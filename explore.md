@@ -159,3 +159,4 @@ main.rs
 - **最复杂的模块**: `health/`（14 文件，多维度健康监控）和 `orchestrator/`（13 文件，核心编排引擎）
 - **架构特点**: 分层记忆（长期/短期/语义/陷阱）、多级健康门控（Gate→Monitor→Sentinel→Liveness）、任务阶段动态路由（Chat/Explore/Plan/Coding/Debug）
 - **潜在问题点**: 多处存在功能重叠（如 `health/audit.rs` 与 `health/checks.rs` 都做消息校验，`orchestrator/gates.rs` 与 `health/gate.rs` 都有门控逻辑），重构时需重点去重和合并
+# DSX — DeepSeek X
