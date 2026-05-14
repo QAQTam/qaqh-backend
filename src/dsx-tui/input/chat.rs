@@ -1,304 +1,213 @@
-//! Chat mode keyboard handler.
+//! Chat mode keyboard handler — pure state machine.
+//!
+//! Receives `(&mut InputState, KeyEvent, &[(String, String)])` and returns `InputAction`.
+//! No access to App, tx, or any async resource.
 
 use crossterm::event::{self, KeyCode, KeyModifiers};
-use tokio::sync::mpsc;
 
-use crate::api::{self, StreamEvent};
-use crate::config;
+use super::action::{InputAction, NO_ACTION};
+use super::state::{InputMode, InputState, SlashSubMenu};
+use crate::tui::utils::{char_boundary, next_char_boundary, prev_char_boundary};
 
-use super::super::app::App;
-use super::super::utils::{char_boundary, prev_char_boundary, next_char_boundary};
-use super::super::{Mode, SubMenuState};
-
-pub(crate) fn handle_chat_key(
-    app: &mut App,
+/// Handle a key event in Chat mode.
+///
+/// `commands` is the list of available slash commands from config,
+/// injected by the caller (the event loop or dispatch layer).
+pub fn handle_chat_key(
+    state: &mut InputState,
     key: event::KeyEvent,
-    tx: mpsc::Sender<StreamEvent>,
-) {
-    // ── Slash menu navigation ──
-    if app.slash_open {
-        // ── Submenu handling (priority over main menu) ──
-        if app.slash_submenu.is_some() {
-            match key.code {
-                KeyCode::Esc => {
-                    app.slash_submenu = None;
-                    return;
-                }
-                KeyCode::Up => {
-                    if let Some(ref mut sub) = app.slash_submenu {
-                        sub.idx = sub.idx.saturating_sub(1);
-                    }
-                    return;
-                }
-                KeyCode::Down => {
-                    if let Some(ref mut sub) = app.slash_submenu {
-                        if sub.idx + 1 < sub.items.len() {
-                            sub.idx += 1;
-                        }
-                    }
-                    return;
-                }
-                KeyCode::Enter => {
-                    if let Some(sub) = app.slash_submenu.take() {
-                        if let Some((val, _)) = sub.items.get(sub.idx) {
-                            app.input = format!("{} {} ", sub.parent_cmd, val);
-                            app.input_cursor = app.input.len();
-                            app.status_msg = format!("\u{00BB} {} {}", sub.parent_cmd, val);
-                        }
-                    }
-                    app.slash_open = false;
-                    return;
-                }
-                _ => return, // Block all other keys while submenu is open
-            }
-        }
+    commands: &[(String, String)],
+) -> InputAction {
+    state.active_mode = InputMode::Chat;
 
-        // ── Space opens submenu ──
+    // ── Slash submenu navigation (takes priority over main menu) ──
+    if let Some(ref mut sub) = state.slash.submenu {
+        match key.code {
+            KeyCode::Esc => {
+                state.slash.submenu = None;
+                return NO_ACTION;
+            }
+            KeyCode::Up => {
+                sub.idx = sub.idx.saturating_sub(1);
+                return NO_ACTION;
+            }
+            KeyCode::Down => {
+                if sub.idx + 1 < sub.items.len() {
+                    sub.idx += 1;
+                }
+                return NO_ACTION;
+            }
+            KeyCode::Enter => {
+                if let Some((val, _)) = sub.items.get(sub.idx) {
+                    state.chat.buffer = format!("{} {} ", sub.parent_cmd, val);
+                    state.chat.cursor = state.chat.buffer.len();
+                }
+                state.slash.submenu = None;
+                state.slash.open = false;
+                return NO_ACTION;
+            }
+            _ => return NO_ACTION,
+        }
+    }
+
+    // ── Slash menu navigation ──
+    if state.slash.open {
+        // Space opens submenu
         if key.code == KeyCode::Char(' ') {
-            if let Some((cmd, _)) = app.slash_items.get(app.slash_idx) {
-                if let Some(items) = build_submenu(cmd) {
-                    app.slash_submenu = Some(SubMenuState {
+            if let Some((cmd, _)) = state.slash.items.get(state.slash.idx) {
+                let items = build_submenu_items(cmd);
+                if let Some(items) = items {
+                    state.slash.submenu = Some(SlashSubMenu {
                         parent_cmd: cmd.clone(),
                         items,
                         idx: 0,
                     });
                 }
             }
-            return;
+            return NO_ACTION;
         }
 
         match key.code {
             KeyCode::Esc => {
-                app.slash_open = false;
-                app.input.clear();
-                app.input_cursor = 0;
-                // Also consume this Esc event so it doesn't fall through to global exit
-                app.esc_just_closed_menu = true;
-                return;
+                state.slash.open = false;
+                state.chat.buffer.clear();
+                state.chat.cursor = 0;
+                state.slash.esc_just_closed = true;
+                return NO_ACTION;
             }
             KeyCode::Up => {
-                app.slash_idx = app.slash_idx.saturating_sub(1);
-                return;
+                state.slash.idx = state.slash.idx.saturating_sub(1);
+                return NO_ACTION;
             }
             KeyCode::Down => {
-                if app.slash_idx + 1 < app.slash_items.len() {
-                    app.slash_idx += 1;
+                if state.slash.idx + 1 < state.slash.items.len() {
+                    state.slash.idx += 1;
                 }
-                return;
+                return NO_ACTION;
             }
             KeyCode::Enter | KeyCode::Tab => {
-                if let Some((cmd, _)) = app.slash_items.get(app.slash_idx) {
-                    let label = cmd.clone();
-                    app.input = format!("{} ", cmd);
-                    app.input_cursor = app.input.len();
-                    app.status_msg = format!("\u{00BB} {} \u{2014} type args and Enter", label);
+                if let Some((cmd, _)) = state.slash.items.get(state.slash.idx) {
+                    state.chat.buffer = format!("{} ", cmd);
+                    state.chat.cursor = state.chat.buffer.len();
                 }
-                app.slash_open = false;
-                return;
+                state.slash.open = false;
+                return NO_ACTION;
             }
             KeyCode::Char(c) => {
-                let pos = char_boundary(&app.input, app.input_cursor);
-                app.input.insert(pos, c);
-                app.input_cursor = pos + c.len_utf8();
-                app.slash_filter = app.input.clone();
-                update_slash_items(app);
-                app.slash_idx = 0;
-                if app.slash_items.is_empty() {
-                    app.slash_open = false;
+                let pos = char_boundary(&state.chat.buffer, state.chat.cursor);
+                state.chat.buffer.insert(pos, c);
+                state.chat.cursor = pos + c.len_utf8();
+                state.slash.filter = state.chat.buffer.clone();
+                update_slash_items(state, commands);
+                state.slash.idx = 0;
+                if state.slash.items.is_empty() {
+                    state.slash.open = false;
                 }
-                return;
+                return NO_ACTION;
             }
             KeyCode::Backspace => {
-                if app.input_cursor > 0 {
-                    let prev = prev_char_boundary(&app.input, app.input_cursor);
-                    app.input.remove(prev);
-                    app.input_cursor = prev;
-                    app.slash_filter = app.input.clone();
-                    update_slash_items(app);
-                    app.slash_idx = 0;
+                if state.chat.cursor > 0 {
+                    let prev = prev_char_boundary(&state.chat.buffer, state.chat.cursor);
+                    state.chat.buffer.remove(prev);
+                    state.chat.cursor = prev;
+                    state.slash.filter = state.chat.buffer.clone();
+                    update_slash_items(state, commands);
+                    state.slash.idx = 0;
                 }
-                return;
+                return NO_ACTION;
             }
-            _ => return,
+            _ => return NO_ACTION,
         }
     }
 
-    // ── Setup wizard key handling (before normal chat keys) ──
-    if app.mode == Mode::ApiConfig {
-        match key.code {
-            KeyCode::Esc => {
-                std::process::exit(0);
-            }
-            KeyCode::Enter => {
-                let mut key = app.input.trim().to_string();
-                if key.len() >= 10 {
-                    // Normalize: strip doubled prefix, handle mixed-case
-                    let key_lower = key.to_lowercase();
-                    while key_lower.starts_with("sk-sk-") {
-                        key = key.replacen("sk-", "", 1);
-                        break;
-                    }
-                    let key2 = if key.to_lowercase().starts_with("sk-") {
-                        key
-                    } else {
-                        format!("sk-{}", key)
-                    };
-                    app.config.api_key = key2;
-                    app.status_msg = "Verifying...".into();
-                    let cfg = app.config.clone();
-                    let tx2 = tx.clone();
-                    tokio::spawn(async move {
-                        use tokio::net::TcpStream;
-                        // Step 1: test network reachability
-                        let net_ok = TcpStream::connect("api.deepseek.com:443")
-                            .await
-                            .map(|_| ())
-                            .is_ok();
-                        if !net_ok {
-                            let _ = tx2.send(StreamEvent::BalanceResult("netfail".into())).await;
-                            return;
-                        }
-                        // Step 2: test API key validity with specific error
-                        let result = match api::list_models(&cfg).await {
-                            Ok(_) => "ok".to_string(),
-                            Err(e) => {
-                                let err_str = format!("{}", e);
-                                if err_str.contains("401") {
-                                    "fail_auth".into()
-                                } else {
-                                    format!(
-                                        "fail_{}",
-                                        err_str.chars().take(40).collect::<String>()
-                                    )
-                                }
-                            }
-                        };
-                        let _ = tx2.send(StreamEvent::BalanceResult(result)).await;
-                    });
-                } else {
-                    app.status_msg = "Key must be at least 10 characters".into();
-                }
-            }
-            KeyCode::Char(c) => {
-                let pos = char_boundary(&app.input, app.input_cursor);
-                app.input.insert(pos, c);
-                app.input_cursor += 1;
-            }
-            KeyCode::Backspace => {
-                if app.input_cursor > 0 {
-                    let prev = prev_char_boundary(&app.input, app.input_cursor);
-                    app.input.remove(prev);
-                    app.input_cursor -= 1;
-                }
-            }
-            _ => {}
-        }
-        return; // Block other key handling during setup
-    }
-
+    // ── Normal chat input ──
     match key.code {
         KeyCode::Esc => {
-            if !app.input.is_empty() {
-                app.input.clear();
-                app.input_cursor = 0;
+            if !state.chat.buffer.is_empty() {
+                state.chat.buffer.clear();
+                state.chat.cursor = 0;
             }
+            NO_ACTION
         }
         KeyCode::Enter => {
             if key.modifiers == KeyModifiers::CONTROL {
-                let pos = char_boundary(&app.input, app.input_cursor);
-                app.input.insert(pos, '\n');
-                app.input_cursor = pos + 1;
+                // Ctrl+Enter = insert newline
+                let pos = char_boundary(&state.chat.buffer, state.chat.cursor);
+                state.chat.buffer.insert(pos, '\n');
+                state.chat.cursor = pos + 1;
+                NO_ACTION
             } else {
-                app.send_message(tx);
+                InputAction::SendMessage(state.chat.buffer.clone())
             }
         }
-        KeyCode::Char(c) if key.modifiers == KeyModifiers::CONTROL => {
-            match c {
-                'd' | '\x04' => {
-                    if app.auto_scroll {
-                        app.scroll_offset = app.last_max_scroll;
-                        app.auto_scroll = false;
-                    }
-                    app.scroll_offset = app.scroll_offset.saturating_add(12);
-                }
-                'u' | '\x15' => {
-                    if app.auto_scroll {
-                        app.scroll_offset = app.last_max_scroll;
-                        app.auto_scroll = false;
-                    }
-                    app.scroll_offset = app.scroll_offset.saturating_sub(12);
-                }
-                _ => {}
-            }
-            return;
-        }
+        KeyCode::Char(c) if key.modifiers == KeyModifiers::CONTROL => match c {
+            'd' | '\x04' => InputAction::ScrollDown(12),
+            'u' | '\x15' => InputAction::ScrollUp(12),
+            _ => NO_ACTION,
+        },
         KeyCode::Char(c) => {
-            let pos = char_boundary(&app.input, app.input_cursor);
-            app.input.insert(pos, c);
-            app.input_cursor = pos + c.len_utf8();
-            // Open slash menu when user types / at start
-            if c == '/' && app.input.trim() == "/" {
-                app.slash_open = true;
-                app.slash_filter = app.input.clone();
-                update_slash_items(app);
-                app.slash_idx = 0;
+            let pos = char_boundary(&state.chat.buffer, state.chat.cursor);
+            state.chat.buffer.insert(pos, c);
+            state.chat.cursor = pos + c.len_utf8();
+            if c == '/' && state.chat.buffer.trim() == "/" {
+                state.slash.open = true;
+                state.slash.filter = state.chat.buffer.clone();
+                update_slash_items(state, commands);
+                state.slash.idx = 0;
             }
+            NO_ACTION
         }
         KeyCode::Backspace => {
-            if app.input_cursor > 0 {
-                let prev = prev_char_boundary(&app.input, app.input_cursor);
-                app.input.remove(prev);
-                app.input_cursor = prev;
+            if state.chat.cursor > 0 {
+                let prev = prev_char_boundary(&state.chat.buffer, state.chat.cursor);
+                state.chat.buffer.remove(prev);
+                state.chat.cursor = prev;
             }
+            NO_ACTION
         }
         KeyCode::Delete => {
-            if app.input_cursor < app.input.len() {
-                app.input.remove(app.input_cursor);
+            if state.chat.cursor < state.chat.buffer.len() {
+                state.chat.buffer.remove(state.chat.cursor);
             }
+            NO_ACTION
         }
-        KeyCode::Left => app.input_cursor = prev_char_boundary(&app.input, app.input_cursor),
-        KeyCode::Right => app.input_cursor = next_char_boundary(&app.input, app.input_cursor),
-        KeyCode::Home => app.input_cursor = 0,
+        KeyCode::Left => {
+            state.chat.cursor = prev_char_boundary(&state.chat.buffer, state.chat.cursor);
+            NO_ACTION
+        }
+        KeyCode::Right => {
+            state.chat.cursor = next_char_boundary(&state.chat.buffer, state.chat.cursor);
+            NO_ACTION
+        }
+        KeyCode::Home => {
+            state.chat.cursor = 0;
+            NO_ACTION
+        }
         KeyCode::End => {
-            app.input_cursor = app.input.len();
-            app.auto_scroll = true;
+            state.chat.cursor = state.chat.buffer.len();
+            NO_ACTION
         }
-        KeyCode::Up => {
-            if app.auto_scroll {
-                app.scroll_offset = app.last_max_scroll;
-                app.auto_scroll = false;
-            }
-            app.scroll_offset = app.scroll_offset.saturating_sub(3);
-        }
-        KeyCode::Down => {
-            if app.auto_scroll {
-                app.scroll_offset = app.last_max_scroll;
-                app.auto_scroll = false;
-            }
-            app.scroll_offset = app.scroll_offset.saturating_add(3);
-        }
-        KeyCode::PageUp => {
-            app.exec_scroll_offset = app.exec_scroll_offset.saturating_add(20);
-        }
-        KeyCode::PageDown => {
-            app.exec_scroll_offset = app.exec_scroll_offset.saturating_sub(20);
-        }
-        KeyCode::Tab => {}
-        _ => {}
+        KeyCode::Up => InputAction::ScrollUp(3),
+        KeyCode::Down => InputAction::ScrollDown(3),
+        KeyCode::PageUp => InputAction::ScrollPageUp,
+        KeyCode::PageDown => InputAction::ScrollPageDown,
+        KeyCode::Tab => NO_ACTION,
+        _ => NO_ACTION,
     }
 }
 
-pub(crate) fn update_slash_items(app: &mut App) {
-    let filter = app.slash_filter.trim().to_lowercase();
-    let cmds = config::all_commands(&app.config.prompt_lang);
-    app.slash_items = cmds
+/// Filter the slash commands list against the current input filter.
+fn update_slash_items(state: &mut InputState, commands: &[(String, String)]) {
+    let filter = state.slash.filter.trim().to_lowercase();
+    state.slash.items = commands
         .iter()
         .filter(|(cmd, _)| cmd.to_lowercase().contains(&filter))
         .map(|(c, d)| (c.to_string(), d.to_string()))
         .collect();
 }
 
-pub(crate) fn build_submenu(cmd: &str) -> Option<Vec<(String, String)>> {
+/// Build submenu items for a given slash command (pure, static).
+fn build_submenu_items(cmd: &str) -> Option<Vec<(String, String)>> {
     match cmd {
         "/effort" => Some(vec![
             ("high".into(), "High reasoning effort".into()),

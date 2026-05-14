@@ -1,96 +1,121 @@
 //! Stream event handler: processes real-time streaming events from the API.
 //! finalize_stream_response lives in response_processor.rs.
+//!
+//! There are two entry points:
+//!   - handle_stream_event: Agent-side handler operating on AgentState
+//!   - handle_stream_event_legacy: TUI-side display handler (legacy compat)
 
 use crate::api::StreamEvent;
-use crate::tui::app::App;
-use crate::tui::utils::{char_boundary, strip_ansi};
-use crate::tui::Mode;
-use crate::orchestrator::response_processor;
 use crate::types::{AgentPhase, UsageInfo};
 use tokio::sync::mpsc;
 
-pub fn handle_stream_event(app: &mut App, event: StreamEvent, tx: mpsc::Sender<StreamEvent>) {
-    log::trace!("stream: {:?}", std::mem::discriminant(&event));
-    log::trace!("stream: {:?}", std::mem::discriminant(&event));
+/// Agent-side stream handler — processes events for health/phase tracking.
+/// Tool call finalization is done by response_processor::finalize_stream_response.
+pub fn handle_stream_event(
+    state: &mut crate::agent::AgentState,
+    event: StreamEvent,
+    tx: mpsc::Sender<StreamEvent>,
+) {
+    match event {
+        StreamEvent::ContentDelta(_text) => {
+            // Content delta is handled by TUI via StreamBuffer.
+            // Agent only tracks health.
+        }
+        StreamEvent::ReasoningDelta(ref text) => {
+            state.update_phase(text);
+        }
+        StreamEvent::ToolCallProgress { .. } => {
+            state.phase = AgentPhase::Executing;
+        }
+        StreamEvent::Done { raw_message, usage, ref stop_reason } => {
+            if let Some(ref u) = usage {
+                let total = u.prompt_cache_hit_tokens + u.prompt_cache_miss_tokens;
+                if total > 0 {
+                    state.cache_hit_pct = u.prompt_cache_hit_tokens as f64 / total as f64;
+                }
+                if let Some(ref dt) = u.completion_tokens_details {
+                    state.reasoning_tokens = dt.reasoning_tokens;
+                }
+            }
+            let _ = crate::orchestrator::response_processor::finalize_stream_response(
+                state, raw_message, usage, tx);
+        }
+        StreamEvent::Error(msg) => {
+            state.health.has_orphan_tool_uses = msg.contains("tool_use") && msg.contains("tool_result");
+            state.health.record_api_error();
+        }
+        _ => {}
+    }
+}
+
+// ── TUI-side legacy handler ──
+
+use crate::tui::{AppState, StreamBuffer, Mode};
+
+/// Legacy TUI-side stream event handler — updates display state only.
+///
+/// In the new IPC architecture, streaming events arrive via AgentFrame::StreamPayload
+/// and are handled by process_agent_frame in the TUI event loop. This function is
+/// a backward-compat bridge for the mpsc::channel<StreamEvent> legacy path.
+///
+/// Tool call processing is NOT done here — that is the Agent's responsibility
+/// via the IPC stream.
+pub fn handle_stream_event_legacy(
+    app: &mut AppState,
+    buf: &mut StreamBuffer,
+    event: StreamEvent,
+    _tx: mpsc::Sender<StreamEvent>,
+) {
     match event {
         StreamEvent::ContentDelta(text) => {
             app.dirty = true;
-            app.stream_content.push_str(&text);
-            if let Some(warn) = app.health.check_content(&text) {
-                app.status_msg = format!("⚠ {}", warn);
-            }
+            buf.content.push_str(&text);
         }
         StreamEvent::ReasoningDelta(text) => {
             app.dirty = true;
-            app.stream_reasoning.push_str(&text);
-            if let Some(warn) = app.health.check_reasoning(&text) {
-                app.status_msg = format!("⚠ {}", warn);
-            }
-            let r = app.stream_reasoning.clone();
-            app.update_phase(&r);
+            buf.reasoning.push_str(&text);
         }
         StreamEvent::ToolCallProgress { name, args_so_far } => {
             app.dirty = true;
-            app.phase = AgentPhase::Executing;
-            if let Some(existing) = app.stream_tool_progress.iter_mut()
+            if let Some(existing) = buf.tool_progress.iter_mut()
                 .find(|(n, _)| n == &name)
             {
                 existing.1 = args_so_far;
             } else {
-                app.stream_tool_progress.push((name, args_so_far));
+                buf.tool_progress.push((name, args_so_far));
             }
         }
-        StreamEvent::Done { ref raw_message, ref usage, ref stop_reason } => {
-            log::info!("stream done: content={} reasoning={} tools={} stop_reason={:?}",
-                raw_message.content.as_ref().map(|c| c.len()).unwrap_or(0),
-                raw_message.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0),
-                raw_message.tool_calls.as_ref().map(|t| t.len()).unwrap_or(0),
-                stop_reason);
+        StreamEvent::Done { raw_message, usage, stop_reason: _ } => {
             let has_content = raw_message.content.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
             let has_tools = raw_message.tool_calls.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
             let has_reasoning = raw_message.reasoning_content.as_ref().map(|r| r.len() > 50).unwrap_or(false);
             if !has_content && !has_tools && has_reasoning {
-                log::warn!("EMPTY RESPONSE with reasoning_len={} stop_reason={:?} — possible API truncation or connection drop",
-                    raw_message.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0),
-                    stop_reason);
+                log::warn!("EMPTY RESPONSE with reasoning_len={} — possible API truncation",
+                    raw_message.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0));
             }
-            let raw_message = raw_message.clone();
-            let usage = usage.clone();
+            // Push accumulated buffer content as a message
+            if buf.is_active() {
+                app.push_message(buf.to_message());
+            }
+            buf.clear();
+            if let Some(u) = usage {
+                app.api_usage = Some(u);
+            }
             app.dirty = true;
-            app.auto_scroll = true;
-            if let Some(ref u) = usage {
-                let total = u.prompt_cache_hit_tokens + u.prompt_cache_miss_tokens;
-                if total > 0 {
-                    app.cache_hit_pct = u.prompt_cache_hit_tokens as f64 / total as f64;
-                }
-                if let Some(ref dt) = u.completion_tokens_details {
-                    app.reasoning_tokens = dt.reasoning_tokens;
-                }
-            }
-            response_processor::finalize_stream_response(app, raw_message, usage, tx);
         }
         StreamEvent::Error(msg) => {
-            log::error!("stream error: {}", msg);
-            app.health.has_orphan_tool_uses = msg.contains("tool_use") && msg.contains("tool_result");
-            if app.health.has_orphan_tool_uses {
-                app.status_msg = format!("⚠ 400: orphan tool_use — type /fix to repair");
-            } else {
-                app.status_msg = format!("Error: {}", msg);
-            }
+            app.status_msg = format!("Error: {}", msg);
             app.mode = Mode::Chat;
-            app.stream_content.clear();
-            app.stream_reasoning.clear();
-            app.health.record_api_error();
+            buf.content.clear();
+            buf.reasoning.clear();
+            app.dirty = true;
         }
         StreamEvent::BalanceResult(msg) => {
             app.balance = Some(msg.clone());
             if app.mode == Mode::ApiConfig {
                 if msg == "ok" {
-                    app.config.save();
-                    app.mode = Mode::Chat;
                     app.status_msg = "Ready. Start coding!".into();
                 } else if msg == "fail_auth" {
-                    app.input.clear(); app.input_cursor = 0;
                     app.status_msg = "Key rejected. Check your API key.".into();
                 } else if msg == "netfail" {
                     app.status_msg = "Network unreachable. Check internet connection.".into();
@@ -99,57 +124,18 @@ pub fn handle_stream_event(app: &mut App, event: StreamEvent, tx: mpsc::Sender<S
                     app.status_msg = format!("API error: {} ", detail);
                 }
             }
+            app.dirty = true;
+        }
+        StreamEvent::ExecProgress(chunk) => {
+            app.tool_code_action = "exec".into();
+            if !chunk.is_empty() {
+                app.tool_code_content = chunk.to_string();
+            }
+            app.dirty = true;
         }
         StreamEvent::ModelListResult(_) => {}
         StreamEvent::SudoDone(_) => {}
-        StreamEvent::ExecProgress(chunk) => {
-            let chunk = strip_ansi(&chunk);
-            if chunk.ends_with('\r') {
-                let clean = chunk.trim_end_matches('\r');
-                app.exec_buffer.push_str(clean);
-                if app.tool_code_action == "exec" {
-                    if let Some(nl) = app.tool_code_content.rfind('\n') {
-                        app.tool_code_content.truncate(nl + 1);
-                    } else {
-                        app.tool_code_content.clear();
-                    }
-                    app.tool_code_content.push_str(clean);
-                }
-            } else {
-                let has_cr = chunk.contains('\r');
-                if has_cr {
-                    let last = chunk.rsplit('\r').next().unwrap_or(&chunk);
-                    app.exec_buffer.push_str(last);
-                    if app.tool_code_action == "exec" {
-                        if let Some(nl) = app.tool_code_content.rfind('\n') {
-                            app.tool_code_content.truncate(nl + 1);
-                        } else {
-                            app.tool_code_content.clear();
-                        }
-                        app.tool_code_content.push_str(last);
-                    }
-                } else {
-                    app.exec_buffer.push_str(&chunk);
-                    app.exec_buffer.push('\n');
-                    if app.tool_code_action == "exec" {
-                        app.tool_code_content.push_str(&chunk);
-                        app.tool_code_content.push('\n');
-                    }
-                }
-            }
-            if app.exec_buffer.len() > 50000 {
-                let start = app.exec_buffer.len().saturating_sub(30000);
-                let cut = char_boundary(&app.exec_buffer, start);
-                app.exec_buffer = app.exec_buffer[cut..].to_string();
-            }
-            if app.tool_code_action == "exec" && app.tool_code_content.len() > 50000 {
-                let start = app.tool_code_content.len().saturating_sub(30000);
-                let cut = char_boundary(&app.tool_code_content, start);
-                app.tool_code_content = app.tool_code_content[cut..].to_string();
-            }
-        }
-        StreamEvent::ExecDone(_id, _result) => {}
+        StreamEvent::ExecDone(_, _) => {}
         StreamEvent::ExecStarted(_, _) => {}
     }
 }
-

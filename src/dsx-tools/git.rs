@@ -1,70 +1,48 @@
 //! Git operations: status, diff, log, commit.
+//!
+//! Handler functions for new IPC framework + backward compat with old run_cmd.
 
 use std::process::Command;
 
-use crate::types::ToolDef;
-use super::{parse_arg, parse_opt};
-#[allow(dead_code)]
-pub(super) fn git_status_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "git_status".into(),
-            description: "Show git working tree status.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": false
-            }),
-        },
+use crate::tools::{ToolCallCtx, ToolResult};
+
+// ── Handler 函数（新 IPC 框架）──
+
+pub fn handle_status() -> ToolResult {
+    let out = run_cmd("git", &["status", "--short", "-b"]);
+    ToolResult::ok(out)
+}
+
+pub fn handle_diff(ctx: ToolCallCtx) -> ToolResult {
+    let staged = ctx.get_bool("staged").unwrap_or(false);
+    if staged {
+        ToolResult::ok(run_cmd("git", &["diff", "--cached", "--stat"]))
+    } else {
+        ToolResult::ok(run_cmd("git", &["diff", "--stat"]))
     }
 }
+
+pub fn handle_log(ctx: ToolCallCtx) -> ToolResult {
+    let count = ctx.get_str("count").unwrap_or("10");
+    ToolResult::ok(run_cmd("git", &["log", "--oneline", "-n", count]))
+}
+
+pub fn handle_commit(ctx: ToolCallCtx) -> ToolResult {
+    let msg = ctx.get_str("message").unwrap_or("");
+    if msg.is_empty() {
+        return ToolResult::err("[ERROR] git commit: message is required");
+    }
+    ToolResult::ok(run_cmd("git", &["commit", "-m", msg]))
+}
+
+// ── 旧函数（向后兼容）──
 
 pub(super) fn exec_git_status() -> String {
     run_cmd("git", &["status", "--short", "-b"])
 }
 
-#[allow(dead_code)]
-pub(super) fn git_diff_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "git_diff".into(),
-            description: "Show git diff. Default unstaged; set staged=true for staged changes.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "staged": {"type": "boolean", "description": "Show staged changes instead", "default": false}
-                },
-                "required": [],
-                "additionalProperties": false
-            }),
-        },
-    }
-}
-
 pub(super) fn exec_git_diff() -> String {
     run_cmd("git", &["diff", "--stat"])
-}
-
-#[allow(dead_code)]
-pub(super) fn git_log_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "git_log".into(),
-            description: "Show recent git commit history.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "count": {"type": "integer", "description": "Number of recent commits", "default": 10}
-                },
-                "required": [],
-                "additionalProperties": false
-            }),
-        },
-    }
 }
 
 pub(super) fn exec_git_log(args: &str) -> String {
@@ -72,35 +50,79 @@ pub(super) fn exec_git_log(args: &str) -> String {
     run_cmd("git", &["log", "--oneline", "-n", &count])
 }
 
-#[allow(dead_code)]
-pub(super) fn git_commit_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "git_commit".into(),
-            description: "Create a git commit. Requires user confirmation.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string", "description": "Commit message"}
-                },
-                "required": ["message"],
-                "additionalProperties": false
-            }),
-        },
-    }
-}
-
 pub(super) fn exec_git_commit(args: &str) -> String {
     let msg = parse_arg(args, "message");
     run_cmd("git", &["commit", "-m", &msg])
 }
+
 pub(super) fn run_cmd(prog: &str, args: &[&str]) -> String {
     match Command::new(prog).args(args).output() {
         Ok(o) => {
             let out = String::from_utf8_lossy(&o.stdout).to_string();
-            if out.is_empty() { "(no output)".into() } else { out }
+            let err = String::from_utf8_lossy(&o.stderr).to_string();
+            if out.is_empty() && err.is_empty() {
+                "(no output)".into()
+            } else if out.is_empty() {
+                err
+            } else if err.is_empty() {
+                out
+            } else {
+                format!("{}\n{}", out.trim(), err.trim())
+            }
         }
         Err(e) => format!("{} error: {}", prog, e),
     }
+}
+
+fn parse_arg(args: &str, key: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|v| v.get(key).and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_default()
+}
+
+fn parse_opt(args: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|v| v.get(key).and_then(|v| v.as_str()).map(String::from))
+}
+
+// ── 注册入口 ──
+
+use crate::tools::{ToolHandler, ToolKey, SafetyVerdict};
+use std::time::Duration;
+
+pub fn register(mgr: &mut crate::tools::ToolManager) {
+    mgr.register(ToolHandler {
+        key: ToolKey::new("git", "status"),
+        description: "Show git working tree status.",
+        input_schema: serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+        handler: |_| handle_status(),
+        safety: |_| SafetyVerdict::allowed(),
+        default_timeout: Duration::from_secs(10),
+    });
+    mgr.register(ToolHandler {
+        key: ToolKey::new("git", "diff"),
+        description: "Show git diff (unstaged, or staged with staged=true).",
+        input_schema: serde_json::json!({"type":"object","properties":{"staged":{"type":"boolean"}},"additionalProperties":false}),
+        handler: handle_diff,
+        safety: |_| SafetyVerdict::allowed(),
+        default_timeout: Duration::from_secs(10),
+    });
+    mgr.register(ToolHandler {
+        key: ToolKey::new("git", "log"),
+        description: "Show recent git commit history.",
+        input_schema: serde_json::json!({"type":"object","properties":{"count":{"type":"integer"}},"additionalProperties":false}),
+        handler: handle_log,
+        safety: |_| SafetyVerdict::allowed(),
+        default_timeout: Duration::from_secs(10),
+    });
+    mgr.register(ToolHandler {
+        key: ToolKey::new("git", "commit"),
+        description: "Create a git commit.",
+        input_schema: serde_json::json!({"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}),
+        handler: handle_commit,
+        safety: |_| SafetyVerdict::confirm("git_commit"),
+        default_timeout: Duration::from_secs(10),
+    });
 }

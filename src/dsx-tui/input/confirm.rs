@@ -1,33 +1,24 @@
-//! Tool confirmation keyboard handlers.
+//! Tool confirmation keyboard handlers — pure state machines.
+//!
+//! Enter → ConfirmTools, Esc → RejectTools.
 
 use crossterm::event::{self, KeyCode};
-use tokio::sync::mpsc;
 
-use crate::api::StreamEvent;
-use crate::orchestrator::tool_dispatch;
+use super::action::InputAction;
+use super::state::InputState;
 
-use super::super::app::App;
-
-pub(crate) fn handle_confirm_key(
-    app: &mut App,
-    key: event::KeyEvent,
-    tx: mpsc::Sender<StreamEvent>,
-) {
+pub fn handle_confirm_key(state: &mut InputState, key: event::KeyEvent) -> InputAction {
     match key.code {
-        KeyCode::Enter => tool_dispatch::handle_confirm_tools(app, tx),
-        KeyCode::Esc => tool_dispatch::handle_reject_tools(app),
-        _ => {}
+        KeyCode::Enter => InputAction::ConfirmTools,
+        KeyCode::Esc => InputAction::RejectTools,
+        _ => InputAction::None,
     }
 }
 
-pub(crate) fn handle_danger_key(
-    app: &mut App,
-    key: event::KeyEvent,
-    tx: mpsc::Sender<StreamEvent>,
-) {
+pub fn handle_danger_key(state: &mut InputState, key: event::KeyEvent) -> InputAction {
     match key.code {
-        KeyCode::Enter => tool_dispatch::handle_confirm_tools(app, tx),
-        KeyCode::Esc => tool_dispatch::handle_reject_tools(app),
-        _ => {}
+        KeyCode::Enter => InputAction::ConfirmTools,
+        KeyCode::Esc => InputAction::RejectTools,
+        _ => InputAction::None,
     }
 }

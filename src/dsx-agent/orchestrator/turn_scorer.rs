@@ -1,10 +1,10 @@
-use crate::tui::app::App;
+use crate::agent::AgentState;
 
 /// Score the current turn based on tool calls executed.
 /// Higher score = more valuable information worth preserving.
-pub fn score_current_turn(app: &App) -> f32 {
+pub fn score_current_turn(state: &AgentState) -> f32 {
     let mut max_score = 0.2f32; // base: text-only response
-    for (name, result) in &app.tool_results {
+    for (name, result) in &state.tool_results {
         let tool_score = match name.as_str() {
             "exec" if result.contains("explore") || result.contains("── explore ──") => 0.9,
             "file" if result.contains("[OK]") && (result.contains("write") || result.contains("edit")) => 0.7,
@@ -80,7 +80,7 @@ pub fn extract_why(text: &str, path: &str, _tool: &str) -> String {
                 .trim_start_matches("// ");
             let short: String = cleaned.chars().take(120).collect();
             if is_valid_why(&short) {
-                return if short.len() < 120 { short } else { format!("{}…", short) };
+                return if short.len() < 120 { short } else { format!("{}...", short) };
             }
         }
     }
@@ -89,12 +89,10 @@ pub fn extract_why(text: &str, path: &str, _tool: &str) -> String {
 
 fn is_valid_why(s: &str) -> bool {
     if s.len() < 4 { return false; }
-    // Reject if it's just punctuation/whitespace/emoji
     let meaningful: String = s.chars().filter(|c| c.is_alphanumeric()).collect();
     if meaningful.len() < 3 { return false; }
-    // Reject profanity patterns (minimal check — can be extended)
     let lower = s.to_lowercase();
-    for bad in &["滚", "fuck", "shit", "damn", "去死", "傻逼", "蠢", "idiot", "stupid"] {
+    for bad in &["fuck", "shit", "damn", "去死", "idiot", "stupid"] {
         if lower.contains(bad) { return false; }
     }
     true
@@ -120,7 +118,6 @@ pub enum PathTrust {
 }
 
 pub fn classify_path(path: &str) -> PathTrust {
-    // Normalize: collapse /tmp/../src/ bypass attempts
     let normalized = std::path::Path::new(path)
         .components()
         .collect::<std::path::PathBuf>()

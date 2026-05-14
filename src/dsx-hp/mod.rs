@@ -1,10 +1,19 @@
-//! API layer: stream events, HTTP client, SSE parsing, format conversion.
+//! dsx-hp: health platform, API proxy gateway, error sentinel, and process registry.
+
+// ── Local modules (B02: API proxy) ──
 
 mod client;
 mod converter;
 
+// ── Health-platform modules (B01: guardian core) ──
+
+pub mod types;
+pub mod registry;
+pub mod pipeline;
+pub mod ipc_traits;
+
 pub use client::{chat_stream, get_balance, list_models};
-pub use converter::convert_messages;
+pub use converter::{anthropic_url, request_to_provider};
 
 use crate::types::{Message, UsageInfo};
 

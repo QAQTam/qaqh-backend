@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use super::converter::anthropic_url;
+use super::converter::{anthropic_url, request_to_provider};
 
 /// Streaming chat via Anthropic Messages endpoint.
 ///
@@ -56,7 +56,6 @@ pub async fn chat_stream(
     });
 
     // Set effort via output_config (DeepSeek's Anthropic extension)
-    let _effort = effort.map(|s| s.to_string());
     let is_deepseek = config.base_url.contains("deepseek.com");
 
     // Build request with full Anthropic field set
@@ -88,13 +87,9 @@ pub async fn chat_stream(
 
     let url = anthropic_url(&config.base_url);
 
-    // Build JSON — inject output_config only for DeepSeek
+    // Build JSON, then apply provider-specific shaping
     let mut body_json = serde_json::to_value(&request)?;
-    if let Some(ref e) = _effort {
-        if is_deepseek {
-            body_json["output_config"] = serde_json::json!({"effort": e});
-        }
-    }
+    request_to_provider(&mut body_json, &config.base_url, effort);
 
     log::info!(
         "api request: {} model={} max_tokens={} tools={}",

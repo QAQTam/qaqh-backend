@@ -188,17 +188,17 @@ impl ContextAssembler {
 
     // ── User messages ──
 
-    /// Push a user message. Fails if the current turn has incomplete steps.
+    /// Push a user message. Actively rejects if the current turn has unfulfilled tool calls.
     pub fn push_user(&mut self, text: &str) -> Result<(), AssemblerError> {
+        if self.has_unfulfilled_tool_calls() {
+            return Err(AssemblerError::TurnIncomplete {
+                missing: format!(
+                    "{} step(s) with missing tool results — cannot push user yet",
+                    self.turns.last().map(|t| t.total_missing_tools()).unwrap_or(0)
+                ),
+            });
+        }
         if let Some(last) = self.turns.last() {
-            if !last.all_steps_satisfied() {
-                return Err(AssemblerError::TurnIncomplete {
-                    missing: format!(
-                        "{} step(s) with missing tool results — cannot push user yet",
-                        last.total_missing_tools()
-                    ),
-                });
-            }
             if last.steps.is_empty() {
                 return Err(AssemblerError::TurnIncomplete {
                     missing: "current turn has no assistant response yet".into(),
@@ -210,8 +210,10 @@ impl ContextAssembler {
         Ok(())
     }
 
-    /// Push user unconditionally (session restore, repair).
-    pub fn push_user_unchecked(&mut self, text: &str) {
+    /// Push user unconditionally — RESTORE ONLY. Do not use in normal flow.
+    /// Skipped checks: turn completeness, alternation.
+    #[doc(hidden)]
+    pub fn push_user_restore(&mut self, text: &str) {
         if let Some(last) = self.turns.last_mut() {
             if last.steps.is_empty() {
                 last.user.content = Some(format!(
@@ -230,13 +232,13 @@ impl ContextAssembler {
     // ── Assistant messages ──
 
     /// Push an assistant response. Creates a new Step in the current turn.
-    /// Fails if no user message is pending.
+    /// Actively rejects if current turn has unfulfilled tool calls.
     pub fn push_assistant(&mut self, msg: Message) -> Result<(), AssemblerError> {
         assert_eq!(msg.role, "assistant");
         let turn = self.turns.last_mut().ok_or(AssemblerError::NoUserPending)?;
         // Previous step must be satisfied before starting a new one
-        if let Some(last_step) = turn.current_step() {
-            if !last_step.all_tools_satisfied() {
+        if self.has_unfulfilled_tool_calls() {
+            if let Some(last_step) = turn.current_step() {
                 return Err(AssemblerError::TurnIncomplete {
                     missing: format!(
                         "{} tool result(s) missing from previous step",
@@ -250,8 +252,10 @@ impl ContextAssembler {
         Ok(())
     }
 
-    /// Push assistant without validation (session restore).
-    pub fn push_assistant_unchecked(&mut self, msg: Message) {
+    /// Push assistant without validation — RESTORE ONLY. Do not use in normal flow.
+    /// Skipped checks: turn existence, alternation, pending tools.
+    #[doc(hidden)]
+    pub fn push_assistant_restore(&mut self, msg: Message) {
         if self.turns.is_empty() {
             self.turns.push(Turn::new(Message::user("")));
         }
@@ -325,6 +329,12 @@ impl ContextAssembler {
     }
 
     // ── Validation ──
+    //
+    // CANONICAL implementation — all check_alternation call sites in
+    // gate.rs, audit.rs, and checks.rs have been consolidated here.
+    // This function checks: orphan tool_use/tool_result, turn/step
+    // completeness, system role correctness. Do NOT add parallel
+    // alternation checks elsewhere.
 
     pub fn validate(&self) -> Result<(), String> {
         if self.turns.is_empty() && self.system_messages.is_empty() {
@@ -369,9 +379,22 @@ impl ContextAssembler {
         Ok(())
     }
 
-    // ── Conversion to Anthropic format (guaranteed valid) ──
+    // ── Conversion to Anthropic format (guaranteed valid by debug_assert) ──
 
     pub fn to_anthropic_messages(&self) -> (Option<String>, Vec<AnthropicMessage>) {
+        // Validate ALL steps are complete before emitting.
+        // Unsatisfied tool_uses → assistant without matching tool_result → API 400.
+        debug_assert!({
+            let mut ok = true;
+            for turn in &self.turns {
+                for step in &turn.steps {
+                    if !step.all_tools_satisfied() {
+                        ok = false;
+                    }
+                }
+            }
+            ok
+        }, "to_anthropic_messages called with unsatisfied tool_uses — would cause API 400");
         let system = if self.system_messages.is_empty() {
             None
         } else {
@@ -468,6 +491,20 @@ impl ContextAssembler {
 
     // ── State queries ──
 
+    /// Read-only access to all turns for ContextBuilder compaction.
+    /// Turn+Step structure is preserved — no flatten round-trip needed.
+    pub fn turns(&self) -> &[Turn] {
+        &self.turns
+    }
+
+    /// True if the current turn has any unfulfilled tool calls in any step.
+    /// Used by push_user and push_assistant to actively reject invalid state transitions.
+    pub fn has_unfulfilled_tool_calls(&self) -> bool {
+        self.turns.last()
+            .map(|t| !t.all_steps_satisfied())
+            .unwrap_or(false)
+    }
+
     pub fn last_turn(&self) -> Option<&Turn> {
         self.turns.last()
     }
@@ -528,7 +565,7 @@ impl ContextAssembler {
                 }
                 "assistant" => {
                     let msg = msgs[i].clone();
-                    assembler.push_assistant_unchecked(msg);
+                    assembler.push_assistant_restore(msg);
                     i += 1;
                 }
                 "tool" => {

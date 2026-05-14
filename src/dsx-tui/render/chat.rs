@@ -8,7 +8,7 @@ use ratatui::{
 };
 use crate::types::SafetyLevel;
 
-use crate::tui::app::App;
+use crate::tui::state::RenderContext;
 use crate::tui::utils::{char_boundary, display_width, format_bytes, pad_to_width, textwrap, truncate};
 use crate::tui::Mode;
 
@@ -16,35 +16,37 @@ use super::color;
 
 use super::DS_BANNER;
 
-pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
+use crate::tui::app::{ApiError, GateBlocked, RateLimitInfo, RetryProgress};
+
+pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, ctx: &RenderContext) {
     let mut lines: Vec<Line> = Vec::new();
     let w = area.width.saturating_sub(4) as usize;
 
     // Welcome
-    if app.messages.iter().filter(|m| m.role != "system").count() == 0 && app.mode != Mode::Streaming {
+    if ctx.messages.iter().filter(|m| m.role != "system").count() == 0 && ctx.mode != Mode::Streaming {
         for bl in DS_BANNER.lines() {
             if !bl.is_empty() { lines.push(Line::from(Span::styled(bl.to_string(),
                 Style::default().fg(color::ACCENT).add_modifier(Modifier::BOLD)))); }
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(app.tt().welcome_help.to_string(), Style::default().fg(color::MUTED))));
+        lines.push(Line::from(Span::styled(ctx.tt().welcome_help.to_string(), Style::default().fg(color::MUTED))));
         lines.push(Line::from(""));
     }
 
     // Session picker
-    if app.mode == Mode::SessionPicker {
+    if ctx.mode == Mode::SessionPicker {
         lines.clear();
-        lines.push(Line::from(Span::styled(app.tt().resume_title.to_string(), Style::default().fg(color::ACCENT).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(ctx.tt().resume_title.to_string(), Style::default().fg(color::ACCENT).add_modifier(Modifier::BOLD))));
         lines.push(Line::from(""));
-        if app.session_list.is_empty() {
+        if ctx.session_list.is_empty() {
             lines.push(Line::from("  No saved sessions found."));
             lines.push(Line::from("  Start a session with: dsx"));
             lines.push(Line::from(""));
         } else {
-            lines.push(Line::from(Span::styled(app.tt().resume_headers.to_string(), Style::default().fg(color::MUTED))));
+            lines.push(Line::from(Span::styled(ctx.tt().resume_headers.to_string(), Style::default().fg(color::MUTED))));
             lines.push(Line::from(""));
-            for (i, m) in app.session_list.iter().enumerate() {
-                let is_selected = i == app.session_pick_idx;
+            for (i, m) in ctx.session_list.iter().enumerate() {
+                let is_selected = i == ctx.session_pick_idx;
                 let style = if is_selected {
                     Style::default().fg(color::BG).bg(color::ACCENT).add_modifier(Modifier::BOLD)
                 } else {
@@ -61,7 +63,7 @@ pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 )));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(app.tt().resume_help.to_string(), Style::default().fg(color::MUTED))));
+            lines.push(Line::from(Span::styled(ctx.tt().resume_help.to_string(), Style::default().fg(color::MUTED))));
             lines.push(Line::from(""));
         }
         let text = Text::from(lines);
@@ -75,7 +77,7 @@ pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     }
 
     // Setup wizard — centered logo + key prompt
-    if app.mode == Mode::ApiConfig {
+    if ctx.mode == Mode::ApiConfig {
         lines.clear();
         let banner = DS_BANNER.to_string();
         let container_w = area.width.saturating_sub(8) as usize;
@@ -92,9 +94,9 @@ pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         lines.push(Line::from(Span::styled(format!("{:^container_w$}", "Enter your DeepSeek API key to begin"), Style::default().fg(color::MUTED))));
         lines.push(Line::from(Span::styled(format!("{:^container_w$}", "Get one at: https://platform.deepseek.com/api_keys"), Style::default().fg(color::MUTED).add_modifier(Modifier::DIM))));
         lines.push(Line::from(""));
-        if app.input.len() >= 10 && app.input.starts_with("sk-") {
+        if ctx.input.len() >= 10 && ctx.input.starts_with("sk-") {
             lines.push(Line::from(Span::styled(format!("{:^container_w$}", "[Enter] start  [Esc] quit"), Style::default().fg(color::SUCCESS))));
-        } else if !app.input.is_empty() {
+        } else if !ctx.input.is_empty() {
             lines.push(Line::from(Span::styled(format!("{:^container_w$}", "Key must start with 'sk-'"), Style::default().fg(color::WARNING))));
         } else {
             lines.push(Line::from(Span::styled(format!("{:^container_w$}", "[Esc] quit"), Style::default().fg(color::MUTED))));
@@ -102,9 +104,9 @@ pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     }
 
     // Pending tool confirmations
-    if !app.pending_tools.is_empty() {
+    if !ctx.pending_tools.is_empty() {
         lines.push(Line::from(""));
-        for (tc, safety, prompt) in &app.pending_tools {
+        for (tc, safety, prompt) in &ctx.pending_tools {
             let (style, icon) = match safety {
                 SafetyLevel::Safe => (Style::default().fg(color::SUCCESS), "~"),
                 SafetyLevel::Confirm => (Style::default().fg(color::WARNING), "?"),
@@ -117,7 +119,7 @@ pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     // ── Messages ──
     let mut prev_role = "";
-    for msg in &app.messages {
+    for msg in &ctx.messages {
         if msg.role == "system" { continue; }
         let role = msg.role.as_str();
         // Add separator between user <-> assistant transitions
@@ -145,7 +147,7 @@ pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 if let Some(ref r) = msg.reasoning_content {
                     if !r.is_empty() {
                         lines.push(Line::from(""));
-                        lines.extend(render_thinking_block(r, w, app.tt().thinking_block));
+                        lines.extend(render_thinking_block(r, w, ctx.tt().thinking_block));
                     }
                 }
                 // Content with code blocks
@@ -174,49 +176,63 @@ pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     }
 
     // ── Live streaming ──
-    if app.mode == Mode::Streaming {
-        if !app.stream_reasoning.is_empty() {
+    if ctx.mode == Mode::Streaming {
+        if !ctx.stream_reasoning.is_empty() {
             lines.push(Line::from(""));
-            let rlines: Vec<&str> = app.stream_reasoning.lines().collect();
+            let rlines: Vec<&str> = ctx.stream_reasoning.lines().collect();
             let start = rlines.len().saturating_sub(12);
-            lines.extend(render_thinking_block(&rlines[start..].join("\n"), w, app.tt().thinking_block));
+            lines.extend(render_thinking_block(&rlines[start..].join("\n"), w, ctx.tt().thinking_block));
         }
-        if !app.stream_content.is_empty() {
-            let cd = if app.stream_content.len() > 2000 {
-                let cut = char_boundary(&app.stream_content, app.stream_content.len().saturating_sub(2000));
-                &app.stream_content[cut..]
-            } else { &app.stream_content };
+        if !ctx.stream_content.is_empty() {
+            let cd = if ctx.stream_content.len() > 2000 {
+                let cut = char_boundary(&ctx.stream_content, ctx.stream_content.len().saturating_sub(2000));
+                &ctx.stream_content[cut..]
+            } else { &ctx.stream_content };
             lines.extend(render_message_content(cd, w));
         }
         // Tool progress — show as open-ended tool block
-        for (name, args) in &app.stream_tool_progress {
+        for (name, args) in &ctx.stream_tool_progress {
             lines.push(Line::from(""));
             lines.extend(render_tool_call_block(name, args, w));
         }
         // Content being generated (after reasoning, before emission — hybrid streaming)
-        if app.stream_content.is_empty() && !app.stream_reasoning.is_empty() && app.stream_tool_progress.is_empty() {
-            let e = app.last_activity.elapsed().as_secs();
+        if ctx.stream_content.is_empty() && !ctx.stream_reasoning.is_empty() && ctx.stream_tool_progress.is_empty() {
+            let e = ctx.last_activity.elapsed().as_secs();
             let spinner = match e % 4 { 0 => "/", 1 => "-", 2 => "\\", 3 => "|", _ => "/" };
             lines.push(Line::from(Span::styled(
-                format!("  {} {}", spinner, app.tt().generating),
+                format!("  {} {}", spinner, ctx.tt().generating),
                 Style::default().fg(color::ACCENT),
             )));
         }
         // Spinner
-        if app.stream_content.is_empty() && app.stream_reasoning.is_empty() && app.stream_tool_progress.is_empty() {
-            let e = app.last_activity.elapsed().as_secs();
+        if ctx.stream_content.is_empty() && ctx.stream_reasoning.is_empty() && ctx.stream_tool_progress.is_empty() {
+            let e = ctx.last_activity.elapsed().as_secs();
             let spinner = match e % 4 { 0 => "o", 1 => "O", 2 => "o", 3 => ".", _ => "o" };
-            lines.push(Line::from(Span::styled(format!("  {} {}", spinner, app.tt().waiting), Style::default().fg(color::MUTED))));
+            lines.push(Line::from(Span::styled(format!("  {} {}", spinner, ctx.tt().waiting), Style::default().fg(color::MUTED))));
         }
-        lines.push(Line::from(Span::styled(format!(" {}", app.tt().esc_cancel), Style::default().fg(color::MUTED))));
+        lines.push(Line::from(Span::styled(format!(" {}", ctx.tt().esc_cancel), Style::default().fg(color::MUTED))));
     }
 
 
+    // ── Stream error / retry / rate-limit blocks (after messages) ──
+    if let Some(ref err) = ctx.last_api_error {
+        lines.push(Line::from(""));
+        lines.extend(render_api_error_block(err, w));
+    }
+    if let Some(ref retry) = ctx.retry_progress {
+        lines.push(Line::from(""));
+        lines.extend(render_retry_progress_block(retry, w));
+    }
+    if let Some(ref rl) = ctx.rate_limit_info {
+        lines.push(Line::from(""));
+        lines.extend(render_rate_limit_block(rl, w));
+    }
+
     // ── Async exec running indicator ──
-    if app.exec_pending > 0 {
-        let e = app.exec_started_at.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+    if ctx.exec_pending > 0 {
+        let e = ctx.exec_started_at.map(|s| s.elapsed().as_secs()).unwrap_or(0);
         let spinner = match e % 4 { 0 => "|", 1 => "/", 2 => "-", 3 => "\\", _ => "|" };
-        let cmd_hint = app.tool_code_path.lines().next().unwrap_or("...");
+        let cmd_hint = ctx.tool_code_path.lines().next().unwrap_or("...");
         let cmd_short = truncate(cmd_hint.trim_start_matches("$ "), 50);
         lines.push(Line::from(Span::styled(
             format!("  {} Running: {} ({}s)  [PageUp/Dn→scroll output]",
@@ -228,20 +244,20 @@ pub fn render_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let total = lines.len();
     let visible = area.height.saturating_sub(1) as usize;
     let max_scroll = total.saturating_sub(visible);
-    app.last_max_scroll = max_scroll;
+    ctx.last_max_scroll = max_scroll;
 
     // Clamp scroll
-    let scroll = if app.auto_scroll {
+    let scroll = if ctx.auto_scroll {
         max_scroll
     } else {
-        app.scroll_offset.min(max_scroll)
+        ctx.scroll_offset.min(max_scroll)
     };
 
     // Scroll position indicator
-    if !app.auto_scroll && total > visible {
+    if !ctx.auto_scroll && total > visible {
         let pct = if max_scroll == 0 { 100 } else { (scroll * 100 / max_scroll).min(100) };
         lines.push(Line::from(Span::styled(
-            format!("  {} {}% {}", app.tt().scroll_indicator, pct, app.tt().scroll_indicator),
+            format!("  {} {}% {}", ctx.tt().scroll_indicator, pct, ctx.tt().scroll_indicator),
             Style::default().fg(color::MUTED).add_modifier(Modifier::DIM),
         )));
     }
@@ -696,4 +712,136 @@ pub fn is_table_row(s: &str) -> bool {
     let first = s.chars().next().unwrap();
     // Starts with pipe | or box-drawing ─│┌┐└┘├┤┬┴┼
     matches!(first, '|' | '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼')
+}
+
+// ── Stream error / retry / rate-limit block renderers ──
+
+/// Render an API error block in the chat stream.
+/// Color varies by error type: ClientFatal=Red, others=Yellow.
+/// Shared `┌─ ─┐ │ └─ ─┘` border style with thinking/tool-call blocks.
+pub fn render_api_error_block(err: &ApiError, max_width: usize) -> Vec<Line<'static>> {
+    let w = max_width.min(90).max(30);
+    let border_color = match err.error_type.as_str() {
+        "ClientFatal" => color::ERROR,
+        _ => color::WARNING,
+    };
+    let title = format!(" ✗ {} ", err.message.split(|c| c == ' ' || c == ':').next().unwrap_or("Error"));
+    let bar_len = w.saturating_sub(title.len() + 3);
+    let bar = "─".repeat(bar_len);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("  ┌{}{}", title, bar),
+            Style::default().fg(border_color).add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    // Error type tag
+    lines.push(Line::from(Span::styled(
+        format!("  │ {}: {}", err.error_type, err.message),
+        Style::default().fg(color::TEXT),
+    )));
+
+    // Status code if available
+    if let Some(status) = err.status {
+        lines.push(Line::from(Span::styled(
+            format!("  │ HTTP {}", status),
+            Style::default().fg(color::MUTED),
+        )));
+    }
+
+    // Retry info if applicable
+    if err.max_retries > 0 {
+        let tag = if err.permanent { "Permanent after" } else { "Retry" };
+        lines.push(Line::from(Span::styled(
+            format!("  │ {} {}/{}", tag, err.retry_count, err.max_retries),
+            Style::default().fg(color::MUTED),
+        )));
+    }
+
+    // Permanent tag
+    if err.permanent {
+        lines.push(Line::from(Span::styled(
+            "  │ Request blocked — no further retries.",
+            Style::default().fg(border_color),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("  └{}", "─".repeat(w.saturating_sub(2))),
+        Style::default().fg(border_color).add_modifier(Modifier::DIM),
+    )));
+    lines
+}
+
+/// Render a retry progress block in the chat stream (dim/gray).
+pub fn render_retry_progress_block(retry: &RetryProgress, max_width: usize) -> Vec<Line<'static>> {
+    let w = max_width.min(90).max(30);
+    let title = " Retrying ";
+    let bar_len = w.saturating_sub(title.len() + 3);
+    let bar = "─".repeat(bar_len);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("  ┌{}{}", title, bar),
+            Style::default().fg(color::ACCENT).add_modifier(Modifier::DIM),
+        )),
+    ];
+
+    let spinner = {
+        let frames = ["|", "/", "-", "\\"];
+        let idx = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+            .as_millis() / 200) as usize % frames.len();
+        frames[idx]
+    };
+
+    lines.push(Line::from(Span::styled(
+        format!("  │ {} Attempt {}/{}", spinner, retry.attempt, retry.max_retries),
+        Style::default().fg(color::ACCENT),
+    )));
+    if !retry.message.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  │ {}", retry.message),
+            Style::default().fg(color::MUTED),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("  └{}", "─".repeat(w.saturating_sub(2))),
+        Style::default().fg(color::ACCENT).add_modifier(Modifier::DIM),
+    )));
+    lines
+}
+
+/// Render a rate-limit info block in the chat stream (yellow countdown).
+pub fn render_rate_limit_block(rl: &RateLimitInfo, max_width: usize) -> Vec<Line<'static>> {
+    let w = max_width.min(90).max(30);
+    let title = " Rate Limited ";
+    let bar_len = w.saturating_sub(title.len() + 3);
+    let bar = "─".repeat(bar_len);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("  ┌{}{}", title, bar),
+            Style::default().fg(color::WARNING).add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    lines.push(Line::from(Span::styled(
+        format!("  │ Retry after {}s", rl.retry_after_secs),
+        Style::default().fg(color::WARNING),
+    )));
+    if !rl.message.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  │ {}", rl.message),
+            Style::default().fg(color::MUTED),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("  └{}", "─".repeat(w.saturating_sub(2))),
+        Style::default().fg(color::WARNING).add_modifier(Modifier::DIM),
+    )));
+    lines
 }

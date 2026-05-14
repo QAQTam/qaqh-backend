@@ -1,31 +1,38 @@
 //! File operations: read, write, edit, search, list directory.
+//!
+//! Each sub-tool is a standalone `ToolHandler` registered via `register()`.
+//! The old consolidated `file` dispatcher (file_def/exec_file/classify_file)
+//! has been removed — callers use the individual tools directly.
 
 use std::process::Command;
+use std::time::Duration;
 
-use crate::types::{SafetyLevel, ToolDef};
+use crate::types::{ToolDef};
 use super::{parse_arg, parse_arg_or, parse_opt, parse_opt_bool};
-// ── Individual tool implementations ──
+use super::{ToolManager, ToolHandler, ToolKey, ToolCallCtx, ToolResult, SafetyVerdict};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Individual tool implementations (unchanged internals)
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[allow(dead_code)]
-pub(super) fn read_file_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "read_file".into(),
-            description: "读文件。默认预览首50行+尾10行。start_line/end_line 精确读取。查工具行为前先读 tools/mod.rs。".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path"},
-                    "start_line": {"type": "integer", "description": "First line to read (1-based)", "default": 1},
-                    "end_line": {"type": "integer", "description": "Last line to read (inclusive). If omitted, reads to end of file."}
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }),
-        },
-    }
-}
+pub(super) fn read_file_def() -> ToolDef { ToolDef {
+    call_type: "function".into(),
+    function: crate::types::ToolFunction {
+        name: "read_file".into(),
+        description: "读文件。默认预览首50行+尾10行。start_line/end_line 精确读取。查工具行为前先读 tools/mod.rs。".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path"},
+                "start_line": {"type": "integer", "description": "First line to read (1-based)", "default": 1},
+                "end_line": {"type": "integer", "description": "Last line to read (inclusive). If omitted, reads to end of file."}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+    },
+} }
 
 pub(super) fn exec_read_file(args: &str) -> String {
     let path = parse_arg(args, "path");
@@ -40,20 +47,18 @@ pub(super) fn exec_read_file(args: &str) -> String {
             let total = all_lines.len();
             let start_idx = start.map(|s| (s - 1).min(total)).unwrap_or(0);
             let end_idx = end.map(|e| e.min(total)).unwrap_or(total);
-            let start_idx = start_idx.min(end_idx); // guard against reversed range
+            let start_idx = start_idx.min(end_idx);
             let lines: Vec<&str> = all_lines[start_idx..end_idx].to_vec();
             let shown = lines.len();
             let total_lines = all_lines.len();
 
             if start.is_some() || end.is_some() {
-                // Precise read — no truncation needed
                 let mut result = format!("[OK] {} lines {}-{}/{} of {}\n", shown, start_idx + 1, end_idx, total_lines, path);
                 for (i, l) in lines.iter().enumerate() {
                     result.push_str(&format!("{:>6}  {}\n", start_idx + i + 1, l));
                 }
                 result
             } else {
-                // Default: show first 50 + last 10 lines (prevent inflating cache with full file dumps)
                 let head: Vec<&str> = lines.iter().take(50).cloned().collect();
                 let tail: Vec<&str> = lines.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().cloned().collect();
                 let mut result = format!("[PARTIAL] {} lines, showing 1-50/{}\n", total_lines, path);
@@ -87,24 +92,22 @@ pub(super) fn exec_read_file(args: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub(super) fn write_file_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "write_file".into(),
-            description: "Create or overwrite a file. Creates parent dirs. For new files or full rewrites; prefer edit_file for small changes.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path to write"},
-                    "content": {"type": "string", "description": "File content"}
-                },
-                "required": ["path", "content"],
-                "additionalProperties": false
-            }),
-        },
-    }
-}
+pub(super) fn write_file_def() -> ToolDef { ToolDef {
+    call_type: "function".into(),
+    function: crate::types::ToolFunction {
+        name: "write_file".into(),
+        description: "Create or overwrite a file. Creates parent dirs. For new files or full rewrites; prefer edit_file for small changes.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to write"},
+                "content": {"type": "string", "description": "File content"}
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        }),
+    },
+} }
 
 pub(super) fn exec_write_file(args: &str) -> String {
     let path = parse_arg(args, "path");
@@ -127,27 +130,25 @@ pub(super) fn exec_write_file(args: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub(super) fn edit_file_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "edit_file".into(),
-            description: "Find-and-replace in a file. Supports regex with regex=true, replace_all for all occurrences. Surgical edits only.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the file to edit"},
-                    "old_string": {"type": "string", "description": "Text to find (exact, or regex if regex=true)"},
-                    "new_string": {"type": "string", "description": "Replacement text"},
-                    "replace_all": {"type": "boolean", "description": "Replace all occurrences", "default": false},
-                    "regex": {"type": "boolean", "description": "Treat old_string as a regex pattern", "default": false}
-                },
-                "required": ["path", "old_string", "new_string"],
-                "additionalProperties": false
-            }),
-        },
-    }
-}
+pub(super) fn edit_file_def() -> ToolDef { ToolDef {
+    call_type: "function".into(),
+    function: crate::types::ToolFunction {
+        name: "edit_file".into(),
+        description: "Find-and-replace in a file. Supports regex with regex=true, replace_all for all occurrences. Surgical edits only.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to the file to edit"},
+                "old_string": {"type": "string", "description": "Text to find (exact, or regex if regex=true)"},
+                "new_string": {"type": "string", "description": "Replacement text"},
+                "replace_all": {"type": "boolean", "description": "Replace all occurrences", "default": false},
+                "regex": {"type": "boolean", "description": "Treat old_string as a regex pattern", "default": false}
+            },
+            "required": ["path", "old_string", "new_string"],
+            "additionalProperties": false
+        }),
+    },
+} }
 
 pub(super) fn exec_edit_file(args: &str) -> String {
     let path = parse_arg(args, "path");
@@ -224,7 +225,6 @@ pub(super) fn build_diff(before: &str, after: &str, old: &str, new: &str, path: 
     let before_lines: Vec<&str> = before.lines().collect();
     let after_lines: Vec<&str> = after.lines().collect();
 
-    // Find changed line
     let change_line = before_lines.iter()
         .position(|l| l.contains(old.lines().next().unwrap_or(old)))
         .unwrap_or(0);
@@ -235,12 +235,10 @@ pub(super) fn build_diff(before: &str, after: &str, old: &str, new: &str, path: 
     let mut diff = String::new();
     diff.push_str(&format!("  {}  (line {})\n", path, change_line + 1));
 
-    // Context before
     for i in ctx_start..change_line {
         diff.push_str(&format!("      {:>4}  {}\n", i + 1, before_lines[i]));
     }
 
-    // Changed lines (show old → new)
     let before_snippet: Vec<&str> = before_lines[change_line..(change_line + old.lines().count()).min(before_lines.len())].to_vec();
     let after_snippet: Vec<&str> = after_lines[change_line..(change_line + new.lines().count()).min(after_lines.len())].to_vec();
 
@@ -251,7 +249,6 @@ pub(super) fn build_diff(before: &str, after: &str, old: &str, new: &str, path: 
         diff.push_str(&format!("  +   {:>4}  {}\n", change_line + 1, al));
     }
 
-    // Context after
     let after_change = change_line + new.lines().count();
     for i in after_change..(after_change + 3).min(after_lines.len()) {
         diff.push_str(&format!("      {:>4}  {}\n", i + 1, after_lines[i]));
@@ -263,43 +260,41 @@ pub(super) fn build_diff(before: &str, after: &str, old: &str, new: &str, path: 
 // ── edit_file_diff: context-anchored, fuzzy-matching, auto-recording ──
 
 #[allow(dead_code)]
-pub(super) fn edit_file_diff_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "edit_file_diff".into(),
-            description: "Context/Fuzzy edit: give old_lines+new_lines+optional context. Tolerant of whitespace changes. Auto-records to memory. Use INSTEAD of edit_file when exact old_string is uncertain or you're changing multi-line blocks. ⚠ Multiple edits to the SAME file: re-read between calls (first edit shifts line numbers).".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path to edit"},
-                    "old_lines": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "Lines to replace (supports multi-line). Trailing-whitespace immune."
-                    },
-                    "new_lines": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "Replacement lines (empty = delete)"
-                    },
-                    "context_before": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "Lines before the change (helps disambiguate)"
-                    },
-                    "context_after": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "Lines after the change (helps disambiguate)"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "What changed and why (saved to memory)"
-                    }
+pub(super) fn edit_file_diff_def() -> ToolDef { ToolDef {
+    call_type: "function".into(),
+    function: crate::types::ToolFunction {
+        name: "edit_file_diff".into(),
+        description: "Context/Fuzzy edit: give old_lines+new_lines+optional context. Tolerant of whitespace changes. Auto-records to memory. Use INSTEAD of edit_file when exact old_string is uncertain or you're changing multi-line blocks. ⚠ Multiple edits to the SAME file: re-read between calls (first edit shifts line numbers).".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to edit"},
+                "old_lines": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Lines to replace (supports multi-line). Trailing-whitespace immune."
                 },
-                "required": ["path", "old_lines", "new_lines"],
-                "additionalProperties": false
-            }),
-        },
-    }
-}
+                "new_lines": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Replacement lines (empty = delete)"
+                },
+                "context_before": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Lines before the change (helps disambiguate)"
+                },
+                "context_after": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Lines after the change (helps disambiguate)"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What changed and why (saved to memory)"
+                }
+            },
+            "required": ["path", "old_lines", "new_lines"],
+            "additionalProperties": false
+        }),
+    },
+} }
 
 pub(super) fn exec_edit_file_diff(args: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(args) {
@@ -339,14 +334,14 @@ pub(super) fn exec_edit_file_diff(args: &str) -> String {
         return format!("[ERROR] old_lines ({} lines) longer than file ({} lines)", win, file_lines.len());
     }
 
-    // Phase 1: exact match (trimmed trailing whitespace only)
+    // Phase 1: exact match
     let mut candidates: Vec<usize> = Vec::new();
     let mut was_fuzzy = false;
     for i in 0..=file_lines.len() - win {
         let window: Vec<String> = file_lines[i..i+win].iter().map(|l| normalize(l)).collect();
         if window == norm_old { candidates.push(i); }
     }
-    // Phase 2: fuzzy match (ignore leading whitespace too)
+    // Phase 2: fuzzy match
     if candidates.is_empty() {
         was_fuzzy = true;
         for i in 0..=file_lines.len() - win {
@@ -427,7 +422,6 @@ pub(super) fn exec_edit_file_diff(args: &str) -> String {
                     result.push_str(&format!("  {:>4}  {}\n", i+1, out_lines[i]));
                 }
             }
-            // Memory marker — KnowledgeExtractor picks this up
             let desc = if description.is_empty() { "edited" } else { description };
             result.push_str(&format!("\n[CHANGE] {}:{} +{} -{} | {}", path, line, added, removed, desc));
             result
@@ -437,23 +431,21 @@ pub(super) fn exec_edit_file_diff(args: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub(super) fn list_dir_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "list_dir".into(),
-            description: "List files and directories with names and sizes.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Directory path to list", "default": "."}
-                },
-                "required": [],
-                "additionalProperties": false
-            }),
-        },
-    }
-}
+pub(super) fn list_dir_def() -> ToolDef { ToolDef {
+    call_type: "function".into(),
+    function: crate::types::ToolFunction {
+        name: "list_dir".into(),
+        description: "List files and directories with names and sizes.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Directory path to list", "default": "."}
+            },
+            "required": [],
+            "additionalProperties": false
+        }),
+    },
+} }
 
 pub(super) fn exec_list_dir(args: &str) -> String {
     let path = parse_arg_or(args, "path", ".");
@@ -484,25 +476,23 @@ pub(super) fn exec_list_dir(args: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub(super) fn search_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "search".into(),
-            description: "Regex search across files. Returns file:line matches. Grep for your codebase.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Regex or literal pattern"},
-                    "glob": {"type": "string", "description": "File glob (e.g. *.rs)"},
-                    "path": {"type": "string", "description": "Directory to search", "default": "."}
-                },
-                "required": ["pattern"],
-                "additionalProperties": false
-            }),
-        },
-    }
-}
+pub(super) fn search_def() -> ToolDef { ToolDef {
+    call_type: "function".into(),
+    function: crate::types::ToolFunction {
+        name: "search".into(),
+        description: "Regex search across files. Returns file:line matches. Grep for your codebase.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex or literal pattern"},
+                "glob": {"type": "string", "description": "File glob (e.g. *.rs)"},
+                "path": {"type": "string", "description": "Directory to search", "default": "."}
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        }),
+    },
+} }
 
 pub(super) fn exec_search(args: &str) -> String {
     let pattern = parse_arg(args, "pattern");
@@ -531,72 +521,185 @@ pub(super) fn exec_search(args: &str) -> String {
     }
 }
 
-// ── Consolidated file tool definition ──
+// ═══════════════════════════════════════════════════════════════════════════
+// Handler wrappers (bridge ToolCallCtx → old-style exec_* string-args)
+// ═══════════════════════════════════════════════════════════════════════════
 
-pub fn file_def() -> ToolDef {
-    ToolDef {
-        call_type: "function".into(),
-        function: crate::types::ToolFunction {
-            name: "file".into(),
-            description: "File operations. Actions: read (read file), write (create/overwrite), edit (find/replace), diff (context-anchored fuzzy edit), list (list directory), search (regex search).".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["read", "write", "edit", "diff", "list", "search"],
-                        "description": "Action to perform"
-                    },
-                    "path": {"type": "string", "description": "File/directory path"},
-                    "content": {"type": "string", "description": "File content (for write)"},
-                    "old_string": {"type": "string", "description": "Text to find (for edit)"},
-                    "new_string": {"type": "string", "description": "Replacement text (for edit)"},
-                    "replace_all": {"type": "boolean", "description": "Replace all occurrences (for edit)"},
-                    "regex": {"type": "boolean", "description": "Treat old_string as regex (for edit)"},
-                    "old_lines": {"type": "array", "items": {"type": "string"}, "description": "Lines to replace (for diff)"},
-                    "new_lines": {"type": "array", "items": {"type": "string"}, "description": "Replacement lines (for diff)"},
-                    "context_before": {"type": "array", "items": {"type": "string"}, "description": "Lines before change, helps disambiguate (for diff)"},
-                    "context_after": {"type": "array", "items": {"type": "string"}, "description": "Lines after change, helps disambiguate (for diff)"},
-                    "description": {"type": "string", "description": "What changed and why, saved to memory (for diff)"},
-                    "start_line": {"type": "integer", "description": "First line to read, 1-based (for read)"},
-                    "end_line": {"type": "integer", "description": "Last line to read, inclusive (for read)"},
-                    "pattern": {"type": "string", "description": "Regex or literal pattern (for search)"},
-                    "glob": {"type": "string", "description": "File glob, e.g. *.rs (for search)"}
-                },
-                "required": ["action"],
-                "additionalProperties": false
-            }),
-        },
-    }
+fn handle_read_file(ctx: ToolCallCtx) -> ToolResult {
+    let args = serde_json::to_string(&ctx.args).unwrap_or_default();
+    ToolResult::ok(exec_read_file(&args))
 }
 
-pub fn exec_file(args: &str) -> String {
-    let action = parse_arg(args, "action");
-    match action.as_str() {
-        "read" => exec_read_file(args),
-        "write" => exec_write_file(args),
-        "edit" => exec_edit_file(args),
-        "diff" => exec_edit_file_diff(args),
-        "list" => exec_list_dir(args),
-        "search" => exec_search(args),
-        _ => format!("[ERROR] Unknown file action: {}. Valid: read, write, edit, diff, list, search", action),
-    }
+fn handle_write_file(ctx: ToolCallCtx) -> ToolResult {
+    let args = serde_json::to_string(&ctx.args).unwrap_or_default();
+    ToolResult::ok(exec_write_file(&args))
 }
 
-pub fn classify_file(args: &str) -> SafetyLevel {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
-        match v.get("action").and_then(|a| a.as_str()) {
-            Some("read" | "list" | "search") => SafetyLevel::Safe,
-            Some("write") => {
-                if let Some(path) = v.get("path").and_then(|p| p.as_str()) {
-                    if path.starts_with("/tmp/") { return SafetyLevel::Safe; }
-                }
-                SafetyLevel::Confirm
-            }
-            Some("edit") | Some("diff") => SafetyLevel::Confirm,
-            _ => SafetyLevel::Confirm,
+fn handle_edit_file(ctx: ToolCallCtx) -> ToolResult {
+    let args = serde_json::to_string(&ctx.args).unwrap_or_default();
+    ToolResult::ok(exec_edit_file(&args))
+}
+
+fn handle_edit_file_diff(ctx: ToolCallCtx) -> ToolResult {
+    let args = serde_json::to_string(&ctx.args).unwrap_or_default();
+    ToolResult::ok(exec_edit_file_diff(&args))
+}
+
+fn handle_list_dir(ctx: ToolCallCtx) -> ToolResult {
+    let args = serde_json::to_string(&ctx.args).unwrap_or_default();
+    ToolResult::ok(exec_list_dir(&args))
+}
+
+fn handle_search(ctx: ToolCallCtx) -> ToolResult {
+    let args = serde_json::to_string(&ctx.args).unwrap_or_default();
+    ToolResult::ok(exec_search(&args))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Safety classifiers
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn safety_read_file(_ctx: &ToolCallCtx) -> SafetyVerdict {
+    SafetyVerdict::Allow
+}
+
+fn safety_write_file(ctx: &ToolCallCtx) -> SafetyVerdict {
+    if let Some(path) = ctx.get_str("path") {
+        if path.starts_with("/tmp/") {
+            return SafetyVerdict::Allow;
         }
-    } else {
-        SafetyLevel::Confirm
     }
+    SafetyVerdict::confirm("write_file")
+}
+
+fn safety_edit_file(_ctx: &ToolCallCtx) -> SafetyVerdict {
+    SafetyVerdict::confirm("edit_file")
+}
+
+fn safety_edit_file_diff(_ctx: &ToolCallCtx) -> SafetyVerdict {
+    SafetyVerdict::confirm("edit_file_diff")
+}
+
+fn safety_list_dir(_ctx: &ToolCallCtx) -> SafetyVerdict {
+    SafetyVerdict::Allow
+}
+
+fn safety_search(_ctx: &ToolCallCtx) -> SafetyVerdict {
+    SafetyVerdict::Allow
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Registration entry point
+// ═══════════════════════════════════════════════════════════════════════════
+
+pub fn register(mgr: &mut ToolManager) {
+    mgr.register(ToolHandler {
+        key: ToolKey::new("read_file", ""),
+        description: "Read file content. Default preview: first 50 lines + last 10 lines. Use start_line/end_line for precise range.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path"},
+                "start_line": {"type": "integer", "description": "First line to read (1-based)", "default": 1},
+                "end_line": {"type": "integer", "description": "Last line to read (inclusive). If omitted, reads to end of file."}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        handler: handle_read_file,
+        safety: safety_read_file,
+        default_timeout: Duration::from_secs(15),
+    });
+
+    mgr.register(ToolHandler {
+        key: ToolKey::new("write_file", ""),
+        description: "Create or overwrite a file. Creates parent dirs. For new files or full rewrites; prefer edit_file for small changes.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to write"},
+                "content": {"type": "string", "description": "File content"}
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        }),
+        handler: handle_write_file,
+        safety: safety_write_file,
+        default_timeout: Duration::from_secs(15),
+    });
+
+    mgr.register(ToolHandler {
+        key: ToolKey::new("edit_file", ""),
+        description: "Find-and-replace in a file. Supports regex with regex=true, replace_all for all occurrences. Surgical edits only.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to the file to edit"},
+                "old_string": {"type": "string", "description": "Text to find (exact, or regex if regex=true)"},
+                "new_string": {"type": "string", "description": "Replacement text"},
+                "replace_all": {"type": "boolean", "description": "Replace all occurrences", "default": false},
+                "regex": {"type": "boolean", "description": "Treat old_string as a regex pattern", "default": false}
+            },
+            "required": ["path", "old_string", "new_string"],
+            "additionalProperties": false
+        }),
+        handler: handle_edit_file,
+        safety: safety_edit_file,
+        default_timeout: Duration::from_secs(15),
+    });
+
+    mgr.register(ToolHandler {
+        key: ToolKey::new("edit_file_diff", ""),
+        description: "Context/Fuzzy edit: give old_lines+new_lines+optional context. Tolerant of whitespace changes. Use INSTEAD of edit_file when exact old_string is uncertain or changing multi-line blocks.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to edit"},
+                "old_lines": {"type": "array", "items": {"type": "string"}, "description": "Lines to replace"},
+                "new_lines": {"type": "array", "items": {"type": "string"}, "description": "Replacement lines (empty = delete)"},
+                "context_before": {"type": "array", "items": {"type": "string"}, "description": "Lines before the change"},
+                "context_after": {"type": "array", "items": {"type": "string"}, "description": "Lines after the change"},
+                "description": {"type": "string", "description": "What changed and why"}
+            },
+            "required": ["path", "old_lines", "new_lines"],
+            "additionalProperties": false
+        }),
+        handler: handle_edit_file_diff,
+        safety: safety_edit_file_diff,
+        default_timeout: Duration::from_secs(15),
+    });
+
+    mgr.register(ToolHandler {
+        key: ToolKey::new("list_dir", ""),
+        description: "List files and directories with names and sizes.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Directory path to list", "default": "."}
+            },
+            "required": [],
+            "additionalProperties": false
+        }),
+        handler: handle_list_dir,
+        safety: safety_list_dir,
+        default_timeout: Duration::from_secs(15),
+    });
+
+    mgr.register(ToolHandler {
+        key: ToolKey::new("search", ""),
+        description: "Regex search across files. Returns file:line matches. Grep for your codebase.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex or literal pattern"},
+                "glob": {"type": "string", "description": "File glob (e.g. *.rs)"},
+                "path": {"type": "string", "description": "Directory to search", "default": "."}
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        }),
+        handler: handle_search,
+        safety: safety_search,
+        default_timeout: Duration::from_secs(15),
+    });
 }

@@ -11,8 +11,45 @@ use crate::types::{AgentPhase, Message, SafetyLevel, ToolCall, UsageInfo};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-use super::utils::{char_boundary, detect_phase};
+use super::utils::char_boundary;
 use super::{Mode, SubMenuState};
+
+// ── Inbound stream state (populated by StreamEvent handlers) ──
+
+/// Gate block info from HP `StreamEvent::GateBlocked`.
+#[derive(Debug, Clone)]
+pub(crate) struct GateBlocked {
+    pub reason: String,
+    pub repairable: bool,
+    pub suggestion: Option<String>,
+}
+
+/// API error info from HP `StreamEvent::ApiError`.
+#[derive(Debug, Clone)]
+pub(crate) struct ApiError {
+    pub error_type: String, // "ClientFatal" | "ServerRetryable" | "RateLimited" | "NetworkError"
+    pub status: Option<u16>,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub permanent: bool,
+    pub message: String,
+}
+
+/// Retry progress from HP `StreamEvent::RetryProgress`.
+#[derive(Debug, Clone)]
+pub(crate) struct RetryProgress {
+    pub attempt: u32,
+    pub max_retries: u32,
+    pub message: String,
+}
+
+/// Rate limit info from HP `StreamEvent::RateLimitInfo`.
+#[derive(Debug, Clone)]
+pub(crate) struct RateLimitInfo {
+    pub retry_after_secs: u64,
+    pub message: String,
+}
+
 // ── App State ──
 
 pub(crate) struct App {
@@ -136,6 +173,12 @@ pub(crate) struct App {
     pub(crate) exec_scroll_offset: usize,
     /// System note queue — flushed into last message at start_agent_loop
     pub(crate) pending_notes: Vec<String>,
+
+    // ── Gate / stream error state (from HP StreamEvent handlers) ──
+    pub(crate) last_gate_block: Option<GateBlocked>,
+    pub(crate) last_api_error: Option<ApiError>,
+    pub(crate) retry_progress: Option<RetryProgress>,
+    pub(crate) rate_limit_info: Option<RateLimitInfo>,
 }
 impl App {
     pub(crate) fn new(config: Config, resume: bool) -> Self {
@@ -243,6 +286,10 @@ impl App {
             gate_message: None,
             health_status_line: String::new(),
             pending_notes: Vec::new(),
+            last_gate_block: None,
+            last_api_error: None,
+            retry_progress: None,
+            rate_limit_info: None,
         };
         // Seed project backbone invariants if fresh
         if app.long_mem.architecture.is_empty() {
@@ -494,7 +541,7 @@ impl App {
 }
 impl App {
     pub(crate) fn update_phase(&mut self, reasoning: &str) {
-        let (detected, _conf) = detect_phase(reasoning);
+        let (detected, _conf) = crate::orchestrator::phase_detector::detect_phase(reasoning);
         if detected == self.phase {
             self.phase_count += 1;
         } else {

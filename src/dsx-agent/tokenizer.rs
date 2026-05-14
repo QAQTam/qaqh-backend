@@ -1,6 +1,16 @@
 //! Token counting and estimation.
+//!
+//! Provides DeepSeek-tokenizer-backed counting with heuristic fallback.
+//! The [`TokenCount`] trait from `dsx-types` is implemented here so that
+//! the DeepSeek tokenizer binary embedded in this crate is used for
+//! accurate counting, rather than the heuristic-only base implementation.
+//!
+//! Utility functions (`format_tokens`, `context_usage_ratio`, `TokenBreakdown`)
+//! are re-exported from `dsx-types` for caller convenience.
 
 use crate::types::Message;
+use crate::types::token::TokenCount;
+pub use crate::types::token::{TokenBreakdown, format_tokens, context_usage_ratio};
 use std::sync::OnceLock;
 use tokenizers::Tokenizer;
 
@@ -54,23 +64,20 @@ pub fn estimate_messages_tokens(messages: &[Message]) -> u32 {
     messages.iter().map(count_message_tokens).sum()
 }
 
-pub fn format_tokens(n: u32) -> String {
-    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
-    else if n >= 1_000 { format!("{:.1}K", n as f64 / 1_000.0) }
-    else { n.to_string() }
+// ── TokenCount trait impl for Message ──
+//
+// Uses the DeepSeek tokenizer when available, falling back to the
+// heuristic in dsx-types. This overrides the blanket impl for
+// Message-like types with more accurate per-field counting.
+
+impl TokenCount for Message {
+    fn count_tokens(&self) -> u32 {
+        count_message_tokens(self)
+    }
 }
 
-pub fn context_usage_ratio(used: u32, max_tokens: u32) -> f64 {
-    (used as f64 / max_tokens as f64).clamp(0.0, 1.0)
-}
-
-// ── Token breakdown ──
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TokenBreakdown {
-    pub system: u32,
-    pub semantic: u32,
-    pub long_mem: u32,
-    pub episodic: u32,
-    pub total: u32,
+impl TokenCount for [Message] {
+    fn count_tokens(&self) -> u32 {
+        estimate_messages_tokens(self)
+    }
 }

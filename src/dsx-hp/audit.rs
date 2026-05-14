@@ -26,20 +26,10 @@ pub enum AuditResult {
 /// Audit a flat message list for structural issues.
 ///
 /// Runs the messages through `ContextAssembler::from_legacy` and reports
-/// any repairs needed. Does **not** modify the input.
-///
-/// Ported from the alternation check in `health/mod.rs` and the
-/// `repair_messages` flow in `tui/app.rs`.
+/// any repairs needed. Uses `ContextAssembler::validate()` for structural
+/// validation (the canonical check_alternation implementation).
 pub fn audit_session(messages: &[Message]) -> AuditResult {
-    // Check for obvious alternation violations first (fast path)
-    if let Some(issue) = check_alternation(messages) {
-        return AuditResult::Repairable {
-            issues: vec![issue.to_string()],
-            fix_description: "Alternation violation detected — run repair to fix.".into(),
-        };
-    }
-
-    // Full structural check via ContextAssembler
+    // Structural check via ContextAssembler (canonical validation authority)
     let (assembler, repairs) = ContextAssembler::from_legacy(messages.to_vec());
 
     if !repairs.is_empty() {
@@ -76,35 +66,7 @@ pub fn repair_session(ctx: &mut ContextAssembler) -> (AuditResult, Vec<String>) 
     (result, repairs)
 }
 
-/// Lightweight alternation check — scans a flat message list for
-/// common patterns that would cause a 400 from the API.
-///
-/// Ported from `check_alternation` in `health/mod.rs`.
-fn check_alternation(messages: &[Message]) -> Option<&'static str> {
-    let mut i = 0;
-    while i < messages.len() {
-        if messages[i].role == "assistant" {
-            let has_tc = messages[i].tool_calls.as_ref()
-                .map(|t| !t.is_empty())
-                .unwrap_or(false);
-            if has_tc {
-                let next = i + 1;
-                if next >= messages.len() || messages[next].role != "tool" {
-                    return Some("orphan tool_use — no tool_result follows");
-                }
-            }
-        }
-        if messages[i].role == "user" && i > 0 {
-            if messages[i - 1].role == "user" {
-                return Some("consecutive user messages");
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-#[cfg(test)]
+	#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::Message;

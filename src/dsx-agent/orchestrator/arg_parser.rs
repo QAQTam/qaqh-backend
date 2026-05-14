@@ -1,5 +1,4 @@
 //! Arg parsers: extract action, path, command from tool call JSON.
-use crate::tui::app::App;
 
 /// Extract the "action" field from tool args JSON.
 pub fn tool_action(args: &str) -> String {

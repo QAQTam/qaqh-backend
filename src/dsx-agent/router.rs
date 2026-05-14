@@ -1,4 +1,4 @@
-use crate::types::{DebugLevel, TaskPhase};
+use crate::types::{DebugLevel, RouterCommand, TaskPhase};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Global phase + debug level set by the status tool, read by start_agent_loop().
@@ -44,6 +44,16 @@ pub fn read_debug_level() -> DebugLevel {
 
 pub fn set_phase(phase: TaskPhase, level: DebugLevel) {
     CURRENT_PHASE.store(encode(phase, level), Ordering::Relaxed);
+}
+
+/// Process a [`RouterCommand`] from IPC, returning a human-readable ack string.
+pub fn handle_router_command(cmd: RouterCommand) -> String {
+    match cmd {
+        RouterCommand::SetPhase { phase, level } => {
+            set_phase(phase, level);
+            format!("[OK] Router: phase={:?} level={:?}", phase, level)
+        }
+    }
 }
 
 // ── Routing table ──

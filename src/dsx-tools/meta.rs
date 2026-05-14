@@ -1,12 +1,19 @@
-//! Skill listing and lookup.
+//! Skill listing, lookup, and file metadata.
+//!
+//! Three standalone tools: list_skills, read_skill_ref, glance.
+//! Registered via `register()` as individual ToolHandlers.
 
-use crate::session;
-use crate::skills;
-use crate::tools::CURRENT_SESSION;
+use std::time::Duration;
+
 use crate::types::ToolDef;
+// NOTE: crate::session and crate::skills are in dsx-agent, not dsx-tools.
+// These will be provided via IPC in Phase 4. Stubbed for now.
 use super::parse_arg;
+use super::{ToolManager, ToolHandler, ToolKey, ToolCallCtx, ToolResult, SafetyVerdict};
 
-// ── Skills tools ──
+// ═══════════════════════════════════════════════════════════════════════════
+// Individual tool implementations (unchanged internals)
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[allow(dead_code)]
 pub(super) fn list_skills_def() -> ToolDef {
@@ -46,11 +53,13 @@ pub(super) fn read_skill_ref_def() -> ToolDef {
 }
 
 pub(super) fn exec_list_skills(_args: &str) -> String {
-    skills::tool_list_skills()
+    // TODO Phase 4: return actual skill list via IPC from agent
+    String::new()
 }
 
 pub(super) fn exec_read_skill_ref(args: &str) -> String {
-    skills::tool_read_skill_ref(args)
+    // TODO Phase 4: read skill via IPC from agent
+    format!("[HINT] Skill system unavailable in standalone mode. Try again after Phase 4 integration.")
 }
 
 // ── Glance tool (file metadata preview) ──
@@ -80,53 +89,15 @@ pub(super) fn exec_glance(args: &str) -> String {
         return "[ERROR] glance: path is required".to_string();
     }
 
-    let seed = CURRENT_SESSION.get().cloned().unwrap_or_default();
-    if seed.is_empty() {
-        return "[ERROR] glance: no active session. Start a conversation first.".to_string();
-    }
-
-    let short_content = session::read_memory(&seed, "short");
-    let last_round = find_last_round_for_file(&short_content, &path);
-
-    match session::read_semantic_entry(&seed, &path) {
-        Some(entry) => {
-            let lang = entry.language.as_deref().unwrap_or("?");
-            let purpose = entry.purpose.as_deref().unwrap_or("-");
-            let syms = if entry.symbols.is_empty() {
-                "(none)".to_string()
-            } else {
-                entry.symbols.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
-            };
-            let stale_note = match last_round {
-                Some(r) => {
-                    // Count total rounds
-                    let total = short_content.lines()
-                        .filter(|l| l.starts_with("- R") && l.contains(" → "))
-                        .count();
-                    if total.saturating_sub(r) >= 3 {
-                        format!("\n⚠ Last read: R{} (now R{}) — content may be compressed. Consider read_file() if editing.", r, total)
-                    } else {
-                        format!("\nLast read: R{}", r)
-                    }
-                }
-                None => String::new(),
-            };
-            format!(
-                "[OK] {} | {} | {} symbols\nPurpose: {}\nSymbols: {}{}",
-                path, lang, entry.symbols.len(), purpose, syms, stale_note
-            )
-        }
-        None => {
-            format!(
-                "[OK] {} — No cached summary. Use read() to load and auto-cache, or explore() to scan the directory first.",
-                path
-            )
-        }
-    }
+    // TODO Phase 4: glance receives seed + semantic data via IPC from agent.
+    // In standalone mode, always return the "no cached summary" message.
+    format!(
+        "[OK] {} — No cached summary. Use read() to load and auto-cache, or explore() to scan the directory first.",
+        path
+    )
 }
 
 /// Find the last round number that touched a given file path.
-/// Short-term memory format: "- R{N}: {tools} → {files} — {summary}"
 fn find_last_round_for_file(short_mem: &str, file_path: &str) -> Option<usize> {
     for line in short_mem.lines().rev() {
         if !line.starts_with("- R") { continue; }
@@ -140,4 +111,92 @@ fn find_last_round_for_file(short_mem: &str, file_path: &str) -> Option<usize> {
         }
     }
     None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Handler wrappers
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn handle_list_skills(ctx: ToolCallCtx) -> ToolResult {
+    let args = serde_json::to_string(&ctx.args).unwrap_or_default();
+    ToolResult::ok(exec_list_skills(&args))
+}
+
+fn handle_read_skill_ref(ctx: ToolCallCtx) -> ToolResult {
+    let args = serde_json::to_string(&ctx.args).unwrap_or_default();
+    ToolResult::ok(exec_read_skill_ref(&args))
+}
+
+fn handle_glance(ctx: ToolCallCtx) -> ToolResult {
+    let args = serde_json::to_string(&ctx.args).unwrap_or_default();
+    ToolResult::ok(exec_glance(&args))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Safety classifiers — all read-only metadata, always safe
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn safety_list_skills(_ctx: &ToolCallCtx) -> SafetyVerdict {
+    SafetyVerdict::Allow
+}
+
+fn safety_read_skill_ref(_ctx: &ToolCallCtx) -> SafetyVerdict {
+    SafetyVerdict::Allow
+}
+
+fn safety_glance(_ctx: &ToolCallCtx) -> SafetyVerdict {
+    SafetyVerdict::Allow
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Registration entry point
+// ═══════════════════════════════════════════════════════════════════════════
+
+pub fn register(mgr: &mut ToolManager) {
+    mgr.register(ToolHandler {
+        key: ToolKey::new("list_skills", ""),
+        description: "List all installed skills and their descriptions.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+        }),
+        handler: handle_list_skills,
+        safety: safety_list_skills,
+        default_timeout: Duration::from_secs(15),
+    });
+
+    mgr.register(ToolHandler {
+        key: ToolKey::new("read_skill_ref", ""),
+        description: "Read a skill's files to load domain knowledge for your task.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Skill name (e.g. postgresql)"},
+                "path": {"type": "string", "description": "File path within the skill (default: SKILL.md). Use references/<file> for reference docs."}
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        handler: handle_read_skill_ref,
+        safety: safety_read_skill_ref,
+        default_timeout: Duration::from_secs(15),
+    });
+
+    mgr.register(ToolHandler {
+        key: ToolKey::new("glance", ""),
+        description: "Preview file metadata: symbols, purpose, language, size. Use after explore.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to preview. Relative to project root."}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        handler: handle_glance,
+        safety: safety_glance,
+        default_timeout: Duration::from_secs(15),
+    });
 }

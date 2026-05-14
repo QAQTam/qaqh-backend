@@ -1,4 +1,13 @@
 //! Session persistence: save/load/resume, crash recovery snapshots, plan storage, pitfall guide.
+//!
+//! # Storage format
+//!
+//! Sessions are persisted as [`SessionFile`] on disk, containing
+//! a flat `Vec<Message>` alongside metadata (seed, timestamps, model).
+//! This internal `Vec<Message>` format is the canonical conversation
+//! representation — NOT AnthropicMessage or any API-specific format.
+//! Conversion to API format happens at the API boundary via
+//! [`ContextAssembler::to_anthropic_messages()`].
 
 use std::path::PathBuf;
 use crate::types::Message;

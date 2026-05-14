@@ -15,7 +15,10 @@ mod router;
 mod dsc_log;
 mod health;
 mod conversation;
+#[path = "../dsx-agent/orchestrator"]
 mod orchestrator;
+#[path = "../dsx-agent/src/agent.rs"]
+mod agent;
 mod tui;
 
 #[derive(Parser)]

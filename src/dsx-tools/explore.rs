@@ -3,8 +3,8 @@
 use std::sync::atomic::Ordering;
 
 use crate::tools::CANCEL;
+use crate::tools::{ToolCallCtx, ToolResult};
 use crate::types::ToolDef;
-use super::parse_arg_or;
 
 #[allow(dead_code)]
 pub(super) fn explore_def() -> ToolDef {
@@ -339,4 +339,90 @@ fn walk_ext_files(dir: &std::path::Path, ext: &str) -> Vec<std::path::PathBuf> {
     }
     files.sort_by_key(|p| p.to_string_lossy().to_string());
     files
+}
+
+// ── Handler（新 IPC 框架）──
+
+pub fn handle_explore(ctx: ToolCallCtx) -> ToolResult {
+    let path = ctx.get_str("path").unwrap_or(".");
+    ToolResult::ok(exec_explore_inner(path))
+}
+
+fn exec_explore_inner(path: &str) -> String {
+    let max_depth = 3usize;
+
+    let abs = std::path::Path::new(&path);
+    let abs_path = if abs.is_absolute() {
+        abs.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(abs)
+    };
+    let abs_str = abs_path.to_string_lossy().to_string();
+
+    let mut markers = Vec::new();
+    for m in ["Cargo.toml", "package.json", "go.mod", "pyproject.toml", "Makefile", ".git"] {
+        if abs_path.join(m).exists() { markers.push(m); }
+    }
+
+    let mut result = format!("[PROJECT_MAP]\n");
+    result.push_str(&format!("path: {}\n", abs_str));
+    if !markers.is_empty() {
+        result.push_str(&format!("project markers: {}\n", markers.join(", ")));
+    } else if path == "." {
+        result.push_str("[HINT] No project markers found. You may be in the wrong directory.\n");
+        result.push_str("[HINT] The user runs dsx from their terminal. The project root is where dsc was launched.\n");
+    }
+    result.push('\n');
+
+    if let Err(e) = walk_dir(&path, &mut result, 0, max_depth, "") {
+        return format!("[ERROR] Cannot explore {}: {}", path, e);
+    }
+
+    if markers.iter().any(|m| *m == "Cargo.toml") {
+        let graph = derive_rust_graph(&abs_str);
+        if !graph.is_empty() {
+            result.push_str(&format!("\n\n## Module Graph\n{}", graph));
+        }
+    } else if markers.iter().any(|m| *m == "go.mod") {
+        let graph = derive_go_graph(&abs_str);
+        if !graph.is_empty() {
+            result.push_str(&format!("\n\n## Module Graph\n{}", graph));
+        }
+    }
+
+    result.push_str(&format!("\n── depth={}, {} chars ── Use read_file(path, start_line, end_line) for precise reading ──",
+        max_depth, result.len()));
+    result
+}
+
+// ── 注册入口 ──
+
+use crate::tools::{ToolHandler, ToolKey, SafetyVerdict};
+use std::time::Duration;
+
+pub fn register(mgr: &mut crate::tools::ToolManager) {
+    mgr.register(ToolHandler {
+        key: ToolKey::new("explore", "scan"),
+        description: "Scan directory: file sizes, line counts, signatures. Call FIRST to understand project structure.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Directory to scan", "default": "."}
+            },
+            "required": [],
+            "additionalProperties": false
+        }),
+        handler: handle_explore,
+        safety: |_| SafetyVerdict::allowed(),
+        default_timeout: Duration::from_secs(30),
+    });
+}
+
+// ── 参数解析（兼容垫片）──
+
+fn parse_arg_or(args: &str, key: &str, default: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|v| v.get(key).and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_else(|| default.to_string())
 }

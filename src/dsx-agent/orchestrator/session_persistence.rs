@@ -1,30 +1,29 @@
 //! Session persistence: save/load conversations, repair alternation.
 use crate::conversation::ContextAssembler;
 use crate::session;
-use crate::tui::app::App;
+use crate::agent::AgentState;
 
 /// Repair messages by re-importing through ContextAssembler.
-pub fn repair_messages(app: &mut App) {
-    let msgs = std::mem::take(&mut app.messages);
+pub fn repair_messages(state: &mut AgentState) {
+    let msgs = std::mem::take(&mut state.messages);
     let (new_ctx, repairs) = ContextAssembler::from_legacy(msgs);
-    app.ctx = new_ctx;
-    app.sync_messages();
+    state.ctx = new_ctx;
+    state.sync_messages();
     if !repairs.is_empty() {
         log::warn!("repair: {}", repairs.join("; "));
-        app.status_msg = format!("Repaired: {} issue(s).", repairs.len());
     }
 }
 
 /// Save session to disk if there are messages and a seed.
-pub fn maybe_save_session(app: &mut App) {
-    repair_messages(app);
-    let msgs = app.ctx.to_vec();
-    if msgs.len() > 1 && !app.session_seed.is_empty() {
+pub fn maybe_save_session(state: &mut AgentState) {
+    repair_messages(state);
+    let msgs = state.ctx.to_vec();
+    if msgs.len() > 1 && !state.session_seed.is_empty() {
         session::finalize_session(
-            &app.session_seed,
+            &state.session_seed,
             &msgs,
-            &app.config.model,
-            app.config.effort.as_deref(),
+            &state.config.model,
+            state.config.effort.as_deref(),
             None,
         );
     }

@@ -693,6 +693,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simplelog",
+ "thiserror 2.0.18",
  "tokenizers",
  "tokio",
  "tokio-stream",

@@ -10,6 +10,8 @@ pub(crate) enum Mode {
     ApiConfig,
     SessionPicker,
     IntentPicker,
+    /// Gate blocked — modal popup overlay (repairable=false) or banner (repairable=true).
+    GateBlock,
 }
 
 #[derive(Debug, Clone)]
