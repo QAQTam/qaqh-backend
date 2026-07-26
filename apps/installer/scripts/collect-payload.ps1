@@ -150,7 +150,6 @@ switch ($Kind) {
             version = $package.version
         }
         Add-BundleTree -SourceRoot (Join-Path $FrontendRoot "release\win-unpacked")
-        Add-BundleFile -Source "target\release\deepx-uninstaller.exe" -Target "uninstall.exe"
         Add-BundleFile -Source "target\release\deepx-updater.exe" -Target "deepx-updater.exe"
         if (Test-Path -LiteralPath "apps\installer\payload\config\default.toml" -PathType Leaf) {
             Add-BundleFile -Source "apps\installer\payload\config\default.toml" -Target "config/config.toml"

@@ -4,7 +4,6 @@ DeepX 桌面应用的 Windows 安装与统一维护程序。
 
 - **安装器**：egui GUI 向导（macOS 风格），支持 SFX 单文件分发、进程检测与关闭
 - **维护程序**：`deepx-updater.exe`，统一负责修改、更新、修复与安全卸载
-- **兼容卸载器**：`uninstall.exe` 仅把旧 Windows 卸载入口转发给维护程序
 - **更新架构**：见 [`UPDATE_ARCHITECTURE.md`](UPDATE_ARCHITECTURE.md)
 
 ## 构建

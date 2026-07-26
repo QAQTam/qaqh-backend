@@ -36,7 +36,6 @@ Installer 不是常驻服务。它与未来 HTTP/CDN 都实现 `UpdateSource`，
 DeepX/
 ├── DeepX.exe
 ├── deepx-updater.exe
-├── uninstall.exe                 # 兼容旧卸载入口，仅转发
 ├── .deepx-install-root.json       # 与规范化安装根绑定的破坏性操作哨兵
 ├── install-state.json
 ├── resources/
@@ -338,7 +337,7 @@ Windows `ModifyPath` 指向 `deepx-updater.exe maintain --interactive`；
   Installer 执行修复。
 - [x] updater 提供统一维护 UI 和显式 uninstall 操作。
 - [x] Windows 注册 ModifyPath、交互卸载和静默卸载入口。
-- [x] 旧 `uninstall.exe` 缩减为 updater 兼容转发器。
+- [x] 移除旧 `uninstall.exe` 兼容入口，由 updater 统一负责卸载。
 
 ### M4：Renderer/Shell 与联网 Source
 

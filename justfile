@@ -161,7 +161,6 @@ status:
     @if (Test-Path 'target/release/deepx-daemon.exe') { '  ✓ deepx-daemon.exe' } else { '  ✗ deepx-daemon.exe' }
     @if (Test-Path 'target/release/deepx-companion.exe') { '  ✓ deepx-companion.exe' } else { '  ✗ deepx-companion.exe' }
     @if (Test-Path 'target/release/DeepXInstaller.exe') { '  ✓ DeepXInstaller.exe' } else { '  ✗ DeepXInstaller.exe' }
-    @if (Test-Path 'target/release/deepx-uninstaller.exe') { '  ✓ deepx-uninstaller.exe' } else { '  ✗ deepx-uninstaller.exe' }
     @if (Test-Path 'target/release/deepx-updater.exe') { '  ✓ deepx-updater.exe' } else { '  ✗ deepx-updater.exe' }
     @Write-Output "=== Desktop ==="
     @if (Test-Path 'apps/desktop/out/main/main.js') { '  ✓ main.js' } else { '  ✗ main.js' }

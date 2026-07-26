@@ -31,10 +31,6 @@ _finalize:
     @pwsh.exe -File scripts/finalize.ps1
 
 [windows]
-_sync-uninstaller:
-    @pwsh.exe -NoLogo -Command "Copy-Item -Force 'target/release/deepx-uninstaller.exe' 'payload/deepx-uninstaller.exe'"
-
-[windows]
 clean:
     cargo clean
     @pwsh.exe -File scripts/clean.ps1
@@ -59,10 +55,6 @@ _finalize:
     @exit 1
 
 [unix]
-_sync-uninstaller:
-    cp -f target/release/deepx-uninstaller payload/deepx-uninstaller 2>/dev/null || true
-
-[unix]
 clean:
     cargo clean
     rm -rf payload/desktop/ payload/gate/ payload/companion/ dist/
@@ -71,7 +63,6 @@ clean:
 status:
     @echo "=== 产物状态 ==="
     @ls -lh target/release/deepx-installer 2>/dev/null && echo "  ✓ installer" || echo "  ✗ installer"
-    @ls -lh target/release/deepx-uninstaller 2>/dev/null && echo "  ✓ uninstaller" || echo "  ✗ uninstaller"
     @ls payload/config/default.toml 2>/dev/null && echo "  ✓ payload config" || echo "  ✗ payload config"
 
 # ——— 通用 recipes ——————————————————————————————————
@@ -95,10 +86,10 @@ frontend:
 installer: _collect-payload _build-installer
 
 # 全流程
-all: backend frontend installer _sync-uninstaller _finalize
+all: backend frontend installer _finalize
 
 # SFX 快速打包（payload 已就位）
-sfx-only: _build-installer _sync-uninstaller _finalize
+sfx-only: _build-installer _finalize
 
 # 跳过前后端构建，从已有产物组装
 quick: _collect-payload _build-installer _finalize

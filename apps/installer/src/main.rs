@@ -1174,6 +1174,7 @@ impl App {
         }
         let app_exe = format!(r"{}\DeepX.exe", self.config.target_path);
         install::write_install_marker(&self.config.target_path)?;
+        install::remove_legacy_uninstaller(&self.config.target_path)?;
         install::write_uninstall_registry(&self.config.target_path, env!("CARGO_PKG_VERSION"))?;
         install::write_legal_acceptance(
             LEGAL_DOCUMENT_VERSION.trim(),

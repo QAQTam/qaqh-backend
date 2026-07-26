@@ -9,10 +9,6 @@ description = "DeepX 桌面应用安装程序"
 name = "DeepXInstaller"
 path = "src/main.rs"
 
-[[bin]]
-name = "deepx-uninstaller"
-path = "src/bin/uninstall.rs"
-
 [dependencies]
 deepx-update = { path = "../../crates/deepx-update" }
 deepx-types = { path = "../../crates/deepx-types" }
@@ -43,3 +39,6 @@ zip = "2"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use deepx_update::{
-    commit_bundle_state, parse_bundle_manifest, safe_join_under_root, write_install_root_marker,
-    BundleFile, BundleManifest,
+    commit_bundle_state, parse_bundle_manifest, safe_join_under_root, verify_install_root,
+    write_install_root_marker, BundleFile, BundleManifest,
 };
 use sha2::{Digest, Sha256};
 
@@ -68,6 +68,26 @@ fn legal_acceptance_record(
 
 fn sha256_text(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+pub fn remove_legacy_uninstaller(install_path: &str) -> Result<(), String> {
+    let root = Path::new(install_path);
+    verify_install_root(root)
+        .map_err(|error| format!("refuse legacy uninstaller cleanup: {error}"))?;
+    let legacy = safe_join_under_root(root, "uninstall.exe")
+        .map_err(|error| format!("resolve legacy uninstaller: {error}"))?;
+    if !legacy.exists() {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(&legacy)
+        .map_err(|error| format!("inspect {}: {error}", legacy.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "refuse to remove unexpected legacy uninstaller object: {}",
+            legacy.display()
+        ));
+    }
+    fs::remove_file(&legacy).map_err(|error| format!("remove {}: {error}", legacy.display()))
 }
 
 // ============================================================
@@ -821,7 +841,7 @@ pub fn write_uninstall_registry(_: &str, _: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::legal_acceptance_record;
+    use super::{legal_acceptance_record, remove_legacy_uninstaller};
 
     #[test]
     fn legal_acceptance_is_bound_to_version_and_both_documents() {
@@ -852,5 +872,23 @@ mod tests {
 
         assert!(agreement.contains(&format!("文档版本：{version}")));
         assert!(privacy.contains(&format!("文档版本：{version}")));
+    }
+
+    #[test]
+    fn legacy_uninstaller_cleanup_requires_verified_install_root() {
+        let unverified = tempfile::tempdir().expect("unverified root");
+        let legacy = unverified.path().join("uninstall.exe");
+        std::fs::write(&legacy, b"legacy").expect("legacy file");
+
+        assert!(remove_legacy_uninstaller(&unverified.path().to_string_lossy()).is_err());
+        assert!(legacy.is_file());
+
+        let verified = tempfile::tempdir().expect("verified root");
+        deepx_update::write_install_root_marker(verified.path()).expect("install marker");
+        let legacy = verified.path().join("uninstall.exe");
+        std::fs::write(&legacy, b"legacy").expect("legacy file");
+
+        remove_legacy_uninstaller(&verified.path().to_string_lossy()).expect("safe cleanup");
+        assert!(!legacy.exists());
     }
 }
