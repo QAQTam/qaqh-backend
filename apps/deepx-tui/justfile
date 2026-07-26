@@ -11,7 +11,7 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
 # ---- helpers ---------------------------------------------------------------
 
-_version := "0.9.0"
+_version := "1.0.0-beta.1"
 _target  := "x86_64-pc-windows-msvc"
 _out_dir := "out"
 _pkg_name := "deepx-tui-v" + _version + "-" + _target

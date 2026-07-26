@@ -13,14 +13,14 @@
     "frontend": {
       "current": "frontend-a123",
       "previous": "frontend-a122",
-      "version": "0.9.0",
+      "version": "1.0.0-beta.1",
       "protocol": 1,
       "health": "healthy"
     },
     "backend": {
       "current": "backend-c789",
       "previous": "backend-c788",
-      "version": "0.9.0",
+      "version": "1.0.0-beta.1",
       "protocol": 1,
       "health": "healthy"
     },

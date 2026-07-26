@@ -11,7 +11,7 @@ node_modules/
 bindings/
 tmp/
 .deepx/
-skills/
+/skills/
 # monorepo additions
 apps/desktop/out/
 apps/desktop/release/
@@ -24,4 +24,4 @@ apps/installer/.verify-install/
 /packages/
 .codegraph/
 .reasonix/
-skills/
+/skills/

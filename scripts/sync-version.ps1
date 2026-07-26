@@ -23,6 +23,7 @@ $pkg | ConvertTo-Json -Depth 16 | Set-Content $PkgJson -NoNewline
 # deepx-backend.lock.json
 $lock = Get-Content $LockJson -Raw | ConvertFrom-Json
 $lock.version = $v
+$lock.release_manifest_url = $lock.release_manifest_url -replace '/download/v[^/]+/', "/download/v$v/"
 $lock | ConvertTo-Json -Depth 4 | Set-Content $LockJson -NoNewline
 
 # root package.json
@@ -30,4 +31,4 @@ $rp = Get-Content $RootPkgJson -Raw | ConvertFrom-Json
 $rp.version = $v
 $rp | ConvertTo-Json -Depth 4 | Set-Content $RootPkgJson -NoNewline
 
-Write-Host "Done — $v synced to Cargo.toml, desktop/package.json, deepx-backend.lock.json, root package.json"
+Write-Host "Done — $v synced to Cargo.toml, desktop/package.json, deepx-backend.lock.json (including release URL), root package.json"

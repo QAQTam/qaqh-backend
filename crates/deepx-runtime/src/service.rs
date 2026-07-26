@@ -405,15 +405,8 @@ impl DeepxService {
     }
 
     fn save_config(&self, params: &Value) -> Result<(), String> {
-        log::info!(
-            "[config.save] received params: {}",
-            serde_json::to_string(params).unwrap_or_else(|_| "<unprintable>".into())
-        );
-        log::info!(
-            "[config.save] params.apiKey={:?} params.api_key={:?}",
-            params.get("apiKey").and_then(|v| v.as_str()),
-            params.get("api_key").and_then(|v| v.as_str()),
-        );
+        // Never log config.save payloads: they may contain provider credentials.
+        log::info!("[config.save] saving configuration");
         let mut cfg = deepx_config::Config::load().unwrap_or_default();
         update_string(&mut cfg.api_key, params, "api_key", "apiKey");
         update_string(&mut cfg.model, params, "model", "model");

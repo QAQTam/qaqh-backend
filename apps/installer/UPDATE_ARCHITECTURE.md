@@ -111,13 +111,13 @@ files/...
   "formatVersion": 1,
   "kind": "backend",
   "buildId": "backend-c789",
-  "appVersion": "0.9.0",
+  "appVersion": "1.0.0-beta.1",
   "releaseId": "20260727.1",
   "channel": "stable",
   "components": {
     "backend": {
       "buildId": "backend-c789",
-      "version": "0.9.0",
+      "version": "1.0.0-beta.1",
       "controlProtocol": 1
     }
   },

@@ -35,7 +35,6 @@ pub fn register(mgr: &mut ToolManager) {
                 "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the subagent can use. Empty = all tools."},
                 "model": {"type": "string", "description": "Override model (e.g. 'gpt-4o-mini'). Inherits parent if empty."},
                 "base_url": {"type": "string", "description": "Override API base URL. Inherits parent if empty."},
-                "api_key": {"type": "string", "description": "Override API key. Inherits parent if empty."},
                 "max_tokens": {"type": "integer", "description": "Max output tokens. Default 4096."},
                 "timeout_secs": {"type": "integer", "description": "Maximum time in seconds. Default 120."}
             },
@@ -46,6 +45,27 @@ pub fn register(mgr: &mut ToolManager) {
         risk: ToolRisk::Administrative,
         default_timeout: std::time::Duration::from_secs(180),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_subagent_schema_never_accepts_api_keys() {
+        let mut manager = ToolManager::new();
+        register(&mut manager);
+
+        let handler = manager
+            .lookup("spawn_subagent")
+            .expect("spawn_subagent should be registered");
+        let properties = handler.input_schema["properties"]
+            .as_object()
+            .expect("tool properties should be an object");
+
+        assert!(!properties.contains_key("api_key"));
+        assert!(!handler.input_schema.to_string().contains("--api-key"));
+    }
 }
 
 fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
@@ -92,12 +112,6 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
     let base_url_override: String = ctx
         .args
         .get("base_url")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default();
-    let api_key_override: String = ctx
-        .args
-        .get("api_key")
         .and_then(|v| v.as_str())
         .map(String::from)
         .unwrap_or_default();
@@ -177,9 +191,6 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
     }
     if !base_url_override.is_empty() {
         cmd.arg("--base-url").arg(&base_url_override);
-    }
-    if !api_key_override.is_empty() {
-        cmd.arg("--api-key").arg(&api_key_override);
     }
     if max_tokens > 0 && max_tokens != 4096 {
         cmd.arg("--max-tokens").arg(max_tokens.to_string());

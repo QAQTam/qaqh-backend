@@ -10,12 +10,12 @@
     },
     "frontend": {
       "buildId": "frontend-a123",
-      "version": "0.9.0",
+      "version": "1.0.0-beta.1",
       "controlProtocol": 1
     },
     "backend": {
       "buildId": "backend-c789",
-      "version": "0.9.0",
+      "version": "1.0.0-beta.1",
       "controlProtocol": 1
     }
   },

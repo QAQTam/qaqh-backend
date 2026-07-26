@@ -540,9 +540,8 @@ impl Config {
             Self::write_outbox_at(&db_path, &json)?;
         }
         log::info!(
-            "[Config::save] writing to {}, api_key={:?}",
-            deepx_types::platform::config_path().display(),
-            pc.api_key.as_deref().unwrap_or("(none)")
+            "[Config::save] writing to {}",
+            deepx_types::platform::config_path().display()
         );
         if !store.save(&pc) {
             return Err(format!(
