@@ -1,6 +1,6 @@
 import { createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { backendStatus, connect, listen, request } from "./runtime/backendClient";
-import { openDialog } from "./runtime/desktopApi";
+import { openDialog, onUpdateAvailable, type UpdateInfo } from "./runtime/desktopApi";
 import type { Agent2Ui, AskAnswer, SessionMeta, TaskInfo } from "./lib/types";
 import ChatView from "./components/ChatView";
 import SettingsView, { type ThemeMode } from "./components/SettingsView";
@@ -66,6 +66,7 @@ export default function App() {
   let unlistenTheme: (() => void) | undefined;
   let unlistenSessionActivity: (() => void) | undefined;
   let unlistenBackendStatus: (() => void) | undefined;
+  let unlistenUpdate: (() => void) | undefined;
   let resumeRequest = 0;
 
   function activeEntry(): SessionEntry | undefined {
@@ -458,6 +459,10 @@ export default function App() {
         setBackendError(event.payload.connected ? "" : (event.payload.error ?? "Daemon unavailable"));
       });
       await connect();
+      // Listen for app updates (production: auto-check on startup)
+      unlistenUpdate = onUpdateAvailable((info: UpdateInfo) => {
+        toastCtrl.push(`New version ${info.version} available!`, "info", true);
+      });
       const status = await backendStatus();
       setBackendError(status.connected ? "" : (status.error ?? "Daemon unavailable"));
     } catch (error) {
@@ -501,6 +506,7 @@ export default function App() {
     unlistenTheme?.();
     unlistenSessionActivity?.();
     unlistenBackendStatus?.();
+    unlistenUpdate?.();
   });
 
   return (

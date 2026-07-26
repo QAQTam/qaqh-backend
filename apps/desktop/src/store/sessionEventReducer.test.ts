@@ -34,7 +34,12 @@ describe("sessionEventReducer", () => {
     }, 210);
 
     expect(state.turns[0].rounds[0].isFinal).toBe(true);
-    expect(state.turns[0].rounds[0].progress["exec-1"].chunks.map(item => item.seq)).toEqual([1, 2]);
+    // Chunks retain arrival order (daemon guarantees monotonic per-stream);
+    // cross-stream seq comparison is meaningless.
+    const chunks = state.turns[0].rounds[0].progress["exec-1"].chunks;
+    expect(chunks.map(item => item.seq)).toEqual([2, 1]); // arrival order
+    expect(chunks[0].stream).toBe("stdout");
+    expect(chunks[1].stream).toBe("stderr");
     expect(state.environment.linesAdded).toBe(7);
   });
 
@@ -98,6 +103,7 @@ describe("sessionEventReducer", () => {
     expect(state.turns[0].status).toBe("waiting");
     expect(state.pendingInteractions[0]).toEqual({
       kind: "plan", id: "plan-1", turnId: "t-plan", content: "# Plan",
+      reviewType: "plan", todoItems: null,
     });
 
     state = reduceAgentEvent(state, {

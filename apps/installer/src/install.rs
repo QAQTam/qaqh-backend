@@ -49,8 +49,90 @@ pub fn get_manifest() -> Vec<ManifestEntry> {
 }
 
 // ============================================================
-// 文件复制引擎（目录 payload 模式）
+// Headless patch: --patch <source_payload> <target_dir>
+// Only updates the desktop/ frontend files, no shortcuts/registry.
 // ============================================================
+
+pub fn run_patch(source: &str, target_dir: &str) -> Result<(), String> {
+    let src = Path::new(source);
+    let dst = Path::new(target_dir);
+
+    if !src.exists() {
+        return Err(format!("source not found: {}", source));
+    }
+
+    // Accept either a ZIP file or a directory
+    if src.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("zip")) {
+        return run_patch_zip(src, dst);
+    }
+
+    if src.is_dir() {
+        return run_patch_dir(src, dst);
+    }
+
+    Err(format!("unsupported source (expected .zip or directory): {}", source))
+}
+
+fn run_patch_dir(src: &Path, dst: &Path) -> Result<(), String> {
+    // Source contains e.g. desktop/ (Electron output)
+    // Copy desktop/ into target install dir
+    let desktop_src = if src.join("desktop").is_dir() {
+        src.join("desktop")
+    } else {
+        src.to_path_buf()
+    };
+
+    let desktop_dst = dst.join("desktop");
+    fs::create_dir_all(&desktop_dst)
+        .map_err(|e| format!("create target dir: {e}"))?;
+
+    let mut count = 0u32;
+    copy_dir_overwrite(&desktop_src, &desktop_dst, &mut count)?;
+
+    // Also update any config changes
+    if let Some(config_src) = src.join("config").is_dir().then(|| src.join("config")) {
+        let config_dst = dst.join("config");
+        fs::create_dir_all(&config_dst).ok();
+        copy_dir_overwrite(&config_src, &config_dst, &mut count)?;
+    }
+
+    println!("patch done: {count} files updated in {}", dst.display());
+    Ok(())
+}
+
+fn run_patch_zip(_zip_path: &Path, _dst: &Path) -> Result<(), String> {
+    // Future: extract desktop/ from zip and copy
+    // For now, require directory mode for patches
+    Err("ZIP patch mode not yet implemented — use directory payload".into())
+}
+
+fn copy_dir_overwrite(src: &Path, dst: &Path, count: &mut u32) -> Result<(), String> {
+    for entry in fs::read_dir(src)
+        .map_err(|e| format!("read dir '{}': {e}", src.display()))?
+    {
+        let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
+        let sp = entry.path();
+        let dp = dst.join(entry.file_name());
+        if sp.is_dir() {
+            fs::create_dir_all(&dp)
+                .map_err(|e| format!("create dir '{}': {e}", dp.display()))?;
+            copy_dir_overwrite(&sp, &dp, count)?;
+        } else {
+            // Remove read-only attribute if present (Electron asar can be locked)
+            if let Ok(meta) = fs::metadata(&dp) {
+                let mut perms = meta.permissions();
+                if perms.readonly() {
+                    perms.set_readonly(false);
+                    let _ = fs::set_permissions(&dp, perms);
+                }
+            }
+            fs::copy(&sp, &dp)
+                .map_err(|e| format!("copy '{}' -> '{}': {e}", sp.display(), dp.display()))?;
+            *count += 1;
+        }
+    }
+    Ok(())
+}
 
 pub fn run_install<F>(config: &mut InstallerConfig, on_progress: F) -> Result<(), String>
 where

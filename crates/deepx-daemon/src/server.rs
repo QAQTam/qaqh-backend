@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use deepx_proto::{
     CONTROL_PROTOCOL_VERSION, ControlClientMessage, ControlServerMessage, ControlSnapshot,
-    DaemonDiscovery,
+    DaemonDiscovery, EventLane,
 };
 use deepx_runtime::{DeepxService, EventBus, LeaseDecision, LeaseManager};
 use futures_util::{SinkExt, StreamExt};
@@ -19,9 +19,14 @@ const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 const LEASE_TIMEOUT_MS: u64 = 15_000;
 const MAX_CONNECTIONS: usize = 32;
-const OUTBOUND_QUEUE_CAPACITY: usize = 2_048;
-const PRIORITY_QUEUE_CAPACITY: usize = 128;
+const OUTBOUND_QUEUE_CAPACITY: usize = 8_192;
+const PRIORITY_QUEUE_CAPACITY: usize = 256;
 const REQUEST_QUEUE_CAPACITY: usize = 64;
+const BULK_QUEUE_CAPACITY: usize = 8_192;
+/// Maximum bulk-lane events to batch into one EventBatch frame.
+const BULK_BATCH_MAX_EVENTS: usize = 64;
+/// Flush interval for bulk batch regardless of event count.
+const BULK_FLUSH_INTERVAL_MS: u64 = 50;
 
 struct RequestJob {
     request_id: String,
@@ -238,6 +243,7 @@ async fn handle_connection(
     let mut command_count = 0_u32;
     let (priority_tx, mut priority_rx) = mpsc::channel(PRIORITY_QUEUE_CAPACITY);
     let (event_tx, mut event_rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+    let (bulk_tx, mut bulk_rx) = mpsc::channel::<ControlServerMessage>(BULK_QUEUE_CAPACITY);
     let mut writer = tokio::spawn(async move {
         loop {
             let message = tokio::select! {
@@ -278,6 +284,52 @@ async fn handle_connection(
             };
             if request_outbound.send(message).await.is_err() {
                 break;
+            }
+        }
+    });
+    // ── Bulk aggregator: drain bulk_tx, group by seed, send EventBatch ──
+    let bulk_outbound = event_tx.clone();
+    let bulk_epoch = service.events().epoch().to_string();
+    let _bulk_aggregator = tokio::spawn(async move {
+        use std::collections::HashMap;
+        let mut interval = tokio::time::interval(Duration::from_millis(BULK_FLUSH_INTERVAL_MS));
+        let mut pending: HashMap<String, Vec<deepx_proto::Agent2Ui>> = HashMap::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = interval.tick() => {
+                    // Flush: drain and send one EventBatch per seed
+                    let drained: HashMap<_, _> = std::mem::take(&mut pending);
+                    for (seed, events) in drained {
+                        if events.is_empty() { continue; }
+                        let _ = bulk_outbound.send(ControlServerMessage::EventBatch {
+                            server_epoch: bulk_epoch.clone(),
+                            seq: 0,
+                            seed,
+                            session_seq: 0,
+                            events,
+                        }).await;
+                    }
+                }
+                message = bulk_rx.recv() => {
+                    let Some(message) = message else { break };
+                    if let ControlServerMessage::Event { seed, event, .. } = message {
+                        let entry = pending.entry(seed.clone()).or_default();
+                        entry.push(event);
+                        if entry.len() >= BULK_BATCH_MAX_EVENTS {
+                            let drained = pending.remove(&seed).unwrap_or_default();
+                            if !drained.is_empty() {
+                                let _ = bulk_outbound.send(ControlServerMessage::EventBatch {
+                                    server_epoch: bulk_epoch.clone(),
+                                    seq: 0,
+                                    seed,
+                                    session_seq: 0,
+                                    events: drained,
+                                }).await;
+                            }
+                        }
+                    }
+                }
             }
         }
     });
@@ -339,11 +391,26 @@ async fn handle_connection(
             }
             event=events.recv()=>match event{
                 Ok(ControlServerMessage::Event{seq,..}) if seq<=delivered_seq=>{},
-                Ok(message @ ControlServerMessage::Event{seq,..})=>{
+                Ok(ref message @ ControlServerMessage::Event{seq,ref event,..})=>{
                     delivered_seq=seq;
-                    if event_allowed(&message,&leases,&client_instance_id,&client_kind){queue_runtime_event(&event_tx,message)?;}
+                    if !event_allowed(message,&leases,&client_instance_id,&client_kind){ continue; }
+                    let lane = event.lane();
+                    match lane {
+                        EventLane::Critical => {
+                            priority_tx.try_send(message.clone()).map_err(|_| "priority writer overloaded".to_string())?;
+                        }
+                        EventLane::Bulk => {
+                            let _ = bulk_tx.try_send(message.clone()); // lossy: drop on full
+                        }
+                        EventLane::Standard => {
+                            // Use blocking send: backpressure propagates to the event
+                            // source instead of killing the connection when the writer
+                            // is slow (e.g. during compact while renderer is lagging).
+                            event_tx.send(message.clone()).await.map_err(|_| "control writer stopped".to_string())?;
+                        }
+                    }
                 },
-                Ok(message)=>queue_runtime_event(&event_tx,message)?,
+                Ok(message)=>event_tx.send(message).await.map_err(|_| "control writer stopped".to_string())?,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{
                     let attached=leases.lock().unwrap_or_else(|e|e.into_inner()).attached_for(&client_instance_id,Instant::now());
                     let snapshot_seq=service.events().current_seq();
@@ -402,18 +469,6 @@ fn event_allowed(
             .owns(seed, client_instance_id, Instant::now()),
         _ => true,
     }
-}
-
-fn queue_runtime_event(
-    sender: &mpsc::Sender<ControlServerMessage>,
-    message: ControlServerMessage,
-) -> Result<(), String> {
-    sender.try_send(message).map_err(|error| match error {
-        mpsc::error::TrySendError::Full(_) => {
-            "control event writer overloaded; reconnect to recover from snapshot".to_string()
-        }
-        mpsc::error::TrySendError::Closed(_) => "control writer stopped".to_string(),
-    })
 }
 
 async fn send<S>(sink: &mut S, message: &ControlServerMessage) -> Result<(), String>

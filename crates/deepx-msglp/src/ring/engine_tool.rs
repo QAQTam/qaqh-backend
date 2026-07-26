@@ -225,7 +225,7 @@ impl ToolEngine {
         let mut pending_permission_ids = Vec::new();
         let mut pending_asks = VecDeque::new();
         let mut pending_plans = VecDeque::new();
-        let pending_todo_activation = None;
+        let mut pending_todo_activation = None;
 
         for tool in tools {
             let inv = deepx_tools::authorization::ToolInvocation {
@@ -294,6 +294,52 @@ impl ToolEngine {
                                 call_id: auth.call_id().to_string(),
                                 content: String::new(),
                             }),
+                            Err(error) => ctx.agent.msg.push_tool_result_direct(
+                                auth.call_id(),
+                                &format!("[ERROR] Cannot read todo: {error}"),
+                                false,
+                            ),
+                        }
+                    } else if auth.tool_name() == "todo"
+                        && auth.args().as_object()
+                            .and_then(|obj| obj.get("action"))
+                            .and_then(|v| v.as_str())
+                            == Some("activate")
+                    {
+                        match deepx_tools::todo::load_todo() {
+                            Ok(store) if store.items.is_empty() => {
+                                ctx.agent.msg.push_tool_result_direct(
+                                    auth.call_id(),
+                                    "[ERROR] No todo items to activate. Use todo_create first.",
+                                    false,
+                                );
+                            }
+                            Ok(store) => {
+                                use deepx_tools::todo::TodoStatus;
+                                let items: Vec<deepx_proto::TodoActivationItem> = store.items.iter()
+                                    .filter(|item| matches!(item.status, TodoStatus::Pending | TodoStatus::InProgress))
+                                    .map(|item| deepx_proto::TodoActivationItem {
+                                        id: item.id.clone(),
+                                        title: item.title.clone(),
+                                        description: item.description.clone(),
+                                        complexity: item.complexity.as_ref()
+                                            .map(|c| format!("{:?}", c).to_lowercase())
+                                            .unwrap_or_default(),
+                                    })
+                                    .collect();
+                                if items.is_empty() {
+                                    ctx.agent.msg.push_tool_result_direct(
+                                        auth.call_id(),
+                                        "[ERROR] No pending or in-progress todo items to activate.",
+                                        false,
+                                    );
+                                } else {
+                                    pending_todo_activation = Some(PendingTodoActivation {
+                                        call_id: auth.call_id().to_string(),
+                                        items,
+                                    });
+                                }
+                            }
                             Err(error) => ctx.agent.msg.push_tool_result_direct(
                                 auth.call_id(),
                                 &format!("[ERROR] Cannot read todo: {error}"),

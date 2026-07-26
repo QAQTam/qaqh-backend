@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { BackendStatus, ConfirmDialogOptions, ControlMessage, OpenDialogOptions } from "./types";
+import type { BackendStatus, ConfirmDialogOptions, ControlMessage, OpenDialogOptions, UpdateInfo } from "./types";
 
 contextBridge.exposeInMainWorld("deepx", {
   backend: {
@@ -25,5 +25,11 @@ contextBridge.exposeInMainWorld("deepx", {
     openPath: (target: string) => ipcRenderer.invoke("desktop:open-path", target),
     togglePet: () => ipcRenderer.invoke("desktop:toggle-pet") as Promise<boolean>,
     getPetStatus: () => ipcRenderer.invoke("desktop:pet-status") as Promise<boolean>,
+    checkUpdate: () => ipcRenderer.invoke("desktop:check-update") as Promise<UpdateInfo | null>,
+    onUpdateAvailable: (listener: (info: UpdateInfo) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, info: UpdateInfo) => listener(info);
+      ipcRenderer.on("update:available", handler);
+      return () => ipcRenderer.removeListener("update:available", handler);
+    },
   },
 });

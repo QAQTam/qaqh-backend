@@ -509,14 +509,18 @@ fn handle_todo(ctx: ToolCallCtx) -> ToolResult {
             Ok(content) => ToolResult::ok(content),
             Err(content) => ToolResult::error(content),
         },
+        "activate" => match exec_todo_activate_preview(&ctx.args) {
+            Ok(content) => ToolResult::ok(content),
+            Err(content) => ToolResult::error(content),
+        },
         _ => ToolResult::error(format!(
-            "Unknown todo action: {action}. Use create, update, delete, list, step_complete, stop, or import_plan."
+            "Unknown todo action: {action}. Use create, update, delete, list, submit, step_complete, stop, import_plan, or activate."
         )),
     }
 }
 
 // ═══════════════════════════════════════════════════════
-// Submit
+// Submit / Activate Preview (no mutation — real work deferred to engine_turn)
 // ═══════════════════════════════════════════════════════
 
 fn exec_todo_submit(_args: &Value) -> Result<String, String> {
@@ -533,6 +537,42 @@ fn exec_todo_submit(_args: &Value) -> Result<String, String> {
         "completed": store.items.iter().filter(|i| i.status == TodoStatus::Completed).count(),
         "goal": false
     })).map_err(|e| format!("todo submit: {e}"))
+}
+
+/// Preview items that would be activated by todo_activate.
+/// Does NOT mutate the store — real activation is deferred to
+/// engine_turn.rs after user approval of PlanSubmitted.
+fn exec_todo_activate_preview(args: &Value) -> Result<String, String> {
+    let store = read_store()?;
+    let ids: Option<Vec<String>> = args.get("ids").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| if s.starts_with('T') { s.to_string() } else { format!("T{s}") })
+            .collect()
+    });
+    let active: Vec<&TodoItem> = if let Some(ref ids) = ids {
+        ids.iter().filter_map(|id| store.items.iter().find(|item| &item.id == id)).collect()
+    } else {
+        store.items.iter().filter(|item| matches!(item.status, TodoStatus::Pending | TodoStatus::InProgress)).collect()
+    };
+    if active.is_empty() {
+        return Err(json_err(
+            "EMPTY_TODO",
+            "no items to activate",
+            if ids.is_some() { "Check the IDs — none matched items in the todo list." } else { "Use todo_create first, or specify ids." },
+        ));
+    }
+    let items: Vec<serde_json::Value> = active.iter().map(|item| serde_json::json!({
+        "id": item.id, "title": item.title, "description": item.description,
+        "complexity": item.complexity.as_ref().map(|c| format!("{:?}", c).to_lowercase()),
+        "status": match item.status { TodoStatus::Pending=>"pending", TodoStatus::InProgress=>"in_progress", _=>"unknown" },
+    })).collect();
+    serde_json::to_string(&serde_json::json!({
+        "items": items,
+        "total": active.len(),
+        "goal": false,
+        "message": format!("Todo activation preview: {} items pending review.", active.len()),
+    })).map_err(|e| format!("todo activate preview: {e}"))
 }
 
 // ═══════════════════════════════════════════════════════

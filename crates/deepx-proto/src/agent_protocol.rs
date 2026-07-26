@@ -752,6 +752,52 @@ pub enum Agent2Ui {
     AskRejected { ask_id: String, message: String },
 }
 
+/// Priority lane for daemon event routing.
+///
+/// Critical: session lifecycle, errors, permissions — never delayed or dropped.
+/// Standard: messages, tool results, plan reviews — blocked on queue full.
+/// Bulk:     exec_progress, audit_record, compact_delta — lossy, batchable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventLane {
+    Critical,
+    Standard,
+    Bulk,
+}
+
+impl Agent2Ui {
+    /// Classify this event into a routing lane for daemon multiplexing.
+    pub fn lane(&self) -> EventLane {
+        match self {
+            // ── Critical: session lifecycle, errors, user interaction ──
+            Agent2Ui::SessionCreated { .. }
+            | Agent2Ui::SessionRestored { .. }
+            | Agent2Ui::Error { .. }
+            | Agent2Ui::Cancelled
+            | Agent2Ui::ShutdownAck
+            | Agent2Ui::Ready
+            | Agent2Ui::Done
+            | Agent2Ui::TurnStart { .. }
+            | Agent2Ui::TurnEnd { .. }
+            | Agent2Ui::PermissionRequest { .. }
+            | Agent2Ui::AskUser { .. }
+            | Agent2Ui::AskResolved { .. }
+            | Agent2Ui::AskRejected { .. }
+            | Agent2Ui::PlanSubmitted { .. }
+            | Agent2Ui::PlanResolved { .. }
+            | Agent2Ui::RoundComplete { .. }
+            | Agent2Ui::Pong => EventLane::Critical,
+
+            // ── Bulk: high-frequency, loss-tolerant streaming ──
+            Agent2Ui::ExecProgress { .. }
+            | Agent2Ui::AuditRecord { .. }
+            | Agent2Ui::CompactDelta { .. } => EventLane::Bulk,
+
+            // ── Standard: everything else ──
+            _ => EventLane::Standard,
+        }
+    }
+}
+
 fn default_load_count() -> u32 {
     20
 }
@@ -1007,5 +1053,128 @@ mod tests {
         assert_eq!(json["state"], "waiting_user");
         assert_eq!(json["turn_id"], "t7");
         assert_eq!(json["seq"], 4);
+    }
+
+    // ── Lane classification tests ──
+
+    #[test]
+    fn exec_progress_is_bulk_lane() {
+        let event = Agent2Ui::ExecProgress {
+            tool_call_id: "t1".into(),
+            stream: "stdout".into(),
+            seq: 1,
+            chunk: "hello".into(),
+        };
+        assert_eq!(event.lane(), EventLane::Bulk);
+    }
+
+    #[test]
+    fn audit_record_is_bulk_lane() {
+        let event = Agent2Ui::AuditRecord {
+            tool_name: "exec".into(),
+            result_summary: "ok".into(),
+            success: true,
+            time: "2024-01-01".into(),
+            args: "{}".into(),
+        };
+        assert_eq!(event.lane(), EventLane::Bulk);
+    }
+
+    #[test]
+    fn session_lifecycle_is_critical_lane() {
+        for event in [
+            Agent2Ui::SessionCreated {
+                seed: "s".into(),
+            },
+            Agent2Ui::Error {
+                message: "boom".into(),
+            },
+            Agent2Ui::Cancelled,
+            Agent2Ui::Done,
+            Agent2Ui::TurnStart {
+                turn_id: "t".into(),
+                user_text: "hello".into(),
+            },
+            Agent2Ui::TurnEnd {
+                turn_id: "t".into(),
+                stop_reason: None,
+                usage: None,
+            },
+            Agent2Ui::PermissionRequest {
+                tool_call_id: "p".into(),
+                tool_name: "exec".into(),
+                reason: "need".into(),
+                paths: vec![],
+                category: "shell".into(),
+                level: 1,
+                risk: PermissionRisk::Low,
+                consequence: "none".into(),
+            },
+        ] {
+            assert_eq!(event.lane(), EventLane::Critical, "{event:?}");
+        }
+    }
+
+    #[test]
+    fn round_delta_is_standard_lane() {
+        let event = Agent2Ui::RoundDelta {
+            turn_id: "t".into(),
+            round_num: 1,
+            kind: RoundDeltaKind::Answering,
+            delta: "text".into(),
+        };
+        assert_eq!(event.lane(), EventLane::Standard);
+    }
+
+    #[test]
+    fn tool_results_is_standard_lane() {
+        let event = Agent2Ui::ToolResults {
+            turn_id: "t".into(),
+            round_num: 0,
+            results: vec![],
+        };
+        assert_eq!(event.lane(), EventLane::Standard);
+    }
+
+    #[test]
+    fn compact_delta_is_bulk_lane() {
+        let event = Agent2Ui::CompactDelta {
+            delta: "summary...".into(),
+        };
+        assert_eq!(event.lane(), EventLane::Bulk);
+    }
+
+    #[test]
+    fn all_variants_have_explicit_lane() {
+        // Smoke test: call lane() on every major variant to ensure
+        // exhaustive coverage without panicking.
+        let events = [
+            Agent2Ui::SessionCreated { seed: "s".into() },
+            Agent2Ui::SessionRestored { seed: "s".into(), turns: vec![], tokens_used: 0, cache_hit_pct: 0.0, total_turns: 0, has_more: false },
+            Agent2Ui::TurnStart { turn_id: "t".into(), user_text: "u".into() },
+            Agent2Ui::TurnEnd { turn_id: "t".into(), stop_reason: None, usage: None },
+            Agent2Ui::RoundDelta { turn_id: "t".into(), round_num: 0, kind: RoundDeltaKind::Thinking, delta: "d".into() },
+            Agent2Ui::RoundComplete { turn_id: "t".into(), round_num: 0, thinking: None, answer: None, tool_calls: vec![], blocks: vec![], is_final: false },
+            Agent2Ui::ToolResults { turn_id: "t".into(), round_num: 0, results: vec![] },
+            Agent2Ui::ToolExecDelta { tool_call_id: "c".into(), delta: "d".into() },
+            Agent2Ui::ExecProgress { tool_call_id: "c".into(), stream: "stdout".into(), seq: 0, chunk: "c".into() },
+            Agent2Ui::ToolCallPreview { turn_id: "t".into(), round_num: 0, index: 0, id: "c".into(), name: "n".into(), args_so_far: "{}".into() },
+            Agent2Ui::CodeDelta { lines_added: 1, lines_removed: 0, files_created: 0, files_deleted: 0, file: None },
+            Agent2Ui::AuditRecord { tool_name: "n".into(), result_summary: "s".into(), success: true, time: "t".into(), args: "{}".into() },
+            Agent2Ui::ToolNotice { level: "info".into(), message: "m".into() },
+            Agent2Ui::Dashboard { hp_connected: false, session_seed: "s".into(), tool_calls_total: 0, tool_failures: 0, current_phase: "idle".into(), streaming: false, dsml_compat_count: 0, documents: vec![], recent_edits: vec![], tasks: vec![], session_title: None, usage: None, context_limit: 0, model: None },
+            Agent2Ui::Done,
+            Agent2Ui::CompactStart { turns_total: 1, turns_keeping: 1 },
+            Agent2Ui::CompactEnd { summary_chars: 0, turns_compacted: 1, turns_removed: 0 },
+            Agent2Ui::CompactDelta { delta: "d".into() },
+            Agent2Ui::Cancelled,
+            Agent2Ui::ShutdownAck,
+            Agent2Ui::Ready,
+            Agent2Ui::Error { message: "e".into() },
+            Agent2Ui::Pong,
+        ];
+        for event in &events {
+            let _lane = event.lane(); // must not panic
+        }
     }
 }

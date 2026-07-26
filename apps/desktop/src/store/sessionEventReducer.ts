@@ -293,26 +293,46 @@ export function reduceAgentEvent(
       });
     }
     case "exec_progress": {
-      const turn = [...state.turns].reverse().find(candidate =>
-        candidate.rounds.some(round => round.toolCalls.some(call => call.id === event.tool_call_id)),
-      ) ?? state.turns[state.turns.length - 1];
-      if (!turn) return state;
-      const round = [...turn.rounds].reverse().find(candidate =>
-        candidate.toolCalls.some(call => call.id === event.tool_call_id),
-      ) ?? turn.rounds[turn.rounds.length - 1] ?? emptyRawRound(0);
+      // Fast path: use the last turn/round — exec_progress always targets
+      // the most recent tool call. Falls back to search only on mismatch.
+      const lastTurn = state.turns[state.turns.length - 1];
+      if (!lastTurn) return state;
+      const lastRound = lastTurn.rounds[lastTurn.rounds.length - 1];
+      const foundInLast = lastRound?.toolCalls.some(call => call.id === event.tool_call_id);
+
+      let turn = lastTurn;
+      let round = lastRound ?? emptyRawRound(0);
+      if (!foundInLast) {
+        const foundTurn = [...state.turns].reverse().find(candidate =>
+          candidate.rounds.some(r => r.toolCalls.some(c => c.id === event.tool_call_id)),
+        );
+        if (foundTurn) turn = foundTurn;
+        const foundRound = [...turn.rounds].reverse().find(candidate =>
+          candidate.toolCalls.some(c => c.id === event.tool_call_id),
+        );
+        if (foundRound) round = foundRound;
+      }
+
+      const seq = Number(event.seq);
+      const stream = event.stream === "stderr" ? "stderr" as const : "stdout" as const;
+      const chunk = event.chunk;
+
       return updateRound(state, turn.turnId, round.roundNum, current => {
         const previous = current.progress[event.tool_call_id]?.chunks ?? [];
-        const chunks = [
-          ...previous.filter(item => item.seq !== Number(event.seq)),
-          {
-            stream: event.stream === "stderr" ? "stderr" as const : "stdout" as const,
-            seq: Number(event.seq),
-            chunk: event.chunk,
-          },
-        ].sort((a, b) => a.seq - b.seq);
+        // Duplicate prevention: check last entry only. Events arrive in
+        // monotonic seq order per stream, so sorting is unnecessary.
+        const last = previous[previous.length - 1];
+        if (last && last.stream === stream && last.seq >= seq) {
+          return current; // already have this or newer
+        }
         return {
           ...current,
-          progress: { ...current.progress, [event.tool_call_id]: { chunks } },
+          progress: {
+            ...current.progress,
+            [event.tool_call_id]: {
+              chunks: [...previous, { stream, seq, chunk }],
+            },
+          },
         };
       });
     }

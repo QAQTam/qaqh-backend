@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mermaid 渲染测试 — DeepX</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#faf5eb',
+      primaryTextColor: '#3d3a35',
+      primaryBorderColor: '#c8a84e',
+      lineColor: '#c8b98a',
+      secondaryColor: '#fefaf2',
+      tertiaryColor: '#fdf6ec',
+      nodeBorder: '#c8a84e',
+      nodeTextColor: '#3d3a35',
+      actorBorder: '#c8a84e',
+      actorBkg: '#faf5eb',
+      actorTextColor: '#3d3a35',
+      signalColor: '#3d3a35',
+      signalTextColor: '#3d3a35',
+      fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+      fontSize: '11px',
+    },
+    flowchart: {
+      useMaxWidth: true,
+      htmlLabels: true,
+      padding: 8,
+      nodeSpacing: 16,
+      rankSpacing: 25,
+    },
+    sequence: {
+      useMaxWidth: true,
+      boxMargin: 8,
+      mirrorActors: false,
+    },
+    deterministicIds: true,
+  });
+</script>
+<style>
+  :root {
+    --bg: #fdf6ec;
+    --card-bg: #fefaf2;
+    --text: #3d3a35;
+    --text-secondary: #8b8578;
+    --accent: #b8860b;
+    --line: #e0d5c1;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; color: var(--accent); margin-bottom: 4px; }
+  .sub { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+  }
+  .card h2 { font-size: 14px; color: var(--accent); margin-bottom: 10px; }
+  textarea {
+    width: 100%; min-height: 200px;
+    background: #f5efe0; color: #4a4538;
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px; font-family: 'Cascadia Code', monospace;
+    font-size: 13px; line-height: 1.5; resize: vertical;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .preview {
+    margin-top: 10px; min-height: 180px;
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px; background: #fff;
+    overflow: auto; max-height: 600px;
+  }
+  .preview svg { max-width: 100%; max-height: 520px; height: auto; display: block; }
+  .error { color: #c44; font-size: 13px; padding: 12px; }
+  .loader { color: var(--text-secondary); font-size: 13px; padding: 20px; text-align: center; }
+  .btn-row { margin-top: 8px; display: flex; gap: 8px; }
+  button {
+    background: var(--accent); color: #fff; border: none;
+    padding: 8px 18px; border-radius: 6px; cursor: pointer;
+    font-size: 13px; font-weight: 500;
+  }
+  button:hover { opacity: 0.85; }
+  button.sec { background: #d4c9aa; color: #5a4e30; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+  .tab {
+    padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    font-size: 12px; border: 1px solid var(--line); background: #fff; color: var(--text);
+  }
+  .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .full { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+
+<h1>🧜‍♀️ Mermaid 渲染测试</h1>
+<p class="sub">6 种图表类型 · 实时编辑 · 模拟流式 · DeepX 主题色</p>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('flowchart')">📋 Flowchart</button>
+  <button class="tab" onclick="switchTab('graph')">🔗 Graph</button>
+  <button class="tab" onclick="switchTab('mindmap')">🧠 Mindmap</button>
+  <button class="tab" onclick="switchTab('sequence')">⏱ Sequence</button>
+  <button class="tab" onclick="switchTab('state')">🔄 State</button>
+  <button class="tab" onclick="switchTab('custom')">✏️ Custom</button>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2 id="editor-title">📋 Flowchart</h2>
+    <textarea id="input" spellcheck="false"></textarea>
+    <div class="btn-row">
+      <button onclick="renderNow()">Render</button>
+      <button class="sec" onclick="simStream()">Simulate Stream</button>
+      <span style="font-size:12px;color:var(--text-secondary);margin-left:auto" id="status"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Rendered Output</h2>
+    <div class="preview" id="preview">
+      <div class="loader">Click Render to see diagram</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Presets ──
+const presets = {
+  flowchart: `flowchart TD
+    A[用户发起请求] --> B{已登录?}
+    B -->|否| C[跳转登录页]
+    B -->|是| D{有权限?}
+    D -->|否| E[返回 403]
+    D -->|是| F[处理请求]
+    F --> G[调用服务]
+    G --> H{成功?}
+    H -->|是| I[返回结果]
+    H -->|否| J[重试 3 次]
+    J -->|仍失败| K[返回 500]
+    J -->|成功| I`,
+
+  graph: `graph LR
+    FE[Frontend Electron] -->|WebSocket| DAEMON[DeepX Daemon]
+    DAEMON -->|spawn| AGENT[Agent Worker]
+    AGENT -->|HTTP/SSE| LLM[LLM API]
+    AGENT -->|call| TOOLS[Tool System]
+    TOOLS --> FS[File Ops]
+    TOOLS --> SH[Shell Exec]
+    TOOLS --> GIT[Git]
+    AGENT -->|read| SKILLS[Skills]
+    DAEMON -->|sqlite| DB[(Session Store)]
+    DAEMON -->|pub/sub| COMPANION[Companion Sync]
+    style FE fill:#f0e6d0,stroke:#c8a84e
+    style LLM fill:#e8d8f0,stroke:#a080c0
+    style DB fill:#d0e0f0,stroke:#8090c0`,
+
+  mindmap: `mindmap
+  root((DeepX))
+    crates
+      deepx-daemon
+        main.rs
+        server.rs
+      deepx-runtime
+        event_bus.rs
+        registry.rs
+        worker.rs
+      deepx-proto
+        agent_protocol.rs
+        control.rs
+      deepx-tools
+        exec.rs
+        file_*.rs
+        git.rs
+        todo.rs
+      deepx-session
+      deepx-message
+      deepx-subagent
+    apps
+      desktop
+        electron
+        src
+          components
+          store
+          runtime
+      installer
+    skills`,
+
+  sequence: `sequenceDiagram
+    participant U as User
+    participant FE as Frontend
+    participant DA as Daemon
+    participant AG as Agent
+    participant LLM as LLM API
+    participant T as Tools
+
+    U->>FE: type message
+    FE->>DA: WS send
+    DA->>AG: stdin JSON-LP
+    AG->>LLM: chat/completions (SSE)
+    LLM-->>AG: streaming tokens
+    AG->>T: tool call (exec)
+    T-->>AG: stdout + exit code
+    AG->>DA: Agent2Ui frames
+    DA->>FE: WS event
+    FE->>U: render response`,
+
+  state: `stateDiagram-v2
+    [*] --> Idle
+    Idle --> Starting : user sends msg
+    Starting --> Working : agent ready
+    Working --> WaitingUser : permission/ask/plan
+    WaitingUser --> Working : user responds
+    Working --> Idle : turn complete
+    Working --> Cancelled : user cancels
+    WaitingUser --> Cancelled : user cancels
+    Idle --> [*] : session close`,
+
+  custom: `flowchart TD
+    A[Start] --> B{Decision}
+    B -->|Yes| C[Action]
+    B -->|No| D[Alternative]
+    C --> E((End))
+    D --> E`
+};
+
+let currentTab = 'flowchart';
+
+function switchTab(name) {
+  currentTab = name;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`[onclick="switchTab('${name}')"]`).classList.add('active');
+  document.getElementById('editor-title').textContent =
+    {flowchart:'📋 Flowchart',graph:'🔗 Graph',mindmap:'🧠 Mindmap',
+     sequence:'⏱ Sequence',state:'🔄 State',custom:'✏️ Custom'}[name];
+  document.getElementById('input').value = presets[name] || '';
+  document.getElementById('preview').innerHTML = '<div class="loader">Click Render to see diagram</div>';
+  document.getElementById('status').textContent = '';
+}
+
+let renderNum = 0;
+
+async function renderNow() {
+  const text = document.getElementById('input').value.trim();
+  const preview = document.getElementById('preview');
+  const status = document.getElementById('status');
+  if (!text) { preview.innerHTML = '<div class="error">Empty input</div>'; return; }
+
+  const id = `m-${++renderNum}`;
+  status.textContent = 'rendering…';
+  preview.innerHTML = '<div class="loader">Rendering diagram…</div>';
+
+  try {
+    const { svg } = await mermaid.render(id, text);
+    preview.innerHTML = svg;
+    // Make SVG responsive: fit container, remove hardcoded width
+    const svgEl = preview.querySelector('svg');
+    if (svgEl) {
+      svgEl.style.maxWidth = '100%';
+      svgEl.style.height = 'auto';
+      if (svgEl.hasAttribute('width')) svgEl.removeAttribute('width');
+    }
+    status.textContent = '✓';
+  } catch (err) {
+    preview.innerHTML = `<div class="error">${err.message.replace(/</g,'&lt;')}</div>`;
+    status.textContent = '✗';
+  }
+}
+
+function simStream() {
+  const full = document.getElementById('input').value;
+  const ta = document.getElementById('input');
+  const preview = document.getElementById('preview');
+  const status = document.getElementById('status');
+
+  const lines = full.split('\n');
+  let i = 0;
+  ta.value = '';
+  preview.innerHTML = '<div class="loader">Waiting for stream…</div>';
+  status.textContent = 'streaming…';
+
+  const timer = setInterval(() => {
+    i++;
+    ta.value = lines.slice(0, i).join('\n');
+    if (i >= lines.length) {
+      clearInterval(timer);
+      status.textContent = 'stream done → render';
+      // Simulate "code block closed → render"
+      setTimeout(() => renderNow(), 100);
+    } else {
+      status.textContent = `streaming ${i}/${lines.length}…`;
+    }
+  }, 180);
+}
+
+// Live render on input change (debounced)
+let debounce;
+document.getElementById('input').addEventListener('input', () => {
+  clearTimeout(debounce);
+  debounce = setTimeout(renderNow, 500);
+});
+
+// Init
+switchTab('flowchart');
+renderNow();
+</script>
+</body>
+</html>

@@ -51,7 +51,7 @@ export async function request<T>(method: string, params: Record<string, unknown>
   ensureBridgeListener();
   const seed = typeof params.seed === "string" ? params.seed : "";
   const domain = method.split(".", 1)[0];
-  const needsLease = ["session", "interaction", "workspace", "git", "plan", "skills"].includes(domain)
+  const needsLease = ["session", "interaction", "workspace", "git", "plan", "skills", "todo"].includes(domain)
     && !["session.list", "session.activity", "session.new", "skills.list_tools"].includes(method);
   if (needsLease && seed) await attach(seed);
   return backendBridge().request(method, params) as Promise<T>;

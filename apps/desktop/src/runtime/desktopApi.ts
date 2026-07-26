@@ -34,3 +34,19 @@ export function togglePet(): Promise<boolean> {
 export function getPetStatus(): Promise<boolean> {
   return desktopBridge().getPetStatus();
 }
+
+// ── Auto-update ──────────────────────────────────────────
+
+export interface UpdateInfo {
+  version: string;
+  downloadUrl?: string;
+  releaseNotes?: string;
+}
+
+export function checkUpdate(): Promise<UpdateInfo | null> {
+  return desktopBridge().checkUpdate();
+}
+
+export function onUpdateAvailable(listener: (info: UpdateInfo) => void): () => void {
+  return desktopBridge().onUpdateAvailable(listener);
+}

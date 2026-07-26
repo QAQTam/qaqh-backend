@@ -13,6 +13,8 @@ pub mod guard;
 mod openai;
 pub mod tool_parser;
 mod types;
+#[cfg(test)]
+mod rt_test;
 
 pub use types::{ProviderConfig, ProviderKind, StreamEvent};
 

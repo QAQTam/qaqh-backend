@@ -19,6 +19,8 @@ interface DeepxDesktopApi {
     openPath(target: string): Promise<void>;
     togglePet(): Promise<boolean>;
     getPetStatus(): Promise<boolean>;
+    checkUpdate(): Promise<{ version: string; downloadUrl?: string; releaseNotes?: string } | null>;
+    onUpdateAvailable(listener: (info: { version: string; downloadUrl?: string; releaseNotes?: string }) => void): () => void;
   };
 }
 

@@ -280,6 +280,23 @@ export class DaemonControlClient {
         else pending.reject(new Error(`${String(message.code ?? message.type)}: ${String(message.message ?? "request failed")}`));
       }
     }
+    // Expand bulk EventBatch into individual Event messages
+    if (message.type === "event_batch") {
+      const raw = message as unknown as { seed?: string; events?: unknown[] };
+      const seed = String(raw.seed ?? "");
+      const events = raw.events;
+      if (Array.isArray(events)) {
+        for (const event of events) {
+          const synthetic: ControlMessage = { type: "event", seed, event };
+          this.routeMessage(synthetic);
+        }
+      }
+      return;
+    }
+    this.routeMessage(message);
+  }
+
+  private routeMessage(message: ControlMessage): void {
     const ready = this.eventBatcher.push(message);
     if (ready.length === 0) {
       this.scheduleStreamFlush();

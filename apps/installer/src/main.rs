@@ -34,6 +34,22 @@ mod colors {
 // ============================================================
 
 fn main() -> Result<(), eframe::Error> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // ── Headless patch mode: --patch <source_payload> <target_dir> ──
+    if args.len() >= 4 && args[1] == "--patch" {
+        let source = &args[2];
+        let target = &args[3];
+        match install::run_patch(source, target) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("patch failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // ── Normal GUI installer ──
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_inner_size([740.0, 500.0])

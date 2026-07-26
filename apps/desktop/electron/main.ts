@@ -1,8 +1,9 @@
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { DaemonControlClient } from "./controlClient";
-import type { ConfirmDialogOptions, OpenDialogOptions } from "./types";
+import type { ConfirmDialogOptions, OpenDialogOptions, UpdateInfo } from "./types";
 
 let mainWindow: BrowserWindow | undefined;
 let quitting = false;
@@ -194,6 +195,7 @@ function registerIpc(): void {
     const error = await shell.openPath(target);
     if (error) throw new Error(error);
   });
+  ipcMain.handle("desktop:check-update", async () => checkForUpdates());
 }
 
 function sendToRenderer(channel: string, payload: unknown): void {
@@ -209,10 +211,60 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// ── Auto-update ────────────────────────────────────────
+
+function frontendUpdateUrl(): string {
+  try {
+    const manifestPath = join(process.resourcesPath, "daemon-manifest.json");
+    const raw = require("fs").readFileSync(manifestPath, "utf-8");
+    const manifest = JSON.parse(raw) as { frontend_version_url?: string };
+    if (manifest.frontend_version_url) return manifest.frontend_version_url;
+  } catch { /* use fallback */ }
+  return "https://deepx.example.com/updates/frontend-version.json";
+}
+
+async function checkForUpdates(): Promise<UpdateInfo | null> {
+  const url = frontendUpdateUrl();
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!response.ok) return null;
+    const data = await response.json() as { version?: string; download_url?: string; notes?: string };
+    if (!data.version) return null;
+    const current = app.getVersion();
+    if (compareVersions(data.version, current) <= 0) return null;
+    return {
+      version: data.version,
+      downloadUrl: data.download_url || "",
+      releaseNotes: data.notes,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.replace(/^v/, "").split(".").map(Number);
+  const pb = b.replace(/^v/, "").split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 app.whenReady().then(() => {
   registerIpc();
   createWindow();
   void backend.connect().catch(() => {});
+  // Production: auto-check for updates on startup
+  if (!smokeMode && app.isPackaged) {
+    void checkForUpdates().then(update => {
+      if (update) sendToRenderer("update:available", update);
+    });
+  }
   // Smoke mode validates that Electron can create the secured renderer and start
   // the backend connection path. Reconnection is intentionally unbounded in the
   // product, so the smoke process needs its own deterministic deadline.

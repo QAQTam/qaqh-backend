@@ -23,6 +23,7 @@ fn make_provider(mock: &MockServer) -> ProviderConfig {
         Default::default(),
         Default::default(),
         false, // supports_thinking
+        None,  // do_sample
     )
 }
 

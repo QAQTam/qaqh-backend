@@ -2,7 +2,8 @@
 //! Includes retry with exponential backoff for transient errors (429, 500, 503, transport).
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use futures::StreamExt;
+use reqwest::Client;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -17,6 +18,20 @@ use super::types::{ProviderConfig, StreamEvent};
 /// flag and retry. This makes cancel responsive even during the "thinking"
 /// delay before the first token arrives.
 const SSE_READ_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Crate-global tokio runtime for reqwest I/O.
+/// Uses current-thread scheduler — all async I/O serialises on the
+/// calling thread via Runtime::block_on.
+static FALLBACK_RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create deepx-gate fallback tokio runtime")
+});
+
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    FALLBACK_RT.block_on(f)
+}
 
 /// Check whether the cancel flag is set.
 fn is_cancelled(cancel: Option<&Arc<AtomicBool>>) -> bool {
@@ -35,25 +50,6 @@ fn sleep_with_cancel(delay: Duration, cancel: Option<&Arc<AtomicBool>>) -> bool 
         std::thread::sleep(remaining.min(Duration::from_millis(100)));
     }
     false
-}
-
-/// Check whether an `io::Error` from `reader.read()` is a recoverable timeout.
-///
-/// ureq v3 wraps its internal `Error::Timeout` as `io::ErrorKind::Other` via
-/// `into_io()`, so we must also inspect the inner error to detect timeouts.
-/// Without this, every SSE read timeout is treated as a fatal error.
-fn is_read_timeout(e: &std::io::Error) -> bool {
-    if e.kind() == std::io::ErrorKind::TimedOut
-        || e.kind() == std::io::ErrorKind::WouldBlock
-        || e.kind() == std::io::ErrorKind::Interrupted
-    {
-        return true;
-    }
-    // ureq v3: io::Error::other(Error::Timeout(_))
-    e.get_ref()
-        .and_then(|inner| inner.downcast_ref::<ureq::Error>())
-        .map(|err| matches!(err, ureq::Error::Timeout(_)))
-        .unwrap_or(false)
 }
 
 const MAX_RETRIES: u32 = 3;
@@ -100,6 +96,16 @@ fn split_inline_thinking(text: &str, in_thinking: &mut bool) -> Vec<(bool, Strin
     }
     result
 }
+
+/// Reusable HTTP client shared across all chat requests.
+/// Connection pool, DNS cache, and TLS session cache are preserved.
+static GLOBAL_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
+    Client::builder()
+        .read_timeout(SSE_READ_TIMEOUT)
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("failed to build reqwest client")
+});
 
 fn backoff_delay(attempt: u32) -> Duration {
     let secs = BASE_DELAY_SECS * 2u64.pow(attempt.saturating_sub(1));
@@ -192,15 +198,7 @@ pub fn chat_stream_openai(
     // can check the cancel flag between reads. Connection pool and DNS cache
     // are preserved across requests.
     // http_status_as_error(false) so we can read error bodies for retry logic.
-    static GLOBAL_AGENT: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| {
-        ureq::Agent::config_builder()
-            .timeout_recv_body(Some(SSE_READ_TIMEOUT))
-            .timeout_send_body(Some(Duration::from_secs(30)))
-            .http_status_as_error(false)
-            .build()
-            .into()
-    });
-    let agent = &*GLOBAL_AGENT;
+    // Reuse the module-level GLOBAL_CLIENT for connection pooling.
 
     loop {
         attempt += 1;
@@ -210,20 +208,22 @@ pub fn chat_stream_openai(
             return Err(anyhow::anyhow!("cancelled by user"));
         }
 
-        let resp = agent
-            .post(&url)
-            .header("Authorization", &format!("Bearer {}", provider.api_key))
-            .header("Content-Type", "application/json")
-            .send_json(&body);
-
-        match resp {
+        match block_on(async {
+            GLOBAL_CLIENT
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", provider.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+        }) {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 if status >= 200 && status < 300 {
                     return stream_sse(resp, provider, user_id.as_deref(), cancel, on_event);
                 }
                 // HTTP error — read body for details
-                let text = resp.into_body().read_to_string().unwrap_or_default();
+                let text = block_on(resp.text()).unwrap_or_default();
                 let code_desc = http_error_description(status);
                 if attempt >= MAX_RETRIES || !is_retryable(status) {
                     let msg = format!("OpenAI API HTTP {} ({})", status, code_desc);
@@ -266,15 +266,15 @@ pub fn chat_stream_openai(
 }
 
 fn stream_sse(
-    resp: ureq::http::Response<ureq::Body>,
+    resp: reqwest::Response,
     provider: &ProviderConfig,
     _user_id: Option<&str>,
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
-    let mut reader = resp.into_body().into_reader();
-    let mut sse_buf = String::new();
-    let mut byte_buf = vec![0u8; 512];
+    use eventsource_stream::EventStream;
+    let stream = resp.bytes_stream();
+    let mut events = EventStream::new(stream);
 
     let mut text_buf = String::new();
     let mut reasoning_buf = String::new();
@@ -291,49 +291,32 @@ fn stream_sse(
             return Err(anyhow::anyhow!("cancelled by user"));
         }
 
-        let n = match reader.read(&mut byte_buf) {
-            Ok(n) => n,
-            Err(e) if is_read_timeout(&e) => {
-                // Read timeout (SSE_READ_TIMEOUT elapsed with no data).
-                // Loop back to check cancel, then retry the read.
-                continue;
-            }
-            Err(e) => {
+        let event = match block_on(async {
+            tokio::time::timeout(SSE_READ_TIMEOUT, events.next()).await
+        }) {
+            Ok(Some(Ok(ev))) => ev,
+            Ok(Some(Err(e))) => {
                 let msg = format!("SSE read error: {e}");
                 on_event(StreamEvent::Error(msg.clone()));
                 return Err(anyhow::anyhow!("{}", msg));
             }
+            Ok(None) => break, // EOF
+            Err(_elapsed) => continue, // timeout → check cancel, retry
         };
 
-        if n == 0 {
-            // EOF — stream ended without Done
-            break;
+        // eventsource-stream appends \n after each data line per SSE spec.
+        let data_str = event.data.trim_end().to_string();
+        if data_str.is_empty() || data_str == "[DONE]" {
+            continue;
         }
 
-        sse_buf.push_str(&String::from_utf8_lossy(&byte_buf[..n]));
-
-        while let Some(pos) = sse_buf.find("\n\n") {
-            let raw = sse_buf[..pos].to_string();
-            sse_buf.drain(..pos + 2); // drain in-place, no reallocation of tail
-
-            let mut data_str = String::new();
-            for line in raw.lines() {
-                let trimmed = line.trim();
-                if let Some(dt) = trimmed.strip_prefix("data: ") {
-                    data_str = dt.to_string();
-                }
-            }
-            if data_str.is_empty() || data_str == "[DONE]" {
+        let ev: serde_json::Value = match serde_json::from_str(&data_str) {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("OpenAI SSE: deserialize fail: {} — data: {}", e, data_str);
                 continue;
             }
-
-            let ev: serde_json::Value = match serde_json::from_str(&data_str) {
-                Ok(e) => e,
-                Err(e) => {
-                    log::warn!("OpenAI SSE: deserialize fail: {} — data: {}", e, data_str);
-                    continue;
-                }
-            };
+        };
 
             // Parse choices
             if let Some(choices) = ev.get("choices").and_then(|c| c.as_array()) {
@@ -486,7 +469,6 @@ fn stream_sse(
                 // Emit real-time usage update so InfoBar can show live cache-hit stats
                 on_event(StreamEvent::UsageUpdate(usage_info.clone().unwrap()));
             }
-        }
     }
 
     // Build final message from accumulated content
@@ -757,15 +739,16 @@ pub fn chat_sync_openai(
         body["thinking"] = thinking;
     }
 
-    let resp = ureq::post(&url)
-        .header("Authorization", &format!("Bearer {}", provider.api_key))
-        .header("Content-Type", "application/json")
-        .send_json(&body)
-        .map_err(|e| format!("compact request failed: {e}"))?;
+    let resp = block_on(
+        GLOBAL_CLIENT
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", provider.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+    ).map_err(|e| format!("compact request failed: {e}"))?;
 
-    let json: serde_json::Value = resp
-        .into_body()
-        .read_json()
+    let json: serde_json::Value = block_on(resp.json())
         .map_err(|e| format!("compact parse failed: {e}"))?;
 
     json["choices"][0]["message"]["content"]
@@ -860,6 +843,7 @@ mod skill_envelope_tests {
             ThinkingParamMode::OpenAi,
             CacheTokenField::None,
             false,
+            None,
         )
     }
 

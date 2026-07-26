@@ -59,7 +59,7 @@ impl DeepxService {
     pub fn session_scoped(method: &str) -> bool {
         matches!(
             method.split('.').next(),
-            Some("session" | "interaction" | "workspace" | "git" | "plan" | "skills")
+            Some("session" | "interaction" | "workspace" | "git" | "plan" | "skills" | "todo")
         ) && !matches!(
             method,
             "session.list" | "session.activity" | "session.new" | "skills.list_tools"

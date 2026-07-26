@@ -44,3 +44,9 @@ export interface ConfirmDialogOptions {
   title?: string;
   kind?: "info" | "warning" | "error";
 }
+
+export interface UpdateInfo {
+  version: string;
+  downloadUrl?: string;
+  releaseNotes?: string;
+}

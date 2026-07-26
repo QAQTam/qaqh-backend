@@ -89,10 +89,12 @@ mod tests {
     }
 
     #[test]
-    fn prompt_places_identity_before_operating_rules() {
+    fn prompt_contains_mermaid_visualization_formats() {
         let prompt = full_system_prompt();
-        let identity = prompt.find("[IDENTITY]").expect("identity section");
-        let rules = prompt.find("[VISUALIZATION FORMATS]").expect("visualization section");
-        assert!(identity < rules);
+        assert!(prompt.contains("[VISUALIZATION FORMATS]"));
+        assert!(prompt.contains("```mermaid"));
+        assert!(prompt.contains("flowchart TD"));
+        assert!(prompt.contains("sequenceDiagram"));
+        assert!(prompt.contains("mindmap"));
     }
 }

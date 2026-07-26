@@ -64,6 +64,17 @@ pub enum ControlServerMessage {
         session_seq: u64,
         event: Agent2Ui,
     },
+    /// Batched bulk-lane events (exec_progress, audit_record, etc.).
+    /// Multiple events share one WebSocket frame to reduce per-event overhead.
+    #[serde(rename = "event_batch")]
+    EventBatch {
+        server_epoch: String,
+        seq: u64,
+        seed: String,
+        session_seq: u64,
+        #[serde(default)]
+        events: Vec<Agent2Ui>,
+    },
     SessionActivity {
         activity: SessionActivity,
     },
@@ -263,6 +274,49 @@ mod tests {
         for message in server_messages {
             let json = serde_json::to_string(&message).unwrap();
             let _: ControlServerMessage = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn event_batch_round_trips() {
+        let events = vec![
+            Agent2Ui::ExecProgress {
+                tool_call_id: "c1".into(),
+                stream: "stdout".into(),
+                seq: 1,
+                chunk: "hello".into(),
+            },
+            Agent2Ui::ExecProgress {
+                tool_call_id: "c1".into(),
+                stream: "stderr".into(),
+                seq: 2,
+                chunk: "warn".into(),
+            },
+            Agent2Ui::AuditRecord {
+                tool_name: "exec".into(),
+                result_summary: "ok".into(),
+                success: true,
+                time: "2024-01-01T00:00:00Z".into(),
+                args: "{}".into(),
+            },
+        ];
+        let batch = ControlServerMessage::EventBatch {
+            server_epoch: "epoch".into(),
+            seq: 0,
+            seed: "seed".into(),
+            session_seq: 0,
+            events: events.clone(),
+        };
+        let json = serde_json::to_string(&batch).unwrap();
+        let parsed: ControlServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ControlServerMessage::EventBatch {
+                seed, events: parsed_events, ..
+            } => {
+                assert_eq!(seed, "seed");
+                assert_eq!(parsed_events.len(), 3);
+            }
+            other => panic!("expected EventBatch, got {:?}", other),
         }
     }
 }

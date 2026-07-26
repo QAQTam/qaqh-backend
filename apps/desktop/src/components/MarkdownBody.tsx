@@ -3,12 +3,10 @@ import { marked, Renderer } from "marked";
 import { createHighlighter, createOnigurumaEngine } from "shiki";
 import renderMathInElement from "katex/contrib/auto-render";
 import {
-  hydratePlaceholders,
-  destroyAllGraphs,
-  ATTR_TYPE,
-  ATTR_RAW,
-  PLACEHOLDER_CLASS,
-} from "../lib/graph-renderer";
+  hydrateMermaidPlaceholders,
+  createMermaidPlaceholder,
+  MERMAID_LANG,
+} from "../lib/mermaid-render";
 
 let hiPromise: ReturnType<typeof createHighlighter> | null = null;
 
@@ -38,21 +36,6 @@ function detectTheme(): "github-light" | "github-dark" {
   return theme === "dark" || theme === "dark-gray" ? "github-dark" : "github-light";
 }
 
-// ── Graph DSL placeholder ──
-
-const GRAPH_LANGS = new Set(["mindmap", "graph"]);
-
-function renderGraphPlaceholder(text: string, lang: string): string {
-  const encoded = encodeURIComponent(text);
-  return (
-    `<div class="${PLACEHOLDER_CLASS}" ${ATTR_TYPE}="${lang}" ${ATTR_RAW}="${encoded}"` +
-    ` style="min-height:200px;background:var(--md-code-bg,#1e1e2e);border-radius:8px;` +
-    ` display:flex;align-items:center;justify-content:center;margin:1em 0;overflow:hidden;">` +
-    `<span style="color:var(--md-text-secondary,#888);font-size:13px;">Rendering ${lang}…</span>` +
-    `</div>`
-  );
-}
-
 // ── P0: Block projection ──
 
 interface MarkdownBlock {
@@ -73,9 +56,9 @@ function buildRenderer(hi: Awaited<ReturnType<typeof getHi>>) {
   const theme = detectTheme();
   const renderer = new Renderer();
   renderer.code = ({ text, lang }) => {
-    // Intercept graph DSL blocks — render as placeholder divs
-    if (lang === "mindmap" || lang === "graph") {
-      return renderGraphPlaceholder(text, lang);
+    // Mermaid diagrams → placeholder div, hydrated after DOM patch
+    if (lang === MERMAID_LANG) {
+      return createMermaidPlaceholder(text);
     }
 
     const langId = !lang ? "text"
@@ -305,7 +288,6 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
   onCleanup(() => {
     disposed = true;
     renderGeneration += 1;
-    destroyAllGraphs();
   });
 
   // Preload the highlighter eagerly so the first streaming delta does not
@@ -354,8 +336,7 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
       blocks[0]!.html = html;
       container.replaceChildren(createStableEl(blocks[0]!));
       container.classList.add("final");
-      // Hydrate any graph placeholders in the final HTML
-      if (!isStale()) void hydratePlaceholders(container);
+      if (!isStale()) void hydrateMermaidPlaceholders(container);
       prevBlocks = blocks;
       return;
     }
@@ -380,8 +361,7 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
 
     if (isStale()) return;
     patchDOM(container, blocks);
-    // Hydrate any newly-appeared graph placeholders
-    void hydratePlaceholders(container);
+    void hydrateMermaidPlaceholders(container);
     prevBlocks = blocks;
     })();
   });
