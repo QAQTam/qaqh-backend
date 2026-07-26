@@ -1706,6 +1706,7 @@ dependencies = [
 name = "deepx-installer"
 version = "1.0.0-beta.1"
 dependencies = [
+ "deepx-types",
  "deepx-update",
  "dirs 5.0.1",
  "eframe",
@@ -1802,6 +1803,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "toml 0.8.23",
  "tracing",
  "walkdir",

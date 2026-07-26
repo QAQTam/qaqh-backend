@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/QAQTam/DeepX/docs/legal/legal-consent.schema.json",
+  "title": "DeepX legal consent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "accepted",
+    "document_version",
+    "software_version",
+    "accepted_at_unix",
+    "user_agreement_sha256",
+    "privacy_policy_sha256",
+    "source"
+  ],
+  "properties": {
+    "accepted": {
+      "const": true
+    },
+    "document_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "software_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "accepted_at_unix": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "user_agreement_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "privacy_policy_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source": {
+      "enum": [
+        "installer",
+        "electron"
+      ]
+    }
+  }
+}

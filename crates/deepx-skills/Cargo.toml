@@ -16,5 +16,8 @@ walkdir = "2"
 [features]
 memory = ["dep:deepx-vector"]
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

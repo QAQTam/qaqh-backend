@@ -10,7 +10,9 @@ node_modules/
 *.exe
 bindings/
 tmp/
-.deepx/
+.deepx/*
+!.deepx/skills/
+!.deepx/skills/**
 /skills/
 # monorepo additions
 apps/desktop/out/

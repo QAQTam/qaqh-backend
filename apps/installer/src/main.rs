@@ -237,6 +237,13 @@ enum Screen {
     Finish,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LegalDocument {
+    #[default]
+    UserAgreement,
+    PrivacyPolicy,
+}
+
 impl Screen {
     fn all() -> &'static [Screen] {
         &[
@@ -250,7 +257,7 @@ impl Screen {
     fn title(&self) -> &'static str {
         match self {
             Screen::Welcome => "欢迎",
-            Screen::License => "许可协议",
+            Screen::License => "协议与隐私",
             Screen::Location => "安装位置",
             Screen::Components => "安装组件",
             Screen::CloseProcesses => "关闭进程",
@@ -262,7 +269,7 @@ impl Screen {
     fn subtitle(&self) -> &'static str {
         match self {
             Screen::Welcome => "本向导将引导您完成 DeepX 的安装配置。",
-            Screen::License => "��阅读并接受许可协议以继续。",
+            Screen::License => "请阅读用户协议和隐私政策后继续。",
             Screen::Location => "选择 DeepX 的安装目录。",
             Screen::Components => "选择要安装的组件与快捷方式。",
             Screen::CloseProcesses => "检测到 DeepX 正在运行，请先关闭以继续安装。",
@@ -296,6 +303,8 @@ struct App {
     config: install::InstallerConfig,
     license_agreed: bool,
     license_text: String,
+    privacy_text: String,
+    legal_document: LegalDocument,
     install_result: Option<Result<(), String>>,
     install_receiver: Option<mpsc::Receiver<InstallMsg>>,
     location_input: String,
@@ -317,7 +326,9 @@ impl Default for App {
                 ..Default::default()
             },
             license_agreed: false,
-            license_text: LICENSE_TEXT.to_string(),
+            license_text: USER_AGREEMENT_TEXT.to_string(),
+            privacy_text: PRIVACY_POLICY_TEXT.to_string(),
+            legal_document: LegalDocument::UserAgreement,
             install_result: None,
             install_receiver: None,
             location_input: install::InstallerConfig::default_path(),
@@ -631,6 +642,37 @@ impl App {
     fn render_license(&mut self, ui: &mut Ui) {
         Self::page_header(ui, Screen::License);
 
+        ui.label(
+            RichText::new(
+                "重要提示：DeepX 仍处于测试阶段；AI 输出可能不准确；您授权的工具可能修改文件；联网功能会向所选第三方服务发送必要数据。",
+            )
+            .size(12.0)
+            .strong()
+            .color(colors::DANGER),
+        );
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.legal_document,
+                LegalDocument::UserAgreement,
+                "用户协议",
+            );
+            ui.selectable_value(
+                &mut self.legal_document,
+                LegalDocument::PrivacyPolicy,
+                "隐私政策",
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("协议版本 {}", LEGAL_DOCUMENT_VERSION.trim()))
+                        .size(11.0)
+                        .color(colors::TEXT_MUTED),
+                );
+            });
+        });
+        ui.add_space(8.0);
+
         Frame::none()
             .fill(Color32::from_rgb(248, 248, 250))
             .rounding(Rounding::same(8.0))
@@ -638,8 +680,12 @@ impl App {
             .inner_margin(Margin::same(14.0))
             .show(ui, |ui| {
                 ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    let text = match self.legal_document {
+                        LegalDocument::UserAgreement => &mut self.license_text,
+                        LegalDocument::PrivacyPolicy => &mut self.privacy_text,
+                    };
                     ui.add(
-                        TextEdit::multiline(&mut self.license_text)
+                        TextEdit::multiline(text)
                             .font(TextStyle::Body)
                             .interactive(false)
                             .desired_width(f32::INFINITY)
@@ -649,12 +695,15 @@ impl App {
             });
 
         ui.add_space(14.0);
-        ui.checkbox(&mut self.license_agreed, "我接受许可协议中的条款");
+        ui.checkbox(
+            &mut self.license_agreed,
+            "我已阅读并同意《DeepX 用户协议》和《DeepX 隐私政策》",
+        );
 
         if !self.license_agreed {
             ui.add_space(4.0);
             ui.label(
-                RichText::new("请先接受许可协议后再继续。")
+                RichText::new("请先阅读并同意两份文件后再继续。")
                     .size(12.0)
                     .color(colors::DANGER),
             );
@@ -1126,6 +1175,11 @@ impl App {
         let app_exe = format!(r"{}\DeepX.exe", self.config.target_path);
         install::write_install_marker(&self.config.target_path)?;
         install::write_uninstall_registry(&self.config.target_path, env!("CARGO_PKG_VERSION"))?;
+        install::write_legal_acceptance(
+            LEGAL_DOCUMENT_VERSION.trim(),
+            USER_AGREEMENT_TEXT,
+            PRIVACY_POLICY_TEXT,
+        )?;
         if self.config.create_desktop_shortcut {
             install::create_desktop_shortcut(&app_exe, "DeepX 桌面应用")?;
         }
@@ -1223,33 +1277,6 @@ fn native_folder_picker() -> Option<String> {
     }
 }
 
-// ============================================================
-// 许可协议
-// ============================================================
-
-const LICENSE_TEXT: &str = r#"DeepX 软件许可协议
-
-版权所有 © 2024-2026 DeepX 开发团队
-
-特此免费授予获得本软件及相关文档文件（以下简称"软件"）的任何人
-不受限制地处理本软件的权利，包括但不限于使用、复制、修改、合并、
-发布、分发、再许可和/或销售本软件副本的权利，以及允许获得本软件
-的人员这样做，但须符合以下条件：
-
-上述版权声明和本许可声明应包含在本软件的所有副本或主要部分中。
-
-本软件按"原样"提供，不提供任何形式的明示或暗示的保证，包括但不
-限于对适销性、特定用途的适用性和非侵权性的保证。在任何情况下，
-作者或版权所有者均不对因本软件或本软件的使用或其他交易而产生、
-引起或与之相关的任何索赔、损害赔偿或其他责任负责，无论是合同诉
-讼、侵权行为还是其他行为。
-
----
-
-第三方开源组件许可
-
-本软件使用了以下开源组件：
-- Electron (MIT)
-- SolidJS (MIT)
-- egui (MIT/Apache-2.0)
-"#;
+const LEGAL_DOCUMENT_VERSION: &str = include_str!("../../../docs/legal/version.txt");
+const USER_AGREEMENT_TEXT: &str = include_str!("../../../docs/legal/USER_AGREEMENT.zh-CN.md");
+const PRIVACY_POLICY_TEXT: &str = include_str!("../../../docs/legal/PRIVACY_POLICY.zh-CN.md");

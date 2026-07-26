@@ -5,13 +5,70 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use deepx_update::{
     commit_bundle_state, parse_bundle_manifest, safe_join_under_root, write_install_root_marker,
     BundleFile, BundleManifest,
 };
 use sha2::{Digest, Sha256};
+
+pub fn write_legal_acceptance(
+    document_version: &str,
+    user_agreement: &str,
+    privacy_policy: &str,
+) -> Result<(), String> {
+    if document_version.trim().is_empty() {
+        return Err("legal document version is empty".into());
+    }
+
+    let data_dir = deepx_types::platform::data_dir();
+    fs::create_dir_all(&data_dir)
+        .map_err(|error| format!("create legal acceptance directory: {error}"))?;
+    let path = data_dir.join("legal-consent.json");
+    let accepted_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("read system time for legal acceptance: {error}"))?
+        .as_secs();
+    let record = legal_acceptance_record(
+        document_version,
+        accepted_at_unix,
+        user_agreement,
+        privacy_policy,
+    );
+    let encoded = serde_json::to_vec_pretty(&record)
+        .map_err(|error| format!("serialize legal acceptance: {error}"))?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("open {}: {error}", path.display()))?;
+    file.write_all(&encoded)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+fn legal_acceptance_record(
+    document_version: &str,
+    accepted_at_unix: u64,
+    user_agreement: &str,
+    privacy_policy: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "accepted": true,
+        "document_version": document_version,
+        "software_version": env!("CARGO_PKG_VERSION"),
+        "accepted_at_unix": accepted_at_unix,
+        "user_agreement_sha256": sha256_text(user_agreement),
+        "privacy_policy_sha256": sha256_text(privacy_policy),
+        "source": "installer",
+    })
+}
+
+fn sha256_text(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
 
 // ============================================================
 // InstallerConfig
@@ -760,4 +817,40 @@ pub fn write_uninstall_registry(install_path: &str, version: &str) -> Result<(),
 #[cfg(not(windows))]
 pub fn write_uninstall_registry(_: &str, _: &str) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::legal_acceptance_record;
+
+    #[test]
+    fn legal_acceptance_is_bound_to_version_and_both_documents() {
+        let record = legal_acceptance_record("2026-07-27.1", 42, "agreement", "privacy");
+
+        assert_eq!(record["accepted"], true);
+        assert_eq!(record["document_version"], "2026-07-27.1");
+        assert_eq!(record["accepted_at_unix"], 42);
+        assert_eq!(record["source"], "installer");
+        assert_eq!(
+            record["user_agreement_sha256"]
+                .as_str()
+                .expect("agreement digest")
+                .len(),
+            64
+        );
+        assert_ne!(
+            record["user_agreement_sha256"],
+            record["privacy_policy_sha256"]
+        );
+    }
+
+    #[test]
+    fn bundled_legal_documents_declare_the_current_document_version() {
+        let version = include_str!("../../../docs/legal/version.txt").trim();
+        let agreement = include_str!("../../../docs/legal/USER_AGREEMENT.zh-CN.md");
+        let privacy = include_str!("../../../docs/legal/PRIVACY_POLICY.zh-CN.md");
+
+        assert!(agreement.contains(&format!("文档版本：{version}")));
+        assert!(privacy.contains(&format!("文档版本：{version}")));
+    }
 }
