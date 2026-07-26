@@ -76,6 +76,17 @@ pub(crate) fn record_token_usage(usage: &deepx_types::UsageInfo, model: &str) {
     }
 }
 
+pub(crate) fn cache_hit_pct(usage: &deepx_types::UsageInfo) -> f64 {
+    let total = usage
+        .prompt_cache_hit_tokens
+        .saturating_add(usage.prompt_cache_miss_tokens);
+    if total == 0 {
+        0.0
+    } else {
+        f64::from(usage.prompt_cache_hit_tokens) * 100.0 / f64::from(total)
+    }
+}
+
 pub(crate) fn has_xml(s: &str) -> bool {
     // Require <tool_calls> wrapper to avoid false positives from
     // examples, explanations, or markdown containing bare <invoke> tags.

@@ -36,7 +36,12 @@ it("isolates reducer failure and skips side effects for the failed event", () =>
   const fx = effects();
   const event: Agent2Ui = {
     type: "session_restored", seed: "seed-a", turns: [], tokens_used: 0,
-    cache_hit_pct: 0, total_turns: 0, has_more: false,
+    cache_hit_pct: 0,
+    usage_totals: {
+      prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+      prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, reasoning_tokens: 0,
+    },
+    usage_requests: 0, cache_reported_requests: 0, total_turns: 0, has_more: false,
   };
   dispatchAgentEvent(event, target, fx);
   expect(fx.onReducerError).toHaveBeenCalledWith(event, failure);

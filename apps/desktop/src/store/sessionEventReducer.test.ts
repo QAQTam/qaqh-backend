@@ -55,6 +55,12 @@ describe("sessionEventReducer", () => {
       }],
       tokens_used: 10,
       cache_hit_pct: 0,
+      usage_totals: {
+        prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+        prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, reasoning_tokens: 0,
+      },
+      usage_requests: 0,
+      cache_reported_requests: 0,
       total_turns: 1,
       has_more: false,
     }, 100);
@@ -365,5 +371,52 @@ describe("sessionEventReducer", () => {
     expect(state.compact.active).toBe(false);
     expect(state.turns).toHaveLength(1); // unchanged
     expect(state.turns[0].turnId).toBe("t1");
+  });
+
+  it("replaces progressive usage and aggregates distinct model requests", () => {
+    const usage = (
+      prompt_tokens: number,
+      completion_tokens: number,
+      prompt_cache_hit_tokens: number,
+      prompt_cache_miss_tokens: number,
+    ) => ({
+      prompt_tokens,
+      completion_tokens,
+      total_tokens: prompt_tokens + completion_tokens,
+      prompt_cache_hit_tokens,
+      prompt_cache_miss_tokens,
+      reasoning_tokens: 0,
+      cache_usage_reported: true,
+    });
+    let state = createRawSessionState("seed-usage");
+    state = reduceAgentEvent(state, {
+      type: "usage_updated", turn_id: "t1", round_num: 0,
+      usage: usage(100, 10, 80, 20), context_limit: 1000, model: "deepseek",
+    }, 1);
+    state = reduceAgentEvent(state, {
+      type: "usage_updated", turn_id: "t1", round_num: 0,
+      usage: usage(100, 20, 80, 20), context_limit: 1000, model: "deepseek",
+    }, 2);
+
+    expect(state.telemetry).toHaveLength(1);
+    expect(state.session.usageTotals.total_tokens).toBe(120);
+    expect(state.session.cacheHitPct).toBe(80);
+    expect(state.session.cacheReportedRequestCount).toBe(1);
+
+    state = reduceAgentEvent(state, {
+      type: "usage_updated", turn_id: "t1", round_num: 1,
+      usage: usage(200, 30, 100, 100), context_limit: 1000, model: "deepseek",
+    }, 3);
+    expect(state.telemetry).toHaveLength(2);
+    expect(state.session.usageTotals).toMatchObject({
+      prompt_tokens: 300,
+      completion_tokens: 50,
+      total_tokens: 350,
+      prompt_cache_hit_tokens: 180,
+      prompt_cache_miss_tokens: 120,
+    });
+    expect(state.session.cacheHitPct).toBe(60);
+    expect(state.session.usageRequestCount).toBe(2);
+    expect(state.session.cacheReportedRequestCount).toBe(2);
   });
 });

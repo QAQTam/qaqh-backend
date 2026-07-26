@@ -156,6 +156,12 @@ pub fn chat_stream_openai(
     body_map.insert("model".into(), serde_json::json!(model));
     body_map.insert("messages".into(), serde_json::Value::Array(api_msgs));
     body_map.insert("stream".into(), serde_json::json!(true));
+    if provider.include_stream_usage {
+        body_map.insert(
+            "stream_options".into(),
+            serde_json::json!({"include_usage": true}),
+        );
+    }
     if provider.supports_thinking {
         match provider.thinking_mode {
             ThinkingParamMode::OpenAi => {
@@ -422,45 +428,48 @@ fn stream_sse(
                 .get("completion_tokens")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
-            let (hit, miss) = match provider.cache_field {
-                CacheTokenField::PromptCacheHitTokens => (
-                    u.get("prompt_cache_hit_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                    u.get("prompt_cache_miss_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                ),
+            let (hit, miss, cache_usage_reported) = match provider.cache_field {
+                CacheTokenField::PromptCacheHitTokens => {
+                    let hit_value = u.get("prompt_cache_hit_tokens");
+                    let miss_value = u.get("prompt_cache_miss_tokens");
+                    (
+                        hit_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        miss_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        hit_value.is_some() || miss_value.is_some(),
+                    )
+                }
                 CacheTokenField::PromptDetailsCached => {
-                    let cached = u
+                    let cached_value = u
                         .get("prompt_tokens_details")
-                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|d| d.get("cached_tokens"));
+                    let cached = cached_value
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u32;
-                    (cached, 0)
+                    (cached, pt.saturating_sub(cached), cached_value.is_some())
                 }
                 CacheTokenField::UsageCachedTokens => {
-                    let cached =
-                        u.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    (cached, 0)
+                    let cached_value = u.get("cached_tokens");
+                    let cached = cached_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    (cached, pt.saturating_sub(cached), cached_value.is_some())
                 }
-                CacheTokenField::None => (0, 0),
+                CacheTokenField::None => (0, 0, false),
             };
             let rt = u
                 .get("completion_tokens_details")
                 .and_then(|d| d.get("reasoning_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
-            usage_info = Some(UsageInfo {
+            let usage = UsageInfo {
                 prompt_tokens: pt,
                 completion_tokens: ct,
                 total_tokens: pt + ct,
                 prompt_cache_hit_tokens: hit,
                 prompt_cache_miss_tokens: miss,
                 reasoning_tokens: rt,
-            });
-            // Emit real-time usage update so InfoBar can show live cache-hit stats
-            on_event(StreamEvent::UsageUpdate(usage_info.clone().unwrap()));
+                cache_usage_reported: Some(cache_usage_reported),
+            };
+            usage_info = Some(usage.clone());
+            on_event(StreamEvent::UsageUpdate(usage));
         }
     }
 

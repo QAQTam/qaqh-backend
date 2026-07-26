@@ -508,6 +508,15 @@ pub enum Agent2Ui {
         tokens_used: u32,
         #[serde(default)]
         cache_hit_pct: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        usage: Option<deepx_types::UsageInfo>,
+        #[serde(default)]
+        usage_totals: deepx_types::UsageInfo,
+        #[serde(default)]
+        usage_requests: u32,
+        #[serde(default)]
+        cache_reported_requests: u32,
         /// Total number of turns in this session.
         #[serde(default)]
         total_turns: u32,
@@ -593,6 +602,18 @@ pub enum Agent2Ui {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         model: Option<String>,
+    },
+
+    /// Provider-confirmed usage for one model request. This event is additive
+    /// and may be emitted more than once for the same turn/round; consumers
+    /// replace the previous sample instead of double-counting it.
+    #[serde(rename = "usage_updated")]
+    UsageUpdated {
+        turn_id: String,
+        round_num: u32,
+        usage: deepx_types::UsageInfo,
+        context_limit: u32,
+        model: String,
     },
 
     /// Agent finished the current turn. Frontend shows the Done indicator.
@@ -790,7 +811,8 @@ impl Agent2Ui {
             // ── Bulk: high-frequency, loss-tolerant streaming ──
             Agent2Ui::ExecProgress { .. }
             | Agent2Ui::AuditRecord { .. }
-            | Agent2Ui::CompactDelta { .. } => EventLane::Bulk,
+            | Agent2Ui::CompactDelta { .. }
+            | Agent2Ui::UsageUpdated { .. } => EventLane::Bulk,
 
             // ── Standard: everything else ──
             _ => EventLane::Standard,
@@ -1145,12 +1167,24 @@ mod tests {
     }
 
     #[test]
+    fn usage_update_is_bulk_lane() {
+        let event = Agent2Ui::UsageUpdated {
+            turn_id: "t".into(),
+            round_num: 0,
+            usage: deepx_types::UsageInfo::default(),
+            context_limit: 128_000,
+            model: "deepseek-chat".into(),
+        };
+        assert_eq!(event.lane(), EventLane::Bulk);
+    }
+
+    #[test]
     fn all_variants_have_explicit_lane() {
         // Smoke test: call lane() on every major variant to ensure
         // exhaustive coverage without panicking.
         let events = [
             Agent2Ui::SessionCreated { seed: "s".into() },
-            Agent2Ui::SessionRestored { seed: "s".into(), turns: vec![], tokens_used: 0, cache_hit_pct: 0.0, total_turns: 0, has_more: false },
+            Agent2Ui::SessionRestored { seed: "s".into(), turns: vec![], tokens_used: 0, cache_hit_pct: 0.0, usage: None, usage_totals: deepx_types::UsageInfo::default(), usage_requests: 0, cache_reported_requests: 0, total_turns: 0, has_more: false },
             Agent2Ui::TurnStart { turn_id: "t".into(), user_text: "u".into() },
             Agent2Ui::TurnEnd { turn_id: "t".into(), stop_reason: None, usage: None },
             Agent2Ui::RoundDelta { turn_id: "t".into(), round_num: 0, kind: RoundDeltaKind::Thinking, delta: "d".into() },
@@ -1163,6 +1197,7 @@ mod tests {
             Agent2Ui::AuditRecord { tool_name: "n".into(), result_summary: "s".into(), success: true, time: "t".into(), args: "{}".into() },
             Agent2Ui::ToolNotice { level: "info".into(), message: "m".into() },
             Agent2Ui::Dashboard { hp_connected: false, session_seed: "s".into(), tool_calls_total: 0, tool_failures: 0, current_phase: "idle".into(), streaming: false, dsml_compat_count: 0, documents: vec![], recent_edits: vec![], tasks: vec![], session_title: None, usage: None, context_limit: 0, model: None },
+            Agent2Ui::UsageUpdated { turn_id: "t".into(), round_num: 0, usage: deepx_types::UsageInfo::default(), context_limit: 0, model: "m".into() },
             Agent2Ui::Done,
             Agent2Ui::CompactStart { turns_total: 1, turns_keeping: 1 },
             Agent2Ui::CompactEnd { summary_chars: 0, turns_compacted: 1, turns_removed: 0 },

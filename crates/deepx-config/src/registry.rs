@@ -23,6 +23,7 @@ fn deepseek() -> ProviderSpec {
             models: vec![],
             models_url: Some("https://api.deepseek.com".into()),
             user_id_mode: Some(UserSendMode::Body),
+            include_stream_usage: true,
             // chat_path: None → "/chat/completions" (default)
             // thinking_mode: OpenAi (default)
             // cache_field: PromptCacheHitTokens (default)

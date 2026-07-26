@@ -651,17 +651,33 @@ fn dashboard(seed: &str) -> Result<Value, String> {
 
 fn persisted_session_projection(seed: &str) -> Option<Vec<Agent2Ui>> {
     const INITIAL_LOAD_COUNT: usize = 20;
-    let (_, messages) = deepx_session::SessionManager::global().load(seed)?;
+    let (meta, messages) = deepx_session::SessionManager::global().load(seed)?;
     let (total, turns) =
         deepx_msglp::util::project_recent_turns_from_messages(seed, &messages, INITIAL_LOAD_COUNT);
+    let cache_reported_requests = meta.effective_cache_reported_requests();
     Some(vec![Agent2Ui::SessionRestored {
         seed: seed.to_string(),
         turns,
-        tokens_used: 0,
-        cache_hit_pct: 0.0,
+        tokens_used: meta.usage_totals.total_tokens,
+        cache_hit_pct: cache_hit_pct(&meta.usage_totals),
+        usage: meta.last_usage,
+        usage_totals: meta.usage_totals,
+        usage_requests: meta.usage_requests,
+        cache_reported_requests,
         total_turns: total as u32,
         has_more: total > INITIAL_LOAD_COUNT,
     }])
+}
+
+fn cache_hit_pct(usage: &deepx_types::UsageInfo) -> f64 {
+    let total = usage
+        .prompt_cache_hit_tokens
+        .saturating_add(usage.prompt_cache_miss_tokens);
+    if total == 0 {
+        0.0
+    } else {
+        f64::from(usage.prompt_cache_hit_tokens) * 100.0 / f64::from(total)
+    }
 }
 
 fn activity(seed: &str) -> Result<Value, String> {

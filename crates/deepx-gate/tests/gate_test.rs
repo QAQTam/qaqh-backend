@@ -237,6 +237,42 @@ fn finish_with_usage() {
 }
 
 #[test]
+fn requests_and_emits_stream_usage_with_cache_details() {
+    let scenario = vec![
+        SseChunk::text("Hello"),
+        SseChunk::Data(json!({
+            "choices": [],
+            "usage": mock_server::usage_with_cache(100, 20, 80, 20),
+        })),
+        SseChunk::done(),
+    ];
+    let mock = MockServer::new(scenario);
+    let provider = make_provider(&mock).with_stream_usage(true);
+    let events = collect_events(&provider, vec![Message::user("Hi")], None);
+
+    let request = mock
+        .last_request_body
+        .lock()
+        .expect("request lock")
+        .clone()
+        .expect("request body");
+    let request: serde_json::Value = serde_json::from_str(&request).expect("request JSON");
+    assert_eq!(request["stream_options"]["include_usage"], true);
+
+    let usage = events.iter().find_map(|event| match event {
+        StreamEvent::UsageUpdate(usage) => Some(usage),
+        _ => None,
+    });
+    let usage = usage.expect("usage update");
+    assert_eq!(usage.prompt_tokens, 100);
+    assert_eq!(usage.completion_tokens, 20);
+    assert_eq!(usage.prompt_cache_hit_tokens, 80);
+    assert_eq!(usage.prompt_cache_miss_tokens, 20);
+    assert_eq!(usage.reasoning_tokens, 7);
+    assert_eq!(usage.cache_usage_reported, Some(true));
+}
+
+#[test]
 fn http_error_401() {
     let scenario = vec![SseChunk::error(401, "Invalid API key")];
     let mock = MockServer::new(scenario);

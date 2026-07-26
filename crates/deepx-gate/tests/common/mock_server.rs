@@ -82,6 +82,22 @@ pub fn usage(prompt: u32, completion: u32) -> serde_json::Value {
     })
 }
 
+pub fn usage_with_cache(
+    prompt: u32,
+    completion: u32,
+    cache_hit: u32,
+    cache_miss: u32,
+) -> serde_json::Value {
+    json!({
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+        "prompt_cache_hit_tokens": cache_hit,
+        "prompt_cache_miss_tokens": cache_miss,
+        "completion_tokens_details": { "reasoning_tokens": 7 },
+    })
+}
+
 // ── MockServer ───────────────────────────────────────────────────────
 
 enum ScenarioSource {

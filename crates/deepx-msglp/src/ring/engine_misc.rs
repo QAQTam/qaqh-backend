@@ -15,8 +15,8 @@ use std::sync::mpsc;
 
 use deepx_proto::Agent2Ui;
 
-use crate::state::agent::AgentState;
 use crate::services::dashboard;
+use crate::state::agent::AgentState;
 use crate::util;
 
 const INITIAL_LOAD_COUNT: usize = 20;
@@ -58,8 +58,12 @@ impl MiscEngine {
             let _ = tx.send(Agent2Ui::SessionRestored {
                 seed: agent.session.seed.clone(),
                 turns: recent,
-                tokens_used: 0,
-                cache_hit_pct: 0.0,
+                tokens_used: agent.session.usage_totals.total_tokens,
+                cache_hit_pct: util::cache_hit_pct(&agent.session.usage_totals),
+                usage: agent.session.last_usage.clone(),
+                usage_totals: agent.session.usage_totals.clone(),
+                usage_requests: agent.session.usage_requests,
+                cache_reported_requests: agent.session.effective_cache_reported_requests(),
                 total_turns: total,
                 has_more: start > 0,
             });

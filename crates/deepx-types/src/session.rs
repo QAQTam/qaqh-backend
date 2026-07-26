@@ -91,6 +91,22 @@ pub struct SessionMeta {
     pub mode: u8,
     #[serde(default)]
     pub skills: SkillSessionStateV2,
+    /// Provider-confirmed usage accumulated across model requests in this session.
+    #[serde(default)]
+    #[ts(skip)]
+    pub usage_totals: crate::UsageInfo,
+    /// Last provider-confirmed request usage, used to restore the live Info panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub last_usage: Option<crate::UsageInfo>,
+    /// Number of model requests included in `usage_totals`.
+    #[serde(default)]
+    #[ts(skip)]
+    pub usage_requests: u32,
+    /// Number of requests whose provider explicitly returned cache usage.
+    #[serde(default)]
+    #[ts(skip)]
+    pub cache_reported_requests: u32,
 
     // ── Runtime fields (not persisted) ──
     /// If set, this seed is passed as a CLI argument to the agent subprocess for auto-restore on startup.
@@ -128,12 +144,79 @@ impl Default for SessionMeta {
             compact_skip: 0,
             mode: 0,
             skills: SkillSessionStateV2::default(),
+            usage_totals: crate::UsageInfo::default(),
+            last_usage: None,
+            usage_requests: 0,
+            cache_reported_requests: 0,
             resume_seed: None,
             tokens: 0,
             title: None,
             from_resume: false,
             turso_backed: false,
         }
+    }
+}
+
+impl SessionMeta {
+    pub fn effective_cache_reported_requests(&self) -> u32 {
+        if self.cache_reported_requests == 0
+            && self.usage_requests > 0
+            && self.usage_totals.prompt_cache_hit_tokens
+                .saturating_add(self.usage_totals.prompt_cache_miss_tokens)
+                > 0
+        {
+            self.usage_requests
+        } else {
+            self.cache_reported_requests
+        }
+    }
+
+    pub fn record_usage(&mut self, usage: &crate::UsageInfo) {
+        self.cache_reported_requests = self.effective_cache_reported_requests();
+        if self.cache_reported_requests > 0 {
+            self.usage_totals.cache_usage_reported = Some(true);
+        }
+        self.usage_totals.prompt_tokens = self
+            .usage_totals
+            .prompt_tokens
+            .saturating_add(usage.prompt_tokens);
+        self.usage_totals.completion_tokens = self
+            .usage_totals
+            .completion_tokens
+            .saturating_add(usage.completion_tokens);
+        self.usage_totals.total_tokens = self
+            .usage_totals
+            .total_tokens
+            .saturating_add(usage.total_tokens);
+        self.usage_totals.prompt_cache_hit_tokens = self
+            .usage_totals
+            .prompt_cache_hit_tokens
+            .saturating_add(usage.prompt_cache_hit_tokens);
+        self.usage_totals.prompt_cache_miss_tokens = self
+            .usage_totals
+            .prompt_cache_miss_tokens
+            .saturating_add(usage.prompt_cache_miss_tokens);
+        self.usage_totals.reasoning_tokens = self
+            .usage_totals
+            .reasoning_tokens
+            .saturating_add(usage.reasoning_tokens);
+        if usage.cache_usage_reported == Some(true) {
+            self.usage_totals.cache_usage_reported = Some(true);
+        }
+        self.usage_requests = self.usage_requests.saturating_add(1);
+        if usage.cache_usage_reported == Some(true) {
+            self.cache_reported_requests = self.cache_reported_requests.saturating_add(1);
+        }
+        self.last_usage = Some(usage.clone());
+        self.tokens = self.usage_totals.total_tokens.into();
+    }
+
+    pub fn reset_usage(&mut self) {
+        self.tokens = 0;
+        self.usage_totals = crate::UsageInfo::default();
+        self.last_usage = None;
+        self.usage_requests = 0;
+        self.cache_reported_requests = 0;
     }
 }
 
@@ -152,5 +235,41 @@ mod tests {
         .unwrap();
         assert_eq!(meta.skills.version, 2);
         assert!(meta.skills.entries.is_empty());
+        assert_eq!(meta.cache_reported_requests, 0);
+    }
+
+    #[test]
+    fn usage_tracks_cache_reporting_separately_from_hit_rate() {
+        let mut meta = SessionMeta::default();
+        meta.record_usage(&crate::UsageInfo {
+            prompt_tokens: 100,
+            prompt_cache_miss_tokens: 100,
+            cache_usage_reported: Some(true),
+            ..Default::default()
+        });
+        meta.record_usage(&crate::UsageInfo {
+            prompt_tokens: 50,
+            ..Default::default()
+        });
+
+        assert_eq!(meta.usage_requests, 2);
+        assert_eq!(meta.cache_reported_requests, 1);
+        assert_eq!(meta.usage_totals.cache_usage_reported, Some(true));
+        assert_eq!(meta.usage_totals.prompt_cache_hit_tokens, 0);
+        assert_eq!(meta.usage_totals.prompt_cache_miss_tokens, 100);
+    }
+
+    #[test]
+    fn legacy_cache_totals_infer_full_request_coverage() {
+        let meta = SessionMeta {
+            usage_requests: 3,
+            usage_totals: crate::UsageInfo {
+                prompt_cache_hit_tokens: 60,
+                prompt_cache_miss_tokens: 40,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(meta.effective_cache_reported_requests(), 3);
     }
 }

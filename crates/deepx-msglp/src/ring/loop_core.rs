@@ -63,8 +63,8 @@ use super::engine_session::SessionEngine;
 use super::engine_tool::PermissionDisposition;
 use super::paced_emitter::{DEFAULT_FLUSH_INTERVAL, PacedEmitter};
 use super::types::*;
-use crate::state::agent::AgentState;
 use crate::services::notification;
+use crate::state::agent::AgentState;
 
 /// Number of recent turns sent on session restore for incremental loading.
 const INITIAL_LOAD_COUNT: usize = 20;
@@ -421,22 +421,30 @@ impl Loop {
                     // 从引擎读取 memory_dir，与 try_init_vector 保持路径一致
                     let memory_dir = vec.lock().ok().map(|g| g.memory_dir().to_path_buf());
                     if let Some(memory_dir) = memory_dir {
-                        let messages: Vec<deepx_types::Message> =
-                            self.session.agent.msg.turns().iter().flat_map(|t| {
+                        let messages: Vec<deepx_types::Message> = self
+                            .session
+                            .agent
+                            .msg
+                            .turns()
+                            .iter()
+                            .flat_map(|t| {
                                 let mut msgs = vec![t.user.clone()];
                                 for step in &t.steps {
                                     msgs.push(step.assistant.clone());
                                     msgs.extend(step.tool_results.clone());
                                 }
                                 msgs
-                            }).collect();
+                            })
+                            .collect();
                         match deepx_session::memory_hook::archive_session_memories(
                             &self.session.agent.session.seed,
                             &messages,
                             &memory_dir,
                         ) {
-                            Ok(n) => log::info!("Memory archived: {n} entries from session '{}'",
-                                self.session.agent.session.seed),
+                            Ok(n) => log::info!(
+                                "Memory archived: {n} entries from session '{}'",
+                                self.session.agent.session.seed
+                            ),
                             Err(e) => log::warn!("Memory archive failed: {e}"),
                         }
                     }
@@ -501,8 +509,14 @@ impl Loop {
                 let _ = self.event_tx.send(Agent2Ui::SessionRestored {
                     seed: self.session.agent.session.seed.clone(),
                     turns: recent,
-                    tokens_used: 0,
-                    cache_hit_pct: 0.0,
+                    tokens_used: self.session.agent.session.usage_totals.total_tokens,
+                    cache_hit_pct: crate::util::cache_hit_pct(
+                        &self.session.agent.session.usage_totals,
+                    ),
+                    usage: self.session.agent.session.last_usage.clone(),
+                    usage_totals: self.session.agent.session.usage_totals.clone(),
+                    usage_requests: self.session.agent.session.usage_requests,
+                    cache_reported_requests: self.session.agent.session.effective_cache_reported_requests(),
                     total_turns: total,
                     has_more: start > 0,
                 });
@@ -601,8 +615,14 @@ impl Loop {
                 let _ = self.event_tx.send(Agent2Ui::SessionRestored {
                     seed: self.session.agent.session.seed.clone(),
                     turns: recent,
-                    tokens_used: 0,
-                    cache_hit_pct: 0.0,
+                    tokens_used: self.session.agent.session.usage_totals.total_tokens,
+                    cache_hit_pct: crate::util::cache_hit_pct(
+                        &self.session.agent.session.usage_totals,
+                    ),
+                    usage: self.session.agent.session.last_usage.clone(),
+                    usage_totals: self.session.agent.session.usage_totals.clone(),
+                    usage_requests: self.session.agent.session.usage_requests,
+                    cache_reported_requests: self.session.agent.session.effective_cache_reported_requests(),
                     total_turns: total,
                     has_more: start > 0,
                 });
@@ -857,8 +877,14 @@ impl Loop {
                     let _ = self.event_tx.send(Agent2Ui::SessionRestored {
                         seed: self.session.agent.session.seed.clone(),
                         turns: recent,
-                        tokens_used: 0,
-                        cache_hit_pct: 0.0,
+                        tokens_used: self.session.agent.session.usage_totals.total_tokens,
+                        cache_hit_pct: crate::util::cache_hit_pct(
+                            &self.session.agent.session.usage_totals,
+                        ),
+                        usage: self.session.agent.session.last_usage.clone(),
+                        usage_totals: self.session.agent.session.usage_totals.clone(),
+                        usage_requests: self.session.agent.session.usage_requests,
+                        cache_reported_requests: self.session.agent.session.effective_cache_reported_requests(),
                         total_turns: total,
                         has_more: start > 0,
                     });
@@ -1103,7 +1129,8 @@ impl Loop {
                                         stats: &mut self.session.stats,
                                         notify: &self.notify,
                                     };
-                                    let next_outcome = self.input.handle_user_input(&mut ctx, &prompt);
+                                    let next_outcome =
+                                        self.input.handle_user_input(&mut ctx, &prompt);
                                     drop(ctx);
                                     self.apply_outcome(next_outcome);
                                     return;

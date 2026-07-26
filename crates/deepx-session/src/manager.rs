@@ -829,6 +829,31 @@ impl SessionManager {
         self.queue_and_sync_mirror(seed);
     }
 
+    pub fn persist_usage(
+        &self,
+        seed: &str,
+        totals: deepx_types::UsageInfo,
+        last_usage: Option<deepx_types::UsageInfo>,
+        requests: u32,
+        cache_reported_requests: u32,
+    ) {
+        let lock = self.session_lock(seed);
+        let _guard = lock.lock().unwrap();
+        let dir = self.session_path_dir(seed);
+        let _ = std::fs::create_dir_all(&dir);
+        let mut meta = self.load_meta(seed).unwrap_or_default();
+        meta.seed = seed.to_string();
+        meta.updated_at = Self::now_epoch();
+        meta.usage_totals = totals;
+        meta.last_usage = last_usage;
+        meta.usage_requests = requests;
+        meta.cache_reported_requests = cache_reported_requests;
+        let _ = store::write_meta(&dir, &meta);
+        store::upsert_index(&self.sessions_dir, &meta);
+        #[cfg(feature = "turso-backend")]
+        self.queue_and_sync_mirror(seed);
+    }
+
     /// Append a single message to JSONL immediately (per-message persistence).
     /// Writes a complete target snapshot to the durable outbox before appending.
     pub fn save_one(&self, seed: &str, msg: &Message) {
@@ -900,6 +925,10 @@ impl SessionManager {
             compact_skip,
             mode: existing.mode,
             skills: existing.skills,
+            usage_totals: existing.usage_totals,
+            last_usage: existing.last_usage,
+            usage_requests: existing.usage_requests,
+            cache_reported_requests: existing.cache_reported_requests,
             ..Default::default()
         };
         #[cfg(feature = "turso-backend")]

@@ -7,7 +7,7 @@ use ts_rs::TS;
 ///
 /// Captures both standard token counts and provider-specific fields
 /// like cache hit/miss and reasoning tokens.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct UsageInfo {
     /// Tokens consumed by the input (prompt + conversation history).
@@ -25,4 +25,9 @@ pub struct UsageInfo {
     /// Tokens consumed by internal reasoning/thinking (DeepSeek R1, etc.).
     #[serde(default)]
     pub reasoning_tokens: u32,
+    /// Whether the provider actually returned cache usage fields. This keeps a
+    /// genuine zero-percent hit rate distinct from unsupported/missing data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_usage_reported: Option<bool>,
 }

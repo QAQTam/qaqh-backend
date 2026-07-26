@@ -16,11 +16,38 @@ export function activeInteraction(state: RawSessionState): PendingInteraction | 
 
 export function sessionUsage(state: RawSessionState) {
   const usage = state.session.usage;
+  const totals = state.session.usageTotals;
+  const cacheReported = Boolean(usage?.cache_usage_reported);
+  const cacheSampleTokens =
+    (usage?.prompt_cache_hit_tokens ?? 0) + (usage?.prompt_cache_miss_tokens ?? 0);
+  const sessionCacheSampleTokens =
+    totals.prompt_cache_hit_tokens + totals.prompt_cache_miss_tokens;
   return {
     contextTokens: usage?.prompt_tokens ?? state.session.tokensUsed,
     totalTokens: usage?.total_tokens ?? state.session.tokensUsed,
     cacheHit: usage?.prompt_cache_hit_tokens ?? 0,
     cacheMiss: usage?.prompt_cache_miss_tokens ?? 0,
+    promptTokens: usage?.prompt_tokens ?? 0,
+    completionTokens: usage?.completion_tokens ?? 0,
+    reasoningTokens: usage?.reasoning_tokens ?? 0,
+    requestTotalTokens: usage?.total_tokens ?? 0,
+    cacheAvailable: cacheReported,
+    cacheHitPct: cacheReported
+      ? cacheSampleTokens > 0
+        ? (usage?.prompt_cache_hit_tokens ?? 0) * 100 / cacheSampleTokens
+        : 0
+      : null,
+    cacheSampleTokens,
+    sessionCacheAvailable: state.session.cacheReportedRequestCount > 0,
+    sessionCacheHitPct: state.session.cacheReportedRequestCount > 0
+      ? sessionCacheSampleTokens > 0
+        ? totals.prompt_cache_hit_tokens * 100 / sessionCacheSampleTokens
+        : 0
+      : null,
+    sessionCacheSampleTokens,
+    cacheReportedRequestCount: state.session.cacheReportedRequestCount,
+    totals,
+    requestCount: state.session.usageRequestCount,
     contextLimit: state.session.contextLimit,
     model: state.session.model ?? "",
   };

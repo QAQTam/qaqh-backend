@@ -712,7 +712,8 @@ impl TurnEngine {
             ep.as_ref().map(|e| e.supports_thinking).unwrap_or(true),
             ep.as_ref().and_then(|e| e.do_sample),
         )
-        .with_stateful(ep.as_ref().map(|e| e.stateful).unwrap_or(false));
+        .with_stateful(ep.as_ref().map(|e| e.stateful).unwrap_or(false))
+        .with_stream_usage(ep.as_ref().map(|e| e.include_stream_usage).unwrap_or(false));
 
         loop {
             // ── Interrupt check ──
@@ -799,7 +800,17 @@ impl TurnEngine {
                         raw_message, usage, ..
                     } => {
                         if let Some(ref u) = usage {
-                            ctx.agent.session.tokens += u.total_tokens as u64;
+                            ctx.agent.session.record_usage(u);
+                            if !ctx.agent.ephemeral {
+                                deepx_session::SessionManager::global().persist_usage(
+                                    &ctx.agent.session.seed,
+                                    ctx.agent.session.usage_totals.clone(),
+                                    ctx.agent.session.last_usage.clone(),
+                                    ctx.agent.session.usage_requests,
+                                    ctx.agent.session.cache_reported_requests,
+                                );
+                            }
+                            util::record_token_usage(u, &ctx.agent.config.model);
                             last_usage = usage.clone();
                         }
                         content.clear();
@@ -845,21 +856,12 @@ impl TurnEngine {
                         last_usage = Some(u.clone());
                         ctx.agent.session.tokens =
                             ctx.agent.session.tokens.max(u.total_tokens as u64);
-                        ctx.emitter.emit_delta(Agent2Ui::Dashboard {
-                            hp_connected: true,
-                            session_seed: ctx.agent.session.seed.clone(),
+                        ctx.emitter.emit_delta(Agent2Ui::UsageUpdated {
+                            turn_id: turn_id.clone(),
+                            round_num,
+                            usage: u,
                             context_limit: ctx.agent.config.context_limit,
-                            tool_calls_total: 0,
-                            tool_failures: 0,
-                            current_phase: "single".into(),
-                            streaming: true,
-                            dsml_compat_count: ctx.agent.dsml_compat_count,
-                            documents: Vec::new(),
-                            recent_edits: Vec::new(),
-                            tasks: Vec::new(),
-                            session_title: None,
-                            usage: Some(u),
-                            model: Some(ctx.agent.config.model.clone()),
+                            model: ctx.agent.config.model.clone(),
                         });
                     }
                     deepx_gate::StreamEvent::Retrying {
@@ -1258,9 +1260,6 @@ impl TurnEngine {
             ctx.agent
                 .msg
                 .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-            if let Some(ref usage) = last_usage {
-                util::record_token_usage(usage, &ctx.agent.config.model);
-            }
             let forced = match ctx.agent.skills.complete_model_lap() {
                 Ok(forced) => forced,
                 Err(error) => {

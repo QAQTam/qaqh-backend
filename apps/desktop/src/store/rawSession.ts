@@ -46,6 +46,9 @@ export type RawMetricPoint = {
   ts: number;
   /** Provider-confirmed request input tokens; not the local context estimate. */
   prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  reasoning_tokens: number;
   cache_hit: number;
   cache_miss: number;
   /** Providers commonly omit cache usage. Zero/zero is not a 0% cache hit rate. */
@@ -130,6 +133,10 @@ export type RawSessionState = {
     model?: string;
     contextLimit: number;
     usage?: UsageInfo;
+    usageTotals: UsageInfo;
+    usageByRequest: Record<string, UsageInfo>;
+    usageRequestCount: number;
+    cacheReportedRequestCount: number;
   };
   dashboard: DashboardData & { activity: RawActivityEntry[] };
   telemetry: RawMetricPoint[];

@@ -39,7 +39,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 );
                 agent.session = meta;
                 agent.session.from_resume = true;
-                agent.session.tokens = 0;
+                agent.session.tokens = agent.session.usage_totals.total_tokens.into();
                 // 如果有 compact 上下文，compact_skip 必须为 0——压缩后的消息
                 // 已经是去除了旧 turn 的活跃视图，不需要再跳过任何 turn。
                 let effective_compact_skip = if compact_context.is_some() {
@@ -113,7 +113,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
     // Create fresh session (either no restore_seed, or restore failed)
     agent.session.seed = seed.clone();
     agent.session.created_at = SessionManager::now_epoch();
-    agent.session.tokens = 0;
+    agent.session.reset_usage();
     agent.session.from_resume = false;
     agent.msg = if agent.ephemeral {
         deepx_message::MessageStore::new_ephemeral(&seed)
@@ -150,7 +150,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
 pub fn create_session(agent: &mut AgentState) {
     agent.session.seed = SessionManager::generate_seed();
     agent.session.created_at = SessionManager::now_epoch();
-    agent.session.tokens = 0;
+    agent.session.reset_usage();
     agent.session.from_resume = false;
     agent.msg = if agent.ephemeral {
         deepx_message::MessageStore::new_ephemeral(&agent.session.seed)
@@ -185,7 +185,7 @@ pub fn create_session(agent: &mut AgentState) {
 /// Create a new session with a pre-set seed (from CLI --seed).
 /// Unlike create_session, this does NOT generate a new seed.
 pub fn create_session_with_seed(agent: &mut AgentState) {
-    agent.session.tokens = 0;
+    agent.session.reset_usage();
     agent.session.from_resume = false;
     agent.msg = if agent.ephemeral {
         deepx_message::MessageStore::new_ephemeral(&agent.session.seed)

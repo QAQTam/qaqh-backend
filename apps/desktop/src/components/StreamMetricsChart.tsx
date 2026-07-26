@@ -5,6 +5,9 @@ export interface MetricPoint {
   ts: number;
   /** Provider-confirmed request input tokens, not the local context estimate. */
   prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  reasoning_tokens: number;
   cache_hit: number;
   cache_miss: number;
   cache_available: boolean;

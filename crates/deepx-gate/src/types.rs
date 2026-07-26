@@ -26,6 +26,7 @@ pub struct ProviderConfig {
     pub chat_path: Option<String>,
     pub thinking_mode: ThinkingParamMode,
     pub cache_field: CacheTokenField,
+    pub include_stream_usage: bool,
     pub supports_thinking: bool,
     /// When Some, explicitly sets `do_sample` in the request body. Used by GLM for
     /// deterministic codegen (do_sample=false). None means don't send the field.
@@ -60,6 +61,7 @@ impl ProviderConfig {
             chat_path,
             thinking_mode,
             cache_field,
+            include_stream_usage: false,
             supports_thinking,
             do_sample,
             stateful: false,
@@ -70,6 +72,11 @@ impl ProviderConfig {
     /// Configure this provider for stateful mode (web proxy).
     pub fn with_stateful(mut self, stateful: bool) -> Self {
         self.stateful = stateful;
+        self
+    }
+
+    pub fn with_stream_usage(mut self, include: bool) -> Self {
+        self.include_stream_usage = include;
         self
     }
 

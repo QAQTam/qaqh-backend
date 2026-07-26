@@ -22,7 +22,7 @@ blocks?: Array<RoundBlock>,
 /**
  * true = this is the final round of the turn
  */
-is_final: boolean, } | { "type": "tool_results", turn_id: string, round_num: number, results: Array<ToolResultDef>, } | { "type": "tool_exec_delta", tool_call_id: string, delta: string, } | { "type": "session_restored", seed: string, turns: Array<TurnData>, tokens_used: number, cache_hit_pct: number,
+is_final: boolean, } | { "type": "tool_results", turn_id: string, round_num: number, results: Array<ToolResultDef>, } | { "type": "tool_exec_delta", tool_call_id: string, delta: string, } | { "type": "session_restored", seed: string, turns: Array<TurnData>, tokens_used: number, cache_hit_pct: number, usage?: UsageInfo, usage_totals: UsageInfo, usage_requests: number, cache_reported_requests: number,
 /**
  * Total number of turns in this session.
  */
@@ -58,7 +58,7 @@ todo_items?: Array<{ id: string, title: string, description: string, complexity:
 /**
  * The plan_submit tool-call ID.
  */
-call_id: string, approved: boolean, } | { "type": "dashboard", hp_connected: boolean, session_seed: string, tool_calls_total: number, tool_failures: number, current_phase: string, streaming: boolean, dsml_compat_count: number, documents?: Array<DocInfo>, recent_edits?: Array<string>, tasks?: Array<TaskInfo>, session_title?: string, usage?: UsageInfo, context_limit: number, model?: string, } | { "type": "done" } | { "type": "compact_start", turns_total: number, turns_keeping: number, } | { "type": "compact_end", summary_chars: number, turns_compacted: number, turns_removed: number, } | { "type": "compact_delta", delta: string, } | { "type": "cancelled" } | { "type": "shutdown_ack" } | { "type": "ready" } | { "type": "audit_record", tool_name: string, result_summary: string, success: boolean,
+call_id: string, approved: boolean, } | { "type": "dashboard", hp_connected: boolean, session_seed: string, tool_calls_total: number, tool_failures: number, current_phase: string, streaming: boolean, dsml_compat_count: number, documents?: Array<DocInfo>, recent_edits?: Array<string>, tasks?: Array<TaskInfo>, session_title?: string, usage?: UsageInfo, context_limit: number, model?: string, } | { "type": "usage_updated", turn_id: string, round_num: number, usage: UsageInfo, context_limit: number, model: string, } | { "type": "done" } | { "type": "compact_start", turns_total: number, turns_keeping: number, } | { "type": "compact_end", summary_chars: number, turns_compacted: number, turns_removed: number, } | { "type": "compact_delta", delta: string, } | { "type": "cancelled" } | { "type": "shutdown_ack" } | { "type": "ready" } | { "type": "audit_record", tool_name: string, result_summary: string, success: boolean,
 /**
  * ISO-8601 timestamp of the tool invocation.
  */

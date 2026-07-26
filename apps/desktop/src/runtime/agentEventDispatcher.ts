@@ -26,6 +26,7 @@ export function dispatchAgentEvent(
     case "session_created": effects.onSessionCreated(event.seed); return;
     case "session_restored": effects.onSessionRestored(event.seed); return;
     case "dashboard": effects.onDashboard(); return;
+    case "usage_updated": return;
     case "error": effects.onError(event.message); return;
     case "cancelled": effects.onCancelled(); return;
     case "ask_resolved": effects.onInteractionSettled(event.ask_id); return;

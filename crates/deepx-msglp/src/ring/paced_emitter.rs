@@ -205,6 +205,9 @@ impl Emitter for PacedEmitter {
             Agent2Ui::ToolCallPreview { id, .. } => {
                 self.replace_latest(format!("tool-preview:{id}"), event)
             }
+            Agent2Ui::UsageUpdated {
+                turn_id, round_num, ..
+            } => self.replace_latest(format!("usage:{turn_id}:{round_num}"), event),
             _ if !self.writer_dead.load(Ordering::SeqCst) => {
                 let _ = self.tx.send(event);
             }
@@ -339,6 +342,38 @@ mod tests {
             })
             .collect();
         assert_eq!(previews, ["{\"path\":\"x\"}"]);
+    }
+
+    #[test]
+    fn usage_updates_keep_only_latest_revision_per_request() {
+        let h = TestHarness::new(Duration::from_millis(20));
+        for total_tokens in [10, 20, 30] {
+            h.pacer.emit_delta(Agent2Ui::UsageUpdated {
+                turn_id: "t1".into(),
+                round_num: 2,
+                usage: deepx_types::UsageInfo {
+                    prompt_tokens: 10,
+                    completion_tokens: total_tokens - 10,
+                    total_tokens,
+                    prompt_cache_hit_tokens: 8,
+                    prompt_cache_miss_tokens: 2,
+                    reasoning_tokens: 0,
+                    cache_usage_reported: Some(true),
+                },
+                context_limit: 1000,
+                model: "test".into(),
+            });
+        }
+        thread::sleep(Duration::from_millis(30));
+        let totals: Vec<_> = h
+            .take_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Agent2Ui::UsageUpdated { usage, .. } => Some(usage.total_tokens),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(totals, [30]);
     }
 
     #[test]

@@ -84,6 +84,10 @@ pub struct EndpointSpec {
     /// Which field in the usage response carries the cache token count.
     /// Default: `PromptCacheHitTokens`.
     pub cache_field: CacheTokenField,
+    /// Request an additional usage chunk before the streaming terminator.
+    /// Kept per endpoint because not every OpenAI-compatible provider accepts
+    /// `stream_options.include_usage`.
+    pub include_stream_usage: bool,
     /// Whether this endpoint has a balance/info endpoint. Default: true.
     pub has_balance: bool,
     /// Whether this endpoint supports the thinking/reasoning parameter. Default: true.
@@ -111,6 +115,7 @@ impl Default for EndpointSpec {
             balance_path: None,
             thinking_mode: ThinkingParamMode::default(),
             cache_field: CacheTokenField::default(),
+            include_stream_usage: false,
             has_balance: true,
             supports_thinking: true,
             stateful: false,

@@ -11,6 +11,16 @@ import {
 const MAX_ACTIVITY = 50;
 const MAX_METRICS = 120;
 
+const emptyUsage = (): UsageInfo => ({
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+  prompt_cache_hit_tokens: 0,
+  prompt_cache_miss_tokens: 0,
+  reasoning_tokens: 0,
+  cache_usage_reported: false,
+});
+
 export function createRawSessionState(seed: string): RawSessionState {
   return {
     seed,
@@ -31,6 +41,10 @@ export function createRawSessionState(seed: string): RawSessionState {
       tokensUsed: 0,
       cacheHitPct: 0,
       contextLimit: 0,
+      usageTotals: emptyUsage(),
+      usageByRequest: {},
+      usageRequestCount: 0,
+      cacheReportedRequestCount: 0,
     },
     dashboard: { tasks: [], recentEdits: [], activity: [] },
     telemetry: [],
@@ -112,33 +126,24 @@ function appendNoticeOnce(
   return { ...state, notices: [...state.notices, notice] };
 }
 
-function usageFingerprint(usage: UsageInfo): string {
-  return [
-    usage.prompt_tokens,
-    usage.completion_tokens,
-    usage.total_tokens,
-    usage.prompt_cache_hit_tokens,
-    usage.prompt_cache_miss_tokens,
-    usage.reasoning_tokens,
-  ].join(":");
-}
-
 function upsertMetric(
   state: RawSessionState,
   usage: UsageInfo,
   now: number,
-  turnId = lastTurnId(state) ?? "session",
+  requestKey: string,
 ): RawSessionState {
-  const sampleKey = `${turnId}:${usageFingerprint(usage)}`;
   const metric = {
     ts: now,
     prompt_tokens: usage.prompt_tokens,
+    completion_tokens: usage.completion_tokens,
+    total_tokens: usage.total_tokens,
+    reasoning_tokens: usage.reasoning_tokens,
     cache_hit: usage.prompt_cache_hit_tokens,
     cache_miss: usage.prompt_cache_miss_tokens,
     cache_available: usage.prompt_cache_hit_tokens + usage.prompt_cache_miss_tokens > 0,
-    sample_key: sampleKey,
+    sample_key: requestKey,
   };
-  const existingIndex = state.telemetry.findIndex(point => point.sample_key === sampleKey);
+  const existingIndex = state.telemetry.findIndex(point => point.sample_key === requestKey);
   const telemetry = existingIndex < 0
     ? [...state.telemetry, metric].slice(-MAX_METRICS)
     : state.telemetry.map((point, index) => index === existingIndex ? metric : point);
@@ -146,6 +151,57 @@ function upsertMetric(
     ...state,
     telemetry,
   };
+}
+
+function replaceUsageTotal(total: number, previous: number, current: number): number {
+  return Math.max(0, total - previous + current);
+}
+
+function upsertUsage(
+  state: RawSessionState,
+  usage: UsageInfo,
+  requestKey: string,
+  now: number,
+  model?: string,
+  contextLimit?: number,
+): RawSessionState {
+  const existing = state.session.usageByRequest[requestKey];
+  const previous = existing ?? emptyUsage();
+  const previousCacheReported = Boolean(existing?.cache_usage_reported);
+  const currentCacheReported = Boolean(usage.cache_usage_reported);
+  const cacheReportedRequestCount = Math.max(
+    0,
+    state.session.cacheReportedRequestCount -
+      (previousCacheReported ? 1 : 0) +
+      (currentCacheReported ? 1 : 0),
+  );
+  const usageTotals: UsageInfo = {
+    prompt_tokens: replaceUsageTotal(state.session.usageTotals.prompt_tokens, previous.prompt_tokens, usage.prompt_tokens),
+    completion_tokens: replaceUsageTotal(state.session.usageTotals.completion_tokens, previous.completion_tokens, usage.completion_tokens),
+    total_tokens: replaceUsageTotal(state.session.usageTotals.total_tokens, previous.total_tokens, usage.total_tokens),
+    prompt_cache_hit_tokens: replaceUsageTotal(state.session.usageTotals.prompt_cache_hit_tokens, previous.prompt_cache_hit_tokens, usage.prompt_cache_hit_tokens),
+    prompt_cache_miss_tokens: replaceUsageTotal(state.session.usageTotals.prompt_cache_miss_tokens, previous.prompt_cache_miss_tokens, usage.prompt_cache_miss_tokens),
+    reasoning_tokens: replaceUsageTotal(state.session.usageTotals.reasoning_tokens, previous.reasoning_tokens, usage.reasoning_tokens),
+    cache_usage_reported: cacheReportedRequestCount > 0,
+  };
+  const next = {
+    ...state,
+    session: {
+      ...state.session,
+      usage,
+      usageTotals,
+      usageByRequest: { ...state.session.usageByRequest, [requestKey]: usage },
+      usageRequestCount: state.session.usageRequestCount + (existing ? 0 : 1),
+      cacheReportedRequestCount,
+      model: model ?? state.session.model,
+      contextLimit: contextLimit ?? state.session.contextLimit,
+      cacheHitPct: usageTotals.prompt_cache_hit_tokens + usageTotals.prompt_cache_miss_tokens > 0
+        ? usageTotals.prompt_cache_hit_tokens * 100 /
+          (usageTotals.prompt_cache_hit_tokens + usageTotals.prompt_cache_miss_tokens)
+        : 0,
+    },
+  };
+  return upsertMetric(next, usage, now, requestKey);
 }
 
 function enqueueInteraction(
@@ -238,10 +294,11 @@ export function reduceAgentEvent(
         usage: event.usage,
       }));
       if (event.usage) {
-        next = upsertMetric({
-          ...next,
-          session: { ...next.session, usage: event.usage },
-        }, event.usage, now, event.turn_id);
+        const existingRequest = Object.keys(next.session.usageByRequest).reverse()
+          .find(key => key.startsWith(`${event.turn_id}:`));
+        next = existingRequest
+          ? upsertUsage(next, event.usage, existingRequest, now)
+          : upsertUsage(next, event.usage, `${event.turn_id}:final`, now);
       }
       return next;
     }
@@ -364,6 +421,11 @@ export function reduceAgentEvent(
           hasMore: event.has_more,
           tokensUsed: event.tokens_used,
           cacheHitPct: event.cache_hit_pct,
+          usage: event.usage,
+          usageTotals: event.usage_totals ?? emptyUsage(),
+          usageByRequest: {},
+          usageRequestCount: event.usage_requests ?? 0,
+          cacheReportedRequestCount: event.cache_reported_requests ?? 0,
         },
       };
     case "more_turns": {
@@ -407,9 +469,27 @@ export function reduceAgentEvent(
           recentEdits: event.recent_edits ?? state.dashboard.recentEdits,
         },
       };
-      if (event.usage) next = upsertMetric(next, event.usage, now);
+      if (event.usage) {
+        next = upsertUsage(
+          next,
+          event.usage,
+          `${lastTurnId(next) ?? "session"}:dashboard`,
+          now,
+          event.model,
+          event.context_limit,
+        );
+      }
       return next;
     }
+    case "usage_updated":
+      return upsertUsage(
+        state,
+        event.usage,
+        `${event.turn_id}:${event.round_num}`,
+        now,
+        event.model,
+        event.context_limit,
+      );
     case "code_delta":
       return {
         ...state,

@@ -25,7 +25,7 @@ import InteractionModal from "./interactions/InteractionModal";
 import PermissionPrompt from "./interactions/PermissionPrompt";
 import PlanReviewPanel from "./PlanReviewPanel";
 import ContextPanel from "./ContextPanel";
-import EnvironmentPopover from "./shell/EnvironmentPopover";
+import InfoPopover from "./shell/InfoPopover";
 import ThreadHeader from "./shell/ThreadHeader";
 import TodoStatusStrip from "./GoalStatusStrip";
 
@@ -81,7 +81,7 @@ export default function ChatView(props: ChatViewProps) {
   };
   const usage = () => sessionUsage(session());
   const [mode, setMode] = createSignal("plan");
-  const [environmentOpen, setEnvironmentOpen] = createSignal(false);
+  const [infoOpen, setInfoOpen] = createSignal(false);
   const [statsOpen, setStatsOpen] = createSignal(false);
   const [branch, setBranch] = createSignal("");
   const [showGitWorkspace, setShowGitWorkspace] = createSignal(false);
@@ -140,7 +140,7 @@ export default function ChatView(props: ChatViewProps) {
   });
 
   createEffect(
-    () => ({ open: environmentOpen(), seed: seed() }),
+    () => ({ open: infoOpen(), seed: seed() }),
     ({ open, seed: currentSeed }) => {
     if (!open) return;
     request<string>("git.branch", { seed: currentSeed })
@@ -152,9 +152,9 @@ export default function ChatView(props: ChatViewProps) {
     <div class="chat-view">
       <ThreadHeader
         title={session().session.title || seed().slice(0, 8)}
-        environmentOpen={environmentOpen()}
+        infoOpen={infoOpen()}
         statsOpen={statsOpen()}
-        onToggleEnvironment={() => setEnvironmentOpen(value => !value)}
+        onToggleInfo={() => setInfoOpen(value => !value)}
         onToggleStats={() => setStatsOpen(value => !value)}
         onOpenLocation={() => { if (props.ui.workspace()) void openPath(props.ui.workspace()); }}
         workspace={props.ui.workspace()}
@@ -174,8 +174,8 @@ export default function ChatView(props: ChatViewProps) {
           });
         }}
       />
-      <Show when={environmentOpen()}>
-        <EnvironmentPopover
+      <Show when={infoOpen()}>
+        <InfoPopover
           session={session()}
           workspace={props.ui.workspace()}
           branch={branch()}
