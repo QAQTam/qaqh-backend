@@ -1,0 +1,16 @@
+{
+  "name": "deepx-monorepo",
+  "private": true,
+  "version": "0.9.0",
+  "description": "DeepX monorepo — AI agent desktop application",
+  "scripts": {
+    "dev:desktop": "pnpm --filter deepx-desktop dev",
+    "build:desktop": "pnpm --filter deepx-desktop build",
+    "check:desktop": "pnpm --filter deepx-desktop typecheck",
+    "lint:desktop": "pnpm --filter deepx-desktop lint"
+  },
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=10"
+  }
+}

@@ -1,0 +1,45 @@
+[package]
+name = "deepx-vector"
+version = "0.1.0"
+edition = "2024"
+description = "Vector embedding and semantic search for DeepX agent"
+license = "MIT"
+
+[features]
+default = ["candle"]
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers"]
+qwen3 = ["candle"]
+opencl = []
+vulkan = ["dep:llama-cpp-2"]
+
+[dependencies]
+# Candle — minimalist ML framework for Rust (optional: gated behind "candle" feature)
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+
+# HuggingFace Hub — model download and caching (optional: for candle feature)
+hf-hub = { version = "0.4", optional = true }
+
+# Tokenization (optional: for candle feature)
+tokenizers = { version = "0.21", optional = true }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+
+# llama.cpp via Vulkan backend (optional)
+llama-cpp-2 = { version = "0.1", features = ["vulkan"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[example]]
+name = "test_vulkan"
+required-features = ["vulkan"]

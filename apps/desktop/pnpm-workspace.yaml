@@ -1,0 +1,10 @@
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+minimumReleaseAgeExclude:
+  - electron
+  - electron-vite
+  - '@solidjs/web@2.0.0-beta.21'
+  - solid-js@2.0.0-beta.21
+  - vite-plugin-solid@3.0.0-next.14

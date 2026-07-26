@@ -1,0 +1,23 @@
+target/
+dist/
+crates/deepx-tauri/src-tauri/binaries/
+**/*.rs.bk
+*.swp
+*.swo
+.env
+node_modules/
+.deepx-trash/
+*.exe
+bindings/
+tmp/
+.deepx/
+skills/
+# monorepo additions
+apps/desktop/out/
+apps/desktop/release/
+apps/desktop/build/
+apps/desktop/.cache/
+apps/installer/payload/desktop/
+apps/installer/dist/
+.codegraph/
+skills/

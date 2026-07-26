@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/deepx-gate",
+    "crates/deepx-config",
+    "crates/deepx-skills",
+    "crates/deepx-msglp",
+    "crates/deepx-message",
+    "crates/deepx-types",
+    "crates/deepx-proto",
+    "crates/deepx-companion",
+    "crates/deepx-runtime",
+    "crates/deepx-client",
+    "crates/deepx-daemon",
+    "crates/deepx-tools",
+    "crates/deepx-session",
+    "crates/deepx-subagent",
+    "crates/deepx-gate-testui",
+    "crates/deepx-vector",
+    "apps/installer",
+    "apps/deepx-tui",
+]
+
+[workspace.package]
+version = "0.9.0"
+edition = "2024"
+license = "MIT"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+string_slice = "deny"
+

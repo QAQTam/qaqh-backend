@@ -1,0 +1,56 @@
+# apps/deepx-tui/justfile — Build & package the TUI app
+#
+# Targets:
+#   just compile         — compile TUI binary → out/deepx-tui.exe
+#   just compile-release  — compile release TUI → out/deepx-tui.exe
+#   just package          — build TUI + bundle daemon → out/*.zip
+#   just clean            — remove out/ contents
+#   just run              — compile and launch TUI
+
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
+# ---- helpers ---------------------------------------------------------------
+
+_version := "0.9.0"
+_target  := "x86_64-pc-windows-msvc"
+_out_dir := "out"
+_pkg_name := "deepx-tui-v" + _version + "-" + _target
+
+# ---- targets ---------------------------------------------------------------
+
+# Compile debug binary (fast, for development)
+compile:
+    cargo build --package deepx-tui
+    powershell -NoLogo -Command "New-Item -Force -ItemType Directory -Path '{{_out_dir}}' | Out-Null; Copy-Item -Force ../../target/debug/deepx-tui.exe '{{_out_dir}}/'; Write-Host '  → copied to {{_out_dir}}/deepx-tui.exe'"
+
+# Compile release binary
+compile-release:
+    cargo build --release --package deepx-tui
+    powershell -NoLogo -Command "New-Item -Force -ItemType Directory -Path '{{_out_dir}}' | Out-Null; Copy-Item -Force ../../target/release/deepx-tui.exe '{{_out_dir}}/'; Write-Host '  → copied to {{_out_dir}}/deepx-tui.exe'"
+
+# Copy daemon binary into out/ (build daemon separately first)
+bundle-daemon:
+    powershell -NoLogo -Command "if (Test-Path ../../target/release/deepx-daemon.exe) { Copy-Item -Force ../../target/release/deepx-daemon.exe '{{_out_dir}}/'; Write-Host '  ✓ daemon copied' } else { Write-Warning 'daemon not found at ../../target/release/deepx-daemon.exe' }"
+
+# Build release TUI + bundle daemon → out/{{_pkg_name}}.zip
+package: compile-release bundle-daemon
+    powershell -NoLogo -Command "New-Item -Force -ItemType Directory -Path '{{_out_dir}}/{{_pkg_name}}' | Out-Null; Copy-Item -Force '{{_out_dir}}/deepx-tui.exe' '{{_out_dir}}/{{_pkg_name}}/'; Copy-Item -Force '{{_out_dir}}/deepx-daemon.exe' '{{_out_dir}}/{{_pkg_name}}/'; @{ name='deepx-tui'; version='{{_version}}'; target='{{_target}}'; built_at=(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ') } | ConvertTo-Json | Set-Content -Encoding utf8 '{{_out_dir}}/{{_pkg_name}}/manifest.json'; Compress-Archive -Force -Path '{{_out_dir}}/{{_pkg_name}}/*' -DestinationPath '{{_out_dir}}/{{_pkg_name}}.zip'; Remove-Item -Recurse -Force '{{_out_dir}}/{{_pkg_name}}'; Write-Host '  ✓ {{_out_dir}}/{{_pkg_name}}.zip'"
+
+# Build TUI + daemon from scratch, then package
+package-full:
+    cargo build --release --package deepx-daemon
+    just compile-release
+    just bundle-daemon
+    just package
+
+# Remove all built artifacts
+clean:
+    powershell -NoLogo -Command "if (Test-Path '{{_out_dir}}') { Remove-Item -Recurse -Force '{{_out_dir}}' }; New-Item -Force -ItemType Directory -Path '{{_out_dir}}' | Out-Null; Write-Host '  ✓ cleaned'"
+
+# Compile and run the TUI (debug mode)
+run: compile
+    .\{{_out_dir}}\deepx-tui.exe
+
+# Compile release and run
+run-release: compile-release
+    .\{{_out_dir}}\deepx-tui.exe

@@ -1,0 +1,127 @@
+# DeepX Installer — 构建系统
+# 用法: just [recipe]
+#
+# 期望的目录布局（三个仓库互为兄弟目录）:
+#   ~/dev/
+#   ├── deepx/            # 后端 (github.com/.../deepx)
+#   ├── deepx-desktop/    # 前端 (github.com/.../deepx-desktop)
+#   └── deepx-installer/  # 安装器 (github.com/QAQTam/deepx-installer)
+#
+# 如果布局不同，设置环境变量或修改下方路径:
+#   $env:DEEPX_BACKEND="D:\MyPath\DeepX"
+#   $env:DEEPX_FRONTEND="D:\MyPath\deepx-desktop"
+
+_backend  := env_var_or_default("DEEPX_BACKEND",  "../deepx")
+_frontend := env_var_or_default("DEEPX_FRONTEND", "../deepx-desktop")
+
+# ——— Windows ——————————————————————————————————————
+[windows]
+set windows-shell := ["pwsh.exe", "-NoLogo", "-Command"]
+
+[windows]
+default:
+    @just --list
+
+[windows]
+_collect-payload:
+    @pwsh.exe -File scripts/collect-payload.ps1 -FrontendRoot "{{_frontend}}"
+
+[windows]
+_finalize:
+    @pwsh.exe -File scripts/finalize.ps1
+
+[windows]
+_sync-uninstaller:
+    @pwsh.exe -NoLogo -Command "Copy-Item -Force 'target/release/deepx-uninstaller.exe' 'payload/deepx-uninstaller.exe'"
+
+[windows]
+clean:
+    cargo clean
+    @pwsh.exe -File scripts/clean.ps1
+
+[windows]
+status:
+    @pwsh.exe -File scripts/status.ps1
+
+# ——— Linux / macOS ————————————————————————————————
+[unix]
+default:
+    @just --list
+
+[unix]
+_collect-payload:
+    @echo "TODO: Linux collect-payload — 需要 bash 版收集脚本"
+    @exit 1
+
+[unix]
+_finalize:
+    @echo "TODO: Linux finalize — 需要 bash 版 finalize 脚本"
+    @exit 1
+
+[unix]
+_sync-uninstaller:
+    cp -f target/release/deepx-uninstaller payload/deepx-uninstaller 2>/dev/null || true
+
+[unix]
+clean:
+    cargo clean
+    rm -rf payload/desktop/ payload/gate/ payload/companion/ dist/
+
+[unix]
+status:
+    @echo "=== 产物状态 ==="
+    @ls -lh target/release/deepx-installer 2>/dev/null && echo "  ✓ installer" || echo "  ✗ installer"
+    @ls -lh target/release/deepx-uninstaller 2>/dev/null && echo "  ✓ uninstaller" || echo "  ✗ uninstaller"
+    @ls payload/config/default.toml 2>/dev/null && echo "  ✓ payload config" || echo "  ✗ payload config"
+
+# ——— 通用 recipes ——————————————————————————————————
+
+# 安装器编译 + 检查
+build:
+    cargo build --release
+
+check:
+    cargo check
+
+# 后端（daemon 由前端 package:dir:local 自动构建，此 recipe 为空）
+backend:
+    @echo "daemon 由前端 package:dir:local 自动构建"
+
+# 前端
+frontend:
+    cd "{{_frontend}}" && pnpm run package:dir:local
+
+# 收集 + 构建安装器
+installer: _collect-payload _build-installer
+
+# 全流程
+all: backend frontend installer _sync-uninstaller _finalize
+
+# SFX 快速打包（payload 已就位）
+sfx-only: _build-installer _sync-uninstaller _finalize
+
+# 跳过前后端构建，从已有产物组装
+quick: _collect-payload _build-installer _finalize
+
+# 内部
+_build-installer:
+    cargo build --release
+
+# ——— 开发辅助 ——————————————————————————————��———————
+
+# 首次克隆: 把三个仓库拉到兄弟目录
+setup:
+    @echo "Cloning sibling repositories..."
+    @if [ ! -d "{{_backend}}" ]; then \
+        echo "  cloning backend..."; \
+        git clone https://github.com/QAQTam/deepx.git "{{_backend}}"; \
+    else \
+        echo "  backend already exists at {{_backend}}"; \
+    fi
+    @if [ ! -d "{{_frontend}}" ]; then \
+        echo "  cloning frontend..."; \
+        git clone https://github.com/QAQTam/deepx-desktop.git "{{_frontend}}"; \
+    else \
+        echo "  frontend already exists at {{_frontend}}"; \
+    fi
+    @echo "Done. Run 'just all' to build."

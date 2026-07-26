@@ -1,0 +1,25 @@
+:root {
+  --dx-sidebar-width: 236px;
+  --dx-transcript-width: 900px;
+  --dx-composer-width: 900px;
+  --conversation-width: 900px;
+  --conversation-shift-x: 0px;
+  --dx-titlebar-height: 36px;
+  --dx-header-height: 48px;
+  /* Compatibility names used by the conversation surface. They deliberately
+     alias the application tokens so every view follows the active theme. */
+  --dx-bg: var(--bg-primary);
+  --dx-surface: var(--bg-primary);
+  --dx-surface-muted: var(--bg-secondary);
+  --dx-surface-hover: var(--bg-hover);
+  --dx-text: var(--text-primary);
+  --dx-text-muted: var(--text-muted);
+  --dx-border: var(--border-panel);
+  --dx-shadow: var(--shadow-card);
+  --dx-accent: var(--accent);
+  --dx-danger: var(--red);
+  --dx-danger-soft: color-mix(in srgb, var(--red) 10%, var(--bg-primary));
+  --dx-radius-sm: var(--radius-sm);
+  --dx-radius-md: var(--radius-md);
+  --dx-radius-lg: var(--radius-lg);
+}

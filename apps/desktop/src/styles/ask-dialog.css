@@ -1,0 +1,252 @@
+/* ── Ask Dialog ── */
+.ask-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,0.3);
+  backdrop-filter: blur(var(--overlay-glass-blur));
+  -webkit-backdrop-filter: blur(var(--overlay-glass-blur));
+  display: flex; align-items: center; justify-content: center;
+}
+.ask-dialog {
+  background: var(--bg-primary);
+  border: 0.5px solid var(--border-panel);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dialog);
+  padding: 20px 24px;
+  min-width: 360px;
+  max-width: 480px;
+  width: 90%;
+}
+.ask-header {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 12px;
+}
+.ask-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: var(--radius);
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent); font-weight: 700; font-size: 16px;
+}
+.ask-title {
+  font-size: 14px; font-weight: 600; color: var(--text-secondary);
+  flex: 1;
+}
+.ask-close {
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; padding: 4px; border-radius: var(--radius);
+  display: flex; align-items: center; justify-content: center;
+}
+.ask-close:hover { color: var(--text-primary); background: var(--bg-hover); }
+.ask-question {
+  font-size: 15px; color: var(--text-primary);
+  margin-bottom: 16px; line-height: 1.5;
+}
+.ask-options {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ask-option-btn {
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family: var(--font-sans); font-size: 14px;
+  cursor: pointer; text-align: left;
+  transition: background var(--transition), border-color var(--transition);
+}
+.ask-option-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ask-custom {
+  display: flex; gap: 8px;
+}
+.ask-input {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family: var(--font-sans); font-size: 14px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+.ask-input:focus {
+  border-color: var(--accent);
+}
+.ask-send-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px;
+  border: none; border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: opacity var(--transition);
+  flex-shrink: 0;
+}
+.ask-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ask-send-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+/* ── Batch Ask Form ── */
+.ask-dialog-batch {
+  max-width: 520px;
+  max-height: 90vh;
+  display: flex; flex-direction: column;
+}
+
+/* Orange progress bar */
+.ask-progress-bar {
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  margin: 0 0 12px;
+  overflow: hidden;
+}
+.ask-progress-fill {
+  height: 100%;
+  background: #f97316; /* orange-500 */
+  border-radius: 2px;
+  transition: width 0.25s ease;
+}
+
+/* Step indicators — Q1 / Q2 / Q3 */
+.ask-progress-steps {
+  display: flex; justify-content: center; gap: 6px;
+  padding: 0 0 14px;
+}
+.ask-step-dot {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px; font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition), color var(--transition);
+}
+.ask-step-dot:hover {
+  border-color: var(--accent);
+  color: var(--text-secondary);
+}
+.ask-step-active {
+  border-color: #f97316;
+  color: #f97316;
+  background: rgba(249,115,22,0.08);
+}
+.ask-step-filled:not(.ask-step-active) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Page body */
+.ask-form-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 100px;
+}
+.ask-form-page {
+  animation: ask-slide-in 0.15s ease;
+}
+.ask-slide-forward {
+  animation-name: ask-slide-forward;
+}
+.ask-slide-back {
+  animation-name: ask-slide-back;
+}
+@keyframes ask-slide-forward {
+  from { opacity: 0.6; transform: translateX(12px); }
+  to   { opacity: 1;   transform: translateX(0); }
+}
+@keyframes ask-slide-back {
+  from { opacity: 0.6; transform: translateX(-12px); }
+  to   { opacity: 1;   transform: translateX(0); }
+}
+.ask-form-section {
+  padding: 4px 0;
+}
+
+/* Question label */
+.ask-form-label {
+  margin-bottom: 12px;
+}
+
+/* Options */
+.ask-option-btn {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 8px;
+}
+.ask-option-radio {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  flex-shrink: 0;
+  transition: border-color var(--transition), background var(--transition);
+}
+.ask-option-selected .ask-option-radio {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: inset 0 0 0 3px var(--bg-secondary);
+}
+.ask-option-selected {
+  background: rgba(var(--accent-rgb), 0.08) !important;
+  border-color: var(--accent) !important;
+}
+
+/* Custom input — always visible */
+.ask-custom {
+  margin-top: 4px;
+}
+
+/* Footer: nav + submit (always visible) */
+.ask-form-footer {
+  padding-top: 12px;
+  border-top: 0.5px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+}
+.ask-nav {
+  display: flex; gap: 8px;
+}
+.ask-nav-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: var(--font-sans); font-size: 13px; font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition);
+}
+.ask-nav-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ask-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.ask-submit-btn {
+  padding: 8px 20px;
+  border: none; border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--transition), background var(--transition);
+  white-space: nowrap;
+}
+.ask-submit-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.ask-submit-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

@@ -1,0 +1,383 @@
+/* ── Settings Page ── */
+.settings-page {
+  display: flex; flex-direction: column;
+  height: 100%; overflow: hidden;
+  background: var(--bg-primary);
+}
+
+/* Shared page hierarchy: quiet navigation, elevated content controls. */
+.settings-page-header{padding:16px 24px}.settings-nav{padding:12px 8px;background:var(--bg-secondary);border-right:var(--panel-border)}.settings-nav-item{border-radius:var(--radius);padding:8px 12px}.settings-nav-item.active{background:color-mix(in srgb,var(--accent) 12%,var(--bg-primary));box-shadow:inset 2px 0 var(--accent)}.settings-body{padding:24px 32px 40px;max-width:980px}.settings-section{padding:18px;border:var(--panel-border);border-radius:var(--radius-md);background:var(--bg-secondary);margin-bottom:14px}.settings-section-title{color:var(--text-secondary);margin-bottom:14px}.settings-row input,.settings-row select{background:var(--bg-primary);border-radius:var(--radius-sm);padding:8px 10px}.settings-save-btn{border-radius:var(--radius-sm);box-shadow:0 2px 8px color-mix(in srgb,var(--accent) 25%,transparent)}
+
+/* ── Header ── */
+.settings-page-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 0.5px solid var(--border-divider);
+  flex-shrink: 0;
+}
+.settings-page-header h1 {
+  font-size: 18px; font-weight: 600; color: var(--text-primary); margin: 0;
+}
+.settings-save-btn {
+  padding: 5px 16px;
+  border: none; border-radius: var(--radius);
+  background: var(--accent); color: #fff;
+  font-size: 13px; font-weight: 500; cursor: pointer;
+  transition: background var(--transition);
+  white-space: nowrap;
+}
+.settings-save-btn:hover { background: var(--accent-hover); }
+.settings-save-btn.saved {
+  background: #16a34a;
+  animation: save-pop 0.45s ease-out;
+}
+@keyframes save-pop {
+  0% { transform: scale(0.94); }
+  40% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+
+/* ── Layout: nav + body ── */
+.settings-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── Left Navigation ── */
+.settings-nav {
+  width: 200px;
+  flex-shrink: 0;
+  border-right: 0.5px solid var(--border-divider);
+  padding: 8px 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-nav-item {
+  display: block;
+  width: 100%;
+  padding: 7px 16px;
+  text-align: left;
+  background: none;
+  border: none;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+  border-radius: 0;
+  font-family: inherit;
+}
+.settings-nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.settings-nav-item.active {
+  background: var(--bg-tertiary);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* ── Right Content Area ── */
+.settings-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px 24px 32px;
+}
+
+/* ── Section ── */
+.settings-section {
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 0.5px solid var(--border-divider);
+}
+.settings-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+.settings-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 12px;
+}
+.settings-section-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: -4px 0 12px;
+  line-height: 1.5;
+}
+
+/* ── Row (label + control) ── */
+.settings-row {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.settings-row:last-child {
+  margin-bottom: 0;
+}
+.settings-row label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-row input,
+.settings-row select {
+  width: 100%;
+  max-width: 360px;
+  padding: 6px 10px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-input);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color var(--transition);
+}
+.settings-row input:focus,
+.settings-row select:focus {
+  border-color: var(--accent);
+}
+.settings-row input[type="number"] {
+  max-width: 160px;
+}
+.settings-row option {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* ── Input Group (input + hint) ── */
+.settings-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 360px;
+}
+.settings-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ── Secret Row (password + eye) ── */
+.settings-secret-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.settings-secret-row input {
+  flex: 1;
+  max-width: 280px;
+}
+
+/* ── Configured Badge ── */
+.settings-configured-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--green);
+  padding: 4px 0;
+}
+.settings-configured-badge::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+/* ── Link-style button (replace / cancel) ── */
+.settings-link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.settings-link-btn:hover {
+  text-decoration: underline;
+  color: var(--accent-hover);
+}
+
+/* ── Toggle ── */
+.settings-toggle {
+  display: inline-block;
+  position: relative;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+}
+.settings-toggle input { display: none; }
+.settings-toggle-track {
+  display: block;
+  width: 100%; height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  transition: background var(--transition);
+  position: relative;
+}
+.settings-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform var(--transition);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+.settings-toggle input:checked + .settings-toggle-track {
+  background: var(--accent);
+}
+.settings-toggle input:checked + .settings-toggle-track::after {
+  transform: translateX(16px);
+}
+
+/* ── Checkbox Grid ── */
+.settings-checkbox-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 400px;
+}
+.settings-checkbox-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 120ms;
+}
+.settings-checkbox-item:hover { background: var(--bg-hover); }
+.settings-checkbox-item.checked {
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent);
+}
+.settings-checkbox-item input { display: none; }
+.settings-checkbox-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── DB Description ── */
+.settings-db-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* ── Loading ── */
+.settings-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* ── Error state ── */
+.settings-error {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px;
+  color: var(--text-secondary);
+}
+.settings-error p {
+  margin: 0;
+  font-size: 14px;
+}
+.settings-error-detail {
+  font-size: 12px !important;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  max-width: 400px;
+  word-break: break-all;
+}
+
+/* ── Migration Modal (unchanged from original) ── */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.modal-card {
+  background: var(--bg-primary);
+  border: 0.5px solid var(--border-panel);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  max-width: 440px; width: 90%;
+  box-shadow: var(--shadow-dialog);
+}
+
+/* ── Responsive: narrow → horizontal nav ── */
+@media (max-width: 640px) {
+  .settings-layout {
+    flex-direction: column;
+  }
+  .settings-nav {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px 8px;
+    border-right: none;
+    border-bottom: 0.5px solid var(--border-divider);
+    gap: 4px;
+  }
+  .settings-nav-item {
+    white-space: nowrap;
+    padding: 5px 10px;
+    font-size: 12px;
+    border-radius: var(--radius-sm);
+    width: auto;
+  }
+  .settings-nav-item.active {
+    background: rgba(var(--accent-rgb), 0.12);
+  }
+  .settings-body {
+    padding: 12px 16px 24px;
+  }
+  .settings-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+    align-items: flex-start;
+  }
+  .settings-row input,
+  .settings-row select {
+    max-width: 100%;
+  }
+  .settings-row input[type="number"] {
+    max-width: 100%;
+  }
+  .settings-input-group {
+    max-width: 100%;
+  }
+}

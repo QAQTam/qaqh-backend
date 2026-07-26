@@ -1,0 +1,15 @@
+# 构建产物
+target/
+dist/
+
+# payload 中由脚本生成的子目录（模板 config 除外，需入库）
+payload/desktop/
+payload/daemon/
+payload/gate/
+payload/companion/
+payload/deepx-uninstaller.exe
+
+# 系统文件
+.DS_Store
+Thumbs.db
+.deepx/

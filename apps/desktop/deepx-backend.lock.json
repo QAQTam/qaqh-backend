@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "repository": "QAQTam/DeepX",
+  "version": "0.9.0",
+  "protocol_version": 1,
+  "git_commit": "db8f387f535a0b4f7f3bd61268313101a66cdfb0",
+  "release_manifest_url": "https://github.com/QAQTam/DeepX/releases/download/v0.9.0/deepx-release.json"
+}

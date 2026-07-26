@@ -1,0 +1,324 @@
+@import "tailwindcss";
+
+/* ── Full-height chain: ensure every ancestor passes 100% down ── */
+html, body, #root { height: 100%; margin: 0; overflow: hidden; }
+
+/* ── Bundled Fonts ── */
+@font-face {
+  font-family: "Cascadia Code";
+  src: local("Cascadia Code"), url("/fonts/CascadiaCode.ttf") format("truetype");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MiSans";
+  src: local("MiSans"), url("/fonts/MiSans-Regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── DeepX Tauri App Styles ── */
+:root {
+  --bg-primary: #f4f2ef;
+  --bg-secondary: #ebe8e3;
+  --bg-tertiary: #e0dcd6;
+  --bg-hover: #d5d1ca;
+  --border-panel: rgba(0,0,0,0.08);
+  --border-card: rgba(0,0,0,0.06);
+  --border-input: rgba(0,0,0,0.10);
+  --border-secondary: rgba(0,0,0,0.08);
+  --border-divider: rgba(0,0,0,0.05);
+  --border: #c8c4bc;
+  --text-primary: #1e1e1e;
+  --text-secondary: #555555;
+  --text-muted: #8a8a8a;
+  --accent: #d4783c;
+  --accent-rgb: 212,120,60;
+  --accent-hover: #e08850;
+  --green: #5a8a4a;
+  --green-rgb: 90,138,74;
+  --red: #c4553d;
+  --red-rgb: 196,85,61;
+  --yellow: #b8860b;
+  --yellow-rgb: 184,134,11;
+  --purple: #8b6baa;
+  --dx-chart-chat: #5a8a4a;
+  --dx-chart-thinking: #8b6baa;
+  --dx-chart-tool-call: #d4783c;
+  --dx-chart-tool-result: #c4553d;
+  --dx-chart-schema: #4a7ab5;
+  --dx-chart-system: #8a7565;
+  --dx-chart-request: #d4783c;
+  --dx-chart-cache: #5a8a4a;
+  --font-sans: "MiSans", "Noto Sans SC", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "MiSans", "Noto Sans SC", monospace;
+  --radius-sm: 3px;
+  --radius: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+  --transition: 200ms ease;
+
+  /* Panel geometry — shared across Sidebar & StatusPanel */
+  --panel-glass-blur: 14px;
+  --panel-glass-saturate: 1.2;
+  --panel-border: 0.5px solid var(--border-panel);
+  --overlay-glass-blur: 4px;
+
+  /* Diff colors — light theme */
+  --text-diff-del: #c03030;
+  --text-diff-add: #2a7a2a;
+  --text-diff-ctx: #5a5a5a;
+  --text-diff-hdr: #4a7ab5;
+  --text-diff-body: #3a3a3a;
+  --bg-diff-del: rgba(192,48,48,0.18);
+  --bg-diff-add: rgba(42,122,42,0.18);
+  --bg-diff-hdr-border: rgba(0,0,0,0.06);
+  --text-diff-ln: #8a8a8a;
+
+  /* Frosted glass (light) */
+  --frost-bg: rgba(0,0,0,0.03);
+  --frost-card-bg: rgba(0,0,0,0.02);
+  --frost-float-bg: rgba(0,0,0,0.05);
+  --frost-float-shadow: rgba(0,0,0,0.10);
+
+  /* Shadows */
+  --shadow-card: 0 8px 40px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06);
+  --shadow-dialog: 0 16px 48px rgba(0,0,0,0.14);
+  --shadow-fab: 0 2px 8px rgba(0,0,0,0.08);
+  --shadow-toast: 0 4px 16px rgba(0,0,0,0.08);
+
+  /* Panel semi-transparent backgrounds */
+  --bg-glass-panel: rgba(244,242,239,0.82);
+  --bg-glass-bar: rgba(244,242,239,0.75);
+
+  /* Heatmap (green scale) */
+  --heatmap-l1: #c6e48b;
+  --heatmap-l2: #7bc96f;
+  --heatmap-l3: #449c4a;
+  --heatmap-l4: #1a6b2a;
+
+  /* Tool card body */
+  --bg-tool-body: #1a1a1a;
+  --text-tool-body: #c0c0c0;
+}
+
+/* ── Dark theme (pure black, LCD-friendly) ── */
+[data-theme="dark"] {
+  --bg-primary: #000000;
+  --bg-secondary: #0a0a0a;
+  --bg-tertiary: #141414;
+  --bg-hover: #1f1f1f;
+  --border-panel: rgba(255,255,255,0.08);
+  --border-card: rgba(255,255,255,0.06);
+  --border-input: rgba(255,255,255,0.10);
+  --border-secondary: rgba(255,255,255,0.08);
+  --border-divider: rgba(255,255,255,0.04);
+  --border: #333333;
+  --text-primary: #e8e4dd;
+  --text-secondary: #a09a8c;
+  --text-muted: #706b5e;
+  --accent: #e08850;
+  --accent-rgb: 224,136,80;
+  --accent-hover: #e89860;
+  --green: #6a9a5a;
+  --green-rgb: 106,154,90;
+  --red: #d4654d;
+  --red-rgb: 212,101,77;
+  --yellow: #c8961b;
+  --yellow-rgb: 200,150,27;
+  --purple: #9b7bba;
+  --dx-chart-chat: #8fcf7a;
+  --dx-chart-thinking: #c6a7ee;
+  --dx-chart-tool-call: #f0a264;
+  --dx-chart-tool-result: #ee8b78;
+  --dx-chart-schema: #8db9dc;
+  --dx-chart-system: #c1ad99;
+  --dx-chart-request: #f0a264;
+  --dx-chart-cache: #8fcf7a;
+
+  --text-diff-del: #ff9080;
+  --text-diff-add: #a0d090;
+  --text-diff-ctx: #888;
+  --text-diff-hdr: #7badc5;
+  --text-diff-body: #d0d0d0;
+  --bg-diff-del: rgba(212,101,77,0.25);
+  --bg-diff-add: rgba(106,154,90,0.25);
+  --bg-diff-hdr-border: rgba(255,255,255,0.08);
+  --text-diff-ln: #706b5e;
+
+  --frost-bg: rgba(255,255,255,0.04);
+  --frost-card-bg: rgba(255,255,255,0.02);
+  --frost-float-bg: rgba(255,255,255,0.06);
+  --frost-float-shadow: rgba(0,0,0,0.3);
+
+  --shadow-card: 0 8px 40px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2);
+  --shadow-dialog: 0 16px 48px rgba(0,0,0,0.5);
+  --shadow-fab: 0 2px 8px rgba(0,0,0,0.3);
+  --shadow-toast: 0 4px 16px rgba(0,0,0,0.3);
+
+  --bg-glass-panel: rgba(0,0,0,0.65);
+  --bg-glass-bar: rgba(0,0,0,0.60);
+
+  --heatmap-l1: #8fd47a;
+  --heatmap-l2: #5ab84e;
+  --heatmap-l3: #3a9a3a;
+  --heatmap-l4: #228b22;
+
+  --bg-tool-body: #0e0e0e;
+  --text-tool-body: #c0c0c0;
+}
+
+/* ── Dark Gray theme (OLED-friendly) ── */
+[data-theme="dark-gray"] {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #212121;
+  --bg-tertiary: #2a2a2a;
+  --bg-hover: #333333;
+  --border-panel: rgba(255,255,255,0.08);
+  --border-card: rgba(255,255,255,0.06);
+  --border-input: rgba(255,255,255,0.10);
+  --border-secondary: rgba(255,255,255,0.08);
+  --border-divider: rgba(255,255,255,0.04);
+  --border: #3d3d3d;
+  --text-primary: #e8e4dd;
+  --text-secondary: #a09a8c;
+  --text-muted: #706b5e;
+  --accent: #d4783c;
+  --accent-rgb: 212,120,60;
+  --accent-hover: #e08850;
+  --green: #5a8a4a;
+  --green-rgb: 90,138,74;
+  --red: #c4553d;
+  --red-rgb: 196,85,61;
+  --yellow: #b8860b;
+  --yellow-rgb: 184,134,11;
+  --purple: #8b6baa;
+  --dx-chart-chat: #8fcf7a;
+  --dx-chart-thinking: #c6a7ee;
+  --dx-chart-tool-call: #f0a264;
+  --dx-chart-tool-result: #ee8b78;
+  --dx-chart-schema: #8db9dc;
+  --dx-chart-system: #c1ad99;
+  --dx-chart-request: #f0a264;
+  --dx-chart-cache: #8fcf7a;
+
+  --text-diff-del: #f09080;
+  --text-diff-add: #98cf88;
+  --text-diff-ctx: #888;
+  --text-diff-hdr: #7badc5;
+  --text-diff-body: #d0d0d0;
+  --bg-diff-del: rgba(196,85,61,0.25);
+  --bg-diff-add: rgba(90,138,74,0.25);
+  --bg-diff-hdr-border: rgba(255,255,255,0.08);
+  --text-diff-ln: #706b5e;
+
+  --frost-bg: rgba(255,255,255,0.04);
+  --frost-card-bg: rgba(255,255,255,0.02);
+  --frost-float-bg: rgba(255,255,255,0.06);
+  --frost-float-shadow: rgba(0,0,0,0.3);
+
+  --shadow-card: 0 8px 40px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2);
+  --shadow-dialog: 0 16px 48px rgba(0,0,0,0.5);
+  --shadow-fab: 0 2px 8px rgba(0,0,0,0.3);
+  --shadow-toast: 0 4px 16px rgba(0,0,0,0.3);
+
+  --bg-glass-panel: rgba(26,26,26,0.82);
+  --bg-glass-bar: rgba(26,26,26,0.75);
+
+  --heatmap-l1: #8fd47a;
+  --heatmap-l2: #5ab84e;
+  --heatmap-l3: #3a9a3a;
+  --heatmap-l4: #228b22;
+
+  --bg-tool-body: #141414;
+  --text-tool-body: #c0c0c0;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #root { height: 100%; overflow: hidden; }
+body { font-family: var(--font-sans); background: var(--bg-primary); color: var(--text-primary); font-size: 14px; line-height: 1.5; }
+
+/* ── Unified Scrollbar (global) ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── App Layout ── */
+.app-container { display: grid; grid-template-columns: var(--sidebar-w, 220px) 1fr; grid-template-rows: 1fr; height: 100vh; }
+
+/* ── Sidebar resize handle ── */
+.sidebar-resize-handle {
+  position: absolute; right: -2px; top: 0; bottom: 0;
+  width: 6px; cursor: col-resize; z-index: 2;
+  transition: background 150ms;
+}
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle.active { background: var(--accent); }
+.sidebar { position: relative; }
+
+/* ── Main Content ── */
+.main-content {
+  --panel-foot: 356px;
+  --content-w: 1000px;
+  display: flex; flex-direction: column; overflow: hidden; background: var(--bg-primary); animation: pageIn 0.25s ease;
+}
+@keyframes pageIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ── Open Tabs (multi-session tab bar) ── */
+.open-tabs {
+  display: flex; align-items: center; gap: 2px;
+  padding: 0 8px; height: 36px; flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-bottom: 0.5px solid var(--border-divider);
+  overflow-x: auto; overflow-y: hidden;
+}
+.open-tabs::-webkit-scrollbar { height: 0; }
+.tab-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 12px; border: none; border-radius: var(--radius);
+  background: transparent; color: var(--text-muted);
+  font-size: 12px; font-family: var(--font-mono); cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+  white-space: nowrap; flex-shrink: 0;
+}
+.tab-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
+.tab-btn.active { background: var(--bg-tertiary); color: var(--accent); font-weight: 500; }
+.tab-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: var(--radius);
+  font-size: 14px; line-height: 1; color: var(--text-muted);
+  transition: background var(--transition), color var(--transition);
+}
+.tab-close:hover { background: var(--bg-hover); color: var(--red); }
+
+/* ── Font Size Utilities ── */
+.text-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.4;
+}
+.text-xs { font-size: 11px; letter-spacing: 0.05em; }
+.text-sm { font-size: 13px; line-height: 1.6; }
+.text-base { font-size: 15px; line-height: 1.7; }
+.mono { font-family: var(--font-mono); }
+
+/* ── Frosted Glass ── */
+.frost-panel {
+  background: var(--frost-bg);
+  backdrop-filter: blur(var(--panel-glass-blur)) saturate(var(--panel-glass-saturate));
+  -webkit-backdrop-filter: blur(var(--panel-glass-blur)) saturate(var(--panel-glass-saturate));
+}
+.frost-card {
+  background: var(--frost-card-bg);
+}
+.frost-float {
+  background: var(--frost-float-bg);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  box-shadow: 0 8px 32px var(--frost-float-shadow);
+}

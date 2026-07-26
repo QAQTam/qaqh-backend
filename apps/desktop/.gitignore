@@ -1,0 +1,12 @@
+node_modules/
+out/
+dist/
+release/
+.cache/
+build/sidecar/
+build/icon.ico
+build/icon.png
+build/legacy-icon-32.*
+*.log
+.DS_Store
+.deepx/

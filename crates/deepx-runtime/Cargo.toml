@@ -1,0 +1,24 @@
+[package]
+name = "deepx-runtime"
+version.workspace = true
+edition.workspace = true
+description = "GUI-independent DeepX daemon application runtime"
+
+[dependencies]
+deepx-config = { path = "../deepx-config" }
+deepx-msglp = { path = "../deepx-msglp" }
+deepx-proto = { path = "../deepx-proto" }
+deepx-session = { path = "../deepx-session" }
+deepx-tools = { path = "../deepx-tools" }
+deepx-types = { path = "../deepx-types" }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time"] }
+
+[features]
+default = ["memory"]
+memory = ["deepx-msglp/memory"]
+
+[lints]
+workspace = true
