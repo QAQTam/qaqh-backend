@@ -7,7 +7,7 @@ it("renders the focused shell without permanent engineering panels", () => {
   const host = document.createElement("div");
   const dispose = render(() => <AppShell sidebar={<aside data-task-sidebar />} workspace={<><section data-thread-workspace /><section data-composer-dock /></>} />, host);
   expect(host.querySelector("[data-task-sidebar]")).not.toBeNull();
-  expect(host.querySelector("[data-window-titlebar]")).not.toBeNull();
+  expect(host.querySelector("[data-window-titlebar]")).toBeNull();
   expect(host.querySelector("[data-thread-workspace]")).not.toBeNull();
   expect(host.querySelector("[data-composer-dock]")).not.toBeNull();
   expect(host.querySelector(".status-panel,.info-bar,.open-tabs")).toBeNull();

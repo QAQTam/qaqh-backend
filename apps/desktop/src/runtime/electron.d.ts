@@ -22,11 +22,7 @@ interface DeepxDesktopApi {
     checkUpdate(): Promise<UpdateInfo | null>;
     stageUpdate(source: string): Promise<UpdateInfo | null>;
     applyUpdate(operationPath: string): Promise<{ restarting: boolean }>;
-    windowMinimize(): void;
-    windowToggleMaximize(): Promise<boolean>;
-    windowIsMaximized(): Promise<boolean>;
-    windowClose(): void;
-    onWindowMaximizedChanged(listener: (maximized: boolean) => void): () => void;
+    openDevTools(): Promise<boolean>;
     onUpdateAvailable(listener: (info: UpdateInfo) => void): () => void;
     onUpdateFailed(listener: (failure: { operationId: string; message: string }) => void): () => void;
   };

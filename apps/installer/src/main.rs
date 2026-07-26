@@ -115,7 +115,7 @@ fn main() -> Result<(), eframe::Error> {
     // ── Normal GUI installer ──
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
-            .with_inner_size([740.0, 500.0])
+            .with_inner_size([780.0, 560.0])
             .with_resizable(false)
             .with_title("DeepX 安装程序"),
         ..Default::default()
@@ -206,6 +206,8 @@ fn setup_style(ctx: &Context) {
         style.visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
         style.visuals.widgets.hovered.bg_fill = Color32::from_rgba_premultiplied(0, 122, 255, 20);
         style.visuals.widgets.active.bg_fill = Color32::from_rgba_premultiplied(0, 122, 255, 40);
+        style.visuals.extreme_bg_color = Color32::from_rgb(238, 240, 244);
+        style.visuals.faint_bg_color = Color32::from_rgb(247, 248, 250);
         // widget 文字色
         style.visuals.widgets.noninteractive.fg_stroke.color = colors::SIDEBAR_TEXT;
         style.visuals.widgets.inactive.fg_stroke.color = colors::SIDEBAR_TEXT;
@@ -350,7 +352,7 @@ impl eframe::App for App {
         if !is_install_phase {
             SidePanel::left("steps")
                 .resizable(false)
-                .default_width(170.0)
+                .default_width(148.0)
                 .show_separator_line(false)
                 .frame(Frame::none().fill(colors::SIDEBAR_BG))
                 .show(ctx, |ui| {
@@ -413,13 +415,21 @@ impl App {
         for (i, step) in Screen::all().iter().enumerate() {
             let (dot_color, text_color, dot_text) = if i < current {
                 // 已完成
-                (colors::SUCCESS, colors::SIDEBAR_TEXT, "✓".to_string())
+                (colors::SUCCESS, colors::SIDEBAR_TEXT, None)
             } else if i == current {
                 // 当前
-                (colors::ACCENT, colors::SIDEBAR_ACTIVE, (i + 1).to_string())
+                (
+                    colors::ACCENT,
+                    colors::SIDEBAR_ACTIVE,
+                    Some((i + 1).to_string()),
+                )
             } else {
                 // 待完成
-                (colors::BORDER, colors::TEXT_SECONDARY, (i + 1).to_string())
+                (
+                    colors::BORDER,
+                    colors::TEXT_SECONDARY,
+                    Some((i + 1).to_string()),
+                )
             };
 
             ui.horizontal(|ui| {
@@ -433,13 +443,25 @@ impl App {
                     colors::STEP_DOT_SIZE / 2.0,
                     dot_color,
                 );
-                ui.painter().text(
-                    dot_rect.center(),
-                    Align2::CENTER_CENTER,
-                    dot_text,
-                    FontId::proportional(13.0),
-                    Color32::WHITE,
-                );
+                if i < current {
+                    let center = dot_rect.center();
+                    ui.painter().line_segment(
+                        [center + vec2(-5.0, 0.0), center + vec2(-1.0, 4.0)],
+                        Stroke::new(2.0_f32, Color32::WHITE),
+                    );
+                    ui.painter().line_segment(
+                        [center + vec2(-1.0, 4.0), center + vec2(6.0, -5.0)],
+                        Stroke::new(2.0_f32, Color32::WHITE),
+                    );
+                } else if let Some(dot_text) = dot_text {
+                    ui.painter().text(
+                        dot_rect.center(),
+                        Align2::CENTER_CENTER,
+                        dot_text,
+                        FontId::proportional(13.0),
+                        Color32::WHITE,
+                    );
+                }
                 // 推进光标，否则下一个 widget 会和圆点重叠
                 ui.advance_cursor_after_rect(dot_rect);
 
@@ -521,7 +543,7 @@ impl App {
 
             // 上一步按钮
             if can_back {
-                let back = Button::new(RichText::new("← 上一步").size(13.0))
+                let back = Button::new(RichText::new("上一步").size(13.0))
                     .fill(Color32::TRANSPARENT)
                     .min_size(Vec2::new(90.0, 30.0));
                 if ui.add(back).clicked() {
@@ -623,16 +645,12 @@ impl App {
                 .show(ui, |ui| {
                     ui.set_width(360.0);
                     let items = [
-                        ("◆", "智能桌面应用 (Electron)"),
-                        ("◆", "本地守护进程 (Rust 后端)"),
-                        ("◆", "高效、安全、本地优先"),
+                        "智能桌面应用 (Electron)",
+                        "本地守护进程 (Rust 后端)",
+                        "高效、安全、本地优先",
                     ];
-                    for (icon, text) in &items {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(*icon).color(colors::ACCENT));
-                            ui.label(*text);
-                        });
-                        ui.add_space(4.0);
+                    for text in items {
+                        Self::bullet_row(ui, text, colors::ACCENT);
                     }
                 });
         });
@@ -738,13 +756,13 @@ impl App {
         let resolved = shellexpand(&self.location_input);
         if let Some(free) = disk_free_space(&resolved) {
             let free_gb = free as f64 / 1_073_741_824.0;
-            let (color, icon) = if free < 200_000_000 {
-                (colors::DANGER, "⚠")
+            let (color, label) = if free < 200_000_000 {
+                (colors::DANGER, "可用空间不足")
             } else {
-                (colors::TEXT_SECONDARY, "💾")
+                (colors::TEXT_SECONDARY, "磁盘可用空间")
             };
             ui.label(
-                RichText::new(format!("{}  可用空间: {:.1} GB", icon, free_gb))
+                RichText::new(format!("{label}：{free_gb:.1} GB"))
                     .size(12.0)
                     .color(color),
             );
@@ -838,11 +856,7 @@ impl App {
                 ui.label(RichText::new("检测到以下 DeepX 进程正在运行:").strong());
                 ui.add_space(8.0);
                 for p in &self.running_procs {
-                    let status = if p.closed {
-                        "✓ 已关闭"
-                    } else {
-                        "● 运行中"
-                    };
+                    let status = if p.closed { "已关闭" } else { "运行中" };
                     ui.label(format!("  {}  (PID: {})  {}", p.name, p.pid, status));
                 }
             });
@@ -986,38 +1000,52 @@ impl App {
     // ---- 安装进度 ----
     fn render_progress(&mut self, ui: &mut Ui) {
         ui.vertical_centered(|ui| {
-            ui.add_space(60.0);
+            ui.add_space(72.0);
 
-            // 动画圆环占位 — 用简单的文字替代
-            ui.label(RichText::new("正在安装 DeepX...").size(20.0).strong());
-            ui.add_space(20.0);
+            ui.label(RichText::new("正在安装 DeepX").size(24.0).strong());
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("正在安全写入应用组件，请勿关闭安装程序")
+                    .size(13.0)
+                    .color(colors::TEXT_SECONDARY),
+            );
+            ui.add_space(28.0);
 
-            let progress = self.config.progress;
-            ui.add(
-                ProgressBar::new(progress)
-                    .desired_width(360.0)
-                    .text(format!("{:.0}%", progress * 100.0)),
+            let progress = self.config.progress.clamp(0.0, 1.0);
+            Self::progress_track(ui, progress, 420.0);
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!("{:.0}%", progress * 100.0))
+                    .size(13.0)
+                    .strong()
+                    .color(colors::ACCENT),
             );
 
-            ui.add_space(16.0);
+            ui.add_space(22.0);
 
             if !self.config.current_file.is_empty() {
-                ui.label(
-                    RichText::new(&self.config.current_file)
-                        .size(12.0)
-                        .color(colors::TEXT_SECONDARY),
-                );
-            }
-
-            if self.config.total_files > 0 {
-                ui.label(
-                    RichText::new(format!(
-                        "文件 {}/{}",
-                        self.config.completed_files, self.config.total_files
-                    ))
-                    .size(12.0)
-                    .color(colors::TEXT_SECONDARY),
-                );
+                Frame::none()
+                    .fill(Color32::from_rgb(247, 248, 250))
+                    .rounding(Rounding::same(8.0))
+                    .inner_margin(Margin::symmetric(16.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.set_width(390.0);
+                        ui.label(
+                            RichText::new(&self.config.current_file)
+                                .size(12.0)
+                                .color(colors::SIDEBAR_TEXT),
+                        );
+                        if self.config.total_files > 0 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "文件 {} / {}",
+                                    self.config.completed_files, self.config.total_files
+                                ))
+                                .size(11.0)
+                                .color(colors::TEXT_SECONDARY),
+                            );
+                        }
+                    });
             }
 
             if let Some(ref err) = self.config.error {
@@ -1038,8 +1066,6 @@ impl App {
                 .map(|r| r.is_ok())
                 .unwrap_or(false);
 
-            // 图标
-            let icon = if success { "✓" } else { "✗" };
             let icon_color = if success {
                 colors::SUCCESS
             } else {
@@ -1048,13 +1074,26 @@ impl App {
             let dot_rect = Rect::from_min_size(ui.next_widget_position(), Vec2::splat(64.0));
             ui.painter()
                 .circle_filled(dot_rect.center(), 32.0, icon_color);
-            ui.painter().text(
-                dot_rect.center(),
-                Align2::CENTER_CENTER,
-                icon,
-                FontId::proportional(30.0),
-                Color32::WHITE,
-            );
+            let center = dot_rect.center();
+            if success {
+                ui.painter().line_segment(
+                    [center + vec2(-11.0, 0.0), center + vec2(-3.0, 9.0)],
+                    Stroke::new(3.5_f32, Color32::WHITE),
+                );
+                ui.painter().line_segment(
+                    [center + vec2(-3.0, 9.0), center + vec2(13.0, -11.0)],
+                    Stroke::new(3.5_f32, Color32::WHITE),
+                );
+            } else {
+                ui.painter().line_segment(
+                    [center + vec2(-9.0, -9.0), center + vec2(9.0, 9.0)],
+                    Stroke::new(3.5_f32, Color32::WHITE),
+                );
+                ui.painter().line_segment(
+                    [center + vec2(9.0, -9.0), center + vec2(-9.0, 9.0)],
+                    Stroke::new(3.5_f32, Color32::WHITE),
+                );
+            }
             ui.advance_cursor_after_rect(dot_rect);
             ui.add_space(16.0);
 
@@ -1080,14 +1119,19 @@ impl App {
                     .inner_margin(Margin::same(14.0))
                     .show(ui, |ui| {
                         ui.set_width(340.0);
-                        ui.label(RichText::new("启动方式:").strong());
+                        ui.label(RichText::new("启动方式").strong());
+                        ui.add_space(6.0);
                         if self.config.create_start_menu {
-                            ui.label("  ◆  开始菜单 → DeepX");
+                            Self::bullet_row(ui, "开始菜单中的 DeepX", colors::ACCENT);
                         }
                         if self.config.create_desktop_shortcut {
-                            ui.label("  ◆  桌面快捷方式");
+                            Self::bullet_row(ui, "桌面快捷方式", colors::ACCENT);
                         }
-                        ui.label(format!("  ◆  {}\\DeepX.exe", self.config.target_path));
+                        Self::bullet_row(
+                            ui,
+                            &format!("{}\\DeepX.exe", self.config.target_path),
+                            colors::ACCENT,
+                        );
                     });
 
                 ui.add_space(20.0);
@@ -1119,6 +1163,29 @@ impl App {
                 std::process::exit(if success { 0 } else { 1 });
             }
         });
+    }
+
+    fn bullet_row(ui: &mut Ui, text: &str, color: Color32) {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(12.0, 18.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 3.0, color);
+            ui.label(text);
+        });
+        ui.add_space(3.0);
+    }
+
+    fn progress_track(ui: &mut Ui, progress: f32, width: f32) {
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 10.0), Sense::hover());
+        ui.painter()
+            .rect_filled(rect, Rounding::same(5.0), Color32::from_rgb(232, 235, 240));
+        if progress > 0.0 {
+            let fill = Rect::from_min_max(
+                rect.min,
+                pos2(rect.left() + rect.width() * progress, rect.bottom()),
+            );
+            ui.painter()
+                .rect_filled(fill, Rounding::same(5.0), colors::ACCENT);
+        }
     }
 }
 

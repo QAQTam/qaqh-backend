@@ -35,26 +35,9 @@ export function getPetStatus(): Promise<boolean> {
   return desktopBridge().getPetStatus();
 }
 
-// ── Frameless window controls ──────────────────────────
-
-export function minimizeWindow(): void {
-  window.deepx?.desktop.windowMinimize();
-}
-
-export async function toggleMaximizeWindow(): Promise<boolean> {
-  return window.deepx?.desktop.windowToggleMaximize() ?? false;
-}
-
-export async function isWindowMaximized(): Promise<boolean> {
-  return window.deepx?.desktop.windowIsMaximized() ?? false;
-}
-
-export function closeWindow(): void {
-  window.deepx?.desktop.windowClose();
-}
-
-export function onWindowMaximizedChanged(listener: (maximized: boolean) => void): () => void {
-  return window.deepx?.desktop.onWindowMaximizedChanged(listener) ?? (() => {});
+/** Opens Electron DevTools in a detached window, including in packaged builds. */
+export async function openDevTools(): Promise<boolean> {
+  return window.deepx?.desktop.openDevTools() ?? false;
 }
 
 // ── Auto-update ──────────────────────────────────────────

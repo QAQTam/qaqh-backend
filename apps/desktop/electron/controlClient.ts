@@ -347,7 +347,10 @@ export class DaemonControlClient {
     this.streamFlush = setTimeout(() => {
       this.streamFlush = undefined;
       for (const message of this.eventBatcher.flush()) this.onMessage(message);
-    }, 16);
+    // Markdown projection is proportional to the accumulated response length.
+    // Coalescing at ~20fps prevents long streams from repeatedly parsing and
+    // patching the full answer for tiny network chunks.
+    }, 50);
   }
 
   private async attachWire(seed: string): Promise<unknown> {

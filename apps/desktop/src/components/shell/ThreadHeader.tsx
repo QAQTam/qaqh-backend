@@ -7,6 +7,7 @@ export default function ThreadHeader(props: {
   onToggleInfo: () => void;
   onToggleStats: () => void;
   onOpenLocation: () => void;
+  onOpenConsole: () => void;
   onChangeWorkspace: () => void | Promise<void>;
   onCompact: () => void;
   undoDisabled: boolean;
@@ -20,6 +21,7 @@ export default function ThreadHeader(props: {
     <div class="thread-actions">
       <button class="thread-workspace-button" data-change-workspace onClick={() => void props.onChangeWorkspace()} title={props.workspace || "选择工作区"}>▱ {workspaceName()}</button>
       <button onClick={props.onOpenLocation}>打开位置</button>
+      <button type="button" data-open-console onClick={props.onOpenConsole}>控制台</button>
       <button class={props.infoOpen ? "active" : ""} onClick={props.onToggleInfo}>信息</button>
       <button class={props.statsOpen ? "active" : ""} onClick={props.onToggleStats}>统计</button>
       <button type="button" data-undo-turn disabled={props.undoDisabled} onClick={props.onUndo}>撤销上一轮</button>

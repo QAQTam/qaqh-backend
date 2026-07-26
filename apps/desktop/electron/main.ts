@@ -102,7 +102,9 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     show: false,
-    frame: false,
+    // Keep the Windows-managed caption buttons and drag area outside the
+    // renderer process. They remain usable when the web UI is unresponsive.
+    frame: true,
     webPreferences: {
       preload: join(__dirname, "../preload/preload.cjs"),
       contextIsolation: true,
@@ -111,15 +113,25 @@ function createWindow(): void {
       webSecurity: true,
     },
   });
-  const publishMaximizedState = () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("window:maximized-changed", mainWindow.isMaximized());
-    }
-  };
-  mainWindow.on("maximize", publishMaximizedState);
-  mainWindow.on("unmaximize", publishMaximizedState);
   mainWindow.webContents.on("preload-error", (_event, preloadPath, error) => {
     console.error(`Failed to load preload ${preloadPath}:`, error);
+  });
+  // This runs in Electron's main process, not in the renderer. Together with
+  // the native frame it gives users a recovery path even if the web UI freezes.
+  mainWindow.webContents.on("unresponsive", () => {
+    void dialog.showMessageBox(mainWindow!, {
+      type: "warning",
+      title: "DeepX 无响应",
+      message: "界面暂时没有响应。你可以等待，或重新加载界面。",
+      buttons: ["重新加载", "等待"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    }).then(({ response }) => {
+      if (response !== 0 || !mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.forcefullyCrashRenderer();
+      mainWindow.webContents.reload();
+    }).catch(() => {});
   });
   mainWindow.webContents.once("did-finish-load", () => resolveInitialRenderer());
   if (smokeMode) {
@@ -162,21 +174,10 @@ function registerIpc(): void {
   ipcMain.handle("backend:attach", (_event, seed: unknown) => backend.attach(requireSeed(seed)));
   ipcMain.handle("backend:detach", (_event, seed: unknown) => backend.detach(requireSeed(seed)));
   ipcMain.handle("backend:status", () => backend.currentStatus());
-  ipcMain.on("desktop:window-minimize", () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
-  });
-  ipcMain.handle("desktop:window-toggle-maximize", () => {
+  ipcMain.handle("desktop:open-devtools", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
-    const shouldMaximize = !mainWindow.isMaximized();
-    if (shouldMaximize) mainWindow.maximize();
-    else mainWindow.unmaximize();
-    return shouldMaximize;
-  });
-  ipcMain.handle("desktop:window-is-maximized", () => (
-    Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized())
-  ));
-  ipcMain.on("desktop:window-close", () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+    mainWindow.webContents.openDevTools({ mode: "detach" });
+    return true;
   });
   ipcMain.handle("desktop:toggle-pet", async () => {
     console.log("[main] toggle-pet called, petProcess:", !!petProcess);

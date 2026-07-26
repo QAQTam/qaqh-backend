@@ -26,6 +26,8 @@ export default function RollingNumber(props: {
   format?: (value: number) => string;
   ariaLabel?: string;
   class?: string;
+  /** Live metric cards opt out to avoid restarting animations on every stream sample. */
+  animate?: boolean;
 }) {
   const initialValue = untrack(() => props.value);
   const initial = untrack(() => (props.format ?? formatCompactNumber)(initialValue));
@@ -62,11 +64,11 @@ export default function RollingNumber(props: {
         id: `${frame().revision}:${index}`,
         previous: oldCharacter,
         current: character,
-        rolls: canRoll &&
+        rolls: props.animate !== false && canRoll &&
           oldCharacter !== character &&
           /\d/.test(oldCharacter) &&
           /\d/.test(character),
-        formatShift: !canRoll,
+        formatShift: props.animate !== false && !canRoll,
       };
     });
   });

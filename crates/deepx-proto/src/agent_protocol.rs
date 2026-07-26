@@ -541,6 +541,18 @@ pub enum Agent2Ui {
     #[serde(rename = "error")]
     Error { message: String },
 
+    /// A provider request failed transiently and will be retried. This is
+    /// deliberately non-terminal: clients must keep the turn running.
+    #[serde(rename = "provider_retrying")]
+    ProviderRetrying {
+        turn_id: String,
+        round_num: u32,
+        attempt: u32,
+        max_retries: u32,
+        delay_secs: u64,
+        error: String,
+    },
+
     #[serde(rename = "tool_notice")]
     ToolNotice {
         message: String,
@@ -815,7 +827,19 @@ impl Agent2Ui {
             | Agent2Ui::UsageUpdated { .. } => EventLane::Bulk,
 
             // ── Standard: everything else ──
-            _ => EventLane::Standard,
+            Agent2Ui::ProviderRetrying { .. }
+            | Agent2Ui::MoreTurns { .. }
+            | Agent2Ui::RoundDelta { .. }
+            | Agent2Ui::ToolResults { .. }
+            | Agent2Ui::ToolExecDelta { .. }
+            | Agent2Ui::ToolCallPreview { .. }
+            | Agent2Ui::CodeDelta { .. }
+            | Agent2Ui::ToolNotice { .. }
+            | Agent2Ui::Dashboard { .. }
+            | Agent2Ui::CompactStart { .. }
+            | Agent2Ui::CompactEnd { .. }
+            | Agent2Ui::SkillsChanged { .. }
+            | Agent2Ui::SkillOperationResolved { .. } => EventLane::Standard,
         }
     }
 }
@@ -1149,6 +1173,19 @@ mod tests {
     }
 
     #[test]
+    fn provider_retry_is_standard_lane() {
+        let event = Agent2Ui::ProviderRetrying {
+            turn_id: "t".into(),
+            round_num: 1,
+            attempt: 1,
+            max_retries: 3,
+            delay_secs: 1,
+            error: "timeout".into(),
+        };
+        assert_eq!(event.lane(), EventLane::Standard);
+    }
+
+    #[test]
     fn tool_results_is_standard_lane() {
         let event = Agent2Ui::ToolResults {
             turn_id: "t".into(),
@@ -1198,6 +1235,7 @@ mod tests {
             Agent2Ui::ToolNotice { level: "info".into(), message: "m".into() },
             Agent2Ui::Dashboard { hp_connected: false, session_seed: "s".into(), tool_calls_total: 0, tool_failures: 0, current_phase: "idle".into(), streaming: false, dsml_compat_count: 0, documents: vec![], recent_edits: vec![], tasks: vec![], session_title: None, usage: None, context_limit: 0, model: None },
             Agent2Ui::UsageUpdated { turn_id: "t".into(), round_num: 0, usage: deepx_types::UsageInfo::default(), context_limit: 0, model: "m".into() },
+            Agent2Ui::ProviderRetrying { turn_id: "t".into(), round_num: 0, attempt: 1, max_retries: 3, delay_secs: 1, error: "timeout".into() },
             Agent2Ui::Done,
             Agent2Ui::CompactStart { turns_total: 1, turns_keeping: 1 },
             Agent2Ui::CompactEnd { summary_chars: 0, turns_compacted: 1, turns_removed: 0 },

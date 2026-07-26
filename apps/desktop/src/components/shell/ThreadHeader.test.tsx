@@ -10,6 +10,7 @@ describe("ThreadHeader", () => {
     document.body.append(host);
     const changeWorkspace = vi.fn();
     const compact = vi.fn();
+    const openConsole = vi.fn();
     const dispose = render(() => (
       <ThreadHeader
         title="Task"
@@ -20,6 +21,7 @@ describe("ThreadHeader", () => {
         statsOpen={false}
         onToggleStats={vi.fn()}
         onOpenLocation={vi.fn()}
+        onOpenConsole={openConsole}
         onChangeWorkspace={changeWorkspace}
         onCompact={compact}
         undoDisabled={false}
@@ -31,6 +33,8 @@ describe("ThreadHeader", () => {
 
     expect(host.textContent).toContain("DeepX-Fork");
     expect(host.textContent).toContain("整理上下文");
+    host.querySelector<HTMLButtonElement>("[data-open-console]")!.click();
+    expect(openConsole).toHaveBeenCalledOnce();
     host.querySelector<HTMLButtonElement>("[data-change-workspace]")!.click();
     expect(changeWorkspace).toHaveBeenCalledOnce();
     dispose();
@@ -45,6 +49,7 @@ describe("ThreadHeader", () => {
       title="Task" infoOpen={false} statsOpen={false} workspace="F:/repo"
       compacting={false} undoDisabled={false}
       onToggleInfo={vi.fn()} onToggleStats={vi.fn()} onOpenLocation={vi.fn()}
+      onOpenConsole={vi.fn()}
       onChangeWorkspace={vi.fn()} onCompact={vi.fn()} onUndo={onUndo}
       petEnabled={false} onTogglePet={vi.fn()}
     />, host);

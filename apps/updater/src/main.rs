@@ -15,6 +15,20 @@ use deepx_update::{
     write_installed_state,
 };
 
+mod colors {
+    use egui::Color32;
+
+    pub const ACCENT: Color32 = Color32::from_rgb(0, 122, 255);
+    pub const ACCENT_SOFT: Color32 = Color32::from_rgb(235, 244, 255);
+    pub const BACKGROUND: Color32 = Color32::from_rgb(247, 248, 250);
+    pub const CARD: Color32 = Color32::WHITE;
+    pub const BORDER: Color32 = Color32::from_rgb(222, 225, 230);
+    pub const TEXT: Color32 = Color32::from_rgb(35, 37, 42);
+    pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(102, 106, 115);
+    pub const DANGER: Color32 = Color32::from_rgb(215, 53, 47);
+    pub const DANGER_SOFT: Color32 = Color32::from_rgb(255, 244, 243);
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("deepx-updater: {error}");
@@ -142,6 +156,7 @@ impl MaintenanceOptions {
 struct MaintenanceApp {
     target: PathBuf,
     source: String,
+    installation: String,
     status: String,
     confirm_uninstall: bool,
     delete_user_data: bool,
@@ -149,11 +164,12 @@ struct MaintenanceApp {
 
 impl MaintenanceApp {
     fn new(target: PathBuf, confirm_uninstall: bool) -> Self {
-        let status = installation_summary(&target);
+        let installation = installation_summary(&target);
         Self {
             target,
             source: String::new(),
-            status,
+            installation,
+            status: "维护程序已就绪。".to_string(),
             confirm_uninstall,
             delete_user_data: false,
         }
@@ -162,64 +178,243 @@ impl MaintenanceApp {
 
 impl eframe::App for MaintenanceApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(context, |ui| {
-            ui.heading("DeepX 维护");
-            ui.add_space(8.0);
-            ui.label(format!("安装位置：{}", self.target.display()));
-            ui.label(&self.status);
-            ui.separator();
-
-            ui.heading("修改或修复");
-            ui.label("选择由 DeepX Installer 生成的本地 update-source 目录：");
-            ui.text_edit_singleline(&mut self.source);
-            if ui.button("验证并暂存更新").clicked() {
-                let target = self.target.to_string_lossy().into_owned();
-                self.status = if self.source.trim().is_empty() {
-                    "请先输入 update-source 目录。".to_string()
-                } else {
-                    match stage(self.source.trim(), &target) {
-                        Ok(()) => "更新已暂存；启动或重启 DeepX 后完成应用。".to_string(),
-                        Err(error) => format!("更新暂存失败：{error}"),
-                    }
-                };
-            }
-
-            ui.add_space(16.0);
-            ui.separator();
-            ui.heading("删除");
-            ui.checkbox(
-                &mut self.delete_user_data,
-                format!(
-                    "同时删除用户数据（{}）",
-                    deepx_types::platform::data_dir().display()
-                ),
-            );
-            if !self.confirm_uninstall {
-                if ui.button("卸载 DeepX…").clicked() {
-                    self.confirm_uninstall = true;
-                }
-            } else {
-                ui.colored_label(
-                    egui::Color32::from_rgb(190, 40, 40),
-                    "卸载将删除程序文件、快捷方式和 Windows 注册信息。",
-                );
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(colors::BACKGROUND)
+                    .inner_margin(egui::Margin::symmetric(30.0, 24.0)),
+            )
+            .show(context, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("确认卸载").clicked() {
-                        match maintenance::handoff_uninstall(
-                            &self.target,
-                            self.delete_user_data,
-                            true,
-                        ) {
-                            Ok(_) => context.send_viewport_cmd(egui::ViewportCommand::Close),
-                            Err(error) => self.status = format!("无法启动卸载：{error}"),
-                        }
-                    }
-                    if ui.button("取消").clicked() {
-                        self.confirm_uninstall = false;
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        icon_rect,
+                        egui::Rounding::same(12.0),
+                        colors::ACCENT_SOFT,
+                    );
+                    ui.painter().text(
+                        icon_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "DX",
+                        egui::FontId::proportional(17.0),
+                        colors::ACCENT,
+                    );
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("DeepX 维护")
+                                .size(24.0)
+                                .strong()
+                                .color(colors::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new("修改、修复或安全卸载 DeepX")
+                                .size(12.0)
+                                .color(colors::TEXT_SECONDARY),
+                        );
+                    });
+                });
+                ui.add_space(20.0);
+
+                Self::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new("当前安装")
+                            .size(12.0)
+                            .strong()
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(self.target.display().to_string())
+                            .size(13.0)
+                            .color(colors::TEXT),
+                    );
+                    ui.label(
+                        egui::RichText::new(&self.installation)
+                            .size(12.0)
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                });
+                ui.add_space(14.0);
+
+                Self::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new("修改或修复")
+                            .size(17.0)
+                            .strong()
+                            .color(colors::TEXT),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("选择 DeepX Installer 生成的本地 update-source 目录。")
+                            .size(12.0)
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                    ui.add_space(10.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.source)
+                            .hint_text("例如：D:\\DeepX\\packages\\update-source")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(10.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("验证并暂存更新").color(egui::Color32::WHITE),
+                            )
+                            .fill(colors::ACCENT)
+                            .rounding(egui::Rounding::same(7.0))
+                            .min_size(egui::vec2(132.0, 34.0)),
+                        )
+                        .clicked()
+                    {
+                        let target = self.target.to_string_lossy().into_owned();
+                        self.status = if self.source.trim().is_empty() {
+                            "请先输入 update-source 目录。".to_string()
+                        } else {
+                            match stage(self.source.trim(), &target) {
+                                Ok(()) => "更新已暂存；启动或重启 DeepX 后完成应用。".to_string(),
+                                Err(error) => format!("更新暂存失败：{error}"),
+                            }
+                        };
                     }
                 });
-            }
-        });
+                ui.add_space(14.0);
+
+                egui::Frame::none()
+                    .fill(colors::DANGER_SOFT)
+                    .rounding(egui::Rounding::same(10.0))
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgb(242, 205, 202),
+                    ))
+                    .inner_margin(egui::Margin::same(16.0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new(if self.confirm_uninstall {
+                                "确认卸载 DeepX"
+                            } else {
+                                "卸载 DeepX"
+                            })
+                            .size(17.0)
+                            .strong()
+                            .color(colors::DANGER),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("将删除程序文件、快捷方式和 Windows 注册信息。")
+                                .size(12.0)
+                                .color(colors::TEXT_SECONDARY),
+                        );
+                        ui.add_space(10.0);
+                        ui.checkbox(
+                            &mut self.delete_user_data,
+                            format!(
+                                "同时删除全局用户数据：{}",
+                                deepx_types::platform::data_dir().display()
+                            ),
+                        );
+                        ui.label(
+                            egui::RichText::new("工作区内的 .deepx 数据不会自动删除。")
+                                .size(11.0)
+                                .color(colors::TEXT_SECONDARY),
+                        );
+                        ui.add_space(12.0);
+
+                        if !self.confirm_uninstall {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("卸载 DeepX").color(colors::DANGER),
+                                    )
+                                    .fill(egui::Color32::WHITE)
+                                    .stroke(egui::Stroke::new(1.0_f32, colors::DANGER))
+                                    .rounding(egui::Rounding::same(7.0))
+                                    .min_size(egui::vec2(112.0, 34.0)),
+                                )
+                                .clicked()
+                            {
+                                self.confirm_uninstall = true;
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new("此操作无法撤销，请确认后继续。")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(colors::DANGER),
+                            );
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("确认卸载")
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(colors::DANGER)
+                                        .rounding(egui::Rounding::same(7.0))
+                                        .min_size(egui::vec2(112.0, 34.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    match maintenance::handoff_uninstall(
+                                        &self.target,
+                                        self.delete_user_data,
+                                        true,
+                                    ) {
+                                        Ok(_) => {
+                                            context.send_viewport_cmd(egui::ViewportCommand::Close)
+                                        }
+                                        Err(error) => {
+                                            self.status = format!("无法启动卸载：{error}")
+                                        }
+                                    }
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new("取消")
+                                            .fill(egui::Color32::WHITE)
+                                            .stroke(egui::Stroke::new(1.0_f32, colors::BORDER))
+                                            .rounding(egui::Rounding::same(7.0))
+                                            .min_size(egui::vec2(80.0, 34.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.confirm_uninstall = false;
+                                }
+                            });
+                        }
+                    });
+
+                ui.add_space(14.0);
+                let status_color = if self.status.contains("失败")
+                    || self.status.contains("无法")
+                    || self.status.contains("请先")
+                {
+                    colors::DANGER
+                } else {
+                    colors::TEXT_SECONDARY
+                };
+                ui.label(
+                    egui::RichText::new(&self.status)
+                        .size(12.0)
+                        .color(status_color),
+                );
+            });
+    }
+}
+
+impl MaintenanceApp {
+    fn card() -> egui::Frame {
+        egui::Frame::none()
+            .fill(colors::CARD)
+            .rounding(egui::Rounding::same(10.0))
+            .stroke(egui::Stroke::new(1.0_f32, colors::BORDER))
+            .inner_margin(egui::Margin::same(16.0))
     }
 }
 
@@ -231,7 +426,7 @@ fn run_maintenance_ui(
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("DeepX 维护")
-            .with_inner_size([620.0, 430.0])
+            .with_inner_size([680.0, 620.0])
             .with_resizable(false),
         ..Default::default()
     };
@@ -240,6 +435,7 @@ fn run_maintenance_ui(
         options,
         Box::new(move |creation| {
             setup_fonts(&creation.egui_ctx);
+            setup_style(&creation.egui_ctx);
             Ok(Box::new(MaintenanceApp::new(target, confirm_uninstall)))
         }),
     )?;
@@ -291,6 +487,25 @@ fn setup_fonts(context: &egui::Context) {
         context.set_fonts(fonts);
         return;
     }
+}
+
+fn setup_style(context: &egui::Context) {
+    context.style_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.button_padding = egui::vec2(14.0, 7.0);
+        style.visuals.dark_mode = false;
+        style.visuals.panel_fill = colors::BACKGROUND;
+        style.visuals.window_fill = colors::BACKGROUND;
+        style.visuals.extreme_bg_color = egui::Color32::WHITE;
+        style.visuals.faint_bg_color = colors::BACKGROUND;
+        style.visuals.selection.bg_fill = colors::ACCENT;
+        style.visuals.widgets.inactive.rounding = egui::Rounding::same(7.0);
+        style.visuals.widgets.hovered.rounding = egui::Rounding::same(7.0);
+        style.visuals.widgets.active.rounding = egui::Rounding::same(7.0);
+        style.visuals.widgets.noninteractive.fg_stroke.color = colors::TEXT;
+        style.visuals.widgets.inactive.fg_stroke.color = colors::TEXT;
+        style.visuals.window_shadow = egui::epaint::Shadow::NONE;
+    });
 }
 
 fn handoff(

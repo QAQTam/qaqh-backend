@@ -148,11 +148,14 @@ export default function App() {
     await refreshSessions();
   }
 
-  async function afterSessionRestored(entry: SessionEntry, seed: string) {
+  function afterSessionRestored(seed: string) {
     localStorage.setItem(LS_KEY, seed);
-    await loadWorkspace(entry);
-    await loadDashboardFromDisk(entry);
-    await refreshSessions();
+    // SessionRestored is a replay/synchronization boundary, not a guarantee
+    // that the control socket is still ready for new requests. The reducer has
+    // already applied the snapshot carried by this event, and resumeSession
+    // loads the workspace after its request cycle completes. Retrying these
+    // three reads here once per streamed restore caused a request storm while
+    // the daemon was reconnecting.
   }
 
   async function handleAgentError(entry: SessionEntry, message: string) {
@@ -175,7 +178,7 @@ export default function App() {
   function handleAgentEvent(entry: SessionEntry, event: Agent2Ui) {
     dispatchAgentEvent(event, entry.runtime, {
       onSessionCreated: seed => { void afterSessionCreated(entry, seed); },
-      onSessionRestored: seed => { void afterSessionRestored(entry, seed); },
+      onSessionRestored: seed => { afterSessionRestored(seed); },
       onDashboard: () => {},
       onError: message => { void handleAgentError(entry, message); },
       onCancelled: () => {

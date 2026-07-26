@@ -3,11 +3,14 @@
  *
  * Protocol:
  *   1. MarkdownBody.renderer.code intercepts ```mermaid blocks
- *   2. Outputs <div data-mermaid-text="..."> placeholder
+ *   2. Outputs <div class="mermaid-placeholder"> with <script> child
  *   3. After DOM patch, hydrateMermaidPlaceholders() scans for placeholders
  *   4. Each placeholder is rendered to SVG via mermaid.render()
  *
- * Mermaid is ~1 MB; we dynamic-import it only when placeholders are found.
+ * Diagram text travels through a <script type="text/mermaid"> child
+ * element so newlines survive the innerHTML round-trip.  HTML data-*
+ * attributes normalise U+000A to space per the HTML5 parsing algorithm,
+ * which silently corrupts multi-line Mermaid source.
  */
 
 let mermaidPromise: Promise<typeof import("mermaid")> | null = null;
@@ -65,7 +68,6 @@ function getMermaid(): Promise<typeof import("mermaid")> {
 }
 
 export const MERMAID_LANG = "mermaid";
-export const MERMAID_ATTR = "data-mermaid-text";
 
 let renderCounter = 0;
 
@@ -90,13 +92,21 @@ export async function renderMermaid(text: string): Promise<string> {
 /**
  * Create a placeholder div for a Mermaid diagram.
  * Called from MarkdownBody's marked renderer.code callback during streaming.
+ *
+ * The diagram text is stored inside a &lt;script type=&quot;text/mermaid&quot;&gt; child
+ * element so that newlines survive the innerHTML round-trip.  HTML data-*
+ * attributes normalise U+000A to space per the HTML5 parsing algorithm,
+ * which silently corrupts multi-line Mermaid source.
  */
 export function createMermaidPlaceholder(text: string): string {
-  const encoded = text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // &lt;script&gt; content is raw text in HTML; the only sequence that
+  // prematurely closes the element is &lt;/script&gt;.
+  const safe = text.replace(/<\/script>/gi, "<\\/script>");
   return (
-    `<div ${MERMAID_ATTR}="${encoded}"` +
+    `<div class="mermaid-placeholder"` +
     ` style="min-height:120px;background:var(--md-code-bg,#f5efe0);border-radius:8px;` +
     ` display:flex;align-items:center;justify-content:center;margin:1em auto;overflow:hidden;">` +
+    `<script type="text/mermaid">${safe}</script>` +
     `<span style="color:var(--md-text-secondary,#8b8578);font-size:13px;">` +
     `Rendering diagram…</span></div>`
   );
@@ -108,7 +118,7 @@ export function createMermaidPlaceholder(text: string): string {
  * Returns a cleanup function.
  */
 export async function hydrateMermaidPlaceholders(root: HTMLElement): Promise<() => void> {
-  const placeholders = root.querySelectorAll(`[${MERMAID_ATTR}]`);
+  const placeholders = root.querySelectorAll<HTMLElement>(".mermaid-placeholder");
   if (placeholders.length === 0) return () => {};
 
   // Lazy-load Mermaid
@@ -121,11 +131,14 @@ export async function hydrateMermaidPlaceholders(root: HTMLElement): Promise<() 
 
   const rendered: HTMLElement[] = [];
 
-  for (const el of placeholders) {
-    const ph = el as HTMLElement;
+  for (const ph of placeholders) {
     if (ph.dataset.mermaidRendered === "1") continue;
 
-    const text = ph.getAttribute(MERMAID_ATTR);
+    // Read diagram text from <script type="text/mermaid"> child.
+    // textContent preserves newlines correctly (unlike data-* attributes
+    // which are subject to HTML5 attribute-value newline normalisation).
+    const script = ph.querySelector<HTMLScriptElement>('script[type="text/mermaid"]');
+    const text = script?.textContent;
     if (!text) continue;
 
     ph.dataset.mermaidRendered = "1";

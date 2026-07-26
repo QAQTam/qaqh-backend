@@ -46,6 +46,49 @@ interface MarkdownBlock {
   html?: string;      // cached rendered HTML (stable blocks only)
 }
 
+let projectionWorker: Worker | null | undefined;
+let projectionId = 0;
+const projectionRequests = new Map<number, (blocks: MarkdownBlock[]) => void>();
+
+function projectBlocksOffThread(text: string, final: boolean): Promise<MarkdownBlock[]> {
+  // Vitest's jsdom Worker shim does not execute module workers. Keep its DOM
+  // contract synchronous while production Chromium uses the worker below.
+  if (import.meta.env.MODE === "test" || typeof Worker === "undefined") {
+    return Promise.resolve(projectBlocks(text, final, []));
+  }
+  if (projectionWorker === undefined) {
+    projectionWorker = new Worker(new URL("./markdownProjection.worker.ts", import.meta.url), { type: "module" });
+    projectionWorker.onmessage = ({ data }: MessageEvent<{ id: number; blocks: MarkdownBlock[] }>) => {
+      const resolve = projectionRequests.get(data.id);
+      projectionRequests.delete(data.id);
+      resolve?.(data.blocks);
+    };
+    projectionWorker.onerror = () => {
+      projectionWorker?.terminate();
+      projectionWorker = null;
+      for (const resolve of projectionRequests.values()) resolve([]);
+      projectionRequests.clear();
+    };
+  }
+  if (!projectionWorker) return Promise.resolve(projectBlocks(text, final, []));
+  const id = ++projectionId;
+  return new Promise(resolve => {
+    projectionRequests.set(id, resolve);
+    projectionWorker!.postMessage({ id, text, final });
+  });
+}
+
+function canProjectOffThread(): boolean {
+  return import.meta.env.MODE !== "test" && typeof Worker !== "undefined";
+}
+
+function reuseCachedHtml(blocks: MarkdownBlock[], previous: MarkdownBlock[]): MarkdownBlock[] {
+  return blocks.map(block => ({
+    ...block,
+    html: block.stable ? previous.find(candidate => candidate.key === block.key && candidate.hash === block.hash)?.html : undefined,
+  }));
+}
+
 function blockHash(raw: string): string {
   if (raw.length <= 24) return String(raw.length);
   return `${raw.length}:${raw.slice(0, 10)}…${raw.slice(-10)}`;
@@ -315,7 +358,11 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
         return;
       }
 
-      const blocks = projectBlocks(text, final, prevBlocks);
+      const projected = canProjectOffThread()
+        ? await projectBlocksOffThread(text, final)
+        : projectBlocks(text, final, []);
+      const blocks = reuseCachedHtml(projected, prevBlocks);
+      if (isStale()) return;
 
     if (final) {
       let html: string;

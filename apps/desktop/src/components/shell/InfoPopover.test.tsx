@@ -87,7 +87,7 @@ describe("InfoPopover", () => {
       usage,
     }, 101));
     await Promise.resolve();
-    expect(host.querySelector(".info-cache-label strong")?.textContent).toBe("不可用");
+    expect(host.querySelector(".info-cache")).toBeNull();
   });
 
   it("expands task details and only asks when the question control is clicked", async () => {

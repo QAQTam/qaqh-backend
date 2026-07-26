@@ -870,9 +870,14 @@ impl TurnEngine {
                         delay_secs,
                         error,
                     } => {
-                        ctx.emitter.emit(Agent2Ui::Error {
-                                message: format!("API error, retrying ({attempt}/{max_retries}) in {delay_secs}s: {error}"),
-                            });
+                        ctx.emitter.emit(Agent2Ui::ProviderRetrying {
+                            turn_id: turn_id.clone(),
+                            round_num,
+                            attempt,
+                            max_retries,
+                            delay_secs,
+                            error,
+                        });
                     }
                     deepx_gate::StreamEvent::Error(msg) => {
                         ctx.emitter.emit(Agent2Ui::Error { message: msg });

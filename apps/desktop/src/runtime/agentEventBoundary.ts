@@ -3,6 +3,7 @@ import type { Agent2Ui } from "../lib/types";
 const EVENT_TYPES: ReadonlySet<Agent2Ui["type"]> = new Set([
   "turn_start", "turn_end", "round_delta", "round_complete", "tool_results",
   "tool_exec_delta", "session_restored", "more_turns", "session_created", "error",
+  "provider_retrying",
   "tool_notice", "plan_submitted", "plan_resolved", "dashboard", "done",
   "usage_updated",
   "compact_start", "compact_end", "compact_delta", "cancelled", "shutdown_ack",

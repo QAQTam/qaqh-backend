@@ -113,6 +113,17 @@ export type RawTurn = {
 export type RawSessionState = {
   seed: string;
   turns: RawTurn[];
+  /**
+   * Transient provider-retry state. It is deliberately outside a turn so
+   * retries do not mutate transcript content or turn terminal status.
+   */
+  providerRetry: {
+    turnId: string;
+    roundNum: number;
+    attempt: number;
+    maxRetries: number;
+    delaySecs: number;
+  } | null;
   pendingInteractions: PendingInteraction[];
   environment: {
     linesAdded: number;

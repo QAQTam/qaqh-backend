@@ -34,7 +34,7 @@ has_more: boolean, } | { "type": "more_turns", turns: Array<TurnData>,
 /**
  * True if there are still more (older) turns available.
  */
-has_more: boolean, } | { "type": "session_created", seed: string, } | { "type": "error", message: string, } | { "type": "tool_notice", message: string,
+has_more: boolean, } | { "type": "session_created", seed: string, } | { "type": "error", message: string, } | { "type": "provider_retrying", turn_id: string, round_num: number, attempt: number, max_retries: number, delay_secs: number, error: string, } | { "type": "tool_notice", message: string,
 /**
  * "warn" or "error"
  */

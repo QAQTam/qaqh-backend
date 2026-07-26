@@ -100,7 +100,13 @@ fn split_inline_thinking(text: &str, in_thinking: &mut bool) -> Vec<(bool, Strin
 /// Connection pool, DNS cache, and TLS session cache are preserved.
 static GLOBAL_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
     Client::builder()
-        .timeout(Duration::from_secs(300))
+        // A streaming response can legitimately last longer than five minutes.
+        // Bound connection establishment separately and keep idle pooled sockets
+        // alive, while leaving enough total budget for long reasoning streams.
+        .connect_timeout(Duration::from_secs(15))
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .pool_idle_timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(30 * 60))
         .build()
         .expect("failed to build reqwest client")
 });

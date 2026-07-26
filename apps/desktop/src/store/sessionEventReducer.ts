@@ -25,6 +25,7 @@ export function createRawSessionState(seed: string): RawSessionState {
   return {
     seed,
     turns: [],
+    providerRetry: null,
     pendingInteractions: [],
     environment: {
       linesAdded: 0,
@@ -115,6 +116,11 @@ function lastTurnId(state: RawSessionState): string | undefined {
   return state.turns[state.turns.length - 1]?.turnId;
 }
 
+function clearProviderRetry(state: RawSessionState, turnId?: string): RawSessionState {
+  if (!state.providerRetry || (turnId && state.providerRetry.turnId !== turnId)) return state;
+  return { ...state, providerRetry: null };
+}
+
 function appendNoticeOnce(
   state: RawSessionState,
   notice: RawSessionState["notices"][number],
@@ -140,7 +146,10 @@ function upsertMetric(
     reasoning_tokens: usage.reasoning_tokens,
     cache_hit: usage.prompt_cache_hit_tokens,
     cache_miss: usage.prompt_cache_miss_tokens,
-    cache_available: usage.prompt_cache_hit_tokens + usage.prompt_cache_miss_tokens > 0,
+    // A reported 0/0 is real provider data, whereas an omitted value is not.
+    // Keep availability separate from the token values so the UI never flickers
+    // between unavailable and a cache card while a stream is in flight.
+    cache_available: Boolean(usage.cache_usage_reported),
     sample_key: requestKey,
   };
   const existingIndex = state.telemetry.findIndex(point => point.sample_key === requestKey);
@@ -270,6 +279,7 @@ export function reduceAgentEvent(
       if (state.turns.some(turn => turn.turnId === event.turn_id)) return state;
       return {
         ...state,
+        providerRetry: null,
         turns: [...state.turns, {
           turnId: event.turn_id,
           userText: event.user_text,
@@ -300,17 +310,19 @@ export function reduceAgentEvent(
           ? upsertUsage(next, event.usage, existingRequest, now)
           : upsertUsage(next, event.usage, `${event.turn_id}:final`, now);
       }
-      return next;
+      return clearProviderRetry(next, event.turn_id);
     }
-    case "round_delta":
-      return updateRound(state, event.turn_id, event.round_num, round => ({
+    case "round_delta": {
+      const next = updateRound(state, event.turn_id, event.round_num, round => ({
         ...round,
         thinking: event.kind === "thinking" ? round.thinking + event.delta : round.thinking,
         answer: event.kind === "answering" ? round.answer + event.delta : round.answer,
         phase: event.kind,
       }));
-    case "round_complete":
-      return updateRound(state, event.turn_id, event.round_num, round => ({
+      return clearProviderRetry(next, event.turn_id);
+    }
+    case "round_complete": {
+      const next = updateRound(state, event.turn_id, event.round_num, round => ({
         ...round,
         isFinal: event.is_final,
         thinking: event.thinking ?? round.thinking,
@@ -319,6 +331,8 @@ export function reduceAgentEvent(
         blocks: event.blocks ?? round.blocks,
         phase: "complete",
       }));
+      return clearProviderRetry(next, event.turn_id);
+    }
     case "tool_results":
       return updateRound(state, event.turn_id, event.round_num, round => ({
         ...round,
@@ -415,6 +429,7 @@ export function reduceAgentEvent(
         ...state,
         seed: event.seed,
         turns: event.turns.map(restoredTurn),
+        providerRetry: null,
         session: {
           ...state.session,
           totalTurns: event.total_turns,
@@ -449,7 +464,8 @@ export function reduceAgentEvent(
         message: event.message,
         at: now,
       });
-      return turnId ? updateTurn(next, turnId, turn => ({ ...turn, status: "failed", endedAt: now })) : next;
+      const failed = turnId ? updateTurn(next, turnId, turn => ({ ...turn, status: "failed", endedAt: now })) : next;
+      return clearProviderRetry(failed, turnId);
     }
     case "tool_notice":
       return { ...state, notices: [...state.notices, { level: event.level, message: event.message, at: now }] };
@@ -481,6 +497,21 @@ export function reduceAgentEvent(
       }
       return next;
     }
+    case "provider_retrying":
+      // This is informational. The provider still owns the active request and
+      // may recover on the next attempt, so do not fail the turn or append an
+      // error notice. The small, replace-in-place status is cleared by output
+      // or a terminal event.
+      return {
+        ...state,
+        providerRetry: {
+          turnId: event.turn_id,
+          roundNum: event.round_num,
+          attempt: event.attempt,
+          maxRetries: event.max_retries,
+          delaySecs: event.delay_secs,
+        },
+      };
     case "usage_updated":
       return upsertUsage(
         state,
@@ -626,17 +657,21 @@ export function reduceAgentEvent(
         ...state,
         pendingInteractions,
       };
-      return updateTurn(next, turnId, turn => ({ ...turn, status: "cancelled", endedAt: now }));
+      return clearProviderRetry(
+        updateTurn(next, turnId, turn => ({ ...turn, status: "cancelled", endedAt: now })),
+        turnId,
+      );
     }
     case "ready":
       return { ...state, session: { ...state.session, ready: true } };
     case "done": {
       const turnId = lastTurnId(state);
-      return turnId ? updateTurn(state, turnId, turn =>
+      const completed = turnId ? updateTurn(state, turnId, turn =>
         turn.status === "running" || turn.status === "waiting"
           ? { ...turn, status: "completed", endedAt: now }
           : turn,
       ) : state;
+      return clearProviderRetry(completed, turnId);
     }
     case "shutdown_ack":
     case "pong":

@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, Match, onCleanup, Show, Switch, untrack, type Accessor } from "solid-js";
 import { request } from "../runtime/backendClient";
-import { openPath } from "../runtime/desktopApi";
+import { openDevTools, openPath } from "../runtime/desktopApi";
 import { togglePet } from "../runtime/desktopApi";
 import type { AskAnswer, TaskInfo } from "../lib/types";
 import { createSessionProjector } from "../presentation/useConversationView";
@@ -140,9 +140,12 @@ export default function ChatView(props: ChatViewProps) {
   });
 
   createEffect(
-    () => ({ open: infoOpen(), seed: seed() }),
-    ({ open, seed: currentSeed }) => {
-    if (!open) return;
+    () => ({ open: infoOpen(), seed: seed(), streaming: streaming() }),
+    ({ open, seed: currentSeed, streaming: activeStream }) => {
+    // git.branch is a session-scoped request. On a reconnect it may need to
+    // attach the lease and receive a snapshot, so defer this nonessential
+    // metadata read until the active stream has finished.
+    if (!open || activeStream) return;
     request<string>("git.branch", { seed: currentSeed })
       .then(setBranch)
       .catch(() => setBranch(""));
@@ -157,6 +160,7 @@ export default function ChatView(props: ChatViewProps) {
         onToggleInfo={() => setInfoOpen(value => !value)}
         onToggleStats={() => setStatsOpen(value => !value)}
         onOpenLocation={() => { if (props.ui.workspace()) void openPath(props.ui.workspace()); }}
+        onOpenConsole={() => { void openDevTools(); }}
         workspace={props.ui.workspace()}
         onChangeWorkspace={props.onChangeWorkspace}
         compacting={session().compact.active}
@@ -194,6 +198,11 @@ export default function ChatView(props: ChatViewProps) {
           contextLimit={usage().contextLimit || 200000}
           onClose={() => setStatsOpen(false)}
         />
+      </Show>
+      <Show when={session().providerRetry}>
+        {retry => <div class="provider-retry-status" role="status">
+          连接暂时不稳定，将在 {retry().delaySecs} 秒后重试（{retry().attempt}/{retry().maxRetries}）
+        </div>}
       </Show>
       <ConversationTranscript
         turns={turns()}

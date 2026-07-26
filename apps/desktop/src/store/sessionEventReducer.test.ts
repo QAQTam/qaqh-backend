@@ -373,6 +373,26 @@ describe("sessionEventReducer", () => {
     expect(state.turns[0].turnId).toBe("t1");
   });
 
+  it("keeps a streamed turn running while the provider retries", () => {
+    let state = reduceAgentEvent(createRawSessionState("seed-a"), {
+      type: "turn_start", turn_id: "t1", user_text: "run",
+    }, 1);
+    state = reduceAgentEvent(state, {
+      type: "provider_retrying", turn_id: "t1", round_num: 0,
+      attempt: 1, max_retries: 3, delay_secs: 1, error: "connect timeout",
+    }, 2);
+
+    expect(state.turns[0]?.status).toBe("running");
+    expect(state.notices).toEqual([]);
+    expect(state.providerRetry).toMatchObject({ attempt: 1, maxRetries: 3 });
+
+    state = reduceAgentEvent(state, {
+      type: "round_delta", turn_id: "t1", round_num: 0,
+      kind: "thinking", delta: "recovered",
+    }, 3);
+    expect(state.providerRetry).toBeNull();
+  });
+
   it("replaces progressive usage and aggregates distinct model requests", () => {
     const usage = (
       prompt_tokens: number,
@@ -418,5 +438,19 @@ describe("sessionEventReducer", () => {
     expect(state.session.cacheHitPct).toBe(60);
     expect(state.session.usageRequestCount).toBe(2);
     expect(state.session.cacheReportedRequestCount).toBe(2);
+  });
+
+  it("keeps provider-reported zero cache values available to the UI", () => {
+    const state = reduceAgentEvent(createRawSessionState("seed-cache-zero"), {
+      type: "usage_updated", turn_id: "t1", round_num: 0,
+      usage: {
+        prompt_tokens: 100, completion_tokens: 0, total_tokens: 100,
+        prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0,
+        reasoning_tokens: 0, cache_usage_reported: true,
+      },
+      context_limit: 1_000, model: "model",
+    }, 1);
+
+    expect(state.telemetry[0]).toMatchObject({ cache_available: true, cache_hit: 0, cache_miss: 0 });
   });
 });

@@ -55,25 +55,25 @@ export default function InfoPopover(props: {
         fallback={<div class="environment-empty">{t().environment.waitingUsage}</div>}
       >
         <div class="info-token-grid" aria-live="polite">
-          <div><span>{t().environment.inputTokens}</span><strong><RollingNumber value={usage().promptTokens} /></strong></div>
-          <div><span>{t().environment.outputTokens}</span><strong><RollingNumber value={usage().completionTokens} /></strong></div>
-          <div><span>{t().environment.reasoningTokens}</span><strong><RollingNumber value={usage().reasoningTokens} /></strong></div>
-          <div><span>{t().environment.totalTokens}</span><strong><RollingNumber value={usage().requestTotalTokens} /></strong></div>
+          <div><span>{t().environment.inputTokens}</span><strong><RollingNumber value={usage().promptTokens} animate={false} /></strong></div>
+          <div><span>{t().environment.outputTokens}</span><strong><RollingNumber value={usage().completionTokens} animate={false} /></strong></div>
+          <div><span>{t().environment.reasoningTokens}</span><strong><RollingNumber value={usage().reasoningTokens} animate={false} /></strong></div>
+          <div><span>{t().environment.totalTokens}</span><strong><RollingNumber value={usage().requestTotalTokens} animate={false} /></strong></div>
         </div>
-        <div class="info-cache">
-          <div class="info-cache-label">
-            <span>{t().environment.cache}</span>
-            <strong>{usage().cacheHitPct == null ? t().environment.unavailable : `${usage().cacheHitPct!.toFixed(1)}%`}</strong>
-          </div>
-          <Show when={usage().cacheAvailable}>
+        <Show when={usage().cacheAvailable}>
+          <div class="info-cache">
+            <div class="info-cache-label">
+              <span>{t().environment.cache}</span>
+              <strong>{`${usage().cacheHitPct!.toFixed(1)}%`}</strong>
+            </div>
             <div class="info-cache-detail">
-              <RollingNumber value={usage().cacheHit} /> {t().environment.hit} · <RollingNumber value={usage().cacheMiss} /> {t().environment.miss}
+              <RollingNumber value={usage().cacheHit} animate={false} /> {t().environment.hit} · <RollingNumber value={usage().cacheMiss} animate={false} /> {t().environment.miss}
             </div>
             <div class="info-progress info-cache-progress">
               <span style={{ width: `${usage().cacheHitPct ?? 0}%` }} />
             </div>
-          </Show>
-        </div>
+          </div>
+        </Show>
       </Show>
       <details class="info-session-summary">
         <summary>

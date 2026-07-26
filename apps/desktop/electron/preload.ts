@@ -28,15 +28,7 @@ contextBridge.exposeInMainWorld("deepx", {
     checkUpdate: () => ipcRenderer.invoke("desktop:check-update") as Promise<UpdateInfo | null>,
     stageUpdate: (source: string) => ipcRenderer.invoke("desktop:stage-update", source) as Promise<UpdateInfo | null>,
     applyUpdate: (operationPath: string) => ipcRenderer.invoke("desktop:apply-update", operationPath) as Promise<{ restarting: boolean }>,
-    windowMinimize: () => ipcRenderer.send("desktop:window-minimize"),
-    windowToggleMaximize: () => ipcRenderer.invoke("desktop:window-toggle-maximize") as Promise<boolean>,
-    windowIsMaximized: () => ipcRenderer.invoke("desktop:window-is-maximized") as Promise<boolean>,
-    windowClose: () => ipcRenderer.send("desktop:window-close"),
-    onWindowMaximizedChanged: (listener: (maximized: boolean) => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, maximized: boolean) => listener(maximized);
-      ipcRenderer.on("window:maximized-changed", handler);
-      return () => ipcRenderer.removeListener("window:maximized-changed", handler);
-    },
+    openDevTools: () => ipcRenderer.invoke("desktop:open-devtools") as Promise<boolean>,
     onUpdateAvailable: (listener: (info: UpdateInfo) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, info: UpdateInfo) => listener(info);
       ipcRenderer.on("update:available", handler);
