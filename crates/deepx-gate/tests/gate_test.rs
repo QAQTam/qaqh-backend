@@ -130,6 +130,23 @@ fn basic_text_stream() {
 }
 
 #[test]
+fn slow_initial_response_is_not_treated_as_transport_timeout() {
+    let scenario = vec![
+        SseChunk::delay_ms(150),
+        SseChunk::text("Delayed response"),
+        SseChunk::finish("stop", None),
+        SseChunk::done(),
+    ];
+    let mock = MockServer::new(scenario);
+    let provider = make_provider(&mock);
+
+    let events = collect_events(&provider, vec![Message::user("Wait for it")], None);
+
+    let texts: Vec<&str> = events.iter().filter_map(event_text).collect();
+    assert_eq!(texts, vec!["Delayed response"]);
+}
+
+#[test]
 fn reasoning_then_text() {
     let scenario = vec![
         SseChunk::reasoning("Let me think about this..."),

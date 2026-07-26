@@ -16,16 +16,16 @@ mod win_process;
 
 mod colors {
     use egui::Color32;
-    pub const ACCENT: Color32 = Color32::from_rgb(0, 122, 255);      // macOS 蓝
+    pub const ACCENT: Color32 = Color32::from_rgb(0, 122, 255); // macOS 蓝
     pub const SIDEBAR_BG: Color32 = Color32::from_rgb(245, 245, 247); // 浅灰侧边栏
-    pub const SIDEBAR_TEXT: Color32 = Color32::from_rgb(50, 50, 55);  // 深色文字
+    pub const SIDEBAR_TEXT: Color32 = Color32::from_rgb(50, 50, 55); // 深色文字
     pub const SIDEBAR_ACTIVE: Color32 = Color32::from_rgb(0, 0, 0);
     pub const CONTENT_BG: Color32 = Color32::from_rgb(255, 255, 255);
-    pub const SUCCESS: Color32 = Color32::from_rgb(52, 199, 89);     // 绿色
-    pub const DANGER: Color32 = Color32::from_rgb(255, 59, 48);      // 红色
+    pub const SUCCESS: Color32 = Color32::from_rgb(52, 199, 89); // 绿色
+    pub const DANGER: Color32 = Color32::from_rgb(255, 59, 48); // 红色
     pub const BORDER: Color32 = Color32::from_rgb(200, 200, 205);
     pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(90, 90, 95); // 次级文字
-    pub const TEXT_MUTED: Color32 = Color32::from_rgb(140, 140, 145);  // 更浅（禁用态等）
+    pub const TEXT_MUTED: Color32 = Color32::from_rgb(140, 140, 145); // 更浅（禁用态等）
     pub const STEP_DOT_SIZE: f32 = 28.0;
 }
 
@@ -36,6 +36,39 @@ mod colors {
 fn main() -> Result<(), eframe::Error> {
     let args: Vec<String> = std::env::args().collect();
 
+    // A DirectoryUpdateSource ships with this renamed launcher. Double-clicking
+    // it stages the sibling catalog into the current user's default installation.
+    if args.len() == 1 {
+        if let Ok(executable) = std::env::current_exe() {
+            let is_update_launcher = executable
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("DeepXUpdate.exe"));
+            if is_update_launcher {
+                let source = executable
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                if source.join("catalog.json").is_file() {
+                    let target = install::InstallerConfig::default_path();
+                    let result = install::push_update(&source.to_string_lossy(), &target);
+                    match result {
+                        Ok(_) => show_update_message(
+                            "DeepX 更新",
+                            "更新已安全暂存。DeepX 正在运行时会显示更新提示；未运行时请启动 DeepX 完成更新。",
+                            false,
+                        ),
+                        Err(error) => show_update_message(
+                            "DeepX 更新失败",
+                            &format!("{error}\n\n若尚未安装 DeepX，请先运行 Full 安装包。"),
+                            true,
+                        ),
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     // ── Headless patch mode: --patch <source_payload> <target_dir> ──
     if args.len() >= 4 && args[1] == "--patch" {
         let source = &args[2];
@@ -44,6 +77,36 @@ fn main() -> Result<(), eframe::Error> {
             Ok(()) => std::process::exit(0),
             Err(e) => {
                 eprintln!("patch failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // ── Feed a local catalog to the installed updater ──
+    if args.len() >= 4 && args[1] == "--push-update" {
+        match install::push_update(&args[2], &args[3]) {
+            Ok(output) => {
+                println!("{output}");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("更新投递失败: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // ── Headless SFX mode: --apply-self <target_dir> ──
+    if args.len() >= 3 && args[1] == "--apply-self" {
+        let mut config = install::InstallerConfig {
+            target_path: args[2].clone(),
+            install_desktop_app: true,
+            ..Default::default()
+        };
+        match install::run_install(&mut config, |_| {}) {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                eprintln!("self update failed: {error}");
                 std::process::exit(1);
             }
         }
@@ -69,6 +132,42 @@ fn main() -> Result<(), eframe::Error> {
     )
 }
 
+#[cfg(windows)]
+fn show_update_message(title: &str, message: &str, error: bool) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+    };
+
+    let title = std::ffi::OsStr::new(title)
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let message = std::ffi::OsStr::new(message)
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let icon = if error {
+        MB_ICONERROR
+    } else {
+        MB_ICONINFORMATION
+    };
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR::from_raw(message.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            MB_OK | icon,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn show_update_message(title: &str, message: &str, _error: bool) {
+    println!("{title}: {message}");
+}
+
 fn setup_chinese_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
     let font_paths = [
@@ -80,9 +179,15 @@ fn setup_chinese_fonts(ctx: &Context) {
     ];
     for path in &font_paths {
         if let Ok(bytes) = std::fs::read(path) {
-            fonts.font_data.insert("chinese_font".to_owned(), FontData::from_owned(bytes));
+            fonts
+                .font_data
+                .insert("chinese_font".to_owned(), FontData::from_owned(bytes));
             for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                fonts.families.entry(family).or_default().insert(0, "chinese_font".to_owned());
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .insert(0, "chinese_font".to_owned());
             }
             break;
         }
@@ -134,7 +239,12 @@ enum Screen {
 
 impl Screen {
     fn all() -> &'static [Screen] {
-        &[Screen::Welcome, Screen::License, Screen::Location, Screen::Components]
+        &[
+            Screen::Welcome,
+            Screen::License,
+            Screen::Location,
+            Screen::Components,
+        ]
     }
 
     fn title(&self) -> &'static str {
@@ -220,7 +330,10 @@ impl Default for App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.poll_install(ctx);
-        let is_install_phase = matches!(self.screen, Screen::CloseProcesses | Screen::Progress | Screen::Finish);
+        let is_install_phase = matches!(
+            self.screen,
+            Screen::CloseProcesses | Screen::Progress | Screen::Finish
+        );
 
         // 左侧步骤导航
         if !is_install_phase {
@@ -239,7 +352,11 @@ impl eframe::App for App {
             .resizable(false)
             .min_height(if is_install_phase { 0.0 } else { 52.0 })
             .show_separator_line(!is_install_phase)
-            .frame(Frame::none().fill(colors::CONTENT_BG).inner_margin(Margin::symmetric(16.0, 10.0)))
+            .frame(
+                Frame::none()
+                    .fill(colors::CONTENT_BG)
+                    .inner_margin(Margin::symmetric(16.0, 10.0)),
+            )
             .show(ctx, |ui| {
                 if !is_install_phase {
                     self.render_nav_bar(ui);
@@ -248,17 +365,19 @@ impl eframe::App for App {
 
         // 主内容区
         CentralPanel::default()
-            .frame(Frame::none().fill(colors::CONTENT_BG).inner_margin(Margin::symmetric(32.0, 20.0)))
-            .show(ctx, |ui| {
-                match self.screen {
-                    Screen::Welcome => self.render_welcome(ui),
-                    Screen::License => self.render_license(ui),
-                    Screen::Location => self.render_location(ui),
-                    Screen::Components => self.render_components(ui),
-                    Screen::CloseProcesses => self.render_close_processes(ui),
-                    Screen::Progress => self.render_progress(ui),
-                    Screen::Finish => self.render_finish(ui),
-                }
+            .frame(
+                Frame::none()
+                    .fill(colors::CONTENT_BG)
+                    .inner_margin(Margin::symmetric(32.0, 20.0)),
+            )
+            .show(ctx, |ui| match self.screen {
+                Screen::Welcome => self.render_welcome(ui),
+                Screen::License => self.render_license(ui),
+                Screen::Location => self.render_location(ui),
+                Screen::Components => self.render_components(ui),
+                Screen::CloseProcesses => self.render_close_processes(ui),
+                Screen::Progress => self.render_progress(ui),
+                Screen::Finish => self.render_finish(ui),
             });
     }
 }
@@ -270,7 +389,12 @@ impl eframe::App for App {
 impl App {
     fn render_sidebar(&self, ui: &mut Ui) {
         ui.add_space(28.0);
-        ui.label(RichText::new("安装步骤").size(13.0).color(colors::TEXT_SECONDARY).strong());
+        ui.label(
+            RichText::new("安装步骤")
+                .size(13.0)
+                .color(colors::TEXT_SECONDARY)
+                .strong(),
+        );
         ui.add_space(20.0);
 
         let current = self.screen.step_index();
@@ -370,10 +494,14 @@ impl App {
                     .rounding(Rounding::same(6.0))
                     .min_size(Vec2::new(90.0, 30.0))
             } else {
-                Button::new(RichText::new(next_label).color(Color32::from_rgb(130, 130, 135)).size(13.0))
-                    .fill(Color32::from_rgb(230, 230, 235))
-                    .rounding(Rounding::same(6.0))
-                    .min_size(Vec2::new(90.0, 30.0))
+                Button::new(
+                    RichText::new(next_label)
+                        .color(Color32::from_rgb(130, 130, 135))
+                        .size(13.0),
+                )
+                .fill(Color32::from_rgb(230, 230, 235))
+                .rounding(Rounding::same(6.0))
+                .min_size(Vec2::new(90.0, 30.0))
             };
 
             if ui.add_enabled(can_next, next_btn).clicked() {
@@ -437,7 +565,11 @@ impl App {
         ui.add_space(12.0);
         ui.label(RichText::new(screen.title()).size(22.0).strong());
         ui.add_space(4.0);
-        ui.label(RichText::new(screen.subtitle()).size(13.0).color(colors::TEXT_SECONDARY));
+        ui.label(
+            RichText::new(screen.subtitle())
+                .size(13.0)
+                .color(colors::TEXT_SECONDARY),
+        );
         ui.add_space(20.0);
     }
 
@@ -465,7 +597,11 @@ impl App {
 
             ui.label(RichText::new("DeepX").size(32.0).strong());
             ui.add_space(4.0);
-            ui.label(RichText::new("本地优先的桌面效率工具集").size(14.0).color(colors::TEXT_SECONDARY));
+            ui.label(
+                RichText::new("本地优先的桌面效率工具集")
+                    .size(14.0)
+                    .color(colors::TEXT_SECONDARY),
+            );
             ui.add_space(36.0);
 
             // 特性列表
@@ -501,17 +637,15 @@ impl App {
             .stroke(Stroke::new(1.0_f32, colors::BORDER))
             .inner_margin(Margin::same(14.0))
             .show(ui, |ui| {
-                ScrollArea::vertical()
-                    .max_height(200.0)
-                    .show(ui, |ui| {
-                        ui.add(
-                            TextEdit::multiline(&mut self.license_text)
-                                .font(TextStyle::Body)
-                                .interactive(false)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(12),
-                        );
-                    });
+                ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    ui.add(
+                        TextEdit::multiline(&mut self.license_text)
+                            .font(TextStyle::Body)
+                            .interactive(false)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(12),
+                    );
+                });
             });
 
         ui.add_space(14.0);
@@ -655,7 +789,11 @@ impl App {
                 ui.label(RichText::new("检测到以下 DeepX 进程正在运行:").strong());
                 ui.add_space(8.0);
                 for p in &self.running_procs {
-                    let status = if p.closed { "✓ 已关闭" } else { "● 运行中" };
+                    let status = if p.closed {
+                        "✓ 已关闭"
+                    } else {
+                        "● 运行中"
+                    };
                     ui.label(format!("  {}  (PID: {})  {}", p.name, p.pid, status));
                 }
             });
@@ -665,7 +803,11 @@ impl App {
         if !self.close_attempted {
             ui.label("可以尝试自动关闭这些进程（同用户进程无需管理员权限）。");
             ui.add_space(4.0);
-            ui.label(RichText::new("提示：关闭后未保存的数据可能丢失。").size(12.0).color(colors::TEXT_SECONDARY));
+            ui.label(
+                RichText::new("提示：关闭后未保存的数据可能丢失。")
+                    .size(12.0)
+                    .color(colors::TEXT_SECONDARY),
+            );
         } else {
             // 检查还有哪些在运行
             let still_running: Vec<_> = self.running_procs.iter().filter(|p| !p.closed).collect();
@@ -685,7 +827,15 @@ impl App {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // 继续安装（进程已关闭时）
             if self.running_procs.iter().all(|p| p.closed) {
-                if ui.add(Button::new(RichText::new("继续安装").color(Color32::WHITE)).fill(colors::ACCENT).rounding(Rounding::same(6.0)).min_size(Vec2::new(100.0, 30.0))).clicked() {
+                if ui
+                    .add(
+                        Button::new(RichText::new("继续安装").color(Color32::WHITE))
+                            .fill(colors::ACCENT)
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(100.0, 30.0)),
+                    )
+                    .clicked()
+                {
                     self.screen = Screen::Progress;
                     self.start_install();
                 }
@@ -693,7 +843,18 @@ impl App {
 
             // 跳过（忽略运行中的进程）
             if self.close_attempted {
-                if ui.add(Button::new(RichText::new("跳过（可能不完整）").color(colors::TEXT_SECONDARY).size(12.0)).fill(Color32::TRANSPARENT).min_size(Vec2::new(130.0, 30.0))).clicked() {
+                if ui
+                    .add(
+                        Button::new(
+                            RichText::new("跳过（可能不完整）")
+                                .color(colors::TEXT_SECONDARY)
+                                .size(12.0),
+                        )
+                        .fill(Color32::TRANSPARENT)
+                        .min_size(Vec2::new(130.0, 30.0)),
+                    )
+                    .clicked()
+                {
                     self.screen = Screen::Progress;
                     self.start_install();
                 }
@@ -701,7 +862,15 @@ impl App {
 
             // 强制关闭
             if self.close_attempted && !self.running_procs.iter().all(|p| p.closed) {
-                if ui.add(Button::new(RichText::new("强制关闭").color(Color32::WHITE)).fill(colors::DANGER).rounding(Rounding::same(6.0)).min_size(Vec2::new(90.0, 30.0))).clicked() {
+                if ui
+                    .add(
+                        Button::new(RichText::new("强制关闭").color(Color32::WHITE))
+                            .fill(colors::DANGER)
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(90.0, 30.0)),
+                    )
+                    .clicked()
+                {
                     for p in &mut self.running_procs {
                         if !p.closed {
                             win_process::force_terminate(p.pid);
@@ -713,7 +882,14 @@ impl App {
 
             // 重试（重新检测）
             if self.close_attempted {
-                if ui.add(Button::new(RichText::new("重试").size(13.0)).fill(Color32::TRANSPARENT).min_size(Vec2::new(70.0, 30.0))).clicked() {
+                if ui
+                    .add(
+                        Button::new(RichText::new("重试").size(13.0))
+                            .fill(Color32::TRANSPARENT)
+                            .min_size(Vec2::new(70.0, 30.0)),
+                    )
+                    .clicked()
+                {
                     self.running_procs = win_process::find_deepx_processes();
                     self.close_attempted = false;
                 }
@@ -721,7 +897,15 @@ impl App {
 
             // 自动关闭（首次）
             if !self.close_attempted {
-                if ui.add(Button::new(RichText::new("自动关闭").color(Color32::WHITE)).fill(colors::ACCENT).rounding(Rounding::same(6.0)).min_size(Vec2::new(100.0, 30.0))).clicked() {
+                if ui
+                    .add(
+                        Button::new(RichText::new("自动关闭").color(Color32::WHITE))
+                            .fill(colors::ACCENT)
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(100.0, 30.0)),
+                    )
+                    .clicked()
+                {
                     win_process::graceful_close(&mut self.running_procs);
                     let all_gone = win_process::wait_for_exit(&self.running_procs, 5);
                     if all_gone {
@@ -799,13 +983,22 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.add_space(50.0);
 
-            let success = self.install_result.as_ref().map(|r| r.is_ok()).unwrap_or(false);
+            let success = self
+                .install_result
+                .as_ref()
+                .map(|r| r.is_ok())
+                .unwrap_or(false);
 
             // 图标
             let icon = if success { "✓" } else { "✗" };
-            let icon_color = if success { colors::SUCCESS } else { colors::DANGER };
+            let icon_color = if success {
+                colors::SUCCESS
+            } else {
+                colors::DANGER
+            };
             let dot_rect = Rect::from_min_size(ui.next_widget_position(), Vec2::splat(64.0));
-            ui.painter().circle_filled(dot_rect.center(), 32.0, icon_color);
+            ui.painter()
+                .circle_filled(dot_rect.center(), 32.0, icon_color);
             ui.painter().text(
                 dot_rect.center(),
                 Align2::CENTER_CENTER,
@@ -817,9 +1010,19 @@ impl App {
             ui.add_space(16.0);
 
             if success {
-                ui.label(RichText::new("安装完成").size(22.0).strong());
+                let completed_title = match self.config.operation.as_str() {
+                    "update" => "更新完成",
+                    "upgrade" => "升级完成",
+                    _ => "安装完成",
+                };
+                let completed_message = match self.config.operation.as_str() {
+                    "update" => "DeepX 组件已成功更新。",
+                    "upgrade" => "DeepX 已成功升级。",
+                    _ => "DeepX 已成功安装到您的计算机。",
+                };
+                ui.label(RichText::new(completed_title).size(22.0).strong());
                 ui.add_space(8.0);
-                ui.label("DeepX 已成功安装到您的计算机。");
+                ui.label(completed_message);
                 ui.add_space(12.0);
 
                 Frame::none()
@@ -841,7 +1044,10 @@ impl App {
                 ui.add_space(20.0);
             } else {
                 ui.label(
-                    RichText::new("安装失败").size(22.0).strong().color(colors::DANGER),
+                    RichText::new("安装失败")
+                        .size(22.0)
+                        .strong()
+                        .color(colors::DANGER),
                 );
                 if let Some(Err(ref err)) = self.install_result {
                     ui.add_space(8.0);
@@ -852,10 +1058,12 @@ impl App {
 
             if ui
                 .add(
-                    Button::new(RichText::new(if success { "完成" } else { "关闭" }).color(Color32::WHITE))
-                        .fill(colors::ACCENT)
-                        .rounding(Rounding::same(6.0))
-                        .min_size(Vec2::new(120.0, 34.0)),
+                    Button::new(
+                        RichText::new(if success { "完成" } else { "关闭" }).color(Color32::WHITE),
+                    )
+                    .fill(colors::ACCENT)
+                    .rounding(Rounding::same(6.0))
+                    .min_size(Vec2::new(120.0, 34.0)),
                 )
                 .clicked()
             {
@@ -897,8 +1105,13 @@ impl App {
             match msg {
                 InstallMsg::Progress(cfg) => self.config = cfg,
                 InstallMsg::Done(result) => {
+                    let succeeded = result.is_ok();
                     self.install_result = Some(result);
-                    self.post_install();
+                    if succeeded {
+                        if let Err(error) = self.post_install() {
+                            self.install_result = Some(Err(error));
+                        }
+                    }
                     self.screen = Screen::Finish;
                 }
             }
@@ -906,15 +1119,20 @@ impl App {
         ctx.request_repaint();
     }
 
-    fn post_install(&mut self) {
+    fn post_install(&mut self) -> Result<(), String> {
+        if self.config.bundle_kind != "full" {
+            return Ok(());
+        }
         let app_exe = format!(r"{}\DeepX.exe", self.config.target_path);
+        install::write_install_marker(&self.config.target_path)?;
+        install::write_uninstall_registry(&self.config.target_path, env!("CARGO_PKG_VERSION"))?;
         if self.config.create_desktop_shortcut {
-            let _ = install::create_desktop_shortcut(&app_exe, "DeepX 桌面应用");
+            install::create_desktop_shortcut(&app_exe, "DeepX 桌面应用")?;
         }
         if self.config.create_start_menu {
-            let _ = install::create_start_menu_shortcut(&app_exe, "DeepX 桌面应用");
+            install::create_start_menu_shortcut(&app_exe, "DeepX 桌面应用")?;
         }
-        let _ = install::write_uninstall_registry(&self.config.target_path, env!("CARGO_PKG_VERSION"));
+        Ok(())
     }
 }
 
@@ -934,9 +1152,15 @@ fn shellexpand(path: &str) -> String {
 fn disk_free_space(path: &str) -> Option<u64> {
     let path = shellexpand(path);
     let p = std::path::Path::new(&path);
-    let mut current = if p.is_absolute() { Some(p.to_path_buf()) } else { None };
+    let mut current = if p.is_absolute() {
+        Some(p.to_path_buf())
+    } else {
+        None
+    };
     while let Some(ref c) = current {
-        if c.exists() { break; }
+        if c.exists() {
+            break;
+        }
         current = c.parent().map(|p| p.to_path_buf());
     }
     let check = current.unwrap_or_else(|| std::path::PathBuf::from("C:\\"));
@@ -950,34 +1174,53 @@ fn disk_free_space(path: &str) -> Option<u64> {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-        let drive_wide: Vec<u16> = format!("{}\\", drive).encode_utf16().chain(std::iter::once(0)).collect();
+        let drive_wide: Vec<u16> = format!("{}\\", drive)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut free: u64 = 0;
         GetDiskFreeSpaceExW(
             windows::core::PCWSTR::from_raw(drive_wide.as_ptr()),
-            Some(&mut free), None, None,
-        ).ok()?;
+            Some(&mut free),
+            None,
+            None,
+        )
+        .ok()?;
         Some(free)
     }
 
     #[cfg(not(windows))]
-    { None }
+    {
+        None
+    }
 }
 
 fn native_folder_picker() -> Option<String> {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::UI::Shell::{FileOpenDialog, IFileDialog, FOS_PICKFOLDERS, FOS_PATHMUSTEXIST};
-        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+        };
+        use windows::Win32::UI::Shell::{
+            FileOpenDialog, IFileDialog, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
+        };
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let dialog: IFileDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-        dialog.SetOptions(FOS_PICKFOLDERS | FOS_PATHMUSTEXIST).ok()?;
+        let dialog: IFileDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        dialog
+            .SetOptions(FOS_PICKFOLDERS | FOS_PATHMUSTEXIST)
+            .ok()?;
         dialog.Show(None).ok()?;
         let item = dialog.GetResult().ok()?;
-        let name = item.GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH).ok()?;
+        let name = item
+            .GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH)
+            .ok()?;
         Some(name.to_string().unwrap_or_default())
     }
     #[cfg(not(windows))]
-    { None }
+    {
+        None
+    }
 }
 
 // ============================================================

@@ -66,4 +66,34 @@ describe("PlanReviewPanel", () => {
 
     expect(onApprove).toHaveBeenCalledWith(true);
   });
+
+  it("renders backend todo items and submits activation approval", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    dispose = render(() => (
+      <PlanReviewPanel
+        planContent=""
+        reviewType="todo_activation"
+        todoItems={[{
+          id: "T1",
+          title: "Trace todo chain",
+          description: "backend to UI",
+          complexity: "medium",
+        }]}
+        onApprove={onApprove}
+        onReject={vi.fn()}
+      />
+    ), host);
+    await flush();
+
+    expect(host.textContent).toContain("Goal 激活审核");
+    expect(host.textContent).toContain("T1");
+    expect(host.textContent).toContain("Trace todo chain");
+    expect(host.textContent).toContain("backend to UI");
+
+    host.querySelector<HTMLButtonElement>(".interaction-approve")!.click();
+    await flush();
+    expect(onApprove).toHaveBeenCalledWith(true);
+  });
 });

@@ -1,50 +1,63 @@
-# finalize.ps1 — 生成 SFX 单文件成品
-# 所有路径相对于 workspace 根 (D:\DeepX)
+# finalize.ps1 — 将指定 Bundle 生成 DeepX 自解压安装器
 param(
-    [string]$PayloadDir = "apps\installer\payload",
-    [string]$ExePath    = "target\release\DeepXInstaller.exe",
-    [string]$OutDir     = "apps\installer\dist"
+    [ValidateSet("full", "frontend", "backend")]
+    [string]$Kind = "full",
+    [string]$PayloadDir = "",
+    [string]$ExePath = "target/release/DeepXInstaller.exe",
+    [string]$OutDir = "packages"
 )
 
-Write-Host "=== 生成成品 (SFX 单文件模式) ==="
+$ErrorActionPreference = "Stop"
 
-if (Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
-New-Item -Force -ItemType Directory -Path $OutDir | Out-Null
-
-# 1) 构建 payload.zip
-if (-not (Test-Path $PayloadDir)) {
-    Write-Warning "payload/ 不存在，跳过压缩"
-} else {
-    Write-Host "  → 压缩 payload.zip ..."
-    Compress-Archive -Path "$PayloadDir/*" -DestinationPath "$OutDir/payload.zip" -Force
-}
-
-# 2) 追加 ZIP 到 EXE 尾部 → 单文件 SFX
-#    用 PowerShell 流式拼接，避免 cmd copy /b 把 "/" 路径当开关
-if (Test-Path $ExePath) {
-    Write-Host "  → 生成单文件安装器 (流式拼接) ..."
-    $sfx = "$OutDir/DeepXInstaller-Setup.exe"
-    $exeStream = [System.IO.File]::OpenRead($ExePath)
-    $zipStream = [System.IO.File]::OpenRead("$OutDir/payload.zip")
-    $outStream = [System.IO.File]::Create($sfx)
-    try {
-        $exeStream.CopyTo($outStream)
-        $zipStream.CopyTo($outStream)
-    } finally {
-        $exeStream.Close()
-        $zipStream.Close()
-        $outStream.Close()
+if ([string]::IsNullOrWhiteSpace($PayloadDir)) {
+    $pointerPath = "apps/installer/staging/$Kind.latest.json"
+    if (Test-Path -LiteralPath $pointerPath -PathType Leaf) {
+        $PayloadDir = (Get-Content -LiteralPath $pointerPath -Raw | ConvertFrom-Json).payloadPath
+    } else {
+        $PayloadDir = "apps/installer/staging/$Kind"
     }
-    Remove-Item -Force "$OutDir/payload.zip" -ErrorAction SilentlyContinue
-} else {
-    Write-Warning "未找到安装器 EXE: $ExePath"
 }
 
-# 3) 保留 payload 目录版本（调试用）
-if (Test-Path $PayloadDir) {
-    Copy-Item -Recurse -Force $PayloadDir "$OutDir/payload/" -ErrorAction SilentlyContinue
-    Write-Host "  → dist/payload/ (调试用)"
+$manifestPath = Join-Path $PayloadDir "bundle.json"
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "未找到 Bundle manifest: $manifestPath"
+}
+if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
+    throw "未找到安装器 EXE: $ExePath"
 }
 
-Write-Host "  → dist/DeepXInstaller-Setup.exe  (单文件，可直接分发)"
-Write-Host "  ✓ 成品生成完毕"
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ($manifest.kind -ne $Kind) {
+    throw "Bundle 类型不匹配: 期望 $Kind，实际 $($manifest.kind)"
+}
+
+New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+$safeBuildId = $manifest.buildId -replace '[^A-Za-z0-9._-]', '-'
+$displayKind = (Get-Culture).TextInfo.ToTitleCase($Kind)
+$outputPath = Join-Path $OutDir "DeepXInstaller-$displayKind-$safeBuildId.exe"
+$zipPath = Join-Path $OutDir ".$Kind-$safeBuildId.payload.zip"
+
+Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
+
+Write-Host "=== 生成 $Kind 自解压安装器 ==="
+Write-Host "  → 压缩 payload ..."
+$payloadItems = Get-ChildItem -LiteralPath $PayloadDir -Force | ForEach-Object { $_.FullName }
+Compress-Archive -LiteralPath $payloadItems -DestinationPath $zipPath -CompressionLevel Optimal -Force
+
+Write-Host "  → 拼接安装器 ..."
+$exeStream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $ExePath))
+$zipStream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $zipPath))
+$outStream = [System.IO.File]::Create([System.IO.Path]::GetFullPath($outputPath))
+try {
+    $exeStream.CopyTo($outStream)
+    $zipStream.CopyTo($outStream)
+} finally {
+    $exeStream.Close()
+    $zipStream.Close()
+    $outStream.Close()
+}
+
+Remove-Item -LiteralPath $zipPath -Force
+$sizeMb = [Math]::Round((Get-Item -LiteralPath $outputPath).Length / 1MB, 2)
+Write-Host "  ✓ $outputPath ($sizeMb MB)"

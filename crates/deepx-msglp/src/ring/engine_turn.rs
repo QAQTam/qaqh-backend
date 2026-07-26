@@ -253,39 +253,74 @@ impl TurnEngine {
             .as_ref()
             .filter(|state| state.reason == YieldReason::PlanReview)
             .and_then(|state| {
-                state.pending_plans.front().map(|p| p.call_id.as_str())
-                    .or_else(|| state.pending_todo_activation.as_ref().map(|t| t.call_id.as_str()))
+                state
+                    .pending_plans
+                    .front()
+                    .map(|p| p.call_id.as_str())
+                    .or_else(|| {
+                        state
+                            .pending_todo_activation
+                            .as_ref()
+                            .map(|t| t.call_id.as_str())
+                    })
             });
         if active_id != Some(call_id) {
             log::warn!("[TURN] plan response without a suspended review: {call_id}");
             return Outcome::Handled;
         }
 
-        let mut saved = self.suspended.take().expect("plan review suspension exists");
+        let mut saved = self
+            .suspended
+            .take()
+            .expect("plan review suspension exists");
 
         // ── Todo activation path ──
         if let Some(todo_act) = saved.pending_todo_activation.take() {
             if approved {
-                let content = match deepx_tools::todo::exec_todo_activate(&serde_json::json!({})) {
-                    Ok(c) => c,
-                    Err(e) => e,
+                let (content, success) =
+                    match deepx_tools::todo::exec_todo_activate(&serde_json::json!({})) {
+                        Ok(content) => (content, true),
+                        Err(error) => (error, false),
+                    };
+                ctx.agent
+                    .msg
+                    .push_tool_result_direct(&todo_act.call_id, &content, success);
+                if !success {
+                    log::warn!(
+                        "[TURN] approved todo activation failed during commit: {}",
+                        content
+                    );
                 };
-                ctx.agent.msg.push_tool_result_direct(&todo_act.call_id, &content, true);
             } else {
                 ctx.agent.msg.push_tool_result_direct(
                     &todo_act.call_id,
-                    &format!("Todo activation rejected: {}", if message.is_empty() { "no reason given" } else { message }),
+                    &format!(
+                        "Todo activation rejected: {}",
+                        if message.is_empty() {
+                            "no reason given"
+                        } else {
+                            message
+                        }
+                    ),
                     false,
                 );
             }
-            ctx.agent.msg.flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-            ctx.emitter.emit(Agent2Ui::PlanResolved { call_id: todo_act.call_id, approved });
+            ctx.agent
+                .msg
+                .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
+            ctx.emitter.emit(Agent2Ui::PlanResolved {
+                call_id: todo_act.call_id,
+                approved,
+            });
             self.emit_completed_tool_round(ctx, &saved.turn_id, saved.round_num);
             return self.run_lap(ctx, tool, saved.turn_id, saved.round_num + 1, saved.usage);
         }
 
         // ── Plan review path ──
-        let plan = saved.pending_plans.pop_front().expect("pending plan exists");
+        let plan = saved
+            .pending_plans
+            .pop_front()
+            .expect("pending plan exists");
 
         let content = if approved && autonomous {
             format!(
@@ -599,7 +634,16 @@ impl TurnEngine {
         };
 
         let msgs = vec![deepx_types::Message::user(&prompt)];
-        let result = deepx_gate::chat_stream(&provider, msgs, None, 20480, None, None, None, &mut on_event);
+        let result = deepx_gate::chat_stream(
+            &provider,
+            msgs,
+            None,
+            20480,
+            None,
+            None,
+            None,
+            &mut on_event,
+        );
 
         match result {
             Ok(()) if !summary.trim().is_empty() => {
@@ -608,10 +652,9 @@ impl TurnEngine {
                     c + t + tc + tr + ts + sp
                 };
                 ctx.agent.msg.apply_compact(&summary, kept);
-                ctx.agent.msg.snapshot_full(
-                    &ctx.agent.config.model,
-                    &ctx.agent.config.reasoning_effort,
-                );
+                ctx.agent
+                    .msg
+                    .snapshot_full(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
                 let after = {
                     let (c, t, tc, tr, ts, sp, _, _) = ctx.agent.msg.compute_context_stats(None);
                     c + t + tc + tr + ts + sp
@@ -625,12 +668,16 @@ impl TurnEngine {
             }
             Ok(()) => {
                 ctx.emitter.emit(deepx_proto::Agent2Ui::CompactEnd {
-                    summary_chars: 0, turns_compacted: 0, turns_removed: 0,
+                    summary_chars: 0,
+                    turns_compacted: 0,
+                    turns_removed: 0,
                 });
             }
             Err(e) => {
                 ctx.emitter.emit(deepx_proto::Agent2Ui::CompactEnd {
-                    summary_chars: 0, turns_compacted: 0, turns_removed: 0,
+                    summary_chars: 0,
+                    turns_compacted: 0,
+                    turns_removed: 0,
                 });
                 log::error!("[TURN] auto-compact failed: {e}");
             }
@@ -924,12 +971,21 @@ impl TurnEngine {
                             // Capture plan info before moving into TurnState
                             let plan_submitted = if reason == YieldReason::PlanReview {
                                 if let Some(ref todo_act) = admission.pending_todo_activation {
-                                    Some((todo_act.call_id.clone(), String::new(), "todo_activation".to_string(), Some(todo_act.items.clone())))
+                                    Some((
+                                        todo_act.call_id.clone(),
+                                        String::new(),
+                                        "todo_activation".to_string(),
+                                        Some(todo_act.items.clone()),
+                                    ))
                                 } else {
-                                    admission
-                                        .pending_plans
-                                        .front()
-                                        .map(|plan| (plan.call_id.clone(), plan.content.clone(), "plan".to_string(), None))
+                                    admission.pending_plans.front().map(|plan| {
+                                        (
+                                            plan.call_id.clone(),
+                                            plan.content.clone(),
+                                            "plan".to_string(),
+                                            None,
+                                        )
+                                    })
                                 }
                             } else {
                                 None
@@ -948,7 +1004,9 @@ impl TurnEngine {
                                 usage: last_usage.clone(),
                                 reason,
                             });
-                            if let Some((call_id, plan_content, review_type, todo_items)) = plan_submitted {
+                            if let Some((call_id, plan_content, review_type, todo_items)) =
+                                plan_submitted
+                            {
                                 ctx.emitter.emit(Agent2Ui::PlanSubmitted {
                                     call_id,
                                     plan_content,
@@ -1126,12 +1184,21 @@ impl TurnEngine {
                             // Capture plan info before moving into TurnState
                             let plan_submitted = if reason == YieldReason::PlanReview {
                                 if let Some(ref todo_act) = admission.pending_todo_activation {
-                                    Some((todo_act.call_id.clone(), String::new(), "todo_activation".to_string(), Some(todo_act.items.clone())))
+                                    Some((
+                                        todo_act.call_id.clone(),
+                                        String::new(),
+                                        "todo_activation".to_string(),
+                                        Some(todo_act.items.clone()),
+                                    ))
                                 } else {
-                                    admission
-                                        .pending_plans
-                                        .front()
-                                        .map(|plan| (plan.call_id.clone(), plan.content.clone(), "plan".to_string(), None))
+                                    admission.pending_plans.front().map(|plan| {
+                                        (
+                                            plan.call_id.clone(),
+                                            plan.content.clone(),
+                                            "plan".to_string(),
+                                            None,
+                                        )
+                                    })
                                 }
                             } else {
                                 None
@@ -1156,7 +1223,9 @@ impl TurnEngine {
                                     self.suspended.as_ref().expect("suspended ask state"),
                                 );
                             }
-                            if let Some((call_id, plan_content, review_type, todo_items)) = plan_submitted {
+                            if let Some((call_id, plan_content, review_type, todo_items)) =
+                                plan_submitted
+                            {
                                 ctx.emitter.emit(Agent2Ui::PlanSubmitted {
                                     call_id,
                                     plan_content,

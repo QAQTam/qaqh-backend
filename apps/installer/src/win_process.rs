@@ -27,11 +27,11 @@ pub fn find_deepx_processes() -> Vec<ProcInfo> {
 fn find_via_toolhelp() -> Option<Vec<ProcInfo>> {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
-            PROCESSENTRY32W, TH32CS_SNAPPROCESS,
-        };
         use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
 
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
         let mut pe = PROCESSENTRY32W::default();
@@ -40,10 +40,21 @@ fn find_via_toolhelp() -> Option<Vec<ProcInfo>> {
         let mut result = Vec::new();
         if Process32FirstW(snap, &mut pe).is_ok() {
             loop {
-                let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(pe.szExeFile.len());
+                let len = pe
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(pe.szExeFile.len());
                 let name = String::from_utf16_lossy(&pe.szExeFile[..len]);
-                if DEEPX_PROCESSES.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
-                    result.push(ProcInfo { pid: pe.th32ProcessID, name, closed: false });
+                if DEEPX_PROCESSES
+                    .iter()
+                    .any(|p| p.eq_ignore_ascii_case(&name))
+                {
+                    result.push(ProcInfo {
+                        pid: pe.th32ProcessID,
+                        name,
+                        closed: false,
+                    });
                 }
                 if Process32NextW(snap, &mut pe).is_err() {
                     break;
@@ -54,7 +65,9 @@ fn find_via_toolhelp() -> Option<Vec<ProcInfo>> {
         Some(result)
     }
     #[cfg(not(windows))]
-    { None }
+    {
+        None
+    }
 }
 
 /// fallback：tasklist
@@ -62,15 +75,28 @@ fn find_via_tasklist() -> Vec<ProcInfo> {
     let mut result = Vec::new();
     for name in DEEPX_PROCESSES {
         if let Ok(out) = std::process::Command::new("tasklist")
-            .args(["/fo", "csv", "/nh", "/fi", &format!("imagename eq {}", name)])
+            .args([
+                "/fo",
+                "csv",
+                "/nh",
+                "/fi",
+                &format!("imagename eq {}", name),
+            ])
             .output()
         {
             let text = String::from_utf8_lossy(&out.stdout);
             for line in text.lines() {
-                let parts: Vec<&str> = line.split(',').map(|s| s.trim_matches('"').trim()).collect();
+                let parts: Vec<&str> = line
+                    .split(',')
+                    .map(|s| s.trim_matches('"').trim())
+                    .collect();
                 if parts.len() >= 2 {
                     if let Ok(pid) = parts[1].parse() {
-                        result.push(ProcInfo { pid, name: name.to_string(), closed: false });
+                        result.push(ProcInfo {
+                            pid,
+                            name: name.to_string(),
+                            closed: false,
+                        });
                     }
                 }
             }
@@ -113,7 +139,9 @@ fn stop_daemon_via_http() {
     use std::io::Write;
 
     let home = std::env::var("USERPROFILE").unwrap_or_default();
-    let discovery_path = std::path::PathBuf::from(&home).join(".deepx").join("daemon.json");
+    let discovery_path = std::path::PathBuf::from(&home)
+        .join(".deepx")
+        .join("daemon.json");
 
     let content = match std::fs::read_to_string(&discovery_path) {
         Ok(c) => c,
@@ -126,9 +154,17 @@ fn stop_daemon_via_http() {
         Err(_) => return,
     };
 
-    let endpoint = discovery.get("endpoint").and_then(|v| v.as_str()).unwrap_or("");
-    let token = discovery.get("token").and_then(|v| v.as_str()).unwrap_or("");
-    if endpoint.is_empty() || token.is_empty() { return; }
+    let endpoint = discovery
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let token = discovery
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if endpoint.is_empty() || token.is_empty() {
+        return;
+    }
 
     // 从 "ws://127.0.0.1:PORT/control/v1" 提取 socket 地址
     let addr = endpoint
@@ -137,7 +173,9 @@ fn stop_daemon_via_http() {
         .next()
         .unwrap_or("");
 
-    let Ok(socket_addr) = addr.parse::<std::net::SocketAddr>() else { return; };
+    let Ok(socket_addr) = addr.parse::<std::net::SocketAddr>() else {
+        return;
+    };
 
     let Ok(mut stream) =
         std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(2))
@@ -158,12 +196,14 @@ fn stop_daemon_via_http() {
 pub fn force_terminate(pid: u32) -> bool {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
         use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
         if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
             let ok = TerminateProcess(h, 0).is_ok();
             let _ = CloseHandle(h);
-            if ok { return true; }
+            if ok {
+                return true;
+            }
         }
     }
     // fallback: taskkill /f /t 确保子进程树也被杀
@@ -195,8 +235,10 @@ pub fn is_alive(pid: u32) -> bool {
 fn is_process_running(pid: u32) -> bool {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, GetExitCodeProcess};
         use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
             let mut code: u32 = 259; // STILL_ACTIVE
             let _ = GetExitCodeProcess(h, &mut code);
@@ -206,5 +248,8 @@ fn is_process_running(pid: u32) -> bool {
         false
     }
     #[cfg(not(windows))]
-    { let _ = pid; false }
+    {
+        let _ = pid;
+        false
+    }
 }

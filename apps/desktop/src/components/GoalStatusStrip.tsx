@@ -17,7 +17,7 @@ export default function TodoStatusStrip(props: { seed: string; refreshKey: strin
       const next = await request<TodoStatus | null>("todo.status", { seed: props.seed });
       if (generation !== refreshGeneration) return;
       // Show for active / paused goals and todo lists; hide terminal states
-      const visibleModes = new Set(["goal", "paused", "todo"]);
+      const visibleModes = new Set(["manual", "goal", "paused", "todo"]);
       setTodo(next && next.total > 0 && visibleModes.has(next.mode) ? next : null);
     }
     catch { if (generation === refreshGeneration) setTodo(null); }

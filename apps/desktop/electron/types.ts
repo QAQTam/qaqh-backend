@@ -49,4 +49,9 @@ export interface UpdateInfo {
   version: string;
   downloadUrl?: string;
   releaseNotes?: string;
+  operationPath?: string;
+  operationId?: string;
+  mode?: "install" | "update" | "upgrade" | "current";
+  artifacts?: string[];
+  actions?: string[];
 }

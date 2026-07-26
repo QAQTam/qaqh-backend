@@ -32,6 +32,7 @@ export class DaemonControlClient {
   private readonly cursor = new ControlCursor();
   private readonly pending = new Map<string, Pending>();
   private readonly attached = new Set<string>();
+  private updateReattach: string[] = [];
   private readonly clientId = `electron-${randomUUID()}`;
   private stopped = false;
   private restarting = false;
@@ -93,6 +94,42 @@ export class DaemonControlClient {
     if (this.upgradeCheck) clearTimeout(this.upgradeCheck);
     this.closing = this.releaseLeases().finally(() => this.disconnectSocket());
     return this.closing;
+  }
+
+  async prepareBackendUpdate(): Promise<boolean> {
+    const discovery = await readDiscovery();
+    const stopped = await requestDaemonStop(discovery, true);
+    if (stopped === "busy") {
+      this.setStatus({ connected: true, updatePending: true });
+      return false;
+    }
+    if (stopped !== "stopping") {
+      throw new Error("daemon does not support safe update handoff");
+    }
+    this.restarting = true;
+    this.updateReattach = [...this.attached];
+    try {
+      this.disconnectSocket();
+      await waitForDaemonExit(discovery.pid);
+      return true;
+    } catch (error) {
+      this.restarting = false;
+      this.updateReattach = [];
+      throw error;
+    }
+  }
+
+  async resumeAfterBackendUpdate(): Promise<void> {
+    try {
+      await this.connectOrLaunch();
+      for (const seed of this.updateReattach) {
+        await this.attachWire(seed);
+      }
+      this.updateReattach = [];
+      this.setStatus({ connected: true });
+    } finally {
+      this.restarting = false;
+    }
   }
 
   private async releaseLeases(): Promise<void> {

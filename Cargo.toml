@@ -17,7 +17,9 @@ members = [
     "crates/deepx-subagent",
     "crates/deepx-gate-testui",
     "crates/deepx-vector",
+    "crates/deepx-update",
     "apps/installer",
+    "apps/updater",
     "apps/deepx-tui",
 ]
 

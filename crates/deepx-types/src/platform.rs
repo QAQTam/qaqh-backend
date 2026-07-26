@@ -1,4 +1,20 @@
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+pub const DATA_ROOT_MARKER: &str = ".deepx-data-root.json";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DataRootMarker {
+    format_version: u32,
+    product: String,
+    canonical_root: String,
+    owner_home: String,
+    root_id: String,
+}
 
 /// Cross-platform home directory.
 /// - Windows: `USERPROFILE`
@@ -24,6 +40,265 @@ pub fn data_dir() -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|_| home_dir().join(".config"))
             .join("deepx")
+    }
+}
+
+/// Create or verify the DeepX-owned user data root.
+///
+/// The marker binds the directory to both its canonical path and the current
+/// user's canonical home. Destructive maintenance must call `verify_data_root`
+/// and must never infer ownership from the directory name alone.
+pub fn ensure_data_root() -> io::Result<PathBuf> {
+    let root = data_dir();
+    if root.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "DeepX data root is empty",
+        ));
+    }
+    let owner_home = canonical_home()?;
+    validate_data_root_location(&root, &owner_home)?;
+    fs::create_dir_all(&root)?;
+    reject_link(&root)?;
+    let canonical_root = fs::canonicalize(&root)?;
+    let marker_path = canonical_root.join(DATA_ROOT_MARKER);
+    if marker_path.exists() {
+        return verify_data_root(&canonical_root);
+    }
+
+    write_data_root_marker(&canonical_root, &owner_home)?;
+    verify_data_root_paths(&canonical_root, &canonical_root, &owner_home)
+}
+
+fn write_data_root_marker(canonical_root: &Path, owner_home: &Path) -> io::Result<()> {
+    let canonical_root_text = normalized_path_text(canonical_root);
+    let owner_home = normalized_path_text(owner_home);
+    let marker = DataRootMarker {
+        format_version: 1,
+        product: "DeepX".into(),
+        root_id: data_root_id(&canonical_root_text, &owner_home),
+        canonical_root: canonical_root_text,
+        owner_home,
+    };
+    let marker_path = canonical_root.join(DATA_ROOT_MARKER);
+    let temporary = canonical_root.join(".deepx-data-root.json.deepx-new");
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(&marker).map_err(invalid_data)?,
+    )?;
+    fs::rename(&temporary, &marker_path)?;
+    Ok(())
+}
+
+pub fn verify_data_root(root: &Path) -> io::Result<PathBuf> {
+    if root.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "DeepX data root is empty",
+        ));
+    }
+    reject_link(root)?;
+    let owner_home = canonical_home()?;
+    let configured = data_dir();
+    validate_data_root_location(&configured, &owner_home)?;
+    let expected = fs::canonicalize(configured)?;
+    let canonical = fs::canonicalize(root)?;
+    verify_data_root_paths(&canonical, &expected, &owner_home)
+}
+
+fn validate_data_root_location(root: &Path, owner_home: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        let expected = owner_home.join(".deepx");
+        let parent = root.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "DeepX data root has no parent directory",
+            )
+        })?;
+        let canonical_parent = fs::canonicalize(parent)?;
+        if normalized_path_text(&canonical_parent) != normalized_path_text(owner_home)
+            || root
+                .file_name()
+                .is_none_or(|name| !name.eq_ignore_ascii_case(".deepx"))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "DeepX data root must be the current user's direct .deepx directory: {}",
+                    expected.display()
+                ),
+            ));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let parent = root.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "DeepX data root has no parent directory",
+            )
+        })?;
+        if parent.parent().is_none() || root.file_name().is_none_or(|name| name != "deepx") {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("unsafe DeepX data root '{}'", root.display()),
+            ));
+        }
+        let _ = owner_home;
+    }
+    Ok(())
+}
+
+fn verify_data_root_paths(
+    canonical: &Path,
+    expected: &Path,
+    owner_home: &Path,
+) -> io::Result<PathBuf> {
+    if normalized_path_text(canonical) != normalized_path_text(expected) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "data root '{}' is not the current DeepX data directory",
+                canonical.display()
+            ),
+        ));
+    }
+    reject_link(&canonical)?;
+    let marker_path = canonical.join(DATA_ROOT_MARKER);
+    reject_link(&marker_path)?;
+    let marker: DataRootMarker =
+        serde_json::from_slice(&fs::read(&marker_path)?).map_err(invalid_data)?;
+    let canonical_root = normalized_path_text(&canonical);
+    let owner_home = normalized_path_text(owner_home);
+    if marker.format_version != 1
+        || marker.product != "DeepX"
+        || marker.canonical_root != canonical_root
+        || marker.owner_home != owner_home
+        || marker.root_id != data_root_id(&canonical_root, &owner_home)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "DeepX data root marker does not match the current user and path",
+        ));
+    }
+    Ok(canonical.to_path_buf())
+}
+
+fn canonical_home() -> io::Result<PathBuf> {
+    let home = home_dir();
+    if home.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "user home directory is empty",
+        ));
+    }
+    fs::canonicalize(home)
+}
+
+fn reject_link(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("linked data path is not allowed: {}", path.display()),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("reparse data path is not allowed: {}", path.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalized_path_text(path: &Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    let value = if let Some(rest) = value.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else {
+        value
+            .strip_prefix("//?/")
+            .map(str::to_owned)
+            .unwrap_or(value)
+    };
+    if cfg!(windows) {
+        value.trim_end_matches('/').to_ascii_lowercase()
+    } else {
+        value.trim_end_matches('/').to_string()
+    }
+}
+
+fn data_root_id(canonical_root: &str, owner_home: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in canonical_root.bytes().chain([0]).chain(owner_home.bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("data-{hash:016x}")
+}
+
+fn invalid_data(error: impl std::fmt::Display) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+}
+
+#[cfg(test)]
+mod data_root_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn copied_data_marker_cannot_authorize_another_directory() {
+        let root = test_root();
+        let home = root.join("home");
+        let first = home.join(".deepx-a");
+        let second = home.join(".deepx-b");
+        fs::create_dir_all(&first).expect("create first data root");
+        fs::create_dir_all(&second).expect("create second data root");
+        let home = fs::canonicalize(&home).expect("canonical home");
+        let first = fs::canonicalize(&first).expect("canonical first");
+        let second = fs::canonicalize(&second).expect("canonical second");
+
+        write_data_root_marker(&first, &home).expect("write data marker");
+        assert!(verify_data_root_paths(&first, &first, &home).is_ok());
+        fs::copy(first.join(DATA_ROOT_MARKER), second.join(DATA_ROOT_MARKER))
+            .expect("copy data marker");
+        assert!(verify_data_root_paths(&second, &second, &home).is_err());
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn marker_for_another_user_cannot_authorize_deletion() {
+        let root = test_root();
+        let first_home = root.join("first-home");
+        let second_home = root.join("second-home");
+        let data = first_home.join(".deepx");
+        fs::create_dir_all(&data).expect("create data root");
+        fs::create_dir_all(&second_home).expect("create second home");
+        let first_home = fs::canonicalize(&first_home).expect("canonical first home");
+        let second_home = fs::canonicalize(&second_home).expect("canonical second home");
+        let data = fs::canonicalize(&data).expect("canonical data");
+
+        write_data_root_marker(&data, &first_home).expect("write data marker");
+        assert!(verify_data_root_paths(&data, &data, &second_home).is_err());
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    fn test_root() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deepx-data-root-test-{}-{nonce}",
+            std::process::id()
+        ))
     }
 }
 

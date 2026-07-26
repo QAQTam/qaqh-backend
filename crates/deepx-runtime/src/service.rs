@@ -294,11 +294,31 @@ impl DeepxService {
                 let action = pstr(params, "action")?;
                 match action.as_str() {
                     "activate" => {
-                        let _ = self.send(seed, Ui2Agent::UserInput { text: "[激活 Goal 模式] 用户已批准，开始自动执行 todo 列表".into() });
+                        let _ = self.send(seed, Ui2Agent::UserInput {
+                            text: "[请求激活 Goal 模式] 请调用 todo 工具 action=activate，将当前 todo 列表提交给用户审核；获得明确批准后再开始自动执行。".into(),
+                        });
                         Ok(Value::Null)
-                    },
-                    "stop" => { let _ = self.send(seed, Ui2Agent::UserInput { text: "[停止 Goal] 使用 todo 工具执行 action=stop reason=用户手动停止".into() }); Ok(Value::Null) },
-                    "resume" => { let _ = self.send(seed, Ui2Agent::UserInput { text: "[DeepX Goal: resume]".into() }); Ok(Value::Null) },
+                    }
+                    "stop" => {
+                        let _ = self.send(
+                            seed,
+                            Ui2Agent::UserInput {
+                                text:
+                                    "[停止 Goal] 使用 todo 工具执行 action=stop reason=用户手动停止"
+                                        .into(),
+                            },
+                        );
+                        Ok(Value::Null)
+                    }
+                    "resume" => {
+                        let _ = self.send(
+                            seed,
+                            Ui2Agent::UserInput {
+                                text: "[DeepX Goal: resume]".into(),
+                            },
+                        );
+                        Ok(Value::Null)
+                    }
                     _ => return Err(format!("unknown todo action: {action}").into()),
                 }
             }
@@ -537,9 +557,7 @@ fn update_string(target: &mut String, params: &Value, snake: &str, camel: &str) 
     {
         // Guard: skip the masked placeholder used by load_config
         if value == "****" {
-            log::info!(
-                "[update_string] skipping masked placeholder '****' for field '{snake}'"
-            );
+            log::info!("[update_string] skipping masked placeholder '****' for field '{snake}'");
             return;
         }
         *target = value.to_string();

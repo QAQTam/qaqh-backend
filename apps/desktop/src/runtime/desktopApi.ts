@@ -35,18 +35,59 @@ export function getPetStatus(): Promise<boolean> {
   return desktopBridge().getPetStatus();
 }
 
+// ── Frameless window controls ──────────────────────────
+
+export function minimizeWindow(): void {
+  window.deepx?.desktop.windowMinimize();
+}
+
+export async function toggleMaximizeWindow(): Promise<boolean> {
+  return window.deepx?.desktop.windowToggleMaximize() ?? false;
+}
+
+export async function isWindowMaximized(): Promise<boolean> {
+  return window.deepx?.desktop.windowIsMaximized() ?? false;
+}
+
+export function closeWindow(): void {
+  window.deepx?.desktop.windowClose();
+}
+
+export function onWindowMaximizedChanged(listener: (maximized: boolean) => void): () => void {
+  return window.deepx?.desktop.onWindowMaximizedChanged(listener) ?? (() => {});
+}
+
 // ── Auto-update ──────────────────────────────────────────
 
 export interface UpdateInfo {
   version: string;
   downloadUrl?: string;
   releaseNotes?: string;
+  operationPath?: string;
+  operationId?: string;
+  mode?: "install" | "update" | "upgrade" | "current";
+  artifacts?: string[];
+  actions?: string[];
 }
 
 export function checkUpdate(): Promise<UpdateInfo | null> {
   return desktopBridge().checkUpdate();
 }
 
+export function stageUpdate(source: string): Promise<UpdateInfo | null> {
+  return desktopBridge().stageUpdate(source);
+}
+
+export function applyUpdate(operationPath: string): Promise<{ restarting: boolean }> {
+  return desktopBridge().applyUpdate(operationPath);
+}
+
 export function onUpdateAvailable(listener: (info: UpdateInfo) => void): () => void {
   return desktopBridge().onUpdateAvailable(listener);
+}
+
+export function onUpdateFailed(
+  listener: (failure: { operationId: string; message: string }) => void,
+): () => void {
+  return desktopBridge().onUpdateFailed(listener);
 }

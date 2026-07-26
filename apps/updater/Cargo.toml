@@ -1,0 +1,31 @@
+[package]
+name = "deepx-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeepX component update planner and executor"
+
+[[bin]]
+name = "deepx-updater"
+path = "src/main.rs"
+
+[dependencies]
+deepx-update = { path = "../../crates/deepx-update" }
+deepx-types = { path = "../../crates/deepx-types" }
+dirs = "5"
+eframe = "0.29"
+egui = "0.29"
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true

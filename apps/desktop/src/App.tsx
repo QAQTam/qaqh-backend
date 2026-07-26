@@ -1,6 +1,13 @@
 import { createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { backendStatus, connect, listen, request } from "./runtime/backendClient";
-import { openDialog, onUpdateAvailable, type UpdateInfo } from "./runtime/desktopApi";
+import {
+  applyUpdate,
+  checkUpdate,
+  openDialog,
+  onUpdateAvailable,
+  onUpdateFailed,
+  type UpdateInfo,
+} from "./runtime/desktopApi";
 import type { Agent2Ui, AskAnswer, SessionMeta, TaskInfo } from "./lib/types";
 import ChatView from "./components/ChatView";
 import SettingsView, { type ThemeMode } from "./components/SettingsView";
@@ -64,15 +71,34 @@ export default function App() {
   const [workspaceDraft, setWorkspaceDraft] = createSignal(localStorage.getItem(LS_WORKSPACE) ?? "");
   const [theme, setTheme] = createSignal<ThemeMode>("system");
   const [backendError, setBackendError] = createSignal("");
+  const [pendingUpdate, setPendingUpdate] = createSignal<UpdateInfo | null>(null);
+  const [applyingUpdate, setApplyingUpdate] = createSignal(false);
   let unlistenTheme: (() => void) | undefined;
   let unlistenSessionActivity: (() => void) | undefined;
   let unlistenBackendStatus: (() => void) | undefined;
   let unlistenUpdate: (() => void) | undefined;
+  let unlistenUpdateFailure: (() => void) | undefined;
   let resumeRequest = 0;
 
   function activeEntry(): SessionEntry | undefined {
     const seed = activeSeed();
     return seed ? registry.get(seed) : undefined;
+  }
+
+  async function installPendingUpdate() {
+    const update = pendingUpdate();
+    if (!update?.operationPath || applyingUpdate()) return;
+    setApplyingUpdate(true);
+    try {
+      const result = await applyUpdate(update.operationPath);
+      if (!result.restarting) {
+        setPendingUpdate(null);
+        toastCtrl.push("Update applied successfully.", "info");
+      }
+    } catch (error) {
+      toastCtrl.push(`Update failed: ${String(error)}`, "error", true);
+      setApplyingUpdate(false);
+    }
   }
 
   async function refreshSessions(): Promise<boolean> {
@@ -471,8 +497,12 @@ export default function App() {
       await connect();
       // Listen for app updates (production: auto-check on startup)
       unlistenUpdate = onUpdateAvailable((info: UpdateInfo) => {
-        toastCtrl.push(`New version ${info.version} available!`, "info", true);
+        setPendingUpdate(info);
       });
+      unlistenUpdateFailure = onUpdateFailed(failure => {
+        toastCtrl.push(`Update rolled back: ${failure.message}`, "error", true);
+      });
+      setPendingUpdate(await checkUpdate());
       const status = await backendStatus();
       setBackendError(status.connected ? "" : (status.error ?? "Daemon unavailable"));
     } catch (error) {
@@ -517,6 +547,7 @@ export default function App() {
     unlistenSessionActivity?.();
     unlistenBackendStatus?.();
     unlistenUpdate?.();
+    unlistenUpdateFailure?.();
   });
 
   return (
@@ -607,6 +638,37 @@ export default function App() {
           </>
         }
       />
+      <Show when={pendingUpdate()}>
+        {update => <aside class="update-ready-banner" role="status">
+          <div>
+            <strong>{i18n.lang() === "zh" ? "更新已准备好" : "Update ready"}</strong>
+            <span>
+              {update().artifacts?.join(" + ") || update().version}
+            </span>
+          </div>
+          <div class="update-ready-actions">
+            <button
+              type="button"
+              disabled={applyingUpdate()}
+              onClick={() => setPendingUpdate(null)}
+            >
+              {i18n.lang() === "zh" ? "稍后" : "Later"}
+            </button>
+            <button
+              type="button"
+              class="primary"
+              disabled={applyingUpdate()}
+              onClick={() => void installPendingUpdate()}
+            >
+              {applyingUpdate()
+                ? (i18n.lang() === "zh" ? "正在应用…" : "Applying…")
+                : update().actions?.includes("restartElectron")
+                  ? (i18n.lang() === "zh" ? "重启并更新" : "Restart and update")
+                  : (i18n.lang() === "zh" ? "立即更新" : "Update now")}
+            </button>
+          </div>
+        </aside>}
+      </Show>
       <ToastContainer ctrl={toastCtrl} />
     </I18nCtx>
   );

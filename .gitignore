@@ -19,5 +19,9 @@ apps/desktop/build/
 apps/desktop/.cache/
 apps/installer/payload/desktop/
 apps/installer/dist/
+apps/installer/staging/
+apps/installer/.verify-install/
+/packages/
 .codegraph/
+.reasonix/
 skills/

@@ -32,6 +32,44 @@ function mount() {
 }
 
 describe("TodoStatusStrip", () => {
+  it("renders a manual todo list created by the backend tool", async () => {
+    const status = {
+      mode: "manual",
+      completed: 0,
+      total: 1,
+      items: [{
+        id: "T1",
+        title: "修复窗口",
+        description: "验证完整链路",
+        status: "pending",
+        complexity: "medium",
+      }],
+      auto_turns: 0,
+    };
+    requestMock
+      .mockResolvedValueOnce(status)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(status);
+    mount();
+
+    await flush();
+
+    const strip = document.querySelector(".todo-status-strip");
+    expect(strip?.textContent).toContain("Todo 列表");
+    expect(strip?.textContent).toContain("Activate");
+    (strip?.querySelector(".todo-status-copy") as HTMLElement).click();
+    await flush();
+    expect(strip?.textContent).toContain("T1");
+    expect(strip?.textContent).toContain("修复窗口");
+
+    (strip?.querySelector(".todo-status-actions button") as HTMLButtonElement).click();
+    await flush();
+    expect(requestMock).toHaveBeenCalledWith("todo.action", {
+      seed: "todo-seed",
+      action: "activate",
+    });
+  });
+
   it("retracts after the finishing turn refreshes a completed goal", async () => {
     requestMock
       .mockResolvedValueOnce({

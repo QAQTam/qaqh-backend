@@ -13,14 +13,17 @@
     "start": "electron-vite preview",
     "prepare:daemon": "node scripts/prepare-daemon.mjs",
     "prepare:daemon:local": "node scripts/prepare-daemon.mjs --backend-root ../..",
+    "package:asar": "node scripts/pack-frontend.mjs",
     "package:dir": "pnpm prepare:daemon && pnpm build && electron-builder --dir --win --x64 --publish never",
     "package:dir:local": "pnpm prepare:daemon:local && pnpm build && electron-builder --dir --win --x64 --publish never",
-    "package:win": "pnpm prepare:daemon && pnpm build && electron-builder --win nsis --x64 --publish never",
-    "package:win:local": "pnpm prepare:daemon:local && pnpm build && electron-builder --win nsis --x64 --publish never",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@electron/asar": "^3.4.1",
     "@antv/g6": "^5.1.1",
     "@dschz/solid-g6": "^0.1.1",
     "@solidjs/web": "2.0.0-beta.21",
@@ -35,9 +38,6 @@
     "shiki": "^4.3.1",
     "solid-js": "2.0.0-beta.21",
     "tailwindcss": "^4.3.0",
-    "ws": "^8.21.1"
-  },
-  "devDependencies": {
     "@types/katex": "^0.16.8",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",

@@ -29,6 +29,7 @@ export default function PlanReviewPanel(props: PlanReviewPanelProps) {
   const [busy, setBusy] = createSignal(false);
   const [autonomous, setAutonomous] = createSignal(false);
   const isTodoActivation = () => props.reviewType === "todo_activation";
+  let autonomousInput: HTMLInputElement | undefined;
 
   async function handleApprove(autonomousOverride = autonomous()) {
     if (busy()) return;
@@ -104,6 +105,7 @@ export default function PlanReviewPanel(props: PlanReviewPanelProps) {
       <Show when={!isTodoActivation()}>
         <label class="plan-goal-mode">
           <input
+            ref={autonomousInput}
             type="checkbox"
             checked={autonomous()}
             onChange={(e) => setAutonomous(e.currentTarget.checked)}
@@ -123,7 +125,9 @@ export default function PlanReviewPanel(props: PlanReviewPanelProps) {
           type="button"
           class="interaction-approve"
           disabled={busy()}
-          onClick={() => void handleApprove(isTodoActivation() ? true : autonomous())}
+          onClick={() => void handleApprove(
+            isTodoActivation() ? true : (autonomousInput?.checked ?? autonomous()),
+          )}
         >
           {busy() ? "提交中…" : isTodoActivation() ? "批准并启动 Goal 模式" : autonomous() ? "批准并启动目标模式" : "批准并继续"}
         </button>

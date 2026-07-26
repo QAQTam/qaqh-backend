@@ -117,6 +117,40 @@ describe("sessionEventReducer", () => {
     });
   });
 
+  it("preserves todo activation items from the backend review event", () => {
+    let state = createRawSessionState("seed-a");
+    state = reduceAgentEvent(state, {
+      type: "turn_start", turn_id: "t-goal", user_text: "activate",
+    }, 100);
+    state = reduceAgentEvent(state, {
+      type: "plan_submitted",
+      call_id: "todo-activate-1",
+      plan_content: "",
+      review_type: "todo_activation",
+      todo_items: [{
+        id: "T1",
+        title: "Trace todo chain",
+        description: "backend to UI",
+        complexity: "medium",
+      }],
+    }, 110);
+
+    expect(state.turns[0].status).toBe("waiting");
+    expect(state.pendingInteractions[0]).toEqual({
+      kind: "plan",
+      id: "todo-activate-1",
+      turnId: "t-goal",
+      content: "",
+      reviewType: "todo_activation",
+      todoItems: [{
+        id: "T1",
+        title: "Trace todo chain",
+        description: "backend to UI",
+        complexity: "medium",
+      }],
+    });
+  });
+
   it("does not duplicate consecutive notices when lifecycle events are replayed", () => {
     let state = createRawSessionState("seed-a");
     const event = { type: "error" as const, message: "agent exited" };

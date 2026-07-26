@@ -45,7 +45,7 @@ fn daemon_channel() -> String {
 }
 
 pub async fn run() -> Result<(), String> {
-    std::fs::create_dir_all(deepx_types::platform::data_dir()).map_err(stringify)?;
+    deepx_types::platform::ensure_data_root().map_err(stringify)?;
     let _lock = acquire_single_instance()?;
     let token = random_hex();
     let epoch = random_hex();

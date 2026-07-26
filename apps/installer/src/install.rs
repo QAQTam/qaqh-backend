@@ -1,8 +1,17 @@
 // 安装逻辑：文件复制（SFX / 目录模式）、快捷方式、注册表
 
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
+
+use deepx_update::{
+    commit_bundle_state, parse_bundle_manifest, safe_join_under_root, write_install_root_marker,
+    BundleFile, BundleManifest,
+};
+use sha2::{Digest, Sha256};
 
 // ============================================================
 // InstallerConfig
@@ -19,38 +28,65 @@ pub struct InstallerConfig {
     pub total_files: usize,
     pub completed_files: usize,
     pub error: Option<String>,
+    pub bundle_kind: String,
+    pub bundle_build_id: String,
+    pub operation: String,
 }
 
 impl InstallerConfig {
     pub fn default_path() -> String {
-        let local_app_data = std::env::var("LOCALAPPDATA")
-            .unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".to_string());
-        format!(r"{}\Programs\DeepX", local_app_data)
+        dirs::data_local_dir()
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|path| path.join(r"AppData\Local"))
+            })
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Programs")
+            .join("DeepX")
+            .to_string_lossy()
+            .into_owned()
     }
+}
+
+pub fn push_update(source: &str, target_dir: &str) -> Result<String, String> {
+    let source =
+        fs::canonicalize(source).map_err(|error| format!("更新源目录无效 '{source}': {error}"))?;
+    let target = PathBuf::from(target_dir);
+    let updater = target.join(if cfg!(windows) {
+        "deepx-updater.exe"
+    } else {
+        "deepx-updater"
+    });
+    if !updater.is_file() {
+        return Err(format!(
+            "目标安装缺少 updater，请先进行完整安装或升级: {}",
+            updater.display()
+        ));
+    }
+    let output = Command::new(&updater)
+        .arg("stage")
+        .arg(&source)
+        .arg(&target)
+        .output()
+        .map_err(|error| format!("启动 updater '{}' 失败: {error}", updater.display()))?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if message.is_empty() {
+            format!("updater 失败，退出码 {}", output.status)
+        } else {
+            message
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|error| format!("updater 输出不是 UTF-8: {error}"))
 }
 
 // ============================================================
 // Manifest
 // ============================================================
 
-#[derive(Clone)]
-pub struct ManifestEntry {
-    pub source: &'static str,
-    pub dest: &'static str,
-    pub is_dir: bool,
-}
-
-pub fn get_manifest() -> Vec<ManifestEntry> {
-    vec![
-        ManifestEntry { source: "desktop", dest: "", is_dir: true },
-        ManifestEntry { source: "config/default.toml", dest: "config/config.toml", is_dir: false },
-        ManifestEntry { source: "deepx-uninstaller.exe", dest: "uninstall.exe", is_dir: false },
-    ]
-}
-
 // ============================================================
-// Headless patch: --patch <source_payload> <target_dir>
-// Only updates the desktop/ frontend files, no shortcuts/registry.
+// Headless bundle install: --patch <source_payload> <target_dir>
 // ============================================================
 
 pub fn run_patch(source: &str, target_dir: &str) -> Result<(), String> {
@@ -61,8 +97,10 @@ pub fn run_patch(source: &str, target_dir: &str) -> Result<(), String> {
         return Err(format!("source not found: {}", source));
     }
 
-    // Accept either a ZIP file or a directory
-    if src.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("zip")) {
+    if src
+        .extension()
+        .map_or(false, |ext| ext.eq_ignore_ascii_case("zip"))
+    {
         return run_patch_zip(src, dst);
     }
 
@@ -70,80 +108,78 @@ pub fn run_patch(source: &str, target_dir: &str) -> Result<(), String> {
         return run_patch_dir(src, dst);
     }
 
-    Err(format!("unsupported source (expected .zip or directory): {}", source))
+    Err(format!(
+        "unsupported source (expected .zip or directory): {}",
+        source
+    ))
 }
 
 fn run_patch_dir(src: &Path, dst: &Path) -> Result<(), String> {
-    // Source contains e.g. desktop/ (Electron output)
-    // Copy desktop/ into target install dir
-    let desktop_src = if src.join("desktop").is_dir() {
-        src.join("desktop")
-    } else {
-        src.to_path_buf()
-    };
-
-    let desktop_dst = dst.join("desktop");
-    fs::create_dir_all(&desktop_dst)
-        .map_err(|e| format!("create target dir: {e}"))?;
-
-    let mut count = 0u32;
-    copy_dir_overwrite(&desktop_src, &desktop_dst, &mut count)?;
-
-    // Also update any config changes
-    if let Some(config_src) = src.join("config").is_dir().then(|| src.join("config")) {
-        let config_dst = dst.join("config");
-        fs::create_dir_all(&config_dst).ok();
-        copy_dir_overwrite(&config_src, &config_dst, &mut count)?;
+    let manifest = read_manifest_file(&src.join("bundle.json"))?;
+    validate_bundle(&manifest, dst)?;
+    for file in &manifest.files {
+        let source_path = safe_join(src, &file.source)?;
+        let target_path = safe_join(dst, &file.target)?;
+        install_file_from_reader(
+            fs::File::open(&source_path)
+                .map_err(|e| format!("打开 '{}' 失败: {e}", source_path.display()))?,
+            &target_path,
+            file,
+            manifest.kind != "full",
+        )?;
     }
-
-    println!("patch done: {count} files updated in {}", dst.display());
+    write_install_state(dst, &manifest)?;
+    println!(
+        "{} bundle {} installed: {} files in {}",
+        manifest.kind,
+        manifest.build_id,
+        manifest.files.len(),
+        dst.display()
+    );
     Ok(())
 }
 
-fn run_patch_zip(_zip_path: &Path, _dst: &Path) -> Result<(), String> {
-    // Future: extract desktop/ from zip and copy
-    // For now, require directory mode for patches
-    Err("ZIP patch mode not yet implemented — use directory payload".into())
+fn run_patch_zip(zip_path: &Path, dst: &Path) -> Result<(), String> {
+    let file = fs::File::open(zip_path)
+        .map_err(|e| format!("打开 ZIP '{}' 失败: {e}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("读取 ZIP '{}' 失败: {e}", zip_path.display()))?;
+    install_zip_archive(&mut archive, dst, |_, _, _| {}).map(|_| ())
 }
 
-fn copy_dir_overwrite(src: &Path, dst: &Path, count: &mut u32) -> Result<(), String> {
-    for entry in fs::read_dir(src)
-        .map_err(|e| format!("read dir '{}': {e}", src.display()))?
-    {
-        let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
-        let sp = entry.path();
-        let dp = dst.join(entry.file_name());
-        if sp.is_dir() {
-            fs::create_dir_all(&dp)
-                .map_err(|e| format!("create dir '{}': {e}", dp.display()))?;
-            copy_dir_overwrite(&sp, &dp, count)?;
-        } else {
-            // Remove read-only attribute if present (Electron asar can be locked)
-            if let Ok(meta) = fs::metadata(&dp) {
-                let mut perms = meta.permissions();
-                if perms.readonly() {
-                    perms.set_readonly(false);
-                    let _ = fs::set_permissions(&dp, perms);
-                }
-            }
-            fs::copy(&sp, &dp)
-                .map_err(|e| format!("copy '{}' -> '{}': {e}", sp.display(), dp.display()))?;
-            *count += 1;
-        }
+fn read_manifest_file(path: &Path) -> Result<BundleManifest, String> {
+    let bytes = fs::read(path)
+        .map_err(|e| format!("读取 Bundle manifest '{}' 失败: {e}", path.display()))?;
+    parse_manifest(&bytes)
+}
+
+fn parse_manifest(bytes: &[u8]) -> Result<BundleManifest, String> {
+    parse_bundle_manifest(bytes).map_err(|error| format!("解析 bundle.json 失败: {error}"))
+}
+
+fn validate_bundle(manifest: &BundleManifest, target: &Path) -> Result<(), String> {
+    if manifest.requires_full_install && !target.join("DeepX.exe").is_file() {
+        return Err(format!(
+            "{} 是组件更新包，但目标目录不是完整的 DeepX 安装目录: {}",
+            manifest.kind,
+            target.display()
+        ));
     }
     Ok(())
+}
+
+fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    safe_join_under_root(root, relative)
+        .map_err(|error| format!("Bundle 包含非法路径 '{relative}': {error}"))
 }
 
 pub fn run_install<F>(config: &mut InstallerConfig, on_progress: F) -> Result<(), String>
 where
     F: Fn(&InstallerConfig),
 {
-    // 优先尝试 SFX 自解压模式（EXE 尾部带 ZIP）
     if let Ok(zip_offset) = find_zip_in_exe() {
         return run_install_sfx(config, on_progress, zip_offset);
     }
-
-    // 回退到 payload/ 目录模式
     run_install_from_dir(config, on_progress)
 }
 
@@ -151,58 +187,71 @@ fn run_install_from_dir<F>(config: &mut InstallerConfig, on_progress: F) -> Resu
 where
     F: Fn(&InstallerConfig),
 {
-    let manifest = get_manifest();
-    let entries: Vec<&ManifestEntry> = filter_entries(&manifest, config);
-
     let exe_dir = current_exe_dir()?;
     let payload_dir = exe_dir.join("payload");
-
     if !payload_dir.exists() {
         return Err("未找到安装数据：EXE 内无嵌入包，且 payload/ 目录不存在。".into());
     }
 
-    config.total_files = count_files_in_dir_entries(&payload_dir, &entries);
-    config.completed_files = 0;
-    config.progress = 0.0;
-    config.error = None;
-
+    let manifest = read_manifest_file(&payload_dir.join("bundle.json"))?;
     let target_path = config.target_path.clone();
     let target = Path::new(&target_path);
+    validate_bundle(&manifest, target)?;
+    initialize_progress(config, &manifest, target);
 
-    for entry in &entries {
-        let src = payload_dir.join(entry.source);
-        let dst = target.join(entry.dest);
-
-        if entry.is_dir && src.is_dir() {
-            copy_dir_recursive(&src, &dst, config, &on_progress)?;
-        } else if src.exists() {
-            config.current_file = entry.dest.to_string();
-            config.completed_files += 1;
-            config.progress = config.completed_files as f32 / config.total_files as f32;
-            on_progress(config);
-
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("创建目录失败 '{}': {}", parent.display(), e))?;
-            }
-            fs::copy(&src, &dst).map_err(|e| {
-                format!("复制失败\n  源: {}\n  目标: {}\n  错误: {}", src.display(), dst.display(), e)
-            })?;
-        } else {
-            eprintln!("警告: 源不存在 '{}'，跳过", src.display());
-        }
+    for file in &manifest.files {
+        let source_path = safe_join(&payload_dir, &file.source)?;
+        let target_path = safe_join(target, &file.target)?;
+        install_file_from_reader(
+            fs::File::open(&source_path)
+                .map_err(|e| format!("打开 '{}' 失败: {e}", source_path.display()))?,
+            &target_path,
+            file,
+            manifest.kind != "full",
+        )?;
+        advance_progress(config, &file.target, &on_progress);
     }
 
-    config.progress = 1.0;
-    on_progress(config);
+    write_install_state(target, &manifest)?;
+    finish_progress(config, &on_progress);
     Ok(())
 }
 
-fn filter_entries<'a>(manifest: &'a [ManifestEntry], config: &InstallerConfig) -> Vec<&'a ManifestEntry> {
-    manifest
-        .iter()
-        .filter(|e| !e.source.starts_with("desktop") || config.install_desktop_app)
-        .collect()
+fn initialize_progress(config: &mut InstallerConfig, manifest: &BundleManifest, target: &Path) {
+    config.bundle_kind = manifest.kind.clone();
+    config.bundle_build_id = manifest.build_id.clone();
+    config.operation = if manifest.kind == "full" {
+        if target.join("DeepX.exe").is_file() {
+            "upgrade"
+        } else {
+            "install"
+        }
+    } else {
+        "update"
+    }
+    .to_string();
+    config.total_files = manifest.files.len().max(1);
+    config.completed_files = 0;
+    config.progress = 0.0;
+    config.error = None;
+}
+
+fn advance_progress<F>(config: &mut InstallerConfig, target: &str, on_progress: &F)
+where
+    F: Fn(&InstallerConfig),
+{
+    config.current_file = target.to_string();
+    config.completed_files += 1;
+    config.progress = config.completed_files as f32 / config.total_files as f32;
+    on_progress(config);
+}
+
+fn finish_progress<F>(config: &mut InstallerConfig, on_progress: &F)
+where
+    F: Fn(&InstallerConfig),
+{
+    config.progress = 1.0;
+    on_progress(config);
 }
 
 fn current_exe_dir() -> Result<PathBuf, String> {
@@ -211,56 +260,6 @@ fn current_exe_dir() -> Result<PathBuf, String> {
         .parent()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| "无法获取安装器目录".into())
-}
-
-fn count_files_in_dir_entries(payload_dir: &Path, entries: &[&ManifestEntry]) -> usize {
-    let mut total = 0;
-    for entry in entries {
-        let src = payload_dir.join(entry.source);
-        if entry.is_dir && src.is_dir() {
-            total += count_files(&src);
-        } else if src.exists() {
-            total += 1;
-        }
-    }
-    total.max(1) // 避免除零
-}
-
-fn count_files(dir: &Path) -> usize {
-    let mut n = 0;
-    if let Ok(iter) = fs::read_dir(dir) {
-        for e in iter.flatten() {
-            let p = e.path();
-            if p.is_dir() { n += count_files(&p); } else { n += 1; }
-        }
-    }
-    n
-}
-
-fn copy_dir_recursive<F>(src: &Path, dst: &Path, config: &mut InstallerConfig, on_progress: &F) -> Result<(), String>
-where
-    F: Fn(&InstallerConfig),
-{
-    fs::create_dir_all(dst)
-        .map_err(|e| format!("创建目录失败 '{}': {}", dst.display(), e))?;
-
-    for entry in fs::read_dir(src).map_err(|e| format!("读取目录失败 '{}': {}", src.display(), e))? {
-        let entry = entry.map_err(|e| format!("读取目录项失败: {}", e))?;
-        let sp = entry.path();
-        let dp = dst.join(entry.file_name());
-        if sp.is_dir() {
-            copy_dir_recursive(&sp, &dp, config, on_progress)?;
-        } else {
-            config.current_file = sp.file_name().unwrap_or_default().to_string_lossy().to_string();
-            config.completed_files += 1;
-            config.progress = config.completed_files as f32 / config.total_files as f32;
-            on_progress(config);
-            fs::copy(&sp, &dp).map_err(|e| {
-                format!("复制失败\n  源: {}\n  目标: {}\n  错误: {}", sp.display(), dp.display(), e)
-            })?;
-        }
-    }
-    Ok(())
 }
 
 // ============================================================
@@ -283,7 +282,7 @@ impl<R: Read + Seek> Seek for OffsetReader<R> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let real = match pos {
             SeekFrom::Start(p) => SeekFrom::Start(self.offset + p),
-            SeekFrom::End(p) => SeekFrom::End(p),   // 尾部 EOCD 直接用文件尾
+            SeekFrom::End(p) => SeekFrom::End(p), // 尾部 EOCD 直接用文件尾
             SeekFrom::Current(p) => SeekFrom::Current(p),
         };
         let abs = self.inner.seek(real)?;
@@ -291,7 +290,9 @@ impl<R: Read + Seek> Seek for OffsetReader<R> {
     }
 
     fn stream_position(&mut self) -> io::Result<u64> {
-        self.inner.stream_position().map(|p| p.saturating_sub(self.offset))
+        self.inner
+            .stream_position()
+            .map(|p| p.saturating_sub(self.offset))
     }
 }
 
@@ -299,14 +300,17 @@ impl<R: Read + Seek> Seek for OffsetReader<R> {
 fn find_zip_in_exe() -> Result<u64, String> {
     let exe_path = std::env::current_exe().map_err(|e| format!("无法获取自身路径: {}", e))?;
     let mut f = fs::File::open(&exe_path).map_err(|e| format!("打开自身失败: {}", e))?;
-    let file_len = f.seek(SeekFrom::End(0)).map_err(|e| format!("seek 失败: {}", e))?;
+    let file_len = f
+        .seek(SeekFrom::End(0))
+        .map_err(|e| format!("seek 失败: {}", e))?;
 
     // ZIP EOCD 最小 22 字节，最大 22 + 65535（注释）
     let scan = 65536u64.min(file_len);
     let mut buf = vec![0u8; scan as usize];
     f.seek(SeekFrom::End(-(scan as i64)))
         .map_err(|e| format!("seek 失败: {}", e))?;
-    f.read_exact(&mut buf).map_err(|e| format!("读取尾部失败: {}", e))?;
+    f.read_exact(&mut buf)
+        .map_err(|e| format!("读取尾部失败: {}", e))?;
 
     // 从后往前扫 EOCD 签名 PK\x05\x06
     let sig: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
@@ -317,8 +321,10 @@ fn find_zip_in_exe() -> Result<u64, String> {
 
     // 解析 EOCD 获取 central directory 偏移和大小
     let eocd_file_pos = file_len - scan + pos as u64;
-    let cd_size = u32::from_le_bytes([buf[pos + 12], buf[pos + 13], buf[pos + 14], buf[pos + 15]]) as u64;
-    let cd_offset = u32::from_le_bytes([buf[pos + 16], buf[pos + 17], buf[pos + 18], buf[pos + 19]]) as u64;
+    let cd_size =
+        u32::from_le_bytes([buf[pos + 12], buf[pos + 13], buf[pos + 14], buf[pos + 15]]) as u64;
+    let cd_offset =
+        u32::from_le_bytes([buf[pos + 16], buf[pos + 17], buf[pos + 18], buf[pos + 19]]) as u64;
 
     // ZIP 起始 = EOCD 文件位置 - central_dir_size - central_dir_offset
     let zip_start = eocd_file_pos
@@ -330,7 +336,8 @@ fn find_zip_in_exe() -> Result<u64, String> {
     f.seek(SeekFrom::Start(zip_start + cd_offset))
         .map_err(|e| format!("seek CD 失败: {}", e))?;
     let mut cd_sig = [0u8; 4];
-    f.read_exact(&mut cd_sig).map_err(|e| format!("读取 CD 签名失败: {}", e))?;
+    f.read_exact(&mut cd_sig)
+        .map_err(|e| format!("读取 CD 签名失败: {}", e))?;
     if cd_sig != [0x50, 0x4B, 0x01, 0x02] {
         return Err("ZIP central directory 签名验证失败".into());
     }
@@ -338,86 +345,207 @@ fn find_zip_in_exe() -> Result<u64, String> {
     Ok(zip_start)
 }
 
-fn run_install_sfx<F>(config: &mut InstallerConfig, on_progress: F, zip_offset: u64) -> Result<(), String>
+fn run_install_sfx<F>(
+    config: &mut InstallerConfig,
+    on_progress: F,
+    zip_offset: u64,
+) -> Result<(), String>
 where
     F: Fn(&InstallerConfig),
 {
-    let manifest = get_manifest();
-    let entries: Vec<&ManifestEntry> = filter_entries(&manifest, config);
-
     let exe_path = std::env::current_exe().map_err(|e| format!("无法获取自身路径: {}", e))?;
     let file = fs::File::open(&exe_path).map_err(|e| format!("打开自身失败: {}", e))?;
-    let reader = OffsetReader { inner: file, offset: zip_offset };
-
-    let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|e| format!("读取内嵌 ZIP 失败: {}", e))?;
-
-    // 统计匹配的文件数
-    let matching: Vec<_> = (0..archive.len())
-        .filter_map(|i| {
-            let zf = archive.by_index(i).ok()?;
-            let name = zf.name().to_string();
-            if name.ends_with('/') { return None; }
-            let normalized = name.replace('\\', "/");
-            manifest_match(&entries, &normalized).map(|dest| (i, dest))
-        })
-        .collect();
-
-    config.total_files = matching.len().max(1);
-    config.completed_files = 0;
-    config.progress = 0.0;
-    config.error = None;
-
-    let target = Path::new(&config.target_path);
-
-    for (idx, (i, dest)) in matching.iter().enumerate() {
-        let mut zip_file = archive.by_index(*i)
-            .map_err(|e| format!("读取 ZIP 条目 {} 失败: {}", *i, e))?;
-
-        config.current_file = dest.clone();
-        config.completed_files = idx + 1;
-        config.progress = config.completed_files as f32 / config.total_files as f32;
-        on_progress(config);
-
-        let dest_path = target.join(dest);
-        if let Some(parent) = dest_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("创建目录失败 '{}': {}", parent.display(), e))?;
-        }
-
-        let mut out = fs::File::create(&dest_path)
-            .map_err(|e| format!("创建文件失败 '{}': {}", dest_path.display(), e))?;
-
-        io::copy(&mut zip_file, &mut out)
-            .map_err(|e| format!("解压失败 '{}': {}", dest, e))?;
-    }
-
-    config.progress = 1.0;
-    on_progress(config);
+    let reader = OffsetReader {
+        inner: file,
+        offset: zip_offset,
+    };
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|e| format!("读取内嵌 ZIP 失败: {}", e))?;
+    let target_path = config.target_path.clone();
+    let target = Path::new(&target_path);
+    let manifest = read_manifest_from_archive(&mut archive)?;
+    validate_bundle(&manifest, target)?;
+    initialize_progress(config, &manifest, target);
+    install_archive_files(&mut archive, target, &manifest, |target_name, _, _| {
+        advance_progress(config, target_name, &on_progress);
+    })?;
+    write_install_state(target, &manifest)?;
+    finish_progress(config, &on_progress);
     Ok(())
 }
 
-/// 将 ZIP 条目路径匹配到 manifest，返回目标相对路径。不匹配则 None。
-fn manifest_match(entries: &[&ManifestEntry], zip_path: &str) -> Option<String> {
-    for e in entries {
-        if e.is_dir {
-            // 目录条目：匹配以 source/ 开头的所有文件
-            if zip_path.starts_with(e.source) && zip_path.len() > e.source.len() + 1 {
-                let rest = &zip_path[e.source.len() + 1..]; // 去掉 "desktop/"
-                if e.dest.is_empty() {
-                    return Some(rest.to_string());
-                } else {
-                    return Some(format!("{}/{}", e.dest, rest));
-                }
+fn install_zip_archive<R, F>(
+    archive: &mut zip::ZipArchive<R>,
+    target: &Path,
+    on_file: F,
+) -> Result<BundleManifest, String>
+where
+    R: Read + Seek,
+    F: FnMut(&str, usize, usize),
+{
+    let manifest = read_manifest_from_archive(archive)?;
+    validate_bundle(&manifest, target)?;
+    install_archive_files(archive, target, &manifest, on_file)?;
+    write_install_state(target, &manifest)?;
+    Ok(manifest)
+}
+
+fn read_manifest_from_archive<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<BundleManifest, String> {
+    let mut manifest_file = archive
+        .by_name("bundle.json")
+        .map_err(|e| format!("内嵌包缺少 bundle.json: {e}"))?;
+    let mut bytes = Vec::new();
+    manifest_file
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取 bundle.json 失败: {e}"))?;
+    parse_manifest(&bytes)
+}
+
+fn install_archive_files<R, F>(
+    archive: &mut zip::ZipArchive<R>,
+    target: &Path,
+    manifest: &BundleManifest,
+    mut on_file: F,
+) -> Result<(), String>
+where
+    R: Read + Seek,
+    F: FnMut(&str, usize, usize),
+{
+    for (index, file) in manifest.files.iter().enumerate() {
+        let mut zip_file = archive
+            .by_name(&file.source)
+            .map_err(|e| format!("Bundle 缺少清单文件 '{}': {e}", file.source))?;
+        if zip_file.is_dir() {
+            return Err(format!("清单文件实际是目录: {}", file.source));
+        }
+        let target_path = safe_join(target, &file.target)?;
+        install_file_from_reader(&mut zip_file, &target_path, file, manifest.kind != "full")?;
+        on_file(&file.target, index + 1, manifest.files.len());
+    }
+    Ok(())
+}
+
+fn install_file_from_reader<R: Read>(
+    mut source: R,
+    target: &Path,
+    expected: &BundleFile,
+    preserve_previous: bool,
+) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("目标路径没有父目录: {}", target.display()))?;
+    fs::create_dir_all(parent).map_err(|e| format!("创建目录 '{}' 失败: {e}", parent.display()))?;
+
+    let file_name = target
+        .file_name()
+        .and_then(|v| v.to_str())
+        .ok_or_else(|| format!("目标文件名无效: {}", target.display()))?;
+    let temp = parent.join(format!(".{file_name}.deepx-new-{}", std::process::id()));
+    if temp.exists() {
+        retry_io(|| fs::remove_file(&temp))
+            .map_err(|e| format!("清理临时文件 '{}' 失败: {e}", temp.display()))?;
+    }
+
+    let mut output = fs::File::create(&temp)
+        .map_err(|e| format!("创建临时文件 '{}' 失败: {e}", temp.display()))?;
+    let mut hasher = Sha256::new();
+    let mut copied = 0u64;
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .map_err(|e| format!("读取 '{}' 失败: {e}", expected.source))?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .map_err(|e| format!("写入临时文件 '{}' 失败: {e}", temp.display()))?;
+        hasher.update(&buffer[..read]);
+        copied += read as u64;
+    }
+    output
+        .sync_all()
+        .map_err(|e| format!("同步临时文件 '{}' 失败: {e}", temp.display()))?;
+    drop(output);
+
+    let actual_hash = format!("{:x}", hasher.finalize());
+    if copied != expected.size || !actual_hash.eq_ignore_ascii_case(&expected.sha256) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!(
+            "文件校验失败: {}（大小 {copied}/{}, SHA-256 {actual_hash}/{}）",
+            expected.target, expected.size, expected.sha256
+        ));
+    }
+
+    let backup = parent.join(format!("{file_name}.previous"));
+    if target.exists() {
+        clear_readonly(target);
+        if preserve_previous {
+            if backup.exists() {
+                clear_readonly(&backup);
+                retry_io(|| fs::remove_file(&backup))
+                    .map_err(|e| format!("删除旧备份 '{}' 失败: {e}", backup.display()))?;
             }
+            retry_io(|| fs::rename(target, &backup))
+                .map_err(|e| format!("备份 '{}' 失败: {e}", target.display()))?;
         } else {
-            // 单文件条目：精确匹配 source 路径
-            if zip_path == e.source || zip_path == e.source.replace('\\', "/") {
-                return Some(e.dest.to_string());
+            retry_io(|| fs::remove_file(target))
+                .map_err(|e| format!("替换前删除 '{}' 失败: {e}", target.display()))?;
+        }
+    }
+
+    if let Err(error) = retry_io(|| fs::rename(&temp, target)) {
+        if preserve_previous && backup.exists() && !target.exists() {
+            let _ = retry_io(|| fs::rename(&backup, target));
+        }
+        let _ = fs::remove_file(&temp);
+        return Err(format!("启用新文件 '{}' 失败: {error}", target.display()));
+    }
+    Ok(())
+}
+
+fn clear_readonly(path: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.readonly() {
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
+}
+
+fn retry_io<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut last_error = None;
+    for attempt in 0..20 {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 19 {
+                    thread::sleep(Duration::from_millis(150));
+                }
             }
         }
     }
-    None
+    Err(last_error.expect("retry loop always records an error"))
+}
+
+fn write_install_state(target: &Path, manifest: &BundleManifest) -> Result<(), String> {
+    commit_bundle_state(
+        target,
+        manifest,
+        &format!("installer-{}", manifest.build_id),
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        format!(
+            "写入安装状态 '{}' 失败: {error}",
+            target.join("install-state.json").display()
+        )
+    })
 }
 
 // ============================================================
@@ -437,8 +565,7 @@ pub fn create_start_menu_shortcut(target_exe: &str, description: &str) -> Result
         .map(|p| p.join(r"Microsoft\Windows\Start Menu\Programs\DeepX"))
         .ok_or("无法获取开始菜单路径")?;
 
-    fs::create_dir_all(&start_menu)
-        .map_err(|e| format!("创建开始菜单目录失败: {}", e))?;
+    fs::create_dir_all(&start_menu).map_err(|e| format!("创建开始菜单目录失败: {}", e))?;
 
     create_shortcut(
         target_exe,
@@ -449,10 +576,12 @@ pub fn create_start_menu_shortcut(target_exe: &str, description: &str) -> Result
 
 #[cfg(windows)]
 fn create_shortcut(target_exe: &str, lnk_path_str: &str, description: &str) -> Result<(), String> {
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
-    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
-    use windows::Win32::System::Com::IPersistFile;
     use windows::core::Interface;
+    use windows::Win32::System::Com::IPersistFile;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
@@ -461,21 +590,28 @@ fn create_shortcut(target_exe: &str, lnk_path_str: &str, description: &str) -> R
     }
 
     let result = unsafe {
-        let shell_link: IShellLinkW =
-            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
-                .map_err(|e| format!("创建 ShellLink 失败: {:?}", e))?;
+        let shell_link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("创建 ShellLink 失败: {:?}", e))?;
 
-        let target_wide: Vec<u16> = target_exe.encode_utf16().chain(std::iter::once(0)).collect();
+        let target_wide: Vec<u16> = target_exe
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         shell_link
             .SetPath(windows::core::PCWSTR::from_raw(target_wide.as_ptr()))
             .map_err(|e| format!("SetPath 失败: {:?}", e))?;
 
-        let desc_wide: Vec<u16> = description.encode_utf16().chain(std::iter::once(0)).collect();
+        let desc_wide: Vec<u16> = description
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         shell_link
             .SetDescription(windows::core::PCWSTR::from_raw(desc_wide.as_ptr()))
             .map_err(|e| format!("SetDescription 失败: {:?}", e))?;
 
-        let persist: IPersistFile = shell_link.cast().map_err(|e| format!("cast 失败: {:?}", e))?;
+        let persist: IPersistFile = shell_link
+            .cast()
+            .map_err(|e| format!("cast 失败: {:?}", e))?;
 
         let path_wide: Vec<u16> = lnk_path_str
             .encode_utf16()
@@ -497,27 +633,37 @@ fn create_shortcut(target_exe: &str, lnk_path_str: &str, description: &str) -> R
 }
 
 #[cfg(not(windows))]
-pub fn create_desktop_shortcut(_: &str, _: &str) -> Result<(), String> { Ok(()) }
+pub fn create_desktop_shortcut(_: &str, _: &str) -> Result<(), String> {
+    Ok(())
+}
 #[cfg(not(windows))]
-pub fn create_start_menu_shortcut(_: &str, _: &str) -> Result<(), String> { Ok(()) }
+pub fn create_start_menu_shortcut(_: &str, _: &str) -> Result<(), String> {
+    Ok(())
+}
 
 // ============================================================
 // 注册表 — 卸载信息
 // ============================================================
 
+pub fn write_install_marker(install_path: &str) -> Result<(), String> {
+    write_install_root_marker(Path::new(install_path))
+        .map_err(|error| format!("写入安装根标记失败: {error}"))
+}
+
 #[cfg(windows)]
 pub fn write_uninstall_registry(install_path: &str, version: &str) -> Result<(), String> {
-    use windows::Win32::System::Registry::{
-        RegSetValueExW, RegCreateKeyExW, RegCloseKey, REG_CREATE_KEY_DISPOSITION,
-        HKEY_CURRENT_USER, KEY_SET_VALUE, KEY_CREATE_SUB_KEY, REG_SZ, REG_OPTION_NON_VOLATILE,
-    };
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY_CURRENT_USER,
+        KEY_CREATE_SUB_KEY, KEY_SET_VALUE, REG_CREATE_KEY_DISPOSITION, REG_DWORD,
+        REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
 
-    let subkey: Vec<u16> =
-        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DeepX"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DeepX"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     unsafe {
         let mut hkey = std::mem::zeroed();
@@ -540,10 +686,8 @@ pub fn write_uninstall_registry(install_path: &str, version: &str) -> Result<(),
         let set_value = |name: &str, value: &str| -> Result<(), String> {
             let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
             let value_wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-            let data = std::slice::from_raw_parts(
-                value_wide.as_ptr() as *const u8,
-                value_wide.len() * 2,
-            );
+            let data =
+                std::slice::from_raw_parts(value_wide.as_ptr() as *const u8, value_wide.len() * 2);
 
             RegSetValueExW(
                 hkey,
@@ -557,14 +701,55 @@ pub fn write_uninstall_registry(install_path: &str, version: &str) -> Result<(),
 
             Ok(())
         };
+        let set_dword = |name: &str, value: u32| -> Result<(), String> {
+            let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            RegSetValueExW(
+                hkey,
+                PCWSTR::from_raw(name_wide.as_ptr()),
+                0,
+                REG_DWORD,
+                Some(&value.to_le_bytes()),
+            )
+            .ok()
+            .map_err(|e| format!("设置注册表值失败: {:?}", e))
+        };
 
         set_value("DisplayName", "DeepX")?;
         set_value("Publisher", "DeepX Team")?;
         set_value("InstallLocation", install_path)?;
         set_value("DisplayVersion", version)?;
-        set_value("UninstallString", &format!("{}\\uninstall.exe", install_path))?;
-        set_value("NoModify", "1")?;
-        set_value("NoRepair", "1")?;
+        set_value(
+            "UninstallString",
+            &format!(
+                "\"{}\\deepx-updater.exe\" uninstall --interactive --install-dir \"{}\"",
+                install_path, install_path
+            ),
+        )?;
+        set_value(
+            "QuietUninstallString",
+            &format!(
+                "\"{}\\deepx-updater.exe\" uninstall --quiet --install-dir \"{}\"",
+                install_path, install_path
+            ),
+        )?;
+        set_value(
+            "ModifyPath",
+            &format!(
+                "\"{}\\deepx-updater.exe\" maintain --interactive --install-dir \"{}\"",
+                install_path, install_path
+            ),
+        )?;
+        set_value("DisplayIcon", &format!("{}\\DeepX.exe", install_path))?;
+        let no_modify = "NoModify"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let delete_result = RegDeleteValueW(hkey, PCWSTR::from_raw(no_modify.as_ptr()));
+        if delete_result != ERROR_SUCCESS && delete_result != ERROR_FILE_NOT_FOUND {
+            let _ = RegCloseKey(hkey);
+            return Err(format!("清除 NoModify 注册表值失败: {delete_result:?}"));
+        }
+        set_dword("NoRepair", 1)?;
 
         let _ = RegCloseKey(hkey);
     }
@@ -573,4 +758,6 @@ pub fn write_uninstall_registry(install_path: &str, version: &str) -> Result<(),
 }
 
 #[cfg(not(windows))]
-pub fn write_uninstall_registry(_: &str, _: &str) -> Result<(), String> { Ok(()) }
+pub fn write_uninstall_registry(_: &str, _: &str) -> Result<(), String> {
+    Ok(())
+}

@@ -19,9 +19,28 @@ interface DeepxDesktopApi {
     openPath(target: string): Promise<void>;
     togglePet(): Promise<boolean>;
     getPetStatus(): Promise<boolean>;
-    checkUpdate(): Promise<{ version: string; downloadUrl?: string; releaseNotes?: string } | null>;
-    onUpdateAvailable(listener: (info: { version: string; downloadUrl?: string; releaseNotes?: string }) => void): () => void;
+    checkUpdate(): Promise<UpdateInfo | null>;
+    stageUpdate(source: string): Promise<UpdateInfo | null>;
+    applyUpdate(operationPath: string): Promise<{ restarting: boolean }>;
+    windowMinimize(): void;
+    windowToggleMaximize(): Promise<boolean>;
+    windowIsMaximized(): Promise<boolean>;
+    windowClose(): void;
+    onWindowMaximizedChanged(listener: (maximized: boolean) => void): () => void;
+    onUpdateAvailable(listener: (info: UpdateInfo) => void): () => void;
+    onUpdateFailed(listener: (failure: { operationId: string; message: string }) => void): () => void;
   };
+}
+
+interface UpdateInfo {
+  version: string;
+  downloadUrl?: string;
+  releaseNotes?: string;
+  operationPath?: string;
+  operationId?: string;
+  mode?: "install" | "update" | "upgrade" | "current";
+  artifacts?: string[];
+  actions?: string[];
 }
 
 declare global {

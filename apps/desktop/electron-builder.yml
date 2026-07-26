@@ -19,16 +19,3 @@ extraResources:
 
 win:
   executableName: DeepX
-  target:
-    - target: nsis
-      arch:
-        - x64
-  artifactName: DeepX-${version}-${arch}-Setup.${ext}
-
-nsis:
-  oneClick: false
-  perMachine: false
-  allowToChangeInstallationDirectory: true
-  createDesktopShortcut: always
-  createStartMenuShortcut: true
-  shortcutName: DeepX

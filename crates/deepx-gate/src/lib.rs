@@ -11,10 +11,10 @@
 
 pub mod guard;
 mod openai;
-pub mod tool_parser;
-mod types;
 #[cfg(test)]
 mod rt_test;
+pub mod tool_parser;
+mod types;
 
 pub use types::{ProviderConfig, ProviderKind, StreamEvent};
 
@@ -26,8 +26,8 @@ use std::sync::atomic::AtomicBool;
 ///
 /// `cancel` is an optional shared abort flag. When set to `true`, the
 /// streaming read loop will return `Err("cancelled by user")` within
-/// `SSE_READ_TIMEOUT` (200ms), aborting the HTTP response promptly
-/// instead of waiting for the server to finish.
+/// one 50ms polling interval, aborting the HTTP response promptly instead
+/// of waiting for the server to finish.
 #[allow(clippy::string_slice)]
 pub fn chat_stream(
     provider: &ProviderConfig,

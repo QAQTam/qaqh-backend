@@ -26,10 +26,29 @@ contextBridge.exposeInMainWorld("deepx", {
     togglePet: () => ipcRenderer.invoke("desktop:toggle-pet") as Promise<boolean>,
     getPetStatus: () => ipcRenderer.invoke("desktop:pet-status") as Promise<boolean>,
     checkUpdate: () => ipcRenderer.invoke("desktop:check-update") as Promise<UpdateInfo | null>,
+    stageUpdate: (source: string) => ipcRenderer.invoke("desktop:stage-update", source) as Promise<UpdateInfo | null>,
+    applyUpdate: (operationPath: string) => ipcRenderer.invoke("desktop:apply-update", operationPath) as Promise<{ restarting: boolean }>,
+    windowMinimize: () => ipcRenderer.send("desktop:window-minimize"),
+    windowToggleMaximize: () => ipcRenderer.invoke("desktop:window-toggle-maximize") as Promise<boolean>,
+    windowIsMaximized: () => ipcRenderer.invoke("desktop:window-is-maximized") as Promise<boolean>,
+    windowClose: () => ipcRenderer.send("desktop:window-close"),
+    onWindowMaximizedChanged: (listener: (maximized: boolean) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, maximized: boolean) => listener(maximized);
+      ipcRenderer.on("window:maximized-changed", handler);
+      return () => ipcRenderer.removeListener("window:maximized-changed", handler);
+    },
     onUpdateAvailable: (listener: (info: UpdateInfo) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, info: UpdateInfo) => listener(info);
       ipcRenderer.on("update:available", handler);
       return () => ipcRenderer.removeListener("update:available", handler);
+    },
+    onUpdateFailed: (listener: (failure: { operationId: string; message: string }) => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        failure: { operationId: string; message: string },
+      ) => listener(failure);
+      ipcRenderer.on("update:failed", handler);
+      return () => ipcRenderer.removeListener("update:failed", handler);
     },
   },
 });

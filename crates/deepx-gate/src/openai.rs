@@ -1,9 +1,9 @@
-//! OpenAI Chat Completions API streaming client — sync (ureq).
+//! OpenAI Chat Completions API streaming client — synchronous facade over reqwest.
 //! Includes retry with exponential backoff for transient errors (429, 500, 503, transport).
 
-use std::collections::{HashMap, HashSet};
 use futures::StreamExt;
 use reqwest::Client;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -13,11 +13,10 @@ use deepx_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::types::{ProviderConfig, StreamEvent};
 
-/// Per-read timeout for SSE streaming. When no data arrives within this
-/// interval, `read()` returns a `TimedOut` error so we can check the cancel
-/// flag and retry. This makes cancel responsive even during the "thinking"
-/// delay before the first token arrives.
-const SSE_READ_TIMEOUT: Duration = Duration::from_millis(50);
+/// Polling interval for SSE streaming. When no data arrives within this
+/// interval, the outer Tokio timeout lets us check the cancel flag before
+/// polling the same stream again.
+const SSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Crate-global tokio runtime for reqwest I/O.
 /// Uses current-thread scheduler — all async I/O serialises on the
@@ -101,7 +100,6 @@ fn split_inline_thinking(text: &str, in_thinking: &mut bool) -> Vec<(bool, Strin
 /// Connection pool, DNS cache, and TLS session cache are preserved.
 static GLOBAL_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
     Client::builder()
-        .read_timeout(SSE_READ_TIMEOUT)
         .timeout(Duration::from_secs(300))
         .build()
         .expect("failed to build reqwest client")
@@ -115,9 +113,8 @@ fn backoff_delay(attempt: u32) -> Duration {
 /// Send a chat completion request and stream SSE events via `on_event`.
 ///
 /// `cancel` is an optional `Arc<AtomicBool>` that, when set to `true`, causes
-/// the streaming to abort as soon as the next read times out (within
-/// `SSE_READ_TIMEOUT`). This makes cancel responsive even while the HTTP
-/// response is still being streamed.
+/// the streaming loop to abort within one `SSE_POLL_INTERVAL`. This keeps
+/// cancellation responsive while the HTTP response body is being streamed.
 #[allow(clippy::string_slice)]
 pub fn chat_stream_openai(
     provider: &ProviderConfig,
@@ -194,11 +191,9 @@ pub fn chat_stream_openai(
     let url = build_chat_url(&provider.base_url, provider.chat_path.as_deref());
 
     let mut attempt = 0u32;
-    // Reuse a global Agent with a short per-read timeout so that stream_sse
-    // can check the cancel flag between reads. Connection pool and DNS cache
-    // are preserved across requests.
-    // http_status_as_error(false) so we can read error bodies for retry logic.
-    // Reuse the module-level GLOBAL_CLIENT for connection pooling.
+    // Reuse the module-level client for connection pooling. Cancellation
+    // responsiveness is handled by the polling timeout in stream_sse, not by
+    // a client-level read timeout.
 
     loop {
         attempt += 1;
@@ -292,7 +287,7 @@ fn stream_sse(
         }
 
         let event = match block_on(async {
-            tokio::time::timeout(SSE_READ_TIMEOUT, events.next()).await
+            tokio::time::timeout(SSE_POLL_INTERVAL, events.next()).await
         }) {
             Ok(Some(Ok(ev))) => ev,
             Ok(Some(Err(e))) => {
@@ -300,7 +295,7 @@ fn stream_sse(
                 on_event(StreamEvent::Error(msg.clone()));
                 return Err(anyhow::anyhow!("{}", msg));
             }
-            Ok(None) => break, // EOF
+            Ok(None) => break,         // EOF
             Err(_elapsed) => continue, // timeout → check cancel, retry
         };
 
@@ -318,157 +313,155 @@ fn stream_sse(
             }
         };
 
-            // Parse choices
-            if let Some(choices) = ev.get("choices").and_then(|c| c.as_array()) {
-                if let Some(choice) = choices.first() {
-                    let finish = choice.get("finish_reason").and_then(|v| v.as_str());
-                    if let Some(fr) = finish {
-                        if !fr.is_empty() && fr != "null" {
-                            stop_reason = Some(fr.to_string());
-                        }
+        // Parse choices
+        if let Some(choices) = ev.get("choices").and_then(|c| c.as_array()) {
+            if let Some(choice) = choices.first() {
+                let finish = choice.get("finish_reason").and_then(|v| v.as_str());
+                if let Some(fr) = finish {
+                    if !fr.is_empty() && fr != "null" {
+                        stop_reason = Some(fr.to_string());
                     }
+                }
 
-                    if let Some(delta) = choice.get("delta") {
-                        // Text content
-                        if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
-                            for (is_reasoning, t) in
-                                split_inline_thinking(text, &mut inline_thinking)
-                            {
-                                if is_reasoning {
-                                    reasoning_buf.push_str(&t);
-                                    on_event(StreamEvent::ReasoningDelta(t));
-                                } else {
-                                    text_buf.push_str(&t);
-                                    on_event(StreamEvent::ContentDelta(t.clone()));
+                if let Some(delta) = choice.get("delta") {
+                    // Text content
+                    if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
+                        for (is_reasoning, t) in split_inline_thinking(text, &mut inline_thinking) {
+                            if is_reasoning {
+                                reasoning_buf.push_str(&t);
+                                on_event(StreamEvent::ReasoningDelta(t));
+                            } else {
+                                text_buf.push_str(&t);
+                                on_event(StreamEvent::ContentDelta(t.clone()));
 
-                                    // DSML tool call detection in content stream
-                                    dsml_buf.push_str(&t);
-                                    let mut search_from = 0usize;
-                                    while let Some(start) =
-                                        dsml_buf[search_from..].find("<｜DSML｜invoke name=\"")
-                                    {
-                                        let abs_start = search_from + start;
-                                        let after_tag = abs_start + "<｜DSML｜invoke name=\"".len();
-                                        if let Some(rest) = dsml_buf.get(after_tag..) {
-                                            if let Some(quote_end) = rest.find('"') {
-                                                let name = rest[..quote_end].to_string();
-                                                if dsml_seen.insert(name.clone()) {
-                                                    let idx = dsml_seen.len() - 1;
-                                                    on_event(StreamEvent::ToolCallProgress {
-                                                        index: idx,
-                                                        id: format!("dsml_tc_{}", idx),
-                                                        name,
-                                                        args_so_far: String::new(),
-                                                    });
-                                                }
-                                                search_from = after_tag + quote_end + 1;
-                                                continue;
+                                // DSML tool call detection in content stream
+                                dsml_buf.push_str(&t);
+                                let mut search_from = 0usize;
+                                while let Some(start) =
+                                    dsml_buf[search_from..].find("<｜DSML｜invoke name=\"")
+                                {
+                                    let abs_start = search_from + start;
+                                    let after_tag = abs_start + "<｜DSML｜invoke name=\"".len();
+                                    if let Some(rest) = dsml_buf.get(after_tag..) {
+                                        if let Some(quote_end) = rest.find('"') {
+                                            let name = rest[..quote_end].to_string();
+                                            if dsml_seen.insert(name.clone()) {
+                                                let idx = dsml_seen.len() - 1;
+                                                on_event(StreamEvent::ToolCallProgress {
+                                                    index: idx,
+                                                    id: format!("dsml_tc_{}", idx),
+                                                    name,
+                                                    args_so_far: String::new(),
+                                                });
                                             }
+                                            search_from = after_tag + quote_end + 1;
+                                            continue;
                                         }
-                                        break;
                                     }
+                                    break;
                                 }
                             }
                         }
+                    }
 
-                        // Reasoning content
-                        if let Some(rc) = reasoning_delta(delta) {
-                            let r = rc.to_string();
-                            reasoning_buf.push_str(&r);
-                            on_event(StreamEvent::ReasoningDelta(r));
-                        }
+                    // Reasoning content
+                    if let Some(rc) = reasoning_delta(delta) {
+                        let r = rc.to_string();
+                        reasoning_buf.push_str(&r);
+                        on_event(StreamEvent::ReasoningDelta(r));
+                    }
 
-                        // Tool calls (native OpenAI format)
-                        if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
-                            for tc in tcs {
-                                let idx =
-                                    tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                let entry = tool_acc.entry(idx).or_insert_with(|| {
-                                    let tid = tc
-                                        .get("id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let tname = tc
-                                        .get("function")
-                                        .and_then(|f| f.get("name"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    (tid, tname, String::new())
-                                });
-                                if let Some(args) = tc
-                                    .get("function")
-                                    .and_then(|f| f.get("arguments"))
+                    // Tool calls (native OpenAI format)
+                    if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                        for tc in tcs {
+                            let idx =
+                                tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                            let entry = tool_acc.entry(idx).or_insert_with(|| {
+                                let tid = tc
+                                    .get("id")
                                     .and_then(|v| v.as_str())
-                                {
-                                    entry.2.push_str(args);
-                                    log::info!(
-                                        "[GATE] ToolCallProgress idx={idx} id={} name={} args_len={}",
-                                        entry.0,
-                                        entry.1,
-                                        entry.2.len()
-                                    );
-                                    on_event(StreamEvent::ToolCallProgress {
-                                        index: idx,
-                                        id: entry.0.clone(),
-                                        name: entry.1.clone(),
-                                        args_so_far: entry.2.clone(),
-                                    });
-                                }
+                                    .unwrap_or("")
+                                    .to_string();
+                                let tname = tc
+                                    .get("function")
+                                    .and_then(|f| f.get("name"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                (tid, tname, String::new())
+                            });
+                            if let Some(args) = tc
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|v| v.as_str())
+                            {
+                                entry.2.push_str(args);
+                                log::info!(
+                                    "[GATE] ToolCallProgress idx={idx} id={} name={} args_len={}",
+                                    entry.0,
+                                    entry.1,
+                                    entry.2.len()
+                                );
+                                on_event(StreamEvent::ToolCallProgress {
+                                    index: idx,
+                                    id: entry.0.clone(),
+                                    name: entry.1.clone(),
+                                    args_so_far: entry.2.clone(),
+                                });
                             }
                         }
                     }
                 }
             }
+        }
 
-            // Usage info (may appear in any chunk)
-            if let Some(u) = ev.get("usage") {
-                let pt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let ct = u
-                    .get("completion_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-                let (hit, miss) = match provider.cache_field {
-                    CacheTokenField::PromptCacheHitTokens => (
-                        u.get("prompt_cache_hit_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
-                        u.get("prompt_cache_miss_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
-                    ),
-                    CacheTokenField::PromptDetailsCached => {
-                        let cached = u
-                            .get("prompt_tokens_details")
-                            .and_then(|d| d.get("cached_tokens"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
-                        (cached, 0)
-                    }
-                    CacheTokenField::UsageCachedTokens => {
-                        let cached =
-                            u.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                        (cached, 0)
-                    }
-                    CacheTokenField::None => (0, 0),
-                };
-                let rt = u
-                    .get("completion_tokens_details")
-                    .and_then(|d| d.get("reasoning_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-                usage_info = Some(UsageInfo {
-                    prompt_tokens: pt,
-                    completion_tokens: ct,
-                    total_tokens: pt + ct,
-                    prompt_cache_hit_tokens: hit,
-                    prompt_cache_miss_tokens: miss,
-                    reasoning_tokens: rt,
-                });
-                // Emit real-time usage update so InfoBar can show live cache-hit stats
-                on_event(StreamEvent::UsageUpdate(usage_info.clone().unwrap()));
-            }
+        // Usage info (may appear in any chunk)
+        if let Some(u) = ev.get("usage") {
+            let pt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let ct = u
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let (hit, miss) = match provider.cache_field {
+                CacheTokenField::PromptCacheHitTokens => (
+                    u.get("prompt_cache_hit_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    u.get("prompt_cache_miss_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                ),
+                CacheTokenField::PromptDetailsCached => {
+                    let cached = u
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    (cached, 0)
+                }
+                CacheTokenField::UsageCachedTokens => {
+                    let cached =
+                        u.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    (cached, 0)
+                }
+                CacheTokenField::None => (0, 0),
+            };
+            let rt = u
+                .get("completion_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            usage_info = Some(UsageInfo {
+                prompt_tokens: pt,
+                completion_tokens: ct,
+                total_tokens: pt + ct,
+                prompt_cache_hit_tokens: hit,
+                prompt_cache_miss_tokens: miss,
+                reasoning_tokens: rt,
+            });
+            // Emit real-time usage update so InfoBar can show live cache-hit stats
+            on_event(StreamEvent::UsageUpdate(usage_info.clone().unwrap()));
+        }
     }
 
     // Build final message from accumulated content
@@ -745,11 +738,12 @@ pub fn chat_sync_openai(
             .header("Authorization", format!("Bearer {}", provider.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
-            .send()
-    ).map_err(|e| format!("compact request failed: {e}"))?;
+            .send(),
+    )
+    .map_err(|e| format!("compact request failed: {e}"))?;
 
-    let json: serde_json::Value = block_on(resp.json())
-        .map_err(|e| format!("compact parse failed: {e}"))?;
+    let json: serde_json::Value =
+        block_on(resp.json()).map_err(|e| format!("compact parse failed: {e}"))?;
 
     json["choices"][0]["message"]["content"]
         .as_str()

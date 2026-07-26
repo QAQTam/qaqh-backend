@@ -1,0 +1,35 @@
+{
+  "formatVersion": 2,
+  "installationId": "install-123e4567-e89b-12d3-a456-426614174000",
+  "releaseId": "20260727.1",
+  "channel": "local",
+  "components": {
+    "runtime": {
+      "current": "electron-43.2.0",
+      "previous": null,
+      "version": "43.2.0",
+      "health": "healthy"
+    },
+    "frontend": {
+      "current": "frontend-a123",
+      "previous": "frontend-a122",
+      "version": "0.9.0",
+      "protocol": 1,
+      "health": "healthy"
+    },
+    "backend": {
+      "current": "backend-c789",
+      "previous": "backend-c788",
+      "version": "0.9.0",
+      "protocol": 1,
+      "health": "healthy"
+    },
+    "updater": {
+      "current": "updater-1",
+      "previous": null,
+      "version": "0.1.0",
+      "health": "healthy"
+    }
+  },
+  "lastCommittedOperation": "op-20260727-001"
+}

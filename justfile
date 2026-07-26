@@ -26,34 +26,91 @@ build-companion:
 build-installer:
     cargo build --release -p deepx-installer
 
+# 编译组件更新器（release）
+build-updater:
+    cargo build --release -p deepx-updater
+
 # 构建前端（typecheck + vite，不含 daemon）
 build-desktop:
     Set-Location apps/desktop; pnpm build
 
 # ── 打包 ────────────────────────────────────────────
 
-# 打包桌面 Electron App（daemon 编译 + 侧车注入 + electron-builder）
+# 打包桌面 Electron 运行目录（仅完整安装包使用）
 [windows]
 package-desktop: build-daemon
     Set-Location apps/desktop; node scripts/prepare-daemon.mjs --backend-root ../..
     Set-Location apps/desktop; pnpm build
     Set-Location apps/desktop; pnpm exec electron-builder --dir --win --x64 --publish never
 
-# 生成安装器 SFX（安装器编译 + 收集产物 + 拼接）
+# 只构建前端 ASAR，不构建 Electron Runtime 或 Rust 后端
 [windows]
-package-installer: build-installer
-    ./apps/installer/scripts/collect-payload.ps1
-    ./apps/installer/scripts/finalize.ps1
+pack-frontend: build-desktop
+    Set-Location apps/desktop; node scripts/pack-frontend.mjs
 
-# 完整流水线
+# 生成完整安装包 EXE（首次安装、修复或完整升级）
 [windows]
-package: package-desktop package-installer
+package: package-desktop build-installer build-updater
+    ./apps/installer/scripts/collect-payload.ps1 -Kind full
+    ./apps/installer/scripts/finalize.ps1 -Kind full
 
-# SFX 快速拼接（payload 已就位，跳过编译）
+# 生成仅前端的本地更新源（catalog.json + Bundle ZIP）
 [windows]
-sfx-quick:
-    ./apps/installer/scripts/collect-payload.ps1
-    ./apps/installer/scripts/finalize.ps1
+package-update-frontend: pack-frontend build-installer
+    ./apps/installer/scripts/collect-payload.ps1 -Kind frontend
+    ./apps/installer/scripts/make-update-source.ps1 -Kinds frontend
+
+# 生成仅后端的本地更新源（catalog.json + Bundle ZIP）
+[windows]
+package-update-backend: build-daemon build-installer
+    Set-Location apps/desktop; node scripts/prepare-daemon.mjs --backend-root ../..
+    ./apps/installer/scripts/collect-payload.ps1 -Kind backend
+    ./apps/installer/scripts/make-update-source.ps1 -Kinds backend
+
+# 生成智能本地更新源（Full + Frontend + Backend）
+[windows]
+package-update: package-desktop build-installer build-updater
+    ./apps/installer/scripts/collect-payload.ps1 -Kind full
+    ./apps/installer/scripts/collect-payload.ps1 -Kind frontend -FrontendAsarPath apps/desktop/release/win-unpacked/resources/app.asar
+    ./apps/installer/scripts/collect-payload.ps1 -Kind backend
+    ./apps/installer/scripts/make-update-source.ps1 -Kinds full,frontend,backend
+
+# ── 旧打包命令（可调用，但不在 just --list 中显示）────
+
+[private]
+[windows]
+package-frontend: pack-frontend build-installer
+    ./apps/installer/scripts/collect-payload.ps1 -Kind frontend
+    ./apps/installer/scripts/finalize.ps1 -Kind frontend
+
+[private]
+[windows]
+package-backend: build-daemon build-installer
+    Set-Location apps/desktop; node scripts/prepare-daemon.mjs --backend-root ../..
+    ./apps/installer/scripts/collect-payload.ps1 -Kind backend
+    ./apps/installer/scripts/finalize.ps1 -Kind backend
+
+[private]
+[windows]
+package-full: package
+
+[private]
+[windows]
+package-installer: package
+
+[private]
+[windows]
+package-update-full: package
+    ./apps/installer/scripts/make-update-source.ps1 -Kinds full
+
+[private]
+[windows]
+package-update-all: package-update
+
+# SFX 快速拼接（staging 已就位，跳过构建和收集）
+[windows]
+sfx-quick kind="full":
+    ./apps/installer/scripts/finalize.ps1 -Kind {{kind}}
 
 # ── 开发 ────────────────────────────────────────────
 
@@ -101,15 +158,16 @@ clippy:
 [windows]
 status:
     @Write-Output "=== Rust binaries ==="
-    @"if (Test-Path 'target/release/deepx-daemon.exe') { '  ✓ deepx-daemon.exe' } else { '  ✗ deepx-daemon.exe' }"
-    @"if (Test-Path 'target/release/deepx-companion.exe') { '  ✓ deepx-companion.exe' } else { '  ✗ deepx-companion.exe' }"
-    @"if (Test-Path 'target/release/DeepXInstaller.exe') { '  ✓ DeepXInstaller.exe' } else { '  ✗ DeepXInstaller.exe' }"
-    @"if (Test-Path 'target/release/deepx-uninstaller.exe') { '  ✓ deepx-uninstaller.exe' } else { '  ✗ deepx-uninstaller.exe' }"
+    @if (Test-Path 'target/release/deepx-daemon.exe') { '  ✓ deepx-daemon.exe' } else { '  ✗ deepx-daemon.exe' }
+    @if (Test-Path 'target/release/deepx-companion.exe') { '  ✓ deepx-companion.exe' } else { '  ✗ deepx-companion.exe' }
+    @if (Test-Path 'target/release/DeepXInstaller.exe') { '  ✓ DeepXInstaller.exe' } else { '  ✗ DeepXInstaller.exe' }
+    @if (Test-Path 'target/release/deepx-uninstaller.exe') { '  ✓ deepx-uninstaller.exe' } else { '  ✗ deepx-uninstaller.exe' }
+    @if (Test-Path 'target/release/deepx-updater.exe') { '  ✓ deepx-updater.exe' } else { '  ✗ deepx-updater.exe' }
     @Write-Output "=== Desktop ==="
-    @"if (Test-Path 'apps/desktop/out/main/main.js') { '  ✓ main.js' } else { '  ✗ main.js' }"
-    @"if (Test-Path 'apps/desktop/out/renderer/index.html') { '  ✓ renderer' } else { '  ✗ renderer' }"
-    @Write-Output "=== Payload ==="
-    @"if (Test-Path 'apps/installer/payload/config/default.toml') { '  ✓ config' } else { '  ✗ config' }"
+    @if (Test-Path 'apps/desktop/out/main/main.js') { '  ✓ main.js' } else { '  ✗ main.js' }
+    @if (Test-Path 'apps/desktop/out/renderer/index.html') { '  ✓ renderer' } else { '  ✗ renderer' }
+    @Write-Output "=== Packages ==="
+    @if (Test-Path 'packages') { Get-ChildItem 'packages' -Force | ForEach-Object { "  ✓ $($_.Name)" } } else { '  ✗ no packages yet' }
 
 # 清理
 [windows]
@@ -118,7 +176,9 @@ clean:
     @"Remove-Item -Recurse -Force 'apps/desktop/out' -ErrorAction SilentlyContinue"
     @"Remove-Item -Recurse -Force 'apps/desktop/release' -ErrorAction SilentlyContinue"
     @"Remove-Item -Recurse -Force 'apps/desktop/build/sidecar' -ErrorAction SilentlyContinue"
+    @"Remove-Item -Recurse -Force 'packages' -ErrorAction SilentlyContinue"
     @"Remove-Item -Recurse -Force 'apps/installer/dist' -ErrorAction SilentlyContinue"
+    @"Remove-Item -Recurse -Force 'apps/installer/staging' -ErrorAction SilentlyContinue"
     @"Remove-Item -Recurse -Force 'apps/installer/payload/desktop' -ErrorAction SilentlyContinue"
     @Write-Output "Clean done."
 
@@ -152,5 +212,5 @@ package:
 clean:
     cargo clean
     rm -rf apps/desktop/out apps/desktop/release apps/desktop/build/sidecar
-    rm -rf apps/installer/dist apps/installer/payload/desktop
+    rm -rf packages apps/installer/dist apps/installer/staging apps/installer/payload/desktop
     @echo Clean done.

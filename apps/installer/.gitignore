@@ -1,13 +1,20 @@
-# 构建产物
-target/
+# 最终安装包与本地更新源
 dist/
 
-# payload 中由脚本生成的子目录（模板 config 除外，需入库）
-payload/desktop/
-payload/daemon/
-payload/gate/
-payload/companion/
-payload/deepx-uninstaller.exe
+# collect-payload.ps1 生成的 Bundle、latest 指针和验证数据
+staging/
+
+# 安装/更新集成测试生成的临时安装目录
+.verify-install/
+
+# Cargo 在独立构建此 crate 时生成的产物
+target/
+
+# 旧打包流程的 payload 收集区；只保留可选的默认配置模板
+payload/*
+!payload/config/
+payload/config/*
+!payload/config/default.toml
 
 # 系统文件
 .DS_Store

@@ -1,0 +1,76 @@
+{
+  "formatVersion": 1,
+  "releaseId": "20260727.1",
+  "channel": "local",
+  "publishedAt": "2026-07-27T00:00:00Z",
+  "components": {
+    "runtime": {
+      "buildId": "electron-43.2.0",
+      "version": "43.2.0"
+    },
+    "frontend": {
+      "buildId": "frontend-a123",
+      "version": "0.9.0",
+      "controlProtocol": 1
+    },
+    "backend": {
+      "buildId": "backend-c789",
+      "version": "0.9.0",
+      "controlProtocol": 1
+    }
+  },
+  "artifacts": [
+    {
+      "id": "frontend-a123",
+      "kind": "frontend",
+      "strategy": "component-full",
+      "targets": {
+        "frontend": "frontend-a123"
+      },
+      "requires": {
+        "runtime": "electron-43.2.0",
+        "controlProtocol": 1
+      },
+      "restartPolicy": "electron",
+      "payload": {
+        "path": "bundles/frontend-a123.zip",
+        "size": 14354841,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "id": "backend-c789",
+      "kind": "backend",
+      "strategy": "component-full",
+      "targets": {
+        "backend": "backend-c789"
+      },
+      "requires": {
+        "controlProtocol": 1
+      },
+      "restartPolicy": "daemon",
+      "payload": {
+        "path": "bundles/backend-c789.zip",
+        "size": 14837350,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "id": "full-20260727.1",
+      "kind": "full",
+      "strategy": "component-full",
+      "targets": {
+        "runtime": "electron-43.2.0",
+        "frontend": "frontend-a123",
+        "backend": "backend-c789"
+      },
+      "requires": {},
+      "restartPolicy": "full",
+      "payload": {
+        "path": "bundles/full-20260727.1.zip",
+        "size": 175374336,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    }
+  ]
+}

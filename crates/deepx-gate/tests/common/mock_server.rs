@@ -120,7 +120,7 @@ fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk]) {
                     sse.push('\n');
                 }
             }
-            SseChunk::Delay(_) => {}
+            SseChunk::Delay(delay) => thread::sleep(*delay),
             SseChunk::HttpError(status, body_val) => {
                 error_response = Some((*status, body_val.to_string()));
                 break;
@@ -166,8 +166,6 @@ fn run_server(
         }
         *last_body.lock().unwrap() = Some(body);
         request_count.fetch_add(1, Ordering::SeqCst);
-
-        let url = req.url().to_string();
 
         // Get the scenario for this request
         let scenario = {

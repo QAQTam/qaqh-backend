@@ -1,6 +1,6 @@
-import { join } from "node:path";
-import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
+import { execFile, spawn } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { DaemonControlClient } from "./controlClient";
 import type { ConfirmDialogOptions, OpenDialogOptions, UpdateInfo } from "./types";
@@ -9,6 +9,12 @@ let mainWindow: BrowserWindow | undefined;
 let quitting = false;
 let petProcess: ReturnType<typeof spawn> | undefined;
 let petEnabled = false;
+let lastPendingOperation = "";
+let updatePoll: ReturnType<typeof setInterval> | undefined;
+let resolveInitialRenderer!: () => void;
+const initialRendererReady = new Promise<void>(resolveReady => {
+  resolveInitialRenderer = resolveReady;
+});
 
 function getClawdPath(): string {
   // 1. 硬编码测试路径（临时，后续打包时去掉）
@@ -96,12 +102,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     show: false,
-    titleBarStyle: "hidden",
-    titleBarOverlay: {
-      color: "#0d1117",
-      symbolColor: "#c9d1d9",
-      height: 36,
-    },
+    frame: false,
     webPreferences: {
       preload: join(__dirname, "../preload/preload.cjs"),
       contextIsolation: true,
@@ -110,9 +111,17 @@ function createWindow(): void {
       webSecurity: true,
     },
   });
+  const publishMaximizedState = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("window:maximized-changed", mainWindow.isMaximized());
+    }
+  };
+  mainWindow.on("maximize", publishMaximizedState);
+  mainWindow.on("unmaximize", publishMaximizedState);
   mainWindow.webContents.on("preload-error", (_event, preloadPath, error) => {
     console.error(`Failed to load preload ${preloadPath}:`, error);
   });
+  mainWindow.webContents.once("did-finish-load", () => resolveInitialRenderer());
   if (smokeMode) {
     mainWindow.webContents.once("did-finish-load", async () => {
       const bridgeReady = await mainWindow?.webContents.executeJavaScript(
@@ -153,6 +162,22 @@ function registerIpc(): void {
   ipcMain.handle("backend:attach", (_event, seed: unknown) => backend.attach(requireSeed(seed)));
   ipcMain.handle("backend:detach", (_event, seed: unknown) => backend.detach(requireSeed(seed)));
   ipcMain.handle("backend:status", () => backend.currentStatus());
+  ipcMain.on("desktop:window-minimize", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+  });
+  ipcMain.handle("desktop:window-toggle-maximize", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    const shouldMaximize = !mainWindow.isMaximized();
+    if (shouldMaximize) mainWindow.maximize();
+    else mainWindow.unmaximize();
+    return shouldMaximize;
+  });
+  ipcMain.handle("desktop:window-is-maximized", () => (
+    Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized())
+  ));
+  ipcMain.on("desktop:window-close", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+  });
   ipcMain.handle("desktop:toggle-pet", async () => {
     console.log("[main] toggle-pet called, petProcess:", !!petProcess);
     try {
@@ -202,6 +227,47 @@ function registerIpc(): void {
     if (error) throw new Error(error);
   });
   ipcMain.handle("desktop:check-update", async () => checkForUpdates());
+  ipcMain.handle("desktop:stage-update", async (_event, source: unknown) => {
+    if (typeof source !== "string" || !source) throw new Error("update source directory is required");
+    await runUpdater(["stage", source, installRoot()]);
+    return checkForUpdates();
+  });
+  ipcMain.handle("desktop:apply-update", async (_event, operationPath: unknown) => {
+    if (typeof operationPath !== "string" || !isSafeOperationPath(operationPath)) {
+      throw new Error("invalid staged update operation");
+    }
+    const operation = JSON.parse(await readFile(operationPath, "utf8")) as {
+      plan?: { actions?: string[] };
+    };
+    const actions = operation.plan?.actions ?? [];
+    const backendOnly = actions.includes("applyBackend")
+      && !actions.includes("restartElectron")
+      && !actions.includes("applyFull");
+    if (backendOnly) {
+      if (!await backend.prepareBackendUpdate()) {
+        throw new Error("backend is busy; the update remains staged");
+      }
+      try {
+        await runUpdater(["apply-staged", operationPath, installRoot()]);
+        await backend.resumeAfterBackendUpdate();
+      } catch (error) {
+        try {
+          await runUpdater(["rollback-staged", operationPath, installRoot()]);
+          await backend.resumeAfterBackendUpdate();
+        } catch (rollbackError) {
+          throw new Error(`backend update failed (${String(error)}); rollback also failed (${String(rollbackError)})`);
+        }
+        throw error;
+      }
+      return { restarting: false };
+    }
+
+    await runUpdater(["handoff", operationPath, installRoot(), String(process.pid), process.execPath]);
+    await backend.close();
+    quitting = true;
+    app.quit();
+    return { restarting: true };
+  });
 }
 
 function sendToRenderer(channel: string, payload: unknown): void {
@@ -217,65 +283,115 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// ── Auto-update ────────────────────────────────────────
-
-function frontendUpdateUrl(): string {
-  try {
-    const manifestPath = join(process.resourcesPath, "daemon-manifest.json");
-    const raw = require("fs").readFileSync(manifestPath, "utf-8");
-    const manifest = JSON.parse(raw) as { frontend_version_url?: string };
-    if (manifest.frontend_version_url) return manifest.frontend_version_url;
-  } catch { /* use fallback */ }
-  return "https://deepx.example.com/updates/frontend-version.json";
-}
+// ── Installer/updater handoff ──────────────────────────
 
 async function checkForUpdates(): Promise<UpdateInfo | null> {
-  const url = frontendUpdateUrl();
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
-    const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!response.ok) return null;
-    const data = await response.json() as { version?: string; download_url?: string; notes?: string };
-    if (!data.version) return null;
-    const current = app.getVersion();
-    if (compareVersions(data.version, current) <= 0) return null;
+    const data = JSON.parse(await readFile(
+      join(installRoot(), ".deepx-update", "pending.json"),
+      "utf8",
+    )) as {
+      releaseId?: string;
+      operationPath?: string;
+      operationId?: string;
+      mode?: UpdateInfo["mode"];
+      artifacts?: string[];
+      actions?: string[];
+    };
+    if (!data.releaseId || !data.operationPath || !isSafeOperationPath(data.operationPath)) return null;
     return {
-      version: data.version,
-      downloadUrl: data.download_url || "",
-      releaseNotes: data.notes,
+      version: data.releaseId,
+      operationPath: data.operationPath,
+      operationId: data.operationId,
+      mode: data.mode,
+      artifacts: data.artifacts,
+      actions: data.actions,
     };
   } catch {
     return null;
   }
 }
 
-function compareVersions(a: string, b: string): number {
-  const pa = a.replace(/^v/, "").split(".").map(Number);
-  const pb = b.replace(/^v/, "").split(".").map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const diff = (pa[i] || 0) - (pb[i] || 0);
-    if (diff !== 0) return diff;
+function installRoot(): string {
+  return dirname(process.execPath);
+}
+
+function updaterPath(): string {
+  return join(installRoot(), process.platform === "win32" ? "deepx-updater.exe" : "deepx-updater");
+}
+
+function isSafeOperationPath(value: string): boolean {
+  const stagingRoot = resolve(installRoot(), ".deepx-update", "staging") + sep;
+  const operation = resolve(value);
+  return operation.startsWith(stagingRoot) && operation.endsWith(`${sep}operation.json`);
+}
+
+function runUpdater(args: string[]): Promise<string> {
+  return new Promise((resolveRun, reject) => {
+    execFile(updaterPath(), args, { windowsHide: true }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr.trim() || error.message));
+        return;
+      }
+      resolveRun(stdout);
+    });
+  });
+}
+
+async function publishPendingUpdate(): Promise<void> {
+  const update = await checkForUpdates();
+  if (!update?.operationId || update.operationId === lastPendingOperation) return;
+  lastPendingOperation = update.operationId;
+  sendToRenderer("update:available", update);
+}
+
+function commandArgument(name: string): string | undefined {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+async function acknowledgeUpdateHealth(backendReady: Promise<void>): Promise<void> {
+  const operationId = commandArgument("--deepx-update-operation");
+  if (!operationId || !/^[A-Za-z0-9._+-]{1,240}$/.test(operationId)) return;
+  try {
+    await Promise.all([initialRendererReady, backendReady]);
+    const healthDir = join(installRoot(), ".deepx-update", "health");
+    await mkdir(healthDir, { recursive: true });
+    await writeFile(join(healthDir, `${operationId}.ok`), "healthy\n", "utf8");
+  } catch (error) {
+    console.error("update health confirmation failed", error);
   }
-  return 0;
+}
+
+async function publishRollbackNotice(): Promise<void> {
+  const operationId = commandArgument("--deepx-update-rollback");
+  if (!operationId) return;
+  await initialRendererReady;
+  sendToRenderer("update:failed", {
+    operationId,
+    message: "The updated application did not become healthy; the previous version was restored.",
+  });
 }
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   registerIpc();
   createWindow();
-  void backend.connect().catch(() => {});
-  // Production: auto-check for updates on startup
+  const backendReady = backend.connect();
+  void backendReady.catch(() => {});
+  void acknowledgeUpdateHealth(backendReady);
+  void publishRollbackNotice();
+  // Installer/updater writes a durable pending marker. Polling also covers an
+  // external installer pushing an update while DeepX is already running.
   if (!smokeMode && app.isPackaged) {
-    void checkForUpdates().then(update => {
-      if (update) sendToRenderer("update:available", update);
-    });
+    void publishPendingUpdate();
+    updatePoll = setInterval(() => void publishPendingUpdate(), 2_000);
   }
   // Smoke mode validates that Electron can create the secured renderer and start
   // the backend connection path. Reconnection is intentionally unbounded in the
   // product, so the smoke process needs its own deterministic deadline.
   app.on("will-quit", () => {
+    if (updatePoll) clearInterval(updatePoll);
     killPet();
   });
   app.on("activate", () => {
