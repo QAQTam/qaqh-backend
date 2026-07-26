@@ -7,6 +7,7 @@ import SettingsView, { type ThemeMode } from "./components/SettingsView";
 import SkillsView from "./components/SkillsView";
 import StartupView from "./components/StartupView";
 import { ToastContainer, createToastCtrl } from "./components/Toast";
+import { setReplaying, isReplaying } from "./runtime/replayState";
 import AppShell from "./components/shell/AppShell";
 import TaskSidebar from "./components/shell/TaskSidebar";
 import { createI18n, I18nCtx, type Lang } from "./i18n";
@@ -129,7 +130,11 @@ export default function App() {
   }
 
   async function handleAgentError(entry: SessionEntry, message: string) {
-    toastCtrl.push(message, "error");
+    // Suppress toast during session restore replays — the error already happened
+    // in the past and was shown then. We only toast fresh (live) errors.
+    if (!isReplaying()) {
+      toastCtrl.push(message, "error");
+    }
     const agentDead = /(exited|died|broken.pipe|killed|connection.*lost|agent.*(dead|gone|stopped))/i.test(message);
     if (!agentDead) return;
     const seed = entry.state().seed;
@@ -200,6 +205,9 @@ export default function App() {
   async function resumeSession(seed: string) {
     const requestToken = ++resumeRequest;
     sessionReplay.begin(seed);
+    toastCtrl.clear();
+    // Suppress error toasts during replay — only fresh errors should toast.
+    setReplaying(true);
     // Swap to the locally persisted transcript immediately. Agent startup and
     // replay may take seconds on a cold session and must not block navigation.
     const cachedEntry = registry.ensure(seed);
@@ -219,7 +227,8 @@ export default function App() {
         }
       });
       sessionReplay.complete(seed, replayed, event => handleAgentEvent(entry!, event));
-      if (requestToken !== resumeRequest) return;
+      setReplaying(false);
+      if (requestToken !== resumeRequest) { setReplaying(false); return; }
       const currentSeed = entry.state().seed;
       localStorage.setItem(LS_KEY, currentSeed);
       setActiveSeed(currentSeed);
@@ -229,7 +238,8 @@ export default function App() {
     } catch (error) {
       if (entry) sessionReplay.abort(seed, event => handleAgentEvent(entry!, event));
       else sessionReplay.abort(seed, () => {});
-      if (requestToken !== resumeRequest) return;
+      setReplaying(false);
+      if (requestToken !== resumeRequest) { setReplaying(false); return; }
       console.error("[App] resumeSession error", error);
       if (!hasRestorableTranscript(entry?.state())) {
         setHasChosenSession(false);

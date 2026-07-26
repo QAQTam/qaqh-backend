@@ -17,6 +17,7 @@ export interface ToastCtrl {
   toasts: () => ToastItem[];
   push: (msg: string, type: ToastItem["type"], sticky?: boolean) => void;
   dismiss: (id: number) => void;
+  clear: () => void;
 }
 
 export function createToastCtrl(): ToastCtrl {
@@ -37,7 +38,11 @@ export function createToastCtrl(): ToastCtrl {
     setToasts(prev => prev.filter(t => t.id !== id));
   }
 
-  return { toasts, push, dismiss };
+  function clear() {
+    setToasts([]);
+  }
+
+  return { toasts, push, dismiss, clear };
 }
 
 

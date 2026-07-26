@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { DaemonControlClient } from "./controlClient";
 import type { ConfirmDialogOptions, OpenDialogOptions, UpdateInfo } from "./types";
 
@@ -96,6 +96,12 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     show: false,
+    titleBarStyle: "hidden",
+    titleBarOverlay: {
+      color: "#0d1117",
+      symbolColor: "#c9d1d9",
+      height: 36,
+    },
     webPreferences: {
       preload: join(__dirname, "../preload/preload.cjs"),
       contextIsolation: true,
@@ -256,6 +262,7 @@ function compareVersions(a: string, b: string): number {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   registerIpc();
   createWindow();
   void backend.connect().catch(() => {});

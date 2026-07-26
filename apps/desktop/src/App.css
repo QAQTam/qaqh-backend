@@ -3,6 +3,28 @@
 /* ── Full-height chain: ensure every ancestor passes 100% down ── */
 html, body, #root { height: 100%; margin: 0; overflow: hidden; }
 
+/* ── App Shell (Electron titleBarOverlay) ── */
+.deepx-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.shell-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+.titlebar-drag {
+  -webkit-app-region: drag;
+  app-region: drag;
+  height: 36px;
+  flex-shrink: 0;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
 /* ── Bundled Fonts ── */
 @font-face {
   font-family: "Cascadia Code";
