@@ -4,7 +4,12 @@ import type { TaskInfo } from "../../lib/types";
 import { workspaceDisplayPath } from "../../lib/workspacePath";
 import { useI18n } from "../../i18n";
 import { sessionUsage } from "../../store/sessionSelectors";
-import RollingNumber, { formatCompactNumber } from "./RollingNumber";
+import RollingNumber from "./RollingNumber";
+
+/** Full number with locale thousands separators — no compact abbreviations. */
+function formatRawNumber(value: number): string {
+  return Math.round(value).toLocaleString();
+}
 
 export default function InfoPopover(props: {
   session: RawSessionState;
@@ -40,7 +45,7 @@ export default function InfoPopover(props: {
       <div class="info-context">
         <div class="info-context-label">
           <span>{t().environment.context}</span>
-          <strong><RollingNumber value={usage().contextTokens} /> / {formatCompactNumber(usage().contextLimit)}</strong>
+          <strong><RollingNumber value={usage().contextTokens} format={formatRawNumber} /> / {formatRawNumber(usage().contextLimit)}</strong>
         </div>
         <div class="info-progress" aria-label={t().environment.context}>
           <span style={{ width: `${contextPct()}%` }} />
@@ -55,10 +60,10 @@ export default function InfoPopover(props: {
         fallback={<div class="environment-empty">{t().environment.waitingUsage}</div>}
       >
         <div class="info-token-grid" aria-live="polite">
-          <div><span>{t().environment.inputTokens}</span><strong><RollingNumber value={usage().promptTokens} animate={false} /></strong></div>
-          <div><span>{t().environment.outputTokens}</span><strong><RollingNumber value={usage().completionTokens} animate={false} /></strong></div>
-          <div><span>{t().environment.reasoningTokens}</span><strong><RollingNumber value={usage().reasoningTokens} animate={false} /></strong></div>
-          <div><span>{t().environment.totalTokens}</span><strong><RollingNumber value={usage().requestTotalTokens} animate={false} /></strong></div>
+          <div><span>{t().environment.inputTokens}</span><strong><RollingNumber value={usage().promptTokens} format={formatRawNumber} animate={false} /></strong></div>
+          <div><span>{t().environment.outputTokens}</span><strong><RollingNumber value={usage().completionTokens} format={formatRawNumber} animate={false} /></strong></div>
+          <div><span>{t().environment.reasoningTokens}</span><strong><RollingNumber value={usage().reasoningTokens} format={formatRawNumber} animate={false} /></strong></div>
+          <div><span>{t().environment.totalTokens}</span><strong><RollingNumber value={usage().requestTotalTokens} format={formatRawNumber} animate={false} /></strong></div>
         </div>
         <Show when={usage().cacheAvailable}>
           <div class="info-cache">
@@ -67,7 +72,7 @@ export default function InfoPopover(props: {
               <strong>{`${usage().cacheHitPct!.toFixed(1)}%`}</strong>
             </div>
             <div class="info-cache-detail">
-              <RollingNumber value={usage().cacheHit} animate={false} /> {t().environment.hit} · <RollingNumber value={usage().cacheMiss} animate={false} /> {t().environment.miss}
+              <RollingNumber value={usage().cacheHit} format={formatRawNumber} animate={false} /> {t().environment.hit} · <RollingNumber value={usage().cacheMiss} format={formatRawNumber} animate={false} /> {t().environment.miss}
             </div>
             <div class="info-progress info-cache-progress">
               <span style={{ width: `${usage().cacheHitPct ?? 0}%` }} />
@@ -82,10 +87,10 @@ export default function InfoPopover(props: {
         </Show>
       </div>
       <div class="info-token-grid" aria-live="polite">
-        <div><span>{t().environment.inputTokens}</span><strong><RollingNumber value={usage().totals.prompt_tokens} /></strong></div>
-        <div><span>{t().environment.outputTokens}</span><strong><RollingNumber value={usage().totals.completion_tokens} /></strong></div>
-        <div><span>{t().environment.reasoningTokens}</span><strong><RollingNumber value={usage().totals.reasoning_tokens} /></strong></div>
-        <div><span>{t().environment.totalTokens}</span><strong><RollingNumber value={usage().totals.total_tokens} /></strong></div>
+        <div><span>{t().environment.inputTokens}</span><strong><RollingNumber value={usage().totals.prompt_tokens} format={formatRawNumber} /></strong></div>
+        <div><span>{t().environment.outputTokens}</span><strong><RollingNumber value={usage().totals.completion_tokens} format={formatRawNumber} /></strong></div>
+        <div><span>{t().environment.reasoningTokens}</span><strong><RollingNumber value={usage().totals.reasoning_tokens} format={formatRawNumber} /></strong></div>
+        <div><span>{t().environment.totalTokens}</span><strong><RollingNumber value={usage().totals.total_tokens} format={formatRawNumber} /></strong></div>
       </div>
       <Show when={usage().sessionCacheAvailable}>
         <div class="info-cache">
@@ -94,7 +99,7 @@ export default function InfoPopover(props: {
             <strong>{`${usage().sessionCacheHitPct!.toFixed(1)}%`}</strong>
           </div>
           <div class="info-cache-detail">
-            <RollingNumber value={usage().totals.prompt_cache_hit_tokens} animate={false} /> {t().environment.hit} · <RollingNumber value={usage().totals.prompt_cache_miss_tokens} animate={false} /> {t().environment.miss}
+            <RollingNumber value={usage().totals.prompt_cache_hit_tokens} format={formatRawNumber} animate={false} /> {t().environment.hit} · <RollingNumber value={usage().totals.prompt_cache_miss_tokens} format={formatRawNumber} animate={false} /> {t().environment.miss}
           </div>
           <div class="info-progress info-cache-progress">
             <span style={{ width: `${usage().sessionCacheHitPct ?? 0}%` }} />
