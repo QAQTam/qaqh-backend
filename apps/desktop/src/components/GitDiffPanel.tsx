@@ -99,17 +99,30 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
     }
   }
 
+  let lastPolledRevision = 0;
+  let pollDebounceTimer: number | undefined;
+
   createEffect(
     () => ({ open: props.open, seed: props.seed, revision: props.changeRevision }),
     ({ open, seed, revision }) => {
     if (!open || !seed) return;
+    // Debounce: skip rapid-fire re-triggers from CodeDelta events.
+    // Only poll if revision advanced and we aren't already scheduled.
+    if (revision === lastPolledRevision) return;
+    if (revision !== lastPolledRevision) {
+      if (typeof revision === "number") lastPolledRevision = revision;
+      if (pollDebounceTimer) clearTimeout(pollDebounceTimer);
+      pollDebounceTimer = window.setTimeout(() => {
+        pollDebounceTimer = undefined;
+        void tryRefresh();
+      }, revision ? 500 : 0);
+    }
+    if (pollHandle) { clearTimeout(pollHandle); pollHandle = undefined; }
     pollIntervalMs = 4_000;
-    if (pollHandle) clearTimeout(pollHandle);
-    const timer = window.setTimeout(() => void tryRefresh(), revision ? 280 : 0);
     void loadBranches();
     scheduleNextPoll();
     onCleanup(() => {
-      window.clearTimeout(timer);
+      if (pollDebounceTimer) window.clearTimeout(pollDebounceTimer);
       if (pollHandle) clearTimeout(pollHandle);
     });
   });

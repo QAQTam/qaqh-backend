@@ -447,20 +447,25 @@ async fn handle_connection(
                         }
                     }
                 },
-                Ok(message)=>event_tx.send(message).await.map_err(|_| "control writer stopped".to_string())?,
+                Ok(message)=>{event_tx.send(message).await.ok();}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{
                     let attached=leases.lock().unwrap_or_else(|e|e.into_inner()).attached_for(&client_instance_id,Instant::now());
                     let snapshot_seq=service.events().current_seq();
                     let snapshot=build_snapshot(&service,attached).await?;
-                    priority_tx.send(ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await.map_err(|_|"control writer stopped".to_string())?;
+                    priority_tx.send(ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await.ok();
                     delivered_seq=snapshot_seq;
                 }
                 Err(_)=>break,
             },
-            _=heartbeat.tick()=>priority_tx.send(ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce:service.events().current_seq()}).await.map_err(|_|"control writer stopped".to_string())?,
+            _=heartbeat.tick()=>{
+                // If the writer task has exited the outbound channel is closed;
+                // silently skip the heartbeat — the writer-monitor arm below
+                // will catch the failure and cleanly close the connection.
+                let _ = priority_tx.send(ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce:service.events().current_seq()}).await;
+            }
             changed=daemon_shutdown.changed()=>{
                 if changed.is_err() || *daemon_shutdown.borrow() {
-                    priority_tx.send(ControlServerMessage::Shutdown{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),reason:"daemon_stop_requested".into()}).await.map_err(|_|"control writer stopped".to_string())?;
+                    priority_tx.send(ControlServerMessage::Shutdown{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),reason:"daemon_stop_requested".into()}).await.ok();
                     break;
                 }
             },
