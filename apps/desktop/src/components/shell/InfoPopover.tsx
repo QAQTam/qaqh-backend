@@ -75,24 +75,32 @@ export default function InfoPopover(props: {
           </div>
         </Show>
       </Show>
-      <details class="info-session-summary">
-        <summary>
-          <span>{t().environment.sessionTotal}</span>
-          <strong><RollingNumber value={usage().totals.total_tokens} /></strong>
-        </summary>
-        <div class="info-session-detail">
+      <div class="environment-section-heading">
+        <span>{t().environment.sessionTotal}</span>
+        <Show when={usage().requestCount > 0}>
           <span>{t().environment.requests.replace("{count}", String(usage().requestCount))}</span>
-          <span>{t().environment.inputTokens} <RollingNumber value={usage().totals.prompt_tokens} /></span>
-          <span>{t().environment.outputTokens} <RollingNumber value={usage().totals.completion_tokens} /></span>
-          <span>{t().environment.cache} {usage().sessionCacheHitPct == null ? t().environment.unavailable : `${usage().sessionCacheHitPct!.toFixed(1)}%`}</span>
-          <Show when={usage().sessionCacheAvailable}>
-            <span>{t().environment.cacheSample} <RollingNumber value={usage().sessionCacheSampleTokens} /></span>
-          </Show>
-          <span>{t().environment.cacheCoverage
-            .replace("{reported}", String(usage().cacheReportedRequestCount))
-            .replace("{total}", String(usage().requestCount))}</span>
+        </Show>
+      </div>
+      <div class="info-token-grid" aria-live="polite">
+        <div><span>{t().environment.inputTokens}</span><strong><RollingNumber value={usage().totals.prompt_tokens} /></strong></div>
+        <div><span>{t().environment.outputTokens}</span><strong><RollingNumber value={usage().totals.completion_tokens} /></strong></div>
+        <div><span>{t().environment.reasoningTokens}</span><strong><RollingNumber value={usage().totals.reasoning_tokens} /></strong></div>
+        <div><span>{t().environment.totalTokens}</span><strong><RollingNumber value={usage().totals.total_tokens} /></strong></div>
+      </div>
+      <Show when={usage().sessionCacheAvailable}>
+        <div class="info-cache">
+          <div class="info-cache-label">
+            <span>{t().environment.cache} ({t().environment.sessionTotal})</span>
+            <strong>{`${usage().sessionCacheHitPct!.toFixed(1)}%`}</strong>
+          </div>
+          <div class="info-cache-detail">
+            <RollingNumber value={usage().totals.prompt_cache_hit_tokens} animate={false} /> {t().environment.hit} · <RollingNumber value={usage().totals.prompt_cache_miss_tokens} animate={false} /> {t().environment.miss}
+          </div>
+          <div class="info-progress info-cache-progress">
+            <span style={{ width: `${usage().sessionCacheHitPct ?? 0}%` }} />
+          </div>
         </div>
-      </details>
+      </Show>
       <div
         class="environment-row environment-row-clickable"
         onClick={() => props.onOpenDiff?.()}

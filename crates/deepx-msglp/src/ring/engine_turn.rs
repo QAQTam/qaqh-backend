@@ -736,13 +736,15 @@ impl TurnEngine {
             }
 
             // ── Auto-compact check (gate lap boundary) ──
-            // Use API-reported total_tokens when available, fallback to heuristic.
-            // Runs inline (blocking) — the compact frees context before the gate request.
+            // Use API-reported prompt_tokens (input fill) when available, fallback to
+            // heuristic.  prompt_tokens measures context-window pressure — completion
+            // tokens are output and do not occupy the window.  Runs inline (blocking):
+            // the compact frees context before the next gate request.
             let threshold = ctx.agent.config.auto_compact_threshold;
             if threshold > 0.0 {
                 let total = last_usage
                     .as_ref()
-                    .map(|u| u.total_tokens as u64)
+                    .map(|u| u.prompt_tokens as u64)
                     .unwrap_or_else(|| {
                         let (c, t, tc, tr, ts, sp, _, _) =
                             ctx.agent.msg.compute_context_stats(None);
