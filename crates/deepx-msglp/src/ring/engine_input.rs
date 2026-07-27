@@ -64,6 +64,7 @@ impl InputEngine {
         };
 
         ctx.cancel.clear();
+        ctx.agent.reset_annotation();
         deepx_tools::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
 
         deepx_tools::runtime::set_context(

@@ -697,55 +697,40 @@ impl MessageStore {
                     continue;
                 }
                 v.push(turn.user.clone());
-                let is_last_turn = i == total_turns - 1;
-                let total_steps = turn.steps.len();
-                for (si, step) in turn.steps.iter().enumerate() {
+                let _is_last_turn = i == total_turns - 1;
+                let _total_steps = turn.steps.len();
+                for (_si, step) in turn.steps.iter().enumerate() {
                     v.push(step.assistant.clone());
-                    let is_last_step_of_last_turn = is_last_turn && si == total_steps - 1;
                     for tr in &step.tool_results {
-                        if is_last_step_of_last_turn {
-                            let mut msg = tr.clone();
-                            for block in &mut msg.content {
-                                if let deepx_types::ContentBlock::ToolResult {
-                                    tool_use_id,
-                                    content,
-                                    ..
-                                } = block
-                                {
-                                    let tool_name =
-                                        step.tool_name_for_result(tool_use_id).unwrap_or("");
-                                    let keep_full = tool_name == "read"
-                                        || tool_name == "search"
-                                        || tool_name.starts_with("exec");
-                                    if keep_full {
-                                        *content = truncate_tool_result(tool_name, content);
-                                    } else {
-                                        *content = fold_completed_tool_result(tool_name, content);
-                                    }
+                        let mut msg = tr.clone();
+                        for block in &mut msg.content {
+                            if let deepx_types::ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                ..
+                            } = block
+                            {
+                                let tool_name =
+                                    step.tool_name_for_result(tool_use_id).unwrap_or("");
+                                // Unified rule (same for all steps) — keeps
+                                // the prefix stable across rounds within a turn.
+                                // Reasonix applies truncation at storage time;
+                                // we apply it here consistently regardless of
+                                // step position.
+                                if tool_name == "read" {
+                                    // read self-limits to head 50 + tail 30 lines
+                                    // (~4K chars); pass through unchanged.
+                                } else if tool_name == "search" {
+                                    // search results are structured text; keep
+                                    // as-is — they are bounded by the tool.
+                                } else if tool_name.starts_with("exec") {
+                                    *content = truncate_tool_result(tool_name, content);
+                                } else {
+                                    *content = fold_completed_tool_result(tool_name, content);
                                 }
                             }
-                            v.push(msg);
-                        } else {
-                            let mut folded = tr.clone();
-                            for block in &mut folded.content {
-                                if let deepx_types::ContentBlock::ToolResult {
-                                    tool_use_id,
-                                    content,
-                                    ..
-                                } = block
-                                {
-                                    let tool_name =
-                                        step.tool_name_for_result(tool_use_id).unwrap_or("");
-                                    if tool_name == "read" {
-                                        // read 工具已自限制 head 50 + tail 30 行 (~4K chars)，
-                                        // 无需额外折叠或截断，透传即可。
-                                    } else {
-                                        *content = fold_completed_tool_result(tool_name, content);
-                                    }
-                                }
-                            }
-                            v.push(folded);
                         }
+                        v.push(msg);
                     }
                 }
             }

@@ -18,9 +18,14 @@ pub struct AgentState {
     pub turn_count: u32,
     /// If true, skip all disk persistence (subagent disposable mode).
     pub ephemeral: bool,
-    /// RAG 向量引擎（None = 未启用或初始化失败）
+    /// RAG vector engine (None = not enabled or init failed)
     pub vector: Option<Arc<Mutex<VectorEngine>>>,
     pub skills: SkillContextManager,
+    /// Frozen [Environment] annotation for the current turn.
+    /// Generated once on first build_context() and reused for all
+    /// subsequent rounds within the same turn so the file_state
+    /// prefix stays cache-stable. Reset when a new user turn begins.
+    frozen_annotation: Option<String>,
 }
 
 impl AgentState {
@@ -40,6 +45,7 @@ impl AgentState {
             ephemeral: false,
             vector,
             skills: SkillContextManager::new(Path::new("."), effective_input_tokens),
+            frozen_annotation: None,
         }
     }
 
@@ -119,24 +125,46 @@ impl AgentState {
         agent
     }
 
+    /// Freeze annotations for the current turn so subsequent rounds
+    /// reuse the cached [Environment] block and keep the prefix stable.
+    /// Called from engine_input when a new user turn starts.
+    pub fn reset_annotation(&mut self) {
+        self.frozen_annotation = None;
+    }
+
     pub fn build_context(&mut self) -> Vec<deepx_types::Message> {
-        let mut annotations: Vec<String> = Vec::new();
+        // Freeze annotations at the first gate call of a turn.
+        // file_state changes between rounds within the same turn
+        // (e.g. reading a file adds to the state), and injecting a
+        // changed annotation into the last user message would break
+        // the prefix cache at that position.  Reusing the frozen
+        // snapshot keeps the entire context prefix cache-stable.
         let workspace = deepx_tools::CURRENT_WORKSPACE
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if !workspace.is_empty() && workspace != "." {
-            annotations.push(format!("<workspace_path>{workspace}</workspace_path>"));
-        }
-        let fs = deepx_tools::file_state::summary();
-        if !fs.is_empty() {
-            annotations.push(fs);
-        }
         self.skills.set_workspace(Path::new(&workspace));
         let snapshot = self.skills.snapshot_for_context();
-        if let Some(requested) = snapshot.requested_annotation {
-            annotations.push(requested);
-        }
+
+        let annotations: Vec<String> = if let Some(ref frozen) = self.frozen_annotation {
+            vec![frozen.clone()]
+        } else {
+            let mut parts: Vec<String> = Vec::new();
+            if !workspace.is_empty() && workspace != "." {
+                parts.push(format!("<workspace_path>{workspace}</workspace_path>"));
+            }
+            let fs = deepx_tools::file_state::summary();
+            if !fs.is_empty() {
+                parts.push(fs);
+            }
+            if let Some(requested) = &snapshot.requested_annotation {
+                parts.push(requested.clone());
+            }
+            let text = parts.join("\n");
+            self.frozen_annotation = Some(text.clone());
+            if text.is_empty() { vec![] } else { vec![text] }
+        };
+
         let mut context = self.msg.build_context_for_gate(&annotations);
         // Catalog is now persisted as a system message on session creation.
         // Only inject transiently when the stored messages lack it (first
