@@ -96,7 +96,7 @@ fn git_code_delta(now: u64, file_path: &str, action: &str) -> Option<deepx_proto
 
     let repository = git2::Repository::open(workspace).ok()?;
     match action {
-        "write" | "edit" | "edit_diff" => {
+        "patch" | "write" | "edit" | "edit_diff" => {
             let head_tree = repository.head().ok()?.peel_to_tree().ok()?;
             let mut options = git2::DiffOptions::new();
             options.pathspec(file_path);

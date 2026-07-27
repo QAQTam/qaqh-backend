@@ -241,7 +241,7 @@ impl ToolManager {
                         }
                     }
                 }
-                "edit" | "edit_block" | "write" | "delete" => {
+                "patch" | "edit" | "edit_block" | "write" | "delete" => {
                     for f in &files_affected {
                         if !self.files_written.contains(f) {
                             self.files_written.push(f.clone());

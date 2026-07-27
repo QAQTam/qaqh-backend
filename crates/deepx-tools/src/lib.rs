@@ -188,7 +188,7 @@ pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>>
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 /// Tools blocked in PLAN mode. Keep in sync with permission::categorize_tool.
-pub const PLAN_BLOCKED: &[&str] = &["edit", "edit_block", "write", "delete", "exec", "git"];
+pub const PLAN_BLOCKED: &[&str] = &["patch", "edit", "edit_block", "write", "delete", "exec", "git"];
 
 pub fn set_workspace(path: &str) {
     let mut ws = CURRENT_WORKSPACE.write().unwrap_or_else(|e| e.into_inner());

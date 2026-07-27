@@ -82,7 +82,7 @@ pub fn categorize_tool(name: &str) -> ToolCategory {
         | "process_check" | "process_wait" => ToolCategory::Read,
 
         // ── Write ──
-        "write" | "edit" | "edit_block" | "delete" | "git_add" | "git_commit" | "git_branch"
+        "patch" | "write" | "edit" | "edit_block" | "delete" | "git_add" | "git_commit" | "git_branch"
         | "git_checkout" | "git_merge" | "git_restore" | "plan_create" | "task" => ToolCategory::Write,
 
         // ── Exec ──

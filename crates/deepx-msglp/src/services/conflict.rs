@@ -18,7 +18,7 @@ pub(crate) fn file_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec
     };
 
     match action {
-        "write" | "edit" | "edit_block" | "edit_diff" | "delete" => {
+        "patch" | "write" | "edit" | "edit_block" | "edit_diff" | "delete" => {
             collect_paths(args, &mut paths);
         }
         "move" | "copy" => {
