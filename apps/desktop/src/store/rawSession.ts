@@ -133,6 +133,10 @@ export type RawSessionState = {
     changedFiles: string[];
     /** Increments for every tool-reported write so Git views can refresh promptly. */
     gitRevision: number;
+    /** If true, the cache prefix key changed since last turn. */
+    cachePrefixChanged: boolean;
+    /** Component names that changed (e.g. "system_prompt", "catalog"). */
+    cacheChangeReasons: string[];
   };
   session: {
     ready: boolean;

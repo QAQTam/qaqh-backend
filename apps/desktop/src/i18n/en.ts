@@ -209,6 +209,7 @@ const en = {
     cacheSample: "Cache sample",
     cacheCoverage: "Cache coverage {reported}/{total} requests",
     changes: "Changes",
+    cachePrefix: "Cache Prefix",
     workspace: "Workspace",
     branch: "Branch",
     tasks: "Tasks",

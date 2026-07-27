@@ -211,6 +211,7 @@ const zh: I18nStrings = {
     cacheSample: "缓存样本",
     cacheCoverage: "缓存覆盖 {reported}/{total} 次请求",
     changes: "变更",
+    cachePrefix: "缓存前缀",
     workspace: "工作区",
     branch: "分支",
     tasks: "执行任务",

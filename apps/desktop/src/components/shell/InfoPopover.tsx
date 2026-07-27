@@ -121,6 +121,12 @@ export default function InfoPopover(props: {
           <b class="removed">-{props.session.environment.linesRemoved}</b>
         </span>
       </div>
+      <Show when={props.session.environment.cachePrefixChanged}>
+        <div class="environment-row environment-row-warning" title={`Cache prefix changed: ${props.session.environment.cacheChangeReasons.join(", ")}`}>
+          <span>{t().environment.cachePrefix}</span>
+          <span class="cache-prefix-badge">⚠ {props.session.environment.cacheChangeReasons.join(", ")}</span>
+        </div>
+      </Show>
       <div class="environment-row">
         <span>{t().environment.workspace}</span>
         <span>{props.workspace || t().session.workspaceHint}</span>

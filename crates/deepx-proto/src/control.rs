@@ -266,6 +266,7 @@ mod tests {
                 request_id: Some("r3".into()),
                 code: "request_failed".into(),
                 message: "failed".into(),
+                retry_after_ms: None,
             },
             ControlServerMessage::Shutdown {
                 server_epoch: "epoch".into(),

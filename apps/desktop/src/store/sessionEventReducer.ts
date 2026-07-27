@@ -34,6 +34,8 @@ export function createRawSessionState(seed: string): RawSessionState {
       filesDeleted: 0,
       changedFiles: [],
       gitRevision: 0,
+      cachePrefixChanged: false,
+      cacheChangeReasons: [],
     },
     session: {
       ready: false,
@@ -532,6 +534,7 @@ export function reduceAgentEvent(
       return {
         ...state,
         environment: {
+          ...state.environment,
           linesAdded: state.environment.linesAdded + event.lines_added,
           linesRemoved: state.environment.linesRemoved + event.lines_removed,
           filesCreated: state.environment.filesCreated + event.files_created,
@@ -540,6 +543,15 @@ export function reduceAgentEvent(
             ? [...state.environment.changedFiles, event.file]
             : state.environment.changedFiles,
           gitRevision: state.environment.gitRevision + 1,
+        },
+      };
+    case "cache_diagnostics":
+      return {
+        ...state,
+        environment: {
+          ...state.environment,
+          cachePrefixChanged: event.prefix_changed,
+          cacheChangeReasons: event.change_reasons ?? [],
         },
       };
     case "skills_changed": {
