@@ -54,7 +54,9 @@
   padding: 2px 8px;
   font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--text-muted);
   background: color-mix(in srgb, var(--bg-secondary) 85%, transparent);
   border: 0.5px solid var(--border-card);
@@ -62,6 +64,34 @@
   border-radius: 0 8px 0 6px;
   user-select: none;
   z-index: 1;
+}
+.code-copy-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 3px 6px;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+.code-block-wrapper:hover .code-copy-btn {
+  opacity: 1;
+}
+.code-copy-btn:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--bg-secondary) 85%, transparent);
+}
+.code-copy-btn:active { opacity: 0.7; }
+/* Push language label right when copy button is present */
+.code-copy-btn ~ .code-lang-label {
+  right: 30px;
 }
 .code-block-wrapper pre {
   margin: 0;

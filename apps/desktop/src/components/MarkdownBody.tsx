@@ -139,11 +139,12 @@ function buildRenderer(hi: Awaited<ReturnType<typeof getHi>>) {
       : lang === "hpp" ? "cpp"
       : lang;
     const label = lang ? `<span class="code-lang-label">${lang}</span>` : "";
+    const copyBtn = `<button class="code-copy-btn" aria-label="Copy code" title="Copy code"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>`;
     try {
       const highlighted = hi.codeToHtml(text, { lang: langId, theme });
-      return `<div class="code-block-wrapper">${label}${highlighted}</div>`;
+      return `<div class="code-block-wrapper">${copyBtn}${label}${highlighted}</div>`;
     } catch {
-      return `<div class="code-block-wrapper">${label}<pre><code>${text}</code></pre></div>`;
+      return `<div class="code-block-wrapper">${copyBtn}${label}<pre><code>${text}</code></pre></div>`;
     }
   };
   return renderer;
@@ -429,5 +430,19 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
     })();
   });
 
-  return <div ref={container} class={props.class} />;
+  function onCopyClick(e: MouseEvent) {
+    const btn = (e.target as HTMLElement).closest?.(".code-copy-btn");
+    if (!btn) return;
+    e.preventDefault();
+    const wrapper = btn.closest?.(".code-block-wrapper");
+    if (!wrapper) return;
+    const code = wrapper.querySelector("pre code")?.textContent ?? "";
+    navigator.clipboard.writeText(code).catch(() => {});
+    // Brief visual feedback
+    const original = btn.innerHTML;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#159555" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`;
+    setTimeout(() => { btn.innerHTML = original; }, 1500);
+  }
+
+  return <div ref={container} class={props.class} onClick={onCopyClick} />;
 }
