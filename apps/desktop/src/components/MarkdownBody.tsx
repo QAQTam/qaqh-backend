@@ -138,10 +138,12 @@ function buildRenderer(hi: Awaited<ReturnType<typeof getHi>>) {
       : lang === "h" ? "c"
       : lang === "hpp" ? "cpp"
       : lang;
+    const label = lang ? `<span class="code-lang-label">${lang}</span>` : "";
     try {
-      return hi.codeToHtml(text, { lang: langId, theme });
+      const highlighted = hi.codeToHtml(text, { lang: langId, theme });
+      return `<div class="code-block-wrapper">${label}${highlighted}</div>`;
     } catch {
-      return `<pre><code>${text}</code></pre>`;
+      return `<div class="code-block-wrapper">${label}<pre><code>${text}</code></pre></div>`;
     }
   };
   return renderer;

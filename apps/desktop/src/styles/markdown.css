@@ -42,6 +42,31 @@
   line-height: 1.6;
 }
 
+/* ── Code block language label ── */
+.code-block-wrapper {
+  position: relative;
+  margin: 0.8em 0;
+}
+.code-lang-label {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg-secondary) 85%, transparent);
+  border: 0.5px solid var(--border-card);
+  border-width: 0 0 0.5px 0.5px;
+  border-radius: 0 8px 0 6px;
+  user-select: none;
+  z-index: 1;
+}
+.code-block-wrapper pre {
+  margin: 0;
+}
+
 .md-body ul, .md-body ol {
   padding-left: 1.4em;
   margin: 0.5em 0;

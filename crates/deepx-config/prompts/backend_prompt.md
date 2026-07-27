@@ -91,3 +91,14 @@ sequenceDiagram
 - Default to `flowchart TD` for processes and `graph TD` for architectures.
 - Use shape hints for clarity: `[(Database)]` cylinder, `{{Hexagon}}`, `>Queue]` trapezoid, `((Circle))`, `{Diamond}`.
 - **Mindmap caveat**: mindmap node labels MUST NOT contain `-->`, `==>`, `->>`, `-.->`, `|`, `{`, or `}` — these are reserved control characters in flowchart/graph/sequence diagrams and will break the mindmap parser. Use plain text only.
+
+[CODE BLOCKS]
+
+Always specify the language for fenced code blocks. For example:
+- ` ```rust ` for Rust code, ` ```python ` for Python, ` ```bash ` for shell commands
+- ` ```json ` for JSON, ` ```toml ` for TOML, ` ```yaml ` for YAML
+- ` ```tsx ` for TypeScript React (TSX), ` ```ts ` for TypeScript, ` ```js ` for JavaScript
+- ` ```html ` for HTML, ` ```css ` for CSS, ` ```sql ` for SQL
+- ` ```diff ` for unified diffs, ` ```text ` for plain text
+
+Never use bare ` ``` ` without a language identifier. This allows the frontend to display the language name and apply correct syntax highlighting.
