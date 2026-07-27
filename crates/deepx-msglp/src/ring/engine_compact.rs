@@ -193,17 +193,31 @@ impl CompactEngine {
             )
         };
 
-        let provider = deepx_gate::ProviderConfig::openai(
+        let ep = deepx_config::registry::find_endpoint(
+            &ctx.agent.config.provider_id,
+            &ctx.agent.config.endpoint,
+        );
+        let mut provider = deepx_gate::ProviderConfig::openai(
             &ctx.agent.config.base_url,
             &ctx.agent.config.api_key,
             &ctx.agent.config.model,
-            None,
-            None,
-            Default::default(),
-            Default::default(),
-            false,
-            None,
+            ep.as_ref().and_then(|e| e.user_id_mode.clone()),
+            ep.as_ref().and_then(|e| e.chat_path.clone()),
+            ep.as_ref()
+                .map(|e| e.thinking_mode.clone())
+                .unwrap_or_default(),
+            ep.as_ref()
+                .map(|e| e.cache_field.clone())
+                .unwrap_or_default(),
+            ep.as_ref().map(|e| e.supports_thinking).unwrap_or(false),
+            ep.as_ref().and_then(|e| e.do_sample),
         );
+        if let Some(endpoint) = ep.as_ref() {
+            provider.supports_reasoning_effort = endpoint.supports_reasoning_effort;
+            provider.tool_call_content_null = endpoint.tool_call_content_null;
+            provider.supports_reasoning_content = endpoint.supports_reasoning_content;
+            provider.require_provider_parameters = endpoint.require_provider_parameters;
+        }
         Some((prompt, kept_user_count, head_user_count, provider))
     }
 

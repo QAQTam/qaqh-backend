@@ -6,7 +6,6 @@ import { spawn } from "node:child_process";
 import { app } from "electron";
 import WebSocket from "ws";
 import { daemonIdentityMismatch, hasActiveDaemonWork, type ExpectedDaemonIdentity } from "../src/runtime/daemonLifecycle";
-import { ControlEventBatcher } from "../src/runtime/controlEventBatcher";
 import { ControlCursor } from "../src/runtime/controlCursor";
 import type { BackendStatus, ControlMessage, DaemonDiscovery, DaemonManifest } from "./types";
 
@@ -27,8 +26,6 @@ export class DaemonControlClient {
   private heartbeat?: NodeJS.Timeout;
   private reconnect?: NodeJS.Timeout;
   private upgradeCheck?: NodeJS.Timeout;
-  private streamFlush?: NodeJS.Timeout;
-  private readonly eventBatcher = new ControlEventBatcher();
   private readonly cursor = new ControlCursor();
   private readonly pending = new Map<string, Pending>();
   private readonly attached = new Set<string>();
@@ -334,23 +331,10 @@ export class DaemonControlClient {
   }
 
   private routeMessage(message: ControlMessage): void {
-    const ready = this.eventBatcher.push(message);
-    if (ready.length === 0) {
-      this.scheduleStreamFlush();
-      return;
-    }
-    for (const outgoing of ready) this.onMessage(outgoing);
-  }
-
-  private scheduleStreamFlush(): void {
-    if (this.streamFlush) return;
-    this.streamFlush = setTimeout(() => {
-      this.streamFlush = undefined;
-      for (const message of this.eventBatcher.flush()) this.onMessage(message);
-    // Markdown projection is proportional to the accumulated response length.
-    // Coalescing at ~20fps prevents long streams from repeatedly parsing and
-    // patching the full answer for tiny network chunks.
-    }, 50);
+    // Streaming events must cross the main-process boundary immediately.
+    // Frame-level coalescing belongs in the renderer, where it can track paint
+    // cadence without adding an artificial 50 ms transport delay.
+    this.onMessage(message);
   }
 
   private async attachWire(seed: string): Promise<unknown> {
@@ -402,9 +386,6 @@ export class DaemonControlClient {
   private disconnectSocket(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
-    if (this.streamFlush) clearTimeout(this.streamFlush);
-    this.streamFlush = undefined;
-    for (const message of this.eventBatcher.flush()) this.onMessage(message);
     const socket = this.socket;
     this.socket = undefined;
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close();

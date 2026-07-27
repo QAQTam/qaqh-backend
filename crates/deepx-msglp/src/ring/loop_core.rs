@@ -61,7 +61,7 @@ use super::engine_input::InputEngine;
 use super::engine_misc::MiscEngine;
 use super::engine_session::SessionEngine;
 use super::engine_tool::PermissionDisposition;
-use super::paced_emitter::{DEFAULT_FLUSH_INTERVAL, PacedEmitter};
+use super::paced_emitter::PacedEmitter;
 use super::types::*;
 use crate::services::notification;
 use crate::state::agent::AgentState;
@@ -115,8 +115,7 @@ pub struct Loop {
     /// Pending compact result (set when compact is running in background).
     pending_compact_rx: Option<mpsc::Receiver<CompactMeta>>,
 
-    /// Paced output buffer: rate-limits RoundDelta events to 120/s.
-    /// Non-delta events (tool calls, etc.) pass through immediately.
+    /// Direct output emitter. The renderer performs frame-level coalescing.
     paced_emitter: PacedEmitter,
 }
 
@@ -220,11 +219,7 @@ impl Loop {
             log::info!("[AGENT] writer thread exiting");
         });
 
-        let paced_emitter = PacedEmitter::new(
-            event_tx.clone(),
-            writer_dead.clone(),
-            DEFAULT_FLUSH_INTERVAL,
-        );
+        let paced_emitter = PacedEmitter::new(event_tx.clone(), writer_dead.clone(), cancel.arc());
 
         Loop {
             cmd_rx,

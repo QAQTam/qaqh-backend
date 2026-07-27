@@ -4,7 +4,8 @@ param(
     [string]$CargoToml   = "Cargo.toml",
     [string]$PkgJson     = "apps/desktop/package.json",
     [string]$LockJson    = "apps/desktop/deepx-backend.lock.json",
-    [string]$RootPkgJson = "package.json"
+    [string]$RootPkgJson = "package.json",
+    [string]$TuiJustfile = "apps/deepx-tui/justfile"
 )
 
 $v = (Get-Content $VersionFile).Trim()
@@ -31,4 +32,9 @@ $rp = Get-Content $RootPkgJson -Raw | ConvertFrom-Json
 $rp.version = $v
 $rp | ConvertTo-Json -Depth 4 | Set-Content $RootPkgJson -NoNewline
 
-Write-Host "Done — $v synced to Cargo.toml, desktop/package.json, deepx-backend.lock.json (including release URL), root package.json"
+# TUI package filename and embedded manifest use this Just variable.
+$tui = Get-Content $TuiJustfile -Raw
+$tui = $tui -replace '(?m)^_version\s*:=\s*"[^"]*"', "_version := `"$v`""
+Set-Content $TuiJustfile -Value $tui -NoNewline
+
+Write-Host "Done — $v synced to Cargo.toml, desktop/package.json, deepx-backend.lock.json (including release URL), root package.json, TUI justfile"

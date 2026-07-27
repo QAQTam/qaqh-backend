@@ -437,6 +437,83 @@ fn tools_are_sent_in_request() {
 }
 
 #[test]
+fn openrouter_tool_history_uses_strict_compatible_shape() {
+    let scenario = vec![
+        SseChunk::text("Tool result received."),
+        SseChunk::finish("stop", None),
+        SseChunk::done(),
+    ];
+    let mock = MockServer::new(scenario);
+    let provider = make_provider(&mock).with_openrouter_compat();
+    let messages = vec![
+        Message::user("Read the configuration"),
+        Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![
+                ContentBlock::Reasoning {
+                    reasoning: "private chain".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    input: json!({"path": "config.toml"}),
+                },
+            ],
+        },
+        Message::tool("call_1", "contents", true),
+    ];
+    let tools = vec![ToolDef {
+        call_type: "function".into(),
+        function: ToolFunction {
+            name: "read_file".into(),
+            description: "Read a file".into(),
+            parameters: json!({"type": "object"}),
+        },
+    }];
+
+    let _events = collect_events(&provider, messages, Some(tools));
+    let request = mock.last_request_json().expect("request body");
+    assert_eq!(request["provider"]["require_parameters"], true);
+    assert!(request.get("thinking").is_none());
+    assert!(request.get("reasoning_effort").is_none());
+
+    let assistant = &request["messages"][1];
+    assert_eq!(assistant["content"], serde_json::Value::Null);
+    assert!(assistant["tool_calls"].is_array());
+    assert!(assistant.get("reasoning_content").is_none());
+}
+
+#[test]
+fn default_provider_tool_history_is_unchanged() {
+    let scenario = vec![
+        SseChunk::text("ok"),
+        SseChunk::finish("stop", None),
+        SseChunk::done(),
+    ];
+    let mock = MockServer::new(scenario);
+    let provider = make_provider(&mock);
+    let messages = vec![
+        Message::user("Read the configuration"),
+        Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                input: json!({"path": "config.toml"}),
+            }],
+        },
+    ];
+    let _events = collect_events(&provider, messages, None);
+    let request = mock.last_request_json().expect("request body");
+    assert!(request.get("provider").is_none());
+    assert!(request["messages"][1].get("content").is_none());
+}
+
+#[test]
 fn chat_sync_non_streaming() {
     let scenario = vec![
         SseChunk::text("Hello sync"),

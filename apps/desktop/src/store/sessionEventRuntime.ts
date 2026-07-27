@@ -125,38 +125,99 @@ export function createSessionEventRuntime(options: {
   commit: (state: RawSessionState) => void;
   storage: ReloadStorage;
   now?: () => number;
+  scheduleFrame?: (callback: FrameRequestCallback) => number;
+  cancelFrame?: (handle: number) => void;
 }): SessionEventRuntime {
   let state = options.initialState;
   let disposed = false;
   let persistenceEnabled = true;
   const now = options.now ?? Date.now;
+  const hasFrameScheduler = options.scheduleFrame !== undefined || typeof requestAnimationFrame === "function";
+  const scheduleFrame: (callback: FrameRequestCallback) => number = options.scheduleFrame ?? (typeof requestAnimationFrame === "function"
+    ? requestAnimationFrame
+    : ((_callback: FrameRequestCallback) => 0));
+  const cancelFrame = options.cancelFrame ?? (typeof cancelAnimationFrame === "function"
+    ? cancelAnimationFrame
+    : (() => {}));
+  let frameHandle: number | undefined;
+  let pendingDeltas: Agent2Ui[] = [];
+
+  const commit = () => options.commit(state);
+  const applyPendingDeltas = () => {
+    if (pendingDeltas.length === 0) return;
+    const deltas = pendingDeltas;
+    pendingDeltas = [];
+    for (const delta of deltas) state = reduceAgentEvent(state, delta, now());
+  };
+  const flushFrame = () => {
+    if (frameHandle !== undefined) {
+      cancelFrame(frameHandle);
+      frameHandle = undefined;
+    }
+    if (pendingDeltas.length === 0) return;
+    applyPendingDeltas();
+    commit();
+  };
+  const scheduleStreamCommit = () => {
+    if (!hasFrameScheduler) {
+      applyPendingDeltas();
+      commit();
+      return;
+    }
+    if (frameHandle !== undefined) return;
+    frameHandle = scheduleFrame(() => {
+      frameHandle = undefined;
+      if (!disposed) {
+        applyPendingDeltas();
+        commit();
+      }
+    });
+  };
 
   return {
     push(event) {
       if (disposed) return;
+      if (event.type === "round_delta") {
+        const previous = pendingDeltas[pendingDeltas.length - 1];
+        if (
+          previous?.type === "round_delta" &&
+          previous.turn_id === event.turn_id &&
+          previous.round_num === event.round_num &&
+          previous.kind === event.kind
+        ) {
+          pendingDeltas[pendingDeltas.length - 1] = { ...event, delta: previous.delta + event.delta };
+        } else {
+          pendingDeltas.push(event);
+        }
+        scheduleStreamCommit();
+        return;
+      }
+      flushFrame();
       state = reduceAgentEvent(state, event, now());
-      options.commit(state);
+      commit();
       if (IMMEDIATE_EVENT_TYPES.has(event.type) && persistenceEnabled) {
         persistenceEnabled = saveReloadSnapshot(options.storage, state);
       }
     },
     update(update) {
       if (disposed) return;
+      flushFrame();
       state = update(state);
-      options.commit(state);
+      commit();
       if (persistenceEnabled) {
         persistenceEnabled = saveReloadSnapshot(options.storage, state);
       }
     },
     flush() {
-      // State is committed synchronously on every push/update.
-      // No-op kept for interface compatibility.
+      flushFrame();
     },
     dispose() {
       if (disposed) return;
       disposed = true;
+      if (frameHandle !== undefined) cancelFrame(frameHandle);
     },
     current() {
+      applyPendingDeltas();
       return state;
     },
   };

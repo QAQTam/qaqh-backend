@@ -28,6 +28,10 @@ pub struct ProviderConfig {
     pub cache_field: CacheTokenField,
     pub include_stream_usage: bool,
     pub supports_thinking: bool,
+    pub supports_reasoning_effort: bool,
+    pub tool_call_content_null: bool,
+    pub supports_reasoning_content: bool,
+    pub require_provider_parameters: bool,
     /// When Some, explicitly sets `do_sample` in the request body. Used by GLM for
     /// deterministic codegen (do_sample=false). None means don't send the field.
     pub do_sample: Option<bool>,
@@ -63,6 +67,10 @@ impl ProviderConfig {
             cache_field,
             include_stream_usage: false,
             supports_thinking,
+            supports_reasoning_effort: true,
+            tool_call_content_null: false,
+            supports_reasoning_content: true,
+            require_provider_parameters: false,
             do_sample,
             stateful: false,
             supports_tail_system: true,
@@ -77,6 +85,16 @@ impl ProviderConfig {
 
     pub fn with_stream_usage(mut self, include: bool) -> Self {
         self.include_stream_usage = include;
+        self
+    }
+
+    /// Apply OpenRouter's strict OpenAI-compatible tool-history contract.
+    pub fn with_openrouter_compat(mut self) -> Self {
+        self.supports_thinking = false;
+        self.supports_reasoning_effort = false;
+        self.tool_call_content_null = true;
+        self.supports_reasoning_content = false;
+        self.require_provider_parameters = true;
         self
     }
 

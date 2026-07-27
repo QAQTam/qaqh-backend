@@ -49,6 +49,52 @@ describe("sessionEventRuntime", () => {
     expect(storage.writeCount).toBe(2);
   });
 
+  it("coalesces bursty text only until the next display frame", () => {
+    const storage = new MemoryStorage();
+    const commits: string[] = [];
+    const frames: FrameRequestCallback[] = [];
+    const runtime = createSessionEventRuntime({
+      initialState: createRawSessionState("seed-a"),
+      commit: state => commits.push(state.turns[0]?.rounds[0]?.answer ?? ""),
+      storage,
+      now: () => 100,
+      scheduleFrame: callback => { frames.push(callback); return frames.length; },
+      cancelFrame: () => {},
+    });
+
+    runtime.push({ type: "turn_start", turn_id: "t1", user_text: "go" });
+    runtime.push({ type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "A" });
+    runtime.push({ type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "B" });
+    expect(commits).toHaveLength(1);
+    expect(frames).toHaveLength(1);
+
+    frames[0]!(116);
+    expect(commits).toEqual(["", "AB"]);
+  });
+
+  it("keeps a 1000-delta burst complete while committing it once per frame", () => {
+    const storage = new MemoryStorage();
+    const commits: string[] = [];
+    const frames: FrameRequestCallback[] = [];
+    const runtime = createSessionEventRuntime({
+      initialState: createRawSessionState("seed-a"),
+      commit: state => commits.push(state.turns[0]?.rounds[0]?.answer ?? ""),
+      storage,
+      scheduleFrame: callback => { frames.push(callback); return frames.length; },
+      cancelFrame: () => {},
+    });
+
+    runtime.push({ type: "turn_start", turn_id: "t1", user_text: "go" });
+    for (let index = 0; index < 1000; index++) {
+      runtime.push({ type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "x" });
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(commits).toEqual([""]);
+    frames[0]!(116);
+    expect(commits).toEqual(["", "x".repeat(1000)]);
+  });
+
   it("restores the last twenty turns on dispose", () => {
     const storage = new MemoryStorage();
     const state = createRawSessionState("seed-a");

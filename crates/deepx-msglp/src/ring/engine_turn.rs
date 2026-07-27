@@ -697,7 +697,7 @@ impl TurnEngine {
             &ctx.agent.config.provider_id,
             &ctx.agent.config.endpoint,
         );
-        let provider = deepx_gate::ProviderConfig::openai(
+        let mut provider = deepx_gate::ProviderConfig::openai(
             &ctx.agent.config.base_url,
             &ctx.agent.config.api_key,
             &ctx.agent.config.model,
@@ -714,6 +714,12 @@ impl TurnEngine {
         )
         .with_stateful(ep.as_ref().map(|e| e.stateful).unwrap_or(false))
         .with_stream_usage(ep.as_ref().map(|e| e.include_stream_usage).unwrap_or(false));
+        if let Some(endpoint) = ep.as_ref() {
+            provider.supports_reasoning_effort = endpoint.supports_reasoning_effort;
+            provider.tool_call_content_null = endpoint.tool_call_content_null;
+            provider.supports_reasoning_content = endpoint.supports_reasoning_content;
+            provider.require_provider_parameters = endpoint.require_provider_parameters;
+        }
 
         loop {
             // ── Interrupt check ──

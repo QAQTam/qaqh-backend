@@ -3,18 +3,8 @@ import { marked } from "marked";
 type Block = { key: string; hash: string; raw: string; stable: boolean };
 type Request = { id: number; text: string; final: boolean };
 
-const TEXT_SNAP = /[\s.,!?;:)\]]/;
-
 function hash(raw: string): string {
   return raw.length <= 24 ? String(raw.length) : `${raw.length}:${raw.slice(0, 10)}…${raw.slice(-10)}`;
-}
-
-function pace(text: string): string {
-  if (text.length < 60) return text;
-  for (let index = text.length - 1; index >= Math.max(0, text.length - 12); index--) {
-    if (TEXT_SNAP.test(text[index]!)) return text.slice(0, index + 1);
-  }
-  return text;
 }
 
 self.onmessage = ({ data }: MessageEvent<Request>) => {
@@ -42,7 +32,7 @@ self.onmessage = ({ data }: MessageEvent<Request>) => {
     blocks.push({ key: `b${blocks.length}`, hash: hash(raw), raw, stable: true });
   }
   if (tail < tokens.length) {
-    const raw = pace(tokens.slice(tail).map(token => token.raw).join(""));
+    const raw = tokens.slice(tail).map(token => token.raw).join("");
     blocks.push({ key: `l${blocks.length}`, hash: hash(raw), raw, stable: false });
   }
   self.postMessage({ id, blocks });

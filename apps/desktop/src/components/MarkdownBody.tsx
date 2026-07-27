@@ -48,7 +48,26 @@ interface MarkdownBlock {
 
 let projectionWorker: Worker | null | undefined;
 let projectionId = 0;
-const projectionRequests = new Map<number, (blocks: MarkdownBlock[]) => void>();
+type ProjectionRequest = {
+  id: number;
+  text: string;
+  final: boolean;
+  resolve: (blocks: MarkdownBlock[]) => void;
+};
+let activeProjection: ProjectionRequest | undefined;
+let queuedProjection: ProjectionRequest | undefined;
+
+function dispatchProjection(request: ProjectionRequest) {
+  activeProjection = request;
+  projectionWorker!.postMessage({ id: request.id, text: request.text, final: request.final });
+}
+
+function abortProjectionQueue() {
+  activeProjection?.resolve([]);
+  queuedProjection?.resolve([]);
+  activeProjection = undefined;
+  queuedProjection = undefined;
+}
 
 function projectBlocksOffThread(text: string, final: boolean): Promise<MarkdownBlock[]> {
   // Vitest's jsdom Worker shim does not execute module workers. Keep its DOM
@@ -59,22 +78,33 @@ function projectBlocksOffThread(text: string, final: boolean): Promise<MarkdownB
   if (projectionWorker === undefined) {
     projectionWorker = new Worker(new URL("./markdownProjection.worker.ts", import.meta.url), { type: "module" });
     projectionWorker.onmessage = ({ data }: MessageEvent<{ id: number; blocks: MarkdownBlock[] }>) => {
-      const resolve = projectionRequests.get(data.id);
-      projectionRequests.delete(data.id);
-      resolve?.(data.blocks);
+      const request = activeProjection;
+      if (!request || request.id !== data.id) return;
+      activeProjection = undefined;
+      request.resolve(data.blocks);
+      const next = queuedProjection;
+      queuedProjection = undefined;
+      if (next && projectionWorker) dispatchProjection(next);
     };
     projectionWorker.onerror = () => {
       projectionWorker?.terminate();
       projectionWorker = null;
-      for (const resolve of projectionRequests.values()) resolve([]);
-      projectionRequests.clear();
+      abortProjectionQueue();
     };
   }
   if (!projectionWorker) return Promise.resolve(projectBlocks(text, final, []));
   const id = ++projectionId;
   return new Promise(resolve => {
-    projectionRequests.set(id, resolve);
-    projectionWorker!.postMessage({ id, text, final });
+    const request = { id, text, final, resolve };
+    if (!activeProjection) {
+      dispatchProjection(request);
+      return;
+    }
+    // The current render generation will ignore superseded results. Retain
+    // only the newest projection so a fast model cannot create an unbounded
+    // backlog of full-document lexer jobs in the worker.
+    queuedProjection?.resolve([]);
+    queuedProjection = request;
   });
 }
 
@@ -220,26 +250,10 @@ function projectBlocks(text: string, final: boolean, prev: MarkdownBlock[]): Mar
   // When the table was promoted above, live tail is empty.
   if (tailIdx < tokens.length) {
     const liveRaw = tokens.slice(tailIdx).map(t => t.raw).join("");
-    const paced = paceText(liveRaw);
-    blocks.push({ key: `l${blocks.length}`, hash: blockHash(paced), raw: paced, stable: false });
+    blocks.push({ key: `l${blocks.length}`, hash: blockHash(liveRaw), raw: liveRaw, stable: false });
   }
 
   return blocks;
-}
-
-// ── P2: Word-boundary pacing ──
-
-const TEXT_SNAP = /[\s.,!?;:)\]]/;
-
-/** Pace live text: hide trailing partial words for smoother reveal. */
-function paceText(text: string): string {
-  if (text.length < 60) return text;
-  // Search backwards for a word boundary within last 12 chars
-  const start = Math.max(0, text.length - 12);
-  for (let i = text.length - 1; i >= start; i--) {
-    if (TEXT_SNAP.test(text[i]!)) return text.slice(0, i + 1);
-  }
-  return text;
 }
 
 // ── P1: DOM patching via data-key + data-hash ──

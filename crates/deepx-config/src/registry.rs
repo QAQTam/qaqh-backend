@@ -167,6 +167,39 @@ fn openai() -> ProviderSpec {
     }
 }
 
+/// OpenRouter exposes a normalized OpenAI Chat Completions endpoint, but can
+/// route one request to many vendor backends. Keep its request surface strict:
+/// free and non-reasoning models must not receive vendor-specific thinking or
+/// reasoning-history fields, and tool calls require providers that advertise
+/// support for every supplied parameter.
+fn openrouter() -> ProviderSpec {
+    ProviderSpec {
+        id: "openrouter".into(),
+        display: "OpenRouter".into(),
+        endpoints: vec![EndpointSpec {
+            id: "openai".into(),
+            display: "OpenAI-compatible (text)".into(),
+            protocol: "openai".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            default_model: String::new(),
+            models: vec![],
+            // Limit the picker to text-only models that declare native tool
+            // support. DeepX does not yet serialize multimodal content.
+            models_url: Some(
+                "https://openrouter.ai/api/v1/models?output_modalities=text&supported_parameters=tools&sort=pricing-low-to-high"
+                    .into(),
+            ),
+            has_balance: false,
+            supports_thinking: false,
+            supports_reasoning_effort: false,
+            tool_call_content_null: true,
+            supports_reasoning_content: false,
+            require_provider_parameters: true,
+            ..Default::default()
+        }],
+    }
+}
+
 fn deepseek_web() -> ProviderSpec {
     ProviderSpec {
         id: "deepseek-web".into(),
@@ -198,6 +231,7 @@ fn providers() -> Vec<ProviderSpec> {
         minimax(),
         doubao(),
         openai(),
+        openrouter(),
         deepseek_web(),
     ]
 }
@@ -235,6 +269,11 @@ pub fn first_provider_endpoint() -> (String, String) {
 pub fn models_url_for(provider_id: &str, endpoint_id: &str) -> Option<String> {
     let ep = find_endpoint(provider_id, endpoint_id)?;
     let base = ep.models_url.as_deref().unwrap_or(&ep.base_url);
+    // Most presets store a base URL, but OpenRouter's model discovery needs
+    // documented query filters. Treat an explicit /models URL as complete.
+    if base.contains("/models") {
+        return Some(base.to_string());
+    }
     let stripped = base.trim_end_matches('/');
     Some(format!("{}/models", stripped))
 }
@@ -309,5 +348,38 @@ pub fn migrate_provider_id(old_pid: &str) -> (String, String) {
         (old_pid.to_string(), ep)
     } else {
         ("deepseek".into(), "openai".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openrouter_text_endpoint_has_router_safe_capabilities() {
+        let endpoint = find_endpoint("openrouter", "openai").expect("OpenRouter endpoint");
+        assert_eq!(endpoint.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(
+            models_url_for("openrouter", "openai").as_deref(),
+            Some(
+                "https://openrouter.ai/api/v1/models?output_modalities=text&supported_parameters=tools&sort=pricing-low-to-high"
+            )
+        );
+        assert!(!endpoint.has_balance);
+        assert!(!endpoint.supports_thinking);
+        assert!(!endpoint.supports_reasoning_effort);
+        assert!(endpoint.tool_call_content_null);
+        assert!(!endpoint.supports_reasoning_content);
+        assert!(endpoint.require_provider_parameters);
+    }
+
+    #[test]
+    fn existing_openai_preset_keeps_legacy_capabilities() {
+        let endpoint = find_endpoint("openai", "openai").expect("OpenAI endpoint");
+        assert!(endpoint.supports_thinking);
+        assert!(endpoint.supports_reasoning_effort);
+        assert!(!endpoint.tool_call_content_null);
+        assert!(endpoint.supports_reasoning_content);
+        assert!(!endpoint.require_provider_parameters);
     }
 }

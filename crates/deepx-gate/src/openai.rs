@@ -141,7 +141,7 @@ pub fn chat_stream_openai(
         messages
     };
 
-    let api_msgs = convert_messages(messages, None);
+    let api_msgs = convert_messages(provider, messages, None);
 
     let openai_tools: Option<Vec<serde_json::Value>> = tools.map(|tds| {
         tds.into_iter()
@@ -184,14 +184,22 @@ pub fn chat_stream_openai(
     }
     body_map.insert("max_tokens".into(), serde_json::json!(max_tokens));
 
-    if let Some(ref e) = effort {
-        body_map.insert("reasoning_effort".into(), serde_json::json!(e));
+    if provider.supports_reasoning_effort {
+        if let Some(ref e) = effort {
+            body_map.insert("reasoning_effort".into(), serde_json::json!(e));
+        }
     }
     if let Some(sample) = provider.do_sample {
         body_map.insert("do_sample".into(), serde_json::json!(sample));
     }
     if let Some(ref t) = openai_tools {
         body_map.insert("tools".into(), serde_json::Value::Array(t.clone()));
+        if provider.require_provider_parameters {
+            body_map.insert(
+                "provider".into(),
+                serde_json::json!({"require_parameters": true}),
+            );
+        }
     }
     if let Some(ref uid) = user_id {
         if provider.user_id_mode.is_some() {
@@ -619,7 +627,11 @@ fn normalize_skill_envelope(
     Ok(messages)
 }
 
-fn convert_messages(messages: Vec<Message>, system: Option<String>) -> Vec<serde_json::Value> {
+fn convert_messages(
+    provider: &ProviderConfig,
+    messages: Vec<Message>,
+    system: Option<String>,
+) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
     if let Some(sys) = system {
         if !sys.is_empty() {
@@ -682,10 +694,13 @@ fn convert_messages(messages: Vec<Message>, system: Option<String>) -> Vec<serde
                 } else if tool_calls.is_empty() && !reasoning.is_empty() {
                     obj["content"] = serde_json::json!("[Thinking complete]");
                 }
-                if !reasoning.is_empty() {
+                if provider.supports_reasoning_content && !reasoning.is_empty() {
                     obj["reasoning_content"] = serde_json::json!(reasoning);
                 }
                 if !tool_calls.is_empty() {
+                    if provider.tool_call_content_null && obj.get("content").is_none() {
+                        obj["content"] = serde_json::Value::Null;
+                    }
                     obj["tool_calls"] = serde_json::json!(tool_calls);
                 }
                 if obj.as_object().map_or(false, |m| m.len() > 1) {
@@ -729,7 +744,7 @@ pub fn chat_sync_openai(
     } else {
         messages
     };
-    let api_msgs = convert_messages(messages, None);
+    let api_msgs = convert_messages(provider, messages, None);
     let url = build_chat_url(&provider.base_url, provider.chat_path.as_deref());
 
     let mut body = serde_json::json!({

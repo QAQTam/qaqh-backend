@@ -92,6 +92,21 @@ pub struct EndpointSpec {
     pub has_balance: bool,
     /// Whether this endpoint supports the thinking/reasoning parameter. Default: true.
     pub supports_thinking: bool,
+    /// Whether this endpoint accepts OpenAI's `reasoning_effort` parameter.
+    /// Kept separately because an endpoint may support neither vendor-specific
+    /// thinking toggles nor OpenAI reasoning effort.
+    pub supports_reasoning_effort: bool,
+    /// Whether assistant history entries that contain tool calls must include
+    /// an explicit `content: null`. Some OpenAI-compatible upstreams reject a
+    /// missing content member even though the OpenAI schema permits null.
+    pub tool_call_content_null: bool,
+    /// Whether provider-specific `reasoning_content` may be sent back as
+    /// assistant history. This is disabled for routers that target many
+    /// different upstream schemas.
+    pub supports_reasoning_content: bool,
+    /// Ask a router to select only upstreams that implement every request
+    /// parameter. Used by OpenRouter tool calls to avoid lax fallback routing.
+    pub require_provider_parameters: bool,
     /// When true, the gate sends only incremental messages instead of full conversation
     /// history. Used for stateful proxy endpoints (e.g. DeepSeek Web CDP proxy).
     pub stateful: bool,
@@ -118,6 +133,10 @@ impl Default for EndpointSpec {
             include_stream_usage: false,
             has_balance: true,
             supports_thinking: true,
+            supports_reasoning_effort: true,
+            tool_call_content_null: false,
+            supports_reasoning_content: true,
+            require_provider_parameters: false,
             stateful: false,
             do_sample: None,
         }
