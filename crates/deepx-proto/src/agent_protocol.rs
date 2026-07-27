@@ -628,6 +628,16 @@ pub enum Agent2Ui {
         model: String,
     },
 
+    /// Cache-key prefix changed since the last gate call.  Contains the
+    /// names of the components that differed (e.g. "system_prompt",
+    /// "catalog", "tool_defs").  An empty list means the prefix is stable.
+    #[serde(rename = "cache_diagnostics")]
+    CacheDiagnostics {
+        prefix_hash: String,
+        prefix_changed: bool,
+        change_reasons: Vec<String>,
+    },
+
     /// Agent finished the current turn. Frontend shows the Done indicator.
     #[serde(rename = "done")]
     Done,
@@ -824,7 +834,8 @@ impl Agent2Ui {
             Agent2Ui::ExecProgress { .. }
             | Agent2Ui::AuditRecord { .. }
             | Agent2Ui::CompactDelta { .. }
-            | Agent2Ui::UsageUpdated { .. } => EventLane::Bulk,
+            | Agent2Ui::UsageUpdated { .. }
+            | Agent2Ui::CacheDiagnostics { .. } => EventLane::Bulk,
 
             // ── Standard: everything else ──
             Agent2Ui::ProviderRetrying { .. }

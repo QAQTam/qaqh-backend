@@ -761,6 +761,16 @@ impl TurnEngine {
             }
 
             let messages = ctx.agent.build_context();
+
+            // ── Emit pending cache diagnostic ──
+            if let Some((hash, reasons)) = ctx.agent.take_cache_diagnostics() {
+                ctx.emitter.emit_delta(deepx_proto::Agent2Ui::CacheDiagnostics {
+                    prefix_hash: hash,
+                    prefix_changed: true,
+                    change_reasons: reasons,
+                });
+            }
+
             let tools = Some(ctx.agent.tool_defs.clone());
             let mut content = String::new();
             let mut reasoning = String::new();

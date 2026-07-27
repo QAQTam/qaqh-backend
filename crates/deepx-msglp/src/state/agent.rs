@@ -39,16 +39,16 @@ impl PrefixShape {
         }
     }
 
-    fn diff(&self, prev: &Self) -> Vec<&'static str> {
+    fn diff(&self, prev: &Self) -> Vec<String> {
         let mut changed = Vec::new();
         if !prev.system_hash.is_empty() && self.system_hash != prev.system_hash {
-            changed.push("system_prompt");
+            changed.push("system_prompt".into());
         }
         if !prev.catalog_hash.is_empty() && self.catalog_hash != prev.catalog_hash {
-            changed.push("catalog");
+            changed.push("catalog".into());
         }
         if !prev.tools_hash.is_empty() && self.tools_hash != prev.tools_hash {
-            changed.push("tool_defs");
+            changed.push("tool_defs".into());
         }
         changed
     }
@@ -75,6 +75,9 @@ pub struct AgentState {
     /// Last captured prefix hash; compared in build_context to detect
     /// cache-breaking changes (system prompt, catalog, tool defs).
     prev_prefix: PrefixShape,
+    /// Pending cache diagnostic reasons set by build_context() and
+    /// consumed by the engine to emit a CacheDiagnostics event.
+    pending_cache_diagnostics: Option<Vec<String>>,
 }
 
 impl AgentState {
@@ -96,6 +99,7 @@ impl AgentState {
             skills: SkillContextManager::new(Path::new("."), effective_input_tokens),
             frozen_annotation: None,
             prev_prefix: PrefixShape::default(),
+            pending_cache_diagnostics: None,
         }
     }
 
@@ -182,6 +186,14 @@ impl AgentState {
         self.frozen_annotation = None;
     }
 
+    /// Consume any pending cache diagnostics set by build_context().
+    /// Returns (prefix_hash, change_reasons) if the prefix changed.
+    pub fn take_cache_diagnostics(&mut self) -> Option<(String, Vec<String>)> {
+        self.pending_cache_diagnostics.take().map(|reasons| {
+            (self.prev_prefix.system_hash.clone(), reasons)
+        })
+    }
+
     pub fn build_context(&mut self) -> Vec<deepx_types::Message> {
         // Freeze annotations at the first gate call of a turn.
         // file_state changes between rounds within the same turn
@@ -229,38 +241,41 @@ impl AgentState {
                 .iter()
                 .take_while(|message| message.role == "system")
                 .count();
-            // ── 前缀稳定性校验 ──
-        // Hash the three cache-key components (system prompt, catalog,
-        // tool defs) and compare with the previous turn.  If anything
-        // changed, log exactly what broke so we can fix it quickly.
-        let sys_text: String = context
-            .iter()
-            .take_while(|m| m.role == "system")
-            .flat_map(|m| &m.content)
-            .filter_map(|block| match block {
-                deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let cat_text = snapshot.catalog.clone();
-        let cur = PrefixShape::capture(&sys_text, &cat_text, &self.tool_defs);
-        if !self.prev_prefix.system_hash.is_empty() {
-            let changed = cur.diff(&self.prev_prefix);
-            if !changed.is_empty() {
-                log::warn!(
-                    "[PREFIX] cache key changed: {} — expect cache miss",
-                    changed.join(", ")
-                );
-            }
-        }
-        self.prev_prefix = cur;
-
-        context.insert(prefix_end, deepx_types::Message::system(&snapshot.catalog));
+            context.insert(prefix_end, deepx_types::Message::system(&snapshot.catalog));
         }
         // The complete authoritative active set is always the final message.
         let envelope_text = snapshot.envelope.as_str();
         context.push(deepx_types::Message::system(envelope_text));
+
+        // ── 前缀稳定性校验 ──
+        // Hash the three cache-key components and compare with the
+        // previous turn.  If anything changed, emit a CacheDiagnostics
+        // event so the frontend can surface the reason.
+        {
+            let sys_text: String = context
+                .iter()
+                .take_while(|m| m.role == "system")
+                .flat_map(|m| &m.content)
+                .filter_map(|block| match block {
+                    deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let cat_text = snapshot.catalog.clone();
+            let cur = PrefixShape::capture(&sys_text, &cat_text, &self.tool_defs);
+            if !self.prev_prefix.system_hash.is_empty() {
+                let changed = cur.diff(&self.prev_prefix);
+                if !changed.is_empty() {
+                    log::warn!(
+                        "[PREFIX] cache key changed: {} — expect cache miss",
+                        changed.join(", ")
+                    );
+                    self.pending_cache_diagnostics = Some(changed);
+                }
+            }
+            self.prev_prefix = cur;
+        }
 
         // ── RAG: 语义技能检索 ──
         // 如果向量引擎已启用且有已索引的技能，用语义检索补充上下文
