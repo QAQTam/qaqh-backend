@@ -8,6 +8,48 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use deepx_vector::{VectorConfig, VectorEngine};
 
+/// Hash snapshot of the cache-key-relevant prefix components.
+/// Compared across turns to detect and explain prompt-cache misses.
+#[derive(Debug, Clone, Default)]
+struct PrefixShape {
+    system_hash: String,
+    catalog_hash: String,
+    tools_hash: String,
+}
+
+fn sha256_hex(data: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+impl PrefixShape {
+    fn capture(system_text: &str, catalog_text: &str, tool_defs: &[deepx_types::ToolDef]) -> Self {
+        let tools_json = serde_json::to_string(tool_defs).unwrap_or_default();
+        Self {
+            system_hash: sha256_hex(system_text),
+            catalog_hash: sha256_hex(catalog_text),
+            tools_hash: sha256_hex(&tools_json),
+        }
+    }
+
+    fn diff(&self, prev: &Self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        if !prev.system_hash.is_empty() && self.system_hash != prev.system_hash {
+            changed.push("system_prompt");
+        }
+        if !prev.catalog_hash.is_empty() && self.catalog_hash != prev.catalog_hash {
+            changed.push("catalog");
+        }
+        if !prev.tools_hash.is_empty() && self.tools_hash != prev.tools_hash {
+            changed.push("tool_defs");
+        }
+        changed
+    }
+}
+
 #[derive(Debug)]
 pub struct AgentState {
     pub msg: deepx_message::MessageStore,
@@ -26,6 +68,9 @@ pub struct AgentState {
     /// subsequent rounds within the same turn so the file_state
     /// prefix stays cache-stable. Reset when a new user turn begins.
     frozen_annotation: Option<String>,
+    /// Last captured prefix hash; compared in build_context to detect
+    /// cache-breaking changes (system prompt, catalog, tool defs).
+    prev_prefix: PrefixShape,
 }
 
 impl AgentState {
@@ -46,6 +91,7 @@ impl AgentState {
             vector,
             skills: SkillContextManager::new(Path::new("."), effective_input_tokens),
             frozen_annotation: None,
+            prev_prefix: PrefixShape::default(),
         }
     }
 
@@ -179,7 +225,30 @@ impl AgentState {
                 .iter()
                 .take_while(|message| message.role == "system")
                 .count();
-            context.insert(prefix_end, deepx_types::Message::system(&snapshot.catalog));
+            // ── 前缀稳定性校验 ──
+        // Hash the three cache-key components (system prompt, catalog,
+        // tool defs) and compare with the previous turn.  If anything
+        // changed, log exactly what broke so we can fix it quickly.
+        let sys_text: String = context
+            .iter()
+            .take_while(|m| m.role == "system")
+            .map(|m| serde_json::to_string(m).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cat_text = snapshot.catalog.clone();
+        let cur = PrefixShape::capture(&sys_text, &cat_text, &self.tool_defs);
+        if !self.prev_prefix.system_hash.is_empty() {
+            let changed = cur.diff(&self.prev_prefix);
+            if !changed.is_empty() {
+                log::warn!(
+                    "[PREFIX] cache key changed: {} — expect cache miss",
+                    changed.join(", ")
+                );
+            }
+        }
+        self.prev_prefix = cur;
+
+        context.insert(prefix_end, deepx_types::Message::system(&snapshot.catalog));
         }
         // The complete authoritative active set is always the final message.
         let envelope_text = snapshot.envelope.as_str();
