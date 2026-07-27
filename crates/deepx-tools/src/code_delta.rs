@@ -14,13 +14,8 @@ pub(crate) fn compute(
         .unwrap_or(tool_name);
     let file_path = args.get("path").and_then(|value| value.as_str());
 
-    if let Some(path) = file_path {
-        if let Some(delta) = git_code_delta(now, path, action) {
-            return Some(delta);
-        }
-    }
-
-    match (tool_name, action) {
+    // Compute text-based line counts from args (cheap, no git2 pathspec bug).
+    let mut delta = match (tool_name, action) {
         ("file", "write") => {
             let content = args
                 .get("content")
@@ -82,10 +77,29 @@ pub(crate) fn compute(
             })
         }
         _ => None,
+    };
+
+    // Override files_created / files_deleted from git when available
+    // (git2::Repository::open is a cheap metadata op — no diff, no
+    // pathspec bug since we only check HEAD tree existence).
+    if let (Some(path), Some(d)) = (file_path, &mut delta) {
+        if let Some(git) = git_file_meta(path) {
+            d.files_created = git.files_created;
+            d.files_deleted = git.files_deleted;
+        }
     }
+
+    delta
 }
 
-fn git_code_delta(now: u64, file_path: &str, action: &str) -> Option<deepx_proto::CodeDeltaRecord> {
+/// Lightweight git file metadata — only checks HEAD tree existence, no diff.
+/// Avoids the git2 pathspec bug that inflated lines_added / lines_removed.
+struct GitFileMeta {
+    files_created: usize,
+    files_deleted: usize,
+}
+
+fn git_file_meta(file_path: &str) -> Option<GitFileMeta> {
     let seed = crate::CURRENT_SESSION.lock().ok()?.clone()?;
     let directory = deepx_types::platform::sessions_dir().join(seed);
     let workspace = std::fs::read_to_string(directory.join("workspace.txt")).ok()?;
@@ -93,40 +107,13 @@ fn git_code_delta(now: u64, file_path: &str, action: &str) -> Option<deepx_proto
     if workspace.is_empty() {
         return None;
     }
-
-    let repository = git2::Repository::open(workspace).ok()?;
-    match action {
-        "patch" | "write" | "edit" | "edit_diff" => {
-            let head_tree = repository.head().ok()?.peel_to_tree().ok()?;
-            let mut options = git2::DiffOptions::new();
-            options.pathspec(file_path);
-            let diff = repository
-                .diff_tree_to_workdir(Some(&head_tree), Some(&mut options))
-                .ok()?;
-            let stats = diff.stats().ok()?;
-            let is_new = head_tree.get_path(std::path::Path::new(file_path)).is_err();
-            Some(deepx_proto::CodeDeltaRecord {
-                timestamp: now,
-                lines_added: stats.insertions(),
-                lines_removed: stats.deletions(),
-                files_created: usize::from(is_new),
-                files_deleted: 0,
-                file: Some(file_path.to_string()),
-            })
-        }
-        "delete" => {
-            let head_tree = repository.head().ok()?.peel_to_tree().ok()?;
-            let entry = head_tree.get_path(std::path::Path::new(file_path)).ok()?;
-            let blob = repository.find_blob(entry.id()).ok()?;
-            Some(deepx_proto::CodeDeltaRecord {
-                timestamp: now,
-                lines_added: 0,
-                lines_removed: String::from_utf8_lossy(blob.content()).lines().count(),
-                files_created: 0,
-                files_deleted: 1,
-                file: Some(file_path.to_string()),
-            })
-        }
-        _ => None,
-    }
+    let repo = git2::Repository::open(workspace).ok()?;
+    let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
+    let is_new = head_tree
+        .get_path(std::path::Path::new(file_path))
+        .is_err();
+    Some(GitFileMeta {
+        files_created: usize::from(is_new),
+        files_deleted: 0,
+    })
 }
