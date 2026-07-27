@@ -175,6 +175,13 @@ function upsertUsage(
   contextLimit?: number,
 ): RawSessionState {
   const existing = state.session.usageByRequest[requestKey];
+  // Defense: skip zero-value UsageUpdated when a real usage sample already
+  // exists for this request.  Providers that send stream_options.include_usage
+  // emit usage:null on every intermediate chunk, which the gate decodes as all
+  // zeros; accepting it would flash the info panel to 0 & back.
+  if (usage.total_tokens === 0 && existing && existing.total_tokens > 0) {
+    return state;
+  }
   const previous = existing ?? emptyUsage();
   const previousCacheReported = Boolean(existing?.cache_usage_reported);
   const currentCacheReported = Boolean(usage.cache_usage_reported);

@@ -435,8 +435,13 @@ fn stream_sse(
             }
         }
 
-        // Usage info (may appear in any chunk)
-        if let Some(u) = ev.get("usage") {
+        // Usage info (may appear in any chunk).
+        // When stream_options.include_usage=true the field is present on
+        // every chunk but is null for all intermediate chunks; only the final
+        // chunk before [DONE] carries actual token counts.  Skip null to avoid
+        // emitting zero-value UsageUpdate events that cause the info panel to
+        // flicker between 0 and real values.
+        if let Some(u) = ev.get("usage").filter(|v| !v.is_null()) {
             let pt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let ct = u
                 .get("completion_tokens")
