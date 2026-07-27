@@ -93,7 +93,7 @@ export default function InfoPopover(props: {
         <div><span>{t().environment.totalTokens}</span><strong><RollingNumber value={usage().totals.total_tokens} format={formatRawNumber} /></strong></div>
       </div>
       <Show when={usage().sessionCacheAvailable}>
-        <div class="info-cache">
+        <div class="info-cache info-cache--session">
           <div class="info-cache-label">
             <span>{t().environment.cache} ({t().environment.sessionTotal})</span>
             <strong>{`${usage().sessionCacheHitPct!.toFixed(1)}%`}</strong>

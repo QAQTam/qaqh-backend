@@ -46,3 +46,6 @@
   font-size:12px;
   pointer-events:none;
 }
+.info-cache--session{background:color-mix(in srgb,#3b82f6 6%,transparent)}
+.info-cache--session .info-cache-label strong{color:#2563eb}
+.info-cache--session .info-cache-progress>span{background:#3b82f6}
