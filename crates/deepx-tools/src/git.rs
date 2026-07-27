@@ -32,21 +32,24 @@ pub fn status_json(workspace: &str) -> Result<String, String> {
             continue;
         };
 
-        let (lines_added, lines_removed) = if matches!(change, "modified" | "added") {
-            let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-            let mut opts = DiffOptions::new();
-            opts.pathspec(&path);
-            head_tree
-                .and_then(|tree| {
-                    repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))
-                        .ok()
-                })
-                .and_then(|d| d.stats().ok())
-                .map(|s| (s.insertions() as u32, s.deletions() as u32))
-                .unwrap_or((0, 0))
-        } else {
-            (0, 0)
-        };
+        let (lines_added, lines_removed) = (0, 0);
+        // FIXME(git2-isolation): diff_tree_to_workdir_with_index 的 pathspec 过滤可能失效，
+        // 导致全量 diff 计算拖垮 tokio 运行时(code=1006)。注释掉待验证。
+        // 复用前：if matches!(change, "modified" | "added") {
+        //     let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+        //     let mut opts = DiffOptions::new();
+        //     opts.pathspec(&path);
+        //     head_tree
+        //         .and_then(|tree| {
+        //             repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))
+        //                 .ok()
+        //         })
+        //         .and_then(|d| d.stats().ok())
+        //         .map(|s| (s.insertions() as u32, s.deletions() as u32))
+        //         .unwrap_or((0, 0))
+        // } else {
+        //     (0, 0)
+        // };
 
         files.push(serde_json::json!({
             "path": path,

@@ -94,6 +94,8 @@ pub enum ControlServerMessage {
         request_id: Option<String>,
         code: String,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
     },
     Heartbeat {
         server_epoch: String,

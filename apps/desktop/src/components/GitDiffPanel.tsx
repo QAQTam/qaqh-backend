@@ -54,17 +54,63 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
   const [actionError, setActionError] = createSignal<string | null>(null);
   const [actionNotice, setActionNotice] = createSignal<string | null>(null);
   let refreshing = false;
+  let pollIntervalMs = 4_000;
+  let pollHandle: ReturnType<typeof setTimeout> | undefined;
+
+  function scheduleNextPoll(): void {
+    pollHandle = setTimeout(async () => {
+      if (!props.open || !props.seed) return;
+      const ok = await tryRefresh();
+      if (ok) {
+        pollIntervalMs = 4_000;
+      } else {
+        pollIntervalMs = Math.min(pollIntervalMs * 2, 32_000);
+        setTimeout(() => { pollIntervalMs = 4_000; }, 60_000);
+      }
+      if (props.open && props.seed) scheduleNextPoll();
+    }, pollIntervalMs);
+  }
+
+  async function tryRefresh(): Promise<boolean> {
+    if (!props.seed || refreshing) return true;
+    refreshing = true;
+    setLoading(true);
+    setListError(null);
+    try {
+      const raw = await request<GitFileEntry[]>("git.diff", { seed: props.seed });
+      setFiles(raw.map(file => ({ ...file, diffHtml: undefined })));
+      setDiffError(null);
+      const selected = selectedFile();
+      if (selected && raw.some(file => file.path === selected)) {
+        await selectFile(selected);
+      } else if (selected) {
+        setSelectedFile(null);
+        setDiffHtml(null);
+      }
+      return true;
+    } catch (e) {
+      console.error("git_diff error:", e);
+      setFiles([]);
+      setListError(String(e));
+      return false;
+    } finally {
+      setLoading(false);
+      refreshing = false;
+    }
+  }
 
   createEffect(
     () => ({ open: props.open, seed: props.seed, revision: props.changeRevision }),
     ({ open, seed, revision }) => {
     if (!open || !seed) return;
-    const timer = window.setTimeout(() => void refresh(), revision ? 280 : 0);
-    const poll = window.setInterval(() => void refresh(), 4_000);
+    pollIntervalMs = 4_000;
+    if (pollHandle) clearTimeout(pollHandle);
+    const timer = window.setTimeout(() => void tryRefresh(), revision ? 280 : 0);
     void loadBranches();
+    scheduleNextPoll();
     onCleanup(() => {
       window.clearTimeout(timer);
-      window.clearInterval(poll);
+      if (pollHandle) clearTimeout(pollHandle);
     });
   });
 
@@ -93,31 +139,8 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
     }
   });
 
-  async function refresh() {
-    if (!props.seed || refreshing) return;
-    refreshing = true;
-    setLoading(true);
-    setListError(null);
-    try {
-      const raw = await request<GitFileEntry[]>("git.diff", { seed: props.seed });
-      // A Git refresh invalidates every cached patch: a tool can update the selected file
-      // without changing its entry in the list.
-      setFiles(raw.map(file => ({ ...file, diffHtml: undefined })));
-      setDiffError(null);
-      const selected = selectedFile();
-      if (selected && raw.some(file => file.path === selected)) {
-        await selectFile(selected);
-      } else if (selected) {
-        setSelectedFile(null);
-        setDiffHtml(null);
-      }
-    } catch (e) {
-      console.error("git_diff error:", e);
-      setFiles([]);
-      setListError(String(e));
-    }
-    setLoading(false);
-    refreshing = false;
+  async function refresh(): Promise<void> {
+    tryRefresh().catch(e => console.error("manual refresh error:", e));
   }
 
   async function loadBranches() {

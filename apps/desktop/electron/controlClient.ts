@@ -293,7 +293,9 @@ export class DaemonControlClient {
       });
     });
 
-    socket.on("close", () => this.handleDisconnect("daemon connection closed"));
+    socket.on("close", (code: number, reason: Buffer, wasClean: boolean) => {
+      this.handleDisconnect(`daemon closed: code=${code} clean=${wasClean} reason="${(reason ?? "").toString()}"`);
+    });
     socket.on("error", error => {
       if (socket.readyState !== WebSocket.OPEN) this.handleDisconnect(error.message);
     });
@@ -344,7 +346,9 @@ export class DaemonControlClient {
   private roundTrip(message: ControlMessage): Promise<unknown> {
     const requestId = String(message.request_id ?? "");
     if (!requestId || this.socket?.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error("daemon disconnected"));
+      const state = this.socket?.readyState ?? -1;
+      const stateNames: Record<number, string> = { 0: "CONNECTING", 1: "OPEN", 2: "CLOSING", 3: "CLOSED" };
+      return Promise.reject(new Error(`daemon not connected: socket state=${state} (${stateNames[state] ?? "UNKNOWN"})`));
     }
     return new Promise((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
@@ -389,9 +393,9 @@ export class DaemonControlClient {
     const socket = this.socket;
     this.socket = undefined;
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
-    for (const pending of this.pending.values()) {
+    for (const [reqId, pending] of this.pending.entries()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error("daemon disconnected"));
+      pending.reject(new Error(`daemon disconnected: ${this.status.error || "connection dropped"} (pending request: ${reqId})`));
     }
     this.pending.clear();
   }

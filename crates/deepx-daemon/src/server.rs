@@ -185,6 +185,7 @@ async fn handle_connection(
                 request_id: None,
                 code: "protocol_version_mismatch".into(),
                 message: format!("server requires protocol {CONTROL_PROTOCOL_VERSION}"),
+                retry_after_ms: None,
             },
         )
         .await?;
@@ -257,8 +258,40 @@ async fn handle_connection(
         Ok::<(), String>(())
     });
     let (request_tx, mut request_rx) = mpsc::channel::<RequestJob>(REQUEST_QUEUE_CAPACITY);
+    let (git_tx, mut git_rx) = mpsc::channel::<RequestJob>(REQUEST_QUEUE_CAPACITY);
     let request_service = service.clone();
+    let git_service = request_service.clone();
     let request_outbound = priority_tx.clone();
+    let git_outbound = priority_tx.clone();
+    let git_worker = tokio::spawn(async move {
+        let git_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+        while let Some(job) = git_rx.recv().await {
+            let RequestJob { request_id, method, params } = job;
+            let service = git_service.clone();
+            let outbound = git_outbound.clone();
+            let permit = git_semaphore.clone().acquire_owned().await;
+            tokio::spawn(async move {
+                let _permit = permit;
+                let handled = tokio::task::spawn_blocking(move || service.handle(&method, &params)).await;
+                let message = match handled {
+                    Ok(Ok(result)) => ControlServerMessage::Response { request_id, result },
+                    Ok(Err(message)) => ControlServerMessage::Error {
+                        request_id: Some(request_id),
+                        code: "request_failed".into(),
+                        message,
+                        retry_after_ms: None,
+                    },
+                    Err(error) => ControlServerMessage::Error {
+                        request_id: Some(request_id),
+                        code: "runtime_failed".into(),
+                        message: error.to_string(),
+                        retry_after_ms: None,
+                    },
+                };
+                let _ = outbound.send(message).await;
+            });
+        }
+    });
     let request_worker = tokio::spawn(async move {
         while let Some(job) = request_rx.recv().await {
             let RequestJob {
@@ -275,11 +308,13 @@ async fn handle_connection(
                     request_id: Some(request_id),
                     code: "request_failed".into(),
                     message,
+                    retry_after_ms: None,
                 },
                 Err(error) => ControlServerMessage::Error {
                     request_id: Some(request_id),
                     code: "runtime_failed".into(),
                     message: error.to_string(),
+                    retry_after_ms: None,
                 },
             };
             if request_outbound.send(message).await.is_err() {
@@ -375,15 +410,17 @@ async fn handle_connection(
                         if DeepxService::session_scoped(&method){
                             let seed=params.get("seed").and_then(serde_json::Value::as_str).unwrap_or_default();
                             if !leases.lock().unwrap_or_else(|e|e.into_inner()).owns(seed,&client_instance_id,Instant::now()){
-                                priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:"session_lease_required".into(),message:format!("session {seed} is not attached")}).await.map_err(|_|"control writer stopped".to_string())?;continue;
+                                priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:"session_lease_required".into(),message:format!("session {seed} is not attached"),retry_after_ms:None}).await.map_err(|_|"control writer stopped".to_string())?;continue;
                             }
                         }
-                        if let Err(error)=request_tx.try_send(RequestJob{request_id:request_id.clone(),method,params}) {
+                        let job = RequestJob{request_id: request_id.clone(), method, params};
+                        let target = if job.method.starts_with("git.") { &git_tx } else { &request_tx };
+                        if let Err(error)=target.try_send(job) {
                             let code=match error {
                                 mpsc::error::TrySendError::Full(_)=>"request_queue_full",
                                 mpsc::error::TrySendError::Closed(_)=>"runtime_failed",
                             };
-                            priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:code.into(),message:"daemon request worker is unavailable".into()}).await.map_err(|_|"control writer stopped".to_string())?;
+                            priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:code.into(),message:"daemon request worker is unavailable".into(),retry_after_ms:Some(5_000)}).await.map_err(|_|"control writer stopped".to_string())?;
                         }
                     }
                     ControlClientMessage::ClientHello{..}=>break,
@@ -438,6 +475,7 @@ async fn handle_connection(
         }
     }
     request_worker.abort();
+    git_worker.abort();
     writer.abort();
     Ok(())
 }

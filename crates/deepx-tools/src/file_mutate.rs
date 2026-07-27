@@ -279,11 +279,10 @@ fn apply_one(
                 },
             );
         }
-        let escaped_new = new.replace('$', "$$");
         let new_content = if replace_all {
-            re.replace_all(content, &escaped_new).to_string()
+            re.replace_all(content, new).to_string()
         } else {
-            re.replacen(content, 1, &escaped_new).to_string()
+            re.replacen(content, 1, new).to_string()
         };
         let _msg = if replace_all {
             format!("regex replaced {count} matches")

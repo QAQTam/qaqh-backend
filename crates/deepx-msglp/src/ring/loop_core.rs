@@ -139,7 +139,7 @@ impl Loop {
         let cancel_for_reader = cancel.clone();
 
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<Ui2Agent>(4096);
-        let (event_tx, event_rx) = mpsc::sync_channel::<Agent2Ui>(65536);
+        let (event_tx, event_rx) = mpsc::sync_channel::<Agent2Ui>(655360);
         let writer_dead = Arc::new(AtomicBool::new(false));
         let writer_dead_for_thread = writer_dead.clone();
 
