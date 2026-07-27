@@ -138,9 +138,15 @@ impl AgentState {
             annotations.push(requested);
         }
         let mut context = self.msg.build_context_for_gate(&annotations);
-        // Catalog occupies a stable, transient system slot after the base
-        // system prefix. It is never persisted in MessageStore history.
-        if !snapshot.catalog.is_empty() {
+        // Catalog is now persisted as a system message on session creation.
+        // Only inject transiently when the stored messages lack it (first
+        // turn of a session created before this change, or empty catalog).
+        let has_catalog = context.iter().any(|message| {
+            message.role == "system" && message.content.iter().any(|block| {
+                matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("</available_skills>"))
+            })
+        });
+        if !snapshot.catalog.is_empty() && !has_catalog {
             let prefix_end = context
                 .iter()
                 .take_while(|message| message.role == "system")
