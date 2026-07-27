@@ -17,21 +17,25 @@ struct PrefixShape {
     tools_hash: String,
 }
 
-fn sha256_hex(data: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+fn prefix_hash(data: &str) -> String {
+    // FNV-1a 64-bit — deterministic across runs (unlike DefaultHasher
+    // which uses a random seed).  Same algorithm as
+    // deepx_skills::content_hash.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in data.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 impl PrefixShape {
     fn capture(system_text: &str, catalog_text: &str, tool_defs: &[deepx_types::ToolDef]) -> Self {
         let tools_json = serde_json::to_string(tool_defs).unwrap_or_default();
         Self {
-            system_hash: sha256_hex(system_text),
-            catalog_hash: sha256_hex(catalog_text),
-            tools_hash: sha256_hex(&tools_json),
+            system_hash: prefix_hash(system_text),
+            catalog_hash: prefix_hash(catalog_text),
+            tools_hash: prefix_hash(&tools_json),
         }
     }
 
@@ -232,7 +236,11 @@ impl AgentState {
         let sys_text: String = context
             .iter()
             .take_while(|m| m.role == "system")
-            .map(|m| serde_json::to_string(m).unwrap_or_default())
+            .flat_map(|m| &m.content)
+            .filter_map(|block| match block {
+                deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let cat_text = snapshot.catalog.clone();
