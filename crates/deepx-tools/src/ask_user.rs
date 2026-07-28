@@ -233,7 +233,7 @@ mod tests {
         });
         let result = exec_ask_user(&args);
         // Parse the JSON output
-        let value: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
         assert_eq!(value["status"], "ok");
         assert!(value.get("user_query").is_none());
         assert_eq!(value["mode"], "single");
@@ -255,7 +255,7 @@ mod tests {
             ]
         });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
         assert_eq!(value["status"], "ok");
         assert!(value.get("user_query").is_none());
         assert_eq!(value["mode"], "batch");
@@ -275,7 +275,7 @@ mod tests {
             "mode": "batch"
         });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
         let qs = value["questions"].as_array().unwrap();
         assert_eq!(qs[0]["id"], "q1");
         assert_eq!(qs[1]["id"], "q2");
@@ -286,7 +286,7 @@ mod tests {
     fn empty_questions_error() {
         let args = serde_json::json!({ "questions": [] });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
         assert_eq!(value["status"], "error");
     }
 
@@ -299,7 +299,7 @@ mod tests {
             ]
         });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
         assert_eq!(value["status"], "error");
     }
 
@@ -307,7 +307,7 @@ mod tests {
     fn old_format_no_options() {
         let args = serde_json::json!({ "question": "What do you think?" });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
         assert_eq!(value["status"], "ok");
         let q = &value["questions"][0];
         assert_eq!(q["question"], "What do you think?");

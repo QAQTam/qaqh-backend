@@ -6,6 +6,7 @@ use super::ToolManager;
 use super::exec;
 use super::web;
 
+use super::apply_patch;
 use super::file_mutate;
 use super::file_query;
 
@@ -29,6 +30,7 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     web::register(&mut mgr);
 
     // ── 文件操作 ──
+    apply_patch::register(&mut mgr);
     file_mutate::register(&mut mgr);
     file_query::register(&mut mgr);
 

@@ -4,6 +4,7 @@
 
 pub mod exec;
 
+pub mod apply_patch;
 pub mod authorization;
 mod code_delta;
 pub mod execution;

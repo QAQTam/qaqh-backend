@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 /// Stable content fingerprint exposed by `read` and accepted as a write precondition.
-pub(super) fn content_hash(content: &str) -> String {
+pub(crate) fn content_hash(content: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(content.as_bytes()))
 }
@@ -61,7 +61,7 @@ pub(super) fn atomic_write(path: &str, content: &str) -> std::io::Result<()> {
 }
 
 /// Normalize CRLF → LF in content. Returns (normalized, was_crlf).
-pub(super) fn normalize_newlines(content: &str) -> (String, bool) {
+pub(crate) fn normalize_newlines(content: &str) -> (String, bool) {
     if content.contains("\r\n") {
         (content.replace("\r\n", "\n"), true)
     } else if content.contains('\r') {

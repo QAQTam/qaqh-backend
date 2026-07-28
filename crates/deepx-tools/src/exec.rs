@@ -4,6 +4,12 @@
 //! to the UI while retaining a bounded final result for the LLM.
 //! Output is read via pipes (not `output()`) to prevent OOM on large outputs,
 //! and truncated by actual token count using `deepx_types::token::count_tokens`.
+//!
+//! Two invocation modes:
+//!   • `argv`  — direct exec, no shell (for simple program calls).
+//!   • `command` — auto-wrapped in the platform shell, enabling pipes,
+//!     redirects, and builtins without the model needing to spell out the
+//!     shell executable manually.
 
 use crate::{ExecOutputStream, ExecProgressEvent, ExecProgressSender, ToolCallCtx, ToolResult};
 use serde::Serialize;
@@ -12,6 +18,101 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+
+// ── Platform shell detection ──
+// Adapted from codex-rs/shell-command/src/shell_detect.rs & core/src/shell.rs.
+// Stripped to the minimum needed: pick the right shell, derive argv.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum Shell {
+    Bash,
+    Zsh,
+    Sh,
+    PowerShell,
+    Cmd,
+}
+
+impl Shell {
+    /// Auto-detect the best available shell on this platform.
+    fn detect() -> Self {
+        #[cfg(windows)]
+        {
+            // Prefer bash (Git for Windows / MSYS2 / WSL interop),
+            // then pwsh, falling back to cmd.
+            if std::process::Command::new("bash")
+                .arg("-c")
+                .arg("exit 0")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+            {
+                return Shell::Bash;
+            }
+            if std::process::Command::new("pwsh")
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg("exit 0")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+            {
+                return Shell::PowerShell;
+            }
+            Shell::Cmd
+        }
+        #[cfg(not(windows))]
+        {
+            if std::process::Command::new("bash")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+            {
+                return Shell::Bash;
+            }
+            Shell::Sh
+        }
+    }
+
+    /// Path to the shell executable.
+    fn path(&self) -> &'static str {
+        match self {
+            Shell::Bash => "bash",
+            Shell::Zsh => "zsh",
+            Shell::Sh => "sh",
+            Shell::PowerShell => "pwsh",
+            Shell::Cmd => "cmd",
+        }
+    }
+
+    /// Build the argv that runs `command` through this shell.
+    fn derive_exec_args(&self, command: &str) -> Vec<String> {
+        match self {
+            Shell::Bash | Shell::Zsh | Shell::Sh => {
+                vec![self.path().to_string(), "-c".to_string(), command.to_string()]
+            }
+            Shell::PowerShell => {
+                vec![
+                    self.path().to_string(),
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    command.to_string(),
+                ]
+            }
+            Shell::Cmd => {
+                vec![
+                    self.path().to_string(),
+                    "/c".to_string(),
+                    command.to_string(),
+                ]
+            }
+        }
+    }
+}
 
 /// Stream read from a pipe, capped at `max_bytes`.
 ///
@@ -512,20 +613,36 @@ impl ExecOutput {
 // ── Tool handler ──
 
 pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
-    let argv: Vec<String> = match ctx.args.get("argv").and_then(|v| v.as_array()) {
-        Some(arr) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect(),
-        None => {
+    // ── Resolve argv ──
+    // Two modes: `command` (auto-wrapped in platform shell) or `argv` (direct exec).
+    let argv: Vec<String> = if let Some(command) = ctx.get_str("command") {
+        if command.is_empty() {
             return ToolResult {
                 success: false,
                 content: crate::json_err(
-                    "MISSING_ARGV",
-                    "exec requires an argv array",
-                    "Example: [\"cargo\", \"check\"]",
+                    "EMPTY_COMMAND",
+                    "command string is empty",
+                    "Provide a shell command string.",
                 ),
             };
+        }
+        Shell::detect().derive_exec_args(command)
+    } else {
+        match ctx.args.get("argv").and_then(|v| v.as_array()) {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+            None => {
+                return ToolResult {
+                    success: false,
+                    content: crate::json_err(
+                        "MISSING_ARGV",
+                        "exec requires argv or command",
+                        "Example: {\"argv\": [\"cargo\", \"check\"]} or {\"command\": \"cargo check\"}",
+                    ),
+                };
+            }
         }
     };
     if argv.is_empty() {
@@ -620,17 +737,22 @@ use std::time::Duration;
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
         key: "exec".to_string(),
-        description: "Execute a command. Pass {\"argv\": [\"program\", \"arg1\", \"arg2\", ...]}. The first element is the executable, the rest are arguments. No shell — for shell builtins use cmd /c, pwsh -Command, or bash -c as the executable. For pipes or redirects, write a script file and run it. Returns {\"status\": \"completed\", \"exit_code\": 0, \"output\": \"...\", \"wall_time_seconds\": 0.5, \"timed_out\": false}",
+        description: "Execute a command. Two modes: (1) {\"argv\": [\"program\", \"arg1\", ...]} — direct exec, no shell. (2) {\"command\": \"pipeline | grep foo\"} — auto-wrapped in the platform shell (bash -c / pwsh -Command / cmd /c), enabling pipes, redirects, and shell builtins. For the argv mode, the first element is the executable, the rest are arguments. Returns {\"status\": \"completed\", \"exit_code\": 0, \"output\": \"...\", \"wall_time_seconds\": 0.5, \"timed_out\": false}",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "argv": { "type": "array", "items": {"type": "string"}, "description": "Command as array of strings. argv[0]=executable, argv[1..]=args. Example: [\"cargo\",\"check\"]" },
+                "command": { "type": "string", "description": "Shell command string. Auto-wrapped in platform shell (bash -c, pwsh -Command, or cmd /c). Use for pipes, redirects, or one-liners. Example: \"ls -la | grep foo\"" },
                 "cwd": {"type": "string", "description": "Working directory (optional). Defaults to workspace root."},
                 "timeout_secs": {"type": "integer", "description": "Timeout in seconds (1-3600, default 30)"},
                 "max_output_tokens": { "type": "integer", "description": "Max tokens of output before smart truncation (head 70% + tail 30%). Default 10000, min 100, max 50000." }
             },
-            "required": ["argv"],
-            "additionalProperties": false
+            "required": [],
+            "additionalProperties": false,
+            "oneOf": [
+                {"required": ["argv"]},
+                {"required": ["command"]}
+            ]
         }),
         handler: handle_run,
         risk: ToolRisk::Destructive,

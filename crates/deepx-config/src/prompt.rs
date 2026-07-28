@@ -49,21 +49,15 @@ pub fn full_system_prompt_with_date(today: &str, os_info: &str) -> String {
 fn detect_shells() -> String {
     let mut shells: Vec<&str> = Vec::new();
     if cfg!(windows) {
-        shells.push("cmd");
-        // pwsh (PowerShell 7) — check both common install locations
-        let pwsh_paths = [
-            r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.4.0_x64__8wekyb3d8bbwe\pwsh.exe",
-            r"C:\Program Files (x86)\PowerShell\7\pwsh.exe",
-        ];
-        if pwsh_paths.iter().any(|p| std::path::Path::new(p).exists()) {
+        // bash (Git for Windows / MSYS2 / WSL interop)
+        if which_shell("bash") {
+            shells.push("bash (Git for Windows)");
+        }
+        // pwsh (PowerShell 7)
+        if which_shell("pwsh") {
             shells.push("pwsh (PowerShell 7)");
         }
-        // Legacy Windows PowerShell
-        if std::path::Path::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
-            .exists()
-        {
-            shells.push("powershell (Windows PowerShell 5)");
-        }
+        shells.push("cmd");
     } else {
         shells.push("bash");
         shells.push("sh");
@@ -72,6 +66,17 @@ fn detect_shells() -> String {
         }
     }
     shells.join(", ")
+}
+
+/// Check if a shell executable can be spawned.
+fn which_shell(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg(if name == "bash" { "-c" } else { "-Command" })
+        .arg("exit 0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -101,10 +106,10 @@ mod tests {
     #[test]
     fn prompt_teaches_hash_bound_patch_preview_before_apply() {
         let prompt = full_system_prompt();
-        assert!(prompt.contains("[PATCH TOOL]"));
+        assert!(prompt.contains("[FILE EDITING]"));
+        assert!(prompt.contains("apply_patch"));
         assert!(prompt.contains("expected_hash"));
         assert!(prompt.contains("dry_run: true"));
-        assert!(prompt.contains("patch_edit"));
-        assert!(prompt.contains("patch_commit"));
+        assert!(prompt.contains("*** Begin Patch"));
     }
 }
