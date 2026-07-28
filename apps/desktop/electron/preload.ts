@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld("deepx", {
     stageUpdate: (source: string) => ipcRenderer.invoke("desktop:stage-update", source) as Promise<UpdateInfo | null>,
     applyUpdate: (operationPath: string) => ipcRenderer.invoke("desktop:apply-update", operationPath) as Promise<{ restarting: boolean }>,
     openDevTools: () => ipcRenderer.invoke("desktop:open-devtools") as Promise<boolean>,
+    setBackgroundMaterial: (material: "auto" | "mica" | "acrylic" | "none") =>
+      ipcRenderer.invoke("desktop:set-background-material", material) as Promise<boolean>,
     onUpdateAvailable: (listener: (info: UpdateInfo) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, info: UpdateInfo) => listener(info);
       ipcRenderer.on("update:available", handler);

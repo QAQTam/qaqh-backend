@@ -1,7 +1,13 @@
 @import "tailwindcss";
 
 /* ── Full-height chain: ensure every ancestor passes 100% down ── */
-html, body, #root { height: 100%; margin: 0; overflow: hidden; }
+html, body, #root { height: 100%; margin: 0; overflow: hidden; background: transparent; }
+
+/* When Electron's backgroundMaterial (Mica/Acrylic) is active, the root
+   background must be semi-transparent so the system material shows through.
+   The rgba values mirror the opaque theme colors but with ~85% alpha. */
+html { background: transparent; }
+body { background: transparent; }
 
 /* ── Bundled Fonts ── */
 @font-face {

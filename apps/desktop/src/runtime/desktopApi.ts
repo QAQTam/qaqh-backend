@@ -40,6 +40,17 @@ export async function openDevTools(): Promise<boolean> {
   return window.deepx?.desktop.openDevTools() ?? false;
 }
 
+/** Set the window's background material (Mica / Acrylic / auto / none). Windows only. */
+export async function setBackgroundMaterial(
+  material: "auto" | "mica" | "acrylic" | "none",
+): Promise<boolean> {
+  try {
+    return await desktopBridge().setBackgroundMaterial(material);
+  } catch {
+    return false;
+  }
+}
+
 // ── Auto-update ──────────────────────────────────────────
 
 export interface UpdateInfo {

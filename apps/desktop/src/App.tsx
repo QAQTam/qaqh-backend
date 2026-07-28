@@ -6,6 +6,7 @@ import {
   openDialog,
   onUpdateAvailable,
   onUpdateFailed,
+  setBackgroundMaterial,
   type UpdateInfo,
 } from "./runtime/desktopApi";
 import type { Agent2Ui, AskAnswer, SessionMeta, TaskInfo } from "./lib/types";
@@ -479,6 +480,8 @@ export default function App() {
     setTheme(nextTheme);
     localStorage.setItem(LS_THEME, nextTheme);
     applyTheme(nextTheme);
+    // Re-apply system material so the translucent sidebar reflects the new theme.
+    void setBackgroundMaterial("auto");
   }
 
   onSettled(() => {
@@ -486,6 +489,8 @@ export default function App() {
     const savedTheme = (localStorage.getItem(LS_THEME) ?? "system") as ThemeMode;
     setTheme(savedTheme);
     applyTheme(savedTheme);
+    // Activate Mica/Acrylic after first render (Electron 28+, Windows only).
+    void setBackgroundMaterial("auto");
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const onSystemThemeChange = () => {
       if ((localStorage.getItem(LS_THEME) ?? "system") === "system") applyTheme("system");

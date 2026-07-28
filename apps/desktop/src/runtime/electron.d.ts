@@ -23,6 +23,7 @@ interface DeepxDesktopApi {
     stageUpdate(source: string): Promise<UpdateInfo | null>;
     applyUpdate(operationPath: string): Promise<{ restarting: boolean }>;
     openDevTools(): Promise<boolean>;
+    setBackgroundMaterial(material: "auto" | "mica" | "acrylic" | "none"): Promise<boolean>;
     onUpdateAvailable(listener: (info: UpdateInfo) => void): () => void;
     onUpdateFailed(listener: (failure: { operationId: string; message: string }) => void): () => void;
   };
