@@ -105,13 +105,6 @@ function createWindow(): void {
     // Keep the Windows-managed caption buttons and drag area outside the
     // renderer process. They remain usable when the web UI is unresponsive.
     frame: true,
-    // Electron docs: backgroundMaterial only works when transparent is true.
-    // On Windows, the native frame stays opaque while the client area becomes
-    // an alpha-composited surface where Mica/Acrylic can show through.
-    transparent: true,
-    // Win11: Mica (samples wallpaper color) / Win10: Acrylic (blur)
-    // 'auto' picks the best available material for the OS version.
-    backgroundMaterial: "auto",
     webPreferences: {
       preload: join(__dirname, "../preload/preload.cjs"),
       contextIsolation: true,
