@@ -154,16 +154,31 @@ fn openai() -> ProviderSpec {
     ProviderSpec {
         id: "openai".into(),
         display: "OpenAI".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "Chat Completions".into(),
-            protocol: "openai".into(),
-            base_url: "https://api.openai.com/v1".into(),
-            default_model: String::new(),
-            models: vec![],
-            models_url: Some("https://api.openai.com/v1".into()),
-            ..Default::default()
-        }],
+        endpoints: vec![
+            EndpointSpec {
+                id: "openai".into(),
+                display: "Chat Completions".into(),
+                protocol: "openai".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                default_model: String::new(),
+                models: vec![],
+                models_url: Some("https://api.openai.com/v1".into()),
+                ..Default::default()
+            },
+            EndpointSpec {
+                id: "responses".into(),
+                display: "Responses API".into(),
+                protocol: "responses".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                default_model: String::new(),
+                models: vec![],
+                models_url: Some("https://api.openai.com/v1".into()),
+                supports_thinking: false,
+                supports_reasoning_effort: true,
+                supports_reasoning_content: false,
+                ..Default::default()
+            },
+        ],
     }
 }
 
@@ -381,5 +396,29 @@ mod tests {
         assert!(!endpoint.tool_call_content_null);
         assert!(endpoint.supports_reasoning_content);
         assert!(!endpoint.require_provider_parameters);
+    }
+
+    #[test]
+    fn openai_responses_endpoint_exists() {
+        let endpoint = find_endpoint("openai", "responses").expect("OpenAI Responses endpoint");
+        assert_eq!(endpoint.protocol, "responses");
+        assert_eq!(endpoint.base_url, "https://api.openai.com/v1");
+        assert!(!endpoint.supports_thinking);
+        assert!(endpoint.supports_reasoning_effort);
+        assert!(!endpoint.supports_reasoning_content);
+    }
+
+    #[test]
+    fn protocol_for_responses_endpoint() {
+        let proto = protocol_for("openai", "responses");
+        assert_eq!(proto, "responses");
+    }
+
+    #[test]
+    fn chat_endpoint_still_works() {
+        let proto = protocol_for("openai", "openai");
+        assert_eq!(proto, "openai");
+        let url = base_url_for("openai", "openai");
+        assert_eq!(url, "https://api.openai.com/v1");
     }
 }

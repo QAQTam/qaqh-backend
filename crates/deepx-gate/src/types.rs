@@ -6,11 +6,15 @@ use deepx_types::{CacheTokenField, ThinkingParamMode};
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderKind {
     OpenAi,
+    Responses,
 }
 
 impl ProviderKind {
-    pub fn from_str(_s: &str) -> Self {
-        Self::OpenAi
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "responses" => Self::Responses,
+            _ => Self::OpenAi,
+        }
     }
 }
 
@@ -24,6 +28,7 @@ pub struct ProviderConfig {
 
     // ── Multi-provider adaptation fields ──
     pub chat_path: Option<String>,
+    pub responses_path: Option<String>,
     pub thinking_mode: ThinkingParamMode,
     pub cache_field: CacheTokenField,
     pub include_stream_usage: bool,
@@ -63,6 +68,7 @@ impl ProviderConfig {
             model: model.to_string(),
             user_id_mode,
             chat_path,
+            responses_path: None,
             thinking_mode,
             cache_field,
             include_stream_usage: false,
@@ -72,6 +78,35 @@ impl ProviderConfig {
             supports_reasoning_content: true,
             require_provider_parameters: false,
             do_sample,
+            stateful: false,
+            supports_tail_system: true,
+        }
+    }
+
+    /// Build a Responses API provider config.
+    pub fn responses(
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        responses_path: Option<String>,
+    ) -> Self {
+        Self {
+            kind: ProviderKind::Responses,
+            base_url: base_url.to_string(),
+            api_key: api_key.to_string(),
+            model: model.to_string(),
+            user_id_mode: None,
+            chat_path: None,
+            responses_path,
+            thinking_mode: ThinkingParamMode::OpenAi,
+            cache_field: CacheTokenField::default(),
+            include_stream_usage: false,
+            supports_thinking: false,
+            supports_reasoning_effort: true,
+            tool_call_content_null: false,
+            supports_reasoning_content: false,
+            require_provider_parameters: false,
+            do_sample: None,
             stateful: false,
             supports_tail_system: true,
         }

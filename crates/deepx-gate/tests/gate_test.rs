@@ -814,3 +814,163 @@ fn dsml_tool_call_in_content() {
         }
     );
 }
+
+// ── Responses API tests ──────────────────────────────────────────────
+
+fn make_responses_provider(mock: &MockServer) -> ProviderConfig {
+    ProviderConfig::responses(
+        &mock.base_url(),
+        "sk-test-key",
+        "test-model",
+        None, // responses_path
+    )
+}
+
+/// Build a Responses-format SSE stream with text, reasoning, and completion.
+fn responses_sse_scenario() -> Vec<mock_server::SseChunk> {
+    vec![
+        // event: response.output_text.delta
+        mock_server::SseChunk::Raw(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n".into()
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\" world\"}\n\n".into()
+        ),
+        // event: response.reasoning_text.delta
+        mock_server::SseChunk::Raw(
+            "event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"r1\",\"output_index\":0,\"content_index\":0,\"delta\":\"thinking...\"}\n\n".into()
+        ),
+        // event: response.output_item.done
+        mock_server::SseChunk::Raw(
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello world\",\"annotations\":[]}]}}\n\n".into()
+        ),
+        // event: response.completed
+        mock_server::SseChunk::Raw(
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"test-model\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"output_tokens_details\":{\"reasoning_tokens\":5},\"total_tokens\":13}}}\n\n".into()
+        ),
+        mock_server::SseChunk::done(),
+    ]
+}
+
+#[test]
+fn responses_chat_stream_basic_text() {
+    let mock = MockServer::new(responses_sse_scenario());
+    let provider = make_responses_provider(&mock);
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let result = deepx_gate::chat_stream(
+        &provider,
+        vec![Message::user("hi")],
+        None,
+        4096,
+        Some("high".into()),
+        None,
+        None,
+        &mut |ev| events.push(ev),
+    );
+    assert!(result.is_ok(), "chat_stream failed: {:?}", result);
+
+    // Should have ContentDelta for text
+    let texts: Vec<&str> = events.iter().filter_map(|ev| {
+        if let StreamEvent::ContentDelta(t) = ev { Some(t.as_str()) } else { None }
+    }).collect();
+    assert_eq!(texts, vec!["Hello", " world"]);
+
+    // Should have ReasoningDelta
+    let reasoning: Vec<&str> = events.iter().filter_map(|ev| {
+        if let StreamEvent::ReasoningDelta(t) = ev { Some(t.as_str()) } else { None }
+    }).collect();
+    assert_eq!(reasoning, vec!["thinking..."]);
+
+    // Should have a Done event with usage
+    let done = events.iter().find_map(|ev| {
+        if let StreamEvent::Done { usage, .. } = ev { Some(usage.clone()) } else { None }
+    }).flatten();
+    assert!(done.is_some(), "should have Done event");
+    let usage = done.unwrap();
+    assert_eq!(usage.prompt_tokens, 10);
+    assert_eq!(usage.completion_tokens, 3);
+    assert_eq!(usage.reasoning_tokens, 5);
+}
+
+#[test]
+fn responses_chat_stream_with_tool_calls() {
+    let scenario = vec![
+        mock_server::SseChunk::Raw(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Let me check\"}\n\n".into()
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc1\",\"output_index\":1,\"delta\":\"{\\\"path\\\":\\\"\"}\n\n".into()
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc1\",\"output_index\":1,\"delta\":\"/x.txt\\\"}\"}\n\n".into()
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc1\",\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/x.txt\\\"}\",\"status\":\"completed\"}}\n\n".into()
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\",\"model\":\"test-model\",\"usage\":{\"input_tokens\":5,\"output_tokens\":10,\"total_tokens\":15}}}\n\n".into()
+        ),
+        mock_server::SseChunk::done(),
+    ];
+
+    let mock = MockServer::new(scenario);
+    let provider = make_responses_provider(&mock);
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let result = deepx_gate::chat_stream(
+        &provider,
+        vec![Message::user("read /x.txt")],
+        None,
+        4096,
+        Some("high".into()),
+        None,
+        None,
+        &mut |ev| events.push(ev),
+    );
+    assert!(result.is_ok());
+
+    // Should have tool call progress
+    let tool_events: Vec<_> = events.iter().filter_map(|ev| {
+        if let StreamEvent::ToolCallProgress { name, args_so_far, .. } = ev {
+            Some((name.clone(), args_so_far.clone()))
+        } else { None }
+    }).collect();
+    assert!(!tool_events.is_empty(), "should have tool call events");
+    assert_eq!(tool_events[0].0, "read_file");
+    assert_eq!(tool_events[0].1, "{\"path\":\"/x.txt\"}");
+}
+
+#[test]
+fn responses_chat_stream_http_error_retries() {
+    let scenario1 = vec![
+        mock_server::SseChunk::HttpError(503, json!({"error": {"message": "overloaded"}})),
+    ];
+    // Second attempt succeeds
+    let scenario2 = vec![
+        mock_server::SseChunk::Raw(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n".into()
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"model\":\"m\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n".into()
+        ),
+        mock_server::SseChunk::done(),
+    ];
+
+    let mock = MockServer::new_sequential(vec![scenario1, scenario2]);
+    let provider = make_responses_provider(&mock);
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let result = deepx_gate::chat_stream(
+        &provider,
+        vec![Message::user("hi")],
+        None,
+        4096,
+        None,
+        None,
+        None,
+        &mut |ev| events.push(ev),
+    );
+    assert!(result.is_ok(), "should succeed after retry: {:?}", result);
+    assert_eq!(mock.request_count.load(Ordering::SeqCst), 2, "should have retried once");
+}

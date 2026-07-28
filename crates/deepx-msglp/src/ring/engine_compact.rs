@@ -197,27 +197,38 @@ impl CompactEngine {
             &ctx.agent.config.provider_id,
             &ctx.agent.config.endpoint,
         );
-        let mut provider = deepx_gate::ProviderConfig::openai(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.user_id_mode.clone()),
-            ep.as_ref().and_then(|e| e.chat_path.clone()),
-            ep.as_ref()
-                .map(|e| e.thinking_mode.clone())
-                .unwrap_or_default(),
-            ep.as_ref()
-                .map(|e| e.cache_field.clone())
-                .unwrap_or_default(),
-            ep.as_ref().map(|e| e.supports_thinking).unwrap_or(false),
-            ep.as_ref().and_then(|e| e.do_sample),
-        );
-        if let Some(endpoint) = ep.as_ref() {
-            provider.supports_reasoning_effort = endpoint.supports_reasoning_effort;
-            provider.tool_call_content_null = endpoint.tool_call_content_null;
-            provider.supports_reasoning_content = endpoint.supports_reasoning_content;
-            provider.require_provider_parameters = endpoint.require_provider_parameters;
-        }
+        let is_responses = ep.as_ref().map(|e| e.protocol.as_str()) == Some("responses");
+        let provider = if is_responses {
+            deepx_gate::ProviderConfig::responses(
+                &ctx.agent.config.base_url,
+                &ctx.agent.config.api_key,
+                &ctx.agent.config.model,
+                ep.as_ref().and_then(|e| e.responses_path.clone()),
+            )
+        } else {
+            let mut p = deepx_gate::ProviderConfig::openai(
+                &ctx.agent.config.base_url,
+                &ctx.agent.config.api_key,
+                &ctx.agent.config.model,
+                ep.as_ref().and_then(|e| e.user_id_mode.clone()),
+                ep.as_ref().and_then(|e| e.chat_path.clone()),
+                ep.as_ref()
+                    .map(|e| e.thinking_mode.clone())
+                    .unwrap_or_default(),
+                ep.as_ref()
+                    .map(|e| e.cache_field.clone())
+                    .unwrap_or_default(),
+                ep.as_ref().map(|e| e.supports_thinking).unwrap_or(false),
+                ep.as_ref().and_then(|e| e.do_sample),
+            );
+            if let Some(endpoint) = ep.as_ref() {
+                p.supports_reasoning_effort = endpoint.supports_reasoning_effort;
+                p.tool_call_content_null = endpoint.tool_call_content_null;
+                p.supports_reasoning_content = endpoint.supports_reasoning_content;
+                p.require_provider_parameters = endpoint.require_provider_parameters;
+            }
+            p
+        };
         Some((prompt, kept_user_count, head_user_count, provider))
     }
 

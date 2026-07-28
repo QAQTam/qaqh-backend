@@ -75,6 +75,9 @@ pub struct EndpointSpec {
     /// Chat completions path override (appended to `base_url`).
     /// `None` = default `/chat/completions`.
     pub chat_path: Option<String>,
+    /// Responses API path override (appended to `base_url`).
+    /// `None` = default `/responses`.
+    pub responses_path: Option<String>,
     /// Balance query path override (appended to `base_url`).
     /// `None` = default `/user/balance`.
     pub balance_path: Option<String>,
@@ -127,6 +130,7 @@ impl Default for EndpointSpec {
             models_url: None,
             user_id_mode: None,
             chat_path: None,
+            responses_path: None,
             balance_path: None,
             thinking_mode: ThinkingParamMode::default(),
             cache_field: CacheTokenField::default(),

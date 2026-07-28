@@ -295,17 +295,8 @@ impl AgentState {
                     }
                 }
 
-                // 2) 跨会话记忆检索
-                if !query.is_empty() {
-                    if let Ok(entries) = engine.recall_memory(&query, 3) {
-                        if !entries.is_empty() {
-                            let memory_ctx = VectorEngine::format_memory_context(&entries);
-                            if !memory_ctx.is_empty() {
-                                context.push(deepx_types::Message::system(&memory_ctx));
-                            }
-                        }
-                    }
-                }
+                // 2) 跨会话记忆检索已移除 — 自动注入可能导致语义失准，
+                // 改为通过 memory query 工具显式查询
             }
         }
         context

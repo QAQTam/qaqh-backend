@@ -1,6 +1,6 @@
 //! deepx-gate: LLM API gateway — HTTP streaming + message format conversion.
 //!
-//! Currently supports OpenAI-compatible protocol.
+//! Supports OpenAI Chat Completions and Responses API protocols.
 //!
 //! # Note: string slices
 //!
@@ -11,6 +11,7 @@
 
 pub mod guard;
 mod openai;
+mod responses;
 #[cfg(test)]
 mod rt_test;
 pub mod tool_parser;
@@ -39,17 +40,29 @@ pub fn chat_stream(
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
-    openai::chat_stream_openai(
-        provider,
-        &provider.model,
-        messages,
-        tools,
-        max_tokens,
-        effort,
-        user_id,
-        cancel,
-        on_event,
-    )
+    match provider.kind {
+        ProviderKind::Responses => responses::chat_stream_responses(
+            provider,
+            &provider.model,
+            messages,
+            tools,
+            max_tokens,
+            effort,
+            cancel,
+            on_event,
+        ),
+        ProviderKind::OpenAi => openai::chat_stream_openai(
+            provider,
+            &provider.model,
+            messages,
+            tools,
+            max_tokens,
+            effort,
+            user_id,
+            cancel,
+            on_event,
+        ),
+    }
 }
 
 /// Synchronous (non-streaming) chat for internal use (compact, etc.).
@@ -58,5 +71,8 @@ pub fn chat_sync(
     messages: Vec<Message>,
     max_tokens: u32,
 ) -> Result<String, String> {
-    openai::chat_sync_openai(provider, &provider.model, messages, max_tokens)
+    match provider.kind {
+        ProviderKind::Responses => responses::chat_sync_responses(provider, &provider.model, messages, max_tokens),
+        ProviderKind::OpenAi => openai::chat_sync_openai(provider, &provider.model, messages, max_tokens),
+    }
 }

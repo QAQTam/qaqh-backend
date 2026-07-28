@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>DeepX Mermaid 配置对比测试</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; max-width: 1400px; margin: 2em auto; }
+        .section { margin: 2em 0; padding: 1.5em; border: 2px solid #ccc; border-radius: 8px; }
+        .section h2 { margin-top: 0; }
+        .config-a { border-color: #4CAF50; }
+        .config-b { border-color: #FF9800; }
+        .test-row { display: flex; gap: 1em; margin: 1em 0; padding: 1em; background: #f9f9f9; border-radius: 4px; }
+        .test-row .label { min-width: 200px; font-weight: bold; }
+        .result { flex: 1; padding: 0.5em; border: 1px solid #ddd; border-radius: 4px; min-height: 60px; }
+        .result.pass { border-color: #4CAF50; background: #f1f8f1; }
+        .result.fail { border-color: #f44336; background: #fef0f0; }
+        .error-msg { color: #c44; font-size: 12px; font-family: monospace; margin-top: 0.5em; }
+        .code-block { font-family: monospace; font-size: 12px; background: #f4f4f4; padding: 0.5em; border-radius: 3px; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+    <h1>🔍 DeepX Mermaid 配置对比测试</h1>
+    <p>版本: <strong>11.16.0</strong> | 对比: 默认配置 vs DeepX 自定义配置</p>
+
+    <div class="section config-a">
+        <h2>✅ 配置 A: 默认 (你的测试页面)</h2>
+        <div id="results-a"></div>
+    </div>
+
+    <div class="section config-b">
+        <h2>🎨 配置 B: DeepX 自定义配置</h2>
+        <p style="color: #666; font-size: 14px;">
+            关键差异: <code>theme: "base"</code>, <code>htmlLabels: true</code>, <code>deterministicIds: true</code>, 
+            自定义 themeVariables
+        </p>
+        <div id="results-b"></div>
+    </div>
+
+    <script>
+        const testCases = [
+            {
+                name: "双向箭头 无标签",
+                code: "graph TD\n    A <--> B",
+                shouldWork: true
+            },
+            {
+                name: "双向箭头 + 标签",
+                code: 'graph TD\n    A <-->|"双向通信"| B',
+                shouldWork: true
+            },
+            {
+                name: "双向粗箭头 + 标签",
+                code: 'graph TD\n    A <==>|"WebSocket"| B',
+                shouldWork: true
+            },
+            {
+                name: "双向粗箭头 + 含 br 标签",
+                code: 'graph TD\n    A <==>|"WebSocket<br/>ws://127.0.0.1"| B',
+                shouldWork: true
+            },
+            {
+                name: "单向箭头 + 标签",
+                code: 'graph TD\n    A -->|"HTTP"| B',
+                shouldWork: true
+            },
+            {
+                name: "无向边 + 标签",
+                code: 'graph TD\n    A ---|"连接"| B',
+                shouldWork: true
+            }
+        ];
+
+        // 配置 A: 默认
+        const configA = {
+            startOnLoad: false,
+            theme: 'default'
+        };
+
+        // 配置 B: DeepX 完全一致
+        const configB = {
+            startOnLoad: false,
+            theme: "base",
+            themeVariables: {
+                primaryColor: "#f4f2ef",
+                primaryTextColor: "#1e1e1e",
+                primaryBorderColor: "#c8c4bc",
+                lineColor: "#c8c4bc",
+                secondaryColor: "#ebe8e3",
+                tertiaryColor: "#e0dcd6",
+                nodeBorder: "#c8c4bc",
+                nodeTextColor: "#1e1e1e",
+                actorBorder: "#c8c4bc",
+                actorBkg: "#f4f2ef",
+                actorTextColor: "#1e1e1e",
+                signalColor: "#1e1e1e",
+                signalTextColor: "#1e1e1e",
+                edgeLabelBackground: "#f4f2ef",
+                fontFamily: "'MiSans','Noto Sans SC','Inter',-apple-system,sans-serif",
+                fontSize: "11px",
+            },
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                padding: 8,
+                nodeSpacing: 16,
+                rankSpacing: 25,
+            },
+            sequence: {
+                useMaxWidth: true,
+                boxMargin: 8,
+                mirrorActors: false,
+            },
+            deterministicIds: true,
+            fontFamily: "system-ui, sans-serif",
+        };
+
+        let renderCounter = 0;
+
+        async function runTest(config, containerId) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+
+            for (const tc of testCases) {
+                renderCounter++;
+                const id = `mermaid-${containerId}-${renderCounter}-${Date.now().toString(36)}`;
+                
+                mermaid.initialize(config);
+                
+                const row = document.createElement('div');
+                row.className = 'test-row';
+                
+                const label = document.createElement('div');
+                label.className = 'label';
+                label.innerHTML = `
+                    <div>${tc.name}</div>
+                    <div class="code-block">${tc.code}</div>
+                `;
+                
+                const result = document.createElement('div');
+                result.className = 'result';
+                
+                try {
+                    const { svg } = await mermaid.render(id, tc.code);
+                    result.innerHTML = svg;
+                    result.classList.add('pass');
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    const short = msg.replace(/^Parse error on line \d+:\s*/, "").slice(0, 300);
+                    result.innerHTML = `<div class="error-msg">❌ ${short}</div>`;
+                    result.classList.add('fail');
+                }
+                
+                row.appendChild(label);
+                row.appendChild(result);
+                container.appendChild(row);
+            }
+        }
+
+        // 运行两组测试
+        runTest(configA, 'results-a');
+        setTimeout(() => runTest(configB, 'results-b'), 100);
+    </script>
+</body>
+</html>
