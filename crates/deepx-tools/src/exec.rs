@@ -942,4 +942,31 @@ mod tests {
         }
         assert_eq!(tx.dropped_bytes(), 1);
     }
+
+    #[test]
+    fn shell_detect_finds_available_shell() {
+        let shell = Shell::detect();
+        let path = shell.path();
+        // Verify the detected shell binary actually exists
+        let status = std::process::Command::new(path)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        assert!(status.is_ok(), "detected shell '{path}' should be runnable (got {:?})", shell);
+    }
+
+    #[test]
+    fn command_mode_uses_bash_on_windows_if_available() {
+        // On Windows with Git/MSYS2, bash should be detected and usable
+        let argv = Shell::detect().derive_exec_args("echo hello-from-shell");
+        let result = direct_exec(&argv, None, 100, 10, None, None, "shell-test");
+        assert_eq!(result.exit_code, Some(0), "shell exec failed: {}", result.output);
+        // Should output "hello-from-shell" from the echo command
+        assert!(
+            result.output.contains("hello-from-shell"),
+            "expected 'hello-from-shell' in output, got: '{}'",
+            result.output
+        );
+    }
 }

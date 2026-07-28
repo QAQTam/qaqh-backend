@@ -41,7 +41,8 @@ function dispatch(name: string, payload: unknown): void {
 }
 
 async function attach(seed: string): Promise<void> {
-  if (!seed || attached.has(seed)) return;
+  if (!seed) return;
+  if (attached.has(seed)) return;
   ensureBridgeListener();
   await backendBridge().attach(seed);
   attached.add(seed);
@@ -54,7 +55,19 @@ export async function request<T>(method: string, params: Record<string, unknown>
   const needsLease = ["session", "interaction", "workspace", "git", "plan", "skills", "todo"].includes(domain)
     && !["session.list", "session.activity", "session.new", "skills.list_tools"].includes(method);
   if (needsLease && seed) await attach(seed);
-  return backendBridge().request(method, params) as Promise<T>;
+  try {
+    return backendBridge().request(method, params) as Promise<T>;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    // Stale lease: snapshot told us the session was attached, but daemon
+    // disagrees. Clear the cached flag and retry once with a fresh attach.
+    if (needsLease && seed && msg.includes("session_lease_required")) {
+      attached.delete(seed);
+      await attach(seed);
+      return backendBridge().request(method, params) as Promise<T>;
+    }
+    throw error;
+  }
 }
 
 export async function connect(): Promise<void> {
