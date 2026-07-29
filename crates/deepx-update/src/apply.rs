@@ -136,7 +136,7 @@ fn install_file(
     }
     output.sync_all()?;
     drop(output);
-    let sha256 = format!("{:x}", hasher.finalize());
+    let sha256 = hex::encode(hasher.finalize());
     if copied != expected.size || !sha256.eq_ignore_ascii_case(&expected.sha256) {
         let _ = fs::remove_file(&temporary);
         return Err(UpdateError(format!(
@@ -268,7 +268,7 @@ mod tests {
     }
 
     fn write_bundle(path: &Path, payload: &[u8]) {
-        let digest = format!("{:x}", Sha256::digest(payload));
+        let digest = hex::encode(Sha256::digest(payload));
         let manifest = json!({
             "formatVersion": 1,
             "kind": "frontend",

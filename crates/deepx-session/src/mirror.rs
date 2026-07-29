@@ -49,7 +49,7 @@ impl MirrorSnapshot {
 pub fn sha256_json<T: Serialize>(value: &T) -> Result<String, String> {
     let bytes =
         serde_json::to_vec(value).map_err(|error| format!("serialize snapshot: {error}"))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 #[cfg(test)]

@@ -102,11 +102,10 @@ impl CompactEngine {
             return None;
         }
 
-        let estimate = |s: &str| -> usize { s.chars().count() / 4 };
         let mut kept_idx = msgs.len();
         let mut kept_tokens = 0usize;
         for (i, m) in msgs.iter().enumerate().rev() {
-            let t = estimate(&serde_json::to_string(m).unwrap_or_default());
+            let t = estimate_message_tokens(m);
             if kept_tokens + t > KEEP_TOKENS {
                 kept_idx = i + 1;
                 break;
@@ -309,6 +308,11 @@ impl CompactEngine {
     }
 }
 
+fn estimate_message_tokens(message: &deepx_types::Message) -> usize {
+    let serialized = serde_json::to_string(message).unwrap_or_default();
+    deepx_types::count_tokens(&serialized) as usize
+}
+
 // ═══════════════════════════════════════════════════════
 // Background worker — runs in a separate thread
 // ═══════════════════════════════════════════════════════
@@ -458,7 +462,10 @@ fn serialize_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_history_head, compactable_head_user_count, serialize_messages};
+    use super::{
+        compact_history_head, compactable_head_user_count, estimate_message_tokens,
+        serialize_messages,
+    };
 
     #[test]
     fn update_mode_does_not_repeat_previous_summary_in_history() {
@@ -499,5 +506,12 @@ mod tests {
         let head = vec![&old, &real];
 
         assert_eq!(compactable_head_user_count(&head), 1);
+    }
+
+    #[test]
+    fn tail_budget_uses_tokenizer_for_cjk_content() {
+        let message = deepx_types::Message::user(&"上下文压缩".repeat(100));
+
+        assert!(estimate_message_tokens(&message) > 300);
     }
 }

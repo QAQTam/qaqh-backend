@@ -14,15 +14,15 @@ vulkan = ["dep:llama-cpp-2"]
 
 [dependencies]
 # Candle — minimalist ML framework for Rust (optional: gated behind "candle" feature)
-candle-core = { version = "0.9", optional = true }
-candle-nn = { version = "0.9", optional = true }
-candle-transformers = { version = "0.9", optional = true }
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
 
 # HuggingFace Hub — model download and caching (optional: for candle feature)
-hf-hub = { version = "0.4", optional = true }
+hf-hub = { version = "1", optional = true }
 
 # Tokenization (optional: for candle feature)
-tokenizers = { version = "0.21", optional = true }
+tokenizers = { version = "0.23", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

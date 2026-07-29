@@ -746,37 +746,43 @@ impl TurnEngine {
                 return Outcome::Handled;
             }
 
-            // ── Auto-compact check (gate lap boundary) ──
-            // Use API-reported prompt_tokens (input fill) when available, fallback to
-            // heuristic.  prompt_tokens measures context-window pressure — completion
-            // tokens are output and do not occupy the window.  Runs inline (blocking):
-            // the compact frees context before the next gate request.
+            // ── Build and measure the exact request snapshot for this gate lap ──
+            // Auto-compaction has one authoritative decision source: a local
+            // preflight estimate of the messages + tool schema that are about to
+            // be sent. Provider usage is terminal telemetry and only calibrates
+            // future estimates; it never directly controls compaction.
+            let mut messages = ctx.agent.build_context();
+            let mut request_estimate = ctx
+                .agent
+                .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
             let threshold = ctx.agent.config.auto_compact_threshold;
             if threshold > 0.0 {
-                let total = last_usage
-                    .as_ref()
-                    .map(|u| u.prompt_tokens as u64)
-                    .unwrap_or_else(|| {
-                        let (c, t, tc, tr, ts, sp, _, _) =
-                            ctx.agent.msg.compute_context_stats(None);
-                        c + t + tc + tr + ts + sp
-                    });
                 let limit = ctx.agent.config.context_limit as u64;
-                if total as f64 > limit as f64 * threshold {
+                if request_estimate.upper_bound_tokens as f64 > limit as f64 * threshold {
                     log::info!(
-                        "[TURN] auto-compact lap-boundary: {total}/{limit} tokens ({:.0}% threshold)",
+                        "[TURN] auto-compact preflight: raw={}, predicted={}, upper={}/{limit} tokens ({} samples, {:.0}% threshold)",
+                        request_estimate.raw_tokens,
+                        request_estimate.predicted_tokens,
+                        request_estimate.upper_bound_tokens,
+                        request_estimate.sample_count,
                         threshold * 100.0
                     );
                     if Self::run_auto_compact(ctx) {
-                        // This usage describes the pre-compact prompt. Reusing
-                        // it would immediately trigger another compact before
-                        // the active context has grown again.
-                        last_usage = None;
+                        messages = ctx.agent.build_context();
+                        request_estimate = ctx
+                            .agent
+                            .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
+                        if request_estimate.upper_bound_tokens as f64 > limit as f64 * threshold {
+                            // One compact attempt per gate boundary. Remaining
+                            // pressure may be non-compactable system/tool overhead.
+                            log::warn!(
+                                "[TURN] post-compact preflight remains above threshold: upper={}/{limit}",
+                                request_estimate.upper_bound_tokens
+                            );
+                        }
                     }
                 }
             }
-
-            let messages = ctx.agent.build_context();
 
             // ── Emit pending cache diagnostic ──
             if let Some((hash, reasons)) = ctx.agent.take_cache_diagnostics() {
@@ -793,6 +799,8 @@ impl TurnEngine {
             let mut tool_calls_raw = serde_json::Value::Null;
             let mut had_error = false;
             let mut gate_error = None;
+            let mut current_request_usage: Option<UsageInfo> = None;
+            let request_fingerprint = ctx.agent.token_calibration_fingerprint();
 
             *ctx.phase = LoopPhase::GateRunning;
             let cancel_arc = ctx.cancel.arc();
@@ -848,6 +856,7 @@ impl TurnEngine {
                             }
                             util::record_token_usage(u, &ctx.agent.config.model);
                             last_usage = usage.clone();
+                            current_request_usage = usage.clone();
                         }
                         content.clear();
                         reasoning.clear();
@@ -890,6 +899,7 @@ impl TurnEngine {
                     }
                     deepx_gate::StreamEvent::UsageUpdate(u) => {
                         last_usage = Some(u.clone());
+                        current_request_usage = Some(u.clone());
                         ctx.agent.session.tokens =
                             ctx.agent.session.tokens.max(u.total_tokens as u64);
                         ctx.emitter.emit_delta(Agent2Ui::UsageUpdated {
@@ -941,6 +951,19 @@ impl TurnEngine {
                         .or_else(|| result.err().map(|error| error.to_string()))
                         .unwrap_or_else(|| "Model request failed".into()),
                 };
+            }
+
+            if let Some(usage) = current_request_usage {
+                let accepted = ctx.agent.observe_prepared_request(
+                    &request_fingerprint,
+                    request_estimate.raw_tokens,
+                    u64::from(usage.prompt_tokens),
+                );
+                log::debug!(
+                    "[TURN] token calibration sample: raw={}, observed={}, accepted={accepted}",
+                    request_estimate.raw_tokens,
+                    usage.prompt_tokens
+                );
             }
 
             log::info!("[TURN] run_lap turn_id={} round_num={} gate succeeded, parsing response", turn_id, round_num);

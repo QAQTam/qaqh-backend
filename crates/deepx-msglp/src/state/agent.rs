@@ -2,11 +2,12 @@ use deepx_config::Config;
 use deepx_session::SessionMeta;
 
 use super::skill_context::SkillContextManager;
+use super::token_calibration::{
+    RequestTokenEstimate, SessionTokenCalibrator, estimate_prepared_request_tokens,
+};
 use deepx_message::{ToolExecReport, ToolExecRequest};
 use deepx_tools::runtime;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use deepx_vector::{VectorConfig, VectorEngine};
+use std::path::Path;
 
 /// Hash snapshot of the cache-key-relevant prefix components.
 /// Compared across turns to detect and explain prompt-cache misses.
@@ -64,8 +65,6 @@ pub struct AgentState {
     pub turn_count: u32,
     /// If true, skip all disk persistence (subagent disposable mode).
     pub ephemeral: bool,
-    /// RAG vector engine (None = not enabled or init failed)
-    pub vector: Option<Arc<Mutex<VectorEngine>>>,
     pub skills: SkillContextManager,
     /// Frozen [Environment] annotation for the current turn.
     /// Generated once on first build_context() and reused for all
@@ -78,6 +77,8 @@ pub struct AgentState {
     /// Pending cache diagnostic reasons set by build_context() and
     /// consumed by the engine to emit a CacheDiagnostics event.
     pending_cache_diagnostics: Option<Vec<String>>,
+    /// Per-session/provider online calibration for request preflight estimates.
+    token_calibration: SessionTokenCalibrator,
 }
 
 impl AgentState {
@@ -86,9 +87,6 @@ impl AgentState {
         // This prevents accidental persistence of a placeholder seed.
         let msg = deepx_message::MessageStore::new("");
         let effective_input_tokens = config.context_limit as usize;
-        // Agent processes do not need a local VectorEngine: the daemon owns
-        // RAG / memory archiving.  Skipping this saves ~100-200 MB per agent.
-        let vector = None; // was: Self::try_init_vector(&config);
         Self {
             msg,
             config,
@@ -97,51 +95,47 @@ impl AgentState {
             dsml_compat_count: 0,
             turn_count: 0,
             ephemeral: false,
-            vector,
             skills: SkillContextManager::new(Path::new("."), effective_input_tokens),
             frozen_annotation: None,
             prev_prefix: PrefixShape::default(),
             pending_cache_diagnostics: None,
+            token_calibration: SessionTokenCalibrator::default(),
         }
     }
 
-    /// 尝试初始化向量引擎。失败时记录日志并返回 None。
-    fn try_init_vector(config: &deepx_config::Config) -> Option<Arc<Mutex<VectorEngine>>> {
-        if !config.rag.enabled {
-            return None;
-        }
-        let base = config.rag.store_dir.as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                let home = std::env::var("USERPROFILE")
-                    .or_else(|_| std::env::var("HOME"))
-                    .unwrap_or_else(|_| ".".into());
-                PathBuf::from(home).join(".deepx").join("vector")
-            });
-        let vcfg = VectorConfig {
-            enabled: true,
-            model_id: config.rag.model.clone(),
-            embed_dim: config.rag.embed_dim,
-            store_dir: base.clone(),
-            memory_dir: base.join("memory"),
-            skill_top_k: config.rag.skill_top_k,
-            memory_top_k: config.rag.memory_top_k,
-            max_chunk_size: 500,
-            min_chunk_size: 50,
-            local_model: config.rag.local_model.clone().map(PathBuf::from),
-        };
-        match VectorEngine::init(vcfg) {
-            Ok(engine) => {
-                let arc = Arc::new(Mutex::new(engine));
-                #[cfg(feature = "memory")]
-                deepx_tools::memory::set_engine(arc.clone());
-                Some(arc)
-            }
-            Err(e) => {
-                log::warn!("RAG 向量引擎初始化失败（将禁用 RAG 功能）: {e}");
-                None
-            }
-        }
+    pub(crate) fn token_calibration_fingerprint(&self) -> String {
+        let protocol =
+            deepx_config::registry::protocol_for(&self.config.provider_id, &self.config.endpoint);
+        format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            self.session.seed,
+            self.config.provider_id,
+            self.config.endpoint,
+            self.config.base_url,
+            protocol,
+            self.config.model,
+            self.config.tokenizer_path.as_deref().unwrap_or("<heuristic>"),
+        )
+    }
+
+    pub(crate) fn estimate_prepared_request(
+        &self,
+        messages: &[deepx_types::Message],
+        tools: Option<&[deepx_types::ToolDef]>,
+    ) -> RequestTokenEstimate {
+        let raw_tokens = estimate_prepared_request_tokens(messages, tools);
+        self.token_calibration
+            .estimate(&self.token_calibration_fingerprint(), raw_tokens)
+    }
+
+    pub(crate) fn observe_prepared_request(
+        &mut self,
+        fingerprint: &str,
+        raw_tokens: u64,
+        observed_tokens: u64,
+    ) -> bool {
+        self.token_calibration
+            .observe(fingerprint, raw_tokens, observed_tokens)
     }
 
     pub fn init(caller: &str) -> Self {
@@ -279,44 +273,7 @@ impl AgentState {
             self.prev_prefix = cur;
         }
 
-        // ── RAG: 语义技能检索 ──
-        // 如果向量引擎已启用且有已索引的技能，用语义检索补充上下文
-        if let Some(ref vec) = self.vector {
-            if let Ok(engine) = vec.lock() {
-                let query = Self::extract_last_user_query(&self.msg);
-
-                // 1) 技能语义检索
-                if engine.skill_count() > 0 && !query.is_empty() {
-                    if let Ok(chunks) = engine.search_skills(&query) {
-                        if !chunks.is_empty() {
-                            let semantic = engine.format_skill_context(&chunks);
-                            if !semantic.is_empty() {
-                                context.push(deepx_types::Message::system(&semantic));
-                            }
-                        }
-                    }
-                }
-
-                // 2) 跨会话记忆检索已移除 — 自动注入可能导致语义失准，
-                // 改为通过 memory query 工具显式查询
-            }
-        }
         context
-    }
-
-    /// 从消息存储中提取最后一条用户消息文本，用作语义检索的查询。
-    fn extract_last_user_query(msg: &deepx_message::MessageStore) -> String {
-        let turns = msg.turns();
-        for turn in turns.iter().rev() {
-            for block in &turn.user.content {
-                if let deepx_types::ContentBlock::Text { text } = block {
-                    if !text.is_empty() {
-                        return text.clone();
-                    }
-                }
-            }
-        }
-        String::new()
     }
 
     /// Refresh the transient catalog slot without writing it to history.

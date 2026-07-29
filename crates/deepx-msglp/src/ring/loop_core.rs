@@ -425,40 +425,6 @@ impl Loop {
             self.drain_pending();
 
             if self.pending.shutdown {
-                // ── 跨会话记忆归档 ──
-                #[cfg(feature = "memory")]
-                if let Some(ref vec) = self.session.agent.vector {
-                    // 从引擎读取 memory_dir，与 try_init_vector 保持路径一致
-                    let memory_dir = vec.lock().ok().map(|g| g.memory_dir().to_path_buf());
-                    if let Some(memory_dir) = memory_dir {
-                        let messages: Vec<deepx_types::Message> = self
-                            .session
-                            .agent
-                            .msg
-                            .turns()
-                            .iter()
-                            .flat_map(|t| {
-                                let mut msgs = vec![t.user.clone()];
-                                for step in &t.steps {
-                                    msgs.push(step.assistant.clone());
-                                    msgs.extend(step.tool_results.clone());
-                                }
-                                msgs
-                            })
-                            .collect();
-                        match deepx_session::memory_hook::archive_session_memories(
-                            &self.session.agent.session.seed,
-                            &messages,
-                            &memory_dir,
-                        ) {
-                            Ok(n) => log::info!(
-                                "Memory archived: {n} entries from session '{}'",
-                                self.session.agent.session.seed
-                            ),
-                            Err(e) => log::warn!("Memory archive failed: {e}"),
-                        }
-                    }
-                }
                 break;
             }
 

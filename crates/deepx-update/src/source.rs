@@ -95,7 +95,7 @@ pub fn sha256_reader(mut reader: impl Read) -> Result<(u64, String)> {
         hasher.update(&buffer[..read]);
         size += read as u64;
     }
-    Ok((size, format!("{:x}", hasher.finalize())))
+    Ok((size, hex::encode(hasher.finalize())))
 }
 
 #[cfg(test)]

@@ -67,7 +67,7 @@ fn legal_acceptance_record(
 }
 
 fn sha256_text(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 pub fn remove_legacy_uninstaller(install_path: &str) -> Result<(), String> {
@@ -548,7 +548,7 @@ fn install_file_from_reader<R: Read>(
         .map_err(|e| format!("同步临时文件 '{}' 失败: {e}", temp.display()))?;
     drop(output);
 
-    let actual_hash = format!("{:x}", hasher.finalize());
+    let actual_hash = hex::encode(hasher.finalize());
     if copied != expected.size || !actual_hash.eq_ignore_ascii_case(&expected.sha256) {
         let _ = fs::remove_file(&temp);
         return Err(format!(
