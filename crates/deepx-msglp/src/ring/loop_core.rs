@@ -92,6 +92,12 @@ pub struct Loop {
     /// A running turn already emitted its terminal transaction, but the
     /// reader-thread interrupt frame still needs to be drained.
     terminal_for_queued_interrupt: bool,
+    /// Whether a `Ready` event has already been emitted for the current
+    /// idle period. Prevents the 1 Hz `Ready` storm that flooded the
+    /// daemon's Critical lane (each Ready is EventLane::Critical and was
+    /// sent every loop iteration, saturating priority queues and tripping
+    /// the connection-death cascade).
+    ready_emitted: bool,
 
     // ── Session-scoped state (flushed/swapped on session change) ──
     /// The active session's data and engines.
@@ -229,6 +235,7 @@ impl Loop {
             pending: PendingState::default(),
             writer_dead,
             terminal_for_queued_interrupt: false,
+            ready_emitted: false,
             session: SessionBundle::new(agent),
             session_eng: SessionEngine::new(),
             input: InputEngine::new(),
@@ -447,8 +454,14 @@ impl Loop {
                 break;
             }
 
-            // Signal readiness (frontend uses this to know it can send commands)
-            let _ = self.event_tx.send(Agent2Ui::Ready);
+            // Signal readiness at most once per idle period (frontend uses
+            // this to know it can send commands). Re-emitting every second
+            // floods the daemon's Critical lane and caused priority-queue
+            // overflow + connection death.
+            if !self.ready_emitted {
+                let _ = self.event_tx.send(Agent2Ui::Ready);
+                self.ready_emitted = true;
+            }
 
             if self.writer_dead.load(Ordering::SeqCst) {
                 log::error!("[AGENT] writer thread died — exiting");
@@ -708,6 +721,9 @@ impl Loop {
     /// 3. **Fallback**: commands needing direct event_tx access (Undo, SetMode,
     ///    LoadMoreTurns, Cancel, Shutdown)
     fn dispatch_one(&mut self, frame: Ui2Agent) {
+        // Any inbound command ends the idle period; the next time the loop
+        // returns to idle it will re-emit Ready exactly once.
+        self.ready_emitted = false;
         // ── Guard: suspended turn — reason-aware command filtering ──
         if let Some(reason) = self.session.turn.suspended_reason() {
             match (&frame, reason) {

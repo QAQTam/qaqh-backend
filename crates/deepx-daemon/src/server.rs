@@ -20,7 +20,7 @@ const HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 const LEASE_TIMEOUT_MS: u64 = 15_000;
 const MAX_CONNECTIONS: usize = 32;
 const OUTBOUND_QUEUE_CAPACITY: usize = 8_192;
-const PRIORITY_QUEUE_CAPACITY: usize = 256;
+const PRIORITY_QUEUE_CAPACITY: usize = 2_048;
 const REQUEST_QUEUE_CAPACITY: usize = 64;
 const BULK_QUEUE_CAPACITY: usize = 8_192;
 /// Maximum bulk-lane events to batch into one EventBatch frame.
@@ -317,15 +317,19 @@ async fn handle_connection(
                     retry_after_ms: None,
                 },
             };
-            if request_outbound.send(message).await.is_err() {
-                break;
-            }
+            // Drop the response on send failure (dead writer) instead of
+            // breaking: a transient writer death must not strand subsequent
+            // requests. The request still executes — e.g. session.send_message
+            // still writes to the agent stdin and the turn still runs — so the
+            // user's input reaches the API even if this RPC reply is lost.
+            // The writer-monitor arm closes the connection when appropriate.
+            let _ = request_outbound.send(message).await;
         }
     });
     // ── Bulk aggregator: drain bulk_tx, group by seed, send EventBatch ──
     let bulk_outbound = event_tx.clone();
     let bulk_epoch = service.events().epoch().to_string();
-    let _bulk_aggregator = tokio::spawn(async move {
+    let bulk_aggregator = tokio::spawn(async move {
         use std::collections::HashMap;
         let mut interval = tokio::time::interval(Duration::from_millis(BULK_FLUSH_INTERVAL_MS));
         let mut pending: HashMap<String, Vec<deepx_proto::Agent2Ui>> = HashMap::new();
@@ -377,7 +381,11 @@ async fn handle_connection(
                 match message {
                     ControlClientMessage::Heartbeat{nonce}=>{
                         leases.lock().unwrap_or_else(|e|e.into_inner()).renew_connection(&connection_id,Instant::now());
-                        priority_tx.send(ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await.map_err(|_|"control writer stopped".to_string())?;
+                        // Drop send errors: a dead/slow writer must not kill the
+                        // connection. The writer-monitor arm handles graceful
+                        // close; dropping the heartbeat reply is harmless (the
+                        // client times out and retries).
+                        let _ = priority_tx.send(ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await;
                     }
                     ControlClientMessage::SessionAttach{request_id,seed}=>{
                         let decision=if client_kind=="clawd"{
@@ -387,7 +395,12 @@ async fn handle_connection(
                         };
                         match decision {
                             LeaseDecision::Acquired|LeaseDecision::Resumed=>{
-                                priority_tx.send(ControlServerMessage::Response{request_id,result:serde_json::json!({"seed":seed})}).await.map_err(|_|"control writer stopped".to_string())?;
+                                // Drop send errors, never propagate: a transient
+                                // writer stall must not kill the connection and
+                                // strand this and all future RPCs. If the
+                                // writer is truly dead the writer-monitor arm
+                                // closes the connection cleanly.
+                                let _ = priority_tx.send(ControlServerMessage::Response{request_id,result:serde_json::json!({"seed":seed})}).await;
                                 // An attach only needs the canonical state for
                                 // that session. Rebuilding every previously
                                 // attached session here turns multi-session
@@ -395,22 +408,30 @@ async fn handle_connection(
                                 // the event consumer lag during heavy streams.
                                 let attached=vec![seed];
                                 let snapshot_seq=service.events().current_seq();
-                                let snapshot=build_snapshot(&service,attached).await?;
-                                priority_tx.send(ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await.map_err(|_|"control writer stopped".to_string())?;
-                                delivered_seq=snapshot_seq;
+                                // Snapshot build can still fail; on error we
+                                // skip sending the Snapshot but keep the
+                                // connection alive — the Response above already
+                                // acknowledges the attach.
+                                if let Ok(snapshot)=build_snapshot(&service,attached).await {
+                                    let _ = priority_tx.send(ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await;
+                                    delivered_seq=snapshot_seq;
+                                }
                             }
-                            LeaseDecision::Denied{owner_kind,retry_after_ms}=>priority_tx.send(ControlServerMessage::LeaseDenied{request_id,seed,owner_kind,retry_after_ms}).await.map_err(|_|"control writer stopped".to_string())?
+                            LeaseDecision::Denied{owner_kind,retry_after_ms}=>{
+                                let _ = priority_tx.send(ControlServerMessage::LeaseDenied{request_id,seed,owner_kind,retry_after_ms}).await;
+                            }
                         }
                     }
                     ControlClientMessage::SessionDetach{request_id,seed}=>{
                         let detached=leases.lock().unwrap_or_else(|e|e.into_inner()).detach(&seed,&client_instance_id);
-                        priority_tx.send(ControlServerMessage::Response{request_id,result:serde_json::json!({"detached":detached})}).await.map_err(|_|"control writer stopped".to_string())?;
+                        let _ = priority_tx.send(ControlServerMessage::Response{request_id,result:serde_json::json!({"detached":detached})}).await;
                     }
                     ControlClientMessage::Request{request_id,method,params}=>{
                         if DeepxService::session_scoped(&method){
                             let seed=params.get("seed").and_then(serde_json::Value::as_str).unwrap_or_default();
                             if !leases.lock().unwrap_or_else(|e|e.into_inner()).owns(seed,&client_instance_id,Instant::now()){
-                                priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:"session_lease_required".into(),message:format!("session {seed} is not attached"),retry_after_ms:None}).await.map_err(|_|"control writer stopped".to_string())?;continue;
+                                let _ = priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:"session_lease_required".into(),message:format!("session {seed} is not attached"),retry_after_ms:None}).await;
+                                continue;
                             }
                         }
                         let job = RequestJob{request_id: request_id.clone(), method, params};
@@ -420,7 +441,7 @@ async fn handle_connection(
                                 mpsc::error::TrySendError::Full(_)=>"request_queue_full",
                                 mpsc::error::TrySendError::Closed(_)=>"runtime_failed",
                             };
-                            priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:code.into(),message:"daemon request worker is unavailable".into(),retry_after_ms:Some(5_000)}).await.map_err(|_|"control writer stopped".to_string())?;
+                            let _ = priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:code.into(),message:"daemon request worker is unavailable".into(),retry_after_ms:Some(5_000)}).await;
                         }
                     }
                     ControlClientMessage::ClientHello{..}=>break,
@@ -434,16 +455,25 @@ async fn handle_connection(
                     let lane = event.lane();
                     match lane {
                         EventLane::Critical => {
-                            priority_tx.try_send(message.clone()).map_err(|_| "priority writer overloaded".to_string())?;
+                            // Blocking send with error-drop: preserves the event
+                            // (Critical = TurnStart/PermissionRequest/etc — never drop)
+                            // and applies backpressure to the agent when the writer
+                            // is slow. A dead writer returns Err immediately; the
+                            // writer-monitor arm below handles graceful close, so we
+                            // must NOT propagate here (that re-introduces the
+                            // connection-killing cascade that 2cd80a3 fixed elsewhere).
+                            let _ = priority_tx.send(message.clone()).await;
                         }
                         EventLane::Bulk => {
                             let _ = bulk_tx.try_send(message.clone()); // lossy: drop on full
                         }
                         EventLane::Standard => {
-                            // Use blocking send: backpressure propagates to the event
+                            // Blocking send: backpressure propagates to the event
                             // source instead of killing the connection when the writer
                             // is slow (e.g. during compact while renderer is lagging).
-                            event_tx.send(message.clone()).await.map_err(|_| "control writer stopped".to_string())?;
+                            // Drop send errors: a dead writer is handled by the
+                            // writer-monitor arm (`result = &mut writer`).
+                            let _ = event_tx.send(message.clone()).await;
                         }
                     }
                 },
@@ -479,6 +509,7 @@ async fn handle_connection(
             },
         }
     }
+    bulk_aggregator.abort();
     request_worker.abort();
     git_worker.abort();
     writer.abort();
@@ -506,6 +537,7 @@ fn event_allowed(
         return true;
     }
     match message {
+        ControlServerMessage::Event { event: deepx_proto::Agent2Ui::Error { .. }, .. } => true,
         ControlServerMessage::Event { seed, .. } => leases
             .lock()
             .unwrap_or_else(|e| e.into_inner())

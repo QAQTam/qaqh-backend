@@ -115,7 +115,10 @@ export default function ChatView(props: ChatViewProps) {
 
   async function handleSend(text: string, files: string[]) {
     try { await request("session.send_message", { seed: seed(), text, files }); }
-    catch (error) { console.error("send_message error:", error); }
+    catch (error) {
+      console.error("send_message error:", error);
+      throw error;
+    }
   }
 
   async function handleStop() {

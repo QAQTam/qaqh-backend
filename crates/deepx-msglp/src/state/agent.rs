@@ -86,7 +86,9 @@ impl AgentState {
         // This prevents accidental persistence of a placeholder seed.
         let msg = deepx_message::MessageStore::new("");
         let effective_input_tokens = config.context_limit as usize;
-        let vector = Self::try_init_vector(&config);
+        // Agent processes do not need a local VectorEngine: the daemon owns
+        // RAG / memory archiving.  Skipping this saves ~100-200 MB per agent.
+        let vector = None; // was: Self::try_init_vector(&config);
         Self {
             msg,
             config,

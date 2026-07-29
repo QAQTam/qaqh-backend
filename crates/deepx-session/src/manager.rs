@@ -829,6 +829,27 @@ impl SessionManager {
         self.queue_and_sync_mirror(seed);
     }
 
+    /// Synchronously create a new session directory and initial meta.json
+    /// on disk, so that the session exists before the agent process starts.
+    /// This prevents the race where the frontend receives a seed from
+    /// `session.new` but the session directory isn't created until the
+    /// agent writes it asynchronously during boot.
+    pub fn persist_new_session(&self, seed: &str) {
+        let lock = self.session_lock(seed);
+        let _guard = lock.lock().unwrap();
+        let dir = self.session_path_dir(seed);
+        let _ = std::fs::create_dir_all(&dir);
+        let mut meta = self.load_meta(seed).unwrap_or_default();
+        let now = Self::now_epoch();
+        meta.seed = seed.to_string();
+        meta.created_at = now;
+        meta.updated_at = now;
+        let _ = store::write_meta(&dir, &meta);
+        store::upsert_index(&self.sessions_dir, &meta);
+        #[cfg(feature = "turso-backend")]
+        self.queue_and_sync_mirror(seed);
+    }
+
     pub fn persist_usage(
         &self,
         seed: &str,

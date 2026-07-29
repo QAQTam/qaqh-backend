@@ -203,6 +203,7 @@ impl DeepxClient {
                     request_id: None,
                     code: "disconnected".into(),
                     message: "daemon connection closed".into(),
+                    retry_after_ms: None,
                 });
             }
         });
@@ -225,6 +226,7 @@ impl DeepxClient {
                         request_id: Some(request_id),
                         code,
                         message: detail,
+                        ..
                     } => {
                         if let Some(tx) = reader_pending.lock().await.remove(request_id) {
                             let _ = tx.send(Err(ClientError {
@@ -259,6 +261,7 @@ impl DeepxClient {
                     request_id: None,
                     code: "disconnected".into(),
                     message: "daemon connection closed".into(),
+                    retry_after_ms: None,
                 });
             }
         });

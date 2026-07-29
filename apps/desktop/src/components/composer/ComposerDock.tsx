@@ -24,7 +24,7 @@ export default function ComposerDock(props: {
     const value = text().trim();
     if (!value || props.hasPendingGate()) return;
     if (props.isStreaming()) props.queue.enqueue(value, []);
-    else await props.onSend(value, []);
+    else try { await props.onSend(value, []); } catch { return; }
     setText("");
   };
   return <div class="composer-wrap">

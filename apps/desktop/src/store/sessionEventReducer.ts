@@ -462,7 +462,11 @@ export function reduceAgentEvent(
       };
     }
     case "session_created": {
-      if (state.seed === event.seed && state.session.ready) return state;
+      if (state.seed === event.seed) {
+        return state.session.ready
+          ? state
+          : { ...state, session: { ...state.session, ready: true } };
+      }
       const created = createRawSessionState(event.seed);
       return { ...created, session: { ...created.session, ready: true } };
     }

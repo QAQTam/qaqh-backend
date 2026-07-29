@@ -77,6 +77,7 @@ impl DeepxService {
             "session.new" => {
                 let seed = deepx_session::SessionManager::generate_seed();
                 deepx_session::SessionManager::global().clear_active();
+                deepx_session::SessionManager::global().persist_new_session(&seed);
                 self.registry()?.spawn_new(&seed)?;
                 Ok(json!(seed))
             }
