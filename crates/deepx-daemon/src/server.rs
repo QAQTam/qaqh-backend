@@ -15,6 +15,11 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 
+/// Maximum time to wait for a channel send inside a `select!` branch body.
+///
+/// Must be well under the heartbeat interval (5 s) so a stuck writer is
+/// detected by the writer-monitor arm, not by a permanent branch-body block.
+const SEND_TIMEOUT_MS: u64 = 500;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 const LEASE_TIMEOUT_MS: u64 = 15_000;
@@ -288,7 +293,7 @@ async fn handle_connection(
                         retry_after_ms: None,
                     },
                 };
-                let _ = outbound.send(message).await;
+                send_or_drop(&outbound, message).await;
             });
         }
     });
@@ -317,13 +322,11 @@ async fn handle_connection(
                     retry_after_ms: None,
                 },
             };
-            // Drop the response on send failure (dead writer) instead of
-            // breaking: a transient writer death must not strand subsequent
-            // requests. The request still executes — e.g. session.send_message
-            // still writes to the agent stdin and the turn still runs — so the
-            // user's input reaches the API even if this RPC reply is lost.
-            // The writer-monitor arm closes the connection when appropriate.
-            let _ = request_outbound.send(message).await;
+            // Timeout-bounded: a stuck writer must not permanently strand the
+            // RPC reply. The request still executes (e.g. session.send_message
+            // still writes agent stdin), so user input reaches the API even if
+            // this reply is dropped after the timeout.
+            send_or_drop(&request_outbound, message).await;
         }
     });
     // ── Bulk aggregator: drain bulk_tx, group by seed, send EventBatch ──
@@ -341,7 +344,7 @@ async fn handle_connection(
                     let drained: HashMap<_, _> = std::mem::take(&mut pending);
                     for (seed, events) in drained {
                         if events.is_empty() { continue; }
-                        let _ = bulk_outbound.send(ControlServerMessage::EventBatch {
+                        send_or_drop(&bulk_outbound, ControlServerMessage::EventBatch {
                             server_epoch: bulk_epoch.clone(),
                             seq: 0,
                             seed,
@@ -358,7 +361,7 @@ async fn handle_connection(
                         if entry.len() >= BULK_BATCH_MAX_EVENTS {
                             let drained = pending.remove(&seed).unwrap_or_default();
                             if !drained.is_empty() {
-                                let _ = bulk_outbound.send(ControlServerMessage::EventBatch {
+                                send_or_drop(&bulk_outbound, ControlServerMessage::EventBatch {
                                     server_epoch: bulk_epoch.clone(),
                                     seq: 0,
                                     seed,
@@ -381,11 +384,12 @@ async fn handle_connection(
                 match message {
                     ControlClientMessage::Heartbeat{nonce}=>{
                         leases.lock().unwrap_or_else(|e|e.into_inner()).renew_connection(&connection_id,Instant::now());
-                        // Drop send errors: a dead/slow writer must not kill the
-                        // connection. The writer-monitor arm handles graceful
-                        // close; dropping the heartbeat reply is harmless (the
-                        // client times out and retries).
-                        let _ = priority_tx.send(ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await;
+                        // Timeout-bounded: a dead writer drops the receiver
+                        // and send returns Err immediately. A slow-but-alive
+                        // writer blocks at most SEND_TIMEOUT_MS, then the
+                        // message is dropped and the writer-monitor arm can
+                        // fire on the next select! iteration.
+                        send_or_drop(&priority_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await;
                     }
                     ControlClientMessage::SessionAttach{request_id,seed}=>{
                         let decision=if client_kind=="clawd"{
@@ -395,12 +399,7 @@ async fn handle_connection(
                         };
                         match decision {
                             LeaseDecision::Acquired|LeaseDecision::Resumed=>{
-                                // Drop send errors, never propagate: a transient
-                                // writer stall must not kill the connection and
-                                // strand this and all future RPCs. If the
-                                // writer is truly dead the writer-monitor arm
-                                // closes the connection cleanly.
-                                let _ = priority_tx.send(ControlServerMessage::Response{request_id,result:serde_json::json!({"seed":seed})}).await;
+                                send_or_drop(&priority_tx, ControlServerMessage::Response{request_id,result:serde_json::json!({"seed":seed})}).await;
                                 // An attach only needs the canonical state for
                                 // that session. Rebuilding every previously
                                 // attached session here turns multi-session
@@ -408,29 +407,25 @@ async fn handle_connection(
                                 // the event consumer lag during heavy streams.
                                 let attached=vec![seed];
                                 let snapshot_seq=service.events().current_seq();
-                                // Snapshot build can still fail; on error we
-                                // skip sending the Snapshot but keep the
-                                // connection alive — the Response above already
-                                // acknowledges the attach.
                                 if let Ok(snapshot)=build_snapshot(&service,attached).await {
-                                    let _ = priority_tx.send(ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await;
+                                    send_or_drop(&priority_tx, ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await;
                                     delivered_seq=snapshot_seq;
                                 }
                             }
                             LeaseDecision::Denied{owner_kind,retry_after_ms}=>{
-                                let _ = priority_tx.send(ControlServerMessage::LeaseDenied{request_id,seed,owner_kind,retry_after_ms}).await;
+                                send_or_drop(&priority_tx, ControlServerMessage::LeaseDenied{request_id,seed,owner_kind,retry_after_ms}).await;
                             }
                         }
                     }
                     ControlClientMessage::SessionDetach{request_id,seed}=>{
                         let detached=leases.lock().unwrap_or_else(|e|e.into_inner()).detach(&seed,&client_instance_id);
-                        let _ = priority_tx.send(ControlServerMessage::Response{request_id,result:serde_json::json!({"detached":detached})}).await;
+                        send_or_drop(&priority_tx, ControlServerMessage::Response{request_id,result:serde_json::json!({"detached":detached})}).await;
                     }
                     ControlClientMessage::Request{request_id,method,params}=>{
                         if DeepxService::session_scoped(&method){
                             let seed=params.get("seed").and_then(serde_json::Value::as_str).unwrap_or_default();
                             if !leases.lock().unwrap_or_else(|e|e.into_inner()).owns(seed,&client_instance_id,Instant::now()){
-                                let _ = priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:"session_lease_required".into(),message:format!("session {seed} is not attached"),retry_after_ms:None}).await;
+                                send_or_drop(&priority_tx, ControlServerMessage::Error{request_id:Some(request_id),code:"session_lease_required".into(),message:format!("session {seed} is not attached"),retry_after_ms:None}).await;
                                 continue;
                             }
                         }
@@ -441,7 +436,7 @@ async fn handle_connection(
                                 mpsc::error::TrySendError::Full(_)=>"request_queue_full",
                                 mpsc::error::TrySendError::Closed(_)=>"runtime_failed",
                             };
-                            let _ = priority_tx.send(ControlServerMessage::Error{request_id:Some(request_id),code:code.into(),message:"daemon request worker is unavailable".into(),retry_after_ms:Some(5_000)}).await;
+                            send_or_drop(&priority_tx, ControlServerMessage::Error{request_id:Some(request_id),code:code.into(),message:"daemon request worker is unavailable".into(),retry_after_ms:Some(5_000)}).await;
                         }
                     }
                     ControlClientMessage::ClientHello{..}=>break,
@@ -455,47 +450,32 @@ async fn handle_connection(
                     let lane = event.lane();
                     match lane {
                         EventLane::Critical => {
-                            // Blocking send with error-drop: preserves the event
-                            // (Critical = TurnStart/PermissionRequest/etc — never drop)
-                            // and applies backpressure to the agent when the writer
-                            // is slow. A dead writer returns Err immediately; the
-                            // writer-monitor arm below handles graceful close, so we
-                            // must NOT propagate here (that re-introduces the
-                            // connection-killing cascade that 2cd80a3 fixed elsewhere).
-                            let _ = priority_tx.send(message.clone()).await;
+                            send_or_drop(&priority_tx, message.clone()).await;
                         }
                         EventLane::Bulk => {
                             let _ = bulk_tx.try_send(message.clone()); // lossy: drop on full
                         }
                         EventLane::Standard => {
-                            // Blocking send: backpressure propagates to the event
-                            // source instead of killing the connection when the writer
-                            // is slow (e.g. during compact while renderer is lagging).
-                            // Drop send errors: a dead writer is handled by the
-                            // writer-monitor arm (`result = &mut writer`).
-                            let _ = event_tx.send(message.clone()).await;
+                            send_or_drop(&event_tx, message.clone()).await;
                         }
                     }
                 },
-                Ok(message)=>{event_tx.send(message).await.ok();}
+                Ok(message)=>{send_or_drop(&event_tx, message).await;}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{
                     let attached=leases.lock().unwrap_or_else(|e|e.into_inner()).attached_for(&client_instance_id,Instant::now());
                     let snapshot_seq=service.events().current_seq();
                     let snapshot=build_snapshot(&service,attached).await?;
-                    priority_tx.send(ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await.ok();
+                    send_or_drop(&priority_tx, ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await;
                     delivered_seq=snapshot_seq;
                 }
                 Err(_)=>break,
             },
             _=heartbeat.tick()=>{
-                // If the writer task has exited the outbound channel is closed;
-                // silently skip the heartbeat — the writer-monitor arm below
-                // will catch the failure and cleanly close the connection.
-                let _ = priority_tx.send(ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce:service.events().current_seq()}).await;
+                send_or_drop(&priority_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce:service.events().current_seq()}).await;
             }
             changed=daemon_shutdown.changed()=>{
                 if changed.is_err() || *daemon_shutdown.borrow() {
-                    priority_tx.send(ControlServerMessage::Shutdown{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),reason:"daemon_stop_requested".into()}).await.ok();
+                    send_or_drop(&priority_tx, ControlServerMessage::Shutdown{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),reason:"daemon_stop_requested".into()}).await;
                     break;
                 }
             },
@@ -556,6 +536,28 @@ where
     ))
     .await
     .map_err(stringify)
+}
+
+/// Send a message to an mpsc channel with a bounded timeout.
+///
+/// **Why this exists:** `tokio::select!` does not poll other branches while
+/// the chosen branch's body is still awaiting.  An unbounded `tx.send(msg).await`
+/// inside a branch body therefore blocks the entire `select!` — including the
+/// `result = &mut writer` death-monitor branch — when the writer is slow but
+/// alive (e.g. TCP send window exhausted on a half-open connection).  The
+/// writer task never exits in that state, so the receiver is never dropped,
+/// and `send` never returns `Err`.
+///
+/// The timeout caps the worst-case block at `SEND_TIMEOUT_MS`, after which the
+/// message is dropped and the `select!` can poll the writer-monitor branch.
+/// A *dead* writer (receiver dropped) still makes `send` return immediately,
+/// so the timeout only kicks in for the stuck-but-alive case.
+///
+/// This is the root-cause fix for the "old sessions work, new sessions can't
+/// send messages" regression introduced by d2f66da (which replaced the
+/// previous `try_send().map_err()?` with unbounded `send().await`).
+async fn send_or_drop<T>(tx: &mpsc::Sender<T>, msg: T) {
+    let _ = tokio::time::timeout(Duration::from_millis(SEND_TIMEOUT_MS), tx.send(msg)).await;
 }
 fn error_response(status: StatusCode, text: &str) -> ErrorResponse {
     let mut response = ErrorResponse::new(Some(text.into()));

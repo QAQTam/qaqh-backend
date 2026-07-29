@@ -109,26 +109,48 @@ fn find_via_tasklist() -> Vec<ProcInfo> {
 // 进程关闭
 // ============================================================
 
-/// 优雅关闭：先通过 daemon HTTP 端点（对无窗口后台进程有效），
-/// 再对 GUI 进程发 WM_CLOSE，覆盖子进程树（/t）。
+/// 关闭 DeepX 运行时进程。
+///
+/// 策略（解决安装时 ~30s 卡顿问题）：
+/// - **DeepX.exe（Electron GUI）**：直接 `TerminateProcess` 强杀。
+///   原因：`taskkill` 不带 `/f` 发 WM_CLOSE 后，Electron 的 `before-quit`
+///   回调会执行 `backend.close()`（含 WebSocket detach 等待），如果
+///   daemon 正处于连接故障态，该回调可阻塞到系统 ~30s 的
+///   "程序未响应"超时才返回。对安装场景而言这个延迟不可接受。
+///
+/// - **deepx-daemon.exe（后台 daemon）**：先发 HTTP `/control/v1/stop`
+///   优雅关闭（daemon 没有窗口消息泵，WM_CLOSE 对它无效），等 2s，
+///   仍未退出则强杀。给 daemon 一个短窗口做 WS 关闭/文件 flush，
+///   但不无限等待。
 pub fn graceful_close(procs: &mut [ProcInfo]) {
-    // 第一步：尝试通过 daemon 的 HTTP stop 端点优雅关闭
-    // （daemon 是后台进程，没有窗口消息泵，WM_CLOSE 对它无效）
+    // ── 第一步：daemon 优雅关闭（HTTP stop，最多 ~2s）──
     stop_daemon_via_http();
 
-    // 第二步：对仍有窗口的 GUI 进程（如 Electron）发送 WM_CLOSE
+    // ── 第二步：DeepX.exe 直接强杀（不等 WM_CLOSE / before-quit）──
     for p in procs.iter_mut() {
-        if !is_process_running(p.pid) {
-            p.closed = true;
-            continue;
+        if p.name.eq_ignore_ascii_case("DeepX.exe") && is_process_running(p.pid) {
+            force_terminate(p.pid);
+            p.closed = !is_process_running(p.pid);
         }
-        let _ = std::process::Command::new("taskkill")
-            .args(["/pid", &p.pid.to_string(), "/t"])
-            .output();
     }
-    // 等 3 秒让进程自行退出
-    thread::sleep(Duration::from_secs(3));
+
+    // ── 第三步：daemon 给 2s 优雅退出窗口 ──
+    let daemon_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < daemon_deadline {
+        let all_daemon_gone = procs
+            .iter()
+            .all(|p| p.name.eq_ignore_ascii_case("DeepX.exe") || !is_process_running(p.pid));
+        if all_daemon_gone {
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    // ── 第四步：daemon 仍未退出 → 强杀 ──
     for p in procs.iter_mut() {
+        if !p.name.eq_ignore_ascii_case("DeepX.exe") && is_process_running(p.pid) {
+            force_terminate(p.pid);
+        }
         p.closed = !is_process_running(p.pid);
     }
 }

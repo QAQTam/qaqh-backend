@@ -79,6 +79,7 @@ export default function App() {
   let unlistenUpdate: (() => void) | undefined;
   let unlistenUpdateFailure: (() => void) | undefined;
   let resumeRequest = 0;
+  let reconnecting = false;
 
   function activeEntry(): SessionEntry | undefined {
     const seed = activeSeed();
@@ -166,12 +167,23 @@ export default function App() {
     }
     const agentDead = /(exited|died|broken.pipe|killed|connection.*lost|agent.*(dead|gone|stopped))/i.test(message);
     if (!agentDead) return;
+    // Prevent infinite recursion: during replay, sessionReplay.complete/abort
+    // re-dispatches the same Error event, which would call handleAgentError →
+    // resumeSession → sessionReplay.complete → same Error → handleAgentError → …
+    // Each loop iteration fires an RPC that piles up as "daemon disconnected:
+    // connection dropped", flooding the console and blocking real user input.
+    if (isReplaying()) return;
+    // Prevent concurrent reconnect attempts from multiple live Error events.
+    if (reconnecting) return;
+    reconnecting = true;
     const seed = entry.state().seed;
     try {
       await resumeSession(seed);
       toastCtrl.push(i18n.t().toast.agentReconnected, "info");
     } catch {
       toastCtrl.push(i18n.t().toast.agentLost, "error", true);
+    } finally {
+      reconnecting = false;
     }
   }
 
