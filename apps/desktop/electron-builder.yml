@@ -12,10 +12,16 @@ files:
 asar: true
 
 extraResources:
-  - from: build/sidecar/deepx-daemon.exe
-    to: deepx-daemon.exe
   - from: build/sidecar/daemon-manifest.json
     to: daemon-manifest.json
 
 win:
   executableName: DeepX
+  extraResources:
+    - from: build/sidecar/deepx-daemon.exe
+      to: deepx-daemon.exe
+
+linux:
+  extraResources:
+    - from: build/sidecar/deepx-daemon
+      to: deepx-daemon

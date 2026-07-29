@@ -15,4 +15,5 @@
 pub(crate) mod conflict;
 pub(crate) mod dashboard;
 pub(crate) mod notification;
+#[cfg(windows)]
 pub(crate) mod toast_com;

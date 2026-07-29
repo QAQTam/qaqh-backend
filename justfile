@@ -23,6 +23,7 @@ build-companion:
     cargo build --release -p deepx-companion
 
 # 编译安装器（release）
+[windows]
 build-installer:
     cargo build --release -p deepx-installer
 
@@ -31,6 +32,7 @@ build-updater:
     cargo build --release -p deepx-updater
 
 # 构建前端（typecheck + vite，不含 daemon）
+[windows]
 build-desktop:
     Set-Location apps/desktop; pnpm build
 
@@ -119,6 +121,7 @@ dev:
     cargo run -p deepx-daemon -- run
 
 # 启动桌面开发模式（需先 build-daemon 或设 DEEPX_BACKEND_ROOT）
+[windows]
 dev-desktop:
     Set-Location apps/desktop; pnpm dev
 
@@ -129,16 +132,24 @@ check-rust:
     cargo check --workspace
 
 # 前端类型检查
+[windows]
 check-desktop:
     Set-Location apps/desktop; pnpm typecheck
 
 # 全部静态检查
+[windows]
 check: check-rust check-desktop
+[unix]
+check: check-rust
 
 # 全部测试
+[windows]
 test:
     cargo test --workspace
     Set-Location apps/desktop; pnpm test
+[unix]
+test:
+    cargo test --workspace
 
 # Rust 测试
 test-rust:
@@ -182,6 +193,7 @@ clean:
     @Write-Output "Clean done."
 
 # 初始化开发环境
+[windows]
 setup:
     Set-Location apps/desktop; pnpm install
     @Write-Output "Setup done. Run 'just build-daemon' to compile the backend."
@@ -191,21 +203,40 @@ setup:
 sync-version:
     @pwsh -File scripts/sync-version.ps1
 
-# ── Linux/macOS (stub) ─────────────────────────────
+# ── Linux ───────────────────────────────────────────
+
 [unix]
-package-desktop:
-    @echo "TODO: Linux desktop packaging not implemented"
+package-desktop: build-daemon
+    cd apps/desktop && node scripts/prepare-daemon.mjs --backend-root ../..
+    cd apps/desktop && pnpm build
+    cd apps/desktop && pnpm exec electron-builder --dir --linux --x64 --publish never
+
+[unix]
+build-installer:
+    @echo "deepx-installer crate is Windows-only (uses COM, Registry, tasklist)"
+    @echo "See crates/deepx-msglp for how to cfg-gate the windows dependency."
     @exit 1
 
 [unix]
-package-installer:
-    @echo "TODO: Linux installer not implemented"
-    @exit 1
+package: package-desktop
+    @echo "  ✓ Electron app packaged to release/"
+    @echo "  ⚠ Full installer (NSIS + SFX) is Windows-only; skipped"
 
 [unix]
-package:
-    @echo "TODO: Linux packaging not implemented"
-    @exit 1
+build-desktop:
+    cd apps/desktop && pnpm build
+
+[unix]
+dev-desktop:
+    cd apps/desktop && pnpm dev
+
+[unix]
+check-desktop:
+    cd apps/desktop && pnpm typecheck
+
+[unix]
+pack-frontend: build-desktop
+    cd apps/desktop && node scripts/pack-frontend.mjs
 
 [unix]
 clean:
@@ -213,3 +244,19 @@ clean:
     rm -rf apps/desktop/out apps/desktop/release apps/desktop/build/sidecar
     rm -rf packages apps/installer/dist apps/installer/staging apps/installer/payload/desktop
     @echo Clean done.
+
+[unix]
+setup:
+    cd apps/desktop && pnpm install
+    @echo "Setup done. Run 'just build-daemon' to compile the backend."
+
+[unix]
+status:
+    @echo "=== Rust binaries ==="
+    @test -f target/release/deepx-daemon && echo "  ✓ deepx-daemon" || echo "  ✗ deepx-daemon"
+    @test -f target/release/deepx-companion && echo "  ✓ deepx-companion" || echo "  ✗ deepx-companion"
+    @echo "=== Desktop ==="
+    @test -f apps/desktop/out/main/main.js && echo "  ✓ main.js" || echo "  ✗ main.js"
+    @test -f apps/desktop/out/renderer/index.html && echo "  ✓ renderer" || echo "  ✗ renderer"
+    @echo "=== Packages ==="
+    @ls -la packages 2>/dev/null || echo "  ✗ no packages yet"
