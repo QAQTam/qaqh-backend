@@ -1843,6 +1843,7 @@ dependencies = [
  "similar 2.7.0",
  "tempfile",
  "ureq 3.3.0",
+ "windows 0.58.0",
 ]
 
 [[package]]

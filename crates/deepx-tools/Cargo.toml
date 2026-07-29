@@ -33,6 +33,9 @@ git2 = { version = "0.21", features = ["vendored-libgit2"] }
 agentfs = []
 memory = ["dep:deepx-vector"]
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Storage_FileSystem"] }
+
 [lints]
 workspace = true
 

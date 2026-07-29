@@ -52,12 +52,61 @@ pub(super) fn atomic_write(path: &str, content: &str) -> std::io::Result<()> {
             .open(&temporary)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&temporary, target)
+        replace_file(&temporary, target)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, target)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MoveFileExW(
+            PCWSTR::from_raw(source.as_ptr()),
+            PCWSTR::from_raw(target.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(std::io::Error::other)
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_replaces_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "before").unwrap();
+
+        atomic_write(&target.to_string_lossy(), "after").unwrap();
+
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "after");
+    }
 }
 
 /// Normalize CRLF → LF in content. Returns (normalized, was_crlf).

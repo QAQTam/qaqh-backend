@@ -82,8 +82,8 @@ pub fn categorize_tool(name: &str) -> ToolCategory {
         | "process_check" | "process_wait" => ToolCategory::Read,
 
         // ── Write ──
-        "patch" | "write" | "edit" | "edit_block" | "delete" | "git_add" | "git_commit" | "git_branch"
-        | "git_checkout" | "git_merge" | "git_restore" | "plan_create" | "task" => ToolCategory::Write,
+        "apply_patch" | "patch" | "write" | "edit" | "edit_block" | "delete" | "git_add" | "git_commit"
+        | "git_branch" | "git_checkout" | "git_merge" | "git_restore" | "plan_create" | "task" => ToolCategory::Write,
 
         // ── Exec ──
         "exec" | "spawn_subagent" => ToolCategory::Exec,
@@ -159,6 +159,9 @@ impl PermissionLevel {
 pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
+    if tool_name == "apply_patch" {
+        paths.extend(crate::apply_patch::extract_target_paths(args));
+    }
     // Direct path argument
     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
         paths.push(PathBuf::from(p));

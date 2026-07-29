@@ -9,8 +9,9 @@
 //!   • marker constants / batch parser  (parser.rs)
 //!   • fuzzy line matching               (seek_sequence.rs)
 //!   • replacement computation           (lib.rs)
-use std::path::{Path, PathBuf};
 use crate::{JsonArgs, ToolHandler, ToolRisk};
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 // ── Markers (from codex-rs/apply-patch/src/parser.rs) ──
 const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
 const END_PATCH_MARKER: &str = "*** End Patch";
@@ -83,29 +84,39 @@ impl PatchParser {
             }
             if let Some(path) = line.strip_prefix(ADD_FILE_MARKER) {
                 let path = PathBuf::from(path.trim());
+                validate_patch_path(&path, "Add File")?;
                 parser.pos += 1;
                 let contents = parser.read_add_lines();
+                if contents.is_empty() {
+                    return Err(format!(
+                        "Add file hunk for path '{}' is empty",
+                        path.display()
+                    ));
+                }
                 parser.hunks.push(Hunk::AddFile { path, contents });
             } else if let Some(path) = line.strip_prefix(DELETE_FILE_MARKER) {
-                parser.hunks.push(Hunk::DeleteFile {
-                    path: PathBuf::from(path.trim()),
-                });
+                let path = PathBuf::from(path.trim());
+                validate_patch_path(&path, "Delete File")?;
+                parser.hunks.push(Hunk::DeleteFile { path });
                 parser.pos += 1;
             } else if let Some(path) = line.strip_prefix(UPDATE_FILE_MARKER) {
                 let path = PathBuf::from(path.trim());
+                validate_patch_path(&path, "Update File")?;
                 parser.pos += 1;
                 let (move_path, chunks) = parser.read_update_body()?;
+                if chunks.is_empty() {
+                    return Err(format!(
+                        "Update file hunk for path '{}' is empty",
+                        path.display()
+                    ));
+                }
                 parser.hunks.push(Hunk::UpdateFile {
                     path,
                     move_path,
                     chunks,
                 });
             } else {
-                return Err(format!(
-                    "unexpected line {}: '{}'",
-                    parser.pos + 1,
-                    line
-                ));
+                return Err(format!("unexpected line {}: '{}'", parser.pos + 1, line));
             }
         }
         Ok(parser.hunks)
@@ -124,9 +135,7 @@ impl PatchParser {
         }
         content
     }
-    fn read_update_body(
-        &mut self,
-    ) -> Result<(Option<PathBuf>, Vec<UpdateFileChunk>), String> {
+    fn read_update_body(&mut self) -> Result<(Option<PathBuf>, Vec<UpdateFileChunk>), String> {
         let mut move_path = None;
         let mut chunks: Vec<UpdateFileChunk> = Vec::new();
         while self.pos < self.lines.len() {
@@ -136,7 +145,11 @@ impl PatchParser {
                 continue;
             }
             if let Some(dest) = line.strip_prefix(MOVE_TO_MARKER) {
-                move_path = Some(PathBuf::from(dest.trim()));
+                let dest = PathBuf::from(dest.trim());
+                validate_patch_path(&dest, "Move to")?;
+                if move_path.replace(dest).is_some() {
+                    return Err("update hunk contains more than one Move to marker".into());
+                }
                 self.pos += 1;
                 continue;
             }
@@ -182,7 +195,15 @@ impl PatchParser {
                 self.pos += 1;
                 break;
             }
-            if trimmed.is_empty() {
+            if line.is_empty() {
+                old_lines.push(String::new());
+                new_lines.push(String::new());
+                self.pos += 1;
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix(' ') {
+                old_lines.push(rest.to_string());
+                new_lines.push(rest.to_string());
                 self.pos += 1;
                 continue;
             }
@@ -199,11 +220,7 @@ impl PatchParser {
             // Context lines appear in both old_lines and new_lines.
             // Removed lines appear only in old_lines.
             // Added lines appear only in new_lines.
-            if let Some(rest) = line.strip_prefix(' ') {
-                old_lines.push(rest.to_string());
-                new_lines.push(rest.to_string());
-                self.pos += 1;
-            } else if let Some(rest) = line.strip_prefix('-') {
+            if let Some(rest) = line.strip_prefix('-') {
                 old_lines.push(rest.to_string());
                 self.pos += 1;
             } else if let Some(rest) = line.strip_prefix('+') {
@@ -225,15 +242,19 @@ impl PatchParser {
         })
     }
 }
+fn validate_patch_path(path: &Path, marker: &str) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err(format!("{marker} path must not be empty"));
+    }
+    Ok(())
+}
 fn strip_heredoc(lines: &[String]) -> Vec<String> {
     if lines.len() < 4 {
         return lines.to_vec();
     }
     let first = lines[0].trim();
     let last = lines[lines.len() - 1].trim();
-    if (first == "<<EOF" || first == "<<'EOF'" || first == "<<\"EOF\"")
-        && last.ends_with("EOF")
-    {
+    if (first == "<<EOF" || first == "<<'EOF'" || first == "<<\"EOF\"") && last.ends_with("EOF") {
         // Strip heredoc markers.
         lines[1..lines.len() - 1].to_vec()
     } else {
@@ -242,12 +263,7 @@ fn strip_heredoc(lines: &[String]) -> Vec<String> {
 }
 // ── seek_sequence (from codex-rs/apply-patch/src/seek_sequence.rs) ──
 // Four-pass fuzzy matching: exact → rstrip → trim → Unicode normalise.
-fn seek_sequence(
-    lines: &[String],
-    pattern: &[String],
-    start: usize,
-    eof: bool,
-) -> Option<usize> {
+fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
     if pattern.is_empty() {
         return Some(start);
     }
@@ -301,13 +317,13 @@ fn normalise(s: &str) -> String {
     s.trim()
         .chars()
         .map(|c| match c {
-            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}'
-            | '\u{2015}' | '\u{2212}' => '-',
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
             '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
             '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
-            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}'
-            | '\u{2006}' | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}'
-            | '\u{202F}' | '\u{205F}' | '\u{3000}' => ' ',
+            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
+            | '\u{3000}' => ' ',
             other => other,
         })
         .collect()
@@ -323,23 +339,16 @@ fn compute_replacements(
     for chunk in chunks {
         // If a chunk has a change_context, find it and advance line_index.
         if let Some(ctx_line) = &chunk.change_context {
-            if let Some(idx) =
-                seek_sequence(original_lines, &[ctx_line.clone()], line_index, false)
+            if let Some(idx) = seek_sequence(original_lines, &[ctx_line.clone()], line_index, false)
             {
                 line_index = idx + 1;
             } else {
-                return Err(format!(
-                    "Failed to find context '{}' in {}",
-                    ctx_line, path
-                ));
+                return Err(format!("Failed to find context '{}' in {}", ctx_line, path));
             }
         }
         if chunk.old_lines.is_empty() {
             // Pure addition.
-            let insertion_idx = if original_lines
-                .last()
-                .is_some_and(|s| s.is_empty())
-            {
+            let insertion_idx = if original_lines.last().is_some_and(|s| s.is_empty()) {
                 original_lines.len() - 1
             } else {
                 original_lines.len()
@@ -349,12 +358,7 @@ fn compute_replacements(
         }
         // Try to locate old_lines via fuzzy matching.
         let mut pattern: &[String] = &chunk.old_lines;
-        let mut found = seek_sequence(
-            original_lines,
-            pattern,
-            line_index,
-            chunk.is_end_of_file,
-        );
+        let mut found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
         let mut new_slice: &[String] = &chunk.new_lines;
         // Retry without trailing empty line (final newline sentinel).
         if found.is_none() && pattern.last().is_some_and(|s| s.is_empty()) {
@@ -362,12 +366,7 @@ fn compute_replacements(
             if new_slice.last().is_some_and(|s| s.is_empty()) {
                 new_slice = &new_slice[..new_slice.len() - 1];
             }
-            found = seek_sequence(
-                original_lines,
-                pattern,
-                line_index,
-                chunk.is_end_of_file,
-            );
+            found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
         }
         if let Some(start_idx) = found {
             replacements.push((start_idx, pattern.len(), new_slice.to_vec()));
@@ -421,126 +420,514 @@ fn derive_new_contents(
     Ok(new_lines.join("\n"))
 }
 // ── DeepX handler ──
-pub(super) fn exec_apply_patch(args: &serde_json::Value) -> String {
+#[derive(Debug)]
+struct PatchFailure {
+    code: &'static str,
+    message: String,
+    hint: &'static str,
+}
+
+impl PatchFailure {
+    fn apply(message: impl Into<String>) -> Self {
+        Self {
+            code: "APPLY_FAILED",
+            message: message.into(),
+            hint: "Read the target files and verify the patch content matches",
+        }
+    }
+
+    fn stale(message: impl Into<String>) -> Self {
+        Self {
+            code: "STALE_FILE",
+            message: message.into(),
+            hint: "Use read to obtain current content and hash, then retry",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum PlannedChange {
+    Add {
+        display: String,
+        target: PathBuf,
+        contents: String,
+    },
+    Delete {
+        display: String,
+        target: PathBuf,
+        original: String,
+    },
+    Update {
+        display: String,
+        source: PathBuf,
+        target: PathBuf,
+        original: String,
+        contents: String,
+    },
+}
+
+#[derive(Debug)]
+struct PatchPlan {
+    changes: Vec<PlannedChange>,
+}
+
+struct WorkspaceResolver {
+    root: PathBuf,
+}
+
+impl WorkspaceResolver {
+    fn new(workspace: &Path) -> Result<Self, String> {
+        let absolute = if workspace.is_absolute() {
+            workspace.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("cannot resolve current directory: {e}"))?
+                .join(workspace)
+        };
+        let root = std::fs::canonicalize(&absolute)
+            .map_err(|e| format!("cannot resolve workspace '{}': {e}", workspace.display()))?;
+        if !root.is_dir() {
+            return Err(format!(
+                "workspace '{}' is not a directory",
+                workspace.display()
+            ));
+        }
+        Ok(Self { root })
+    }
+
+    fn resolve(&self, patch_path: &Path) -> Result<PathBuf, String> {
+        if patch_path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(format!(
+                "path '{}' contains a parent-directory component",
+                patch_path.display()
+            ));
+        }
+        let candidate = if patch_path.is_absolute() {
+            patch_path.to_path_buf()
+        } else {
+            self.root.join(patch_path)
+        };
+        let mut ancestor = candidate.as_path();
+        let mut missing = Vec::new();
+        while !ancestor.exists() {
+            let Some(name) = ancestor.file_name() else {
+                return Err(format!("cannot resolve path '{}'", patch_path.display()));
+            };
+            missing.push(name.to_os_string());
+            let Some(parent) = ancestor.parent() else {
+                return Err(format!("cannot resolve path '{}'", patch_path.display()));
+            };
+            ancestor = parent;
+        }
+        let mut resolved = std::fs::canonicalize(ancestor)
+            .map_err(|e| format!("cannot resolve '{}': {e}", patch_path.display()))?;
+        for component in missing.iter().rev() {
+            resolved.push(component);
+        }
+        if !resolved.starts_with(&self.root) {
+            return Err(format!(
+                "path '{}' resolves outside workspace",
+                patch_path.display()
+            ));
+        }
+        Ok(resolved)
+    }
+}
+
+impl PatchPlan {
+    fn build(
+        hunks: &[Hunk],
+        resolver: &WorkspaceResolver,
+        expected_hash: &str,
+        verify_hash: bool,
+    ) -> Result<Self, PatchFailure> {
+        let mut changes = Vec::with_capacity(hunks.len());
+        let mut touched = HashSet::new();
+        for hunk in hunks {
+            match hunk {
+                Hunk::AddFile { path, contents } => {
+                    let target = resolver.resolve(path).map_err(PatchFailure::apply)?;
+                    reserve_path(&mut touched, &target, path)?;
+                    if target.is_dir() {
+                        return Err(PatchFailure::apply(format!(
+                            "{} is a directory, refusing to overwrite",
+                            path.display()
+                        )));
+                    }
+                    changes.push(PlannedChange::Add {
+                        display: path.display().to_string(),
+                        target,
+                        contents: contents.clone(),
+                    });
+                }
+                Hunk::DeleteFile { path } => {
+                    let target = resolver.resolve(path).map_err(PatchFailure::apply)?;
+                    reserve_path(&mut touched, &target, path)?;
+                    if verify_hash {
+                        verify_hash_for_resolved(path, &target, expected_hash)?;
+                    }
+                    if !target.exists() {
+                        return Err(PatchFailure::apply(format!(
+                            "{} does not exist",
+                            path.display()
+                        )));
+                    }
+                    if target.is_dir() {
+                        return Err(PatchFailure::apply(format!(
+                            "{} is a directory, refusing to delete",
+                            path.display()
+                        )));
+                    }
+                    let original = std::fs::read_to_string(&target).map_err(|e| {
+                        PatchFailure::apply(format!("Failed to read {}: {e}", path.display()))
+                    })?;
+                    changes.push(PlannedChange::Delete {
+                        display: path.display().to_string(),
+                        target,
+                        original,
+                    });
+                }
+                Hunk::UpdateFile {
+                    path,
+                    move_path,
+                    chunks,
+                } => {
+                    let source = resolver.resolve(path).map_err(PatchFailure::apply)?;
+                    if verify_hash {
+                        verify_hash_for_resolved(path, &source, expected_hash)?;
+                    }
+                    if !source.is_file() {
+                        return Err(PatchFailure::apply(format!(
+                            "{} does not exist or is not a file",
+                            path.display()
+                        )));
+                    }
+                    let original = std::fs::read_to_string(&source).map_err(|e| {
+                        PatchFailure::apply(format!("Failed to read {}: {e}", path.display()))
+                    })?;
+                    let contents =
+                        derive_new_contents(&original, &path.display().to_string(), chunks)
+                            .map_err(PatchFailure::apply)?;
+                    let target = match move_path {
+                        Some(dest) => resolver.resolve(dest).map_err(PatchFailure::apply)?,
+                        None => source.clone(),
+                    };
+                    reserve_path(&mut touched, &source, path)?;
+                    if target != source {
+                        let display_path = move_path.as_deref().unwrap_or(path);
+                        reserve_path(&mut touched, &target, display_path)?;
+                    }
+                    if target.is_dir() {
+                        return Err(PatchFailure::apply(format!(
+                            "{} is a directory, refusing to overwrite",
+                            move_path.as_deref().unwrap_or(path).display()
+                        )));
+                    }
+                    let display = match move_path {
+                        Some(dest) if target != source => {
+                            format!("{} → {}", path.display(), dest.display())
+                        }
+                        _ => path.display().to_string(),
+                    };
+                    changes.push(PlannedChange::Update {
+                        display,
+                        source,
+                        target,
+                        original,
+                        contents,
+                    });
+                }
+            }
+        }
+        Ok(Self { changes })
+    }
+}
+
+fn reserve_path(
+    touched: &mut HashSet<PathBuf>,
+    resolved: &Path,
+    patch_path: &Path,
+) -> Result<(), PatchFailure> {
+    if touched.insert(resolved.to_path_buf()) {
+        Ok(())
+    } else {
+        Err(PatchFailure::apply(format!(
+            "path '{}' is modified more than once in the same patch",
+            patch_path.display()
+        )))
+    }
+}
+
+pub(crate) fn extract_target_paths(args: &serde_json::Value) -> Vec<PathBuf> {
+    let Some(patch) = args.get("patch").and_then(|value| value.as_str()) else {
+        return Vec::new();
+    };
+    let Ok(hunks) = PatchParser::parse(patch) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for hunk in hunks {
+        match hunk {
+            Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => paths.push(path),
+            Hunk::UpdateFile {
+                path, move_path, ..
+            } => {
+                paths.push(path);
+                if let Some(dest) = move_path {
+                    paths.push(dest);
+                }
+            }
+        }
+    }
+    let workspace = crate::CURRENT_WORKSPACE
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    paths
+        .into_iter()
+        .map(|path| {
+            if path.is_absolute() || workspace.is_empty() || workspace == "." {
+                path
+            } else {
+                Path::new(&workspace).join(path)
+            }
+        })
+        .collect()
+}
+
+fn execute_apply_patch(args: &serde_json::Value) -> crate::ToolResult {
     let patch_text = args.s("patch");
     if patch_text.is_empty() {
-        return serde_json::json!({
-            "timeis": crate::now_utc8(), "status": "error",
-            "code": "EMPTY_PATCH",
-            "message": "patch argument is required and must not be empty",
-            "hint": "Provide a patch body starting with *** Begin Patch"
-        })
-        .to_string();
+        return error_result(
+            "EMPTY_PATCH",
+            "patch argument is required and must not be empty",
+            "Provide a patch body starting with *** Begin Patch",
+        );
     }
     let expected_hash = args.s("expected_hash");
     let dry_run = args.opt_bool("dry_run").unwrap_or(false);
-    // 1. Parse Codex format.
     let hunks = match PatchParser::parse(&patch_text) {
         Ok(hunks) => hunks,
         Err(e) => {
-            return serde_json::json!({
-                "timeis": crate::now_utc8(), "status": "error",
-                "code": "PARSE_ERROR",
-                "message": format!("Failed to parse patch: {}", e),
-                "hint": "Check that the patch starts with *** Begin Patch and ends with *** End Patch"
-            })
-            .to_string();
+            return error_result(
+                "PARSE_ERROR",
+                format!("Failed to parse patch: {e}"),
+                "Check that the patch starts with *** Begin Patch and ends with *** End Patch",
+            );
         }
     };
     if hunks.is_empty() {
-        return serde_json::json!({
-            "timeis": crate::now_utc8(), "status": "error",
-            "code": "EMPTY_PATCH",
-            "message": "Patch contains no file changes",
-            "hint": "Add at least one *** Add File: / *** Delete File: / *** Update File: section"
-        })
-        .to_string();
+        return error_result(
+            "EMPTY_PATCH",
+            "Patch contains no file changes",
+            "Add at least one *** Add File: / *** Delete File: / *** Update File: section",
+        );
     }
-    // 2. Resolve workspace (PathBuf from string — no canonicalize, which
-    //    adds Windows \\?\ prefix that breaks file operations).
     let workspace = crate::CURRENT_WORKSPACE
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     if workspace.is_empty() || workspace == "." {
-        return serde_json::json!({
-            "timeis": crate::now_utc8(), "status": "error",
-            "code": "NO_WORKSPACE",
-            "message": "An existing workspace is required"
-        })
-        .to_string();
+        return error_result(
+            "NO_WORKSPACE",
+            "An existing workspace is required",
+            "Open an existing workspace and retry",
+        );
     }
-    let workspace = std::path::PathBuf::from(&workspace);
-    // 3. Verify expected_hash if provided — check every UpdateFile/DeleteFile target.
-    if !expected_hash.is_empty() && !dry_run {
-        for hunk in &hunks {
-            match hunk {
-                Hunk::UpdateFile { path, .. } | Hunk::DeleteFile { path, .. } => {
-                    match verify_hash_for_path(path, &expected_hash, &workspace) {
-                        Ok(()) => {}
-                        Err(stale_err) => return stale_err,
-                    }
+    let resolver = match WorkspaceResolver::new(Path::new(&workspace)) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            return error_result(
+                "NO_WORKSPACE",
+                error,
+                "Open an existing workspace and retry",
+            );
+        }
+    };
+    let plan = match PatchPlan::build(
+        &hunks,
+        &resolver,
+        &expected_hash,
+        !expected_hash.is_empty() && !dry_run,
+    ) {
+        Ok(plan) => plan,
+        Err(failure) => return failure_result(failure),
+    };
+    if dry_run {
+        return dry_run_result(&plan);
+    }
+    apply_plan(plan)
+}
+
+fn error_result(
+    code: &'static str,
+    message: impl Into<String>,
+    hint: &'static str,
+) -> crate::ToolResult {
+    crate::ToolResult {
+        success: false,
+        content: serde_json::json!({
+            "timeis": crate::now_utc8(),
+            "status": "error",
+            "code": code,
+            "message": message.into(),
+            "hint": hint,
+        })
+        .to_string(),
+    }
+}
+
+fn failure_result(failure: PatchFailure) -> crate::ToolResult {
+    error_result(failure.code, failure.message, failure.hint)
+}
+
+fn verify_hash_for_resolved(
+    patch_path: &Path,
+    resolved: &Path,
+    expected_hash: &str,
+) -> Result<(), PatchFailure> {
+    let content = std::fs::read_to_string(resolved)
+        .map_err(|e| PatchFailure::stale(format!("Cannot read {}: {e}", patch_path.display())))?;
+    let (normalized, _) = crate::file_shared::normalize_newlines(&content);
+    let actual_hash = crate::file_shared::content_hash(&normalized);
+    if actual_hash == expected_hash {
+        Ok(())
+    } else {
+        Err(PatchFailure::stale(format!(
+            "File content changed since the referenced read: {} (expected {}, actual {})",
+            patch_path.display(),
+            expected_hash,
+            actual_hash
+        )))
+    }
+}
+
+fn dry_run_result(plan: &PatchPlan) -> crate::ToolResult {
+    let mut preview = String::from("[DRY RUN] apply_patch — preview, no changes written\n\n");
+    for change in &plan.changes {
+        match change {
+            PlannedChange::Add {
+                display, contents, ..
+            } => {
+                preview.push_str(&format!(
+                    "--- /dev/null\n+++ b/{display}\n@@ -0,0 +1,{} @@\n",
+                    contents.lines().count().max(1)
+                ));
+                for line in contents.lines() {
+                    preview.push_str(&format!("+{line}\n"));
                 }
-                Hunk::AddFile { .. } => {}
+            }
+            PlannedChange::Delete {
+                display, original, ..
+            } => {
+                preview.push_str(&format!(
+                    "--- a/{display}\n+++ /dev/null\n@@ -1,{} +0,0 @@\n",
+                    original.lines().count().max(1)
+                ));
+                for line in original.lines() {
+                    preview.push_str(&format!("-{line}\n"));
+                }
+            }
+            PlannedChange::Update {
+                display,
+                original,
+                contents,
+                ..
+            } => {
+                preview.push_str(&crate::file_shared::unified_diff(
+                    original, contents, display,
+                ));
             }
         }
+        preview.push('\n');
     }
-    // 4. Dry-run: compute what would change and return a unified diff preview.
-    if dry_run {
-        return dry_run_preview(&hunks, &workspace);
+    crate::ToolResult {
+        success: true,
+        content: serde_json::json!({
+            "timeis": crate::now_utc8(),
+            "status": "ok",
+            "dry_run": true,
+            "content": preview.trim_end(),
+        })
+        .to_string(),
     }
-    // 5. Apply each hunk (non-dry-run).
+}
+
+fn apply_plan(plan: PatchPlan) -> crate::ToolResult {
     let mut added: Vec<String> = Vec::new();
     let mut modified: Vec<String> = Vec::new();
     let mut deleted: Vec<String> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    for hunk in &hunks {
-        let result = match hunk {
-            Hunk::AddFile { path, contents } => {
-                apply_add(path, contents, &workspace)
-            }
-            Hunk::DeleteFile { path } => {
-                apply_delete(path, &workspace)
-            }
-            Hunk::UpdateFile {
-                path,
-                move_path,
-                chunks,
-            } => apply_update(path, move_path.as_ref(), chunks, &workspace),
-        };
-        match result {
-            Ok(affected) => {
-                for a in affected.added {
-                    added.push(a);
-                }
-                for m in affected.modified {
-                    modified.push(m);
-                }
-                for d in affected.deleted {
-                    deleted.push(d);
+    for change in plan.changes {
+        match change {
+            PlannedChange::Add {
+                display,
+                target,
+                contents,
+            } => {
+                let result = ensure_parent_dir(&target).and_then(|()| {
+                    write_text(&target, &contents)?;
+                    crate::file_state::record_write(
+                        &target.to_string_lossy(),
+                        contents.lines().count(),
+                    );
+                    Ok(())
+                });
+                match result {
+                    Ok(()) => added.push(display),
+                    Err(error) => {
+                        return partial_failure_result(error, added, modified, deleted);
+                    }
                 }
             }
-            Err(e) => errors.push(e),
+            PlannedChange::Delete {
+                display, target, ..
+            } => {
+                if let Err(error) = std::fs::remove_file(&target)
+                    .map_err(|e| format!("Failed to delete {display}: {e}"))
+                {
+                    return partial_failure_result(error, added, modified, deleted);
+                }
+                crate::file_state::record_delete(&target.to_string_lossy());
+                deleted.push(display);
+            }
+            PlannedChange::Update {
+                display,
+                source,
+                target,
+                contents,
+                ..
+            } => {
+                if let Err(error) = ensure_parent_dir(&target).and_then(|()| {
+                    write_text(&target, &contents)
+                        .map_err(|e| format!("Failed to write {display}: {e}"))
+                }) {
+                    return partial_failure_result(error, added, modified, deleted);
+                }
+                if source == target {
+                    crate::file_state::record_edit(
+                        &target.to_string_lossy(),
+                        contents.lines().count(),
+                    );
+                    modified.push(display);
+                } else {
+                    modified.push(display.clone());
+                    if let Err(error) = std::fs::remove_file(&source)
+                        .map_err(|e| format!("Failed to remove original {display}: {e}"))
+                    {
+                        return partial_failure_result(error, added, modified, deleted);
+                    }
+                    crate::file_state::record_move(
+                        &source.to_string_lossy(),
+                        &target.to_string_lossy(),
+                    );
+                }
+            }
         }
     }
-    // 6. Build output.
-    if !errors.is_empty() && added.is_empty() && modified.is_empty() && deleted.is_empty() {
-        return serde_json::json!({
-            "timeis": crate::now_utc8(), "status": "error",
-            "code": "APPLY_FAILED",
-            "message": errors.join("; "),
-            "hint": "Read the target files and verify the patch content matches"
-        })
-        .to_string();
-    }
-    let mut summary = if errors.is_empty() {
-        "Success. Updated the following files:\n".to_string()
-    } else {
-        format!(
-            "Partial success ({} errors). Updated files:\n",
-            errors.len()
-        )
-    };
+    let mut summary = "Success. Updated the following files:\n".to_string();
     for p in &added {
         summary.push_str(&format!("A {}\n", p));
     }
@@ -550,273 +937,64 @@ pub(super) fn exec_apply_patch(args: &serde_json::Value) -> String {
     for p in &deleted {
         summary.push_str(&format!("D {}\n", p));
     }
-    if !errors.is_empty() {
-        summary.push_str("\nErrors:\n");
-        for e in &errors {
-            summary.push_str(&format!("  • {}\n", e));
-        }
+    crate::ToolResult {
+        success: true,
+        content: serde_json::json!({
+            "timeis": crate::now_utc8(),
+            "status": "ok",
+            "content": summary,
+            "added": added,
+            "modified": modified,
+            "deleted": deleted,
+        })
+        .to_string(),
     }
-    serde_json::json!({
-        "timeis": crate::now_utc8(), "status": "ok",
-        "content": summary,
-        "added": added, "modified": modified, "deleted": deleted
-    })
-    .to_string()
 }
-/// Verify the file at `path` matches `expected_hash`. Returns Ok on match,
-/// or a JSON error string on mismatch / missing file.
-fn verify_hash_for_path(
-    path: &Path,
-    expected_hash: &str,
-    workspace: &Path,
-) -> Result<(), String> {
-    let full = match resolve_path(path, workspace) {
-        Ok(p) => p,
-        Err(e) => return Err(serde_json::json!({
-            "timeis": crate::now_utc8(), "status": "error",
-            "code": "STALE_FILE",
-            "path": path.display().to_string(),
-            "message": format!("Cannot resolve {}: {}", path.display(), e),
-            "hint": "Use read to verify the file still exists."
-        }).to_string()),
-    };
-    let content = match std::fs::read_to_string(&full) {
-        Ok(c) => c,
-        Err(e) => return Err(serde_json::json!({
-            "timeis": crate::now_utc8(), "status": "error",
-            "code": "STALE_FILE",
-            "path": path.display().to_string(),
-            "message": format!("Cannot read {}: {}", path.display(), e),
-            "hint": "The file may have been deleted. Use list to check."
-        }).to_string()),
-    };
-    // Normalize newlines before hashing (same as read does).
-    let (normalized, _) = crate::file_shared::normalize_newlines(&content);
-    let actual_hash = crate::file_shared::content_hash(&normalized);
-    if actual_hash == expected_hash {
-        return Ok(());
-    }
-    Err(serde_json::json!({
-        "timeis": crate::now_utc8(), "status": "error",
-        "code": "STALE_FILE",
-        "path": path.display().to_string(),
-        "message": "File content changed since the referenced read",
-        "expected_hash": expected_hash,
-        "actual_hash": actual_hash,
-        "hint": "Use read to obtain current content and hash, then retry."
-    }).to_string())
-}
-/// Dry-run: compute diffs for every UpdateFile hunk without writing anything.
-fn dry_run_preview(hunks: &[Hunk], workspace: &Path) -> String {
-    let mut diffs = String::from("[DRY RUN] apply_patch — preview, no changes written\n\n");
-    let mut has_any = false;
-    for hunk in hunks {
-        match hunk {
-            Hunk::AddFile { path, contents } => {
-                diffs.push_str(&format!(
-                    "--- /dev/null\n+++ b/{}\n@@ -0,0 +1,{} @@\n",
-                    path.display(),
-                    contents.lines().count().max(1),
-                ));
-                for line in contents.lines() {
-                    diffs.push_str(&format!("+{}\n", line));
-                }
-                diffs.push('\n');
-                has_any = true;
-            }
-            Hunk::DeleteFile { path } => {
-                diffs.push_str(&format!("--- a/{}\n+++ /dev/null\n", path.display()));
-                match resolve_path(path, workspace)
-                    .and_then(|full| std::fs::read_to_string(&full).map_err(|e| e.to_string()))
-                {
-                    Ok(content) => {
-                        let count = content.lines().count().max(1);
-                        diffs.push_str(&format!(
-                            "@@ -1,{} +0,0 @@\n",
-                            count
-                        ));
-                        for line in content.lines() {
-                            diffs.push_str(&format!("-{}\n", line));
-                        }
-                    }
-                    Err(_) => {
-                        diffs.push_str("@@ -1,1 +0,0 @@\n-[file not found]\n");
-                    }
-                }
-                diffs.push('\n');
-                has_any = true;
-            }
-            Hunk::UpdateFile {
-                path,
-                move_path,
-                chunks,
-            } => {
-                let path_display = if let Some(dest) = move_path {
-                    format!("{} → {}", path.display(), dest.display())
-                } else {
-                    path.display().to_string()
-                };
-                diffs.push_str(&format!("--- a/{}\n+++ b/{}\n", path_display, path_display));
-                match resolve_path(path, workspace)
-                    .and_then(|full| std::fs::read_to_string(&full).map_err(|e| e.to_string()))
-                {
-                    Ok(raw) => {
-                        match derive_new_contents(&raw, &path.display().to_string(), chunks) {
-                            Ok(new_content) => {
-                                // Generate a minimal unified diff preview.
-                                let diff = crate::file_shared::unified_diff(
-                                    &raw, &new_content,
-                                    &path.display().to_string(),
-                                );
-                                diffs.push_str(&diff);
-                            }
-                            Err(e) => {
-                                diffs.push_str(&format!(
-                                    "@@ [ERROR] {}\n",
-                                    e
-                                ));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        diffs.push_str(&format!("@@ [ERROR] Cannot read {}: {}\n", path.display(), e));
-                    }
-                }
-                diffs.push('\n');
-                has_any = true;
-            }
-        }
-    }
-    if !has_any {
-        diffs.push_str("(no changes)\n");
-    }
-    serde_json::json!({
-        "timeis": crate::now_utc8(), "status": "ok",
-        "dry_run": true,
-        "content": diffs.trim_end().to_string()
-    })
-    .to_string()
-}
-struct Affected {
+
+fn partial_failure_result(
+    message: String,
     added: Vec<String>,
     modified: Vec<String>,
     deleted: Vec<String>,
-}
-fn resolve_path(rel: &Path, workspace: &Path) -> Result<String, String> {
-    // Simple join — workspace is already canonicalized by exec_apply_patch.
-    let full = workspace.join(rel);
-    // Quick sanity: for existing files, verify they resolve inside workspace.
-    if let Ok(canon) = std::fs::canonicalize(&full) {
-        let ws_lower = workspace.to_string_lossy().to_lowercase();
-        let canon_lower = canon.to_string_lossy().to_lowercase();
-        if !canon_lower.starts_with(&ws_lower) {
-            return Err(format!("path '{}' resolves outside workspace", rel.display()));
-        }
-        return Ok(canon.to_string_lossy().to_string());
+) -> crate::ToolResult {
+    crate::ToolResult {
+        success: false,
+        content: serde_json::json!({
+            "timeis": crate::now_utc8(),
+            "status": "error",
+            "code": "APPLY_PARTIAL",
+            "message": message,
+            "hint": "Some earlier operations may have completed; read the listed files before retrying",
+            "added": added,
+            "modified": modified,
+            "deleted": deleted,
+        })
+        .to_string(),
     }
-    // File doesn't exist yet (AddFile). Just join.
-    Ok(full.to_string_lossy().to_string())
 }
-fn ensure_parent_dir(file_path: &str) -> Result<(), String> {
-    if let Some(parent) = Path::new(file_path).parent() {
+
+fn ensure_parent_dir(file_path: &Path) -> Result<(), String> {
+    if let Some(parent) = file_path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                format!("Failed to create parent dirs for {}: {}", file_path, e)
+                format!(
+                    "Failed to create parent dirs for {}: {e}",
+                    file_path.display()
+                )
             })?;
         }
     }
     Ok(())
 }
-fn apply_add(
-    path: &Path,
-    contents: &str,
-    workspace: &Path,
-) -> Result<Affected, String> {
-    let full = resolve_path(path, workspace)?;
-    ensure_parent_dir(&full)?;
-    crate::file_shared::atomic_write(&full, contents).map_err(|e| {
-        format!("Failed to write {}: {}", path.display(), e)
-    })?;
-    let line_count = contents.lines().count();
-    crate::file_state::record_write(&full, line_count);
-    Ok(Affected {
-        added: vec![path.display().to_string()],
-        modified: vec![],
-        deleted: vec![],
-    })
+
+fn write_text(path: &Path, contents: &str) -> Result<(), String> {
+    crate::file_shared::atomic_write(&path.to_string_lossy(), contents)
+        .map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
-fn apply_delete(path: &Path, workspace: &Path) -> Result<Affected, String> {
-    let full = resolve_path(path, workspace)?;
-    let p = Path::new(&full);
-    if !p.exists() {
-        return Err(format!("{} does not exist", path.display()));
-    }
-    if p.is_dir() {
-        return Err(format!("{} is a directory, refusing to delete", path.display()));
-    }
-    std::fs::remove_file(p).map_err(|e| {
-        format!("Failed to delete {}: {}", path.display(), e)
-    })?;
-    crate::file_state::record_delete(&full);
-    Ok(Affected {
-        added: vec![],
-        modified: vec![],
-        deleted: vec![path.display().to_string()],
-    })
-}
-fn apply_update(
-    path: &Path,
-    move_path: Option<&PathBuf>,
-    chunks: &[UpdateFileChunk],
-    workspace: &Path,
-) -> Result<Affected, String> {
-    let full = resolve_path(path, workspace)?;
-    let raw = std::fs::read_to_string(&full).map_err(|e| {
-        format!("Failed to read {}: {}", path.display(), e)
-    })?;
-    let new_content = derive_new_contents(&raw, &path.display().to_string(), chunks)?;
-    if let Some(dest) = move_path {
-        // Move: write to new path, remove old.
-        let dest_full = resolve_path(dest, workspace)?;
-        ensure_parent_dir(&dest_full)?;
-        crate::file_shared::atomic_write(&dest_full, &new_content)
-            .map_err(|e| format!("Failed to write {}: {}", dest.display(), e))?;
-        let line_count = new_content.lines().count();
-        crate::file_state::record_write(&dest_full, line_count);
-        // Remove original.
-        std::fs::remove_file(Path::new(&full)).map_err(|e| {
-            format!("Failed to remove original {}: {}", path.display(), e)
-        })?;
-        crate::file_state::record_delete(&full);
-        Ok(Affected {
-            added: vec![],
-            modified: vec![format!(
-                "{} → {}",
-                path.display(),
-                dest.display()
-            )],
-            deleted: vec![],
-        })
-    } else {
-        // In-place update.
-        crate::file_shared::atomic_write(&full, &new_content)
-            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-        let line_count = new_content.lines().count();
-        crate::file_state::record_edit(&full, line_count);
-        Ok(Affected {
-            added: vec![],
-            modified: vec![path.display().to_string()],
-            deleted: vec![],
-        })
-    }
-}
+
 // ── Handler glue ──
 fn handle_apply_patch(ctx: crate::ToolCallCtx) -> crate::ToolResult {
-    let s = exec_apply_patch(&ctx.args);
-    // Parse JSON status to determine success (handler_from_string! can't
-    // see into JSON — it only checks for [ERROR] prefix).
-    let success = !s.contains("\"status\":\"error\"");
-    crate::ToolResult { success, content: s }
+    execute_apply_patch(&ctx.args)
 }
 // ── Registration ──
 pub fn register(mgr: &mut crate::ToolManager) {
@@ -853,6 +1031,13 @@ pub fn register(mgr: &mut crate::ToolManager) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
+
+    fn runtime_guard() -> MutexGuard<'static, ()> {
+        crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
     #[test]
     fn parse_simple_add() {
         let patch = "\
@@ -936,7 +1121,10 @@ mod tests {
     }
     #[test]
     fn seek_exact_match() {
-        let lines: Vec<String> = ["foo", "bar", "baz"].iter().map(|s| s.to_string()).collect();
+        let lines: Vec<String> = ["foo", "bar", "baz"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let pattern: Vec<String> = ["bar", "baz"].iter().map(|s| s.to_string()).collect();
         assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(1));
     }
@@ -976,6 +1164,7 @@ mod tests {
     }
     #[test]
     fn e2e_dry_run_does_not_write() {
+        let _guard = runtime_guard();
         let dir = tempfile::tempdir().unwrap();
         crate::set_workspace(&dir.path().to_string_lossy());
         std::fs::write(dir.path().join("example.txt"), "before\n").unwrap();
@@ -983,13 +1172,32 @@ mod tests {
             "patch": "*** Begin Patch\n*** Update File: example.txt\n@@\n-before\n+after\n*** End Patch",
             "dry_run": true
         });
-        let result = exec_apply_patch(&args);
-        assert!(result.contains("\"dry_run\":true"), "unexpected: {result}");
-        assert!(result.contains("[DRY RUN]"), "unexpected: {result}");
-        assert_eq!(std::fs::read_to_string(dir.path().join("example.txt")).unwrap(), "before\n");
+        let result = execute_apply_patch(&args);
+        assert!(result.success, "unexpected: {}", result.content);
+        assert!(
+            result.content.contains("\"dry_run\":true"),
+            "unexpected: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("[DRY RUN]"),
+            "unexpected: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("[ERROR]"),
+            "unexpected: {}",
+            result.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("example.txt")).unwrap(),
+            "before\n"
+        );
+        crate::set_workspace(".");
     }
     #[test]
     fn e2e_stale_hash_is_rejected() {
+        let _guard = runtime_guard();
         let dir = tempfile::tempdir().unwrap();
         crate::set_workspace(&dir.path().to_string_lossy());
         std::fs::write(dir.path().join("target.txt"), "original\n").unwrap();
@@ -998,8 +1206,291 @@ mod tests {
             "patch": "*** Begin Patch\n*** Update File: target.txt\n@@\n-original\n+modified\n*** End Patch",
             "expected_hash": bogus_hash
         });
-        let result = exec_apply_patch(&args);
-        assert!(result.contains("STALE_FILE"), "should reject stale hash: {result}");
-        assert_eq!(std::fs::read_to_string(dir.path().join("target.txt")).unwrap(), "original\n");
+        let result = execute_apply_patch(&args);
+        assert!(!result.success);
+        assert!(result.content.contains("STALE_FILE"), "{}", result.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("target.txt")).unwrap(),
+            "original\n"
+        );
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn parser_preserves_blank_context_and_rejects_empty_update() {
+        let patch = "*** Begin Patch\n*** Update File: file.txt\n@@\n context before\n\n context after\n-old\n+new\n*** End Patch";
+        let hunks = PatchParser::parse(patch).unwrap();
+        let Hunk::UpdateFile { chunks, .. } = &hunks[0] else {
+            panic!("expected update");
+        };
+        assert_eq!(
+            chunks[0].old_lines,
+            vec!["context before", "", "context after", "old"]
+        );
+        assert_eq!(
+            chunks[0].new_lines,
+            vec!["context before", "", "context after", "new"]
+        );
+        assert!(
+            PatchParser::parse("*** Begin Patch\n*** Update File: file.txt\n*** End Patch")
+                .unwrap_err()
+                .contains("is empty")
+        );
+    }
+
+    #[test]
+    fn registration_preserves_json_patch_contract() {
+        let mut manager = crate::ToolManager::new();
+        register(&mut manager);
+        let handler = manager.handlers.get("apply_patch").unwrap();
+        assert_eq!(handler.input_schema["type"], "object");
+        assert_eq!(handler.input_schema["required"], serde_json::json!(["patch"]));
+        assert_eq!(handler.input_schema["properties"]["patch"]["type"], "string");
+        assert_eq!(
+            handler.input_schema["properties"]["expected_hash"]["type"],
+            "string"
+        );
+        assert_eq!(
+            handler.input_schema["properties"]["dry_run"]["default"],
+            false
+        );
+        assert_eq!(handler.input_schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn e2e_relative_and_workspace_absolute_paths_apply() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        for (name, content) in [
+            ("relative-delete.txt", "delete relative\n"),
+            ("absolute-delete.txt", "delete absolute\n"),
+            ("relative-update.txt", "relative old\n"),
+            ("absolute-update.txt", "absolute old\n"),
+            ("move-old.txt", "move old\n"),
+        ] {
+            std::fs::write(dir.path().join(name), content).unwrap();
+        }
+        let absolute_add = dir.path().join("absolute-add.txt");
+        let absolute_delete = dir.path().join("absolute-delete.txt");
+        let absolute_update = dir.path().join("absolute-update.txt");
+        let patch = format!(
+            "*** Begin Patch\n\
+             *** Add File: relative-add.txt\n\
+             +relative add\n\
+             *** Add File: {}\n\
+             +absolute add\n\
+             *** Delete File: relative-delete.txt\n\
+             *** Delete File: {}\n\
+             *** Update File: relative-update.txt\n\
+             @@\n\
+             -relative old\n\
+             +relative new\n\
+             *** Update File: {}\n\
+             @@\n\
+             -absolute old\n\
+             +absolute new\n\
+             *** Update File: move-old.txt\n\
+             *** Move to: move-new.txt\n\
+             @@\n\
+             -move old\n\
+             +move new\n\
+             *** End Patch",
+            absolute_add.display(),
+            absolute_delete.display(),
+            absolute_update.display()
+        );
+        let result = execute_apply_patch(&serde_json::json!({ "patch": patch }));
+        assert!(result.success, "{}", result.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("relative-add.txt")).unwrap(),
+            "relative add\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&absolute_add).unwrap(),
+            "absolute add\n"
+        );
+        assert!(!dir.path().join("relative-delete.txt").exists());
+        assert!(!absolute_delete.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("relative-update.txt")).unwrap(),
+            "relative new\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&absolute_update).unwrap(),
+            "absolute new\n"
+        );
+        assert!(!dir.path().join("move-old.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("move-new.txt")).unwrap(),
+            "move new\n"
+        );
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn preflight_failure_does_not_apply_earlier_hunks() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        let patch = "*** Begin Patch\n\
+                     *** Add File: should-not-exist.txt\n\
+                     +content\n\
+                     *** Update File: missing.txt\n\
+                     @@\n\
+                     -old\n\
+                     +new\n\
+                     *** End Patch";
+        let result = execute_apply_patch(&serde_json::json!({ "patch": patch }));
+        assert!(!result.success, "{}", result.content);
+        assert!(!dir.path().join("should-not-exist.txt").exists());
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn dry_run_read_error_is_a_failed_tool_result() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        let result = execute_apply_patch(&serde_json::json!({
+            "patch": "*** Begin Patch\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch",
+            "dry_run": true
+        }));
+        assert!(!result.success, "{}", result.content);
+        assert!(result.content.contains("\"status\":\"error\""));
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn add_rejects_parent_and_absolute_workspace_escape() {
+        let _guard = runtime_guard();
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        crate::set_workspace(&workspace.to_string_lossy());
+        let parent_escape = root.path().join("parent-escape.txt");
+        let absolute_escape = root.path().join("absolute-escape.txt");
+        for patch in [
+            "*** Begin Patch\n*** Add File: ..\\parent-escape.txt\n+escape\n*** End Patch"
+                .to_string(),
+            format!(
+                "*** Begin Patch\n*** Add File: {}\n+escape\n*** End Patch",
+                absolute_escape.display()
+            ),
+        ] {
+            let result = execute_apply_patch(&serde_json::json!({ "patch": patch }));
+            assert!(!result.success, "{}", result.content);
+        }
+        assert!(!parent_escape.exists());
+        assert!(!absolute_escape.exists());
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn patch_paths_are_visible_to_permission_authorization() {
+        let _guard = runtime_guard();
+        let root_dir = tempfile::tempdir().unwrap();
+        let workspace = root_dir.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        crate::set_workspace(&workspace.to_string_lossy());
+        let args = serde_json::json!({
+            "patch": "*** Begin Patch\n*** Update File: source.txt\n*** Move to: nested/dest.txt\n@@\n-old\n+new\n*** End Patch"
+        });
+        let resources = crate::permission::extract_target_paths("apply_patch", &args);
+        let root = std::fs::canonicalize(&workspace).unwrap();
+        assert_eq!(resources.len(), 2);
+        assert!(resources.iter().all(|path| path.starts_with(&root)));
+        assert!(matches!(
+            crate::permission::needs_permission(
+                crate::permission::PermissionLevel::WorkspaceFree,
+                "apply_patch",
+                &args,
+                &workspace,
+                &HashSet::new(),
+            ),
+            crate::permission::PermissionDecision::AutoApprove
+        ));
+        let outside_args = serde_json::json!({
+            "patch": format!(
+                "*** Begin Patch\n*** Add File: {}\n+outside\n*** End Patch",
+                root_dir.path().join("outside.txt").display()
+            )
+        });
+        assert!(matches!(
+            crate::permission::needs_permission(
+                crate::permission::PermissionLevel::WorkspaceFree,
+                "apply_patch",
+                &outside_args,
+                &workspace,
+                &HashSet::new(),
+            ),
+            crate::permission::PermissionDecision::AskUser { .. }
+        ));
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn dispatch_reports_apply_patch_failure_and_success_structurally() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        crate::runtime::init_tools("apply-patch-test", &[], Vec::new());
+        crate::runtime::set_context("apply-patch-test", 4);
+        let success_args = serde_json::json!({
+            "patch": "*** Begin Patch\n*** Add File: through-dispatch.txt\n+created\n*** End Patch"
+        })
+        .to_string();
+        let success = crate::execution::execute_with_context(
+            "apply_patch",
+            "",
+            &success_args,
+            "apply-patch-success",
+            None,
+        );
+        assert!(success.success, "{}", success.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("through-dispatch.txt")).unwrap(),
+            "created\n"
+        );
+        let failure_args = serde_json::json!({
+            "patch": "*** Begin Patch\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch",
+            "dry_run": true
+        })
+        .to_string();
+        let failure = crate::execution::execute_with_context(
+            "apply_patch",
+            "",
+            &failure_args,
+            "apply-patch-failure",
+            None,
+        );
+        assert!(!failure.success, "{}", failure.content);
+        assert!(failure.content.contains("\"status\":\"error\""));
+        crate::runtime::clear_context();
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn add_rejects_symlink_or_junction_escape_when_supported() {
+        let _guard = runtime_guard();
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let link = workspace.join("link");
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&outside, &link).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        crate::set_workspace(&workspace.to_string_lossy());
+        let result = execute_apply_patch(&serde_json::json!({
+            "patch": "*** Begin Patch\n*** Add File: link/escape.txt\n+escape\n*** End Patch"
+        }));
+        assert!(!result.success, "{}", result.content);
+        assert!(!outside.join("escape.txt").exists());
+        crate::set_workspace(".");
     }
 }
