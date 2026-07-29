@@ -1,5 +1,5 @@
 
 interface:
   display_name: "DeepX 开发审计"
-  short_description: "严格执行 DeepX 开发、调试、API 兼容与安全审计"
-  default_prompt: "Use $deepx-dev-audit to implement and verify this DeepX change safely."
+  short_description: "审计 DeepX 合约、并发、外部进程与发布安全"
+  default_prompt: "Use $deepx-dev-audit to audit this DeepX change for contracts, subprocess blocking, startup readiness, cancellation, and release safety."
