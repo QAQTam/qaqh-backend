@@ -475,7 +475,10 @@ impl Loop {
             // ── Block for next command (with timeout to poll compact) ──
             let frame = match self.cmd_rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(f) => {
-                    log::info!("[AGENT] received Ui2Agent frame");
+                    log::info!(
+                        "[AGENT] received Ui2Agent frame: {:?}",
+                        std::mem::discriminant(&f)
+                    );
                     f
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -721,6 +724,10 @@ impl Loop {
     /// 3. **Fallback**: commands needing direct event_tx access (Undo, SetMode,
     ///    LoadMoreTurns, Cancel, Shutdown)
     fn dispatch_one(&mut self, frame: Ui2Agent) {
+        log::info!(
+            "[AGENT] dispatch_one: frame={:?}",
+            std::mem::discriminant(&frame)
+        );
         // Any inbound command ends the idle period; the next time the loop
         // returns to idle it will re-emit Ready exactly once.
         self.ready_emitted = false;

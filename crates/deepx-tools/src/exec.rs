@@ -15,7 +15,7 @@ use crate::{ExecOutputStream, ExecProgressEvent, ExecProgressSender, ToolCallCtx
 use serde::Serialize;
 use std::io::Read;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -33,45 +33,30 @@ enum Shell {
     Cmd,
 }
 
+static DETECTED_SHELL: OnceLock<Shell> = OnceLock::new();
+
 impl Shell {
     /// Auto-detect the best available shell on this platform.
     fn detect() -> Self {
+        *DETECTED_SHELL.get_or_init(Self::detect_uncached)
+    }
+
+    fn detect_uncached() -> Self {
         #[cfg(windows)]
         {
             // Prefer bash (Git for Windows / MSYS2 / WSL interop),
             // then pwsh, falling back to cmd.
-            if std::process::Command::new("bash")
-                .arg("-c")
-                .arg("exit 0")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok()
-            {
+            if executable_on_path("bash") {
                 return Shell::Bash;
             }
-            if std::process::Command::new("pwsh")
-                .arg("-NoProfile")
-                .arg("-Command")
-                .arg("exit 0")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok()
-            {
+            if executable_on_path("pwsh") {
                 return Shell::PowerShell;
             }
             Shell::Cmd
         }
         #[cfg(not(windows))]
         {
-            if std::process::Command::new("bash")
-                .arg("--version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok()
-            {
+            if executable_on_path("bash") {
                 return Shell::Bash;
             }
             Shell::Sh
@@ -112,6 +97,49 @@ impl Shell {
             }
         }
     }
+}
+
+fn executable_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    executable_in_dirs(name, std::env::split_paths(&path))
+}
+
+fn executable_in_dirs(name: &str, dirs: impl IntoIterator<Item = std::path::PathBuf>) -> bool {
+    #[cfg(windows)]
+    let candidates = if std::path::Path::new(name).extension().is_some() {
+        vec![name.to_string()]
+    } else {
+        ["exe", "cmd", "bat", "com"]
+            .into_iter()
+            .map(|extension| format!("{name}.{extension}"))
+            .collect()
+    };
+    #[cfg(not(windows))]
+    let candidates = vec![name.to_string()];
+
+    dirs.into_iter().any(|dir| {
+        candidates
+            .iter()
+            .any(|candidate| is_executable_file(&dir.join(candidate)))
+    })
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    true
 }
 
 /// Stream read from a pipe, capped at `max_bytes`.
@@ -968,5 +996,33 @@ mod tests {
             "expected 'hello-from-shell' in output, got: '{}'",
             result.output
         );
+    }
+
+    #[test]
+    fn shell_discovery_does_not_execute_path_candidates() {
+        let root =
+            std::env::temp_dir().join(format!("deepx-exec-shell-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        #[cfg(windows)]
+        let candidate = root.join("probe-shell.exe");
+        #[cfg(not(windows))]
+        let candidate = root.join("probe-shell");
+        #[cfg(windows)]
+        std::fs::write(&candidate, b"not an executable").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&candidate, b"#!/bin/sh\n: > \"$0.ran\"\n").unwrap();
+            std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        assert!(executable_in_dirs(
+            "probe-shell",
+            std::iter::once(root.clone())
+        ));
+        assert!(!root.join("probe-shell.ran").exists());
+
+        let _ = std::fs::remove_file(candidate);
+        let _ = std::fs::remove_dir(root);
     }
 }

@@ -14,6 +14,10 @@ pub static OS_INFO: OnceLock<String> = OnceLock::new();
 /// Cached toolchain versions. Set at startup.
 pub static TOOLS_INFO: OnceLock<String> = OnceLock::new();
 
+/// Cached shell inventory. Discovery must remain side-effect free because this
+/// code runs synchronously before a newly spawned agent enters its input loop.
+static SHELLS_INFO: OnceLock<String> = OnceLock::new();
+
 /// Full system prompt from embedded backend_prompt.md (identity + rules only).
 pub fn full_system_prompt() -> String {
     DEFAULT_PROMPT.to_string()
@@ -40,43 +44,77 @@ pub fn full_system_prompt_with_date(today: &str, os_info: &str) -> String {
     let env_block = OS_ENV_TEMPLATE
         .replace("{{DATE}}", today)
         .replace("{{OS}}", os)
-        .replace("{{SHELLS}}", &shells)
+        .replace("{{SHELLS}}", shells)
         .replace("{{TOOLS}}", tools);
     format!("{}\n\n{}", DEFAULT_PROMPT, env_block)
 }
 
 /// Detect available shells on this machine.
-fn detect_shells() -> String {
-    let mut shells: Vec<&str> = Vec::new();
-    if cfg!(windows) {
-        // bash (Git for Windows / MSYS2 / WSL interop)
-        if which_shell("bash") {
-            shells.push("bash (Git for Windows)");
+fn detect_shells() -> &'static str {
+    SHELLS_INFO.get_or_init(|| {
+        let mut shells: Vec<&str> = Vec::new();
+        if cfg!(windows) {
+            // Never spawn a shell as a capability probe here. Git Bash startup
+            // can block for tens of seconds under concurrent agent creation.
+            if executable_on_path("bash") {
+                shells.push("bash (Git for Windows)");
+            }
+            if executable_on_path("pwsh") {
+                shells.push("pwsh (PowerShell 7)");
+            }
+            shells.push("cmd");
+        } else {
+            shells.push("bash");
+            shells.push("sh");
+            if std::path::Path::new("/bin/zsh").exists() {
+                shells.push("zsh");
+            }
         }
-        // pwsh (PowerShell 7)
-        if which_shell("pwsh") {
-            shells.push("pwsh (PowerShell 7)");
-        }
-        shells.push("cmd");
-    } else {
-        shells.push("bash");
-        shells.push("sh");
-        if std::path::Path::new("/bin/zsh").exists() {
-            shells.push("zsh");
-        }
-    }
-    shells.join(", ")
+        shells.join(", ")
+    })
 }
 
-/// Check if a shell executable can be spawned.
-fn which_shell(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg(if name == "bash" { "-c" } else { "-Command" })
-        .arg("exit 0")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
+fn executable_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    executable_in_dirs(name, std::env::split_paths(&path))
+}
+
+fn executable_in_dirs(name: &str, dirs: impl IntoIterator<Item = std::path::PathBuf>) -> bool {
+    #[cfg(windows)]
+    let candidates = if std::path::Path::new(name).extension().is_some() {
+        vec![name.to_string()]
+    } else {
+        ["exe", "cmd", "bat", "com"]
+            .into_iter()
+            .map(|extension| format!("{name}.{extension}"))
+            .collect()
+    };
+    #[cfg(not(windows))]
+    let candidates = vec![name.to_string()];
+
+    dirs.into_iter().any(|dir| {
+        candidates
+            .iter()
+            .any(|candidate| is_executable_file(&dir.join(candidate)))
+    })
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    true
 }
 
 #[cfg(test)]
@@ -111,5 +149,32 @@ mod tests {
         assert!(prompt.contains("expected_hash"));
         assert!(prompt.contains("dry_run: true"));
         assert!(prompt.contains("*** Begin Patch"));
+    }
+
+    #[test]
+    fn executable_discovery_reads_directories_without_starting_the_candidate() {
+        let root = std::env::temp_dir().join(format!("deepx-shell-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        #[cfg(windows)]
+        let candidate = root.join("probe-shell.exe");
+        #[cfg(not(windows))]
+        let candidate = root.join("probe-shell");
+        #[cfg(windows)]
+        std::fs::write(&candidate, b"not an executable").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&candidate, b"#!/bin/sh\n: > \"$0.ran\"\n").unwrap();
+            std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        assert!(executable_in_dirs(
+            "probe-shell",
+            std::iter::once(root.clone())
+        ));
+        assert!(!root.join("probe-shell.ran").exists());
+
+        let _ = std::fs::remove_file(candidate);
+        let _ = std::fs::remove_dir(root);
     }
 }
