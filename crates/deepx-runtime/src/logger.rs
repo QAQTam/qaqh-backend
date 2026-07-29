@@ -1,3 +1,4 @@
+use chrono::Local;
 use log::{LevelFilter, Log, Metadata, Record};
 use std::path::Path;
 
@@ -12,13 +13,14 @@ impl Log for FileLogSink {
             let level = record.level();
             let target = record.target();
             let msg = record.args();
+            let ts = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.path)
             {
                 use std::io::Write;
-                let _ = writeln!(file, "[{level:5}] {target} | {msg}");
+                let _ = writeln!(file, "[{ts}] [{level:5}] {target} | {msg}");
             }
         }
     }

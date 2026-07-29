@@ -96,10 +96,7 @@ impl CompactEngine {
         let turns_total = ctx.agent.msg.turn_count();
         log::info!("[COMPACT] {} turns", turns_total);
 
-        let all = ctx
-            .agent
-            .msg
-            .build_context_for_gate(&[]);
+        let all = ctx.agent.msg.build_context_for_gate(&[]);
         let msgs: Vec<&deepx_types::Message> = all.iter().filter(|m| m.role != "system").collect();
         if msgs.is_empty() {
             return None;
@@ -143,7 +140,16 @@ impl CompactEngine {
             return None;
         }
 
-        let head_user_count = head_msgs.iter().filter(|m| m.role == "user").count();
+        let previous_summary = ctx.agent.msg.previous_compact_summary();
+        let head_user_count = compactable_head_user_count(head_msgs);
+        // Immediately after a successful compact, the only item before the
+        // 4K tail can be the synthetic checkpoint itself. Re-compacting that
+        // checkpoint removes no real turn and can repeat every gate lap when
+        // fixed system/tool overhead still keeps the prompt above threshold.
+        if head_user_count == 0 {
+            log::debug!("[COMPACT] skipped: no new turns are eligible");
+            return None;
+        }
         let kept_user_count = msgs[kept_idx..].iter().filter(|m| m.role == "user").count();
 
         ctx.emitter.emit(Agent2Ui::CompactStart {
@@ -151,7 +157,11 @@ impl CompactEngine {
             turns_keeping: kept_user_count as u32,
         });
 
-        let contexts = serialize_messages(head_msgs, &msgs[kept_idx..]);
+        // The previous checkpoint already appears in <previous-summary> below.
+        // Do not serialize the synthetic `[Compacted ...]` turn into HISTORY
+        // again, or repeated compaction duplicates and recursively amplifies it.
+        let history_head = compact_history_head(head_msgs, previous_summary.is_some());
+        let contexts = serialize_messages(&history_head, &msgs[kept_idx..]);
         let timeline = {
             let created = ctx.agent.session.created_at;
             let updated = ctx
@@ -168,7 +178,6 @@ impl CompactEngine {
             )
         };
 
-        let previous_summary = ctx.agent.msg.previous_compact_summary();
         let prompt = if let Some(ref prev) = previous_summary {
             format!(
                 "[COMPACT — UPDATE MODE]\n\n\
@@ -285,18 +294,18 @@ impl CompactEngine {
         let _ = std::fs::create_dir_all(&stats_dir);
         let _ = std::fs::write(stats_dir.join("context_stats.json"), stats.to_string());
 
-            ctx.emitter.emit(Agent2Ui::CompactEnd {
-                summary_chars: chars,
-                turns_compacted: meta.head_user_count as u32,
-                turns_removed: turns_removed as u32,
-            });
-            ctx.emitter.emit(Agent2Ui::ToolNotice {
-                message: format!(
-                    "Compacted {} turns -> {chars} chars, keeping {} turns",
-                    meta.head_user_count, meta.kept_user_count,
-                ),
-                level: "info".into(),
-            });
+        ctx.emitter.emit(Agent2Ui::CompactEnd {
+            summary_chars: chars,
+            turns_compacted: meta.head_user_count as u32,
+            turns_removed: turns_removed as u32,
+        });
+        ctx.emitter.emit(Agent2Ui::ToolNotice {
+            message: format!(
+                "Compacted {} turns -> {chars} chars, keeping {} turns",
+                meta.head_user_count, meta.kept_user_count,
+            ),
+            level: "info".into(),
+        });
     }
 }
 
@@ -366,6 +375,36 @@ pub(crate) fn run_compact_worker(
 // Message serialization helpers
 // ═══════════════════════════════════════════════════════
 
+fn is_compact_summary_message(message: &deepx_types::Message) -> bool {
+    message.role == "user"
+        && message.content.iter().any(|block| {
+            matches!(
+                block,
+                deepx_types::ContentBlock::Text { text } if text.starts_with("[Compacted ")
+            )
+        })
+}
+
+fn compact_history_head<'a>(
+    head: &[&'a deepx_types::Message],
+    has_previous_summary: bool,
+) -> Vec<&'a deepx_types::Message> {
+    if has_previous_summary {
+        head.iter()
+            .copied()
+            .filter(|message| !is_compact_summary_message(message))
+            .collect()
+    } else {
+        head.to_vec()
+    }
+}
+
+fn compactable_head_user_count(head: &[&deepx_types::Message]) -> usize {
+    head.iter()
+        .filter(|message| message.role == "user" && !is_compact_summary_message(message))
+        .count()
+}
+
 fn serialize_messages(
     head: &[&deepx_types::Message],
     kept: &[&deepx_types::Message],
@@ -415,4 +454,50 @@ fn serialize_messages(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compact_history_head, compactable_head_user_count, serialize_messages};
+
+    #[test]
+    fn update_mode_does_not_repeat_previous_summary_in_history() {
+        let old = deepx_types::Message::user("[Compacted 4 turns]\nold checkpoint body");
+        let newer = deepx_types::Message::user("new work after checkpoint");
+        let head = vec![&old, &newer];
+
+        let filtered = compact_history_head(&head, true);
+        let history = serialize_messages(&filtered, &[]).join("\n");
+
+        assert!(!history.contains("old checkpoint body"));
+        assert!(history.contains("new work after checkpoint"));
+    }
+
+    #[test]
+    fn initial_mode_keeps_ordinary_history_unchanged() {
+        let message = deepx_types::Message::user("ordinary history");
+        let head = vec![&message];
+
+        let filtered = compact_history_head(&head, false);
+        let history = serialize_messages(&filtered, &[]).join("\n");
+
+        assert!(history.contains("ordinary history"));
+    }
+
+    #[test]
+    fn previous_summary_alone_is_not_a_new_compaction_candidate() {
+        let old = deepx_types::Message::user("[Compacted 4 turns]\nold checkpoint body");
+        let head = vec![&old];
+
+        assert_eq!(compactable_head_user_count(&head), 0);
+    }
+
+    #[test]
+    fn real_turn_after_previous_summary_is_compactable() {
+        let old = deepx_types::Message::user("[Compacted 4 turns]\nold checkpoint body");
+        let real = deepx_types::Message::user("new completed work");
+        let head = vec![&old, &real];
+
+        assert_eq!(compactable_head_user_count(&head), 1);
+    }
 }

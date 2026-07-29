@@ -20,14 +20,20 @@ pub struct ToolInvocation {
 pub struct AuthorizedToolCall {
     invocation: ToolInvocation,
     resources: Vec<PathBuf>,
+    workspace_root: PathBuf,
     _sealed: (),
 }
 
 impl AuthorizedToolCall {
-    pub(crate) fn new(invocation: ToolInvocation, resources: Vec<PathBuf>) -> Self {
+    pub(crate) fn new(
+        invocation: ToolInvocation,
+        resources: Vec<PathBuf>,
+        workspace_root: PathBuf,
+    ) -> Self {
         Self {
             invocation,
             resources,
+            workspace_root,
             _sealed: (),
         }
     }
@@ -56,8 +62,12 @@ impl AuthorizedToolCall {
         &self.resources
     }
 
-    pub(crate) fn into_parts(self) -> (ToolInvocation, Vec<PathBuf>) {
-        (self.invocation, self.resources)
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    pub(crate) fn into_parts(self) -> (ToolInvocation, Vec<PathBuf>, PathBuf) {
+        (self.invocation, self.resources, self.workspace_root)
     }
 }
 
@@ -78,6 +88,7 @@ pub struct PermissionChallenge {
     action: String,
     normalized_args: serde_json::Value,
     resources: Vec<PathBuf>,
+    workspace_root: PathBuf,
     reason: String,
     category: crate::permission::ToolCategory,
     risk: crate::permission::PermissionRisk,
@@ -91,6 +102,7 @@ impl PermissionChallenge {
         invocation: ToolInvocation,
         reason: String,
         resources: Vec<PathBuf>,
+        workspace_root: PathBuf,
         category: crate::permission::ToolCategory,
         risk: crate::permission::PermissionRisk,
         consequence: String,
@@ -102,6 +114,7 @@ impl PermissionChallenge {
             action: invocation.action,
             normalized_args: invocation.args,
             resources,
+            workspace_root,
             reason,
             category,
             risk,
@@ -133,6 +146,10 @@ impl PermissionChallenge {
 
     pub fn resources(&self) -> &[PathBuf] {
         &self.resources
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
     }
 
     pub fn reason(&self) -> &str {
@@ -177,7 +194,11 @@ impl PermissionChallenge {
             action: self.action,
             args: self.normalized_args,
         };
-        Ok(AuthorizedToolCall::new(invocation, self.resources))
+        Ok(AuthorizedToolCall::new(
+            invocation,
+            self.resources,
+            self.workspace_root,
+        ))
     }
 }
 
@@ -195,12 +216,13 @@ pub fn admit(
     workspace_root: &Path,
     trusted_dirs: &HashSet<PathBuf>,
 ) -> Admission {
+    let workspace_root = crate::permission::resolve_target_path(workspace_root.to_path_buf());
     let level = crate::permission::PermissionLevel::from_u8(permission_level);
     match crate::permission::needs_permission(
         level,
         &invocation.tool_name,
         &invocation.args,
-        workspace_root,
+        &workspace_root,
         trusted_dirs,
     ) {
         crate::permission::PermissionDecision::AutoApprove => {
@@ -208,7 +230,11 @@ pub fn admit(
                 crate::permission::extract_target_paths(&invocation.tool_name, &invocation.args);
             resources.sort();
             resources.dedup();
-            Admission::Authorized(AuthorizedToolCall::new(invocation, resources))
+            Admission::Authorized(AuthorizedToolCall::new(
+                invocation,
+                resources,
+                workspace_root,
+            ))
         }
         crate::permission::PermissionDecision::AskUser {
             reason,
@@ -220,6 +246,7 @@ pub fn admit(
             invocation,
             reason,
             paths,
+            workspace_root,
             category,
             risk,
             consequence,

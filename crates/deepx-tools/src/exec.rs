@@ -759,33 +759,36 @@ fn strip_ansi(s: &str) -> String {
 
 // ── Registration ──
 
-use crate::{ToolHandler, ToolRisk};
+use crate::{ToolHandler, ToolPlacement, ToolRisk};
 use std::time::Duration;
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register(ToolHandler {
-        key: "exec".to_string(),
-        description: "Execute a command. Two modes: (1) {\"argv\": [\"program\", \"arg1\", ...]} — direct exec, no shell. (2) {\"command\": \"pipeline | grep foo\"} — auto-wrapped in the platform shell (bash -c / pwsh -Command / cmd /c), enabling pipes, redirects, and shell builtins. For the argv mode, the first element is the executable, the rest are arguments. Returns {\"status\": \"completed\", \"exit_code\": 0, \"output\": \"...\", \"wall_time_seconds\": 0.5, \"timed_out\": false}",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "argv": { "type": "array", "items": {"type": "string"}, "description": "Command as array of strings. argv[0]=executable, argv[1..]=args. Example: [\"cargo\",\"check\"]" },
-                "command": { "type": "string", "description": "Shell command string. Auto-wrapped in platform shell (bash -c, pwsh -Command, or cmd /c). Use for pipes, redirects, or one-liners. Example: \"ls -la | grep foo\"" },
-                "cwd": {"type": "string", "description": "Working directory (optional). Defaults to workspace root."},
-                "timeout_secs": {"type": "integer", "description": "Timeout in seconds (1-3600, default 30)"},
-                "max_output_tokens": { "type": "integer", "description": "Max tokens of output before smart truncation (head 70% + tail 30%). Default 10000, min 100, max 50000." }
-            },
-            "required": [],
-            "additionalProperties": false,
-            "oneOf": [
-                {"required": ["argv"]},
-                {"required": ["command"]}
-            ]
-        }),
-        handler: handle_run,
-        risk: ToolRisk::Destructive,
-        default_timeout: Duration::from_secs(30),
-    });
+    mgr.register_with_placement(
+        ToolHandler {
+            key: "exec".to_string(),
+            description: "Execute a command. Two modes: (1) {\"argv\": [\"program\", \"arg1\", ...]} — direct exec, no shell. (2) {\"command\": \"pipeline | grep foo\"} — auto-wrapped in the platform shell (bash -c / pwsh -Command / cmd /c), enabling pipes, redirects, and shell builtins. For the argv mode, the first element is the executable, the rest are arguments. Returns {\"status\": \"completed\", \"exit_code\": 0, \"output\": \"...\", \"wall_time_seconds\": 0.5, \"timed_out\": false}",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "argv": { "type": "array", "items": {"type": "string"}, "description": "Command as array of strings. argv[0]=executable, argv[1..]=args. Example: [\"cargo\",\"check\"]" },
+                    "command": { "type": "string", "description": "Shell command string. Auto-wrapped in platform shell (bash -c, pwsh -Command, or cmd /c). Use for pipes, redirects, or one-liners. Example: \"ls -la | grep foo\"" },
+                    "cwd": {"type": "string", "description": "Working directory (optional). Defaults to workspace root."},
+                    "timeout_secs": {"type": "integer", "description": "Timeout in seconds (1-3600, default 30)"},
+                    "max_output_tokens": { "type": "integer", "description": "Max tokens of output before smart truncation (head 70% + tail 30%). Default 10000, min 100, max 50000." }
+                },
+                "required": [],
+                "additionalProperties": false,
+                "oneOf": [
+                    {"required": ["argv"]},
+                    {"required": ["command"]}
+                ]
+            }),
+            handler: handle_run,
+            risk: ToolRisk::Destructive,
+            default_timeout: Duration::from_secs(30),
+        },
+        ToolPlacement::Workspace,
+    );
 }
 
 #[cfg(test)]

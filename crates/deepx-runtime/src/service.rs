@@ -92,8 +92,7 @@ impl DeepxService {
                 let text = pstr(params, "text")?;
                 let files = pstrings(params, "files");
                 let text = with_file_previews(text, &files);
-                self.registry()?.send(&seed, Ui2Agent::UserInput { text })?;
-                Ok(Value::Null)
+                self.send_user_input(seed, text)
             }
             "session.set_mode" => self.send(
                 seed()?,
@@ -102,7 +101,7 @@ impl DeepxService {
                 },
             ),
             "session.cancel" => self.send(seed()?, Ui2Agent::Cancel),
-            "session.compact" => self.send(seed()?, Ui2Agent::Compact),
+            "session.compact" => self.compact_idle_session(seed()?),
             "session.undo_turn" => self.send(
                 seed()?,
                 Ui2Agent::UndoTurn {
@@ -294,32 +293,15 @@ impl DeepxService {
                 let seed = seed()?;
                 let action = pstr(params, "action")?;
                 match action.as_str() {
-                    "activate" => {
-                        let _ = self.send(seed, Ui2Agent::UserInput {
-                            text: "[请求激活 Goal 模式] 请调用 todo 工具 action=activate，将当前 todo 列表提交给用户审核；获得明确批准后再开始自动执行。".into(),
-                        });
-                        Ok(Value::Null)
-                    }
-                    "stop" => {
-                        let _ = self.send(
-                            seed,
-                            Ui2Agent::UserInput {
-                                text:
-                                    "[停止 Goal] 使用 todo 工具执行 action=stop reason=用户手动停止"
-                                        .into(),
-                            },
-                        );
-                        Ok(Value::Null)
-                    }
-                    "resume" => {
-                        let _ = self.send(
-                            seed,
-                            Ui2Agent::UserInput {
-                                text: "[DeepX Goal: resume]".into(),
-                            },
-                        );
-                        Ok(Value::Null)
-                    }
+                    "activate" => self.send_user_input(
+                        seed,
+                        "[请求激活 Goal 模式] 请调用 todo 工具 action=activate，将当前 todo 列表提交给用户审核；获得明确批准后再开始自动执行。".into(),
+                    ),
+                    "stop" => self.send_user_input(
+                        seed,
+                        "[停止 Goal] 使用 todo 工具执行 action=stop reason=用户手动停止".into(),
+                    ),
+                    "resume" => self.send_user_input(seed, "[DeepX Goal: resume]".into()),
                     _ => return Err(format!("unknown todo action: {action}").into()),
                 }
             }
@@ -387,6 +369,80 @@ impl DeepxService {
 
     fn send(&self, seed: String, frame: Ui2Agent) -> Result<Value, String> {
         self.registry()?.send(&seed, frame)?;
+        Ok(Value::Null)
+    }
+
+    fn send_user_input(&self, seed: String, text: String) -> Result<Value, String> {
+        let mut registry = self.registry()?;
+        // An inactive persisted session has no activity entry yet. Spawn it
+        // first so the Starting -> Working reservation below also covers the
+        // initialization Ready / first UserInput race.
+        registry.get_or_spawn(&seed)?;
+        let current = registry.activity(&seed);
+        // Preserve the existing ability to queue follow-ups while a real turn
+        // is running. A Working state without turn_id is different: it is an
+        // atomic pre-TurnStart or manual-compact transaction, so another input
+        // cannot safely be admitted yet.
+        if current.as_ref().is_some_and(|activity| {
+            activity.state == deepx_proto::SessionActivityState::Working
+                && activity.turn_id.is_none()
+        }) {
+            return Err("session message is blocked by an active context transaction".into());
+        }
+
+        // Starting/Idle must be reserved before writing the frame. Reserving
+        // afterwards can race a very short turn that already emitted Done and
+        // incorrectly move the activity back from Idle to Working.
+        let reservation = match current.as_ref().map(|activity| activity.state) {
+            Some(
+                deepx_proto::SessionActivityState::Starting
+                | deepx_proto::SessionActivityState::Idle,
+            ) => registry.reserve_for_input(&seed),
+            _ => None,
+        };
+        if matches!(
+            current.as_ref().map(|activity| activity.state),
+            Some(
+                deepx_proto::SessionActivityState::Starting
+                    | deepx_proto::SessionActivityState::Idle
+            )
+        ) && reservation.is_none()
+        {
+            return Err("session activity changed before message admission".into());
+        }
+        if let Some((activity, _)) = reservation.as_ref() {
+            self.events.publish_activity(activity.clone());
+        }
+        if let Err(error) = registry.send(&seed, Ui2Agent::UserInput { text }) {
+            if let Some((activity, previous)) = reservation
+                && let Some(rollback) =
+                    registry.rollback_input_reservation(&seed, activity.seq, previous)
+            {
+                self.events.publish_activity(rollback);
+            }
+            return Err(error);
+        }
+        Ok(Value::Null)
+    }
+
+    fn compact_idle_session(&self, seed: String) -> Result<Value, String> {
+        let mut registry = self.registry()?;
+        let reservation = registry.reserve_idle(&seed).ok_or_else(|| {
+            let state = registry
+                .activity(&seed)
+                .map(|activity| format!("{:?}", activity.state))
+                .unwrap_or_else(|| "unknown".into());
+            format!("session compact requires an idle session; current state: {state}")
+        })?;
+        let reservation_seq = reservation.seq;
+        self.events.publish_activity(reservation);
+
+        if let Err(error) = registry.send(&seed, Ui2Agent::Compact) {
+            if let Some(rollback) = registry.rollback_idle_reservation(&seed, reservation_seq) {
+                self.events.publish_activity(rollback);
+            }
+            return Err(error);
+        }
         Ok(Value::Null)
     }
 
@@ -645,7 +701,15 @@ fn dashboard(seed: &str) -> Result<Value, String> {
 
 fn persisted_session_projection(seed: &str) -> Option<Vec<Agent2Ui>> {
     const INITIAL_LOAD_COUNT: usize = 20;
-    let (meta, messages) = deepx_session::SessionManager::global().load(seed)?;
+    let (meta, archive_messages, compact_context) =
+        deepx_session::SessionManager::global().load_for_resume(seed)?;
+    // The daemon snapshot and the agent resume event must describe the same
+    // active transcript. Mixing the immutable archive here with the compact
+    // checkpoint in the worker produced incompatible restore baselines.
+    let messages = compact_context
+        .as_ref()
+        .map(|context| context.messages.as_slice())
+        .unwrap_or(archive_messages.as_slice());
     let (total, turns) =
         deepx_msglp::util::project_recent_turns_from_messages(seed, &messages, INITIAL_LOAD_COUNT);
     let cache_reported_requests = meta.effective_cache_reported_requests();

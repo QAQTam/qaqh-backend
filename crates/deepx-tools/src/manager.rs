@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use crate::{CANCEL, SafetyVerdict, ToolHandler};
+use crate::{CANCEL, SafetyVerdict, ToolHandler, ToolPlacement};
 
 // ── Execution metadata ──
 
@@ -40,6 +40,7 @@ pub struct ToolStats {
 
 pub struct ToolManager {
     pub(crate) handlers: BTreeMap<String, ToolHandler>,
+    placements: BTreeMap<String, ToolPlacement>,
     allowed: Option<Vec<String>>,
     inflight_tasks: BTreeMap<String, Arc<AtomicBool>>,
     stats_total: u32,
@@ -54,6 +55,7 @@ pub struct ToolManager {
 pub(crate) struct PreparedCall {
     pub(crate) id: String,
     pub(crate) name: String,
+    pub(crate) placement: ToolPlacement,
     pub(crate) handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
     pub(crate) ctx: crate::ToolCallCtx,
     pub(crate) audit_args: serde_json::Value,
@@ -63,6 +65,7 @@ impl ToolManager {
     pub fn new() -> Self {
         Self {
             handlers: BTreeMap::new(),
+            placements: BTreeMap::new(),
             allowed: None,
             inflight_tasks: BTreeMap::new(),
             stats_total: 0,
@@ -73,7 +76,17 @@ impl ToolManager {
     }
 
     pub fn register(&mut self, handler: ToolHandler) {
-        self.handlers.insert(handler.key.clone(), handler);
+        self.register_with_placement(handler, ToolPlacement::HostOnly);
+    }
+
+    pub fn register_with_placement(
+        &mut self,
+        handler: ToolHandler,
+        placement: ToolPlacement,
+    ) {
+        let key = handler.key.clone();
+        self.handlers.insert(key.clone(), handler);
+        self.placements.insert(key, placement);
     }
 
     pub fn lookup(&self, name: &str) -> Option<&ToolHandler> {
@@ -139,8 +152,11 @@ impl ToolManager {
             }
         }
 
-        let handler = match self.handlers.get(name) {
-            Some(h) => h.clone(),
+        let (handler, placement) = match self.handlers.get(name) {
+            Some(handler) => (
+                handler.clone(),
+                self.placements.get(name).copied().unwrap_or_default(),
+            ),
             None => {
                 let msg = format!("[ERROR] Unknown tool: {}", name);
                 return Err(ToolExecReport {
@@ -208,6 +224,7 @@ impl ToolManager {
         Ok(PreparedCall {
             id,
             name: name.to_string(),
+            placement,
             handler_fn: handler.handler,
             ctx,
             audit_args,

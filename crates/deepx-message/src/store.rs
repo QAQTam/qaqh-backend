@@ -332,6 +332,9 @@ pub struct MessageStore {
     has_compact_context: bool,
     /// Next message ID to assign (monotonic per session).
     next_msg_id: u64,
+    /// Next externally visible turn sequence. Unlike `turns.len()`, this never
+    /// moves backwards when old turns are replaced by a compact checkpoint.
+    next_turn_seq: u64,
     /// If true, save_msg is a no-op — used during from_messages replay.
     replaying: bool,
     /// Messages assigned msg_id but not yet flushed to disk.
@@ -364,6 +367,7 @@ impl Clone for MessageStore {
             compact_skip: self.compact_skip,
             has_compact_context: self.has_compact_context,
             next_msg_id: self.next_msg_id,
+            next_turn_seq: self.next_turn_seq,
             replaying: false,
             pending_save: Vec::new(),
             ephemeral: self.ephemeral,
@@ -382,6 +386,7 @@ impl MessageStore {
             compact_skip: 0,
             has_compact_context: false,
             next_msg_id: 1,
+            next_turn_seq: 1,
             replaying: false,
             pending_save: Vec::new(),
             ephemeral: false,
@@ -407,6 +412,7 @@ impl MessageStore {
         self.compact_skip = 0;
         self.has_compact_context = false;
         self.next_msg_id = 1;
+        self.next_turn_seq = 1;
         self.replaying = false;
         self.pending_save.clear();
     }
@@ -1099,6 +1105,7 @@ impl MessageStore {
         // Restore next_msg_id: max(msg_id) + 1, or 1 if empty.
         let max_id = msgs.iter().filter_map(|m| m.msg_id).max().unwrap_or(0);
         store.next_msg_id = store.next_msg_id.max(max_id + 1);
+        store.next_turn_seq = store.next_turn_seq.max(store.turns.len() as u64 + 1);
         store.replaying = false;
 
         (store, repairs)
@@ -1115,6 +1122,19 @@ impl MessageStore {
     /// checkpoint (the checkpoint intentionally omits archived messages).
     pub fn ensure_next_msg_id(&mut self, next: u64) {
         self.next_msg_id = self.next_msg_id.max(next);
+    }
+
+    /// Allocate a session-monotonic turn ID. Compaction may shrink the active
+    /// model view, but must never make a future TurnStart reuse an archived ID.
+    pub fn allocate_turn_id(&mut self) -> String {
+        let seq = self.next_turn_seq;
+        self.next_turn_seq = self.next_turn_seq.saturating_add(1);
+        format!("t{seq}")
+    }
+
+    /// Restore the turn allocator against the immutable archive.
+    pub fn ensure_next_turn_seq(&mut self, next: u64) {
+        self.next_turn_seq = self.next_turn_seq.max(next.max(1));
     }
 
     pub fn remove_last_step_if_incomplete(&mut self) -> bool {
@@ -1637,5 +1657,46 @@ mod tests {
     fn find_last_step_tool_call_no_turns_returns_none() {
         let store = MessageStore::new_ephemeral("test");
         assert!(store.find_last_step_tool_call("ask_user").is_none());
+    }
+
+    #[test]
+    fn compact_does_not_reuse_archived_turn_ids() {
+        let mut store = MessageStore::new_ephemeral("test");
+        for index in 1..=5 {
+            assert_eq!(store.allocate_turn_id(), format!("t{index}"));
+            store.push_user(&format!("turn {index}"));
+        }
+
+        store.apply_compact("checkpoint", 2);
+
+        assert_eq!(store.turn_count(), 3); // summary + two kept turns
+        assert_eq!(store.allocate_turn_id(), "t6");
+    }
+
+    #[test]
+    fn repeated_compact_replaces_the_old_summary_in_gate_context() {
+        let mut store = MessageStore::new_ephemeral("test");
+        for index in 1..=5 {
+            store.push_user(&format!("turn {index}"));
+        }
+        store.apply_compact("first checkpoint body", 2);
+        store.push_user("work after first checkpoint");
+        store.push_user("latest work");
+
+        store.apply_compact("second checkpoint body", 2);
+
+        let serialized = serde_json::to_string(&store.build_context_for_gate(&[])).unwrap();
+        assert!(serialized.contains("second checkpoint body"));
+        assert!(!serialized.contains("first checkpoint body"));
+        assert_eq!(serialized.matches("[Compacted ").count(), 1);
+    }
+
+    #[test]
+    fn restored_turn_allocator_can_follow_immutable_archive_count() {
+        let messages = vec![Message::user("active summary"), Message::user("recent")];
+        let (mut store, _) = MessageStore::from_messages("test", &messages, 0);
+        store.ensure_next_turn_seq(31);
+
+        assert_eq!(store.allocate_turn_id(), "t31");
     }
 }

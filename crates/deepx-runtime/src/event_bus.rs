@@ -159,6 +159,20 @@ impl EventBus {
 /// this only compacts the state used for reconnect/recovery.
 fn update_projection(projection: &mut Vec<Agent2Ui>, event: &Agent2Ui) {
     match event {
+        // Historical errors/retries are notifications, not canonical session
+        // state. Retaining them made every resume re-fail the newest turn.
+        Agent2Ui::Error { .. }
+        | Agent2Ui::ProviderRetrying { .. }
+        | Agent2Ui::Pong => return,
+        Agent2Ui::CompactDelta { delta } => {
+            if let Some(Agent2Ui::CompactDelta {
+                delta: previous_delta,
+            }) = projection.last_mut()
+            {
+                previous_delta.push_str(delta);
+                return;
+            }
+        }
         Agent2Ui::RoundDelta {
             turn_id,
             round_num,
@@ -397,5 +411,51 @@ mod tests {
         assert!(
             matches!(&projection["s"][0], Agent2Ui::RoundDelta { delta, .. } if delta == "draft")
         );
+    }
+
+    #[test]
+    fn snapshot_projection_drops_historical_errors_and_retries() {
+        let bus = EventBus::new("epoch");
+        bus.publish("s", Agent2Ui::Error { message: "old".into() });
+        bus.publish(
+            "s",
+            Agent2Ui::ProviderRetrying {
+                turn_id: "t1".into(),
+                round_num: 0,
+                attempt: 1,
+                max_retries: 3,
+                delay_secs: 1,
+                error: "timeout".into(),
+            },
+        );
+
+        assert!(bus.projections_for(&["s".into()])["s"].is_empty());
+    }
+
+    #[test]
+    fn snapshot_projection_coalesces_compact_deltas_without_reordering_boundaries() {
+        let bus = EventBus::new("epoch");
+        bus.publish(
+            "s",
+            Agent2Ui::CompactStart {
+                turns_total: 3,
+                turns_keeping: 1,
+            },
+        );
+        bus.publish("s", Agent2Ui::CompactDelta { delta: "sum".into() });
+        bus.publish("s", Agent2Ui::CompactDelta { delta: "mary".into() });
+        bus.publish(
+            "s",
+            Agent2Ui::CompactEnd {
+                summary_chars: 7,
+                turns_compacted: 2,
+                turns_removed: 2,
+            },
+        );
+
+        let projection = bus.projections_for(&["s".into()]);
+        assert_eq!(projection["s"].len(), 3);
+        assert!(matches!(&projection["s"][1], Agent2Ui::CompactDelta { delta } if delta == "summary"));
+        assert!(matches!(&projection["s"][2], Agent2Ui::CompactEnd { .. }));
     }
 }

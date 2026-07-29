@@ -6,6 +6,7 @@ pub mod exec;
 
 pub mod apply_patch;
 pub mod authorization;
+pub mod backend;
 mod code_delta;
 pub mod execution;
 pub mod file_cache;
@@ -45,6 +46,10 @@ pub mod agentfs_bridge;
 pub mod audit;
 pub mod auth;
 
+pub use backend::{
+    BackendRequest, LocalToolExecutionBackend, ToolExecutionBackend, ToolPlacement,
+    install_workspace_backend, use_local_workspace_backend,
+};
 pub use manager::{ToolExecMeta, ToolExecReport, ToolManager, ToolStats};
 pub use safety::SafetyVerdict;
 

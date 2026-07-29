@@ -3,6 +3,7 @@ export default function ThreadHeader(props: {
   infoOpen: boolean;
   workspace: string;
   compacting: boolean;
+  compactDisabled: boolean;
   statsOpen: boolean;
   onToggleInfo: () => void;
   onToggleStats: () => void;
@@ -25,7 +26,7 @@ export default function ThreadHeader(props: {
       <button class={props.infoOpen ? "active" : ""} onClick={props.onToggleInfo}>信息</button>
       <button class={props.statsOpen ? "active" : ""} onClick={props.onToggleStats}>统计</button>
       <button type="button" data-undo-turn disabled={props.undoDisabled} onClick={props.onUndo}>撤销上一轮</button>
-      <button aria-label="整理上下文" disabled={props.compacting} onClick={props.onCompact}>{props.compacting ? "整理中…" : "整理上下文"}</button>
+      <button aria-label="整理上下文" disabled={props.compacting || props.compactDisabled} onClick={props.onCompact}>{props.compacting ? "整理中…" : "整理上下文"}</button>
       <button class={props.petEnabled ? "active" : ""} onClick={props.onTogglePet} title={props.petEnabled ? "隐藏桌宠" : "显示桌宠"}>
         {props.petEnabled ? "🦀" : "🦀"}
       </button>

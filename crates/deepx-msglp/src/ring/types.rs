@@ -158,6 +158,15 @@ pub enum Outcome {
         consume_queued_interrupt: bool,
     },
 
+    /// A running turn ended because the provider or gate failed. This is a
+    /// terminal transaction: Loop emits Error + TurnEnd + Done and returns
+    /// to Idle so clients never remain stuck in `running`.
+    TurnFailed {
+        turn_id: String,
+        usage: Option<UsageInfo>,
+        message: String,
+    },
+
     /// Turn needs another lap around the ring (tools executed → back to gate).
     /// Loop calls TurnEngine.run() recursively.
     ContinueTurn {

@@ -167,6 +167,7 @@ export default function ChatView(props: ChatViewProps) {
         workspace={props.ui.workspace()}
         onChangeWorkspace={props.onChangeWorkspace}
         compacting={session().compact.active}
+        compactDisabled={streaming()}
         onCompact={handleCompact}
         undoDisabled={session().turns.length === 0 || streaming()}
         onUndo={() => void props.onUndo()}

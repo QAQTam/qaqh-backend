@@ -17,6 +17,7 @@ impl InputEngine {
     /// Handle user input. Returns an Outcome telling the Loop whether
     /// to start a turn, yield, or report an error.
     pub fn handle_user_input(&self, ctx: &mut RingContext, text: &str) -> Outcome {
+        log::info!("[INPUT] handle_user_input called, text_len={}", text.len());
         // Auto-create session on first input
         if ctx.agent.session.seed.is_empty() {
             log::info!("[INPUT] auto-creating session on first user input");
@@ -94,10 +95,13 @@ impl InputEngine {
             ctx.emitter.emit(Agent2Ui::SkillsChanged { status });
         }
 
+        log::info!("[INPUT] pushing user message to store");
+        let turn_id = ctx.agent.msg.allocate_turn_id();
         ctx.agent.msg.push_user(&text);
+        log::info!("[INPUT] flushing meta");
         ctx.agent.msg.flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
 
-        let turn_id = format!("t{}", ctx.agent.msg.turn_count());
+        log::info!("[INPUT] emitting TurnStart turn_id={} round_num=0", turn_id);
         ctx.emitter.emit(Agent2Ui::TurnStart { turn_id: turn_id.clone(), user_text: text });
 
         Outcome::ContinueTurn { turn_id, round_num: 0, usage: None }

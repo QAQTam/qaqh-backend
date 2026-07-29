@@ -1,6 +1,7 @@
 //! Global tool runtime state and ToolManager lifecycle.
 
 use deepx_types::ToolDef;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -141,6 +142,28 @@ where
 #[cfg(test)]
 pub(crate) fn register_test_handler(handler: crate::ToolHandler) {
     with_manager(|manager| manager.register(handler));
+}
+
+/// Return the canonical workspace root used for authorization and execution.
+pub(crate) fn active_workspace_root() -> PathBuf {
+    let workspace = crate::CURRENT_WORKSPACE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let root = if workspace.is_empty() || workspace == "." {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        PathBuf::from(workspace)
+    };
+    crate::permission::resolve_target_path(root)
+}
+
+#[cfg(test)]
+pub(crate) fn register_test_handler_with_placement(
+    handler: crate::ToolHandler,
+    placement: crate::ToolPlacement,
+) {
+    with_manager(|manager| manager.register_with_placement(handler, placement));
 }
 
 pub fn all_tools() -> Vec<ToolDef> {

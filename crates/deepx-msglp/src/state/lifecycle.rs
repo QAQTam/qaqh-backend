@@ -61,6 +61,10 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 let mut msg = msg;
                 msg.set_compact_context_active(compact_context.is_some());
                 msg.ensure_next_msg_id(archive_next_id);
+                // Turn IDs belong to the immutable archive, not the compacted
+                // active view. Otherwise compacting 30 turns down to 6 would
+                // make the next live turn reuse t7 and be ignored by clients.
+                msg.ensure_next_turn_seq(agent.session.turn_count as u64 + 1);
                 log::info!(
                     "[LIFECYCLE] from_messages done, {} turns, {} repairs",
                     msg.turn_count(),

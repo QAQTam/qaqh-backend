@@ -373,6 +373,57 @@ describe("sessionEventReducer", () => {
     expect(state.turns[0].turnId).toBe("t1");
   });
 
+  it("ignores stale compact_end without a matching compact_start", () => {
+    let state = reduceAgentEvent(createRawSessionState("seed-stale"), {
+      type: "turn_start", turn_id: "t1", user_text: "keep",
+    }, 1);
+    state = reduceAgentEvent(state, { type: "turn_end", turn_id: "t1" }, 2);
+    const current = state;
+
+    state = reduceAgentEvent(state, {
+      type: "compact_end", summary_chars: 7, turns_compacted: 1, turns_removed: 1,
+    }, 3);
+
+    expect(state).toBe(current);
+    expect(state.turns.map(turn => turn.turnId)).toEqual(["t1"]);
+  });
+
+  it("session restore resets compact and interaction transients", () => {
+    let state = reduceAgentEvent(createRawSessionState("seed-restore"), {
+      type: "turn_start", turn_id: "t1", user_text: "run",
+    }, 1);
+    state = reduceAgentEvent(state, {
+      type: "ask_user", turn_id: "t1", round_num: 0, ask_id: "ask-1",
+      mode: "single", questions: [],
+    }, 2);
+    state = reduceAgentEvent(state, {
+      type: "compact_start", turns_total: 3, turns_keeping: 1,
+    }, 3);
+    state = reduceAgentEvent(state, { type: "compact_delta", delta: "draft" }, 4);
+
+    state = reduceAgentEvent(state, {
+      type: "session_restored", seed: "seed-restore", turns: [], tokens_used: 0,
+      cache_hit_pct: 0, usage_totals: {
+        prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+        prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, reasoning_tokens: 0,
+      }, usage_requests: 0, cache_reported_requests: 0, total_turns: 0, has_more: false,
+    }, 5);
+
+    expect(state.pendingInteractions).toEqual([]);
+    expect(state.compact).toMatchObject({ active: false, text: "", turnsCompacted: null });
+  });
+
+  it("a historical error does not fail an already completed turn", () => {
+    let state = reduceAgentEvent(createRawSessionState("seed-error"), {
+      type: "turn_start", turn_id: "t1", user_text: "done",
+    }, 1);
+    state = reduceAgentEvent(state, { type: "turn_end", turn_id: "t1" }, 2);
+    state = reduceAgentEvent(state, { type: "error", message: "old error" }, 3);
+
+    expect(state.turns[0].status).toBe("completed");
+    expect(state.notices.at(-1)?.message).toBe("old error");
+  });
+
   it("keeps a streamed turn running while the provider retries", () => {
     let state = reduceAgentEvent(createRawSessionState("seed-a"), {
       type: "turn_start", turn_id: "t1", user_text: "run",

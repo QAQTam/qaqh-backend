@@ -16,6 +16,7 @@ describe("ThreadHeader", () => {
         title="Task"
         workspace="F:/DeepX-Fork"
         compacting={false}
+        compactDisabled={false}
         infoOpen={false}
         onToggleInfo={vi.fn()}
         statsOpen={false}
@@ -47,7 +48,7 @@ describe("ThreadHeader", () => {
     document.body.append(host);
     const dispose = render(() => <ThreadHeader
       title="Task" infoOpen={false} statsOpen={false} workspace="F:/repo"
-      compacting={false} undoDisabled={false}
+      compacting={false} compactDisabled={false} undoDisabled={false}
       onToggleInfo={vi.fn()} onToggleStats={vi.fn()} onOpenLocation={vi.fn()}
       onOpenConsole={vi.fn()}
       onChangeWorkspace={vi.fn()} onCompact={vi.fn()} onUndo={onUndo}

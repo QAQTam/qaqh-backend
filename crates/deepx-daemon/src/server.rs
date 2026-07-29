@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use deepx_proto::{
     CONTROL_PROTOCOL_VERSION, ControlClientMessage, ControlServerMessage, ControlSnapshot,
-    DaemonDiscovery, EventLane,
+    DaemonDiscovery,
 };
 use deepx_runtime::{DeepxService, EventBus, LeaseDecision, LeaseManager};
 use futures_util::{SinkExt, StreamExt};
@@ -25,13 +25,7 @@ const HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 const LEASE_TIMEOUT_MS: u64 = 15_000;
 const MAX_CONNECTIONS: usize = 32;
 const OUTBOUND_QUEUE_CAPACITY: usize = 8_192;
-const PRIORITY_QUEUE_CAPACITY: usize = 2_048;
 const REQUEST_QUEUE_CAPACITY: usize = 64;
-const BULK_QUEUE_CAPACITY: usize = 8_192;
-/// Maximum bulk-lane events to batch into one EventBatch frame.
-const BULK_BATCH_MAX_EVENTS: usize = 64;
-/// Flush interval for bulk batch regardless of event count.
-const BULK_FLUSH_INTERVAL_MS: u64 = 50;
 
 struct RequestJob {
     request_id: String,
@@ -247,17 +241,12 @@ async fn handle_connection(
     let mut daemon_shutdown = shutdown.subscribe();
     let mut command_window = Instant::now();
     let mut command_count = 0_u32;
-    let (priority_tx, mut priority_rx) = mpsc::channel(PRIORITY_QUEUE_CAPACITY);
-    let (event_tx, mut event_rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
-    let (bulk_tx, mut bulk_rx) = mpsc::channel::<ControlServerMessage>(BULK_QUEUE_CAPACITY);
+    // One ordered outbound queue is deliberate. Splitting critical, standard,
+    // and bulk events allowed CompactEnd/TurnStart to overtake CompactDelta
+    // and made the frontend replay a sequence that never existed in EventBus.
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let mut writer = tokio::spawn(async move {
-        loop {
-            let message = tokio::select! {
-                biased;
-                message=priority_rx.recv()=>message,
-                message=event_rx.recv()=>message,
-            };
-            let Some(message) = message else { break };
+        while let Some(message) = outbound_rx.recv().await {
             send(&mut sink, &message).await?;
         }
         Ok::<(), String>(())
@@ -266,8 +255,8 @@ async fn handle_connection(
     let (git_tx, mut git_rx) = mpsc::channel::<RequestJob>(REQUEST_QUEUE_CAPACITY);
     let request_service = service.clone();
     let git_service = request_service.clone();
-    let request_outbound = priority_tx.clone();
-    let git_outbound = priority_tx.clone();
+    let request_outbound = outbound_tx.clone();
+    let git_outbound = outbound_tx.clone();
     let git_worker = tokio::spawn(async move {
         let git_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
         while let Some(job) = git_rx.recv().await {
@@ -329,52 +318,6 @@ async fn handle_connection(
             send_or_drop(&request_outbound, message).await;
         }
     });
-    // ── Bulk aggregator: drain bulk_tx, group by seed, send EventBatch ──
-    let bulk_outbound = event_tx.clone();
-    let bulk_epoch = service.events().epoch().to_string();
-    let bulk_aggregator = tokio::spawn(async move {
-        use std::collections::HashMap;
-        let mut interval = tokio::time::interval(Duration::from_millis(BULK_FLUSH_INTERVAL_MS));
-        let mut pending: HashMap<String, Vec<deepx_proto::Agent2Ui>> = HashMap::new();
-        loop {
-            tokio::select! {
-                biased;
-                _ = interval.tick() => {
-                    // Flush: drain and send one EventBatch per seed
-                    let drained: HashMap<_, _> = std::mem::take(&mut pending);
-                    for (seed, events) in drained {
-                        if events.is_empty() { continue; }
-                        send_or_drop(&bulk_outbound, ControlServerMessage::EventBatch {
-                            server_epoch: bulk_epoch.clone(),
-                            seq: 0,
-                            seed,
-                            session_seq: 0,
-                            events,
-                        }).await;
-                    }
-                }
-                message = bulk_rx.recv() => {
-                    let Some(message) = message else { break };
-                    if let ControlServerMessage::Event { seed, event, .. } = message {
-                        let entry = pending.entry(seed.clone()).or_default();
-                        entry.push(event);
-                        if entry.len() >= BULK_BATCH_MAX_EVENTS {
-                            let drained = pending.remove(&seed).unwrap_or_default();
-                            if !drained.is_empty() {
-                                send_or_drop(&bulk_outbound, ControlServerMessage::EventBatch {
-                                    server_epoch: bulk_epoch.clone(),
-                                    seq: 0,
-                                    seed,
-                                    session_seq: 0,
-                                    events: drained,
-                                }).await;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
     loop {
         tokio::select! {
             incoming=source.next()=>{
@@ -389,7 +332,7 @@ async fn handle_connection(
                         // writer blocks at most SEND_TIMEOUT_MS, then the
                         // message is dropped and the writer-monitor arm can
                         // fire on the next select! iteration.
-                        send_or_drop(&priority_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await;
+                        send_or_drop(&outbound_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await;
                     }
                     ControlClientMessage::SessionAttach{request_id,seed}=>{
                         let decision=if client_kind=="clawd"{
@@ -399,7 +342,7 @@ async fn handle_connection(
                         };
                         match decision {
                             LeaseDecision::Acquired|LeaseDecision::Resumed=>{
-                                send_or_drop(&priority_tx, ControlServerMessage::Response{request_id,result:serde_json::json!({"seed":seed})}).await;
+                                send_or_drop(&outbound_tx, ControlServerMessage::Response{request_id,result:serde_json::json!({"seed":seed})}).await;
                                 // An attach only needs the canonical state for
                                 // that session. Rebuilding every previously
                                 // attached session here turns multi-session
@@ -408,24 +351,24 @@ async fn handle_connection(
                                 let attached=vec![seed];
                                 let snapshot_seq=service.events().current_seq();
                                 if let Ok(snapshot)=build_snapshot(&service,attached).await {
-                                    send_or_drop(&priority_tx, ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await;
+                                    send_or_drop(&outbound_tx, ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await;
                                     delivered_seq=snapshot_seq;
                                 }
                             }
                             LeaseDecision::Denied{owner_kind,retry_after_ms}=>{
-                                send_or_drop(&priority_tx, ControlServerMessage::LeaseDenied{request_id,seed,owner_kind,retry_after_ms}).await;
+                                send_or_drop(&outbound_tx, ControlServerMessage::LeaseDenied{request_id,seed,owner_kind,retry_after_ms}).await;
                             }
                         }
                     }
                     ControlClientMessage::SessionDetach{request_id,seed}=>{
                         let detached=leases.lock().unwrap_or_else(|e|e.into_inner()).detach(&seed,&client_instance_id);
-                        send_or_drop(&priority_tx, ControlServerMessage::Response{request_id,result:serde_json::json!({"detached":detached})}).await;
+                        send_or_drop(&outbound_tx, ControlServerMessage::Response{request_id,result:serde_json::json!({"detached":detached})}).await;
                     }
                     ControlClientMessage::Request{request_id,method,params}=>{
                         if DeepxService::session_scoped(&method){
                             let seed=params.get("seed").and_then(serde_json::Value::as_str).unwrap_or_default();
                             if !leases.lock().unwrap_or_else(|e|e.into_inner()).owns(seed,&client_instance_id,Instant::now()){
-                                send_or_drop(&priority_tx, ControlServerMessage::Error{request_id:Some(request_id),code:"session_lease_required".into(),message:format!("session {seed} is not attached"),retry_after_ms:None}).await;
+                                send_or_drop(&outbound_tx, ControlServerMessage::Error{request_id:Some(request_id),code:"session_lease_required".into(),message:format!("session {seed} is not attached"),retry_after_ms:None}).await;
                                 continue;
                             }
                         }
@@ -436,7 +379,7 @@ async fn handle_connection(
                                 mpsc::error::TrySendError::Full(_)=>"request_queue_full",
                                 mpsc::error::TrySendError::Closed(_)=>"runtime_failed",
                             };
-                            send_or_drop(&priority_tx, ControlServerMessage::Error{request_id:Some(request_id),code:code.into(),message:"daemon request worker is unavailable".into(),retry_after_ms:Some(5_000)}).await;
+                            send_or_drop(&outbound_tx, ControlServerMessage::Error{request_id:Some(request_id),code:code.into(),message:"daemon request worker is unavailable".into(),retry_after_ms:Some(5_000)}).await;
                         }
                     }
                     ControlClientMessage::ClientHello{..}=>break,
@@ -444,38 +387,27 @@ async fn handle_connection(
             }
             event=events.recv()=>match event{
                 Ok(ControlServerMessage::Event{seq,..}) if seq<=delivered_seq=>{},
-                Ok(ref message @ ControlServerMessage::Event{seq,ref event,..})=>{
+                Ok(ref message @ ControlServerMessage::Event{seq,..})=>{
                     delivered_seq=seq;
                     if !event_allowed(message,&leases,&client_instance_id,&client_kind){ continue; }
-                    let lane = event.lane();
-                    match lane {
-                        EventLane::Critical => {
-                            send_or_drop(&priority_tx, message.clone()).await;
-                        }
-                        EventLane::Bulk => {
-                            let _ = bulk_tx.try_send(message.clone()); // lossy: drop on full
-                        }
-                        EventLane::Standard => {
-                            send_or_drop(&event_tx, message.clone()).await;
-                        }
-                    }
+                    send_or_drop(&outbound_tx, message.clone()).await;
                 },
-                Ok(message)=>{send_or_drop(&event_tx, message).await;}
+                Ok(message)=>{send_or_drop(&outbound_tx, message).await;}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{
                     let attached=leases.lock().unwrap_or_else(|e|e.into_inner()).attached_for(&client_instance_id,Instant::now());
                     let snapshot_seq=service.events().current_seq();
                     let snapshot=build_snapshot(&service,attached).await?;
-                    send_or_drop(&priority_tx, ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await;
+                    send_or_drop(&outbound_tx, ControlServerMessage::Snapshot{server_epoch:service.events().epoch().into(),seq:snapshot_seq,snapshot}).await;
                     delivered_seq=snapshot_seq;
                 }
                 Err(_)=>break,
             },
             _=heartbeat.tick()=>{
-                send_or_drop(&priority_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce:service.events().current_seq()}).await;
+                send_or_drop(&outbound_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce:service.events().current_seq()}).await;
             }
             changed=daemon_shutdown.changed()=>{
                 if changed.is_err() || *daemon_shutdown.borrow() {
-                    send_or_drop(&priority_tx, ControlServerMessage::Shutdown{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),reason:"daemon_stop_requested".into()}).await;
+                    send_or_drop(&outbound_tx, ControlServerMessage::Shutdown{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),reason:"daemon_stop_requested".into()}).await;
                     break;
                 }
             },
@@ -489,7 +421,6 @@ async fn handle_connection(
             },
         }
     }
-    bulk_aggregator.abort();
     request_worker.abort();
     git_worker.abort();
     writer.abort();

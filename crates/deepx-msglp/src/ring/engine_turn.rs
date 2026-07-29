@@ -608,17 +608,13 @@ impl TurnEngine {
     /// Uses CompactEngine to build prompt, calls LLM inline (blocking),
     /// applies result, and streams CompactDelta events to the frontend.
     /// After compact, the current turn continues normally.
-    fn run_auto_compact(ctx: &mut RingContext) {
+    fn run_auto_compact(ctx: &mut RingContext) -> bool {
         let compact_eng = super::engine_compact::CompactEngine::new();
         let (prompt, kept, head, provider) = match compact_eng.build_prompt_and_meta(ctx) {
             Some(v) => v,
-            None => return,
+            None => return false,
         };
-
-        ctx.emitter.emit(deepx_proto::Agent2Ui::CompactStart {
-            turns_total: ctx.agent.msg.turn_count() as u32,
-            turns_keeping: kept as u32,
-        });
+        let turns_removed = ctx.agent.msg.turns().len().saturating_sub(kept);
 
         let emitter = ctx.emitter;
         let mut summary = String::new();
@@ -662,9 +658,10 @@ impl TurnEngine {
                 ctx.emitter.emit(deepx_proto::Agent2Ui::CompactEnd {
                     summary_chars: summary.chars().count(),
                     turns_compacted: head as u32,
-                    turns_removed: ctx.agent.msg.turns().len().saturating_sub(kept) as u32,
+                    turns_removed: turns_removed as u32,
                 });
                 log::info!("[TURN] auto-compact done: {before} → {after} tokens");
+                true
             }
             Ok(()) => {
                 ctx.emitter.emit(deepx_proto::Agent2Ui::CompactEnd {
@@ -672,6 +669,7 @@ impl TurnEngine {
                     turns_compacted: 0,
                     turns_removed: 0,
                 });
+                false
             }
             Err(e) => {
                 ctx.emitter.emit(deepx_proto::Agent2Ui::CompactEnd {
@@ -680,6 +678,7 @@ impl TurnEngine {
                     turns_removed: 0,
                 });
                 log::error!("[TURN] auto-compact failed: {e}");
+                false
             }
         }
     }
@@ -692,6 +691,7 @@ impl TurnEngine {
         round_num: u32,
         mut last_usage: Option<UsageInfo>,
     ) -> Outcome {
+        log::info!("[TURN] run_lap turn_id={} round_num={}", turn_id, round_num);
         // Rebuild provider from current config
         let ep = deepx_config::registry::find_endpoint(
             &ctx.agent.config.provider_id,
@@ -767,7 +767,12 @@ impl TurnEngine {
                         "[TURN] auto-compact lap-boundary: {total}/{limit} tokens ({:.0}% threshold)",
                         threshold * 100.0
                     );
-                    Self::run_auto_compact(ctx);
+                    if Self::run_auto_compact(ctx) {
+                        // This usage describes the pre-compact prompt. Reusing
+                        // it would immediately trigger another compact before
+                        // the active context has grown again.
+                        last_usage = None;
+                    }
                 }
             }
 
@@ -787,11 +792,13 @@ impl TurnEngine {
             let mut reasoning = String::new();
             let mut tool_calls_raw = serde_json::Value::Null;
             let mut had_error = false;
+            let mut gate_error = None;
 
             *ctx.phase = LoopPhase::GateRunning;
             let cancel_arc = ctx.cancel.arc();
 
             // ── SSE Gate Request ──
+            log::info!("[TURN] run_lap turn_id={} round_num={} calling chat_stream", turn_id, round_num);
             let result = deepx_gate::chat_stream(
                 &provider,
                 messages,
@@ -909,7 +916,10 @@ impl TurnEngine {
                         });
                     }
                     deepx_gate::StreamEvent::Error(msg) => {
-                        ctx.emitter.emit(Agent2Ui::Error { message: msg });
+                        log::error!(
+                            "[TURN] gate error turn_id={turn_id} round_num={round_num}: {msg}"
+                        );
+                        gate_error = Some(msg);
                         had_error = true;
                     }
                 },
@@ -920,11 +930,20 @@ impl TurnEngine {
             }
 
             if had_error || result.is_err() {
+                log::info!("[TURN] run_lap turn_id={} round_num={} gate error or had_error={}", turn_id, round_num, had_error);
                 ctx.agent
                     .msg
                     .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-                return Outcome::Handled;
+                return Outcome::TurnFailed {
+                    turn_id,
+                    usage: last_usage,
+                    message: gate_error
+                        .or_else(|| result.err().map(|error| error.to_string()))
+                        .unwrap_or_else(|| "Model request failed".into()),
+                };
             }
+
+            log::info!("[TURN] run_lap turn_id={} round_num={} gate succeeded, parsing response", turn_id, round_num);
 
             // ── Parse + push assistant message ──
             let parsed = util::parse_tool_calls_from_response(
@@ -985,6 +1004,7 @@ impl TurnEngine {
                             .iter()
                             .map(|call| call.id.clone())
                             .collect::<Vec<_>>();
+                        log::info!("[TURN] run_lap turn_id={} round_num={} admit_batch {} pending tools", turn_id, round_num, pending.len());
                         const MAX_PARALLEL_TOOL_WORKERS: usize = 4;
                         let (_serial_groups, serial_after) =
                             conflict::resolve_write_conflicts(&pending);

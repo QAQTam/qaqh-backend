@@ -263,9 +263,47 @@ impl AgentRegistry {
     pub fn activities(&self) -> Vec<deepx_proto::SessionActivity> {
         self.activity.snapshot()
     }
+
+    pub fn activity(&self, seed: &str) -> Option<deepx_proto::SessionActivity> {
+        self.activity.get(seed)
+    }
+
+    pub fn reserve_idle(&self, seed: &str) -> Option<deepx_proto::SessionActivity> {
+        self.activity.mark_working_if_idle(seed)
+    }
+
+    pub fn reserve_for_input(
+        &self,
+        seed: &str,
+    ) -> Option<(
+        deepx_proto::SessionActivity,
+        deepx_proto::SessionActivityState,
+    )> {
+        self.activity.mark_working_for_input(seed)
+    }
+
+    pub fn rollback_idle_reservation(
+        &self,
+        seed: &str,
+        expected_seq: u64,
+    ) -> Option<deepx_proto::SessionActivity> {
+        self.activity.restore_idle_if_unchanged(seed, expected_seq)
+    }
+
+    pub fn rollback_input_reservation(
+        &self,
+        seed: &str,
+        expected_seq: u64,
+        previous: deepx_proto::SessionActivityState,
+    ) -> Option<deepx_proto::SessionActivity> {
+        self.activity
+            .restore_state_if_unchanged(seed, expected_seq, previous)
+    }
+
     pub fn is_running(&self, seed: &str) -> bool {
         self.instances.contains_key(seed)
     }
+
     pub fn send_all(&mut self, frame: Ui2Agent) {
         let seeds: Vec<_> = self.instances.keys().cloned().collect();
         for seed in seeds {

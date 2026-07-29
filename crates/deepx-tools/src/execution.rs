@@ -2,7 +2,6 @@
 
 use crate::authorization::{Admission, AuthorizedToolCall, ToolInvocation, admit};
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -21,10 +20,22 @@ pub fn execute_authorized(
     progress_tx: Option<crate::ExecProgressSender>,
 ) -> ToolExecResult {
     let started = Instant::now();
-    let (invocation, authorized_resources) = call.into_parts();
+    let (invocation, authorized_resources, authorized_workspace) = call.into_parts();
 
     if let Err(_error) = crate::runtime::verify_active_session(&invocation.session_id) {
         return failure(&invocation.tool_name, crate::ToolError::SessionMismatch);
+    }
+
+    let active_workspace = crate::runtime::active_workspace_root();
+    if active_workspace != authorized_workspace {
+        return failure(
+            &invocation.tool_name,
+            crate::ToolError::ToolSpecific {
+                tool: invocation.tool_name.clone(),
+                code: "WORKSPACE_MISMATCH".into(),
+                message: "workspace mismatch — active workspace changed after authorization".into(),
+            },
+        );
     }
 
     let mut current_resources =
@@ -38,10 +49,13 @@ pub fn execute_authorized(
         return failure(&invocation.tool_name, crate::ToolError::ResourceMismatch);
     }
 
-    let name = invocation.tool_name;
-    let action = invocation.action;
-    let args = invocation.args;
-    let call_id = invocation.call_id;
+    let ToolInvocation {
+        session_id,
+        call_id,
+        tool_name: name,
+        action,
+        args,
+    } = invocation;
 
     if crate::CANCEL.load(Ordering::SeqCst) {
         return failure(&name, crate::ToolError::Cancelled);
@@ -75,7 +89,14 @@ pub fn execute_authorized(
     };
 
     // Phase 2: execute without holding the manager lock.
-    let tool_result = (prepared.handler_fn)(prepared.ctx.clone());
+    let tool_result = crate::backend::execute(
+        prepared.placement,
+        session_id,
+        authorized_workspace,
+        authorized_resources,
+        prepared.handler_fn,
+        prepared.ctx.clone(),
+    );
     let skill_effects = if name == "skills" && tool_result.success {
         prepared.ctx.take_skill_effects()
     } else {
@@ -170,15 +191,7 @@ pub fn execute_with_context(
     } else {
         action.to_string()
     };
-    let workspace = crate::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let workspace_root = if workspace.is_empty() || workspace == "." {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    } else {
-        PathBuf::from(workspace)
-    };
+    let workspace_root = crate::runtime::active_workspace_root();
     let invocation = ToolInvocation {
         session_id: context.active_session,
         call_id,
@@ -241,13 +254,36 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::{MutexGuard, atomic::AtomicU32};
+    use std::sync::{Arc, MutexGuard, atomic::AtomicU32};
     use std::time::Duration;
 
     static TEST_HANDLER_COUNT: AtomicU32 = AtomicU32::new(0);
     fn test_counter_handler(_ctx: crate::ToolCallCtx) -> crate::ToolResult {
         TEST_HANDLER_COUNT.fetch_add(1, Ordering::SeqCst);
         crate::ToolResult::ok("counter incremented")
+    }
+
+    struct TestWorkspaceBackend {
+        calls: Arc<AtomicU32>,
+    }
+
+    struct WorkspaceReset;
+
+    impl Drop for WorkspaceReset {
+        fn drop(&mut self) {
+            crate::set_workspace(".");
+        }
+    }
+
+    impl crate::ToolExecutionBackend for TestWorkspaceBackend {
+        fn execute(&self, request: crate::BackendRequest) -> crate::ToolResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.session_id, "test_session");
+            assert_eq!(request.ctx.name, "test_workspace");
+            assert!(request.authorized_resources.is_empty());
+            assert!(!request.host_workspace.as_os_str().is_empty());
+            crate::ToolResult::ok("workspace backend")
+        }
     }
 
     fn setup_test_manager() -> MutexGuard<'static, ()> {
@@ -273,6 +309,17 @@ mod tests {
             risk: crate::ToolRisk::Destructive,
             default_timeout: std::time::Duration::from_secs(5),
         });
+        crate::runtime::register_test_handler_with_placement(
+            crate::ToolHandler {
+                key: "test_workspace".to_string(),
+                description: "test workspace handler",
+                input_schema: serde_json::json!({}),
+                handler: test_counter_handler,
+                risk: crate::ToolRisk::ReadOnly,
+                default_timeout: std::time::Duration::from_secs(5),
+            },
+            crate::ToolPlacement::Workspace,
+        );
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         test_guard
     }
@@ -417,6 +464,50 @@ mod tests {
         assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn workspace_backend_routes_only_workspace_tools() {
+        let _test_guard = setup_test_manager();
+        crate::runtime::set_context("test_session", 4);
+        let backend_calls = Arc::new(AtomicU32::new(0));
+        let _backend_guard = crate::backend::replace_workspace_backend_for_test(Arc::new(
+            TestWorkspaceBackend {
+                calls: backend_calls.clone(),
+            },
+        ));
+        let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let trusted = HashSet::new();
+
+        let workspace_call = match admit(
+            make_invocation("test_workspace", "workspace-route-1"),
+            4,
+            &ws,
+            &trusted,
+        ) {
+            Admission::Authorized(call) => call,
+            _ => panic!("expected workspace call to be authorized"),
+        };
+        let workspace_result = execute_authorized(workspace_call, None);
+        assert!(workspace_result.success);
+        assert_eq!(workspace_result.content, "workspace backend");
+        assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 0);
+
+        let host_call = match admit(
+            make_invocation("test_counter", "host-route-1"),
+            4,
+            &ws,
+            &trusted,
+        ) {
+            Admission::Authorized(call) => call,
+            _ => panic!("expected host call to be authorized"),
+        };
+        let host_result = execute_authorized(host_call, None);
+        assert!(host_result.success);
+        assert_eq!(host_result.content, "counter incremented");
+        assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 1);
+    }
+
     // ── Test 2: Level 1 (MaxLockdown) requires approval ──
 
     #[test]
@@ -503,7 +594,7 @@ mod tests {
         let admission = admit(inv, 1, &ws, &trusted);
         let challenge = match admission {
             Admission::ApprovalRequired(c) => c,
-            other => panic!("expected ApprovalRequired"),
+            _ => panic!("expected ApprovalRequired"),
         };
         assert!(matches!(
             challenge.approve_with_ttl(true, Duration::ZERO),
@@ -523,7 +614,7 @@ mod tests {
         let admission = admit(inv, 1, &ws, &trusted);
         let challenge = match admission {
             Admission::ApprovalRequired(c) => c,
-            other => panic!("expected ApprovalRequired"),
+            _ => panic!("expected ApprovalRequired"),
         };
 
         // First approval succeeds and consumes the challenge
@@ -552,7 +643,7 @@ mod tests {
                 assert_eq!(c.call_id(), "call-7a");
                 c
             }
-            other => panic!("expected ApprovalRequired"),
+            _ => panic!("expected ApprovalRequired"),
         };
         // The challenge call_id matches the invocation — the Loop layer
         // enforces that the PermissionResponse call_id matches the pending
@@ -747,14 +838,55 @@ mod tests {
         let admission = admit(inv, 1, &ws, &trusted);
         let challenge = match admission {
             Admission::ApprovalRequired(c) => c,
-            other => panic!("expected ApprovalRequired"),
+            _ => panic!("expected ApprovalRequired"),
         };
         let expected_resources = challenge.resources().to_vec();
+        let expected_workspace = challenge.workspace_root().to_path_buf();
         let authorized = challenge.approve(true).expect("approval should succeed");
         assert_eq!(
             authorized.resources(),
             expected_resources.as_slice(),
             "resources must be carried through approve()"
+        );
+        assert_eq!(
+            authorized.workspace_root(),
+            expected_workspace,
+            "workspace root must be carried through approve()"
+        );
+    }
+
+    #[test]
+    fn workspace_change_after_authorization_is_rejected() {
+        let _test_guard = setup_test_manager();
+        let _workspace_reset = WorkspaceReset;
+        crate::runtime::set_context("test_session", 4);
+        TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
+        let authorized_workspace = tempfile::tempdir().unwrap();
+        let changed_workspace = tempfile::tempdir().unwrap();
+        crate::set_workspace(&authorized_workspace.path().to_string_lossy());
+
+        let authorized = match admit(
+            make_invocation("test_workspace", "workspace-bound-1"),
+            4,
+            authorized_workspace.path(),
+            &HashSet::new(),
+        ) {
+            Admission::Authorized(call) => call,
+            _ => panic!("expected workspace call to be authorized"),
+        };
+
+        crate::set_workspace(&changed_workspace.path().to_string_lossy());
+        let result = execute_authorized(authorized, None);
+        assert!(!result.success, "changed workspace must invalidate proof");
+        assert!(
+            result.content.contains("workspace mismatch"),
+            "should report workspace mismatch: {}",
+            result.content
+        );
+        assert_eq!(
+            TEST_HANDLER_COUNT.load(Ordering::SeqCst),
+            0,
+            "handler must never be reached"
         );
     }
 
@@ -772,7 +904,11 @@ mod tests {
             action: String::new(),
             args: serde_json::json!({}),
         };
-        let auth = AuthorizedToolCall::new(inv, vec![]);
+        let auth = AuthorizedToolCall::new(
+            inv,
+            vec![],
+            crate::runtime::active_workspace_root(),
+        );
         let result = execute_authorized(auth, None);
         assert!(!result.success, "session mismatch should be rejected");
         assert!(
@@ -825,7 +961,11 @@ mod tests {
             action: String::new(),
             args: serde_json::json!({"path": "b.txt"}),
         };
-        let forged_auth = AuthorizedToolCall::new(inv2, auth.resources().to_vec());
+        let forged_auth = AuthorizedToolCall::new(
+            inv2,
+            auth.resources().to_vec(),
+            auth.workspace_root().to_path_buf(),
+        );
         let result = execute_authorized(forged_auth, None);
         assert!(!result.success, "resource mismatch should be rejected");
         assert!(

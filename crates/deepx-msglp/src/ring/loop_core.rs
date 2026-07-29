@@ -346,9 +346,9 @@ impl Loop {
     /// Returns true if the current operation should abort.
     ///
     /// Called by TurnEngine between gate rounds and by ToolEngine
-    /// during progress draining. Non-interrupt commands received
-    /// during a busy phase are silently dropped (the frontend
-    /// re-sends them after receiving Ready).
+    /// during progress draining. Most non-interrupt commands received during
+    /// a busy phase are dropped; Compact is explicitly rejected because it
+    /// cannot replace context inside an in-flight lap.
     pub fn poll_interrupts(&mut self) -> bool {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             match cmd {
@@ -380,6 +380,14 @@ impl Loop {
                 Ui2Agent::ReloadConfig => {
                     // Non-destructive — queue for processing when idle
                     self.pending.reload_config = true;
+                }
+                Ui2Agent::Compact => {
+                    // Compaction may only replace context between model laps.
+                    // Never silently consume a direct IPC request mid-SSE or
+                    // during tool execution.
+                    let _ = self.event_tx.send(Agent2Ui::Error {
+                        message: "Context compaction requires an idle session.".into(),
+                    });
                 }
                 _ => {} // Drop non-interrupt commands during busy phase
             }
@@ -454,15 +462,6 @@ impl Loop {
                 break;
             }
 
-            // Signal readiness at most once per idle period (frontend uses
-            // this to know it can send commands). Re-emitting every second
-            // floods the daemon's Critical lane and caused priority-queue
-            // overflow + connection death.
-            if !self.ready_emitted {
-                let _ = self.event_tx.send(Agent2Ui::Ready);
-                self.ready_emitted = true;
-            }
-
             if self.writer_dead.load(Ordering::SeqCst) {
                 log::error!("[AGENT] writer thread died — exiting");
                 eprintln!("[DEEPX AGENT] writer thread died — stdout pipe broken. Exiting.");
@@ -471,6 +470,14 @@ impl Loop {
 
             // ── Check background compact completion ──
             self.check_pending_compact();
+
+            // Signal readiness at most once per truly idle period. A manual
+            // compact runs in a background worker, but it still owns the
+            // active context transaction until CompactEnd is applied.
+            if self.pending_compact_rx.is_none() && !self.ready_emitted {
+                let _ = self.event_tx.send(Agent2Ui::Ready);
+                self.ready_emitted = true;
+            }
 
             // ── Block for next command (with timeout to poll compact) ──
             let frame = match self.cmd_rx.recv_timeout(std::time::Duration::from_secs(1)) {
@@ -731,6 +738,17 @@ impl Loop {
         // Any inbound command ends the idle period; the next time the loop
         // returns to idle it will re-emit Ready exactly once.
         self.ready_emitted = false;
+        // A manual compact summarizes a frozen snapshot and later replaces
+        // the active MessageStore. Accepting any other command while its
+        // worker is running could append or mutate messages that apply_result
+        // would then discard. Shutdown is safe because the process exits and
+        // the compact result is never applied.
+        if self.pending_compact_rx.is_some() && !matches!(&frame, Ui2Agent::Shutdown) {
+            let _ = self.event_tx.send(Agent2Ui::Error {
+                message: "Context compaction is running; wait for CompactEnd.".into(),
+            });
+            return;
+        }
         // ── Guard: suspended turn — reason-aware command filtering ──
         if let Some(reason) = self.session.turn.suspended_reason() {
             match (&frame, reason) {
@@ -1051,7 +1069,9 @@ impl Loop {
             }
             Ui2Agent::Compact => {
                 if self.pending_compact_rx.is_some() {
-                    return None; // already running
+                    return Some(Outcome::Error(
+                        "Context compaction is already running.".into(),
+                    ));
                 }
                 if let Some((prompt, kept, head, provider)) =
                     self.compact.build_prompt_and_meta(&mut ctx)
@@ -1086,6 +1106,15 @@ impl Loop {
                         })
                         .ok();
                     self.pending_compact_rx = Some(rx);
+                } else {
+                    // Runtime reserves the session as Working before sending
+                    // a manual Compact command. Complete the activity even
+                    // when there is nothing eligible to compact.
+                    ctx.emitter.emit(Agent2Ui::CompactEnd {
+                        summary_chars: 0,
+                        turns_compacted: 0,
+                        turns_removed: 0,
+                    });
                 }
                 Some(Outcome::Handled)
             }
@@ -1174,6 +1203,22 @@ impl Loop {
                 let _ = self.event_tx.send(Agent2Ui::TurnEnd {
                     turn_id,
                     stop_reason: Some("cancelled".into()),
+                    usage,
+                });
+                let _ = self.event_tx.send(Agent2Ui::Done);
+                self.phase = LoopPhase::Idle;
+            }
+            Outcome::TurnFailed {
+                turn_id,
+                usage,
+                message,
+            } => {
+                self.session.agent.skills.abort_user_turn();
+                self.session.flush();
+                let _ = self.event_tx.send(Agent2Ui::Error { message });
+                let _ = self.event_tx.send(Agent2Ui::TurnEnd {
+                    turn_id,
+                    stop_reason: Some("error".into()),
                     usage,
                 });
                 let _ = self.event_tx.send(Agent2Ui::Done);

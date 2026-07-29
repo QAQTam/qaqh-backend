@@ -439,6 +439,13 @@ export function reduceAgentEvent(
         seed: event.seed,
         turns: event.turns.map(restoredTurn),
         providerRetry: null,
+        pendingInteractions: [],
+        compact: {
+          ...state.compact,
+          active: false,
+          text: "",
+          turnsCompacted: null,
+        },
         session: {
           ...state.session,
           totalTurns: event.total_turns,
@@ -471,7 +478,10 @@ export function reduceAgentEvent(
       return { ...created, session: { ...created.session, ready: true } };
     }
     case "error": {
-      const turnId = lastTurnId(state);
+      const active = [...state.turns].reverse().find(turn =>
+        turn.status === "running" || turn.status === "waiting",
+      );
+      const turnId = active?.turnId;
       const next = appendNoticeOnce(state, {
         level: "error",
         message: event.message,
@@ -640,8 +650,10 @@ export function reduceAgentEvent(
     case "compact_delta":
       return { ...state, compact: { ...state.compact, active: true, text: state.compact.text + event.delta } };
     case "compact_end": {
-      // deduplicate by turnsCompacted
-      if (!state.compact.active && state.compact.turnsCompacted === event.turns_compacted) return state;
+      // Ignore a stale completion without a matching active compact. Comparing
+      // turns_compacted is insufficient because two valid compactions can
+      // remove the same number of turns.
+      if (!state.compact.active) return state;
       // Graceful fallback for old protocol without turns_removed
       const turnsRemoved: number = event.turns_removed ?? event.turns_compacted ?? 0;
       const summaryText = state.compact.text;
@@ -650,7 +662,7 @@ export function reduceAgentEvent(
       // Prepend compact summary turn if we have text and actually removed turns
       if (summaryText && turnsRemoved > 0) {
         const compactTurn: RawTurn = {
-          turnId: `compact-${Date.now()}`,
+          turnId: `compact-${state.compact.completionRevision + 1}`,
           userText: summaryText,
           status: "completed",
           startedAt: Date.now(),

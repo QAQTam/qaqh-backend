@@ -193,7 +193,7 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
 
 /// Resolve symlinks/junctions in the nearest existing ancestor, then append
 /// any missing suffix. This keeps authorization checks correct for new files.
-fn resolve_target_path(path: PathBuf) -> PathBuf {
+pub(crate) fn resolve_target_path(path: PathBuf) -> PathBuf {
     let absolute = if path.is_absolute() {
         path
     } else {
