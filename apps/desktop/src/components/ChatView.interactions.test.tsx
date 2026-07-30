@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { createSignal } from "solid-js";
+import { createSignal, createStore } from "solid-js";
 import { render } from "@solidjs/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createI18n, I18nCtx } from "../i18n";
-import type { RawSessionState } from "../store/rawSession";
+import type { RawSessionState, RawTurn } from "../store/rawSession";
 import { createRawSessionState } from "../store/sessionEventReducer";
 import { createSessionUiState } from "../store/sessionUiState";
+import type { DashboardStoreData } from "../store/sessionRegistry";
 import ChatView from "./ChatView";
 
 vi.mock("../runtime/backendClient", () => ({ request: vi.fn().mockResolvedValue(undefined) }));
@@ -23,6 +24,9 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
 function mountRawChat(initial: RawSessionState) {
   const [state, setState] = createSignal(initial);
+  const [sessionStore] = createStore<RawSessionState>(initial);
+  const [dashboardStore] = createStore<DashboardStoreData>(initial.dashboard);
+  const [pendingSend, setPendingSend] = createSignal<RawTurn | null>(null);
   const ui = createSessionUiState();
   ui.setWorkspace("F:/repo");
   const callbacks = {
@@ -39,6 +43,10 @@ function mountRawChat(initial: RawSessionState) {
     <I18nCtx value={i18n}>
       <ChatView
         rawSession={state}
+        sessionStore={sessionStore}
+        dashboardStore={dashboardStore}
+        pendingSend={pendingSend}
+        setPendingSend={setPendingSend}
         ui={ui}
         onLoadMore={callbacks.onLoadMore}
         onAskSubmit={callbacks.onAskSubmit}

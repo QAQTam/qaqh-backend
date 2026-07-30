@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 
+import { createStore } from "solid-js";
 import { render } from "@solidjs/web";
 import { afterEach, describe, expect, it } from "vitest";
 import TodoStatusStrip from "./TodoStatusStrip";
 import type { TaskInfo } from "../lib/types";
+import type { DashboardStoreData } from "../store/sessionRegistry";
 
 const cleanups: Array<() => void> = [];
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -16,8 +18,17 @@ afterEach(() => {
 function mount(tasks: TaskInfo[], currentTodoId?: string | null) {
   const host = document.createElement("div");
   document.body.append(host);
+
+  const initial: DashboardStoreData = {
+    tasks,
+    recentEdits: [],
+    currentTodoId: currentTodoId ?? null,
+    activity: [],
+  };
+  const [dashboard] = createStore<DashboardStoreData>(initial);
+
   cleanups.push(render(() =>
-    <TodoStatusStrip tasks={tasks} currentTodoId={currentTodoId ?? null} />
+    <TodoStatusStrip dashboard={dashboard} />
   , host));
 }
 
@@ -29,8 +40,11 @@ describe("TodoStatusStrip", () => {
     const strip = document.querySelector(".todo-strip")!;
     expect(strip.textContent).not.toContain("Todo");
     expect(strip.textContent).toContain("1 待处理");
-    expect(strip.textContent).toContain("进度 0/1");
-    expect(strip.textContent).toContain("0%");
+    // Progress count rendered as "0/1" in the <small> tag
+    expect(strip.textContent).toContain("0/1");
+    // Progress fill bar shows 0% width (all pending)
+    const fill = strip.querySelector(".todo-progress-fill") as HTMLElement;
+    expect(fill.style.width).toBe("0%");
     expect(strip.getAttribute("aria-expanded")).toBe("false");
     // Expand
     (strip as HTMLElement).click(); await flush();
@@ -52,14 +66,14 @@ describe("TodoStatusStrip", () => {
     // Current item
     expect(strip.textContent).toContain("T2");
     expect(strip.textContent).toContain("进行中");
-    // Title truncated
-    const curText = strip.querySelector(".todo-ci-text")?.textContent ?? "";
+    // Title truncated (max ~25 CJK / ~50 ASCII visual width)
+    const curText = strip.querySelector(".todo-roulette-text")?.textContent ?? "";
     expect(curText.length).toBeLessThanOrEqual(22);
-    // Progress: 1 completed out of 3
-    expect(strip.textContent).toContain("33%");
-    // Arrows both visible
-    const arrows = strip.querySelectorAll(".todo-arr:not(.is-empty)");
-    expect(arrows.length).toBe(2);
+    // Progress: 1 completed + 1 cancelled out of 3 → 1/3
+    expect(strip.textContent).toContain("1/3");
+    // Arrows both visible (the roulette has 3 rows: prev, current, next)
+    const rows = strip.querySelectorAll(".todo-roulette-row");
+    expect(rows.length).toBe(3);
     // Expand
     (strip as HTMLElement).click(); await flush();
     expect(strip.querySelectorAll("[data-status]").length).toBe(3);
@@ -75,7 +89,8 @@ describe("TodoStatusStrip", () => {
 
     const strip = document.querySelector(".todo-strip")!;
     expect(strip.textContent).toContain("✓ 全部完成 (2/2)");
-    expect(strip.textContent).toContain("100%");
+    // Progress count shows 2/2
+    expect(strip.textContent).toContain("2/2");
     expect(strip.classList.contains("all-done")).toBe(true);
   });
 

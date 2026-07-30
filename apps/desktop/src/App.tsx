@@ -619,6 +619,10 @@ export default function App() {
               <Show when={hasChosenSession() && activeEntry()} keyed>
                 {entry => <ChatView
                   rawSession={entry.state}
+                  sessionStore={entry.sessionStore}
+                  dashboardStore={entry.dashboardStore}
+                  pendingSend={entry.pendingSend}
+                  setPendingSend={entry.setPendingSend}
                   ui={entry.ui}
                   onLoadMore={loadMoreTurns}
                   onAskSubmit={submitAsk}

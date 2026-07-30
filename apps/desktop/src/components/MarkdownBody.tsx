@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createStore, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createStore, For, onCleanup, reconcile, Show } from "solid-js";
 import { marked, Renderer } from "marked";
 import { createHighlighter, createOnigurumaEngine } from "shiki";
 import renderMathInElement from "katex/contrib/auto-render";
@@ -45,6 +45,7 @@ interface MarkdownBlock {
   hash: string;
   raw: string;
   stable: boolean;
+  kind: "text" | "code";
 }
 
 // ── Cached Renderer (avoids per-block allocation) ──
@@ -128,14 +129,14 @@ function blockHash(raw: string): string {
 function projectBlocks(text: string, final: boolean): MarkdownBlock[] {
   if (!text) return [];
   if (final) {
-    return [{ key: "f", hash: blockHash(text), raw: text, stable: true }];
+    return [{ key: "f", hash: blockHash(text), raw: text, stable: true, kind: "text" }];
   }
 
   const tokens = marked.lexer(text);
   let tailIdx = tokens.length;
   while (tailIdx > 0 && tokens[tailIdx - 1]?.type === "space") tailIdx--;
   if (tailIdx === 0) {
-    return [{ key: "l0", hash: blockHash(text), raw: text, stable: false }];
+    return [{ key: "l0", hash: blockHash(text), raw: text, stable: false, kind: "text" }];
   }
   tailIdx--;
 
@@ -152,12 +153,13 @@ function projectBlocks(text: string, final: boolean): MarkdownBlock[] {
     if (!token || token.type === "space") continue;
     let raw = token.raw;
     while (i + 1 < tailIdx && tokens[i + 1]?.type === "space") raw += tokens[++i]!.raw;
-    blocks.push({ key: `b${blocks.length}`, hash: blockHash(raw), raw, stable: true });
+    const kind: MarkdownBlock["kind"] = token.type === "code" ? "code" : "text";
+    blocks.push({ key: `b${blocks.length}`, hash: blockHash(raw), raw, stable: true, kind });
   }
 
   if (tailIdx < tokens.length) {
     const liveRaw = tokens.slice(tailIdx).map(t => t.raw).join("");
-    blocks.push({ key: `l${blocks.length}`, hash: blockHash(liveRaw), raw: liveRaw, stable: false });
+    blocks.push({ key: `l${blocks.length}`, hash: blockHash(liveRaw), raw: liveRaw, stable: false, kind: "text" });
   }
 
   return blocks;
@@ -180,6 +182,9 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
   onCleanup(() => {
     disposed = true;
     renderGeneration += 1;
+    // Release Shiki HTML strings retained in the store
+    setBlockHtml(reconcile({} as Record<string, string>));
+    setVisibleBlocks(reconcile([] as MarkdownBlock[]));
   });
 
   // Preload the highlighter eagerly so the first streaming delta does not
@@ -201,17 +206,27 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
     gen: number,
     isStale: () => boolean,
   ) {
-    const pending = currentBlocks.filter(
-      b => b.stable && !blockHtml[b.key],
+    // Text blocks: render immediately with plain markdown (no Shiki overhead)
+    const textBlocks = currentBlocks.filter(
+      b => b.stable && b.kind === "text" && !blockHtml[b.key],
     );
-    if (pending.length === 0) return;
+    for (const block of textBlocks) {
+      if (isStale()) return;
+      setBlockHtml(s => { s[block.key] = renderFallbackHTML(block.raw); });
+    }
+
+    // Code blocks: render async with Shiki syntax highlighting
+    const codeBlocks = currentBlocks.filter(
+      b => b.stable && b.kind === "code" && !blockHtml[b.key],
+    );
+    if (codeBlocks.length === 0) return;
 
     let hi: Awaited<ReturnType<typeof getHi>>;
     try {
       hi = await getHi();
     } catch {
-      // Shiki unavailable — render with fallback
-      for (const block of pending) {
+      // Shiki unavailable — render code blocks with fallback
+      for (const block of codeBlocks) {
         if (isStale()) return;
         setBlockHtml(s => { s[block.key] = renderFallbackHTML(block.raw); });
       }
@@ -219,7 +234,7 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
     }
     if (isStale() || !hi) return;
 
-    for (const block of pending) {
+    for (const block of codeBlocks) {
       if (isStale()) return;
       try {
         setBlockHtml(s => { s[block.key] = renderBlockHTML(block.raw, hi); });
@@ -240,9 +255,26 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
       const gen = ++renderGeneration;
       const isStale = () => disposed || gen !== renderGeneration;
 
-      // Streaming: show blocks immediately, render stable ones async
+      // Streaming: update blocks incrementally — only the last (live) block
+      // changes every frame. Avoid full array replacement to prevent
+      // <For> reconciling all historical blocks on every delta.
       if (!props.final) {
-        setVisibleBlocks(() => currentBlocks);
+        setVisibleBlocks(s => {
+          const prevLen = s.length;
+          if (prevLen === 0) {
+            // First render: push all blocks
+            for (const b of currentBlocks) s.push(b);
+          } else {
+            // Update last block in-place (live text growth)
+            if (currentBlocks[prevLen - 1] && s[prevLen - 1].hash !== currentBlocks[prevLen - 1].hash) {
+              s[prevLen - 1] = currentBlocks[prevLen - 1];
+            }
+            // Append new stable blocks that just completed
+            for (let i = prevLen; i < currentBlocks.length; i++) {
+              s.push(currentBlocks[i]);
+            }
+          }
+        });
         prevVisible = currentBlocks;
         void renderStreamingBlocks(currentBlocks, gen, isStale);
         return;
@@ -279,19 +311,15 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
         if (isStale()) return;
         setVisibleBlocks(() => currentBlocks);
         prevVisible = currentBlocks;
+        // Hydrate mermaid placeholders after DOM has the rendered blocks.
+        // Must happen here (not in a separate effect) because the async
+        // final rendering runs after mount — a parallel effect would fire
+        // before blockHtml is written to the DOM.
+        if (container) {
+          queueMicrotask(() => hydrateMermaidPlaceholders(container));
+        }
       })();
     },
-  );
-
-  // ── Mermaid hydration (deferred until next microtask after DOM update) ──
-  createEffect(
-    () => props.final,
-    (final) => {
-      if (final && container) {
-        queueMicrotask(() => hydrateMermaidPlaceholders(container));
-      }
-    },
-    { defer: true },
   );
 
   function onCopyClick(e: MouseEvent) {
@@ -312,22 +340,37 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
       <For each={visibleBlocks}>
         {(block) => {
           const html = () => blockHtml[block.key];
+          const isCode = () => block.kind === "code";
           return (
             <Show
-              when={block.stable && html()}
+              when={!isCode() || html()}
               fallback={
                 <div
                   data-key={block.key}
                   data-hash={block.hash}
-                  textContent={block.raw}
-                />
+                  class="code-block-skeleton"
+                  aria-busy="true"
+                >
+                  <pre><code>{block.raw}</code></pre>
+                </div>
               }
             >
-              <div
-                data-key={block.key}
-                data-hash={block.hash}
-                innerHTML={html()!}
-              />
+              <Show
+                when={block.stable && html()}
+                fallback={
+                  <div
+                    data-key={block.key}
+                    data-hash={block.hash}
+                    textContent={block.raw}
+                  />
+                }
+              >
+                <div
+                  data-key={block.key}
+                  data-hash={block.hash}
+                  innerHTML={html()!}
+                />
+              </Show>
             </Show>
           );
         }}

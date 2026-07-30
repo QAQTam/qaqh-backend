@@ -3,8 +3,9 @@ import { request } from "../runtime/backendClient";
 import { openDevTools, openPath } from "../runtime/desktopApi";
 import { togglePet } from "../runtime/desktopApi";
 import type { AskAnswer } from "../lib/types";
-import { createSessionProjector } from "../presentation/useConversationView";
-import type { PendingInteraction, RawSessionState } from "../store/rawSession";
+import { projectTurn, type ChangeReviewFile, type TurnViewModel } from "../presentation/turnProjection";
+import type { PendingInteraction, RawSessionState, RawTurn } from "../store/rawSession";
+import type { DashboardStoreData } from "../store/sessionRegistry";
 import { createFollowUpQueue } from "../store/followUpQueue";
 import {
   activeInteraction,
@@ -17,7 +18,6 @@ import ComposerDock from "./composer/ComposerDock";
 import ConversationTranscript from "./conversation/ConversationTranscript";
 import GitDiffPanel from "./GitDiffPanel";
 import ChangeReviewPanel from "./ChangeReviewPanel";
-import type { ChangeReviewFile } from "../presentation/turnProjection";
 import AskUserPrompt from "./interactions/AskUserPrompt";
 import CompactStatusRow from "./interactions/CompactStatusRow";
 import InteractionDock from "./interactions/InteractionDock";
@@ -31,6 +31,8 @@ import TodoStatusStrip from "./TodoStatusStrip";
 
 interface ChatViewProps {
   rawSession: Accessor<RawSessionState>;
+  sessionStore: RawSessionState;
+  dashboardStore: DashboardStoreData;
   ui: SessionUiState;
   onLoadMore: () => void | Promise<void>;
   onAskSubmit: (
@@ -53,12 +55,21 @@ interface ChatViewProps {
   permissionLevel: number;
   onPermissionLevelChange: (level: number) => void | Promise<void>;
   onChangeWorkspace: () => void | Promise<void>;
+  /** Optimistic send: shows user's message immediately before backend confirms. */
+  pendingSend: Accessor<RawTurn | null>;
+  setPendingSend: (turn: RawTurn | null) => void;
 }
 
 export default function ChatView(props: ChatViewProps) {
   const session = () => props.rawSession();
-  const projectSession = createSessionProjector();
-  const turns = createMemo(() => projectSession(props.rawSession()));
+  const turns = createMemo(() => {
+    const projected = props.sessionStore.turns.map(projectTurn);
+    const pending = props.pendingSend();
+    if (pending) {
+      projected.push(projectTurn(pending));
+    }
+    return projected;
+  });
   const seed = () => session().seed;
   const interaction = () => activeInteraction(session());
   const permissionInteraction = () => {
@@ -111,12 +122,23 @@ export default function ChatView(props: ChatViewProps) {
   }
 
   const handleSend = action(async function* (text: string, files: string[], imageBlocks?: Array<{ mimeType: string; data: string }>) {
+    // Optimistic: show user's message immediately
+    const optimisticTurn: RawTurn = {
+      turnId: `optimistic-${Date.now()}`,
+      userText: text,
+      status: "running",
+      startedAt: Date.now(),
+      rounds: [],
+      interactions: [],
+    };
+    props.setPendingSend(optimisticTurn);
     yield request("session.send_message", {
       seed: seed(),
       text,
       files,
       images: imageBlocks ?? [],
     });
+    // pendingSend auto-cleared when turn_start arrives (new turns count increases)
   });
 
   const handleStop = action(async function* () {
@@ -261,7 +283,7 @@ export default function ChatView(props: ChatViewProps) {
         </Match>
       </Switch>
       <ComposerDock
-        goalBar={<TodoStatusStrip tasks={session().dashboard.tasks} currentTodoId={session().dashboard.currentTodoId} />}
+        goalBar={<TodoStatusStrip dashboard={props.dashboardStore} />}
         onSend={handleSend}
         onStop={handleStop}
         isStreaming={streaming}

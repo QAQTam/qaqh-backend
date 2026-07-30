@@ -1,7 +1,8 @@
-import { createEffect, createSignal, For, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
 import type { TurnViewModel } from "../../presentation/turnProjection";
 import type { ChangeReviewFile } from "../../presentation/turnProjection";
 import TurnGroup from "./TurnGroup";
+import VirtualTurn from "./VirtualTurn";
 
 const BOTTOM_THRESHOLD = 120;
 
@@ -73,7 +74,20 @@ export default function ConversationTranscript(props: {
         >加载更早消息</button>
       </Show>
       <main ref={transcript} class="conversation-transcript" aria-live="polite">
-        <For each={props.turns} keyed={t => t.turnId}>{(turn) => <TurnGroup turn={turn()} onReviewChanges={props.onReviewChanges} />}</For>
+        <For each={props.turns} keyed={t => t.turnId}>{(turn) => {
+          const isLast = createMemo(() => {
+            const idx = props.turns.findIndex(t => t.turnId === turn().turnId);
+            return idx === props.turns.length - 1;
+          });
+          return (
+            <Show
+              when={isLast()}
+              fallback={<VirtualTurn turn={turn()} onReviewChanges={props.onReviewChanges} />}
+            >
+              <TurnGroup turn={turn()} onReviewChanges={props.onReviewChanges} />
+            </Show>
+          );
+        }}</For>
       </main>
       <Show when={!followTail()}>
         <button

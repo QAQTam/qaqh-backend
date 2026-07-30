@@ -174,18 +174,32 @@ export function createSessionEventRuntime(options: {
     });
   };
 
+  // ── Streaming delta types that should be batched per frame ──
+  const STREAM_EVENT_TYPES = new Set<Agent2Ui["type"]>([
+    "round_delta",
+    "exec_progress",
+    "tool_exec_delta",
+  ]);
+
   return {
     push(event) {
       if (disposed) return;
-      if (event.type === "round_delta") {
-        const previous = pendingDeltas[pendingDeltas.length - 1];
-        if (
-          previous?.type === "round_delta" &&
-          previous.turn_id === event.turn_id &&
-          previous.round_num === event.round_num &&
-          previous.kind === event.kind
-        ) {
-          pendingDeltas[pendingDeltas.length - 1] = { ...event, delta: previous.delta + event.delta };
+      // Batch streaming events to frame boundary — each event individually
+      // is cheap to reduce, but commit+reconcile per event would traverse the
+      // entire state tree. One commit per frame is sufficient.
+      if (STREAM_EVENT_TYPES.has(event.type)) {
+        if (event.type === "round_delta") {
+          const previous = pendingDeltas[pendingDeltas.length - 1];
+          if (
+            previous?.type === "round_delta" &&
+            previous.turn_id === event.turn_id &&
+            previous.round_num === event.round_num &&
+            previous.kind === event.kind
+          ) {
+            pendingDeltas[pendingDeltas.length - 1] = { ...event, delta: previous.delta + event.delta };
+          } else {
+            pendingDeltas.push(event);
+          }
         } else {
           pendingDeltas.push(event);
         }

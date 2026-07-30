@@ -10,6 +10,8 @@ import {
 
 const MAX_ACTIVITY = 50;
 const MAX_METRICS = 120;
+const MAX_PROGRESS_CHUNKS = 200;
+const MAX_USAGE_BY_REQUEST = 50;
 
 const emptyUsage = (): UsageInfo => ({
   prompt_tokens: 0,
@@ -169,6 +171,19 @@ function replaceUsageTotal(total: number, previous: number, current: number): nu
   return Math.max(0, total - previous + current);
 }
 
+function capUsageByRequest(
+  map: Record<string, UsageInfo>,
+): Record<string, UsageInfo> {
+  const keys = Object.keys(map);
+  if (keys.length <= MAX_USAGE_BY_REQUEST) return map;
+  // Keep the most recent entries (keys are chronologically ordered by requestKey)
+  const trimmed: Record<string, UsageInfo> = {};
+  for (const key of keys.slice(-MAX_USAGE_BY_REQUEST)) {
+    trimmed[key] = map[key]!;
+  }
+  return trimmed;
+}
+
 function upsertUsage(
   state: RawSessionState,
   usage: UsageInfo,
@@ -209,7 +224,9 @@ function upsertUsage(
       ...state.session,
       usage,
       usageTotals,
-      usageByRequest: { ...state.session.usageByRequest, [requestKey]: usage },
+      usageByRequest: capUsageByRequest(
+        { ...state.session.usageByRequest, [requestKey]: usage },
+      ),
       usageRequestCount: state.session.usageRequestCount + (existing ? 0 : 1),
       cacheReportedRequestCount,
       model: model ?? state.session.model,
@@ -367,7 +384,7 @@ export function reduceAgentEvent(
                 stream: "stdout" as const,
                 seq: previous.length,
                 chunk: event.delta,
-              }],
+              }].slice(-MAX_PROGRESS_CHUNKS),
             },
           },
         };
@@ -411,7 +428,7 @@ export function reduceAgentEvent(
           progress: {
             ...current.progress,
             [event.tool_call_id]: {
-              chunks: [...previous, { stream, seq, chunk }],
+              chunks: [...previous, { stream, seq, chunk }].slice(-MAX_PROGRESS_CHUNKS),
             },
           },
         };

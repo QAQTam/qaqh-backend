@@ -1,5 +1,6 @@
 import { For, Show, createMemo, createSignal, createEffect } from "solid-js";
 import type { TaskInfo } from "../lib/types";
+import type { DashboardStoreData } from "../store/sessionRegistry";
 
 export type TodoItemStatus = "pending" | "in_progress" | "completed" | "cancelled";
 
@@ -15,10 +16,9 @@ function truncTitle(t: string): string {
   return t;
 }
 
-/** Pure display: receives tasks directly from WebSocket Dashboard events. */
+/** Pure display: reads tasks/currentTodoId directly from a fine-grained reactive store. */
 export default function TodoStatusStrip(props: {
-  tasks: TaskInfo[];
-  currentTodoId?: string | null;
+  dashboard: DashboardStoreData;
 }) {
   const [expanded, setExpanded] = createSignal(false);
   const [completedFlash, setCompletedFlash] = createSignal<Set<string>>(new Set());
@@ -28,11 +28,11 @@ export default function TodoStatusStrip(props: {
   const statusIcon = (status: string) =>
     ({ pending: "○", in_progress: "◌", completed: "✓", cancelled: "—" } as Record<string, string>)[status] ?? "○";
   const count = (status: string) =>
-    props.tasks.filter(t => t.status === status).length;
+    props.dashboard.tasks.filter(t => t.status === status).length;
 
   const activeItem = createMemo(() => {
-    const byId = props.currentTodoId
-      ? props.tasks.find(t => t.id === props.currentTodoId)
+    const byId = props.dashboard.currentTodoId
+      ? props.dashboard.tasks.find(t => t.id === props.dashboard.currentTodoId)
       : null;
     // Keep currentTodoId match if active, OR if just completed (still flashing)
     if (byId && byId.status !== "cancelled") {
@@ -41,31 +41,31 @@ export default function TodoStatusStrip(props: {
       }
     }
     // Otherwise find any in_progress task
-    return props.tasks.find(t => t.status === "in_progress") ?? null;
+    return props.dashboard.tasks.find(t => t.status === "in_progress") ?? null;
   });
 
   const carousel = createMemo(() => {
     const active = activeItem();
     if (!active) return { prev: null as TaskInfo | null, current: null as TaskInfo | null, next: null as TaskInfo | null };
-    const idx = props.tasks.findIndex(t => t.id === active.id);
+    const idx = props.dashboard.tasks.findIndex(t => t.id === active.id);
     return {
-      prev: idx > 0 ? props.tasks[idx - 1] : null,
+      prev: idx > 0 ? props.dashboard.tasks[idx - 1] : null,
       current: active,
-      next: idx < props.tasks.length - 1 ? props.tasks[idx + 1] : null,
+      next: idx < props.dashboard.tasks.length - 1 ? props.dashboard.tasks[idx + 1] : null,
     };
   });
 
   const donePct = () => {
-    const total = props.tasks.length;
+    const total = props.dashboard.tasks.length;
     if (total === 0) return 0;
     return Math.floor((count("completed") + count("cancelled")) * 100 / total);
   };
 
   const doneCount = () => count("completed") + count("cancelled");
-  const totalCount = () => props.tasks.length;
+  const totalCount = () => props.dashboard.tasks.length;
 
   const summaryLine = () => {
-    const total = props.tasks.length;
+    const total = props.dashboard.tasks.length;
     const done = count("completed") + count("cancelled");
     const pending = count("pending");
     const inProg = count("in_progress");
@@ -80,7 +80,7 @@ export default function TodoStatusStrip(props: {
   // Derive completed IDs as a stable memo — only changes when task statuses actually change
   const completedIds = createMemo(() => {
     const ids = new Set<string>();
-    for (const t of props.tasks) {
+    for (const t of props.dashboard.tasks) {
       if (t.status === "completed" || t.status === "cancelled") ids.add(t.id);
     }
     return ids;
@@ -163,7 +163,7 @@ export default function TodoStatusStrip(props: {
     );
   });
 
-  return <Show when={props.tasks.length > 0} fallback={null}>
+  return <Show when={props.dashboard.tasks.length > 0} fallback={null}>
     <section
       class={`todo-strip${count("in_progress") > 0 ? " has-active" : " all-done"}`}
       aria-label="任务进度"
@@ -172,7 +172,7 @@ export default function TodoStatusStrip(props: {
     >
       <Show when={!expanded()} fallback={
         <ul class="todo-list-panel">
-          <For each={props.tasks}>
+          <For each={props.dashboard.tasks}>
             {ti => (
               <li class={`todo-list-item status-${ti.status}`} data-status={ti.status}>
                 <span class="todo-item-icon">{statusIcon(ti.status)}</span>

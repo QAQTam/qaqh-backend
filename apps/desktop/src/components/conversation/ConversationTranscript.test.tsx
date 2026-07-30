@@ -25,6 +25,37 @@ class ResizeObserverMock {
 
 vi.stubGlobal("ResizeObserver", ResizeObserverMock);
 
+// Virtual scrolling uses IntersectionObserver to defer rendering of
+// off-screen turns. In jsdom every element is "visible" by default.
+class IntersectionObserverMock {
+  static instances: IntersectionObserverMock[] = [];
+  readonly root: Element | null = null;
+  readonly rootMargin: string = "";
+  readonly thresholds: ReadonlyArray<number> = [];
+
+  constructor(
+    private readonly callback: IntersectionObserverCallback,
+    _options?: IntersectionObserverInit,
+  ) {
+    IntersectionObserverMock.instances.push(this);
+  }
+
+  observe(target: Element) {
+    // Immediately report as intersecting so TurnGroup renders in tests
+    this.callback(
+      [{ isIntersecting: true, target } as IntersectionObserverEntry],
+      this as unknown as IntersectionObserver,
+    );
+  }
+
+  unobserve() {}
+  disconnect() {}
+  takeRecords(): IntersectionObserverEntry[] { return []; }
+  static reset() { IntersectionObserverMock.instances = []; }
+}
+
+vi.stubGlobal("IntersectionObserver", IntersectionObserverMock);
+
 let frames: FrameRequestCallback[] = [];
 vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
   frames.push(callback);
