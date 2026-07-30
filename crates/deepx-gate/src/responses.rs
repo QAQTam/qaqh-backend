@@ -155,10 +155,21 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
 
 fn convert_user_content(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
     let mut parts: Vec<serde_json::Value> = Vec::new();
+    let mut img_idx: usize = 0;
     for b in blocks {
         match b {
             ContentBlock::Text { text } => {
                 parts.push(serde_json::json!({"type": "input_text", "text": text}));
+            }
+            ContentBlock::Image { mime_type, data } => {
+                parts.push(serde_json::json!({
+                    "type": "input_text",
+                    "text": format!(
+                        "[Image #{img_idx}: {mime_type}, ~{} bytes — call image_query(image_index={img_idx}, prompt=\"...\") to analyze]",
+                        data.len()
+                    )
+                }));
+                img_idx += 1;
             }
             _ => {}
         }

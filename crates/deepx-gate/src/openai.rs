@@ -660,13 +660,30 @@ fn convert_messages(
                 }
             }
             "user" => {
-                let mut text = String::new();
+                let mut text_parts: Vec<String> = Vec::new();
+                let mut image_refs: Vec<String> = Vec::new();
+                let mut img_idx: usize = 0;
                 for block in &msg.content {
-                    if let ContentBlock::Text { text: t } = block {
-                        text.push_str(t);
+                    match block {
+                        ContentBlock::Text { text: t } => text_parts.push(t.clone()),
+                        ContentBlock::Image { mime_type, data } => {
+                            image_refs.push(format!(
+                                "[Image #{img_idx}: {mime_type}, ~{} bytes — to analyze, call: image_query(image_index={img_idx}, prompt=\"describe this image\")]",
+                                data.len()
+                            ));
+                            img_idx += 1;
+                        }
+                        _ => {}
                     }
                 }
-                let mut obj = serde_json::json!({"role": "user", "content": text});
+                let mut combined_text = text_parts.join("");
+                if !image_refs.is_empty() {
+                    if !combined_text.is_empty() {
+                        combined_text.push('\n');
+                    }
+                    combined_text.push_str(&image_refs.join("\n"));
+                }
+                let mut obj = serde_json::json!({"role": "user", "content": combined_text});
                 if let Some(n) = name {
                     obj["name"] = serde_json::json!(n);
                 }

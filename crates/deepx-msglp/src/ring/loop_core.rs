@@ -971,7 +971,7 @@ impl Loop {
         };
 
         match frame {
-            Ui2Agent::UserInput { text } => Some(self.input.handle_user_input(&mut ctx, text)),
+            Ui2Agent::UserInput { text, images } => Some(self.input.handle_user_input(&mut ctx, text, images.to_vec())),
             Ui2Agent::AskResponse { ask_id, answers } => {
                 Some(self.session.turn.handle_ask_response(
                     &mut ctx,
@@ -1143,7 +1143,7 @@ impl Loop {
                                         notify: &self.notify,
                                     };
                                     let next_outcome =
-                                        self.input.handle_user_input(&mut ctx, &prompt);
+                                        self.input.handle_user_input(&mut ctx, &prompt, vec![]);
                                     drop(ctx);
                                     self.apply_outcome(next_outcome);
                                     return;

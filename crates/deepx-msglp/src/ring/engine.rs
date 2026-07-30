@@ -112,7 +112,7 @@ impl Engine for super::engine_session::SessionEngine {
 impl Engine for super::engine_input::InputEngine {
     fn try_handle(&mut self, ctx: &mut RingContext, cmd: &Ui2Agent) -> Option<Outcome> {
         match cmd {
-            Ui2Agent::UserInput { text } => Some(self.handle_user_input(ctx, text)),
+            Ui2Agent::UserInput { text, images } => Some(self.handle_user_input(ctx, text, images.to_vec())),
             _ => None,
         }
     }

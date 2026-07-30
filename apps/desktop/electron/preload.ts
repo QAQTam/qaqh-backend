@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld("deepx", {
   },
   desktop: {
     openDialog: (options: OpenDialogOptions) => ipcRenderer.invoke("desktop:open-dialog", options),
+    openImageDialog: () => ipcRenderer.invoke("desktop:open-image-dialog") as Promise<string | null>,
+    readFileBase64: (filePath: string) => ipcRenderer.invoke("desktop:read-file-base64", filePath) as Promise<{ mimeType: string; data: string; size: number }>,
+    readTextFile: (filePath: string) => ipcRenderer.invoke("desktop:read-text-file", filePath) as Promise<{ content: string; size: number }>,
     confirm: (message: string, options?: ConfirmDialogOptions) => ipcRenderer.invoke("desktop:confirm", message, options),
     openPath: (target: string) => ipcRenderer.invoke("desktop:open-path", target),
     togglePet: () => ipcRenderer.invoke("desktop:toggle-pet") as Promise<boolean>,

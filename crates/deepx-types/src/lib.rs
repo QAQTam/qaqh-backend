@@ -26,8 +26,8 @@ pub mod token;
 
 pub use api_types::UsageInfo;
 pub use config::{
-    BalanceInfo, ConfigStore, PersistentConfig, PersistentDatabaseConfig, PersistentSubagentConfig,
-    ProfileConfig,
+    BalanceInfo, ConfigStore, PersistentConfig, PersistentDatabaseConfig, PersistentMultimodalConfig,
+    PersistentSubagentConfig, ProfileConfig,
 };
 pub use message::{ContentBlock, FunctionCall, Message, ToolCall};
 pub use provider::{CacheTokenField, EndpointSpec, ProviderSpec, ThinkingParamMode, UserSendMode};

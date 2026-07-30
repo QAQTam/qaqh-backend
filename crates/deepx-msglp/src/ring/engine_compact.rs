@@ -437,6 +437,9 @@ fn serialize_messages(
                     let end = compact.floor_char_boundary(compact.len().min(600));
                     Some(format!("[Tool result]: {}", &compact[..end]))
                 }
+                deepx_types::ContentBlock::Image { .. } => {
+                    Some(format!("[{role}]: [Image attached]"))
+                }
             })
             .collect();
         if !lines.is_empty() {

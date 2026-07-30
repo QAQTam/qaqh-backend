@@ -221,6 +221,35 @@ function registerIpc(): void {
     if (result.canceled) return null;
     return options.multiple ? result.filePaths : (result.filePaths[0] ?? null);
   });
+  ipcMain.handle("desktop:open-image-dialog", async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: "选择图片",
+      properties: ["openFile"],
+      filters: [
+        { name: "图片文件", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] },
+        { name: "所有文件", extensions: ["*"] },
+      ],
+    });
+    if (result.canceled) return null;
+    return result.filePaths[0] ?? null;
+  });
+  ipcMain.handle("desktop:read-file-base64", async (_event, filePath: unknown) => {
+    if (typeof filePath !== "string" || !filePath) throw new Error("file path is required");
+    const buffer = await readFile(filePath);
+    const base64 = buffer.toString("base64");
+    const ext = filePath.split(".").pop()?.toLowerCase() ?? "png";
+    const mimeMap: Record<string, string> = {
+      png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+      gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
+    };
+    const mimeType = mimeMap[ext] ?? "image/png";
+    return { mimeType, data: base64, size: buffer.length };
+  });
+  ipcMain.handle("desktop:read-text-file", async (_event, filePath: unknown) => {
+    if (typeof filePath !== "string" || !filePath) throw new Error("file path is required");
+    const content = await readFile(filePath, "utf-8");
+    return { content, size: Buffer.byteLength(content, "utf-8") };
+  });
   ipcMain.handle("desktop:confirm", async (_event, message: unknown, raw: ConfirmDialogOptions = {}) => {
     if (typeof message !== "string") throw new Error("invalid confirmation message");
     const options = isRecord(raw) ? raw : {};

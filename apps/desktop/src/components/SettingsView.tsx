@@ -126,6 +126,16 @@ export default function SettingsView(props: SettingsViewProps) {
 
   const [activeCategory, setActiveCategory] = createSignal("models");
 
+  // -- Multimodal config --
+  const [mmEnabled, setMmEnabled] = createSignal(false);
+  const [mmApiKeyValue, setMmApiKeyValue] = createSignal("");
+  const [mmApiKeyConfigured, setMmApiKeyConfigured] = createSignal(false);
+  const [showMmApiKeyInput, setShowMmApiKeyInput] = createSignal(false);
+  const [mmBaseUrl, setMmBaseUrl] = createSignal("");
+  const [mmModel, setMmModel] = createSignal("mimo-v2.5");
+  const [mmProviderType, setMmProviderType] = createSignal("mimo");
+  const [mmMaxTokens, setMmMaxTokens] = createSignal(4096);
+
   const [configData, setConfigData] = createSignal<any>(null);
   const [configLoading, setConfigLoading] = createSignal(true);
   const [configError, setConfigError] = createSignal<any>(null);
@@ -202,6 +212,19 @@ export default function SettingsView(props: SettingsViewProps) {
       if (data.subagent.timeout_secs) setSubTimeout(data.subagent.timeout_secs);
       if (data.subagent.default_tools?.length) setSubTools(data.subagent.default_tools);
     }
+    if (data.multimodal) {
+      if (data.multimodal.enabled !== undefined) setMmEnabled(data.multimodal.enabled);
+      if (data.multimodal.provider_type) setMmProviderType(data.multimodal.provider_type);
+      if (data.multimodal.api_key) {
+        const isMasked = data.multimodal.api_key === "****";
+        setMmApiKeyConfigured(isMasked);
+        setMmApiKeyValue(isMasked ? "" : data.multimodal.api_key);
+        setShowMmApiKeyInput(!isMasked);
+      }
+      if (data.multimodal.base_url) setMmBaseUrl(data.multimodal.base_url);
+      if (data.multimodal.model) setMmModel(data.multimodal.model);
+      if (data.multimodal.max_tokens) setMmMaxTokens(data.multimodal.max_tokens);
+    }
   });
 
   const providers = (): Provider[] => configData()?.providers ?? [];
@@ -248,6 +271,7 @@ export default function SettingsView(props: SettingsViewProps) {
     try {
       const apiKeyReplacement = !apiKeyConfigured() || showApiKeyInput() ? apiKeyValue() : "";
       const subApiKeyReplacement = !subApiKeyConfigured() || showSubApiKeyInput() ? subApiKeyValue() : "";
+      const mmApiKeyReplacement = !mmApiKeyConfigured() || showMmApiKeyInput() ? mmApiKeyValue() : "";
       await request("config.save", {
         apiKey: apiKeyReplacement,
         model: model(), baseUrl: baseUrl(),
@@ -260,6 +284,10 @@ export default function SettingsView(props: SettingsViewProps) {
         subagentTimeoutSecs: subTimeout(), subagentDefaultTools: subTools(),
         databaseEnabled: databaseEnabled(),
         tokenizerPath: tokenizerPath(),
+        multimodalProviderType: mmProviderType(),
+        multimodalEnabled: mmEnabled(),
+        multimodalApiKey: mmApiKeyReplacement, multimodalBaseUrl: mmBaseUrl(),
+        multimodalModel: mmModel(), multimodalMaxTokens: mmMaxTokens(),
       });
       if (apiKeyConfigured() || apiKeyReplacement) {
         setApiKeyConfigured(true);
@@ -270,6 +298,11 @@ export default function SettingsView(props: SettingsViewProps) {
         setSubApiKeyConfigured(true);
         setSubApiKeyValue("");
         setShowSubApiKeyInput(false);
+      if (mmApiKeyConfigured() || mmApiKeyReplacement) {
+        setMmApiKeyConfigured(true);
+        setMmApiKeyValue("");
+        setShowMmApiKeyInput(false);
+      }
       }
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -364,6 +397,7 @@ export default function SettingsView(props: SettingsViewProps) {
     { id: "context", label: t().settings.categoryContext },
     { id: "subagent", label: t().settings.categorySubagent },
     { id: "data", label: t().settings.categoryData },
+    { id: "multimodal", label: t().settings.categoryMultimodal },
     { id: "appearance", label: t().settings.categoryAppearance },
     { id: "advanced", label: t().settings.categoryAdvanced },
   ];
@@ -568,6 +602,64 @@ export default function SettingsView(props: SettingsViewProps) {
                       <div class="settings-hint">{t().settings.subagentToolsHint}</div>
                     </div>
                   </div>
+                </section>
+              </Show>
+
+              {/* Category: Multimodal */}
+              <Show when={activeCategory() === "multimodal"}>
+                <section class="settings-section">
+                  <h2 class="settings-section-title">{t().settings.multimodal.title}</h2>
+                  <p class="settings-section-desc">{t().settings.multimodal.desc}</p>
+                  <div class="settings-row">
+                    <label>{t().settings.multimodal.enable}</label>
+                    <div class="settings-input-group">
+                      <label class="settings-toggle">
+                        <input type="checkbox" checked={mmEnabled()} onChange={(e) => setMmEnabled(e.currentTarget.checked)} />
+                        <span class="settings-toggle-track" />
+                      </label>
+                      <div class="settings-hint">{t().settings.multimodal.enableHint}</div>
+                    </div>
+                  </div>
+                  <Show when={mmEnabled()}>
+                    <div class="settings-row">
+                      <label>{t().settings.multimodal.providerType}</label>
+                      <select value={mmProviderType()} onChange={(e) => setMmProviderType(e.currentTarget.value)}>
+                        <option value="mimo">MiMo (小米) — 云端 API</option>
+                        <option value="ollama">Ollama — 本地模型</option>
+                        <option value="lmstudio">LM Studio — 本地 (原生 API)</option>
+                        <option value="openai_compat">OpenAI 兼容 — LM Studio / vLLM / 通用</option>
+                      </select>
+                      <div class="settings-hint">{t().settings.multimodal.providerTypeHint}</div>
+                    </div>
+                    <div class="settings-row">
+                      <label>{t().settings.multimodal.apiKey}</label>
+                      <SecretInput
+                        configured={mmApiKeyConfigured()}
+                        showInput={showMmApiKeyInput()}
+                        value={mmApiKeyValue()}
+                        onInput={setMmApiKeyValue}
+                        onReplace={() => { setShowMmApiKeyInput(true); setMmApiKeyValue("") }}
+                        onCancel={() => { setShowMmApiKeyInput(false); setMmApiKeyValue("") }}
+                        placeholder={t().settings.multimodal.apiKeyPlaceholder}
+                        configuredLabel={t().settings.multimodal.apiKeyConfigured}
+                        replaceLabel={t().settings.apiKeyReplace}
+                        cancelLabel={t().settings.cancel}
+                        hint={t().settings.multimodal.apiKeyHint}
+                      />
+                    </div>
+                    <div class="settings-row">
+                      <label>{t().settings.multimodal.baseUrl}</label>
+                      <input value={mmBaseUrl()} onInput={(e) => setMmBaseUrl(e.currentTarget.value)} placeholder={t().settings.multimodal.baseUrlPlaceholder} />
+                    </div>
+                    <div class="settings-row">
+                      <label>{t().settings.multimodal.model}</label>
+                      <input value={mmModel()} onInput={(e) => setMmModel(e.currentTarget.value)} />
+                    </div>
+                    <div class="settings-row">
+                      <label>{t().settings.multimodal.maxTokens}</label>
+                      <input type="number" value={mmMaxTokens()} onInput={(e) => setMmMaxTokens(parseInt(e.currentTarget.value) || 4096)} step={512} />
+                    </div>
+                  </Show>
                 </section>
               </Show>
 

@@ -26,6 +26,9 @@ interface DeepxDesktopApi {
     setBackgroundMaterial(material: "auto" | "mica" | "acrylic" | "none"): Promise<boolean>;
     onUpdateAvailable(listener: (info: UpdateInfo) => void): () => void;
     onUpdateFailed(listener: (failure: { operationId: string; message: string }) => void): () => void;
+    openImageDialog(): Promise<string | null>;
+    readFileBase64(filePath: string): Promise<{ mimeType: string; data: string; size: number }>;
+    readTextFile(filePath: string): Promise<{ content: string; size: number }>;
   };
 }
 

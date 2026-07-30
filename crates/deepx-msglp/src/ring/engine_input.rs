@@ -3,7 +3,7 @@
 //! Receives raw user text, handles auto-session-creation, compliance guard,
 //! and routes to TurnEngine for LLM processing.
 
-use deepx_proto::Agent2Ui;
+use deepx_proto::{Agent2Ui, ImageBlock};
 
 use super::types::*;
 
@@ -16,7 +16,12 @@ impl InputEngine {
 
     /// Handle user input. Returns an Outcome telling the Loop whether
     /// to start a turn, yield, or report an error.
-    pub fn handle_user_input(&self, ctx: &mut RingContext, text: &str) -> Outcome {
+    pub fn handle_user_input(
+        &self,
+        ctx: &mut RingContext,
+        text: &str,
+        images: Vec<deepx_proto::ImageBlock>,
+    ) -> Outcome {
         log::info!("[INPUT] handle_user_input called, text_len={}", text.len());
         // Auto-create session on first input
         if ctx.agent.session.seed.is_empty() {
@@ -98,6 +103,17 @@ impl InputEngine {
         log::info!("[INPUT] pushing user message to store");
         let turn_id = ctx.agent.msg.allocate_turn_id();
         ctx.agent.msg.push_user(&text);
+
+        // Add image blocks to the user message and register them globally
+        // so image_query can look them up by index.
+        for img in &images {
+            ctx.agent.msg.push_image_to_last_user(&img.mime_type, &img.data);
+            deepx_tools::image_query::store_image(
+                &ctx.agent.session.seed,
+                &img.mime_type,
+                &img.data,
+            );
+        }
         log::info!("[INPUT] flushing meta");
         ctx.agent.msg.flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
 

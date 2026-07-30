@@ -49,6 +49,10 @@ pub struct PersistentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<PersistentDatabaseConfig>,
 
+    // ── Multimodal (vision) LLM config ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multimodal: Option<PersistentMultimodalConfig>,
+
     // ── Permission ──
     /// Agent permission level: 1=MaxLockdown, 2=ReadFree, 3=WorkspaceFree, 4=Unrestricted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,6 +107,37 @@ pub struct PersistentDatabaseConfig {
     /// inside the DeepX data directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+/// Persistence-friendly multimodal (vision) LLM config.
+///
+/// Separate from the main LLM provider because multimodal models (e.g. MiMo)
+/// may have different endpoints, API keys, and model names than the primary
+/// text-only provider.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersistentMultimodalConfig {
+    /// Whether multimodal image understanding is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Provider type: "mimo", "ollama", "openai_compat", "lmstudio".
+    /// Determines which backend adapter is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_type: Option<String>,
+    /// Provider ID for multimodal (e.g. "mimo"). If None, uses the main provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// API key for multimodal provider. If None, uses the main API key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Base URL for multimodal API. If None, uses provider default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Model name for multimodal (e.g. "mimo-v2.5").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Max output tokens for multimodal requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 // ── Profile / Preferences ──

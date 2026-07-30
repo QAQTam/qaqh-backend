@@ -5,6 +5,7 @@
 use super::ToolManager;
 use super::exec;
 use super::web;
+use super::image_query;
 
 use super::apply_patch;
 use super::file_mutate;
@@ -38,6 +39,9 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
 
     // ── 交互 ──
     ask_user::register(&mut mgr);
+
+    // ── 多模态图像理解 ──
+    image_query::register(&mut mgr);
 
     // ── 进程巡查 ──
     process_inspect::register(&mut mgr);

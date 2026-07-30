@@ -108,9 +108,15 @@ export default function ChatView(props: ChatViewProps) {
     catch (error) { console.error("set_mode error:", error); }
   }
 
-  async function handleSend(text: string, files: string[]) {
-    try { await request("session.send_message", { seed: seed(), text, files }); }
-    catch (error) {
+  async function handleSend(text: string, files: string[], imageBlocks?: Array<{ mimeType: string; data: string }>) {
+    try {
+      await request("session.send_message", {
+        seed: seed(),
+        text,
+        files,
+        images: imageBlocks ?? [],
+      });
+    } catch (error) {
       console.error("send_message error:", error);
       throw error;
     }

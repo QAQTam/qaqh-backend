@@ -1,5 +1,6 @@
 use deepx_types::{
-    ConfigStore, PersistentConfig, PersistentDatabaseConfig, PersistentSubagentConfig,
+    ConfigStore, PersistentConfig, PersistentDatabaseConfig, PersistentMultimodalConfig,
+    PersistentSubagentConfig,
 };
 use std::collections::HashMap; // still used by profiles
 
@@ -74,6 +75,55 @@ impl Default for DatabaseConfig {
         Self {
             enabled: true,
             url: None,
+        }
+    }
+}
+
+/// Multimodal (vision) LLM configuration for image understanding.
+///
+/// Separate from the main LLM provider so users can use a vision-capable
+/// model (e.g. MiMo) for image analysis while keeping their primary text
+/// provider (e.g. DeepSeek) for general conversation and tool use.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MultimodalConfig {
+    /// Whether multimodal image understanding is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Provider type: "mimo", "ollama", "openai_compat", "lmstudio".
+    /// Determines which backend adapter is used.
+    #[serde(default = "default_multimodal_provider_type")]
+    pub provider_type: String,
+    /// Provider ID for multimodal (e.g. "mimo").
+    #[serde(default)]
+    pub provider_id: String,
+    /// API key for multimodal provider. Empty = use main API key.
+    #[serde(default)]
+    pub api_key: String,
+    /// Base URL override for multimodal. Empty = use provider default.
+    #[serde(default)]
+    pub base_url: String,
+    /// Model name for multimodal (e.g. "mimo-v2.5").
+    #[serde(default = "default_multimodal_model")]
+    pub model: String,
+    /// Max output tokens for multimodal requests.
+    #[serde(default = "default_multimodal_max_tokens")]
+    pub max_tokens: u32,
+}
+
+fn default_multimodal_provider_type() -> String { "mimo".into() }
+fn default_multimodal_model() -> String { "mimo-v2.5".into() }
+fn default_multimodal_max_tokens() -> u32 { 4096 }
+
+impl Default for MultimodalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider_type: "mimo".into(),
+            provider_id: "mimo".into(),
+            api_key: String::new(),
+            base_url: String::new(),
+            model: "mimo-v2.5".into(),
+            max_tokens: 4096,
         }
     }
 }
@@ -163,6 +213,8 @@ pub struct Config {
     pub compliance_allowlist: Vec<String>,
     /// Local Turso SQLite database mirror configuration.
     pub database: DatabaseConfig,
+    /// Multimodal (vision) LLM configuration for image understanding.
+    pub multimodal: MultimodalConfig,
     /// RAG 向量引擎配置（embedding / 语义搜索 / 跨会话记忆）
     pub rag: RagConfig,
     /// Agent permission level:
@@ -212,6 +264,7 @@ impl Default for Config {
             compliance_extra_keywords: Vec::new(),
             compliance_allowlist: Vec::new(),
             database: DatabaseConfig::default(),
+            multimodal: MultimodalConfig::default(),
             rag: RagConfig::default(),
             permission_level: 4, // Unrestricted — backward compat
             tokenizer_path: None,
@@ -414,6 +467,31 @@ impl Config {
                 cfg.database.url = db.url.clone();
             }
 
+            // ── Multimodal (vision) ──
+            if let Some(ref mm) = pc.multimodal {
+                if let Some(enabled) = mm.enabled {
+                    cfg.multimodal.enabled = enabled;
+                }
+                if let Some(ref pt) = mm.provider_type {
+                    cfg.multimodal.provider_type = pt.clone();
+                }
+                if let Some(ref pid) = mm.provider_id {
+                    cfg.multimodal.provider_id = pid.clone();
+                }
+                if let Some(ref key) = mm.api_key {
+                    cfg.multimodal.api_key = key.clone();
+                }
+                if let Some(ref url) = mm.base_url {
+                    cfg.multimodal.base_url = url.clone();
+                }
+                if let Some(ref model) = mm.model {
+                    cfg.multimodal.model = model.clone();
+                }
+                if let Some(mt) = mm.max_tokens {
+                    cfg.multimodal.max_tokens = mt;
+                }
+            }
+
             // ── Permission ──
             if let Some(pl) = pc.permission_level {
                 cfg.permission_level = pl;
@@ -529,6 +607,31 @@ impl Config {
             database: Some(PersistentDatabaseConfig {
                 enabled: Some(self.database.enabled),
                 url: self.database.url.clone(),
+            }),
+            multimodal: Some(PersistentMultimodalConfig {
+                enabled: Some(self.multimodal.enabled),
+                provider_type: if self.multimodal.provider_type.is_empty() {
+                    None
+                } else {
+                    Some(self.multimodal.provider_type.clone())
+                },
+                provider_id: if self.multimodal.provider_id.is_empty() {
+                    None
+                } else {
+                    Some(self.multimodal.provider_id.clone())
+                },
+                api_key: if self.multimodal.api_key.is_empty() {
+                    None
+                } else {
+                    Some(self.multimodal.api_key.clone())
+                },
+                base_url: if self.multimodal.base_url.is_empty() {
+                    None
+                } else {
+                    Some(self.multimodal.base_url.clone())
+                },
+                model: Some(self.multimodal.model.clone()),
+                max_tokens: Some(self.multimodal.max_tokens),
             }),
             permission_level: Some(self.permission_level),
             tokenizer_path: self.tokenizer_path.clone(),

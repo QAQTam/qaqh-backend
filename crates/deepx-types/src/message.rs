@@ -36,6 +36,16 @@ pub enum ContentBlock {
         #[serde(default)]
         success: bool,
     },
+    /// An image for multimodal understanding (user messages only).
+    /// `mime_type` is the MIME type (e.g. "image/png", "image/jpeg").
+    /// `data` is the base64-encoded image data (without the `data:...;base64,` prefix).
+    #[serde(rename = "image")]
+    Image {
+        /// MIME type of the image (e.g. "image/png", "image/jpeg").
+        mime_type: String,
+        /// Base64-encoded image data (raw, without the data URI prefix).
+        data: String,
+    },
 }
 
 impl ContentBlock {
@@ -45,6 +55,14 @@ impl ContentBlock {
             text: text.to_string(),
         }
     }
+
+    /// Convenience constructor for an image content block.
+    pub fn image(mime_type: &str, base64_data: &str) -> Self {
+        ContentBlock::Image {
+            mime_type: mime_type.to_string(),
+            data: base64_data.to_string(),
+        }
+    }
 }
 
 // ── Messages ──
@@ -52,7 +70,7 @@ impl ContentBlock {
 /// A conversation message using OpenAI-native content-block format.
 ///
 /// Roles:
-/// - `"user"` — contains `Text` and/or `ToolResult` blocks
+/// - `"user"` — contains `Text`, `Image`, and/or `ToolResult` blocks
 /// - `"assistant"` — contains `Text`, `Reasoning`, and/or `ToolUse` blocks
 /// - `"system"` — system-level context and instructions
 /// - `"tool"` — tool execution results

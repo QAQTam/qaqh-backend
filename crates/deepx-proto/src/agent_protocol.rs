@@ -58,6 +58,16 @@ pub struct TodoActivationItem {
     pub complexity: String,
 }
 
+/// An image attachment in a user message, for multimodal (vision) models.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImageBlock {
+    /// MIME type (e.g. "image/png", "image/jpeg").
+    pub mime_type: String,
+    /// Base64-encoded image data (without the data URI prefix).
+    pub data: String,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // UI → Agent
 // ═══════════════════════════════════════════════════════════════════════════
@@ -69,7 +79,12 @@ pub struct TodoActivationItem {
 pub enum Ui2Agent {
     /// User typed a message. Triggers InputEngine → TurnEngine → gate → tools pipeline.
     #[serde(rename = "user_input")]
-    UserInput { text: String },
+    UserInput {
+        text: String,
+        /// Optional image attachments (mime_type, base64 data).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageBlock>,
+    },
 
     /// Frontend-requested tool execution (e.g. from a UI button or inline action).
     #[serde(rename = "tool_call")]

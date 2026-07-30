@@ -1957,6 +1957,7 @@ name = "deepx-tools"
 version = "1.0.0-beta.4"
 dependencies = [
  "chrono",
+ "deepx-config",
  "deepx-message",
  "deepx-proto",
  "deepx-skills",
@@ -1965,6 +1966,7 @@ dependencies = [
  "git2",
  "hex",
  "html2text",
+ "image",
  "log",
  "regex",
  "serde",
@@ -3918,6 +3920,8 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
  "image-webp",
  "moxcms",
  "num-traits",

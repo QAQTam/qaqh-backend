@@ -15,6 +15,7 @@ pub mod file_query;
 pub mod file_shared;
 pub mod file_state;
 pub mod git;
+pub mod image_query;
 pub mod runtime;
 mod safety;
 pub mod skill;

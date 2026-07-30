@@ -19,6 +19,29 @@ export function openDialog(options: OpenDialogOptions = {}): Promise<string | st
   return desktopBridge().openDialog(options);
 }
 
+export interface ImageFileInfo {
+  mimeType: string;
+  data: string;
+  size: number;
+}
+
+export interface TextFileInfo {
+  content: string;
+  size: number;
+}
+
+export function openImageDialog(): Promise<string | null> {
+  return desktopBridge().openImageDialog();
+}
+
+export function readFileBase64(filePath: string): Promise<ImageFileInfo> {
+  return desktopBridge().readFileBase64(filePath);
+}
+
+export function readTextFile(filePath: string): Promise<TextFileInfo> {
+  return desktopBridge().readTextFile(filePath);
+}
+
 export function confirmDialog(message: string, options?: ConfirmDialogOptions): Promise<boolean> {
   return desktopBridge().confirm(message, options);
 }

@@ -537,6 +537,16 @@ impl MessageStore {
         Effect::None
     }
 
+    /// Add an image block to the last user message (the most recent turn's user message).
+    pub fn push_image_to_last_user(&mut self, mime_type: &str, data: &str) {
+        if let Some(turn) = self.turns.last_mut() {
+            turn.user.content.push(deepx_types::ContentBlock::Image {
+                mime_type: mime_type.to_string(),
+                data: data.to_string(),
+            });
+        }
+    }
+
     pub fn push_assistant(&mut self, msg: Message) -> Effect {
         debug_assert_eq!(
             msg.role, "assistant",
@@ -1287,6 +1297,11 @@ impl MessageStore {
                         }
                         deepx_types::ContentBlock::ToolResult { content, .. } => {
                             tool_results += deepx_types::count_tokens(content) as u64;
+                        }
+                        deepx_types::ContentBlock::Image { .. } => {
+                            // Image token count uses the MiMo formula (roughly ~256-1024 tokens depending on resolution).
+                            // Use a conservative estimate of 512 tokens per image.
+                            chat_text += 512;
                         }
                     }
                 }

@@ -92,7 +92,21 @@ impl DeepxService {
                 let text = pstr(params, "text")?;
                 let files = pstrings(params, "files");
                 let text = with_file_previews(text, &files);
-                self.send_user_input(seed, text)
+                let images: Vec<deepx_proto::ImageBlock> = params
+                    .get("images")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|img| {
+                                Some(deepx_proto::ImageBlock {
+                                    mime_type: img.get("mimeType")?.as_str()?.to_string(),
+                                    data: img.get("data")?.as_str()?.to_string(),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.send_user_input(seed, text, images)
             }
             "session.set_mode" => self.send(
                 seed()?,
@@ -349,7 +363,7 @@ impl DeepxService {
         Ok(Value::Null)
     }
 
-    fn send_user_input(&self, seed: String, text: String) -> Result<Value, String> {
+    fn send_user_input(&self, seed: String, text: String, images: Vec<deepx_proto::ImageBlock>) -> Result<Value, String> {
         let mut registry = self.registry()?;
         // An inactive persisted session has no activity entry yet. Spawn it
         // first so the Starting -> Working reservation below also covers the
@@ -390,7 +404,7 @@ impl DeepxService {
         if let Some((activity, _)) = reservation.as_ref() {
             self.events.publish_activity(activity.clone());
         }
-        if let Err(error) = registry.send(&seed, Ui2Agent::UserInput { text }) {
+        if let Err(error) = registry.send(&seed, Ui2Agent::UserInput { text, images }) {
             if let Some((activity, previous)) = reservation
                 && let Some(rollback) =
                     registry.rollback_input_reservation(&seed, activity.seq, previous)
@@ -516,6 +530,48 @@ impl DeepxService {
         {
             cfg.tokenizer_path = (!path.is_empty()).then(|| path.to_string());
         }
+        // ── Multimodal (vision) config ──
+        if let Some(enabled) =
+            value2(params, "multimodal_enabled", "multimodalEnabled").and_then(Value::as_bool)
+        {
+            cfg.multimodal.enabled = enabled;
+        }
+        update_string(
+            &mut cfg.multimodal.provider_type,
+            params,
+            "multimodal_provider_type",
+            "multimodalProviderType",
+        );
+        update_string(
+            &mut cfg.multimodal.provider_id,
+            params,
+            "multimodal_provider_id",
+            "multimodalProviderId",
+        );
+        update_string(
+            &mut cfg.multimodal.api_key,
+            params,
+            "multimodal_api_key",
+            "multimodalApiKey",
+        );
+        update_string(
+            &mut cfg.multimodal.base_url,
+            params,
+            "multimodal_base_url",
+            "multimodalBaseUrl",
+        );
+        update_string(
+            &mut cfg.multimodal.model,
+            params,
+            "multimodal_model",
+            "multimodalModel",
+        );
+        update_u32(
+            &mut cfg.multimodal.max_tokens,
+            params,
+            "multimodal_max_tokens",
+            "multimodalMaxTokens",
+        );
         if let Some(threshold) =
             value2(params, "auto_compact_threshold", "autoCompactThreshold").and_then(Value::as_f64)
         {
@@ -761,7 +817,7 @@ fn load_config() -> Result<Value, String> {
     let cfg = deepx_config::Config::load().map_err(err)?;
     let providers = deepx_config::registry::all_providers().into_iter().map(|provider| json!({"id":provider.id,"display":provider.display,"endpoints":provider.endpoints.into_iter().map(|endpoint|json!({"id":endpoint.id,"display":endpoint.display,"base_url":endpoint.base_url,"default_model":endpoint.default_model,"models":endpoint.models,"stateful":endpoint.stateful})).collect::<Vec<_>>() })).collect::<Vec<_>>();
     Ok(
-        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"active_profile":cfg.active_profile,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"database":{"enabled":cfg.database.enabled},"tokenizer_path":cfg.tokenizer_path}),
+        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"active_profile":cfg.active_profile,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"database":{"enabled":cfg.database.enabled},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"tokenizer_path":cfg.tokenizer_path}),
     )
 }
 

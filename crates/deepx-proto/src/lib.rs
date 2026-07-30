@@ -28,10 +28,10 @@ mod control;
 
 pub use agent_protocol::{
     Agent2Ui, AskAnswer, AskMode, AskQuestion, AskResolution, CodeDaily, CodeDeltaRecord,
-    DaemonToFrontend, DocInfo, EventLane, FileSnapshotInfo, FrontendToDaemon, PermissionRisk,
-    RoundBlock, RoundData, RoundDeltaKind, SessionActivity, SessionActivityState, SkillInfo,
-    SkillRuntimeInfo, SkillsStatus, TaskInfo, TodoActivationItem, ToolCallDef, ToolResultDef,
-    TurnData, Ui2Agent,
+    DaemonToFrontend, DocInfo, EventLane, FileSnapshotInfo, FrontendToDaemon, ImageBlock,
+    PermissionRisk, RoundBlock, RoundData, RoundDeltaKind, SessionActivity, SessionActivityState,
+    SkillInfo, SkillRuntimeInfo, SkillsStatus, TaskInfo, TodoActivationItem, ToolCallDef,
+    ToolResultDef, TurnData, Ui2Agent,
 };
 pub use companion::{
     COMPANION_PROTOCOL_VERSION, CompanionClientMessage, CompanionCommandStatus, CompanionEvent,
