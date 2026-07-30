@@ -1,12 +1,7 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
+import type { TaskInfo } from "../lib/types";
 
 export type TodoItemStatus = "pending" | "in_progress" | "completed" | "cancelled";
-export type TodoTask = {
-  id: string;
-  subject: string;
-  description: string;
-  status: TodoItemStatus;
-};
 
 /** Truncate to ~15 CJK or ~25 ASCII visual width. */
 function truncTitle(t: string): string {
@@ -22,18 +17,16 @@ function truncTitle(t: string): string {
 
 /** Pure display: receives tasks directly from WebSocket Dashboard events. */
 export default function TodoStatusStrip(props: {
-  tasks: TodoTask[];
+  tasks: TaskInfo[];
   currentTodoId?: string | null;
 }) {
   const [expanded, setExpanded] = createSignal(false);
 
-  const statusLabel = (status: TodoItemStatus) => ({
-    pending: "待处理", in_progress: "进行中", completed: "已完成", cancelled: "已取消",
-  })[status];
-  const statusIcon = (status: TodoItemStatus) => ({
-    pending: "○", in_progress: "◌", completed: "✓", cancelled: "—",
-  })[status];
-  const count = (status: TodoItemStatus) =>
+  const statusLabel = (status: string) =>
+    ({ pending: "待处理", in_progress: "进行中", completed: "已完成", cancelled: "已取消" } as Record<string, string>)[status] ?? status;
+  const statusIcon = (status: string) =>
+    ({ pending: "○", in_progress: "◌", completed: "✓", cancelled: "—" } as Record<string, string>)[status] ?? "○";
+  const count = (status: string) =>
     props.tasks.filter(t => t.status === status).length;
 
   const activeItem = createMemo(() =>
@@ -44,7 +37,7 @@ export default function TodoStatusStrip(props: {
 
   const carousel = createMemo(() => {
     const active = activeItem();
-    if (!active) return { prev: null as TodoTask | null, current: null as TodoTask | null, next: null as TodoTask | null };
+    if (!active) return { prev: null as TaskInfo | null, current: null as TaskInfo | null, next: null as TaskInfo | null };
     const idx = props.tasks.findIndex(t => t.id === active.id);
     return {
       prev: idx > 0 ? props.tasks[idx - 1] : null,

@@ -2,7 +2,8 @@
 
 import { render } from "@solidjs/web";
 import { afterEach, describe, expect, it } from "vitest";
-import TodoStatusStrip, { type TodoTask } from "./TodoStatusStrip";
+import TodoStatusStrip from "./TodoStatusStrip";
+import type { TaskInfo } from "../lib/types";
 
 const cleanups: Array<() => void> = [];
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -12,7 +13,7 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-function mount(tasks: TodoTask[], currentTodoId?: string | null) {
+function mount(tasks: TaskInfo[], currentTodoId?: string | null) {
   const host = document.createElement("div");
   document.body.append(host);
   cleanups.push(render(() =>

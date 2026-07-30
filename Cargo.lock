@@ -1751,7 +1751,7 @@ checksum = "c286de4e81ea2590afc24d754e0f83810c566f50a1388fa75ebd57928c0d9745"
 
 [[package]]
 name = "deepx-client"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-proto",
  "deepx-types",
@@ -1764,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-companion"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-proto",
  "futures-util",
@@ -1776,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-config"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-types",
  "log",
@@ -1789,7 +1789,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-daemon"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-proto",
  "deepx-runtime",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-gate"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "anyhow",
  "deepx-config",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-gate-testui"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-gate",
  "deepx-types",
@@ -1832,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-installer"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-types",
  "deepx-update",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-message"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-proto",
  "deepx-session",
@@ -1864,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-msglp"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-config",
  "deepx-gate",
@@ -1885,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-proto"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-types",
  "serde",
@@ -1895,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-runtime"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "chrono",
  "deepx-config",
@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-session"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-types",
  "deepx-vector",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-skills"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-vector",
  "serde",
@@ -1942,7 +1942,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-subagent"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-session",
  "deepx-tools",
@@ -1954,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-tools"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "chrono",
  "deepx-message",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-tui"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-types"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2008,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-update"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "hex",
  "serde",
@@ -2019,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-updater"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deepx-types",
  "deepx-update",
@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-vector"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "candle-core",
  "candle-nn",
