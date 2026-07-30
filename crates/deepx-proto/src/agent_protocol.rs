@@ -605,6 +605,9 @@ pub enum Agent2Ui {
         tasks: Vec<TaskInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        current_todo_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         session_title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]

@@ -10,14 +10,13 @@ use deepx_types::{Message, ToolDef};
 /// - Truncation markers tell the model how to retrieve the omitted portion.
 /// - Line-oriented tools snap to a preceding newline; others cut at a UTF-8 boundary.
 fn is_line_oriented_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "read" | "search" | "list" | "diff") || tool_name.starts_with("file")
+    matches!(tool_name, "read" | "search" | "diff") || tool_name.starts_with("file")
 }
 
 fn truncation_hint(tool_name: &str) -> &'static str {
     match tool_name {
         "read" => "Call read again with the same path and a later start_line/end_line range.",
         "search" => "Call search again with a narrower pattern, glob, or path.",
-        "list" => "Call list again on a narrower directory.",
         "exec" => "Call exec again with narrower argv or a filtering command.",
         "web" => "Call web again with a narrower URL or query.",
         _ => "Call this tool again with narrower arguments to retrieve the omitted portion.",
@@ -113,7 +112,7 @@ fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
         return result.to_string();
     }
 
-    if matches!(tool_name, "read" | "search") {
+    if matches!(tool_name, "read" | "search" | "diff") {
         return fold_retrieval_result(tool_name, result);
     }
 
@@ -183,6 +182,8 @@ fn fold_retrieval_result(tool_name: &str, result: &str) -> String {
         }
         let hint = if tool_name == "read" {
             "[read content folded; call read with path and start_line/end_line to retrieve code]"
+        } else if tool_name == "diff" {
+            "[diff folded; call diff with the same paths to retrieve changes]"
         } else {
             "[search matches folded; call search with the same or narrower query to retrieve matches]"
         };
@@ -194,6 +195,8 @@ fn fold_retrieval_result(tool_name: &str, result: &str) -> String {
     let cap = first.floor_char_boundary(first.len().min(400));
     let hint = if tool_name == "read" {
         " [read content folded; call read again with a path and range]"
+    } else if tool_name == "diff" {
+        " [diff folded; call diff again with the same paths]"
     } else {
         " [search matches folded; call search again with a narrower query]"
     };

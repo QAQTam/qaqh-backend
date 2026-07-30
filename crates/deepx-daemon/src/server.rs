@@ -323,7 +323,19 @@ async fn handle_connection(
             incoming=source.next()=>{
                 let Some(Ok(frame))=incoming else{break}; let Ok(text)=frame.to_text() else{continue};
                 let Ok(message)=serde_json::from_str::<ControlClientMessage>(text) else{continue};
-                if command_window.elapsed()>=Duration::from_secs(1){command_window=Instant::now();command_count=0;} command_count=command_count.saturating_add(1); if command_count>100{break;}
+                // Heartbeat and SessionAttach are essential liveness / reconnection
+                // signals and must not be counted toward the per-second rate limit.
+                let counted = !matches!(message,
+                    ControlClientMessage::Heartbeat{..} | ControlClientMessage::SessionAttach{..}
+                );
+                if counted {
+                    if command_window.elapsed()>=Duration::from_secs(1){command_window=Instant::now();command_count=0;}
+                    command_count=command_count.saturating_add(1);
+                    if command_count>100{
+                        log::warn!("control connection: rate limit exceeded ({command_count} commands/s), closing connection");
+                        break;
+                    }
+                }
                 match message {
                     ControlClientMessage::Heartbeat{nonce}=>{
                         leases.lock().unwrap_or_else(|e|e.into_inner()).renew_connection(&connection_id,Instant::now());
@@ -488,7 +500,10 @@ where
 /// send messages" regression introduced by d2f66da (which replaced the
 /// previous `try_send().map_err()?` with unbounded `send().await`).
 async fn send_or_drop<T>(tx: &mpsc::Sender<T>, msg: T) {
-    let _ = tokio::time::timeout(Duration::from_millis(SEND_TIMEOUT_MS), tx.send(msg)).await;
+    match tokio::time::timeout(Duration::from_millis(SEND_TIMEOUT_MS), tx.send(msg)).await {
+        Ok(Ok(())) | Ok(Err(_)) => {}
+        Err(_) => log::warn!("control outbound: writer stalled >{SEND_TIMEOUT_MS}ms, dropping message"),
+    }
 }
 fn error_response(status: StatusCode, text: &str) -> ErrorResponse {
     let mut response = ErrorResponse::new(Some(text.into()));

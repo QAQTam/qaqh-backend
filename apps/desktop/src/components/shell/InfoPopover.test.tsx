@@ -90,33 +90,6 @@ describe("InfoPopover", () => {
     expect(host.querySelector(".info-cache")).toBeNull();
   });
 
-  it("expands task details and only asks when the question control is clicked", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const onTaskAction = vi.fn();
-    const task = { id: "T1", subject: "实现审批", description: "接通计划审核", status: "in_progress" };
-    dispose = render(() => (
-      <I18nCtx value={createI18n("zh")}><InfoPopover
-          session={createRawSessionState("seed-1")}
-          workspace="F:/repo"
-          tasks={[task]}
-          onTaskAction={onTaskAction}
-        /></I18nCtx>
-    ), host);
-
-    expect(host.textContent).toContain("T1");
-    expect(host.textContent).toContain("实现审批");
-    expect(host.textContent).toContain("进行中");
-    host.querySelector<HTMLButtonElement>(".environment-task-main")!.click();
-    await Promise.resolve();
-    expect(host.textContent).toContain("接通计划审核");
-    expect(onTaskAction).not.toHaveBeenCalled();
-    host.querySelector<HTMLButtonElement>(".environment-task-question")!.click();
-    expect(onTaskAction).toHaveBeenCalledWith("ask", task);
-    host.querySelector<HTMLButtonElement>(".environment-task-action")!.click();
-    expect(onTaskAction).toHaveBeenCalledWith("cancel", task);
-  });
-
   it("normalizes changed files and opens their Git diff", () => {
     const host = document.createElement("div");
     document.body.append(host);

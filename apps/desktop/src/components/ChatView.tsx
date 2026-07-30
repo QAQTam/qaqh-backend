@@ -2,7 +2,7 @@ import { createEffect, createMemo, createSignal, Match, onCleanup, Show, Switch,
 import { request } from "../runtime/backendClient";
 import { openDevTools, openPath } from "../runtime/desktopApi";
 import { togglePet } from "../runtime/desktopApi";
-import type { AskAnswer, TaskInfo } from "../lib/types";
+import type { AskAnswer } from "../lib/types";
 import { createSessionProjector } from "../presentation/useConversationView";
 import type { PendingInteraction, RawSessionState } from "../store/rawSession";
 import { createFollowUpQueue } from "../store/followUpQueue";
@@ -49,7 +49,6 @@ interface ChatViewProps {
     message?: string,
     autonomous?: boolean,
   ) => void | Promise<void>;
-  onTaskAction: (action: "cancel" | "delete" | "ask", task: TaskInfo) => void | Promise<void>;
   onUndo: () => void | Promise<void>;
   permissionLevel: number;
   onPermissionLevelChange: (level: number) => void | Promise<void>;
@@ -75,10 +74,6 @@ export default function ChatView(props: ChatViewProps) {
     return item?.kind === "plan" ? item : null;
   };
   const streaming = () => isSessionStreaming(session());
-  const goalRefreshKey = () => {
-    const last = session().turns.at(-1);
-    return `${session().turns.length}:${last?.turnId ?? ""}:${last?.status ?? ""}`;
-  };
   const usage = () => sessionUsage(session());
   const [mode, setMode] = createSignal("plan");
   const [infoOpen, setInfoOpen] = createSignal(false);
@@ -187,12 +182,10 @@ export default function ChatView(props: ChatViewProps) {
           session={session()}
           workspace={props.ui.workspace()}
           branch={branch()}
-          tasks={session().dashboard.tasks}
           onOpenDiff={(file) => {
             setSelectedGitFile(file);
             setShowGitWorkspace(true);
           }}
-          onTaskAction={(action, task) => void props.onTaskAction(action, task)}
         />
       </Show>
       <Show when={statsOpen()}>
@@ -267,7 +260,7 @@ export default function ChatView(props: ChatViewProps) {
         </Match>
       </Switch>
       <ComposerDock
-        goalBar={<TodoStatusStrip seed={seed()} refreshKey={goalRefreshKey()} />}
+        goalBar={<TodoStatusStrip tasks={session().dashboard.tasks} currentTodoId={session().dashboard.currentTodoId} />}
         onSend={handleSend}
         onStop={handleStop}
         isStreaming={streaming}

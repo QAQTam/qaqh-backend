@@ -77,7 +77,7 @@ pub fn classify_risk(
 pub fn categorize_tool(name: &str) -> ToolCategory {
     match name {
         // ── Read ──
-        "read" | "list" | "search" | "diff" | "skills" | "ask_user" | "git_diff" | "git_log"
+        "read" | "search" | "diff" | "skills" | "ask_user" | "git_diff" | "git_log"
         | "git_show" | "git_status" | "plan_list" | "plan_submit" | "process_check"
         | "process_wait" | "todo_list" => ToolCategory::Read,
 

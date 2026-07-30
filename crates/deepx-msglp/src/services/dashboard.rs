@@ -29,5 +29,11 @@ pub fn build_recent_edits() -> Vec<String> {
 }
 
 pub fn build_tasks() -> Vec<TaskInfo> {
-    deepx_tools::runtime::all_tasks()
+    deepx_tools::todo::get_todo_infos()
+}
+
+pub fn build_current_todo_id() -> Option<String> {
+    deepx_tools::todo::load_todo()
+        .ok()
+        .and_then(|store| store.current_id)
 }

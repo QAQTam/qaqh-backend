@@ -2,19 +2,13 @@
 //!
 //! Persisted to `sessions/{seed}/todo.json` (session-scoped).
 //! The public model contract supports create, status update, cancel, and list.
-//! Legacy Goal fields remain readable while Goal automation is frozen.
 //!
 //! Data model:
 //! ```json
 //! {
 //!   "items": [
-//!     {"id":"T1","title":"...","description":"...","status":"pending",
-//!      "complexity":"small","deps":[],"effort_min":30,"evidence":null}
-//!   ],
-//!   "mode": "manual",
-//!   "current_id": null,
-//!   "auto_turns": 0,
-//!   "max_auto_turns": 24
+//!     {"id":"T1","title":"...","description":"...","status":"pending","evidence":null}
+//!   ]
 //! }
 //! ```
 
@@ -25,11 +19,6 @@ use std::sync::Mutex;
 use crate::{ToolCallCtx, ToolResult, json_err, json_ok};
 
 static TODO_LOCK: Mutex<()> = Mutex::new(());
-
-/// Goal automation is intentionally frozen while the manual todo workflow is
-/// the supported contract. Keep the persisted variants readable so existing
-/// sessions can be opened without a migration.
-pub const GOAL_MODE_ENABLED: bool = false;
 
 // ═══════════════════════════════════════════════════════
 // Data model
@@ -42,12 +31,6 @@ pub struct TodoItem {
     pub description: String,
     #[serde(default = "default_status")]
     pub status: TodoStatus,
-    #[serde(default)]
-    pub complexity: Option<TodoComplexity>,
-    #[serde(default)]
-    pub deps: Vec<String>,
-    #[serde(default)]
-    pub effort_min: Option<u32>,
     /// Completion evidence (filled when status=completed).
     #[serde(default)]
     pub evidence: Option<String>,
@@ -65,14 +48,6 @@ pub enum TodoStatus {
     InProgress,
     Completed,
     Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum TodoComplexity {
-    Small,
-    Medium,
-    Large,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -126,9 +101,7 @@ pub fn load_todo() -> Result<TodoStore, String> {
 
 /// Public API: save the TodoStore to disk atomically (used by GoalEngine).
 pub fn save_todo(store: &TodoStore) -> Result<(), String> {
-    let mut store = store.clone();
-    normalize_frozen_goal(&mut store);
-    write_store(&store)
+    write_store(store)
 }
 
 /// Get todo items as Dashboard-compatible info structs.
@@ -164,9 +137,8 @@ pub fn todo_status_json(seed: &str) -> Result<String, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("null".into()),
         Err(e) => return Err(format!("read todo.json: {e}")),
     };
-    let mut store: TodoStore =
+    let store: TodoStore =
         serde_json::from_str(&content).map_err(|e| format!("parse todo.json: {e}"))?;
-    normalize_frozen_goal(&mut store);
     let current = store
         .current_id
         .as_ref()
@@ -197,9 +169,60 @@ pub fn todo_status_json(seed: &str) -> Result<String, String> {
         "cancelled": cancelled,
         "total": store.items.len(),
         "items": items_summary,
-        "goal_enabled": GOAL_MODE_ENABLED,
     }))
     .map_err(|e| format!("todo: {e}"))
+}
+
+/// Direct cancel by session seed — no runtime context needed.
+pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
+    if seed.is_empty() {
+        return Err(json_err("INVALID_INPUT", "no active session", ""));
+    }
+    let _guard = TODO_LOCK
+        .lock()
+        .map_err(|_| "todo lock poisoned".to_string())?;
+    let path = deepx_types::platform::sessions_dir()
+        .join(seed)
+        .join("todo.json");
+    if !path.exists() {
+        return Err(json_err(
+            "NOT_FOUND",
+            "no todo list for this session",
+            "",
+        ));
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read todo.json: {e}"))?;
+    let mut store: TodoStore =
+        serde_json::from_str(&content).map_err(|e| format!("parse todo.json: {e}"))?;
+    let idx = store
+        .items
+        .iter()
+        .position(|item| item.id == id)
+        .ok_or_else(|| {
+            json_err(
+                "NOT_FOUND",
+                &format!("todo {id} not found"),
+                "Use todo_list to see all IDs.",
+            )
+        })?;
+
+    store.items[idx].status = TodoStatus::Cancelled;
+    if store.current_id.as_deref() == Some(id) {
+        store.current_id = None;
+    }
+
+    let item_json = todo_item_json(&store.items[idx]);
+    let tmp = path.with_extension("json.tmp");
+    let data =
+        serde_json::to_vec_pretty(&store).map_err(|e| format!("serialize todo: {e}"))?;
+    std::fs::write(&tmp, data).map_err(|e| format!("write todo.tmp: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename todo: {e}"))?;
+
+    Ok(json_ok(serde_json::json!({
+        "item": item_json,
+        "message": format!("Todo {id} cancelled.")
+    })))
 }
 
 fn read_store() -> Result<TodoStore, String> {
@@ -214,23 +237,9 @@ fn read_store() -> Result<TodoStore, String> {
         });
     }
     let content = std::fs::read_to_string(&path).map_err(|e| format!("read todo.json: {e}"))?;
-    let mut store: TodoStore =
+    let store: TodoStore =
         serde_json::from_str(&content).map_err(|e| format!("parse todo.json: {e}"))?;
-    normalize_frozen_goal(&mut store);
     Ok(store)
-}
-
-fn normalize_frozen_goal(store: &mut TodoStore) {
-    if !GOAL_MODE_ENABLED {
-        store.mode = TodoMode::Manual;
-        store.current_id = store.current_id.take().filter(|id| {
-            store
-                .items
-                .iter()
-                .any(|item| &item.id == id && item.status == TodoStatus::InProgress)
-        });
-        store.auto_turns = 0;
-    }
 }
 
 fn status_name(status: &TodoStatus) -> &'static str {
@@ -256,8 +265,6 @@ fn todo_item_json(item: &TodoItem) -> serde_json::Value {
         "title": item.title,
         "description": item.description,
         "status": status_name(&item.status),
-        "complexity": item.complexity.as_ref().map(|c| format!("{c:?}").to_lowercase()),
-        "effort_min": item.effort_min,
         "evidence": item.evidence,
     })
 }
@@ -336,40 +343,12 @@ fn exec_todo_create(args: &Value) -> Result<String, String> {
         return Err(json_err("INVALID_INPUT", "description max 200 chars", ""));
     }
 
-    let complexity = args
-        .get("complexity")
-        .and_then(|v| v.as_str())
-        .and_then(|s| match s {
-            "small" => Some(TodoComplexity::Small),
-            "medium" => Some(TodoComplexity::Medium),
-            "large" => Some(TodoComplexity::Large),
-            _ => None,
-        });
-
-    let deps: Vec<String> = args
-        .get("deps")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let effort_min = args
-        .get("effort_min")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
-
     let id = format!("T{}", next_id(&store.items));
     let item = TodoItem {
         id: id.clone(),
         title,
         description,
         status: TodoStatus::Pending,
-        complexity,
-        deps,
-        effort_min,
         evidence: None,
     };
     store.items.push(item.clone());
@@ -436,23 +415,6 @@ fn exec_todo_update(args: &Value) -> Result<String, String> {
             return Err(json_err("INVALID_INPUT", "description max 200 chars", ""));
         }
         item.description = d;
-    }
-    if let Some(c) = args.get("complexity").and_then(|v| v.as_str()) {
-        item.complexity = match c {
-            "small" => Some(TodoComplexity::Small),
-            "medium" => Some(TodoComplexity::Medium),
-            "large" => Some(TodoComplexity::Large),
-            _ => None,
-        };
-    }
-    if let Some(deps) = args.get("deps").and_then(|v| v.as_array()) {
-        item.deps = deps
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-    }
-    if let Some(e) = args.get("effort_min").and_then(|v| v.as_u64()) {
-        item.effort_min = Some(e as u32);
     }
     if let Some(ev) = args.get("evidence").and_then(|v| v.as_str()) {
         item.evidence = Some(ev.trim().to_string());
@@ -554,95 +516,6 @@ fn handle_todo_list(ctx: ToolCallCtx) -> ToolResult {
 }
 
 // ═══════════════════════════════════════════════════════
-// Goal-mode tool handlers
-// ═══════════════════════════════════════════════════════
-
-pub fn exec_todo_activate(args: &Value) -> Result<String, String> {
-    if !GOAL_MODE_ENABLED {
-        return Err(json_err(
-            "GOAL_FEATURE_FROZEN",
-            "Goal automation is temporarily unavailable",
-            "Use the manual todo tools instead.",
-        ));
-    }
-    let _guard = TODO_LOCK
-        .lock()
-        .map_err(|_| "todo lock poisoned".to_string())?;
-    let mut store = read_store()?;
-
-    if store.mode == TodoMode::Goal {
-        return Err(json_err(
-            "GOAL_ALREADY_ACTIVE",
-            "a goal is already active",
-            "Stop it first with todo_stop.",
-        ));
-    }
-
-    let ids: Option<Vec<String>> = args.get("ids").and_then(|v| v.as_array()).map(|arr| {
-        arr.iter()
-            .filter_map(|v| v.as_str())
-            .map(|s| {
-                if s.starts_with('T') {
-                    s.to_string()
-                } else {
-                    format!("T{s}")
-                }
-            })
-            .collect()
-    });
-
-    let active_items: Vec<TodoItem> = if let Some(ref ids) = ids {
-        ids.iter()
-            .filter_map(|id| store.items.iter().find(|item| &item.id == id).cloned())
-            .collect()
-    } else {
-        store
-            .items
-            .iter()
-            .filter(|item| matches!(item.status, TodoStatus::Pending | TodoStatus::InProgress))
-            .cloned()
-            .collect()
-    };
-
-    if active_items.is_empty() {
-        return Err(json_err(
-            "EMPTY_TODO",
-            "no items to activate",
-            if ids.is_some() {
-                "Check the IDs — none matched items in the todo list."
-            } else {
-                "Use todo_create first, or specify ids."
-            },
-        ));
-    }
-
-    let total = active_items.len();
-    let mut sorted = active_items;
-    sorted.sort_by_key(|item| match item.complexity {
-        Some(TodoComplexity::Small) => 0,
-        Some(TodoComplexity::Medium) => 1,
-        Some(TodoComplexity::Large) => 2,
-        None => 3,
-    });
-    for item in &mut sorted {
-        item.status = TodoStatus::Pending;
-    }
-    sorted[0].status = TodoStatus::InProgress;
-    let first_id = sorted[0].id.clone();
-    let first_title = sorted[0].title.clone();
-
-    store.items = sorted;
-    store.mode = TodoMode::Goal;
-    store.current_id = Some(first_id.clone());
-    store.auto_turns = 0;
-    write_store(&store)?;
-
-    Ok(json_ok(Value::String(format!(
-        "Goal activated with {total} items. Starting: {first_id} {first_title} — complete this step then call todo_step_complete(id=\"{first_id}\", summary=\"...\")."
-    ))))
-}
-
-// ═══════════════════════════════════════════════════════
 // Registration
 // ═══════════════════════════════════════════════════════
 
@@ -650,19 +523,24 @@ use crate::{ToolHandler, ToolRisk};
 use std::time::Duration;
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    // Compatibility decision: tool definitions are regenerated for every
-    // model session, so there is no persisted caller that needs the old
-    // multiplexed `todo(action=...)` schema. The TodoStore format remains
-    // dual-readable, and the runtime keeps its old todo.action endpoint as an
-    // explicit frozen response for mixed desktop/daemon versions.
     mgr.register(ToolHandler {
         key: "todo_create".to_string(),
-        description: "Create one todo. The new todo starts in pending status.",
+        description: "Create one todo. The new todo starts in pending status. \
+            Todo IDs are auto-assigned (T1, T2, T3…). \
+            Batch-create multiple todos when you've planned the full task breakdown upfront. \
+            The user sees todos in a live progress strip above the input — \
+            create them early so progress is visible throughout the session.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "Short imperative title, 1-100 characters"},
-                "description": {"type": "string", "description": "Optional context, at most 200 characters"}
+                "title": {
+                    "type": "string",
+                    "description": "Short imperative title, 1-100 characters. Format: '[动作] [对象]'. Examples: '实现 JWT 刷新', '修复搜索框卡顿', '编写 API 文档'."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional context or acceptance criteria, at most 200 characters."
+                }
             },
             "required": ["title"],
             "additionalProperties": false
@@ -673,13 +551,37 @@ pub fn register(mgr: &mut crate::ToolManager) {
     });
     mgr.register(ToolHandler {
         key: "todo_update".to_string(),
-        description: "Set a todo status to pending, in_progress, completed, or cancelled.",
+        description: "Transition a todo's status. \
+            Only ONE todo should be in_progress at a time — \
+            complete or pause the current one before starting another. \
+            When set to in_progress, it becomes the 'current' task shown in the user's progress strip. \
+            When set to completed, include an 'evidence' string describing what was done \
+            (e.g. '新增 POST /auth/refresh, 测试 3/3 通过'). \
+            When set to cancelled, the task is removed from the active workflow.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "id": {"type": ["string", "integer"], "description": "Todo ID, for example T1 or 1"},
-                "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]},
-                "evidence": {"type": "string", "description": "Optional concise completion evidence"}
+                "id": {
+                    "type": ["string", "integer"],
+                    "description": "Todo ID (e.g. 'T1' or 1)."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed", "cancelled"],
+                    "description": "Target status. 'completed' requires evidence. Only 1 todo should be 'in_progress' simultaneously."
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "Required for 'completed' status. Concise summary of what was accomplished: files changed, tests passed, root cause fixed, etc."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional updated title (max 100 chars)."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional updated description (max 200 chars)."
+                }
             },
             "required": ["id", "status"],
             "additionalProperties": false
@@ -690,11 +592,14 @@ pub fn register(mgr: &mut crate::ToolManager) {
     });
     mgr.register(ToolHandler {
         key: "todo_cancel".to_string(),
-        description: "Cancel one todo. This is the simplest way to set its status to cancelled.",
+        description: "Cancel one todo (shortcut for todo_update with status=cancelled). \
+            Use this when a task becomes irrelevant — e.g. requirements changed, \
+            approach was wrong, or the task is blocked externally. \
+            Cancelled tasks are dimmed and struck-through in the UI.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "id": {"type": ["string", "integer"], "description": "Todo ID, for example T1 or 1"}
+                "id": {"type": ["string", "integer"], "description": "Todo ID to cancel (e.g. 'T1' or 1)."}
             },
             "required": ["id"],
             "additionalProperties": false
@@ -705,11 +610,18 @@ pub fn register(mgr: &mut crate::ToolManager) {
     });
     mgr.register(ToolHandler {
         key: "todo_list".to_string(),
-        description: "List todos and exact status counts. Optionally filter by one status.",
+        description: "List all todos with exact status counts. \
+            Call this to verify progress before reporting to the user, \
+            or to check which tasks remain after a complex edit session. \
+            Optionally filter by a single status to see only pending/in_progress/completed/cancelled items.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]}
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed", "cancelled"],
+                    "description": "Optional filter. Omit to see all todos with per-status counts."
+                }
             },
             "additionalProperties": false
         }),

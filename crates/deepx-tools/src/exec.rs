@@ -34,6 +34,8 @@ enum Shell {
 }
 
 static DETECTED_SHELL: OnceLock<Shell> = OnceLock::new();
+/// Full path to bash on Windows — avoids the WSL wrapper at System32\\bash.exe.
+static DETECTED_BASH_PATH: OnceLock<String> = OnceLock::new();
 
 impl Shell {
     /// Auto-detect the best available shell on this platform.
@@ -44,9 +46,24 @@ impl Shell {
     fn detect_uncached() -> Self {
         #[cfg(windows)]
         {
-            // Prefer bash (Git for Windows / MSYS2 / WSL interop),
-            // then pwsh, falling back to cmd.
-            if executable_on_path("bash") {
+            // Windows: `bash` on PATH often resolves to WSL's wrapper at
+            // C:\\Windows\\System32\\bash.exe.  Prefer Git for Windows / MSYS2
+            // at their standard install locations so commands run natively.
+            const WIN_BASH_CANDIDATES: &[&str] = &[
+                "C:\\Program Files\\Git\\bin\\bash.exe",
+                "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+                "C:\\msys64\\usr\\bin\\bash.exe",
+            ];
+            for p in WIN_BASH_CANDIDATES {
+                if std::path::Path::new(p).is_file() {
+                    DETECTED_BASH_PATH.get_or_init(|| p.to_string());
+                    return Shell::Bash;
+                }
+            }
+            // Fall back to PATH-based search (skip WSL wrappers in System32 /
+            // WindowsApps by checking known-bad prefixes).
+            if let Some(found) = find_bash_on_path() {
+                DETECTED_BASH_PATH.get_or_init(|| found);
                 return Shell::Bash;
             }
             if executable_on_path("pwsh") {
@@ -64,9 +81,14 @@ impl Shell {
     }
 
     /// Path to the shell executable.
-    fn path(&self) -> &'static str {
+    fn path(&self) -> &str {
         match self {
-            Shell::Bash => "bash",
+            Shell::Bash => {
+                DETECTED_BASH_PATH
+                    .get()
+                    .map(String::as_str)
+                    .unwrap_or("bash")
+            }
             Shell::Zsh => "zsh",
             Shell::Sh => "sh",
             Shell::PowerShell => "pwsh",
@@ -124,6 +146,25 @@ fn executable_in_dirs(name: &str, dirs: impl IntoIterator<Item = std::path::Path
             .iter()
             .any(|candidate| is_executable_file(&dir.join(candidate)))
     })
+}
+
+/// Find `bash` on Windows PATH, skipping known WSL wrapper locations
+/// (System32, WindowsApps). Returns the full path on success.
+#[cfg(windows)]
+fn find_bash_on_path() -> Option<String> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let dir_s = dir.to_string_lossy().to_lowercase();
+        // Windows System32 contains WSL's bash.exe launcher — skip it.
+        if dir_s.contains("\\system32") || dir_s.contains("\\windowsapps") {
+            continue;
+        }
+        let candidate = dir.join("bash.exe");
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 fn is_executable_file(path: &std::path::Path) -> bool {

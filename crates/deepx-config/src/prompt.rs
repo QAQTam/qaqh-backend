@@ -152,6 +152,15 @@ mod tests {
     }
 
     #[test]
+    fn prompt_contains_task_management_section() {
+        let prompt = full_system_prompt();
+        assert!(prompt.contains("[TASK MANAGEMENT]"));
+        assert!(prompt.contains("todo_create"));
+        assert!(prompt.contains("todo_update"));
+        assert!(prompt.contains("一次一个 in_progress"));
+    }
+
+    #[test]
     fn executable_discovery_reads_directories_without_starting_the_candidate() {
         let root = std::env::temp_dir().join(format!("deepx-shell-probe-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();

@@ -1,4 +1,4 @@
-//! Query tools: file read, list_dir, search, diff.
+//! Query tools: file read, search, diff.
 
 use std::process::Command;
 
@@ -164,64 +164,7 @@ pub(super) fn exec_read_file(args: &serde_json::Value) -> ToolResult {
 
 handler!(handle_read_file, exec_read_file);
 
-// ------ exec_list_dir (from file_list_dir.rs) ------
-
-pub(super) fn exec_list_dir(args: &serde_json::Value) -> ToolResult {
-    let path = crate::resolve_workspace_path(&args.s_or("path", "."));
-    match std::fs::read_dir(&path) {
-        Ok(entries) => {
-            const MAX_LIST_DIR_ENTRIES: usize = 200;
-            let mut content = String::from("Directory listing: ");
-            content.push_str(&path);
-            content.push('\n');
-            let mut count = 0usize;
-            let all: Vec<_> = entries.flatten().collect();
-            let total = all.len();
-            for entry in &all {
-                if count >= MAX_LIST_DIR_ENTRIES {
-                    break;
-                }
-                count += 1;
-                let ft = entry
-                    .file_type()
-                    .map(|t| if t.is_dir() { "/" } else { "" })
-                    .unwrap_or("?");
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                let name = entry.file_name();
-                let name_s = name.to_string_lossy();
-                let hidden = name_s.starts_with('.');
-                if ft == "/" {
-                    let tag = if hidden { " <DIR> (hidden)" } else { " <DIR>" };
-                    content.push_str(&format!("  {:<40}{}\n", name_s + "/", tag));
-                } else {
-                    let sz = if size > 1024 * 1024 {
-                        format!("{:.1}M", size as f64 / 1_048_576.0)
-                    } else if size > 1024 {
-                        format!("{}K", size / 1024)
-                    } else {
-                        format!("{}B", size)
-                    };
-                    let tag = if hidden { " (hidden)" } else { "" };
-                    content.push_str(&format!("  {:<40} {:>6}{}\n", name_s, sz, tag));
-                }
-            }
-            if total > MAX_LIST_DIR_ENTRIES {
-                content.push_str(&format!(
-                    "... [truncated: {} more entries. Call list again on a narrower directory.]\n",
-                    total - MAX_LIST_DIR_ENTRIES
-                ));
-            }
-            ToolResult::ok(crate::json_ok(serde_json::json!({"path": path, "content": content})))
-        }
-        Err(e) => ToolResult { success: false, content: crate::json_err(
-            "LIST_FAILED",
-            &format!("Cannot list {}: {}", path, e),
-            "Check if the directory exists and is readable.",
-        ) },
-    }
-}
-
-handler!(handle_list_dir, exec_list_dir);
+// ------ exec_search ------
 
 // ------ exec_search (from file_search.rs) ------
 
@@ -366,14 +309,6 @@ pub fn register(mgr: &mut crate::ToolManager) {
         description: "Read one or more files. Use path for one file or paths for a batch. Use list for directories and start_line/end_line for a range. Returns a content hash; pass it as expected_hash to edit/write to prevent stale writes. Full files auto-truncate to head 50 + tail 30 lines (>200 lines); when truncated, call read again with a smaller range.",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"One file path, not a directory. Relative to workspace or absolute."},"paths":{"type":"array","items":{"type":"string"},"description":"Multiple file paths; cannot be combined with path."},"start_line":{"type":"integer","description":"First line to read (1-based, optional)"},"end_line":{"type":"integer","description":"Last line to read, inclusive (optional). Max range: 300 lines."}},"anyOf":[{"required":["path"]},{"required":["paths"]}],"additionalProperties":false}),
         handler: handle_read_file,
-        risk: ToolRisk::ReadOnly,
-        default_timeout: std::time::Duration::from_secs(15),
-    });
-    mgr.register(ToolHandler {
-        key: "list".to_string(),
-        description: "List directory contents with names and sizes.",
-        input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"Directory path","default":"."}},"additionalProperties":false}),
-        handler: handle_list_dir,
         risk: ToolRisk::ReadOnly,
         default_timeout: std::time::Duration::from_secs(15),
     });

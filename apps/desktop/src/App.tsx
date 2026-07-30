@@ -378,22 +378,6 @@ export default function App() {
     }
   }
 
-  async function submitTaskAction(action: "cancel" | "delete" | "ask", task: TaskInfo) {
-    const entry = activeEntry();
-    if (!entry) return;
-    if (action === "ask") {
-      await request("session.send_message", {
-        seed: entry.state().seed,
-        text: `Look at ${task.id}: ${task.subject}. Explain the implementation plan and current status in detail.`,
-      });
-      return;
-    }
-    const taskId = Number.parseInt(task.id.replace(/^T/, ""), 10);
-    if (!Number.isFinite(taskId)) return;
-    await request("plan.task_action", { seed: entry.state().seed, action, taskId });
-    await loadDashboardFromDisk(entry);
-  }
-
   async function loadMoreTurns() {
     const entry = activeEntry();
     const firstId = entry?.state().turns[0]?.turnId;
@@ -641,7 +625,6 @@ export default function App() {
                   onAskDismiss={dismissAsk}
                   onPermissionRespond={respondToPermission}
                   onPlanRespond={respondToPlan}
-                  onTaskAction={submitTaskAction}
                   onUndo={undoLastTurn}
                   permissionLevel={permissionLevel()}
                   onPermissionLevelChange={changePermissionLevel}

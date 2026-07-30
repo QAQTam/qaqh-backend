@@ -10,6 +10,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::state::agent::PendingApproval;
+use crate::services::dashboard;
 use deepx_proto::{Agent2Ui, AskMode, AskQuestion};
 
 use super::types::*;
@@ -322,9 +323,7 @@ impl ToolEngine {
                                         id: item.id.clone(),
                                         title: item.title.clone(),
                                         description: item.description.clone(),
-                                        complexity: item.complexity.as_ref()
-                                            .map(|c| format!("{:?}", c).to_lowercase())
-                                            .unwrap_or_default(),
+                                        complexity: String::new(),
                                     })
                                     .collect();
                                 if items.is_empty() {
@@ -486,6 +485,27 @@ impl ToolEngine {
             });
 
         ctx.agent.apply_tool_effects(skill_effects);
+
+        // Instant refresh for todo tools
+        if name.starts_with("todo_") {
+            ctx.emitter.emit(Agent2Ui::Dashboard {
+                hp_connected: true,
+                session_seed: ctx.agent.session.seed.clone(),
+                context_limit: ctx.agent.config.context_limit,
+                tool_calls_total: 0,
+                tool_failures: 0,
+                current_phase: "single".into(),
+                streaming: false,
+                dsml_compat_count: ctx.agent.dsml_compat_count,
+                documents: dashboard::build_documents(),
+                recent_edits: dashboard::build_recent_edits(),
+                tasks: dashboard::build_tasks(),
+current_todo_id: dashboard::build_current_todo_id(),
+                session_title: ctx.agent.session.title.clone(),
+                usage: None,
+                model: Some(ctx.agent.config.model.clone()),
+            });
+        }
 
         if let Some(ref delta) = code_delta {
             ctx.stats.push_delta(delta.clone());

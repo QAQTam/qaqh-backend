@@ -48,8 +48,9 @@ export function createRawSessionState(seed: string): RawSessionState {
       usageByRequest: {},
       usageRequestCount: 0,
       cacheReportedRequestCount: 0,
+      dashboardRevision: 0,
     },
-    dashboard: { tasks: [], recentEdits: [], activity: [] },
+    dashboard: { tasks: [], recentEdits: [], activity: [], currentTodoId: null },
     telemetry: [],
     skills: {
       available: [], active: [], catalogRevision: "", contextEpoch: 0,
@@ -487,7 +488,14 @@ export function reduceAgentEvent(
         message: event.message,
         at: now,
       });
-      const failed = turnId ? updateTurn(next, turnId, turn => ({ ...turn, status: "failed", endedAt: now })) : next;
+      // Only mark the turn as failed when the agent process actually died.
+      // Recoverable errors (rate limits, model overload, etc.) keep the
+      // turn streaming so the UI doesn't flip the Stop button back to Send
+      // while the agent is still producing output.
+      const agentDead = /(exited|died|broken\.pipe|killed|connection.*lost|agent.*(?:dead|gone|stopped))/i.test(event.message);
+      const failed = agentDead && turnId
+        ? updateTurn(next, turnId, turn => ({ ...turn, status: "failed", endedAt: now }))
+        : next;
       return clearProviderRetry(failed, turnId);
     }
     case "tool_notice":
@@ -501,11 +509,13 @@ export function reduceAgentEvent(
           model: event.model,
           contextLimit: event.context_limit,
           usage: event.usage ?? state.session.usage,
+          dashboardRevision: state.session.dashboardRevision + 1,
         },
         dashboard: {
           ...state.dashboard,
           tasks: event.tasks ?? state.dashboard.tasks,
           recentEdits: event.recent_edits ?? state.dashboard.recentEdits,
+          currentTodoId: event.current_todo_id ?? state.dashboard.currentTodoId,
         },
       };
       if (event.usage) {

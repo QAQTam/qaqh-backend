@@ -30,7 +30,6 @@ function mountRawChat(initial: RawSessionState) {
     onAskDismiss: vi.fn().mockResolvedValue(undefined),
     onPermissionRespond: vi.fn().mockResolvedValue(undefined),
     onPlanRespond: vi.fn().mockResolvedValue(undefined),
-    onTaskAction: vi.fn().mockResolvedValue(undefined),
     onLoadMore: vi.fn().mockResolvedValue(undefined),
   };
   const host = document.createElement("div");
@@ -46,7 +45,6 @@ function mountRawChat(initial: RawSessionState) {
         onAskDismiss={callbacks.onAskDismiss}
         onPermissionRespond={callbacks.onPermissionRespond}
         onPlanRespond={callbacks.onPlanRespond}
-        onTaskAction={callbacks.onTaskAction}
         onUndo={vi.fn()}
         permissionLevel={2}
         onPermissionLevelChange={vi.fn()}

@@ -274,23 +274,17 @@ impl TurnEngine {
             .take()
             .expect("plan review suspension exists");
 
-        // ── Todo activation path ──
+        // ── Todo activation path (Goal mode frozen) ──
         if let Some(todo_act) = saved.pending_todo_activation.take() {
             if approved {
-                let (content, success) =
-                    match deepx_tools::todo::exec_todo_activate(&serde_json::json!({})) {
-                        Ok(content) => (content, true),
-                        Err(error) => (error, false),
-                    };
+                let content = "Goal automation is temporarily unavailable. Use manual todo tools instead.".to_string();
                 ctx.agent
                     .msg
-                    .push_tool_result_direct(&todo_act.call_id, &content, success);
-                if !success {
-                    log::warn!(
-                        "[TURN] approved todo activation failed during commit: {}",
-                        content
-                    );
-                };
+                    .push_tool_result_direct(&todo_act.call_id, &content, false);
+                log::warn!(
+                    "[TURN] approved todo activation rejected — Goal mode frozen: {}",
+                    content
+                );
             } else {
                 ctx.agent.msg.push_tool_result_direct(
                     &todo_act.call_id,
@@ -487,6 +481,7 @@ impl TurnEngine {
             for admitted in batch {
                 let tx = progress_tx.clone();
                 let call_id = admitted.call_id.clone();
+                let tool_name = admitted.auth.tool_name().to_string();
                 let handle = std::thread::Builder::new()
                     .stack_size(4 * 1024 * 1024)
                     .spawn({
@@ -505,13 +500,13 @@ impl TurnEngine {
                         }
                     })
                     .expect("tool thread spawn");
-                handles.push((call_id, handle));
+                handles.push((call_id, tool_name, handle));
             }
             drop(progress_tx);
             tool.drain_progress_external(ctx, progress_rx, "llm_tool");
 
             let cancelled = ctx.cancel.is_set();
-            for (call_id, handle) in handles {
+            for (call_id, tool_name, handle) in handles {
                 if cancelled {
                     let _ = handle.join();
                     continue;
@@ -532,6 +527,26 @@ impl TurnEngine {
                                 file: delta.file.clone(),
                             });
                         }
+                        // Instant refresh for todo tools
+                        if tool_name.starts_with("todo_") {
+                            ctx.emitter.emit(Agent2Ui::Dashboard {
+                                hp_connected: true,
+                                session_seed: ctx.agent.session.seed.clone(),
+                                context_limit: ctx.agent.config.context_limit,
+                                tool_calls_total: 0,
+                                tool_failures: 0,
+                                current_phase: "single".into(),
+                                streaming: false,
+                                dsml_compat_count: ctx.agent.dsml_compat_count,
+                                documents: dashboard::build_documents(),
+                                recent_edits: dashboard::build_recent_edits(),
+                                tasks: dashboard::build_tasks(),
+current_todo_id: dashboard::build_current_todo_id(),
+                                session_title: ctx.agent.session.title.clone(),
+                                usage: None,
+                                model: Some(ctx.agent.config.model.clone()),
+                            });
+                        }
                     }
                     Err(_) => ctx.agent.msg.push_tool_result_direct(
                         &call_id,
@@ -547,6 +562,7 @@ impl TurnEngine {
                 return false;
             }
             let call_id = admitted.call_id;
+            let tool_name = admitted.auth.tool_name().to_string();
             let (progress_tx, progress_rx) = deepx_tools::bounded_exec_progress_channel();
             let handle = std::thread::Builder::new()
                 .stack_size(4 * 1024 * 1024)
@@ -578,6 +594,26 @@ impl TurnEngine {
                             files_created: delta.files_created,
                             files_deleted: delta.files_deleted,
                             file: delta.file.clone(),
+                        });
+                    }
+                    // Instant refresh for todo tools
+                    if tool_name.starts_with("todo_") {
+                        ctx.emitter.emit(Agent2Ui::Dashboard {
+                            hp_connected: true,
+                            session_seed: ctx.agent.session.seed.clone(),
+                            context_limit: ctx.agent.config.context_limit,
+                            tool_calls_total: 0,
+                            tool_failures: 0,
+                            current_phase: "single".into(),
+                            streaming: false,
+                            dsml_compat_count: ctx.agent.dsml_compat_count,
+                            documents: dashboard::build_documents(),
+                            recent_edits: dashboard::build_recent_edits(),
+                            tasks: dashboard::build_tasks(),
+current_todo_id: dashboard::build_current_todo_id(),
+                            session_title: ctx.agent.session.title.clone(),
+                            usage: None,
+                            model: Some(ctx.agent.config.model.clone()),
                         });
                     }
                 }
@@ -1418,6 +1454,7 @@ impl TurnEngine {
                 documents: dashboard::build_documents(),
                 recent_edits: dashboard::build_recent_edits(),
                 tasks: dashboard::build_tasks(),
+current_todo_id: dashboard::build_current_todo_id(),
                 session_title: ctx.agent.session.title.clone(),
                 usage: None,
                 model: Some(ctx.agent.config.model.clone()),

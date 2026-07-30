@@ -109,6 +109,7 @@ impl MiscEngine {
             documents: dashboard::build_documents(),
             recent_edits: dashboard::build_recent_edits(),
             tasks: dashboard::build_tasks(),
+current_todo_id: dashboard::build_current_todo_id(),
             session_title: agent.session.title.clone(),
             usage: None,
             model: Some(agent.config.model.clone()),

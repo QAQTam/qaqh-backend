@@ -289,13 +289,9 @@ impl DeepxService {
             )
             .map_err(err)?),
             "todo.status" => parse_json_string(deepx_tools::todo::todo_status_json(&seed()?)?),
-            "todo.action" => {
-                let action = pstr(params, "action")?;
-                Err(format!(
-                    "todo action '{action}' is unavailable while Goal automation is frozen"
-                )
-                .into())
-            }
+            "todo.cancel" => parse_json_string(
+                deepx_tools::todo::todo_cancel_json(&seed()?, &pstr(params, "id")?)?,
+            ),
             "plan.context_stats" => context_stats(&seed()?),
             "stats.token_usage" => token_stats(pu64(params, "days") as u32),
             "plan.read" => read_plan(&seed()?),
@@ -307,16 +303,6 @@ impl DeepxService {
                     value2(params, "user_comment", "userComment")
                         .and_then(Value::as_str)
                         .unwrap_or_default(),
-                )?;
-                Ok(Value::Null)
-            }
-            "plan.task_action" => {
-                let mut registry = self.registry()?;
-                task_action(
-                    &seed()?,
-                    &pstr(params, "action")?,
-                    pu64_2(params, "task_id", "taskId") as u32,
-                    &mut registry,
                 )?;
                 Ok(Value::Null)
             }
@@ -665,13 +651,21 @@ fn with_file_previews(text: String, files: &[String]) -> String {
 
 fn dashboard(seed: &str) -> Result<Value, String> {
     let dir = deepx_types::platform::sessions_dir().join(seed);
-    let tasks = std::fs::File::open(dir.join("tasks.md")).ok().into_iter().flat_map(|file| std::io::BufReader::new(file).lines().map_while(Result::ok)).filter_map(|line| {
-        if !line.starts_with("- [") { return None; }
-        let status = line.get(3..line.find(']')?)?;
-        let after = line.split_once("] ")?.1; let (id, rest) = after.split_once(": ")?;
-        let (subject, description) = rest.split_once(" — ").unwrap_or((rest, ""));
-        Some(json!({"id":id.trim(),"subject":subject.trim(),"description":description.trim(),"status":status}))
-    }).collect::<Vec<_>>();
+    let tasks: Vec<Value> = deepx_tools::todo::todo_status_json(seed)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| {
+            v.get("items")?
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|item| {
+                            json!({"id":item["id"],"subject":item["title"],"description":item["description"],"status":item["status"]})
+                        })
+                        .collect()
+                })
+        })
+        .unwrap_or_default();
     let mut edits = std::fs::File::open(dir.join("code_stats.jsonl"))
         .ok()
         .into_iter()
@@ -781,56 +775,6 @@ fn context_stats(seed: &str) -> Result<Value, String> {
     Ok(
         json!({"messages":0,"chat_text":0,"thinking":0,"tool_calls":0,"tool_results":0,"tools_schema":0,"system_prompt":0,"thinking_blocks":0,"tool_call_blocks":0}),
     )
-}
-
-fn task_action(
-    seed: &str,
-    action: &str,
-    task_id: u32,
-    registry: &mut AgentRegistry,
-) -> Result<(), String> {
-    let path = deepx_types::platform::sessions_dir()
-        .join(seed)
-        .join("tasks.md");
-    let mut lines: Vec<String> = std::fs::read_to_string(&path)
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect();
-    let prefix = format!("T{task_id}:");
-    let index = lines.iter().position(|line| line.contains(&prefix));
-    match action {
-        "cancel" => {
-            let index = index.ok_or_else(|| format!("Task T{task_id} not found"))?;
-            for marker in ["[pending]", "[in_progress]", "[completed]", "[cancelled]"] {
-                if lines[index].contains(marker) {
-                    lines[index] = lines[index].replace(marker, "[cancelled]");
-                    break;
-                }
-            }
-        }
-        "delete" => {
-            if let Some(index) = index {
-                lines.remove(index);
-            }
-        }
-        _ => return Err(format!("unknown task action: {action}")),
-    }
-    std::fs::write(path, lines.join("\n")).map_err(err)?;
-    let _ = registry.send(
-        seed,
-        Ui2Agent::ToolCall {
-            id: format!("frontend_tc_{task_id}"),
-            name: "task".into(),
-            action: if action == "cancel" {
-                "update".into()
-            } else {
-                "delete".into()
-            },
-            args: json!({"id":task_id,"status":if action=="cancel"{"cancelled"}else{"deleted"}}),
-        },
-    );
-    Ok(())
 }
 
 fn token_stats(days: u32) -> Result<Value, String> {

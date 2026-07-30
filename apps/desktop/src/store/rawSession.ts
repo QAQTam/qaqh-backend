@@ -96,6 +96,7 @@ export type PendingInteraction =
 export type DashboardData = {
   tasks: TaskInfo[];
   recentEdits: string[];
+  currentTodoId?: string | null;
 };
 
 export type RawTurn = {
@@ -152,6 +153,8 @@ export type RawSessionState = {
     usageByRequest: Record<string, UsageInfo>;
     usageRequestCount: number;
     cacheReportedRequestCount: number;
+    /** Increments on every Dashboard event so views can refresh. */
+    dashboardRevision: number;
   };
   dashboard: DashboardData & { activity: RawActivityEntry[] };
   telemetry: RawMetricPoint[];

@@ -114,7 +114,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     )
     .expect("parse status JSON");
     assert_eq!(status["mode"], "manual");
-    assert_eq!(status["goal_enabled"], false);
     assert_eq!(status["current_id"], "T1");
     assert_eq!(status["current_title"], "Working");
     assert_eq!(status["pending"], 1);
@@ -124,17 +123,9 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(status["total"], 4);
     assert_eq!(status["items"][2]["status"], "cancelled");
 
-    let activation =
-        deepx_tools::todo::exec_todo_activate(&serde_json::json!({})).expect_err("Goal frozen");
-    assert!(activation.contains("GOAL_FEATURE_FROZEN"));
-
-    let mut store = deepx_tools::todo::load_todo().expect("load todo");
-    store.mode = deepx_tools::todo::TodoMode::Goal;
-    deepx_tools::todo::save_todo(&store).expect("save normalizes frozen Goal state");
-    assert_eq!(
-        deepx_tools::todo::load_todo().expect("reload todo").mode,
-        deepx_tools::todo::TodoMode::Manual
-    );
+    // Verify that the todo.json format is clean (no legacy Goal-enforced normalization).
+    let store = deepx_tools::todo::load_todo().expect("load todo");
+    assert_eq!(store.mode, deepx_tools::todo::TodoMode::Manual);
 
     std::fs::remove_dir_all(&temp_home).expect("remove isolated home");
 }

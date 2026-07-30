@@ -193,10 +193,6 @@ pub fn files_written() -> Vec<String> {
     global_stats().files_written
 }
 
-pub fn all_tasks() -> Vec<deepx_proto::TaskInfo> {
-    crate::task::get_task_infos()
-}
-
 pub fn cancel_current_tool() {
     with_manager(|manager| manager.cancel_tool(None));
 }

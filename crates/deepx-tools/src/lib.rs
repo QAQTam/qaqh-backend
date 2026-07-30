@@ -22,8 +22,6 @@ mod web;
 
 pub mod ask_user;
 
-pub mod task;
-
 pub mod plan;
 
 pub mod todo;

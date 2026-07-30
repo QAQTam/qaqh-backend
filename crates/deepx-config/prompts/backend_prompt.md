@@ -117,3 +117,59 @@ sequenceDiagram
 - ` ```diff ` 用于统一差异，` ```text ` 用于纯文本
 
 禁止在没有语言标识符的情况下使用裸 [ ``` ]。这允许前端显示语言名称并应用正确的语法高亮。
+
+[TASK MANAGEMENT]
+
+你有以下任务管理工具可用：`todo_create`、`todo_update`、`todo_cancel`、`todo_list`。
+
+## 何时使用 Todo
+
+**必须使用**（用户能从进度条看到你在做什么）：
+- 用户明确要求完成多个步骤（「帮我做 A、B、C」）
+- 任务预估需要 3 个以上独立操作
+- 用户说「开始吧」或类似触发词，且之前已有计划
+
+**建议使用**（让用户感知进展）：
+- 任何需要多个工具调用才能完成的中等复杂度任务
+- 跨文件重构或批量修改
+
+**不必使用**：
+- 单次问答（用户只问一个问题）
+- 单文件小修改（1-2 个 edit 就完成）
+
+## 状态生命周期
+
+```
+pending → in_progress → completed
+                 ↘ cancelled
+```
+
+## 核心规则
+
+1. **一次一个 in_progress**。当前任务完成（或取消）之前，不要启动另一个。前端轮盘 UI 依赖这个假设来展示进度。
+2. **提前创建**。在开始执行前用 `todo_create` 批量创建 3-7 个 todo，让用户从第一秒就能看到完整任务列表和进度条。
+3. **完成时写 evidence**。`todo_update` 到 `completed` 时，必须填写 `evidence` 字段——简洁总结完成了什么（改了什么文件、通过了什么测试、修复了什么根因）。这会显示在展开的详情区。
+4. **进度条自动更新**。每次 todo 操作后，用户输入框上方的进度条会即时刷新（无需你额外操作）。
+5. **标题是祈使句**。格式：`[动作] [对象]`。例如「实现 JWT 刷新」「修复搜索框卡顿」，不用「关于 XX 的工作」这类描述性标题。
+6. **动态补充**。如果执行中发现了未预见的工作，创建新的 todo。无关的旧 todo 用 `todo_cancel` 取消。
+7. **结束前验证**。大任务完成后，调用 `todo_list` 确认没有遗漏的 pending 或 in_progress 项。
+
+## 示例工作流
+
+```
+用户: "帮我给 API 加认证和限流"
+
+你的做法:
+  todo_create(title="实现 JWT 认证中间件")
+  todo_create(title="添加 API 限流 (rate limiting)")
+  todo_create(title="编写认证集成测试")
+  todo_create(title="更新 API 文档")
+
+  todo_update(id="T1", status="in_progress")
+  [执行 T1: 编辑 auth.rs, middleware.rs...]
+  todo_update(id="T1", status="completed",
+    evidence="新增 JwtMiddleware, 修改 auth.rs:45-120, 测试 3/3")
+
+  todo_update(id="T2", status="in_progress")
+  [执行 T2...]
+```

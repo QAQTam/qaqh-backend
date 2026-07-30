@@ -5,7 +5,15 @@
 //! advances through items sequentially, and supports mid-execution
 //! CRUD via pending changes that merge on turn boundaries.
 
-use deepx_tools::todo::{load_todo, save_todo, TodoComplexity, TodoItem, TodoMode, TodoStatus, TodoStore};
+use deepx_tools::todo::{load_todo, save_todo, TodoItem, TodoMode, TodoStatus, TodoStore};
+
+/// Task complexity — maintained locally since the TodoItem model no longer stores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Complexity {
+    Small,
+    Medium,
+    Large,
+}
 
 /// A buffered mutation applied on the next turn boundary.
 #[derive(Debug, Clone)]
@@ -16,7 +24,6 @@ enum PendingChange {
         status: Option<TodoStatus>,
         title: Option<String>,
         description: Option<String>,
-        complexity: Option<TodoComplexity>,
         evidence: Option<String>,
     },
     DeleteItem(String),
@@ -47,11 +54,6 @@ impl GoalEngine {
     /// If `ids` are specified, only those items are activated (in order).
     /// Otherwise all pending/in_progress items are activated.
     pub fn activate(&mut self, ids: Option<&[String]>) -> Result<(), String> {
-        if !deepx_tools::todo::GOAL_MODE_ENABLED {
-            return Err(
-                "Goal automation is temporarily frozen. Use the manual todo tools instead.".into(),
-            );
-        }
         let mut store = load_todo()?;
 
         if store.mode == TodoMode::Goal {
@@ -85,14 +87,8 @@ impl GoalEngine {
             return Err("No items to activate. Use todo_create first or specify ids.".into());
         }
 
-        // Sort by complexity: small → medium → large
-        let mut sorted = active_items;
-        sorted.sort_by_key(|item| match item.complexity {
-            Some(TodoComplexity::Small) => 0,
-            Some(TodoComplexity::Medium) => 1,
-            Some(TodoComplexity::Large) => 2,
-            None => 3,
-        });
+        // Items are activated in their natural order (complexity sorting removed).
+        let sorted = active_items;
 
         let first_id = sorted[0].id.clone();
         store.items = sorted;
@@ -176,12 +172,6 @@ impl GoalEngine {
         let current_id = store.current_id.as_ref()?;
         let item = store.items.iter().find(|item| &item.id == current_id)?;
 
-        let complexity_str = item
-            .complexity
-            .as_ref()
-            .map(|c| format!("[{:?}] ", c).to_lowercase())
-            .unwrap_or_default();
-
         let progress = store
             .items
             .iter()
@@ -190,7 +180,7 @@ impl GoalEngine {
 
         Some(format!(
             "[自动执行计划 / 目标模式]\n\n\
-             {complexity_str}T{}: {}\n{}\n\n\
+             T{}: {}\n{}\n\n\
              进度: {}/{} 已完成\n\n\
              完成此步骤后，必须调用 todo_step_complete(id=\\\"{}\\\", summary=\\\"...\\\")。\n\
              如果遇到无法自行安全解决的阻塞，调用 todo_stop(reason=\\\"...\\\") 或 ask_user。",
@@ -219,7 +209,6 @@ impl GoalEngine {
         status: Option<TodoStatus>,
         title: Option<String>,
         description: Option<String>,
-        complexity: Option<TodoComplexity>,
         evidence: Option<String>,
     ) {
         self.pending_changes.push(PendingChange::UpdateItem {
@@ -227,7 +216,6 @@ impl GoalEngine {
             status,
             title,
             description,
-            complexity,
             evidence,
         });
     }
@@ -255,7 +243,6 @@ impl GoalEngine {
                     status,
                     title,
                     description,
-                    complexity,
                     evidence,
                 } => {
                     if let Some(item) = store.items.iter_mut().find(|item| item.id == id) {
@@ -267,9 +254,6 @@ impl GoalEngine {
                         }
                         if let Some(d) = description {
                             item.description = d;
-                        }
-                        if let Some(c) = complexity {
-                            item.complexity = Some(c);
                         }
                         if let Some(e) = evidence {
                             item.evidence = Some(e);
@@ -294,14 +278,8 @@ impl GoalEngine {
             }
         }
 
-        // Re-sort after merges
-        let mut items = store.items.clone();
-        items.sort_by_key(|item| match item.complexity {
-            Some(TodoComplexity::Small) => 0,
-            Some(TodoComplexity::Medium) => 1,
-            Some(TodoComplexity::Large) => 2,
-            None => 3,
-        });
+        // Re-sort after merges (complexity sorting removed).
+        let items = store.items.clone();
         store.items = items;
 
         save_todo(store)
@@ -312,7 +290,7 @@ impl GoalEngine {
     // ═══════════════════════════════════════════
 
     /// Parse complexity-labeled tasks from a compact summary.
-    pub fn parse_compact_tasks(summary: &str) -> Vec<(TodoComplexity, String)> {
+    pub fn parse_compact_tasks(summary: &str) -> Vec<(Complexity, String)> {
         let mut tasks = Vec::new();
         let mut in_remaining = false;
 
@@ -334,11 +312,11 @@ impl GoalEngine {
 
             let lower = trimmed.to_lowercase();
             let (complexity, desc_start) = if lower.starts_with("[small]") || lower.starts_with("- [small]") {
-                (TodoComplexity::Small, find_after_label(trimmed, "[small]"))
+                (Complexity::Small, find_after_label(trimmed, "[small]"))
             } else if lower.starts_with("[medium]") || lower.starts_with("- [medium]") {
-                (TodoComplexity::Medium, find_after_label(trimmed, "[medium]"))
+                (Complexity::Medium, find_after_label(trimmed, "[medium]"))
             } else if lower.starts_with("[large]") || lower.starts_with("- [large]") {
-                (TodoComplexity::Large, find_after_label(trimmed, "[large]"))
+                (Complexity::Large, find_after_label(trimmed, "[large]"))
             } else {
                 continue;
             };
@@ -363,7 +341,7 @@ impl GoalEngine {
             return Ok(());
         };
 
-        for (complexity, desc) in tasks {
+        for (_complexity, desc) in tasks {
             // Avoid duplicates: check if a similar task already exists
             if store
                 .items
@@ -385,9 +363,6 @@ impl GoalEngine {
                 title: desc.chars().take(60).collect(),
                 description: desc,
                 status: TodoStatus::Pending,
-                complexity: Some(complexity),
-                deps: Vec::new(),
-                effort_min: None,
                 evidence: None,
             });
         }
@@ -460,9 +435,9 @@ None";
 
         let tasks = GoalEngine::parse_compact_tasks(summary);
         assert_eq!(tasks.len(), 3);
-        assert_eq!(tasks[0].0, TodoComplexity::Small);
-        assert_eq!(tasks[1].0, TodoComplexity::Medium);
-        assert_eq!(tasks[2].0, TodoComplexity::Large);
+        assert_eq!(tasks[0].0, Complexity::Small);
+        assert_eq!(tasks[1].0, Complexity::Medium);
+        assert_eq!(tasks[2].0, Complexity::Large);
         assert_eq!(tasks[0].1, "fix typo in config");
     }
 }
