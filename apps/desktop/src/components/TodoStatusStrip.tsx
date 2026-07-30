@@ -30,11 +30,19 @@ export default function TodoStatusStrip(props: {
   const count = (status: string) =>
     props.tasks.filter(t => t.status === status).length;
 
-  const activeItem = createMemo(() =>
-    props.tasks.find(t => t.id === props.currentTodoId)
-    ?? props.tasks.find(t => t.status === "in_progress")
-    ?? null,
-  );
+  const activeItem = createMemo(() => {
+    const byId = props.currentTodoId
+      ? props.tasks.find(t => t.id === props.currentTodoId)
+      : null;
+    // Keep currentTodoId match if active, OR if just completed (still flashing)
+    if (byId && byId.status !== "cancelled") {
+      if (byId.status !== "completed" || completedFlash().has(byId.id)) {
+        return byId;
+      }
+    }
+    // Otherwise find any in_progress task
+    return props.tasks.find(t => t.status === "in_progress") ?? null;
+  });
 
   const carousel = createMemo(() => {
     const active = activeItem();
@@ -50,7 +58,7 @@ export default function TodoStatusStrip(props: {
   const donePct = () => {
     const total = props.tasks.length;
     if (total === 0) return 0;
-    return Math.round((count("completed") + count("cancelled")) * 100 / total);
+    return Math.floor((count("completed") + count("cancelled")) * 100 / total);
   };
 
   const doneCount = () => count("completed") + count("cancelled");
@@ -68,26 +76,33 @@ export default function TodoStatusStrip(props: {
     return `${parts.join(" · ")} · ${done}/${total}`;
   };
 
-  // ── Completion flash tracking ──
+  // ── Completion flash tracking (isolated from streaming jitter) ──
+  // Derive completed IDs as a stable memo — only changes when task statuses actually change
+  const completedIds = createMemo(() => {
+    const ids = new Set<string>();
+    for (const t of props.tasks) {
+      if (t.status === "completed" || t.status === "cancelled") ids.add(t.id);
+    }
+    return ids;
+  });
+
+  let prevCompletedIds = new Set<string>();
   createEffect(
-    () => props.tasks,
-    (tasks) => {
-      for (const t of tasks) {
-        if (t.status === "completed" || t.status === "cancelled") {
-          if (!completedFlash().has(t.id)) {
-            const next = new Set(completedFlash());
-            next.add(t.id);
-            setCompletedFlash(next);
-            setTimeout(() => {
-              setCompletedFlash(prev => {
-                const s = new Set(prev);
-                s.delete(t.id);
-                return s;
-              });
-            }, 800);
-          }
+    () => completedIds(),
+    (ids) => {
+      for (const id of ids) {
+        if (!prevCompletedIds.has(id)) {
+          setCompletedFlash(prev => new Set(prev).add(id));
+          setTimeout(() => {
+            setCompletedFlash(prev => {
+              const s = new Set(prev);
+              s.delete(id);
+              return s;
+            });
+          }, 800);
         }
       }
+      prevCompletedIds = ids;
     },
   );
 

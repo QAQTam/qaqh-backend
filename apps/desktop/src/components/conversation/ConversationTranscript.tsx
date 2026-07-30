@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
+import { createEffect, createSignal, For, onSettled, Show } from "solid-js";
 import type { TurnViewModel } from "../../presentation/turnProjection";
 import type { ChangeReviewFile } from "../../presentation/turnProjection";
 import TurnGroup from "./TurnGroup";
@@ -54,13 +54,12 @@ export default function ConversationTranscript(props: {
 
   onSettled(() => {
     if (typeof ResizeObserver === "undefined") return;
-    resizeObserver = new ResizeObserver(() => scheduleScrollToBottom());
-    resizeObserver.observe(transcript);
-  });
-
-  onCleanup(() => {
-    if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
-    resizeObserver?.disconnect();
+    const observer = new ResizeObserver(() => scheduleScrollToBottom());
+    observer.observe(transcript);
+    return () => {
+      observer.disconnect();
+      if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
+    };
   });
 
   return (
@@ -74,7 +73,7 @@ export default function ConversationTranscript(props: {
         >加载更早消息</button>
       </Show>
       <main ref={transcript} class="conversation-transcript" aria-live="polite">
-        <For each={props.turns} keyed={false}>{(turn) => <TurnGroup turn={turn()} onReviewChanges={props.onReviewChanges} />}</For>
+        <For each={props.turns} keyed={t => t.turnId}>{(turn) => <TurnGroup turn={turn()} onReviewChanges={props.onReviewChanges} />}</For>
       </main>
       <Show when={!followTail()}>
         <button

@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, Match, onCleanup, Show, Switch, untrack, type Accessor } from "solid-js";
+import { action, createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack, type Accessor } from "solid-js";
 import { request } from "../runtime/backendClient";
 import { openDevTools, openPath } from "../runtime/desktopApi";
 import { togglePet } from "../runtime/desktopApi";
@@ -100,7 +100,9 @@ export default function ChatView(props: ChatViewProps) {
     }
     compactRevision = revision;
   });
-  onCleanup(() => { if (compactTimer) clearTimeout(compactTimer); });
+  onSettled(() => {
+    return () => { if (compactTimer) clearTimeout(compactTimer); };
+  });
 
   async function handleSetMode(nextMode: string) {
     setMode(nextMode);
@@ -108,29 +110,22 @@ export default function ChatView(props: ChatViewProps) {
     catch (error) { console.error("set_mode error:", error); }
   }
 
-  async function handleSend(text: string, files: string[], imageBlocks?: Array<{ mimeType: string; data: string }>) {
-    try {
-      await request("session.send_message", {
-        seed: seed(),
-        text,
-        files,
-        images: imageBlocks ?? [],
-      });
-    } catch (error) {
-      console.error("send_message error:", error);
-      throw error;
-    }
-  }
+  const handleSend = action(async function* (text: string, files: string[], imageBlocks?: Array<{ mimeType: string; data: string }>) {
+    yield request("session.send_message", {
+      seed: seed(),
+      text,
+      files,
+      images: imageBlocks ?? [],
+    });
+  });
 
-  async function handleStop() {
-    try { await request("session.cancel", { seed: seed() }); }
-    catch (error) { console.error("cancel error:", error); }
-  }
+  const handleStop = action(async function* () {
+    yield request("session.cancel", { seed: seed() });
+  });
 
-  async function handleCompact() {
-    try { await request("session.compact", { seed: seed() }); }
-    catch (error) { console.error("compact error:", error); }
-  }
+  const handleCompact = action(async function* () {
+    yield request("session.compact", { seed: seed() });
+  });
 
   const followUps = createFollowUpQueue(untrack(seed), handleSend);
   let wasStreaming = untrack(streaming);

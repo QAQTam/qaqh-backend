@@ -7,7 +7,7 @@ minimumReleaseAgeExclude:
   - electron-vite
   - '@solidjs/web@2.0.0-beta.28'
   - solid-js@2.0.0-beta.28
-  - vite-plugin-solid@3.0.0-next.18
+  - vite-plugin-solid@3.0.0-next.18 || 3.0.0-next.20
   - '@dom-expressions/babel-plugin-jsx@0.50.0-next.33'
   - '@dom-expressions/compiler-darwin-arm64@0.50.0-next.33'
   - '@dom-expressions/compiler-darwin-x64@0.50.0-next.33'

@@ -1,4 +1,4 @@
-import { createSignal, For, Show, createEffect, onCleanup } from "solid-js";
+import { action, createEffect, createMemo, createSignal, Errored, For, isPending, Loading, onCleanup, onSettled, Show } from "solid-js";
 import { request } from "../runtime/backendClient";
 import { useI18n } from "../i18n";
 import { renderDiffHtml } from "../lib/diff";
@@ -46,9 +46,6 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
   const [committing, setCommitting] = createSignal(false);
   const [commitMessage, setCommitMessage] = createSignal("");
   const [selectedFile, setSelectedFile] = createSignal<string | null>(null);
-  const [diffLoading, setDiffLoading] = createSignal(false);
-  const [diffError, setDiffError] = createSignal<string | null>(null);
-  const [diffHtml, setDiffHtml] = createSignal<string | null>(null);
   const [showSwitchPrompt, setShowSwitchPrompt] = createSignal(false);
   const [pendingBranch, setPendingBranch] = createSignal("");
   const [actionError, setActionError] = createSignal<string | null>(null);
@@ -79,13 +76,9 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
     try {
       const raw = await request<GitFileEntry[]>("git.diff", { seed: props.seed });
       setFiles(raw.map(file => ({ ...file, diffHtml: undefined })));
-      setDiffError(null);
       const selected = selectedFile();
-      if (selected && raw.some(file => file.path === selected)) {
-        await selectFile(selected);
-      } else if (selected) {
+      if (selected && !raw.some(file => file.path === selected)) {
         setSelectedFile(null);
-        setDiffHtml(null);
       }
       return true;
     } catch (e) {
@@ -131,7 +124,7 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
     () => ({ open: props.open, file: props.initialFile, files: files(), selected: selectedFile() }),
     ({ open, file, files, selected }) => {
     if (open && file && files.some(entry => entry.path === file) && selected !== file) {
-      void selectFile(file);
+      setSelectedFile(file);
     }
   });
 
@@ -145,14 +138,12 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
       setBranch("");
       setBranches([]);
       setSelectedFile(null);
-      setDiffHtml(null);
-      setDiffError(null);
       setCommitMessage("");
       setShowSwitchPrompt(false);
     }
   });
 
-  async function refresh(): Promise<void> {
+  async function refreshFiles(): Promise<void> {
     tryRefresh().catch(e => console.error("manual refresh error:", e));
   }
 
@@ -167,39 +158,23 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
     }
   }
 
-  async function selectFile(path: string) {
-    setSelectedFile(path);
-    setDiffLoading(true);
-    setDiffError(null);
-    setDiffHtml(null);
+  // ── Async memo: diff content for selected file ──
+  const diffHtml = createMemo(async () => {
+    const path = selectedFile();
+    if (!path) return null;
 
-    // Check if we already have the diff cached
-    const cached = files().find((f) => f.path === path);
-    if (cached?.diffHtml) {
-      setDiffHtml(cached.diffHtml);
-      setDiffLoading(false);
-      return;
-    }
+    const cached = files().find(f => f.path === path);
+    if (cached?.diffHtml) return cached.diffHtml;
 
-    try {
-      const rawDiff = await request<string>("git.file_diff", {
-        seed: props.seed,
-        filePath: path,
-      });
-      const html =
-        renderDiffHtml(rawDiff) ||
-        '<div class="git-workspace-empty">No diff available</div>';
-      // Cache the result
-      setFiles((prev) =>
-        prev.map((f) => (f.path === path ? { ...f, diffHtml: html } : f)),
-      );
-      setDiffHtml(html);
-    } catch (e) {
-      console.error("git_file_diff error:", e);
-      setDiffError(String(e));
-    }
-    setDiffLoading(false);
-  }
+    const rawDiff = await request<string>("git.file_diff", {
+      seed: props.seed,
+      filePath: path,
+    });
+    const html = renderDiffHtml(rawDiff) ||
+      '<div class="git-workspace-empty">No diff available</div>';
+    setFiles(prev => prev.map(f => f.path === path ? { ...f, diffHtml: html } : f));
+    return html;
+  });
 
   async function switchBranch(name: string) {
     if (name === branch()) return;
@@ -211,16 +186,16 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
     await doSwitch(name);
   }
 
-  async function doSwitch(name: string, stash: boolean = false) {
+  const doSwitch = action(async function* (name: string, stash: boolean = false) {
     setSwitching(true);
     setShowSwitchPrompt(false);
     try {
-      await request("git.switch_branch", {
+      yield request("git.switch_branch", {
         seed: props.seed,
         branch: name,
         stash,
       });
-      await refresh();
+      await refreshFiles();
       await loadBranches();
       setActionError(null);
       setActionNotice(`Switched to ${name}`);
@@ -231,21 +206,20 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
     } finally {
       setSwitching(false);
     }
-  }
+  });
 
-  async function commit() {
+  const commit = action(async function* () {
     const msg = commitMessage().trim();
     if (!msg) return;
     setCommitting(true);
     try {
-      await request("git.commit", {
+      yield request("git.commit", {
         seed: props.seed,
         message: msg,
       });
       setCommitMessage("");
       setSelectedFile(null);
-      setDiffHtml(null);
-      await refresh();
+      await refreshFiles();
       setActionError(null);
       setActionNotice("Commit created");
     } catch (e) {
@@ -255,7 +229,7 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
     } finally {
       setCommitting(false);
     }
-  }
+  });
 
   const totalStats = () => {
     let a = 0,
@@ -332,7 +306,7 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
             </button>
             <button
               class="git-workspace-icon-btn"
-              onClick={refresh}
+              onClick={refreshFiles}
               disabled={loading()}
               title={t().skills.refresh}
             >
@@ -382,7 +356,7 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
             }>
               <div class="git-workspace-error" role="alert">
                 <span>{listError()}</span>
-                <button class="git-workspace-icon-btn" onClick={refresh}>Retry</button>
+                <button class="git-workspace-icon-btn" onClick={refreshFiles}>Retry</button>
               </div>
             </Show>
           }
@@ -394,7 +368,7 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
                 {(f) => (
                   <div
                     class={`git-file-item${selectedFile() === f.path ? " selected" : ""}`}
-                    onClick={() => selectFile(f.path)}
+                    onClick={() => setSelectedFile(f.path)}
                   >
                     <span
                       class="git-file-change-icon"
@@ -426,20 +400,16 @@ export default function GitDiffPanel(props: GitDiffPanelProps) {
                   </div>
                 }
               >
-                <Show when={!diffLoading()} fallback={
-                  <div class="git-diff-view-loading">Loading diff...</div>
-                }>
-                  <Show when={!diffError()} fallback={
+                <Loading fallback={<div class="git-diff-view-loading">Loading diff...</div>}>
+                  <Errored fallback={(err, reset) => (
                     <div class="git-diff-view-error">
-                      <span>{diffError()}</span>
-                      <button class="git-workspace-icon-btn" onClick={() => selectFile(selectedFile()!)}>
-                        Retry
-                      </button>
+                      <span>{String(err())}</span>
+                      <button class="git-workspace-icon-btn" onClick={reset}>Retry</button>
                     </div>
-                  }>
-                    <div class="git-diff-content" innerHTML={diffHtml() || ""} />
-                  </Show>
-                </Show>
+                  )}>
+                    <div class="git-diff-content" innerHTML={diffHtml() ?? ""} />
+                  </Errored>
+                </Loading>
               </Show>
             </div>
           </div>

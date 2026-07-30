@@ -402,7 +402,7 @@ export default function SettingsView(props: SettingsViewProps) {
     { id: "advanced", label: t().settings.categoryAdvanced },
   ];
 
-  const Loading = () => <div class="settings-loading">{t().chat.thinking}</div>;
+  const SettingsLoading = () => <div class="settings-loading">{t().chat.thinking}</div>;
   const ErrorState = () => (
     <div class="settings-error">
       <p>{t().settings.loadError ?? "Failed to load settings"}</p>
@@ -422,7 +422,7 @@ export default function SettingsView(props: SettingsViewProps) {
         </button>
       </div>
 
-      <Show when={!configLoading()} fallback={<Loading />}>
+      <Show when={!configLoading()} fallback={<SettingsLoading />}>
         <Show when={!loadError()} fallback={<ErrorState />}>
           <div class="settings-layout">
             {/* ── Left Nav ── */}

@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { action, createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { useI18n } from "../i18n";
 import type { SkillInfo, SkillRuntimeInfo } from "../lib/types";
 
@@ -29,7 +29,7 @@ export default function SkillsView(props: SkillsViewProps) {
   const [pending, setPending] = createSignal<Set<string>>(new Set());
   const [errors, setErrors] = createSignal<Record<string, string>>({});
   const [refreshing, setRefreshing] = createSignal(false);
-  const [refreshError, setRefreshError] = createSignal<string | null>(null);
+  const [refreshError, setRefreshError] = createSignal<Error | null>(null);
   const pendingTargets = new Map<string, boolean>();
   let refreshAwaitingCatalog = false;
 
@@ -114,14 +114,19 @@ export default function SkillsView(props: SkillsViewProps) {
     }
   }
 
-  async function reload() {
+  const reload = action(async function* () {
     if (!props.seed || refreshing()) return;
     setRefreshing(true);
     refreshAwaitingCatalog = true;
     setRefreshError(null);
-    try { await props.onReload(); }
-    catch (error) { refreshAwaitingCatalog = false; setRefreshError(String(error)); setRefreshing(false); }
-  }
+    try {
+      yield props.onReload();
+    } catch (error) {
+      refreshAwaitingCatalog = false;
+      setRefreshError(error instanceof Error ? error : new Error(String(error)));
+      setRefreshing(false);
+    }
+  });
 
   return <div class="skills-page">
     <div class="skills-header">
@@ -145,7 +150,12 @@ export default function SkillsView(props: SkillsViewProps) {
       </div>
     </div>
 
-    <Show when={refreshError()}><div class="skill-refresh-error" role="alert">{refreshError()}</div></Show>
+    <Show when={refreshError()}>
+      <div class="skill-refresh-error" role="alert">
+        {String(refreshError()!)}
+        <button onClick={() => { setRefreshError(null); void reload(); }}>{t().skills.retry}</button>
+      </div>
+    </Show>
     <Show when={props.diagnostics?.length}>
       <details class="skill-diagnostics"><summary>{t().skills.diagnostics.replace("{count}", String(props.diagnostics!.length))}</summary>
         <For each={props.diagnostics}>{item => <div>{item}</div>}</For>

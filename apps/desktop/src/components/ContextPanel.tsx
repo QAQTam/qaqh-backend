@@ -1,4 +1,4 @@
-import { createEffect, createSignal, Show } from "solid-js";
+import { createMemo, createSignal, Errored, Loading, Show } from "solid-js";
 import { request } from "../runtime/backendClient";
 import StreamMetricsChart, { type MetricPoint } from "./StreamMetricsChart";
 import { useI18n } from "../i18n";
@@ -54,28 +54,17 @@ function buildPiePaths(stats: ContextStats, caption: string): string {
 
 export default function ContextPanel(props: { seed: string; metricHistory: MetricPoint[]; contextLimit: number; onClose: () => void }) {
   const { t } = useI18n();
-  const [stats, setStats] = createSignal<ContextStats | null>(null);
   const [tab, setTab] = createSignal<"breakdown" | "timeline">("breakdown");
-  const [updatedAt, setUpdatedAt] = createSignal<number | null>(null);
 
-  async function refresh() {
-    if (!props.seed) return;
-    try {
-      const stats = await request<ContextStats>("plan.context_stats", { seed: props.seed });
-      setStats(stats);
-      setUpdatedAt(Date.now());
-    } catch (e) { console.error("context_stats:", e); }
-  }
-
-  // The panel is mounted only while visible. Refresh at mount and after a confirmed
-  // usage sample, rather than polling or coupling telemetry to the transcript.
-  createEffect(
-    () => {
-      const latest = props.metricHistory[props.metricHistory.length - 1];
-      return `${props.seed}:${latest?.sample_key ?? ""}:${latest?.ts ?? 0}`;
-    },
-    () => void refresh(),
-  );
+  // ── Async memo: auto-refetch when seed or latest metric changes ──
+  const stats = createMemo(async () => {
+    if (!props.seed) return null;
+    const latest = props.metricHistory[props.metricHistory.length - 1];
+    // Track both seed and metric snapshot for auto-refresh
+    void latest?.sample_key;
+    void latest?.ts;
+    return request<ContextStats>("plan.context_stats", { seed: props.seed });
+  });
 
   const piePaths = () => stats() ? buildPiePaths(stats()!, t().chat.tokens) : "";
 
@@ -105,29 +94,38 @@ export default function ContextPanel(props: { seed: string; metricHistory: Metri
           </div>
           <div class="context-dropdown-body">
             <Show when={tab() === "breakdown"}>
-            <Show when={stats() && total_tokens() > 0} fallback={<div class="context-empty">{t().context.empty}</div>}>
-              <div class="context-pie-wrap">
-                <svg viewBox="0 0 120 120" class="context-pie" role="img" aria-label={t().context.title} innerHTML={piePaths()} />
-              </div>
-              <div class="context-legend">
-                {stats() && [t().context.chat, t().context.thinking, t().context.toolCalls, t().context.toolResults, t().context.schema, t().context.system].map((label, i) => {
-                  const values = [stats()!.chat_text, stats()!.thinking, stats()!.tool_calls, stats()!.tool_results, stats()!.tools_schema, stats()!.system_prompt];
-                  return (
-                    <div class="context-legend-item">
-                      <span class="context-legend-dot" style={`background: ${COLORS[i]}`} />
-                      <span class="context-legend-label">{label}</span>
-                      <span class="context-legend-pct">{pct(values[i])}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              <div class="context-detail">
-                <span>{t().context.messages.replace("{count}", String(stats()?.messages ?? 0))}</span>
-                <span>{t().context.thinkingBlocks.replace("{count}", String(stats()?.thinking_blocks ?? 0))}</span>
-                <span>{t().context.toolCallBlocks.replace("{count}", String(stats()?.tool_call_blocks ?? 0))}</span>
-              </div>
-              <Show when={updatedAt()}>{time => <div class="context-updated">{t().context.updated.replace("{time}", new Date(time()).toLocaleTimeString())}</div>}</Show>
-            </Show>
+              <Loading fallback={<div class="context-empty">{t().chat.thinking}</div>}>
+                <Errored fallback={(err) => (
+                  <div class="context-empty">{t().context.empty} — {String(err())}</div>
+                )}>
+                  <Show when={stats()} fallback={<div class="context-empty">{t().context.empty}</div>}>
+                    {s => (
+                      <Show when={total_tokens() > 0} fallback={<div class="context-empty">{t().context.empty}</div>}>
+                        <div class="context-pie-wrap">
+                          <svg viewBox="0 0 120 120" class="context-pie" role="img" aria-label={t().context.title} innerHTML={piePaths()} />
+                        </div>
+                        <div class="context-legend">
+                          {[t().context.chat, t().context.thinking, t().context.toolCalls, t().context.toolResults, t().context.schema, t().context.system].map((label, i) => {
+                            const values = [s().chat_text, s().thinking, s().tool_calls, s().tool_results, s().tools_schema, s().system_prompt];
+                            return (
+                              <div class="context-legend-item">
+                                <span class="context-legend-dot" style={`background: ${COLORS[i]}`} />
+                                <span class="context-legend-label">{label}</span>
+                                <span class="context-legend-pct">{pct(values[i])}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div class="context-detail">
+                          <span>{t().context.messages.replace("{count}", String(s().messages))}</span>
+                          <span>{t().context.thinkingBlocks.replace("{count}", String(s().thinking_blocks))}</span>
+                          <span>{t().context.toolCallBlocks.replace("{count}", String(s().tool_call_blocks))}</span>
+                        </div>
+                      </Show>
+                    )}
+                  </Show>
+                </Errored>
+              </Loading>
             </Show>
             <Show when={tab() === "timeline"}>
               <Show when={props.metricHistory.length >= 1} fallback={<div class="context-empty">{t().context.waiting}</div>}>

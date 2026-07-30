@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, onSettled } from "solid-js";
+import { createSignal, onSettled } from "solid-js";
 import type { JSX } from "@solidjs/web";
 
 const LS_SIDEBAR_WIDTH = "deepx:sidebar-width";
@@ -46,11 +46,10 @@ export default function AppShell(props: { sidebar: JSX.Element; workspace: JSX.E
   onSettled(() => {
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
-  });
-
-  onCleanup(() => {
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
   });
 
   return (
