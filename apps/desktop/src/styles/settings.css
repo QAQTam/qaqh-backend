@@ -28,7 +28,7 @@
 }
 .settings-save-btn:hover { background: var(--accent-hover); }
 .settings-save-btn.saved {
-  background: #16a34a;
+  background: var(--green);
   animation: save-pop 0.45s ease-out;
 }
 @keyframes save-pop {
@@ -240,7 +240,7 @@
   border-radius: 50%;
   background: #fff;
   transition: transform var(--transition);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  box-shadow: var(--shadow-fab);
 }
 .settings-toggle input:checked + .settings-toggle-track {
   background: var(--accent);
@@ -324,7 +324,7 @@
 /* ── Migration Modal (unchanged from original) ── */
 .modal-overlay {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,0.4);
+  background: color-mix(in srgb, var(--bg-primary) 60%, transparent);
   display: flex; align-items: center; justify-content: center;
   z-index: 100;
 }

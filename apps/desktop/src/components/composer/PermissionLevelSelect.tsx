@@ -1,8 +1,8 @@
 export const PERMISSION_LEVELS = [
-  { value: 1, label: "L1 全部询问" },
-  { value: 2, label: "L2 读取免询问" },
-  { value: 3, label: "L3 工作区操作" },
-  { value: 4, label: "L4 完全访问" },
+  { value: 1, label: "L1", desc: "全部询问", color: "l1" },
+  { value: 2, label: "L2", desc: "读取免问", color: "l2" },
+  { value: 3, label: "L3", desc: "工作区", color: "l3" },
+  { value: 4, label: "L4", desc: "完全访问", color: "l4" },
 ] as const;
 
 export default function PermissionLevelSelect(props: {
@@ -11,21 +11,29 @@ export default function PermissionLevelSelect(props: {
   compact?: boolean;
 }) {
   return (
-    <label
-      class={{ "permission-level-select": true, compact: props.compact ?? false, "is-danger": props.level === 4 }}
+    <div
+      class={`permission-level-select${props.compact ? " compact" : ""}`}
       data-permission-level={props.level}
       title="控制 DeepX 可执行的操作范围"
+      role="radiogroup"
+      aria-label="权限等级"
     >
       <span class="permission-level-label">权限</span>
-      <select
-        aria-label="权限等级"
-        value={props.level}
-        onChange={(event) => void props.onChange(Number(event.currentTarget.value))}
-      >
+      <div class="permission-pills">
         {PERMISSION_LEVELS.map((item) => (
-          <option value={item.value}>{item.label}</option>
+          <button
+            type="button"
+            class={`permission-pill pill-${item.color}${props.level === item.value ? " active" : ""}`}
+            role="radio"
+            aria-checked={props.level === item.value ? "true" : "false"}
+            onClick={() => void props.onChange(item.value)}
+            title={item.desc}
+          >
+            <span class="pill-label">{item.label}</span>
+            {!props.compact && <span class="pill-desc">{item.desc}</span>}
+          </button>
         ))}
-      </select>
-    </label>
+      </div>
+    </div>
   );
 }

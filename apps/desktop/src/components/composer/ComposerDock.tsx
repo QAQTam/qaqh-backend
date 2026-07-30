@@ -188,7 +188,7 @@ export default function ComposerDock(props: {
           <div class="composer-attach-wrap" style="position:relative;">
             <button class="composer-attach" aria-label="添加附件" onClick={() => setAttachOpen(p => !p)}>＋</button>
             <Show when={attachOpen()}>
-              <div class="composer-attach-menu" style="position:absolute;bottom:100%;left:0;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:4px;margin-bottom:4px;z-index:10;min-width:140px;box-shadow:0 4px 12px rgba(0,0,0,0.15);">
+              <div class="composer-attach-menu" style="position:absolute;bottom:100%;left:0;background:var(--bg-secondary);border:var(--panel-border);border-radius:8px;padding:4px;margin-bottom:4px;z-index:10;min-width:140px;box-shadow:var(--shadow-card);">
                 <button class="composer-attach-option" onClick={handleUploadImage} style="display:block;width:100%;padding:8px 12px;border:none;background:none;text-align:left;cursor:pointer;border-radius:4px;">🖼️ 上传图片</button>
                 <button class="composer-attach-option" onClick={handleUploadText} style="display:block;width:100%;padding:8px 12px;border:none;background:none;text-align:left;cursor:pointer;border-radius:4px;">📄 上传文本</button>
               </div>

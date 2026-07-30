@@ -1,12 +1,12 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createSignal, createEffect } from "solid-js";
 import type { TaskInfo } from "../lib/types";
 
 export type TodoItemStatus = "pending" | "in_progress" | "completed" | "cancelled";
 
-/** Truncate to ~15 CJK or ~25 ASCII visual width. */
+/** Truncate to ~25 CJK or ~50 ASCII visual width. */
 function truncTitle(t: string): string {
   let w = 0;
-  const max = 30;
+  const max = 50;
   for (let i = 0; i < t.length; i++) {
     const cw = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(t[i]) ? 2 : 1;
     if (w + cw > max) return t.slice(0, i) + "…";
@@ -21,6 +21,7 @@ export default function TodoStatusStrip(props: {
   currentTodoId?: string | null;
 }) {
   const [expanded, setExpanded] = createSignal(false);
+  const [completedFlash, setCompletedFlash] = createSignal<Set<string>>(new Set());
 
   const statusLabel = (status: string) =>
     ({ pending: "待处理", in_progress: "进行中", completed: "已完成", cancelled: "已取消" } as Record<string, string>)[status] ?? status;
@@ -52,6 +53,9 @@ export default function TodoStatusStrip(props: {
     return Math.round((count("completed") + count("cancelled")) * 100 / total);
   };
 
+  const doneCount = () => count("completed") + count("cancelled");
+  const totalCount = () => props.tasks.length;
+
   const summaryLine = () => {
     const total = props.tasks.length;
     const done = count("completed") + count("cancelled");
@@ -61,36 +65,87 @@ export default function TodoStatusStrip(props: {
     const parts: string[] = [];
     if (inProg > 0) parts.push(`${inProg} 进行中`);
     if (pending > 0) parts.push(`${pending} 待处理`);
-    return `${parts.join(" · ")} · 进度 ${done}/${total}`;
+    return `${parts.join(" · ")} · ${done}/${total}`;
   };
 
-  // Pre-compute collapsed row content so it stays reactive inside Show
-  const collapsedRow = createMemo(() => {
+  // ── Completion flash tracking ──
+  createEffect(
+    () => props.tasks,
+    (tasks) => {
+      for (const t of tasks) {
+        if (t.status === "completed" || t.status === "cancelled") {
+          if (!completedFlash().has(t.id)) {
+            const next = new Set(completedFlash());
+            next.add(t.id);
+            setCompletedFlash(next);
+            setTimeout(() => {
+              setCompletedFlash(prev => {
+                const s = new Set(prev);
+                s.delete(t.id);
+                return s;
+              });
+            }, 800);
+          }
+        }
+      }
+    },
+  );
+
+  // ── Single row render helper (reused in roulette) ──
+  const renderRow = (item: TaskInfo | null, role: "prev" | "current" | "next", showProgress: boolean) => {
+    if (!item) {
+      return <div class={`todo-roulette-row row-${role} is-empty`}><span class="todo-roulette-dot">·</span></div>;
+    }
+    const isFlashing = completedFlash().has(item.id);
+    return (
+      <div
+        class={`todo-roulette-row row-${role} status-${item.status}${isFlashing ? " flash-complete" : ""}`}
+        data-todo-id={item.id}
+      >
+        <span class="todo-roulette-dot">
+          <i class={`todo-ci s-${item.status}${item.status === "in_progress" ? " pulse" : ""}`}>
+            {statusIcon(item.status)}
+          </i>
+        </span>
+        <span class="todo-roulette-id">{item.id}</span>
+        <span class="todo-roulette-text">{truncTitle(item.subject)}</span>
+        <span class={`todo-roulette-badge s-${item.status}`}>{statusLabel(item.status)}</span>
+        {showProgress && (
+          <span class="todo-roulette-progress">
+            <span class="todo-progress-track"><span class="todo-progress-fill" style={{ width: `${donePct()}%` }} /></span>
+            <small>{doneCount()}/{totalCount()}</small>
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  // ── Collapsed content ──
+  const collapsedContent = createMemo(() => {
     const car = carousel();
     const cur = car.current;
+
+    // No active item → summary line
     if (!cur) {
-      return <div class="todo-row todo-summary">
-        <span>{summaryLine()}</span>
-        <span class="todo-progress">
-          <span class="todo-progress-track"><span class="todo-progress-fill" style={{ width: `${donePct()}%` }} /></span>
-          <small>{donePct()}%</small>
-        </span>
-      </div>;
+      return (
+        <div class="todo-row todo-summary">
+          <span>{summaryLine()}</span>
+          <span class="todo-progress">
+            <span class="todo-progress-track"><span class="todo-progress-fill" style={{ width: `${donePct()}%` }} /></span>
+            <small>{doneCount()}/{totalCount()}</small>
+          </span>
+        </div>
+      );
     }
-    return <div class="todo-row">
-      {car.prev ? <span class="todo-arr" aria-hidden="true">‹</span> : <span class="todo-arr is-empty" />}
-      <span class="todo-cur">
-        <i class={`todo-ci s-${cur.status} pulse`}>{statusIcon(cur.status)}</i>
-        <span class="todo-ci-id">{cur.id}</span>
-        <span class="todo-ci-text">{truncTitle(cur.subject)}</span>
-        <span class={`todo-ci-badge s-${cur.status}`}>{statusLabel(cur.status)}</span>
-        <span class="todo-progress">
-          <span class="todo-progress-track"><span class="todo-progress-fill" style={{ width: `${donePct()}%` }} /></span>
-          <small>{donePct()}%</small>
-        </span>
-      </span>
-      {car.next ? <span class="todo-arr" aria-hidden="true">›</span> : <span class="todo-arr is-empty" />}
-    </div>;
+
+    // Active item → 3-row roulette
+    return (
+      <div class="todo-roulette">
+        {renderRow(car.prev, "prev", false)}
+        {renderRow(car.current, "current", true)}
+        {renderRow(car.next, "next", false)}
+      </div>
+    );
   });
 
   return <Show when={props.tasks.length > 0} fallback={null}>
@@ -114,8 +169,7 @@ export default function TodoStatusStrip(props: {
           </For>
         </ul>
       }>
-        {/* Render memoized row — SolidJS tracks its dependencies */}
-        {collapsedRow()}
+        {collapsedContent()}
       </Show>
     </section>
   </Show>;

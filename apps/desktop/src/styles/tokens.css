@@ -3,7 +3,7 @@
   --dx-transcript-width: 900px;
   --dx-composer-width: 900px;
   --conversation-width: 900px;
-  --conversation-shift-x: 0px;
+  --conversation-shift-x: calc(-1 * var(--sidebar-width, 258px) / 2);
   --dx-titlebar-height: 36px;
   --dx-header-height: 48px;
   /* Compatibility names used by the conversation surface. They deliberately
@@ -22,4 +22,9 @@
   --dx-radius-sm: var(--radius-sm);
   --dx-radius-md: var(--radius-md);
   --dx-radius-lg: var(--radius-lg);
+  --dx-bg-hover: var(--bg-hover);
+  --dx-bg-code: var(--bg-tool-body);
+  --dx-text-secondary: var(--text-secondary);
+  --dx-success: var(--green);
+  --border-strong: var(--border);
 }

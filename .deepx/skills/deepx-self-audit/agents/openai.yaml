@@ -1,4 +1,0 @@
-interface:
-  display_name: "DeepX Self Audit"
-  short_description: "Audit DeepX changes, contracts, secrets, and tests"
-  default_prompt: "Use $deepx-self-audit to inspect and verify this DeepX change."

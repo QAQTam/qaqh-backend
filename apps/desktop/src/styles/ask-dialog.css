@@ -1,7 +1,7 @@
 /* ── Ask Dialog ── */
 .ask-overlay {
   position: fixed; inset: 0; z-index: 100;
-  background: rgba(0,0,0,0.3);
+  background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
   backdrop-filter: blur(var(--overlay-glass-blur));
   -webkit-backdrop-filter: blur(var(--overlay-glass-blur));
   display: flex; align-items: center; justify-content: center;
@@ -110,7 +110,7 @@
 }
 .ask-progress-fill {
   height: 100%;
-  background: #f97316; /* orange-500 */
+  background: var(--accent);
   border-radius: 2px;
   transition: width 0.25s ease;
 }
@@ -136,9 +136,9 @@
   color: var(--text-secondary);
 }
 .ask-step-active {
-  border-color: #f97316;
-  color: #f97316;
-  background: rgba(249,115,22,0.08);
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(var(--accent-rgb),0.08);
 }
 .ask-step-filled:not(.ask-step-active) {
   border-color: var(--accent);

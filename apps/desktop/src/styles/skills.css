@@ -239,7 +239,7 @@
   border-radius: 50%;
   background: #fff;
   transition: transform var(--transition);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  box-shadow: var(--shadow-fab);
 }
 .skill-toggle input:checked + .skill-toggle-track {
   background: var(--accent);

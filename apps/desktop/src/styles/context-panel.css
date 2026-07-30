@@ -2,7 +2,7 @@
 
 .context-dropdown {
   width: 310px; margin-top: 6px; background: var(--bg-glass-panel); border: var(--panel-border);
-  border-radius: var(--radius-md); box-shadow: var(--shadow-card);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-card),var(--glass-highlight);
   overflow: hidden; backdrop-filter: blur(var(--panel-glass-blur)) saturate(var(--panel-glass-saturate));
 }
 .context-dropdown-hd {
