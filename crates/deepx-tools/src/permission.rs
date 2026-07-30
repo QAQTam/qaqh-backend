@@ -77,13 +77,16 @@ pub fn classify_risk(
 pub fn categorize_tool(name: &str) -> ToolCategory {
     match name {
         // ── Read ──
-        "read" | "list" | "search" | "diff" | "skills" | "ask_user"
-        | "git_diff" | "git_log" | "git_show" | "git_status" | "plan_list" | "plan_submit"
-        | "process_check" | "process_wait" => ToolCategory::Read,
+        "read" | "list" | "search" | "diff" | "skills" | "ask_user" | "git_diff" | "git_log"
+        | "git_show" | "git_status" | "plan_list" | "plan_submit" | "process_check"
+        | "process_wait" | "todo_list" => ToolCategory::Read,
 
         // ── Write ──
-        "apply_patch" | "patch" | "write" | "edit" | "edit_block" | "delete" | "git_add" | "git_commit"
-        | "git_branch" | "git_checkout" | "git_merge" | "git_restore" | "plan_create" | "task" => ToolCategory::Write,
+        "apply_patch" | "patch" | "write" | "edit" | "edit_block" | "delete" | "git_add"
+        | "git_commit" | "git_branch" | "git_checkout" | "git_merge" | "git_restore"
+        | "plan_create" | "task" | "todo_create" | "todo_update" | "todo_cancel" => {
+            ToolCategory::Write
+        }
 
         // ── Exec ──
         "exec" | "spawn_subagent" => ToolCategory::Exec,
@@ -292,6 +295,17 @@ pub fn needs_permission(
     workspace_root: &Path,
     trusted_dirs: &HashSet<PathBuf>,
 ) -> PermissionDecision {
+    // Todo tools only mutate the active session's own todo.json. They do not
+    // touch workspace files, run code, or access external resources. Requiring
+    // approval for each model-authored status transition creates recursive,
+    // repeated prompts without protecting a user-controlled resource.
+    if matches!(
+        tool_name,
+        "todo_create" | "todo_update" | "todo_cancel" | "todo_list"
+    ) {
+        return PermissionDecision::AutoApprove;
+    }
+
     // Level 4: everything auto-approved
     if level == PermissionLevel::Unrestricted {
         return PermissionDecision::AutoApprove;
@@ -352,7 +366,10 @@ pub fn needs_permission(
             tool_name
         )
     } else if matches!(category, ToolCategory::Exec | ToolCategory::Net) {
-        format!("Level 3: '{}' requires execution or network confirmation.", tool_name)
+        format!(
+            "Level 3: '{}' requires execution or network confirmation.",
+            tool_name
+        )
     } else {
         format!(
             "Level 3: '{}' accesses a path outside the workspace.",
@@ -505,6 +522,31 @@ mod tests {
         );
 
         assert!(matches!(decision, PermissionDecision::AutoApprove));
+    }
+
+    #[test]
+    fn session_todo_operations_never_open_permission_dialogs() {
+        for level in [
+            PermissionLevel::MaxLockdown,
+            PermissionLevel::ReadFree,
+            PermissionLevel::WorkspaceFree,
+            PermissionLevel::Unrestricted,
+        ] {
+            for tool_name in ["todo_create", "todo_update", "todo_cancel", "todo_list"] {
+                let decision = needs_permission(
+                    level,
+                    tool_name,
+                    &serde_json::json!({"id": "T1", "status": "completed"}),
+                    Path::new("."),
+                    &HashSet::new(),
+                );
+                assert!(
+                    matches!(decision, PermissionDecision::AutoApprove),
+                    "{tool_name} should be auto-approved at level {}",
+                    level.to_u8()
+                );
+            }
+        }
     }
 
     #[test]

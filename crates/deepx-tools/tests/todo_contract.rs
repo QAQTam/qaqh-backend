@@ -1,24 +1,34 @@
 #[test]
-fn public_schema_exposes_the_activation_path_handled_by_the_engine() {
-    let mut manager = deepx_tools::ToolManager::new();
-    deepx_tools::todo::register(&mut manager);
-    let definition = manager
-        .all_defs()
-        .into_iter()
-        .find(|definition| definition.function.name == "todo")
-        .expect("todo definition");
-    let actions = definition.function.parameters["properties"]["action"]["enum"]
-        .as_array()
-        .expect("todo action enum");
+fn public_schema_exposes_small_direct_todo_tools_and_no_goal_entrypoint() {
+    let manager = deepx_tools::registration::build_tool_manager(&[]);
+    let definitions = manager.all_defs();
+    let names: Vec<&str> = definitions
+        .iter()
+        .map(|definition| definition.function.name.as_str())
+        .collect();
 
+    for expected in ["todo_create", "todo_update", "todo_cancel", "todo_list"] {
+        assert!(names.contains(&expected), "missing {expected}");
+    }
     assert!(
-        actions.iter().any(|action| action == "activate"),
-        "todo activate must be visible to the model so the review flow is reachable"
+        !names.contains(&"todo"),
+        "legacy multiplexed tool must stay hidden"
+    );
+    assert!(
+        !names.contains(&"task"),
+        "deprecated duplicate task tool must stay hidden"
+    );
+    assert!(
+        definitions
+            .iter()
+            .filter(|definition| definition.function.name.starts_with("todo_"))
+            .all(|definition| !definition.function.description.contains("Goal")),
+        "the frozen Goal workflow must not be advertised to the model"
     );
 }
 
 #[test]
-fn crud_accepts_numeric_ids_and_status_round_trips_to_the_frontend_contract() {
+fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     let temp_home = std::env::temp_dir().join(format!(
         "deepx-todo-contract-{}-{}",
         std::process::id(),
@@ -29,114 +39,102 @@ fn crud_accepts_numeric_ids_and_status_round_trips_to_the_frontend_contract() {
     ));
     std::fs::create_dir_all(&temp_home).expect("create isolated home");
 
-    // This test binary owns a unique process and executes this test serially.
+    // This integration test binary owns an isolated process home.
     unsafe { std::env::set_var("USERPROFILE", &temp_home) };
     deepx_tools::runtime::init_tools("todo-contract", &[], vec![]);
-    deepx_tools::runtime::set_context("todo-contract", 4);
+    deepx_tools::runtime::set_context("todo-contract", 1);
 
-    let create = deepx_tools::execution::execute_with_context(
-        "todo",
-        "",
-        r#"{"action":"create","title":"Trace todo chain","description":"backend to UI"}"#,
-        "todo-create",
-        None,
-    );
-    assert!(create.success, "create failed: {}", create.content);
+    for (index, title) in ["Working", "Done", "Cancelled", "Waiting"]
+        .into_iter()
+        .enumerate()
+    {
+        let create = deepx_tools::execution::execute_with_context(
+            "todo_create",
+            "",
+            &serde_json::json!({"title": title, "description": format!("item {index}")})
+                .to_string(),
+            &format!("todo-create-{index}"),
+            None,
+        );
+        assert!(create.success, "create failed: {}", create.content);
+    }
 
-    let update = deepx_tools::execution::execute_with_context(
-        "todo",
+    let working = deepx_tools::execution::execute_with_context(
+        "todo_update",
         "",
-        r#"{"action":"update","id":1,"status":"completed","evidence":"verified"}"#,
-        "todo-update",
+        r#"{"id":1,"status":"in_progress"}"#,
+        "todo-working",
         None,
     );
     assert!(
-        update.success,
-        "numeric ID update failed: {}",
-        update.content
+        working.success,
+        "working update failed: {}",
+        working.content
     );
 
-    let list = deepx_tools::execution::execute_with_context(
-        "todo",
+    let completed = deepx_tools::execution::execute_with_context(
+        "todo_update",
         "",
-        r#"{"action":"list"}"#,
-        "todo-list",
+        r#"{"id":"T2","status":"completed","evidence":"verified"}"#,
+        "todo-completed",
         None,
     );
+    assert!(
+        completed.success,
+        "completed update failed: {}",
+        completed.content
+    );
+
+    let cancelled = deepx_tools::execution::execute_with_context(
+        "todo_cancel",
+        "",
+        r#"{"id":"3"}"#,
+        "todo-cancelled",
+        None,
+    );
+    assert!(
+        cancelled.success,
+        "cancel operation failed: {}",
+        cancelled.content
+    );
+
+    let list =
+        deepx_tools::execution::execute_with_context("todo_list", "", r#"{}"#, "todo-list", None);
     assert!(list.success, "list failed: {}", list.content);
-    assert!(
-        list.content.contains("T1:"),
-        "list omitted T1: {}",
-        list.content
-    );
-    assert!(
-        !list.content.contains("TT1"),
-        "list doubled ID prefix: {}",
-        list.content
-    );
+    let list_json: serde_json::Value =
+        serde_json::from_str(&list.content).expect("structured list response");
+    assert_eq!(list_json["counts"]["in_progress"], 1);
+    assert_eq!(list_json["counts"]["completed"], 1);
+    assert_eq!(list_json["counts"]["cancelled"], 1);
+    assert_eq!(list_json["counts"]["pending"], 1);
+    assert_eq!(list_json["items"][0]["id"], "T1");
 
     let status: serde_json::Value = serde_json::from_str(
         &deepx_tools::todo::todo_status_json("todo-contract").expect("status JSON"),
     )
     .expect("parse status JSON");
     assert_eq!(status["mode"], "manual");
+    assert_eq!(status["goal_enabled"], false);
+    assert_eq!(status["current_id"], "T1");
+    assert_eq!(status["current_title"], "Working");
+    assert_eq!(status["pending"], 1);
+    assert_eq!(status["in_progress"], 1);
     assert_eq!(status["completed"], 1);
-    assert_eq!(status["total"], 1);
-    assert_eq!(status["items"][0]["id"], "T1");
-    assert_eq!(status["items"][0]["status"], "completed");
+    assert_eq!(status["cancelled"], 1);
+    assert_eq!(status["total"], 4);
+    assert_eq!(status["items"][2]["status"], "cancelled");
 
-    let create_second = deepx_tools::execution::execute_with_context(
-        "todo",
-        "",
-        r#"{"action":"create","title":"Activate review","description":"commit after approval"}"#,
-        "todo-create-second",
-        None,
-    );
-    assert!(
-        create_second.success,
-        "second create failed: {}",
-        create_second.content
-    );
+    let activation =
+        deepx_tools::todo::exec_todo_activate(&serde_json::json!({})).expect_err("Goal frozen");
+    assert!(activation.contains("GOAL_FEATURE_FROZEN"));
 
-    let activate = deepx_tools::todo::exec_todo_activate(&serde_json::json!({}))
-        .expect("approved activation commits");
-    assert!(
-        activate.contains("Starting: T2"),
-        "activation returned the wrong ID: {activate}"
+    let mut store = deepx_tools::todo::load_todo().expect("load todo");
+    store.mode = deepx_tools::todo::TodoMode::Goal;
+    deepx_tools::todo::save_todo(&store).expect("save normalizes frozen Goal state");
+    assert_eq!(
+        deepx_tools::todo::load_todo().expect("reload todo").mode,
+        deepx_tools::todo::TodoMode::Manual
     );
-    assert!(
-        !activate.contains("TT2"),
-        "activation doubled ID prefix: {activate}"
-    );
-
-    let active_status: serde_json::Value = serde_json::from_str(
-        &deepx_tools::todo::todo_status_json("todo-contract").expect("active status JSON"),
-    )
-    .expect("parse active status JSON");
-    assert_eq!(active_status["mode"], "goal");
-    assert_eq!(active_status["current_id"], "T2");
-    assert_eq!(active_status["items"][0]["status"], "in_progress");
-
-    let complete = deepx_tools::execution::execute_with_context(
-        "todo",
-        "",
-        r#"{"action":"step_complete","id":2,"summary":"approved flow verified"}"#,
-        "todo-step-complete",
-        None,
-    );
-    assert!(
-        complete.success,
-        "numeric step completion failed: {}",
-        complete.content
-    );
-
-    let completed_status: serde_json::Value = serde_json::from_str(
-        &deepx_tools::todo::todo_status_json("todo-contract").expect("completed status JSON"),
-    )
-    .expect("parse completed status JSON");
-    assert_eq!(completed_status["mode"], "manual");
-    assert_eq!(completed_status["completed"], 1);
-    assert_eq!(completed_status["items"][0]["status"], "completed");
 
     std::fs::remove_dir_all(&temp_home).expect("remove isolated home");
 }

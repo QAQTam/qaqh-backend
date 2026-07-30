@@ -12,7 +12,6 @@ use super::file_query;
 
 use super::ask_user;
 use super::process_inspect;
-use super::task;
 use super::todo;
 
 use super::skill;
@@ -34,10 +33,7 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     file_mutate::register(&mut mgr);
     file_query::register(&mut mgr);
 
-    // ── 任务 (已废弃，请使用 todo) ──
-    task::register(&mut mgr);
-
-    // ── Todo (统一 task/plan/goal) ──
+    // ── Todo（直接、会话内状态工具）──
     todo::register(&mut mgr);
 
     // ── 交互 ──

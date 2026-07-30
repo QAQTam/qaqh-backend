@@ -1,4 +1,4 @@
-//! PLAN.md reader: parse PLAN.md checklist items for importers (todo_import_plan).
+//! PLAN.md reader and checklist parser.
 //!
 //! Format:
 //! ```markdown
@@ -7,8 +7,8 @@
 //! ```
 //!
 //! This module no longer registers any Agent tools. Planning is done via
-//! the unified `todo` tool, and PLAN.md serves only as a human-readable
-//! plan of record that can be imported into todo.json via `todo_import_plan`.
+//! the direct `todo_*` tools, and PLAN.md remains a human-readable plan of
+//! record. Goal activation/import is currently frozen.
 
 mod types;
 pub use types::PlanItem;

@@ -47,6 +47,11 @@ impl GoalEngine {
     /// If `ids` are specified, only those items are activated (in order).
     /// Otherwise all pending/in_progress items are activated.
     pub fn activate(&mut self, ids: Option<&[String]>) -> Result<(), String> {
+        if !deepx_tools::todo::GOAL_MODE_ENABLED {
+            return Err(
+                "Goal automation is temporarily frozen. Use the manual todo tools instead.".into(),
+            );
+        }
         let mut store = load_todo()?;
 
         if store.mode == TodoMode::Goal {

@@ -290,20 +290,11 @@ impl DeepxService {
             .map_err(err)?),
             "todo.status" => parse_json_string(deepx_tools::todo::todo_status_json(&seed()?)?),
             "todo.action" => {
-                let seed = seed()?;
                 let action = pstr(params, "action")?;
-                match action.as_str() {
-                    "activate" => self.send_user_input(
-                        seed,
-                        "[请求激活 Goal 模式] 请调用 todo 工具 action=activate，将当前 todo 列表提交给用户审核；获得明确批准后再开始自动执行。".into(),
-                    ),
-                    "stop" => self.send_user_input(
-                        seed,
-                        "[停止 Goal] 使用 todo 工具执行 action=stop reason=用户手动停止".into(),
-                    ),
-                    "resume" => self.send_user_input(seed, "[DeepX Goal: resume]".into()),
-                    _ => return Err(format!("unknown todo action: {action}").into()),
-                }
+                Err(format!(
+                    "todo action '{action}' is unavailable while Goal automation is frozen"
+                )
+                .into())
             }
             "plan.context_stats" => context_stats(&seed()?),
             "stats.token_usage" => token_stats(pu64(params, "days") as u32),

@@ -27,7 +27,7 @@ import PlanReviewPanel from "./PlanReviewPanel";
 import ContextPanel from "./ContextPanel";
 import InfoPopover from "./shell/InfoPopover";
 import ThreadHeader from "./shell/ThreadHeader";
-import TodoStatusStrip from "./GoalStatusStrip";
+import TodoStatusStrip from "./TodoStatusStrip";
 
 interface ChatViewProps {
   rawSession: Accessor<RawSessionState>;

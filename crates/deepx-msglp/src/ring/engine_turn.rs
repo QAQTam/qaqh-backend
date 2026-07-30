@@ -324,7 +324,7 @@ impl TurnEngine {
 
         let content = if approved && autonomous {
             format!(
-                "Plan approved. Import with todo_import_plan, then call todo_activate to start goal mode.\n\n{}",
+                "Plan approved. Goal automation is currently frozen. Track execution with todo_create and todo_update; use todo_cancel for work that is no longer needed.\n\n{}",
                 plan.content
             )
         } else if approved {

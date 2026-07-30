@@ -16,14 +16,42 @@ Ringing
 └─ Tool
 ```
 
+本计划属于**协议与运行时架构升级**，其中包含前后端连接方式升级，但不把
+Ringing 绑定到某一种传输：
+
+```text
+Provider HTTP/SSE 或 WebSocket
+        ↓ provider adapter（解析、修复、归一化）
+DomainCommand / DomainEvent
+        ↓ Ringing projector / router
+┌─────────────────────────────────────────────────────┐
+│ client boundary: HTTP command/query + 3×SSE event   │
+│ worker boundary: framed OS pipe                     │
+│ optional boundary: WebSocket（PTY/realtime专用）     │
+└─────────────────────────────────────────────────────┘
+```
+
+根因判断固定为：
+
+> 当前主要故障并非 WebSocket 本身，而是 Agent2Ui 同时承担领域事件、
+> 传输帧、重放日志和前端状态输入，令瞬时增量、可靠终态、错误和连接状态
+> 共享同一队列、背压与恢复语义。
+
+因此，替换 WebSocket 而不拆分领域模型、可靠性等级、快照和消费预算，不算
+完成 Ringing 升级。
+
 公共类型命名固定为：
 
 ```text
 RingingChannel
 RingingEventEnvelope
 RingingCommandEnvelope
-RingingServerFrame
-RingingClientFrame
+RingingCommandAck
+RingingEventBatch
+RingingChannelSnapshot
+RingingContentRef
+RingingWorkerCommandEnvelope
+RingingWorkerEventEnvelope
 
 RingingControlEvent
 RingingConversationEvent
@@ -63,6 +91,22 @@ Agent core ─────────→ DomainEvent ─┬──────�
                                    └───────→ LegacyProjector → Agent2Ui
 ```
 
+Ringing 固定分为四层，依赖只能向下：
+
+```text
+Domain        业务命令、业务事件、不变量
+Projection    snapshot、cursor、content reference
+Wire          Ringing envelope、版本、能力协商
+Transport     HTTP、SSE、WebSocket、OS pipe、in-process channel
+```
+
+- `Domain` 不得知道 SSE、WebSocket、HTTP、pipe、JSON frame 或 Electron。
+- `Projection` 只能从领域状态/领域事件生成，不从 legacy wire 反推。
+- `Wire` 不决定业务可靠性；可靠性由事件定义显式声明。
+- `Transport` 可以被替换，但不得重新解释事件、错误或终态。
+- provider adapter 必须在后端把供应商 SSE/WebSocket 转成中立 `DomainEvent`；
+  供应商原始 stream frame 永不进入 daemon-client 或 renderer 边界。
+
 严格禁止：
 
 ```text
@@ -88,15 +132,17 @@ Ringing → Ui2Agent → 新后端
 | 方向 | 两个独立大枚举 | 同一协议族下的 Command/Event |
 | 领域 | 消息、工具、session、错误混杂 | Control、Conversation、Tool独立 |
 | 生产模型 | 业务层直接构造线协议 | 业务层只产生DomainCommand/DomainEvent |
-| 连接 | 单WebSocket | 三条独立WebSocket |
-| 命令 | 部分Ui2Agent、部分字符串RPC | 原Ui2Agent语义全部变成typed command |
+| 连接 | 单WebSocket | HTTP命令/查询 + Control/Conversation/Tool三条SSE事件流 |
+| worker边界 | stdin/stdout legacy JSON-LP | framed OS pipe上的Ringing worker envelope |
+| 命令 | 部分Ui2Agent、部分字符串RPC | 原Ui2Agent语义变成typed HTTP command |
 | 事件 | 单Agent2Ui流 | 三个独立事件流 |
-| 顺序 | 全局seq和session seq | 每session/channel独立seq，保留因果session seq |
-| 恢复 | replay UI事件数组 | 每频道snapshot + cursor replay |
+| 顺序 | 全局seq和session seq | 每频道stream seq + 每session/channel seq，保留因果session seq |
+| 恢复 | replay UI事件数组 | 每频道领域snapshot + reliable cursor replay |
 | 错误 | 全局字符串Error | 结构化、可关联、可去重的失败终态 |
 | 高频输出 | 与关键生命周期共用队列 | 可合并、截断、覆盖；终态可靠 |
 | 前端 | 单reducer、单replay buffer | 三个domain store和合成selector |
 | 命令确认 | RPC返回与业务终态含混 | accepted/rejected与最终事件明确分离 |
+| 大内容 | 直接塞入事件并反复复制 | 事件携带摘要/tail，完整内容通过HTTP content ref读取 |
 
 ## Ringing 公共接口
 
@@ -107,13 +153,16 @@ RingingEventEnvelope {
   schema: "deepx.Ringing"
   version: 1
   channel
+  delivery: "reliable" | "replaceable" | "ephemeral"
   server_epoch
   seed
+  stream_seq
   channel_seq
   session_seq
   event_id
   causation_id?
   correlation_id?
+  state_revision?
   event
 }
 ```
@@ -153,8 +202,9 @@ RingingCommandAck {
 RingingEventBatch {
   channel
   seed
-  from_seq
-  to_seq
+  from_stream_seq
+  to_stream_seq
+  state_revision
   events
 }
 
@@ -162,6 +212,7 @@ RingingChannelSnapshot {
   channel
   seed
   baseline_seq
+  state_revision
   snapshot_version
   state
 }
@@ -169,29 +220,123 @@ RingingChannelSnapshot {
 
 Snapshot 必须表达领域状态，禁止使用事件数组模拟状态。
 
-## 三连接模型
+### 可靠性等级与回放
 
-新客户端建立三条独立 WebSocket，均可复用现有 `/control/v1` 地址，通过 Hello 的 `connection_role` 区分：
+- `reliable`：生命周期、终态、interaction、错误和revision变更。进入有界journal，
+  必须按cursor回放，不能静默丢弃。
+- `replaceable`：message/reasoning/tool progress等增量。允许按identity合并或用较新
+  checkpoint覆盖，不承诺逐token重放。
+- `ephemeral`：仅用于诊断性live提示，不进入snapshot和journal。
+- terminal事件发送前必须flush或覆盖同identity的replaceable事件。
+- journal只保存可靠事件和稀疏progress checkpoint，禁止保存每个provider token。
+- cursor超出保留窗口时发送`ringing.reset_required`，客户端通过HTTP读取权威snapshot；
+  禁止把历史错误、retry或toast重新注入snapshot。
+- 相同`event_id`至少一次投递但只允许应用一次；frontend reducer必须幂等。
+- `stream_seq`在`server_epoch + channel`内全局递增，供一条SSE连接恢复；`channel_seq`
+  在`seed + channel`内递增，供领域状态检测乱序。不得试图用一个SSE `Last-Event-ID`
+  表达多个session cursor。
+
+### 大内容外置
+
+工具完整输出、compact archive、超大diff和诊断内容使用：
 
 ```text
-control
-conversation
-tool
+RingingContentRef {
+  content_id
+  media_type
+  bytes
+  sha256
+  truncated
+}
 ```
 
-连接流程：
+事件只携带可渲染tail、统计信息和`content_ref`。客户端通过带鉴权的HTTP GET按需读取，
+服务端支持range/分页，并给content设置会话所有权和生命周期。API key、provider原始
+响应和未脱敏错误禁止进入content store。
 
-1. Control 首先连接并获得随机 `connection_group_id`。
-2. Conversation/Tool 使用相同 `client_instance_id` 和 group id加入。
-3. Control持有session lease，负责attach/detach和连接组生命周期。
-4. Conversation/Tool heartbeat只检测连接，不续租。
-5. Conversation/Tool可发送各自的Ringing命令，但服务端必须验证同组Control仍持有目标session lease。
-6. Conversation/Tool断开时独立恢复。
-7. Control断开时立即注销连接组、关闭数据连接，并重建三条连接。
+## 目标拓扑与传输分工
 
-旧客户端只建立原Control连接，不会收到Ringing消息。
+### daemon-client边界
 
-Control protocol在双协议期保持版本1，仅增加可选Hello字段。服务端只有在能力协商成功后才允许发送Ringing frame。
+普通HTTP负责：
+
+```text
+POST /ringing/v1/clients/open
+POST /ringing/v1/leases/renew
+POST /ringing/v1/commands/{control|conversation|tool}
+GET  /ringing/v1/snapshots/{channel}/{seed}
+GET  /ringing/v1/content/{content_id}
+GET  /ringing/v1/query/...
+```
+
+三条独立SSE负责server→client事件：
+
+```text
+GET /ringing/v1/events/control
+GET /ringing/v1/events/conversation
+GET /ringing/v1/events/tool
+```
+
+SSE frame使用标准字段：
+
+```text
+id: <server_epoch>:<channel>:<stream_seq>
+event: <Ringing event type>
+data: <RingingEventEnvelope JSON>
+```
+
+约束：
+
+1. Electron main持有daemon token和SSE连接；renderer不得直接持有token。
+2. Electron main可以使用支持header的fetch stream，不把token放入query string。
+   `client_session_id`同样通过header传递。
+3. main→renderer必须发送完整batch，禁止像现有`EventBatch`一样重新展开为逐事件IPC。
+4. SSE断开只表示该频道退化；Conversation或Tool断开不得显示daemon全局断联。
+5. Control SSE断开也不立即撤销session lease。lease绑定逻辑`client_session_id`，由有界
+   TTL和HTTP renew维护，避免一次网络抖动终止会话所有权。
+6. 每频道独立重连、cursor、snapshot和健康状态；全局“后端断联”只能由daemon
+   discovery/health与Control lease共同判定。
+7. HTTP command ack只表达accepted/rejected；业务完成仍由对应频道可靠终态表达。
+
+### daemon-worker边界
+
+- daemon与本地agent worker使用framed OS pipe；若未来同进程运行，可替换为in-process
+  bounded channel，但语义不变。
+- stdin只承载`RingingWorkerCommandEnvelope`，stdout只承载
+  `RingingWorkerEventEnvelope`，stderr只承载脱敏日志。
+- frame必须有长度上限、版本、方向、channel、session、command/event id。
+- stdout/stderr必须并发drain；spawn、读写、等待和teardown共享同一总超时与cancel。
+- worker不对外提供SSE，也不把provider SSE复制到pipe。
+
+### WebSocket保留范围
+
+WebSocket不是Ringing默认承载，仅在以下能力出现时单独协商：
+
+- PTY按键/resize与双向字节流。
+- 实时音频或其它真正高频双向媒体。
+- 未来远程控制需要单连接全双工且HTTP/SSE不可用的环境。
+
+普通message、compact、tool progress、permission和session管理不得仅因为“已有WS代码”
+继续使用WebSocket。
+
+旧客户端继续建立现有`/control/v1` WebSocket，不会收到Ringing消息。双协议期间，
+legacy WebSocket和Ringing HTTP/SSE并行存在，互不嵌套。
+
+legacy Control protocol在双协议期保持版本1且不承载Ringing frame。新客户端先调用
+`POST /ringing/v1/clients/open`完成版本/能力协商；端点不存在或版本不兼容时才显式选择
+legacy，禁止在同一连接上猜测frame类型。
+
+## 相对Codex与Reasonix的取舍
+
+- 采用Codex的优点：provider SSE/WebSocket只停留在adapter层；核心消费统一领域事件；
+  transport失败可以回落但不改变业务协议。
+- 不复制Codex的单一客户端事件管道：DeepX已有Electron IPC和高吞吐exec progress，
+  需要Control/Conversation/Tool物理隔离和独立消费预算。
+- 采用Reasonix的优点：HTTP POST命令、SSE事件、共享typed event和前端帧批处理。
+- 不复制Reasonix慢订阅者直接丢frame再整体读取history的策略：DeepX的permission、
+  compact terminal和tool terminal不能丢，必须区分reliable与replaceable。
+- DeepX额外增加：领域snapshot、双序号、content ref、逻辑lease、terminal revision和
+  main→renderer整batch IPC。这些是当前三个故障的直接约束，不是通用框架装饰。
 
 ## 每会话、每频道切流
 
@@ -209,7 +354,7 @@ sessionChannelMode[seed][channel] {
 事件切流采用两阶段提交：
 
 1. 客户端发送`channel_prepare`。
-2. 服务端先订阅live boundary，再生成Ringing snapshot，并缓冲boundary后的事件。
+2. 服务端先建立SSE live boundary，再生成Ringing领域snapshot，并缓冲boundary后的可靠事件。
 3. 客户端应用snapshot后发送`channel_commit`。
 4. 服务端原子切换event owner，停止向该客户端发送对应legacy事件并释放缓冲。
 5. prepare失败、超时或断线时保持legacy。
@@ -224,20 +369,33 @@ sessionChannelMode[seed][channel] {
 
 已经切换到Ringing的频道发生故障时保持Ringing模式，通过cursor/snapshot恢复，不自动退回legacy。
 
+切流期间可以从同一个`DomainEvent`同时投影legacy与Ringing用于影子验证，但只有一个
+协议能进入可见store。严禁把已经序列化的legacy frame作为Ringing的生产源。
+
 ## 迁移阶段
 
-### 1. Ringing基础设施
+### 0. 先固定故障基线与可观测性
+
+- 为compact期间“假断联”、单HTTP错误重复、10 MiB exec progress积压建立回归fixture。
+- 记录每频道producer rate、coalesce ratio、queue depth、IPC batch size、renderer commit
+  duration、cursor gap和terminal latency；只记录类型、长度和id，不记录正文。
+- 为当前legacy链路加上唯一`error occurrence id`诊断字段，但不改变旧wire语义。
+- 明确现有`Agent2Ui`每个variant的领域归属、可靠性等级、snapshot资格和最终Ringing类型。
+
+### 1. Ringing基础设施与身份骨架
 
 - 新增DomainCommand、DomainEvent和Ringing协议类型。
 - agent worker输入输出支持显式判别：
   - legacy记录保持原格式。
   - 新记录使用`wire: "Ringing_domain_v1"`。
 - worker reader必须先检查`wire`，禁止使用untagged猜测。
-- daemon建立三个独立ChannelBus、journal、snapshot projection和发送队列。
+- daemon建立三个独立ChannelRouter、可靠journal、领域snapshot projection和分级发送队列。
 - legacy EventBus继续存在，但只能接收DomainEvent经过LegacyProjector生成的事件，或尚未迁移的原始legacy事件。
-- 增加连接组、三连接握手、per-session/channel cursor和两阶段切流。
+- 增加HTTP command/query、三条SSE、逻辑client session/lease、per-session/channel cursor和两阶段切流。
+- 先迁移所有频道共用的session/turn/operation/interaction identity，避免Tool先迁移时继续从
+  legacy字符串推断turn归属。
 - 自动生成Rust→TypeScript bindings，并由CI检查漂移。
-- 初始默认全部legacy，Ringing只运行协议和连接测试。
+- 初始默认全部legacy；Ringing只运行协议、transport和shadow projection测试，不进入UI。
 
 ### 2. 第一优先级：Tool Event
 
@@ -277,6 +435,9 @@ truncated
 - 前端自动渲染最多128 KiB并显示截断提示。
 - terminal发送前先flush该工具保留的progress。
 - Electron必须把整个batch作为一次IPC发送，禁止展开。
+- Tool router使用独立reliable queue和replaceable slots；慢消费者只能覆盖progress，
+  不能阻塞或丢弃ToolFinished/ToolFailed。
+- 10 MiB以上完整输出只进入content store，SSE不重发完整正文。
 - Desktop建立Tool store；TUI直接处理RingingToolEvent。
 - ToolSnapshot直接从MessageStore和当前工具运行状态构建。
 - Tool切为Ringing后，legacy `RoundComplete.tool_calls`不再拥有工具卡渲染权。
@@ -303,9 +464,13 @@ ConversationCancelled
 
 - compact事件携带`compact_id`。
 - CompactFinished具有`completed/skipped/failed/cancelled`明确状态。
-- provider HTTP失败只生成一个可靠TurnFailed。
+- provider HTTP失败只生成一个可靠OperationFailed/TurnFailed，必须绑定
+  `operation_id + occurrence_id`；retry与最终失败不得共用event id。
 - message/reasoning/compact delta按帧合并。
 - terminal不得排在未受限delta backlog之后。
+- terminal包含完整最终文本或content ref，允许客户端直接覆盖未消费完的delta backlog。
+- compact期间transport健康、session activity、compact operation状态独立；compact开始/
+  结束不得触发backend connected状态。
 - ConversationSnapshot直接从持久化session消息构建。
 - v2会话不再使用Agent2Ui replay签名去重，也不通过错误字符串触发resume。
 
@@ -381,6 +546,7 @@ ToolPermissionRespond
 - 断线发生在accepted之后时，客户端通过command id查询/等待终态，不得重新执行。
 - legacy RPC handler和Ringing command handler分别映射到DomainCommand；两者不得互相调用。
 - 与Agent无关的config、git、workspace查询RPC不要求在本计划中删除，除非其语义原本属于Ui2Agent。
+- 只读查询继续使用HTTP query，不为了“协议统一”伪装成Command/Event。
 
 ## 前端与TUI状态结构
 
@@ -409,14 +575,24 @@ command mode
 
 TUI增加三个Ringing handler，并保留legacy handler两个发布周期。TUI不得通过LegacyProjector消费Ringing。
 
+Renderer调度固定为：
+
+- main进程按频道收包和校验，按batch通过preload发送。
+- renderer每session/channel每animation frame最多commit一次。
+- reliable事件到达时先drain/覆盖同identity replaceable状态，再原子应用terminal。
+- selector只读取已物化状态，不在render期间重放事件数组或拼接全部历史输出。
+- 完成态到达后，未处理的旧progress通过`state_revision`立即作废，不允许继续追赶渲染。
+
 ## 迁移错误热点
 
+- `Agent2Ui`当前同时充当领域模型、wire frame、snapshot projection和frontend reducer输入。
 - agent stdout/stdin当前分别严格解析Agent2Ui和Ui2Agent。
 - activity tracker当前通过序列化后的legacy `type`判断生命周期。
 - EventBus直接存储ControlServerMessage和Agent2Ui projection。
 - persisted session snapshot直接创建SessionRestored。
 - 单outbound queue隐含全局到达顺序。
 - Electron当前拆散EventBatch并逐事件IPC。
+- Electron连接错误、频道错误与业务错误容易汇入同一status/toast路径。
 - frontend replay、local snapshot和reducer假设只有一个全局流。
 - resume同时依赖RPC、SessionRestored和session.replay_events，容易产生重复baseline。
 - TUI对未知ControlServerMessage静默忽略。
@@ -428,7 +604,7 @@ TUI增加三个Ringing handler，并保留legacy handler两个发布周期。TUI
 
 发布周期1：
 
-- Ringing基础设施。
+- Ringing HTTP/SSE/pipe基础设施与identity spine。
 - Tool Event默认Ringing。
 - Conversation、Control Event和全部Command保持legacy。
 - Desktop和TUI均支持按session切流。
@@ -441,9 +617,9 @@ TUI增加三个Ringing handler，并保留legacy handler两个发布周期。TUI
 
 两个兼容周期结束并满足验收门槛后：
 
-- 将Control protocol升至2。
+- 固化Ringing v1最低客户端/daemon版本并拒绝不支持的组合。
 - 删除Agent2Ui和Ui2Agent。
-- 删除LegacyProjector、legacy ingress、旧EventBus projection、旧replay buffer、旧前端reducer和legacy TS bindings。
+- 删除`/control/v1` legacy WebSocket业务事件/RPC入口、LegacyProjector、legacy ingress、旧EventBus projection、旧replay buffer、旧前端reducer和legacy TS bindings。
 - 删除对应字符串session/interaction RPC兼容入口。
 - 保留不属于Agent命令域的daemon查询RPC。
 - 全仓搜索要求Agent2Ui/Ui2Agent生产引用为零。
@@ -461,16 +637,19 @@ TUI增加三个Ringing handler，并保留legacy handler两个发布周期。TUI
   - accepted前断线可安全重试。
   - accepted后断线不得重复执行。
   - command id与最终causation id正确关联。
-- 三连接：
-  - 数据连接不能独立获得lease。
-  - Control断开销毁连接组。
-  - Tool/Conversation断开只恢复自身。
+- HTTP/SSE/lease：
+  - SSE连接不能独立获得或续租session lease。
+  - lease renew停止后在有界TTL内释放，不依赖一次socket close。
+  - Tool/Conversation断开只恢复自身，不触发全局断联。
+  - `Last-Event-ID`有效时只回放可靠tail；gap时强制snapshot。
+  - native/EventSource限制不导致token进入URL、日志或renderer。
 - 压力测试：
   - 10 MiB exec输出时内存保持有界。
   - renderer每session/channel每帧最多commit一次。
-  - Tool洪峰期间Control RPC/heartbeat本地p95低于250 ms。
+  - Tool洪峰期间Control HTTP command/lease renew本地p95低于250 ms。
   - compact成功或HTTP失败后1秒内显示唯一终态。
   - 后端工具完成后前端不存在分钟级渲染积压。
+  - terminal到达后旧revision progress不再触发render。
 - UI：
   - 每session/channel/direction只有一个权威协议。
   - 单个error id最多生成一个Toast。
@@ -478,7 +657,8 @@ TUI增加三个Ringing handler，并保留legacy handler两个发布周期。TUI
 - 最终验证：
   - 协议单测。
   - worker输入输出边界测试。
-  - daemon三连接WebSocket集成测试。
+  - daemon HTTP command/query、三SSE和lease集成测试。
+  - SSE partial frame、malformed data、重连、cursor gap和慢消费者测试。
   - Desktop/TUI focused tests。
   - TypeScript typecheck。
   - Rust affected crates check。
@@ -487,6 +667,9 @@ TUI增加三个Ringing handler，并保留legacy handler两个发布周期。TUI
 ## 默认假设
 
 - Ringing是整个新双向协议的正式名称，代码、能力名、日志和文档统一使用该拼写。
+- Ringing是领域协议族，不等于SSE、HTTP、WebSocket或pipe；transport crate不得成为
+  domain crate的依赖。
 - daemon和agent worker来自同一可执行文件，不支持新worker与旧daemon内部混搭。
+- legacy使用现有WebSocket，Ringing默认使用HTTP+SSE；二者在迁移期并行但不互相封装。
 - 已切换的Ringing频道不会自动退回legacy，故障必须在Ringing恢复路径中解决。
 - 迁移诊断只记录频道、类型、长度、序号、耗时、command id和丢弃字节数，不记录消息正文、工具参数、provider响应或凭据。

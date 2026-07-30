@@ -298,7 +298,7 @@ use std::time::Duration;
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
         key: "task".to_string(),
-        description: "[DEPRECATED] Use todo instead. Create, manage, and track tasks via action: create, update (status change), delete, or list.",
+        description: "[DEPRECATED] Use todo_create, todo_update, todo_cancel, and todo_list instead.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
