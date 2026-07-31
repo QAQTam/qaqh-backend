@@ -66,7 +66,7 @@ time: string,
 /**
  * JSON-serialized tool arguments for formatting.
  */
-args: string, } | { "type": "exec_progress", tool_call_id: string, stream: string, seq: bigint, chunk: string, } | { "type": "tool_call_preview", turn_id: string, round_num: number, index: number, id: string, name: string, args_so_far: string, } | { "type": "code_delta", lines_added: number, lines_removed: number, files_created: number, files_deleted: number, file?: string, } | { "type": "pong" } | { "type": "skills_changed",
+args: string, } | { "type": "exec_progress", tool_call_id: string, stream: string, seq: bigint, chunk: string, } | { "type": "tool_call_preview", turn_id: string, round_num: number, index: number, id: string, name: string, args_so_far: string, } | { "type": "search_status", turn_id: string, round_num: number, status: string, } | { "type": "code_delta", lines_added: number, lines_removed: number, files_created: number, files_deleted: number, file?: string, } | { "type": "pong" } | { "type": "skills_changed",
 /**
  * All discoverable skills in the workspace.
  */

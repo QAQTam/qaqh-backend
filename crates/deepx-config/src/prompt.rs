@@ -142,11 +142,10 @@ mod tests {
     }
 
     #[test]
-    fn prompt_teaches_hash_bound_patch_preview_before_apply() {
+    fn prompt_teaches_dry_run_preview_before_apply() {
         let prompt = full_system_prompt();
         assert!(prompt.contains("[FILE EDITING]"));
         assert!(prompt.contains("apply_patch"));
-        assert!(prompt.contains("expected_hash"));
         assert!(prompt.contains("dry_run: true"));
         assert!(prompt.contains("*** Begin Patch"));
     }

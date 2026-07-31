@@ -99,3 +99,35 @@ it("renders inline and display LaTeX while preserving Markdown code as literal t
   expect(host.querySelector("code")?.textContent).toBe("$not_math$");
   dispose();
 });
+
+it("replaces streaming code-block HTML with the single final block", async () => {
+  const host = document.createElement("div");
+  const [content, setContent] = createSignal("intro\n\n```ts\nconst a = 1;\n```\n\nafter");
+  const [final, setFinal] = createSignal(false);
+  const dispose = render(
+    () => <MarkdownBody content={content()} final={final()} />,
+    host,
+  );
+
+  // Streaming path: the code block gets a rendered wrapper (Shiki or fallback).
+  shikiState.resolve({
+    codeToHtml: text => `<pre class="shiki"><code>${text}</code></pre>`,
+  });
+  await vi.waitFor(() =>
+    expect(host.querySelector(".code-block-wrapper")).not.toBeNull(),
+  );
+  expect(host.textContent).toContain("const a = 1");
+
+  // Final render: the whole answer becomes one "f" block; streaming block
+  // HTML is dropped so no second copy of the answer stays resident.
+  setFinal(true);
+  setContent("**final answer**");
+  await vi.waitFor(() => expect(host.querySelector("strong")?.textContent).toBe("final answer"));
+
+  expect(host.querySelector(".code-block-wrapper")).toBeNull();
+  expect(host.querySelector('[data-key="b1"]')).toBeNull();
+  expect(host.textContent).not.toContain("const a = 1");
+  expect(host.textContent).not.toContain("intro");
+  dispose();
+  shikiState.reset();
+});

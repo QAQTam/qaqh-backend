@@ -47,6 +47,46 @@ pub struct ProviderConfig {
     pub stateful: bool,
     /// Whether the endpoint accepts a system message after history/tools.
     pub supports_tail_system: bool,
+    /// Responses API capability differences from the OpenAI reference semantics.
+    /// Configured from `EndpointSpec` (registry) so new providers only need a
+    /// config change, never gate code.
+    pub responses_compat: ResponsesCompat,
+}
+
+/// Responses API provider capability differences.
+///
+/// Defaults follow OpenAI's official Responses API semantics — every
+/// compatible endpoint uses that format as its reference (DeepSeek's docs
+/// say so explicitly). Providers that diverge override the fields they
+/// differ on; unknown request members are ignored silently by DeepSeek and
+/// rejected only by a few strict endpoints.
+#[derive(Debug, Clone)]
+pub struct ResponsesCompat {
+    /// Inject the built-in `web_search` tool so the model can search on its
+    /// own (server-side execution). Default: true.
+    pub web_search: bool,
+    /// Allow echoing `web_search_call` items back verbatim to restore
+    /// server-side search results across stateless turns. Default: true.
+    pub echo_web_search_call: bool,
+    /// Send `include: ["reasoning.encrypted_content"]`. Default: true.
+    pub send_include: bool,
+    /// Upper bound for `reasoning.effort` ("high" for OpenAI, "max" for
+    /// DeepSeek). Higher requested values are clamped. Default: "high".
+    pub effort_max: String,
+    /// Send the `user` field (rate-limit & KVCache isolation). Default: true.
+    pub supports_user: bool,
+}
+
+impl Default for ResponsesCompat {
+    fn default() -> Self {
+        Self {
+            web_search: true,
+            echo_web_search_call: true,
+            send_include: true,
+            effort_max: "high".into(),
+            supports_user: true,
+        }
+    }
 }
 
 impl ProviderConfig {
@@ -80,6 +120,7 @@ impl ProviderConfig {
             do_sample,
             stateful: false,
             supports_tail_system: true,
+            responses_compat: ResponsesCompat::default(),
         }
     }
 
@@ -109,6 +150,7 @@ impl ProviderConfig {
             do_sample: None,
             stateful: false,
             supports_tail_system: true,
+            responses_compat: ResponsesCompat::default(),
         }
     }
 
@@ -151,6 +193,9 @@ pub enum StreamEvent {
         name: String,
         args_so_far: String,
     },
+    /// Server-side web search progress (Responses API built-in tool).
+    /// Payload is one of "in_progress" | "searching" | "completed".
+    WebSearchStatus(String),
     Done {
         raw_message: Message,
         usage: Option<deepx_types::UsageInfo>,

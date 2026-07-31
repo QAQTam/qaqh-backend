@@ -620,6 +620,9 @@ fn handle_chat(
                     StreamEvent::ToolCallProgress { index, id, name, args_so_far } => {
                         json!({"type":"tool_call","index":index,"id":id,"name":name,"args":args_so_far}).to_string()
                     }
+                    StreamEvent::WebSearchStatus(status) => {
+                        json!({"type":"web_search","status":status}).to_string()
+                    }
                     StreamEvent::Done { raw_message, usage, stop_reason } => {
                         let msg_json: serde_json::Value = serde_json::json!({
                             "role": raw_message.role,

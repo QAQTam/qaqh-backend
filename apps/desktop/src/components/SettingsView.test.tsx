@@ -27,6 +27,14 @@ const sampleProviders = [
         default_model: "deepseek-chat",
         models: ["deepseek-chat", "deepseek-reasoner"],
       },
+      {
+        id: "responses",
+        display: "Responses API",
+        base_url: "https://api.deepseek.com",
+        default_model: "deepseek-v4-flash",
+        models: ["deepseek-v4-flash"],
+        beta: true,
+      },
     ],
   },
 ];
@@ -396,6 +404,28 @@ describe("SettingsView – API Key behavior", () => {
     await vi.waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("config.set_database_enabled", { enabled: true });
     });
+
+    dispose();
+    host.remove();
+  });
+});
+
+describe("SettingsView – endpoint Beta badge", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders the Beta badge only on beta endpoints", async () => {
+    invokeMock.mockResolvedValue(cfg());
+
+    const { host, dispose } = setup();
+    await waitForLayout(host);
+
+    // Models & Providers category shows the endpoint dropdown.
+    const options = [...host.querySelectorAll<HTMLOptionElement>(".settings-row select option")];
+    const labels = options.map((o) => o.textContent ?? "");
+    expect(labels).toContain("OpenAI Compat");
+    expect(labels).toContain("Responses API (Beta)");
 
     dispose();
     host.remove();

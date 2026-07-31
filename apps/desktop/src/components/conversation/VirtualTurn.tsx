@@ -5,27 +5,45 @@ import TurnGroup from "./TurnGroup";
 /**
  * Wraps TurnGroup with IntersectionObserver-based virtualisation.
  *
- * When a turn scrolls out of the viewport (with a generous rootMargin
- * buffer), TurnGroup is unmounted — releasing MarkdownBody's blockHtml
- * store (including Shiki HTML strings) and its DOM subtree.
+ * Turns render only while inside (or near) the viewport. When a turn scrolls
+ * far out, it is unmounted after a short debounce — releasing MarkdownBody's
+ * blockHtml store (including Shiki HTML strings) and its DOM subtree — while a
+ * measured placeholder keeps the scroll position stable. Scrolling back in
+ * remounts TurnGroup and re-renders the blocks from raw content.
  *
- * When the turn scrolls back into view, TurnGroup is remounted and
- * MarkdownBody re-renders the blocks from scratch.
+ * The debounce absorbs fast-scroll edge crossings so the transcript does not
+ * thrash mount/unmount while the user is actively scrolling.
  */
+const UNMOUNT_DEBOUNCE_MS = 300;
+
 export default function VirtualTurn(props: {
   turn: TurnViewModel;
   onReviewChanges?: (changes: ChangeReviewFile[]) => void;
 }) {
   let sentinel!: HTMLDivElement;
+  let hideTimer: number | undefined;
+  let measuredHeight = 0;
   const [visible, setVisible] = createSignal(false);
 
   onSettled(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry?.isIntersecting) setVisible(true);
-        // Never flip back to false — once rendered, keep it.
-        // This avoids jank from rapid mount/unmount during fast scroll.
-        // Memory is freed only on full transcript disposal.
+        if (entry?.isIntersecting) {
+          if (hideTimer !== undefined) {
+            clearTimeout(hideTimer);
+            hideTimer = undefined;
+          }
+          setVisible(true);
+          return;
+        }
+        // Left the viewport: schedule an unmount. Capture the current height
+        // first so the placeholder keeps the scroll position.
+        if (hideTimer !== undefined) clearTimeout(hideTimer);
+        hideTimer = window.setTimeout(() => {
+          hideTimer = undefined;
+          if (sentinel) measuredHeight = sentinel.offsetHeight;
+          setVisible(false);
+        }, UNMOUNT_DEBOUNCE_MS);
       },
       {
         rootMargin: "600px 0px",
@@ -33,7 +51,13 @@ export default function VirtualTurn(props: {
       },
     );
     observer.observe(sentinel);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (hideTimer !== undefined) {
+        clearTimeout(hideTimer);
+        hideTimer = undefined;
+      }
+    };
   });
 
   return (
@@ -48,7 +72,7 @@ export default function VirtualTurn(props: {
           <div
             aria-hidden="true"
             style={{
-              "min-height": "120px",
+              height: `${measuredHeight || 120}px`,
               background: "var(--bg-secondary, transparent)",
             }}
           />

@@ -504,4 +504,63 @@ describe("sessionEventReducer", () => {
 
     expect(state.telemetry[0]).toMatchObject({ cache_available: true, cache_hit: 0, cache_miss: 0 });
   });
+
+  it("caps turns to the newest MAX_TURNS entries", () => {
+    let state = createRawSessionState("seed-turns");
+    for (let i = 1; i <= 260; i++) {
+      state = reduceAgentEvent(state, {
+        type: "turn_start", turn_id: `t${i}`, user_text: `q${i}`,
+      }, i);
+    }
+    expect(state.turns).toHaveLength(250);
+    expect(state.turns[0].turnId).toBe("t11");
+    expect(state.turns[249].turnId).toBe("t260");
+  });
+
+  it("caps rounds per turn to the newest MAX_ROUNDS_PER_TURN entries", () => {
+    let state = createRawSessionState("seed-rounds");
+    state = reduceAgentEvent(state, { type: "turn_start", turn_id: "t1", user_text: "go" }, 1);
+    for (let i = 1; i <= 25; i++) {
+      state = reduceAgentEvent(state, {
+        type: "round_complete",
+        turn_id: "t1",
+        round_num: i,
+        answer: `round-${i}`,
+        tool_calls: [],
+        blocks: [],
+        is_final: false,
+      }, 100 + i);
+    }
+    expect(state.turns[0].rounds).toHaveLength(20);
+    expect(state.turns[0].rounds[0].roundNum).toBe(6);
+    expect(state.turns[0].rounds[19].roundNum).toBe(25);
+  });
+
+  it("caps and truncates tool results per round", () => {
+    let state = createRawSessionState("seed-results");
+    state = reduceAgentEvent(state, { type: "turn_start", turn_id: "t1", user_text: "go" }, 1);
+    const results = Array.from({ length: 60 }, (_, i) => ({
+      tool_call_id: `call-${i}`,
+      output: `output-${i}`,
+      success: true,
+    }));
+    state = reduceAgentEvent(state, {
+      type: "tool_results", turn_id: "t1", round_num: 1, results,
+    }, 200);
+
+    const toolResults = state.turns[0].rounds[0].toolResults;
+    expect(Object.keys(toolResults)).toHaveLength(50);
+    expect(toolResults["call-9"]).toBeUndefined();
+    expect(toolResults["call-10"]).toBeTruthy();
+    expect(toolResults["call-59"]).toBeTruthy();
+
+    // Oversized output is clipped with a truncation marker.
+    state = reduceAgentEvent(state, {
+      type: "tool_results", turn_id: "t1", round_num: 1,
+      results: [{ tool_call_id: "big", output: "x".repeat(70_000), success: true }],
+    }, 210);
+    const big = state.turns[0].rounds[0].toolResults["big"];
+    expect(big.output.length).toBeLessThan(70_000);
+    expect(big.output).toContain("[truncated:");
+  });
 });

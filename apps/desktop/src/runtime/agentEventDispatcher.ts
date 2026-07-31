@@ -41,7 +41,7 @@ export function dispatchAgentEvent(
     case "tool_results": case "tool_exec_delta": case "more_turns": case "tool_notice":
     case "plan_submitted": case "done": case "compact_start":
     case "compact_end": case "compact_delta": case "shutdown_ack": case "ready":
-    case "audit_record": case "exec_progress": case "tool_call_preview": case "code_delta":
+    case "audit_record": case "exec_progress": case "tool_call_preview": case "search_status": case "code_delta":
     case "pong": case "skills_changed": case "skill_operation_resolved": case "permission_request": case "ask_user":
       return;
     default: {

@@ -11,9 +11,10 @@ use std::time::Duration;
 
 use deepx_types::{ContentBlock, Message, ToolDef};
 
-use super::types::{ProviderConfig, StreamEvent};
+use super::types::{ProviderConfig, ResponsesCompat, StreamEvent};
 
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_RETRIES: u32 = 3;
 
 static FALLBACK_RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
     tokio::runtime::Builder::new_current_thread()
@@ -70,7 +71,10 @@ fn build_responses_url(base_url: &str, responses_path: Option<&str>) -> String {
 
 // ── Message conversion: DeepX ContentBlock → Responses input[] items ──
 
-fn convert_messages_to_input(messages: &[Message]) -> Vec<serde_json::Value> {
+fn convert_messages_to_input(
+    messages: &[Message],
+    compat: &ResponsesCompat,
+) -> Vec<serde_json::Value> {
     let mut items: Vec<serde_json::Value> = Vec::new();
 
     for msg in messages {
@@ -122,6 +126,20 @@ fn convert_messages_to_input(messages: &[Message]) -> Vec<serde_json::Value> {
                             "arguments": args,
                             "status": "completed",
                         }));
+                    }
+                }
+
+                // WebSearchCall blocks → top-level web_search_call items,
+                // echoed verbatim so the server restores its search results.
+                if compat.echo_web_search_call {
+                    for block in &msg.content {
+                        if let ContentBlock::WebSearchCall { id, action } = block {
+                            items.push(serde_json::json!({
+                                "type": "web_search_call",
+                                "id": id,
+                                "action": action,
+                            }));
+                        }
                     }
                 }
             }
@@ -180,20 +198,51 @@ fn convert_user_content(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
     parts
 }
 
-fn convert_tools(tools: Option<Vec<ToolDef>>) -> Option<Vec<serde_json::Value>> {
-    let tds = tools?;
-    if tds.is_empty() {
-        return None;
+fn convert_tools(
+    tools: Option<Vec<ToolDef>>,
+    compat: &ResponsesCompat,
+) -> Option<Vec<serde_json::Value>> {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    if let Some(tds) = tools {
+        for td in tds {
+            items.push(serde_json::json!({
+                "type": "function",
+                "name": td.function.name,
+                "description": td.function.description,
+                "parameters": td.function.parameters,
+            }));
+        }
     }
-    let items: Vec<serde_json::Value> = tds.into_iter().map(|td| {
-        serde_json::json!({
-            "type": "function",
-            "name": td.function.name,
-            "description": td.function.description,
-            "parameters": td.function.parameters,
-        })
-    }).collect();
-    Some(items)
+    // Built-in server-side search tool. Injected even when no function tools
+    // are registered: the model may decide on its own to search (tool_choice
+    // default `auto`). Providers that ignore unknown tool types (compat
+    // web_search=false) are unaffected.
+    if compat.web_search {
+        items.push(serde_json::json!({"type": "web_search"}));
+    }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+/// Clamp a requested reasoning effort to the provider's upper bound.
+///
+/// DeepSeek accepts `none / minimal / low / medium / high / xhigh / max`;
+/// OpenAI stops at `high`. The ladder is ordered so a value above the bound
+/// (e.g. "xhigh" against an OpenAI endpoint) degrades gracefully instead of
+/// being rejected or silently misinterpreted.
+fn clamp_effort(effort: Option<String>, max: &str) -> String {
+    const ORDER: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    let requested = effort.unwrap_or_else(|| "medium".into());
+    let max_idx = ORDER.iter().position(|&v| v == max).unwrap_or(4);
+    let idx = ORDER
+        .iter()
+        .position(|&v| v == requested)
+        .unwrap_or(max_idx)
+        .min(max_idx);
+    ORDER[idx].to_string()
 }
 
 // ── Public API ──
@@ -204,13 +253,15 @@ pub fn chat_stream_responses(
     model: &str,
     messages: Vec<Message>,
     tools: Option<Vec<ToolDef>>,
-    _max_tokens: u32,
+    max_tokens: u32,
     effort: Option<String>,
+    user_id: Option<String>,
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
-    let input_items = convert_messages_to_input(&messages);
-    let responses_tools = convert_tools(tools);
+    let compat = &provider.responses_compat;
+    let input_items = convert_messages_to_input(&messages, compat);
+    let responses_tools = convert_tools(tools, compat);
 
     let mut body_map = serde_json::Map::new();
     body_map.insert("model".into(), serde_json::json!(model));
@@ -218,6 +269,9 @@ pub fn chat_stream_responses(
     body_map.insert("stream".into(), serde_json::json!(true));
     body_map.insert("store".into(), serde_json::json!(false));
     body_map.insert("parallel_tool_calls".into(), serde_json::json!(true));
+    if max_tokens > 0 {
+        body_map.insert("max_output_tokens".into(), serde_json::json!(max_tokens));
+    }
 
     if let Some(ref t) = responses_tools {
         body_map.insert("tools".into(), serde_json::Value::Array(t.clone()));
@@ -226,11 +280,24 @@ pub fn chat_stream_responses(
     body_map.insert(
         "reasoning".into(),
         serde_json::json!({
-            "effort": effort.unwrap_or_else(|| "medium".into()),
+            "effort": clamp_effort(effort, &compat.effort_max),
             "summary": "auto",
         }),
     );
-    body_map.insert("include".into(), serde_json::json!(["reasoning.encrypted_content"]));
+    if compat.send_include {
+        // `include` requests encrypted reasoning content (OpenAI semantics).
+        // DeepSeek ignores it silently (documented); strict compatible
+        // endpoints that reject unknown members turn this off via compat.
+        body_map.insert(
+            "include".into(),
+            serde_json::json!(["reasoning.encrypted_content"]),
+        );
+    }
+    if compat.supports_user {
+        if let Some(ref uid) = user_id {
+            body_map.insert("user".into(), serde_json::json!(uid));
+        }
+    }
 
     let body = serde_json::Value::Object(body_map);
     let url = build_responses_url(&provider.base_url, provider.responses_path.as_deref());
@@ -255,9 +322,21 @@ pub fn chat_stream_responses(
                 if !resp.status().is_success() {
                     let status = resp.status().as_u16();
                     let err_body = block_on(async { resp.text().await }).unwrap_or_default();
+                    if status == 401 {
+                        // Some providers echo the API key tail in auth errors
+                        // (e.g. DeepSeek: "Your api key: ****test is invalid").
+                        // Never surface credential material in error output.
+                        return Err(anyhow::anyhow!("HTTP 401 (authentication failed)"));
+                    }
                     if status == 429 || status == 500 || status == 502 || status == 503 {
-                        if attempt < 3 {
+                        if attempt < MAX_RETRIES {
                             let delay = Duration::from_secs(2u64.pow(attempt));
+                            on_event(StreamEvent::Retrying {
+                                attempt,
+                                max_retries: MAX_RETRIES,
+                                delay_secs: delay.as_secs(),
+                                error: format!("HTTP {} (retryable)", status),
+                            });
                             if sleep_with_cancel(delay, cancel) {
                                 return Err(anyhow::anyhow!("cancelled by user"));
                             }
@@ -270,8 +349,14 @@ pub fn chat_stream_responses(
                 return parse_responses_sse(resp, cancel, on_event);
             }
             Err(e) => {
-                if attempt < 3 {
+                if attempt < MAX_RETRIES {
                     let delay = Duration::from_secs(2u64.pow(attempt));
+                    on_event(StreamEvent::Retrying {
+                        attempt,
+                        max_retries: MAX_RETRIES,
+                        delay_secs: delay.as_secs(),
+                        error: format!("transport error: {e}"),
+                    });
                     if sleep_with_cancel(delay, cancel) {
                         return Err(anyhow::anyhow!("cancelled by user"));
                     }
@@ -288,18 +373,35 @@ pub fn chat_sync_responses(
     provider: &ProviderConfig,
     model: &str,
     messages: Vec<Message>,
-    _max_tokens: u32,
+    max_tokens: u32,
 ) -> Result<String, String> {
-    let input_items = convert_messages_to_input(&messages);
+    let compat = &provider.responses_compat;
+    let input_items = convert_messages_to_input(&messages, compat);
+    let responses_tools = convert_tools(None, compat);
 
     let mut body_map = serde_json::Map::new();
     body_map.insert("model".into(), serde_json::json!(model));
     body_map.insert("input".into(), serde_json::Value::Array(input_items));
     body_map.insert("stream".into(), serde_json::json!(false));
     body_map.insert("store".into(), serde_json::json!(false));
+    if max_tokens > 0 {
+        body_map.insert("max_output_tokens".into(), serde_json::json!(max_tokens));
+    }
+    if let Some(ref t) = responses_tools {
+        body_map.insert("tools".into(), serde_json::Value::Array(t.clone()));
+    }
+    if compat.send_include {
+        body_map.insert(
+            "include".into(),
+            serde_json::json!(["reasoning.encrypted_content"]),
+        );
+    }
     body_map.insert(
         "reasoning".into(),
-        serde_json::json!({"effort": "medium", "summary": "auto"}),
+        serde_json::json!({
+            "effort": clamp_effort(None, &compat.effort_max),
+            "summary": "auto",
+        }),
     );
 
     let body = serde_json::Value::Object(body_map);
@@ -319,6 +421,10 @@ pub fn chat_sync_responses(
     let text = block_on(async { resp.text().await }).map_err(|e| format!("Read error: {}", e))?;
 
     if status < 200 || status >= 300 {
+        if status == 401 {
+            // Never surface credential material echoed by the provider.
+            return Err("HTTP 401 (authentication failed)".into());
+        }
         let msg = if text.len() > 200 { &text[..200] } else { &text };
         return Err(format!("HTTP {}: {}", status, msg));
     }
@@ -347,6 +453,227 @@ pub fn chat_sync_responses(
 
 // ── SSE parsing ──
 
+/// Outcome of processing a single Responses API SSE event.
+#[derive(Debug)]
+enum EventAction {
+    /// Keep consuming the stream.
+    Continue,
+    /// Terminal event received; emit the accumulated `Done` now.
+    Completed { stop_reason: Option<String> },
+    /// Terminal failure; abort with the given error message.
+    Failed(String),
+}
+
+/// Mutable state accumulated across Responses API SSE events.
+#[derive(Default)]
+struct ResponsesParseState {
+    accumulated_text: String,
+    reasoning_text: String,
+    tool_calls: Vec<serde_json::Value>,
+    tool_index: usize,
+    /// Completed function calls in model output order: (call_id, name, parsed input).
+    /// Attached to `Done.raw_message` as `ToolUse` blocks so the agent loop can
+    /// execute them and continue the next round.
+    tool_uses: Vec<(String, String, serde_json::Value)>,
+    /// Completed server-side web search calls in output order: (id, action).
+    /// Attached to `Done.raw_message` as `WebSearchCall` blocks so the agent
+    /// loop can echo them back and the server restores its search results.
+    web_search_calls: Vec<(String, serde_json::Value)>,
+    usage: Option<deepx_types::UsageInfo>,
+}
+
+/// Parse `usage` from the `response` object carried by terminal events.
+///
+/// DeepSeek reports context-cache hits under `input_tokens_details.cached_tokens`
+/// and chain-of-thought tokens under `output_tokens_details.reasoning_tokens`.
+fn parse_usage(resp_data: &serde_json::Value) -> Option<deepx_types::UsageInfo> {
+    let u = resp_data.get("usage")?;
+    let input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let output_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let cached = u
+        .get("input_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    Some(deepx_types::UsageInfo {
+        prompt_tokens: input_tokens,
+        completion_tokens: output_tokens,
+        total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        prompt_cache_hit_tokens: cached,
+        prompt_cache_miss_tokens: input_tokens.saturating_sub(cached),
+        reasoning_tokens: u
+            .get("output_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        cache_usage_reported: Some(true),
+    })
+}
+
+/// Emit the final `Done` event from accumulated state (idempotent: consumes state).
+fn emit_done(
+    state: &mut ResponsesParseState,
+    stop_reason: Option<String>,
+    on_event: &mut dyn FnMut(StreamEvent),
+) {
+    let mut content_blocks: Vec<ContentBlock> = Vec::new();
+    if !state.reasoning_text.is_empty() {
+        content_blocks.push(ContentBlock::Reasoning {
+            reasoning: std::mem::take(&mut state.reasoning_text),
+        });
+    }
+    if !state.accumulated_text.is_empty() {
+        content_blocks.push(ContentBlock::Text {
+            text: std::mem::take(&mut state.accumulated_text),
+        });
+    }
+    for (id, name, input) in std::mem::take(&mut state.tool_uses) {
+        content_blocks.push(ContentBlock::ToolUse { id, name, input });
+    }
+    for (id, action) in std::mem::take(&mut state.web_search_calls) {
+        content_blocks.push(ContentBlock::WebSearchCall { id, action });
+    }
+    let raw_message = Message {
+        msg_id: None,
+        role: "assistant".into(),
+        name: None,
+        content: content_blocks,
+    };
+    on_event(StreamEvent::Done {
+        raw_message,
+        usage: state.usage.take(),
+        stop_reason,
+    });
+}
+
+/// Process one parsed Responses API SSE event.
+///
+/// Terminal-event contract (OpenAI + DeepSeek): `response.completed` is the last
+/// event on success, `response.incomplete` when truncated (e.g. max_output_tokens),
+/// and `response.failed` on error — each carries the full response object.
+fn handle_responses_event(
+    data: &serde_json::Value,
+    state: &mut ResponsesParseState,
+    on_event: &mut dyn FnMut(StreamEvent),
+) -> EventAction {
+    let typ = data.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match typ {
+        "response.web_search_call.in_progress"
+        | "response.web_search_call.searching"
+        | "response.web_search_call.completed" => {
+            let status = typ.trim_start_matches("response.web_search_call.").to_string();
+            on_event(StreamEvent::WebSearchStatus(status));
+            EventAction::Continue
+        }
+        "response.output_text.delta" => {
+            if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                state.accumulated_text.push_str(delta);
+                on_event(StreamEvent::ContentDelta(delta.to_string()));
+            }
+            EventAction::Continue
+        }
+        "response.reasoning_text.delta" => {
+            if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                state.reasoning_text.push_str(delta);
+                on_event(StreamEvent::ReasoningDelta(delta.to_string()));
+            }
+            EventAction::Continue
+        }
+        "response.function_call_arguments.delta" => {
+            if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                let item_id = data.get("item_id").and_then(|i| i.as_str()).unwrap_or("");
+                if let Some(tc) = state.tool_calls.iter_mut().find(|tc| {
+                    tc.get("item_id").and_then(|i| i.as_str()) == Some(item_id)
+                }) {
+                    let cur = tc.get("args").and_then(|a| a.as_str()).unwrap_or("");
+                    let new_args = format!("{}{}", cur, delta);
+                    if let Some(obj) = tc.as_object_mut() {
+                        obj.insert("args".into(), serde_json::json!(new_args));
+                    }
+                } else {
+                    state.tool_calls.push(serde_json::json!({
+                        "item_id": item_id,
+                        "args": delta,
+                    }));
+                }
+            }
+            EventAction::Continue
+        }
+        "response.output_item.done" => {
+            if let Some(item) = data.get("item") {
+                let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if item_type == "function_call" {
+                    let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let args = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                    let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                    on_event(StreamEvent::ToolCallProgress {
+                        index: state.tool_index,
+                        id: call_id.to_string(),
+                        name: name.to_string(),
+                        args_so_far: args.to_string(),
+                    });
+                    // Preserve the completed call so `emit_done` can attach
+                    // ToolUse blocks — the agent loop executes tools from
+                    // Done.raw_message, not from preview events.
+                    let input: serde_json::Value =
+                        serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+                    if !call_id.is_empty() && !name.is_empty() {
+                        state
+                            .tool_uses
+                            .push((call_id.to_string(), name.to_string(), input));
+                    }
+                    state.tool_index += 1;
+                } else if item_type == "web_search_call" {
+                    let call_id = item.get("id").and_then(|c| c.as_str()).unwrap_or("");
+                    let action = item
+                        .get("action")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"type": "search"}));
+                    if !call_id.is_empty() {
+                        state
+                            .web_search_calls
+                            .push((call_id.to_string(), action));
+                    }
+                }
+            }
+            EventAction::Continue
+        }
+        "response.completed" => {
+            if let Some(usage) = data.get("response").and_then(parse_usage) {
+                state.usage = Some(usage.clone());
+                on_event(StreamEvent::UsageUpdate(usage));
+            }
+            EventAction::Completed { stop_reason: None }
+        }
+        "response.incomplete" => {
+            if let Some(usage) = data.get("response").and_then(parse_usage) {
+                state.usage = Some(usage.clone());
+                on_event(StreamEvent::UsageUpdate(usage));
+            }
+            // Truncated (e.g. max_output_tokens): emit accumulated content with
+            // the reason so callers can surface the incomplete state.
+            let stop_reason = data
+                .get("response")
+                .and_then(|r| r.get("incomplete_details"))
+                .and_then(|d| d.get("reason"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            EventAction::Completed { stop_reason }
+        }
+        "response.failed" => {
+            let message = data
+                .get("response")
+                .and_then(|r| r.get("error"))
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("response failed")
+                .to_string();
+            EventAction::Failed(message)
+        }
+        _ => EventAction::Continue,
+    }
+}
+
 #[allow(clippy::string_slice)]
 fn parse_responses_sse(
     resp: reqwest::Response,
@@ -356,11 +683,7 @@ fn parse_responses_sse(
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
 
-    let mut accumulated_text = String::new();
-    let mut reasoning_text = String::new();
-    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
-    let mut usage: Option<deepx_types::UsageInfo> = None;
-    let mut tool_index: usize = 0;
+    let mut state = ResponsesParseState::default();
 
     loop {
         if is_cancelled(cancel) {
@@ -423,100 +746,21 @@ fn parse_responses_sse(
                 Err(_) => continue,
             };
 
-            let typ = data.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-            match typ {
-                "response.output_text.delta" => {
-                    if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                        accumulated_text.push_str(delta);
-                        on_event(StreamEvent::ContentDelta(delta.to_string()));
-                    }
+            match handle_responses_event(&data, &mut state, on_event) {
+                EventAction::Continue => {}
+                EventAction::Completed { stop_reason } => {
+                    emit_done(&mut state, stop_reason, on_event);
+                    return Ok(());
                 }
-                "response.reasoning_text.delta" => {
-                    if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                        reasoning_text.push_str(delta);
-                        on_event(StreamEvent::ReasoningDelta(delta.to_string()));
-                    }
+                EventAction::Failed(message) => {
+                    return Err(anyhow::anyhow!("{}", message));
                 }
-                "response.function_call_arguments.delta" => {
-                    if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                        let item_id = data.get("item_id").and_then(|i| i.as_str()).unwrap_or("");
-                        if let Some(tc) = tool_calls.iter_mut().find(|tc| {
-                            tc.get("item_id").and_then(|i| i.as_str()) == Some(item_id)
-                        }) {
-                            let cur = tc.get("args").and_then(|a| a.as_str()).unwrap_or("");
-                            let new_args = format!("{}{}", cur, delta);
-                            tc.as_object_mut().unwrap().insert("args".into(), serde_json::json!(new_args));
-                        } else {
-                            tool_calls.push(serde_json::json!({
-                                "item_id": item_id,
-                                "args": delta,
-                            }));
-                        }
-                    }
-                }
-                "response.output_item.done" => {
-                    if let Some(item) = data.get("item") {
-                        let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        if item_type == "function_call" {
-                            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                            let args = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-                            let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
-                            on_event(StreamEvent::ToolCallProgress {
-                                index: tool_index,
-                                id: call_id.to_string(),
-                                name: name.to_string(),
-                                args_so_far: args.to_string(),
-                            });
-                            tool_index += 1;
-                        }
-                    }
-                }
-                "response.completed" => {
-                    if let Some(resp_data) = data.get("response") {
-                        if let Some(u) = resp_data.get("usage") {
-                            usage = Some(deepx_types::UsageInfo {
-                                prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                prompt_cache_hit_tokens: 0,
-                                prompt_cache_miss_tokens: 0,
-                                reasoning_tokens: u.get("output_tokens_details")
-                                    .and_then(|d| d.get("reasoning_tokens"))
-                                    .and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                cache_usage_reported: None,
-                            });
-                            on_event(StreamEvent::UsageUpdate(usage.clone().unwrap()));
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }
 
-    // Build final message from accumulated content
-    let mut content_blocks: Vec<ContentBlock> = Vec::new();
-
-    if !reasoning_text.is_empty() {
-        content_blocks.push(ContentBlock::Reasoning { reasoning: reasoning_text });
-    }
-    if !accumulated_text.is_empty() {
-        content_blocks.push(ContentBlock::Text { text: accumulated_text });
-    }
-
-    let raw_message = Message {
-        msg_id: None,
-        role: "assistant".into(),
-        name: None,
-        content: content_blocks,
-    };
-
-    on_event(StreamEvent::Done {
-        raw_message,
-        usage,
-        stop_reason: None,
-    });
+    // Stream closed without a terminal event: emit whatever was accumulated.
+    emit_done(&mut state, None, on_event);
 
     Ok(())
 }
@@ -525,6 +769,12 @@ fn parse_responses_sse(
 mod tests {
     use super::*;
     use deepx_types::{ContentBlock, Message, ToolDef, ToolFunction};
+
+    /// OpenAI-reference compat used by conversion tests. `web_search` stays on
+    /// by default so tests exercise the full tool list, matching production.
+    fn test_compat() -> ResponsesCompat {
+        ResponsesCompat::default()
+    }
 
     // ── URL construction ──
 
@@ -573,7 +823,7 @@ mod tests {
     #[test]
     fn user_message_becomes_input() {
         let msgs = vec![Message::user("hello")];
-        let input = convert_messages_to_input(&msgs);
+        let input = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "message");
         assert_eq!(input[0]["role"], "user");
@@ -585,7 +835,7 @@ mod tests {
     #[test]
     fn system_message_becomes_developer() {
         let msgs = vec![Message::system("you are helpful")];
-        let input = convert_messages_to_input(&msgs);
+        let input = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["role"], "developer");
     }
 
@@ -597,7 +847,7 @@ mod tests {
             name: None,
             content: vec![ContentBlock::Text { text: "I'll help".into() }],
         }];
-        let input = convert_messages_to_input(&msgs);
+        let input = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["role"], "assistant");
         let content = input[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "output_text");
@@ -616,7 +866,7 @@ mod tests {
                 input: serde_json::json!({"path": "/x.txt"}),
             }],
         }];
-        let input = convert_messages_to_input(&msgs);
+        let input = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["call_id"], "tc_1");
         assert_eq!(input[0]["name"], "read_file");
@@ -636,7 +886,7 @@ mod tests {
                 success: true,
             }],
         }];
-        let input = convert_messages_to_input(&msgs);
+        let input = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "tc_1");
         assert_eq!(input[0]["output"], "file contents");
@@ -657,7 +907,7 @@ mod tests {
                 },
             ],
         }];
-        let input = convert_messages_to_input(&msgs);
+        let input = convert_messages_to_input(&msgs, &test_compat());
         // Should have: message (with text) + function_call
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "message");
@@ -673,7 +923,7 @@ mod tests {
             name: None,
             content: vec![],
         }];
-        let input = convert_messages_to_input(&msgs);
+        let input = convert_messages_to_input(&msgs, &test_compat());
         let content = input[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["text"], "");
     }
@@ -695,8 +945,15 @@ mod tests {
 
     #[test]
     fn convert_tools_empty() {
-        assert!(convert_tools(None).is_none());
-        assert!(convert_tools(Some(vec![])).is_none());
+        // Built-in web_search is injected even with no function tools.
+        let with_web = convert_tools(None, &test_compat()).unwrap();
+        assert_eq!(with_web.len(), 1);
+        assert_eq!(with_web[0]["type"], "web_search");
+        // Disabled compat → no tools at all.
+        let mut compat = test_compat();
+        compat.web_search = false;
+        assert!(convert_tools(None, &compat).is_none());
+        assert!(convert_tools(Some(vec![]), &compat).is_none());
     }
 
     #[test]
@@ -709,11 +966,94 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             },
         }];
-        let result = convert_tools(Some(tools)).unwrap();
-        assert_eq!(result.len(), 1);
+        let result = convert_tools(Some(tools), &test_compat()).unwrap();
+        assert_eq!(result.len(), 2);
         assert_eq!(result[0]["type"], "function");
         assert_eq!(result[0]["name"], "search");
         assert_eq!(result[0]["description"], "searches");
+        assert_eq!(result[1]["type"], "web_search");
+    }
+
+    #[test]
+    fn convert_tools_web_search_placement() {
+        // Function tools keep their order; web_search is appended last.
+        let tools = vec![ToolDef {
+            call_type: "function".into(),
+            function: ToolFunction {
+                name: "a".into(),
+                description: String::new(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        }];
+        let result = convert_tools(Some(tools), &test_compat()).unwrap();
+        assert_eq!(result[0]["name"], "a");
+        assert_eq!(result[1]["type"], "web_search");
+    }
+
+    // ── effort clamping ──
+
+    #[test]
+    fn clamp_effort_defaults_to_medium() {
+        assert_eq!(clamp_effort(None, "high"), "medium");
+    }
+
+    #[test]
+    fn clamp_effort_respects_provider_bound() {
+        // OpenAI bound: xhigh/max collapse to high.
+        assert_eq!(clamp_effort(Some("xhigh".into()), "high"), "high");
+        assert_eq!(clamp_effort(Some("max".into()), "high"), "high");
+        // DeepSeek bound: everything passes through.
+        assert_eq!(clamp_effort(Some("xhigh".into()), "max"), "xhigh");
+        assert_eq!(clamp_effort(Some("low".into()), "max"), "low");
+        // Unknown values fall back to the bound (never rejected).
+        assert_eq!(clamp_effort(Some("ultra".into()), "high"), "high");
+    }
+
+    // ── web_search_call echo ──
+
+    #[test]
+    fn web_search_call_echoed_when_compat_allows() {
+        let msgs = vec![Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![
+                ContentBlock::Text { text: "searching...".into() },
+                ContentBlock::WebSearchCall {
+                    id: "ws_1".into(),
+                    action: serde_json::json!({"type": "search"}),
+                },
+            ],
+        }];
+        let input = convert_messages_to_input(&msgs, &test_compat());
+        let ws_items: Vec<_> = input
+            .iter()
+            .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("web_search_call"))
+            .collect();
+        assert_eq!(ws_items.len(), 1);
+        assert_eq!(ws_items[0]["id"], "ws_1");
+        assert_eq!(ws_items[0]["action"]["type"], "search");
+    }
+
+    #[test]
+    fn web_search_call_suppressed_when_compat_disallows() {
+        let mut compat = test_compat();
+        compat.echo_web_search_call = false;
+        let msgs = vec![Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::WebSearchCall {
+                id: "ws_1".into(),
+                action: serde_json::json!({"type": "search"}),
+            }],
+        }];
+        let input = convert_messages_to_input(&msgs, &compat);
+        assert!(
+            input
+                .iter()
+                .all(|i| i.get("type").and_then(|t| t.as_str()) != Some("web_search_call"))
+        );
     }
 
     // ── extract_text ──
@@ -744,11 +1084,291 @@ mod tests {
             },
             Message::user("read x.txt"),
         ];
-        let input = convert_messages_to_input(&msgs);
+        let input = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input.len(), 4);
         assert_eq!(input[0]["role"], "developer");
         assert_eq!(input[1]["role"], "user");
         assert_eq!(input[2]["role"], "assistant");
         assert_eq!(input[3]["role"], "user");
+    }
+
+    // ── SSE event handling (OpenAI + DeepSeek terminal events) ──
+
+    #[test]
+    fn completed_event_parses_usage_and_cache() {
+        let mut state = ResponsesParseState::default();
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let data = serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120,
+                    "input_tokens_details": { "cached_tokens": 60 },
+                    "output_tokens_details": { "reasoning_tokens": 5 }
+                }
+            }
+        });
+        let action = handle_responses_event(&data, &mut state, &mut |e| events.push(e));
+        assert!(matches!(action, EventAction::Completed { stop_reason: None }));
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEvent::UsageUpdate(u) => {
+                assert_eq!(u.prompt_tokens, 100);
+                assert_eq!(u.completion_tokens, 20);
+                assert_eq!(u.total_tokens, 120);
+                assert_eq!(u.prompt_cache_hit_tokens, 60);
+                assert_eq!(u.prompt_cache_miss_tokens, 40);
+                assert_eq!(u.reasoning_tokens, 5);
+                assert_eq!(u.cache_usage_reported, Some(true));
+            }
+            other => panic!("expected UsageUpdate, got {other:?}"),
+        }
+        let stored = state.usage.as_ref().expect("usage stored in state");
+        assert_eq!(stored.prompt_tokens, 100);
+        assert_eq!(stored.prompt_cache_hit_tokens, 60);
+        assert_eq!(stored.reasoning_tokens, 5);
+    }
+
+    #[test]
+    fn incomplete_event_yields_stop_reason_and_usage() {
+        let mut state = ResponsesParseState::default();
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let data = serde_json::json!({
+            "type": "response.incomplete",
+            "response": {
+                "status": "incomplete",
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "usage": { "input_tokens": 10, "output_tokens": 200, "total_tokens": 210 }
+            }
+        });
+        let action = handle_responses_event(&data, &mut state, &mut |e| events.push(e));
+        match action {
+            EventAction::Completed { stop_reason } => {
+                assert_eq!(stop_reason.as_deref(), Some("max_output_tokens"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        assert!(matches!(&events[0], StreamEvent::UsageUpdate(_)));
+    }
+
+    #[test]
+    fn failed_event_yields_error_message() {
+        let mut state = ResponsesParseState::default();
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let data = serde_json::json!({
+            "type": "response.failed",
+            "response": {
+                "error": { "message": "upstream model error" }
+            }
+        });
+        let action = handle_responses_event(&data, &mut state, &mut |e| events.push(e));
+        match action {
+            EventAction::Failed(message) => assert_eq!(message, "upstream model error"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn function_call_done_appears_in_done_message() {
+        // Simulate the full tool-call stream: argument deltas, then the
+        // completed function_call item, then a terminal event.
+        let mut state = ResponsesParseState::default();
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let delta = serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "delta": "{\"city\": \"Beijing\"}"
+        });
+        assert!(matches!(
+            handle_responses_event(&delta, &mut state, &mut |e| events.push(e)),
+            EventAction::Continue
+        ));
+        let done = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_abc",
+                "name": "get_weather",
+                "arguments": "{\"city\": \"Beijing\"}",
+                "status": "completed"
+            }
+        });
+        assert!(matches!(
+            handle_responses_event(&done, &mut state, &mut |e| events.push(e)),
+            EventAction::Continue
+        ));
+        // Preview event emitted for the UI.
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ToolCallProgress { id, name, .. } if id == "call_abc" && name == "get_weather"
+        ));
+
+        emit_done(&mut state, None, &mut |e| events.push(e));
+        match &events[1] {
+            StreamEvent::Done { raw_message, .. } => {
+                let tool_uses: Vec<_> = raw_message
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, name, input } => {
+                            Some((id.as_str(), name.as_str(), input.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(tool_uses.len(), 1);
+                let (id, name, input) = &tool_uses[0];
+                assert_eq!(*id, "call_abc");
+                assert_eq!(*name, "get_weather");
+                assert_eq!(input["city"], "Beijing");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_search_call_events_stream_and_roundtrip() {
+        // Status events surface progress; the completed item attaches a
+        // WebSearchCall block to Done so the next turn echoes it back.
+        let mut state = ResponsesParseState::default();
+        let mut events: Vec<StreamEvent> = Vec::new();
+
+        let searching = serde_json::json!({
+            "type": "response.web_search_call.searching",
+            "item_id": "ws_1",
+        });
+        assert!(matches!(
+            handle_responses_event(&searching, &mut state, &mut |e| events.push(e)),
+            EventAction::Continue
+        ));
+        assert!(matches!(
+            &events[0],
+            StreamEvent::WebSearchStatus(s) if s == "searching"
+        ));
+
+        let done = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "action": {"type": "search"},
+                "status": "completed"
+            }
+        });
+        assert!(matches!(
+            handle_responses_event(&done, &mut state, &mut |e| events.push(e)),
+            EventAction::Continue
+        ));
+
+        emit_done(&mut state, None, &mut |e| events.push(e));
+        match &events[1] {
+            StreamEvent::Done { raw_message, .. } => {
+                let ws: Vec<_> = raw_message
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::WebSearchCall { id, action } => {
+                            Some((id.as_str(), action.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(ws.len(), 1);
+                assert_eq!(ws[0].0, "ws_1");
+                assert_eq!(ws[0].1["type"], "search");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+
+        // Round-trip: the echoed input item restores the search call.
+        let raw_message = match &events[1] {
+            StreamEvent::Done { raw_message, .. } => raw_message.clone(),
+            other => panic!("expected Done, got {other:?}"),
+        };
+        let input = convert_messages_to_input(&[raw_message], &test_compat());
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "web_search_call");
+        assert_eq!(input[0]["id"], "ws_1");
+    }
+
+    #[test]
+    fn done_with_tool_use_roundtrips_to_function_call_input() {
+        // A Done message carrying ToolUse must convert back into a
+        // function_call input item for the next round (multi-turn contract).
+        let state_events = {
+            let mut state = ResponsesParseState::default();
+            let mut events: Vec<StreamEvent> = Vec::new();
+            let done = serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{\"path\": \"/x.txt\"}",
+                    "status": "completed"
+                }
+            });
+            assert!(matches!(
+                handle_responses_event(&done, &mut state, &mut |e| events.push(e)),
+                EventAction::Continue
+            ));
+            emit_done(&mut state, None, &mut |e| events.push(e));
+            events
+        };
+        let raw_message = match &state_events[1] {
+            StreamEvent::Done { raw_message, .. } => raw_message.clone(),
+            other => panic!("expected Done, got {other:?}"),
+        };
+        let input = convert_messages_to_input(&[raw_message], &test_compat());
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], "call_1");
+        assert_eq!(input[0]["name"], "read_file");
+        assert_eq!(input[0]["status"], "completed");
+        assert!(input[0]["arguments"].as_str().unwrap().contains("x.txt"));
+    }
+
+    #[test]
+    fn delta_events_accumulate_into_done() {
+        let mut state = ResponsesParseState::default();
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let t1 = serde_json::json!({"type": "response.output_text.delta", "delta": "Hello"});
+        let t2 = serde_json::json!({"type": "response.reasoning_text.delta", "delta": "hmm"});
+        let t3 = serde_json::json!({"type": "response.output_text.delta", "delta": " world"});
+        assert!(matches!(
+            handle_responses_event(&t1, &mut state, &mut |e| events.push(e)),
+            EventAction::Continue
+        ));
+        assert!(matches!(
+            handle_responses_event(&t2, &mut state, &mut |e| events.push(e)),
+            EventAction::Continue
+        ));
+        assert!(matches!(
+            handle_responses_event(&t3, &mut state, &mut |e| events.push(e)),
+            EventAction::Continue
+        ));
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], StreamEvent::ContentDelta(d) if d == "Hello"));
+        assert!(matches!(&events[1], StreamEvent::ReasoningDelta(d) if d == "hmm"));
+
+        emit_done(&mut state, None, &mut |e| events.push(e));
+        match &events[3] {
+            StreamEvent::Done { raw_message, stop_reason, .. } => {
+                assert_eq!(stop_reason, &None);
+                assert!(raw_message
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Reasoning { .. })));
+                assert!(raw_message.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text { text } if text == "Hello world")
+                ));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 }

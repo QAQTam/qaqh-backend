@@ -293,6 +293,32 @@ fn http_error_401() {
 }
 
 #[test]
+fn responses_http_error_401_does_not_leak_body() {
+    // Some providers (e.g. DeepSeek) echo the API key tail in the 401 body.
+    // The Responses adapter must surface only the status, never the body.
+    let scenario = vec![SseChunk::error(401, "Invalid API key: sk-real-secret")];
+    let mock = MockServer::new(scenario);
+    let provider = ProviderConfig::responses(&mock.base_url(), "sk-test-key", "test-model", None);
+    let result = deepx_gate::chat_stream(
+        &provider,
+        vec![Message::user("hi")],
+        None,
+        4096,
+        None,
+        None,
+        None,
+        &mut |_| {},
+    );
+    assert!(result.is_err(), "401 should return error");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("401"), "error should mention 401: {err}");
+    assert!(
+        !err.contains("sk-real-secret"),
+        "credential material must not leak into error output: {err}"
+    );
+}
+
+#[test]
 fn retry_then_success() {
     let scenarios = vec![
         vec![SseChunk::error(429, "rate limit")],

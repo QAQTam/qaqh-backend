@@ -14,21 +14,43 @@ fn deepseek() -> ProviderSpec {
     ProviderSpec {
         id: "deepseek".into(),
         display: "DeepSeek".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "OpenAI-compatible".into(),
-            protocol: "openai".into(),
-            base_url: "https://api.deepseek.com".into(),
-            default_model: String::new(),
-            models: vec![],
-            models_url: Some("https://api.deepseek.com".into()),
-            user_id_mode: Some(UserSendMode::Body),
-            include_stream_usage: true,
-            // chat_path: None → "/chat/completions" (default)
-            // thinking_mode: OpenAi (default)
-            // cache_field: PromptCacheHitTokens (default)
-            ..Default::default()
-        }],
+        endpoints: vec![
+            EndpointSpec {
+                id: "openai".into(),
+                display: "OpenAI-compatible".into(),
+                protocol: "openai".into(),
+                base_url: "https://api.deepseek.com".into(),
+                default_model: String::new(),
+                models: vec![],
+                models_url: Some("https://api.deepseek.com".into()),
+                user_id_mode: Some(UserSendMode::Body),
+                include_stream_usage: true,
+                // chat_path: None → "/chat/completions" (default)
+                // thinking_mode: OpenAi (default)
+                // cache_field: PromptCacheHitTokens (default)
+                ..Default::default()
+            },
+            // DeepSeek Responses API (Beta): 目前仅支持 deepseek-v4-flash。
+            // 模型列表静态锁定，避免 /models 探测在 Beta 阶段引入不稳定模型。
+            EndpointSpec {
+                id: "responses".into(),
+                display: "Responses API".into(),
+                protocol: "responses".into(),
+                base_url: "https://api.deepseek.com".into(),
+                default_model: "deepseek-v4-flash".into(),
+                models: vec!["deepseek-v4-flash".into()],
+                responses_path: Some("/responses".into()),
+                supports_thinking: false,
+                supports_reasoning_effort: true,
+                supports_reasoning_content: false,
+                // DeepSeek silently ignores `include` (no encrypted reasoning),
+                // so skip it; and its effort ladder extends to "max".
+                responses_send_include: false,
+                responses_effort_max: "max".into(),
+                beta: true,
+                ..Default::default()
+            },
+        ],
     }
 }
 
@@ -420,5 +442,27 @@ mod tests {
         assert_eq!(proto, "openai");
         let url = base_url_for("openai", "openai");
         assert_eq!(url, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn deepseek_responses_endpoint_exists() {
+        let endpoint = find_endpoint("deepseek", "responses").expect("DeepSeek Responses endpoint");
+        assert_eq!(endpoint.protocol, "responses");
+        assert_eq!(endpoint.base_url, "https://api.deepseek.com");
+        assert_eq!(endpoint.responses_path.as_deref(), Some("/responses"));
+        assert_eq!(endpoint.default_model, "deepseek-v4-flash");
+        assert_eq!(endpoint.models, vec!["deepseek-v4-flash".to_string()]);
+        assert!(endpoint.beta);
+        assert!(!endpoint.supports_thinking);
+        assert!(endpoint.supports_reasoning_effort);
+        assert!(!endpoint.supports_reasoning_content);
+    }
+
+    #[test]
+    fn deepseek_responses_protocol_flows_through() {
+        assert_eq!(protocol_for("deepseek", "responses"), "responses");
+        assert_eq!(protocol_for("deepseek", "openai"), "openai");
+        // Unknown endpoint falls back to the openai protocol (backward compat).
+        assert_eq!(protocol_for("deepseek", "unknown"), "openai");
     }
 }

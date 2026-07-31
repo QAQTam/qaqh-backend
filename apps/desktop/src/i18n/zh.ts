@@ -87,6 +87,7 @@ const zh: I18nStrings = {
     title: "设置",
     provider: "服务商",
     endpoint: "端点",
+    beta: "Beta",
     apiKey: "API 密钥",
     apiKeyHint: "API 密钥仅存储在本地，仅发送至所选服务商 API。",
     model: "模型",

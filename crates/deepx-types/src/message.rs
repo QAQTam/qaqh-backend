@@ -46,6 +46,17 @@ pub enum ContentBlock {
         /// Base64-encoded image data (raw, without the data URI prefix).
         data: String,
     },
+    /// A server-side web search call emitted by the model (Responses API
+    /// built-in tool). The search itself runs on the provider; this block is
+    /// carried in history and echoed back verbatim on the next turn so the
+    /// server restores its search results (stateless multi-turn).
+    #[serde(rename = "web_search_call")]
+    WebSearchCall {
+        /// Output item id (e.g. "ws_1"); must be unique per response.
+        id: String,
+        /// The server-executed search action, e.g. {"type": "search"}.
+        action: serde_json::Value,
+    },
 }
 
 impl ContentBlock {

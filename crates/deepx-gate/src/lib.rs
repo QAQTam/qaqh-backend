@@ -17,7 +17,7 @@ mod rt_test;
 pub mod tool_parser;
 mod types;
 
-pub use types::{ProviderConfig, ProviderKind, StreamEvent};
+pub use types::{ProviderConfig, ProviderKind, ResponsesCompat, StreamEvent};
 
 use deepx_types::{Message, ToolDef};
 use std::sync::Arc;
@@ -48,6 +48,7 @@ pub fn chat_stream(
             tools,
             max_tokens,
             effort,
+            user_id,
             cancel,
             on_event,
         ),

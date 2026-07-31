@@ -11,24 +11,15 @@ const MAX_RELOAD_TURNS = 20;
 const MAX_PROGRESS_CHUNKS = 200;
 const MAX_RELOAD_CHARS = 512 * 1024;
 
-const IMMEDIATE_EVENT_TYPES = new Set<Agent2Ui["type"]>([
-  "turn_start",
+// Persistence is only worth it for low-frequency terminal events; round-level
+// events arrive in bursts during tool loops and would serialize the whole
+// state (MBs) synchronously on every burst. A 3s throttle absorbs repeats.
+const PERSIST_INTERVAL_MS = 3000;
+const PERSIST_EVENT_TYPES = new Set<Agent2Ui["type"]>([
   "turn_end",
-  "round_complete",
-  "tool_results",
   "session_restored",
-  "more_turns",
   "session_created",
-  "error",
-  "permission_request",
-  "ask_user",
-  "ask_resolved",
-  "ask_rejected",
-  "plan_submitted",
-  "plan_resolved",
-  "compact_start",
   "compact_end",
-  "cancelled",
   "done",
   "ready",
 ]);
@@ -131,6 +122,7 @@ export function createSessionEventRuntime(options: {
   let state = options.initialState;
   let disposed = false;
   let persistenceEnabled = true;
+  let lastPersistAt = 0;
   const now = options.now ?? Date.now;
   const hasFrameScheduler = options.scheduleFrame !== undefined || typeof requestAnimationFrame === "function";
   const scheduleFrame: (callback: FrameRequestCallback) => number = options.scheduleFrame ?? (typeof requestAnimationFrame === "function"
@@ -209,8 +201,12 @@ export function createSessionEventRuntime(options: {
       flushFrame();
       state = reduceAgentEvent(state, event, now());
       commit();
-      if (IMMEDIATE_EVENT_TYPES.has(event.type) && persistenceEnabled) {
-        persistenceEnabled = saveReloadSnapshot(options.storage, state);
+      if (PERSIST_EVENT_TYPES.has(event.type) && persistenceEnabled) {
+        const nowMs = now();
+        if (nowMs - lastPersistAt >= PERSIST_INTERVAL_MS) {
+          lastPersistAt = nowMs;
+          persistenceEnabled = saveReloadSnapshot(options.storage, state);
+        }
       }
     },
     update(update) {

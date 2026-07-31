@@ -4,4 +4,4 @@ import type { ToolCallDef } from "./ToolCallDef";
 /**
  * One block in a round, preserving the LLM's output order.
  */
-export type RoundBlock = { "type": "reasoning", content: string, } | { "type": "text", content: string, } | { "type": "tool", card: ToolCallDef, };
+export type RoundBlock = { "type": "reasoning", content: string, } | { "type": "text", content: string, } | { "type": "tool", card: ToolCallDef, } | { "type": "web_search", action: string, };

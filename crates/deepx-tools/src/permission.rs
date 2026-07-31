@@ -24,7 +24,7 @@ pub enum ToolCategory {
     Write,
     /// Executes arbitrary code: exec, spawn_subagent.
     Exec,
-    /// Outbound network: web_fetch, web_search.
+    /// Outbound network: web_fetch.
     Net,
 }
 

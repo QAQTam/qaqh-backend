@@ -16,7 +16,7 @@ class MemoryStorage implements ReloadStorage {
 }
 
 describe("sessionEventRuntime", () => {
-  it("commits every event immediately and persists only terminal events", () => {
+  it("commits every event immediately and persists only low-frequency terminals", () => {
     const storage = new MemoryStorage();
     const commits: string[] = [];
     const runtime = createSessionEventRuntime({
@@ -26,10 +26,10 @@ describe("sessionEventRuntime", () => {
       now: () => 100,
     });
 
-    // Terminal events commit immediately and persist
+    // Non-terminal events commit immediately but never persist
     runtime.push({ type: "turn_start", turn_id: "t1", user_text: "go" });
     expect(commits).toHaveLength(1);
-    expect(storage.writeCount).toBe(1);
+    expect(storage.writeCount).toBe(0);
 
     // Streaming deltas also commit immediately (SolidJS batches internally)
     runtime.push({ type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "A" });
@@ -40,12 +40,48 @@ describe("sessionEventRuntime", () => {
     expect(commits).toHaveLength(3);
     expect(commits[2]).toBe("AB");
     // Streaming deltas do NOT persist
-    expect(storage.writeCount).toBe(1);
+    expect(storage.writeCount).toBe(0);
 
-    // Terminal event commits and persists
+    // Terminal events commit; persistence is throttled (now()=100 is inside
+    // the initial throttle window), so nothing is written yet.
     runtime.push({ type: "turn_end", turn_id: "t1" });
     expect(runtime.current().turns[0].status).toBe("completed");
     expect(commits).toHaveLength(4);
+    expect(storage.writeCount).toBe(0);
+  });
+
+  it("throttles snapshot persistence to low-frequency events with a 3s window", () => {
+    const storage = new MemoryStorage();
+    let t = 0;
+    const runtime = createSessionEventRuntime({
+      initialState: createRawSessionState("seed-a"),
+      commit: () => {},
+      storage,
+      now: () => t,
+    });
+
+    // Round-level burst events never persist.
+    runtime.push({ type: "turn_start", turn_id: "t1", user_text: "go" });
+    runtime.push({ type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "A" });
+    runtime.push({
+      type: "round_complete", turn_id: "t1", round_num: 0, answer: "A",
+      tool_calls: [], blocks: [], is_final: true,
+    });
+    expect(storage.writeCount).toBe(0);
+
+    // First qualifying terminal at t=5000 persists.
+    t = 5000;
+    runtime.push({ type: "turn_end", turn_id: "t1" });
+    expect(storage.writeCount).toBe(1);
+
+    // A second terminal inside the 3s window is skipped.
+    t = 6000;
+    runtime.push({ type: "done" });
+    expect(storage.writeCount).toBe(1);
+
+    // After the window elapses the next terminal persists again.
+    t = 9000;
+    runtime.push({ type: "done" });
     expect(storage.writeCount).toBe(2);
   });
 
@@ -111,8 +147,9 @@ describe("sessionEventRuntime", () => {
       storage,
     });
 
-    // Trigger a terminal event to persist the snapshot
+    // Trigger a low-frequency terminal event to persist the snapshot
     runtime.push({ type: "turn_start", turn_id: "t25", user_text: "go" });
+    runtime.push({ type: "turn_end", turn_id: "t25" });
     const restored = loadReloadSnapshot(storage, "seed-a");
     expect(restored?.turns).toHaveLength(20);
     expect(restored?.turns[0].turnId).toBe("t6");
@@ -157,15 +194,17 @@ describe("sessionEventRuntime", () => {
       initialState: createRawSessionState("seed-a"),
       commit: state => commits.push(state),
       storage,
+      now: () => 5000,
     });
-    // Terminal event triggers persistence attempt (which throws, disabling further persistence)
+    // Low-frequency terminal event triggers persistence attempt (which throws, disabling further persistence)
     runtime.push({ type: "turn_start", turn_id: "t1", user_text: "go" });
-    expect(commits).toHaveLength(1);
+    runtime.push({ type: "turn_end", turn_id: "t1" });
+    expect(commits).toHaveLength(2);
     expect(writeAttempts).toBe(1);
 
     // Second terminal event should not attempt persistence (disabled)
     runtime.push({ type: "session_created", seed: "seed-a" });
-    expect(commits).toHaveLength(2);
+    expect(commits).toHaveLength(3);
     expect(writeAttempts).toBe(1);
   });
 });

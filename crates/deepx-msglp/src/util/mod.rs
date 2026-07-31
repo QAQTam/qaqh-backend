@@ -436,6 +436,11 @@ pub(crate) fn emit_round_complete(
                     },
                 });
             }
+            ContentBlock::WebSearchCall { action, .. } => {
+                blocks.push(deepx_proto::RoundBlock::WebSearch {
+                    action: action.to_string(),
+                });
+            }
             _ => {}
         }
     }
@@ -498,6 +503,11 @@ pub(crate) fn emit_round_complete_via_emitter(
                         args_display: display,
                         args_json: input.to_string(),
                     },
+                });
+            }
+            ContentBlock::WebSearchCall { action, .. } => {
+                blocks.push(deepx_proto::RoundBlock::WebSearch {
+                    action: action.to_string(),
                 });
             }
             _ => {}

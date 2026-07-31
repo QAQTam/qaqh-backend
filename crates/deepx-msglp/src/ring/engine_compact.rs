@@ -207,12 +207,22 @@ impl CompactEngine {
         );
         let is_responses = ep.as_ref().map(|e| e.protocol.as_str()) == Some("responses");
         let provider = if is_responses {
-            deepx_gate::ProviderConfig::responses(
+            let mut p = deepx_gate::ProviderConfig::responses(
                 &ctx.agent.config.base_url,
                 &ctx.agent.config.api_key,
                 &ctx.agent.config.model,
                 ep.as_ref().and_then(|e| e.responses_path.clone()),
-            )
+            );
+            if let Some(endpoint) = ep.as_ref() {
+                p.responses_compat = deepx_gate::ResponsesCompat {
+                    web_search: endpoint.responses_web_search,
+                    echo_web_search_call: endpoint.responses_echo_web_search_call,
+                    send_include: endpoint.responses_send_include,
+                    effort_max: endpoint.responses_effort_max.clone(),
+                    supports_user: endpoint.responses_supports_user,
+                };
+            }
+            p
         } else {
             let mut p = deepx_gate::ProviderConfig::openai(
                 &ctx.agent.config.base_url,
@@ -426,6 +436,10 @@ fn serialize_messages(
                     let args = serde_json::to_string(input).unwrap_or_default();
                     let end = args.floor_char_boundary(args.len().min(120));
                     Some(format!("[{role} tool call]: {}({})", name, &args[..end]))
+                }
+                deepx_types::ContentBlock::WebSearchCall { action, .. } => {
+                    let action_str = serde_json::to_string(action).unwrap_or_default();
+                    Some(format!("[{role} web search]: {action_str}"))
                 }
                 deepx_types::ContentBlock::ToolResult { content, .. } => {
                     let compact: String = content

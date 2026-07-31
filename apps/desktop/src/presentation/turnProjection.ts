@@ -149,6 +149,14 @@ function projectRoundEntries(
         case "tool":
           processItems.push(toolItem(round, block.card));
           break;
+        case "web_search":
+          processItems.push({
+            kind: "notice",
+            id: `${turn.turnId}-round-${round.roundNum}-search-${processItems.length}`,
+            level: "info",
+            message: `🔍 搜索: ${block.action}`,
+          });
+          break;
         case "text":
           if (!block.content.trim()) break;
           flushProcess();

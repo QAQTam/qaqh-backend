@@ -383,6 +383,10 @@ pub enum RoundBlock {
     Text { content: String },
     /// A tool call the model wants to invoke.
     Tool { card: ToolCallDef },
+    /// A server-side web search performed by the model's built-in tool
+    /// (Responses API). Shown as a record line; the search itself ran on the
+    /// provider, so there is no local tool card or result round-trip.
+    WebSearch { action: String },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -729,6 +733,17 @@ pub enum Agent2Ui {
         args_so_far: String,
     },
 
+    /// Server-side web search progress (Responses API built-in tool).
+    /// `status` is one of "in_progress" | "searching" | "completed".
+    /// The search runs on the provider; the frontend shows a transient
+    /// "searching…" line that the RoundComplete blocks replace on arrival.
+    #[serde(rename = "search_status")]
+    SearchStatus {
+        turn_id: String,
+        round_num: u32,
+        status: String,
+    },
+
     /// Realtime code stats delta from a file operation (write/edit/delete/move).
     #[serde(rename = "code_delta")]
     CodeDelta {
@@ -862,6 +877,7 @@ impl Agent2Ui {
             | Agent2Ui::ToolResults { .. }
             | Agent2Ui::ToolExecDelta { .. }
             | Agent2Ui::ToolCallPreview { .. }
+            | Agent2Ui::SearchStatus { .. }
             | Agent2Ui::CodeDelta { .. }
             | Agent2Ui::ToolNotice { .. }
             | Agent2Ui::Dashboard { .. }

@@ -1,4 +1,4 @@
-import type { Agent2Ui, RoundData, TurnData, UsageInfo } from "../lib/types";
+import type { Agent2Ui, RoundData, ToolResultDef, TurnData, UsageInfo } from "../lib/types";
 import {
   emptyRawRound,
   type DashboardData,
@@ -12,6 +12,15 @@ const MAX_ACTIVITY = 50;
 const MAX_METRICS = 120;
 const MAX_PROGRESS_CHUNKS = 200;
 const MAX_USAGE_BY_REQUEST = 50;
+// ── Memory ceilings ──
+// The daemon owns the canonical session; this state is a rendering mirror.
+// Beyond these bounds the oldest content is dropped to keep the transcript
+// bounded in long-running sessions (virtual scrolling only limits DOM, not
+// the data held in the store).
+const MAX_TURNS = 250;
+const MAX_ROUNDS_PER_TURN = 20;
+const MAX_TOOL_RESULTS = 50;
+const MAX_TOOL_RESULT_CHARS = 64 * 1024;
 
 const emptyUsage = (): UsageInfo => ({
   prompt_tokens: 0,
@@ -109,7 +118,9 @@ function updateRound(
 ): RawSessionState {
   return updateTurn(state, turnId, turn => {
     const exists = turn.rounds.some(round => round.roundNum === roundNum);
-    const rounds = exists ? turn.rounds : [...turn.rounds, emptyRawRound(roundNum)];
+    const rounds = exists
+      ? turn.rounds
+      : [...turn.rounds, emptyRawRound(roundNum)].slice(-MAX_ROUNDS_PER_TURN);
     return {
       ...turn,
       rounds: rounds.map(round => round.roundNum === roundNum ? update(round) : round),
@@ -179,6 +190,29 @@ function capUsageByRequest(
   // Keep the most recent entries (keys are chronologically ordered by requestKey)
   const trimmed: Record<string, UsageInfo> = {};
   for (const key of keys.slice(-MAX_USAGE_BY_REQUEST)) {
+    trimmed[key] = map[key]!;
+  }
+  return trimmed;
+}
+
+/** Clip oversized tool outputs (file reads, git diffs, exec streams). */
+function truncateToolResult(result: ToolResultDef): ToolResultDef {
+  if (result.output.length <= MAX_TOOL_RESULT_CHARS) return result;
+  const clipped = result.output.slice(0, MAX_TOOL_RESULT_CHARS);
+  return {
+    ...result,
+    output: `${clipped}\n…[truncated: ${result.output.length - MAX_TOOL_RESULT_CHARS} chars]`,
+  };
+}
+
+/** Keep only the most recent tool results per round. */
+function capToolResults(
+  map: Record<string, ToolResultDef>,
+): Record<string, ToolResultDef> {
+  const keys = Object.keys(map);
+  if (keys.length <= MAX_TOOL_RESULTS) return map;
+  const trimmed: Record<string, ToolResultDef> = {};
+  for (const key of keys.slice(-MAX_TOOL_RESULTS)) {
     trimmed[key] = map[key]!;
   }
   return trimmed;
@@ -302,20 +336,22 @@ export function reduceAgentEvent(
   now = Date.now(),
 ): RawSessionState {
   switch (event.type) {
-    case "turn_start":
+    case "turn_start": {
       if (state.turns.some(turn => turn.turnId === event.turn_id)) return state;
+      const newTurn: RawTurn = {
+        turnId: event.turn_id,
+        userText: event.user_text,
+        status: "running",
+        startedAt: now,
+        rounds: [],
+        interactions: [],
+      };
       return {
         ...state,
         providerRetry: null,
-        turns: [...state.turns, {
-          turnId: event.turn_id,
-          userText: event.user_text,
-          status: "running",
-          startedAt: now,
-          rounds: [],
-          interactions: [],
-        }],
+        turns: [...state.turns, newTurn].slice(-MAX_TURNS),
       };
+    }
     case "turn_end": {
       const current = state.turns.find(turn => turn.turnId === event.turn_id);
       if (
@@ -363,10 +399,13 @@ export function reduceAgentEvent(
     case "tool_results":
       return updateRound(state, event.turn_id, event.round_num, round => ({
         ...round,
-        toolResults: {
+        toolResults: capToolResults({
           ...round.toolResults,
-          ...Object.fromEntries(event.results.map(result => [result.tool_call_id, result])),
-        },
+          ...Object.fromEntries(event.results.map(result => [
+            result.tool_call_id,
+            truncateToolResult(result),
+          ])),
+        }),
       }));
     case "tool_exec_delta": {
       const turnId = lastTurnId(state);
@@ -451,6 +490,11 @@ export function reduceAgentEvent(
           phase: "tool_calling",
         };
       });
+    case "search_status":
+      // Transient server-side search progress. RoundComplete blocks carry the
+      // authoritative WebSearch record and replace this state on arrival, so
+      // no persistent field is needed here.
+      return state;
     case "session_restored":
       return {
         ...state,

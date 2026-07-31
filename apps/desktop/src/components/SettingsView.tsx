@@ -7,7 +7,7 @@ import PermissionLevelSelect from "./composer/PermissionLevelSelect";
 export type ThemeMode = "system" | "light" | "dark" | "dark-gray";
 
 interface Provider { id: string; display: string; endpoints: Endpoint[]; }
-interface Endpoint { id: string; display: string; base_url: string; default_model: string; models: string[]; stateful?: boolean; }
+interface Endpoint { id: string; display: string; base_url: string; default_model: string; models: string[]; stateful?: boolean; beta?: boolean; }
 
 interface SettingsViewProps {
   lang: () => Lang; onLangChange: (l: Lang) => void;
@@ -454,7 +454,9 @@ export default function SettingsView(props: SettingsViewProps) {
                   <div class="settings-row">
                     <label>{t().settings.endpoint}</label>
                     <select value={endpointId()} onChange={(e) => handleEndpointChange(e.currentTarget.value)}>
-                      <For each={currentEndpoints()}>{(ep: Endpoint) => <option value={ep.id}>{ep.display}</option>}</For>
+                      <For each={currentEndpoints()}>{(ep: Endpoint) => (
+                        <option value={ep.id}>{ep.display}{ep.beta ? ` (${t().settings.beta})` : ""}</option>
+                      )}</For>
                     </select>
                   </div>
                   <div class="settings-row">

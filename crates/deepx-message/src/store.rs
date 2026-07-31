@@ -1295,6 +1295,12 @@ impl MessageStore {
                             tool_calls += deepx_types::count_tokens(&json) as u64;
                             tool_call_blocks += 1;
                         }
+                        deepx_types::ContentBlock::WebSearchCall { .. } => {
+                            // Server-side search action JSON ≈ serialized form
+                            let json = serde_json::to_string(b).unwrap_or_default();
+                            tool_calls += deepx_types::count_tokens(&json) as u64;
+                            tool_call_blocks += 1;
+                        }
                         deepx_types::ContentBlock::ToolResult { content, .. } => {
                             tool_results += deepx_types::count_tokens(content) as u64;
                         }

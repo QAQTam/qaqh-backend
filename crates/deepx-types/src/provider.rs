@@ -113,9 +113,34 @@ pub struct EndpointSpec {
     /// When true, the gate sends only incremental messages instead of full conversation
     /// history. Used for stateful proxy endpoints (e.g. DeepSeek Web CDP proxy).
     pub stateful: bool,
+    /// Experimental/Beta endpoint flag surfaced to the settings UI as a badge.
+    /// Beta endpoints are additive: they never replace a stable endpoint.
+    pub beta: bool,
     /// Explicitly set `do_sample` in the request body. GLM-5.2 benefits from `false` for
     /// deterministic code generation. `None` means the field is not sent (API default).
     pub do_sample: Option<bool>,
+
+    // ── Responses API adaptation fields ──
+    /// Inject the built-in `web_search` tool so the model can search on its own
+    /// (server-side execution). OpenAI / DeepSeek support it; some compatible
+    /// endpoints ignore unknown tool types. Default: true.
+    pub responses_web_search: bool,
+    /// Allow echoing `web_search_call` output items back verbatim in the next
+    /// turn so the server restores its search results (stateless multi-turn).
+    /// DeepSeek documents this; OpenAI stateless mode behaves the same.
+    /// Default: true.
+    pub responses_echo_web_search_call: bool,
+    /// Send `include: ["reasoning.encrypted_content"]`. OpenAI supports it;
+    /// DeepSeek silently ignores it; a few strict compatible endpoints reject
+    /// unknown members with 400. Default: true (OpenAI semantics).
+    pub responses_send_include: bool,
+    /// Upper bound for `reasoning.effort`. OpenAI: `"high"`; DeepSeek extends
+    /// the ladder to `"xhigh"` / `"max"`. Values above the bound are clamped.
+    /// Default: "high".
+    pub responses_effort_max: String,
+    /// Send the `user` field (rate-limit & KVCache isolation per end user).
+    /// Default: true.
+    pub responses_supports_user: bool,
 }
 
 impl Default for EndpointSpec {
@@ -142,7 +167,13 @@ impl Default for EndpointSpec {
             supports_reasoning_content: true,
             require_provider_parameters: false,
             stateful: false,
+            beta: false,
             do_sample: None,
+            responses_web_search: true,
+            responses_echo_web_search_call: true,
+            responses_send_include: true,
+            responses_effort_max: "high".into(),
+            responses_supports_user: true,
         }
     }
 }

@@ -85,6 +85,7 @@ const en = {
     title: "Settings",
     provider: "Provider",
     endpoint: "Endpoint",
+    beta: "Beta",
     apiKey: "API Key",
     apiKeyHint: "Your API key is stored locally and never sent anywhere except to the provider API.",
     model: "Model",

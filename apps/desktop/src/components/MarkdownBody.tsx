@@ -311,6 +311,14 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
         if (isStale()) return;
         setVisibleBlocks(() => currentBlocks);
         prevVisible = currentBlocks;
+        // The final render is authoritative (single "f" block covering the whole
+        // answer). Drop the streaming-path block HTML (b0..bN) — it was only a
+        // preview and keeping it would retain a second full copy of the answer.
+        setBlockHtml(s => {
+          for (const k of Object.keys(s)) {
+            if (k !== "f") delete s[k];
+          }
+        });
         // Hydrate mermaid placeholders after DOM has the rendered blocks.
         // Must happen here (not in a separate effect) because the async
         // final rendering runs after mount — a parallel effect would fire
