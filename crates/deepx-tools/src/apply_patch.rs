@@ -435,14 +435,6 @@ impl PatchFailure {
             hint: "Read the target files and verify the patch content matches",
         }
     }
-
-    fn stale(message: impl Into<String>) -> Self {
-        Self {
-            code: "STALE_FILE",
-            message: message.into(),
-            hint: "Use read to obtain current content and hash, then retry",
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -538,12 +530,7 @@ impl WorkspaceResolver {
 }
 
 impl PatchPlan {
-    fn build(
-        hunks: &[Hunk],
-        resolver: &WorkspaceResolver,
-        expected_hash: &str,
-        verify_hash: bool,
-    ) -> Result<Self, PatchFailure> {
+    fn build(hunks: &[Hunk], resolver: &WorkspaceResolver) -> Result<Self, PatchFailure> {
         let mut changes = Vec::with_capacity(hunks.len());
         let mut touched = HashSet::new();
         for hunk in hunks {
@@ -566,9 +553,6 @@ impl PatchPlan {
                 Hunk::DeleteFile { path } => {
                     let target = resolver.resolve(path).map_err(PatchFailure::apply)?;
                     reserve_path(&mut touched, &target, path)?;
-                    if verify_hash {
-                        verify_hash_for_resolved(path, &target, expected_hash)?;
-                    }
                     if !target.exists() {
                         return Err(PatchFailure::apply(format!(
                             "{} does not exist",
@@ -596,9 +580,6 @@ impl PatchPlan {
                     chunks,
                 } => {
                     let source = resolver.resolve(path).map_err(PatchFailure::apply)?;
-                    if verify_hash {
-                        verify_hash_for_resolved(path, &source, expected_hash)?;
-                    }
                     if !source.is_file() {
                         return Err(PatchFailure::apply(format!(
                             "{} does not exist or is not a file",
@@ -707,7 +688,6 @@ fn execute_apply_patch(args: &serde_json::Value) -> crate::ToolResult {
             "Provide a patch body starting with *** Begin Patch",
         );
     }
-    let expected_hash = args.s("expected_hash");
     let dry_run = args.opt_bool("dry_run").unwrap_or(false);
     let hunks = match PatchParser::parse(&patch_text) {
         Ok(hunks) => hunks,
@@ -747,12 +727,7 @@ fn execute_apply_patch(args: &serde_json::Value) -> crate::ToolResult {
             );
         }
     };
-    let plan = match PatchPlan::build(
-        &hunks,
-        &resolver,
-        &expected_hash,
-        !expected_hash.is_empty() && !dry_run,
-    ) {
+    let plan = match PatchPlan::build(&hunks, &resolver) {
         Ok(plan) => plan,
         Err(failure) => return failure_result(failure),
     };
@@ -782,27 +757,6 @@ fn error_result(
 
 fn failure_result(failure: PatchFailure) -> crate::ToolResult {
     error_result(failure.code, failure.message, failure.hint)
-}
-
-fn verify_hash_for_resolved(
-    patch_path: &Path,
-    resolved: &Path,
-    expected_hash: &str,
-) -> Result<(), PatchFailure> {
-    let content = std::fs::read_to_string(resolved)
-        .map_err(|e| PatchFailure::stale(format!("Cannot read {}: {e}", patch_path.display())))?;
-    let (normalized, _) = crate::file_shared::normalize_newlines(&content);
-    let actual_hash = crate::file_shared::content_hash(&normalized);
-    if actual_hash == expected_hash {
-        Ok(())
-    } else {
-        Err(PatchFailure::stale(format!(
-            "File content changed since the referenced read: {} (expected {}, actual {})",
-            patch_path.display(),
-            expected_hash,
-            actual_hash
-        )))
-    }
 }
 
 fn dry_run_result(plan: &PatchPlan) -> crate::ToolResult {
@@ -1001,17 +955,13 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
         key: "apply_patch".to_string(),
         description:
-            "Apply file changes using a multi-file patch format. Supports Add, Delete, Update (with move/rename) and content-anchored fuzzy matching. Use @@ to anchor Update hunks to a function or class name; the engine locates the exact lines with Unicode-aware fuzzy search. Call read first and pass its hash as expected_hash to prevent stale writes. Use dry_run=true to preview changes without writing.",
+            "Apply file changes using a multi-file patch format. Supports Add, Delete, Update (with move/rename) and content-anchored fuzzy matching. Use @@ to anchor Update hunks to a function or class name; the engine locates the exact lines with Unicode-aware fuzzy search. Use dry_run=true to preview changes without writing.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "patch": {
                     "type": "string",
                     "description": "Patch body in *** Begin Patch / *** End Patch format. Use *** Add File: / *** Delete File: / *** Update File: hunks. Update hunks use @@ context to anchor location, then +/- for changes."
-                },
-                "expected_hash": {
-                    "type": "string",
-                    "description": "Optional hash returned by read for the file(s) being updated or deleted. If provided, the patch is rejected when file content has changed since the read."
                 },
                 "dry_run": {
                     "type": "boolean",
@@ -1196,27 +1146,6 @@ mod tests {
         crate::set_workspace(".");
     }
     #[test]
-    fn e2e_stale_hash_is_rejected() {
-        let _guard = runtime_guard();
-        let dir = tempfile::tempdir().unwrap();
-        crate::set_workspace(&dir.path().to_string_lossy());
-        std::fs::write(dir.path().join("target.txt"), "original\n").unwrap();
-        let bogus_hash = "0".repeat(64);
-        let args = serde_json::json!({
-            "patch": "*** Begin Patch\n*** Update File: target.txt\n@@\n-original\n+modified\n*** End Patch",
-            "expected_hash": bogus_hash
-        });
-        let result = execute_apply_patch(&args);
-        assert!(!result.success);
-        assert!(result.content.contains("STALE_FILE"), "{}", result.content);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("target.txt")).unwrap(),
-            "original\n"
-        );
-        crate::set_workspace(".");
-    }
-
-    #[test]
     fn parser_preserves_blank_context_and_rejects_empty_update() {
         let patch = "*** Begin Patch\n*** Update File: file.txt\n@@\n context before\n\n context after\n-old\n+new\n*** End Patch";
         let hunks = PatchParser::parse(patch).unwrap();
@@ -1246,10 +1175,6 @@ mod tests {
         assert_eq!(handler.input_schema["type"], "object");
         assert_eq!(handler.input_schema["required"], serde_json::json!(["patch"]));
         assert_eq!(handler.input_schema["properties"]["patch"]["type"], "string");
-        assert_eq!(
-            handler.input_schema["properties"]["expected_hash"]["type"],
-            "string"
-        );
         assert_eq!(
             handler.input_schema["properties"]["dry_run"]["default"],
             false

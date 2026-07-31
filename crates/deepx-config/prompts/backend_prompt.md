@@ -32,7 +32,7 @@
 调用示例：
 
 ```json
-{"patch":"*** Begin Patch\n*** Update File: src/example.rs\n@@ fn main():\n-    old\n+    new\n*** End Patch","expected_hash":"<hash from read>","dry_run":true}
+{"patch":"*** Begin Patch\n*** Update File: src/example.rs\n@@ fn main():\n-    old\n+    new\n*** End Patch","dry_run":true}
 ```
 
 **`edit`** — 单文件字符串替换（支持正则）。**`edit_block`** — 单文件块替换，支持 old_lines/new_lines 匹配。**`write`** — 创建或覆盖文件。**`delete`** — 移入回收站。
