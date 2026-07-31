@@ -7,7 +7,7 @@
 #   just clean            — remove out/ contents
 #   just run              — compile and launch TUI
 
-_version := "1.0.0-beta.4"
+_version := "1.0.0-beta.5"
 _target  := if os_family() == "windows" { "x86_64-pc-windows-msvc" } else { "x86_64-unknown-linux-gnu" }
 _ext     := if os_family() == "windows" { ".exe" } else { "" }
 _out_dir := "out"
