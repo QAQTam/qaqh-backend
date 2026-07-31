@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use deepx_proto::{Agent2Ui, Ui2Agent};
 
-use crate::{EventBus, SessionActivityTracker};
+use crate::{EventBus, RingingHub, SessionActivityTracker};
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
 
@@ -109,6 +109,8 @@ pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     events: EventBus,
     activity: SessionActivityTracker,
+    /// Ringing 运行时（双投管道；None = 未启用，保持纯 legacy）。
+    hub: Option<Arc<RingingHub>>,
 }
 
 impl AgentRegistry {
@@ -117,7 +119,13 @@ impl AgentRegistry {
             instances: HashMap::new(),
             events,
             activity: SessionActivityTracker::default(),
+            hub: None,
         }
+    }
+
+    /// 挂载 Ringing 运行时（worker 事件双投：hub.publish + LegacyProjector）。
+    pub fn attach_ringing(&mut self, hub: Arc<RingingHub>) {
+        self.hub = Some(hub);
     }
 
     pub fn get_or_spawn(&mut self, seed: &str) -> Result<(), String> {
@@ -187,15 +195,42 @@ impl AgentRegistry {
         let event_seed = seed.to_string();
         let events = self.events.clone();
         let activity = self.activity.clone();
+        let hub = self.hub.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 if line.trim().is_empty() {
                     continue;
                 }
-                let Ok(event) = serde_json::from_str::<Agent2Ui>(&line) else {
-                    log::warn!("invalid agent event for {event_seed}");
-                    continue;
+                // wire 判别：默认 legacy；Ringing 事件行在 ChannelRouter 接入前跳过
+                let event = match deepx_msglp::ring::wire::read_worker_event_line(&line) {
+                    Ok(Some(event)) => event,
+                    Ok(None) => {
+                        // Ringing envelope → 领域事件双投：
+                        //   hub.publish（Ringing 客户端）+ LegacyProjector（legacy 客户端）
+                        if let Some(hub) = &hub {
+                            match serde_json::from_str::<
+                                deepx_ringing::RingingWorkerEventEnvelope,
+                            >(&line)
+                            {
+                                Ok(env) => {
+                                    let domain: deepx_domain::DomainEvent = env.event.into();
+                                    let _ = hub.publish(&env.seed, domain.clone());
+                                    if let Some(legacy) =
+                                        crate::ringing::legacy_projector::project(&domain)
+                                    {
+                                        events.publish(&env.seed, legacy);
+                                    }
+                                }
+                                Err(e) => log::warn!("invalid ringing worker envelope: {e}"),
+                            }
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        log::warn!("invalid agent event for {event_seed}: {e}");
+                        continue;
+                    }
                 };
                 if let Ok(value) = serde_json::to_value(&event)
                     && let Some(update) = activity.observe(&event_seed, generation, &value)
@@ -230,6 +265,32 @@ impl AgentRegistry {
     pub fn send(&mut self, seed: &str, frame: Ui2Agent) -> Result<(), String> {
         self.get_or_spawn(seed)?;
         let json = serde_json::to_string(&frame).map_err(|e| format!("serialize: {e}"))?;
+        let write = |instance: &AgentInstance| -> Result<(), String> {
+            let mut stdin = instance
+                .stdin
+                .lock()
+                .map_err(|e| format!("agent stdin lock: {e}"))?;
+            writeln!(*stdin, "{json}").map_err(|e| format!("agent write: {e}"))?;
+            stdin.flush().map_err(|e| format!("agent flush: {e}"))
+        };
+        if write(self.instances.get(seed).expect("spawned instance")).is_ok() {
+            return Ok(());
+        }
+        if let Some(dead) = self.instances.remove(seed) {
+            dead.shutdown();
+        }
+        self.get_or_spawn(seed)?;
+        write(self.instances.get(seed).expect("respawned instance"))
+    }
+
+    /// 发送 Ringing worker 命令帧（携带 `wire` 判别字段；worker reader 按 wire 解析）。
+    pub fn send_ringing(
+        &mut self,
+        seed: &str,
+        env: &deepx_ringing::RingingWorkerCommandEnvelope,
+    ) -> Result<(), String> {
+        self.get_or_spawn(seed)?;
+        let json = serde_json::to_string(env).map_err(|e| format!("serialize: {e}"))?;
         let write = |instance: &AgentInstance| -> Result<(), String> {
             let mut stdin = instance
                 .stdin

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use deepx_proto::{Agent2Ui, AskAnswer, ControlSnapshot, Ui2Agent};
 use serde_json::{Value, json};
 
-use crate::{AgentRegistry, EventBus};
+use crate::{AgentRegistry, EventBus, RingingHub};
 
 #[derive(Clone)]
 pub struct DeepxService {
@@ -27,6 +27,26 @@ impl DeepxService {
 
     pub fn events(&self) -> &EventBus {
         &self.events
+    }
+
+    /// 挂载 Ringing 运行时（worker 事件双投）。
+    pub fn attach_ringing(&self, hub: Arc<RingingHub>) {
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attach_ringing(hub);
+    }
+
+    /// 转发 Ringing 命令到 agent worker（wire 判别后由 worker reader 解析）。
+    pub fn send_ringing_command(
+        &self,
+        seed: &str,
+        env: &deepx_ringing::RingingWorkerCommandEnvelope,
+    ) -> Result<(), String> {
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send_ringing(seed, env)
     }
 
     pub fn snapshot(&self, attached_sessions: Vec<String>) -> ControlSnapshot {

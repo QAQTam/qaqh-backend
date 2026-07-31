@@ -48,3 +48,4 @@ pub mod engine_turn;
 pub mod loop_core;
 pub mod paced_emitter;
 pub mod types;
+pub mod wire;

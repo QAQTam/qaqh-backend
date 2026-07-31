@@ -354,12 +354,10 @@ impl AgentState {
                     super::skill_context::SkillRuntimeState::Catalog => "catalog",
                     super::skill_context::SkillRuntimeState::Requested => "requested",
                     super::skill_context::SkillRuntimeState::Active => "active",
-                    super::skill_context::SkillRuntimeState::ReviewDue => "review_due",
                     super::skill_context::SkillRuntimeState::Unavailable => "unavailable",
                 }
                 .to_string(),
                 source: item.source,
-                lease_remaining: item.lease_remaining,
                 token_count: item.token_count,
                 error: item.error,
             })

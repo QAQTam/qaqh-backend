@@ -1444,7 +1444,6 @@ mod skill_persistence_tests {
                 activation_order: 1,
                 source: "model".into(),
                 state: SkillSessionEntryState::Active,
-                lease_remaining: 2,
             }],
         }
     }

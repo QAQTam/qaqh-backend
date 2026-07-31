@@ -70,22 +70,33 @@ fn build_responses_url(base_url: &str, responses_path: Option<&str>) -> String {
 }
 
 // ── Message conversion: DeepX ContentBlock → Responses input[] items ──
+//
+// 第一条 system 消息 → 顶层 `instructions`（文档语义：模型上下文中的
+// 第一条 system 消息，静态 base prompt 的正确承载位）；其余 system
+// （运行时动态注入：skills catalog、上下文 envelope 等）→ `developer` item。
 
 fn convert_messages_to_input(
     messages: &[Message],
     compat: &ResponsesCompat,
-) -> Vec<serde_json::Value> {
+) -> (Vec<serde_json::Value>, Option<String>) {
     let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut instructions: Option<String> = None;
 
     for msg in messages {
         match msg.role.as_str() {
             "system" => {
                 let text = extract_text(&msg.content);
-                items.push(serde_json::json!({
-                    "type": "message",
-                    "role": "developer",
-                    "content": [{"type": "input_text", "text": text}],
-                }));
+                if instructions.is_none() {
+                    // 第一条 system = base 系统指令 → 顶层 instructions
+                    instructions = Some(text);
+                } else {
+                    // 动态注入的系统指令保持 developer item（追加语义）
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": text}],
+                    }));
+                }
             }
             "user" => {
                 let parts = convert_user_content(&msg.content);
@@ -159,7 +170,7 @@ fn convert_messages_to_input(
         }
     }
 
-    items
+    (items, instructions)
 }
 
 fn extract_text(blocks: &[ContentBlock]) -> String {
@@ -260,7 +271,7 @@ pub fn chat_stream_responses(
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
     let compat = &provider.responses_compat;
-    let input_items = convert_messages_to_input(&messages, compat);
+    let (input_items, instructions) = convert_messages_to_input(&messages, compat);
     let responses_tools = convert_tools(tools, compat);
 
     let mut body_map = serde_json::Map::new();
@@ -269,6 +280,9 @@ pub fn chat_stream_responses(
     body_map.insert("stream".into(), serde_json::json!(true));
     body_map.insert("store".into(), serde_json::json!(false));
     body_map.insert("parallel_tool_calls".into(), serde_json::json!(true));
+    if let Some(ref instructions) = instructions {
+        body_map.insert("instructions".into(), serde_json::json!(instructions));
+    }
     if max_tokens > 0 {
         body_map.insert("max_output_tokens".into(), serde_json::json!(max_tokens));
     }
@@ -376,7 +390,7 @@ pub fn chat_sync_responses(
     max_tokens: u32,
 ) -> Result<String, String> {
     let compat = &provider.responses_compat;
-    let input_items = convert_messages_to_input(&messages, compat);
+    let (input_items, instructions) = convert_messages_to_input(&messages, compat);
     let responses_tools = convert_tools(None, compat);
 
     let mut body_map = serde_json::Map::new();
@@ -384,6 +398,9 @@ pub fn chat_sync_responses(
     body_map.insert("input".into(), serde_json::Value::Array(input_items));
     body_map.insert("stream".into(), serde_json::json!(false));
     body_map.insert("store".into(), serde_json::json!(false));
+    if let Some(ref instructions) = instructions {
+        body_map.insert("instructions".into(), serde_json::json!(instructions));
+    }
     if max_tokens > 0 {
         body_map.insert("max_output_tokens".into(), serde_json::json!(max_tokens));
     }
@@ -823,7 +840,7 @@ mod tests {
     #[test]
     fn user_message_becomes_input() {
         let msgs = vec![Message::user("hello")];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "message");
         assert_eq!(input[0]["role"], "user");
@@ -833,10 +850,25 @@ mod tests {
     }
 
     #[test]
-    fn system_message_becomes_developer() {
+    fn first_system_becomes_instructions_rest_stay_developer() {
+        // 第一条 system → 顶层 instructions（文档推荐承载位）
         let msgs = vec![Message::system("you are helpful")];
-        let input = convert_messages_to_input(&msgs, &test_compat());
-        assert_eq!(input[0]["role"], "developer");
+        let (input, instructions) = convert_messages_to_input(&msgs, &test_compat());
+        assert_eq!(instructions.as_deref(), Some("you are helpful"));
+        assert!(input.is_empty(), "base system must not duplicate into input[]");
+
+        // 动态注入的后续 system → developer item
+        let msgs = vec![
+            Message::system("base prompt"),
+            Message::system("skills catalog"),
+            Message::system("context envelope"),
+        ];
+        let (input, instructions) = convert_messages_to_input(&msgs, &test_compat());
+        assert_eq!(instructions.as_deref(), Some("base prompt"));
+        assert_eq!(input.len(), 2, "two dynamic system messages stay as developer items");
+        for item in &input {
+            assert_eq!(item["role"], "developer");
+        }
     }
 
     #[test]
@@ -847,7 +879,7 @@ mod tests {
             name: None,
             content: vec![ContentBlock::Text { text: "I'll help".into() }],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["role"], "assistant");
         let content = input[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "output_text");
@@ -866,7 +898,7 @@ mod tests {
                 input: serde_json::json!({"path": "/x.txt"}),
             }],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["call_id"], "tc_1");
         assert_eq!(input[0]["name"], "read_file");
@@ -886,7 +918,7 @@ mod tests {
                 success: true,
             }],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "tc_1");
         assert_eq!(input[0]["output"], "file contents");
@@ -907,7 +939,7 @@ mod tests {
                 },
             ],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         // Should have: message (with text) + function_call
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "message");
@@ -923,7 +955,7 @@ mod tests {
             name: None,
             content: vec![],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         let content = input[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["text"], "");
     }
@@ -1025,7 +1057,7 @@ mod tests {
                 },
             ],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         let ws_items: Vec<_> = input
             .iter()
             .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("web_search_call"))
@@ -1048,7 +1080,7 @@ mod tests {
                 action: serde_json::json!({"type": "search"}),
             }],
         }];
-        let input = convert_messages_to_input(&msgs, &compat);
+        let (input, _instructions) = convert_messages_to_input(&msgs, &compat);
         assert!(
             input
                 .iter()
@@ -1084,12 +1116,13 @@ mod tests {
             },
             Message::user("read x.txt"),
         ];
-        let input = convert_messages_to_input(&msgs, &test_compat());
-        assert_eq!(input.len(), 4);
-        assert_eq!(input[0]["role"], "developer");
-        assert_eq!(input[1]["role"], "user");
-        assert_eq!(input[2]["role"], "assistant");
-        assert_eq!(input[3]["role"], "user");
+        let (input, instructions) = convert_messages_to_input(&msgs, &test_compat());
+        // 第一条 system 已被提取为 instructions
+        assert_eq!(instructions.as_deref(), Some("be helpful"));
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[2]["role"], "user");
     }
 
     // ── SSE event handling (OpenAI + DeepSeek terminal events) ──
@@ -1289,7 +1322,7 @@ mod tests {
             StreamEvent::Done { raw_message, .. } => raw_message.clone(),
             other => panic!("expected Done, got {other:?}"),
         };
-        let input = convert_messages_to_input(&[raw_message], &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&[raw_message], &test_compat());
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "web_search_call");
         assert_eq!(input[0]["id"], "ws_1");
@@ -1324,7 +1357,7 @@ mod tests {
             StreamEvent::Done { raw_message, .. } => raw_message.clone(),
             other => panic!("expected Done, got {other:?}"),
         };
-        let input = convert_messages_to_input(&[raw_message], &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&[raw_message], &test_compat());
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["call_id"], "call_1");

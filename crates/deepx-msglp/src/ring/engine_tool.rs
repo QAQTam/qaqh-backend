@@ -430,6 +430,15 @@ impl ToolEngine {
             turn_id: turn_id.clone(),
             user_text: format!("tool: {name}"),
         });
+        // Ringing 双发：权限已通过 = 执行真正开始（决策记录 Q1）
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+            deepx_domain::ToolEvent::ToolStarted {
+                tool_call_id: id.to_string(),
+                turn_id: turn_id.clone(),
+                round_num: 0,
+                name: name.to_string(),
+            },
+        ));
         ctx.emitter.emit(Agent2Ui::RoundComplete {
             turn_id: turn_id.clone(),
             round_num: 0,
@@ -516,18 +525,40 @@ current_todo_id: dashboard::build_current_todo_id(),
                 files_deleted: delta.files_deleted,
                 file: delta.file.clone(),
             });
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                deepx_domain::ToolEvent::CodeChanged {
+                    lines_added: delta.lines_added,
+                    lines_removed: delta.lines_removed,
+                    files_created: delta.files_created,
+                    files_deleted: delta.files_deleted,
+                    file: delta.file.clone(),
+                },
+            ));
         }
 
         ctx.emitter.emit(Agent2Ui::ToolResults {
             turn_id: turn_id.clone(),
             round_num: 0,
             results: vec![deepx_proto::ToolResultDef {
-                tool_call_id: tid,
-                output,
+                tool_call_id: tid.clone(),
+                output: output.clone(),
                 success,
                 file: None,
             }],
         });
+        // Ringing 双发：ToolFinished（terminal）
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+            deepx_domain::ToolEvent::ToolFinished {
+                tool_call_id: tid,
+                turn_id: turn_id.clone(),
+                round_num: 0,
+                result: deepx_domain::ToolResult {
+                    success,
+                    summary: output.clone(),
+                    output_ref: None,
+                },
+            },
+        ));
         ctx.emitter.emit(Agent2Ui::TurnEnd {
             turn_id,
             stop_reason: None,
@@ -545,7 +576,7 @@ current_todo_id: dashboard::build_current_todo_id(),
         &self,
         ctx: &mut RingContext,
         rx: std::sync::mpsc::Receiver<deepx_tools::ExecProgressEvent>,
-        _default_id: &str,
+        default_id: &str,
     ) {
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
@@ -556,11 +587,25 @@ current_todo_id: dashboard::build_current_todo_id(),
                     }
                     for event in events {
                         ctx.emitter.emit_delta(Agent2Ui::ExecProgress {
-                            tool_call_id: event.tool_call_id,
+                            tool_call_id: event.tool_call_id.clone(),
                             stream: event.stream.as_str().to_string(),
                             seq: event.seq,
-                            chunk: event.chunk,
+                            chunk: event.chunk.clone(),
                         });
+                        // Ringing 双发：ToolProgress（replaceable 增量）
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                            deepx_domain::ToolEvent::ToolProgress {
+                                tool_call_id: event.tool_call_id.clone(),
+                                turn_id: default_id.to_string(),
+                                round_num: 0,
+                                stream: event.stream.as_str().to_string(),
+                                seq_start: event.seq,
+                                seq_end: event.seq + event.chunk.len() as u64,
+                                chunk: event.chunk.clone(),
+                                dropped_bytes: 0,
+                                truncated: false,
+                            },
+                        ));
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -573,7 +618,7 @@ current_todo_id: dashboard::build_current_todo_id(),
         &self,
         ctx: &mut RingContext,
         rx: std::sync::mpsc::Receiver<deepx_tools::ExecProgressEvent>,
-        _default_id: &str,
+        default_id: &str,
     ) {
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
@@ -584,11 +629,25 @@ current_todo_id: dashboard::build_current_todo_id(),
                     }
                     for event in events {
                         ctx.emitter.emit_delta(Agent2Ui::ExecProgress {
-                            tool_call_id: event.tool_call_id,
+                            tool_call_id: event.tool_call_id.clone(),
                             stream: event.stream.as_str().to_string(),
                             seq: event.seq,
-                            chunk: event.chunk,
+                            chunk: event.chunk.clone(),
                         });
+                        // Ringing 双发：ToolProgress（replaceable 增量）
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                            deepx_domain::ToolEvent::ToolProgress {
+                                tool_call_id: event.tool_call_id.clone(),
+                                turn_id: default_id.to_string(),
+                                round_num: 0,
+                                stream: event.stream.as_str().to_string(),
+                                seq_start: event.seq,
+                                seq_end: event.seq + event.chunk.len() as u64,
+                                chunk: event.chunk.clone(),
+                                dropped_bytes: 0,
+                                truncated: false,
+                            },
+                        ));
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}

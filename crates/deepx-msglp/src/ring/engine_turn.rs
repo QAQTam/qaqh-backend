@@ -871,8 +871,16 @@ current_todo_id: dashboard::build_current_todo_id(),
                             turn_id: turn_id.clone(),
                             round_num,
                             kind: RoundDeltaKind::Answering,
-                            delta: d,
+                            delta: d.clone(),
                         });
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                            deepx_domain::ConversationEvent::RoundDelta {
+                                turn_id: turn_id.clone(),
+                                round_num,
+                                kind: deepx_domain::RoundDeltaKind::Answering,
+                                delta: d,
+                            },
+                        ));
                     }
                     deepx_gate::StreamEvent::ReasoningDelta(r) => {
                         if ctx.cancel.is_set() {
@@ -883,8 +891,16 @@ current_todo_id: dashboard::build_current_todo_id(),
                             turn_id: turn_id.clone(),
                             round_num,
                             kind: RoundDeltaKind::Thinking,
-                            delta: r,
+                            delta: r.clone(),
                         });
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                            deepx_domain::ConversationEvent::RoundDelta {
+                                turn_id: turn_id.clone(),
+                                round_num,
+                                kind: deepx_domain::RoundDeltaKind::Thinking,
+                                delta: r,
+                            },
+                        ));
                     }
                     deepx_gate::StreamEvent::Done {
                         raw_message, usage, ..

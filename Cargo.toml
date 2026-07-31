@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/deepx-gate",
     "crates/deepx-config",
+    "crates/deepx-domain",
     "crates/deepx-skills",
     "crates/deepx-msglp",
     "crates/deepx-message",
@@ -10,6 +11,7 @@ members = [
     "crates/deepx-proto",
     "crates/deepx-companion",
     "crates/deepx-runtime",
+    "crates/deepx-ringing",
     "crates/deepx-client",
     "crates/deepx-daemon",
     "crates/deepx-tools",

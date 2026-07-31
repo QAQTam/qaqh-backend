@@ -9,6 +9,7 @@ use deepx_proto::{
 };
 use deepx_runtime::{DeepxService, EventBus, LeaseDecision, LeaseManager};
 use futures_util::{SinkExt, StreamExt};
+use deepx_runtime::RingingHub;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -67,8 +68,16 @@ pub async fn run() -> Result<(), String> {
     };
     write_discovery(&discovery)?;
     let events = EventBus::new(epoch);
+    let hub = Arc::new(RingingHub::new(events.epoch().to_string()));
     let service = DeepxService::init(events);
+    service.attach_ringing(hub.clone());
     let leases = Arc::new(Mutex::new(LeaseManager::default()));
+    let ringing_leases = Arc::new(Mutex::new(
+        crate::ringing_http::RingingLeaseStore::new(),
+    ));
+    let pending_commands = Arc::new(Mutex::new(
+        crate::ringing_http::PendingCommandStore::new(),
+    ));
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let (shutdown, mut shutdown_rx) = watch::channel(false);
     loop {
@@ -80,10 +89,12 @@ pub async fn run() -> Result<(), String> {
                     continue;
                 };
                 let service = service.clone(); let leases = leases.clone(); let token = token.clone();
+                let hub = hub.clone(); let ringing_leases = ringing_leases.clone();
+                let pending_commands = pending_commands.clone();
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error)=handle_connection(stream,token,service,leases,shutdown).await { log::warn!("control connection: {error}"); }
+                    if let Err(error)=handle_connection(stream,token,service,leases,shutdown,hub,ringing_leases,pending_commands).await { log::warn!("control connection: {error}"); }
                 });
             }
             changed = shutdown_rx.changed() => if changed.is_err() || *shutdown_rx.borrow() { break },
@@ -101,6 +112,9 @@ async fn handle_connection(
     service: DeepxService,
     leases: Arc<Mutex<LeaseManager>>,
     shutdown: watch::Sender<bool>,
+    hub: Arc<RingingHub>,
+    ringing_leases: Arc<Mutex<crate::ringing_http::RingingLeaseStore>>,
+    pending_commands: Arc<Mutex<crate::ringing_http::PendingCommandStore>>,
 ) -> Result<(), String> {
     let mut peek = [0_u8; 2048];
     let count = stream.peek(&mut peek).await.map_err(stringify)?;
@@ -127,6 +141,20 @@ async fn handle_connection(
             let _ = shutdown.send(true);
         }
         return Ok(());
+    }
+
+    // Ringing HTTP/SSE 分流（PLAN：legacy WS 与 Ringing HTTP/SSE 并行、互不嵌套）
+    if preview.starts_with("POST /ringing/") || preview.starts_with("GET /ringing/") {
+        return crate::ringing_http::handle_ringing_http(
+            stream,
+            &preview,
+            &token,
+            hub,
+            ringing_leases,
+            service,
+            pending_commands,
+        )
+        .await;
     }
 
     let expected = format!("Bearer {token}");
@@ -510,7 +538,7 @@ fn error_response(status: StatusCode, text: &str) -> ErrorResponse {
     *response.status_mut() = status;
     response
 }
-fn random_hex() -> String {
+pub fn random_hex() -> String {
     rand::random::<[u8; 32]>()
         .iter()
         .map(|byte| format!("{byte:02x}"))

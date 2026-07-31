@@ -118,7 +118,14 @@ impl InputEngine {
         ctx.agent.msg.flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
 
         log::info!("[INPUT] emitting TurnStart turn_id={} round_num=0", turn_id);
-        ctx.emitter.emit(Agent2Ui::TurnStart { turn_id: turn_id.clone(), user_text: text });
+        ctx.emitter.emit(Agent2Ui::TurnStart { turn_id: turn_id.clone(), user_text: text.clone() });
+        // Ringing 双发：TurnStarted（权威开始事件）
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+            deepx_domain::ConversationEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                user_text: text,
+            },
+        ));
 
         Outcome::ContinueTurn { turn_id, round_num: 0, usage: None }
     }

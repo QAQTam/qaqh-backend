@@ -166,6 +166,8 @@ mod tests {
         let plan = Agent2Ui::PlanSubmitted {
             call_id: "plan-1".into(),
             plan_content: "# Plan".into(),
+            review_type: "plan".into(),
+            todo_items: None,
         };
 
         let permission = interaction_from_agent_event("deadbeef", 3, &permission).unwrap();

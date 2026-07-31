@@ -37,7 +37,7 @@ impl MiscEngine {
         &self,
         agent: &mut AgentState,
         turn_id: &str,
-        tx: &mpsc::SyncSender<Agent2Ui>,
+        tx: &mpsc::SyncSender<crate::ring::types::WriterEvent>,
     ) {
         log::info!(
             "[MISC] UndoTurn {turn_id} — turns before: {}",
@@ -55,7 +55,7 @@ impl MiscEngine {
             let start = total.saturating_sub(INITIAL_LOAD_COUNT as u32) as usize;
             let recent =
                 util::build_turns_from_context(agent, Some(start), Some(INITIAL_LOAD_COUNT));
-            let _ = tx.send(Agent2Ui::SessionRestored {
+            let _ = tx.send(crate::ring::types::WriterEvent::Legacy(Agent2Ui::SessionRestored {
                 seed: agent.session.seed.clone(),
                 turns: recent,
                 tokens_used: agent.session.usage_totals.total_tokens,
@@ -66,7 +66,7 @@ impl MiscEngine {
                 cache_reported_requests: agent.session.effective_cache_reported_requests(),
                 total_turns: total,
                 has_more: start > 0,
-            });
+            }));
         } else {
             log::info!("[MISC] UndoTurn — no changes");
         }
@@ -74,7 +74,7 @@ impl MiscEngine {
 
     // ── Dashboard ──
 
-    pub fn emit_dashboard(&self, agent: &AgentState, tx: &mpsc::SyncSender<Agent2Ui>) {
+    pub fn emit_dashboard(&self, agent: &AgentState, tx: &mpsc::SyncSender<crate::ring::types::WriterEvent>) {
         // Write context stats to disk
         let (
             chat_text,
@@ -97,7 +97,7 @@ impl MiscEngine {
         let _ = std::fs::create_dir_all(&stats_dir);
         let _ = std::fs::write(stats_dir.join("context_stats.json"), stats.to_string());
 
-        let _ = tx.send(Agent2Ui::Dashboard {
+        let _ = tx.send(crate::ring::types::WriterEvent::Legacy(Agent2Ui::Dashboard {
             hp_connected: true,
             session_seed: agent.session.seed.clone(),
             context_limit: agent.config.context_limit,
@@ -113,7 +113,7 @@ current_todo_id: dashboard::build_current_todo_id(),
             session_title: agent.session.title.clone(),
             usage: None,
             model: Some(agent.config.model.clone()),
-        });
+        }));
     }
 
     // ── Mode ──

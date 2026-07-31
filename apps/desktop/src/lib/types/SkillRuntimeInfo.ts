@@ -2,6 +2,6 @@
 
 export type SkillRuntimeInfo = { name: string, description: string,
 /**
- * catalog, requested, active, review_due, or unavailable
+ * catalog, requested, active, or unavailable
  */
-state: string, source: string, lease_remaining?: number, token_count: number, error?: string, };
+state: string, source: string, token_count: number, error?: string, };

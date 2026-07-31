@@ -182,7 +182,7 @@ fn send_message_triggers_turn_lifecycle() {
         expect(&rx, Duration::from_secs(10), |e| matches!(e, Agent2Ui::Ready));
 
         // Step 2: send a user message (this is what the frontend does)
-        send(&mut iw, Ui2Agent::UserInput { text: "Hi!".into() });
+        send(&mut iw, Ui2Agent::UserInput { text: "Hi!".into(), images: vec![] });
 
         // Step 3: verify the full turn lifecycle
         expect(&rx, Duration::from_secs(15), |e| matches!(e, Agent2Ui::TurnStart { .. }));

@@ -1,0 +1,14 @@
+[package]
+name = "deepx-ringing"
+version.workspace = true
+edition.workspace = true
+description = "Ringing 线协议层（Wire）：envelope/ack/batch/snapshot/content ref/worker frame/能力协商"
+
+[dependencies]
+deepx-domain = { path = "../deepx-domain" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl"] }
+
+[lints]
+workspace = true
