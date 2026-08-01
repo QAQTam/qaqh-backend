@@ -9,15 +9,15 @@ import type { UsageInfo } from "./UsageInfo";
 /**
  * Conversation 频道领域事件。
  */
-export type ConversationEvent = { "type": "turn_started", turn_id: string, user_text: string, } | { "type": "turn_completed", turn_id: string, stop_reason?: string | null, usage?: UsageInfo | null, } | { "type": "turn_failed", turn_id: string, error: DomainError, } | { "type": "round_delta", turn_id: string, round_num: number, kind: RoundDeltaKind, delta: string, } | { "type": "round_completed", turn_id: string, round_num: number, thinking?: string | null, answer?: string | null, output_ref?: ContentRef | null, 
+export type ConversationEvent = { "type": "turn_started", turn_id: string, user_text: string, } | { "type": "turn_completed", turn_id: string, stop_reason?: string | null, usage?: UsageInfo | null, } | { "type": "turn_failed", turn_id: string, error: DomainError, } | { "type": "round_delta", turn_id: string, round_num: number, kind: RoundDeltaKind, delta: string, } | { "type": "round_completed", turn_id: string, round_num: number, thinking?: string | null, answer?: string | null, output_ref?: ContentRef | null,
 /**
  * true = 本回合最后一个 round。
  */
-is_final: boolean, } | { "type": "provider_retrying", turn_id: string, round_num: number, attempt: number, max_retries: number, delay_secs: bigint, error_message: string, } | { "type": "provider_tool_status", turn_id: string, round_num: number, 
+is_final: boolean, } | { "type": "provider_retrying", turn_id: string, round_num: number, attempt: number, max_retries: number, delay_secs: number, error_message: string, } | { "type": "provider_tool_status", turn_id: string, round_num: number,
 /**
  * provider 侧 call id（如 web_search_call id），**不是** DeepX tool_call_id。
  */
-call_id: string, 
+call_id: string,
 /**
  * 目前固定 "web_search"，为未来 provider 内建工具预留。
  */

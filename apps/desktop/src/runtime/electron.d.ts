@@ -10,15 +10,13 @@ interface DeepxDesktopApi {
     restart(): Promise<{ ok: boolean; reason?: string }>;
     attach(seed: string): Promise<unknown>;
     detach(seed: string): Promise<unknown>;
-    status(): Promise<{ connected: boolean; error?: string }>;
+    status(): Promise<{ connected: boolean; transport?: "ringing" | "legacy"; error?: string }>;
     onMessage(listener: (message: DeepxControlMessage) => void): () => void;
-    onStatus(listener: (status: { connected: boolean; error?: string }) => void): () => void;
+    onStatus(listener: (status: { connected: boolean; transport?: "ringing" | "legacy"; error?: string }) => void): () => void;
   };
   ringing: {
     status(): Promise<Record<string, { state: string; detail?: string } | null>>;
-    mode(seed: string): Promise<Record<string, { eventProtocol: string; commandProtocol: string }>>;
-    cutoverEvents(seed: string, channel: string, action: "prepare" | "commit" | "abort"): Promise<unknown>;
-    cutoverCommands(seed: string, channel: string, protocol: "ringing" | "legacy"): Promise<unknown>;
+    bootstrap?(seed: string): Promise<unknown>;
     snapshot(seed: string, channel: string): Promise<unknown>;
     command(seed: string, channel: string, envelope: unknown): Promise<unknown>;
     query(path: string, params?: Record<string, string | undefined>): Promise<unknown>;

@@ -155,9 +155,7 @@ fn project_control(ce: &deepx_domain::ControlEvent) -> Option<Agent2Ui> {
                 diagnostics: vec![],
             },
         }),
-        CE::SystemNotice {
-            level, message, ..
-        } => Some(Agent2Ui::ToolNotice {
+        CE::SystemNotice { level, message, .. } => Some(Agent2Ui::ToolNotice {
             message: message.clone(),
             level: match level {
                 deepx_domain::NoticeLevel::Info => "info".into(),
@@ -171,6 +169,7 @@ fn project_control(ce: &deepx_domain::ControlEvent) -> Option<Agent2Ui> {
                 message: error.message.clone(),
             })
         }
+        CE::OperationCompleted { .. } => None,
     }
 }
 
@@ -274,7 +273,9 @@ fn project_conversation(ce: &deepx_domain::ConversationEvent) -> Option<Agent2Ui
             turns_total: *turns_total,
             turns_keeping: *turns_keeping,
         }),
-        CE::CompactProgress { delta, .. } => Some(Agent2Ui::CompactDelta { delta: delta.clone() }),
+        CE::CompactProgress { delta, .. } => Some(Agent2Ui::CompactDelta {
+            delta: delta.clone(),
+        }),
         CE::CompactFinished {
             status,
             summary_chars,
@@ -385,9 +386,7 @@ fn project_tool(te: &deepx_domain::ToolEvent) -> Option<Agent2Ui> {
             },
             consequence: consequence.clone(),
         }),
-        TE::ToolNotice {
-            level, message, ..
-        } => Some(Agent2Ui::ToolNotice {
+        TE::ToolNotice { level, message, .. } => Some(Agent2Ui::ToolNotice {
             message: message.clone(),
             level: match level {
                 deepx_domain::NoticeLevel::Info => "info".into(),
@@ -428,7 +427,7 @@ fn project_tool(te: &deepx_domain::ToolEvent) -> Option<Agent2Ui> {
 mod tests {
     use super::*;
     use deepx_domain::{
-        AskMode, ConversationEvent, ControlEvent, DomainError, SessionState, ToolEvent, ToolResult,
+        AskMode, ControlEvent, ConversationEvent, DomainError, SessionState, ToolEvent, ToolResult,
     };
 
     #[test]
@@ -537,13 +536,15 @@ mod tests {
             .is_none()
         );
         assert!(
-            project(&DomainEvent::Conversation(ConversationEvent::CompactFinished {
-                compact_id: "k".into(),
-                status: deepx_domain::CompactStatus::Skipped,
-                summary_chars: None,
-                turns_compacted: None,
-                turns_removed: None,
-            }))
+            project(&DomainEvent::Conversation(
+                ConversationEvent::CompactFinished {
+                    compact_id: "k".into(),
+                    status: deepx_domain::CompactStatus::Skipped,
+                    summary_chars: None,
+                    turns_compacted: None,
+                    turns_removed: None,
+                }
+            ))
             .is_none()
         );
     }

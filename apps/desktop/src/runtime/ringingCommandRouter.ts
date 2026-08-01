@@ -1,60 +1,9 @@
-// Ringing 命令/查询路由（renderer 侧）。
+// Ringing v2 typed Desktop backend 路由。
 //
-// 命令方向协议独立于事件方向（PLAN 双协议共存）：默认 legacy；只有
-// (seed, channel) 被标记为 commandProtocol=ringing 后，backendClient.request
-// 才会把对应方法改走 Ringing HTTP 命令。标记来源：
-// - 调试面板命令切流按钮；
-// - localStorage["ringing.autoCommands"] 自动切流；
-// - ringingMonitor.syncMode 从 main 的 mode 表恢复（renderer 刷新后仍生效）。
-//
-// 回退规则：Ringing 未连接（"ringing not connected"）时命令回退 legacy 一次
-// （共存：新出旧进）；其余错误原样抛出，不允许静默吞错。
+// 协议模式在 Electron main 的连接协商时固定；renderer 不维护 mode、seed/channel
+// 没有 per-seed/channel 开关。命令只能通过 typed backend 进入 Ringing。
 
 export type RingingChannelName = "control" | "conversation" | "tool";
-export type CommandProtocol = "legacy" | "ringing";
-
-const CHANNELS: readonly RingingChannelName[] = ["control", "conversation", "tool"];
-
-const commandProtocols = new Map<string, Partial<Record<RingingChannelName, CommandProtocol>>>();
-
-export function setCommandProtocol(
-  seed: string,
-  channel: RingingChannelName,
-  protocol: CommandProtocol,
-): void {
-  const entry = commandProtocols.get(seed) ?? {};
-  entry[channel] = protocol;
-  commandProtocols.set(seed, entry);
-}
-
-/** 从 main 的 mode 表同步整组命令协议（reload 后恢复路由标记）。 */
-export function applyCommandModes(
-  seed: string,
-  modes: Record<string, { eventProtocol: string; commandProtocol: string }>,
-): void {
-  const entry = commandProtocols.get(seed) ?? {};
-  for (const channel of CHANNELS) {
-    const mode = modes[channel];
-    if (mode) {
-      entry[channel] = mode.commandProtocol === "ringing" ? "ringing" : "legacy";
-    }
-  }
-  commandProtocols.set(seed, entry);
-}
-
-export function commandIsRinging(seed: string, channel: RingingChannelName): boolean {
-  return commandProtocols.get(seed)?.[channel] === "ringing";
-}
-
-/** 该 seed 任一频道命令已切流（决定只读查询是否走 Ringing）。 */
-export function sessionCommandsRinging(seed: string): boolean {
-  const entry = commandProtocols.get(seed);
-  return !!entry && CHANNELS.some((channel) => entry[channel] === "ringing");
-}
-
-export function resetCommandProtocols(): void {
-  commandProtocols.clear();
-}
 
 export interface RingingCommandSpec {
   channel: RingingChannelName;
@@ -67,9 +16,8 @@ export const RINGING_COMMAND_METHODS: Record<string, RingingCommandSpec> = {
   "session.send_message": {
     channel: "conversation",
     build: (params) => {
-      // 带 files 的消息保持 legacy：文件预览展开在 daemon 侧（service.rs
-      // with_file_previews），renderer 沙箱内无法复刻。
-      if (Array.isArray(params.files) && params.files.length > 0) return null;
+      // 文件路径由 Electron main 读取并上传为 ContentRef；renderer 只负责
+      // 构造领域命令，不把本地路径放进 Ringing wire。
       const images =
         Array.isArray(params.images) && params.images.length > 0
           ? params.images.map((img) => ({
@@ -120,6 +68,10 @@ export const RINGING_COMMAND_METHODS: Record<string, RingingCommandSpec> = {
     channel: "control",
     build: (params) => ({ type: "session_close", seed: String(params.seed ?? "") }),
   },
+  "session.delete": {
+    channel: "control",
+    build: (params) => ({ type: "session_close", seed: String(params.seed ?? "") }),
+  },
   "session.resume": {
     channel: "control",
     build: (params) => ({ type: "session_resume", seed: String(params.seed ?? "") }),
@@ -160,20 +112,16 @@ export const RINGING_COMMAND_METHODS: Record<string, RingingCommandSpec> = {
       tool_call_id: String(params.toolCallId ?? params.tool_call_id ?? ""),
       approved: params.approved === true,
       trust_folder: params.trustFolder === true || params.trust_folder === true,
-      ...(params.expectedRevision != null || params.expected_revision != null
-        ? { expected_revision: params.expectedRevision ?? params.expected_revision }
-        : {}),
     }),
   },
   "skills.operation": {
     channel: "control",
-    build: (params) => {
-      const name = String(params.name ?? "");
-      const action = String(params.action ?? "");
-      if (action === "activate") return { type: "skills_activate", name };
-      if (action === "release") return { type: "skills_release", name };
-      return null; // retain 等动作暂不可经 Ringing 路由
-    },
+    build: (params) => ({
+      type: "skills_operation",
+      operation_id: String(params.operationId ?? params.operation_id ?? ""),
+      action: String(params.action ?? ""),
+      name: String(params.name ?? ""),
+    }),
   },
   "skills.reload": {
     channel: "control",
@@ -181,7 +129,7 @@ export const RINGING_COMMAND_METHODS: Record<string, RingingCommandSpec> = {
   },
 };
 
-/** 可经 /ringing/v1/query 的只读方法（与后端白名单一致）。 */
+/** 可经 /ringing/v2/queries 的只读方法（与后端白名单一致）。 */
 export const RINGING_QUERY_METHODS: ReadonlySet<string> = new Set([
   "daemon.version",
   "session.list",
@@ -211,10 +159,12 @@ export function buildRingingCommandEnvelope(
   seed: string,
   channel: RingingChannelName,
   command: Record<string, unknown>,
-): { command_id: string; command: unknown; seed?: string } {
+  expectedRevision?: unknown,
+): { command_id: string; command: unknown; seed?: string; expected_revision?: number | null } {
   return {
     command_id: randomCommandId(),
     command,
     seed: seed || undefined,
+    expected_revision: typeof expectedRevision === "number" ? expectedRevision : null,
   };
 }

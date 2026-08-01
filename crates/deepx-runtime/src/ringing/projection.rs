@@ -48,7 +48,7 @@ impl SnapshotProjector {
         &self,
         channel: RingingChannel,
         seed: &str,
-        baseline_seq: u64,
+        baseline_stream_seq: u64,
     ) -> RingingChannelSnapshot {
         let state = self
             .state
@@ -66,11 +66,14 @@ impl SnapshotProjector {
             .get(&(channel, seed.to_string()))
             .copied()
             .unwrap_or(0);
-        RingingChannelSnapshot::new(channel, seed, baseline_seq, revision, state)
+        RingingChannelSnapshot::new(channel, seed, baseline_stream_seq, revision, state)
     }
 
     pub fn revision(&self, channel: RingingChannel, seed: &str) -> u64 {
-        self.revisions.get(&(channel, seed.to_string())).copied().unwrap_or(0)
+        self.revisions
+            .get(&(channel, seed.to_string()))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// 领域状态折叠（按频道）。仅实现基础状态演化；
@@ -114,6 +117,7 @@ impl SnapshotProjector {
                         state["last_failure"] = serde_json::json!({ "occurred": true });
                         true
                     }
+                    CE::OperationCompleted { .. } => false,
                     CE::SystemNotice { notice_id, .. } => {
                         state["last_notice"] = serde_json::json!(notice_id);
                         true
@@ -197,7 +201,7 @@ impl SnapshotProjector {
 mod tests {
     use super::*;
     use deepx_domain::{
-        ActivityState, AgentLifecycleState, ConversationEvent, ControlEvent, SessionState,
+        ActivityState, AgentLifecycleState, ControlEvent, ConversationEvent, SessionState,
         ToolEvent,
     };
 
@@ -275,7 +279,10 @@ mod tests {
                 consequence: "run".into(),
             }),
         );
-        assert_eq!(p.snapshot_for(RingingChannel::Tool, "s", 0).state["pending_permission"], "c1");
+        assert_eq!(
+            p.snapshot_for(RingingChannel::Tool, "s", 0).state["pending_permission"],
+            "c1"
+        );
         p.apply(
             RingingChannel::Tool,
             "s",

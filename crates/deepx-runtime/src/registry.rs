@@ -3,7 +3,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use deepx_domain::RingingChannel;
 use deepx_proto::{Agent2Ui, Ui2Agent};
 
 use crate::{EventBus, RingingHub, SessionActivityTracker};
@@ -240,10 +239,9 @@ impl AgentRegistry {
                         // Ringing envelope → 领域事件双投：
                         //   hub.publish（Ringing 客户端）+ LegacyProjector（legacy 客户端）
                         if let Some(hub) = &hub {
-                            match serde_json::from_str::<
-                                deepx_ringing::RingingWorkerEventEnvelope,
-                            >(&line)
-                            {
+                            match serde_json::from_str::<deepx_ringing::RingingWorkerEventEnvelope>(
+                                &line,
+                            ) {
                                 Ok(env) => {
                                     let domain: deepx_domain::DomainEvent = env.event.into();
                                     // 大内容外置：ToolFinished summary > 10MiB 时
@@ -257,10 +255,9 @@ impl AgentRegistry {
                                         domain.clone(),
                                         env.causation_id.as_deref(),
                                     );
-                                    // 切流过滤：该 channel 已切到 Ringing 后，不再向
-                                    // legacy 通道投影（legacy 客户端只收未切流 channel）。
+                                    // 兼容旧 daemon：旧协议整条连接仍接收 legacy 投影；
+                                    // 新 Desktop 只消费同一连接上的 Ringing v2。
                                     if !externalized
-                                        && !hub.event_is_ringing(&env.seed, domain.channel())
                                         && let Some(legacy) =
                                             crate::ringing::legacy_projector::project(&domain)
                                         && legacy_should_forward(
@@ -288,17 +285,7 @@ impl AgentRegistry {
                 {
                     crate::activity::publish_activity_dual(&events, hub.as_deref(), &update);
                 }
-                // 切流过滤：legacy 直发事件按 channel 归属过滤（已切流 channel
-                // 不再向 legacy 发送；无归属的全局事件如 Pong 恒放行）。
-                let cutover_ok = hub
-                    .as_ref()
-                    .map(|h| {
-                        agent2ui_channel(&event)
-                            .map(|c| !h.event_is_ringing(&event_seed, c))
-                            .unwrap_or(true)
-                    })
-                    .unwrap_or(true);
-                if cutover_ok && legacy_should_forward(&legacy_dedup, &event_seed, &event, false) {
+                if legacy_should_forward(&legacy_dedup, &event_seed, &event, false) {
                     events.publish(&event_seed, event);
                 }
             }
@@ -469,7 +456,7 @@ impl AgentInstance {
 /// ToolFinished 大内容外置（PLAN 大内容外置）：summary 超过 10 MiB 时
 /// 存入 ContentStore（会话所有权 + TTL），事件替换为 tail（256 KiB）+
 /// `output_ref`。Ringing 与 legacy 客户端都只收到 tail，完整内容经
-/// `GET /ringing/v1/content/{id}?seed=` 按需读取。
+/// `GET /ringing/v2/content/{id}?seed=` 按需读取。
 ///
 /// 非 ToolFinished 事件原样返回（externalized = false）；未超阈值的事件
 /// 原样返回（externalized = false）。externalized = true 表示已外置：调用方
@@ -499,12 +486,7 @@ fn externalize_large_content(
             false,
         );
     }
-    let content_id = hub.put_content(
-        seed,
-        "text/plain",
-        result.summary.as_bytes().to_vec(),
-        true,
-    );
+    let content_id = hub.put_content(seed, "text/plain", result.summary.as_bytes().to_vec(), true);
     let tail = tail_text(&result.summary, CONTENT_TAIL_BYTES);
     (
         deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
@@ -544,13 +526,10 @@ fn tail_text(text: &str, max_bytes: usize) -> String {
         .collect()
 }
 
-/// Agent2Ui 事件 → Ringing 频道归属（切流过滤用）。
-/// 依据 docs/ringing-migration-map.md 的 42 事件映射表；
-/// 无归属（None）的事件不参与切流过滤，恒向 legacy 发送。
-fn agent2ui_channel(event: &Agent2Ui) -> Option<RingingChannel> {
+#[cfg(test)]
+fn agent2ui_channel(event: &Agent2Ui) -> Option<deepx_domain::RingingChannel> {
     use deepx_domain::RingingChannel::{Control, Conversation, Tool};
     Some(match event {
-        // Conversation 频道（映射表 #1-#14）
         Agent2Ui::TurnStart { .. }
         | Agent2Ui::TurnEnd { .. }
         | Agent2Ui::RoundDelta { .. }
@@ -563,8 +542,8 @@ fn agent2ui_channel(event: &Agent2Ui) -> Option<RingingChannel> {
         | Agent2Ui::CompactStart { .. }
         | Agent2Ui::CompactEnd { .. }
         | Agent2Ui::CompactDelta { .. }
-        | Agent2Ui::Cancelled => Conversation,
-        // Tool 频道（映射表 #1-#9）
+        | Agent2Ui::Cancelled
+        | Agent2Ui::SearchStatus { .. } => Conversation,
         Agent2Ui::ToolResults { .. }
         | Agent2Ui::ToolExecDelta { .. }
         | Agent2Ui::ExecProgress { .. }
@@ -573,7 +552,6 @@ fn agent2ui_channel(event: &Agent2Ui) -> Option<RingingChannel> {
         | Agent2Ui::AuditRecord { .. }
         | Agent2Ui::CodeDelta { .. }
         | Agent2Ui::PermissionRequest { .. } => Tool,
-        // Control 频道（映射表 #1-#15）
         Agent2Ui::SessionCreated { .. }
         | Agent2Ui::Error { .. }
         | Agent2Ui::PlanSubmitted { .. }
@@ -588,10 +566,6 @@ fn agent2ui_channel(event: &Agent2Ui) -> Option<RingingChannel> {
         | Agent2Ui::AskUser { .. }
         | Agent2Ui::AskResolved { .. }
         | Agent2Ui::AskRejected { .. } => Control,
-        // 全局/未分类（None）：SearchStatus 按映射表属 Conversation，
-        // 但 legacy 无对应双发——保守归类，避免切流后遗漏。
-        Agent2Ui::SearchStatus { .. } => Conversation,
-        // 未来新增事件：无归属 → 恒放行 legacy（保守）���
         _ => return None,
     })
 }
@@ -622,7 +596,8 @@ fn legacy_should_forward(
     // 惰性清理过期条目
     let window = std::time::Duration::from_secs(1);
     seen.direct.retain(|_, t| now.duration_since(*t) < window);
-    seen.projected.retain(|_, t| now.duration_since(*t) < window);
+    seen.projected
+        .retain(|_, t| now.duration_since(*t) < window);
     if seen.direct.len() + seen.projected.len() > 4096 {
         seen.direct.clear();
         seen.projected.clear();
@@ -647,7 +622,6 @@ fn legacy_should_forward(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn event() -> Agent2Ui {
         Agent2Ui::TurnEnd {
@@ -762,14 +736,13 @@ mod tests {
     #[test]
     fn large_tool_finished_is_externalized() {
         let hub = RingingHub::new("test");
-        let big = "x".repeat(
-            crate::ringing::content_store::CONTENT_STORE_THRESHOLD_BYTES + 1024,
-        );
+        let big = "x".repeat(crate::ringing::content_store::CONTENT_STORE_THRESHOLD_BYTES + 1024);
         let (out, externalized) = externalize_large_content(&hub, "s1", tool_finished(big.clone()));
         assert!(externalized, "large content must be flagged");
         match out {
             deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
-                result, ..
+                result,
+                ..
             }) => {
                 assert!(result.summary.len() <= CONTENT_TAIL_BYTES);
                 let rf = result.output_ref.expect("output_ref set");
@@ -794,7 +767,8 @@ mod tests {
         assert!(!externalized);
         match out {
             deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
-                result, ..
+                result,
+                ..
             }) => {
                 assert_eq!(result.summary, "small");
                 assert!(result.output_ref.is_none());
@@ -806,12 +780,11 @@ mod tests {
     #[test]
     fn non_tool_event_passes_through() {
         let hub = RingingHub::new("test");
-        let ev = deepx_domain::DomainEvent::Conversation(
-            deepx_domain::ConversationEvent::TurnStarted {
+        let ev =
+            deepx_domain::DomainEvent::Conversation(deepx_domain::ConversationEvent::TurnStarted {
                 turn_id: "t1".into(),
                 user_text: "hi".into(),
-            },
-        );
+            });
         let (out, externalized) = externalize_large_content(&hub, "s1", ev);
         assert!(!externalized);
         assert!(matches!(
@@ -839,42 +812,202 @@ mod tests {
     fn sample_agent2ui(variant: &str) -> Agent2Ui {
         use deepx_proto::{AskMode, AskResolution, PermissionRisk};
         match variant {
-            "TurnStart" => Agent2Ui::TurnStart { turn_id: "t".into(), user_text: "u".into() },
-            "TurnEnd" => Agent2Ui::TurnEnd { turn_id: "t".into(), stop_reason: None, usage: None },
-            "RoundDelta" => Agent2Ui::RoundDelta { turn_id: "t".into(), round_num: 0, kind: deepx_proto::RoundDeltaKind::Answering, delta: "d".into() },
-            "RoundComplete" => Agent2Ui::RoundComplete { turn_id: "t".into(), round_num: 0, thinking: None, answer: None, tool_calls: vec![], blocks: vec![], is_final: true },
-            "ToolResults" => Agent2Ui::ToolResults { turn_id: "t".into(), round_num: 0, results: vec![] },
-            "ToolExecDelta" => Agent2Ui::ToolExecDelta { tool_call_id: "c".into(), delta: "d".into() },
-            "SessionRestored" => Agent2Ui::SessionRestored { seed: "s".into(), turns: vec![], tokens_used: 0, cache_hit_pct: 0.0, usage: None, usage_totals: deepx_types::UsageInfo::default(), usage_requests: 0, cache_reported_requests: 0, total_turns: 0, has_more: false },
-            "MoreTurns" => Agent2Ui::MoreTurns { turns: vec![], has_more: false },
+            "TurnStart" => Agent2Ui::TurnStart {
+                turn_id: "t".into(),
+                user_text: "u".into(),
+            },
+            "TurnEnd" => Agent2Ui::TurnEnd {
+                turn_id: "t".into(),
+                stop_reason: None,
+                usage: None,
+            },
+            "RoundDelta" => Agent2Ui::RoundDelta {
+                turn_id: "t".into(),
+                round_num: 0,
+                kind: deepx_proto::RoundDeltaKind::Answering,
+                delta: "d".into(),
+            },
+            "RoundComplete" => Agent2Ui::RoundComplete {
+                turn_id: "t".into(),
+                round_num: 0,
+                thinking: None,
+                answer: None,
+                tool_calls: vec![],
+                blocks: vec![],
+                is_final: true,
+            },
+            "ToolResults" => Agent2Ui::ToolResults {
+                turn_id: "t".into(),
+                round_num: 0,
+                results: vec![],
+            },
+            "ToolExecDelta" => Agent2Ui::ToolExecDelta {
+                tool_call_id: "c".into(),
+                delta: "d".into(),
+            },
+            "SessionRestored" => Agent2Ui::SessionRestored {
+                seed: "s".into(),
+                turns: vec![],
+                tokens_used: 0,
+                cache_hit_pct: 0.0,
+                usage: None,
+                usage_totals: deepx_types::UsageInfo::default(),
+                usage_requests: 0,
+                cache_reported_requests: 0,
+                total_turns: 0,
+                has_more: false,
+            },
+            "MoreTurns" => Agent2Ui::MoreTurns {
+                turns: vec![],
+                has_more: false,
+            },
             "SessionCreated" => Agent2Ui::SessionCreated { seed: "s".into() },
-            "Error" => Agent2Ui::Error { message: "e".into() },
-            "ProviderRetrying" => Agent2Ui::ProviderRetrying { turn_id: "t".into(), round_num: 0, attempt: 1, max_retries: 3, delay_secs: 1, error: "e".into() },
-            "ToolNotice" => Agent2Ui::ToolNotice { message: "m".into(), level: "info".into() },
-            "PlanSubmitted" => Agent2Ui::PlanSubmitted { call_id: "c".into(), plan_content: "p".into(), review_type: "r".into(), todo_items: None },
-            "PlanResolved" => Agent2Ui::PlanResolved { call_id: "c".into(), approved: true },
-            "Dashboard" => Agent2Ui::Dashboard { hp_connected: false, session_seed: "s".into(), tool_calls_total: 0, tool_failures: 0, current_phase: "p".into(), streaming: false, dsml_compat_count: 0, documents: vec![], recent_edits: vec![], tasks: vec![], current_todo_id: None, session_title: None, usage: None, context_limit: 0, model: None },
-            "UsageUpdated" => Agent2Ui::UsageUpdated { turn_id: "t".into(), round_num: 0, usage: deepx_types::UsageInfo::default(), context_limit: 1, model: "m".into() },
-            "CacheDiagnostics" => Agent2Ui::CacheDiagnostics { prefix_hash: "h".into(), prefix_changed: false, change_reasons: vec![] },
+            "Error" => Agent2Ui::Error {
+                message: "e".into(),
+            },
+            "ProviderRetrying" => Agent2Ui::ProviderRetrying {
+                turn_id: "t".into(),
+                round_num: 0,
+                attempt: 1,
+                max_retries: 3,
+                delay_secs: 1,
+                error: "e".into(),
+            },
+            "ToolNotice" => Agent2Ui::ToolNotice {
+                message: "m".into(),
+                level: "info".into(),
+            },
+            "PlanSubmitted" => Agent2Ui::PlanSubmitted {
+                call_id: "c".into(),
+                plan_content: "p".into(),
+                review_type: "r".into(),
+                todo_items: None,
+            },
+            "PlanResolved" => Agent2Ui::PlanResolved {
+                call_id: "c".into(),
+                approved: true,
+            },
+            "Dashboard" => Agent2Ui::Dashboard {
+                hp_connected: false,
+                session_seed: "s".into(),
+                tool_calls_total: 0,
+                tool_failures: 0,
+                current_phase: "p".into(),
+                streaming: false,
+                dsml_compat_count: 0,
+                documents: vec![],
+                recent_edits: vec![],
+                tasks: vec![],
+                current_todo_id: None,
+                session_title: None,
+                usage: None,
+                context_limit: 0,
+                model: None,
+            },
+            "UsageUpdated" => Agent2Ui::UsageUpdated {
+                turn_id: "t".into(),
+                round_num: 0,
+                usage: deepx_types::UsageInfo::default(),
+                context_limit: 1,
+                model: "m".into(),
+            },
+            "CacheDiagnostics" => Agent2Ui::CacheDiagnostics {
+                prefix_hash: "h".into(),
+                prefix_changed: false,
+                change_reasons: vec![],
+            },
             "Done" => Agent2Ui::Done,
-            "CompactStart" => Agent2Ui::CompactStart { turns_total: 1, turns_keeping: 1 },
-            "CompactEnd" => Agent2Ui::CompactEnd { summary_chars: 0, turns_compacted: 0, turns_removed: 0 },
+            "CompactStart" => Agent2Ui::CompactStart {
+                turns_total: 1,
+                turns_keeping: 1,
+            },
+            "CompactEnd" => Agent2Ui::CompactEnd {
+                summary_chars: 0,
+                turns_compacted: 0,
+                turns_removed: 0,
+            },
             "CompactDelta" => Agent2Ui::CompactDelta { delta: "d".into() },
             "Cancelled" => Agent2Ui::Cancelled,
             "ShutdownAck" => Agent2Ui::ShutdownAck,
             "Ready" => Agent2Ui::Ready,
-            "AuditRecord" => Agent2Ui::AuditRecord { tool_name: "n".into(), result_summary: "r".into(), success: true, time: "t".into(), args: "a".into() },
-            "ExecProgress" => Agent2Ui::ExecProgress { tool_call_id: "c".into(), stream: "stdout".into(), seq: 0, chunk: "c".into() },
-            "ToolCallPreview" => Agent2Ui::ToolCallPreview { turn_id: "t".into(), round_num: 0, index: 0, id: "i".into(), name: "n".into(), args_so_far: "a".into() },
-            "SearchStatus" => Agent2Ui::SearchStatus { turn_id: "t".into(), round_num: 0, status: "s".into() },
-            "CodeDelta" => Agent2Ui::CodeDelta { lines_added: 1, lines_removed: 0, files_created: 0, files_deleted: 0, file: None },
+            "AuditRecord" => Agent2Ui::AuditRecord {
+                tool_name: "n".into(),
+                result_summary: "r".into(),
+                success: true,
+                time: "t".into(),
+                args: "a".into(),
+            },
+            "ExecProgress" => Agent2Ui::ExecProgress {
+                tool_call_id: "c".into(),
+                stream: "stdout".into(),
+                seq: 0,
+                chunk: "c".into(),
+            },
+            "ToolCallPreview" => Agent2Ui::ToolCallPreview {
+                turn_id: "t".into(),
+                round_num: 0,
+                index: 0,
+                id: "i".into(),
+                name: "n".into(),
+                args_so_far: "a".into(),
+            },
+            "SearchStatus" => Agent2Ui::SearchStatus {
+                turn_id: "t".into(),
+                round_num: 0,
+                status: "s".into(),
+            },
+            "CodeDelta" => Agent2Ui::CodeDelta {
+                lines_added: 1,
+                lines_removed: 0,
+                files_created: 0,
+                files_deleted: 0,
+                file: None,
+            },
             "Pong" => Agent2Ui::Pong,
-            "SkillsChanged" => Agent2Ui::SkillsChanged { status: deepx_proto::SkillsStatus { available: vec![], active: vec![], catalog_revision: String::new(), context_epoch: 0, operation_revision: 0, token_budget: 0, token_usage: 0, runtime: vec![], diagnostics: vec![] } },
-            "SkillOperationResolved" => Agent2Ui::SkillOperationResolved { operation_id: "o".into(), success: true, revision: 1, error: None },
-            "PermissionRequest" => Agent2Ui::PermissionRequest { tool_call_id: "c".into(), tool_name: "n".into(), reason: "r".into(), paths: vec![], category: "c".into(), level: 1, risk: PermissionRisk::Low, consequence: "c".into() },
-            "AskUser" => Agent2Ui::AskUser { turn_id: "t".into(), round_num: 0, ask_id: "a".into(), mode: AskMode::Single, questions: vec![] },
-            "AskResolved" => Agent2Ui::AskResolved { ask_id: "a".into(), resolution: AskResolution::Answered },
-            "AskRejected" => Agent2Ui::AskRejected { ask_id: "a".into(), message: "m".into() },
+            "SkillsChanged" => Agent2Ui::SkillsChanged {
+                status: deepx_proto::SkillsStatus {
+                    available: vec![],
+                    active: vec![],
+                    catalog_revision: String::new(),
+                    context_epoch: 0,
+                    operation_revision: 0,
+                    token_budget: 0,
+                    token_usage: 0,
+                    runtime: vec![],
+                    diagnostics: vec![],
+                },
+            },
+            "SkillOperationResolved" => Agent2Ui::SkillOperationResolved {
+                operation_id: "o".into(),
+                success: true,
+                revision: 1,
+                error: None,
+            },
+            "PermissionRequest" => Agent2Ui::PermissionRequest {
+                tool_call_id: "c".into(),
+                tool_name: "n".into(),
+                reason: "r".into(),
+                paths: vec![],
+                category: "c".into(),
+                level: 1,
+                risk: PermissionRisk::Low,
+                consequence: "c".into(),
+            },
+            "AskUser" => Agent2Ui::AskUser {
+                turn_id: "t".into(),
+                round_num: 0,
+                ask_id: "a".into(),
+                mode: AskMode::Single,
+                questions: vec![],
+            },
+            "AskResolved" => Agent2Ui::AskResolved {
+                ask_id: "a".into(),
+                resolution: AskResolution::Answered,
+            },
+            "AskRejected" => Agent2Ui::AskRejected {
+                ask_id: "a".into(),
+                message: "m".into(),
+            },
             other => panic!("unhandled variant in sample_agent2ui: {other}"),
         }
     }
@@ -883,24 +1016,42 @@ mod tests {
     fn agent2ui_channel_covers_all_variants() {
         use deepx_domain::RingingChannel::{Control, Conversation, Tool};
         let expect = [
-            ("TurnStart", Conversation), ("TurnEnd", Conversation),
-            ("RoundDelta", Conversation), ("RoundComplete", Conversation),
-            ("SessionRestored", Conversation), ("MoreTurns", Conversation),
-            ("ProviderRetrying", Conversation), ("UsageUpdated", Conversation),
-            ("CacheDiagnostics", Conversation), ("CompactStart", Conversation),
-            ("CompactEnd", Conversation), ("CompactDelta", Conversation),
-            ("Cancelled", Conversation), ("SearchStatus", Conversation),
-            ("ToolResults", Tool), ("ToolExecDelta", Tool),
-            ("ExecProgress", Tool), ("ToolCallPreview", Tool),
-            ("ToolNotice", Tool), ("AuditRecord", Tool),
-            ("CodeDelta", Tool), ("PermissionRequest", Tool),
-            ("SessionCreated", Control), ("Error", Control),
-            ("PlanSubmitted", Control), ("PlanResolved", Control),
-            ("Dashboard", Control), ("Done", Control),
-            ("ShutdownAck", Control), ("Ready", Control),
-            ("Pong", Control), ("SkillsChanged", Control),
-            ("SkillOperationResolved", Control), ("AskUser", Control),
-            ("AskResolved", Control), ("AskRejected", Control),
+            ("TurnStart", Conversation),
+            ("TurnEnd", Conversation),
+            ("RoundDelta", Conversation),
+            ("RoundComplete", Conversation),
+            ("SessionRestored", Conversation),
+            ("MoreTurns", Conversation),
+            ("ProviderRetrying", Conversation),
+            ("UsageUpdated", Conversation),
+            ("CacheDiagnostics", Conversation),
+            ("CompactStart", Conversation),
+            ("CompactEnd", Conversation),
+            ("CompactDelta", Conversation),
+            ("Cancelled", Conversation),
+            ("SearchStatus", Conversation),
+            ("ToolResults", Tool),
+            ("ToolExecDelta", Tool),
+            ("ExecProgress", Tool),
+            ("ToolCallPreview", Tool),
+            ("ToolNotice", Tool),
+            ("AuditRecord", Tool),
+            ("CodeDelta", Tool),
+            ("PermissionRequest", Tool),
+            ("SessionCreated", Control),
+            ("Error", Control),
+            ("PlanSubmitted", Control),
+            ("PlanResolved", Control),
+            ("Dashboard", Control),
+            ("Done", Control),
+            ("ShutdownAck", Control),
+            ("Ready", Control),
+            ("Pong", Control),
+            ("SkillsChanged", Control),
+            ("SkillOperationResolved", Control),
+            ("AskUser", Control),
+            ("AskResolved", Control),
+            ("AskRejected", Control),
         ];
         for (name, expected) in expect {
             let event = sample_agent2ui(name);
@@ -912,36 +1063,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cutover_filters_legacy_per_channel_via_hub() {
-        let hub = RingingHub::new("test");
-        use deepx_domain::RingingChannel::{Conversation, Tool};
-        // 默认 legacy：全部放行
-        assert!(!hub.event_is_ringing("s", Tool));
-        // 两阶段切流 Tool
-        hub.cutover_prepare("s", Tool).expect("prepare");
-        assert!(!hub.event_is_ringing("s", Tool), "preparing 阶段仍是 legacy");
-        hub.cutover_commit("s", Tool).expect("commit");
-        assert!(hub.event_is_ringing("s", Tool));
-        // 过滤条件组合（registry 闭包内的判定逻辑）：
-        // Tool 已切流 → Tool 频道事件不应再发 legacy
-        let tool_event = sample_agent2ui("ToolResults");
-        assert_eq!(agent2ui_channel(&tool_event), Some(Tool));
-        assert!(hub.event_is_ringing("s", Tool));
-        // 过滤判定 = channel 已切流（registry 闭包取反后拦截）
-        let should_filter = hub.event_is_ringing("s", Tool);
-        assert!(should_filter);
-        // 未切流 Conversation 不受影响
-        assert!(!hub.event_is_ringing("s", Conversation));
-        let conv_event = sample_agent2ui("TurnStart");
-        assert_eq!(agent2ui_channel(&conv_event), Some(Conversation));
-        // abort 后回到 legacy
-        hub.cutover_prepare("s", Conversation).expect("prepare");
-        hub.cutover_abort("s", Conversation);
-        assert!(!hub.event_is_ringing("s", Conversation));
-        // 命令协议独立切换
-        hub.cutover_switch_command("s", Conversation, true);
-        assert!(hub.command_is_ringing("s", Conversation));
-        assert!(!hub.event_is_ringing("s", Conversation));
-    }
 }

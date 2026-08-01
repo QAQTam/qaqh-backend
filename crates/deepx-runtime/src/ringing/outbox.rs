@@ -112,8 +112,7 @@ impl ChannelOutbox {
     /// 丢弃所有已过时 revision 的 replaceable（terminal 携带新 revision 时调用）。
     pub fn drop_stale_replaceable(&mut self, up_to_seq: u64) -> usize {
         let before = self.replaceable.len();
-        self.replaceable
-            .retain(|_, env| env.stream_seq > up_to_seq);
+        self.replaceable.retain(|_, env| env.stream_seq > up_to_seq);
         self.replaceable_order
             .retain(|k| self.replaceable.contains_key(k));
         before - self.replaceable.len()

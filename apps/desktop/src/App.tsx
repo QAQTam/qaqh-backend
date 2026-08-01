@@ -1,7 +1,6 @@
 import { createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { backendStatus, connect, listen, request } from "./runtime/backendClient";
 import { requestWithRinging } from "./runtime/ringingCommands";
-import { setCommandProtocol } from "./runtime/ringingCommandRouter";
 import {
   applyUpdate,
   checkUpdate,
@@ -27,9 +26,8 @@ import { startSessionActivityClient } from "./runtime/sessionActivityClient";
 import type { SessionActivityMap } from "./runtime/sessionActivityStore";
 import { hasRestorableTranscript } from "./runtime/sessionStartup";
 import type { PendingInteraction } from "./store/rawSession";
-import { createRingingMonitor, type ChannelName } from "./store/ringingMonitor";
-import { projectRingingToRawSession } from "./store/ringingSessionAdapter";
-import { RingingDebugPanel } from "./components/RingingDebugPanel";
+import { createRingingMonitor } from "./store/ringingMonitor";
+import { selectRingingPresentation } from "./store/sessionPresentation";
 import {
   applyDashboardData,
   removeTurnFromSession,
@@ -65,7 +63,7 @@ export default function App() {
   const toastCtrl = createToastCtrl();
   const registry = createSessionRegistry({ storage: sessionStorage });
   const sessionReplay = createSessionReplayBuffer();
-  // Ringing 影子监视器（验证新链路；调试面板展示）
+  // Ringing v2 三频道状态源
   const ringingMonitor = createRingingMonitor();
   const pendingEntries = new Map<string, Promise<SessionEntry>>();
   const [view, setView] = createSignal<View>("home");
@@ -260,12 +258,6 @@ export default function App() {
     toastCtrl.clear();
     // Suppress error toasts during replay — only fresh errors should toast.
     setReplaying(true);
-    // 切流状态同步：该 seed 已切流的 channel 从 main mode 表恢复 + 拉 snapshot
-    void ringingMonitor.syncMode(seed);
-    // 自动切流：localStorage["ringing.auto"] = "conversation,tool" 等，免调试面板
-    void autoCutoverChannels(seed);
-    // 命令方向自动切流：localStorage["ringing.autoCommands"] = "conversation,tool"
-    void autoCutoverCommands(seed);
     // Swap to the locally persisted transcript immediately. Agent startup and
     // replay may take seconds on a cold session and must not block navigation.
     const cachedEntry = registry.ensure(seed);
@@ -276,15 +268,9 @@ export default function App() {
     try {
       entry = await getOrCreateSessionEntry(seed);
       await request("session.resume", { seed });
-      const rawReplay = await request<unknown[]>("session.replay_events", { seed }).catch(() => []);
-      const replayed = rawReplay.flatMap(payload => {
-        try { return [parseAgentEvent(payload)]; }
-        catch (error) {
-          console.error("[App] ignored malformed replay event", { seed, error });
-          return [];
-        }
-      });
-      sessionReplay.complete(seed, replayed, event => handleAgentEvent(entry!, event));
+      // v2 SessionResume 建立 seed lease 后再请求原子 bootstrap。
+      await ringingMonitor.activate(seed);
+      sessionReplay.complete(seed, [], event => handleAgentEvent(entry!, event));
       setReplaying(false);
       if (requestToken !== resumeRequest) { setReplaying(false); return; }
       // replay 刚同步应用完事件，state() 可能尚未冲刷；current() 立即可靠。
@@ -312,60 +298,6 @@ export default function App() {
     }
   }
 
-  const AUTO_CUTOVER_KEY = "ringing.auto";
-
-  /** 按配置自动把会话频道切到 Ringing（服务端幂等：AlreadyRinging 视为成功）。 */
-  async function autoCutoverChannels(seed: string): Promise<void> {
-    const raw = localStorage.getItem(AUTO_CUTOVER_KEY);
-    if (!raw) return;
-    const channels = raw
-      .split(",")
-      .map(c => c.trim())
-      .filter((c): c is ChannelName =>
-        c === "control" || c === "conversation" || c === "tool",
-      );
-    for (const channel of channels) {
-      try {
-        await ringingMonitor.cutover(seed, channel);
-        console.info(`[ringing] auto cutover ${seed}/${channel}`);
-      } catch (error) {
-        // 已切流（服务端 AlreadyRinging）→ 从 main mode 表恢复渲染标记；
-        // 其它错误（daemon 未连接等）只记录一次，不再触发 syncMode，
-        // 避免 daemon 下线时 snapshot 请求风暴。
-        console.warn(`[ringing] auto cutover ${seed}/${channel} skipped`, error);
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.includes("already_ringing") || message.includes("duplicate")) {
-          void ringingMonitor.syncMode(seed);
-        }
-      }
-    }
-  }
-
-  const AUTO_COMMANDS_KEY = "ringing.autoCommands";
-
-  /** 按配置自动把 (seed, channel) 的命令协议切到 Ringing（renderer 路由表同步）。 */
-  async function autoCutoverCommands(seed: string): Promise<void> {
-    const raw = localStorage.getItem(AUTO_COMMANDS_KEY);
-    if (!raw) return;
-    const api = window.deepx?.ringing;
-    if (!api) return;
-    const channels = raw
-      .split(",")
-      .map((c) => c.trim())
-      .filter((c): c is ChannelName =>
-        c === "control" || c === "conversation" || c === "tool",
-      );
-    for (const channel of channels) {
-      try {
-        await api.cutoverCommands(seed, channel, "ringing");
-        setCommandProtocol(seed, channel, "ringing");
-        console.info(`[ringing] auto command cutover ${seed}/${channel}`);
-      } catch (error) {
-        // 已切流（服务端幂等）或 daemon 未连接：只记录，不阻塞会话打开
-        console.warn(`[ringing] auto command cutover ${seed}/${channel} skipped`, error);
-      }
-    }
-  }
 
   async function changePermissionLevel(level: number) {
     if (level < 1 || level > 4) return;
@@ -567,7 +499,7 @@ export default function App() {
         setBackendError(event.payload.connected ? "" : (event.payload.error ?? "Daemon unavailable"));
       });
       await connect();
-      // Ringing 影子订阅：batch 按 seed 路由进影子 store（不干扰 legacy 主渲染）
+      // Ringing v2 主订阅：batch 按 seed 路由进 typed stores。
       const api = window.deepx?.ringing;
       if (api) {
         unlistenRingingBatch = api.onBatch(batch => ringingMonitor.handleBatch(batch));
@@ -635,7 +567,6 @@ export default function App() {
 
   return (
     <I18nCtx value={i18n}>
-      <RingingDebugPanel monitor={ringingMonitor} />
       <AppShell
         sidebar={
           <TaskSidebar
@@ -703,25 +634,18 @@ export default function App() {
             <Match when={view() === "chat"}>
               <Show when={hasChosenSession() && activeEntry()} keyed>
                 {entry => {
-                  // SessionPresentationSelector：已切流会话的主 UI 数据源切换到
-                  // Ringing store（投影为 RawSessionState，组件零改动）。
+                  // SessionPresentationSelector：v2 会话从三个 typed store 读取；
+                  // legacy 会话继续读取 legacy session store。
                   const rawSession = () => {
-                    // 响应式依赖：Ringing 影子 store 是普通对象，任何 batch/
-                    // snapshot 应用都通过版本信号驱动这里重投影（否则切流后
-                    // ChatView 失去重渲染触发器，新输出不显示）。
-                    void ringingMonitor.ringingVersion();
                     const seed = entry.state().seed;
-                    if (ringingMonitor.isRinging(seed)) {
-                      const shadow = ringingMonitor.shadowOf(seed);
-                      if (shadow) {
-                        // 透传 legacy 侧的 usage/telemetry：切流后图表与用量卡
+                    if (ringingMonitor.hasStores(seed)) {
+                      const stores = ringingMonitor.storesFor(seed);
+                      if (stores) {
+                        // 透传当前展示所需的 usage/telemetry：图表与用量卡
                         // 不因投影重建而恒空。
-                        return projectRingingToRawSession(
+                        return selectRingingPresentation(
                           seed,
-                          shadow,
-                          entry.state().session.usage,
-                          entry.state().session.usageTotals,
-                          entry.state().telemetry,
+                          stores,
                         );
                       }
                     }
@@ -729,7 +653,6 @@ export default function App() {
                   };
                   return <ChatView
                   rawSession={rawSession}
-                  sessionStore={entry.sessionStore}
                   dashboardStore={entry.dashboardStore}
                   pendingSend={entry.pendingSend}
                   setPendingSend={entry.setPendingSend}

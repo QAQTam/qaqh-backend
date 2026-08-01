@@ -5,16 +5,20 @@ import type { RingingCommand } from "./RingingCommand";
 /**
  * 命令信封（PLAN 固定字段）。
  */
-export type RingingCommandEnvelope = { schema: string, version: number, channel: RingingChannel, 
+export type RingingCommandEnvelope = { schema: string, version: number, channel: RingingChannel,
 /**
  * 命令幂等 id：accepted 前断线可安全重试；accepted 后不得重复执行。
  */
-command_id: string, 
+command_id: string,
 /**
  * 发起客户端实例 id（lease 绑定该身份）。
  */
-client_instance_id: string, seed?: string | null, 
+client_instance_id: string,
+/**
+ * open 成功后由 daemon 签发的连接级身份。
+ */
+client_session_id: string, seed?: string | null,
 /**
  * 乐观并发修订（可选）。
  */
-expected_revision?: bigint | null, command: RingingCommand, };
+expected_revision?: number | null, command: RingingCommand, };

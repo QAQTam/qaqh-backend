@@ -10,16 +10,16 @@ import type { RingingEventEnvelope } from "../lib/types/ringing";
 function envelope(streamSeq: number, eventId: string): RingingEventEnvelope {
   return {
     schema: "deepx.Ringing",
-    version: 1,
+    version: 2,
     channel: "tool",
     delivery: "reliable",
     server_epoch: "epoch-1",
     seed: "s1",
-    stream_seq: streamSeq as unknown as bigint,
-    channel_seq: 1n,
-    session_seq: 1n,
+    stream_seq: streamSeq,
+    channel_seq: 1,
+    session_seq: 1,
     event_id: eventId,
-    state_revision: 3n,
+    state_revision: 3,
     event: {
       channel: "tool",
       type: "tool_started",
@@ -76,7 +76,20 @@ describe("envelopeToBatch", () => {
     expect(batch.seed).toBe("s1");
     expect(batch.from_stream_seq).toBe(5);
     expect(batch.to_stream_seq).toBe(5);
-    expect(batch.events).toHaveLength(1);
-    expect(batch.events[0]).toMatchObject({ type: "tool_started", tool_call_id: "c1" });
+    expect(batch.envelopes).toHaveLength(1);
+    expect(batch.envelopes[0].event).toMatchObject({ type: "tool_started", tool_call_id: "c1" });
+  });
+
+  it("rejects malformed envelope metadata at the transport boundary", () => {
+    expect(() => envelopeToBatch("tool", { ...envelope(5, "e5"), seed: "" })).toThrow(
+      "invalid Ringing stream sequence",
+    );
+    expect(() => envelopeToBatch("tool", {
+      ...envelope(5, "e5"),
+      event: { ...envelope(5, "e5").event, channel: "conversation" } as never,
+    })).toThrow("invalid Ringing stream sequence");
+    expect(() => envelopeToBatch("tool", {
+      ...envelope(Number.MAX_SAFE_INTEGER + 1, "e5"),
+    })).toThrow("invalid Ringing stream sequence");
   });
 });

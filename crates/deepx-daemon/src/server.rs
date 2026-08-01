@@ -80,19 +80,36 @@ pub async fn run() -> Result<(), String> {
     let workspace_mode = deepx_config::Config::load()
         .map(|config| WorkspaceMode::parse(&config.workspace.mode))
         .unwrap_or(WorkspaceMode::Local);
-    let workspace = WorkspaceSupervisor::start(workspace_mode).ok();
+    let workspace_service = service.clone();
+    let workspace = WorkspaceSupervisor::start(
+        workspace_mode,
+        Arc::new(move |connection| {
+            // 新 endpoint/token 仅经 daemon 内存注入后续 worker，绝不进日志或 IPC。
+            workspace_service.attach_workspace(connection.endpoint.clone(), connection.token);
+            workspace_service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
+                configured_mode: workspace_mode.label().into(),
+                active_mode: connection.mode.label().into(),
+                endpoint: connection.endpoint,
+                generation: connection.generation,
+            });
+        }),
+    )
+    .ok();
     if let Some(ref ws) = workspace {
-        service.attach_workspace(ws.endpoint.clone(), ws.token.clone());
+        let connection = ws.connection();
+        service.attach_workspace(connection.endpoint.clone(), connection.token);
         service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
             configured_mode: workspace_mode.label().into(),
-            active_mode: ws.mode_label().into(),
-            endpoint: ws.endpoint.clone(),
+            active_mode: connection.mode.label().into(),
+            endpoint: connection.endpoint,
+            generation: connection.generation,
         });
     } else {
         service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
             configured_mode: workspace_mode.label().into(),
             active_mode: "disabled".into(),
             endpoint: String::new(),
+            generation: 0,
         });
     }
     let leases = Arc::new(Mutex::new(LeaseManager::default()));
@@ -100,8 +117,36 @@ pub async fn run() -> Result<(), String> {
         crate::ringing_http::RingingLeaseStore::new(),
     ));
     let pending_commands = Arc::new(Mutex::new(
-        crate::ringing_http::PendingCommandStore::new(),
+        crate::ringing_http::PendingCommandStore::new_persistent(),
     ));
+    // Fold causally-linked business terminal events into persistent command
+    // receipts. One observer per physical channel preserves channel isolation.
+    for channel in [
+        deepx_domain::RingingChannel::Control,
+        deepx_domain::RingingChannel::Conversation,
+        deepx_domain::RingingChannel::Tool,
+    ] {
+        let mut receiver = hub.subscribe(channel);
+        let receipts = pending_commands.clone();
+        tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(envelope) => receipts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .observe_terminal_event(&envelope),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        log::warn!(
+                            "[ringing] command receipt observer lagged on {} by {} events",
+                            channel.as_str(),
+                            skipped
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let (shutdown, mut shutdown_rx) = watch::channel(false);
     loop {

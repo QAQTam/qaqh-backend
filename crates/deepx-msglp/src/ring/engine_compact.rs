@@ -173,13 +173,14 @@ impl CompactEngine {
             turns_keeping: kept_user_count as u32,
         });
         // Ringing 双发：CompactStarted（权威开始事件，携带 compact_id）
-        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
-            deepx_domain::ConversationEvent::CompactStarted {
-                compact_id: compact_id.clone(),
-                turns_total: turns_total as u32,
-                turns_keeping: kept_user_count as u32,
-            },
-        ));
+        ctx.emitter
+            .emit_domain(deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::CompactStarted {
+                    compact_id: compact_id.clone(),
+                    turns_total: turns_total as u32,
+                    turns_keeping: kept_user_count as u32,
+                },
+            ));
 
         // The previous checkpoint already appears in <previous-summary> below.
         // Do not serialize the synthetic `[Compacted ...]` turn into HISTORY
@@ -272,7 +273,13 @@ impl CompactEngine {
             }
             p
         };
-        Some((prompt, kept_user_count, head_user_count, provider, compact_id))
+        Some((
+            prompt,
+            kept_user_count,
+            head_user_count,
+            provider,
+            compact_id,
+        ))
     }
 
     /// Step 2: Apply compact result on the live message store (called from main thread).
@@ -314,15 +321,16 @@ impl CompactEngine {
                 turns_removed: 0,
             });
             // Ringing 双发：CompactFinished（失败终态）
-            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
-                deepx_domain::ConversationEvent::CompactFinished {
-                    compact_id: meta.compact_id.clone(),
-                    status: deepx_domain::CompactStatus::Failed,
-                    summary_chars: Some(0),
-                    turns_compacted: Some(0),
-                    turns_removed: Some(0),
-                },
-            ));
+            ctx.emitter
+                .emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::CompactFinished {
+                        compact_id: meta.compact_id.clone(),
+                        status: deepx_domain::CompactStatus::Failed,
+                        summary_chars: Some(0),
+                        turns_compacted: Some(0),
+                        turns_removed: Some(0),
+                    },
+                ));
             return;
         }
         let chars = meta.summary.chars().count();
@@ -371,15 +379,16 @@ impl CompactEngine {
             turns_removed: turns_removed as u32,
         });
         // Ringing 双发：CompactFinished（成功终态）
-        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
-            deepx_domain::ConversationEvent::CompactFinished {
-                compact_id: meta.compact_id.clone(),
-                status: deepx_domain::CompactStatus::Completed,
-                summary_chars: Some(chars),
-                turns_compacted: Some(meta.head_user_count as u32),
-                turns_removed: Some(turns_removed as u32),
-            },
-        ));
+        ctx.emitter
+            .emit_domain(deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::CompactFinished {
+                    compact_id: meta.compact_id.clone(),
+                    status: deepx_domain::CompactStatus::Completed,
+                    summary_chars: Some(chars),
+                    turns_compacted: Some(meta.head_user_count as u32),
+                    turns_removed: Some(turns_removed as u32),
+                },
+            ));
         ctx.emitter.emit(Agent2Ui::ToolNotice {
             message: format!(
                 "Compacted {} turns -> {chars} chars, keeping {} turns",
@@ -422,6 +431,7 @@ pub(crate) fn run_compact_worker(
     kept_user_count: usize,
     head_user_count: usize,
     event_tx: std::sync::mpsc::SyncSender<crate::ring::types::WriterEvent>,
+    causation_id: Option<String>,
 ) -> CompactMeta {
     let msgs_vec = vec![deepx_types::Message::user(&prompt)];
     let mut summary = String::new();
@@ -431,7 +441,9 @@ pub(crate) fn run_compact_worker(
         deepx_gate::StreamEvent::ContentDelta(delta) => {
             summary.push_str(&delta);
             let _ = event_tx.send(crate::ring::types::WriterEvent::Legacy(
-                deepx_proto::Agent2Ui::CompactDelta { delta: delta.clone() },
+                deepx_proto::Agent2Ui::CompactDelta {
+                    delta: delta.clone(),
+                },
             ));
             // Ringing 双发：CompactProgress（replaceable 流式摘要）
             progress_seq += 1;
@@ -446,6 +458,10 @@ pub(crate) fn run_compact_worker(
                 )
                 .into(),
             );
+            let env = match causation_id.as_deref() {
+                Some(command_id) => env.with_causation(command_id),
+                None => env,
+            };
             let _ = event_tx.send(crate::ring::types::WriterEvent::Ringing(env));
         }
         deepx_gate::StreamEvent::ReasoningDelta(delta) => {

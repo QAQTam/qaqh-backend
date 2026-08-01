@@ -69,6 +69,19 @@ use crate::state::agent::AgentState;
 /// Number of recent turns sent on session restore for incremental loading.
 const INITIAL_LOAD_COUNT: usize = 20;
 
+fn ringing_command_is_interrupt(env: &deepx_ringing::RingingWorkerCommandEnvelope) -> bool {
+    matches!(
+        &env.command,
+        deepx_ringing::RingingCommand::Control(
+            deepx_domain::ControlCommand::SessionResume { .. }
+                | deepx_domain::ControlCommand::SessionShutdown
+                | deepx_domain::ControlCommand::SessionCreate { .. }
+        ) | deepx_ringing::RingingCommand::Conversation(
+            deepx_domain::ConversationCommand::ConversationCancel { .. }
+        )
+    )
+}
+
 // ═══════════════════════════════════════════════════════
 // Loop — the dispatcher
 // ═══════════════════════════════════════════════════════
@@ -120,6 +133,7 @@ pub struct Loop {
 
     /// Pending compact result (set when compact is running in background).
     pending_compact_rx: Option<mpsc::Receiver<CompactMeta>>,
+    pending_compact_causation: Option<String>,
 
     /// Direct output emitter. The renderer performs frame-level coalescing.
     paced_emitter: PacedEmitter,
@@ -174,7 +188,7 @@ impl Loop {
                             }
                             if cmd_tx
                                 .send(super::types::WorkerCommand {
-                                    frame,
+                                    frame: super::wire::WorkerCommandFrame::Legacy(frame),
                                     causation: None,
                                 })
                                 .is_err()
@@ -183,34 +197,19 @@ impl Loop {
                             }
                         }
                         Ok(Some(super::wire::WorkerCommandFrame::Ringing(env))) => {
-                            // Ringing 命令经 ingress 映射驱动现有引擎（默认全部
-                            // legacy 期间正常不会到达；映射失败仅记录日志不中断）。
-                            match super::wire::ringing_command_to_legacy(&env) {
-                                Ok(frame) => {
-                                    let is_interrupt = matches!(
-                                        frame,
-                                        Ui2Agent::Cancel
-                                            | Ui2Agent::ResumeSession { .. }
-                                            | Ui2Agent::NewSession
-                                            | Ui2Agent::Shutdown
-                                    );
-                                    if is_interrupt {
-                                        cancel_for_reader.set();
-                                        deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
-                                    }
-                                    if cmd_tx
-                                        .send(super::types::WorkerCommand {
-                                            frame,
-                                            causation: Some(env.command_id.clone()),
-                                        })
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!("[AGENT] ringing command rejected: {e}");
-                                }
+                            let causation = env.command_id.clone();
+                            if ringing_command_is_interrupt(&env) {
+                                cancel_for_reader.set();
+                                deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
+                            }
+                            if cmd_tx
+                                .send(super::types::WorkerCommand {
+                                    frame: super::wire::WorkerCommandFrame::Ringing(env),
+                                    causation: Some(causation),
+                                })
+                                .is_err()
+                            {
+                                break;
                             }
                         }
                         Ok(None) | Err(_) => {
@@ -266,12 +265,8 @@ impl Loop {
             log::info!("[AGENT] writer thread exiting");
         });
 
-        let paced_emitter = PacedEmitter::new(
-            seed,
-            event_tx.clone(),
-            writer_dead.clone(),
-            cancel.arc(),
-        );
+        let paced_emitter =
+            PacedEmitter::new(seed, event_tx.clone(), writer_dead.clone(), cancel.arc());
 
         Loop {
             cmd_rx,
@@ -292,6 +287,7 @@ impl Loop {
                 tx: notification::NotificationThread::spawn().into_sender(),
             },
             pending_compact_rx: None,
+            pending_compact_causation: None,
             paced_emitter,
         }
     }
@@ -330,11 +326,11 @@ impl Loop {
             self.cancel.clear();
             deepx_workspace::CANCEL.store(false, Ordering::SeqCst);
 
-            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
-                Agent2Ui::Error {
+            let _ = self
+                .event_tx
+                .send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
                     message: format!("Internal error (recovered): {msg}"),
-                },
-            ));
+                }));
             let _ = self
                 .event_tx
                 .send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
@@ -360,6 +356,7 @@ impl Loop {
         self.goal = GoalEngine::new();
         self.misc.reset();
         self.pending_compact_rx = None;
+        self.pending_compact_causation = None;
 
         self.pending.clear();
     }
@@ -401,7 +398,19 @@ impl Loop {
     /// cannot replace context inside an in-flight lap.
     pub fn poll_interrupts(&mut self) -> bool {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            match cmd.frame {
+            let frame = match cmd.frame {
+                super::wire::WorkerCommandFrame::Legacy(frame) => frame,
+                super::wire::WorkerCommandFrame::Ringing(env) => {
+                    if ringing_command_is_interrupt(&env) {
+                        self.cancel.set();
+                        deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
+                        self.phase = LoopPhase::Idle;
+                        return true;
+                    }
+                    continue;
+                }
+            };
+            match frame {
                 Ui2Agent::Cancel => {
                     self.cancel.set();
                     deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
@@ -441,9 +450,11 @@ impl Loop {
                     // Compaction may only replace context between model laps.
                     // Never silently consume a direct IPC request mid-SSE or
                     // during tool execution.
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
-                        message: "Context compaction requires an idle session.".into(),
-                    }));
+                    let _ =
+                        self.event_tx
+                            .send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
+                                message: "Context compaction requires an idle session.".into(),
+                            }));
                 }
                 _ => {} // Drop non-interrupt commands during busy phase
             }
@@ -497,7 +508,9 @@ impl Loop {
             // compact runs in a background worker, but it still owns the
             // active context transaction until CompactEnd is applied.
             if self.pending_compact_rx.is_none() && !self.ready_emitted {
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
                 self.ready_emitted = true;
             }
 
@@ -505,7 +518,7 @@ impl Loop {
             let cmd = match self.cmd_rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(f) => {
                     log::info!(
-                        "[AGENT] received Ui2Agent frame: {:?}",
+                        "[AGENT] received worker command frame: {:?}",
                         std::mem::discriminant(&f.frame)
                     );
                     f
@@ -522,7 +535,10 @@ impl Loop {
             let causation = cmd.causation.clone();
             self.safe_dispatch(|this| {
                 let _scope = this.paced_emitter.enter_causation(causation.as_deref());
-                this.dispatch_one(cmd.frame);
+                match cmd.frame {
+                    super::wire::WorkerCommandFrame::Legacy(frame) => this.dispatch_one(frame),
+                    super::wire::WorkerCommandFrame::Ringing(env) => this.dispatch_ringing_one(env),
+                }
             });
         }
 
@@ -548,59 +564,77 @@ impl Loop {
                     Some(start),
                     Some(INITIAL_LOAD_COUNT),
                 );
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::SessionRestored {
-                    seed: self.session.agent.session.seed.clone(),
-                    turns: recent,
-                    tokens_used: self.session.agent.session.usage_totals.total_tokens,
-                    cache_hit_pct: crate::util::cache_hit_pct(
-                        &self.session.agent.session.usage_totals,
-                    ),
-                    usage: self.session.agent.session.last_usage.clone(),
-                    usage_totals: self.session.agent.session.usage_totals.clone(),
-                    usage_requests: self.session.agent.session.usage_requests,
-                    cache_reported_requests: self.session.agent.session.effective_cache_reported_requests(),
-                    total_turns: total,
-                    has_more: start > 0,
-                }));
+                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
+                    Agent2Ui::SessionRestored {
+                        seed: self.session.agent.session.seed.clone(),
+                        turns: recent,
+                        tokens_used: self.session.agent.session.usage_totals.total_tokens,
+                        cache_hit_pct: crate::util::cache_hit_pct(
+                            &self.session.agent.session.usage_totals,
+                        ),
+                        usage: self.session.agent.session.last_usage.clone(),
+                        usage_totals: self.session.agent.session.usage_totals.clone(),
+                        usage_requests: self.session.agent.session.usage_requests,
+                        cache_reported_requests: self
+                            .session
+                            .agent
+                            .session
+                            .effective_cache_reported_requests(),
+                        total_turns: total,
+                        has_more: start > 0,
+                    },
+                ));
             }
             self.misc
                 .emit_dashboard(&self.session.agent, &self.paced_emitter);
-            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
-            self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Control(
-                deepx_domain::ControlEvent::AgentLifecycleChanged {
-                    state: deepx_domain::AgentLifecycleState::Ready,
-                },
-            ));
+            let _ = self
+                .event_tx
+                .send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
+            self.paced_emitter
+                .emit_domain(deepx_domain::DomainEvent::Control(
+                    deepx_domain::ControlEvent::AgentLifecycleChanged {
+                        state: deepx_domain::AgentLifecycleState::Ready,
+                    },
+                ));
         } else if has_seed && !self.session.agent.session.from_resume {
             self.session_eng
                 .create_with_seed(&mut self.session.agent, &self.cancel);
-            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::SessionCreated {
-                seed: self.session.agent.session.seed.clone(),
-            }));
+            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
+                Agent2Ui::SessionCreated {
+                    seed: self.session.agent.session.seed.clone(),
+                },
+            ));
             let seed = self.session.agent.session.seed.clone();
-            self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Control(
-                deepx_domain::ControlEvent::SessionStateChanged {
-                    seed: seed.clone(),
-                    state: deepx_domain::SessionState::Created,
-                },
-            ));
-            self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Control(
-                deepx_domain::ControlEvent::AgentLifecycleChanged {
-                    state: deepx_domain::AgentLifecycleState::Ready,
-                },
-            ));
+            self.paced_emitter
+                .emit_domain(deepx_domain::DomainEvent::Control(
+                    deepx_domain::ControlEvent::SessionStateChanged {
+                        seed: seed.clone(),
+                        state: deepx_domain::SessionState::Created,
+                    },
+                ));
+            self.paced_emitter
+                .emit_domain(deepx_domain::DomainEvent::Control(
+                    deepx_domain::ControlEvent::AgentLifecycleChanged {
+                        state: deepx_domain::AgentLifecycleState::Ready,
+                    },
+                ));
             self.misc
                 .emit_dashboard(&self.session.agent, &self.paced_emitter);
-            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
+            let _ = self
+                .event_tx
+                .send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
         } else {
             self.misc
                 .emit_dashboard(&self.session.agent, &self.paced_emitter);
-            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
-            self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Control(
-                deepx_domain::ControlEvent::AgentLifecycleChanged {
-                    state: deepx_domain::AgentLifecycleState::Ready,
-                },
-            ));
+            let _ = self
+                .event_tx
+                .send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
+            self.paced_emitter
+                .emit_domain(deepx_domain::DomainEvent::Control(
+                    deepx_domain::ControlEvent::AgentLifecycleChanged {
+                        state: deepx_domain::AgentLifecycleState::Ready,
+                    },
+                ));
         }
     }
 
@@ -616,7 +650,22 @@ impl Loop {
     /// re-sends UserInput after receiving Ready.
     fn drain_pending(&mut self) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            match cmd.frame {
+            let frame = match cmd.frame {
+                super::wire::WorkerCommandFrame::Legacy(frame) => frame,
+                super::wire::WorkerCommandFrame::Ringing(env) => {
+                    if self.pending.is_empty() {
+                        let causation = cmd.causation.clone();
+                        let _scope = self.paced_emitter.enter_causation(causation.as_deref());
+                        self.dispatch_ringing_one(env);
+                    } else {
+                        log::info!(
+                            "[AGENT] dropping Ringing command during pending session switch"
+                        );
+                    }
+                    continue;
+                }
+            };
+            match frame {
                 Ui2Agent::Cancel => {
                     if std::mem::take(&mut self.terminal_for_queued_interrupt) {
                         self.cancel.clear();
@@ -626,7 +675,9 @@ impl Loop {
                     self.cancel.set();
                     deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                     self.phase = LoopPhase::Idle;
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
+                    let _ = self
+                        .event_tx
+                        .send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
                 }
                 Ui2Agent::ResumeSession { seed } => {
                     let terminal_emitted = std::mem::take(&mut self.terminal_for_queued_interrupt);
@@ -634,7 +685,9 @@ impl Loop {
                     deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                     self.pending.session = Some(seed);
                     if !terminal_emitted {
-                        let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
+                        let _ = self
+                            .event_tx
+                            .send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
                     }
                 }
                 Ui2Agent::NewSession => {
@@ -643,7 +696,9 @@ impl Loop {
                     deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                     self.pending.new_session = true;
                     if !terminal_emitted {
-                        let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
+                        let _ = self
+                            .event_tx
+                            .send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
                     }
                 }
                 Ui2Agent::Shutdown => {
@@ -678,34 +733,46 @@ impl Loop {
                     Some(start),
                     Some(INITIAL_LOAD_COUNT),
                 );
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::SessionRestored {
-                    seed: self.session.agent.session.seed.clone(),
-                    turns: recent,
-                    tokens_used: self.session.agent.session.usage_totals.total_tokens,
-                    cache_hit_pct: crate::util::cache_hit_pct(
-                        &self.session.agent.session.usage_totals,
-                    ),
-                    usage: self.session.agent.session.last_usage.clone(),
-                    usage_totals: self.session.agent.session.usage_totals.clone(),
-                    usage_requests: self.session.agent.session.usage_requests,
-                    cache_reported_requests: self.session.agent.session.effective_cache_reported_requests(),
-                    total_turns: total,
-                    has_more: start > 0,
-                }));
+                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
+                    Agent2Ui::SessionRestored {
+                        seed: self.session.agent.session.seed.clone(),
+                        turns: recent,
+                        tokens_used: self.session.agent.session.usage_totals.total_tokens,
+                        cache_hit_pct: crate::util::cache_hit_pct(
+                            &self.session.agent.session.usage_totals,
+                        ),
+                        usage: self.session.agent.session.last_usage.clone(),
+                        usage_totals: self.session.agent.session.usage_totals.clone(),
+                        usage_requests: self.session.agent.session.usage_requests,
+                        cache_reported_requests: self
+                            .session
+                            .agent
+                            .session
+                            .effective_cache_reported_requests(),
+                        total_turns: total,
+                        has_more: start > 0,
+                    },
+                ));
             }
-            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
+            let _ = self
+                .event_tx
+                .send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
         }
         if self.pending.new_session {
             self.pending.new_session = false;
             self.prepare_session_switch();
             self.session_eng
                 .create(&mut self.session.agent, &self.cancel);
-            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::SessionCreated {
-                seed: self.session.agent.session.seed.clone(),
-            }));
+            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
+                Agent2Ui::SessionCreated {
+                    seed: self.session.agent.session.seed.clone(),
+                },
+            ));
             self.misc
                 .emit_dashboard(&self.session.agent, &self.paced_emitter);
-            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
+            let _ = self
+                .event_tx
+                .send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
         }
         if self.pending.reload_config {
             self.pending.reload_config = false;
@@ -720,6 +787,8 @@ impl Loop {
             match rx.try_recv() {
                 Ok(meta) => {
                     self.pending_compact_rx = None;
+                    let causation = self.pending_compact_causation.take();
+                    let _scope = self.paced_emitter.enter_causation(causation.as_deref());
                     let mut ctx = RingContext {
                         agent: &mut self.session.agent,
                         emitter: &self.paced_emitter,
@@ -738,14 +807,19 @@ impl Loop {
                     // doesn't stay stuck at the "compacting" animation.
                     log::error!("[COMPACT] worker thread disconnected without result");
                     self.pending_compact_rx = None;
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
-                        message: "Context compaction failed: worker thread crashed.".into(),
-                    }));
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::CompactEnd {
-                        summary_chars: 0,
-                        turns_compacted: 0,
-                        turns_removed: 0,
-                    }));
+                    self.pending_compact_causation = None;
+                    let _ =
+                        self.event_tx
+                            .send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
+                                message: "Context compaction failed: worker thread crashed.".into(),
+                            }));
+                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
+                        Agent2Ui::CompactEnd {
+                            summary_chars: 0,
+                            turns_compacted: 0,
+                            turns_removed: 0,
+                        },
+                    ));
                 }
                 Err(mpsc::TryRecvError::Empty) => {
                     // Still running — check again next loop iteration.
@@ -761,12 +835,472 @@ impl Loop {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let status = self.session.agent.build_skills_status(&workspace);
-        let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::SkillsChanged { status }));
+        let _ = self
+            .event_tx
+            .send(super::types::WriterEvent::Legacy(Agent2Ui::SkillsChanged {
+                status,
+            }));
+    }
+
+    fn emit_ringing_skills_status(&mut self) {
+        let workspace = deepx_workspace::CURRENT_WORKSPACE
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let status = self.session.agent.build_skills_status(&workspace);
+        self.paced_emitter
+            .emit_domain(deepx_domain::DomainEvent::Control(
+                deepx_domain::ControlEvent::SkillsUpdated {
+                    available: status
+                        .available
+                        .iter()
+                        .map(|s| deepx_domain::SkillInfo {
+                            name: s.name.clone(),
+                            description: s.description.clone(),
+                            scope: s.scope.clone(),
+                            source: s.source.clone(),
+                        })
+                        .collect(),
+                    active: status.active.clone(),
+                    catalog_revision: Some(status.catalog_revision.clone()),
+                    operation_revision: Some(status.operation_revision),
+                },
+            ));
     }
 
     // ═══════════════════════════════════════════════════
     // Single-command dispatch
     // ═══════════════════════════════════════════════════
+
+    fn start_compact(&mut self, causation: Option<String>) -> Outcome {
+        if self.pending_compact_rx.is_some() {
+            return Outcome::Error("Context compaction is already running.".into());
+        }
+        let compact = {
+            let mut ctx = RingContext {
+                agent: &mut self.session.agent,
+                emitter: &self.paced_emitter,
+                cancel: &self.cancel,
+                phase: &mut self.phase,
+                pending: &mut self.pending,
+                writer_dead: &self.writer_dead,
+                stats: &mut self.session.stats,
+                notify: &self.notify,
+            };
+            self.compact.build_prompt_and_meta(&mut ctx)
+        };
+        if let Some((prompt, kept, head, provider, compact_id)) = compact {
+            let (tx, rx) = mpsc::channel();
+            let event_tx = self.event_tx.clone();
+            let compact_seed = self.session.agent.session.seed.clone();
+            let worker_causation = causation.clone();
+            std::thread::Builder::new()
+                .name("compact-worker".into())
+                .spawn(move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        super::engine_compact::run_compact_worker(
+                            compact_seed,
+                            compact_id.clone(),
+                            prompt,
+                            provider,
+                            kept,
+                            head,
+                            event_tx,
+                            worker_causation,
+                        )
+                    }));
+                    let meta = match result {
+                        Ok(meta) => meta,
+                        Err(error) => CompactMeta {
+                            compact_id,
+                            summary: String::new(),
+                            kept_user_count: kept,
+                            head_user_count: head,
+                            error: Some(format!(
+                                "Compact worker panicked: {}",
+                                Self::panic_msg_from_err(error)
+                            )),
+                        },
+                    };
+                    let _ = tx.send(meta);
+                })
+                .ok();
+            self.pending_compact_rx = Some(rx);
+            self.pending_compact_causation = causation;
+        } else {
+            self.paced_emitter.emit(Agent2Ui::CompactEnd {
+                summary_chars: 0,
+                turns_compacted: 0,
+                turns_removed: 0,
+            });
+            self.paced_emitter
+                .emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::CompactFinished {
+                        compact_id: format!("compact-skipped-{}", self.session.agent.session.seed),
+                        status: deepx_domain::CompactStatus::Skipped,
+                        summary_chars: Some(0),
+                        turns_compacted: Some(0),
+                        turns_removed: Some(0),
+                    },
+                ));
+        }
+        Outcome::Handled
+    }
+
+    /// Dispatch an already typed Ringing command without constructing a
+    /// `Ui2Agent` frame. Legacy and Ringing ingress therefore remain separate
+    /// at the worker boundary; both may share the domain engines underneath.
+    fn emit_operation_completed(&self, command_id: &str, scope: deepx_domain::ErrorScope) {
+        self.paced_emitter
+            .emit_domain(deepx_domain::DomainEvent::Control(
+                deepx_domain::ControlEvent::OperationCompleted {
+                    occurrence_id: command_id.to_string(),
+                    scope,
+                    operation_id: Some(command_id.to_string()),
+                },
+            ));
+    }
+
+    fn emit_operation_failed(
+        &self,
+        command_id: &str,
+        scope: deepx_domain::ErrorScope,
+        code: &str,
+        message: &str,
+    ) {
+        self.paced_emitter
+            .emit_domain(deepx_domain::DomainEvent::Control(
+                deepx_domain::ControlEvent::OperationFailed {
+                    occurrence_id: command_id.to_string(),
+                    scope,
+                    error: deepx_domain::DomainError {
+                        error_id: command_id.to_string(),
+                        code: code.to_string(),
+                        message: message.to_string(),
+                        retryable: false,
+                        dedupe_key: Some(command_id.to_string()),
+                    },
+                    operation_id: Some(command_id.to_string()),
+                },
+            ));
+    }
+
+    fn dispatch_ringing_one(&mut self, env: deepx_ringing::RingingWorkerCommandEnvelope) {
+        use deepx_domain::{ControlCommand, ConversationCommand, DomainEvent, ToolCommand};
+        use deepx_ringing::RingingCommand;
+
+        self.ready_emitted = false;
+        let expected_revision = env.expected_revision.unwrap_or_default();
+        let command_id = env.command_id.clone();
+        match env.command {
+            RingingCommand::Control(command) => match command {
+                ControlCommand::SessionCreate { close_current } => {
+                    if close_current {
+                        self.prepare_session_switch();
+                    }
+                    self.session_eng
+                        .create(&mut self.session.agent, &self.cancel);
+                    self.paced_emitter.emit_domain(DomainEvent::Control(
+                        deepx_domain::ControlEvent::SessionStateChanged {
+                            seed: self.session.agent.session.seed.clone(),
+                            state: deepx_domain::SessionState::Created,
+                        },
+                    ));
+                    self.misc
+                        .emit_dashboard(&self.session.agent, &self.paced_emitter);
+                }
+                ControlCommand::SessionResume { seed } => {
+                    self.prepare_session_switch();
+                    if self
+                        .session_eng
+                        .resume(&mut self.session.agent, &seed, &self.cancel)
+                    {
+                        self.paced_emitter.emit_domain(DomainEvent::Control(
+                            deepx_domain::ControlEvent::SessionStateChanged {
+                                seed,
+                                state: deepx_domain::SessionState::Resumed,
+                            },
+                        ));
+                    } else {
+                        self.emit_operation_failed(
+                            &command_id,
+                            deepx_domain::ErrorScope::Control,
+                            "session_resume_failed",
+                            "session could not be resumed",
+                        );
+                    }
+                }
+                ControlCommand::SessionShutdown => {
+                    self.pending.shutdown = true;
+                    self.emit_operation_completed(&command_id, deepx_domain::ErrorScope::Control);
+                }
+                ControlCommand::AgentReloadConfig => {
+                    self.session_eng
+                        .reload_config(&mut self.session.agent, &self.cancel);
+                    self.emit_operation_completed(&command_id, deepx_domain::ErrorScope::Control);
+                }
+                ControlCommand::SkillsReload => self.emit_skills_status(),
+                ControlCommand::SkillsActivate { name } => {
+                    let _ = self.session.agent.skills.queue_request(&name, "user");
+                    self.emit_skills_status();
+                }
+                ControlCommand::SkillsRelease { name } => {
+                    self.session.agent.deactivate_explicit_skill(&name);
+                    self.emit_skills_status();
+                }
+                ControlCommand::SkillsOperation {
+                    operation_id,
+                    action,
+                    name,
+                } => {
+                    let (success, _revision, error) = self.session.agent.skills.apply_ui_operation(
+                        &operation_id,
+                        expected_revision,
+                        &action,
+                        &name,
+                    );
+                    self.emit_ringing_skills_status();
+                    if !success {
+                        self.paced_emitter
+                            .emit_domain(deepx_domain::DomainEvent::Control(
+                                deepx_domain::ControlEvent::OperationFailed {
+                                    occurrence_id: operation_id.clone(),
+                                    scope: deepx_domain::ErrorScope::Control,
+                                    error: deepx_domain::DomainError {
+                                        error_id: operation_id.clone(),
+                                        code: "skill_operation_failed".into(),
+                                        message: error
+                                            .unwrap_or_else(|| "skill operation failed".into()),
+                                        retryable: false,
+                                        dedupe_key: Some(operation_id.clone()),
+                                    },
+                                    operation_id: Some(operation_id),
+                                },
+                            ));
+                    }
+                }
+                ControlCommand::SessionClose { .. } => {
+                    log::debug!("SessionClose is handled by daemon registry");
+                }
+                ControlCommand::InteractionAskRespond {
+                    interaction_id,
+                    answers,
+                } => {
+                    let answers = answers
+                        .into_iter()
+                        .map(|answer| deepx_proto::AskAnswer {
+                            question_id: answer.question_id,
+                            answer: answer.answer,
+                        })
+                        .collect::<Vec<_>>();
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        notify: &self.notify,
+                    };
+                    let outcome = self.session.turn.handle_ask_response(
+                        &mut ctx,
+                        &mut self.session.tool,
+                        &interaction_id,
+                        &answers,
+                    );
+                    drop(ctx);
+                    self.apply_outcome(outcome);
+                }
+                ControlCommand::InteractionAskDismiss { interaction_id } => {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        notify: &self.notify,
+                    };
+                    let outcome = self.session.turn.handle_ask_dismiss(
+                        &mut ctx,
+                        &mut self.session.tool,
+                        &interaction_id,
+                    );
+                    drop(ctx);
+                    self.apply_outcome(outcome);
+                }
+                ControlCommand::PlanReviewRespond {
+                    interaction_id,
+                    approved,
+                    message,
+                    autonomous,
+                } => {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        notify: &self.notify,
+                    };
+                    let outcome = self.session.turn.handle_plan_response(
+                        &mut ctx,
+                        &mut self.session.tool,
+                        &interaction_id,
+                        approved,
+                        &message.unwrap_or_default(),
+                        autonomous,
+                    );
+                    drop(ctx);
+                    self.apply_outcome(outcome);
+                }
+            },
+            RingingCommand::Conversation(command) => match command {
+                ConversationCommand::ConversationSendMessage {
+                    text,
+                    images,
+                    attachments: _,
+                } => {
+                    let images = images
+                        .into_iter()
+                        .map(|image| deepx_proto::ImageBlock {
+                            mime_type: image.mime_type,
+                            data: image.data,
+                        })
+                        .collect();
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        notify: &self.notify,
+                    };
+                    let outcome = self.input.handle_user_input(&mut ctx, &text, images);
+                    drop(ctx);
+                    self.apply_outcome(outcome);
+                }
+                ConversationCommand::ConversationCancel { turn_id } => {
+                    self.cancel.set();
+                    deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
+                    self.reset_all_engines();
+                    self.paced_emitter.emit_domain(DomainEvent::Conversation(
+                        deepx_domain::ConversationEvent::ConversationCancelled { turn_id },
+                    ));
+                }
+                ConversationCommand::ConversationUndoTurn { turn_id } => {
+                    self.session.turn.reset();
+                    self.session.tool.reset();
+                    self.misc
+                        .handle_undo(&mut self.session.agent, &turn_id, &self.event_tx);
+                    self.emit_operation_completed(
+                        &command_id,
+                        deepx_domain::ErrorScope::Conversation,
+                    );
+                }
+                ConversationCommand::ConversationSetMode { mode } => {
+                    let mode = match mode {
+                        deepx_domain::ConversationMode::Normal => "normal",
+                        deepx_domain::ConversationMode::Plan => "plan",
+                        deepx_domain::ConversationMode::Code => "code",
+                    };
+                    self.misc.set_mode(&mut self.session.agent, mode);
+                    self.emit_operation_completed(
+                        &command_id,
+                        deepx_domain::ErrorScope::Conversation,
+                    );
+                }
+                ConversationCommand::ConversationCompact { .. } => {
+                    let outcome = self.start_compact(Some(command_id));
+                    self.apply_outcome(outcome);
+                }
+                ConversationCommand::ConversationLoadMore { .. } => {
+                    self.emit_operation_failed(
+                        &command_id,
+                        deepx_domain::ErrorScope::Conversation,
+                        "unsupported_command",
+                        "Ringing v2 bootstrap already contains complete persisted history",
+                    );
+                }
+            },
+            RingingCommand::Tool(command) => match command {
+                ToolCommand::ToolInvoke {
+                    tool_call_id,
+                    name,
+                    action,
+                    args,
+                } => {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        notify: &self.notify,
+                    };
+                    self.session.tool.handle_ui_tool_call(
+                        &mut ctx,
+                        &tool_call_id,
+                        &name,
+                        &action,
+                        &args,
+                    );
+                }
+                ToolCommand::ToolPermissionRespond {
+                    tool_call_id,
+                    approved,
+                    trust_folder,
+                    ..
+                } => {
+                    let mut ctx = RingContext {
+                        agent: &mut self.session.agent,
+                        emitter: &self.paced_emitter,
+                        cancel: &self.cancel,
+                        phase: &mut self.phase,
+                        pending: &mut self.pending,
+                        writer_dead: &self.writer_dead,
+                        stats: &mut self.session.stats,
+                        notify: &self.notify,
+                    };
+                    match self.session.tool.handle_permission_response(
+                        &mut ctx,
+                        &tool_call_id,
+                        approved,
+                        trust_folder,
+                    ) {
+                        PermissionDisposition::Ignored => {
+                            drop(ctx);
+                            self.emit_operation_failed(
+                                &command_id,
+                                deepx_domain::ErrorScope::Tool,
+                                "interaction_not_found",
+                                "tool permission request is no longer pending",
+                            );
+                        }
+                        PermissionDisposition::UiHandled => {}
+                        PermissionDisposition::LlmResolved { call_id, admitted } => {
+                            let outcome = self.session.turn.handle_permission_resolved(
+                                &mut ctx,
+                                &mut self.session.tool,
+                                &call_id,
+                                admitted,
+                            );
+                            drop(ctx);
+                            self.apply_outcome(outcome);
+                        }
+                    }
+                }
+            },
+        }
+    }
 
     /// Route a single Ui2Agent frame to the appropriate engine.
     ///
@@ -792,9 +1326,11 @@ impl Loop {
         // would then discard. Shutdown is safe because the process exits and
         // the compact result is never applied.
         if self.pending_compact_rx.is_some() && !matches!(&frame, Ui2Agent::Shutdown) {
-            let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
-                message: "Context compaction is running; wait for CompactEnd.".into(),
-            }));
+            let _ = self
+                .event_tx
+                .send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
+                    message: "Context compaction is running; wait for CompactEnd.".into(),
+                }));
             return;
         }
         // ── Guard: suspended turn — reason-aware command filtering ──
@@ -815,11 +1351,13 @@ impl Loop {
                 | (Ui2Agent::Shutdown, _) => {}
                 _ => {
                     log::warn!("[AGENT] dropping command during suspended turn");
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
-                        message:
-                            "Turn is suspended — resolve pending permissions or ask_user first."
-                                .into(),
-                    }));
+                    let _ =
+                        self.event_tx
+                            .send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
+                            message:
+                                "Turn is suspended — resolve pending permissions or ask_user first."
+                                    .into(),
+                        }));
                     return;
                 }
             }
@@ -843,26 +1381,35 @@ impl Loop {
                 // Cancel is a cross-engine reset: clear ALL mutable state
                 self.reset_all_engines();
                 self.phase = LoopPhase::Idle;
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
                 if let Some((turn_id, usage)) = suspended {
                     self.session.flush();
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
-                        turn_id: turn_id.clone(),
-                        stop_reason: Some("cancelled".into()),
-                        usage: usage.clone(),
-                    }));
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
-                    self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
-                        deepx_domain::ConversationEvent::TurnCompleted {
-                            turn_id,
-                            stop_reason: Some("cancelled".into()),
-                            usage,
-                        },
-                    ));
+                    let _ =
+                        self.event_tx
+                            .send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
+                                turn_id: turn_id.clone(),
+                                stop_reason: Some("cancelled".into()),
+                                usage: usage.clone(),
+                            }));
+                    let _ = self
+                        .event_tx
+                        .send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
+                    self.paced_emitter
+                        .emit_domain(deepx_domain::DomainEvent::Conversation(
+                            deepx_domain::ConversationEvent::TurnCompleted {
+                                turn_id,
+                                stop_reason: Some("cancelled".into()),
+                                usage,
+                            },
+                        ));
                 }
             }
             Ui2Agent::Shutdown => {
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::ShutdownAck));
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::ShutdownAck));
                 self.pending.shutdown = true;
             }
             Ui2Agent::UndoTurn { turn_id } => {
@@ -872,11 +1419,13 @@ impl Loop {
                     .suspended_turn_id()
                     .is_some_and(|active_turn_id| active_turn_id != turn_id)
                 {
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
-                        message: format!(
-                            "Cannot undo {turn_id}: a different active turn is suspended"
-                        ),
-                    }));
+                    let _ =
+                        self.event_tx
+                            .send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
+                                message: format!(
+                                    "Cannot undo {turn_id}: a different active turn is suspended"
+                                ),
+                            }));
                     return;
                 }
                 // ── Cross-engine undo transaction ──
@@ -909,10 +1458,12 @@ impl Loop {
                     Some(start),
                     Some(count as usize),
                 );
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::MoreTurns {
-                    turns: batch,
-                    has_more: start > 0,
-                }));
+                let _ =
+                    self.event_tx
+                        .send(super::types::WriterEvent::Legacy(Agent2Ui::MoreTurns {
+                            turns: batch,
+                            has_more: start > 0,
+                        }));
             }
             // Already handled by engine chain — unreachable here
             Ui2Agent::UserInput { .. }
@@ -945,9 +1496,11 @@ impl Loop {
             Ui2Agent::CreateSession => {
                 self.session_eng
                     .create(&mut self.session.agent, &self.cancel);
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::SessionCreated {
-                    seed: self.session.agent.session.seed.clone(),
-                }));
+                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
+                    Agent2Ui::SessionCreated {
+                        seed: self.session.agent.session.seed.clone(),
+                    },
+                ));
                 self.misc
                     .emit_dashboard(&self.session.agent, &self.paced_emitter);
                 return Some(Outcome::Handled);
@@ -965,24 +1518,32 @@ impl Loop {
                         Some(start),
                         Some(INITIAL_LOAD_COUNT),
                     );
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::SessionRestored {
-                        seed: self.session.agent.session.seed.clone(),
-                        turns: recent,
-                        tokens_used: self.session.agent.session.usage_totals.total_tokens,
-                        cache_hit_pct: crate::util::cache_hit_pct(
-                            &self.session.agent.session.usage_totals,
-                        ),
-                        usage: self.session.agent.session.last_usage.clone(),
-                        usage_totals: self.session.agent.session.usage_totals.clone(),
-                        usage_requests: self.session.agent.session.usage_requests,
-                        cache_reported_requests: self.session.agent.session.effective_cache_reported_requests(),
-                        total_turns: total,
-                        has_more: start > 0,
-                    }));
+                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
+                        Agent2Ui::SessionRestored {
+                            seed: self.session.agent.session.seed.clone(),
+                            turns: recent,
+                            tokens_used: self.session.agent.session.usage_totals.total_tokens,
+                            cache_hit_pct: crate::util::cache_hit_pct(
+                                &self.session.agent.session.usage_totals,
+                            ),
+                            usage: self.session.agent.session.last_usage.clone(),
+                            usage_totals: self.session.agent.session.usage_totals.clone(),
+                            usage_requests: self.session.agent.session.usage_requests,
+                            cache_reported_requests: self
+                                .session
+                                .agent
+                                .session
+                                .effective_cache_reported_requests(),
+                            total_turns: total,
+                            has_more: start > 0,
+                        },
+                    ));
                 } else {
-                    let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
-                        message: format!("Failed to resume session: {seed}"),
-                    }));
+                    let _ =
+                        self.event_tx
+                            .send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
+                                message: format!("Failed to resume session: {seed}"),
+                            }));
                 }
                 self.misc
                     .emit_dashboard(&self.session.agent, &self.paced_emitter);
@@ -992,9 +1553,11 @@ impl Loop {
                 self.prepare_session_switch();
                 self.session_eng
                     .create(&mut self.session.agent, &self.cancel);
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::SessionCreated {
-                    seed: self.session.agent.session.seed.clone(),
-                }));
+                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
+                    Agent2Ui::SessionCreated {
+                        seed: self.session.agent.session.seed.clone(),
+                    },
+                ));
                 self.misc
                     .emit_dashboard(&self.session.agent, &self.paced_emitter);
                 return Some(Outcome::Handled);
@@ -1035,12 +1598,14 @@ impl Loop {
                     action,
                     name,
                 );
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::SkillOperationResolved {
-                    operation_id: operation_id.clone(),
-                    success,
-                    revision,
-                    error,
-                }));
+                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
+                    Agent2Ui::SkillOperationResolved {
+                        operation_id: operation_id.clone(),
+                        success,
+                        revision,
+                        error,
+                    },
+                ));
                 self.emit_skills_status();
                 return Some(Outcome::Handled);
             }
@@ -1060,7 +1625,11 @@ impl Loop {
         };
 
         match frame {
-            Ui2Agent::UserInput { text, images } => Some(self.input.handle_user_input(&mut ctx, text, images.to_vec())),
+            Ui2Agent::UserInput { text, images } => Some(self.input.handle_user_input(
+                &mut ctx,
+                text,
+                images.to_vec(),
+            )),
             Ui2Agent::AskResponse { ask_id, answers } => {
                 Some(self.session.turn.handle_ask_response(
                     &mut ctx,
@@ -1123,63 +1692,8 @@ impl Loop {
                 }
             }
             Ui2Agent::Compact => {
-                if self.pending_compact_rx.is_some() {
-                    return Some(Outcome::Error(
-                        "Context compaction is already running.".into(),
-                    ));
-                }
-                if let Some((prompt, kept, head, provider, compact_id)) =
-                    self.compact.build_prompt_and_meta(&mut ctx)
-                {
-                    // Step 2: spawn LLM call in background (catch_unwind so
-                    // a panic still sends a result via the channel — otherwise
-                    // the receiver disconnects and the frontend gets stuck).
-                    let (tx, rx) = mpsc::channel();
-                    let event_tx = self.event_tx.clone();
-                    let compact_seed = self.session.agent.session.seed.clone();
-                    std::thread::Builder::new()
-                        .name("compact-worker".into())
-                        .spawn(move || {
-                            let result =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    super::engine_compact::run_compact_worker(
-                                        compact_seed,
-                                        compact_id.clone(),
-                                        prompt,
-                                        provider,
-                                        kept,
-                                        head,
-                                        event_tx,
-                                    )
-                                }));
-                            let meta = match result {
-                                Ok(meta) => meta,
-                                Err(e) => {
-                                    let msg = Self::panic_msg_from_err(e);
-                                    CompactMeta {
-                                        compact_id,
-                                        summary: String::new(),
-                                        kept_user_count: kept,
-                                        head_user_count: head,
-                                        error: Some(format!("Compact worker panicked: {msg}")),
-                                    }
-                                }
-                            };
-                            let _ = tx.send(meta);
-                        })
-                        .ok();
-                    self.pending_compact_rx = Some(rx);
-                } else {
-                    // Runtime reserves the session as Working before sending
-                    // a manual Compact command. Complete the activity even
-                    // when there is nothing eligible to compact.
-                    ctx.emitter.emit(Agent2Ui::CompactEnd {
-                        summary_chars: 0,
-                        turns_compacted: 0,
-                        turns_removed: 0,
-                    });
-                }
-                Some(Outcome::Handled)
+                drop(ctx);
+                Some(self.start_compact(None))
             }
             _ => None,
         }
@@ -1207,18 +1721,21 @@ impl Loop {
                 if let Some(ref u) = usage {
                     crate::util::record_token_usage(u, &self.session.agent.config.model);
                 }
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
-                    turn_id: turn_id.clone(),
-                    stop_reason: None,
-                    usage: usage.clone(),
-                }));
-                self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
-                    deepx_domain::ConversationEvent::TurnCompleted {
-                        turn_id,
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
+                        turn_id: turn_id.clone(),
                         stop_reason: None,
-                        usage,
-                    },
-                ));
+                        usage: usage.clone(),
+                    }));
+                self.paced_emitter
+                    .emit_domain(deepx_domain::DomainEvent::Conversation(
+                        deepx_domain::ConversationEvent::TurnCompleted {
+                            turn_id,
+                            stop_reason: None,
+                            usage,
+                        },
+                    ));
 
                 // Desktop notification: preview of assistant response
                 self.misc.maybe_notify(&self.session.agent, &self.notify.tx);
@@ -1257,7 +1774,9 @@ impl Loop {
                     }
                 }
 
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
                 self.phase = LoopPhase::Idle;
             }
             Outcome::TurnAborted {
@@ -1269,20 +1788,27 @@ impl Loop {
                 self.session.flush();
                 self.reset_all_engines();
                 self.terminal_for_queued_interrupt = consume_queued_interrupt;
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
-                    turn_id: turn_id.clone(),
-                    stop_reason: Some("cancelled".into()),
-                    usage: usage.clone(),
-                }));
-                self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
-                    deepx_domain::ConversationEvent::TurnCompleted {
-                        turn_id,
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
+                        turn_id: turn_id.clone(),
                         stop_reason: Some("cancelled".into()),
-                        usage,
-                    },
-                ));
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
+                        usage: usage.clone(),
+                    }));
+                self.paced_emitter
+                    .emit_domain(deepx_domain::DomainEvent::Conversation(
+                        deepx_domain::ConversationEvent::TurnCompleted {
+                            turn_id,
+                            stop_reason: Some("cancelled".into()),
+                            usage,
+                        },
+                    ));
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
                 self.phase = LoopPhase::Idle;
             }
             Outcome::TurnFailed {
@@ -1292,35 +1818,40 @@ impl Loop {
             } => {
                 self.session.agent.skills.abort_user_turn();
                 self.session.flush();
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
-                    Agent2Ui::Error { message: message.clone() },
-                ));
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
-                    Agent2Ui::TurnEnd {
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
+                        message: message.clone(),
+                    }));
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
                         turn_id: turn_id.clone(),
                         stop_reason: Some("error".into()),
                         usage: usage.clone(),
-                    },
-                ));
-                self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
-                    deepx_domain::ConversationEvent::TurnFailed {
-                        turn_id,
-                        error: deepx_domain::DomainError {
-                            error_id: format!(
-                                "turn-failed-{}",
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis())
-                                    .unwrap_or(0),
-                            ),
-                            code: "turn_failed".into(),
-                            message,
-                            retryable: false,
-                            dedupe_key: None,
+                    }));
+                self.paced_emitter
+                    .emit_domain(deepx_domain::DomainEvent::Conversation(
+                        deepx_domain::ConversationEvent::TurnFailed {
+                            turn_id,
+                            error: deepx_domain::DomainError {
+                                error_id: format!(
+                                    "turn-failed-{}",
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0),
+                                ),
+                                code: "turn_failed".into(),
+                                message,
+                                retryable: false,
+                                dedupe_key: None,
+                            },
                         },
-                    },
-                ));
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
+                    ));
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
                 self.phase = LoopPhase::Idle;
             }
             Outcome::ContinueTurn {
@@ -1362,7 +1893,11 @@ impl Loop {
             }
             Outcome::Handled => {}
             Outcome::Error(msg) => {
-                let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Error { message: msg }));
+                let _ = self
+                    .event_tx
+                    .send(super::types::WriterEvent::Legacy(Agent2Ui::Error {
+                        message: msg,
+                    }));
                 self.phase = LoopPhase::Idle;
             }
             Outcome::Shutdown => {

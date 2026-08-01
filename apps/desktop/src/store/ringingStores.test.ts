@@ -17,14 +17,14 @@ import {
 function envelope(event: RingingEventEnvelope["event"], eventId = "e1"): RingingEventEnvelope {
   return {
     schema: "deepx.Ringing",
-    version: 1,
+    version: 2,
     channel: event.channel,
     delivery: "reliable",
     server_epoch: "epoch-1",
     seed: "s1",
-    stream_seq: 1n,
-    channel_seq: 1n,
-    session_seq: 1n,
+    stream_seq: 1,
+    channel_seq: 1,
+    session_seq: 1,
     event_id: eventId,
     event,
   };
@@ -40,7 +40,13 @@ describe("controlReducer", () => {
       mode: "single",
       questions: [],
     });
-    expect(state.activeAskPlan).toEqual({ id: "i1", kind: "ask", turnId: "t1" });
+    expect(state.activeAskPlan).toEqual({
+      id: "i1",
+      kind: "ask",
+      turnId: "t1",
+      mode: "single",
+      questions: [],
+    });
     state = controlReducer(state, { type: "interaction_resolved", interaction_id: "i1", resolution: "answered" });
     expect(state.activeAskPlan).toBeNull();
   });
@@ -167,10 +173,10 @@ describe("toolReducer", () => {
       turn_id: "t1",
       round_num: 0,
       stream: "stdout",
-      seq_start: 0n,
-      seq_end: 1n,
+      seq_start: 0,
+      seq_end: 1,
       chunk: "a",
-      dropped_bytes: 0n,
+      dropped_bytes: 0,
       truncated: false,
     });
     state = toolReducer(state, {
@@ -179,10 +185,10 @@ describe("toolReducer", () => {
       turn_id: "t1",
       round_num: 0,
       stream: "stdout",
-      seq_start: 1n,
-      seq_end: 2n,
-      chunk: "ab",
-      dropped_bytes: 0n,
+      seq_start: 1,
+      seq_end: 2,
+      chunk: "b",
+      dropped_bytes: 0,
       truncated: false,
     });
     state = toolReducer(state, {

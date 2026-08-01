@@ -293,17 +293,17 @@ pub trait Emitter {
 pub enum WriterEvent {
     /// legacy JSON-LP 帧（`Agent2Ui`）。
     Legacy(Agent2Ui),
-    /// Ringing worker envelope（`wire: "Ringing_domain_v1"`）。
+    /// Ringing worker envelope（`wire: "Ringing_domain_v2"`）。
     Ringing(deepx_ringing::RingingWorkerEventEnvelope),
 }
 
-/// 命令通道载荷：legacy 帧 + 可选的 Ringing command_id（causation）。
+/// 命令通道载荷：legacy 帧或原生 Ringing DomainCommand。
 ///
-/// Ringing 命令经 ingress 映射后仍走 legacy 引擎；`causation` 随帧传递，
-/// 使执行期间产出的 Ringing 事件能携带 `causation_id = command_id`。
+/// 两种协议在 worker 边界保持可判别且互不转换；Ringing command_id 作为
+/// causation 进入原生领域执行路径。
 #[derive(Debug, Clone)]
 pub struct WorkerCommand {
-    pub frame: deepx_proto::Ui2Agent,
+    pub frame: super::wire::WorkerCommandFrame,
     pub causation: Option<String>,
 }
 

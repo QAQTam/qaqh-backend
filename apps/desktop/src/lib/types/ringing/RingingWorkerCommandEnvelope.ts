@@ -6,8 +6,8 @@ import type { WorkerDirection } from "./WorkerDirection";
 /**
  * daemon → worker 命令 frame。
  */
-export type RingingWorkerCommandEnvelope = { schema: string, version: number, 
+export type RingingWorkerCommandEnvelope = { schema: string, version: number,
 /**
- * 线格式判别字段，固定 `WIRE_RINGING_DOMAIN_V1`。
+ * 线格式判别字段，固定 `WIRE_RINGING_DOMAIN_V2`。
  */
-wire: string, direction: WorkerDirection, channel: RingingChannel, seed: string, command_id: string, command: RingingCommand, };
+wire: string, direction: WorkerDirection, channel: RingingChannel, seed: string, command_id: string, expected_revision?: number | null, command: RingingCommand, };

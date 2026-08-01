@@ -16,7 +16,7 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 /// 工具套件运行环境。
@@ -45,15 +45,24 @@ impl WorkspaceMode {
 }
 
 pub struct WorkspaceSupervisor {
-    /// 就绪后的 HTTP 基址（`http://127.0.0.1:<port>`）。
-    pub endpoint: String,
-    /// daemon 生成的访问令牌（worker env 注入）。
-    pub token: String,
+    /// 当前已通过 health 的连接资料。每次子进程重启均原子替换。
+    connection: Arc<RwLock<WorkspaceConnection>>,
     /// 当前实际运行模式（WSL 降级后为 Local；stop() 按此回收）。
     mode: WorkspaceMode,
     child: Arc<Mutex<Option<Child>>>,
     stop: Arc<AtomicBool>,
 }
+
+/// workspace 连接代际；endpoint/token 仅留在 daemon 内存并注入新 worker。
+#[derive(Clone)]
+pub struct WorkspaceConnection {
+    pub generation: u64,
+    pub endpoint: String,
+    pub token: String,
+    pub mode: WorkspaceMode,
+}
+
+pub type WorkspaceConnectionHandler = Arc<dyn Fn(WorkspaceConnection) + Send + Sync>;
 
 fn workspace_exe_name() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -69,8 +78,11 @@ impl WorkspaceSupervisor {
     /// 降级链：请求模式拉起 → READY/health 未就绪（含 WSL 预检失败）→
     /// 若请求是 WSL 则回退 local serve → 再失败才返回 Err（daemon 禁用
     /// workspace 服务，worker 全本地执行）。绝不静默半启用。
-    pub fn start(mode: WorkspaceMode) -> Result<Self, String> {
-        let (mut child, token, endpoint, active_mode, label) = match Self::try_start(mode) {
+    pub fn start(
+        mode: WorkspaceMode,
+        on_connection: WorkspaceConnectionHandler,
+    ) -> Result<Self, String> {
+        let (child, token, endpoint, active_mode, label) = match Self::try_start(mode) {
             Ok(ready) => ready,
             Err(wsl_error) if mode == WorkspaceMode::Wsl => {
                 // WSL 不可用/未就绪 → 回退 local serve（降级记录）。
@@ -87,16 +99,29 @@ impl WorkspaceSupervisor {
             Err(e) => return Err(format!("workspace serve: {e}")),
         };
 
-        let supervisor = WorkspaceSupervisor {
+        let connection = WorkspaceConnection {
+            generation: 1,
             endpoint,
             token,
+            mode: active_mode,
+        };
+        let supervisor = WorkspaceSupervisor {
+            connection: Arc::new(RwLock::new(connection.clone())),
             mode: active_mode,
             child: Arc::new(Mutex::new(Some(child))),
             stop: Arc::new(AtomicBool::new(false)),
         };
-        supervisor.watchdog(active_mode, label.clone());
-        log::info!("[workspace] serve ready at {} ({label})", supervisor.endpoint);
+        supervisor.watchdog(active_mode, label.clone(), on_connection);
+        log::info!("[workspace] serve ready at {} ({label})", connection.endpoint);
         Ok(supervisor)
+    }
+
+    /// 读取当前已健康检查通过的连接代际。
+    pub fn connection(&self) -> WorkspaceConnection {
+        self.connection
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// 尝试拉起并等待就绪。返回 (child, token, endpoint, active_mode, label)。
@@ -135,13 +160,14 @@ impl WorkspaceSupervisor {
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
+            let mut ready_sent = false;
             loop {
                 match reader.read_line(&mut line) {
                     Ok(0) => break,
                     Ok(_) => {
-                        if let Some(rest) = line.strip_prefix("DEEPX_WORKSPACE_READY ") {
+                        if !ready_sent && let Some(rest) = line.strip_prefix("DEEPX_WORKSPACE_READY ") {
                             let _ = ready_tx.send(rest.trim().to_string());
-                            break;
+                            ready_sent = true;
                         }
                         line.clear();
                     }
@@ -278,9 +304,15 @@ impl WorkspaceSupervisor {
     }
 
     /// 崩溃退避重启：serve 异常退出后 5s 重拉；shutdown 置 stop 后退出。
-    fn watchdog(&self, mode: WorkspaceMode, label: String) {
+    fn watchdog(
+        &self,
+        mode: WorkspaceMode,
+        label: String,
+        on_connection: WorkspaceConnectionHandler,
+    ) {
         let child = self.child.clone();
         let stop = self.stop.clone();
+        let connection = self.connection.clone();
         std::thread::Builder::new()
             .name("workspace-supervisor".into())
             .spawn(move || loop {
@@ -306,16 +338,24 @@ impl WorkspaceSupervisor {
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
-                let token = random_hex();
-                match Self::spawn(mode, &token) {
-                    Ok(mut new_child) => {
-                        // 保持 stdout 管道开放：serve 启动时写 READY 行，
-                        // 管道关闭会触发 EPIPE panic；读线程持续 drain。
-                        if let Some(stdout) = new_child.stdout.take() {
-                            std::thread::spawn(move || {
-                                for _ in BufReader::new(stdout).lines().map_while(Result::ok) {}
-                            });
-                        }
+                // 只有 READY + /health 均成功后才发布新 endpoint/token；失败继续退避。
+                match Self::try_start(mode) {
+                    Ok((new_child, token, endpoint, active_mode, _)) => {
+                        let next = WorkspaceConnection {
+                            generation: connection
+                                .read()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .generation
+                                .saturating_add(1),
+                            endpoint,
+                            token,
+                            mode: active_mode,
+                        };
+                        // 先更新 registry，随后再暴露新进程；新 worker 绝不会拿到旧凭据。
+                        on_connection(next.clone());
+                        *connection
+                            .write()
+                            .unwrap_or_else(|error| error.into_inner()) = next;
                         let mut guard = child.lock().unwrap_or_else(|e| e.into_inner());
                         *guard = Some(new_child);
                     }

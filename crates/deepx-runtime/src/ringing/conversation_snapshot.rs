@@ -17,8 +17,7 @@ pub fn persisted_conversation_state(seed: &str) -> Option<serde_json::Value> {
         .as_ref()
         .map(|context| context.messages.as_slice())
         .unwrap_or(archive_messages.as_slice());
-    let (total, turns) =
-        deepx_msglp::util::project_turns_from_messages(seed, messages, None, None);
+    let (total, turns) = deepx_msglp::util::project_turns_from_messages(seed, messages, None, None);
     Some(json!({
         "turns": turns.iter().map(neutral_turn).collect::<Vec<_>>(),
         "total_turns": total,

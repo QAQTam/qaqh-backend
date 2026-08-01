@@ -32,7 +32,6 @@ import TodoStatusStrip from "./TodoStatusStrip";
 
 interface ChatViewProps {
   rawSession: Accessor<RawSessionState>;
-  sessionStore: RawSessionState;
   dashboardStore: DashboardStoreData;
   ui: SessionUiState;
   onLoadMore: () => void | Promise<void>;
@@ -64,7 +63,7 @@ interface ChatViewProps {
 export default function ChatView(props: ChatViewProps) {
   const session = () => props.rawSession();
   const turns = createMemo(() => {
-    const projected = props.sessionStore.turns.map(projectTurn);
+    const projected = session().turns.map(projectTurn);
     const pending = props.pendingSend();
     if (pending) {
       projected.push(projectTurn(pending));

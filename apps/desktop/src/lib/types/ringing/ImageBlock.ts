@@ -3,11 +3,11 @@
 /**
  * 用户消息中的图片附件（multimodal）。
  */
-export type ImageBlock = { 
+export type ImageBlock = {
 /**
  * MIME type（如 "image/png"）。
  */
-mime_type: string, 
+mime_type: string,
 /**
  * Base64 编码的图像数据（不含 data URI 前缀）。
  */

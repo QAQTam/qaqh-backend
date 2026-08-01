@@ -2,10 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { request } from "./backendClient";
 import {
   RINGING_COMMAND_METHODS,
-  applyCommandModes,
-  commandIsRinging,
-  resetCommandProtocols,
-  setCommandProtocol,
 } from "./ringingCommandRouter";
 
 function mockBridge(
@@ -23,10 +19,7 @@ function mockBridge(
   const query = overrides.query ?? vi.fn(async () => ({ ok: true }));
   const backendRequest = overrides.backendRequest ?? vi.fn(async () => ({ ok: true }));
   const ringing = {
-    status: vi.fn(),
-    mode: vi.fn(),
-    cutoverEvents: vi.fn(),
-    cutoverCommands: vi.fn(),
+    status: vi.fn(async () => ({ connected: true, transport: "ringing" as const })),
     snapshot: vi.fn(),
     command,
     query,
@@ -40,7 +33,7 @@ function mockBridge(
     restart: vi.fn(),
     attach: vi.fn(),
     detach: vi.fn(),
-    status: vi.fn(),
+    status: vi.fn(async () => ({ connected: true, transport: "ringing" as const })),
     onMessage: vi.fn(),
     onStatus: vi.fn(),
   };
@@ -63,9 +56,12 @@ describe("ringingCommandRouter mapping", () => {
     });
   });
 
-  it("keeps send_message with files on legacy", () => {
+  it("builds send_message with files for main-side ContentRef upload", () => {
     const spec = RINGING_COMMAND_METHODS["session.send_message"];
-    expect(spec.build({ seed: "s1", text: "hi", files: ["a.txt"] })).toBeNull();
+    expect(spec.build({ seed: "s1", text: "hi", files: ["a.txt"] })).toEqual({
+      type: "conversation_send_message",
+      text: "hi",
+    });
   });
 
   it("maps plan_review callId to interaction_id", () => {
@@ -91,60 +87,24 @@ describe("ringingCommandRouter mapping", () => {
       });
   });
 
-  it("routes skills.operation activate/release but keeps other actions legacy", () => {
+  it("routes all skills operations through the typed command", () => {
     const spec = RINGING_COMMAND_METHODS["skills.operation"];
-    expect(spec.build({ name: "bash", action: "activate" })).toEqual({
-      type: "skills_activate",
+    expect(spec.build({ operationId: "op-1", name: "bash", action: "retain" })).toEqual({
+      type: "skills_operation",
+      operation_id: "op-1",
       name: "bash",
+      action: "retain",
     });
-    expect(spec.build({ name: "bash", action: "release" })).toEqual({
-      type: "skills_release",
-      name: "bash",
-    });
-    expect(spec.build({ name: "bash", action: "retain" })).toBeNull();
-  });
-});
-
-describe("command protocol registry", () => {
-  beforeEach(() => {
-    resetCommandProtocols();
-  });
-  afterEach(() => {
-    resetCommandProtocols();
-    vi.unstubAllGlobals();
-  });
-
-  it("tracks per (seed, channel) protocol", () => {
-    expect(commandIsRinging("s1", "conversation")).toBe(false);
-    setCommandProtocol("s1", "conversation", "ringing");
-    expect(commandIsRinging("s1", "conversation")).toBe(true);
-    expect(commandIsRinging("s1", "tool")).toBe(false);
-    expect(commandIsRinging("s2", "conversation")).toBe(false);
-  });
-
-  it("restores protocols from main mode table", () => {
-    applyCommandModes("s1", {
-      control: { eventProtocol: "legacy", commandProtocol: "legacy" },
-      conversation: { eventProtocol: "ringing", commandProtocol: "ringing" },
-      tool: { eventProtocol: "legacy", commandProtocol: "legacy" },
-    });
-    expect(commandIsRinging("s1", "conversation")).toBe(true);
-    expect(commandIsRinging("s1", "control")).toBe(false);
   });
 });
 
 describe("backendClient Ringing routing", () => {
-  beforeEach(() => {
-    resetCommandProtocols();
-  });
   afterEach(() => {
-    resetCommandProtocols();
     vi.unstubAllGlobals();
   });
 
   it("routes mapped commands via Ringing when protocol is ringing", async () => {
     const { command, backendRequest } = mockBridge();
-    setCommandProtocol("s1", "conversation", "ringing");
     await request("session.send_message", { seed: "s1", text: "hi" });
     expect(command).toHaveBeenCalledTimes(1);
     const [seed, channel, envelope] = command.mock.calls[0] as [
@@ -159,11 +119,11 @@ describe("backendClient Ringing routing", () => {
     expect(backendRequest).not.toHaveBeenCalled();
   });
 
-  it("keeps legacy when protocol is not ringing", async () => {
+  it("keeps connection-level Ringing selected", async () => {
     const { command, backendRequest } = mockBridge();
     await request("session.send_message", { seed: "s1", text: "hi" });
-    expect(command).not.toHaveBeenCalled();
-    expect(backendRequest).toHaveBeenCalledWith("session.send_message", { seed: "s1", text: "hi" });
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(backendRequest).not.toHaveBeenCalled();
   });
 
   it("propagates rejected Ringing commands without silent fallback", async () => {
@@ -172,7 +132,6 @@ describe("backendClient Ringing routing", () => {
         throw new Error("Ringing rejected command: lease_required");
       }),
     });
-    setCommandProtocol("s1", "conversation", "ringing");
     await expect(request("session.send_message", { seed: "s1", text: "hi" })).rejects.toThrow(
       "lease_required",
     );
@@ -187,45 +146,41 @@ describe("backendClient Ringing routing", () => {
         message: "open a client session first",
       })),
     });
-    setCommandProtocol("s1", "conversation", "ringing");
     await expect(request("session.send_message", { seed: "s1", text: "hi" })).rejects.toThrow(
       "open a client session first",
     );
     expect(backendRequest).not.toHaveBeenCalled();
   });
 
-  it("falls back to legacy once when Ringing is not connected", async () => {
+  it("does not fall back when a Ringing command fails", async () => {
     const { command, backendRequest } = mockBridge({
       command: vi.fn(async () => {
         throw new Error("ringing not connected");
       }),
     });
-    setCommandProtocol("s1", "conversation", "ringing");
-    const result = await request("session.send_message", { seed: "s1", text: "hi" });
+    await expect(request("session.send_message", { seed: "s1", text: "hi" })).rejects.toThrow(
+      "ringing not connected",
+    );
     expect(command).toHaveBeenCalledTimes(1);
-    expect(backendRequest).toHaveBeenCalledWith("session.send_message", { seed: "s1", text: "hi" });
-    expect(result).toEqual({ ok: true });
+    expect(backendRequest).not.toHaveBeenCalled();
   });
 
   it("routes read-only queries via Ringing for migrated sessions", async () => {
     const { query, backendRequest } = mockBridge();
-    setCommandProtocol("s1", "conversation", "ringing");
     const result = await request("session.dashboard", { seed: "s1" });
     expect(query).toHaveBeenCalledWith("session.dashboard", { seed: "s1" });
     expect(backendRequest).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: true });
   });
 
-  it("falls back to legacy when Ringing query fails", async () => {
+  it("does not fall back when a Ringing query fails", async () => {
     const { query, backendRequest } = mockBridge({
       query: vi.fn(async () => {
         throw new Error("query failed: HTTP 501");
       }),
     });
-    setCommandProtocol("s1", "conversation", "ringing");
-    const result = await request("session.dashboard", { seed: "s1" });
+    await expect(request("session.dashboard", { seed: "s1" })).rejects.toThrow("query failed");
     expect(query).toHaveBeenCalledTimes(1);
-    expect(backendRequest).toHaveBeenCalledWith("session.dashboard", { seed: "s1" });
-    expect(result).toEqual({ ok: true });
+    expect(backendRequest).not.toHaveBeenCalled();
   });
 });

@@ -4,7 +4,6 @@ import {
   requestWithRinging,
   ringingCommandsEnabled,
 } from "./ringingCommands";
-import { resetCommandProtocols, setCommandProtocol } from "./ringingCommandRouter";
 
 function stubLocalStorage(enabled: boolean): void {
   const store = new Map<string, string>();
@@ -20,12 +19,10 @@ function stubLocalStorage(enabled: boolean): void {
 function mockBridge(
   command = vi.fn(async () => ({ status: "accepted" })),
   backendRequest = vi.fn(async () => ({ ok: true })),
+  transport: "ringing" | "legacy" = "ringing",
 ): { command: ReturnType<typeof vi.fn>; backendRequest: ReturnType<typeof vi.fn> } {
   const ringing = {
-    status: vi.fn(),
-    mode: vi.fn(),
-    cutoverEvents: vi.fn(),
-    cutoverCommands: vi.fn(),
+    status: vi.fn(async () => ({ connected: true, transport })),
     snapshot: vi.fn(),
     command,
     query: vi.fn(),
@@ -39,7 +36,7 @@ function mockBridge(
     restart: vi.fn(),
     attach: vi.fn(),
     detach: vi.fn(),
-    status: vi.fn(),
+    status: vi.fn(async () => ({ connected: true, transport })),
     onMessage: vi.fn(),
     onStatus: vi.fn(),
   };
@@ -61,8 +58,11 @@ describe("buildRingingCommand", () => {
     });
   });
 
-  it("keeps send_message with files on legacy (daemon-side preview expansion)", () => {
-    expect(buildRingingCommand("session.send_message", { text: "hi", files: ["a.txt"] })).toBeNull();
+  it("builds send_message with files for main-side ContentRef upload", () => {
+    expect(buildRingingCommand("session.send_message", { text: "hi", files: ["a.txt"] })).toEqual({
+      channel: "conversation",
+      command: { type: "conversation_send_message", text: "hi" },
+    });
   });
 
   it("maps cancel and compact to conversation commands", () => {
@@ -84,19 +84,17 @@ describe("buildRingingCommand", () => {
 describe("requestWithRinging", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
-    resetCommandProtocols();
   });
   afterEach(() => {
     vi.unstubAllGlobals();
-    resetCommandProtocols();
   });
 
-  it("uses legacy when the switch is off", async () => {
+  it("uses Ringing regardless of localStorage", async () => {
     stubLocalStorage(false);
     const { command, backendRequest } = mockBridge();
     await requestWithRinging("session.send_message", { seed: "s1", text: "hi" });
-    expect(command).not.toHaveBeenCalled();
-    expect(backendRequest).toHaveBeenCalledWith("session.send_message", { seed: "s1", text: "hi" });
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(backendRequest).not.toHaveBeenCalled();
   });
 
   it("sends via Ringing when the switch is on", async () => {
@@ -113,29 +111,32 @@ describe("requestWithRinging", () => {
     expect(backendRequest).not.toHaveBeenCalled();
   });
 
-  it("falls back to legacy when Ringing rejects", async () => {
+  it("does not fall back when Ringing rejects", async () => {
     stubLocalStorage(true);
     const { command, backendRequest } = mockBridge(
       vi.fn(async () => ({ status: "rejected", code: "lease_required" })),
     );
-    await requestWithRinging("session.cancel", { seed: "s1" });
+    await expect(requestWithRinging("session.cancel", { seed: "s1" })).rejects.toThrow("rejected");
     expect(command).toHaveBeenCalledTimes(1);
-    expect(backendRequest).toHaveBeenCalledWith("session.cancel", { seed: "s1" });
+    expect(backendRequest).not.toHaveBeenCalled();
   });
 
-  it("falls back to legacy when Ringing throws", async () => {
+  it("rejects a legacy-selected connection without probing Ringing", async () => {
     stubLocalStorage(true);
     const { command, backendRequest } = mockBridge(
       vi.fn(async () => {
         throw new Error("ringing not connected");
       }),
+      vi.fn(async () => ({ ok: true })),
+      "legacy",
     );
-    await requestWithRinging("session.compact", { seed: "s1" });
-    expect(command).toHaveBeenCalledTimes(1);
-    expect(backendRequest).toHaveBeenCalledWith("session.compact", { seed: "s1" });
+    await expect(requestWithRinging("session.compact", { seed: "s1" }))
+      .rejects.toThrow("Ringing v2 is required");
+    expect(command).not.toHaveBeenCalled();
+    expect(backendRequest).not.toHaveBeenCalled();
   });
 
-  it("keeps send_message with files on legacy even when the switch is on", async () => {
+  it("sends file paths to main for ContentRef upload", async () => {
     stubLocalStorage(true);
     const { command, backendRequest } = mockBridge();
     await requestWithRinging("session.send_message", { seed: "s1", text: "hi", files: ["a.txt"] });
@@ -149,24 +150,22 @@ describe("requestWithRinging", () => {
 
   it("uses Ringing when the per-session command protocol is ringing (switch off)", async () => {
     stubLocalStorage(false);
-    setCommandProtocol("s1", "conversation", "ringing");
     const { command, backendRequest } = mockBridge();
     await requestWithRinging("session.send_message", { seed: "s1", text: "hi" });
     expect(command).toHaveBeenCalledTimes(1);
     expect(backendRequest).not.toHaveBeenCalled();
   });
 
-  it("keeps legacy when neither the switch nor per-session protocol enables Ringing", async () => {
+  it("keeps Ringing selected without a per-session protocol", async () => {
     stubLocalStorage(false);
     const { command, backendRequest } = mockBridge();
     await requestWithRinging("session.cancel", { seed: "s1" });
-    expect(command).not.toHaveBeenCalled();
-    expect(backendRequest).toHaveBeenCalledWith("session.cancel", { seed: "s1" });
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(backendRequest).not.toHaveBeenCalled();
   });
 
   it("propagates rejected Ringing commands in per-session mode (sticky, no fallback)", async () => {
     stubLocalStorage(false);
-    setCommandProtocol("s1", "conversation", "ringing");
     const { command, backendRequest } = mockBridge(
       vi.fn(async () => ({ status: "rejected", code: "lease_required" })),
     );
@@ -177,23 +176,25 @@ describe("requestWithRinging", () => {
     expect(backendRequest).not.toHaveBeenCalled();
   });
 
-  it("falls back to legacy on not-connected in per-session mode", async () => {
+  it("never falls back to legacy when the connection selected legacy", async () => {
     stubLocalStorage(false);
-    setCommandProtocol("s1", "conversation", "ringing");
     const { command, backendRequest } = mockBridge(
       vi.fn(async () => {
         throw new Error("ringing not connected");
       }),
+      vi.fn(async () => ({ ok: true })),
+      "legacy",
     );
-    await requestWithRinging("session.compact", { seed: "s1" });
-    expect(command).toHaveBeenCalledTimes(1);
-    expect(backendRequest).toHaveBeenCalledWith("session.compact", { seed: "s1" });
+    await expect(requestWithRinging("session.compact", { seed: "s1" }))
+      .rejects.toThrow("Ringing v2 is required");
+    expect(command).not.toHaveBeenCalled();
+    expect(backendRequest).not.toHaveBeenCalled();
   });
 });
 
 describe("ringingCommandsEnabled", () => {
-  it("is false when localStorage is unavailable", () => {
+  it("is true when localStorage is unavailable", () => {
     vi.unstubAllGlobals();
-    expect(ringingCommandsEnabled()).toBe(false);
+    expect(ringingCommandsEnabled()).toBe(true);
   });
 });

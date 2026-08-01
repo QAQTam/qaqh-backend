@@ -49,7 +49,9 @@ impl InputEngine {
                         "目标模式无法恢复：没有当前步骤。".to_string()
                     }
                 }
-                Ok(_) => "目标模式无法恢复：当前没有激活的 goal。使用 todo_activate 开始。".to_string(),
+                Ok(_) => {
+                    "目标模式无法恢复：当前没有激活的 goal。使用 todo_activate 开始。".to_string()
+                }
                 Err(e) => format!("目标模式恢复失败：{e}"),
             }
         } else {
@@ -81,7 +83,9 @@ impl InputEngine {
         if ctx.agent.config.compliance_enabled {
             if let Err(reason) = deepx_gate::guard::content_guard(&text) {
                 log::info!("[INPUT] compliance blocked: {reason}");
-                ctx.emitter.emit(Agent2Ui::Error { message: reason.clone() });
+                ctx.emitter.emit(Agent2Ui::Error {
+                    message: reason.clone(),
+                });
                 // Ringing 双发：OperationFailed（Control 频道错误终态）
                 ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                     deepx_domain::ControlEvent::OperationFailed {
@@ -122,9 +126,14 @@ impl InputEngine {
         ctx.agent.activate_explicit_skills(&text);
 
         {
-            let workspace = deepx_workspace::CURRENT_WORKSPACE.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let workspace = deepx_workspace::CURRENT_WORKSPACE
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let status = ctx.agent.build_skills_status(&workspace);
-            ctx.emitter.emit(Agent2Ui::SkillsChanged { status: status.clone() });
+            ctx.emitter.emit(Agent2Ui::SkillsChanged {
+                status: status.clone(),
+            });
             // Ringing 双发：SkillsUpdated（skill 目录/激活状态）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                 deepx_domain::ControlEvent::SkillsUpdated {
@@ -152,7 +161,9 @@ impl InputEngine {
         // Add image blocks to the user message and register them globally
         // so image_query can look them up by index.
         for img in &images {
-            ctx.agent.msg.push_image_to_last_user(&img.mime_type, &img.data);
+            ctx.agent
+                .msg
+                .push_image_to_last_user(&img.mime_type, &img.data);
             deepx_workspace::image_query::store_image(
                 &ctx.agent.session.seed,
                 &img.mime_type,
@@ -160,18 +171,28 @@ impl InputEngine {
             );
         }
         log::info!("[INPUT] flushing meta");
-        ctx.agent.msg.flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
+        ctx.agent
+            .msg
+            .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
 
         log::info!("[INPUT] emitting TurnStart turn_id={} round_num=0", turn_id);
-        ctx.emitter.emit(Agent2Ui::TurnStart { turn_id: turn_id.clone(), user_text: text.clone() });
+        ctx.emitter.emit(Agent2Ui::TurnStart {
+            turn_id: turn_id.clone(),
+            user_text: text.clone(),
+        });
         // Ringing 双发：TurnStarted（权威开始事件）
-        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
-            deepx_domain::ConversationEvent::TurnStarted {
-                turn_id: turn_id.clone(),
-                user_text: text,
-            },
-        ));
+        ctx.emitter
+            .emit_domain(deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::TurnStarted {
+                    turn_id: turn_id.clone(),
+                    user_text: text,
+                },
+            ));
 
-        Outcome::ContinueTurn { turn_id, round_num: 0, usage: None }
+        Outcome::ContinueTurn {
+            turn_id,
+            round_num: 0,
+            usage: None,
+        }
     }
 }

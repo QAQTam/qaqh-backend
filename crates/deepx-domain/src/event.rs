@@ -234,10 +234,7 @@ pub struct SkillInfo {
 #[ts(export)]
 pub enum ConversationEvent {
     /// 新回合开始（`ConversationSendMessage` accepted 后的权威开始事件）。
-    TurnStarted {
-        turn_id: String,
-        user_text: String,
-    },
+    TurnStarted { turn_id: String, user_text: String },
     /// 回合完成（成功）。`TurnFailed` 为失败终态。
     TurnCompleted {
         turn_id: String,
@@ -247,10 +244,7 @@ pub enum ConversationEvent {
         usage: Option<UsageInfo>,
     },
     /// 回合失败（新领域事件；provider 最终失败只产生一个可靠失败终态）。
-    TurnFailed {
-        turn_id: String,
-        error: DomainError,
-    },
+    TurnFailed { turn_id: String, error: DomainError },
     /// 流式增量（reliable：增量是追加语义，覆盖/合并会吞字；journal 在
     /// `RoundCompleted` 到达后按 round 压缩，见 `ReliableJournal::compact_round_deltas`）。
     RoundDelta {
@@ -278,6 +272,7 @@ pub enum ConversationEvent {
         round_num: u32,
         attempt: u32,
         max_retries: u32,
+        #[ts(type = "number")]
         delay_secs: u64,
         error_message: String,
     },
@@ -306,10 +301,7 @@ pub enum ConversationEvent {
         turns_keeping: u32,
     },
     /// compact 流式摘要（replaceable，按 compact_id 合并）。
-    CompactProgress {
-        compact_id: String,
-        delta: String,
-    },
+    CompactProgress { compact_id: String, delta: String },
     /// compact 终态。`ConversationCompact` accepted 不代表成功，本事件才是终态。
     CompactFinished {
         compact_id: String,
@@ -369,9 +361,12 @@ pub enum ToolEvent {
         turn_id: String,
         round_num: u32,
         stream: String,
+        #[ts(type = "number")]
         seq_start: u64,
+        #[ts(type = "number")]
         seq_end: u64,
         chunk: String,
+        #[ts(type = "number")]
         dropped_bytes: u64,
         truncated: bool,
     },
@@ -464,23 +459,20 @@ impl ToolEvent {
 #[ts(export)]
 pub enum ControlEvent {
     /// 会话生命周期状态变更。
-    SessionStateChanged {
-        seed: String,
-        state: SessionState,
-    },
+    SessionStateChanged { seed: String, state: SessionState },
     /// 会话活动状态变更（WaitingUser 汇总 interaction/permission 挂起）。
     SessionActivityChanged {
         seed: String,
         state: ActivityState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
+        #[ts(type = "number")]
         seq: u64,
+        #[ts(type = "number")]
         updated_at: u64,
     },
     /// agent **进程**生命周期（决策记录 Q8：不含回合状态）。
-    AgentLifecycleChanged {
-        state: AgentLifecycleState,
-    },
+    AgentLifecycleChanged { state: AgentLifecycleState },
     /// 会话仪表盘（replaceable，覆盖式）。
     DashboardUpdated {
         hp_connected: bool,
@@ -524,6 +516,7 @@ pub enum ControlEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         catalog_revision: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(type = "number | null")]
         operation_revision: Option<u64>,
     },
     /// 系统级通知（决策记录 Q6：最小集——升级、维护、daemon 重启等）。
@@ -531,6 +524,14 @@ pub enum ControlEvent {
         notice_id: String,
         level: NoticeLevel,
         message: String,
+    },
+    /// 无专用领域终态载荷的命令已完成。用于 undo/set-mode/reload 等
+    /// 操作的 receipt 收口，不承担 UI 通知语义。
+    OperationCompleted {
+        occurrence_id: String,
+        scope: ErrorScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
     },
     /// 业务失败终态（结构化、可关联、可去重）。
     OperationFailed {
@@ -700,7 +701,10 @@ mod tests {
         let back: ControlEvent = serde_json::from_str(&json).expect("deserialize");
         assert!(matches!(
             back,
-            ControlEvent::OperationFailed { scope: ErrorScope::Tool, .. }
+            ControlEvent::OperationFailed {
+                scope: ErrorScope::Tool,
+                ..
+            }
         ));
     }
 

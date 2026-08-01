@@ -15,7 +15,9 @@ import type {
   ToolEvent,
   SessionState,
   ActivityState,
+  AskQuestion,
   RoundDeltaKind,
+  TodoItem,
 } from "../lib/types/ringing";
 import type { PermissionRisk } from "../lib/types";
 
@@ -32,8 +34,6 @@ export interface ChannelConnectionState {
   cursor: number;
   /** snapshot 是否已应用。 */
   snapshotApplied: boolean;
-  /** 切流待定（prepare 已发，commit 未到）。 */
-  pendingCutover: boolean;
 }
 
 export function initialChannelConnectionState(): ChannelConnectionState {
@@ -42,7 +42,6 @@ export function initialChannelConnectionState(): ChannelConnectionState {
     serverEpoch: "",
     cursor: 0,
     snapshotApplied: false,
-    pendingCutover: false,
   };
 }
 
@@ -54,6 +53,11 @@ export interface ActiveAskPlan {
   id: string;
   kind: "ask" | "plan";
   turnId: string;
+  questions?: AskQuestion[];
+  mode?: "single" | "batch";
+  planContent?: string;
+  reviewType?: string;
+  todoItems?: TodoItem[] | null;
 }
 
 export interface ControlState {
@@ -102,7 +106,13 @@ export function controlReducer(state: ControlState, event: ControlEvent): Contro
     case "interaction_requested":
       return {
         ...state,
-        activeAskPlan: { id: event.interaction_id, kind: "ask", turnId: event.turn_id },
+        activeAskPlan: {
+          id: event.interaction_id,
+          kind: "ask",
+          turnId: event.turn_id,
+          questions: event.questions,
+          mode: event.mode,
+        },
       };
     case "interaction_resolved":
       return state.activeAskPlan?.id === event.interaction_id
@@ -111,7 +121,14 @@ export function controlReducer(state: ControlState, event: ControlEvent): Contro
     case "plan_review_requested":
       return {
         ...state,
-        activeAskPlan: { id: event.interaction_id, kind: "plan", turnId: event.turn_id },
+        activeAskPlan: {
+          id: event.interaction_id,
+          kind: "plan",
+          turnId: event.turn_id,
+          planContent: event.plan_content,
+          reviewType: event.review_type,
+          todoItems: event.todo_items,
+        },
       };
     case "plan_review_resolved":
       return state.activeAskPlan?.id === event.interaction_id
@@ -119,6 +136,8 @@ export function controlReducer(state: ControlState, event: ControlEvent): Contro
         : state;
     case "operation_failed":
       return { ...state, lastFailureId: event.error.error_id };
+    case "operation_completed":
+      return state;
     case "system_notice":
       return { ...state, lastNoticeId: event.notice_id };
     case "dashboard_updated":
@@ -379,10 +398,14 @@ export function conversationReducer(state: ConversationState, event: Conversatio
 export interface ToolCardView {
   toolCallId: string;
   turnId: string;
+  roundNum: number;
   name: string;
+  argsSoFar: string;
   status: "prepared" | "running" | "finished" | "failed";
+  progressStream: "stdout" | "stderr";
   progressTail: string;
-  droppedBytes: bigint;
+  progressSeqEnd: number;
+  droppedBytes: number;
   truncated: boolean;
   resultSummary: string | null;
   pendingPermission: boolean;
@@ -422,10 +445,14 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
           {
             toolCallId: event.tool_call_id,
             turnId: event.turn_id,
+            roundNum: event.round_num,
             name: event.name,
+            argsSoFar: event.args_so_far,
             status: "prepared",
+            progressStream: "stdout",
             progressTail: "",
-            droppedBytes: 0n,
+            progressSeqEnd: 0,
+            droppedBytes: 0,
             truncated: false,
             resultSummary: null,
             pendingPermission: false,
@@ -444,10 +471,14 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
           {
             toolCallId: event.tool_call_id,
             turnId: event.turn_id,
+            roundNum: event.round_num,
             name: event.name,
+            argsSoFar: "",
             status: "running",
+            progressStream: "stdout",
             progressTail: "",
-            droppedBytes: 0n,
+            progressSeqEnd: 0,
+            droppedBytes: 0,
             truncated: false,
             resultSummary: null,
             pendingPermission: false,
@@ -456,12 +487,22 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
         ],
       };
     }
-    case "tool_progress":
+    case "tool_progress": {
+      const card = state.cards.find((candidate) => candidate.toolCallId === event.tool_call_id);
+      if (!card) return state;
+      const combined = event.seq_start === card.progressSeqEnd
+        ? `${card.progressTail}${event.chunk}`
+        : event.chunk;
+      const maxTail = 128 * 1024;
+      const trimmed = Math.max(0, combined.length - maxTail);
       return patchCard(state, event.tool_call_id, {
-        progressTail: event.chunk,
-        droppedBytes: event.dropped_bytes,
-        truncated: event.truncated,
+        progressTail: trimmed > 0 ? combined.slice(-maxTail) : combined,
+        progressStream: event.stream === "stderr" ? "stderr" : "stdout",
+        progressSeqEnd: event.seq_end,
+        droppedBytes: event.dropped_bytes + trimmed,
+        truncated: event.truncated || trimmed > 0,
       });
+    }
     case "tool_finished":
       return patchCard(state, event.tool_call_id, {
         status: "finished",
@@ -492,10 +533,14 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
           {
             toolCallId: event.tool_call_id,
             turnId: event.turn_id,
+            roundNum: event.round_num,
             name: event.tool_name,
+            argsSoFar: "",
             status: "prepared",
+            progressStream: "stdout",
             progressTail: "",
-            droppedBytes: 0n,
+            progressSeqEnd: 0,
+            droppedBytes: 0,
             truncated: false,
             resultSummary: null,
             pendingPermission: true,

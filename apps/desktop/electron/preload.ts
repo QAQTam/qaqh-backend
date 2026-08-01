@@ -23,11 +23,7 @@ contextBridge.exposeInMainWorld("deepx", {
   },
   ringing: {
     status: () => ipcRenderer.invoke("ringing:status"),
-    mode: (seed: string) => ipcRenderer.invoke("ringing:mode", seed),
-    cutoverEvents: (seed: string, channel: string, action: "prepare" | "commit" | "abort") =>
-      ipcRenderer.invoke("ringing:cutover-events", seed, channel, action),
-    cutoverCommands: (seed: string, channel: string, protocol: "ringing" | "legacy") =>
-      ipcRenderer.invoke("ringing:cutover-commands", seed, channel, protocol),
+    bootstrap: (seed: string) => ipcRenderer.invoke("ringing:bootstrap", seed),
     snapshot: (seed: string, channel: string) =>
       ipcRenderer.invoke("ringing:snapshot", seed, channel),
     command: (seed: string, channel: string, envelope: unknown) =>

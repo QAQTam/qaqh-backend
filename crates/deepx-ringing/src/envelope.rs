@@ -6,7 +6,7 @@ use ts_rs::TS;
 
 use crate::command::RingingCommand;
 use crate::event::RingingEvent;
-use crate::protocol::{RINGING_SCHEMA, RINGING_VERSION};
+use crate::protocol::{RINGING_SCHEMA, RINGING_VERSION, is_safe_integer};
 
 /// 事件信封（PLAN 固定字段）。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -17,15 +17,18 @@ pub struct RingingEventEnvelope {
     pub channel: RingingChannel,
     /// 可靠性等级：由领域事件定义显式声明，wire 不决定。
     pub delivery: Delivery,
-    /// daemon 重启/切流纪元；epoch 变化后 stream_seq 重置。
+    /// daemon 重启纪元；epoch 变化后 stream_seq 重置。
     pub server_epoch: String,
     /// 会话标识。
     pub seed: String,
     /// 每 (server_epoch, channel) 全局递增，供单条 SSE 连接恢复。
+    #[ts(type = "number")]
     pub stream_seq: u64,
     /// 每 (seed, channel) 递增，供领域状态乱序检测。
+    #[ts(type = "number")]
     pub channel_seq: u64,
     /// 每 session/channel 因果序（保留 legacy session_seq 语义）。
+    #[ts(type = "number")]
     pub session_seq: u64,
     /// 事件唯一 id；同 id 至少一次投递但只允许应用一次（幂等）。
     pub event_id: String,
@@ -37,6 +40,7 @@ pub struct RingingEventEnvelope {
     pub correlation_id: Option<String>,
     /// 领域状态修订号；terminal 到达后旧 revision 的 replaceable 立即作废。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub state_revision: Option<u64>,
     pub event: RingingEvent,
 }
@@ -81,6 +85,23 @@ impl RingingEventEnvelope {
         self.state_revision = Some(revision);
         self
     }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.schema != RINGING_SCHEMA || self.version != RINGING_VERSION {
+            return Err("unsupported_version");
+        }
+        if self.seed.is_empty()
+            || self.event_id.is_empty()
+            || self.channel != self.event.channel()
+            || !is_safe_integer(self.stream_seq)
+            || !is_safe_integer(self.channel_seq)
+            || !is_safe_integer(self.session_seq)
+            || self.state_revision.is_some_and(|v| !is_safe_integer(v))
+        {
+            return Err("invalid_envelope");
+        }
+        Ok(())
+    }
 }
 
 /// 命令信封（PLAN 固定字段）。
@@ -94,10 +115,13 @@ pub struct RingingCommandEnvelope {
     pub command_id: String,
     /// 发起客户端实例 id（lease 绑定该身份）。
     pub client_instance_id: String,
+    /// open 成功后由 daemon 签发的连接级身份。
+    pub client_session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<String>,
     /// 乐观并发修订（可选）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub expected_revision: Option<u64>,
     pub command: RingingCommand,
 }
@@ -115,6 +139,7 @@ impl RingingCommandEnvelope {
             channel,
             command_id: command_id.into(),
             client_instance_id: client_instance_id.into(),
+            client_session_id: String::new(),
             seed: None,
             expected_revision: None,
             command,
@@ -124,6 +149,41 @@ impl RingingCommandEnvelope {
     pub fn with_seed(mut self, seed: impl Into<String>) -> Self {
         self.seed = Some(seed.into());
         self
+    }
+
+    pub fn with_client_session_id(mut self, client_session_id: impl Into<String>) -> Self {
+        self.client_session_id = client_session_id.into();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.schema != RINGING_SCHEMA || self.version != RINGING_VERSION {
+            return Err("unsupported_version");
+        }
+        if self.command.channel() != self.channel {
+            return Err("invalid_envelope");
+        }
+        if self.command_id.is_empty() || self.client_instance_id.is_empty() {
+            return Err("invalid_envelope");
+        }
+        if self.client_session_id.is_empty() {
+            return Err("lease_required");
+        }
+        if self.seed.as_deref().is_some_and(str::is_empty) {
+            return Err("invalid_envelope");
+        }
+        if self.seed.is_none()
+            && !matches!(
+                self.command,
+                RingingCommand::Control(deepx_domain::ControlCommand::SessionCreate { .. })
+            )
+        {
+            return Err("missing_seed");
+        }
+        if self.expected_revision.is_some_and(|v| !is_safe_integer(v)) {
+            return Err("invalid_envelope");
+        }
+        Ok(())
     }
 }
 
@@ -152,17 +212,82 @@ pub struct RingingCommandAck {
     pub retry_after_ms: Option<u64>,
 }
 
+/// 可持久化的命令执行状态。ACK 丢失时客户端用原 command_id 查询它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum RingingCommandState {
+    Accepted,
+    Running,
+    Succeeded,
+    Failed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RingingCommandStatus {
+    pub command_id: String,
+    pub state: RingingCommandState,
+    pub payload_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
 /// 事件批次（main→renderer 必须整 batch 传递，禁止展开为逐事件）。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RingingEventBatch {
+    pub schema: String,
+    pub version: u32,
     pub channel: RingingChannel,
     pub seed: String,
+    pub server_epoch: String,
+    #[ts(type = "number")]
     pub from_stream_seq: u64,
+    #[ts(type = "number")]
     pub to_stream_seq: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_revision: Option<u64>,
-    pub events: Vec<RingingEvent>,
+    pub envelopes: Vec<RingingEventEnvelope>,
+}
+
+impl RingingEventBatch {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.schema != RINGING_SCHEMA || self.version != RINGING_VERSION {
+            return Err("unsupported_version");
+        }
+        if self.from_stream_seq > self.to_stream_seq || self.envelopes.is_empty() {
+            return Err("invalid_envelope");
+        }
+        if !is_safe_integer(self.from_stream_seq) || !is_safe_integer(self.to_stream_seq) {
+            return Err("invalid_envelope");
+        }
+        let expected_to = self
+            .from_stream_seq
+            .checked_add(self.envelopes.len() as u64 - 1)
+            .ok_or("invalid_envelope")?;
+        if self.to_stream_seq != expected_to {
+            return Err("invalid_envelope");
+        }
+        for (index, envelope) in self.envelopes.iter().enumerate() {
+            envelope.validate()?;
+            if envelope.schema != self.schema
+                || envelope.version != self.version
+                || envelope.channel != self.channel
+                || envelope.seed != self.seed
+                || envelope.server_epoch != self.server_epoch
+                || envelope.stream_seq
+                    != self
+                        .from_stream_seq
+                        .checked_add(index as u64)
+                        .ok_or("invalid_envelope")?
+            {
+                return Err("invalid_envelope");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -183,21 +308,13 @@ mod tests {
             dropped_bytes: 0,
             truncated: false,
         });
-        let env = RingingEventEnvelope::new(
-            "epoch-1",
-            "seed-1",
-            5,
-            3,
-            2,
-            "evt-1",
-            event,
-        )
-        .with_causation("cmd-9")
-        .with_state_revision(7);
+        let env = RingingEventEnvelope::new("epoch-1", "seed-1", 5, 3, 2, "evt-1", event)
+            .with_causation("cmd-9")
+            .with_state_revision(7);
 
         let json = serde_json::to_string(&env).expect("serialize");
         assert!(json.contains("\"schema\":\"deepx.Ringing\""));
-        assert!(json.contains("\"version\":1"));
+        assert!(json.contains("\"version\":2"));
         assert!(json.contains("\"channel\":\"tool\""));
         assert!(json.contains("\"delivery\":\"replaceable\""));
         assert!(json.contains("\"causation_id\":\"cmd-9\""));
@@ -245,16 +362,27 @@ mod tests {
         let batch = RingingEventBatch {
             channel: RingingChannel::Conversation,
             seed: "s1".into(),
+            schema: RINGING_SCHEMA.into(),
+            version: RINGING_VERSION,
             from_stream_seq: 1,
-            to_stream_seq: 2,
-            state_revision: Some(9),
-            events: vec![RingingEvent::Conversation(
-                ConversationEvent::ConversationCancelled { turn_id: None },
+            to_stream_seq: 1,
+            server_epoch: "e1".into(),
+            envelopes: vec![RingingEventEnvelope::new(
+                "e1",
+                "s1",
+                1,
+                1,
+                1,
+                "event-1",
+                RingingEvent::Conversation(ConversationEvent::ConversationCancelled {
+                    turn_id: None,
+                }),
             )],
         };
         let json = serde_json::to_string(&batch).expect("serialize");
         let back: RingingEventBatch = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.events.len(), 1);
-        assert_eq!(back.to_stream_seq, 2);
+        assert_eq!(back.envelopes.len(), 1);
+        assert_eq!(back.to_stream_seq, 1);
+        back.validate().expect("valid batch");
     }
 }

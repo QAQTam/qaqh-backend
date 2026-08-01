@@ -3,11 +3,11 @@
 /**
  * skill 目录条目。
  */
-export type SkillInfo = { name: string, description: string, 
+export type SkillInfo = { name: string, description: string,
 /**
  * "project" | "user"
  */
-scope: string, 
+scope: string,
 /**
  * 相对 workspace 的展示路径。
  */

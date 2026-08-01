@@ -96,6 +96,30 @@ pub fn replaceable_key_for(event: &RingingEvent) -> Option<ReplaceableKey> {
     }
 }
 
+/// Reliable terminal events invalidate the replaceable identities that fed
+/// them. This prevents a reconnect/restart from replaying stale progress after
+/// the authoritative terminal state.
+pub fn terminal_replaceable_keys(event: &RingingEvent) -> Vec<ReplaceableKey> {
+    use deepx_domain::{ConversationEvent as CE, ToolEvent as TE};
+    match event {
+        RingingEvent::Tool(
+            TE::ToolFinished { tool_call_id, .. } | TE::ToolFailed { tool_call_id, .. },
+        ) => {
+            vec![ReplaceableKey::tool_progress(tool_call_id)]
+        }
+        RingingEvent::Conversation(CE::RoundCompleted {
+            turn_id, round_num, ..
+        }) => ["thinking", "tool_calling", "answering"]
+            .into_iter()
+            .map(|kind| ReplaceableKey::round_delta(turn_id, *round_num, kind))
+            .collect(),
+        RingingEvent::Conversation(CE::CompactFinished { compact_id, .. }) => {
+            vec![ReplaceableKey::compact_progress(compact_id)]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// 路由器对单个事件的入队结果。
 #[derive(Debug)]
 pub enum RouteOutcome {
@@ -132,7 +156,11 @@ impl ChannelRouter {
         }
     }
 
-    pub fn with_limits(channel: RingingChannel, reliable_capacity: usize, replaceable_slots: usize) -> Self {
+    pub fn with_limits(
+        channel: RingingChannel,
+        reliable_capacity: usize,
+        replaceable_slots: usize,
+    ) -> Self {
         Self {
             channel,
             reliable: VecDeque::new(),
@@ -151,9 +179,9 @@ impl ChannelRouter {
     pub fn route(&mut self, envelope: RingingEventEnvelope) -> RouteOutcome {
         match envelope.delivery {
             Delivery::Reliable => self.push_reliable(envelope),
-            Delivery::Replaceable => {
-                RouteOutcome::Routed { envelope: self.push_replaceable(envelope) }
-            }
+            Delivery::Replaceable => RouteOutcome::Routed {
+                envelope: self.push_replaceable(envelope),
+            },
             Delivery::Ephemeral => {
                 // ephemeral 不入队；透传给调用方（outbox 直接转发给当前消费者）
                 RouteOutcome::Routed { envelope }
@@ -220,10 +248,7 @@ impl ChannelRouter {
     }
 
     pub fn last_stream_seq(&self) -> u64 {
-        self.reliable
-            .back()
-            .map(|e| e.stream_seq)
-            .unwrap_or(0)
+        self.reliable.back().map(|e| e.stream_seq).unwrap_or(0)
     }
 
     pub fn reliable_len(&self) -> usize {
@@ -241,7 +266,15 @@ mod tests {
     use deepx_domain::{ConversationEvent, DomainEvent, ToolEvent};
 
     fn env_for(seed: &str, seq: u64, event: DomainEvent) -> RingingEventEnvelope {
-        RingingEventEnvelope::new("epoch", seed, seq, seq, seq, format!("e{seq}"), event.into())
+        RingingEventEnvelope::new(
+            "epoch",
+            seed,
+            seq,
+            seq,
+            seq,
+            format!("e{seq}"),
+            event.into(),
+        )
     }
 
     #[test]
@@ -302,8 +335,7 @@ mod tests {
 
     #[test]
     fn reliable_backpressure_when_full_and_no_replaceable() {
-        let mut router =
-            ChannelRouter::with_limits(RingingChannel::Tool, 16, 16);
+        let mut router = ChannelRouter::with_limits(RingingChannel::Tool, 16, 16);
         let ev = |seq: u64| {
             env_for(
                 "s",
@@ -382,7 +414,11 @@ mod tests {
         }
         assert_eq!(router.replaceable_len(), 4);
         // 最早 identity c1 被逐出
-        assert!(router.flush_replaceable(&ReplaceableKey::tool_progress("c1")).is_none());
+        assert!(
+            router
+                .flush_replaceable(&ReplaceableKey::tool_progress("c1"))
+                .is_none()
+        );
     }
 
     #[test]

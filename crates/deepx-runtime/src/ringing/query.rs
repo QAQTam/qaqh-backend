@@ -1,4 +1,4 @@
-//! Ringing 只读查询（`GET /ringing/v1/query/*`）。
+//! Ringing 只读查询（`POST /ringing/v2/queries/{name}`）。
 //!
 //! 实现 session.list / session.meta / session.activity 三个只读 RPC 的
 //! 中立 JSON 形状，复用 legacy `DeepxService::handle` 语义（查询只读，
@@ -21,7 +21,14 @@ pub fn query(service: &DeepxService, method: &str, params: &Value) -> Result<Val
         | "workspace.status"
         | "config.load"
         | "skills.list_tools"
-        | "todo.status" => service.handle(method, params),
+        | "todo.status"
+        | "plan.read"
+        | "plan.context_stats"
+        | "stats.token_usage"
+        | "git.diff"
+        | "git.branch"
+        | "git.branches"
+        | "git.file_diff" => service.handle(method, params),
         _ => Err(format!("unknown query method {method}")),
     }
 }
@@ -35,6 +42,12 @@ pub fn requires_seed(method: &str) -> bool {
             | "session.get_activity"
             | "workspace.get"
             | "todo.status"
+            | "plan.read"
+            | "plan.context_stats"
+            | "git.diff"
+            | "git.branch"
+            | "git.branches"
+            | "git.file_diff"
     )
 }
 

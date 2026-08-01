@@ -5,6 +5,11 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { DaemonControlClient } from "./controlClient";
 import { RingingManager, type ChannelName } from "./ringingManager";
 import type { ConfirmDialogOptions, OpenDialogOptions, UpdateInfo } from "./types";
+import {
+  RINGING_COMMAND_METHODS,
+  RINGING_QUERY_METHODS,
+  buildRingingCommandEnvelope,
+} from "../src/runtime/ringingCommandRouter";
 
 let mainWindow: BrowserWindow | undefined;
 let quitting = false;
@@ -86,12 +91,16 @@ const backend = new DaemonControlClient(
   message => sendToRenderer("backend:message", message),
   status => sendToRenderer("backend:status", status),
 );
-// Ringing 会话管理（三 SSE + 切流）。batch 整批转发 renderer，禁止逐事件展开。
+// Ringing 会话管理（三 SSE）。batch 整批转发 renderer，禁止逐事件展开。
 const ringing = new RingingManager(
   batch => sendToRenderer("ringing:batch", batch),
   (channel, status) => sendToRenderer("ringing:status", { channel, status }),
   (seed, channel, snapshot) =>
     sendToRenderer("ringing:snapshot", { seed, channel, snapshot }),
+  async () => {
+    const info = await backend.refreshRingingConnection();
+    await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+  },
 );
 
 if (smokeMode) {
@@ -176,25 +185,80 @@ function createWindow(): void {
 function registerIpc(): void {
   // Ringing 会话惰性确保：daemon 重启/端口变化后，任何 ringing IPC 都会用
   // 最新 discovery 重新建立连接（旧逻辑只在 backend:connect 时连一次；
-  // 连接失败或 daemon 重启后 client 一直为 null，切流报 ringing not connected）。
+  // 连接失败或 daemon 重启后 client 一直为 null，需重新建立 v2 client。
   async function ensureRingingConnected(): Promise<void> {
-    const info = backend.discoveryInfo();
-    if (!info) return;
+    // 首个 renderer 请求可能早于显式 backend:connect。必须先确定连接级
+    // 传输，不能因 status 仍是初始值而误走 legacy 请求。
+    await backend.connect();
+    const info = backend.ringingConnectionInfo();
+    if (!info || !backend.usingRinging()) {
+      throw new Error("Ringing v2 is required but the daemon did not establish its HTTP session");
+    }
     // daemon 重启后端口/token 会变：即使 client 还在（流已死），也要重建
     if (ringing.connected() && ringing.connectedBaseUrl() === info.baseUrl) return;
-    await ringing.ensureConnected(info.baseUrl, info.token);
+    await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+  }
+
+  async function requestSelectedBackend(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    await ensureRingingConnected();
+    if (!ringing.connected()) throw new Error("Ringing v2 backend is not connected");
+
+    const seed = typeof params.seed === "string" ? params.seed : "";
+    const spec = RINGING_COMMAND_METHODS[method];
+    if (spec) {
+      let command = spec.build(params);
+      // Local file paths never cross the Ringing wire. Electron main owns the
+      // read/upload step and sends only ContentRef values to the daemon.
+      if (method === "session.send_message" && command && Array.isArray(params.files)) {
+        const files = params.files.filter((file): file is string => typeof file === "string");
+        if (files.length > 0) {
+          const attachments = [] as unknown[];
+          for (const filePath of files) {
+            const bytes = await readFile(filePath);
+            const mediaType = mimeTypeForPath(filePath);
+            attachments.push(await ringing.uploadContent(seed, mediaType, new Uint8Array(bytes)));
+          }
+          command = { ...command, attachments };
+        }
+      }
+      if (command) {
+        return ringing.command(
+          seed,
+          spec.channel,
+          buildRingingCommandEnvelope(
+            seed,
+            spec.channel,
+            command,
+            params.expectedRevision ?? params.expected_revision,
+          ),
+        );
+      }
+    }
+    if (RINGING_QUERY_METHODS.has(method)) {
+      const queryParams: Record<string, string | undefined> = {};
+      for (const [key, value] of Object.entries(params)) {
+        if (value === undefined || value === null) continue;
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+          queryParams[key] = String(value);
+        }
+      }
+      return ringing.query(method, queryParams);
+    }
+    return ringing.action(method, params);
   }
 
   ipcMain.handle("backend:connect", async () => {
     const result = await backend.connect();
-    // 复用 daemon discovery（baseUrl + token）启动 Ringing 三 SSE
-    const info = backend.discoveryInfo();
-    if (info) await ringing.ensureConnected(info.baseUrl, info.token);
+    // 控制客户端已完成唯一的 v2 open；RingingManager 复用其 lease 启动三 SSE。
+    await ensureRingingConnected();
     return result;
   });
   ipcMain.handle("backend:request", (_event, method: unknown, params: unknown) => {
     if (typeof method !== "string" || !isRecord(params)) throw new Error("invalid backend request");
-    return backend.request(method, params);
+    return requestSelectedBackend(method, params);
   });
   ipcMain.handle("backend:attach", (_event, seed: unknown) => backend.attach(requireSeed(seed)));
   ipcMain.handle("backend:detach", (_event, seed: unknown) => backend.detach(requireSeed(seed)));
@@ -216,36 +280,16 @@ function registerIpc(): void {
     await ensureRingingConnected();
     return ringing.status();
   });
-  ipcMain.handle("ringing:mode", async (_event, seed: unknown) => {
-    await ensureRingingConnected();
-    return ringing.mode(requireSeed(seed));
-  });
-  ipcMain.handle("ringing:cutover-events", async (_event, seed: unknown, channel: unknown, action: unknown) => {
-    await ensureRingingConnected();
-    if (!["control", "conversation", "tool"].includes(String(channel))) {
-      throw new Error("invalid ringing channel");
-    }
-    if (!["prepare", "commit", "abort"].includes(String(action))) {
-      throw new Error("invalid cutover action");
-    }
-    return ringing.cutoverEvents(requireSeed(seed), String(channel) as ChannelName, String(action) as "prepare" | "commit" | "abort");
-  });
-  ipcMain.handle("ringing:cutover-commands", async (_event, seed: unknown, channel: unknown, protocol: unknown) => {
-    await ensureRingingConnected();
-    if (!["control", "conversation", "tool"].includes(String(channel))) {
-      throw new Error("invalid ringing channel");
-    }
-    if (!["ringing", "legacy"].includes(String(protocol))) {
-      throw new Error("invalid command protocol");
-    }
-    return ringing.cutoverCommands(requireSeed(seed), String(channel) as ChannelName, String(protocol) as "ringing" | "legacy");
-  });
   ipcMain.handle("ringing:snapshot", async (_event, seed: unknown, channel: unknown) => {
     await ensureRingingConnected();
     if (!["control", "conversation", "tool"].includes(String(channel))) {
       throw new Error("invalid ringing channel");
     }
     return ringing.snapshot(requireSeed(seed), String(channel) as ChannelName);
+  });
+  ipcMain.handle("ringing:bootstrap", async (_event, seed: unknown) => {
+    await ensureRingingConnected();
+    return ringing.bootstrapSession(requireSeed(seed));
   });
   ipcMain.handle("ringing:command", async (_event, seed: unknown, channel: unknown, envelope: unknown) => {
     await ensureRingingConnected();
@@ -441,6 +485,23 @@ function requireSeed(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function mimeTypeForPath(filePath: string): string {
+  const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
+  const types: Record<string, string> = {
+    txt: "text/plain",
+    md: "text/markdown",
+    json: "application/json",
+    csv: "text/csv",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    pdf: "application/pdf",
+  };
+  return types[extension] ?? "application/octet-stream";
 }
 
 // ── Installer/updater handoff ──────────────────────────

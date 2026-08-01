@@ -7,12 +7,11 @@
 //! - `projection`：领域 snapshot projection（禁止事件数组模拟状态）
 //! - `hub`：三频道聚合入口 `RingingHub`
 
+pub mod content_store;
+pub mod conversation_snapshot;
 pub mod hub;
 pub mod journal;
 pub mod journal_store;
-pub mod cutover;
-pub mod content_store;
-pub mod conversation_snapshot;
 pub mod legacy_projector;
 pub mod outbox;
 pub mod projection;

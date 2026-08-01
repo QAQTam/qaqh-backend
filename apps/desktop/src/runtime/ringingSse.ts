@@ -41,14 +41,46 @@ export function envelopeToBatch(
   channel: RingingChannel,
   envelope: RingingEventEnvelope,
 ): RingingEventBatch {
+  if (envelope.channel !== channel) {
+    throw new Error(`Ringing SSE channel mismatch: expected ${channel}, got ${envelope.channel}`);
+  }
+  if (envelope.schema !== "deepx.Ringing" || envelope.version !== 2) {
+    throw new Error("unsupported Ringing event envelope version");
+  }
+  if (
+    !envelope.server_epoch
+    || !envelope.seed
+    || !envelope.event_id
+    || (envelope.event as { channel?: unknown }).channel !== channel
+    || !Number.isSafeInteger(envelope.stream_seq)
+    || envelope.stream_seq < 0
+    || !Number.isSafeInteger(envelope.channel_seq)
+    || envelope.channel_seq < 0
+    || !Number.isSafeInteger(envelope.session_seq)
+    || envelope.session_seq < 0
+    || (envelope.state_revision != null
+      && (!Number.isSafeInteger(envelope.state_revision) || envelope.state_revision < 0))
+  ) {
+    throw new Error("invalid Ringing stream sequence");
+  }
   return {
+    schema: envelope.schema,
+    version: envelope.version,
     channel,
     seed: envelope.seed,
+    server_epoch: envelope.server_epoch,
     from_stream_seq: envelope.stream_seq,
     to_stream_seq: envelope.stream_seq,
-    state_revision: envelope.state_revision ?? null,
-    events: [envelope.event],
+    envelopes: [envelope],
   };
+}
+
+/** 校验 SSE id 的 cursor 形状；无效 id 不得推进流 cursor。 */
+export function cursorFromSseId(id: string, channel: RingingChannel): number | null {
+  const parts = id.split(":");
+  if (parts.length !== 3 || parts[1] !== channel || !parts[0]) return null;
+  const seq = Number(parts[2]);
+  return Number.isSafeInteger(seq) && seq >= 0 ? seq : null;
 }
 
 /** 解析 `ringing.reset_required` 的 data payload。 */
@@ -58,7 +90,6 @@ export function parseResetRequired(data: string): RingingResetRequired {
 
 /** 从 `id: epoch:channel:seq` 提取 seq；格式不符返回 0。 */
 export function cursorSeqFromId(id: string): number {
-  const parts = id.split(":");
-  const seq = Number(parts[parts.length - 1]);
-  return Number.isFinite(seq) ? seq : 0;
+  const seq = Number(id.split(":").at(-1));
+  return Number.isSafeInteger(seq) && seq >= 0 ? seq : 0;
 }

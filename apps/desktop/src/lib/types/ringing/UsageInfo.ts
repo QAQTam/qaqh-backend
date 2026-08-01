@@ -6,31 +6,31 @@
  * Captures both standard token counts and provider-specific fields
  * like cache hit/miss and reasoning tokens.
  */
-export type UsageInfo = { 
+export type UsageInfo = {
 /**
  * Tokens consumed by the input (prompt + conversation history).
  */
-prompt_tokens: number, 
+prompt_tokens: number,
 /**
  * Tokens generated in the model's response.
  */
-completion_tokens: number, 
+completion_tokens: number,
 /**
  * Sum of prompt_tokens + completion_tokens.
  */
-total_tokens: number, 
+total_tokens: number,
 /**
  * Cached prompt tokens that were served from cache (DeepSeek).
  */
-prompt_cache_hit_tokens: number, 
+prompt_cache_hit_tokens: number,
 /**
  * Prompt tokens that missed the cache and were computed fresh.
  */
-prompt_cache_miss_tokens: number, 
+prompt_cache_miss_tokens: number,
 /**
  * Tokens consumed by internal reasoning/thinking (DeepSeek R1, etc.).
  */
-reasoning_tokens: number, 
+reasoning_tokens: number,
 /**
  * Whether the provider actually returned cache usage fields. This keeps a
  * genuine zero-percent hit rate distinct from unsupported/missing data.

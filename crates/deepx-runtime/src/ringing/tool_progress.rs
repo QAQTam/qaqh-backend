@@ -93,8 +93,15 @@ impl ToolProgressCoalescer {
             });
 
         // 窗口过期：先产出累积
-        if !entry.pending.is_empty() && now.duration_since(entry.window_start).as_millis() as u64 >= COALESCE_WINDOW_MS {
+        if !entry.pending.is_empty()
+            && now.duration_since(entry.window_start).as_millis() as u64 >= COALESCE_WINDOW_MS
+        {
             let out = Self::flush_locked(&key, entry, now);
+            // The chunk that caused the window rollover belongs to the next
+            // window. Keep it pending; returning the previous window must not
+            // silently drop the current write.
+            entry.seq_start = seq;
+            entry.pending.push_str(chunk);
             return Some(out);
         }
 
@@ -120,7 +127,8 @@ impl ToolProgressCoalescer {
 
     /// 覆盖式替换（terminal 到达时丢弃未消费 progress）。
     pub fn discard(&mut self, tool_call_id: &str, stream: &str) {
-        self.streams.remove(&(tool_call_id.to_string(), stream.to_string()));
+        self.streams
+            .remove(&(tool_call_id.to_string(), stream.to_string()));
     }
 
     fn flush_locked(
@@ -140,10 +148,12 @@ impl ToolProgressCoalescer {
         };
         // 截断 tail 到 256 KiB（超出部分计入 dropped_bytes）
         let out = if out.chunk.len() > MAX_TAIL_BYTES {
-            let keep = MAX_TAIL_BYTES;
-            let dropped = (out.chunk.len() - keep) as u64;
+            let start = tail_start_boundary(&out.chunk, MAX_TAIL_BYTES);
+            let dropped = start as u64;
+            let chunk = out.chunk[start..].to_string();
             CoalescedProgress {
-                chunk: out.chunk[..keep].to_string(),
+                seq_start: out.seq_end.saturating_sub(chunk.len() as u64),
+                chunk,
                 dropped_bytes: out.dropped_bytes + dropped,
                 truncated: true,
                 ..out
@@ -156,6 +166,17 @@ impl ToolProgressCoalescer {
         entry.flushed_len = seq_end;
         out
     }
+}
+
+fn tail_start_boundary(text: &str, max_bytes: usize) -> usize {
+    if text.len() <= max_bytes {
+        return 0;
+    }
+    let mut start = text.len() - max_bytes;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    start
 }
 
 #[cfg(test)]
@@ -183,6 +204,9 @@ mod tests {
         c.now = Some(c.clock() + std::time::Duration::from_millis(20));
         let out = c.push("c1", "stdout", 2, "cd").expect("window expired");
         assert_eq!(out.chunk, "ab");
+        let next = c.flush("c1", "stdout").expect("rollover chunk retained");
+        assert_eq!(next.chunk, "cd");
+        assert_eq!((next.seq_start, next.seq_end), (2, 4));
     }
 
     #[test]
@@ -231,5 +255,15 @@ mod tests {
         c.push("c1", "stdout", 2, "cd");
         let second = c.flush("c1", "stdout").expect("second");
         assert_eq!((second.seq_start, second.seq_end), (2, 4));
+    }
+
+    #[test]
+    fn unicode_oversize_keeps_a_valid_utf8_tail() {
+        let mut c = ToolProgressCoalescer::new();
+        let big = "界".repeat(MAX_BATCH_BYTES / 3 + 10);
+        let out = c.push("c1", "stdout", 0, &big).expect("oversize flush");
+        assert!(out.chunk.len() <= MAX_TAIL_BYTES);
+        assert_eq!(out.seq_end - out.seq_start, out.chunk.len() as u64);
+        assert!(out.truncated);
     }
 }

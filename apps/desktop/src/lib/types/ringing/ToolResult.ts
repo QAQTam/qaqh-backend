@@ -4,11 +4,11 @@ import type { ContentRef } from "./ContentRef";
 /**
  * 工具执行结果。
  */
-export type ToolResult = { success: boolean, 
+export type ToolResult = { success: boolean,
 /**
  * 可渲染摘要/tail。
  */
-summary: string, 
+summary: string,
 /**
  * 完整输出引用（≥10 MiB 或按内容策略外置）。
  */

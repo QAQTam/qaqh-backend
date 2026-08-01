@@ -3,19 +3,19 @@
 /**
  * ask_user 中的单个问题。
  */
-export type AskQuestion = { 
+export type AskQuestion = {
 /**
  * 本 ask 内唯一（如 "q1"）。
  */
-id: string, 
+id: string,
 /**
  * 问题文本（支持 Markdown）。
  */
-question: string, 
+question: string,
 /**
  * 预设选项；空 = 仅自由文本。
  */
-options?: Array<string>, 
+options?: Array<string>,
 /**
  * 是否允许自定义输入。
  */

@@ -13,7 +13,7 @@ import type {
   RingingResetRequired,
 } from "../src/lib/types/ringing";
 import {
-  cursorSeqFromId,
+  cursorFromSseId,
   envelopeToBatch,
   parseResetRequired,
   parseSseFrame,
@@ -26,12 +26,23 @@ export type ChannelStatus =
   | { state: "reconnecting"; retryMs: number; lastCursor: number }
   | { state: "closed"; reason: string };
 
+/** 已由控制客户端完成的 v2 open 协商结果。仅保存在 Electron main 内存。 */
+export interface RingingSessionOpen {
+  clientInstanceId: string;
+  clientSessionId: string;
+  serverEpoch: string;
+  leaseTtlMs: number;
+  renewIntervalMs: number;
+}
+
 /** 事件批次回调（整 batch 交付，禁止逐事件展开）。 */
 export type BatchHandler = (batch: RingingEventBatch) => void;
 export type StatusHandler = (status: ChannelStatus) => void;
 
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 30000;
+const SSE_IDLE_TIMEOUT_MS = 45_000;
+const MAX_RENEW_FAILURES = 2;
 
 /** 单频道 SSE 连接。 */
 export class RingingChannelStream {
@@ -47,6 +58,7 @@ export class RingingChannelStream {
     private readonly onBatch: BatchHandler,
     private readonly onStatus: StatusHandler,
     private readonly getServerEpoch: () => string,
+    private readonly getClientSessionId: () => string,
     private readonly onReset?: (reset: RingingResetRequired) => void,
   ) {}
 
@@ -81,6 +93,7 @@ export class RingingChannelStream {
     const response = await fetch(this.url, {
       headers: {
         Authorization: `Bearer ${this.token}`,
+        "X-DeepX-Client-Session-Id": this.getClientSessionId(),
         Accept: "text/event-stream",
         // Last-Event-ID 只回放该频道可靠 tail（epoch:channel:seq；epoch 不匹配
         // 服务端视为 0，因此必须带 open 协商出的 server_epoch）
@@ -99,39 +112,57 @@ export class RingingChannelStream {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => this.controller?.abort(), SSE_IDLE_TIMEOUT_MS);
+    };
+    resetIdleTimer();
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // SSE 帧以空行分隔
-      let sep: number;
-      while ((sep = buffer.indexOf("\n\n")) >= 0) {
-        const frame = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        const parsed = parseSseFrame(frame);
-        if (parsed.id) {
-          this.cursor = cursorSeqFromId(parsed.id);
-        }
-        if (!parsed.data.trim()) continue; // keepalive 注释帧
-        if (parsed.eventType === "ringing.reset_required") {
-          // cursor 超出保留窗口：客户端必须经 HTTP 读取权威 snapshot 后继续
-          this.onReset?.(parseResetRequired(parsed.data.trim()));
-        } else {
-          // 服务端 `event:` 为 Ringing 事件类型（tool_started 等），全部按信封处理
-          this.dispatch(parsed.data.trim());
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        resetIdleTimer(); // keepalive 也证明这条 TCP/SSE 路径仍然双端可达
+        buffer += decoder.decode(value, { stream: true });
+        // SSE 帧以空行分隔
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) >= 0) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const parsed = parseSseFrame(frame);
+          const frameCursor = parsed.id ? cursorFromSseId(parsed.id, this.channel) : null;
+          if (!parsed.data.trim()) continue; // keepalive 注释帧
+          if (parsed.eventType === "ringing.reset_required") {
+            // cursor 超出保留窗口：客户端必须经 HTTP 读取权威 snapshot 后继续
+            this.onReset?.(parseResetRequired(parsed.data.trim()));
+          } else {
+            // 服务端 `event:` 为 Ringing 事件类型（tool_started 等），全部按信封处理
+            this.dispatch(parsed.data.trim(), frameCursor);
+          }
         }
       }
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
     }
     // 流结束：触发重连（不撤销 lease）
     if (!this.closed) throw new Error(`SSE ${this.channel} stream ended`);
   }
 
-  private dispatch(payload: string): void {
-    this.onBatch(envelopeToBatch(this.channel, JSON.parse(payload)));
+  private dispatch(payload: string, frameCursor: number | null): void {
+    const batch = envelopeToBatch(this.channel, JSON.parse(payload));
+    if (frameCursor !== null) {
+      if (batch.server_epoch !== this.getServerEpoch()
+        || batch.from_stream_seq !== frameCursor) {
+        throw new Error("Ringing SSE cursor/envelope mismatch");
+      }
+    }
+    // Only a fully parsed and accepted envelope advances Last-Event-ID.
+    if (frameCursor !== null) this.cursor = frameCursor;
+    this.onBatch(batch);
   }
 
-  /** 强制 snapshot 后按 snapshot 的 baseline_seq 重置本地 cursor。 */
+  /** 强制 bootstrap 后按频道 baseline_stream_seq 重置本地 cursor。 */
   resetCursor(seq: number): void {
     this.cursor = seq;
   }
@@ -142,19 +173,24 @@ export class RingingSession {
   clientSessionId: string | null = null;
   serverEpoch = "";
   leaseTtlMs = 0;
-  /** open 请求携带的客户端实例 id（cutover/命令端点 lease 校验字段）。 */
-  readonly clientInstanceId = randomId();
+  /** open 请求携带的客户端实例 id（连接级 lease 校验字段）。 */
+  readonly clientInstanceId: string;
   private renewTimer: ReturnType<typeof setInterval> | null = null;
+  private renewFailures = 0;
   private closed = false;
 
   constructor(
     private readonly baseUrl: string,
     private readonly token: string,
-  ) {}
+    clientInstanceId = randomId(),
+    private readonly onUnhealthy?: () => void,
+  ) {
+    this.clientInstanceId = clientInstanceId;
+  }
 
-  /** POST /ringing/v1/clients/open（能力协商）。 */
+  /** POST /ringing/v2/clients/open（能力协商）。 */
   async open(): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/ringing/v1/clients/open`, {
+    const response = await fetch(`${this.baseUrl}/ringing/v2/clients/open`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -162,9 +198,14 @@ export class RingingSession {
       },
       body: JSON.stringify({
         schema: "deepx.Ringing",
-        version: 1,
+        version: 2,
         client_instance_id: this.clientInstanceId,
-        capabilities: ["Ringing_v1", "Ringing_session_cutover_v1", "Ringing_batch_v1"],
+        capabilities: [
+          "Ringing_v2",
+          "Ringing_batch_v2",
+          "Ringing_bootstrap_v2",
+          "Ringing_command_status_v2",
+        ],
       }),
     });
     if (!response.ok) throw new Error(`open failed: HTTP ${response.status}`);
@@ -176,32 +217,50 @@ export class RingingSession {
       renew_interval_ms: number;
     };
     if (!result.accepted) throw new Error("Ringing not accepted by daemon");
-    this.serverEpoch = result.server_epoch;
-    this.leaseTtlMs = result.lease_ttl_ms;
-    this.clientSessionId = result.client_session_id;
-    const renewInterval = Math.max(1000, Math.floor(result.renew_interval_ms / 2));
+    this.adoptOpen({
+      clientInstanceId: this.clientInstanceId,
+      clientSessionId: result.client_session_id,
+      serverEpoch: result.server_epoch,
+      leaseTtlMs: result.lease_ttl_ms,
+      renewIntervalMs: result.renew_interval_ms,
+    });
+  }
+
+  /** 复用控制客户端已经完成的 open，避免同一启动周期重复建 HTTP lease。 */
+  adoptOpen(open: RingingSessionOpen): void {
+    if (open.clientInstanceId !== this.clientInstanceId) {
+      throw new Error("Ringing open client instance mismatch");
+    }
+    this.serverEpoch = open.serverEpoch;
+    this.leaseTtlMs = open.leaseTtlMs;
+    this.clientSessionId = open.clientSessionId;
+    if (this.renewTimer) clearInterval(this.renewTimer);
+    const renewInterval = Math.max(1000, Math.floor(open.renewIntervalMs / 2));
     this.renewTimer = setInterval(() => void this.renew(), renewInterval);
   }
 
-  /** POST /ringing/v1/leases/renew。 */
+  /** POST /ringing/v2/leases/renew。 */
   private async renew(): Promise<void> {
     if (this.closed) return;
     try {
-      const response = await fetch(`${this.baseUrl}/ringing/v1/leases/renew`, {
+      const response = await fetch(`${this.baseUrl}/ringing/v2/leases/renew`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.token}`,
-          "Content-Type": "application/json",
+          "X-DeepX-Client-Session-Id": this.clientSessionId ?? "",
         },
-        body: JSON.stringify({ client_session_id: this.clientSessionId }),
       });
-      if (!response.ok) {
-        // lease 续租失败不触发全局断联（控制面在 open/命令时显式报错）
-        console.warn(`[ringing] lease renew failed: HTTP ${response.status}`);
-      }
+      if (!response.ok) return this.recordRenewFailure(`HTTP ${response.status}`);
+      this.renewFailures = 0;
     } catch (err) {
-      console.warn("[ringing] lease renew error", err);
+      this.recordRenewFailure(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  private recordRenewFailure(reason: string): void {
+    this.renewFailures += 1;
+    console.warn(`[ringing] lease renew failed (${this.renewFailures}/${MAX_RENEW_FAILURES}): ${reason}`);
+    if (this.renewFailures >= MAX_RENEW_FAILURES) this.onUnhealthy?.();
   }
 
   close(): void {
@@ -221,29 +280,37 @@ export class RingingClient {
     onBatch: BatchHandler,
     onStatus: (channel: "control" | "conversation" | "tool", status: ChannelStatus) => void,
     onReset?: (reset: RingingResetRequired) => void,
+    private readonly openedSession?: RingingSessionOpen,
+    onSessionUnhealthy?: () => void,
   ) {
-    this.session = new RingingSession(baseUrl, token);
+    this.session = new RingingSession(
+      baseUrl,
+      token,
+      openedSession?.clientInstanceId,
+      onSessionUnhealthy,
+    );
     this.streams = {
       control: new RingingChannelStream(
-        `${baseUrl}/ringing/v1/events/control`, token, "control",
+        `${baseUrl}/ringing/v2/events/control`, token, "control",
         (b) => onBatch(b), (s) => onStatus("control", s),
-        () => this.session.serverEpoch, onReset,
+        () => this.session.serverEpoch, () => this.session.clientSessionId ?? "", onReset,
       ),
       conversation: new RingingChannelStream(
-        `${baseUrl}/ringing/v1/events/conversation`, token, "conversation",
+        `${baseUrl}/ringing/v2/events/conversation`, token, "conversation",
         (b) => onBatch(b), (s) => onStatus("conversation", s),
-        () => this.session.serverEpoch, onReset,
+        () => this.session.serverEpoch, () => this.session.clientSessionId ?? "", onReset,
       ),
       tool: new RingingChannelStream(
-        `${baseUrl}/ringing/v1/events/tool`, token, "tool",
+        `${baseUrl}/ringing/v2/events/tool`, token, "tool",
         (b) => onBatch(b), (s) => onStatus("tool", s),
-        () => this.session.serverEpoch, onReset,
+        () => this.session.serverEpoch, () => this.session.clientSessionId ?? "", onReset,
       ),
     };
   }
 
   async connect(): Promise<void> {
-    await this.session.open();
+    if (this.openedSession) this.session.adoptOpen(this.openedSession);
+    else await this.session.open();
     for (const key of ["control", "conversation", "tool"] as const) {
       this.streams[key].start();
     }

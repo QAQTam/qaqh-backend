@@ -87,35 +87,41 @@ fn legacy_projector_returns_none_for_unmappable_events() {
     use deepx_domain::{ConversationEvent, DomainEvent, ToolEvent};
     use deepx_runtime::ringing::legacy_projector::project;
     // ToolStarted（Q1 双事件中的可靠开始事件）在 legacy 无对应
-    assert!(project(&DomainEvent::Tool(ToolEvent::ToolStarted {
-        tool_call_id: "c".into(),
-        turn_id: "t".into(),
-        round_num: 0,
-        name: "exec".into(),
-    }))
-    .is_none());
+    assert!(
+        project(&DomainEvent::Tool(ToolEvent::ToolStarted {
+            tool_call_id: "c".into(),
+            turn_id: "t".into(),
+            round_num: 0,
+            name: "exec".into(),
+        }))
+        .is_none()
+    );
     // SessionActivityChanged 走独立 activity 流，不伪造进 Agent2Ui
-    assert!(project(&DomainEvent::Control(
-        deepx_domain::ControlEvent::SessionActivityChanged {
-            seed: "s".into(),
-            state: deepx_domain::ActivityState::Idle,
-            turn_id: None,
-            seq: 1,
-            updated_at: 0,
-        },
-    ))
-    .is_none());
+    assert!(
+        project(&DomainEvent::Control(
+            deepx_domain::ControlEvent::SessionActivityChanged {
+                seed: "s".into(),
+                state: deepx_domain::ActivityState::Idle,
+                turn_id: None,
+                seq: 1,
+                updated_at: 0,
+            },
+        ))
+        .is_none()
+    );
     // compact skipped 无 legacy 终态表达
-    assert!(project(&DomainEvent::Conversation(
-        ConversationEvent::CompactFinished {
-            compact_id: "k".into(),
-            status: deepx_domain::CompactStatus::Skipped,
-            summary_chars: None,
-            turns_compacted: None,
-            turns_removed: None,
-        },
-    ))
-    .is_none());
+    assert!(
+        project(&DomainEvent::Conversation(
+            ConversationEvent::CompactFinished {
+                compact_id: "k".into(),
+                status: deepx_domain::CompactStatus::Skipped,
+                summary_chars: None,
+                turns_compacted: None,
+                turns_removed: None,
+            },
+        ))
+        .is_none()
+    );
 }
 
 fn walk_rs(dir: &std::path::Path, visit: &mut impl FnMut(&std::path::Path, &str)) {

@@ -2,8 +2,6 @@ import {
   RINGING_COMMAND_METHODS,
   RINGING_QUERY_METHODS,
   buildRingingCommandEnvelope,
-  commandIsRinging,
-  sessionCommandsRinging,
 } from "./ringingCommandRouter";
 
 type Listener<T = unknown> = (event: { payload: T }) => void;
@@ -61,17 +59,30 @@ export async function request<T>(method: string, params: Record<string, unknown>
   const seed = typeof params.seed === "string" ? params.seed : "";
   const needsLease = leaseRequired(method);
   if (needsLease && seed) await attach(seed);
+  // 请求前完成传输选择。Ringing v2 是唯一允许的主通道，不能在初始
+  // connected=false 的瞬间把请求误发到 legacy。
+  await backendBridge().connect();
+  const backendState = (await backendBridge().status()) ?? { connected: false };
 
-  // Ringing 命令/查询路由：仅在 (seed, channel) 命令协议已切流时接管；
-  // "ringing not connected" 回退 legacy 一次（共存），其余错误原样抛出。
+  // Ringing v2 是连接级选择：所有命令/查询固定走 v2，协商失败直接暴露。
   const ringing = window.deepx?.ringing;
-  if (ringing) {
+  if (ringing && backendState.transport === "ringing") {
     const spec = RINGING_COMMAND_METHODS[method];
-    if (spec && commandIsRinging(seed, spec.channel)) {
+    if (spec) {
       const command = spec.build(params);
       if (command) {
+        // Local paths are intentionally handled by Electron main. It reads
+        // and uploads them as ContentRef values before dispatching v2.
+        if (method === "session.send_message" && Array.isArray(params.files) && params.files.length > 0) {
+          return backendBridge().request(method, params) as Promise<T>;
+        }
         try {
-          const envelope = buildRingingCommandEnvelope(seed, spec.channel, command);
+          const envelope = buildRingingCommandEnvelope(
+            seed,
+            spec.channel,
+            command,
+            params.expectedRevision ?? params.expected_revision,
+          );
           const ack = (await ringing.command(seed, spec.channel, envelope)) as {
             status?: string;
             code?: string;
@@ -82,12 +93,12 @@ export async function request<T>(method: string, params: Record<string, unknown>
           }
           return ack as T;
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (!message.includes("ringing not connected")) throw error;
-          console.warn(`[ringing] command ${method} not connected — legacy 继续承载`);
+          // Transport choice is connection-wide; a v2 command error never
+          // changes the selected backend or retries through legacy.
+          throw error;
         }
       }
-    } else if (RINGING_QUERY_METHODS.has(method) && sessionCommandsRinging(seed)) {
+    } else if (RINGING_QUERY_METHODS.has(method)) {
       try {
         const queryParams: Record<string, string | undefined> = {};
         for (const [key, value] of Object.entries(params)) {
@@ -102,13 +113,18 @@ export async function request<T>(method: string, params: Record<string, unknown>
         }
         return (await ringing.query(method, queryParams)) as T;
       } catch (error) {
-        // 只读查询：失败回退 legacy（读路径回退安全，不破坏 UI）
-        console.warn(`[ringing] query ${method} failed — falling back to legacy`, error);
+        // Transport choice is connection-wide; a v2 query error never falls
+        // back to legacy.
+        throw error;
       }
     }
   }
 
-  return requestLegacy<T>(method, params);
+  if (backendState.transport !== "ringing") {
+    throw new Error("Ringing v2 is required but the daemon is not connected");
+  }
+  // 未映射为 typed command/query 的请求由 Electron main 转成 v2 action。
+  return backendBridge().request(method, params) as Promise<T>;
 }
 
 function leaseRequired(method: string): boolean {
@@ -118,8 +134,8 @@ function leaseRequired(method: string): boolean {
 }
 
 /**
- * 纯 legacy 请求（跳过 Ringing 路由）：供 request() 的回退路径和
- * requestWithRinging 使用，避免回退时重复尝试 Ringing。
+ * 保留原导出名称以兼容调用方；实际仍由 Electron main 转发至 v2 action，
+ * 不会建立 legacy WebSocket 或执行 legacy 回退。
  */
 export async function requestLegacy<T>(
   method: string,

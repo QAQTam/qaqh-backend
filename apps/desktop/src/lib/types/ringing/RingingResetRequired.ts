@@ -4,12 +4,12 @@ import type { RingingChannel } from "./RingingChannel";
 /**
  * `event: ringing.reset_required` 的 data payload。
  */
-export type RingingResetRequired = { channel: RingingChannel, 
+export type RingingResetRequired = { channel: RingingChannel,
 /**
  * 需要重新拉取 snapshot 的会话。
  */
-seed: string, 
+seed: string,
 /**
  * 服务端该 seed+channel 仍可回放的最早 stream_seq。
  */
-earliest_available_seq: bigint, };
+earliest_available_seq: number, };

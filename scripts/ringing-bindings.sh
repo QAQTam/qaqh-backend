@@ -28,6 +28,10 @@ for dir in "${SRC_DIRS[@]}"; do
   cp -rf "$dir"/. "$tmpdir"/
 done
 
+# ts-rs may emit spaces immediately before a generated newline. Normalize
+# those mechanically so generated bindings also satisfy git diff --check.
+find "$tmpdir" -type f -name '*.ts' -exec sed -i 's/[[:space:]]\+$//' {} +
+
 # 生成聚合入口 index.ts（各类型从 ts-rs 各自的文件中导出）
 {
   echo "// 由 scripts/ringing-bindings.sh 自动生成，禁止手改。"
@@ -69,8 +73,11 @@ done
   echo "export type { RingingCommandEnvelope } from \"./RingingCommandEnvelope\";"
   echo "export type { RingingCommandAck } from \"./RingingCommandAck\";"
   echo "export type { RingingCommandAckStatus } from \"./RingingCommandAckStatus\";"
+  echo "export type { RingingCommandState } from \"./RingingCommandState\";"
+  echo "export type { RingingCommandStatus } from \"./RingingCommandStatus\";"
   echo "export type { RingingEventBatch } from \"./RingingEventBatch\";"
   echo "export type { RingingChannelSnapshot } from \"./RingingChannelSnapshot\";"
+  echo "export type { RingingSessionBootstrap } from \"./RingingSessionBootstrap\";"
   echo "export type { RingingResetRequired } from \"./RingingResetRequired\";"
   echo "export type { ClientOpenRequest } from \"./ClientOpenRequest\";"
   echo "export type { ClientOpenResponse } from \"./ClientOpenResponse\";"

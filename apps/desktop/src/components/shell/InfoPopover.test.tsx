@@ -43,9 +43,9 @@ describe("InfoPopover", () => {
 
     expect(host.textContent).toContain("deepseek-v4-pro");
     expect(host.textContent).toContain("80.0%");
-    expect(host.textContent).toContain("100.0K");
-    expect(host.textContent).toContain("105.0K");
-    expect(host.textContent).toContain("缓存覆盖 1/1 次请求");
+    expect(host.textContent).toContain("100,000");
+    expect(host.textContent).toContain("105,000");
+    expect(host.textContent).toContain("1 次请求");
   });
 
   it("distinguishes a reported zero-percent hit rate from missing cache data", async () => {

@@ -12,7 +12,10 @@ export default function PermissionLevelSelect(props: {
 }) {
   return (
     <div
-      class={`permission-level-select${props.compact ? " compact" : ""}`}
+      class={[
+        "permission-level-select",
+        { compact: props.compact === true, "is-danger": props.level === 4 },
+      ]}
       data-permission-level={props.level}
       title="控制 DeepX 可执行的操作范围"
       role="radiogroup"
@@ -23,7 +26,8 @@ export default function PermissionLevelSelect(props: {
         {PERMISSION_LEVELS.map((item) => (
           <button
             type="button"
-            class={`permission-pill pill-${item.color}${props.level === item.value ? " active" : ""}`}
+            class={[`permission-pill pill-${item.color}`, { active: props.level === item.value }]}
+            data-permission-option={item.value}
             role="radio"
             aria-checked={props.level === item.value ? "true" : "false"}
             onClick={() => void props.onChange(item.value)}

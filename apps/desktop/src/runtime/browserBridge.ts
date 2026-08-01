@@ -17,7 +17,7 @@ import type {
   RingingResetRequired,
 } from "../lib/types/ringing";
 import {
-  cursorSeqFromId,
+  cursorFromSseId,
   envelopeToBatch,
   parseResetRequired,
   parseSseFrame,
@@ -35,6 +35,8 @@ type ChannelName = "control" | "conversation" | "tool";
 let sseStarted = false;
 let sseBase = "";
 let sseToken = "";
+let sseSessionId = "";
+let sseServerEpoch = "";
 const batchListeners = new Set<(batch: RingingEventBatch) => void>();
 const statusListeners = new Set<(u: { channel: string; status: unknown }) => void>();
 const snapshotListeners = new Set<
@@ -50,8 +52,12 @@ async function connectSse(ch: ChannelName): Promise<void> {
   for (;;) {
     try {
       emitStatus(ch, { state: "connecting" });
-      const response = await fetch(`${sseBase}/ringing/v1/events/${ch}`, {
-        headers: { Authorization: `Bearer ${sseToken}`, Accept: "text/event-stream" },
+      const response = await fetch(`${sseBase}/ringing/v2/events/${ch}`, {
+        headers: {
+          Authorization: `Bearer ${sseToken}`,
+          "X-DeepX-Client-Session-Id": sseSessionId,
+          Accept: "text/event-stream",
+        },
       });
       if (!response.ok || !response.body) {
         throw new Error(`HTTP ${response.status}`);
@@ -69,8 +75,10 @@ async function connectSse(ch: ChannelName): Promise<void> {
           const frame = buffer.slice(0, sep);
           buffer = buffer.slice(sep + 2);
           const parsed = parseSseFrame(frame);
-          if (parsed.id) cursor = cursorSeqFromId(parsed.id);
-          handleFrame(ch, parsed.eventType, parsed.data);
+          const frameCursor = parsed.id ? cursorFromSseId(parsed.id, ch) : null;
+          if (handleFrame(ch, parsed.eventType, parsed.data, frameCursor)) {
+            if (frameCursor !== null) cursor = frameCursor;
+          }
         }
       }
       emitStatus(ch, { state: "reconnecting", reason: "stream ended", lastCursor: cursor });
@@ -83,18 +91,29 @@ async function connectSse(ch: ChannelName): Promise<void> {
   }
 }
 
-function handleFrame(ch: ChannelName, eventType: string, data: string): void {
-  if (!data.trim()) return; // keepalive 注释帧
+function handleFrame(
+  ch: ChannelName,
+  eventType: string,
+  data: string,
+  frameCursor: number | null,
+): boolean {
+  if (!data.trim()) return false; // keepalive 注释帧
   if (eventType === "ringing.reset_required") {
     void handleReset(parseResetRequired(data.trim()));
-    return;
+    return false;
   }
   try {
     const envelope = JSON.parse(data) as RingingEventEnvelope;
     const batch = envelopeToBatch(ch, envelope);
+    if (frameCursor !== null
+      && (batch.server_epoch !== sseServerEpoch || batch.from_stream_seq !== frameCursor)) {
+      return false;
+    }
     for (const listener of batchListeners) listener(batch);
+    return true;
   } catch {
     // 忽略畸形帧
+    return false;
   }
 }
 
@@ -102,8 +121,8 @@ function handleFrame(ch: ChannelName, eventType: string, data: string): void {
 async function handleReset(reset: RingingResetRequired): Promise<void> {
   try {
     const response = await fetch(
-      `${sseBase}/ringing/v1/snapshots/${reset.channel}/${encodeURIComponent(reset.seed)}`,
-      { headers: { Authorization: `Bearer ${sseToken}` } },
+      `${sseBase}/ringing/v2/sessions/${encodeURIComponent(reset.seed)}/bootstrap`,
+      { headers: { Authorization: `Bearer ${sseToken}`, "X-DeepX-Client-Session-Id": sseSessionId } },
     );
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const snapshot = await response.json();
@@ -115,11 +134,26 @@ async function handleReset(reset: RingingResetRequired): Promise<void> {
   }
 }
 
-function ensureSse(base: string, token: string): void {
+async function ensureSse(base: string, token: string): Promise<void> {
   if (sseStarted) return;
   sseStarted = true;
   sseBase = base;
   sseToken = token;
+  const response = await fetch(`${base}/ringing/v2/clients/open`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      schema: "deepx.Ringing",
+      version: 2,
+      client_instance_id: `browser-${crypto.randomUUID()}`,
+      capabilities: ["Ringing_v2", "Ringing_batch_v2", "Ringing_bootstrap_v2", "Ringing_command_status_v2"],
+    }),
+  });
+  if (!response.ok) throw new Error(`Ringing open failed: HTTP ${response.status}`);
+  const opened = await response.json() as { client_session_id?: string; server_epoch?: string };
+  if (!opened.client_session_id) throw new Error("Ringing open did not return a client session");
+  sseSessionId = opened.client_session_id;
+  sseServerEpoch = opened.server_epoch ?? "";
   for (const ch of ["control", "conversation", "tool"] as ChannelName[]) {
     void connectSse(ch);
   }
@@ -133,7 +167,10 @@ export function installBrowserBridge(): boolean {
 
   const http = async (path: string): Promise<unknown> => {
     const response = await fetch(`${base}${path}`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(sseSessionId ? { "X-DeepX-Client-Session-Id": sseSessionId } : {}),
+      },
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
@@ -162,19 +199,26 @@ export function installBrowserBridge(): boolean {
     },
     ringing: {
       status: () => Promise.resolve({}),
-      mode: () => Promise.resolve({}),
-      cutoverEvents: rejectReadOnly as () => Promise<unknown>,
-      cutoverCommands: rejectReadOnly as () => Promise<unknown>,
-      snapshot: (seed: string, channel: string) =>
-        http(`/ringing/v1/snapshots/${channel}/${encodeURIComponent(seed)}`),
+      snapshot: async (seed: string, channel: string) => {
+        const bootstrap = await fetch(
+          `${base}/ringing/v2/sessions/${encodeURIComponent(seed)}/bootstrap`,
+          { headers: { Authorization: `Bearer ${token}`, "X-DeepX-Client-Session-Id": sseSessionId } },
+        );
+        if (!bootstrap.ok) throw new Error(`HTTP ${bootstrap.status}`);
+        const payload = await bootstrap.json() as Record<string, unknown>;
+        return payload[channel];
+      },
+      command: rejectReadOnly,
+      query: (path: string, params?: Record<string, string | undefined>) =>
+        http(`/ringing/v2/queries/${path}${params ? `?${new URLSearchParams(params as Record<string, string>).toString()}` : ""}`),
       onBatch: (listener: (batch: RingingEventBatch) => void) => {
         batchListeners.add(listener);
-        ensureSse(base, token);
+        void ensureSse(base, token).catch((error) => console.warn("[browser-bridge] Ringing open failed", error));
         return () => { batchListeners.delete(listener); };
       },
       onStatus: (listener: (u: { channel: string; status: unknown }) => void) => {
         statusListeners.add(listener);
-        ensureSse(base, token);
+        void ensureSse(base, token).catch((error) => console.warn("[browser-bridge] Ringing open failed", error));
         return () => { statusListeners.delete(listener); };
       },
       onSnapshot: (listener: (u: { seed: string; channel: string; snapshot: unknown }) => void) => {

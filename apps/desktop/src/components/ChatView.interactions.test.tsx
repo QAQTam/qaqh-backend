@@ -24,7 +24,6 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
 function mountRawChat(initial: RawSessionState) {
   const [state, setState] = createSignal(initial);
-  const [sessionStore] = createStore<RawSessionState>(initial);
   const [dashboardStore] = createStore<DashboardStoreData>(initial.dashboard);
   const [pendingSend, setPendingSend] = createSignal<RawTurn | null>(null);
   const ui = createSessionUiState();
@@ -43,7 +42,6 @@ function mountRawChat(initial: RawSessionState) {
     <I18nCtx value={i18n}>
       <ChatView
         rawSession={state}
-        sessionStore={sessionStore}
         dashboardStore={dashboardStore}
         pendingSend={pendingSend}
         setPendingSend={setPendingSend}

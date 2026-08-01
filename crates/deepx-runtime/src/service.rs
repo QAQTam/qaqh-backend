@@ -15,6 +15,8 @@ pub struct WorkspaceRuntimeState {
     pub active_mode: String,
     /// serve endpoint（空 = 未启用）。
     pub endpoint: String,
+    /// 每次 workspace 守护重启后单调递增；不含任何凭据。
+    pub generation: u64,
 }
 
 #[derive(Clone)]
@@ -164,6 +166,7 @@ impl DeepxService {
                     "configured_mode": state.configured_mode,
                     "active_mode": state.active_mode,
                     "endpoint": state.endpoint,
+                    "generation": state.generation,
                 }))
             }
             "workspace.diagnose" => Ok(crate::workspace_supervisor::diagnose_wsl().map_err(err)?),

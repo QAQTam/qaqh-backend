@@ -3,4 +3,4 @@
 /**
  * Tool 频道命令。
  */
-export type ToolCommand = { "type": "tool_invoke", tool_call_id: string, name: string, action: string, args: any, } | { "type": "tool_permission_respond", tool_call_id: string, approved: boolean, trust_folder: boolean, expected_revision?: bigint | null, };
+export type ToolCommand = { "type": "tool_invoke", tool_call_id: string, name: string, action: string, args: any, } | { "type": "tool_permission_respond", tool_call_id: string, approved: boolean, trust_folder: boolean, };

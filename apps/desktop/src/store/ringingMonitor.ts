@@ -1,15 +1,12 @@
-// Ringing 影子监视器（renderer 进程）。
+// Ringing v2 状态监视器（renderer 进程）。
 //
 // 职责：
 // - 订阅 main 进程转发的 Ringing batch（整批 IPC）；
-// - 按 batch.seed 路由到每会话的 RingingStores（影子状态，不参与主渲染）；
-// - 记录频道连接状态与事件计数，供调试面板展示；
-// - 提供切流动作（prepare → commit → reload 页面，让 UI 从 Ringing store 重建）。
-//
-// 影子模式：legacy 主渲染不受影响，Ringing 事件旁路进 store——
-// 这是"新实现真实运行"的零风险验证入口。
+// - 按 batch.seed 路由到每会话的 RingingStores；
+// - 记录频道连接状态与事件计数，供主界面派生视图使用；
+// - 协议模式在连接建立时确定；reload 通过 bootstrap 恢复，不再切换频道。
 
-import { createSignal } from "solid-js";
+import { createSignal, createStore, type Store, type StoreSetter } from "solid-js";
 import {
   AppliedEventRegistry,
   applyConversationSnapshot,
@@ -21,7 +18,6 @@ import {
   type RingingStores,
 } from "./ringingStores";
 import type { RingingEventBatch } from "../lib/types/ringing";
-import { applyCommandModes } from "../runtime/ringingCommandRouter";
 
 export type ChannelName = "control" | "conversation" | "tool";
 
@@ -34,7 +30,7 @@ export interface SeedView {
   applied: number;
   turns: number;
   toolCards: number;
-  /** snapshot 摘要（切流后历史恢复的尽力而为展示）。 */
+  /** snapshot 摘要（历史恢复的尽力而为展示）。 */
   snapshot?: {
     activeTurnId?: string | null;
     lastCompletedTurnId?: string | null;
@@ -65,59 +61,43 @@ const initialState = (): RingingMonitorState => ({
   perSeed: {},
 });
 
-// 每会话影子 store（不入主渲染树；调试面板只读展示）
-const shadowBySeed = new Map<string, { stores: RingingStores; applied: AppliedEventRegistry }>();
-const appliedBySeed = new Map<string, number>();
-// 每 (seed, channel) 在途 snapshot 去重：daemon 下线时避免并发请求风暴
-const snapshotInflight = new Set<string>();
-/** 每 (seed, channel) 已应用快照的 baseline_seq：其前事件已包含在快照内，跳过。 */
-const baselineBySeed = new Map<string, Partial<Record<ChannelName, number>>>();
+interface RingingSessionStoreEntry {
+  stores: Store<RingingStores>;
+  setStores: StoreSetter<RingingStores>;
+  applied: AppliedEventRegistry;
+}
 
 export function createRingingMonitor() {
+  // Each monitor owns its session registry. Keeping these maps inside the
+  // app instance prevents disposed/test monitors from leaking Ringing state
+  // into a later renderer view.
+  const storesBySeed = new Map<string, RingingSessionStoreEntry>();
+  const appliedBySeed = new Map<string, number>();
+  // 每 (seed, channel) 在途 snapshot 去重：daemon 下线时避免并发请求风暴
+  const snapshotInflight = new Set<string>();
+  /** 每 (seed, channel) 已应用快照的 baseline_seq：其前事件已包含在快照内，跳过。 */
+  const baselineBySeed = new Map<string, Partial<Record<ChannelName, number>>>();
   const [state, setState] = createSignal<RingingMonitorState>(initialState());
-  // 已切流会话集合与数据版本：必须是 signal（App.tsx rawSession 依赖它们，
-  // 影子 store 是普通对象，版本信号是 ChatView 感知变化的唯一依赖）。
+  // 已建立 v2 typed store 的会话集合与数据版本。
   const [ringingSeeds, setRingingSeeds] = createSignal<ReadonlySet<string>>(new Set());
   const [ringingVersion, setRingingVersion] = createSignal(0);
 
-  /** 该 seed 是否已切流（主 UI 数据源切换依据）。 */
-  function isRinging(seed: string): boolean {
+  /** 该 seed 是否已由 v2 bootstrap 激活（主 UI 数据源切换依据）。 */
+  function hasStores(seed: string): boolean {
     return ringingSeeds().has(seed);
   }
 
-  /** 从 main 进程 sessionChannelMode 表同步切流状态（reload 后恢复）。 */
-  async function syncMode(seed: string): Promise<void> {
-    const api = window.deepx?.ringing;
-    if (!api) return;
-    try {
-      const modes = (await api.mode(seed)) as Record<
-        string,
-        { eventProtocol: string; commandProtocol: string }
-      >;
-      applyCommandModes(seed, modes);
-      const anyRinging = Object.values(modes).some((m) => m.eventProtocol === "ringing");
-      if (anyRinging) {
-        setRingingSeeds((prev) => new Set(prev).add(seed));
-        setRingingVersion((v) => v + 1);
-        const chans = (Object.entries(modes)
-          .filter(([, m]) => m.eventProtocol === "ringing")
-          .map(([c]) => c) as ChannelName[]);
-        for (const ch of chans) void loadSnapshot(seed, ch);
-      }
-    } catch (error) {
-      console.warn(`[ringing] syncMode ${seed} failed`, error);
-    }
-  }
-
-  function ensureShadow(seed: string) {
-    if (!shadowBySeed.has(seed)) {
-      shadowBySeed.set(seed, {
-        stores: initialRingingStores(seed),
+  function ensureStores(seed: string) {
+    if (!storesBySeed.has(seed)) {
+      const [stores, setStores] = createStore(initialRingingStores(seed));
+      storesBySeed.set(seed, {
+        stores,
+        setStores,
         applied: new AppliedEventRegistry(),
       });
       appliedBySeed.set(seed, 0);
     }
-    return shadowBySeed.get(seed)!;
+    return storesBySeed.get(seed)!;
   }
 
   function handleBatch(batch: RingingEventBatch): void {
@@ -126,26 +106,30 @@ export function createRingingMonitor() {
       setState((s) => ({ ...s, lastError: "batch missing seed" }));
       return;
     }
-    const shadow = ensureShadow(seed);
+    setRingingSeeds((prev) => prev.has(seed) ? prev : new Set(prev).add(seed));
+    const storesEntry = ensureStores(seed);
     const baseline = baselineBySeed.get(seed)?.[batch.channel];
-    const seq = Number(batch.to_stream_seq);
     let appliedCount = 0;
-    for (const event of batch.events) {
-      // 快照已覆盖的事件（≤ baseline_seq）不重复应用，避免与恢复的 turns 双计。
-      if (baseline !== undefined && seq <= baseline) continue;
+    for (const envelope of batch.envelopes) {
+      // 快照已覆盖的事件（≤ baseline_stream_seq）不重复应用，避免与恢复的 turns 双计。
+      if (baseline !== undefined && envelope.stream_seq <= baseline) continue;
       // 幂等键 = (channel, to_stream_seq)：SSE cursor 保证每频道 stream_seq
       // 单调且不重发已 ack 事件；重连后 Last-Event-ID 续传天然跳过历史。
-      const key = `${batch.channel}:${batch.to_stream_seq}`;
-      if (shadow.applied.apply({ event_id: key } as never)) {
-        dispatchToStores(shadow.stores, batch.channel, event as never);
+      if (storesEntry.applied.apply(envelope)) {
+        dispatchToStores(
+          storesEntry.stores,
+          storesEntry.setStores,
+          batch.channel,
+          envelope.event as never,
+        );
         appliedCount += 1;
       }
     }
     if (appliedCount === 0) return;
     setRingingVersion((v) => v + 1);
     appliedBySeed.set(seed, (appliedBySeed.get(seed) ?? 0) + appliedCount);
-    const conv = shadow.stores.conversation;
-    const tool = shadow.stores.tool;
+    const conv = storesEntry.stores.conversation;
+    const tool = storesEntry.stores.tool;
     setState((s) => ({
       ...s,
       perSeed: {
@@ -158,6 +142,38 @@ export function createRingingMonitor() {
       },
       lastBatch: { seed, channel: batch.channel, at: Date.now() },
     }));
+  }
+
+  /** 标记该连接的 session 使用 Ringing v2，并以三频道 bootstrap 建立基线。 */
+  async function activate(seed: string): Promise<void> {
+    if (!seed) return;
+    const api = window.deepx?.ringing;
+    if (!api) return;
+    const statuses = await api.status().catch(() => null);
+    const connected = statuses
+      ? Object.values(statuses).some(status =>
+        status?.state === "open" || status?.state === "connected" || status?.state === "connecting",
+      )
+      : false;
+    if (!connected) return;
+    setRingingSeeds((prev) => prev.has(seed) ? prev : new Set(prev).add(seed));
+    setRingingVersion((v) => v + 1);
+    if (api.bootstrap) {
+      const bootstrap = await api.bootstrap(seed) as {
+        control?: { state?: Record<string, unknown>; baseline_stream_seq?: unknown };
+        conversation?: { state?: Record<string, unknown>; baseline_stream_seq?: unknown };
+        tool?: { state?: Record<string, unknown>; baseline_stream_seq?: unknown };
+      };
+      for (const channel of ["control", "conversation", "tool"] as ChannelName[]) {
+        applySnapshotPayload(seed, channel, bootstrap[channel] ?? null);
+      }
+    } else {
+      // Test/debug bridges from before the v2 bootstrap IPC can still recover
+      // through the same main-owned per-channel snapshot endpoint.
+      await Promise.all(([
+        "control", "conversation", "tool",
+      ] as ChannelName[]).map((channel) => loadSnapshot(seed, channel)));
+    }
   }
 
   function handleStatus(update: { channel: string; status: unknown }): void {
@@ -190,46 +206,38 @@ export function createRingingMonitor() {
     }));
   }
 
-  /** 切流：prepare → commit → reload（commit 后 legacy 停发该频道，UI 从 Ringing 重建）。 */
-  async function cutover(seed: string, channel: ChannelName): Promise<void> {
-    const api = window.deepx?.ringing;
-    if (!api) throw new Error("ringing bridge unavailable");
-    await api.cutoverEvents(seed, channel, "prepare");
-    // prepare 后服务端建立边界；commit 原子切换 event owner
-    await api.cutoverEvents(seed, channel, "commit");
-    setRingingSeeds((prev) => new Set(prev).add(seed));
-    setRingingVersion((v) => v + 1);
-  }
-
   /** 应用频道领域快照（摘要重建；ConversationSnapshot 现携带完整 turns）。 */
   function applySnapshotPayload(
     seed: string,
     channel: string,
-    snap: { state?: Record<string, unknown>; baseline_seq?: unknown } | null,
+    snap: { state?: Record<string, unknown>; baseline_stream_seq?: unknown } | null,
   ): void {
     const s = (snap?.state ?? {}) as Record<string, string | boolean | null | unknown>;
-    ensureShadow(seed);
-    // 摘要字段应用到影子 store（尽力而为；turns/cards 完整数据由 SSE 增量补齐）
-    const shadow = shadowBySeed.get(seed)!;
+    ensureStores(seed);
+    // 摘要字段应用到 typed store（尽力而为；turns/cards 完整数据由 SSE 增量补齐）
+    const storesEntry = storesBySeed.get(seed)!;
     const sc = s as Record<string, string | boolean | null>;
     if (channel === "control") {
-      shadow.stores.control.agentLifecycle = (sc.agent_lifecycle as any) ?? null;
-      shadow.stores.control.sessionState = (sc.session_state as any) ?? null;
+      storesEntry.setStores((draft) => {
+        draft.control.agentLifecycle = (sc.agent_lifecycle as any) ?? null;
+        draft.control.sessionState = (sc.session_state as any) ?? null;
+      });
     } else if (channel === "conversation") {
-      shadow.stores.conversation.compactStatus = (sc.compact_status as any) ?? null;
-      shadow.stores.conversation.cancelled = sc.cancelled === true;
+      const nextConversation = applyConversationSnapshot(
+        {
+          ...storesEntry.stores.conversation,
+          compactStatus: (sc.compact_status as any) ?? null,
+          cancelled: sc.cancelled === true,
+        },
+        Array.isArray(s.turns) ? (s.turns as unknown as ConversationSnapshotTurn[]) : [],
+        (sc.active_turn as string | null) ?? null,
+      );
       // 快照携带完整 turns（neutral JSON）：只补缺失 turn，保留流式现场，
       // 并恢复 activeTurn 使后续 round_delta 能继续追加（修复快照后吞字）。
-      const turns = Array.isArray(s.turns) ? (s.turns as unknown as ConversationSnapshotTurn[]) : [];
-      const activeTurnId = (sc.active_turn as string | null) ?? null;
-      shadow.stores.conversation = applyConversationSnapshot(
-        shadow.stores.conversation,
-        turns,
-        activeTurnId,
-      );
+      storesEntry.setStores((draft) => { draft.conversation = nextConversation; });
     }
-    const baselineSeq = Number(snap?.baseline_seq);
-    if (Number.isFinite(baselineSeq) && baselineSeq > 0) {
+    const baselineSeq = Number(snap?.baseline_stream_seq);
+    if (Number.isSafeInteger(baselineSeq) && baselineSeq >= 0) {
       const existing = baselineBySeed.get(seed) ?? {};
       existing[channel as ChannelName] = baselineSeq;
       baselineBySeed.set(seed, existing);
@@ -257,7 +265,7 @@ export function createRingingMonitor() {
     }));
   }
 
-  /** 拉取频道领域快照（切流/reload 后摘要重建）。 */
+  /** 拉取频道领域快照（bootstrap 后摘要重建）。 */
   async function loadSnapshot(seed: string, channel: ChannelName): Promise<void> {
     const api = window.deepx?.ringing;
     if (!api) return;
@@ -267,7 +275,7 @@ export function createRingingMonitor() {
     try {
       const snap = (await api.snapshot(seed, channel)) as {
         state?: Record<string, unknown>;
-        baseline_seq?: unknown;
+        baseline_stream_seq?: unknown;
       };
       applySnapshotPayload(seed, channel, snap);
     } catch (error) {
@@ -277,15 +285,15 @@ export function createRingingMonitor() {
     }
   }
 
-  function shadowOf(seed: string): RingingStores | undefined {
-    return shadowBySeed.get(seed)?.stores;
+  function storesFor(seed: string): RingingStores | undefined {
+    return storesBySeed.get(seed)?.stores;
   }
 
   // cursor 超出保留窗口时，main 进程拉取权威 snapshot 后经 IPC 推送
   window.deepx?.ringing.onSnapshot?.((update) =>
     applySnapshotPayload(update.seed, update.channel, update.snapshot as {
       state?: Record<string, unknown>;
-      baseline_seq?: unknown;
+        baseline_stream_seq?: unknown;
     }),
   );
 
@@ -295,11 +303,10 @@ export function createRingingMonitor() {
     handleBatch,
     handleStatus,
     applyStatusSnapshot,
-    cutover,
+    activate,
     loadSnapshot,
-    syncMode,
-    isRinging,
-    shadowOf,
+    hasStores,
+    storesFor,
   };
 }
 
@@ -310,11 +317,23 @@ function normalizeStatus(
 }
 
 // 按 batch.channel 分发到对应 reducer（事件对象为纯领域事件）
-function dispatchToStores(stores: RingingStores, channel: ChannelName, event: never): void {
+function dispatchToStores(
+  stores: Store<RingingStores>,
+  setStores: StoreSetter<RingingStores>,
+  channel: ChannelName,
+  event: never,
+): void {
   const e = event as { type?: string } & Record<string, unknown>;
-  if (channel === "control") stores.control = controlReducer(stores.control, e as any);
-  else if (channel === "conversation") stores.conversation = conversationReducer(stores.conversation, e as any);
-  else if (channel === "tool") stores.tool = toolReducer(stores.tool, e as any);
+  if (channel === "control") {
+    const next = controlReducer(stores.control, e as any);
+    setStores((draft) => { draft.control = next; });
+  } else if (channel === "conversation") {
+    const next = conversationReducer(stores.conversation, e as any);
+    setStores((draft) => { draft.conversation = next; });
+  } else if (channel === "tool") {
+    const next = toolReducer(stores.tool, e as any);
+    setStores((draft) => { draft.tool = next; });
+  }
 }
 
 export type RingingMonitor = ReturnType<typeof createRingingMonitor>;

@@ -2,13 +2,14 @@
 //!
 //! 磁盘格式为 append-only JSONL：每条记录对应一次内存变更
 //! （`Append`/`Checkpoint`/`Compact`），启动时按序重放可完整重建
-//! `ReliableJournal`/`ChannelRouter`/`SnapshotProjector` 与 cutover 状态。
+//! `ReliableJournal`/`ChannelRouter`/`SnapshotProjector` 状态。
 //! 有界语义由重放时的容量上限自然复现，与内存行为一致；磁盘增长是已知取舍
 //! （RoundCompleted 压缩只追加一条 `Compact` 记录，不删除旧行）。
 //! I/O 失败返回 Err，由调用方记录日志，绝不阻塞事件发布路径。
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
@@ -30,14 +31,13 @@ pub enum JournalOp {
     Compact { turn_id: String, round_num: u32 },
 }
 
-/// 装载结果：每 (channel, seed) 的 op 序列 + cutover 状态。
+/// 装载结果：每 (channel, seed) 的 op 序列。
 #[derive(Debug, Default)]
 pub struct LoadedJournal {
     pub per_seed: Vec<(RingingChannel, String, Vec<JournalOp>)>,
-    pub cutover: Option<serde_json::Value>,
 }
 
-/// 持久化 journal 存储（root/journal/{channel}/{seed}.jsonl + root/cutover.json）。
+/// 持久化 journal 存储（root/journal/{channel}/{seed}.jsonl）。
 #[derive(Debug)]
 pub struct JournalStore {
     root: PathBuf,
@@ -54,6 +54,7 @@ impl JournalStore {
             RingingChannel::Tool,
         ] {
             std::fs::create_dir_all(root.join("journal").join(channel.as_str()))?;
+            std::fs::create_dir_all(root.join("latest").join(channel.as_str()))?;
         }
         Ok(Self {
             root,
@@ -65,7 +66,7 @@ impl JournalStore {
         &self.root
     }
 
-    /// 追加一次事件（reliable 或 replaceable 覆盖）。
+    /// 追加一次 reliable 事件。Replaceable 使用独立有界槽位。
     pub fn append(
         &mut self,
         channel: RingingChannel,
@@ -117,6 +118,40 @@ impl JournalStore {
         )
     }
 
+    /// Persist one bounded replaceable slot. Unlike the reliable JSONL this
+    /// overwrites by identity, so per-token progress cannot grow the journal.
+    pub fn replaceable(
+        &mut self,
+        channel: RingingChannel,
+        seed: &str,
+        identity: &str,
+        envelope: &RingingEventEnvelope,
+    ) -> std::io::Result<()> {
+        let path = self.replaceable_path(channel, seed, identity);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(envelope).map_err(io_error)?)?;
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        std::fs::rename(tmp, path)
+    }
+
+    pub fn remove_replaceable(
+        &mut self,
+        channel: RingingChannel,
+        seed: &str,
+        identity: &str,
+    ) -> std::io::Result<()> {
+        let path = self.replaceable_path(channel, seed, identity);
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
     /// 装载磁盘日志（损坏行跳过并记录，不整体失败）。
     pub fn load(root: impl AsRef<Path>) -> std::io::Result<LoadedJournal> {
         let root = root.as_ref().to_path_buf();
@@ -150,23 +185,48 @@ impl JournalStore {
                     out.per_seed.push((channel, seed, ops));
                 }
             }
-        }
-        let cutover_path = root.join("cutover.json");
-        if cutover_path.is_file() {
-            match std::fs::read_to_string(&cutover_path) {
-                Ok(text) => out.cutover = serde_json::from_str(&text).ok(),
-                Err(error) => log::warn!("[ringing] read cutover.json failed: {error}"),
+
+            let latest_dir = root.join("latest").join(channel.as_str());
+            if latest_dir.is_dir() {
+                for seed_entry in std::fs::read_dir(&latest_dir)? {
+                    let seed_entry = seed_entry?;
+                    if !seed_entry.path().is_dir() {
+                        continue;
+                    }
+                    let seed = seed_entry.file_name().to_string_lossy().to_string();
+                    let mut latest = Vec::new();
+                    for entry in std::fs::read_dir(seed_entry.path())? {
+                        let path = entry?.path();
+                        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                            continue;
+                        }
+                        match std::fs::read(&path).ok().and_then(|bytes| {
+                            serde_json::from_slice::<RingingEventEnvelope>(&bytes).ok()
+                        }) {
+                            Some(envelope) => latest.push(JournalOp::Append { envelope }),
+                            None => log::warn!(
+                                "[ringing] skip corrupt replaceable slot {}",
+                                path.display()
+                            ),
+                        }
+                    }
+                    if !latest.is_empty() {
+                        if let Some((_, _, ops)) =
+                            out.per_seed
+                                .iter_mut()
+                                .find(|(saved_channel, saved_seed, _)| {
+                                    *saved_channel == channel && saved_seed == &seed
+                                })
+                        {
+                            ops.extend(latest);
+                        } else {
+                            out.per_seed.push((channel, seed, latest));
+                        }
+                    }
+                }
             }
         }
         Ok(out)
-    }
-
-    /// 持久化 cutover 状态（临时文件 + rename，避免半写）。
-    pub fn save_cutover(&mut self, value: &serde_json::Value) -> std::io::Result<()> {
-        let path = self.root.join("cutover.json");
-        let tmp = self.root.join("cutover.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(value).map_err(io_error)?)?;
-        std::fs::rename(&tmp, &path)
     }
 
     fn write_line(
@@ -197,6 +257,16 @@ impl JournalStore {
             .join("journal")
             .join(channel.as_str())
             .join(format!("{}.jsonl", sanitize_seed(seed)))
+    }
+
+    fn replaceable_path(&self, channel: RingingChannel, seed: &str, identity: &str) -> PathBuf {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        identity.hash(&mut hasher);
+        self.root
+            .join("latest")
+            .join(channel.as_str())
+            .join(sanitize_seed(seed))
+            .join(format!("{:016x}.json", hasher.finish()))
     }
 }
 
@@ -286,9 +356,6 @@ mod tests {
             store
                 .compact(RingingChannel::Conversation, "s", "t1", 0)
                 .expect("compact");
-            store
-                .save_cutover(&serde_json::json!({ "modes": [] }))
-                .expect("cutover");
         }
         let loaded = JournalStore::load(&root).expect("load");
         assert_eq!(loaded.per_seed.len(), 1);
@@ -300,7 +367,6 @@ mod tests {
         assert!(matches!(ops[1], JournalOp::Checkpoint { .. }));
         assert!(matches!(ops[2], JournalOp::Append { .. }));
         assert!(matches!(ops[3], JournalOp::Compact { .. }));
-        assert!(loaded.cutover.is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 

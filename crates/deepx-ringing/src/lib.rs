@@ -7,8 +7,8 @@
 //! - `snapshot`：`RingingChannelSnapshot`
 //! - `content`：`RingingContentRef`（大内容外置引用）
 //! - `worker`：daemon ↔ agent worker 边界的 framed envelope
-//! - `capability`：客户端 open/能力协商（`Ringing_v1` 等）
-//! - `protocol`：线协议标识（`schema: "deepx.Ringing"`, `version: 1`）
+//! - `capability`：客户端 open/能力协商（`Ringing_v2` 等）
+//! - `protocol`：线协议标识（`schema: "deepx.Ringing"`, `version: 2`）
 //!
 //! ## 架构硬规则
 //!
@@ -26,18 +26,23 @@ pub mod reset;
 pub mod snapshot;
 pub mod worker;
 
-pub use capability::{ClientOpenRequest, ClientOpenResponse, CapabilityName};
-pub use command::{RingingCommand, RingingControlCommand, RingingConversationCommand, RingingToolCommand};
+pub use capability::{CapabilityName, ClientOpenRequest, ClientOpenResponse};
+pub use command::{
+    RingingCommand, RingingControlCommand, RingingConversationCommand, RingingToolCommand,
+};
 pub use content::RingingContentRef;
 pub use envelope::{
-    RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope, RingingEventBatch,
-    RingingEventEnvelope,
+    RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope, RingingCommandState,
+    RingingCommandStatus, RingingEventBatch, RingingEventEnvelope,
 };
 pub use event::{RingingControlEvent, RingingConversationEvent, RingingEvent, RingingToolEvent};
-pub use protocol::{RINGING_SCHEMA, RINGING_VERSION};
+pub use protocol::{
+    CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_BASE_PATH, RINGING_SCHEMA, RINGING_VERSION,
+    is_safe_integer,
+};
 pub use reset::RingingResetRequired;
-pub use snapshot::RingingChannelSnapshot;
+pub use snapshot::{RingingChannelSnapshot, RingingSessionBootstrap};
 pub use worker::{
-    RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope, WorkerDirection,
-    WORKER_FRAME_MAX_BYTES, WIRE_RINGING_DOMAIN_V1,
+    RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope, WIRE_RINGING_DOMAIN_V2,
+    WORKER_FRAME_MAX_BYTES, WorkerDirection,
 };

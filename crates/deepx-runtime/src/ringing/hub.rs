@@ -17,15 +17,15 @@ use std::sync::Mutex;
 use deepx_domain::{ConversationEvent, Delivery, DomainEvent, RingingChannel};
 use deepx_ringing::{
     RingingChannelSnapshot, RingingEvent, RingingEventEnvelope, RingingResetRequired,
+    is_safe_integer,
 };
 use tokio::sync::broadcast;
 
 use super::content_store::{ContentEntry, ContentStore};
-use super::cutover::{CommandProtocol, CutoverError, CutoverState, EventProtocol};
 use super::journal::{AppendOutcome, CursorExpired, ReliableJournal};
 use super::journal_store::{JournalOp, JournalStore};
 use super::projection::SnapshotProjector;
-use super::router::ChannelRouter;
+use super::router::{ChannelRouter, replaceable_key_for, terminal_replaceable_keys};
 use super::sequencer::Sequencer;
 
 /// 事件已接受（含 envelope 与幂等状态）。
@@ -51,6 +51,8 @@ struct SeedChannelState {
     router: ChannelRouter,
     journal: ReliableJournal,
     projection: SnapshotProjector,
+    last_stream_seq: u64,
+    replaceable_since_checkpoint: HashMap<super::router::ReplaceableKey, u32>,
 }
 
 impl SeedChannelState {
@@ -59,6 +61,8 @@ impl SeedChannelState {
             router: ChannelRouter::new(channel),
             journal: ReliableJournal::new(),
             projection: SnapshotProjector::new(),
+            last_stream_seq: 0,
+            replaceable_since_checkpoint: HashMap::new(),
         }
     }
 
@@ -68,6 +72,7 @@ impl SeedChannelState {
         for op in ops {
             match op {
                 JournalOp::Append { envelope } => {
+                    state.last_stream_seq = state.last_stream_seq.max(envelope.stream_seq);
                     let domain = match &envelope.event {
                         RingingEvent::Control(event) => DomainEvent::Control(event.clone()),
                         RingingEvent::Conversation(event) => {
@@ -79,7 +84,6 @@ impl SeedChannelState {
                     match envelope.delivery {
                         Delivery::Reliable => {
                             let _ = state.journal.append(envelope);
-                            let _ = state.router.route(envelope.clone());
                         }
                         Delivery::Replaceable => {
                             let _ = state.router.route(envelope.clone());
@@ -91,6 +95,7 @@ impl SeedChannelState {
                     identity,
                     stream_seq,
                 } => {
+                    state.last_stream_seq = state.last_stream_seq.max(*stream_seq);
                     state.journal.checkpoint_replaceable(identity, *stream_seq);
                 }
                 JournalOp::Compact { turn_id, round_num } => {
@@ -109,8 +114,6 @@ pub struct RingingHub {
     sequencer: Sequencer,
     /// 大内容外置存储（会话所有权 + TTL）。
     content_store: Mutex<ContentStore>,
-    /// 每 session/channel 两阶段切流状态（事件/命令协议权威记录）。
-    cutover: Mutex<CutoverState>,
     /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
     channels: Mutex<HashMap<RingingChannel, HashMap<String, SeedChannelState>>>,
     /// 每频道实时推送通道（SSE 消费；可靠性由 journal/cursor 保证）。
@@ -146,14 +149,13 @@ impl RingingHub {
             epoch,
             sequencer: Sequencer::new(),
             content_store: Mutex::new(ContentStore::new()),
-            cutover: Mutex::new(CutoverState::new()),
             channels: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             journal_store: Mutex::new(journal_store),
         }
     }
 
-    /// 启动装载：重建 journal/router/projection 与 cutover 状态，并恢复序号。
+    /// 启动装载：重建 journal/router/projection，并恢复序号。
     fn load_persisted(&self) {
         let root = {
             let guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
@@ -169,11 +171,6 @@ impl RingingHub {
                 return;
             }
         };
-        if let Some(json) = &loaded.cutover
-            && let Some(state) = CutoverState::from_json(json)
-        {
-            *self.cutover.lock().unwrap_or_else(|e| e.into_inner()) = state;
-        }
         let mut guard = self.channel_state(RingingChannel::Control);
         for (channel, seed, ops) in loaded.per_seed {
             let (mut max_stream, mut max_channel, mut max_session) = (0, 0, 0);
@@ -220,74 +217,6 @@ impl RingingHub {
             .get(seed, content_id)
     }
 
-    /// 切流：channel_prepare（两阶段提交阶段 1）。
-    pub fn cutover_prepare(&self, seed: &str, channel: RingingChannel) -> Result<(), CutoverError> {
-        let result = self
-            .cutover
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .prepare(seed, channel);
-        if result.is_ok() {
-            self.persist_cutover();
-        }
-        result
-    }
-
-    /// 切流：channel_commit（阶段 2，原子切换 event owner）。
-    pub fn cutover_commit(&self, seed: &str, channel: RingingChannel) -> Result<(), CutoverError> {
-        let result = self
-            .cutover
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .commit(seed, channel);
-        if result.is_ok() {
-            self.persist_cutover();
-        }
-        result
-    }
-
-    /// 切流：prepare 失败/超时/断线 → abort，保持 legacy。
-    pub fn cutover_abort(&self, seed: &str, channel: RingingChannel) {
-        self.cutover
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .abort(seed, channel);
-        self.persist_cutover();
-    }
-
-    /// 切流：命令方向独立切换（`command_mode_prepare`）。
-    pub fn cutover_switch_command(&self, seed: &str, channel: RingingChannel, ringing: bool) {
-        self.cutover
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .switch_command(
-                seed,
-                channel,
-                if ringing {
-                    CommandProtocol::Ringing
-                } else {
-                    CommandProtocol::Legacy
-                },
-            );
-        self.persist_cutover();
-    }
-
-    /// 事件协议是否已切到 Ringing（legacy 通道按此过滤）。
-    pub fn event_is_ringing(&self, seed: &str, channel: RingingChannel) -> bool {
-        self.cutover
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .event_is_ringing(seed, channel)
-    }
-
-    /// 命令协议是否已切到 Ringing。
-    pub fn command_is_ringing(&self, seed: &str, channel: RingingChannel) -> bool {
-        self.cutover
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .command_is_ringing(seed, channel)
-    }
-
     fn channel_state(
         &self,
         _channel: RingingChannel,
@@ -323,6 +252,13 @@ impl RingingHub {
         let channel = event.channel();
         let delivery = event.delivery();
         let (stream_seq, channel_seq, session_seq) = self.sequencer.next(channel, seed);
+        if !is_safe_integer(stream_seq)
+            || !is_safe_integer(channel_seq)
+            || !is_safe_integer(session_seq)
+        {
+            log::error!("[ringing] sequence exceeded JSON safe integer range");
+            return PublishOutcome::Backpressure;
+        }
         let event_id = format!(
             "{}-{}-{}-{}",
             self.epoch,
@@ -355,6 +291,7 @@ impl RingingHub {
         if state_changed {
             envelope = envelope.with_state_revision(revision);
         }
+        st.last_stream_seq = st.last_stream_seq.max(stream_seq);
 
         match delivery {
             Delivery::Reliable => {
@@ -376,21 +313,44 @@ impl RingingHub {
                         self.persist_compact(channel, seed, turn_id, *round_num);
                     }
                 }
-                match st.router.route(envelope.clone()) {
-                    super::router::RouteOutcome::Routed { .. } => {
-                        self.fanout(channel, &envelope);
-                        PublishOutcome::Published { envelope }
-                    }
-                    super::router::RouteOutcome::Backpressure => PublishOutcome::Backpressure,
+                for key in terminal_replaceable_keys(&envelope.event) {
+                    st.router.flush_replaceable(&key);
+                    st.replaceable_since_checkpoint.remove(&key);
+                    self.persist_remove_replaceable(channel, seed, &format!("{key:?}"));
                 }
+                // Reliable replay/backpressure belongs to the journal. Keeping a
+                // second reliable queue in the router would fill permanently
+                // because live broadcast has no dequeue/ack path.
+                self.fanout(channel, &envelope);
+                PublishOutcome::Published { envelope }
             }
             Delivery::Replaceable | Delivery::Ephemeral => {
                 // replaceable 覆盖入槽；ephemeral 不入队但照常实时推送
-                if matches!(delivery, Delivery::Replaceable) {
-                    self.persist_append(channel, seed, &envelope);
-                }
                 match st.router.route(envelope.clone()) {
                     super::router::RouteOutcome::Routed { .. } => {
+                        if let Some(key) = replaceable_key_for(&envelope.event) {
+                            let count = st
+                                .replaceable_since_checkpoint
+                                .entry(key.clone())
+                                .or_default();
+                            *count = count.saturating_add(1);
+                            let first_progress = matches!(
+                                &envelope.event,
+                                RingingEvent::Tool(deepx_domain::ToolEvent::ToolProgress {
+                                    seq_start: 0,
+                                    ..
+                                })
+                            );
+                            if *count == 1 || *count >= 64 || first_progress {
+                                self.persist_replaceable(
+                                    channel,
+                                    seed,
+                                    &format!("{key:?}"),
+                                    &envelope,
+                                );
+                                *count = 0;
+                            }
+                        }
                         self.fanout(channel, &envelope);
                         PublishOutcome::Published { envelope }
                     }
@@ -480,7 +440,7 @@ impl RingingHub {
         replay
     }
 
-    /// 读取领域快照（HTTP `GET /ringing/v1/snapshots/{channel}/{seed}`）。
+    /// 读取领域快照（HTTP `GET /ringing/v2/sessions/{seed}/bootstrap`）。
     pub fn snapshot(&self, channel: RingingChannel, seed: &str) -> RingingChannelSnapshot {
         let guard = self.channel_state(channel);
         guard
@@ -488,7 +448,7 @@ impl RingingHub {
             .and_then(|seeds| seeds.get(seed))
             .map(|st| {
                 st.projection
-                    .snapshot_for(channel, seed, st.router.last_stream_seq())
+                    .snapshot_for(channel, seed, st.last_stream_seq)
             })
             .unwrap_or_else(|| SnapshotProjector::new().snapshot_for(channel, seed, 0))
     }
@@ -515,6 +475,7 @@ impl RingingHub {
     pub fn checkpoint(&self, channel: RingingChannel, seed: &str, identity: &str, stream_seq: u64) {
         let mut guard = self.channel_state(channel);
         let st = self.seed_state(&mut guard, channel, seed);
+        st.last_stream_seq = st.last_stream_seq.max(stream_seq);
         st.journal.checkpoint_replaceable(identity, stream_seq);
         self.persist_checkpoint(channel, seed, identity, stream_seq);
     }
@@ -524,7 +485,7 @@ impl RingingHub {
         guard
             .get(&channel)
             .and_then(|seeds| seeds.get(seed))
-            .map(|s| s.router.last_stream_seq())
+            .map(|s| s.last_stream_seq)
             .unwrap_or(0)
     }
 
@@ -563,16 +524,27 @@ impl RingingHub {
         }
     }
 
-    fn persist_cutover(&self) {
-        let json = {
-            let guard = self.cutover.lock().unwrap_or_else(|e| e.into_inner());
-            guard.to_json()
-        };
-        let mut store = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(store) = store.as_mut()
-            && let Err(error) = store.save_cutover(&json)
+    fn persist_replaceable(
+        &self,
+        channel: RingingChannel,
+        seed: &str,
+        identity: &str,
+        envelope: &RingingEventEnvelope,
+    ) {
+        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = guard.as_mut()
+            && let Err(error) = store.replaceable(channel, seed, identity, envelope)
         {
-            log::warn!("[ringing] cutover persist failed: {error}");
+            log::warn!("[ringing] replaceable slot persist failed: {error}");
+        }
+    }
+
+    fn persist_remove_replaceable(&self, channel: RingingChannel, seed: &str, identity: &str) {
+        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = guard.as_mut()
+            && let Err(error) = store.remove_replaceable(channel, seed, identity)
+        {
+            log::warn!("[ringing] replaceable slot cleanup failed: {error}");
         }
     }
 }
@@ -617,15 +589,13 @@ mod tests {
     }
 
     #[test]
-    fn persisted_journal_and_cutover_survive_restart() {
+    fn persisted_journal_survives_restart() {
         let root = temp_root("restart");
         {
             let hub = RingingHub::with_persistence("epoch-1", &root);
             let _ = hub.publish("s", round_delta(1));
             let _ = hub.publish("s", tool_progress("a"));
-            hub.cutover_switch_command("s", RingingChannel::Tool, true);
         }
-        drop(()); // 释放 hub（文件已 flush）
         let hub = RingingHub::with_persistence("epoch-2", &root);
         // reliable 事件重放
         let replayed = hub
@@ -648,8 +618,6 @@ mod tests {
                 .any(|e| matches!(&e.event, RingingEvent::Tool(ToolEvent::ToolProgress { chunk, .. }) if chunk == "a")),
             "replaceable latest value must survive restart"
         );
-        // cutover 状态恢复
-        assert!(hub.command_is_ringing("s", RingingChannel::Tool));
         // 序号继续递增（新 epoch 内不从头冲突）
         let outcome = hub.publish("s", round_delta(99));
         if let PublishOutcome::Published { envelope } = outcome {
@@ -682,7 +650,6 @@ mod tests {
                 }),
             );
         }
-        drop(());
         let hub = RingingHub::with_persistence("epoch-2", &root);
         let replayed = hub
             .replay_since(RingingChannel::Conversation, "s", 0)
@@ -913,6 +880,24 @@ mod tests {
         let env = rx.blocking_recv().expect("live event");
         assert_eq!(env.channel, RingingChannel::Conversation);
         assert_eq!(env.seed, "s");
+    }
+
+    #[test]
+    fn reliable_live_publish_does_not_fill_an_undrained_router_queue() {
+        let hub = RingingHub::new("epoch");
+        for _ in 0..5_000 {
+            let outcome = hub.publish(
+                "s",
+                DomainEvent::Conversation(ConversationEvent::ConversationCancelled {
+                    turn_id: None,
+                }),
+            );
+            assert!(matches!(outcome, PublishOutcome::Published { .. }));
+        }
+        assert_eq!(
+            hub.last_stream_seq(RingingChannel::Conversation, "s"),
+            5_000
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 /**
  * todo_activate 评审项。
  */
-export type TodoItem = { id: string, title: string, description: string, 
+export type TodoItem = { id: string, title: string, description: string,
 /**
  * "small" | "medium" | "large"
  */

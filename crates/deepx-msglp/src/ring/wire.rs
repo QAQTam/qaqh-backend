@@ -3,21 +3,21 @@
 //! 硬规则：**reader 必须先检查 `wire`，禁止 untagged 猜测**。
 //!
 //! - legacy 记录：无 `wire` 字段，保持原 JSON-LP 格式（`Ui2Agent` / `Agent2Ui`）。
-//! - Ringing 记录：携带 `wire: "Ringing_domain_v1"`，解析为
+//! - Ringing 记录：携带 `wire: "Ringing_domain_v2"`，解析为
 //!   `RingingWorkerCommandEnvelope` / `RingingWorkerEventEnvelope`。
 //! - 未知 `wire` 值：拒绝并报 `InvalidData`，绝不猜测。
 
 use std::io::{BufRead, Write};
 
 use deepx_proto::{Agent2Ui, Ui2Agent};
-use deepx_ringing::worker::{RingingWorkerCommandEnvelope, WIRE_RINGING_DOMAIN_V1};
+use deepx_ringing::worker::{RingingWorkerCommandEnvelope, WIRE_RINGING_DOMAIN_V2};
 
 /// stdin 方向的可判别命令帧。
 #[derive(Debug, Clone)]
 pub enum WorkerCommandFrame {
     /// legacy `Ui2Agent`（无 `wire` 字段）。
     Legacy(Ui2Agent),
-    /// Ringing `RingingWorkerCommandEnvelope`（`wire: "Ringing_domain_v1"`）。
+    /// Ringing `RingingWorkerCommandEnvelope`（`wire: "Ringing_domain_v2"`）。
     Ringing(RingingWorkerCommandEnvelope),
 }
 
@@ -26,7 +26,7 @@ pub enum WorkerCommandFrame {
 /// 判别规则（顺序固定）：
 /// 1. 解析为 `serde_json::Value`；
 /// 2. 无 `wire` 字段 → legacy（保持旧格式兼容）；
-/// 3. `wire == "Ringing_domain_v1"` → Ringing envelope；
+/// 3. `wire == "Ringing_domain_v2"` → Ringing envelope；
 /// 4. 其它 `wire` 值 → `InvalidData`（禁止猜测）。
 pub fn read_worker_command_frame<R: BufRead>(
     r: &mut R,
@@ -45,7 +45,7 @@ pub fn read_worker_command_frame<R: BufRead>(
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
             Ok(Some(WorkerCommandFrame::Legacy(frame)))
         }
-        Some(w) if w == WIRE_RINGING_DOMAIN_V1 => {
+        Some(w) if w == WIRE_RINGING_DOMAIN_V2 => {
             let frame = serde_json::from_value::<RingingWorkerCommandEnvelope>(value)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
             Ok(Some(WorkerCommandFrame::Ringing(frame)))
@@ -55,130 +55,6 @@ pub fn read_worker_command_frame<R: BufRead>(
             format!("unknown worker wire tag: {other}"),
         )),
     }
-}
-
-/// 将 Ringing 命令映射为 legacy `Ui2Agent` 语义（过渡期：agent core 尚未切到
-/// DomainCommand 时的 ingress 适配；映射失败返回错误，绝不静默丢弃）。
-///
-/// 注意：这是**命令方向**的 ingress 映射（Ringing command → 领域语义），
-/// 与 PLAN 禁止的事件桥接（Ringing → Agent2Ui）无关。
-pub fn ringing_command_to_legacy(env: &RingingWorkerCommandEnvelope) -> Result<Ui2Agent, String> {
-    use deepx_ringing::RingingCommand as RC;
-    match &env.command {
-        RC::Control(cmd) => legacy_control(cmd),
-        RC::Conversation(cmd) => legacy_conversation(cmd),
-        RC::Tool(cmd) => legacy_tool(cmd),
-    }
-}
-
-fn legacy_control(cmd: &deepx_domain::ControlCommand) -> Result<Ui2Agent, String> {
-    use deepx_domain::ControlCommand as C;
-    Ok(match cmd {
-        C::SessionCreate { close_current } => {
-            if *close_current {
-                Ui2Agent::NewSession
-            } else {
-                Ui2Agent::CreateSession
-            }
-        }
-        C::SessionResume { seed } => Ui2Agent::ResumeSession { seed: seed.clone() },
-        C::SessionClose { .. } => {
-            // legacy 无对应语义；暂不支持命令方向映射
-            return Err("SessionClose has no legacy Ui2Agent equivalent".into());
-        }
-        C::SessionShutdown => Ui2Agent::Shutdown,
-        C::AgentReloadConfig => Ui2Agent::ReloadConfig,
-        C::InteractionAskRespond {
-            interaction_id,
-            answers,
-        } => Ui2Agent::AskResponse {
-            ask_id: interaction_id.clone(),
-            answers: answers
-                .iter()
-                .map(|a| deepx_proto::AskAnswer {
-                    question_id: a.question_id.clone(),
-                    answer: a.answer.clone(),
-                })
-                .collect(),
-        },
-        C::InteractionAskDismiss { interaction_id } => {
-            Ui2Agent::AskDismiss { ask_id: interaction_id.clone() }
-        }
-        C::PlanReviewRespond {
-            interaction_id,
-            approved,
-            message,
-            autonomous,
-        } => Ui2Agent::PlanReview {
-            call_id: interaction_id.clone(),
-            approved: *approved,
-            message: message.clone().unwrap_or_default(),
-            autonomous: *autonomous,
-        },
-        C::SkillsActivate { name } => Ui2Agent::ActivateSkill { name: name.clone() },
-        C::SkillsRelease { name } => Ui2Agent::UnloadSkill { name: name.clone() },
-        C::SkillsReload => Ui2Agent::ReloadSkills,
-    })
-}
-
-fn legacy_conversation(cmd: &deepx_domain::ConversationCommand) -> Result<Ui2Agent, String> {
-    use deepx_domain::ConversationCommand as C;
-    Ok(match cmd {
-        C::ConversationSendMessage { text, images } => Ui2Agent::UserInput {
-            text: text.clone(),
-            images: images
-                .iter()
-                .map(|i| deepx_proto::ImageBlock {
-                    mime_type: i.mime_type.clone(),
-                    data: i.data.clone(),
-                })
-                .collect(),
-        },
-        C::ConversationCancel { .. } => Ui2Agent::Cancel,
-        C::ConversationUndoTurn { turn_id } => Ui2Agent::UndoTurn { turn_id: turn_id.clone() },
-        C::ConversationCompact { .. } => Ui2Agent::Compact,
-        C::ConversationLoadMore {
-            before_turn_id,
-            count,
-        } => Ui2Agent::LoadMoreTurns {
-            before_turn_id: before_turn_id.clone(),
-            count: *count,
-        },
-        C::ConversationSetMode { mode } => Ui2Agent::SetMode {
-            mode: match mode {
-                deepx_domain::ConversationMode::Normal => "normal".into(),
-                deepx_domain::ConversationMode::Plan => "plan".into(),
-                deepx_domain::ConversationMode::Code => "code".into(),
-            },
-        },
-    })
-}
-
-fn legacy_tool(cmd: &deepx_domain::ToolCommand) -> Result<Ui2Agent, String> {
-    use deepx_domain::ToolCommand as T;
-    Ok(match cmd {
-        T::ToolInvoke {
-            tool_call_id,
-            name,
-            action,
-            args,
-        } => Ui2Agent::ToolCall {
-            id: tool_call_id.clone(),
-            name: name.clone(),
-            action: action.clone(),
-            args: args.clone(),
-        },
-        T::ToolPermissionRespond {
-            tool_call_id,
-            approved,
-            trust_folder,
-            ..
-        } => Ui2Agent::PermissionResponse {
-            tool_call_id: tool_call_id.clone(),
-            approved: *approved,
-            trust_folder: *trust_folder,
-        },
-    })
 }
 
 /// 写入 legacy 事件帧（默认模式；worker 未切流前保持该格式）。
@@ -211,7 +87,7 @@ pub fn read_worker_event_line(line: &str) -> Result<Option<Agent2Ui>, String> {
         None => serde_json::from_value::<Agent2Ui>(value)
             .map(Some)
             .map_err(|e| format!("invalid legacy event: {e}")),
-        Some(w) if w == WIRE_RINGING_DOMAIN_V1 => {
+        Some(w) if w == WIRE_RINGING_DOMAIN_V2 => {
             // 解析校验后跳过（领域消费路径由 ChannelRouter 在 T2/T6 接入）
             let env = serde_json::from_value::<deepx_ringing::RingingWorkerEventEnvelope>(value)
                 .map_err(|e| format!("invalid ringing event: {e}"))?;
@@ -250,7 +126,7 @@ mod tests {
             }),
         );
         let json = serde_json::to_string(&env).expect("serialize");
-        assert!(json.contains("\"wire\":\"Ringing_domain_v1\""));
+        assert!(json.contains("\"wire\":\"Ringing_domain_v2\""));
         let mut reader = std::io::Cursor::new(format!("{json}\n"));
         let frame = read_worker_command_frame(&mut reader)
             .expect("read")
@@ -275,134 +151,26 @@ mod tests {
     #[test]
     fn blank_line_returns_none() {
         let mut reader = std::io::Cursor::new("\n\n");
-        assert!(read_worker_command_frame(&mut reader).expect("read").is_none());
+        assert!(
+            read_worker_command_frame(&mut reader)
+                .expect("read")
+                .is_none()
+        );
     }
 
     #[test]
-    fn ringing_command_to_legacy_full_mapping() {
-        use deepx_domain::{ControlCommand, ConversationCommand, ConversationMode, ToolCommand};
-
-        let cases: Vec<(RC, &str)> = vec![
-            (
-                RC::Control(ControlCommand::SessionCreate { close_current: false }),
-                "create_session",
-            ),
-            (
-                RC::Control(ControlCommand::SessionCreate { close_current: true }),
-                "new_session",
-            ),
-            (
-                RC::Control(ControlCommand::SessionResume { seed: "s1".into() }),
-                "resume_session",
-            ),
-            (RC::Control(ControlCommand::SessionShutdown), "shutdown"),
-            (RC::Control(ControlCommand::AgentReloadConfig), "reload_config"),
-            (RC::Control(ControlCommand::SkillsReload), "reload_skills"),
-            (
-                RC::Control(ControlCommand::SkillsActivate { name: "x".into() }),
-                "activate_skill",
-            ),
-            (
-                RC::Control(ControlCommand::SkillsRelease { name: "x".into() }),
-                "unload_skill",
-            ),
-            (
-                RC::Conversation(ConversationCommand::ConversationSendMessage {
-                    text: "hi".into(),
-                    images: vec![],
-                }),
-                "user_input",
-            ),
-            (
-                RC::Conversation(ConversationCommand::ConversationCancel { turn_id: None }),
-                "cancel",
-            ),
-            (
-                RC::Conversation(ConversationCommand::ConversationUndoTurn {
-                    turn_id: "t".into(),
-                }),
-                "undo_turn",
-            ),
-            (
-                RC::Conversation(ConversationCommand::ConversationCompact { turn_id: None }),
-                "compact",
-            ),
-            (
-                RC::Conversation(ConversationCommand::ConversationLoadMore {
-                    before_turn_id: "t".into(),
-                    count: 20,
-                }),
-                "load_more_turns",
-            ),
-            (
-                RC::Conversation(ConversationCommand::ConversationSetMode {
-                    mode: ConversationMode::Plan,
-                }),
-                "set_mode",
-            ),
-            (
-                RC::Tool(ToolCommand::ToolInvoke {
-                    tool_call_id: "c".into(),
-                    name: "exec".into(),
-                    action: "run".into(),
-                    args: serde_json::json!({}),
-                }),
-                "tool_call",
-            ),
-            (
-                RC::Tool(ToolCommand::ToolPermissionRespond {
-                    tool_call_id: "c".into(),
-                    approved: true,
-                    trust_folder: false,
-                    expected_revision: None,
-                }),
-                "permission_response",
-            ),
-            (
-                RC::Control(ControlCommand::InteractionAskRespond {
-                    interaction_id: "a1".into(),
-                    answers: vec![deepx_domain::AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "A".into(),
-                    }],
-                }),
-                "ask_response",
-            ),
-            (
-                RC::Control(ControlCommand::InteractionAskDismiss {
-                    interaction_id: "a1".into(),
-                }),
-                "ask_dismiss",
-            ),
-            (
-                RC::Control(ControlCommand::PlanReviewRespond {
-                    interaction_id: "p1".into(),
-                    approved: true,
-                    message: None,
-                    autonomous: false,
-                }),
-                "plan_review",
-            ),
-        ];
-
-        for (cmd, expected_type) in cases {
-            let env = RingingWorkerCommandEnvelope::new("s", "c", cmd);
-            let legacy = ringing_command_to_legacy(&env).expect("mapping must succeed");
-            let json = serde_json::to_value(&legacy).expect("serialize");
-            assert_eq!(
-                json["type"],
-                expected_type,
-                "expected {expected_type}, got {json}"
-            );
-        }
-
-        // 无 legacy 对应的命令必须显式失败
+    fn ringing_command_remains_typed_at_worker_boundary() {
         let env = RingingWorkerCommandEnvelope::new(
             "s",
             "c",
-            RC::Control(ControlCommand::SessionClose { seed: "s".into() }),
+            RC::Conversation(deepx_domain::ConversationCommand::ConversationCancel {
+                turn_id: None,
+            }),
         );
-        assert!(ringing_command_to_legacy(&env).is_err());
+        let value = serde_json::to_value(&env).expect("serialize");
+        assert_eq!(value["wire"], "Ringing_domain_v2");
+        assert_eq!(value["command"]["channel"], "conversation");
+        assert_eq!(value["command"]["type"], "conversation_cancel");
     }
 
     #[test]
@@ -425,8 +193,8 @@ mod tests {
         assert!(parsed.is_none(), "ringing events are skipped pre-router");
 
         // 未知 wire 拒绝
-        let err = read_worker_event_line(r#"{"wire":"nope","type":"ready"}"#)
-            .expect_err("must reject");
+        let err =
+            read_worker_event_line(r#"{"wire":"nope","type":"ready"}"#).expect_err("must reject");
         assert!(err.contains("unknown worker wire tag"));
     }
 
@@ -449,7 +217,7 @@ mod tests {
         );
         write_ringing_event_frame(&mut buf2, &env).expect("ringing write");
         let text = String::from_utf8_lossy(&buf2);
-        assert!(text.contains("\"wire\":\"Ringing_domain_v1\""));
+        assert!(text.contains("\"wire\":\"Ringing_domain_v2\""));
         assert!(text.contains("\"direction\":\"event\""));
     }
 
@@ -459,5 +227,4 @@ mod tests {
         let err = read_worker_command_frame(&mut reader).expect_err("must reject");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
-
 }

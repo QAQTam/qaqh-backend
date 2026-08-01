@@ -18,7 +18,7 @@ pub enum RingingChannel {
 }
 
 impl RingingChannel {
-    /// SSE 事件流的 URL 片段（`/ringing/v1/events/{channel}`）。
+    /// SSE 事件流的 URL 片段（`/ringing/v2/events/{channel}`）。
     pub fn as_str(self) -> &'static str {
         match self {
             RingingChannel::Control => "control",

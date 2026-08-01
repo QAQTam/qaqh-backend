@@ -3,23 +3,23 @@
 /**
  * 服务端 open 响应。
  */
-export type ClientOpenResponse = { schema: string, version: number, accepted: boolean, 
+export type ClientOpenResponse = { schema: string, version: number, accepted: boolean,
 /**
  * 服务端签发的 client session id（lease 与命令绑定该身份）。
  */
-client_session_id: string, 
+client_session_id: string,
 /**
  * 服务端确认启用的能力名。
  */
-capabilities?: Array<string>, 
+capabilities?: Array<string>,
 /**
  * 服务端 epoch（SSE stream_seq 基准）。
  */
-server_epoch: string, 
+server_epoch: string,
 /**
  * 逻辑 lease 的 TTL（毫秒）。
  */
-lease_ttl_ms: bigint, 
+lease_ttl_ms: bigint,
 /**
  * 建议的 lease renew 间隔（毫秒，< TTL）。
  */

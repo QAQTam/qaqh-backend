@@ -10,9 +10,26 @@ function clampWidth(w: number): number {
   return Math.round(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, w)));
 }
 
+function readSidebarWidth(): number {
+  try {
+    return Number(globalThis.localStorage?.getItem(LS_SIDEBAR_WIDTH)) || DEFAULT_WIDTH;
+  } catch {
+    return DEFAULT_WIDTH;
+  }
+}
+
+function updateSidebarWidth(value?: number): void {
+  try {
+    if (value === undefined) globalThis.localStorage?.removeItem(LS_SIDEBAR_WIDTH);
+    else globalThis.localStorage?.setItem(LS_SIDEBAR_WIDTH, String(value));
+  } catch {
+    // Storage can be unavailable in tests, sandboxed renderers, or privacy mode.
+  }
+}
+
 export default function AppShell(props: { sidebar: JSX.Element; workspace: JSX.Element }) {
   const [width, setWidth] = createSignal(
-    clampWidth(Number(localStorage.getItem(LS_SIDEBAR_WIDTH)) || DEFAULT_WIDTH),
+    clampWidth(readSidebarWidth()),
   );
   const [dragging, setDragging] = createSignal(false);
 
@@ -40,7 +57,7 @@ export default function AppShell(props: { sidebar: JSX.Element; workspace: JSX.E
     setDragging(false);
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
-    localStorage.setItem(LS_SIDEBAR_WIDTH, String(width()));
+    updateSidebarWidth(width());
   }
 
   onSettled(() => {
@@ -61,7 +78,7 @@ export default function AppShell(props: { sidebar: JSX.Element; workspace: JSX.E
           onMouseDown={onMouseDown}
           onDblClick={() => {
             setWidth(DEFAULT_WIDTH);
-            localStorage.removeItem(LS_SIDEBAR_WIDTH);
+            updateSidebarWidth();
           }}
         />
         <main class="thread-workspace" data-thread-workspace>{props.workspace}</main>

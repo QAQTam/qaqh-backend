@@ -43,13 +43,7 @@ impl ContentStore {
     }
 
     /// 存入内容。返回 content_id（SHA-256 前 32 hex 或随机）。
-    pub fn put(
-        &mut self,
-        seed: &str,
-        media_type: &str,
-        bytes: Vec<u8>,
-        truncated: bool,
-    ) -> String {
+    pub fn put(&mut self, seed: &str, media_type: &str, bytes: Vec<u8>, truncated: bool) -> String {
         let content_id = sha256_hex(&bytes);
         let now = Instant::now();
         self.entries.insert(
@@ -153,7 +147,8 @@ mod tests {
         let mut store = ContentStore::new();
         let id = store.put("s1", "text/plain", vec![1], false);
         // 直接改过期时间
-        store.entries.get_mut(&id).expect("exists").expires_at = Instant::now() - Duration::from_secs(1);
+        store.entries.get_mut(&id).expect("exists").expires_at =
+            Instant::now() - Duration::from_secs(1);
         assert!(store.get("s1", &id).is_none());
         assert_eq!(store.len(), 0);
     }

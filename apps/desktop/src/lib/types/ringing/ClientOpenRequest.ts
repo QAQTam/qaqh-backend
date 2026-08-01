@@ -4,11 +4,11 @@
  * 客户端 open 请求。端点不存在或版本不兼容时才显式选择 legacy；
  * 禁止在同一连接上猜测 frame 类型。
  */
-export type ClientOpenRequest = { schema: string, version: number, 
+export type ClientOpenRequest = { schema: string, version: number,
 /**
  * 客户端实例 id（后续 lease 绑定该身份）。
  */
-client_instance_id: string, 
+client_instance_id: string,
 /**
  * 请求启用的能力名（`CapabilityName::as_str()`）。
  */

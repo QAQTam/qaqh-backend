@@ -7,8 +7,8 @@ import type { JsonValue } from "./serde_json/JsonValue";
  * （PLAN 硬规则）。`state` 为对应频道的领域快照 payload
  * （Conversation/Tool/Control snapshot projection 在 transport 层注入强类型）。
  */
-export type RingingChannelSnapshot = { schema: string, version: number, channel: RingingChannel, seed: string, 
+export type RingingChannelSnapshot = { schema: string, version: number, channel: RingingChannel, seed: string,
 /**
  * 快照覆盖到的 stream_seq 基线（其后的可靠事件需从 cursor 回放）。
  */
-baseline_seq: bigint, state_revision: bigint, snapshot_version: number, state: JsonValue, };
+baseline_stream_seq: number, state_revision: number, snapshot_version: number, state: JsonValue, };

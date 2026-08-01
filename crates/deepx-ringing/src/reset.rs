@@ -1,7 +1,7 @@
 //! SSE 恢复指令：cursor 超出可靠 journal 保留窗口时的 `ringing.reset_required`。
 //!
 //! 该指令不是领域事件，不进入 snapshot/journal；客户端收到后必须经 HTTP
-//! 读取对应频道的权威 snapshot，并以 snapshot 的 `baseline_seq` 继续。
+//! 读取对应频道的权威 snapshot，并以 snapshot 的 `baseline_stream_seq` 继续。
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -16,6 +16,7 @@ pub struct RingingResetRequired {
     /// 需要重新拉取 snapshot 的会话。
     pub seed: String,
     /// 服务端该 seed+channel 仍可回放的最早 stream_seq。
+    #[ts(type = "number")]
     pub earliest_available_seq: u64,
 }
 
@@ -44,8 +45,7 @@ mod tests {
         assert!(json.contains("\"channel\":\"tool\""));
         assert!(json.contains("\"seed\":\"s1\""));
         assert!(json.contains("\"earliest_available_seq\":42"));
-        let back: RingingResetRequired =
-            serde_json::from_str(&json).expect("deserialize");
+        let back: RingingResetRequired = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, reset);
     }
 }

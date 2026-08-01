@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::channel::RingingChannel;
+use crate::event::ContentRef;
 
 /// 用户消息中的图片附件（multimodal）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -78,6 +79,13 @@ pub enum ControlCommand {
     SkillsRelease { name: String },
     /// 从磁盘重载 skill 目录并刷新目录系统消息。
     SkillsReload,
+    /// 带 operation id/revision 保护的 skill UI 操作。
+    /// revision 本身统一位于 Ringing command envelope。
+    SkillsOperation {
+        operation_id: String,
+        action: String,
+        name: String,
+    },
 }
 
 /// Conversation 频道命令。
@@ -91,6 +99,9 @@ pub enum ConversationCommand {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageBlock>,
+        /// Electron main 上传后的会话附件引用；命令中不允许出现本地路径。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachments: Option<Vec<ContentRef>>,
     },
     /// 取消当前回合（停止 gate 流式输出与工具执行）。
     ConversationCancel {
@@ -132,14 +143,12 @@ pub enum ToolCommand {
         args: serde_json::Value,
     },
     /// 权限请求响应。必须携带对应 interaction/tool_call 的 id；
-    /// `expected_revision` 用于 revision-safe 语义。
+    /// revision-safe 语义统一由 Ringing command envelope 承载。
     ToolPermissionRespond {
         tool_call_id: String,
         approved: bool,
         #[serde(default)]
         trust_folder: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expected_revision: Option<u64>,
     },
 }
 

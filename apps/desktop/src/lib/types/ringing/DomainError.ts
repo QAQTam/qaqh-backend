@@ -3,23 +3,23 @@
 /**
  * 失败终态的错误域（PLAN：错误带 scope、code、retryable、dedupe_key）。
  */
-export type DomainError = { 
+export type DomainError = {
 /**
  * 唯一错误实例 id，用于 toast 去重与日志关联。
  */
-error_id: string, 
+error_id: string,
 /**
  * 稳定错误码（如 "provider_http_500"）。
  */
-code: string, 
+code: string,
 /**
  * 人类可读消息（脱敏，禁止含 API key / provider 原始响应）。
  */
-message: string, 
+message: string,
 /**
  * 是否可重试。
  */
-retryable: boolean, 
+retryable: boolean,
 /**
  * 去重键；同键错误只产生一个前端 toast。
  */

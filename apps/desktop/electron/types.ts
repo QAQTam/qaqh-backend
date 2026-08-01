@@ -30,6 +30,7 @@ export type ControlMessage = {
 
 export interface BackendStatus {
   connected: boolean;
+  transport?: "ringing" | "legacy";
   error?: string;
   updatePending?: boolean;
 }
