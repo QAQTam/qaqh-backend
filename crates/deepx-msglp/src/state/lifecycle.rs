@@ -3,7 +3,7 @@
 use super::agent::AgentState;
 use crate::util::chrono_local_date;
 use deepx_session::SessionManager;
-use deepx_tools;
+use deepx_workspace;
 
 /// Load session from disk via [`SessionManager`].
 ///
@@ -81,16 +81,16 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                     .msg
                     .remove_system_messages_by_prefix("Available skills");
 
-                deepx_tools::workspace::set_current_session(&agent.session.seed);
-                deepx_tools::workspace::load_session_workspace(&agent.session.seed);
-                let workspace = deepx_tools::CURRENT_WORKSPACE
+                deepx_workspace::workspace::set_current_session(&agent.session.seed);
+                deepx_workspace::workspace::load_session_workspace(&agent.session.seed);
+                let workspace = deepx_workspace::CURRENT_WORKSPACE
                     .read()
                     .unwrap_or_else(|error| error.into_inner())
                     .clone();
                 agent.skills.set_workspace(std::path::Path::new(&workspace));
                 agent.skills.restore(&agent.session.skills.clone());
                 // Hot-load latest tool schema (order-stable: new tools appended at end)
-                agent.tool_defs = deepx_tools::runtime::all_tools();
+                agent.tool_defs = deepx_workspace::runtime::all_tools();
                 log::info!(
                     "deepx-agent: restored session {} ({} msgs, {} tokens)",
                     agent.session.seed,
@@ -124,9 +124,9 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
     } else {
         deepx_message::MessageStore::new(&seed)
     };
-    deepx_tools::workspace::set_current_session(&agent.session.seed);
-    deepx_tools::workspace::load_session_workspace(&agent.session.seed);
-    let workspace = deepx_tools::CURRENT_WORKSPACE
+    deepx_workspace::workspace::set_current_session(&agent.session.seed);
+    deepx_workspace::workspace::load_session_workspace(&agent.session.seed);
+    let workspace = deepx_workspace::CURRENT_WORKSPACE
         .read()
         .unwrap_or_else(|error| error.into_inner())
         .clone();
@@ -167,9 +167,9 @@ pub fn create_session(agent: &mut AgentState) {
     } else {
         deepx_message::MessageStore::new(&agent.session.seed)
     };
-    deepx_tools::workspace::set_current_session(&agent.session.seed);
-    deepx_tools::workspace::load_session_workspace(&agent.session.seed);
-    let workspace = deepx_tools::CURRENT_WORKSPACE
+    deepx_workspace::workspace::set_current_session(&agent.session.seed);
+    deepx_workspace::workspace::load_session_workspace(&agent.session.seed);
+    let workspace = deepx_workspace::CURRENT_WORKSPACE
         .read()
         .unwrap_or_else(|error| error.into_inner())
         .clone();
@@ -208,9 +208,9 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
     } else {
         deepx_message::MessageStore::new(&agent.session.seed)
     };
-    deepx_tools::workspace::set_current_session(&agent.session.seed);
-    deepx_tools::workspace::load_session_workspace(&agent.session.seed);
-    let workspace = deepx_tools::CURRENT_WORKSPACE
+    deepx_workspace::workspace::set_current_session(&agent.session.seed);
+    deepx_workspace::workspace::load_session_workspace(&agent.session.seed);
+    let workspace = deepx_workspace::CURRENT_WORKSPACE
         .read()
         .unwrap_or_else(|error| error.into_inner())
         .clone();

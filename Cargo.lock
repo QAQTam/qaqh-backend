@@ -1791,6 +1791,7 @@ dependencies = [
 name = "deepx-daemon"
 version = "1.0.0-beta.5"
 dependencies = [
+ "deepx-config",
  "deepx-domain",
  "deepx-proto",
  "deepx-ringing",
@@ -1888,8 +1889,8 @@ dependencies = [
  "deepx-session",
  "deepx-skills",
  "deepx-subagent",
- "deepx-tools",
  "deepx-types",
+ "deepx-workspace",
  "log",
  "os_pipe",
  "serde_json",
@@ -1929,13 +1930,14 @@ dependencies = [
  "deepx-proto",
  "deepx-ringing",
  "deepx-session",
- "deepx-tools",
  "deepx-types",
+ "deepx-workspace",
  "log",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tokio",
+ "ureq",
 ]
 
 [[package]]
@@ -1973,37 +1975,11 @@ name = "deepx-subagent"
 version = "1.0.0-beta.5"
 dependencies = [
  "deepx-session",
- "deepx-tools",
  "deepx-types",
+ "deepx-workspace",
  "log",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "deepx-tools"
-version = "1.0.0-beta.5"
-dependencies = [
- "chrono",
- "deepx-config",
- "deepx-message",
- "deepx-proto",
- "deepx-skills",
- "deepx-types",
- "deepx-vector",
- "git2",
- "hex",
- "html2text",
- "image",
- "log",
- "regex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "similar",
- "tempfile",
- "ureq",
- "windows 0.58.0",
 ]
 
 [[package]]
@@ -2075,6 +2051,33 @@ dependencies = [
  "thiserror 2.0.19",
  "tokenizers 0.23.1",
  "tracing",
+]
+
+[[package]]
+name = "deepx-workspace"
+version = "1.0.0-beta.5"
+dependencies = [
+ "chrono",
+ "deepx-config",
+ "deepx-message",
+ "deepx-proto",
+ "deepx-skills",
+ "deepx-types",
+ "deepx-vector",
+ "git2",
+ "hex",
+ "html2text",
+ "image",
+ "log",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "similar",
+ "tempfile",
+ "tiny_http",
+ "ureq",
+ "windows 0.58.0",
 ]
 
 [[package]]

@@ -319,7 +319,7 @@ pub(super) fn apply_diff_and_format(
             result.push_str(&format!(" {}\n", out_lines[i]));
         }
         let desc = if description.is_empty() {
-            "edit_file_diff"
+            "edit_block"
         } else {
             description
         };
@@ -347,7 +347,7 @@ pub(super) fn apply_diff_and_format(
                 result.push_str("\u{26a0} fuzzy match (indentation normalized)\n");
             }
             let desc = if description.is_empty() {
-                "edit_file_diff"
+                "edit_block"
             } else {
                 description
             };
@@ -366,190 +366,6 @@ pub(super) fn apply_diff_and_format(
     }
 }
 
-// ── Pure-Rust grep engine (used by grep tool on Windows, search tool fallback) ──
-
-/// Search files/directories with regex. Returns `path:line:content` lines.
-/// Handles single files, recursive directory walk, glob filtering, binary skip.
-pub(crate) fn rust_grep(
-    pattern: &str,
-    path: &str,
-    recursive: bool,
-    line_numbers: bool,
-    glob: Option<&str>,
-    max_results: usize,
-) -> Result<Vec<String>, String> {
-    let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
-    let p = std::path::Path::new(path);
-    let mut results = Vec::new();
-
-    if p.is_dir() {
-        if recursive {
-            walk_dir(p, glob, &re, line_numbers, max_results, &mut results)
-                .map_err(|e| format!("{path}: {e}"))?;
-        } else {
-            // Non-recursive dir: search only immediate files
-            walk_dir_flat(p, glob, &re, line_numbers, max_results, &mut results)
-                .map_err(|e| format!("{path}: {e}"))?;
-        }
-    } else if p.is_file() {
-        search_file(p, &re, line_numbers, max_results, &mut results);
-    } else {
-        return Err(format!("{path}: no such file or directory"));
-    }
-    Ok(results)
-}
-
-fn search_file(
-    path: &std::path::Path,
-    re: &regex::Regex,
-    line_numbers: bool,
-    max_results: usize,
-    results: &mut Vec<String>,
-) {
-    if is_binary_file(path) {
-        return;
-    }
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    for (i, line) in content.lines().enumerate() {
-        if re.is_match(line) {
-            let disp = crate::display_path(&path.to_string_lossy());
-            if line_numbers {
-                results.push(format!("{}:{}:{}", disp, i + 1, line));
-            } else {
-                results.push(format!("{}:{}", disp, line));
-            }
-            if results.len() >= max_results {
-                return;
-            }
-        }
-    }
-}
-
-fn walk_dir(
-    dir: &std::path::Path,
-    glob: Option<&str>,
-    re: &regex::Regex,
-    line_numbers: bool,
-    max_results: usize,
-    results: &mut Vec<String>,
-) -> std::io::Result<()> {
-    if results.len() >= max_results {
-        return Ok(());
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        let fname = path
-            .file_name()
-            .map(|n| n.to_string_lossy())
-            .unwrap_or_default();
-
-        if path.is_dir() {
-            if fname == ".git" || fname == "target" || fname == "node_modules" {
-                continue;
-            }
-            walk_dir(&path, glob, re, line_numbers, max_results, results)?;
-        } else if path.is_file() {
-            if results.len() >= max_results {
-                return Ok(());
-            }
-            if let Some(g) = glob {
-                if !simple_glob_match(g, &fname) {
-                    continue;
-                }
-            }
-            search_file(&path, re, line_numbers, max_results, results);
-        }
-    }
-    Ok(())
-}
-
-fn walk_dir_flat(
-    dir: &std::path::Path,
-    glob: Option<&str>,
-    re: &regex::Regex,
-    line_numbers: bool,
-    max_results: usize,
-    results: &mut Vec<String>,
-) -> std::io::Result<()> {
-    if results.len() >= max_results {
-        return Ok(());
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.is_file() {
-            if results.len() >= max_results {
-                return Ok(());
-            }
-            let fname = path
-                .file_name()
-                .map(|n| n.to_string_lossy())
-                .unwrap_or_default();
-            if let Some(g) = glob {
-                if !simple_glob_match(g, &fname) {
-                    continue;
-                }
-            }
-            search_file(&path, re, line_numbers, max_results, results);
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn simple_glob_match(glob: &str, filename: &str) -> bool {
-    if glob == "*" || glob == "**" {
-        return true;
-    }
-    let starts = glob.starts_with('*');
-    let ends = glob.ends_with('*');
-    let inner = glob.trim_matches('*');
-    if inner.is_empty() {
-        return true;
-    }
-    match (starts, ends) {
-        (true, true) => filename.contains(inner),
-        (true, false) => filename.ends_with(inner),
-        (false, true) => filename.starts_with(inner),
-        (false, false) => filename == glob,
-    }
-}
-
-fn is_binary_file(path: &std::path::Path) -> bool {
-    match std::fs::read(path) {
-        Ok(data) => {
-            let check = &data[..data.len().min(16384)];
-            if check.contains(&0u8) {
-                return true;
-            }
-            let non_printable = check
-                .iter()
-                .filter(|&&b| b != 0x09 && b != 0x0A && b != 0x0D && (b < 0x20 || b > 0x7E))
-                .count();
-            non_printable as f64 / check.len().max(1) as f64 > 0.30
-        }
-        Err(_) => false,
-    }
-}
-
-/// Check if a file read error indicates a binary (non-UTF-8) file.
 pub(super) fn is_binary_read_error(err: &str) -> bool {
     err.contains("valid UTF-8")
         || err.contains("utf8")

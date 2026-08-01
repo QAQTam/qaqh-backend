@@ -81,6 +81,28 @@ pub fn register(mgr: &mut crate::ToolManager) {
     });
 }
 
+/// Format a process info payload as a flat structured response.
+///
+/// `ProcessRegistry::get_info` already returns a structured JSON object
+/// (id/name/status/exit_code/output…). Serializing it into a `content` string
+/// would double-escape it (JSON inside a JSON string), so we spread the
+/// fields at the top level and add a short human-readable `content` summary
+/// that the context-fold logic can later replace with a hint.
+fn process_info_ok(id: u32, info: serde_json::Value) -> String {
+    let mut v = info;
+    if let serde_json::Value::Object(ref mut map) = v {
+        map.insert("timeis".to_string(), serde_json::json!(crate::now_utc8()));
+        if !map.contains_key("content") {
+            let status = map.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            map.insert(
+                "content".to_string(),
+                serde_json::json!(format!("process {id}: {status}")),
+            );
+        }
+    }
+    v.to_string()
+}
+
 fn handle_check(ctx: ToolCallCtx) -> ToolResult {
     let id: u32 = match ctx.args.get("id").and_then(|v| v.as_u64()) {
         Some(v) if v <= u32::MAX as u64 => v as u32,
@@ -99,9 +121,7 @@ fn handle_check(ctx: ToolCallCtx) -> ToolResult {
     match ProcessRegistry::get_info(id) {
         Some(info) => ToolResult {
             success: true,
-            content: crate::json_ok(
-                serde_json::json!({"content": serde_json::to_string_pretty(&info).unwrap_or_else(|_| format!("{:?}", info))}),
-            ),
+            content: process_info_ok(id, info),
         },
         None => ToolResult {
             success: false,
@@ -137,9 +157,7 @@ fn handle_wait(ctx: ToolCallCtx) -> ToolResult {
     match ProcessRegistry::wait_for(id, timeout_secs) {
         Some(info) => ToolResult {
             success: true,
-            content: crate::json_ok(
-                serde_json::json!({"content": serde_json::to_string_pretty(&info).unwrap_or_else(|_| format!("{:?}", info))}),
-            ),
+            content: process_info_ok(id, info),
         },
         None => ToolResult {
             success: false,

@@ -14,3 +14,6 @@ pub use registry::{AgentRegistry, cache_system_path, detect_os_info};
 pub use ringing::hub::RingingHub;
 pub use service::DeepxService;
 pub use worker::run_agent_worker;
+pub mod workspace_supervisor;
+pub use workspace_supervisor::{WorkspaceMode, WorkspaceSupervisor};
+pub use service::WorkspaceRuntimeState;

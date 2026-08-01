@@ -21,6 +21,8 @@ use super::journal::{AppendOutcome, CursorExpired, ReliableJournal};
 use super::projection::SnapshotProjector;
 use super::router::ChannelRouter;
 use super::sequencer::Sequencer;
+use super::content_store::{ContentEntry, ContentStore};
+use super::cutover::{CommandProtocol, CutoverError, CutoverState, EventProtocol};
 
 /// 事件已接受（含 envelope 与幂等状态）。
 #[derive(Debug)]
@@ -55,6 +57,10 @@ impl SeedChannelState {
 pub struct RingingHub {
     epoch: String,
     sequencer: Sequencer,
+    /// 大内容外置存储（会话所有权 + TTL）。
+    content_store: Mutex<ContentStore>,
+    /// 每 session/channel 两阶段切流状态（事件/命令协议权威记录）。
+    cutover: Mutex<CutoverState>,
     /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
     channels: Mutex<HashMap<RingingChannel, HashMap<String, SeedChannelState>>>,
     /// 每频道实时推送通道（SSE 消费；可靠性由 journal/cursor 保证）。
@@ -66,6 +72,8 @@ impl RingingHub {
         Self {
             epoch: epoch.into(),
             sequencer: Sequencer::new(),
+            content_store: Mutex::new(ContentStore::new()),
+            cutover: Mutex::new(CutoverState::new()),
             channels: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
         }
@@ -73,6 +81,97 @@ impl RingingHub {
 
     pub fn epoch(&self) -> &str {
         &self.epoch
+    }
+
+    /// 大内容外置：存入（返回 content_id）。
+    pub fn put_content(
+        &self,
+        seed: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+        truncated: bool,
+    ) -> String {
+        self.content_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .put(seed, media_type, bytes, truncated)
+    }
+
+    /// 大内容外置：读取（校验会话所有权 + TTL）。
+    pub fn get_content(&self, seed: &str, content_id: &str) -> Option<ContentEntry> {
+        self.content_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(seed, content_id)
+    }
+
+    /// 切流：channel_prepare（两阶段提交阶段 1）。
+    pub fn cutover_prepare(
+        &self,
+        seed: &str,
+        channel: RingingChannel,
+    ) -> Result<(), CutoverError> {
+        self.cutover
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .prepare(seed, channel)
+    }
+
+    /// 切流：channel_commit（阶段 2，原子切换 event owner）。
+    pub fn cutover_commit(
+        &self,
+        seed: &str,
+        channel: RingingChannel,
+    ) -> Result<(), CutoverError> {
+        self.cutover
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .commit(seed, channel)
+    }
+
+    /// 切流：prepare 失败/超时/断线 → abort，保持 legacy。
+    pub fn cutover_abort(&self, seed: &str, channel: RingingChannel) {
+        self.cutover
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .abort(seed, channel);
+    }
+
+    /// 切流：命令方向独立切换（`command_mode_prepare`）。
+    pub fn cutover_switch_command(
+        &self,
+        seed: &str,
+        channel: RingingChannel,
+        ringing: bool,
+    ) {
+        self.cutover
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .switch_command(
+                seed,
+                channel,
+                if ringing {
+                    CommandProtocol::Ringing
+                } else {
+                    CommandProtocol::Legacy
+                },
+            );
+    }
+
+    /// 事件协议是否已切到 Ringing（legacy 通道按此过滤）。
+    pub fn event_is_ringing(&self, seed: &str, channel: RingingChannel) -> bool {
+        self.cutover
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .event_is_ringing(seed, channel)
+    }
+
+    /// 命令协议是否已切到 Ringing。
+    pub fn command_is_ringing(&self, seed: &str, channel: RingingChannel) -> bool {
+        self.cutover
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .command_is_ringing(seed, channel)
     }
 
     fn channel_state(

@@ -1,0 +1,179 @@
+// Browser 调试桥：daemon `/debug/` 页在纯浏览器运行时的适配层。
+//
+// 背景：Electron 的 preload 只存在于 Electron 环境。浏览器直接打开
+// `http://127.0.0.1:<port>/debug/` 时 `window.deepx` 不存在，需要注入
+// 浏览器实现。daemon 的 Ringing 端点全部走 HTTP/SSE（fetch 可带
+// Authorization header），因此 Ringing 通道在浏览器完全可用；
+// legacy WS 需要自定义 header（浏览器 WebSocket 不支持），且 RPC 请求
+// 映射工作量大——debug 模式定位为**只读观察**：SSE 三频道 + snapshot +
+// 面板展示，backend.request/desktop 降级为 no-op。
+//
+// 注入点：main.tsx 最先调用 installBrowserBridge()；仅当
+// `window.__DEEPX_DEBUG__`（daemon 内联 token）存在时生效。
+
+import type { RingingEventBatch, RingingEventEnvelope } from "../lib/types/ringing";
+
+declare global {
+  interface Window {
+    __DEEPX_DEBUG__?: { token: string; nonce: string };
+  }
+}
+
+type ChannelName = "control" | "conversation" | "tool";
+
+// ── 模块级单例状态（SSE 三频道只启动一次） ──────────────────────────────
+let sseStarted = false;
+let sseBase = "";
+let sseToken = "";
+const batchListeners = new Set<(batch: RingingEventBatch) => void>();
+const statusListeners = new Set<(u: { channel: string; status: unknown }) => void>();
+
+function emitStatus(channel: string, status: unknown): void {
+  for (const listener of statusListeners) listener({ channel, status });
+}
+
+async function connectSse(ch: ChannelName): Promise<void> {
+  for (;;) {
+    try {
+      emitStatus(ch, { state: "connecting" });
+      const response = await fetch(`${sseBase}/ringing/v1/events/${ch}`, {
+        headers: { Authorization: `Bearer ${sseToken}`, Accept: "text/event-stream" },
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      emitStatus(ch, { state: "open", cursor: 0 });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) >= 0) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          handleFrame(ch, frame);
+        }
+      }
+      throw new Error("stream ended");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      emitStatus(ch, { state: "reconnecting", reason: message });
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+}
+
+function handleFrame(ch: ChannelName, frame: string): void {
+  let eventType = "";
+  let data = "";
+  for (const line of frame.split("\n")) {
+    if (line.startsWith(":")) continue;
+    if (line.startsWith("event:")) eventType = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  if (eventType !== "message" || !data) return;
+  try {
+    const envelope = JSON.parse(data) as RingingEventEnvelope;
+    const batch: RingingEventBatch = {
+      channel: ch,
+      seed: envelope.seed,
+      from_stream_seq: envelope.stream_seq,
+      to_stream_seq: envelope.stream_seq,
+      state_revision: envelope.state_revision ?? null,
+      events: [envelope.event],
+    };
+    for (const listener of batchListeners) listener(batch);
+  } catch {
+    // 忽略畸形帧
+  }
+}
+
+function ensureSse(base: string, token: string): void {
+  if (sseStarted) return;
+  sseStarted = true;
+  sseBase = base;
+  sseToken = token;
+  for (const ch of ["control", "conversation", "tool"] as ChannelName[]) {
+    void connectSse(ch);
+  }
+}
+
+/** 安装浏览器桥。返回是否生效（true = 处于 debug 只读模式）。 */
+export function installBrowserBridge(): boolean {
+  if (window.deepx || !window.__DEEPX_DEBUG__) return false;
+  const { token } = window.__DEEPX_DEBUG__;
+  const base = window.location.origin;
+
+  const http = async (path: string): Promise<unknown> => {
+    const response = await fetch(`${base}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  };
+
+  const noop = (): void => undefined;
+  const rejectReadOnly = (): Promise<never> =>
+    Promise.reject(new Error("browser debug 模式只读：操作请使用桌面应用"));
+
+  const bridge = {
+    backend: {
+      connect: noop as () => Promise<void>,
+      request: ((method: string) => {
+        // 只读观察：会话列表/活动查询返回空（避免控制台红字）；
+        // 其余 RPC 明确拒绝。
+        if (method === "session.list") return Promise.resolve([]);
+        if (method === "session.activity") return Promise.resolve([]);
+        if (method === "session.meta") return Promise.resolve({});
+        return rejectReadOnly();
+      }) as (m: string, p: Record<string, unknown>) => Promise<unknown>,
+      attach: noop,
+      detach: noop,
+      status: () => Promise.resolve({ connected: true }),
+      onMessage: () => () => undefined,
+      onStatus: () => () => undefined,
+    },
+    ringing: {
+      status: () => Promise.resolve({}),
+      mode: () => Promise.resolve({}),
+      cutoverEvents: rejectReadOnly as () => Promise<unknown>,
+      cutoverCommands: rejectReadOnly as () => Promise<unknown>,
+      snapshot: (seed: string, channel: string) =>
+        http(`/ringing/v1/snapshots/${channel}/${encodeURIComponent(seed)}`),
+      onBatch: (listener: (batch: RingingEventBatch) => void) => {
+        batchListeners.add(listener);
+        ensureSse(base, token);
+        return () => { batchListeners.delete(listener); };
+      },
+      onStatus: (listener: (u: { channel: string; status: unknown }) => void) => {
+        statusListeners.add(listener);
+        ensureSse(base, token);
+        return () => { statusListeners.delete(listener); };
+      },
+    },
+    desktop: {
+      openDialog: rejectReadOnly,
+      confirm: rejectReadOnly,
+      openPath: noop,
+      togglePet: noop as () => Promise<boolean>,
+      getPetStatus: noop as () => Promise<boolean>,
+      checkUpdate: () => Promise.resolve(null),
+      stageUpdate: rejectReadOnly,
+      applyUpdate: rejectReadOnly,
+      openDevTools: noop,
+      setBackgroundMaterial: noop,
+      onUpdateAvailable: () => () => undefined,
+      onUpdateFailed: () => () => undefined,
+      openImageDialog: rejectReadOnly,
+      readFileBase64: rejectReadOnly,
+      readTextFile: rejectReadOnly,
+    },
+  };
+
+  (window as unknown as { deepx: typeof bridge }).deepx = bridge;
+  console.info("[browser-bridge] debug 只读模式已启用（Ringing SSE 观察）");
+  return true;
+}

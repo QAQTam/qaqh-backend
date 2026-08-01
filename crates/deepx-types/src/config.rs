@@ -66,6 +66,22 @@ pub struct PersistentConfig {
     /// When total tokens exceed context_limit * threshold, compact is triggered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_threshold: Option<f64>,
+
+    /// 工具套件运行环境（deepx-workspace serve）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<PersistentWorkspaceConfig>,
+}
+
+/// 工具套件运行环境配置。
+///
+/// - `local`（默认）：daemon 拉起本机 `deepx-workspace serve`（Windows 原生）。
+/// - `wsl`（仅 Windows）：daemon 经 `wsl.exe` 在 WSL 发行版内拉起
+///   `deepx-workspace serve`，Windows 端经 localhost 访问（WSL2 自动转发）。
+///   Linux 原生系统无此选项——工具本来就在 Linux 环境运行。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersistentWorkspaceConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// Persistence-friendly subagent config with all-Option fields.

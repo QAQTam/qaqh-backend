@@ -36,6 +36,8 @@ enum Shell {
 static DETECTED_SHELL: OnceLock<Shell> = OnceLock::new();
 /// Full path to bash on Windows — avoids the WSL wrapper at System32\\bash.exe.
 static DETECTED_BASH_PATH: OnceLock<String> = OnceLock::new();
+/// Full path to PowerShell on Windows（pwsh 7 优先，powershell.exe 兜底）。
+static DETECTED_PWSH_PATH: OnceLock<String> = OnceLock::new();
 
 impl Shell {
     /// Auto-detect the best available shell on this platform.
@@ -43,12 +45,62 @@ impl Shell {
         *DETECTED_SHELL.get_or_init(Self::detect_uncached)
     }
 
+    /// Resolve an explicit shell name requested by the model (exec `shell`
+    /// parameter). Windows `bash` resolves to Git-for-Windows / MSYS2 when
+    /// present, avoiding the WSL wrapper. Unknown names fall back to None so
+    /// the caller can report a clean error.
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "bash" => {
+                #[cfg(windows)]
+                {
+                    const WIN_BASH_CANDIDATES: &[&str] = &[
+                        "C:\\Program Files\\Git\\bin\\bash.exe",
+                        "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+                        "C:\\msys64\\usr\\bin\\bash.exe",
+                    ];
+                    for p in WIN_BASH_CANDIDATES {
+                        if std::path::Path::new(p).is_file() {
+                            DETECTED_BASH_PATH.get_or_init(|| p.to_string());
+                            return Some(Shell::Bash);
+                        }
+                    }
+                    if let Some(found) = find_bash_on_path() {
+                        DETECTED_BASH_PATH.get_or_init(|| found);
+                        return Some(Shell::Bash);
+                    }
+                    // No git bash available — plain `bash` (may be WSL wrapper,
+                    // but the model explicitly asked for bash).
+                    return Some(Shell::Bash);
+                }
+                #[cfg(not(windows))]
+                {
+                    Some(Shell::Bash)
+                }
+            }
+            "zsh" => Some(Shell::Zsh),
+            "sh" => Some(Shell::Sh),
+            "pwsh" | "powershell" => Some(Shell::PowerShell),
+            "cmd" => Some(Shell::Cmd),
+            _ => None,
+        }
+    }
+
     fn detect_uncached() -> Self {
         #[cfg(windows)]
         {
-            // Windows: `bash` on PATH often resolves to WSL's wrapper at
-            // C:\\Windows\\System32\\bash.exe.  Prefer Git for Windows / MSYS2
-            // at their standard install locations so commands run natively.
+            // Windows 默认 PowerShell（pwsh 7 优先，Windows 自带 powershell.exe 兜底）；
+            // 模型需要 POSIX 语义时显式传 `shell: "bash"`。
+            if executable_on_path("pwsh") {
+                DETECTED_PWSH_PATH.get_or_init(|| "pwsh".to_string());
+                return Shell::PowerShell;
+            }
+            if executable_on_path("powershell") {
+                DETECTED_PWSH_PATH.get_or_init(|| "powershell".to_string());
+                return Shell::PowerShell;
+            }
+            // 无 PowerShell（罕见）：退回 Git for Windows / MSYS2 bash，
+            // 避免 WSL wrapper（System32\\bash.exe）。
             const WIN_BASH_CANDIDATES: &[&str] = &[
                 "C:\\Program Files\\Git\\bin\\bash.exe",
                 "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
@@ -60,14 +112,9 @@ impl Shell {
                     return Shell::Bash;
                 }
             }
-            // Fall back to PATH-based search (skip WSL wrappers in System32 /
-            // WindowsApps by checking known-bad prefixes).
             if let Some(found) = find_bash_on_path() {
                 DETECTED_BASH_PATH.get_or_init(|| found);
                 return Shell::Bash;
-            }
-            if executable_on_path("pwsh") {
-                return Shell::PowerShell;
             }
             Shell::Cmd
         }
@@ -91,7 +138,12 @@ impl Shell {
             }
             Shell::Zsh => "zsh",
             Shell::Sh => "sh",
-            Shell::PowerShell => "pwsh",
+            Shell::PowerShell => {
+                DETECTED_PWSH_PATH
+                    .get()
+                    .map(String::as_str)
+                    .unwrap_or("pwsh")
+            }
             Shell::Cmd => "cmd",
         }
     }
@@ -195,6 +247,7 @@ fn read_stream(
     tool_call_id: String,
     output_stream: ExecOutputStream,
     progress_seq: Arc<AtomicU64>,
+    registry_id: Option<u32>,
 ) -> (Vec<u8>, bool) {
     let mut reader = std::io::BufReader::new(stream);
     let mut buf = vec![0u8; 8192];
@@ -216,6 +269,7 @@ fn read_stream(
                         &tool_call_id,
                         output_stream,
                         &progress_seq,
+                        registry_id,
                     );
                 }
                 if retained < n {
@@ -235,6 +289,9 @@ fn read_stream(
             &progress_seq,
             String::from_utf8_lossy(&pending_utf8).into_owned(),
         );
+        if let Some(id) = registry_id {
+            append_registry(id, output_stream, &String::from_utf8_lossy(&pending_utf8));
+        }
     }
     (out, truncated)
 }
@@ -249,12 +306,16 @@ fn forward_progress(
     tool_call_id: &str,
     stream: ExecOutputStream,
     seq: &Arc<AtomicU64>,
+    registry_id: Option<u32>,
 ) {
     pending.extend_from_slice(bytes);
     loop {
         match std::str::from_utf8(pending) {
             Ok(valid) => {
                 send_progress(tx, tool_call_id, stream, seq, valid.to_owned());
+                if let Some(id) = registry_id {
+                    append_registry(id, stream, valid);
+                }
                 pending.clear();
                 return;
             }
@@ -279,6 +340,14 @@ fn forward_progress(
             }
             Err(_) => return, // incomplete character at end; wait for next read.
         }
+    }
+}
+
+/// 将已解码的输出块追加到进程注册表（backgrounded 后 process_check 可查 tail）。
+fn append_registry(id: u32, stream: ExecOutputStream, chunk: &str) {
+    match stream {
+        ExecOutputStream::Stdout => crate::process_registry::ProcessRegistry::append_output(id, chunk),
+        ExecOutputStream::Stderr => crate::process_registry::ProcessRegistry::append_stderr(id, chunk),
     }
 }
 
@@ -312,7 +381,7 @@ fn decode_windows_oem(bytes: &[u8]) -> Option<String> {
     // flag prevents silent substitution of invalid sequences (a split DBCS
     // byte at the end of a pipe read is not an error — it waits for the next
     // chunk).  TODO(migration): replace with `windows` crate's
-    // `GetOEMCP` / `MultiByteToWideChar` bindings when `deepx-tools` gains
+    // `GetOEMCP` / `MultiByteToWideChar` bindings when `deepx-workspace` gains
     // a `windows` dependency.
     #[link(name = "Kernel32")]
     unsafe extern "system" {
@@ -479,9 +548,11 @@ fn token_truncate(text: &str, max_tokens: u32) -> String {
 /// Uses background threads for pipe reading and poll-based timeout.
 fn direct_exec(
     argv: &[String],
+    env: Option<&[(String, String)]>,
     cwd: Option<&str>,
     max_output_tokens: u32,
     timeout_secs: u64,
+    background_after_secs: Option<u64>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     progress_tx: Option<ExecProgressSender>,
     tool_call_id: &str,
@@ -497,6 +568,9 @@ fn direct_exec(
     let mut cmd = std::process::Command::new(&argv[0]);
     if argv.len() > 1 {
         cmd.args(&argv[1..]);
+    }
+    if let Some(env) = env {
+        cmd.envs(env.iter().map(|(k, v)| (k, v)));
     }
     #[cfg(windows)]
     {
@@ -527,9 +601,17 @@ fn direct_exec(
                 stdout_bytes: 0,
                 stderr_bytes: 0,
                 ui_dropped_bytes: 0,
+                process_id: None,
             };
         }
     };
+
+    // 接线 ProcessRegistry：先注册（管道线程捕获 proc_id），take 管道后
+    // 再把子进程句柄移入注册表（poll 经 try_wait、超时移交可查）。
+    let proc_id = crate::process_registry::ProcessRegistry::register(&display_name);
+    // 移交标志：只有 backgrounded（超时移交）才需要管道线程善后写回状态；
+    // 正常路径 direct_exec 自己 mark_exited，线程不得空轮询。
+    let handoff = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Start background pipe readers
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
@@ -539,6 +621,7 @@ fn direct_exec(
         let progress_tx = progress_tx.clone();
         let tool_call_id = tool_call_id.to_string();
         let progress_seq = progress_seq.clone();
+        let handoff = handoff.clone();
         std::thread::spawn(move || {
             let (s, t) = read_stream(
                 p,
@@ -547,8 +630,20 @@ fn direct_exec(
                 tool_call_id,
                 ExecOutputStream::Stdout,
                 progress_seq,
+                Some(proc_id),
             );
             let _ = stdout_tx.send((s, t));
+            // 仅 backgrounded（超时移交）善后：轮询写回退出状态（EOF 与
+            // 进程退出存在毫秒级竞态，try_wait 一次可能恰逢 None）。
+            if handoff.load(std::sync::atomic::Ordering::SeqCst) {
+                for _ in 0..100 {
+                    if let Some(code) = crate::process_registry::ProcessRegistry::try_wait(proc_id) {
+                        crate::process_registry::ProcessRegistry::mark_exited(proc_id, code);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
         });
     } else {
         let _ = stdout_tx.send((Vec::new(), false));
@@ -557,6 +652,7 @@ fn direct_exec(
         let progress_tx = progress_tx.clone();
         let tool_call_id = tool_call_id.to_string();
         let progress_seq = progress_seq.clone();
+        let handoff = handoff.clone();
         std::thread::spawn(move || {
             let (s, t) = read_stream(
                 p,
@@ -565,43 +661,102 @@ fn direct_exec(
                 tool_call_id,
                 ExecOutputStream::Stderr,
                 progress_seq,
+                Some(proc_id),
             );
             let _ = stderr_tx.send((s, t));
+            if handoff.load(std::sync::atomic::Ordering::SeqCst) {
+                for _ in 0..100 {
+                    if let Some(code) = crate::process_registry::ProcessRegistry::try_wait(proc_id) {
+                        crate::process_registry::ProcessRegistry::mark_exited(proc_id, code);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
         });
     } else {
         let _ = stderr_tx.send((Vec::new(), false));
     }
 
-    // Poll child with timeout
+    // 管道已 take，子进程句柄移入注册表（唯一持有）
+    crate::process_registry::ProcessRegistry::attach_child(proc_id, child);
+
+    // Poll child with timeout（子进程句柄唯一持有在注册表，经 try_wait 查询）
     let deadline = start_time + std::time::Duration::from_secs(timeout_secs);
+    // 快速移交：子进程存活超过 background_after_secs 即移交后台（不等 timeout）。
+    // 用于拉起长驻服务（serve/daemon/watch）—���调用方希望尽快拿到
+    // backgrounded tool_result，用 process_check/wait/kill 接管，而不是
+    // 死等到 timeout_secs 让 agent loop 阻塞。
+    let handoff_deadline =
+        background_after_secs.map(|secs| start_time + std::time::Duration::from_secs(secs));
     let mut exit_code: Option<i32> = None;
     let mut timed_out = false;
     let mut cancelled = false;
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                exit_code = status.code();
+        match crate::process_registry::ProcessRegistry::try_wait(proc_id) {
+            Some(code) => {
+                exit_code = Some(code);
                 break;
             }
-            Ok(None) => {
+            None => {
                 if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
                     || crate::CANCEL.load(std::sync::atomic::Ordering::SeqCst)
                 {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    // 取消 = 杀进程树（含后代），��止管道泄漏
+                    crate::process_registry::ProcessRegistry::kill(proc_id);
                     cancelled = true;
                     break;
                 }
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    // 超时 = 移交后台（不 kill）：进程存活、管道线程继续
+                    // append_output/推流，LLM 可用 process_check/wait/kill 接管。
+                    timed_out = true;
+                    break;
+                }
+                if handoff_deadline.is_some_and(|hd| std::time::Instant::now() >= hd) {
+                    // 快速移交：进程仍在运行且已超过观察窗口 → 立即转后台。
                     timed_out = true;
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Err(_) => break,
         }
+    }
+
+    // 超时移交：不再等待管道（读取线程仍在后台 append 到注册表）
+    if timed_out {
+        handoff.store(true, std::sync::atomic::Ordering::SeqCst);
+        let info = crate::process_registry::ProcessRegistry::get_info(proc_id)
+            .unwrap_or_else(|| serde_json::json!({}));
+        return ExecOutput {
+            status: "backgrounded",
+            command: display_name,
+            exit_code: None,
+            output: serde_json::json!({
+                "backgrounded": true,
+                "process_id": proc_id,
+                "transferred_after_secs": start_time.elapsed().as_secs_f64(),
+                "hint": "进程已转入后台（未终止）。用 process_check(process_id) 查看状态，process_wait(process_id) 等待完成，process_kill(process_id) 终止。",
+                "info": info,
+            })
+            .to_string(),
+            wall_time_seconds: start_time.elapsed().as_secs_f64(),
+            original_tokens: 0,
+            truncated: false,
+            timed_out: true,
+            cancelled: false,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            ui_dropped_bytes: 0,
+            process_id: Some(proc_id),
+        };
+    }
+
+    // 正常退出 / 取消：标记注册表状态
+    if cancelled {
+        crate::process_registry::ProcessRegistry::kill(proc_id);
+    } else if let Some(code) = exit_code {
+        crate::process_registry::ProcessRegistry::mark_exited(proc_id, code);
     }
 
     // Collect pipe output (threads finish after child exits)
@@ -651,6 +806,7 @@ fn direct_exec(
         stdout_bytes,
         stderr_bytes,
         ui_dropped_bytes,
+        process_id: Some(proc_id),
     }
 }
 
@@ -670,6 +826,9 @@ pub(crate) struct ExecOutput {
     stderr_bytes: u64,
     /// Bytes not sent to the UI because its bounded event queue was full.
     ui_dropped_bytes: u64,
+    /// 超时移交后台时的注册表进程 id（process_check/wait/kill 使用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process_id: Option<u32>,
 }
 
 impl ExecOutput {
@@ -695,7 +854,24 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
                 ),
             };
         }
-        Shell::detect().derive_exec_args(command)
+        // Explicit shell override (exec `shell` param) or platform default.
+        let shell = match ctx.args.get("shell").and_then(|v| v.as_str()) {
+            Some(name) if !name.is_empty() => match Shell::from_name(name) {
+                Some(shell) => shell,
+                None => {
+                    return ToolResult {
+                        success: false,
+                        content: crate::json_err(
+                            "UNKNOWN_SHELL",
+                            format!("unknown shell '{name}'"),
+                            "Use one of: bash, zsh, sh, pwsh, cmd. The default is auto-detected (bash on Windows).",
+                        ),
+                    };
+                }
+            },
+            _ => Shell::detect(),
+        };
+        shell.derive_exec_args(command)
     } else {
         match ctx.args.get("argv").and_then(|v| v.as_array()) {
             Some(arr) => arr
@@ -732,8 +908,18 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
         .get_u64("timeout_secs")
         .filter(|&n| n > 0 && n <= 3600)
         .unwrap_or_else(|| ctx.timeout_secs.unwrap_or(30).clamp(1, 3600));
-    // Fall back to workspace root when the caller doesn't supply cwd
-    let cwd: Option<String> = ctx.get_str("cwd").map(String::from).or_else(|| {
+    // 快速后台移交窗口：进程存活超过该时长（秒）即返回 backgrounded，
+    // 不等 timeout_secs。用于拉起长驻服务（serve/daemon/watch）。
+    let background_after_secs = ctx
+        .get_u64("background_after_secs")
+        .filter(|&n| n > 0 && n <= 3600);
+    // Fall back to workspace root when the caller doesn't supply cwd.
+    // A relative cwd resolves against the workspace root (or the process
+    // directory when no workspace is set) — same semantics as file tools.
+    let cwd: Option<String> = ctx.get_str("cwd").map(String::from).map(|cwd| {
+        let resolved = crate::resolve_workspace_path(&cwd);
+        if resolved.is_empty() { cwd } else { resolved }
+    }).or_else(|| {
         let ws = crate::CURRENT_WORKSPACE.read().ok()?;
         if ws.is_empty() || *ws == "." {
             None
@@ -742,11 +928,24 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
         }
     });
     let cwd_ref: Option<&str> = cwd.as_deref();
+    // 可选环境变量覆盖（传入完整 env 供子进程使用）。
+    let env: Option<Vec<(String, String)>> = ctx
+        .args
+        .get("env")
+        .and_then(|v| v.as_object())
+        .map(|map| {
+            map.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .filter(|pairs: &Vec<(String, String)>| !pairs.is_empty());
     let result = direct_exec(
         &argv,
+        env.as_deref(),
         cwd_ref,
         max_output_tokens,
         timeout_secs,
+        background_after_secs,
         Some(ctx.cancel.as_ref()),
         ctx.tx_progress.clone(),
         &ctx.id,
@@ -813,8 +1012,11 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 "properties": {
                     "argv": { "type": "array", "items": {"type": "string"}, "description": "Command as array of strings. argv[0]=executable, argv[1..]=args. Example: [\"cargo\",\"check\"]" },
                     "command": { "type": "string", "description": "Shell command string. Auto-wrapped in platform shell (bash -c, pwsh -Command, or cmd /c). Use for pipes, redirects, or one-liners. Example: \"ls -la | grep foo\"" },
-                    "cwd": {"type": "string", "description": "Working directory (optional). Defaults to workspace root."},
+                    "shell": { "type": "string", "enum": ["bash", "zsh", "sh", "pwsh", "cmd"], "description": "Shell to wrap `command` with (optional). Default: pwsh (PowerShell 7, powershell.exe fallback) on Windows, bash on Unix. Pick bash when the command uses POSIX syntax (e.g. ls | grep, $VAR, &&). Ignored in argv mode." },
+                    "cwd": {"type": "string", "description": "Working directory (optional). Relative paths resolve against the workspace root (or process directory when no workspace is set). Defaults to workspace root."},
+                    "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Environment variables to set for the child (optional). Keys/values must be strings; existing variables with the same name are overridden."},
                     "timeout_secs": {"type": "integer", "description": "Timeout in seconds (1-3600, default 30)"},
+                    "background_after_secs": {"type": "integer", "description": "Fast handoff window in seconds (1-3600, optional). If the child is still running after this many seconds, the call returns immediately with status \"backgrounded\" plus a process_id (instead of waiting until timeout_secs). Use this when launching long-running services (serve/daemon/watch): the model then takes over with process_check(process_id), process_wait(process_id), or process_kill(process_id)."},
                     "max_output_tokens": { "type": "integer", "description": "Max tokens of output before smart truncation (head 70% + tail 30%). Default 10000, min 100, max 50000." }
                 },
                 "required": [],
@@ -837,9 +1039,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shell_from_name_resolves_known_shells() {
+        assert_eq!(Shell::from_name("pwsh"), Some(Shell::PowerShell));
+        assert_eq!(Shell::from_name("powershell"), Some(Shell::PowerShell));
+        assert_eq!(Shell::from_name("cmd"), Some(Shell::Cmd));
+        assert_eq!(Shell::from_name("zsh"), Some(Shell::Zsh));
+        assert_eq!(Shell::from_name("sh"), Some(Shell::Sh));
+        assert_eq!(Shell::from_name("bash"), Some(Shell::Bash));
+        assert_eq!(Shell::from_name("fish"), None);
+        assert_eq!(Shell::from_name(""), None);
+    }
+
+    #[test]
+    fn shell_derive_args_are_shell_specific() {
+        // Note: on Windows the bash path may have been resolved to
+        // Git-for-Windows by another test (shared DETECTED_BASH_PATH), so
+        // only assert the tail of argv[0] and the fixed wrapper arguments.
+        let bash = Shell::Bash.derive_exec_args("ls -la");
+        assert!(
+            bash[0].ends_with("bash") || bash[0].ends_with("bash.exe"),
+            "argv[0]={}",
+            bash[0]
+        );
+        assert_eq!(bash[1], "-c");
+        assert_eq!(bash[2], "ls -la");
+
+        let pwsh = Shell::PowerShell.derive_exec_args("Get-ChildItem");
+        assert_eq!(&pwsh[..3], ["pwsh", "-NoProfile", "-Command"]);
+        assert_eq!(pwsh[3], "Get-ChildItem");
+
+        let cmd = Shell::Cmd.derive_exec_args("dir");
+        assert_eq!(&cmd[..2], ["cmd", "/c"]);
+        assert_eq!(cmd[2], "dir");
+    }
+
+    #[test]
     fn test_git_status_returns_output() {
         let argv = vec!["git".to_string(), "status".to_string()];
-        let result = direct_exec(&argv, None, 10000, 10, None, None, "test");
+        let result = direct_exec(&argv, None, None, 10000, 10, None, None, None, "test");
         eprintln!(
             "exit_code={:?} timed_out={} time={:.3}s tokens={}",
             result.exit_code, result.timed_out, result.wall_time_seconds, result.original_tokens
@@ -851,7 +1088,7 @@ mod tests {
     #[test]
     fn test_git_diff_returns_output() {
         let argv = vec!["git".to_string(), "diff".to_string(), "--stat".to_string()];
-        let result = direct_exec(&argv, None, 10000, 10, None, None, "test");
+        let result = direct_exec(&argv, None, None, 10000, 10, None, None, None, "test");
         eprintln!(
             "exit_code={:?} timed_out={} time={:.3}s tokens={}",
             result.exit_code, result.timed_out, result.wall_time_seconds, result.original_tokens
@@ -867,7 +1104,7 @@ mod tests {
             "-p".to_string(),
             "deepx-types".to_string(),
         ];
-        let result = direct_exec(&argv, None, 10000, 60, None, None, "test");
+        let result = direct_exec(&argv, None, None, 10000, 60, None, None, None, "test");
         eprintln!(
             "exit_code={:?} timed_out={} time={:.3}s tokens={}",
             result.exit_code, result.timed_out, result.wall_time_seconds, result.original_tokens
@@ -891,7 +1128,7 @@ mod tests {
             signal.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let result = direct_exec(&argv, None, 100, 10, Some(cancel.as_ref()), None, "test");
+        let result = direct_exec(&argv, None, None, 100, 10, None, Some(cancel.as_ref()), None, "test");
         assert!(
             result.cancelled,
             "per-call cancellation should stop the child"
@@ -912,7 +1149,7 @@ mod tests {
             signal.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let result = direct_exec(&argv, None, 100, 10, Some(cancel.as_ref()), None, "test");
+        let result = direct_exec(&argv, None, None, 100, 10, None, Some(cancel.as_ref()), None, "test");
         assert!(
             result.cancelled,
             "per-call cancellation should stop the child"
@@ -938,6 +1175,7 @@ mod tests {
             "call-stream-1".to_string(),
             ExecOutputStream::Stdout,
             Arc::new(AtomicU64::new(0)),
+            None,
         );
 
         let chunks: Vec<_> = rx.try_iter().collect();
@@ -964,7 +1202,7 @@ mod tests {
         ];
         let (tx, rx) = crate::bounded_exec_progress_channel();
 
-        let result = direct_exec(&argv, None, 100, 10, None, Some(tx), "call-stream-2");
+        let result = direct_exec(&argv, None, None, 100, 10, None, None, Some(tx), "call-stream-2");
         let chunks: Vec<_> = rx.try_iter().collect();
 
         assert!(result.output.contains("streamed-output"));
@@ -987,6 +1225,7 @@ mod tests {
             "utf8".to_string(),
             ExecOutputStream::Stdout,
             Arc::new(AtomicU64::new(0)),
+            None,
         );
         assert!(!truncated);
         let text: String = rx.try_iter().map(|event| event.chunk).collect();
@@ -1029,15 +1268,32 @@ mod tests {
     }
 
     #[test]
-    fn command_mode_uses_bash_on_windows_if_available() {
-        // On Windows with Git/MSYS2, bash should be detected and usable
+    fn command_mode_uses_detected_shell() {
+        // 默认检测的 shell（Windows=pwsh / Unix=bash）应可运行 command 模式
         let argv = Shell::detect().derive_exec_args("echo hello-from-shell");
-        let result = direct_exec(&argv, None, 100, 10, None, None, "shell-test");
+        let result = direct_exec(&argv, None, None, 100, 10, None, None, None, "shell-test");
         assert_eq!(result.exit_code, Some(0), "shell exec failed: {}", result.output);
         // Should output "hello-from-shell" from the echo command
         assert!(
             result.output.contains("hello-from-shell"),
             "expected 'hello-from-shell' in output, got: '{}'",
+            result.output
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_bash_shell_resolves_git_bash() {
+        // 模型显式传 shell: bash 时（Windows）应解析到可运行 bash，
+        // 且 POSIX 管道语义可用。
+        let argv = Shell::from_name("bash")
+            .expect("bash name resolves")
+            .derive_exec_args("echo posix-ok | tr a-z A-Z");
+        let result = direct_exec(&argv, None, None, 100, 10, None, None, None, "bash-test");
+        assert_eq!(result.exit_code, Some(0), "bash exec failed: {}", result.output);
+        assert!(
+            result.output.contains("POSIX-OK"),
+            "bash pipeline output missing marker: {}",
             result.output
         );
     }
@@ -1068,5 +1324,85 @@ mod tests {
 
         let _ = std::fs::remove_file(candidate);
         let _ = std::fs::remove_dir(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn timeout_transfers_process_to_background_registry() {
+        // 8 秒 sleep，超时 3 秒 → 移交后台（不 kill）。
+        // 用 PowerShell Start-Sleep（无孙进程，避免句柄继承干扰）。
+        let argv = vec![
+            "powershell".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Start-Sleep -Seconds 8; Write-Output done".to_string(),
+        ];
+        let result = direct_exec(&argv, None, None, 100, 3, None, None, None, "bg-test");
+        assert!(result.timed_out, "应超时");
+        assert_eq!(result.status, "backgrounded", "超时 = 移交后台");
+        let pid = result.process_id.expect("移交必须携带 process_id");
+        // 进程存活于注册表（running）
+        let info = crate::process_registry::ProcessRegistry::get_info(pid)
+            .expect("进程必须在注册表");
+        assert_eq!(info["status"], "running", "移交后进程不得被杀");
+        assert!(result.output.contains("process_check"), "提示应指向检查工具");
+        // process_wait 语义：等待自然退出
+        let final_info = crate::process_registry::ProcessRegistry::wait_for(pid, 15)
+            .expect("wait_for 必须返回");
+        eprintln!("final_info: {final_info}");
+        assert_eq!(final_info["status"], "exited", "ping 自然结束后应为 exited");
+        // 输出已逐 chunk 追加到注册表（backgrounded 期间也累积）
+        assert!(final_info["output"].is_string() || final_info.get("output_tail").is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn backgrounded_process_check_sees_running_then_kill_tree() {
+        // cmd /C 生成孙进程树（ping 8 秒）；超时 2 秒移交
+        let argv = vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            "ping -n 8 127.0.0.1 >NUL".to_string(),
+        ];
+        let result = direct_exec(&argv, None, None, 100, 2, None, None, None, "bg-kill");
+        let pid = result.process_id.expect("process_id");
+        assert_eq!(
+            crate::process_registry::ProcessRegistry::get_info(pid).unwrap()["status"],
+            "running"
+        );
+        // 注册表 kill = 进程树终止
+        assert!(crate::process_registry::ProcessRegistry::kill(pid), "kill 应成功");
+        let after = crate::process_registry::ProcessRegistry::get_info(pid).expect("still tracked");
+        assert_eq!(after["status"], "killed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_after_secs_handoff_before_timeout() {
+        // 长驻进程（8 秒 sleep），timeout 设 60 秒，但 background_after_secs=3
+        // → 3 秒即移交后台，而不是死等到 60 秒（验证 agent loop 不阻塞）。
+        let argv = vec![
+            "powershell".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Start-Sleep -Seconds 8; Write-Output done".to_string(),
+        ];
+        let started = std::time::Instant::now();
+        let result = direct_exec(&argv, None, None, 100, 60, Some(3), None, None, "bg-fast");
+        let elapsed = started.elapsed().as_secs_f64();
+        assert!(result.timed_out, "观察窗口到期应移交");
+        assert_eq!(result.status, "backgrounded");
+        assert!(elapsed < 10.0, "移交必须远早于 timeout=60s，实际 {elapsed}s");
+        let pid = result.process_id.expect("移交必须携带 process_id");
+        let info = crate::process_registry::ProcessRegistry::get_info(pid).expect("in registry");
+        assert_eq!(info["status"], "running", "移交后进程存活");
+        assert!(
+            result.output.contains("transferred_after_secs"),
+            "backgrounded 输出应包含移交耗时字段"
+        );
+        // 清理：等待自然退出（8 秒 sleep 早已结束）
+        let final_info = crate::process_registry::ProcessRegistry::wait_for(pid, 15)
+            .expect("wait_for 必须返回");
+        assert_eq!(final_info["status"], "exited");
     }
 }

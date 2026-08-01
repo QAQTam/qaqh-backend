@@ -116,7 +116,7 @@ describe("turn projection", () => {
     turn.rounds[0]!.toolResults = {
       "edit-1": {
         tool_call_id: "edit-1",
-        output: "[OK] src/a.ts:8 +3 -1 | edit_file\n\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -8 +8 @@\n-old\n+new",
+        output: "[OK] src/a.ts:8 +3 -1 | edit\n\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -8 +8 @@\n-old\n+new",
         success: true,
       },
       "edit-2": { tool_call_id: "edit-2", output: "[ERROR] denied", success: false },

@@ -16,6 +16,7 @@ import type {
   SessionState,
   ActivityState,
 } from "../lib/types/ringing";
+import type { PermissionRisk } from "../lib/types";
 
 // ────────────────────────────────────────────────────────────────────────────
 // 每频道独立维护的连接状态（PLAN：每频道独立重连、cursor、snapshot、健康状态）
@@ -235,6 +236,15 @@ export interface ToolCardView {
   truncated: boolean;
   resultSummary: string | null;
   pendingPermission: boolean;
+  /** 权限请求详情（ToolPermissionRequested 完整字段；pendingPermission 为 false 后可保留）。 */
+  permission: {
+    reason: string;
+    paths: string[];
+    category: string;
+    level: number;
+    risk: PermissionRisk;
+    consequence: string;
+  } | null;
 }
 
 export interface ToolState {
@@ -265,6 +275,7 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
             truncated: false,
             resultSummary: null,
             pendingPermission: false,
+            permission: null,
           },
         ],
       };
@@ -286,6 +297,7 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
             truncated: false,
             resultSummary: null,
             pendingPermission: false,
+            permission: null,
           },
         ],
       };
@@ -309,8 +321,16 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
         pendingPermission: false,
       });
     case "tool_permission_requested": {
+      const permission = {
+        reason: event.reason,
+        paths: event.paths,
+        category: event.category,
+        level: event.level,
+        risk: event.risk,
+        consequence: event.consequence,
+      };
       const existing = state.cards.find((c) => c.toolCallId === event.tool_call_id);
-      if (existing) return patchCard(state, event.tool_call_id, { pendingPermission: true });
+      if (existing) return patchCard(state, event.tool_call_id, { pendingPermission: true, permission });
       return {
         ...state,
         cards: [
@@ -325,6 +345,7 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
             truncated: false,
             resultSummary: null,
             pendingPermission: true,
+            permission,
           },
         ],
       };

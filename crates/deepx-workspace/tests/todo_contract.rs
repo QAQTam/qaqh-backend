@@ -1,6 +1,6 @@
 #[test]
 fn public_schema_exposes_small_direct_todo_tools_and_no_goal_entrypoint() {
-    let manager = deepx_tools::registration::build_tool_manager(&[]);
+    let manager = deepx_workspace::registration::build_tool_manager(&[]);
     let definitions = manager.all_defs();
     let names: Vec<&str> = definitions
         .iter()
@@ -41,14 +41,14 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     // This integration test binary owns an isolated process home.
     unsafe { std::env::set_var("USERPROFILE", &temp_home) };
-    deepx_tools::runtime::init_tools("todo-contract", &[], vec![]);
-    deepx_tools::runtime::set_context("todo-contract", 1);
+    deepx_workspace::runtime::init_tools("todo-contract", &[], vec![]);
+    deepx_workspace::runtime::set_context("todo-contract", 1);
 
     for (index, title) in ["Working", "Done", "Cancelled", "Waiting"]
         .into_iter()
         .enumerate()
     {
-        let create = deepx_tools::execution::execute_with_context(
+        let create = deepx_workspace::execution::execute_with_context(
             "todo_create",
             "",
             &serde_json::json!({"title": title, "description": format!("item {index}")})
@@ -59,7 +59,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         assert!(create.success, "create failed: {}", create.content);
     }
 
-    let working = deepx_tools::execution::execute_with_context(
+    let working = deepx_workspace::execution::execute_with_context(
         "todo_update",
         "",
         r#"{"id":1,"status":"in_progress"}"#,
@@ -72,7 +72,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         working.content
     );
 
-    let completed = deepx_tools::execution::execute_with_context(
+    let completed = deepx_workspace::execution::execute_with_context(
         "todo_update",
         "",
         r#"{"id":"T2","status":"completed","evidence":"verified"}"#,
@@ -85,7 +85,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         completed.content
     );
 
-    let cancelled = deepx_tools::execution::execute_with_context(
+    let cancelled = deepx_workspace::execution::execute_with_context(
         "todo_cancel",
         "",
         r#"{"id":"3"}"#,
@@ -99,7 +99,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     );
 
     let list =
-        deepx_tools::execution::execute_with_context("todo_list", "", r#"{}"#, "todo-list", None);
+        deepx_workspace::execution::execute_with_context("todo_list", "", r#"{}"#, "todo-list", None);
     assert!(list.success, "list failed: {}", list.content);
     let list_json: serde_json::Value =
         serde_json::from_str(&list.content).expect("structured list response");
@@ -110,7 +110,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(list_json["items"][0]["id"], "T1");
 
     let status: serde_json::Value = serde_json::from_str(
-        &deepx_tools::todo::todo_status_json("todo-contract").expect("status JSON"),
+        &deepx_workspace::todo::todo_status_json("todo-contract").expect("status JSON"),
     )
     .expect("parse status JSON");
     assert_eq!(status["mode"], "manual");
@@ -124,8 +124,8 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(status["items"][2]["status"], "cancelled");
 
     // Verify that the todo.json format is clean (no legacy Goal-enforced normalization).
-    let store = deepx_tools::todo::load_todo().expect("load todo");
-    assert_eq!(store.mode, deepx_tools::todo::TodoMode::Manual);
+    let store = deepx_workspace::todo::load_todo().expect("load todo");
+    assert_eq!(store.mode, deepx_workspace::todo::TodoMode::Manual);
 
     std::fs::remove_dir_all(&temp_home).expect("remove isolated home");
 }

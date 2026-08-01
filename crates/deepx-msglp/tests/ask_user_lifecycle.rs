@@ -272,7 +272,7 @@ fn run_case_with_delay(
     std::fs::write(temp.path().join("input2.txt"), "second permission input\n").unwrap();
     let mock = MockServer::sequential_with_delay(scenarios, response_delay);
     let request_count = mock.requests.clone();
-    deepx_tools::set_workspace(&temp.path().to_string_lossy());
+    deepx_workspace::set_workspace(&temp.path().to_string_lossy());
 
     let mut agent = AgentState::init("ask-lifecycle-test");
     agent.ephemeral = true;
@@ -307,7 +307,7 @@ fn run_case_with_delay(
             Agent2Ui::SessionCreated { seed } => seed,
             _ => unreachable!(),
         };
-        deepx_tools::set_workspace(&workspace.to_string_lossy());
+        deepx_workspace::set_workspace(&workspace.to_string_lossy());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             test(&mut input_writer, &event_rx, request_count, seed)
         }));

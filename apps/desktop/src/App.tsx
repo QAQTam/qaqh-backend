@@ -25,6 +25,9 @@ import { startSessionActivityClient } from "./runtime/sessionActivityClient";
 import type { SessionActivityMap } from "./runtime/sessionActivityStore";
 import { hasRestorableTranscript } from "./runtime/sessionStartup";
 import type { PendingInteraction } from "./store/rawSession";
+import { createRingingMonitor } from "./store/ringingMonitor";
+import { projectRingingToRawSession } from "./store/ringingSessionAdapter";
+import { RingingDebugPanel } from "./components/RingingDebugPanel";
 import {
   applyDashboardData,
   removeTurnFromSession,
@@ -60,6 +63,8 @@ export default function App() {
   const toastCtrl = createToastCtrl();
   const registry = createSessionRegistry({ storage: sessionStorage });
   const sessionReplay = createSessionReplayBuffer();
+  // Ringing 影子监视器（验证新链路；调试面板展示）
+  const ringingMonitor = createRingingMonitor();
   const pendingEntries = new Map<string, Promise<SessionEntry>>();
   const [view, setView] = createSignal<View>("home");
   const [configLang, setConfigLang] = createSignal<Lang>(i18n.lang());
@@ -76,6 +81,8 @@ export default function App() {
   let unlistenTheme: (() => void) | undefined;
   let unlistenSessionActivity: (() => void) | undefined;
   let unlistenBackendStatus: (() => void) | undefined;
+  let unlistenRingingBatch: (() => void) | undefined;
+  let unlistenRingingStatus: (() => void) | undefined;
   let unlistenUpdate: (() => void) | undefined;
   let unlistenUpdateFailure: (() => void) | undefined;
   let resumeRequest = 0;
@@ -249,6 +256,8 @@ export default function App() {
     toastCtrl.clear();
     // Suppress error toasts during replay — only fresh errors should toast.
     setReplaying(true);
+    // 切流状态同步：该 seed 已切流的 channel 从 main mode 表恢复 + 拉 snapshot
+    void ringingMonitor.syncMode(seed);
     // Swap to the locally persisted transcript immediately. Agent startup and
     // replay may take seconds on a cold session and must not block navigation.
     const cachedEntry = registry.ensure(seed);
@@ -494,6 +503,12 @@ export default function App() {
         setBackendError(event.payload.connected ? "" : (event.payload.error ?? "Daemon unavailable"));
       });
       await connect();
+      // Ringing 影子订阅：batch 按 seed 路由进影子 store（不干扰 legacy 主渲染）
+      const api = window.deepx?.ringing;
+      if (api) {
+        unlistenRingingBatch = api.onBatch(batch => ringingMonitor.handleBatch(batch));
+        unlistenRingingStatus = api.onStatus(update => ringingMonitor.handleStatus(update));
+      }
       // Listen for app updates (production: auto-check on startup)
       unlistenUpdate = onUpdateAvailable((info: UpdateInfo) => {
         setPendingUpdate(info);
@@ -543,6 +558,8 @@ export default function App() {
     registry.disposeView();
     sessionReplay.clear();
     unlistenTheme?.();
+    unlistenRingingBatch?.();
+    unlistenRingingStatus?.();
     unlistenSessionActivity?.();
     unlistenBackendStatus?.();
     unlistenUpdate?.();
@@ -551,6 +568,7 @@ export default function App() {
 
   return (
     <I18nCtx value={i18n}>
+      <RingingDebugPanel monitor={ringingMonitor} />
       <AppShell
         sidebar={
           <TaskSidebar
@@ -617,8 +635,19 @@ export default function App() {
             </Match>
             <Match when={view() === "chat"}>
               <Show when={hasChosenSession() && activeEntry()} keyed>
-                {entry => <ChatView
-                  rawSession={entry.state}
+                {entry => {
+                  // SessionPresentationSelector：已切流会话的主 UI 数据源切换到
+                  // Ringing store（投影为 RawSessionState，组件零改动）。
+                  const rawSession = () => {
+                    const seed = entry.state().seed;
+                    if (ringingMonitor.isRinging(seed)) {
+                      const shadow = ringingMonitor.shadowOf(seed);
+                      if (shadow) return projectRingingToRawSession(seed, shadow);
+                    }
+                    return entry.state();
+                  };
+                  return <ChatView
+                  rawSession={rawSession}
                   sessionStore={entry.sessionStore}
                   dashboardStore={entry.dashboardStore}
                   pendingSend={entry.pendingSend}
@@ -633,7 +662,8 @@ export default function App() {
                   permissionLevel={permissionLevel()}
                   onPermissionLevelChange={changePermissionLevel}
                   onChangeWorkspace={browseWorkspace}
-                />}
+                />;
+                }}
               </Show>
             </Match>
           </Switch>

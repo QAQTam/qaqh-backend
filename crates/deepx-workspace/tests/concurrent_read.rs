@@ -8,12 +8,12 @@ fn ten_parallel_reads() {
     let _ = std::fs::create_dir_all(&tmp);
     let file_path = tmp.join("test.txt");
     std::fs::write(&file_path, "0123456789").unwrap();
-    deepx_tools::set_workspace(&tmp.to_string_lossy());
+    deepx_workspace::set_workspace(&tmp.to_string_lossy());
 
     // Init tool manager
-    deepx_tools::runtime::init_tools("test", &[], vec![]);
+    deepx_workspace::runtime::init_tools("test", &[], vec![]);
     // Set permission context so the compat wrapper can pass admission
-    deepx_tools::runtime::set_context("test", 4);
+    deepx_workspace::runtime::set_context("test", 4);
 
     let file_path_str = file_path.to_string_lossy().to_string();
     let args = serde_json::json!({"path": file_path_str}).to_string();
@@ -25,7 +25,7 @@ fn ten_parallel_reads() {
         let args = args.clone();
         let done_tx = done_tx.clone();
         handles.push(std::thread::spawn(move || {
-            let result = deepx_tools::execution::execute_with_context(
+            let result = deepx_workspace::execution::execute_with_context(
                 "read",
                 "",
                 &args,

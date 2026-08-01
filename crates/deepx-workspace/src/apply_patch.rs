@@ -488,18 +488,23 @@ impl WorkspaceResolver {
     }
 
     fn resolve(&self, patch_path: &Path) -> Result<PathBuf, String> {
-        if patch_path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-        {
-            return Err(format!(
-                "path '{}' contains a parent-directory component",
-                patch_path.display()
-            ));
-        }
         let candidate = if patch_path.is_absolute() {
+            // Absolute paths are trusted as-is (same semantics as read/write/
+            // edit): the model said exactly where to write.
             patch_path.to_path_buf()
         } else {
+            // Relative paths resolve inside the workspace root. Reject parent
+            // components so the patch cannot escape, then canonicalize the
+            // ancestor chain to defend against symlink escapes.
+            if patch_path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+            {
+                return Err(format!(
+                    "path '{}' contains a parent-directory component",
+                    patch_path.display()
+                ));
+            }
             self.root.join(patch_path)
         };
         let mut ancestor = candidate.as_path();
@@ -519,7 +524,8 @@ impl WorkspaceResolver {
         for component in missing.iter().rev() {
             resolved.push(component);
         }
-        if !resolved.starts_with(&self.root) {
+        // Only relative paths must stay inside the workspace root.
+        if !patch_path.is_absolute() && !resolved.starts_with(&self.root) {
             return Err(format!(
                 "path '{}' resolves outside workspace",
                 patch_path.display()
@@ -710,14 +716,14 @@ fn execute_apply_patch(args: &serde_json::Value) -> crate::ToolResult {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    if workspace.is_empty() || workspace == "." {
-        return error_result(
-            "NO_WORKSPACE",
-            "An existing workspace is required",
-            "Open an existing workspace and retry",
-        );
-    }
-    let resolver = match WorkspaceResolver::new(Path::new(&workspace)) {
+    // No workspace configured? Fall back to the process directory — the same
+    // semantics as read/write/edit, so apply_patch never refuses to run.
+    let effective_ws = if workspace.is_empty() || workspace == "." {
+        ".".to_string()
+    } else {
+        workspace.clone()
+    };
+    let resolver = match WorkspaceResolver::new(Path::new(&effective_ws)) {
         Ok(resolver) => resolver,
         Err(error) => {
             return error_result(
@@ -1294,20 +1300,14 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         crate::set_workspace(&workspace.to_string_lossy());
         let parent_escape = root.path().join("parent-escape.txt");
-        let absolute_escape = root.path().join("absolute-escape.txt");
-        for patch in [
-            "*** Begin Patch\n*** Add File: ..\\parent-escape.txt\n+escape\n*** End Patch"
-                .to_string(),
-            format!(
-                "*** Begin Patch\n*** Add File: {}\n+escape\n*** End Patch",
-                absolute_escape.display()
-            ),
-        ] {
-            let result = execute_apply_patch(&serde_json::json!({ "patch": patch }));
-            assert!(!result.success, "{}", result.content);
-        }
+        // Relative `..` escape is rejected at the tool layer: patch text is
+        // free-form, so a hallucinated patch must not silently write outside
+        // the workspace. Absolute paths are trusted by the tool and instead
+        // surface through the permission layer as High risk (user approval).
+        let patch = "*** Begin Patch\n*** Add File: ..\\parent-escape.txt\n+escape\n*** End Patch".to_string();
+        let result = execute_apply_patch(&serde_json::json!({ "patch": patch }));
+        assert!(!result.success, "{}", result.content);
         assert!(!parent_escape.exists());
-        assert!(!absolute_escape.exists());
         crate::set_workspace(".");
     }
 

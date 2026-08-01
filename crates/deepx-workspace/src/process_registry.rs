@@ -85,6 +85,25 @@ impl ProcessRegistry {
         });
     }
 
+    /// 非阻塞查询子进程是否退出；已退出返回 exit code 并释放句柄。
+    /// 子进程句柄唯一持有在注册表（attach_child 移入），direct_exec 的
+    /// poll 循环经此查询，避免 Child 双重持有。
+    pub fn try_wait(id: u32) -> Option<i32> {
+        Self::with(|r| {
+            let entry = r.entries.get(&id)?;
+            let mut child_opt = entry.child.lock().unwrap();
+            let child = child_opt.as_mut()?;
+            match child.try_wait().ok()? {
+                Some(status) => {
+                    let code = status.code().unwrap_or(-1);
+                    *child_opt = None;
+                    Some(code)
+                }
+                None => None,
+            }
+        })
+    }
+
     /// Attach a PTY stdin writer to an entry (for interactive processes).
     pub fn attach_writer(id: u32, writer: Box<dyn std::io::Write + Send>) {
         Self::with(|r| {
@@ -203,14 +222,25 @@ impl ProcessRegistry {
         })
     }
 
-    /// Kill a process by id.
+    /// Kill a process by id（Windows：杀整棵进程树，防止后代进程泄漏管道）。
     pub fn kill(id: u32) -> bool {
         Self::with(|r| {
             if let Some(entry) = r.entries.get(&id) {
                 let mut child_opt = entry.child.lock().unwrap();
                 if let Some(mut c) = child_opt.take() {
-                    let _ = c.kill();
-                    let _ = c.wait();
+                    #[cfg(windows)]
+                    {
+                        use std::process::Command;
+                        let _ = Command::new("taskkill")
+                            .args(["/pid", &c.id().to_string(), "/T", "/F"])
+                            .status();
+                        let _ = c.wait();
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                    }
                 }
                 *entry.status.lock().unwrap() = ProcStatus::Killed;
                 true

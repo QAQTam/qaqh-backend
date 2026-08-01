@@ -169,7 +169,7 @@ impl Loop {
                             );
                             if is_interrupt {
                                 cancel_for_reader.set();
-                                deepx_tools::CANCEL.store(true, Ordering::SeqCst);
+                                deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                             }
                             if cmd_tx.send(frame).is_err() {
                                 break;
@@ -189,7 +189,7 @@ impl Loop {
                                     );
                                     if is_interrupt {
                                         cancel_for_reader.set();
-                                        deepx_tools::CANCEL.store(true, Ordering::SeqCst);
+                                        deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                                     }
                                     if cmd_tx.send(frame).is_err() {
                                         break;
@@ -310,7 +310,7 @@ impl Loop {
             self.reset_all_engines();
             self.phase = LoopPhase::Idle;
             self.cancel.clear();
-            deepx_tools::CANCEL.store(false, Ordering::SeqCst);
+            deepx_workspace::CANCEL.store(false, Ordering::SeqCst);
 
             let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
                 Agent2Ui::Error {
@@ -356,7 +356,7 @@ impl Loop {
         self.session.flush();
         self.reset_all_engines();
         self.cancel.clear();
-        deepx_tools::CANCEL.store(false, Ordering::SeqCst);
+        deepx_workspace::CANCEL.store(false, Ordering::SeqCst);
     }
 
     /// Extract a human-readable message from a panic payload.
@@ -386,7 +386,7 @@ impl Loop {
             match cmd {
                 Ui2Agent::Cancel => {
                     self.cancel.set();
-                    deepx_tools::CANCEL.store(true, Ordering::SeqCst);
+                    deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                     self.phase = LoopPhase::Idle;
                     let _ = self
                         .event_tx
@@ -395,7 +395,7 @@ impl Loop {
                 }
                 Ui2Agent::ResumeSession { seed } => {
                     self.cancel.set();
-                    deepx_tools::CANCEL.store(true, Ordering::SeqCst);
+                    deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                     self.pending.session = Some(seed);
                     let _ = self
                         .event_tx
@@ -404,7 +404,7 @@ impl Loop {
                 }
                 Ui2Agent::NewSession => {
                     self.cancel.set();
-                    deepx_tools::CANCEL.store(true, Ordering::SeqCst);
+                    deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                     self.pending.new_session = true;
                     let _ = self
                         .event_tx
@@ -507,7 +507,7 @@ impl Loop {
         }
 
         // ── Cleanup ──
-        deepx_tools::runtime::shutdown_tools();
+        deepx_workspace::runtime::shutdown_tools();
         self.session.flush();
     }
 
@@ -600,18 +600,18 @@ impl Loop {
                 Ui2Agent::Cancel => {
                     if std::mem::take(&mut self.terminal_for_queued_interrupt) {
                         self.cancel.clear();
-                        deepx_tools::CANCEL.store(false, Ordering::SeqCst);
+                        deepx_workspace::CANCEL.store(false, Ordering::SeqCst);
                         continue;
                     }
                     self.cancel.set();
-                    deepx_tools::CANCEL.store(true, Ordering::SeqCst);
+                    deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                     self.phase = LoopPhase::Idle;
                     let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
                 }
                 Ui2Agent::ResumeSession { seed } => {
                     let terminal_emitted = std::mem::take(&mut self.terminal_for_queued_interrupt);
                     self.cancel.set();
-                    deepx_tools::CANCEL.store(true, Ordering::SeqCst);
+                    deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                     self.pending.session = Some(seed);
                     if !terminal_emitted {
                         let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
@@ -620,7 +620,7 @@ impl Loop {
                 Ui2Agent::NewSession => {
                     let terminal_emitted = std::mem::take(&mut self.terminal_for_queued_interrupt);
                     self.cancel.set();
-                    deepx_tools::CANCEL.store(true, Ordering::SeqCst);
+                    deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                     self.pending.new_session = true;
                     if !terminal_emitted {
                         let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
@@ -734,7 +734,7 @@ impl Loop {
 
     /// Emit Agent2Ui::SkillsChanged with current available/active skills.
     fn emit_skills_status(&mut self) {
-        let workspace = deepx_tools::CURRENT_WORKSPACE
+        let workspace = deepx_workspace::CURRENT_WORKSPACE
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
@@ -813,7 +813,7 @@ impl Loop {
         match frame {
             Ui2Agent::Cancel => {
                 self.cancel.set();
-                deepx_tools::CANCEL.store(true, Ordering::SeqCst);
+                deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                 let suspended = self.session.turn.take_suspended_for_abort();
                 if suspended.is_some() {
                     self.session.agent.msg.remove_last_step_if_incomplete();
@@ -825,11 +825,18 @@ impl Loop {
                 if let Some((turn_id, usage)) = suspended {
                     self.session.flush();
                     let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         stop_reason: Some("cancelled".into()),
-                        usage,
+                        usage: usage.clone(),
                     }));
                     let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
+                    self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                        deepx_domain::ConversationEvent::TurnCompleted {
+                            turn_id,
+                            stop_reason: Some("cancelled".into()),
+                            usage,
+                        },
+                    ));
                 }
             }
             Ui2Agent::Shutdown => {
@@ -976,7 +983,7 @@ impl Loop {
                 return Some(Outcome::Handled);
             }
             Ui2Agent::ReloadSkills => {
-                let workspace = deepx_tools::CURRENT_WORKSPACE
+                let workspace = deepx_workspace::CURRENT_WORKSPACE
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
@@ -1099,7 +1106,7 @@ impl Loop {
                         "Context compaction is already running.".into(),
                     ));
                 }
-                if let Some((prompt, kept, head, provider)) =
+                if let Some((prompt, kept, head, provider, compact_id)) =
                     self.compact.build_prompt_and_meta(&mut ctx)
                 {
                     // Step 2: spawn LLM call in background (catch_unwind so
@@ -1113,7 +1120,7 @@ impl Loop {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     super::engine_compact::run_compact_worker(
-                                        prompt, provider, kept, head, event_tx,
+                                        compact_id.clone(), prompt, provider, kept, head, event_tx,
                                     )
                                 }));
                             let meta = match result {
@@ -1121,6 +1128,7 @@ impl Loop {
                                 Err(e) => {
                                     let msg = Self::panic_msg_from_err(e);
                                     CompactMeta {
+                                        compact_id,
                                         summary: String::new(),
                                         kept_user_count: kept,
                                         head_user_count: head,
@@ -1171,21 +1179,28 @@ impl Loop {
                     crate::util::record_token_usage(u, &self.session.agent.config.model);
                 }
                 let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     stop_reason: None,
-                    usage,
+                    usage: usage.clone(),
                 }));
+                self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::TurnCompleted {
+                        turn_id,
+                        stop_reason: None,
+                        usage,
+                    },
+                ));
 
                 // Desktop notification: preview of assistant response
                 self.misc.maybe_notify(&self.session.agent, &self.notify.tx);
 
                 // Goal mode auto-advance: if the LLM completed a step
                 // (via todo_step_complete tool), inject the next step.
-                if let Ok(store) = deepx_tools::todo::load_todo() {
-                    if store.mode == deepx_tools::todo::TodoMode::Goal {
+                if let Ok(store) = deepx_workspace::todo::load_todo() {
+                    if store.mode == deepx_workspace::todo::TodoMode::Goal {
                         if let Some(ref current_id) = store.current_id {
                             if let Some(item) = store.items.iter().find(|i| &i.id == current_id) {
-                                if item.status == deepx_tools::todo::TodoStatus::InProgress {
+                                if item.status == deepx_workspace::todo::TodoStatus::InProgress {
                                     let prompt = format!(
                                         "[自动执行计划 / 目标模式]\n\n\
                                          T{}: {}\n{}\n\n\
@@ -1227,10 +1242,17 @@ impl Loop {
                 self.terminal_for_queued_interrupt = consume_queued_interrupt;
                 let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Cancelled));
                 let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     stop_reason: Some("cancelled".into()),
-                    usage,
+                    usage: usage.clone(),
                 }));
+                self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::TurnCompleted {
+                        turn_id,
+                        stop_reason: Some("cancelled".into()),
+                        usage,
+                    },
+                ));
                 let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Done));
                 self.phase = LoopPhase::Idle;
             }
@@ -1242,13 +1264,31 @@ impl Loop {
                 self.session.agent.skills.abort_user_turn();
                 self.session.flush();
                 let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
-                    Agent2Ui::Error { message },
+                    Agent2Ui::Error { message: message.clone() },
                 ));
                 let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
                     Agent2Ui::TurnEnd {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         stop_reason: Some("error".into()),
-                        usage,
+                        usage: usage.clone(),
+                    },
+                ));
+                self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::TurnFailed {
+                        turn_id,
+                        error: deepx_domain::DomainError {
+                            error_id: format!(
+                                "turn-failed-{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0),
+                            ),
+                            code: "turn_failed".into(),
+                            message,
+                            retryable: false,
+                            dedupe_key: None,
+                        },
                     },
                 ));
                 let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Done));

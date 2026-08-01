@@ -16,7 +16,7 @@ fn ten_parallel_reads_same_file() {
     let tmp = tempfile::tempdir().unwrap();
     let file_path = tmp.path().join("test.txt");
     std::fs::write(&file_path, "0123456789").unwrap();
-    deepx_tools::set_workspace(&tmp.path().to_string_lossy());
+    deepx_workspace::set_workspace(&tmp.path().to_string_lossy());
 
     // ── Init agent ──
     deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false);

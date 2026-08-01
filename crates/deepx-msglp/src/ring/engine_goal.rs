@@ -5,7 +5,7 @@
 //! advances through items sequentially, and supports mid-execution
 //! CRUD via pending changes that merge on turn boundaries.
 
-use deepx_tools::todo::{load_todo, save_todo, TodoItem, TodoMode, TodoStatus, TodoStore};
+use deepx_workspace::todo::{load_todo, save_todo, TodoItem, TodoMode, TodoStatus, TodoStore};
 
 /// Task complexity — maintained locally since the TodoItem model no longer stores it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

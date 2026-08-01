@@ -25,7 +25,7 @@ fn format_diff_result(prefix: &str, path: &str, diff: &str, label: &str, _succes
 
 fn write_error(path: &str, error: impl std::fmt::Display) -> String {
     format!(
-        "[ERROR] Cannot write {}: {}\n[HINT] Verify the parent directory exists and is writable. Use list on its parent directory or exec with argv [\"ls\", \"-la\"] to check.",
+        "[ERROR] Cannot write {}: {}\n[HINT] Verify the parent directory exists and is writable. Use exec with argv [\"ls\", \"-la\"] to check.",
         path, error
     )
 }
@@ -205,7 +205,7 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> String {
                         old_line_count as u32 + 1
                     };
                     format!(
-                        "[OK] {path}:{first_line} +{line_count} -0 | write_file\n\n+{content_trim}",
+                        "[OK] {path}:{first_line} +{line_count} -0 | write\n\n+{content_trim}",
                         path = path,
                         first_line = first_line,
                         line_count = line_count,
@@ -239,7 +239,7 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> String {
                             line_count
                         )
                     } else {
-                        format_diff_result("OK", &path, &diff, "write_file", true)
+                        format_diff_result("OK", &path, &diff, "write", true)
                     }
                 } else {
                     format!(
@@ -262,12 +262,12 @@ handler_from_string!(handle_write_file, exec_write_file);
 pub(super) fn exec_edit_file(args: &serde_json::Value) -> String {
     let path = crate::resolve_workspace_path(&args.s("path"));
     if path.is_empty() {
-        return "[ERROR] edit_file: no path specified\n[HINT] Provide 'path' (string) to the file."
+        return "[ERROR] edit: no path specified\n[HINT] Provide 'path' (string) to the file."
             .into();
     }
     let old_str = args.s("old_string");
     if old_str.is_empty() {
-        return "[ERROR] edit_file: no old_string specified\n[HINT] Provide 'old_string' (text to find).".into();
+        return "[ERROR] edit: no old_string specified\n[HINT] Provide 'old_string' (text to find).".into();
     }
     let new_str = args.s("new_string");
     let replace_all = args.opt_bool("replace_all").unwrap_or(false);
@@ -279,7 +279,7 @@ pub(super) fn exec_edit_file(args: &serde_json::Value) -> String {
         Ok(c) => c,
         Err(e) => {
             if is_binary_read_error(&e.to_string()) {
-                return format!("[PARTIAL] {path} — binary file, edit_file works on text only");
+                return format!("[PARTIAL] {path} — binary file, edit works on text only");
             }
             return format!("[ERROR] Cannot read {path}: {e}");
         }
@@ -290,7 +290,7 @@ pub(super) fn exec_edit_file(args: &serde_json::Value) -> String {
         return error;
     }
     if was_crlf {
-        log::info!("edit_file: {path} had CRLF, normalized to LF");
+        log::info!("edit: {path} had CRLF, normalized to LF");
     }
 
     let old = old_str.replace("\r\n", "\n").replace('\r', "\n");
@@ -310,7 +310,7 @@ pub(super) fn exec_edit_file(args: &serde_json::Value) -> String {
 
     if dry_run {
         let diff = unified_diff(&orig, &content, &path);
-        return format_diff_result("DRY RUN", &path, &diff, "edit_file", false);
+        return format_diff_result("DRY RUN", &path, &diff, "edit", false);
     }
 
     let write_content = if was_crlf {
@@ -322,7 +322,7 @@ pub(super) fn exec_edit_file(args: &serde_json::Value) -> String {
         Ok(_) => {
             crate::file_state::record_edit(&path, 0);
             let diff = unified_diff(&orig, &content, &path);
-            format_diff_result("OK", &path, &diff, "edit_file", true)
+            format_diff_result("OK", &path, &diff, "edit", true)
         }
         Err(e) => format!("[ERROR] Cannot write {path}: {e}"),
     }
@@ -348,7 +348,7 @@ pub(super) fn exec_delete_file(args: &serde_json::Value) -> String {
             "code": "NOT_FOUND",
             "path": path,
             "message": format!("{} does not exist", path),
-            "hint": "Use list to verify."
+            "hint": "Use exec with argv [\"ls\", \"-la\"] to verify."
         })
         .to_string();
     }
@@ -540,7 +540,11 @@ pub(super) fn exec_edit_fuzzy(args: &serde_json::Value) -> String {
                 })
                 .to_string();
             }
-            return err("READ_FAILED", &e.to_string(), "Use list first.");
+            return err(
+                "READ_FAILED",
+                &e.to_string(),
+                "Use read on the parent directory or exec with argv [\"ls\", \"-la\"] first.",
+            );
         }
     };
     let (content, was_crlf) = normalize_newlines(&raw);

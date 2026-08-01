@@ -40,10 +40,20 @@ const RENEW_INTERVAL_MS: u64 = 10_000;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SSE_KEEPALIVE_MS: u64 = 15_000;
 
-/// Ringing 逻辑 client session lease（绑定 client_session_id，TTL + renew）。
+/// Ringing 逻辑 client session lease。
+///
+/// 键 = 客户端自生成的 `client_instance_id`（命令/切流端点校验字段）；
+/// 值记录服务端签发的 `client_session_id`（renew 端点���用）。
+/// open 时双 id 关联，renew 按 client_session_id 反查续期。
 #[derive(Debug, Default)]
 pub struct RingingLeaseStore {
-    leases: HashMap<String, Instant>,
+    leases: HashMap<String, LeaseEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct LeaseEntry {
+    client_session_id: String,
+    expiry: Instant,
 }
 
 /// 已 accepted 命令的幂等表（有界 TTL；accepted 后断线重试不得重复执行）。
@@ -99,28 +109,45 @@ impl RingingLeaseStore {
         Self::default()
     }
 
-    pub fn open(&mut self, client_session_id: String) {
-        self.leases
-            .insert(client_session_id, Instant::now() + Duration::from_millis(RENEW_TTL_MS));
+    pub fn open(&mut self, client_session_id: String, client_instance_id: String) {
+        self.leases.insert(
+            client_instance_id,
+            LeaseEntry {
+                client_session_id,
+                expiry: Instant::now() + Duration::from_millis(RENEW_TTL_MS),
+            },
+        );
     }
 
-    /// 续租；过期/未知会话返回 false。
+    /// 续租（按 client_session_id 反查）；过期/未知会话返回 false。
     pub fn renew(&mut self, client_session_id: &str) -> bool {
-        let Some(expiry) = self.leases.get_mut(client_session_id) else {
+        let Some(entry) = self
+            .leases
+            .values_mut()
+            .find(|e| e.client_session_id == client_session_id)
+        else {
             return false;
         };
-        if *expiry < Instant::now() {
-            self.leases.remove(client_session_id);
+        if entry.expiry < Instant::now() {
+            let victim = self
+                .leases
+                .iter()
+                .find(|(_, e)| e.client_session_id == client_session_id)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = victim {
+                self.leases.remove(&k);
+            }
             return false;
         }
-        *expiry = Instant::now() + Duration::from_millis(RENEW_TTL_MS);
+        entry.expiry = Instant::now() + Duration::from_millis(RENEW_TTL_MS);
         true
     }
 
-    pub fn is_active(&self, client_session_id: &str) -> bool {
+    /// 活跃校验（按 client_instance_id；命令/切流端点使用）��
+    pub fn is_active(&self, client_instance_id: &str) -> bool {
         self.leases
-            .get(client_session_id)
-            .is_some_and(|e| *e >= Instant::now())
+            .get(client_instance_id)
+            .is_some_and(|e| e.expiry >= Instant::now())
     }
 }
 
@@ -226,7 +253,10 @@ fn sse_frame(envelope: &deepx_ringing::RingingEventEnvelope) -> String {
         .ok()
         .and_then(|v| v["type"].as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "message".into());
-    let data = serde_json::to_string(&envelope.event)
+    // data 必须是**完整信封**（含 seed/stream_seq/event_id/event）：
+    // 客户端按 RingingEventEnvelope 解析，缺 seed 将无法按会话路由，
+    // 缺 event_id 将破坏 renderer 幂等。
+    let data = serde_json::to_string(envelope)
         .unwrap_or_else(|_| "{}".into());
     format!(
         "id: {}:{}:{}\nevent: {}\ndata: {}\n\n",
@@ -278,6 +308,14 @@ pub async fn handle_ringing_http(
         let channel = path.trim_start_matches("/ringing/v1/commands/");
         return handle_command(&mut stream, channel, &request.body, &leases, &service, &pending).await;
     }
+    if method == "POST" && path.starts_with("/ringing/v1/cutover/events/") {
+        let channel = path.trim_start_matches("/ringing/v1/cutover/events/");
+        return handle_cutover_events(&mut stream, channel, &request.body, &leases, &hub).await;
+    }
+    if method == "POST" && path.starts_with("/ringing/v1/cutover/commands/") {
+        let channel = path.trim_start_matches("/ringing/v1/cutover/commands/");
+        return handle_cutover_commands(&mut stream, channel, &request.body, &leases, &hub).await;
+    }
     if method == "GET" && path.starts_with("/ringing/v1/snapshots/") {
         let rest = path.trim_start_matches("/ringing/v1/snapshots/");
         return handle_snapshot(&mut stream, rest, &hub).await;
@@ -287,14 +325,55 @@ pub async fn handle_ringing_http(
         return handle_sse(&mut stream, channel, &request, hub).await;
     }
     if method == "GET" && path.starts_with("/ringing/v1/content/") {
-        // content store 在 T9 实现；当前显式 404
-        return write_response(&mut stream, "404 Not Found", "text/plain", b"content store unavailable").await;
+        return handle_content(&mut stream, &path, &hub).await;
     }
     if method == "GET" && path.starts_with("/ringing/v1/query/") {
         // 只读查询 RPC 保留（PLAN：不伪装成 Command/Event）
         return write_response(&mut stream, "501 Not Implemented", "text/plain", b"query rpc reserved").await;
     }
     write_response(&mut stream, "404 Not Found", "text/plain", b"unknown ringing endpoint").await
+}
+
+/// GET /ringing/v1/content/{content_id}?seed={seed}
+///
+/// 大内容外置读取（PLAN）：鉴权由统一 Bearer token 完成；seed 查询参数
+/// 用于会话所有权校验（ContentStore 拒绝跨会话读取）。返回 200 + media_type
+/// 或 404（不存在/过期/非本会话）。
+async fn handle_content(
+    stream: &mut TcpStream,
+    path: &str,
+    hub: &Arc<RingingHub>,
+) -> Result<(), String> {
+    let rest = path.trim_start_matches("/ringing/v1/content/");
+    let (content_id, seed) = match rest.split_once('?') {
+        Some((id, query)) => (id.to_string(), parse_query_param(query, "seed")),
+        None => (rest.to_string(), None),
+    };
+    if content_id.is_empty() {
+        return write_response(stream, "400 Bad Request", "text/plain", b"missing content_id").await;
+    }
+    let Some(seed) = seed else {
+        return write_response(stream, "400 Bad Request", "text/plain", b"missing seed query param").await;
+    };
+    match hub.get_content(&seed, &content_id) {
+        Some(entry) => write_response(stream, "200 OK", &entry.media_type, &entry.bytes).await,
+        None => write_response(
+            stream,
+            "404 Not Found",
+            "text/plain",
+            b"content not found or expired",
+        )
+        .await,
+    }
+}
+
+/// 从 query string 中取参数（`a=1&seed=xxx` 形式，无 URL 解码——content_id/seed
+/// 均为十六进制/会话标识，不含保留字符）。
+fn parse_query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then(|| v.to_string())
+    })
 }
 
 /// 从 peek preview 解析请求（preview 已含完整 header；body 长度按 header 读取，
@@ -363,10 +442,11 @@ async fn handle_open(
         .await;
     }
     let client_session_id = random_hex();
+    // lease 双键关联：client_instance_id（命令/切流校验）+ client_session_id（renew）
     leases
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .open(client_session_id.clone());
+        .open(client_session_id.clone(), req.client_instance_id.clone());
     // 支持的能力 = 请求 ∩ 服务端支持
     let supported: &[&str] = &[
         "Ringing_v1",
@@ -546,6 +626,174 @@ async fn handle_command(
         .await
 }
 
+/// POST /ringing/v1/cutover/events/{channel}
+///
+/// 事件切流���两阶段提交，PLAN）：
+/// body: `{"action": "prepare"|"commit"|"abort", "seed": "...", "client_instance_id": "..."}`
+/// - prepare：进入 Preparing（SSE boundary 建立 + snapshot + 缓冲阶段），
+///   事件协议仍为 legacy；
+/// - commit：原子切换 event owner 为 Ringing（必须 precede prepare）；
+/// - abort：prepare 失败/超时/断线，保持 legacy。
+///
+/// 响应：`{ok, event_protocol, command_protocol}`；AlreadyRinging /
+/// NotPreparing → 409 Conflict。
+async fn handle_cutover_events(
+    stream: &mut TcpStream,
+    channel: &str,
+    body: &[u8],
+    leases: &Arc<Mutex<RingingLeaseStore>>,
+    hub: &Arc<RingingHub>,
+) -> Result<(), String> {
+    let Some(channel) = parse_channel(channel) else {
+        return write_response(stream, "404 Not Found", "text/plain", b"unknown channel").await;
+    };
+    #[derive(serde::Deserialize)]
+    struct CutoverEventsBody {
+        action: String,
+        seed: String,
+        client_instance_id: String,
+    }
+    let req: CutoverEventsBody = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(e) => {
+            return write_response(
+                stream,
+                "400 Bad Request",
+                "text/plain",
+                format!("invalid cutover request: {e}").as_bytes(),
+            )
+            .await;
+        }
+    };
+    if !leases
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_active(&req.client_instance_id)
+    {
+        return write_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain",
+            b"lease required: open a client session before cutover",
+        )
+        .await;
+    }
+    let result = match req.action.as_str() {
+        "prepare" => hub.cutover_prepare(&req.seed, channel),
+        "commit" => hub.cutover_commit(&req.seed, channel),
+        "abort" => {
+            hub.cutover_abort(&req.seed, channel);
+            Ok(())
+        }
+        other => {
+            return write_response(
+                stream,
+                "400 Bad Request",
+                "text/plain",
+                format!("unknown cutover action: {other}").as_bytes(),
+            )
+            .await;
+        }
+    };
+    match result {
+        Ok(()) => {
+            let resp = serde_json::json!({
+                "ok": true,
+                "event_protocol": if hub.event_is_ringing(&req.seed, channel) { "ringing" } else { "legacy" },
+                "command_protocol": if hub.command_is_ringing(&req.seed, channel) { "ringing" } else { "legacy" },
+            });
+            write_response(stream, "200 OK", "application/json", &serde_json::to_vec(&resp).map_err(stringify)?)
+                .await
+        }
+        Err(e) => {
+            let (code, message) = match e {
+                deepx_runtime::ringing::cutover::CutoverError::AlreadyRinging => {
+                    ("already_ringing", "channel already switched to Ringing")
+                }
+                deepx_runtime::ringing::cutover::CutoverError::NotPreparing => {
+                    ("not_preparing", "commit/abort requires a preceding prepare")
+                }
+            };
+            let resp = serde_json::json!({
+                "ok": false,
+                "code": code,
+                "message": message,
+            });
+            write_response(stream, "409 Conflict", "application/json", &serde_json::to_vec(&resp).map_err(stringify)?)
+                .await
+        }
+    }
+}
+
+/// POST /ringing/v1/cutover/commands/{channel}
+///
+/// 命令切流（单阶段，PLAN command_mode_prepare）：
+/// body: `{"protocol": "ringing"|"legacy", "seed": "...", "client_instance_id": "..."}`
+/// 服务端返回命令协议已切换；此后该 seed+channel 的命令应走 Ringing command。
+async fn handle_cutover_commands(
+    stream: &mut TcpStream,
+    channel: &str,
+    body: &[u8],
+    leases: &Arc<Mutex<RingingLeaseStore>>,
+    hub: &Arc<RingingHub>,
+) -> Result<(), String> {
+    let Some(channel) = parse_channel(channel) else {
+        return write_response(stream, "404 Not Found", "text/plain", b"unknown channel").await;
+    };
+    #[derive(serde::Deserialize)]
+    struct CutoverCommandsBody {
+        protocol: String,
+        seed: String,
+        client_instance_id: String,
+    }
+    let req: CutoverCommandsBody = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(e) => {
+            return write_response(
+                stream,
+                "400 Bad Request",
+                "text/plain",
+                format!("invalid cutover request: {e}").as_bytes(),
+            )
+            .await;
+        }
+    };
+    if !leases
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_active(&req.client_instance_id)
+    {
+        return write_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain",
+            b"lease required: open a client session before cutover",
+        )
+        .await;
+    }
+    let ringing = match req.protocol.as_str() {
+        "ringing" => true,
+        "legacy" => false,
+        other => {
+            return write_response(
+                stream,
+                "400 Bad Request",
+                "text/plain",
+                format!("unknown protocol: {other}").as_bytes(),
+            )
+            .await;
+        }
+    };
+    hub.cutover_switch_command(&req.seed, channel, ringing);
+    let resp = serde_json::json!({
+        "ok": true,
+        "command_protocol": req.protocol,
+        "event_protocol": if hub.event_is_ringing(&req.seed, channel) { "ringing" } else { "legacy" },
+    });
+    write_response(stream, "200 OK", "application/json", &serde_json::to_vec(&resp).map_err(stringify)?)
+        .await
+}
+
 async fn handle_snapshot(
     stream: &mut TcpStream,
     rest: &str,
@@ -648,14 +896,19 @@ mod tests {
     #[test]
     fn lease_lifecycle_ttl_renew_expiry() {
         let mut store = RingingLeaseStore::new();
-        store.open("c1".into());
-        assert!(store.is_active("c1"));
-        assert!(store.renew("c1"));
+        // open 关联双 id：client_instance_id（校验键）+ client_session_id（续租键）
+        store.open("cs-1".into(), "ci-1".into());
+        assert!(store.is_active("ci-1"));
+        // 命令/切流端点用 client_instance_id 校验
+        assert!(store.is_active("ci-1"));
         assert!(!store.is_active("unknown"));
+        // renew 用 client_session_id 反查续期
+        assert!(store.renew("cs-1"));
         // 过期模拟：直接改内部时间
-        store.leases.insert("c1".into(), Instant::now() - Duration::from_secs(1));
-        assert!(!store.is_active("c1"));
-        assert!(!store.renew("c1"));
+        let inst = store.leases.get_mut("ci-1").expect("lease exists");
+        inst.expiry = Instant::now() - Duration::from_secs(1);
+        assert!(!store.is_active("ci-1"));
+        assert!(!store.renew("cs-1"));
     }
 
     #[test]
@@ -693,6 +946,17 @@ mod tests {
         let frame = sse_frame(&env);
         assert!(frame.starts_with("id: epoch-1:tool:7\nevent: tool_started\ndata: "));
         assert!(frame.ends_with("\n\n"));
+        // data 必须是完整信封：含 seed（renderer 按会话路由）与 event_id（幂等）
+        let data = frame
+            .split("\ndata: ")
+            .nth(1)
+            .expect("data field")
+            .trim_end_matches("\n\n");
+        let parsed: serde_json::Value = serde_json::from_str(data).expect("data is JSON");
+        assert_eq!(parsed["seed"], "s1");
+        assert_eq!(parsed["event_id"], "e1");
+        assert_eq!(parsed["stream_seq"], 7);
+        assert_eq!(parsed["event"]["type"], "tool_started");
     }
 
     #[test]

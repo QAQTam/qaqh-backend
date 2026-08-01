@@ -265,7 +265,7 @@ fn run_case(
         deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false);
     });
     let mock = MockServer::sequential(scenarios);
-    deepx_tools::set_workspace(&workspace.to_string_lossy());
+    deepx_workspace::set_workspace(&workspace.to_string_lossy());
 
     let mut agent = AgentState::init("permission-lifecycle-test");
     agent.ephemeral = true;
@@ -299,7 +299,7 @@ fn run_case(
         });
         // Session creation restores a persisted workspace. Tests need the
         // explicit workspace selection to occur after that lifecycle step.
-        deepx_tools::set_workspace(&workspace.to_string_lossy());
+        deepx_workspace::set_workspace(&workspace.to_string_lossy());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             test(&mut input_writer, &event_rx)
         }));

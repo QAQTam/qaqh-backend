@@ -1,8 +1,6 @@
-//! Query tools: file read, search, diff.
+//! Query tools: file read, diff.
 
-use std::process::Command;
-
-use super::file_shared::{content_hash, is_binary_read_error, rust_grep, unified_diff};
+use super::file_shared::{content_hash, is_binary_read_error, unified_diff};
 use crate::{JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
 
 // ------ exec_read_file (from file_read.rs) ------
@@ -50,6 +48,60 @@ pub(super) fn exec_read_file(args: &serde_json::Value) -> ToolResult {
         .get("end_line")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
+
+    // ── Directory fallback: reading a directory lists its entries instead of
+    // erroring (start_line/end_line are meaningless for a directory). There is
+    // no separate `list` tool, so this is the only way the model can browse
+    // the workspace without exec ls.
+    if let Ok(mut entries) = std::fs::read_dir(&path) {
+            const MAX_ENTRIES: usize = 200;
+            let mut lines: Vec<String> = Vec::new();
+            let mut count = 0usize;
+            let mut skipped = 0usize;
+            let mut total = 0usize;
+            while let Some(entry) = entries.next() {
+                total += 1;
+                if lines.len() >= MAX_ENTRIES {
+                    skipped = total - MAX_ENTRIES;
+                    break;
+                }
+                match entry {
+                    Ok(e) => {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        let size = e.metadata().ok().map(|m| m.len());
+                        let size_s = size
+                            .map(|b| {
+                                if b >= 1024 * 1024 {
+                                    format!("{:.1}M", b as f64 / 1048576.0)
+                                } else if b >= 1024 {
+                                    format!("{:.1}K", b as f64 / 1024.0)
+                                } else {
+                                    format!("{b}B")
+                                }
+                            })
+                            .unwrap_or_else(|| "?".to_string());
+                        lines.push(format!("{}{}  {size_s}", if is_dir { "📁 " } else { "   " }, name));
+                        count += 1;
+                    }
+                    Err(_) => count += 0,
+                }
+            }
+            let mut text = lines.join("\n");
+            if skipped > 0 {
+                text.push_str(&format!("\n... [{skipped} more entries omitted]"));
+            }
+            return ToolResult::ok(serde_json::json!({
+                "timeis": crate::now_utc8(),
+                "status": "ok",
+                "path": path,
+                "is_dir": true,
+                "entry_count": total,
+                "shown_entries": count,
+                "content": text,
+            })
+            .to_string());
+    }
 
     const MAX_READ_LINES: usize = 300;
     if let (Some(s), Some(e)) = (start, end) {
@@ -155,7 +207,7 @@ pub(super) fn exec_read_file(args: &serde_json::Value) -> ToolResult {
                     "path": path,
                     "code": "NOT_FOUND",
                     "message": e.to_string(),
-                    "hint": format!("Use list on the parent directory to verify the file exists.{url_hint}"),
+                    "hint": format!("Use exec with argv [\"ls\", \"-la\"] on the parent directory to verify the file exists.{url_hint}"),
                 }).to_string() }
             }
         }
@@ -163,103 +215,6 @@ pub(super) fn exec_read_file(args: &serde_json::Value) -> ToolResult {
 }
 
 handler!(handle_read_file, exec_read_file);
-
-// ------ exec_search ------
-
-// ------ exec_search (from file_search.rs) ------
-
-pub(super) fn exec_search(args: &serde_json::Value) -> ToolResult {
-    let pattern = args.s("pattern");
-    let glob = args.get("glob").and_then(|v| v.as_str()).map(String::from);
-    let dir = crate::resolve_workspace_path(&args.s_or("path", "."));
-    let workspace = crate::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
-    if let Some(skill) = deepx_skills::managed_skill_for_path(
-        std::path::Path::new(&workspace),
-        std::path::Path::new(&dir),
-    ) {
-        return ToolResult { success: false, content: crate::json_err(
-            "USE_SKILLS_TOOL",
-            format!("search target is managed by skill '{skill}'"),
-            "Use skills(action=activate|resource, name=...) instead of generic search.",
-        ) };
-    }
-
-    // Phase 1: try ripgrep (cross-platform, fast)
-    let mut cmd = Command::new("rg");
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    cmd.arg("-n").arg("--no-heading");
-    for excluded in ["!.deepx/skills/**", "!.agents/skills/**", "!skills/**"] {
-        cmd.arg("-g").arg(excluded);
-    }
-    if let Some(ref g) = glob {
-        cmd.arg("-g").arg(g);
-    }
-    cmd.arg(&pattern).arg(&dir);
-
-    match cmd.output() {
-        Ok(o) if o.status.success() => {
-            let out = String::from_utf8_lossy(&o.stdout);
-            let all_lines: Vec<&str> = out.lines().collect();
-            let lines: Vec<&str> = all_lines.iter().take(100).copied().collect();
-            if lines.is_empty() {
-                return ToolResult::ok(crate::json_ok(
-                    serde_json::json!({"pattern": pattern, "content": format!("No matches for '{}'", pattern)}),
-                ));
-            }
-            let truncated = if all_lines.len() > 100 {
-                format!(
-                    "\n... [truncated: {} more matches. Call search again with a narrower pattern, glob, or path.]",
-                    all_lines.len() - 100
-                )
-            } else {
-                String::new()
-            };
-            return ToolResult::ok(crate::json_ok(
-                serde_json::json!({"pattern": pattern, "matches": all_lines.len(), "content": format!("{}", lines.join("\n")) + &truncated}),
-            ));
-        }
-        _ => {} // rg not installed or errored --?fall through to pure Rust
-    }
-
-    // Phase 2: pure Rust fallback
-    match rust_grep(&pattern, &dir, true, true, glob.as_deref(), 100) {
-        Ok(lines) => {
-            if lines.is_empty() {
-                ToolResult::ok(crate::json_ok(
-                    serde_json::json!({"pattern": pattern, "content": format!("No matches for '{}'", pattern)}),
-                ))
-            } else {
-                let result: Vec<&str> = lines.iter().take(100).map(|s| s.as_str()).collect();
-                let truncated = if lines.len() > 100 {
-                    format!(
-                        "\n... [truncated: {} more matches. Call search again with a narrower pattern, glob, or path.]",
-                        lines.len() - 100
-                    )
-                } else {
-                    String::new()
-                };
-                ToolResult::ok(crate::json_ok(
-                    serde_json::json!({"pattern": pattern, "matches": lines.len(), "content": format!("{}", result.join("\n")) + &truncated}),
-                ))
-            }
-        }
-        Err(e) => ToolResult { success: false, content: crate::json_err(
-            "SEARCH_FAILED",
-            &format!("search failed: {}", e),
-            "Check the pattern or path.",
-        ) },
-    }
-}
-
-handler!(handle_search, exec_search);
 
 // ------ exec_diff (from file_diff.rs) ------
 
@@ -273,7 +228,7 @@ pub(super) fn exec_diff(args: &serde_json::Value) -> ToolResult {
             return ToolResult { success: false, content: crate::json_err(
                 "READ_FAILED",
                 &format!("Cannot read {}: {}", path_a, e),
-                "Verify the file exists. Use list to check.",
+                "Verify the file exists. Use exec with argv [\"ls\", \"-la\"] to check.",
             ) };
         }
     };
@@ -283,7 +238,7 @@ pub(super) fn exec_diff(args: &serde_json::Value) -> ToolResult {
             return ToolResult { success: false, content: crate::json_err(
                 "READ_FAILED",
                 &format!("Cannot read {}: {}", path_b, e),
-                "Verify the file exists. Use list to check.",
+                "Verify the file exists. Use exec with argv [\"ls\", \"-la\"] to check.",
             ) };
         }
     };
@@ -306,19 +261,11 @@ handler!(handle_diff, exec_diff);
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
         key: "read".to_string(),
-        description: "Read one or more files. Use path for one file or paths for a batch. Use list for directories and start_line/end_line for a range. Returns a content hash; pass it as expected_hash to edit/write to prevent stale writes. Full files auto-truncate to head 50 + tail 30 lines (>200 lines); when truncated, call read again with a smaller range.",
+        description: "Read one or more files. Use path for one file or paths for a batch. Passing a directory lists its entries; use start_line/end_line for a range. Returns a content hash; pass it as expected_hash to edit/write to prevent stale writes. Full files auto-truncate to head 50 + tail 30 lines (>200 lines); when truncated, call read again with a smaller range.",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"One file path, not a directory. Relative to workspace or absolute."},"paths":{"type":"array","items":{"type":"string"},"description":"Multiple file paths; cannot be combined with path."},"start_line":{"type":"integer","description":"First line to read (1-based, optional)"},"end_line":{"type":"integer","description":"Last line to read, inclusive (optional). Max range: 300 lines."}},"anyOf":[{"required":["path"]},{"required":["paths"]}],"additionalProperties":false}),
         handler: handle_read_file,
         risk: ToolRisk::ReadOnly,
         default_timeout: std::time::Duration::from_secs(15),
-    });
-    mgr.register(ToolHandler {
-        key: "search".to_string(),
-        description: "Regex search across files. Returns file:line matches.",
-        input_schema: serde_json::json!({"type":"object","properties":{"pattern":{"type":"string","description":"Regex pattern"},"glob":{"type":"string","description":"File glob filter (e.g. *.rs)"},"path":{"type":"string","description":"Search directory","default":"."}},"required":["pattern"],"additionalProperties":false}),
-        handler: handle_search,
-        risk: ToolRisk::ReadOnly,
-        default_timeout: std::time::Duration::from_secs(30),
     });
     mgr.register(ToolHandler {
         key: "diff".to_string(),
@@ -328,4 +275,49 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::ReadOnly,
         default_timeout: std::time::Duration::from_secs(30),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_directory_lists_entries_instead_of_erroring() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.path().join("b.md"), "# hi\n").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let result = exec_read_file(&serde_json::json!({
+            "path": dir.path().to_string_lossy(),
+        }));
+
+        assert!(result.success, "directory read should succeed: {}", result.content);
+        let v: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(v["is_dir"], true);
+        assert_eq!(v["entry_count"], 3);
+        let text = v["content"].as_str().unwrap();
+        assert!(text.contains("a.rs"), "entries should list a.rs: {text}");
+        assert!(text.contains("b.md"), "entries should list b.md: {text}");
+        assert!(text.contains("sub"), "entries should list sub: {text}");
+        assert!(text.contains('📁'), "directories should be marked: {text}");
+    }
+
+    #[test]
+    fn read_directory_with_range_still_lists_entries() {
+        // start_line/end_line are irrelevant for a directory — the fallback
+        // still applies (range reads of a directory make no sense).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x\n").unwrap();
+
+        let result = exec_read_file(&serde_json::json!({
+            "path": dir.path().to_string_lossy(),
+            "start_line": 1,
+            "end_line": 5,
+        }));
+
+        assert!(result.success, "directory read should succeed: {}", result.content);
+        let v: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(v["is_dir"], true);
+    }
 }

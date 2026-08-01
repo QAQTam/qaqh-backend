@@ -10,6 +10,7 @@ use deepx_proto::{
 use deepx_runtime::{DeepxService, EventBus, LeaseDecision, LeaseManager};
 use futures_util::{SinkExt, StreamExt};
 use deepx_runtime::RingingHub;
+use deepx_runtime::{WorkspaceMode, WorkspaceSupervisor};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -71,6 +72,26 @@ pub async fn run() -> Result<(), String> {
     let hub = Arc::new(RingingHub::new(events.epoch().to_string()));
     let service = DeepxService::init(events);
     service.attach_ringing(hub.clone());
+    // 工具套件运行环境：config `[workspace] mode`（local 默认 / wsl 可选）。
+    // 拉起失败不阻塞 daemon——worker 回退进程内工具执行。
+    let workspace_mode = deepx_config::Config::load()
+        .map(|config| WorkspaceMode::parse(&config.workspace.mode))
+        .unwrap_or(WorkspaceMode::Local);
+    let workspace = WorkspaceSupervisor::start(workspace_mode).ok();
+    if let Some(ref ws) = workspace {
+        service.attach_workspace(ws.endpoint.clone(), ws.token.clone());
+        service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
+            configured_mode: workspace_mode.label().into(),
+            active_mode: ws.mode_label().into(),
+            endpoint: ws.endpoint.clone(),
+        });
+    } else {
+        service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
+            configured_mode: workspace_mode.label().into(),
+            active_mode: "disabled".into(),
+            endpoint: String::new(),
+        });
+    }
     let leases = Arc::new(Mutex::new(LeaseManager::default()));
     let ringing_leases = Arc::new(Mutex::new(
         crate::ringing_http::RingingLeaseStore::new(),
@@ -101,6 +122,9 @@ pub async fn run() -> Result<(), String> {
         }
     }
     service.shutdown();
+    if let Some(ref ws) = workspace {
+        ws.stop();
+    }
     let _ = std::fs::remove_file(deepx_types::platform::daemon_discovery_path());
     let _ = std::fs::remove_file(deepx_types::platform::daemon_lock_path());
     Ok(())
@@ -155,6 +179,11 @@ async fn handle_connection(
             pending_commands,
         )
         .await;
+    }
+
+    // Debug 只读页：静态服务前端产物（浏览器调试入口，无需 Electron）
+    if preview.starts_with("GET /debug") {
+        return crate::debug_http::handle_debug_http(stream, &preview, &token).await;
     }
 
     let expected = format!("Bearer {token}");

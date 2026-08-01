@@ -58,7 +58,7 @@ function cfg(overrides: Record<string, unknown> = {}) {
       api_key: "****",
       max_tokens: 4096,
       timeout_secs: 120,
-      default_tools: ["read_file", "search"],
+      default_tools: ["read_file"],
     },
     ...overrides,
   };

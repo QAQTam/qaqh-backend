@@ -395,15 +395,6 @@ mod tests {
         );
         assert!(generic_read.content.contains("USE_SKILLS_TOOL"));
 
-        let generic_search = execute_with_context(
-            "search",
-            "",
-            &serde_json::json!({"path": skill_dir, "pattern": "Typed"}).to_string(),
-            "generic-skill-search",
-            None,
-        );
-        assert!(generic_search.content.contains("USE_SKILLS_TOOL"));
-
         let traversal = execute_with_context(
             "skills",
             "",

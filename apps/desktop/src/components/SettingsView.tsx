@@ -121,7 +121,7 @@ export default function SettingsView(props: SettingsViewProps) {
   const [showSubApiKeyInput, setShowSubApiKeyInput] = createSignal(false);
   const [subMaxTokens, setSubMaxTokens] = createSignal(4096);
   const [subTimeout, setSubTimeout] = createSignal(120);
-  const [subTools, setSubTools] = createSignal<string[]>(["read_file", "search", "grep", "exec", "list_dir", "glob"]);
+  const [subTools, setSubTools] = createSignal<string[]>(["read_file", "grep", "exec", "list_dir", "glob"]);
   const [tokenizerPath, setTokenizerPath] = createSignal("");
 
   const [activeCategory, setActiveCategory] = createSignal("models");
@@ -136,6 +136,19 @@ export default function SettingsView(props: SettingsViewProps) {
   const [mmProviderType, setMmProviderType] = createSignal("mimo");
   const [mmMaxTokens, setMmMaxTokens] = createSignal(4096);
 
+  // -- Workspace 工具套件运行环境 --
+  const [workspaceMode, setWorkspaceMode] = createSignal("local");
+  const [workspaceInitialMode, setWorkspaceInitialMode] = createSignal("local");
+  const [workspaceBusy, setWorkspaceBusy] = createSignal(false);
+  const [workspaceResult, setWorkspaceResult] = createSignal("");
+  const [workspaceStatus, setWorkspaceStatus] = createSignal<{ configured_mode: string; active_mode: string; endpoint: string } | null>(null);
+  const [wslDiagnose, setWslDiagnose] = createSignal<Record<string, unknown> | null>(null);
+  const [wslDiagnoseBusy, setWslDiagnoseBusy] = createSignal(false);
+  const [wslInstallBusy, setWslInstallBusy] = createSignal(false);
+  const [wslInstallResult, setWslInstallResult] = createSignal("");
+  // Electron renderer 平台判断：Linux 系统不提供 WSL 二选一。
+  const isWindows = () => navigator.userAgent.includes("Windows");
+
   const [configData, setConfigData] = createSignal<any>(null);
   const [configLoading, setConfigLoading] = createSignal(true);
   const [configError, setConfigError] = createSignal<any>(null);
@@ -145,6 +158,7 @@ export default function SettingsView(props: SettingsViewProps) {
     setConfigError(null);
     try {
       setConfigData(await request<unknown>("config.load"));
+      void refreshWorkspaceStatus();
     } catch (e) {
       console.error(e);
       setConfigError(e);
@@ -225,6 +239,10 @@ export default function SettingsView(props: SettingsViewProps) {
       if (data.multimodal.model) setMmModel(data.multimodal.model);
       if (data.multimodal.max_tokens) setMmMaxTokens(data.multimodal.max_tokens);
     }
+    if (data.workspace?.mode) {
+      setWorkspaceMode(data.workspace.mode);
+      setWorkspaceInitialMode(data.workspace.mode);
+    }
   });
 
   const providers = (): Provider[] => configData()?.providers ?? [];
@@ -264,6 +282,68 @@ export default function SettingsView(props: SettingsViewProps) {
       setTimeout(() => setSaved(false), 2500);
     } catch (e) {
       console.error(e);
+    }
+  }
+
+  async function applyWorkspaceMode() {
+    setWorkspaceBusy(true);
+    setWorkspaceResult("");
+    try {
+      await request("workspace.set_mode", { mode: workspaceMode() });
+      setWorkspaceInitialMode(workspaceMode());
+      const result = await window.deepx?.backend.restart();
+      if (result?.ok) {
+        setWorkspaceResult("已保存并重启后端，新运行环境已生效。");
+      } else {
+        setWorkspaceResult(`配置已保存，但重启后端失败: ${result?.reason ?? "unknown"}（下次启动 daemon 时生效）`);
+      }
+    } catch (error) {
+      setWorkspaceResult(`切换失败: ${String(error)}`);
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }
+
+  async function refreshWorkspaceStatus() {
+    try {
+      const status = await request("workspace.status") as { configured_mode: string; active_mode: string; endpoint: string };
+      setWorkspaceStatus(status);
+      if (status.configured_mode) {
+        setWorkspaceMode(status.configured_mode);
+        setWorkspaceInitialMode(status.configured_mode);
+      }
+    } catch (error) {
+      console.error("workspace.status failed", error);
+    }
+  }
+
+  async function diagnoseWsl() {
+    setWslDiagnoseBusy(true);
+    setWslDiagnose(null);
+    try {
+      const result = await request("workspace.diagnose") as Record<string, unknown>;
+      setWslDiagnose(result);
+    } catch (error) {
+      setWslDiagnose({ error: String(error) });
+    } finally {
+      setWslDiagnoseBusy(false);
+    }
+  }
+
+  async function installWsl() {
+    setWslInstallBusy(true);
+    setWslInstallResult("");
+    try {
+      const result = await request("workspace.install_wsl", {}) as { ok?: boolean; already_installed?: boolean; message?: string; verify?: string };
+      setWslInstallResult(
+        result.already_installed
+          ? `已存在: ${result.message ?? ""}`
+          : `${result.message ?? ""}${result.verify ? `\n${result.verify}` : ""}`,
+      );
+    } catch (error) {
+      setWslInstallResult(String(error));
+    } finally {
+      setWslInstallBusy(false);
     }
   }
 
@@ -396,6 +476,7 @@ export default function SettingsView(props: SettingsViewProps) {
     { id: "api", label: t().settings.categoryApi },
     { id: "context", label: t().settings.categoryContext },
     { id: "subagent", label: t().settings.categorySubagent },
+    { id: "workspace", label: "工具套件" },
     { id: "data", label: t().settings.categoryData },
     { id: "multimodal", label: t().settings.categoryMultimodal },
     { id: "appearance", label: t().settings.categoryAppearance },
@@ -660,6 +741,98 @@ export default function SettingsView(props: SettingsViewProps) {
                     <div class="settings-row">
                       <label>{t().settings.multimodal.maxTokens}</label>
                       <input type="number" value={mmMaxTokens()} onInput={(e) => setMmMaxTokens(parseInt(e.currentTarget.value) || 4096)} step={512} />
+                    </div>
+                  </Show>
+                </section>
+              </Show>
+
+              {/* Category: Workspace 工具套件运行环境 */}
+              <Show when={activeCategory() === "workspace"}>
+                <section class="settings-section">
+                  <h2 class="settings-section-title">工具套件运行环境</h2>
+                  <p class="settings-section-desc">
+                    deepx-workspace serve 提供 exec 等工具的隔离执行服务（daemon 启动时自动拉起）。
+                  </p>
+                  <Show when={workspaceStatus()}>
+                    <div class="settings-row">
+                      <label>当前运行状态</label>
+                      <div class="settings-input-group">
+                        <span>
+                          配置: {workspaceStatus()!.configured_mode} · 实际: {workspaceStatus()!.active_mode}
+                          {workspaceStatus()!.endpoint ? ` · ${workspaceStatus()!.endpoint}` : " · 未启用（工具进程内执行）"}
+                        </span>
+                        <div class="settings-hint">
+                          实际为 local 而配置为 wsl 时，表示 WSL 拉起失败已自动回退本地。
+                        </div>
+                      </div>
+                    </div>
+                  </Show>
+                  <Show when={isWindows()}>
+                    <div class="settings-row">
+                      <label>运行环境</label>
+                      <select value={workspaceMode()} onChange={(e) => setWorkspaceMode(e.currentTarget.value)}>
+                        <option value="local">本地（Windows 原生）</option>
+                        <option value="wsl">WSL（Linux 子系统）</option>
+                      </select>
+                      <div class="settings-hint">
+                        WSL 模式要求 WSL 发行版内已安装 deepx-workspace，切换前建议先「诊断 WSL」。
+                        切换后需重启后端生效；WSL 不可用时会自动回退本地。
+                      </div>
+                    </div>
+                    <div class="settings-row">
+                      <label>诊断 WSL</label>
+                      <div class="settings-input-group">
+                        <button class="settings-save-btn" disabled={wslDiagnoseBusy()} onClick={diagnoseWsl}>
+                          {wslDiagnoseBusy() ? "诊断中…" : "运行诊断"}
+                        </button>
+                        <Show when={wslDiagnose()}>
+                          <div class="settings-hint" style={{ "white-space": "pre-wrap" }}>
+                            {wslDiagnose()!.error
+
+                              ? `✗ ${String(wslDiagnose()!.error)}`
+
+                              : [
+                                  `✓ WSL 可用${wslDiagnose()!.distro ? ` (${String(wslDiagnose()!.distro)})` : ""}`
+                                  + `\n${wslDiagnose()!.workspace_installed ? `✓ deepx-workspace 已安装${wslDiagnose()!.workspace_version ? `: ${String(wslDiagnose()!.workspace_version)}` : ""}` : "✗ deepx-workspace 未安装"}`
+                                  + `\n${wslDiagnose()!.connection_ok ? `✓ 连接测试通过 (${String(wslDiagnose()!.endpoint)})` : "✗ 连接测试失败"}`
+                                ].join("")}
+                          </div>
+                        </Show>
+                      </div>
+                    </div>
+                    <Show when={wslDiagnose()?.workspace_installed === false || wslDiagnose()?.error}>
+                      <div class="settings-row">
+                        <label>安装到 WSL</label>
+                        <div class="settings-input-group">
+                          <button class="settings-save-btn" disabled={wslInstallBusy()} onClick={installWsl}>
+                            {wslInstallBusy() ? "构建安装中（可能数分钟）…" : "安装 deepx-workspace 到 WSL"}
+                          </button>
+                          <Show when={wslInstallResult()}>
+                            <div class="settings-hint" style={{ "white-space": "pre-wrap" }}>{wslInstallResult()}</div>
+                          </Show>
+                          <div class="settings-hint">
+                            要求 WSL 内已安装 Rust（cargo）；安装程序会从当前仓库源码构建并装入 ~/.local/bin。
+                          </div>
+                        </div>
+                      </div>
+                    </Show>
+                    <div class="settings-row">
+                      <button
+                        class="settings-save-btn"
+                        disabled={workspaceBusy() || workspaceMode() === workspaceInitialMode()}
+                        onClick={applyWorkspaceMode}
+                      >
+                        {workspaceBusy() ? "切换中…" : "保存并重启后端"}
+                      </button>
+                      <Show when={workspaceResult()}>
+                        <div class="settings-hint">{workspaceResult()}</div>
+                      </Show>
+                    </div>
+                  </Show>
+                  <Show when={!isWindows()}>
+                    <div class="settings-row">
+                      <label>运行环境</label>
+                      <span>本地（Linux 原生系统，工具直接运行在系统环境）</span>
                     </div>
                   </Show>
                 </section>

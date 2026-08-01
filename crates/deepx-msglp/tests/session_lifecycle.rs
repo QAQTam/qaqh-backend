@@ -115,7 +115,7 @@ fn create_session_emits_session_created_and_ready() {
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
-    deepx_tools::set_workspace(&ws.to_string_lossy());
+    deepx_workspace::set_workspace(&ws.to_string_lossy());
     SESSION_INIT.call_once(|| deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false));
 
     let mut agent = AgentState::init("test");
@@ -152,7 +152,7 @@ fn send_message_triggers_turn_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
-    deepx_tools::set_workspace(&ws.to_string_lossy());
+    deepx_workspace::set_workspace(&ws.to_string_lossy());
 
     SESSION_INIT.call_once(|| deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false));
 

@@ -6,10 +6,22 @@ use serde_json::{Value, json};
 
 use crate::{AgentRegistry, EventBus, RingingHub};
 
+/// workspace serve 当前运行状态（daemon 内存态，供前端展示诊断依据）。
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceRuntimeState {
+    /// 配置的模式（config.toml [workspace] mode）。
+    pub configured_mode: String,
+    /// 实际运行模式（WSL 降级后为 local）。
+    pub active_mode: String,
+    /// serve endpoint（空 = 未启用）。
+    pub endpoint: String,
+}
+
 #[derive(Clone)]
 pub struct DeepxService {
     registry: Arc<Mutex<AgentRegistry>>,
     events: EventBus,
+    workspace_state: Arc<Mutex<WorkspaceRuntimeState>>,
 }
 
 impl DeepxService {
@@ -22,6 +34,7 @@ impl DeepxService {
         Self {
             registry: Arc::new(Mutex::new(AgentRegistry::new(events.clone()))),
             events,
+            workspace_state: Arc::new(Mutex::new(WorkspaceRuntimeState::default())),
         }
     }
 
@@ -90,6 +103,61 @@ impl DeepxService {
         let seed = || pstr(params, "seed");
         match method {
             "daemon.version" => Ok(json!(env!("CARGO_PKG_VERSION"))),
+            "workspace.set_mode" => {
+                let mode = pstr(params, "mode")?;
+                let supported = if cfg!(target_os = "windows") {
+                    matches!(mode.as_str(), "local" | "wsl")
+                } else {
+                    // Linux 原生系统：工具本来就在 Linux 环境，无 WSL 选项。
+                    mode == "local"
+                };
+                if !supported {
+                    return Err(format!(
+                        "invalid workspace mode '{mode}' (supported: {})",
+                        if cfg!(target_os = "windows") {
+                            "local | wsl"
+                        } else {
+                            "local"
+                        }
+                    ));
+                }
+                let mut config = deepx_config::Config::load()
+                    .map_err(|e| format!("load config: {e}"))?;
+                config.workspace.mode = mode.clone();
+                config
+                    .save()
+                    .map_err(|e| format!("save config: {e}"))?;
+                log::info!("[workspace] mode switched to {mode} (restart required)");
+                Ok(json!({
+                    "mode": mode,
+                    "restart_required": true,
+                }))
+            }
+            "workspace.status" => {
+                let state = self
+                    .workspace_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                Ok(json!({
+                    "configured_mode": state.configured_mode,
+                    "active_mode": state.active_mode,
+                    "endpoint": state.endpoint,
+                }))
+            }
+            "workspace.diagnose" => {
+                Ok(crate::workspace_supervisor::diagnose_wsl().map_err(err)?)
+            }
+            "workspace.install_wsl" => {
+                let repo_root = params
+                    .get("repo_root")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Ok(crate::workspace_supervisor::install_wsl(
+                    repo_root.as_deref(),
+                )
+                .map_err(err)?)
+            }
             "session.list" => Ok(Value::Array(self.list_sessions())),
             "session.activity" => {
                 Ok(serde_json::to_value(self.registry()?.activities()).map_err(err)?)
@@ -236,7 +304,7 @@ impl DeepxService {
                     name: pstr(params, "name")?,
                 },
             ),
-            "skills.list_tools" => Ok(json!(deepx_tools::runtime::all_tool_names())),
+            "skills.list_tools" => Ok(json!(deepx_workspace::runtime::all_tool_names())),
             "workspace.get" => Ok(json!(workspace(&seed()?))),
             "workspace.set" => {
                 let seed = seed()?;
@@ -247,21 +315,21 @@ impl DeepxService {
                 let _ = self.registry()?.send(&seed, Ui2Agent::ReloadConfig);
                 Ok(Value::Null)
             }
-            "git.diff" => git(&seed()?, |ws| deepx_tools::git::status_json(ws), json!([])),
+            "git.diff" => git(&seed()?, |ws| deepx_workspace::git::status_json(ws), json!([])),
             "git.branch" => git(
                 &seed()?,
-                |ws| deepx_tools::git::current_branch(ws),
+                |ws| deepx_workspace::git::current_branch(ws),
                 Value::Null,
             ),
             "git.branches" => git(
                 &seed()?,
-                |ws| deepx_tools::git::list_branches(ws),
+                |ws| deepx_workspace::git::list_branches(ws),
                 json!([]),
             ),
             "git.switch_branch" => git(
                 &seed()?,
                 |ws| {
-                    deepx_tools::git::switch_branch(
+                    deepx_workspace::git::switch_branch(
                         ws,
                         &pstr(params, "branch")?,
                         pbool(params, "stash"),
@@ -271,12 +339,12 @@ impl DeepxService {
             ),
             "git.commit" => git(
                 &seed()?,
-                |ws| deepx_tools::git::commit_all(ws, &pstr(params, "message")?),
+                |ws| deepx_workspace::git::commit_all(ws, &pstr(params, "message")?),
                 Value::Null,
             ),
             "git.file_diff" => git(
                 &seed()?,
-                |ws| deepx_tools::git::file_diff(ws, &pstr2(params, "file_path", "filePath")?),
+                |ws| deepx_workspace::git::file_diff(ws, &pstr2(params, "file_path", "filePath")?),
                 Value::Null,
             ),
             "config.load" => load_config(),
@@ -322,9 +390,9 @@ impl DeepxService {
                 deepx_session::SessionManager::global().db_primary_readiness(),
             )
             .map_err(err)?),
-            "todo.status" => parse_json_string(deepx_tools::todo::todo_status_json(&seed()?)?),
+            "todo.status" => parse_json_string(deepx_workspace::todo::todo_status_json(&seed()?)?),
             "todo.cancel" => parse_json_string(
-                deepx_tools::todo::todo_cancel_json(&seed()?, &pstr(params, "id")?)?,
+                deepx_workspace::todo::todo_cancel_json(&seed()?, &pstr(params, "id")?)?,
             ),
             "plan.context_stats" => context_stats(&seed()?),
             "stats.token_usage" => token_stats(pu64(params, "days") as u32),
@@ -376,6 +444,21 @@ impl DeepxService {
         self.registry
             .lock()
             .map_err(|e| format!("registry lock: {e}"))
+    }
+
+    /// 注入 workspace serve 连接信息（worker spawn 时写入 env）。
+    pub fn attach_workspace(&self, endpoint: String, token: String) {
+        if let Ok(mut registry) = self.registry() {
+            registry.attach_workspace(endpoint, token);
+        }
+    }
+
+    /// 记录 workspace serve 实际运行状态（server.rs 启动 supervisor 后调用）。
+    pub fn attach_workspace_state(&self, state: WorkspaceRuntimeState) {
+        *self
+            .workspace_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = state;
     }
 
     fn send(&self, seed: String, frame: Ui2Agent) -> Result<Value, String> {
@@ -727,7 +810,7 @@ fn with_file_previews(text: String, files: &[String]) -> String {
 
 fn dashboard(seed: &str) -> Result<Value, String> {
     let dir = deepx_types::platform::sessions_dir().join(seed);
-    let tasks: Vec<Value> = deepx_tools::todo::todo_status_json(seed)
+    let tasks: Vec<Value> = deepx_workspace::todo::todo_status_json(seed)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| {
@@ -837,7 +920,7 @@ fn load_config() -> Result<Value, String> {
     let cfg = deepx_config::Config::load().map_err(err)?;
     let providers = deepx_config::registry::all_providers().into_iter().map(|provider| json!({"id":provider.id,"display":provider.display,"endpoints":provider.endpoints.into_iter().map(|endpoint|json!({"id":endpoint.id,"display":endpoint.display,"base_url":endpoint.base_url,"default_model":endpoint.default_model,"models":endpoint.models,"stateful":endpoint.stateful,"beta":endpoint.beta})).collect::<Vec<_>>() })).collect::<Vec<_>>();
     Ok(
-        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"active_profile":cfg.active_profile,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"database":{"enabled":cfg.database.enabled},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"tokenizer_path":cfg.tokenizer_path}),
+        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"active_profile":cfg.active_profile,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"database":{"enabled":cfg.database.enabled},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"workspace":{"mode":cfg.workspace.mode},"tokenizer_path":cfg.tokenizer_path}),
     )
 }
 

@@ -38,7 +38,7 @@ export type ChangeReviewFile = {
 };
 
 export function toolFamily(name: string): string {
-  if (["read", "list", "search", "diff"].includes(name)) return "read";
+  if (["read", "list", "diff"].includes(name)) return "read";
   if (["write", "edit", "edit_block", "delete"].includes(name)) return "write";
   if (["web", "web_search", "web_fetch"].includes(name)) return "web";
   if (["exec", "spawn_subagent"].includes(name)) return "exec";

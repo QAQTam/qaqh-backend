@@ -1,10 +1,12 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { BackendStatus, ConfirmDialogOptions, ControlMessage, OpenDialogOptions, UpdateInfo } from "./types";
+import type { RingingEventBatch } from "../src/lib/types/ringing";
 
 contextBridge.exposeInMainWorld("deepx", {
   backend: {
     connect: () => ipcRenderer.invoke("backend:connect"),
     request: (method: string, params: Record<string, unknown>) => ipcRenderer.invoke("backend:request", method, params),
+    restart: () => ipcRenderer.invoke("backend:restart") as Promise<{ ok: boolean; reason?: string }>,
     attach: (seed: string) => ipcRenderer.invoke("backend:attach", seed),
     detach: (seed: string) => ipcRenderer.invoke("backend:detach", seed),
     status: () => ipcRenderer.invoke("backend:status") as Promise<BackendStatus>,
@@ -17,6 +19,26 @@ contextBridge.exposeInMainWorld("deepx", {
       const handler = (_event: Electron.IpcRendererEvent, status: BackendStatus) => listener(status);
       ipcRenderer.on("backend:status", handler);
       return () => ipcRenderer.removeListener("backend:status", handler);
+    },
+  },
+  ringing: {
+    status: () => ipcRenderer.invoke("ringing:status"),
+    mode: (seed: string) => ipcRenderer.invoke("ringing:mode", seed),
+    cutoverEvents: (seed: string, channel: string, action: "prepare" | "commit" | "abort") =>
+      ipcRenderer.invoke("ringing:cutover-events", seed, channel, action),
+    cutoverCommands: (seed: string, channel: string, protocol: "ringing" | "legacy") =>
+      ipcRenderer.invoke("ringing:cutover-commands", seed, channel, protocol),
+    snapshot: (seed: string, channel: string) =>
+      ipcRenderer.invoke("ringing:snapshot", seed, channel),
+    onBatch: (listener: (batch: RingingEventBatch) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, batch: RingingEventBatch) => listener(batch);
+      ipcRenderer.on("ringing:batch", handler);
+      return () => ipcRenderer.removeListener("ringing:batch", handler);
+    },
+    onStatus: (listener: (update: { channel: string; status: unknown }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, update: { channel: string; status: unknown }) => listener(update);
+      ipcRenderer.on("ringing:status", handler);
+      return () => ipcRenderer.removeListener("ringing:status", handler);
     },
   },
   desktop: {

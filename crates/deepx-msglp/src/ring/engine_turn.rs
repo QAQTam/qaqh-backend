@@ -144,6 +144,16 @@ impl TurnEngine {
                     review_type: "plan".to_string(),
                     todo_items: None,
                 });
+                // Ringing 双发：PlanReviewRequested（resume 重放）
+                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                    deepx_domain::ControlEvent::PlanReviewRequested {
+                        interaction_id: plan.call_id.clone(),
+                        turn_id: turn_id.clone(),
+                        plan_content: plan.content.clone(),
+                        review_type: "plan".to_string(),
+                        todo_items: None,
+                    },
+                ));
             }
             self.suspended = Some(saved);
             return Outcome::YieldToUser {
@@ -218,9 +228,16 @@ impl TurnEngine {
             .msg
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
         ctx.emitter.emit(Agent2Ui::AskResolved {
-            ask_id: active.call_id,
+            ask_id: active.call_id.clone(),
             resolution: AskResolution::Answered,
         });
+        // Ringing 双发：InteractionResolved（ask 已回答）
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+            deepx_domain::ControlEvent::InteractionResolved {
+                interaction_id: active.call_id,
+                resolution: deepx_domain::AskResolution::Answered,
+            },
+        ));
 
         if !saved.pending_asks.is_empty() {
             saved.reason = YieldReason::AskUser;
@@ -303,9 +320,16 @@ impl TurnEngine {
                 .msg
                 .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
             ctx.emitter.emit(Agent2Ui::PlanResolved {
-                call_id: todo_act.call_id,
+                call_id: todo_act.call_id.clone(),
                 approved,
             });
+            // Ringing 双发：PlanReviewResolved（todo 激活裁决）
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                deepx_domain::ControlEvent::PlanReviewResolved {
+                    interaction_id: todo_act.call_id,
+                    approved,
+                },
+            ));
             self.emit_completed_tool_round(ctx, &saved.turn_id, saved.round_num);
             return self.run_lap(ctx, tool, saved.turn_id, saved.round_num + 1, saved.usage);
         }
@@ -341,9 +365,16 @@ impl TurnEngine {
             .msg
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
         ctx.emitter.emit(Agent2Ui::PlanResolved {
-            call_id: plan.call_id,
+            call_id: plan.call_id.clone(),
             approved,
         });
+        // Ringing 双发：PlanReviewResolved（plan 裁决）
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+            deepx_domain::ControlEvent::PlanReviewResolved {
+                interaction_id: plan.call_id,
+                approved,
+            },
+        ));
 
         self.emit_completed_tool_round(ctx, &saved.turn_id, saved.round_num);
         self.run_lap(ctx, tool, saved.turn_id, saved.round_num + 1, saved.usage)
@@ -377,6 +408,13 @@ impl TurnEngine {
             ask_id: ask_id.to_string(),
             resolution: AskResolution::Dismissed,
         });
+        // Ringing 双发：InteractionResolved��ask 交互终结）
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+            deepx_domain::ControlEvent::InteractionResolved {
+                interaction_id: ask_id.to_string(),
+                resolution: deepx_domain::AskResolution::Dismissed,
+            },
+        ));
         Outcome::TurnAborted {
             turn_id: saved.turn_id,
             usage: saved.usage,
@@ -391,6 +429,36 @@ impl TurnEngine {
         });
     }
 
+    /// 构造结构化领域错误（error_id = 时间戳，dedupe 可选）。
+    fn domain_failure(
+        code: &str,
+        message: String,
+        dedupe_key: Option<&str>,
+    ) -> deepx_domain::DomainError {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        deepx_domain::DomainError {
+            error_id: format!("err-{code}-{ts}"),
+            code: code.to_string(),
+            message,
+            retryable: false,
+            dedupe_key: dedupe_key.map(|s| s.to_string()),
+        }
+    }
+
+    /// OperationFailed 的 occurrence_id（时间戳）。
+    fn occurrence_id() -> String {
+        format!(
+            "occ-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+    }
+
     fn emit_active_ask(ctx: &mut RingContext, state: &TurnState) {
         if let Some(ask) = state.pending_asks.front() {
             ctx.emitter.emit(Agent2Ui::AskUser {
@@ -400,6 +468,27 @@ impl TurnEngine {
                 mode: ask.mode,
                 questions: ask.questions.clone(),
             });
+            // Ringing 双发：InteractionRequested（ask 交互请求）
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                deepx_domain::ControlEvent::InteractionRequested {
+                    interaction_id: ask.call_id.clone(),
+                    turn_id: state.turn_id.clone(),
+                    mode: match ask.mode {
+                        deepx_proto::AskMode::Single => deepx_domain::AskMode::Single,
+                        deepx_proto::AskMode::Batch => deepx_domain::AskMode::Batch,
+                    },
+                    questions: ask
+                        .questions
+                        .iter()
+                        .map(|q| deepx_domain::AskQuestion {
+                            id: q.id.clone(),
+                            question: q.question.clone(),
+                            options: q.options.clone(),
+                            allow_custom: q.allow_custom,
+                        })
+                        .collect(),
+                },
+            ));
         }
     }
 
@@ -476,7 +565,7 @@ impl TurnEngine {
         while !parallel.is_empty() {
             let batch_len = parallel.len().min(MAX_PARALLEL_TOOL_WORKERS);
             let batch: Vec<_> = parallel.drain(..batch_len).collect();
-            let (progress_tx, progress_rx) = deepx_tools::bounded_exec_progress_channel();
+            let (progress_tx, progress_rx) = deepx_workspace::bounded_exec_progress_channel();
             let mut handles = Vec::new();
             for admitted in batch {
                 let tx = progress_tx.clone();
@@ -489,7 +578,7 @@ impl TurnEngine {
                         let id = call_id.clone();
                         move || {
                             let result =
-                                deepx_tools::execution::execute_authorized(*auth, Some(tx));
+                                deepx_workspace::execution::execute_authorized(*auth, Some(tx));
                             (
                                 id,
                                 result.content,
@@ -563,11 +652,11 @@ current_todo_id: dashboard::build_current_todo_id(),
             }
             let call_id = admitted.call_id;
             let tool_name = admitted.auth.tool_name().to_string();
-            let (progress_tx, progress_rx) = deepx_tools::bounded_exec_progress_channel();
+            let (progress_tx, progress_rx) = deepx_workspace::bounded_exec_progress_channel();
             let handle = std::thread::Builder::new()
                 .stack_size(4 * 1024 * 1024)
                 .spawn(move || {
-                    let result = deepx_tools::execution::execute_authorized(
+                    let result = deepx_workspace::execution::execute_authorized(
                         *admitted.auth,
                         Some(progress_tx),
                     );
@@ -646,10 +735,11 @@ current_todo_id: dashboard::build_current_todo_id(),
     /// After compact, the current turn continues normally.
     fn run_auto_compact(ctx: &mut RingContext) -> bool {
         let compact_eng = super::engine_compact::CompactEngine::new();
-        let (prompt, kept, head, provider) = match compact_eng.build_prompt_and_meta(ctx) {
-            Some(v) => v,
-            None => return false,
-        };
+        let (prompt, kept, head, provider, compact_id) =
+            match compact_eng.build_prompt_and_meta(ctx) {
+                Some(v) => v,
+                None => return false,
+            };
         let turns_removed = ctx.agent.msg.turns().len().saturating_sub(kept);
 
         let emitter = ctx.emitter;
@@ -657,7 +747,14 @@ current_todo_id: dashboard::build_current_todo_id(),
         let mut on_event = |ev: deepx_gate::StreamEvent| match ev {
             deepx_gate::StreamEvent::ContentDelta(d) => {
                 summary.push_str(&d);
-                emitter.emit_delta(deepx_proto::Agent2Ui::CompactDelta { delta: d });
+                emitter.emit_delta(deepx_proto::Agent2Ui::CompactDelta { delta: d.clone() });
+                // Ringing 双发：CompactProgress（replaceable 流式摘要）
+                emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::CompactProgress {
+                        compact_id: compact_id.clone(),
+                        delta: d,
+                    },
+                ));
             }
             deepx_gate::StreamEvent::ReasoningDelta(d) => {
                 emitter.emit_delta(deepx_proto::Agent2Ui::CompactDelta { delta: d });
@@ -696,6 +793,16 @@ current_todo_id: dashboard::build_current_todo_id(),
                     turns_compacted: head as u32,
                     turns_removed: turns_removed as u32,
                 });
+                // Ringing 双发：CompactFinished（成功终态）
+                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::CompactFinished {
+                        compact_id,
+                        status: deepx_domain::CompactStatus::Completed,
+                        summary_chars: Some(summary.chars().count()),
+                        turns_compacted: Some(head as u32),
+                        turns_removed: Some(turns_removed as u32),
+                    },
+                ));
                 log::info!("[TURN] auto-compact done: {before} → {after} tokens");
                 true
             }
@@ -705,6 +812,16 @@ current_todo_id: dashboard::build_current_todo_id(),
                     turns_compacted: 0,
                     turns_removed: 0,
                 });
+                // Ringing 双发：CompactFinished（空摘要 → 失败终态）
+                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::CompactFinished {
+                        compact_id,
+                        status: deepx_domain::CompactStatus::Failed,
+                        summary_chars: Some(0),
+                        turns_compacted: Some(0),
+                        turns_removed: Some(0),
+                    },
+                ));
                 false
             }
             Err(e) => {
@@ -713,6 +830,16 @@ current_todo_id: dashboard::build_current_todo_id(),
                     turns_compacted: 0,
                     turns_removed: 0,
                 });
+                // Ringing 双发：CompactFinished（失败终态）
+                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::CompactFinished {
+                        compact_id,
+                        status: deepx_domain::CompactStatus::Failed,
+                        summary_chars: Some(0),
+                        turns_compacted: Some(0),
+                        turns_removed: Some(0),
+                    },
+                ));
                 log::error!("[TURN] auto-compact failed: {e}");
                 false
             }
@@ -780,7 +907,7 @@ current_todo_id: dashboard::build_current_todo_id(),
 
         loop {
             // ── Interrupt check ──
-            if ctx.cancel.is_set() || deepx_tools::CANCEL.load(std::sync::atomic::Ordering::SeqCst)
+            if ctx.cancel.is_set() || deepx_workspace::CANCEL.load(std::sync::atomic::Ordering::SeqCst)
             {
                 return Self::abort_running_turn(ctx, turn_id, last_usage);
             }
@@ -994,8 +1121,19 @@ current_todo_id: dashboard::build_current_todo_id(),
                             attempt,
                             max_retries,
                             delay_secs,
-                            error,
+                            error: error.clone(),
                         });
+                        // Ringing 双发：ProviderRetrying（重试可见性）
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                            deepx_domain::ConversationEvent::ProviderRetrying {
+                                turn_id: turn_id.clone(),
+                                round_num,
+                                attempt,
+                                max_retries,
+                                delay_secs,
+                                error_message: error,
+                            },
+                        ));
                     }
                     deepx_gate::StreamEvent::Error(msg) => {
                         log::error!(
@@ -1077,6 +1215,19 @@ current_todo_id: dashboard::build_current_todo_id(),
                             ctx.emitter.emit(Agent2Ui::Error {
                                 message: "Duplicate tool-call ID from model".into(),
                             });
+                            // Ringing 双发：OperationFailed（结构化错误）
+                            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                                deepx_domain::ControlEvent::OperationFailed {
+                                    occurrence_id: Self::occurrence_id(),
+                                    scope: deepx_domain::ErrorScope::Tool,
+                                    error: Self::domain_failure(
+                                        "duplicate_tool_call",
+                                        "Duplicate tool-call ID from model".into(),
+                                        Some("duplicate_tool_call"),
+                                    ),
+                                    operation_id: None,
+                                },
+                            ));
                             return Outcome::Handled;
                         }
 
@@ -1159,11 +1310,31 @@ current_todo_id: dashboard::build_current_todo_id(),
                                 plan_submitted
                             {
                                 ctx.emitter.emit(Agent2Ui::PlanSubmitted {
-                                    call_id,
-                                    plan_content,
-                                    review_type,
-                                    todo_items,
+                                    call_id: call_id.clone(),
+                                    plan_content: plan_content.clone(),
+                                    review_type: review_type.clone(),
+                                    todo_items: todo_items.clone(),
                                 });
+                                // Ringing 双发：PlanReviewRequested（plan 评审请求）
+                                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                                    deepx_domain::ControlEvent::PlanReviewRequested {
+                                        interaction_id: call_id.clone(),
+                                        turn_id: turn_id.clone(),
+                                        plan_content,
+                                        review_type,
+                                        todo_items: todo_items.map(|items| {
+                                            items
+                                                .into_iter()
+                                                .map(|t| deepx_domain::TodoItem {
+                                                    id: t.id,
+                                                    title: t.title,
+                                                    description: t.description,
+                                                    complexity: t.complexity,
+                                                })
+                                                .collect()
+                                        }),
+                                    },
+                                ));
                             }
                             return Outcome::YieldToUser { turn_id, reason };
                         }
@@ -1180,7 +1351,7 @@ current_todo_id: dashboard::build_current_todo_id(),
                                 parallel_authorized.len().min(MAX_PARALLEL_TOOL_WORKERS);
                             let batch: Vec<_> = parallel_authorized.drain(..batch_len).collect();
                             let (progress_tx, progress_rx) =
-                                deepx_tools::bounded_exec_progress_channel();
+                                deepx_workspace::bounded_exec_progress_channel();
                             let mut handles: Vec<(String, std::thread::JoinHandle<_>)> = Vec::new();
 
                             for admitted in batch {
@@ -1192,7 +1363,7 @@ current_todo_id: dashboard::build_current_todo_id(),
                                         let auth = admitted.auth;
                                         let cid = call_id.clone();
                                         move || {
-                                            let result = deepx_tools::execution::execute_authorized(
+                                            let result = deepx_workspace::execution::execute_authorized(
                                                 *auth,
                                                 Some(tx),
                                             );
@@ -1257,13 +1428,13 @@ current_todo_id: dashboard::build_current_todo_id(),
                             }
                             let call_id = admitted.call_id;
                             let (progress_tx, progress_rx) =
-                                deepx_tools::bounded_exec_progress_channel();
+                                deepx_workspace::bounded_exec_progress_channel();
                             let handle = std::thread::Builder::new()
                                 .stack_size(4 * 1024 * 1024)
                                 .spawn({
                                     let auth = admitted.auth;
                                     move || {
-                                        let result = deepx_tools::execution::execute_authorized(
+                                        let result = deepx_workspace::execution::execute_authorized(
                                             *auth,
                                             Some(progress_tx),
                                         );
@@ -1378,11 +1549,31 @@ current_todo_id: dashboard::build_current_todo_id(),
                                 plan_submitted
                             {
                                 ctx.emitter.emit(Agent2Ui::PlanSubmitted {
-                                    call_id,
-                                    plan_content,
-                                    review_type,
-                                    todo_items,
+                                    call_id: call_id.clone(),
+                                    plan_content: plan_content.clone(),
+                                    review_type: review_type.clone(),
+                                    todo_items: todo_items.clone(),
                                 });
+                                // Ringing 双发：PlanReviewRequested（plan 评审请求）
+                                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                                    deepx_domain::ControlEvent::PlanReviewRequested {
+                                        interaction_id: call_id.clone(),
+                                        turn_id: turn_id.clone(),
+                                        plan_content,
+                                        review_type,
+                                        todo_items: todo_items.map(|items| {
+                                            items
+                                                .into_iter()
+                                                .map(|t| deepx_domain::TodoItem {
+                                                    id: t.id,
+                                                    title: t.title,
+                                                    description: t.description,
+                                                    complexity: t.complexity,
+                                                })
+                                                .collect()
+                                        }),
+                                    },
+                                ));
                             }
                             return Outcome::YieldToUser { turn_id, reason };
                         }
@@ -1392,7 +1583,16 @@ current_todo_id: dashboard::build_current_todo_id(),
                     self.emit_completed_tool_round(ctx, &turn_id, round_num);
 
                     if let Err(error) = ctx.agent.skills.complete_model_lap() {
-                        ctx.emitter.emit(Agent2Ui::Error { message: error });
+                        ctx.emitter.emit(Agent2Ui::Error { message: error.clone() });
+                        // Ringing 双发：OperationFailed（skill lap 失败）
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                            deepx_domain::ControlEvent::OperationFailed {
+                                occurrence_id: Self::occurrence_id(),
+                                scope: deepx_domain::ErrorScope::Tool,
+                                error: Self::domain_failure("skill_lap", error, Some("skill_lap")),
+                                operation_id: None,
+                            },
+                        ));
                     }
 
                     // Another lap: tools executed, back to Gate
@@ -1412,7 +1612,16 @@ current_todo_id: dashboard::build_current_todo_id(),
             let forced = match ctx.agent.skills.complete_model_lap() {
                 Ok(forced) => forced,
                 Err(error) => {
-                    ctx.emitter.emit(Agent2Ui::Error { message: error });
+                    ctx.emitter.emit(Agent2Ui::Error { message: error.clone() });
+                    // Ringing 双发：OperationFailed（skill lap 失败）
+                    ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                        deepx_domain::ControlEvent::OperationFailed {
+                            occurrence_id: Self::occurrence_id(),
+                            scope: deepx_domain::ErrorScope::Tool,
+                            error: Self::domain_failure("skill_lap", error, Some("skill_lap")),
+                            operation_id: None,
+                        },
+                    ));
                     Vec::new()
                 }
             };

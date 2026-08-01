@@ -47,6 +47,106 @@ impl ToolExecutionBackend for LocalToolExecutionBackend {
     }
 }
 
+/// HTTP backend that forwards prepared calls to a `deepx-workspace serve`
+/// instance (local process or WSL). On any transport/HTTP failure it falls
+/// back to the in-process handler so a flapping tool service never blocks
+/// the agent loop (failure mode: slow path, not hard failure).
+#[derive(Debug, Clone)]
+pub struct HttpToolExecutionBackend {
+    pub endpoint: String,
+    pub token: String,
+}
+
+impl HttpToolExecutionBackend {
+    pub fn new(endpoint: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            token: token.into(),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct HttpExecuteRequest<'a> {
+    session_id: &'a str,
+    workspace: &'a str,
+    name: &'a str,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    action: String,
+    args: &'a serde_json::Value,
+    call_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct HttpExecuteResponse {
+    success: bool,
+    content: String,
+}
+
+impl ToolExecutionBackend for HttpToolExecutionBackend {
+    fn execute(&self, request: BackendRequest) -> ToolResult {
+        let ctx = &request.ctx;
+        let payload = HttpExecuteRequest {
+            session_id: &request.session_id,
+            workspace: &request.host_workspace.to_string_lossy(),
+            name: &ctx.name,
+            action: ctx.action.clone(),
+            args: &ctx.args,
+            call_id: &ctx.id,
+            timeout_secs: ctx.timeout_secs,
+        };
+        let body = match serde_json::to_vec(&payload) {
+            Ok(body) => body,
+            Err(error) => {
+                log::warn!("[workspace-backend] serialize execute request: {error}; fallback local");
+                return (request.local_handler)(request.ctx);
+            }
+        };
+
+        // 与 serve 的 executor 串行语义匹配：HTTP 读超时按工具自身超时放大，
+        // 避免代理层比工具更早放弃；连接/写超时保持有界（服务不可达快速回退）。
+        let timeout = ctx.timeout_secs.unwrap_or(30).saturating_add(30).min(3600);
+        let url = format!("{}/execute", self.endpoint.trim_end_matches('/'));
+        let result = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_per_call(Some(std::time::Duration::from_secs(timeout)))
+            .build()
+            .new_agent()
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .send(body);
+
+        match result {
+            Ok(mut response) => {
+                let parsed = response
+                    .body_mut()
+                    .read_json::<HttpExecuteResponse>()
+                    .map_err(|e| e.to_string());
+                match parsed {
+                    Ok(resp) => ToolResult {
+                        success: resp.success,
+                        content: resp.content,
+                    },
+                    Err(error) => {
+                        log::warn!("[workspace-backend] invalid execute response: {error}; fallback local");
+                        (request.local_handler)(request.ctx)
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "[workspace-backend] {} unavailable ({error}); fallback local",
+                    self.endpoint
+                );
+                (request.local_handler)(request.ctx)
+            }
+        }
+    }
+}
+
 fn backend_slot() -> &'static RwLock<Arc<dyn ToolExecutionBackend>> {
     static WORKSPACE_BACKEND: OnceLock<RwLock<Arc<dyn ToolExecutionBackend>>> = OnceLock::new();
     WORKSPACE_BACKEND

@@ -35,6 +35,12 @@ export class DaemonControlClient {
   private restarting = false;
   private closing?: Promise<void>;
   private status: BackendStatus = { connected: false };
+  private lastDiscovery?: { baseUrl: string; token: string };
+
+  /** 最近一次成功的 daemon discovery（Ringing HTTP 客户端复用同一 token）。 */
+  discoveryInfo(): { baseUrl: string; token: string } | null {
+    return this.lastDiscovery ?? null;
+  }
 
   constructor(
     private readonly onMessage: (message: ControlMessage) => void,
@@ -249,6 +255,14 @@ export class DaemonControlClient {
     if (discovery.protocol_version !== PROTOCOL_VERSION) {
       throw new Error(`daemon protocol ${discovery.protocol_version} is incompatible`);
     }
+    // 保存 baseUrl（仅 origin：ws://host:port/control/v1 → http://host:port）
+    // 供 Ringing HTTP 复用。endpoint 带 /control/v1 路径，必须去掉，
+    // 否则 /ringing/v1/... 请求会 404。
+    const endpointUrl = new URL(discovery.endpoint);
+    this.lastDiscovery = {
+      baseUrl: `${endpointUrl.protocol === "wss:" ? "https" : "http"}://${endpointUrl.host}`,
+      token: discovery.token,
+    };
     const socket = new WebSocket(discovery.endpoint, {
       headers: { Authorization: `Bearer ${discovery.token}` },
       maxPayload: 64 * 1024 * 1024,

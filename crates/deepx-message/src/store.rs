@@ -10,13 +10,32 @@ use deepx_types::{Message, ToolDef};
 /// - Truncation markers tell the model how to retrieve the omitted portion.
 /// - Line-oriented tools snap to a preceding newline; others cut at a UTF-8 boundary.
 fn is_line_oriented_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "read" | "search" | "diff") || tool_name.starts_with("file")
+    matches!(tool_name, "read" | "diff") || tool_name.starts_with("file")
+}
+
+/// Tools whose result carries content the model must consume to continue:
+/// folding their *active* (last-step) result forces a redundant second call
+/// (re-fetching a URL, re-running an image query, re-listing todos, …).
+/// Receipt-style tools (write/edit/delete/todo_create/…) stay folded even on
+/// the last step — the model already knows what it changed.
+fn is_content_bearing_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "web"
+            | "image_query"
+            | "diff"
+            | "todo_list"
+            | "memory"
+            | "process_check"
+            | "process_wait"
+            | "ask_user"
+            | "apply_patch"
+    )
 }
 
 fn truncation_hint(tool_name: &str) -> &'static str {
     match tool_name {
         "read" => "Call read again with the same path and a later start_line/end_line range.",
-        "search" => "Call search again with a narrower pattern, glob, or path.",
         "exec" => "Call exec again with narrower argv or a filtering command.",
         "web" => "Call web again with a narrower URL or query.",
         _ => "Call this tool again with narrower arguments to retrieve the omitted portion.",
@@ -112,7 +131,7 @@ fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
         return result.to_string();
     }
 
-    if matches!(tool_name, "read" | "search" | "diff") {
+    if matches!(tool_name, "read" | "diff") {
         return fold_retrieval_result(tool_name, result);
     }
 
@@ -123,7 +142,7 @@ fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
     // ── JSON-aware folding ──
     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(result) {
         let hint = if tool_name.starts_with("web") {
-            "[web content folded]"
+            "[web content folded; call web again with the same url to re-fetch, or read the saved file if the result led with [saved to ...]]"
         } else if tool_name.starts_with("exec") {
             "[stdout folded]"
         } else if tool_name.starts_with("file") {
@@ -142,7 +161,7 @@ fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
 
     // ── Plain string folding (legacy) ──
     let hint = if tool_name.starts_with("web") {
-        " [web content folded]"
+        " [web content folded; call web again with the same url to re-fetch, or read the saved file if the result led with [saved to ...]]"
     } else if tool_name.starts_with("exec") {
         " [stdout folded]"
     } else if tool_name.starts_with("file") {
@@ -175,6 +194,10 @@ fn fold_retrieval_result(tool_name: &str, result: &str) -> String {
             "hash",
             "unchanged",
             "truncated",
+            // diff results: keep the two paths so a re-diff is trivial
+            "path_a",
+            "path_b",
+            "identical",
         ] {
             if let Some(value) = value.get(key) {
                 folded.insert(key.to_string(), value.clone());
@@ -716,10 +739,17 @@ impl MessageStore {
                     continue;
                 }
                 v.push(turn.user.clone());
-                let _is_last_turn = i == total_turns - 1;
-                let _total_steps = turn.steps.len();
-                for (_si, step) in turn.steps.iter().enumerate() {
+                let is_last_turn = i == total_turns - 1;
+                for (si, step) in turn.steps.iter().enumerate() {
                     v.push(step.assistant.clone());
+                    // The active (last) step of the current turn is what the model
+                    // consumes on the next iteration. Content-bearing tools whose
+                    // results the model still needs (web content, image analysis,
+                    // todo list, diff, memory, process state, ask_user, patch
+                    // preview) must NOT be folded there — folding forces a
+                    // redundant second call. Earlier steps stay folded to keep
+                    // the historical prefix stable and bounded.
+                    let is_active_step = is_last_turn && si == turn.steps.len() - 1;
                     for tr in &step.tool_results {
                         let mut msg = tr.clone();
                         for block in &mut msg.content {
@@ -739,9 +769,15 @@ impl MessageStore {
                                 if tool_name == "read" {
                                     // read self-limits to head 50 + tail 30 lines
                                     // (~4K chars); pass through unchanged.
-                                } else if tool_name == "search" {
-                                    // search results are structured text; keep
-                                    // as-is — they are bounded by the tool.
+                                } else if tool_name == "skills" {
+                                    // Skill instructions / resources are active
+                                    // context; never folded (also below).
+                                } else if is_active_step
+                                    && is_content_bearing_tool(tool_name)
+                                {
+                                    // Last step of the current turn: keep the
+                                    // result intact so the model can consume it
+                                    // without calling the tool again.
                                 } else if tool_name.starts_with("exec") {
                                     *content = truncate_tool_result(tool_name, content);
                                 } else {
@@ -1360,7 +1396,6 @@ impl MessageStore {
 
                             let effective = if is_last_step_of_last_turn {
                                 let keep_full = tool_name == "read"
-                                    || tool_name == "search"
                                     || tool_name == "skills"
                                     || tool_name.starts_with("exec");
                                 if keep_full {
@@ -1554,13 +1589,65 @@ mod tests {
         store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
         store.push_tool_result_direct(
             "edit-1",
-            "[OK] src/lib.rs:42 +3 -2 | edit_file\n\n@@ -42,2 +42,3 @@\n-full diff body",
+            "[OK] src/lib.rs:42 +3 -2 | edit\n\n@@ -42,2 +42,3 @@\n-full diff body",
             true,
         );
 
         assert_eq!(
             context_result(&store.build_context_for_gate(&[]), "edit-1"),
-            "[OK] src/lib.rs:42 +3 -2 | edit_file\n[edit diff folded; verify the affected range with read before making dependent changes]"
+            "[OK] src/lib.rs:42 +3 -2 | edit\n[edit diff folded; verify the affected range with read before making dependent changes]"
+        );
+    }
+
+    #[test]
+    fn content_bearing_tool_kept_intact_on_active_step() {
+        // web is content-bearing: its result must stay visible on the active
+        // (last) step, otherwise the model would re-fetch the URL.
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("fetch page");
+        store.push_assistant(assistant_with_tools(&[("web-1", "web")]));
+        store.push_tool_result_direct("web-1", "PAGE_TEXT_BODY", true);
+
+        assert_eq!(
+            context_result(&store.build_context_for_gate(&[]), "web-1"),
+            "PAGE_TEXT_BODY"
+        );
+    }
+
+    #[test]
+    fn content_bearing_tool_folded_once_historical() {
+        // Once a later step exists, the web result is historical and folds to
+        // a marker — bounded prefix wins over re-readability.
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("fetch page");
+        store.push_assistant(assistant_with_tools(&[("web-1", "web")]));
+        store.push_tool_result_direct("web-1", "PAGE_TEXT_BODY", true);
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
+        store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
+
+        let context = store.build_context_for_gate(&[]);
+        let folded = context_result(&context, "web-1");
+        assert!(folded.contains("folded"), "expected folded marker, got: {folded}");
+        // The edit receipt stays folded too — edit is receipt-style even on
+        // the active step.
+        assert_eq!(
+            context_result(&context, "edit-1"),
+            "OK_RECEIPT\n[edit diff folded; verify the affected range with read before making dependent changes]"
+        );
+    }
+
+    #[test]
+    fn receipt_tool_stays_folded_even_on_active_step() {
+        // write/edit are receipt-style: even the active step shows the
+        // verification receipt, not the full body — the model knows the change.
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("write file");
+        store.push_assistant(assistant_with_tools(&[("write-1", "write")]));
+        store.push_tool_result_direct("write-1", "WRITE_RESULT", true);
+
+        assert_eq!(
+            context_result(&store.build_context_for_gate(&[]), "write-1"),
+            "WRITE_RESULT\n[write diff folded; verify the affected range with read before making dependent changes]"
         );
     }
 

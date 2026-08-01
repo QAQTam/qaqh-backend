@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { DaemonControlClient } from "./controlClient";
+import { RingingManager, type ChannelName } from "./ringingManager";
 import type { ConfirmDialogOptions, OpenDialogOptions, UpdateInfo } from "./types";
 
 let mainWindow: BrowserWindow | undefined;
@@ -85,6 +86,11 @@ const backend = new DaemonControlClient(
   message => sendToRenderer("backend:message", message),
   status => sendToRenderer("backend:status", status),
 );
+// Ringing 会话管理（三 SSE + 切流）。batch 整批转发 renderer，禁止逐事件展开。
+const ringing = new RingingManager(
+  batch => sendToRenderer("ringing:batch", batch),
+  (channel, status) => sendToRenderer("ringing:status", { channel, status }),
+);
 
 if (smokeMode) {
   setTimeout(() => {
@@ -166,7 +172,13 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle("backend:connect", () => backend.connect());
+  ipcMain.handle("backend:connect", async () => {
+    const result = await backend.connect();
+    // 复用 daemon discovery（baseUrl + token）启动 Ringing 三 SSE
+    const info = backend.discoveryInfo();
+    if (info) await ringing.ensureConnected(info.baseUrl, info.token);
+    return result;
+  });
   ipcMain.handle("backend:request", (_event, method: unknown, params: unknown) => {
     if (typeof method !== "string" || !isRecord(params)) throw new Error("invalid backend request");
     return backend.request(method, params);
@@ -174,6 +186,45 @@ function registerIpc(): void {
   ipcMain.handle("backend:attach", (_event, seed: unknown) => backend.attach(requireSeed(seed)));
   ipcMain.handle("backend:detach", (_event, seed: unknown) => backend.detach(requireSeed(seed)));
   ipcMain.handle("backend:status", () => backend.currentStatus());
+  ipcMain.handle("backend:restart", async () => {
+    // 运行环境切换（workspace.set_mode 已写 config）后重启 daemon：
+    // 复用更新链路的 prepare/resume（停 daemon → 等退出 → 重连拉起）。
+    try {
+      if (!(await backend.prepareBackendUpdate())) {
+        return { ok: false, reason: "busy" };
+      }
+      await backend.resumeAfterBackendUpdate();
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: String(error) };
+    }
+  });
+  ipcMain.handle("ringing:status", () => ringing.status());
+  ipcMain.handle("ringing:mode", (_event, seed: unknown) => ringing.mode(requireSeed(seed)));
+  ipcMain.handle("ringing:cutover-events", (_event, seed: unknown, channel: unknown, action: unknown) => {
+    if (!["control", "conversation", "tool"].includes(String(channel))) {
+      throw new Error("invalid ringing channel");
+    }
+    if (!["prepare", "commit", "abort"].includes(String(action))) {
+      throw new Error("invalid cutover action");
+    }
+    return ringing.cutoverEvents(requireSeed(seed), String(channel) as ChannelName, String(action) as "prepare" | "commit" | "abort");
+  });
+  ipcMain.handle("ringing:cutover-commands", (_event, seed: unknown, channel: unknown, protocol: unknown) => {
+    if (!["control", "conversation", "tool"].includes(String(channel))) {
+      throw new Error("invalid ringing channel");
+    }
+    if (!["ringing", "legacy"].includes(String(protocol))) {
+      throw new Error("invalid command protocol");
+    }
+    return ringing.cutoverCommands(requireSeed(seed), String(channel) as ChannelName, String(protocol) as "ringing" | "legacy");
+  });
+  ipcMain.handle("ringing:snapshot", (_event, seed: unknown, channel: unknown) => {
+    if (!["control", "conversation", "tool"].includes(String(channel))) {
+      throw new Error("invalid ringing channel");
+    }
+    return ringing.snapshot(requireSeed(seed), String(channel) as ChannelName);
+  });
   ipcMain.handle("desktop:open-devtools", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
     mainWindow.webContents.openDevTools({ mode: "detach" });
@@ -451,5 +502,6 @@ app.on("before-quit", event => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
+  ringing.close();
   void backend.close().finally(() => app.quit());
 });

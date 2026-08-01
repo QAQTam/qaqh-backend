@@ -35,7 +35,7 @@ DeepX/
 │   ├── deepx-msglp         # Agent 消息循环
 │   ├── deepx-gate          # 模型访问与流式响应
 │   ├── deepx-session       # 会话管理与持久化
-│   ├── deepx-tools         # 工具、权限与执行审计
+│   ├── deepx-workspace         # 工具、权限与执行审计
 │   ├── deepx-skills        # Skills 发现与生命周期
 │   ├── deepx-subagent      # 子 Agent
 │   ├── deepx-update        # 更新协议与事务引擎

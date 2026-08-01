@@ -15,7 +15,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
-use deepx_tools::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
+use deepx_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
 
 pub fn register(mgr: &mut ToolManager) {
     mgr.register(ToolHandler {
@@ -129,7 +129,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
     if task.is_empty() {
         return ToolResult {
             success: false,
-            content: deepx_tools::json_err(
+            content: deepx_workspace::json_err(
                 "MISSING_TASK",
                 "spawn_subagent: task is required",
                 "Provide a task description.",
@@ -142,7 +142,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         Err(e) => {
             return ToolResult {
                 success: false,
-                content: deepx_tools::json_err(
+                content: deepx_workspace::json_err(
                     "EXE_ERROR",
                     &format!("spawn_subagent: cannot get exe path: {e}"),
                     "Check the installation.",
@@ -151,7 +151,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         }
     };
 
-    let parent_seed = deepx_tools::CURRENT_SESSION
+    let parent_seed = deepx_workspace::CURRENT_SESSION
         .lock()
         .ok()
         .and_then(|g| g.clone())
@@ -177,7 +177,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
 
     let tools_json = serde_json::to_string(&tools).unwrap_or_default();
     let registry_id =
-        deepx_tools::process_registry::ProcessRegistry::register(&format!("subagent:{}", name));
+        deepx_workspace::process_registry::ProcessRegistry::register(&format!("subagent:{}", name));
 
     let mut cmd = Command::new(&exe);
     cmd.arg("subagent")
@@ -218,7 +218,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         Err(e) => {
             return ToolResult {
                 success: false,
-                content: deepx_tools::json_err(
+                content: deepx_workspace::json_err(
                     "SPAWN_ERROR",
                     &format!("spawn_subagent: failed to spawn: {e}"),
                     "Check that deepx is installed correctly.",
@@ -232,7 +232,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         None => {
             return ToolResult {
                 success: false,
-                content: deepx_tools::json_err(
+                content: deepx_workspace::json_err(
                     "STDIN_ERROR",
                     "spawn_subagent: failed to get stdin",
                     "Check subagent process.",
@@ -245,7 +245,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         None => {
             return ToolResult {
                 success: false,
-                content: deepx_tools::json_err(
+                content: deepx_workspace::json_err(
                     "STDOUT_ERROR",
                     "spawn_subagent: failed to get stdout",
                     "Check subagent process.",
@@ -254,7 +254,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         }
     };
 
-    deepx_tools::process_registry::ProcessRegistry::attach_child(registry_id, child);
+    deepx_workspace::process_registry::ProcessRegistry::attach_child(registry_id, child);
 
     // Write task to subagent's stdin
     {
@@ -262,10 +262,10 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         let frame = serde_json::json!({"type": "user_input", "text": task_text});
         let line = serde_json::to_string(&frame).unwrap_or_default();
         if writeln!(stdin_writer, "{}", line).is_err() || stdin_writer.flush().is_err() {
-            deepx_tools::process_registry::ProcessRegistry::kill(registry_id);
+            deepx_workspace::process_registry::ProcessRegistry::kill(registry_id);
             return ToolResult {
                 success: false,
-                content: deepx_tools::json_err(
+                content: deepx_workspace::json_err(
                     "WRITE_ERROR",
                     "spawn_subagent: failed to write task",
                     "Check subagent process.",
@@ -362,14 +362,14 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
             }
         }
         let answer_len = final_answer.len();
-        deepx_tools::process_registry::ProcessRegistry::set_answer(registry_id_bg, final_answer);
+        deepx_workspace::process_registry::ProcessRegistry::set_answer(registry_id_bg, final_answer);
         if did_cancel {
-            deepx_tools::process_registry::ProcessRegistry::kill(registry_id_bg);
+            deepx_workspace::process_registry::ProcessRegistry::kill(registry_id_bg);
         } else if did_finish {
-            deepx_tools::process_registry::ProcessRegistry::mark_exited(registry_id_bg, exit_code);
+            deepx_workspace::process_registry::ProcessRegistry::mark_exited(registry_id_bg, exit_code);
         } else {
             // Abnormal exit: pipe broke before turn_end/error/cancelled
-            deepx_tools::process_registry::ProcessRegistry::mark_exited(registry_id_bg, -1);
+            deepx_workspace::process_registry::ProcessRegistry::mark_exited(registry_id_bg, -1);
             log::warn!(
                 "[SUBAGENT] '{}' abnormal exit (no turn_end), partial answer_len={}",
                 name_bg,
@@ -391,7 +391,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
     );
     ToolResult {
         success: true,
-        content: deepx_tools::json_ok(serde_json::json!({
+        content: deepx_workspace::json_ok(serde_json::json!({
             "process_id": registry_id,
             "name": name,
             "content": format!("Subagent '{}' spawned successfully.", name),

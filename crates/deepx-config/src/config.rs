@@ -1,6 +1,6 @@
 use deepx_types::{
     ConfigStore, PersistentConfig, PersistentDatabaseConfig, PersistentMultimodalConfig,
-    PersistentSubagentConfig,
+    PersistentSubagentConfig, PersistentWorkspaceConfig,
 };
 use std::collections::HashMap; // still used by profiles
 
@@ -227,6 +227,22 @@ pub struct Config {
     /// triggered before the next user message is processed. 0.0 disables.
     /// Default: 0.75 (compact at 75% capacity).
     pub auto_compact_threshold: f64,
+    /// 工具套件运行环境："local"（默认）| "wsl"（仅 Windows）。
+    pub workspace: WorkspaceConfig,
+}
+
+/// 工具套件运行环境（daemon 据此拉起 deepx-workspace serve）。
+#[derive(Debug, Clone)]
+pub struct WorkspaceConfig {
+    pub mode: String,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            mode: "local".into(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -269,6 +285,7 @@ impl Default for Config {
             permission_level: 4, // Unrestricted — backward compat
             tokenizer_path: None,
             auto_compact_threshold: 0.75,
+            workspace: WorkspaceConfig::default(),
         }
     }
 }
@@ -506,6 +523,13 @@ impl Config {
             if let Some(act) = pc.auto_compact_threshold {
                 cfg.auto_compact_threshold = act;
             }
+
+            // ── 工具套件运行环境 ──
+            if let Some(ref ws) = pc.workspace {
+                if let Some(ref mode) = ws.mode {
+                    cfg.workspace.mode = mode.clone();
+                }
+            }
         }
 
         // TOML is authoritative for database.enabled (prevents stale ConfigDb value)
@@ -636,6 +660,9 @@ impl Config {
             permission_level: Some(self.permission_level),
             tokenizer_path: self.tokenizer_path.clone(),
             auto_compact_threshold: Some(self.auto_compact_threshold),
+            workspace: Some(PersistentWorkspaceConfig {
+                mode: Some(self.workspace.mode.clone()),
+            }),
         };
         let json = serde_json::to_string(&pc).map_err(|e| format!("serialize config mirror: {e}"))?;
         let db_path = deepx_types::platform::data_dir().join("config.db");

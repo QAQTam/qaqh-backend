@@ -124,7 +124,7 @@ current_todo_id: dashboard::build_current_todo_id(),
             "code" => 2,
             _ => 0,
         };
-        deepx_tools::runtime::set_mode(m);
+        deepx_workspace::runtime::set_mode(m);
         if !agent.session.seed.is_empty() {
             deepx_session::SessionManager::global().persist_mode(&agent.session.seed, m);
         }

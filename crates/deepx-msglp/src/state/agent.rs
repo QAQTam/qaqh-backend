@@ -6,7 +6,7 @@ use super::token_calibration::{
     RequestTokenEstimate, SessionTokenCalibrator, estimate_prepared_request_tokens,
 };
 use deepx_message::{ToolExecReport, ToolExecRequest};
-use deepx_tools::runtime;
+use deepx_workspace::runtime;
 use std::path::Path;
 
 /// Hash snapshot of the cache-key-relevant prefix components.
@@ -197,7 +197,7 @@ impl AgentState {
         // changed annotation into the last user message would break
         // the prefix cache at that position.  Reusing the frozen
         // snapshot keeps the entire context prefix cache-stable.
-        let workspace = deepx_tools::CURRENT_WORKSPACE
+        let workspace = deepx_workspace::CURRENT_WORKSPACE
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
@@ -211,7 +211,7 @@ impl AgentState {
             if !workspace.is_empty() && workspace != "." {
                 parts.push(format!("<workspace_path>{workspace}</workspace_path>"));
             }
-            let fs = deepx_tools::file_state::summary();
+            let fs = deepx_workspace::file_state::summary();
             if !fs.is_empty() {
                 parts.push(fs);
             }
@@ -282,10 +282,10 @@ impl AgentState {
         self.skills.refresh();
     }
 
-    pub fn apply_tool_effects(&mut self, effects: Vec<deepx_tools::ToolEffect>) {
+    pub fn apply_tool_effects(&mut self, effects: Vec<deepx_workspace::ToolEffect>) {
         for effect in effects {
             let result = match effect {
-                deepx_tools::ToolEffect::Skill(effect) => self.skills.apply_tool_effect(effect),
+                deepx_workspace::ToolEffect::Skill(effect) => self.skills.apply_tool_effect(effect),
             };
             if let Err(error) = result {
                 log::warn!("cannot apply skill effect: {error}");
@@ -296,7 +296,7 @@ impl AgentState {
     /// Host-side activation for explicit `$skill-name` mentions.
     /// Explicit mentions enter Requested state; they never mutate history.
     pub fn activate_explicit_skills(&mut self, text: &str) {
-        let workspace = deepx_tools::CURRENT_WORKSPACE
+        let workspace = deepx_workspace::CURRENT_WORKSPACE
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
@@ -385,7 +385,7 @@ impl AgentState {
 
     pub fn rebind_store(&mut self) {
         self.msg.set_tool_executor(Box::new(|req: ToolExecRequest| {
-            let result = deepx_tools::execution::execute_with_context(
+            let result = deepx_workspace::execution::execute_with_context(
                 &req.name,
                 "",
                 &req.args.to_string(),
@@ -450,7 +450,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().unwrap();
-        deepx_tools::set_workspace(&temp.path().to_string_lossy());
+        deepx_workspace::set_workspace(&temp.path().to_string_lossy());
         let mut agent = AgentState::new(deepx_config::Config::default());
         agent.msg = deepx_message::MessageStore::new_ephemeral("test");
         agent.msg.push_system(deepx_types::Message::system("base"));
@@ -485,7 +485,7 @@ mod tests {
             |block| matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("DYNAMIC_FULL_BODY"))
         ));
 
-        deepx_tools::set_workspace(".");
+        deepx_workspace::set_workspace(".");
     }
     #[test]
     fn catalog_prefix_is_stable_when_a_skill_is_activated() {
@@ -500,7 +500,7 @@ mod tests {
             "---\nname: cache-skill\ndescription: Use for prompt cache tests.\n---\n\nCACHE_SKILL_BODY",
         )
         .unwrap();
-        deepx_tools::set_workspace(&temp.path().to_string_lossy());
+        deepx_workspace::set_workspace(&temp.path().to_string_lossy());
 
         let mut agent = AgentState::new(deepx_config::Config::default());
         agent.msg = deepx_message::MessageStore::new_ephemeral("test");
@@ -528,7 +528,7 @@ mod tests {
             serde_json::to_value(&after).unwrap(),
             serde_json::to_value(agent.build_context()).unwrap()
         );
-        deepx_tools::set_workspace(".");
+        deepx_workspace::set_workspace(".");
     }
 }
 
@@ -540,7 +540,7 @@ mod tests {
 /// Holds the immutable challenge — only the stored fields are used for
 /// authorization; the approval response must not supply replacement values.
 pub struct PendingApproval {
-    pub challenge: deepx_tools::authorization::PermissionChallenge,
+    pub challenge: deepx_workspace::authorization::PermissionChallenge,
     pub is_llm_tool: bool,
 }
 

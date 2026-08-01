@@ -4,7 +4,7 @@
 /// Skips silently if Python or script is unavailable (local dev without Python).
 #[test]
 fn cjk_no_unsafe_byte_slices() {
-    // CARGO_MANIFEST_DIR is crates/deepx-tools, navigate up to project root
+    // CARGO_MANIFEST_DIR is crates/deepx-workspace, navigate up to project root
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()

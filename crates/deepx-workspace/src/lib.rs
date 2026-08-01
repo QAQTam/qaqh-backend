@@ -38,6 +38,7 @@ pub mod process_registry;
 pub mod registration;
 
 pub mod manager;
+pub mod serve;
 /// Permission engine: tool categories, levels, trusted folders.
 pub mod permission;
 
@@ -46,7 +47,8 @@ pub mod audit;
 pub mod auth;
 
 pub use backend::{
-    BackendRequest, LocalToolExecutionBackend, ToolExecutionBackend, ToolPlacement,
+    BackendRequest, HttpToolExecutionBackend, LocalToolExecutionBackend, ToolExecutionBackend,
+    ToolPlacement,
     install_workspace_backend, use_local_workspace_backend,
 };
 pub use manager::{ToolExecMeta, ToolExecReport, ToolManager, ToolStats};

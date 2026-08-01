@@ -81,9 +81,16 @@ fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
         body
     };
     if let Some(out) = args.get("output").and_then(|v| v.as_str()) {
-        let _ = std::fs::write(crate::resolve_workspace_path(out), &readable);
+        let target = crate::resolve_workspace_path(out);
+        let _ = std::fs::write(&target, &readable);
+        // Lead with a save marker: plain-text folding keeps the first line,
+        // so a folded historical result still tells the model where the
+        // content lives — it can `read` the file instead of re-fetching.
+        return format!("[saved to {}]\n{}", crate::display_path(&target), readable);
     }
-    crate::json_ok(serde_json::json!({"content": readable}))
+    // Return the page text directly — the result *is* the content, no JSON
+    // wrapper needed (errors above stay structured via json_err).
+    readable
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {

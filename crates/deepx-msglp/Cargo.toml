@@ -10,7 +10,7 @@ deepx-config = { path = "../deepx-config" }
 deepx-session = { path = "../deepx-session" }
 deepx-message = { path = "../deepx-message" }
 deepx-skills = { path = "../deepx-skills" }
-deepx-tools = { path = "../deepx-tools" }
+deepx-workspace = { path = "../deepx-workspace" }
 deepx-subagent = { path = "../deepx-subagent" }
 deepx-proto = { path = "../deepx-proto" }
 deepx-domain = { path = "../deepx-domain" }

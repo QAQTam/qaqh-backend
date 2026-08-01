@@ -416,19 +416,28 @@ sessionChannelMode[seed][channel] {
 
 ### ⚠️ 部分完成（基础设施就绪，未接线/未切换）
 
-- **阶段 2（Tool Event）**：生产点双发 + 流控器 + content store 就绪；`ToolPermissionRequested`
-  尚未从 PermissionRequest 双发；daemon 侧 content 端点未接 ContentStore。
-- **阶段 3/4（Conversation/Control Event）**：仅关键链路双发（TurnStarted/RoundDelta/
-  SessionState/AgentLifecycle）；TurnCompleted/CompactFinished/ProviderRetrying/Interaction/
-  OperationFailed 等生产点未补全。
-- **阶段 5（Ringing Command）**：HTTP 命令已真正执行（校验 → 幂等 → wire 转发）；但
-  session/channel 切流（`sessionChannelMode`）默认值仍为 legacy，cutover 端点
-  （`channel_prepare`/`channel_commit`）未接到 HTTP。
+- **生产点双发**：三频道全量补全（Tool：ToolStarted/Progress/Finished/Failed/CodeChanged/
+  PermissionRequested/RoundCompleted；Conversation：TurnStarted/TurnCompleted/TurnFailed/
+  RoundDelta/RoundCompleted/CompactStarted/Progress/Finished/ProviderRetrying/
+  ConversationCancelled；Control：SessionState/AgentLifecycle/InteractionRequested/Resolved/
+  PlanReviewRequested/Resolved/SkillsUpdated/OperationFailed×4）。
+- **阶段 5（Ringing Command）**：HTTP 命令已真正执行（校验 → 幂等 → wire 转发）；cutover 端点
+  已接 HTTP（`POST /ringing/v1/cutover/events/{channel}` prepare/commit/abort +
+  `POST /ringing/v1/cutover/commands/{channel}` 命令切换，lease 校验 + 409 冲突语义）；
+  legacy 通道按切流状态过滤（domain 投影 + Agent2Ui 直发双路径，36 变体归属表）；
+  但 `sessionChannelMode` 默认值仍为 legacy（发布周期 1 翻转）。
+- **大内容外置**：ContentStore 写入侧（daemon 拦截 ToolFinished >10MiB → store + tail +
+  output_ref，外置时跳过 legacy 投影）+ 读取侧（`GET /ringing/v1/content/{id}?seed=`）已闭环。
+- **legacy 双发去重**：daemon legacy 通道 5s 相同 JSON 去重（双发 + 投影双路径）。
+- **前端切流闭环（桌面）**：electron main RingingManager（三 SSE + sessionChannelMode 表 +
+  cutover/snapshot IPC）；renderer 三 store 影子模式 + 调试面板切流按钮（prepare→commit→reload）；
+  SessionPresentationSelector（已切流会话主 UI 数据源切换为 Ringing store 投影）；
+  snapshot 摘要重建（完整历史依赖 ConversationSnapshot HTTP，未实现）。
 - **发布周期 1**：基础设施与 identity spine ✅；Tool 默认 Ringing、按 session 切流 ⬜。
 
 ### ⬜ 未开始
 
-- 阶段 2-4 的剩余生产点双发与默认值切换。
+- ConversationSnapshot HTTP 端点（切流后完整历史恢复；映射表 #5 设计项）。
 - 持久化 journal（当前内存有界实现，daemon 重启丢可靠事件）。
 - TUI 三个 Ringing handler。
 - 发布周期 2（Conversation/Control 默认 Ringing、命令逐频道切换）。
@@ -436,9 +445,9 @@ sessionChannelMode[seed][channel] {
 
 ### 下一步建议（按优先级）
 
-1. 生产点补全（TurnCompleted/CompactFinished/ProviderRetrying/Interaction 等）+ content 端点接线。
-2. cutover 端点接线（两阶段切流真正可用的最小闭环）。
-3. 持久化 journal；4. TUI Ringing handler；5-6. 发布周期 1/2 默认值切换与最终删除 legacy。
+1. 发布周期 1 实战：补 daemon 重启 → 面板影子验证 → 切流 Tool → 主 UI 接管验证。
+2. ConversationSnapshot HTTP（历史恢复闭环）；3. 持久化 journal；4. TUI handler；
+5. 发布周期 2；6. 最终删除 legacy。
 
 ## 迁移阶段
 

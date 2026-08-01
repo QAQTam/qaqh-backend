@@ -19,6 +19,20 @@ pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
         index += 1;
     }
     let _ = crate::logger::init_agent_logger(&deepx_types::platform::data_dir());
+    // 工具套件 HTTP 后端：daemon 注入的 workspace serve endpoint。
+    // 存在则 exec 等 Workspace placement 工具经 HTTP 执行；缺失/不可达
+    // 时由 HttpToolExecutionBackend 自动回退进程内（渐进式，无配置 = 旧行为）。
+    if let (Ok(endpoint), Ok(token)) = (
+        std::env::var("DEEPX_WORKSPACE_URL"),
+        std::env::var("DEEPX_WORKSPACE_TOKEN"),
+    ) {
+        if !endpoint.is_empty() && !token.is_empty() {
+            deepx_workspace::install_workspace_backend(std::sync::Arc::new(
+                deepx_workspace::HttpToolExecutionBackend::new(endpoint, token),
+            ));
+            log::info!("deepx-agent: workspace tools via HTTP backend");
+        }
+    }
     let enabled = deepx_config::Config::load()
         .map(|config| config.turso_enabled())
         .unwrap_or(true);

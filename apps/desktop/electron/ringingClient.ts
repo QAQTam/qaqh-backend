@@ -151,6 +151,8 @@ export class RingingSession {
   clientSessionId: string | null = null;
   serverEpoch = "";
   leaseTtlMs = 0;
+  /** open 请求携带的客户端实例 id（cutover/命令端点 lease 校验字段）。 */
+  readonly clientInstanceId = randomId();
   private renewTimer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
 
@@ -170,7 +172,7 @@ export class RingingSession {
       body: JSON.stringify({
         schema: "deepx.Ringing",
         version: 1,
-        client_instance_id: randomId(),
+        client_instance_id: this.clientInstanceId,
         capabilities: ["Ringing_v1", "Ringing_session_cutover_v1", "Ringing_batch_v1"],
       }),
     });

@@ -6,6 +6,7 @@ description = "Headless DeepX application daemon"
 build = "build.rs"
 
 [dependencies]
+deepx-config = { path = "../deepx-config" }
 deepx-proto = { path = "../deepx-proto" }
 deepx-domain = { path = "../deepx-domain" }
 deepx-ringing = { path = "../deepx-ringing" }

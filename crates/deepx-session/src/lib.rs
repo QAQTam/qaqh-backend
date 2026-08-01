@@ -1,6 +1,6 @@
 //! deepx-session — unified session manager singleton.
 //!
-//! Follows the same pattern as deepx-tools::ToolManager.
+//! Follows the same pattern as deepx-workspace::ToolManager.
 
 pub mod manager;
 mod migrate;
