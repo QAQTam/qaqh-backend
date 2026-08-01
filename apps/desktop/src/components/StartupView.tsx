@@ -1,5 +1,6 @@
 import { For, createMemo, Show } from "solid-js";
 import { request } from "../runtime/backendClient";
+import { requestWithRinging } from "../runtime/ringingCommands";
 import { useI18n } from "../i18n";
 import type { SessionMeta } from "../lib/types";
 import SessionCard from "./SessionCard";
@@ -51,7 +52,7 @@ export default function StartupView(props: StartupViewProps) {
     if (props.onSend) { props.onSend(text); return; }
     try {
       const seed = await request<string>("session.new");
-      await request("session.send_message", { seed, text });
+      await requestWithRinging("session.send_message", { seed, text });
     } catch (e) { console.error(e); }
   }
   function handleKeyDown(e: KeyboardEvent) {

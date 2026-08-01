@@ -10,4 +10,8 @@ export type RingingWorkerEventEnvelope = { schema: string, version: number,
 /**
  * 线格式判别字段，固定 `WIRE_RINGING_DOMAIN_V1`。
  */
-wire: string, direction: WorkerDirection, channel: RingingChannel, seed: string, event_id: string, event: RingingEvent, };
+wire: string, direction: WorkerDirection, channel: RingingChannel, seed: string, event_id: string, 
+/**
+ * 因果来源 command_id（Ringing 命令执行期间产出的事件携带）。
+ */
+causation_id?: string | null, event: RingingEvent, };

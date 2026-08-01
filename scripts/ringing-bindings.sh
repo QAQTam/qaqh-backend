@@ -71,6 +71,7 @@ done
   echo "export type { RingingCommandAckStatus } from \"./RingingCommandAckStatus\";"
   echo "export type { RingingEventBatch } from \"./RingingEventBatch\";"
   echo "export type { RingingChannelSnapshot } from \"./RingingChannelSnapshot\";"
+  echo "export type { RingingResetRequired } from \"./RingingResetRequired\";"
   echo "export type { ClientOpenRequest } from \"./ClientOpenRequest\";"
   echo "export type { ClientOpenResponse } from \"./ClientOpenResponse\";"
   echo "export type { CapabilityName } from \"./CapabilityName\";"

@@ -46,7 +46,7 @@ fn daemon_channel() -> String {
 }
 
 pub async fn run() -> Result<(), String> {
-    deepx_types::platform::ensure_data_root().map_err(stringify)?;
+    let data_root = deepx_types::platform::ensure_data_root().map_err(stringify)?;
     let _lock = acquire_single_instance()?;
     let token = random_hex();
     let epoch = random_hex();
@@ -69,7 +69,10 @@ pub async fn run() -> Result<(), String> {
     };
     write_discovery(&discovery)?;
     let events = EventBus::new(epoch);
-    let hub = Arc::new(RingingHub::new(events.epoch().to_string()));
+    let hub = Arc::new(RingingHub::with_persistence(
+        events.epoch().to_string(),
+        data_root.join("ringing"),
+    ));
     let service = DeepxService::init(events);
     service.attach_ringing(hub.clone());
     // 工具套件运行环境：config `[workspace] mode`（local 默认 / wsl 可选）。
@@ -401,7 +404,7 @@ async fn handle_connection(
                         // writer blocks at most SEND_TIMEOUT_MS, then the
                         // message is dropped and the writer-monitor arm can
                         // fire on the next select! iteration.
-                        send_or_drop(&outbound_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await;
+                    send_or_drop(&outbound_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await;
                     }
                     ControlClientMessage::SessionAttach{request_id,seed}=>{
                         let decision=if client_kind=="clawd"{
@@ -459,7 +462,12 @@ async fn handle_connection(
                 Ok(ref message @ ControlServerMessage::Event{seq,..})=>{
                     delivered_seq=seq;
                     if !event_allowed(message,&leases,&client_instance_id,&client_kind){ continue; }
-                    send_or_drop(&outbound_tx, message.clone()).await;
+                    // 事件一旦写出超时，绝不能静默丢失（流式增量缺字无法在
+                    // 同连接内自愈）。关闭连接让客户端以 cursor 续传重放
+                    // journal 中缺失的事件，把“静默吞字”变成“可恢复重同步”。
+                    if !send_or_drop(&outbound_tx, message.clone()).await {
+                        return Err("control outbound stalled; closing connection for cursor resync".into());
+                    }
                 },
                 Ok(message)=>{send_or_drop(&outbound_tx, message).await;}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{
@@ -556,10 +564,14 @@ where
 /// This is the root-cause fix for the "old sessions work, new sessions can't
 /// send messages" regression introduced by d2f66da (which replaced the
 /// previous `try_send().map_err()?` with unbounded `send().await`).
-async fn send_or_drop<T>(tx: &mpsc::Sender<T>, msg: T) {
+/// 发送一条消息；`true` = 已投递（含接收端已关闭），`false` = 超时被丢弃。
+async fn send_or_drop<T>(tx: &mpsc::Sender<T>, msg: T) -> bool {
     match tokio::time::timeout(Duration::from_millis(SEND_TIMEOUT_MS), tx.send(msg)).await {
-        Ok(Ok(())) | Ok(Err(_)) => {}
-        Err(_) => log::warn!("control outbound: writer stalled >{SEND_TIMEOUT_MS}ms, dropping message"),
+        Ok(Ok(())) | Ok(Err(_)) => true,
+        Err(_) => {
+            log::warn!("control outbound: writer stalled >{SEND_TIMEOUT_MS}ms, dropping message");
+            false
+        }
     }
 }
 fn error_response(status: StatusCode, text: &str) -> ErrorResponse {

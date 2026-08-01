@@ -8,7 +8,16 @@
 // - Control SSE 断开也不立即撤销 session lease（TTL + renew 维护）。
 // - 每频道独立重连、cursor、snapshot 与健康状态。
 
-import type { RingingEventBatch, RingingEventEnvelope } from "../src/lib/types/ringing";
+import type {
+  RingingEventBatch,
+  RingingResetRequired,
+} from "../src/lib/types/ringing";
+import {
+  cursorSeqFromId,
+  envelopeToBatch,
+  parseResetRequired,
+  parseSseFrame,
+} from "../src/runtime/ringingSse";
 
 /** 单频道 SSE 连接状态。 */
 export type ChannelStatus =
@@ -37,6 +46,8 @@ export class RingingChannelStream {
     private readonly channel: "control" | "conversation" | "tool",
     private readonly onBatch: BatchHandler,
     private readonly onStatus: StatusHandler,
+    private readonly getServerEpoch: () => string,
+    private readonly onReset?: (reset: RingingResetRequired) => void,
   ) {}
 
   start(): void {
@@ -71,32 +82,23 @@ export class RingingChannelStream {
       headers: {
         Authorization: `Bearer ${this.token}`,
         Accept: "text/event-stream",
-        // Last-Event-ID 只回放该频道可靠 tail（epoch:channel:seq）
-        ...(this.cursor > 0 ? { "Last-Event-ID": `:${this.channel}:${this.cursor}` } : {}),
+        // Last-Event-ID 只回放该频道可靠 tail（epoch:channel:seq；epoch 不匹配
+        // 服务端视为 0，因此必须带 open 协商出的 server_epoch）
+        ...(this.cursor > 0 && this.getServerEpoch()
+          ? { "Last-Event-ID": `${this.getServerEpoch()}:${this.channel}:${this.cursor}` }
+          : {}),
       },
       signal: this.controller.signal,
     });
     if (!response.ok || !response.body) {
       throw new Error(`SSE ${this.channel} HTTP ${response.status}`);
     }
-    this.onStatus({ state: "open", serverEpoch: "", cursor: this.cursor });
+    this.onStatus({ state: "open", serverEpoch: this.getServerEpoch(), cursor: this.cursor });
     this.retryMs = RETRY_BASE_MS; // 连接成功：重置退避
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    let eventId = "";
-    let eventType = "";
-    let data = "";
-
-    const flush = () => {
-      if (eventType === "message" && data.trim()) {
-        this.dispatch(data.trim());
-      }
-      eventId = "";
-      eventType = "";
-      data = "";
-    };
 
     for (;;) {
       const { done, value } = await reader.read();
@@ -107,18 +109,18 @@ export class RingingChannelStream {
       while ((sep = buffer.indexOf("\n\n")) >= 0) {
         const frame = buffer.slice(0, sep);
         buffer = buffer.slice(sep + 2);
-        for (const line of frame.split("\n")) {
-          if (line.startsWith(":")) continue; // 注释（keepalive）
-          if (line.startsWith("id:")) {
-            eventId = line.slice(3).trim();
-            this.cursor = parseCursorSeq(eventId);
-          } else if (line.startsWith("event:")) {
-            eventType = line.slice(6).trim();
-          } else if (line.startsWith("data:")) {
-            data += line.slice(5).trim();
-          }
+        const parsed = parseSseFrame(frame);
+        if (parsed.id) {
+          this.cursor = cursorSeqFromId(parsed.id);
         }
-        flush();
+        if (!parsed.data.trim()) continue; // keepalive 注释帧
+        if (parsed.eventType === "ringing.reset_required") {
+          // cursor 超出保留窗口：客户端必须经 HTTP 读取权威 snapshot 后继续
+          this.onReset?.(parseResetRequired(parsed.data.trim()));
+        } else {
+          // 服务端 `event:` 为 Ringing 事件类型（tool_started 等），全部按信封处理
+          this.dispatch(parsed.data.trim());
+        }
       }
     }
     // 流结束：触发重连（不撤销 lease）
@@ -126,24 +128,13 @@ export class RingingChannelStream {
   }
 
   private dispatch(payload: string): void {
-    const envelope = JSON.parse(payload) as RingingEventEnvelope;
-    const batch: RingingEventBatch = {
-      channel: this.channel,
-      seed: envelope.seed,
-      from_stream_seq: envelope.stream_seq,
-      to_stream_seq: envelope.stream_seq,
-      state_revision: envelope.state_revision ?? null,
-      events: [envelope.event],
-    };
-    this.onBatch(batch);
+    this.onBatch(envelopeToBatch(this.channel, JSON.parse(payload)));
   }
-}
 
-/** 从 `id: epoch:channel:seq` 提取 seq。 */
-function parseCursorSeq(eventId: string): number {
-  const parts = eventId.split(":");
-  const seq = Number(parts[parts.length - 1]);
-  return Number.isFinite(seq) ? seq : 0;
+  /** 强制 snapshot 后按 snapshot 的 baseline_seq 重置本地 cursor。 */
+  resetCursor(seq: number): void {
+    this.cursor = seq;
+  }
 }
 
 /** 客户端 open + lease renew。 */
@@ -229,20 +220,24 @@ export class RingingClient {
     token: string,
     onBatch: BatchHandler,
     onStatus: (channel: "control" | "conversation" | "tool", status: ChannelStatus) => void,
+    onReset?: (reset: RingingResetRequired) => void,
   ) {
     this.session = new RingingSession(baseUrl, token);
     this.streams = {
       control: new RingingChannelStream(
         `${baseUrl}/ringing/v1/events/control`, token, "control",
         (b) => onBatch(b), (s) => onStatus("control", s),
+        () => this.session.serverEpoch, onReset,
       ),
       conversation: new RingingChannelStream(
         `${baseUrl}/ringing/v1/events/conversation`, token, "conversation",
         (b) => onBatch(b), (s) => onStatus("conversation", s),
+        () => this.session.serverEpoch, onReset,
       ),
       tool: new RingingChannelStream(
         `${baseUrl}/ringing/v1/events/tool`, token, "tool",
         (b) => onBatch(b), (s) => onStatus("tool", s),
+        () => this.session.serverEpoch, onReset,
       ),
     };
   }

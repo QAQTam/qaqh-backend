@@ -22,6 +22,7 @@ pub mod content;
 pub mod envelope;
 pub mod event;
 pub mod protocol;
+pub mod reset;
 pub mod snapshot;
 pub mod worker;
 
@@ -34,6 +35,7 @@ pub use envelope::{
 };
 pub use event::{RingingControlEvent, RingingConversationEvent, RingingEvent, RingingToolEvent};
 pub use protocol::{RINGING_SCHEMA, RINGING_VERSION};
+pub use reset::RingingResetRequired;
 pub use snapshot::RingingChannelSnapshot;
 pub use worker::{
     RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope, WorkerDirection,

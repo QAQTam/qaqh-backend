@@ -30,6 +30,26 @@ impl Sequencer {
         Self::default()
     }
 
+    /// 从持久化 journal 装载后恢复序号（取历史最大值，`next` 继续递增）。
+    pub fn seed(
+        &self,
+        channel: RingingChannel,
+        seed: &str,
+        stream_seq: u64,
+        channel_seq: u64,
+        session_seq: u64,
+    ) {
+        let mut streams = self.stream_seq.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = streams.entry(channel).or_default();
+        *entry = (*entry).max(stream_seq);
+        drop(streams);
+
+        let mut per = self.per_seed.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = per.entry((channel, seed.to_string())).or_default();
+        entry.channel_seq = entry.channel_seq.max(channel_seq);
+        entry.session_seq = entry.session_seq.max(session_seq);
+    }
+
     /// 分配一组序号（stream/channel/session 各自独立递增）。
     pub fn next(&self, channel: RingingChannel, seed: &str) -> (u64, u64, u64) {
         let mut streams = self.stream_seq.lock().unwrap_or_else(|e| e.into_inner());

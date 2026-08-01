@@ -21,6 +21,7 @@ pub struct WorkspaceRuntimeState {
 pub struct DeepxService {
     registry: Arc<Mutex<AgentRegistry>>,
     events: EventBus,
+    hub: std::sync::OnceLock<Arc<RingingHub>>,
     workspace_state: Arc<Mutex<WorkspaceRuntimeState>>,
 }
 
@@ -34,6 +35,7 @@ impl DeepxService {
         Self {
             registry: Arc::new(Mutex::new(AgentRegistry::new(events.clone()))),
             events,
+            hub: std::sync::OnceLock::new(),
             workspace_state: Arc::new(Mutex::new(WorkspaceRuntimeState::default())),
         }
     }
@@ -44,6 +46,7 @@ impl DeepxService {
 
     /// 挂载 Ringing 运行时（worker 事件双投）。
     pub fn attach_ringing(&self, hub: Arc<RingingHub>) {
+        let _ = self.hub.set(hub.clone());
         self.registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -60,6 +63,26 @@ impl DeepxService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .send_ringing(seed, env)
+    }
+
+    /// 关闭会话（Ringing `SessionClose` 命令语义，契约 §2）：
+    /// 关闭 registry 实例并经 hub 发布 `SessionStateChanged { state: Closed }`，
+    /// causation 挂命令 id。会话不存在同样返回 Ok（幂等关闭）。
+    pub fn close_session(&self, seed: &str, causation_id: Option<&str>) -> Result<(), String> {
+        self.registry()?.close(seed);
+        if let Some(hub) = self.hub.get() {
+            let _ = hub.publish_with_causation(
+                seed,
+                deepx_domain::DomainEvent::Control(
+                    deepx_domain::ControlEvent::SessionStateChanged {
+                        seed: seed.to_string(),
+                        state: deepx_domain::SessionState::Closed,
+                    },
+                ),
+                causation_id,
+            );
+        }
+        Ok(())
     }
 
     pub fn snapshot(&self, attached_sessions: Vec<String>) -> ControlSnapshot {
@@ -121,12 +144,10 @@ impl DeepxService {
                         }
                     ));
                 }
-                let mut config = deepx_config::Config::load()
-                    .map_err(|e| format!("load config: {e}"))?;
+                let mut config =
+                    deepx_config::Config::load().map_err(|e| format!("load config: {e}"))?;
                 config.workspace.mode = mode.clone();
-                config
-                    .save()
-                    .map_err(|e| format!("save config: {e}"))?;
+                config.save().map_err(|e| format!("save config: {e}"))?;
                 log::info!("[workspace] mode switched to {mode} (restart required)");
                 Ok(json!({
                     "mode": mode,
@@ -145,20 +166,26 @@ impl DeepxService {
                     "endpoint": state.endpoint,
                 }))
             }
-            "workspace.diagnose" => {
-                Ok(crate::workspace_supervisor::diagnose_wsl().map_err(err)?)
-            }
+            "workspace.diagnose" => Ok(crate::workspace_supervisor::diagnose_wsl().map_err(err)?),
             "workspace.install_wsl" => {
                 let repo_root = params
                     .get("repo_root")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                Ok(crate::workspace_supervisor::install_wsl(
-                    repo_root.as_deref(),
-                )
-                .map_err(err)?)
+                Ok(crate::workspace_supervisor::install_wsl(repo_root.as_deref()).map_err(err)?)
             }
             "session.list" => Ok(Value::Array(self.list_sessions())),
+            "session.meta" => {
+                let seed = seed()?;
+                let manager = deepx_session::SessionManager::global();
+                let Some(meta) = manager.load_meta(&seed) else {
+                    return Ok(Value::Null);
+                };
+                let mut value = serde_json::to_value(&meta).map_err(err)?;
+                value["turso_backed"] = json!(manager.is_turso_backed(&meta.seed));
+                value["running"] = json!(self.registry()?.is_running(&meta.seed));
+                Ok(value)
+            }
             "session.activity" => {
                 Ok(serde_json::to_value(self.registry()?.activities()).map_err(err)?)
             }
@@ -315,7 +342,11 @@ impl DeepxService {
                 let _ = self.registry()?.send(&seed, Ui2Agent::ReloadConfig);
                 Ok(Value::Null)
             }
-            "git.diff" => git(&seed()?, |ws| deepx_workspace::git::status_json(ws), json!([])),
+            "git.diff" => git(
+                &seed()?,
+                |ws| deepx_workspace::git::status_json(ws),
+                json!([]),
+            ),
             "git.branch" => git(
                 &seed()?,
                 |ws| deepx_workspace::git::current_branch(ws),
@@ -391,9 +422,10 @@ impl DeepxService {
             )
             .map_err(err)?),
             "todo.status" => parse_json_string(deepx_workspace::todo::todo_status_json(&seed()?)?),
-            "todo.cancel" => parse_json_string(
-                deepx_workspace::todo::todo_cancel_json(&seed()?, &pstr(params, "id")?)?,
-            ),
+            "todo.cancel" => parse_json_string(deepx_workspace::todo::todo_cancel_json(
+                &seed()?,
+                &pstr(params, "id")?,
+            )?),
             "plan.context_stats" => context_stats(&seed()?),
             "stats.token_usage" => token_stats(pu64(params, "days") as u32),
             "plan.read" => read_plan(&seed()?),
@@ -466,7 +498,12 @@ impl DeepxService {
         Ok(Value::Null)
     }
 
-    fn send_user_input(&self, seed: String, text: String, images: Vec<deepx_proto::ImageBlock>) -> Result<Value, String> {
+    fn send_user_input(
+        &self,
+        seed: String,
+        text: String,
+        images: Vec<deepx_proto::ImageBlock>,
+    ) -> Result<Value, String> {
         let mut registry = self.registry()?;
         // An inactive persisted session has no activity entry yet. Spawn it
         // first so the Starting -> Working reservation below also covers the
@@ -505,14 +542,22 @@ impl DeepxService {
             return Err("session activity changed before message admission".into());
         }
         if let Some((activity, _)) = reservation.as_ref() {
-            self.events.publish_activity(activity.clone());
+            crate::activity::publish_activity_dual(
+                &self.events,
+                self.hub.get().map(|v| &**v),
+                activity,
+            );
         }
         if let Err(error) = registry.send(&seed, Ui2Agent::UserInput { text, images }) {
             if let Some((activity, previous)) = reservation
                 && let Some(rollback) =
                     registry.rollback_input_reservation(&seed, activity.seq, previous)
             {
-                self.events.publish_activity(rollback);
+                crate::activity::publish_activity_dual(
+                    &self.events,
+                    self.hub.get().map(|v| &**v),
+                    &rollback,
+                );
             }
             return Err(error);
         }
@@ -529,11 +574,19 @@ impl DeepxService {
             format!("session compact requires an idle session; current state: {state}")
         })?;
         let reservation_seq = reservation.seq;
-        self.events.publish_activity(reservation);
+        crate::activity::publish_activity_dual(
+            &self.events,
+            self.hub.get().map(|v| &**v),
+            &reservation,
+        );
 
         if let Err(error) = registry.send(&seed, Ui2Agent::Compact) {
             if let Some(rollback) = registry.rollback_idle_reservation(&seed, reservation_seq) {
-                self.events.publish_activity(rollback);
+                crate::activity::publish_activity_dual(
+                    &self.events,
+                    self.hub.get().map(|v| &**v),
+                    &rollback,
+                );
             }
             return Err(error);
         }

@@ -39,6 +39,7 @@ export type { RingingCommandAck } from "./RingingCommandAck";
 export type { RingingCommandAckStatus } from "./RingingCommandAckStatus";
 export type { RingingEventBatch } from "./RingingEventBatch";
 export type { RingingChannelSnapshot } from "./RingingChannelSnapshot";
+export type { RingingResetRequired } from "./RingingResetRequired";
 export type { ClientOpenRequest } from "./ClientOpenRequest";
 export type { ClientOpenResponse } from "./ClientOpenResponse";
 export type { CapabilityName } from "./CapabilityName";

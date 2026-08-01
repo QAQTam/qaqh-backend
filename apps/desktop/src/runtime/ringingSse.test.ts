@@ -1,0 +1,82 @@
+import { describe, expect, it } from "vitest";
+import {
+  cursorSeqFromId,
+  envelopeToBatch,
+  parseResetRequired,
+  parseSseFrame,
+} from "./ringingSse";
+import type { RingingEventEnvelope } from "../lib/types/ringing";
+
+function envelope(streamSeq: number, eventId: string): RingingEventEnvelope {
+  return {
+    schema: "deepx.Ringing",
+    version: 1,
+    channel: "tool",
+    delivery: "reliable",
+    server_epoch: "epoch-1",
+    seed: "s1",
+    stream_seq: streamSeq as unknown as bigint,
+    channel_seq: 1n,
+    session_seq: 1n,
+    event_id: eventId,
+    state_revision: 3n,
+    event: {
+      channel: "tool",
+      type: "tool_started",
+      tool_call_id: "c1",
+      turn_id: "t1",
+      round_num: 0,
+      name: "exec",
+    } as unknown as RingingEventEnvelope["event"],
+  };
+}
+
+describe("parseSseFrame", () => {
+  it("parses id/event/data from a typed Ringing frame", () => {
+    const parsed = parseSseFrame(
+      "id: epoch-1:tool:7\nevent: tool_started\ndata: {\"seed\":\"s1\"}\n\n",
+    );
+    expect(parsed.id).toBe("epoch-1:tool:7");
+    expect(parsed.eventType).toBe("tool_started");
+    expect(parsed.data).toBe('{"seed":"s1"}');
+  });
+
+  it("ignores keepalive comment frames", () => {
+    const parsed = parseSseFrame(": keepalive\n\n");
+    expect(parsed.id).toBe("");
+    expect(parsed.eventType).toBe("");
+    expect(parsed.data).toBe("");
+  });
+
+  it("parses reset_required frames", () => {
+    const parsed = parseSseFrame(
+      'event: ringing.reset_required\ndata: {"channel":"tool","seed":"s1","earliest_available_seq":2}\n\n',
+    );
+    expect(parsed.eventType).toBe("ringing.reset_required");
+    const reset = parseResetRequired(parsed.data);
+    expect(reset.channel).toBe("tool");
+    expect(reset.seed).toBe("s1");
+    expect(Number(reset.earliest_available_seq)).toBe(2);
+  });
+});
+
+describe("cursorSeqFromId", () => {
+  it("extracts the last segment", () => {
+    expect(cursorSeqFromId("epoch-1:tool:42")).toBe(42);
+  });
+  it("returns 0 for malformed ids", () => {
+    expect(cursorSeqFromId("garbage")).toBe(0);
+  });
+});
+
+describe("envelopeToBatch", () => {
+  it("builds a whole-batch payload without expanding events", () => {
+    const batch = envelopeToBatch("tool", envelope(5, "e5"));
+    expect(batch.channel).toBe("tool");
+    expect(batch.seed).toBe("s1");
+    expect(batch.from_stream_seq).toBe(5);
+    expect(batch.to_stream_seq).toBe(5);
+    expect(batch.events).toHaveLength(1);
+    expect(batch.events[0]).toMatchObject({ type: "tool_started", tool_call_id: "c1" });
+  });
+});

@@ -11,6 +11,10 @@ const MAX_RELOAD_TURNS = 20;
 const MAX_PROGRESS_CHUNKS = 200;
 const MAX_RELOAD_CHARS = 512 * 1024;
 
+// rAF 在后台/隐藏窗口不触发：若长时间没有帧调度，流式提交会冻结。
+// 用定时器兜底，保证最小化/后台时流式仍然推进。
+const STREAM_FALLBACK_MS = 100;
+
 // Persistence is only worth it for low-frequency terminal events; round-level
 // events arrive in bursts during tool loops and would serialize the whole
 // state (MBs) synchronously on every burst. A 3s throttle absorbs repeats.
@@ -132,6 +136,7 @@ export function createSessionEventRuntime(options: {
     ? cancelAnimationFrame
     : (() => {}));
   let frameHandle: number | undefined;
+  let fallbackHandle: ReturnType<typeof setTimeout> | undefined;
   let pendingDeltas: Agent2Ui[] = [];
 
   const commit = () => options.commit(state);
@@ -146,6 +151,10 @@ export function createSessionEventRuntime(options: {
       cancelFrame(frameHandle);
       frameHandle = undefined;
     }
+    if (fallbackHandle !== undefined) {
+      clearTimeout(fallbackHandle);
+      fallbackHandle = undefined;
+    }
     if (pendingDeltas.length === 0) return;
     applyPendingDeltas();
     commit();
@@ -156,14 +165,18 @@ export function createSessionEventRuntime(options: {
       commit();
       return;
     }
-    if (frameHandle !== undefined) return;
-    frameHandle = scheduleFrame(() => {
+    if (frameHandle !== undefined || fallbackHandle !== undefined) return;
+    const flush = () => {
       frameHandle = undefined;
+      fallbackHandle = undefined;
       if (!disposed) {
         applyPendingDeltas();
         commit();
       }
-    });
+    };
+    frameHandle = scheduleFrame(flush);
+    // rAF 在隐藏/后台窗口不触发：定时器兜底，避免流式冻结。
+    fallbackHandle = setTimeout(flush, STREAM_FALLBACK_MS);
   };
 
   // ── Streaming delta types that should be batched per frame ──
@@ -225,6 +238,7 @@ export function createSessionEventRuntime(options: {
       if (disposed) return;
       disposed = true;
       if (frameHandle !== undefined) cancelFrame(frameHandle);
+      if (fallbackHandle !== undefined) clearTimeout(fallbackHandle);
     },
     current() {
       applyPendingDeltas();

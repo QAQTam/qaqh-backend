@@ -1,5 +1,7 @@
 import { createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { backendStatus, connect, listen, request } from "./runtime/backendClient";
+import { requestWithRinging } from "./runtime/ringingCommands";
+import { setCommandProtocol } from "./runtime/ringingCommandRouter";
 import {
   applyUpdate,
   checkUpdate,
@@ -25,7 +27,7 @@ import { startSessionActivityClient } from "./runtime/sessionActivityClient";
 import type { SessionActivityMap } from "./runtime/sessionActivityStore";
 import { hasRestorableTranscript } from "./runtime/sessionStartup";
 import type { PendingInteraction } from "./store/rawSession";
-import { createRingingMonitor } from "./store/ringingMonitor";
+import { createRingingMonitor, type ChannelName } from "./store/ringingMonitor";
 import { projectRingingToRawSession } from "./store/ringingSessionAdapter";
 import { RingingDebugPanel } from "./components/RingingDebugPanel";
 import {
@@ -147,7 +149,9 @@ export default function App() {
   }
 
   async function afterSessionCreated(entry: SessionEntry, seed: string) {
-    const previousSeed = entry.state().seed;
+    // Solid 2（beta）信号写入是微任务批处理：同一同步栈内读 state() 可能
+    // 仍是旧值。runtime.current() 是同步权威源，事件刚 push 完即可读。
+    const previousSeed = entry.runtime.current().seed;
     const remapped = registry.remap(entry.listenerSeed, seed);
     if (activeSeed() === entry.listenerSeed || activeSeed() === previousSeed) setActiveSeed(seed);
     localStorage.setItem(LS_KEY, seed);
@@ -183,7 +187,7 @@ export default function App() {
     // Prevent concurrent reconnect attempts from multiple live Error events.
     if (reconnecting) return;
     reconnecting = true;
-    const seed = entry.state().seed;
+    const seed = entry.runtime.current().seed;
     try {
       await resumeSession(seed);
       toastCtrl.push(i18n.t().toast.agentReconnected, "info");
@@ -258,6 +262,10 @@ export default function App() {
     setReplaying(true);
     // 切流状态同步：该 seed 已切流的 channel 从 main mode 表恢复 + 拉 snapshot
     void ringingMonitor.syncMode(seed);
+    // 自动切流：localStorage["ringing.auto"] = "conversation,tool" 等，免调试面板
+    void autoCutoverChannels(seed);
+    // 命令方向自动切流：localStorage["ringing.autoCommands"] = "conversation,tool"
+    void autoCutoverCommands(seed);
     // Swap to the locally persisted transcript immediately. Agent startup and
     // replay may take seconds on a cold session and must not block navigation.
     const cachedEntry = registry.ensure(seed);
@@ -279,7 +287,8 @@ export default function App() {
       sessionReplay.complete(seed, replayed, event => handleAgentEvent(entry!, event));
       setReplaying(false);
       if (requestToken !== resumeRequest) { setReplaying(false); return; }
-      const currentSeed = entry.state().seed;
+      // replay 刚同步应用完事件，state() 可能尚未冲刷；current() 立即可靠。
+      const currentSeed = entry.runtime.current().seed;
       localStorage.setItem(LS_KEY, currentSeed);
       setActiveSeed(currentSeed);
       setHasChosenSession(true);
@@ -299,6 +308,61 @@ export default function App() {
         setHasChosenSession(true);
         setView("chat");
         toastCtrl.push("后端暂时不可用，已显示本地恢复的消息", "error");
+      }
+    }
+  }
+
+  const AUTO_CUTOVER_KEY = "ringing.auto";
+
+  /** 按配置自动把会话频道切到 Ringing（服务端幂等：AlreadyRinging 视为成功）。 */
+  async function autoCutoverChannels(seed: string): Promise<void> {
+    const raw = localStorage.getItem(AUTO_CUTOVER_KEY);
+    if (!raw) return;
+    const channels = raw
+      .split(",")
+      .map(c => c.trim())
+      .filter((c): c is ChannelName =>
+        c === "control" || c === "conversation" || c === "tool",
+      );
+    for (const channel of channels) {
+      try {
+        await ringingMonitor.cutover(seed, channel);
+        console.info(`[ringing] auto cutover ${seed}/${channel}`);
+      } catch (error) {
+        // 已切流（服务端 AlreadyRinging）→ 从 main mode 表恢复渲染标记；
+        // 其它错误（daemon 未连接等）只记录一次，不再触发 syncMode，
+        // 避免 daemon 下线时 snapshot 请求风暴。
+        console.warn(`[ringing] auto cutover ${seed}/${channel} skipped`, error);
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("already_ringing") || message.includes("duplicate")) {
+          void ringingMonitor.syncMode(seed);
+        }
+      }
+    }
+  }
+
+  const AUTO_COMMANDS_KEY = "ringing.autoCommands";
+
+  /** 按配置自动把 (seed, channel) 的命令协议切到 Ringing（renderer 路由表同步）。 */
+  async function autoCutoverCommands(seed: string): Promise<void> {
+    const raw = localStorage.getItem(AUTO_COMMANDS_KEY);
+    if (!raw) return;
+    const api = window.deepx?.ringing;
+    if (!api) return;
+    const channels = raw
+      .split(",")
+      .map((c) => c.trim())
+      .filter((c): c is ChannelName =>
+        c === "control" || c === "conversation" || c === "tool",
+      );
+    for (const channel of channels) {
+      try {
+        await api.cutoverCommands(seed, channel, "ringing");
+        setCommandProtocol(seed, channel, "ringing");
+        console.info(`[ringing] auto command cutover ${seed}/${channel}`);
+      } catch (error) {
+        // 已切流（服务端幂等）或 daemon 未连接：只记录，不阻塞会话打开
+        console.warn(`[ringing] auto command cutover ${seed}/${channel} skipped`, error);
       }
     }
   }
@@ -426,7 +490,7 @@ export default function App() {
   async function startNewSessionAndSend(text: string) {
     await newSession();
     const entry = activeEntry();
-    if (entry) await request("session.send_message", { seed: entry.state().seed, text });
+    if (entry) await requestWithRinging("session.send_message", { seed: entry.state().seed, text });
   }
 
   async function deleteSession(seed: string) {
@@ -508,6 +572,9 @@ export default function App() {
       if (api) {
         unlistenRingingBatch = api.onBatch(batch => ringingMonitor.handleBatch(batch));
         unlistenRingingStatus = api.onStatus(update => ringingMonitor.handleStatus(update));
+        // 主进程可能在 renderer 订阅前就连好 SSE（初始 open 状态已发出），
+        // 订阅后主动拉一次当前状态，避免调试面板一直停在 idle。
+        ringingMonitor.applyStatusSnapshot(await api.status());
       }
       // Listen for app updates (production: auto-check on startup)
       unlistenUpdate = onUpdateAvailable((info: UpdateInfo) => {
@@ -639,10 +706,24 @@ export default function App() {
                   // SessionPresentationSelector：已切流会话的主 UI 数据源切换到
                   // Ringing store（投影为 RawSessionState，组件零改动）。
                   const rawSession = () => {
+                    // 响应式依赖：Ringing 影子 store 是普通对象，任何 batch/
+                    // snapshot 应用都通过版本信号驱动这里重投影（否则切流后
+                    // ChatView 失去重渲染触发器，新输出不显示）。
+                    void ringingMonitor.ringingVersion();
                     const seed = entry.state().seed;
                     if (ringingMonitor.isRinging(seed)) {
                       const shadow = ringingMonitor.shadowOf(seed);
-                      if (shadow) return projectRingingToRawSession(seed, shadow);
+                      if (shadow) {
+                        // 透传 legacy 侧的 usage/telemetry：切流后图表与用量卡
+                        // 不因投影重建而恒空。
+                        return projectRingingToRawSession(
+                          seed,
+                          shadow,
+                          entry.state().session.usage,
+                          entry.state().session.usageTotals,
+                          entry.state().telemetry,
+                        );
+                      }
                     }
                     return entry.state();
                   };

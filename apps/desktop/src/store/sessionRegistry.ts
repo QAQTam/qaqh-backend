@@ -128,7 +128,9 @@ export function createSessionRegistry(options: { storage: ReloadStorage }) {
 
   function remap(listenerSeed: string, nextSeed: string): SessionEntry {
     const entry = findByListenerSeed(listenerSeed) ?? ensure(listenerSeed);
-    const stateSeedBefore = entry.state().seed;
+    // Solid 2 信号写入是微任务批处理：同栈读 state() 可能滞后，必须用
+    // runtime.current() 这个同步权威源（事件已同步 reduce 进本地 state）。
+    const stateSeedBefore = entry.runtime.current().seed;
     const mappedSeeds = [...bySeed.entries()]
       .filter(([, candidate]) => candidate === entry)
       .map(([seed]) => seed);

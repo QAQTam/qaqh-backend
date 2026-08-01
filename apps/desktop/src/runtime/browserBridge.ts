@@ -11,7 +11,17 @@
 // 注入点：main.tsx 最先调用 installBrowserBridge()；仅当
 // `window.__DEEPX_DEBUG__`（daemon 内联 token）存在时生效。
 
-import type { RingingEventBatch, RingingEventEnvelope } from "../lib/types/ringing";
+import type {
+  RingingEventBatch,
+  RingingEventEnvelope,
+  RingingResetRequired,
+} from "../lib/types/ringing";
+import {
+  cursorSeqFromId,
+  envelopeToBatch,
+  parseResetRequired,
+  parseSseFrame,
+} from "./ringingSse";
 
 declare global {
   interface Window {
@@ -27,12 +37,16 @@ let sseBase = "";
 let sseToken = "";
 const batchListeners = new Set<(batch: RingingEventBatch) => void>();
 const statusListeners = new Set<(u: { channel: string; status: unknown }) => void>();
+const snapshotListeners = new Set<
+  (u: { seed: string; channel: string; snapshot: unknown }) => void
+>();
 
 function emitStatus(channel: string, status: unknown): void {
   for (const listener of statusListeners) listener({ channel, status });
 }
 
 async function connectSse(ch: ChannelName): Promise<void> {
+  let cursor = 0;
   for (;;) {
     try {
       emitStatus(ch, { state: "connecting" });
@@ -54,9 +68,12 @@ async function connectSse(ch: ChannelName): Promise<void> {
         while ((sep = buffer.indexOf("\n\n")) >= 0) {
           const frame = buffer.slice(0, sep);
           buffer = buffer.slice(sep + 2);
-          handleFrame(ch, frame);
+          const parsed = parseSseFrame(frame);
+          if (parsed.id) cursor = cursorSeqFromId(parsed.id);
+          handleFrame(ch, parsed.eventType, parsed.data);
         }
       }
+      emitStatus(ch, { state: "reconnecting", reason: "stream ended", lastCursor: cursor });
       throw new Error("stream ended");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -66,28 +83,35 @@ async function connectSse(ch: ChannelName): Promise<void> {
   }
 }
 
-function handleFrame(ch: ChannelName, frame: string): void {
-  let eventType = "";
-  let data = "";
-  for (const line of frame.split("\n")) {
-    if (line.startsWith(":")) continue;
-    if (line.startsWith("event:")) eventType = line.slice(6).trim();
-    else if (line.startsWith("data:")) data += line.slice(5).trim();
+function handleFrame(ch: ChannelName, eventType: string, data: string): void {
+  if (!data.trim()) return; // keepalive 注释帧
+  if (eventType === "ringing.reset_required") {
+    void handleReset(parseResetRequired(data.trim()));
+    return;
   }
-  if (eventType !== "message" || !data) return;
   try {
     const envelope = JSON.parse(data) as RingingEventEnvelope;
-    const batch: RingingEventBatch = {
-      channel: ch,
-      seed: envelope.seed,
-      from_stream_seq: envelope.stream_seq,
-      to_stream_seq: envelope.stream_seq,
-      state_revision: envelope.state_revision ?? null,
-      events: [envelope.event],
-    };
+    const batch = envelopeToBatch(ch, envelope);
     for (const listener of batchListeners) listener(batch);
   } catch {
     // 忽略畸形帧
+  }
+}
+
+/** cursor 超出保留窗口：经 HTTP 拉取权威 snapshot 并通知 renderer。 */
+async function handleReset(reset: RingingResetRequired): Promise<void> {
+  try {
+    const response = await fetch(
+      `${sseBase}/ringing/v1/snapshots/${reset.channel}/${encodeURIComponent(reset.seed)}`,
+      { headers: { Authorization: `Bearer ${sseToken}` } },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const snapshot = await response.json();
+    for (const listener of snapshotListeners) {
+      listener({ seed: reset.seed, channel: reset.channel, snapshot });
+    }
+  } catch (err) {
+    console.warn("[ringing][browser] reset snapshot failed", err);
   }
 }
 
@@ -152,6 +176,10 @@ export function installBrowserBridge(): boolean {
         statusListeners.add(listener);
         ensureSse(base, token);
         return () => { statusListeners.delete(listener); };
+      },
+      onSnapshot: (listener: (u: { seed: string; channel: string; snapshot: unknown }) => void) => {
+        snapshotListeners.add(listener);
+        return () => { snapshotListeners.delete(listener); };
       },
     },
     desktop: {

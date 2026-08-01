@@ -11,7 +11,7 @@
 // 在 renderer 刷新后仍保留，保证刷新后重连仍走 Ringing 路径。
 
 import { RingingClient, type ChannelStatus } from "./ringingClient";
-import type { RingingEventBatch } from "../src/lib/types/ringing";
+import type { RingingEventBatch, RingingResetRequired } from "../src/lib/types/ringing";
 
 export type ChannelName = "control" | "conversation" | "tool";
 
@@ -32,6 +32,7 @@ export class RingingManager {
   private client: RingingClient | null = null;
   private baseUrl = "";
   private token = "";
+  private lastConnectError: string | null = null;
   private readonly modes = new Map<string, SessionModes>();
   private readonly channelStatus: Record<ChannelName, ChannelStatus | null> = {
     control: null,
@@ -42,6 +43,11 @@ export class RingingManager {
   constructor(
     private readonly onBatch: (batch: RingingEventBatch) => void,
     private readonly onStatus: (channel: ChannelName, status: ChannelStatus) => void,
+    private readonly onSnapshot?: (
+      seed: string,
+      channel: ChannelName,
+      snapshot: unknown,
+    ) => void,
   ) {}
 
   /** backend connect 成功后调用；重复调用幂等（同一 daemon 不重建）。 */
@@ -58,12 +64,15 @@ export class RingingManager {
         this.channelStatus[channel] = status;
         this.onStatus(channel, status);
       },
+      (reset) => void this.handleReset(reset),
     );
     this.client = client;
     try {
       await client.connect();
+      this.lastConnectError = null;
       console.log("[ringing] connected to daemon", baseUrl);
     } catch (error) {
+      this.lastConnectError = error instanceof Error ? error.message : String(error);
       console.warn("[ringing] connect failed (legacy 继续承载)", error);
       this.client = null;
     }
@@ -76,6 +85,22 @@ export class RingingManager {
 
   connected(): boolean {
     return this.client !== null;
+  }
+
+  /** 当前连接的 daemon baseUrl（用于检测 daemon 重启后端口变化）。 */
+  connectedBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  /** 返回已连接客户端；未连接时抛出带原因的明确错误。 */
+  private requireClient(): RingingClient {
+    if (!this.client) {
+      const reason = this.lastConnectError
+        ? ` (last connect error: ${this.lastConnectError})`
+        : "";
+      throw new Error(`ringing not connected${reason}`);
+    }
+    return this.client;
   }
 
   status(): Record<ChannelName, ChannelStatus | null> {
@@ -96,6 +121,7 @@ export class RingingManager {
     channel: ChannelName,
     action: "prepare" | "commit" | "abort",
   ): Promise<{ eventProtocol: string; commandProtocol: string }> {
+    this.requireClient();
     const body = await this.postJson(`/ringing/v1/cutover/events/${channel}`, {
       action,
       seed,
@@ -123,6 +149,7 @@ export class RingingManager {
     channel: ChannelName,
     protocol: "ringing" | "legacy",
   ): Promise<{ commandProtocol: string; eventProtocol: string }> {
+    this.requireClient();
     const body = await this.postJson(`/ringing/v1/cutover/commands/${channel}`, {
       protocol,
       seed,
@@ -137,7 +164,7 @@ export class RingingManager {
 
   /** 拉取频道领域快照（切流/reload 后重建前端状态）。 */
   async snapshot(seed: string, channel: ChannelName): Promise<unknown> {
-    if (!this.client) throw new Error("ringing not connected");
+    this.requireClient();
     const response = await fetch(
       `${this.baseUrl}/ringing/v1/snapshots/${channel}/${encodeURIComponent(seed)}`,
       {
@@ -149,13 +176,87 @@ export class RingingManager {
     return response.json();
   }
 
-  private instanceId(): string {
-    if (!this.client) throw new Error("ringing not connected");
-    return this.client.session.clientInstanceId;
+  /** Ringing 命令（POST /ringing/v1/commands/{channel}）。
+   *
+   * daemon 负责 lease + 幂等校验；`client_instance_id` 缺省时由 main 进程
+   * 填充当前连接的实例 id（renderer 不持有该标识）。
+   */
+  async command(
+    seed: string,
+    channel: ChannelName,
+    envelope: {
+      command_id: string;
+      command: unknown;
+      seed?: string | null;
+      expected_revision?: number | null;
+      client_instance_id?: string;
+    },
+  ): Promise<unknown> {
+    this.requireClient();
+    return this.postJson(`/ringing/v1/commands/${channel}`, {
+      schema: "deepx.Ringing",
+      version: 1,
+      channel,
+      command_id: envelope.command_id,
+      client_instance_id: envelope.client_instance_id ?? this.instanceId(),
+      seed: envelope.seed ?? seed,
+      expected_revision: envelope.expected_revision ?? null,
+      command: envelope.command,
+    }, "command");
   }
 
-  private async postJson(path: string, payload: unknown): Promise<any> {
-    if (!this.client) throw new Error("ringing not connected");
+  /** Ringing 只读查询（GET /ringing/v1/query/{path}）。 */
+  async query(path: string, params?: Record<string, string | undefined>): Promise<unknown> {
+    this.requireClient();
+    const query = params
+      ? Object.entries(params)
+          .filter(([, value]) => value !== undefined && value !== "")
+          .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+          .join("&")
+      : "";
+    const url = `${this.baseUrl}/ringing/v1/query/${path}${query ? `?${query}` : ""}`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    const text = await response.text();
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      // 非 JSON 响应（错误页）
+    }
+    if (!response.ok) {
+      const message =
+        (json as { message?: string } | null)?.message ??
+        (json as { code?: string } | null)?.code ??
+        `HTTP ${response.status}`;
+      throw new Error(`query failed: ${message}`);
+    }
+    return json;
+  }
+
+  /** cursor 超出保留窗口：拉取权威 snapshot，更新流 cursor 并转发 renderer。 */
+  private async handleReset(reset: RingingResetRequired): Promise<void> {
+    if (!this.client) return;
+    try {
+      const snapshot = await this.snapshot(reset.seed, reset.channel);
+      const baseline = (snapshot as { baseline_seq?: number })?.baseline_seq;
+      if (typeof baseline === "number") {
+        this.client.streams[reset.channel].resetCursor(baseline);
+      }
+      this.onSnapshot?.(reset.seed, reset.channel, snapshot);
+    } catch (err) {
+      console.warn("[ringing] reset snapshot failed", err);
+    }
+  }
+
+  private instanceId(): string {
+    return this.requireClient().session.clientInstanceId;
+  }
+
+  private async postJson(path: string, payload: unknown, label = "ringing request"): Promise<any> {
+    this.requireClient();
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: "POST",
       headers: {
@@ -173,7 +274,7 @@ export class RingingManager {
     }
     if (!response.ok) {
       const message = json?.message ?? json?.code ?? `HTTP ${response.status}`;
-      throw new Error(`cutover failed: ${message}`);
+      throw new Error(`${label} failed: ${message}`);
     }
     return json;
   }

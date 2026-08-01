@@ -76,7 +76,7 @@ const INITIAL_LOAD_COUNT: usize = 20;
 pub struct Loop {
     // ── Process-level I/O ──
     /// Incoming command channel (fed by reader thread).
-    cmd_rx: mpsc::Receiver<Ui2Agent>,
+    cmd_rx: mpsc::Receiver<super::types::WorkerCommand>,
     /// Outgoing event channel (consumed by writer thread).
     event_tx: mpsc::SyncSender<super::types::WriterEvent>,
 
@@ -141,10 +141,11 @@ impl Loop {
         input: impl BufRead + Send + 'static,
         output: impl Write + Send + 'static,
     ) -> Self {
+        let seed = agent.session.seed.clone();
         let cancel = CancelToken::new();
         let cancel_for_reader = cancel.clone();
 
-        let (cmd_tx, cmd_rx) = mpsc::sync_channel::<Ui2Agent>(4096);
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel::<super::types::WorkerCommand>(4096);
         let (event_tx, event_rx) = mpsc::sync_channel::<super::types::WriterEvent>(655360);
         let writer_dead = Arc::new(AtomicBool::new(false));
         let writer_dead_for_thread = writer_dead.clone();
@@ -171,7 +172,13 @@ impl Loop {
                                 cancel_for_reader.set();
                                 deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                             }
-                            if cmd_tx.send(frame).is_err() {
+                            if cmd_tx
+                                .send(super::types::WorkerCommand {
+                                    frame,
+                                    causation: None,
+                                })
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -191,7 +198,13 @@ impl Loop {
                                         cancel_for_reader.set();
                                         deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                                     }
-                                    if cmd_tx.send(frame).is_err() {
+                                    if cmd_tx
+                                        .send(super::types::WorkerCommand {
+                                            frame,
+                                            causation: Some(env.command_id.clone()),
+                                        })
+                                        .is_err()
+                                    {
                                         break;
                                     }
                                 }
@@ -253,7 +266,12 @@ impl Loop {
             log::info!("[AGENT] writer thread exiting");
         });
 
-        let paced_emitter = PacedEmitter::new(event_tx.clone(), writer_dead.clone(), cancel.arc());
+        let paced_emitter = PacedEmitter::new(
+            seed,
+            event_tx.clone(),
+            writer_dead.clone(),
+            cancel.arc(),
+        );
 
         Loop {
             cmd_rx,
@@ -383,7 +401,7 @@ impl Loop {
     /// cannot replace context inside an in-flight lap.
     pub fn poll_interrupts(&mut self) -> bool {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            match cmd {
+            match cmd.frame {
                 Ui2Agent::Cancel => {
                     self.cancel.set();
                     deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
@@ -484,11 +502,11 @@ impl Loop {
             }
 
             // ── Block for next command (with timeout to poll compact) ──
-            let frame = match self.cmd_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            let cmd = match self.cmd_rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(f) => {
                     log::info!(
                         "[AGENT] received Ui2Agent frame: {:?}",
-                        std::mem::discriminant(&f)
+                        std::mem::discriminant(&f.frame)
                     );
                     f
                 }
@@ -501,8 +519,10 @@ impl Loop {
             };
 
             // ── Dispatch with panic safety ──
+            let causation = cmd.causation.clone();
             self.safe_dispatch(|this| {
-                this.dispatch_one(frame);
+                let _scope = this.paced_emitter.enter_causation(causation.as_deref());
+                this.dispatch_one(cmd.frame);
             });
         }
 
@@ -544,7 +564,7 @@ impl Loop {
                 }));
             }
             self.misc
-                .emit_dashboard(&self.session.agent, &self.event_tx);
+                .emit_dashboard(&self.session.agent, &self.paced_emitter);
             let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
             self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Control(
                 deepx_domain::ControlEvent::AgentLifecycleChanged {
@@ -570,11 +590,11 @@ impl Loop {
                 },
             ));
             self.misc
-                .emit_dashboard(&self.session.agent, &self.event_tx);
+                .emit_dashboard(&self.session.agent, &self.paced_emitter);
             let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
         } else {
             self.misc
-                .emit_dashboard(&self.session.agent, &self.event_tx);
+                .emit_dashboard(&self.session.agent, &self.paced_emitter);
             let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
             self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Control(
                 deepx_domain::ControlEvent::AgentLifecycleChanged {
@@ -596,7 +616,7 @@ impl Loop {
     /// re-sends UserInput after receiving Ready.
     fn drain_pending(&mut self) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            match cmd {
+            match cmd.frame {
                 Ui2Agent::Cancel => {
                     if std::mem::take(&mut self.terminal_for_queued_interrupt) {
                         self.cancel.clear();
@@ -634,6 +654,8 @@ impl Loop {
                 // Route them through the reason-aware dispatch guard instead of
                 // dropping every response after the first one.
                 other if self.pending.is_empty() => {
+                    let causation = cmd.causation.clone();
+                    let _scope = self.paced_emitter.enter_causation(causation.as_deref());
                     self.dispatch_one(other);
                 }
                 _ => {
@@ -682,7 +704,7 @@ impl Loop {
                 seed: self.session.agent.session.seed.clone(),
             }));
             self.misc
-                .emit_dashboard(&self.session.agent, &self.event_tx);
+                .emit_dashboard(&self.session.agent, &self.paced_emitter);
             let _ = self.event_tx.send(super::types::WriterEvent::Legacy(Agent2Ui::Ready));
         }
         if self.pending.reload_config {
@@ -927,7 +949,7 @@ impl Loop {
                     seed: self.session.agent.session.seed.clone(),
                 }));
                 self.misc
-                    .emit_dashboard(&self.session.agent, &self.event_tx);
+                    .emit_dashboard(&self.session.agent, &self.paced_emitter);
                 return Some(Outcome::Handled);
             }
             Ui2Agent::ResumeSession { seed } => {
@@ -963,7 +985,7 @@ impl Loop {
                     }));
                 }
                 self.misc
-                    .emit_dashboard(&self.session.agent, &self.event_tx);
+                    .emit_dashboard(&self.session.agent, &self.paced_emitter);
                 return Some(Outcome::Handled);
             }
             Ui2Agent::NewSession => {
@@ -974,7 +996,7 @@ impl Loop {
                     seed: self.session.agent.session.seed.clone(),
                 }));
                 self.misc
-                    .emit_dashboard(&self.session.agent, &self.event_tx);
+                    .emit_dashboard(&self.session.agent, &self.paced_emitter);
                 return Some(Outcome::Handled);
             }
             Ui2Agent::ReloadConfig => {
@@ -1114,13 +1136,20 @@ impl Loop {
                     // the receiver disconnects and the frontend gets stuck).
                     let (tx, rx) = mpsc::channel();
                     let event_tx = self.event_tx.clone();
+                    let compact_seed = self.session.agent.session.seed.clone();
                     std::thread::Builder::new()
                         .name("compact-worker".into())
                         .spawn(move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     super::engine_compact::run_compact_worker(
-                                        compact_id.clone(), prompt, provider, kept, head, event_tx,
+                                        compact_seed,
+                                        compact_id.clone(),
+                                        prompt,
+                                        provider,
+                                        kept,
+                                        head,
+                                        event_tx,
                                     )
                                 }));
                             let meta = match result {

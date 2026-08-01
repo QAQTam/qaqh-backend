@@ -499,6 +499,60 @@ mod tests {
         assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 1);
     }
 
+    struct TestProcessBackend {
+        calls: Arc<AtomicU32>,
+    }
+
+    impl crate::ToolExecutionBackend for TestProcessBackend {
+        fn execute(&self, _request: crate::BackendRequest) -> crate::ToolResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            crate::ToolResult::ok("workspace backend")
+        }
+    }
+
+    /// exec 与 process_* 必须路由到 workspace 后端（与 exec 共享 serve 进程的
+    /// ProcessRegistry）。若 process_* 仍为 HostOnly，则 LLM 拿到的 exec
+    /// process_id 在 worker 本地注册表查不到（跨进程注册表隔离 bug）。
+    #[test]
+    fn process_tools_route_to_workspace_backend() {
+        let _test_guard = setup_test_manager();
+        crate::runtime::set_context("test_session", 4);
+        let backend_calls = Arc::new(AtomicU32::new(0));
+        let _backend_guard = crate::backend::replace_workspace_backend_for_test(Arc::new(
+            TestProcessBackend {
+                calls: backend_calls.clone(),
+            },
+        ));
+        let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let trusted = HashSet::new();
+
+        for tool in [
+            "exec",
+            "process_check",
+            "process_wait",
+            "process_kill",
+            "process_write",
+        ] {
+            backend_calls.store(0, Ordering::SeqCst);
+            let call = match admit(
+                make_invocation(tool, &format!("proc-route-{tool}")),
+                4,
+                &ws,
+                &trusted,
+            ) {
+                Admission::Authorized(call) => call,
+                _ => panic!("expected {tool} to be authorized"),
+            };
+            let result = execute_authorized(call, None);
+            assert!(result.success, "{tool} should succeed via workspace backend");
+            assert_eq!(
+                backend_calls.load(Ordering::SeqCst),
+                1,
+                "{tool} must route to workspace backend (shared ProcessRegistry)"
+            );
+        }
+    }
+
     // ── Test 2: Level 1 (MaxLockdown) requires approval ──
 
     #[test]

@@ -9,6 +9,7 @@
 import { createSignal, For, Show } from "solid-js";
 import type { RingingMonitor } from "../store/ringingMonitor";
 import type { ChannelName } from "../store/ringingMonitor";
+import { setCommandProtocol } from "../runtime/ringingCommandRouter";
 
 export function RingingDebugPanel(props: { monitor: RingingMonitor }) {
   const { state, cutover, shadowOf } = props.monitor;
@@ -26,6 +27,26 @@ export function RingingDebugPanel(props: { monitor: RingingMonitor }) {
       await cutover(seed, ch);
       setResult({ ok: true, text: `已切流 ${seed} / ${ch} → Ringing，即将刷新页面` });
       setTimeout(() => window.location.reload(), 800);
+    } catch (error) {
+      setResult({ ok: false, text: String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doCommandCutover(
+    seed: string,
+    ch: ChannelName,
+    protocol: "ringing" | "legacy",
+  ): Promise<void> {
+    setBusy(true);
+    setResult(null);
+    try {
+      const api = window.deepx?.ringing;
+      if (!api) throw new Error("ringing bridge unavailable");
+      await api.cutoverCommands(seed, ch, protocol);
+      setCommandProtocol(seed, ch, protocol);
+      setResult({ ok: true, text: `命令 ${ch} → ${protocol}` });
     } catch (error) {
       setResult({ ok: false, text: String(error) });
     } finally {
@@ -163,6 +184,56 @@ export function RingingDebugPanel(props: { monitor: RingingMonitor }) {
             {result()!.text}
           </div>
         </Show>
+      </div>
+
+      <div style={{ "border-top": "1px solid #444", "padding-top": "8px" }}>
+        <div style={{ color: "#8fd3ff", "margin-bottom": "4px" }}>命令协议（独立于事件切流）</div>
+        <div style={{ display: "flex", gap: "4px" }}>
+          <button
+            disabled={busy()}
+            onClick={() => {
+              const seed = seedInput() || seeds()[0];
+              if (!seed) {
+                setResult({ ok: false, text: "没有活跃会话，先输入 seed" });
+                return;
+              }
+              void doCommandCutover(seed, channel(), "ringing");
+            }}
+            style={{
+              flex: "1",
+              background: "#8957e5",
+              color: "#fff",
+              border: "none",
+              "border-radius": "4px",
+              padding: "6px",
+              cursor: busy() ? "wait" : "pointer",
+            }}
+          >
+            命令 → Ringing
+          </button>
+          <button
+            disabled={busy()}
+            onClick={() => {
+              const seed = seedInput() || seeds()[0];
+              if (!seed) {
+                setResult({ ok: false, text: "没有活跃会话，先输入 seed" });
+                return;
+              }
+              void doCommandCutover(seed, channel(), "legacy");
+            }}
+            style={{
+              flex: "1",
+              background: "#222",
+              color: "#ddd",
+              border: "1px solid #444",
+              "border-radius": "4px",
+              padding: "6px",
+              cursor: busy() ? "wait" : "pointer",
+            }}
+          >
+            命令 → legacy
+          </button>
+        </div>
       </div>
     </div>
   );

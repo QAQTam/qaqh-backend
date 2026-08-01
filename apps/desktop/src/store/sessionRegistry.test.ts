@@ -65,3 +65,22 @@ it("keeps the new-seed snapshot when remap follows session_created reduction", (
   expect(values.has("deepx:reload:v4:new")).toBe(true);
   expect(registry.get("new")).toBe(entry);
 });
+
+it("runtime.current() is the synchronous authoritative source while the signal lags", () => {
+  const { storage } = memoryStorage();
+  const registry = createSessionRegistry({ storage });
+  const entry = registry.ensure("old");
+
+  entry.runtime.push({ type: "session_created", seed: "new" });
+
+  // Solid 2（beta.28 浏览器构建）信号写入是微任务批处理：同一同步栈内
+  // state() 仍可能是旧值；runtime.current() 始终立即可靠。
+  // 若此断言失败，说明框架批处理行为变化——请重新评估所有
+  // “push/update 后同栈读 state()” 的调用点。
+  expect(entry.state().seed).toBe("old");
+  expect(entry.runtime.current().seed).toBe("new");
+
+  // 冲刷后信号收敛到最新值。
+  flush();
+  expect(entry.state().seed).toBe("new");
+});

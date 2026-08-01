@@ -19,6 +19,8 @@ use crate::services::dashboard;
 use crate::state::agent::AgentState;
 use crate::util;
 
+use super::types::Emitter;
+
 const INITIAL_LOAD_COUNT: usize = 20;
 
 pub struct MiscEngine;
@@ -74,7 +76,7 @@ impl MiscEngine {
 
     // ── Dashboard ──
 
-    pub fn emit_dashboard(&self, agent: &AgentState, tx: &mpsc::SyncSender<crate::ring::types::WriterEvent>) {
+    pub fn emit_dashboard(&self, agent: &AgentState, emitter: &dyn Emitter) {
         // Write context stats to disk
         let (
             chat_text,
@@ -97,7 +99,7 @@ impl MiscEngine {
         let _ = std::fs::create_dir_all(&stats_dir);
         let _ = std::fs::write(stats_dir.join("context_stats.json"), stats.to_string());
 
-        let _ = tx.send(crate::ring::types::WriterEvent::Legacy(Agent2Ui::Dashboard {
+        emitter.emit(Agent2Ui::Dashboard {
             hp_connected: true,
             session_seed: agent.session.seed.clone(),
             context_limit: agent.config.context_limit,
@@ -113,7 +115,18 @@ current_todo_id: dashboard::build_current_todo_id(),
             session_title: agent.session.title.clone(),
             usage: None,
             model: Some(agent.config.model.clone()),
-        }));
+        });
+        // Ringing 双发：DashboardUpdated（replaceable 覆盖）
+        emitter.emit_domain(deepx_domain::DomainEvent::Control(
+            deepx_domain::ControlEvent::DashboardUpdated {
+                hp_connected: true,
+                session_seed: agent.session.seed.clone(),
+                tool_calls_total: 0,
+                tool_failures: 0,
+                current_phase: "single".into(),
+                streaming: false,
+            },
+        ));
     }
 
     // ── Mode ──

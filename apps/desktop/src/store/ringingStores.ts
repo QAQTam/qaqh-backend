@@ -15,6 +15,7 @@ import type {
   ToolEvent,
   SessionState,
   ActivityState,
+  RoundDeltaKind,
 } from "../lib/types/ringing";
 import type { PermissionRisk } from "../lib/types";
 
@@ -63,6 +64,17 @@ export interface ControlState {
   activeAskPlan: ActiveAskPlan | null;
   lastNoticeId: string | null;
   lastFailureId: string | null;
+  /** 最近一次 DashboardUpdated（replaceable，覆盖式）。 */
+  dashboard: DashboardView | null;
+}
+
+export interface DashboardView {
+  hpConnected: boolean;
+  sessionSeed: string;
+  toolCallsTotal: number;
+  toolFailures: number;
+  currentPhase: string;
+  streaming: boolean;
 }
 
 export function initialControlState(seed: string): ControlState {
@@ -74,6 +86,7 @@ export function initialControlState(seed: string): ControlState {
     activeAskPlan: null,
     lastNoticeId: null,
     lastFailureId: null,
+    dashboard: null,
   };
 }
 
@@ -108,6 +121,18 @@ export function controlReducer(state: ControlState, event: ControlEvent): Contro
       return { ...state, lastFailureId: event.error.error_id };
     case "system_notice":
       return { ...state, lastNoticeId: event.notice_id };
+    case "dashboard_updated":
+      return {
+        ...state,
+        dashboard: {
+          hpConnected: event.hp_connected,
+          sessionSeed: event.session_seed,
+          toolCallsTotal: event.tool_calls_total,
+          toolFailures: event.tool_failures,
+          currentPhase: event.current_phase,
+          streaming: event.streaming,
+        },
+      };
     default:
       return state;
   }
@@ -140,15 +165,113 @@ export interface ConversationState {
   cancelled: boolean;
   /** 已作废的 revision（terminal 到达后旧 progress 不再渲染）。 */
   staleRevision: number;
+  /** 防御乱序/快照间隙：turn_started 到达前先缓冲增量，绝不丢弃。 */
+  pendingDeltas: Array<{
+    turnId: string;
+    roundNum: number;
+    kind: RoundDeltaKind;
+    delta: string;
+  }>;
+  /** 最近一次 UsageUpdated（replaceable，按 turn/round 覆盖）。 */
+  lastUsage: { usage: unknown; contextLimit: number; model: string } | null;
+  /** 最近一次 ProviderToolStatus（如 web_search 状态）。 */
+  lastProviderToolStatus: { callId: string; toolKind: string; state: string } | null;
 }
 
 export function initialConversationState(seed: string): ConversationState {
-  return { seed, activeTurn: null, turns: [], compactStatus: null, cancelled: false, staleRevision: 0 };
+  return {
+    seed,
+    activeTurn: null,
+    turns: [],
+    compactStatus: null,
+    cancelled: false,
+    staleRevision: 0,
+    pendingDeltas: [],
+    lastUsage: null,
+    lastProviderToolStatus: null,
+  };
 }
 
 function upsertTurn(state: ConversationState, turnId: string, mutate: (t: TurnView) => TurnView): ConversationState {
   const turns = state.turns.map((t) => (t.turnId === turnId ? mutate(t) : t));
   return { ...state, turns, activeTurn: turns.find((t) => t.turnId === turnId) ?? null };
+}
+
+function clearPending(state: ConversationState, turnId: string): ConversationState {
+  return state.pendingDeltas.some((d) => d.turnId === turnId)
+    ? { ...state, pendingDeltas: state.pendingDeltas.filter((d) => d.turnId !== turnId) }
+    : state;
+}
+
+/** 追加式应用一个 round 增量（首个 delta 创建 round）。 */
+function applyRoundDelta(
+  state: ConversationState,
+  turnId: string,
+  roundNum: number,
+  kind: RoundDeltaKind,
+  delta: string,
+): ConversationState {
+  return upsertTurn(state, turnId, (t) => {
+    const rounds = [...t.rounds];
+    const idx = rounds.findIndex((r) => r.roundNum === roundNum);
+    if (idx < 0) {
+      rounds.push({
+        roundNum,
+        thinking: kind === "thinking" ? delta : "",
+        answer: kind === "answering" ? delta : "",
+        isFinal: false,
+      });
+    } else {
+      const r = rounds[idx];
+      rounds[idx] = {
+        ...r,
+        thinking: kind === "thinking" ? r.thinking + delta : r.thinking,
+        answer: kind === "answering" ? r.answer + delta : r.answer,
+      };
+    }
+    return { ...t, rounds, lastRoundNum: Math.max(t.lastRoundNum, roundNum) };
+  });
+}
+
+/** 服务器快照里的中立 turn 形状（conversation_snapshot.rs 的 neutral_turn）。 */
+export interface ConversationSnapshotTurn {
+  turn_id: string;
+  user_text?: string;
+  rounds?: Array<{
+    round_num: number;
+    is_final?: boolean;
+    thinking?: string | null;
+    answer?: string | null;
+  }>;
+}
+
+/** 把服务器 ConversationSnapshot 合并进本地 store（只补缺失 turn，保留流式现场）。 */
+export function applyConversationSnapshot(
+  state: ConversationState,
+  turns: ConversationSnapshotTurn[],
+  activeTurnId: string | null,
+): ConversationState {
+  const existing = new Set(state.turns.map((t) => t.turnId));
+  const added: TurnView[] = [];
+  for (const raw of turns) {
+    if (!raw?.turn_id || existing.has(raw.turn_id)) continue;
+    const rounds: RoundView[] = (raw.rounds ?? []).map((r) => ({
+      roundNum: r.round_num,
+      thinking: r.thinking ?? "",
+      answer: r.answer ?? "",
+      isFinal: Boolean(r.is_final),
+    }));
+    added.push({
+      turnId: raw.turn_id,
+      userText: raw.user_text ?? "",
+      rounds,
+      status: raw.turn_id === activeTurnId ? "running" : "completed",
+      lastRoundNum: rounds.reduce((max, r) => Math.max(max, r.roundNum), 0),
+    });
+  }
+  const turnsAll = [...state.turns, ...added];
+  const activeTurn = turnsAll.find((t) => t.turnId === activeTurnId) ?? state.activeTurn;
+  return { ...state, turns: turnsAll, activeTurn };
 }
 
 export function conversationReducer(state: ConversationState, event: ConversationEvent): ConversationState {
@@ -161,31 +284,37 @@ export function conversationReducer(state: ConversationState, event: Conversatio
         status: "running",
         lastRoundNum: 0,
       };
-      return { ...state, turns: [...state.turns, turn], activeTurn: turn, cancelled: false };
-    }
-    case "round_delta": {
-      if (!state.activeTurn || state.activeTurn.turnId !== event.turn_id) return state;
-      return upsertTurn(state, event.turn_id, (t) => {
-        const rounds = [...t.rounds];
-        const idx = rounds.findIndex((r) => r.roundNum === event.round_num);
-        if (idx < 0) {
-          rounds.push({
-            roundNum: event.round_num,
-            thinking: event.kind === "thinking" ? event.delta : "",
-            answer: event.kind === "answering" ? event.delta : "",
-            isFinal: false,
-          });
-        } else {
-          const r = rounds[idx];
-          rounds[idx] = {
-            ...r,
-            thinking: event.kind === "thinking" ? r.thinking + event.delta : r.thinking,
-            answer: event.kind === "answering" ? r.answer + event.delta : r.answer,
-          };
+      let next: ConversationState = {
+        ...state,
+        turns: [...state.turns, turn],
+        activeTurn: turn,
+        cancelled: false,
+      };
+      // 合并乱序到达的缓冲增量（快照间隙/事件乱序时不丢字）。
+      const buffered = state.pendingDeltas.filter((d) => d.turnId === event.turn_id);
+      if (buffered.length > 0) {
+        next = clearPending(next, event.turn_id);
+        for (const d of buffered) {
+          next = applyRoundDelta(next, d.turnId, d.roundNum, d.kind, d.delta);
         }
-        return { ...t, rounds, lastRoundNum: Math.max(t.lastRoundNum, event.round_num) };
-      });
+      }
+      return next;
     }
+    case "round_delta":
+      if (state.activeTurn?.turnId !== event.turn_id) {
+        // 防御乱序/快照间隙：缓冲而不是丢弃，turn_started 到达后合并。
+        const pendingDeltas = [
+          ...state.pendingDeltas,
+          {
+            turnId: event.turn_id,
+            roundNum: event.round_num,
+            kind: event.kind,
+            delta: event.delta,
+          },
+        ].slice(-500);
+        return { ...state, pendingDeltas };
+      }
+      return applyRoundDelta(state, event.turn_id, event.round_num, event.kind, event.delta);
     case "round_completed": {
       if (!state.activeTurn || state.activeTurn.turnId !== event.turn_id) return state;
       return upsertTurn(state, event.turn_id, (t) => {
@@ -204,16 +333,37 @@ export function conversationReducer(state: ConversationState, event: Conversatio
         return { ...t, rounds };
       });
     }
+    case "usage_updated":
+      return {
+        ...state,
+        lastUsage: {
+          usage: event.usage,
+          contextLimit: event.context_limit,
+          model: event.model,
+        },
+      };
+    case "provider_tool_status":
+      return {
+        ...state,
+        lastProviderToolStatus: {
+          callId: event.call_id,
+          toolKind: event.tool_kind,
+          state: event.state,
+        },
+      };
     case "turn_completed":
-      return upsertTurn(state, event.turn_id, (t) => ({ ...t, status: "completed" }));
+      return upsertTurn(clearPending(state, event.turn_id), event.turn_id, (t) => ({ ...t, status: "completed" }));
     case "turn_failed":
-      return upsertTurn(state, event.turn_id, (t) => ({ ...t, status: "failed" }));
+      return upsertTurn(clearPending(state, event.turn_id), event.turn_id, (t) => ({ ...t, status: "failed" }));
     case "conversation_cancelled":
       return {
         ...state,
         cancelled: true,
         activeTurn: state.activeTurn ? { ...state.activeTurn, status: "cancelled" } : null,
         staleRevision: state.staleRevision + 1,
+        pendingDeltas: event.turn_id
+          ? state.pendingDeltas.filter((d) => d.turnId !== event.turn_id)
+          : state.pendingDeltas,
       };
     case "compact_finished":
       return { ...state, compactStatus: event.status };
@@ -250,10 +400,14 @@ export interface ToolCardView {
 export interface ToolState {
   seed: string;
   cards: ToolCardView[];
+  /** 最近工具域通知（有界，最多保留 50 条）。 */
+  notices: Array<{ level: string; message: string }>;
+  /** 最近审计记录（有界，最多保留 50 条）。 */
+  audits: Array<{ toolName: string; resultSummary: string; success: boolean; time: string }>;
 }
 
 export function initialToolState(seed: string): ToolState {
-  return { seed, cards: [] };
+  return { seed, cards: [], notices: [], audits: [] };
 }
 
 export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
@@ -350,6 +504,27 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
         ],
       };
     }
+    case "tool_notice":
+      return {
+        ...state,
+        notices: [
+          ...state.notices,
+          { level: event.level, message: event.message },
+        ].slice(-50),
+      };
+    case "audit_recorded":
+      return {
+        ...state,
+        audits: [
+          ...state.audits,
+          {
+            toolName: event.tool_name,
+            resultSummary: event.result_summary,
+            success: event.success,
+            time: event.time,
+          },
+        ].slice(-50),
+      };
     default:
       return state;
   }

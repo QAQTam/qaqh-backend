@@ -50,7 +50,7 @@
 |---|---|---|---|---|
 | 1 | `TurnStart { turn_id, user_text }` | `TurnStarted` | reliable | 部分（当前 turn） |
 | 2 | `TurnEnd { turn_id, stop_reason, usage }` | `TurnCompleted`（成功）/ `TurnFailed`（由 Error/ProviderRetrying 终态推导，**新领域事件**） | reliable | 是 |
-| 3 | `RoundDelta { turn_id, round_num, kind, delta }` | `RoundDelta` | replaceable（按 kind+round 合并） | 否 |
+| 3 | `RoundDelta { turn_id, round_num, kind, delta }` | `RoundDelta` | reliable（增量追加；`RoundCompleted` 到达后按 round 压缩 journal） | 否 |
 | 4 | `RoundComplete { thinking, answer, tool_calls, blocks, is_final }` | `RoundCompleted`（正文大时带 content_ref） | reliable terminal | 是 |
 | 5 | `SessionRestored { turns, tokens_used, usage, … }` | 无直接事件 → `ConversationSnapshot` 经 HTTP GET | reliable | **是（快照本体）** |
 | 6 | `MoreTurns { turns, has_more }` | `ConversationLoadMore` 的 query 结果（HTTP） | reliable | 否 |
@@ -144,15 +144,15 @@
 
 ## 4. 可靠性等级汇总（PLAN 硬规则映射）
 
-- **reliable（进有界 journal，按 cursor 回放）**：全部 terminal（TurnCompleted/TurnFailed/RoundCompleted/ToolFinished/ToolFailed/CompactFinished）、生命周期（TurnStarted/TurnStarted 前 SessionStateChanged/AgentLifecycleChanged/SessionActivityChanged）、interaction 四件套、SkillsUpdated、AuditRecorded、CodeChanged、OperationFailed、ProviderRetrying（最终失败）、ConversationCancelled。
-- **replaceable（按 identity 合并/覆盖，不进 journal 或仅稀疏 checkpoint）**：RoundDelta、ToolProgress（ExecProgress/ToolExecDelta）、CompactProgress、UsageUpdated、DashboardUpdated、ToolCallPrepared（可被 ToolStarted 覆盖）、ProviderToolStatus（按 call_id 合并/覆盖）。
+- **reliable（进有界 journal，按 cursor 回放）**：全部 terminal（TurnCompleted/TurnFailed/RoundCompleted/ToolFinished/ToolFailed/CompactFinished）、生命周期（TurnStarted/TurnStarted 前 SessionStateChanged/AgentLifecycleChanged/SessionActivityChanged）、interaction 四件套、SkillsUpdated、AuditRecorded、CodeChanged、OperationFailed、ProviderRetrying（最终失败）、ConversationCancelled、**RoundDelta（增量是追加语义，覆盖/合并会吞字；journal 在 RoundCompleted 后按 round 压缩）**。
+- **replaceable（按 identity 合并/覆盖，不进 journal 或仅稀疏 checkpoint）**：ToolProgress（ExecProgress/ToolExecDelta）、CompactProgress、UsageUpdated、DashboardUpdated、ToolCallPrepared（可被 ToolStarted 覆盖）、ProviderToolStatus（按 call_id 合并/覆盖）。
 - **ephemeral（不 snapshot/journal）**：CacheDiagnostics、Pong、诊断性 live 提示。
 - terminal 到达前必须 flush/覆盖同 identity 的 replaceable 事件（`state_revision` 作废旧 progress）。
 
 ## 5. 决策记录（2026-07-31 评审定稿）
 
 1. **`ToolStarted` 触发点** → **双事件**：`ToolCallPrepared`（流式预览检测到调用，replaceable，可被覆盖）+ `ToolStarted`（permission 通过后执行真正开始，reliable）。prepared 与 started 之间以 `ToolPermissionRequested` 衔接。
-2. **`RoundDelta.kind`** → **保留 kind 作 replaceable 合并键**：合并键 = `turn_id + round_num + kind`；终端 `RoundCompleted` 按 `state_revision` 整体覆盖，不拆独立事件流。
+2. **`RoundDelta.kind`** → **增量按 reliable 投递**：合并/覆盖会丢字（重连/慢消费只剩最后一个 delta），因此进有界 journal 按 cursor 回放；终端 `RoundCompleted` 携带权威全量并按 `state_revision` 整体覆盖，同时压缩该 round 的 journal 增量。
 3. **`SearchStatus`** → **新增 Conversation 频道事件 `ProviderToolStatus`**（不消化进 Tool 频道、不保留自由文本 status），定义见 5.1。
 4. **`CacheDiagnostics`** → **ephemeral 诊断事件**（保留 domain 形态，不进 journal/snapshot），不并入 OperationFailed。
 5. **`MoreTurns`** → **HTTP query 直接返回**：`ConversationLoadMore` 命令 + 查询结果走 HTTP，不保留事件形态。

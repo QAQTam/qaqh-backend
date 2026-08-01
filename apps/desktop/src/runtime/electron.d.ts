@@ -20,8 +20,11 @@ interface DeepxDesktopApi {
     cutoverEvents(seed: string, channel: string, action: "prepare" | "commit" | "abort"): Promise<unknown>;
     cutoverCommands(seed: string, channel: string, protocol: "ringing" | "legacy"): Promise<unknown>;
     snapshot(seed: string, channel: string): Promise<unknown>;
+    command(seed: string, channel: string, envelope: unknown): Promise<unknown>;
+    query(path: string, params?: Record<string, string | undefined>): Promise<unknown>;
     onBatch(listener: (batch: import("../lib/types/ringing").RingingEventBatch) => void): () => void;
     onStatus(listener: (update: { channel: string; status: unknown }) => void): () => void;
+    onSnapshot(listener: (update: { seed: string; channel: string; snapshot: unknown }) => void): () => void;
   };
   desktop: {
     openDialog(options: { directory?: boolean; multiple?: boolean; title?: string }): Promise<string | string[] | null>;

@@ -1,5 +1,6 @@
 import { action, createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack, type Accessor } from "solid-js";
 import { request } from "../runtime/backendClient";
+import { requestWithRinging } from "../runtime/ringingCommands";
 import { openDevTools, openPath } from "../runtime/desktopApi";
 import { togglePet } from "../runtime/desktopApi";
 import type { AskAnswer } from "../lib/types";
@@ -132,7 +133,7 @@ export default function ChatView(props: ChatViewProps) {
       interactions: [],
     };
     props.setPendingSend(optimisticTurn);
-    yield request("session.send_message", {
+    yield requestWithRinging("session.send_message", {
       seed: seed(),
       text,
       files,
@@ -142,11 +143,11 @@ export default function ChatView(props: ChatViewProps) {
   });
 
   const handleStop = action(async function* () {
-    yield request("session.cancel", { seed: seed() });
+    yield requestWithRinging("session.cancel", { seed: seed() });
   });
 
   const handleCompact = action(async function* () {
-    yield request("session.compact", { seed: seed() });
+    yield requestWithRinging("session.compact", { seed: seed() });
   });
 
   const followUps = createFollowUpQueue(untrack(seed), handleSend);

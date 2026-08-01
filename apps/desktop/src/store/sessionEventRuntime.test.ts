@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RawSessionState } from "./rawSession";
 import { createRawSessionState } from "./sessionEventReducer";
 import {
@@ -129,6 +129,39 @@ describe("sessionEventRuntime", () => {
     expect(commits).toEqual([""]);
     frames[0]!(116);
     expect(commits).toEqual(["", "x".repeat(1000)]);
+  });
+
+  it("flushes via a timer fallback when no frame callback ever fires (hidden window)", () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new MemoryStorage();
+      const commits: string[] = [];
+      const frames: FrameRequestCallback[] = [];
+      const runtime = createSessionEventRuntime({
+        initialState: createRawSessionState("seed-a"),
+        commit: state => commits.push(state.turns[0]?.rounds[0]?.answer ?? ""),
+        storage,
+        scheduleFrame: callback => { frames.push(callback); return frames.length; },
+        cancelFrame: () => {},
+      });
+
+      runtime.push({ type: "turn_start", turn_id: "t1", user_text: "go" });
+      runtime.push({ type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "A" });
+      runtime.push({ type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "B" });
+      expect(frames).toHaveLength(1);
+      expect(commits).toEqual([""]);
+
+      // 模拟隐藏窗口：rAF 永不触发，定时器兜底必须提交且内容完整。
+      vi.advanceTimersByTime(101);
+      expect(commits).toEqual(["", "AB"]);
+
+      // 兜底提交后，后续增量重新调度。
+      runtime.push({ type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "C" });
+      vi.advanceTimersByTime(101);
+      expect(commits).toEqual(["", "AB", "ABC"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("restores the last twenty turns on dispose", () => {

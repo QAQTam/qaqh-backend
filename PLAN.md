@@ -394,8 +394,29 @@ sessionChannelMode[seed][channel] {
   唯一合法出口，无对应表达返回 None）。
 - **传输层**：`deepx-daemon/ringing_http.rs` — `clients/open`（能力协商 + lease 签发）、
   `leases/renew`（TTL 30s）、`commands/{channel}`（校验 → 幂等表 → worker 转发 → 失败回滚）、
-  `snapshots/{channel}/{seed}`、三条独立 SSE（`id: epoch:channel:seq` + Last-Event-ID +
-  keepalive + 独立重连）；server.rs peek 分流，legacy WS 与 Ringing HTTP/SSE 单端口并行互不嵌套。
+  `snapshots/{channel}/{seed}`（Conversation 频道返回持久化消息构建的完整 turns）、
+  三条独立 SSE（`id: epoch:channel:seq` + Last-Event-ID 按 cursor 回放可靠 tail +
+  `ringing.reset_required` + keepalive + 独立重连）；server.rs peek 分流，legacy WS 与
+  Ringing HTTP/SSE 单端口并行互不嵌套。
+- **恢复语义收口**：SSE 重连先订阅再回放，跨 seed 按全局 `stream_seq` 合并；journal 记录
+  `evicted_through`，仅当某 seed 确有被淘汰且 seq > cursor 的事件才发
+  `ringing.reset_required`（避免"晚创建 session 首事件 seq 大"误报）；Electron 客户端修复
+  typed event 帧解析（此前只处理 `event: message` 导致事件全丢）、Last-Event-ID 携带
+  server_epoch，收到 reset 后经 HTTP 重取 snapshot 并重置流 cursor。
+- **causation 贯通**：worker 事件信封新增 `causation_id`，Ringing 命令执行期间
+  `emit_domain` 产出的事件携带 `command_id`（命令作用域 guard），daemon 发布时写入
+  `RingingEventEnvelope.causation_id`；业务终态可与 accepted 命令关联。
+- **领域事件生产点补齐**：`UsageUpdated`、`ToolCallPrepared`、`ProviderToolStatus`
+  （web_search）、`AuditRecorded`、`ToolFailed`（拒绝路径）、`ToolNotice`（compact）、
+  `DashboardUpdated`（worker 仪表盘 5 处）已双发接入；daemon 活动状态变化改为
+  `SessionActivity` 与 `SessionActivityChanged` 双发；前端三 store 增加对应消费
+  （dashboard/usage/provider status/notices/audits）。`SystemNotice` 无 legacy 数据源，
+  待 daemon 通知集成（升级/维护）时接入。
+- **worker seed 修复**：Ringing worker 事件信封改用真实 session seed（此前硬编码
+  `"worker"`，会导致所有会话事件落入同一伪 seed）。
+- **ConversationSnapshot HTTP**：`GET /ringing/v1/snapshots/conversation/{seed}` 从
+  `SessionManager::load_for_resume` 持久化消息构建完整 turns（中立 JSON，非 legacy wire），
+  与 hub 领域投影摘要合并返回。
 - **worker 边界**（阶段 1）：stdin/stdout `wire` 判别（无 wire→legacy / `Ringing_domain_v1`→
   Ringing / 未知→拒绝）；Ringing 命令→legacy ingress 映射（19 命令，SessionClose 显式拒绝）；
   writer 双协议通道（`WriterEvent`）。
@@ -432,13 +453,26 @@ sessionChannelMode[seed][channel] {
 - **前端切流闭环（桌面）**：electron main RingingManager（三 SSE + sessionChannelMode 表 +
   cutover/snapshot IPC）；renderer 三 store 影子模式 + 调试面板切流按钮（prepare→commit→reload）；
   SessionPresentationSelector（已切流会话主 UI 数据源切换为 Ringing store 投影）；
-  snapshot 摘要重建（完整历史依赖 ConversationSnapshot HTTP，未实现）。
+  snapshot 摘要重建；ConversationSnapshot HTTP 已实现，renderer 完整 turns 消费待前端阶段接入。
+- **命令/查询接管（契约 `docs/ringing-command-query-contract.md`）**：
+  `GET /ringing/v1/query/*` 已实现（session.list/meta/activity/dashboard/get_activity、
+  workspace.get/status、config.load、skills.list_tools、todo.status、daemon.version；
+  同时接受斜杠与点号路径，seed 依赖方法缺参 400）；
+  `SessionClose` 在 daemon 侧拦截（registry close + hub 发布
+  `SessionStateChanged{Closed}`，causation=command_id，幂等关闭，无 seed 400）；
+  Electron IPC `ringing:command` / `ringing:query` 已接线；
+  renderer 命令路由 `ringingCommandRouter`（按 (seed,channel) commandProtocol 接管
+  send/cancel/compact/undo/set_mode/load_more/close/resume/new/interaction/skills，
+  "ringing not connected" 回退 legacy）+ `ringingCommands` localStorage 强制开关；
+  只读查询在命令已切流的会话上走 Ringing，失败安全回退 legacy。
+- **持久化 journal**：`JournalStore`（append-only JSONL `{data}/ringing/journal/{channel}/{seed}.jsonl`
+  + cutover.json 原子写）；`RingingHub::with_persistence` 启动装载重建
+  journal/router/projection/sequencer/cutover；I/O 失败只记录日志不阻塞 publish；
+  daemon 启动改走持久构造（`server.rs`）。
 - **发布周期 1**：基础设施与 identity spine ✅；Tool 默认 Ringing、按 session 切流 ⬜。
 
 ### ⬜ 未开始
 
-- ConversationSnapshot HTTP 端点（切流后完整历史恢复；映射表 #5 设计项）。
-- 持久化 journal（当前内存有界实现，daemon 重启丢可靠事件）。
 - TUI 三个 Ringing handler。
 - 发布周期 2（Conversation/Control 默认 Ringing、命令逐频道切换）。
 - 最终迁移（固化 v1、删除 Agent2Ui/Ui2Agent/LegacyProjector/legacy WS/旧 reducer/旧 bindings）。
@@ -446,8 +480,8 @@ sessionChannelMode[seed][channel] {
 ### 下一步建议（按优先级）
 
 1. 发布周期 1 实战：补 daemon 重启 → 面板影子验证 → 切流 Tool → 主 UI 接管验证。
-2. ConversationSnapshot HTTP（历史恢复闭环）；3. 持久化 journal；4. TUI handler；
-5. 发布周期 2；6. 最终删除 legacy。
+2. ConversationSnapshot HTTP（历史恢复闭环）；3. renderer 消费完整 turns；
+4. TUI handler；5. 发布周期 2；6. 最终删除 legacy。
 
 ## 迁移阶段
 

@@ -138,6 +138,14 @@ impl CompactEngine {
                 message: "Compact skipped: all within token budget".into(),
                 level: "info".into(),
             });
+            // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                deepx_domain::ToolEvent::ToolNotice {
+                    tool_call_id: None,
+                    level: deepx_domain::NoticeLevel::Info,
+                    message: "Compact skipped: all within token budget".into(),
+                },
+            ));
             return None;
         }
 
@@ -379,6 +387,17 @@ impl CompactEngine {
             ),
             level: "info".into(),
         });
+        // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+            deepx_domain::ToolEvent::ToolNotice {
+                tool_call_id: None,
+                level: deepx_domain::NoticeLevel::Info,
+                message: format!(
+                    "Compacted {} turns -> {chars} chars, keeping {} turns",
+                    meta.head_user_count, meta.kept_user_count,
+                ),
+            },
+        ));
     }
 }
 
@@ -396,6 +415,7 @@ fn estimate_message_tokens(message: &deepx_types::Message) -> usize {
 /// via `CompactDelta` events pushed through `event_tx`.
 /// Returns CompactMeta via the channel.
 pub(crate) fn run_compact_worker(
+    seed: String,
     compact_id: String,
     prompt: String,
     provider: deepx_gate::ProviderConfig,
@@ -416,7 +436,7 @@ pub(crate) fn run_compact_worker(
             // Ringing 双发：CompactProgress（replaceable 流式摘要）
             progress_seq += 1;
             let env = deepx_ringing::RingingWorkerEventEnvelope::new(
-                "worker",
+                seed.as_str(),
                 format!("w-compact-{compact_id}-{progress_seq}"),
                 deepx_domain::DomainEvent::Conversation(
                     deepx_domain::ConversationEvent::CompactProgress {

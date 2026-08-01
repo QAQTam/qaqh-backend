@@ -9,11 +9,14 @@
 
 pub mod hub;
 pub mod journal;
+pub mod journal_store;
 pub mod cutover;
 pub mod content_store;
+pub mod conversation_snapshot;
 pub mod legacy_projector;
 pub mod outbox;
 pub mod projection;
+pub mod query;
 pub mod router;
 pub mod sequencer;
 pub mod tool_progress;

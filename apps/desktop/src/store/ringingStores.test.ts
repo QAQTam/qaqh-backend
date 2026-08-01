@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RingingEventEnvelope } from "../lib/types/ringing";
 import {
   AppliedEventRegistry,
+  applyConversationSnapshot,
   applyEnvelope,
   applyEnvelopeUnchecked,
   conversationReducer,
@@ -88,6 +89,63 @@ describe("conversationReducer", () => {
     expect(state.activeTurn?.status).toBe("completed");
     expect(state.activeTurn?.rounds[0].answer).toBe("hello");
     expect(state.activeTurn?.rounds[0].thinking).toBe("think");
+  });
+
+  it("buffers deltas arriving before turn_started and replays them losslessly", () => {
+    let state = initialConversationState("s1");
+    // 乱序/快照间隙：turn_started 尚未到达
+    state = conversationReducer(state, {
+      type: "round_delta",
+      turn_id: "t1",
+      round_num: 0,
+      kind: "thinking",
+      delta: "前",
+    });
+    state = conversationReducer(state, {
+      type: "round_delta",
+      turn_id: "t1",
+      round_num: 0,
+      kind: "thinking",
+      delta: "半",
+    });
+    expect(state.turns).toHaveLength(0);
+    expect(state.pendingDeltas).toHaveLength(2);
+
+    state = conversationReducer(state, { type: "turn_started", turn_id: "t1", user_text: "hi" });
+    expect(state.activeTurn?.rounds[0].thinking).toBe("前半");
+    expect(state.pendingDeltas).toHaveLength(0);
+  });
+
+  it("restores turns from the server conversation snapshot and keeps streaming context", () => {
+    let state = initialConversationState("s1");
+    // 流式现场：活动 turn 已有部分内容，快照合并时不得覆盖
+    state = conversationReducer(state, { type: "turn_started", turn_id: "t-live", user_text: "live" });
+    state = conversationReducer(state, {
+      type: "round_delta",
+      turn_id: "t-live",
+      round_num: 0,
+      kind: "answering",
+      delta: "live partial",
+    });
+
+    state = applyConversationSnapshot(
+      state,
+      [
+        { turn_id: "t-old", user_text: "old", rounds: [{ round_num: 0, is_final: true, thinking: "plan", answer: "done" }] },
+        { turn_id: "t-live", user_text: "live", rounds: [] },
+      ],
+      "t-live",
+    );
+
+    expect(state.turns.map((t) => t.turnId)).toEqual(["t-live", "t-old"]);
+    // 已存在的活动 turn 保留流式内容
+    const live = state.turns.find((t) => t.turnId === "t-live")!;
+    expect(live.rounds[0].answer).toBe("live partial");
+    expect(live.status).toBe("running");
+    // 快照补齐的历史 turn 以 completed 进入
+    const old = state.turns.find((t) => t.turnId === "t-old")!;
+    expect(old.rounds[0].thinking).toBe("plan");
+    expect(old.status).toBe("completed");
   });
 });
 
@@ -189,5 +247,87 @@ describe("applyEnvelope + idempotency", () => {
     expect(stores.control.agentLifecycle).toBe("ready");
     expect(stores.conversation.activeTurn?.turnId).toBe("t1");
     expect(stores.tool.cards[0].status).toBe("running");
+  });
+});
+
+describe("newly dual-emitted domain events", () => {
+  it("dashboard_updated stores dashboard state", () => {
+    let state = initialControlState("s1");
+    state = controlReducer(state, {
+      type: "dashboard_updated",
+      hp_connected: true,
+      session_seed: "s1",
+      tool_calls_total: 3,
+      tool_failures: 1,
+      current_phase: "working",
+      streaming: true,
+    });
+    expect(state.dashboard).toEqual({
+      hpConnected: true,
+      sessionSeed: "s1",
+      toolCallsTotal: 3,
+      toolFailures: 1,
+      currentPhase: "working",
+      streaming: true,
+    });
+  });
+
+  it("usage_updated and provider_tool_status are stored", () => {
+    let state = initialConversationState("s1");
+    state = conversationReducer(
+      state,
+      {
+        type: "usage_updated",
+        turn_id: "t1",
+        round_num: 0,
+        usage: { total_tokens: 10 },
+        context_limit: 1000,
+        model: "m",
+      } as never,
+    );
+    expect(state.lastUsage?.contextLimit).toBe(1000);
+    expect((state.lastUsage?.usage as { total_tokens: number }).total_tokens).toBe(10);
+    state = conversationReducer(state, {
+      type: "provider_tool_status",
+      turn_id: "t1",
+      round_num: 0,
+      call_id: "c1",
+      tool_kind: "web_search",
+      state: "completed",
+    });
+    expect(state.lastProviderToolStatus).toEqual({
+      callId: "c1",
+      toolKind: "web_search",
+      state: "completed",
+    });
+  });
+
+  it("tool_notice and audit_recorded are appended with a bound", () => {
+    let state = initialToolState("s1");
+    for (let i = 0; i < 55; i++) {
+      state = toolReducer(state, {
+        type: "tool_notice",
+        tool_call_id: null,
+        level: "info",
+        message: `n${i}`,
+      });
+    }
+    expect(state.notices).toHaveLength(50);
+    expect(state.notices[49].message).toBe("n54");
+    state = toolReducer(state, {
+      type: "audit_recorded",
+      tool_name: "exec",
+      result_summary: "ok",
+      success: true,
+      time: "t",
+      args_ref: null,
+    });
+    expect(state.audits).toHaveLength(1);
+    expect(state.audits[0]).toEqual({
+      toolName: "exec",
+      resultSummary: "ok",
+      success: true,
+      time: "t",
+    });
   });
 });

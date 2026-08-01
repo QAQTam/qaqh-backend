@@ -9,6 +9,7 @@
 // - 本模块不持有状态：输入 stores + seed，输出 RawSessionState（纯函数）。
 
 import type {
+  RawMetricPoint,
   RawRound,
   RawSessionState,
   RawTurn,
@@ -63,6 +64,8 @@ export function projectRingingToRawSession(
   seed: string,
   stores: RingingStores,
   usage?: UsageInfo,
+  usageTotals?: UsageInfo,
+  telemetry?: RawMetricPoint[],
 ): RawSessionState {
   const base = createRawSessionState(seed);
   const conv = stores.conversation;
@@ -98,7 +101,9 @@ export function projectRingingToRawSession(
       ...base.session,
       ready: stores.control.agentLifecycle === "ready",
       usage: usage ?? base.session.usage,
+      usageTotals: usageTotals ?? base.session.usageTotals,
     },
+    telemetry: telemetry ?? [],
     compact: {
       ...base.compact,
       active: conv.compactStatus === "completed" ? false : conv.compactStatus !== null,

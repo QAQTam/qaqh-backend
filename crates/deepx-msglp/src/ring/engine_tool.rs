@@ -155,6 +155,21 @@ impl ToolEngine {
                         file: None,
                     }],
                 });
+                // Ringing 双发：ToolFailed（拒绝是结构化失败终态）
+                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                    deepx_domain::ToolEvent::ToolFailed {
+                        tool_call_id: id.to_string(),
+                        turn_id: turn_id.clone(),
+                        round_num: 0,
+                        error: deepx_domain::DomainError {
+                            error_id: format!("tool-denied-{id}"),
+                            code: "tool_denied".into(),
+                            message: reason.to_string(),
+                            retryable: false,
+                            dedupe_key: Some(format!("tool:{id}")),
+                        },
+                    },
+                ));
                 ctx.emitter.emit(Agent2Ui::TurnEnd {
                     turn_id,
                     stop_reason: None,
@@ -570,6 +585,17 @@ current_todo_id: dashboard::build_current_todo_id(),
                 usage: None,
                 model: Some(ctx.agent.config.model.clone()),
             });
+            // Ringing 双发：DashboardUpdated（replaceable 覆盖）
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                deepx_domain::ControlEvent::DashboardUpdated {
+                    hp_connected: true,
+                    session_seed: ctx.agent.session.seed.clone(),
+                    tool_calls_total: 0,
+                    tool_failures: 0,
+                    current_phase: "single".into(),
+                    streaming: false,
+                },
+            ));
         }
 
         if let Some(ref delta) = code_delta {
@@ -728,6 +754,21 @@ current_todo_id: dashboard::build_current_todo_id(),
                 file: None,
             }],
         });
+        // Ringing 双发：ToolFailed（拒绝是结构化失败终态）
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+            deepx_domain::ToolEvent::ToolFailed {
+                tool_call_id: call_id.to_string(),
+                turn_id: turn_id.clone(),
+                round_num: 0,
+                error: deepx_domain::DomainError {
+                    error_id: format!("tool-denied-{call_id}"),
+                    code: "tool_denied".into(),
+                    message: reason.to_string(),
+                    retryable: false,
+                    dedupe_key: Some(format!("tool:{call_id}")),
+                },
+            },
+        ));
         ctx.emitter.emit(Agent2Ui::TurnEnd {
             turn_id,
             stop_reason: None,

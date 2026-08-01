@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld("deepx", {
       ipcRenderer.invoke("ringing:cutover-commands", seed, channel, protocol),
     snapshot: (seed: string, channel: string) =>
       ipcRenderer.invoke("ringing:snapshot", seed, channel),
+    command: (seed: string, channel: string, envelope: unknown) =>
+      ipcRenderer.invoke("ringing:command", seed, channel, envelope),
+    query: (path: string, params?: Record<string, string | undefined>) =>
+      ipcRenderer.invoke("ringing:query", path, params),
     onBatch: (listener: (batch: RingingEventBatch) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, batch: RingingEventBatch) => listener(batch);
       ipcRenderer.on("ringing:batch", handler);
@@ -39,6 +43,14 @@ contextBridge.exposeInMainWorld("deepx", {
       const handler = (_event: Electron.IpcRendererEvent, update: { channel: string; status: unknown }) => listener(update);
       ipcRenderer.on("ringing:status", handler);
       return () => ipcRenderer.removeListener("ringing:status", handler);
+    },
+    onSnapshot: (listener: (update: { seed: string; channel: string; snapshot: unknown }) => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        update: { seed: string; channel: string; snapshot: unknown },
+      ) => listener(update);
+      ipcRenderer.on("ringing:snapshot", handler);
+      return () => ipcRenderer.removeListener("ringing:snapshot", handler);
     },
   },
   desktop: {

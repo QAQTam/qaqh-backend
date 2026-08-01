@@ -21,23 +21,27 @@
 use std::collections::HashMap;
 
 use deepx_domain::RingingChannel;
+use serde::{Deserialize, Serialize};
 
 /// 事件方向协议。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventProtocol {
     Legacy,
     Ringing,
 }
 
 /// 命令方向协议。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CommandProtocol {
     Legacy,
     Ringing,
 }
 
 /// 切流中间态（两阶段提交的 prepare 阶段）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CutoverPhase {
     /// 未切流（默认 legacy）。
     None,
@@ -46,7 +50,8 @@ pub enum CutoverPhase {
 }
 
 /// 每 session/channel 的协议模式。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct SessionChannelMode {
     pub event_protocol: EventProtocol,
     pub command_protocol: CommandProtocol,
@@ -80,6 +85,35 @@ pub enum CutoverError {
 impl CutoverState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 序列化为持久化 JSON（HashMap 元组键不满足 JSON map key，改为数组）。
+    pub fn to_json(&self) -> serde_json::Value {
+        let modes: Vec<_> = self
+            .modes
+            .iter()
+            .map(|((seed, channel), mode)| {
+                serde_json::json!({
+                    "seed": seed,
+                    "channel": channel,
+                    "mode": mode,
+                })
+            })
+            .collect();
+        serde_json::json!({ "modes": modes })
+    }
+
+    /// 从持久化 JSON 恢复；格式不合法时返回 None（调用方保持默认）。
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let modes = value.get("modes")?.as_array()?;
+        let mut map = HashMap::new();
+        for item in modes {
+            let seed = item.get("seed")?.as_str()?.to_string();
+            let channel = serde_json::from_value(item.get("channel")?.clone()).ok()?;
+            let mode = serde_json::from_value(item.get("mode")?.clone()).ok()?;
+            map.insert((seed, channel), mode);
+        }
+        Some(Self { modes: map })
     }
 
     pub fn mode(&self, seed: &str, channel: RingingChannel) -> SessionChannelMode {

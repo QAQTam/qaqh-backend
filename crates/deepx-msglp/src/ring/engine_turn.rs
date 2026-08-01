@@ -635,6 +635,17 @@ current_todo_id: dashboard::build_current_todo_id(),
                                 usage: None,
                                 model: Some(ctx.agent.config.model.clone()),
                             });
+                            // Ringing 双发：DashboardUpdated（replaceable 覆盖）
+                            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                                deepx_domain::ControlEvent::DashboardUpdated {
+                                    hp_connected: true,
+                                    session_seed: ctx.agent.session.seed.clone(),
+                                    tool_calls_total: 0,
+                                    tool_failures: 0,
+                                    current_phase: "single".into(),
+                                    streaming: false,
+                                },
+                            ));
                         }
                     }
                     Err(_) => ctx.agent.msg.push_tool_result_direct(
@@ -704,6 +715,17 @@ current_todo_id: dashboard::build_current_todo_id(),
                             usage: None,
                             model: Some(ctx.agent.config.model.clone()),
                         });
+                        // Ringing 双发：DashboardUpdated（replaceable 覆盖）
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                            deepx_domain::ControlEvent::DashboardUpdated {
+                                hp_connected: true,
+                                session_seed: ctx.agent.session.seed.clone(),
+                                tool_calls_total: 0,
+                                tool_failures: 0,
+                                current_phase: "single".into(),
+                                streaming: false,
+                            },
+                        ));
                     }
                 }
                 Err(_) => ctx.agent.msg.push_tool_result_direct(
@@ -1077,6 +1099,16 @@ current_todo_id: dashboard::build_current_todo_id(),
                         log::info!(
                             "[TURN] emit_delta ToolCallPreview turn_id={turn_id} round={round_num} idx={index} id={id} name={name}"
                         );
+                        // Ringing 双发：ToolCallPrepared（replaceable 预览，可被 ToolStarted 覆盖）
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                            deepx_domain::ToolEvent::ToolCallPrepared {
+                                tool_call_id: id.clone(),
+                                turn_id: turn_id.clone(),
+                                round_num,
+                                name: name.clone(),
+                                args_so_far: args_so_far.clone(),
+                            },
+                        ));
                         ctx.emitter.emit_delta(Agent2Ui::ToolCallPreview {
                             turn_id: turn_id.clone(),
                             round_num,
@@ -1090,6 +1122,23 @@ current_todo_id: dashboard::build_current_todo_id(),
                         // Server-side search progress (Responses API built-in
                         // tool). Transient status line; RoundComplete blocks
                         // replace it on arrival.
+                        // Ringing 双发：ProviderToolStatus（replaceable，按 call_id 合并）
+                        let provider_state = match status.as_str() {
+                            "completed" | "done" => deepx_domain::ProviderToolState::Completed,
+                            "searching" | "running" | "in_progress" => {
+                                deepx_domain::ProviderToolState::Searching
+                            }
+                            _ => deepx_domain::ProviderToolState::InProgress,
+                        };
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                            deepx_domain::ConversationEvent::ProviderToolStatus {
+                                turn_id: turn_id.clone(),
+                                round_num,
+                                call_id: format!("ws-{turn_id}-{round_num}"),
+                                tool_kind: "web_search".into(),
+                                state: provider_state,
+                            },
+                        ));
                         ctx.emitter.emit_delta(Agent2Ui::SearchStatus {
                             turn_id: turn_id.clone(),
                             round_num,
@@ -1101,6 +1150,16 @@ current_todo_id: dashboard::build_current_todo_id(),
                         current_request_usage = Some(u.clone());
                         ctx.agent.session.tokens =
                             ctx.agent.session.tokens.max(u.total_tokens as u64);
+                        // Ringing 双发：UsageUpdated（replaceable，按 turn/round 覆盖）
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                            deepx_domain::ConversationEvent::UsageUpdated {
+                                turn_id: turn_id.clone(),
+                                round_num,
+                                usage: u.clone(),
+                                context_limit: ctx.agent.config.context_limit,
+                                model: ctx.agent.config.model.clone(),
+                            },
+                        ));
                         ctx.emitter.emit_delta(Agent2Ui::UsageUpdated {
                             turn_id: turn_id.clone(),
                             round_num,
@@ -1656,15 +1715,26 @@ current_todo_id: dashboard::build_current_todo_id(),
                     .tool_call_args(tc_id)
                     .map(|a| a.to_string())
                     .unwrap_or_default();
+                let summary: String = content
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(120)
+                    .collect();
+                // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
+                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                    deepx_domain::ToolEvent::AuditRecorded {
+                        tool_name: name.clone(),
+                        result_summary: summary.clone(),
+                        success: *success,
+                        time: ts.clone(),
+                        args_ref: None,
+                    },
+                ));
                 ctx.emitter.emit_delta(Agent2Ui::AuditRecord {
                     tool_name: name.clone(),
-                    result_summary: content
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .chars()
-                        .take(120)
-                        .collect(),
+                    result_summary: summary,
                     success: *success,
                     time: ts.clone(),
                     args,
@@ -1704,6 +1774,17 @@ current_todo_id: dashboard::build_current_todo_id(),
                 usage: None,
                 model: Some(ctx.agent.config.model.clone()),
             });
+            // Ringing 双发：DashboardUpdated（replaceable 覆盖）
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                deepx_domain::ControlEvent::DashboardUpdated {
+                    hp_connected: true,
+                    session_seed: ctx.agent.session.seed.clone(),
+                    tool_calls_total: 0,
+                    tool_failures: 0,
+                    current_phase: "single".into(),
+                    streaming: false,
+                },
+            ));
         }
         ctx.agent
             .msg

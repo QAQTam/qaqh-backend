@@ -16,15 +16,16 @@
 //! - token 只经 `Authorization` header，不进 query string。
 //! - HTTP command ack 只表达 accepted/rejected；业务完成由对应频道可靠终态表达。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use deepx_domain::RingingChannel;
+use deepx_domain::{ControlCommand, RingingChannel};
 use deepx_ringing::{
-    ClientOpenRequest, ClientOpenResponse, RingingChannelSnapshot, RingingCommandAck,
-    RingingCommandAckStatus, RingingCommandEnvelope, RINGING_SCHEMA, RINGING_VERSION,
+    ClientOpenRequest, ClientOpenResponse, RINGING_SCHEMA, RINGING_VERSION, RingingChannelSnapshot,
+    RingingCommandAck, RingingCommandAckStatus, RingingCommandEnvelope, RingingResetRequired,
 };
+use deepx_runtime::ringing::query;
 use deepx_runtime::{DeepxService, RingingHub};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -189,10 +190,18 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 
     let header_text = String::from_utf8_lossy(&buf[..header_end]).to_string();
     let mut lines = header_text.lines();
-    let request_line = lines.next().ok_or_else(|| "missing request line".to_string())?;
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "missing request line".to_string())?;
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().ok_or_else(|| "missing method".to_string())?.to_string();
-    let path = parts.next().ok_or_else(|| "missing path".to_string())?.to_string();
+    let method = parts
+        .next()
+        .ok_or_else(|| "missing method".to_string())?
+        .to_string();
+    let path = parts
+        .next()
+        .ok_or_else(|| "missing path".to_string())?
+        .to_string();
     let mut headers = HashMap::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
@@ -256,8 +265,7 @@ fn sse_frame(envelope: &deepx_ringing::RingingEventEnvelope) -> String {
     // data 必须是**完整信封**（含 seed/stream_seq/event_id/event）：
     // 客户端按 RingingEventEnvelope 解析，缺 seed 将无法按会话路由，
     // 缺 event_id 将破坏 renderer 幂等。
-    let data = serde_json::to_string(envelope)
-        .unwrap_or_else(|_| "{}".into());
+    let data = serde_json::to_string(envelope).unwrap_or_else(|_| "{}".into());
     format!(
         "id: {}:{}:{}\nevent: {}\ndata: {}\n\n",
         envelope.server_epoch,
@@ -292,7 +300,13 @@ pub async fn handle_ringing_http(
         .header("authorization")
         .is_some_and(|v| v == format!("Bearer {token}"));
     if !authorized {
-        return write_response(&mut stream, "401 Unauthorized", "text/plain", b"unauthorized").await;
+        return write_response(
+            &mut stream,
+            "401 Unauthorized",
+            "text/plain",
+            b"unauthorized",
+        )
+        .await;
     }
 
     let path = request.path.clone();
@@ -306,7 +320,15 @@ pub async fn handle_ringing_http(
     }
     if method == "POST" && path.starts_with("/ringing/v1/commands/") {
         let channel = path.trim_start_matches("/ringing/v1/commands/");
-        return handle_command(&mut stream, channel, &request.body, &leases, &service, &pending).await;
+        return handle_command(
+            &mut stream,
+            channel,
+            &request.body,
+            &leases,
+            &service,
+            &pending,
+        )
+        .await;
     }
     if method == "POST" && path.starts_with("/ringing/v1/cutover/events/") {
         let channel = path.trim_start_matches("/ringing/v1/cutover/events/");
@@ -328,10 +350,16 @@ pub async fn handle_ringing_http(
         return handle_content(&mut stream, &path, &hub).await;
     }
     if method == "GET" && path.starts_with("/ringing/v1/query/") {
-        // 只读查询 RPC 保留（PLAN：不伪装成 Command/Event）
-        return write_response(&mut stream, "501 Not Implemented", "text/plain", b"query rpc reserved").await;
+        let rest = path.trim_start_matches("/ringing/v1/query/");
+        return handle_query(&mut stream, rest, &service).await;
     }
-    write_response(&mut stream, "404 Not Found", "text/plain", b"unknown ringing endpoint").await
+    write_response(
+        &mut stream,
+        "404 Not Found",
+        "text/plain",
+        b"unknown ringing endpoint",
+    )
+    .await
 }
 
 /// GET /ringing/v1/content/{content_id}?seed={seed}
@@ -350,20 +378,34 @@ async fn handle_content(
         None => (rest.to_string(), None),
     };
     if content_id.is_empty() {
-        return write_response(stream, "400 Bad Request", "text/plain", b"missing content_id").await;
+        return write_response(
+            stream,
+            "400 Bad Request",
+            "text/plain",
+            b"missing content_id",
+        )
+        .await;
     }
     let Some(seed) = seed else {
-        return write_response(stream, "400 Bad Request", "text/plain", b"missing seed query param").await;
+        return write_response(
+            stream,
+            "400 Bad Request",
+            "text/plain",
+            b"missing seed query param",
+        )
+        .await;
     };
     match hub.get_content(&seed, &content_id) {
         Some(entry) => write_response(stream, "200 OK", &entry.media_type, &entry.bytes).await,
-        None => write_response(
-            stream,
-            "404 Not Found",
-            "text/plain",
-            b"content not found or expired",
-        )
-        .await,
+        None => {
+            write_response(
+                stream,
+                "404 Not Found",
+                "text/plain",
+                b"content not found or expired",
+            )
+            .await
+        }
     }
 }
 
@@ -384,10 +426,18 @@ fn parse_preview_request(preview: &str) -> Result<HttpRequest, String> {
         .ok_or_else(|| "incomplete headers".to_string())?;
     let header_text = &preview[..header_end];
     let mut lines = header_text.lines();
-    let request_line = lines.next().ok_or_else(|| "missing request line".to_string())?;
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "missing request line".to_string())?;
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().ok_or_else(|| "missing method".to_string())?.to_string();
-    let path = parts.next().ok_or_else(|| "missing path".to_string())?.to_string();
+    let method = parts
+        .next()
+        .ok_or_else(|| "missing method".to_string())?
+        .to_string();
+    let path = parts
+        .next()
+        .ok_or_else(|| "missing path".to_string())?
+        .to_string();
     let mut headers = HashMap::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
@@ -423,8 +473,8 @@ async fn handle_open(
     leases: &Arc<Mutex<RingingLeaseStore>>,
     hub: &Arc<RingingHub>,
 ) -> Result<(), String> {
-    let req: ClientOpenRequest = serde_json::from_slice(body)
-        .map_err(|e| format!("invalid open request: {e}"))?;
+    let req: ClientOpenRequest =
+        serde_json::from_slice(body).map_err(|e| format!("invalid open request: {e}"))?;
     if req.schema != RINGING_SCHEMA || req.version != RINGING_VERSION {
         return write_response(
             stream,
@@ -469,8 +519,13 @@ async fn handle_open(
         lease_ttl_ms: RENEW_TTL_MS,
         renew_interval_ms: RENEW_INTERVAL_MS,
     };
-    write_response(stream, "200 OK", "application/json", &serde_json::to_vec(&resp).map_err(stringify)?)
-        .await
+    write_response(
+        stream,
+        "200 OK",
+        "application/json",
+        &serde_json::to_vec(&resp).map_err(stringify)?,
+    )
+    .await
 }
 
 async fn handle_renew(
@@ -482,23 +537,92 @@ async fn handle_renew(
     struct RenewBody {
         client_session_id: String,
     }
-    let req: RenewBody = serde_json::from_slice(body)
-        .map_err(|e| format!("invalid renew request: {e}"))?;
+    let req: RenewBody =
+        serde_json::from_slice(body).map_err(|e| format!("invalid renew request: {e}"))?;
     let ok = leases
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .renew(&req.client_session_id);
     if !ok {
-        return write_response(stream, "401 Unauthorized", "text/plain", b"lease expired or unknown")
-            .await;
+        return write_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain",
+            b"lease expired or unknown",
+        )
+        .await;
     }
     let resp = serde_json::json!({
         "ok": true,
         "lease_ttl_ms": RENEW_TTL_MS,
         "renew_interval_ms": RENEW_INTERVAL_MS,
     });
-    write_response(stream, "200 OK", "application/json", &serde_json::to_vec(&resp).map_err(stringify)?)
-        .await
+    write_response(
+        stream,
+        "200 OK",
+        "application/json",
+        &serde_json::to_vec(&resp).map_err(stringify)?,
+    )
+    .await
+}
+
+/// GET /ringing/v1/query/{path}?seed=...
+///
+/// 只读查询（契约 §1）：`session/list`、`session/meta`、`session/activity`；
+/// 未知路径 → 404 + JSON 错误；`session/meta` 缺 seed → 400。
+async fn handle_query(
+    stream: &mut TcpStream,
+    path_with_query: &str,
+    service: &DeepxService,
+) -> Result<(), String> {
+    let (query_path, query_string) = match path_with_query.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (path_with_query, None),
+    };
+    let seed = query_string.and_then(|query| parse_query_param(query, "seed"));
+    let method = match query_path {
+        // 同时接受斜杠（URL 路径）与点号（legacy RPC 方法名）两种形式
+        "session/list" | "session.list" => Some("session.list"),
+        "session/meta" | "session.meta" => Some("session.meta"),
+        "session/activity" | "session.activity" => Some("session.activity"),
+        "session/dashboard" | "session.dashboard" => Some("session.dashboard"),
+        "session/get_activity" | "session.get_activity" => Some("session.get_activity"),
+        "workspace/get" | "workspace.get" => Some("workspace.get"),
+        "workspace/status" | "workspace.status" => Some("workspace.status"),
+        "config/load" | "config.load" => Some("config.load"),
+        "skills/list_tools" | "skills.list_tools" => Some("skills.list_tools"),
+        "todo/status" | "todo.status" => Some("todo.status"),
+        "daemon/version" | "daemon.version" => Some("daemon.version"),
+        _ => None,
+    };
+    let Some(method) = method else {
+        let body = serde_json::to_vec(&query::error_response(&format!(
+            "unknown query path {query_path}"
+        )))
+        .map_err(stringify)?;
+        return write_response(stream, "404 Not Found", "application/json", &body).await;
+    };
+    if query::requires_seed(method) && seed.is_none() {
+        let body = serde_json::to_vec(&query::error_response("missing seed query param"))
+            .map_err(stringify)?;
+        return write_response(stream, "400 Bad Request", "application/json", &body).await;
+    }
+    let params = serde_json::json!({ "seed": seed });
+    match query::query(service, method, &params) {
+        Ok(value) => {
+            write_response(
+                stream,
+                "200 OK",
+                "application/json",
+                &serde_json::to_vec(&value).map_err(stringify)?,
+            )
+            .await
+        }
+        Err(error) => {
+            let body = serde_json::to_vec(&query::error_response(&error)).map_err(stringify)?;
+            write_response(stream, "400 Bad Request", "application/json", &body).await
+        }
+    }
 }
 
 async fn handle_command(
@@ -536,7 +660,10 @@ async fn handle_command(
             command_id: env.command_id.clone(),
             status: RingingCommandAckStatus::Rejected,
             code: Some("channel_mismatch".into()),
-            message: Some(format!("path channel {channel} != envelope channel {:?}", env.channel)),
+            message: Some(format!(
+                "path channel {channel} != envelope channel {:?}",
+                env.channel
+            )),
             retry_after_ms: None,
         };
         return write_response(
@@ -589,6 +716,71 @@ async fn handle_command(
         )
         .await;
     }
+
+    // SessionClose（契约 §2）：daemon 侧拦截，不转发 worker——
+    // registry close + hub 发布 SessionStateChanged{Closed}（causation=command_id）；
+    // 会话不存在同样 Accepted（幂等关闭）。无 seed → 400 并回滚幂等记录。
+    if let deepx_ringing::RingingCommand::Control(ControlCommand::SessionClose {
+        seed: close_seed,
+    }) = &env.command
+    {
+        let close_seed = session_close_seed(close_seed, &env.seed);
+        if close_seed.is_empty() {
+            pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .rollback(&env.command_id);
+            let ack = RingingCommandAck {
+                command_id: env.command_id,
+                status: RingingCommandAckStatus::Rejected,
+                code: Some("missing_seed".into()),
+                message: Some("SessionClose requires seed".into()),
+                retry_after_ms: None,
+            };
+            return write_response(
+                stream,
+                "400 Bad Request",
+                "application/json",
+                &serde_json::to_vec(&ack).map_err(stringify)?,
+            )
+            .await;
+        }
+        if let Err(error) = service.close_session(&close_seed, Some(&env.command_id)) {
+            pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .rollback(&env.command_id);
+            let ack = RingingCommandAck {
+                command_id: env.command_id,
+                status: RingingCommandAckStatus::Rejected,
+                code: Some("dispatch_failed".into()),
+                message: Some(format!("{error}")),
+                retry_after_ms: None,
+            };
+            return write_response(
+                stream,
+                "502 Bad Gateway",
+                "application/json",
+                &serde_json::to_vec(&ack).map_err(stringify)?,
+            )
+            .await;
+        }
+        let ack = RingingCommandAck {
+            command_id: env.command_id,
+            status: RingingCommandAckStatus::Accepted,
+            code: None,
+            message: None,
+            retry_after_ms: None,
+        };
+        return write_response(
+            stream,
+            "200 OK",
+            "application/json",
+            &serde_json::to_vec(&ack).map_err(stringify)?,
+        )
+        .await;
+    }
+
     let seed = env.seed.clone().unwrap_or_default();
     let worker_env = deepx_ringing::RingingWorkerCommandEnvelope::new(
         seed.as_str(),
@@ -622,8 +814,22 @@ async fn handle_command(
         message: None,
         retry_after_ms: None,
     };
-    write_response(stream, "200 OK", "application/json", &serde_json::to_vec(&ack).map_err(stringify)?)
-        .await
+    write_response(
+        stream,
+        "200 OK",
+        "application/json",
+        &serde_json::to_vec(&ack).map_err(stringify)?,
+    )
+    .await
+}
+
+/// SessionClose 的 seed 解析：命令 seed 优先，其次 envelope seed（无则空）。
+fn session_close_seed(close_seed: &str, envelope_seed: &Option<String>) -> String {
+    if !close_seed.is_empty() {
+        close_seed.to_string()
+    } else {
+        envelope_seed.clone().unwrap_or_default()
+    }
 }
 
 /// POST /ringing/v1/cutover/events/{channel}
@@ -702,8 +908,13 @@ async fn handle_cutover_events(
                 "event_protocol": if hub.event_is_ringing(&req.seed, channel) { "ringing" } else { "legacy" },
                 "command_protocol": if hub.command_is_ringing(&req.seed, channel) { "ringing" } else { "legacy" },
             });
-            write_response(stream, "200 OK", "application/json", &serde_json::to_vec(&resp).map_err(stringify)?)
-                .await
+            write_response(
+                stream,
+                "200 OK",
+                "application/json",
+                &serde_json::to_vec(&resp).map_err(stringify)?,
+            )
+            .await
         }
         Err(e) => {
             let (code, message) = match e {
@@ -719,8 +930,13 @@ async fn handle_cutover_events(
                 "code": code,
                 "message": message,
             });
-            write_response(stream, "409 Conflict", "application/json", &serde_json::to_vec(&resp).map_err(stringify)?)
-                .await
+            write_response(
+                stream,
+                "409 Conflict",
+                "application/json",
+                &serde_json::to_vec(&resp).map_err(stringify)?,
+            )
+            .await
         }
     }
 }
@@ -790,8 +1006,13 @@ async fn handle_cutover_commands(
         "command_protocol": req.protocol,
         "event_protocol": if hub.event_is_ringing(&req.seed, channel) { "ringing" } else { "legacy" },
     });
-    write_response(stream, "200 OK", "application/json", &serde_json::to_vec(&resp).map_err(stringify)?)
-        .await
+    write_response(
+        stream,
+        "200 OK",
+        "application/json",
+        &serde_json::to_vec(&resp).map_err(stringify)?,
+    )
+    .await
 }
 
 async fn handle_snapshot(
@@ -808,9 +1029,23 @@ async fn handle_snapshot(
     if seed.is_empty() {
         return write_response(stream, "400 Bad Request", "text/plain", b"missing seed").await;
     }
-    let snap: RingingChannelSnapshot = hub.snapshot(channel, seed);
-    write_response(stream, "200 OK", "application/json", &serde_json::to_vec(&snap).map_err(stringify)?)
-        .await
+    let snap: RingingChannelSnapshot = match channel {
+        RingingChannel::Conversation => hub.conversation_snapshot(seed),
+        _ => hub.snapshot(channel, seed),
+    };
+    write_response(
+        stream,
+        "200 OK",
+        "application/json",
+        &serde_json::to_vec(&snap).map_err(stringify)?,
+    )
+    .await
+}
+
+/// `ringing.reset_required` SSE 帧（cursor 超出保留窗口时发送）。
+fn sse_reset_frame(reset: &RingingResetRequired) -> String {
+    let data = serde_json::to_string(reset).unwrap_or_else(|_| "{}".into());
+    format!("event: ringing.reset_required\ndata: {data}\n\n")
 }
 
 /// 单频道 SSE 长连接。
@@ -828,25 +1063,44 @@ async fn handle_sse(
     let last_event_id = request
         .header("last-event-id")
         .or_else(|| {
-            request
-                .path
-                .split('?')
-                .nth(1)
-                .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("last_event_id=")))
+            request.path.split('?').nth(1).and_then(|q| {
+                q.split('&')
+                    .find_map(|kv| kv.strip_prefix("last_event_id="))
+            })
         })
         .unwrap_or("");
     let after_seq = parse_sse_cursor(last_event_id, &hub.epoch(), channel);
 
-    // TODO(T9/T10)：SSE 跨 seed 聚合回放（多 session 共用频道流）。
-    // 当前仅做 cursor 校验与实时推送；可靠 tail 回放待频道迁移时按 seed 聚合。
-    let _ = after_seq;
+    // 先订阅实时通道再回放 journal，避免回放期间新事件丢失；
+    // 回放集合内的事件在实时循环中按 event_id 去重。
+    let mut rx = hub.subscribe(channel);
+    let replay = hub.replay_channel_since(channel, after_seq);
+    let replayed_ids: HashSet<String> = replay.events.iter().map(|e| e.event_id.clone()).collect();
 
     // 响应头
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
     stream.write_all(head.as_bytes()).await.map_err(stringify)?;
     stream.flush().await.map_err(stringify)?;
 
-    let mut rx = hub.subscribe(channel);
+    // 可靠 tail + 当前 replaceable 值（PLAN：Last-Event-ID 有效时只回放可靠 tail）
+    for env in &replay.events {
+        if stream.write_all(sse_frame(env).as_bytes()).await.is_err() {
+            return Ok(());
+        }
+        let _ = stream.flush().await;
+    }
+    // cursor 超出保留窗口的会话：客户端必须经 HTTP 读取权威 snapshot
+    for reset in &replay.resets {
+        if stream
+            .write_all(sse_reset_frame(reset).as_bytes())
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        let _ = stream.flush().await;
+    }
+
     let mut keepalive = tokio::time::interval(Duration::from_millis(SSE_KEEPALIVE_MS));
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -860,6 +1114,12 @@ async fn handle_sse(
             recv = rx.recv() => {
                 match recv {
                     Ok(envelope) => {
+                        // 跳过回放已发送/连接前已确认的事件
+                        if envelope.stream_seq <= after_seq
+                            || replayed_ids.contains(&envelope.event_id)
+                        {
+                            continue;
+                        }
                         if stream.write_all(sse_frame(&envelope).as_bytes()).await.is_err() {
                             return Ok(());
                         }
@@ -881,7 +1141,10 @@ fn parse_sse_cursor(cursor: &str, epoch: &str, channel: RingingChannel) -> u64 {
     let mut parts = cursor.split(':');
     let e = parts.next().unwrap_or("");
     let c = parts.next().unwrap_or("");
-    let seq = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let seq = parts
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
     if e == epoch && c == channel.as_str() {
         seq
     } else {
@@ -914,17 +1177,32 @@ mod tests {
     #[test]
     fn channel_parsing() {
         assert_eq!(parse_channel("control"), Some(RingingChannel::Control));
-        assert_eq!(parse_channel("conversation"), Some(RingingChannel::Conversation));
+        assert_eq!(
+            parse_channel("conversation"),
+            Some(RingingChannel::Conversation)
+        );
         assert_eq!(parse_channel("tool"), Some(RingingChannel::Tool));
         assert_eq!(parse_channel("bogus"), None);
     }
 
     #[test]
     fn sse_cursor_parsing() {
-        assert_eq!(parse_sse_cursor("epoch-1:tool:42", "epoch-1", RingingChannel::Tool), 42);
-        assert_eq!(parse_sse_cursor("epoch-2:tool:42", "epoch-1", RingingChannel::Tool), 0);
-        assert_eq!(parse_sse_cursor("epoch-1:conversation:7", "epoch-1", RingingChannel::Tool), 0);
-        assert_eq!(parse_sse_cursor("garbage", "epoch-1", RingingChannel::Tool), 0);
+        assert_eq!(
+            parse_sse_cursor("epoch-1:tool:42", "epoch-1", RingingChannel::Tool),
+            42
+        );
+        assert_eq!(
+            parse_sse_cursor("epoch-2:tool:42", "epoch-1", RingingChannel::Tool),
+            0
+        );
+        assert_eq!(
+            parse_sse_cursor("epoch-1:conversation:7", "epoch-1", RingingChannel::Tool),
+            0
+        );
+        assert_eq!(
+            parse_sse_cursor("garbage", "epoch-1", RingingChannel::Tool),
+            0
+        );
     }
 
     #[test]
@@ -960,6 +1238,16 @@ mod tests {
     }
 
     #[test]
+    fn sse_reset_frame_format() {
+        let reset = RingingResetRequired::new(RingingChannel::Tool, "s1", 7);
+        let frame = sse_reset_frame(&reset);
+        assert!(frame.starts_with("event: ringing.reset_required\ndata: "));
+        assert!(frame.ends_with("\n\n"));
+        assert!(frame.contains("\"seed\":\"s1\""));
+        assert!(frame.contains("\"earliest_available_seq\":7"));
+    }
+
+    #[test]
     fn parse_preview_request_extracts_fields() {
         let preview = "POST /ringing/v1/commands/tool HTTP/1.1\r\nAuthorization: Bearer abc\r\nContent-Length: 7\r\n\r\n{\"a\":1}";
         let req = parse_preview_request(preview).expect("parse");
@@ -979,5 +1267,29 @@ mod tests {
         // 回滚后允许重试
         store.rollback("cmd-2");
         assert!(store.record("cmd-2"), "retry after rollback accepted");
+    }
+
+    #[test]
+    fn session_close_seed_resolution_prefers_command_seed() {
+        assert_eq!(
+            session_close_seed("s-command", &Some("s-envelope".into())),
+            "s-command"
+        );
+        assert_eq!(session_close_seed("s-command", &None), "s-command");
+        assert_eq!(
+            session_close_seed("", &Some("s-envelope".into())),
+            "s-envelope"
+        );
+        assert_eq!(session_close_seed("", &None), "");
+    }
+
+    #[test]
+    fn parse_query_param_extracts_seed() {
+        assert_eq!(parse_query_param("seed=abc", "seed"), Some("abc".into()));
+        assert_eq!(
+            parse_query_param("a=1&seed=xyz", "seed"),
+            Some("xyz".into())
+        );
+        assert_eq!(parse_query_param("a=1", "seed"), None);
     }
 }

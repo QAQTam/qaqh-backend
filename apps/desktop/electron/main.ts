@@ -90,6 +90,8 @@ const backend = new DaemonControlClient(
 const ringing = new RingingManager(
   batch => sendToRenderer("ringing:batch", batch),
   (channel, status) => sendToRenderer("ringing:status", { channel, status }),
+  (seed, channel, snapshot) =>
+    sendToRenderer("ringing:snapshot", { seed, channel, snapshot }),
 );
 
 if (smokeMode) {
@@ -172,6 +174,17 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  // Ringing 会话惰性确保：daemon 重启/端口变化后，任何 ringing IPC 都会用
+  // 最新 discovery 重新建立连接（旧逻辑只在 backend:connect 时连一次；
+  // 连接失败或 daemon 重启后 client 一直为 null，切流报 ringing not connected）。
+  async function ensureRingingConnected(): Promise<void> {
+    const info = backend.discoveryInfo();
+    if (!info) return;
+    // daemon 重启后端口/token 会变：即使 client 还在（流已死），也要重建
+    if (ringing.connected() && ringing.connectedBaseUrl() === info.baseUrl) return;
+    await ringing.ensureConnected(info.baseUrl, info.token);
+  }
+
   ipcMain.handle("backend:connect", async () => {
     const result = await backend.connect();
     // 复用 daemon discovery（baseUrl + token）启动 Ringing 三 SSE
@@ -199,9 +212,16 @@ function registerIpc(): void {
       return { ok: false, reason: String(error) };
     }
   });
-  ipcMain.handle("ringing:status", () => ringing.status());
-  ipcMain.handle("ringing:mode", (_event, seed: unknown) => ringing.mode(requireSeed(seed)));
-  ipcMain.handle("ringing:cutover-events", (_event, seed: unknown, channel: unknown, action: unknown) => {
+  ipcMain.handle("ringing:status", async () => {
+    await ensureRingingConnected();
+    return ringing.status();
+  });
+  ipcMain.handle("ringing:mode", async (_event, seed: unknown) => {
+    await ensureRingingConnected();
+    return ringing.mode(requireSeed(seed));
+  });
+  ipcMain.handle("ringing:cutover-events", async (_event, seed: unknown, channel: unknown, action: unknown) => {
+    await ensureRingingConnected();
     if (!["control", "conversation", "tool"].includes(String(channel))) {
       throw new Error("invalid ringing channel");
     }
@@ -210,7 +230,8 @@ function registerIpc(): void {
     }
     return ringing.cutoverEvents(requireSeed(seed), String(channel) as ChannelName, String(action) as "prepare" | "commit" | "abort");
   });
-  ipcMain.handle("ringing:cutover-commands", (_event, seed: unknown, channel: unknown, protocol: unknown) => {
+  ipcMain.handle("ringing:cutover-commands", async (_event, seed: unknown, channel: unknown, protocol: unknown) => {
+    await ensureRingingConnected();
     if (!["control", "conversation", "tool"].includes(String(channel))) {
       throw new Error("invalid ringing channel");
     }
@@ -219,11 +240,55 @@ function registerIpc(): void {
     }
     return ringing.cutoverCommands(requireSeed(seed), String(channel) as ChannelName, String(protocol) as "ringing" | "legacy");
   });
-  ipcMain.handle("ringing:snapshot", (_event, seed: unknown, channel: unknown) => {
+  ipcMain.handle("ringing:snapshot", async (_event, seed: unknown, channel: unknown) => {
+    await ensureRingingConnected();
     if (!["control", "conversation", "tool"].includes(String(channel))) {
       throw new Error("invalid ringing channel");
     }
     return ringing.snapshot(requireSeed(seed), String(channel) as ChannelName);
+  });
+  ipcMain.handle("ringing:command", async (_event, seed: unknown, channel: unknown, envelope: unknown) => {
+    await ensureRingingConnected();
+    if (!["control", "conversation", "tool"].includes(String(channel))) {
+      throw new Error("invalid ringing channel");
+    }
+    if (
+      !isRecord(envelope) ||
+      typeof envelope.command_id !== "string" ||
+      !isRecord(envelope.command)
+    ) {
+      throw new Error("invalid ringing command envelope");
+    }
+    return ringing.command(
+      requireSeed(seed),
+      String(channel) as ChannelName,
+      {
+        command_id: envelope.command_id,
+        command: envelope.command,
+        seed: typeof envelope.seed === "string" ? envelope.seed : undefined,
+        expected_revision:
+          typeof envelope.expected_revision === "number" ? envelope.expected_revision : undefined,
+        client_instance_id:
+          typeof envelope.client_instance_id === "string"
+            ? envelope.client_instance_id
+            : undefined,
+      },
+    );
+  });
+  ipcMain.handle("ringing:query", async (_event, path: unknown, params: unknown) => {
+    await ensureRingingConnected();
+    if (typeof path !== "string" || !/^[a-zA-Z0-9._/-]+$/.test(path)) {
+      throw new Error("invalid ringing query path");
+    }
+    const safeParams: Record<string, string | undefined> | undefined = isRecord(params)
+      ? Object.fromEntries(
+          Object.entries(params).filter(
+            (entry): entry is [string, string | undefined] =>
+              entry[1] === undefined || typeof entry[1] === "string",
+          ),
+        )
+      : undefined;
+    return ringing.query(path, safeParams);
   });
   ipcMain.handle("desktop:open-devtools", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;

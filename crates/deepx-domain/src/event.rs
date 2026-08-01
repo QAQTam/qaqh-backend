@@ -251,7 +251,8 @@ pub enum ConversationEvent {
         turn_id: String,
         error: DomainError,
     },
-    /// 流式增量（replaceable；合并键 = turn_id + round_num + kind）。
+    /// 流式增量（reliable：增量是追加语义，覆盖/合并会吞字；journal 在
+    /// `RoundCompleted` 到达后按 round 压缩，见 `ReliableJournal::compact_round_deltas`）。
     RoundDelta {
         turn_id: String,
         round_num: u32,
@@ -330,8 +331,7 @@ pub enum ConversationEvent {
 impl ConversationEvent {
     pub fn delivery(&self) -> Delivery {
         match self {
-            ConversationEvent::RoundDelta { .. }
-            | ConversationEvent::ProviderToolStatus { .. }
+            ConversationEvent::ProviderToolStatus { .. }
             | ConversationEvent::UsageUpdated { .. }
             | ConversationEvent::CompactProgress { .. } => Delivery::Replaceable,
             _ => Delivery::Reliable,
@@ -640,7 +640,8 @@ mod tests {
                 delta: "x".into(),
             }
             .delivery(),
-            Delivery::Replaceable
+            // 增量文本必须可靠投递；覆盖/合并会在断线重连时吞字。
+            Delivery::Reliable
         );
         assert_eq!(
             ToolEvent::ToolStarted {

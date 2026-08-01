@@ -1,3 +1,11 @@
+import {
+  RINGING_COMMAND_METHODS,
+  RINGING_QUERY_METHODS,
+  buildRingingCommandEnvelope,
+  commandIsRinging,
+  sessionCommandsRinging,
+} from "./ringingCommandRouter";
+
 type Listener<T = unknown> = (event: { payload: T }) => void;
 type UnlistenFn = () => void;
 type ControlMessage =
@@ -51,17 +59,81 @@ async function attach(seed: string): Promise<void> {
 export async function request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   ensureBridgeListener();
   const seed = typeof params.seed === "string" ? params.seed : "";
-  const domain = method.split(".", 1)[0];
-  const needsLease = ["session", "interaction", "workspace", "git", "plan", "skills", "todo"].includes(domain)
-    && !["session.list", "session.activity", "session.new", "skills.list_tools"].includes(method);
+  const needsLease = leaseRequired(method);
   if (needsLease && seed) await attach(seed);
+
+  // Ringing 命令/查询路由：仅在 (seed, channel) 命令协议已切流时接管；
+  // "ringing not connected" 回退 legacy 一次（共存），其余错误原样抛出。
+  const ringing = window.deepx?.ringing;
+  if (ringing) {
+    const spec = RINGING_COMMAND_METHODS[method];
+    if (spec && commandIsRinging(seed, spec.channel)) {
+      const command = spec.build(params);
+      if (command) {
+        try {
+          const envelope = buildRingingCommandEnvelope(seed, spec.channel, command);
+          const ack = (await ringing.command(seed, spec.channel, envelope)) as {
+            status?: string;
+            code?: string;
+            message?: string;
+          };
+          if (ack?.status === "rejected") {
+            throw new Error(ack.message ?? `Ringing rejected command: ${ack.code ?? "rejected"}`);
+          }
+          return ack as T;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes("ringing not connected")) throw error;
+          console.warn(`[ringing] command ${method} not connected — legacy 继续承载`);
+        }
+      }
+    } else if (RINGING_QUERY_METHODS.has(method) && sessionCommandsRinging(seed)) {
+      try {
+        const queryParams: Record<string, string | undefined> = {};
+        for (const [key, value] of Object.entries(params)) {
+          if (value === undefined || value === null) continue;
+          if (
+            typeof value === "string" ||
+            typeof value === "number" ||
+            typeof value === "boolean"
+          ) {
+            queryParams[key] = String(value);
+          }
+        }
+        return (await ringing.query(method, queryParams)) as T;
+      } catch (error) {
+        // 只读查询：失败回退 legacy（读路径回退安全，不破坏 UI）
+        console.warn(`[ringing] query ${method} failed — falling back to legacy`, error);
+      }
+    }
+  }
+
+  return requestLegacy<T>(method, params);
+}
+
+function leaseRequired(method: string): boolean {
+  const domain = method.split(".", 1)[0];
+  return ["session", "interaction", "workspace", "git", "plan", "skills", "todo"].includes(domain)
+    && !["session.list", "session.activity", "session.new", "skills.list_tools"].includes(method);
+}
+
+/**
+ * 纯 legacy 请求（跳过 Ringing 路由）：供 request() 的回退路径和
+ * requestWithRinging 使用，避免回退时重复尝试 Ringing。
+ */
+export async function requestLegacy<T>(
+  method: string,
+  params: Record<string, unknown>,
+): Promise<T> {
+  ensureBridgeListener();
+  const seed = typeof params.seed === "string" ? params.seed : "";
   try {
     return backendBridge().request(method, params) as Promise<T>;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     // Stale lease: snapshot told us the session was attached, but daemon
     // disagrees. Clear the cached flag and retry once with a fresh attach.
-    if (needsLease && seed && msg.includes("session_lease_required")) {
+    if (leaseRequired(method) && seed && msg.includes("session_lease_required")) {
       attached.delete(seed);
       await attach(seed);
       return backendBridge().request(method, params) as Promise<T>;

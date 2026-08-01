@@ -106,15 +106,25 @@ pub struct AgentInstance {
     child: Arc<Mutex<Option<Child>>>,
 }
 
+/// legacy 通道双发去重表。
+///
+/// 同一业务事件会以“agent 直发”与“Ringing 投影”两条路径到达 daemon。
+/// 去重**只跨路径生效**：直发路径与投影路径互相查对方的表，避免双份；
+/// 同路径内即使 JSON 完全相同（例如模型连续输出两个相同文本增量）也放行，
+/// 防止合法重复内容被误杀。
+struct LegacyDedup {
+    direct: HashMap<String, std::time::Instant>,
+    projected: HashMap<String, std::time::Instant>,
+}
+
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     events: EventBus,
     activity: SessionActivityTracker,
     /// Ringing 运行时（双投管道；None = 未启用，保持纯 legacy）。
     hub: Option<Arc<RingingHub>>,
-    /// legacy 通道事件去重表（双发模式：同一业务事件以 legacy 直发 +
-    /// Ringing 投影两条路径到达，5s 窗口内相同 JSON 只投递一次）。
-    legacy_dedup: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    /// legacy 通道事件去重表（双发模式，跨路径去重）。
+    legacy_dedup: Arc<Mutex<LegacyDedup>>,
     /// daemon 拉起的 workspace serve endpoint + token（注入每个 worker env）。
     workspace_env: Option<(String, String)>,
 }
@@ -126,7 +136,10 @@ impl AgentRegistry {
             events,
             activity: SessionActivityTracker::default(),
             hub: None,
-            legacy_dedup: Arc::new(Mutex::new(HashMap::new())),
+            legacy_dedup: Arc::new(Mutex::new(LegacyDedup {
+                direct: HashMap::new(),
+                projected: HashMap::new(),
+            })),
             workspace_env: None,
         }
     }
@@ -239,7 +252,11 @@ impl AgentRegistry {
                                     // 内容，外置时跳过投影避免双份不一致）。
                                     let (domain, externalized) =
                                         externalize_large_content(&hub, &env.seed, domain);
-                                    let _ = hub.publish(&env.seed, domain.clone());
+                                    let _ = hub.publish_with_causation(
+                                        &env.seed,
+                                        domain.clone(),
+                                        env.causation_id.as_deref(),
+                                    );
                                     // 切流过滤：该 channel 已切到 Ringing 后，不再向
                                     // legacy 通道投影（legacy 客户端只收未切流 channel）。
                                     if !externalized
@@ -250,6 +267,7 @@ impl AgentRegistry {
                                             &legacy_dedup,
                                             &env.seed,
                                             &legacy,
+                                            true,
                                         )
                                     {
                                         events.publish(&env.seed, legacy);
@@ -268,7 +286,7 @@ impl AgentRegistry {
                 if let Ok(value) = serde_json::to_value(&event)
                     && let Some(update) = activity.observe(&event_seed, generation, &value)
                 {
-                    events.publish_activity(update);
+                    crate::activity::publish_activity_dual(&events, hub.as_deref(), &update);
                 }
                 // 切流过滤：legacy 直发事件按 channel 归属过滤（已切流 channel
                 // 不再向 legacy 发送；无归属的全局事件如 Pong 恒放行）。
@@ -280,7 +298,7 @@ impl AgentRegistry {
                             .unwrap_or(true)
                     })
                     .unwrap_or(true);
-                if cutover_ok && legacy_should_forward(&legacy_dedup, &event_seed, &event) {
+                if cutover_ok && legacy_should_forward(&legacy_dedup, &event_seed, &event, false) {
                     events.publish(&event_seed, event);
                 }
             }
@@ -292,7 +310,7 @@ impl AgentRegistry {
             };
             events.publish(&event_seed, event);
             if let Some(update) = activity.disconnect(&event_seed, generation) {
-                events.publish_activity(update);
+                crate::activity::publish_activity_dual(&events, hub.as_deref(), &update);
             }
         });
 
@@ -579,15 +597,18 @@ fn agent2ui_channel(event: &Agent2Ui) -> Option<RingingChannel> {
 }
 
 /// legacy 通道事件去重：双发模式下，同一业务事件以 legacy 直发 + Ringing
-/// 投影两条路径到达 daemon。5s 窗口内 (seed, 完整 JSON) 相同的事件只投递一次。
+/// 投影两条路径到达 daemon。
 ///
-/// - 双份事件 JSON 完全相同 → 天然去重；
-/// - 合法重复（5s 内相同内容两次）概率极低且仅丢一条 UI 更新，非破坏性；
+/// - 只跨路径去重：直发事件查投影表、投影事件查直发表，双份只投递一次；
+/// - 同路径内的相同 JSON（如模型连续输出两个相同文本增量）**不去重**，
+///   避免合法内容被误吞；
+/// - 窗口 1s（双发两条帧在 agent stdout 中相邻到达，微秒级间隔足够）；
 /// - 有界：超 4096 条清空（退化为首发即过）。
 fn legacy_should_forward(
-    dedup: &Mutex<HashMap<String, std::time::Instant>>,
+    dedup: &Mutex<LegacyDedup>,
     seed: &str,
     event: &Agent2Ui,
+    from_projection: bool,
 ) -> bool {
     let Ok(key) = serde_json::to_string(event) else {
         return true;
@@ -599,14 +620,27 @@ fn legacy_should_forward(
         Err(poisoned) => poisoned.into_inner(),
     };
     // 惰性清理过期条目
-    seen.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(5));
-    if seen.len() > 4096 {
-        seen.clear();
+    let window = std::time::Duration::from_secs(1);
+    seen.direct.retain(|_, t| now.duration_since(*t) < window);
+    seen.projected.retain(|_, t| now.duration_since(*t) < window);
+    if seen.direct.len() + seen.projected.len() > 4096 {
+        seen.direct.clear();
+        seen.projected.clear();
     }
-    if seen.contains_key(&key) {
+    let duplicate = if from_projection {
+        seen.direct.contains_key(&key)
+    } else {
+        seen.projected.contains_key(&key)
+    };
+    if duplicate {
         return false;
     }
-    seen.insert(key, now);
+    let map = if from_projection {
+        &mut seen.projected
+    } else {
+        &mut seen.direct
+    };
+    map.insert(key, now);
     true
 }
 
@@ -625,17 +659,27 @@ mod tests {
 
     #[test]
     fn duplicate_legacy_event_is_dropped_within_window() {
-        let dedup = Mutex::new(HashMap::new());
-        assert!(legacy_should_forward(&dedup, "s1", &event()));
-        // 双发第二条（legacy 直发 + Ringing 投影）→ 相同 JSON → 丢弃
-        assert!(!legacy_should_forward(&dedup, "s1", &event()));
+        let dedup = Mutex::new(LegacyDedup {
+            direct: HashMap::new(),
+            projected: HashMap::new(),
+        });
+        // 直发第一份
+        assert!(legacy_should_forward(&dedup, "s1", &event(), false));
+        // 投影第二份（跨路径）→ 相同 JSON → 丢弃
+        assert!(!legacy_should_forward(&dedup, "s1", &event(), true));
+        // 反向顺序同样只投递一次
+        assert!(legacy_should_forward(&dedup, "s1", &event(), false));
+        assert!(!legacy_should_forward(&dedup, "s1", &event(), true));
         // 不同 seed 不互斥
-        assert!(legacy_should_forward(&dedup, "s2", &event()));
+        assert!(legacy_should_forward(&dedup, "s2", &event(), false));
     }
 
     #[test]
     fn distinct_events_are_not_dropped() {
-        let dedup = Mutex::new(HashMap::new());
+        let dedup = Mutex::new(LegacyDedup {
+            direct: HashMap::new(),
+            projected: HashMap::new(),
+        });
         let a = Agent2Ui::RoundDelta {
             turn_id: "t1".into(),
             round_num: 1,
@@ -648,32 +692,58 @@ mod tests {
             kind: deepx_proto::RoundDeltaKind::Answering,
             delta: "hello".into(),
         };
-        assert!(legacy_should_forward(&dedup, "s1", &a));
+        assert!(legacy_should_forward(&dedup, "s1", &a, false));
         // 增量内容不同 → 合法两条
-        assert!(legacy_should_forward(&dedup, "s1", &b));
+        assert!(legacy_should_forward(&dedup, "s1", &b, false));
+    }
+
+    #[test]
+    fn same_path_identical_delta_is_not_dropped() {
+        let dedup = Mutex::new(LegacyDedup {
+            direct: HashMap::new(),
+            projected: HashMap::new(),
+        });
+        let a = Agent2Ui::RoundDelta {
+            turn_id: "t1".into(),
+            round_num: 1,
+            kind: deepx_proto::RoundDeltaKind::Answering,
+            delta: "好的".into(),
+        };
+        // 同路径合法重复（模型连续输出两个相同增量）必须都放行
+        assert!(legacy_should_forward(&dedup, "s1", &a, false));
+        assert!(legacy_should_forward(&dedup, "s1", &a, false));
+        // 投影第三份仍被跨路径去重
+        assert!(!legacy_should_forward(&dedup, "s1", &a, true));
     }
 
     #[test]
     fn window_expiry_allows_repeat() {
-        let dedup = Mutex::new(HashMap::new());
-        assert!(legacy_should_forward(&dedup, "s1", &event()));
+        let dedup = Mutex::new(LegacyDedup {
+            direct: HashMap::new(),
+            projected: HashMap::new(),
+        });
+        assert!(legacy_should_forward(&dedup, "s1", &event(), true));
         // 模拟窗口过期：直接清空表
-        dedup.lock().unwrap().clear();
-        assert!(legacy_should_forward(&dedup, "s1", &event()));
+        dedup.lock().unwrap().direct.clear();
+        dedup.lock().unwrap().projected.clear();
+        assert!(legacy_should_forward(&dedup, "s1", &event(), true));
     }
 
     #[test]
     fn oversize_table_resets() {
-        let dedup = Mutex::new(HashMap::new());
+        let dedup = Mutex::new(LegacyDedup {
+            direct: HashMap::new(),
+            projected: HashMap::new(),
+        });
         for i in 0..5000 {
             let e = Agent2Ui::ToolNotice {
                 message: format!("m{i}"),
                 level: "info".into(),
             };
-            assert!(legacy_should_forward(&dedup, "s1", &e));
+            assert!(legacy_should_forward(&dedup, "s1", &e, false));
         }
         // 表在超 4096 后清空 → 重复可再发
-        assert!(legacy_should_forward(&dedup, "s1", &event()));
+        assert!(legacy_should_forward(&dedup, "s1", &event(), false));
     }
 
     fn tool_finished(summary: String) -> deepx_domain::DomainEvent {

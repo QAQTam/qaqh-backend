@@ -199,13 +199,16 @@ function projectRoundEntries(
 }
 
 export function projectTurn(rawTurn: RawTurn): TurnViewModel {
-  const rounds = rawTurn.rounds.map((round, index) => ({
+  // streaming 是 round 级而非 turn 级：round_complete 到达（phase=complete）
+  // 后该轮正文立即全量渲染，不必等整个 turn 结束（修复 markdown 延迟到
+  // 流式结束才渲染的问题）。
+  const rounds = rawTurn.rounds.map((round) => ({
     roundNum: round.roundNum,
     isFinal: round.isFinal,
     entries: projectRoundEntries(
       rawTurn,
       round,
-      rawTurn.status === "running" && index === rawTurn.rounds.length - 1,
+      rawTurn.status === "running" && round.phase !== "complete",
     ),
   }));
 

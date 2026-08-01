@@ -74,12 +74,28 @@ describe("turn projection", () => {
     turn.status = "running";
     turn.rounds[0]!.blocks = [];
     turn.rounds[0]!.answer = "forming conclusion";
+    turn.rounds[0]!.phase = "answering";
 
     const entries = projectTurn(turn).rounds[0]!.entries;
     const assistant = entries.find((entry): entry is Extract<typeof entry, { kind: "assistant" }> =>
       entry.kind === "assistant",
     );
     expect(assistant).toMatchObject({ markdown: "forming conclusion", streaming: true });
+  });
+
+  it("renders a completed round as final even while the turn is still running", () => {
+    const turn = rawTurn();
+    turn.status = "running";
+    turn.rounds[0]!.blocks = [];
+    turn.rounds[0]!.answer = "round done";
+    // round_complete 已到达：phase=complete，正文应立即按 final 渲染，
+    // 不必等整个 turn 结束（修复 markdown 延迟）。
+    turn.rounds[0]!.phase = "complete";
+
+    const assistant = projectTurn(turn).rounds[0]!.entries.find(
+      (entry): entry is Extract<typeof entry, { kind: "assistant" }> => entry.kind === "assistant",
+    );
+    expect(assistant).toMatchObject({ markdown: "round done", streaming: false });
   });
 
   it("hides stale thinking while a live tool preview is active", () => {

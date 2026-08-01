@@ -297,6 +297,16 @@ pub enum WriterEvent {
     Ringing(deepx_ringing::RingingWorkerEventEnvelope),
 }
 
+/// 命令通道载荷：legacy 帧 + 可选的 Ringing command_id（causation）。
+///
+/// Ringing 命令经 ingress 映射后仍走 legacy 引擎；`causation` 随帧传递，
+/// 使执行期间产出的 Ringing 事件能携带 `causation_id = command_id`。
+#[derive(Debug, Clone)]
+pub struct WorkerCommand {
+    pub frame: deepx_proto::Ui2Agent,
+    pub causation: Option<String>,
+}
+
 // ═══════════════════════════════════════════════════════
 // RingContext — what each Engine can access
 // ═══════════════════════════════════════════════════════

@@ -4,10 +4,10 @@
 //! These let the LLM inspect long-running exec/subagent processes that
 //! hit their timeout, instead of blindly retrying or killing.
 
-use crate::{ToolCallCtx, ToolResult, ToolRisk, process_registry::ProcessRegistry};
+use crate::{ToolCallCtx, ToolPlacement, ToolResult, ToolRisk, process_registry::ProcessRegistry};
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register(crate::ToolHandler {
+    mgr.register_with_placement(crate::ToolHandler {
         key: "process_check".to_string(),
         description: "Inspect a running background process (exec or subagent). \
             Returns status, elapsed time, and the last output tail. \
@@ -24,9 +24,9 @@ pub fn register(mgr: &mut crate::ToolManager) {
         handler: handle_check,
         risk: ToolRisk::ReadOnly,
         default_timeout: std::time::Duration::from_secs(10),
-    });
+    }, ToolPlacement::Workspace);
 
-    mgr.register(crate::ToolHandler {
+    mgr.register_with_placement(crate::ToolHandler {
         key: "process_wait".to_string(),
         description: "Wait for a background process to complete, with a timeout. \
             Returns the final output when the process exits, or a snapshot if timeout is reached. \
@@ -43,9 +43,9 @@ pub fn register(mgr: &mut crate::ToolManager) {
         handler: handle_wait,
         risk: ToolRisk::ReadOnly,
         default_timeout: std::time::Duration::from_secs(180),
-    });
+    }, ToolPlacement::Workspace);
 
-    mgr.register(crate::ToolHandler {
+    mgr.register_with_placement(crate::ToolHandler {
         key: "process_kill".to_string(),
         description: "Kill a process",
         input_schema: serde_json::json!({
@@ -59,9 +59,9 @@ pub fn register(mgr: &mut crate::ToolManager) {
         handler: handle_kill,
         risk: ToolRisk::Administrative,
         default_timeout: std::time::Duration::from_secs(15),
-    });
+    }, ToolPlacement::Workspace);
 
-    mgr.register(crate::ToolHandler {
+    mgr.register_with_placement(crate::ToolHandler {
         key: "process_write".to_string(),
         description: "Write text to the stdin of a running interactive process. \
             Use when a background exec process is waiting for input (e.g. password prompt, [Y/n] confirmation). \
@@ -78,7 +78,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         handler: handle_write,
         risk: ToolRisk::Write,
         default_timeout: std::time::Duration::from_secs(15),
-    });
+    }, ToolPlacement::Workspace);
 }
 
 /// Format a process info payload as a flat structured response.

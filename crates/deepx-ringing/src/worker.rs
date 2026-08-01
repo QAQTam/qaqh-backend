@@ -71,6 +71,9 @@ pub struct RingingWorkerEventEnvelope {
     pub channel: RingingChannel,
     pub seed: String,
     pub event_id: String,
+    /// 因果来源 command_id（Ringing 命令执行期间产出的事件携带）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<String>,
     pub event: RingingEvent,
 }
 
@@ -89,8 +92,14 @@ impl RingingWorkerEventEnvelope {
             channel,
             seed: seed.into(),
             event_id: event_id.into(),
+            causation_id: None,
             event,
         }
+    }
+
+    pub fn with_causation(mut self, causation_id: impl Into<String>) -> Self {
+        self.causation_id = Some(causation_id.into());
+        self
     }
 }
 

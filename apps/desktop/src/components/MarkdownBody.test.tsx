@@ -131,3 +131,29 @@ it("replaces streaming code-block HTML with the single final block", async () =>
   dispose();
   shikiState.reset();
 });
+
+it("renders closed inline markdown on the live tail while streaming", async () => {
+  const host = document.createElement("div");
+  const [content, setContent] = createSignal("partial **bold");
+  const dispose = render(
+    () => <MarkdownBody content={content()} final={false} />,
+    host,
+  );
+
+  // 未闭合的强调保持字面（不产生破损 HTML）
+  expect(host.textContent).toContain("**bold");
+
+  // 闭合后立即实时渲染，无需等待流式结束
+  setContent("partial **bold** text");
+  await vi.waitFor(() => expect(host.querySelector("strong")?.textContent).toBe("bold"));
+  expect(host.textContent).toContain("partial");
+
+  // 链接同样实时生效
+  setContent("see [docs](https://example.com) now");
+  await vi.waitFor(() => {
+    const link = host.querySelector("a") as HTMLAnchorElement | null;
+    expect(link?.textContent).toBe("docs");
+    expect(link?.getAttribute("href")).toBe("https://example.com");
+  });
+  dispose();
+});
