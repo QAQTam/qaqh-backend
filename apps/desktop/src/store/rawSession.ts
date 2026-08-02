@@ -44,6 +44,8 @@ export type RoundPhase = "thinking" | "tool_calling" | "answering" | "complete";
 
 export type TurnStatus = "running" | "waiting" | "completed" | "failed" | "cancelled";
 
+export type TurnFailure = { code: string; message: string };
+
 export type RawProgressChunk = {
   stream: "stdout" | "stderr";
   seq: number;
@@ -135,6 +137,7 @@ export type RawTurn = {
   startedAt?: number;
   endedAt?: number;
   stopReason?: string;
+  failure?: TurnFailure;
   usage?: UsageInfo;
   rounds: RawRound[];
   interactions: InteractionRecord[];

@@ -47,6 +47,11 @@ fn deepseek() -> ProviderSpec {
                 // so skip it; and its effort ladder extends to "max".
                 responses_send_include: false,
                 responses_effort_max: "max".into(),
+                // DeepSeek rejects a request that combines its built-in
+                // web_search with a custom function literally named `search`.
+                // Alias only at the provider boundary; DeepX keeps `search`
+                // canonical in execution, events, and persisted history.
+                responses_search_function_alias: Some("deepx_search".into()),
                 beta: true,
                 ..Default::default()
             },
@@ -428,6 +433,7 @@ mod tests {
         assert!(!endpoint.supports_thinking);
         assert!(endpoint.supports_reasoning_effort);
         assert!(!endpoint.supports_reasoning_content);
+        assert!(endpoint.responses_search_function_alias.is_none());
     }
 
     #[test]
@@ -456,6 +462,10 @@ mod tests {
         assert!(!endpoint.supports_thinking);
         assert!(endpoint.supports_reasoning_effort);
         assert!(!endpoint.supports_reasoning_content);
+        assert_eq!(
+            endpoint.responses_search_function_alias.as_deref(),
+            Some("deepx_search")
+        );
     }
 
     #[test]

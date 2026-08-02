@@ -75,6 +75,9 @@ pub struct ResponsesCompat {
     pub effort_max: String,
     /// Send the `user` field (rate-limit & KVCache isolation). Default: true.
     pub supports_user: bool,
+    /// Provider-facing alias for the canonical DeepX `search` function.
+    /// The alias is reversed before tool events leave the gate.
+    pub search_function_alias: Option<String>,
 }
 
 impl Default for ResponsesCompat {
@@ -85,8 +88,21 @@ impl Default for ResponsesCompat {
             send_include: true,
             effort_max: "high".into(),
             supports_user: true,
+            search_function_alias: None,
         }
     }
+}
+
+/// Produce a bounded provider error that is safe to persist and display.
+/// Providers occasionally echo credentials in error bodies, and byte slicing
+/// arbitrary UTF-8 can panic while handling the original failure.
+pub(crate) fn safe_provider_error_body(body: &str, api_key: &str) -> String {
+    let redacted = if api_key.is_empty() {
+        body.to_owned()
+    } else {
+        body.replace(api_key, "[REDACTED]")
+    };
+    redacted.chars().take(200).collect()
 }
 
 impl ProviderConfig {

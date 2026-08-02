@@ -5,7 +5,13 @@ use std::thread;
 use std::time::Duration;
 
 /// 已知的 DeepX 进程名
-const DEEPX_PROCESSES: &[&str] = &["DeepX.exe", "deepx-daemon.exe"];
+const DEEPX_PROCESSES: &[&str] = &[
+    "DeepX.exe",
+    "deepx-daemon.exe",
+    // The workspace service can hold files in the install directory during an
+    // upgrade, so it must use the same warning-and-confirmed-termination flow.
+    "deepx-workspace.exe",
+];
 
 /// 进程信息
 #[derive(Clone, Debug)]
@@ -252,6 +258,18 @@ pub fn wait_for_exit(procs: &[ProcInfo], timeout_secs: u64) -> bool {
 /// 检查进程是否仍在运行
 pub fn is_alive(pid: u32) -> bool {
     is_process_running(pid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEEPX_PROCESSES;
+
+    #[test]
+    fn workspace_service_is_part_of_the_installer_shutdown_allowlist() {
+        assert!(DEEPX_PROCESSES
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("deepx-workspace.exe")));
+    }
 }
 
 fn is_process_running(pid: u32) -> bool {

@@ -8,7 +8,10 @@ import TurnGroup from "./TurnGroup";
 
 vi.mock("../../i18n", () => ({
   useI18n: () => ({
-    t: () => ({ review: { changedFiles: "Changed {n} files", reviewChanges: "Review changes" } }),
+    t: () => ({
+      chat: { error: "Error" },
+      review: { changedFiles: "Changed {n} files", reviewChanges: "Review changes" },
+    }),
   }),
 }));
 
@@ -119,6 +122,28 @@ it("keeps assistant chats visible when the turn completes", () => {
   const dispose = render(() => <TurnGroup turn={turn} />, host);
 
   expect(host.querySelector('[data-markdown-final="true"]')?.textContent).toContain("完成");
+  dispose();
+});
+
+it("renders a failed turn's provider error instead of an empty transcript", () => {
+  const host = document.createElement("div");
+  const turn: TurnViewModel = {
+    turnId: "turn-failed",
+    userPrompt: "开始",
+    status: "failed",
+    failure: {
+      code: "model_request_failed",
+      message: "provider rejected the tool contract",
+    },
+    rounds: [],
+    interactions: [],
+  };
+  const dispose = render(() => <TurnGroup turn={turn} />, host);
+
+  const failure = host.querySelector('[data-part="turn-failure"]');
+  expect(failure?.getAttribute("role")).toBe("alert");
+  expect(failure?.textContent).toContain("model_request_failed");
+  expect(failure?.textContent).toContain("provider rejected the tool contract");
   dispose();
 });
 

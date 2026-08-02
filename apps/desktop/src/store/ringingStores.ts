@@ -201,6 +201,7 @@ export interface TurnView {
   rounds: RoundView[];
   status: "running" | "completed" | "failed" | "cancelled";
   lastRoundNum: number;
+  failure?: { code: string; message: string };
 }
 
 export interface ConversationState {
@@ -466,7 +467,11 @@ export function conversationReducer(state: ConversationState, event: Conversatio
     case "turn_completed":
       return upsertTurn(clearPending(state, event.turn_id), event.turn_id, (t) => ({ ...t, status: "completed" }));
     case "turn_failed":
-      return upsertTurn(clearPending(state, event.turn_id), event.turn_id, (t) => ({ ...t, status: "failed" }));
+      return upsertTurn(clearPending(state, event.turn_id), event.turn_id, (t) => ({
+        ...t,
+        status: "failed",
+        failure: { code: event.error.code, message: event.error.message },
+      }));
     case "conversation_cancelled":
       return {
         ...state,

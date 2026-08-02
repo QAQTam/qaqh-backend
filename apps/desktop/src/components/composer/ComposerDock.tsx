@@ -3,6 +3,7 @@ import type { createFollowUpQueue } from "../../store/followUpQueue";
 import ComposerQueue from "./ComposerQueue";
 import PermissionLevelSelect from "./PermissionLevelSelect";
 import { openImageDialog, readFileBase64, readTextFile, type ImageFileInfo, type TextFileInfo } from "../../runtime/desktopApi";
+import { matchSlashCommands, type SlashCommand } from "./slashCommands";
 
 type Queue = ReturnType<typeof createFollowUpQueue>;
 
@@ -49,6 +50,29 @@ export default function ComposerDock(props: {
   const [images, setImages] = createSignal<UploadedImage[]>([]);
   const [textFiles, setTextFiles] = createSignal<UploadedText[]>([]);
   const [attachOpen, setAttachOpen] = createSignal(false);
+  const [submitError, setSubmitError] = createSignal("");
+  const [selectedSlashIndex, setSelectedSlashIndex] = createSignal(0);
+  const [dismissedSlashValue, setDismissedSlashValue] = createSignal<string | null>(null);
+
+  function visibleSlashCommands(): readonly SlashCommand[] {
+    const value = text();
+    return dismissedSlashValue() === value ? [] : matchSlashCommands(value);
+  }
+
+  function updateText(value: string): void {
+    setText(value);
+    setSubmitError("");
+    setSelectedSlashIndex(0);
+    setDismissedSlashValue(null);
+  }
+
+  function selectSlashCommand(command: SlashCommand): void {
+    // This first slice provides discovery and keyboard behavior only. Command
+    // execution/context registration will be attached to the same catalogue.
+    setText(command.command);
+    setSelectedSlashIndex(0);
+    setDismissedSlashValue(command.command);
+  }
 
   const submit = async () => {
     const value = text().trim();
@@ -65,10 +89,16 @@ export default function ComposerDock(props: {
     // Build image blocks for the message
     const imageBlocks = images().map(img => ({ mimeType: img.mimeType, data: img.data }));
 
+    setSubmitError("");
     if (props.isStreaming()) {
       props.queue.enqueue(combinedText, []);
     } else {
-      try { await props.onSend(combinedText, [], imageBlocks.length > 0 ? imageBlocks : undefined); } catch { return; }
+      try {
+        await props.onSend(combinedText, [], imageBlocks.length > 0 ? imageBlocks : undefined);
+      } catch (error) {
+        setSubmitError(error instanceof Error ? error.message : String(error));
+        return;
+      }
     }
 
     // Cleanup preview URLs
@@ -180,9 +210,52 @@ export default function ComposerDock(props: {
     </Show>
 
     <section class="composer-dock" data-composer-dock>
-      <textarea value={text()} onInput={event => setText(event.currentTarget.value)} onKeyDown={event => {
+      <textarea value={text()} onInput={event => updateText(event.currentTarget.value)} onKeyDown={event => {
+        const commands = visibleSlashCommands();
+        if (commands.length > 0) {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setSelectedSlashIndex(index => (index + 1) % commands.length);
+            return;
+          }
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setSelectedSlashIndex(index => (index + commands.length - 1) % commands.length);
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setDismissedSlashValue(text());
+            return;
+          }
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            selectSlashCommand(commands[selectedSlashIndex() % commands.length]);
+            return;
+          }
+        }
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); }
       }} placeholder={props.hasPendingGate() ? "请先处理当前授权请求" : "向 DeepX 提问…"} />
+      <Show when={submitError()}>
+        {message => <div class="composer-submit-error" role="alert">{message()}</div>}
+      </Show>
+      <Show when={visibleSlashCommands().length > 0}>
+        <div class="composer-slash-menu" role="listbox" aria-label="快捷命令">
+          <For each={visibleSlashCommands()}>{(command, index) =>
+            <button
+              class={["composer-slash-option", { "is-selected": selectedSlashIndex() === index() }]}
+              type="button"
+              role="option"
+              aria-selected={selectedSlashIndex() === index() ? "true" : "false"}
+              onClick={() => selectSlashCommand(command)}
+            >
+              <code>{command.command}</code>
+              <span>{command.label}</span>
+              <small>{command.description}</small>
+            </button>
+          }</For>
+        </div>
+      </Show>
       <footer>
         <div class="composer-controls">
           <div class="composer-attach-wrap" style="position:relative;">

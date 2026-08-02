@@ -141,6 +141,10 @@ pub struct EndpointSpec {
     /// Send the `user` field (rate-limit & KVCache isolation per end user).
     /// Default: true.
     pub responses_supports_user: bool,
+    /// Provider-facing alias for DeepX's canonical `search` function tool.
+    /// Some Responses-compatible providers reserve `search` while their
+    /// built-in `web_search` tool is enabled. `None` keeps the canonical name.
+    pub responses_search_function_alias: Option<String>,
 }
 
 impl Default for EndpointSpec {
@@ -174,6 +178,7 @@ impl Default for EndpointSpec {
             responses_send_include: true,
             responses_effort_max: "high".into(),
             responses_supports_user: true,
+            responses_search_function_alias: None,
         }
     }
 }

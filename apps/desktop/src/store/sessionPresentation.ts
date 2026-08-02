@@ -110,6 +110,7 @@ export function selectRingingPresentation(
       turnId: tv.turnId,
       userText: tv.userText,
       status: mapTurnStatus(tv.status),
+      failure: tv.failure,
       rounds,
       interactions: [],
     };

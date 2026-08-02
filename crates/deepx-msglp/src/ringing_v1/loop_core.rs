@@ -47,6 +47,7 @@
 //!   → Outcome::TurnComplete → TurnEnd + Done → Idle
 //! ```
 
+use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,6 +101,10 @@ pub struct Loop {
     phase: LoopPhase,
     /// Deferred interrupt commands received while busy.
     pending: PendingState,
+    /// Ringing commands already acknowledged by the daemon while a legacy
+    /// session switch is pending. An accepted command must execute exactly
+    /// once after the switch; it must never be silently discarded.
+    deferred_ringing: VecDeque<super::types::WorkerCommand>,
     /// Set to true when the writer thread exits (stdout pipe broken).
     writer_dead: Arc<AtomicBool>,
     /// A running turn already emitted its terminal transaction, but the
@@ -280,6 +285,7 @@ impl Loop {
             cancel,
             phase: LoopPhase::Idle,
             pending: PendingState::default(),
+            deferred_ringing: VecDeque::new(),
             writer_dead,
             terminal_for_queued_interrupt: false,
             ready_emitted: false,
@@ -651,10 +657,11 @@ impl Loop {
     /// Process all queued commands from the channel.
     ///
     /// Interrupt-type commands (Cancel, ResumeSession, NewSession, Shutdown)
-    /// set the cancel token and queue a pending action. Non-interrupt commands
-    /// received while a session switch is pending are dropped — the frontend
-    /// re-sends UserInput after receiving Ready.
+    /// set the cancel token and queue a pending action. Ringing commands have
+    /// already been acknowledged by the daemon, so commands received during a
+    /// session switch are retained and dispatched once the switch completes.
     fn drain_pending(&mut self) {
+        self.dispatch_deferred_ringing();
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             let frame = match cmd.frame {
                 super::wire::WorkerCommandFrame::Legacy(frame) => frame,
@@ -664,9 +671,10 @@ impl Loop {
                         let _scope = self.paced_emitter.enter_causation(causation.as_deref());
                         self.dispatch_ringing_one(env);
                     } else {
-                        log::info!(
-                            "[AGENT] dropping Ringing command during pending session switch"
-                        );
+                        self.deferred_ringing.push_back(super::types::WorkerCommand {
+                            frame: super::wire::WorkerCommandFrame::Ringing(env),
+                            causation: cmd.causation,
+                        });
                     }
                     continue;
                 }
@@ -784,6 +792,23 @@ impl Loop {
             self.pending.reload_config = false;
             self.session_eng
                 .reload_config(&mut self.session.agent, &self.cancel);
+        }
+        self.dispatch_deferred_ringing();
+    }
+
+    /// Dispatch accepted Ringing commands in FIFO order once no session switch
+    /// is pending. Stop as soon as a deferred command schedules another switch;
+    /// later commands remain queued for the next drain.
+    fn dispatch_deferred_ringing(&mut self) {
+        while self.pending.is_empty() {
+            let Some(cmd) = self.deferred_ringing.pop_front() else {
+                break;
+            };
+            let super::wire::WorkerCommandFrame::Ringing(env) = cmd.frame else {
+                unreachable!("only Ringing commands are deferred");
+            };
+            let _scope = self.paced_emitter.enter_causation(cmd.causation.as_deref());
+            self.dispatch_ringing_one(env);
         }
     }
 

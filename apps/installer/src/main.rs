@@ -937,7 +937,10 @@ impl App {
                     for p in &mut self.running_procs {
                         if !p.closed {
                             win_process::force_terminate(p.pid);
-                            p.closed = true;
+                            // Do not claim success merely because taskkill was
+                            // attempted; a protected workspace service may
+                            // still hold install files and must remain visible.
+                            p.closed = !win_process::is_alive(p.pid);
                         }
                     }
                 }

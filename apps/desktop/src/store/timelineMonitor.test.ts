@@ -88,4 +88,27 @@ describe("Ringing V1 timeline renderer monitor", () => {
       event: { type: "text_delta", block_id: "reasoning", fragment_seq: 0, delta: "late" },
     })).toBe(false);
   });
+
+  it("preserves a terminal provider failure for presentation", () => {
+    const monitor = createTimelineMonitor();
+    const response = snapshot();
+    response.snapshot.turns[0]!.sealed = true;
+    response.snapshot.turns[0]!.state = "failed";
+    response.snapshot.turns[0]!.failure = {
+      code: "model_request_failed",
+      message: "provider rejected the tool contract",
+    };
+    monitor.handleSnapshot(response);
+
+    const turn = selectTimelinePresentation(
+      "seed",
+      monitor.snapshotFor("seed")!,
+      createRawSessionState("seed"),
+    ).turns[0]!;
+    expect(turn.status).toBe("failed");
+    expect(turn.failure).toEqual({
+      code: "model_request_failed",
+      message: "provider rejected the tool contract",
+    });
+  });
 });

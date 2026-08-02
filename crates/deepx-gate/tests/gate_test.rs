@@ -274,9 +274,10 @@ fn requests_and_emits_stream_usage_with_cache_details() {
 
 #[test]
 fn http_error_401() {
-    let scenario = vec![SseChunk::error(401, "Invalid API key")];
+    let scenario = vec![SseChunk::error(401, "Invalid API key: sk-test-key")];
     let mock = MockServer::new(scenario);
     let provider = make_provider(&mock);
+    let mut events = Vec::new();
     let result = deepx_gate::chat_stream(
         &provider,
         vec![Message::user("hi")],
@@ -285,11 +286,20 @@ fn http_error_401() {
         None,
         None,
         None,
-        &mut |_| {},
+        &mut |event| events.push(event),
     );
     assert!(result.is_err(), "401 should return error");
     let err = result.unwrap_err().to_string();
     assert!(err.contains("401"), "error should mention 401");
+    let provider_error = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Error(message) => Some(message),
+            _ => None,
+        })
+        .expect("provider error event");
+    assert!(provider_error.contains("authentication failed"));
+    assert!(!provider_error.contains("sk-test-key"));
 }
 
 #[test]
@@ -965,6 +975,60 @@ fn responses_chat_stream_with_tool_calls() {
     assert!(!tool_events.is_empty(), "should have tool call events");
     assert_eq!(tool_events[0].0, "read_file");
     assert_eq!(tool_events[0].1, "{\"path\":\"/x.txt\"}");
+}
+
+#[test]
+fn responses_search_alias_is_wire_only_with_web_search_enabled() {
+    let scenario = vec![
+        mock_server::SseChunk::Raw(
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc1\",\"type\":\"function_call\",\"call_id\":\"call_search\",\"name\":\"deepx_search\",\"arguments\":\"{\\\"query\\\":\\\"needle\\\"}\",\"status\":\"completed\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_search\",\"status\":\"completed\",\"model\":\"test-model\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"total_tokens\":7}}}\n\n".into(),
+        ),
+        mock_server::SseChunk::done(),
+    ];
+    let mock = MockServer::new(scenario);
+    let mut provider = make_responses_provider(&mock);
+    provider.responses_compat.search_function_alias = Some("deepx_search".into());
+    let tools = vec![ToolDef {
+        call_type: "function".into(),
+        function: ToolFunction {
+            name: "search".into(),
+            description: "search workspace files".into(),
+            parameters: json!({"type": "object"}),
+        },
+    }];
+
+    let mut events = Vec::new();
+    let result = deepx_gate::chat_stream(
+        &provider,
+        vec![Message::user("find needle")],
+        Some(tools),
+        4096,
+        None,
+        None,
+        None,
+        &mut |event| events.push(event),
+    );
+    assert!(result.is_ok(), "chat_stream failed: {result:?}");
+
+    let request = mock.last_request_json().expect("request body must be JSON");
+    let request_tools = request["tools"].as_array().expect("tools must be an array");
+    assert!(request_tools.iter().any(|tool| {
+        tool["type"] == "function" && tool["name"] == "deepx_search"
+    }));
+    assert!(request_tools.iter().any(|tool| tool["type"] == "web_search"));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ToolCallProgress { name, .. } if name == "search"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Done { raw_message, .. }
+            if matches!(raw_message.content.as_slice(),
+                [ContentBlock::ToolUse { name, .. }] if name == "search")
+    )));
 }
 
 #[test]

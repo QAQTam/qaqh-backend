@@ -11,7 +11,7 @@ use std::time::Duration;
 use deepx_types::{CacheTokenField, ThinkingParamMode};
 use deepx_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
-use super::types::{ProviderConfig, StreamEvent};
+use super::types::{ProviderConfig, StreamEvent, safe_provider_error_body};
 
 /// Polling interval for SSE streaming. When no data arrives within this
 /// interval, the outer Tokio timeout lets us check the cancel flag before
@@ -242,7 +242,12 @@ pub fn chat_stream_openai(
                 let code_desc = http_error_description(status);
                 if attempt >= MAX_RETRIES || !is_retryable(status) {
                     let msg = format!("OpenAI API HTTP {} ({})", status, code_desc);
-                    on_event(StreamEvent::Error(format!("{}: {}", msg, text)));
+                    let detail = if status == 401 {
+                        "authentication failed".into()
+                    } else {
+                        safe_provider_error_body(&text, &provider.api_key)
+                    };
+                    on_event(StreamEvent::Error(format!("{}: {}", msg, detail)));
                     return Err(anyhow::anyhow!("{}", msg));
                 }
 

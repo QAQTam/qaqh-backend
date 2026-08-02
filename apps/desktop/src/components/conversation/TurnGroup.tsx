@@ -89,6 +89,16 @@ export default function TurnGroup(props: { turn: TurnViewModel; onReviewChanges?
         }}
       </For>
 
+      <Show when={props.turn.failure}>
+        {failure => <div class="turn-failure" data-part="turn-failure" role="alert">
+          <div class="turn-failure-heading">
+            <strong>{t().chat.error}</strong>
+            <code>{failure().code}</code>
+          </div>
+          <p>{failure().message}</p>
+        </div>}
+      </Show>
+
       <Show when={status() === "completed" && changes().length > 0}>
         <div class="turn-change-receipt" data-part="turn-change-receipt">
           <span class="turn-change-receipt-files">{t().review.changedFiles.replace("{n}", String(changes().length))}</span>

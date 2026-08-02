@@ -15,10 +15,12 @@ use std::time::{Duration, Instant};
 use deepx_msglp::ringing_v1::loop_core::Loop;
 use deepx_msglp::state::agent::AgentState;
 use deepx_proto::{Agent2Ui, Ui2Agent};
+use deepx_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
 use serde_json::json;
 use tiny_http::{Header, Response, Server};
 
 static SESSION_INIT: Once = Once::new();
+static SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 // ── Mock LLM server ────────────────────────────────────────────────────
 
@@ -108,6 +110,11 @@ fn send(w: &mut os_pipe::PipeWriter, cmd: Ui2Agent) {
     w.flush().unwrap();
 }
 
+fn send_ringing(w: &mut os_pipe::PipeWriter, env: RingingWorkerCommandEnvelope) {
+    writeln!(w, "{}", serde_json::to_string(&env).unwrap()).unwrap();
+    w.flush().unwrap();
+}
+
 fn expect(
     rx: &std::sync::mpsc::Receiver<Agent2Ui>,
     timeout: Duration,
@@ -128,6 +135,7 @@ fn expect(
 
 #[test]
 fn create_session_emits_session_created_and_ready() {
+    let _test_lock = SESSION_TEST_LOCK.lock().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
@@ -173,6 +181,7 @@ fn create_session_emits_session_created_and_ready() {
 
 #[test]
 fn send_message_triggers_turn_lifecycle() {
+    let _test_lock = SESSION_TEST_LOCK.lock().unwrap();
     let mock = MockServer::single_response(text_round("Hello from DeepX"));
 
     let tmp = tempfile::tempdir().unwrap();
@@ -259,4 +268,79 @@ fn send_message_triggers_turn_lifecycle() {
         1,
         "expected exactly 1 LLM request"
     );
+}
+
+#[test]
+fn ringing_send_is_not_dropped_during_a_pending_session_switch() {
+    let _test_lock = SESSION_TEST_LOCK.lock().unwrap();
+    let mock = MockServer::single_response(text_round("queued send"));
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    deepx_workspace::set_workspace(&ws.to_string_lossy());
+    SESSION_INIT.call_once(|| {
+        deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false)
+    });
+
+    let mut agent = AgentState::init("test");
+    agent.ephemeral = true;
+    agent.config.base_url = mock.base_url.clone();
+    agent.config.api_key = "sk-test".into();
+    agent.config.model = "test-model".into();
+    agent.config.provider_id.clear();
+    agent.config.endpoint.clear();
+    agent.config.compliance_enabled = false;
+
+    let (ir, mut iw) = os_pipe::pipe().unwrap();
+    let (oread, owrite) = os_pipe::pipe().unwrap();
+    let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
+    let (tx, rx) = std::sync::mpsc::channel::<Agent2Ui>();
+    thread::spawn(move || {
+        for line in BufReader::new(oread).lines().map_while(Result::ok) {
+            if let Ok(event) = serde_json::from_str::<Agent2Ui>(&line) {
+                if tx.send(event).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let drv = thread::spawn(move || {
+        send(&mut iw, Ui2Agent::CreateSession);
+        let seed = match expect(&rx, Duration::from_secs(10), |event| {
+            matches!(event, Agent2Ui::SessionCreated { .. })
+        }) {
+            Agent2Ui::SessionCreated { seed } => seed,
+            _ => unreachable!(),
+        };
+        expect(&rx, Duration::from_secs(10), |event| matches!(event, Agent2Ui::Ready));
+
+        // A legacy resume schedules a pending session switch. The daemon can
+        // already have accepted this Ringing send by the time the worker drains
+        // its input queue, so it must be retained and run after the switch.
+        send(&mut iw, Ui2Agent::ResumeSession { seed: seed.clone() });
+        send_ringing(
+            &mut iw,
+            RingingWorkerCommandEnvelope::new(
+                &seed,
+                "cmd-queued-send",
+                RingingCommand::Conversation(
+                    deepx_domain::ConversationCommand::ConversationSendMessage {
+                        text: "Hi after resume".into(),
+                        images: vec![],
+                        attachments: None,
+                    },
+                ),
+            ),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while mock.requests.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(mock.requests.load(Ordering::SeqCst), 1, "queued send must reach the provider");
+        send(&mut iw, Ui2Agent::Shutdown);
+    });
+    lp.run();
+    drv.join().unwrap();
 }

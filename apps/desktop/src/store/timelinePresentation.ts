@@ -38,6 +38,7 @@ export function selectTimelinePresentation(
     turnId: turn.turn_id,
     userText: turn.user_text,
     status: status(turn.state),
+    failure: turn.failure,
     rounds: turn.rounds.map(round => {
       const tools = round.blocks.filter(block => block.kind === "tool" && block.tool);
       // Timeline entries append text while a block is open.  Block sealing is

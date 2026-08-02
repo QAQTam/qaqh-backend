@@ -11,6 +11,7 @@
 .assistant-answer { color: var(--dx-text); font-size: 14px; line-height: 1.7; }
 .assistant-stage-answer { margin: 0 0 18px; }
 .assistant-answer .md-body { max-width: none; }
+.turn-failure{margin:12px 0 0;padding:10px 12px;border:1px solid color-mix(in srgb,var(--dx-danger) 45%,transparent);border-radius:var(--radius-md);background:color-mix(in srgb,var(--dx-danger) 8%,transparent);color:var(--dx-text);font-size:13px}.turn-failure-heading{display:flex;align-items:center;gap:8px;color:var(--dx-danger)}.turn-failure-heading code{font-size:11px}.turn-failure p{margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
 .jump-to-bottom {
   position: sticky; left: 50%; bottom: 108px; width: 32px; height: 32px; border: 1px solid var(--dx-border);
   border-radius: 999px; background: var(--dx-surface); color: var(--dx-text-muted); box-shadow: var(--dx-shadow); cursor: pointer;

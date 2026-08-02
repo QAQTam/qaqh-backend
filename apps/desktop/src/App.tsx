@@ -81,6 +81,11 @@ export default function App() {
   let unlistenUpdate: (() => void) | undefined;
   let unlistenUpdateFailure: (() => void) | undefined;
   let resumeRequest = 0;
+  // Multiple terminal events can arrive while a session.list request is in
+  // flight. Keep one follow-up refresh so the sidebar always observes the
+  // latest persisted metadata without issuing parallel list requests.
+  let sessionListRefreshInFlight = false;
+  let sessionListRefreshQueued = false;
 
   function activeEntry(): SessionEntry | undefined {
     const seed = activeSeed();
@@ -144,6 +149,26 @@ export default function App() {
     if (!list) return false;
     setSessions(list);
     return true;
+  }
+
+  function refreshSessionsAfterCompletedTurn(): void {
+    sessionListRefreshQueued = true;
+    if (sessionListRefreshInFlight) return;
+
+    sessionListRefreshInFlight = true;
+    void (async () => {
+      while (sessionListRefreshQueued) {
+        sessionListRefreshQueued = false;
+        await refreshSessions();
+      }
+    })().catch(error => {
+      console.error("refreshSessionsAfterCompletedTurn", error);
+    }).finally(() => {
+      sessionListRefreshInFlight = false;
+      // Preserve a terminal event that arrives between the final loop check and
+      // clearing the in-flight flag.
+      if (sessionListRefreshQueued) refreshSessionsAfterCompletedTurn();
+    });
   }
 
   async function loadWorkspace(entry: SessionEntry) {
@@ -423,6 +448,13 @@ export default function App() {
       if (api) {
         unlistenRingingBatch = api.onBatch(batch => {
           ringingMonitor.handleBatch(batch);
+          // The worker flushes the message store before publishing this
+          // terminal event, so session.list now contains last_summary.
+          if (batch.channel === "conversation" && batch.envelopes.some(envelope =>
+            envelope.event.channel === "conversation" && envelope.event.type === "turn_completed"
+          )) {
+            refreshSessionsAfterCompletedTurn();
+          }
           const dashboard = ringingMonitor.storesFor(batch.seed)?.control.dashboardSnapshot;
           const entry = registry.get(batch.seed);
           if (dashboard && entry) {
@@ -493,9 +525,18 @@ export default function App() {
       ) setPermissionLevel(config.permission_level!);
     } catch {}
 
-    await refreshSessions();
-    // Home is the stable entry point. A previous task stays available in the
-    // sidebar and the home list, but never hijacks navigation on application start.
+    const initialSessions = await loadSessionList();
+    if (initialSessions) {
+      setSessions(initialSessions);
+      // Cold startup must re-establish the full session boundary (lease,
+      // Ringing bootstrap, and timeline) before the composer is usable.
+      // Prefer the persisted active session, then the most recently updated
+      // task so an existing user never has to manually select one first.
+      const savedSeed = localStorage.getItem(LS_KEY);
+      const initialSession = initialSessions.find(session => session.seed === savedSeed)
+        ?? initialSessions[0];
+      if (initialSession) await resumeSession(initialSession.seed);
+    }
   })();
   });
 

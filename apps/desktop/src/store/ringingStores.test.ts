@@ -112,6 +112,27 @@ describe("conversationReducer", () => {
     expect(state.activeTurn?.rounds[0].thinking).toBe("think");
   });
 
+  it("retains the typed failure carried by turn_failed", () => {
+    let state = initialConversationState("s1");
+    state = conversationReducer(state, { type: "turn_started", turn_id: "t1", user_text: "hi" });
+    state = conversationReducer(state, {
+      type: "turn_failed",
+      turn_id: "t1",
+      error: {
+        error_id: "failure-1",
+        code: "model_request_failed",
+        message: "provider rejected the request",
+        retryable: false,
+        dedupe_key: null,
+      },
+    });
+    expect(state.activeTurn?.status).toBe("failed");
+    expect(state.activeTurn?.failure).toEqual({
+      code: "model_request_failed",
+      message: "provider rejected the request",
+    });
+  });
+
   it("buffers deltas arriving before turn_started and replays them losslessly", () => {
     let state = initialConversationState("s1");
     // 乱序/快照间隙：turn_started 尚未到达

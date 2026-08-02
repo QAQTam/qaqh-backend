@@ -1034,6 +1034,7 @@ impl TurnEngine {
                     send_include: endpoint.responses_send_include,
                     effort_max: endpoint.responses_effort_max.clone(),
                     supports_user: endpoint.responses_supports_user,
+                    search_function_alias: endpoint.responses_search_function_alias.clone(),
                 };
             }
             p

@@ -16,6 +16,7 @@ export type TurnViewModel = {
   turnId: string;
   userPrompt: string;
   status: string;
+  failure?: { code: string; message: string };
   /** Total elapsed time across all rounds, or undefined until complete. */
   elapsedMs?: number;
   rounds: RoundViewModel[];
@@ -254,6 +255,7 @@ export function projectTurn(rawTurn: RawTurn): TurnViewModel {
     turnId: rawTurn.turnId,
     userPrompt: rawTurn.userText,
     status: rawTurn.status,
+    failure: rawTurn.failure,
     elapsedMs,
     rounds,
     interactions,

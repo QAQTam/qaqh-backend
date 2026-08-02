@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use deepx_types::{ContentBlock, Message, ToolDef};
 
-use super::types::{ProviderConfig, ResponsesCompat, StreamEvent};
+use super::types::{ProviderConfig, ResponsesCompat, StreamEvent, safe_provider_error_body};
 
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_RETRIES: u32 = 3;
@@ -130,6 +130,7 @@ fn convert_messages_to_input(
                 for block in &msg.content {
                     if let ContentBlock::ToolUse { id, name, input } = block {
                         let args = serde_json::to_string(input).unwrap_or_default();
+                        let name = provider_function_name(name, compat);
                         items.push(serde_json::json!({
                             "type": "function_call",
                             "call_id": id,
@@ -216,9 +217,10 @@ fn convert_tools(
     let mut items: Vec<serde_json::Value> = Vec::new();
     if let Some(tds) = tools {
         for td in tds {
+            let name = provider_function_name(&td.function.name, compat);
             items.push(serde_json::json!({
                 "type": "function",
-                "name": td.function.name,
+                "name": name,
                 "description": td.function.description,
                 "parameters": td.function.parameters,
             }));
@@ -235,6 +237,27 @@ fn convert_tools(
         None
     } else {
         Some(items)
+    }
+}
+
+/// Map DeepX's stable tool name to a provider-safe wire name. The mapping is
+/// deliberately confined to the Responses adapter so authorization, tool
+/// execution, events, and persisted history continue to use `search`.
+fn provider_function_name<'a>(name: &'a str, compat: &'a ResponsesCompat) -> &'a str {
+    if name != "search" {
+        return name;
+    }
+    compat
+        .search_function_alias
+        .as_deref()
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or(name)
+}
+
+fn canonical_function_name(name: &str, compat: &ResponsesCompat) -> String {
+    match compat.search_function_alias.as_deref() {
+        Some(alias) if !alias.is_empty() && name == alias => "search".into(),
+        _ => name.to_string(),
     }
 }
 
@@ -258,7 +281,6 @@ fn clamp_effort(effort: Option<String>, max: &str) -> String {
 
 // ── Public API ──
 
-#[allow(clippy::string_slice)]
 pub fn chat_stream_responses(
     provider: &ProviderConfig,
     model: &str,
@@ -357,10 +379,10 @@ pub fn chat_stream_responses(
                             continue;
                         }
                     }
-                    let msg = if err_body.len() > 200 { &err_body[..200] } else { &err_body };
+                    let msg = safe_provider_error_body(&err_body, &provider.api_key);
                     return Err(anyhow::anyhow!("HTTP {}: {}", status, msg));
                 }
-                return parse_responses_sse(resp, cancel, on_event);
+                return parse_responses_sse(resp, compat, cancel, on_event);
             }
             Err(e) => {
                 if attempt < MAX_RETRIES {
@@ -442,7 +464,7 @@ pub fn chat_sync_responses(
             // Never surface credential material echoed by the provider.
             return Err("HTTP 401 (authentication failed)".into());
         }
-        let msg = if text.len() > 200 { &text[..200] } else { &text };
+        let msg = safe_provider_error_body(&text, &provider.api_key);
         return Err(format!("HTTP {}: {}", status, msg));
     }
 
@@ -497,6 +519,9 @@ struct ResponsesParseState {
     /// loop can echo them back and the server restores its search results.
     web_search_calls: Vec<(String, serde_json::Value)>,
     usage: Option<deepx_types::UsageInfo>,
+    /// Provider compatibility used to reverse function aliases before any
+    /// event or persisted message observes the tool name.
+    compat: ResponsesCompat,
 }
 
 /// Parse `usage` from the `response` object carried by terminal events.
@@ -630,13 +655,14 @@ fn handle_responses_event(
             if let Some(item) = data.get("item") {
                 let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if item_type == "function_call" {
-                    let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let provider_name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let name = canonical_function_name(provider_name, &state.compat);
                     let args = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
                     let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
                     on_event(StreamEvent::ToolCallProgress {
                         index: state.tool_index,
                         id: call_id.to_string(),
-                        name: name.to_string(),
+                        name: name.clone(),
                         args_so_far: args.to_string(),
                     });
                     // Preserve the completed call so `emit_done` can attach
@@ -647,7 +673,7 @@ fn handle_responses_event(
                     if !call_id.is_empty() && !name.is_empty() {
                         state
                             .tool_uses
-                            .push((call_id.to_string(), name.to_string(), input));
+                            .push((call_id.to_string(), name, input));
                     }
                     state.tool_index += 1;
                 } else if item_type == "web_search_call" {
@@ -704,6 +730,7 @@ fn handle_responses_event(
 #[allow(clippy::string_slice)]
 fn parse_responses_sse(
     resp: reqwest::Response,
+    compat: &ResponsesCompat,
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
@@ -713,7 +740,10 @@ fn parse_responses_sse(
     // 只在拿到完整的 `\n` 结尾行之后，才对该行做严格 UTF-8 解码。
     let mut buf: Vec<u8> = Vec::new();
 
-    let mut state = ResponsesParseState::default();
+    let mut state = ResponsesParseState {
+        compat: compat.clone(),
+        ..Default::default()
+    };
 
     loop {
         if is_cancelled(cancel) {
@@ -1195,6 +1225,90 @@ mod tests {
         assert_eq!(result[0]["name"], "search");
         assert_eq!(result[0]["description"], "searches");
         assert_eq!(result[1]["type"], "web_search");
+    }
+
+    #[test]
+    fn deepseek_search_alias_keeps_builtin_web_search_and_canonical_history() {
+        let mut compat = test_compat();
+        compat.search_function_alias = Some("deepx_search".into());
+        let tools = vec![ToolDef {
+            call_type: "function".into(),
+            function: ToolFunction {
+                name: "search".into(),
+                description: "searches workspace files".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        }];
+
+        let result = convert_tools(Some(tools), &compat).unwrap();
+        assert_eq!(result[0]["name"], "deepx_search");
+        assert_eq!(result[1]["type"], "web_search");
+
+        let history = vec![Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_search".into(),
+                name: "search".into(),
+                input: serde_json::json!({"query": "needle"}),
+            }],
+        }];
+        let (input, _) = convert_messages_to_input(&history, &compat);
+        assert_eq!(input[0]["name"], "deepx_search");
+    }
+
+    #[test]
+    fn provider_error_body_redacts_credentials_and_truncates_on_char_boundaries() {
+        let api_key = "secret-key";
+        let body = format!("provider echoed {api_key}: {}", "错".repeat(250));
+        let safe = safe_provider_error_body(&body, api_key);
+
+        assert!(!safe.contains(api_key));
+        assert!(safe.contains("[REDACTED]"));
+        assert_eq!(safe.chars().count(), 200);
+    }
+
+    #[test]
+    fn empty_api_key_does_not_rewrite_provider_errors() {
+        assert_eq!(safe_provider_error_body("missing key", ""), "missing key");
+    }
+
+    #[test]
+    fn provider_search_alias_is_reversed_before_gate_events_and_messages() {
+        let mut compat = test_compat();
+        compat.search_function_alias = Some("deepx_search".into());
+        let mut state = ResponsesParseState {
+            compat,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let event = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "name": "deepx_search",
+                "arguments": "{\"query\":\"needle\"}",
+                "call_id": "call_search"
+            }
+        });
+
+        assert!(matches!(
+            handle_responses_event(&event, &mut state, &mut |value| events.push(value)),
+            EventAction::Continue
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::ToolCallProgress { name, .. }] if name == "search"
+        ));
+
+        emit_done(&mut state, None, &mut |value| events.push(value));
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::Done { raw_message, .. })
+                if matches!(raw_message.content.as_slice(),
+                    [ContentBlock::ToolUse { name, .. }] if name == "search")
+        ));
     }
 
     #[test]
