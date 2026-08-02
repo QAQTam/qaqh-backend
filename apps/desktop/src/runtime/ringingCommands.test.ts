@@ -105,7 +105,11 @@ describe("requestWithRinging", () => {
     const [seed, channel, envelope] = command.mock.calls[0] as [string, string, { command_id: string; command: unknown; seed: string }];
     expect(seed).toBe("s1");
     expect(channel).toBe("conversation");
-    expect(envelope.command).toEqual({ type: "conversation_send_message", text: "hi" });
+    expect(envelope.command).toEqual({
+      channel: "conversation",
+      type: "conversation_send_message",
+      text: "hi",
+    });
     expect(envelope.seed).toBe("s1");
     expect(envelope.command_id).toBeTruthy();
     expect(backendRequest).not.toHaveBeenCalled();

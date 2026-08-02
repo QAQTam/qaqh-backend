@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { BackendStatus, ConfirmDialogOptions, ControlMessage, OpenDialogOptions, UpdateInfo } from "./types";
 import type { RingingEventBatch } from "../src/lib/types/ringing";
+import type { TimelineEntry, TimelineSnapshotResponse } from "../src/store/timelineProtocol";
 
 contextBridge.exposeInMainWorld("deepx", {
   backend: {
@@ -47,6 +48,25 @@ contextBridge.exposeInMainWorld("deepx", {
       ) => listener(update);
       ipcRenderer.on("ringing:snapshot", handler);
       return () => ipcRenderer.removeListener("ringing:snapshot", handler);
+    },
+  },
+  timeline: {
+    activate: (seed: string) => ipcRenderer.invoke("timeline:activate", seed),
+    status: () => ipcRenderer.invoke("timeline:status"),
+    onEntry: (listener: (update: { seed: string; entry: TimelineEntry }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, update: { seed: string; entry: TimelineEntry }) => listener(update);
+      ipcRenderer.on("timeline:entry", handler);
+      return () => ipcRenderer.removeListener("timeline:entry", handler);
+    },
+    onSnapshot: (listener: (snapshot: TimelineSnapshotResponse) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, snapshot: TimelineSnapshotResponse) => listener(snapshot);
+      ipcRenderer.on("timeline:snapshot", handler);
+      return () => ipcRenderer.removeListener("timeline:snapshot", handler);
+    },
+    onStatus: (listener: (status: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, status: unknown) => listener(status);
+      ipcRenderer.on("timeline:status", handler);
+      return () => ipcRenderer.removeListener("timeline:status", handler);
     },
   },
   desktop: {

@@ -43,6 +43,6 @@ pub use protocol::{
 pub use reset::RingingResetRequired;
 pub use snapshot::{RingingChannelSnapshot, RingingSessionBootstrap};
 pub use worker::{
-    RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope, WIRE_RINGING_DOMAIN_V2,
-    WORKER_FRAME_MAX_BYTES, WorkerDirection,
+    RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope, TimelineWorkerIntentEnvelope,
+    WIRE_RINGING_DOMAIN_V2, WIRE_TIMELINE_INTENT_V3, WORKER_FRAME_MAX_BYTES, WorkerDirection,
 };

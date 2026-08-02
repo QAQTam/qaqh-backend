@@ -101,6 +101,9 @@ const ringing = new RingingManager(
     const info = await backend.refreshRingingConnection();
     await ringing.ensureConnected(info.baseUrl, info.token, info.session);
   },
+  (seed, entry) => sendToRenderer("timeline:entry", { seed, entry }),
+  status => sendToRenderer("timeline:status", status),
+  snapshot => sendToRenderer("timeline:snapshot", snapshot),
 );
 
 if (smokeMode) {
@@ -189,7 +192,19 @@ function registerIpc(): void {
   async function ensureRingingConnected(): Promise<void> {
     // 首个 renderer 请求可能早于显式 backend:connect。必须先确定连接级
     // 传输，不能因 status 仍是初始值而误走 legacy 请求。
-    await backend.connect();
+    try {
+      await backend.connect();
+    } catch (error) {
+      // The first request can fail before RingingManager.query is reached, so
+      // queryRingingWithRecovery cannot catch this transport failure itself.
+      if (!isRingingFetchFailure(error)) throw error;
+      try {
+        await recoverRingingConnection();
+      } catch (recoveryError) {
+        throw new Error(`Ringing connection failed during initial connect: ${ringingErrorMessage(recoveryError)}`);
+      }
+      return;
+    }
     const info = backend.ringingConnectionInfo();
     if (!info || !backend.usingRinging()) {
       throw new Error("Ringing v2 is required but the daemon did not establish its HTTP session");
@@ -197,6 +212,75 @@ function registerIpc(): void {
     // daemon 重启后端口/token 会变：即使 client 还在（流已死），也要重建
     if (ringing.connected() && ringing.connectedBaseUrl() === info.baseUrl) return;
     await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+  }
+
+  let ringingRecovery: Promise<void> | null = null;
+
+  function isRingingFetchFailure(error: unknown): boolean {
+    return error instanceof TypeError && /fetch failed/i.test(error.message);
+  }
+
+  function ringingErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  async function recoverRingingConnection(): Promise<void> {
+    if (ringingRecovery) return ringingRecovery;
+    ringingRecovery = (async () => {
+      // The manager can still contain a client after its HTTP/SSE transport has
+      // died. Stop those streams before re-reading discovery and opening a new
+      // lease; otherwise a stale client keeps making ensureConnected a no-op.
+      ringing.close();
+      if (!backend.usingRinging() || !backend.ringingConnectionInfo()) {
+        await backend.close();
+        await backend.connect();
+        const info = backend.ringingConnectionInfo();
+        if (!info || !backend.usingRinging()) {
+          throw new Error("Ringing recovery could not establish a daemon session");
+        }
+        await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+        return;
+      }
+      try {
+        const info = await backend.refreshRingingConnection();
+        await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+      } catch (error) {
+        if (!isRingingFetchFailure(error)) throw error;
+
+        // The control client can be stale too. Reset both transports so the
+        // next connect reads daemon.json again instead of reusing old state.
+        await backend.close();
+        await backend.connect();
+        const info = backend.ringingConnectionInfo();
+        if (!info || !backend.usingRinging()) {
+          throw new Error("Ringing recovery could not establish a daemon session");
+        }
+        await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+      }
+    })().finally(() => {
+      ringingRecovery = null;
+    });
+    return ringingRecovery;
+  }
+
+  async function queryRingingWithRecovery(
+    path: string,
+    params?: Record<string, string | undefined>,
+  ): Promise<unknown> {
+    try {
+      return await ringing.query(path, params);
+    } catch (error) {
+      // Queries are idempotent. A single retry is safe after refreshing daemon
+      // discovery, and fixes stale baseUrl/token state after daemon restart.
+      if (!isRingingFetchFailure(error)) throw error;
+      console.warn("[ringing] query transport failed; refreshing connection", error);
+      try {
+        await recoverRingingConnection();
+      } catch (recoveryError) {
+        throw new Error(`Ringing query recovery failed: ${ringingErrorMessage(recoveryError)}`);
+      }
+      return ringing.query(path, params);
+    }
   }
 
   async function requestSelectedBackend(
@@ -245,7 +329,7 @@ function registerIpc(): void {
           queryParams[key] = String(value);
         }
       }
-      return ringing.query(method, queryParams);
+      return queryRingingWithRecovery(method, queryParams);
     }
     return ringing.action(method, params);
   }
@@ -291,6 +375,14 @@ function registerIpc(): void {
     await ensureRingingConnected();
     return ringing.bootstrapSession(requireSeed(seed));
   });
+  ipcMain.handle("timeline:activate", async (_event, seed: unknown) => {
+    await ensureRingingConnected();
+    return ringing.activateTimeline(requireSeed(seed));
+  });
+  ipcMain.handle("timeline:status", async () => {
+    await ensureRingingConnected();
+    return ringing.timelineConnectionStatus();
+  });
   ipcMain.handle("ringing:command", async (_event, seed: unknown, channel: unknown, envelope: unknown) => {
     await ensureRingingConnected();
     if (!["control", "conversation", "tool"].includes(String(channel))) {
@@ -300,11 +392,16 @@ function registerIpc(): void {
       !isRecord(envelope) ||
       typeof envelope.command_id !== "string" ||
       !isRecord(envelope.command)
-    ) {
+  ) {
       throw new Error("invalid ringing command envelope");
     }
+    // SessionCreate is the only registry command that is valid before a
+    // session seed exists. RingingManager and the daemon both represent this
+    // as a null seed; all other commands must retain the strict seed check.
+    const isUnseededSessionCreate =
+      String(channel) === "control" && envelope.command.type === "session_create";
     return ringing.command(
-      requireSeed(seed),
+      isUnseededSessionCreate ? "" : requireSeed(seed),
       String(channel) as ChannelName,
       {
         command_id: envelope.command_id,
@@ -332,7 +429,7 @@ function registerIpc(): void {
           ),
         )
       : undefined;
-    return ringing.query(path, safeParams);
+    return queryRingingWithRecovery(path, safeParams);
   });
   ipcMain.handle("desktop:open-devtools", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;

@@ -53,6 +53,17 @@ function roundDelta(turnId: string, delta: string) {
   };
 }
 
+function sessionCreated(seed: string, commandId: string): RingingEventBatch {
+  const created = batch(seed, "control", 1, {
+    channel: "control",
+    type: "session_state_changed",
+    seed,
+    state: "created",
+  });
+  created.envelopes[0].causation_id = commandId;
+  return created;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -108,5 +119,24 @@ describe("createRingingMonitor reactivity", () => {
     const second = createRingingMonitor();
     expect(second.hasStores("s-isolated")).toBe(false);
     expect(second.storesFor("s-isolated")).toBeUndefined();
+  });
+
+  it("returns the real seed from a causal SessionCreate event", async () => {
+    vi.stubGlobal("window", { deepx: undefined });
+    const monitor = createRingingMonitor();
+    const waiting = monitor.waitForSessionCreated("cmd-create");
+
+    monitor.handleBatch(sessionCreated("s-created", "cmd-create"));
+
+    await expect(waiting).resolves.toBe("s-created");
+  });
+
+  it("keeps a causal create event that arrives before the waiter", async () => {
+    vi.stubGlobal("window", { deepx: undefined });
+    const monitor = createRingingMonitor();
+
+    monitor.handleBatch(sessionCreated("s-early", "cmd-early"));
+
+    await expect(monitor.waitForSessionCreated("cmd-early")).resolves.toBe("s-early");
   });
 });

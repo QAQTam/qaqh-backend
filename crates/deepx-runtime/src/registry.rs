@@ -236,9 +236,23 @@ impl AgentRegistry {
                 let event = match deepx_msglp::ring::wire::read_worker_event_line(&line) {
                     Ok(Some(event)) => event,
                     Ok(None) => {
-                        // Ringing envelope → 领域事件双投：
-                        //   hub.publish（Ringing 客户端）+ LegacyProjector（legacy 客户端）
+                        // v3 Timeline intent is a native producer path: it is
+                        // intentionally not projected through Agent2Ui or v2.
                         if let Some(hub) = &hub {
+                            if let Ok(env) = serde_json::from_str::<
+                                deepx_ringing::TimelineWorkerIntentEnvelope,
+                            >(&line)
+                            {
+                                if let Err(error) = hub.publish_timeline(&env.seed, env.intent) {
+                                    log::warn!(
+                                        "rejected timeline intent for {}: {error}",
+                                        env.seed
+                                    );
+                                }
+                                continue;
+                            }
+                            // Ringing envelope → 领域事件双投：
+                            //   hub.publish（Ringing 客户端）+ LegacyProjector（legacy 客户端）
                             match serde_json::from_str::<deepx_ringing::RingingWorkerEventEnvelope>(
                                 &line,
                             ) {
@@ -1062,5 +1076,4 @@ mod tests {
             );
         }
     }
-
 }

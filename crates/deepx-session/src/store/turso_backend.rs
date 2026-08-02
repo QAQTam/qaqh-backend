@@ -185,7 +185,8 @@ impl TursoBackend {
 
     pub fn save_compact_context(&self, seed: &str, context: &CompactContext) -> Result<(), String> {
         let seed = seed.to_string();
-        let json = serde_json::to_string(context).map_err(|error| format!("serialize compact context: {error}"))?;
+        let json = serde_json::to_string(context)
+            .map_err(|error| format!("serialize compact context: {error}"))?;
         let created_at = context.created_at as i64;
         runtime()?.block_on(async {
             self.conn.execute(
@@ -200,14 +201,30 @@ impl TursoBackend {
     pub fn load_compact_context(&self, seed: &str) -> Result<Option<CompactContext>, String> {
         let seed = seed.to_string();
         runtime()?.block_on(async {
-            let mut rows = self.conn.query(
-                "SELECT context_json FROM session_compact_context WHERE seed = ?1",
-                turso::params![seed],
-            ).await.map_err(|error| format!("load compact context: {error}"))?;
-            let Some(row) = rows.next().await.map_err(|error| format!("compact context rows: {error}"))? else { return Ok(None); };
-            let json = row.get_value(0).map_err(|error| format!("compact context value: {error}"))?
-                .as_text().cloned().ok_or_else(|| "compact context has wrong type".to_string())?;
-            serde_json::from_str(&json).map(Some).map_err(|error| format!("parse compact context: {error}"))
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT context_json FROM session_compact_context WHERE seed = ?1",
+                    turso::params![seed],
+                )
+                .await
+                .map_err(|error| format!("load compact context: {error}"))?;
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| format!("compact context rows: {error}"))?
+            else {
+                return Ok(None);
+            };
+            let json = row
+                .get_value(0)
+                .map_err(|error| format!("compact context value: {error}"))?
+                .as_text()
+                .cloned()
+                .ok_or_else(|| "compact context has wrong type".to_string())?;
+            serde_json::from_str(&json)
+                .map(Some)
+                .map_err(|error| format!("parse compact context: {error}"))
         })
     }
 

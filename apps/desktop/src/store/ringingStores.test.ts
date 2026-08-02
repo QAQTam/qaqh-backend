@@ -62,6 +62,21 @@ describe("controlReducer", () => {
     });
     expect(state.lastFailureId).toBe("e-9");
   });
+
+  it("keeps the full native dashboard snapshot without a legacy projection", () => {
+    const state = controlReducer(initialControlState("s1"), {
+      type: "dashboard_snapshot",
+      snapshot: {
+        seed: "s1",
+        documents: [{ tag: "doc", path: "a.ts", turns_since_read: 0, is_stale: false }],
+        recent_edits: ["edit: a.ts"],
+        tasks: [{ id: "todo-1", subject: "Ship", description: "native", status: "in_progress" }],
+        current_todo_id: "todo-1",
+      },
+    });
+    expect(state.dashboardSnapshot?.tasks[0].subject).toBe("Ship");
+    expect(state.dashboardSnapshot?.current_todo_id).toBe("todo-1");
+  });
 });
 
 describe("conversationReducer", () => {
@@ -122,7 +137,25 @@ describe("conversationReducer", () => {
     expect(state.pendingDeltas).toHaveLength(0);
   });
 
-  it("restores turns from the server conversation snapshot and keeps streaming context", () => {
+  it("does not truncate a high-frequency stream that arrives before turn_started", () => {
+    let state = initialConversationState("s1");
+    const chunks = Array.from({ length: 750 }, (_, index) => String(index % 10));
+    for (const delta of chunks) {
+      state = conversationReducer(state, {
+        type: "round_delta",
+        turn_id: "t1",
+        round_num: 0,
+        kind: "answering",
+        delta,
+      });
+    }
+
+    state = conversationReducer(state, { type: "turn_started", turn_id: "t1", user_text: "hi" });
+    expect(state.activeTurn?.rounds[0].answer).toBe(chunks.join(""));
+    expect(state.pendingDeltas).toHaveLength(0);
+  });
+
+  it("uses the authoritative snapshot to repair an already-created streaming turn", () => {
     let state = initialConversationState("s1");
     // 流式现场：活动 turn 已有部分内容，快照合并时不得覆盖
     state = conversationReducer(state, { type: "turn_started", turn_id: "t-live", user_text: "live" });
@@ -138,15 +171,16 @@ describe("conversationReducer", () => {
       state,
       [
         { turn_id: "t-old", user_text: "old", rounds: [{ round_num: 0, is_final: true, thinking: "plan", answer: "done" }] },
-        { turn_id: "t-live", user_text: "live", rounds: [] },
+        { turn_id: "t-live", user_text: "live", rounds: [{ round_num: 0, is_final: false, answer: "live complete" }] },
       ],
       "t-live",
     );
 
     expect(state.turns.map((t) => t.turnId)).toEqual(["t-live", "t-old"]);
-    // 已存在的活动 turn 保留流式内容
+    // 已存在的活动 turn 也必须以权威快照修复，否则 reset 期间漏掉的
+    // delta 会永久留在 UI 中。
     const live = state.turns.find((t) => t.turnId === "t-live")!;
-    expect(live.rounds[0].answer).toBe("live partial");
+    expect(live.rounds[0].answer).toBe("live complete");
     expect(live.status).toBe("running");
     // 快照补齐的历史 turn 以 completed 进入
     const old = state.turns.find((t) => t.turnId === "t-old")!;

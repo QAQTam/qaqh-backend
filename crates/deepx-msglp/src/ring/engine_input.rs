@@ -3,7 +3,7 @@
 //! Receives raw user text, handles auto-session-creation, compliance guard,
 //! and routes to TurnEngine for LLM processing.
 
-use deepx_proto::{Agent2Ui, ImageBlock};
+use deepx_proto::Agent2Ui;
 
 use super::types::*;
 
@@ -180,6 +180,11 @@ impl InputEngine {
             turn_id: turn_id.clone(),
             user_text: text.clone(),
         });
+        ctx.emitter
+            .emit_timeline(deepx_domain::TimelineIntent::TurnOpened {
+                turn_id: turn_id.clone(),
+                user_text: text.clone(),
+            });
         // Ringing 双发：TurnStarted（权威开始事件）
         ctx.emitter
             .emit_domain(deepx_domain::DomainEvent::Conversation(

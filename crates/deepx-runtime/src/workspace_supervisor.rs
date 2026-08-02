@@ -86,7 +86,9 @@ impl WorkspaceSupervisor {
             Ok(ready) => ready,
             Err(wsl_error) if mode == WorkspaceMode::Wsl => {
                 // WSL 不可用/未就绪 → 回退 local serve（降级记录）。
-                log::warn!("[workspace] WSL mode unavailable ({wsl_error}); falling back to local serve");
+                log::warn!(
+                    "[workspace] WSL mode unavailable ({wsl_error}); falling back to local serve"
+                );
                 match Self::try_start(WorkspaceMode::Local) {
                     Ok(ready) => ready,
                     Err(local_error) => {
@@ -112,7 +114,10 @@ impl WorkspaceSupervisor {
             stop: Arc::new(AtomicBool::new(false)),
         };
         supervisor.watchdog(active_mode, label.clone(), on_connection);
-        log::info!("[workspace] serve ready at {} ({label})", connection.endpoint);
+        log::info!(
+            "[workspace] serve ready at {} ({label})",
+            connection.endpoint
+        );
         Ok(supervisor)
     }
 
@@ -125,7 +130,9 @@ impl WorkspaceSupervisor {
     }
 
     /// 尝试拉起并等待就绪。返回 (child, token, endpoint, active_mode, label)。
-    fn try_start(mode: WorkspaceMode) -> Result<(Child, String, String, WorkspaceMode, String), String> {
+    fn try_start(
+        mode: WorkspaceMode,
+    ) -> Result<(Child, String, String, WorkspaceMode, String), String> {
         if mode == WorkspaceMode::Wsl {
             // 预检：WSL 可用且发行版内存在 deepx-workspace。
             // 快速失败（2s 超时），避免在 READY 阶段空等 5s 才发现。
@@ -165,7 +172,9 @@ impl WorkspaceSupervisor {
                 match reader.read_line(&mut line) {
                     Ok(0) => break,
                     Ok(_) => {
-                        if !ready_sent && let Some(rest) = line.strip_prefix("DEEPX_WORKSPACE_READY ") {
+                        if !ready_sent
+                            && let Some(rest) = line.strip_prefix("DEEPX_WORKSPACE_READY ")
+                        {
                             let _ = ready_tx.send(rest.trim().to_string());
                             ready_sent = true;
                         }
@@ -270,7 +279,9 @@ impl WorkspaceSupervisor {
         let manifest = match std::fs::read_to_string(&manifest_path) {
             Ok(text) => text,
             Err(_) => {
-                log::info!("[workspace] no daemon-manifest.json (dev mode); skipping integrity check");
+                log::info!(
+                    "[workspace] no daemon-manifest.json (dev mode); skipping integrity check"
+                );
                 return Ok(());
             }
         };
@@ -279,7 +290,9 @@ impl WorkspaceSupervisor {
         let expected = match json.get("workspace_sha256").and_then(|v| v.as_str()) {
             Some(hash) => hash.to_string(),
             None => {
-                log::warn!("[workspace] manifest has no workspace_sha256 (old package); skipping check");
+                log::warn!(
+                    "[workspace] manifest has no workspace_sha256 (old package); skipping check"
+                );
                 return Ok(());
             }
         };
@@ -315,51 +328,53 @@ impl WorkspaceSupervisor {
         let connection = self.connection.clone();
         std::thread::Builder::new()
             .name("workspace-supervisor".into())
-            .spawn(move || loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                let exited = {
-                    let mut guard = child.lock().unwrap_or_else(|e| e.into_inner());
-                    match guard.as_mut() {
-                        Some(c) => c.try_wait().ok().flatten().is_some(),
-                        None => true,
+            .spawn(move || {
+                loop {
+                    if stop.load(Ordering::SeqCst) {
+                        return;
                     }
-                };
-                if !exited {
-                    std::thread::sleep(Duration::from_millis(500));
-                    continue;
-                }
-                // 崩溃/退出 → 退避重启。端口随机，endpoint 可能变化：
-                // 已运行 worker 降级本地执行，新 worker 由 daemon 重启后
-                // 重新注入（v1 语义：serve 长稳，崩溃是罕见路径）。
-                log::warn!("[workspace] serve exited; restarting in 5s ({label})");
-                std::thread::sleep(Duration::from_secs(5));
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                // 只有 READY + /health 均成功后才发布新 endpoint/token；失败继续退避。
-                match Self::try_start(mode) {
-                    Ok((new_child, token, endpoint, active_mode, _)) => {
-                        let next = WorkspaceConnection {
-                            generation: connection
-                                .read()
-                                .unwrap_or_else(|error| error.into_inner())
-                                .generation
-                                .saturating_add(1),
-                            endpoint,
-                            token,
-                            mode: active_mode,
-                        };
-                        // 先更新 registry，随后再暴露新进程；新 worker 绝不会拿到旧凭据。
-                        on_connection(next.clone());
-                        *connection
-                            .write()
-                            .unwrap_or_else(|error| error.into_inner()) = next;
+                    let exited = {
                         let mut guard = child.lock().unwrap_or_else(|e| e.into_inner());
-                        *guard = Some(new_child);
+                        match guard.as_mut() {
+                            Some(c) => c.try_wait().ok().flatten().is_some(),
+                            None => true,
+                        }
+                    };
+                    if !exited {
+                        std::thread::sleep(Duration::from_millis(500));
+                        continue;
                     }
-                    Err(e) => log::warn!("[workspace] restart failed: {e}"),
+                    // 崩溃/退出 → 退避重启。端口随机，endpoint 可能变化：
+                    // 已运行 worker 降级本地执行，新 worker 由 daemon 重启后
+                    // 重新注入（v1 语义：serve 长稳，崩溃是罕见路径）。
+                    log::warn!("[workspace] serve exited; restarting in 5s ({label})");
+                    std::thread::sleep(Duration::from_secs(5));
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    // 只有 READY + /health 均成功后才发布新 endpoint/token；失败继续退避。
+                    match Self::try_start(mode) {
+                        Ok((new_child, token, endpoint, active_mode, _)) => {
+                            let next = WorkspaceConnection {
+                                generation: connection
+                                    .read()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .generation
+                                    .saturating_add(1),
+                                endpoint,
+                                token,
+                                mode: active_mode,
+                            };
+                            // 先更新 registry，随后再暴露新进程；新 worker 绝不会拿到旧凭据。
+                            on_connection(next.clone());
+                            *connection
+                                .write()
+                                .unwrap_or_else(|error| error.into_inner()) = next;
+                            let mut guard = child.lock().unwrap_or_else(|e| e.into_inner());
+                            *guard = Some(new_child);
+                        }
+                        Err(e) => log::warn!("[workspace] restart failed: {e}"),
+                    }
                 }
             })
             .ok();
@@ -509,8 +524,12 @@ fn run_wsl(args: &[&str], timeout_secs: u64) -> Result<(bool, String), String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    let stdout = out_rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
-    let stderr = err_rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    let stdout = out_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_default();
+    let stderr = err_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_default();
     let combined = format!("{stdout}{stderr}").trim().to_string();
     Ok((status.success(), combined))
 }
@@ -557,7 +576,12 @@ pub fn diagnose_wsl() -> Result<serde_json::Value, String> {
 
     // 2. 发行版信息。
     let distro = run_wsl(
-        &["-e", "bash", "-lc", "source /etc/os-release 2>/dev/null; echo \"$PRETTY_NAME\""],
+        &[
+            "-e",
+            "bash",
+            "-lc",
+            "source /etc/os-release 2>/dev/null; echo \"$PRETTY_NAME\"",
+        ],
         10,
     )
     .ok()
@@ -566,7 +590,12 @@ pub fn diagnose_wsl() -> Result<serde_json::Value, String> {
 
     // 3. deepx-workspace 是否已安装（PATH 可达）。
     let (installed, workspace_version) = match run_wsl(
-        &["-e", "bash", "-lc", "command -v deepx-workspace && deepx-workspace list 2>&1 | tail -1"],
+        &[
+            "-e",
+            "bash",
+            "-lc",
+            "command -v deepx-workspace && deepx-workspace list 2>&1 | tail -1",
+        ],
         15,
     ) {
         Ok((true, out)) => {
@@ -842,10 +871,7 @@ mod tests {
 
     #[test]
     fn wsl_path_conversion_maps_drive_and_segments() {
-        assert_eq!(
-            to_wsl_path(r"F:\DeepX").as_deref(),
-            Some("/mnt/f/DeepX")
-        );
+        assert_eq!(to_wsl_path(r"F:\DeepX").as_deref(), Some("/mnt/f/DeepX"));
         assert_eq!(
             to_wsl_path(r"F:\DeepX\crates\deepx-workspace").as_deref(),
             Some("/mnt/f/DeepX/crates/deepx-workspace")

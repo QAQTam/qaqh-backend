@@ -132,6 +132,7 @@ const en = {
     sectionDatabase: "Database",
     databaseEnabled: "SQLite Dual Store (Preview)",
     databaseEnabledHint: "Mirror sessions and configuration to SQLite for crash-safe storage. Takes effect immediately.",
+    databaseUnavailable: "Temporarily disabled while the new session architecture stabilizes. Existing database files are preserved.",
     databaseDesc: "When enabled, all session messages/state AND configuration are mirrored to local SQLite databases alongside JSON/TOML files. This version reads files as primary and uses SQLite for recovery and consistency checks.",
     restartTitle: "Applied",
     restartPrompt: "Database storage setting has been applied \u2014 no restart needed.",
@@ -343,6 +344,7 @@ const en = {
     sessions: "sessions",
     less: "Less",
     more: "More",
+    openDevTools: "DevTools",
   },
   time: {
     mSuffix: "m ago",

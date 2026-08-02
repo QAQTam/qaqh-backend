@@ -5,7 +5,7 @@ edition.workspace = true
 description = "DeepX session manager — singleton, list/load/save/active"
 
 [features]
-default = ["turso-backend"]
+default = []
 turso-backend = ["dep:turso", "dep:tokio"]
 memory = ["dep:deepx-vector"]
 

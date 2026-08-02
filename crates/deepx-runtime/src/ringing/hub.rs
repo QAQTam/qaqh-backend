@@ -14,7 +14,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use deepx_domain::{ConversationEvent, Delivery, DomainEvent, RingingChannel};
+use deepx_domain::{
+    ConversationEvent, Delivery, DomainEvent, RingingChannel, TimelineEntry, TimelineIntent,
+    TimelineSnapshot,
+};
 use deepx_ringing::{
     RingingChannelSnapshot, RingingEvent, RingingEventEnvelope, RingingResetRequired,
     is_safe_integer,
@@ -27,6 +30,8 @@ use super::journal_store::{JournalOp, JournalStore};
 use super::projection::SnapshotProjector;
 use super::router::{ChannelRouter, replaceable_key_for, terminal_replaceable_keys};
 use super::sequencer::Sequencer;
+use crate::timeline_store::TimelineStore;
+use crate::{TimelineAppender, TimelineError, TimelineLiveEntry};
 
 /// 事件已接受（含 envelope 与幂等状态）。
 #[derive(Debug)]
@@ -120,6 +125,11 @@ pub struct RingingHub {
     live: Mutex<HashMap<RingingChannel, broadcast::Sender<RingingEventEnvelope>>>,
     /// 持久化 journal（None = 非持久模式；I/O 失败只记录日志，不阻塞事件路径）。
     journal_store: Mutex<Option<JournalStore>>,
+    /// v3 transcript 的唯一 writer。它与三频道 Ringing v2 完全隔离，直到
+    /// Electron 直切完成后旧 projector 才会被删除。
+    timeline: Mutex<TimelineAppender>,
+    timeline_live: broadcast::Sender<TimelineLiveEntry>,
+    timeline_store: Mutex<Option<TimelineStore>>,
 }
 
 impl RingingHub {
@@ -131,10 +141,20 @@ impl RingingHub {
     pub fn with_persistence(epoch: impl Into<String>, root: impl Into<PathBuf>) -> Self {
         let hub = Self::with_options(epoch.into(), Some(root.into()));
         hub.load_persisted();
+        hub.load_timeline_persisted();
         hub
     }
 
     fn with_options(epoch: String, root: Option<PathBuf>) -> Self {
+        let timeline_store = root
+            .as_ref()
+            .and_then(|root| match TimelineStore::new(root) {
+                Ok(store) => Some(store),
+                Err(error) => {
+                    log::warn!("[timeline] persistence disabled: {error}");
+                    None
+                }
+            });
         let journal_store = match root {
             Some(root) => match JournalStore::new(&root) {
                 Ok(store) => Some(store),
@@ -145,6 +165,7 @@ impl RingingHub {
             },
             None => None,
         };
+        let (timeline_live, _) = broadcast::channel(1024);
         Self {
             epoch,
             sequencer: Sequencer::new(),
@@ -152,6 +173,9 @@ impl RingingHub {
             channels: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             journal_store: Mutex::new(journal_store),
+            timeline: Mutex::new(TimelineAppender::new()),
+            timeline_live,
+            timeline_store: Mutex::new(timeline_store),
         }
     }
 
@@ -191,8 +215,82 @@ impl RingingHub {
         }
     }
 
+    fn load_timeline_persisted(&self) {
+        let loaded = {
+            let guard = self
+                .timeline_store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some(store) => store.load(),
+                None => return,
+            }
+        };
+        match loaded {
+            Ok(timelines) => {
+                let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                for (seed, persisted) in timelines {
+                    appender.restore(seed, persisted.snapshot, persisted.journal);
+                }
+            }
+            Err(error) => log::warn!("[timeline] load persisted state failed: {error}"),
+        }
+    }
+
     pub fn epoch(&self) -> &str {
         &self.epoch
+    }
+
+    /// 接收原生 v3 producer intent。此路径不接受 Agent2Ui 或 RingingEvent，
+    /// 因而不会形成旧协议包装链。
+    pub fn publish_timeline(
+        &self,
+        seed: &str,
+        intent: TimelineIntent,
+    ) -> Result<TimelineEntry, TimelineError> {
+        let (entry, snapshot, journal) = {
+            let mut timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = timeline.apply_intent(seed, intent)?;
+            let snapshot = timeline.snapshot(seed).expect("intent just created seed");
+            let journal = timeline.replay_since(seed, 0);
+            (entry, snapshot, journal)
+        };
+        if let Some(store) = self
+            .timeline_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            && let Err(error) = store.persist(seed, &snapshot, journal)
+        {
+            log::warn!("[timeline] persist failed for {seed}: {error}");
+        }
+        let _ = self.timeline_live.send(TimelineLiveEntry {
+            seed: seed.to_string(),
+            entry: entry.clone(),
+        });
+        Ok(entry)
+    }
+
+    /// v3 bootstrap 的权威 transcript 快照。
+    pub fn timeline_snapshot(&self, seed: &str) -> Option<TimelineSnapshot> {
+        self.timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot(seed)
+    }
+
+    /// v3 reconnect tail。调用方用 snapshot watermark 作为 after 参数。
+    pub fn timeline_replay_since(&self, seed: &str, watermark: u64) -> Vec<TimelineEntry> {
+        self.timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replay_since(seed, watermark)
+    }
+
+    /// Live v3 transcript feed. Reliability comes from `timeline_replay_since`
+    /// and snapshot watermark; a lagged receiver must reconnect and replay.
+    pub fn subscribe_timeline(&self) -> broadcast::Receiver<TimelineLiveEntry> {
+        self.timeline_live.subscribe()
     }
 
     /// 大内容外置：存入（返回 content_id）。
@@ -898,6 +996,68 @@ mod tests {
             hub.last_stream_seq(RingingChannel::Conversation, "s"),
             5_000
         );
+    }
+
+    #[test]
+    fn native_timeline_intents_bypass_the_v2_channel_sequencer() {
+        let hub = RingingHub::new("epoch");
+        let opened = hub
+            .publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::TurnOpened {
+                    turn_id: "t".into(),
+                    user_text: "question".into(),
+                },
+            )
+            .expect("timeline intent accepted");
+        assert_eq!(opened.timeline_seq, 1);
+        assert_eq!(hub.last_stream_seq(RingingChannel::Conversation, "s"), 0);
+        let snapshot = hub.timeline_snapshot("s").expect("timeline snapshot");
+        assert_eq!(snapshot.watermark, 1);
+        assert_eq!(snapshot.turns[0].user_text, "question");
+    }
+
+    #[test]
+    fn persisted_native_timeline_recovers_snapshot_and_replay_tail() {
+        let root = temp_root("timeline-persist");
+        {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::TurnOpened {
+                    turn_id: "t".into(),
+                    user_text: "question".into(),
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::BlockOpened {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    block_id: "text".into(),
+                    kind: deepx_domain::TimelineBlockKind::Text,
+                    tool: None,
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::TextDelta {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    block_id: "text".into(),
+                    delta: "hello".into(),
+                },
+            )
+            .unwrap();
+        }
+        let hub = RingingHub::with_persistence("epoch-2", &root);
+        let snapshot = hub.timeline_snapshot("s").unwrap();
+        assert_eq!(snapshot.watermark, 3);
+        assert_eq!(snapshot.turns[0].rounds[0].blocks[0].text, "hello");
+        assert_eq!(hub.timeline_replay_since("s", 1).len(), 2);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

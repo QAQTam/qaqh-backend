@@ -1,5 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
-import type { AskQuestion, AskAnswer } from "../../lib/types";
+import type { AskQuestion, AskAnswer } from "../../lib/types/ringing";
 
 interface AskUserPromptProps {
   questions: AskQuestion[];

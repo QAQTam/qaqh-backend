@@ -87,7 +87,9 @@ impl Emitter for PacedEmitter {
                 Err(mpsc::TrySendError::Full(event)) => {
                     pending = match event {
                         WriterEvent::Legacy(agent_event) => agent_event,
-                        WriterEvent::Ringing(_) => unreachable!("emit_delta only sends legacy"),
+                        WriterEvent::Ringing(_) | WriterEvent::Timeline(_) => {
+                            unreachable!("emit_delta only sends legacy")
+                        }
                     };
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -117,8 +119,30 @@ impl Emitter for PacedEmitter {
         };
         let _ = self.tx.send(WriterEvent::Ringing(env));
     }
-}
 
+    fn emit_timeline(&self, intent: deepx_domain::TimelineIntent) {
+        if self.writer_dead.load(Ordering::SeqCst) {
+            return;
+        }
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let causation = self
+            .causation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let env = deepx_ringing::TimelineWorkerIntentEnvelope::new(
+            self.seed.as_str(),
+            format!("timeline-{seq}"),
+            intent,
+        );
+        let env = match causation {
+            Some(c) => env.with_causation(c),
+            None => env,
+        };
+        let _ = self.tx.send(WriterEvent::Timeline(env));
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -160,12 +184,12 @@ mod tests {
             });
             Self {
                 events,
-            pacer: PacedEmitter::new(
-                "worker",
-                tx.clone(),
-                Arc::new(AtomicBool::new(false)),
-                Arc::new(AtomicBool::new(false)),
-            ),
+                pacer: PacedEmitter::new(
+                    "worker",
+                    tx.clone(),
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(AtomicBool::new(false)),
+                ),
                 _tx: tx,
             }
         }
@@ -410,9 +434,13 @@ mod tests {
         let worker = thread::spawn(move || emitter.emit_delta(round_delta("second")));
 
         thread::sleep(Duration::from_millis(5));
-        assert!(matches!(rx.recv().unwrap(), WriterEvent::Legacy(Agent2Ui::RoundDelta { ref delta, .. }) if delta == "first"));
+        assert!(
+            matches!(rx.recv().unwrap(), WriterEvent::Legacy(Agent2Ui::RoundDelta { ref delta, .. }) if delta == "first")
+        );
         worker.join().unwrap();
-        assert!(matches!(rx.recv().unwrap(), WriterEvent::Legacy(Agent2Ui::RoundDelta { ref delta, .. }) if delta == "second"));
+        assert!(
+            matches!(rx.recv().unwrap(), WriterEvent::Legacy(Agent2Ui::RoundDelta { ref delta, .. }) if delta == "second")
+        );
     }
 
     #[test]
@@ -420,7 +448,12 @@ mod tests {
         let (tx, _rx) = mpsc::sync_channel::<WriterEvent>(1);
         tx.send(WriterEvent::Legacy(round_delta("first"))).unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let emitter = PacedEmitter::new("s1", tx, Arc::new(AtomicBool::new(false)), cancelled.clone());
+        let emitter = PacedEmitter::new(
+            "s1",
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            cancelled.clone(),
+        );
         let worker = thread::spawn(move || emitter.emit_delta(round_delta("discarded")));
 
         thread::sleep(Duration::from_millis(5));

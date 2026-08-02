@@ -112,6 +112,41 @@ pub enum AgentLifecycleState {
     Stopped,
 }
 
+/// A document visible in the dashboard. This intentionally mirrors only the
+/// renderer-facing tracking state, not the legacy protocol type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DashboardDocument {
+    pub tag: String,
+    pub path: String,
+    pub turns_since_read: u32,
+    pub is_stale: bool,
+}
+
+/// One persisted task row for the native dashboard activity snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DashboardTask {
+    pub id: String,
+    pub subject: String,
+    pub description: String,
+    pub status: String,
+}
+
+/// Replaceable dashboard/activity payload. It is deliberately separate from
+/// the transcript and is sufficient for the Electron dashboard without an
+/// `Agent2Ui::Dashboard` projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DashboardSnapshot {
+    pub seed: String,
+    pub documents: Vec<DashboardDocument>,
+    pub recent_edits: Vec<String>,
+    pub tasks: Vec<DashboardTask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_todo_id: Option<String>,
+}
+
 /// 失败终态的错误域（PLAN：错误带 scope、code、retryable、dedupe_key）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -482,6 +517,8 @@ pub enum ControlEvent {
         current_phase: String,
         streaming: bool,
     },
+    /// Full native dashboard activity state, replaceable by session seed.
+    DashboardSnapshot { snapshot: DashboardSnapshot },
     /// ask_user 交互请求（决策记录 Q10：ask/plan 归 Control，permission 归 Tool）。
     InteractionRequested {
         interaction_id: String,
@@ -546,7 +583,9 @@ pub enum ControlEvent {
 impl ControlEvent {
     pub fn delivery(&self) -> Delivery {
         match self {
-            ControlEvent::DashboardUpdated { .. } => Delivery::Replaceable,
+            ControlEvent::DashboardUpdated { .. } | ControlEvent::DashboardSnapshot { .. } => {
+                Delivery::Replaceable
+            }
             _ => Delivery::Reliable,
         }
     }

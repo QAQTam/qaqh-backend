@@ -1,6 +1,5 @@
 import { flush } from "solid-js";
 import { expect, it, vi } from "vitest";
-import { createRawSessionState } from "./sessionEventReducer";
 import { createSessionRegistry } from "./sessionRegistry";
 
 function memoryStorage() {
@@ -15,13 +14,9 @@ function memoryStorage() {
   };
 }
 
-it("hydrates once, remaps without replacing the entry, and removes frontend resources", () => {
+it("does not hydrate legacy transcript state, remaps without replacing the entry, and removes frontend resources", () => {
   const { values, storage } = memoryStorage();
-  const restored = createRawSessionState("old");
-  restored.turns.push({
-    turnId: "t1", userText: "restored", status: "completed", rounds: [], interactions: [],
-  });
-  values.set("deepx:reload:v4:old", JSON.stringify({ version: 4, state: restored }));
+  values.set("deepx:reload:v4:old", JSON.stringify({ version: 4, state: { seed: "old", turns: [{}] } }));
 
   const registry = createSessionRegistry({ storage });
   const entry = registry.ensure("old");
@@ -29,20 +24,19 @@ it("hydrates once, remaps without replacing the entry, and removes frontend reso
   entry.attachListener(unlisten);
 
   expect(registry.ensure("old")).toBe(entry);
-  expect(entry.state().turns[0].turnId).toBe("t1");
+  expect(entry.state().turns).toEqual([]);
   expect(registry.remap("old", "new")).toBe(entry);
   flush();
   expect(entry.state().seed).toBe("new");
-  expect(entry.state().turns[0].turnId).toBe("t1");
+  expect(entry.state().turns).toEqual([]);
 
   registry.remove("new");
   expect(unlisten).toHaveBeenCalledOnce();
   expect(registry.get("new")).toBeUndefined();
-  expect(values.has("deepx:reload:v4:old")).toBe(false);
-  expect(values.has("deepx:reload:v4:new")).toBe(false);
+  expect(values.has("deepx:reload:v4:old")).toBe(true);
 });
 
-it("disposes only frontend-owned runtimes and listeners", () => {
+it("disposes frontend listeners", () => {
   const { storage } = memoryStorage();
   const registry = createSessionRegistry({ storage });
   const entry = registry.ensure("seed-a");
@@ -53,34 +47,23 @@ it("disposes only frontend-owned runtimes and listeners", () => {
   expect(registry.entries()).toEqual([]);
 });
 
-it("keeps the new-seed snapshot when remap follows session_created reduction", () => {
-  const { values, storage } = memoryStorage();
+it("remaps renderer-local metadata without a wire-event reducer", () => {
+  const { storage } = memoryStorage();
   const registry = createSessionRegistry({ storage });
   const entry = registry.ensure("old");
-  entry.runtime.push({ type: "session_created", seed: "new" });
-
+  entry.updateLocalState(state => ({ ...state, session: { ...state.session, title: "draft" } }));
   registry.remap("old", "new");
-
-  expect(values.has("deepx:reload:v4:old")).toBe(false);
-  expect(values.has("deepx:reload:v4:new")).toBe(true);
+  flush();
   expect(registry.get("new")).toBe(entry);
+  expect(entry.state().session.title).toBe("draft");
 });
 
-it("runtime.current() is the synchronous authoritative source while the signal lags", () => {
+it("updates only renderer-local metadata", () => {
   const { storage } = memoryStorage();
   const registry = createSessionRegistry({ storage });
   const entry = registry.ensure("old");
 
-  entry.runtime.push({ type: "session_created", seed: "new" });
-
-  // Solid 2（beta.28 浏览器构建）信号写入是微任务批处理：同一同步栈内
-  // state() 仍可能是旧值；runtime.current() 始终立即可靠。
-  // 若此断言失败，说明框架批处理行为变化——请重新评估所有
-  // “push/update 后同栈读 state()” 的调用点。
-  expect(entry.state().seed).toBe("old");
-  expect(entry.runtime.current().seed).toBe("new");
-
-  // 冲刷后信号收敛到最新值。
+  entry.updateLocalState(state => ({ ...state, seed: "new" }));
   flush();
   expect(entry.state().seed).toBe("new");
 });

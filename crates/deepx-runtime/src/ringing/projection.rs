@@ -122,6 +122,10 @@ impl SnapshotProjector {
                         state["last_notice"] = serde_json::json!(notice_id);
                         true
                     }
+                    CE::DashboardSnapshot { snapshot } => {
+                        state["dashboard_snapshot"] = serde_json::json!(snapshot);
+                        true
+                    }
                     CE::SkillsUpdated { .. } | CE::DashboardUpdated { .. } => false,
                 }
             }

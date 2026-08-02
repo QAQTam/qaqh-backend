@@ -44,6 +44,7 @@ fn stringify(error: impl std::fmt::Display) -> String {
 
 const RENEW_TTL_MS: u64 = 30_000;
 const RENEW_INTERVAL_MS: u64 = 10_000;
+const TIMELINE_V3_BASE_PATH: &str = "/ringing/v3";
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SSE_KEEPALIVE_MS: u64 = 15_000;
 
@@ -184,12 +185,14 @@ impl PendingCommandStore {
     }
 
     /// 记录 accepted。返回 false 表示重复（已 accepted 且未过期）。
+    #[cfg(test)]
     pub fn record(&mut self, command_id: &str) -> bool {
         self.record_fingerprint(command_id, command_id)
             .unwrap_or(false)
     }
 
     /// 预留 receipt；相同 ID 不同 payload 是协议错误。
+    #[cfg(test)]
     pub fn record_fingerprint(&mut self, command_id: &str, fingerprint: &str) -> Result<bool, ()> {
         self.record_fingerprint_owned(command_id, fingerprint, None)
     }
@@ -244,6 +247,7 @@ impl PendingCommandStore {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub fn is_known(&self, command_id: &str) -> bool {
         self.accepted
             .get(command_id)
@@ -443,6 +447,7 @@ impl RingingLeaseStore {
     }
 
     /// 活跃校验（按 client_instance_id；命令/切流端点使用）��
+    #[cfg(test)]
     pub fn is_active(&self, client_instance_id: &str) -> bool {
         self.leases
             .get(client_instance_id)
@@ -648,6 +653,24 @@ pub async fn handle_ringing_http(
             br#"{"code":"lease_required","message":"open a Ringing v2 client session first"}"#,
         )
         .await;
+    }
+    if method == "GET" && path.starts_with(&format!("{TIMELINE_V3_BASE_PATH}/sessions/")) {
+        let rest = path.trim_start_matches(&format!("{TIMELINE_V3_BASE_PATH}/sessions/"));
+        if let Some(seed) = rest.strip_suffix("/timeline") {
+            return handle_timeline_snapshot(&mut stream, seed, session_id, &leases, &hub).await;
+        }
+        if let Some(seed) = rest.strip_suffix("/timeline/events") {
+            let Some(session_id) = session_id else {
+                return write_response(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "application/json",
+                    br#"{"code":"lease_required","message":"client session header required"}"#,
+                )
+                .await;
+            };
+            return handle_timeline_sse(&mut stream, seed, &request, session_id, leases, hub).await;
+        }
     }
     if method == "POST" && path.starts_with(&format!("{RINGING_BASE_PATH}/commands/")) {
         let channel = path.trim_start_matches(&format!("{RINGING_BASE_PATH}/commands/"));
@@ -1437,6 +1460,12 @@ async fn handle_command(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .attach_seed(session_id, seed);
+                // SessionCreate is a registry operation, so it does not enter the
+                // worker's command-causation scope. Publish the authoritative
+                // creation event after the lease is attached; otherwise the SSE
+                // filter could discard it before the newly created seed is owned
+                // by this client session.
+                publish_session_created(hub, seed, &env.command_id);
             }
             pending
                 .lock()
@@ -1651,6 +1680,158 @@ async fn handle_bootstrap(
         &serde_json::to_vec(&bootstrap).map_err(stringify)?,
     )
     .await
+}
+
+/// v3 transcript recovery state. It is intentionally separate from the v2
+/// three-channel bootstrap: a Timeline client receives one materialized model
+/// and one watermark only.
+async fn handle_timeline_snapshot(
+    stream: &mut TcpStream,
+    seed: &str,
+    session_id: Option<&str>,
+    leases: &Arc<Mutex<RingingLeaseStore>>,
+    hub: &Arc<RingingHub>,
+) -> Result<(), String> {
+    if seed.is_empty() {
+        return write_response(stream, "400 Bad Request", "text/plain", b"missing seed").await;
+    }
+    let owns_seed = session_id.is_some_and(|id| {
+        leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .owns_seed(id, seed)
+    });
+    if !owns_seed {
+        return write_response(
+            stream,
+            "401 Unauthorized",
+            "application/json",
+            br#"{"code":"lease_required","message":"attach the session seed before reading timeline"}"#,
+        )
+        .await;
+    }
+    let snapshot = hub
+        .timeline_snapshot(seed)
+        .unwrap_or(deepx_domain::TimelineSnapshot {
+            watermark: 0,
+            turns: vec![],
+        });
+    let body = serde_json::json!({
+        "schema": "deepx.Timeline",
+        "version": 3,
+        "server_epoch": hub.epoch(),
+        "seed": seed,
+        "snapshot": snapshot,
+    });
+    write_response(
+        stream,
+        "200 OK",
+        "application/json",
+        &serde_json::to_vec(&body).map_err(stringify)?,
+    )
+    .await
+}
+
+fn timeline_sse_frame(epoch: &str, seed: &str, entry: &deepx_domain::TimelineEntry) -> String {
+    let data = serde_json::json!({
+        "schema": "deepx.Timeline",
+        "version": 3,
+        "server_epoch": epoch,
+        "seed": seed,
+        "entry": entry,
+    });
+    format!(
+        "id: {epoch}:timeline:{}\nevent: timeline.entry\ndata: {}\n\n",
+        entry.timeline_seq,
+        serde_json::to_string(&data).unwrap_or_else(|_| "{}".into())
+    )
+}
+
+/// Per-session v3 Timeline SSE. The cursor is `epoch:timeline:timeline_seq`;
+/// it cannot be compared with any v2 channel cursor.
+async fn handle_timeline_sse(
+    stream: &mut TcpStream,
+    seed: &str,
+    request: &HttpRequest,
+    session_id: &str,
+    leases: Arc<Mutex<RingingLeaseStore>>,
+    hub: Arc<RingingHub>,
+) -> Result<(), String> {
+    if seed.is_empty()
+        || !leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .owns_seed(session_id, seed)
+    {
+        return write_response(
+            stream,
+            "401 Unauthorized",
+            "application/json",
+            br#"{"code":"lease_required"}"#,
+        )
+        .await;
+    }
+    let after = request
+        .header("last-event-id")
+        .map(|cursor| parse_timeline_cursor(cursor, hub.epoch()))
+        .unwrap_or(0);
+    // Subscribe before replay so every entry has either the replay or live
+    // path. Live duplicates at/below `after` are skipped below.
+    let mut rx = hub.subscribe_timeline();
+    let replay = hub.timeline_replay_since(seed, after);
+    let replayed: HashSet<u64> = replay.iter().map(|entry| entry.timeline_seq).collect();
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+    stream.write_all(head.as_bytes()).await.map_err(stringify)?;
+    for entry in &replay {
+        if stream
+            .write_all(timeline_sse_frame(hub.epoch(), seed, entry).as_bytes())
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+    }
+    stream.flush().await.map_err(stringify)?;
+    let mut keepalive = tokio::time::interval(Duration::from_millis(SSE_KEEPALIVE_MS));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = keepalive.tick() => {
+                if !leases.lock().unwrap_or_else(|e| e.into_inner()).is_active_session(session_id) {
+                    return Ok(());
+                }
+                if stream.write_all(b": keepalive\n\n").await.is_err() { return Ok(()); }
+                let _ = stream.flush().await;
+            }
+            received = rx.recv() => match received {
+                Ok(live) => {
+                    if live.seed != seed || live.entry.timeline_seq <= after || replayed.contains(&live.entry.timeline_seq) {
+                        continue;
+                    }
+                    if stream.write_all(timeline_sse_frame(hub.epoch(), seed, &live.entry).as_bytes()).await.is_err() {
+                        return Ok(());
+                    }
+                    let _ = stream.flush().await;
+                }
+                // Never continue after a broadcast gap: the client reconnects
+                // from the last parsed cursor and replays the lossless journal.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return Ok(()),
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+            }
+        }
+    }
+}
+
+fn parse_timeline_cursor(cursor: &str, epoch: &str) -> u64 {
+    let mut parts = cursor.split(':');
+    let received_epoch = parts.next().unwrap_or_default();
+    let kind = parts.next().unwrap_or_default();
+    let seq = parts.next().and_then(|value| value.parse::<u64>().ok());
+    if received_epoch == epoch && kind == "timeline" && parts.next().is_none() {
+        seq.unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 fn query_method(name: &str) -> Option<&'static str> {
@@ -1931,6 +2112,17 @@ fn session_close_seed(close_seed: &str, envelope_seed: &Option<String>) -> Strin
     }
 }
 
+fn publish_session_created(hub: &RingingHub, seed: &str, command_id: &str) {
+    let _ = hub.publish_with_causation(
+        seed,
+        deepx_domain::DomainEvent::Control(deepx_domain::ControlEvent::SessionStateChanged {
+            seed: seed.to_string(),
+            state: deepx_domain::SessionState::Created,
+        }),
+        Some(command_id),
+    );
+}
+
 /// `ringing.reset_required` SSE 帧（cursor 超出保留窗口时发送）。
 fn sse_reset_frame(reset: &RingingResetRequired) -> String {
     let data = serde_json::to_string(reset).unwrap_or_else(|_| "{}".into());
@@ -2040,8 +2232,12 @@ async fn handle_sse(
                         let _ = stream.flush().await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // 慢消费者落后：跳过（reliable 由 cursor 重连兜底）
-                        continue;
+                        // Do not continue on this connection. The broadcast receiver has
+                        // already skipped reliable events, while the Electron client may
+                        // subsequently advance Last-Event-ID past them. Closing forces it
+                        // to reconnect from its last *received* cursor and replay the gap
+                        // from the reliable journal.
+                        return Ok(());
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
                 }
@@ -2130,6 +2326,17 @@ mod tests {
         );
         assert_eq!(
             parse_sse_cursor("garbage", "epoch-1", RingingChannel::Tool),
+            0
+        );
+    }
+
+    #[test]
+    fn timeline_cursor_is_separate_from_v2_channel_cursors() {
+        assert_eq!(parse_timeline_cursor("epoch-1:timeline:42", "epoch-1"), 42);
+        assert_eq!(parse_timeline_cursor("epoch-1:tool:42", "epoch-1"), 0);
+        assert_eq!(parse_timeline_cursor("epoch-2:timeline:42", "epoch-1"), 0);
+        assert_eq!(
+            parse_timeline_cursor("epoch-1:timeline:42:extra", "epoch-1"),
             0
         );
     }
@@ -2293,6 +2500,23 @@ mod tests {
             "s-envelope"
         );
         assert_eq!(session_close_seed("", &None), "");
+    }
+
+    #[test]
+    fn session_create_event_carries_command_causation() {
+        let hub = RingingHub::new("epoch-1");
+        publish_session_created(&hub, "s-created", "cmd-create");
+        let replay = hub.replay_channel_since(RingingChannel::Control, 0);
+        assert_eq!(replay.events.len(), 1);
+        assert_eq!(replay.events[0].seed, "s-created");
+        assert_eq!(replay.events[0].causation_id.as_deref(), Some("cmd-create"));
+        assert!(matches!(
+            &replay.events[0].event,
+            deepx_ringing::RingingEvent::Control(deepx_domain::ControlEvent::SessionStateChanged {
+                state: deepx_domain::SessionState::Created,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -102,7 +102,8 @@ export default function SettingsView(props: SettingsViewProps) {
   const [autoCompactThreshold, setAutoCompactThreshold] = createSignal(0.75);
   const [autoCompactEnabled, setAutoCompactEnabled] = createSignal(true);
   const [complianceEnabled, setComplianceEnabled] = createSignal(true);
-  const [databaseEnabled, setDatabaseEnabled] = createSignal(true);
+  const [databaseEnabled, setDatabaseEnabled] = createSignal(false);
+  const [databaseAvailable, setDatabaseAvailable] = createSignal(false);
   const [migrationPending, setMigrationPending] = createSignal(0);
   const [migrating, setMigrating] = createSignal(false);
   const [migrationResult, setMigrationResult] = createSignal("");
@@ -212,6 +213,7 @@ export default function SettingsView(props: SettingsViewProps) {
       setAutoCompactEnabled(data.auto_compact_threshold > 0);
     }
     if (data.compliance_enabled !== undefined) setComplianceEnabled(data.compliance_enabled);
+    if (data.database?.available !== undefined) setDatabaseAvailable(data.database.available);
     if (data.database?.enabled !== undefined) setDatabaseEnabled(data.database.enabled);
     if (data.subagent) {
       if (data.subagent.model) setSubModel(data.subagent.model);
@@ -274,9 +276,10 @@ export default function SettingsView(props: SettingsViewProps) {
   }
 
   async function toggleDatabase(enabled: boolean) {
+    if (!databaseAvailable()) return;
     try {
-      await request("config.set_database_enabled", { enabled });
-      setDatabaseEnabled(enabled);
+      const result = await request<{ enabled?: boolean }>("config.set_database_enabled", { enabled });
+      setDatabaseEnabled(result?.enabled ?? enabled);
       dbToggled = false;
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -846,10 +849,10 @@ export default function SettingsView(props: SettingsViewProps) {
                     <label>{t().settings.databaseEnabled}</label>
                     <div class="settings-input-group">
                       <label class="settings-toggle">
-                        <input type="checkbox" checked={databaseEnabled()} onChange={(e) => void toggleDatabase(e.currentTarget.checked)} />
+                        <input type="checkbox" checked={databaseEnabled()} disabled={!databaseAvailable()} onChange={(e) => void toggleDatabase(e.currentTarget.checked)} />
                         <span class="settings-toggle-track" />
                       </label>
-                      <div class="settings-hint">{t().settings.databaseEnabledHint}</div>
+                      <div class="settings-hint">{databaseAvailable() ? t().settings.databaseEnabledHint : t().settings.databaseUnavailable}</div>
                     </div>
                   </div>
                   <Show when={databaseEnabled()}>

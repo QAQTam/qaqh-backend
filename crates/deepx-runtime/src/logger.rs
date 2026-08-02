@@ -7,7 +7,9 @@ struct FileLogSink {
 }
 
 impl Log for FileLogSink {
-    fn enabled(&self, _: &Metadata) -> bool { true }
+    fn enabled(&self, _: &Metadata) -> bool {
+        true
+    }
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
             let level = record.level();

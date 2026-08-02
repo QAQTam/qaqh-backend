@@ -24,6 +24,13 @@ interface DeepxDesktopApi {
     onStatus(listener: (update: { channel: string; status: unknown }) => void): () => void;
     onSnapshot(listener: (update: { seed: string; channel: string; snapshot: unknown }) => void): () => void;
   };
+  timeline?: {
+    activate(seed: string): Promise<import("../store/timelineProtocol").TimelineSnapshotResponse>;
+    status(): Promise<unknown>;
+    onEntry(listener: (update: { seed: string; entry: import("../store/timelineProtocol").TimelineEntry }) => void): () => void;
+    onSnapshot(listener: (snapshot: import("../store/timelineProtocol").TimelineSnapshotResponse) => void): () => void;
+    onStatus(listener: (status: unknown) => void): () => void;
+  };
   desktop: {
     openDialog(options: { directory?: boolean; multiple?: boolean; title?: string }): Promise<string | string[] | null>;
     confirm(message: string, options?: { title?: string; kind?: "info" | "warning" | "error" }): Promise<boolean>;

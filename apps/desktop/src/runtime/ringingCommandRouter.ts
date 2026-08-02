@@ -163,7 +163,10 @@ export function buildRingingCommandEnvelope(
 ): { command_id: string; command: unknown; seed?: string; expected_revision?: number | null } {
   return {
     command_id: randomCommandId(),
-    command,
+    // The wire envelope has a top-level channel, but RingingCommand is also
+    // internally tagged by channel on the Rust side. Keep both discriminators
+    // aligned at this boundary instead of making every command builder repeat it.
+    command: { ...command, channel },
     seed: seed || undefined,
     expected_revision: typeof expectedRevision === "number" ? expectedRevision : null,
   };

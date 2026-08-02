@@ -252,6 +252,12 @@ impl Loop {
                                 break;
                             }
                         }
+                        Ok(super::types::WriterEvent::Timeline(env)) => {
+                            if super::wire::write_timeline_intent_frame(&mut writer, &env).is_err()
+                            {
+                                break;
+                            }
+                        }
                         Err(_) => break,
                     }
                 }

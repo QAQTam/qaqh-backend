@@ -14,9 +14,10 @@ import type {
   RawTurn,
   TurnStatus,
 } from "./rawSession";
-import { createRawSessionState } from "./sessionEventReducer";
+import { createRawSessionState } from "./rawSession";
 import type { RingingStores, ToolCardView } from "./ringingStores";
-import type { UsageInfo } from "../lib/types";
+import type { UsageInfo } from "../lib/types/ringing/UsageInfo";
+import type { SkillRuntimeInfo } from "./rawSession";
 
 function mapTurnStatus(status: string): TurnStatus {
   switch (status) {
@@ -163,6 +164,26 @@ export function selectRingingPresentation(
         }]
     : [];
   merged.pendingInteractions = [...pendingPermissions, ...pendingAskPlan];
+
+  const skills = stores.control.skills;
+  if (skills) {
+    const active = new Set(skills.active);
+    const runtime: SkillRuntimeInfo[] = skills.available.map(skill => ({
+      name: skill.name,
+      description: skill.description,
+      source: skill.source,
+      state: active.has(skill.name) ? "active" : "catalog",
+      token_count: 0,
+    }));
+    merged.skills = {
+      ...merged.skills,
+      available: skills.available,
+      active: skills.active,
+      catalogRevision: skills.catalogRevision ?? "",
+      operationRevision: skills.operationRevision ?? 0,
+      runtime,
+    };
+  }
 
   return merged;
 }

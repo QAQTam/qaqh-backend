@@ -67,6 +67,10 @@ fn project_control(ce: &deepx_domain::ControlEvent) -> Option<Agent2Ui> {
             context_limit: 0,
             model: None,
         }),
+        // This is a native replaceable document. It intentionally has no
+        // Agent2Ui projection: legacy Dashboard cannot preserve its snapshot
+        // semantics without fabricating unrelated fields.
+        CE::DashboardSnapshot { .. } => None,
         CE::InteractionRequested {
             interaction_id,
             turn_id,

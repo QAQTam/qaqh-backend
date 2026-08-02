@@ -290,7 +290,7 @@ impl GoalEngine {
     // ═══════════════════════════════════════════
 
     /// Parse complexity-labeled tasks from a compact summary.
-    pub fn parse_compact_tasks(summary: &str) -> Vec<(Complexity, String)> {
+    pub(crate) fn parse_compact_tasks(summary: &str) -> Vec<(Complexity, String)> {
         let mut tasks = Vec::new();
         let mut in_remaining = false;
 

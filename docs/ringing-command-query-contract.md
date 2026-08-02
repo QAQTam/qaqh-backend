@@ -47,8 +47,10 @@ renderer 开关：`localStorage["ringing.commands"] === "1"` 时，`session.send
 - 失败回退 legacy 时，若 Ringing 侧实际已 accepted（网络歧义），可能重复执行；
   命令端点幂等键在 Ringing 内部，legacy 重试无法复用——opt-in 调试开关的已知权衡。
 
-本轮**不切**：`session.new`（Ringing ack 不返回新 seed，需事件驱动创建，属下一轮）、
-`session.resume/delete`、`interaction.*`、`skills.*`。
+`session.new` 已切入 Ringing：ACK 仍只表示 accepted，前端按同一 `command_id` 等待
+Control 频道可靠的 `SessionStateChanged { state: "created" }` 事件，并从事件信封读取新 seed；
+不把 ACK 强转成 seed，也不改变 ACK 契约。`session.resume/delete`、`interaction.*`、
+`skills.*` 仍未在本节切入。
 
 ## 4. 持久化 journal（daemon 重启不丢可靠事件）
 

@@ -5,7 +5,7 @@ import { render } from "@solidjs/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createI18n, I18nCtx } from "../i18n";
 import type { RawSessionState, RawTurn } from "../store/rawSession";
-import { createRawSessionState } from "../store/sessionEventReducer";
+import { createRawSessionState } from "../store/rawSession";
 import { createSessionUiState } from "../store/sessionUiState";
 import type { DashboardStoreData } from "../store/sessionRegistry";
 import ChatView from "./ChatView";

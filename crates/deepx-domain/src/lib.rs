@@ -21,6 +21,7 @@ pub mod channel;
 pub mod command;
 pub mod delivery;
 pub mod event;
+pub mod timeline;
 
 pub use channel::RingingChannel;
 pub use command::{
@@ -30,7 +31,13 @@ pub use command::{
 pub use delivery::Delivery;
 pub use event::{
     ActivityState, AgentLifecycleState, AskMode, AskQuestion, AskResolution, CompactStatus,
-    ContentRef, ControlEvent, ConversationEvent, DomainError, DomainEvent, ErrorScope,
-    NoticeLevel, PermissionCategory, PermissionRisk, ProviderToolState, RoundDeltaKind,
-    SessionState, SkillInfo, TodoItem, ToolEvent, ToolResult,
+    ContentRef, ControlEvent, ConversationEvent, DashboardDocument, DashboardSnapshot,
+    DashboardTask, DomainError, DomainEvent, ErrorScope, NoticeLevel, PermissionCategory,
+    PermissionRisk, ProviderToolState, RoundDeltaKind, SessionState, SkillInfo, TodoItem,
+    ToolEvent, ToolResult,
+};
+pub use timeline::{
+    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
+    TimelineFailure, TimelineIntent, TimelineRound, TimelineSnapshot, TimelineTool,
+    TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState,
 };

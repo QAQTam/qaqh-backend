@@ -10,7 +10,9 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { RingingClient, type ChannelStatus, type RingingSessionOpen } from "./ringingClient";
+import { TimelineClient, type TimelineStatus } from "./timelineClient";
 import type { RingingEventBatch, RingingResetRequired } from "../src/lib/types/ringing";
+import type { TimelineEntry, TimelineSnapshotResponse } from "../src/store/timelineProtocol";
 
 export type ChannelName = "control" | "conversation" | "tool";
 
@@ -21,6 +23,8 @@ const RECOVERY_MAX_MS = 30_000;
 
 export class RingingManager {
   private client: RingingClient | null = null;
+  private timelineClient: TimelineClient | null = null;
+  private timelineStatus: TimelineStatus | null = null;
   private baseUrl = "";
   private token = "";
   private lastConnectError: string | null = null;
@@ -51,6 +55,9 @@ export class RingingManager {
       snapshot: unknown,
     ) => void,
     private readonly onRecoveryRequired?: () => Promise<void>,
+    private readonly onTimelineEntry?: (seed: string, entry: TimelineEntry) => void,
+    private readonly onTimelineStatus?: (status: TimelineStatus) => void,
+    private readonly onTimelineSnapshot?: (snapshot: TimelineSnapshotResponse) => void,
   ) {}
 
   /** backend connect 成功后调用；重复调用幂等（同一 daemon 不重建）。 */
@@ -99,6 +106,9 @@ export class RingingManager {
     this.bootstrapQueueStats.clear();
     this.bootstrapOverflow.clear();
     this.bootstrapping.clear();
+    this.timelineClient?.close("ringing connection closed");
+    this.timelineClient = null;
+    this.timelineStatus = null;
     this.client?.close();
     this.client = null;
   }
@@ -143,6 +153,48 @@ export class RingingManager {
 
   status(): Record<ChannelName, ChannelStatus | null> {
     return { ...this.channelStatus };
+  }
+
+  timelineConnectionStatus(): TimelineStatus | null {
+    return this.timelineStatus;
+  }
+
+  /**
+   * Activates the native transcript for one renderer-selected session. A
+   * snapshot watermark becomes the sole SSE cursor; any entry emitted after
+   * the snapshot is replayed by the server before live delivery begins.
+   */
+  async activateTimeline(seed: string): Promise<TimelineSnapshotResponse> {
+    const client = this.requireClient();
+    const response = await this.getJson(
+      `/ringing/v3/sessions/${encodeURIComponent(seed)}/timeline`,
+      "timeline snapshot",
+    ) as TimelineSnapshotResponse;
+    if (
+      response.schema !== "deepx.Timeline"
+      || response.version !== 3
+      || response.seed !== seed
+      || !Number.isSafeInteger(response.snapshot?.watermark)
+    ) throw new Error("invalid Timeline v3 snapshot");
+
+    this.timelineClient?.close("session changed");
+    const stream = new TimelineClient(
+      this.baseUrl,
+      this.token,
+      seed,
+      () => client.session.serverEpoch,
+      () => client.session.clientSessionId ?? "",
+      entry => this.onTimelineEntry?.(seed, entry),
+      status => {
+        this.timelineStatus = status;
+        this.onTimelineStatus?.(status);
+      },
+      response.snapshot.watermark,
+    );
+    this.timelineClient = stream;
+    this.onTimelineSnapshot?.(response);
+    stream.start();
+    return response;
   }
 
   /** 拉取频道领域快照（reload 后重建前端状态）。 */

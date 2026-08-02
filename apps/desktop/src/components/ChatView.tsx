@@ -3,7 +3,7 @@ import { request } from "../runtime/backendClient";
 import { requestWithRinging } from "../runtime/ringingCommands";
 import { openDevTools, openPath } from "../runtime/desktopApi";
 import { togglePet } from "../runtime/desktopApi";
-import type { AskAnswer } from "../lib/types";
+import type { AskAnswer } from "../lib/types/ringing";
 import { projectTurn, type ChangeReviewFile, type TurnViewModel } from "../presentation/turnProjection";
 import type { PendingInteraction, RawSessionState, RawTurn } from "../store/rawSession";
 import type { DashboardStoreData } from "../store/sessionRegistry";

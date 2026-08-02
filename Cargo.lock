@@ -1754,9 +1754,11 @@ name = "deepx-client"
 version = "1.0.0-beta.5"
 dependencies = [
  "deepx-proto",
+ "deepx-ringing",
  "deepx-types",
  "futures-util",
  "rand 0.10.2",
+ "reqwest",
  "serde_json",
  "tokio",
  "tokio-tungstenite",

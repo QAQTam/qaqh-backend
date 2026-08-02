@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { request } from "./backendClient";
 import {
   RINGING_COMMAND_METHODS,
+  buildRingingCommandEnvelope,
 } from "./ringingCommandRouter";
 
 function mockBridge(
@@ -42,6 +43,17 @@ function mockBridge(
 }
 
 describe("ringingCommandRouter mapping", () => {
+  it("includes the channel discriminator inside the wire command", () => {
+    expect(buildRingingCommandEnvelope("s1", "conversation", {
+      type: "conversation_send_message",
+      text: "hi",
+    }).command).toEqual({
+      channel: "conversation",
+      type: "conversation_send_message",
+      text: "hi",
+    });
+  });
+
   it("maps send_message images to snake_case mime_type", () => {
     const spec = RINGING_COMMAND_METHODS["session.send_message"];
     const command = spec.build({
@@ -115,7 +127,30 @@ describe("backendClient Ringing routing", () => {
     expect(seed).toBe("s1");
     expect(channel).toBe("conversation");
     expect(envelope.seed).toBe("s1");
-    expect(envelope.command).toEqual({ type: "conversation_send_message", text: "hi" });
+    expect(envelope.command).toEqual({
+      channel: "conversation",
+      type: "conversation_send_message",
+      text: "hi",
+    });
+    expect(backendRequest).not.toHaveBeenCalled();
+  });
+
+  it("routes session.new without requiring a seed", async () => {
+    const { command, backendRequest } = mockBridge();
+    await request("session.new");
+    const [seed, channel, envelope] = command.mock.calls[0] as [
+      string,
+      string,
+      { command: unknown; seed?: string },
+    ];
+    expect(seed).toBe("");
+    expect(channel).toBe("control");
+    expect(envelope.seed).toBeUndefined();
+    expect(envelope.command).toEqual({
+      channel: "control",
+      type: "session_create",
+      close_current: false,
+    });
     expect(backendRequest).not.toHaveBeenCalled();
   });
 

@@ -37,3 +37,31 @@ pub fn build_current_todo_id() -> Option<String> {
         .ok()
         .and_then(|store| store.current_id)
 }
+
+/// Builds the native replaceable dashboard record without exposing the legacy
+/// `Agent2Ui::Dashboard` schema to new consumers.
+pub fn build_snapshot(seed: String) -> deepx_domain::DashboardSnapshot {
+    deepx_domain::DashboardSnapshot {
+        seed,
+        documents: build_documents()
+            .into_iter()
+            .map(|doc| deepx_domain::DashboardDocument {
+                tag: doc.tag,
+                path: doc.path,
+                turns_since_read: doc.turns_since_read,
+                is_stale: doc.is_stale,
+            })
+            .collect(),
+        recent_edits: build_recent_edits(),
+        tasks: build_tasks()
+            .into_iter()
+            .map(|task| deepx_domain::DashboardTask {
+                id: task.id,
+                subject: task.subject,
+                description: task.description,
+                status: task.status,
+            })
+            .collect(),
+        current_todo_id: build_current_todo_id(),
+    }
+}

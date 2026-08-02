@@ -64,8 +64,9 @@ struct ExecuteRequest {
     args: serde_json::Value,
     #[serde(default)]
     call_id: String,
-    #[serde(default)]
-    timeout_secs: Option<u64>,
+    /// Reserved for wire compatibility; execution timeout is controlled by the tool arguments.
+    #[serde(default, rename = "timeout_secs")]
+    _timeout_secs: Option<u64>,
 }
 
 fn default_args() -> serde_json::Value {

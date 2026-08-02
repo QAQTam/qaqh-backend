@@ -57,18 +57,20 @@ impl MiscEngine {
             let start = total.saturating_sub(INITIAL_LOAD_COUNT as u32) as usize;
             let recent =
                 util::build_turns_from_context(agent, Some(start), Some(INITIAL_LOAD_COUNT));
-            let _ = tx.send(crate::ring::types::WriterEvent::Legacy(Agent2Ui::SessionRestored {
-                seed: agent.session.seed.clone(),
-                turns: recent,
-                tokens_used: agent.session.usage_totals.total_tokens,
-                cache_hit_pct: util::cache_hit_pct(&agent.session.usage_totals),
-                usage: agent.session.last_usage.clone(),
-                usage_totals: agent.session.usage_totals.clone(),
-                usage_requests: agent.session.usage_requests,
-                cache_reported_requests: agent.session.effective_cache_reported_requests(),
-                total_turns: total,
-                has_more: start > 0,
-            }));
+            let _ = tx.send(crate::ring::types::WriterEvent::Legacy(
+                Agent2Ui::SessionRestored {
+                    seed: agent.session.seed.clone(),
+                    turns: recent,
+                    tokens_used: agent.session.usage_totals.total_tokens,
+                    cache_hit_pct: util::cache_hit_pct(&agent.session.usage_totals),
+                    usage: agent.session.last_usage.clone(),
+                    usage_totals: agent.session.usage_totals.clone(),
+                    usage_requests: agent.session.usage_requests,
+                    cache_reported_requests: agent.session.effective_cache_reported_requests(),
+                    total_turns: total,
+                    has_more: start > 0,
+                },
+            ));
         } else {
             log::info!("[MISC] UndoTurn — no changes");
         }
@@ -111,7 +113,7 @@ impl MiscEngine {
             documents: dashboard::build_documents(),
             recent_edits: dashboard::build_recent_edits(),
             tasks: dashboard::build_tasks(),
-current_todo_id: dashboard::build_current_todo_id(),
+            current_todo_id: dashboard::build_current_todo_id(),
             session_title: agent.session.title.clone(),
             usage: None,
             model: Some(agent.config.model.clone()),
@@ -125,6 +127,11 @@ current_todo_id: dashboard::build_current_todo_id(),
                 tool_failures: 0,
                 current_phase: "single".into(),
                 streaming: false,
+            },
+        ));
+        emitter.emit_domain(deepx_domain::DomainEvent::Control(
+            deepx_domain::ControlEvent::DashboardSnapshot {
+                snapshot: dashboard::build_snapshot(agent.session.seed.clone()),
             },
         ));
     }

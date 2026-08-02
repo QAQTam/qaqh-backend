@@ -111,7 +111,6 @@ fn try_standardize(
 
 /// Encode arbitrary bytes to a base64 string.
 pub fn encode_base64(bytes: &[u8]) -> String {
-    use std::fmt::Write;
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut output = String::with_capacity((bytes.len() + 2) / 3 * 4);

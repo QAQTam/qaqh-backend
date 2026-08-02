@@ -75,6 +75,13 @@ export function createRingingMonitor() {
   const appliedBySeed = new Map<string, number>();
   // 每 (seed, channel) 在途 snapshot 去重：daemon 下线时避免并发请求风暴
   const snapshotInflight = new Set<string>();
+  /** SessionCreate 的因果事件可能先于 ACK 到达，先缓存再由调用方领取。 */
+  const createdSeedsByCommand = new Map<string, string>();
+  const createdSeedWaiters = new Map<string, Set<{
+    resolve: (seed: string) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>>();
   /** 每 (seed, channel) 已应用快照的 baseline_seq：其前事件已包含在快照内，跳过。 */
   const baselineBySeed = new Map<string, Partial<Record<ChannelName, number>>>();
   const [state, setState] = createSignal<RingingMonitorState>(initialState());
@@ -111,6 +118,26 @@ export function createRingingMonitor() {
     const baseline = baselineBySeed.get(seed)?.[batch.channel];
     let appliedCount = 0;
     for (const envelope of batch.envelopes) {
+      const event = envelope.event as { type?: string; state?: string };
+      if (
+        batch.channel === "control"
+        && event.type === "session_state_changed"
+        && event.state === "created"
+        && envelope.causation_id
+      ) {
+        const commandId = envelope.causation_id;
+        const waiters = createdSeedWaiters.get(commandId);
+        if (waiters) {
+          createdSeedsByCommand.delete(commandId);
+          createdSeedWaiters.delete(commandId);
+          for (const waiter of waiters) {
+            clearTimeout(waiter.timer);
+            waiter.resolve(seed);
+          }
+        } else {
+          createdSeedsByCommand.set(commandId, seed);
+        }
+      }
       // 快照已覆盖的事件（≤ baseline_stream_seq）不重复应用，避免与恢复的 turns 双计。
       if (baseline !== undefined && envelope.stream_seq <= baseline) continue;
       // 幂等键 = (channel, to_stream_seq)：SSE cursor 保证每频道 stream_seq
@@ -142,6 +169,30 @@ export function createRingingMonitor() {
       },
       lastBatch: { seed, channel: batch.channel, at: Date.now() },
     }));
+  }
+
+  /** 等待 SessionCreate 的因果创建事件，并返回事件信封中的真实 seed。 */
+  function waitForSessionCreated(commandId: string, timeoutMs = 15_000): Promise<string> {
+    const cached = createdSeedsByCommand.get(commandId);
+    if (cached) {
+      createdSeedsByCommand.delete(commandId);
+      return Promise.resolve(cached);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          const waiters = createdSeedWaiters.get(commandId);
+          waiters?.delete(waiter);
+          if (waiters?.size === 0) createdSeedWaiters.delete(commandId);
+          reject(new Error("timed out waiting for Ringing session creation event"));
+        }, timeoutMs),
+      };
+      const waiters = createdSeedWaiters.get(commandId) ?? new Set();
+      waiters.add(waiter);
+      createdSeedWaiters.set(commandId, waiters);
+    });
   }
 
   /** 标记该连接的 session 使用 Ringing v2，并以三频道 bootstrap 建立基线。 */
@@ -307,6 +358,7 @@ export function createRingingMonitor() {
     loadSnapshot,
     hasStores,
     storesFor,
+    waitForSessionCreated,
   };
 }
 

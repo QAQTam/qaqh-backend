@@ -7,9 +7,8 @@ import {
 type Listener<T = unknown> = (event: { payload: T }) => void;
 type UnlistenFn = () => void;
 type ControlMessage =
-  | { type: "event"; seed: string; event: unknown }
   | { type: "session_activity"; activity: unknown }
-  | { type: "snapshot"; snapshot: { activities?: unknown[]; attached_sessions?: string[]; session_events?: Record<string, unknown[]> } }
+  | { type: "snapshot"; snapshot: { activities?: unknown[]; attached_sessions?: string[] } }
   | { type: string; [key: string]: unknown };
 
 const listeners = new Map<string, Set<Listener>>();
@@ -26,18 +25,12 @@ function ensureBridgeListener(): void {
   if (bridgeReady) return;
   bridgeReady = true;
   backendBridge().onMessage(payload => {
-    if (payload.type === "event") dispatch(`agent-${String(payload.seed)}-event`, payload.event);
-    else if (payload.type === "session_activity") dispatch("session-activity", payload.activity);
+    if (payload.type === "session_activity") dispatch("session-activity", payload.activity);
     else if (payload.type === "snapshot") {
-      const snapshot = payload.snapshot as { activities?: unknown[]; attached_sessions?: string[]; session_events?: Record<string, unknown[]> };
+      const snapshot = payload.snapshot as { activities?: unknown[]; attached_sessions?: string[] };
       for (const seed of snapshot.attached_sessions ?? []) attached.add(seed);
       for (const activity of snapshot.activities ?? []) dispatch("session-activity", activity);
-      for (const [seed, events] of Object.entries(snapshot.session_events ?? {})) {
-        for (const event of events) dispatch(`agent-${seed}-event`, event);
-      }
-      dispatch("backend-snapshot", snapshot);
     } else if (payload.type === "error" && payload.code === "disconnected") attached.clear();
-    dispatch("backend-message", payload);
   });
   backendBridge().onStatus(payload => dispatch("backend-status", payload));
 }

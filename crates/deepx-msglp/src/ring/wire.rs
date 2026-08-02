@@ -10,7 +10,10 @@
 use std::io::{BufRead, Write};
 
 use deepx_proto::{Agent2Ui, Ui2Agent};
-use deepx_ringing::worker::{RingingWorkerCommandEnvelope, WIRE_RINGING_DOMAIN_V2};
+use deepx_ringing::worker::{
+    RingingWorkerCommandEnvelope, TimelineWorkerIntentEnvelope, WIRE_RINGING_DOMAIN_V2,
+    WIRE_TIMELINE_INTENT_V3,
+};
 
 /// stdin 方向的可判别命令帧。
 #[derive(Debug, Clone)]
@@ -76,6 +79,17 @@ pub fn write_ringing_event_frame<W: Write>(
     w.flush()
 }
 
+/// Writes a native Timeline v3 intent frame.
+pub fn write_timeline_intent_frame<W: Write>(
+    w: &mut W,
+    env: &TimelineWorkerIntentEnvelope,
+) -> std::io::Result<()> {
+    let json = serde_json::to_string(env)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    writeln!(w, "{json}")?;
+    w.flush()
+}
+
 /// 判别 worker stdout 行：Ringing 事件 vs legacy 事件（daemon 侧使用）。
 ///
 /// 返回 `None` 表示该行是 Ringing 事件（daemon 尚未接入领域消费时跳过）；
@@ -92,6 +106,11 @@ pub fn read_worker_event_line(line: &str) -> Result<Option<Agent2Ui>, String> {
             let env = serde_json::from_value::<deepx_ringing::RingingWorkerEventEnvelope>(value)
                 .map_err(|e| format!("invalid ringing event: {e}"))?;
             let _ = env.event.channel();
+            Ok(None)
+        }
+        Some(w) if w == WIRE_TIMELINE_INTENT_V3 => {
+            let _ = serde_json::from_value::<TimelineWorkerIntentEnvelope>(value)
+                .map_err(|e| format!("invalid timeline intent: {e}"))?;
             Ok(None)
         }
         Some(other) => Err(format!("unknown worker wire tag: {other}")),

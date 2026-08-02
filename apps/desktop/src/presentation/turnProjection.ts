@@ -1,5 +1,4 @@
-import type { RawRound, RawTurn } from "../store/rawSession";
-import type { ToolCallDef } from "../lib/types";
+import type { RawRound, RawTurn, ToolCallDef } from "../store/rawSession";
 import { aggregateProcessItems, type ProcessItem } from "./processAggregation";
 
 export type RoundRenderEntry =

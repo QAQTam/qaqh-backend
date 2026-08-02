@@ -4,7 +4,7 @@
 //   ControlStore / ConversationStore / ToolStore / SessionPresentationSelector
 //
 // 每 store 独立维护 per-session/channel 领域状态，由 Ringing 事件驱动；
-// selector 合成展示视图，**禁止合成 Agent2Ui**。
+// selector 合成展示视图，禁止合成旧事件协议。
 // reliable 事件到达时先 drain/覆盖同 identity replaceable 状态，再原子应用 terminal。
 
 import type {
@@ -16,10 +16,12 @@ import type {
   SessionState,
   ActivityState,
   AskQuestion,
+  PermissionRisk,
   RoundDeltaKind,
+  SkillInfo,
   TodoItem,
 } from "../lib/types/ringing";
-import type { PermissionRisk } from "../lib/types";
+import type { DashboardSnapshot } from "../lib/types/ringing/DashboardSnapshot";
 
 // ────────────────────────────────────────────────────────────────────────────
 // 每频道独立维护的连接状态（PLAN：每频道独立重连、cursor、snapshot、健康状态）
@@ -70,6 +72,15 @@ export interface ControlState {
   lastFailureId: string | null;
   /** 最近一次 DashboardUpdated（replaceable，覆盖式）。 */
   dashboard: DashboardView | null;
+  /** 完整 dashboard/activity 快照，不依赖旧 dashboard 事件。 */
+  dashboardSnapshot: DashboardSnapshot | null;
+  /** Native skill catalog state. */
+  skills: {
+    available: SkillInfo[];
+    active: string[];
+    catalogRevision?: string | null;
+    operationRevision?: number | null;
+  } | null;
 }
 
 export interface DashboardView {
@@ -91,6 +102,8 @@ export function initialControlState(seed: string): ControlState {
     lastNoticeId: null,
     lastFailureId: null,
     dashboard: null,
+    dashboardSnapshot: null,
+    skills: null,
   };
 }
 
@@ -150,6 +163,18 @@ export function controlReducer(state: ControlState, event: ControlEvent): Contro
           toolFailures: event.tool_failures,
           currentPhase: event.current_phase,
           streaming: event.streaming,
+        },
+      };
+    case "dashboard_snapshot":
+      return { ...state, dashboardSnapshot: event.snapshot };
+    case "skills_updated":
+      return {
+        ...state,
+        skills: {
+          available: event.available,
+          active: event.active,
+          catalogRevision: event.catalog_revision,
+          operationRevision: event.operation_revision,
         },
       };
     default:
@@ -264,23 +289,28 @@ export interface ConversationSnapshotTurn {
   }>;
 }
 
-/** 把服务器 ConversationSnapshot 合并进本地 store（只补缺失 turn，保留流式现场）。 */
+/**
+ * 把服务器 ConversationSnapshot 合并进本地 store。
+ *
+ * 快照是 cursor reset/bootstrap 后的权威恢复点。不能只补缺失 turn：如果
+ * renderer 在 SSE 缺口中已经创建了同一 turn，保留它的局部文本会永久吞掉
+ * 缺失的 thinking/answer。snapshot baseline 之后的 live events 会继续追加。
+ */
 export function applyConversationSnapshot(
   state: ConversationState,
   turns: ConversationSnapshotTurn[],
   activeTurnId: string | null,
 ): ConversationState {
-  const existing = new Set(state.turns.map((t) => t.turnId));
-  const added: TurnView[] = [];
+  const snapshots = new Map<string, TurnView>();
   for (const raw of turns) {
-    if (!raw?.turn_id || existing.has(raw.turn_id)) continue;
+    if (!raw?.turn_id) continue;
     const rounds: RoundView[] = (raw.rounds ?? []).map((r) => ({
       roundNum: r.round_num,
       thinking: r.thinking ?? "",
       answer: r.answer ?? "",
       isFinal: Boolean(r.is_final),
     }));
-    added.push({
+    snapshots.set(raw.turn_id, {
       turnId: raw.turn_id,
       userText: raw.user_text ?? "",
       rounds,
@@ -288,7 +318,11 @@ export function applyConversationSnapshot(
       lastRoundNum: rounds.reduce((max, r) => Math.max(max, r.roundNum), 0),
     });
   }
-  const turnsAll = [...state.turns, ...added];
+  const existingIds = new Set(state.turns.map((turn) => turn.turnId));
+  const turnsAll = [
+    ...state.turns.map((turn) => snapshots.get(turn.turnId) ?? turn),
+    ...[...snapshots.values()].filter((turn) => !existingIds.has(turn.turnId)),
+  ];
   const activeTurn = turnsAll.find((t) => t.turnId === activeTurnId) ?? state.activeTurn;
   return { ...state, turns: turnsAll, activeTurn };
 }
@@ -330,7 +364,7 @@ export function conversationReducer(state: ConversationState, event: Conversatio
             kind: event.kind,
             delta: event.delta,
           },
-        ].slice(-500);
+        ];
         return { ...state, pendingDeltas };
       }
       return applyRoundDelta(state, event.turn_id, event.round_num, event.kind, event.delta);

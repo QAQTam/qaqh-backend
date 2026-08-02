@@ -14,6 +14,9 @@ pub const WORKER_FRAME_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// worker 边界线格式标记（PLAN 阶段 1：新记录必须携带该判别字段）。
 /// reader 必须先检查 `wire`，禁止 untagged 猜测。
 pub const WIRE_RINGING_DOMAIN_V2: &str = "Ringing_domain_v2";
+/// Native transcript producer frame. Unlike the v2 DomainEvent wire it has no
+/// channel: transcript order is assigned by the daemon's one Timeline writer.
+pub const WIRE_TIMELINE_INTENT_V3: &str = "Timeline_intent_v3";
 
 /// frame 方向（stdin 只承载 Command，stdout 只承载 Event；stderr 只承载脱敏日志）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -99,6 +102,46 @@ impl RingingWorkerEventEnvelope {
             event_id: event_id.into(),
             causation_id: None,
             event,
+        }
+    }
+
+    pub fn with_causation(mut self, causation_id: impl Into<String>) -> Self {
+        self.causation_id = Some(causation_id.into());
+        self
+    }
+}
+
+/// Worker → daemon native transcript intent. This is a breaking v3 wire and
+/// intentionally does not reuse `RingingWorkerEventEnvelope`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TimelineWorkerIntentEnvelope {
+    pub schema: String,
+    pub version: u32,
+    pub wire: String,
+    pub direction: WorkerDirection,
+    pub seed: String,
+    pub intent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<String>,
+    pub intent: deepx_domain::TimelineIntent,
+}
+
+impl TimelineWorkerIntentEnvelope {
+    pub fn new(
+        seed: impl Into<String>,
+        intent_id: impl Into<String>,
+        intent: deepx_domain::TimelineIntent,
+    ) -> Self {
+        Self {
+            schema: RINGING_SCHEMA.to_string(),
+            version: 3,
+            wire: WIRE_TIMELINE_INTENT_V3.to_string(),
+            direction: WorkerDirection::Event,
+            seed: seed.into(),
+            intent_id: intent_id.into(),
+            causation_id: None,
+            intent,
         }
     }
 
