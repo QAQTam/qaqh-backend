@@ -150,6 +150,22 @@ impl InputEngine {
                     active: status.active.clone(),
                     catalog_revision: Some(status.catalog_revision.clone()),
                     operation_revision: Some(status.operation_revision),
+                    context_epoch: status.context_epoch as usize,
+                    token_budget: status.token_budget,
+                    token_usage: status.token_usage,
+                    runtime: status
+                        .runtime
+                        .iter()
+                        .map(|item| deepx_domain::SkillRuntimeInfo {
+                            name: item.name.clone(),
+                            description: item.description.clone(),
+                            state: item.state.clone(),
+                            source: item.source.clone(),
+                            token_count: item.token_count,
+                            error: item.error.clone(),
+                        })
+                        .collect(),
+                    diagnostics: status.diagnostics.clone(),
                 },
             ));
         }

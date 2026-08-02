@@ -386,7 +386,7 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
                 when={block.stable && html()}
                 fallback={
                   <Show
-                    when={!block.stable && block.kind === "text"}
+                    when={!block.stable && block.kind === "text" && livePreview().html}
                     fallback={
                       <div
                         data-key={block.key}
@@ -395,22 +395,15 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
                       />
                     }
                   >
-                    <Show
-                      when={livePreview().hash === block.hash}
-                      fallback={
-                        <div
-                          data-key={block.key}
-                          data-hash={block.hash}
-                          textContent={block.raw}
-                        />
-                      }
-                    >
-                      <div
-                        data-key={block.key}
-                        data-hash={block.hash}
-                        innerHTML={livePreview().html}
-                      />
-                    </Show>
+                    {/* 流式 live 块：保留最近一次已解析的内联 HTML。内容滞后
+                        至多一帧，但 delta 到达时不会回退成原始文字（消除
+                        md↔raw 帧级交替闪烁）；未闭合语法由 parseInline 按
+                        字面输出，不会产生破损 HTML。 */}
+                    <div
+                      data-key={block.key}
+                      data-hash={block.hash}
+                      innerHTML={livePreview().html}
+                    />
                   </Show>
                 }
               >

@@ -165,7 +165,13 @@ impl Loop {
         let cancel_for_reader = cancel.clone();
 
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<super::types::WorkerCommand>(4096);
-        let (event_tx, event_rx) = mpsc::sync_channel::<super::types::WriterEvent>(655360);
+        // std 的 sync_channel 在构造时预分配 (capacity + 1) 个 slot 的环形缓冲，
+        // 每个 slot 是 size_of::<WriterEvent>() = 512 字节（枚举按最大变体对齐）。
+        // 旧值 655360 × 512B ≈ 320MB —— 每个 worker 进程启动即常驻，这正是
+        // 单 session 内存 300MB+ 的根因。writer 线程逐事件即时写 stdout，突发
+        // 事件由 PacedEmitter 以 ≤50ms 节流合并，16384 个 slot（8MB）在保留
+        // 背压语义的同时把固定开销降到合理范围。
+        let (event_tx, event_rx) = mpsc::sync_channel::<super::types::WriterEvent>(16384);
         let writer_dead = Arc::new(AtomicBool::new(false));
         let writer_dead_for_thread = writer_dead.clone();
 
@@ -895,6 +901,22 @@ impl Loop {
                     active: status.active.clone(),
                     catalog_revision: Some(status.catalog_revision.clone()),
                     operation_revision: Some(status.operation_revision),
+                    context_epoch: status.context_epoch as usize,
+                    token_budget: status.token_budget,
+                    token_usage: status.token_usage,
+                    runtime: status
+                        .runtime
+                        .iter()
+                        .map(|item| deepx_domain::SkillRuntimeInfo {
+                            name: item.name.clone(),
+                            description: item.description.clone(),
+                            state: item.state.clone(),
+                            source: item.source.clone(),
+                            token_count: item.token_count,
+                            error: item.error.clone(),
+                        })
+                        .collect(),
+                    diagnostics: status.diagnostics.clone(),
                 },
             ));
     }
@@ -1070,14 +1092,14 @@ impl Loop {
                         .reload_config(&mut self.session.agent, &self.cancel);
                     self.emit_operation_completed(&command_id, deepx_domain::ErrorScope::Control);
                 }
-                ControlCommand::SkillsReload => self.emit_skills_status(),
+                ControlCommand::SkillsReload => self.emit_ringing_skills_status(),
                 ControlCommand::SkillsActivate { name } => {
                     let _ = self.session.agent.skills.queue_request(&name, "user");
-                    self.emit_skills_status();
+                    self.emit_ringing_skills_status();
                 }
                 ControlCommand::SkillsRelease { name } => {
                     self.session.agent.deactivate_explicit_skill(&name);
-                    self.emit_skills_status();
+                    self.emit_ringing_skills_status();
                 }
                 ControlCommand::SkillsOperation {
                     operation_id,
@@ -1605,16 +1627,19 @@ impl Loop {
                     .clone();
                 self.session.agent.inject_catalog(&workspace);
                 self.emit_skills_status();
+                self.emit_ringing_skills_status();
                 return Some(Outcome::Handled);
             }
             Ui2Agent::UnloadSkill { name } => {
                 self.session.agent.deactivate_explicit_skill(name);
                 self.emit_skills_status();
+                self.emit_ringing_skills_status();
                 return Some(Outcome::Handled);
             }
             Ui2Agent::ActivateSkill { name } => {
                 let _ = self.session.agent.skills.queue_request(name, "user");
                 self.emit_skills_status();
+                self.emit_ringing_skills_status();
                 return Some(Outcome::Handled);
             }
             Ui2Agent::SkillOperation {
@@ -1638,6 +1663,7 @@ impl Loop {
                     },
                 ));
                 self.emit_skills_status();
+                self.emit_ringing_skills_status();
                 return Some(Outcome::Handled);
             }
             _ => {}

@@ -111,6 +111,8 @@ export function selectRingingPresentation(
       userText: tv.userText,
       status: mapTurnStatus(tv.status),
       failure: tv.failure,
+      startedAt: tv.startedAt,
+      lastActivityAt: tv.lastActivityAt,
       rounds,
       interactions: [],
     };
@@ -185,20 +187,28 @@ export function selectRingingPresentation(
   const skills = stores.control.skills;
   if (skills) {
     const active = new Set(skills.active);
-    const runtime: SkillRuntimeInfo[] = skills.available.map(skill => ({
-      name: skill.name,
-      description: skill.description,
-      source: skill.source,
-      state: active.has(skill.name) ? "active" : "catalog",
-      token_count: 0,
-    }));
+    // 事件携带的 runtime 是权威生命周期（catalog/requested/active/unavailable）。
+    // 旧 daemon 事件没有该字段时退回合成视图（仅 active/catalog 两态）。
+    const runtime: SkillRuntimeInfo[] = (skills.runtime ?? []).length > 0
+      ? skills.runtime
+      : skills.available.map(skill => ({
+        name: skill.name,
+        description: skill.description,
+        source: skill.source,
+        state: active.has(skill.name) ? "active" : "catalog",
+        token_count: 0,
+      }));
     merged.skills = {
       ...merged.skills,
       available: skills.available,
       active: skills.active,
       catalogRevision: skills.catalogRevision ?? "",
       operationRevision: skills.operationRevision ?? 0,
+      contextEpoch: skills.contextEpoch ?? 0,
+      tokenBudget: skills.tokenBudget ?? 0,
+      tokenUsage: skills.tokenUsage ?? 0,
       runtime,
+      diagnostics: skills.diagnostics ?? [],
     };
   }
 

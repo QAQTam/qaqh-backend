@@ -237,6 +237,24 @@ pub struct SkillInfo {
     pub source: String,
 }
 
+/// skill 运行时条目（catalog/requested/active/unavailable 生命周期状态）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillRuntimeInfo {
+    pub name: String,
+    pub description: String,
+    /// 生命周期状态：\"catalog\" | \"requested\" | \"active\" | \"unavailable\"。
+    pub state: String,
+    /// 展示源路径。
+    pub source: String,
+    /// skill 正文估算 token 数。
+    pub token_count: usize,
+    /// 加载失败时的错误信息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversation 频道
 // ─────────────────────────────────────────────────────────────────────────────
@@ -525,6 +543,16 @@ pub enum ControlEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(type = "number | null")]
         operation_revision: Option<u64>,
+        #[serde(default)]
+        context_epoch: usize,
+        #[serde(default)]
+        token_budget: usize,
+        #[serde(default)]
+        token_usage: usize,
+        #[serde(default)]
+        runtime: Vec<SkillRuntimeInfo>,
+        #[serde(default)]
+        diagnostics: Vec<String>,
     },
     /// 系统级通知（决策记录 Q6：最小集——升级、维护、daemon 重启等）。
     SystemNotice {

@@ -118,9 +118,16 @@ export default function SkillsView(props: SkillsViewProps) {
     setRefreshing(true);
     refreshAwaitingCatalog = true;
     setRefreshError(null);
+    // 兜底：daemon 未产生新 catalog 快照（目录未变/事件丢失）时
+    // 也要复位按钮，避免永久转圈。权威快照到达时 createEffect 会提前复位。
+    const timeout = window.setTimeout(() => {
+      refreshAwaitingCatalog = false;
+      setRefreshing(false);
+    }, 8_000);
     try {
       yield props.onReload();
     } catch (error) {
+      window.clearTimeout(timeout);
       refreshAwaitingCatalog = false;
       setRefreshError(error instanceof Error ? error : new Error(String(error)));
       setRefreshing(false);

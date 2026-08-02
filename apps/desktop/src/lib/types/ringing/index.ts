@@ -30,6 +30,7 @@ export type { AgentLifecycleState } from "./AgentLifecycleState";
 export type { ErrorScope } from "./ErrorScope";
 export type { TodoItem } from "./TodoItem";
 export type { SkillInfo } from "./SkillInfo";
+export type { SkillRuntimeInfo } from "./SkillRuntimeInfo";
 export type { NoticeLevel } from "./NoticeLevel";
 export type { RingingEvent } from "./RingingEvent";
 export type { RingingEventEnvelope } from "./RingingEventEnvelope";

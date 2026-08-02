@@ -1,4 +1,4 @@
-import { createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
+import { createMemo, createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { backendStatus, connect, listen, request } from "./runtime/backendClient";
 import { requestWithRinging } from "./runtime/ringingCommands";
 import {
@@ -589,30 +589,39 @@ export default function App() {
               />
             </Match>
             <Match when={view() === "skills"}>
-              <SkillsView
-                seed={activeSeed()}
-                available={activeEntry()?.state().skills.available ?? []}
-                active={activeEntry()?.state().skills.active ?? []}
-                runtime={activeEntry()?.state().skills.runtime ?? []}
-                catalogRevision={activeEntry()?.state().skills.catalogRevision}
-                contextEpoch={activeEntry()?.state().skills.contextEpoch}
-                tokenBudget={activeEntry()?.state().skills.tokenBudget}
-                tokenUsage={activeEntry()?.state().skills.tokenUsage}
-                diagnostics={activeEntry()?.state().skills.diagnostics ?? []}
-                onActivate={async name => { await request("skills.operation", {
-                  seed: activeSeed(), operationId: crypto.randomUUID(), action: "request", name,
-                  expectedRevision: activeEntry()?.state().skills.operationRevision ?? 0,
-                }); }}
-                onUnload={async name => { await request("skills.operation", {
-                  seed: activeSeed(), operationId: crypto.randomUUID(), action: "release", name,
-                  expectedRevision: activeEntry()?.state().skills.operationRevision ?? 0,
-                }); }}
-                onRetain={async name => { await request("skills.operation", {
-                  seed: activeSeed(), operationId: crypto.randomUUID(), action: "retain", name,
-                  expectedRevision: activeEntry()?.state().skills.operationRevision ?? 0,
-                }); }}
-                onReload={async () => { await request("skills.reload", { seed: activeSeed() }); }}
-              />
+              <Show when={activeEntry()} keyed>
+                {entry => {
+                  // SkillsView 数据源与 ChatView 同源（Ringing presentation）。
+                  // entry.state().skills 没有任何生产写入路径，必须从
+                  // presentationFor 派生，skills_updated 事件才能驱动 UI。
+                  const skills = createMemo(() => presentationFor(entry).skills);
+                  const seed = () => entry.state().seed;
+                  return <SkillsView
+                    seed={seed()}
+                    available={skills().available}
+                    active={skills().active}
+                    runtime={skills().runtime}
+                    catalogRevision={skills().catalogRevision}
+                    contextEpoch={skills().contextEpoch}
+                    tokenBudget={skills().tokenBudget}
+                    tokenUsage={skills().tokenUsage}
+                    diagnostics={skills().diagnostics}
+                    onActivate={async name => { await request("skills.operation", {
+                      seed: seed(), operationId: crypto.randomUUID(), action: "request", name,
+                      expectedRevision: skills().operationRevision ?? 0,
+                    }); }}
+                    onUnload={async name => { await request("skills.operation", {
+                      seed: seed(), operationId: crypto.randomUUID(), action: "release", name,
+                      expectedRevision: skills().operationRevision ?? 0,
+                    }); }}
+                    onRetain={async name => { await request("skills.operation", {
+                      seed: seed(), operationId: crypto.randomUUID(), action: "retain", name,
+                      expectedRevision: skills().operationRevision ?? 0,
+                    }); }}
+                    onReload={async () => { await request("skills.reload", { seed: seed() }); }}
+                  />;
+                }}
+              </Show>
             </Match>
             <Match when={view() === "home"}>
               <StartupView

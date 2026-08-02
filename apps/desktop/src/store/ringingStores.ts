@@ -19,6 +19,7 @@ import type {
   PermissionRisk,
   RoundDeltaKind,
   SkillInfo,
+  SkillRuntimeInfo,
   TodoItem,
 } from "../lib/types/ringing";
 import type { DashboardSnapshot } from "../lib/types/ringing/DashboardSnapshot";
@@ -82,6 +83,11 @@ export interface ControlState {
     active: string[];
     catalogRevision?: string | null;
     operationRevision?: number | null;
+    contextEpoch: number;
+    tokenBudget: number;
+    tokenUsage: number;
+    runtime: SkillRuntimeInfo[];
+    diagnostics: string[];
   } | null;
 }
 
@@ -177,6 +183,13 @@ export function controlReducer(state: ControlState, event: ControlEvent): Contro
           active: event.active,
           catalogRevision: event.catalog_revision,
           operationRevision: event.operation_revision,
+          // 旧 daemon 事件不含新字段：serde(default) 保证新 daemon 全量，
+          // 这里对缺省值兜底，避免 undefined 泄漏到渲染层。
+          contextEpoch: Number(event.context_epoch ?? 0),
+          tokenBudget: Number(event.token_budget ?? 0),
+          tokenUsage: Number(event.token_usage ?? 0),
+          runtime: event.runtime ?? [],
+          diagnostics: event.diagnostics ?? [],
         },
       };
     default:
@@ -201,6 +214,10 @@ export interface TurnView {
   rounds: RoundView[];
   status: "running" | "completed" | "failed" | "cancelled";
   lastRoundNum: number;
+  /** turn 开始时间（本地时钟；snapshot 恢复时为恢复时刻）。 */
+  startedAt?: number;
+  /** 该 turn 收到最后一个领域事件的时间（卡死检测依据）。 */
+  lastActivityAt?: number;
   failure?: { code: string; message: string };
 }
 
@@ -356,6 +373,8 @@ export function applyConversationSnapshot(
       rounds,
       status: raw.turn_id === activeTurnId ? "running" : "completed",
       lastRoundNum: rounds.reduce((max, r) => Math.max(max, r.roundNum), 0),
+      startedAt: Date.now(),
+      lastActivityAt: Date.now(),
     });
   }
   const existingIds = new Set(state.turns.map((turn) => turn.turnId));
@@ -382,6 +401,18 @@ export function applyConversationSnapshot(
 }
 
 export function conversationReducer(state: ConversationState, event: ConversationEvent): ConversationState {
+  // 任何领域事件都视为活动：刷新当前 turn 的活动时间（卡死检测依据）。
+  // turn_started 本身会创建新 turn，无需（也不能）刷新旧 turn。
+  if (state.activeTurn && event.type !== "turn_started") {
+    const now = Date.now();
+    state = {
+      ...state,
+      activeTurn: { ...state.activeTurn, lastActivityAt: now },
+      turns: state.turns.map((t) =>
+        t.turnId === state.activeTurn!.turnId ? { ...t, lastActivityAt: now } : t,
+      ),
+    };
+  }
   switch (event.type) {
     case "turn_started": {
       const turn: TurnView = {
@@ -390,6 +421,8 @@ export function conversationReducer(state: ConversationState, event: Conversatio
         rounds: [],
         status: "running",
         lastRoundNum: 0,
+        startedAt: Date.now(),
+        lastActivityAt: Date.now(),
       };
       let next: ConversationState = {
         ...state,

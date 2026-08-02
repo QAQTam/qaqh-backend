@@ -33,8 +33,8 @@ pub use event::{
     ActivityState, AgentLifecycleState, AskMode, AskQuestion, AskResolution, CompactStatus,
     ContentRef, ControlEvent, ConversationEvent, DashboardDocument, DashboardSnapshot,
     DashboardTask, DomainError, DomainEvent, ErrorScope, NoticeLevel, PermissionCategory,
-    PermissionRisk, ProviderToolState, RoundDeltaKind, SessionState, SkillInfo, TodoItem,
-    ToolEvent, ToolResult,
+    PermissionRisk, ProviderToolState, RoundDeltaKind, SessionState, SkillInfo, SkillRuntimeInfo,
+    TodoItem, ToolEvent, ToolResult,
 };
 pub use timeline::{
     TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
