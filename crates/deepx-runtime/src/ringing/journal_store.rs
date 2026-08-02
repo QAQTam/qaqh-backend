@@ -152,6 +152,53 @@ impl JournalStore {
         Ok(())
     }
 
+    /// 物理重写 jsonl：以内存中存活事件为准，丢弃已被
+    /// `compact_round_deltas` 折叠的 RoundDelta 与淘汰记录。
+    ///
+    /// 先关闭打开句柄再原子替换（tmp + rename），避免 Windows 上 rename
+    /// 与持有句柄的 append 竞态；后续写入经 `file()` 重新打开新文件。
+    pub fn rewrite(
+        &mut self,
+        channel: RingingChannel,
+        seed: &str,
+        envelopes: &[RingingEventEnvelope],
+        checkpoints: &[(String, u64)],
+    ) -> std::io::Result<()> {
+        self.files.remove(&(channel, seed.to_string()));
+        let path = self.path_for(channel, seed);
+        let mut body = Vec::new();
+        for envelope in envelopes {
+            body.extend(
+                serde_json::to_vec(&JournalOp::Append {
+                    envelope: envelope.clone(),
+                })
+                .map_err(io_error)?,
+            );
+            body.push(b'\n');
+        }
+        for (identity, stream_seq) in checkpoints {
+            body.extend(
+                serde_json::to_vec(&JournalOp::Checkpoint {
+                    identity: identity.clone(),
+                    stream_seq: *stream_seq,
+                })
+                .map_err(io_error)?,
+            );
+            body.push(b'\n');
+        }
+        let tmp = path.with_extension("jsonl.tmp");
+        std::fs::write(&tmp, body)?;
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        std::fs::rename(tmp, path)
+    }
+
+    /// 当前 jsonl 物理大小（字节）。
+    pub fn file_size(&self, channel: RingingChannel, seed: &str) -> std::io::Result<u64> {
+        Ok(std::fs::metadata(self.path_for(channel, seed))?.len())
+    }
+
     /// 装载磁盘日志（损坏行跳过并记录，不整体失败）。
     pub fn load(root: impl AsRef<Path>) -> std::io::Result<LoadedJournal> {
         let root = root.as_ref().to_path_buf();
@@ -395,7 +442,84 @@ mod tests {
         }
         let loaded = JournalStore::load(&root).expect("load");
         let (_, _, ops) = &loaded.per_seed[0];
+        let loaded = JournalStore::load(&root).expect("load");
+        let (_, _, ops) = &loaded.per_seed[0];
         assert_eq!(ops.len(), 1, "corrupt line skipped");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rewrite_drops_compacted_deltas_and_preserves_survivors() {
+        let root = std::env::temp_dir().join(format!(
+            "deepx-ringing-rewrite-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let delta = {
+            let mut envelope = env(1, "delta-1");
+            envelope.event = deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::RoundDelta {
+                    turn_id: "t1".into(),
+                    round_num: 0,
+                    kind: deepx_domain::RoundDeltaKind::Answering,
+                    delta: "token".into(),
+                },
+            )
+            .into();
+            envelope
+        };
+        let turn_started = env(2, "turn-2");
+        {
+            let mut store = JournalStore::new(&root).expect("create");
+            store
+                .append(RingingChannel::Conversation, "s", &delta)
+                .expect("append delta");
+            store
+                .append(RingingChannel::Conversation, "s", &turn_started)
+                .expect("append turn");
+            store
+                .checkpoint(RingingChannel::Conversation, "s", "tool:c1", 9)
+                .expect("checkpoint");
+            let before = store
+                .file_size(RingingChannel::Conversation, "s")
+                .expect("size");
+            // 重写：内存存活事件只有 turn_started（delta 已被 compact 折叠），
+            // checkpoints 保留。重写后文件必须物理收缩。
+            store
+                .rewrite(
+                    RingingChannel::Conversation,
+                    "s",
+                    &[turn_started.clone()],
+                    &[("tool:c1".to_string(), 9)],
+                )
+                .expect("rewrite");
+            let after = store
+                .file_size(RingingChannel::Conversation, "s")
+                .expect("size after");
+            assert!(after < before, "rewrite must shrink the file");
+            // 重写后句柄已关闭：再 append 必须落到新文件。
+            store
+                .append(RingingChannel::Conversation, "s", &env(3, "e3"))
+                .expect("append after rewrite");
+        }
+        let loaded = JournalStore::load(&root).expect("load");
+        let (_, _, ops) = &loaded.per_seed[0];
+        // delta 的 Append 已被物理移除；turn_started 与后续 e3 保留；checkpoint 保留。
+        let appends: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                JournalOp::Append { envelope } => Some(envelope.event_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(appends, vec!["turn-2", "e3"]);
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, JournalOp::Checkpoint { identity, .. } if identity == "tool:c1"))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

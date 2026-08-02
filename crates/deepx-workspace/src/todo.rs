@@ -550,7 +550,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
                     "type": "string",
                     "description": "Optional context or acceptance criteria, at most 200 characters."
                 },
-                "id": {"type": ["string", "integer"]},
+                "id": {"type": ["string", "integer"], "description": "Task id. Omit for action=create (a new id is generated); pass the id returned by create/list for update, cancel, submit or activate."},
                 "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]},
                 "evidence": {"type": "string"}
             },

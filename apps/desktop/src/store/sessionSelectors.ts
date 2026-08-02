@@ -6,8 +6,32 @@ export function activeTurn(state: RawSessionState): RawTurn | undefined {
   );
 }
 
+/**
+ * 卡死判定阈值：running/waiting 的 turn 超过该时长没有任何领域事件，
+ * 视为会话卡死（典型场景：工具调用未返回 result 且 worker 无法收尾）。
+ */
+export const SESSION_STALL_TIMEOUT_MS = 4 * 60 * 1000;
+
+function lastActivityOf(turn: RawTurn): number | undefined {
+  return turn.lastActivityAt ?? turn.startedAt;
+}
+
+/** 会话是否处于卡死状态（有 running turn 但长时间无事件）。 */
+export function isSessionStalled(state: RawSessionState): boolean {
+  const turn = activeTurn(state);
+  if (!turn) return false;
+  const last = lastActivityOf(turn);
+  if (last == null) return false;
+  return Date.now() - last >= SESSION_STALL_TIMEOUT_MS;
+}
+
 export function isSessionStreaming(state: RawSessionState): boolean {
-  return activeTurn(state) !== undefined;
+  const turn = activeTurn(state);
+  if (!turn) return false;
+  const last = lastActivityOf(turn);
+  // 无时间戳（旧数据/恢复间隙）：保守按 streaming 处理，避免误发。
+  if (last == null) return true;
+  return Date.now() - last < SESSION_STALL_TIMEOUT_MS;
 }
 
 export function activeInteraction(state: RawSessionState): PendingInteraction | null {

@@ -135,6 +135,8 @@ export type RawTurn = {
   userText: string;
   status: TurnStatus;
   startedAt?: number;
+  /** 该 turn 收到最后一个领域事件的时间（卡死检测依据）。 */
+  lastActivityAt?: number;
   endedAt?: number;
   stopReason?: string;
   failure?: TurnFailure;

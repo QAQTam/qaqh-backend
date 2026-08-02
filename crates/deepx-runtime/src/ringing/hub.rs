@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 
 use deepx_domain::{
-    ConversationEvent, Delivery, DomainEvent, RingingChannel, TimelineEntry, TimelineIntent,
-    TimelineSnapshot,
+    ConversationEvent, Delivery, DomainEvent, RingingChannel, TimelineBlockState, TimelineEntry,
+    TimelineFailure, TimelineIntent, TimelineSnapshot, TimelineTurnState,
 };
 use deepx_ringing::{
     RingingChannelSnapshot, RingingEvent, RingingEventEnvelope, RingingResetRequired,
@@ -33,6 +33,10 @@ use super::router::{ChannelRouter, replaceable_key_for, terminal_replaceable_key
 use super::sequencer::Sequencer;
 use crate::timeline_store::TimelineStore;
 use crate::{TimelineAppender, TimelineError, TimelineLiveEntry};
+
+/// journal jsonl 超过该物理大小时，compact 后触发整文件重写（丢弃已折叠的
+/// RoundDelta）。append-only 日志若不重写，磁盘与装载成本永久累积。
+const JOURNAL_REWRITE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
 
 /// 事件已接受（含 envelope 与幂等状态）。
 #[derive(Debug)]
@@ -221,9 +225,11 @@ impl RingingHub {
                     for seed in seeds {
                         let Some((snapshot, journal)) = ({
                             let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
-                            timeline
-                                .snapshot(&seed)
-                                .map(|snapshot| (snapshot, timeline.replay_since(&seed, 0)))
+                            timeline.snapshot(&seed).map(|snapshot| {
+                                let journal = timeline.replay_since(&seed, 0);
+                                let journal = Self::prune_sealed_timeline_journal(&snapshot, journal);
+                                (snapshot, journal)
+                            })
                         }) else {
                             continue;
                         };
@@ -323,13 +329,110 @@ impl RingingHub {
         };
         match loaded {
             Ok(timelines) => {
-                let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-                for (seed, persisted) in timelines {
-                    appender.restore(seed, persisted.snapshot, persisted.journal);
+                {
+                    let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                    for (seed, persisted) in &timelines {
+                        appender.restore(
+                            seed.clone(),
+                            persisted.snapshot.clone(),
+                            persisted.journal.clone(),
+                        );
+                    }
+                }
+                // 上次运行遗留的孤儿 running turn 在此收尾（见
+                // seal_orphan_running_turns）。persistence worker 尚未启动，
+                // 有变更时需同步写回，保证重启后快照已收敛。
+                for (seed, _) in &timelines {
+                    if !self.seal_orphan_running_turns(seed) {
+                        continue;
+                    }
+                    let (snapshot, journal) = {
+                        let appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                        match appender.snapshot(seed) {
+                            Some(snapshot) => {
+                                let journal = appender.replay_since(seed, 0);
+                                let journal =
+                                    Self::prune_sealed_timeline_journal(&snapshot, journal);
+                                (snapshot, journal)
+                            }
+                            None => continue,
+                        }
+                    };
+                    let store = self.timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(store) = store.as_ref()
+                        && let Err(error) = store.persist(seed, &snapshot, journal)
+                    {
+                        log::warn!("[timeline] orphan seal persist failed for {seed}: {error}");
+                    }
                 }
             }
             Err(error) => log::warn!("[timeline] load persisted state failed: {error}"),
         }
+    }
+
+    /// 收尾孤儿 running turn。daemon 重启或 worker 重新 spawn 后，timeline 中
+    /// 任何未 seal 的 turn 都没有存活生产者（典型场景：工具调用未返回 result
+    /// 时进程被杀）。若不 seal，前端会永远把它投影为 running，stop/send 按钮
+    /// 卡死在 stop 且新消息无法发送——这是"重启 daemon/前端都无法再发送新
+    /// 消息"的根因。
+    ///
+    /// seal 顺序遵循 TimelineAppender 契约：先 seal 全部 open block，再 seal
+    /// 全部未 seal round（is_final=true，这是该 turn 的最后一轮），最后将 turn
+    /// seal 为 Cancelled。幂等：已 seal 的 turn 直接跳过。返回是否有变更。
+    pub fn seal_orphan_running_turns(&self, seed: &str) -> bool {
+        let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(snapshot) = appender.snapshot(seed) else {
+            return false;
+        };
+        let mut changed = false;
+        for turn in snapshot.turns.iter().filter(|turn| !turn.sealed) {
+            for round in &turn.rounds {
+                for block in &round.blocks {
+                    if block.state == TimelineBlockState::Sealed {
+                        continue;
+                    }
+                    match appender.seal_block(seed, &turn.turn_id, round.round_num, &block.block_id)
+                    {
+                        Ok(_) => changed = true,
+                        Err(error) => log::warn!(
+                            "[timeline] orphan seal block failed for {seed} {}: {error}",
+                            block.block_id
+                        ),
+                    }
+                }
+            }
+            for round in &turn.rounds {
+                if round.sealed {
+                    continue;
+                }
+                match appender.seal_round(seed, &turn.turn_id, round.round_num, true) {
+                    Ok(_) => changed = true,
+                    Err(error) => log::warn!(
+                        "[timeline] orphan seal round failed for {seed} {}/{}: {error}",
+                        turn.turn_id,
+                        round.round_num
+                    ),
+                }
+            }
+            match appender.seal_turn_with_state(
+                seed,
+                &turn.turn_id,
+                TimelineTurnState::Cancelled,
+                Some(TimelineFailure {
+                    code: "daemon_restart_interrupted".into(),
+                    message:
+                        "Daemon restarted while this turn was running; the turn was interrupted and the session is ready for new input."
+                            .into(),
+                }),
+            ) {
+                Ok(_) => changed = true,
+                Err(error) => log::warn!(
+                    "[timeline] orphan seal turn failed for {seed} {}: {error}",
+                    turn.turn_id
+                ),
+            }
+        }
+        changed
     }
 
     pub fn epoch(&self) -> &str {
@@ -493,6 +596,7 @@ impl RingingHub {
                     let removed = st.journal.compact_round_deltas(turn_id, *round_num);
                     if removed > 0 {
                         self.persist_compact(channel, seed, turn_id, *round_num);
+                        self.maybe_rewrite_journal(channel, seed, &st);
                     }
                 }
                 for key in terminal_replaceable_keys(&envelope.event) {
@@ -697,6 +801,60 @@ impl RingingHub {
         {
             log::warn!("[ringing] journal compact persist failed: {error}");
         }
+    }
+
+    /// RoundDelta 折叠后检查 jsonl 物理大小，超过阈值则按内存存活事件整文件
+    /// 重写（丢弃已折叠的增量，磁盘收敛）。低频触发（每轮至多一次）。
+    fn maybe_rewrite_journal(&self, channel: RingingChannel, seed: &str, st: &SeedChannelState) {
+        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(store) = guard.as_mut() else { return };
+        let size = match store.file_size(channel, seed) {
+            Ok(size) => size,
+            Err(_) => return,
+        };
+        if size < JOURNAL_REWRITE_THRESHOLD_BYTES {
+            return;
+        }
+        let envelopes: Vec<_> = st.journal.entries().cloned().collect();
+        let checkpoints: Vec<(String, u64)> = st
+            .journal
+            .checkpoints()
+            .iter()
+            .map(|(key, seq)| (key.clone(), *seq))
+            .collect();
+        if let Err(error) = store.rewrite(channel, seed, &envelopes, &checkpoints) {
+            log::warn!("[ringing] journal rewrite failed for {seed}: {error}");
+        } else {
+            log::info!(
+                "[ringing] journal rewritten for {seed}: {} bytes -> {} entries",
+                size,
+                envelopes.len()
+            );
+        }
+    }
+
+    /// 过滤已 seal turn 的 timeline journal 条目。已 seal turn 的 TextDelta/
+    /// ToolProgress 已被快照全量覆盖，且 seal 后不会再有新 delta（append_text
+    /// 拒绝已 seal block），因此持久化时丢弃这些条目不会破坏恢复：restore 的
+    /// next_fragment 只从保留的活跃 turn 条目重建。这消除了每次 persist 都
+    /// 全量克隆整个 journal 的写放大（曾实测 13.5MB JSON 每几秒重写一次）。
+    fn prune_sealed_timeline_journal(
+        snapshot: &deepx_domain::TimelineSnapshot,
+        journal: Vec<TimelineEntry>,
+    ) -> Vec<TimelineEntry> {
+        let sealed: HashSet<&str> = snapshot
+            .turns
+            .iter()
+            .filter(|turn| turn.sealed)
+            .map(|turn| turn.turn_id.as_str())
+            .collect();
+        if sealed.is_empty() {
+            return journal;
+        }
+        journal
+            .into_iter()
+            .filter(|entry| !sealed.contains(entry.turn_id.as_str()))
+            .collect()
     }
 
     fn persist_checkpoint(
@@ -1163,9 +1321,110 @@ mod tests {
         }
         let hub = RingingHub::with_persistence("epoch-2", &root);
         let snapshot = hub.timeline_snapshot("s").unwrap();
-        assert_eq!(snapshot.watermark, 3);
+        // 恢复时遗留的 running turn 必须收尾为 Cancelled（孤儿 turn seal
+        // 契约），否则前端会永远把它投影为 running 并禁止发送新消息。
+        assert_eq!(snapshot.watermark, 6);
         assert_eq!(snapshot.turns[0].rounds[0].blocks[0].text, "hello");
-        assert_eq!(hub.timeline_replay_since("s", 1).len(), 2);
+        assert_eq!(
+            snapshot.turns[0].state,
+            deepx_domain::TimelineTurnState::Cancelled
+        );
+        assert!(snapshot.turns[0].rounds[0].sealed);
+        assert_eq!(
+            snapshot.turns[0].rounds[0].blocks[0].state,
+            deepx_domain::TimelineBlockState::Sealed
+        );
+        assert_eq!(hub.timeline_replay_since("s", 1).len(), 5);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn orphan_running_turns_are_sealed_on_recovery_and_sealed_turns_are_untouched() {
+        let root = temp_root("timeline-orphan-seal");
+        {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            // 完整完成的 turn：正常 seal 后恢复不得被改动。
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::TurnOpened {
+                    turn_id: "t1".into(),
+                    user_text: "a".into(),
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::BlockOpened {
+                    turn_id: "t1".into(),
+                    round_num: 0,
+                    block_id: "text".into(),
+                    kind: deepx_domain::TimelineBlockKind::Text,
+                    tool: None,
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::BlockSealed {
+                    turn_id: "t1".into(),
+                    round_num: 0,
+                    block_id: "text".into(),
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::RoundSealed {
+                    turn_id: "t1".into(),
+                    round_num: 0,
+                    is_final: true,
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::TurnSealed {
+                    turn_id: "t1".into(),
+                    state: deepx_domain::TimelineTurnState::Completed,
+                    failure: None,
+                },
+            )
+            .unwrap();
+            // 孤儿 running turn：只有 TurnOpened + BlockOpened，无任何 seal。
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::TurnOpened {
+                    turn_id: "t2".into(),
+                    user_text: "b".into(),
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::BlockOpened {
+                    turn_id: "t2".into(),
+                    round_num: 0,
+                    block_id: "text2".into(),
+                    kind: deepx_domain::TimelineBlockKind::Text,
+                    tool: None,
+                },
+            )
+            .unwrap();
+        }
+        let hub = RingingHub::with_persistence("epoch-2", &root);
+        let snapshot = hub.timeline_snapshot("s").unwrap();
+        let t1 = snapshot.turns.iter().find(|turn| turn.turn_id == "t1").unwrap();
+        assert_eq!(t1.state, deepx_domain::TimelineTurnState::Completed);
+        assert!(t1.sealed);
+        let t2 = snapshot.turns.iter().find(|turn| turn.turn_id == "t2").unwrap();
+        assert_eq!(t2.state, deepx_domain::TimelineTurnState::Cancelled);
+        assert!(t2.sealed);
+        assert_eq!(
+            t2.rounds[0].blocks[0].state,
+            deepx_domain::TimelineBlockState::Sealed
+        );
+        // 幂等：再次收尾无变更。
+        assert!(!hub.seal_orphan_running_turns("s"));
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -112,6 +112,7 @@ export default function SettingsView(props: SettingsViewProps) {
   const [migrationPhase, setMigrationPhase] = createSignal<"idle" | "confirm" | "running" | "done">("idle");
   const [dualWriteChecked, setDualWriteChecked] = createSignal(true);
   const [saved, setSaved] = createSignal(false);
+  const [saveError, setSaveError] = createSignal<string | null>(null);
   let dbToggled = false;
 
   // Subagent
@@ -277,6 +278,7 @@ export default function SettingsView(props: SettingsViewProps) {
 
   async function toggleDatabase(enabled: boolean) {
     if (!databaseAvailable()) return;
+    setSaveError(null);
     try {
       const result = await request<{ enabled?: boolean }>("config.set_database_enabled", { enabled });
       setDatabaseEnabled(result?.enabled ?? enabled);
@@ -285,6 +287,7 @@ export default function SettingsView(props: SettingsViewProps) {
       setTimeout(() => setSaved(false), 2500);
     } catch (e) {
       console.error(e);
+      setSaveError(String(e instanceof Error ? e.message : e));
     }
   }
 
@@ -351,6 +354,7 @@ export default function SettingsView(props: SettingsViewProps) {
   }
 
   async function save() {
+    setSaveError(null);
     try {
       const apiKeyReplacement = !apiKeyConfigured() || showApiKeyInput() ? apiKeyValue() : "";
       const subApiKeyReplacement = !subApiKeyConfigured() || showSubApiKeyInput() ? subApiKeyValue() : "";
@@ -381,11 +385,11 @@ export default function SettingsView(props: SettingsViewProps) {
         setSubApiKeyConfigured(true);
         setSubApiKeyValue("");
         setShowSubApiKeyInput(false);
+      }
       if (mmApiKeyConfigured() || mmApiKeyReplacement) {
         setMmApiKeyConfigured(true);
         setMmApiKeyValue("");
         setShowMmApiKeyInput(false);
-      }
       }
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -396,7 +400,10 @@ export default function SettingsView(props: SettingsViewProps) {
           kind: "info",
         });
       }
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error(e);
+      setSaveError(String(e instanceof Error ? e.message : e));
+    }
   }
 
   // ── Migration ──
@@ -505,6 +512,12 @@ export default function SettingsView(props: SettingsViewProps) {
           {saved() ? "✓ " + (t().settings.saved ?? "Saved") : t().settings.save}
         </button>
       </div>
+      <Show when={saveError()}>
+        <div class="settings-error">
+          <p>{t().settings.saveFailed ?? "Save failed"}</p>
+          <p class="settings-error-detail">{saveError()}</p>
+        </div>
+      </Show>
 
       <Show when={!configLoading()} fallback={<SettingsLoading />}>
         <Show when={!loadError()} fallback={<ErrorState />}>

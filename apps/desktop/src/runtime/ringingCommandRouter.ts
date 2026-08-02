@@ -133,6 +133,7 @@ export const RINGING_COMMAND_METHODS: Record<string, RingingCommandSpec> = {
 export const RINGING_QUERY_METHODS: ReadonlySet<string> = new Set([
   "daemon.version",
   "session.list",
+  "session.meta",
   "session.activity",
   "session.dashboard",
   "session.get_activity",

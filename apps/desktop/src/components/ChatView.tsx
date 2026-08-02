@@ -11,6 +11,7 @@ import { createFollowUpQueue } from "../store/followUpQueue";
 import {
   activeInteraction,
   canLoadMore,
+  isSessionStalled,
   isSessionStreaming,
   sessionUsage,
 } from "../store/sessionSelectors";
@@ -93,6 +94,7 @@ export default function ChatView(props: ChatViewProps) {
     return item?.kind === "plan" ? item : null;
   };
   const streaming = () => isSessionStreaming(session());
+  const stalled = () => isSessionStalled(session());
   const usage = () => sessionUsage(session());
   const [mode, setMode] = createSignal("plan");
   const [infoOpen, setInfoOpen] = createSignal(false);
@@ -130,6 +132,11 @@ export default function ChatView(props: ChatViewProps) {
   }
 
   const handleSend = action(async function* (text: string, files: string[], imageBlocks?: Array<{ mimeType: string; data: string }>) {
+    // 卡死恢复：工具调用未返回结果且长时间无事件时，后端可能残留一个
+    // 永不终结的 turn。先发送 cancel 清掉僵尸 turn，再发新消息。
+    if (stalled()) {
+      yield requestWithRinging("session.cancel", { seed: seed() });
+    }
     // Optimistic: show user's message immediately
     const optimisticTurn: RawTurn = {
       turnId: `optimistic-${Date.now()}`,
@@ -231,6 +238,11 @@ export default function ChatView(props: ChatViewProps) {
         {retry => <div class="provider-retry-status" role="status">
           连接暂时不稳定，将在 {retry().delaySecs} 秒后重试（{retry().attempt}/{retry().maxRetries}）
         </div>}
+      </Show>
+      <Show when={stalled()}>
+        <div class="provider-retry-status" role="status">
+          检测到会话可能已卡住（长时间无响应）。发送新消息时将先取消当前回合以恢复会话。
+        </div>
       </Show>
       <ConversationTranscript
         turns={turns()}

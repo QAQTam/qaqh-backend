@@ -13,10 +13,25 @@ pub fn register(mgr: &mut crate::ToolManager) {
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["check", "wait", "write", "kill"]},
-                "id": {"type": "integer"},
-                "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 3600},
-                "text": {"type": "string"}
+                "action": {
+                    "type": "string",
+                    "enum": ["check", "wait", "write", "kill"],
+                    "description": "check: query status, output tail and metadata of a tracked process; wait: block until the process exits (or timeout_secs elapses) and return its final state; write: send text to the process stdin; kill: terminate the process tree."
+                },
+                "id": {
+                    "type": "integer",
+                    "description": "Process id returned by exec when a command was backgrounded (status \\\"backgrounded\\\" + process_id)."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3600,
+                    "description": "Max seconds to wait for action=wait. Default 120. Ignored by check/write/kill."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Text to write to the process stdin (action=write only; newline is NOT appended automatically)."
+                }
             },
             "required": ["action", "id"],
             "additionalProperties": false

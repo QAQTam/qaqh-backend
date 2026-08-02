@@ -99,6 +99,7 @@ const en = {
     hide: "Hide",
     save: "Save",
     saved: "Saved",
+    saveFailed: "Save failed",
     cancel: "Cancel",
     activeProfile: "Profile",
     sectionProvider: "Provider",

@@ -5,6 +5,7 @@
 pub mod exec;
 
 pub mod apply_patch;
+pub mod file_mutate;
 pub mod authorization;
 pub mod backend;
 mod code_delta;
@@ -115,6 +116,22 @@ macro_rules! handler {
     ($name:ident, $exec:ident) => {
         fn $name(ctx: ToolCallCtx) -> ToolResult {
             $exec(&ctx.args)
+        }
+    };
+}
+
+/// String 结果兼容宏：旧式 exec 返回 `String`（[ERROR]/[PARTIAL] 前缀视为失败），
+/// 包装为结构化 `ToolResult`。file_mutate 系列工具使用（write/edit/edit_block/delete）。
+#[macro_export]
+macro_rules! handler_from_string {
+    ($name:ident, $exec:ident) => {
+        fn $name(ctx: ToolCallCtx) -> ToolResult {
+            let s: String = $exec(&ctx.args);
+            if s.trim_start().starts_with("[ERROR") || s.trim_start().starts_with("[PARTIAL") {
+                ToolResult::error(s)
+            } else {
+                ToolResult::ok(s)
+            }
         }
     };
 }
@@ -513,3 +530,6 @@ impl ToolHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod schema_spot_check;

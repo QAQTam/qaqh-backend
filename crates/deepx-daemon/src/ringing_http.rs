@@ -2026,12 +2026,7 @@ async fn handle_action(
         object.remove("action_id");
         object.remove("fingerprint");
     }
-    let fingerprint_payload = serde_json::to_vec(&serde_json::json!({
-        "method": method,
-        "params": fingerprint_params,
-    }))
-    .map_err(stringify)?;
-    let fingerprint = deepx_runtime::ringing::content_store::sha256_hex(&fingerprint_payload);
+    let fingerprint = action_fingerprint(&method, &fingerprint_params)?;
     if supplied_fingerprint.is_some_and(|value| value != fingerprint) {
         return write_response(
             stream,
@@ -2106,6 +2101,22 @@ async fn handle_action(
             .await
         }
     }
+}
+
+/// 计算 action 幂等指纹，必须与 Electron `ringingManager.action` 的
+/// `sha256(JSON.stringify({method, params}))` 字节完全一致。
+///
+/// 关键约束：`params` 必须按 wire 字节序（客户端 JSON 键插入序）序列化。
+/// 依赖 serde_json 的 `preserve_order` feature——否则 BTreeMap 会按
+/// 字典序重排键，任何参数键非字典序的 action（如 config.save 的
+/// lang + autoCompactThreshold）都会被客户端拒绝为指纹不匹配。
+fn action_fingerprint(method: &str, params: &serde_json::Value) -> Result<String, String> {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "method": method,
+        "params": params,
+    }))
+    .map_err(stringify)?;
+    Ok(deepx_runtime::ringing::content_store::sha256_hex(&payload))
 }
 
 /// SessionClose 的 seed 解析：命令 seed 优先，其次 envelope seed（无则空）。
@@ -2424,6 +2435,24 @@ mod tests {
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/ringing/v1/content");
         assert_eq!(request.body, body);
+    }
+
+    #[test]
+    fn action_fingerprint_matches_js_client_wire_bytes() {
+        // Electron 客户端按 JSON 插入序 stringify；daemon 必须按 wire 字节序
+        // 复算。回归保护：参数键非字典序（lang < autoCompactThreshold 为字典序，
+        // 此处故意反插）时，若 serde_json 丢失 preserve_order 会重排键，
+        // 导致 config.save 等 action 报 400 fingerprint mismatch。
+        let body =
+            br#"{"lang":"en","autoCompactThreshold":0.75,"subagentDefaultTools":["file","exec"]}"#;
+        let mut params: serde_json::Value = serde_json::from_slice(body).unwrap();
+        params.as_object_mut().unwrap().remove("action_id");
+        params.as_object_mut().unwrap().remove("fingerprint");
+        let fingerprint = action_fingerprint("config.save", &params).unwrap();
+        let js_payload =
+            br#"{"method":"config.save","params":{"lang":"en","autoCompactThreshold":0.75,"subagentDefaultTools":["file","exec"]}}"#;
+        let js_fingerprint = deepx_runtime::ringing::content_store::sha256_hex(js_payload);
+        assert_eq!(fingerprint, js_fingerprint, "fingerprint payload must match JS JSON.stringify byte-for-byte");
     }
 
     #[test]

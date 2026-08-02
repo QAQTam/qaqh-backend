@@ -189,7 +189,7 @@ fn display(path: &Path) -> String {
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
         key: "search".into(),
-        description: "Search the workspace with structured text, symbol, or file queries. Returns bounded path/line/column matches and a continuation cursor.",
+        description: "Search the workspace with structured text, symbol, or file queries. Returns bounded path/line/column matches and a continuation cursor. Use kind=files to enumerate paths, kind=text for literal content search, kind=symbol for definitions/references. To read file contents use read; this tool locates, it does not return file bodies.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

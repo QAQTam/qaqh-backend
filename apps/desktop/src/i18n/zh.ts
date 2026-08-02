@@ -101,6 +101,7 @@ const zh: I18nStrings = {
     hide: "隐藏",
     save: "保存",
     saved: "已保存",
+    saveFailed: "保存失败",
     cancel: "取消",
     activeProfile: "配置方案",
     sectionProvider: "服务商",

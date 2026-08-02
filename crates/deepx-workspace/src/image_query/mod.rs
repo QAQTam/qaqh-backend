@@ -335,7 +335,11 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 }
             },
             "required": ["prompt"],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "anyOf": [
+                { "required": ["image_index"], "description": "Reference an image already uploaded in this conversation" },
+                { "required": ["base64_image"], "description": "Pass raw image data inline" }
+            ]
         }),
         handler: handle_image_query,
         risk: ToolRisk::ReadOnly,

@@ -461,6 +461,28 @@ pub(crate) fn emit_round_complete_via_emitter(
         blocks,
         is_final: tool_calls.is_empty(),
     });
+    // Ringing 双发：RoundCompleted（该 round 的权威全量终态，携带全量
+    // thinking/answer）。daemon 收到后折叠该 round 的 RoundDelta；否则每个
+    // token 增量都会永久累积在 conversation journal 中（磁盘与内存无界
+    // 增长——曾实测 3 个 turn 积累 36k 条 delta / 18.5MB）。
+    emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+        deepx_domain::ConversationEvent::RoundCompleted {
+            turn_id: turn_id.into(),
+            round_num,
+            thinking: if _reasoning.is_empty() {
+                None
+            } else {
+                Some(_reasoning.into())
+            },
+            answer: if _content.is_empty() {
+                None
+            } else {
+                Some(_content.into())
+            },
+            output_ref: None,
+            is_final: tool_calls.is_empty(),
+        },
+    ));
 }
 
 #[cfg(test)]

@@ -26,6 +26,9 @@ mkdirSync(dirname(destination), { recursive: true });
 const stagedBuildId = explicitBackend
   ? await stageLocalBackend(resolve(explicitBackend))
   : await stageReleaseArtifact();
+// 校验预置 daemon 实际嵌入的 build_id 与清单一致，避免把
+// git 不可用/构建缓存陈旧导致 build_id 回退到版本的二进制打进包。
+verifyDaemonBuildId(destination, stagedBuildId);
 // workspace 二进制与 daemon 同源构建（just build-daemon 一起产出）。
 // Full 包与 Backend 包都会携带它；daemon 负责拉起（未随包时为可选项）。
 if (explicitBackend) {
@@ -132,6 +135,25 @@ function gitCommit(backendRoot) {
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`Unable to resolve backend git commit: ${result.stderr.trim()}`);
   return result.stdout.trim();
+}
+
+/**
+ * 校验预置 daemon 二进制实际嵌入的 build_id 与清单将声明的值一致。
+ * build.rs 会把 DEEPX_BUILD_ID（默认 git commit）编译为字符串字面量写入
+ * 二进制；git 不可用或构建产物陈旧时它会回退为 CARGO_PKG_VERSION，
+ * 导致运行时 "incompatible daemon: build ... (expected ...)" 且设置页
+ * 无法加载。因此这里必须 fail fast。直接扫描文件字节，避免运行 daemon
+ * 派生 deepx-workspace 子进程造成残留。
+ */
+function verifyDaemonBuildId(executable, expectedBuildId) {
+  const bytes = readFileSync(executable);
+  if (!bytes.includes(Buffer.from(expectedBuildId, "utf8"))) {
+    throw new Error(
+      `staged daemon does not embed build ${expectedBuildId}; ` +
+      `the daemon binary is stale or was built without git (build.rs fell back to CARGO_PKG_VERSION). ` +
+      `Run 'just build-daemon' (or 'cargo clean -p deepx-daemon && cargo build --release -p deepx-daemon') and retry.`,
+    );
+  }
 }
 
 function validateDesktopProtocol() {

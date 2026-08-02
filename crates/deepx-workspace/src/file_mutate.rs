@@ -729,7 +729,7 @@ handler_from_string!(handle_edit_file_diff, exec_edit_fuzzy);
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
         key: "write".to_string(),
-        description: "Create, overwrite, or append to a file.",
+        description: "Create, overwrite, or append to a file. Use for whole-file creation/overwrite/append; use edit/edit_block for targeted changes and apply_patch for multi-file patches.",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"If true, append to file instead of overwriting","default":false},"expected_hash":{"type":"string","description":"Optional hash returned by read. Write fails safely if the file changed."}},"required":["path","content"],"additionalProperties":false}),
         handler: handle_write_file,
         risk: ToolRisk::Write,
@@ -737,7 +737,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     });
     mgr.register(ToolHandler {
         key: "edit".to_string(),
-        description: "String replacement in files. Supports exact match, regex (with capture groups). Set dry_run=true to preview the diff before applying. For fuzzy or line-number addressing use edit_block.",
+        description: "String replacement in files. Supports exact match, regex (with capture groups). Set dry_run=true to preview the diff before applying. For fuzzy or line-number addressing use edit_block. For multi-file changes prefer apply_patch; for whole-file rewrites use write.",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"old_string":{"type":"string","description":"Text to find"},"new_string":{"type":"string","description":"Replacement text"},"regex":{"type":"boolean","description":"Treat old_string as regex","default":false},"replace_all":{"type":"boolean","description":"Replace all occurrences","default":false},"dry_run":{"type":"boolean","description":"Preview diff only, do not write file. Use for complex edits; call again with false to apply.","default":false},"expected_hash":{"type":"string","description":"Optional hash returned by read. Edit fails safely if the file changed."}},"required":["path"],"additionalProperties":false}),
         handler: handle_edit_file,
         risk: ToolRisk::Write,
@@ -745,7 +745,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     });
     mgr.register(ToolHandler {
         key: "edit_block".to_string(),
-        description: "Multi-line edit with fuzzy matching. Provide new_lines to insert; use old_lines for content-based matching or start_line/end_line for line-number addressing. context_before/after disambiguate identical text.",
+        description: "Multi-line edit with fuzzy matching. Provide new_lines to insert; use old_lines for content-based matching or start_line/end_line for line-number addressing. context_before/after disambiguate identical text. For single-string replacement use edit; for multi-file changes prefer apply_patch.",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"old_lines":{"type":"array","items":{"type":"string"},"description":"Lines to find and replace. Required for safe line-number edits unless expected_hash is supplied."},"new_lines":{"type":"array","items":{"type":"string"},"description":"Lines to insert. REQUIRED."},"context_before":{"type":"array","items":{"type":"string"},"description":"Lines just before the change, for disambiguation"},"context_after":{"type":"array","items":{"type":"string"},"description":"Lines just after the change, for disambiguation"},"start_line":{"type":"integer","description":"1-based line to start replacement at"},"end_line":{"type":"integer","description":"1-based line to end replacement at (inclusive, defaults to start_line)"},"expected_hash":{"type":"string","description":"Optional hash returned by read; required for line-number edits without old_lines."},"allow_fuzzy":{"type":"boolean","description":"Allow whitespace-normalized fallback matching. Default false for safety.","default":false},"dry_run":{"type":"boolean","description":"Preview diff only (default: false)","default":false},"description":{"type":"string","description":"Brief note explaining why this change is needed (optional)"}},"required":["path","new_lines"],"additionalProperties":false}),
         handler: handle_edit_file_diff,
         risk: ToolRisk::Write,

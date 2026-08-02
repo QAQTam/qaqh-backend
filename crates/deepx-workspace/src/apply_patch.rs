@@ -815,7 +815,14 @@ fn failure_result(failure: PatchFailure) -> crate::ToolResult {
 }
 
 fn dry_run_result(plan: &PatchPlan, plan_hash: &str) -> crate::ToolResult {
-    let mut preview = String::from("[DRY RUN] apply_patch — preview, no changes written\n\n");
+    // plan_hash 必须位于响应文本最开头：模型侧工具结果可见文本只有
+    // summary（512 字符截断）与 model.text（24000 字符截断），且部分
+    // 执行路径只透传 summary。大 diff 的 preview 必然超窗，若 hash 放在
+    // 末尾会被截断，模型拿不到合法 hash，正式 apply 将永远
+    // PLAN_HASH_REQUIRED/MISMATCH 失败（曾实测确认该死锁）。
+    let mut preview = format!(
+        "[DRY RUN] apply_patch — preview, no changes written\nplan_hash: {plan_hash}\n\n"
+    );
     for change in &plan.changes {
         match change {
             PlannedChange::Add {
@@ -1000,7 +1007,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
         key: "apply_patch".to_string(),
         description:
-            "Apply file changes using a multi-file patch format. Supports Add, Delete, Update (with move/rename) and content-anchored fuzzy matching. Use @@ to anchor Update hunks to a function or class name; the engine locates the exact lines with Unicode-aware fuzzy search. Use dry_run=true to preview changes without writing.",
+            "Apply file changes using a multi-file patch format. Supports Add, Delete, Update (with move/rename) and content-anchored fuzzy matching. Use @@ to anchor Update hunks to a function or class name; the engine locates the exact lines with Unicode-aware fuzzy search. Use dry_run=true to preview changes without writing. Prefer apply_patch for multi-file changes or large unified hunks; use edit for single-file string replacement, edit_block for line-based fuzzy edits, and write for whole-file creation/overwrite.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1015,7 +1022,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 },
                 "plan_hash": {
                     "type": "string",
-                    "description": "Hash returned by the matching dry-run. If provided, the current patch plan must match exactly."
+                    "description": "Hash returned by the matching dry-run. It appears on the FIRST line of the dry-run response text (\"plan_hash: <64-hex>\"). Copy it verbatim into this field when applying; if the workspace changed since the dry-run, the apply is rejected with PLAN_HASH_MISMATCH and a new dry-run is required."
                 }
             },
             "required": ["patch"],
@@ -1192,6 +1199,31 @@ mod tests {
             result.model_text().contains("[DRY RUN]"),
             "unexpected: {}",
             result.model_text()
+        );
+        // 防回归：plan_hash 必须出现在响应文本首部（第二行），且与 data 字段
+        // 一致。模型侧可见文本只有 summary（512 字符）与 model.text
+        // （24000 字符），大 diff 时末尾必然被截断；hash 若只放 data 字段，
+        // 部分执行路径透传时模型永远拿不到（曾实测 confirm 的死锁）。
+        let text = result.model_text();
+        let hash_line = text
+            .lines()
+            .nth(1)
+            .expect("response has a second line with plan_hash");
+        assert!(
+            hash_line.starts_with("plan_hash: "),
+            "plan_hash must be on the second line, got: {hash_line:?}"
+        );
+        let text_hash = hash_line.trim_start_matches("plan_hash: ").to_string();
+        let data_hash = result.data["plan_hash"].as_str().expect("data plan_hash");
+        assert_eq!(
+            text_hash, data_hash,
+            "text plan_hash must match data plan_hash"
+        );
+        // 512 字符 summary 截断窗口内必须保留 plan_hash（大 diff 场景）。
+        let summary = &result.summary;
+        assert!(
+            summary.contains(&data_hash),
+            "plan_hash must survive the 512-char summary truncation; summary={summary:?}"
         );
         assert!(
             !result.model_text().contains("[ERROR]"),

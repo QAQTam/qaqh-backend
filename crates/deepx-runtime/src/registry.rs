@@ -140,7 +140,15 @@ impl AgentRegistry {
         if self.instances.contains_key(seed) {
             return Ok(());
         }
-        self.spawn(seed, None)
+        self.spawn(seed, None)?;
+        // 新 worker 诞生意味着旧 worker 已死（daemon 重启或进程退出）。
+        // timeline 中该 seed 任何未 seal 的 running turn 都是孤儿（如工具
+        // 调用未返回 result 时进程被杀），立即收尾为 Cancelled，否则前端
+        // 会永远把它投影为 running 并禁止发送新消息。
+        if let Some(hub) = self.hub.as_ref() {
+            hub.seal_orphan_running_turns(seed);
+        }
+        Ok(())
     }
 
     pub fn spawn_new(&mut self, seed: &str) -> Result<(), String> {

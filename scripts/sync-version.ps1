@@ -24,6 +24,15 @@ $pkg | ConvertTo-Json -Depth 16 | Set-Content $PkgJson -NoNewline
 $lock = Get-Content $LockJson -Raw | ConvertFrom-Json
 $lock.version = $v
 $lock.release_manifest_url = $lock.release_manifest_url -replace '/download/v[^/]+/', "/download/v$v/"
+# 锁定当前 HEAD：发布新版本时后端 release 应从该 commit 构建，
+# prepare-daemon.mjs 会校验 release manifest 的 git_commit 与 lock 一致。
+$gitCommit = & git rev-parse HEAD 2>$null
+if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($gitCommit)) {
+    $lock.git_commit = $gitCommit.Trim()
+    Write-Host "  git_commit -> $($lock.git_commit)"
+} else {
+    Write-Host "  WARN: git rev-parse failed; keeping existing git_commit $($lock.git_commit)"
+}
 $lock | ConvertTo-Json -Depth 4 | Set-Content $LockJson -NoNewline
 
 # root package.json

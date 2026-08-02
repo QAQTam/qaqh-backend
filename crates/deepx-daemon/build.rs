@@ -10,7 +10,13 @@ fn main() {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(git_commit)
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        .unwrap_or_else(|| {
+            println!(
+                "cargo:warning=DEEPX_BUILD_ID fell back to CARGO_PKG_VERSION ({}) because the git commit could not be resolved; packaged daemon will fail the desktop identity check unless the manifest uses the same value",
+                env!("CARGO_PKG_VERSION")
+            );
+            env!("CARGO_PKG_VERSION").to_string()
+        });
     println!("cargo:rustc-env=DEEPX_BUILD_ID={build_id}");
 }
 

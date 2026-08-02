@@ -117,6 +117,11 @@ impl ReliableJournal {
         &self.checkpoints
     }
 
+    /// 存活事件（compact 后为已折叠序列，stream_seq 升序）。磁盘重写用。
+    pub fn entries(&self) -> impl Iterator<Item = &RingingEventEnvelope> {
+        self.entries.iter()
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
