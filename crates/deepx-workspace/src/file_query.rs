@@ -6,26 +6,59 @@ use crate::{JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
 // ------ exec_read_file (from file_read.rs) ------
 
 pub(super) fn exec_read_file(args: &serde_json::Value) -> ToolResult {
-    // ------ Batch mode: read multiple files ------
-    if let Some(paths) = args.get("paths").and_then(|v| v.as_array()) {
-        let mut results = Vec::new();
-        for p in paths {
-            if let Some(pstr) = p.as_str() {
-                let mut per = serde_json::json!({"path": pstr});
-                if let Some(s) = args.get("start_line") {
-                    per["start_line"] = s.clone();
-                }
-                if let Some(e) = args.get("end_line") {
-                    per["end_line"] = e.clone();
-                }
-                results.push(exec_read_file(&per).content);
-            }
-        }
-        return ToolResult::ok(format!("[{} files]\n\n{}", paths.len(), results.join("\n\n---\n\n")));
+    let requests = args
+        .get("requests")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_else(|| vec![args.clone()]);
+    if requests.is_empty() || requests.len() > 8 {
+        return ToolResult::error_data(
+            "INVALID_REQUEST_COUNT",
+            "read accepts between 1 and 8 file requests",
+            false,
+            Some("Split the read into multiple calls.".into()),
+            serde_json::json!({"max_requests": 8}),
+        );
     }
 
-    // ------ Single file mode ------
-    let path = crate::resolve_workspace_path(&args.s("path"));
+    let mut outputs = Vec::with_capacity(requests.len());
+    let mut metadata = Vec::with_capacity(requests.len());
+    let mut total_chars = 0usize;
+    for request in requests {
+        let (result, meta) = read_one(&request);
+        if !result.is_success() {
+            return result;
+        }
+        let text = result.model_text().to_string();
+        total_chars += text.chars().count();
+        if total_chars > 48_000 {
+            return ToolResult::error_data(
+                "RANGE_TOO_LARGE",
+                "combined read result exceeds the 12k-token lap budget",
+                false,
+                Some("Read fewer files or split the requests.".into()),
+                serde_json::json!({"max_tokens": 12_000}),
+            );
+        }
+        outputs.push(text);
+        metadata.push(meta);
+    }
+    let text = outputs.join("\n\n---\n\n");
+    ToolResult::ok_data(serde_json::json!({"files": metadata}), text)
+}
+
+fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
+    const MAX_LINES: usize = 400;
+    const MAX_MODEL_CHARS: usize = 24_000;
+    let path = crate::resolve_workspace_path(
+        args.get("path").and_then(|value| value.as_str()).unwrap_or_default(),
+    );
+    if path.is_empty() {
+        return (
+            ToolResult::error("read: path is required"),
+            serde_json::json!({}),
+        );
+    }
     let workspace = crate::CURRENT_WORKSPACE
         .read()
         .unwrap_or_else(|error| error.into_inner())
@@ -34,184 +67,173 @@ pub(super) fn exec_read_file(args: &serde_json::Value) -> ToolResult {
         std::path::Path::new(&workspace),
         std::path::Path::new(&path),
     ) {
-        return ToolResult { success: false, content: crate::json_err(
-            "USE_SKILLS_TOOL",
-            format!("'{path}' is managed by skill '{skill}'"),
-            "Use skills(action=activate|resource, name=...) instead of generic read.",
-        ) };
+        return (
+            ToolResult::error_data(
+                "USE_SKILLS_TOOL",
+                format!("'{path}' is managed by skill '{skill}'"),
+                false,
+                Some("Use skills(action=activate|resource, name=...) instead.".into()),
+                serde_json::json!({"path": path}),
+            ),
+            serde_json::json!({}),
+        );
     }
-    let start: Option<usize> = args
-        .get("start_line")
-        .and_then(|v| v.as_u64())
-        .map(|n| (n as usize).max(1));
-    let end: Option<usize> = args
-        .get("end_line")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
+    if std::path::Path::new(&path).is_dir() {
+        return (
+            ToolResult::error_data(
+                "IS_DIRECTORY",
+                format!("'{path}' is a directory"),
+                false,
+                Some("Use search(kind=files) to enumerate files.".into()),
+                serde_json::json!({"path": path}),
+            ),
+            serde_json::json!({}),
+        );
+    }
 
-    // ── Directory fallback: reading a directory lists its entries instead of
-    // erroring (start_line/end_line are meaningless for a directory). There is
-    // no separate `list` tool, so this is the only way the model can browse
-    // the workspace without exec ls.
-    if let Ok(mut entries) = std::fs::read_dir(&path) {
-            const MAX_ENTRIES: usize = 200;
-            let mut lines: Vec<String> = Vec::new();
-            let mut count = 0usize;
-            let mut skipped = 0usize;
-            let mut total = 0usize;
-            while let Some(entry) = entries.next() {
-                total += 1;
-                if lines.len() >= MAX_ENTRIES {
-                    skipped = total - MAX_ENTRIES;
+    let start = args.get("start_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let end = args.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+    if start.is_some_and(|value| value == 0) || end.is_some_and(|value| value == 0) {
+        return (ToolResult::error("read line numbers start at 1"), serde_json::json!({}));
+    }
+    if let (Some(start), Some(end)) = (start, end) {
+        if end < start {
+            return (ToolResult::error("end_line must be greater than or equal to start_line"), serde_json::json!({}));
+        }
+        if end - start + 1 > MAX_LINES {
+            return (
+                ToolResult::error_data(
+                    "RANGE_TOO_LARGE",
+                    format!("requested range exceeds {MAX_LINES} lines"),
+                    false,
+                    Some("Use smaller contiguous ranges.".into()),
+                    serde_json::json!({"max_lines": MAX_LINES}),
+                ),
+                serde_json::json!({}),
+            );
+        }
+    }
+
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if is_binary_read_error(&error.to_string()) => {
+            return (
+                ToolResult::error_data(
+                    "BINARY_FILE",
+                    format!("'{path}' is binary and cannot be read as text"),
+                    false,
+                    Some("Use exec for a binary-aware inspection.".into()),
+                    serde_json::json!({"path": path}),
+                ),
+                serde_json::json!({}),
+            )
+        }
+        Err(error) => {
+            return (
+                ToolResult::error_data(
+                    "NOT_FOUND",
+                    format!("cannot read '{path}': {error}"),
+                    false,
+                    Some("Verify the path, then retry read.".into()),
+                    serde_json::json!({"path": path}),
+                ),
+                serde_json::json!({}),
+            )
+        }
+    };
+    let content = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let hash = content_hash(&content);
+    if args.get("if_hash").and_then(|v| v.as_str()) == Some(hash.as_str()) {
+        let meta = serde_json::json!({"path": path, "not_modified": true, "hash": hash});
+        return (ToolResult::ok_data(meta.clone(), "not modified"), meta);
+    }
+    let mut lines: Vec<&str> = content.split('\n').collect();
+    if content.ends_with('\n') {
+        lines.pop();
+    }
+    let total_lines = lines.len();
+    let explicit = start.is_some() || end.is_some();
+    let first = start.unwrap_or(1).saturating_sub(1);
+    if first > total_lines || end.is_some_and(|value| value > total_lines && explicit) {
+        return (
+            ToolResult::error_data(
+                "LINE_OUT_OF_RANGE",
+                format!("requested lines are outside '{path}' ({total_lines} total lines)"),
+                false,
+                Some("Use the total_lines value and retry.".into()),
+                serde_json::json!({"path": path, "total_lines": total_lines, "hash": hash}),
+            ),
+            serde_json::json!({}),
+        );
+    }
+    let requested_end = end.unwrap_or(total_lines).min(total_lines);
+    let mut end_index = requested_end;
+    if explicit && end_index.saturating_sub(first) > MAX_MODEL_CHARS / 40 {
+        return (
+            ToolResult::error_data(
+                "RANGE_TOO_LARGE",
+                "requested range exceeds the model output budget",
+                false,
+                Some("Split the range into smaller contiguous reads.".into()),
+                serde_json::json!({"path": path, "max_chars": MAX_MODEL_CHARS}),
+            ),
+            serde_json::json!({}),
+        );
+    }
+    if !explicit {
+        let full_chars = lines.iter().map(|line| line.chars().count() + 8).sum::<usize>();
+        if total_lines > MAX_LINES || full_chars > MAX_MODEL_CHARS {
+            end_index = first;
+            while end_index < total_lines {
+                let next = end_index + 1;
+                let chars = lines[first..next]
+                    .iter()
+                    .map(|line| line.chars().count() + 8)
+                    .sum::<usize>();
+                if chars > MAX_MODEL_CHARS {
                     break;
                 }
-                match entry {
-                    Ok(e) => {
-                        let name = e.file_name().to_string_lossy().to_string();
-                        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        let size = e.metadata().ok().map(|m| m.len());
-                        let size_s = size
-                            .map(|b| {
-                                if b >= 1024 * 1024 {
-                                    format!("{:.1}M", b as f64 / 1048576.0)
-                                } else if b >= 1024 {
-                                    format!("{:.1}K", b as f64 / 1024.0)
-                                } else {
-                                    format!("{b}B")
-                                }
-                            })
-                            .unwrap_or_else(|| "?".to_string());
-                        lines.push(format!("{}{}  {size_s}", if is_dir { "📁 " } else { "   " }, name));
-                        count += 1;
-                    }
-                    Err(_) => count += 0,
-                }
-            }
-            let mut text = lines.join("\n");
-            if skipped > 0 {
-                text.push_str(&format!("\n... [{skipped} more entries omitted]"));
-            }
-            return ToolResult::ok(serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "ok",
-                "path": path,
-                "is_dir": true,
-                "entry_count": total,
-                "shown_entries": count,
-                "content": text,
-            })
-            .to_string());
-    }
-
-    const MAX_READ_LINES: usize = 300;
-    if let (Some(s), Some(e)) = (start, end) {
-        if e >= s && e - s + 1 > MAX_READ_LINES {
-            return ToolResult { success: false, content: serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "error",
-                "path": path,
-                "code": "RANGE_TOO_LARGE",
-                "message": format!("Requested range too large ({} lines > {} max)", e - s, MAX_READ_LINES),
-                "hint": "Use smaller range."
-            }).to_string() };
-        }
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => {
-            let content = raw.replace("\r\n", "\n").replace('\r', "\n");
-
-            // ------ Cache check: return "unchanged" if content matches previous read ------
-            if start.is_none() && end.is_none() {
-                if let Some(cached) = crate::file_cache::check(&path, &content) {
-                    return ToolResult::ok(cached);
-                }
-            }
-
-            let all_lines: Vec<&str> = content.lines().collect();
-            let total = all_lines.len();
-            let start_idx = start.map(|s| (s - 1).min(total)).unwrap_or(0);
-            let end_idx = end.map(|e| e.min(total)).unwrap_or(total);
-            let start_idx = start_idx.min(end_idx);
-            let shown = end_idx - start_idx;
-            let truncated = start.is_some() || end.is_some() || total > 200;
-
-            let body: String = if total <= 200 && start.is_none() && end.is_none() {
-                // Small file, full output ---no line numbers in body
-                all_lines.join("\n")
-            } else if start.is_some() || end.is_some() {
-                // Range read
-                all_lines[start_idx..end_idx].join("\n")
-            } else {
-                // Large file: head + tail, no line numbers
-                let head = 50.min(total);
-                let tail = 30.min(total - head);
-                let mut s = all_lines[..head].join("\n");
-                if total > head + tail {
-                    s.push_str(&format!(
-                        "\n[truncated: {} lines omitted. Call read again with start_line/end_line for the omitted range.]",
-                        total - head - tail
-                    ));
-                }
-                if tail > 0 {
-                    s.push('\n');
-                    s.push_str(&all_lines[total - tail..].join("\n"));
-                }
-                s
-            };
-
-            // ------ Cache: store full-file reads for future deduplication ------
-            if start.is_none() && end.is_none() {
-                crate::file_state::record_read(&path, &content, total);
-            }
-
-            ToolResult::ok(serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "ok",
-                "path": path,
-                "start_line": start_idx + 1,
-                "end_line": start_idx + shown,
-                "total_lines": total,
-                "hash": content_hash(&content),
-                "truncated": truncated,
-                "content": body,
-            })
-            .to_string())
-        }
-        Err(e) => {
-            if is_binary_read_error(&e.to_string()) {
-                let meta = std::fs::metadata(&path);
-                let size = meta
-                    .as_ref()
-                    .map(|m| format!("{}", m.len()))
-                    .unwrap_or_default();
-                ToolResult { success: false, content: serde_json::json!({
-                    "timeis": crate::now_utc8(),
-                    "status": "error",
-                    "path": path,
-                    "code": "BINARY_FILE",
-                    "message": format!("Binary file ({}B), cannot display as text", size),
-                    "hint": format!("Use exec with argv [\"file\", \"{}\"] to identify format, or [\"xxd\", \"{}\"] for a hex dump.", path, path),
-                }).to_string() }
-            } else {
-                let url_hint = if path.contains("://")
-                    || path.contains(".com")
-                    || path.contains("www.")
-                {
-                    "\n[HINT] This looks like a URL — did you mean to call web with {\"url\": ...} instead?"
-                } else {
-                    ""
-                };
-                ToolResult { success: false, content: serde_json::json!({
-                    "timeis": crate::now_utc8(),
-                    "status": "error",
-                    "path": path,
-                    "code": "NOT_FOUND",
-                    "message": e.to_string(),
-                    "hint": format!("Use exec with argv [\"ls\", \"-la\"] on the parent directory to verify the file exists.{url_hint}"),
-                }).to_string() }
+                end_index = next;
             }
         }
     }
+    let body = lines[first..end_index]
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| format!("L{}: {line}", first + offset + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if explicit && body.chars().count() > MAX_MODEL_CHARS {
+        return (
+            ToolResult::error_data(
+                "RANGE_TOO_LARGE",
+                "requested range exceeds the model output budget",
+                false,
+                Some("Split the range into smaller contiguous reads.".into()),
+                serde_json::json!({"path": path, "max_chars": MAX_MODEL_CHARS}),
+            ),
+            serde_json::json!({}),
+        );
+    }
+    let truncated = end_index < total_lines;
+    let mut meta = serde_json::json!({
+        "path": path,
+        "start_line": first + 1,
+        "end_line": end_index,
+        "total_lines": total_lines,
+        "hash": hash,
+        "truncated": truncated,
+    });
+    if truncated {
+        let mut continuation = args.clone();
+        continuation["start_line"] = serde_json::json!(end_index + 1);
+        continuation["end_line"] = serde_json::Value::Null;
+        meta["continuation"] = continuation;
+    }
+    if !explicit {
+        crate::file_state::record_read(&path, &content, total_lines);
+    }
+    (ToolResult::ok_data(meta.clone(), body), meta)
 }
 
 handler!(handle_read_file, exec_read_file);
@@ -225,21 +247,21 @@ pub(super) fn exec_diff(args: &serde_json::Value) -> ToolResult {
     let content_a = match std::fs::read_to_string(&path_a) {
         Ok(c) => c,
         Err(e) => {
-            return ToolResult { success: false, content: crate::json_err(
+            return ToolResult::error(crate::json_err(
                 "READ_FAILED",
                 &format!("Cannot read {}: {}", path_a, e),
                 "Verify the file exists. Use exec with argv [\"ls\", \"-la\"] to check.",
-            ) };
+            ));
         }
     };
     let content_b = match std::fs::read_to_string(&path_b) {
         Ok(c) => c,
         Err(e) => {
-            return ToolResult { success: false, content: crate::json_err(
+            return ToolResult::error(crate::json_err(
                 "READ_FAILED",
                 &format!("Cannot read {}: {}", path_b, e),
                 "Verify the file exists. Use exec with argv [\"ls\", \"-la\"] to check.",
-            ) };
+            ));
         }
     };
 
@@ -261,19 +283,26 @@ handler!(handle_diff, exec_diff);
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
         key: "read".to_string(),
-        description: "Read one or more files. Use path for one file or paths for a batch. Passing a directory lists its entries; use start_line/end_line for a range. Returns a content hash; pass it as expected_hash to edit/write to prevent stale writes. Full files auto-truncate to head 50 + tail 30 lines (>200 lines); when truncated, call read again with a smaller range.",
-        input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"One file path, not a directory. Relative to workspace or absolute."},"paths":{"type":"array","items":{"type":"string"},"description":"Multiple file paths; cannot be combined with path."},"start_line":{"type":"integer","description":"First line to read (1-based, optional)"},"end_line":{"type":"integer","description":"Last line to read, inclusive (optional). Max range: 300 lines."}},"anyOf":[{"required":["path"]},{"required":["paths"]}],"additionalProperties":false}),
+        description: "Read up to eight files as precise contiguous ranges. Every returned line has a stable L<number> prefix, and each file includes its hash, total line count, and a directly executable continuation when the model budget is insufficient. Directories are errors; enumerate them with search(kind=files).",
+        input_schema: serde_json::json!({
+            "type":"object",
+            "properties": {
+                "requests": {
+                    "type":"array", "maxItems":8,
+                    "items": {"type":"object", "properties": {
+                        "path":{"type":"string"}, "start_line":{"type":"integer","minimum":1},
+                        "end_line":{"type":"integer","minimum":1}, "if_hash":{"type":"string"}
+                    }, "required":["path"], "additionalProperties":false}
+                },
+                "path":{"type":"string"}, "start_line":{"type":"integer","minimum":1},
+                "end_line":{"type":"integer","minimum":1}, "if_hash":{"type":"string"}
+            },
+            "oneOf":[{"required":["requests"]},{"required":["path"]}],
+            "additionalProperties":false
+        }),
         handler: handle_read_file,
         risk: ToolRisk::ReadOnly,
         default_timeout: std::time::Duration::from_secs(15),
-    });
-    mgr.register(ToolHandler {
-        key: "diff".to_string(),
-        description: "Compare two files line by line.",
-        input_schema: serde_json::json!({"type":"object","properties":{"path_a":{"type":"string","description":"First file path"},"path_b":{"type":"string","description":"Second file path"}},"required":["path_a","path_b"],"additionalProperties":false}),
-        handler: handle_diff,
-        risk: ToolRisk::ReadOnly,
-        default_timeout: std::time::Duration::from_secs(30),
     });
 }
 
@@ -282,7 +311,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn read_directory_lists_entries_instead_of_erroring() {
+    fn read_directory_is_an_explicit_error() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         std::fs::write(dir.path().join("b.md"), "# hi\n").unwrap();
@@ -292,32 +321,24 @@ mod tests {
             "path": dir.path().to_string_lossy(),
         }));
 
-        assert!(result.success, "directory read should succeed: {}", result.content);
-        let v: serde_json::Value = serde_json::from_str(&result.content).unwrap();
-        assert_eq!(v["is_dir"], true);
-        assert_eq!(v["entry_count"], 3);
-        let text = v["content"].as_str().unwrap();
-        assert!(text.contains("a.rs"), "entries should list a.rs: {text}");
-        assert!(text.contains("b.md"), "entries should list b.md: {text}");
-        assert!(text.contains("sub"), "entries should list sub: {text}");
-        assert!(text.contains('📁'), "directories should be marked: {text}");
+        assert!(!result.is_success());
+        assert_eq!(result.error.as_ref().unwrap().code, "IS_DIRECTORY");
     }
 
     #[test]
-    fn read_directory_with_range_still_lists_entries() {
-        // start_line/end_line are irrelevant for a directory — the fallback
-        // still applies (range reads of a directory make no sense).
+    fn read_range_is_contiguous_and_numbered() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("x.txt"), "x\n").unwrap();
+        std::fs::write(dir.path().join("x.txt"), "one\ntwo\nthree\n").unwrap();
 
         let result = exec_read_file(&serde_json::json!({
-            "path": dir.path().to_string_lossy(),
-            "start_line": 1,
-            "end_line": 5,
+            "path": dir.path().join("x.txt").to_string_lossy(),
+            "start_line": 2,
+            "end_line": 3,
         }));
 
-        assert!(result.success, "directory read should succeed: {}", result.content);
-        let v: serde_json::Value = serde_json::from_str(&result.content).unwrap();
-        assert_eq!(v["is_dir"], true);
+        assert!(result.is_success(), "range read should succeed: {}", result.model_text());
+        assert_eq!(result.model_text(), "L2: two\nL3: three");
+        assert_eq!(result.data["files"][0]["start_line"], 2);
+        assert_eq!(result.data["files"][0]["end_line"], 3);
     }
 }

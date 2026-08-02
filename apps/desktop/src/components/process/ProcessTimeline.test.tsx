@@ -17,7 +17,7 @@ describe("ProcessTimeline", () => {
       },
       {
         kind: "tool", id: "build", family: "exec", toolName: "exec_run",
-        summary: "Frontend build failed", success: false,
+        summary: "Frontend build failed", status: "error",
       },
     ];
     const dispose = render(() => <ProcessTimeline items={items} />, host);

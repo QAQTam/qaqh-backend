@@ -162,8 +162,7 @@ fn update_projection(projection: &mut Vec<Agent2Ui>, event: &Agent2Ui) {
         // Historical errors/retries are notifications, not canonical session
         // state. Retaining them made every resume re-fail the newest turn.
         Agent2Ui::Error { .. }
-        | Agent2Ui::ProviderRetrying { .. }
-        | Agent2Ui::Pong => return,
+        | Agent2Ui::ProviderRetrying { .. } => return,
         Agent2Ui::CompactDelta { delta } => {
             if let Some(Agent2Ui::CompactDelta {
                 delta: previous_delta,

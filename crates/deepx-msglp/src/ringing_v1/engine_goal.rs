@@ -57,7 +57,7 @@ impl GoalEngine {
         let mut store = load_todo()?;
 
         if store.mode == TodoMode::Goal {
-            return Err("A goal is already active. Stop it first with todo_stop.".into());
+            return Err("A goal is already active. Stop it first with task(action=\"cancel\").".into());
         }
 
         // Filter items to activate
@@ -77,7 +77,7 @@ impl GoalEngine {
         };
 
         if active_items.is_empty() {
-            return Err("No items to activate. Use todo_create first or specify ids.".into());
+            return Err("No items to activate. Use task(action=\"create\") first or specify ids.".into());
         }
 
         // Items are activated in their natural order (complexity sorting removed).
@@ -170,8 +170,8 @@ impl GoalEngine {
             "[自动执行计划 / 目标模式]\n\n\
              T{}: {}\n{}\n\n\
              进度: {}/{} 已完成\n\n\
-             完成此步骤后，必须调用 todo_step_complete(id=\\\"{}\\\", summary=\\\"...\\\")。\n\
-             如果遇到无法自行安全解决的阻塞，调用 todo_stop(reason=\\\"...\\\") 或 ask_user。",
+             完成此步骤后，必须调用 task(action=\\\"update\\\", id=\\\"{}\\\", status=\\\"completed\\\", evidence=\\\"...\\\")。\n\
+             如果遇到无法自行安全解决的阻塞，调用 task(action=\\\"cancel\\\", reason=\\\"...\\\") 或 ask。",
             item.id,
             item.title,
             item.description,

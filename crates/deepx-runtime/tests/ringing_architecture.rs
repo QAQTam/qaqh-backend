@@ -5,7 +5,8 @@
 //!    通过依赖图静态检查（cargo metadata）。
 //! 2. 全仓不存在 `Agent2Ui → Ringing` / `Ui2Agent → Ringing` 转换函数——
 //!    通过源码模式检查（禁止的桥接模式）。
-//! 3. Ringing 事件在 legacy 中无对应表达时必须显式跳过（LegacyProjector 语义）。
+//! 3. Ringing 原生事件不再投影到 Agent2Ui；底层 legacy worker 边界仍为后续
+//!    TUI/WinUI 重做保留。
 
 /// 读取 deepx-domain 的 Cargo.toml path 依赖。
 fn domain_path_deps() -> Vec<String> {
@@ -78,49 +79,6 @@ fn no_agent2ui_to_ringing_bridge_functions() {
         found.is_empty(),
         "found forbidden Agent2Ui→Ringing bridge candidates:\n{}",
         found.join("\n")
-    );
-}
-
-/// 架构测试：LegacyProjector 对 legacy 无对应表达的事件显式返回 None。
-#[test]
-fn legacy_projector_returns_none_for_unmappable_events() {
-    use deepx_domain::{ConversationEvent, DomainEvent, ToolEvent};
-    use deepx_runtime::ringing::legacy_projector::project;
-    // ToolStarted（Q1 双事件中的可靠开始事件）在 legacy 无对应
-    assert!(
-        project(&DomainEvent::Tool(ToolEvent::ToolStarted {
-            tool_call_id: "c".into(),
-            turn_id: "t".into(),
-            round_num: 0,
-            name: "exec".into(),
-        }))
-        .is_none()
-    );
-    // SessionActivityChanged 走独立 activity 流，不伪造进 Agent2Ui
-    assert!(
-        project(&DomainEvent::Control(
-            deepx_domain::ControlEvent::SessionActivityChanged {
-                seed: "s".into(),
-                state: deepx_domain::ActivityState::Idle,
-                turn_id: None,
-                seq: 1,
-                updated_at: 0,
-            },
-        ))
-        .is_none()
-    );
-    // compact skipped 无 legacy 终态表达
-    assert!(
-        project(&DomainEvent::Conversation(
-            ConversationEvent::CompactFinished {
-                compact_id: "k".into(),
-                status: deepx_domain::CompactStatus::Skipped,
-                summary_chars: None,
-                turns_compacted: None,
-                turns_removed: None,
-            },
-        ))
-        .is_none()
     );
 }
 

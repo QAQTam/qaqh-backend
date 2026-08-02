@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub use deepx_types::{ContentRef, ToolResult};
 use deepx_types::UsageInfo;
 
 use crate::channel::RingingChannel;
@@ -173,29 +174,6 @@ pub enum ErrorScope {
     Conversation,
     Tool,
     System,
-}
-
-/// 大内容外置引用（工具完整输出、超大 diff、诊断内容等）。
-/// 事件只携带可渲染 tail / 统计信息与 `content_ref`；完整内容经鉴权 HTTP 按需读取。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct ContentRef {
-    pub content_id: String,
-    pub media_type: String,
-    pub sha256: String,
-    pub truncated: bool,
-}
-
-/// 工具执行结果。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct ToolResult {
-    pub success: bool,
-    /// 可渲染摘要/tail。
-    pub summary: String,
-    /// 完整输出引用（≥10 MiB 或按内容策略外置）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_ref: Option<ContentRef>,
 }
 
 /// ask_user 的提问模式。
@@ -412,13 +390,6 @@ pub enum ToolEvent {
         round_num: u32,
         result: ToolResult,
     },
-    /// 工具执行失败终态（terminal；错误结构化）。
-    ToolFailed {
-        tool_call_id: String,
-        turn_id: String,
-        round_num: u32,
-        error: DomainError,
-    },
     /// 权限请求：agent 挂起回合等待用户批准/拒绝。
     ToolPermissionRequested {
         tool_call_id: String,
@@ -476,7 +447,6 @@ impl ToolEvent {
             | ToolEvent::ToolStarted { tool_call_id, .. }
             | ToolEvent::ToolProgress { tool_call_id, .. }
             | ToolEvent::ToolFinished { tool_call_id, .. }
-            | ToolEvent::ToolFailed { tool_call_id, .. }
             | ToolEvent::ToolPermissionRequested { tool_call_id, .. } => Some(tool_call_id),
             ToolEvent::ToolNotice { tool_call_id, .. } => tool_call_id.as_deref(),
             ToolEvent::AuditRecorded { .. } | ToolEvent::CodeChanged { .. } => None,

@@ -8,7 +8,7 @@
 //! ```text
 //! GET  /health          -> 200 {"ok":true,"tools":N,"version":"..."}
 //! GET  /tools           -> 200 [{"name","description","parameters"}, ...]
-//! POST /execute         -> 200 {"success":bool,"content":"..."}
+//! POST /execute         -> 200 {"status":"ok|error|...", ...}
 //!                         400 invalid body / 401 bad token / 404 unknown tool
 //!                         500 execution failure
 //!   body: {"session_id","workspace","name","args",
@@ -73,11 +73,7 @@ fn default_args() -> serde_json::Value {
     serde_json::Value::Object(Default::default())
 }
 
-#[derive(Debug, Serialize)]
-struct ExecuteResponse {
-    success: bool,
-    content: String,
-}
+type ExecuteResponse = crate::ToolResult;
 
 /// Job handed to the serial execution worker.
 struct ExecuteJob {
@@ -180,10 +176,9 @@ fn handle_execute(
         Ok(()) => {
             // Wait for the serial worker. No timeout: tool duration is the
             // contract; control endpoints are served on other threads.
-            let response = received.recv().unwrap_or(ExecuteResponse {
-                success: false,
-                content: "[ERROR] workspace execution worker unavailable".into(),
-            });
+            let response = received
+                .recv()
+                .unwrap_or_else(|_| crate::ToolResult::error("workspace execution worker unavailable"));
             let _ = request.respond(json_response(tiny_http::StatusCode(200), &response));
         }
         Err(_) => {
@@ -244,6 +239,7 @@ pub fn serve(host: &str, port: u16, token: &str) -> Result<(), String> {
                     crate::execution::ToolExecResult {
                         content: format!("[ERROR] tool '{name}' panicked: {message}"),
                         success: false,
+                        result: crate::ToolResult::error(format!("tool '{name}' panicked: {message}")),
                         meta: crate::ToolExecMeta {
                             name: name.clone(),
                             elapsed_ms: 0,
@@ -255,10 +251,7 @@ pub fn serve(host: &str, port: u16, token: &str) -> Result<(), String> {
                         skill_effects: Vec::new(),
                     }
                 });
-                let _ = job.respond.send(ExecuteResponse {
-                    success: result.success,
-                    content: result.content,
-                });
+                let _ = job.respond.send(result.result);
             }
             // channel 断开（唯一 sender 是 HTTP 线程持有的 Arc<tx>，只有
             // 在 serve 关闭路径才会全断）→ 异常退出，让 supervisor 重启。

@@ -16,13 +16,13 @@ use std::path::{Component, Path, PathBuf};
 /// Risk profile for each tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCategory {
-    /// No side effects: file_read, explore, search, list, git_diff/log/show/status,
-    /// plan_list, process_check.
+    /// No side effects: read, search, skills, image, ask, process(check/wait),
+    /// and read-only git queries.
     Read,
-    /// Mutates files or state: file_write/edit/delete/move/copy, git_add/commit,
-    /// plan_create/submit, task.
+    /// Mutates files or session state: apply_patch, task, and write-oriented git
+    /// operations.
     Write,
-    /// Executes arbitrary code: exec, spawn_subagent.
+    /// Executes arbitrary code or controls a running process: exec, process(kill/write).
     Exec,
     /// Outbound network: web_fetch.
     Net,
@@ -77,14 +77,12 @@ pub fn classify_risk(
 pub fn categorize_tool(name: &str) -> ToolCategory {
     match name {
         // ── Read ──
-        "read" | "diff" | "skills" | "ask_user" | "git_diff" | "git_log"
-        | "git_show" | "git_status" | "plan_list" | "plan_submit" | "process_check"
-        | "process_wait" | "todo_list" => ToolCategory::Read,
+        "read" | "search" | "skills" | "ask" | "image" | "git_diff" | "git_log"
+        | "git_show" | "git_status" => ToolCategory::Read,
 
         // ── Write ──
-        "apply_patch" | "patch" | "write" | "edit" | "edit_block" | "delete" | "git_add"
-        | "git_commit" | "git_branch" | "git_checkout" | "git_merge" | "git_restore"
-        | "plan_create" | "task" | "todo_create" | "todo_update" | "todo_cancel" => {
+        "apply_patch" | "git_add" | "git_commit" | "git_branch" | "git_checkout"
+        | "git_merge" | "git_restore" | "task" => {
             ToolCategory::Write
         }
 
@@ -164,6 +162,13 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
 
     if tool_name == "apply_patch" {
         paths.extend(crate::apply_patch::extract_target_paths(args));
+    }
+    if tool_name == "read" {
+        if let Some(requests) = args.get("requests").and_then(|value| value.as_array()) {
+            paths.extend(requests.iter().filter_map(|request| {
+                request.get("path").and_then(|value| value.as_str()).map(PathBuf::from)
+            }));
+        }
     }
     // Direct path argument
     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
@@ -248,7 +253,7 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool {
     if paths.is_empty() {
         return true;
-    } // tools without paths (e.g. ask_user) are considered safe
+    } // tools without paths (e.g. ask) are considered safe
     paths.iter().all(|p| p.starts_with(workspace))
 }
 
@@ -295,13 +300,12 @@ pub fn needs_permission(
     workspace_root: &Path,
     trusted_dirs: &HashSet<PathBuf>,
 ) -> PermissionDecision {
-    // Todo tools only mutate the active session's own todo.json. They do not
+    // Task only mutates the active session's own todo.json. It does not
     // touch workspace files, run code, or access external resources. Requiring
     // approval for each model-authored status transition creates recursive,
     // repeated prompts without protecting a user-controlled resource.
     if matches!(
-        tool_name,
-        "todo_create" | "todo_update" | "todo_cancel" | "todo_list"
+        tool_name, "task"
     ) {
         return PermissionDecision::AutoApprove;
     }
@@ -311,14 +315,22 @@ pub fn needs_permission(
         return PermissionDecision::AutoApprove;
     }
 
-    // ask_user is itself the user-interaction boundary. Opening a permission
+    // ask is itself the user-interaction boundary. Opening a permission
     // dialog for it creates a recursive prompt and prevents the Ring from
     // delivering the actual model question.
-    if tool_name == "ask_user" {
+    if tool_name == "ask" {
         return PermissionDecision::AutoApprove;
     }
 
-    let category = categorize_tool(tool_name);
+    let category = if tool_name == "process" {
+        match args.get("action").and_then(|value| value.as_str()) {
+            Some("check" | "wait") => ToolCategory::Read,
+            Some("write" | "kill") => ToolCategory::Exec,
+            _ => ToolCategory::Write,
+        }
+    } else {
+        categorize_tool(tool_name)
+    };
     let paths = extract_target_paths(tool_name, args);
     let workspace_root = resolve_target_path(workspace_root.to_path_buf());
     let risk = classify_risk(category, &paths, &workspace_root);
@@ -512,10 +524,10 @@ mod tests {
 
     #[test]
     fn ask_user_does_not_open_a_second_permission_dialog() {
-        assert_eq!(categorize_tool("ask_user"), ToolCategory::Read);
+        assert_eq!(categorize_tool("ask"), ToolCategory::Read);
         let decision = needs_permission(
             PermissionLevel::MaxLockdown,
-            "ask_user",
+            "ask",
             &serde_json::json!({"question":"Continue?"}),
             Path::new("."),
             &HashSet::new(),
@@ -532,7 +544,7 @@ mod tests {
             PermissionLevel::WorkspaceFree,
             PermissionLevel::Unrestricted,
         ] {
-            for tool_name in ["todo_create", "todo_update", "todo_cancel", "todo_list"] {
+            for tool_name in ["task"] {
                 let decision = needs_permission(
                     level,
                     tool_name,

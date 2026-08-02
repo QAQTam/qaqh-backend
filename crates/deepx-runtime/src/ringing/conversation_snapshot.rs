@@ -2,7 +2,7 @@
 //!
 //! PLAN：ConversationSnapshot 直接从持久化 session 消息构建，客户端切流后
 //! 经 HTTP 读取完整历史。快照 state 使用中立 JSON 形状（非 legacy wire 类型），
-//! 包含 turns、total_turns、has_more、usage、usage_totals。
+//! 包含 turns、total_turns、has_more、usage、usage_totals 及其计数快照。
 
 use deepx_session::SessionManager;
 use serde_json::json;
@@ -24,6 +24,8 @@ pub fn persisted_conversation_state(seed: &str) -> Option<serde_json::Value> {
         "has_more": false,
         "usage": meta.last_usage,
         "usage_totals": meta.usage_totals,
+        "usage_requests": meta.usage_requests,
+        "cache_reported_requests": meta.effective_cache_reported_requests(),
     }))
 }
 

@@ -110,14 +110,6 @@ impl PendingCommandStore {
     pub fn new_persistent() -> Self {
         let data_dir = deepx_types::platform::data_dir();
         let path = data_dir.join("ringing-command-receipts.json");
-        // Keep accepted command ids across the one-time v2 → V1 rollout so a
-        // retried command is not executed twice after the daemon upgrades.
-        let legacy = data_dir.join("ringing-v2-command-receipts.json");
-        if !path.exists() && legacy.is_file() {
-            if let Err(error) = std::fs::rename(&legacy, &path) {
-                log::warn!("[ringing] migrate legacy command receipts: {error}");
-            }
-        }
         let mut store = Self {
             persistence_path: Some(path.clone()),
             ..Self::new()
@@ -312,11 +304,15 @@ impl PendingCommandStore {
                 }
                 _ => Some((RingingCommandState::Succeeded, None)),
             },
-            RingingEvent::Tool(deepx_domain::ToolEvent::ToolFinished { .. }) => {
-                Some((RingingCommandState::Succeeded, None))
-            }
-            RingingEvent::Tool(deepx_domain::ToolEvent::ToolFailed { error, .. }) => {
-                Some((RingingCommandState::Failed, Some(error.code.clone())))
+            RingingEvent::Tool(deepx_domain::ToolEvent::ToolFinished { result, .. }) => {
+                if result.status.is_failure() {
+                    Some((
+                        RingingCommandState::Failed,
+                        result.error.as_ref().map(|error| error.code.clone()),
+                    ))
+                } else {
+                    Some((RingingCommandState::Succeeded, None))
+                }
             }
             _ => None,
         };
@@ -2478,11 +2474,7 @@ mod tests {
                 tool_call_id: "call".into(),
                 turn_id: "turn".into(),
                 round_num: 0,
-                result: deepx_domain::ToolResult {
-                    success: true,
-                    summary: "ok".into(),
-                    output_ref: None,
-                },
+                result: deepx_domain::ToolResult::ok("ok"),
             }),
         )
         .with_causation("cmd-1");

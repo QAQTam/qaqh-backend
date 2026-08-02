@@ -203,7 +203,7 @@ pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
             json_err(
                 "NOT_FOUND",
                 &format!("todo {id} not found"),
-                "Use todo_list to see all IDs.",
+                "Use task(action=\"list\") to see all IDs.",
             )
         })?;
 
@@ -381,7 +381,7 @@ fn exec_todo_update(args: &Value) -> Result<String, String> {
             json_err(
                 "NOT_FOUND",
                 &format!("todo {id} not found"),
-                "Use todo_list to see all IDs.",
+                "Use task(action=\"list\") to see all IDs.",
             )
         })?;
 
@@ -472,7 +472,7 @@ fn exec_todo_list(args: &Value) -> Result<String, String> {
 
     if items.is_empty() {
         return Ok(json_ok(Value::String(
-            "No todos yet. Use todo_create(title=..., description=...) to create one.".to_string(),
+            "No tasks yet. Use task(action=\"create\", title=..., description=...) to create one.".to_string(),
         )));
     }
 
@@ -515,6 +515,18 @@ fn handle_todo_list(ctx: ToolCallCtx) -> ToolResult {
     tool_result(exec_todo_list(&ctx.args))
 }
 
+fn handle_task(ctx: ToolCallCtx) -> ToolResult {
+    let action = ctx.args.get("action").and_then(|v| v.as_str()).unwrap_or_default();
+    let result = match action {
+        "create" => exec_todo_create(&ctx.args),
+        "update" => exec_todo_update(&ctx.args),
+        "cancel" => exec_todo_cancel(&ctx.args),
+        "list" => exec_todo_list(&ctx.args),
+        _ => return ToolResult::error("task.action must be create, update, cancel, or list"),
+    };
+    tool_result(result)
+}
+
 // ═══════════════════════════════════════════════════════
 // Registration
 // ═══════════════════════════════════════════════════════
@@ -524,15 +536,12 @@ use std::time::Duration;
 
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
-        key: "todo_create".to_string(),
-        description: "Create one todo. The new todo starts in pending status. \
-            Todo IDs are auto-assigned (T1, T2, T3…). \
-            Batch-create multiple todos when you've planned the full task breakdown upfront. \
-            The user sees todos in a live progress strip above the input — \
-            create them early so progress is visible throughout the session.",
+        key: "task".to_string(),
+        description: "Manage the session task list through one typed interface. Use create, update, cancel, or list; task state is internal session state and does not grant file permissions.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
+                "action": {"type": "string", "enum": ["create", "update", "cancel", "list", "submit", "activate"]},
                 "title": {
                     "type": "string",
                     "description": "Short imperative title, 1-100 characters. Format: '[动作] [对象]'. Examples: '实现 JWT 刷新', '修复搜索框卡顿', '编写 API 文档'."
@@ -540,93 +549,16 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 "description": {
                     "type": "string",
                     "description": "Optional context or acceptance criteria, at most 200 characters."
-                }
+                },
+                "id": {"type": ["string", "integer"]},
+                "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]},
+                "evidence": {"type": "string"}
             },
-            "required": ["title"],
+            "required": ["action"],
             "additionalProperties": false
         }),
-        handler: handle_todo_create,
+        handler: handle_task,
         risk: ToolRisk::Write,
-        default_timeout: Duration::from_secs(15),
-    });
-    mgr.register(ToolHandler {
-        key: "todo_update".to_string(),
-        description: "Transition a todo's status. \
-            Only ONE todo should be in_progress at a time — \
-            complete or pause the current one before starting another. \
-            When set to in_progress, it becomes the 'current' task shown in the user's progress strip. \
-            When set to completed, include an 'evidence' string describing what was done \
-            (e.g. '新增 POST /auth/refresh, 测试 3/3 通过'). \
-            When set to cancelled, the task is removed from the active workflow.",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": ["string", "integer"],
-                    "description": "Todo ID (e.g. 'T1' or 1)."
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["pending", "in_progress", "completed", "cancelled"],
-                    "description": "Target status. 'completed' requires evidence. Only 1 todo should be 'in_progress' simultaneously."
-                },
-                "evidence": {
-                    "type": "string",
-                    "description": "Required for 'completed' status. Concise summary of what was accomplished: files changed, tests passed, root cause fixed, etc."
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Optional updated title (max 100 chars)."
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Optional updated description (max 200 chars)."
-                }
-            },
-            "required": ["id", "status"],
-            "additionalProperties": false
-        }),
-        handler: handle_todo_update,
-        risk: ToolRisk::Write,
-        default_timeout: Duration::from_secs(15),
-    });
-    mgr.register(ToolHandler {
-        key: "todo_cancel".to_string(),
-        description: "Cancel one todo (shortcut for todo_update with status=cancelled). \
-            Use this when a task becomes irrelevant — e.g. requirements changed, \
-            approach was wrong, or the task is blocked externally. \
-            Cancelled tasks are dimmed and struck-through in the UI.",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": {"type": ["string", "integer"], "description": "Todo ID to cancel (e.g. 'T1' or 1)."}
-            },
-            "required": ["id"],
-            "additionalProperties": false
-        }),
-        handler: handle_todo_cancel,
-        risk: ToolRisk::Write,
-        default_timeout: Duration::from_secs(15),
-    });
-    mgr.register(ToolHandler {
-        key: "todo_list".to_string(),
-        description: "List all todos with exact status counts. \
-            Call this to verify progress before reporting to the user, \
-            or to check which tasks remain after a complex edit session. \
-            Optionally filter by a single status to see only pending/in_progress/completed/cancelled items.",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "enum": ["pending", "in_progress", "completed", "cancelled"],
-                    "description": "Optional filter. Omit to see all todos with per-status counts."
-                }
-            },
-            "additionalProperties": false
-        }),
-        handler: handle_todo_list,
-        risk: ToolRisk::ReadOnly,
         default_timeout: Duration::from_secs(15),
     });
 }

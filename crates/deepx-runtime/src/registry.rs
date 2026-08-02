@@ -105,25 +105,12 @@ pub struct AgentInstance {
     child: Arc<Mutex<Option<Child>>>,
 }
 
-/// legacy 通道双发去重表。
-///
-/// 同一业务事件会以“agent 直发”与“Ringing 投影”两条路径到达 daemon。
-/// 去重**只跨路径生效**：直发路径与投影路径互相查对方的表，避免双份；
-/// 同路径内即使 JSON 完全相同（例如模型连续输出两个相同文本增量）也放行，
-/// 防止合法重复内容被误杀。
-struct LegacyDedup {
-    direct: HashMap<String, std::time::Instant>,
-    projected: HashMap<String, std::time::Instant>,
-}
-
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     events: EventBus,
     activity: SessionActivityTracker,
-    /// Ringing 运行时（双投管道；None = 未启用，保持纯 legacy）。
+    /// Ringing 运行时；None = 未启用 legacy worker-only 模式。
     hub: Option<Arc<RingingHub>>,
-    /// legacy 通道事件去重表（双发模式，跨路径去重）。
-    legacy_dedup: Arc<Mutex<LegacyDedup>>,
     /// daemon 拉起的 workspace serve endpoint + token（注入每个 worker env）。
     workspace_env: Option<(String, String)>,
 }
@@ -135,10 +122,6 @@ impl AgentRegistry {
             events,
             activity: SessionActivityTracker::default(),
             hub: None,
-            legacy_dedup: Arc::new(Mutex::new(LegacyDedup {
-                direct: HashMap::new(),
-                projected: HashMap::new(),
-            })),
             workspace_env: None,
         }
     }
@@ -148,7 +131,7 @@ impl AgentRegistry {
         self.workspace_env = Some((endpoint, token));
     }
 
-    /// 挂载 Ringing 运行时（worker 事件双投：hub.publish + LegacyProjector）。
+    /// 挂载 Ringing 运行时。Ringing worker 事件只进入 native hub。
     pub fn attach_ringing(&mut self, hub: Arc<RingingHub>) {
         self.hub = Some(hub);
     }
@@ -225,7 +208,6 @@ impl AgentRegistry {
         let events = self.events.clone();
         let activity = self.activity.clone();
         let hub = self.hub.clone();
-        let legacy_dedup = self.legacy_dedup.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
@@ -251,38 +233,19 @@ impl AgentRegistry {
                                 }
                                 continue;
                             }
-                            // Ringing envelope → 领域事件双投：
-                            //   hub.publish（Ringing 客户端）+ LegacyProjector（legacy 客户端）
                             match serde_json::from_str::<deepx_ringing::RingingWorkerEventEnvelope>(
                                 &line,
                             ) {
                                 Ok(env) => {
                                     let domain: deepx_domain::DomainEvent = env.event.into();
-                                    // 大内容外置：ToolFinished summary > 10MiB 时
-                                    // 存入 ContentStore，事件替换为 tail + content_ref
-                                    // （Ringing 客户端只收 tail；legacy 保留直发完整
-                                    // 内容，外置时跳过投影避免双份不一致）。
-                                    let (domain, externalized) =
-                                        externalize_large_content(&hub, &env.seed, domain);
+                                    // Ringing 是唯一的 native consumer；大内容在进入
+                                    // Ringing channel 前外置，兼容投影不再参与这条路径。
+                                    let domain = externalize_large_content(&hub, &env.seed, domain);
                                     let _ = hub.publish_with_causation(
                                         &env.seed,
                                         domain.clone(),
                                         env.causation_id.as_deref(),
                                     );
-                                    // 兼容旧 daemon：旧协议整条连接仍接收 legacy 投影；
-                                    // 新 Desktop 只消费同一连接上的 Ringing v1。
-                                    if !externalized
-                                        && let Some(legacy) =
-                                            crate::ringing::legacy_projector::project(&domain)
-                                        && legacy_should_forward(
-                                            &legacy_dedup,
-                                            &env.seed,
-                                            &legacy,
-                                            true,
-                                        )
-                                    {
-                                        events.publish(&env.seed, legacy);
-                                    }
                                 }
                                 Err(e) => log::warn!("invalid ringing worker envelope: {e}"),
                             }
@@ -299,9 +262,7 @@ impl AgentRegistry {
                 {
                     crate::activity::publish_activity_dual(&events, hub.as_deref(), &update);
                 }
-                if legacy_should_forward(&legacy_dedup, &event_seed, &event, false) {
-                    events.publish(&event_seed, event);
-                }
+                events.publish(&event_seed, event);
             }
             let event = Agent2Ui::Error {
                 message: format!(
@@ -472,14 +433,12 @@ impl AgentInstance {
 /// `output_ref`。Ringing 与 legacy 客户端都只收到 tail，完整内容经
 /// `GET /ringing/v1/content/{id}?seed=` 按需读取。
 ///
-/// 非 ToolFinished 事件原样返回（externalized = false）；未超阈值的事件
-/// 原样返回（externalized = false）。externalized = true 表示已外置：调用方
-/// 应跳过 LegacyProjector 投影（legacy 直发保留完整内容，避免双份不一致）。
+/// 非 ToolFinished 事件和未超阈值的 ToolFinished 事件原样返回。
 fn externalize_large_content(
     hub: &RingingHub,
     seed: &str,
     event: deepx_domain::DomainEvent,
-) -> (deepx_domain::DomainEvent, bool) {
+) -> deepx_domain::DomainEvent {
     let deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
         tool_call_id,
         turn_id,
@@ -487,39 +446,38 @@ fn externalize_large_content(
         result,
     }) = event
     else {
-        return (event, false);
+        return event;
     };
-    if result.summary.len() <= crate::ringing::content_store::CONTENT_STORE_THRESHOLD_BYTES {
-        return (
-            deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
-                tool_call_id,
-                turn_id,
-                round_num,
-                result,
-            }),
-            false,
-        );
-    }
-    let content_id = hub.put_content(seed, "text/plain", result.summary.as_bytes().to_vec(), true);
-    let tail = tail_text(&result.summary, CONTENT_TAIL_BYTES);
-    (
-        deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
+    let full_text = result.model.text.as_str();
+    if full_text.len() <= crate::ringing::content_store::CONTENT_STORE_THRESHOLD_BYTES {
+        return deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
             tool_call_id,
             turn_id,
             round_num,
-            result: deepx_domain::ToolResult {
-                success: result.success,
-                summary: tail,
-                output_ref: Some(deepx_domain::ContentRef {
-                    content_id: content_id.clone(),
-                    media_type: "text/plain".into(),
-                    sha256: content_id,
-                    truncated: true,
-                }),
-            },
-        }),
-        true,
-    )
+            result,
+        });
+    }
+    let content_id = hub.put_content(seed, "text/plain", full_text.as_bytes().to_vec(), true);
+    let tail = tail_text(full_text, CONTENT_TAIL_BYTES);
+    let mut projected = result;
+    projected.summary = tail
+        .chars()
+        .take(deepx_types::TOOL_SUMMARY_MAX_CHARS)
+        .collect();
+    projected.model.text = tail;
+    projected.model.truncated = true;
+    projected.output_ref = Some(deepx_domain::ContentRef {
+        content_id: content_id.clone(),
+        media_type: "text/plain".into(),
+        sha256: content_id.clone(),
+        truncated: true,
+    });
+    deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
+        tool_call_id,
+        turn_id,
+        round_num,
+        result: projected,
+    })
 }
 
 /// 事件内可渲染 tail 上限（与 ToolProgress tail 对齐）。
@@ -556,8 +514,7 @@ fn agent2ui_channel(event: &Agent2Ui) -> Option<deepx_domain::RingingChannel> {
         | Agent2Ui::CompactStart { .. }
         | Agent2Ui::CompactEnd { .. }
         | Agent2Ui::CompactDelta { .. }
-        | Agent2Ui::Cancelled
-        | Agent2Ui::SearchStatus { .. } => Conversation,
+        | Agent2Ui::Cancelled => Conversation,
         Agent2Ui::ToolResults { .. }
         | Agent2Ui::ToolExecDelta { .. }
         | Agent2Ui::ExecProgress { .. }
@@ -574,7 +531,6 @@ fn agent2ui_channel(event: &Agent2Ui) -> Option<deepx_domain::RingingChannel> {
         | Agent2Ui::Done
         | Agent2Ui::ShutdownAck
         | Agent2Ui::Ready
-        | Agent2Ui::Pong
         | Agent2Ui::SkillsChanged { .. }
         | Agent2Ui::SkillOperationResolved { .. }
         | Agent2Ui::AskUser { .. }
@@ -584,166 +540,24 @@ fn agent2ui_channel(event: &Agent2Ui) -> Option<deepx_domain::RingingChannel> {
     })
 }
 
-/// legacy 通道事件去重：双发模式下，同一业务事件以 legacy 直发 + Ringing
-/// 投影两条路径到达 daemon。
-///
-/// - 只跨路径去重：直发事件查投影表、投影事件查直发表，双份只投递一次；
-/// - 同路径内的相同 JSON（如模型连续输出两个相同文本增量）**不去重**，
-///   避免合法内容被误吞；
-/// - 窗口 1s（双发两条帧在 agent stdout 中相邻到达，微秒级间隔足够）；
-/// - 有界：超 4096 条清空（退化为首发即过）。
-fn legacy_should_forward(
-    dedup: &Mutex<LegacyDedup>,
-    seed: &str,
-    event: &Agent2Ui,
-    from_projection: bool,
-) -> bool {
-    let Ok(key) = serde_json::to_string(event) else {
-        return true;
-    };
-    let key = format!("{seed}\n{key}");
-    let now = std::time::Instant::now();
-    let mut seen = match dedup.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    // 惰性清理过期条目
-    let window = std::time::Duration::from_secs(1);
-    seen.direct.retain(|_, t| now.duration_since(*t) < window);
-    seen.projected
-        .retain(|_, t| now.duration_since(*t) < window);
-    if seen.direct.len() + seen.projected.len() > 4096 {
-        seen.direct.clear();
-        seen.projected.clear();
-    }
-    let duplicate = if from_projection {
-        seen.direct.contains_key(&key)
-    } else {
-        seen.projected.contains_key(&key)
-    };
-    if duplicate {
-        return false;
-    }
-    let map = if from_projection {
-        &mut seen.projected
-    } else {
-        &mut seen.direct
-    };
-    map.insert(key, now);
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn event() -> Agent2Ui {
-        Agent2Ui::TurnEnd {
-            turn_id: "t1".into(),
-            stop_reason: Some("done".into()),
-            usage: None,
-        }
-    }
-
-    #[test]
-    fn duplicate_legacy_event_is_dropped_within_window() {
-        let dedup = Mutex::new(LegacyDedup {
-            direct: HashMap::new(),
-            projected: HashMap::new(),
-        });
-        // 直发第一份
-        assert!(legacy_should_forward(&dedup, "s1", &event(), false));
-        // 投影第二份（跨路径）→ 相同 JSON → 丢弃
-        assert!(!legacy_should_forward(&dedup, "s1", &event(), true));
-        // 反向顺序同样只投递一次
-        assert!(legacy_should_forward(&dedup, "s1", &event(), false));
-        assert!(!legacy_should_forward(&dedup, "s1", &event(), true));
-        // 不同 seed 不互斥
-        assert!(legacy_should_forward(&dedup, "s2", &event(), false));
-    }
-
-    #[test]
-    fn distinct_events_are_not_dropped() {
-        let dedup = Mutex::new(LegacyDedup {
-            direct: HashMap::new(),
-            projected: HashMap::new(),
-        });
-        let a = Agent2Ui::RoundDelta {
-            turn_id: "t1".into(),
-            round_num: 1,
-            kind: deepx_proto::RoundDeltaKind::Answering,
-            delta: "hel".into(),
-        };
-        let b = Agent2Ui::RoundDelta {
-            turn_id: "t1".into(),
-            round_num: 1,
-            kind: deepx_proto::RoundDeltaKind::Answering,
-            delta: "hello".into(),
-        };
-        assert!(legacy_should_forward(&dedup, "s1", &a, false));
-        // 增量内容不同 → 合法两条
-        assert!(legacy_should_forward(&dedup, "s1", &b, false));
-    }
-
-    #[test]
-    fn same_path_identical_delta_is_not_dropped() {
-        let dedup = Mutex::new(LegacyDedup {
-            direct: HashMap::new(),
-            projected: HashMap::new(),
-        });
-        let a = Agent2Ui::RoundDelta {
-            turn_id: "t1".into(),
-            round_num: 1,
-            kind: deepx_proto::RoundDeltaKind::Answering,
-            delta: "好的".into(),
-        };
-        // 同路径合法重复（模型连续输出两个相同增量）必须都放行
-        assert!(legacy_should_forward(&dedup, "s1", &a, false));
-        assert!(legacy_should_forward(&dedup, "s1", &a, false));
-        // 投影第三份仍被跨路径去重
-        assert!(!legacy_should_forward(&dedup, "s1", &a, true));
-    }
-
-    #[test]
-    fn window_expiry_allows_repeat() {
-        let dedup = Mutex::new(LegacyDedup {
-            direct: HashMap::new(),
-            projected: HashMap::new(),
-        });
-        assert!(legacy_should_forward(&dedup, "s1", &event(), true));
-        // 模拟窗口过期：直接清空表
-        dedup.lock().unwrap().direct.clear();
-        dedup.lock().unwrap().projected.clear();
-        assert!(legacy_should_forward(&dedup, "s1", &event(), true));
-    }
-
-    #[test]
-    fn oversize_table_resets() {
-        let dedup = Mutex::new(LegacyDedup {
-            direct: HashMap::new(),
-            projected: HashMap::new(),
-        });
-        for i in 0..5000 {
-            let e = Agent2Ui::ToolNotice {
-                message: format!("m{i}"),
-                level: "info".into(),
-            };
-            assert!(legacy_should_forward(&dedup, "s1", &e, false));
-        }
-        // 表在超 4096 后清空 → 重复可再发
-        assert!(legacy_should_forward(&dedup, "s1", &event(), false));
-    }
-
     fn tool_finished(summary: String) -> deepx_domain::DomainEvent {
+        let mut result = deepx_domain::ToolResult::ok(summary.clone());
+        // The worker normally sends the bounded model projection. This test
+        // helper also covers the pre-projection large-output boundary used by
+        // the content store.
+        if summary.len() > deepx_types::TOOL_MODEL_MAX_CHARS {
+            result.model.text = summary;
+            result.model.truncated = false;
+        }
         deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
             tool_call_id: "t1".into(),
             turn_id: "turn1".into(),
             round_num: 0,
-            result: deepx_domain::ToolResult {
-                success: true,
-                summary,
-                output_ref: None,
-            },
+            result,
         })
     }
 
@@ -751,14 +565,14 @@ mod tests {
     fn large_tool_finished_is_externalized() {
         let hub = RingingHub::new("test");
         let big = "x".repeat(crate::ringing::content_store::CONTENT_STORE_THRESHOLD_BYTES + 1024);
-        let (out, externalized) = externalize_large_content(&hub, "s1", tool_finished(big.clone()));
-        assert!(externalized, "large content must be flagged");
+        let out = externalize_large_content(&hub, "s1", tool_finished(big.clone()));
         match out {
             deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
                 result,
                 ..
             }) => {
-                assert!(result.summary.len() <= CONTENT_TAIL_BYTES);
+                assert!(result.model.text.len() <= CONTENT_TAIL_BYTES);
+                assert!(result.summary.chars().count() <= deepx_types::TOOL_SUMMARY_MAX_CHARS);
                 let rf = result.output_ref.expect("output_ref set");
                 assert!(rf.truncated);
                 assert_eq!(rf.media_type, "text/plain");
@@ -776,9 +590,7 @@ mod tests {
     #[test]
     fn small_tool_finished_is_not_externalized() {
         let hub = RingingHub::new("test");
-        let (out, externalized) =
-            externalize_large_content(&hub, "s1", tool_finished("small".into()));
-        assert!(!externalized);
+        let out = externalize_large_content(&hub, "s1", tool_finished("small".into()));
         match out {
             deepx_domain::DomainEvent::Tool(deepx_domain::ToolEvent::ToolFinished {
                 result,
@@ -799,8 +611,7 @@ mod tests {
                 turn_id: "t1".into(),
                 user_text: "hi".into(),
             });
-        let (out, externalized) = externalize_large_content(&hub, "s1", ev);
-        assert!(!externalized);
+        let out = externalize_large_content(&hub, "s1", ev);
         assert!(matches!(
             out,
             deepx_domain::DomainEvent::Conversation(
@@ -965,11 +776,6 @@ mod tests {
                 name: "n".into(),
                 args_so_far: "a".into(),
             },
-            "SearchStatus" => Agent2Ui::SearchStatus {
-                turn_id: "t".into(),
-                round_num: 0,
-                status: "s".into(),
-            },
             "CodeDelta" => Agent2Ui::CodeDelta {
                 lines_added: 1,
                 lines_removed: 0,
@@ -977,7 +783,6 @@ mod tests {
                 files_deleted: 0,
                 file: None,
             },
-            "Pong" => Agent2Ui::Pong,
             "SkillsChanged" => Agent2Ui::SkillsChanged {
                 status: deepx_proto::SkillsStatus {
                     available: vec![],
@@ -1043,7 +848,6 @@ mod tests {
             ("CompactEnd", Conversation),
             ("CompactDelta", Conversation),
             ("Cancelled", Conversation),
-            ("SearchStatus", Conversation),
             ("ToolResults", Tool),
             ("ToolExecDelta", Tool),
             ("ExecProgress", Tool),
@@ -1060,7 +864,6 @@ mod tests {
             ("Done", Control),
             ("ShutdownAck", Control),
             ("Ready", Control),
-            ("Pong", Control),
             ("SkillsChanged", Control),
             ("SkillOperationResolved", Control),
             ("AskUser", Control),

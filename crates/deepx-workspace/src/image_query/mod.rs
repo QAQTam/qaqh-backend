@@ -130,7 +130,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     let prompt = ctx.get_str("prompt").unwrap_or_default().to_string();
 
     if prompt.is_empty() {
-        return ToolResult::error("image_query: prompt is required");
+        return ToolResult::error("image: prompt is required");
     }
 
     // Resolve image data: prefer image_index (lookup), fall back to base64_image
@@ -141,7 +141,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
                 Some(c) => c.active_session,
                 None => {
                     return ToolResult::error(
-                        "image_query: no active session — image_index requires a running session context",
+                        "image: no active session — image_index requires a running session context",
                     );
                 }
             };
@@ -149,7 +149,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
                 Some((mime, data)) => (data, mime, Some(seed), Some(idx)),
                 None => {
                     return ToolResult::error(&format!(
-                        "image_query: image_index {idx} not found in session '{seed}'. \
+                        "image: image_index {idx} not found in session '{seed}'. \
                          Images may have been uploaded in a different turn. \
                          Try re-uploading the image."
                     ));
@@ -159,7 +159,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
             let data = ctx.get_str("base64_image").unwrap_or_default().to_string();
             if data.is_empty() {
                 return ToolResult::error(
-                    "image_query: either image_index or base64_image is required. \
+                    "image: either image_index or base64_image is required. \
                      Tip: if you see [Image #N: ...] in the conversation, use image_index=N.",
                 );
             }
@@ -170,12 +170,12 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     // ── 2. Load config ──
     let cfg = match deepx_config::Config::load() {
         Ok(c) => c,
-        Err(e) => return ToolResult::error(&format!("image_query: failed to load config: {e}")),
+        Err(e) => return ToolResult::error(&format!("image: failed to load config: {e}")),
     };
 
     if !cfg.multimodal.enabled {
         return ToolResult::error(
-            "image_query: multimodal is not enabled. \
+            "image: multimodal is not enabled. \
              Please configure a multimodal provider in Settings > Multimodal.",
         );
     }
@@ -209,7 +209,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     let max_b64 = backend.max_image_bytes().saturating_mul(4) / 3;
     if image_data.len() > max_b64 {
         return ToolResult::error(&format!(
-            "image_query: base64 data too large ({} bytes, max ~{} bytes for this backend)",
+            "image: base64 data too large ({} bytes, max ~{} bytes for this backend)",
             image_data.len(),
             max_b64
         ));
@@ -238,7 +238,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     let resp = match req.send_json(&body) {
         Ok(r) => r,
         Err(e) => {
-            return ToolResult::error(&format!("image_query: API request failed: {e}"));
+            return ToolResult::error(&format!("image: API request failed: {e}"));
         }
     };
 
@@ -247,7 +247,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     let body_bytes = match resp.into_body().read_to_vec() {
         Ok(b) => b,
         Err(e) => {
-            return ToolResult::error(&format!("image_query: failed to read response body: {e}"));
+            return ToolResult::error(&format!("image: failed to read response body: {e}"));
         }
     };
 
@@ -264,7 +264,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
             })
             .unwrap_or_else(|| body_str[..body_str.len().min(500)].to_string());
         return ToolResult::error(&format!(
-            "image_query: API returned HTTP {}: {err_msg}", status.as_u16(),
+            "image: API returned HTTP {}: {err_msg}", status.as_u16(),
         ));
     }
 
@@ -274,7 +274,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
         Err(e) => {
             let body_str = String::from_utf8_lossy(&body_bytes);
             return ToolResult::error(&format!(
-                "image_query: failed to parse JSON response: {e}. Body: {}",
+                "image: failed to parse JSON response: {e}. Body: {}",
                 &body_str[..body_str.len().min(500)]
             ));
         }
@@ -289,7 +289,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
                 .and_then(|e| e.get("message"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("[No content in response]");
-            return ToolResult::error(&format!("image_query: {err_msg}"));
+            return ToolResult::error(&format!("image: {err_msg}"));
         }
     };
 
@@ -316,7 +316,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
 
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
-        key: "image_query".to_string(),
+        key: "image".to_string(),
         description: "Analyze an image using a multimodal vision model. Use image_index (preferred) to reference an uploaded image, or base64_image for direct data. Always provide a prompt describing what to analyze. Supports MiMo, Ollama, LM Studio, and OpenAI-compatible endpoints.",
         input_schema: serde_json::json!({
             "type": "object",

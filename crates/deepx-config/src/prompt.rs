@@ -133,13 +133,10 @@ mod tests {
     }
 
     #[test]
-    fn prompt_contains_mermaid_visualization_formats() {
+    fn prompt_visualization_is_optional() {
         let prompt = full_system_prompt();
-        assert!(prompt.contains("[VISUALIZATION FORMATS]"));
-        assert!(prompt.contains("```mermaid"));
-        assert!(prompt.contains("flowchart TD"));
-        assert!(prompt.contains("sequenceDiagram"));
-        assert!(prompt.contains("mindmap"));
+        assert!(prompt.contains("[OPTIONAL VISUALIZATION]"));
+        assert!(prompt.contains("不要把图表教程或 Mermaid 作为默认输出"));
     }
 
     #[test]
@@ -155,8 +152,8 @@ mod tests {
     fn prompt_contains_task_management_section() {
         let prompt = full_system_prompt();
         assert!(prompt.contains("[TASK MANAGEMENT]"));
-        assert!(prompt.contains("todo_create"));
-        assert!(prompt.contains("todo_update"));
+        assert!(prompt.contains("task(action=\"create\")"));
+        assert!(prompt.contains("task(action=\"update\")"));
         assert!(prompt.contains("一次一个 in_progress"));
     }
 

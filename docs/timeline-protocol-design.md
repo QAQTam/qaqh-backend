@@ -75,11 +75,11 @@ own reliable journal. It is not implemented by merging the current
 engine source -> TimelineAppender -> timeline journal/snapshot -> timeline SSE -> renderer
 ```
 
-The current conversation/tool events remain only while their producers are
-being replaced. No `Agent2Ui -> TimelineEntry` bridge is permitted. The
-cutover is complete only after all model deltas and tool lifecycle producers
-emit native timeline records, at which point `Agent2Ui` and
-`legacy_projector` can be removed together.
+The current conversation/tool events are no longer used as a transcript
+projection source by Electron. No `Agent2Ui -> TimelineEntry` bridge is
+permitted. The native timeline producer is authoritative for the desktop
+transcript; the lower-level `Agent2Ui` worker boundary remains only for
+the later TUI/WinUI rewrite.
 
 ## First implementation slice
 
@@ -104,8 +104,9 @@ keeps a replay journal, and materializes recovery snapshots.
    text deltas render while the block is open and `block_sealed` marks its
    final lifecycle state. The presentation conversion
    is from Timeline's own materialized model, never from `Agent2Ui` events.
-5. Delete `Agent2Ui`, `legacy_projector`, and their old event/reducer paths in
-   the same protocol-removal change.
+5. After the TUI/WinUI rewrite, evaluate removal of the remaining `Agent2Ui`
+   worker boundary and its legacy reducers. The Ringing runtime compatibility
+   projector has already been removed.
 
 ## Verification requirements
 

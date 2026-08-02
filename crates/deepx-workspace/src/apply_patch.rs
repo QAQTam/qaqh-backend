@@ -463,6 +463,38 @@ struct PatchPlan {
     changes: Vec<PlannedChange>,
 }
 
+impl PatchPlan {
+    fn plan_hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for change in &self.changes {
+            match change {
+                PlannedChange::Add { display, contents, .. } => {
+                    hasher.update(b"add\0");
+                    hasher.update(display.as_bytes());
+                    hasher.update(b"\0");
+                    hasher.update(contents.as_bytes());
+                }
+                PlannedChange::Delete { display, original, .. } => {
+                    hasher.update(b"delete\0");
+                    hasher.update(display.as_bytes());
+                    hasher.update(b"\0");
+                    hasher.update(original.as_bytes());
+                }
+                PlannedChange::Update { display, original, contents, .. } => {
+                    hasher.update(b"update\0");
+                    hasher.update(display.as_bytes());
+                    hasher.update(b"\0");
+                    hasher.update(original.as_bytes());
+                    hasher.update(b"\0");
+                    hasher.update(contents.as_bytes());
+                }
+            }
+        }
+        hex::encode(hasher.finalize())
+    }
+}
+
 struct WorkspaceResolver {
     root: PathBuf,
 }
@@ -737,8 +769,28 @@ fn execute_apply_patch(args: &serde_json::Value) -> crate::ToolResult {
         Ok(plan) => plan,
         Err(failure) => return failure_result(failure),
     };
+    let plan_hash = plan.plan_hash();
+    if !dry_run {
+        let expected = match args.get("plan_hash").and_then(|value| value.as_str()) {
+            Some(value) if !value.is_empty() => value,
+            _ => {
+                return error_result(
+                    "PLAN_HASH_REQUIRED",
+                    "a dry-run plan_hash is required before applying changes",
+                    "Run apply_patch with dry_run=true, then retry with its plan_hash.",
+                );
+            }
+        };
+        if expected != plan_hash {
+            return error_result(
+                "PLAN_HASH_MISMATCH",
+                "the dry-run plan no longer matches the current workspace",
+                "Run apply_patch with dry_run=true again and use its new plan_hash.",
+            );
+        }
+    }
     if dry_run {
-        return dry_run_result(&plan);
+        return dry_run_result(&plan, &plan_hash);
     }
     apply_plan(plan)
 }
@@ -748,24 +800,21 @@ fn error_result(
     message: impl Into<String>,
     hint: &'static str,
 ) -> crate::ToolResult {
-    crate::ToolResult {
-        success: false,
-        content: serde_json::json!({
+    crate::ToolResult::error(serde_json::json!({
             "timeis": crate::now_utc8(),
             "status": "error",
             "code": code,
             "message": message.into(),
             "hint": hint,
         })
-        .to_string(),
-    }
+        .to_string())
 }
 
 fn failure_result(failure: PatchFailure) -> crate::ToolResult {
     error_result(failure.code, failure.message, failure.hint)
 }
 
-fn dry_run_result(plan: &PatchPlan) -> crate::ToolResult {
+fn dry_run_result(plan: &PatchPlan, plan_hash: &str) -> crate::ToolResult {
     let mut preview = String::from("[DRY RUN] apply_patch — preview, no changes written\n\n");
     for change in &plan.changes {
         match change {
@@ -804,16 +853,12 @@ fn dry_run_result(plan: &PatchPlan) -> crate::ToolResult {
         }
         preview.push('\n');
     }
-    crate::ToolResult {
-        success: true,
-        content: serde_json::json!({
+    crate::ToolResult::ok_data(serde_json::json!({
             "timeis": crate::now_utc8(),
             "status": "ok",
             "dry_run": true,
-            "content": preview.trim_end(),
-        })
-        .to_string(),
-    }
+            "plan_hash": plan_hash,
+        }), preview.trim_end())
 }
 
 fn apply_plan(plan: PatchPlan) -> crate::ToolResult {
@@ -897,9 +942,7 @@ fn apply_plan(plan: PatchPlan) -> crate::ToolResult {
     for p in &deleted {
         summary.push_str(&format!("D {}\n", p));
     }
-    crate::ToolResult {
-        success: true,
-        content: serde_json::json!({
+    crate::ToolResult::ok(serde_json::json!({
             "timeis": crate::now_utc8(),
             "status": "ok",
             "content": summary,
@@ -907,8 +950,7 @@ fn apply_plan(plan: PatchPlan) -> crate::ToolResult {
             "modified": modified,
             "deleted": deleted,
         })
-        .to_string(),
-    }
+        .to_string())
 }
 
 fn partial_failure_result(
@@ -917,9 +959,7 @@ fn partial_failure_result(
     modified: Vec<String>,
     deleted: Vec<String>,
 ) -> crate::ToolResult {
-    crate::ToolResult {
-        success: false,
-        content: serde_json::json!({
+    crate::ToolResult::partial(serde_json::json!({
             "timeis": crate::now_utc8(),
             "status": "error",
             "code": "APPLY_PARTIAL",
@@ -929,8 +969,7 @@ fn partial_failure_result(
             "modified": modified,
             "deleted": deleted,
         })
-        .to_string(),
-    }
+        .to_string())
 }
 
 fn ensure_parent_dir(file_path: &Path) -> Result<(), String> {
@@ -973,6 +1012,10 @@ pub fn register(mgr: &mut crate::ToolManager) {
                     "type": "boolean",
                     "description": "Validate and show the resulting diff without writing. Default: false.",
                     "default": false
+                },
+                "plan_hash": {
+                    "type": "string",
+                    "description": "Hash returned by the matching dry-run. If provided, the current patch plan must match exactly."
                 }
             },
             "required": ["patch"],
@@ -993,6 +1036,19 @@ mod tests {
         crate::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn apply_after_dry_run(patch: &str) -> crate::ToolResult {
+        let preview = execute_apply_patch(&serde_json::json!({
+            "patch": patch,
+            "dry_run": true,
+        }));
+        assert!(preview.is_success(), "dry-run failed: {}", preview.model_text());
+        let plan_hash = preview.data["plan_hash"].as_str().expect("plan hash");
+        execute_apply_patch(&serde_json::json!({
+            "patch": patch,
+            "plan_hash": plan_hash,
+        }))
     }
     #[test]
     fn parse_simple_add() {
@@ -1129,21 +1185,18 @@ mod tests {
             "dry_run": true
         });
         let result = execute_apply_patch(&args);
-        assert!(result.success, "unexpected: {}", result.content);
+        assert!(result.is_success(), "unexpected: {}", result.model_text());
+        assert_eq!(result.data["dry_run"], true);
+        assert!(result.data["plan_hash"].is_string());
         assert!(
-            result.content.contains("\"dry_run\":true"),
+            result.model_text().contains("[DRY RUN]"),
             "unexpected: {}",
-            result.content
+            result.model_text()
         );
         assert!(
-            result.content.contains("[DRY RUN]"),
+            !result.model_text().contains("[ERROR]"),
             "unexpected: {}",
-            result.content
-        );
-        assert!(
-            !result.content.contains("[ERROR]"),
-            "unexpected: {}",
-            result.content
+            result.model_text()
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("example.txt")).unwrap(),
@@ -1231,8 +1284,8 @@ mod tests {
             absolute_delete.display(),
             absolute_update.display()
         );
-        let result = execute_apply_patch(&serde_json::json!({ "patch": patch }));
-        assert!(result.success, "{}", result.content);
+        let result = apply_after_dry_run(&patch);
+        assert!(result.is_success(), "{}", result.model_text());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("relative-add.txt")).unwrap(),
             "relative add\n"
@@ -1273,7 +1326,7 @@ mod tests {
                      +new\n\
                      *** End Patch";
         let result = execute_apply_patch(&serde_json::json!({ "patch": patch }));
-        assert!(!result.success, "{}", result.content);
+        assert!(!result.is_success(), "{}", result.model_text());
         assert!(!dir.path().join("should-not-exist.txt").exists());
         crate::set_workspace(".");
     }
@@ -1287,8 +1340,8 @@ mod tests {
             "patch": "*** Begin Patch\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch",
             "dry_run": true
         }));
-        assert!(!result.success, "{}", result.content);
-        assert!(result.content.contains("\"status\":\"error\""));
+        assert!(!result.is_success(), "{}", result.model_text());
+        assert!(result.model_text().contains("\"status\":\"error\""));
         crate::set_workspace(".");
     }
 
@@ -1306,7 +1359,7 @@ mod tests {
         // surface through the permission layer as High risk (user approval).
         let patch = "*** Begin Patch\n*** Add File: ..\\parent-escape.txt\n+escape\n*** End Patch".to_string();
         let result = execute_apply_patch(&serde_json::json!({ "patch": patch }));
-        assert!(!result.success, "{}", result.content);
+        assert!(!result.is_success(), "{}", result.model_text());
         assert!(!parent_escape.exists());
         crate::set_workspace(".");
     }
@@ -1361,8 +1414,22 @@ mod tests {
         crate::set_workspace(&dir.path().to_string_lossy());
         crate::runtime::init_tools("apply-patch-test", &[], Vec::new());
         crate::runtime::set_context("apply-patch-test", 4);
+        let preview_args = serde_json::json!({
+            "patch": "*** Begin Patch\n*** Add File: through-dispatch.txt\n+created\n*** End Patch",
+            "dry_run": true
+        })
+        .to_string();
+        let preview = crate::execution::execute_with_context(
+            "apply_patch",
+            "",
+            &preview_args,
+            "apply-patch-preview",
+            None,
+        );
+        let plan_hash = preview.result.data["plan_hash"].as_str().unwrap();
         let success_args = serde_json::json!({
-            "patch": "*** Begin Patch\n*** Add File: through-dispatch.txt\n+created\n*** End Patch"
+            "patch": "*** Begin Patch\n*** Add File: through-dispatch.txt\n+created\n*** End Patch",
+            "plan_hash": plan_hash,
         })
         .to_string();
         let success = crate::execution::execute_with_context(
@@ -1372,7 +1439,7 @@ mod tests {
             "apply-patch-success",
             None,
         );
-        assert!(success.success, "{}", success.content);
+        assert!(success.result.is_success(), "{}", success.result.model_text());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("through-dispatch.txt")).unwrap(),
             "created\n"
@@ -1389,8 +1456,8 @@ mod tests {
             "apply-patch-failure",
             None,
         );
-        assert!(!failure.success, "{}", failure.content);
-        assert!(failure.content.contains("\"status\":\"error\""));
+        assert!(!failure.result.is_success(), "{}", failure.result.model_text());
+        assert!(failure.result.model_text().contains("\"status\":\"error\""));
         crate::runtime::clear_context();
         crate::set_workspace(".");
     }
@@ -1414,7 +1481,7 @@ mod tests {
         let result = execute_apply_patch(&serde_json::json!({
             "patch": "*** Begin Patch\n*** Add File: link/escape.txt\n+escape\n*** End Patch"
         }));
-        assert!(!result.success, "{}", result.content);
+        assert!(!result.is_success(), "{}", result.model_text());
         assert!(!outside.join("escape.txt").exists());
         crate::set_workspace(".");
     }

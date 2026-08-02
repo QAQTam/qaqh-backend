@@ -105,7 +105,7 @@ impl ToolEngine {
         success: bool,
     ) {
         let failure = (!success).then(|| deepx_domain::TimelineFailure {
-            code: "tool_failed".into(),
+            code: "TOOL_EXECUTION_FAILED".into(),
             message: output.to_string(),
         });
         ctx.emitter
@@ -300,19 +300,18 @@ impl ToolEngine {
                         file: None,
                     }],
                 });
-                // Ringing 双发：ToolFailed（拒绝是结构化失败终态）
+                // Ringing 终态统一由 ToolFinished 承载，失败只由 result.status 表达。
                 ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
-                    deepx_domain::ToolEvent::ToolFailed {
+                    deepx_domain::ToolEvent::ToolFinished {
                         tool_call_id: id.to_string(),
                         turn_id: turn_id.clone(),
                         round_num: 0,
-                        error: deepx_domain::DomainError {
-                            error_id: format!("tool-denied-{id}"),
-                            code: "tool_denied".into(),
-                            message: reason.to_string(),
-                            retryable: false,
-                            dedupe_key: Some(format!("tool:{id}")),
-                        },
+                        result: deepx_types::ToolResult::error_with(
+                            "TOOL_DENIED",
+                            reason.to_string(),
+                            false,
+                            None,
+                        ),
                     },
                 ));
                 ctx.emitter.emit(Agent2Ui::TurnEnd {
@@ -450,7 +449,7 @@ impl ToolEngine {
                 self.trusted.set(),
             ) {
                 deepx_workspace::authorization::Admission::Authorized(auth) => {
-                    if auth.tool_name() == "ask_user" {
+                    if auth.tool_name() == "ask" {
                         match deepx_workspace::ask_user::normalize_ask_user(auth.args()) {
                             Ok(normalized) => pending_asks.push_back(PendingAsk {
                                 call_id: auth.call_id().to_string(),
@@ -484,7 +483,7 @@ impl ToolEngine {
                                 false,
                             ),
                         }
-                    } else if auth.tool_name() == "todo"
+                    } else if auth.tool_name() == "task"
                         && auth
                             .args()
                             .as_object()
@@ -496,7 +495,7 @@ impl ToolEngine {
                             Ok(store) if store.items.is_empty() => {
                                 ctx.agent.msg.push_tool_result_direct(
                                     auth.call_id(),
-                                    "[ERROR] No todo items to submit. Use todo create first.",
+                                    "[ERROR] No task items to submit. Use task(action=\"create\") first.",
                                     false,
                                 );
                             }
@@ -510,7 +509,7 @@ impl ToolEngine {
                                 false,
                             ),
                         }
-                    } else if auth.tool_name() == "todo"
+                    } else if auth.tool_name() == "task"
                         && auth
                             .args()
                             .as_object()
@@ -522,7 +521,7 @@ impl ToolEngine {
                             Ok(store) if store.items.is_empty() => {
                                 ctx.agent.msg.push_tool_result_direct(
                                     auth.call_id(),
-                                    "[ERROR] No todo items to activate. Use todo_create first.",
+                                    "[ERROR] No task items to activate. Use task(action=\"create\") first.",
                                     false,
                                 );
                             }
@@ -777,8 +776,7 @@ impl ToolEngine {
                     deepx_workspace::execution::execute_authorized(authorized, Some(progress_tx));
                 (
                     tool_id,
-                    result.content,
-                    result.success,
+                    result.result,
                     result.code_delta,
                     result.skill_effects,
                 )
@@ -788,21 +786,21 @@ impl ToolEngine {
         // Drain progress
         self.drain_progress(ctx, progress_rx, &turn_id, 0);
 
-        let (tid, output, success, code_delta, skill_effects) =
-            handle.join().unwrap_or_else(|_| {
-                (
-                    id.to_string(),
-                    "[ERROR] tool thread panicked".into(),
-                    false,
-                    None,
-                    Vec::new(),
-                )
-            });
+        let (tid, result, code_delta, skill_effects) = handle.join().unwrap_or_else(|_| {
+            (
+                id.to_string(),
+                deepx_types::ToolResult::error("[ERROR] tool thread panicked"),
+                None,
+                Vec::new(),
+            )
+        });
+        let output = result.model_text().to_string();
+        let success = result.is_success();
 
         ctx.agent.apply_tool_effects(skill_effects);
 
         // Instant refresh for todo tools
-        if name.starts_with("todo_") {
+        if name == "task" {
             ctx.emitter.emit(Agent2Ui::Dashboard {
                 hp_connected: true,
                 session_seed: ctx.agent.session.seed.clone(),
@@ -858,6 +856,8 @@ impl ToolEngine {
             ));
         }
 
+        // Ringing 终态：ToolFinished（terminal）。PacedEmitter 只在 legacy
+        // worker ingress 下保留旧 ToolResults，原生路径不会双发。
         ctx.emitter.emit(Agent2Ui::ToolResults {
             turn_id: turn_id.clone(),
             round_num: 0,
@@ -868,17 +868,12 @@ impl ToolEngine {
                 file: None,
             }],
         });
-        // Ringing 双发：ToolFinished（terminal）
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
             deepx_domain::ToolEvent::ToolFinished {
                 tool_call_id: tid,
                 turn_id: turn_id.clone(),
                 round_num: 0,
-                result: deepx_domain::ToolResult {
-                    success,
-                    summary: output.clone(),
-                    output_ref: None,
-                },
+                result,
             },
         ));
         let terminal_state = if success {
@@ -887,7 +882,7 @@ impl ToolEngine {
             deepx_domain::TimelineToolState::Failed
         };
         let failure = (!success).then(|| deepx_domain::TimelineFailure {
-            code: "tool_failed".into(),
+            code: "TOOL_EXECUTION_FAILED".into(),
             message: output.clone(),
         });
         ctx.emitter
@@ -925,7 +920,7 @@ impl ToolEngine {
                     deepx_domain::TimelineTurnState::Failed
                 },
                 failure: (!success).then(|| deepx_domain::TimelineFailure {
-                    code: "tool_failed".into(),
+                    code: "TOOL_EXECUTION_FAILED".into(),
                     message: output.clone(),
                 }),
             });
@@ -1117,19 +1112,18 @@ impl ToolEngine {
                 file: None,
             }],
         });
-        // Ringing 双发：ToolFailed（拒绝是结构化失败终态）
+        // Ringing 终态统一由 ToolFinished 承载，失败只由 result.status 表达。
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
-            deepx_domain::ToolEvent::ToolFailed {
+            deepx_domain::ToolEvent::ToolFinished {
                 tool_call_id: call_id.to_string(),
                 turn_id: turn_id.clone(),
                 round_num: 0,
-                error: deepx_domain::DomainError {
-                    error_id: format!("tool-denied-{call_id}"),
-                    code: "tool_denied".into(),
-                    message: reason.to_string(),
-                    retryable: false,
-                    dedupe_key: Some(format!("tool:{call_id}")),
-                },
+                result: deepx_types::ToolResult::error_with(
+                    "TOOL_DENIED",
+                    reason.to_string(),
+                    false,
+                    None,
+                ),
             },
         ));
         ctx.emitter.emit(Agent2Ui::TurnEnd {

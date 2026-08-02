@@ -81,8 +81,8 @@ struct HttpExecuteRequest<'a> {
 
 #[derive(serde::Deserialize)]
 struct HttpExecuteResponse {
-    success: bool,
-    content: String,
+    #[serde(flatten)]
+    result: ToolResult,
 }
 
 impl ToolExecutionBackend for HttpToolExecutionBackend {
@@ -126,10 +126,7 @@ impl ToolExecutionBackend for HttpToolExecutionBackend {
                     .read_json::<HttpExecuteResponse>()
                     .map_err(|e| e.to_string());
                 match parsed {
-                    Ok(resp) => ToolResult {
-                        success: resp.success,
-                        content: resp.content,
-                    },
+                    Ok(resp) => resp.result,
                     Err(error) => {
                         log::warn!("[workspace-backend] invalid execute response: {error}; fallback local");
                         (request.local_handler)(request.ctx)

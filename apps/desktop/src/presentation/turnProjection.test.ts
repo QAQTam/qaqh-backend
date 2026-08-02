@@ -21,7 +21,14 @@ function rawTurn(): RawTurn {
         { type: "text", content: "after tool" },
       ],
       toolCalls: [{ id: "read-1", name: "read", args_display: "App.tsx", args_json: "{}" }],
-      toolResults: { "read-1": { tool_call_id: "read-1", output: "source", success: true } },
+      toolResults: { "read-1": {
+        status: "ok",
+        summary: "source",
+        data: {},
+        model: { text: "source", truncated: false, total_tokens: 1 },
+        output_ref: null,
+        error: null,
+      } },
       progress: {},
       phase: "complete",
     }],
@@ -39,7 +46,7 @@ describe("turn projection", () => {
     expect(entries[2]).toMatchObject({ kind: "assistant", markdown: "after tool", streaming: false });
     if (entries[1]?.kind === "process") {
       expect(entries[1].items).toContainEqual(expect.objectContaining({
-        kind: "tool", id: "read-1", output: "source", success: true,
+        kind: "tool", id: "read-1", output: "source", status: "ok",
       }));
     }
 
@@ -131,11 +138,25 @@ describe("turn projection", () => {
     ];
     turn.rounds[0]!.toolResults = {
       "edit-1": {
-        tool_call_id: "edit-1",
-        output: "[OK] src/a.ts:8 +3 -1 | edit\n\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -8 +8 @@\n-old\n+new",
-        success: true,
+        status: "ok",
+        summary: "[OK] src/a.ts:8 +3 -1 | edit",
+        data: {},
+        model: {
+          text: "[OK] src/a.ts:8 +3 -1 | edit\n\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -8 +8 @@\n-old\n+new",
+          truncated: false,
+          total_tokens: 1,
+        },
+        output_ref: null,
+        error: null,
       },
-      "edit-2": { tool_call_id: "edit-2", output: "[ERROR] denied", success: false },
+      "edit-2": {
+        status: "error",
+        summary: "[ERROR] denied",
+        data: {},
+        model: { text: "[ERROR] denied", truncated: false, total_tokens: 1 },
+        output_ref: null,
+        error: null,
+      },
     };
 
     expect(projectTurn(turn).changes).toEqual([expect.objectContaining({

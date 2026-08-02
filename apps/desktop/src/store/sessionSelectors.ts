@@ -22,17 +22,19 @@ export function sessionUsage(state: RawSessionState) {
     (usage?.prompt_cache_hit_tokens ?? 0) + (usage?.prompt_cache_miss_tokens ?? 0);
   const sessionCacheSampleTokens =
     totals.prompt_cache_hit_tokens + totals.prompt_cache_miss_tokens;
+  const requestTotalTokens = usage?.total_tokens ?? 0;
+  const requestCacheSampleTokens = cacheSampleTokens;
   return {
-    contextTokens: usage?.prompt_tokens ?? totals.prompt_tokens ?? state.session.tokensUsed,
-    totalTokens: usage?.total_tokens ?? totals.total_tokens ?? state.session.tokensUsed,
-    cacheHit: usage?.prompt_cache_hit_tokens ?? totals.prompt_cache_hit_tokens,
-    cacheMiss: usage?.prompt_cache_miss_tokens ?? totals.prompt_cache_miss_tokens,
-    promptTokens: usage?.prompt_tokens ?? totals.prompt_tokens,
-    completionTokens: usage?.completion_tokens ?? totals.completion_tokens,
-    reasoningTokens: usage?.reasoning_tokens ?? totals.reasoning_tokens,
-    requestTotalTokens: usage?.total_tokens ?? totals.total_tokens ?? 0,
-    cacheAvailable: (cacheReported || state.session.cacheReportedRequestCount > 0) && (cacheSampleTokens > 0 || sessionCacheSampleTokens > 0),
-    cacheHitPct: cacheSampleTokens > 0
+    contextTokens: usage?.prompt_tokens ?? state.session.tokensUsed,
+    totalTokens: usage?.total_tokens ?? state.session.tokensUsed,
+    cacheHit: usage?.prompt_cache_hit_tokens ?? 0,
+    cacheMiss: usage?.prompt_cache_miss_tokens ?? 0,
+    promptTokens: usage?.prompt_tokens ?? 0,
+    completionTokens: usage?.completion_tokens ?? 0,
+    reasoningTokens: usage?.reasoning_tokens ?? 0,
+    requestTotalTokens,
+    cacheAvailable: cacheReported && requestCacheSampleTokens > 0,
+    cacheHitPct: requestCacheSampleTokens > 0
       ? (usage?.prompt_cache_hit_tokens ?? 0) * 100 / cacheSampleTokens
       : sessionCacheSampleTokens > 0
         ? totals.prompt_cache_hit_tokens * 100 / sessionCacheSampleTokens

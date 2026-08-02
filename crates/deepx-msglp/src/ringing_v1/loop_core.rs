@@ -1724,9 +1724,6 @@ impl Loop {
                 self.session.agent.skills.complete_user_turn();
                 // Persist session state
                 self.session.flush();
-                if let Some(ref u) = usage {
-                    crate::util::record_token_usage(u, &self.session.agent.config.model);
-                }
                 let _ = self
                     .event_tx
                     .send(super::types::WriterEvent::Legacy(Agent2Ui::TurnEnd {
@@ -1747,7 +1744,7 @@ impl Loop {
                 self.misc.maybe_notify(&self.session.agent, &self.notify.tx);
 
                 // Goal mode auto-advance: if the LLM completed a step
-                // (via todo_step_complete tool), inject the next step.
+                // (via task(action=update, status=completed)), inject the next step.
                 if let Ok(store) = deepx_workspace::todo::load_todo() {
                     if store.mode == deepx_workspace::todo::TodoMode::Goal {
                         if let Some(ref current_id) = store.current_id {
@@ -1756,7 +1753,7 @@ impl Loop {
                                     let prompt = format!(
                                         "[自动执行计划 / 目标模式]\n\n\
                                          T{}: {}\n{}\n\n\
-                                         完成此步骤后，调用 todo_step_complete(id=\"{}\", summary=\"...\").",
+                                         完成此步骤后，调用 task(action=\"update\", id=\"{}\", status=\"completed\", evidence=\"...\").",
                                         item.id, item.title, item.description, item.id
                                     );
                                     let mut ctx = RingContext {

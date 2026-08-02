@@ -169,9 +169,9 @@ const zh: I18nStrings = {
     defaultPermissionHint: "切换后立即保存。L4 完全访问允许执行高风险操作。",
     multimodal: {
       title: "多模态 (Vision)",
-      desc: "配置用于图像理解的多模态模型（支持 MiMo、Ollama、LM Studio）。LLM 可调用 image_query 工具分析图片。",
+      desc: "配置用于图像理解的多模态模型（支持 MiMo、Ollama、LM Studio）。LLM 可调用 image 工具分析图片。",
       enable: "启用多模态",
-      enableHint: "启用后，LLM 可以调用 image_query 工具进行图像分析和理解。",
+      enableHint: "启用后，LLM 可以调用 image 工具进行图像分析和理解。",
       providerType: "后端类型",
       providerTypeHint: "决定 API 格式和认证方式。本地模型（Ollama、LM Studio）超时更长。",
       provider: "Provider",

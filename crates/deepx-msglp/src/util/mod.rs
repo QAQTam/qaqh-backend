@@ -282,14 +282,13 @@ fn build_turns(
                     msg.content.iter().filter_map(|b| {
                         if let ContentBlock::ToolResult {
                             tool_use_id,
-                            content,
-                            success,
+                            result,
                         } = b
                         {
                             Some(deepx_proto::ToolResultDef {
                                 tool_call_id: tool_use_id.clone(),
-                                output: content.clone(),
-                                success: *success,
+                                output: result.model.text.clone(),
+                                success: result.is_success(),
                                 file: None,
                             })
                         } else {

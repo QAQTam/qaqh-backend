@@ -62,11 +62,19 @@ interface ChatViewProps {
 
 export default function ChatView(props: ChatViewProps) {
   const session = () => props.rawSession();
+  const projectedTurnCache = new WeakMap<RawTurn, TurnViewModel>();
+  const projectCachedTurn = (turn: RawTurn): TurnViewModel => {
+    const cached = projectedTurnCache.get(turn);
+    if (cached) return cached;
+    const projected = projectTurn(turn);
+    projectedTurnCache.set(turn, projected);
+    return projected;
+  };
   const turns = createMemo(() => {
-    const projected = session().turns.map(projectTurn);
+    const projected = session().turns.map(projectCachedTurn);
     const pending = props.pendingSend();
     if (pending) {
-      projected.push(projectTurn(pending));
+      projected.push(projectCachedTurn(pending));
     }
     return projected;
   });

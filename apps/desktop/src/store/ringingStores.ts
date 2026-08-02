@@ -22,6 +22,8 @@ import type {
   TodoItem,
 } from "../lib/types/ringing";
 import type { DashboardSnapshot } from "../lib/types/ringing/DashboardSnapshot";
+import type { UsageInfo } from "../lib/types/ringing/UsageInfo";
+import type { ToolResult } from "../lib/types/ringing/ToolResult";
 
 // ────────────────────────────────────────────────────────────────────────────
 // 每频道独立维护的连接状态（PLAN：每频道独立重连、cursor、snapshot、健康状态）
@@ -217,12 +219,26 @@ export interface ConversationState {
     delta: string;
   }>;
   /** 最近一次 UsageUpdated（replaceable，按 turn/round 覆盖）。 */
-  lastUsage: { usage: unknown; contextLimit: number; model: string } | null;
+  lastUsage: { usage: UsageInfo; contextLimit: number; model: string } | null;
+  usageTotals: UsageInfo;
+  usageRequestCount: number;
+  cacheReportedRequestCount: number;
+  totalTurns: number;
+  hasMore: boolean;
   /** 最近一次 ProviderToolStatus（如 web_search 状态）。 */
   lastProviderToolStatus: { callId: string; toolKind: string; state: string } | null;
 }
 
 export function initialConversationState(seed: string): ConversationState {
+  const usageTotals: UsageInfo = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    prompt_cache_hit_tokens: 0,
+    prompt_cache_miss_tokens: 0,
+    reasoning_tokens: 0,
+    cache_usage_reported: false,
+  };
   return {
     seed,
     activeTurn: null,
@@ -232,6 +248,11 @@ export function initialConversationState(seed: string): ConversationState {
     staleRevision: 0,
     pendingDeltas: [],
     lastUsage: null,
+    usageTotals,
+    usageRequestCount: 0,
+    cacheReportedRequestCount: 0,
+    totalTurns: 0,
+    hasMore: false,
     lastProviderToolStatus: null,
   };
 }
@@ -289,6 +310,18 @@ export interface ConversationSnapshotTurn {
   }>;
 }
 
+function addUsage(left: UsageInfo, right: UsageInfo): UsageInfo {
+  return {
+    prompt_tokens: left.prompt_tokens + right.prompt_tokens,
+    completion_tokens: left.completion_tokens + right.completion_tokens,
+    total_tokens: left.total_tokens + right.total_tokens,
+    prompt_cache_hit_tokens: left.prompt_cache_hit_tokens + right.prompt_cache_hit_tokens,
+    prompt_cache_miss_tokens: left.prompt_cache_miss_tokens + right.prompt_cache_miss_tokens,
+    reasoning_tokens: left.reasoning_tokens + right.reasoning_tokens,
+    cache_usage_reported: left.cache_usage_reported === true || right.cache_usage_reported === true,
+  };
+}
+
 /**
  * 把服务器 ConversationSnapshot 合并进本地 store。
  *
@@ -300,6 +333,12 @@ export function applyConversationSnapshot(
   state: ConversationState,
   turns: ConversationSnapshotTurn[],
   activeTurnId: string | null,
+  usage?: UsageInfo | null,
+  usageTotals?: UsageInfo | null,
+  usageRequestCount?: number,
+  cacheReportedRequestCount?: number,
+  totalTurns?: number,
+  hasMore?: boolean,
 ): ConversationState {
   const snapshots = new Map<string, TurnView>();
   for (const raw of turns) {
@@ -324,7 +363,21 @@ export function applyConversationSnapshot(
     ...[...snapshots.values()].filter((turn) => !existingIds.has(turn.turnId)),
   ];
   const activeTurn = turnsAll.find((t) => t.turnId === activeTurnId) ?? state.activeTurn;
-  return { ...state, turns: turnsAll, activeTurn };
+  return {
+    ...state,
+    turns: turnsAll,
+    activeTurn,
+    lastUsage: usage ? {
+      usage,
+      contextLimit: state.lastUsage?.contextLimit ?? 0,
+      model: state.lastUsage?.model ?? "",
+    } : state.lastUsage,
+    usageTotals: usageTotals ?? state.usageTotals,
+    usageRequestCount: Number.isSafeInteger(usageRequestCount) ? Math.max(0, usageRequestCount!) : state.usageRequestCount,
+    cacheReportedRequestCount: Number.isSafeInteger(cacheReportedRequestCount) ? Math.max(0, cacheReportedRequestCount!) : state.cacheReportedRequestCount,
+    totalTurns: Number.isSafeInteger(totalTurns) ? Math.max(0, totalTurns!) : Math.max(state.totalTurns, turnsAll.length),
+    hasMore: typeof hasMore === "boolean" ? hasMore : state.hasMore,
+  };
 }
 
 export function conversationReducer(state: ConversationState, event: ConversationEvent): ConversationState {
@@ -387,14 +440,20 @@ export function conversationReducer(state: ConversationState, event: Conversatio
       });
     }
     case "usage_updated":
+      {
+      const usage = event.usage as UsageInfo;
       return {
         ...state,
         lastUsage: {
-          usage: event.usage,
+          usage,
           contextLimit: event.context_limit,
           model: event.model,
         },
+        usageTotals: addUsage(state.usageTotals, usage),
+        usageRequestCount: state.usageRequestCount + 1,
+        cacheReportedRequestCount: state.cacheReportedRequestCount + (usage.cache_usage_reported === true ? 1 : 0),
       };
+      }
     case "provider_tool_status":
       return {
         ...state,
@@ -441,7 +500,8 @@ export interface ToolCardView {
   progressSeqEnd: number;
   droppedBytes: number;
   truncated: boolean;
-  resultSummary: string | null;
+  result: ToolResult | null;
+  /** Canonical terminal status; lifecycle `status` above only tracks delivery. */
   pendingPermission: boolean;
   /** 权限请求详情（ToolPermissionRequested 完整字段；pendingPermission 为 false 后可保留）。 */
   permission: {
@@ -488,7 +548,7 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
             progressSeqEnd: 0,
             droppedBytes: 0,
             truncated: false,
-            resultSummary: null,
+            result: null,
             pendingPermission: false,
             permission: null,
           },
@@ -514,7 +574,7 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
             progressSeqEnd: 0,
             droppedBytes: 0,
             truncated: false,
-            resultSummary: null,
+            result: null,
             pendingPermission: false,
             permission: null,
           },
@@ -540,13 +600,7 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
     case "tool_finished":
       return patchCard(state, event.tool_call_id, {
         status: "finished",
-        resultSummary: event.result.summary,
-        pendingPermission: false,
-      });
-    case "tool_failed":
-      return patchCard(state, event.tool_call_id, {
-        status: "failed",
-        resultSummary: event.error.message,
+        result: event.result,
         pendingPermission: false,
       });
     case "tool_permission_requested": {
@@ -576,7 +630,7 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
             progressSeqEnd: 0,
             droppedBytes: 0,
             truncated: false,
-            resultSummary: null,
+            result: null,
             pendingPermission: true,
             permission,
           },

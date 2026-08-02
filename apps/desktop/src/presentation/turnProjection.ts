@@ -1,4 +1,5 @@
 import type { RawRound, RawTurn, ToolCallDef } from "../store/rawSession";
+import type { ToolStatus } from "../lib/types/ringing/ToolResult";
 import { aggregateProcessItems, type ProcessItem } from "./processAggregation";
 
 export type RoundRenderEntry =
@@ -44,11 +45,12 @@ export function toolFamily(name: string): string {
   return "tool";
 }
 
-function reasoningItem(turnId: string, roundNum: number, ordinal: number, content: string): ProcessItem {
+function reasoningItem(turnId: string, roundNum: number, ordinal: number, content: string, state?: "open" | "sealed"): ProcessItem {
   return {
     kind: "reasoning",
     id: `${turnId}-reasoning-${roundNum}-${ordinal}`,
     content,
+    state,
   };
 }
 
@@ -61,9 +63,9 @@ function toolItem(round: RawRound, call: ToolCallDef): Extract<ProcessItem, { ki
     toolName: call.name,
     summary: call.args_display || call.name,
     argsJson: call.args_json,
-    output: result?.output,
+    output: result?.model.text,
     progress: round.progress[call.id]?.chunks,
-    success: result?.success,
+    status: result?.status,
   };
 }
 
@@ -97,12 +99,13 @@ function projectChanges(rawTurn: RawTurn): ChangeReviewFile[] {
     for (const call of round.toolCalls) {
       if (!MUTATING_TOOLS.has(call.name)) continue;
       const result = round.toolResults[call.id];
-      if (!result?.success) continue;
+      if (!result || !isSuccessfulToolStatus(result.status)) continue;
       let path: string | undefined;
       try { path = JSON.parse(call.args_json).path; } catch { /* tool output remains available */ }
       if (typeof path !== "string" || !path) continue;
-      const counts = changeCount(result.output);
-      const diff = extractUnifiedDiff(result.output) ??
+      const output = result.model.text;
+      const counts = changeCount(output);
+      const diff = extractUnifiedDiff(output) ??
         (call.name === "write" ? syntheticNewFileDiff(path, call.args_json) : undefined);
       const previous = files.get(path);
       files.set(path, {
@@ -114,6 +117,10 @@ function projectChanges(rawTurn: RawTurn): ChangeReviewFile[] {
     }
   }
   return [...files.values()];
+}
+
+function isSuccessfulToolStatus(status: ToolStatus): boolean {
+  return status === "ok" || status === "backgrounded";
 }
 
 function projectRoundEntries(
@@ -142,7 +149,7 @@ function projectRoundEntries(
       switch (block.type) {
         case "reasoning":
           if (block.content.trim()) {
-            processItems.push(reasoningItem(turn.turnId, round.roundNum, processItems.length, block.content));
+            processItems.push(reasoningItem(turn.turnId, round.roundNum, processItems.length, block.content, block.state));
           }
           break;
         case "tool":
@@ -156,6 +163,14 @@ function projectRoundEntries(
             message: `🔍 搜索: ${block.action}`,
           });
           break;
+        case "notice":
+          processItems.push({
+            kind: "notice",
+            id: `${turn.turnId}-round-${round.roundNum}-notice-${processItems.length}`,
+            level: "info",
+            message: block.message,
+          });
+          break;
         case "text":
           if (!block.content.trim()) break;
           flushProcess();
@@ -163,7 +178,10 @@ function projectRoundEntries(
             kind: "assistant",
             id: `${turn.turnId}-round-${round.roundNum}-assistant-${ordinal++}`,
             markdown: block.content,
-            streaming,
+            // Timeline text lifecycle is authoritative. A completed turn may
+            // still contain an open text block after a reconnect, and a
+            // running turn may already have sealed an earlier answer block.
+            streaming: block.state === undefined ? streaming : block.state === "open",
           });
           break;
       }
@@ -176,7 +194,7 @@ function projectRoundEntries(
   // reasoning deltas before its tool-call preview; retaining both makes the UI
   // look as though it is thinking and executing at once.
   if (round.phase !== "tool_calling" && round.thinking.trim()) {
-    processItems.push(reasoningItem(turn.turnId, round.roundNum, 0, round.thinking));
+    processItems.push(reasoningItem(turn.turnId, round.roundNum, 0, round.thinking, "open"));
   }
   if (round.phase !== "thinking") {
     for (const call of round.toolCalls) {

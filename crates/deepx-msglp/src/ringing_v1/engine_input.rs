@@ -50,7 +50,7 @@ impl InputEngine {
                     }
                 }
                 Ok(_) => {
-                    "目标模式无法恢复：当前没有激活的 goal。使用 todo_activate 开始。".to_string()
+                    "目标模式无法恢复：当前没有激活的 goal。使用 task(action=\"activate\") 开始。".to_string()
                 }
                 Err(e) => format!("目标模式恢复失败：{e}"),
             }
@@ -159,7 +159,7 @@ impl InputEngine {
         ctx.agent.msg.push_user(&text);
 
         // Add image blocks to the user message and register them globally
-        // so image_query can look them up by index.
+                // so image can look them up by index.
         for img in &images {
             ctx.agent
                 .msg

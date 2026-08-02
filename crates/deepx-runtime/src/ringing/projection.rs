@@ -183,11 +183,6 @@ impl SnapshotProjector {
                         state["pending_permission"] = serde_json::Value::Null;
                         true
                     }
-                    TE::ToolFailed { tool_call_id, .. } => {
-                        state["last_failed"] = serde_json::json!(tool_call_id);
-                        state["pending_permission"] = serde_json::Value::Null;
-                        true
-                    }
                     TE::ToolStarted { tool_call_id, .. } => {
                         state["running"] = serde_json::json!([tool_call_id]);
                         true
@@ -294,11 +289,7 @@ mod tests {
                 tool_call_id: "c1".into(),
                 turn_id: "t".into(),
                 round_num: 0,
-                result: deepx_domain::ToolResult {
-                    success: true,
-                    summary: "ok".into(),
-                    output_ref: None,
-                },
+                result: deepx_domain::ToolResult::ok("ok"),
             }),
         );
         let snap = p.snapshot_for(RingingChannel::Tool, "s", 0);

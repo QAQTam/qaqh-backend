@@ -8,7 +8,6 @@ use super::web;
 use super::image_query;
 
 use super::apply_patch;
-use super::file_mutate;
 use super::file_query;
 
 use super::ask_user;
@@ -16,6 +15,7 @@ use super::process_inspect;
 use super::todo;
 
 use super::skill;
+use super::search;
 
 /// 工具注册器函数签名。
 pub type ToolRegistrar = fn(&mut ToolManager);
@@ -28,10 +28,10 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     // ── 系统工具 ──
     exec::register(&mut mgr);
     web::register(&mut mgr);
+    search::register(&mut mgr);
 
     // ── 文件操作 ──
     apply_patch::register(&mut mgr);
-    file_mutate::register(&mut mgr);
     file_query::register(&mut mgr);
 
     // ── Todo（直接、会话内状态工具）──
@@ -49,14 +49,31 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     // ── Agent Skills ──
     skill::register(&mut mgr);
 
-    // ── Memory (跨会话记忆) ──
-    #[cfg(feature = "memory")]
-    crate::memory::register(&mut mgr);
-
     // ── 外部注册器 ──
     for reg in extra_registrars {
         reg(&mut mgr);
     }
 
     mgr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_tool_manager;
+
+    #[test]
+    fn default_registry_exposes_the_formal_tool_vocabulary() {
+        let names: Vec<String> = build_tool_manager(&[])
+            .all_defs()
+            .into_iter()
+            .map(|def| def.function.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "apply_patch", "ask", "exec", "image", "process", "read", "search",
+                "skills", "task", "web",
+            ]
+        );
+    }
 }

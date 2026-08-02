@@ -19,8 +19,8 @@ function truncate(text: string, max: number): string {
 function toolHint(item: ProcessItem): string | null {
   if (item.kind !== "tool") return null;
   const parts: string[] = [];
-  if (item.success === true) parts.push("✓");
-  else if (item.success === false) parts.push("✗");
+  if (item.status === "ok" || item.status === "backgrounded") parts.push("✓");
+  else if (item.status === "error" || item.status === "partial" || item.status === "cancelled") parts.push("✗");
   if (item.output != null) {
     const n = item.output.length;
     parts.push(n > 1024 ? `${(n / 1024).toFixed(1)}k` : `${n}`);
@@ -33,8 +33,12 @@ export default function ProcessEventRow(props: {
   expanded: () => boolean;
   onToggle: () => void;
 }) {
-  const failed = () => props.item.kind === "tool" && props.item.success === false;
-  const pending = () => props.item.kind === "tool" && props.item.output == null && props.item.success == null;
+  const failed = () =>
+    props.item.kind === "tool"
+    && (props.item.status === "error" || props.item.status === "partial" || props.item.status === "cancelled");
+  const pending = () =>
+    (props.item.kind === "tool" && props.item.output == null && props.item.status == null)
+    || (props.item.kind === "reasoning" && props.item.state === "open");
 
   return (
     // @ts-expect-error SolidJS 2.x: tsc children type mismatch on div

@@ -157,11 +157,11 @@ fn convert_messages_to_input(
             "tool" => {
                 // ToolResult blocks → function_call_output
                 for block in &msg.content {
-                    if let ContentBlock::ToolResult { tool_use_id, content, .. } = block {
+                    if let ContentBlock::ToolResult { tool_use_id, result } = block {
                         items.push(serde_json::json!({
                             "type": "function_call_output",
                             "call_id": tool_use_id,
-                            "output": content,
+                            "output": result.project_for_model().to_string(),
                         }));
                     }
                 }
@@ -507,23 +507,24 @@ fn parse_usage(resp_data: &serde_json::Value) -> Option<deepx_types::UsageInfo> 
     let u = resp_data.get("usage")?;
     let input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let cached = u
+    let cached_value = u
         .get("input_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .and_then(|d| d.get("cached_tokens"));
+    let cached = cached_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     Some(deepx_types::UsageInfo {
         prompt_tokens: input_tokens,
         completion_tokens: output_tokens,
         total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         prompt_cache_hit_tokens: cached,
-        prompt_cache_miss_tokens: input_tokens.saturating_sub(cached),
+        prompt_cache_miss_tokens: cached_value
+            .map(|_| input_tokens.saturating_sub(cached))
+            .unwrap_or(0),
         reasoning_tokens: u
             .get("output_tokens_details")
             .and_then(|d| d.get("reasoning_tokens"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32,
-        cache_usage_reported: Some(true),
+        cache_usage_reported: cached_value.and_then(|value| value.as_u64()).map(|_| true),
     })
 }
 
@@ -1100,14 +1101,18 @@ mod tests {
             name: None,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tc_1".into(),
-                content: "file contents".into(),
-                success: true,
+                result: deepx_types::ToolResult::ok("file contents"),
             }],
         }];
         let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "tc_1");
-        assert_eq!(input[0]["output"], "file contents");
+        let output: serde_json::Value = serde_json::from_str(
+            input[0]["output"].as_str().expect("canonical tool result output"),
+        )
+        .expect("canonical tool result JSON");
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["text"], "file contents");
     }
 
     #[test]
@@ -1348,6 +1353,29 @@ mod tests {
         assert_eq!(stored.prompt_tokens, 100);
         assert_eq!(stored.prompt_cache_hit_tokens, 60);
         assert_eq!(stored.reasoning_tokens, 5);
+    }
+
+    #[test]
+    fn completed_event_without_cached_tokens_keeps_cache_unknown() {
+        let mut state = ResponsesParseState::default();
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let data = serde_json::json!({
+            "type": "response.completed",
+            "response": { "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120
+            }}
+        });
+        handle_responses_event(&data, &mut state, &mut |event| events.push(event));
+        match &events[0] {
+            StreamEvent::UsageUpdate(usage) => {
+                assert_eq!(usage.prompt_cache_hit_tokens, 0);
+                assert_eq!(usage.prompt_cache_miss_tokens, 0);
+                assert_eq!(usage.cache_usage_reported, None);
+            }
+            other => panic!("expected UsageUpdate, got {other:?}"),
+        }
     }
 
     #[test]

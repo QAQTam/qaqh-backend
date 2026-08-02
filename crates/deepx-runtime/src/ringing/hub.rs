@@ -10,9 +10,10 @@
 //! 由 daemon（T5）与 worker 事件入口（T6）消费。线程安全（Mutex 保护），
 //! 与 legacy `EventBus` 并行存在，互不嵌套。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::JoinHandle;
 
 use deepx_domain::{
     ConversationEvent, Delivery, DomainEvent, RingingChannel, TimelineEntry, TimelineIntent,
@@ -58,6 +59,13 @@ struct SeedChannelState {
     projection: SnapshotProjector,
     last_stream_seq: u64,
     replaceable_since_checkpoint: HashMap<super::router::ReplaceableKey, u32>,
+}
+
+#[derive(Debug)]
+struct TimelinePersistence {
+    wake: mpsc::Sender<()>,
+    pending_seeds: Arc<Mutex<HashSet<String>>>,
+    join: Option<JoinHandle<()>>,
 }
 
 impl SeedChannelState {
@@ -125,11 +133,12 @@ pub struct RingingHub {
     live: Mutex<HashMap<RingingChannel, broadcast::Sender<RingingEventEnvelope>>>,
     /// 持久化 journal（None = 非持久模式；I/O 失败只记录日志，不阻塞事件路径）。
     journal_store: Mutex<Option<JournalStore>>,
-    /// Ringing V1 timeline transcript 的唯一 writer。它与三频道 Ringing v1 完全隔离，直到
-    /// Electron 直切完成后旧 projector 才会被删除。
-    timeline: Mutex<TimelineAppender>,
+    /// Ringing V1 timeline transcript 的唯一 writer。它与三频道 Ringing v1 完全隔离，
+    /// 不依赖 legacy 事件投影。
+    timeline: Arc<Mutex<TimelineAppender>>,
     timeline_live: broadcast::Sender<TimelineLiveEntry>,
     timeline_store: Mutex<Option<TimelineStore>>,
+    timeline_persistence: Mutex<Option<TimelinePersistence>>,
 }
 
 impl RingingHub {
@@ -142,6 +151,7 @@ impl RingingHub {
         let hub = Self::with_options(epoch.into(), Some(root.into()));
         hub.load_persisted();
         hub.load_timeline_persisted();
+        hub.start_timeline_persistence();
         hub
     }
 
@@ -173,9 +183,94 @@ impl RingingHub {
             channels: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             journal_store: Mutex::new(journal_store),
-            timeline: Mutex::new(TimelineAppender::new()),
+            timeline: Arc::new(Mutex::new(TimelineAppender::new())),
             timeline_live,
             timeline_store: Mutex::new(timeline_store),
+            timeline_persistence: Mutex::new(None),
+        }
+    }
+
+    /// Move timeline checkpoint I/O off the producer/writer hot path.
+    ///
+    /// The live TimelineAppender remains the sole source of sequence allocation and
+    /// broadcast ordering. Persistence is a best-effort, single-writer checkpoint
+    /// queue: notifications are coalesced per seed, and the worker snapshots the
+    /// latest in-memory state only after it wakes. The on-disk record shape is
+    /// unchanged, so bootstrap/replay compatibility is preserved.
+    fn start_timeline_persistence(&self) {
+        let store = self
+            .timeline_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some(store) = store else { return };
+
+        let (wake, rx) = mpsc::channel::<()>();
+        let pending_seeds = Arc::new(Mutex::new(HashSet::<String>::new()));
+        let pending_for_worker = Arc::clone(&pending_seeds);
+        let timeline = Arc::clone(&self.timeline);
+        let join = match std::thread::Builder::new()
+            .name("deepx-timeline-persist".into())
+            .spawn(move || {
+                let persist_pending = || {
+                    let seeds: Vec<String> = {
+                        let mut pending =
+                            pending_for_worker.lock().unwrap_or_else(|e| e.into_inner());
+                        pending.drain().collect()
+                    };
+                    for seed in seeds {
+                        let Some((snapshot, journal)) = ({
+                            let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
+                            timeline
+                                .snapshot(&seed)
+                                .map(|snapshot| (snapshot, timeline.replay_since(&seed, 0)))
+                        }) else {
+                            continue;
+                        };
+                        if let Err(error) = store.persist(&seed, &snapshot, journal) {
+                            log::warn!("[timeline] persist failed for {seed}: {error}");
+                        }
+                    }
+                };
+
+                while rx.recv().is_ok() {
+                    persist_pending();
+                }
+                // Drain the final coalesced notifications before the worker exits.
+                persist_pending();
+            }) {
+            Ok(join) => join,
+            Err(error) => {
+                log::warn!("[timeline] persistence worker unavailable: {error}");
+                return;
+            }
+        };
+
+        *self
+            .timeline_persistence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(TimelinePersistence {
+            wake,
+            pending_seeds,
+            join: Some(join),
+        });
+    }
+
+    fn request_timeline_persistence(&self, seed: &str) {
+        let persistence = self
+            .timeline_persistence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(persistence) = persistence.as_ref() else {
+            return;
+        };
+        let should_wake = persistence
+            .pending_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(seed.to_string());
+        if should_wake {
+            let _ = persistence.wake.send(());
         }
     }
 
@@ -248,22 +343,11 @@ impl RingingHub {
         seed: &str,
         intent: TimelineIntent,
     ) -> Result<TimelineEntry, TimelineError> {
-        let (entry, snapshot, journal) = {
+        let entry = {
             let mut timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            let entry = timeline.apply_intent(seed, intent)?;
-            let snapshot = timeline.snapshot(seed).expect("intent just created seed");
-            let journal = timeline.replay_since(seed, 0);
-            (entry, snapshot, journal)
+            timeline.apply_intent(seed, intent)?
         };
-        if let Some(store) = self
-            .timeline_store
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            && let Err(error) = store.persist(seed, &snapshot, journal)
-        {
-            log::warn!("[timeline] persist failed for {seed}: {error}");
-        }
+        self.request_timeline_persistence(seed);
         let _ = self.timeline_live.send(TimelineLiveEntry {
             seed: seed.to_string(),
             entry: entry.clone(),
@@ -557,7 +641,15 @@ impl RingingHub {
         if let Some(state) = super::conversation_snapshot::persisted_conversation_state(seed) {
             match snap.state.as_object_mut() {
                 Some(obj) => {
-                    for key in ["turns", "total_turns", "has_more", "usage", "usage_totals"] {
+                    for key in [
+                        "turns",
+                        "total_turns",
+                        "has_more",
+                        "usage",
+                        "usage_totals",
+                        "usage_requests",
+                        "cache_reported_requests",
+                    ] {
                         if let Some(value) = state.get(key) {
                             obj.insert(key.to_string(), value.clone());
                         }
@@ -643,6 +735,23 @@ impl RingingHub {
             && let Err(error) = store.remove_replaceable(channel, seed, identity)
         {
             log::warn!("[ringing] replaceable slot cleanup failed: {error}");
+        }
+    }
+}
+
+impl Drop for RingingHub {
+    fn drop(&mut self) {
+        let persistence = self
+            .timeline_persistence
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some(mut persistence) = persistence else {
+            return;
+        };
+        drop(persistence.wake);
+        if let Some(join) = persistence.join.take() {
+            let _ = join.join();
         }
     }
 }

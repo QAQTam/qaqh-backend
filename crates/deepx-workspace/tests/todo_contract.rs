@@ -1,5 +1,5 @@
 #[test]
-fn public_schema_exposes_small_direct_todo_tools_and_no_goal_entrypoint() {
+fn public_schema_exposes_one_task_tool_and_no_goal_entrypoint() {
     let manager = deepx_workspace::registration::build_tool_manager(&[]);
     let definitions = manager.all_defs();
     let names: Vec<&str> = definitions
@@ -7,21 +7,21 @@ fn public_schema_exposes_small_direct_todo_tools_and_no_goal_entrypoint() {
         .map(|definition| definition.function.name.as_str())
         .collect();
 
-    for expected in ["todo_create", "todo_update", "todo_cancel", "todo_list"] {
+    for expected in ["task"] {
         assert!(names.contains(&expected), "missing {expected}");
     }
     assert!(
         !names.contains(&"todo"),
-        "legacy multiplexed tool must stay hidden"
+        "unregistered todo alias must stay hidden"
     );
     assert!(
-        !names.contains(&"task"),
-        "deprecated duplicate task tool must stay hidden"
+        names.iter().filter(|name| name.starts_with("todo_")).count() == 0,
+        "split todo tools must stay hidden"
     );
     assert!(
         definitions
             .iter()
-            .filter(|definition| definition.function.name.starts_with("todo_"))
+            .filter(|definition| definition.function.name == "task")
             .all(|definition| !definition.function.description.contains("Goal")),
         "the frozen Goal workflow must not be advertised to the model"
     );
@@ -49,9 +49,9 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         .enumerate()
     {
         let create = deepx_workspace::execution::execute_with_context(
-            "todo_create",
+            "task",
             "",
-            &serde_json::json!({"title": title, "description": format!("item {index}")})
+            &serde_json::json!({"action":"create", "title": title, "description": format!("item {index}")})
                 .to_string(),
             &format!("todo-create-{index}"),
             None,
@@ -60,9 +60,9 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     }
 
     let working = deepx_workspace::execution::execute_with_context(
-        "todo_update",
+        "task",
         "",
-        r#"{"id":1,"status":"in_progress"}"#,
+        r#"{"action":"update","id":1,"status":"in_progress"}"#,
         "todo-working",
         None,
     );
@@ -73,9 +73,9 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     );
 
     let completed = deepx_workspace::execution::execute_with_context(
-        "todo_update",
+        "task",
         "",
-        r#"{"id":"T2","status":"completed","evidence":"verified"}"#,
+        r#"{"action":"update","id":"T2","status":"completed","evidence":"verified"}"#,
         "todo-completed",
         None,
     );
@@ -86,9 +86,9 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     );
 
     let cancelled = deepx_workspace::execution::execute_with_context(
-        "todo_cancel",
+        "task",
         "",
-        r#"{"id":"3"}"#,
+        r#"{"action":"cancel","id":"3"}"#,
         "todo-cancelled",
         None,
     );
@@ -98,8 +98,13 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         cancelled.content
     );
 
-    let list =
-        deepx_workspace::execution::execute_with_context("todo_list", "", r#"{}"#, "todo-list", None);
+    let list = deepx_workspace::execution::execute_with_context(
+        "task",
+        "",
+        r#"{"action":"list"}"#,
+        "todo-list",
+        None,
+    );
     assert!(list.success, "list failed: {}", list.content);
     let list_json: serde_json::Value =
         serde_json::from_str(&list.content).expect("structured list response");

@@ -13,6 +13,7 @@ pub mod provider;
 pub mod session;
 pub mod state;
 pub mod tool_def;
+pub mod tool_result;
 
 // Unified arg parsing (shared across dsx-agent, dsx-tools)
 pub mod arg;
@@ -34,6 +35,10 @@ pub use provider::{CacheTokenField, EndpointSpec, ProviderSpec, ThinkingParamMod
 pub use session::{SessionMeta, SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2};
 pub use state::DebugLevel;
 pub use tool_def::{ToolDef, ToolFunction};
+pub use tool_result::{
+    ContentRef, ToolContinuation, ToolError, ToolModelPayload, ToolResult, ToolStatus,
+    TOOL_MODEL_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS,
+};
 
 // ── Unified arg parsers ──
 pub use arg::{

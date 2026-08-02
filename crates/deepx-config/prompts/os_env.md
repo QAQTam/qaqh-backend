@@ -16,5 +16,5 @@
 
 - **exec 超时 = 移交后台，不是失败**：
   - 达到 `timeout_secs` 时 exec 返回 `{"status": "backgrounded", "process_id": <id>, "info": {...}}`，**进程仍在运行**，输出继续累积。
-  - 收到 backgrounded 后用 `process_check`（查状态/输出 tail）、`process_wait`（等待退出）、`process_kill`（终止）接管。**不要**立即重试或判定失败。
-  - 取消（cancel）与 `process_kill` 会终止整棵进程树（含子进程），不是仅杀直接子进程。
+  - 收到 backgrounded 后用 `process(action="check")`（查状态/输出 tail）、`process(action="wait")`（等待退出）、`process(action="kill")`（终止）接管。**不要**立即重试或判定失败。
+  - 取消（cancel）与 `process(action="kill")` 会终止整棵进程树（含子进程），不是仅杀直接子进程。

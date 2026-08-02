@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createStore, For, onCleanup, reconcile, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createStore, For, onCleanup, reconcile, Show } from "solid-js";
 import { marked, Renderer } from "marked";
 import { createHighlighter, createOnigurumaEngine } from "shiki";
 import renderMathInElement from "katex/contrib/auto-render";
@@ -146,37 +146,10 @@ function projectBlocks(text: string, final: boolean): MarkdownBlock[] {
     return [{ key: "f", hash: blockHash(text), raw: text, stable: true, kind: "text" }];
   }
 
-  const tokens = marked.lexer(text);
-  let tailIdx = tokens.length;
-  while (tailIdx > 0 && tokens[tailIdx - 1]?.type === "space") tailIdx--;
-  if (tailIdx === 0) {
-    return [{ key: "l0", hash: blockHash(text), raw: text, stable: false, kind: "text" }];
-  }
-  tailIdx--;
+  // Open Timeline text is rendered as a cheap inline preview. Full block
+  // lexing/highlighting is deferred until the producer seals the block.
+  return [{ key: "l0", hash: blockHash(text), raw: text, stable: false, kind: "text" }];
 
-  const lastToken = tokens[tailIdx];
-  const lastIsCompleteTable =
-    lastToken?.type === "table" &&
-    (lastToken as any).align != null &&
-    (lastToken as any).align.length > 0;
-  if (lastIsCompleteTable) tailIdx++;
-
-  const blocks: MarkdownBlock[] = [];
-  for (let i = 0; i < tailIdx; i++) {
-    const token = tokens[i];
-    if (!token || token.type === "space") continue;
-    let raw = token.raw;
-    while (i + 1 < tailIdx && tokens[i + 1]?.type === "space") raw += tokens[++i]!.raw;
-    const kind: MarkdownBlock["kind"] = token.type === "code" ? "code" : "text";
-    blocks.push({ key: `b${blocks.length}`, hash: blockHash(raw), raw, stable: true, kind });
-  }
-
-  if (tailIdx < tokens.length) {
-    const liveRaw = tokens.slice(tailIdx).map(t => t.raw).join("");
-    blocks.push({ key: `l${blocks.length}`, hash: blockHash(liveRaw), raw: liveRaw, stable: false, kind: "text" });
-  }
-
-  return blocks;
 }
 
 // ── Component ──
@@ -191,11 +164,42 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
   let container!: HTMLDivElement;
   let renderGeneration = 0;
   let disposed = false;
+  let livePreviewFrame: number | undefined;
+  let pendingLiveBlock: MarkdownBlock | undefined;
   let prevVisible: MarkdownBlock[] = [];
+
+  const [livePreview, setLivePreview] = createSignal({ hash: "", html: "" });
+
+  const cancelLivePreview = () => {
+    if (livePreviewFrame === undefined) return;
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(livePreviewFrame);
+    else clearTimeout(livePreviewFrame);
+    livePreviewFrame = undefined;
+  };
+
+  const scheduleLivePreview = (block: MarkdownBlock | undefined) => {
+    pendingLiveBlock = block;
+    if (livePreviewFrame !== undefined) return;
+    const schedule = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0) as unknown as number;
+    livePreviewFrame = schedule(() => {
+      livePreviewFrame = undefined;
+      const next = pendingLiveBlock;
+      pendingLiveBlock = undefined;
+      if (disposed || !next) return;
+      // At most one full inline parse per animation frame. While the parse is
+      // pending, the renderer falls back to textContent instead of reparsing
+      // the entire accumulated answer for every incoming delta.
+      setLivePreview({ hash: next.hash, html: inlineLiveHTML(next.raw) });
+    });
+  };
 
   onCleanup(() => {
     disposed = true;
     renderGeneration += 1;
+    cancelLivePreview();
+    pendingLiveBlock = undefined;
     // Release Shiki HTML strings retained in the store
     setBlockHtml(reconcile({} as Record<string, string>));
     setVisibleBlocks(reconcile([] as MarkdownBlock[]));
@@ -273,6 +277,7 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
       // changes every frame. Avoid full array replacement to prevent
       // <For> reconciling all historical blocks on every delta.
       if (!props.final) {
+        scheduleLivePreview(currentBlocks.at(-1));
         setVisibleBlocks(s => {
           const prevLen = s.length;
           if (prevLen === 0) {
@@ -390,11 +395,22 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
                       />
                     }
                   >
-                    <div
-                      data-key={block.key}
-                      data-hash={block.hash}
-                      innerHTML={inlineLiveHTML(block.raw)}
-                    />
+                    <Show
+                      when={livePreview().hash === block.hash}
+                      fallback={
+                        <div
+                          data-key={block.key}
+                          data-hash={block.hash}
+                          textContent={block.raw}
+                        />
+                      }
+                    >
+                      <div
+                        data-key={block.key}
+                        data-hash={block.hash}
+                        innerHTML={livePreview().html}
+                      />
+                    </Show>
                   </Show>
                 }
               >

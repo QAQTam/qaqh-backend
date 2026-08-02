@@ -138,8 +138,7 @@ impl TurnEngine {
                 ctx,
                 &saved.turn_id,
                 saved.round_num,
-                false,
-                false,
+                None,
                 &tool_ids,
                 deepx_domain::TimelineTurnState::Cancelled,
                 None,
@@ -357,7 +356,7 @@ impl TurnEngine {
 
         let content = if approved && autonomous {
             format!(
-                "Plan approved. Goal automation is currently frozen. Track execution with todo_create and todo_update; use todo_cancel for work that is no longer needed.\n\n{}",
+                "Plan approved. Goal automation is currently frozen. Track execution with task(action=\"create|update\"); use task(action=\"cancel\") for work that is no longer needed.\n\n{}",
                 plan.content
             )
         } else if approved {
@@ -419,8 +418,7 @@ impl TurnEngine {
             ctx,
             &saved.turn_id,
             saved.round_num,
-            false,
-            false,
+            None,
             &tool_ids,
             deepx_domain::TimelineTurnState::Cancelled,
             None,
@@ -573,26 +571,17 @@ impl TurnEngine {
         ctx: &mut RingContext,
         turn_id: &str,
         round_num: u32,
-        reasoning_open: bool,
-        text_open: bool,
+        active_stream_block: Option<&(deepx_domain::TimelineBlockKind, String)>,
         tool_ids: &HashSet<String>,
         state: deepx_domain::TimelineTurnState,
         failure: Option<deepx_domain::TimelineFailure>,
     ) {
-        if reasoning_open {
+        if let Some((_, block_id)) = active_stream_block {
             ctx.emitter
                 .emit_timeline(deepx_domain::TimelineIntent::BlockSealed {
                     turn_id: turn_id.to_string(),
                     round_num,
-                    block_id: format!("round-{round_num}:reasoning"),
-                });
-        }
-        if text_open {
-            ctx.emitter
-                .emit_timeline(deepx_domain::TimelineIntent::BlockSealed {
-                    turn_id: turn_id.to_string(),
-                    round_num,
-                    block_id: format!("round-{round_num}:text"),
+                    block_id: block_id.clone(),
                 });
         }
         for tool_id in tool_ids {
@@ -615,6 +604,55 @@ impl TurnEngine {
                 state,
                 failure,
             });
+    }
+
+    fn seal_active_stream_block(
+        ctx: &mut RingContext,
+        turn_id: &str,
+        round_num: u32,
+        active: &mut Option<(deepx_domain::TimelineBlockKind, String)>,
+    ) {
+        if let Some((_, block_id)) = active.take() {
+            ctx.emitter
+                .emit_timeline(deepx_domain::TimelineIntent::BlockSealed {
+                    turn_id: turn_id.to_string(),
+                    round_num,
+                    block_id,
+                });
+        }
+    }
+
+    fn ensure_stream_block(
+        ctx: &mut RingContext,
+        turn_id: &str,
+        round_num: u32,
+        active: &mut Option<(deepx_domain::TimelineBlockKind, String)>,
+        segment: &mut u32,
+        kind: deepx_domain::TimelineBlockKind,
+    ) -> String {
+        if let Some((active_kind, block_id)) = active {
+            if *active_kind == kind {
+                return block_id.clone();
+            }
+        }
+        Self::seal_active_stream_block(ctx, turn_id, round_num, active);
+        let label = match kind {
+            deepx_domain::TimelineBlockKind::Reasoning => "reasoning",
+            deepx_domain::TimelineBlockKind::Text => "text",
+            _ => "stream",
+        };
+        let block_id = format!("round-{round_num}:{label}:{}", *segment);
+        *segment = (*segment).saturating_add(1);
+        ctx.emitter
+            .emit_timeline(deepx_domain::TimelineIntent::BlockOpened {
+                turn_id: turn_id.to_string(),
+                round_num,
+                block_id: block_id.clone(),
+                kind,
+                tool: None,
+            });
+        *active = Some((kind, block_id.clone()));
+        block_id
     }
 
     fn execute_admitted_batch(
@@ -697,7 +735,7 @@ impl TurnEngine {
                             });
                         }
                         // Instant refresh for todo tools
-                        if tool_name.starts_with("todo_") {
+                        if tool_name == "task" {
                             ctx.emitter.emit(Agent2Ui::Dashboard {
                                 hp_connected: true,
                                 session_seed: ctx.agent.session.seed.clone(),
@@ -788,7 +826,7 @@ impl TurnEngine {
                         });
                     }
                     // Instant refresh for todo tools
-                    if tool_name.starts_with("todo_") {
+                    if tool_name == "task" {
                         ctx.emitter.emit(Agent2Ui::Dashboard {
                             hp_connected: true,
                             session_seed: ctx.agent.session.seed.clone(),
@@ -1099,8 +1137,8 @@ impl TurnEngine {
             let mut content = String::new();
             let mut reasoning = String::new();
             let mut tool_calls_raw = serde_json::Value::Null;
-            let mut timeline_reasoning_open = false;
-            let mut timeline_text_open = false;
+            let mut active_stream_block: Option<(deepx_domain::TimelineBlockKind, String)> = None;
+            let mut timeline_segment = 0u32;
             let mut timeline_tools_open = HashSet::new();
             let mut had_error = false;
             let mut gate_error = None;
@@ -1130,22 +1168,19 @@ impl TurnEngine {
                             return;
                         }
                         content.push_str(&d);
-                        if !timeline_text_open {
-                            ctx.emitter
-                                .emit_timeline(deepx_domain::TimelineIntent::BlockOpened {
-                                    turn_id: turn_id.clone(),
-                                    round_num,
-                                    block_id: format!("round-{round_num}:text"),
-                                    kind: deepx_domain::TimelineBlockKind::Text,
-                                    tool: None,
-                                });
-                            timeline_text_open = true;
-                        }
+                        let block_id = Self::ensure_stream_block(
+                            ctx,
+                            &turn_id,
+                            round_num,
+                            &mut active_stream_block,
+                            &mut timeline_segment,
+                            deepx_domain::TimelineBlockKind::Text,
+                        );
                         ctx.emitter
                             .emit_timeline(deepx_domain::TimelineIntent::TextDelta {
                                 turn_id: turn_id.clone(),
                                 round_num,
-                                block_id: format!("round-{round_num}:text"),
+                                block_id,
                                 delta: d.clone(),
                             });
                         ctx.emitter.emit_delta(Agent2Ui::RoundDelta {
@@ -1169,22 +1204,19 @@ impl TurnEngine {
                             return;
                         }
                         reasoning.push_str(&r);
-                        if !timeline_reasoning_open {
-                            ctx.emitter
-                                .emit_timeline(deepx_domain::TimelineIntent::BlockOpened {
-                                    turn_id: turn_id.clone(),
-                                    round_num,
-                                    block_id: format!("round-{round_num}:reasoning"),
-                                    kind: deepx_domain::TimelineBlockKind::Reasoning,
-                                    tool: None,
-                                });
-                            timeline_reasoning_open = true;
-                        }
+                        let block_id = Self::ensure_stream_block(
+                            ctx,
+                            &turn_id,
+                            round_num,
+                            &mut active_stream_block,
+                            &mut timeline_segment,
+                            deepx_domain::TimelineBlockKind::Reasoning,
+                        );
                         ctx.emitter
                             .emit_timeline(deepx_domain::TimelineIntent::TextDelta {
                                 turn_id: turn_id.clone(),
                                 round_num,
-                                block_id: format!("round-{round_num}:reasoning"),
+                                block_id,
                                 delta: r.clone(),
                             });
                         ctx.emitter.emit_delta(Agent2Ui::RoundDelta {
@@ -1252,6 +1284,12 @@ impl TurnEngine {
                             "[TURN] emit_delta ToolCallPreview turn_id={turn_id} round={round_num} idx={index} id={id} name={name}"
                         );
                         let block_id = format!("tool:{id}");
+                        Self::seal_active_stream_block(
+                            ctx,
+                            &turn_id,
+                            round_num,
+                            &mut active_stream_block,
+                        );
                         if timeline_tools_open.insert(id.clone()) {
                             ctx.emitter
                                 .emit_timeline(deepx_domain::TimelineIntent::BlockOpened {
@@ -1313,11 +1351,6 @@ impl TurnEngine {
                                     state: provider_state,
                                 },
                             ));
-                        ctx.emitter.emit_delta(Agent2Ui::SearchStatus {
-                            turn_id: turn_id.clone(),
-                            round_num,
-                            status,
-                        });
                     }
                     deepx_gate::StreamEvent::UsageUpdate(u) => {
                         last_usage = Some(u.clone());
@@ -1385,8 +1418,7 @@ impl TurnEngine {
                     ctx,
                     &turn_id,
                     round_num,
-                    timeline_reasoning_open,
-                    timeline_text_open,
+                    active_stream_block.as_ref(),
                     &timeline_tools_open,
                     deepx_domain::TimelineTurnState::Cancelled,
                     None,
@@ -1411,8 +1443,7 @@ impl TurnEngine {
                     ctx,
                     &turn_id,
                     round_num,
-                    timeline_reasoning_open,
-                    timeline_text_open,
+                    active_stream_block.as_ref(),
                     &timeline_tools_open,
                     deepx_domain::TimelineTurnState::Failed,
                     Some(deepx_domain::TimelineFailure {
@@ -1498,22 +1529,7 @@ impl TurnEngine {
             // Native transcript sealing is independent from the legacy
             // RoundComplete projection. A Markdown consumer only sees these
             // blocks as final after the explicit seal.
-            if timeline_reasoning_open {
-                ctx.emitter
-                    .emit_timeline(deepx_domain::TimelineIntent::BlockSealed {
-                        turn_id: turn_id.clone(),
-                        round_num,
-                        block_id: format!("round-{round_num}:reasoning"),
-                    });
-            }
-            if timeline_text_open {
-                ctx.emitter
-                    .emit_timeline(deepx_domain::TimelineIntent::BlockSealed {
-                        turn_id: turn_id.clone(),
-                        round_num,
-                        block_id: format!("round-{round_num}:text"),
-                    });
-            }
+            Self::seal_active_stream_block(ctx, &turn_id, round_num, &mut active_stream_block);
             if parsed.is_empty() {
                 ctx.emitter
                     .emit_timeline(deepx_domain::TimelineIntent::RoundSealed {
@@ -1816,8 +1832,7 @@ impl TurnEngine {
                                 ctx,
                                 &turn_id,
                                 round_num,
-                                timeline_reasoning_open,
-                                timeline_text_open,
+                                active_stream_block.as_ref(),
                                 &timeline_tools_open,
                                 deepx_domain::TimelineTurnState::Cancelled,
                                 None,
@@ -2005,50 +2020,48 @@ impl TurnEngine {
     ) -> Vec<(String, String, String, bool)> {
         let results = ctx.agent.msg.last_step_tool_results();
         let ts = util::chrono_local_datetime();
-        let tool_defs: Vec<_> = results
-            .iter()
-            .map(|(tc_id, name, content, success)| {
-                let args = ctx
-                    .agent
-                    .msg
-                    .tool_call_args(tc_id)
-                    .map(|a| a.to_string())
-                    .unwrap_or_default();
-                let summary: String = content
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(120)
-                    .collect();
-                ToolEngine::emit_timeline_tool_result(
-                    ctx, turn_id, round_num, tc_id, name, &args, content, *success,
-                );
-                // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
-                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
-                    deepx_domain::ToolEvent::AuditRecorded {
-                        tool_name: name.clone(),
-                        result_summary: summary.clone(),
-                        success: *success,
-                        time: ts.clone(),
-                        args_ref: None,
-                    },
-                ));
-                ctx.emitter.emit_delta(Agent2Ui::AuditRecord {
+        let mut tool_defs = Vec::with_capacity(results.len());
+        for (tc_id, name, content, success) in &results {
+            let args = ctx
+                .agent
+                .msg
+                .tool_call_args(tc_id)
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            let summary: String = content
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect();
+            ToolEngine::emit_timeline_tool_result(
+                ctx, turn_id, round_num, tc_id, name, &args, content, *success,
+            );
+            // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                deepx_domain::ToolEvent::AuditRecorded {
                     tool_name: name.clone(),
-                    result_summary: summary,
+                    result_summary: summary.clone(),
                     success: *success,
                     time: ts.clone(),
-                    args,
-                });
-                deepx_proto::ToolResultDef {
-                    tool_call_id: tc_id.clone(),
-                    output: content.clone(),
-                    success: *success,
-                    file: None,
-                }
-            })
-            .collect();
+                    args_ref: None,
+                },
+            ));
+            ctx.emitter.emit_delta(Agent2Ui::AuditRecord {
+                tool_name: name.clone(),
+                result_summary: summary,
+                success: *success,
+                time: ts.clone(),
+                args,
+            });
+            tool_defs.push(deepx_proto::ToolResultDef {
+                tool_call_id: tc_id.clone(),
+                output: content.clone(),
+                success: *success,
+                file: None,
+            });
+        }
 
         if !tool_defs.is_empty() {
             ctx.emitter.emit(Agent2Ui::ToolResults {

@@ -959,12 +959,11 @@ fn activity(seed: &str) -> Result<Value, String> {
             for block in &message.content {
                 if let deepx_types::ContentBlock::ToolResult {
                     tool_use_id,
-                    content,
-                    success,
+                    result: tool_result,
                 } = block
                 {
                     let (name, args) = tools.get(tool_use_id).cloned().unwrap_or_default();
-                    result.push(json!({"tool_name":name,"summary":content.lines().find(|v|!v.starts_with("[timeis:")).unwrap_or("").chars().take(120).collect::<String>(),"success":success,"time":message.msg_id.map(|v|v.to_string()).unwrap_or_default(),"args":args}));
+                    result.push(json!({"tool_name":name,"summary":tool_result.summary,"status":serde_json::to_value(tool_result.status).unwrap_or_default(),"time":message.msg_id.map(|v|v.to_string()).unwrap_or_default(),"args":args}));
                 }
             }
         }

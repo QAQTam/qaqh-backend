@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ToolResult;
+
 // ── OpenAI-native content blocks ──
 
 /// Content block within a message, matching OpenAI / DeepSeek Chat Completions API.
@@ -30,11 +32,8 @@ pub enum ContentBlock {
     ToolResult {
         /// Matches the `id` from the corresponding `ToolUse` block.
         tool_use_id: String,
-        /// The tool's output (may be truncated).
-        content: String,
-        /// Whether the tool execution succeeded.
-        #[serde(default)]
-        success: bool,
+        /// Canonical structured result. `status` is the only execution truth.
+        result: ToolResult,
     },
     /// An image for multimodal understanding (user messages only).
     /// `mime_type` is the MIME type (e.g. "image/png", "image/jpeg").
@@ -122,14 +121,23 @@ impl Message {
     }
     /// Create a tool result message, feeding tool output back to the model.
     pub fn tool(tool_call_id: &str, result: &str, success: bool) -> Self {
+        let result = if success {
+            ToolResult::ok(result)
+        } else {
+            ToolResult::error(result)
+        };
+        Self::tool_result(tool_call_id, result)
+    }
+
+    /// Create a tool result message with the canonical structured result.
+    pub fn tool_result(tool_call_id: &str, result: ToolResult) -> Self {
         Self {
             msg_id: None,
             role: "tool".into(),
             name: None,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tool_call_id.into(),
-                content: result.into(),
-                success,
+                result,
             }],
         }
     }

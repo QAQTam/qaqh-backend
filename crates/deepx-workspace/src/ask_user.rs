@@ -159,14 +159,11 @@ pub fn normalize_ask_user(args: &serde_json::Value) -> Result<NormalizedAsk, Ask
 pub(super) fn exec_ask_user(args: &serde_json::Value) -> ToolResult {
     match normalize_ask_user(args) {
         Ok(ask) => ToolResult::ok(crate::json_ok(serde_json::to_value(ask).expect("NormalizedAsk serializes"))),
-        Err(error) => ToolResult {
-            success: false,
-            content: crate::json_err(
+        Err(error) => ToolResult::error(crate::json_err(
                 error.code,
-                &format!("ask_user: {}", error.message),
-                "Fix the ask_user arguments and retry.",
-            ),
-        },
+                &format!("ask: {}", error.message),
+                "Fix the ask arguments and retry.",
+            )),
     }
 }
 
@@ -174,8 +171,8 @@ handler!(handle_ask_user, exec_ask_user);
 
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
-        key: "ask_user".to_string(),
-        description: "Ask the user one or more questions when blocked. Use questions for a batch form; presentation mode is derived from the normalized question count. Legacy question/options/allow_custom input remains supported for one question.",
+        key: "ask".to_string(),
+        description: "Ask the user one or more questions when blocked. This opens a Ringing interaction and is not treated as an ordinary successful tool result.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -233,7 +230,7 @@ mod tests {
         });
         let result = exec_ask_user(&args);
         // Parse the JSON output
-        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(result.model_text()).expect("valid JSON");
         assert_eq!(value["status"], "ok");
         assert!(value.get("user_query").is_none());
         assert_eq!(value["mode"], "single");
@@ -255,7 +252,7 @@ mod tests {
             ]
         });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(result.model_text()).expect("valid JSON");
         assert_eq!(value["status"], "ok");
         assert!(value.get("user_query").is_none());
         assert_eq!(value["mode"], "batch");
@@ -275,7 +272,7 @@ mod tests {
             "mode": "batch"
         });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(result.model_text()).expect("valid JSON");
         let qs = value["questions"].as_array().unwrap();
         assert_eq!(qs[0]["id"], "q1");
         assert_eq!(qs[1]["id"], "q2");
@@ -286,7 +283,7 @@ mod tests {
     fn empty_questions_error() {
         let args = serde_json::json!({ "questions": [] });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(result.model_text()).expect("valid JSON");
         assert_eq!(value["status"], "error");
     }
 
@@ -299,7 +296,7 @@ mod tests {
             ]
         });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(result.model_text()).expect("valid JSON");
         assert_eq!(value["status"], "error");
     }
 
@@ -307,7 +304,7 @@ mod tests {
     fn old_format_no_options() {
         let args = serde_json::json!({ "question": "What do you think?" });
         let result = exec_ask_user(&args);
-        let value: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
+        let value: serde_json::Value = serde_json::from_str(result.model_text()).expect("valid JSON");
         assert_eq!(value["status"], "ok");
         let q = &value["questions"][0];
         assert_eq!(q["question"], "What do you think?");

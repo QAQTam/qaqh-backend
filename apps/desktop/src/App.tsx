@@ -119,10 +119,24 @@ export default function App() {
     const seed = entry.state().seed;
     timelineMonitor.version();
     let fallback = entry.state();
-    const stores = ringingMonitor.storesFor(seed);
-    if (stores) fallback = selectRingingPresentation(seed, stores);
     const snapshot = timelineMonitor.snapshotFor(seed);
-    return snapshot ? selectTimelinePresentation(seed, snapshot, fallback) : fallback;
+    const stores = ringingMonitor.storesFor(seed);
+    if (stores) {
+      // Timeline owns transcript ordering once activated. Keep Ringing control,
+      // tool and interaction state, but do not rebuild the transcript a second
+      // time before the authoritative Timeline projection runs.
+      fallback = selectRingingPresentation(seed, stores, fallback, {
+        includeTurns: !snapshot,
+      });
+    }
+    return snapshot
+      ? selectTimelinePresentation(
+        seed,
+        snapshot,
+        fallback,
+        turnId => timelineMonitor.turnRevisionFor(seed, turnId),
+      )
+      : fallback;
   }
 
   async function refreshSessions(): Promise<boolean> {

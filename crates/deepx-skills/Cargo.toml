@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-deepx-vector = { path = "../deepx-vector", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -14,7 +13,6 @@ tracing = "0.1"
 walkdir = "2"
 
 [features]
-memory = ["dep:deepx-vector"]
 
 [dev-dependencies]
 tempfile = "3"

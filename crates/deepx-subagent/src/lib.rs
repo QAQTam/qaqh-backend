@@ -127,27 +127,21 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         .unwrap_or(120);
 
     if task.is_empty() {
-        return ToolResult {
-            success: false,
-            content: deepx_workspace::json_err(
+        return ToolResult::error(deepx_workspace::json_err(
                 "MISSING_TASK",
                 "spawn_subagent: task is required",
                 "Provide a task description.",
-            ),
-        };
+            ));
     }
 
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
-            return ToolResult {
-                success: false,
-                content: deepx_workspace::json_err(
+            return ToolResult::error(deepx_workspace::json_err(
                     "EXE_ERROR",
                     &format!("spawn_subagent: cannot get exe path: {e}"),
                     "Check the installation.",
-                ),
-            };
+                ));
         }
     };
 
@@ -216,41 +210,32 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return ToolResult {
-                success: false,
-                content: deepx_workspace::json_err(
+            return ToolResult::error(deepx_workspace::json_err(
                     "SPAWN_ERROR",
                     &format!("spawn_subagent: failed to spawn: {e}"),
                     "Check that deepx is installed correctly.",
-                ),
-            };
+                ));
         }
     };
 
     let child_stdin = match child.stdin.take() {
         Some(s) => s,
         None => {
-            return ToolResult {
-                success: false,
-                content: deepx_workspace::json_err(
+            return ToolResult::error(deepx_workspace::json_err(
                     "STDIN_ERROR",
                     "spawn_subagent: failed to get stdin",
                     "Check subagent process.",
-                ),
-            };
+                ));
         }
     };
     let child_stdout = match child.stdout.take() {
         Some(s) => s,
         None => {
-            return ToolResult {
-                success: false,
-                content: deepx_workspace::json_err(
+            return ToolResult::error(deepx_workspace::json_err(
                     "STDOUT_ERROR",
                     "spawn_subagent: failed to get stdout",
                     "Check subagent process.",
-                ),
-            };
+                ));
         }
     };
 
@@ -263,14 +248,11 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         let line = serde_json::to_string(&frame).unwrap_or_default();
         if writeln!(stdin_writer, "{}", line).is_err() || stdin_writer.flush().is_err() {
             deepx_workspace::process_registry::ProcessRegistry::kill(registry_id);
-            return ToolResult {
-                success: false,
-                content: deepx_workspace::json_err(
+            return ToolResult::error(deepx_workspace::json_err(
                     "WRITE_ERROR",
                     "spawn_subagent: failed to write task",
                     "Check subagent process.",
-                ),
-            };
+                ));
         }
     }
 
@@ -389,12 +371,9 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         name,
         registry_id
     );
-    ToolResult {
-        success: true,
-        content: deepx_workspace::json_ok(serde_json::json!({
+    ToolResult::ok(deepx_workspace::json_ok(serde_json::json!({
             "process_id": registry_id,
             "name": name,
             "content": format!("Subagent '{}' spawned successfully.", name),
-        })),
-    }
+        })))
 }

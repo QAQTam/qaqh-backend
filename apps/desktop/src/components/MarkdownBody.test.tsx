@@ -100,7 +100,7 @@ it("renders inline and display LaTeX while preserving Markdown code as literal t
   dispose();
 });
 
-it("replaces streaming code-block HTML with the single final block", async () => {
+it("defers code-block Markdown work until the block is sealed", async () => {
   const host = document.createElement("div");
   const [content, setContent] = createSignal("intro\n\n```ts\nconst a = 1;\n```\n\nafter");
   const [final, setFinal] = createSignal(false);
@@ -109,13 +109,12 @@ it("replaces streaming code-block HTML with the single final block", async () =>
     host,
   );
 
-  // Streaming path: the code block gets a rendered wrapper (Shiki or fallback).
+  // Open blocks stay cheap; no full lexer/highlighter work is needed yet.
   shikiState.resolve({
     codeToHtml: text => `<pre class="shiki"><code>${text}</code></pre>`,
   });
-  await vi.waitFor(() =>
-    expect(host.querySelector(".code-block-wrapper")).not.toBeNull(),
-  );
+  await Promise.resolve();
+  expect(host.querySelector(".code-block-wrapper")).toBeNull();
   expect(host.textContent).toContain("const a = 1");
 
   // Final render: the whole answer becomes one "f" block; streaming block

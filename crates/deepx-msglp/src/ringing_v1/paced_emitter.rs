@@ -69,6 +69,19 @@ impl Drop for CausationGuard {
 impl Emitter for PacedEmitter {
     fn emit(&self, event: Agent2Ui) {
         if !self.writer_dead.load(Ordering::SeqCst) {
+            // The legacy worker boundary remains available for the later
+            // TUI/WinUI rewrite. Native Ringing commands already have a
+            // canonical ToolFinished terminal, so do not dual-send the old
+            // ToolResults shape when a causation scope identifies that path.
+            if matches!(event, Agent2Ui::ToolResults { .. })
+                && self
+                    .causation
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some()
+            {
+                return;
+            }
             let _ = self.tx.send(WriterEvent::Legacy(event));
         }
     }
@@ -250,6 +263,48 @@ mod tests {
         let h = TestHarness::new();
         h.pacer.emit_delta(Agent2Ui::Ready);
         assert!(matches!(h.take_events()[0], Agent2Ui::Ready));
+    }
+
+    #[test]
+    fn native_causation_suppresses_legacy_tool_results_only() {
+        let h = TestHarness::new();
+        let event = Agent2Ui::ToolResults {
+            turn_id: "t1".into(),
+            round_num: 0,
+            results: vec![deepx_proto::ToolResultDef {
+                tool_call_id: "call-1".into(),
+                output: "ok".into(),
+                success: true,
+                file: None,
+            }],
+        };
+        {
+            let _scope = h.pacer.enter_causation(Some("ringing-command"));
+            h.pacer.emit(event.clone());
+            h.pacer.emit(Agent2Ui::TurnEnd {
+                turn_id: "t1".into(),
+                stop_reason: None,
+                usage: None,
+            });
+        }
+        let native_events = h.take_events();
+        assert!(
+            native_events
+                .iter()
+                .all(|event| !matches!(event, Agent2Ui::ToolResults { .. }))
+        );
+        assert!(
+            native_events
+                .iter()
+                .any(|event| matches!(event, Agent2Ui::TurnEnd { .. }))
+        );
+
+        h.pacer.emit(event);
+        assert!(
+            h.take_events()
+                .iter()
+                .any(|event| matches!(event, Agent2Ui::ToolResults { .. }))
+        );
     }
 
     #[test]

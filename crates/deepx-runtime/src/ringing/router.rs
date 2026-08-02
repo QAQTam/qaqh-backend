@@ -103,7 +103,7 @@ pub fn terminal_replaceable_keys(event: &RingingEvent) -> Vec<ReplaceableKey> {
     use deepx_domain::{ConversationEvent as CE, ToolEvent as TE};
     match event {
         RingingEvent::Tool(
-            TE::ToolFinished { tool_call_id, .. } | TE::ToolFailed { tool_call_id, .. },
+            TE::ToolFinished { tool_call_id, .. },
         ) => {
             vec![ReplaceableKey::tool_progress(tool_call_id)]
         }

@@ -10,13 +10,13 @@ pub mod backend;
 mod code_delta;
 pub mod execution;
 pub mod file_cache;
-pub mod file_mutate;
 pub mod file_query;
 pub mod file_shared;
 pub mod file_state;
 pub mod git;
 pub mod image_query;
 pub mod runtime;
+pub mod search;
 mod safety;
 pub mod skill;
 mod web;
@@ -29,8 +29,6 @@ pub mod todo;
 
 pub mod workspace;
 
-#[cfg(feature = "memory")]
-pub mod memory;
 
 pub mod process_inspect;
 pub mod process_registry;
@@ -109,29 +107,14 @@ pub enum ToolRisk {
     Administrative,
 }
 
-// ── Macro: handler! (v3 — exec returns ToolResult directly, no success inference) ──
+// ── Macro: handler ──
 ///
-/// The inner `$exec` function must return `ToolResult { success, content }` explicitly.
-/// No magic string-parsing — the handler is a pure pass-through.
+/// The inner `$exec` function returns the canonical structured result directly.
 #[macro_export]
 macro_rules! handler {
     ($name:ident, $exec:ident) => {
         fn $name(ctx: ToolCallCtx) -> ToolResult {
             $exec(&ctx.args)
-        }
-    };
-}
-
-/// Transitional macro for `exec` functions that still return `String` with
-/// `[ERROR]`/`[PARTIAL]` prefix conventions. Migrate callers to `handler!`
-/// (→ `ToolResult`) and delete this.
-#[macro_export]
-macro_rules! handler_from_string {
-    ($name:ident, $exec:ident) => {
-        fn $name(ctx: ToolCallCtx) -> ToolResult {
-            let s: String = $exec(&ctx.args);
-            let success = !(s.trim_start().starts_with("[ERROR") || s.trim_start().starts_with("[PARTIAL"));
-            ToolResult { success, content: s }
         }
     };
 }
@@ -168,6 +151,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
+pub use deepx_types::{
+    ContentRef, ToolContinuation, ToolError as CanonicalToolError, ToolModelPayload, ToolResult,
+    ToolStatus,
+};
 use deepx_types::ToolDef;
 
 // ── Global state ──
@@ -195,7 +182,7 @@ pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>>
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 /// Tools blocked in PLAN mode. Keep in sync with permission::categorize_tool.
-pub const PLAN_BLOCKED: &[&str] = &["patch", "edit", "edit_block", "write", "delete", "exec", "git"];
+pub const PLAN_BLOCKED: &[&str] = &["apply_patch", "exec", "process", "task"];
 
 pub fn set_workspace(path: &str) {
     let mut ws = CURRENT_WORKSPACE.write().unwrap_or_else(|e| e.into_inner());
@@ -370,43 +357,6 @@ impl ToolCallCtx {
     }
 }
 
-// ── ToolResult ──
-
-#[derive(Clone, Debug)]
-pub struct ToolResult {
-    pub success: bool,
-    pub content: String,
-}
-
-impl ToolResult {
-    pub fn ok(content: impl Into<String>) -> Self {
-        Self {
-            success: true,
-            content: content.into(),
-        }
-    }
-    pub fn error(msg: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            content: format!("[ERROR] {}", msg.into()),
-        }
-    }
-    pub fn partial(msg: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            content: format!("[PARTIAL] {}", msg.into()),
-        }
-    }
-
-    /// Create a failure result from a structured [`ToolError`].
-    pub fn from_error(error: ToolError) -> Self {
-        Self {
-            success: false,
-            content: error.to_string(),
-        }
-    }
-}
-
 /// Structured error type for tool operations.
 ///
 /// Replaces `"[ERROR]"` / `"[PARTIAL]"` / `"[CANCELLED]"` prefix conventions
@@ -493,6 +443,28 @@ impl std::fmt::Display for ToolError {
                 write!(f, "[ERROR] {message}")
             }
         }
+    }
+}
+
+impl ToolError {
+    pub fn into_result(self) -> ToolResult {
+        let message = self.to_string();
+        let (code, retryable, hint) = match &self {
+            Self::ManagerUnavailable => ("MANAGER_UNAVAILABLE", true, None),
+            Self::UnknownTool { .. } => ("UNKNOWN_TOOL", false, None),
+            Self::SessionMismatch => ("SESSION_MISMATCH", false, None),
+            Self::PermissionDenied { .. } => ("PERMISSION_DENIED", false, None),
+            Self::Cancelled => ("CANCELLED", false, None),
+            Self::BlockedByMode { .. } => ("BLOCKED_BY_MODE", false, None),
+            Self::InvalidArgs { .. } => ("INVALID_ARGUMENTS", false, None),
+            Self::Io { .. } => ("IO_ERROR", false, None),
+            Self::ResourceMismatch => ("RESOURCE_MISMATCH", false, None),
+            Self::RuntimeNotInitialized => ("RUNTIME_NOT_INITIALIZED", false, None),
+            Self::ToolSpecific { .. } => ("TOOL_ERROR", false, None),
+            Self::Partial { .. } => ("PARTIAL", false, None),
+            Self::Internal { .. } => ("INTERNAL_ERROR", true, None),
+        };
+        ToolResult::error_with(code, message, retryable, hint.map(str::to_string))
     }
 }
 

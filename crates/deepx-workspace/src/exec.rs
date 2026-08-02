@@ -685,7 +685,7 @@ fn direct_exec(
     let deadline = start_time + std::time::Duration::from_secs(timeout_secs);
     // 快速移交：子进程存活超过 background_after_secs 即移交后台（不等 timeout）。
     // 用于拉起长驻服务（serve/daemon/watch）—���调用方希望尽快拿到
-    // backgrounded tool_result，用 process_check/wait/kill 接管，而不是
+    // backgrounded tool_result，用 process(action=check/wait/kill) 接管，而不是
     // 死等到 timeout_secs 让 agent loop 阻塞。
     let handoff_deadline =
         background_after_secs.map(|secs| start_time + std::time::Duration::from_secs(secs));
@@ -709,7 +709,7 @@ fn direct_exec(
                 }
                 if std::time::Instant::now() >= deadline {
                     // 超时 = 移交后台（不 kill）：进程存活、管道线程继续
-                    // append_output/推流，LLM 可用 process_check/wait/kill 接管。
+                    // append_output/推流，LLM 可用 process(action=...) 接管。
                     timed_out = true;
                     break;
                 }
@@ -736,7 +736,7 @@ fn direct_exec(
                 "backgrounded": true,
                 "process_id": proc_id,
                 "transferred_after_secs": start_time.elapsed().as_secs_f64(),
-                "hint": "进程已转入后台（未终止）。用 process_check(process_id) 查看状态，process_wait(process_id) 等待完成，process_kill(process_id) 终止。",
+                "hint": "进程已转入后台（未终止）。用 process(action=\"check\", id=process_id) 查看状态，process(action=\"wait\", id=process_id) 等待完成，process(action=\"kill\", id=process_id) 终止。",
                 "info": info,
             })
             .to_string(),
@@ -826,7 +826,7 @@ pub(crate) struct ExecOutput {
     stderr_bytes: u64,
     /// Bytes not sent to the UI because its bounded event queue was full.
     ui_dropped_bytes: u64,
-    /// 超时移交后台时的注册表进程 id（process_check/wait/kill 使用）。
+    /// 超时移交后台时的注册表进程 id（由 process 的 action 使用）。
     #[serde(skip_serializing_if = "Option::is_none")]
     process_id: Option<u32>,
 }
@@ -845,28 +845,22 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
     // Two modes: `command` (auto-wrapped in platform shell) or `argv` (direct exec).
     let argv: Vec<String> = if let Some(command) = ctx.get_str("command") {
         if command.is_empty() {
-            return ToolResult {
-                success: false,
-                content: crate::json_err(
+            return ToolResult::error(crate::json_err(
                     "EMPTY_COMMAND",
                     "command string is empty",
                     "Provide a shell command string.",
-                ),
-            };
+                ));
         }
         // Explicit shell override (exec `shell` param) or platform default.
         let shell = match ctx.args.get("shell").and_then(|v| v.as_str()) {
             Some(name) if !name.is_empty() => match Shell::from_name(name) {
                 Some(shell) => shell,
                 None => {
-                    return ToolResult {
-                        success: false,
-                        content: crate::json_err(
+                    return ToolResult::error(crate::json_err(
                             "UNKNOWN_SHELL",
                             format!("unknown shell '{name}'"),
                             "Use one of: bash, zsh, sh, pwsh, cmd. The default is auto-detected (bash on Windows).",
-                        ),
-                    };
+                        ));
                 }
             },
             _ => Shell::detect(),
@@ -879,26 +873,20 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect(),
             None => {
-                return ToolResult {
-                    success: false,
-                    content: crate::json_err(
+                return ToolResult::error(crate::json_err(
                         "MISSING_ARGV",
                         "exec requires argv or command",
                         "Example: {\"argv\": [\"cargo\", \"check\"]} or {\"command\": \"cargo check\"}",
-                    ),
-                };
+                    ));
             }
         }
     };
     if argv.is_empty() {
-        return ToolResult {
-            success: false,
-            content: crate::json_err(
+        return ToolResult::error(crate::json_err(
                 "EMPTY_ARGV",
                 "argv array is empty",
                 "Provide at least one element.",
-            ),
-        };
+            ));
     }
     let max_output_tokens = ctx
         .get_u64("max_output_tokens")
@@ -955,9 +943,10 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
         Some(_) => false,
         None => !result.timed_out && !result.cancelled,
     };
-    ToolResult {
-        success,
-        content: result.to_json(),
+    if success {
+        ToolResult::ok(result.to_json())
+    } else {
+        ToolResult::error(result.to_json())
     }
 }
 
@@ -1016,7 +1005,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
                     "cwd": {"type": "string", "description": "Working directory (optional). Relative paths resolve against the workspace root (or process directory when no workspace is set). Defaults to workspace root."},
                     "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Environment variables to set for the child (optional). Keys/values must be strings; existing variables with the same name are overridden."},
                     "timeout_secs": {"type": "integer", "description": "Timeout in seconds (1-3600, default 30)"},
-                    "background_after_secs": {"type": "integer", "description": "Fast handoff window in seconds (1-3600, optional). If the child is still running after this many seconds, the call returns immediately with status \"backgrounded\" plus a process_id (instead of waiting until timeout_secs). Use this when launching long-running services (serve/daemon/watch): the model then takes over with process_check(process_id), process_wait(process_id), or process_kill(process_id)."},
+                    "background_after_secs": {"type": "integer", "description": "Fast handoff window in seconds (1-3600, optional). If the child is still running after this many seconds, the call returns immediately with status \"backgrounded\" plus a process_id (instead of waiting until timeout_secs). Use this when launching long-running services (serve/daemon/watch): the model then takes over with process(action=\"check|wait|kill\", id=process_id)."},
                     "max_output_tokens": { "type": "integer", "description": "Max tokens of output before smart truncation (head 70% + tail 30%). Default 10000, min 100, max 50000." }
                 },
                 "required": [],
@@ -1345,8 +1334,8 @@ mod tests {
         let info = crate::process_registry::ProcessRegistry::get_info(pid)
             .expect("进程必须在注册表");
         assert_eq!(info["status"], "running", "移交后进程不得被杀");
-        assert!(result.output.contains("process_check"), "提示应指向检查工具");
-        // process_wait 语义：等待自然退出
+        assert!(result.output.contains("process(action="), "提示应指向 process 检查动作");
+        // process(wait) 语义：等待自然退出
         let final_info = crate::process_registry::ProcessRegistry::wait_for(pid, 15)
             .expect("wait_for 必须返回");
         eprintln!("final_info: {final_info}");

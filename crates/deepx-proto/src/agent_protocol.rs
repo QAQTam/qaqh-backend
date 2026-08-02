@@ -729,17 +729,6 @@ pub enum Agent2Ui {
         args_so_far: String,
     },
 
-    /// Server-side web search progress (Responses API built-in tool).
-    /// `status` is one of "in_progress" | "searching" | "completed".
-    /// The search runs on the provider; the frontend shows a transient
-    /// "searching…" line that the RoundComplete blocks replace on arrival.
-    #[serde(rename = "search_status")]
-    SearchStatus {
-        turn_id: String,
-        round_num: u32,
-        status: String,
-    },
-
     /// Realtime code stats delta from a file operation (write/edit/delete/move).
     #[serde(rename = "code_delta")]
     CodeDelta {
@@ -751,10 +740,6 @@ pub enum Agent2Ui {
         #[ts(optional)]
         file: Option<String>,
     },
-
-    /// Heartbeat: daemon responds to frontend ping.
-    #[serde(rename = "pong")]
-    Pong,
 
     /// Skills catalog changed — frontend should refresh the skills panel.
     /// Emitted on explicit activation ($name), deactivation (UnloadSkill),
@@ -856,8 +841,7 @@ impl Agent2Ui {
             | Agent2Ui::AskRejected { .. }
             | Agent2Ui::PlanSubmitted { .. }
             | Agent2Ui::PlanResolved { .. }
-            | Agent2Ui::RoundComplete { .. }
-            | Agent2Ui::Pong => EventLane::Critical,
+            | Agent2Ui::RoundComplete { .. } => EventLane::Critical,
 
             // ── Bulk: high-frequency, loss-tolerant streaming ──
             Agent2Ui::ExecProgress { .. }
@@ -873,7 +857,6 @@ impl Agent2Ui {
             | Agent2Ui::ToolResults { .. }
             | Agent2Ui::ToolExecDelta { .. }
             | Agent2Ui::ToolCallPreview { .. }
-            | Agent2Ui::SearchStatus { .. }
             | Agent2Ui::CodeDelta { .. }
             | Agent2Ui::ToolNotice { .. }
             | Agent2Ui::Dashboard { .. }
@@ -1285,7 +1268,6 @@ mod tests {
             Agent2Ui::ShutdownAck,
             Agent2Ui::Ready,
             Agent2Ui::Error { message: "e".into() },
-            Agent2Ui::Pong,
         ];
         for event in &events {
             let _lane = event.lane(); // must not panic

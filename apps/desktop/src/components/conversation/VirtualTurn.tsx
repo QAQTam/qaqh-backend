@@ -18,17 +18,27 @@ const UNMOUNT_DEBOUNCE_MS = 300;
 
 export default function VirtualTurn(props: {
   turn: TurnViewModel;
+  root?: Element;
+  estimatedHeight?: number;
+  tail?: boolean;
+  onMeasured?: (turnId: string, height: number) => void;
   onReviewChanges?: (changes: ChangeReviewFile[]) => void;
 }) {
   let sentinel!: HTMLDivElement;
   let hideTimer: number | undefined;
-  let measuredHeight = 0;
   const [visible, setVisible] = createSignal(false);
 
+  const reportHeight = () => {
+    const height = sentinel?.offsetHeight ?? 0;
+    if (height > 0) props.onMeasured?.(props.turn.turnId, height);
+  };
+
   onSettled(() => {
+    reportHeight();
+    if (props.tail) setVisible(true);
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry?.isIntersecting) {
+        if (props.tail || entry?.isIntersecting) {
           if (hideTimer !== undefined) {
             clearTimeout(hideTimer);
             hideTimer = undefined;
@@ -41,11 +51,12 @@ export default function VirtualTurn(props: {
         if (hideTimer !== undefined) clearTimeout(hideTimer);
         hideTimer = window.setTimeout(() => {
           hideTimer = undefined;
-          if (sentinel) measuredHeight = sentinel.offsetHeight;
+          reportHeight();
           setVisible(false);
         }, UNMOUNT_DEBOUNCE_MS);
       },
       {
+        root: props.root ?? null,
         rootMargin: "600px 0px",
         threshold: 0,
       },
@@ -63,8 +74,9 @@ export default function VirtualTurn(props: {
   return (
     <article
       ref={sentinel}
-      class="conversation-turn"
+      class="conversation-turn-virtual"
       data-turn={props.turn.turnId}
+      data-tail={props.tail ? "true" : undefined}
     >
       <Show
         when={visible()}
@@ -72,7 +84,7 @@ export default function VirtualTurn(props: {
           <div
             aria-hidden="true"
             style={{
-              height: `${measuredHeight || 120}px`,
+              height: `${props.estimatedHeight ?? 120}px`,
               background: "var(--bg-secondary, transparent)",
             }}
           />

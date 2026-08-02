@@ -6,6 +6,7 @@ import {
   toolReducer,
 } from "./ringingStores";
 import { selectRingingPresentation } from "./sessionPresentation";
+import { createRawSessionState } from "./rawSession";
 
 describe("selectRingingPresentation", () => {
   it("projects Ringing conversation data without legacy usage arguments", () => {
@@ -57,6 +58,16 @@ describe("selectRingingPresentation", () => {
     expect(presentation.seed).toBe("seed-empty");
     expect(presentation.turns).toEqual([]);
     expect(presentation.pendingInteractions).toEqual([]);
+  });
+
+  it("preserves non-Ringing fallback fields while projecting Ringing usage", () => {
+    const stores = initialRingingStores("seed-preserve");
+    const fallback = createRawSessionState("seed-preserve");
+    fallback.providerRetry = { turnId: "t", roundNum: 1, attempt: 1, maxRetries: 2, delaySecs: 1 };
+    fallback.telemetry = [{ ts: 1, prompt_tokens: 1, completion_tokens: 1, total_tokens: 2, reasoning_tokens: 0, cache_hit: 0, cache_miss: 0, cache_available: false, sample_key: "x" }];
+    const presentation = selectRingingPresentation("seed-preserve", stores, fallback);
+    expect(presentation.providerRetry).toEqual(fallback.providerRetry);
+    expect(presentation.telemetry).toEqual(fallback.telemetry);
   });
 
   it("keeps tool rounds, progress, and ask/plan payloads in the presentation", () => {

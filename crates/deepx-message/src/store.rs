@@ -755,8 +755,7 @@ impl MessageStore {
                         for block in &mut msg.content {
                             if let deepx_types::ContentBlock::ToolResult {
                                 tool_use_id,
-                                content,
-                                ..
+                                result,
                             } = block
                             {
                                 let tool_name =
@@ -779,9 +778,11 @@ impl MessageStore {
                                     // result intact so the model can consume it
                                     // without calling the tool again.
                                 } else if tool_name.starts_with("exec") {
-                                    *content = truncate_tool_result(tool_name, content);
+                                    result.model.text = truncate_tool_result(tool_name, &result.model.text);
+                                    result.model.truncated = true;
                                 } else {
-                                    *content = fold_completed_tool_result(tool_name, content);
+                                    result.model.text = fold_completed_tool_result(tool_name, &result.model.text);
+                                    result.model.truncated = true;
                                 }
                             }
                         }
@@ -889,11 +890,14 @@ impl MessageStore {
             if let Some((tc_id, result_text, ok)) = tr.content.iter().find_map(|b| {
                 if let deepx_types::ContentBlock::ToolResult {
                     tool_use_id,
-                    content,
-                    success,
+                    result,
                 } = b
                 {
-                    Some((tool_use_id.clone(), content.clone(), *success))
+                    Some((
+                        tool_use_id.clone(),
+                        result.model.text.clone(),
+                        result.is_success(),
+                    ))
                 } else {
                     None
                 }
@@ -1086,11 +1090,14 @@ impl MessageStore {
                         .find_map(|b| {
                             if let deepx_types::ContentBlock::ToolResult {
                                 tool_use_id,
-                                content,
-                                success,
+                                result,
                             } = b
                             {
-                                Some((tool_use_id.clone(), content.clone(), *success))
+                                Some((
+                                    tool_use_id.clone(),
+                                    result.model.text.clone(),
+                                    result.is_success(),
+                                ))
                             } else {
                                 None
                             }
@@ -1337,8 +1344,8 @@ impl MessageStore {
                             tool_calls += deepx_types::count_tokens(&json) as u64;
                             tool_call_blocks += 1;
                         }
-                        deepx_types::ContentBlock::ToolResult { content, .. } => {
-                            tool_results += deepx_types::count_tokens(content) as u64;
+                        deepx_types::ContentBlock::ToolResult { result, .. } => {
+                            tool_results += deepx_types::count_tokens(&result.model.text) as u64;
                         }
                         deepx_types::ContentBlock::Image { .. } => {
                             // Image token count uses the MiMo formula (roughly ~256-1024 tokens depending on resolution).
@@ -1371,8 +1378,7 @@ impl MessageStore {
                     for b in &tr.content {
                         if let deepx_types::ContentBlock::ToolResult {
                             tool_use_id,
-                            content,
-                            ..
+                            result,
                         } = b
                         {
                             // Match tool name by id
@@ -1399,12 +1405,12 @@ impl MessageStore {
                                     || tool_name == "skills"
                                     || tool_name.starts_with("exec");
                                 if keep_full {
-                                    truncate_tool_result(tool_name, content)
+                                    truncate_tool_result(tool_name, &result.model.text)
                                 } else {
-                                    fold_completed_tool_result(tool_name, content)
+                                    fold_completed_tool_result(tool_name, &result.model.text)
                                 }
                             } else {
-                                fold_completed_tool_result(tool_name, content)
+                                fold_completed_tool_result(tool_name, &result.model.text)
                             };
                             tool_results += deepx_types::count_tokens(&effective) as u64;
                         }
@@ -1496,9 +1502,9 @@ mod tests {
             .find_map(|block| match block {
                 ContentBlock::ToolResult {
                     tool_use_id,
-                    content,
+                    result,
                     ..
-                } if tool_use_id == id => Some(content.clone()),
+                } if tool_use_id == id => Some(result.model.text.clone()),
                 _ => None,
             })
             .expect("tool result must be present in gate context")

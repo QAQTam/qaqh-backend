@@ -29,7 +29,7 @@ function processEntry() {
       family: "read",
       toolName: "read",
       summary: "App.tsx",
-      success: true,
+      status: "ok" as const,
     }],
   };
 }

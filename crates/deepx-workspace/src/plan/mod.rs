@@ -7,7 +7,7 @@
 //! ```
 //!
 //! This module no longer registers any Agent tools. Planning is done via
-//! the direct `todo_*` tools, and PLAN.md remains a human-readable plan of
+//! the unified `task` tool, and PLAN.md remains a human-readable plan of
 //! record. Goal activation/import is currently frozen.
 
 mod types;

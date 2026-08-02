@@ -16,11 +16,11 @@ native owner and one transport class.
 
 ## Legacy deletion groups
 
-1. **Transcript projection group**: `Agent2Ui::{TurnStart, RoundDelta,
+1. **Transcript projection group**: historical `Agent2Ui::{TurnStart, RoundDelta,
    RoundComplete, ToolCallPreview, ToolResults, ToolExecDelta, ExecProgress,
-   TurnEnd, Done, Cancelled}` and `legacy_projector` transcript branches. Delete
-   after Ringing V1 timeline SSE and the Electron timeline reducer are the only desktop
-   transcript source.
+   TurnEnd, Done, Cancelled}` and the removed runtime compatibility projector.
+   The native Ringing timeline SSE and Electron timeline reducer are now the only
+   desktop transcript source. Keep the worker-side legacy boundary for TUI/WinUI.
 2. **Control projection group**: legacy `Ready`, session lifecycle, ask/plan,
    permission, dashboard, skills and error variants. Delete only after the
    native control plane has its own Electron store and command receipt UI.
@@ -47,7 +47,6 @@ fetches `/ringing/v1/sessions/{seed}/timeline` and consumes one per-session
 SSE cursor; its reducer rejects gaps and renders incoming text deltas before a
 block seal.
 
-This is still a staged cutover: Ringing V1 control stores supply interactions,
-dashboard and accounting to the presentation fallback, and error/cancelled
-model terminal paths plus native usage records remain to be completed before
-the transcript projection group is deleted.
+The desktop cutover remains intentionally layered: Ringing V1 control stores
+supply interactions, dashboard and accounting to the presentation fallback,
+while the legacy worker boundary is isolated for the later TUI/WinUI rewrite.

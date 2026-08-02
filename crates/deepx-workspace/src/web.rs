@@ -19,9 +19,18 @@ fn http_agent(timeout_secs: u64) -> ureq::Agent {
 pub(super) fn handle_web(ctx: ToolCallCtx) -> ToolResult {
     let timeout_secs = ctx.timeout_secs.unwrap_or(30);
     if ctx.args.s("url").starts_with("http") {
-        ToolResult::ok(&web_fetch(&ctx.args, timeout_secs))
+        let payload = web_fetch(&ctx.args, timeout_secs);
+        let is_error = serde_json::from_str::<serde_json::Value>(&payload)
+            .ok()
+            .and_then(|value| value.get("status").and_then(|status| status.as_str()).map(|status| status == "error"))
+            .unwrap_or(false);
+        if is_error {
+            ToolResult::error(payload)
+        } else {
+            ToolResult::ok(payload)
+        }
     } else {
-        ToolResult::ok(&crate::json_err(
+        ToolResult::error(&crate::json_err(
             "MISSING_URL",
             "web: 'url' (starting with http) is required; web search is handled by the model's built-in web_search tool",
             "Pass a URL to fetch, or rely on the model's server-side web_search.",

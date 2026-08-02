@@ -53,8 +53,8 @@ fn main() {
         None,
     );
 
-    println!("{}", r.content);
-    if !r.success {
+    println!("{}", r.result.model_text());
+    if !r.result.is_success() {
         std::process::exit(1);
     }
 }

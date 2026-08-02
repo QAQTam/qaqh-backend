@@ -18,10 +18,6 @@ default:
 build-daemon:
     cargo build --release -p deepx-daemon -p deepx-workspace
 
-# 编译 companion（同步引擎，release）
-build-companion:
-    cargo build --release -p deepx-companion
-
 # 编译安装器（release）
 [windows]
 build-installer:
@@ -170,7 +166,6 @@ clippy:
 status:
     @Write-Output "=== Rust binaries ==="
     @if (Test-Path 'target/release/deepx-daemon.exe') { '  ✓ deepx-daemon.exe' } else { '  ✗ deepx-daemon.exe' }
-    @if (Test-Path 'target/release/deepx-companion.exe') { '  ✓ deepx-companion.exe' } else { '  ✗ deepx-companion.exe' }
     @if (Test-Path 'target/release/DeepXInstaller.exe') { '  ✓ DeepXInstaller.exe' } else { '  ✗ DeepXInstaller.exe' }
     @if (Test-Path 'target/release/deepx-updater.exe') { '  ✓ deepx-updater.exe' } else { '  ✗ deepx-updater.exe' }
     @Write-Output "=== Desktop ==="
@@ -254,7 +249,6 @@ setup:
 status:
     @echo "=== Rust binaries ==="
     @test -f target/release/deepx-daemon && echo "  ✓ deepx-daemon" || echo "  ✗ deepx-daemon"
-    @test -f target/release/deepx-companion && echo "  ✓ deepx-companion" || echo "  ✗ deepx-companion"
     @echo "=== Desktop ==="
     @test -f apps/desktop/out/main/main.js && echo "  ✓ main.js" || echo "  ✗ main.js"
     @test -f apps/desktop/out/renderer/index.html && echo "  ✓ renderer" || echo "  ✗ renderer"

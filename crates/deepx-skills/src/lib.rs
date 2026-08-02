@@ -82,9 +82,8 @@ pub struct SkillCatalog {
 impl SkillCatalog {
     /// Semantic search over available skills.
     ///
-    /// Returns matching skills sorted by relevance. When the `rag` feature
-    /// is enabled, uses vector embeddings for true semantic search. Without
-    /// it, falls back to keyword matching on skill name and description.
+    /// Returns matching skills sorted by keyword relevance over skill name and
+    /// description.
     ///
     /// `top_k` is a hint; the actual count may be lower if fewer skills match.
     pub fn search_semantic(&self, query: &str, top_k: usize) -> Vec<SkillMetadata> {
@@ -92,15 +91,7 @@ impl SkillCatalog {
             return Vec::new();
         }
 
-        #[cfg(feature = "memory")]
-        {
-            return self.search_semantic_vector(query, top_k);
-        }
-
-        #[cfg(not(feature = "memory"))]
-        {
-            self.search_semantic_keyword(query, top_k)
-        }
+        self.search_semantic_keyword(query, top_k)
     }
 
     /// Keyword-based fallback: score skills by token overlap with the query.
@@ -141,34 +132,6 @@ impl SkillCatalog {
             .collect()
     }
 
-    /// Vector-based semantic search (requires `rag` feature).
-    #[cfg(feature = "memory")]
-    fn search_semantic_vector(&self, query: &str, top_k: usize) -> Vec<SkillMetadata> {
-        use deepx_vector::degradation::auto_detect;
-        use std::sync::OnceLock;
-
-        // Build a BM25 index lazily (cheap, no model needed)
-        static BM25: OnceLock<deepx_vector::Bm25Index> = OnceLock::new();
-        let bm25 = BM25.get_or_init(|| {
-            let mut idx = deepx_vector::Bm25Index::new();
-            for skill in &self.skills {
-                let text = format!("{} {}", skill.name, skill.description);
-                idx.insert(&skill.name, &text, &skill.description);
-            }
-            idx
-        });
-
-        // TODO: When embedder is available, use vector search.
-        // For now, fall back to BM25 keyword search.
-        let _ = auto_detect; // verify the dep works
-        let results = bm25.search(query, top_k);
-        results
-            .into_iter()
-            .filter_map(|(name, _meta, _score)| {
-                self.skills.iter().find(|s| s.name == name).cloned()
-            })
-            .collect()
-    }
 }
 
 /// A fully loaded skill ready for injection into the agent context.

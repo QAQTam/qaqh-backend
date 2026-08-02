@@ -13,7 +13,6 @@ const DEEPX_PROCESS_NAMES: &[&str] = &[
     "DeepX.exe",
     "deepx-daemon.exe",
     "deepx-updater.exe",
-    "deepx-companion.exe",
 ];
 const MAX_UNINSTALL_ENTRIES: u64 = 100_000;
 const MAX_UNINSTALL_BYTES: u64 = 20 * 1024 * 1024 * 1024;

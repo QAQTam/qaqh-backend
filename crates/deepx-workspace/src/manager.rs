@@ -240,8 +240,8 @@ impl ToolManager {
     ) -> ToolExecReport {
         self.inflight_tasks.remove(&prepared.id);
 
-        let output_size = result.content.len();
-        let success = result.success;
+        let output_size = result.model_text().len();
+        let success = result.is_success();
 
         self.stats_total += 1;
         if !success {
@@ -251,14 +251,14 @@ impl ToolManager {
         let files_affected = extract_files_affected(&prepared.name, &prepared.audit_args);
         if success {
             match prepared.name.as_str() {
-                "read" | "diff" | "skills" => {
+                "read" | "search" | "skills" => {
                     for f in &files_affected {
                         if !self.files_read.contains(f) {
                             self.files_read.push(f.clone());
                         }
                     }
                 }
-                "patch" | "edit" | "edit_block" | "write" | "delete" => {
+                "apply_patch" | "task" => {
                     for f in &files_affected {
                         if !self.files_written.contains(f) {
                             self.files_written.push(f.clone());
@@ -280,7 +280,7 @@ impl ToolManager {
         };
         ToolExecReport {
             success,
-            content: result.content,
+            content: result.model_text().to_string(),
             meta,
             files_affected,
         }
@@ -366,7 +366,7 @@ fn is_path_in_workspace(ctx: &crate::ToolCallCtx) -> bool {
         };
         abs_path.starts_with(&*ws)
     } else {
-        // No path arg — assume workspace operation (e.g. task, memory, ask_user)
+        // No path arg — assume workspace operation (e.g. task, skills, ask)
         true
     }
 }

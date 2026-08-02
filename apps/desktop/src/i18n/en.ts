@@ -167,9 +167,9 @@ const en = {
     defaultPermissionHint: "Saved immediately. Level 4 full access permits high-risk operations.",
     multimodal: {
       title: "Multimodal (Vision)",
-      desc: "Configure a multimodal model for image understanding (supports MiMo, Ollama, LM Studio). The LLM can call the image_query tool to analyze images.",
+      desc: "Configure a multimodal model for image understanding (supports MiMo, Ollama, LM Studio). The LLM can call the image tool to analyze images.",
       enable: "Enable Multimodal",
-      enableHint: "When enabled, the LLM can use the image_query tool for image analysis and understanding.",
+      enableHint: "When enabled, the LLM can use the image tool for image analysis and understanding.",
       providerType: "Provider Type",
       providerTypeHint: "Determines API format and authentication. Local models (Ollama, LM Studio) use longer timeouts.",
       provider: "Provider",

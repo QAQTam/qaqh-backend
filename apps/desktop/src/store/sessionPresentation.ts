@@ -17,6 +17,7 @@ import type {
 import { createRawSessionState } from "./rawSession";
 import type { RingingStores, ToolCardView } from "./ringingStores";
 import type { UsageInfo } from "../lib/types/ringing/UsageInfo";
+import type { ToolResult } from "../lib/types/ringing/ToolResult";
 import type { SkillRuntimeInfo } from "./rawSession";
 
 function mapTurnStatus(status: string): TurnStatus {
@@ -46,14 +47,10 @@ function toolCallsFor(cards: ToolCardView[]) {
 }
 
 function toolResultsFor(cards: ToolCardView[]) {
-  const out: Record<string, { tool_call_id: string; output: string; success: boolean }> = {};
+  const out: Record<string, ToolResult> = {};
   for (const c of cards) {
-    if (c.status === "finished" || c.status === "failed") {
-      out[c.toolCallId] = {
-        tool_call_id: c.toolCallId,
-        output: c.resultSummary ?? "",
-        success: c.status === "finished",
-      };
+    if (c.status === "finished" && c.result) {
+      out[c.toolCallId] = c.result;
     }
   }
   return out;
@@ -62,13 +59,24 @@ function toolResultsFor(cards: ToolCardView[]) {
 export function selectRingingPresentation(
   seed: string,
   stores: RingingStores,
+  fallback?: RawSessionState,
+  options?: { includeTurns?: boolean },
 ): RawSessionState {
-  const base = createRawSessionState(seed);
+  const base = fallback ?? createRawSessionState(seed);
   const conv = stores.conversation;
   const tool = stores.tool;
+  const includeTurns = options?.includeTurns !== false;
   const typedUsage = conv.lastUsage?.usage as UsageInfo | undefined;
+  const hasRingingUsage = conv.lastUsage !== null
+    || conv.usageRequestCount > 0
+    || conv.usageTotals.total_tokens > 0;
+  const usageTotals = hasRingingUsage ? conv.usageTotals : base.session.usageTotals;
+  const usageRequestCount = hasRingingUsage ? conv.usageRequestCount : base.session.usageRequestCount;
+  const cacheReportedRequestCount = hasRingingUsage
+    ? conv.cacheReportedRequestCount
+    : base.session.cacheReportedRequestCount;
 
-  const turns: RawTurn[] = conv.turns.map((tv) => {
+  const turns: RawTurn[] = includeTurns ? conv.turns.map((tv) => {
     const rounds: RawRound[] = tv.rounds.map((rv) => {
       const cards = cardsForRound(tool.cards, tv.turnId, rv.roundNum);
       const progress = Object.fromEntries(
@@ -105,7 +113,7 @@ export function selectRingingPresentation(
       rounds,
       interactions: [],
     };
-  });
+  }) : base.turns;
 
   const merged: RawSessionState = {
     ...base,
@@ -114,14 +122,22 @@ export function selectRingingPresentation(
     session: {
       ...base.session,
       ready: stores.control.agentLifecycle === "ready",
-      hasMore: false,
-      totalTurns: turns.length,
       model: conv.lastUsage?.model ?? base.session.model,
       contextLimit: conv.lastUsage?.contextLimit ?? base.session.contextLimit,
       usage: typedUsage ?? base.session.usage,
-      usageTotals: base.session.usageTotals,
+      usageTotals,
+      usageRequestCount,
+      cacheReportedRequestCount,
+      tokensUsed: usageTotals.total_tokens,
+      cacheHitPct: usageTotals.cache_usage_reported === true
+        ? (() => {
+          const total = usageTotals.prompt_cache_hit_tokens + usageTotals.prompt_cache_miss_tokens;
+          return total > 0 ? usageTotals.prompt_cache_hit_tokens * 100 / total : 0;
+        })()
+        : base.session.cacheHitPct,
+      hasMore: conv.hasMore || base.session.hasMore,
+      totalTurns: Math.max(conv.totalTurns, turns.length, base.session.totalTurns),
     },
-    telemetry: [],
     compact: {
       ...base.compact,
       active: conv.compactStatus === "completed" ? false : conv.compactStatus !== null,

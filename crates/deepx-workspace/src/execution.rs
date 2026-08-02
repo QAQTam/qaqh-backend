@@ -9,6 +9,7 @@ use std::time::Instant;
 pub struct ToolExecResult {
     pub content: String,
     pub success: bool,
+    pub result: crate::ToolResult,
     pub meta: crate::ToolExecMeta,
     pub code_delta: Option<deepx_proto::CodeDeltaRecord>,
     pub skill_effects: Vec<crate::ToolEffect>,
@@ -75,9 +76,11 @@ pub fn execute_authorized(
     let prepared = match prepared {
         Some(Ok(prepared)) => prepared,
         Some(Err(report)) => {
+            let canonical = crate::ToolResult::error(report.content.clone());
             return ToolExecResult {
                 content: report.content,
                 success: report.success,
+                result: canonical,
                 meta: report.meta,
                 code_delta: None,
                 skill_effects: Vec::new(),
@@ -97,13 +100,14 @@ pub fn execute_authorized(
         prepared.handler_fn,
         prepared.ctx.clone(),
     );
-    let skill_effects = if name == "skills" && tool_result.success {
+    let skill_effects = if name == "skills" && tool_result.is_success() {
         prepared.ctx.take_skill_effects()
     } else {
         Vec::new()
     };
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    let success = tool_result.success;
+    let success = tool_result.is_success();
+    let canonical = tool_result.clone();
 
     // Phase 3: finalize while holding the manager lock again.
     let report = crate::runtime::with_manager(|manager| {
@@ -118,6 +122,7 @@ pub fn execute_authorized(
             let result = ToolExecResult {
                 content: report.content,
                 success: report.success,
+                result: canonical,
                 meta: report.meta,
                 code_delta,
                 skill_effects,
@@ -230,6 +235,7 @@ fn failure(name: &str, error: crate::ToolError) -> ToolExecResult {
     ToolExecResult {
         content: error.to_string(),
         success: false,
+        result: error.into_result(),
         meta: crate::ToolExecMeta {
             name: name.to_string(),
             elapsed_ms: 0,
@@ -393,7 +399,11 @@ mod tests {
             "generic-skill-read",
             None,
         );
-        assert!(generic_read.content.contains("USE_SKILLS_TOOL"));
+        assert!(!generic_read.success);
+        assert_eq!(
+            generic_read.result.error.as_ref().map(|error| error.code.as_str()),
+            Some("USE_SKILLS_TOOL")
+        );
 
         let traversal = execute_with_context(
             "skills",
@@ -510,8 +520,8 @@ mod tests {
         }
     }
 
-    /// exec 与 process_* 必须路由到 workspace 后端（与 exec 共享 serve 进程的
-    /// ProcessRegistry）。若 process_* 仍为 HostOnly，则 LLM 拿到的 exec
+    /// exec 与 process 必须路由到 workspace 后端（与 exec 共享 serve 进程的
+    /// ProcessRegistry）。若 process 仍为 HostOnly，则 LLM 拿到的 exec
     /// process_id 在 worker 本地注册表查不到（跨进程注册表隔离 bug）。
     #[test]
     fn process_tools_route_to_workspace_backend() {
@@ -528,10 +538,7 @@ mod tests {
 
         for tool in [
             "exec",
-            "process_check",
-            "process_wait",
-            "process_kill",
-            "process_write",
+            "process",
         ] {
             backend_calls.store(0, Ordering::SeqCst);
             let call = match admit(

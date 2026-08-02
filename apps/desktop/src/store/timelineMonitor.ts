@@ -8,12 +8,39 @@ import type { TimelineEntry, TimelineSnapshot, TimelineSnapshotResponse } from "
  */
 export function createTimelineMonitor() {
   const snapshots = new Map<string, TimelineSnapshot>();
+  const turnRevisions = new Map<string, Map<string, number>>();
   const [version, setVersion] = createSignal(0);
+  const dirtyTurns = new Map<string, Set<string>>();
+  let frame: number | undefined;
+
+  const notifyFrame = () => {
+    if (frame !== undefined) return;
+    const schedule = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0) as unknown as number;
+    frame = schedule(() => {
+      frame = undefined;
+      dirtyTurns.clear();
+      setVersion(value => value + 1);
+    });
+  };
+
+  const cancelFrame = () => {
+    if (frame === undefined) return;
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);
+    else clearTimeout(frame);
+    frame = undefined;
+  };
 
   function handleSnapshot(response: TimelineSnapshotResponse): void {
     if (response.schema !== "deepx.Ringing" || response.version !== 1) return;
     if (!Number.isSafeInteger(response.snapshot?.watermark) || response.snapshot.watermark < 0) return;
+    cancelFrame();
     snapshots.set(response.seed, structuredClone(response.snapshot));
+    turnRevisions.set(
+      response.seed,
+      new Map(response.snapshot.turns.map(turn => [turn.turn_id, 0])),
+    );
     setVersion(value => value + 1);
   }
 
@@ -24,13 +51,22 @@ export function createTimelineMonitor() {
     if (entry.timeline_seq !== snapshot.watermark + 1) return false;
     if (!applyEntry(snapshot, entry)) return false;
     snapshot.watermark = entry.timeline_seq;
-    setVersion(value => value + 1);
+    const revisions = turnRevisions.get(seed) ?? new Map<string, number>();
+    revisions.set(entry.turn_id, (revisions.get(entry.turn_id) ?? 0) + 1);
+    turnRevisions.set(seed, revisions);
+    const turns = dirtyTurns.get(seed) ?? new Set<string>();
+    turns.add(entry.turn_id);
+    dirtyTurns.set(seed, turns);
+    notifyFrame();
     return true;
   }
 
   return {
     version,
     snapshotFor: (seed: string) => snapshots.get(seed),
+    dirtyTurnIdsFor: (seed: string) => dirtyTurns.get(seed) ?? new Set<string>(),
+    turnRevisionFor: (seed: string, turnId: string) =>
+      turnRevisions.get(seed)?.get(turnId) ?? 0,
     hasSnapshot: (seed: string) => snapshots.has(seed),
     handleSnapshot,
     handleEntry,
@@ -80,6 +116,7 @@ function applyEntry(snapshot: TimelineSnapshot, entry: TimelineEntry): boolean {
       const block = round.blocks.find(value => value.block_id === event.block_id);
       if (!block) return false;
       if (block.kind !== "text" && block.kind !== "reasoning") return false;
+      if (block.state === "sealed") return false;
       block.text = `${block.text ?? ""}${event.delta}`;
       return true;
       }
@@ -89,6 +126,7 @@ function applyEntry(snapshot: TimelineSnapshot, entry: TimelineEntry): boolean {
       const block = round.blocks.find(value => value.block_id === event.block_id);
       if (!block) return false;
       if (block.kind !== "tool") return false;
+      if (block.state === "sealed") return false;
       block.tool = event.tool;
       return true;
       }
@@ -98,6 +136,7 @@ function applyEntry(snapshot: TimelineSnapshot, entry: TimelineEntry): boolean {
       const block = round.blocks.find(value => value.block_id === event.block_id);
       if (!block) return false;
       if (!block.tool) return false;
+      if (block.state === "sealed") return false;
       block.tool.progress = `${block.tool.progress ?? ""}${event.chunk}`;
       return true;
       }
@@ -106,6 +145,7 @@ function applyEntry(snapshot: TimelineSnapshot, entry: TimelineEntry): boolean {
       {
       const block = round.blocks.find(value => value.block_id === event.block_id);
       if (!block) return false;
+      if (block.state === "sealed") return false;
       block.state = "sealed";
       return true;
       }

@@ -733,14 +733,14 @@ fn convert_messages(
                 for block in &msg.content {
                     if let ContentBlock::ToolResult {
                         tool_use_id,
-                        content,
+                        result,
                         ..
                     } = block
                     {
                         out.push(serde_json::json!({
                             "role": "tool",
                             "tool_call_id": tool_use_id,
-                            "content": content,
+                            "content": result.project_for_model().to_string(),
                         }));
                     }
                 }

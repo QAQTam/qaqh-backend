@@ -12,7 +12,6 @@ pub mod conversation_snapshot;
 pub mod hub;
 pub mod journal;
 pub mod journal_store;
-pub mod legacy_projector;
 pub mod outbox;
 pub mod projection;
 pub mod query;

@@ -45,8 +45,12 @@ export default function ProcessDetail(props: { item: ProcessItem }) {
 
   const statusBadge = () => {
     if (props.item.kind !== "tool") return null;
-    if (props.item.success === true) return <span class="process-tool-status success">✅ 成功</span>;
-    if (props.item.success === false) return <span class="process-tool-status failure">❌ 失败</span>;
+    if (props.item.status === "ok" || props.item.status === "backgrounded") {
+      return <span class="process-tool-status success">✅ 成功</span>;
+    }
+    if (props.item.status === "error" || props.item.status === "partial" || props.item.status === "cancelled") {
+      return <span class="process-tool-status failure">❌ 失败</span>;
+    }
     return <span class="process-tool-status pending">⏳ 等待中</span>;
   };
 

@@ -1,5 +1,7 @@
+import type { ToolStatus } from "../lib/types/ringing/ToolResult";
+
 export type ProcessItem =
-  | { kind: "reasoning"; id: string; content: string; elapsedMs?: number }
+  | { kind: "reasoning"; id: string; content: string; elapsedMs?: number; state?: "open" | "sealed" }
   | { kind: "assistant_progress"; id: string; markdown: string }
   | {
       kind: "tool";
@@ -10,7 +12,7 @@ export type ProcessItem =
       argsJson?: string;
       output?: string;
       progress?: Array<{ stream: "stdout" | "stderr"; seq: number; chunk: string }>;
-      success?: boolean;
+      status?: ToolStatus;
     }
   | { kind: "group"; id: string; family: string; label: string; children: ProcessItem[] }
   | { kind: "interaction"; id: string; label: string; resolution: string }
@@ -46,7 +48,10 @@ export function aggregateProcessItems(items: ProcessItem[]): ProcessItem[] {
   };
 
   for (const item of items) {
-    if (item.kind === "tool" && item.success === true) {
+    if (
+      item.kind === "tool"
+      && (item.status === "ok" || item.status === "backgrounded")
+    ) {
       if (run.length === 0 || run[0].family === item.family) {
         run.push(item);
       } else {

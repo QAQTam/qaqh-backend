@@ -489,14 +489,14 @@ POST /ringing/v1/clients/open 成功  → 本连接全部事件、命令、查�
   的 Ringing v1 迁移留待未来单独立项。
 - 旧 daemon / 旧客户端兼容仍依赖 `/control/v1`、Agent2Ui/Ui2Agent、LegacyProjector 和
   legacy reducer。它们已与新 Desktop 连接隔离，但尚未到删除兼容层的发布窗口。
-- 全 workspace `cargo check` 仍受 `deepx-vector` 的既有 `hf_hub` API 漂移阻塞；不属于
-  Ringing 协议链，不能据此宣称全仓绿色。
+- 旧基线的全 workspace `cargo check` 曾受实验性向量 crate 的 `hf_hub` API 漂移阻塞；本次已
+  移除该实验性向量/RAG crate，需在本次依赖清理后重新验证全仓构建。
 - server 侧 `ToolProgressCoalescer` 已修复并有单测，但生产路径目前主要依赖 worker 周期 drain
   与 Electron 16ms batch；若“server 必须按 16ms 合并”是硬性验收项，仍需把该工具接入发布路径。
 
 ### 下一步建议（按优先级）
 
-1. 修复 `deepx-vector` 的 `hf_hub` 版本漂移，恢复全 workspace check。
+1. 完成向量/RAG crate 移除后的 lockfile 清理，并恢复全 workspace check。
 2. 若服务端 16ms progress 合并是硬指标，把 `ToolProgressCoalescer` 接入实际发布路径并补压力测试。
 3. 兼容窗口结束后删除 legacy WS、LegacyProjector 与旧 bindings/reducer。
 4. TUI/WinUI 如需 Ringing v1，另开客户端迁移计划，不纳入本次主 HTTP 验收。
@@ -760,8 +760,8 @@ Renderer调度固定为：
 > 本轮验证（2026-08-01）：架构测试 3/3；domain 37/37；ringing 27/27；
 > runtime Ringing 64/64；daemon 16/16；msglp ring 25/25；Desktop 48 files / 227 tests；
 > Desktop typecheck、Ringing bindings drift check、受影响 Rust crates check、TUI 独立 check 均通过。
-> 高吞吐端到端压力测试尚未执行；全 workspace check 受 `deepx-vector` 的既有
-> `hf_hub` API 漂移阻塞，因此不能宣称全仓绿色。
+> 高吞吐端到端压力测试尚未执行；旧基线曾因实验性向量 crate 的 `hf_hub` API 漂移阻塞全
+> workspace check，本次移除后需要重新验证。
 
 - 架构测试：
   - domain模块不能引用Agent2Ui、Ui2Agent或Ringing wire。

@@ -5,6 +5,7 @@ import type {
   SkillInfo,
 } from "../lib/types/ringing";
 import type { UsageInfo } from "../lib/types/ringing/UsageInfo";
+import type { ToolResult } from "../lib/types/ringing/ToolResult";
 
 /** Renderer-local display records. These deliberately do not mirror wire events. */
 export type ToolCallDef = {
@@ -14,17 +15,19 @@ export type ToolCallDef = {
   args_json: string;
 };
 
-export type ToolResultDef = {
-  tool_call_id: string;
-  output: string;
-  success: boolean;
+export type RoundBlockState = "open" | "sealed";
+export type RoundBlockMeta = {
+  blockId?: string;
+  blockOrder?: number;
+  state?: RoundBlockState;
 };
 
 export type RoundBlock =
-  | { type: "reasoning"; content: string }
-  | { type: "text"; content: string }
-  | { type: "tool"; card: ToolCallDef }
-  | { type: "web_search"; action: string };
+  | ({ type: "reasoning"; content: string } & RoundBlockMeta)
+  | ({ type: "text"; content: string } & RoundBlockMeta)
+  | ({ type: "tool"; card: ToolCallDef } & RoundBlockMeta)
+  | ({ type: "web_search"; action: string } & RoundBlockMeta)
+  | ({ type: "notice"; message: string } & RoundBlockMeta);
 
 export type TaskInfo = { id: string; subject: string; description: string; status: string };
 
@@ -56,7 +59,7 @@ export type RawRound = {
   answer: string;
   blocks: RoundBlock[];
   toolCalls: ToolCallDef[];
-  toolResults: Record<string, ToolResultDef>;
+  toolResults: Record<string, ToolResult>;
   progress: Record<string, RawProgress>;
   phase: RoundPhase;
 };

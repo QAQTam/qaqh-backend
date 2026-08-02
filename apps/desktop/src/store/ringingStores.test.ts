@@ -230,7 +230,13 @@ describe("toolReducer", () => {
       tool_call_id: "c1",
       turn_id: "t1",
       round_num: 0,
-      result: { success: true, summary: "ok", output_ref: null },
+      result: {
+        status: "ok",
+        summary: "ok",
+        data: {},
+        model: { text: "ok", truncated: false, total_tokens: 1 },
+        output_ref: null,
+      },
     });
     const card = state.cards.find((c) => c.toolCallId === "c1");
     expect(card?.status).toBe("finished");
@@ -287,6 +293,53 @@ describe("applyEnvelope + idempotency", () => {
     expect(stores.control.agentLifecycle).toBe("ready");
     expect(stores.conversation.activeTurn?.turnId).toBe("t1");
     expect(stores.tool.cards[0].status).toBe("running");
+  });
+
+  it("restores usage counters from snapshot and does not count duplicate live envelopes", () => {
+    const stores = initialRingingStores("s1");
+    stores.conversation = applyConversationSnapshot(
+      stores.conversation,
+      [],
+      null,
+      {
+        prompt_tokens: 10, completion_tokens: 2, total_tokens: 12,
+        prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 10,
+        reasoning_tokens: 0, cache_usage_reported: true,
+      },
+      {
+        prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+        prompt_cache_hit_tokens: 40, prompt_cache_miss_tokens: 60,
+        reasoning_tokens: 5, cache_usage_reported: true,
+      },
+      3,
+      2,
+      7,
+      false,
+    );
+    expect(stores.conversation.usageRequestCount).toBe(3);
+    expect(stores.conversation.cacheReportedRequestCount).toBe(2);
+    expect(stores.conversation.usageTotals.total_tokens).toBe(120);
+
+    const applied = new AppliedEventRegistry();
+    const usageEvent = {
+      channel: "conversation" as const,
+      type: "usage_updated" as const,
+      turn_id: "t1",
+      round_num: 0,
+      usage: {
+        prompt_tokens: 1, completion_tokens: 1, total_tokens: 2,
+        prompt_cache_hit_tokens: 1, prompt_cache_miss_tokens: 0,
+        reasoning_tokens: 0, cache_usage_reported: true,
+      },
+      context_limit: 100,
+      model: "m",
+    };
+    const live = envelope(usageEvent, "usage-1");
+    expect(applyEnvelope(stores, live, applied)).toBe(true);
+    expect(applyEnvelope(stores, live, applied)).toBe(false);
+    expect(stores.conversation.usageRequestCount).toBe(4);
+    expect(stores.conversation.cacheReportedRequestCount).toBe(3);
+    expect(stores.conversation.usageTotals.total_tokens).toBe(122);
   });
 });
 

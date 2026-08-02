@@ -282,6 +282,12 @@ export function createRingingMonitor() {
         },
         Array.isArray(s.turns) ? (s.turns as unknown as ConversationSnapshotTurn[]) : [],
         (sc.active_turn as string | null) ?? null,
+        (s.usage as any) ?? null,
+        (s.usage_totals as any) ?? null,
+        asSafeNonNegativeInt(s.usage_requests),
+        asSafeNonNegativeInt(s.cache_reported_requests),
+        asSafeNonNegativeInt(s.total_turns),
+        typeof s.has_more === "boolean" ? s.has_more : undefined,
       );
       // 快照携带完整 turns（neutral JSON）：只补缺失 turn，保留流式现场，
       // 并恢复 activeTurn 使后续 round_delta 能继续追加（修复快照后吞字）。
@@ -366,6 +372,11 @@ function normalizeStatus(
   status: { state: string; detail?: string } | null | undefined,
 ): { state: string; detail?: string } {
   return status ?? { state: "idle" };
+}
+
+function asSafeNonNegativeInt(value: unknown): number | undefined {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : undefined;
 }
 
 // 按 batch.channel 分发到对应 reducer（事件对象为纯领域事件）

@@ -1,6 +1,8 @@
-.conversation-scroll { position: relative; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.conversation-scroll { position: relative; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; overflow-anchor: none; }
 .conversation-transcript { width: min(var(--dx-transcript-width), calc(100% - 40px)); margin: 0 auto; padding: 36px 0 24px; position: relative; left: var(--conversation-shift-x, 0px); }
 .conversation-turn { margin: 0 0 34px; color: var(--dx-text); }
+.conversation-turn-virtual { margin: 0 0 34px; color: var(--dx-text); }
+.conversation-turn-virtual > .conversation-turn { margin: 0; }
 .user-prompt-row { display: flex; justify-content: flex-end; margin-bottom: 22px; }
 .user-prompt-bubble {
   max-width: min(72%, 560px); padding: 11px 14px; border-radius: 16px 16px 4px 16px;
