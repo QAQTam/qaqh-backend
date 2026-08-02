@@ -188,7 +188,7 @@ function createWindow(): void {
 function registerIpc(): void {
   // Ringing 会话惰性确保：daemon 重启/端口变化后，任何 ringing IPC 都会用
   // 最新 discovery 重新建立连接（旧逻辑只在 backend:connect 时连一次；
-  // 连接失败或 daemon 重启后 client 一直为 null，需重新建立 v2 client。
+  // 连接失败或 daemon 重启后 client 一直为 null，需重新建立 Ringing V1 client。
   async function ensureRingingConnected(): Promise<void> {
     // 首个 renderer 请求可能早于显式 backend:connect。必须先确定连接级
     // 传输，不能因 status 仍是初始值而误走 legacy 请求。
@@ -207,7 +207,7 @@ function registerIpc(): void {
     }
     const info = backend.ringingConnectionInfo();
     if (!info || !backend.usingRinging()) {
-      throw new Error("Ringing v2 is required but the daemon did not establish its HTTP session");
+      throw new Error("Ringing v1 is required but the daemon did not establish its HTTP session");
     }
     // daemon 重启后端口/token 会变：即使 client 还在（流已死），也要重建
     if (ringing.connected() && ringing.connectedBaseUrl() === info.baseUrl) return;
@@ -288,7 +288,7 @@ function registerIpc(): void {
     params: Record<string, unknown>,
   ): Promise<unknown> {
     await ensureRingingConnected();
-    if (!ringing.connected()) throw new Error("Ringing v2 backend is not connected");
+    if (!ringing.connected()) throw new Error("Ringing v1 backend is not connected");
 
     const seed = typeof params.seed === "string" ? params.seed : "";
     const spec = RINGING_COMMAND_METHODS[method];
@@ -336,7 +336,7 @@ function registerIpc(): void {
 
   ipcMain.handle("backend:connect", async () => {
     const result = await backend.connect();
-    // 控制客户端已完成唯一的 v2 open；RingingManager 复用其 lease 启动三 SSE。
+    // 控制客户端已完成唯一的 Ringing V1 open；RingingManager 复用其 lease 启动三 SSE。
     await ensureRingingConnected();
     return result;
   });

@@ -51,17 +51,17 @@ export class DaemonControlClient {
     return this.lastDiscovery ?? null;
   }
 
-  /** 已完成 v2 open 的会话；只给 Electron main 的 RingingManager 使用。 */
+  /** 已完成 Ringing V1 open 的会话；只给 Electron main 的 RingingManager 使用。 */
   ringingConnectionInfo(): RingingConnectionInfo | null {
     return this.ringingConnection ?? null;
   }
 
-  /** 强制重新协商 v2 lease；只用于健康监督恢复，绝不改选 legacy。 */
+  /** 强制重新协商 Ringing V1 lease；只用于健康监督恢复，绝不改选 legacy。 */
   async refreshRingingConnection(): Promise<RingingConnectionInfo> {
-    if (this.transport !== "ringing") throw new Error("Ringing v2 is not the selected transport");
+    if (this.transport !== "ringing") throw new Error("Ringing v1 is not the selected transport");
     const discovery = await readDiscovery();
     if (!(await this.tryConnectRinging(discovery)) || !this.ringingConnection) {
-      throw new Error("Ringing v2 is no longer supported by the daemon");
+      throw new Error("Ringing v1 is no longer supported by the daemon");
     }
     return this.ringingConnection;
   }
@@ -93,7 +93,7 @@ export class DaemonControlClient {
     if (!method || typeof method !== "string") throw new Error("invalid backend method");
     await this.connect();
     if (this.usingRinging()) {
-      throw new Error(`legacy backend request is unavailable on Ringing v2: ${method}`);
+      throw new Error(`legacy backend request is unavailable on Ringing v1: ${method}`);
     }
     return this.roundTrip({
       type: "request",
@@ -203,7 +203,7 @@ export class DaemonControlClient {
       const mismatch = daemonIdentityMismatch(discovery, expected);
       if (mismatch) throw new Error(`incompatible daemon: ${mismatch}`);
       if (await this.tryConnectRinging(discovery)) return;
-      throw new Error("Ringing v2 is required but this daemon does not support it");
+      throw new Error("Ringing v1 is required but this daemon does not support it");
     } catch (error) {
       lastError = error;
       this.disconnectSocket();
@@ -221,7 +221,7 @@ export class DaemonControlClient {
           continue;
         }
         if (await this.tryConnectRinging(discovery)) return;
-        lastError = new Error("Ringing v2 is required but this daemon does not support it");
+        lastError = new Error("Ringing v1 is required but this daemon does not support it");
       } catch (error) {
         lastError = error;
       }
@@ -277,7 +277,7 @@ export class DaemonControlClient {
       launchDaemon();
       const replacement = await waitForCompatibleDiscovery(expected);
       if (!(await this.tryConnectRinging(replacement))) {
-        throw new Error("replacement daemon does not support required Ringing v2");
+        throw new Error("replacement daemon does not support required Ringing v1");
       }
       this.setStatus({ connected: true });
     } finally {
@@ -293,7 +293,7 @@ export class DaemonControlClient {
     this.ringingConnection = undefined;
     // 保存 baseUrl（仅 origin：ws://host:port/control/v1 → http://host:port）
     // 供 Ringing HTTP 复用。endpoint 带 /control/v1 路径，必须去掉，
-    // 否则 /ringing/v2/... 请求会 404。
+    // 否则 /ringing/v1/... 请求会 404。
     const endpointUrl = new URL(discovery.endpoint);
     this.lastDiscovery = {
       baseUrl: `${endpointUrl.protocol === "wss:" ? "https" : "http"}://${endpointUrl.host}`,
@@ -354,12 +354,12 @@ export class DaemonControlClient {
     for (const seed of this.attached) await this.attachWire(seed);
   }
 
-  /** 先探测 v2 open；成功时整个 daemon 连接固定走 Ringing，不回退到 legacy WS。 */
+  /** 先探测 Ringing V1 open；成功时整个 daemon 连接固定走 Ringing，不回退到 legacy WS。 */
   private async tryConnectRinging(discovery: DaemonDiscovery): Promise<boolean> {
     const endpointUrl = new URL(discovery.endpoint);
     const baseUrl = `${endpointUrl.protocol === "wss:" ? "https" : "http"}://${endpointUrl.host}`;
     try {
-      const response = await fetch(`${baseUrl}/ringing/v2/clients/open`, {
+      const response = await fetch(`${baseUrl}/ringing/v1/clients/open`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${discovery.token}`,
@@ -367,21 +367,21 @@ export class DaemonControlClient {
         },
         body: JSON.stringify({
           schema: "deepx.Ringing",
-          version: 2,
+          version: 1,
           client_instance_id: this.clientId,
           capabilities: [
-            "Ringing_v2",
-            "Ringing_batch_v2",
-            "Ringing_bootstrap_v2",
-            "Ringing_command_status_v2",
+            "Ringing_v1",
+            "Ringing_batch_v1",
+            "Ringing_bootstrap_v1",
+            "Ringing_command_status_v1",
           ],
         }),
       });
       if (!response.ok) {
-        // 只有明确表明 daemon 不支持 Ringing v2 的响应才允许选择
+        // 只有明确表明 daemon 不支持 Ringing v1 的响应才允许选择
         // 兼容 legacy；认证、服务端故障和其他协议错误必须暴露出来。
         if (response.status === 404 || response.status === 426) return false;
-        throw new Error(`Ringing v2 negotiation failed: HTTP ${response.status}`);
+        throw new Error(`Ringing v1 negotiation failed: HTTP ${response.status}`);
       }
       const result = await response.json() as {
         accepted?: boolean;
@@ -391,7 +391,7 @@ export class DaemonControlClient {
         renew_interval_ms?: number;
       };
       if (result.accepted !== true) {
-        throw new Error("Ringing v2 negotiation was not accepted by daemon");
+        throw new Error("Ringing v1 negotiation was not accepted by daemon");
       }
       if (
         typeof result.client_session_id !== "string" ||
@@ -399,7 +399,7 @@ export class DaemonControlClient {
         typeof result.lease_ttl_ms !== "number" ||
         typeof result.renew_interval_ms !== "number"
       ) {
-        throw new Error("Ringing v2 negotiation returned an incomplete session");
+        throw new Error("Ringing v1 negotiation returned an incomplete session");
       }
       this.lastDiscovery = { baseUrl, token: discovery.token };
       this.ringingConnection = {
@@ -418,7 +418,7 @@ export class DaemonControlClient {
       return true;
     } catch (error) {
       // 旧 daemon 的明确 404/426 在上方选择 legacy；网络超时、连接中断
-      // 不能被伪装成旧协议，否则 v2 daemon 故障会悄悄建立 legacy 双链路。
+      // 不能被伪装成旧协议，否则 Ringing V1 daemon 故障会悄悄建立 legacy 双链路。
       throw error;
     }
   }

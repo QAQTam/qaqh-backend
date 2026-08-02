@@ -5,7 +5,7 @@
 //! advances through items sequentially, and supports mid-execution
 //! CRUD via pending changes that merge on turn boundaries.
 
-use deepx_workspace::todo::{load_todo, save_todo, TodoItem, TodoMode, TodoStatus, TodoStore};
+use deepx_workspace::todo::{TodoItem, TodoMode, TodoStatus, TodoStore, load_todo, save_todo};
 
 /// Task complexity — maintained locally since the TodoItem model no longer stores it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -63,21 +63,14 @@ impl GoalEngine {
         // Filter items to activate
         let active_items: Vec<TodoItem> = if let Some(ids) = ids {
             ids.iter()
-                .filter_map(|id| {
-                    store
-                        .items
-                        .iter()
-                        .find(|item| &item.id == id)
-                        .cloned()
-                })
+                .filter_map(|id| store.items.iter().find(|item| &item.id == id).cloned())
                 .collect()
         } else {
             store
                 .items
                 .iter()
                 .filter(|item| {
-                    item.status == TodoStatus::Pending
-                        || item.status == TodoStatus::InProgress
+                    item.status == TodoStatus::Pending || item.status == TodoStatus::InProgress
                 })
                 .cloned()
                 .collect()
@@ -141,18 +134,13 @@ impl GoalEngine {
             .iter()
             .find(|item| {
                 item.id != current_id
-                    && (item.status == TodoStatus::Pending
-                        || item.status == TodoStatus::InProgress)
+                    && (item.status == TodoStatus::Pending || item.status == TodoStatus::InProgress)
             })
             .cloned();
 
         if let Some(ref next_item) = next {
             // Mark next item in_progress
-            if let Some(item) = store
-                .items
-                .iter_mut()
-                .find(|item| item.id == next_item.id)
-            {
+            if let Some(item) = store.items.iter_mut().find(|item| item.id == next_item.id) {
                 item.status = TodoStatus::InProgress;
             }
             store.current_id = Some(next_item.id.clone());
@@ -311,15 +299,16 @@ impl GoalEngine {
             }
 
             let lower = trimmed.to_lowercase();
-            let (complexity, desc_start) = if lower.starts_with("[small]") || lower.starts_with("- [small]") {
-                (Complexity::Small, find_after_label(trimmed, "[small]"))
-            } else if lower.starts_with("[medium]") || lower.starts_with("- [medium]") {
-                (Complexity::Medium, find_after_label(trimmed, "[medium]"))
-            } else if lower.starts_with("[large]") || lower.starts_with("- [large]") {
-                (Complexity::Large, find_after_label(trimmed, "[large]"))
-            } else {
-                continue;
-            };
+            let (complexity, desc_start) =
+                if lower.starts_with("[small]") || lower.starts_with("- [small]") {
+                    (Complexity::Small, find_after_label(trimmed, "[small]"))
+                } else if lower.starts_with("[medium]") || lower.starts_with("- [medium]") {
+                    (Complexity::Medium, find_after_label(trimmed, "[medium]"))
+                } else if lower.starts_with("[large]") || lower.starts_with("- [large]") {
+                    (Complexity::Large, find_after_label(trimmed, "[large]"))
+                } else {
+                    continue;
+                };
 
             let desc = trimmed[desc_start..].trim().to_string();
             if !desc.is_empty() && desc != "None" {

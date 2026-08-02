@@ -26,7 +26,7 @@ export type ChannelStatus =
   | { state: "reconnecting"; retryMs: number; lastCursor: number }
   | { state: "closed"; reason: string };
 
-/** 已由控制客户端完成的 v2 open 协商结果。仅保存在 Electron main 内存。 */
+/** 已由控制客户端完成的 Ringing V1 open 协商结果。仅保存在 Electron main 内存。 */
 export interface RingingSessionOpen {
   clientInstanceId: string;
   clientSessionId: string;
@@ -188,9 +188,9 @@ export class RingingSession {
     this.clientInstanceId = clientInstanceId;
   }
 
-  /** POST /ringing/v2/clients/open（能力协商）。 */
+  /** POST /ringing/v1/clients/open（能力协商）。 */
   async open(): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/ringing/v2/clients/open`, {
+    const response = await fetch(`${this.baseUrl}/ringing/v1/clients/open`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -198,13 +198,13 @@ export class RingingSession {
       },
       body: JSON.stringify({
         schema: "deepx.Ringing",
-        version: 2,
+        version: 1,
         client_instance_id: this.clientInstanceId,
         capabilities: [
-          "Ringing_v2",
-          "Ringing_batch_v2",
-          "Ringing_bootstrap_v2",
-          "Ringing_command_status_v2",
+          "Ringing_v1",
+          "Ringing_batch_v1",
+          "Ringing_bootstrap_v1",
+          "Ringing_command_status_v1",
         ],
       }),
     });
@@ -239,11 +239,11 @@ export class RingingSession {
     this.renewTimer = setInterval(() => void this.renew(), renewInterval);
   }
 
-  /** POST /ringing/v2/leases/renew。 */
+  /** POST /ringing/v1/leases/renew。 */
   private async renew(): Promise<void> {
     if (this.closed) return;
     try {
-      const response = await fetch(`${this.baseUrl}/ringing/v2/leases/renew`, {
+      const response = await fetch(`${this.baseUrl}/ringing/v1/leases/renew`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.token}`,
@@ -291,17 +291,17 @@ export class RingingClient {
     );
     this.streams = {
       control: new RingingChannelStream(
-        `${baseUrl}/ringing/v2/events/control`, token, "control",
+        `${baseUrl}/ringing/v1/events/control`, token, "control",
         (b) => onBatch(b), (s) => onStatus("control", s),
         () => this.session.serverEpoch, () => this.session.clientSessionId ?? "", onReset,
       ),
       conversation: new RingingChannelStream(
-        `${baseUrl}/ringing/v2/events/conversation`, token, "conversation",
+        `${baseUrl}/ringing/v1/events/conversation`, token, "conversation",
         (b) => onBatch(b), (s) => onStatus("conversation", s),
         () => this.session.serverEpoch, () => this.session.clientSessionId ?? "", onReset,
       ),
       tool: new RingingChannelStream(
-        `${baseUrl}/ringing/v2/events/tool`, token, "tool",
+        `${baseUrl}/ringing/v1/events/tool`, token, "tool",
         (b) => onBatch(b), (s) => onStatus("tool", s),
         () => this.session.serverEpoch, () => this.session.clientSessionId ?? "", onReset,
       ),

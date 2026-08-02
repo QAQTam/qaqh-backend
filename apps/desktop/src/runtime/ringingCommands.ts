@@ -1,6 +1,6 @@
 // Ringing 命令/查询 renderer 入口。
 //
-// Ringing v2 命令入口。backend 模式在连接级 open 协商时固定；协商失败直接
+// Ringing v1 命令入口。backend 模式在连接级 open 协商时固定；协商失败直接
 // 暴露给 UI，绝不退回 legacy backend。
 //
 // 边界：
@@ -8,7 +8,7 @@
 //   为 ContentRef；本地路径不会进入 Ringing 命令。
 // - ack 只表示 accepted；业务结果经 Ringing 事件流（causation_id = command_id）
 //   返回，本 helper 不等待终态。
-// - v2 连接故障只向 UI 报错；不会建立 legacy IPC。
+// - Ringing V1 连接故障只向 UI 报错；不会建立 legacy IPC。
 
 import type { RingingChannel } from "../lib/types/ringing";
 import { request } from "./backendClient";
@@ -58,13 +58,13 @@ export function buildRingingCommand(
   }
 }
 
-/** 命令请求：协议选择固定在连接级，v2 错误不再按命令回退 legacy。 */
+/** 命令请求：协议选择固定在连接级，Ringing V1 错误不再按命令回退 legacy。 */
 export async function requestWithRinging<T>(
   method: string,
   params: Record<string, unknown> = {},
 ): Promise<T> {
   // Keep the historical helper name for callers, but let the connection-level
-  // backend router choose the typed v2 route. This also ensures file paths reach main
+  // backend router choose the typed Ringing V1 route. This also ensures file paths reach main
   // for ContentRef upload instead of bypassing Electron's ownership boundary.
   return request<T>(method, params);
 }

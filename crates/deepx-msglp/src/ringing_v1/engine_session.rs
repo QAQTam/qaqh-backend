@@ -25,7 +25,11 @@ impl SessionEngine {
     }
 
     /// Create a new session with a pre-set seed (from CLI --seed).
-    pub fn create_with_seed(&self, agent: &mut crate::state::agent::AgentState, _cancel: &CancelToken) {
+    pub fn create_with_seed(
+        &self,
+        agent: &mut crate::state::agent::AgentState,
+        _cancel: &CancelToken,
+    ) {
         lifecycle::create_session_with_seed(agent);
         agent.rebind_store();
         deepx_workspace::runtime::set_context(&agent.session.seed, agent.config.permission_level);
@@ -41,7 +45,10 @@ impl SessionEngine {
         log::info!("[SESSION] resume seed={seed}");
         if lifecycle::init_session(agent, Some(seed)) {
             agent.rebind_store();
-            deepx_workspace::runtime::set_context(&agent.session.seed, agent.config.permission_level);
+            deepx_workspace::runtime::set_context(
+                &agent.session.seed,
+                agent.config.permission_level,
+            );
 
             // Restore persisted agent mode
             let saved_mode = agent.session.mode;
@@ -71,7 +78,11 @@ impl SessionEngine {
     }
 
     /// Reload config from disk and apply to agent.
-    pub fn reload_config(&self, agent: &mut crate::state::agent::AgentState, _cancel: &CancelToken) {
+    pub fn reload_config(
+        &self,
+        agent: &mut crate::state::agent::AgentState,
+        _cancel: &CancelToken,
+    ) {
         if let Ok(cfg) = deepx_config::Config::load() {
             agent.config.api_key = cfg.api_key;
             agent.config.model = cfg.model;

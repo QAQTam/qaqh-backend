@@ -131,7 +131,7 @@ impl Emitter for PacedEmitter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let env = deepx_ringing::TimelineWorkerIntentEnvelope::new(
+        let env = deepx_ringing::RingingTimelineIntentEnvelope::new(
             self.seed.as_str(),
             format!("timeline-{seq}"),
             intent,
@@ -372,7 +372,7 @@ mod tests {
         ));
         match rx.recv().expect("envelope") {
             WriterEvent::Ringing(env) => {
-                assert_eq!(env.wire, deepx_ringing::worker::WIRE_RINGING_DOMAIN_V2);
+                assert_eq!(env.wire, deepx_ringing::worker::WIRE_RINGING_DOMAIN_V1);
                 assert_eq!(env.seed, "s1");
                 assert!(matches!(
                     env.event,

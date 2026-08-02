@@ -233,14 +233,14 @@ impl AgentRegistry {
                     continue;
                 }
                 // wire 判别：默认 legacy；Ringing 事件行在 ChannelRouter 接入前跳过
-                let event = match deepx_msglp::ring::wire::read_worker_event_line(&line) {
+                let event = match deepx_msglp::ringing_v1::wire::read_worker_event_line(&line) {
                     Ok(Some(event)) => event,
                     Ok(None) => {
-                        // v3 Timeline intent is a native producer path: it is
-                        // intentionally not projected through Agent2Ui or v2.
+                        // Ringing V1 timeline intent is a native producer path: it is
+                        // intentionally not projected through Agent2Ui or a legacy wire.
                         if let Some(hub) = &hub {
                             if let Ok(env) = serde_json::from_str::<
-                                deepx_ringing::TimelineWorkerIntentEnvelope,
+                                deepx_ringing::RingingTimelineIntentEnvelope,
                             >(&line)
                             {
                                 if let Err(error) = hub.publish_timeline(&env.seed, env.intent) {
@@ -270,7 +270,7 @@ impl AgentRegistry {
                                         env.causation_id.as_deref(),
                                     );
                                     // 兼容旧 daemon：旧协议整条连接仍接收 legacy 投影；
-                                    // 新 Desktop 只消费同一连接上的 Ringing v2。
+                                    // 新 Desktop 只消费同一连接上的 Ringing v1。
                                     if !externalized
                                         && let Some(legacy) =
                                             crate::ringing::legacy_projector::project(&domain)
@@ -470,7 +470,7 @@ impl AgentInstance {
 /// ToolFinished 大内容外置（PLAN 大内容外置）：summary 超过 10 MiB 时
 /// 存入 ContentStore（会话所有权 + TTL），事件替换为 tail（256 KiB）+
 /// `output_ref`。Ringing 与 legacy 客户端都只收到 tail，完整内容经
-/// `GET /ringing/v2/content/{id}?seed=` 按需读取。
+/// `GET /ringing/v1/content/{id}?seed=` 按需读取。
 ///
 /// 非 ToolFinished 事件原样返回（externalized = false）；未超阈值的事件
 /// 原样返回（externalized = false）。externalized = true 表示已外置：调用方

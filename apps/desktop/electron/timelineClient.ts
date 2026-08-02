@@ -61,7 +61,7 @@ export class TimelineClient {
     this.onStatus({ state: "connecting", seed: this.seed });
     this.controller = new AbortController();
     const response = await fetch(
-      `${this.baseUrl}/ringing/v3/sessions/${encodeURIComponent(this.seed)}/timeline/events`,
+      `${this.baseUrl}/ringing/v1/sessions/${encodeURIComponent(this.seed)}/timeline/events`,
       {
         headers: {
           Authorization: `Bearer ${this.token}`,
@@ -110,13 +110,13 @@ export class TimelineClient {
   private dispatch(sseId: string, payload: string): void {
     const frame = JSON.parse(payload) as TimelineSseFrame;
     if (
-      frame.schema !== "deepx.Timeline"
-      || frame.version !== 3
+      frame.schema !== "deepx.Ringing"
+      || frame.version !== 1
       || frame.seed !== this.seed
       || frame.server_epoch !== this.getServerEpoch()
       || !Number.isSafeInteger(frame.entry?.timeline_seq)
       || frame.entry.timeline_seq <= this.cursor
-    ) throw new Error("invalid Timeline v3 SSE frame");
+    ) throw new Error("invalid Ringing V1 timeline SSE frame");
     const expectedId = `${frame.server_epoch}:timeline:${frame.entry.timeline_seq}`;
     if (sseId && sseId !== expectedId) throw new Error("Timeline SSE cursor/frame mismatch");
     if (frame.entry.timeline_seq !== this.cursor + 1) throw new Error("Timeline SSE gap requires snapshot recovery");

@@ -2,16 +2,16 @@
 //!
 //! 端点（PLAN 固定）：
 //! ```text
-//! POST /ringing/v2/clients/open
-//! POST /ringing/v2/leases/renew
-//! POST /ringing/v2/commands/{control|conversation|tool}
-//! GET  /ringing/v2/commands/{command_id}
-//! GET  /ringing/v2/sessions/{seed}/bootstrap
-//! POST /ringing/v2/queries/{name}
-//! POST /ringing/v2/actions/{name}
-//! POST /ringing/v2/content
-//! GET  /ringing/v2/content/{content_id}
-//! GET  /ringing/v2/events/{control|conversation|tool}   (SSE)
+//! POST /ringing/v1/clients/open
+//! POST /ringing/v1/leases/renew
+//! POST /ringing/v1/commands/{control|conversation|tool}
+//! GET  /ringing/v1/commands/{command_id}
+//! GET  /ringing/v1/sessions/{seed}/bootstrap
+//! POST /ringing/v1/queries/{name}
+//! POST /ringing/v1/actions/{name}
+//! POST /ringing/v1/content
+//! GET  /ringing/v1/content/{content_id}
+//! GET  /ringing/v1/events/{control|conversation|tool}   (SSE)
 //! ```
 //!
 //! 硬规则：
@@ -44,7 +44,7 @@ fn stringify(error: impl std::fmt::Display) -> String {
 
 const RENEW_TTL_MS: u64 = 30_000;
 const RENEW_INTERVAL_MS: u64 = 10_000;
-const TIMELINE_V3_BASE_PATH: &str = "/ringing/v3";
+const RINGING_TIMELINE_BASE_PATH: &str = RINGING_BASE_PATH;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SSE_KEEPALIVE_MS: u64 = 15_000;
 
@@ -105,10 +105,19 @@ impl PendingCommandStore {
         }
     }
 
-    /// Receipt 存在 daemon 数据目录的独立 Ringing v2 namespace；只保存哈希，
+    /// Receipt 存在 daemon 数据目录的独立 Ringing V1 namespace；只保存哈希，
     /// 不把命令正文、用户文本或附件元数据写入磁盘。
     pub fn new_persistent() -> Self {
-        let path = deepx_types::platform::data_dir().join("ringing-v2-command-receipts.json");
+        let data_dir = deepx_types::platform::data_dir();
+        let path = data_dir.join("ringing-command-receipts.json");
+        // Keep accepted command ids across the one-time v2 → V1 rollout so a
+        // retried command is not executed twice after the daemon upgrades.
+        let legacy = data_dir.join("ringing-v2-command-receipts.json");
+        if !path.exists() && legacy.is_file() {
+            if let Err(error) = std::fs::rename(&legacy, &path) {
+                log::warn!("[ringing] migrate legacy command receipts: {error}");
+            }
+        }
         let mut store = Self {
             persistence_path: Some(path.clone()),
             ..Self::new()
@@ -650,12 +659,12 @@ pub async fn handle_ringing_http(
             &mut stream,
             "401 Unauthorized",
             "application/json",
-            br#"{"code":"lease_required","message":"open a Ringing v2 client session first"}"#,
+            br#"{"code":"lease_required","message":"open a Ringing v1 client session first"}"#,
         )
         .await;
     }
-    if method == "GET" && path.starts_with(&format!("{TIMELINE_V3_BASE_PATH}/sessions/")) {
-        let rest = path.trim_start_matches(&format!("{TIMELINE_V3_BASE_PATH}/sessions/"));
+    if method == "GET" && path.starts_with(&format!("{RINGING_TIMELINE_BASE_PATH}/sessions/")) {
+        let rest = path.trim_start_matches(&format!("{RINGING_TIMELINE_BASE_PATH}/sessions/"));
         if let Some(seed) = rest.strip_suffix("/timeline") {
             return handle_timeline_snapshot(&mut stream, seed, session_id, &leases, &hub).await;
         }
@@ -757,7 +766,7 @@ pub async fn handle_ringing_http(
     .await
 }
 
-/// GET /ringing/v2/content/{content_id}
+/// GET /ringing/v1/content/{content_id}
 ///
 /// 大内容外置读取（PLAN）：鉴权由统一 Bearer token 完成；seed 查询参数
 /// 用于会话所有权校验（ContentStore 拒绝跨会话读取）。返回 200 + media_type
@@ -821,7 +830,7 @@ async fn handle_content(
     }
 }
 
-/// POST /ringing/v2/content
+/// POST /ringing/v1/content
 ///
 /// Electron main 上传本地附件；renderer 只传本地路径，绝不把路径或 token
 /// 放入 Ringing 命令。使用受限 multipart 解析，内容上限由 read_request 执行。
@@ -1016,12 +1025,12 @@ async fn handle_open(
         .await;
     }
     let client_session_id = random_hex();
-    // v2 Desktop 只有在四项能力全部满足时才允许建立 Ringing backend。
+    // Ringing V1 Desktop 只有在四项能力全部满足时才允许建立 Ringing backend。
     let supported: &[&str] = &[
-        "Ringing_v2",
-        "Ringing_batch_v2",
-        "Ringing_bootstrap_v2",
-        "Ringing_command_status_v2",
+        "Ringing_v1",
+        "Ringing_batch_v1",
+        "Ringing_bootstrap_v1",
+        "Ringing_command_status_v1",
     ];
     let capabilities: Vec<String> = supported
         .iter()
@@ -1037,7 +1046,7 @@ async fn handle_open(
             stream,
             "426 Upgrade Required",
             "application/json",
-            br#"{"code":"missing_capability","message":"Ringing v2 capabilities are incomplete"}"#,
+            br#"{"code":"missing_capability","message":"Ringing v1 capabilities are incomplete"}"#,
         )
         .await;
     }
@@ -1189,7 +1198,7 @@ async fn handle_command(
             command_id: env.command_id.clone(),
             status: RingingCommandAckStatus::Rejected,
             code: Some(code.into()),
-            message: Some("invalid Ringing v2 command envelope".into()),
+            message: Some("invalid Ringing v1 command envelope".into()),
             retry_after_ms: None,
         };
         return write_response(
@@ -1284,7 +1293,7 @@ async fn handle_command(
             status: RingingCommandAckStatus::Rejected,
             code: Some("unsupported_command".into()),
             message: Some(
-                "Ringing v2 bootstrap already returns the complete persisted conversation history"
+                "Ringing v1 bootstrap already returns the complete persisted conversation history"
                     .into(),
             ),
             retry_after_ms: None,
@@ -1682,7 +1691,7 @@ async fn handle_bootstrap(
     .await
 }
 
-/// v3 transcript recovery state. It is intentionally separate from the v2
+/// Ringing V1 timeline transcript recovery state. It is intentionally separate from the
 /// three-channel bootstrap: a Timeline client receives one materialized model
 /// and one watermark only.
 async fn handle_timeline_snapshot(
@@ -1717,8 +1726,8 @@ async fn handle_timeline_snapshot(
             turns: vec![],
         });
     let body = serde_json::json!({
-        "schema": "deepx.Timeline",
-        "version": 3,
+        "schema": "deepx.Ringing",
+        "version": 1,
         "server_epoch": hub.epoch(),
         "seed": seed,
         "snapshot": snapshot,
@@ -1734,8 +1743,8 @@ async fn handle_timeline_snapshot(
 
 fn timeline_sse_frame(epoch: &str, seed: &str, entry: &deepx_domain::TimelineEntry) -> String {
     let data = serde_json::json!({
-        "schema": "deepx.Timeline",
-        "version": 3,
+        "schema": "deepx.Ringing",
+        "version": 1,
         "server_epoch": epoch,
         "seed": seed,
         "entry": entry,
@@ -1747,8 +1756,8 @@ fn timeline_sse_frame(epoch: &str, seed: &str, entry: &deepx_domain::TimelineEnt
     )
 }
 
-/// Per-session v3 Timeline SSE. The cursor is `epoch:timeline:timeline_seq`;
-/// it cannot be compared with any v2 channel cursor.
+/// Per-session Ringing V1 timeline SSE. The cursor is `epoch:timeline:timeline_seq`;
+/// it cannot be compared with any Ringing V1 channel cursor.
 async fn handle_timeline_sse(
     stream: &mut TcpStream,
     seed: &str,
@@ -2331,7 +2340,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_cursor_is_separate_from_v2_channel_cursors() {
+    fn timeline_cursor_is_separate_from_ringing_v1_channel_cursors() {
         assert_eq!(parse_timeline_cursor("epoch-1:timeline:42", "epoch-1"), 42);
         assert_eq!(parse_timeline_cursor("epoch-1:tool:42", "epoch-1"), 0);
         assert_eq!(parse_timeline_cursor("epoch-2:timeline:42", "epoch-1"), 0);
@@ -2385,10 +2394,10 @@ mod tests {
 
     #[test]
     fn parse_preview_request_extracts_fields() {
-        let preview = "POST /ringing/v2/commands/tool HTTP/1.1\r\nAuthorization: Bearer abc\r\nContent-Length: 7\r\n\r\n{\"a\":1}";
+        let preview = "POST /ringing/v1/commands/tool HTTP/1.1\r\nAuthorization: Bearer abc\r\nContent-Length: 7\r\n\r\n{\"a\":1}";
         let req = parse_preview_request(preview).expect("parse");
         assert_eq!(req.method, "POST");
-        assert_eq!(req.path, "/ringing/v2/commands/tool");
+        assert_eq!(req.path, "/ringing/v1/commands/tool");
         assert_eq!(req.header("authorization"), Some("Bearer abc"));
         assert_eq!(req.body, b"{\"a\":1}");
     }
@@ -2407,7 +2416,7 @@ mod tests {
         let body = vec![b'x'; 4096];
         let mut client = TcpStream::connect(address).await.unwrap();
         let headers = format!(
-            "POST /ringing/v2/content HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            "POST /ringing/v1/content HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
             body.len()
         );
         client.write_all(headers.as_bytes()).await.unwrap();
@@ -2417,7 +2426,7 @@ mod tests {
 
         let request = server.await.unwrap();
         assert_eq!(request.method, "POST");
-        assert_eq!(request.path, "/ringing/v2/content");
+        assert_eq!(request.path, "/ringing/v1/content");
         assert_eq!(request.body, body);
     }
 

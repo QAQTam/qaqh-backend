@@ -1,4 +1,4 @@
-//! 客户端 open 与能力协商（`POST /ringing/v2/clients/open` 的 payload 类型）。
+//! 客户端 open 与能力协商（`POST /ringing/v1/clients/open` 的 payload 类型）。
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -10,23 +10,23 @@ use crate::protocol::{RINGING_SCHEMA, RINGING_VERSION};
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum CapabilityName {
-    /// 基础 Ringing v2 协议（HTTP command/query + 三 SSE）。
-    RingingV2,
+    /// 基础 Ringing v1 协议（HTTP command/query + 三 SSE）。
+    RingingV1,
     /// 批量事件（RingingEventBatch）。
-    RingingBatchV2,
+    RingingBatchV1,
     /// 全 session typed bootstrap。
-    RingingBootstrapV2,
+    RingingBootstrapV1,
     /// 命令 receipt/status 查询。
-    RingingCommandStatusV2,
+    RingingCommandStatusV1,
 }
 
 impl CapabilityName {
     pub fn as_str(self) -> &'static str {
         match self {
-            CapabilityName::RingingV2 => "Ringing_v2",
-            CapabilityName::RingingBatchV2 => "Ringing_batch_v2",
-            CapabilityName::RingingBootstrapV2 => "Ringing_bootstrap_v2",
-            CapabilityName::RingingCommandStatusV2 => "Ringing_command_status_v2",
+            CapabilityName::RingingV1 => "Ringing_v1",
+            CapabilityName::RingingBatchV1 => "Ringing_batch_v1",
+            CapabilityName::RingingBootstrapV1 => "Ringing_bootstrap_v1",
+            CapabilityName::RingingCommandStatusV1 => "Ringing_command_status_v1",
         }
     }
 }
@@ -88,16 +88,16 @@ mod tests {
         let req = ClientOpenRequest::new(
             "client-a",
             vec![
-                CapabilityName::RingingV2,
-                CapabilityName::RingingBatchV2,
-                CapabilityName::RingingBootstrapV2,
-                CapabilityName::RingingCommandStatusV2,
+                CapabilityName::RingingV1,
+                CapabilityName::RingingBatchV1,
+                CapabilityName::RingingBootstrapV1,
+                CapabilityName::RingingCommandStatusV1,
             ],
         );
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(json.contains("\"schema\":\"deepx.Ringing\""));
-        assert!(json.contains("Ringing_v2"));
-        assert!(json.contains("Ringing_bootstrap_v2"));
+        assert!(json.contains("Ringing_v1"));
+        assert!(json.contains("Ringing_bootstrap_v1"));
         let back: ClientOpenRequest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.version, RINGING_VERSION);
         assert_eq!(back.capabilities.len(), 4);
@@ -105,15 +105,15 @@ mod tests {
 
     #[test]
     fn capability_names_match_plan() {
-        assert_eq!(CapabilityName::RingingV2.as_str(), "Ringing_v2");
-        assert_eq!(CapabilityName::RingingBatchV2.as_str(), "Ringing_batch_v2");
+        assert_eq!(CapabilityName::RingingV1.as_str(), "Ringing_v1");
+        assert_eq!(CapabilityName::RingingBatchV1.as_str(), "Ringing_batch_v1");
         assert_eq!(
-            CapabilityName::RingingBootstrapV2.as_str(),
-            "Ringing_bootstrap_v2"
+            CapabilityName::RingingBootstrapV1.as_str(),
+            "Ringing_bootstrap_v1"
         );
         assert_eq!(
-            CapabilityName::RingingCommandStatusV2.as_str(),
-            "Ringing_command_status_v2"
+            CapabilityName::RingingCommandStatusV1.as_str(),
+            "Ringing_command_status_v1"
         );
     }
 }

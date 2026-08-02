@@ -6,7 +6,7 @@ describe("RingingSession", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
-  it("adopts the control client's negotiated v2 lease without another HTTP open", () => {
+  it("adopts the control client's negotiated Ringing V1 lease without another HTTP open", () => {
     const session = new RingingSession("http://127.0.0.1:43123", "test-token", "electron-1");
     session.adoptOpen({
       clientInstanceId: "electron-1",

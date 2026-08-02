@@ -6,8 +6,8 @@ import type { TimelineSnapshotResponse } from "./timelineProtocol";
 
 function snapshot(): TimelineSnapshotResponse {
   return {
-    schema: "deepx.Timeline",
-    version: 3,
+    schema: "deepx.Ringing",
+    version: 1,
     server_epoch: "epoch",
     seed: "seed",
     snapshot: {
@@ -34,8 +34,8 @@ function snapshot(): TimelineSnapshotResponse {
   };
 }
 
-describe("Timeline v3 renderer monitor", () => {
-  it("requires a contiguous cursor and renders Markdown only after block seal", () => {
+describe("Ringing V1 timeline renderer monitor", () => {
+  it("requires a contiguous cursor and renders text deltas before block seal", () => {
     const monitor = createTimelineMonitor();
     monitor.handleSnapshot(snapshot());
     expect(monitor.handleEntry("seed", {
@@ -52,7 +52,8 @@ describe("Timeline v3 renderer monitor", () => {
     })).toBe(true);
 
     const current = monitor.snapshotFor("seed")!;
-    expect(selectTimelinePresentation("seed", current, createRawSessionState("seed")).turns[0].rounds[0].answer).toBe("");
+    expect(selectTimelinePresentation("seed", current, createRawSessionState("seed")).turns[0].rounds[0].answer)
+      .toBe("partial text");
     expect(monitor.handleEntry("seed", {
       timeline_seq: 3,
       turn_id: "turn",

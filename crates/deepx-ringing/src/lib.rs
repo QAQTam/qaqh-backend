@@ -7,8 +7,8 @@
 //! - `snapshot`：`RingingChannelSnapshot`
 //! - `content`：`RingingContentRef`（大内容外置引用）
 //! - `worker`：daemon ↔ agent worker 边界的 framed envelope
-//! - `capability`：客户端 open/能力协商（`Ringing_v2` 等）
-//! - `protocol`：线协议标识（`schema: "deepx.Ringing"`, `version: 2`）
+//! - `capability`：客户端 open/能力协商（`Ringing_v1` 等）
+//! - `protocol`：线协议标识（`schema: "deepx.Ringing"`, `version: 1`）
 //!
 //! ## 架构硬规则
 //!
@@ -43,6 +43,7 @@ pub use protocol::{
 pub use reset::RingingResetRequired;
 pub use snapshot::{RingingChannelSnapshot, RingingSessionBootstrap};
 pub use worker::{
-    RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope, TimelineWorkerIntentEnvelope,
-    WIRE_RINGING_DOMAIN_V2, WIRE_TIMELINE_INTENT_V3, WORKER_FRAME_MAX_BYTES, WorkerDirection,
+    RingingTimelineIntentEnvelope, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
+    WIRE_RINGING_DOMAIN_V1, WIRE_RINGING_TIMELINE_INTENT_V1, WORKER_FRAME_MAX_BYTES,
+    WorkerDirection,
 };

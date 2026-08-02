@@ -1,4 +1,4 @@
-// Ringing v2 状态监视器（renderer 进程）。
+// Ringing v1 状态监视器（renderer 进程）。
 //
 // 职责：
 // - 订阅 main 进程转发的 Ringing batch（整批 IPC）；
@@ -85,11 +85,11 @@ export function createRingingMonitor() {
   /** 每 (seed, channel) 已应用快照的 baseline_seq：其前事件已包含在快照内，跳过。 */
   const baselineBySeed = new Map<string, Partial<Record<ChannelName, number>>>();
   const [state, setState] = createSignal<RingingMonitorState>(initialState());
-  // 已建立 v2 typed store 的会话集合与数据版本。
+  // 已建立 Ringing V1 typed store 的会话集合与数据版本。
   const [ringingSeeds, setRingingSeeds] = createSignal<ReadonlySet<string>>(new Set());
   const [ringingVersion, setRingingVersion] = createSignal(0);
 
-  /** 该 seed 是否已由 v2 bootstrap 激活（主 UI 数据源切换依据）。 */
+  /** 该 seed 是否已由 Ringing V1 bootstrap 激活（主 UI 数据源切换依据）。 */
   function hasStores(seed: string): boolean {
     return ringingSeeds().has(seed);
   }
@@ -195,7 +195,7 @@ export function createRingingMonitor() {
     });
   }
 
-  /** 标记该连接的 session 使用 Ringing v2，并以三频道 bootstrap 建立基线。 */
+  /** 标记该连接的 session 使用 Ringing v1，并以三频道 bootstrap 建立基线。 */
   async function activate(seed: string): Promise<void> {
     if (!seed) return;
     const api = window.deepx?.ringing;
@@ -219,7 +219,7 @@ export function createRingingMonitor() {
         applySnapshotPayload(seed, channel, bootstrap[channel] ?? null);
       }
     } else {
-      // Test/debug bridges from before the v2 bootstrap IPC can still recover
+      // Test/debug bridges from before the Ringing V1 bootstrap IPC can still recover
       // through the same main-owned per-channel snapshot endpoint.
       await Promise.all(([
         "control", "conversation", "tool",

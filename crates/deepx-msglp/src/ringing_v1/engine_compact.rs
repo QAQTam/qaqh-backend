@@ -430,7 +430,7 @@ pub(crate) fn run_compact_worker(
     provider: deepx_gate::ProviderConfig,
     kept_user_count: usize,
     head_user_count: usize,
-    event_tx: std::sync::mpsc::SyncSender<crate::ring::types::WriterEvent>,
+    event_tx: std::sync::mpsc::SyncSender<crate::ringing_v1::types::WriterEvent>,
     causation_id: Option<String>,
 ) -> CompactMeta {
     let msgs_vec = vec![deepx_types::Message::user(&prompt)];
@@ -440,7 +440,7 @@ pub(crate) fn run_compact_worker(
     let mut on_event = |ev: deepx_gate::StreamEvent| match ev {
         deepx_gate::StreamEvent::ContentDelta(delta) => {
             summary.push_str(&delta);
-            let _ = event_tx.send(crate::ring::types::WriterEvent::Legacy(
+            let _ = event_tx.send(crate::ringing_v1::types::WriterEvent::Legacy(
                 deepx_proto::Agent2Ui::CompactDelta {
                     delta: delta.clone(),
                 },
@@ -462,12 +462,12 @@ pub(crate) fn run_compact_worker(
                 Some(command_id) => env.with_causation(command_id),
                 None => env,
             };
-            let _ = event_tx.send(crate::ring::types::WriterEvent::Ringing(env));
+            let _ = event_tx.send(crate::ringing_v1::types::WriterEvent::Ringing(env));
         }
         deepx_gate::StreamEvent::ReasoningDelta(delta) => {
             // 思考链仅透传给前端（用户可以看到压缩 LLM 的推理过程），
             // 不进入 summary，否则会泄露进下一个 LLM 的上下文中。
-            let _ = event_tx.send(crate::ring::types::WriterEvent::Legacy(
+            let _ = event_tx.send(crate::ringing_v1::types::WriterEvent::Legacy(
                 deepx_proto::Agent2Ui::CompactDelta { delta },
             ));
         }

@@ -47,7 +47,7 @@ pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
     }
     let stdin = BufReader::new(std::io::stdin());
     let stdout = std::io::stdout();
-    let mut loop_ = deepx_msglp::ring::loop_core::Loop::new_ipc(agent, stdin, stdout);
+    let mut loop_ = deepx_msglp::ringing_v1::loop_core::Loop::new_ipc(agent, stdin, stdout);
     loop_.run();
     Ok(())
 }

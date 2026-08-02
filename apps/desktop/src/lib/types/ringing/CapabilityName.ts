@@ -3,4 +3,4 @@
 /**
  * 能力名称（PLAN 固定命名）。
  */
-export type CapabilityName = "ringing_v2" | "ringing_batch_v2" | "ringing_bootstrap_v2" | "ringing_command_status_v2";
+export type CapabilityName = "ringing_v1" | "ringing_batch_v1" | "ringing_bootstrap_v1" | "ringing_command_status_v1";

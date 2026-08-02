@@ -97,10 +97,12 @@ keeps a replay journal, and materializes recovery snapshots.
 2. Move provider-stream and tool-engine output construction to timeline
    intents, including contiguous block IDs for interleaved reasoning/text/tool
    output.
-3. Add a persisted timeline journal and `/ringing/v3/events/timeline` plus
-   timeline bootstrap/snapshot endpoints.
+3. Add a persisted timeline journal and the Ringing V1 per-session endpoints
+   `/ringing/v1/sessions/{seed}/timeline` and
+   `/ringing/v1/sessions/{seed}/timeline/events`.
 4. Replace the Electron transcript store with a gap-aware timeline reducer;
-   Markdown rendering begins on `block_sealed`. The presentation conversion
+   text deltas render while the block is open and `block_sealed` marks its
+   final lifecycle state. The presentation conversion
    is from Timeline's own materialized model, never from `Agent2Ui` events.
 5. Delete `Agent2Ui`, `legacy_projector`, and their old event/reducer paths in
    the same protocol-removal change.
@@ -110,6 +112,7 @@ keeps a replay journal, and materializes recovery snapshots.
 - A sequence reasoning -> tool -> text retains that exact block order after
   live delivery, reconnect, and snapshot recovery.
 - A missing or reordered text fragment is rejected and triggers recovery.
-- A sealed text block is immutable and only then reaches the Markdown parser.
+- A sealed text block is immutable; open text blocks remain incrementally
+  renderable as their deltas arrive.
 - Mixed streams cannot change transcript order because there is only one
   timeline cursor.

@@ -11,7 +11,7 @@ export function createTimelineMonitor() {
   const [version, setVersion] = createSignal(0);
 
   function handleSnapshot(response: TimelineSnapshotResponse): void {
-    if (response.schema !== "deepx.Timeline" || response.version !== 3) return;
+    if (response.schema !== "deepx.Ringing" || response.version !== 1) return;
     if (!Number.isSafeInteger(response.snapshot?.watermark) || response.snapshot.watermark < 0) return;
     snapshots.set(response.seed, structuredClone(response.snapshot));
     setVersion(value => value + 1);

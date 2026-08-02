@@ -1,4 +1,4 @@
-//! Ringing 只读查询（`POST /ringing/v2/queries/{name}`）。
+//! Ringing 只读查询（`POST /ringing/v1/queries/{name}`）。
 //!
 //! 实现 session.list / session.meta / session.activity 三个只读 RPC 的
 //! 中立 JSON 形状，复用 legacy `DeepxService::handle` 语义（查询只读，

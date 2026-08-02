@@ -8,8 +8,7 @@ use deepx_proto::{
     CONTROL_PROTOCOL_VERSION, ControlClientMessage, ControlServerMessage, DaemonDiscovery,
 };
 use deepx_ringing::{
-    CapabilityName, ClientOpenRequest, ClientOpenResponse, CLIENT_SESSION_HEADER,
-    RINGING_BASE_PATH,
+    CLIENT_SESSION_HEADER, CapabilityName, ClientOpenRequest, ClientOpenResponse, RINGING_BASE_PATH,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -61,7 +60,7 @@ pub struct NativeRingingClient {
 }
 
 impl NativeRingingClient {
-    /// Find or launch the daemon, then negotiate Ringing v2. No legacy
+    /// Find or launch the daemon, then negotiate Ringing v1. No legacy
     /// protocol connection is attempted or retained.
     pub async fn connect_or_launch(
         daemon_path: Option<&Path>,
@@ -81,12 +80,25 @@ impl NativeRingingClient {
         discovery: DaemonDiscovery,
         client_instance_id: String,
     ) -> Result<Self, ClientError> {
-        let endpoint = discovery.endpoint.strip_prefix("ws://").or_else(|| discovery.endpoint.strip_prefix("wss://"))
-            .ok_or_else(|| ClientError { code: "invalid_endpoint".into(), message: discovery.endpoint.clone() })?;
-        let scheme = if discovery.endpoint.starts_with("wss://") { "https" } else { "http" };
+        let endpoint = discovery
+            .endpoint
+            .strip_prefix("ws://")
+            .or_else(|| discovery.endpoint.strip_prefix("wss://"))
+            .ok_or_else(|| ClientError {
+                code: "invalid_endpoint".into(),
+                message: discovery.endpoint.clone(),
+            })?;
+        let scheme = if discovery.endpoint.starts_with("wss://") {
+            "https"
+        } else {
+            "http"
+        };
         let host = endpoint.split('/').next().unwrap_or_default();
         if host.is_empty() {
-            return Err(ClientError { code: "invalid_endpoint".into(), message: discovery.endpoint });
+            return Err(ClientError {
+                code: "invalid_endpoint".into(),
+                message: discovery.endpoint,
+            });
         }
         let base_url = format!("{scheme}://{host}");
         let http = reqwest::Client::builder()
@@ -95,10 +107,10 @@ impl NativeRingingClient {
         let open = ClientOpenRequest::new(
             client_instance_id.clone(),
             vec![
-                CapabilityName::RingingV2,
-                CapabilityName::RingingBatchV2,
-                CapabilityName::RingingBootstrapV2,
-                CapabilityName::RingingCommandStatusV2,
+                CapabilityName::RingingV1,
+                CapabilityName::RingingBatchV1,
+                CapabilityName::RingingBootstrapV1,
+                CapabilityName::RingingCommandStatusV1,
             ],
         );
         let response = http
@@ -109,11 +121,20 @@ impl NativeRingingClient {
             .await
             .map_err(|e| client_error("ringing_open", e))?;
         if !response.status().is_success() {
-            return Err(ClientError { code: "ringing_open".into(), message: format!("HTTP {}", response.status()) });
+            return Err(ClientError {
+                code: "ringing_open".into(),
+                message: format!("HTTP {}", response.status()),
+            });
         }
-        let opened: ClientOpenResponse = response.json().await.map_err(|e| client_error("ringing_open", e))?;
+        let opened: ClientOpenResponse = response
+            .json()
+            .await
+            .map_err(|e| client_error("ringing_open", e))?;
         if !opened.accepted {
-            return Err(ClientError { code: "ringing_rejected".into(), message: "daemon declined Ringing v2".into() });
+            return Err(ClientError {
+                code: "ringing_rejected".into(),
+                message: "daemon declined Ringing v1".into(),
+            });
         }
         Ok(Self {
             http,
@@ -127,8 +148,12 @@ impl NativeRingingClient {
         })
     }
 
-    pub fn client_session_id(&self) -> &str { &self.client_session_id }
-    pub fn client_instance_id(&self) -> &str { &self.client_instance_id }
+    pub fn client_session_id(&self) -> &str {
+        &self.client_session_id
+    }
+    pub fn client_instance_id(&self) -> &str {
+        &self.client_instance_id
+    }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.http
@@ -138,37 +163,88 @@ impl NativeRingingClient {
     }
 
     pub async fn renew(&self) -> Result<(), ClientError> {
-        let response = self.request(reqwest::Method::POST, &format!("{RINGING_BASE_PATH}/leases/renew"))
+        let response = self
+            .request(
+                reqwest::Method::POST,
+                &format!("{RINGING_BASE_PATH}/leases/renew"),
+            )
             .json(&serde_json::json!({}))
-            .send().await.map_err(|e| client_error("ringing_renew", e))?;
-        if response.status().is_success() { Ok(()) }
-        else { Err(ClientError { code: "ringing_renew".into(), message: format!("HTTP {}", response.status()) }) }
+            .send()
+            .await
+            .map_err(|e| client_error("ringing_renew", e))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ClientError {
+                code: "ringing_renew".into(),
+                message: format!("HTTP {}", response.status()),
+            })
+        }
     }
 
     pub async fn timeline_snapshot(&self, seed: &str) -> Result<Value, ClientError> {
-        self.json(reqwest::Method::GET, &format!("/ringing/v3/sessions/{seed}/timeline"), None).await
+        self.json(
+            reqwest::Method::GET,
+            &format!("/ringing/v1/sessions/{seed}/timeline"),
+            None,
+        )
+        .await
     }
 
     pub async fn bootstrap(&self, seed: &str) -> Result<Value, ClientError> {
-        self.json(reqwest::Method::GET, &format!("{RINGING_BASE_PATH}/sessions/{seed}/bootstrap"), None).await
+        self.json(
+            reqwest::Method::GET,
+            &format!("{RINGING_BASE_PATH}/sessions/{seed}/bootstrap"),
+            None,
+        )
+        .await
     }
 
     pub async fn command(&self, channel: &str, envelope: Value) -> Result<Value, ClientError> {
-        self.json(reqwest::Method::POST, &format!("{RINGING_BASE_PATH}/commands/{channel}"), Some(envelope)).await
+        self.json(
+            reqwest::Method::POST,
+            &format!("{RINGING_BASE_PATH}/commands/{channel}"),
+            Some(envelope),
+        )
+        .await
     }
 
     pub async fn query(&self, name: &str, body: Value) -> Result<Value, ClientError> {
-        self.json(reqwest::Method::POST, &format!("{RINGING_BASE_PATH}/queries/{name}"), Some(body)).await
+        self.json(
+            reqwest::Method::POST,
+            &format!("{RINGING_BASE_PATH}/queries/{name}"),
+            Some(body),
+        )
+        .await
     }
 
-    async fn json(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, ClientError> {
+    async fn json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, ClientError> {
         let mut request = self.request(method, path);
-        if let Some(body) = body { request = request.json(&body); }
-        let response = request.send().await.map_err(|e| client_error("ringing_http", e))?;
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| client_error("ringing_http", e))?;
         let status = response.status();
-        let value = response.json::<Value>().await.map_err(|e| client_error("ringing_decode", e))?;
-        if status.is_success() { Ok(value) }
-        else { Err(ClientError { code: "ringing_http".into(), message: format!("HTTP {status}: {value}") }) }
+        let value = response
+            .json::<Value>()
+            .await
+            .map_err(|e| client_error("ringing_decode", e))?;
+        if status.is_success() {
+            Ok(value)
+        } else {
+            Err(ClientError {
+                code: "ringing_http".into(),
+                message: format!("HTTP {status}: {value}"),
+            })
+        }
     }
 }
 

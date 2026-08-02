@@ -52,7 +52,7 @@ async function connectSse(ch: ChannelName): Promise<void> {
   for (;;) {
     try {
       emitStatus(ch, { state: "connecting" });
-      const response = await fetch(`${sseBase}/ringing/v2/events/${ch}`, {
+      const response = await fetch(`${sseBase}/ringing/v1/events/${ch}`, {
         headers: {
           Authorization: `Bearer ${sseToken}`,
           "X-DeepX-Client-Session-Id": sseSessionId,
@@ -121,7 +121,7 @@ function handleFrame(
 async function handleReset(reset: RingingResetRequired): Promise<void> {
   try {
     const response = await fetch(
-      `${sseBase}/ringing/v2/sessions/${encodeURIComponent(reset.seed)}/bootstrap`,
+      `${sseBase}/ringing/v1/sessions/${encodeURIComponent(reset.seed)}/bootstrap`,
       { headers: { Authorization: `Bearer ${sseToken}`, "X-DeepX-Client-Session-Id": sseSessionId } },
     );
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -139,14 +139,14 @@ async function ensureSse(base: string, token: string): Promise<void> {
   sseStarted = true;
   sseBase = base;
   sseToken = token;
-  const response = await fetch(`${base}/ringing/v2/clients/open`, {
+  const response = await fetch(`${base}/ringing/v1/clients/open`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       schema: "deepx.Ringing",
-      version: 2,
+      version: 1,
       client_instance_id: `browser-${crypto.randomUUID()}`,
-      capabilities: ["Ringing_v2", "Ringing_batch_v2", "Ringing_bootstrap_v2", "Ringing_command_status_v2"],
+      capabilities: ["Ringing_v1", "Ringing_batch_v1", "Ringing_bootstrap_v1", "Ringing_command_status_v1"],
     }),
   });
   if (!response.ok) throw new Error(`Ringing open failed: HTTP ${response.status}`);
@@ -201,7 +201,7 @@ export function installBrowserBridge(): boolean {
       status: () => Promise.resolve({}),
       snapshot: async (seed: string, channel: string) => {
         const bootstrap = await fetch(
-          `${base}/ringing/v2/sessions/${encodeURIComponent(seed)}/bootstrap`,
+          `${base}/ringing/v1/sessions/${encodeURIComponent(seed)}/bootstrap`,
           { headers: { Authorization: `Bearer ${token}`, "X-DeepX-Client-Session-Id": sseSessionId } },
         );
         if (!bootstrap.ok) throw new Error(`HTTP ${bootstrap.status}`);
@@ -210,7 +210,7 @@ export function installBrowserBridge(): boolean {
       },
       command: rejectReadOnly,
       query: (path: string, params?: Record<string, string | undefined>) =>
-        http(`/ringing/v2/queries/${path}${params ? `?${new URLSearchParams(params as Record<string, string>).toString()}` : ""}`),
+        http(`/ringing/v1/queries/${path}${params ? `?${new URLSearchParams(params as Record<string, string>).toString()}` : ""}`),
       onBatch: (listener: (batch: RingingEventBatch) => void) => {
         batchListeners.add(listener);
         void ensureSse(base, token).catch((error) => console.warn("[browser-bridge] Ringing open failed", error));

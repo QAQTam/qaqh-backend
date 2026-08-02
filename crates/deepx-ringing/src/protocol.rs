@@ -4,10 +4,10 @@
 pub const RINGING_SCHEMA: &str = "deepx.Ringing";
 
 /// 线协议版本。
-pub const RINGING_VERSION: u32 = 2;
+pub const RINGING_VERSION: u32 = 1;
 
-/// Ringing v2 的统一 HTTP 前缀。
-pub const RINGING_BASE_PATH: &str = "/ringing/v2";
+/// Ringing v1 的统一 HTTP 前缀。
+pub const RINGING_BASE_PATH: &str = "/ringing/v1";
 
 /// open 成功后所有请求使用的连接级身份 header。
 pub const CLIENT_SESSION_HEADER: &str = "X-DeepX-Client-Session-Id";

@@ -6,7 +6,7 @@ function sseStream(): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const envelope = {
     schema: "deepx.Ringing",
-    version: 2,
+    version: 1,
     channel: "tool",
     delivery: "reliable",
     server_epoch: "epoch-1",
@@ -43,7 +43,7 @@ function malformedThenValidSseStream(): ReadableStream<Uint8Array> {
   const malformed = {
     ...JSON.parse(JSON.stringify({
       schema: "deepx.Ringing",
-      version: 2,
+      version: 1,
       channel: "tool",
       delivery: "reliable",
       server_epoch: "epoch-1",
@@ -87,7 +87,7 @@ describe("RingingChannelStream", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const stream = new RingingChannelStream(
-      "http://127.0.0.1:1/ringing/v2/events/tool",
+      "http://127.0.0.1:1/ringing/v1/events/tool",
       "token",
       "tool",
       (batch) => batches.push(batch),
@@ -126,7 +126,7 @@ describe("RingingChannelStream", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const stream = new RingingChannelStream(
-      "http://127.0.0.1:1/ringing/v2/events/tool",
+      "http://127.0.0.1:1/ringing/v1/events/tool",
       "token",
       "tool",
       () => undefined,
@@ -152,7 +152,7 @@ describe("RingingChannelStream", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const stream = new RingingChannelStream(
-      "http://127.0.0.1:1/ringing/v2/events/tool",
+      "http://127.0.0.1:1/ringing/v1/events/tool",
       "token",
       "tool",
       batch => batches.push(batch),

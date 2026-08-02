@@ -3,7 +3,7 @@
 //! 硬规则：**reader 必须先检查 `wire`，禁止 untagged 猜测**。
 //!
 //! - legacy 记录：无 `wire` 字段，保持原 JSON-LP 格式（`Ui2Agent` / `Agent2Ui`）。
-//! - Ringing 记录：携带 `wire: "Ringing_domain_v2"`，解析为
+//! - Ringing 记录：携带 `wire: "Ringing_domain_v1"`，解析为
 //!   `RingingWorkerCommandEnvelope` / `RingingWorkerEventEnvelope`。
 //! - 未知 `wire` 值：拒绝并报 `InvalidData`，绝不猜测。
 
@@ -11,8 +11,8 @@ use std::io::{BufRead, Write};
 
 use deepx_proto::{Agent2Ui, Ui2Agent};
 use deepx_ringing::worker::{
-    RingingWorkerCommandEnvelope, TimelineWorkerIntentEnvelope, WIRE_RINGING_DOMAIN_V2,
-    WIRE_TIMELINE_INTENT_V3,
+    RingingTimelineIntentEnvelope, RingingWorkerCommandEnvelope, WIRE_RINGING_DOMAIN_V1,
+    WIRE_RINGING_TIMELINE_INTENT_V1,
 };
 
 /// stdin 方向的可判别命令帧。
@@ -20,7 +20,7 @@ use deepx_ringing::worker::{
 pub enum WorkerCommandFrame {
     /// legacy `Ui2Agent`（无 `wire` 字段）。
     Legacy(Ui2Agent),
-    /// Ringing `RingingWorkerCommandEnvelope`（`wire: "Ringing_domain_v2"`）。
+    /// Ringing `RingingWorkerCommandEnvelope`（`wire: "Ringing_domain_v1"`）。
     Ringing(RingingWorkerCommandEnvelope),
 }
 
@@ -29,7 +29,7 @@ pub enum WorkerCommandFrame {
 /// 判别规则（顺序固定）：
 /// 1. 解析为 `serde_json::Value`；
 /// 2. 无 `wire` 字段 → legacy（保持旧格式兼容）；
-/// 3. `wire == "Ringing_domain_v2"` → Ringing envelope；
+/// 3. `wire == "Ringing_domain_v1"` → Ringing envelope；
 /// 4. 其它 `wire` 值 → `InvalidData`（禁止猜测）。
 pub fn read_worker_command_frame<R: BufRead>(
     r: &mut R,
@@ -48,7 +48,7 @@ pub fn read_worker_command_frame<R: BufRead>(
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
             Ok(Some(WorkerCommandFrame::Legacy(frame)))
         }
-        Some(w) if w == WIRE_RINGING_DOMAIN_V2 => {
+        Some(w) if w == WIRE_RINGING_DOMAIN_V1 => {
             let frame = serde_json::from_value::<RingingWorkerCommandEnvelope>(value)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
             Ok(Some(WorkerCommandFrame::Ringing(frame)))
@@ -79,10 +79,10 @@ pub fn write_ringing_event_frame<W: Write>(
     w.flush()
 }
 
-/// Writes a native Timeline v3 intent frame.
+/// Writes a native Ringing V1 timeline intent frame.
 pub fn write_timeline_intent_frame<W: Write>(
     w: &mut W,
-    env: &TimelineWorkerIntentEnvelope,
+    env: &RingingTimelineIntentEnvelope,
 ) -> std::io::Result<()> {
     let json = serde_json::to_string(env)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
@@ -101,15 +101,15 @@ pub fn read_worker_event_line(line: &str) -> Result<Option<Agent2Ui>, String> {
         None => serde_json::from_value::<Agent2Ui>(value)
             .map(Some)
             .map_err(|e| format!("invalid legacy event: {e}")),
-        Some(w) if w == WIRE_RINGING_DOMAIN_V2 => {
+        Some(w) if w == WIRE_RINGING_DOMAIN_V1 => {
             // 解析校验后跳过（领域消费路径由 ChannelRouter 在 T2/T6 接入）
             let env = serde_json::from_value::<deepx_ringing::RingingWorkerEventEnvelope>(value)
                 .map_err(|e| format!("invalid ringing event: {e}"))?;
             let _ = env.event.channel();
             Ok(None)
         }
-        Some(w) if w == WIRE_TIMELINE_INTENT_V3 => {
-            let _ = serde_json::from_value::<TimelineWorkerIntentEnvelope>(value)
+        Some(w) if w == WIRE_RINGING_TIMELINE_INTENT_V1 => {
+            let _ = serde_json::from_value::<RingingTimelineIntentEnvelope>(value)
                 .map_err(|e| format!("invalid timeline intent: {e}"))?;
             Ok(None)
         }
@@ -145,7 +145,7 @@ mod tests {
             }),
         );
         let json = serde_json::to_string(&env).expect("serialize");
-        assert!(json.contains("\"wire\":\"Ringing_domain_v2\""));
+        assert!(json.contains("\"wire\":\"Ringing_domain_v1\""));
         let mut reader = std::io::Cursor::new(format!("{json}\n"));
         let frame = read_worker_command_frame(&mut reader)
             .expect("read")
@@ -187,7 +187,7 @@ mod tests {
             }),
         );
         let value = serde_json::to_value(&env).expect("serialize");
-        assert_eq!(value["wire"], "Ringing_domain_v2");
+        assert_eq!(value["wire"], "Ringing_domain_v1");
         assert_eq!(value["command"]["channel"], "conversation");
         assert_eq!(value["command"]["type"], "conversation_cancel");
     }
@@ -236,7 +236,7 @@ mod tests {
         );
         write_ringing_event_frame(&mut buf2, &env).expect("ringing write");
         let text = String::from_utf8_lossy(&buf2);
-        assert!(text.contains("\"wire\":\"Ringing_domain_v2\""));
+        assert!(text.contains("\"wire\":\"Ringing_domain_v1\""));
         assert!(text.contains("\"direction\":\"event\""));
     }
 

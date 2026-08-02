@@ -397,7 +397,7 @@ pub(crate) fn build_assistant_message(
 
 /// Emitter-trait version of emit_round_complete for the new Loop architecture.
 pub(crate) fn emit_round_complete_via_emitter(
-    emitter: &dyn crate::ring::types::Emitter,
+    emitter: &dyn crate::ringing_v1::types::Emitter,
     turn_id: &str,
     round_num: u32,
     assistant_msg: &deepx_types::Message,

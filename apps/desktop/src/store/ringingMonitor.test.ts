@@ -10,7 +10,7 @@ function batch(
 ): RingingEventBatch {
   return {
     schema: "deepx.Ringing",
-    version: 2,
+    version: 1,
     channel,
     seed,
     server_epoch: "epoch-1",
@@ -18,7 +18,7 @@ function batch(
     to_stream_seq: seq,
     envelopes: [{
       schema: "deepx.Ringing",
-      version: 2,
+      version: 1,
       channel,
       delivery: "reliable",
       server_epoch: "epoch-1",
@@ -86,7 +86,7 @@ describe("createRingingMonitor reactivity", () => {
     monitor.handleBatch(batch("s1", "conversation", 2, roundDelta("t1", "hello")));
     await Promise.resolve();
     expect(monitor.ringingVersion()).toBe(before2 + 1);
-    // 增量无损进入 Solid store；v2 UI 直接读取 store proxy 建立字段级依赖。
+    // 增量无损进入 Solid store；Ringing V1 UI 直接读取 store proxy 建立字段级依赖。
     expect(JSON.stringify(monitor.storesFor("s1")!.conversation)).toContain("hello");
   });
 

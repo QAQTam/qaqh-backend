@@ -4,14 +4,16 @@ DeepX 是一款本地优先的 AI Agent 桌面应用，由 Rust 后端、Electro
 
 当前版本：**1.0.0-beta.5**
 
-> 项目仍处于 beta 阶段。API、协议和持久化格式将在若干 beta 版本验证后，于 `1.0.0` 正式版进入稳定兼容周期。
+> **DeepX 1.0 是 DeepX-Ring 版本。**它以统一的 Ringing V1 协议与架构作为桌面端、daemon 与 worker 的正式通信基础。
+
+> 项目仍处于 beta 阶段。API、协议和持久化格式将在若干 beta 版本验证后，随 DeepX-Ring `1.0.0` 正式版进入稳定兼容周期。
 
 ## 核心能力
 
 - 流式模型对话、token 用量与缓存命中统计
 - Ringing 原生控制协议：会话快照、命令确认、批量事件与 SSE 增量同步
-- Timeline V3：按会话严格排序、可持久化回放的思考、聊天与工具时间线
-- Markdown 分段封口渲染，避免流式半截标记造成的吞字与显示错位
+- Ringing V1 Timeline：按会话严格排序、可持久化回放的思考、聊天与工具时间线
+- Markdown 增量渲染与分段封口，避免流式半截标记造成的吞字与显示错位
 - 文件、Shell、Git、Plan、Todo 和网页访问等工具
 - 会话持久化、工作区管理、Skills 和子 Agent
 - Electron 桌面端与独立 Rust daemon
@@ -103,12 +105,12 @@ just dev
 
 ## Beta.5 协议说明
 
-Beta.5 开始，Electron 桌面端使用 Ringing 与 Timeline V3 读取运行状态和对话时间线：
+Beta.5 开始，Electron 桌面端使用 Ringing 与 Ringing V1 Timeline 读取运行状态和对话时间线：
 
 - 每个会话的事件使用严格递增 cursor；重连后可从 cursor 恢复，不依赖前端临时缓冲。
 - 思考链、聊天正文和工具生命周期保留同一条时间线中的精确先后关系。
-- Markdown 内容在区块完整封口后才交给渲染器，流式期间保留原始内容，避免不完整标记导致 UI 丢字。
-- Electron 已不再使用旧 `Agent2Ui` / `Ui2Agent` 协议；桌面端必须与支持 Ringing/Timeline V3 的 daemon 配套使用。
+- Markdown 内容随 text delta 增量进入渲染器；区块封口只标记其完成状态，不再阻断流式展示。
+- Electron 已不再使用旧 `Agent2Ui` / `Ui2Agent` 协议；桌面端必须与支持 Ringing/Ringing V1 Timeline 的 daemon 配套使用。
 
 TUI 与 WinUI3 的迁移不包含在 Beta.5 的 Electron 协议切换范围内。Beta.5 仍为预发布版本，合并与 Release 前须完成已打包 Electron 的干净环境冒烟验证。
 

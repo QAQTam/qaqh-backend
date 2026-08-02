@@ -13,7 +13,7 @@ use deepx_domain::{
     TimelineTurnState,
 };
 
-/// A live v3 delivery record. `entry.timeline_seq` is the sole SSE cursor for
+/// A live Ringing V1 timeline delivery record. `entry.timeline_seq` is the sole SSE cursor for
 /// this seed; no per-channel sequence is exposed to a transcript consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineLiveEntry {

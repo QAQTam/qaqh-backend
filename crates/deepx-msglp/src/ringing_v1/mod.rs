@@ -1,4 +1,4 @@
-//! ring/ — production Ring-architecture Loop (primary).
+//! ringing_v1/ — production Ringing V1 architecture loop (primary).
 //!
 //! This loop replaces the old monolithic `Loop` with a pluggable Engine model.
 //! Each Engine implements the [`Engine`] trait; the Loop dispatches `Ui2Agent`

@@ -10,7 +10,7 @@ import type { RingingEventEnvelope } from "../lib/types/ringing";
 function envelope(streamSeq: number, eventId: string): RingingEventEnvelope {
   return {
     schema: "deepx.Ringing",
-    version: 2,
+    version: 1,
     channel: "tool",
     delivery: "reliable",
     server_epoch: "epoch-1",

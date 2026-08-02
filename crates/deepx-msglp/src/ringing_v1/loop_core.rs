@@ -1231,7 +1231,7 @@ impl Loop {
                         &command_id,
                         deepx_domain::ErrorScope::Conversation,
                         "unsupported_command",
-                        "Ringing v2 bootstrap already contains complete persisted history",
+                        "Ringing v1 bootstrap already contains complete persisted history",
                     );
                 }
             },
@@ -1711,7 +1711,7 @@ impl Loop {
 
     /// Apply the outcome returned by an engine.
     ///
-    /// This is the central decision point of the Ring architecture.
+    /// This is the central decision point of the Ringing V1 architecture.
     /// Each Outcome variant maps to a specific Loop action:
     ///
     /// - `TurnComplete` → flush, emit TurnEnd + Done, notify, return to Idle

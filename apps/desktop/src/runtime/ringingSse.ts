@@ -44,7 +44,7 @@ export function envelopeToBatch(
   if (envelope.channel !== channel) {
     throw new Error(`Ringing SSE channel mismatch: expected ${channel}, got ${envelope.channel}`);
   }
-  if (envelope.schema !== "deepx.Ringing" || envelope.version !== 2) {
+  if (envelope.schema !== "deepx.Ringing" || envelope.version !== 1) {
     throw new Error("unsupported Ringing event envelope version");
   }
   if (

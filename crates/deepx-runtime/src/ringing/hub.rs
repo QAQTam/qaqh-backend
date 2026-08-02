@@ -125,7 +125,7 @@ pub struct RingingHub {
     live: Mutex<HashMap<RingingChannel, broadcast::Sender<RingingEventEnvelope>>>,
     /// 持久化 journal（None = 非持久模式；I/O 失败只记录日志，不阻塞事件路径）。
     journal_store: Mutex<Option<JournalStore>>,
-    /// v3 transcript 的唯一 writer。它与三频道 Ringing v2 完全隔离，直到
+    /// Ringing V1 timeline transcript 的唯一 writer。它与三频道 Ringing v1 完全隔离，直到
     /// Electron 直切完成后旧 projector 才会被删除。
     timeline: Mutex<TimelineAppender>,
     timeline_live: broadcast::Sender<TimelineLiveEntry>,
@@ -241,7 +241,7 @@ impl RingingHub {
         &self.epoch
     }
 
-    /// 接收原生 v3 producer intent。此路径不接受 Agent2Ui 或 RingingEvent，
+    /// 接收原生 Ringing V1 timeline producer intent。此路径不接受 Agent2Ui 或 RingingEvent，
     /// 因而不会形成旧协议包装链。
     pub fn publish_timeline(
         &self,
@@ -271,7 +271,7 @@ impl RingingHub {
         Ok(entry)
     }
 
-    /// v3 bootstrap 的权威 transcript 快照。
+    /// Ringing V1 bootstrap 的权威 transcript 快照。
     pub fn timeline_snapshot(&self, seed: &str) -> Option<TimelineSnapshot> {
         self.timeline
             .lock()
@@ -279,7 +279,7 @@ impl RingingHub {
             .snapshot(seed)
     }
 
-    /// v3 reconnect tail。调用方用 snapshot watermark 作为 after 参数。
+    /// Ringing V1 reconnect tail。调用方用 snapshot watermark 作为 after 参数。
     pub fn timeline_replay_since(&self, seed: &str, watermark: u64) -> Vec<TimelineEntry> {
         self.timeline
             .lock()
@@ -287,7 +287,7 @@ impl RingingHub {
             .replay_since(seed, watermark)
     }
 
-    /// Live v3 transcript feed. Reliability comes from `timeline_replay_since`
+    /// Live Ringing V1 timeline transcript feed. Reliability comes from `timeline_replay_since`
     /// and snapshot watermark; a lagged receiver must reconnect and replay.
     pub fn subscribe_timeline(&self) -> broadcast::Receiver<TimelineLiveEntry> {
         self.timeline_live.subscribe()
@@ -538,7 +538,7 @@ impl RingingHub {
         replay
     }
 
-    /// 读取领域快照（HTTP `GET /ringing/v2/sessions/{seed}/bootstrap`）。
+    /// 读取领域快照（HTTP `GET /ringing/v1/sessions/{seed}/bootstrap`）。
     pub fn snapshot(&self, channel: RingingChannel, seed: &str) -> RingingChannelSnapshot {
         let guard = self.channel_state(channel);
         guard
@@ -999,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn native_timeline_intents_bypass_the_v2_channel_sequencer() {
+    fn native_timeline_intents_bypass_the_ringing_v1_channel_sequencer() {
         let hub = RingingHub::new("epoch");
         let opened = hub
             .publish_timeline(

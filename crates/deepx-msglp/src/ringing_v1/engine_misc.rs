@@ -39,7 +39,7 @@ impl MiscEngine {
         &self,
         agent: &mut AgentState,
         turn_id: &str,
-        tx: &mpsc::SyncSender<crate::ring::types::WriterEvent>,
+        tx: &mpsc::SyncSender<crate::ringing_v1::types::WriterEvent>,
     ) {
         log::info!(
             "[MISC] UndoTurn {turn_id} — turns before: {}",
@@ -57,7 +57,7 @@ impl MiscEngine {
             let start = total.saturating_sub(INITIAL_LOAD_COUNT as u32) as usize;
             let recent =
                 util::build_turns_from_context(agent, Some(start), Some(INITIAL_LOAD_COUNT));
-            let _ = tx.send(crate::ring::types::WriterEvent::Legacy(
+            let _ = tx.send(crate::ringing_v1::types::WriterEvent::Legacy(
                 Agent2Ui::SessionRestored {
                     seed: agent.session.seed.clone(),
                     turns: recent,

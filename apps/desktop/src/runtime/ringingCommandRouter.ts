@@ -1,4 +1,4 @@
-// Ringing v2 typed Desktop backend 路由。
+// Ringing v1 typed Desktop backend 路由。
 //
 // 协议模式在 Electron main 的连接协商时固定；renderer 不维护 mode、seed/channel
 // 没有 per-seed/channel 开关。命令只能通过 typed backend 进入 Ringing。
@@ -129,7 +129,7 @@ export const RINGING_COMMAND_METHODS: Record<string, RingingCommandSpec> = {
   },
 };
 
-/** 可经 /ringing/v2/queries 的只读方法（与后端白名单一致）。 */
+/** 可经 /ringing/v1/queries 的只读方法（与后端白名单一致）。 */
 export const RINGING_QUERY_METHODS: ReadonlySet<string> = new Set([
   "daemon.version",
   "session.list",

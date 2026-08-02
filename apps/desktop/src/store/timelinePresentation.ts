@@ -6,7 +6,7 @@ function status(state: TimelineTurn["state"]): TurnStatus {
 }
 
 /**
- * Projects only the transcript portion of RawSessionState from Timeline v3.
+ * Projects only the transcript portion of RawSessionState from Ringing V1 timeline.
  * Control/dashboard/interaction data remains owned by their native control
  * paths during the staged protocol replacement.
  */
@@ -21,8 +21,12 @@ export function selectTimelinePresentation(
     status: status(turn.state),
     rounds: turn.rounds.map(round => {
       const tools = round.blocks.filter(block => block.kind === "tool" && block.tool);
+      // Timeline entries append text while a block is open.  Block sealing is
+      // a lifecycle/finality marker, not a presentation barrier: filtering on
+      // it kept every `text_delta` out of the active transcript until the
+      // terminal event sealed the block.
       const text = (kind: "reasoning" | "text") => round.blocks
-        .filter(block => block.kind === kind && block.state === "sealed")
+        .filter(block => block.kind === kind)
         .map(block => block.text ?? "")
         .join("");
       const activeTool = tools.some(block => block.tool!.state === "prepared" || block.tool!.state === "running");

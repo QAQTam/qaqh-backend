@@ -74,10 +74,10 @@ RingingToolCommand
 能力名称固定为：
 
 ```text
-Ringing_v2
-Ringing_batch_v2
-Ringing_bootstrap_v2
-Ringing_command_status_v2
+Ringing_v1
+Ringing_batch_v1
+Ringing_bootstrap_v1
+Ringing_command_status_v1
 ```
 
 ## 架构硬规则
@@ -262,23 +262,23 @@ RingingContentRef {
 普通HTTP负责：
 
 ```text
-POST /ringing/v2/clients/open
-POST /ringing/v2/leases/renew
-POST /ringing/v2/commands/{control|conversation|tool}
-GET  /ringing/v2/commands/{command_id}
-GET  /ringing/v2/sessions/{seed}/bootstrap
-POST /ringing/v2/queries/{name}
-POST /ringing/v2/actions/{name}
-POST /ringing/v2/content
-GET  /ringing/v2/content/{content_id}
+POST /ringing/v1/clients/open
+POST /ringing/v1/leases/renew
+POST /ringing/v1/commands/{control|conversation|tool}
+GET  /ringing/v1/commands/{command_id}
+GET  /ringing/v1/sessions/{seed}/bootstrap
+POST /ringing/v1/queries/{name}
+POST /ringing/v1/actions/{name}
+POST /ringing/v1/content
+GET  /ringing/v1/content/{content_id}
 ```
 
 三条独立SSE负责server→client事件：
 
 ```text
-GET /ringing/v2/events/control
-GET /ringing/v2/events/conversation
-GET /ringing/v2/events/tool
+GET /ringing/v1/events/control
+GET /ringing/v1/events/conversation
+GET /ringing/v1/events/tool
 ```
 
 SSE frame使用标准字段：
@@ -327,7 +327,7 @@ WebSocket不是Ringing默认承载，仅在以下能力出现时单独协商：
 legacy WebSocket和Ringing HTTP/SSE并行存在，互不嵌套。
 
 legacy Control protocol在双协议期保持版本1且不承载Ringing frame。新客户端先调用
-`POST /ringing/v2/clients/open`完成版本/能力协商；端点不存在或版本不兼容时才显式选择
+`POST /ringing/v1/clients/open`完成版本/能力协商；端点不存在或版本不兼容时才显式选择
 legacy，禁止在同一连接上猜测frame类型。
 
 ## 相对Codex与Reasonix的取舍
@@ -347,7 +347,7 @@ legacy，禁止在同一连接上猜测frame类型。
 Desktop 在连接建立时只选择一个 backend：
 
 ```text
-POST /ringing/v2/clients/open 成功  → 本连接全部事件、命令、查询使用 Ringing v2
+POST /ringing/v1/clients/open 成功  → 本连接全部事件、命令、查询使用 Ringing v1
 明确返回 404/426                  → 旧 daemon，建立独立 /control/v1 legacy 连接
 其他认证、网络或协议错误          → 暴露错误，不静默降级
 ```
@@ -366,8 +366,8 @@ POST /ringing/v2/clients/open 成功  → 本连接全部事件、命令、查�
 
 ### 当前结论
 
-- **Desktop / daemon / worker 主链已是 Ringing v2**：连接级协商、三 SSE、完整 bootstrap、
-  typed command/query/action、content upload/ref、worker `Ringing_domain_v2` 边界均已接线。
+- **Desktop / daemon / worker 主链已是 Ringing v1**：连接级协商、三 SSE、完整 bootstrap、
+  typed command/query/action、content upload/ref、worker `Ringing_domain_v1` 边界均已接线。
 - **可靠性已闭环**：reliable 只以 journal/cursor 为权威，不再写入无人 drain 的第二队列；
   replaceable 按 identity 使用有界 latest 槽持久化，terminal 会清除旧 progress；
   ToolProgress 合并器工具不会在窗口翻转时吞掉当前 chunk，并保持 UTF-8 tail 合法。
@@ -392,8 +392,8 @@ POST /ringing/v2/clients/open 成功  → 本连接全部事件、命令、查�
 - **domain 层**：`crates/deepx-domain` — DomainCommand(21)/DomainEvent(36)/RingingChannel/
   Delivery，零 legacy/wire 依赖（架构测试 `ringing_architecture.rs` 3/3 保证）。
 - **wire 层**：`crates/deepx-ringing` — envelope/ack/batch/snapshot/content_ref/worker frame/
-  能力协商（`Ringing_v2`/`Ringing_batch_v2`/`Ringing_bootstrap_v2`/
-  `Ringing_command_status_v2`）。
+  能力协商（`Ringing_v1`/`Ringing_batch_v1`/`Ringing_bootstrap_v1`/
+  `Ringing_command_status_v1`）。
 - **daemon 运行时**：`deepx-runtime/ringing/` — 三频道 router（reliable FIFO + replaceable
   slots + FIFO 淘汰）、有界 journal（event_id 幂等 + CursorExpired）、领域 snapshot
   projection（禁事件数组模拟状态）、分级 outbox（背压）、sequencer（双序号 + revision）、
@@ -422,10 +422,10 @@ POST /ringing/v2/clients/open 成功  → 本连接全部事件、命令、查�
   待 daemon 通知集成（升级/维护）时接入。
 - **worker seed 修复**：Ringing worker 事件信封改用真实 session seed（此前硬编码
   `"worker"`，会导致所有会话事件落入同一伪 seed）。
-- **ConversationSnapshot HTTP**：`GET /ringing/v2/sessions/{seed}/bootstrap` 从
+- **ConversationSnapshot HTTP**：`GET /ringing/v1/sessions/{seed}/bootstrap` 从
   `SessionManager::load_for_resume` 持久化消息构建完整 turns（中立 JSON，非 legacy wire），
   与 hub 领域投影摘要合并返回。
-- **worker 边界**（阶段 1）：stdin/stdout `wire` 判别（无 wire→legacy / `Ringing_domain_v2`→
+- **worker 边界**（阶段 1）：stdin/stdout `wire` 判别（无 wire→legacy / `Ringing_domain_v1`→
   Ringing / 未知→拒绝）；Ringing 命令→legacy ingress 映射（19 命令，SessionClose 显式拒绝）；
   writer 双协议通道（`WriterEvent`）。
 - **生产点双发**（零 `Agent2Ui→Ringing` 转换函数）：engine_tool（ToolStarted/ToolProgress/
@@ -457,14 +457,14 @@ POST /ringing/v2/clients/open 成功  → 本连接全部事件、命令、查�
   legacy 通道按切流状态过滤（domain 投影 + Agent2Ui 直发双路径，36 变体归属表）；
   （历史方案）`sessionChannelMode` 后续已由 v2 连接级选择取代并删除。
 - **大内容外置**：ContentStore 写入侧（daemon 拦截 ToolFinished >10MiB → store + tail +
-  output_ref，外置时跳过 legacy 投影）+ 读取侧（`GET /ringing/v2/content/{id}?seed=`）已闭环。
+  output_ref，外置时跳过 legacy 投影）+ 读取侧（`GET /ringing/v1/content/{id}?seed=`）已闭环。
 - **legacy 双发去重**：daemon legacy 通道 5s 相同 JSON 去重（双发 + 投影双路径）。
 - **前端切流闭环（桌面）**：electron main RingingManager（三 SSE + 连接级 backend 选择 +
-  bootstrap/snapshot IPC）；renderer 三 store 直接消费 Ringing v2；
+  bootstrap/snapshot IPC）；renderer 三 store 直接消费 Ringing v1；
   SessionPresentationSelector（Ringing 连接的主 UI 数据源为 Ringing store 投影）；
   snapshot 摘要重建；ConversationSnapshot HTTP 已实现，renderer 完整 turns 消费待前端阶段接入。
 - **命令/查询接管（契约 `docs/ringing-command-query-contract.md`）**：
-  `POST /ringing/v2/queries/*` 已实现（session.list/meta/activity/dashboard/get_activity、
+  `POST /ringing/v1/queries/*` 已实现（session.list/meta/activity/dashboard/get_activity、
   workspace.get/status、config.load、skills.list_tools、todo.status、daemon.version；
   同时接受斜杠与点号路径，seed 依赖方法缺参 400）；
   `SessionClose` 在 daemon 侧拦截（registry close + hub 发布
@@ -479,14 +479,14 @@ POST /ringing/v2/clients/open 成功  → 本连接全部事件、命令、查�
   `RingingHub::with_persistence` 启动装载重建
   journal/router/projection/sequencer；I/O 失败只记录日志不阻塞 publish；
   daemon 启动改走持久构造（`server.rs`）。
-- **发布周期 1（历史）**：已由连接级 Ringing v2 上线模型取代。
+- **发布周期 1（历史）**：已由连接级 Ringing v1 上线模型取代。
 
 ### 当前剩余边界
 
-- 本轮验收范围是 Desktop → daemon → worker 的 Ringing v2 主 HTTP/SSE；TUI 与 WinUI
+- 本轮验收范围是 Desktop → daemon → worker 的 Ringing v1 主 HTTP/SSE；TUI 与 WinUI
   已由产品决策明确排除，不作为主 HTTP 完成度的阻塞项。
 - TUI 当前已恢复 workspace 构建，但传输仍使用 `deepx-client` legacy WebSocket；该客户端
-  的 Ringing v2 迁移留待未来单独立项。
+  的 Ringing v1 迁移留待未来单独立项。
 - 旧 daemon / 旧客户端兼容仍依赖 `/control/v1`、Agent2Ui/Ui2Agent、LegacyProjector 和
   legacy reducer。它们已与新 Desktop 连接隔离，但尚未到删除兼容层的发布窗口。
 - 全 workspace `cargo check` 仍受 `deepx-vector` 的既有 `hf_hub` API 漂移阻塞；不属于
@@ -499,7 +499,7 @@ POST /ringing/v2/clients/open 成功  → 本连接全部事件、命令、查�
 1. 修复 `deepx-vector` 的 `hf_hub` 版本漂移，恢复全 workspace check。
 2. 若服务端 16ms progress 合并是硬指标，把 `ToolProgressCoalescer` 接入实际发布路径并补压力测试。
 3. 兼容窗口结束后删除 legacy WS、LegacyProjector 与旧 bindings/reducer。
-4. TUI/WinUI 如需 Ringing v2，另开客户端迁移计划，不纳入本次主 HTTP 验收。
+4. TUI/WinUI 如需 Ringing v1，另开客户端迁移计划，不纳入本次主 HTTP 验收。
 
 ## 历史迁移阶段
 
@@ -518,7 +518,7 @@ POST /ringing/v2/clients/open 成功  → 本连接全部事件、命令、查�
 - 新增DomainCommand、DomainEvent和Ringing协议类型。
 - agent worker输入输出支持显式判别：
   - legacy记录保持原格式。
-  - 新记录使用`wire: "Ringing_domain_v2"`。
+  - 新记录使用`wire: "Ringing_domain_v1"`。
 - worker reader必须先检查`wire`，禁止使用untagged猜测。
 - daemon建立三个独立ChannelRouter、可靠journal、领域snapshot projection和分级发送队列。
 - legacy EventBus继续存在，但只能接收DomainEvent经过LegacyProjector生成的事件，或尚未迁移的原始legacy事件。
@@ -748,7 +748,7 @@ Renderer调度固定为：
 
 两个兼容周期结束并满足验收门槛后：— ⬜ 未开始
 
-- 固化Ringing v2最低客户端/daemon版本并拒绝不支持的组合。
+- 固化Ringing v1最低客户端/daemon版本并拒绝不支持的组合。
 - 删除Agent2Ui和Ui2Agent。
 - 删除`/control/v1` legacy WebSocket业务事件/RPC入口、LegacyProjector、legacy ingress、旧EventBus projection、旧replay buffer、旧前端reducer和legacy TS bindings。
 - 删除对应字符串session/interaction RPC兼容入口。
@@ -769,7 +769,7 @@ Renderer调度固定为：
 - 混合版本：
   - 新客户端+旧daemon仅在显式 404/426 时建立独立 legacy 连接。
   - 旧客户端/TUI+新daemon走legacy。
-  - 新客户端+新daemon使用连接级 Ringing v2，不按 session/channel 混用协议。
+  - 新客户端+新daemon使用连接级 Ringing v1，不按 session/channel 混用协议。
 - 命令幂等：
   - accepted前断线可安全重试。
   - accepted后断线不得重复执行。

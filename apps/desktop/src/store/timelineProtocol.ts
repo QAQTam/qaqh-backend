@@ -1,4 +1,4 @@
-// Native Timeline v3 wire model. This intentionally has no Ringing channel,
+// Native Ringing V1 timeline wire model. This intentionally has no Ringing channel,
 // per-channel sequence, or legacy event payload: one session transcript advances
 // through exactly one ordered cursor.
 
@@ -69,16 +69,16 @@ export type TimelineEntry = {
 };
 
 export type TimelineSnapshotResponse = {
-  schema: "deepx.Timeline";
-  version: 3;
+  schema: "deepx.Ringing";
+  version: 1;
   server_epoch: string;
   seed: string;
   snapshot: TimelineSnapshot;
 };
 
 export type TimelineSseFrame = {
-  schema: "deepx.Timeline";
-  version: 3;
+  schema: "deepx.Ringing";
+  version: 1;
   server_epoch: string;
   seed: string;
   entry: TimelineEntry;

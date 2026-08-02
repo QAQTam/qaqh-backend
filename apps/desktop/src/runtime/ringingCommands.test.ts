@@ -135,7 +135,7 @@ describe("requestWithRinging", () => {
       "legacy",
     );
     await expect(requestWithRinging("session.compact", { seed: "s1" }))
-      .rejects.toThrow("Ringing v2 is required");
+      .rejects.toThrow("Ringing v1 is required");
     expect(command).not.toHaveBeenCalled();
     expect(backendRequest).not.toHaveBeenCalled();
   });
@@ -190,7 +190,7 @@ describe("requestWithRinging", () => {
       "legacy",
     );
     await expect(requestWithRinging("session.compact", { seed: "s1" }))
-      .rejects.toThrow("Ringing v2 is required");
+      .rejects.toThrow("Ringing v1 is required");
     expect(command).not.toHaveBeenCalled();
     expect(backendRequest).not.toHaveBeenCalled();
   });

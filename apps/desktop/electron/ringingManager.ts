@@ -2,10 +2,10 @@
 //
 // 职责：
 // - 持有全局唯一的 RingingClient（三条 SSE 流，app 生命周期）；
-// - 维护连接级 v2 session，不按 seed/channel 切换协议；
+// - 维护连接级 Ringing V1 session，不按 seed/channel 切换协议；
 // - 向 renderer 转发 batch（整批 IPC）与频道连接状态。
 //
-// 一个 daemon 连接只使用 Ringing v2 或 legacy backend；Ringing v2 本身
+// 一个 daemon 连接只使用 Ringing v1 或 legacy backend；Ringing v1 本身
 // 不暴露 per-seed/channel mode。
 
 import { createHash, randomUUID } from "node:crypto";
@@ -93,7 +93,7 @@ export class RingingManager {
       console.log("[ringing] connected to daemon", baseUrl);
     } catch (error) {
       this.lastConnectError = error instanceof Error ? error.message : String(error);
-      console.warn("[ringing] v2 stream setup failed", error);
+      console.warn("[ringing] Ringing V1 stream setup failed", error);
       this.client = null;
     }
   }
@@ -113,7 +113,7 @@ export class RingingManager {
     this.client = null;
   }
 
-  /** lease 连续两次未获确认：重新 open、重建三条 SSE，保持 Ringing v2。 */
+  /** lease 连续两次未获确认：重新 open、重建三条 SSE，保持 Ringing v1。 */
   private scheduleRecovery(): void {
     if (this.recoveryTimer || !this.onRecoveryRequired) return;
     const delay = Math.min(RECOVERY_BASE_MS * 2 ** this.recoveryAttempt, RECOVERY_MAX_MS);
@@ -167,15 +167,15 @@ export class RingingManager {
   async activateTimeline(seed: string): Promise<TimelineSnapshotResponse> {
     const client = this.requireClient();
     const response = await this.getJson(
-      `/ringing/v3/sessions/${encodeURIComponent(seed)}/timeline`,
+      `/ringing/v1/sessions/${encodeURIComponent(seed)}/timeline`,
       "timeline snapshot",
     ) as TimelineSnapshotResponse;
     if (
-      response.schema !== "deepx.Timeline"
-      || response.version !== 3
+      response.schema !== "deepx.Ringing"
+      || response.version !== 1
       || response.seed !== seed
       || !Number.isSafeInteger(response.snapshot?.watermark)
-    ) throw new Error("invalid Timeline v3 snapshot");
+    ) throw new Error("invalid Ringing V1 timeline snapshot");
 
     this.timelineClient?.close("session changed");
     const stream = new TimelineClient(
@@ -244,10 +244,10 @@ export class RingingManager {
 
   async bootstrap(seed: string): Promise<unknown> {
     this.requireClient();
-    return this.getJson(`/ringing/v2/sessions/${encodeURIComponent(seed)}/bootstrap`, "bootstrap");
+    return this.getJson(`/ringing/v1/sessions/${encodeURIComponent(seed)}/bootstrap`, "bootstrap");
   }
 
-  /** Ringing 命令（POST /ringing/v2/commands/{channel}）。
+  /** Ringing 命令（POST /ringing/v1/commands/{channel}）。
    *
    * daemon 负责 lease + 幂等校验；`client_instance_id` 缺省时由 main 进程
    * 填充当前连接的实例 id（renderer 不持有该标识）。
@@ -266,7 +266,7 @@ export class RingingManager {
     this.requireClient();
     const payload = {
       schema: "deepx.Ringing",
-      version: 2,
+      version: 1,
       channel,
       command_id: envelope.command_id,
       client_instance_id: envelope.client_instance_id ?? this.instanceId(),
@@ -277,7 +277,7 @@ export class RingingManager {
       command: envelope.command,
     };
     try {
-      return await this.postJson(`/ringing/v2/commands/${channel}`, payload, "command");
+      return await this.postJson(`/ringing/v1/commands/${channel}`, payload, "command");
     } catch (error) {
       // The POST response may be lost after daemon acceptance. Resolve the
       // uncertainty with the same command id before surfacing the error.
@@ -304,10 +304,10 @@ export class RingingManager {
     }
   }
 
-  /** Ringing typed query（POST /ringing/v2/queries/{name}）。 */
+  /** Ringing typed query（POST /ringing/v1/queries/{name}）。 */
   async query(path: string, params?: Record<string, string | undefined>): Promise<unknown> {
     this.requireClient();
-    return this.postJson(`/ringing/v2/queries/${path}`, params ?? {}, "query");
+    return this.postJson(`/ringing/v1/queries/${path}`, params ?? {}, "query");
   }
 
   /** 连接级辅助 action（git/workspace/config/skills/plan/todo 等）。 */
@@ -317,7 +317,7 @@ export class RingingManager {
     const fingerprint = createHash("sha256")
       .update(JSON.stringify({ method: name, params }))
       .digest("hex");
-    return this.postJson(`/ringing/v2/actions/${name}`, {
+    return this.postJson(`/ringing/v1/actions/${name}`, {
       ...params,
       action_id: actionId,
       fingerprint,
@@ -327,7 +327,7 @@ export class RingingManager {
   /** 查询命令 receipt；断线重试使用同一 command_id。 */
   async commandStatus(commandId: string): Promise<unknown> {
     this.requireClient();
-    return this.getJson(`/ringing/v2/commands/${encodeURIComponent(commandId)}`, "command status");
+    return this.getJson(`/ringing/v1/commands/${encodeURIComponent(commandId)}`, "command status");
   }
 
   /** Electron main 读取本地文件后上传；renderer 不接触 content token/HTTP。 */
@@ -338,7 +338,7 @@ export class RingingManager {
     form.append("media_type", mediaType);
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
     form.append("content", new Blob([buffer], { type: mediaType }));
-    const response = await fetch(`${this.baseUrl}/ringing/v2/content`, {
+    const response = await fetch(`${this.baseUrl}/ringing/v1/content`, {
       method: "POST",
       headers: this.headers(),
       body: form,

@@ -8,7 +8,7 @@ import type { WorkerDirection } from "./WorkerDirection";
  */
 export type RingingWorkerEventEnvelope = { schema: string, version: number,
 /**
- * 线格式判别字段，固定 `WIRE_RINGING_DOMAIN_V2`。
+ * 线格式判别字段，固定 `WIRE_RINGING_DOMAIN_V1`。
  */
 wire: string, direction: WorkerDirection, channel: RingingChannel, seed: string, event_id: string,
 /**

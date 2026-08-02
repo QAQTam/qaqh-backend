@@ -8,6 +8,6 @@ import type { WorkerDirection } from "./WorkerDirection";
  */
 export type RingingWorkerCommandEnvelope = { schema: string, version: number,
 /**
- * 线格式判别字段，固定 `WIRE_RINGING_DOMAIN_V2`。
+ * 线格式判别字段，固定 `WIRE_RINGING_DOMAIN_V1`。
  */
 wire: string, direction: WorkerDirection, channel: RingingChannel, seed: string, command_id: string, expected_revision?: number | null, command: RingingCommand, };

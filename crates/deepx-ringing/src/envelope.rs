@@ -314,7 +314,7 @@ mod tests {
 
         let json = serde_json::to_string(&env).expect("serialize");
         assert!(json.contains("\"schema\":\"deepx.Ringing\""));
-        assert!(json.contains("\"version\":2"));
+        assert!(json.contains("\"version\":1"));
         assert!(json.contains("\"channel\":\"tool\""));
         assert!(json.contains("\"delivery\":\"replaceable\""));
         assert!(json.contains("\"causation_id\":\"cmd-9\""));

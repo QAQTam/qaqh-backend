@@ -55,7 +55,7 @@ export default function App() {
   const i18n = createI18n((localStorage.getItem("deepx:lang") ?? "en") as Lang);
   const toastCtrl = createToastCtrl();
   const registry = createSessionRegistry({ storage: sessionStorage });
-  // Ringing v2 三频道状态源
+  // Ringing v1 三频道状态源
   const ringingMonitor = createRingingMonitor();
   // Transcript v3 is intentionally separate: one seed owns one cursor.
   const timelineMonitor = createTimelineMonitor();
@@ -114,7 +114,7 @@ export default function App() {
     }
   }
 
-  /** The UI model is derived from native Ringing stores and Timeline v3. */
+  /** The UI model is derived from native Ringing stores and Ringing V1 timeline. */
   function presentationFor(entry: SessionEntry) {
     const seed = entry.state().seed;
     timelineMonitor.version();
@@ -404,7 +404,7 @@ export default function App() {
         setBackendError(event.payload.connected ? "" : (event.payload.error ?? "Daemon unavailable"));
       });
       await connect();
-      // Ringing v2 主订阅：batch 按 seed 路由进 typed stores。
+      // Ringing v1 主订阅：batch 按 seed 路由进 typed stores。
       const api = window.deepx?.ringing;
       if (api) {
         unlistenRingingBatch = api.onBatch(batch => {

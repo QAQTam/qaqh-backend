@@ -17,7 +17,7 @@ import {
 function envelope(event: RingingEventEnvelope["event"], eventId = "e1"): RingingEventEnvelope {
   return {
     schema: "deepx.Ringing",
-    version: 2,
+    version: 1,
     channel: event.channel,
     delivery: "reliable",
     server_epoch: "epoch-1",
