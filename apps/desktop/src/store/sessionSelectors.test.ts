@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createRawSessionState } from "./sessionEventReducer";
+import { createRawSessionState } from "./rawSession";
 import {
   activeInteraction,
   activeTurn,

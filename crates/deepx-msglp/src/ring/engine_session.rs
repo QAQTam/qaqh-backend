@@ -21,14 +21,14 @@ impl SessionEngine {
     pub fn create(&self, agent: &mut crate::state::agent::AgentState, _cancel: &CancelToken) {
         lifecycle::create_session(agent);
         agent.rebind_store();
-        deepx_tools::runtime::set_context(&agent.session.seed, agent.config.permission_level);
+        deepx_workspace::runtime::set_context(&agent.session.seed, agent.config.permission_level);
     }
 
     /// Create a new session with a pre-set seed (from CLI --seed).
     pub fn create_with_seed(&self, agent: &mut crate::state::agent::AgentState, _cancel: &CancelToken) {
         lifecycle::create_session_with_seed(agent);
         agent.rebind_store();
-        deepx_tools::runtime::set_context(&agent.session.seed, agent.config.permission_level);
+        deepx_workspace::runtime::set_context(&agent.session.seed, agent.config.permission_level);
     }
 
     /// Resume an existing session. Returns false if the session doesn't exist.
@@ -41,12 +41,12 @@ impl SessionEngine {
         log::info!("[SESSION] resume seed={seed}");
         if lifecycle::init_session(agent, Some(seed)) {
             agent.rebind_store();
-            deepx_tools::runtime::set_context(&agent.session.seed, agent.config.permission_level);
+            deepx_workspace::runtime::set_context(&agent.session.seed, agent.config.permission_level);
 
             // Restore persisted agent mode
             let saved_mode = agent.session.mode;
             if saved_mode != 0 {
-                deepx_tools::runtime::set_mode(saved_mode);
+                deepx_workspace::runtime::set_mode(saved_mode);
             }
 
             // Build initial turn batch and emit
@@ -83,7 +83,7 @@ impl SessionEngine {
             agent.config.context_limit = cfg.context_limit;
             agent.config.permission_level = cfg.permission_level;
             agent.config.permission_level = cfg.permission_level;
-            deepx_tools::workspace::load_session_workspace(&agent.session.seed);
+            deepx_workspace::workspace::load_session_workspace(&agent.session.seed);
             deepx_session::SessionManager::global().set_turso_enabled(cfg.database.enabled);
         }
     }

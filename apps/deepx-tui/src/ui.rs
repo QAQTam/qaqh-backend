@@ -617,10 +617,14 @@ mod tests {
     use serde_json::json;
 
     fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
         let mut s = String::new();
-        for row in terminal.backend().buffer().content.iter() {
-            s.push_str(&row.symbol);
-            s.push('\n');
+        let width = buffer.area.width as usize;
+        for (i, cell) in buffer.content.iter().enumerate() {
+            s.push_str(cell.symbol());
+            if (i + 1) % width == 0 {
+                s.push('\n');
+            }
         }
         s
     }
@@ -631,11 +635,12 @@ mod tests {
         app.status_message = "Connected".to_string();
         let session = SessionInfo {
             seed: "deadbeef".to_string(),
+            name: "deadbeef".to_string(),
+            preview: "Diagnose terminal input and repair the chat layout".to_string(),
             updated_at: Utc::now().timestamp() as u64,
-            model: Some("gpt-test".to_string()),
+            model: "gpt-test".to_string(),
             turn_count: 7,
             message_count: 18,
-            last_summary: Some("Diagnose terminal input and repair the chat layout".to_string()),
             running: true,
         };
         app.sessions.push(session);
@@ -654,7 +659,7 @@ mod tests {
         assert!(screen.contains("Diagnose terminal input"));
         assert!(screen.contains("gpt-test"));
         assert!(screen.contains("7 turns"));
-        assert!(screen.contains("running"));
+        assert!(screen.contains("1 session"));
     }
 
     #[test]
@@ -663,6 +668,7 @@ mod tests {
         app.open_new_session("scroll01".to_string());
         for id in 1..=60 {
             let msg = crate::app::ChatMessage {
+                id,
                 kind: MessageKind::Answer {
                     content: format!(
                         "message {id}: this deliberately wraps across a narrow terminal viewport"
@@ -671,7 +677,7 @@ mod tests {
                 },
                 timestamp: Utc::now(),
                 turn_id: format!("turn-{id}"),
-                round_num: Some(id),
+                round_num: Some(id as u32),
             };
             app.messages.push(msg);
         }

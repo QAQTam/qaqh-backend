@@ -416,7 +416,12 @@ mod tests {
     #[test]
     fn snapshot_projection_drops_historical_errors_and_retries() {
         let bus = EventBus::new("epoch");
-        bus.publish("s", Agent2Ui::Error { message: "old".into() });
+        bus.publish(
+            "s",
+            Agent2Ui::Error {
+                message: "old".into(),
+            },
+        );
         bus.publish(
             "s",
             Agent2Ui::ProviderRetrying {
@@ -442,8 +447,18 @@ mod tests {
                 turns_keeping: 1,
             },
         );
-        bus.publish("s", Agent2Ui::CompactDelta { delta: "sum".into() });
-        bus.publish("s", Agent2Ui::CompactDelta { delta: "mary".into() });
+        bus.publish(
+            "s",
+            Agent2Ui::CompactDelta {
+                delta: "sum".into(),
+            },
+        );
+        bus.publish(
+            "s",
+            Agent2Ui::CompactDelta {
+                delta: "mary".into(),
+            },
+        );
         bus.publish(
             "s",
             Agent2Ui::CompactEnd {
@@ -455,7 +470,9 @@ mod tests {
 
         let projection = bus.projections_for(&["s".into()]);
         assert_eq!(projection["s"].len(), 3);
-        assert!(matches!(&projection["s"][1], Agent2Ui::CompactDelta { delta } if delta == "summary"));
+        assert!(
+            matches!(&projection["s"][1], Agent2Ui::CompactDelta { delta } if delta == "summary")
+        );
         assert!(matches!(&projection["s"][2], Agent2Ui::CompactEnd { .. }));
     }
 }

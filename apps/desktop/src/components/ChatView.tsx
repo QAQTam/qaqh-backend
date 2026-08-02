@@ -1,8 +1,9 @@
 import { action, createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack, type Accessor } from "solid-js";
 import { request } from "../runtime/backendClient";
+import { requestWithRinging } from "../runtime/ringingCommands";
 import { openDevTools, openPath } from "../runtime/desktopApi";
 import { togglePet } from "../runtime/desktopApi";
-import type { AskAnswer } from "../lib/types";
+import type { AskAnswer } from "../lib/types/ringing";
 import { projectTurn, type ChangeReviewFile, type TurnViewModel } from "../presentation/turnProjection";
 import type { PendingInteraction, RawSessionState, RawTurn } from "../store/rawSession";
 import type { DashboardStoreData } from "../store/sessionRegistry";
@@ -31,7 +32,6 @@ import TodoStatusStrip from "./TodoStatusStrip";
 
 interface ChatViewProps {
   rawSession: Accessor<RawSessionState>;
-  sessionStore: RawSessionState;
   dashboardStore: DashboardStoreData;
   ui: SessionUiState;
   onLoadMore: () => void | Promise<void>;
@@ -63,7 +63,7 @@ interface ChatViewProps {
 export default function ChatView(props: ChatViewProps) {
   const session = () => props.rawSession();
   const turns = createMemo(() => {
-    const projected = props.sessionStore.turns.map(projectTurn);
+    const projected = session().turns.map(projectTurn);
     const pending = props.pendingSend();
     if (pending) {
       projected.push(projectTurn(pending));
@@ -132,7 +132,7 @@ export default function ChatView(props: ChatViewProps) {
       interactions: [],
     };
     props.setPendingSend(optimisticTurn);
-    yield request("session.send_message", {
+    yield requestWithRinging("session.send_message", {
       seed: seed(),
       text,
       files,
@@ -142,11 +142,11 @@ export default function ChatView(props: ChatViewProps) {
   });
 
   const handleStop = action(async function* () {
-    yield request("session.cancel", { seed: seed() });
+    yield requestWithRinging("session.cancel", { seed: seed() });
   });
 
   const handleCompact = action(async function* () {
-    yield request("session.compact", { seed: seed() });
+    yield requestWithRinging("session.compact", { seed: seed() });
   });
 
   const followUps = createFollowUpQueue(untrack(seed), handleSend);

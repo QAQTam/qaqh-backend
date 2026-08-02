@@ -9,6 +9,8 @@ use deepx_proto::{
 };
 use deepx_runtime::{DeepxService, EventBus, LeaseDecision, LeaseManager};
 use futures_util::{SinkExt, StreamExt};
+use deepx_runtime::RingingHub;
+use deepx_runtime::{WorkspaceMode, WorkspaceSupervisor};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -44,7 +46,7 @@ fn daemon_channel() -> String {
 }
 
 pub async fn run() -> Result<(), String> {
-    deepx_types::platform::ensure_data_root().map_err(stringify)?;
+    let data_root = deepx_types::platform::ensure_data_root().map_err(stringify)?;
     let _lock = acquire_single_instance()?;
     let token = random_hex();
     let epoch = random_hex();
@@ -67,8 +69,84 @@ pub async fn run() -> Result<(), String> {
     };
     write_discovery(&discovery)?;
     let events = EventBus::new(epoch);
+    let hub = Arc::new(RingingHub::with_persistence(
+        events.epoch().to_string(),
+        data_root.join("ringing"),
+    ));
     let service = DeepxService::init(events);
+    service.attach_ringing(hub.clone());
+    // 工具套件运行环境：config `[workspace] mode`（local 默认 / wsl 可选）。
+    // 拉起失败不阻塞 daemon——worker 回退进程内工具执行。
+    let workspace_mode = deepx_config::Config::load()
+        .map(|config| WorkspaceMode::parse(&config.workspace.mode))
+        .unwrap_or(WorkspaceMode::Local);
+    let workspace_service = service.clone();
+    let workspace = WorkspaceSupervisor::start(
+        workspace_mode,
+        Arc::new(move |connection| {
+            // 新 endpoint/token 仅经 daemon 内存注入后续 worker，绝不进日志或 IPC。
+            workspace_service.attach_workspace(connection.endpoint.clone(), connection.token);
+            workspace_service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
+                configured_mode: workspace_mode.label().into(),
+                active_mode: connection.mode.label().into(),
+                endpoint: connection.endpoint,
+                generation: connection.generation,
+            });
+        }),
+    )
+    .ok();
+    if let Some(ref ws) = workspace {
+        let connection = ws.connection();
+        service.attach_workspace(connection.endpoint.clone(), connection.token);
+        service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
+            configured_mode: workspace_mode.label().into(),
+            active_mode: connection.mode.label().into(),
+            endpoint: connection.endpoint,
+            generation: connection.generation,
+        });
+    } else {
+        service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
+            configured_mode: workspace_mode.label().into(),
+            active_mode: "disabled".into(),
+            endpoint: String::new(),
+            generation: 0,
+        });
+    }
     let leases = Arc::new(Mutex::new(LeaseManager::default()));
+    let ringing_leases = Arc::new(Mutex::new(
+        crate::ringing_http::RingingLeaseStore::new(),
+    ));
+    let pending_commands = Arc::new(Mutex::new(
+        crate::ringing_http::PendingCommandStore::new_persistent(),
+    ));
+    // Fold causally-linked business terminal events into persistent command
+    // receipts. One observer per physical channel preserves channel isolation.
+    for channel in [
+        deepx_domain::RingingChannel::Control,
+        deepx_domain::RingingChannel::Conversation,
+        deepx_domain::RingingChannel::Tool,
+    ] {
+        let mut receiver = hub.subscribe(channel);
+        let receipts = pending_commands.clone();
+        tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(envelope) => receipts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .observe_terminal_event(&envelope),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        log::warn!(
+                            "[ringing] command receipt observer lagged on {} by {} events",
+                            channel.as_str(),
+                            skipped
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let (shutdown, mut shutdown_rx) = watch::channel(false);
     loop {
@@ -80,16 +158,21 @@ pub async fn run() -> Result<(), String> {
                     continue;
                 };
                 let service = service.clone(); let leases = leases.clone(); let token = token.clone();
+                let hub = hub.clone(); let ringing_leases = ringing_leases.clone();
+                let pending_commands = pending_commands.clone();
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error)=handle_connection(stream,token,service,leases,shutdown).await { log::warn!("control connection: {error}"); }
+                    if let Err(error)=handle_connection(stream,token,service,leases,shutdown,hub,ringing_leases,pending_commands).await { log::warn!("control connection: {error}"); }
                 });
             }
             changed = shutdown_rx.changed() => if changed.is_err() || *shutdown_rx.borrow() { break },
         }
     }
     service.shutdown();
+    if let Some(ref ws) = workspace {
+        ws.stop();
+    }
     let _ = std::fs::remove_file(deepx_types::platform::daemon_discovery_path());
     let _ = std::fs::remove_file(deepx_types::platform::daemon_lock_path());
     Ok(())
@@ -101,6 +184,9 @@ async fn handle_connection(
     service: DeepxService,
     leases: Arc<Mutex<LeaseManager>>,
     shutdown: watch::Sender<bool>,
+    hub: Arc<RingingHub>,
+    ringing_leases: Arc<Mutex<crate::ringing_http::RingingLeaseStore>>,
+    pending_commands: Arc<Mutex<crate::ringing_http::PendingCommandStore>>,
 ) -> Result<(), String> {
     let mut peek = [0_u8; 2048];
     let count = stream.peek(&mut peek).await.map_err(stringify)?;
@@ -127,6 +213,25 @@ async fn handle_connection(
             let _ = shutdown.send(true);
         }
         return Ok(());
+    }
+
+    // Ringing HTTP/SSE 分流（PLAN：legacy WS 与 Ringing HTTP/SSE 并行、互不嵌套）
+    if preview.starts_with("POST /ringing/") || preview.starts_with("GET /ringing/") {
+        return crate::ringing_http::handle_ringing_http(
+            stream,
+            &preview,
+            &token,
+            hub,
+            ringing_leases,
+            service,
+            pending_commands,
+        )
+        .await;
+    }
+
+    // Debug 只读页：静态服务前端产物（浏览器调试入口，无需 Electron）
+    if preview.starts_with("GET /debug") {
+        return crate::debug_http::handle_debug_http(stream, &preview, &token).await;
     }
 
     let expected = format!("Bearer {token}");
@@ -344,7 +449,7 @@ async fn handle_connection(
                         // writer blocks at most SEND_TIMEOUT_MS, then the
                         // message is dropped and the writer-monitor arm can
                         // fire on the next select! iteration.
-                        send_or_drop(&outbound_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await;
+                    send_or_drop(&outbound_tx, ControlServerMessage::Heartbeat{server_epoch:service.events().epoch().into(),seq:service.events().current_seq(),nonce}).await;
                     }
                     ControlClientMessage::SessionAttach{request_id,seed}=>{
                         let decision=if client_kind=="clawd"{
@@ -402,7 +507,12 @@ async fn handle_connection(
                 Ok(ref message @ ControlServerMessage::Event{seq,..})=>{
                     delivered_seq=seq;
                     if !event_allowed(message,&leases,&client_instance_id,&client_kind){ continue; }
-                    send_or_drop(&outbound_tx, message.clone()).await;
+                    // 事件一旦写出超时，绝不能静默丢失（流式增量缺字无法在
+                    // 同连接内自愈）。关闭连接让客户端以 cursor 续传重放
+                    // journal 中缺失的事件，把“静默吞字”变成“可恢复重同步”。
+                    if !send_or_drop(&outbound_tx, message.clone()).await {
+                        return Err("control outbound stalled; closing connection for cursor resync".into());
+                    }
                 },
                 Ok(message)=>{send_or_drop(&outbound_tx, message).await;}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{
@@ -499,10 +609,14 @@ where
 /// This is the root-cause fix for the "old sessions work, new sessions can't
 /// send messages" regression introduced by d2f66da (which replaced the
 /// previous `try_send().map_err()?` with unbounded `send().await`).
-async fn send_or_drop<T>(tx: &mpsc::Sender<T>, msg: T) {
+/// 发送一条消息；`true` = 已投递（含接收端已关闭），`false` = 超时被丢弃。
+async fn send_or_drop<T>(tx: &mpsc::Sender<T>, msg: T) -> bool {
     match tokio::time::timeout(Duration::from_millis(SEND_TIMEOUT_MS), tx.send(msg)).await {
-        Ok(Ok(())) | Ok(Err(_)) => {}
-        Err(_) => log::warn!("control outbound: writer stalled >{SEND_TIMEOUT_MS}ms, dropping message"),
+        Ok(Ok(())) | Ok(Err(_)) => true,
+        Err(_) => {
+            log::warn!("control outbound: writer stalled >{SEND_TIMEOUT_MS}ms, dropping message");
+            false
+        }
     }
 }
 fn error_response(status: StatusCode, text: &str) -> ErrorResponse {
@@ -510,7 +624,7 @@ fn error_response(status: StatusCode, text: &str) -> ErrorResponse {
     *response.status_mut() = status;
     response
 }
-fn random_hex() -> String {
+pub fn random_hex() -> String {
     rand::random::<[u8; 32]>()
         .iter()
         .map(|byte| format!("{byte:02x}"))

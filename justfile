@@ -16,7 +16,7 @@ default:
 
 # 编译 daemon（后端核心，release）
 build-daemon:
-    cargo build --release -p deepx-daemon
+    cargo build --release -p deepx-daemon -p deepx-workspace
 
 # 编译 companion（同步引擎，release）
 build-companion:

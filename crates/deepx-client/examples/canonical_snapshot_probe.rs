@@ -37,10 +37,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         turns > 0,
         "canonical snapshot did not contain persisted turns"
     );
-    let replay = client
-        .request("session.replay_events", serde_json::json!({ "seed": seed }))
-        .await?;
-    assert!(replay.as_array().is_some_and(|events| !events.is_empty()));
     let activity = client
         .request("session.get_activity", serde_json::json!({ "seed": seed }))
         .await?;

@@ -7,6 +7,7 @@ import { app } from "electron";
 import WebSocket from "ws";
 import { daemonIdentityMismatch, hasActiveDaemonWork, type ExpectedDaemonIdentity } from "../src/runtime/daemonLifecycle";
 import { ControlCursor } from "../src/runtime/controlCursor";
+import type { RingingSessionOpen } from "./ringingClient";
 import type { BackendStatus, ControlMessage, DaemonDiscovery, DaemonManifest } from "./types";
 
 const PROTOCOL_VERSION = 1;
@@ -19,6 +20,12 @@ type Pending = {
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 };
+
+export interface RingingConnectionInfo {
+  baseUrl: string;
+  token: string;
+  session: RingingSessionOpen;
+}
 
 export class DaemonControlClient {
   private socket?: WebSocket;
@@ -34,7 +41,30 @@ export class DaemonControlClient {
   private stopped = false;
   private restarting = false;
   private closing?: Promise<void>;
-  private status: BackendStatus = { connected: false };
+  private status: BackendStatus = { connected: false, transport: "legacy" };
+  private lastDiscovery?: { baseUrl: string; token: string };
+  private ringingConnection?: RingingConnectionInfo;
+  private transport: "ringing" | "legacy" = "legacy";
+
+  /** 最近一次成功的 daemon discovery（Ringing HTTP 客户端复用同一 token）。 */
+  discoveryInfo(): { baseUrl: string; token: string } | null {
+    return this.lastDiscovery ?? null;
+  }
+
+  /** 已完成 v2 open 的会话；只给 Electron main 的 RingingManager 使用。 */
+  ringingConnectionInfo(): RingingConnectionInfo | null {
+    return this.ringingConnection ?? null;
+  }
+
+  /** 强制重新协商 v2 lease；只用于健康监督恢复，绝不改选 legacy。 */
+  async refreshRingingConnection(): Promise<RingingConnectionInfo> {
+    if (this.transport !== "ringing") throw new Error("Ringing v2 is not the selected transport");
+    const discovery = await readDiscovery();
+    if (!(await this.tryConnectRinging(discovery)) || !this.ringingConnection) {
+      throw new Error("Ringing v2 is no longer supported by the daemon");
+    }
+    return this.ringingConnection;
+  }
 
   constructor(
     private readonly onMessage: (message: ControlMessage) => void,
@@ -45,8 +75,14 @@ export class DaemonControlClient {
     return { ...this.status };
   }
 
+  /** 新版 daemon 选择 Ringing 后不再建立 legacy WebSocket。 */
+  usingRinging(): boolean {
+    return this.transport === "ringing" && this.status.connected;
+  }
+
   async connect(): Promise<void> {
     if (this.socket?.readyState === WebSocket.OPEN) return;
+    if (this.usingRinging()) return;
     if (this.connecting) return this.connecting;
     this.stopped = false;
     this.connecting = this.connectOrLaunch().finally(() => { this.connecting = undefined; });
@@ -56,6 +92,9 @@ export class DaemonControlClient {
   async request(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
     if (!method || typeof method !== "string") throw new Error("invalid backend method");
     await this.connect();
+    if (this.usingRinging()) {
+      throw new Error(`legacy backend request is unavailable on Ringing v2: ${method}`);
+    }
     return this.roundTrip({
       type: "request",
       request_id: randomUUID(),
@@ -67,6 +106,10 @@ export class DaemonControlClient {
   async attach(seed: string): Promise<unknown> {
     if (!seed) throw new Error("session seed is required");
     await this.connect();
+    if (this.usingRinging()) {
+      this.attached.add(seed);
+      return { ok: true, transport: "ringing" };
+    }
     const result = await this.attachWire(seed);
     this.attached.add(seed);
     return result;
@@ -75,6 +118,10 @@ export class DaemonControlClient {
   async detach(seed: string): Promise<unknown> {
     if (!seed) throw new Error("session seed is required");
     await this.connect();
+    if (this.usingRinging()) {
+      this.attached.delete(seed);
+      return { ok: true, transport: "ringing" };
+    }
     const result = await this.roundTrip({
       type: "session_detach",
       request_id: randomUUID(),
@@ -89,7 +136,11 @@ export class DaemonControlClient {
     this.stopped = true;
     if (this.reconnect) clearTimeout(this.reconnect);
     if (this.upgradeCheck) clearTimeout(this.upgradeCheck);
-    this.closing = this.releaseLeases().finally(() => this.disconnectSocket());
+    this.closing = this.releaseLeases().finally(() => {
+      this.transport = "legacy";
+      this.ringingConnection = undefined;
+      this.disconnectSocket();
+    });
     return this.closing;
   }
 
@@ -149,23 +200,10 @@ export class DaemonControlClient {
     let lastError: unknown = new Error("daemon did not publish discovery");
     try {
       const discovery = await readDiscovery();
-      await this.connectDiscovery(discovery);
       const mismatch = daemonIdentityMismatch(discovery, expected);
-      if (!mismatch) return;
-
-      const activities = await this.roundTrip({
-        type: "request",
-        request_id: randomUUID(),
-        method: "session.activity",
-        params: {},
-      });
-      if (hasActiveDaemonWork(activities)) {
-        this.setStatus({ connected: true, updatePending: true });
-        this.scheduleUpgrade(discovery, expected);
-        return;
-      }
-      await this.takeOverDaemon(discovery, expected, true);
-      return;
+      if (mismatch) throw new Error(`incompatible daemon: ${mismatch}`);
+      if (await this.tryConnectRinging(discovery)) return;
+      throw new Error("Ringing v2 is required but this daemon does not support it");
     } catch (error) {
       lastError = error;
       this.disconnectSocket();
@@ -182,8 +220,8 @@ export class DaemonControlClient {
           lastError = new Error(`incompatible daemon: ${mismatch}`);
           continue;
         }
-        await this.connectDiscovery(discovery);
-        return;
+        if (await this.tryConnectRinging(discovery)) return;
+        lastError = new Error("Ringing v2 is required but this daemon does not support it");
       } catch (error) {
         lastError = error;
       }
@@ -238,7 +276,9 @@ export class DaemonControlClient {
       await waitForDaemonExit(discovery.pid);
       launchDaemon();
       const replacement = await waitForCompatibleDiscovery(expected);
-      await this.connectDiscovery(replacement);
+      if (!(await this.tryConnectRinging(replacement))) {
+        throw new Error("replacement daemon does not support required Ringing v2");
+      }
       this.setStatus({ connected: true });
     } finally {
       this.restarting = false;
@@ -249,6 +289,16 @@ export class DaemonControlClient {
     if (discovery.protocol_version !== PROTOCOL_VERSION) {
       throw new Error(`daemon protocol ${discovery.protocol_version} is incompatible`);
     }
+    this.transport = "legacy";
+    this.ringingConnection = undefined;
+    // 保存 baseUrl（仅 origin：ws://host:port/control/v1 → http://host:port）
+    // 供 Ringing HTTP 复用。endpoint 带 /control/v1 路径，必须去掉，
+    // 否则 /ringing/v2/... 请求会 404。
+    const endpointUrl = new URL(discovery.endpoint);
+    this.lastDiscovery = {
+      baseUrl: `${endpointUrl.protocol === "wss:" ? "https" : "http"}://${endpointUrl.host}`,
+      token: discovery.token,
+    };
     const socket = new WebSocket(discovery.endpoint, {
       headers: { Authorization: `Bearer ${discovery.token}` },
       maxPayload: 64 * 1024 * 1024,
@@ -302,6 +352,75 @@ export class DaemonControlClient {
     this.startHeartbeat();
     this.setStatus({ connected: true });
     for (const seed of this.attached) await this.attachWire(seed);
+  }
+
+  /** 先探测 v2 open；成功时整个 daemon 连接固定走 Ringing，不回退到 legacy WS。 */
+  private async tryConnectRinging(discovery: DaemonDiscovery): Promise<boolean> {
+    const endpointUrl = new URL(discovery.endpoint);
+    const baseUrl = `${endpointUrl.protocol === "wss:" ? "https" : "http"}://${endpointUrl.host}`;
+    try {
+      const response = await fetch(`${baseUrl}/ringing/v2/clients/open`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${discovery.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          schema: "deepx.Ringing",
+          version: 2,
+          client_instance_id: this.clientId,
+          capabilities: [
+            "Ringing_v2",
+            "Ringing_batch_v2",
+            "Ringing_bootstrap_v2",
+            "Ringing_command_status_v2",
+          ],
+        }),
+      });
+      if (!response.ok) {
+        // 只有明确表明 daemon 不支持 Ringing v2 的响应才允许选择
+        // 兼容 legacy；认证、服务端故障和其他协议错误必须暴露出来。
+        if (response.status === 404 || response.status === 426) return false;
+        throw new Error(`Ringing v2 negotiation failed: HTTP ${response.status}`);
+      }
+      const result = await response.json() as {
+        accepted?: boolean;
+        client_session_id?: string;
+        server_epoch?: string;
+        lease_ttl_ms?: number;
+        renew_interval_ms?: number;
+      };
+      if (result.accepted !== true) {
+        throw new Error("Ringing v2 negotiation was not accepted by daemon");
+      }
+      if (
+        typeof result.client_session_id !== "string" ||
+        typeof result.server_epoch !== "string" ||
+        typeof result.lease_ttl_ms !== "number" ||
+        typeof result.renew_interval_ms !== "number"
+      ) {
+        throw new Error("Ringing v2 negotiation returned an incomplete session");
+      }
+      this.lastDiscovery = { baseUrl, token: discovery.token };
+      this.ringingConnection = {
+        baseUrl,
+        token: discovery.token,
+        session: {
+          clientInstanceId: this.clientId,
+          clientSessionId: result.client_session_id,
+          serverEpoch: result.server_epoch,
+          leaseTtlMs: result.lease_ttl_ms,
+          renewIntervalMs: result.renew_interval_ms,
+        },
+      };
+      this.transport = "ringing";
+      this.setStatus({ connected: true });
+      return true;
+    } catch (error) {
+      // 旧 daemon 的明确 404/426 在上方选择 legacy；网络超时、连接中断
+      // 不能被伪装成旧协议，否则 v2 daemon 故障会悄悄建立 legacy 双链路。
+      throw error;
+    }
   }
 
   private handleMessage(message: ControlMessage): void {
@@ -401,8 +520,8 @@ export class DaemonControlClient {
   }
 
   private setStatus(status: BackendStatus): void {
-    this.status = status;
-    this.onStatus({ ...status });
+    this.status = { ...status, transport: status.transport ?? this.transport };
+    this.onStatus({ ...this.status });
   }
 }
 

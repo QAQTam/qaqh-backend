@@ -3,7 +3,7 @@
 //! Receives raw user text, handles auto-session-creation, compliance guard,
 //! and routes to TurnEngine for LLM processing.
 
-use deepx_proto::{Agent2Ui, ImageBlock};
+use deepx_proto::Agent2Ui;
 
 use super::types::*;
 
@@ -34,8 +34,8 @@ impl InputEngine {
         }
 
         let text = if text == "[DeepX Goal: resume]" {
-            match deepx_tools::todo::load_todo() {
-                Ok(store) if store.mode == deepx_tools::todo::TodoMode::Goal => {
+            match deepx_workspace::todo::load_todo() {
+                Ok(store) if store.mode == deepx_workspace::todo::TodoMode::Goal => {
                     if let Some(current_id) = store.current_id {
                         if let Some(item) = store.items.iter().find(|i| i.id == current_id) {
                             format!(
@@ -49,21 +49,23 @@ impl InputEngine {
                         "目标模式无法恢复：没有当前步骤。".to_string()
                     }
                 }
-                Ok(_) => "目标模式无法恢复：当前没有激活的 goal。使用 todo_activate 开始。".to_string(),
+                Ok(_) => {
+                    "目标模式无法恢复：当前没有激活的 goal。使用 todo_activate 开始。".to_string()
+                }
                 Err(e) => format!("目标模式恢复失败：{e}"),
             }
         } else {
-            if let Ok(mut store) = deepx_tools::todo::load_todo() {
-                if store.mode == deepx_tools::todo::TodoMode::Goal {
+            if let Ok(mut store) = deepx_workspace::todo::load_todo() {
+                if store.mode == deepx_workspace::todo::TodoMode::Goal {
                     if let Some(ref current_id) = store.current_id.clone() {
                         if let Some(item) = store.items.iter_mut().find(|i| &i.id == current_id) {
-                            if item.status == deepx_tools::todo::TodoStatus::InProgress {
-                                item.status = deepx_tools::todo::TodoStatus::Pending;
+                            if item.status == deepx_workspace::todo::TodoStatus::InProgress {
+                                item.status = deepx_workspace::todo::TodoStatus::Pending;
                             }
                         }
                     }
-                    store.mode = deepx_tools::todo::TodoMode::Manual;
-                    let _ = deepx_tools::todo::save_todo(&store);
+                    store.mode = deepx_workspace::todo::TodoMode::Manual;
+                    let _ = deepx_workspace::todo::save_todo(&store);
                 }
             }
             text.to_string()
@@ -71,9 +73,9 @@ impl InputEngine {
 
         ctx.cancel.clear();
         ctx.agent.reset_annotation();
-        deepx_tools::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+        deepx_workspace::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        deepx_tools::runtime::set_context(
+        deepx_workspace::runtime::set_context(
             &ctx.agent.session.seed,
             ctx.agent.config.permission_level,
         );
@@ -81,7 +83,36 @@ impl InputEngine {
         if ctx.agent.config.compliance_enabled {
             if let Err(reason) = deepx_gate::guard::content_guard(&text) {
                 log::info!("[INPUT] compliance blocked: {reason}");
-                ctx.emitter.emit(Agent2Ui::Error { message: reason.clone() });
+                ctx.emitter.emit(Agent2Ui::Error {
+                    message: reason.clone(),
+                });
+                // Ringing 双发：OperationFailed（Control 频道错误终态）
+                ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                    deepx_domain::ControlEvent::OperationFailed {
+                        occurrence_id: format!(
+                            "op-failed-{}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0),
+                        ),
+                        scope: deepx_domain::ErrorScope::Control,
+                        error: deepx_domain::DomainError {
+                            error_id: format!(
+                                "compliance-{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0),
+                            ),
+                            code: "compliance_block".into(),
+                            message: reason,
+                            retryable: false,
+                            dedupe_key: Some("compliance_block".into()),
+                        },
+                        operation_id: None,
+                    },
+                ));
                 ctx.emitter.emit(Agent2Ui::TurnEnd {
                     turn_id: "blocked".into(),
                     stop_reason: Some("compliance_block".into()),
@@ -95,9 +126,32 @@ impl InputEngine {
         ctx.agent.activate_explicit_skills(&text);
 
         {
-            let workspace = deepx_tools::CURRENT_WORKSPACE.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let workspace = deepx_workspace::CURRENT_WORKSPACE
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let status = ctx.agent.build_skills_status(&workspace);
-            ctx.emitter.emit(Agent2Ui::SkillsChanged { status });
+            ctx.emitter.emit(Agent2Ui::SkillsChanged {
+                status: status.clone(),
+            });
+            // Ringing 双发：SkillsUpdated（skill 目录/激活状态）
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                deepx_domain::ControlEvent::SkillsUpdated {
+                    available: status
+                        .available
+                        .iter()
+                        .map(|s| deepx_domain::SkillInfo {
+                            name: s.name.clone(),
+                            description: s.description.clone(),
+                            scope: s.scope.clone(),
+                            source: s.source.clone(),
+                        })
+                        .collect(),
+                    active: status.active.clone(),
+                    catalog_revision: Some(status.catalog_revision.clone()),
+                    operation_revision: Some(status.operation_revision),
+                },
+            ));
         }
 
         log::info!("[INPUT] pushing user message to store");
@@ -107,19 +161,43 @@ impl InputEngine {
         // Add image blocks to the user message and register them globally
         // so image_query can look them up by index.
         for img in &images {
-            ctx.agent.msg.push_image_to_last_user(&img.mime_type, &img.data);
-            deepx_tools::image_query::store_image(
+            ctx.agent
+                .msg
+                .push_image_to_last_user(&img.mime_type, &img.data);
+            deepx_workspace::image_query::store_image(
                 &ctx.agent.session.seed,
                 &img.mime_type,
                 &img.data,
             );
         }
         log::info!("[INPUT] flushing meta");
-        ctx.agent.msg.flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
+        ctx.agent
+            .msg
+            .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
 
         log::info!("[INPUT] emitting TurnStart turn_id={} round_num=0", turn_id);
-        ctx.emitter.emit(Agent2Ui::TurnStart { turn_id: turn_id.clone(), user_text: text });
+        ctx.emitter.emit(Agent2Ui::TurnStart {
+            turn_id: turn_id.clone(),
+            user_text: text.clone(),
+        });
+        ctx.emitter
+            .emit_timeline(deepx_domain::TimelineIntent::TurnOpened {
+                turn_id: turn_id.clone(),
+                user_text: text.clone(),
+            });
+        // Ringing 双发：TurnStarted（权威开始事件）
+        ctx.emitter
+            .emit_domain(deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::TurnStarted {
+                    turn_id: turn_id.clone(),
+                    user_text: text,
+                },
+            ));
 
-        Outcome::ContinueTurn { turn_id, round_num: 0, usage: None }
+        Outcome::ContinueTurn {
+            turn_id,
+            round_num: 0,
+            usage: None,
+        }
     }
 }

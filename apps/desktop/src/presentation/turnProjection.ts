@@ -1,5 +1,4 @@
-import type { RawRound, RawTurn } from "../store/rawSession";
-import type { ToolCallDef } from "../lib/types";
+import type { RawRound, RawTurn, ToolCallDef } from "../store/rawSession";
 import { aggregateProcessItems, type ProcessItem } from "./processAggregation";
 
 export type RoundRenderEntry =
@@ -38,7 +37,7 @@ export type ChangeReviewFile = {
 };
 
 export function toolFamily(name: string): string {
-  if (["read", "list", "search", "diff"].includes(name)) return "read";
+  if (["read", "list", "diff"].includes(name)) return "read";
   if (["write", "edit", "edit_block", "delete"].includes(name)) return "write";
   if (["web", "web_search", "web_fetch"].includes(name)) return "web";
   if (["exec", "spawn_subagent"].includes(name)) return "exec";
@@ -199,13 +198,16 @@ function projectRoundEntries(
 }
 
 export function projectTurn(rawTurn: RawTurn): TurnViewModel {
-  const rounds = rawTurn.rounds.map((round, index) => ({
+  // streaming 是 round 级而非 turn 级：round_complete 到达（phase=complete）
+  // 后该轮正文立即全量渲染，不必等整个 turn 结束（修复 markdown 延迟到
+  // 流式结束才渲染的问题）。
+  const rounds = rawTurn.rounds.map((round) => ({
     roundNum: round.roundNum,
     isFinal: round.isFinal,
     entries: projectRoundEntries(
       rawTurn,
       round,
-      rawTurn.status === "running" && index === rawTurn.rounds.length - 1,
+      rawTurn.status === "running" && round.phase !== "complete",
     ),
   }));
 

@@ -10,9 +10,11 @@ deepx-config = { path = "../deepx-config" }
 deepx-session = { path = "../deepx-session" }
 deepx-message = { path = "../deepx-message" }
 deepx-skills = { path = "../deepx-skills" }
-deepx-tools = { path = "../deepx-tools" }
+deepx-workspace = { path = "../deepx-workspace" }
 deepx-subagent = { path = "../deepx-subagent" }
 deepx-proto = { path = "../deepx-proto" }
+deepx-domain = { path = "../deepx-domain" }
+deepx-ringing = { path = "../deepx-ringing" }
 deepx-types = { path = "../deepx-types" }
 serde_json = "1"
 log = { version = "0.4", features = ["std"] }

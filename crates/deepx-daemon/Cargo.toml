@@ -6,12 +6,16 @@ description = "Headless DeepX application daemon"
 build = "build.rs"
 
 [dependencies]
+deepx-config = { path = "../deepx-config" }
 deepx-proto = { path = "../deepx-proto" }
+deepx-domain = { path = "../deepx-domain" }
+deepx-ringing = { path = "../deepx-ringing" }
 deepx-runtime = { path = "../deepx-runtime" }
 deepx-types = { path = "../deepx-types" }
 futures-util = "0.3"
 log = "0.4"
 rand = "0.10"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = "0.30"

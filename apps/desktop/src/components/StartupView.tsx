@@ -1,5 +1,7 @@
 import { For, createMemo, Show } from "solid-js";
 import { request } from "../runtime/backendClient";
+import { requestWithRinging } from "../runtime/ringingCommands";
+import { openDevTools } from "../runtime/desktopApi";
 import { useI18n } from "../i18n";
 import type { SessionMeta } from "../lib/types";
 import SessionCard from "./SessionCard";
@@ -51,7 +53,7 @@ export default function StartupView(props: StartupViewProps) {
     if (props.onSend) { props.onSend(text); return; }
     try {
       const seed = await request<string>("session.new");
-      await request("session.send_message", { seed, text });
+      await requestWithRinging("session.send_message", { seed, text });
     } catch (e) { console.error(e); }
   }
   function handleKeyDown(e: KeyboardEvent) {
@@ -78,6 +80,17 @@ export default function StartupView(props: StartupViewProps) {
             <h1 class="startup-title">{t().app.title}</h1>
             <p class="startup-subtitle">{t().app.subtitle}</p>
           </div>
+          <button
+            type="button"
+            class="home-devtools-button"
+            data-open-devtools
+            onClick={() => void openDevTools()}
+            title={t().startup.openDevTools}
+            aria-label={t().startup.openDevTools}
+          >
+            <span aria-hidden="true">&lt;/&gt;</span>
+            {t().startup.openDevTools}
+          </button>
         </header>
 
         <section class="home-compose" aria-label={t().chat.newSession}>

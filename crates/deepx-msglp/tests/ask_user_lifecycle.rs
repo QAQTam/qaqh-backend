@@ -272,7 +272,7 @@ fn run_case_with_delay(
     std::fs::write(temp.path().join("input2.txt"), "second permission input\n").unwrap();
     let mock = MockServer::sequential_with_delay(scenarios, response_delay);
     let request_count = mock.requests.clone();
-    deepx_tools::set_workspace(&temp.path().to_string_lossy());
+    deepx_workspace::set_workspace(&temp.path().to_string_lossy());
 
     let mut agent = AgentState::init("ask-lifecycle-test");
     agent.ephemeral = true;
@@ -307,7 +307,7 @@ fn run_case_with_delay(
             Agent2Ui::SessionCreated { seed } => seed,
             _ => unreachable!(),
         };
-        deepx_tools::set_workspace(&workspace.to_string_lossy());
+        deepx_workspace::set_workspace(&workspace.to_string_lossy());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             test(&mut input_writer, &event_rx, request_count, seed)
         }));
@@ -346,6 +346,7 @@ fn batch_ask_waits_for_every_answer_and_writes_one_exact_result() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "ask me".into(),
+                    images: vec![],
                 },
             );
             let ask = expect_event(receiver, Duration::from_secs(5), |event| {
@@ -481,6 +482,7 @@ fn multiple_ask_calls_are_presented_sequentially_before_one_resume() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "ask twice".into(),
+                    images: vec![],
                 },
             );
             expect_event(
@@ -572,6 +574,7 @@ fn invalid_or_stale_responses_do_not_consume_the_active_ask() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "validate identity".into(),
+                    images: vec![],
                 },
             );
             expect_event(
@@ -670,6 +673,7 @@ fn dismiss_validates_identity_and_does_not_swallow_the_next_user_input() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "start dismiss case".into(),
+                    images: vec![],
                 },
             );
             expect_event(
@@ -727,6 +731,7 @@ fn dismiss_validates_identity_and_does_not_swallow_the_next_user_input() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "fresh input".into(),
+                    images: vec![],
                 },
             );
             let fresh = collect_through_done(receiver);
@@ -760,6 +765,7 @@ fn permission_then_ask_resolves_the_same_tool_round_once() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "read then ask".into(),
+                    images: vec![],
                 },
             );
             expect_event(receiver, Duration::from_secs(5), |event| {
@@ -835,6 +841,7 @@ fn every_permission_resolves_before_the_queued_ask_is_presented() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "approve both then ask".into(),
+                    images: vec![],
                 },
             );
             for expected in ["read-one", "read-two"] {
@@ -925,6 +932,7 @@ fn cancel_aborts_one_suspended_turn_and_invalidates_its_ask_id() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "start cancel case".into(),
+                    images: vec![],
                 },
             );
             expect_event(
@@ -995,6 +1003,7 @@ fn new_session_invalidates_the_suspended_ask() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "start new-session case".into(),
+                    images: vec![],
                 },
             );
             expect_event(
@@ -1044,6 +1053,7 @@ fn resume_session_invalidates_the_suspended_ask() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "start resume-session case".into(),
+                    images: vec![],
                 },
             );
             expect_event(
@@ -1090,6 +1100,7 @@ fn undo_invalidates_the_suspended_ask() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "start undo case".into(),
+                    images: vec![],
                 },
             );
             let turn_id = match expect_event(
@@ -1136,6 +1147,7 @@ fn cancel_during_gate_emits_one_complete_terminal_transaction() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "cancel during gate".into(),
+                    images: vec![],
                 },
             );
             expect_event(receiver, Duration::from_secs(5), |event| {
@@ -1191,6 +1203,7 @@ fn stale_undo_does_not_consume_the_active_ask() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "validate undo identity".into(),
+                    images: vec![],
                 },
             );
             expect_event(

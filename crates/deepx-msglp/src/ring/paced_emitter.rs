@@ -4,34 +4,72 @@
 //! immediate prevents hidden server-side latency at high token rates.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
 use deepx_proto::Agent2Ui;
 
 use super::types::Emitter;
+use super::types::WriterEvent;
 
 pub struct PacedEmitter {
-    tx: mpsc::SyncSender<Agent2Ui>,
+    seed: String,
+    tx: mpsc::SyncSender<WriterEvent>,
     writer_dead: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    causation: Arc<Mutex<Option<String>>>,
 }
 
 impl PacedEmitter {
     pub fn new(
-        tx: mpsc::SyncSender<Agent2Ui>,
+        seed: impl Into<String>,
+        tx: mpsc::SyncSender<WriterEvent>,
         writer_dead: Arc<AtomicBool>,
         cancelled: Arc<AtomicBool>,
     ) -> Self {
-        Self { tx, writer_dead, cancelled }
+        Self {
+            seed: seed.into(),
+            tx,
+            writer_dead,
+            cancelled,
+            causation: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// 进入一个命令执行的作用域：期间 `emit_domain` 产出的事件携带
+    /// `causation_id`。返回的 guard 在 Drop 时恢复上一个作用域（支持嵌套）。
+    pub fn enter_causation(&self, causation: Option<&str>) -> CausationGuard {
+        let previous = {
+            let mut slot = self.causation.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = slot.clone();
+            *slot = causation.map(str::to_string);
+            previous
+        };
+        CausationGuard {
+            slot: self.causation.clone(),
+            previous,
+        }
+    }
+}
+
+/// 命令作用域 guard：Drop 时恢复进入前的 causation。
+pub struct CausationGuard {
+    slot: Arc<Mutex<Option<String>>>,
+    previous: Option<String>,
+}
+
+impl Drop for CausationGuard {
+    fn drop(&mut self) {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = self.previous.take();
     }
 }
 
 impl Emitter for PacedEmitter {
     fn emit(&self, event: Agent2Ui) {
         if !self.writer_dead.load(Ordering::SeqCst) {
-            let _ = self.tx.send(event);
+            let _ = self.tx.send(WriterEvent::Legacy(event));
         }
     }
 
@@ -44,17 +82,67 @@ impl Emitter for PacedEmitter {
             if self.writer_dead.load(Ordering::SeqCst) || self.cancelled.load(Ordering::SeqCst) {
                 return;
             }
-            match self.tx.try_send(pending) {
+            match self.tx.try_send(WriterEvent::Legacy(pending)) {
                 Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => return,
                 Err(mpsc::TrySendError::Full(event)) => {
-                    pending = event;
+                    pending = match event {
+                        WriterEvent::Legacy(agent_event) => agent_event,
+                        WriterEvent::Ringing(_) | WriterEvent::Timeline(_) => {
+                            unreachable!("emit_delta only sends legacy")
+                        }
+                    };
                     thread::sleep(Duration::from_millis(1));
                 }
             }
         }
     }
-}
 
+    fn emit_domain(&self, event: deepx_domain::DomainEvent) {
+        if self.writer_dead.load(Ordering::SeqCst) {
+            return;
+        }
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let causation = self
+            .causation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let env = deepx_ringing::RingingWorkerEventEnvelope::new(
+            self.seed.as_str(),
+            format!("w-{seq}"),
+            event.into(),
+        );
+        let env = match causation {
+            Some(c) => env.with_causation(c),
+            None => env,
+        };
+        let _ = self.tx.send(WriterEvent::Ringing(env));
+    }
+
+    fn emit_timeline(&self, intent: deepx_domain::TimelineIntent) {
+        if self.writer_dead.load(Ordering::SeqCst) {
+            return;
+        }
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let causation = self
+            .causation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let env = deepx_ringing::TimelineWorkerIntentEnvelope::new(
+            self.seed.as_str(),
+            format!("timeline-{seq}"),
+            intent,
+        );
+        let env = match causation {
+            Some(c) => env.with_causation(c),
+            None => env,
+        };
+        let _ = self.tx.send(WriterEvent::Timeline(env));
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -76,29 +164,32 @@ mod tests {
     struct TestHarness {
         events: Arc<Mutex<Vec<Agent2Ui>>>,
         pacer: PacedEmitter,
-        _tx: mpsc::SyncSender<Agent2Ui>,
+        _tx: mpsc::SyncSender<WriterEvent>,
     }
 
     impl TestHarness {
         fn new() -> Self {
-            let (tx, rx) = mpsc::sync_channel::<Agent2Ui>(128);
+            let (tx, rx) = mpsc::sync_channel::<WriterEvent>(128);
             let events = Arc::new(Mutex::new(Vec::new()));
             let collected = events.clone();
             thread::spawn(move || {
                 while let Ok(event) = rx.recv() {
-                    collected
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(event);
+                    if let WriterEvent::Legacy(agent_event) = event {
+                        collected
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(agent_event);
+                    }
                 }
             });
             Self {
                 events,
-            pacer: PacedEmitter::new(
-                tx.clone(),
-                Arc::new(AtomicBool::new(false)),
-                Arc::new(AtomicBool::new(false)),
-            ),
+                pacer: PacedEmitter::new(
+                    "worker",
+                    tx.clone(),
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(AtomicBool::new(false)),
+                ),
                 _tx: tx,
             }
         }
@@ -263,10 +354,79 @@ mod tests {
     }
 
     #[test]
-    fn saturated_channel_waits_for_capacity_without_losing_a_delta() {
-        let (tx, rx) = mpsc::sync_channel::<Agent2Ui>(1);
-        tx.send(round_delta("first")).unwrap();
+    fn domain_events_flow_through_ringing_envelope_channel() {
+        let (tx, rx) = mpsc::sync_channel::<WriterEvent>(16);
         let emitter = PacedEmitter::new(
+            "s1",
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+            deepx_domain::ToolEvent::ToolStarted {
+                tool_call_id: "c1".into(),
+                turn_id: "t1".into(),
+                round_num: 0,
+                name: "exec".into(),
+            },
+        ));
+        match rx.recv().expect("envelope") {
+            WriterEvent::Ringing(env) => {
+                assert_eq!(env.wire, deepx_ringing::worker::WIRE_RINGING_DOMAIN_V2);
+                assert_eq!(env.seed, "s1");
+                assert!(matches!(
+                    env.event,
+                    deepx_ringing::RingingEvent::Tool(deepx_domain::ToolEvent::ToolStarted { .. })
+                ));
+            }
+            other => panic!("expected Ringing envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn domain_events_carry_causation_within_command_scope() {
+        let (tx, rx) = mpsc::sync_channel::<WriterEvent>(16);
+        let emitter = PacedEmitter::new(
+            "s1",
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        {
+            let _scope = emitter.enter_causation(Some("cmd-7"));
+            emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::TurnStarted {
+                    turn_id: "t1".into(),
+                    user_text: "hi".into(),
+                },
+            ));
+        }
+        emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+            deepx_domain::ConversationEvent::TurnStarted {
+                turn_id: "t2".into(),
+                user_text: "outside".into(),
+            },
+        ));
+        match rx.recv().expect("inside scope") {
+            WriterEvent::Ringing(env) => {
+                assert_eq!(env.causation_id.as_deref(), Some("cmd-7"));
+            }
+            other => panic!("expected Ringing envelope, got {other:?}"),
+        }
+        match rx.recv().expect("outside scope") {
+            WriterEvent::Ringing(env) => {
+                assert!(env.causation_id.is_none());
+            }
+            other => panic!("expected Ringing envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn saturated_channel_waits_for_capacity_without_losing_a_delta() {
+        let (tx, rx) = mpsc::sync_channel::<WriterEvent>(1);
+        tx.send(WriterEvent::Legacy(round_delta("first"))).unwrap();
+        let emitter = PacedEmitter::new(
+            "s1",
             tx,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
@@ -274,17 +434,26 @@ mod tests {
         let worker = thread::spawn(move || emitter.emit_delta(round_delta("second")));
 
         thread::sleep(Duration::from_millis(5));
-        assert!(matches!(rx.recv().unwrap(), Agent2Ui::RoundDelta { ref delta, .. } if delta == "first"));
+        assert!(
+            matches!(rx.recv().unwrap(), WriterEvent::Legacy(Agent2Ui::RoundDelta { ref delta, .. }) if delta == "first")
+        );
         worker.join().unwrap();
-        assert!(matches!(rx.recv().unwrap(), Agent2Ui::RoundDelta { ref delta, .. } if delta == "second"));
+        assert!(
+            matches!(rx.recv().unwrap(), WriterEvent::Legacy(Agent2Ui::RoundDelta { ref delta, .. }) if delta == "second")
+        );
     }
 
     #[test]
     fn cancellation_releases_a_delta_waiting_for_capacity() {
-        let (tx, _rx) = mpsc::sync_channel::<Agent2Ui>(1);
-        tx.send(round_delta("first")).unwrap();
+        let (tx, _rx) = mpsc::sync_channel::<WriterEvent>(1);
+        tx.send(WriterEvent::Legacy(round_delta("first"))).unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let emitter = PacedEmitter::new(tx, Arc::new(AtomicBool::new(false)), cancelled.clone());
+        let emitter = PacedEmitter::new(
+            "s1",
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            cancelled.clone(),
+        );
         let worker = thread::spawn(move || emitter.emit_delta(round_delta("discarded")));
 
         thread::sleep(Duration::from_millis(5));

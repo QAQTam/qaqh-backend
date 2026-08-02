@@ -265,7 +265,7 @@ fn run_case(
         deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false);
     });
     let mock = MockServer::sequential(scenarios);
-    deepx_tools::set_workspace(&workspace.to_string_lossy());
+    deepx_workspace::set_workspace(&workspace.to_string_lossy());
 
     let mut agent = AgentState::init("permission-lifecycle-test");
     agent.ephemeral = true;
@@ -299,7 +299,7 @@ fn run_case(
         });
         // Session creation restores a persisted workspace. Tests need the
         // explicit workspace selection to occur after that lifecycle step.
-        deepx_tools::set_workspace(&workspace.to_string_lossy());
+        deepx_workspace::set_workspace(&workspace.to_string_lossy());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             test(&mut input_writer, &event_rx)
         }));
@@ -345,6 +345,7 @@ fn skill_activation_reaches_followup_round_and_next_user_turn() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "use the matching skill".into(),
+                    images: vec![],
                 },
             );
             assert_eq!(permission_id(receiver), "activate-skill");
@@ -372,6 +373,7 @@ fn skill_activation_reaches_followup_round_and_next_user_turn() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "continue using it".into(),
+                    images: vec![],
                 },
             );
             let second = collect_through_done(receiver);
@@ -420,6 +422,7 @@ fn llm_approval_resumes_original_turn_once() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "read it".into(),
+                    images: vec![],
                 },
             );
             match expect_event(receiver, Duration::from_secs(5), |event| {
@@ -477,6 +480,7 @@ fn llm_rejection_resumes_with_original_failure() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "read it".into(),
+                    images: vec![],
                 },
             );
             assert_eq!(permission_id(receiver), "llm-denied");
@@ -527,6 +531,7 @@ fn llm_multiple_pending_waits_for_every_response() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "read both".into(),
+                    images: vec![],
                 },
             );
             let mut ids = vec![permission_id(receiver), permission_id(receiver)];
@@ -583,6 +588,7 @@ fn llm_four_pending_execs_defer_execution_until_all_resolved() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "run four commands".into(),
+                    images: vec![],
                 },
             );
             let mut ids = (0..4).map(|_| permission_id(receiver)).collect::<Vec<_>>();
@@ -667,6 +673,7 @@ fn llm_mixed_auto_and_pending_emits_one_unified_result() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "read and write".into(),
+                    images: vec![],
                 },
             );
             assert_eq!(permission_id(receiver), "llm-pending");
@@ -712,6 +719,7 @@ fn llm_session_switch_invalidates_suspended_turn() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "write it".into(),
+                    images: vec![],
                 },
             );
             assert_eq!(permission_id(receiver), "llm-stale");
@@ -735,6 +743,7 @@ fn llm_session_switch_invalidates_suspended_turn() {
                 writer,
                 Ui2Agent::UserInput {
                     text: "continue in new session".into(),
+                    images: vec![],
                 },
             );
             let events = collect_through_done(receiver);

@@ -2,7 +2,40 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use deepx_domain::{ActivityState, ControlEvent, DomainEvent};
 use deepx_proto::{SessionActivity, SessionActivityState};
+
+use crate::{EventBus, RingingHub};
+
+/// 活动状态双发：legacy `SessionActivity` 流 + Ringing `SessionActivityChanged`。
+pub fn publish_activity_dual(
+    events: &EventBus,
+    hub: Option<&RingingHub>,
+    activity: &SessionActivity,
+) {
+    events.publish_activity(activity.clone());
+    let Some(hub) = hub else {
+        return;
+    };
+    let state = match activity.state {
+        SessionActivityState::Starting => ActivityState::Starting,
+        SessionActivityState::Idle => ActivityState::Idle,
+        SessionActivityState::Working => ActivityState::Working,
+        SessionActivityState::WaitingUser => ActivityState::WaitingUser,
+        SessionActivityState::Disconnected => ActivityState::Disconnected,
+    };
+    let _ = hub.publish_with_causation(
+        &activity.seed,
+        DomainEvent::Control(ControlEvent::SessionActivityChanged {
+            seed: activity.seed.clone(),
+            state,
+            turn_id: activity.turn_id.clone(),
+            seq: activity.seq,
+            updated_at: activity.updated_at,
+        }),
+        None,
+    );
+}
 
 #[derive(Clone, Default)]
 pub struct SessionActivityTracker {

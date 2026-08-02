@@ -1,10 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { BackendStatus, ConfirmDialogOptions, ControlMessage, OpenDialogOptions, UpdateInfo } from "./types";
+import type { RingingEventBatch } from "../src/lib/types/ringing";
+import type { TimelineEntry, TimelineSnapshotResponse } from "../src/store/timelineProtocol";
 
 contextBridge.exposeInMainWorld("deepx", {
   backend: {
     connect: () => ipcRenderer.invoke("backend:connect"),
     request: (method: string, params: Record<string, unknown>) => ipcRenderer.invoke("backend:request", method, params),
+    restart: () => ipcRenderer.invoke("backend:restart") as Promise<{ ok: boolean; reason?: string }>,
     attach: (seed: string) => ipcRenderer.invoke("backend:attach", seed),
     detach: (seed: string) => ipcRenderer.invoke("backend:detach", seed),
     status: () => ipcRenderer.invoke("backend:status") as Promise<BackendStatus>,
@@ -17,6 +20,53 @@ contextBridge.exposeInMainWorld("deepx", {
       const handler = (_event: Electron.IpcRendererEvent, status: BackendStatus) => listener(status);
       ipcRenderer.on("backend:status", handler);
       return () => ipcRenderer.removeListener("backend:status", handler);
+    },
+  },
+  ringing: {
+    status: () => ipcRenderer.invoke("ringing:status"),
+    bootstrap: (seed: string) => ipcRenderer.invoke("ringing:bootstrap", seed),
+    snapshot: (seed: string, channel: string) =>
+      ipcRenderer.invoke("ringing:snapshot", seed, channel),
+    command: (seed: string, channel: string, envelope: unknown) =>
+      ipcRenderer.invoke("ringing:command", seed, channel, envelope),
+    query: (path: string, params?: Record<string, string | undefined>) =>
+      ipcRenderer.invoke("ringing:query", path, params),
+    onBatch: (listener: (batch: RingingEventBatch) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, batch: RingingEventBatch) => listener(batch);
+      ipcRenderer.on("ringing:batch", handler);
+      return () => ipcRenderer.removeListener("ringing:batch", handler);
+    },
+    onStatus: (listener: (update: { channel: string; status: unknown }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, update: { channel: string; status: unknown }) => listener(update);
+      ipcRenderer.on("ringing:status", handler);
+      return () => ipcRenderer.removeListener("ringing:status", handler);
+    },
+    onSnapshot: (listener: (update: { seed: string; channel: string; snapshot: unknown }) => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        update: { seed: string; channel: string; snapshot: unknown },
+      ) => listener(update);
+      ipcRenderer.on("ringing:snapshot", handler);
+      return () => ipcRenderer.removeListener("ringing:snapshot", handler);
+    },
+  },
+  timeline: {
+    activate: (seed: string) => ipcRenderer.invoke("timeline:activate", seed),
+    status: () => ipcRenderer.invoke("timeline:status"),
+    onEntry: (listener: (update: { seed: string; entry: TimelineEntry }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, update: { seed: string; entry: TimelineEntry }) => listener(update);
+      ipcRenderer.on("timeline:entry", handler);
+      return () => ipcRenderer.removeListener("timeline:entry", handler);
+    },
+    onSnapshot: (listener: (snapshot: TimelineSnapshotResponse) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, snapshot: TimelineSnapshotResponse) => listener(snapshot);
+      ipcRenderer.on("timeline:snapshot", handler);
+      return () => ipcRenderer.removeListener("timeline:snapshot", handler);
+    },
+    onStatus: (listener: (status: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, status: unknown) => listener(status);
+      ipcRenderer.on("timeline:status", handler);
+      return () => ipcRenderer.removeListener("timeline:status", handler);
     },
   },
   desktop: {

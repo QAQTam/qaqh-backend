@@ -7,6 +7,10 @@ use std::time::Duration;
 use deepx_proto::{
     CONTROL_PROTOCOL_VERSION, ControlClientMessage, ControlServerMessage, DaemonDiscovery,
 };
+use deepx_ringing::{
+    CapabilityName, ClientOpenRequest, ClientOpenResponse, CLIENT_SESSION_HEADER,
+    RINGING_BASE_PATH,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -39,6 +43,133 @@ pub struct DeepxClient {
     connected: Arc<AtomicBool>,
     connection_marker: Arc<()>,
     pub client_instance_id: Arc<str>,
+}
+
+/// Native Ringing HTTP client. Unlike [`DeepxClient`], this type never opens
+/// the legacy control WebSocket. It is the migration target for non-Electron
+/// clients such as the TUI.
+#[derive(Clone)]
+pub struct NativeRingingClient {
+    http: reqwest::Client,
+    base_url: Arc<str>,
+    token: Arc<str>,
+    client_instance_id: Arc<str>,
+    client_session_id: Arc<str>,
+    pub server_epoch: Arc<str>,
+    pub lease_ttl_ms: u64,
+    pub renew_interval_ms: u64,
+}
+
+impl NativeRingingClient {
+    /// Find or launch the daemon, then negotiate Ringing v2. No legacy
+    /// protocol connection is attempted or retained.
+    pub async fn connect_or_launch(
+        daemon_path: Option<&Path>,
+        client_instance_id: String,
+    ) -> Result<Self, ClientError> {
+        let discovery = match read_discovery() {
+            Ok(value) if endpoint_reachable(&value).await => value,
+            _ => {
+                launch_daemon(daemon_path).map_err(|e| client_error("daemon_launch_failed", e))?;
+                wait_for_discovery().await?
+            }
+        };
+        Self::connect(discovery, client_instance_id).await
+    }
+
+    pub async fn connect(
+        discovery: DaemonDiscovery,
+        client_instance_id: String,
+    ) -> Result<Self, ClientError> {
+        let endpoint = discovery.endpoint.strip_prefix("ws://").or_else(|| discovery.endpoint.strip_prefix("wss://"))
+            .ok_or_else(|| ClientError { code: "invalid_endpoint".into(), message: discovery.endpoint.clone() })?;
+        let scheme = if discovery.endpoint.starts_with("wss://") { "https" } else { "http" };
+        let host = endpoint.split('/').next().unwrap_or_default();
+        if host.is_empty() {
+            return Err(ClientError { code: "invalid_endpoint".into(), message: discovery.endpoint });
+        }
+        let base_url = format!("{scheme}://{host}");
+        let http = reqwest::Client::builder()
+            .build()
+            .map_err(|e| client_error("http_client", e))?;
+        let open = ClientOpenRequest::new(
+            client_instance_id.clone(),
+            vec![
+                CapabilityName::RingingV2,
+                CapabilityName::RingingBatchV2,
+                CapabilityName::RingingBootstrapV2,
+                CapabilityName::RingingCommandStatusV2,
+            ],
+        );
+        let response = http
+            .post(format!("{base_url}{RINGING_BASE_PATH}/clients/open"))
+            .bearer_auth(&discovery.token)
+            .json(&open)
+            .send()
+            .await
+            .map_err(|e| client_error("ringing_open", e))?;
+        if !response.status().is_success() {
+            return Err(ClientError { code: "ringing_open".into(), message: format!("HTTP {}", response.status()) });
+        }
+        let opened: ClientOpenResponse = response.json().await.map_err(|e| client_error("ringing_open", e))?;
+        if !opened.accepted {
+            return Err(ClientError { code: "ringing_rejected".into(), message: "daemon declined Ringing v2".into() });
+        }
+        Ok(Self {
+            http,
+            base_url: Arc::from(base_url),
+            token: Arc::from(discovery.token),
+            client_instance_id: Arc::from(client_instance_id),
+            client_session_id: Arc::from(opened.client_session_id),
+            server_epoch: Arc::from(opened.server_epoch),
+            lease_ttl_ms: opened.lease_ttl_ms,
+            renew_interval_ms: opened.renew_interval_ms,
+        })
+    }
+
+    pub fn client_session_id(&self) -> &str { &self.client_session_id }
+    pub fn client_instance_id(&self) -> &str { &self.client_instance_id }
+
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .request(method, format!("{}{}", self.base_url, path))
+            .bearer_auth(&*self.token)
+            .header(CLIENT_SESSION_HEADER, &*self.client_session_id)
+    }
+
+    pub async fn renew(&self) -> Result<(), ClientError> {
+        let response = self.request(reqwest::Method::POST, &format!("{RINGING_BASE_PATH}/leases/renew"))
+            .json(&serde_json::json!({}))
+            .send().await.map_err(|e| client_error("ringing_renew", e))?;
+        if response.status().is_success() { Ok(()) }
+        else { Err(ClientError { code: "ringing_renew".into(), message: format!("HTTP {}", response.status()) }) }
+    }
+
+    pub async fn timeline_snapshot(&self, seed: &str) -> Result<Value, ClientError> {
+        self.json(reqwest::Method::GET, &format!("/ringing/v3/sessions/{seed}/timeline"), None).await
+    }
+
+    pub async fn bootstrap(&self, seed: &str) -> Result<Value, ClientError> {
+        self.json(reqwest::Method::GET, &format!("{RINGING_BASE_PATH}/sessions/{seed}/bootstrap"), None).await
+    }
+
+    pub async fn command(&self, channel: &str, envelope: Value) -> Result<Value, ClientError> {
+        self.json(reqwest::Method::POST, &format!("{RINGING_BASE_PATH}/commands/{channel}"), Some(envelope)).await
+    }
+
+    pub async fn query(&self, name: &str, body: Value) -> Result<Value, ClientError> {
+        self.json(reqwest::Method::POST, &format!("{RINGING_BASE_PATH}/queries/{name}"), Some(body)).await
+    }
+
+    async fn json(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, ClientError> {
+        let mut request = self.request(method, path);
+        if let Some(body) = body { request = request.json(&body); }
+        let response = request.send().await.map_err(|e| client_error("ringing_http", e))?;
+        let status = response.status();
+        let value = response.json::<Value>().await.map_err(|e| client_error("ringing_decode", e))?;
+        if status.is_success() { Ok(value) }
+        else { Err(ClientError { code: "ringing_http".into(), message: format!("HTTP {status}: {value}") }) }
+    }
 }
 
 impl DeepxClient {

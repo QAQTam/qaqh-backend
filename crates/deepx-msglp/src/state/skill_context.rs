@@ -3,7 +3,6 @@ use deepx_types::{SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_LEASE_TURNS: u8 = 3;
 pub const MAX_TOTAL_SKILL_TOKENS: usize = 64 * 1024;
 pub const MAX_SINGLE_SKILL_TOKENS: usize = 32 * 1024;
 
@@ -12,7 +11,6 @@ pub enum SkillRuntimeState {
     Catalog,
     Requested,
     Active,
-    ReviewDue,
     Unavailable,
 }
 
@@ -22,7 +20,6 @@ pub struct SkillRuntimeInfo {
     pub description: String,
     pub state: SkillRuntimeState,
     pub source: String,
-    pub lease_remaining: Option<u8>,
     pub token_count: usize,
     pub error: Option<String>,
 }
@@ -42,10 +39,8 @@ struct RuntimeEntry {
     state: SkillRuntimeState,
     source: String,
     activation_order: u64,
-    lease_remaining: u8,
     last_retained_revision: u64,
     ignored_request_laps: u8,
-    remove_at_next_boundary: bool,
     error: Option<String>,
 }
 
@@ -169,18 +164,8 @@ impl SkillContextManager {
     }
 
     pub fn complete_user_turn(&mut self) {
-        for entry in self.entries.values_mut() {
-            match entry.state {
-                SkillRuntimeState::Active => {
-                    entry.lease_remaining = entry.lease_remaining.saturating_sub(1);
-                    if entry.lease_remaining == 0 {
-                        entry.state = SkillRuntimeState::ReviewDue;
-                    }
-                }
-                SkillRuntimeState::ReviewDue => entry.remove_at_next_boundary = true,
-                _ => {}
-            }
-        }
+        // 自动卸载已删除（产品决策）：skill 激活后保持注入直到显式卸载，
+        // 避免长程任务后的下一轮系统提示词变化破坏缓存命中。
         self.frozen = None;
         self.operation_revision = self.operation_revision.saturating_add(1);
     }
@@ -297,10 +282,8 @@ impl SkillContextManager {
                 state: SkillRuntimeState::Catalog,
                 source: "catalog".into(),
                 activation_order: 0,
-                lease_remaining: 0,
                 last_retained_revision: 0,
                 ignored_request_laps: 0,
-                remove_at_next_boundary: false,
                 error: None,
             });
         }
@@ -320,10 +303,8 @@ impl SkillContextManager {
                 state: SkillRuntimeState::Unavailable,
                 source: diagnostic.path.to_string_lossy().into_owned(),
                 activation_order: 0,
-                lease_remaining: 0,
                 last_retained_revision: 0,
                 ignored_request_laps: 0,
-                remove_at_next_boundary: false,
                 error: Some(diagnostic.message.clone()),
             });
         }
@@ -351,12 +332,6 @@ impl SkillContextManager {
                         entry.state
                     },
                     source: entry.source,
-                    lease_remaining: (!catalog_only
-                        && matches!(
-                            entry.state,
-                            SkillRuntimeState::Active | SkillRuntimeState::ReviewDue
-                        ))
-                    .then_some(entry.lease_remaining),
                     token_count: entry.activation.as_ref().map_or(0, activation_tokens),
                     error: entry.error,
                 }
@@ -370,9 +345,7 @@ impl SkillContextManager {
             .iter()
             .filter_map(|(name, entry)| {
                 let state = match entry.state {
-                    SkillRuntimeState::Active | SkillRuntimeState::ReviewDue => {
-                        SkillSessionEntryState::Active
-                    }
+                    SkillRuntimeState::Active => SkillSessionEntryState::Active,
                     SkillRuntimeState::Unavailable => SkillSessionEntryState::Unavailable,
                     SkillRuntimeState::Requested | SkillRuntimeState::Catalog => return None,
                 };
@@ -381,7 +354,6 @@ impl SkillContextManager {
                     activation_order: entry.activation_order,
                     source: entry.source.clone(),
                     state,
-                    lease_remaining: entry.lease_remaining,
                 })
             })
             .collect::<Vec<_>>();
@@ -410,7 +382,6 @@ impl SkillContextManager {
                         activation,
                         &saved.source,
                         saved.activation_order,
-                        DEFAULT_LEASE_TURNS,
                     );
                 }
                 Err(error) => {
@@ -421,10 +392,8 @@ impl SkillContextManager {
                             state: SkillRuntimeState::Unavailable,
                             source: saved.source,
                             activation_order: saved.activation_order,
-                            lease_remaining: 0,
                             last_retained_revision: self.operation_revision,
                             ignored_request_laps: 0,
-                            remove_at_next_boundary: false,
                             error: Some(error),
                         },
                     );
@@ -440,7 +409,7 @@ impl SkillContextManager {
     fn request_now(&mut self, name: &str, source: &str) -> Result<(), String> {
         self.ensure_known(name)?;
         match self.entries.get(name).map(|entry| &entry.state) {
-            Some(SkillRuntimeState::Active | SkillRuntimeState::ReviewDue) => return Ok(()),
+            Some(SkillRuntimeState::Active) => return Ok(()),
             _ => {}
         }
         self.entries.insert(
@@ -450,10 +419,8 @@ impl SkillContextManager {
                 state: SkillRuntimeState::Requested,
                 source: source.to_string(),
                 activation_order: 0,
-                lease_remaining: 0,
                 last_retained_revision: self.operation_revision,
                 ignored_request_laps: 0,
-                remove_at_next_boundary: false,
                 error: None,
             },
         );
@@ -463,12 +430,7 @@ impl SkillContextManager {
 
     fn activate(&mut self, activation: SkillActivation, source: &str) -> Result<(), String> {
         self.activation_order = self.activation_order.saturating_add(1);
-        self.activate_with_order(
-            activation,
-            source,
-            self.activation_order,
-            DEFAULT_LEASE_TURNS,
-        )
+        self.activate_with_order(activation, source, self.activation_order)
     }
 
     fn activate_with_order(
@@ -476,7 +438,6 @@ impl SkillContextManager {
         activation: SkillActivation,
         source: &str,
         order: u64,
-        lease: u8,
     ) -> Result<(), String> {
         let name = activation.metadata.name.clone();
         let tokens = activation_tokens(&activation);
@@ -514,10 +475,8 @@ impl SkillContextManager {
                 state: SkillRuntimeState::Active,
                 source: source.to_string(),
                 activation_order: order,
-                lease_remaining: lease,
                 last_retained_revision: self.operation_revision,
                 ignored_request_laps: 0,
-                remove_at_next_boundary: false,
                 error: None,
             },
         );
@@ -531,16 +490,11 @@ impl SkillContextManager {
             .entries
             .get_mut(name)
             .ok_or_else(|| format!("SKILL_INVALID_STATE: '{name}' is not active"))?;
-        if !matches!(
-            entry.state,
-            SkillRuntimeState::Active | SkillRuntimeState::ReviewDue
-        ) {
+        if !matches!(entry.state, SkillRuntimeState::Active) {
             return Err(format!("SKILL_INVALID_STATE: '{name}' cannot be retained"));
         }
         entry.state = SkillRuntimeState::Active;
-        entry.lease_remaining = DEFAULT_LEASE_TURNS;
         entry.last_retained_revision = self.operation_revision;
-        entry.remove_at_next_boundary = false;
         self.operation_revision = self.operation_revision.saturating_add(1);
         Ok(())
     }
@@ -564,16 +518,11 @@ impl SkillContextManager {
             .iter()
             .filter(|(name, entry)| entry.activation.is_some() && except != Some(name.as_str()))
             .map(|(name, entry)| {
-                (
-                    name.clone(),
-                    entry.state != SkillRuntimeState::ReviewDue,
-                    entry.lease_remaining,
-                    entry.last_retained_revision,
-                )
+                (name.clone(), entry.last_retained_revision)
             })
             .collect::<Vec<_>>();
-        candidates.sort_by(|a, b| (a.1, a.2, a.3, &a.0).cmp(&(b.1, b.2, b.3, &b.0)));
-        for (name, _, _, _) in candidates {
+        candidates.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+        for (name, _) in candidates {
             if required == 0 {
                 break;
             }
@@ -588,15 +537,6 @@ impl SkillContextManager {
     }
 
     fn apply_boundary_transitions(&mut self) {
-        let removals = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| entry.remove_at_next_boundary)
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        for name in removals {
-            let _ = self.release_now(&name);
-        }
         while let Some(transition) = self.queued_ui.pop_front() {
             let result = match transition {
                 UiTransition::Request { name, source } => self.request_now(&name, &source),
@@ -636,9 +576,7 @@ impl SkillContextManager {
                         ));
                         if let Some(entry) = self.entries.get_mut(&name) {
                             entry.activation = Some(new);
-                            entry.lease_remaining = DEFAULT_LEASE_TURNS;
                             entry.state = SkillRuntimeState::Active;
-                            entry.remove_at_next_boundary = false;
                         }
                         self.context_epoch = self.context_epoch.saturating_add(1);
                     }
@@ -692,17 +630,12 @@ impl SkillContextManager {
         let mut active = self
             .entries
             .iter()
-            .filter(|(_, entry)| {
-                matches!(
-                    entry.state,
-                    SkillRuntimeState::Active | SkillRuntimeState::ReviewDue
-                )
-            })
+            .filter(|(_, entry)| matches!(entry.state, SkillRuntimeState::Active))
             .filter_map(|(name, entry)| {
                 entry
                     .activation
                     .as_ref()
-                    .map(|activation| (entry.activation_order, name, activation, &entry.state))
+                    .map(|activation| (entry.activation_order, name, activation))
             })
             .collect::<Vec<_>>();
         active.sort_by_key(|item| item.0);
@@ -710,18 +643,13 @@ impl SkillContextManager {
             output.push_str("<active_skills />\n");
         } else {
             output.push_str("<active_skills>\n");
-            for (_, name, activation, state) in active {
+            for (_, name, activation) in active {
                 output.push_str(&format!(
                     "<skill name=\"{}\" hash=\"{}\">\n{}\n</skill>\n",
                     name,
                     deepx_skills::content_hash(&activation.body),
                     deepx_skills::render_activation(activation)
                 ));
-                if *state == SkillRuntimeState::ReviewDue {
-                    output.push_str(&format!(
-                        "<review_due name=\"{name}\">Call skills retain or release.</review_due>\n"
-                    ));
-                }
             }
             output.push_str("</active_skills>\n");
         }
@@ -819,7 +747,8 @@ mod tests {
     }
 
     #[test]
-    fn only_successful_turns_consume_the_three_turn_lease() {
+    fn activated_skill_stays_active_after_many_turns() {
+        // 自动卸载已删除：skill 激活后保持 Active，直到显式卸载。
         let (_temp, mut manager) = manager();
         manager.begin_user_turn("use $alpha");
         let activation = manager.load_named("alpha").unwrap();
@@ -827,8 +756,7 @@ mod tests {
             .apply_tool_effect(SkillEffect::Activate(activation))
             .unwrap();
         manager.abort_user_turn();
-        assert_eq!(manager.session_state().entries[0].lease_remaining, 3);
-        for _ in 0..3 {
+        for _ in 0..10 {
             manager.begin_user_turn("continue");
             manager.complete_user_turn();
         }
@@ -836,7 +764,13 @@ mod tests {
             manager
                 .runtime_info()
                 .iter()
-                .any(|item| item.name == "alpha" && item.state == SkillRuntimeState::ReviewDue)
+                .any(|item| item.name == "alpha" && item.state == SkillRuntimeState::Active),
+            "skill must remain active across turns (no auto-unload)"
+        );
+        let snapshot = manager.begin_user_turn("continue");
+        assert!(
+            snapshot.envelope.contains("ALPHA_BODY"),
+            "skill body must stay in the injected context (cache stability)"
         );
     }
 
@@ -857,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn session_restore_reloads_body_and_resets_lease() {
+    fn session_restore_reloads_latest_body() {
         let (temp, mut manager) = manager();
         manager.begin_user_turn("use $alpha");
         let activation = manager.load_named("alpha").unwrap();
@@ -874,38 +808,31 @@ mod tests {
 
         let mut restored = SkillContextManager::new(temp.path(), 100_000);
         restored.restore(&state);
-        assert_eq!(restored.session_state().entries[0].lease_remaining, 3);
         let snapshot = restored.begin_user_turn("continue");
         assert!(snapshot.envelope.contains("LATEST_BODY"));
     }
 
     #[test]
-    fn ignored_review_is_removed_at_the_following_turn_boundary() {
+    fn skill_survives_many_turn_boundaries_without_unloading() {
         let (_temp, mut manager) = manager();
         manager.begin_user_turn("use $alpha");
         let activation = manager.load_named("alpha").unwrap();
         manager
             .apply_tool_effect(SkillEffect::Activate(activation))
             .unwrap();
-        for _ in 0..3 {
+        for _ in 0..5 {
             manager.complete_user_turn();
             manager.begin_user_turn("continue");
         }
-        assert!(
-            manager
-                .turn_snapshot()
-                .unwrap()
-                .envelope
-                .contains("review_due")
-        );
-        manager.complete_user_turn();
         let next = manager.begin_user_turn("continue");
-        assert!(!next.envelope.contains("ALPHA_BODY"));
-        assert!(next.envelope.contains("alpha 已移除"));
+        assert!(
+            next.envelope.contains("ALPHA_BODY"),
+            "no auto-unload: skill must stay in context"
+        );
     }
 
     #[test]
-    fn active_body_hot_update_resets_lease_and_emits_small_diff() {
+    fn active_body_hot_update_emits_small_diff() {
         let (temp, mut manager) = manager();
         manager.begin_user_turn("use $alpha");
         let activation = manager.load_named("alpha").unwrap();
@@ -921,10 +848,6 @@ mod tests {
         let next = manager.begin_user_turn("continue");
         assert!(next.envelope.contains("ALPHA_CHANGED"));
         assert!(next.envelope.contains("skill_updated"));
-        assert_eq!(
-            manager.session_state().entries[0].lease_remaining,
-            DEFAULT_LEASE_TURNS
-        );
     }
 
     #[test]

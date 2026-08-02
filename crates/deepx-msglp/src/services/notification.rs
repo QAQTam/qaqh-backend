@@ -97,11 +97,6 @@ impl NotificationThread {
         }
     }
 
-    /// Send a simple one-way toast notification.
-    pub(crate) fn notify(&self, body: String) {
-        let _ = self.tx.send(NotifyMessage::Toast(body));
-    }
-
     /// Consume the thread handle and return the sender channel.
     /// Used by the new Loop architecture to integrate with NotifyHandle.
     pub(crate) fn into_sender(self) -> mpsc::Sender<NotifyMessage> {
@@ -153,7 +148,7 @@ fn pump_com_messages() {
             if !has_msg.as_bool() {
                 break;
             }
-            windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+            let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
             windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
         }
     }

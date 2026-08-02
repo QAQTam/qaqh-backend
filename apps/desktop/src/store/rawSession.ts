@@ -2,14 +2,40 @@ import type {
   AskMode,
   AskQuestion,
   PermissionRisk,
-  RoundBlock,
   SkillInfo,
-  SkillRuntimeInfo,
-  TaskInfo,
-  ToolCallDef,
-  ToolResultDef,
-  UsageInfo,
-} from "../lib/types";
+} from "../lib/types/ringing";
+import type { UsageInfo } from "../lib/types/ringing/UsageInfo";
+
+/** Renderer-local display records. These deliberately do not mirror wire events. */
+export type ToolCallDef = {
+  id: string;
+  name: string;
+  args_display: string;
+  args_json: string;
+};
+
+export type ToolResultDef = {
+  tool_call_id: string;
+  output: string;
+  success: boolean;
+};
+
+export type RoundBlock =
+  | { type: "reasoning"; content: string }
+  | { type: "text"; content: string }
+  | { type: "tool"; card: ToolCallDef }
+  | { type: "web_search"; action: string };
+
+export type TaskInfo = { id: string; subject: string; description: string; status: string };
+
+export type SkillRuntimeInfo = {
+  name: string;
+  description: string;
+  state: string;
+  source: string;
+  token_count: number;
+  error?: string;
+};
 
 export type RoundPhase = "thinking" | "tool_calling" | "answering" | "complete";
 
@@ -177,6 +203,57 @@ export type RawSessionState = {
     completionRevision: number;
   };
 };
+
+const emptyUsage = (): UsageInfo => ({
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+  prompt_cache_hit_tokens: 0,
+  prompt_cache_miss_tokens: 0,
+  reasoning_tokens: 0,
+  cache_usage_reported: false,
+});
+
+/** A renderer-local shell. Authoritative transcript/control data arrives on Ringing. */
+export function createRawSessionState(seed: string): RawSessionState {
+  return {
+    seed,
+    turns: [],
+    providerRetry: null,
+    pendingInteractions: [],
+    environment: {
+      linesAdded: 0,
+      linesRemoved: 0,
+      filesCreated: 0,
+      filesDeleted: 0,
+      changedFiles: [],
+      gitRevision: 0,
+      cachePrefixChanged: false,
+      cacheChangeReasons: [],
+    },
+    session: {
+      ready: false,
+      hasMore: false,
+      totalTurns: 0,
+      tokensUsed: 0,
+      cacheHitPct: 0,
+      contextLimit: 0,
+      usageTotals: emptyUsage(),
+      usageByRequest: {},
+      usageRequestCount: 0,
+      cacheReportedRequestCount: 0,
+      dashboardRevision: 0,
+    },
+    dashboard: { tasks: [], recentEdits: [], activity: [], currentTodoId: null },
+    telemetry: [],
+    skills: {
+      available: [], active: [], catalogRevision: "", contextEpoch: 0,
+      operationRevision: 0, tokenBudget: 0, tokenUsage: 0, runtime: [], diagnostics: [],
+    },
+    notices: [],
+    compact: { active: false, text: "", turnsCompacted: null, completionRevision: 0 },
+  };
+}
 
 export function emptyRawRound(roundNum: number): RawRound {
   return {

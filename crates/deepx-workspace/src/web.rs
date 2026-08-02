@@ -1,0 +1,102 @@
+//! Web tool — fetch URL content.
+//!
+//! Web *search* is no longer a local tool: DeepSeek / OpenAI Responses APIs
+//! ship a built-in `web_search` tool executed server-side (see
+//! `deepx-gate/src/responses.rs`). The model triggers it on its own, so the
+//! local Bing-RSS parser was removed — this tool only fetches URLs the model
+//! (or user) explicitly wants to read.
+
+use crate::{JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk};
+use std::time::Duration;
+
+fn http_agent(timeout_secs: u64) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(timeout_secs)))
+        .build()
+        .into()
+}
+
+pub(super) fn handle_web(ctx: ToolCallCtx) -> ToolResult {
+    let timeout_secs = ctx.timeout_secs.unwrap_or(30);
+    if ctx.args.s("url").starts_with("http") {
+        ToolResult::ok(&web_fetch(&ctx.args, timeout_secs))
+    } else {
+        ToolResult::ok(&crate::json_err(
+            "MISSING_URL",
+            "web: 'url' (starting with http) is required; web search is handled by the model's built-in web_search tool",
+            "Pass a URL to fetch, or rely on the model's server-side web_search.",
+        ))
+    }
+}
+
+fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
+    const MAX_WEB_BODY_BYTES: u64 = 512 * 1024;
+    let url = args.s("url");
+    if url.is_empty() || !url.starts_with("http") {
+        return crate::json_err("INVALID_URL", "web: url must start with http", "");
+    }
+    let resp = match http_agent(timeout_secs)
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (compatible; DeepX/0.7)")
+        .call()
+    {
+        Ok(r) => r,
+        Err(e) => return crate::json_err("FETCH_ERROR", &format!("{e}"), ""),
+    };
+    if resp
+        .body()
+        .content_length()
+        .is_some_and(|len| len > MAX_WEB_BODY_BYTES)
+    {
+        return crate::json_err(
+            "RESPONSE_TOO_LARGE",
+            &format!("Response exceeds the {} byte limit", MAX_WEB_BODY_BYTES),
+            "Fetch a narrower URL or use a source with a paginated API.",
+        );
+    }
+    let is_html = resp
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("html"))
+        .unwrap_or(false);
+    let body = match resp
+        .into_body()
+        .with_config()
+        .limit(MAX_WEB_BODY_BYTES)
+        .read_to_string()
+    {
+        Ok(b) => b,
+        Err(_) => {
+            return crate::json_err(
+                "READ_ERROR",
+                "Response could not be read within the body limit",
+                "Fetch a narrower URL or use a source with a paginated API.",
+            );
+        }
+    };
+    let readable = if is_html || body.trim_start().starts_with("<") {
+        html2text::from_read(body.as_bytes(), body.len().min(120_000)).unwrap_or(body)
+    } else {
+        body
+    };
+    if let Some(out) = args.get("output").and_then(|v| v.as_str()) {
+        let target = crate::resolve_workspace_path(out);
+        let _ = std::fs::write(&target, &readable);
+        // Lead with a save marker: plain-text folding keeps the first line,
+        // so a folded historical result still tells the model where the
+        // content lives — it can `read` the file instead of re-fetching.
+        return format!("[saved to {}]\n{}", crate::display_path(&target), readable);
+    }
+    // Return the page text directly — the result *is* the content, no JSON
+    // wrapper needed (errors above stay structured via json_err).
+    readable
+}
+
+pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register(ToolHandler { key: "web".to_string(),
+        description: "Fetch URL content (pass 'url'). Web search is not a local tool — the model uses its built-in server-side web_search instead.",
+        input_schema: serde_json::json!({"type":"object","properties":{"url":{"type":"string","description":"URL to fetch"},"output":{"type":"string","description":"Optional file path"}},"required":[],"additionalProperties":false}),
+        handler: handle_web, risk: ToolRisk::ReadOnly, default_timeout: std::time::Duration::from_secs(30),
+    });
+}

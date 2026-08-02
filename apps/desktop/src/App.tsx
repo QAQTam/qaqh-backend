@@ -1,5 +1,6 @@
 import { createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { backendStatus, connect, listen, request } from "./runtime/backendClient";
+import { requestWithRinging } from "./runtime/ringingCommands";
 import {
   applyUpdate,
   checkUpdate,
@@ -8,28 +9,23 @@ import {
   onUpdateFailed,
   type UpdateInfo,
 } from "./runtime/desktopApi";
-import type { Agent2Ui, AskAnswer, SessionMeta, TaskInfo } from "./lib/types";
+import type { SessionMeta } from "./lib/types";
+import type { AskAnswer } from "./lib/types/ringing";
 import ChatView from "./components/ChatView";
 import SettingsView, { type ThemeMode } from "./components/SettingsView";
 import SkillsView from "./components/SkillsView";
 import StartupView from "./components/StartupView";
 import { ToastContainer, createToastCtrl } from "./components/Toast";
-import { setReplaying, isReplaying } from "./runtime/replayState";
 import AppShell from "./components/shell/AppShell";
 import TaskSidebar from "./components/shell/TaskSidebar";
 import { createI18n, I18nCtx, type Lang } from "./i18n";
-import { parseAgentEvent } from "./runtime/agentEventBoundary";
-import { dispatchAgentEvent } from "./runtime/agentEventDispatcher";
-import { createSessionReplayBuffer } from "./runtime/sessionReplayBuffer";
 import { startSessionActivityClient } from "./runtime/sessionActivityClient";
 import type { SessionActivityMap } from "./runtime/sessionActivityStore";
-import { hasRestorableTranscript } from "./runtime/sessionStartup";
 import type { PendingInteraction } from "./store/rawSession";
-import {
-  applyDashboardData,
-  removeTurnFromSession,
-  resolvePendingInteraction,
-} from "./store/sessionEventReducer";
+import { createRingingMonitor } from "./store/ringingMonitor";
+import { selectRingingPresentation } from "./store/sessionPresentation";
+import { createTimelineMonitor } from "./store/timelineMonitor";
+import { selectTimelinePresentation } from "./store/timelinePresentation";
 import {
   createSessionRegistry,
   type SessionEntry,
@@ -59,8 +55,10 @@ export default function App() {
   const i18n = createI18n((localStorage.getItem("deepx:lang") ?? "en") as Lang);
   const toastCtrl = createToastCtrl();
   const registry = createSessionRegistry({ storage: sessionStorage });
-  const sessionReplay = createSessionReplayBuffer();
-  const pendingEntries = new Map<string, Promise<SessionEntry>>();
+  // Ringing v2 三频道状态源
+  const ringingMonitor = createRingingMonitor();
+  // Transcript v3 is intentionally separate: one seed owns one cursor.
+  const timelineMonitor = createTimelineMonitor();
   const [view, setView] = createSignal<View>("home");
   const [configLang, setConfigLang] = createSignal<Lang>(i18n.lang());
   const [permissionLevel, setPermissionLevel] = createSignal(4);
@@ -76,10 +74,13 @@ export default function App() {
   let unlistenTheme: (() => void) | undefined;
   let unlistenSessionActivity: (() => void) | undefined;
   let unlistenBackendStatus: (() => void) | undefined;
+  let unlistenRingingBatch: (() => void) | undefined;
+  let unlistenRingingStatus: (() => void) | undefined;
+  let unlistenTimelineEntry: (() => void) | undefined;
+  let unlistenTimelineSnapshot: (() => void) | undefined;
   let unlistenUpdate: (() => void) | undefined;
   let unlistenUpdateFailure: (() => void) | undefined;
   let resumeRequest = 0;
-  let reconnecting = false;
 
   function activeEntry(): SessionEntry | undefined {
     const seed = activeSeed();
@@ -102,28 +103,33 @@ export default function App() {
     }
   }
 
-  async function refreshSessions(): Promise<boolean> {
+  async function loadSessionList(): Promise<SessionMeta[] | null> {
     try {
       const list = await request<SessionMeta[]>("session.list");
       list.sort((a, b) => Number(b.updated_at) - Number(a.updated_at));
-      setSessions(list);
-      return true;
+      return list;
     } catch (error) {
       console.error("refreshSessions", error);
-      return false;
+      return null;
     }
   }
 
-  async function loadDashboardFromDisk(entry: SessionEntry) {
-    try {
-      const parsed = await request<{ tasks?: TaskInfo[]; recent_edits?: string[] }>("session.dashboard", { seed: entry.state().seed });
-      entry.runtime.update(state => applyDashboardData(state, {
-        tasks: parsed.tasks ?? [],
-        recentEdits: parsed.recent_edits ?? [],
-      }));
-    } catch (error) {
-      console.error("loadDashboardFromDisk", error);
-    }
+  /** The UI model is derived from native Ringing stores and Timeline v3. */
+  function presentationFor(entry: SessionEntry) {
+    const seed = entry.state().seed;
+    timelineMonitor.version();
+    let fallback = entry.state();
+    const stores = ringingMonitor.storesFor(seed);
+    if (stores) fallback = selectRingingPresentation(seed, stores);
+    const snapshot = timelineMonitor.snapshotFor(seed);
+    return snapshot ? selectTimelinePresentation(seed, snapshot, fallback) : fallback;
+  }
+
+  async function refreshSessions(): Promise<boolean> {
+    const list = await loadSessionList();
+    if (!list) return false;
+    setSessions(list);
+    return true;
   }
 
   async function loadWorkspace(entry: SessionEntry) {
@@ -139,160 +145,44 @@ export default function App() {
     }
   }
 
-  async function afterSessionCreated(entry: SessionEntry, seed: string) {
-    const previousSeed = entry.state().seed;
-    const remapped = registry.remap(entry.listenerSeed, seed);
-    if (activeSeed() === entry.listenerSeed || activeSeed() === previousSeed) setActiveSeed(seed);
-    localStorage.setItem(LS_KEY, seed);
-    await loadWorkspace(remapped);
-    await loadDashboardFromDisk(remapped);
-    await refreshSessions();
-  }
-
-  function afterSessionRestored(seed: string) {
-    localStorage.setItem(LS_KEY, seed);
-    // SessionRestored is a replay/synchronization boundary, not a guarantee
-    // that the control socket is still ready for new requests. The reducer has
-    // already applied the snapshot carried by this event, and resumeSession
-    // loads the workspace after its request cycle completes. Retrying these
-    // three reads here once per streamed restore caused a request storm while
-    // the daemon was reconnecting.
-  }
-
-  async function handleAgentError(entry: SessionEntry, message: string) {
-    // Suppress toast during session restore replays — the error already happened
-    // in the past and was shown then. We only toast fresh (live) errors.
-    if (!isReplaying()) {
-      toastCtrl.push(message, "error");
-    }
-    const agentDead = /(exited|died|broken.pipe|killed|connection.*lost|agent.*(dead|gone|stopped))/i.test(message);
-    if (!agentDead) return;
-    // Prevent infinite recursion: during replay, sessionReplay.complete/abort
-    // re-dispatches the same Error event, which would call handleAgentError →
-    // resumeSession → sessionReplay.complete → same Error → handleAgentError → …
-    // Each loop iteration fires an RPC that piles up as "daemon disconnected:
-    // connection dropped", flooding the console and blocking real user input.
-    if (isReplaying()) return;
-    // Prevent concurrent reconnect attempts from multiple live Error events.
-    if (reconnecting) return;
-    reconnecting = true;
-    const seed = entry.state().seed;
-    try {
-      await resumeSession(seed);
-      toastCtrl.push(i18n.t().toast.agentReconnected, "info");
-    } catch {
-      toastCtrl.push(i18n.t().toast.agentLost, "error", true);
-    } finally {
-      reconnecting = false;
-    }
-  }
-
-  function handleAgentEvent(entry: SessionEntry, event: Agent2Ui) {
-    dispatchAgentEvent(event, entry.runtime, {
-      onSessionCreated: seed => { void afterSessionCreated(entry, seed); },
-      onSessionRestored: seed => { afterSessionRestored(seed); },
-      onDashboard: () => {},
-      onError: message => { void handleAgentError(entry, message); },
-      onCancelled: () => {
-        const id = entry.ui.submittingInteractionId();
-        if (id) entry.ui.finishInteractionSubmit(id);
-      },
-      onInteractionSettled: id => entry.ui.finishInteractionSubmit(id),
-      onReducerError: (failedEvent, error) => {
-        console.error("[App] reducer rejected event", {
-          seed: entry.state().seed,
-          type: failedEvent.type,
-          error,
-        });
-        toastCtrl.push("会话事件处理失败，现有消息已保留", "error");
-      },
-    });
-  }
-
-  async function getOrCreateSessionEntry(seed: string): Promise<SessionEntry> {
-    const existing = registry.get(seed);
-    if (existing?.hasListener()) return existing;
-    const pending = pendingEntries.get(seed);
-    if (pending) return pending;
-
-    const creation = (async () => {
-      const entry = registry.ensure(seed);
-      try {
-        const unlisten = await listen<unknown>(`agent-${entry.listenerSeed}-event`, event => {
-          let parsed: Agent2Ui;
-          try {
-            parsed = parseAgentEvent(event.payload);
-          } catch (error) {
-            console.error("[App] ignored malformed live event", { seed: entry.listenerSeed, error });
-            toastCtrl.push("收到无法识别的后端事件，已忽略", "error");
-            return;
-          }
-          sessionReplay.handleLive(entry.listenerSeed, parsed, replayed => {
-            handleAgentEvent(entry, replayed);
-          });
-        });
-        entry.attachListener(unlisten);
-        return entry;
-      } catch (error) {
-        registry.remove(seed);
-        throw error;
-      }
-    })();
-    pendingEntries.set(seed, creation);
-    try { return await creation; }
-    finally { pendingEntries.delete(seed); }
-  }
-
   async function resumeSession(seed: string) {
     const requestToken = ++resumeRequest;
-    sessionReplay.begin(seed);
     toastCtrl.clear();
-    // Suppress error toasts during replay — only fresh errors should toast.
-    setReplaying(true);
-    // Swap to the locally persisted transcript immediately. Agent startup and
-    // replay may take seconds on a cold session and must not block navigation.
+    // Native Timeline snapshot and control bootstrap are the recovery boundary.
     const cachedEntry = registry.ensure(seed);
     setActiveSeed(cachedEntry.state().seed);
     setHasChosenSession(true);
     setView("chat");
     let entry: SessionEntry | undefined = cachedEntry;
     try {
-      entry = await getOrCreateSessionEntry(seed);
       await request("session.resume", { seed });
-      const rawReplay = await request<unknown[]>("session.replay_events", { seed }).catch(() => []);
-      const replayed = rawReplay.flatMap(payload => {
-        try { return [parseAgentEvent(payload)]; }
-        catch (error) {
-          console.error("[App] ignored malformed replay event", { seed, error });
-          return [];
-        }
-      });
-      sessionReplay.complete(seed, replayed, event => handleAgentEvent(entry!, event));
-      setReplaying(false);
-      if (requestToken !== resumeRequest) { setReplaying(false); return; }
-      const currentSeed = entry.state().seed;
-      localStorage.setItem(LS_KEY, currentSeed);
-      setActiveSeed(currentSeed);
+      // v2 SessionResume 建立 seed lease 后再请求原子 bootstrap。
+      await ringingMonitor.activate(seed);
+      const nativeDashboard = ringingMonitor.storesFor(seed)?.control.dashboardSnapshot;
+      if (nativeDashboard) {
+        entry.setDashboard({
+          tasks: nativeDashboard.tasks,
+          recentEdits: nativeDashboard.recent_edits,
+          currentTodoId: nativeDashboard.current_todo_id,
+          activity: entry.dashboardStore.activity,
+        });
+      }
+      const timeline = window.deepx?.timeline;
+      if (timeline) timelineMonitor.handleSnapshot(await timeline.activate(seed));
+      if (requestToken !== resumeRequest) return;
+      localStorage.setItem(LS_KEY, seed);
+      setActiveSeed(seed);
       setHasChosenSession(true);
       setView("chat");
       await loadWorkspace(entry);
     } catch (error) {
-      if (entry) sessionReplay.abort(seed, event => handleAgentEvent(entry!, event));
-      else sessionReplay.abort(seed, () => {});
-      setReplaying(false);
-      if (requestToken !== resumeRequest) { setReplaying(false); return; }
+      if (requestToken !== resumeRequest) return;
       console.error("[App] resumeSession error", error);
-      if (!hasRestorableTranscript(entry?.state())) {
-        setHasChosenSession(false);
-        setView("home");
-      } else {
-        setActiveSeed(entry!.state().seed);
-        setHasChosenSession(true);
-        setView("chat");
-        toastCtrl.push("后端暂时不可用，已显示本地恢复的消息", "error");
-      }
+      setHasChosenSession(false);
+      setView("home");
     }
   }
+
 
   async function changePermissionLevel(level: number) {
     if (level < 1 || level > 4) return;
@@ -319,11 +209,6 @@ export default function App() {
         approved,
         trustFolder,
       });
-      entry.runtime.update(state => resolvePendingInteraction(
-        state,
-        item.id,
-        approved ? "approved" : "rejected",
-      ));
     } catch (error) {
       toastCtrl.push(String(error), "error");
     } finally {
@@ -380,7 +265,7 @@ export default function App() {
 
   async function loadMoreTurns() {
     const entry = activeEntry();
-    const firstId = entry?.state().turns[0]?.turnId;
+    const firstId = entry ? presentationFor(entry).turns[0]?.turnId : undefined;
     if (!entry || !firstId) return;
     try {
       await request("session.load_more_turns", {
@@ -394,15 +279,35 @@ export default function App() {
 
   async function undoLastTurn() {
     const entry = activeEntry();
-    const turns = entry?.state().turns;
+    const turns = entry ? presentationFor(entry).turns : undefined;
     const turnId = turns?.[turns.length - 1]?.turnId;
-    if (!entry || !turnId || isSessionStreaming(entry.state())) return;
+    if (!entry || !turnId || isSessionStreaming(presentationFor(entry))) return;
     await request("session.undo_turn", { seed: entry.state().seed, turnId });
-    entry.runtime.update(state => removeTurnFromSession(state, turnId));
   }
 
   async function newSession() {
-    const seed = await request<string>("session.new");
+    // Capture a reliable baseline before creating the session. Otherwise an
+    // initial empty/stale UI list could make an existing session look like the
+    // newly created one when the post-ACK list is queried.
+    const baseline = await loadSessionList();
+    const knownSeeds = new Set((baseline ?? sessions()).map(session => session.seed));
+    if (baseline) setSessions(baseline);
+
+    const ack = await request<{ command_id?: string; status?: string }>("session.new");
+    if (ack?.status !== "accepted" || !ack.command_id) {
+      throw new Error("Ringing session creation was not accepted");
+    }
+    // The ACK intentionally contains no business payload. Prefer the
+    // authoritative session.list query so UI navigation does not depend on
+    // whether the SSE create event was delivered before/after this request.
+    const list = await loadSessionList();
+    if (list) setSessions(list);
+    const discoveredSeed = baseline
+      ? list?.find(session => !knownSeeds.has(session.seed))?.seed
+      : undefined;
+    // If the list raced the daemon's persistence, the causal event remains
+    // the fallback source of truth and is cached by the monitor when early.
+    const seed = discoveredSeed ?? await ringingMonitor.waitForSessionCreated(ack.command_id);
     localStorage.removeItem(LS_KEY);
     await resumeSession(seed);
     const entry = activeEntry();
@@ -415,9 +320,14 @@ export default function App() {
   }
 
   async function startNewSessionAndSend(text: string) {
-    await newSession();
-    const entry = activeEntry();
-    if (entry) await request("session.send_message", { seed: entry.state().seed, text });
+    try {
+      await newSession();
+      const entry = activeEntry();
+      if (entry) await requestWithRinging("session.send_message", { seed: entry.state().seed, text });
+    } catch (error) {
+      console.error("startNewSessionAndSend", error);
+      toastCtrl.push(`新建任务失败：${String(error)}`, "error");
+    }
   }
 
   async function deleteSession(seed: string) {
@@ -494,6 +404,42 @@ export default function App() {
         setBackendError(event.payload.connected ? "" : (event.payload.error ?? "Daemon unavailable"));
       });
       await connect();
+      // Ringing v2 主订阅：batch 按 seed 路由进 typed stores。
+      const api = window.deepx?.ringing;
+      if (api) {
+        unlistenRingingBatch = api.onBatch(batch => {
+          ringingMonitor.handleBatch(batch);
+          const dashboard = ringingMonitor.storesFor(batch.seed)?.control.dashboardSnapshot;
+          const entry = registry.get(batch.seed);
+          if (dashboard && entry) {
+            entry.setDashboard({
+              tasks: dashboard.tasks,
+              recentEdits: dashboard.recent_edits,
+              currentTodoId: dashboard.current_todo_id,
+              activity: entry.dashboardStore.activity,
+            });
+          }
+        });
+        unlistenRingingStatus = api.onStatus(update => ringingMonitor.handleStatus(update));
+        // 主进程可能在 renderer 订阅前就连好 SSE（初始 open 状态已发出），
+        // 订阅后主动拉一次当前状态，避免调试面板一直停在 idle。
+        ringingMonitor.applyStatusSnapshot(await api.status());
+      }
+      const timeline = window.deepx?.timeline;
+      if (timeline) {
+        unlistenTimelineSnapshot = timeline.onSnapshot(snapshot => timelineMonitor.handleSnapshot(snapshot));
+        unlistenTimelineEntry = timeline.onEntry(({ seed, entry }) => {
+          if (timelineMonitor.handleEntry(seed, entry)) {
+            if (entry.event.type === "turn_opened") registry.get(seed)?.setPendingSend(null);
+            return;
+          }
+          // A gap is never patched in the renderer. Recover from the writer's
+          // snapshot watermark and let the one cursor replay the tail.
+          void timeline.activate(seed).then(snapshot => timelineMonitor.handleSnapshot(snapshot)).catch(error => {
+            console.error("[App] timeline snapshot recovery failed", error);
+          });
+        });
+      }
       // Listen for app updates (production: auto-check on startup)
       unlistenUpdate = onUpdateAvailable((info: UpdateInfo) => {
         setPendingUpdate(info);
@@ -541,8 +487,11 @@ export default function App() {
 
   onCleanup(() => {
     registry.disposeView();
-    sessionReplay.clear();
     unlistenTheme?.();
+    unlistenRingingBatch?.();
+    unlistenRingingStatus?.();
+    unlistenTimelineEntry?.();
+    unlistenTimelineSnapshot?.();
     unlistenSessionActivity?.();
     unlistenBackendStatus?.();
     unlistenUpdate?.();
@@ -557,7 +506,10 @@ export default function App() {
             sessions={sessions()}
             activities={sessionActivities()}
             activeSeed={activeSeed()}
-            onNew={() => void newSession()}
+            onNew={() => void newSession().catch(error => {
+              console.error("newSession", error);
+              toastCtrl.push(`新建任务失败：${String(error)}`, "error");
+            })}
             onOpen={seed => void resumeSession(seed)}
             onDelete={seed => void deleteSession(seed)}
             onHome={() => setView("home")}
@@ -617,9 +569,10 @@ export default function App() {
             </Match>
             <Match when={view() === "chat"}>
               <Show when={hasChosenSession() && activeEntry()} keyed>
-                {entry => <ChatView
-                  rawSession={entry.state}
-                  sessionStore={entry.sessionStore}
+                {entry => {
+                  const rawSession = () => presentationFor(entry);
+                  return <ChatView
+                  rawSession={rawSession}
                   dashboardStore={entry.dashboardStore}
                   pendingSend={entry.pendingSend}
                   setPendingSend={entry.setPendingSend}
@@ -633,7 +586,8 @@ export default function App() {
                   permissionLevel={permissionLevel()}
                   onPermissionLevelChange={changePermissionLevel}
                   onChangeWorkspace={browseWorkspace}
-                />}
+                />;
+                }}
               </Show>
             </Match>
           </Switch>

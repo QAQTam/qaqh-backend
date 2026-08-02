@@ -74,9 +74,10 @@ RingingToolCommand
 能力名称固定为：
 
 ```text
-Ringing_v1
-Ringing_session_cutover_v1
-Ringing_batch_v1
+Ringing_v2
+Ringing_batch_v2
+Ringing_bootstrap_v2
+Ringing_command_status_v2
 ```
 
 ## 架构硬规则
@@ -261,20 +262,23 @@ RingingContentRef {
 普通HTTP负责：
 
 ```text
-POST /ringing/v1/clients/open
-POST /ringing/v1/leases/renew
-POST /ringing/v1/commands/{control|conversation|tool}
-GET  /ringing/v1/snapshots/{channel}/{seed}
-GET  /ringing/v1/content/{content_id}
-GET  /ringing/v1/query/...
+POST /ringing/v2/clients/open
+POST /ringing/v2/leases/renew
+POST /ringing/v2/commands/{control|conversation|tool}
+GET  /ringing/v2/commands/{command_id}
+GET  /ringing/v2/sessions/{seed}/bootstrap
+POST /ringing/v2/queries/{name}
+POST /ringing/v2/actions/{name}
+POST /ringing/v2/content
+GET  /ringing/v2/content/{content_id}
 ```
 
 三条独立SSE负责server→client事件：
 
 ```text
-GET /ringing/v1/events/control
-GET /ringing/v1/events/conversation
-GET /ringing/v1/events/tool
+GET /ringing/v2/events/control
+GET /ringing/v2/events/conversation
+GET /ringing/v2/events/tool
 ```
 
 SSE frame使用标准字段：
@@ -323,7 +327,7 @@ WebSocket不是Ringing默认承载，仅在以下能力出现时单独协商：
 legacy WebSocket和Ringing HTTP/SSE并行存在，互不嵌套。
 
 legacy Control protocol在双协议期保持版本1且不承载Ringing frame。新客户端先调用
-`POST /ringing/v1/clients/open`完成版本/能力协商；端点不存在或版本不兼容时才显式选择
+`POST /ringing/v2/clients/open`完成版本/能力协商；端点不存在或版本不兼容时才显式选择
 legacy，禁止在同一连接上猜测frame类型。
 
 ## 相对Codex与Reasonix的取舍
@@ -338,43 +342,170 @@ legacy，禁止在同一连接上猜测frame类型。
 - DeepX额外增加：领域snapshot、双序号、content ref、逻辑lease、terminal revision和
   main→renderer整batch IPC。这些是当前三个故障的直接约束，不是通用框架装饰。
 
-## 每会话、每频道切流
+## 连接级协议选择（v2 最终模型）
 
-客户端维护：
+Desktop 在连接建立时只选择一个 backend：
 
 ```text
-sessionChannelMode[seed][channel] {
-  event_protocol: legacy | Ringing
-  command_protocol: legacy | Ringing
-}
+POST /ringing/v2/clients/open 成功  → 本连接全部事件、命令、查询使用 Ringing v2
+明确返回 404/426                  → 旧 daemon，建立独立 /control/v1 legacy 连接
+其他认证、网络或协议错误          → 暴露错误，不静默降级
 ```
 
-事件和命令可以分阶段切换，但同一方向、同一session/channel只能有一个权威协议。
+不再维护 `sessionChannelMode[seed][channel]`，也不再持久化 `cutover.json`。三条 SSE
+仍独立重连、独立 cursor，但协议所有权是连接级的，避免同一会话在 legacy/Ringing 间
+出现双写或“半切流”。旧客户端通过独立 legacy WebSocket 获得兼容，不与 Ringing frame
+嵌套。Ringing 连接故障只能通过 cursor/bootstrap 恢复，不能自动回退 legacy。
 
-事件切流采用两阶段提交：
+`command_id` 在 client session 内幂等；accepted 后由带相同 `causation_id` 的可靠终态
+将 receipt 从 running 收口为 succeeded/failed。
 
-1. 客户端发送`channel_prepare`。
-2. 服务端先建立SSE live boundary，再生成Ringing领域snapshot，并缓冲boundary后的可靠事件。
-3. 客户端应用snapshot后发送`channel_commit`。
-4. 服务端原子切换event owner，停止向该客户端发送对应legacy事件并释放缓冲。
-5. prepare失败、超时或断线时保持legacy。
+## 实施状态（2026-08-01）
 
-命令切流：
+> 本节是当前事实来源；下方“历史迁移阶段”的旧阶段标记仅保留决策背景。
 
-1. 客户端请求`command_mode_prepare`。
-2. 服务端等待该session/channel已有legacy命令完成入队。
-3. 服务端返回Ringing command mode ready。
-4. 客户端之后只发送Ringing command。
-5. `command_id`必须幂等；重连重试不得重复执行已经accepted的命令。
+### 当前结论
 
-已经切换到Ringing的频道发生故障时保持Ringing模式，通过cursor/snapshot恢复，不自动退回legacy。
+- **Desktop / daemon / worker 主链已是 Ringing v2**：连接级协商、三 SSE、完整 bootstrap、
+  typed command/query/action、content upload/ref、worker `Ringing_domain_v2` 边界均已接线。
+- **可靠性已闭环**：reliable 只以 journal/cursor 为权威，不再写入无人 drain 的第二队列；
+  replaceable 按 identity 使用有界 latest 槽持久化，terminal 会清除旧 progress；
+  ToolProgress 合并器工具不会在窗口翻转时吞掉当前 chunk，并保持 UTF-8 tail 合法。
+- **命令终态已闭环**：daemon 观察三个频道的 causal terminal 更新持久 receipt；undo、set-mode、
+  reload 等无专用业务终态的操作使用 `OperationCompleted`；不支持的 load-more 明确拒绝，
+  不再返回 accepted 后永久 running。
+- **compact 与附件已闭环**：Ringing compact 进入真实 CompactEngine，异步终态保留 causation；
+  ContentRef 经 seed/sha/media-type 所有权校验后生成安全文本预览，worker 不再丢附件。
+- **Desktop 展示已闭环**：Ask/Plan/todo、tool round、参数、增量 progress 和 terminal 状态进入
+  Ringing presentation；完整 bootstrap 明确 `hasMore=false`。
+- **工程门槛**：Ringing bindings 由 ts-rs 生成并通过 drift check；`deepx-tui` 已纳入 workspace
+  且可独立编译。
+- **主 HTTP 请求完整性**：daemon 的协议分流只用 `TcpStream::peek` 识别 Ringing，handler
+  始终重新从 socket 按 `Content-Length` 读取完整请求；分片到达及超过 2 KiB preview 的
+  command/content body 不再被截断。Desktop 仅在 open 明确返回 404/426 时选择 legacy，
+  `accepted:false`、认证、网络及协议错误均显式失败。
 
-切流期间可以从同一个`DomainEvent`同时投影legacy与Ringing用于影子验证，但只有一个
-协议能进入可见store。严禁把已经序列化的legacy frame作为Ringing的生产源。
+### 已交付明细
 
-## 迁移阶段
+- **映射清单**（阶段 0 产物）：`docs/ringing-migration-map.md` — 42 事件/21 命令/10 帧全量映射、
+  可靠性矩阵、snapshot 资格、10 项设计决策定稿（Q1-Q10）。
+- **domain 层**：`crates/deepx-domain` — DomainCommand(21)/DomainEvent(36)/RingingChannel/
+  Delivery，零 legacy/wire 依赖（架构测试 `ringing_architecture.rs` 3/3 保证）。
+- **wire 层**：`crates/deepx-ringing` — envelope/ack/batch/snapshot/content_ref/worker frame/
+  能力协商（`Ringing_v2`/`Ringing_batch_v2`/`Ringing_bootstrap_v2`/
+  `Ringing_command_status_v2`）。
+- **daemon 运行时**：`deepx-runtime/ringing/` — 三频道 router（reliable FIFO + replaceable
+  slots + FIFO 淘汰）、有界 journal（event_id 幂等 + CursorExpired）、领域 snapshot
+  projection（禁事件数组模拟状态）、分级 outbox（背压）、sequencer（双序号 + revision）、
+  ToolProgressCoalescer（16ms/256KiB/tail）、ContentStore（10MiB 外置/sha256/所有权/TTL）、
+  replaceable latest 槽（有界持久化 + terminal 清理）、LegacyProjector（仅用于独立 legacy
+  兼容连接；DomainEvent→Agent2Ui 无对应表达时返回 None）。v2 不再维护 session/channel cutover。
+- **传输层**：`deepx-daemon/ringing_http.rs` — `clients/open`（能力协商 + lease 签发）、
+  `leases/renew`（TTL 30s）、`commands/{channel}`（校验 → 幂等表 → worker 转发 → 失败回滚）、
+  `snapshots/{channel}/{seed}`（Conversation 频道返回持久化消息构建的完整 turns）、
+  三条独立 SSE（`id: epoch:channel:seq` + Last-Event-ID 按 cursor 回放可靠 tail +
+  `ringing.reset_required` + keepalive + 独立重连）；server.rs peek 分流，legacy WS 与
+  Ringing HTTP/SSE 单端口并行互不嵌套。
+- **恢复语义收口**：SSE 重连先订阅再回放，跨 seed 按全局 `stream_seq` 合并；journal 记录
+  `evicted_through`，仅当某 seed 确有被淘汰且 seq > cursor 的事件才发
+  `ringing.reset_required`（避免"晚创建 session 首事件 seq 大"误报）；Electron 客户端修复
+  typed event 帧解析（此前只处理 `event: message` 导致事件全丢）、Last-Event-ID 携带
+  server_epoch，收到 reset 后经 HTTP 重取 snapshot 并重置流 cursor。
+- **causation 贯通**：worker 事件信封新增 `causation_id`，Ringing 命令执行期间
+  `emit_domain` 产出的事件携带 `command_id`（命令作用域 guard），daemon 发布时写入
+  `RingingEventEnvelope.causation_id`；业务终态可与 accepted 命令关联。
+- **领域事件生产点补齐**：`UsageUpdated`、`ToolCallPrepared`、`ProviderToolStatus`
+  （web_search）、`AuditRecorded`、`ToolFailed`（拒绝路径）、`ToolNotice`（compact）、
+  `DashboardUpdated`（worker 仪表盘 5 处）已双发接入；daemon 活动状态变化改为
+  `SessionActivity` 与 `SessionActivityChanged` 双发；前端三 store 增加对应消费
+  （dashboard/usage/provider status/notices/audits）。`SystemNotice` 无 legacy 数据源，
+  待 daemon 通知集成（升级/维护）时接入。
+- **worker seed 修复**：Ringing worker 事件信封改用真实 session seed（此前硬编码
+  `"worker"`，会导致所有会话事件落入同一伪 seed）。
+- **ConversationSnapshot HTTP**：`GET /ringing/v2/sessions/{seed}/bootstrap` 从
+  `SessionManager::load_for_resume` 持久化消息构建完整 turns（中立 JSON，非 legacy wire），
+  与 hub 领域投影摘要合并返回。
+- **worker 边界**（阶段 1）：stdin/stdout `wire` 判别（无 wire→legacy / `Ringing_domain_v2`→
+  Ringing / 未知→拒绝）；Ringing 命令→legacy ingress 映射（19 命令，SessionClose 显式拒绝）；
+  writer 双协议通道（`WriterEvent`）。
+- **生产点双发**（零 `Agent2Ui→Ringing` 转换函数）：engine_tool（ToolStarted/ToolProgress/
+  ToolFinished/CodeChanged）、engine_turn/input（TurnStarted/RoundDelta Answering+Thinking）、
+  loop_core（SessionStateChanged/AgentLifecycleChanged）；daemon 双投管道
+  （hub.publish → Ringing 客户端 + LegacyProjector → EventBus → legacy 客户端）。
+- **前端**（阶段 1）：`scripts/ringing-bindings.sh`（ts-rs bindings 合并 + `--check` 漂移
+  检查，48 文件）；三 store（Control/Conversation/Tool reducer + AppliedEventRegistry 幂等，
+  7 vitest）；`electron/ringingClient.ts`（三频道 SSE 独立重连、整 batch 回调、token 仅 header、
+  lease renew）。
+- **responses API 真迁移**：base system → 顶层 `instructions`（DeepSeek 文档语义），
+  动态注入（skills catalog/envelope）保持 developer item。
+- **skills 自动卸载移除**：删 lease/review_due 全链路（激活后保持注入直到显式 release），
+  长程任务后系统提示词前缀稳定、缓存命中不再被破坏。
+- **存量编译故障修复**：UserInput.images 测试同步（4 文件）、TUI 6 处、companion
+  PlanSubmitted、proto Dashboard 字段。
 
-### 0. 先固定故障基线与可观测性
+### 历史快照（已被 v2 连接级模型取代）
+
+以下条目保留 2026-07-31 的迁移轨迹，不作为当前实现状态：
+
+- **生产点双发**：三频道全量补全（Tool：ToolStarted/Progress/Finished/Failed/CodeChanged/
+  PermissionRequested/RoundCompleted；Conversation：TurnStarted/TurnCompleted/TurnFailed/
+  RoundDelta/RoundCompleted/CompactStarted/Progress/Finished/ProviderRetrying/
+  ConversationCancelled；Control：SessionState/AgentLifecycle/InteractionRequested/Resolved/
+  PlanReviewRequested/Resolved/SkillsUpdated/OperationFailed×4）。
+- **阶段 5（Ringing Command）**：HTTP 命令已真正执行（校验 → 幂等 → wire 转发）；cutover 端点
+  早期曾规划 per-channel cutover；v2 已删除该端点与状态机，改为连接级协议选择；
+  legacy 通道按切流状态过滤（domain 投影 + Agent2Ui 直发双路径，36 变体归属表）；
+  （历史方案）`sessionChannelMode` 后续已由 v2 连接级选择取代并删除。
+- **大内容外置**：ContentStore 写入侧（daemon 拦截 ToolFinished >10MiB → store + tail +
+  output_ref，外置时跳过 legacy 投影）+ 读取侧（`GET /ringing/v2/content/{id}?seed=`）已闭环。
+- **legacy 双发去重**：daemon legacy 通道 5s 相同 JSON 去重（双发 + 投影双路径）。
+- **前端切流闭环（桌面）**：electron main RingingManager（三 SSE + 连接级 backend 选择 +
+  bootstrap/snapshot IPC）；renderer 三 store 直接消费 Ringing v2；
+  SessionPresentationSelector（Ringing 连接的主 UI 数据源为 Ringing store 投影）；
+  snapshot 摘要重建；ConversationSnapshot HTTP 已实现，renderer 完整 turns 消费待前端阶段接入。
+- **命令/查询接管（契约 `docs/ringing-command-query-contract.md`）**：
+  `POST /ringing/v2/queries/*` 已实现（session.list/meta/activity/dashboard/get_activity、
+  workspace.get/status、config.load、skills.list_tools、todo.status、daemon.version；
+  同时接受斜杠与点号路径，seed 依赖方法缺参 400）；
+  `SessionClose` 在 daemon 侧拦截（registry close + hub 发布
+  `SessionStateChanged{Closed}`，causation=command_id，幂等关闭，无 seed 400）；
+  Electron IPC `ringing:command` / `ringing:query` 已接线；
+  renderer 命令路由 `ringingCommandRouter`（按 (seed,channel) commandProtocol 接管
+  send/cancel/compact/undo/set_mode/load_more/close/resume/new/interaction/skills，
+  "ringing not connected" 回退 legacy）+ `ringingCommands` localStorage 强制开关；
+  只读查询在命令已切流的会话上走 Ringing，失败安全回退 legacy。
+- **持久化 journal**：`JournalStore`（reliable append-only JSONL
+  `{data}/ringing/journal/{channel}/{seed}.jsonl` + replaceable 有界 latest 槽）；
+  `RingingHub::with_persistence` 启动装载重建
+  journal/router/projection/sequencer；I/O 失败只记录日志不阻塞 publish；
+  daemon 启动改走持久构造（`server.rs`）。
+- **发布周期 1（历史）**：已由连接级 Ringing v2 上线模型取代。
+
+### 当前剩余边界
+
+- 本轮验收范围是 Desktop → daemon → worker 的 Ringing v2 主 HTTP/SSE；TUI 与 WinUI
+  已由产品决策明确排除，不作为主 HTTP 完成度的阻塞项。
+- TUI 当前已恢复 workspace 构建，但传输仍使用 `deepx-client` legacy WebSocket；该客户端
+  的 Ringing v2 迁移留待未来单独立项。
+- 旧 daemon / 旧客户端兼容仍依赖 `/control/v1`、Agent2Ui/Ui2Agent、LegacyProjector 和
+  legacy reducer。它们已与新 Desktop 连接隔离，但尚未到删除兼容层的发布窗口。
+- 全 workspace `cargo check` 仍受 `deepx-vector` 的既有 `hf_hub` API 漂移阻塞；不属于
+  Ringing 协议链，不能据此宣称全仓绿色。
+- server 侧 `ToolProgressCoalescer` 已修复并有单测，但生产路径目前主要依赖 worker 周期 drain
+  与 Electron 16ms batch；若“server 必须按 16ms 合并”是硬性验收项，仍需把该工具接入发布路径。
+
+### 下一步建议（按优先级）
+
+1. 修复 `deepx-vector` 的 `hf_hub` 版本漂移，恢复全 workspace check。
+2. 若服务端 16ms progress 合并是硬指标，把 `ToolProgressCoalescer` 接入实际发布路径并补压力测试。
+3. 兼容窗口结束后删除 legacy WS、LegacyProjector 与旧 bindings/reducer。
+4. TUI/WinUI 如需 Ringing v2，另开客户端迁移计划，不纳入本次主 HTTP 验收。
+
+## 历史迁移阶段
+
+> 以下阶段标记是迁移过程记录，不是 2026-08-01 的完成度判断；现状以“实施状态”节为准。
+
+### 0. 先固定故障基线与可观测性 — ⚠️ 部分（映射清单✅；回归fixture/诊断字段⬜）
 
 - 为compact期间“假断联”、单HTTP错误重复、10 MiB exec progress积压建立回归fixture。
 - 记录每频道producer rate、coalesce ratio、queue depth、IPC batch size、renderer commit
@@ -382,12 +513,12 @@ sessionChannelMode[seed][channel] {
 - 为当前legacy链路加上唯一`error occurrence id`诊断字段，但不改变旧wire语义。
 - 明确现有`Agent2Ui`每个variant的领域归属、可靠性等级、snapshot资格和最终Ringing类型。
 
-### 1. Ringing基础设施与身份骨架
+### 1. Ringing基础设施与身份骨架 — ✅ 完成（见「实施状态」）
 
 - 新增DomainCommand、DomainEvent和Ringing协议类型。
 - agent worker输入输出支持显式判别：
   - legacy记录保持原格式。
-  - 新记录使用`wire: "Ringing_domain_v1"`。
+  - 新记录使用`wire: "Ringing_domain_v2"`。
 - worker reader必须先检查`wire`，禁止使用untagged猜测。
 - daemon建立三个独立ChannelRouter、可靠journal、领域snapshot projection和分级发送队列。
 - legacy EventBus继续存在，但只能接收DomainEvent经过LegacyProjector生成的事件，或尚未迁移的原始legacy事件。
@@ -397,7 +528,7 @@ sessionChannelMode[seed][channel] {
 - 自动生成Rust→TypeScript bindings，并由CI检查漂移。
 - 初始默认全部legacy；Ringing只运行协议、transport和shadow projection测试，不进入UI。
 
-### 2. 第一优先级：Tool Event
+### 2. 第一优先级：Tool Event — ⚠️ 部分（生产点双发✅；ToolPermissionRequested/content端点/默认切换⬜）
 
 完整迁移工具领域，不能只迁移progress：
 
@@ -442,7 +573,7 @@ truncated
 - ToolSnapshot直接从MessageStore和当前工具运行状态构建。
 - Tool切为Ringing后，legacy `RoundComplete.tool_calls`不再拥有工具卡渲染权。
 
-### 3. 第二优先级：Conversation Event
+### 3. 第二优先级：Conversation Event — ⚠️ 部分（TurnStarted/RoundDelta双发✅；终态/compact/usage等⬜）
 
 迁移：
 
@@ -474,7 +605,7 @@ ConversationCancelled
 - ConversationSnapshot直接从持久化session消息构建。
 - v2会话不再使用Agent2Ui replay签名去重，也不通过错误字符串触发resume。
 
-### 4. 第三优先级：Control Event
+### 4. 第三优先级：Control Event — ⚠️ 部分（SessionState/AgentLifecycle双发✅；Interaction/OperationFailed等⬜）
 
 迁移：
 
@@ -499,7 +630,7 @@ OperationFailed
 - Toast按error id去重并有数量上限。
 - ControlSnapshot只承载session/control状态，不承载Conversation或Tool事件数组。
 
-### 5. Ringing Command迁移
+### 5. Ringing Command迁移 — ⚠️ 部分（HTTP执行/幂等/wire转发✅；切流默认值与cutover端点⬜）
 
 在三个Event频道稳定后，迁移所有原`Ui2Agent`语义。
 
@@ -600,24 +731,24 @@ Renderer调度固定为：
 - 命令重试没有统一command id，accepted和completed边界不清晰。
 - 当前compact/token calibration改动属于现有用户工作，实施时必须保留。
 
-## 发布顺序
+## 历史发布顺序（已由连接级 v2 模型取代）
 
-发布周期1：
+发布周期1（历史记录）：
 
-- Ringing HTTP/SSE/pipe基础设施与identity spine。
-- Tool Event默认Ringing。
-- Conversation、Control Event和全部Command保持legacy。
-- Desktop和TUI均支持按session切流。
+- Ringing HTTP/SSE/pipe基础设施与identity spine。（✅ 已交付）
+- Tool Event默认Ringing。（⬜ 双发就绪，默认值未切）
+- Conversation、Control Event和全部Command保持legacy。（✅ 现状符合）
+- Desktop 已改用连接级 v2；TUI 仍是 legacy 兼容客户端。
 
-发布周期2：
+发布周期2：— ⬜ 未开始
 
 - Conversation Event和Control Event默认Ringing。
 - 原Ui2Agent命令逐频道切换为Ringing Command。
 - legacy仍保留显式诊断回滚开关。
 
-两个兼容周期结束并满足验收门槛后：
+两个兼容周期结束并满足验收门槛后：— ⬜ 未开始
 
-- 固化Ringing v1最低客户端/daemon版本并拒绝不支持的组合。
+- 固化Ringing v2最低客户端/daemon版本并拒绝不支持的组合。
 - 删除Agent2Ui和Ui2Agent。
 - 删除`/control/v1` legacy WebSocket业务事件/RPC入口、LegacyProjector、legacy ingress、旧EventBus projection、旧replay buffer、旧前端reducer和legacy TS bindings。
 - 删除对应字符串session/interaction RPC兼容入口。
@@ -626,13 +757,19 @@ Renderer调度固定为：
 
 ## 测试与验收
 
+> 本轮验证（2026-08-01）：架构测试 3/3；domain 37/37；ringing 27/27；
+> runtime Ringing 64/64；daemon 16/16；msglp ring 25/25；Desktop 48 files / 227 tests；
+> Desktop typecheck、Ringing bindings drift check、受影响 Rust crates check、TUI 独立 check 均通过。
+> 高吞吐端到端压力测试尚未执行；全 workspace check 受 `deepx-vector` 的既有
+> `hf_hub` API 漂移阻塞，因此不能宣称全仓绿色。
+
 - 架构测试：
   - domain模块不能引用Agent2Ui、Ui2Agent或Ringing wire。
   - 不存在Agent2Ui→Ringing、Ui2Agent→Ringing转换函数。
 - 混合版本：
-  - 新客户端+旧daemon走legacy。
+  - 新客户端+旧daemon仅在显式 404/426 时建立独立 legacy 连接。
   - 旧客户端/TUI+新daemon走legacy。
-  - 新客户端+新daemon可对不同session采用不同频道模式。
+  - 新客户端+新daemon使用连接级 Ringing v2，不按 session/channel 混用协议。
 - 命令幂等：
   - accepted前断线可安全重试。
   - accepted后断线不得重复执行。

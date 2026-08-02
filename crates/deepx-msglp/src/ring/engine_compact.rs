@@ -14,6 +14,7 @@ use crate::util;
 
 /// Result produced by the background compact thread.
 pub(crate) struct CompactMeta {
+    pub compact_id: String,
     pub summary: String,
     pub kept_user_count: usize,
     pub head_user_count: usize,
@@ -53,7 +54,7 @@ Include ONLY when:\n\
 - ≥2 dead-end investigation paths were tried before finding the root cause\n\
   → briefly note each dead-end and why it was wrong\n\
 - A cross-crate or cross-module causality chain was needed to diagnose an issue\n\
-  → note the chain (e.g. \"deepx-tools → deepx-message → deepx-session\")\n\
+  → note the chain (e.g. \"deepx-workspace → deepx-message → deepx-session\")\n\
 \n\
 If neither condition is met, OMIT this section entirely.\n\
 \n\
@@ -86,12 +87,13 @@ impl CompactEngine {
     pub fn reset(&mut self) {}
 
     /// Step 1: Token-split, serialize, build prompt — fast, synchronous.
-    /// Returns (prompt, kept_user_count, head_user_count, provider) needed
-    /// for the LLM call and apply step. Returns None if no compaction needed.
+    /// Returns (prompt, kept_user_count, head_user_count, provider, compact_id)
+    /// needed for the LLM call and apply step. Returns None if no compaction
+    /// needed. compact_id 在同一函数内生成，供 CompactStarted/Finished 关联。
     pub(crate) fn build_prompt_and_meta(
         &self,
         ctx: &mut RingContext,
-    ) -> Option<(String, usize, usize, deepx_gate::ProviderConfig)> {
+    ) -> Option<(String, usize, usize, deepx_gate::ProviderConfig, String)> {
         const KEEP_TOKENS: usize = 4_000;
         let turns_total = ctx.agent.msg.turn_count();
         log::info!("[COMPACT] {} turns", turns_total);
@@ -136,6 +138,14 @@ impl CompactEngine {
                 message: "Compact skipped: all within token budget".into(),
                 level: "info".into(),
             });
+            // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                deepx_domain::ToolEvent::ToolNotice {
+                    tool_call_id: None,
+                    level: deepx_domain::NoticeLevel::Info,
+                    message: "Compact skipped: all within token budget".into(),
+                },
+            ));
             return None;
         }
 
@@ -151,10 +161,26 @@ impl CompactEngine {
         }
         let kept_user_count = msgs[kept_idx..].iter().filter(|m| m.role == "user").count();
 
+        let compact_id = format!(
+            "compact-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
         ctx.emitter.emit(Agent2Ui::CompactStart {
             turns_total: turns_total as u32,
             turns_keeping: kept_user_count as u32,
         });
+        // Ringing 双发：CompactStarted（权威开始事件，携带 compact_id）
+        ctx.emitter
+            .emit_domain(deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::CompactStarted {
+                    compact_id: compact_id.clone(),
+                    turns_total: turns_total as u32,
+                    turns_keeping: kept_user_count as u32,
+                },
+            ));
 
         // The previous checkpoint already appears in <previous-summary> below.
         // Do not serialize the synthetic `[Compacted ...]` turn into HISTORY
@@ -247,7 +273,13 @@ impl CompactEngine {
             }
             p
         };
-        Some((prompt, kept_user_count, head_user_count, provider))
+        Some((
+            prompt,
+            kept_user_count,
+            head_user_count,
+            provider,
+            compact_id,
+        ))
     }
 
     /// Step 2: Apply compact result on the live message store (called from main thread).
@@ -256,11 +288,49 @@ impl CompactEngine {
             ctx.emitter.emit(Agent2Ui::Error {
                 message: err.clone(),
             });
+            // Ringing 双发：OperationFailed（compact 失败）
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                deepx_domain::ControlEvent::OperationFailed {
+                    occurrence_id: format!(
+                        "occ-compact-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0),
+                    ),
+                    scope: deepx_domain::ErrorScope::Conversation,
+                    error: deepx_domain::DomainError {
+                        error_id: format!(
+                            "err-compact-{}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0),
+                        ),
+                        code: "compact_failed".into(),
+                        message: err.clone(),
+                        retryable: true,
+                        dedupe_key: Some("compact_failed".into()),
+                    },
+                    operation_id: None,
+                },
+            ));
             ctx.emitter.emit(Agent2Ui::CompactEnd {
                 summary_chars: 0,
                 turns_compacted: 0,
                 turns_removed: 0,
             });
+            // Ringing 双发：CompactFinished（失败终态）
+            ctx.emitter
+                .emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::CompactFinished {
+                        compact_id: meta.compact_id.clone(),
+                        status: deepx_domain::CompactStatus::Failed,
+                        summary_chars: Some(0),
+                        turns_compacted: Some(0),
+                        turns_removed: Some(0),
+                    },
+                ));
             return;
         }
         let chars = meta.summary.chars().count();
@@ -308,6 +378,17 @@ impl CompactEngine {
             turns_compacted: meta.head_user_count as u32,
             turns_removed: turns_removed as u32,
         });
+        // Ringing 双发：CompactFinished（成功终态）
+        ctx.emitter
+            .emit_domain(deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::CompactFinished {
+                    compact_id: meta.compact_id.clone(),
+                    status: deepx_domain::CompactStatus::Completed,
+                    summary_chars: Some(chars),
+                    turns_compacted: Some(meta.head_user_count as u32),
+                    turns_removed: Some(turns_removed as u32),
+                },
+            ));
         ctx.emitter.emit(Agent2Ui::ToolNotice {
             message: format!(
                 "Compacted {} turns -> {chars} chars, keeping {} turns",
@@ -315,6 +396,17 @@ impl CompactEngine {
             ),
             level: "info".into(),
         });
+        // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+            deepx_domain::ToolEvent::ToolNotice {
+                tool_call_id: None,
+                level: deepx_domain::NoticeLevel::Info,
+                message: format!(
+                    "Compacted {} turns -> {chars} chars, keeping {} turns",
+                    meta.head_user_count, meta.kept_user_count,
+                ),
+            },
+        ));
     }
 }
 
@@ -332,24 +424,52 @@ fn estimate_message_tokens(message: &deepx_types::Message) -> usize {
 /// via `CompactDelta` events pushed through `event_tx`.
 /// Returns CompactMeta via the channel.
 pub(crate) fn run_compact_worker(
+    seed: String,
+    compact_id: String,
     prompt: String,
     provider: deepx_gate::ProviderConfig,
     kept_user_count: usize,
     head_user_count: usize,
-    event_tx: std::sync::mpsc::SyncSender<deepx_proto::Agent2Ui>,
+    event_tx: std::sync::mpsc::SyncSender<crate::ring::types::WriterEvent>,
+    causation_id: Option<String>,
 ) -> CompactMeta {
     let msgs_vec = vec![deepx_types::Message::user(&prompt)];
     let mut summary = String::new();
+    let mut progress_seq = 0u64;
 
     let mut on_event = |ev: deepx_gate::StreamEvent| match ev {
         deepx_gate::StreamEvent::ContentDelta(delta) => {
             summary.push_str(&delta);
-            let _ = event_tx.send(deepx_proto::Agent2Ui::CompactDelta { delta });
+            let _ = event_tx.send(crate::ring::types::WriterEvent::Legacy(
+                deepx_proto::Agent2Ui::CompactDelta {
+                    delta: delta.clone(),
+                },
+            ));
+            // Ringing 双发：CompactProgress（replaceable 流式摘要）
+            progress_seq += 1;
+            let env = deepx_ringing::RingingWorkerEventEnvelope::new(
+                seed.as_str(),
+                format!("w-compact-{compact_id}-{progress_seq}"),
+                deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::CompactProgress {
+                        compact_id: compact_id.clone(),
+                        delta,
+                    },
+                )
+                .into(),
+            );
+            let env = match causation_id.as_deref() {
+                Some(command_id) => env.with_causation(command_id),
+                None => env,
+            };
+            let _ = event_tx.send(crate::ring::types::WriterEvent::Ringing(env));
         }
         deepx_gate::StreamEvent::ReasoningDelta(delta) => {
             // 思考链仅透传给前端（用户可以看到压缩 LLM 的推理过程），
             // 不进入 summary，否则会泄露进下一个 LLM 的上下文中。
-            let _ = event_tx.send(deepx_proto::Agent2Ui::CompactDelta { delta });
+            let _ = event_tx.send(crate::ring::types::WriterEvent::Legacy(
+                deepx_proto::Agent2Ui::CompactDelta { delta },
+            ));
         }
         _ => {}
     };
@@ -365,18 +485,21 @@ pub(crate) fn run_compact_worker(
         &mut on_event,
     ) {
         Ok(()) if !summary.trim().is_empty() => CompactMeta {
+            compact_id,
             summary,
             kept_user_count,
             head_user_count,
             error: None,
         },
         Ok(()) => CompactMeta {
+            compact_id,
             summary: String::new(),
             kept_user_count,
             head_user_count,
             error: Some("Compact failed: model returned empty response.".into()),
         },
         Err(e) => CompactMeta {
+            compact_id,
             summary: String::new(),
             kept_user_count,
             head_user_count,

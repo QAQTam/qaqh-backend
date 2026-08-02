@@ -257,14 +257,10 @@ pub struct SkillsStatus {
 pub struct SkillRuntimeInfo {
     pub name: String,
     pub description: String,
-    /// Current lifecycle state: "catalog", "requested", "active", "review_due", or "unavailable".
+    /// Current lifecycle state: "catalog", "requested", "active", or "unavailable".
     pub state: String,
     /// Display source path (e.g. "skills/deepx/deepx-debug" or "~/.deepx/skills/...").
     pub source: String,
-    /// Number of turns before the lease expires and the skill must be re-validated.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub lease_remaining: Option<u8>,
     /// Estimated token count of the skill body.
     pub token_count: usize,
     /// Error message if the skill failed to load.
@@ -1278,7 +1274,7 @@ mod tests {
             Agent2Ui::CodeDelta { lines_added: 1, lines_removed: 0, files_created: 0, files_deleted: 0, file: None },
             Agent2Ui::AuditRecord { tool_name: "n".into(), result_summary: "s".into(), success: true, time: "t".into(), args: "{}".into() },
             Agent2Ui::ToolNotice { level: "info".into(), message: "m".into() },
-            Agent2Ui::Dashboard { hp_connected: false, session_seed: "s".into(), tool_calls_total: 0, tool_failures: 0, current_phase: "idle".into(), streaming: false, dsml_compat_count: 0, documents: vec![], recent_edits: vec![], tasks: vec![], session_title: None, usage: None, context_limit: 0, model: None },
+            Agent2Ui::Dashboard { hp_connected: false, session_seed: "s".into(), tool_calls_total: 0, tool_failures: 0, current_phase: "idle".into(), streaming: false, dsml_compat_count: 0, documents: vec![], recent_edits: vec![], tasks: vec![], current_todo_id: None, session_title: None, usage: None, context_limit: 0, model: None },
             Agent2Ui::UsageUpdated { turn_id: "t".into(), round_num: 0, usage: deepx_types::UsageInfo::default(), context_limit: 0, model: "m".into() },
             Agent2Ui::ProviderRetrying { turn_id: "t".into(), round_num: 0, attempt: 1, max_retries: 3, delay_secs: 1, error: "timeout".into() },
             Agent2Ui::Done,

@@ -4,7 +4,7 @@ This document is authoritative for skill discovery, context assembly, runtime st
 
 ## Ownership and context order
 
-`SkillContextManager` owns catalog snapshots, Requested/Active/ReviewDue/Unavailable state, leases, budget, hot reload, queued UI transitions, revisions, and session conversion. `MessageStore` owns conversation history only and never infers skill state from historical system messages.
+`SkillContextManager` owns catalog snapshots, Requested/Active/Unavailable state, budget, hot reload, queued UI transitions, revisions, and session conversion. `MessageStore` owns conversation history only and never infers skill state from historical system messages.
 
 Each LLM request is assembled in this order:
 
@@ -21,7 +21,7 @@ Catalog and envelope messages are never written to history. Removing all skills 
 
 Discovery precedence is `.deepx/skills`, `.agents/skills`, and `skills` under the workspace, followed by the equivalent user roots. Scanning and file sizes are bounded. Invalid entries do not stop discovery and appear as Unavailable diagnostics.
 
-The fixed `skills` schema supports `activate`, `retain`, `release`, `resource`, `list`, and `validate`; it is not expanded per discovered skill. Successful lifecycle actions return ordered typed `SkillEffect` values. Parallel results are committed in original tool-call order. Generic `read` and `search` reject or exclude discovered `SKILL.md` files and managed resources with `USE_SKILLS_TOOL`.
+The fixed `skills` schema supports `activate`, `retain`, `release`, `resource`, `list`, and `validate`; it is not expanded per discovered skill. Successful lifecycle actions return ordered typed `SkillEffect` values. Parallel results are committed in original tool-call order. Generic `read` rejects or excludes discovered `SKILL.md` files and managed resources with `USE_SKILLS_TOOL`.
 
 ## State machine and turn lifecycle
 
@@ -29,11 +29,11 @@ Frontend Load and `$skill-name` create Requested state and add only a temporary 
 
 Every user turn freezes a `SkillTurnSnapshot`. Permission, ask-user, plan review, and additional model laps reuse that snapshot epoch. UI operations received during a turn are queued until the next user-turn boundary. Only successful `TurnComplete` consumes a lease; cancel and abort do not.
 
-Active skills receive a three-successful-turn lease. Expiry moves them to ReviewDue. `retain` renews three turns and `release` removes immediately. If a review turn ends without either action, removal occurs at the following user-turn boundary and a one-shot system notice is emitted.
+Active skills stay injected until explicitly released (no turn lease / auto-unload — removed to keep the system-prompt prefix stable and preserve cache hits across long-running tasks). `release` removes immediately.
 
 ## Budget and hot update
 
-Total skill instructions are limited to 10% of effective input capacity with a 64K-token ceiling; one skill is limited to 32K. Bodies are never truncated. Reclamation order is ReviewDue first, then shortest remaining lease, oldest retain revision, and name. Activation is rejected if reclamation cannot satisfy the budget.
+Total skill instructions are limited to 10% of effective input capacity with a 64K-token ceiling; one skill is limited to 32K. Bodies are never truncated. Reclamation order is oldest retain revision, then name. Activation is rejected if reclamation cannot satisfy the budget.
 
 Catalog directory metadata is fingerprinted every user turn while unchanged rendered catalog bytes are reused. Active bodies are reloaded and validated every turn. A changed body replaces the old body immediately and resets its lease. Changes of at most 200 lines include a diff; larger changes include hashes and add/remove counts only. Missing or invalid active files are removed instead of retaining stale instructions.
 

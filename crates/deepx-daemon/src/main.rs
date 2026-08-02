@@ -1,4 +1,6 @@
 mod server;
+mod ringing_http;
+mod debug_http;
 
 use std::io::{Read, Write};
 

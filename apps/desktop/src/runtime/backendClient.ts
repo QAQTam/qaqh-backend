@@ -1,9 +1,14 @@
+import {
+  RINGING_COMMAND_METHODS,
+  RINGING_QUERY_METHODS,
+  buildRingingCommandEnvelope,
+} from "./ringingCommandRouter";
+
 type Listener<T = unknown> = (event: { payload: T }) => void;
 type UnlistenFn = () => void;
 type ControlMessage =
-  | { type: "event"; seed: string; event: unknown }
   | { type: "session_activity"; activity: unknown }
-  | { type: "snapshot"; snapshot: { activities?: unknown[]; attached_sessions?: string[]; session_events?: Record<string, unknown[]> } }
+  | { type: "snapshot"; snapshot: { activities?: unknown[]; attached_sessions?: string[] } }
   | { type: string; [key: string]: unknown };
 
 const listeners = new Map<string, Set<Listener>>();
@@ -20,18 +25,12 @@ function ensureBridgeListener(): void {
   if (bridgeReady) return;
   bridgeReady = true;
   backendBridge().onMessage(payload => {
-    if (payload.type === "event") dispatch(`agent-${String(payload.seed)}-event`, payload.event);
-    else if (payload.type === "session_activity") dispatch("session-activity", payload.activity);
+    if (payload.type === "session_activity") dispatch("session-activity", payload.activity);
     else if (payload.type === "snapshot") {
-      const snapshot = payload.snapshot as { activities?: unknown[]; attached_sessions?: string[]; session_events?: Record<string, unknown[]> };
+      const snapshot = payload.snapshot as { activities?: unknown[]; attached_sessions?: string[] };
       for (const seed of snapshot.attached_sessions ?? []) attached.add(seed);
       for (const activity of snapshot.activities ?? []) dispatch("session-activity", activity);
-      for (const [seed, events] of Object.entries(snapshot.session_events ?? {})) {
-        for (const event of events) dispatch(`agent-${seed}-event`, event);
-      }
-      dispatch("backend-snapshot", snapshot);
     } else if (payload.type === "error" && payload.code === "disconnected") attached.clear();
-    dispatch("backend-message", payload);
   });
   backendBridge().onStatus(payload => dispatch("backend-status", payload));
 }
@@ -51,17 +50,99 @@ async function attach(seed: string): Promise<void> {
 export async function request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   ensureBridgeListener();
   const seed = typeof params.seed === "string" ? params.seed : "";
-  const domain = method.split(".", 1)[0];
-  const needsLease = ["session", "interaction", "workspace", "git", "plan", "skills", "todo"].includes(domain)
-    && !["session.list", "session.activity", "session.new", "skills.list_tools"].includes(method);
+  const needsLease = leaseRequired(method);
   if (needsLease && seed) await attach(seed);
+  // 请求前完成传输选择。Ringing v2 是唯一允许的主通道，不能在初始
+  // connected=false 的瞬间把请求误发到 legacy。
+  await backendBridge().connect();
+  const backendState = (await backendBridge().status()) ?? { connected: false };
+
+  // Ringing v2 是连接级选择：所有命令/查询固定走 v2，协商失败直接暴露。
+  const ringing = window.deepx?.ringing;
+  if (ringing && backendState.transport === "ringing") {
+    const spec = RINGING_COMMAND_METHODS[method];
+    if (spec) {
+      const command = spec.build(params);
+      if (command) {
+        // Local paths are intentionally handled by Electron main. It reads
+        // and uploads them as ContentRef values before dispatching v2.
+        if (method === "session.send_message" && Array.isArray(params.files) && params.files.length > 0) {
+          return backendBridge().request(method, params) as Promise<T>;
+        }
+        try {
+          const envelope = buildRingingCommandEnvelope(
+            seed,
+            spec.channel,
+            command,
+            params.expectedRevision ?? params.expected_revision,
+          );
+          const ack = (await ringing.command(seed, spec.channel, envelope)) as {
+            status?: string;
+            code?: string;
+            message?: string;
+          };
+          if (ack?.status === "rejected") {
+            throw new Error(ack.message ?? `Ringing rejected command: ${ack.code ?? "rejected"}`);
+          }
+          return ack as T;
+        } catch (error) {
+          // Transport choice is connection-wide; a v2 command error never
+          // changes the selected backend or retries through legacy.
+          throw error;
+        }
+      }
+    } else if (RINGING_QUERY_METHODS.has(method)) {
+      try {
+        const queryParams: Record<string, string | undefined> = {};
+        for (const [key, value] of Object.entries(params)) {
+          if (value === undefined || value === null) continue;
+          if (
+            typeof value === "string" ||
+            typeof value === "number" ||
+            typeof value === "boolean"
+          ) {
+            queryParams[key] = String(value);
+          }
+        }
+        return (await ringing.query(method, queryParams)) as T;
+      } catch (error) {
+        // Transport choice is connection-wide; a v2 query error never falls
+        // back to legacy.
+        throw error;
+      }
+    }
+  }
+
+  if (backendState.transport !== "ringing") {
+    throw new Error("Ringing v2 is required but the daemon is not connected");
+  }
+  // 未映射为 typed command/query 的请求由 Electron main 转成 v2 action。
+  return backendBridge().request(method, params) as Promise<T>;
+}
+
+function leaseRequired(method: string): boolean {
+  const domain = method.split(".", 1)[0];
+  return ["session", "interaction", "workspace", "git", "plan", "skills", "todo"].includes(domain)
+    && !["session.list", "session.activity", "session.new", "skills.list_tools"].includes(method);
+}
+
+/**
+ * 保留原导出名称以兼容调用方；实际仍由 Electron main 转发至 v2 action，
+ * 不会建立 legacy WebSocket 或执行 legacy 回退。
+ */
+export async function requestLegacy<T>(
+  method: string,
+  params: Record<string, unknown>,
+): Promise<T> {
+  ensureBridgeListener();
+  const seed = typeof params.seed === "string" ? params.seed : "";
   try {
     return backendBridge().request(method, params) as Promise<T>;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     // Stale lease: snapshot told us the session was attached, but daemon
     // disagrees. Clear the cached flag and retry once with a fresh attach.
-    if (needsLease && seed && msg.includes("session_lease_required")) {
+    if (leaseRequired(method) && seed && msg.includes("session_lease_required")) {
       attached.delete(seed);
       await attach(seed);
       return backendBridge().request(method, params) as Promise<T>;

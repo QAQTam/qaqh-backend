@@ -1,5 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
-import type { PermissionRisk } from "../../lib/types";
+import type { PermissionRisk } from "../../lib/types/ringing";
 
 export interface PermissionRequest {
   tool_call_id: string;

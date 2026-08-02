@@ -3,7 +3,7 @@
 import { render } from "@solidjs/web";
 import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createRawSessionState, reduceAgentEvent } from "../../store/sessionEventReducer";
+import { createRawSessionState } from "../../store/rawSession";
 import { createI18n, I18nCtx } from "../../i18n";
 import InfoPopover from "./InfoPopover";
 
@@ -23,12 +23,10 @@ describe("InfoPopover", () => {
     ), host);
 
     expect(host.textContent).toContain("等待用量数据");
-    setSession(reduceAgentEvent(session(), {
-      type: "usage_updated",
-      turn_id: "t1",
-      round_num: 0,
+    setSession({ ...session(), session: {
+      ...session().session,
       model: "deepseek-v4-pro",
-      context_limit: 1_000_000,
+      contextLimit: 1_000_000,
       usage: {
         prompt_tokens: 100_000,
         completion_tokens: 5_000,
@@ -38,14 +36,15 @@ describe("InfoPopover", () => {
         reasoning_tokens: 3_000,
         cache_usage_reported: true,
       },
-    }, 100));
+      usageRequestCount: 1,
+    } });
     await Promise.resolve();
 
     expect(host.textContent).toContain("deepseek-v4-pro");
     expect(host.textContent).toContain("80.0%");
-    expect(host.textContent).toContain("100.0K");
-    expect(host.textContent).toContain("105.0K");
-    expect(host.textContent).toContain("缓存覆盖 1/1 次请求");
+    expect(host.textContent).toContain("100,000");
+    expect(host.textContent).toContain("105,000");
+    expect(host.textContent).toContain("1 次请求");
   });
 
   it("distinguishes a reported zero-percent hit rate from missing cache data", async () => {
@@ -67,25 +66,23 @@ describe("InfoPopover", () => {
       reasoning_tokens: 0,
     };
 
-    setSession(reduceAgentEvent(session(), {
-      type: "usage_updated",
-      turn_id: "t1",
-      round_num: 0,
+    setSession({ ...session(), session: {
+      ...session().session,
       model: "deepseek-chat",
-      context_limit: 128_000,
+      contextLimit: 128_000,
       usage: { ...usage, cache_usage_reported: true },
-    }, 100));
+      usageRequestCount: 1,
+    } });
     await Promise.resolve();
     expect(host.querySelector(".info-cache-label strong")?.textContent).toBe("0.0%");
 
-    setSession(reduceAgentEvent(session(), {
-      type: "usage_updated",
-      turn_id: "t1",
-      round_num: 0,
+    setSession({ ...session(), session: {
+      ...session().session,
       model: "provider-without-cache-data",
-      context_limit: 128_000,
+      contextLimit: 128_000,
       usage,
-    }, 101));
+      usageRequestCount: 2,
+    } });
     await Promise.resolve();
     expect(host.querySelector(".info-cache")).toBeNull();
   });

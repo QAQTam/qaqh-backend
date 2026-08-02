@@ -19,7 +19,7 @@ interface SkillsViewProps {
   onReload: () => Promise<void>;
 }
 
-type ColumnState = "catalog" | "requested" | "active" | "review_due" | "unavailable";
+type ColumnState = "catalog" | "requested" | "active" | "unavailable";
 type ViewSkill = SkillRuntimeInfo & { scope: string; path: string };
 
 export default function SkillsView(props: SkillsViewProps) {
@@ -52,7 +52,7 @@ export default function SkillsView(props: SkillsViewProps) {
   });
   const columns = createMemo(() => {
     const value: Record<ColumnState, ViewSkill[]> = {
-      catalog: [], requested: [], active: [], review_due: [], unavailable: [],
+      catalog: [], requested: [], active: [], unavailable: [],
     };
     for (const item of items()) {
       const state = item.state as ColumnState;
@@ -86,7 +86,6 @@ export default function SkillsView(props: SkillsViewProps) {
     catalog: t().skills.groupCatalog,
     requested: t().skills.groupRequested,
     active: t().skills.groupEnabled,
-    review_due: t().skills.groupReviewDue,
     unavailable: t().skills.groupUnavailable,
   };
 
@@ -166,7 +165,7 @@ export default function SkillsView(props: SkillsViewProps) {
       <Show when={items().length} fallback={<div class="skills-empty"><p>{search() ? t().skills.noResults : t().skills.empty}</p></div>}>
         <div class="skills-body skills-workbench">
           <span hidden>{t().skills.groupProject}</span><span hidden>{t().skills.groupUser}</span>
-          <For each={["catalog", "requested", "active", "review_due", "unavailable"] as ColumnState[]}>
+          <For each={["catalog", "requested", "active", "unavailable"] as ColumnState[]}>
             {state => <section class={`skill-group skill-column skill-column-${state}`}>
               <h2 class="skill-group-title">{labels[state]} <span>{columns()[state].length}</span></h2>
               <For each={columns()[state]}>
@@ -200,7 +199,6 @@ function SkillCard(props: {
       case "requested": return <button disabled={props.disabled} onClick={() => props.onAction("release")}>{t().skills.cancel}</button>;
       case "active": return <label class="skill-toggle"><input type="checkbox" checked={true} disabled={props.disabled}
         onChange={() => props.onAction("release")} /><span class="skill-toggle-track" /></label>;
-      case "review_due": return <><button disabled={props.disabled} onClick={() => props.onAction("retain")}>{t().skills.retain}</button><button disabled={props.disabled} onClick={() => props.onAction("release")}>{t().skills.unload}</button></>;
       default: return <button disabled={props.disabled} onClick={() => props.onAction("activate")}>{t().skills.retry}</button>;
     }
   };
@@ -209,7 +207,6 @@ function SkillCard(props: {
       <div class="skill-row-left"><span class="skill-name">{props.item.name}</span>
         <span class="skill-desc-excerpt">{props.item.description}</span></div>
       <div class="skill-row-meta"><span class="skill-scope-badge">{props.item.scope}</span>
-        <Show when={props.item.lease_remaining !== undefined}><span>{t().skills.lease.replace("{seconds}", String(props.item.lease_remaining))}</span></Show>
         <span>{props.item.token_count}t</span></div>
     </div>
     <div class="skill-row-actions">{props.pending ? <span class="skill-spinner" /> : action()}</div>

@@ -17,8 +17,8 @@
 use std::path::Path;
 
 use deepx_types::Message;
-use deepx_vector::memory::{MemoryEntry, MemoryStore};
 use deepx_vector::VectorResult;
+use deepx_vector::memory::{MemoryEntry, MemoryStore};
 
 /// Archive noteworthy exchanges from a session into persistent memory.
 ///
@@ -65,9 +65,7 @@ fn extract_entries(session_id: &str, messages: &[Message]) -> Vec<MemoryEntry> {
         }
         let lower = content.to_lowercase();
 
-        let mem_type = if lower.contains("决定")
-            || lower.contains("选择")
-            || lower.contains("方案")
+        let mem_type = if lower.contains("决定") || lower.contains("选择") || lower.contains("方案")
         {
             "decision"
         } else if lower.contains("修复")

@@ -28,9 +28,6 @@ pub struct SkillSessionEntry {
     pub source: String,
     /// Current activation state.
     pub state: SkillSessionEntryState,
-    /// Number of turns remaining before the skill lease expires and
-    /// must be re-validated or released.
-    pub lease_remaining: u8,
 }
 
 /// Snapshot of skill activation state for a session, persisted in meta.json.

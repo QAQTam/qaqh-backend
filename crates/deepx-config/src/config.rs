@@ -1,9 +1,10 @@
 use deepx_types::{
     ConfigStore, PersistentConfig, PersistentDatabaseConfig, PersistentMultimodalConfig,
-    PersistentSubagentConfig,
+    PersistentSubagentConfig, PersistentWorkspaceConfig,
 };
 use std::collections::HashMap; // still used by profiles
 
+#[cfg(feature = "turso-backend")]
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ConfigMirrorOutbox {
     version: u32,
@@ -73,7 +74,7 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: cfg!(feature = "turso-backend"),
             url: None,
         }
     }
@@ -227,6 +228,22 @@ pub struct Config {
     /// triggered before the next user message is processed. 0.0 disables.
     /// Default: 0.75 (compact at 75% capacity).
     pub auto_compact_threshold: f64,
+    /// 工具套件运行环境："local"（默认）| "wsl"（仅 Windows）。
+    pub workspace: WorkspaceConfig,
+}
+
+/// 工具套件运行环境（daemon 据此拉起 deepx-workspace serve）。
+#[derive(Debug, Clone)]
+pub struct WorkspaceConfig {
+    pub mode: String,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            mode: "local".into(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -269,6 +286,7 @@ impl Default for Config {
             permission_level: 4, // Unrestricted — backward compat
             tokenizer_path: None,
             auto_compact_threshold: 0.75,
+            workspace: WorkspaceConfig::default(),
         }
     }
 }
@@ -303,7 +321,7 @@ impl Config {
             .as_ref()
             .and_then(|pc| pc.database.as_ref())
             .and_then(|db| db.enabled)
-            .unwrap_or(true); // default: enabled
+            .unwrap_or(cfg!(feature = "turso-backend"));
 
         // A durable outbox is replayed before normal DB reads. TOML remains
         // the bootstrap authority; the outbox only completes its DB mirror.
@@ -506,6 +524,13 @@ impl Config {
             if let Some(act) = pc.auto_compact_threshold {
                 cfg.auto_compact_threshold = act;
             }
+
+            // ── 工具套件运行环境 ──
+            if let Some(ref ws) = pc.workspace {
+                if let Some(ref mode) = ws.mode {
+                    cfg.workspace.mode = mode.clone();
+                }
+            }
         }
 
         // TOML is authoritative for database.enabled (prevents stale ConfigDb value)
@@ -636,12 +661,18 @@ impl Config {
             permission_level: Some(self.permission_level),
             tokenizer_path: self.tokenizer_path.clone(),
             auto_compact_threshold: Some(self.auto_compact_threshold),
+            workspace: Some(PersistentWorkspaceConfig {
+                mode: Some(self.workspace.mode.clone()),
+            }),
         };
         let json = serde_json::to_string(&pc).map_err(|e| format!("serialize config mirror: {e}"))?;
         let db_path = deepx_types::platform::data_dir().join("config.db");
+        #[cfg(feature = "turso-backend")]
         if self.database.enabled {
             Self::write_outbox_at(&db_path, &json)?;
         }
+        #[cfg(not(feature = "turso-backend"))]
+        let _ = (&db_path, &json);
         log::info!(
             "[Config::save] writing to {}",
             deepx_types::platform::config_path().display()
@@ -697,7 +728,6 @@ impl Config {
         db.init_table()?;
         db.save_config(json)
     }
-
 
     pub fn apply_profile(&mut self, name: &str) -> Option<String> {
         let profile = self.profiles.get(name)?.clone();
@@ -760,10 +790,12 @@ impl Config {
         crate::registry::protocol_for(&self.provider_id, &self.endpoint)
     }
 
+    #[cfg(any(feature = "turso-backend", test))]
     fn outbox_path(db_path: &std::path::Path) -> std::path::PathBuf {
         db_path.with_file_name("config-mirror-outbox.json")
     }
 
+    #[cfg(feature = "turso-backend")]
     fn write_outbox_at(db_path: &std::path::Path, json: &str) -> Result<(), String> {
         let path = Self::outbox_path(db_path);
         let tmp = path.with_extension("json.tmp");
@@ -781,14 +813,50 @@ impl Config {
     }
 
     fn replay_outbox_at(db_path: &std::path::Path) -> Result<(), String> {
-        let path = Self::outbox_path(db_path);
-        if !path.exists() { return Ok(()); }
-        let _outbox: ConfigMirrorOutbox = serde_json::from_slice(&std::fs::read(&path)
-            .map_err(|e| format!("read config outbox: {e}"))?)
-            .map_err(|e| format!("parse config outbox: {e}"))?;
+        #[cfg(not(feature = "turso-backend"))]
+        {
+            let _ = db_path;
+            return Ok(());
+        }
         #[cfg(feature = "turso-backend")]
-        { let db = crate::config_db::ConfigDb::open(db_path)?; db.init_table()?; db.save_config(&outbox.config_json)?; Self::remove_outbox_at(db_path)?; }
-        Ok(())
+        {
+            let path = Self::outbox_path(db_path);
+            if !path.exists() { return Ok(()); }
+            let outbox: ConfigMirrorOutbox = serde_json::from_slice(&std::fs::read(&path)
+                .map_err(|e| format!("read config outbox: {e}"))?)
+                .map_err(|e| format!("parse config outbox: {e}"))?;
+            let db = crate::config_db::ConfigDb::open(db_path)?;
+            db.init_table()?;
+            db.save_config(&outbox.config_json)?;
+            Self::remove_outbox_at(db_path)?;
+            Ok(())
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "turso-backend")))]
+mod file_only_tests {
+    use super::Config;
+
+    #[test]
+    fn disabled_backend_ignores_existing_mirror_outbox() {
+        let root = std::env::temp_dir().join(format!(
+            "deepx-config-file-only-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create test directory");
+        let db_path = root.join("config.db");
+        std::fs::write(Config::outbox_path(&db_path), b"not-json")
+            .expect("write stale outbox");
+
+        Config::replay_outbox_at(&db_path).expect("disabled backend must ignore stale outbox");
+        assert!(Config::outbox_path(&db_path).exists());
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
     }
 }
 
@@ -882,14 +950,21 @@ mod tests {
         let db_path = root.join("config.db");
         let json = serde_json::to_string(&PersistentConfig {
             api_key: Some("outbox-key".into()),
-            database: Some(PersistentDatabaseConfig { enabled: Some(true), url: None }),
+            database: Some(PersistentDatabaseConfig {
+                enabled: Some(true),
+                url: None,
+            }),
             ..Default::default()
-        }).expect("serialize config");
+        })
+        .expect("serialize config");
         Config::write_outbox_at(&db_path, &json).expect("write outbox");
         Config::replay_outbox_at(&db_path).expect("replay outbox");
         assert!(!Config::outbox_path(&db_path).exists());
         let db = crate::config_db::ConfigDb::open(&db_path).expect("open database");
-        let saved = db.load_config().expect("read database").expect("database config");
+        let saved = db
+            .load_config()
+            .expect("read database")
+            .expect("database config");
         assert_eq!(saved, json);
         std::fs::remove_dir_all(root).expect("remove test directory");
     }

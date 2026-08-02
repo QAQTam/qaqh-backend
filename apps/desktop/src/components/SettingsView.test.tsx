@@ -50,7 +50,7 @@ function cfg(overrides: Record<string, unknown> = {}) {
     context_limit: 1000000,
     reasoning_effort: "high",
     compliance_enabled: true,
-    database: { enabled: true },
+    database: { enabled: false, available: false },
     providers: sampleProviders,
     subagent: {
       model: "",
@@ -58,7 +58,7 @@ function cfg(overrides: Record<string, unknown> = {}) {
       api_key: "****",
       max_tokens: 4096,
       timeout_secs: 120,
-      default_tools: ["read_file", "search"],
+      default_tools: ["read_file"],
     },
     ...overrides,
   };
@@ -277,7 +277,7 @@ describe("SettingsView – API Key behavior", () => {
     expect(saveArgs.subagentApiKey).not.toBe("****");
 
     // database
-    expect(saveArgs.databaseEnabled).toBe(true);
+    expect(saveArgs.databaseEnabled).toBe(false);
 
     dispose();
     host.remove();
@@ -384,9 +384,9 @@ describe("SettingsView – API Key behavior", () => {
     host.remove();
   });
 
-  it("8. persists and applies the database toggle immediately", async () => {
+  it("8. disables the database toggle when the backend is unavailable", async () => {
     invokeMock.mockImplementation(async (command) => {
-      if (command === "config.load") return cfg({ database: { enabled: false } });
+      if (command === "config.load") return cfg({ database: { enabled: false, available: false } });
       if (command === "skills.list_tools") return [];
       if (command === "config.database_migration_count") return { pending: 0 };
       return undefined;
@@ -398,12 +398,9 @@ describe("SettingsView – API Key behavior", () => {
     await new Promise((r) => setTimeout(r, 20));
 
     const toggle = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    toggle.checked = true;
-    toggle.dispatchEvent(new Event("change", { bubbles: true }));
-
-    await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("config.set_database_enabled", { enabled: true });
-    });
+    expect(toggle.disabled).toBe(true);
+    expect(host.textContent).toContain("暂时停用");
+    expect(invokeMock).not.toHaveBeenCalledWith("config.set_database_enabled", expect.anything());
 
     dispose();
     host.remove();

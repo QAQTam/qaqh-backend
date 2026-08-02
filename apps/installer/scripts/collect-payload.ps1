@@ -136,6 +136,7 @@ switch ($Kind) {
         $components.backend = $backendComponent
         $sidecar = Join-Path $FrontendRoot "build\sidecar"
         Add-BundleFile -Source (Join-Path $sidecar "deepx-daemon.exe") -Target "resources/deepx-daemon.exe"
+        Add-BundleFile -Source (Join-Path $sidecar "deepx-workspace.exe") -Target "resources/deepx-workspace.exe"
         Add-BundleFile -Source (Join-Path $sidecar "daemon-manifest.json") -Target "resources/daemon-manifest.json"
     }
     "full" {

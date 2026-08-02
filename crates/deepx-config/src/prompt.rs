@@ -56,11 +56,12 @@ fn detect_shells() -> &'static str {
         if cfg!(windows) {
             // Never spawn a shell as a capability probe here. Git Bash startup
             // can block for tens of seconds under concurrent agent creation.
-            if executable_on_path("bash") {
-                shells.push("bash (Git for Windows)");
-            }
+            // 顺序与默认 shell 一致：pwsh 优先。
             if executable_on_path("pwsh") {
                 shells.push("pwsh (PowerShell 7)");
+            }
+            if executable_on_path("bash") {
+                shells.push("bash (Git for Windows)");
             }
             shells.push("cmd");
         } else {

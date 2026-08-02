@@ -70,22 +70,33 @@ fn build_responses_url(base_url: &str, responses_path: Option<&str>) -> String {
 }
 
 // ── Message conversion: DeepX ContentBlock → Responses input[] items ──
+//
+// 第一条 system 消息 → 顶层 `instructions`（文档语义：模型上下文中的
+// 第一条 system 消息，静态 base prompt 的正确承载位）；其余 system
+// （运行时动态注入：skills catalog、上下文 envelope 等）→ `developer` item。
 
 fn convert_messages_to_input(
     messages: &[Message],
     compat: &ResponsesCompat,
-) -> Vec<serde_json::Value> {
+) -> (Vec<serde_json::Value>, Option<String>) {
     let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut instructions: Option<String> = None;
 
     for msg in messages {
         match msg.role.as_str() {
             "system" => {
                 let text = extract_text(&msg.content);
-                items.push(serde_json::json!({
-                    "type": "message",
-                    "role": "developer",
-                    "content": [{"type": "input_text", "text": text}],
-                }));
+                if instructions.is_none() {
+                    // 第一条 system = base 系统指令 → 顶层 instructions
+                    instructions = Some(text);
+                } else {
+                    // 动态注入的系统指令保持 developer item（追加语义）
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": text}],
+                    }));
+                }
             }
             "user" => {
                 let parts = convert_user_content(&msg.content);
@@ -159,7 +170,7 @@ fn convert_messages_to_input(
         }
     }
 
-    items
+    (items, instructions)
 }
 
 fn extract_text(blocks: &[ContentBlock]) -> String {
@@ -260,7 +271,7 @@ pub fn chat_stream_responses(
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
     let compat = &provider.responses_compat;
-    let input_items = convert_messages_to_input(&messages, compat);
+    let (input_items, instructions) = convert_messages_to_input(&messages, compat);
     let responses_tools = convert_tools(tools, compat);
 
     let mut body_map = serde_json::Map::new();
@@ -269,6 +280,9 @@ pub fn chat_stream_responses(
     body_map.insert("stream".into(), serde_json::json!(true));
     body_map.insert("store".into(), serde_json::json!(false));
     body_map.insert("parallel_tool_calls".into(), serde_json::json!(true));
+    if let Some(ref instructions) = instructions {
+        body_map.insert("instructions".into(), serde_json::json!(instructions));
+    }
     if max_tokens > 0 {
         body_map.insert("max_output_tokens".into(), serde_json::json!(max_tokens));
     }
@@ -376,7 +390,7 @@ pub fn chat_sync_responses(
     max_tokens: u32,
 ) -> Result<String, String> {
     let compat = &provider.responses_compat;
-    let input_items = convert_messages_to_input(&messages, compat);
+    let (input_items, instructions) = convert_messages_to_input(&messages, compat);
     let responses_tools = convert_tools(None, compat);
 
     let mut body_map = serde_json::Map::new();
@@ -384,6 +398,9 @@ pub fn chat_sync_responses(
     body_map.insert("input".into(), serde_json::Value::Array(input_items));
     body_map.insert("stream".into(), serde_json::json!(false));
     body_map.insert("store".into(), serde_json::json!(false));
+    if let Some(ref instructions) = instructions {
+        body_map.insert("instructions".into(), serde_json::json!(instructions));
+    }
     if max_tokens > 0 {
         body_map.insert("max_output_tokens".into(), serde_json::json!(max_tokens));
     }
@@ -567,6 +584,9 @@ fn handle_responses_event(
         }
         "response.output_text.delta" => {
             if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                if delta.is_empty() {
+                    return EventAction::Continue;
+                }
                 state.accumulated_text.push_str(delta);
                 on_event(StreamEvent::ContentDelta(delta.to_string()));
             }
@@ -574,6 +594,9 @@ fn handle_responses_event(
         }
         "response.reasoning_text.delta" => {
             if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                if delta.is_empty() {
+                    return EventAction::Continue;
+                }
                 state.reasoning_text.push_str(delta);
                 on_event(StreamEvent::ReasoningDelta(delta.to_string()));
             }
@@ -581,6 +604,9 @@ fn handle_responses_event(
         }
         "response.function_call_arguments.delta" => {
             if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                if delta.is_empty() {
+                    return EventAction::Continue;
+                }
                 let item_id = data.get("item_id").and_then(|i| i.as_str()).unwrap_or("");
                 if let Some(tc) = state.tool_calls.iter_mut().find(|tc| {
                     tc.get("item_id").and_then(|i| i.as_str()) == Some(item_id)
@@ -681,7 +707,10 @@ fn parse_responses_sse(
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
+    // 字节级累积缓冲：TCP/HTTP chunk 可能把一个 UTF-8 多字节字符切成两半，
+    // 绝不能逐 chunk 做 lossy 解码（会产生 U+FFFD 替换符并永久污染文本）。
+    // 只在拿到完整的 `\n` 结尾行之后，才对该行做严格 UTF-8 解码。
+    let mut buf: Vec<u8> = Vec::new();
 
     let mut state = ResponsesParseState::default();
 
@@ -705,57 +734,20 @@ fn parse_responses_sse(
             futures::future::Either::Right(_) => continue,
         };
 
-        buf.push_str(&String::from_utf8_lossy(&chunk));
+        buf.extend_from_slice(&chunk);
+        match feed_responses_sse(&mut buf, &mut state, on_event) {
+            Ok(SseProgress::Continue) => {}
+            Ok(SseProgress::Done) => return Ok(()),
+            Err(message) => return Err(anyhow::anyhow!("{}", message)),
+        }
+    }
 
-        while let Some(line_end) = buf.find('\n') {
-            let line = buf[..line_end].trim().to_string();
-            buf = buf[line_end + 1..].to_string();
-
-            if line.is_empty() || line.starts_with(':') {
-                continue;
-            }
-
-            // Handle SSE "event:" + "data:" pairs
-            let (_, data_str) = if line.starts_with("event: ") {
-                let next = if let Some(nl) = buf.find('\n') {
-                    let d = buf[..nl].trim().to_string();
-                    buf = buf[nl + 1..].to_string();
-                    d
-                } else {
-                    continue;
-                };
-                // Strip "data: " prefix from the next line
-                let payload = if next.starts_with("data: ") {
-                    next[6..].trim().to_string()
-                } else {
-                    next
-                };
-                ("", payload)
-            } else if line.starts_with("data: ") {
-                ("", line[6..].trim().to_string())
-            } else {
-                continue;
-            };
-
-            if data_str == "[DONE]" {
-                break;
-            }
-
-            let data: serde_json::Value = match serde_json::from_str(&data_str) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            match handle_responses_event(&data, &mut state, on_event) {
-                EventAction::Continue => {}
-                EventAction::Completed { stop_reason } => {
-                    emit_done(&mut state, stop_reason, on_event);
-                    return Ok(());
-                }
-                EventAction::Failed(message) => {
-                    return Err(anyhow::anyhow!("{}", message));
-                }
-            }
+    // 流结束：处理缓冲区中最后一条没有换行结尾的行（补一个换行触发消费）。
+    if !buf.is_empty() {
+        buf.push(b'\n');
+        match feed_responses_sse(&mut buf, &mut state, on_event) {
+            Ok(SseProgress::Continue | SseProgress::Done) => {}
+            Err(message) => return Err(anyhow::anyhow!("{}", message)),
         }
     }
 
@@ -765,10 +757,221 @@ fn parse_responses_sse(
     Ok(())
 }
 
+/// SSE 处理进展：`Done` 表示应终止读取（收到 `[DONE]` 或 terminal 事件）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SseProgress {
+    Continue,
+    Done,
+}
+
+/// 把新到达的字节追加进缓冲，并消费所有已完整的行。
+///
+/// 关键约束（UTF-8 真实性）：
+/// - 只在字节层面按 `\n` 切分；`\n` (0x0A) 不可能出现在 UTF-8 多字节序列内部，
+///   因此完整行天然对齐字符边界；
+/// - 整行用 `str::from_utf8` 严格解码；非法行跳过并告警，**绝不 lossy 注入替换符**；
+/// - `event:` / `data:` 配对在行解码之后进行。
+fn feed_responses_sse(
+    buf: &mut Vec<u8>,
+    state: &mut ResponsesParseState,
+    on_event: &mut dyn FnMut(StreamEvent),
+) -> Result<SseProgress, String> {
+    loop {
+        let Some(line_end) = buf.iter().position(|&b| b == b'\n') else {
+            return Ok(SseProgress::Continue);
+        };
+        let line_bytes: Vec<u8> = buf.drain(..=line_end).collect();
+        let line = match std::str::from_utf8(&line_bytes[..line_bytes.len() - 1]) {
+            Ok(line) => line.trim(),
+            Err(e) => {
+                log::warn!("[GATE] responses SSE line is not valid UTF-8, skipping: {e}");
+                continue;
+            }
+        };
+
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+
+        // Handle SSE "event:" + "data:" pairs
+        let data_str: String = if let Some(_rest) = line.strip_prefix("event: ") {
+            let Some(next_end) = buf.iter().position(|&b| b == b'\n') else {
+                return Ok(SseProgress::Continue);
+            };
+            let next_bytes: Vec<u8> = buf.drain(..=next_end).collect();
+            let next_line = match std::str::from_utf8(&next_bytes[..next_bytes.len() - 1]) {
+                Ok(next) => next.trim(),
+                Err(e) => {
+                    log::warn!("[GATE] responses SSE data line is not valid UTF-8, skipping: {e}");
+                    continue;
+                }
+            };
+            // Strip "data: " prefix from the next line
+            match next_line.strip_prefix("data: ") {
+                Some(payload) => payload.trim().to_string(),
+                None => next_line.to_string(),
+            }
+        } else if let Some(payload) = line.strip_prefix("data: ") {
+            payload.trim().to_string()
+        } else {
+            continue;
+        };
+
+        if data_str == "[DONE]" {
+            return Ok(SseProgress::Done);
+        }
+
+        let data: serde_json::Value = match serde_json::from_str(&data_str) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("[GATE] responses SSE JSON parse failed: {e} — data: {data_str}");
+                continue;
+            }
+        };
+
+        match handle_responses_event(&data, state, on_event) {
+            EventAction::Continue => {}
+            EventAction::Completed { stop_reason } => {
+                emit_done(state, stop_reason, on_event);
+                return Ok(SseProgress::Done);
+            }
+            EventAction::Failed(message) => return Err(message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use deepx_types::{ContentBlock, Message, ToolDef, ToolFunction};
+
+    // ── SSE UTF-8 边界 ──
+
+    #[test]
+    fn sse_utf8_char_split_across_chunks_is_not_corrupted() {
+        let mut state = ResponsesParseState::default();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut events: Vec<StreamEvent> = Vec::new();
+
+        // "中" = E4 B8 AD，故意把字节切到两个网络 chunk 里。
+        let chunk1 = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\xe4\xb8";
+        let chunk2 = b"\xad\"}\n\n";
+
+        buf.extend_from_slice(chunk1);
+        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        assert_eq!(progress, SseProgress::Continue);
+        assert!(events.is_empty(), "半行不得提前派发");
+        assert_eq!(state.accumulated_text, "");
+
+        buf.extend_from_slice(chunk2);
+        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        assert_eq!(progress, SseProgress::Continue);
+        assert_eq!(state.accumulated_text, "中");
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::ContentDelta(d)] if d == "中"
+        ));
+    }
+
+    #[test]
+    fn sse_emoji_split_across_chunks_is_not_corrupted() {
+        let mut state = ResponsesParseState::default();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut events: Vec<StreamEvent> = Vec::new();
+
+        // "👍" = F0 9F 91 8D，切成 2+2 与 3+1 两种边界都要还原。
+        let chunk1 = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\xf0\x9f";
+        let chunk2 = b"\x91\x8d\"}\n\n";
+        buf.extend_from_slice(chunk1);
+        buf.extend_from_slice(chunk2);
+        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        assert_eq!(progress, SseProgress::Continue);
+        assert_eq!(state.accumulated_text, "👍");
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::ContentDelta(d)] if d == "👍"
+        ));
+    }
+
+    #[test]
+    fn sse_utf8_split_in_tool_arguments_is_not_corrupted() {
+        let mut state = ResponsesParseState::default();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut events: Vec<StreamEvent> = Vec::new();
+
+        // 工具参数 JSON 里的中文字段值被 TCP 切断。
+        let chunk1 = b"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"i1\",\"delta\":\"{\\\"path\\\":\\\"\xe8\xaf\xbe";
+        let chunk2 = b"\xe9\xa2\x98\\\"}\"}\n\n";
+        buf.extend_from_slice(chunk1);
+        buf.extend_from_slice(chunk2);
+        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        assert_eq!(progress, SseProgress::Continue);
+        assert_eq!(state.tool_calls.len(), 1);
+        assert_eq!(
+            state.tool_calls[0].get("args").and_then(|a| a.as_str()),
+            Some("{\"path\":\"课题\"}")
+        );
+        assert!(events.is_empty(), "arguments.delta 只累积，不派发 preview");
+
+        // output_item.done 携带完整参数并派发 ToolCallProgress。
+        buf.extend_from_slice(
+            b"event: response.output_item.done\n\
+              data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\
+              \"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"\xe8\xaf\xbe\xe9\xa2\x98\\\"}\",\"call_id\":\"call_1\"}}\n\n",
+        );
+        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        assert_eq!(progress, SseProgress::Continue);
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::ToolCallProgress { args_so_far, .. }] if args_so_far == "{\"path\":\"课题\"}"
+        ));
+    }
+
+    #[test]
+    fn empty_deltas_are_not_carried_into_context_or_tools() {
+        let mut state = ResponsesParseState::default();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut events: Vec<StreamEvent> = Vec::new();
+
+        // 空 delta 不得进入累积文本、推理文本或工具参数，也不得派发事件。
+        buf.extend_from_slice(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\"}\n\n\
+              data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"\"}\n\n\
+              data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"i1\",\"delta\":\"\"}\n\n",
+        );
+        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        assert_eq!(progress, SseProgress::Continue);
+        assert_eq!(state.accumulated_text, "");
+        assert_eq!(state.reasoning_text, "");
+        assert!(state.tool_calls.is_empty(), "空参数增量不得创建 args 条目");
+        assert!(events.is_empty(), "空 delta 不得派发任何事件");
+    }
+
+    #[test]
+    fn sse_done_terminates_and_final_line_without_newline_is_consumed() {
+        let mut state = ResponsesParseState::default();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut events: Vec<StreamEvent> = Vec::new();
+
+        // 最后一个事件没有结尾换行：EOF 时必须补 \n 消费，不能丢内容。
+        buf.extend_from_slice(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
+              data: {\"type\":\"response.output_text.delta\",\"delta\":\"tail\"}",
+        );
+        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        assert_eq!(progress, SseProgress::Continue);
+        assert_eq!(state.accumulated_text, "ok");
+        assert!(!buf.is_empty(), "无换行尾巴应保留在缓冲里由 EOF 路径消费");
+
+        buf.push(b'\n');
+        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        assert_eq!(progress, SseProgress::Continue);
+        assert_eq!(state.accumulated_text, "oktail");
+
+        buf.extend_from_slice(b"data: [DONE]\n\n");
+        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        assert_eq!(progress, SseProgress::Done);
+    }
 
     /// OpenAI-reference compat used by conversion tests. `web_search` stays on
     /// by default so tests exercise the full tool list, matching production.
@@ -823,7 +1026,7 @@ mod tests {
     #[test]
     fn user_message_becomes_input() {
         let msgs = vec![Message::user("hello")];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "message");
         assert_eq!(input[0]["role"], "user");
@@ -833,10 +1036,25 @@ mod tests {
     }
 
     #[test]
-    fn system_message_becomes_developer() {
+    fn first_system_becomes_instructions_rest_stay_developer() {
+        // 第一条 system → 顶层 instructions（文档推荐承载位）
         let msgs = vec![Message::system("you are helpful")];
-        let input = convert_messages_to_input(&msgs, &test_compat());
-        assert_eq!(input[0]["role"], "developer");
+        let (input, instructions) = convert_messages_to_input(&msgs, &test_compat());
+        assert_eq!(instructions.as_deref(), Some("you are helpful"));
+        assert!(input.is_empty(), "base system must not duplicate into input[]");
+
+        // 动态注入的后续 system → developer item
+        let msgs = vec![
+            Message::system("base prompt"),
+            Message::system("skills catalog"),
+            Message::system("context envelope"),
+        ];
+        let (input, instructions) = convert_messages_to_input(&msgs, &test_compat());
+        assert_eq!(instructions.as_deref(), Some("base prompt"));
+        assert_eq!(input.len(), 2, "two dynamic system messages stay as developer items");
+        for item in &input {
+            assert_eq!(item["role"], "developer");
+        }
     }
 
     #[test]
@@ -847,7 +1065,7 @@ mod tests {
             name: None,
             content: vec![ContentBlock::Text { text: "I'll help".into() }],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["role"], "assistant");
         let content = input[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "output_text");
@@ -866,7 +1084,7 @@ mod tests {
                 input: serde_json::json!({"path": "/x.txt"}),
             }],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["call_id"], "tc_1");
         assert_eq!(input[0]["name"], "read_file");
@@ -886,7 +1104,7 @@ mod tests {
                 success: true,
             }],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "tc_1");
         assert_eq!(input[0]["output"], "file contents");
@@ -907,7 +1125,7 @@ mod tests {
                 },
             ],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         // Should have: message (with text) + function_call
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "message");
@@ -923,7 +1141,7 @@ mod tests {
             name: None,
             content: vec![],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         let content = input[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["text"], "");
     }
@@ -1025,7 +1243,7 @@ mod tests {
                 },
             ],
         }];
-        let input = convert_messages_to_input(&msgs, &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         let ws_items: Vec<_> = input
             .iter()
             .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("web_search_call"))
@@ -1048,7 +1266,7 @@ mod tests {
                 action: serde_json::json!({"type": "search"}),
             }],
         }];
-        let input = convert_messages_to_input(&msgs, &compat);
+        let (input, _instructions) = convert_messages_to_input(&msgs, &compat);
         assert!(
             input
                 .iter()
@@ -1084,12 +1302,13 @@ mod tests {
             },
             Message::user("read x.txt"),
         ];
-        let input = convert_messages_to_input(&msgs, &test_compat());
-        assert_eq!(input.len(), 4);
-        assert_eq!(input[0]["role"], "developer");
-        assert_eq!(input[1]["role"], "user");
-        assert_eq!(input[2]["role"], "assistant");
-        assert_eq!(input[3]["role"], "user");
+        let (input, instructions) = convert_messages_to_input(&msgs, &test_compat());
+        // 第一条 system 已被提取为 instructions
+        assert_eq!(instructions.as_deref(), Some("be helpful"));
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[2]["role"], "user");
     }
 
     // ── SSE event handling (OpenAI + DeepSeek terminal events) ──
@@ -1289,7 +1508,7 @@ mod tests {
             StreamEvent::Done { raw_message, .. } => raw_message.clone(),
             other => panic!("expected Done, got {other:?}"),
         };
-        let input = convert_messages_to_input(&[raw_message], &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&[raw_message], &test_compat());
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "web_search_call");
         assert_eq!(input[0]["id"], "ws_1");
@@ -1324,7 +1543,7 @@ mod tests {
             StreamEvent::Done { raw_message, .. } => raw_message.clone(),
             other => panic!("expected Done, got {other:?}"),
         };
-        let input = convert_messages_to_input(&[raw_message], &test_compat());
+        let (input, _instructions) = convert_messages_to_input(&[raw_message], &test_compat());
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["call_id"], "call_1");

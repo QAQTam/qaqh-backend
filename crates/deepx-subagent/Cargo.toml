@@ -5,7 +5,7 @@ edition.workspace = true
 description = "DeepX subagent tool — spawn sub-agents for focused tasks"
 
 [dependencies]
-deepx-tools = { path = "../deepx-tools" }
+deepx-workspace = { path = "../deepx-workspace" }
 deepx-types = { path = "../deepx-types" }
 deepx-session = { path = "../deepx-session" }
 serde = { version = "1", features = ["derive"] }

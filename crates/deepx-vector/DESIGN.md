@@ -27,7 +27,7 @@ DeepX 是一个 AI 编码代理。核心循环是"用户输入 → LLM 推理 �
 ```
 deepx-vector          ← 新增 leaf crate
 ├── 依赖 (无)           ← 零运行时依赖（Candle 是可选 feature）
-├── 被依赖 deepx-tools    ← 注册 RAG tool
+├── 被依赖 deepx-workspace    ← 注册 RAG tool
 ├── 被依赖 deepx-skills   ← 语义技能搜索
 └── 被依赖 deepx-session  ← 跨会话记忆（Phase 5）
 ```
@@ -53,10 +53,10 @@ deepx-vector/src/
 对照 `deepx-arch` 模块边界：
 
 ```
-deepx-vector → deepx-tools     ✅ (工具注册)
+deepx-vector → deepx-workspace     ✅ (工具注册)
 deepx-vector → deepx-skills    ✅ (语义搜索)
 deepx-vector → deepx-session   ✅ (长期记忆)
-deepx-tools → deepx-vector     ❌ (不可能，depth-vector 是最下层)
+deepx-workspace → deepx-vector     ❌ (不可能，depth-vector 是最下层)
 ```
 
 `deepx-vector` 是最底层工具 crate，不依赖任何 DeepX 内部 crate。
@@ -203,7 +203,7 @@ deepx-vector = { path = "..." }
 [features]
 default = ["candle"]   # 启用本地嵌入推理
 # vulkan = []           # 可选：GPU 加速（需 Vulkan SDK）
-# rag = [...]           # deepx-tools / deepx-skills 层面控制
+# rag = [...]           # deepx-workspace / deepx-skills 层面控制
 ```
 
 ---
@@ -321,7 +321,7 @@ let embedder = CandleEmbedder::new("BAAI/bge-base-zh-v1.5")?;
 ### Phase 3: 集成到 tools + skills + config
 
 **决策**：
-- `deepx-tools` 新增 `rag.rs`，注册 3 个 tool，全局 `OnceLock` 管理 RAG 管道
+- `deepx-workspace` 新增 `rag.rs`，注册 3 个 tool，全局 `OnceLock` 管理 RAG 管道
 - `deepx-skills` 新增 `SkillCatalog::search_semantic()`，feature gate 控制向量/关键词分支
 - `deepx-config` 不直接依赖 `deepx-skills`，技能渲染在 `deepx-msglp/skill_context.rs`
 - 全量 feature gate 默认关闭（`rag` feature），不影响现有功能
@@ -379,7 +379,7 @@ let embedder = CandleEmbedder::new("BAAI/bge-base-zh-v1.5")?;
 | bge-reranker-base 重排 | ✅ | Cross-encoder, CPU, 20ms/对 |
 | BruteForceStore (cosine) | ✅ | 10000 条 < 3ms |
 | 4 级降级链 | ✅ | Candle(small) → Candle(base) → GPU(Qwen3) → BM25 |
-| rag_index / rag_search tools | ✅ | Feature-gated in deepx-tools |
+| rag_index / rag_search tools | ✅ | Feature-gated in deepx-workspace |
 | memory_hook 跨会话记忆 | ✅ | Feature-gated in deepx-session |
 | search_semantic on Skills | ✅ | 方法定义完成，agent loop 未调用 |
 

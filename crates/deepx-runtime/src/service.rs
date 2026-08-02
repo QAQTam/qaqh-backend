@@ -4,12 +4,27 @@ use std::sync::{Arc, Mutex};
 use deepx_proto::{Agent2Ui, AskAnswer, ControlSnapshot, Ui2Agent};
 use serde_json::{Value, json};
 
-use crate::{AgentRegistry, EventBus};
+use crate::{AgentRegistry, EventBus, RingingHub};
+
+/// workspace serve 当前运行状态（daemon 内存态，供前端展示诊断依据）。
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceRuntimeState {
+    /// 配置的模式（config.toml [workspace] mode）。
+    pub configured_mode: String,
+    /// 实际运行模式（WSL 降级后为 local）。
+    pub active_mode: String,
+    /// serve endpoint（空 = 未启用）。
+    pub endpoint: String,
+    /// 每次 workspace 守护重启后单调递增；不含任何凭据。
+    pub generation: u64,
+}
 
 #[derive(Clone)]
 pub struct DeepxService {
     registry: Arc<Mutex<AgentRegistry>>,
     events: EventBus,
+    hub: std::sync::OnceLock<Arc<RingingHub>>,
+    workspace_state: Arc<Mutex<WorkspaceRuntimeState>>,
 }
 
 impl DeepxService {
@@ -22,11 +37,54 @@ impl DeepxService {
         Self {
             registry: Arc::new(Mutex::new(AgentRegistry::new(events.clone()))),
             events,
+            hub: std::sync::OnceLock::new(),
+            workspace_state: Arc::new(Mutex::new(WorkspaceRuntimeState::default())),
         }
     }
 
     pub fn events(&self) -> &EventBus {
         &self.events
+    }
+
+    /// 挂载 Ringing 运行时（worker 事件双投）。
+    pub fn attach_ringing(&self, hub: Arc<RingingHub>) {
+        let _ = self.hub.set(hub.clone());
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attach_ringing(hub);
+    }
+
+    /// 转发 Ringing 命令到 agent worker（wire 判别后由 worker reader 解析）。
+    pub fn send_ringing_command(
+        &self,
+        seed: &str,
+        env: &deepx_ringing::RingingWorkerCommandEnvelope,
+    ) -> Result<(), String> {
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send_ringing(seed, env)
+    }
+
+    /// 关闭会话（Ringing `SessionClose` 命令语义，契约 §2）：
+    /// 关闭 registry 实例并经 hub 发布 `SessionStateChanged { state: Closed }`，
+    /// causation 挂命令 id。会话不存在同样返回 Ok（幂等关闭）。
+    pub fn close_session(&self, seed: &str, causation_id: Option<&str>) -> Result<(), String> {
+        self.registry()?.close(seed);
+        if let Some(hub) = self.hub.get() {
+            let _ = hub.publish_with_causation(
+                seed,
+                deepx_domain::DomainEvent::Control(
+                    deepx_domain::ControlEvent::SessionStateChanged {
+                        seed: seed.to_string(),
+                        state: deepx_domain::SessionState::Closed,
+                    },
+                ),
+                causation_id,
+            );
+        }
+        Ok(())
     }
 
     pub fn snapshot(&self, attached_sessions: Vec<String>) -> ControlSnapshot {
@@ -70,7 +128,67 @@ impl DeepxService {
         let seed = || pstr(params, "seed");
         match method {
             "daemon.version" => Ok(json!(env!("CARGO_PKG_VERSION"))),
+            "workspace.set_mode" => {
+                let mode = pstr(params, "mode")?;
+                let supported = if cfg!(target_os = "windows") {
+                    matches!(mode.as_str(), "local" | "wsl")
+                } else {
+                    // Linux 原生系统：工具本来就在 Linux 环境，无 WSL 选项。
+                    mode == "local"
+                };
+                if !supported {
+                    return Err(format!(
+                        "invalid workspace mode '{mode}' (supported: {})",
+                        if cfg!(target_os = "windows") {
+                            "local | wsl"
+                        } else {
+                            "local"
+                        }
+                    ));
+                }
+                let mut config =
+                    deepx_config::Config::load().map_err(|e| format!("load config: {e}"))?;
+                config.workspace.mode = mode.clone();
+                config.save().map_err(|e| format!("save config: {e}"))?;
+                log::info!("[workspace] mode switched to {mode} (restart required)");
+                Ok(json!({
+                    "mode": mode,
+                    "restart_required": true,
+                }))
+            }
+            "workspace.status" => {
+                let state = self
+                    .workspace_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                Ok(json!({
+                    "configured_mode": state.configured_mode,
+                    "active_mode": state.active_mode,
+                    "endpoint": state.endpoint,
+                    "generation": state.generation,
+                }))
+            }
+            "workspace.diagnose" => Ok(crate::workspace_supervisor::diagnose_wsl().map_err(err)?),
+            "workspace.install_wsl" => {
+                let repo_root = params
+                    .get("repo_root")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Ok(crate::workspace_supervisor::install_wsl(repo_root.as_deref()).map_err(err)?)
+            }
             "session.list" => Ok(Value::Array(self.list_sessions())),
+            "session.meta" => {
+                let seed = seed()?;
+                let manager = deepx_session::SessionManager::global();
+                let Some(meta) = manager.load_meta(&seed) else {
+                    return Ok(Value::Null);
+                };
+                let mut value = serde_json::to_value(&meta).map_err(err)?;
+                value["turso_backed"] = json!(manager.is_turso_backed(&meta.seed));
+                value["running"] = json!(self.registry()?.is_running(&meta.seed));
+                Ok(value)
+            }
             "session.activity" => {
                 Ok(serde_json::to_value(self.registry()?.activities()).map_err(err)?)
             }
@@ -216,7 +334,7 @@ impl DeepxService {
                     name: pstr(params, "name")?,
                 },
             ),
-            "skills.list_tools" => Ok(json!(deepx_tools::runtime::all_tool_names())),
+            "skills.list_tools" => Ok(json!(deepx_workspace::runtime::all_tool_names())),
             "workspace.get" => Ok(json!(workspace(&seed()?))),
             "workspace.set" => {
                 let seed = seed()?;
@@ -227,21 +345,25 @@ impl DeepxService {
                 let _ = self.registry()?.send(&seed, Ui2Agent::ReloadConfig);
                 Ok(Value::Null)
             }
-            "git.diff" => git(&seed()?, |ws| deepx_tools::git::status_json(ws), json!([])),
+            "git.diff" => git(
+                &seed()?,
+                |ws| deepx_workspace::git::status_json(ws),
+                json!([]),
+            ),
             "git.branch" => git(
                 &seed()?,
-                |ws| deepx_tools::git::current_branch(ws),
+                |ws| deepx_workspace::git::current_branch(ws),
                 Value::Null,
             ),
             "git.branches" => git(
                 &seed()?,
-                |ws| deepx_tools::git::list_branches(ws),
+                |ws| deepx_workspace::git::list_branches(ws),
                 json!([]),
             ),
             "git.switch_branch" => git(
                 &seed()?,
                 |ws| {
-                    deepx_tools::git::switch_branch(
+                    deepx_workspace::git::switch_branch(
                         ws,
                         &pstr(params, "branch")?,
                         pbool(params, "stash"),
@@ -251,12 +373,12 @@ impl DeepxService {
             ),
             "git.commit" => git(
                 &seed()?,
-                |ws| deepx_tools::git::commit_all(ws, &pstr(params, "message")?),
+                |ws| deepx_workspace::git::commit_all(ws, &pstr(params, "message")?),
                 Value::Null,
             ),
             "git.file_diff" => git(
                 &seed()?,
-                |ws| deepx_tools::git::file_diff(ws, &pstr2(params, "file_path", "filePath")?),
+                |ws| deepx_workspace::git::file_diff(ws, &pstr2(params, "file_path", "filePath")?),
                 Value::Null,
             ),
             "config.load" => load_config(),
@@ -266,11 +388,12 @@ impl DeepxService {
             }
             "config.set_database_enabled" => {
                 let mut config = deepx_config::Config::load().unwrap_or_default();
-                config.database.enabled = pbool(params, "enabled");
+                let available = deepx_session::turso_backend_available();
+                config.database.enabled = pbool(params, "enabled") && available;
                 config.save()?;
                 deepx_session::SessionManager::global().set_turso_enabled(config.database.enabled);
                 self.registry()?.send_all(Ui2Agent::ReloadConfig);
-                Ok(Value::Null)
+                Ok(json!({"enabled": config.database.enabled, "available": available}))
             }
             "config.set_permission_level" => {
                 let level = pu64(params, "level") as u8;
@@ -302,10 +425,11 @@ impl DeepxService {
                 deepx_session::SessionManager::global().db_primary_readiness(),
             )
             .map_err(err)?),
-            "todo.status" => parse_json_string(deepx_tools::todo::todo_status_json(&seed()?)?),
-            "todo.cancel" => parse_json_string(
-                deepx_tools::todo::todo_cancel_json(&seed()?, &pstr(params, "id")?)?,
-            ),
+            "todo.status" => parse_json_string(deepx_workspace::todo::todo_status_json(&seed()?)?),
+            "todo.cancel" => parse_json_string(deepx_workspace::todo::todo_cancel_json(
+                &seed()?,
+                &pstr(params, "id")?,
+            )?),
             "plan.context_stats" => context_stats(&seed()?),
             "stats.token_usage" => token_stats(pu64(params, "days") as u32),
             "plan.read" => read_plan(&seed()?),
@@ -358,12 +482,32 @@ impl DeepxService {
             .map_err(|e| format!("registry lock: {e}"))
     }
 
+    /// 注入 workspace serve 连接信息（worker spawn 时写入 env）。
+    pub fn attach_workspace(&self, endpoint: String, token: String) {
+        if let Ok(mut registry) = self.registry() {
+            registry.attach_workspace(endpoint, token);
+        }
+    }
+
+    /// 记录 workspace serve 实际运行状态（server.rs 启动 supervisor 后调用）。
+    pub fn attach_workspace_state(&self, state: WorkspaceRuntimeState) {
+        *self
+            .workspace_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = state;
+    }
+
     fn send(&self, seed: String, frame: Ui2Agent) -> Result<Value, String> {
         self.registry()?.send(&seed, frame)?;
         Ok(Value::Null)
     }
 
-    fn send_user_input(&self, seed: String, text: String, images: Vec<deepx_proto::ImageBlock>) -> Result<Value, String> {
+    fn send_user_input(
+        &self,
+        seed: String,
+        text: String,
+        images: Vec<deepx_proto::ImageBlock>,
+    ) -> Result<Value, String> {
         let mut registry = self.registry()?;
         // An inactive persisted session has no activity entry yet. Spawn it
         // first so the Starting -> Working reservation below also covers the
@@ -402,14 +546,22 @@ impl DeepxService {
             return Err("session activity changed before message admission".into());
         }
         if let Some((activity, _)) = reservation.as_ref() {
-            self.events.publish_activity(activity.clone());
+            crate::activity::publish_activity_dual(
+                &self.events,
+                self.hub.get().map(|v| &**v),
+                activity,
+            );
         }
         if let Err(error) = registry.send(&seed, Ui2Agent::UserInput { text, images }) {
             if let Some((activity, previous)) = reservation
                 && let Some(rollback) =
                     registry.rollback_input_reservation(&seed, activity.seq, previous)
             {
-                self.events.publish_activity(rollback);
+                crate::activity::publish_activity_dual(
+                    &self.events,
+                    self.hub.get().map(|v| &**v),
+                    &rollback,
+                );
             }
             return Err(error);
         }
@@ -426,11 +578,19 @@ impl DeepxService {
             format!("session compact requires an idle session; current state: {state}")
         })?;
         let reservation_seq = reservation.seq;
-        self.events.publish_activity(reservation);
+        crate::activity::publish_activity_dual(
+            &self.events,
+            self.hub.get().map(|v| &**v),
+            &reservation,
+        );
 
         if let Err(error) = registry.send(&seed, Ui2Agent::Compact) {
             if let Some(rollback) = registry.rollback_idle_reservation(&seed, reservation_seq) {
-                self.events.publish_activity(rollback);
+                crate::activity::publish_activity_dual(
+                    &self.events,
+                    self.hub.get().map(|v| &**v),
+                    &rollback,
+                );
             }
             return Err(error);
         }
@@ -707,7 +867,7 @@ fn with_file_previews(text: String, files: &[String]) -> String {
 
 fn dashboard(seed: &str) -> Result<Value, String> {
     let dir = deepx_types::platform::sessions_dir().join(seed);
-    let tasks: Vec<Value> = deepx_tools::todo::todo_status_json(seed)
+    let tasks: Vec<Value> = deepx_workspace::todo::todo_status_json(seed)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| {
@@ -815,9 +975,10 @@ fn activity(seed: &str) -> Result<Value, String> {
 
 fn load_config() -> Result<Value, String> {
     let cfg = deepx_config::Config::load().map_err(err)?;
+    let database_available = deepx_session::turso_backend_available();
     let providers = deepx_config::registry::all_providers().into_iter().map(|provider| json!({"id":provider.id,"display":provider.display,"endpoints":provider.endpoints.into_iter().map(|endpoint|json!({"id":endpoint.id,"display":endpoint.display,"base_url":endpoint.base_url,"default_model":endpoint.default_model,"models":endpoint.models,"stateful":endpoint.stateful,"beta":endpoint.beta})).collect::<Vec<_>>() })).collect::<Vec<_>>();
     Ok(
-        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"active_profile":cfg.active_profile,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"database":{"enabled":cfg.database.enabled},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"tokenizer_path":cfg.tokenizer_path}),
+        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"active_profile":cfg.active_profile,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"database":{"enabled":cfg.database.enabled && database_available,"available":database_available},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"workspace":{"mode":cfg.workspace.mode},"tokenizer_path":cfg.tokenizer_path}),
     )
 }
 

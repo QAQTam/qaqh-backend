@@ -365,6 +365,9 @@ impl App {
                             ("text", content.clone())
                         }
                         deepx_proto::RoundBlock::Tool { card: _ } => continue,
+                        deepx_proto::RoundBlock::WebSearch { action } => {
+                            ("web_search", action.clone())
+                        }
                     };
                     self.push_message(
                         MessageKind::Block {
@@ -443,6 +446,9 @@ impl App {
                                         ("text", content.clone())
                                     }
                                     deepx_proto::RoundBlock::Tool { card: _ } => continue,
+                                    deepx_proto::RoundBlock::WebSearch { action } => {
+                                        ("web_search", action.clone())
+                                    }
                                 };
                                 self.push_message(
                                     MessageKind::Block {

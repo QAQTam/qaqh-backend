@@ -9,19 +9,19 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use deepx_types::{Message, SessionMeta};
 
-use crate::mirror::{MirrorManifest, MirrorOutbox, MirrorSnapshot};
+#[cfg(feature = "turso-backend")]
+use crate::mirror::MirrorOutbox;
+use crate::mirror::{MirrorManifest, MirrorSnapshot};
 use crate::store;
 
 #[cfg(feature = "turso-backend")]
 use crate::store::turso_backend::TursoBackend;
 #[cfg(feature = "turso-backend")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "turso-backend")]
-use std::sync::Mutex;
 
 static INSTANCE: OnceLock<SessionManager> = OnceLock::new();
 
@@ -123,6 +123,8 @@ impl SessionManager {
             if turso_enabled { "ENABLED" } else { "DISABLED" },
             sessions_dir.join("<seed>").join("sessions.db").display()
         );
+        #[cfg(not(feature = "turso-backend"))]
+        let _ = turso_enabled;
 
         let mgr = Self {
             active_path: data_dir.join(".active_session"),
@@ -147,16 +149,22 @@ impl SessionManager {
             .expect("SessionManager not initialized — call init() first")
     }
 
-    /// Toggle Turso mirroring at runtime (no restart needed).
-    #[cfg(feature = "turso-backend")]
+    /// Toggle Turso mirroring at runtime when this build contains the backend.
+    /// Production builds currently compile it out, so the compatibility API is
+    /// intentionally a no-op rather than interrupting config reloads.
     pub fn set_turso_enabled(&self, enabled: bool) {
-        let old = self.turso_enabled.load(Ordering::Relaxed);
-        self.turso_enabled.store(enabled, Ordering::Relaxed);
-        log::info!(
-            "SessionManager: Turso mirroring {} -> {}",
-            if old { "ENABLED" } else { "DISABLED" },
-            if enabled { "ENABLED" } else { "DISABLED" },
-        );
+        #[cfg(feature = "turso-backend")]
+        {
+            let old = self.turso_enabled.load(Ordering::Relaxed);
+            self.turso_enabled.store(enabled, Ordering::Relaxed);
+            log::info!(
+                "SessionManager: Turso mirroring {} -> {}",
+                if old { "ENABLED" } else { "DISABLED" },
+                if enabled { "ENABLED" } else { "DISABLED" },
+            );
+        }
+        #[cfg(not(feature = "turso-backend"))]
+        let _ = enabled;
     }
 
     // ── Session listing ──
@@ -175,9 +183,10 @@ impl SessionManager {
                     if !path.is_dir() {
                         continue;
                     }
-                    let seed = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    let meta = store::read_meta(&path).or_else(|| {
-                        #[cfg(feature = "turso-backend")]
+                    let meta = store::read_meta(&path);
+                    #[cfg(feature = "turso-backend")]
+                    let meta = meta.or_else(|| {
+                        let seed = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         if self.turso_enabled.load(Ordering::Relaxed) {
                             if let Some(dbs) = self.get_or_open_db(seed) {
                                 if let Some(db) = dbs.get(seed) {
@@ -195,8 +204,6 @@ impl SessionManager {
                         } else {
                             None
                         }
-                        #[cfg(not(feature = "turso-backend"))]
-                        None
                     });
                     if let Some(meta) = meta {
                         metas.push(meta);
@@ -313,9 +320,9 @@ impl SessionManager {
                 let _ = self.write_compact_context(seed, &database);
                 Some(database)
             }
-            (Some(file), Some(database)) => {
+            (Some(file), Some(_database)) => {
                 #[cfg(feature = "turso-backend")]
-                if serde_json::to_string(&file).ok() != serde_json::to_string(&database).ok() {
+                if serde_json::to_string(&file).ok() != serde_json::to_string(&_database).ok() {
                     if let Some(dbs) = self.get_or_open_db(seed) {
                         if let Some(db) = dbs.get(seed) {
                             let _ = db.save_compact_context(seed, &file);
@@ -651,16 +658,20 @@ impl SessionManager {
         Ok(())
     }
 
-    #[cfg(feature = "turso-backend")]
     pub fn reconcile_all_mirrors(&self) -> Vec<(String, Result<(), String>)> {
-        self.audit_all_mirrors()
-            .into_iter()
-            .map(|audit| {
-                let seed = audit.seed;
-                let result = self.reconcile_mirror(&seed);
-                (seed, result)
-            })
-            .collect()
+        #[cfg(feature = "turso-backend")]
+        {
+            self.audit_all_mirrors()
+                .into_iter()
+                .map(|audit| {
+                    let seed = audit.seed;
+                    let result = self.reconcile_mirror(&seed);
+                    (seed, result)
+                })
+                .collect()
+        }
+        #[cfg(not(feature = "turso-backend"))]
+        Vec::new()
     }
 
     /// Returns the non-mutating safety gate for a future DB-primary switch.
@@ -707,7 +718,12 @@ impl SessionManager {
     /// A stale, incomplete, or missing database is migration-pending.
     pub fn migrate_all_to_turso(&self) -> Result<MigrationReport, String> {
         #[cfg(not(feature = "turso-backend"))]
-        return Err("Turso backend not compiled".into());
+        return Ok(MigrationReport {
+            sessions: 0,
+            messages: 0,
+            failed: 0,
+            outcomes: Vec::new(),
+        });
 
         #[cfg(feature = "turso-backend")]
         {
@@ -844,6 +860,9 @@ impl SessionManager {
         meta.seed = seed.to_string();
         meta.created_at = now;
         meta.updated_at = now;
+        if !dir.join("messages.jsonl").exists() {
+            let _ = store::append_messages(&dir, &[]);
+        }
         let _ = store::write_meta(&dir, &meta);
         store::upsert_index(&self.sessions_dir, &meta);
         #[cfg(feature = "turso-backend")]
@@ -1200,6 +1219,7 @@ impl SessionManager {
         serde_json::from_str(&std::fs::read_to_string(self.file_manifest_path(seed)).ok()?).ok()
     }
 
+    #[cfg(feature = "turso-backend")]
     fn write_file_manifest(&self, seed: &str, manifest: &MirrorManifest) -> Result<(), String> {
         let path = self.file_manifest_path(seed);
         let temporary = path.with_extension("json.tmp");
@@ -1211,10 +1231,12 @@ impl SessionManager {
             .map_err(|error| format!("activate file mirror manifest: {error}"))
     }
 
+    #[cfg(feature = "turso-backend")]
     fn read_outbox(&self, seed: &str) -> Option<MirrorOutbox> {
         serde_json::from_str(&std::fs::read_to_string(self.outbox_path(seed)).ok()?).ok()
     }
 
+    #[cfg(feature = "turso-backend")]
     fn restore_file_snapshot(&self, seed: &str, snapshot: &MirrorSnapshot) -> Result<(), String> {
         let dir = self.session_path_dir(seed);
         std::fs::create_dir_all(&dir)
@@ -1240,6 +1262,7 @@ impl SessionManager {
         Ok(MirrorSnapshot::new(meta, messages))
     }
 
+    #[cfg(feature = "turso-backend")]
     fn write_outbox(&self, seed: &str, outbox: &MirrorOutbox) -> Result<(), String> {
         let path = self.outbox_path(seed);
         let temporary = path.with_extension("json.tmp");
@@ -1444,9 +1467,24 @@ mod skill_persistence_tests {
                 activation_order: 1,
                 source: "model".into(),
                 state: SkillSessionEntryState::Active,
-                lease_remaining: 2,
             }],
         }
+    }
+
+    #[test]
+    fn file_only_new_session_is_immediately_listable_and_loadable() {
+        let (root, manager) = manager();
+        manager.persist_new_session("file-only");
+
+        let listed = manager.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].seed, "file-only");
+        let (meta, messages) = manager.load("file-only").expect("file snapshot");
+        assert_eq!(meta.seed, "file-only");
+        assert!(messages.is_empty());
+        assert!(!manager.is_turso_backed("file-only"));
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
@@ -1489,12 +1527,13 @@ mod skill_persistence_tests {
         assert_eq!(context.messages.len(), active.len());
         assert_eq!(context.parent_checkpoint_id, None);
         let dbs = manager.get_or_open_db("compact-seed").expect("database");
-        assert!(dbs
-            .get("compact-seed")
-            .expect("backend")
-            .load_compact_context("compact-seed")
-            .expect("load context")
-            .is_some());
+        assert!(
+            dbs.get("compact-seed")
+                .expect("backend")
+                .load_compact_context("compact-seed")
+                .expect("load context")
+                .is_some()
+        );
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
@@ -1807,9 +1846,14 @@ mod skill_persistence_tests {
             .map(|(_, messages)| messages.len())
             == Some(2);
 
-        assert!(manual_delete_kept_history, "a JSONL file whose manifest no longer matches must be restored from the verified DB snapshot");
+        assert!(
+            manual_delete_kept_history,
+            "a JSONL file whose manifest no longer matches must be restored from the verified DB snapshot"
+        );
 
-        println!("SIMULATION parallel={parallel_ok} panic_outbox={panic_ok} missing_jsonl={jsonl_recovery_ok} missing_db={db_recovery_ok} db_toggle={toggle_ok} manual_jsonl_delete_kept_history={manual_delete_kept_history}");
+        println!(
+            "SIMULATION parallel={parallel_ok} panic_outbox={panic_ok} missing_jsonl={jsonl_recovery_ok} missing_db={db_recovery_ok} db_toggle={toggle_ok} manual_jsonl_delete_kept_history={manual_delete_kept_history}"
+        );
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 }

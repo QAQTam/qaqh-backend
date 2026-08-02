@@ -119,6 +119,20 @@ function renderFallbackHTML(raw: string): string {
   return parseMarkdown(raw);
 }
 
+/**
+ * 流式 live 块的实时内联渲染：只处理已闭合的内联语法（**bold**、`code`、
+ * [link](url) 等），未闭合的语法由 marked 按字面文本输出，不会产生破损 HTML。
+ * 这是“流式期间也能看到加粗/链接”的关键，块级/代码/图表仍等 final。
+ */
+function inlineLiveHTML(raw: string): string {
+  if (!raw.trim()) return "";
+  try {
+    return marked.parseInline(raw, { async: false });
+  } catch {
+    return "";
+  }
+}
+
 // ── Block splitting (replaces Web Worker + projectBlocksOffThread) ──
 
 function blockHash(raw: string): string {
@@ -366,11 +380,22 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
               <Show
                 when={block.stable && html()}
                 fallback={
-                  <div
-                    data-key={block.key}
-                    data-hash={block.hash}
-                    textContent={block.raw}
-                  />
+                  <Show
+                    when={!block.stable && block.kind === "text"}
+                    fallback={
+                      <div
+                        data-key={block.key}
+                        data-hash={block.hash}
+                        textContent={block.raw}
+                      />
+                    }
+                  >
+                    <div
+                      data-key={block.key}
+                      data-hash={block.hash}
+                      innerHTML={inlineLiveHTML(block.raw)}
+                    />
+                  </Show>
                 }
               >
                 <div

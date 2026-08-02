@@ -19,6 +19,8 @@ use crate::services::dashboard;
 use crate::state::agent::AgentState;
 use crate::util;
 
+use super::types::Emitter;
+
 const INITIAL_LOAD_COUNT: usize = 20;
 
 pub struct MiscEngine;
@@ -37,7 +39,7 @@ impl MiscEngine {
         &self,
         agent: &mut AgentState,
         turn_id: &str,
-        tx: &mpsc::SyncSender<Agent2Ui>,
+        tx: &mpsc::SyncSender<crate::ring::types::WriterEvent>,
     ) {
         log::info!(
             "[MISC] UndoTurn {turn_id} — turns before: {}",
@@ -55,18 +57,20 @@ impl MiscEngine {
             let start = total.saturating_sub(INITIAL_LOAD_COUNT as u32) as usize;
             let recent =
                 util::build_turns_from_context(agent, Some(start), Some(INITIAL_LOAD_COUNT));
-            let _ = tx.send(Agent2Ui::SessionRestored {
-                seed: agent.session.seed.clone(),
-                turns: recent,
-                tokens_used: agent.session.usage_totals.total_tokens,
-                cache_hit_pct: util::cache_hit_pct(&agent.session.usage_totals),
-                usage: agent.session.last_usage.clone(),
-                usage_totals: agent.session.usage_totals.clone(),
-                usage_requests: agent.session.usage_requests,
-                cache_reported_requests: agent.session.effective_cache_reported_requests(),
-                total_turns: total,
-                has_more: start > 0,
-            });
+            let _ = tx.send(crate::ring::types::WriterEvent::Legacy(
+                Agent2Ui::SessionRestored {
+                    seed: agent.session.seed.clone(),
+                    turns: recent,
+                    tokens_used: agent.session.usage_totals.total_tokens,
+                    cache_hit_pct: util::cache_hit_pct(&agent.session.usage_totals),
+                    usage: agent.session.last_usage.clone(),
+                    usage_totals: agent.session.usage_totals.clone(),
+                    usage_requests: agent.session.usage_requests,
+                    cache_reported_requests: agent.session.effective_cache_reported_requests(),
+                    total_turns: total,
+                    has_more: start > 0,
+                },
+            ));
         } else {
             log::info!("[MISC] UndoTurn — no changes");
         }
@@ -74,7 +78,7 @@ impl MiscEngine {
 
     // ── Dashboard ──
 
-    pub fn emit_dashboard(&self, agent: &AgentState, tx: &mpsc::SyncSender<Agent2Ui>) {
+    pub fn emit_dashboard(&self, agent: &AgentState, emitter: &dyn Emitter) {
         // Write context stats to disk
         let (
             chat_text,
@@ -97,7 +101,7 @@ impl MiscEngine {
         let _ = std::fs::create_dir_all(&stats_dir);
         let _ = std::fs::write(stats_dir.join("context_stats.json"), stats.to_string());
 
-        let _ = tx.send(Agent2Ui::Dashboard {
+        emitter.emit(Agent2Ui::Dashboard {
             hp_connected: true,
             session_seed: agent.session.seed.clone(),
             context_limit: agent.config.context_limit,
@@ -109,11 +113,27 @@ impl MiscEngine {
             documents: dashboard::build_documents(),
             recent_edits: dashboard::build_recent_edits(),
             tasks: dashboard::build_tasks(),
-current_todo_id: dashboard::build_current_todo_id(),
+            current_todo_id: dashboard::build_current_todo_id(),
             session_title: agent.session.title.clone(),
             usage: None,
             model: Some(agent.config.model.clone()),
         });
+        // Ringing 双发：DashboardUpdated（replaceable 覆盖）
+        emitter.emit_domain(deepx_domain::DomainEvent::Control(
+            deepx_domain::ControlEvent::DashboardUpdated {
+                hp_connected: true,
+                session_seed: agent.session.seed.clone(),
+                tool_calls_total: 0,
+                tool_failures: 0,
+                current_phase: "single".into(),
+                streaming: false,
+            },
+        ));
+        emitter.emit_domain(deepx_domain::DomainEvent::Control(
+            deepx_domain::ControlEvent::DashboardSnapshot {
+                snapshot: dashboard::build_snapshot(agent.session.seed.clone()),
+            },
+        ));
     }
 
     // ── Mode ──
@@ -124,7 +144,7 @@ current_todo_id: dashboard::build_current_todo_id(),
             "code" => 2,
             _ => 0,
         };
-        deepx_tools::runtime::set_mode(m);
+        deepx_workspace::runtime::set_mode(m);
         if !agent.session.seed.is_empty() {
             deepx_session::SessionManager::global().persist_mode(&agent.session.seed, m);
         }

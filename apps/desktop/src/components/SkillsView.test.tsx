@@ -424,10 +424,10 @@ describe("SkillsView", () => {
     host.remove();
   });
 
-  it("13. renders the five authoritative runtime columns", async () => {
+  it("13. renders the four authoritative runtime columns", async () => {
     const host = document.createElement("div");
     document.body.append(host);
-    const runtime: SkillRuntimeInfo[] = ["catalog", "requested", "active", "review_due", "unavailable"].map((state, index) => ({
+    const runtime: SkillRuntimeInfo[] = ["catalog", "requested", "active", "unavailable"].map((state, index) => ({
       name: `skill-${index}`, description: state, state, source: "test", token_count: index,
     }));
     const dispose = render(() => <I18nCtx value={createI18n("en")}>
@@ -435,10 +435,10 @@ describe("SkillsView", () => {
         onActivate={vi.fn()} onUnload={vi.fn()} onReload={vi.fn()} />
     </I18nCtx>, host);
     await flush();
-    for (const label of ["Catalog", "Requested", "Enabled", "Review Due", "Unavailable"]) {
+    for (const label of ["Catalog", "Requested", "Enabled", "Unavailable"]) {
       expect(host.textContent).toContain(label);
     }
-    expect(host.querySelectorAll(".skill-column")).toHaveLength(5);
+    expect(host.querySelectorAll(".skill-column")).toHaveLength(4);
     dispose();
     host.remove();
   });

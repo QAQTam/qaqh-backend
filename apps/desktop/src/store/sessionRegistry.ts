@@ -1,28 +1,23 @@
 import { createSignal, createStore, reconcile, type Accessor } from "solid-js";
 import type { DashboardData, RawActivityEntry, RawSessionState, RawTurn } from "./rawSession";
-import { createRawSessionState } from "./sessionEventReducer";
-import {
-  createSessionEventRuntime,
-  loadReloadSnapshot,
-  removeReloadSnapshot,
-  type ReloadStorage,
-  type SessionEventRuntime,
-} from "./sessionEventRuntime";
+import { createRawSessionState } from "./rawSession";
 import { createSessionUiState, type SessionUiState } from "./sessionUiState";
+
+export type ReloadStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 export type DashboardStoreData = DashboardData & { activity: RawActivityEntry[] };
 
 export interface SessionEntry {
   listenerSeed: string;
   state: Accessor<RawSessionState>;
-  runtime: SessionEventRuntime;
+  /** Mutates renderer-local UI state only. Daemon events never enter here. */
+  updateLocalState(update: (state: RawSessionState) => RawSessionState): void;
   ui: SessionUiState;
-  /** Reactive store mirror of state. Components read fine-grained fields
-   *  directly from this store instead of going through the signal. */
-  sessionStore: RawSessionState;
   /** Fine-grained reactive store for dashboard data. Leaf components read this
    *  directly instead of going through the full session state signal. */
   dashboardStore: DashboardStoreData;
+  /** Native dashboard/activity snapshots update this store directly. */
+  setDashboard(data: DashboardStoreData): void;
   /** Optimistic pending send: set immediately when user sends a message,
    *  cleared automatically when turn_start arrives. */
   pendingSend: Accessor<RawTurn | null>;
@@ -42,69 +37,23 @@ export function createSessionRegistry(options: { storage: ReloadStorage }) {
   function ensure(seed: string): SessionEntry {
     const existing = get(seed);
     if (existing) return existing;
-    const initial = loadReloadSnapshot(options.storage, seed) ?? createRawSessionState(seed);
+    // The daemon Timeline snapshot is the only transcript recovery source.
+    // Do not restore a serialized legacy projection into a new renderer.
+    void options.storage;
+    const initial = createRawSessionState(seed);
     const [state, setState] = createSignal(initial);
-    const [sessionStore, setSessionStore] = createStore<RawSessionState>(initial);
     const [dashboardStore, setDashboardStore] = createStore<DashboardStoreData>(initial.dashboard);
     const [pendingSend, setPendingSend] = createSignal<RawTurn | null>(null);
-    let prevTurnCount = initial.turns.length;
-    let prevTurnsRef = initial.turns;
-    let prevDashboardRef = initial.dashboard;
     let unlisten: (() => void) | undefined;
     const entry: SessionEntry = {
       listenerSeed: seed,
       state,
-      runtime: createSessionEventRuntime({
-        initialState: initial,
-        commit: (newState) => {
-          setState(newState);
-          const isStreaming = newState.turns.some(
-            t => t.status === "running" || t.status === "waiting",
-          );
-
-          if (isStreaming) {
-            // Streaming path: only update turns + dashboard subtrees.
-            // The rest (environment, session, skills, telemetry, notices,
-            // compact) are unchanged during text/tool streaming. Reconcile
-            // on terminal events covers them.
-            if (newState.turns !== prevTurnsRef) {
-              setSessionStore(s => {
-                // Only update the last turn (streaming target) — avoids
-                // walking all historical turns every frame.
-                const lastIdx = s.turns.length - 1;
-                if (lastIdx >= 0 && lastIdx < newState.turns.length) {
-                  s.turns[lastIdx] = newState.turns[lastIdx];
-                }
-                // Append new turns that arrived this frame
-                for (let i = s.turns.length; i < newState.turns.length; i++) {
-                  s.turns.push(newState.turns[i]);
-                }
-              });
-              prevTurnsRef = newState.turns;
-            }
-            if (newState.dashboard !== prevDashboardRef) {
-              setDashboardStore(reconcile(newState.dashboard));
-              prevDashboardRef = newState.dashboard;
-            }
-          } else {
-            // Terminal path: full reconcile all subtrees
-            setSessionStore(reconcile(newState));
-            setDashboardStore(reconcile(newState.dashboard));
-            prevTurnsRef = newState.turns;
-            prevDashboardRef = newState.dashboard;
-          }
-
-          // Auto-clear optimistic pending send when turn_start adds a new turn
-          if (pendingSend() && newState.turns.length > prevTurnCount) {
-            setPendingSend(null);
-          }
-          prevTurnCount = newState.turns.length;
-        },
-        storage: options.storage,
-      }),
+      updateLocalState(update) { setState(update); },
       ui: createSessionUiState(),
-      sessionStore,
       dashboardStore,
+      setDashboard(data) {
+        setDashboardStore(reconcile(data));
+      },
       pendingSend,
       setPendingSend,
       hasListener: () => unlisten !== undefined,
@@ -128,18 +77,19 @@ export function createSessionRegistry(options: { storage: ReloadStorage }) {
 
   function remap(listenerSeed: string, nextSeed: string): SessionEntry {
     const entry = findByListenerSeed(listenerSeed) ?? ensure(listenerSeed);
+    // Solid 2 信号写入是微任务批处理：同栈读 state() 可能滞后，必须用
+    // runtime.current() 这个同步权威源（事件已同步 reduce 进本地 state）。
     const stateSeedBefore = entry.state().seed;
     const mappedSeeds = [...bySeed.entries()]
       .filter(([, candidate]) => candidate === entry)
       .map(([seed]) => seed);
-    entry.runtime.update(state => ({ ...state, seed: nextSeed }));
+    entry.updateLocalState(state => ({ ...state, seed: nextSeed }));
     for (const seed of mappedSeeds) {
       bySeed.delete(seed);
-      if (seed !== nextSeed) removeReloadSnapshot(options.storage, seed);
     }
     bySeed.set(nextSeed, entry);
-    if (stateSeedBefore !== nextSeed) removeReloadSnapshot(options.storage, stateSeedBefore);
-    if (listenerSeed !== nextSeed) removeReloadSnapshot(options.storage, listenerSeed);
+    void stateSeedBefore;
+    void listenerSeed;
     return entry;
   }
 
@@ -147,16 +97,12 @@ export function createSessionRegistry(options: { storage: ReloadStorage }) {
     const entry = get(seed);
     if (!entry) return;
     entry.detachListener();
-    entry.runtime.dispose();
     bySeed.delete(seed);
     bySeed.delete(entry.listenerSeed);
-    removeReloadSnapshot(options.storage, seed);
-    removeReloadSnapshot(options.storage, entry.listenerSeed);
   }
 
   function disposeView(): void {
     for (const entry of new Set(bySeed.values())) {
-      entry.runtime.dispose();
       entry.detachListener();
     }
     bySeed.clear();
