@@ -11,6 +11,16 @@ const RETRY_BASE_MS = 1_000;
 const RETRY_MAX_MS = 30_000;
 const SSE_IDLE_TIMEOUT_MS = 45_000;
 
+/** 收到的 timeline_seq 与期望游标不连续（journal 已修剪或广播丢失）。 */
+export class TimelineGapError extends Error {
+  constructor(
+    readonly expected: number,
+    readonly received: number,
+  ) {
+    super(`Timeline SSE gap: expected seq ${expected}, received ${received}`);
+  }
+}
+
 /** One transcript, one SSE stream, one monotonically increasing cursor. */
 export class TimelineClient {
   private controller: AbortController | null = null;
@@ -26,6 +36,8 @@ export class TimelineClient {
     private readonly onEntry: (entry: TimelineEntry) => void,
     private readonly onStatus: (status: TimelineStatus) => void,
     initialCursor: number,
+    /** gap 恢复：拉取权威 snapshot 并返回新 watermark，成为重连游标。 */
+    private readonly onGap?: () => Promise<number>,
   ) {
     this.cursor = initialCursor;
   }
@@ -101,6 +113,20 @@ export class TimelineClient {
           this.dispatch(frame.id, frame.data.trim());
         }
       }
+    } catch (error) {
+      // A gap means the server journal no longer covers our cursor. Recover
+      // by fetching the authoritative snapshot: its watermark becomes the new
+      // cursor so the next reconnect resumes from a covered position. Without
+      // this, Last-Event-ID never advances and the client reconnects into the
+      // same gap forever, starving the renderer of new entries.
+      if (error instanceof TimelineGapError && this.onGap) {
+        try {
+          this.cursor = await this.onGap();
+        } catch (recoveryError) {
+          console.warn("[timeline] gap snapshot recovery failed", recoveryError);
+        }
+      }
+      throw error;
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
     }
@@ -119,7 +145,9 @@ export class TimelineClient {
     ) throw new Error("invalid Ringing V1 timeline SSE frame");
     const expectedId = `${frame.server_epoch}:timeline:${frame.entry.timeline_seq}`;
     if (sseId && sseId !== expectedId) throw new Error("Timeline SSE cursor/frame mismatch");
-    if (frame.entry.timeline_seq !== this.cursor + 1) throw new Error("Timeline SSE gap requires snapshot recovery");
+    if (frame.entry.timeline_seq !== this.cursor + 1) {
+      throw new TimelineGapError(this.cursor + 1, frame.entry.timeline_seq);
+    }
     this.cursor = frame.entry.timeline_seq;
     this.onEntry(frame.entry);
   }

@@ -78,7 +78,22 @@ function applyEntry(snapshot: TimelineSnapshot, entry: TimelineEntry): boolean {
   const event = entry.event;
   switch (event.type) {
     case "turn_opened":
-      if (turn) return false;
+      if (turn) {
+        // Reopen allowance: the daemon orphan-sealer marks an interrupted
+        // turn as Cancelled on restart, but the message store still counts
+        // it, so the worker legitimately reuses the same turn_id for the
+        // next input. Reset the cancelled placeholder in place; otherwise
+        // every subsequent delta is dropped and the transcript stays blank.
+        if (turn.state === "cancelled" && turn.sealed) {
+          turn.user_text = event.user_text;
+          turn.sealed = false;
+          turn.state = "running";
+          turn.failure = undefined;
+          turn.rounds = [];
+          return true;
+        }
+        return false;
+      }
       snapshot.turns.push({
         turn_id: entry.turn_id,
         user_text: event.user_text,

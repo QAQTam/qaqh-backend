@@ -11,7 +11,7 @@ use std::time::Duration;
 use deepx_types::{CacheTokenField, ThinkingParamMode};
 use deepx_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
-use super::types::{ProviderConfig, StreamEvent, safe_provider_error_body};
+use super::types::{ProviderConfig, StreamEvent, normalize_reasoning_effort, safe_provider_error_body};
 
 /// Polling interval for SSE streaming. When no data arrives within this
 /// interval, the outer Tokio timeout lets us check the cancel flag before
@@ -186,6 +186,9 @@ pub fn chat_stream_openai(
 
     if provider.supports_reasoning_effort {
         if let Some(ref e) = effort {
+            // DeepX always reasons: promote none/minimal/disable to the
+            // lowest thinking level instead of sending them through.
+            let e = normalize_reasoning_effort(Some(e)).unwrap_or_else(|| e.clone());
             body_map.insert("reasoning_effort".into(), serde_json::json!(e));
         }
     }

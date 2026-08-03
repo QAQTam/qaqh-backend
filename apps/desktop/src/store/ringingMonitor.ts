@@ -288,6 +288,8 @@ export function createRingingMonitor() {
         asSafeNonNegativeInt(s.cache_reported_requests),
         asSafeNonNegativeInt(s.total_turns),
         typeof s.has_more === "boolean" ? s.has_more : undefined,
+        (sc.model as string | null) ?? null,
+        asSafeNonNegativeInt(s.context_limit),
       );
       // 快照携带完整 turns（neutral JSON）：只补缺失 turn，保留流式现场，
       // 并恢复 activeTurn 使后续 round_delta 能继续追加（修复快照后吞字）。

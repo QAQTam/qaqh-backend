@@ -145,6 +145,11 @@ pub struct EndpointSpec {
     /// Some Responses-compatible providers reserve `search` while their
     /// built-in `web_search` tool is enabled. `None` keeps the canonical name.
     pub responses_search_function_alias: Option<String>,
+    /// Echo assistant `reasoning` items back verbatim in the next turn's
+    /// input. Default: true — DeepSeek / MiMo reject tool-loop continuations
+    /// without them (HTTP 400), Kimi K3 & k2.7-code require them for preserved
+    /// thinking, and GLM / Qwen / MiniMax / OpenAI accept them silently.
+    pub responses_echo_reasoning_content: bool,
 }
 
 impl Default for EndpointSpec {
@@ -179,6 +184,7 @@ impl Default for EndpointSpec {
             responses_effort_max: "high".into(),
             responses_supports_user: true,
             responses_search_function_alias: None,
+            responses_echo_reasoning_content: true,
         }
     }
 }

@@ -7,7 +7,7 @@
 //! （RoundCompleted 压缩只追加一条 `Compact` 记录，不删除旧行）。
 //! I/O 失败返回 Err，由调用方记录日志，绝不阻塞事件发布路径。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
@@ -42,6 +42,9 @@ pub struct LoadedJournal {
 pub struct JournalStore {
     root: PathBuf,
     files: HashMap<JournalKey, File>,
+    /// 自上次 rewrite 以来追加的字节数（内存计数，热路径零 I/O 门控）。
+    /// rewrite 后清零；超阈值由调用方触发整文件重写。
+    pending_bytes: HashMap<JournalKey, u64>,
 }
 
 impl JournalStore {
@@ -59,6 +62,7 @@ impl JournalStore {
         Ok(Self {
             root,
             files: HashMap::new(),
+            pending_bytes: HashMap::new(),
         })
     }
 
@@ -165,6 +169,7 @@ impl JournalStore {
         checkpoints: &[(String, u64)],
     ) -> std::io::Result<()> {
         self.files.remove(&(channel, seed.to_string()));
+        self.pending_bytes.insert((channel, seed.to_string()), 0);
         let path = self.path_for(channel, seed);
         let mut body = Vec::new();
         for envelope in envelopes {
@@ -197,6 +202,86 @@ impl JournalStore {
     /// 当前 jsonl 物理大小（字节）。
     pub fn file_size(&self, channel: RingingChannel, seed: &str) -> std::io::Result<u64> {
         Ok(std::fs::metadata(self.path_for(channel, seed))?.len())
+    }
+
+    /// 自上次 rewrite 以来追加的字节数（内存计数，无 I/O）。
+    pub fn pending_bytes(&self, channel: RingingChannel, seed: &str) -> u64 {
+        self.pending_bytes
+            .get(&(channel, seed.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 磁盘上有历史记录的 (channel → seed) 清单（懒加载索引；不读取文件内容）。
+    /// 覆盖 reliable jsonl 与 replaceable latest 槽目录。
+    pub fn list_seeds(&self) -> HashMap<RingingChannel, HashSet<String>> {
+        let mut out = HashMap::<RingingChannel, HashSet<String>>::new();
+        for channel in [
+            RingingChannel::Control,
+            RingingChannel::Conversation,
+            RingingChannel::Tool,
+        ] {
+            let journal_dir = self.root.join("journal").join(channel.as_str());
+            if let Ok(entries) = std::fs::read_dir(&journal_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    if let Some(seed) = path.file_stem().and_then(|s| s.to_str()) {
+                        if !seed.is_empty() {
+                            out.entry(channel)
+                                .or_default()
+                                .insert(seed.to_string());
+                        }
+                    }
+                }
+            }
+            let latest_dir = self.root.join("latest").join(channel.as_str());
+            if let Ok(entries) = std::fs::read_dir(&latest_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir()
+                        && let Some(seed) = entry.file_name().to_str()
+                    {
+                        out.entry(channel).or_default().insert(seed.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 装载单个 (channel, seed) 的磁盘操作序列（reliable jsonl + replaceable
+    /// latest 槽，顺序与 `load()` 一致）。懒加载按需恢复用。
+    pub fn load_seed(&self, channel: RingingChannel, seed: &str) -> std::io::Result<Vec<JournalOp>> {
+        let mut ops = Vec::new();
+        let path = self.path_for(channel, seed);
+        if path.is_file() {
+            ops = read_ops(&path);
+        }
+        let latest_dir = self
+            .root
+            .join("latest")
+            .join(channel.as_str())
+            .join(sanitize_seed(seed));
+        if latest_dir.is_dir() {
+            for entry in std::fs::read_dir(&latest_dir)? {
+                let path = entry?.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
+                match std::fs::read(&path).ok().and_then(|bytes| {
+                    serde_json::from_slice::<RingingEventEnvelope>(&bytes).ok()
+                }) {
+                    Some(envelope) => ops.push(JournalOp::Append { envelope }),
+                    None => log::warn!(
+                        "[ringing] skip corrupt replaceable slot {}",
+                        path.display()
+                    ),
+                }
+            }
+        }
+        Ok(ops)
     }
 
     /// 装载磁盘日志（损坏行跳过并记录，不整体失败）。
@@ -286,7 +371,12 @@ impl JournalStore {
         let mut line = serde_json::to_vec(op).map_err(io_error)?;
         line.push(b'\n');
         file.write_all(&line)?;
-        file.flush()
+        file.flush()?;
+        *self
+            .pending_bytes
+            .entry((channel, seed.to_string()))
+            .or_default() += line.len() as u64;
+        Ok(())
     }
 
     fn file(&mut self, channel: RingingChannel, seed: &str) -> std::io::Result<&mut File> {

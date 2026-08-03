@@ -190,6 +190,17 @@ export class RingingManager {
         this.onTimelineStatus?.(status);
       },
       response.snapshot.watermark,
+      // gap 恢复：拉取权威 snapshot，新 watermark 成为重连游标；快照同时
+      // 转发 renderer 重建 transcript，避免 Last-Event-ID 永不前进导致的
+      // 无限重连（renderer 的 gap 恢复因无条目到达而永远不会触发）。
+      async () => {
+        const recovered = await this.getJson(
+          `/ringing/v1/sessions/${encodeURIComponent(seed)}/timeline`,
+          "timeline snapshot",
+        ) as TimelineSnapshotResponse;
+        this.onTimelineSnapshot?.(recovered);
+        return recovered.snapshot.watermark;
+      },
     );
     this.timelineClient = stream;
     this.onTimelineSnapshot?.(response);

@@ -1,6 +1,7 @@
 //! Durable Ringing V1 timeline state. One atomically replaced record per session contains
 //! the materialized recovery snapshot and its replay tail.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -55,6 +56,8 @@ impl TimelineStore {
         std::fs::rename(tmp, path)
     }
 
+    /// 全量装载（仅测试用；生产走 `list_seeds` + `load_seed` 懒加载）。
+    #[cfg(test)]
     pub fn load(&self) -> std::io::Result<HashMap<String, PersistedTimeline>> {
         let mut timelines = HashMap::new();
         for entry in std::fs::read_dir(&self.root)? {
@@ -80,6 +83,31 @@ impl TimelineStore {
             }
         }
         Ok(timelines)
+    }
+
+    /// 磁盘上的 timeline seed 清单（懒加载索引；不读取文件内容）。
+    pub fn list_seeds(&self) -> std::io::Result<Vec<String>> {
+        let mut seeds = Vec::new();
+        for entry in std::fs::read_dir(&self.root)? {
+            let path = entry?.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(seed) = path.file_stem().and_then(|s| s.to_str()) {
+                if !seed.is_empty() {
+                    seeds.push(seed.to_string());
+                }
+            }
+        }
+        Ok(seeds)
+    }
+
+    /// 装载单个 seed 的持久化 timeline（懒加载按需恢复用）。
+    pub fn load_seed(&self, seed: &str) -> Option<PersistedTimeline> {
+        let path = self.path_for(seed);
+        std::fs::read(&path)
+            .ok()
+            .and_then(|body| serde_json::from_slice::<PersistedTimeline>(&body).ok())
     }
 
     fn path_for(&self, seed: &str) -> PathBuf {

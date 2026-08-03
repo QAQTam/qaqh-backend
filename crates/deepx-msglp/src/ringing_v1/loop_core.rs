@@ -413,7 +413,9 @@ impl Loop {
     /// Called by TurnEngine between gate rounds and by ToolEngine
     /// during progress draining. Most non-interrupt commands received during
     /// a busy phase are dropped; Compact is explicitly rejected because it
-    /// cannot replace context inside an in-flight lap.
+    /// cannot replace context inside an in-flight lap, and Ringing
+    /// ConversationSendMessage is explicitly rejected because the daemon has
+    /// already ACKed it (a silent drop would strand the frontend forever).
     pub fn poll_interrupts(&mut self) -> bool {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             let frame = match cmd.frame {
@@ -424,6 +426,25 @@ impl Loop {
                         deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
                         self.phase = LoopPhase::Idle;
                         return true;
+                    }
+                    // 忙碌期非中断 Ringing 命令：显式拒绝而非静默丢弃。
+                    // 命令在 daemon 侧已被 ACK（accepted），若 worker 无声
+                    // 丢弃，前端将永远等待业务终态（消息无限排队/乐观 turn
+                    // 永不结束）。以被拒命令的 command_id 作为 causation，
+                    // 使 daemon 能把 OperationFailed 折叠进对应 receipt。
+                    if let deepx_ringing::RingingCommand::Conversation(
+                        deepx_domain::ConversationCommand::ConversationSendMessage { .. },
+                    ) = &env.command
+                    {
+                        let command_id = env.command_id.clone();
+                        let _scope =
+                            self.paced_emitter.enter_causation(Some(&command_id));
+                        self.emit_operation_failed(
+                            &command_id,
+                            deepx_domain::ErrorScope::Conversation,
+                            "busy",
+                            "A turn is already running; cancel it before sending a new message",
+                        );
                     }
                     continue;
                 }

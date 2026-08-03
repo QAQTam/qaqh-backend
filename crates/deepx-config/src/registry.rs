@@ -52,6 +52,10 @@ fn deepseek() -> ProviderSpec {
                 // Alias only at the provider boundary; DeepX keeps `search`
                 // canonical in execution, events, and persisted history.
                 responses_search_function_alias: Some("deepx_search".into()),
+                // Reasoning echo is the default (responses_echo_reasoning_content
+                // defaults to true): DeepSeek's thinking mode requires assistant
+                // reasoning_text to be passed back whenever the input continues a
+                // tool loop (ends with function_call_output), otherwise HTTP 400.
                 beta: true,
                 ..Default::default()
             },
@@ -63,20 +67,45 @@ fn qwen() -> ProviderSpec {
     ProviderSpec {
         id: "qwen".into(),
         display: "Qwen (阿里百炼)".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "OpenAI-compatible".into(),
-            protocol: "openai".into(),
-            base_url: "https://dashscope.aliyuncs.com".into(),
-            default_model: String::new(),
-            models: vec![],
-            models_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
-            chat_path: Some("/compatible-mode/v1/chat/completions".into()),
-            thinking_mode: ThinkingParamMode::QwenEnableThinking,
-            cache_field: CacheTokenField::PromptDetailsCached,
-            has_balance: false,
-            ..Default::default()
-        }],
+        endpoints: vec![
+            EndpointSpec {
+                id: "openai".into(),
+                display: "OpenAI-compatible".into(),
+                protocol: "openai".into(),
+                base_url: "https://dashscope.aliyuncs.com".into(),
+                default_model: String::new(),
+                models: vec![],
+                models_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
+                chat_path: Some("/compatible-mode/v1/chat/completions".into()),
+                thinking_mode: ThinkingParamMode::QwenEnableThinking,
+                cache_field: CacheTokenField::PromptDetailsCached,
+                has_balance: false,
+                ..Default::default()
+            },
+            // Qwen Responses API (bridge): dashscope exposes the Responses
+            // protocol at the OpenAI-compatible prefix. Known differences are
+            // tracked in docs/responses-api-support.md (R1: reasoning events
+            // use `response.reasoning_summary_text.delta`; R3: effort ladder
+            // unverified). Beta until those are confirmed.
+            EndpointSpec {
+                id: "responses".into(),
+                display: "Responses API".into(),
+                protocol: "responses".into(),
+                base_url: "https://dashscope.aliyuncs.com".into(),
+                default_model: String::new(),
+                models: vec![],
+                models_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
+                responses_path: Some("/compatible-mode/v1/responses".into()),
+                thinking_mode: ThinkingParamMode::QwenEnableThinking,
+                cache_field: CacheTokenField::PromptDetailsCached,
+                supports_thinking: false,
+                supports_reasoning_effort: true,
+                supports_reasoning_content: false,
+                has_balance: false,
+                beta: true,
+                ..Default::default()
+            },
+        ],
     }
 }
 
@@ -124,18 +153,42 @@ fn mimo() -> ProviderSpec {
     ProviderSpec {
         id: "mimo".into(),
         display: "MiMo (小米)".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "OpenAI-compatible".into(),
-            protocol: "openai".into(),
-            base_url: "https://api.xiaomimimo.com/v1".into(),
-            default_model: String::new(),
-            models: vec![],
-            models_url: Some("https://api.xiaomimimo.com/v1".into()),
-            cache_field: CacheTokenField::None,
-            has_balance: false,
-            ..Default::default()
-        }],
+        endpoints: vec![
+            EndpointSpec {
+                id: "openai".into(),
+                display: "OpenAI-compatible".into(),
+                protocol: "openai".into(),
+                base_url: "https://api.xiaomimimo.com/v1".into(),
+                default_model: String::new(),
+                models: vec![],
+                models_url: Some("https://api.xiaomimimo.com/v1".into()),
+                cache_field: CacheTokenField::None,
+                has_balance: false,
+                ..Default::default()
+            },
+            // MiMo Responses API (bridge): https://mimo.mi.com/docs/zh-CN/api/chat/responses
+            // Uses the standard OpenAI item format and reasoning_text events.
+            // Constraint: previous_response_id / background / context_management
+            // are NOT supported (rejected); the gate never sends them.
+            EndpointSpec {
+                id: "responses".into(),
+                display: "Responses API".into(),
+                protocol: "responses".into(),
+                base_url: "https://api.xiaomimimo.com/v1".into(),
+                default_model: String::new(),
+                models: vec![],
+                models_url: Some("https://api.xiaomimimo.com/v1".into()),
+                responses_path: Some("/responses".into()),
+                cache_field: CacheTokenField::None,
+                supports_thinking: false,
+                supports_reasoning_effort: true,
+                supports_reasoning_content: false,
+                responses_effort_max: "high".into(),
+                has_balance: false,
+                beta: true,
+                ..Default::default()
+            },
+        ],
     }
 }
 
@@ -163,17 +216,40 @@ fn doubao() -> ProviderSpec {
     ProviderSpec {
         id: "doubao".into(),
         display: "Doubao (火山方舟)".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "OpenAI-compatible".into(),
-            protocol: "openai".into(),
-            base_url: "https://ark.cn-beijing.volces.com".into(),
-            default_model: String::new(),
-            models: vec![],
-            models_url: Some("https://ark.cn-beijing.volces.com/api/v3".into()),
-            chat_path: Some("/api/v3/chat/completions".into()),
-            ..Default::default()
-        }],
+        endpoints: vec![
+            EndpointSpec {
+                id: "openai".into(),
+                display: "OpenAI-compatible".into(),
+                protocol: "openai".into(),
+                base_url: "https://ark.cn-beijing.volces.com".into(),
+                default_model: String::new(),
+                models: vec![],
+                models_url: Some("https://ark.cn-beijing.volces.com/api/v3".into()),
+                chat_path: Some("/api/v3/chat/completions".into()),
+                ..Default::default()
+            },
+            // Doubao Responses API (bridge): 火山方舟 exposes the Responses
+            // protocol at /api/v3/responses. Uses the standard OpenAI item
+            // format. Known differences are tracked in
+            // docs/responses-api-support.md (R2: thinking embedding and
+            // thinking params unverified). Beta until confirmed.
+            EndpointSpec {
+                id: "responses".into(),
+                display: "Responses API".into(),
+                protocol: "responses".into(),
+                base_url: "https://ark.cn-beijing.volces.com".into(),
+                default_model: String::new(),
+                models: vec![],
+                models_url: Some("https://ark.cn-beijing.volces.com/api/v3".into()),
+                responses_path: Some("/api/v3/responses".into()),
+                supports_thinking: false,
+                supports_reasoning_effort: true,
+                supports_reasoning_content: false,
+                has_balance: false,
+                beta: true,
+                ..Default::default()
+            },
+        ],
     }
 }
 
@@ -474,5 +550,64 @@ mod tests {
         assert_eq!(protocol_for("deepseek", "openai"), "openai");
         // Unknown endpoint falls back to the openai protocol (backward compat).
         assert_eq!(protocol_for("deepseek", "unknown"), "openai");
+    }
+
+    #[test]
+    fn qwen_responses_endpoint_exists() {
+        let endpoint = find_endpoint("qwen", "responses").expect("Qwen Responses endpoint");
+        assert_eq!(endpoint.protocol, "responses");
+        assert_eq!(endpoint.base_url, "https://dashscope.aliyuncs.com");
+        assert_eq!(
+            endpoint.responses_path.as_deref(),
+            Some("/compatible-mode/v1/responses")
+        );
+        assert_eq!(
+            models_url_for("qwen", "responses").as_deref(),
+            Some("https://dashscope.aliyuncs.com/compatible-mode/v1/models")
+        );
+        assert!(endpoint.beta);
+        assert!(!endpoint.supports_thinking);
+        assert!(endpoint.supports_reasoning_effort);
+        assert!(!endpoint.supports_reasoning_content);
+        // Bridge must not disturb the default chat endpoint.
+        assert_eq!(protocol_for("qwen", "openai"), "openai");
+    }
+
+    #[test]
+    fn doubao_responses_endpoint_exists() {
+        let endpoint = find_endpoint("doubao", "responses").expect("Doubao Responses endpoint");
+        assert_eq!(endpoint.protocol, "responses");
+        assert_eq!(endpoint.base_url, "https://ark.cn-beijing.volces.com");
+        assert_eq!(
+            endpoint.responses_path.as_deref(),
+            Some("/api/v3/responses")
+        );
+        assert_eq!(
+            models_url_for("doubao", "responses").as_deref(),
+            Some("https://ark.cn-beijing.volces.com/api/v3/models")
+        );
+        assert!(endpoint.beta);
+        assert!(!endpoint.supports_thinking);
+        assert!(endpoint.supports_reasoning_effort);
+        assert!(!endpoint.supports_reasoning_content);
+        assert_eq!(protocol_for("doubao", "openai"), "openai");
+    }
+
+    #[test]
+    fn mimo_responses_endpoint_exists() {
+        let endpoint = find_endpoint("mimo", "responses").expect("MiMo Responses endpoint");
+        assert_eq!(endpoint.protocol, "responses");
+        assert_eq!(endpoint.base_url, "https://api.xiaomimimo.com/v1");
+        assert_eq!(endpoint.responses_path.as_deref(), Some("/responses"));
+        assert_eq!(
+            models_url_for("mimo", "responses").as_deref(),
+            Some("https://api.xiaomimimo.com/v1/models")
+        );
+        assert!(endpoint.beta);
+        assert!(!endpoint.supports_thinking);
+        assert!(endpoint.supports_reasoning_effort);
+        assert_eq!(endpoint.responses_effort_max, "high");
+        assert!(!endpoint.supports_reasoning_content);
+        assert_eq!(protocol_for("mimo", "openai"), "openai");
     }
 }

@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use deepx_types::{ContentBlock, Message, ToolDef};
 
-use super::types::{ProviderConfig, ResponsesCompat, StreamEvent, safe_provider_error_body};
+use super::types::{
+    EFFORT_LADDER, ProviderConfig, ResponsesCompat, StreamEvent, normalize_reasoning_effort,
+    safe_provider_error_body,
+};
 
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_RETRIES: u32 = 3;
@@ -107,6 +110,25 @@ fn convert_messages_to_input(
                 }));
             }
             "assistant" => {
+                // Reasoning blocks → top-level reasoning items, echoed verbatim.
+                // Default on: DeepSeek / MiMo thinking mode requires assistant
+                // reasoning to be passed back when the input continues a tool
+                // loop (ends with function_call_output) — HTTP 400 otherwise;
+                // Kimi K3 / k2.7-code need it for preserved thinking; GLM /
+                // Qwen / MiniMax / OpenAI accept it silently.
+                if compat.echo_reasoning_content {
+                    for block in &msg.content {
+                        if let ContentBlock::Reasoning { reasoning } = block {
+                            if !reasoning.is_empty() {
+                                items.push(serde_json::json!({
+                                    "type": "reasoning",
+                                    "content": [{"type": "reasoning_text", "text": reasoning}],
+                                }));
+                            }
+                        }
+                    }
+                }
+
                 let text_parts: Vec<_> = msg.content.iter().filter_map(|b| {
                     if let ContentBlock::Text { text } = b {
                         if !text.is_empty() { Some(text.clone()) } else { None }
@@ -263,20 +285,26 @@ fn canonical_function_name(name: &str, compat: &ResponsesCompat) -> String {
 
 /// Clamp a requested reasoning effort to the provider's upper bound.
 ///
-/// DeepSeek accepts `none / minimal / low / medium / high / xhigh / max`;
-/// OpenAI stops at `high`. The ladder is ordered so a value above the bound
-/// (e.g. "xhigh" against an OpenAI endpoint) degrades gracefully instead of
-/// being rejected or silently misinterpreted.
+/// DeepSeek accepts the full ladder up to `max`; OpenAI stops at `high`. The
+/// ladder is ordered so a value above the bound (e.g. "xhigh" against an
+/// OpenAI endpoint) degrades gracefully instead of being rejected or silently
+/// misinterpreted. Values that would disable thinking are promoted to `low`
+/// (DeepX always reasons).
 fn clamp_effort(effort: Option<String>, max: &str) -> String {
-    const ORDER: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-    let requested = effort.unwrap_or_else(|| "medium".into());
-    let max_idx = ORDER.iter().position(|&v| v == max).unwrap_or(4);
-    let idx = ORDER
+    let requested = effort
+        .as_deref()
+        .and_then(|e| normalize_reasoning_effort(Some(e)))
+        .unwrap_or_else(|| "medium".into());
+    let max_idx = EFFORT_LADDER
+        .iter()
+        .position(|&v| v == max)
+        .unwrap_or(4);
+    let idx = EFFORT_LADDER
         .iter()
         .position(|&v| v == requested)
         .unwrap_or(max_idx)
         .min(max_idx);
-    ORDER[idx].to_string()
+    EFFORT_LADDER[idx].to_string()
 }
 
 // ── Public API ──
@@ -1194,6 +1222,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assistant_reasoning_echoed_when_enabled() {
+        // DeepSeek / MiMo thinking mode requires assistant reasoning to be
+        // passed back when the input continues a tool loop; default is on.
+        let msgs = vec![Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![
+                ContentBlock::Reasoning { reasoning: "step by step".into() },
+                ContentBlock::Text { text: "checking".into() },
+                ContentBlock::ToolUse {
+                    id: "tc_r".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "/x.txt"}),
+                },
+            ],
+        }];
+        // Default compat: reasoning echoed before message/function_call.
+        let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["type"], "reasoning");
+        assert_eq!(input[0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[0]["content"][0]["text"], "step by step");
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[2]["type"], "function_call");
+
+        // Explicitly disabled: reasoning dropped silently.
+        let mut compat = test_compat();
+        compat.echo_reasoning_content = false;
+        let (input, _instructions) = convert_messages_to_input(&msgs, &compat);
+        assert_eq!(input.len(), 2, "no reasoning item when echo disabled");
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[1]["type"], "function_call");
+    }
+
+    #[test]
+    fn empty_reasoning_not_echoed() {
+        let mut compat = test_compat();
+        compat.echo_reasoning_content = true;
+        let msgs = vec![Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![
+                ContentBlock::Reasoning { reasoning: String::new() },
+                ContentBlock::Text { text: "ok".into() },
+            ],
+        }];
+        let (input, _instructions) = convert_messages_to_input(&msgs, &compat);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "message");
+    }
+
     // ── Tool conversion ──
 
     #[test]
@@ -1330,11 +1412,6 @@ mod tests {
     // ── effort clamping ──
 
     #[test]
-    fn clamp_effort_defaults_to_medium() {
-        assert_eq!(clamp_effort(None, "high"), "medium");
-    }
-
-    #[test]
     fn clamp_effort_respects_provider_bound() {
         // OpenAI bound: xhigh/max collapse to high.
         assert_eq!(clamp_effort(Some("xhigh".into()), "high"), "high");
@@ -1344,6 +1421,20 @@ mod tests {
         assert_eq!(clamp_effort(Some("low".into()), "max"), "low");
         // Unknown values fall back to the bound (never rejected).
         assert_eq!(clamp_effort(Some("ultra".into()), "high"), "high");
+    }
+
+    #[test]
+    fn clamp_effort_promotes_disabling_values_to_low() {
+        // DeepX always reasons: none/minimal/disable must never reach the API.
+        for off in ["none", "minimal", "disable", "disabled", "off", ""] {
+            assert_eq!(clamp_effort(Some(off.into()), "max"), "low", "{}", off);
+            assert_eq!(clamp_effort(Some(off.into()), "high"), "low", "{}", off);
+        }
+    }
+
+    #[test]
+    fn clamp_effort_defaults_to_medium() {
+        assert_eq!(clamp_effort(None, "high"), "medium");
     }
 
     // ── web_search_call echo ──

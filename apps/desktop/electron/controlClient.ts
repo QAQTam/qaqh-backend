@@ -144,6 +144,31 @@ export class DaemonControlClient {
     return this.closing;
   }
 
+  /**
+   * 优雅停止 daemon 并等待其进程退出（POST /control/v1/stop）。
+   *
+   * 必须先断开控制连接并置 `stopped`：daemon 关闭广播会让 handleDisconnect
+   * 触发自动重连，而 discovery 文件随即被删除——重连会误判"daemon 死了"并
+   * 重新拉起一个孤儿 daemon，正好绕开本次优雅关闭。
+   */
+  async stopDaemon(): Promise<boolean> {
+    this.stopped = true;
+    this.disconnectSocket();
+    try {
+      const discovery = await readDiscovery();
+      const stopped = await requestDaemonStop(discovery, false);
+      if (stopped !== "stopping") {
+        console.warn("[backend] daemon did not acknowledge graceful stop:", stopped);
+        return false;
+      }
+      await waitForDaemonExit(discovery.pid);
+      return true;
+    } catch (error) {
+      console.warn("[backend] graceful daemon stop failed", error);
+      return false;
+    }
+  }
+
   async prepareBackendUpdate(): Promise<boolean> {
     const discovery = await readDiscovery();
     const stopped = await requestDaemonStop(discovery, true);

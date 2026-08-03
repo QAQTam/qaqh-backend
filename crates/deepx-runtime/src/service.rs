@@ -455,6 +455,14 @@ impl DeepxService {
             .shutdown_all();
     }
 
+    /// F4: 死 worker 重生（daemon 周期任务调用；内部自带退避与关闭保护）。
+    pub fn respawn_dead_agents(&self) {
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .respawn_dead_agents();
+    }
+
     /// True while stopping the daemon would interrupt work or abandon an
     /// interaction waiting for its lease owner. Used by lifecycle takeover so
     /// an updater cannot race a newly-started turn.

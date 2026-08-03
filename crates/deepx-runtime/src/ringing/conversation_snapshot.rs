@@ -18,6 +18,14 @@ pub fn persisted_conversation_state(seed: &str) -> Option<serde_json::Value> {
         .map(|context| context.messages.as_slice())
         .unwrap_or(archive_messages.as_slice());
     let (total, turns) = deepx_msglp::util::project_turns_from_messages(seed, messages, None, None);
+    // 恢复 Info 面板所需元数据：model 以会话实际使用过的为准（meta.json 持久化），
+    // 老会话可能为空，回退到当前配置；context_limit 未持久化，取当前配置。
+    let config = deepx_config::Config::load().unwrap_or_default();
+    let model = if meta.model.is_empty() {
+        config.model.clone()
+    } else {
+        meta.model.clone()
+    };
     Some(json!({
         "turns": turns.iter().map(neutral_turn).collect::<Vec<_>>(),
         "total_turns": total,
@@ -26,6 +34,8 @@ pub fn persisted_conversation_state(seed: &str) -> Option<serde_json::Value> {
         "usage_totals": meta.usage_totals,
         "usage_requests": meta.usage_requests,
         "cache_reported_requests": meta.effective_cache_reported_requests(),
+        "model": model,
+        "context_limit": config.context_limit,
     }))
 }
 

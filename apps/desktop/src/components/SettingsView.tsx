@@ -21,6 +21,16 @@ interface Category {
   label: string;
 }
 
+/** Global reasoning-effort ladder. DeepX always reasons, so off values are
+ *  normalized to the lowest thinking level. Mirrors EFFORT_LADDER on the gate. */
+const EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"] as const;
+const EFFORT_OFF = ["none", "minimal", "disable", "disabled", "off", ""];
+
+function normalizeEffort(effort: string): string {
+  if (EFFORT_OFF.includes(effort)) return "low";
+  return EFFORT_LADDER.includes(effort as (typeof EFFORT_LADDER)[number]) ? effort : effort;
+}
+
 function EyeIcon(props: { show: boolean }) {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -208,7 +218,7 @@ export default function SettingsView(props: SettingsViewProps) {
     if (data.endpoint) setEndpointId(data.endpoint);
     if (data.max_tokens) setMaxTokens(data.max_tokens);
     if (data.context_limit) setContextLimit(data.context_limit);
-    if (data.reasoning_effort) setReasoningEffort(data.reasoning_effort);
+    if (data.reasoning_effort) setReasoningEffort(normalizeEffort(data.reasoning_effort));
     if (data.auto_compact_threshold !== undefined) {
       setAutoCompactThreshold(data.auto_compact_threshold);
       setAutoCompactEnabled(data.auto_compact_threshold > 0);
@@ -364,7 +374,7 @@ export default function SettingsView(props: SettingsViewProps) {
         model: model(), baseUrl: baseUrl(),
         providerId: providerId(), endpoint: endpointId(),
         maxTokens: maxTokens(), contextLimit: contextLimit(),
-        reasoningEffort: reasoningEffort(), autoCompactThreshold: autoCompactEnabled() ? autoCompactThreshold() : 0.0, lang: props.lang(),
+        reasoningEffort: normalizeEffort(reasoningEffort()), autoCompactThreshold: autoCompactEnabled() ? autoCompactThreshold() : 0.0, lang: props.lang(),
         subagentModel: subModel(), subagentBaseUrl: subBaseUrl(),
         subagentApiKey: subApiKeyReplacement,
         subagentMaxTokens: subMaxTokens(),
@@ -466,7 +476,7 @@ export default function SettingsView(props: SettingsViewProps) {
         model: model(), baseUrl: baseUrl(),
         providerId: providerId(), endpoint: endpointId(),
         maxTokens: maxTokens(), contextLimit: contextLimit(),
-        reasoningEffort: reasoningEffort(), autoCompactThreshold: autoCompactEnabled() ? autoCompactThreshold() : 0.0, lang: props.lang(),
+        reasoningEffort: normalizeEffort(reasoningEffort()), autoCompactThreshold: autoCompactEnabled() ? autoCompactThreshold() : 0.0, lang: props.lang(),
         subagentModel: subModel(), subagentBaseUrl: subBaseUrl(),
         subagentApiKey: !subApiKeyConfigured() || showSubApiKeyInput() ? subApiKeyValue() : "",
         subagentMaxTokens: subMaxTokens(),
@@ -628,7 +638,10 @@ export default function SettingsView(props: SettingsViewProps) {
                   <div class="settings-row">
                     <label>{t().settings.reasoningEffort}</label>
                     <select value={reasoningEffort()} onChange={(e) => setReasoningEffort(e.currentTarget.value)}>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
                       <option value="high">high</option>
+                      <option value="xhigh">xhigh</option>
                       <option value="max">max</option>
                     </select>
                   </div>

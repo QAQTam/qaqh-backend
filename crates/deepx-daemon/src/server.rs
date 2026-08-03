@@ -149,6 +149,25 @@ pub async fn run() -> Result<(), String> {
     }
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let (shutdown, mut shutdown_rx) = watch::channel(false);
+    // F4: worker reader 线程 panic/崩溃时，registry 会把死实例标记为可重生；
+    // 此周期任务负责真正重新拉起，避免单条事件流故障永久饿死会话。
+    {
+        let service = service.clone();
+        let mut shutdown_rx = shutdown.subscribe();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => service.respawn_dead_agents(),
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -170,6 +189,9 @@ pub async fn run() -> Result<(), String> {
         }
     }
     service.shutdown();
+    // F2: timeline 持久化是异步合并 checkpoint；退出前同步落盘全部 pending
+    // seed，缩小子进程被杀时 transcript 尾部的丢失窗口。
+    hub.flush_timeline_persistence();
     if let Some(ref ws) = workspace {
         ws.stop();
     }

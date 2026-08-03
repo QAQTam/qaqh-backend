@@ -9,8 +9,8 @@ use std::fmt;
 
 use deepx_domain::{
     TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
-    TimelineIntent, TimelineRound, TimelineSnapshot, TimelineTool, TimelineToolState, TimelineTurn,
-    TimelineTurnState,
+    TimelineFailure, TimelineIntent, TimelineRound, TimelineSnapshot, TimelineTool,
+    TimelineToolState, TimelineTurn, TimelineTurnState,
 };
 
 /// A live Ringing V1 timeline delivery record. `entry.timeline_seq` is the sole SSE cursor for
@@ -136,6 +136,11 @@ impl TimelineAppender {
         Self::default()
     }
 
+    /// 该 seed 的 timeline 是否已在内存（懒加载索引检查用）。
+    pub fn contains(&self, seed: &str) -> bool {
+        self.seeds.contains_key(seed)
+    }
+
     pub fn open_turn(
         &mut self,
         seed: &str,
@@ -143,11 +148,49 @@ impl TimelineAppender {
         user_text: impl Into<String>,
     ) -> Result<TimelineEntry, TimelineError> {
         let turn_id = turn_id.into();
+        let user_text = user_text.into();
         let timeline = self.seeds.entry(seed.to_string()).or_default();
         if timeline.turns.contains_key(&turn_id) {
+            // Reopen allowance: after a daemon restart the orphan-sealer marks
+            // every unsealed turn as Cancelled, but the message store (the
+            // authoritative history) still counts that turn — the worker's
+            // next input can legitimately reuse the same id (meta.turn_count
+            // lags while a turn is running). Rejecting the intent would starve
+            // the frontend transcript for that turn forever, so an orphan
+            // Cancelled turn is reset in place.
+            let reopenable = {
+                let turn = timeline.turns.get(&turn_id).expect("checked above");
+                turn.sealed && turn.state == TimelineTurnState::Cancelled
+            };
+            if reopenable {
+                let reopened_user_text = {
+                    let turn = timeline.turns.get_mut(&turn_id).expect("checked above");
+                    turn.user_text = user_text;
+                    turn.sealed = false;
+                    turn.state = TimelineTurnState::Running;
+                    turn.failure = None;
+                    turn.rounds.clear();
+                    turn.user_text.clone()
+                };
+                // Fragment counters are keyed by (turn, round, block) and the
+                // reopened turn may reuse the same round/block ids, so reset
+                // them — otherwise the resumed stream's first TextDelta is
+                // rejected with FragmentOutOfOrder and the transcript stalls
+                // again.
+                timeline
+                    .next_fragment
+                    .retain(|(turn, _, _), _| turn != &turn_id);
+                return Ok(next_entry(
+                    timeline,
+                    turn_id,
+                    None,
+                    TimelineEvent::TurnOpened {
+                        user_text: reopened_user_text,
+                    },
+                ));
+            }
             return Err(TimelineError::DuplicateTurn(turn_id));
         }
-        let user_text = user_text.into();
         timeline.turns.insert(
             turn_id.clone(),
             TimelineTurn {
@@ -677,6 +720,76 @@ mod tests {
             failure: None,
             permission: None,
         }
+    }
+
+    #[test]
+    fn orphan_cancelled_turn_is_reopened_by_the_next_input() {
+        // Regression: after a daemon restart the orphan-sealer marks the
+        // interrupted turn Cancelled, but the message store still counts it,
+        // so the worker's next input reuses the same turn_id. open_turn must
+        // reset that placeholder instead of rejecting with DuplicateTurn —
+        // otherwise every timeline intent for the turn is dropped and the
+        // frontend transcript stays blank.
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t1", "interrupted question").unwrap();
+        appender
+            .open_block("s", "t1", 0, "answer", TimelineBlockKind::Text, None)
+            .unwrap();
+        appender
+            .append_text("s", "t1", 0, "answer", 0, "partial")
+            .unwrap();
+        appender.seal_block("s", "t1", 0, "answer").unwrap();
+        appender.seal_round("s", "t1", 0, false).unwrap();
+        // Simulate daemon restart orphan seal.
+        appender
+            .seal_turn_with_state(
+                "s",
+                "t1",
+                TimelineTurnState::Cancelled,
+                Some(TimelineFailure {
+                    code: "daemon_restart_interrupted".into(),
+                    message: "interrupted".into(),
+                }),
+            )
+            .unwrap();
+
+        // The worker reuses t1 for the resumed conversation.
+        let reopened = appender
+            .open_turn("s", "t1", "next question")
+            .expect("orphan cancelled turn must be reopenable");
+        assert!(matches!(reopened.event, TimelineEvent::TurnOpened { .. }));
+
+        let snapshot = appender.snapshot("s").unwrap();
+        let turn = &snapshot.turns[0];
+        assert_eq!(turn.user_text, "next question");
+        assert!(!turn.sealed);
+        assert_eq!(turn.state, TimelineTurnState::Running);
+        assert!(turn.rounds.is_empty(), "stale rounds are cleared");
+        assert!(turn.failure.is_none(), "failure marker is cleared");
+
+        // Subsequent intents for the reopened turn flow normally.
+        appender
+            .open_block("s", "t1", 0, "answer", TimelineBlockKind::Text, None)
+            .unwrap();
+        appender
+            .append_text("s", "t1", 0, "answer", 0, "full reply")
+            .unwrap();
+        let final_snapshot = appender.snapshot("s").unwrap();
+        assert_eq!(
+            final_snapshot.turns[0].rounds[0].blocks[0].text,
+            "full reply"
+        );
+    }
+
+    #[test]
+    fn completed_turn_is_not_reopened() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t1", "question").unwrap();
+        appender.seal_turn("s", "t1").unwrap();
+        let err = appender
+            .open_turn("s", "t1", "duplicate")
+            .expect_err("completed turns must not be reopened");
+        assert!(matches!(err, TimelineError::DuplicateTurn(_)));
     }
 
     #[test]

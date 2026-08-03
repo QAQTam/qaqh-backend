@@ -5,6 +5,7 @@ import {
   activeTurn,
   canLoadMore,
   failedPrompt,
+  isSessionStalled,
   isSessionStreaming,
   sessionUsage,
 } from "./sessionSelectors";
@@ -33,5 +34,36 @@ describe("sessionSelectors", () => {
     expect(sessionUsage(state)).toMatchObject({ contextTokens: 80, totalTokens: 100 });
     expect(failedPrompt(state)).toBe("retry me");
     expect(canLoadMore(state)).toBe(true);
+  });
+
+  it("treats a running turn without timestamps as stalled so recovery can trigger", () => {
+    // Timeline 投影/旧数据来源的 running turn 可能没有 startedAt/lastActivityAt。
+    // streaming 保守判 true（防误发）的同时，stalled 必须判 true，
+    // 否则 handleSend 的“先 cancel 再发送”恢复路径永远不触发。
+    const state = createRawSessionState("seed-a");
+    state.turns.push({
+      turnId: "t1",
+      userText: "zombie",
+      status: "running",
+      rounds: [],
+      interactions: [],
+    });
+    expect(isSessionStreaming(state)).toBe(true);
+    expect(isSessionStalled(state)).toBe(true);
+  });
+
+  it("reports stalled only after the stall timeout elapses", () => {
+    const state = createRawSessionState("seed-a");
+    state.turns.push({
+      turnId: "t1",
+      userText: "stale",
+      status: "running",
+      startedAt: Date.now() - 5 * 60 * 1000,
+      lastActivityAt: Date.now() - 5 * 60 * 1000,
+      rounds: [],
+      interactions: [],
+    });
+    expect(isSessionStreaming(state)).toBe(false);
+    expect(isSessionStalled(state)).toBe(true);
   });
 });

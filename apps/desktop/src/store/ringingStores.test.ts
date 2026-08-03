@@ -208,6 +208,47 @@ describe("conversationReducer", () => {
     expect(old.rounds[0].thinking).toBe("plan");
     expect(old.status).toBe("completed");
   });
+
+  it("restores model and context limit from the snapshot for the Info panel", () => {
+    let state = initialConversationState("s1");
+    state = applyConversationSnapshot(
+      state,
+      [],
+      null,
+      { total_tokens: 42, prompt_tokens: 30, completion_tokens: 12, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, reasoning_tokens: 0, cache_usage_reported: false },
+      null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      "deepseek-chat",
+      200_000,
+    );
+    expect(state.lastUsage?.model).toBe("deepseek-chat");
+    expect(state.lastUsage?.contextLimit).toBe(200_000);
+    expect(state.lastUsage?.usage.total_tokens).toBe(42);
+  });
+
+  it("keeps an existing live model when the snapshot omits it", () => {
+    let state = initialConversationState("s1");
+    state = conversationReducer(state, {
+      type: "usage_updated",
+      turn_id: "t1",
+      round_num: 0,
+      usage: { total_tokens: 5, prompt_tokens: 5, completion_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, reasoning_tokens: 0, cache_usage_reported: false } as any,
+      context_limit: 1000,
+      model: "live-model",
+    });
+    state = applyConversationSnapshot(
+      state,
+      [],
+      null,
+      { total_tokens: 7, prompt_tokens: 7, completion_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, reasoning_tokens: 0, cache_usage_reported: false },
+    );
+    expect(state.lastUsage?.model).toBe("live-model");
+    expect(state.lastUsage?.contextLimit).toBe(1000);
+    expect(state.lastUsage?.usage.total_tokens).toBe(7);
+  });
 });
 
 describe("toolReducer", () => {

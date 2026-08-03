@@ -147,12 +147,21 @@ export default function ChatView(props: ChatViewProps) {
       interactions: [],
     };
     props.setPendingSend(optimisticTurn);
-    yield requestWithRinging("session.send_message", {
-      seed: seed(),
-      text,
-      files,
-      images: imageBlocks ?? [],
-    });
+    try {
+      yield requestWithRinging("session.send_message", {
+        seed: seed(),
+        text,
+        files,
+        images: imageBlocks ?? [],
+      });
+    } catch (error) {
+      // Transport/lease-level rejection (e.g. daemon restarted and the seed
+      // lease is not re-attached yet) produces no turn_started, turn_opened,
+      // or busy event, so the optimistic turn would stay stuck as running
+      // forever. Clear it; ComposerDock surfaces the error and keeps the text.
+      props.setPendingSend(null);
+      throw error;
+    }
     // pendingSend auto-cleared when turn_start arrives (new turns count increases)
   });
 

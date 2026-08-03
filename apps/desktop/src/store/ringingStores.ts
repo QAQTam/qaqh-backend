@@ -357,6 +357,8 @@ export function applyConversationSnapshot(
   cacheReportedRequestCount?: number,
   totalTurns?: number,
   hasMore?: boolean,
+  model?: string | null,
+  contextLimit?: number,
 ): ConversationState {
   const snapshots = new Map<string, TurnView>();
   for (const raw of turns) {
@@ -389,8 +391,10 @@ export function applyConversationSnapshot(
     activeTurn,
     lastUsage: usage ? {
       usage,
-      contextLimit: state.lastUsage?.contextLimit ?? 0,
-      model: state.lastUsage?.model ?? "",
+      // 快照优先（daemon bootstrap 携带会话实际 model 与当前 context_limit）；
+      // 旧值兜底，避免快照缺字段时清空已有数据。
+      contextLimit: contextLimit ?? state.lastUsage?.contextLimit ?? 0,
+      model: model || state.lastUsage?.model || "",
     } : state.lastUsage,
     usageTotals: usageTotals ?? state.usageTotals,
     usageRequestCount: Number.isSafeInteger(usageRequestCount) ? Math.max(0, usageRequestCount!) : state.usageRequestCount,

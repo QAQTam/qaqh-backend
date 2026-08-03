@@ -1035,6 +1035,7 @@ impl TurnEngine {
                     effort_max: endpoint.responses_effort_max.clone(),
                     supports_user: endpoint.responses_supports_user,
                     search_function_alias: endpoint.responses_search_function_alias.clone(),
+                    echo_reasoning_content: endpoint.responses_echo_reasoning_content,
                 };
             }
             p

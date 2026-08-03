@@ -3,6 +3,30 @@
 use deepx_types::Message;
 use deepx_types::{CacheTokenField, ThinkingParamMode};
 
+/// Global reasoning-effort ladder. DeepX always enables thinking, so the
+/// `none` / `disable` levels are not part of the presets: any value that
+/// would turn reasoning off is promoted to the lowest thinking level.
+pub const EFFORT_LADDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Values that would disable or minimize reasoning. Never sent to the API:
+/// thinking is a hard requirement of DeepX, so they are promoted to `low`.
+const EFFORT_OFF: [&str; 6] = ["none", "minimal", "disable", "disabled", "off", ""];
+
+/// Normalize a reasoning-effort string against the global ladder.
+///
+/// `None` stays `None` (caller decides whether to send the field); values
+/// that disable thinking (`none` / `minimal` / `disable` / `off` / empty)
+/// are promoted to `low` so the provider always reasons. Unknown values are
+/// passed through untouched so future provider levels are not rejected.
+pub fn normalize_reasoning_effort(effort: Option<&str>) -> Option<String> {
+    let e = effort?;
+    if EFFORT_OFF.contains(&e) {
+        Some("low".to_string())
+    } else {
+        Some(e.to_string())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderKind {
     OpenAi,
@@ -78,6 +102,11 @@ pub struct ResponsesCompat {
     /// Provider-facing alias for the canonical DeepX `search` function.
     /// The alias is reversed before tool events leave the gate.
     pub search_function_alias: Option<String>,
+    /// Echo assistant `reasoning` items back verbatim in the next turn's
+    /// input. Default: true — DeepSeek / MiMo reject tool-loop continuations
+    /// without them (HTTP 400), Kimi K3 & k2.7-code require them for preserved
+    /// thinking, and GLM / Qwen / MiniMax / OpenAI accept them silently.
+    pub echo_reasoning_content: bool,
 }
 
 impl Default for ResponsesCompat {
@@ -89,6 +118,7 @@ impl Default for ResponsesCompat {
             effort_max: "high".into(),
             supports_user: true,
             search_function_alias: None,
+            echo_reasoning_content: true,
         }
     }
 }

@@ -21,7 +21,11 @@ export function isSessionStalled(state: RawSessionState): boolean {
   const turn = activeTurn(state);
   if (!turn) return false;
   const last = lastActivityOf(turn);
-  if (last == null) return false;
+  // 无时间戳（旧数据/恢复间隙）：无法证明 turn 仍活跃，保守视为卡死。
+  // 与 isSessionStreaming 的“无时间戳=保守流式”互补——若两处都保守地
+  // 判为活跃/流式，handleSend 的“先 cancel 再发送”恢复路径将永远无法
+  // 覆盖 timeline 投影等无时间戳来源，消息会无限排队。
+  if (last == null) return true;
   return Date.now() - last >= SESSION_STALL_TIMEOUT_MS;
 }
 

@@ -38,6 +38,21 @@ use crate::{TimelineAppender, TimelineError, TimelineLiveEntry};
 /// RoundDelta）。append-only 日志若不重写，磁盘与装载成本永久累积。
 const JOURNAL_REWRITE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
 
+/// 测试用阈值覆盖（OnceLock 一次性；仅测试模块设置）。
+static JOURNAL_REWRITE_THRESHOLD_OVERRIDE: std::sync::OnceLock<u64> =
+    std::sync::OnceLock::new();
+
+fn journal_rewrite_threshold() -> u64 {
+    *JOURNAL_REWRITE_THRESHOLD_OVERRIDE
+        .get()
+        .unwrap_or(&JOURNAL_REWRITE_THRESHOLD_BYTES)
+}
+
+#[cfg(test)]
+pub(crate) fn override_journal_rewrite_threshold_for_test(bytes: u64) {
+    let _ = JOURNAL_REWRITE_THRESHOLD_OVERRIDE.set(bytes);
+}
+
 /// 事件已接受（含 envelope 与幂等状态）。
 #[derive(Debug)]
 pub enum PublishOutcome {
@@ -129,6 +144,16 @@ impl SeedChannelState {
 pub struct RingingHub {
     epoch: String,
     sequencer: Sequencer,
+    /// 磁盘持久化 seed 清单（懒加载索引；`ensure_seed_loaded` 按需重放）。
+    /// 启动时 `load_persisted` 只扫描清单，不加载任何历史。
+    disk_seeds: Mutex<HashMap<RingingChannel, HashSet<String>>>,
+    /// 磁盘 timeline seed 清单（懒加载索引；`ensure_timeline_loaded` 按需恢复）。
+    disk_timeline_seeds: Mutex<HashSet<String>>,
+    /// timeline 持久化根目录（父目录；`start_timeline_persistence` 会 take 掉
+    /// `timeline_store`，懒加载必须保留独立路径以按需读取磁盘）。
+    timeline_root: Mutex<Option<PathBuf>>,
+    /// 懒加载串行化：防止并发首访同一 seed 时双重重放。
+    lazy_load: Mutex<()>,
     /// 大内容外置存储（会话所有权 + TTL）。
     content_store: Mutex<ContentStore>,
     /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
@@ -169,6 +194,8 @@ impl RingingHub {
                     None
                 }
             });
+        // 存父目录：TimelineStore::new 内部会 join "ringing-timeline"。
+        let timeline_root = root.clone();
         let journal_store = match root {
             Some(root) => match JournalStore::new(&root) {
                 Ok(store) => Some(store),
@@ -183,6 +210,10 @@ impl RingingHub {
         Self {
             epoch,
             sequencer: Sequencer::new(),
+            disk_seeds: Mutex::new(HashMap::new()),
+            disk_timeline_seeds: Mutex::new(HashSet::new()),
+            timeline_root: Mutex::new(timeline_root),
+            lazy_load: Mutex::new(()),
             content_store: Mutex::new(ContentStore::new()),
             channels: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
@@ -280,94 +311,194 @@ impl RingingHub {
         }
     }
 
-    /// 启动装载：重建 journal/router/projection，并恢复序号。
+    /// 启动装载（懒加载模式）：只扫描磁盘 seed 清单，不重放任何事件。
+    ///
+    /// 内存态（journal/router/projection/sequencer 水位）在首次访问该 seed
+    /// 时由 `ensure_seed_loaded` 从磁盘按需恢复。冷启动开销从"全量读取
+    /// 全部 jsonl"降为"遍历目录"，历史会话不再常驻内存。
     fn load_persisted(&self) {
-        let root = {
+        let seeds = {
             let guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
-                Some(store) => store.root().to_path_buf(),
+                Some(store) => store.list_seeds(),
+                None => HashMap::new(),
+            }
+        };
+        let total: usize = seeds.values().map(HashSet::len).sum();
+        *self.disk_seeds.lock().unwrap_or_else(|e| e.into_inner()) = seeds;
+        log::info!("[ringing] lazy journal index ready: {total} persisted seeds on disk");
+    }
+
+    /// 懒加载：确保 (channel, seed) 的持久化历史已重放入内存。
+    ///
+    /// - 已在内存或磁盘无记录：零成本返回；
+    /// - 磁盘有记录：读取该 seed 的 ops → 重放重建 state → 精确恢复序号 →
+    ///   超大文件顺手压缩（P0 收敛，不依赖 RoundCompleted）→ 插入 channels。
+    /// 全程持有 `lazy_load` 串行锁，避免并发首访双重重放。
+    fn ensure_seed_loaded(&self, channel: RingingChannel, seed: &str) {
+        let _serial = self.lazy_load.lock().unwrap_or_else(|e| e.into_inner());
+        let loaded = {
+            let guard = self.channel_state(channel);
+            guard
+                .get(&channel)
+                .is_some_and(|seeds| seeds.contains_key(seed))
+        };
+        if loaded {
+            return;
+        }
+        let on_disk = self
+            .disk_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&channel)
+            .is_some_and(|seeds| seeds.contains(seed));
+        if !on_disk {
+            return;
+        }
+        // 读磁盘（短暂持有 journal_store 锁；读完即释放，不与 channel_state 嵌套）。
+        let ops = {
+            let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                Some(store) => match store.load_seed(channel, seed) {
+                    Ok(ops) => ops,
+                    Err(error) => {
+                        log::warn!(
+                            "[ringing] lazy load failed for {seed} on {}: {error}",
+                            channel.as_str()
+                        );
+                        return;
+                    }
+                },
                 None => return,
             }
         };
-        let loaded = match JournalStore::load(&root) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                log::warn!("[ringing] load persisted journal failed: {error}");
-                return;
-            }
-        };
-        let mut guard = self.channel_state(RingingChannel::Control);
-        for (channel, seed, ops) in loaded.per_seed {
-            let (mut max_stream, mut max_channel, mut max_session) = (0, 0, 0);
-            for op in &ops {
-                if let JournalOp::Append { envelope } = op {
-                    max_stream = max_stream.max(envelope.stream_seq);
-                    max_channel = max_channel.max(envelope.channel_seq);
-                    max_session = max_session.max(envelope.session_seq);
-                }
-            }
-            guard
+        if ops.is_empty() {
+            // 清单存在但无任何可重放操作（空/损坏）：插入空 state 防反复扫描。
+            self.channel_state(channel)
                 .entry(channel)
                 .or_default()
-                .entry(seed.clone())
-                .or_insert_with(|| SeedChannelState::with_ops(channel, &seed, &ops));
-            self.sequencer
-                .seed(channel, &seed, max_stream, max_channel, max_session);
+                .insert(seed.to_string(), SeedChannelState::new(channel));
+            return;
         }
+        let state = SeedChannelState::with_ops(channel, seed, &ops);
+        // 精确恢复序号（比启动水位更完整：channel/session seq 一并恢复）。
+        let (mut max_stream, mut max_channel, mut max_session) = (0, 0, 0);
+        for op in &ops {
+            if let JournalOp::Append { envelope } = op {
+                max_stream = max_stream.max(envelope.stream_seq);
+                max_channel = max_channel.max(envelope.channel_seq);
+                max_session = max_session.max(envelope.session_seq);
+            }
+        }
+        self.sequencer
+            .seed(channel, seed, max_stream, max_channel, max_session);
+        // 超大历史文件加载即压缩（force：绕过 pending 门控，按物理大小检查）。
+        self.rewrite_if_oversized(channel, seed, &state, true);
+        self.channel_state(channel)
+            .entry(channel)
+            .or_default()
+            .insert(seed.to_string(), state);
+        log::info!(
+            "[ringing] lazily loaded {seed} on {}: {} ops",
+            channel.as_str(),
+            ops.len()
+        );
     }
 
+    /// 启动装载（懒加载模式）：只扫描磁盘 timeline seed 清单，不 restore 任何
+    /// 快照。内存态（TimelineAppender）在首次访问该 seed 时由
+    /// `ensure_timeline_loaded` 从磁盘按需恢复。
     fn load_timeline_persisted(&self) {
-        let loaded = {
+        let seeds = {
             let guard = self
                 .timeline_store
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
-                Some(store) => store.load(),
+                Some(store) => store.list_seeds().unwrap_or_default(),
                 None => return,
             }
         };
-        match loaded {
-            Ok(timelines) => {
-                {
-                    let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-                    for (seed, persisted) in &timelines {
-                        appender.restore(
-                            seed.clone(),
-                            persisted.snapshot.clone(),
-                            persisted.journal.clone(),
-                        );
-                    }
-                }
-                // 上次运行遗留的孤儿 running turn 在此收尾（见
-                // seal_orphan_running_turns）。persistence worker 尚未启动，
-                // 有变更时需同步写回，保证重启后快照已收敛。
-                for (seed, _) in &timelines {
-                    if !self.seal_orphan_running_turns(seed) {
-                        continue;
-                    }
-                    let (snapshot, journal) = {
-                        let appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-                        match appender.snapshot(seed) {
-                            Some(snapshot) => {
-                                let journal = appender.replay_since(seed, 0);
-                                let journal =
-                                    Self::prune_sealed_timeline_journal(&snapshot, journal);
-                                (snapshot, journal)
-                            }
-                            None => continue,
-                        }
-                    };
-                    let store = self.timeline_store.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(store) = store.as_ref()
-                        && let Err(error) = store.persist(seed, &snapshot, journal)
-                    {
-                        log::warn!("[timeline] orphan seal persist failed for {seed}: {error}");
-                    }
-                }
-            }
-            Err(error) => log::warn!("[timeline] load persisted state failed: {error}"),
+        let total = seeds.len();
+        *self
+            .disk_timeline_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = seeds.into_iter().collect();
+        log::info!("[ringing] lazy timeline index ready: {total} persisted timelines on disk");
+    }
+
+    /// 懒加载：确保 seed 的 timeline 快照 + replay tail 已 restore 入内存。
+    ///
+    /// - 已在内存或磁盘无记录：零成本返回；
+    /// - 磁盘有记录：读取该 seed 的持久化快照 → restore → 收尾孤儿 running
+    ///   turn（原 `load_timeline_persisted` 语义，有变更则同步写回）。
+    fn ensure_timeline_loaded(&self, seed: &str) {
+        let _serial = self.lazy_load.lock().unwrap_or_else(|e| e.into_inner());
+        if self
+            .timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(seed)
+        {
+            return;
         }
+        if !self
+            .disk_timeline_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(seed)
+        {
+            return;
+        }
+        // `timeline_store` 已被 start_timeline_persistence take 走，按需读取
+        // 必须用保留的独立根目录构造临时 store（new 幂等：仅 create_dir_all）。
+        let persisted = {
+            let root = self
+                .timeline_root
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match root.as_ref() {
+                Some(root) => match TimelineStore::new(root) {
+                    Ok(store) => store.load_seed(seed),
+                    Err(_) => None,
+                },
+                None => return,
+            }
+        };
+        let Some(persisted) = persisted else {
+            return;
+        };
+        {
+            let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            appender.restore(
+                persisted.seed.clone(),
+                persisted.snapshot.clone(),
+                persisted.journal.clone(),
+            );
+        }
+        // 上次运行遗留的孤儿 running turn 在此收尾（见
+        // seal_orphan_running_turns）。persistence worker 尚未启动，
+        // 有变更时需同步写回，保证重启后快照已收敛。
+        if self.seal_orphan_running_turns(seed) {
+            let (snapshot, journal) = {
+                let appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                match appender.snapshot(seed) {
+                    Some(snapshot) => {
+                        let journal = appender.replay_since(seed, 0);
+                        let journal = Self::prune_sealed_timeline_journal(&snapshot, journal);
+                        (snapshot, journal)
+                    }
+                    None => (persisted.snapshot, Vec::new()),
+                }
+            };
+            let store = self.timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(store) = store.as_ref()
+                && let Err(error) = store.persist(seed, &snapshot, journal)
+            {
+                log::warn!("[timeline] orphan seal persist failed for {seed}: {error}");
+            }
+        }
+        log::info!("[ringing] lazily loaded timeline {seed}");
     }
 
     /// 收尾孤儿 running turn。daemon 重启或 worker 重新 spawn 后，timeline 中
@@ -446,11 +577,24 @@ impl RingingHub {
         seed: &str,
         intent: TimelineIntent,
     ) -> Result<TimelineEntry, TimelineError> {
+        // P1: 懒加载——publish 前确保该 seed 历史 timeline 已 restore，
+        // 否则新条目会与磁盘快照断链（replay tail 丢失历史）。
+        self.ensure_timeline_loaded(seed);
+        // Terminal intents (block/round/turn sealed) are the recovery boundary
+        // for a restarting client: persisting them synchronously shrinks the
+        // window in which a crash can lose the transcript tail from "the whole
+        // turn" to "the current open blocks". Everything else keeps the
+        // coalesced async checkpoint to stay off the streaming hot path.
+        let terminal = Self::timeline_intent_is_terminal(&intent);
         let entry = {
             let mut timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
             timeline.apply_intent(seed, intent)?
         };
-        self.request_timeline_persistence(seed);
+        if terminal {
+            self.persist_timeline_sync(seed);
+        } else {
+            self.request_timeline_persistence(seed);
+        }
         let _ = self.timeline_live.send(TimelineLiveEntry {
             seed: seed.to_string(),
             entry: entry.clone(),
@@ -458,8 +602,67 @@ impl RingingHub {
         Ok(entry)
     }
 
+    /// 同步写入一个 seed 的 timeline 快照 + replay tail（daemon 优雅关闭或
+    /// terminal intent 时调用）。从 pending 集合移除，避免异步线程重复写。
+    fn persist_timeline_sync(&self, seed: &str) {
+        // Drop the pending flag so the async worker does not rewrite the same
+        // seed again; the synchronous write below is strictly newer.
+        if let Some(persistence) = self
+            .timeline_persistence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            persistence
+                .pending_seeds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(seed);
+        }
+        let store_guard = self.timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(store) = store_guard.as_ref() else {
+            return;
+        };
+        let Some((snapshot, journal)) = (|| {
+            let timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            timeline.snapshot(seed).map(|snapshot| {
+                let journal = timeline.replay_since(seed, 0);
+                let journal = Self::prune_sealed_timeline_journal(&snapshot, journal);
+                (snapshot, journal)
+            })
+        })() else {
+            return;
+        };
+        if let Err(error) = store.persist(seed, &snapshot, journal) {
+            log::warn!("[timeline] sync persist failed for {seed}: {error}");
+        }
+    }
+
+    /// 同步落盘所有待写 seed（daemon 优雅关闭收尾；Drop 只 join 异步线程，
+    /// 而 Arc 引用可能仍在 tokio task 中存活，必须显式 flush）。
+    pub fn flush_timeline_persistence(&self) {
+        let seeds: Vec<String> = self
+            .timeline_persistence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|persistence| {
+                persistence
+                    .pending_seeds
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .drain()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for seed in seeds {
+            self.persist_timeline_sync(&seed);
+        }
+    }
+
     /// Ringing V1 bootstrap 的权威 transcript 快照。
     pub fn timeline_snapshot(&self, seed: &str) -> Option<TimelineSnapshot> {
+        self.ensure_timeline_loaded(seed);
         self.timeline
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -468,6 +671,7 @@ impl RingingHub {
 
     /// Ringing V1 reconnect tail。调用方用 snapshot watermark 作为 after 参数。
     pub fn timeline_replay_since(&self, seed: &str, watermark: u64) -> Vec<TimelineEntry> {
+        self.ensure_timeline_loaded(seed);
         self.timeline
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -478,6 +682,18 @@ impl RingingHub {
     /// and snapshot watermark; a lagged receiver must reconnect and replay.
     pub fn subscribe_timeline(&self) -> broadcast::Receiver<TimelineLiveEntry> {
         self.timeline_live.subscribe()
+    }
+
+    /// Terminal intents seal a block/round/turn — the client's recovery
+    /// boundary. They are persisted synchronously so a crash between the seal
+    /// and the next async checkpoint cannot drop a completed unit of work.
+    fn timeline_intent_is_terminal(intent: &TimelineIntent) -> bool {
+        matches!(
+            intent,
+            TimelineIntent::BlockSealed { .. }
+                | TimelineIntent::RoundSealed { .. }
+                | TimelineIntent::TurnSealed { .. }
+        )
     }
 
     /// 大内容外置：存入（返回 content_id）。
@@ -535,6 +751,9 @@ impl RingingHub {
         causation: Option<&str>,
     ) -> PublishOutcome {
         let channel = event.channel();
+        // P1: 懒加载——publish 前确保该 seed 历史已重放入内存，防止新事件
+        // 的序号与磁盘历史冲突（sequencer 水位随后续加载精确恢复）。
+        self.ensure_seed_loaded(channel, seed);
         let delivery = event.delivery();
         let (stream_seq, channel_seq, session_seq) = self.sequencer.next(channel, seed);
         if !is_safe_integer(stream_seq)
@@ -582,21 +801,25 @@ impl RingingHub {
             Delivery::Reliable => {
                 match st.journal.append(&envelope) {
                     AppendOutcome::Duplicate => return PublishOutcome::Duplicate,
-                    AppendOutcome::Appended => self.persist_append(channel, seed, &envelope),
-                }
-                // RoundCompleted 是该 round 的权威终态（携带完整 thinking/answer），
-                // 折叠该 round 的增量可控制 journal 用量，且回放安全：
-                // 客户端要么已有增量（随后被快照覆盖），要么直接拿到全量快照。
-                if let RingingEvent::Conversation(ConversationEvent::RoundCompleted {
-                    turn_id,
-                    round_num,
-                    ..
-                }) = &envelope.event
-                {
-                    let removed = st.journal.compact_round_deltas(turn_id, *round_num);
-                    if removed > 0 {
-                        self.persist_compact(channel, seed, turn_id, *round_num);
-                        self.maybe_rewrite_journal(channel, seed, &st);
+                    AppendOutcome::Appended => {
+                        self.persist_append(channel, seed, &envelope);
+                        // RoundCompleted 是该 round 的权威终态（携带完整 thinking/answer），
+                        // 折叠该 round 的增量可控制 journal 用量，且回放安全：
+                        // 客户端要么已有增量（随后被快照覆盖），要么直接拿到全量快照。
+                        if let RingingEvent::Conversation(ConversationEvent::RoundCompleted {
+                            turn_id,
+                            round_num,
+                            ..
+                        }) = &envelope.event
+                        {
+                            let removed = st.journal.compact_round_deltas(turn_id, *round_num);
+                            if removed > 0 {
+                                self.persist_compact(channel, seed, turn_id, *round_num);
+                            }
+                        }
+                        // P0: 磁盘收敛检查脱离 RoundCompleted 依赖——轮次未完成
+                        // 时 delta 持续 append 也必须有兜底重写（pending 门控）。
+                        self.rewrite_if_oversized(channel, seed, &st, false);
                     }
                 }
                 for key in terminal_replaceable_keys(&envelope.event) {
@@ -669,6 +892,7 @@ impl RingingHub {
         seed: &str,
         after_stream_seq: u64,
     ) -> Result<Vec<RingingEventEnvelope>, CursorExpired> {
+        self.ensure_seed_loaded(channel, seed);
         let guard = self.channel_state(channel);
         let st = guard
             .get(&channel)
@@ -691,6 +915,10 @@ impl RingingHub {
     /// 频道级回放（SSE 重连用）：聚合该频道所有 seed 的可靠 tail 与
     /// 当前 replaceable 值。某个 seed 的 cursor 超出保留窗口时产出
     /// `RingingResetRequired`，客户端应改走 snapshot 恢复。
+    ///
+    /// 懒加载语义：只回放**已加载** seed（冷启动后未经任何访问的 seed 不在
+    /// 内存）。客户端连接某 seed 前必经 open/bootstrap（触发 `ensure_seed_loaded`），
+    /// 因此活跃会话的历史始终可回放；从未连接的 seed 没有消费者，无需装载。
     pub fn replay_channel_since(
         &self,
         channel: RingingChannel,
@@ -728,6 +956,7 @@ impl RingingHub {
 
     /// 读取领域快照（HTTP `GET /ringing/v1/sessions/{seed}/bootstrap`）。
     pub fn snapshot(&self, channel: RingingChannel, seed: &str) -> RingingChannelSnapshot {
+        self.ensure_seed_loaded(channel, seed);
         let guard = self.channel_state(channel);
         guard
             .get(&channel)
@@ -767,6 +996,7 @@ impl RingingHub {
 
     /// 记 replaceable checkpoint（稀疏）。
     pub fn checkpoint(&self, channel: RingingChannel, seed: &str, identity: &str, stream_seq: u64) {
+        self.ensure_seed_loaded(channel, seed);
         let mut guard = self.channel_state(channel);
         let st = self.seed_state(&mut guard, channel, seed);
         st.last_stream_seq = st.last_stream_seq.max(stream_seq);
@@ -775,6 +1005,7 @@ impl RingingHub {
     }
 
     pub fn last_stream_seq(&self, channel: RingingChannel, seed: &str) -> u64 {
+        self.ensure_seed_loaded(channel, seed);
         let guard = self.channel_state(channel);
         guard
             .get(&channel)
@@ -803,16 +1034,33 @@ impl RingingHub {
         }
     }
 
-    /// RoundDelta 折叠后检查 jsonl 物理大小，超过阈值则按内存存活事件整文件
-    /// 重写（丢弃已折叠的增量，磁盘收敛）。低频触发（每轮至多一次）。
-    fn maybe_rewrite_journal(&self, channel: RingingChannel, seed: &str, st: &SeedChannelState) {
+    /// 检查 jsonl 物理大小，超过阈值则按内存存活事件整文件重写（磁盘收敛）。
+    ///
+    /// P0 修复：触发不再依赖 `RoundCompleted` 折叠（`removed > 0`）。轮次未
+    /// 完成/卡死时 `RoundDelta` 会持续 append，若只在折叠后检查，文件将无界
+    /// 增长（实测 82MB 全 append 无 compact）。现在每次 reliable append 后
+    /// 都经 `pending_bytes` 内存计数门控：阈值内零 I/O，超阈值才 stat + 重写。
+    /// 重写以内存有界 journal（≤8192 条）为权威，可把超大文件收敛到窗口大小。
+    ///
+    /// `force`：跳过 pending 门控，直接按物理大小检查（懒加载 seed 时用——
+    /// 刚加载的 state 没有 pending 计数，但历史文件可能已超大）。
+    fn rewrite_if_oversized(
+        &self,
+        channel: RingingChannel,
+        seed: &str,
+        st: &SeedChannelState,
+        force: bool,
+    ) {
         let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
         let Some(store) = guard.as_mut() else { return };
+        if !force && store.pending_bytes(channel, seed) < journal_rewrite_threshold() {
+            return;
+        }
         let size = match store.file_size(channel, seed) {
             Ok(size) => size,
             Err(_) => return,
         };
-        if size < JOURNAL_REWRITE_THRESHOLD_BYTES {
+        if size < journal_rewrite_threshold() {
             return;
         }
         let envelopes: Vec<_> = st.journal.entries().cloned().collect();
@@ -951,6 +1199,122 @@ mod tests {
             dropped_bytes: 0,
             truncated: false,
         })
+    }
+
+    #[test]
+    fn lazy_load_defers_history_until_first_access() {
+        let root = temp_root("lazy");
+        {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            for i in 1..=3 {
+                let _ = hub.publish("a", round_delta(i));
+            }
+            let _ = hub.publish("b", round_delta(1));
+        }
+        // 重启：懒加载模式下启动不重放任何历史。
+        let hub = RingingHub::with_persistence("epoch-2", &root);
+        {
+            let guard = hub.channel_state(RingingChannel::Conversation);
+            assert!(
+                guard
+                    .get(&RingingChannel::Conversation)
+                    .is_none_or(|seeds| seeds.is_empty()),
+                "cold start must not load any seed"
+            );
+        }
+        // 首次访问 seed a → 历史按需恢复。
+        let replayed_a = hub
+            .replay_since(RingingChannel::Conversation, "a", 0)
+            .expect("replay a");
+        assert_eq!(replayed_a.len(), 3, "seed a history restored on first access");
+        // seed b 未被访问 → 仍不在内存。
+        {
+            let guard = hub.channel_state(RingingChannel::Conversation);
+            assert!(
+                !guard
+                    .get(&RingingChannel::Conversation)
+                    .unwrap()
+                    .contains_key("b"),
+                "seed b must remain unloaded until accessed"
+            );
+        }
+        let replayed_b = hub
+            .replay_since(RingingChannel::Conversation, "b", 0)
+            .expect("replay b");
+        assert_eq!(replayed_b.len(), 1, "seed b history restored on first access");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn journal_rewrite_converges_on_lazy_load_without_round_completed() {
+        // P0 回归：轮次未完成（无 RoundCompleted）时 delta 持续 append 也必须收敛。
+        // 阈值降到 1MB 加速测试；此覆盖为 OnceLock 一次性，仅本测试使用。
+        override_journal_rewrite_threshold_for_test(1024 * 1024);
+        let root = temp_root("rewrite-lazy");
+        {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            // 9000 个 reliable delta 超过内存窗口（8192），触发淘汰。
+            for i in 0..9000 {
+                let _ = hub.publish("s", round_delta(i));
+            }
+        }
+        let path = root.join("journal").join("conversation").join("s.jsonl");
+        let before_lines = std::fs::read_to_string(&path).unwrap().lines().count();
+        assert!(before_lines > 8500, "fixture must exceed the bounded window");
+        // 重启：启动不加载；首次访问触发懒加载 + force rewrite（窗口收敛）。
+        let hub = RingingHub::with_persistence("epoch-2", &root);
+        {
+            let guard = hub.channel_state(RingingChannel::Conversation);
+            assert!(
+                guard
+                    .get(&RingingChannel::Conversation)
+                    .is_none_or(|seeds| seeds.is_empty()),
+                "cold start must not load any seed"
+            );
+        }
+        // replay_since(0) 因窗口淘汰返回 CursorExpired（正确语义），
+        // 但 ensure 已完成加载并执行收敛重写。
+        let replayed = hub.replay_since(RingingChannel::Conversation, "s", 0);
+        assert!(
+            matches!(replayed, Err(CursorExpired { .. })),
+            "cursor 0 must be expired after window eviction"
+        );
+        {
+            let guard = hub.channel_state(RingingChannel::Conversation);
+            assert!(
+                guard
+                    .get(&RingingChannel::Conversation)
+                    .is_some_and(|seeds| seeds.contains_key("s")),
+                "lazy load must materialize the seed"
+            );
+        }
+        // 序号水位精确恢复：新事件从历史最大值之后继续。
+        assert_eq!(
+            hub.last_stream_seq(RingingChannel::Conversation, "s"),
+            9000,
+            "sequence watermark restored from replayed history"
+        );
+        if let PublishOutcome::Published { envelope } =
+            hub.publish("s", round_delta(9999))
+        {
+            assert!(
+                envelope.stream_seq > 9000,
+                "new events must continue after the restored watermark"
+            );
+        } else {
+            panic!("publish after restart must succeed");
+        }
+        // 文件收敛到有界窗口（8192 条），而非线性增长。
+        let after_lines = std::fs::read_to_string(&path).unwrap().lines().count();
+        assert!(
+            after_lines < before_lines,
+            "rewrite must shrink the file: {before_lines} -> {after_lines}"
+        );
+        assert!(
+            after_lines <= 8192 + 32,
+            "file must converge to the bounded window, got {after_lines} lines"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

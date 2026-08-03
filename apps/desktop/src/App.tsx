@@ -24,8 +24,8 @@ import type { SessionActivityMap } from "./runtime/sessionActivityStore";
 import type { PendingInteraction } from "./store/rawSession";
 import { createRingingMonitor } from "./store/ringingMonitor";
 import { selectRingingPresentation } from "./store/sessionPresentation";
+import { mergeTimelinePresentation } from "./store/timelinePresentation";
 import { createTimelineMonitor } from "./store/timelineMonitor";
-import { selectTimelinePresentation } from "./store/timelinePresentation";
 import {
   createSessionRegistry,
   type SessionEntry,
@@ -127,15 +127,18 @@ export default function App() {
     const snapshot = timelineMonitor.snapshotFor(seed);
     const stores = ringingMonitor.storesFor(seed);
     if (stores) {
-      // Timeline owns transcript ordering once activated. Keep Ringing control,
-      // tool and interaction state, but do not rebuild the transcript a second
-      // time before the authoritative Timeline projection runs.
+      // Keep Ringing control, tool and interaction state. The conversation
+      // store always keeps its turns so the merge below can backfill the
+      // transcript when the timeline snapshot is stale (see
+      // mergeTimelinePresentation: timeline persistence is a best-effort async
+      // checkpoint and a daemon restart can drop its tail, while the message
+      // store — the source of the session-list title — never loses it).
       fallback = selectRingingPresentation(seed, stores, fallback, {
-        includeTurns: !snapshot,
+        includeTurns: true,
       });
     }
     return snapshot
-      ? selectTimelinePresentation(
+      ? mergeTimelinePresentation(
         seed,
         snapshot,
         fallback,
@@ -448,12 +451,39 @@ export default function App() {
       if (api) {
         unlistenRingingBatch = api.onBatch(batch => {
           ringingMonitor.handleBatch(batch);
+          if (batch.channel === "control") {
+            for (const envelope of batch.envelopes) {
+              const event = envelope.event;
+              if (
+                event.channel === "control"
+                && event.type === "operation_failed"
+                && event.error?.code === "busy"
+              ) {
+                // Worker 忙碌期显式拒绝 send_message：命令已被 ACK 但不会执行，
+                // 也不会有 turn_opened 到达。清除乐观 turn 并提示，避免消息
+                // 无限排队、乐观 turn 永久滞留为 running。
+                registry.get(batch.seed)?.setPendingSend(null);
+                toastCtrl.push("当前回合仍在运行，请先停止后再发送新消息", "error");
+              }
+            }
+          }
           // The worker flushes the message store before publishing this
           // terminal event, so session.list now contains last_summary.
-          if (batch.channel === "conversation" && batch.envelopes.some(envelope =>
-            envelope.event.channel === "conversation" && envelope.event.type === "turn_completed"
-          )) {
-            refreshSessionsAfterCompletedTurn();
+          if (batch.channel === "conversation") {
+            for (const envelope of batch.envelopes) {
+              const event = envelope.event;
+              if (event.channel !== "conversation") continue;
+              if (event.type === "turn_started") {
+                // Clear the optimistic turn on the authoritative Ringing start
+                // event as well as the timeline turn_opened path, so a resumed
+                // session whose timeline intent was rejected (turn_id reused
+                // after a restart) does not leave the optimistic bubble stuck
+                // in "running" forever.
+                registry.get(batch.seed)?.setPendingSend(null);
+              } else if (event.type === "turn_completed") {
+                refreshSessionsAfterCompletedTurn();
+              }
+            }
           }
           const dashboard = ringingMonitor.storesFor(batch.seed)?.control.dashboardSnapshot;
           const entry = registry.get(batch.seed);

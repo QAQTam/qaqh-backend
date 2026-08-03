@@ -113,6 +113,10 @@ pub struct AgentRegistry {
     hub: Option<Arc<RingingHub>>,
     /// daemon 拉起的 workspace serve endpoint + token（注入每个 worker env）。
     workspace_env: Option<(String, String)>,
+    /// daemon 正在关闭：worker 退出是预期的，禁止自动重生。
+    shutting_down: bool,
+    /// 最近一次 spawn 时间（防崩溃-重启风暴：同一 seed 1 秒内不重复拉起）。
+    last_spawn: HashMap<String, std::time::Instant>,
 }
 
 impl AgentRegistry {
@@ -123,6 +127,8 @@ impl AgentRegistry {
             activity: SessionActivityTracker::default(),
             hub: None,
             workspace_env: None,
+            shutting_down: false,
+            last_spawn: HashMap::new(),
         }
     }
 
@@ -141,6 +147,23 @@ impl AgentRegistry {
             return Ok(());
         }
         self.spawn(seed, None)?;
+        // Diagnostic: the timeline snapshot is a best-effort async checkpoint
+        // and a daemon restart can drop its tail. When it lags the message
+        // store (meta.turn_count), the resumed transcript misses turns — the
+        // frontend now backfills them from the Ringing conversation store, so
+        // this is informational but valuable for restart forensics.
+        if let Some(hub) = self.hub.as_ref()
+            && let Some(meta) = deepx_session::SessionManager::global().load_meta(seed)
+            && let Some(snapshot) = hub.timeline_snapshot(seed)
+        {
+            let snapshot_turns = snapshot.turns.len();
+            if snapshot_turns != meta.turn_count {
+                log::warn!(
+                    "[timeline] snapshot turns ({snapshot_turns}) != meta.turn_count ({}) for {seed}; transcript backfills from the conversation store",
+                    meta.turn_count
+                );
+            }
+        }
         // 新 worker 诞生意味着旧 worker 已死（daemon 重启或进程退出）。
         // timeline 中该 seed 任何未 seal 的 running turn 都是孤儿（如工具
         // 调用未返回 result 时进程被杀），立即收尾为 Cancelled，否则前端
@@ -159,6 +182,8 @@ impl AgentRegistry {
     }
 
     fn spawn(&mut self, seed: &str, new_seed: Option<&str>) -> Result<(), String> {
+        self.last_spawn
+            .insert(seed.to_string(), std::time::Instant::now());
         let (generation, _) = self.activity.begin(seed);
         let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
         let mut command = Command::new(exe);
@@ -203,13 +228,22 @@ impl AgentRegistry {
 
         let debug_seed = seed.to_string();
         std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                log::warn!(
-                    "[AGENT:{}] {line}",
-                    &debug_seed[..debug_seed.floor_char_boundary(debug_seed.len().min(8))]
-                );
-            }
+            // F4: panic 防护——reader 线程若在解析/分发中 panic，整条 stderr
+            // 流会静默消失且无法被 respawn 检测到（进程还活着）。catch_unwind
+            // 至少把现场记录到日志。
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    log::warn!(
+                        "[AGENT:{}] {line}",
+                        &debug_seed[..debug_seed.floor_char_boundary(debug_seed.len().min(8))]
+                    );
+                }
+            }));
+            log::info!(
+                "[AGENT:{}] stderr reader exited",
+                &debug_seed[..debug_seed.floor_char_boundary(debug_seed.len().min(8))]
+            );
         });
 
         let event_seed = seed.to_string();
@@ -217,13 +251,14 @@ impl AgentRegistry {
         let activity = self.activity.clone();
         let hub = self.hub.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                // wire 判别：默认 legacy；Ringing 事件行在 ChannelRouter 接入前跳过
-                let event = match deepx_msglp::ringing_v1::wire::read_worker_event_line(&line) {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    // wire 判别：默认 legacy；Ringing 事件行在 ChannelRouter 接入前跳过
+                    let event = match deepx_msglp::ringing_v1::wire::read_worker_event_line(&line) {
                     Ok(Some(event)) => event,
                     Ok(None) => {
                         // Ringing V1 timeline intent is a native producer path: it is
@@ -234,8 +269,14 @@ impl AgentRegistry {
                             >(&line)
                             {
                                 if let Err(error) = hub.publish_timeline(&env.seed, env.intent) {
-                                    log::warn!(
-                                        "rejected timeline intent for {}: {error}",
+                                    // A rejected intent silently starves the frontend
+                                    // transcript (the Ringing conversation store keeps
+                                    // delivering, so the session-list title still
+                                    // refreshes while the main pane stays blank).
+                                    // Surface it at error level with the full error so
+                                    // restart-related turn_id collisions are diagnosable.
+                                    log::error!(
+                                        "[timeline] rejected intent for {}: {error}",
                                         env.seed
                                     );
                                 }
@@ -264,13 +305,21 @@ impl AgentRegistry {
                         log::warn!("invalid agent event for {event_seed}: {e}");
                         continue;
                     }
-                };
-                if let Ok(value) = serde_json::to_value(&event)
-                    && let Some(update) = activity.observe(&event_seed, generation, &value)
-                {
-                    crate::activity::publish_activity_dual(&events, hub.as_deref(), &update);
+                    };
+                    if let Ok(value) = serde_json::to_value(&event)
+                        && let Some(update) = activity.observe(&event_seed, generation, &value)
+                    {
+                        crate::activity::publish_activity_dual(&events, hub.as_deref(), &update);
+                    }
+                    events.publish(&event_seed, event);
                 }
-                events.publish(&event_seed, event);
+            }));
+            if let Err(panic) = result {
+                log::error!(
+                    "[AGENT:{}] stdout reader panicked: {:?}",
+                    &event_seed[..event_seed.floor_char_boundary(event_seed.len().min(8))],
+                    panic
+                );
             }
             let event = Agent2Ui::Error {
                 message: format!(
@@ -349,8 +398,56 @@ impl AgentRegistry {
     }
 
     pub fn shutdown_all(&mut self) {
+        self.shutting_down = true;
         for (_, instance) in self.instances.drain() {
             instance.shutdown();
+        }
+    }
+
+    /// F4: 拉起所有已退出且非优雅关闭的 worker。由 daemon 侧周期任务调用；
+    /// 带 1 秒退避防止崩溃-重启风暴。优雅关闭（收到 Shutdown 帧后退出、
+    /// 或被 `close`/`shutdown_all` 主动结束）的实例不会重启。
+    pub fn respawn_dead_agents(&mut self) {
+        if self.shutting_down {
+            return;
+        }
+        let dead: Vec<String> = self
+            .instances
+            .iter()
+            .filter_map(|(seed, instance)| {
+                let exited = instance
+                    .child
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().ok().flatten().is_some());
+                exited.then(|| seed.clone())
+            })
+            .collect();
+        for seed in dead {
+            // 退避：同一 seed 最近 1 秒内刚 spawn 过（例如刚拉起又立刻崩溃）
+            // 则跳过本轮，避免无意义的重启风暴。
+            if self
+                .last_spawn
+                .get(&seed)
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
+            {
+                log::warn!(
+                    "[AGENT:{seed}] worker exited immediately after spawn; backing off"
+                );
+                continue;
+            }
+            if let Some(instance) = self.instances.remove(&seed) {
+                instance.shutdown();
+            }
+            log::warn!("[AGENT:{seed}] worker process died; respawning");
+            if let Err(error) = self.spawn(&seed, None) {
+                log::error!("[AGENT:{seed}] respawn failed: {error}");
+            } else if let Some(hub) = self.hub.as_ref() {
+                // 与 get_or_spawn 一致：新 worker 接管前，把 timeline 中任何
+                // 未 seal 的 running turn 收尾为 Cancelled。
+                hub.seal_orphan_running_turns(&seed);
+            }
         }
     }
 

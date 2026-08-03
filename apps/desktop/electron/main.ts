@@ -1,7 +1,8 @@
 import { dirname, join, resolve, sep } from "node:path";
 import { execFile, spawn } from "node:child_process";
+import { deflateSync } from "node:zlib";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from "electron";
 import { DaemonControlClient } from "./controlClient";
 import { RingingManager, type ChannelName } from "./ringingManager";
 import type { ConfirmDialogOptions, OpenDialogOptions, UpdateInfo } from "./types";
@@ -13,9 +14,11 @@ import {
 
 let mainWindow: BrowserWindow | undefined;
 let quitting = false;
+let tray: Tray | undefined;
 let petProcess: ReturnType<typeof spawn> | undefined;
 let petEnabled = false;
 let lastPendingOperation = "";
+let lastResumedSeed: string | null = null;
 let updatePoll: ReturnType<typeof setInterval> | undefined;
 let resolveInitialRenderer!: () => void;
 const initialRendererReady = new Promise<void>(resolveReady => {
@@ -114,6 +117,157 @@ if (smokeMode) {
   }, 30_000);
 }
 
+// ── Tray / graceful shutdown ────────────────────────────
+//
+// 关闭行为：点窗口关闭按钮 → 弹窗选择「最小化到托盘」/「完全退出」/「取消」。
+// 完全退出时先优雅停止 daemon（POST /control/v1/stop + 等待进程退出），
+// 避免 Electron 退出后 daemon 变成孤儿进程。
+
+// 运行时生成 32×32 RGBA PNG 托盘图标（聊天气泡样式），不依赖外部图标资源。
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(buf: Buffer): number {
+  let c = 0xffffffff;
+  for (const byte of buf) c = CRC_TABLE[(c ^ byte) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length);
+  const typeBuf = Buffer.from(type, "ascii");
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])));
+  return Buffer.concat([len, typeBuf, data, crc]);
+}
+
+function encodePng(width: number, height: number, rgba: Buffer): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // color type: RGBA
+  const stride = width * 4 + 1;
+  const raw = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * stride] = 0; // filter: none
+    rgba.copy(raw, y * stride + 1, y * width * 4, (y + 1) * width * 4);
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function createTrayIcon() {
+  const size = 32;
+  const rgba = Buffer.alloc(size * size * 4);
+  const cx = 15.5;
+  const cy = 15.5;
+  const inRoundedRect = (x: number, y: number) => {
+    const half = 14;
+    const radius = 5;
+    const dx = Math.max(Math.abs(x - cx) - (half - radius), 0);
+    const dy = Math.max(Math.abs(y - cy) - (half - radius), 0);
+    return dx * dx + dy * dy <= radius * radius;
+  };
+  const blue = [0x2f, 0x6f, 0xed, 255];
+  const white = [255, 255, 255, 255];
+  const dotBlue = [0x2f, 0x6f, 0xed, 255];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4;
+      if (!inRoundedRect(x + 0.5, y + 0.5)) continue;
+      rgba[i] = blue[0]; rgba[i + 1] = blue[1]; rgba[i + 2] = blue[2]; rgba[i + 3] = blue[3];
+      // 白色气泡
+      if (Math.hypot(x + 0.5 - cx, y + 0.5 - cy - 1.5) <= 9.5) {
+        rgba[i] = white[0]; rgba[i + 1] = white[1]; rgba[i + 2] = white[2]; rgba[i + 3] = white[3];
+      }
+    }
+  }
+  // 气泡内三圆点（聊天气泡）
+  for (const [dotX, dotY] of [[12, 16.5], [16, 16.5], [20, 16.5]] as const) {
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if (Math.hypot(x + 0.5 - dotX, y + 0.5 - dotY) <= 2) {
+          const i = (y * size + x) * 4;
+          rgba[i] = dotBlue[0]; rgba[i + 1] = dotBlue[1]; rgba[i + 2] = dotBlue[2]; rgba[i + 3] = dotBlue[3];
+        }
+      }
+    }
+  }
+  return nativeImage.createFromBuffer(encodePng(size, size, rgba));
+}
+
+function createTray(): void {
+  if (tray) return;
+  tray = new Tray(createTrayIcon());
+  tray.setToolTip("DeepX");
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "显示 DeepX", click: () => showMainWindow() },
+    { type: "separator" },
+    { label: "退出", click: () => { void quitDeepX(); } },
+  ]));
+  tray.on("click", () => showMainWindow());
+}
+
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function minimizeToTray(): void {
+  createTray();
+  mainWindow?.hide();
+}
+
+/** 完全退出：先优雅停止 daemon，再关闭 Ringing/控制连接，最后退出应用。 */
+async function quitDeepX(): Promise<void> {
+  if (quitting) return;
+  quitting = true;
+  // 先停 daemon（Electron 与 daemon 是分开的进程，直接退出会把 daemon 留成孤儿）。
+  await backend.stopDaemon();
+  ringing.close();
+  void backend.close().finally(() => app.quit());
+}
+
+function onWindowClose(event: { preventDefault: () => void }): void {
+  if (quitting || smokeMode) return;
+  event.preventDefault();
+  void dialog.showMessageBox(mainWindow!, {
+    type: "question",
+    title: "关闭 DeepX",
+    message: "DeepX 正在后台运行。",
+    detail: "选择关闭后的行为：",
+    buttons: ["最小化到托盘", "完全退出", "取消"],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  }).then(({ response }) => {
+    if (response === 0) {
+      minimizeToTray();
+    } else if (response === 1) {
+      void quitDeepX();
+    }
+    // response === 2: 取消，保持窗口打开
+  }).catch(() => {});
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     title: "DeepX",
@@ -175,6 +329,8 @@ function createWindow(): void {
     });
   }
   if (!smokeMode) mainWindow.once("ready-to-show", () => mainWindow?.show());
+  // 关闭按钮 → 弹窗选择（最小化到托盘 / 完全退出 / 取消）
+  mainWindow.on("close", onWindowClose);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("https://") || url.startsWith("http://")) void shell.openExternal(url);
     return { action: "deny" };
@@ -212,6 +368,7 @@ function registerIpc(): void {
     // daemon 重启后端口/token 会变：即使 client 还在（流已死），也要重建
     if (ringing.connected() && ringing.connectedBaseUrl() === info.baseUrl) return;
     await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+    await reattachSeedAfterRecovery();
   }
 
   let ringingRecovery: Promise<void> | null = null;
@@ -222,6 +379,21 @@ function registerIpc(): void {
 
   function ringingErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  // The daemon's seed leases are in-memory and die with the daemon process.
+  // A reconnected Ringing client holds a fresh lease but no seed attachments,
+  // so every command for that seed is rejected with lease_required until
+  // session.resume re-attaches it. Re-dispatch the last resumed seed after
+  // any connection recovery; get_or_spawn makes this idempotent.
+  async function reattachSeedAfterRecovery(): Promise<void> {
+    const seed = lastResumedSeed;
+    if (!seed) return;
+    try {
+      await requestSelectedBackend("session.resume", { seed });
+    } catch (error) {
+      console.warn("[ringing] seed re-attach after recovery failed:", error);
+    }
   }
 
   async function recoverRingingConnection(): Promise<void> {
@@ -239,11 +411,13 @@ function registerIpc(): void {
           throw new Error("Ringing recovery could not establish a daemon session");
         }
         await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+        await reattachSeedAfterRecovery();
         return;
       }
       try {
         const info = await backend.refreshRingingConnection();
         await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+        await reattachSeedAfterRecovery();
       } catch (error) {
         if (!isRingingFetchFailure(error)) throw error;
 
@@ -256,6 +430,7 @@ function registerIpc(): void {
           throw new Error("Ringing recovery could not establish a daemon session");
         }
         await ringing.ensureConnected(info.baseUrl, info.token, info.session);
+        await reattachSeedAfterRecovery();
       }
     })().finally(() => {
       ringingRecovery = null;
@@ -291,6 +466,7 @@ function registerIpc(): void {
     if (!ringing.connected()) throw new Error("Ringing v1 backend is not connected");
 
     const seed = typeof params.seed === "string" ? params.seed : "";
+    if (method === "session.resume" && seed) lastResumedSeed = seed;
     const spec = RINGING_COMMAND_METHODS[method];
     if (spec) {
       let command = spec.build(params);
@@ -710,10 +886,15 @@ app.whenReady().then(() => {
   // product, so the smoke process needs its own deterministic deadline.
   app.on("will-quit", () => {
     if (updatePoll) clearInterval(updatePoll);
+    if (tray) {
+      tray.destroy();
+      tray = undefined;
+    }
     killPet();
   });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    else showMainWindow();
   });
 });
 
