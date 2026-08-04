@@ -23,7 +23,11 @@ import { startSessionActivityClient } from "./runtime/sessionActivityClient";
 import type { SessionActivityMap } from "./runtime/sessionActivityStore";
 import type { PendingInteraction } from "./store/rawSession";
 import { createRingingMonitor } from "./store/ringingMonitor";
-import { selectRingingPresentation } from "./store/sessionPresentation";
+import {
+  emptySkillsPresentation,
+  selectRingingPresentation,
+  selectSkillsPresentation,
+} from "./store/sessionPresentation";
 import { mergeTimelinePresentation } from "./store/timelinePresentation";
 import { createTimelineMonitor } from "./store/timelineMonitor";
 import {
@@ -123,6 +127,9 @@ export default function App() {
   function presentationFor(entry: SessionEntry) {
     const seed = entry.state().seed;
     timelineMonitor.version();
+    // Store 元素级更新不通知"读 turns 数组整体"的表达式：显式依赖版本
+    // 信号，使每批应用的事件驱动一次重投影（WeakMap 缓存保住引用稳定）。
+    ringingMonitor.ringingVersion();
     let fallback = entry.state();
     const snapshot = timelineMonitor.snapshotFor(seed);
     const stores = ringingMonitor.storesFor(seed);
@@ -621,10 +628,17 @@ export default function App() {
             <Match when={view() === "skills"}>
               <Show when={activeEntry()} keyed>
                 {entry => {
-                  // SkillsView 数据源与 ChatView 同源（Ringing presentation）。
+                  // SkillsView 只读 skills 域：轻量投影，不触发 turns 全量投影。
                   // entry.state().skills 没有任何生产写入路径，必须从
-                  // presentationFor 派生，skills_updated 事件才能驱动 UI。
-                  const skills = createMemo(() => presentationFor(entry).skills);
+                  // Ringing control store 派生，skills_updated 事件才能驱动 UI。
+                  const skills = createMemo(() => {
+                    const seed = entry.state().seed;
+                    ringingMonitor.ringingVersion();
+                    const stores = ringingMonitor.storesFor(seed);
+                    return stores
+                      ? selectSkillsPresentation(stores) ?? emptySkillsPresentation()
+                      : emptySkillsPresentation();
+                  });
                   const seed = () => entry.state().seed;
                   return <SkillsView
                     seed={seed()}
@@ -664,7 +678,9 @@ export default function App() {
             <Match when={view() === "chat"}>
               <Show when={hasChosenSession() && activeEntry()} keyed>
                 {entry => {
-                  const rawSession = () => presentationFor(entry);
+                  // memo 化：同一帧内多次读取（turns/session/usage/compact…）
+                  // 共享一次投影，依赖变化时才重算（此前每次调用全量重建）。
+                  const rawSession = createMemo(() => presentationFor(entry));
                   return <ChatView
                   rawSession={rawSession}
                   dashboardStore={entry.dashboardStore}

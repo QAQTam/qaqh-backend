@@ -25,6 +25,7 @@ import type {
 import type { DashboardSnapshot } from "../lib/types/ringing/DashboardSnapshot";
 import type { UsageInfo } from "../lib/types/ringing/UsageInfo";
 import type { ToolResult } from "../lib/types/ringing/ToolResult";
+import type { StoreSetter } from "solid-js";
 
 // ────────────────────────────────────────────────────────────────────────────
 // 每频道独立维护的连接状态（PLAN：每频道独立重连、cursor、snapshot、健康状态）
@@ -524,6 +525,205 @@ export function conversationReducer(state: ConversationState, event: Conversatio
     default:
       return state;
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Store path 应用器（Solid 2.0 定向更新）
+// ────────────────────────────────────────────────────────────────────────────
+// 与 conversationReducer 语义严格等价（等价性由 ringingStores.test.ts 的
+// 对照测试保证），但通过 store 函数式 setter 做**元素级替换**：只重建变化
+// 的 turn/round 对象，不复制整个 turns 数组。长会话下每事件分配从 O(turns)
+// 降为 O(1)，未变化的元素引用天然稳定（投影缓存命中、Solid 跳过未变化
+// 子树）。事件应用后由上层（ringingMonitor）bump ringingVersion 驱动投影
+// 刷新——元素级写入不会通知"读 turns 数组整体"的表达式。
+
+function applyRoundDeltaToTurn(
+  turn: TurnView,
+  roundNum: number,
+  kind: RoundDeltaKind,
+  delta: string,
+): TurnView {
+  const rounds = [...turn.rounds];
+  const idx = rounds.findIndex((r) => r.roundNum === roundNum);
+  if (idx < 0) {
+    rounds.push({
+      roundNum,
+      thinking: kind === "thinking" ? delta : "",
+      answer: kind === "answering" ? delta : "",
+      isFinal: false,
+    });
+  } else {
+    const r = rounds[idx];
+    rounds[idx] = {
+      ...r,
+      thinking: kind === "thinking" ? r.thinking + delta : r.thinking,
+      answer: kind === "answering" ? r.answer + delta : r.answer,
+    };
+  }
+  return { ...turn, rounds, lastRoundNum: Math.max(turn.lastRoundNum, roundNum) };
+}
+
+export function applyConversationEventToStore(
+  setStores: StoreSetter<RingingStores>,
+  event: ConversationEvent,
+): void {
+  setStores((draft) => {
+    // draft 是 StoreNode 宽类型，窄化为领域状态以便元素级读写推断。
+    const conv = draft.conversation as ConversationState;
+    // 任何领域事件都视为活动：刷新当前 turn 的活动时间（卡死检测依据）。
+    // turn_started 本身会创建新 turn，无需（也不能）刷新旧 turn。
+    if (conv.activeTurn && event.type !== "turn_started") {
+      const now = Date.now();
+      conv.activeTurn = { ...conv.activeTurn, lastActivityAt: now };
+      const activeIdx = conv.turns.findIndex((t) => t.turnId === conv.activeTurn!.turnId);
+      if (activeIdx >= 0) {
+        conv.turns[activeIdx] = { ...conv.turns[activeIdx], lastActivityAt: now };
+      }
+    }
+    switch (event.type) {
+      case "turn_started": {
+        // 合并乱序到达的缓冲增量（快照间隙/事件乱序时不丢字）。
+        const buffered = conv.pendingDeltas.filter((d) => d.turnId === event.turn_id);
+        let turn: TurnView = {
+          turnId: event.turn_id,
+          userText: event.user_text,
+          rounds: [],
+          status: "running",
+          lastRoundNum: 0,
+          startedAt: Date.now(),
+          lastActivityAt: Date.now(),
+        };
+        if (buffered.length > 0) {
+          conv.pendingDeltas = conv.pendingDeltas.filter((d) => d.turnId !== event.turn_id);
+          for (const d of buffered) {
+            turn = applyRoundDeltaToTurn(turn, d.roundNum, d.kind, d.delta);
+          }
+        }
+        conv.turns.push(turn);
+        conv.activeTurn = turn;
+        conv.cancelled = false;
+        return;
+      }
+      case "round_delta":
+        if (conv.activeTurn?.turnId !== event.turn_id) {
+          // 防御乱序/快照间隙：缓冲而不是丢弃，turn_started 到达后合并。
+          conv.pendingDeltas = [
+            ...conv.pendingDeltas,
+            {
+              turnId: event.turn_id,
+              roundNum: event.round_num,
+              kind: event.kind,
+              delta: event.delta,
+            },
+          ];
+          return;
+        }
+        {
+          const idx = conv.turns.findIndex((t) => t.turnId === event.turn_id);
+          if (idx < 0) {
+            // activeTurn 匹配但 turn 缺失（不应发生）：缓冲保底，不丢字。
+            conv.pendingDeltas = [
+              ...conv.pendingDeltas,
+              {
+                turnId: event.turn_id,
+                roundNum: event.round_num,
+                kind: event.kind,
+                delta: event.delta,
+              },
+            ];
+            return;
+          }
+          const updated = applyRoundDeltaToTurn(conv.turns[idx], event.round_num, event.kind, event.delta);
+          conv.turns[idx] = updated;
+          // activeTurn 与 turns 元素必须指向同一对象（与 reducer 的 upsertTurn 一致）。
+          if (conv.activeTurn?.turnId === event.turn_id) conv.activeTurn = updated;
+        }
+        return;
+      case "round_completed": {
+        if (!conv.activeTurn || conv.activeTurn.turnId !== event.turn_id) return;
+        const idx = conv.turns.findIndex((t) => t.turnId === event.turn_id);
+        if (idx < 0) return;
+        const turn = conv.turns[idx];
+        const rounds = [...turn.rounds];
+        const rIdx = rounds.findIndex((r) => r.roundNum === event.round_num);
+        if (rIdx >= 0) {
+          rounds[rIdx] = {
+            ...rounds[rIdx],
+            ...(event.thinking ? { thinking: event.thinking } : {}),
+            ...(event.answer ? { answer: event.answer } : {}),
+            isFinal: event.is_final,
+          };
+        } else {
+          rounds.push({
+            roundNum: event.round_num,
+            thinking: event.thinking ?? "",
+            answer: event.answer ?? "",
+            isFinal: event.is_final,
+          });
+        }
+        const updated = { ...turn, rounds };
+        conv.turns[idx] = updated;
+        if (conv.activeTurn?.turnId === event.turn_id) conv.activeTurn = updated;
+        return;
+      }
+      case "usage_updated": {
+        const usage = event.usage as UsageInfo;
+        conv.lastUsage = {
+          usage,
+          contextLimit: event.context_limit,
+          model: event.model,
+        };
+        conv.usageTotals = addUsage(conv.usageTotals, usage);
+        conv.usageRequestCount += 1;
+        conv.cacheReportedRequestCount += usage.cache_usage_reported === true ? 1 : 0;
+        return;
+      }
+      case "provider_tool_status":
+        conv.lastProviderToolStatus = {
+          callId: event.call_id,
+          toolKind: event.tool_kind,
+          state: event.state,
+        };
+        return;
+      case "turn_completed":
+        conv.pendingDeltas = conv.pendingDeltas.filter((d) => d.turnId !== event.turn_id);
+        {
+          const idx = conv.turns.findIndex((t) => t.turnId === event.turn_id);
+          if (idx >= 0) {
+            // StoreNode 窄化后 status 联合仍可能被宽化：显式标注 TurnView。
+            const updated: TurnView = { ...(conv.turns[idx] as TurnView), status: "completed" };
+            conv.turns[idx] = updated;
+            if (conv.activeTurn?.turnId === event.turn_id) conv.activeTurn = updated;
+          }
+        }
+        return;
+      case "turn_failed":
+        conv.pendingDeltas = conv.pendingDeltas.filter((d) => d.turnId !== event.turn_id);
+        {
+          const failure = { code: event.error.code, message: event.error.message };
+          const idx = conv.turns.findIndex((t) => t.turnId === event.turn_id);
+          if (idx >= 0) {
+            const updated: TurnView = { ...(conv.turns[idx] as TurnView), status: "failed", failure };
+            conv.turns[idx] = updated;
+            if (conv.activeTurn?.turnId === event.turn_id) conv.activeTurn = updated;
+          }
+        }
+        return;
+      case "conversation_cancelled":
+        conv.cancelled = true;
+        if (conv.activeTurn) conv.activeTurn = { ...conv.activeTurn, status: "cancelled" };
+        conv.staleRevision += 1;
+        if (event.turn_id) {
+          conv.pendingDeltas = conv.pendingDeltas.filter((d) => d.turnId !== event.turn_id);
+        }
+        return;
+      case "compact_finished":
+        conv.compactStatus = event.status;
+        return;
+      default:
+        return;
+    }
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ import { createSignal, createStore, type Store, type StoreSetter } from "solid-j
 import {
   AppliedEventRegistry,
   applyConversationSnapshot,
+  applyConversationEventToStore,
   conversationReducer,
   controlReducer,
   initialRingingStores,
@@ -18,6 +19,7 @@ import {
   type RingingStores,
 } from "./ringingStores";
 import type { RingingEventBatch } from "../lib/types/ringing";
+import type { ConversationEvent } from "../lib/types/ringing/ConversationEvent";
 
 export type ChannelName = "control" | "conversation" | "tool";
 
@@ -396,7 +398,8 @@ function dispatchToStores(
   if (channel === "control") {
     setStores((draft) => { draft.control = controlReducer(draft.control, e as never); });
   } else if (channel === "conversation") {
-    setStores((draft) => { draft.conversation = conversationReducer(draft.conversation, e as never); });
+    // 热路径：path 定向更新（元素级替换，不复制 turns 数组）。
+    applyConversationEventToStore(setStores, e as ConversationEvent);
   } else if (channel === "tool") {
     setStores((draft) => { draft.tool = toolReducer(draft.tool, e as never); });
   }

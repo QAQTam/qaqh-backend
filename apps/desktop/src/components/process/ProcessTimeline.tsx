@@ -23,12 +23,12 @@ export default function ProcessTimeline(props: {
 
   return (
     <div class="process-timeline" role="list">
-      <For each={props.items} keyed={true}>
+      <For each={props.items} keyed={item => item.id}>
         {(item) => (
           <ProcessEventRow
-            item={item}
-            expanded={() => isExpanded(item.id)}
-            onToggle={() => onToggle(item.id)}
+            item={item()}
+            expanded={() => isExpanded(item().id)}
+            onToggle={() => onToggle(item().id)}
           />
         )}
       </For>

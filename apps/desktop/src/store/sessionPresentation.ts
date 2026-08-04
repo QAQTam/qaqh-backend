@@ -48,18 +48,34 @@ function cardsForRound(cards: ToolCardView[], turnId: string, roundNum: number):
  * 上次的 list，使 round 投影缓存（引用比较）能命中。
  */
 const indexListCache = new Map<string, { refs: ToolCardView[]; list: ToolCardView[] }>();
+/** 有界：字符串键随 (seed, turn, round) 增长，超限整体淘汰（冷启动代价仅一次投影）。 */
+const INDEX_CACHE_MAX = 4096;
 
 function indexCardsByTurnRound(cards: ToolCardView[], seed: string): Map<string, ToolCardView[]> {
-  const index = new Map<string, ToolCardView[]>();
+  // 同一 round 可以有多个工具调用（并行工具 / 同回合多工具），全部 card
+  // 都必须保留。先按 (seed, turnId, roundNum) 分组（保持 cards 原始顺序），
+  // 再与缓存比对整个引用序列：序列未变 → 复用上次的 list 数组（round 投影
+  // 缓存靠引用比较命中）；任一 card 引用变化 → 整组重建并更新缓存。
+  const groups = new Map<string, ToolCardView[]>();
   for (const card of cards) {
     const key = `${seed}:${card.turnId}:${card.roundNum}`;
-    const entry = indexListCache.get(key);
-    if (entry && entry.refs.length === 1 && entry.refs[0] === card) {
+    const group = groups.get(key);
+    if (group) group.push(card);
+    else groups.set(key, [card]);
+  }
+  const index = new Map<string, ToolCardView[]>();
+  for (const [key, list] of groups) {
+    const cached = indexListCache.get(key);
+    if (
+      cached
+      && cached.refs.length === list.length
+      && cached.refs.every((ref, i) => ref === list[i])
+    ) {
       // 引用序列未变：复用数组（round 缓存因此可命中）
-      index.set(key, entry.list);
+      index.set(key, cached.list);
     } else {
-      const list = [card];
-      indexListCache.set(key, { refs: [card], list });
+      if (indexListCache.size >= INDEX_CACHE_MAX) indexListCache.clear();
+      indexListCache.set(key, { refs: list.slice(), list });
       index.set(key, list);
     }
   }
@@ -252,33 +268,57 @@ export function selectRingingPresentation(
     : [];
   merged.pendingInteractions = [...pendingPermissions, ...pendingAskPlan];
 
-  const skills = stores.control.skills;
-  if (skills) {
-    const active = new Set(skills.active);
-    // 事件携带的 runtime 是权威生命周期（catalog/requested/active/unavailable）。
-    // 旧 daemon 事件没有该字段时退回合成视图（仅 active/catalog 两态）。
-    const runtime: SkillRuntimeInfo[] = (skills.runtime ?? []).length > 0
-      ? skills.runtime
-      : skills.available.map(skill => ({
-        name: skill.name,
-        description: skill.description,
-        source: skill.source,
-        state: active.has(skill.name) ? "active" : "catalog",
-        token_count: 0,
-      }));
-    merged.skills = {
-      ...merged.skills,
-      available: skills.available,
-      active: skills.active,
-      catalogRevision: skills.catalogRevision ?? "",
-      operationRevision: skills.operationRevision ?? 0,
-      contextEpoch: skills.contextEpoch ?? 0,
-      tokenBudget: skills.tokenBudget ?? 0,
-      tokenUsage: skills.tokenUsage ?? 0,
-      runtime,
-      diagnostics: skills.diagnostics ?? [],
-    };
-  }
+  const skillsView = selectSkillsPresentation(stores);
+  if (skillsView) merged.skills = skillsView;
 
   return merged;
+}
+
+/** skills 域的空投影（无 Ringing store 时的兜底初始值）。 */
+export function emptySkillsPresentation(): RawSessionState["skills"] {
+  return {
+    available: [],
+    active: [],
+    catalogRevision: "",
+    contextEpoch: 0,
+    operationRevision: 0,
+    tokenBudget: 0,
+    tokenUsage: 0,
+    runtime: [],
+    diagnostics: [],
+  };
+}
+
+/**
+ * skills 域独立投影：SkillsView 只读此域，不必触发 turns 全量投影。
+ * 依赖版本信号由调用方（App）建立；此处为纯函数。
+ */
+export function selectSkillsPresentation(
+  stores: RingingStores,
+): RawSessionState["skills"] | null {
+  const skills = stores.control.skills;
+  if (!skills) return null;
+  const active = new Set(skills.active);
+  // 事件携带的 runtime 是权威生命周期（catalog/requested/active/unavailable）。
+  // 旧 daemon 事件没有该字段时退回合成视图（仅 active/catalog 两态）。
+  const runtime: SkillRuntimeInfo[] = (skills.runtime ?? []).length > 0
+    ? skills.runtime
+    : skills.available.map(skill => ({
+      name: skill.name,
+      description: skill.description,
+      source: skill.source,
+      state: active.has(skill.name) ? "active" : "catalog",
+      token_count: 0,
+    }));
+  return {
+    available: skills.available,
+    active: skills.active,
+    catalogRevision: skills.catalogRevision ?? "",
+    operationRevision: skills.operationRevision ?? 0,
+    contextEpoch: skills.contextEpoch ?? 0,
+    tokenBudget: skills.tokenBudget ?? 0,
+    tokenUsage: skills.tokenUsage ?? 0,
+    runtime,
+    diagnostics: skills.diagnostics ?? [],
+  };
 }

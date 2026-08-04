@@ -91,7 +91,7 @@ export default function ComposerDock(props: {
 
     setSubmitError("");
     if (props.isStreaming()) {
-      props.queue.enqueue(combinedText, []);
+      props.queue.enqueue(combinedText, [], imageBlocks.length > 0 ? imageBlocks : undefined);
     } else {
       try {
         await props.onSend(combinedText, [], imageBlocks.length > 0 ? imageBlocks : undefined);

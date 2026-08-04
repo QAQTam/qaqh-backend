@@ -23,3 +23,23 @@ it("does not persist executable work", () => {
   expect(localStorage.getItem("deepx:follow-ups:seed")).toBeNull();
   expect(writes).toEqual([]);
 });
+
+it("passes image blocks through to the sender on drain", async () => {
+  const sent: Array<{
+    text: string;
+    files: string[];
+    imageBlocks?: Array<{ mimeType: string; data: string }>;
+  }> = [];
+  const queue = createFollowUpQueue("seed", async (text, files, imageBlocks) => {
+    sent.push({ text, files, imageBlocks });
+  });
+  queue.enqueue("with image", [], [{ mimeType: "image/png", data: "aGVsbG8=" }]);
+  // Solid 2 信号写入是微任务批处理：同栈 items() 仍为空，先让出微任务队列
+  await Promise.resolve();
+  await queue.drainAfterTurnEnd({ hasPendingGate: false });
+  expect(sent).toEqual([{
+    text: "with image",
+    files: [],
+    imageBlocks: [{ mimeType: "image/png", data: "aGVsbG8=" }],
+  }]);
+});

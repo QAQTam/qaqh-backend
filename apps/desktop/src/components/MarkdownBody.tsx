@@ -1,38 +1,16 @@
 import { createEffect, createMemo, createSignal, createStore, For, onCleanup, reconcile, Show } from "solid-js";
-import { marked, Renderer } from "marked";
-import { createHighlighter, createOnigurumaEngine } from "shiki";
+import { marked } from "marked";
 import renderMathInElement from "katex/contrib/auto-render";
+import { hydrateMermaidPlaceholders } from "../lib/mermaid-render";
 import {
-  hydrateMermaidPlaceholders,
-  createMermaidPlaceholder,
-  MERMAID_LANG,
-} from "../lib/mermaid-render";
+  getShiki,
+  parseMarkdownCore,
+  type Highlighter,
+  type RenderTheme,
+} from "../lib/markdown-render-core";
+import { renderMarkdownInWorker } from "../lib/markdownWorkerClient";
 
-// ── Shiki singleton ──
-
-let hiPromise: ReturnType<typeof createHighlighter> | null = null;
-
-function getHi() {
-  if (!hiPromise) {
-    hiPromise = createHighlighter({
-      themes: ["github-light", "github-dark"],
-      langs: [
-        "ts", "tsx", "js", "jsx", "json", "yaml", "toml",
-        "rs", "rust", "py", "python", "go", "java", "kt",
-        "css", "scss", "html", "bash", "sh", "shell",
-        "sql", "graphql", "md", "markdown", "diff",
-        "c", "cpp", "zig", "nim",
-      ],
-      engine: createOnigurumaEngine(() => import("shiki/wasm")),
-    }).catch((err) => {
-      hiPromise = null;
-      throw err;
-    });
-  }
-  return hiPromise;
-}
-
-function detectTheme(): "github-light" | "github-dark" {
+function detectTheme(): RenderTheme {
   if (typeof document === "undefined") return "github-dark";
   const theme = document.documentElement.getAttribute("data-theme");
   return theme === "dark" || theme === "dark-gray" ? "github-dark" : "github-light";
@@ -48,51 +26,7 @@ interface MarkdownBlock {
   kind: "text" | "code";
 }
 
-// ── Cached Renderer (avoids per-block allocation) ──
-
-let cachedRenderer: Renderer | null = null;
-let cachedTheme: string | null = null;
-
-function buildRenderer(hi: Awaited<ReturnType<typeof getHi>>) {
-  const theme = detectTheme();
-  if (cachedRenderer && cachedTheme === theme) return cachedRenderer;
-
-  const renderer = new Renderer();
-  renderer.code = ({ text, lang }) => {
-    if (lang === MERMAID_LANG) return createMermaidPlaceholder(text);
-    const langId = !lang ? "text"
-      : lang === "h" ? "c"
-      : lang === "hpp" ? "cpp"
-      : lang;
-    const label = lang ? `<span class="code-lang-label">${lang}</span>` : "";
-    const copyBtn = `<button class="code-copy-btn" aria-label="Copy code" title="Copy code"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>`;
-    try {
-      const highlighted = hi.codeToHtml(text, { lang: langId, theme });
-      return `<div class="code-block-wrapper">${copyBtn}${label}${highlighted}</div>`;
-    } catch {
-      return `<div class="code-block-wrapper">${copyBtn}${label}<pre><code>${text}</code></pre></div>`;
-    }
-  };
-
-  cachedRenderer = renderer;
-  cachedTheme = theme;
-  return renderer;
-}
-
 // ── Markdown parsing ──
-
-function parseMarkdown(raw: string, renderer?: Renderer): string {
-  const html = marked.parse(raw, { async: false, gfm: true, breaks: false, renderer });
-  if (typeof html !== "string") return "";
-  const cleaned = html
-    .replace(
-      /(<pre\b[^>]*style=")([^"]*)(")/gi,
-      (_, before, styles, after) =>
-        before + styles.replace(/background-color\s*:\s*[^;]+;?/gi, "") + after,
-    )
-    .replace(/<pre\b([^>]*)\s+tabindex="0"([^>]*)>/gi, "<pre$1$2>");
-  return renderMath(cleaned);
-}
 
 function renderMath(html: string): string {
   if (typeof document === "undefined" || (!html.includes("$") && !html.includes("\\("))) return html;
@@ -111,12 +45,30 @@ function renderMath(html: string): string {
   return root.innerHTML;
 }
 
-function renderBlockHTML(raw: string, hi: Awaited<ReturnType<typeof getHi>>): string {
-  return parseMarkdown(raw, buildRenderer(hi));
+function renderBlockHTML(raw: string, hi: Highlighter): string {
+  return renderMath(parseMarkdownCore(raw, detectTheme(), hi));
 }
 
 function renderFallbackHTML(raw: string): string {
-  return parseMarkdown(raw);
+  return renderMath(parseMarkdownCore(raw, detectTheme()));
+}
+
+/**
+ * Final 块渲染：marked + shiki 在 Worker 中执行（主线程不再被大文本冻结），
+ * katex 收尾在主线程（需要 DOM）。无 Worker 环境（测试/降级）或 Worker
+ * 失败时回退主线程渲染——内容永不丢失。
+ */
+async function renderBlockHTMLOffThread(raw: string): Promise<string> {
+  if (typeof Worker !== "undefined") {
+    try {
+      const html = await renderMarkdownInWorker(raw, detectTheme());
+      return renderMath(html);
+    } catch (error) {
+      console.warn("[MarkdownBody] worker render failed, falling back to main thread", error);
+    }
+  }
+  const hi = await getShiki().catch(() => null);
+  return hi ? renderBlockHTML(raw, hi) : renderFallbackHTML(raw);
 }
 
 /**
@@ -235,7 +187,7 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
 
   // Preload the highlighter eagerly so the first streaming delta does not
   // block while shiki downloads and instantiates its WASM engine.
-  void getHi();
+  void getShiki();
 
   // ── Raw blocks: derived from content + final ──
   const rawBlocks = createMemo(() => projectBlocks(props.content, !!props.final));
@@ -267,9 +219,9 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
     );
     if (codeBlocks.length === 0) return;
 
-    let hi: Awaited<ReturnType<typeof getHi>>;
+    let hi: Highlighter | undefined;
     try {
-      hi = await getHi();
+      hi = await getShiki();
     } catch {
       // Shiki unavailable — render code blocks with fallback
       for (const block of codeBlocks) {
@@ -330,21 +282,15 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
       // Final: render all blocks async, keep previous content visible
       // until new HTML is ready (stale-while-revalidate).
       void (async () => {
-        let hi: Awaited<ReturnType<typeof getHi>> | null = null;
-        try {
-          hi = await getHi();
-        } catch {
-          // Shiki unavailable — will use fallback below
-        }
         if (isStale()) return;
 
         for (const block of currentBlocks) {
           if (isStale()) return;
           if (!block.stable) continue;
           try {
-            const html = hi
-              ? renderBlockHTML(block.raw, hi)
-              : renderFallbackHTML(block.raw);
+            // marked + shiki 走 Worker；失败时 OffThread 内部已回退主线程。
+            const html = await renderBlockHTMLOffThread(block.raw);
+            if (isStale()) return;
             setBlockHtml(s => { s[block.key] = html; });
           } catch {
             try {

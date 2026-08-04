@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
-import type { RingingEventEnvelope } from "../lib/types/ringing";
+import { createStore, snapshot } from "solid-js";
+import { describe, expect, it, vi } from "vitest";
+import type { ConversationEvent, RingingEventEnvelope } from "../lib/types/ringing";
 import {
   AppliedEventRegistry,
   applyConversationSnapshot,
+  applyConversationEventToStore,
   applyEnvelope,
   applyEnvelopeUnchecked,
   conversationReducer,
@@ -13,6 +15,7 @@ import {
   initialToolState,
   toolReducer,
 } from "./ringingStores";
+import { selectRingingPresentation } from "./sessionPresentation";
 
 function envelope(event: RingingEventEnvelope["event"], eventId = "e1"): RingingEventEnvelope {
   return {
@@ -484,5 +487,131 @@ describe("newly dual-emitted domain events", () => {
       success: true,
       time: "t",
     });
+  });
+});
+
+describe("applyConversationEventToStore (path updates match conversationReducer)", () => {
+  function streamingSequence(): ConversationEvent[] {
+    return [
+      { type: "turn_started", turn_id: "t1", user_text: "hi" },
+      { type: "round_delta", turn_id: "t1", round_num: 0, kind: "thinking", delta: "let me " },
+      { type: "round_delta", turn_id: "t1", round_num: 0, kind: "thinking", delta: "think" },
+      { type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "Hello" },
+      { type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: " world" },
+      {
+        type: "round_completed",
+        turn_id: "t1",
+        round_num: 0,
+        thinking: "let me think",
+        answer: "Hello world",
+        output_ref: null,
+        is_final: true,
+      },
+      {
+        type: "usage_updated",
+        turn_id: "t1",
+        round_num: 0,
+        usage: {
+          prompt_tokens: 5,
+          completion_tokens: 3,
+          total_tokens: 8,
+          prompt_cache_hit_tokens: 0,
+          prompt_cache_miss_tokens: 5,
+          reasoning_tokens: 0,
+        },
+        context_limit: 1000,
+        model: "m",
+      },
+      {
+        type: "provider_tool_status",
+        turn_id: "t1",
+        round_num: 0,
+        call_id: "c1",
+        tool_kind: "web_search",
+        state: "in_progress",
+      },
+      { type: "turn_completed", turn_id: "t1", stop_reason: null, usage: null },
+      // 乱序：delta 先于 turn_started 到达（缓冲合并路径）
+      { type: "round_delta", turn_id: "t2", round_num: 1, kind: "answering", delta: "buffered " },
+      { type: "round_delta", turn_id: "t2", round_num: 1, kind: "answering", delta: "text" },
+      { type: "turn_started", turn_id: "t2", user_text: "second" },
+      // round 缺失时 round_completed 直接创建
+      {
+        type: "round_completed",
+        turn_id: "t2",
+        round_num: 2,
+        thinking: "",
+        answer: "final",
+        output_ref: null,
+        is_final: true,
+      },
+      {
+        type: "turn_failed",
+        turn_id: "t2",
+        error: { error_id: "e-1", code: "boom", message: "failed", retryable: false, dedupe_key: null },
+      },
+      { type: "conversation_cancelled", turn_id: null },
+      { type: "compact_finished", compact_id: "c-1", status: "completed" },
+    ];
+  }
+
+  it("converges with conversationReducer across a full streaming sequence", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-04T00:00:00.000Z"));
+    try {
+      const seq = streamingSequence();
+
+      // reducer 链（语义基准）
+      let reduced = initialConversationState("s-path");
+      for (const event of seq) reduced = conversationReducer(reduced, event);
+
+      // path 链（生产路径）
+      const [stores, setStores] = createStore(initialRingingStores("s-path"));
+      for (const event of seq) applyConversationEventToStore(setStores, event);
+
+      expect(JSON.parse(JSON.stringify(snapshot(stores.conversation)))).toEqual(
+        JSON.parse(JSON.stringify(reduced)),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps unchanged turns stable through the projection when using path updates", async () => {
+    const [stores, setStores] = createStore(initialRingingStores("s-proj"));
+    applyConversationEventToStore(setStores, { type: "turn_started", turn_id: "t1", user_text: "first" });
+    applyConversationEventToStore(setStores, {
+      type: "round_delta",
+      turn_id: "t1",
+      round_num: 0,
+      kind: "answering",
+      delta: "answer 1",
+    });
+    // Solid 2 store 写入是微任务批处理：同栈读取仍为旧值，先 flush 再投影。
+    await Promise.resolve();
+    const p1 = selectRingingPresentation("s-proj", stores);
+    const t1a = p1.turns.find(t => t.turnId === "t1");
+    expect(t1a).toBeDefined();
+
+    // t2 开始流式：t1 未变化 → RawTurn 引用必须稳定（投影缓存命中）
+    applyConversationEventToStore(setStores, { type: "turn_started", turn_id: "t2", user_text: "second" });
+    await Promise.resolve();
+    const p2 = selectRingingPresentation("s-proj", stores);
+    expect(p2.turns.find(t => t.turnId === "t1")).toBe(t1a);
+
+    // t2 delta：t1 仍稳定，t2 自身重建（内容变化）
+    applyConversationEventToStore(setStores, {
+      type: "round_delta",
+      turn_id: "t2",
+      round_num: 0,
+      kind: "answering",
+      delta: "...",
+    });
+    await Promise.resolve();
+    const p3 = selectRingingPresentation("s-proj", stores);
+    expect(p3.turns.find(t => t.turnId === "t1")).toBe(t1a);
+    expect(p3.turns.find(t => t.turnId === "t2")).not.toBe(
+      p2.turns.find(t => t.turnId === "t2"),
+    );
   });
 });

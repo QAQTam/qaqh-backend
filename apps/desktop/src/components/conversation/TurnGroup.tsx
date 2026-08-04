@@ -52,14 +52,14 @@ export default function TurnGroup(props: { turn: TurnViewModel; onReviewChanges?
     <article class="conversation-turn" data-turn={props.turn.turnId}>
       <UserPromptBubble text={props.turn.userPrompt} />
 
-      <For each={merged()} keyed={true}>
+      <For each={merged()} keyed={entry => entry.id}>
         {(entry) => {
           const process = () => {
-            const current = entry;
+            const current = entry();
             return current.kind === "process" ? current : undefined;
           };
           const assistant = () => {
-            const current = entry;
+            const current = entry();
             return current.kind === "assistant" ? current : undefined;
           };
           return (
