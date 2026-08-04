@@ -74,7 +74,7 @@ mod tests {
             names,
             vec![
                 "apply_patch", "ask", "delete", "edit", "edit_block", "exec", "image",
-                "process", "read", "search", "skills", "task", "web", "write",
+                "process", "read", "search", "skills", "task", "todo", "web", "write",
             ]
         );
     }

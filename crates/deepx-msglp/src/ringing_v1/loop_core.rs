@@ -160,7 +160,15 @@ impl Loop {
         input: impl BufRead + Send + 'static,
         output: impl Write + Send + 'static,
     ) -> Self {
-        let seed = agent.session.seed.clone();
+        // resume 模式下 `--resume-seed` 只写入 resume_seed 字段，seed 此时
+        // 仍为空；用 resume_seed 兜底，避免 PacedEmitter 以空 seed 构造
+        // （Ringing 事件信封会被 daemon 按 seed 过滤丢弃）。init_session
+        // 完成后还会经 sync_emitter_seed 再次同步权威值。
+        let seed = if !agent.session.seed.is_empty() {
+            agent.session.seed.clone()
+        } else {
+            agent.session.resume_seed.clone().unwrap_or_default()
+        };
         let cancel = CancelToken::new();
         let cancel_for_reader = cancel.clone();
 
@@ -392,6 +400,15 @@ impl Loop {
         deepx_workspace::CANCEL.store(false, Ordering::SeqCst);
     }
 
+    /// 将会话 seed 同步到 PacedEmitter（Ringing 事件信封路由键）。
+    /// 必须在任何会话创建/恢复（含 auto-create）之后、后续 emit_domain
+    /// 之前调用；否则事件携带旧/空 seed，被 daemon SSE 的 owns_seed
+    /// 过滤丢弃，前端收不到流式输出。
+    fn sync_emitter_seed(&mut self) {
+        let seed = self.session.agent.session.seed.clone();
+        self.paced_emitter.set_seed(&seed);
+    }
+
     /// Extract a human-readable message from a panic payload.
     fn panic_msg_from_err(e: Box<dyn std::any::Any + Send>) -> String {
         if let Some(s) = e.downcast_ref::<&str>() {
@@ -596,6 +613,9 @@ impl Loop {
                 .session_eng
                 .resume(&mut self.session.agent, &seed, &self.cancel)
             {
+                // init_session 已把 agent.session.seed 设为权威值（恢复成功
+                // 为原 seed，fallback 为新 seed）；此后 Ringing 事件必须携带它。
+                self.sync_emitter_seed();
                 let total = self.session.agent.msg.turn_count() as u32;
                 let start = total.saturating_sub(INITIAL_LOAD_COUNT as u32) as usize;
                 let recent = crate::util::build_turns_from_context(
@@ -638,6 +658,7 @@ impl Loop {
         } else if has_seed && !self.session.agent.session.from_resume {
             self.session_eng
                 .create_with_seed(&mut self.session.agent, &self.cancel);
+            self.sync_emitter_seed();
             let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
                 Agent2Ui::SessionCreated {
                     seed: self.session.agent.session.seed.clone(),
@@ -767,6 +788,7 @@ impl Loop {
                 .session_eng
                 .resume(&mut self.session.agent, &seed, &self.cancel)
             {
+                self.sync_emitter_seed();
                 let total = self.session.agent.msg.turn_count() as u32;
                 let start = total.saturating_sub(INITIAL_LOAD_COUNT as u32) as usize;
                 let recent = crate::util::build_turns_from_context(
@@ -804,6 +826,7 @@ impl Loop {
             self.prepare_session_switch();
             self.session_eng
                 .create(&mut self.session.agent, &self.cancel);
+            self.sync_emitter_seed();
             let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
                 Agent2Ui::SessionCreated {
                     seed: self.session.agent.session.seed.clone(),
@@ -1074,6 +1097,7 @@ impl Loop {
                     }
                     self.session_eng
                         .create(&mut self.session.agent, &self.cancel);
+                    self.sync_emitter_seed();
                     self.paced_emitter.emit_domain(DomainEvent::Control(
                         deepx_domain::ControlEvent::SessionStateChanged {
                             seed: self.session.agent.session.seed.clone(),
@@ -1089,6 +1113,7 @@ impl Loop {
                         .session_eng
                         .resume(&mut self.session.agent, &seed, &self.cancel)
                     {
+                        self.sync_emitter_seed();
                         self.paced_emitter.emit_domain(DomainEvent::Control(
                             deepx_domain::ControlEvent::SessionStateChanged {
                                 seed,
@@ -1570,6 +1595,7 @@ impl Loop {
             Ui2Agent::CreateSession => {
                 self.session_eng
                     .create(&mut self.session.agent, &self.cancel);
+                self.sync_emitter_seed();
                 let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
                     Agent2Ui::SessionCreated {
                         seed: self.session.agent.session.seed.clone(),
@@ -1585,6 +1611,7 @@ impl Loop {
                     .session_eng
                     .resume(&mut self.session.agent, seed, &self.cancel)
                 {
+                    self.sync_emitter_seed();
                     let total = self.session.agent.msg.turn_count() as u32;
                     let start = total.saturating_sub(INITIAL_LOAD_COUNT as u32) as usize;
                     let recent = crate::util::build_turns_from_context(
@@ -1627,6 +1654,7 @@ impl Loop {
                 self.prepare_session_switch();
                 self.session_eng
                     .create(&mut self.session.agent, &self.cancel);
+                self.sync_emitter_seed();
                 let _ = self.event_tx.send(super::types::WriterEvent::Legacy(
                     Agent2Ui::SessionCreated {
                         seed: self.session.agent.session.seed.clone(),
@@ -1816,7 +1844,7 @@ impl Loop {
                 self.misc.maybe_notify(&self.session.agent, &self.notify.tx);
 
                 // Goal mode auto-advance: if the LLM completed a step
-                // (via task(action=update, status=completed)), inject the next step.
+                // (via todo(action=update, status=completed)), inject the next step.
                 if let Ok(store) = deepx_workspace::todo::load_todo() {
                     if store.mode == deepx_workspace::todo::TodoMode::Goal {
                         if let Some(ref current_id) = store.current_id {
@@ -1825,7 +1853,7 @@ impl Loop {
                                     let prompt = format!(
                                         "[自动执行计划 / 目标模式]\n\n\
                                          T{}: {}\n{}\n\n\
-                                         完成此步骤后，调用 task(action=\"update\", id=\"{}\", status=\"completed\", evidence=\"...\").",
+                                         完成此步骤后，调用 todo(action=\"update\", id=\"{}\", status=\"completed\", evidence=\"...\").",
                                         item.id, item.title, item.description, item.id
                                     );
                                     let mut ctx = RingContext {

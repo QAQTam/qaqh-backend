@@ -28,6 +28,9 @@ impl InputEngine {
             log::info!("[INPUT] auto-creating session on first user input");
             crate::state::lifecycle::create_session(ctx.agent);
             ctx.agent.rebind_store();
+            // 新 seed 生成后立即同步，后续 Ringing 事件（TurnStarted 双发、
+            // RoundDelta 流式等）才能携带正确路由键。
+            ctx.emitter.set_seed(&ctx.agent.session.seed);
             ctx.emitter.emit(Agent2Ui::SessionCreated {
                 seed: ctx.agent.session.seed.clone(),
             });
@@ -50,7 +53,7 @@ impl InputEngine {
                     }
                 }
                 Ok(_) => {
-                    "目标模式无法恢复：当前没有激活的 goal。使用 task(action=\"activate\") 开始。".to_string()
+                    "目标模式无法恢复：当前没有激活的 goal。使用 todo(action=\"activate\") 开始。".to_string()
                 }
                 Err(e) => format!("目标模式恢复失败：{e}"),
             }

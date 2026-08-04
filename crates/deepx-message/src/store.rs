@@ -86,7 +86,7 @@ fn truncate_tool_result(tool_name: &str, result: &str) -> String {
         Some(4000)
     } else if tool_name.starts_with("exec") {
         Some(4000)
-    } else if tool_name.starts_with("task") || tool_name.starts_with("plan") {
+    } else if tool_name.starts_with("task") || tool_name.starts_with("todo") || tool_name.starts_with("plan") {
         Some(4000)
     } else if tool_name.starts_with("git") || tool_name.starts_with("process") {
         Some(4000)

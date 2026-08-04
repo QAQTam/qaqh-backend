@@ -14,7 +14,10 @@ use super::types::Emitter;
 use super::types::WriterEvent;
 
 pub struct PacedEmitter {
-    seed: String,
+    /// 当前会话 seed（Ringing 事件信封路由键）。会话切换后经
+    /// `set_seed` 更新；构造时快照的旧值在 resume 模式下为空，
+    /// 必须由 Loop 在 init_session 后同步。
+    seed: Arc<Mutex<String>>,
     tx: mpsc::SyncSender<WriterEvent>,
     writer_dead: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
@@ -29,7 +32,7 @@ impl PacedEmitter {
         cancelled: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            seed: seed.into(),
+            seed: Arc::new(Mutex::new(seed.into())),
             tx,
             writer_dead,
             cancelled,
@@ -50,6 +53,13 @@ impl PacedEmitter {
             slot: self.causation.clone(),
             previous,
         }
+    }
+
+    /// 同步当前会话 seed。会话创建/恢复（含 auto-create、worker 内切换）
+    /// 后调用，使 Ringing 事件信封携带正确的路由键。
+    pub fn set_seed(&self, seed: &str) {
+        let mut slot = self.seed.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = seed.to_string();
     }
 }
 
@@ -116,13 +126,14 @@ impl Emitter for PacedEmitter {
         }
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let seed = self.seed.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let causation = self
             .causation
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let env = deepx_ringing::RingingWorkerEventEnvelope::new(
-            self.seed.as_str(),
+            seed.as_str(),
             format!("w-{seq}"),
             event.into(),
         );
@@ -139,13 +150,14 @@ impl Emitter for PacedEmitter {
         }
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let seed = self.seed.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let causation = self
             .causation
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let env = deepx_ringing::RingingTimelineIntentEnvelope::new(
-            self.seed.as_str(),
+            seed.as_str(),
             format!("timeline-{seq}"),
             intent,
         );
@@ -473,6 +485,39 @@ mod tests {
                 assert!(env.causation_id.is_none());
             }
             other => panic!("expected Ringing envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_seed_updates_domain_event_routing_key() {
+        let (tx, rx) = mpsc::sync_channel::<WriterEvent>(16);
+        let emitter = PacedEmitter::new(
+            "old-seed",
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        // 模拟 resume/会话切换后同步 seed：后续事件必须携带新 seed，
+        // 否则 daemon SSE 按 owns_seed 过滤会丢弃整个事件流。
+        emitter.set_seed("new-seed");
+        emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+            deepx_domain::ConversationEvent::TurnStarted {
+                turn_id: "t1".into(),
+                user_text: "hi".into(),
+            },
+        ));
+        match rx.recv().expect("envelope") {
+            WriterEvent::Ringing(env) => assert_eq!(env.seed, "new-seed"),
+            other => panic!("expected Ringing envelope, got {other:?}"),
+        }
+
+        emitter.emit_timeline(deepx_domain::TimelineIntent::TurnOpened {
+            turn_id: "t1".into(),
+            user_text: "hi".into(),
+        });
+        match rx.recv().expect("timeline envelope") {
+            WriterEvent::Timeline(env) => assert_eq!(env.seed, "new-seed"),
+            other => panic!("expected Timeline envelope, got {other:?}"),
         }
     }
 

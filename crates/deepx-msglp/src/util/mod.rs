@@ -118,8 +118,9 @@ pub(crate) fn format_tool_args_display(name: &str, input: &serde_json::Value) ->
             path.map(|p| p.chars().take(60).collect::<String>())
                 .unwrap_or(display_name)
         }
-        "task" => input
-            .get("subject")
+        "todo" | "task" => input
+            .get("title")
+            .or_else(|| input.get("subject"))
             .and_then(|v| v.as_str())
             .map(|s| s.chars().take(60).collect::<String>())
             .unwrap_or(display_name),

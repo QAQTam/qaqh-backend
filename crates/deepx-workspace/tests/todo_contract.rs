@@ -1,5 +1,5 @@
 #[test]
-fn public_schema_exposes_one_task_tool_and_no_goal_entrypoint() {
+fn public_schema_exposes_one_todo_tool_with_task_alias_and_no_goal_entrypoint() {
     let manager = deepx_workspace::registration::build_tool_manager(&[]);
     let definitions = manager.all_defs();
     let names: Vec<&str> = definitions
@@ -7,21 +7,30 @@ fn public_schema_exposes_one_task_tool_and_no_goal_entrypoint() {
         .map(|definition| definition.function.name.as_str())
         .collect();
 
-    for expected in ["task"] {
-        assert!(names.contains(&expected), "missing {expected}");
+    // 主工具：todo（prompt/文档统一命名）。
+    assert!(
+        names.contains(&"todo"),
+        "missing todo tool"
+    );
+    // 兼容别名：task 允许存在，但必须指向同一 handler 且明确标注 deprecated。
+    if names.contains(&"task") {
+        let task = definitions
+            .iter()
+            .find(|definition| definition.function.name == "task")
+            .unwrap();
+        assert!(
+            task.function.description.contains("Alias of the todo tool"),
+            "task alias must be self-describing as deprecated"
+        );
     }
     assert!(
-        !names.contains(&"todo"),
-        "unregistered todo alias must stay hidden"
-    );
-    assert!(
-        names.iter().filter(|name| name.starts_with("todo_")).count() == 0,
+        !names.contains(&"todo_") || !names.iter().any(|name| name.starts_with("todo_")),
         "split todo tools must stay hidden"
     );
     assert!(
         definitions
             .iter()
-            .filter(|definition| definition.function.name == "task")
+            .filter(|definition| definition.function.name == "todo")
             .all(|definition| !definition.function.description.contains("Goal")),
         "the frozen Goal workflow must not be advertised to the model"
     );

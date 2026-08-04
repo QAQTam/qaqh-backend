@@ -10,6 +10,7 @@
 //!   • fuzzy line matching               (seek_sequence.rs)
 //!   • replacement computation           (lib.rs)
 use crate::{JsonArgs, ToolHandler, ToolRisk};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 // ── Markers (from codex-rs/apply-patch/src/parser.rs) ──
@@ -437,8 +438,8 @@ impl PatchFailure {
     }
 }
 
-#[derive(Debug)]
-enum PlannedChange {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum PlannedChange {
     Add {
         display: String,
         target: PathBuf,
@@ -458,13 +459,13 @@ enum PlannedChange {
     },
 }
 
-#[derive(Debug)]
-struct PatchPlan {
-    changes: Vec<PlannedChange>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PatchPlan {
+    pub(crate) changes: Vec<PlannedChange>,
 }
 
 impl PatchPlan {
-    fn plan_hash(&self) -> String {
+    pub(crate) fn plan_hash(&self) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         for change in &self.changes {
@@ -718,6 +719,33 @@ pub(crate) fn extract_target_paths(args: &serde_json::Value) -> Vec<PathBuf> {
 }
 
 fn execute_apply_patch(args: &serde_json::Value) -> crate::ToolResult {
+    let commit_id = args.get("commit").and_then(|value| value.as_str()).unwrap_or("");
+    let abort_id = args.get("abort").and_then(|value| value.as_str()).unwrap_or("");
+
+    // 两阶段协议：commit / abort 仅凭 preview_id 即可提交。
+    // 冗余防御：模型若按旧习惯在 commit 时仍附带完整 patch，只要该 patch
+    // 重建的计划与 commit_id 一致（同一 preview），就容忍并忽略冗余内容；
+    // 不一致或无法解析才拒绝——保证旧调用习惯不会无故断裂。
+    if !commit_id.is_empty() || !abort_id.is_empty() {
+        if !commit_id.is_empty() && !abort_id.is_empty() {
+            return error_result(
+                "COMMIT_AND_ABORT",
+                "commit and abort cannot be used together",
+                "Use exactly one of {\"commit\": \"<preview_id>\"} or {\"abort\": \"<preview_id>\"}.",
+            );
+        }
+        let patch_text = args.s("patch");
+        if !commit_id.is_empty() && !patch_text.is_empty() {
+            if let Err(result) = verify_patch_matches_commit(&patch_text, commit_id) {
+                return result;
+            }
+        }
+        if !commit_id.is_empty() {
+            return commit_plan(commit_id);
+        }
+        return abort_plan(abort_id);
+    }
+
     let patch_text = args.s("patch");
     if patch_text.is_empty() {
         return error_result(
@@ -790,22 +818,209 @@ fn execute_apply_patch(args: &serde_json::Value) -> crate::ToolResult {
         }
     }
     if dry_run {
+        // 预览写入：计划落盘（.deepx/staged-plans/{plan_hash}.json），
+        // 返回 preview_id（= plan_hash）；后续仅凭 preview_id 即可 commit。
+        if let Err(error) = crate::staged_plan::store(&plan, "apply_patch", &effective_ws) {
+            return error_result(
+                "PREVIEW_STORE_FAILED",
+                format!("failed to stage the preview plan: {error}"),
+                "Retry the dry run; staged plans live under .deepx/staged-plans",
+            );
+        }
         return dry_run_result(&plan, &plan_hash);
     }
     apply_plan(plan)
 }
 
+/// 校验附带在 commit 请求里的 patch 是否与 preview_id 指向的预览一致。
+/// 一致 → Ok（冗余内容将被忽略，按 preview_id 提交）；不一致/无法解析 → Err。
+fn verify_patch_matches_commit(
+    patch_text: &str,
+    commit_id: &str,
+) -> Result<(), crate::ToolResult> {
+    let hunks = match PatchParser::parse(patch_text) {
+        Ok(hunks) if !hunks.is_empty() => hunks,
+        _ => {
+            return Err(error_result(
+                "COMMIT_WITH_PATCH",
+                "the attached patch cannot be parsed",
+                "The patch body is not needed for commit — send only {\"commit\": \"<preview_id>\"}.",
+            ));
+        }
+    };
+    let workspace = current_workspace();
+    let resolver = match WorkspaceResolver::new(Path::new(&workspace)) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            return Err(error_result(
+                "NO_WORKSPACE",
+                error,
+                "Open an existing workspace and retry",
+            ));
+        }
+    };
+    let plan = match PatchPlan::build(&hunks, &resolver) {
+        Ok(plan) => plan,
+        Err(failure) => return Err(failure_result(failure)),
+    };
+    if plan.plan_hash() != commit_id {
+        return Err(error_result(
+            "COMMIT_WITH_PATCH",
+            "the attached patch does not match the commit preview",
+            "The patch body is not needed for commit — send only {\"commit\": \"<preview_id>\"}.",
+        ));
+    }
+    Ok(())
+}
+
+/// 提交：仅凭 `preview_id` 应用之前 dry-run 生成的计划，无需重传 patch 内容。
+fn commit_plan(preview_id: &str) -> crate::ToolResult {
+    let workspace = current_workspace();
+    let staged = match crate::staged_plan::load(preview_id, &workspace) {
+        Ok(staged) => staged,
+        Err(crate::staged_plan::LoadError::NotFound) => {
+            return error_result(
+                "PREVIEW_NOT_FOUND",
+                format!("no staged preview for {preview_id}"),
+                "Run apply_patch with dry_run=true first, then commit with its preview_id.",
+            );
+        }
+        Err(crate::staged_plan::LoadError::Stale) => {
+            return error_result(
+                "PREVIEW_STALE",
+                format!("staged preview {preview_id} has expired"),
+                "Run apply_patch with dry_run=true again and commit the new preview_id.",
+            );
+        }
+        Err(crate::staged_plan::LoadError::Invalid(message)) => {
+            return error_result(
+                "PREVIEW_INVALID",
+                format!("staged preview {preview_id} is invalid: {message}"),
+                "Run apply_patch with dry_run=true again and commit the new preview_id.",
+            );
+        }
+        Err(crate::staged_plan::LoadError::WorkspaceMismatch) => {
+            return error_result(
+                "PREVIEW_OWNERSHIP",
+                format!("staged preview {preview_id} belongs to a different workspace"),
+                "Switch back to the workspace that produced the preview, or re-run the dry run.",
+            );
+        }
+    };
+
+    // 逐文件校验：磁盘当前内容必须与预览时的基准一致，任何漂移 → 拒绝，
+    // 不部分应用。校验通过后才进入 apply_plan（其内部失败已有 partial 语义）。
+    let mut conflicts: Vec<String> = Vec::new();
+    for change in &staged.changes {
+        match change {
+            crate::apply_patch::PlannedChange::Add { display, target, .. } => {
+                if target.exists() {
+                    conflicts.push(format!("{display}: target file already exists"));
+                }
+            }
+            crate::apply_patch::PlannedChange::Delete {
+                display, target, original, ..
+            } => {
+                match std::fs::read_to_string(target) {
+                    Ok(current) if current == *original => {}
+                    Ok(_) => conflicts.push(format!("{display}: file content changed since preview")),
+                    Err(_) => conflicts.push(format!("{display}: file no longer readable")),
+                }
+            }
+            crate::apply_patch::PlannedChange::Update {
+                display,
+                source,
+                target,
+                original,
+                ..
+            } => {
+                match std::fs::read_to_string(source) {
+                    Ok(current) if current == *original => {}
+                    Ok(_) => {
+                        conflicts.push(format!(
+                            "{display}: source file content changed since preview"
+                        ))
+                    }
+                    Err(_) => conflicts.push(format!("{display}: source file no longer readable")),
+                }
+                if target != source && target.exists() {
+                    match std::fs::read_to_string(target) {
+                        Ok(current) if current == *original => {}
+                        _ => conflicts.push(format!(
+                            "{display}: move target already exists with different content"
+                        )),
+                    }
+                }
+            }
+        }
+    }
+    if !conflicts.is_empty() {
+        return error_result(
+            "PREVIEW_CONFLICT",
+            format!(
+                "the workspace changed since the preview; {} file(s) conflict",
+                conflicts.len()
+            ),
+            &format!(
+                "Conflicts:\n{}\nRe-run apply_patch with dry_run=true and commit the new preview_id.",
+                conflicts.join("\n")
+            ),
+        );
+    }
+
+    let result = apply_plan(crate::apply_patch::PatchPlan {
+        changes: staged.changes,
+    });
+    // 一次性语义：无论成功或失败都删除计划，重复 commit 得到明确的
+    // PREVIEW_NOT_FOUND 而非重放/部分重放。
+    let _ = crate::staged_plan::remove(preview_id, &workspace);
+    result
+}
+
+/// 放弃：删除暂存计划。
+fn abort_plan(preview_id: &str) -> crate::ToolResult {
+    let workspace = current_workspace();
+    if crate::staged_plan::remove(preview_id, &workspace) {
+        crate::ToolResult::ok(
+            serde_json::json!({
+                "timeis": crate::now_utc8(),
+                "status": "ok",
+                "aborted": preview_id,
+            })
+            .to_string(),
+        )
+    } else {
+        error_result(
+            "PREVIEW_NOT_FOUND",
+            format!("no staged preview for {preview_id}"),
+            "Nothing to abort; the preview may already have been committed or expired.",
+        )
+    }
+}
+
+fn current_workspace() -> String {
+    let workspace = crate::CURRENT_WORKSPACE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if workspace.is_empty() || workspace == "." {
+        ".".to_string()
+    } else {
+        workspace
+    }
+}
+
 fn error_result(
     code: &'static str,
     message: impl Into<String>,
-    hint: &'static str,
+    hint: impl Into<String>,
 ) -> crate::ToolResult {
     crate::ToolResult::error(serde_json::json!({
             "timeis": crate::now_utc8(),
             "status": "error",
             "code": code,
             "message": message.into(),
-            "hint": hint,
+            "hint": hint.into(),
         })
         .to_string())
 }
@@ -864,6 +1079,8 @@ fn dry_run_result(plan: &PatchPlan, plan_hash: &str) -> crate::ToolResult {
             "timeis": crate::now_utc8(),
             "status": "ok",
             "dry_run": true,
+            // preview_id 与 plan_hash 同值（内容哈希）：两阶段提交的句柄。
+            "preview_id": plan_hash,
             "plan_hash": plan_hash,
         }), preview.trim_end())
 }
@@ -1007,7 +1224,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
         key: "apply_patch".to_string(),
         description:
-            "Apply file changes using a multi-file patch format. Supports Add, Delete, Update (with move/rename) and content-anchored fuzzy matching. Use @@ to anchor Update hunks to a function or class name; the engine locates the exact lines with Unicode-aware fuzzy search. Use dry_run=true to preview changes without writing. Prefer apply_patch for multi-file changes or large unified hunks; use edit for single-file string replacement, edit_block for line-based fuzzy edits, and write for whole-file creation/overwrite.",
+            "Apply file changes using a multi-file patch format. Supports Add, Delete, Update (with move/rename) and content-anchored fuzzy matching. Use @@ to anchor Update hunks to a function or class name; the engine locates the exact lines with Unicode-aware fuzzy search. RECOMMENDED TWO-PHASE FLOW: (1) call with dry_run=true to preview and stage the plan — the response's first line carries plan_hash (a.k.a. preview_id); (2) commit with {\"commit\": \"<preview_id>\"} ONLY — do NOT repeat the patch body. Attaching the identical patch to a commit is tolerated but unnecessary. Prefer apply_patch for multi-file changes or large unified hunks; use edit for single-file string replacement, edit_block for line-based fuzzy edits, and write for whole-file creation/overwrite.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1017,12 +1234,20 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 },
                 "dry_run": {
                     "type": "boolean",
-                    "description": "Validate and show the resulting diff without writing. Default: false.",
+                    "description": "Preview write: validate the patch and stage the plan without writing. The response contains preview_id (identical to plan_hash, on the FIRST line of the response text). Stage it and commit later with {\"commit\": \"<preview_id>\"} — no need to repeat the patch body. Default: false.",
                     "default": false
                 },
                 "plan_hash": {
                     "type": "string",
-                    "description": "Hash returned by the matching dry-run. It appears on the FIRST line of the dry-run response text (\"plan_hash: <64-hex>\"). Copy it verbatim into this field when applying; if the workspace changed since the dry-run, the apply is rejected with PLAN_HASH_MISMATCH and a new dry-run is required."
+                    "description": "Hash returned by the matching dry-run (same value as preview_id). It appears on the FIRST line of the dry-run response text (\"plan_hash: <64-hex>\"). Copy it verbatim into this field when applying via the legacy path (patch + plan_hash); if the workspace changed since the dry-run, the apply is rejected with PLAN_HASH_MISMATCH and a new dry-run is required. Prefer the two-phase path: dry_run=true, then {\"commit\": \"<preview_id>\"}."
+                },
+                "commit": {
+                    "type": "string",
+                    "description": "Commit a previously staged preview: applies the plan identified by this preview_id (returned by a dry_run) WITHOUT repeating the patch body. Conflicts with the current workspace are rejected with PREVIEW_CONFLICT. If a patch body is also attached, it is verified against this preview_id: identical → tolerated and ignored; different → rejected with COMMIT_WITH_PATCH."
+                },
+                "abort": {
+                    "type": "string",
+                    "description": "Discard a previously staged preview (preview_id from a dry_run). Cannot be combined with \"patch\"."
                 }
             },
             "required": ["patch"],
@@ -1056,6 +1281,14 @@ mod tests {
             "patch": patch,
             "plan_hash": plan_hash,
         }))
+    }
+
+    /// error_result 的结构化载荷（code/message/hint）位于 model 文本的 JSON 中。
+    fn error_code(result: &crate::ToolResult) -> String {
+        serde_json::from_str::<serde_json::Value>(result.model_text())
+            .ok()
+            .and_then(|value| value["code"].as_str().map(str::to_string))
+            .unwrap_or_else(|| "<unparseable>".to_string())
     }
     #[test]
     fn parse_simple_add() {
@@ -1515,6 +1748,181 @@ mod tests {
         }));
         assert!(!result.is_success(), "{}", result.model_text());
         assert!(!outside.join("escape.txt").exists());
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn preview_then_commit_applies_without_repeating_patch() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        let patch = "\
+*** Begin Patch
+*** Add File: staged.txt
++staged content
+*** End Patch";
+        // 预览写入：返回 preview_id，不写文件
+        let preview = execute_apply_patch(&serde_json::json!({
+            "patch": patch,
+            "dry_run": true,
+        }));
+        assert!(preview.is_success(), "{}", preview.model_text());
+        let preview_id = preview.data["preview_id"].as_str().expect("preview_id");
+        assert!(!dir.path().join("staged.txt").exists(), "dry run must not write");
+        // 提交：仅凭 preview_id，不重传 patch
+        let commit = execute_apply_patch(&serde_json::json!({
+            "commit": preview_id,
+        }));
+        assert!(commit.is_success(), "{}", commit.model_text());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("staged.txt")).unwrap(),
+            "staged content\n"
+        );
+        // 一次性语义：重复提交 → 明确 NOT_FOUND，不重放
+        let again = execute_apply_patch(&serde_json::json!({
+            "commit": preview_id,
+        }));
+        assert!(!again.is_success());
+        assert_eq!(error_code(&again), "PREVIEW_NOT_FOUND");
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn commit_rejects_when_workspace_changed_between_preview_and_commit() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        let target = dir.path().join("drift.txt");
+        std::fs::write(&target, "original\n").unwrap();
+        let patch = "\
+*** Begin Patch
+*** Update File: drift.txt
+@@
+-original
++updated
+*** End Patch";
+        let preview = execute_apply_patch(&serde_json::json!({
+            "patch": patch,
+            "dry_run": true,
+        }));
+        assert!(preview.is_success(), "{}", preview.model_text());
+        let preview_id = preview.data["preview_id"].as_str().unwrap().to_string();
+        // 预览后外部修改文件 → 提交必须拒绝且不部分应用
+        std::fs::write(&target, "externally changed\n").unwrap();
+        let commit = execute_apply_patch(&serde_json::json!({
+            "commit": preview_id,
+        }));
+        assert!(!commit.is_success(), "{}", commit.model_text());
+        assert_eq!(error_code(&commit), "PREVIEW_CONFLICT");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "externally changed\n"
+        );
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn abort_discards_preview_and_commit_fails() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        let patch = "\
+*** Begin Patch
+*** Add File: aborted.txt
++never lands
+*** End Patch";
+        let preview = execute_apply_patch(&serde_json::json!({
+            "patch": patch,
+            "dry_run": true,
+        }));
+        assert!(preview.is_success());
+        let preview_id = preview.data["preview_id"].as_str().unwrap().to_string();
+        let abort = execute_apply_patch(&serde_json::json!({
+            "abort": preview_id,
+        }));
+        assert!(abort.is_success(), "{}", abort.model_text());
+        assert!(!dir.path().join("aborted.txt").exists());
+        let commit = execute_apply_patch(&serde_json::json!({
+            "commit": preview_id,
+        }));
+        assert!(!commit.is_success());
+        assert_eq!(error_code(&commit), "PREVIEW_NOT_FOUND");
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn commit_with_patch_body_is_rejected() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        let result = execute_apply_patch(&serde_json::json!({
+            "commit": "a".repeat(64),
+            "patch": "*** Begin Patch\n*** End Patch",
+        }));
+        assert!(!result.is_success());
+        assert_eq!(error_code(&result), "COMMIT_WITH_PATCH");
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn commit_tolerates_redundant_identical_patch() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        let patch = "\
+*** Begin Patch
+*** Add File: redundant.txt
++redundant ok
+*** End Patch";
+        let preview = execute_apply_patch(&serde_json::json!({
+            "patch": patch,
+            "dry_run": true,
+        }));
+        assert!(preview.is_success(), "{}", preview.model_text());
+        let preview_id = preview.data["preview_id"].as_str().unwrap().to_string();
+        // 模型按旧习惯仍附带完整 patch：与 preview 一致 → 容忍，正常提交。
+        let commit = execute_apply_patch(&serde_json::json!({
+            "commit": preview_id,
+            "patch": patch,
+        }));
+        assert!(commit.is_success(), "{}", commit.model_text());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("redundant.txt")).unwrap(),
+            "redundant ok\n"
+        );
+        crate::set_workspace(".");
+    }
+
+    #[test]
+    fn commit_rejects_mismatched_patch() {
+        let _guard = runtime_guard();
+        let dir = tempfile::tempdir().unwrap();
+        crate::set_workspace(&dir.path().to_string_lossy());
+        let preview_patch = "\
+*** Begin Patch
+*** Add File: mismatched.txt
++preview content
+*** End Patch";
+        let preview = execute_apply_patch(&serde_json::json!({
+            "patch": preview_patch,
+            "dry_run": true,
+        }));
+        assert!(preview.is_success(), "{}", preview.model_text());
+        let preview_id = preview.data["preview_id"].as_str().unwrap().to_string();
+        // 附带与 preview 不同的 patch → 明确拒绝，且不写任何文件。
+        let other_patch = "\
+*** Begin Patch
+*** Add File: other.txt
++other content
+*** End Patch";
+        let commit = execute_apply_patch(&serde_json::json!({
+            "commit": preview_id,
+            "patch": other_patch,
+        }));
+        assert!(!commit.is_success(), "{}", commit.model_text());
+        assert_eq!(error_code(&commit), "COMMIT_WITH_PATCH");
+        assert!(!dir.path().join("other.txt").exists());
+        assert!(!dir.path().join("mismatched.txt").exists());
         crate::set_workspace(".");
     }
 }

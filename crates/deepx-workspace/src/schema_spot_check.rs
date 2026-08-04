@@ -22,7 +22,7 @@ mod schema_spot_check {
         assert!(web["required"].as_array().unwrap().contains(&serde_json::json!("url")), "web.url not required");
 
         // task: id 描述
-        let tid = &params("task")["id"];
+        let tid = &params("todo")["id"];
         assert!(tid["description"].as_str().unwrap().contains("Omit for action=create"), "task.id description missing");
 
         // 文件修改工具选择指引

@@ -6,6 +6,7 @@ pub mod exec;
 
 pub mod apply_patch;
 pub mod file_mutate;
+mod staged_plan;
 pub mod authorization;
 pub mod backend;
 mod code_delta;

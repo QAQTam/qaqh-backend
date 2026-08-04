@@ -82,7 +82,7 @@ pub fn categorize_tool(name: &str) -> ToolCategory {
 
         // ── Write ──
         "apply_patch" | "git_add" | "git_commit" | "git_branch" | "git_checkout"
-        | "git_merge" | "git_restore" | "task" => {
+        | "git_merge" | "git_restore" | "todo" | "task" => {
             ToolCategory::Write
         }
 
@@ -305,7 +305,7 @@ pub fn needs_permission(
     // approval for each model-authored status transition creates recursive,
     // repeated prompts without protecting a user-controlled resource.
     if matches!(
-        tool_name, "task"
+        tool_name, "todo" | "task"
     ) {
         return PermissionDecision::AutoApprove;
     }
@@ -544,7 +544,7 @@ mod tests {
             PermissionLevel::WorkspaceFree,
             PermissionLevel::Unrestricted,
         ] {
-            for tool_name in ["task"] {
+            for tool_name in ["todo", "task"] {
                 let decision = needs_permission(
                     level,
                     tool_name,

@@ -495,7 +495,7 @@ impl ToolEngine {
                             Ok(store) if store.items.is_empty() => {
                                 ctx.agent.msg.push_tool_result_direct(
                                     auth.call_id(),
-                                    "[ERROR] No task items to submit. Use task(action=\"create\") first.",
+                                    "[ERROR] No task items to submit. Use todo(action=\"create\") first.",
                                     false,
                                 );
                             }
@@ -521,7 +521,7 @@ impl ToolEngine {
                             Ok(store) if store.items.is_empty() => {
                                 ctx.agent.msg.push_tool_result_direct(
                                     auth.call_id(),
-                                    "[ERROR] No task items to activate. Use task(action=\"create\") first.",
+                                    "[ERROR] No task items to activate. Use todo(action=\"create\") first.",
                                     false,
                                 );
                             }
@@ -800,7 +800,7 @@ impl ToolEngine {
         ctx.agent.apply_tool_effects(skill_effects);
 
         // Instant refresh for todo tools
-        if name == "task" {
+        if matches!(name, "todo" | "task") {
             ctx.emitter.emit(Agent2Ui::Dashboard {
                 hp_connected: true,
                 session_seed: ctx.agent.session.seed.clone(),

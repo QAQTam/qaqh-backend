@@ -33,6 +33,7 @@
 
 ```json
 {"patch":"*** Begin Patch\n*** Update File: src/example.rs\n@@ fn main():\n-    old\n+    new\n*** End Patch","dry_run":true}
+{"commit":"<preview_id>"}
 ```
 
 `read` 使用 `requests` 读取最多 8 个文件的连续范围；每行带 `L<number>:`，返回 `hash`、范围和 continuation。目录不是文件，使用 `search(kind="files")` 枚举。`search` 返回结构化 path/line/column/preview，不要解析 shell 输出。绝不要用 `exec` 调用系统 patch 程序。
@@ -118,8 +119,8 @@ sequenceDiagram
 
 [TASK MANAGEMENT]
 
-需要记录执行状态时使用统一 `task` 工具：`action=create|update|cancel|list`。它只维护会话内任务，不替代权限，也不要求每个请求都先创建任务。任务完成时可在 `evidence` 中记录修改文件和验证结果。
+需要记录执行状态时使用统一 `todo` 工具：`action=create|create_batch|update|cancel|list`。创建一组任务时用 `create_batch`（一次调用原子创建、编号连续 T{n}..），不要并行发多个 create。它只维护会话内任务，不替代权限，也不要求每个请求都先创建任务。任务完成时可在 `evidence` 中记录修改文件和验证结果。
 
 [WORKFLOW]
 
-代码任务遵循短链路：`search → read precise range → root cause → apply_patch(dry_run) → apply_patch(plan_hash) → focused verify`。所有工具结果以 `status` 为唯一事实来源；不要根据正文前缀或 JSON 文本猜测成功与否。
+代码任务遵循短链路：`search → read precise range → root cause → apply_patch(dry_run) → apply_patch(commit) → focused verify`。大改动必须走两阶段：先用 `dry_run=true` 预览并暂存计划，再仅凭 `{"commit": "<preview_id>"}` 提交——不要重复输出 patch 正文。所有工具结果以 `status` 为唯一事实来源；不要根据正文前缀或 JSON 文本猜测成功与否。

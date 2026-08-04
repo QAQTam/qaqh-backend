@@ -144,7 +144,8 @@ mod tests {
         let prompt = full_system_prompt();
         assert!(prompt.contains("[FILE EDITING]"));
         assert!(prompt.contains("apply_patch"));
-        assert!(prompt.contains("dry_run: true"));
+        assert!(prompt.contains("dry_run"));
+        assert!(prompt.contains("commit"));
         assert!(prompt.contains("*** Begin Patch"));
     }
 
@@ -152,9 +153,9 @@ mod tests {
     fn prompt_contains_task_management_section() {
         let prompt = full_system_prompt();
         assert!(prompt.contains("[TASK MANAGEMENT]"));
-        assert!(prompt.contains("task(action=\"create\")"));
-        assert!(prompt.contains("task(action=\"update\")"));
-        assert!(prompt.contains("一次一个 in_progress"));
+        assert!(prompt.contains("统一 `todo` 工具"));
+        assert!(prompt.contains("create_batch"));
+        assert!(prompt.contains("不要并行发多个 create"));
     }
 
     #[test]

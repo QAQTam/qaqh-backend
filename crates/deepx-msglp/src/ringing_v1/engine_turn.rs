@@ -356,7 +356,7 @@ impl TurnEngine {
 
         let content = if approved && autonomous {
             format!(
-                "Plan approved. Goal automation is currently frozen. Track execution with task(action=\"create|update\"); use task(action=\"cancel\") for work that is no longer needed.\n\n{}",
+                "Plan approved. Goal automation is currently frozen. Track execution with todo(action=\"create|update\"); use todo(action=\"cancel\") for work that is no longer needed.\n\n{}",
                 plan.content
             )
         } else if approved {
@@ -735,7 +735,7 @@ impl TurnEngine {
                             });
                         }
                         // Instant refresh for todo tools
-                        if tool_name == "task" {
+                        if matches!(tool_name.as_str(), "todo" | "task") {
                             ctx.emitter.emit(Agent2Ui::Dashboard {
                                 hp_connected: true,
                                 session_seed: ctx.agent.session.seed.clone(),
@@ -826,7 +826,7 @@ impl TurnEngine {
                         });
                     }
                     // Instant refresh for todo tools
-                    if tool_name == "task" {
+                    if matches!(tool_name.as_str(), "todo" | "task") {
                         ctx.emitter.emit(Agent2Ui::Dashboard {
                             hp_connected: true,
                             session_seed: ctx.agent.session.seed.clone(),

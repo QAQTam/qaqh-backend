@@ -258,7 +258,7 @@ impl ToolManager {
                         }
                     }
                 }
-                "apply_patch" | "task" => {
+                "apply_patch" | "todo" | "task" => {
                     for f in &files_affected {
                         if !self.files_written.contains(f) {
                             self.files_written.push(f.clone());

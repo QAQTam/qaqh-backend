@@ -290,6 +290,11 @@ pub trait Emitter {
     /// Emit a native Ringing V1 timeline producer intent. Timeline is its own wire;
     /// it must never be reconstructed from `Agent2Ui` output.
     fn emit_timeline(&self, _intent: deepx_domain::TimelineIntent) {}
+
+    /// 同步当前会话 seed（Ringing 事件信封的路由键）。
+    /// 会话创建/恢复后必须调用，否则事件被 daemon 按 seed 过滤丢弃。
+    /// 默认空实现：未持有 seed 的 emitter（测试 mock）无需处理。
+    fn set_seed(&self, _seed: &str) {}
 }
 
 /// writer 线程通道载荷：legacy 帧或 Ringing worker envelope（互不嵌套）。
