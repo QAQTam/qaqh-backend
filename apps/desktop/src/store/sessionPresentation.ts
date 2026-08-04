@@ -15,7 +15,7 @@ import type {
   TurnStatus,
 } from "./rawSession";
 import { createRawSessionState } from "./rawSession";
-import type { RingingStores, ToolCardView, TurnView, RoundView } from "./ringingStores";
+import type { RingingStores, ConversationState, ToolCardView, TurnView, RoundView } from "./ringingStores";
 import type { UsageInfo } from "../lib/types/ringing/UsageInfo";
 import type { ToolResult } from "../lib/types/ringing/ToolResult";
 import type { SkillRuntimeInfo } from "./rawSession";
@@ -175,6 +175,20 @@ function projectTurnView(
   return turn;
 }
 
+/** compactStatus（事件/快照源）→ 组件可见的展示状态。cancelled 归入 failed（非成功终态）。 */
+function compactPresentationStatus(
+  status: ConversationState["compactStatus"],
+): "active" | "complete" | "failed" | null {
+  switch (status) {
+    case "running": return "active";
+    case "completed":
+    case "skipped": return "complete";
+    case "failed":
+    case "cancelled": return "failed";
+    default: return null;
+  }
+}
+
 export function selectRingingPresentation(
   seed: string,
   stores: RingingStores,
@@ -227,8 +241,11 @@ export function selectRingingPresentation(
     },
     compact: {
       ...base.compact,
-      active: conv.compactStatus === "completed" ? false : conv.compactStatus !== null,
-      turnsCompacted: null,
+      active: conv.compactStatus === "running",
+      status: compactPresentationStatus(conv.compactStatus),
+      text: conv.compactText,
+      turnsCompacted: conv.compactTurnsCompacted ?? base.compact.turnsCompacted,
+      completionRevision: conv.compactCompletionRevision || base.compact.completionRevision,
     },
   };
 

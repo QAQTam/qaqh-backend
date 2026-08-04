@@ -577,6 +577,48 @@ describe("applyConversationEventToStore (path updates match conversationReducer)
     }
   });
 
+  it("tracks the compact lifecycle through reducer and path updater", () => {
+    const events: ConversationEvent[] = [
+      { type: "compact_started", compact_id: "c-1", turns_total: 10, turns_keeping: 3 },
+      { type: "compact_progress", compact_id: "c-1", delta: "前段" },
+      { type: "compact_progress", compact_id: "c-1", delta: "后段" },
+      { type: "compact_finished", compact_id: "c-1", status: "completed", turns_compacted: 7 },
+    ];
+
+    let reduced = initialConversationState("s-compact");
+    for (const event of events) reduced = conversationReducer(reduced, event);
+    expect(reduced.compactStatus).toBe("completed");
+    expect(reduced.compactText).toBe("前段后段");
+    expect(reduced.compactTurnsCompacted).toBe(7);
+    expect(reduced.compactCompletionRevision).toBe(1);
+
+    const [stores, setStores] = createStore(initialRingingStores("s-compact"));
+    for (const event of events) applyConversationEventToStore(setStores, event);
+    const conv = JSON.parse(JSON.stringify(snapshot(stores.conversation)));
+    expect(conv).toMatchObject({
+      compactStatus: "completed",
+      compactText: "前段后段",
+      compactTurnsCompacted: 7,
+      compactCompletionRevision: 1,
+    });
+  });
+
+  it("marks compact failure with a bumped revision (reducer & path converge)", () => {
+    const events: ConversationEvent[] = [
+      { type: "compact_started", compact_id: "c-2", turns_total: 5, turns_keeping: 1 },
+      { type: "compact_finished", compact_id: "c-2", status: "failed" },
+    ];
+    let reduced = initialConversationState("s-compact-f");
+    for (const event of events) reduced = conversationReducer(reduced, event);
+    expect(reduced.compactStatus).toBe("failed");
+    expect(reduced.compactCompletionRevision).toBe(1);
+
+    const [stores, setStores] = createStore(initialRingingStores("s-compact-f"));
+    for (const event of events) applyConversationEventToStore(setStores, event);
+    expect(snapshot(stores.conversation).compactStatus).toBe("failed");
+    expect(snapshot(stores.conversation).compactCompletionRevision).toBe(1);
+  });
+
   it("keeps unchanged turns stable through the projection when using path updates", async () => {
     const [stores, setStores] = createStore(initialRingingStores("s-proj"));
     applyConversationEventToStore(setStores, { type: "turn_started", turn_id: "t1", user_text: "first" });

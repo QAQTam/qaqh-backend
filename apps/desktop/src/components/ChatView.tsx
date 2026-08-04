@@ -262,11 +262,11 @@ export default function ChatView(props: ChatViewProps) {
           setShowChangeReview(true);
         }}
       />
-      <Show when={session().compact.active || compactCompleteVisible()}>
+      <Show when={session().compact.active || compactCompleteVisible() || session().compact.status === "failed"}>
         <InteractionDock>
           <CompactStatusRow
             active={session().compact.active}
-            status={session().compact.active ? "active" : "complete"}
+            status={session().compact.status ?? "complete"}
             text={session().compact.text}
             turnsCompacted={session().compact.turnsCompacted ?? undefined}
           />

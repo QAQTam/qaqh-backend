@@ -159,6 +159,10 @@ impl SnapshotProjector {
                         });
                         true
                     }
+                    CE::CompactStarted { .. } => {
+                        state["compact_status"] = serde_json::json!("running");
+                        true
+                    }
                     CE::CompactFinished { status, .. } => {
                         state["compact_status"] = serde_json::json!(status);
                         true

@@ -226,7 +226,13 @@ export interface ConversationState {
   seed: string;
   activeTurn: TurnView | null;
   turns: TurnView[];
-  compactStatus: "completed" | "skipped" | "failed" | "cancelled" | null;
+  compactStatus: "running" | "completed" | "skipped" | "failed" | "cancelled" | null;
+  /** CompactProgress delta 累积（compact_started 重置；replaceable 追加语义）。 */
+  compactText: string;
+  /** CompactFinished.turns_compacted（终态后保留，UI 显示"压缩 N 轮"）。 */
+  compactTurnsCompacted: number | null;
+  /** 每次 CompactFinished 递增——驱动 ChatView 的"完成"横幅（4s 自动消失）。 */
+  compactCompletionRevision: number;
   cancelled: boolean;
   /** 已作废的 revision（terminal 到达后旧 progress 不再渲染）。 */
   staleRevision: number;
@@ -263,6 +269,9 @@ export function initialConversationState(seed: string): ConversationState {
     activeTurn: null,
     turns: [],
     compactStatus: null,
+    compactText: "",
+    compactTurnsCompacted: null,
+    compactCompletionRevision: 0,
     cancelled: false,
     staleRevision: 0,
     pendingDeltas: [],
@@ -520,8 +529,17 @@ export function conversationReducer(state: ConversationState, event: Conversatio
           ? state.pendingDeltas.filter((d) => d.turnId !== event.turn_id)
           : state.pendingDeltas,
       };
+    case "compact_started":
+      return { ...state, compactStatus: "running", compactText: "" };
+    case "compact_progress":
+      return { ...state, compactText: state.compactText + event.delta };
     case "compact_finished":
-      return { ...state, compactStatus: event.status };
+      return {
+        ...state,
+        compactStatus: event.status,
+        compactTurnsCompacted: event.turns_compacted ?? null,
+        compactCompletionRevision: state.compactCompletionRevision + 1,
+      };
     default:
       return state;
   }
@@ -717,8 +735,17 @@ export function applyConversationEventToStore(
           conv.pendingDeltas = conv.pendingDeltas.filter((d) => d.turnId !== event.turn_id);
         }
         return;
+      case "compact_started":
+        conv.compactStatus = "running";
+        conv.compactText = "";
+        return;
+      case "compact_progress":
+        conv.compactText += event.delta;
+        return;
       case "compact_finished":
         conv.compactStatus = event.status;
+        conv.compactTurnsCompacted = event.turns_compacted ?? null;
+        conv.compactCompletionRevision += 1;
         return;
       default:
         return;

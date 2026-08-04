@@ -92,7 +92,7 @@ describe("ChatView blocking interactions", () => {
       reason: "Run", paths: ["F:/repo"], category: "exec", level: 1,
       risk: "high", consequence: "May execute commands",
     });
-    state.compact = { active: false, text: "", turnsCompacted: 8, completionRevision: 1 };
+      state.compact = { active: false, status: "complete", text: "", turnsCompacted: 8, completionRevision: 1 };
     const { callbacks, host } = mountRawChat(state);
     document.body.querySelector<HTMLButtonElement>(".approval-high")!.click();
     await flush();

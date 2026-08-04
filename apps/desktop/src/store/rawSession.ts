@@ -206,6 +206,8 @@ export type RawSessionState = {
   notices: Array<{ level: string; message: string; at: number }>;
   compact: {
     active: boolean;
+    /** 派生状态：active/complete/failed（null = 无压缩发生）。 */
+    status: "active" | "complete" | "failed" | null;
     text: string;
     turnsCompacted: number | null;
     completionRevision: number;
@@ -259,7 +261,7 @@ export function createRawSessionState(seed: string): RawSessionState {
       operationRevision: 0, tokenBudget: 0, tokenUsage: 0, runtime: [], diagnostics: [],
     },
     notices: [],
-    compact: { active: false, text: "", turnsCompacted: null, completionRevision: 0 },
+    compact: { active: false, status: null, text: "", turnsCompacted: null, completionRevision: 0 },
   };
 }
 

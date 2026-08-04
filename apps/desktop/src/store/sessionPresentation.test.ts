@@ -64,6 +64,49 @@ describe("selectRingingPresentation", () => {
     expect(presentation.pendingInteractions).toEqual([]);
   });
 
+  it("projects the compact lifecycle into presentation status", () => {
+    const stores = initialRingingStores("seed-compact");
+    stores.conversation = conversationReducer(stores.conversation, {
+      type: "compact_started",
+      compact_id: "c-1",
+      turns_total: 10,
+      turns_keeping: 3,
+    });
+    let presentation = selectRingingPresentation("seed-compact", stores);
+    expect(presentation.compact.active).toBe(true);
+    expect(presentation.compact.status).toBe("active");
+
+    stores.conversation = conversationReducer(stores.conversation, {
+      type: "compact_progress",
+      compact_id: "c-1",
+      delta: "摘要正文",
+    });
+    presentation = selectRingingPresentation("seed-compact", stores);
+    expect(presentation.compact.text).toBe("摘要正文");
+
+    stores.conversation = conversationReducer(stores.conversation, {
+      type: "compact_finished",
+      compact_id: "c-1",
+      status: "completed",
+      turns_compacted: 7,
+    });
+    presentation = selectRingingPresentation("seed-compact", stores);
+    expect(presentation.compact.active).toBe(false);
+    expect(presentation.compact.status).toBe("complete");
+    expect(presentation.compact.turnsCompacted).toBe(7);
+    expect(presentation.compact.completionRevision).toBe(1);
+
+    // failed → failed 展示态（active 必须为 false，避免永久 spinner）
+    stores.conversation = conversationReducer(stores.conversation, {
+      type: "compact_finished",
+      compact_id: "c-2",
+      status: "failed",
+    });
+    presentation = selectRingingPresentation("seed-compact", stores);
+    expect(presentation.compact.active).toBe(false);
+    expect(presentation.compact.status).toBe("failed");
+  });
+
   it("preserves non-Ringing fallback fields while projecting Ringing usage", () => {
     const stores = initialRingingStores("seed-preserve");
     const fallback = createRawSessionState("seed-preserve");
@@ -338,7 +381,7 @@ describe("selectRingingPresentation", () => {
     stores.control = controlReducer(stores.control, {
       type: "skills_updated",
       available: [
-        { name: "frontend-design", description: "UI", source: "catalog", revision: "r1" },
+        { name: "frontend-design", description: "UI", scope: "project", source: "catalog" },
       ],
       active: ["frontend-design"],
       catalog_revision: "r1",
