@@ -104,3 +104,7 @@ git 考古（commit `135a558` / `912810d` / `aeb752a`）：
 | — | A2 block_checkpoint | reducer +1 case；pendingDeltas 可删（-100 行） | 待实施 |
 | — | B1 快照 checkpoint | 零改动 | 待实施 |
 | — | C2 渲染背压 | sessionPresentation + App memo（纯前端） | 待实施 |
+
+> **2026-08-04**：本 PLAN 已由 [convergence-plan.md](./convergence-plan.md) 承接执行——
+> A1/A2/B1 保留分档与验证口径，新增 legacy 完全拆除（已拍板）与前端 C1-C5 重构工作流；
+> C1（后端 16ms 微批）维持"实测后定"，C2（前端渲染背压）由 A4 信封瘦身 + 批次率收敛替代。

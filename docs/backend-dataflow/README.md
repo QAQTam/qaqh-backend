@@ -19,6 +19,7 @@
 |---|---|---|
 | [protocol-anchor.md](./protocol-anchor.md) | 事件协议语义契约：事件分类（replaceable/增量）、发射时机、幂等/恢复语义、演进规则、前端锚点（RawSessionState）不变式 | 后端引擎开发者 + 前端 reducer 维护者 |
 | [optimization-plan.md](./optimization-plan.md) | 数据流优化 PLAN：考古结论、A1/A2/B1/C1/C2 分档方案、里程碑、不做清单 | 架构决策者 + 实施者 |
+| [convergence-plan.md](./convergence-plan.md) | 收敛计划执行版：legacy 完全拆除（已拍板）、事件表契约（block_checkpoint/tool_progress 尾部/usage 节流/信封瘦身）、快照分页 + reconcile、前端 C1-C5 重构清单 | 架构决策者 + 双端实施者 |
 
 ## 核心原则（三层隔离）
 
