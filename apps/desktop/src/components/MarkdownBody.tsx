@@ -167,8 +167,19 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
   let livePreviewFrame: number | undefined;
   let pendingLiveBlock: MarkdownBlock | undefined;
   let prevVisible: MarkdownBlock[] = [];
+  // 增量 live 解析游标：记录上次已解析的完整 raw，避免每帧对完整累积文本
+  // 重新 parseInline（长流式下 O(n²) 退化，主线程被占满导致 UI 冻结）。
+  // 注意不能依赖 block.hash 判重：blockHash 含 raw.length，流式增长时每帧
+  // 都变化，必须用前缀关系（next.raw 以已解析文本开头 = 同一 live 块增长）。
+  let livePrevRaw = "";
 
-  const [livePreview, setLivePreview] = createSignal({ hash: "", html: "" });
+  interface LiveChunk { key: string; html: string }
+  const [liveChunks, setLiveChunks] = createSignal<{ hash: string; chunks: LiveChunk[] }>(
+    { hash: "", chunks: [] },
+  );
+  /** chunk 数上限：超过后全量重解析合并（跨 chunk 未闭合语法修正），
+   *  浏览器原生 innerHTML 解析远快于 marked，合并频率低（每帧一个 chunk）。 */
+  const MAX_LIVE_CHUNKS = 256;
 
   const cancelLivePreview = () => {
     if (livePreviewFrame === undefined) return;
@@ -188,10 +199,26 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
       const next = pendingLiveBlock;
       pendingLiveBlock = undefined;
       if (disposed || !next) return;
-      // At most one full inline parse per animation frame. While the parse is
-      // pending, the renderer falls back to textContent instead of reparsing
-      // the entire accumulated answer for every incoming delta.
-      setLivePreview({ hash: next.hash, html: inlineLiveHTML(next.raw) });
+      const isSameLiveBlock = next.raw.length >= livePrevRaw.length
+        && next.raw.startsWith(livePrevRaw);
+      if (!isSameLiveBlock) {
+        // 新 block / 内容回退 / 跳变：重置游标，首帧全量解析。
+        livePrevRaw = next.raw;
+        setLiveChunks({ hash: next.hash, chunks: [{ key: `${next.hash}-0`, html: inlineLiveHTML(next.raw) }] });
+        return;
+      }
+      if (next.raw.length === livePrevRaw.length) return;
+      // 增量：只解析新增 delta（O(delta)），DOM 侧按 keyed <For> 追加，
+      // 已渲染的旧 chunk 不会被浏览器重新解析。
+      const delta = next.raw.slice(livePrevRaw.length);
+      livePrevRaw = next.raw;
+      setLiveChunks(current => {
+        const chunks = [...current.chunks, { key: `${next.hash}-${livePrevRaw.length}`, html: inlineLiveHTML(delta) }];
+        if (chunks.length <= MAX_LIVE_CHUNKS) return { hash: current.hash, chunks };
+        // 合并：全量重解析一次（修正跨 chunk 未闭合的内联语法），
+        // 之后继续增量。频率 ≈ 每 MAX_LIVE_CHUNKS 帧一次。
+        return { hash: current.hash, chunks: [{ key: `${next.hash}-full-${livePrevRaw.length}`, html: inlineLiveHTML(next.raw) }] };
+      });
     });
   };
 
@@ -200,6 +227,7 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
     renderGeneration += 1;
     cancelLivePreview();
     pendingLiveBlock = undefined;
+    livePrevRaw = "";
     // Release Shiki HTML strings retained in the store
     setBlockHtml(reconcile({} as Record<string, string>));
     setVisibleBlocks(reconcile([] as MarkdownBlock[]));
@@ -386,7 +414,7 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
                 when={block.stable && html()}
                 fallback={
                   <Show
-                    when={!block.stable && block.kind === "text" && livePreview().html}
+                    when={!block.stable && block.kind === "text" && liveChunks().chunks.length > 0}
                     fallback={
                       <div
                         data-key={block.key}
@@ -395,15 +423,20 @@ export default function MarkdownBody(props: MarkdownBodyProps) {
                       />
                     }
                   >
-                    {/* 流式 live 块：保留最近一次已解析的内联 HTML。内容滞后
-                        至多一帧，但 delta 到达时不会回退成原始文字（消除
+                    {/* 流式 live 块：增量解析（每帧只解析新增 delta），按 keyed
+                        <For> 追加 span，已渲染 chunk 不被浏览器重解析；chunk
+                        数超限时全量重解析合并一次（修正跨 chunk 未闭合语法）。
+                        内容滞后至多一帧，delta 到达时不会回退成原始文字（消除
                         md↔raw 帧级交替闪烁）；未闭合语法由 parseInline 按
                         字面输出，不会产生破损 HTML。 */}
                     <div
                       data-key={block.key}
                       data-hash={block.hash}
-                      innerHTML={livePreview().html}
-                    />
+                    >
+                      <For each={liveChunks().chunks}>
+                        {(chunk) => <span data-live-chunk={chunk.key} innerHTML={chunk.html} />}
+                      </For>
+                    </div>
                   </Show>
                 }
               >

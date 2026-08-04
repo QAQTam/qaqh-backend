@@ -1,5 +1,6 @@
 import type { RawRound, RawSessionState, RawTurn, TurnStatus } from "./rawSession";
 import type { TimelineSnapshot, TimelineTurn } from "./timelineProtocol";
+import { toolArgsSummary } from "../presentation/toolSemantics";
 
 function status(state: TimelineTurn["state"]): TurnStatus {
   return state;
@@ -21,6 +22,17 @@ function turnSeq(turnId: string): number {
  * sources know a turn (richer block data); store-only turns are appended so
  * the conversation stays visible and the gap self-heals once the timeline
  * catches up on the next snapshot.
+ *
+ * Placeholder turns: after a daemon restart (or a session switch that leaves
+ * the old worker's turn unsealed) the timeline snapshot can contain an empty
+ * turn whose id the worker legitimately reuses for the next input (the
+ * message store counts it, so `ensure_next_turn_seq` allocates the same id).
+ * The daemon resets that placeholder when the new `turn_opened` intent lands,
+ * but until the timeline entry reaches the renderer (SSE gap / rejected
+ * intent / entry dropped before lease attach) the placeholder would shadow
+ * the conversation store's real content for that turn id — the resumed
+ * transcript stays blank while the backend streams normally. Detect empty
+ * placeholders here and let the store version win for that turn.
  */
 export function mergeTimelinePresentation(
   seed: string,
@@ -29,17 +41,70 @@ export function mergeTimelinePresentation(
   revisionFor?: (turnId: string) => number,
 ): RawSessionState {
   const projected = selectTimelinePresentation(seed, snapshot, fallback, revisionFor);
+  const storeById = new Map(fallback.turns.map(turn => [turn.turnId, turn]));
   const timelineIds = new Set(projected.turns.map(turn => turn.turnId));
   const missing = fallback.turns.filter(turn => !timelineIds.has(turn.turnId));
-  if (missing.length === 0) return projected;
-  const turns = [...projected.turns, ...missing].sort(
-    (left, right) => turnSeq(left.turnId) - turnSeq(right.turnId),
-  );
+  const replaced = projected.turns.some(turn => storeShouldWin(turn, storeById));
+  if (missing.length === 0 && !replaced) return projected;
+  const turns = projected.turns.map(turn => {
+    const storeTurn = storeById.get(turn.turnId);
+    return storeTurn && storeShouldWin(turn, storeById) ? storeTurn : turn;
+  });
+  for (const turn of missing) turns.push(turn);
+  turns.sort((left, right) => turnSeq(left.turnId) - turnSeq(right.turnId));
   return {
     ...projected,
     turns,
     session: { ...projected.session, totalTurns: turns.length },
   };
+}
+
+/**
+ * 该 timeline turn 是否应让位于 conversation store 的同名版本。
+ * - 空占位（cancelled/running 无内容，见 isPlaceholderTurn）；
+ * - daemon 重启被 orphan-sealer 收尾的中断 turn（cancelled +
+ *   `daemon_restart_interrupted`）：worker 按消息存储计数复用了同一
+ *   turn_id 处理新输入，timeline 快照里的旧 cancelled 标记（含失败提示）
+ *   必须让位，否则新对话被旧内容遮蔽，且每次 resume 都显示
+ *   "Daemon restarted..." 错误；
+ * - store 同名 turn 是明确的新输入（userText 与 timeline 不同）——
+ *   turn_id 被复用（重启或用户取消后继续对话）。
+ * 其余 cancelled 的 timeline turn（用户主动取消等）保持 timeline 展示。
+ */
+function storeShouldWin(
+  turn: RawTurn,
+  storeById: Map<string, RawTurn>,
+): boolean {
+  const storeTurn = storeById.get(turn.turnId);
+  if (!storeTurn || storeTurn.status === "cancelled") return false;
+  if (turn.status === "cancelled") {
+    return isOrphanInterruptedTurn(turn) || storeTurn.userText !== turn.userText;
+  }
+  return isPlaceholderTurn(turn) || storeTurn.userText !== turn.userText;
+}
+
+/** daemon 重启被收尾的中断 turn（orphan-sealer 写入的失败标记）。 */
+function isOrphanInterruptedTurn(turn: RawTurn): boolean {
+  return turn.status === "cancelled"
+    && turn.failure?.code === "daemon_restart_interrupted";
+}
+
+/**
+ * A timeline turn with no visible content. Such a turn is either an orphan
+ * placeholder (cancelled after a restart, or a running turn left unsealed by
+ * a session switch) or a freshly opened turn whose blocks have not arrived
+ * yet. In both cases the conversation store is the safer source: it carries
+ * the authoritative message content and never loses a completed turn.
+ */
+function isPlaceholderTurn(turn: RawTurn): boolean {
+  if (turn.status === "completed" || turn.status === "failed") return false;
+  const hasContent = turn.rounds.some(round =>
+    (round.thinking?.length ?? 0) > 0
+    || (round.answer?.length ?? 0) > 0
+    || round.toolCalls.length > 0
+    || Object.keys(round.progress ?? {}).length > 0,
+  );
+  return !hasContent;
 }
 
 type CachedTurn = { signature: string; value: RawTurn };
@@ -112,7 +177,8 @@ export function selectTimelinePresentation(
             card: {
               id: block.tool.tool_call_id,
               name: block.tool.name,
-              args_display: block.tool.args_json ?? "{}",
+              args_display: toolArgsSummary(block.tool.name, block.tool.args_json ?? "")
+                || block.tool.name,
               args_json: block.tool.args_json ?? "{}",
             },
             ...meta,
@@ -130,7 +196,8 @@ export function selectTimelinePresentation(
         toolCalls: tools.map(block => ({
           id: block.tool!.tool_call_id,
           name: block.tool!.name,
-          args_display: block.tool!.args_json ?? "{}",
+          args_display: toolArgsSummary(block.tool!.name, block.tool!.args_json ?? "")
+            || block.tool!.name,
           args_json: block.tool!.args_json ?? "{}",
         })),
         toolResults: Object.fromEntries(tools

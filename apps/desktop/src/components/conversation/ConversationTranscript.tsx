@@ -19,6 +19,12 @@ export default function ConversationTranscript(props: {
   let observedTail: Element | null = null;
   let observeTailNow: (() => void) | undefined;
   let followingTail = true;
+  // resume/恢复历史期间：transcript 从空一次性渲染出大量历史 turn 时
+  // scrollTop 仍是 0 而 scrollHeight 已很大，任何提前到达的 scroll 事件
+  // 都会把 followingTail 误判关闭（remaining ≥ 阈值），导致之后的新内容
+  // 不再自动滚动——"resume 后不主动显示流式输出"。初始化跟随挂起期间
+  // 不做远离底部判定，首次 scrollToBottom 真正落底后恢复判定。
+  let initialFollowPending = true;
   const [followTail, setFollowTail] = createSignal(true);
   const [heightVersion, setHeightVersion] = createSignal(0);
   const measuredHeights = new Map<string, number>();
@@ -33,7 +39,14 @@ export default function ConversationTranscript(props: {
     if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = undefined;
-      if (followingTail) scrollToBottom();
+      if (!followingTail) {
+        // 用户已在落底前滚离底部：放弃初始化跟随，且不拉回
+        initialFollowPending = false;
+        return;
+      }
+      scrollToBottom();
+      // 首次落底完成：后续按常规 measure 判定跟随
+      initialFollowPending = false;
     });
   };
 
@@ -42,6 +55,10 @@ export default function ConversationTranscript(props: {
       setFollowTail(false);
       return;
     }
+    // 初始恢复暂态：resume 恢复长历史时 scrollTop 仍是 0 而 scrollHeight
+    // 已很大，此时"远离底部"是布局暂态而非用户行为，忽略判定；一旦首次
+    // scrollToBottom 落底（scrollTop 离开 0）即恢复正常判定。
+    if (initialFollowPending && scroller.scrollTop < 1) return;
     const remaining = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
     if (remaining >= BOTTOM_THRESHOLD) followingTail = false;
     setFollowTail(followingTail);
@@ -140,6 +157,8 @@ export default function ConversationTranscript(props: {
     <div class="conversation-scroll" ref={scroller} onScroll={measure} onWheel={(event) => {
       if (event.deltaY < 0) {
         followingTail = false;
+        // 用户主动上滚：放弃初始化跟随，避免之后被强制拉回底部
+        initialFollowPending = false;
         setFollowTail(false);
       }
     }}>

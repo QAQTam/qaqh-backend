@@ -389,15 +389,16 @@ function dispatchToStores(
   event: never,
 ): void {
   const e = event as { type?: string } & Record<string, unknown>;
+  // 必须在 setStores 函数式更新内部基于**最新 draft** reduce：同一 batch
+  // 的多个事件（或快速连续的 handleBatch）会排队多个 setter，若在循环外
+  // 用旧 state 计算，后一个结果会覆盖前一个（事件丢失 → resume 后
+  // transcript 空白，必须切换 session 强制重渲染才显示残缺内容）。
   if (channel === "control") {
-    const next = controlReducer(stores.control, e as any);
-    setStores((draft) => { draft.control = next; });
+    setStores((draft) => { draft.control = controlReducer(draft.control, e as never); });
   } else if (channel === "conversation") {
-    const next = conversationReducer(stores.conversation, e as any);
-    setStores((draft) => { draft.conversation = next; });
+    setStores((draft) => { draft.conversation = conversationReducer(draft.conversation, e as never); });
   } else if (channel === "tool") {
-    const next = toolReducer(stores.tool, e as any);
-    setStores((draft) => { draft.tool = next; });
+    setStores((draft) => { draft.tool = toolReducer(draft.tool, e as never); });
   }
 }
 

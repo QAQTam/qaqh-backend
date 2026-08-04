@@ -1,11 +1,12 @@
 import type { ProcessItem } from "../../presentation/processAggregation";
 import ProcessDetail from "./ProcessDetail";
+import { toolStatusLabel } from "../../presentation/toolSemantics";
 
 function label(item: ProcessItem): string {
   switch (item.kind) {
     case "reasoning": return "分析";
     case "assistant_progress": return "阶段结论";
-    case "tool": return truncate(item.summary || item.toolName, 48);
+    case "tool": return truncate(toolStatusLabel(item.status, item.toolName, item.summary), 64);
     case "group": return item.label;
     case "interaction": return `${item.label}: ${item.resolution}`;
     case "notice": return item.message;

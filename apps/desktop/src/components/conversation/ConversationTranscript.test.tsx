@@ -90,6 +90,37 @@ function configureScroller(scroller: HTMLElement, getHeight: () => number) {
   });
 }
 
+it("keeps following during history restore (scrollTop=0) and auto-scrolls new streaming content", async () => {
+  ResizeObserverMock.instances = [];
+  frames = [];
+  const host = document.createElement("div");
+  document.body.append(host);
+  const [turns, setTurns] = createSignal<TurnViewModel[]>([turn("t1", "history 1")]);
+  let height = 3000; // resume 恢复的长历史
+  const dispose = render(() => <ConversationTranscript turns={turns()} />, host);
+  const scroller = host.querySelector<HTMLElement>(".conversation-scroll")!;
+  configureScroller(scroller, () => height);
+
+  // 恢复历史期间：scrollTop 仍是 0 而 scrollHeight 很大，提前到达的
+  // scroll 事件不得把 followingTail 误判关闭（否则新内容不再自动滚动，
+  // 表现为 "resume 后不主动显示流式输出"）。
+  scroller.scrollTop = 0;
+  scroller.dispatchEvent(new Event("scroll"));
+  await Promise.resolve();
+  flushFrames(); // 首次落底
+  vi.mocked(scroller.scrollTo).mockClear();
+
+  // 新流式内容到达：跟随保持，自动滚动到底
+  height = 3200;
+  setTurns([...turns(), turn("t2", "streaming")]);
+  await Promise.resolve();
+  await Promise.resolve(); // Solid flush → effect → queueMicrotask(schedule)
+  flushFrames();
+  expect(scroller.scrollTo).toHaveBeenLastCalledWith({ top: 3200 });
+  dispose();
+  host.remove();
+});
+
 it("loads older turns from a real transcript control", () => {
   const host = document.createElement("div");
   document.body.append(host);

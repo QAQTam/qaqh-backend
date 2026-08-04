@@ -156,3 +156,38 @@ it("renders closed inline markdown on the live tail while streaming", async () =
   });
   dispose();
 });
+
+it("streams long text incrementally without losing content (chunked live parse)", async () => {
+  const host = document.createElement("div");
+  const [content, setContent] = createSignal("");
+  const dispose = render(
+    () => <MarkdownBody content={content()} final={false} />,
+    host,
+  );
+
+  // 模拟长流式：多帧 delta。增量机制生效时每个 delta 追加一个 live chunk
+  // span（而不是每帧全量重解析后只保留一个 chunk）。
+  let text = "";
+  const FRAMES = 30;
+  for (let i = 0; i < FRAMES; i++) {
+    text += `sentence ${i} with **bold${i}** and \`code${i}\` tail. `;
+    setContent(text);
+    // 等一帧（jsdom rAF ~16ms），让 scheduleLivePreview 处理该 delta
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  }
+
+  // 内容完整：首尾 delta 都在
+  expect(host.textContent).toContain("sentence 0 with");
+  expect(host.textContent).toContain("sentence 29 with");
+  // 流式内联语法仍渲染
+  expect(host.querySelectorAll("strong").length).toBeGreaterThan(0);
+  // 增量机制生效：chunk span 数 ≈ delta 帧数（若每帧全量重解析则恒为 1）
+  const chunks = host.querySelectorAll("[data-live-chunk]");
+  expect(chunks.length).toBeGreaterThan(5);
+  expect(chunks.length).toBeLessThanOrEqual(FRAMES);
+  // 无破损 HTML：文本可完整还原（不丢失任何 delta 内容）
+  const visible = host.textContent ?? "";
+  expect(visible).toContain("bold29");
+  dispose();
+});

@@ -15,10 +15,11 @@ import type {
   TurnStatus,
 } from "./rawSession";
 import { createRawSessionState } from "./rawSession";
-import type { RingingStores, ToolCardView } from "./ringingStores";
+import type { RingingStores, ToolCardView, TurnView, RoundView } from "./ringingStores";
 import type { UsageInfo } from "../lib/types/ringing/UsageInfo";
 import type { ToolResult } from "../lib/types/ringing/ToolResult";
 import type { SkillRuntimeInfo } from "./rawSession";
+import { toolArgsSummary } from "../presentation/toolSemantics";
 
 function mapTurnStatus(status: string): TurnStatus {
   switch (status) {
@@ -37,11 +38,43 @@ function cardsForRound(cards: ToolCardView[], turnId: string, roundNum: number):
   return cards.filter((c) => c.turnId === turnId && c.roundNum === roundNum);
 }
 
+/**
+ * 按 (turnId, roundNum) 预索引 tool cards：流式期间 presentationFor 每帧
+ * 全量重建 turns，若每 round 都 filter 全部 cards，长会话下退化为
+ * O(turns×rounds×cards)（数千次比较/帧）。索引后为 O(cards + turns×rounds)。
+ *
+ * 索引同时缓存 list 数组：toolReducer 是不可变更新，未变化的 card 对象
+ * 引用稳定——同一 (seed, turnId, roundNum) 的 card 引用序列未变时复用
+ * 上次的 list，使 round 投影缓存（引用比较）能命中。
+ */
+const indexListCache = new Map<string, { refs: ToolCardView[]; list: ToolCardView[] }>();
+
+function indexCardsByTurnRound(cards: ToolCardView[], seed: string): Map<string, ToolCardView[]> {
+  const index = new Map<string, ToolCardView[]>();
+  for (const card of cards) {
+    const key = `${seed}:${card.turnId}:${card.roundNum}`;
+    const entry = indexListCache.get(key);
+    if (entry && entry.refs.length === 1 && entry.refs[0] === card) {
+      // 引用序列未变：复用数组（round 缓存因此可命中）
+      index.set(key, entry.list);
+    } else {
+      const list = [card];
+      indexListCache.set(key, { refs: [card], list });
+      index.set(key, list);
+    }
+  }
+  return index;
+}
+
+/** 无 tool card 的共享空数组（热路径避免每 round 分配）。 */
+const EMPTY_CARDS: ToolCardView[] = [];
+
 function toolCallsFor(cards: ToolCardView[]) {
   return cards.map((c) => ({
     id: c.toolCallId,
     name: c.name,
-    args_display: c.argsSoFar,
+    // 语义化摘要（路径/命令），取代 argsSoFar 的 JSON 原文
+    args_display: toolArgsSummary(c.name, c.argsSoFar) || c.name,
     args_json: c.argsSoFar || "{}",
   }));
 }
@@ -54,6 +87,76 @@ function toolResultsFor(cards: ToolCardView[]) {
     }
   }
   return out;
+}
+
+// ── 投影缓存 ─────────────────────────────────────────────────────────────
+// 流式热路径：presentationFor 每帧重建全部 turns。若每次投影都新建对象，
+// Solid 无法跳过任何子树，所有组件（ProcessTimeline/ProcessDetail/Markdown
+// 等）每帧全量重渲染；长思考链/长 exec 输出的 detailText join、JSON.parse
+// 与 <pre> 文本替换随之 O(n²) 退化，即使不渲染 Markdown 也卡死。
+//
+// store 的 reducer 是不可变更新：未变化的 TurnView/RoundView/card 对象
+// 引用稳定，可作为 WeakMap 键做投影缓存。tool 状态以 tool.cards 数组引用
+// 作为版本信号（tool 事件必然新建数组）。
+const turnProjectionCache = new WeakMap<TurnView, { toolCards: ToolCardView[]; turn: RawTurn }>();
+const roundProjectionCache = new WeakMap<RoundView, { cards: ToolCardView[]; round: RawRound }>();
+
+function projectRound(rv: RoundView, cards: ToolCardView[]): RawRound {
+  const cached = roundProjectionCache.get(rv);
+  if (cached && cached.cards === cards) return cached.round;
+  const progress = Object.fromEntries(
+    cards
+      .filter((card) => card.progressTail.length > 0)
+      .map((card) => [
+        card.toolCallId,
+        {
+          chunks: [{
+            stream: card.progressStream,
+            seq: card.progressSeqEnd,
+            chunk: card.progressTail,
+          }],
+        },
+      ]),
+  );
+  const hasActiveTool = cards.some((card) => card.status === "prepared" || card.status === "running");
+  const round: RawRound = {
+    roundNum: rv.roundNum,
+    isFinal: rv.isFinal,
+    thinking: rv.thinking ?? "",
+    answer: rv.answer ?? "",
+    blocks: [],
+    toolCalls: toolCallsFor(cards),
+    toolResults: toolResultsFor(cards),
+    progress,
+    phase: rv.isFinal ? "complete" : hasActiveTool ? "tool_calling" : "answering",
+  };
+  roundProjectionCache.set(rv, { cards, round });
+  return round;
+}
+
+function projectTurnView(
+  seed: string,
+  tv: TurnView,
+  toolCards: ToolCardView[],
+  cardsIndex: Map<string, ToolCardView[]>,
+): RawTurn {
+  const cached = turnProjectionCache.get(tv);
+  if (cached && cached.toolCards === toolCards) return cached.turn;
+  const rounds: RawRound[] = tv.rounds.map((rv) =>
+    projectRound(rv, cardsIndex.get(`${seed}:${tv.turnId}:${rv.roundNum}`) ?? EMPTY_CARDS),
+  );
+  const turn: RawTurn = {
+    turnId: tv.turnId,
+    userText: tv.userText,
+    status: mapTurnStatus(tv.status),
+    failure: tv.failure,
+    startedAt: tv.startedAt,
+    lastActivityAt: tv.lastActivityAt,
+    rounds,
+    interactions: [],
+  };
+  turnProjectionCache.set(tv, { toolCards, turn });
+  return turn;
 }
 
 export function selectRingingPresentation(
@@ -76,47 +179,12 @@ export function selectRingingPresentation(
     ? conv.cacheReportedRequestCount
     : base.session.cacheReportedRequestCount;
 
-  const turns: RawTurn[] = includeTurns ? conv.turns.map((tv) => {
-    const rounds: RawRound[] = tv.rounds.map((rv) => {
-      const cards = cardsForRound(tool.cards, tv.turnId, rv.roundNum);
-      const progress = Object.fromEntries(
-        cards
-          .filter((card) => card.progressTail.length > 0)
-          .map((card) => [
-            card.toolCallId,
-            {
-              chunks: [{
-                stream: card.progressStream,
-                seq: card.progressSeqEnd,
-                chunk: card.progressTail,
-              }],
-            },
-          ]),
-      );
-      const hasActiveTool = cards.some((card) => card.status === "prepared" || card.status === "running");
-      return {
-        roundNum: rv.roundNum,
-        isFinal: rv.isFinal,
-        thinking: rv.thinking ?? "",
-        answer: rv.answer ?? "",
-        blocks: [],
-        toolCalls: toolCallsFor(cards),
-        toolResults: toolResultsFor(cards),
-        progress,
-        phase: rv.isFinal ? "complete" : hasActiveTool ? "tool_calling" : "answering",
-      };
-    });
-    return {
-      turnId: tv.turnId,
-      userText: tv.userText,
-      status: mapTurnStatus(tv.status),
-      failure: tv.failure,
-      startedAt: tv.startedAt,
-      lastActivityAt: tv.lastActivityAt,
-      rounds,
-      interactions: [],
-    };
-  }) : base.turns;
+  const turns: RawTurn[] = includeTurns ? (() => {
+    // 流式热路径：先建索引，再经 turn/round 投影缓存复用未变化的
+    // RawTurn/RawRound 对象（引用稳定 → Solid 跳过未变化子树）。
+    const cardsIndex = indexCardsByTurnRound(tool.cards, seed);
+    return conv.turns.map((tv) => projectTurnView(seed, tv, tool.cards, cardsIndex));
+  })() : base.turns;
 
   const merged: RawSessionState = {
     ...base,

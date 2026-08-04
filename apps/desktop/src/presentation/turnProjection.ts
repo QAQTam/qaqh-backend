@@ -1,6 +1,7 @@
 import type { RawRound, RawTurn, ToolCallDef } from "../store/rawSession";
 import type { ToolStatus } from "../lib/types/ringing/ToolResult";
 import { aggregateProcessItems, type ProcessItem } from "./processAggregation";
+import { toolArgsSummary } from "./toolSemantics";
 
 export type RoundRenderEntry =
   | { kind: "assistant"; id: string; markdown: string; streaming: boolean }
@@ -62,12 +63,18 @@ function toolItem(round: RawRound, call: ToolCallDef): Extract<ProcessItem, { ki
     id: call.id,
     family: toolFamily(call.name),
     toolName: call.name,
-    summary: call.args_display || call.name,
+    // 语义化摘要（路径/命令/查询词 + 行范围），取代 args JSON 原文；
+    // args_json 尚在累积时（进行中）回退到 args_display。
+    summary: toolArgsSummary(call.name, call.args_json) || clipText(call.args_display, 64) || call.name,
     argsJson: call.args_json,
     output: result?.model.text,
     progress: round.progress[call.id]?.chunks,
     status: result?.status,
   };
+}
+
+function clipText(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 const MUTATING_TOOLS = new Set(["write", "edit", "edit_block", "delete"]);
@@ -124,7 +131,25 @@ function isSuccessfulToolStatus(status: ToolStatus): boolean {
   return status === "ok" || status === "backgrounded";
 }
 
+// 投影缓存：RawRound 引用稳定（sessionPresentation 缓存保证），未变化的
+// round 直接复用 entries，避免流式时每帧重建全部 ProcessItem 对象导致
+// TurnGroup/ProcessTimeline 全量重渲染。streaming 标志参与键（turn 完成时
+// 全量重投影一次）。
+const roundEntriesCache = new WeakMap<RawRound, { streaming: boolean; entries: RoundRenderEntry[] }>();
+
 function projectRoundEntries(
+  turn: RawTurn,
+  round: RawRound,
+  streaming: boolean,
+): RoundRenderEntry[] {
+  const cached = roundEntriesCache.get(round);
+  if (cached && cached.streaming === streaming) return cached.entries;
+  const entries = buildRoundEntries(turn, round, streaming);
+  roundEntriesCache.set(round, { streaming, entries });
+  return entries;
+}
+
+function buildRoundEntries(
   turn: RawTurn,
   round: RawRound,
   streaming: boolean,
