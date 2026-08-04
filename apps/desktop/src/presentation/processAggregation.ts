@@ -1,4 +1,4 @@
-import type { ToolStatus } from "../lib/types/ringing/ToolResult";
+import type { ToolStatus } from "../lib/types/ringing/ToolStatus";
 
 export type ProcessItem =
   | { kind: "reasoning"; id: string; content: string; elapsedMs?: number; state?: "open" | "sealed" }

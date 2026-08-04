@@ -66,6 +66,7 @@ find "$tmpdir" -type f -name '*.ts' -exec sed -i 's/[[:space:]]\+$//' {} +
   echo "export type { ErrorScope } from \"./ErrorScope\";"
   echo "export type { TodoItem } from \"./TodoItem\";"
   echo "export type { SkillInfo } from \"./SkillInfo\";"
+  echo "export type { SkillRuntimeInfo } from \"./SkillRuntimeInfo\";"
   echo "export type { NoticeLevel } from \"./NoticeLevel\";"
   echo "export type { RingingEvent } from \"./RingingEvent\";"
   echo "export type { RingingEventEnvelope } from \"./RingingEventEnvelope\";"

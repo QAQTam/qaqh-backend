@@ -4,4 +4,4 @@ import type { ToolError } from "./ToolError";
 import type { ToolModelPayload } from "./ToolModelPayload";
 import type { ToolStatus } from "./ToolStatus";
 
-export type ToolResult = { status: ToolStatus, summary: string, data: JsonValue, model: ToolModelPayload, output_ref?: ContentRef | null, error?: ToolError | null, };
+export type ToolResult = { status: ToolStatus, summary: string, data: any, model: ToolModelPayload, output_ref?: ContentRef | null, error?: ToolError | null, };

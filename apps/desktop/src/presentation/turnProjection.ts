@@ -1,5 +1,5 @@
 import type { RawRound, RawTurn, ToolCallDef } from "../store/rawSession";
-import type { ToolStatus } from "../lib/types/ringing/ToolResult";
+import type { ToolStatus } from "../lib/types/ringing/ToolStatus";
 import { aggregateProcessItems, type ProcessItem } from "./processAggregation";
 import { toolArgsSummary } from "./toolSemantics";
 

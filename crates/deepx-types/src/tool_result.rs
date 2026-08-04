@@ -44,7 +44,7 @@ pub struct ContentRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ToolContinuation {
     pub tool: String,
-    #[ts(type = "JsonValue")]
+    #[ts(type = "any")]
     pub args: serde_json::Value,
 }
 
@@ -52,6 +52,7 @@ pub struct ToolContinuation {
 pub struct ToolModelPayload {
     pub text: String,
     pub truncated: bool,
+    #[ts(type = "number")]
     pub total_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ToolContinuation>,
@@ -70,7 +71,7 @@ pub struct ToolError {
 pub struct ToolResult {
     pub status: ToolStatus,
     pub summary: String,
-    #[ts(type = "JsonValue")]
+    #[ts(type = "any")]
     pub data: serde_json::Value,
     pub model: ToolModelPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
