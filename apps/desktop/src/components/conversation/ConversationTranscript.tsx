@@ -52,7 +52,13 @@ export default function ConversationTranscript(props: {
 
   const measure = () => {
     if (!followingTail) {
-      setFollowTail(false);
+      // 用户曾离开底部：仅在真正滚回底部附近时恢复跟随，否则保持关闭。
+      // （流式期间任何一次 scrollTop 修正都会经过这里；若只关闭不恢复，
+      //  跟随被误杀后新内容永远不再自动显示。）
+      if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < BOTTOM_THRESHOLD) {
+        followingTail = true;
+        setFollowTail(true);
+      }
       return;
     }
     // 初始恢复暂态：resume 恢复长历史时 scrollTop 仍是 0 而 scrollHeight
@@ -75,6 +81,9 @@ export default function ConversationTranscript(props: {
 
   const compensateAnchor = (anchor: { id: string; top: number } | null) => {
     if (!anchor?.id) return;
+    // 跟随模式：视口锚点就是底部，任何补偿都会把视口拉离最新内容
+    // （随后被 measure 误判为用户离开，流式输出不再自动滚动）。
+    if (followingTail) return;
     const element = [...transcript.querySelectorAll<HTMLElement>("[data-turn]")]
       .find(candidate => candidate.dataset.turn === anchor.id);
     if (!element) return;
@@ -93,11 +102,19 @@ export default function ConversationTranscript(props: {
     const anchor = captureAnchor();
     measuredHeights.set(turnId, height);
     setHeightVersion(version => version + 1);
+    // 跟随/初始化落底阶段：锚点即底部，scrollTop 修正只会破坏底部对齐
+    // 并触发 measure 误判（"拉到最新行却回弹到早期消息"的根因）。只记录
+    // 高度，把滚动控制完全交给 scrollToBottom。
+    if (followingTail || initialFollowPending) return;
     const elements = [...transcript.querySelectorAll<HTMLElement>("[data-turn]")];
     const targetIndex = elements.findIndex(element => element.dataset.turn === turnId);
     const anchorIndex = anchor ? elements.findIndex(element => element.dataset.turn === anchor.id) : -1;
     const correction = anchorIndex > targetIndex && targetIndex >= 0 ? height - (previous ?? ESTIMATED_TURN_HEIGHT) : 0;
-    if (correction) queueMicrotask(() => { scroller.scrollTop += correction; });
+    if (correction) queueMicrotask(() => {
+      // 排队期间用户可能已滚回底部（跟随恢复）：放弃补偿，避免把视口拉离。
+      if (followingTail) return;
+      scroller.scrollTop += correction;
+    });
   };
 
   async function loadOlder() {

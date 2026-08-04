@@ -19,6 +19,7 @@ class ResizeObserverMock {
   }
 
   observe() {}
+  unobserve() {}
   disconnect() {}
   trigger() { this.callback([], this as unknown as ResizeObserver); }
 }
@@ -194,6 +195,46 @@ it("stops following after user scroll-away and jump-to-bottom restores it", asyn
   vi.mocked(scroller.scrollTo).mockClear();
   height = 1400;
   setTurns([turn("same", "following again")]);
+  await Promise.resolve();
+  await Promise.resolve();
+  flushFrames();
+  expect(scroller.scrollTo).toHaveBeenLastCalledWith({ top: 1400 });
+  dispose();
+  host.remove();
+});
+
+it("re-enables follow when the user scrolls back to the bottom (no bounce-back)", async () => {
+  ResizeObserverMock.instances = [];
+  frames = [];
+  const host = document.createElement("div");
+  document.body.append(host);
+  const [turns, setTurns] = createSignal([turn("same", "first")]);
+  let height = 1000;
+  const dispose = render(() => <ConversationTranscript turns={turns()} />, host);
+  const scroller = host.querySelector<HTMLElement>(".conversation-scroll")!;
+  configureScroller(scroller, () => height);
+  flushFrames(); // 首次落底
+  vi.mocked(scroller.scrollTo).mockClear();
+
+  // 用户滚离底部 → 跟随关闭，新内容不自动滚动
+  scroller.scrollTop = 100;
+  scroller.dispatchEvent(new Event("scroll"));
+  await Promise.resolve();
+  height = 1200;
+  setTurns([turn("same", "more content while reading above")]);
+  await Promise.resolve();
+  flushFrames();
+  expect(scroller.scrollTo).not.toHaveBeenCalled();
+
+  // 用户拉到最新行（滚回底部附近）→ 跟随恢复
+  scroller.scrollTop = 1000; // remaining = 1200 - 1000 - 200 = 0 < 120
+  scroller.dispatchEvent(new Event("scroll"));
+  await Promise.resolve();
+  expect(host.querySelector(".jump-to-bottom")).toBeNull();
+
+  // 新流式内容到达 → 自动滚动到底（不再卡在早期消息）
+  height = 1400;
+  setTurns([turn("same", "streaming continues")]);
   await Promise.resolve();
   await Promise.resolve();
   flushFrames();
