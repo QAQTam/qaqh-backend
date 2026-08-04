@@ -6,15 +6,15 @@
 // - 记录频道连接状态与事件计数，供主界面派生视图使用；
 // - 协议模式在连接建立时确定；reload 通过 bootstrap 恢复，不再切换频道。
 
-import { createSignal, createStore, type Store, type StoreSetter } from "solid-js";
+import { createSignal, createStore, reconcile, type Store, type StoreSetter } from "solid-js";
 import {
   AppliedEventRegistry,
   applyConversationSnapshot,
   applyConversationEventToStore,
-  conversationReducer,
   controlReducer,
   initialRingingStores,
   toolReducer,
+  type ConversationState,
   type ConversationSnapshotTurn,
   type RingingStores,
 } from "./ringingStores";
@@ -295,7 +295,22 @@ export function createRingingMonitor() {
       );
       // 快照携带完整 turns（neutral JSON）：只补缺失 turn，保留流式现场，
       // 并恢复 activeTurn 使后续 round_delta 能继续追加（修复快照后吞字）。
-      storesEntry.setStores((draft) => { draft.conversation = nextConversation; });
+      // C3：经 reconcile 键控合并（turn_id）——内容未变的 turn 身份保持，
+      // 恢复时零全量重渲染；内容变化的 turn 由快照权威覆盖。
+      storesEntry.setStores((draft) => {
+        const conv = draft.conversation as ConversationState;
+        reconcile(nextConversation.turns, "turn_id")(conv.turns);
+        conv.turnsById = nextConversation.turnsById;
+        conv.activeTurn = nextConversation.activeTurn;
+        conv.lastUsage = nextConversation.lastUsage;
+        conv.usageTotals = nextConversation.usageTotals;
+        conv.usageRequestCount = nextConversation.usageRequestCount;
+        conv.cacheReportedRequestCount = nextConversation.cacheReportedRequestCount;
+        conv.totalTurns = nextConversation.totalTurns;
+        conv.hasMore = nextConversation.hasMore;
+        conv.compactStatus = nextConversation.compactStatus;
+        conv.cancelled = nextConversation.cancelled;
+      });
     }
     const baselineSeq = Number(snap?.baseline_stream_seq);
     if (Number.isSafeInteger(baselineSeq) && baselineSeq >= 0) {

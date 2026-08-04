@@ -150,7 +150,7 @@ export class RingingChannelStream {
   }
 
   private dispatch(payload: string, frameCursor: number | null): void {
-    const batch = envelopeToBatch(this.channel, JSON.parse(payload));
+    const batch = envelopeToBatch(this.channel, JSON.parse(payload), this.getServerEpoch());
     if (frameCursor !== null) {
       if (batch.server_epoch !== this.getServerEpoch()
         || batch.from_stream_seq !== frameCursor) {

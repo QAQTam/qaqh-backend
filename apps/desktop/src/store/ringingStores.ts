@@ -226,6 +226,8 @@ export interface ConversationState {
   seed: string;
   activeTurn: TurnView | null;
   turns: TurnView[];
+  /** turnId → turns 索引（O(1) 寻址，长会话免每事件 findIndex 扫描）。 */
+  turnsById: Map<string, number>;
   compactStatus: "running" | "completed" | "skipped" | "failed" | "cancelled" | null;
   /** CompactProgress delta 累积（compact_started 重置；replaceable 追加语义）。 */
   compactText: string;
@@ -268,6 +270,7 @@ export function initialConversationState(seed: string): ConversationState {
     seed,
     activeTurn: null,
     turns: [],
+    turnsById: new Map(),
     compactStatus: null,
     compactText: "",
     compactTurnsCompacted: null,
@@ -283,47 +286,6 @@ export function initialConversationState(seed: string): ConversationState {
     hasMore: false,
     lastProviderToolStatus: null,
   };
-}
-
-function upsertTurn(state: ConversationState, turnId: string, mutate: (t: TurnView) => TurnView): ConversationState {
-  const turns = state.turns.map((t) => (t.turnId === turnId ? mutate(t) : t));
-  return { ...state, turns, activeTurn: turns.find((t) => t.turnId === turnId) ?? null };
-}
-
-function clearPending(state: ConversationState, turnId: string): ConversationState {
-  return state.pendingDeltas.some((d) => d.turnId === turnId)
-    ? { ...state, pendingDeltas: state.pendingDeltas.filter((d) => d.turnId !== turnId) }
-    : state;
-}
-
-/** 追加式应用一个 round 增量（首个 delta 创建 round）。 */
-function applyRoundDelta(
-  state: ConversationState,
-  turnId: string,
-  roundNum: number,
-  kind: RoundDeltaKind,
-  delta: string,
-): ConversationState {
-  return upsertTurn(state, turnId, (t) => {
-    const rounds = [...t.rounds];
-    const idx = rounds.findIndex((r) => r.roundNum === roundNum);
-    if (idx < 0) {
-      rounds.push({
-        roundNum,
-        thinking: kind === "thinking" ? delta : "",
-        answer: kind === "answering" ? delta : "",
-        isFinal: false,
-      });
-    } else {
-      const r = rounds[idx];
-      rounds[idx] = {
-        ...r,
-        thinking: kind === "thinking" ? r.thinking + delta : r.thinking,
-        answer: kind === "answering" ? r.answer + delta : r.answer,
-      };
-    }
-    return { ...t, rounds, lastRoundNum: Math.max(t.lastRoundNum, roundNum) };
-  });
 }
 
 /** 服务器快照里的中立 turn 形状（conversation_snapshot.rs 的 neutral_turn）。 */
@@ -394,10 +356,13 @@ export function applyConversationSnapshot(
     ...state.turns.map((turn) => snapshots.get(turn.turnId) ?? turn),
     ...[...snapshots.values()].filter((turn) => !existingIds.has(turn.turnId)),
   ];
+  const turnsById = new Map<string, number>();
+  turnsAll.forEach((turn, index) => turnsById.set(turn.turnId, index));
   const activeTurn = turnsAll.find((t) => t.turnId === activeTurnId) ?? state.activeTurn;
   return {
     ...state,
     turns: turnsAll,
+    turnsById,
     activeTurn,
     lastUsage: usage ? {
       usage,
@@ -414,146 +379,15 @@ export function applyConversationSnapshot(
   };
 }
 
-export function conversationReducer(state: ConversationState, event: ConversationEvent): ConversationState {
-  // 任何领域事件都视为活动：刷新当前 turn 的活动时间（卡死检测依据）。
-  // turn_started 本身会创建新 turn，无需（也不能）刷新旧 turn。
-  if (state.activeTurn && event.type !== "turn_started") {
-    const now = Date.now();
-    state = {
-      ...state,
-      activeTurn: { ...state.activeTurn, lastActivityAt: now },
-      turns: state.turns.map((t) =>
-        t.turnId === state.activeTurn!.turnId ? { ...t, lastActivityAt: now } : t,
-      ),
-    };
-  }
-  switch (event.type) {
-    case "turn_started": {
-      const turn: TurnView = {
-        turnId: event.turn_id,
-        userText: event.user_text,
-        rounds: [],
-        status: "running",
-        lastRoundNum: 0,
-        startedAt: Date.now(),
-        lastActivityAt: Date.now(),
-      };
-      let next: ConversationState = {
-        ...state,
-        turns: [...state.turns, turn],
-        activeTurn: turn,
-        cancelled: false,
-      };
-      // 合并乱序到达的缓冲增量（快照间隙/事件乱序时不丢字）。
-      const buffered = state.pendingDeltas.filter((d) => d.turnId === event.turn_id);
-      if (buffered.length > 0) {
-        next = clearPending(next, event.turn_id);
-        for (const d of buffered) {
-          next = applyRoundDelta(next, d.turnId, d.roundNum, d.kind, d.delta);
-        }
-      }
-      return next;
-    }
-    case "round_delta":
-      if (state.activeTurn?.turnId !== event.turn_id) {
-        // 防御乱序/快照间隙：缓冲而不是丢弃，turn_started 到达后合并。
-        const pendingDeltas = [
-          ...state.pendingDeltas,
-          {
-            turnId: event.turn_id,
-            roundNum: event.round_num,
-            kind: event.kind,
-            delta: event.delta,
-          },
-        ];
-        return { ...state, pendingDeltas };
-      }
-      return applyRoundDelta(state, event.turn_id, event.round_num, event.kind, event.delta);
-    case "round_completed": {
-      if (!state.activeTurn || state.activeTurn.turnId !== event.turn_id) return state;
-      return upsertTurn(state, event.turn_id, (t) => {
-        const rounds = [...t.rounds];
-        const idx = rounds.findIndex((r) => r.roundNum === event.round_num);
-        if (idx >= 0) {
-          rounds[idx] = { ...rounds[idx], ...(event.thinking ? { thinking: event.thinking } : {}), ...(event.answer ? { answer: event.answer } : {}), isFinal: event.is_final };
-        } else {
-          rounds.push({
-            roundNum: event.round_num,
-            thinking: event.thinking ?? "",
-            answer: event.answer ?? "",
-            isFinal: event.is_final,
-          });
-        }
-        return { ...t, rounds };
-      });
-    }
-    case "usage_updated":
-      {
-      const usage = event.usage as UsageInfo;
-      return {
-        ...state,
-        lastUsage: {
-          usage,
-          contextLimit: event.context_limit,
-          model: event.model,
-        },
-        usageTotals: addUsage(state.usageTotals, usage),
-        usageRequestCount: state.usageRequestCount + 1,
-        cacheReportedRequestCount: state.cacheReportedRequestCount + (usage.cache_usage_reported === true ? 1 : 0),
-      };
-      }
-    case "provider_tool_status":
-      return {
-        ...state,
-        lastProviderToolStatus: {
-          callId: event.call_id,
-          toolKind: event.tool_kind,
-          state: event.state,
-        },
-      };
-    case "turn_completed":
-      return upsertTurn(clearPending(state, event.turn_id), event.turn_id, (t) => ({ ...t, status: "completed" }));
-    case "turn_failed":
-      return upsertTurn(clearPending(state, event.turn_id), event.turn_id, (t) => ({
-        ...t,
-        status: "failed",
-        failure: { code: event.error.code, message: event.error.message },
-      }));
-    case "conversation_cancelled":
-      return {
-        ...state,
-        cancelled: true,
-        activeTurn: state.activeTurn ? { ...state.activeTurn, status: "cancelled" } : null,
-        staleRevision: state.staleRevision + 1,
-        pendingDeltas: event.turn_id
-          ? state.pendingDeltas.filter((d) => d.turnId !== event.turn_id)
-          : state.pendingDeltas,
-      };
-    case "compact_started":
-      return { ...state, compactStatus: "running", compactText: "" };
-    case "compact_progress":
-      return { ...state, compactText: state.compactText + event.delta };
-    case "compact_finished":
-      return {
-        ...state,
-        compactStatus: event.status,
-        compactTurnsCompacted: event.turns_compacted ?? null,
-        compactCompletionRevision: state.compactCompletionRevision + 1,
-      };
-    default:
-      return state;
-  }
-}
-
 // ────────────────────────────────────────────────────────────────────────────
-// Store path 应用器（Solid 2.0 定向更新）
+// Store path 应用器（Solid 2.0 定向更新 · C1 单一实现）
 // ────────────────────────────────────────────────────────────────────────────
-// 与 conversationReducer 语义严格等价（等价性由 ringingStores.test.ts 的
-// 对照测试保证），但通过 store 函数式 setter 做**元素级替换**：只重建变化
-// 的 turn/round 对象，不复制整个 turns 数组。长会话下每事件分配从 O(turns)
-// 降为 O(1)，未变化的元素引用天然稳定（投影缓存命中、Solid 跳过未变化
-// 子树）。事件应用后由上层（ringingMonitor）bump ringingVersion 驱动投影
-// 刷新——元素级写入不会通知"读 turns 数组整体"的表达式。
+// 领域事件 → ConversationState draft 的可变应用（唯一实现，已删除不可变
+// conversationReducer 双实现）。**元素级替换**：只重建变化的 turn/round 对象，
+// 不复制整个 turns 数组。长会话下每事件分配从 O(turns) 降为 O(1)，未变化的
+// 元素引用天然稳定（投影缓存命中、Solid 跳过未变化子树）。事件应用后由上层
+// （ringingMonitor）bump ringingVersion 驱动投影刷新——元素级写入不会通知
+// "读 turns 数组整体"的表达式。
 
 function applyRoundDeltaToTurn(
   turn: TurnView,
@@ -581,19 +415,35 @@ function applyRoundDeltaToTurn(
   return { ...turn, rounds, lastRoundNum: Math.max(turn.lastRoundNum, roundNum) };
 }
 
+/** turnId → turns 索引（O(1)）。索引可能因外部替换过期，校验失败回退线性扫描并修复。 */
+function turnIndex(state: Pick<ConversationState, "turns" | "turnsById">, turnId: string): number {
+  const idx = state.turnsById.get(turnId);
+  if (idx !== undefined && state.turns[idx]?.turnId === turnId) return idx;
+  const found = state.turns.findIndex((t) => t.turnId === turnId);
+  if (found >= 0) state.turnsById.set(turnId, found);
+  return found;
+}
+
 export function applyConversationEventToStore(
   setStores: StoreSetter<RingingStores>,
   event: ConversationEvent,
 ): void {
   setStores((draft) => {
-    // draft 是 StoreNode 宽类型，窄化为领域状态以便元素级读写推断。
-    const conv = draft.conversation as ConversationState;
-    // 任何领域事件都视为活动：刷新当前 turn 的活动时间（卡死检测依据）。
-    // turn_started 本身会创建新 turn，无需（也不能）刷新旧 turn。
-    if (conv.activeTurn && event.type !== "turn_started") {
+    applyConversationEventToDraft(draft.conversation as ConversationState, event);
+  });
+}
+
+/** 领域事件 → ConversationState draft（C1 单一实现；生产与测试共用）。 */
+export function applyConversationEventToDraft(
+  conv: ConversationState,
+  event: ConversationEvent,
+): void {
+  // 任何领域事件都视为活动：刷新当前 turn 的活动时间（卡死检测依据）。
+  // turn_started 本身会创建新 turn，无需（也不能）刷新旧 turn。
+  if (conv.activeTurn && event.type !== "turn_started") {
       const now = Date.now();
       conv.activeTurn = { ...conv.activeTurn, lastActivityAt: now };
-      const activeIdx = conv.turns.findIndex((t) => t.turnId === conv.activeTurn!.turnId);
+      const activeIdx = turnIndex(conv, conv.activeTurn!.turnId);
       if (activeIdx >= 0) {
         conv.turns[activeIdx] = { ...conv.turns[activeIdx], lastActivityAt: now };
       }
@@ -618,6 +468,7 @@ export function applyConversationEventToStore(
           }
         }
         conv.turns.push(turn);
+        conv.turnsById.set(turn.turnId, conv.turns.length - 1);
         conv.activeTurn = turn;
         conv.cancelled = false;
         return;
@@ -637,7 +488,7 @@ export function applyConversationEventToStore(
           return;
         }
         {
-          const idx = conv.turns.findIndex((t) => t.turnId === event.turn_id);
+          const idx = turnIndex(conv, event.turn_id);
           if (idx < 0) {
             // activeTurn 匹配但 turn 缺失（不应发生）：缓冲保底，不丢字。
             conv.pendingDeltas = [
@@ -657,9 +508,41 @@ export function applyConversationEventToStore(
           if (conv.activeTurn?.turnId === event.turn_id) conv.activeTurn = updated;
         }
         return;
+      case "block_checkpoint": {
+        // A1 replaceable 完整值：覆盖写入；turn 未就绪时忽略（下次 checkpoint 自愈）。
+        if (conv.activeTurn?.turnId !== event.turn_id) return;
+        const idx = turnIndex(conv, event.turn_id);
+        if (idx < 0) return;
+        const turn = conv.turns[idx];
+        const rounds = [...turn.rounds];
+        const rIdx = rounds.findIndex((r) => r.roundNum === event.round_num);
+        if (rIdx >= 0) {
+          const r = rounds[rIdx];
+          rounds[rIdx] = {
+            ...r,
+            thinking: event.kind === "thinking" ? event.text : r.thinking,
+            answer: event.kind === "answering" ? event.text : r.answer,
+          };
+        } else {
+          rounds.push({
+            roundNum: event.round_num,
+            thinking: event.kind === "thinking" ? event.text : "",
+            answer: event.kind === "answering" ? event.text : "",
+            isFinal: false,
+          });
+        }
+        const updated = {
+          ...turn,
+          rounds,
+          lastRoundNum: Math.max(turn.lastRoundNum, event.round_num),
+        };
+        conv.turns[idx] = updated;
+        if (conv.activeTurn?.turnId === event.turn_id) conv.activeTurn = updated;
+        return;
+      }
       case "round_completed": {
         if (!conv.activeTurn || conv.activeTurn.turnId !== event.turn_id) return;
-        const idx = conv.turns.findIndex((t) => t.turnId === event.turn_id);
+        const idx = turnIndex(conv, event.turn_id);
         if (idx < 0) return;
         const turn = conv.turns[idx];
         const rounds = [...turn.rounds];
@@ -706,7 +589,7 @@ export function applyConversationEventToStore(
       case "turn_completed":
         conv.pendingDeltas = conv.pendingDeltas.filter((d) => d.turnId !== event.turn_id);
         {
-          const idx = conv.turns.findIndex((t) => t.turnId === event.turn_id);
+          const idx = turnIndex(conv, event.turn_id);
           if (idx >= 0) {
             // StoreNode 窄化后 status 联合仍可能被宽化：显式标注 TurnView。
             const updated: TurnView = { ...(conv.turns[idx] as TurnView), status: "completed" };
@@ -719,7 +602,7 @@ export function applyConversationEventToStore(
         conv.pendingDeltas = conv.pendingDeltas.filter((d) => d.turnId !== event.turn_id);
         {
           const failure = { code: event.error.code, message: event.error.message };
-          const idx = conv.turns.findIndex((t) => t.turnId === event.turn_id);
+          const idx = turnIndex(conv, event.turn_id);
           if (idx >= 0) {
             const updated: TurnView = { ...(conv.turns[idx] as TurnView), status: "failed", failure };
             conv.turns[idx] = updated;
@@ -750,8 +633,7 @@ export function applyConversationEventToStore(
       default:
         return;
     }
-  });
-}
+  }
 
 // ────────────────────────────────────────────────────────────────────────────
 // ToolStore
@@ -853,17 +735,14 @@ export function toolReducer(state: ToolState, event: ToolEvent): ToolState {
     case "tool_progress": {
       const card = state.cards.find((candidate) => candidate.toolCallId === event.tool_call_id);
       if (!card) return state;
-      const combined = event.seq_start === card.progressSeqEnd
-        ? `${card.progressTail}${event.chunk}`
-        : event.chunk;
-      const maxTail = 128 * 1024;
-      const trimmed = Math.max(0, combined.length - maxTail);
+      // A2 尾部协议：事件携带完整渲染尾部（后端保证 ≤4KB），总是替换而非拼接；
+      // seq 不连续 / 丢 chunk 由下一次尾部自愈（丢字风险消除）。
       return patchCard(state, event.tool_call_id, {
-        progressTail: trimmed > 0 ? combined.slice(-maxTail) : combined,
+        progressTail: event.chunk,
         progressStream: event.stream === "stderr" ? "stderr" : "stdout",
         progressSeqEnd: event.seq_end,
-        droppedBytes: event.dropped_bytes + trimmed,
-        truncated: event.truncated || trimmed > 0,
+        droppedBytes: event.dropped_bytes,
+        truncated: event.truncated,
       });
     }
     case "tool_finished":
@@ -974,28 +853,3 @@ export class AppliedEventRegistry {
   }
 }
 
-/** 应用一个信封（幂等 + 按频道分发）。返回是否发生了状态变更。 */
-export function applyEnvelope(
-  stores: RingingStores,
-  envelope: RingingEventEnvelope,
-  applied: AppliedEventRegistry,
-): boolean {
-  if (!applied.apply(envelope)) return false;
-  applyEnvelopeUnchecked(stores, envelope.event);
-  return true;
-}
-
-/** 无幂等检查的应用（snapshot 重建时直接 apply）。 */
-export function applyEnvelopeUnchecked(stores: RingingStores, event: RingingEvent): void {
-  switch (event.channel) {
-    case "control":
-      stores.control = controlReducer(stores.control, event);
-      break;
-    case "conversation":
-      stores.conversation = conversationReducer(stores.conversation, event);
-      break;
-    case "tool":
-      stores.tool = toolReducer(stores.tool, event);
-      break;
-  }
-}

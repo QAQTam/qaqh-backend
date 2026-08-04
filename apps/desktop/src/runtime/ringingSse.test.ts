@@ -9,11 +9,7 @@ import type { RingingEventEnvelope } from "../lib/types/ringing";
 
 function envelope(streamSeq: number, eventId: string): RingingEventEnvelope {
   return {
-    schema: "deepx.Ringing",
-    version: 1,
-    channel: "tool",
     delivery: "reliable",
-    server_epoch: "epoch-1",
     seed: "s1",
     stream_seq: streamSeq,
     channel_seq: 1,
@@ -71,7 +67,7 @@ describe("cursorSeqFromId", () => {
 
 describe("envelopeToBatch", () => {
   it("builds a whole-batch payload without expanding events", () => {
-    const batch = envelopeToBatch("tool", envelope(5, "e5"));
+    const batch = envelopeToBatch("tool", envelope(5, "e5"), "epoch-1");
     expect(batch.channel).toBe("tool");
     expect(batch.seed).toBe("s1");
     expect(batch.from_stream_seq).toBe(5);
@@ -81,15 +77,15 @@ describe("envelopeToBatch", () => {
   });
 
   it("rejects malformed envelope metadata at the transport boundary", () => {
-    expect(() => envelopeToBatch("tool", { ...envelope(5, "e5"), seed: "" })).toThrow(
+    expect(() => envelopeToBatch("tool", { ...envelope(5, "e5"), seed: "" }, "epoch-1")).toThrow(
       "invalid Ringing stream sequence",
     );
     expect(() => envelopeToBatch("tool", {
       ...envelope(5, "e5"),
       event: { ...envelope(5, "e5").event, channel: "conversation" } as never,
-    })).toThrow("invalid Ringing stream sequence");
+    }, "epoch-1")).toThrow("invalid Ringing stream sequence");
     expect(() => envelopeToBatch("tool", {
       ...envelope(Number.MAX_SAFE_INTEGER + 1, "e5"),
-    })).toThrow("invalid Ringing stream sequence");
+    }, "epoch-1")).toThrow("invalid Ringing stream sequence");
   });
 });

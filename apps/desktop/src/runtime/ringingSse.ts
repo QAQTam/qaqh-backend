@@ -40,16 +40,12 @@ export function parseSseFrame(frame: string): ParsedSseFrame {
 export function envelopeToBatch(
   channel: RingingChannel,
   envelope: RingingEventEnvelope,
+  serverEpoch: string,
 ): RingingEventBatch {
-  if (envelope.channel !== channel) {
-    throw new Error(`Ringing SSE channel mismatch: expected ${channel}, got ${envelope.channel}`);
-  }
-  if (envelope.schema !== "deepx.Ringing" || envelope.version !== 1) {
-    throw new Error("unsupported Ringing event envelope version");
-  }
+  // M4：信封已移除 schema/version/channel/server_epoch（帧 id 携带 epoch/channel，
+  // URL 携带协议版本）；事件自身 channel 仍校验与连接一致。
   if (
-    !envelope.server_epoch
-    || !envelope.seed
+    !envelope.seed
     || !envelope.event_id
     || (envelope.event as { channel?: unknown }).channel !== channel
     || !Number.isSafeInteger(envelope.stream_seq)
@@ -64,11 +60,11 @@ export function envelopeToBatch(
     throw new Error("invalid Ringing stream sequence");
   }
   return {
-    schema: envelope.schema,
-    version: envelope.version,
+    schema: "deepx.Ringing",
+    version: 1,
     channel,
     seed: envelope.seed,
-    server_epoch: envelope.server_epoch,
+    server_epoch: serverEpoch,
     from_stream_seq: envelope.stream_seq,
     to_stream_seq: envelope.stream_seq,
     envelopes: [envelope],

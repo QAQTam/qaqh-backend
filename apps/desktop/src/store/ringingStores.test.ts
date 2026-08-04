@@ -1,29 +1,24 @@
-import { createStore, snapshot } from "solid-js";
+import { createStore, flush, reconcile, snapshot, type StoreSetter } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import type { ConversationEvent, RingingEventEnvelope } from "../lib/types/ringing";
 import {
   AppliedEventRegistry,
   applyConversationSnapshot,
   applyConversationEventToStore,
-  applyEnvelope,
-  applyEnvelopeUnchecked,
-  conversationReducer,
   controlReducer,
   initialConversationState,
   initialControlState,
   initialRingingStores,
   initialToolState,
   toolReducer,
+  type ConversationState,
+  type RingingStores,
 } from "./ringingStores";
 import { selectRingingPresentation } from "./sessionPresentation";
 
 function envelope(event: RingingEventEnvelope["event"], eventId = "e1"): RingingEventEnvelope {
   return {
-    schema: "deepx.Ringing",
-    version: 1,
-    channel: event.channel,
     delivery: "reliable",
-    server_epoch: "epoch-1",
     seed: "s1",
     stream_seq: 1,
     channel_seq: 1,
@@ -31,6 +26,39 @@ function envelope(event: RingingEventEnvelope["event"], eventId = "e1"): Ringing
     event_id: eventId,
     event,
   };
+}
+
+/**
+ * C1：conversationReducer 双实现已删除——测试通过 Solid store + draft 应用器
+ * 构建纯 state（与生产路径同一实现）。
+ */
+function makeReducer(seed: string) {
+  const [stores, setStores] = createStore(initialRingingStores(seed));
+  return (event: ConversationEvent) => {
+    applyConversationEventToStore(setStores, event);
+    return snapshot(stores.conversation) as ReturnType<typeof initialConversationState>;
+  };
+}
+
+/** 幂等 + 按频道分发（生产路径：conversation 走 path 应用器，control/tool 走 draft setter）。 */
+function applyEnvelopeWith(
+  setStores: StoreSetter<RingingStores>,
+  env: RingingEventEnvelope,
+  applied: AppliedEventRegistry,
+): boolean {
+  if (!applied.apply(env)) return false;
+  switch (env.event.channel) {
+    case "control":
+      setStores((draft) => { draft.control = controlReducer(draft.control, env.event as never); });
+      break;
+    case "conversation":
+      applyConversationEventToStore(setStores, env.event as ConversationEvent);
+      break;
+    case "tool":
+      setStores((draft) => { draft.tool = toolReducer(draft.tool, env.event as never); });
+      break;
+  }
+  return true;
 }
 
 describe("controlReducer", () => {
@@ -82,25 +110,25 @@ describe("controlReducer", () => {
   });
 });
 
-describe("conversationReducer", () => {
+describe("conversation events (single path applier)", () => {
   it("assembles a turn from deltas and terminal", () => {
-    let state = initialConversationState("s1");
-    state = conversationReducer(state, { type: "turn_started", turn_id: "t1", user_text: "hi" });
-    state = conversationReducer(state, {
+    const reduce = makeReducer("s1");
+    let state = reduce({ type: "turn_started", turn_id: "t1", user_text: "hi" });
+    state = reduce({
       type: "round_delta",
       turn_id: "t1",
       round_num: 0,
       kind: "thinking",
       delta: "think",
     });
-    state = conversationReducer(state, {
+    state = reduce({
       type: "round_delta",
       turn_id: "t1",
       round_num: 0,
       kind: "answering",
       delta: "hello",
     });
-    state = conversationReducer(state, {
+    state = reduce({
       type: "round_completed",
       turn_id: "t1",
       round_num: 0,
@@ -109,16 +137,16 @@ describe("conversationReducer", () => {
       output_ref: null,
       is_final: true,
     });
-    state = conversationReducer(state, { type: "turn_completed", turn_id: "t1", stop_reason: null, usage: null });
+    state = reduce({ type: "turn_completed", turn_id: "t1", stop_reason: null, usage: null });
     expect(state.activeTurn?.status).toBe("completed");
     expect(state.activeTurn?.rounds[0].answer).toBe("hello");
     expect(state.activeTurn?.rounds[0].thinking).toBe("think");
   });
 
   it("retains the typed failure carried by turn_failed", () => {
-    let state = initialConversationState("s1");
-    state = conversationReducer(state, { type: "turn_started", turn_id: "t1", user_text: "hi" });
-    state = conversationReducer(state, {
+    const reduce = makeReducer("s1");
+    let state = reduce({ type: "turn_started", turn_id: "t1", user_text: "hi" });
+    state = reduce({
       type: "turn_failed",
       turn_id: "t1",
       error: {
@@ -137,16 +165,16 @@ describe("conversationReducer", () => {
   });
 
   it("buffers deltas arriving before turn_started and replays them losslessly", () => {
-    let state = initialConversationState("s1");
+    const reduce = makeReducer("s1");
     // 乱序/快照间隙：turn_started 尚未到达
-    state = conversationReducer(state, {
+    let state = reduce({
       type: "round_delta",
       turn_id: "t1",
       round_num: 0,
       kind: "thinking",
       delta: "前",
     });
-    state = conversationReducer(state, {
+    state = reduce({
       type: "round_delta",
       turn_id: "t1",
       round_num: 0,
@@ -156,16 +184,23 @@ describe("conversationReducer", () => {
     expect(state.turns).toHaveLength(0);
     expect(state.pendingDeltas).toHaveLength(2);
 
-    state = conversationReducer(state, { type: "turn_started", turn_id: "t1", user_text: "hi" });
+    state = reduce({ type: "turn_started", turn_id: "t1", user_text: "hi" });
     expect(state.activeTurn?.rounds[0].thinking).toBe("前半");
     expect(state.pendingDeltas).toHaveLength(0);
   });
 
   it("does not truncate a high-frequency stream that arrives before turn_started", () => {
-    let state = initialConversationState("s1");
+    const reduce = makeReducer("s1");
     const chunks = Array.from({ length: 750 }, (_, index) => String(index % 10));
-    for (const delta of chunks) {
-      state = conversationReducer(state, {
+    let state = reduce({
+      type: "round_delta",
+      turn_id: "t1",
+      round_num: 0,
+      kind: "answering",
+      delta: chunks[0]!,
+    });
+    for (const delta of chunks.slice(1)) {
+      state = reduce({
         type: "round_delta",
         turn_id: "t1",
         round_num: 0,
@@ -174,16 +209,16 @@ describe("conversationReducer", () => {
       });
     }
 
-    state = conversationReducer(state, { type: "turn_started", turn_id: "t1", user_text: "hi" });
+    state = reduce({ type: "turn_started", turn_id: "t1", user_text: "hi" });
     expect(state.activeTurn?.rounds[0].answer).toBe(chunks.join(""));
     expect(state.pendingDeltas).toHaveLength(0);
   });
 
   it("uses the authoritative snapshot to repair an already-created streaming turn", () => {
-    let state = initialConversationState("s1");
+    const reduce = makeReducer("s1");
     // 流式现场：活动 turn 已有部分内容，快照合并时不得覆盖
-    state = conversationReducer(state, { type: "turn_started", turn_id: "t-live", user_text: "live" });
-    state = conversationReducer(state, {
+    let state = reduce({ type: "turn_started", turn_id: "t-live", user_text: "live" });
+    state = reduce({
       type: "round_delta",
       turn_id: "t-live",
       round_num: 0,
@@ -233,8 +268,8 @@ describe("conversationReducer", () => {
   });
 
   it("keeps an existing live model when the snapshot omits it", () => {
-    let state = initialConversationState("s1");
-    state = conversationReducer(state, {
+    const reduce = makeReducer("s1");
+    let state = reduce({
       type: "usage_updated",
       turn_id: "t1",
       round_num: 0,
@@ -284,9 +319,23 @@ describe("toolReducer", () => {
       turn_id: "t1",
       round_num: 0,
       stream: "stdout",
-      seq_start: 1,
+      // A2 尾部协议：chunk 是完整渲染尾部（替换语义，不是增量）。
+      seq_start: 0,
       seq_end: 2,
-      chunk: "b",
+      chunk: "ab",
+      dropped_bytes: 0,
+      truncated: false,
+    });
+    state = toolReducer(state, {
+      type: "tool_progress",
+      tool_call_id: "c1",
+      turn_id: "t1",
+      round_num: 0,
+      stream: "stdout",
+      // seq 不连续（丢 chunk）→ 尾部仍是完整值，替换自愈，不丢字。
+      seq_start: 0,
+      seq_end: 3,
+      chunk: "abc",
       dropped_bytes: 0,
       truncated: false,
     });
@@ -305,7 +354,8 @@ describe("toolReducer", () => {
     });
     const card = state.cards.find((c) => c.toolCallId === "c1");
     expect(card?.status).toBe("finished");
-    expect(card?.progressTail).toBe("ab");
+    expect(card?.progressTail).toBe("abc");
+    expect(card?.progressSeqEnd).toBe(3);
   });
 
   it("permission requested sets pending flag", () => {
@@ -327,9 +377,9 @@ describe("toolReducer", () => {
   });
 });
 
-describe("applyEnvelope + idempotency", () => {
+describe("envelope idempotency + channel dispatch (production path)", () => {
   it("applies each event_id exactly once", () => {
-    const stores = initialRingingStores("s1");
+    const [stores, setStores] = createStore(initialRingingStores("s1"));
     const applied = new AppliedEventRegistry();
     const ev = {
       type: "turn_started",
@@ -337,50 +387,68 @@ describe("applyEnvelope + idempotency", () => {
       user_text: "hi",
     } as const;
     const env = envelope({ channel: "conversation", ...ev });
-    expect(applyEnvelope(stores, env, applied)).toBe(true);
+    expect(applyEnvelopeWith(setStores, env, applied)).toBe(true);
     // 幂等：相同 event_id 第二次应用被拒绝
-    expect(applyEnvelope(stores, env, applied)).toBe(false);
+    expect(applyEnvelopeWith(setStores, env, applied)).toBe(false);
+    flush();
     expect(stores.conversation.activeTurn?.turnId).toBe("t1");
   });
 
   it("unchecked apply handles all three channels", () => {
-    const stores = initialRingingStores("s1");
-    applyEnvelopeUnchecked(stores, { channel: "control", type: "agent_lifecycle_changed", state: "ready" });
-    applyEnvelopeUnchecked(stores, { channel: "conversation", type: "turn_started", turn_id: "t1", user_text: "hi" });
-    applyEnvelopeUnchecked(stores, {
-      channel: "tool",
-      type: "tool_started",
-      tool_call_id: "c1",
-      turn_id: "t1",
-      round_num: 0,
-      name: "exec",
-    });
+    const [stores, setStores] = createStore(initialRingingStores("s1"));
+    const applied = new AppliedEventRegistry();
+    applyEnvelopeWith(
+      setStores,
+      envelope({ channel: "control", type: "agent_lifecycle_changed", state: "ready" }, "e-control"),
+      applied,
+    );
+    applyEnvelopeWith(
+      setStores,
+      envelope({ channel: "conversation", type: "turn_started", turn_id: "t1", user_text: "hi" }, "e-conversation"),
+      applied,
+    );
+    applyEnvelopeWith(
+      setStores,
+      envelope({
+        channel: "tool",
+        type: "tool_started",
+        tool_call_id: "c1",
+        turn_id: "t1",
+        round_num: 0,
+        name: "exec",
+      }, "e-tool"),
+      applied,
+    );
+    flush();
     expect(stores.control.agentLifecycle).toBe("ready");
     expect(stores.conversation.activeTurn?.turnId).toBe("t1");
     expect(stores.tool.cards[0].status).toBe("running");
   });
 
   it("restores usage counters from snapshot and does not count duplicate live envelopes", () => {
-    const stores = initialRingingStores("s1");
-    stores.conversation = applyConversationSnapshot(
-      stores.conversation,
-      [],
-      null,
-      {
-        prompt_tokens: 10, completion_tokens: 2, total_tokens: 12,
-        prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 10,
-        reasoning_tokens: 0, cache_usage_reported: true,
-      },
-      {
-        prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
-        prompt_cache_hit_tokens: 40, prompt_cache_miss_tokens: 60,
-        reasoning_tokens: 5, cache_usage_reported: true,
-      },
-      3,
-      2,
-      7,
-      false,
-    );
+    const [stores, setStores] = createStore(initialRingingStores("s1"));
+    setStores((draft) => {
+      draft.conversation = applyConversationSnapshot(
+        draft.conversation as ConversationState,
+        [],
+        null,
+        {
+          prompt_tokens: 10, completion_tokens: 2, total_tokens: 12,
+          prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 10,
+          reasoning_tokens: 0, cache_usage_reported: true,
+        },
+        {
+          prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+          prompt_cache_hit_tokens: 40, prompt_cache_miss_tokens: 60,
+          reasoning_tokens: 5, cache_usage_reported: true,
+        },
+        3,
+        2,
+        7,
+        false,
+      );
+    });
+    flush();
     expect(stores.conversation.usageRequestCount).toBe(3);
     expect(stores.conversation.cacheReportedRequestCount).toBe(2);
     expect(stores.conversation.usageTotals.total_tokens).toBe(120);
@@ -400,8 +468,9 @@ describe("applyEnvelope + idempotency", () => {
       model: "m",
     };
     const live = envelope(usageEvent, "usage-1");
-    expect(applyEnvelope(stores, live, applied)).toBe(true);
-    expect(applyEnvelope(stores, live, applied)).toBe(false);
+    expect(applyEnvelopeWith(setStores, live, applied)).toBe(true);
+    expect(applyEnvelopeWith(setStores, live, applied)).toBe(false);
+    flush();
     expect(stores.conversation.usageRequestCount).toBe(4);
     expect(stores.conversation.cacheReportedRequestCount).toBe(3);
     expect(stores.conversation.usageTotals.total_tokens).toBe(122);
@@ -431,21 +500,18 @@ describe("newly dual-emitted domain events", () => {
   });
 
   it("usage_updated and provider_tool_status are stored", () => {
-    let state = initialConversationState("s1");
-    state = conversationReducer(
-      state,
-      {
-        type: "usage_updated",
-        turn_id: "t1",
-        round_num: 0,
-        usage: { total_tokens: 10 },
-        context_limit: 1000,
-        model: "m",
-      } as never,
-    );
+    const reduce = makeReducer("s1");
+    let state = reduce({
+      type: "usage_updated",
+      turn_id: "t1",
+      round_num: 0,
+      usage: { total_tokens: 10 },
+      context_limit: 1000,
+      model: "m",
+    } as never);
     expect(state.lastUsage?.contextLimit).toBe(1000);
     expect((state.lastUsage?.usage as { total_tokens: number }).total_tokens).toBe(10);
-    state = conversationReducer(state, {
+    state = reduce({
       type: "provider_tool_status",
       turn_id: "t1",
       round_num: 0,
@@ -490,7 +556,7 @@ describe("newly dual-emitted domain events", () => {
   });
 });
 
-describe("applyConversationEventToStore (path updates match conversationReducer)", () => {
+describe("applyConversationEventToStore (single path applier)", () => {
   function streamingSequence(): ConversationEvent[] {
     return [
       { type: "turn_started", turn_id: "t1", user_text: "hi" },
@@ -555,42 +621,45 @@ describe("applyConversationEventToStore (path updates match conversationReducer)
     ];
   }
 
-  it("converges with conversationReducer across a full streaming sequence", () => {
+  it("applies a full streaming sequence through the path applier", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-04T00:00:00.000Z"));
     try {
       const seq = streamingSequence();
-
-      // reducer 链（语义基准）
-      let reduced = initialConversationState("s-path");
-      for (const event of seq) reduced = conversationReducer(reduced, event);
-
-      // path 链（生产路径）
       const [stores, setStores] = createStore(initialRingingStores("s-path"));
       for (const event of seq) applyConversationEventToStore(setStores, event);
-
-      expect(JSON.parse(JSON.stringify(snapshot(stores.conversation)))).toEqual(
-        JSON.parse(JSON.stringify(reduced)),
-      );
+      const conv = JSON.parse(JSON.stringify(snapshot(stores.conversation)));
+      expect(conv).toMatchObject({
+        cancelled: true,
+        staleRevision: 1,
+        compactStatus: "completed",
+        compactCompletionRevision: 1,
+      });
+      const turns = conv.turns as Array<{
+        turnId: string;
+        status: string;
+        rounds: Array<{ thinking?: string; answer?: string }>;
+      }>;
+      const t1 = turns.find((t) => t.turnId === "t1")!;
+      expect(t1.status).toBe("completed");
+      expect(t1.rounds[0].thinking).toBe("let me think");
+      expect(t1.rounds[0].answer).toBe("Hello world");
+      const t2 = turns.find((t) => t.turnId === "t2")!;
+      expect(t2.status).toBe("failed");
+      expect(t2.rounds[0].answer).toBe("buffered text");
+      expect(t2.rounds[1].answer).toBe("final");
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("tracks the compact lifecycle through reducer and path updater", () => {
+  it("tracks the compact lifecycle through the path updater", () => {
     const events: ConversationEvent[] = [
       { type: "compact_started", compact_id: "c-1", turns_total: 10, turns_keeping: 3 },
       { type: "compact_progress", compact_id: "c-1", delta: "前段" },
       { type: "compact_progress", compact_id: "c-1", delta: "后段" },
       { type: "compact_finished", compact_id: "c-1", status: "completed", turns_compacted: 7 },
     ];
-
-    let reduced = initialConversationState("s-compact");
-    for (const event of events) reduced = conversationReducer(reduced, event);
-    expect(reduced.compactStatus).toBe("completed");
-    expect(reduced.compactText).toBe("前段后段");
-    expect(reduced.compactTurnsCompacted).toBe(7);
-    expect(reduced.compactCompletionRevision).toBe(1);
 
     const [stores, setStores] = createStore(initialRingingStores("s-compact"));
     for (const event of events) applyConversationEventToStore(setStores, event);
@@ -603,15 +672,11 @@ describe("applyConversationEventToStore (path updates match conversationReducer)
     });
   });
 
-  it("marks compact failure with a bumped revision (reducer & path converge)", () => {
+  it("marks compact failure with a bumped revision", () => {
     const events: ConversationEvent[] = [
       { type: "compact_started", compact_id: "c-2", turns_total: 5, turns_keeping: 1 },
       { type: "compact_finished", compact_id: "c-2", status: "failed" },
     ];
-    let reduced = initialConversationState("s-compact-f");
-    for (const event of events) reduced = conversationReducer(reduced, event);
-    expect(reduced.compactStatus).toBe("failed");
-    expect(reduced.compactCompletionRevision).toBe(1);
 
     const [stores, setStores] = createStore(initialRingingStores("s-compact-f"));
     for (const event of events) applyConversationEventToStore(setStores, event);
@@ -655,5 +720,97 @@ describe("applyConversationEventToStore (path updates match conversationReducer)
     expect(p3.turns.find(t => t.turnId === "t2")).not.toBe(
       p2.turns.find(t => t.turnId === "t2"),
     );
+  });
+
+  it("block_checkpoint overwrites round text with the complete value (reducer & path converge)", () => {
+    const events: ConversationEvent[] = [
+      { type: "turn_started", turn_id: "t1", user_text: "hello" },
+      { type: "round_delta", turn_id: "t1", round_num: 0, kind: "thinking", delta: "tho" },
+      { type: "round_delta", turn_id: "t1", round_num: 0, kind: "thinking", delta: "ught" },
+      { type: "block_checkpoint", turn_id: "t1", round_num: 0, kind: "thinking", text: "thought-in-full", char_count: 15 },
+      { type: "block_checkpoint", turn_id: "t1", round_num: 0, kind: "thinking", text: "thought-in-full-v2", char_count: 18 },
+      { type: "block_checkpoint", turn_id: "t1", round_num: 0, kind: "answering", text: "answer", char_count: 6 },
+    ];
+    const reduce = makeReducer("s-cp");
+    let reduced = reduce(events[0]!);
+    for (const event of events.slice(1)) reduced = reduce(event);
+    const round = reduced.turns[0]!.rounds[0]!;
+    expect(round.thinking).toBe("thought-in-full-v2");
+    expect(round.answer).toBe("answer");
+
+    const [stores, setStores] = createStore(initialRingingStores("s-cp"));
+    for (const event of events) applyConversationEventToStore(setStores, event);
+    const conv = snapshot(stores.conversation);
+    expect(conv.turns[0]!.rounds[0]!.thinking).toBe("thought-in-full-v2");
+    expect(conv.turns[0]!.rounds[0]!.answer).toBe("answer");
+  });
+
+  it("block_checkpoint before turn_started is ignored and self-heals on the next one", () => {
+    const reduce = makeReducer("s-cp-early");
+    let reduced = reduce({
+      type: "block_checkpoint",
+      turn_id: "t9",
+      round_num: 0,
+      kind: "answering",
+      text: "early",
+      char_count: 5,
+    });
+    expect(reduced.turns).toHaveLength(0);
+    expect(reduced.pendingDeltas).toHaveLength(0);
+
+    // turn 就绪后的下一次 checkpoint 覆盖即自愈（不依赖 delta 拼接）。
+    reduced = reduce({ type: "turn_started", turn_id: "t9", user_text: "hi" });
+    reduced = reduce({
+      type: "block_checkpoint",
+      turn_id: "t9",
+      round_num: 0,
+      kind: "answering",
+      text: "full",
+      char_count: 4,
+    });
+    expect(reduced.turns[0]!.rounds[0]!.answer).toBe("full");
+  });
+
+  it("snapshot reconcile keeps unchanged turn identity and preserves local-only turns (C3)", () => {
+    const [stores, setStores] = createStore(initialRingingStores("s-c3"));
+    // t1 历史完成，t2 流式现场（快照未覆盖）
+    applyConversationEventToStore(setStores, { type: "turn_started", turn_id: "t1", user_text: "old" });
+    applyConversationEventToStore(setStores, {
+      type: "round_delta", turn_id: "t1", round_num: 0, kind: "answering", delta: "done",
+    });
+    applyConversationEventToStore(setStores, { type: "turn_completed", turn_id: "t1", stop_reason: null, usage: null });
+    applyConversationEventToStore(setStores, { type: "turn_started", turn_id: "t2", user_text: "live" });
+    flush();
+    const beforeT1 = stores.conversation.turns.find((t) => t.turnId === "t1");
+    expect(beforeT1).toBeDefined();
+
+    // 快照只含 t1（权威；内容与本地一致）
+    setStores((draft) => {
+      const conv = draft.conversation as ConversationState;
+      const next = applyConversationSnapshot(
+        { ...conv, compactStatus: null, cancelled: false },
+        [{
+          turn_id: "t1",
+          user_text: "old",
+          rounds: [{ round_num: 0, is_final: true, thinking: "", answer: "done" }],
+        }],
+        null,
+      );
+      reconcile(next.turns, "turn_id")(conv.turns);
+      conv.turnsById = next.turnsById;
+      conv.activeTurn = next.activeTurn;
+      conv.lastUsage = next.lastUsage;
+      conv.usageTotals = next.usageTotals;
+      conv.usageRequestCount = next.usageRequestCount;
+      conv.cacheReportedRequestCount = next.cacheReportedRequestCount;
+      conv.totalTurns = next.totalTurns;
+      conv.hasMore = next.hasMore;
+    });
+    flush();
+
+    // 本地独有 t2 保留（快照只补缺失/覆盖，不删除）
+    expect(stores.conversation.turns.map((t) => t.turnId)).toEqual(["t1", "t2"]);
+    // t1 内容未变 → 身份保持（恢复零全量重渲染）
+    expect(stores.conversation.turns.find((t) => t.turnId === "t1")).toBe(beforeT1);
   });
 });

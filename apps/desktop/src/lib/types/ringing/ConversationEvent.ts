@@ -9,7 +9,7 @@ import type { UsageInfo } from "./UsageInfo";
 /**
  * Conversation 频道领域事件。
  */
-export type ConversationEvent = { "type": "turn_started", turn_id: string, user_text: string, } | { "type": "turn_completed", turn_id: string, stop_reason?: string | null, usage?: UsageInfo | null, } | { "type": "turn_failed", turn_id: string, error: DomainError, } | { "type": "round_delta", turn_id: string, round_num: number, kind: RoundDeltaKind, delta: string, } | { "type": "round_completed", turn_id: string, round_num: number, thinking?: string | null, answer?: string | null, output_ref?: ContentRef | null,
+export type ConversationEvent = { "type": "turn_started", turn_id: string, user_text: string, } | { "type": "turn_completed", turn_id: string, stop_reason?: string | null, usage?: UsageInfo | null, } | { "type": "turn_failed", turn_id: string, error: DomainError, } | { "type": "round_delta", turn_id: string, round_num: number, kind: RoundDeltaKind, delta: string, } | { "type": "block_checkpoint", turn_id: string, round_num: number, kind: RoundDeltaKind, text: string, char_count: number, } | { "type": "round_completed", turn_id: string, round_num: number, thinking?: string | null, answer?: string | null, output_ref?: ContentRef | null,
 /**
  * true = 本回合最后一个 round。
  */

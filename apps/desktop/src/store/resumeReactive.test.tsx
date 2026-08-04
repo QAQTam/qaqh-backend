@@ -30,11 +30,7 @@ function batch(
     from_stream_seq: seq,
     to_stream_seq: seq,
     envelopes: [{
-      schema: "deepx.Ringing",
-      version: 1,
-      channel,
       delivery: "reliable",
-      server_epoch: "epoch-2",
       seed,
       stream_seq: seq,
       channel_seq: seq,

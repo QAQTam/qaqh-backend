@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { createStore, flush, type StoreSetter } from "solid-js";
 import {
-  conversationReducer,
+  applyConversationEventToStore,
   controlReducer,
   initialRingingStores,
   toolReducer,
+  type RingingStores,
 } from "./ringingStores";
 import {
   emptySkillsPresentation,
@@ -12,22 +14,41 @@ import {
 } from "./sessionPresentation";
 import { createRawSessionState } from "./rawSession";
 
+/** tool/control 域经 draft setter 应用（Solid store proxy 只读，禁止直接赋值）。 */
+function applyTool(setStores: StoreSetter<RingingStores>, event: Parameters<typeof toolReducer>[1]): void {
+  setStores((draft) => { draft.tool = toolReducer(draft.tool, event); });
+}
+function applyControl(setStores: StoreSetter<RingingStores>, event: Parameters<typeof controlReducer>[1]): void {
+  setStores((draft) => { draft.control = controlReducer(draft.control, event); });
+}
+
+/** flush store 写入后投影（Solid 2 写是微任务批：同栈读为旧值，flush 同步生效）。 */
+function present(
+  seed: string,
+  stores: Parameters<typeof selectRingingPresentation>[1],
+  fallback?: Parameters<typeof selectRingingPresentation>[2],
+  options?: Parameters<typeof selectRingingPresentation>[3],
+) {
+  flush();
+  return selectRingingPresentation(seed, stores, fallback, options);
+}
+
 describe("selectRingingPresentation", () => {
   it("projects Ringing conversation data without legacy usage arguments", () => {
-    const stores = initialRingingStores("seed-presentation");
-    let conversation = conversationReducer(stores.conversation, {
+    const [stores, setStores] = createStore(initialRingingStores("seed-presentation"));
+    applyConversationEventToStore(setStores, {
       type: "turn_started",
       turn_id: "turn-1",
       user_text: "hello",
     });
-    conversation = conversationReducer(conversation, {
+    applyConversationEventToStore(setStores, {
       type: "round_delta",
       turn_id: "turn-1",
       round_num: 0,
       kind: "answering",
       delta: "world",
     });
-    conversation = conversationReducer(conversation, {
+    applyConversationEventToStore(setStores, {
       type: "usage_updated",
       turn_id: "turn-1",
       round_num: 0,
@@ -42,9 +63,8 @@ describe("selectRingingPresentation", () => {
       context_limit: 1000,
       model: "test-model",
     });
-    stores.conversation = conversation;
 
-    const presentation = selectRingingPresentation("seed-presentation", stores);
+    const presentation = present("seed-presentation", stores);
 
     expect(presentation.session.model).toBe("test-model");
     expect(presentation.session.contextLimit).toBe(1000);
@@ -54,7 +74,7 @@ describe("selectRingingPresentation", () => {
   });
 
   it("keeps an empty conversation projection stable", () => {
-    const presentation = selectRingingPresentation(
+    const presentation = present(
       "seed-empty",
       initialRingingStores("seed-empty"),
     );
@@ -65,44 +85,44 @@ describe("selectRingingPresentation", () => {
   });
 
   it("projects the compact lifecycle into presentation status", () => {
-    const stores = initialRingingStores("seed-compact");
-    stores.conversation = conversationReducer(stores.conversation, {
+    const [stores, setStores] = createStore(initialRingingStores("seed-compact"));
+    applyConversationEventToStore(setStores, {
       type: "compact_started",
       compact_id: "c-1",
       turns_total: 10,
       turns_keeping: 3,
     });
-    let presentation = selectRingingPresentation("seed-compact", stores);
+    let presentation = present("seed-compact", stores);
     expect(presentation.compact.active).toBe(true);
     expect(presentation.compact.status).toBe("active");
 
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "compact_progress",
       compact_id: "c-1",
       delta: "摘要正文",
     });
-    presentation = selectRingingPresentation("seed-compact", stores);
+    presentation = present("seed-compact", stores);
     expect(presentation.compact.text).toBe("摘要正文");
 
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "compact_finished",
       compact_id: "c-1",
       status: "completed",
       turns_compacted: 7,
     });
-    presentation = selectRingingPresentation("seed-compact", stores);
+    presentation = present("seed-compact", stores);
     expect(presentation.compact.active).toBe(false);
     expect(presentation.compact.status).toBe("complete");
     expect(presentation.compact.turnsCompacted).toBe(7);
     expect(presentation.compact.completionRevision).toBe(1);
 
     // failed → failed 展示态（active 必须为 false，避免永久 spinner）
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "compact_finished",
       compact_id: "c-2",
       status: "failed",
     });
-    presentation = selectRingingPresentation("seed-compact", stores);
+    presentation = present("seed-compact", stores);
     expect(presentation.compact.active).toBe(false);
     expect(presentation.compact.status).toBe("failed");
   });
@@ -112,26 +132,26 @@ describe("selectRingingPresentation", () => {
     const fallback = createRawSessionState("seed-preserve");
     fallback.providerRetry = { turnId: "t", roundNum: 1, attempt: 1, maxRetries: 2, delaySecs: 1 };
     fallback.telemetry = [{ ts: 1, prompt_tokens: 1, completion_tokens: 1, total_tokens: 2, reasoning_tokens: 0, cache_hit: 0, cache_miss: 0, cache_available: false, sample_key: "x" }];
-    const presentation = selectRingingPresentation("seed-preserve", stores, fallback);
+    const presentation = present("seed-preserve", stores, fallback);
     expect(presentation.providerRetry).toEqual(fallback.providerRetry);
     expect(presentation.telemetry).toEqual(fallback.telemetry);
   });
 
   it("keeps tool rounds, progress, and ask/plan payloads in the presentation", () => {
-    const stores = initialRingingStores("seed-details");
-    stores.conversation = conversationReducer(stores.conversation, {
+    const [stores, setStores] = createStore(initialRingingStores("seed-details"));
+    applyConversationEventToStore(setStores, {
       type: "turn_started",
       turn_id: "turn-1",
       user_text: "hello",
     });
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "round_delta",
       turn_id: "turn-1",
       round_num: 2,
       kind: "answering",
       delta: "working",
     });
-    stores.tool = toolReducer(stores.tool, {
+    applyTool(setStores, {
       type: "tool_call_prepared",
       tool_call_id: "call-1",
       turn_id: "turn-1",
@@ -139,7 +159,7 @@ describe("selectRingingPresentation", () => {
       name: "exec",
       args_so_far: "{\"command\":\"pwd\"}",
     });
-    stores.tool = toolReducer(stores.tool, {
+    applyTool(setStores, {
       type: "tool_progress",
       tool_call_id: "call-1",
       turn_id: "turn-1",
@@ -151,7 +171,7 @@ describe("selectRingingPresentation", () => {
       dropped_bytes: 0,
       truncated: false,
     });
-    stores.control = controlReducer(stores.control, {
+    applyControl(setStores, {
       type: "interaction_requested",
       interaction_id: "ask-1",
       turn_id: "turn-1",
@@ -159,7 +179,7 @@ describe("selectRingingPresentation", () => {
       questions: [{ id: "q1", question: "Continue?", options: ["yes"], allow_custom: true }],
     });
 
-    const presentation = selectRingingPresentation("seed-details", stores);
+    const presentation = present("seed-details", stores);
     const round = presentation.turns[0]?.rounds[0];
     expect(round?.toolCalls[0]).toMatchObject({
       id: "call-1",
@@ -176,14 +196,14 @@ describe("selectRingingPresentation", () => {
 
   it("reuses stable projections for unchanged turns across streaming deltas", () => {
     const seed = "seed-cache";
-    const stores = initialRingingStores(seed);
+    const [stores, setStores] = createStore(initialRingingStores(seed));
     // 历史 turn t1 完成
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "turn_started",
       turn_id: "t1",
       user_text: "first",
     });
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "round_delta",
       turn_id: "t1",
       round_num: 0,
@@ -191,29 +211,29 @@ describe("selectRingingPresentation", () => {
       delta: "first answer",
     });
 
-    const p1 = selectRingingPresentation(seed, stores);
+    const p1 = present(seed, stores);
     const t1a = p1.turns.find(t => t.turnId === "t1");
     expect(t1a).toBeDefined();
 
     // 新 turn t2 开始流式：t1 未变化，投影必须复用同一对象（引用稳定 →
     // Solid 跳过未变化子树，不重建 ProcessItem/Markdown 内容）。
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "turn_started",
       turn_id: "t2",
       user_text: "second",
     });
-    const p2 = selectRingingPresentation(seed, stores);
+    const p2 = present(seed, stores);
     expect(p2.turns.find(t => t.turnId === "t1")).toBe(t1a);
 
     // t2 流式 delta：t1 仍稳定；t2 自身是新建对象（内容变化）
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "round_delta",
       turn_id: "t2",
       round_num: 0,
       kind: "answering",
       delta: "streaming...",
     });
-    const p3 = selectRingingPresentation(seed, stores);
+    const p3 = present(seed, stores);
     expect(p3.turns.find(t => t.turnId === "t1")).toBe(t1a);
     const t2b = p2.turns.find(t => t.turnId === "t2");
     expect(p3.turns.find(t => t.turnId === "t2")).not.toBe(t2b);
@@ -221,20 +241,20 @@ describe("selectRingingPresentation", () => {
 
   it("rebuilds only the affected round when tool progress updates", () => {
     const seed = "seed-tool-cache";
-    const stores = initialRingingStores(seed);
-    stores.conversation = conversationReducer(stores.conversation, {
+    const [stores, setStores] = createStore(initialRingingStores(seed));
+    applyConversationEventToStore(setStores, {
       type: "turn_started",
       turn_id: "t1",
       user_text: "run",
     });
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "round_delta",
       turn_id: "t1",
       round_num: 0,
       kind: "answering",
       delta: "running tool",
     });
-    stores.tool = toolReducer(stores.tool, {
+    applyTool(setStores, {
       type: "tool_call_prepared",
       tool_call_id: "call-1",
       turn_id: "t1",
@@ -243,12 +263,12 @@ describe("selectRingingPresentation", () => {
       args_so_far: "{}",
     });
 
-    const p1 = selectRingingPresentation(seed, stores);
+    const p1 = present(seed, stores);
     const roundBefore = p1.turns[0]?.rounds[0];
     expect(roundBefore?.toolCalls[0]?.id).toBe("call-1");
 
     // tool_progress 到达：conversation 未变，但该 round 的 progress 必须更新
-    stores.tool = toolReducer(stores.tool, {
+    applyTool(setStores, {
       type: "tool_progress",
       tool_call_id: "call-1",
       turn_id: "t1",
@@ -260,7 +280,7 @@ describe("selectRingingPresentation", () => {
       dropped_bytes: 0,
       truncated: false,
     });
-    const p2 = selectRingingPresentation(seed, stores);
+    const p2 = present(seed, stores);
     const roundAfter = p2.turns[0]?.rounds[0];
     expect(roundAfter?.progress["call-1"]?.chunks[0]?.chunk).toBe("out");
     // 变化 round 重建；未变化的 turn 对象保持稳定
@@ -269,14 +289,14 @@ describe("selectRingingPresentation", () => {
 
   it("keeps every tool card when a round has multiple tool calls", () => {
     const seed = "seed-multi-tool";
-    const stores = initialRingingStores(seed);
-    stores.conversation = conversationReducer(stores.conversation, {
+    const [stores, setStores] = createStore(initialRingingStores(seed));
+    applyConversationEventToStore(setStores, {
       type: "turn_started",
       turn_id: "t1",
       user_text: "go",
     });
     // RawRound 投影以 conversation 的 round 为宿主：先建 round 0
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "round_delta",
       turn_id: "t1",
       round_num: 0,
@@ -284,7 +304,7 @@ describe("selectRingingPresentation", () => {
       delta: "",
     });
     // 同一 round 两个工具：call-1 先到（流式），call-2 后到
-    stores.tool = toolReducer(stores.tool, {
+    applyTool(setStores, {
       type: "tool_call_prepared",
       tool_call_id: "call-1",
       turn_id: "t1",
@@ -292,10 +312,10 @@ describe("selectRingingPresentation", () => {
       name: "exec",
       args_so_far: "{}",
     });
-    const p1 = selectRingingPresentation(seed, stores);
+    const p1 = present(seed, stores);
     expect(p1.turns[0]?.rounds[0]?.toolCalls.map(call => call.id)).toEqual(["call-1"]);
 
-    stores.tool = toolReducer(stores.tool, {
+    applyTool(setStores, {
       type: "tool_call_prepared",
       tool_call_id: "call-2",
       turn_id: "t1",
@@ -303,12 +323,12 @@ describe("selectRingingPresentation", () => {
       name: "write",
       args_so_far: "{}",
     });
-    const p2 = selectRingingPresentation(seed, stores);
+    const p2 = present(seed, stores);
     // 回归：旧实现缓存单 card，第二个工具到达时挤掉第一个
     expect(p2.turns[0]?.rounds[0]?.toolCalls.map(call => call.id)).toEqual(["call-1", "call-2"]);
 
     // 结果同样保留：call-1 finished 进入 toolResults；call-2 未完成不进入
-    stores.tool = toolReducer(stores.tool, {
+    applyTool(setStores, {
       type: "tool_finished",
       tool_call_id: "call-1",
       turn_id: "t1",
@@ -320,7 +340,7 @@ describe("selectRingingPresentation", () => {
         model: { text: "done", truncated: false, total_tokens: 1 },
       },
     });
-    const p3 = selectRingingPresentation(seed, stores);
+    const p3 = present(seed, stores);
     const round = p3.turns[0]?.rounds[0];
     expect(round?.toolCalls.map(call => call.id)).toEqual(["call-1", "call-2"]);
     expect(Object.keys(round?.toolResults ?? {})).toEqual(["call-1"]);
@@ -328,13 +348,13 @@ describe("selectRingingPresentation", () => {
 
   it("keeps the round stable once tool cards stop changing", () => {
     const seed = "seed-multi-settle";
-    const stores = initialRingingStores(seed);
-    stores.conversation = conversationReducer(stores.conversation, {
+    const [stores, setStores] = createStore(initialRingingStores(seed));
+    applyConversationEventToStore(setStores, {
       type: "turn_started",
       turn_id: "t1",
       user_text: "run",
     });
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "round_delta",
       turn_id: "t1",
       round_num: 0,
@@ -342,7 +362,7 @@ describe("selectRingingPresentation", () => {
       delta: "",
     });
     for (const call of ["call-1", "call-2"]) {
-      stores.tool = toolReducer(stores.tool, {
+      applyTool(setStores, {
         type: "tool_call_prepared",
         tool_call_id: call,
         turn_id: "t1",
@@ -351,12 +371,12 @@ describe("selectRingingPresentation", () => {
         args_so_far: "{}",
       });
     }
-    const p1 = selectRingingPresentation(seed, stores);
+    const p1 = present(seed, stores);
     const round1 = p1.turns[0]?.rounds[0];
     expect(round1?.toolCalls.map(call => call.id)).toEqual(["call-1", "call-2"]);
 
     // 之后只有 conversation 事件（cards 引用不变）→ 该 round 必须复用同一对象
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "usage_updated",
       turn_id: "t1",
       round_num: 0,
@@ -371,14 +391,14 @@ describe("selectRingingPresentation", () => {
       context_limit: 1000,
       model: "m",
     });
-    const p2 = selectRingingPresentation(seed, stores);
+    const p2 = present(seed, stores);
     expect(p2.turns[0]?.rounds[0]).toBe(round1);
   });
 
   it("projects the skills domain independently of turns", () => {
     const seed = "seed-skills";
-    const stores = initialRingingStores(seed);
-    stores.control = controlReducer(stores.control, {
+    const [stores, setStores] = createStore(initialRingingStores(seed));
+    applyControl(setStores, {
       type: "skills_updated",
       available: [
         { name: "frontend-design", description: "UI", scope: "project", source: "catalog" },
@@ -396,6 +416,7 @@ describe("selectRingingPresentation", () => {
     });
 
     // 域投影：不经过 selectRingingPresentation（不投影 turns）
+    flush();
     const skills = selectSkillsPresentation(stores);
     expect(skills?.active).toEqual(["frontend-design"]);
     expect(skills?.catalogRevision).toBe("r1");
@@ -406,7 +427,7 @@ describe("selectRingingPresentation", () => {
     expect(skills?.runtime?.[0]?.state).toBe("active");
 
     // 与全量投影的 skills 域一致（抽离不改变行为）
-    const full = selectRingingPresentation(seed, stores);
+    const full = present(seed, stores);
     expect(JSON.parse(JSON.stringify(skills))).toEqual(
       JSON.parse(JSON.stringify(full.skills)),
     );

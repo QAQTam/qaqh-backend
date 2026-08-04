@@ -7,8 +7,9 @@
 // store 的同名真实内容被 missing 过滤 → 新 turn 的流式内容被占位吞掉。
 
 import { describe, expect, it } from "vitest";
+import { createStore, flush } from "solid-js";
 import {
-  conversationReducer,
+  applyConversationEventToStore,
   initialRingingStores,
 } from "./ringingStores";
 import { selectRingingPresentation } from "./sessionPresentation";
@@ -18,27 +19,28 @@ import type { TimelineSnapshot } from "./timelineProtocol";
 
 /** conversation store：新输入产生的完整流式 turn。 */
 function conversationWithStreamingTurn(seed: string) {
-  const stores = initialRingingStores(seed);
-  let conversation = conversationReducer(stores.conversation, {
+  const [stores, setStores] = createStore(initialRingingStores(seed));
+  applyConversationEventToStore(setStores, {
     type: "turn_started",
     turn_id: "t12",
     user_text: "hi",
   });
-  conversation = conversationReducer(conversation, {
+  applyConversationEventToStore(setStores, {
     type: "round_delta",
     turn_id: "t12",
     round_num: 0,
     kind: "answering",
     delta: "Hello from backend",
   });
-  conversation = conversationReducer(conversation, {
+  applyConversationEventToStore(setStores, {
     type: "round_delta",
     turn_id: "t12",
     round_num: 0,
     kind: "answering",
     delta: " — still streaming",
   });
-  stores.conversation = conversation;
+  // Solid 2 store 写是微任务批：投影前必须 flush 同步生效。
+  flush();
   return stores;
 }
 
@@ -170,17 +172,18 @@ describe("resume 会话后 send 的流式内容（timeline + conversation 双源
 
   it("用户主动取消的 turn（无 daemon 重启标记）保持 timeline 展示", () => {
     const seed = "s-user-cancelled";
-    const stores = initialRingingStores(seed);
+    const [stores, setStores] = createStore(initialRingingStores(seed));
     // store 同名 turn 也是 cancelled（用户手动取消，非重启）
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "turn_started",
       turn_id: "t9",
       user_text: "do it",
     });
-    stores.conversation = conversationReducer(stores.conversation, {
+    applyConversationEventToStore(setStores, {
       type: "conversation_cancelled",
       turn_id: "t9",
     });
+    flush();
     const fallback = selectRingingPresentation(seed, stores, createRawSessionState(seed), {
       includeTurns: true,
     });

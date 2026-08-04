@@ -104,7 +104,7 @@ function handleFrame(
   }
   try {
     const envelope = JSON.parse(data) as RingingEventEnvelope;
-    const batch = envelopeToBatch(ch, envelope);
+    const batch = envelopeToBatch(ch, envelope, sseServerEpoch);
     if (frameCursor !== null
       && (batch.server_epoch !== sseServerEpoch || batch.from_stream_seq !== frameCursor)) {
       return false;
