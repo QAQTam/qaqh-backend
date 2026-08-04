@@ -144,7 +144,6 @@ mod tests {
 
     fn env(seq: u64, event_id: &str) -> RingingEventEnvelope {
         RingingEventEnvelope::new(
-            "epoch",
             "s",
             seq,
             seq,
@@ -216,7 +215,6 @@ mod tests {
         }
         // 追加一个 RoundDelta（env() 默认是 ConversationCancelled）
         let delta = RingingEventEnvelope::new(
-            "epoch",
             "s",
             5,
             5,

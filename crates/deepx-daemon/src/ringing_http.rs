@@ -578,7 +578,11 @@ fn parse_channel(s: &str) -> Option<RingingChannel> {
 }
 
 /// SSE 事件帧：`id: <epoch>:<channel>:<stream_seq>` + `event:` + `data:`。
-fn sse_frame(envelope: &deepx_ringing::RingingEventEnvelope) -> String {
+fn sse_frame(
+    epoch: &str,
+    channel: RingingChannel,
+    envelope: &deepx_ringing::RingingEventEnvelope,
+) -> String {
     let event_type = serde_json::to_value(&envelope.event)
         .ok()
         .and_then(|v| v["type"].as_str().map(|s| s.to_string()))
@@ -589,8 +593,8 @@ fn sse_frame(envelope: &deepx_ringing::RingingEventEnvelope) -> String {
     let data = serde_json::to_string(envelope).unwrap_or_else(|_| "{}".into());
     format!(
         "id: {}:{}:{}\nevent: {}\ndata: {}\n\n",
-        envelope.server_epoch,
-        envelope.channel.as_str(),
+        epoch,
+        channel.as_str(),
         envelope.stream_seq,
         event_type,
         data
@@ -2190,7 +2194,7 @@ async fn handle_sse(
 
     // 可靠 tail + 当前 replaceable 值（PLAN：Last-Event-ID 有效时只回放可靠 tail）
     for env in &replay.events {
-        if stream.write_all(sse_frame(env).as_bytes()).await.is_err() {
+        if stream.write_all(sse_frame(&hub.epoch(), channel, env).as_bytes()).await.is_err() {
             return Ok(());
         }
         let _ = stream.flush().await;
@@ -2242,9 +2246,9 @@ async fn handle_sse(
                         {
                             continue;
                         }
-                        if stream.write_all(sse_frame(&envelope).as_bytes()).await.is_err() {
-                            return Ok(());
-                        }
+        if stream.write_all(sse_frame(&hub.epoch(), channel, &envelope).as_bytes()).await.is_err() {
+            return Ok(());
+        }
                         let _ = stream.flush().await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -2360,7 +2364,6 @@ mod tests {
     #[test]
     fn sse_frame_format_matches_plan() {
         let env = deepx_ringing::RingingEventEnvelope::new(
-            "epoch-1",
             "s1",
             7,
             3,
@@ -2373,7 +2376,7 @@ mod tests {
                 name: "exec".into(),
             }),
         );
-        let frame = sse_frame(&env);
+        let frame = sse_frame("epoch-1", RingingChannel::Tool, &env);
         assert!(frame.starts_with("id: epoch-1:tool:7\nevent: tool_started\ndata: "));
         assert!(frame.ends_with("\n\n"));
         // data 必须是完整信封：含 seed（renderer 按会话路由）与 event_id（幂等）
@@ -2493,7 +2496,6 @@ mod tests {
                 .expect("accept")
         );
         let envelope = deepx_ringing::RingingEventEnvelope::new(
-            "epoch",
             "seed",
             1,
             1,
@@ -2574,7 +2576,6 @@ mod tests {
         );
 
         let event_a = deepx_ringing::RingingEventEnvelope::new(
-            "epoch-1",
             "seed-a",
             1,
             1,
@@ -2588,7 +2589,6 @@ mod tests {
             }),
         );
         let event_b = deepx_ringing::RingingEventEnvelope::new(
-            "epoch-1",
             "seed-b",
             2,
             1,

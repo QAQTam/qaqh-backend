@@ -9,16 +9,15 @@ use crate::event::RingingEvent;
 use crate::protocol::{RINGING_SCHEMA, RINGING_VERSION, is_safe_integer};
 
 /// 事件信封（PLAN 固定字段）。
+///
+/// M4 瘦身：`schema`/`version`/`channel`/`server_epoch` 已从信封移除——
+/// 版本由端点 URL 承担，epoch/channel 由 SSE 帧 id 承担，batch 级字段承担
+/// 聚合上下文；`seed` 保留（单频道连接承载多 seed，必须逐事件路由）。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RingingEventEnvelope {
-    pub schema: String,
-    pub version: u32,
-    pub channel: RingingChannel,
     /// 可靠性等级：由领域事件定义显式声明，wire 不决定。
     pub delivery: Delivery,
-    /// daemon 重启纪元；epoch 变化后 stream_seq 重置。
-    pub server_epoch: String,
     /// 会话标识。
     pub seed: String,
     /// 每 (server_epoch, channel) 全局递增，供单条 SSE 连接恢复。
@@ -48,7 +47,6 @@ pub struct RingingEventEnvelope {
 impl RingingEventEnvelope {
     /// 构造信封并强制 channel 与事件一致。
     pub fn new(
-        server_epoch: impl Into<String>,
         seed: impl Into<String>,
         stream_seq: u64,
         channel_seq: u64,
@@ -56,14 +54,9 @@ impl RingingEventEnvelope {
         event_id: impl Into<String>,
         event: RingingEvent,
     ) -> Self {
-        let channel = event.channel();
         let delivery = event.delivery();
         Self {
-            schema: RINGING_SCHEMA.to_string(),
-            version: RINGING_VERSION,
-            channel,
             delivery,
-            server_epoch: server_epoch.into(),
             seed: seed.into(),
             stream_seq,
             channel_seq,
@@ -87,12 +80,8 @@ impl RingingEventEnvelope {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema != RINGING_SCHEMA || self.version != RINGING_VERSION {
-            return Err("unsupported_version");
-        }
         if self.seed.is_empty()
             || self.event_id.is_empty()
-            || self.channel != self.event.channel()
             || !is_safe_integer(self.stream_seq)
             || !is_safe_integer(self.channel_seq)
             || !is_safe_integer(self.session_seq)
@@ -272,11 +261,7 @@ impl RingingEventBatch {
         }
         for (index, envelope) in self.envelopes.iter().enumerate() {
             envelope.validate()?;
-            if envelope.schema != self.schema
-                || envelope.version != self.version
-                || envelope.channel != self.channel
-                || envelope.seed != self.seed
-                || envelope.server_epoch != self.server_epoch
+            if envelope.seed != self.seed
                 || envelope.stream_seq
                     != self
                         .from_stream_seq
@@ -308,20 +293,17 @@ mod tests {
             dropped_bytes: 0,
             truncated: false,
         });
-        let env = RingingEventEnvelope::new("epoch-1", "seed-1", 5, 3, 2, "evt-1", event)
+        let env = RingingEventEnvelope::new("seed-1", 5, 3, 2, "evt-1", event)
             .with_causation("cmd-9")
             .with_state_revision(7);
 
         let json = serde_json::to_string(&env).expect("serialize");
-        assert!(json.contains("\"schema\":\"deepx.Ringing\""));
-        assert!(json.contains("\"version\":1"));
-        assert!(json.contains("\"channel\":\"tool\""));
         assert!(json.contains("\"delivery\":\"replaceable\""));
         assert!(json.contains("\"causation_id\":\"cmd-9\""));
         assert!(json.contains("\"state_revision\":7"));
 
         let back: RingingEventEnvelope = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.channel, RingingChannel::Tool);
+        assert_eq!(back.event.channel(), RingingChannel::Tool);
         assert_eq!(back.delivery, Delivery::Replaceable);
         assert!(matches!(
             back.event,
@@ -368,7 +350,6 @@ mod tests {
             to_stream_seq: 1,
             server_epoch: "e1".into(),
             envelopes: vec![RingingEventEnvelope::new(
-                "e1",
                 "s1",
                 1,
                 1,

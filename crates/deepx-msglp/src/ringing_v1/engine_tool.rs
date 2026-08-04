@@ -944,6 +944,8 @@ impl ToolEngine {
         turn_id: &str,
         round_num: u32,
     ) {
+        // A2：渲染尾部协议——尾部状态按 (tool_call_id, stream) 维护，跨事件累积。
+        let mut tails: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(first) => {
@@ -952,33 +954,7 @@ impl ToolEngine {
                         events.push(event);
                     }
                     for event in events {
-                        ctx.emitter.emit_delta(Agent2Ui::ExecProgress {
-                            tool_call_id: event.tool_call_id.clone(),
-                            stream: event.stream.as_str().to_string(),
-                            seq: event.seq,
-                            chunk: event.chunk.clone(),
-                        });
-                        // Ringing 双发：ToolProgress（replaceable 增量）
-                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
-                            deepx_domain::ToolEvent::ToolProgress {
-                                tool_call_id: event.tool_call_id.clone(),
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                stream: event.stream.as_str().to_string(),
-                                seq_start: event.seq,
-                                seq_end: event.seq + event.chunk.len() as u64,
-                                chunk: event.chunk.clone(),
-                                dropped_bytes: 0,
-                                truncated: false,
-                            },
-                        ));
-                        emit_timeline_tool_progress(
-                            ctx,
-                            turn_id,
-                            round_num,
-                            &event.tool_call_id,
-                            event.chunk,
-                        );
+                        Self::emit_progress_tail(ctx, turn_id, round_num, &event, &mut tails);
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -994,6 +970,8 @@ impl ToolEngine {
         turn_id: &str,
         round_num: u32,
     ) {
+        // A2：渲染尾部协议（与 drain_progress_external 共用发射 helper）。
+        let mut tails: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(first) => {
@@ -1002,39 +980,61 @@ impl ToolEngine {
                         events.push(event);
                     }
                     for event in events {
-                        ctx.emitter.emit_delta(Agent2Ui::ExecProgress {
-                            tool_call_id: event.tool_call_id.clone(),
-                            stream: event.stream.as_str().to_string(),
-                            seq: event.seq,
-                            chunk: event.chunk.clone(),
-                        });
-                        // Ringing 双发：ToolProgress（replaceable 增量）
-                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
-                            deepx_domain::ToolEvent::ToolProgress {
-                                tool_call_id: event.tool_call_id.clone(),
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                stream: event.stream.as_str().to_string(),
-                                seq_start: event.seq,
-                                seq_end: event.seq + event.chunk.len() as u64,
-                                chunk: event.chunk.clone(),
-                                dropped_bytes: 0,
-                                truncated: false,
-                            },
-                        ));
-                        emit_timeline_tool_progress(
-                            ctx,
-                            turn_id,
-                            round_num,
-                            &event.tool_call_id,
-                            event.chunk,
-                        );
+                        Self::emit_progress_tail(ctx, turn_id, round_num, &event, &mut tails);
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+    }
+
+    /// A2：渲染尾部协议——每 (tool_call_id, stream) 只保留最后 4KB 尾部，
+    /// 事件携带完整尾部（`seq_start` = 尾部覆盖的起始位置，`chunk` = 尾部全文），
+    /// 前端**替换**而非拼接；不连续/丢 chunk 由下一次尾部自愈。
+    fn emit_progress_tail(
+        ctx: &mut RingContext,
+        turn_id: &str,
+        round_num: u32,
+        event: &deepx_workspace::ExecProgressEvent,
+        tails: &mut std::collections::HashMap<String, String>,
+    ) {
+        const TAIL_MAX: usize = 4096;
+        let key = format!("{}:{}", event.tool_call_id, event.stream.as_str());
+        let buf = tails.entry(key).or_default();
+        buf.push_str(&event.chunk);
+        if buf.len() > TAIL_MAX {
+            buf.drain(..buf.len() - TAIL_MAX);
+        }
+        let seq_end = event.seq + event.chunk.len() as u64;
+        let tail_len = buf.len() as u64;
+        // legacy 双发保留（M3 legacy 拆除前维持对称）。
+        ctx.emitter.emit_delta(Agent2Ui::ExecProgress {
+            tool_call_id: event.tool_call_id.clone(),
+            stream: event.stream.as_str().to_string(),
+            seq: event.seq,
+            chunk: event.chunk.clone(),
+        });
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+            deepx_domain::ToolEvent::ToolProgress {
+                tool_call_id: event.tool_call_id.clone(),
+                turn_id: turn_id.to_string(),
+                round_num,
+                stream: event.stream.as_str().to_string(),
+                seq_start: seq_end.saturating_sub(tail_len),
+                seq_end,
+                chunk: buf.clone(),
+                dropped_bytes: 0,
+                truncated: seq_end > tail_len,
+            },
+        ));
+        emit_timeline_tool_progress(
+            ctx,
+            turn_id,
+            round_num,
+            &event.tool_call_id,
+            event.chunk.clone(),
+        );
     }
 
     fn emit_timeline_denied(

@@ -18,6 +18,9 @@ pub enum ReplaceableKey {
     ToolProgress(String),
     /// 按回合/轮次/块种类合并（turn_id, round_num, kind 语义由调用方编码进 key）。
     RoundDelta(String),
+    /// 按回合/轮次/块种类合并的完整值 checkpoint（与 RoundDelta 同 identity
+    /// 空间，但语义为覆盖；`RoundCompleted` 时两者一并作废）。
+    BlockCheckpoint(String),
     /// 按 usage 身份合并（turn_id:round_num）。
     Usage(String),
     /// 按 provider 工具状态合并（call_id）。
@@ -37,6 +40,10 @@ impl ReplaceableKey {
 
     pub fn round_delta(turn_id: &str, round_num: u32, kind: &str) -> Self {
         ReplaceableKey::RoundDelta(format!("{turn_id}:{round_num}:{kind}"))
+    }
+
+    pub fn block_checkpoint(turn_id: &str, round_num: u32, kind: &str) -> Self {
+        ReplaceableKey::BlockCheckpoint(format!("{turn_id}:{round_num}:{kind}"))
     }
 
     pub fn usage(turn_id: &str, round_num: u32) -> Self {
@@ -80,6 +87,20 @@ pub fn replaceable_key_for(event: &RingingEvent) -> Option<ReplaceableKey> {
                 deepx_domain::RoundDeltaKind::Answering => "answering",
             },
         )),
+        RingingEvent::Conversation(CE::BlockCheckpoint {
+            turn_id,
+            round_num,
+            kind,
+            ..
+        }) => Some(ReplaceableKey::block_checkpoint(
+            turn_id,
+            *round_num,
+            match kind {
+                deepx_domain::RoundDeltaKind::Thinking => "thinking",
+                deepx_domain::RoundDeltaKind::ToolCalling => "tool_calling",
+                deepx_domain::RoundDeltaKind::Answering => "answering",
+            },
+        )),
         RingingEvent::Conversation(CE::UsageUpdated {
             turn_id, round_num, ..
         }) => Some(ReplaceableKey::usage(turn_id, *round_num)),
@@ -109,10 +130,19 @@ pub fn terminal_replaceable_keys(event: &RingingEvent) -> Vec<ReplaceableKey> {
         }
         RingingEvent::Conversation(CE::RoundCompleted {
             turn_id, round_num, ..
-        }) => ["thinking", "tool_calling", "answering"]
-            .into_iter()
-            .map(|kind| ReplaceableKey::round_delta(turn_id, *round_num, kind))
-            .collect(),
+        }) => {
+            let mut keys: Vec<ReplaceableKey> = ["thinking", "tool_calling", "answering"]
+                .into_iter()
+                .flat_map(|kind| {
+                    [
+                        ReplaceableKey::round_delta(turn_id, *round_num, kind),
+                        ReplaceableKey::block_checkpoint(turn_id, *round_num, kind),
+                    ]
+                })
+                .collect();
+            keys.dedup();
+            keys
+        }
         RingingEvent::Conversation(CE::CompactFinished { compact_id, .. }) => {
             vec![ReplaceableKey::compact_progress(compact_id)]
         }
@@ -267,7 +297,6 @@ mod tests {
 
     fn env_for(seed: &str, seq: u64, event: DomainEvent) -> RingingEventEnvelope {
         RingingEventEnvelope::new(
-            "epoch",
             seed,
             seq,
             seq,
@@ -428,5 +457,52 @@ mod tests {
         let key3 = ReplaceableKey::round_delta("t1", 0, "answering");
         assert_ne!(key1, key2);
         assert_eq!(key1, key3);
+    }
+
+    #[test]
+    fn block_checkpoint_is_covered_by_identity_and_replays_latest() {
+        let mut router = ChannelRouter::new(RingingChannel::Conversation);
+        let checkpoint = |seq: u64, text: &str| {
+            env_for(
+                "s",
+                seq,
+                DomainEvent::Conversation(ConversationEvent::BlockCheckpoint {
+                    turn_id: "t1".into(),
+                    round_num: 0,
+                    kind: deepx_domain::RoundDeltaKind::Answering,
+                    text: text.into(),
+                    char_count: text.len() as u32,
+                }),
+            )
+        };
+        router.route(checkpoint(1, "partial"));
+        router.route(checkpoint(2, "partial-later"));
+        router.route(checkpoint(3, "complete-value"));
+        assert_eq!(router.replaceable_len(), 1, "same identity covers");
+        let replay = router.replay_since(0);
+        assert_eq!(replay.len(), 1, "slow consumer gets the latest complete value");
+        match &replay[0].event {
+            RingingEvent::Conversation(ConversationEvent::BlockCheckpoint { text, .. }) => {
+                assert_eq!(text, "complete-value");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_completed_invalidates_delta_and_checkpoint_keys() {
+        let event = RingingEvent::Conversation(ConversationEvent::RoundCompleted {
+            turn_id: "t1".into(),
+            round_num: 2,
+            thinking: Some("t".into()),
+            answer: Some("a".into()),
+            output_ref: None,
+            is_final: true,
+        });
+        let keys = terminal_replaceable_keys(&event);
+        assert_eq!(keys.len(), 6);
+        assert!(keys.contains(&ReplaceableKey::round_delta("t1", 2, "answering")));
+        assert!(keys.contains(&ReplaceableKey::block_checkpoint("t1", 2, "thinking")));
+        assert!(keys.contains(&ReplaceableKey::block_checkpoint("t1", 2, "answering")));
     }
 }

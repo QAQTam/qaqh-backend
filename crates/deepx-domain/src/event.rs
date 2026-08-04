@@ -284,6 +284,18 @@ pub enum ConversationEvent {
         kind: RoundDeltaKind,
         delta: String,
     },
+    /// 流式块的周期**完整值**（replaceable，覆盖语义，治 D1）。
+    ///
+    /// `RoundDelta` 是追加增量（reliable，前端拼接）；本事件携带该 round
+    /// 当前完整文本，乱序/丢 delta 由下一次 checkpoint 自愈，前端直接
+    /// 覆盖赋值。`RoundCompleted` 仍是权威终态（到达后本事件可压缩）。
+    BlockCheckpoint {
+        turn_id: String,
+        round_num: u32,
+        kind: RoundDeltaKind,
+        text: String,
+        char_count: u32,
+    },
     /// 一轮 API 调用完成的权威终态。正文大时经 `output_ref` 外置。
     RoundCompleted {
         turn_id: String,
@@ -356,7 +368,8 @@ impl ConversationEvent {
         match self {
             ConversationEvent::ProviderToolStatus { .. }
             | ConversationEvent::UsageUpdated { .. }
-            | ConversationEvent::CompactProgress { .. } => Delivery::Replaceable,
+            | ConversationEvent::CompactProgress { .. }
+            | ConversationEvent::BlockCheckpoint { .. } => Delivery::Replaceable,
             _ => Delivery::Reliable,
         }
     }

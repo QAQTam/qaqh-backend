@@ -776,7 +776,6 @@ impl RingingHub {
 
         // 幂等：journal 侧 event_id 去重（replaceable 也检查，防重复投递）
         let envelope = RingingEventEnvelope::new(
-            &self.epoch,
             seed,
             stream_seq,
             channel_seq,
@@ -1351,7 +1350,6 @@ mod tests {
         let outcome = hub.publish("s", round_delta(99));
         if let PublishOutcome::Published { envelope } = outcome {
             assert!(envelope.stream_seq > 0);
-            assert_eq!(envelope.server_epoch, "epoch-2");
             assert!(envelope.stream_seq > replayed.first().map(|e| e.stream_seq).unwrap_or(0));
         } else {
             panic!("publish after restart must succeed");
@@ -1417,12 +1415,10 @@ mod tests {
         );
         match outcome {
             PublishOutcome::Published { envelope } => {
-                assert_eq!(envelope.server_epoch, "epoch-1");
                 assert_eq!(envelope.seed, "s1");
                 assert_eq!(envelope.stream_seq, 1);
                 assert_eq!(envelope.channel_seq, 1);
                 assert_eq!(envelope.session_seq, 1);
-                assert_eq!(envelope.channel, RingingChannel::Tool);
                 assert_eq!(envelope.delivery, Delivery::Reliable);
                 assert!(envelope.event_id.starts_with("epoch-1-tool-s1-"));
             }
@@ -1607,7 +1603,6 @@ mod tests {
             DomainEvent::Conversation(ConversationEvent::ConversationCancelled { turn_id: None }),
         );
         let env = rx.blocking_recv().expect("live event");
-        assert_eq!(env.channel, RingingChannel::Conversation);
         assert_eq!(env.seed, "s");
     }
 

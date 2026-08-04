@@ -130,7 +130,6 @@ mod tests {
 
     fn progress(seq: u64, chunk: &str) -> RingingEventEnvelope {
         RingingEventEnvelope::new(
-            "epoch",
             "s",
             seq,
             seq,
@@ -153,7 +152,6 @@ mod tests {
 
     fn started(seq: u64) -> RingingEventEnvelope {
         RingingEventEnvelope::new(
-            "epoch",
             "s",
             seq,
             seq,

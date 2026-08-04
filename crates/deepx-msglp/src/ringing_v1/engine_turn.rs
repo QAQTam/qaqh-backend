@@ -16,6 +16,12 @@ use crate::services::conflict;
 use crate::services::dashboard;
 use crate::util;
 
+/// A1：`block_checkpoint` 发射间隔（delta 次数或时长，先到为准）。
+const CHECKPOINT_TOKEN_INTERVAL: u32 = 64;
+const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// A3：`usage_updated` 节流窗口（流式期间 ~1s 一条；终值由 lap 结束补发）。
+const USAGE_EMIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Why the turn is being resumed.
 pub enum ResumeReason {
     /// User answered permission dialogs — all approvals resolved.
@@ -29,6 +35,35 @@ pub struct TurnEngine {
 }
 
 impl TurnEngine {
+    /// A1：按 delta 次数 / 时间窗发射 `block_checkpoint`（该 round 当前完整文本）。
+    fn maybe_emit_block_checkpoint(
+        ctx: &mut RingContext,
+        turn_id: &str,
+        round_num: u32,
+        kind: deepx_domain::RoundDeltaKind,
+        text: &str,
+        tokens_since_checkpoint: &mut u32,
+        last_checkpoint_at: &mut std::time::Instant,
+    ) {
+        *tokens_since_checkpoint += 1;
+        if *tokens_since_checkpoint < CHECKPOINT_TOKEN_INTERVAL
+            && last_checkpoint_at.elapsed() < CHECKPOINT_INTERVAL
+        {
+            return;
+        }
+        *tokens_since_checkpoint = 0;
+        *last_checkpoint_at = std::time::Instant::now();
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
+            deepx_domain::ConversationEvent::BlockCheckpoint {
+                turn_id: turn_id.to_string(),
+                round_num,
+                kind,
+                text: text.to_string(),
+                char_count: text.chars().count() as u32,
+            },
+        ));
+    }
+
     pub fn new() -> Self {
         Self { suspended: None }
     }
@@ -1138,6 +1173,12 @@ impl TurnEngine {
             let tools = Some(ctx.agent.tool_defs.clone());
             let mut content = String::new();
             let mut reasoning = String::new();
+            // A1：block_checkpoint 节流（delta 次数 + 时间窗，先到为准）。
+            let mut checkpoint_tokens: u32 = 0;
+            let mut last_checkpoint_at = std::time::Instant::now();
+            // A3：usage 节流状态（最后发射时刻 + 已发 total，终值补发依据）。
+            let mut last_usage_emit_at: Option<std::time::Instant> = None;
+            let mut last_emitted_usage_total: u32 = 0;
             let mut tool_calls_raw = serde_json::Value::Null;
             let mut active_stream_block: Option<(deepx_domain::TimelineBlockKind, String)> = None;
             let mut timeline_segment = 0u32;
@@ -1200,6 +1241,16 @@ impl TurnEngine {
                                     delta: d,
                                 },
                             ));
+                        // A1：周期完整值（replaceable 覆盖，乱序/丢 delta 自愈）。
+                        Self::maybe_emit_block_checkpoint(
+                            ctx,
+                            &turn_id,
+                            round_num,
+                            deepx_domain::RoundDeltaKind::Answering,
+                            &content,
+                            &mut checkpoint_tokens,
+                            &mut last_checkpoint_at,
+                        );
                     }
                     deepx_gate::StreamEvent::ReasoningDelta(r) => {
                         if ctx.cancel.is_set() {
@@ -1236,6 +1287,16 @@ impl TurnEngine {
                                     delta: r,
                                 },
                             ));
+                        // A1：周期完整值（replaceable 覆盖，乱序/丢 delta 自愈）。
+                        Self::maybe_emit_block_checkpoint(
+                            ctx,
+                            &turn_id,
+                            round_num,
+                            deepx_domain::RoundDeltaKind::Thinking,
+                            &reasoning,
+                            &mut checkpoint_tokens,
+                            &mut last_checkpoint_at,
+                        );
                     }
                     deepx_gate::StreamEvent::Done {
                         raw_message, usage, ..
@@ -1254,6 +1315,30 @@ impl TurnEngine {
                             util::record_token_usage(u, &ctx.agent.config.model);
                             last_usage = usage.clone();
                             current_request_usage = usage.clone();
+                        }
+                        // A3：终值必发——节流窗口可能吞掉最后一条流式值，此处补发
+                        // 请求权威终值（replaceable 覆盖；与 done 前的 record_usage 一致）。
+                        if let Some(final_usage) = current_request_usage.clone() {
+                            if final_usage.total_tokens != last_emitted_usage_total {
+                                last_emitted_usage_total = final_usage.total_tokens;
+                                ctx.emitter
+                                    .emit_domain(deepx_domain::DomainEvent::Conversation(
+                                        deepx_domain::ConversationEvent::UsageUpdated {
+                                            turn_id: turn_id.clone(),
+                                            round_num,
+                                            usage: final_usage.clone(),
+                                            context_limit: ctx.agent.config.context_limit,
+                                            model: ctx.agent.config.model.clone(),
+                                        },
+                                    ));
+                                ctx.emitter.emit_delta(Agent2Ui::UsageUpdated {
+                                    turn_id: turn_id.clone(),
+                                    round_num,
+                                    usage: final_usage,
+                                    context_limit: ctx.agent.config.context_limit,
+                                    model: ctx.agent.config.model.clone(),
+                                });
+                            }
                         }
                         content.clear();
                         reasoning.clear();
@@ -1359,24 +1444,30 @@ impl TurnEngine {
                         current_request_usage = Some(u.clone());
                         ctx.agent.session.tokens =
                             ctx.agent.session.tokens.max(u.total_tokens as u64);
-                        // Ringing 双发：UsageUpdated（replaceable，按 turn/round 覆盖）
-                        ctx.emitter
-                            .emit_domain(deepx_domain::DomainEvent::Conversation(
-                                deepx_domain::ConversationEvent::UsageUpdated {
-                                    turn_id: turn_id.clone(),
-                                    round_num,
-                                    usage: u.clone(),
-                                    context_limit: ctx.agent.config.context_limit,
-                                    model: ctx.agent.config.model.clone(),
-                                },
-                            ));
-                        ctx.emitter.emit_delta(Agent2Ui::UsageUpdated {
-                            turn_id: turn_id.clone(),
-                            round_num,
-                            usage: u,
-                            context_limit: ctx.agent.config.context_limit,
-                            model: ctx.agent.config.model.clone(),
-                        });
+                        // A3：节流 ~1s（replaceable 覆盖显示）；终值由 Done 分支补发。
+                        let due = last_usage_emit_at
+                            .map_or(true, |at| at.elapsed() >= USAGE_EMIT_INTERVAL);
+                        if due {
+                            last_usage_emit_at = Some(std::time::Instant::now());
+                            last_emitted_usage_total = u.total_tokens;
+                            ctx.emitter
+                                .emit_domain(deepx_domain::DomainEvent::Conversation(
+                                    deepx_domain::ConversationEvent::UsageUpdated {
+                                        turn_id: turn_id.clone(),
+                                        round_num,
+                                        usage: u.clone(),
+                                        context_limit: ctx.agent.config.context_limit,
+                                        model: ctx.agent.config.model.clone(),
+                                    },
+                                ));
+                            ctx.emitter.emit_delta(Agent2Ui::UsageUpdated {
+                                turn_id: turn_id.clone(),
+                                round_num,
+                                usage: u,
+                                context_limit: ctx.agent.config.context_limit,
+                                model: ctx.agent.config.model.clone(),
+                            });
+                        }
                     }
                     deepx_gate::StreamEvent::Retrying {
                         attempt,

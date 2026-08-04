@@ -453,7 +453,6 @@ mod tests {
 
     fn env(seq: u64, event_id: &str) -> RingingEventEnvelope {
         RingingEventEnvelope::new(
-            "epoch",
             "s",
             seq,
             seq,
