@@ -16,7 +16,7 @@ fn http_agent(timeout_secs: u64) -> ureq::Agent {
         .into()
 }
 
-pub(super) fn handle_web(ctx: ToolCallCtx) -> ToolResult {
+pub(super) fn handle_web_fetch(ctx: ToolCallCtx) -> ToolResult {
     let timeout_secs = ctx.timeout_secs.unwrap_or(30);
     if ctx.args.s("url").starts_with("http") {
         let payload = web_fetch(&ctx.args, timeout_secs);
@@ -32,7 +32,7 @@ pub(super) fn handle_web(ctx: ToolCallCtx) -> ToolResult {
     } else {
         ToolResult::error(&crate::json_err(
             "MISSING_URL",
-            "web: 'url' (starting with http) is required; web search is handled by the model's built-in web_search tool",
+            "web_fetch: 'url' (starting with http) is required; web search is handled by the model's built-in web_search tool",
             "Pass a URL to fetch, or rely on the model's server-side web_search.",
         ))
     }
@@ -42,7 +42,7 @@ fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
     const MAX_WEB_BODY_BYTES: u64 = 512 * 1024;
     let url = args.s("url");
     if url.is_empty() || !url.starts_with("http") {
-        return crate::json_err("INVALID_URL", "web: url must start with http", "");
+        return crate::json_err("INVALID_URL", "web_fetch: url must start with http", "");
     }
     let resp = match http_agent(timeout_secs)
         .get(&url)
@@ -103,9 +103,9 @@ fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register(ToolHandler { key: "web".to_string(),
-        description: "Fetch URL content (pass 'url'). Web search is not a local tool — the model uses its built-in server-side web_search instead.",
+    mgr.register(ToolHandler { key: "web_fetch".to_string(),
+        description: "Fetch URL content (pass 'url') — this is a plain HTTP fetch tool. Web search is not a local tool — the model uses its built-in server-side web_search instead.",
         input_schema: serde_json::json!({"type":"object","properties":{"url":{"type":"string","description":"URL to fetch"},"output":{"type":"string","description":"Optional file path"}},"required":["url"],"additionalProperties":false}),
-        handler: handle_web, risk: ToolRisk::ReadOnly, default_timeout: std::time::Duration::from_secs(30),
+        handler: handle_web_fetch, risk: ToolRisk::ReadOnly, default_timeout: std::time::Duration::from_secs(30),
     });
 }

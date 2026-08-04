@@ -1,14 +1,17 @@
 //! Stress test: 10 parallel file read tool calls on the same file.
 //! Designed to trigger any deadlock, panic, or lock poisoning in the
 //! multi-tool parallel execution path.
+//!
+//! M3：走 Ringing ToolInvoke 命令（legacy Ui2Agent::ToolCall 已拆除）。
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use deepx_domain::{ControlCommand, ControlEvent, ConversationEvent, SessionState, ToolCommand};
 use deepx_msglp::ringing_v1::loop_core::Loop;
 use deepx_msglp::state::agent::AgentState;
-use deepx_proto::{Agent2Ui, Ui2Agent};
+use deepx_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope};
 
 #[test]
 fn ten_parallel_reads_same_file() {
@@ -25,11 +28,8 @@ fn ten_parallel_reads_same_file() {
     agent.ephemeral = true;
 
     // ── Create IPC loop with pipe channels ──
-    let (event_tx_from_agent, event_rx_to_test) = mpsc::channel::<Agent2Ui>();
+    let (event_tx_from_agent, event_rx_to_test) = mpsc::channel::<RingingEvent>();
 
-    // We need to create a Loop, but Loop::new_ipc uses stdin/stdout.
-    // Instead, we construct the loop manually via the same channels.
-    // Use a pipe pair for input/output.
     let (input_reader, mut input_writer) = os_pipe::pipe().unwrap();
     let (output_reader, output_writer) = os_pipe::pipe().unwrap();
 
@@ -44,63 +44,67 @@ fn ten_parallel_reads_same_file() {
         let reader = BufReader::new(output_reader);
         for line in reader.lines() {
             match line {
-                Ok(line) => match serde_json::from_str::<Agent2Ui>(&line) {
-                    Ok(event) => {
-                        if event_tx.send(event).is_err() {
+                Ok(line) => {
+                    if let Ok(env) = serde_json::from_str::<RingingWorkerEventEnvelope>(&line) {
+                        if event_tx.send(env.event).is_err() {
                             break;
                         }
                     }
-                    Err(_) => {}
-                },
+                }
                 Err(_) => break,
             }
         }
     });
 
     let handle = std::thread::spawn(move || {
-        // Feed CreateSession first
-        use std::io::Write;
-        let create = Ui2Agent::CreateSession;
-        let json = serde_json::to_string(&create).unwrap();
-        writeln!(input_writer, "{}", json).unwrap();
-        input_writer.flush().unwrap();
+        fn send_cmd(w: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
+            let env = RingingWorkerCommandEnvelope::new(seed, format!("c{}", rand_id()), command);
+            writeln!(w, "{}", serde_json::to_string(&env).unwrap()).unwrap();
+            w.flush().unwrap();
+        }
+        fn rand_id() -> u64 {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        }
 
-        // Wait for Ready then SessionCreated
-        let mut ready = false;
+        // Feed SessionCreate first
+        send_cmd(
+            &mut input_writer,
+            "",
+            RingingCommand::Control(ControlCommand::SessionCreate { close_current: false }),
+        );
+
+        // Wait for SessionStateChanged(Created)
         let mut seed = String::new();
         loop {
             match event_rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(Agent2Ui::Ready) => ready = true,
-                Ok(Agent2Ui::SessionCreated { seed: s }) => seed = s,
+                Ok(RingingEvent::Control(ControlEvent::SessionStateChanged {
+                    seed: s,
+                    state: SessionState::Created,
+                })) => {
+                    seed = s;
+                    break;
+                }
                 Ok(_) => {}
                 Err(_) => break,
             }
-            if ready && !seed.is_empty() {
-                break;
-            }
         }
-        assert!(!seed.is_empty(), "SessionCreated not received");
+        assert!(!seed.is_empty(), "SessionStateChanged(Created) not received");
 
-        // Now send a UserInput that triggers 10 parallel file reads.
-        // We send a single ToolCall frame for each read (simulating
-        // what the agent does after parsing LLM output).
-        // Actually, we simulate the agent's internal flow: send a
-        // UserInput that the gate would normally process. But we
-        // bypass the gate and directly inject tool calls.
-
-        // Send 10 ToolCall frames with incrementing IDs
+        // Send 10 ToolInvoke frames with incrementing IDs
         for i in 0..10 {
-            let tc = Ui2Agent::ToolCall {
-                id: format!("tc_{}", i),
-                name: "read".into(),
-                action: String::new(),
-                args: serde_json::json!({
-                    "path": file_path.to_string_lossy(),
+            send_cmd(
+                &mut input_writer,
+                &seed,
+                RingingCommand::Tool(ToolCommand::ToolInvoke {
+                    tool_call_id: format!("tc_{i}"),
+                    name: "read_file".into(),
+                    action: String::new(),
+                    args: serde_json::json!({
+                        "path": file_path.to_string_lossy(),
+                    }),
                 }),
-            };
-            let json = serde_json::to_string(&tc).unwrap();
-            writeln!(input_writer, "{}", json).unwrap();
-            input_writer.flush().unwrap();
+            );
         }
 
         // Drain events and check for errors
@@ -112,11 +116,11 @@ fn ten_parallel_reads_same_file() {
                 break;
             }
             match event_rx.recv_timeout(remaining) {
-                Ok(Agent2Ui::Error { message }) => {
-                    eprintln!("Error event: {}", message);
+                Ok(RingingEvent::Control(ControlEvent::OperationFailed { error, .. })) => {
+                    eprintln!("Error event: {}", error.message);
                     error_count += 1;
                 }
-                Ok(Agent2Ui::Done) => break,
+                Ok(RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })) => break,
                 Ok(_) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,

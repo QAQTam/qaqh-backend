@@ -90,8 +90,10 @@ function killPet(): void {
   petEnabled = false;
 }
 const smokeMode = process.env.DEEPX_DESKTOP_SMOKE === "1" || process.argv.includes("--deepx-smoke");
+// Ringing 会话管理（三 SSE）。batch 整批转发 renderer，禁止逐事件展开。
+// 注意：legacy `/control/v1` WS 数据协议已退役，daemon 不再推送
+// session-activity 等 legacy 消息；会话活动状态走 Ringing control store。
 const backend = new DaemonControlClient(
-  message => sendToRenderer("backend:message", message),
   status => sendToRenderer("backend:status", status),
 );
 // Ringing 会话管理（三 SSE）。batch 整批转发 renderer，禁止逐事件展开。

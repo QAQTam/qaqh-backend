@@ -10,18 +10,18 @@ use deepx_types::{Message, ToolDef};
 /// - Truncation markers tell the model how to retrieve the omitted portion.
 /// - Line-oriented tools snap to a preceding newline; others cut at a UTF-8 boundary.
 fn is_line_oriented_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "read" | "diff") || tool_name.starts_with("file")
+    matches!(tool_name, "read_file" | "diff") || tool_name.starts_with("file")
 }
 
 /// Tools whose result carries content the model must consume to continue:
 /// folding their *active* (last-step) result forces a redundant second call
 /// (re-fetching a URL, re-running an image query, re-listing todos, …).
-/// Receipt-style tools (write/edit/delete/todo_create/…) stay folded even on
-/// the last step — the model already knows what it changed.
+/// Receipt-style tools (edit_file/write/delete/todo_create/…) stay folded even
+/// on the last step — the model already knows what it changed.
 fn is_content_bearing_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "web"
+        "web_fetch"
             | "image_query"
             | "diff"
             | "todo_list"
@@ -29,15 +29,14 @@ fn is_content_bearing_tool(tool_name: &str) -> bool {
             | "process_check"
             | "process_wait"
             | "ask_user"
-            | "apply_patch"
     )
 }
 
 fn truncation_hint(tool_name: &str) -> &'static str {
     match tool_name {
-        "read" => "Call read again with the same path and a later start_line/end_line range.",
+        "read_file" => "Call read_file again with the same path and a later start_line/end_line range.",
         "exec" => "Call exec again with narrower argv or a filtering command.",
-        "web" => "Call web again with a narrower URL or query.",
+        "web_fetch" => "Call web_fetch again with a narrower URL or query.",
         _ => "Call this tool again with narrower arguments to retrieve the omitted portion.",
     }
 }
@@ -86,7 +85,7 @@ fn truncate_tool_result(tool_name: &str, result: &str) -> String {
         Some(4000)
     } else if tool_name.starts_with("exec") {
         Some(4000)
-    } else if tool_name.starts_with("task") || tool_name.starts_with("todo") || tool_name.starts_with("plan") {
+    } else if tool_name.starts_with("todo") || tool_name.starts_with("plan") {
         Some(4000)
     } else if tool_name.starts_with("git") || tool_name.starts_with("process") {
         Some(4000)
@@ -131,18 +130,18 @@ fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
         return result.to_string();
     }
 
-    if matches!(tool_name, "read" | "diff") {
+    if matches!(tool_name, "read_file" | "diff") {
         return fold_retrieval_result(tool_name, result);
     }
 
-    if matches!(tool_name, "edit" | "edit_block" | "write") {
+    if matches!(tool_name, "edit_file" | "write") {
         return fold_file_mutation_result(tool_name, result);
     }
 
     // ── JSON-aware folding ──
     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(result) {
         let hint = if tool_name.starts_with("web") {
-            "[web content folded; call web again with the same url to re-fetch, or read the saved file if the result led with [saved to ...]]"
+            "[web content folded; call web_fetch again with the same url to re-fetch, or read the saved file if the result led with [saved to ...]]"
         } else if tool_name.starts_with("exec") {
             "[stdout folded]"
         } else if tool_name.starts_with("file") {
@@ -161,7 +160,7 @@ fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
 
     // ── Plain string folding (legacy) ──
     let hint = if tool_name.starts_with("web") {
-        " [web content folded; call web again with the same url to re-fetch, or read the saved file if the result led with [saved to ...]]"
+        " [web content folded; call web_fetch again with the same url to re-fetch, or read the saved file if the result led with [saved to ...]]"
     } else if tool_name.starts_with("exec") {
         " [stdout folded]"
     } else if tool_name.starts_with("file") {
@@ -203,12 +202,12 @@ fn fold_retrieval_result(tool_name: &str, result: &str) -> String {
                 folded.insert(key.to_string(), value.clone());
             }
         }
-        let hint = if tool_name == "read" {
-            "[read content folded; call read with path and start_line/end_line to retrieve code]"
+        let hint = if tool_name == "read_file" {
+            "[read_file content folded; call read_file with path and start_line/end_line to retrieve code]"
         } else if tool_name == "diff" {
             "[diff folded; call diff with the same paths to retrieve changes]"
         } else {
-            "[search matches folded; call search with the same or narrower query to retrieve matches]"
+            "[matches folded; re-run with narrower arguments to retrieve them]"
         };
         folded.insert("content".to_string(), serde_json::Value::String(hint.to_string()));
         return serde_json::Value::Object(folded).to_string();
@@ -216,12 +215,12 @@ fn fold_retrieval_result(tool_name: &str, result: &str) -> String {
 
     let first = result.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
     let cap = first.floor_char_boundary(first.len().min(400));
-    let hint = if tool_name == "read" {
-        " [read content folded; call read again with a path and range]"
+    let hint = if tool_name == "read_file" {
+        " [read_file content folded; call read_file again with a path and range]"
     } else if tool_name == "diff" {
         " [diff folded; call diff again with the same paths]"
     } else {
-        " [search matches folded; call search again with a narrower query]"
+        " [matches folded; re-run with narrower arguments to retrieve them]"
     };
     format!("{}{}", &first[..cap], hint)
 }
@@ -233,12 +232,12 @@ fn fold_file_mutation_result(tool_name: &str, result: &str) -> String {
     let first = result.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
     let cap = first.floor_char_boundary(first.len().min(400));
     let action = match tool_name {
-        "edit" | "edit_block" => "edit",
+        "edit_file" => "edit",
         "write" => "write",
         _ => "change",
     };
     format!(
-        "{}\n[{} diff folded; verify the affected range with read before making dependent changes]",
+        "{}\n[{} diff folded; verify the affected range with read_file before making dependent changes]",
         &first[..cap], action
     )
 }
@@ -765,8 +764,8 @@ impl MessageStore {
                                 // Reasonix applies truncation at storage time;
                                 // we apply it here consistently regardless of
                                 // step position.
-                                if tool_name == "read" {
-                                    // read self-limits to head 50 + tail 30 lines
+                                if tool_name == "read_file" {
+                                    // read_file self-limits to head 50 + tail 30 lines
                                     // (~4K chars); pass through unchanged.
                                 } else if tool_name == "skills" {
                                     // Skill instructions / resources are active
@@ -1401,7 +1400,7 @@ impl MessageStore {
                                 .unwrap_or("");
 
                             let effective = if is_last_step_of_last_turn {
-                                let keep_full = tool_name == "read"
+                            let keep_full = tool_name == "read_file"
                                     || tool_name == "skills"
                                     || tool_name.starts_with("exec");
                                 if keep_full {
@@ -1516,7 +1515,7 @@ mod tests {
         store.push_user("inspect files");
         store.push_assistant(assistant_with_tools(&[
             ("write-1", "write"),
-            ("read-1", "read"),
+    ("read-1", "read_file"),
             ("exec-1", "exec"),
         ]));
         store.push_tool_result_direct("write-1", "WRITE_RESULT", true);
@@ -1527,7 +1526,7 @@ mod tests {
 
         assert_eq!(
             context_result(&context, "write-1"),
-            "WRITE_RESULT\n[write diff folded; verify the affected range with read before making dependent changes]"
+            "WRITE_RESULT\n[write diff folded; verify the affected range with read_file before making dependent changes]"
         );
         assert_eq!(context_result(&context, "read-1"), "READ_RESULT");
         assert_eq!(context_result(&context, "exec-1"), "EXEC_RESULT");
@@ -1539,7 +1538,7 @@ mod tests {
         store.push_user("first turn");
         store.push_assistant(assistant_with_tools(&[
             ("write-1", "write"),
-            ("read-1", "read"),
+    ("read-1", "read_file"),
         ]));
         store.push_tool_result_direct("write-1", "WRITE_RESULT", true);
         store.push_tool_result_direct("read-1", "READ_RESULT", true);
@@ -1549,7 +1548,7 @@ mod tests {
 
         assert_eq!(
             context_result(&context, "write-1"),
-            "WRITE_RESULT\n[write diff folded; verify the affected range with read before making dependent changes]"
+            "WRITE_RESULT\n[write diff folded; verify the affected range with read_file before making dependent changes]"
         );
         assert_eq!(
             context_result(&context, "read-1"),
@@ -1561,7 +1560,7 @@ mod tests {
     fn historical_read_preserves_full_content() {
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("inspect file");
-        store.push_assistant(assistant_with_tools(&[("read-1", "read")]));
+        store.push_assistant(assistant_with_tools(&[("read-1", "read_file")]));
         store.push_tool_result_direct(
             "read-1",
             &serde_json::json!({
@@ -1592,7 +1591,7 @@ mod tests {
     fn historical_edit_keeps_verification_receipt_not_full_diff() {
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("make edit");
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
         store.push_tool_result_direct(
             "edit-1",
             "[OK] src/lib.rs:42 +3 -2 | edit\n\n@@ -42,2 +42,3 @@\n-full diff body",
@@ -1601,7 +1600,7 @@ mod tests {
 
         assert_eq!(
             context_result(&store.build_context_for_gate(&[]), "edit-1"),
-            "[OK] src/lib.rs:42 +3 -2 | edit\n[edit diff folded; verify the affected range with read before making dependent changes]"
+            "[OK] src/lib.rs:42 +3 -2 | edit\n[edit diff folded; verify the affected range with read_file before making dependent changes]"
         );
     }
 
@@ -1611,7 +1610,7 @@ mod tests {
         // (last) step, otherwise the model would re-fetch the URL.
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("fetch page");
-        store.push_assistant(assistant_with_tools(&[("web-1", "web")]));
+        store.push_assistant(assistant_with_tools(&[("web-1", "web_fetch")]));
         store.push_tool_result_direct("web-1", "PAGE_TEXT_BODY", true);
 
         assert_eq!(
@@ -1626,9 +1625,9 @@ mod tests {
         // a marker — bounded prefix wins over re-readability.
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("fetch page");
-        store.push_assistant(assistant_with_tools(&[("web-1", "web")]));
+        store.push_assistant(assistant_with_tools(&[("web-1", "web_fetch")]));
         store.push_tool_result_direct("web-1", "PAGE_TEXT_BODY", true);
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
         store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
 
         let context = store.build_context_for_gate(&[]);
@@ -1638,7 +1637,7 @@ mod tests {
         // the active step.
         assert_eq!(
             context_result(&context, "edit-1"),
-            "OK_RECEIPT\n[edit diff folded; verify the affected range with read before making dependent changes]"
+            "OK_RECEIPT\n[edit diff folded; verify the affected range with read_file before making dependent changes]"
         );
     }
 
@@ -1653,7 +1652,7 @@ mod tests {
 
         assert_eq!(
             context_result(&store.build_context_for_gate(&[]), "write-1"),
-            "WRITE_RESULT\n[write diff folded; verify the affected range with read before making dependent changes]"
+            "WRITE_RESULT\n[write diff folded; verify the affected range with read_file before making dependent changes]"
         );
     }
 
@@ -1725,22 +1724,22 @@ mod tests {
         let raw = serde_json::json!({"content": content}).to_string();
 
         let truncated: serde_json::Value =
-            serde_json::from_str(&truncate_tool_result("read", &raw)).expect("valid JSON result");
+        serde_json::from_str(&truncate_tool_result("read_file", &raw)).expect("valid JSON result");
         let content = truncated["content"].as_str().expect("content string");
 
         assert!(truncated["truncated"].as_bool().unwrap_or(false));
         assert!(content
-            .contains("Call read again with the same path and a later start_line/end_line range."));
+        .contains("Call read_file again with the same path and a later start_line/end_line range."));
     }
 
     #[test]
     fn plain_read_result_is_truncated_at_line_boundary_with_follow_up_hint() {
         let result = "line\n".repeat(1_100);
-        let truncated = truncate_tool_result("read", &result);
+        let truncated = truncate_tool_result("read_file", &result);
 
         assert!(truncated.len() < result.len());
         assert!(truncated
-            .contains("Call read again with the same path and a later start_line/end_line range."));
+        .contains("Call read_file again with the same path and a later start_line/end_line range."));
     }
 
     #[test]

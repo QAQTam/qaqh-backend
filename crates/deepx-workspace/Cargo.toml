@@ -24,6 +24,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 html2text = "0.17"
 log = "0.4"
 sha2 = "0.11"
+unicode-normalization = "0.1"
 hex = "0.4"
 chrono = { version = "0.4", features = ["clock"] }
 git2 = { version = "0.21", features = ["vendored-libgit2"] }

@@ -84,7 +84,7 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
                 "IS_DIRECTORY",
                 format!("'{path}' is a directory"),
                 false,
-                Some("Use search(kind=files) to enumerate files.".into()),
+                Some("Use exec with argv [\"rg\", \"--files\"] (or [\"ls\", \"-la\"] / [\"cmd\", \"/c\", \"dir\", \"/b\"]) to list directory contents.".into()),
                 serde_json::json!({"path": path}),
             ),
             serde_json::json!({}),
@@ -282,8 +282,8 @@ handler!(handle_diff, exec_diff);
 
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
-        key: "read".to_string(),
-        description: "Read up to eight files as precise contiguous ranges. Every returned line has a stable L<number> prefix, and each file includes its hash, total line count, and a directly executable continuation when the model budget is insufficient. Directories are errors; enumerate them with search(kind=files).",
+        key: "read_file".to_string(),
+        description: "Read up to eight files as precise contiguous ranges. Every returned line has a stable L<number> prefix, and each file includes its hash, total line count, and a directly executable continuation when the model budget is insufficient. Directories are rejected with IS_DIRECTORY; list directory contents with exec (e.g. argv [\"rg\", \"--files\"]).",
         input_schema: serde_json::json!({
             "type":"object",
             "properties": {
@@ -340,5 +340,8 @@ mod tests {
         assert_eq!(result.model_text(), "L2: two\nL3: three");
         assert_eq!(result.data["files"][0]["start_line"], 2);
         assert_eq!(result.data["files"][0]["end_line"], 3);
+        // 防呆闭环：响应必须带 hash（LF 视图 content_hash），供 edit_file 的 expected_hash 校验
+        let hash = result.data["files"][0]["hash"].as_str().expect("read_file must return hash");
+        assert_eq!(hash, crate::file_shared::content_hash("one\ntwo\nthree\n"));
     }
 }

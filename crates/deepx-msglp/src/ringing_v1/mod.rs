@@ -37,7 +37,6 @@
 //! 2. Add `Box::new(YourEngine::new())` to the engines vec in `Loop::new_ipc()`
 //! 3. Done — no changes to `Loop::dispatch()` needed
 
-pub mod engine;
 pub mod engine_compact;
 pub mod engine_goal;
 pub mod engine_input;

@@ -19,8 +19,10 @@ import { ToastContainer, createToastCtrl } from "./components/Toast";
 import AppShell from "./components/shell/AppShell";
 import TaskSidebar from "./components/shell/TaskSidebar";
 import { createI18n, I18nCtx, type Lang } from "./i18n";
-import { startSessionActivityClient } from "./runtime/sessionActivityClient";
-import type { SessionActivityMap } from "./runtime/sessionActivityStore";
+import {
+  parseSessionActivity,
+  type SessionActivityMap,
+} from "./runtime/sessionActivityStore";
 import type { PendingInteraction } from "./store/rawSession";
 import { createRingingMonitor } from "./store/ringingMonitor";
 import {
@@ -76,7 +78,6 @@ export default function App() {
   const [pendingUpdate, setPendingUpdate] = createSignal<UpdateInfo | null>(null);
   const [applyingUpdate, setApplyingUpdate] = createSignal(false);
   let unlistenTheme: (() => void) | undefined;
-  let unlistenSessionActivity: (() => void) | undefined;
   let unlistenBackendStatus: (() => void) | undefined;
   let unlistenRingingBatch: (() => void) | undefined;
   let unlistenRingingStatus: (() => void) | undefined;
@@ -159,6 +160,59 @@ export default function App() {
     if (!list) return false;
     setSessions(list);
     return true;
+  }
+
+  /** 已打开会话的实时活动状态（Ringing control store 权威源）。 */
+  function liveActivities(): SessionActivityMap {
+    const map: SessionActivityMap = {};
+    for (const entry of registry.entries()) {
+      const seed = entry.state().seed;
+      const activity = ringingMonitor.storesFor(seed)?.control.activity;
+      if (activity) {
+        map[seed] = { seed, state: activity, seq: 0, updated_at: Date.now() };
+      }
+    }
+    return map;
+  }
+
+  /**
+   * 会话活动状态基线：`session.activity` 查询（Ringing query，返回所有
+   * session 的 tracker 状态）。legacy `session-activity` 事件流在 Ringing
+   * 模式下不存在（daemon 已拆除 legacy WS 数据协议），打开中的会话以
+   * Ringing control store 的实时 activity 覆盖。
+   */
+  async function refreshSessionActivities(): Promise<void> {
+    const baseline: SessionActivityMap = {};
+    try {
+      const list = await request<unknown[]>("session.activity");
+      for (const item of list) {
+        try {
+          const parsed = parseSessionActivity(item);
+          baseline[parsed.seed] = parsed;
+        } catch {
+          // skip malformed entries
+        }
+      }
+    } catch (error) {
+      console.error("session activity", error);
+    }
+    setSessionActivities({ ...baseline, ...liveActivities() });
+  }
+
+  /** 已打开会话的实时 activity 覆盖（Ringing 事件到达时调用，纯内存合并）。 */
+  function mergeLiveActivities(): void {
+    const live = liveActivities();
+    setSessionActivities(prev => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [seed, activity] of Object.entries(live)) {
+        if (next[seed]?.state !== activity.state) {
+          next[seed] = activity;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
   }
 
   function refreshSessionsAfterCompletedTurn(): void {
@@ -274,8 +328,11 @@ export default function App() {
     try {
       await request("interaction.ask_response", { seed: entry.state().seed, askId: item.id, answers });
     } catch (error) {
-      entry.ui.finishInteractionSubmit(item.id);
       toastCtrl.push(String(error), "error");
+    } finally {
+      // 成功路径也必须释放提交闸门：否则 submittingId 永久占用，
+      // 后续所有交互（含授权窗口）的 beginInteractionSubmit 静默返回 false。
+      entry.ui.finishInteractionSubmit(item.id);
     }
   }
 
@@ -285,8 +342,9 @@ export default function App() {
     try {
       await request("interaction.ask_dismiss", { seed: entry.state().seed, askId: item.id });
     } catch (error) {
-      entry.ui.finishInteractionSubmit(item.id);
       toastCtrl.push(String(error), "error");
+    } finally {
+      entry.ui.finishInteractionSubmit(item.id);
     }
   }
 
@@ -307,8 +365,9 @@ export default function App() {
         autonomous,
       });
     } catch (error) {
-      entry.ui.finishInteractionSubmit(item.id);
       toastCtrl.push(String(error), "error");
+    } finally {
+      entry.ui.finishInteractionSubmit(item.id);
     }
   }
 
@@ -458,6 +517,9 @@ export default function App() {
       if (api) {
         unlistenRingingBatch = api.onBatch(batch => {
           ringingMonitor.handleBatch(batch);
+          // 会话活动状态实时覆盖（Ringing control store；事件驱动，
+          // 替代已退役的 legacy session-activity 事件流）。
+          mergeLiveActivities();
           if (batch.channel === "control") {
             for (const envelope of batch.envelopes) {
               const event = envelope.event;
@@ -537,16 +599,9 @@ export default function App() {
       setBackendError(String(error));
     }
 
-    try {
-      unlistenSessionActivity = await startSessionActivityClient({
-        listen: handler => listen<unknown>("session-activity", event => handler(event.payload)),
-        loadSnapshot: () => request<unknown[]>("session.activity"),
-        onChange: setSessionActivities,
-        onError: error => console.error("session activity", error),
-      });
-    } catch (error) {
-      console.error("session activity listener", error);
-    }
+    // 会话活动状态统一走 Ringing：基线查询 + control store 实时派生
+    // （legacy session-activity 事件流已随 legacy WS 数据协议退役）。
+    await refreshSessionActivities();
 
     try {
       const config = await request<{ lang?: Lang; permission_level?: number }>("config.load");
@@ -584,7 +639,6 @@ export default function App() {
     unlistenRingingStatus?.();
     unlistenTimelineEntry?.();
     unlistenTimelineSnapshot?.();
-    unlistenSessionActivity?.();
     unlistenBackendStatus?.();
     unlistenUpdate?.();
     unlistenUpdateFailure?.();

@@ -76,17 +76,6 @@ pub(crate) fn record_token_usage(usage: &deepx_types::UsageInfo, model: &str) {
     }
 }
 
-pub(crate) fn cache_hit_pct(usage: &deepx_types::UsageInfo) -> f64 {
-    let total = usage
-        .prompt_cache_hit_tokens
-        .saturating_add(usage.prompt_cache_miss_tokens);
-    if total == 0 {
-        0.0
-    } else {
-        f64::from(usage.prompt_cache_hit_tokens) * 100.0 / f64::from(total)
-    }
-}
-
 pub(crate) fn has_xml(s: &str) -> bool {
     // Require <tool_calls> wrapper to avoid false positives from
     // examples, explanations, or markdown containing bare <invoke> tags.
@@ -118,13 +107,13 @@ pub(crate) fn format_tool_args_display(name: &str, input: &serde_json::Value) ->
             path.map(|p| p.chars().take(60).collect::<String>())
                 .unwrap_or(display_name)
         }
-        "todo" | "task" => input
+        "todo" => input
             .get("title")
             .or_else(|| input.get("subject"))
             .and_then(|v| v.as_str())
             .map(|s| s.chars().take(60).collect::<String>())
             .unwrap_or(display_name),
-        "web" => input
+        "web_fetch" => input
             .get("url")
             .or_else(|| input.get("query"))
             .or_else(|| input.get("name"))
@@ -445,23 +434,6 @@ pub(crate) fn emit_round_complete_via_emitter(
             _ => {}
         }
     }
-    emitter.emit(deepx_proto::Agent2Ui::RoundComplete {
-        turn_id: turn_id.into(),
-        round_num,
-        thinking: if _reasoning.is_empty() {
-            None
-        } else {
-            Some(_reasoning.into())
-        },
-        answer: if _content.is_empty() {
-            None
-        } else {
-            Some(_content.into())
-        },
-        tool_calls: tool_calls.clone(),
-        blocks,
-        is_final: tool_calls.is_empty(),
-    });
     // Ringing 双发：RoundCompleted（该 round 的权威全量终态，携带全量
     // thinking/answer）。daemon 收到后折叠该 round 的 RoundDelta；否则每个
     // token 增量都会永久累积在 conversation journal 中（磁盘与内存无界

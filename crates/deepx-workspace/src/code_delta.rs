@@ -30,24 +30,6 @@ pub(crate) fn compute(
                 file: file_path.map(String::from),
             })
         }
-        ("edit", _) => {
-            let old = args
-                .get("old_string")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            let new = args
-                .get("new_string")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            Some(deepx_proto::CodeDeltaRecord {
-                timestamp: now,
-                lines_added: new.lines().count(),
-                lines_removed: old.lines().count(),
-                files_created: 0,
-                files_deleted: 0,
-                file: file_path.map(String::from),
-            })
-        }
         ("delete", _) => Some(deepx_proto::CodeDeltaRecord {
             timestamp: now,
             lines_added: 0,
@@ -56,22 +38,67 @@ pub(crate) fn compute(
             files_deleted: 1,
             file: file_path.map(String::from),
         }),
-        ("edit_block", _) => {
-            let old_count = args
-                .get("old_lines")
-                .and_then(|value| value.as_array())
-                .map(Vec::len)
-                .unwrap_or(0);
-            let new_count = args
-                .get("new_lines")
-                .and_then(|value| value.as_array())
-                .map(Vec::len)
-                .unwrap_or(0);
+        ("edit_file", _) => {
+            // 统一 edit_file：单文件（顶层字段或 ops）与多文件（files）都统计。
+            let mut added = 0usize;
+            let mut removed = 0usize;
+            let mut files_created = 0usize;
+            let mut count_one = |v: &serde_json::Value, added: &mut usize, removed: &mut usize| {
+                if let Some(ops) = v.get("ops").and_then(|x| x.as_array()) {
+                    for op in ops {
+                        *added += op
+                            .get("new_lines")
+                            .and_then(|x| x.as_array())
+                            .map(Vec::len)
+                            .unwrap_or_else(|| {
+                                op.get("new_string")
+                                    .and_then(|s| s.as_str())
+                                    .map_or(0, |s| s.lines().count())
+                            });
+                        *removed += op
+                            .get("old_lines")
+                            .and_then(|x| x.as_array())
+                            .map(Vec::len)
+                            .unwrap_or_else(|| {
+                                op.get("old_string")
+                                    .and_then(|s| s.as_str())
+                                    .map_or(0, |s| s.lines().count())
+                            });
+                    }
+                } else {
+                    *added += v
+                        .get("new_lines")
+                        .and_then(|x| x.as_array())
+                        .map(Vec::len)
+                        .unwrap_or_else(|| {
+                            v.get("new_string")
+                                .and_then(|s| s.as_str())
+                                .map_or(0, |s| s.lines().count())
+                        });
+                    *removed += v
+                        .get("old_lines")
+                        .and_then(|x| x.as_array())
+                        .map(Vec::len)
+                        .unwrap_or_else(|| {
+                            v.get("old_string")
+                                .and_then(|s| s.as_str())
+                                .map_or(0, |s| s.lines().count())
+                        });
+                }
+            };
+            if let Some(files) = args.get("files").and_then(|x| x.as_array()) {
+                for f in files {
+                    files_created += 1;
+                    count_one(f, &mut added, &mut removed);
+                }
+            } else {
+                count_one(args, &mut added, &mut removed);
+            }
             Some(deepx_proto::CodeDeltaRecord {
                 timestamp: now,
-                lines_added: new_count,
-                lines_removed: old_count,
-                files_created: 0,
+                lines_added: added,
+                lines_removed: removed,
+                files_created,
                 files_deleted: 0,
                 file: file_path.map(String::from),
             })

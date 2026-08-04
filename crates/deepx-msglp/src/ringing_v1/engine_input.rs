@@ -2,9 +2,6 @@
 //!
 //! Receives raw user text, handles auto-session-creation, compliance guard,
 //! and routes to TurnEngine for LLM processing.
-
-use deepx_proto::Agent2Ui;
-
 use super::types::*;
 
 pub struct InputEngine;
@@ -31,9 +28,6 @@ impl InputEngine {
             // 新 seed 生成后立即同步，后续 Ringing 事件（TurnStarted 双发、
             // RoundDelta 流式等）才能携带正确路由键。
             ctx.emitter.set_seed(&ctx.agent.session.seed);
-            ctx.emitter.emit(Agent2Ui::SessionCreated {
-                seed: ctx.agent.session.seed.clone(),
-            });
         }
 
         let text = if text == "[DeepX Goal: resume]" {
@@ -86,9 +80,6 @@ impl InputEngine {
         if ctx.agent.config.compliance_enabled {
             if let Err(reason) = deepx_gate::guard::content_guard(&text) {
                 log::info!("[INPUT] compliance blocked: {reason}");
-                ctx.emitter.emit(Agent2Ui::Error {
-                    message: reason.clone(),
-                });
                 // Ringing 双发：OperationFailed（Control 频道错误终态）
                 ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                     deepx_domain::ControlEvent::OperationFailed {
@@ -116,12 +107,6 @@ impl InputEngine {
                         operation_id: None,
                     },
                 ));
-                ctx.emitter.emit(Agent2Ui::TurnEnd {
-                    turn_id: "blocked".into(),
-                    stop_reason: Some("compliance_block".into()),
-                    usage: None,
-                });
-                ctx.emitter.emit(Agent2Ui::Done);
                 return Outcome::Handled;
             }
         }
@@ -134,9 +119,6 @@ impl InputEngine {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             let status = ctx.agent.build_skills_status(&workspace);
-            ctx.emitter.emit(Agent2Ui::SkillsChanged {
-                status: status.clone(),
-            });
             // Ringing 双发：SkillsUpdated（skill 目录/激活状态）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                 deepx_domain::ControlEvent::SkillsUpdated {
@@ -195,10 +177,6 @@ impl InputEngine {
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
 
         log::info!("[INPUT] emitting TurnStart turn_id={} round_num=0", turn_id);
-        ctx.emitter.emit(Agent2Ui::TurnStart {
-            turn_id: turn_id.clone(),
-            user_text: text.clone(),
-        });
         ctx.emitter
             .emit_timeline(deepx_domain::TimelineIntent::TurnOpened {
                 turn_id: turn_id.clone(),

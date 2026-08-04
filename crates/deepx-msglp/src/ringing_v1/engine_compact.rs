@@ -6,7 +6,6 @@
 //!    tokens to frontend via CompactDelta events)
 //! 3. `apply_result()` — synchronous, fast (apply on main thread)
 
-use deepx_proto::Agent2Ui;
 use deepx_session::SessionManager;
 
 use super::types::*;
@@ -134,10 +133,6 @@ impl CompactEngine {
 
         let head_msgs = &msgs[..kept_idx];
         if head_msgs.is_empty() {
-            ctx.emitter.emit_delta(Agent2Ui::ToolNotice {
-                message: "Compact skipped: all within token budget".into(),
-                level: "info".into(),
-            });
             // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
                 deepx_domain::ToolEvent::ToolNotice {
@@ -168,10 +163,6 @@ impl CompactEngine {
                 .map(|d| d.as_millis())
                 .unwrap_or(0)
         );
-        ctx.emitter.emit(Agent2Ui::CompactStart {
-            turns_total: turns_total as u32,
-            turns_keeping: kept_user_count as u32,
-        });
         // Ringing 双发：CompactStarted（权威开始事件，携带 compact_id）
         ctx.emitter
             .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -287,9 +278,6 @@ impl CompactEngine {
     /// Step 2: Apply compact result on the live message store (called from main thread).
     pub(crate) fn apply_result(&self, ctx: &mut RingContext, meta: &CompactMeta) {
         if let Some(ref err) = meta.error {
-            ctx.emitter.emit(Agent2Ui::Error {
-                message: err.clone(),
-            });
             // Ringing 双发：OperationFailed（compact 失败）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                 deepx_domain::ControlEvent::OperationFailed {
@@ -317,11 +305,6 @@ impl CompactEngine {
                     operation_id: None,
                 },
             ));
-            ctx.emitter.emit(Agent2Ui::CompactEnd {
-                summary_chars: 0,
-                turns_compacted: 0,
-                turns_removed: 0,
-            });
             // Ringing 双发：CompactFinished（失败终态）
             ctx.emitter
                 .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -375,11 +358,6 @@ impl CompactEngine {
         let _ = std::fs::create_dir_all(&stats_dir);
         let _ = std::fs::write(stats_dir.join("context_stats.json"), stats.to_string());
 
-        ctx.emitter.emit(Agent2Ui::CompactEnd {
-            summary_chars: chars,
-            turns_compacted: meta.head_user_count as u32,
-            turns_removed: turns_removed as u32,
-        });
         // Ringing 双发：CompactFinished（成功终态）
         ctx.emitter
             .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -391,13 +369,6 @@ impl CompactEngine {
                     turns_removed: Some(turns_removed as u32),
                 },
             ));
-        ctx.emitter.emit(Agent2Ui::ToolNotice {
-            message: format!(
-                "Compacted {} turns -> {chars} chars, keeping {} turns",
-                meta.head_user_count, meta.kept_user_count,
-            ),
-            level: "info".into(),
-        });
         // Ringing 双发：ToolNotice（工具域通知留在 Tool 频道）
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
             deepx_domain::ToolEvent::ToolNotice {
@@ -442,11 +413,6 @@ pub(crate) fn run_compact_worker(
     let mut on_event = |ev: deepx_gate::StreamEvent| match ev {
         deepx_gate::StreamEvent::ContentDelta(delta) => {
             summary.push_str(&delta);
-            let _ = event_tx.send(crate::ringing_v1::types::WriterEvent::Legacy(
-                deepx_proto::Agent2Ui::CompactDelta {
-                    delta: delta.clone(),
-                },
-            ));
             // Ringing 双发：CompactProgress（replaceable 流式摘要）
             progress_seq += 1;
             let env = deepx_ringing::RingingWorkerEventEnvelope::new(
@@ -467,11 +433,9 @@ pub(crate) fn run_compact_worker(
             let _ = event_tx.send(crate::ringing_v1::types::WriterEvent::Ringing(env));
         }
         deepx_gate::StreamEvent::ReasoningDelta(delta) => {
-            // 思考链仅透传给前端（用户可以看到压缩 LLM 的推理过程），
-            // 不进入 summary，否则会泄露进下一个 LLM 的上下文中。
-            let _ = event_tx.send(crate::ringing_v1::types::WriterEvent::Legacy(
-                deepx_proto::Agent2Ui::CompactDelta { delta },
-            ));
+            // legacy CompactDelta reasoning 透传已退役：Ringing 无 reasoning 专用事件，
+            // 压缩过程的思考链由 CompactProgress（摘要流）覆盖（convergence-plan §4.2 登记）。
+            let _ = delta;
         }
         _ => {}
     };

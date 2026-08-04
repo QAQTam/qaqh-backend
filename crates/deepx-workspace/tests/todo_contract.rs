@@ -1,5 +1,5 @@
 #[test]
-fn public_schema_exposes_one_todo_tool_with_task_alias_and_no_goal_entrypoint() {
+fn public_schema_exposes_one_todo_tool_with_no_alias_and_no_goal_entrypoint() {
     let manager = deepx_workspace::registration::build_tool_manager(&[]);
     let definitions = manager.all_defs();
     let names: Vec<&str> = definitions
@@ -12,17 +12,11 @@ fn public_schema_exposes_one_todo_tool_with_task_alias_and_no_goal_entrypoint() 
         names.contains(&"todo"),
         "missing todo tool"
     );
-    // 兼容别名：task 允许存在，但必须指向同一 handler 且明确标注 deprecated。
-    if names.contains(&"task") {
-        let task = definitions
-            .iter()
-            .find(|definition| definition.function.name == "task")
-            .unwrap();
-        assert!(
-            task.function.description.contains("Alias of the todo tool"),
-            "task alias must be self-describing as deprecated"
-        );
-    }
+    // 旧名别名 task 已移除：公开 schema 不得再暴露，避免模型调用失效工具。
+    assert!(
+        !names.contains(&"task"),
+        "removed task alias must not be exposed"
+    );
     assert!(
         !names.contains(&"todo_") || !names.iter().any(|name| name.starts_with("todo_")),
         "split todo tools must stay hidden"
@@ -58,7 +52,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         .enumerate()
     {
         let create = deepx_workspace::execution::execute_with_context(
-            "task",
+            "todo",
             "",
             &serde_json::json!({"action":"create", "title": title, "description": format!("item {index}")})
                 .to_string(),
@@ -69,7 +63,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     }
 
     let working = deepx_workspace::execution::execute_with_context(
-        "task",
+        "todo",
         "",
         r#"{"action":"update","id":1,"status":"in_progress"}"#,
         "todo-working",
@@ -82,7 +76,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     );
 
     let completed = deepx_workspace::execution::execute_with_context(
-        "task",
+        "todo",
         "",
         r#"{"action":"update","id":"T2","status":"completed","evidence":"verified"}"#,
         "todo-completed",
@@ -95,7 +89,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     );
 
     let cancelled = deepx_workspace::execution::execute_with_context(
-        "task",
+        "todo",
         "",
         r#"{"action":"cancel","id":"3"}"#,
         "todo-cancelled",
@@ -108,7 +102,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     );
 
     let list = deepx_workspace::execution::execute_with_context(
-        "task",
+        "todo",
         "",
         r#"{"action":"list"}"#,
         "todo-list",

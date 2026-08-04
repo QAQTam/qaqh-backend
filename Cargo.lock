@@ -1886,6 +1886,7 @@ dependencies = [
  "similar",
  "tempfile",
  "tiny_http",
+ "unicode-normalization",
  "ureq",
  "windows 0.58.0",
 ]

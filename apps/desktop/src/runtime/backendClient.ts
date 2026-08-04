@@ -6,10 +6,6 @@ import {
 
 type Listener<T = unknown> = (event: { payload: T }) => void;
 type UnlistenFn = () => void;
-type ControlMessage =
-  | { type: "session_activity"; activity: unknown }
-  | { type: "snapshot"; snapshot: { activities?: unknown[]; attached_sessions?: string[] } }
-  | { type: string; [key: string]: unknown };
 
 const listeners = new Map<string, Set<Listener>>();
 const attached = new Set<string>();
@@ -24,14 +20,8 @@ function backendBridge(): NonNullable<Window["deepx"]>["backend"] {
 function ensureBridgeListener(): void {
   if (bridgeReady) return;
   bridgeReady = true;
-  backendBridge().onMessage(payload => {
-    if (payload.type === "session_activity") dispatch("session-activity", payload.activity);
-    else if (payload.type === "snapshot") {
-      const snapshot = payload.snapshot as { activities?: unknown[]; attached_sessions?: string[] };
-      for (const seed of snapshot.attached_sessions ?? []) attached.add(seed);
-      for (const activity of snapshot.activities ?? []) dispatch("session-activity", activity);
-    } else if (payload.type === "error" && payload.code === "disconnected") attached.clear();
-  });
+  // legacy `/control/v1` WS 数据协议已退役：不再有 session-activity /
+  // snapshot 推送。状态全部经 Ringing（bootstrap + 三 SSE + 查询）。
   backendBridge().onStatus(payload => dispatch("backend-status", payload));
 }
 
@@ -124,31 +114,6 @@ function leaseRequired(method: string): boolean {
   const domain = method.split(".", 1)[0];
   return ["session", "interaction", "workspace", "git", "plan", "skills", "todo"].includes(domain)
     && !["session.list", "session.activity", "session.new", "skills.list_tools"].includes(method);
-}
-
-/**
- * 保留原导出名称以兼容调用方；实际仍由 Electron main 转发至 Ringing V1 action，
- * 不会建立 legacy WebSocket 或执行 legacy 回退。
- */
-export async function requestLegacy<T>(
-  method: string,
-  params: Record<string, unknown>,
-): Promise<T> {
-  ensureBridgeListener();
-  const seed = typeof params.seed === "string" ? params.seed : "";
-  try {
-    return backendBridge().request(method, params) as Promise<T>;
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    // Stale lease: snapshot told us the session was attached, but daemon
-    // disagrees. Clear the cached flag and retry once with a fresh attach.
-    if (leaseRequired(method) && seed && msg.includes("session_lease_required")) {
-      attached.delete(seed);
-      await attach(seed);
-      return backendBridge().request(method, params) as Promise<T>;
-    }
-    throw error;
-  }
 }
 
 export async function connect(): Promise<void> {

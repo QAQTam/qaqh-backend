@@ -30,12 +30,3 @@ export function daemonIdentityMismatch(
   }
   return undefined;
 }
-
-export function hasActiveDaemonWork(value: unknown): boolean {
-  if (!Array.isArray(value)) return true;
-  return value.some(item => {
-    if (!item || typeof item !== "object") return true;
-    const state = String((item as { state?: unknown }).state ?? "");
-    return state === "starting" || state === "working" || state === "waiting_user" || !state;
-  });
-}

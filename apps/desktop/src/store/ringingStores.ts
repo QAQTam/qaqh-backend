@@ -157,6 +157,17 @@ export function controlReducer(state: ControlState, event: ControlEvent): Contro
         ? { ...state, activeAskPlan: null }
         : state;
     case "operation_failed":
+      // 幽灵交互自愈：worker 重启后挂起态丢失，SSE 重放的历史
+      // interaction_requested 无对应 interaction_resolved。此时点击批准
+      // 会被 worker 以 ask_rejected / interaction_not_found 拒绝——
+      // 面板永远无法关闭、loop 无法恢复。收到这类失败终态时清除
+      // activeAskPlan，让 UI 回到可操作状态（权限卡片由快照/终态兜底）。
+      if (
+        event.error.code === "ask_rejected"
+        || event.error.code === "interaction_not_found"
+      ) {
+        return { ...state, lastFailureId: event.error.error_id, activeAskPlan: null };
+      }
       return { ...state, lastFailureId: event.error.error_id };
     case "operation_completed":
       return state;
@@ -331,6 +342,7 @@ export function applyConversationSnapshot(
   hasMore?: boolean,
   model?: string | null,
   contextLimit?: number,
+  replaceTurns = false,
 ): ConversationState {
   const snapshots = new Map<string, TurnView>();
   for (const raw of turns) {
@@ -352,10 +364,14 @@ export function applyConversationSnapshot(
     });
   }
   const existingIds = new Set(state.turns.map((turn) => turn.turnId));
-  const turnsAll = [
-    ...state.turns.map((turn) => snapshots.get(turn.turnId) ?? turn),
-    ...[...snapshots.values()].filter((turn) => !existingIds.has(turn.turnId)),
-  ];
+  // replaceTurns：compact 等权威重拉场景——快照是唯一事实（worker 已物理移除
+  // 被压缩 turn、插入摘要 turn），本地旧 turn 必须删除，否则"只插不移"。
+  const turnsAll = replaceTurns
+    ? [...snapshots.values()]
+    : [
+        ...state.turns.map((turn) => snapshots.get(turn.turnId) ?? turn),
+        ...[...snapshots.values()].filter((turn) => !existingIds.has(turn.turnId)),
+      ];
   const turnsById = new Map<string, number>();
   turnsAll.forEach((turn, index) => turnsById.set(turn.turnId, index));
   const activeTurn = turnsAll.find((t) => t.turnId === activeTurnId) ?? state.activeTurn;
@@ -612,7 +628,20 @@ export function applyConversationEventToDraft(
         return;
       case "conversation_cancelled":
         conv.cancelled = true;
-        if (conv.activeTurn) conv.activeTurn = { ...conv.activeTurn, status: "cancelled" };
+        if (conv.activeTurn) {
+          const activeIdx = turnIndex(conv, conv.activeTurn.turnId);
+          const current = activeIdx >= 0 ? conv.turns[activeIdx] : conv.activeTurn;
+          // 仅 running 收敛为 cancelled；turn_failed/turn_completed 等更具体
+          // 的终态优先保留（失败回合随后收到会话级取消时不得被降级）。
+          const cancelled: TurnView = current.status === "running"
+            ? { ...current, status: "cancelled" }
+            : current;
+          // activeTurn 与 turns 数组必须同步：sessionSelectors.activeTurn()
+          // 从 turns 数组查找 running turn，只更新 activeTurn 会让
+          // isSessionStreaming 继续把已取消的 turn 判为工作中。
+          if (activeIdx >= 0) conv.turns[activeIdx] = cancelled;
+          conv.activeTurn = cancelled;
+        }
         conv.staleRevision += 1;
         if (event.turn_id) {
           conv.pendingDeltas = conv.pendingDeltas.filter((d) => d.turnId !== event.turn_id);

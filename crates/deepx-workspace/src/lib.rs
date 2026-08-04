@@ -4,9 +4,8 @@
 
 pub mod exec;
 
-pub mod apply_patch;
+pub mod file_edit;
 pub mod file_mutate;
-mod staged_plan;
 pub mod authorization;
 pub mod backend;
 mod code_delta;
@@ -18,7 +17,6 @@ pub mod file_state;
 pub mod git;
 pub mod image_query;
 pub mod runtime;
-pub mod search;
 mod safety;
 pub mod skill;
 mod web;
@@ -200,7 +198,7 @@ pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>>
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 /// Tools blocked in PLAN mode. Keep in sync with permission::categorize_tool.
-pub const PLAN_BLOCKED: &[&str] = &["apply_patch", "exec", "process", "task"];
+    pub const PLAN_BLOCKED: &[&str] = &["edit_file", "exec", "process", "todo"];
 
 pub fn set_workspace(path: &str) {
     let mut ws = CURRENT_WORKSPACE.write().unwrap_or_else(|e| e.into_inner());

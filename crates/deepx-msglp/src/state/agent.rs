@@ -239,9 +239,21 @@ impl AgentState {
                 .count();
             context.insert(prefix_end, deepx_types::Message::system(&snapshot.catalog));
         }
-        // The complete authoritative active set is always the final message.
-        let envelope_text = snapshot.envelope.as_str();
-        context.push(deepx_types::Message::system(envelope_text));
+        // TEMP-DISABLED (2026-08-04): skill envelope injection is temporarily
+        // disabled per user request — the per-round tail system message was
+        // observed leaking into the message stream and caused the model to
+        // repeat "skill re-injected" after every tool call.
+        //
+        // NOTE: while disabled, activated skill bodies are NOT delivered to
+        // the model (they live inside the envelope). Re-enable by flipping
+        // SKILL_ENVELOPE_INJECTION to true, or delete this block entirely to
+        // restore the original behavior.
+        const SKILL_ENVELOPE_INJECTION: bool = false;
+        if SKILL_ENVELOPE_INJECTION {
+            // The complete authoritative active set is always the final message.
+            let envelope_text = snapshot.envelope.as_str();
+            context.push(deepx_types::Message::system(envelope_text));
+        }
 
         // ── 前缀稳定性校验 ──
         // Hash the three cache-key components and compare with the
@@ -431,7 +443,7 @@ mod tests {
             name: None,
             content: vec![deepx_types::ContentBlock::ToolUse {
                 id: "read-1".into(),
-                name: "read".into(),
+                name: "read_file".into(),
                 input: serde_json::json!({}),
             }],
         });

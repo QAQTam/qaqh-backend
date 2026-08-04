@@ -185,10 +185,26 @@ impl SnapshotProjector {
                     TE::ToolFinished { tool_call_id, .. } => {
                         state["last_finished"] = serde_json::json!(tool_call_id);
                         state["pending_permission"] = serde_json::Value::Null;
+                        // ToolStarted 写入的 running 必须在终态清除，否则 daemon
+                        // 重启重放 journal 后 tool 快照永远携带陈旧 running 列表
+                        // （异常中断时 ToolFinished 从未到达，孤儿 turn 的收尾
+                        // 也会依赖本分支清空）。
+                        state["running"] = serde_json::Value::Null;
                         true
                     }
-                    TE::ToolStarted { tool_call_id, .. } => {
-                        state["running"] = serde_json::json!([tool_call_id]);
+                    TE::ToolStarted {
+                        tool_call_id,
+                        turn_id,
+                        round_num,
+                        ..
+                    } => {
+                        // 对象化：孤儿收尾（seal_orphan_channel_state）需要
+                        // turn_id/round_num 才能发布完整 ToolFinished 终态。
+                        state["running"] = serde_json::json!([{
+                            "tool_call_id": tool_call_id,
+                            "turn_id": turn_id,
+                            "round_num": round_num,
+                        }]);
                         true
                     }
                     _ => false, // progress/prepared/notice/audit/code 不进快照

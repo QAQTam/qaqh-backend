@@ -16,13 +16,15 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 
 use deepx_domain::{
-    ConversationEvent, Delivery, DomainEvent, RingingChannel, TimelineBlockState, TimelineEntry,
-    TimelineFailure, TimelineIntent, TimelineSnapshot, TimelineTurnState,
+    AskResolution, ControlEvent, ConversationEvent, Delivery, DomainEvent, RingingChannel,
+    TimelineBlockState, TimelineEntry, TimelineFailure, TimelineIntent, TimelineSnapshot,
+    TimelineTurnState, ToolEvent,
 };
 use deepx_ringing::{
     RingingChannelSnapshot, RingingEvent, RingingEventEnvelope, RingingResetRequired,
     is_safe_integer,
 };
+use deepx_types::tool_result::ToolResult;
 use tokio::sync::broadcast;
 
 use super::content_store::{ContentEntry, ContentStore};
@@ -566,6 +568,121 @@ impl RingingHub {
         changed
     }
 
+    /// 收尾三频道投影中的孤儿领域状态（Ringing 版 `seal_orphan_running_turns`）。
+    ///
+    /// worker 的挂起/运行状态在内存中，daemon 重启或 worker 被重新拉起后，
+    /// journal 重放会恢复 `TurnStarted`/`ToolStarted`/`InteractionRequested` 等
+    /// reliable 事件，但它们**永远不会有终态**——bootstrap 快照因此携带陈旧
+    /// 的 `active_turn`/`running`/`pending_permission`/`pending_interaction`：
+    /// 前端把中断的 turn 投影为 running、弹出无法批准的幽灵 ask/授权面板。
+    ///
+    /// 与 timeline seal 语义一致：通过正常 publish 路径发出终态事件
+    /// （`ConversationCancelled` / `ToolFinished(Cancelled)` / `InteractionResolved`），
+    /// 使 journal、投影与 SSE 客户端全部收敛。幂等：无孤儿时返回 false。
+    ///
+    /// 调用方必须在 `ensure_seed_loaded` 完成之后调用（本函数内部 publish 会
+    /// 再次调用 `ensure_seed_loaded`，重入 lazy_load 锁会死锁）。
+    pub fn seal_orphan_channel_state(&self, seed: &str) -> bool {
+        let mut changed = false;
+
+        // 1) conversation：active_turn 无终态（journal 重放后仍有值）→ 取消。
+        let conv = self.snapshot(RingingChannel::Conversation, seed);
+        if let Some(turn_id) = conv
+            .state
+            .get("active_turn")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            log::info!(
+                "[ringing] sealing orphan active turn {turn_id} for {seed} (no terminal event)"
+            );
+            let _ = self.publish_with_causation(
+                seed,
+                DomainEvent::Conversation(ConversationEvent::ConversationCancelled {
+                    turn_id: Some(turn_id.to_string()),
+                }),
+                None,
+            );
+            changed = true;
+        }
+
+        // 2) tool：running 列表 + pending_permission 无 ToolFinished 终态 → 取消。
+        //    兼容旧投影的字符串数组与当前的对象数组两种格式。
+        let tool = self.snapshot(RingingChannel::Tool, seed);
+        let mut orphans: Vec<(String, String, u32)> = Vec::new();
+        if let Some(running) = tool.state.get("running").and_then(|v| v.as_array()) {
+            for entry in running {
+                match entry {
+                    serde_json::Value::String(id) => {
+                        orphans.push((id.clone(), String::new(), 0));
+                    }
+                    serde_json::Value::Object(obj) => {
+                        if let Some(id) = obj.get("tool_call_id").and_then(|v| v.as_str()) {
+                            orphans.push((
+                                id.to_string(),
+                                obj.get("turn_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                obj.get("round_num").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(id) = tool
+            .state
+            .get("pending_permission")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            if !orphans.iter().any(|(tool_call_id, _, _)| tool_call_id == id) {
+                orphans.push((id.to_string(), String::new(), 0));
+            }
+        }
+        for (tool_call_id, turn_id, round_num) in orphans {
+            log::info!(
+                "[ringing] sealing orphan tool {tool_call_id} for {seed} (no ToolFinished)"
+            );
+            let _ = self.publish_with_causation(
+                seed,
+                DomainEvent::Tool(ToolEvent::ToolFinished {
+                    tool_call_id,
+                    turn_id,
+                    round_num,
+                    result: ToolResult::cancelled(
+                        "Agent restarted before the tool returned a result",
+                    ),
+                }),
+                None,
+            );
+            changed = true;
+        }
+
+        // 3) control：pending_interaction 无 InteractionResolved → 关闭（Dismissed）。
+        let control = self.snapshot(RingingChannel::Control, seed);
+        if let Some(id) = control
+            .state
+            .get("pending_interaction")
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+        {
+            log::info!(
+                "[ringing] sealing orphan interaction {id} for {seed} (no resolution)"
+            );
+            let _ = self.publish_with_causation(
+                seed,
+                DomainEvent::Control(ControlEvent::InteractionResolved {
+                    interaction_id: id.to_string(),
+                    resolution: AskResolution::Dismissed,
+                }),
+                None,
+            );
+            changed = true;
+        }
+
+        changed
+    }
+
     pub fn epoch(&self) -> &str {
         &self.epoch
     }
@@ -918,10 +1035,17 @@ impl RingingHub {
     /// 懒加载语义：只回放**已加载** seed（冷启动后未经任何访问的 seed 不在
     /// 内存）。客户端连接某 seed 前必经 open/bootstrap（触发 `ensure_seed_loaded`），
     /// 因此活跃会话的历史始终可回放；从未连接的 seed 没有消费者，无需装载。
+    ///
+    /// `skip_reliable`：无 cursor 的新连接（`after_stream_seq == 0`）为 true。
+    /// 新客户端的历史由 bootstrap 快照承担（快照先行），此时只回放当前
+    /// replaceable 值；不回放 journal 里的可靠历史，否则 SSE 先于 bootstrap
+    /// 到达时，无终态的 TurnStarted/ToolStarted/InteractionRequested 会被
+    /// 前端应用成陈旧 running turn 与无法批准的幽灵交互面板。
     pub fn replay_channel_since(
         &self,
         channel: RingingChannel,
         after_stream_seq: u64,
+        skip_reliable: bool,
     ) -> ChannelReplay {
         let guard = self.channel_state(channel);
         let mut replay = ChannelReplay::default();
@@ -929,16 +1053,18 @@ impl RingingHub {
             return replay;
         };
         for (seed, st) in seeds {
-            match st.journal.replay_since(after_stream_seq) {
-                Ok(mut events) => replay.events.append(&mut events),
-                Err(CursorExpired {
-                    earliest_available_seq,
-                }) => {
-                    replay.resets.push(RingingResetRequired::new(
-                        channel,
-                        seed.clone(),
+            if !skip_reliable {
+                match st.journal.replay_since(after_stream_seq) {
+                    Ok(mut events) => replay.events.append(&mut events),
+                    Err(CursorExpired {
                         earliest_available_seq,
-                    ));
+                    }) => {
+                        replay.resets.push(RingingResetRequired::new(
+                            channel,
+                            seed.clone(),
+                            earliest_available_seq,
+                        ));
+                    }
                 }
             }
             for env in st.router.replay_since(after_stream_seq) {
@@ -1522,7 +1648,7 @@ mod tests {
                 name: "exec".into(),
             }),
         );
-        let replay = hub.replay_channel_since(RingingChannel::Tool, 0);
+        let replay = hub.replay_channel_since(RingingChannel::Tool, 0, false);
         assert_eq!(replay.resets.len(), 0);
         assert_eq!(replay.events.len(), 2);
         // stream_seq 全局递增，跨 seed 合并后按序排列
@@ -1530,6 +1656,12 @@ mod tests {
         assert_eq!(replay.events[1].stream_seq, 2);
         assert_eq!(replay.events[0].seed, "s1");
         assert_eq!(replay.events[1].seed, "s2");
+
+        // 无 cursor 的新连接跳过可靠历史（只回放 replaceable 值）：
+        // 历史由 bootstrap 快照承担，防止幽灵事件先于快照到达前端。
+        let fresh = hub.replay_channel_since(RingingChannel::Tool, 0, true);
+        assert_eq!(fresh.events.len(), 0);
+        assert_eq!(fresh.resets.len(), 0);
 
         // cursor 超出保留窗口 → 该 seed 需要强制 snapshot
         // （journal 默认容量 8192，灌满后 earliest 前移）
@@ -1545,7 +1677,7 @@ mod tests {
                 }),
             );
         }
-        let replayed = hub2.replay_channel_since(RingingChannel::Tool, 0);
+        let replayed = hub2.replay_channel_since(RingingChannel::Tool, 0, false);
         assert!(!replayed.resets.is_empty());
         assert_eq!(replayed.resets[0].seed, "s1");
         assert!(replayed.resets[0].earliest_available_seq > 1);
@@ -1837,5 +1969,120 @@ mod tests {
             &replay[0].event,
             deepx_ringing::RingingEvent::Conversation(ConversationEvent::RoundCompleted { .. })
         ));
+    }
+
+    #[test]
+    fn seal_orphan_channel_state_converges_three_channels() {
+        let hub = RingingHub::new("epoch-seal");
+        // 无终态的中断现场：running turn、running tool + 挂起权限、未决 ask
+        hub.publish(
+            "s",
+            DomainEvent::Conversation(ConversationEvent::TurnStarted {
+                turn_id: "t1".into(),
+                user_text: "hi".into(),
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Tool(ToolEvent::ToolStarted {
+                tool_call_id: "c1".into(),
+                turn_id: "t1".into(),
+                round_num: 0,
+                name: "exec".into(),
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Tool(ToolEvent::ToolPermissionRequested {
+                tool_call_id: "c2".into(),
+                turn_id: "t1".into(),
+                round_num: 0,
+                tool_name: "exec".into(),
+                reason: "r".into(),
+                paths: vec![],
+                category: deepx_domain::PermissionCategory::Exec,
+                level: 3,
+                risk: deepx_domain::PermissionRisk::High,
+                consequence: "run".into(),
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Control(ControlEvent::InteractionRequested {
+                interaction_id: "i1".into(),
+                turn_id: "t1".into(),
+                mode: deepx_domain::AskMode::Single,
+                questions: vec![],
+            }),
+        );
+
+        // 收尾前：三个投影都携带无终态残留
+        assert_eq!(
+            hub.snapshot(RingingChannel::Conversation, "s").state["active_turn"],
+            "t1"
+        );
+        assert!(hub.snapshot(RingingChannel::Tool, "s").state["running"].is_array());
+        assert_eq!(
+            hub.snapshot(RingingChannel::Tool, "s").state["pending_permission"],
+            "c2"
+        );
+        assert_eq!(
+            hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"]["id"],
+            "i1"
+        );
+
+        assert!(hub.seal_orphan_channel_state("s"));
+        // 幂等：再次调用无变更
+        assert!(!hub.seal_orphan_channel_state("s"));
+
+        // 收尾后：三个投影全部收敛
+        assert!(hub.snapshot(RingingChannel::Conversation, "s").state["active_turn"].is_null());
+        assert!(hub.snapshot(RingingChannel::Tool, "s").state["running"].is_null());
+        assert!(hub
+            .snapshot(RingingChannel::Tool, "s")
+            .state["pending_permission"]
+            .is_null());
+        assert!(hub
+            .snapshot(RingingChannel::Control, "s")
+            .state["pending_interaction"]
+            .is_null());
+
+        // journal 已包含终态事件（SSE 客户端与重启后的重放都收敛）
+        let replay = hub
+            .replay_since(RingingChannel::Conversation, "s", 0)
+            .expect("within window");
+        assert!(replay.iter().any(|env| matches!(
+            &env.event,
+            deepx_ringing::RingingEvent::Conversation(ConversationEvent::ConversationCancelled {
+                turn_id: Some(id)
+            }) if id == "t1"
+        )));
+        let tool_replay = hub
+            .replay_since(RingingChannel::Tool, "s", 0)
+            .expect("within window");
+        assert!(tool_replay.iter().any(|env| matches!(
+            &env.event,
+            deepx_ringing::RingingEvent::Tool(ToolEvent::ToolFinished {
+                tool_call_id,
+                ..
+            }) if tool_call_id == "c1"
+        )));
+        assert!(tool_replay.iter().any(|env| matches!(
+            &env.event,
+            deepx_ringing::RingingEvent::Tool(ToolEvent::ToolFinished {
+                tool_call_id,
+                ..
+            }) if tool_call_id == "c2"
+        )));
+        let control_replay = hub
+            .replay_since(RingingChannel::Control, "s", 0)
+            .expect("within window");
+        assert!(control_replay.iter().any(|env| matches!(
+            &env.event,
+            deepx_ringing::RingingEvent::Control(ControlEvent::InteractionResolved {
+                interaction_id,
+                ..
+            }) if interaction_id == "i1"
+        )));
     }
 }

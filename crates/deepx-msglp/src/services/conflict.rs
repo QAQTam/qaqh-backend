@@ -18,7 +18,7 @@ pub(crate) fn file_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec
     };
 
     match action {
-        "patch" | "write" | "edit" | "edit_block" | "edit_diff" | "delete" => {
+        "patch" | "write" | "edit_file" | "edit_diff" | "delete" => {
             collect_paths(args, &mut paths);
         }
         "move" | "copy" => {
@@ -120,7 +120,7 @@ mod tests {
     fn flat_file_mutations_on_same_path_are_serialized() {
         let pending = vec![
             tool("write-1", "write", "src/lib.rs"),
-            tool("edit-1", "edit", "src/lib.rs"),
+        tool("edit-1", "edit_file", "src/lib.rs"),
             tool("delete-1", "delete", "src/other.rs"),
         ];
 
@@ -134,7 +134,7 @@ mod tests {
     fn independent_file_mutations_remain_parallel() {
         let pending = vec![
             tool("write-1", "write", "src/a.rs"),
-            tool("edit-1", "edit_block", "src/b.rs"),
+        tool("edit-1", "edit_file", "src/b.rs"),
         ];
 
         let (groups, serial_after) = resolve_write_conflicts(&pending);

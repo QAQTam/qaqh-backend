@@ -19,7 +19,7 @@ pub enum ToolCategory {
     /// No side effects: read, search, skills, image, ask, process(check/wait),
     /// and read-only git queries.
     Read,
-    /// Mutates files or session state: apply_patch, task, and write-oriented git
+    /// Mutates files or session state: edit_file, task, and write-oriented git
     /// operations.
     Write,
     /// Executes arbitrary code or controls a running process: exec, process(kill/write).
@@ -77,12 +77,12 @@ pub fn classify_risk(
 pub fn categorize_tool(name: &str) -> ToolCategory {
     match name {
         // ── Read ──
-        "read" | "search" | "skills" | "ask" | "image" | "git_diff" | "git_log"
+        "read_file" | "skills" | "ask" | "image" | "git_diff" | "git_log"
         | "git_show" | "git_status" => ToolCategory::Read,
 
         // ── Write ──
-        "apply_patch" | "git_add" | "git_commit" | "git_branch" | "git_checkout"
-        | "git_merge" | "git_restore" | "todo" | "task" => {
+        "edit_file" | "git_add" | "git_commit" | "git_branch" | "git_checkout"
+                    | "git_merge" | "git_restore" | "todo" => {
             ToolCategory::Write
         }
 
@@ -90,7 +90,7 @@ pub fn categorize_tool(name: &str) -> ToolCategory {
         "exec" | "spawn_subagent" => ToolCategory::Exec,
 
         // ── Net ──
-        "web" => ToolCategory::Net,
+        "web_fetch" => ToolCategory::Net,
 
         // Unknown tools default to Write (conservative: assume mutation).
         _ => ToolCategory::Write,
@@ -160,10 +160,10 @@ impl PermissionLevel {
 pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if tool_name == "apply_patch" {
-        paths.extend(crate::apply_patch::extract_target_paths(args));
+    if tool_name == "edit_file" {
+        paths.extend(crate::file_edit::extract_target_paths(args));
     }
-    if tool_name == "read" {
+    if tool_name == "read_file" {
         if let Some(requests) = args.get("requests").and_then(|value| value.as_array()) {
             paths.extend(requests.iter().filter_map(|request| {
                 request.get("path").and_then(|value| value.as_str()).map(PathBuf::from)
@@ -305,7 +305,7 @@ pub fn needs_permission(
     // approval for each model-authored status transition creates recursive,
     // repeated prompts without protecting a user-controlled resource.
     if matches!(
-        tool_name, "todo" | "task"
+            tool_name, "todo"
     ) {
         return PermissionDecision::AutoApprove;
     }
@@ -544,7 +544,7 @@ mod tests {
             PermissionLevel::WorkspaceFree,
             PermissionLevel::Unrestricted,
         ] {
-            for tool_name in ["todo", "task"] {
+        for tool_name in ["todo"] {
                 let decision = needs_permission(
                     level,
                     tool_name,
@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn workspace_free_still_requires_approval_for_exec_and_network() {
-        for tool in ["exec", "spawn_subagent", "web"] {
+        for tool in ["exec", "spawn_subagent", "web_fetch"] {
             let decision = needs_permission(
                 PermissionLevel::WorkspaceFree,
                 tool,

@@ -26,7 +26,7 @@ pub(super) fn verify_expected_hash(
         "timeis": crate::now_utc8(), "status": "error", "code": "STALE_FILE", "path": path,
         "message": "File content changed since the referenced read",
         "expected_hash": expected, "actual_hash": actual,
-        "hint": "Use read to obtain current content and hash, then retry the edit."
+        "hint": "Use read_file to obtain current content and hash, then retry the edit."
     })
     .to_string())
 }
@@ -110,6 +110,18 @@ mod atomic_write_tests {
 }
 
 /// Normalize CRLF → LF in content. Returns (normalized, was_crlf).
+///
+/// # 换行统一契约（LF canonical view）
+///
+/// 所有文件工具共享同一"规范视图"（LF）：
+/// - `read` 的展示、行号、`hash` 基于 LF 视图（file_query.rs 同款归一化）；
+/// - `edit`/`edit_block`/`edit_file` 的**匹配**与 **`expected_hash` 校验**必须
+///   在 LF 视图上进行（read 返回的 hash 即 LF 视图 hash，跨视图校验会失配）；
+/// - **写回时按 `was_crlf` 还原原始换行**（CRLF 文件保持 CRLF，最小 diff）；
+/// - 新文件/`write` 按模型给定内容原样落盘（不归一化）。
+///
+/// 行号语义：`\r\n` 与 `\n` 在 LF 视图中同构（孤立 `\r` 也归一化为 `\n`），
+/// 因此行号在两种换行下完全一致，`\r` 不产生额外行。
 pub(crate) fn normalize_newlines(content: &str) -> (String, bool) {
     if content.contains("\r\n") {
         (content.replace("\r\n", "\n"), true)
@@ -256,114 +268,6 @@ pub(super) fn disambiguate_match(
         }
     }
     Ok(best)
-}
-
-/// Apply the diff (remove old_lines, insert new_lines) and format the result.
-pub(super) fn apply_diff_and_format(
-    path: &str,
-    file_lines: &[&str],
-    match_idx: usize,
-    win: usize,
-    new_lines: &[String],
-    description: &str,
-    was_fuzzy: bool,
-    dry_run: bool,
-    was_crlf: bool,
-    had_final_newline: bool,
-) -> String {
-    let mut out_lines: Vec<&str> = file_lines.to_vec();
-    out_lines.splice(match_idx..match_idx + win, std::iter::empty());
-    for (j, line) in new_lines.iter().enumerate() {
-        out_lines.insert(match_idx + j, line);
-    }
-    let mut new_content = out_lines.join("\n");
-    // `str::lines()` omits the terminal empty item. Preserve the final newline so
-    // line-oriented edits do not introduce formatting-only churn.
-    if had_final_newline && !new_content.ends_with('\n') {
-        new_content.push('\n');
-    }
-
-    if dry_run {
-        let line = match_idx + 1;
-        let added = new_lines.len() as u32;
-        let removed = win as u32;
-        let mut result = String::new();
-        if was_fuzzy {
-            result.push_str("\u{26a0} fuzzy match (indentation normalized)\n");
-        }
-        result.push_str(&format!(
-            "[DRY RUN] {path} — preview, no changes written\n\n"
-        ));
-        result.push_str(&format!("--- a/{}\n+++ b/{}\n", path, path));
-        let ctx_line = file_lines.get(match_idx.saturating_sub(1)).unwrap_or(&"");
-        result.push_str(&format!(
-            "@@ -{},{} +{},{} @@ {}\n",
-            line,
-            removed.max(1),
-            line,
-            added.max(1),
-            ctx_line
-        ));
-        let ctx_start = match_idx.saturating_sub(2);
-        for i in ctx_start..match_idx {
-            result.push_str(&format!(" {}\n", file_lines[i]));
-        }
-        for i in match_idx..match_idx + win {
-            result.push_str(&format!("-{}\n", file_lines[i]));
-        }
-        for l in new_lines {
-            result.push_str(&format!("+{}\n", l));
-        }
-        let ctx_end = (match_idx + win + 2).min(out_lines.len());
-        for i in (match_idx + win)..ctx_end {
-            result.push_str(&format!(" {}\n", out_lines[i]));
-        }
-        let desc = if description.is_empty() {
-            "edit_block"
-        } else {
-            description
-        };
-        result.push_str(&format!(
-            "\n[DRY RUN] {path}:{line} +{added} -{removed} | {desc} (dry run)"
-        ));
-        return result;
-    }
-
-    // Restore CRLF if original file had Windows line endings
-    let write_content = if was_crlf {
-        new_content.replace('\n', "\r\n")
-    } else {
-        new_content
-    };
-    match std::fs::write(path, &write_content) {
-        Ok(_) => {
-            let line_count = write_content.lines().count();
-            crate::file_state::record_edit(path, line_count);
-            let line = match_idx + 1;
-            let added = new_lines.len() as u32;
-            let removed = win as u32;
-            let mut result = String::new();
-            if was_fuzzy {
-                result.push_str("\u{26a0} fuzzy match (indentation normalized)\n");
-            }
-            let desc = if description.is_empty() {
-                "edit_block"
-            } else {
-                description
-            };
-            let disp = crate::display_path(&path);
-            // On success, omit the full diff body — the LLM already knows what it changed.
-            // Saves ~80-90% of tool result tokens per edit.
-            use std::fmt::Write;
-            let _ = write!(result, "[OK] {disp}:{line} +{added} -{removed} | {desc}");
-            result
-        }
-        Err(e) => format!(
-            "[ERROR] Cannot write {}: {}\n[HINT] Verify parent directory exists and is writable.",
-            crate::display_path(&path),
-            e
-        ),
-    }
 }
 
 pub(super) fn is_binary_read_error(err: &str) -> bool {

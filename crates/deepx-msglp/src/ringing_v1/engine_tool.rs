@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::services::dashboard;
 use crate::state::agent::PendingApproval;
-use deepx_proto::{Agent2Ui, AskMode, AskQuestion};
+use deepx_proto::{AskMode, AskQuestion};
 
 use super::types::*;
 
@@ -236,23 +236,6 @@ impl ToolEngine {
                             permission: Some(permission),
                         }),
                     });
-                ctx.emitter.emit(Agent2Ui::PermissionRequest {
-                    tool_call_id: challenge.call_id().to_string(),
-                    tool_name: challenge.tool_name().to_string(),
-                    reason: challenge.reason().to_string(),
-                    paths: challenge
-                        .resources()
-                        .iter()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .collect(),
-                    category: cat_str,
-                    level: deepx_workspace::permission::PermissionLevel::from_u8(
-                        ctx.agent.config.permission_level,
-                    )
-                    .to_u8(),
-                    risk: Self::protocol_risk(challenge.risk()),
-                    consequence: challenge.consequence().to_string(),
-                });
                 // Ringing 双发：ToolPermissionRequested（权限请求归 Tool 频道）
                 ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
                     deepx_domain::ToolEvent::ToolPermissionRequested {
@@ -286,20 +269,6 @@ impl ToolEngine {
             deepx_workspace::authorization::Admission::Denied(reason) => {
                 let turn_id = format!("tc_{id}");
                 Self::emit_timeline_denied(ctx, id, name, &args.to_string(), &reason, false);
-                ctx.emitter.emit(Agent2Ui::TurnStart {
-                    turn_id: turn_id.clone(),
-                    user_text: format!("tool: {name}"),
-                });
-                ctx.emitter.emit(Agent2Ui::ToolResults {
-                    turn_id: turn_id.clone(),
-                    round_num: 0,
-                    results: vec![deepx_proto::ToolResultDef {
-                        tool_call_id: id.to_string(),
-                        output: format!("[DENIED] '{name}' — {reason}"),
-                        success: false,
-                        file: None,
-                    }],
-                });
                 // Ringing 终态统一由 ToolFinished 承载，失败只由 result.status 表达。
                 ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
                     deepx_domain::ToolEvent::ToolFinished {
@@ -314,11 +283,6 @@ impl ToolEngine {
                         ),
                     },
                 ));
-                ctx.emitter.emit(Agent2Ui::TurnEnd {
-                    turn_id,
-                    stop_reason: None,
-                    usage: None,
-                });
             }
         }
     }
@@ -483,85 +447,6 @@ impl ToolEngine {
                                 false,
                             ),
                         }
-                    } else if auth.tool_name() == "task"
-                        && auth
-                            .args()
-                            .as_object()
-                            .and_then(|obj| obj.get("action"))
-                            .and_then(|v| v.as_str())
-                            == Some("submit")
-                    {
-                        match deepx_workspace::todo::load_todo() {
-                            Ok(store) if store.items.is_empty() => {
-                                ctx.agent.msg.push_tool_result_direct(
-                                    auth.call_id(),
-                                    "[ERROR] No task items to submit. Use todo(action=\"create\") first.",
-                                    false,
-                                );
-                            }
-                            Ok(_store) => pending_plans.push_back(PendingPlan {
-                                call_id: auth.call_id().to_string(),
-                                content: String::new(),
-                            }),
-                            Err(error) => ctx.agent.msg.push_tool_result_direct(
-                                auth.call_id(),
-                                &format!("[ERROR] Cannot read todo: {error}"),
-                                false,
-                            ),
-                        }
-                    } else if auth.tool_name() == "task"
-                        && auth
-                            .args()
-                            .as_object()
-                            .and_then(|obj| obj.get("action"))
-                            .and_then(|v| v.as_str())
-                            == Some("activate")
-                    {
-                        match deepx_workspace::todo::load_todo() {
-                            Ok(store) if store.items.is_empty() => {
-                                ctx.agent.msg.push_tool_result_direct(
-                                    auth.call_id(),
-                                    "[ERROR] No task items to activate. Use todo(action=\"create\") first.",
-                                    false,
-                                );
-                            }
-                            Ok(store) => {
-                                use deepx_workspace::todo::TodoStatus;
-                                let items: Vec<deepx_proto::TodoActivationItem> = store
-                                    .items
-                                    .iter()
-                                    .filter(|item| {
-                                        matches!(
-                                            item.status,
-                                            TodoStatus::Pending | TodoStatus::InProgress
-                                        )
-                                    })
-                                    .map(|item| deepx_proto::TodoActivationItem {
-                                        id: item.id.clone(),
-                                        title: item.title.clone(),
-                                        description: item.description.clone(),
-                                        complexity: String::new(),
-                                    })
-                                    .collect();
-                                if items.is_empty() {
-                                    ctx.agent.msg.push_tool_result_direct(
-                                        auth.call_id(),
-                                        "[ERROR] No pending or in-progress todo items to activate.",
-                                        false,
-                                    );
-                                } else {
-                                    pending_todo_activation = Some(PendingTodoActivation {
-                                        call_id: auth.call_id().to_string(),
-                                        items,
-                                    });
-                                }
-                            }
-                            Err(error) => ctx.agent.msg.push_tool_result_direct(
-                                auth.call_id(),
-                                &format!("[ERROR] Cannot read todo: {error}"),
-                                false,
-                            ),
-                        }
                     } else {
                         authorized.push(AdmittedTool {
                             call_id: tool.id.clone(),
@@ -609,23 +494,54 @@ impl ToolEngine {
                                 }),
                             },
                         });
-                    ctx.emitter.emit(Agent2Ui::PermissionRequest {
-                        tool_call_id: call_id.clone(),
-                        tool_name: challenge.tool_name().to_string(),
-                        reason: challenge.reason().to_string(),
-                        paths: challenge
-                            .resources()
-                            .iter()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .collect(),
-                        category: cat_str,
-                        level: deepx_workspace::permission::PermissionLevel::from_u8(
-                            ctx.agent.config.permission_level,
-                        )
-                        .to_u8(),
-                        risk: Self::protocol_risk(challenge.risk()),
-                        consequence: challenge.consequence().to_string(),
-                    });
+                    // Ringing：LLM 工具轮权限请求（legacy PermissionRequest 的替代，
+                    // 与 handle_ui_tool_call 路径一致）。
+                    let cat_domain = match challenge.category() {
+                        deepx_workspace::permission::ToolCategory::Read => {
+                            deepx_domain::PermissionCategory::Read
+                        }
+                        deepx_workspace::permission::ToolCategory::Write => {
+                            deepx_domain::PermissionCategory::Write
+                        }
+                        deepx_workspace::permission::ToolCategory::Exec => {
+                            deepx_domain::PermissionCategory::Exec
+                        }
+                        deepx_workspace::permission::ToolCategory::Net => {
+                            deepx_domain::PermissionCategory::Net
+                        }
+                    };
+                    let risk_domain = match challenge.risk() {
+                        deepx_workspace::permission::PermissionRisk::Low => {
+                            deepx_domain::PermissionRisk::Low
+                        }
+                        deepx_workspace::permission::PermissionRisk::Medium => {
+                            deepx_domain::PermissionRisk::Medium
+                        }
+                        deepx_workspace::permission::PermissionRisk::High => {
+                            deepx_domain::PermissionRisk::High
+                        }
+                    };
+                    ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                        deepx_domain::ToolEvent::ToolPermissionRequested {
+                            tool_call_id: call_id.clone(),
+                            turn_id: turn_id.to_string(),
+                            round_num,
+                            tool_name: challenge.tool_name().to_string(),
+                            reason: challenge.reason().to_string(),
+                            paths: challenge
+                                .resources()
+                                .iter()
+                                .map(|path| path.to_string_lossy().to_string())
+                                .collect(),
+                            category: cat_domain,
+                            level: deepx_workspace::permission::PermissionLevel::from_u8(
+                                ctx.agent.config.permission_level,
+                            )
+                            .to_u8(),
+                            risk: risk_domain,
+                            consequence: challenge.consequence().to_string(),
+                        },
+                    ));
                     pending_permission_ids.push(call_id.clone());
                     self.pending.insert(
                         call_id,
@@ -672,13 +588,6 @@ impl ToolEngine {
         approved: bool,
     ) {
         let turn_id = format!("tc_{id}");
-        let args_display: String = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or(name)
-            .chars()
-            .take(80)
-            .collect();
 
         // A newly authorized UI tool owns a complete native turn. A
         // permission-approved tool resumes its stable pending block.
@@ -719,10 +628,6 @@ impl ToolEngine {
                 ),
             });
 
-        ctx.emitter.emit(Agent2Ui::TurnStart {
-            turn_id: turn_id.clone(),
-            user_text: format!("tool: {name}"),
-        });
         // Ringing 双发：权限已通过 = 执行真正开始（决策记录 Q1）
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
             deepx_domain::ToolEvent::ToolStarted {
@@ -732,27 +637,6 @@ impl ToolEngine {
                 name: name.to_string(),
             },
         ));
-        ctx.emitter.emit(Agent2Ui::RoundComplete {
-            turn_id: turn_id.clone(),
-            round_num: 0,
-            thinking: None,
-            answer: None,
-            tool_calls: vec![deepx_proto::ToolCallDef {
-                id: id.to_string(),
-                name: name.to_string(),
-                args_display: args_display.clone(),
-                args_json: args.to_string(),
-            }],
-            blocks: vec![deepx_proto::RoundBlock::Tool {
-                card: deepx_proto::ToolCallDef {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    args_display,
-                    args_json: args.to_string(),
-                },
-            }],
-            is_final: false,
-        });
         // Ringing 双发：RoundCompleted（工具回合的 initial round 终态）
         ctx.emitter
             .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -800,24 +684,7 @@ impl ToolEngine {
         ctx.agent.apply_tool_effects(skill_effects);
 
         // Instant refresh for todo tools
-        if matches!(name, "todo" | "task") {
-            ctx.emitter.emit(Agent2Ui::Dashboard {
-                hp_connected: true,
-                session_seed: ctx.agent.session.seed.clone(),
-                context_limit: ctx.agent.config.context_limit,
-                tool_calls_total: 0,
-                tool_failures: 0,
-                current_phase: "single".into(),
-                streaming: false,
-                dsml_compat_count: ctx.agent.dsml_compat_count,
-                documents: dashboard::build_documents(),
-                recent_edits: dashboard::build_recent_edits(),
-                tasks: dashboard::build_tasks(),
-                current_todo_id: dashboard::build_current_todo_id(),
-                session_title: ctx.agent.session.title.clone(),
-                usage: None,
-                model: Some(ctx.agent.config.model.clone()),
-            });
+        if matches!(name, "todo") {
             // Ringing 双发：DashboardUpdated（replaceable 覆盖）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                 deepx_domain::ControlEvent::DashboardUpdated {
@@ -838,13 +705,6 @@ impl ToolEngine {
 
         if let Some(ref delta) = code_delta {
             ctx.stats.push_delta(delta.clone());
-            ctx.emitter.emit_delta(Agent2Ui::CodeDelta {
-                lines_added: delta.lines_added,
-                lines_removed: delta.lines_removed,
-                files_created: delta.files_created,
-                files_deleted: delta.files_deleted,
-                file: delta.file.clone(),
-            });
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
                 deepx_domain::ToolEvent::CodeChanged {
                     lines_added: delta.lines_added,
@@ -856,18 +716,6 @@ impl ToolEngine {
             ));
         }
 
-        // Ringing 终态：ToolFinished（terminal）。PacedEmitter 只在 legacy
-        // worker ingress 下保留旧 ToolResults，原生路径不会双发。
-        ctx.emitter.emit(Agent2Ui::ToolResults {
-            turn_id: turn_id.clone(),
-            round_num: 0,
-            results: vec![deepx_proto::ToolResultDef {
-                tool_call_id: tid.clone(),
-                output: output.clone(),
-                success,
-                file: None,
-            }],
-        });
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
             deepx_domain::ToolEvent::ToolFinished {
                 tool_call_id: tid,
@@ -924,11 +772,6 @@ impl ToolEngine {
                     message: output.clone(),
                 }),
             });
-        ctx.emitter.emit(Agent2Ui::TurnEnd {
-            turn_id,
-            stop_reason: None,
-            usage: None,
-        });
     }
 
     // ═══════════════════════════════════════════════════
@@ -1008,13 +851,6 @@ impl ToolEngine {
         }
         let seq_end = event.seq + event.chunk.len() as u64;
         let tail_len = buf.len() as u64;
-        // legacy 双发保留（M3 legacy 拆除前维持对称）。
-        ctx.emitter.emit_delta(Agent2Ui::ExecProgress {
-            tool_call_id: event.tool_call_id.clone(),
-            stream: event.stream.as_str().to_string(),
-            seq: event.seq,
-            chunk: event.chunk.clone(),
-        });
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
             deepx_domain::ToolEvent::ToolProgress {
                 tool_call_id: event.tool_call_id.clone(),
@@ -1098,20 +934,6 @@ impl ToolEngine {
     fn emit_denied(&self, ctx: &mut RingContext, call_id: &str, tool_name: &str, reason: &str) {
         let turn_id = format!("tc_{call_id}");
         Self::emit_timeline_denied(ctx, call_id, tool_name, "{}", reason, true);
-        ctx.emitter.emit(Agent2Ui::TurnStart {
-            turn_id: turn_id.clone(),
-            user_text: format!("tool: {tool_name}"),
-        });
-        ctx.emitter.emit(Agent2Ui::ToolResults {
-            turn_id: turn_id.clone(),
-            round_num: 0,
-            results: vec![deepx_proto::ToolResultDef {
-                tool_call_id: call_id.to_string(),
-                output: format!("[DENIED] '{tool_name}' ({reason})"),
-                success: false,
-                file: None,
-            }],
-        });
         // Ringing 终态统一由 ToolFinished 承载，失败只由 result.status 表达。
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
             deepx_domain::ToolEvent::ToolFinished {
@@ -1126,11 +948,6 @@ impl ToolEngine {
                 ),
             },
         ));
-        ctx.emitter.emit(Agent2Ui::TurnEnd {
-            turn_id,
-            stop_reason: None,
-            usage: None,
-        });
     }
 
     fn resolve_workspace() -> std::path::PathBuf {
@@ -1153,18 +970,6 @@ impl ToolEngine {
             deepx_workspace::permission::ToolCategory::Net => "net",
         }
         .to_string()
-    }
-
-    fn protocol_risk(
-        risk: deepx_workspace::permission::PermissionRisk,
-    ) -> deepx_proto::PermissionRisk {
-        match risk {
-            deepx_workspace::permission::PermissionRisk::Low => deepx_proto::PermissionRisk::Low,
-            deepx_workspace::permission::PermissionRisk::Medium => {
-                deepx_proto::PermissionRisk::Medium
-            }
-            deepx_workspace::permission::PermissionRisk::High => deepx_proto::PermissionRisk::High,
-        }
     }
 
     pub fn cancel_current(&self) {

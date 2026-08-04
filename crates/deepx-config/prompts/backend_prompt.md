@@ -6,37 +6,27 @@
 
 [FILE EDITING]
 
-你有以下正式工具可用：`read`、`search`、`apply_patch`、`exec`、`web`、`image`、`ask`、`skills`、`task`、`process`。
+你有以下正式工具可用：`read_file`、`edit_file`、`write`、`delete`、`exec`、`web_fetch`、`image`、`ask`、`skills`、`todo`、`process`。
 
-**`apply_patch`** — 唯一文件修改入口，支持 Add、Update、Delete、Move 和 dry-run 预览。正式应用 dry-run 计划时必须携带返回的 `plan_hash`；目标发生变化时拒绝应用。
+**`edit_file`** — 统一文件编辑入口（取代旧 apply_patch）。三种定位原语任意组合，按你给了什么自动选择：
 
-```
-*** Begin Patch
-*** Add File: path/to/new.rs     ← 新建文件
-+第一行
-+第二行
+- 字符串定位（Claude 风格）：`old_string`/`new_string`；单行 = 行内子串替换，含换行 = 行窗口替换
+- 行定位：`old_lines`/`new_lines`（行序列窗口匹配，trim_end 空白容错）
+- 行号定位：`start_line`/`end_line`（1-based，与 read_file 的行号一致）；无内容校验时必须携带 `expected_hash`
 
-*** Delete File: path/to/old.rs  ← 删除文件
+单文件多处修改传 `ops` 数组（按序应用）；多文件并行传 `files` 数组。每个 op 是独立事务：失败 op 返回其 closest_line/候选位置，其余 op 照常应用——只需重试失败项，不要整包重发。
 
-*** Update File: path/to/edit.rs ← 修改文件
-*** Move to: path/to/renamed.rs  ← 可选：同时重命名
-@@ fn some_function():           ← 内容锚点（函数名/类名）
--    old_line
-+    new_line
-    context_line                 ← 以空格开头 = 不变的上下文
-*** End of File                 ← 可选：标记匹配到文件末尾
-
-*** End Patch
-```
+严格命中规则：多处命中且无法用 `context_before`/`context_after` 消歧时**拒绝并列出全部候选行号**（绝不猜测），请用 read_file 确认后带行号重试；`replace_all=true` 可声明式地替换全部子串。`allow_fuzzy=true` 启用空白与 Unicode 归一化兜底（默认仅 trim_end 容错）。
 
 调用示例：
 
 ```json
-{"patch":"*** Begin Patch\n*** Update File: src/example.rs\n@@ fn main():\n-    old\n+    new\n*** End Patch","dry_run":true}
-{"commit":"<preview_id>"}
+{"path":"src/example.rs","old_string":"let x = 1;","new_string":"let y = 2;","description":"rename variable"}
+{"path":"src/example.rs","ops":[{"old_lines":["fn old() {","    a();"],"new_lines":["fn new() {","    b();"]},{"old_string":"// TODO","new_string":"// done"}]}
+{"files":[{"path":"src/a.rs","old_string":"one","new_string":"ONE"},{"path":"src/b.rs","old_lines":["two"],"new_lines":["TWO"]}]}
 ```
 
-`read` 使用 `requests` 读取最多 8 个文件的连续范围；每行带 `L<number>:`，返回 `hash`、范围和 continuation。目录不是文件，使用 `search(kind="files")` 枚举。`search` 返回结构化 path/line/column/preview，不要解析 shell 输出。绝不要用 `exec` 调用系统 patch 程序。
+`write` 用于整文件创建/覆盖；`delete` 移入回收站。`read_file` 使用 `requests` 读取最多 8 个文件的连续范围；每行带 `L<number>:`，返回 `hash`（可作 edit_file 的 expected_hash）、范围和 continuation。目录不是文件，用 `exec`（如 `rg --files` 或 `ls -la`）列目录。文件定位用 `exec` 里的 `rg`（如 `rg "pattern" --line-number`），结构化 path/line/column 输出，不要解析 shell 输出。绝不要用 `exec` 调用系统 patch 程序。
 
 [OPTIONAL VISUALIZATION]
 
@@ -123,4 +113,4 @@ sequenceDiagram
 
 [WORKFLOW]
 
-代码任务遵循短链路：`search → read precise range → root cause → apply_patch(dry_run) → apply_patch(commit) → focused verify`。大改动必须走两阶段：先用 `dry_run=true` 预览并暂存计划，再仅凭 `{"commit": "<preview_id>"}` 提交——不要重复输出 patch 正文。所有工具结果以 `status` 为唯一事实来源；不要根据正文前缀或 JSON 文本猜测成功与否。
+代码任务遵循短链路：`exec 定位（rg）→ read_file precise range → root cause → edit_file → focused verify`。多文件/多块修改一次调用 edit_file 的 files/ops 完成；失败 op 按返回的提示局部重试。所有工具结果以 `status` 为唯一事实来源；不要根据正文前缀或 JSON 文本猜测成功与否。

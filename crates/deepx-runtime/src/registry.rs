@@ -170,6 +170,10 @@ impl AgentRegistry {
         // 会永远把它投影为 running 并禁止发送新消息。
         if let Some(hub) = self.hub.as_ref() {
             hub.seal_orphan_running_turns(seed);
+            // Ringing 三频道投影的等价收尾：重放的无终态 TurnStarted/
+            // ToolStarted/InteractionRequested 同样会污染 bootstrap 快照，
+            // 使前端显示陈旧 running turn 与无法批准的幽灵交互面板。
+            hub.seal_orphan_channel_state(seed);
         }
         Ok(())
     }
@@ -246,10 +250,10 @@ impl AgentRegistry {
             );
         });
 
-        let event_seed = seed.to_string();
-        let events = self.events.clone();
-        let activity = self.activity.clone();
-        let hub = self.hub.clone();
+            let event_seed = seed.to_string();
+            let activity = self.activity.clone();
+            let hub = self.hub.clone();
+            let events = self.events.clone();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for line in BufReader::new(stdout).lines() {
@@ -257,61 +261,72 @@ impl AgentRegistry {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    // wire 判别：默认 legacy；Ringing 事件行在 ChannelRouter 接入前跳过
-                    let event = match deepx_msglp::ringing_v1::wire::read_worker_event_line(&line) {
-                    Ok(Some(event)) => event,
-                    Ok(None) => {
-                        // Ringing V1 timeline intent is a native producer path: it is
-                        // intentionally not projected through Agent2Ui or a legacy wire.
-                        if let Some(hub) = &hub {
-                            if let Ok(env) = serde_json::from_str::<
-                                deepx_ringing::RingingTimelineIntentEnvelope,
-                            >(&line)
-                            {
-                                if let Err(error) = hub.publish_timeline(&env.seed, env.intent) {
-                                    // A rejected intent silently starves the frontend
-                                    // transcript (the Ringing conversation store keeps
-                                    // delivering, so the session-list title still
-                                    // refreshes while the main pane stays blank).
-                                    // Surface it at error level with the full error so
-                                    // restart-related turn_id collisions are diagnosable.
-                                    log::error!(
-                                        "[timeline] rejected intent for {}: {error}",
-                                        env.seed
-                                    );
+                    // wire 判别：M3 后仅 Ringing 线格式（legacy Agent2Ui 帧已拆除）。
+                    match deepx_msglp::ringing_v1::wire::read_worker_event_line(&line) {
+                        Ok(()) => {
+                            if let Some(hub) = &hub {
+                                // Ringing V1 timeline intent is a native producer path.
+                                if let Ok(env) = serde_json::from_str::<
+                                    deepx_ringing::RingingTimelineIntentEnvelope,
+                                >(&line)
+                                {
+                                    if let Err(error) = hub.publish_timeline(&env.seed, env.intent) {
+                                        // A rejected intent silently starves the frontend
+                                        // transcript (the Ringing conversation store keeps
+                                        // delivering, so the session-list title still
+                                        // refreshes while the main pane stays blank).
+                                        // Surface it at error level with the full error so
+                                        // restart-related turn_id collisions are diagnosable.
+                                        log::error!(
+                                            "[timeline] rejected intent for {}: {error}",
+                                            env.seed
+                                        );
+                                    }
+                                    continue;
                                 }
-                                continue;
-                            }
-                            match serde_json::from_str::<deepx_ringing::RingingWorkerEventEnvelope>(
-                                &line,
-                            ) {
-                                Ok(env) => {
-                                    let domain: deepx_domain::DomainEvent = env.event.into();
-                                    // Ringing 是唯一的 native consumer；大内容在进入
-                                    // Ringing channel 前外置，兼容投影不再参与这条路径。
-                                    let domain = externalize_large_content(&hub, &env.seed, domain);
-                                    let _ = hub.publish_with_causation(
-                                        &env.seed,
-                                        domain.clone(),
-                                        env.causation_id.as_deref(),
-                                    );
+                                match serde_json::from_str::<deepx_ringing::RingingWorkerEventEnvelope>(
+                                    &line,
+                                ) {
+                                    Ok(env) => {
+                                        let domain: deepx_domain::DomainEvent = env.event.into();
+                                        // Ringing 是唯一的 native consumer；大内容在进入
+                                        // Ringing channel 前外置。
+                                        let domain =
+                                            externalize_large_content(&hub, &env.seed, domain);
+                                        let _ = hub.publish_with_causation(
+                                            &env.seed,
+                                            domain.clone(),
+                                            env.causation_id.as_deref(),
+                                        );
+                                        // Activity tracker 生产接线：领域事件驱动
+                                        // Working→Idle / →WaitingUser 迁移（此前
+                                        // observe 只在测试中调用，daemon 侧活动状态
+                                        // 在回合结束后永远停留在 Working）。
+                                        if let Some(observe) =
+                                            crate::activity::domain_activity_observe(&domain)
+                                            && let Some(activity) = activity.observe(
+                                                &event_seed,
+                                                generation,
+                                                &observe,
+                                            )
+                                        {
+                                            crate::activity::publish_activity_dual(
+                                                &events,
+                                                Some(hub.as_ref()),
+                                                &activity,
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log::warn!("invalid ringing worker envelope: {e}")
+                                    }
                                 }
-                                Err(e) => log::warn!("invalid ringing worker envelope: {e}"),
                             }
                         }
-                        continue;
+                        Err(e) => {
+                            log::warn!("invalid agent event for {event_seed}: {e}");
+                        }
                     }
-                    Err(e) => {
-                        log::warn!("invalid agent event for {event_seed}: {e}");
-                        continue;
-                    }
-                    };
-                    if let Ok(value) = serde_json::to_value(&event)
-                        && let Some(update) = activity.observe(&event_seed, generation, &value)
-                    {
-                        crate::activity::publish_activity_dual(&events, hub.as_deref(), &update);
-                    }
-                    events.publish(&event_seed, event);
                 }
             }));
             if let Err(panic) = result {
@@ -321,13 +336,6 @@ impl AgentRegistry {
                     panic
                 );
             }
-            let event = Agent2Ui::Error {
-                message: format!(
-                    "Agent process for session {} exited",
-                    &event_seed[..event_seed.floor_char_boundary(event_seed.len().min(8))]
-                ),
-            };
-            events.publish(&event_seed, event);
             if let Some(update) = activity.disconnect(&event_seed, generation) {
                 crate::activity::publish_activity_dual(&events, hub.as_deref(), &update);
             }
@@ -447,6 +455,7 @@ impl AgentRegistry {
                 // 与 get_or_spawn 一致：新 worker 接管前，把 timeline 中任何
                 // 未 seal 的 running turn 收尾为 Cancelled。
                 hub.seal_orphan_running_turns(&seed);
+                hub.seal_orphan_channel_state(&seed);
             }
         }
     }

@@ -1,6 +1,8 @@
-//! End-to-end permission lifecycle tests driven through UserInput and a mock
-//! OpenAI-compatible SSE endpoint. These tests exercise LLM-generated tool
-//! calls; they deliberately do not use Ui2Agent::ToolCall.
+//! End-to-end permission lifecycle tests driven through Ringing V1 commands
+//! and a mock OpenAI-compatible SSE endpoint. These tests exercise LLM-generated
+//! tool calls and the ToolPermissionRequested / ToolPermissionRespond lifecycle.
+//!
+//! M3：输入/输出全部走 Ringing worker 线格式（`wire: "Ringing_domain_v1"`）。
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -9,10 +11,14 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use deepx_domain::{
+    ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, SessionState,
+    ToolCommand, ToolEvent,
+};
 use deepx_msglp::ringing_v1::loop_core::Loop;
 use deepx_msglp::state::agent::AgentState;
-use deepx_proto::{Agent2Ui, PermissionRisk, Ui2Agent};
-use serde_json::json;
+use deepx_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope};
+use serde_json::{Value, json};
 use tiny_http::{Header, Response, Server};
 
 static SESSION_INIT: Once = Once::new();
@@ -154,45 +160,89 @@ fn marker_exec_args(path: &std::path::Path) -> serde_json::Value {
     }
 }
 
-fn send(writer: &mut os_pipe::PipeWriter, command: Ui2Agent) {
-    writeln!(writer, "{}", serde_json::to_string(&command).unwrap()).unwrap();
+// ═══════════════════════════════════════════════════════
+// Ringing 命令 / 事件 helper
+// ═══════════════════════════════════════════════════════
+
+fn next_command_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::SeqCst)
+}
+
+fn send_cmd(writer: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
+    let env = RingingWorkerCommandEnvelope::new(seed, format!("c{}", next_command_id()), command);
+    writeln!(writer, "{}", serde_json::to_string(&env).unwrap()).unwrap();
     writer.flush().unwrap();
 }
 
+fn cmd_user_input(text: &str) -> RingingCommand {
+    RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+        text: text.into(),
+        images: vec![],
+        attachments: None,
+    })
+}
+
+fn cmd_session_create(close_current: bool) -> RingingCommand {
+    RingingCommand::Control(ControlCommand::SessionCreate { close_current })
+}
+
+fn cmd_session_shutdown() -> RingingCommand {
+    RingingCommand::Control(ControlCommand::SessionShutdown)
+}
+
+fn cmd_permission_respond(call_id: &str, approved: bool) -> RingingCommand {
+    RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+        tool_call_id: call_id.into(),
+        approved,
+        trust_folder: false,
+    })
+}
+
 fn expect_event(
-    receiver: &std::sync::mpsc::Receiver<Agent2Ui>,
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
     timeout: Duration,
-    predicate: impl Fn(&Agent2Ui) -> bool,
-) -> Agent2Ui {
+    predicate: impl Fn(&RingingEvent) -> bool,
+) -> RingingEvent {
     let deadline = Instant::now() + timeout;
+    let mut seen = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match receiver.recv_timeout(remaining) {
             Ok(event) if predicate(&event) => return event,
-            Ok(Agent2Ui::Error { message }) => panic!("unexpected agent error: {message}"),
-            Ok(_) => {}
-            Err(error) => panic!("event timeout/disconnect: {error}"),
+            Ok(event) => seen.push(format!("{event:?}")),
+            Err(error) => panic!("event timeout/disconnect: {error}; seen={seen:#?}"),
         }
     }
 }
 
-fn permission_id(receiver: &std::sync::mpsc::Receiver<Agent2Ui>) -> String {
+fn permission_id(receiver: &std::sync::mpsc::Receiver<RingingEvent>) -> String {
     match expect_event(receiver, Duration::from_secs(5), |event| {
-        matches!(event, Agent2Ui::PermissionRequest { .. })
+        matches!(
+            event,
+            RingingEvent::Tool(ToolEvent::ToolPermissionRequested { .. })
+        )
     }) {
-        Agent2Ui::PermissionRequest { tool_call_id, .. } => tool_call_id,
-        _ => unreachable!(),
+        RingingEvent::Tool(ToolEvent::ToolPermissionRequested { tool_call_id, .. }) => tool_call_id,
+        other => panic!("expected ToolPermissionRequested, got {other:?}"),
     }
 }
 
-fn assert_no_round_completion(receiver: &std::sync::mpsc::Receiver<Agent2Ui>) {
+fn assert_no_round_completion(receiver: &std::sync::mpsc::Receiver<RingingEvent>) {
     let deadline = Instant::now() + Duration::from_millis(300);
     while Instant::now() < deadline {
         match receiver.recv_timeout(Duration::from_millis(25)) {
-            Ok(Agent2Ui::ToolResults { .. } | Agent2Ui::TurnEnd { .. } | Agent2Ui::Done) => {
-                panic!("suspended LLM turn completed prematurely")
+            Ok(event)
+                if matches!(
+                    event,
+                    RingingEvent::Conversation(
+                        ConversationEvent::TurnCompleted { .. }
+                            | ConversationEvent::TurnFailed { .. }
+                    ) | RingingEvent::Tool(ToolEvent::ToolFinished { .. })
+                ) =>
+            {
+                panic!("suspended LLM turn completed prematurely: {event:?}")
             }
-            Ok(Agent2Ui::Error { message }) => panic!("unexpected agent error: {message}"),
             Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 panic!("event channel disconnected")
@@ -201,7 +251,7 @@ fn assert_no_round_completion(receiver: &std::sync::mpsc::Receiver<Agent2Ui>) {
     }
 }
 
-fn collect_through_done(receiver: &std::sync::mpsc::Receiver<Agent2Ui>) -> Vec<Agent2Ui> {
+fn collect_through_terminal(receiver: &std::sync::mpsc::Receiver<RingingEvent>) -> Vec<RingingEvent> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut events = Vec::new();
     loop {
@@ -209,49 +259,52 @@ fn collect_through_done(receiver: &std::sync::mpsc::Receiver<Agent2Ui>) -> Vec<A
         let event = receiver
             .recv_timeout(remaining)
             .expect("resumed turn did not complete");
-        let done = matches!(event, Agent2Ui::Done);
-        if let Agent2Ui::Error { ref message } = event {
-            panic!("unexpected agent error: {message}");
-        }
+        let terminal = matches!(
+            event,
+            RingingEvent::Conversation(
+                ConversationEvent::TurnCompleted { .. }
+                    | ConversationEvent::TurnFailed { .. }
+                    | ConversationEvent::ConversationCancelled { .. }
+            )
+        );
         events.push(event);
-        if done {
+        if terminal {
             return events;
         }
     }
 }
 
-fn assert_single_completion(events: &[Agent2Ui], expected_results: usize) {
-    let tool_events = events
+fn assert_single_completion(events: &[RingingEvent], expected_results: usize) {
+    let finished = events
         .iter()
         .filter_map(|event| match event {
-            Agent2Ui::ToolResults {
-                turn_id,
-                round_num,
-                results,
-            } => Some((turn_id, round_num, results)),
+            RingingEvent::Tool(ToolEvent::ToolFinished { tool_call_id, .. }) => {
+                Some(tool_call_id.clone())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(tool_events.len(), 1, "tool results must be emitted once");
-    assert!(tool_events[0].0.starts_with('t'));
-    assert_eq!(*tool_events[0].1, 0);
-    assert_eq!(tool_events[0].2.len(), expected_results);
+    assert_eq!(finished.len(), expected_results, "tool results must be emitted once");
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, Agent2Ui::TurnEnd { .. }))
+            .filter(|event| matches!(
+                event,
+                RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+            ))
             .count(),
         1,
-        "TurnEnd must be emitted once",
+        "TurnCompleted must be emitted once",
     );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, Agent2Ui::Done))
-            .count(),
-        1,
-        "Done must be emitted once",
-    );
+}
+
+fn finished_result<'a>(
+    events: &'a [RingingEvent],
+) -> Option<&'a deepx_types::ToolResult> {
+    events.iter().find_map(|event| match event {
+        RingingEvent::Tool(ToolEvent::ToolFinished { result, .. }) => Some(result),
+        _ => None,
+    })
 }
 
 fn run_case(
@@ -259,7 +312,7 @@ fn run_case(
     workspace: &std::path::Path,
     scenarios: Vec<Vec<String>>,
     expected_requests: usize,
-    test: impl FnOnce(&mut os_pipe::PipeWriter, &std::sync::mpsc::Receiver<Agent2Ui>) + Send + 'static,
+    test: impl FnOnce(&mut os_pipe::PipeWriter, &std::sync::mpsc::Receiver<RingingEvent>) + Send + 'static,
 ) -> Vec<String> {
     SESSION_INIT.call_once(|| {
         deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false);
@@ -283,8 +336,8 @@ fn run_case(
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(output_reader).lines().map_while(Result::ok) {
-            if let Ok(event) = serde_json::from_str::<Agent2Ui>(&line) {
-                if event_tx.send(event).is_err() {
+            if let Ok(env) = serde_json::from_str::<RingingWorkerEventEnvelope>(&line) {
+                if event_tx.send(env.event).is_err() {
                     break;
                 }
             }
@@ -293,17 +346,26 @@ fn run_case(
 
     let workspace = workspace.to_path_buf();
     let driver = thread::spawn(move || {
-        send(&mut input_writer, Ui2Agent::CreateSession);
-        expect_event(&event_rx, Duration::from_secs(5), |event| {
-            matches!(event, Agent2Ui::SessionCreated { .. })
-        });
+        send_cmd(&mut input_writer, "", cmd_session_create(false));
+        let seed = match expect_event(&event_rx, Duration::from_secs(5), |event| {
+            matches!(
+                event,
+                RingingEvent::Control(ControlEvent::SessionStateChanged {
+                    state: SessionState::Created,
+                    ..
+                })
+            )
+        }) {
+            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            other => panic!("expected SessionStateChanged(Created), got {other:?}"),
+        };
         // Session creation restores a persisted workspace. Tests need the
         // explicit workspace selection to occur after that lifecycle step.
         deepx_workspace::set_workspace(&workspace.to_string_lossy());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             test(&mut input_writer, &event_rx)
         }));
-        send(&mut input_writer, Ui2Agent::Shutdown);
+        send_cmd(&mut input_writer, &seed, cmd_session_shutdown());
         if let Err(payload) = outcome {
             std::panic::resume_unwind(payload);
         }
@@ -341,46 +403,27 @@ fn skill_activation_reaches_followup_round_and_next_user_turn() {
         ],
         3,
         move |writer, receiver| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "use the matching skill".into(),
-                    images: vec![],
-                },
-            );
+            send_cmd(writer, "", cmd_user_input("use the matching skill"));
             assert_eq!(permission_id(receiver), "activate-skill");
             assert_no_round_completion(receiver);
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "activate-skill".into(),
-                    approved: true,
-                    trust_folder: false,
-                },
-            );
-            let first = collect_through_done(receiver);
+            send_cmd(writer, "", cmd_permission_respond("activate-skill", true));
+            let first = collect_through_terminal(receiver);
             assert_single_completion(&first, 1);
-            let tool_result = first.iter().find_map(|event| match event {
-                Agent2Ui::ToolResults { results, .. } => results.first(),
-                _ => None,
-            });
+            let result = finished_result(&first);
             assert!(
-                tool_result.is_some_and(|result| result.success),
-                "skill tool must execute successfully: {tool_result:?}"
+                result.is_some_and(|result| result.is_success()),
+                "skill tool must execute successfully: {result:?}"
             );
 
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "continue using it".into(),
-                    images: vec![],
-                },
-            );
-            let second = collect_through_done(receiver);
+            send_cmd(writer, "", cmd_user_input("continue using it"));
+            let second = collect_through_terminal(receiver);
             assert_eq!(
                 second
                     .iter()
-                    .filter(|event| matches!(event, Agent2Ui::Done))
+                    .filter(|event| matches!(
+                        event,
+                        RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+                    ))
                     .count(),
                 1
             );
@@ -413,49 +456,36 @@ fn llm_approval_resumes_original_turn_once() {
         1,
         temp.path(),
         vec![
-            tool_round(&[("llm-read", "read", json!({"path": path}))]),
+            tool_round(&[("llm-read", "read_file", json!({"path": path}))]),
             final_round("finished"),
         ],
         2,
         move |writer, receiver| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "read it".into(),
-                    images: vec![],
-                },
-            );
+            send_cmd(writer, "", cmd_user_input("read it"));
             match expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(event, Agent2Ui::PermissionRequest { .. })
+                matches!(
+                    event,
+                    RingingEvent::Tool(ToolEvent::ToolPermissionRequested { .. })
+                )
             }) {
-                Agent2Ui::PermissionRequest {
+                RingingEvent::Tool(ToolEvent::ToolPermissionRequested {
                     tool_call_id,
                     risk,
                     consequence,
                     ..
-                } => {
+                }) => {
                     assert_eq!(tool_call_id, "llm-read");
-                    assert_eq!(risk, PermissionRisk::Low);
+                    assert_eq!(risk, deepx_domain::PermissionRisk::Low);
                     assert!(!consequence.is_empty());
                 }
-                _ => unreachable!(),
+                other => panic!("expected ToolPermissionRequested, got {other:?}"),
             }
             assert_no_round_completion(receiver);
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "llm-read".into(),
-                    approved: true,
-                    trust_folder: false,
-                },
-            );
-            let events = collect_through_done(receiver);
+            send_cmd(writer, "", cmd_permission_respond("llm-read", true));
+            let events = collect_through_terminal(receiver);
             assert_single_completion(&events, 1);
-            let result = events.iter().find_map(|event| match event {
-                Agent2Ui::ToolResults { results, .. } => results.first(),
-                _ => None,
-            });
-            assert!(result.is_some_and(|result| result.success));
+            let result = finished_result(&events);
+            assert!(result.is_some_and(|result| result.is_success()));
             assert!(call_path.exists());
         },
     );
@@ -471,37 +501,23 @@ fn llm_rejection_resumes_with_original_failure() {
         1,
         temp.path(),
         vec![
-            tool_round(&[("llm-denied", "read", json!({"path": path}))]),
+            tool_round(&[("llm-denied", "read_file", json!({"path": path}))]),
             final_round("handled denial"),
         ],
         2,
         move |writer, receiver| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "read it".into(),
-                    images: vec![],
-                },
-            );
+            send_cmd(writer, "", cmd_user_input("read it"));
             assert_eq!(permission_id(receiver), "llm-denied");
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "llm-denied".into(),
-                    approved: false,
-                    trust_folder: false,
-                },
-            );
-            let events = collect_through_done(receiver);
+            send_cmd(writer, "", cmd_permission_respond("llm-denied", false));
+            let events = collect_through_terminal(receiver);
             assert_single_completion(&events, 1);
-            let result = events.iter().find_map(|event| match event {
-                Agent2Ui::ToolResults { results, .. } => results.first(),
-                _ => None,
-            });
+            let result = finished_result(&events);
             assert!(result.is_some_and(|result| {
-                !result.success
-                    && result.tool_call_id == "llm-denied"
-                    && result.output.contains("[DENIED]")
+                !result.is_success()
+                    && result
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| error.message.contains("[DENIED]"))
             }));
         },
     );
@@ -520,41 +536,21 @@ fn llm_multiple_pending_waits_for_every_response() {
         temp.path(),
         vec![
             tool_round(&[
-                ("llm-first", "read", json!({"path": first})),
-                ("llm-second", "read", json!({"path": second})),
+                ("llm-first", "read_file", json!({"path": first})),
+                ("llm-second", "read_file", json!({"path": second})),
             ]),
             final_round("both finished"),
         ],
         2,
         move |writer, receiver| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "read both".into(),
-                    images: vec![],
-                },
-            );
+            send_cmd(writer, "", cmd_user_input("read both"));
             let mut ids = vec![permission_id(receiver), permission_id(receiver)];
             ids.sort();
             assert_eq!(ids, vec!["llm-first", "llm-second"]);
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "llm-first".into(),
-                    approved: true,
-                    trust_folder: false,
-                },
-            );
+            send_cmd(writer, "", cmd_permission_respond("llm-first", true));
             assert_no_round_completion(receiver);
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "llm-second".into(),
-                    approved: true,
-                    trust_folder: false,
-                },
-            );
-            let events = collect_through_done(receiver);
+            send_cmd(writer, "", cmd_permission_respond("llm-second", true));
+            let events = collect_through_terminal(receiver);
             assert_single_completion(&events, 2);
         },
     );
@@ -584,26 +580,13 @@ fn llm_four_pending_execs_defer_execution_until_all_resolved() {
         vec![tool_round(&call_refs), final_round("all execs finished")],
         2,
         move |writer, receiver| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "run four commands".into(),
-                    images: vec![],
-                },
-            );
+            send_cmd(writer, "", cmd_user_input("run four commands"));
             let mut ids = (0..4).map(|_| permission_id(receiver)).collect::<Vec<_>>();
             ids.sort();
             assert_eq!(ids, vec!["exec-1", "exec-2", "exec-3", "exec-4"]);
 
             for id in &ids[..3] {
-                send(
-                    writer,
-                    Ui2Agent::PermissionResponse {
-                        tool_call_id: id.clone(),
-                        approved: true,
-                        trust_folder: false,
-                    },
-                );
+                send_cmd(writer, "", cmd_permission_respond(id, true));
             }
             assert_no_round_completion(receiver);
             let execution_deadline = Instant::now() + Duration::from_secs(3);
@@ -617,14 +600,7 @@ fn llm_four_pending_execs_defer_execution_until_all_resolved() {
                 "approved execs must remain deferred until every decision is recorded",
             );
 
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: ids[3].clone(),
-                    approved: true,
-                    trust_folder: false,
-                },
-            );
+            send_cmd(writer, "", cmd_permission_respond(&ids[3], true));
             let completion_deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < completion_deadline
                 && expected_markers.iter().any(|path| !path.exists())
@@ -639,7 +615,7 @@ fn llm_four_pending_execs_defer_execution_until_all_resolved() {
                     .map(|path| path.exists())
                     .collect::<Vec<_>>(),
             );
-            let events = collect_through_done(receiver);
+            let events = collect_through_terminal(receiver);
             assert_single_completion(&events, 4);
         },
     );
@@ -658,7 +634,7 @@ fn llm_mixed_auto_and_pending_emits_one_unified_result() {
         temp.path(),
         vec![
             tool_round(&[
-                ("llm-auto", "read", json!({"path": input})),
+                ("llm-auto", "read_file", json!({"path": input})),
                 (
                     "llm-pending",
                     "write",
@@ -669,24 +645,11 @@ fn llm_mixed_auto_and_pending_emits_one_unified_result() {
         ],
         2,
         move |writer, receiver| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "read and write".into(),
-                    images: vec![],
-                },
-            );
+            send_cmd(writer, "", cmd_user_input("read and write"));
             assert_eq!(permission_id(receiver), "llm-pending");
             assert_no_round_completion(receiver);
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "llm-pending".into(),
-                    approved: true,
-                    trust_folder: false,
-                },
-            );
-            let events = collect_through_done(receiver);
+            send_cmd(writer, "", cmd_permission_respond("llm-pending", true));
+            let events = collect_through_terminal(receiver);
             assert_single_completion(&events, 2);
             assert_eq!(
                 std::fs::read_to_string(&expected_output).unwrap(),
@@ -715,42 +678,30 @@ fn llm_session_switch_invalidates_suspended_turn() {
         ],
         2,
         move |writer, receiver| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "write it".into(),
-                    images: vec![],
-                },
-            );
+            send_cmd(writer, "", cmd_user_input("write it"));
             assert_eq!(permission_id(receiver), "llm-stale");
-            send(writer, Ui2Agent::NewSession);
+            send_cmd(writer, "", cmd_session_create(true));
             expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(event, Agent2Ui::SessionCreated { .. })
+                matches!(
+                    event,
+                    RingingEvent::Control(ControlEvent::SessionStateChanged {
+                        state: SessionState::Created,
+                        ..
+                    })
+                )
             });
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "llm-stale".into(),
-                    approved: true,
-                    trust_folder: false,
-                },
-            );
+            send_cmd(writer, "", cmd_permission_respond("llm-stale", true));
             assert!(
                 !stale_output.exists(),
                 "stale approval executed after switch"
             );
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "continue in new session".into(),
-                    images: vec![],
-                },
-            );
-            let events = collect_through_done(receiver);
+            send_cmd(writer, "", cmd_user_input("continue in new session"));
+            let events = collect_through_terminal(receiver);
             assert!(
-                events
-                    .iter()
-                    .any(|event| matches!(event, Agent2Ui::TurnEnd { .. }))
+                events.iter().any(|event| matches!(
+                    event,
+                    RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+                ))
             );
             assert!(!stale_output.exists());
         },

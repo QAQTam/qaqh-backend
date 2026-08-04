@@ -1,9 +1,13 @@
 //! Backend lifecycle tests — simulate frontend create-session + send-message
 //! without daemon / WebSocket / Electron.
 //!
-//! * create_session_emits_session_created_and_ready — pure session creation
+//! M3：全部走 Ringing worker 线格式（`wire: "Ringing_domain_v1"`），
+//! legacy `Ui2Agent` / `Agent2Ui` 已完全拆除。
+//!
+//! * create_session_emits_session_state — pure session creation
 //! * send_message_triggers_turn_lifecycle — full frontend simulation:
-//!   create session → send text → verify TurnStart / answer / Done
+//!   create session → send text → verify TurnStarted / RoundDelta / terminal
+//! * ringing_send_is_not_dropped_during_a_session_switch
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -12,10 +16,10 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use deepx_domain::{ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, SessionState};
 use deepx_msglp::ringing_v1::loop_core::Loop;
 use deepx_msglp::state::agent::AgentState;
-use deepx_proto::{Agent2Ui, Ui2Agent};
-use deepx_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
+use deepx_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope};
 use serde_json::json;
 use tiny_http::{Header, Response, Server};
 
@@ -105,36 +109,73 @@ fn text_round(content: &str) -> Vec<String> {
 
 // ── helpers ────────────────────────────────────────────────────────────
 
-fn send(w: &mut os_pipe::PipeWriter, cmd: Ui2Agent) {
-    writeln!(w, "{}", serde_json::to_string(&cmd).unwrap()).unwrap();
-    w.flush().unwrap();
+fn next_command_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::SeqCst)
 }
 
-fn send_ringing(w: &mut os_pipe::PipeWriter, env: RingingWorkerCommandEnvelope) {
+fn send_cmd(w: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
+    let env = RingingWorkerCommandEnvelope::new(seed, format!("c{}", next_command_id()), command);
     writeln!(w, "{}", serde_json::to_string(&env).unwrap()).unwrap();
     w.flush().unwrap();
 }
 
+fn cmd_session_create() -> RingingCommand {
+    RingingCommand::Control(ControlCommand::SessionCreate { close_current: false })
+}
+
+fn cmd_session_resume(seed: &str) -> RingingCommand {
+    RingingCommand::Control(ControlCommand::SessionResume { seed: seed.into() })
+}
+
+fn cmd_session_shutdown() -> RingingCommand {
+    RingingCommand::Control(ControlCommand::SessionShutdown)
+}
+
+fn cmd_user_input(text: &str) -> RingingCommand {
+    RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+        text: text.into(),
+        images: vec![],
+        attachments: None,
+    })
+}
+
 fn expect(
-    rx: &std::sync::mpsc::Receiver<Agent2Ui>,
+    rx: &std::sync::mpsc::Receiver<RingingEvent>,
     timeout: Duration,
-    pred: impl Fn(&Agent2Ui) -> bool,
-) -> Agent2Ui {
+    pred: impl Fn(&RingingEvent) -> bool,
+) -> RingingEvent {
     let dl = Instant::now() + timeout;
     loop {
         match rx.recv_timeout(dl.saturating_duration_since(Instant::now())) {
             Ok(e) if pred(&e) => return e,
-            Ok(Agent2Ui::Error { message }) => panic!("agent error: {message}"),
-            Ok(_) => {}
+            Ok(e) => {
+                eprintln!("skipped event: {e:?}");
+            }
             Err(e) => panic!("timeout/disconnect: {e}"),
         }
     }
 }
 
+/// 事件收集线程：解析 Ringing worker 事件帧并转发。
+fn spawn_event_reader(oread: os_pipe::PipeReader) -> std::sync::mpsc::Receiver<RingingEvent> {
+    let (tx, rx) = std::sync::mpsc::channel::<RingingEvent>();
+    thread::spawn(move || {
+        for line in BufReader::new(oread).lines().map_while(Result::ok) {
+            if let Ok(env) = serde_json::from_str::<RingingWorkerEventEnvelope>(&line) {
+                if tx.send(env.event).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
+
 // ── tests ──────────────────────────────────────────────────────────────
 
 #[test]
-fn create_session_emits_session_created_and_ready() {
+fn create_session_emits_session_state() {
     let _test_lock = SESSION_TEST_LOCK.lock().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
@@ -150,30 +191,24 @@ fn create_session_emits_session_created_and_ready() {
     let (ir, mut iw) = os_pipe::pipe().unwrap();
     let (oread, owrite) = os_pipe::pipe().unwrap();
     let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
-    let (tx, rx) = std::sync::mpsc::channel::<Agent2Ui>();
-    thread::spawn(move || {
-        for line in BufReader::new(oread).lines().map_while(Result::ok) {
-            if let Ok(ev) = serde_json::from_str::<Agent2Ui>(&line) {
-                if tx.send(ev).is_err() {
-                    break;
-                }
-            }
-        }
-    });
+    let rx = spawn_event_reader(oread);
 
     let drv = thread::spawn(move || {
-        send(&mut iw, Ui2Agent::CreateSession);
+        send_cmd(&mut iw, "", cmd_session_create());
         let seed = match expect(&rx, Duration::from_secs(10), |e| {
-            matches!(e, Agent2Ui::SessionCreated { .. })
+            matches!(
+                e,
+                RingingEvent::Control(ControlEvent::SessionStateChanged {
+                    state: SessionState::Created,
+                    ..
+                })
+            )
         }) {
-            Agent2Ui::SessionCreated { seed } => seed,
-            _ => unreachable!(),
+            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
         assert!(!seed.is_empty());
-        expect(&rx, Duration::from_secs(10), |e| {
-            matches!(e, Agent2Ui::Ready)
-        });
-        send(&mut iw, Ui2Agent::Shutdown);
+        send_cmd(&mut iw, &seed, cmd_session_shutdown());
     });
     lp.run();
     drv.join().unwrap();
@@ -205,60 +240,57 @@ fn send_message_triggers_turn_lifecycle() {
     let (ir, mut iw) = os_pipe::pipe().unwrap();
     let (oread, owrite) = os_pipe::pipe().unwrap();
     let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
-    let (tx, rx) = std::sync::mpsc::channel::<Agent2Ui>();
-    thread::spawn(move || {
-        for line in BufReader::new(oread).lines().map_while(Result::ok) {
-            if let Ok(ev) = serde_json::from_str::<Agent2Ui>(&line) {
-                if tx.send(ev).is_err() {
-                    break;
-                }
-            }
-        }
-    });
+    let rx = spawn_event_reader(oread);
 
     let drv = thread::spawn(move || {
         // Step 1: create session
-        send(&mut iw, Ui2Agent::CreateSession);
-        expect(&rx, Duration::from_secs(10), |e| {
-            matches!(e, Agent2Ui::SessionCreated { .. })
-        });
-        expect(&rx, Duration::from_secs(10), |e| {
-            matches!(e, Agent2Ui::Ready)
-        });
+        send_cmd(&mut iw, "", cmd_session_create());
+        let seed = match expect(&rx, Duration::from_secs(10), |e| {
+            matches!(
+                e,
+                RingingEvent::Control(ControlEvent::SessionStateChanged {
+                    state: SessionState::Created,
+                    ..
+                })
+            )
+        }) {
+            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            other => panic!("expected SessionStateChanged(Created), got {other:?}"),
+        };
 
         // Step 2: send a user message (this is what the frontend does)
-        send(
-            &mut iw,
-            Ui2Agent::UserInput {
-                text: "Hi!".into(),
-                images: vec![],
-            },
-        );
+        send_cmd(&mut iw, &seed, cmd_user_input("Hi!"));
 
         // Step 3: verify the full turn lifecycle
         expect(&rx, Duration::from_secs(15), |e| {
-            matches!(e, Agent2Ui::TurnStart { .. })
+            matches!(
+                e,
+                RingingEvent::Conversation(ConversationEvent::TurnStarted { .. })
+            )
         });
         expect(&rx, Duration::from_secs(15), |e| {
             matches!(
                 e,
-                Agent2Ui::RoundDelta {
-                    kind: deepx_proto::RoundDeltaKind::Answering,
+                RingingEvent::Conversation(ConversationEvent::RoundDelta {
+                    kind: deepx_domain::RoundDeltaKind::Answering,
                     ..
-                }
+                })
             )
         });
         expect(&rx, Duration::from_secs(15), |e| {
-            matches!(e, Agent2Ui::RoundComplete { .. })
+            matches!(
+                e,
+                RingingEvent::Conversation(ConversationEvent::RoundCompleted { .. })
+            )
         });
         expect(&rx, Duration::from_secs(15), |e| {
-            matches!(e, Agent2Ui::TurnEnd { .. })
-        });
-        expect(&rx, Duration::from_secs(15), |e| {
-            matches!(e, Agent2Ui::Done)
+            matches!(
+                e,
+                RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+            )
         });
 
-        send(&mut iw, Ui2Agent::Shutdown);
+        send_cmd(&mut iw, &seed, cmd_session_shutdown());
     });
     lp.run();
     drv.join().unwrap();
@@ -271,7 +303,7 @@ fn send_message_triggers_turn_lifecycle() {
 }
 
 #[test]
-fn ringing_send_is_not_dropped_during_a_pending_session_switch() {
+fn ringing_send_is_not_dropped_during_a_session_switch() {
     let _test_lock = SESSION_TEST_LOCK.lock().unwrap();
     let mock = MockServer::single_response(text_round("queued send"));
     let tmp = tempfile::tempdir().unwrap();
@@ -294,52 +326,34 @@ fn ringing_send_is_not_dropped_during_a_pending_session_switch() {
     let (ir, mut iw) = os_pipe::pipe().unwrap();
     let (oread, owrite) = os_pipe::pipe().unwrap();
     let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
-    let (tx, rx) = std::sync::mpsc::channel::<Agent2Ui>();
-    thread::spawn(move || {
-        for line in BufReader::new(oread).lines().map_while(Result::ok) {
-            if let Ok(event) = serde_json::from_str::<Agent2Ui>(&line) {
-                if tx.send(event).is_err() {
-                    break;
-                }
-            }
-        }
-    });
+    let rx = spawn_event_reader(oread);
 
     let drv = thread::spawn(move || {
-        send(&mut iw, Ui2Agent::CreateSession);
-        let seed = match expect(&rx, Duration::from_secs(10), |event| {
-            matches!(event, Agent2Ui::SessionCreated { .. })
+        send_cmd(&mut iw, "", cmd_session_create());
+        let seed = match expect(&rx, Duration::from_secs(10), |e| {
+            matches!(
+                e,
+                RingingEvent::Control(ControlEvent::SessionStateChanged {
+                    state: SessionState::Created,
+                    ..
+                })
+            )
         }) {
-            Agent2Ui::SessionCreated { seed } => seed,
-            _ => unreachable!(),
+            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            other => panic!("expected SessionStateChanged(Created), got {other:?}"),
         };
-        expect(&rx, Duration::from_secs(10), |event| matches!(event, Agent2Ui::Ready));
 
-        // A legacy resume schedules a pending session switch. The daemon can
-        // already have accepted this Ringing send by the time the worker drains
-        // its input queue, so it must be retained and run after the switch.
-        send(&mut iw, Ui2Agent::ResumeSession { seed: seed.clone() });
-        send_ringing(
-            &mut iw,
-            RingingWorkerCommandEnvelope::new(
-                &seed,
-                "cmd-queued-send",
-                RingingCommand::Conversation(
-                    deepx_domain::ConversationCommand::ConversationSendMessage {
-                        text: "Hi after resume".into(),
-                        images: vec![],
-                        attachments: None,
-                    },
-                ),
-            ),
-        );
+        // Session switch + 紧接的 Ringing send：切换完成后 send 必须到达 provider
+        // （Ringing 命令经 deferred 队列保留，不丢）。
+        send_cmd(&mut iw, &seed, cmd_session_resume(&seed));
+        send_cmd(&mut iw, &seed, cmd_user_input("Hi after resume"));
 
         let deadline = Instant::now() + Duration::from_secs(15);
         while mock.requests.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(25));
         }
         assert_eq!(mock.requests.load(Ordering::SeqCst), 1, "queued send must reach the provider");
-        send(&mut iw, Ui2Agent::Shutdown);
+        send_cmd(&mut iw, &seed, cmd_session_shutdown());
     });
     lp.run();
     drv.join().unwrap();

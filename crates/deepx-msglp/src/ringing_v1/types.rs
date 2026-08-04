@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
-use deepx_proto::{Agent2Ui, AskMode, AskQuestion};
+use deepx_proto::{AskMode, AskQuestion};
 use deepx_types::UsageInfo;
 
 use crate::state::agent::AgentState;
@@ -270,19 +270,11 @@ pub struct TurnState {
 
 /// Abstraction over the output channel.
 ///
-/// Engines call `emit()` / `emit_delta()` without knowing whether
+/// Engines call `emit_domain()` / `emit_timeline()` without knowing whether
 /// they're writing to a real mpsc channel (production) or a mock
-/// (unit tests). This trait is the single point where all Agent2Ui
-/// events enter the output pipeline.
+/// (unit tests). This trait is the single point where all Ringing
+/// events enter the output pipeline. (legacy `emit`/`emit_delta` 已随 M3 拆除)
 pub trait Emitter {
-    /// Emit a critical event. Blocks if the channel is full.
-    /// The event MUST be delivered (TurnStart, TurnEnd, ToolResults, etc.).
-    fn emit(&self, event: Agent2Ui);
-
-    /// Emit a streaming delta. May drop if the channel is full.
-    /// Used for high-frequency events (RoundDelta, ExecProgress).
-    fn emit_delta(&self, event: Agent2Ui);
-
     /// Emit a Ringing 领域事件（生产点直接构造，禁止 Agent2Ui→Ringing 转换）。
     /// 默认空实现：未启用 Ringing 出口时零行为变化。
     fn emit_domain(&self, _event: deepx_domain::DomainEvent) {}
@@ -297,11 +289,9 @@ pub trait Emitter {
     fn set_seed(&self, _seed: &str) {}
 }
 
-/// writer 线程通道载荷：legacy 帧或 Ringing worker envelope（互不嵌套）。
+/// writer 线程通道载荷：Ringing worker envelope 或 timeline intent（互不嵌套）。
 #[derive(Debug, Clone)]
 pub enum WriterEvent {
-    /// legacy JSON-LP 帧（`Agent2Ui`）。
-    Legacy(Agent2Ui),
     /// Ringing worker envelope（`wire: "Ringing_domain_v1"`）。
     Ringing(deepx_ringing::RingingWorkerEventEnvelope),
     /// Native ordered transcript intent (`wire: "Ringing_timeline_intent_v1"`).

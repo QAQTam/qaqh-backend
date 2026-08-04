@@ -77,6 +77,7 @@ export function createRingingMonitor() {
   const appliedBySeed = new Map<string, number>();
   // 每 (seed, channel) 在途 snapshot 去重：daemon 下线时避免并发请求风暴
   const snapshotInflight = new Set<string>();
+  const compactReloadInflight = new Set<string>();
   /** SessionCreate 的因果事件可能先于 ACK 到达，先缓存再由调用方领取。 */
   const createdSeedsByCommand = new Map<string, string>();
   const createdSeedWaiters = new Map<string, Set<{
@@ -120,7 +121,11 @@ export function createRingingMonitor() {
     const baseline = baselineBySeed.get(seed)?.[batch.channel];
     let appliedCount = 0;
     for (const envelope of batch.envelopes) {
-      const event = envelope.event as { type?: string; state?: string };
+      const event = envelope.event as {
+        type?: string;
+        state?: string;
+        status?: string;
+      };
       if (
         batch.channel === "control"
         && event.type === "session_state_changed"
@@ -139,6 +144,16 @@ export function createRingingMonitor() {
         } else {
           createdSeedsByCommand.set(commandId, seed);
         }
+      }
+      // Compact 完成后 worker 的 store 已物理移除被压缩 turn 并插入摘要 turn，
+      // 但事件流（journal）只增不删——前端必须重拉权威 bootstrap（替换语义）
+      // 才能移除旧消息。异步执行，不阻塞事件应用。
+      if (
+        batch.channel === "conversation"
+        && event.type === "compact_finished"
+        && event.status === "completed"
+      ) {
+        void reloadAfterCompact(seed);
       }
       // 快照已覆盖的事件（≤ baseline_stream_seq）不重复应用，避免与恢复的 turns 双计。
       if (baseline !== undefined && envelope.stream_seq <= baseline) continue;
@@ -264,6 +279,7 @@ export function createRingingMonitor() {
     seed: string,
     channel: string,
     snap: { state?: Record<string, unknown>; baseline_stream_seq?: unknown } | null,
+    opts?: { replaceTurns?: boolean },
   ): void {
     const s = (snap?.state ?? {}) as Record<string, string | boolean | null | unknown>;
     ensureStores(seed);
@@ -274,6 +290,26 @@ export function createRingingMonitor() {
       storesEntry.setStores((draft) => {
         draft.control.agentLifecycle = (sc.agent_lifecycle as any) ?? null;
         draft.control.sessionState = (sc.session_state as any) ?? null;
+        // 恢复 activity：快照是权威。SSE 重放/遗留事件可能让本地 activity
+        // 停留在陈旧的 working/waiting_user，bootstrap 时必须与 daemon 对齐，
+        // 否则关闭期间中断的会话在重启后永远显示"工作中"。
+        const snapActivity = sc.activity as string | null | undefined;
+        if (
+          snapActivity
+          && ["starting", "idle", "working", "waiting_user", "disconnected"].includes(snapActivity)
+        ) {
+          draft.control.activity = snapActivity as any;
+        }
+        // pending_interaction 权威覆盖（兜底）：快照没有挂起交互 → 清除本地
+        // 幽灵 ask/plan 面板（SSE 重放的历史 interaction_requested 无终态时）。
+        // 快照有 → 保留本地（完整恢复依赖 SSE 重放/后端孤儿收尾）。
+        const snapPending = sc.pending_interaction as unknown as
+          | { id?: string; kind?: string }
+          | null
+          | undefined;
+        if (!snapPending || !snapPending.id) {
+          draft.control.activeAskPlan = null;
+        }
       });
     } else if (channel === "conversation") {
       const nextConversation = applyConversationSnapshot(
@@ -292,6 +328,7 @@ export function createRingingMonitor() {
         typeof s.has_more === "boolean" ? s.has_more : undefined,
         (sc.model as string | null) ?? null,
         asSafeNonNegativeInt(s.context_limit),
+        opts?.replaceTurns === true,
       );
       // 快照携带完整 turns（neutral JSON）：只补缺失 turn，保留流式现场，
       // 并恢复 activeTurn 使后续 round_delta 能继续追加（修复快照后吞字）。
@@ -311,6 +348,22 @@ export function createRingingMonitor() {
         conv.compactStatus = nextConversation.compactStatus;
         conv.cancelled = nextConversation.cancelled;
       });
+    } else if (channel === "tool") {
+      // tool 快照权威覆盖（兜底）：无 pending_permission → 清除本地幽灵
+      // 授权卡片（重放的历史 tool_permission_requested 无 tool_finished 终态时，
+      // 卡片永久 pendingPermission=true，授权窗口无法关闭）。
+      const pendingId = sc.pending_permission as string | null | undefined;
+      if (!pendingId) {
+        storesEntry.setStores((draft) => {
+          const cards = draft.tool.cards;
+          const ghosts = cards.filter((c) => c.pendingPermission);
+          if (ghosts.length === 0) return;
+          for (const ghost of ghosts) {
+            const idx = cards.indexOf(ghost);
+            if (idx >= 0) cards[idx] = { ...ghost, pendingPermission: false };
+          }
+        });
+      }
     }
     const baselineSeq = Number(snap?.baseline_stream_seq);
     if (Number.isSafeInteger(baselineSeq) && baselineSeq >= 0) {
@@ -358,6 +411,30 @@ export function createRingingMonitor() {
       console.warn(`[ringing] snapshot ${channel}/${seed} failed`, error);
     } finally {
       snapshotInflight.delete(key);
+    }
+  }
+
+  /**
+   * Compact 完成后的权威重拉：worker 的 store 已物理移除被压缩 turn 并插入
+   * 摘要 turn，但事件流只增不删——必须以**替换语义**应用 bootstrap 快照，
+   * 否则旧消息永久保留（"只插入 compact 消息，不移除过往消息"）。
+   */
+  async function reloadAfterCompact(seed: string): Promise<void> {
+    const api = window.deepx?.ringing;
+    if (!api?.bootstrap) return;
+    if (compactReloadInflight.has(seed)) return;
+    compactReloadInflight.add(seed);
+    try {
+      const bootstrap = (await api.bootstrap(seed)) as {
+        conversation?: { state?: Record<string, unknown>; baseline_stream_seq?: unknown };
+      };
+      applySnapshotPayload(seed, "conversation", bootstrap.conversation ?? null, {
+        replaceTurns: true,
+      });
+    } catch (error) {
+      console.warn(`[ringing] post-compact bootstrap reload failed for ${seed}`, error);
+    } finally {
+      compactReloadInflight.delete(seed);
     }
   }
 

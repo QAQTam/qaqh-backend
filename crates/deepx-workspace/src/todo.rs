@@ -676,32 +676,6 @@ pub fn register(mgr: &mut crate::ToolManager) {
         },
         crate::ToolPlacement::HostOnly,
     );
-    // 兼容别名：历史 prompt / 宿主工具列表仍可能调用 task（旧名）。
-    // 同一 handler、同一实现；待宿主侧全面切换为 todo 后移除。
-    mgr.register_with_placement(
-        ToolHandler {
-            key: "task".to_string(),
-            description: "Alias of the todo tool (deprecated name). Use todo instead: action=create|create_batch|update|cancel|list.",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["create", "create_batch", "update", "cancel", "list"]},
-                    "title": {"type": "string", "description": "Short imperative title, 1-100 characters."},
-                    "description": {"type": "string", "description": "Optional context or acceptance criteria, at most 200 characters."},
-                    "items": {"type": "array", "items": {"type": "object", "properties": {"title": {"type": "string"}, "description": {"type": "string"}}, "required": ["title"]}, "description": "For action=create_batch only. Max 20 entries."},
-                    "id": {"type": ["string", "integer"], "description": "Task id, e.g. \"T1\" or 1."},
-                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]},
-                    "evidence": {"type": "string"}
-                },
-                "required": ["action"],
-                "additionalProperties": false
-            }),
-            handler: handle_task,
-            risk: ToolRisk::Write,
-            default_timeout: Duration::from_secs(15),
-        },
-        crate::ToolPlacement::HostOnly,
-    );
 }
 
 // ═══════════════════════════════════════════════════════

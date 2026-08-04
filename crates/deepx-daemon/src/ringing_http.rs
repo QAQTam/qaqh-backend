@@ -1675,6 +1675,10 @@ async fn handle_bootstrap(
         )
         .await;
     }
+    // daemon 重启后可能没有 worker 存活（用户直接打开历史会话）：journal
+    // 重放的无终态 TurnStarted/ToolStarted/InteractionRequested 必须在
+    // 快照构建前收尾，否则 bootstrap 携带陈旧 running turn 与幽灵交互面板。
+    hub.seal_orphan_channel_state(seed);
     let bootstrap = RingingSessionBootstrap::new(
         hub.epoch(),
         seed,
@@ -2180,8 +2184,11 @@ async fn handle_sse(
     // A channel SSE is connection-scoped, but the hub aggregates multiple
     // seeds. Filter both replay and live fanout by the lease attached to this
     // client session; otherwise a client owning seed A could observe seed B.
+    // 无 cursor（after_seq == 0）的新连接不回放可靠历史：客户端经 bootstrap
+    // 快照恢复（快照先行），避免 SSE 先于 bootstrap 到达时把 journal 里
+    // 无终态的 TurnStarted/ToolStarted/InteractionRequested 重放成幽灵状态。
     let replay = filter_replay_for_session(
-        hub.replay_channel_since(channel, after_seq),
+        hub.replay_channel_since(channel, after_seq, after_seq == 0),
         session_id,
         &leases,
     );
@@ -2538,7 +2545,7 @@ mod tests {
     fn session_create_event_carries_command_causation() {
         let hub = RingingHub::new("epoch-1");
         publish_session_created(&hub, "s-created", "cmd-create");
-        let replay = hub.replay_channel_since(RingingChannel::Control, 0);
+        let replay = hub.replay_channel_since(RingingChannel::Control, 0, false);
         assert_eq!(replay.events.len(), 1);
         assert_eq!(replay.events[0].seed, "s-created");
         assert_eq!(replay.events[0].causation_id.as_deref(), Some("cmd-create"));

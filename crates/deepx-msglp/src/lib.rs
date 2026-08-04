@@ -25,7 +25,8 @@
 //! | Services  | `services/` | Conflict detection, dashboard, notify   |
 //! | Utilities | `util/`     | Calendar, token logging, display fmt    |
 //!
-//! See [`ringing_v1::engine`] for the `Engine` trait and extension points.
+//! Ringing V1 引擎链：`ringing_v1/engine_*.rs`（M3 后无独立 Engine trait，
+//! 命令经 `dispatch_ringing_one` 直接路由到各引擎方法）。
 
 pub mod ringing_v1;
 mod services;

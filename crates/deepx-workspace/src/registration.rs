@@ -7,7 +7,7 @@ use super::exec;
 use super::web;
 use super::image_query;
 
-use super::apply_patch;
+use super::file_edit;
 use super::file_mutate;
 use super::file_query;
 
@@ -16,7 +16,6 @@ use super::process_inspect;
 use super::todo;
 
 use super::skill;
-use super::search;
 
 /// 工具注册器函数签名。
 pub type ToolRegistrar = fn(&mut ToolManager);
@@ -29,10 +28,9 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     // ── 系统工具 ──
     exec::register(&mut mgr);
     web::register(&mut mgr);
-    search::register(&mut mgr);
 
     // ── 文件操作 ──
-    apply_patch::register(&mut mgr);
+    file_edit::register(&mut mgr);
     file_mutate::register(&mut mgr);
     file_query::register(&mut mgr);
 
@@ -73,8 +71,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "apply_patch", "ask", "delete", "edit", "edit_block", "exec", "image",
-                "process", "read", "search", "skills", "task", "todo", "web", "write",
+                "ask", "delete", "edit_file", "exec", "image", "process", "read_file",
+                "skills", "todo", "web_fetch", "write",
             ]
         );
     }

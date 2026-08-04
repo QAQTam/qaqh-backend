@@ -1,15 +1,14 @@
-//! worker 边界线格式判别（PLAN 阶段 1）。
+//! worker 边界线格式判别（M3 后：仅 Ringing 线格式）。
 //!
 //! 硬规则：**reader 必须先检查 `wire`，禁止 untagged 猜测**。
 //!
-//! - legacy 记录：无 `wire` 字段，保持原 JSON-LP 格式（`Ui2Agent` / `Agent2Ui`）。
 //! - Ringing 记录：携带 `wire: "Ringing_domain_v1"`，解析为
 //!   `RingingWorkerCommandEnvelope` / `RingingWorkerEventEnvelope`。
-//! - 未知 `wire` 值：拒绝并报 `InvalidData`，绝不猜测。
+//! - 缺失/未知 `wire` 值：拒绝并报 `InvalidData`，绝不猜测
+//!   （legacy 无 `wire` 帧已在 M3 完全拆除）。
 
 use std::io::{BufRead, Write};
 
-use deepx_proto::{Agent2Ui, Ui2Agent};
 use deepx_ringing::worker::{
     RingingTimelineIntentEnvelope, RingingWorkerCommandEnvelope, WIRE_RINGING_DOMAIN_V1,
     WIRE_RINGING_TIMELINE_INTENT_V1,
@@ -18,8 +17,6 @@ use deepx_ringing::worker::{
 /// stdin 方向的可判别命令帧。
 #[derive(Debug, Clone)]
 pub enum WorkerCommandFrame {
-    /// legacy `Ui2Agent`（无 `wire` 字段）。
-    Legacy(Ui2Agent),
     /// Ringing `RingingWorkerCommandEnvelope`（`wire: "Ringing_domain_v1"`）。
     Ringing(RingingWorkerCommandEnvelope),
 }
@@ -28,7 +25,7 @@ pub enum WorkerCommandFrame {
 ///
 /// 判别规则（顺序固定）：
 /// 1. 解析为 `serde_json::Value`；
-/// 2. 无 `wire` 字段 → legacy（保持旧格式兼容）；
+/// 2. 无 `wire` 字段 → `InvalidData`（legacy 帧已拆除）；
 /// 3. `wire == "Ringing_domain_v1"` → Ringing envelope；
 /// 4. 其它 `wire` 值 → `InvalidData`（禁止猜测）。
 pub fn read_worker_command_frame<R: BufRead>(
@@ -43,10 +40,10 @@ pub fn read_worker_command_frame<R: BufRead>(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     match value.get("wire") {
         None => {
-            // legacy：反序列化为 Ui2Agent
-            let frame = serde_json::from_value::<Ui2Agent>(value)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            Ok(Some(WorkerCommandFrame::Legacy(frame)))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "worker command frame missing `wire` tag (legacy frames removed in M3)",
+            ))
         }
         Some(w) if w == WIRE_RINGING_DOMAIN_V1 => {
             let frame = serde_json::from_value::<RingingWorkerCommandEnvelope>(value)
@@ -58,14 +55,6 @@ pub fn read_worker_command_frame<R: BufRead>(
             format!("unknown worker wire tag: {other}"),
         )),
     }
-}
-
-/// 写入 legacy 事件帧（默认模式；worker 未切流前保持该格式）。
-pub fn write_legacy_event_frame<W: Write>(w: &mut W, event: &Agent2Ui) -> std::io::Result<()> {
-    let json = serde_json::to_string(event)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    writeln!(w, "{json}")?;
-    w.flush()
 }
 
 /// 写入 Ringing 事件帧（切流后使用；携带 `wire` 判别字段）。
@@ -90,28 +79,22 @@ pub fn write_timeline_intent_frame<W: Write>(
     w.flush()
 }
 
-/// 判别 worker stdout 行：Ringing 事件 vs legacy 事件（daemon 侧使用）。
-///
-/// 返回 `None` 表示该行是 Ringing 事件（daemon 尚未接入领域消费时跳过）；
-/// 返回 `Some(Agent2Ui)` 表示 legacy 事件。
-pub fn read_worker_event_line(line: &str) -> Result<Option<Agent2Ui>, String> {
+/// 校验 worker stdout 行（daemon 侧使用）：仅接受 Ringing / timeline 事件。
+pub fn read_worker_event_line(line: &str) -> Result<(), String> {
     let value: serde_json::Value =
         serde_json::from_str(line).map_err(|e| format!("invalid JSON: {e}"))?;
     match value.get("wire") {
-        None => serde_json::from_value::<Agent2Ui>(value)
-            .map(Some)
-            .map_err(|e| format!("invalid legacy event: {e}")),
+        None => Err("legacy event frame without `wire` tag is no longer supported".into()),
         Some(w) if w == WIRE_RINGING_DOMAIN_V1 => {
-            // 解析校验后跳过（领域消费路径由 ChannelRouter 在 T2/T6 接入）
             let env = serde_json::from_value::<deepx_ringing::RingingWorkerEventEnvelope>(value)
                 .map_err(|e| format!("invalid ringing event: {e}"))?;
             let _ = env.event.channel();
-            Ok(None)
+            Ok(())
         }
         Some(w) if w == WIRE_RINGING_TIMELINE_INTENT_V1 => {
             let _ = serde_json::from_value::<RingingTimelineIntentEnvelope>(value)
                 .map_err(|e| format!("invalid timeline intent: {e}"))?;
-            Ok(None)
+            Ok(())
         }
         Some(other) => Err(format!("unknown worker wire tag: {other}")),
     }
@@ -123,16 +106,13 @@ mod tests {
     use deepx_ringing::RingingCommand as RC;
 
     #[test]
-    fn legacy_command_without_wire_is_preserved() {
+    fn command_without_wire_tag_is_rejected() {
+        // M3：legacy 无 `wire` 帧已拆除，缺失 `wire` 直接拒绝。
         let line = r#"{"type":"user_input","text":"hi"}"#;
         let mut reader = std::io::Cursor::new(format!("{line}\n"));
-        let frame = read_worker_command_frame(&mut reader)
-            .expect("read")
-            .expect("frame");
-        match frame {
-            WorkerCommandFrame::Legacy(Ui2Agent::UserInput { text, .. }) => assert_eq!(text, "hi"),
-            other => panic!("expected legacy user_input, got {other:?}"),
-        }
+        let err = read_worker_command_frame(&mut reader).expect_err("must reject");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("missing `wire` tag"));
     }
 
     #[test]
@@ -194,10 +174,9 @@ mod tests {
 
     #[test]
     fn worker_event_line_discrimination() {
-        // legacy 事件行
-        let legacy = r#"{"type":"ready"}"#;
-        let parsed = read_worker_event_line(legacy).expect("legacy ok");
-        assert!(matches!(parsed, Some(Agent2Ui::Ready)));
+        // legacy 事件行（M3 后拒绝）
+        let err = read_worker_event_line(r#"{"type":"ready"}"#).expect_err("must reject");
+        assert!(err.contains("no longer supported"));
 
         // Ringing 事件行（校验通过，跳过）
         let env = deepx_ringing::RingingWorkerEventEnvelope::new(
@@ -208,8 +187,7 @@ mod tests {
             ),
         );
         let json = serde_json::to_string(&env).expect("serialize");
-        let parsed = read_worker_event_line(&json).expect("ringing ok");
-        assert!(parsed.is_none(), "ringing events are skipped pre-router");
+        read_worker_event_line(&json).expect("ringing ok");
 
         // 未知 wire 拒绝
         let err =
@@ -220,10 +198,6 @@ mod tests {
     #[test]
     fn event_frame_writers_round_trip() {
         let mut buf = Vec::new();
-        write_legacy_event_frame(&mut buf, &Agent2Ui::Ready).expect("legacy write");
-        assert!(String::from_utf8_lossy(&buf).contains("\"type\":\"ready\""));
-
-        let mut buf2 = Vec::new();
         let env = deepx_ringing::RingingWorkerEventEnvelope::new(
             "s",
             "e",
@@ -234,8 +208,8 @@ mod tests {
                 name: "exec".into(),
             }),
         );
-        write_ringing_event_frame(&mut buf2, &env).expect("ringing write");
-        let text = String::from_utf8_lossy(&buf2);
+        write_ringing_event_frame(&mut buf, &env).expect("ringing write");
+        let text = String::from_utf8_lossy(&buf);
         assert!(text.contains("\"wire\":\"Ringing_domain_v1\""));
         assert!(text.contains("\"direction\":\"event\""));
     }

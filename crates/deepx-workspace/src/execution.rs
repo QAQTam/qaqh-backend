@@ -393,7 +393,7 @@ mod tests {
         assert!(resource.skill_effects.is_empty());
 
         let generic_read = execute_with_context(
-            "read",
+            "read_file",
             "",
             &serde_json::json!({"path": skill_dir.join("SKILL.md")}).to_string(),
             "generic-skill-read",
@@ -784,7 +784,7 @@ mod tests {
 
         // test_write has ToolRisk::Destructive, so it's in PLAN_BLOCKED (via the "Test" default for PLAN_BLOCKED?
         // Actually PLAN_BLOCKED checks specific names. Let me check PLAN_BLOCKED:
-        // pub const PLAN_BLOCKED: &[&str] = &["edit", "edit_block", "write", "delete", "exec", "git"];
+        // pub const PLAN_BLOCKED: &[&str] = &["edit_file", "write", "delete", "exec", "git"];
         // So "test_write" is NOT in PLAN_BLOCKED. The admission will Authorize at level 4.
         // The block happens inside execute_authorized based on PLAN_BLOCKED list.
 

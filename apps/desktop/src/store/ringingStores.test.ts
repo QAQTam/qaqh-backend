@@ -94,6 +94,61 @@ describe("controlReducer", () => {
     expect(state.lastFailureId).toBe("e-9");
   });
 
+  it("clears a ghost ask panel on ask_rejected", () => {
+    let state = initialControlState("s1");
+    state = controlReducer(state, {
+      type: "interaction_requested",
+      interaction_id: "i1",
+      turn_id: "t1",
+      mode: "single",
+      questions: [],
+    });
+    expect(state.activeAskPlan).not.toBeNull();
+    // worker 重启后无挂起态：批准被拒（ask_rejected），面板必须自愈关闭
+    state = controlReducer(state, {
+      type: "operation_failed",
+      occurrence_id: "occ-ask-rejected-i1",
+      scope: "control",
+      error: {
+        error_id: "ask-rejected-i1",
+        code: "ask_rejected",
+        message: "No active ask_user prompt",
+        retryable: false,
+        dedupe_key: "ask_rejected:i1",
+      },
+      operation_id: null,
+    });
+    expect(state.activeAskPlan).toBeNull();
+    expect(state.lastFailureId).toBe("ask-rejected-i1");
+  });
+
+  it("clears a ghost plan panel on interaction_not_found", () => {
+    let state = initialControlState("s1");
+    state = controlReducer(state, {
+      type: "plan_review_requested",
+      interaction_id: "p1",
+      turn_id: "t1",
+      plan_content: "plan",
+      review_type: "",
+      todo_items: null,
+    });
+    expect(state.activeAskPlan?.kind).toBe("plan");
+    state = controlReducer(state, {
+      type: "operation_failed",
+      occurrence_id: "occ",
+      scope: "control",
+      error: {
+        error_id: "e-1",
+        code: "interaction_not_found",
+        message: "no longer pending",
+        retryable: false,
+        dedupe_key: null,
+      },
+      operation_id: null,
+    });
+    expect(state.activeAskPlan).toBeNull();
+  });
+
   it("keeps the full native dashboard snapshot without a legacy projection", () => {
     const state = controlReducer(initialControlState("s1"), {
       type: "dashboard_snapshot",
@@ -812,5 +867,64 @@ describe("applyConversationEventToStore (single path applier)", () => {
     expect(stores.conversation.turns.map((t) => t.turnId)).toEqual(["t1", "t2"]);
     // t1 内容未变 → 身份保持（恢复零全量重渲染）
     expect(stores.conversation.turns.find((t) => t.turnId === "t1")).toBe(beforeT1);
+  });
+});
+
+describe("applyConversationSnapshot replaceTurns (compact authority)", () => {
+  it("removes compacted turns and keeps only snapshot turns when replaceTurns is set", () => {
+    const [stores, setStores] = createStore(initialRingingStores("s-replace"));
+    applyConversationEventToStore(setStores, { type: "turn_started", turn_id: "t1", user_text: "old" });
+    applyConversationEventToStore(setStores, { type: "turn_started", turn_id: "t2", user_text: "kept" });
+    flush();
+    expect(stores.conversation.turns.map((t) => t.turnId)).toEqual(["t1", "t2"]);
+
+    // compact 后权威快照：t1 已被压缩移除，摘要 turn 插入，t2 保留
+    setStores((draft) => {
+      const conv = draft.conversation as ConversationState;
+      const next = applyConversationSnapshot(
+        { ...conv, compactStatus: "completed", cancelled: false },
+        [
+          { turn_id: "compact-summary", user_text: "[Compacted 1 turns]\nsummary", rounds: [] },
+          { turn_id: "t2", user_text: "kept", rounds: [{ round_num: 0, is_final: true, thinking: "", answer: "ok" }] },
+        ],
+        null,
+        null,
+        null,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        null,
+        undefined,
+        true, // replaceTurns
+      );
+      conv.turns = next.turns;
+      conv.turnsById = next.turnsById;
+      conv.activeTurn = next.activeTurn;
+    });
+    flush();
+    const ids = stores.conversation.turns.map((t) => t.turnId);
+    expect(ids).toEqual(["compact-summary", "t2"]);
+    expect(stores.conversation.turns[0].userText).toContain("[Compacted 1 turns]");
+  });
+
+  it("keeps local-only turns when replaceTurns is false (default merge semantics)", () => {
+    const [stores, setStores] = createStore(initialRingingStores("s-merge"));
+    applyConversationEventToStore(setStores, { type: "turn_started", turn_id: "t-local", user_text: "live" });
+    flush();
+    setStores((draft) => {
+      const conv = draft.conversation as ConversationState;
+      const next = applyConversationSnapshot(
+        { ...conv, compactStatus: null, cancelled: false },
+        [{ turn_id: "t-snap", user_text: "from snapshot", rounds: [] }],
+        null,
+      );
+      conv.turns = next.turns;
+      conv.turnsById = next.turnsById;
+      conv.activeTurn = next.activeTurn;
+    });
+    flush();
+    const ids = stores.conversation.turns.map((t) => t.turnId).sort();
+    expect(ids).toEqual(["t-local", "t-snap"]);
   });
 });

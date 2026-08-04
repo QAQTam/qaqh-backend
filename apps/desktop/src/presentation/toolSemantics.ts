@@ -12,14 +12,12 @@
 // ── 工具动词表 ──
 
 const TOOL_VERBS: Record<string, string> = {
-  read: "读取",
+  read_file: "读取",
   list: "列出",
   search: "搜索",
   diff: "对比",
   write: "写入",
-  edit: "修改",
-  edit_block: "修改",
-  apply_patch: "修改",
+  edit_file: "修改",
   delete: "删除",
   exec: "执行",
   web: "搜索",
@@ -66,7 +64,7 @@ export function toolArgsSummary(toolName: string, argsJson: string): string {
   } catch {
     // 非 JSON（进行中的 args 片段）：走兜底
   }
-  if (args && toolName === "read") {
+  if (args && (toolName === "read_file" || toolName === "read")) {
     const start = args.start_line ?? args.startLine;
     const end = args.end_line ?? args.endLine;
     const line = args.line ?? args.line_number;

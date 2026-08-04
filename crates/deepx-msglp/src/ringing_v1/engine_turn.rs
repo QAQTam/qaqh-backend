@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use deepx_message::Effect;
-use deepx_proto::{Agent2Ui, AskAnswer, AskResolution, RoundDeltaKind};
+use deepx_proto::AskAnswer;
 use deepx_types::UsageInfo;
 
 use super::engine_tool::ToolEngine;
@@ -185,12 +185,6 @@ impl TurnEngine {
             saved.reason = YieldReason::PlanReview;
             let turn_id = saved.turn_id.clone();
             if let Some(plan) = saved.pending_plans.front() {
-                ctx.emitter.emit(Agent2Ui::PlanSubmitted {
-                    call_id: plan.call_id.clone(),
-                    plan_content: plan.content.clone(),
-                    review_type: "plan".to_string(),
-                    todo_items: None,
-                });
                 // Ringing 双发：PlanReviewRequested（resume 重放）
                 ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                     deepx_domain::ControlEvent::PlanReviewRequested {
@@ -274,10 +268,6 @@ impl TurnEngine {
         ctx.agent
             .msg
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-        ctx.emitter.emit(Agent2Ui::AskResolved {
-            ask_id: active.call_id.clone(),
-            resolution: AskResolution::Answered,
-        });
         // Ringing 双发：InteractionResolved（ask 已回答）
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
             deepx_domain::ControlEvent::InteractionResolved {
@@ -368,10 +358,6 @@ impl TurnEngine {
             ctx.agent
                 .msg
                 .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-            ctx.emitter.emit(Agent2Ui::PlanResolved {
-                call_id: todo_act.call_id.clone(),
-                approved,
-            });
             // Ringing 双发：PlanReviewResolved（todo 激活裁决）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                 deepx_domain::ControlEvent::PlanReviewResolved {
@@ -413,10 +399,6 @@ impl TurnEngine {
         ctx.agent
             .msg
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-        ctx.emitter.emit(Agent2Ui::PlanResolved {
-            call_id: plan.call_id.clone(),
-            approved,
-        });
         // Ringing 双发：PlanReviewResolved（plan 裁决）
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
             deepx_domain::ControlEvent::PlanReviewResolved {
@@ -463,10 +445,6 @@ impl TurnEngine {
         ctx.agent
             .msg
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-        ctx.emitter.emit(Agent2Ui::AskResolved {
-            ask_id: ask_id.to_string(),
-            resolution: AskResolution::Dismissed,
-        });
         // Ringing 双发：InteractionResolved��ask 交互终结）
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
             deepx_domain::ControlEvent::InteractionResolved {
@@ -482,10 +460,22 @@ impl TurnEngine {
     }
 
     fn emit_ask_rejected(ctx: &mut RingContext, ask_id: &str, message: &str) {
-        ctx.emitter.emit(Agent2Ui::AskRejected {
-            ask_id: ask_id.to_string(),
-            message: message.to_string(),
-        });
+        // legacy AskRejected 退役：无 Ringing 专用事件，按 §4.2 登记
+        // "由 OperationFailed（ErrorScope::Control, code=ask_rejected）覆盖"。
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+            deepx_domain::ControlEvent::OperationFailed {
+                occurrence_id: format!("occ-ask-rejected-{ask_id}"),
+                scope: deepx_domain::ErrorScope::Control,
+                error: deepx_domain::DomainError {
+                    error_id: format!("ask-rejected-{ask_id}"),
+                    code: "ask_rejected".into(),
+                    message: message.to_string(),
+                    retryable: false,
+                    dedupe_key: Some(format!("ask_rejected:{ask_id}")),
+                },
+                operation_id: None,
+            },
+        ));
     }
 
     /// 构造结构化领域错误（error_id = 时间戳，dedupe 可选）。
@@ -520,13 +510,6 @@ impl TurnEngine {
 
     fn emit_active_ask(ctx: &mut RingContext, state: &TurnState) {
         if let Some(ask) = state.pending_asks.front() {
-            ctx.emitter.emit(Agent2Ui::AskUser {
-                turn_id: state.turn_id.clone(),
-                round_num: state.round_num,
-                ask_id: ask.call_id.clone(),
-                mode: ask.mode,
-                questions: ask.questions.clone(),
-            });
             // Ringing 双发：InteractionRequested（ask 交互请求）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                 deepx_domain::ControlEvent::InteractionRequested {
@@ -761,33 +744,19 @@ impl TurnEngine {
                         ordered_skill_effects.push((call_id.clone(), skill_effects));
                         if let Some(ref delta) = code_delta {
                             ctx.stats.push_delta(delta.clone());
-                            ctx.emitter.emit_delta(Agent2Ui::CodeDelta {
-                                lines_added: delta.lines_added,
-                                lines_removed: delta.lines_removed,
-                                files_created: delta.files_created,
-                                files_deleted: delta.files_deleted,
-                                file: delta.file.clone(),
-                            });
+                            // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
+                            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                                deepx_domain::ToolEvent::CodeChanged {
+                                    lines_added: delta.lines_added,
+                                    lines_removed: delta.lines_removed,
+                                    files_created: delta.files_created,
+                                    files_deleted: delta.files_deleted,
+                                    file: delta.file.clone(),
+                                },
+                            ));
                         }
                         // Instant refresh for todo tools
-                        if matches!(tool_name.as_str(), "todo" | "task") {
-                            ctx.emitter.emit(Agent2Ui::Dashboard {
-                                hp_connected: true,
-                                session_seed: ctx.agent.session.seed.clone(),
-                                context_limit: ctx.agent.config.context_limit,
-                                tool_calls_total: 0,
-                                tool_failures: 0,
-                                current_phase: "single".into(),
-                                streaming: false,
-                                dsml_compat_count: ctx.agent.dsml_compat_count,
-                                documents: dashboard::build_documents(),
-                                recent_edits: dashboard::build_recent_edits(),
-                                tasks: dashboard::build_tasks(),
-                                current_todo_id: dashboard::build_current_todo_id(),
-                                session_title: ctx.agent.session.title.clone(),
-                                usage: None,
-                                model: Some(ctx.agent.config.model.clone()),
-                            });
+        if matches!(tool_name.as_str(), "todo") {
                             // Ringing 双发：DashboardUpdated（replaceable 覆盖）
                             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                                 deepx_domain::ControlEvent::DashboardUpdated {
@@ -852,33 +821,19 @@ impl TurnEngine {
                     ordered_skill_effects.push((call_id.clone(), skill_effects));
                     if let Some(ref delta) = code_delta {
                         ctx.stats.push_delta(delta.clone());
-                        ctx.emitter.emit_delta(Agent2Ui::CodeDelta {
-                            lines_added: delta.lines_added,
-                            lines_removed: delta.lines_removed,
-                            files_created: delta.files_created,
-                            files_deleted: delta.files_deleted,
-                            file: delta.file.clone(),
-                        });
+                        // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
+                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                            deepx_domain::ToolEvent::CodeChanged {
+                                lines_added: delta.lines_added,
+                                lines_removed: delta.lines_removed,
+                                files_created: delta.files_created,
+                                files_deleted: delta.files_deleted,
+                                file: delta.file.clone(),
+                            },
+                        ));
                     }
                     // Instant refresh for todo tools
-                    if matches!(tool_name.as_str(), "todo" | "task") {
-                        ctx.emitter.emit(Agent2Ui::Dashboard {
-                            hp_connected: true,
-                            session_seed: ctx.agent.session.seed.clone(),
-                            context_limit: ctx.agent.config.context_limit,
-                            tool_calls_total: 0,
-                            tool_failures: 0,
-                            current_phase: "single".into(),
-                            streaming: false,
-                            dsml_compat_count: ctx.agent.dsml_compat_count,
-                            documents: dashboard::build_documents(),
-                            recent_edits: dashboard::build_recent_edits(),
-                            tasks: dashboard::build_tasks(),
-                            current_todo_id: dashboard::build_current_todo_id(),
-                            session_title: ctx.agent.session.title.clone(),
-                            usage: None,
-                            model: Some(ctx.agent.config.model.clone()),
-                        });
+        if matches!(tool_name.as_str(), "todo") {
                         // Ringing 双发：DashboardUpdated（replaceable 覆盖）
                         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                             deepx_domain::ControlEvent::DashboardUpdated {
@@ -938,7 +893,6 @@ impl TurnEngine {
         let mut on_event = |ev: deepx_gate::StreamEvent| match ev {
             deepx_gate::StreamEvent::ContentDelta(d) => {
                 summary.push_str(&d);
-                emitter.emit_delta(deepx_proto::Agent2Ui::CompactDelta { delta: d.clone() });
                 // Ringing 双发：CompactProgress（replaceable 流式摘要）
                 emitter.emit_domain(deepx_domain::DomainEvent::Conversation(
                     deepx_domain::ConversationEvent::CompactProgress {
@@ -948,7 +902,8 @@ impl TurnEngine {
                 ));
             }
             deepx_gate::StreamEvent::ReasoningDelta(d) => {
-                emitter.emit_delta(deepx_proto::Agent2Ui::CompactDelta { delta: d });
+                // legacy CompactDelta reasoning 透传已退役（§4.2 登记：由 CompactProgress 覆盖）
+                let _ = d;
             }
             _ => {}
         };
@@ -979,11 +934,6 @@ impl TurnEngine {
                     let (c, t, tc, tr, ts, sp, _, _) = ctx.agent.msg.compute_context_stats(None);
                     c + t + tc + tr + ts + sp
                 };
-                ctx.emitter.emit(deepx_proto::Agent2Ui::CompactEnd {
-                    summary_chars: summary.chars().count(),
-                    turns_compacted: head as u32,
-                    turns_removed: turns_removed as u32,
-                });
                 // Ringing 双发：CompactFinished（成功终态）
                 ctx.emitter
                     .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -999,11 +949,6 @@ impl TurnEngine {
                 true
             }
             Ok(()) => {
-                ctx.emitter.emit(deepx_proto::Agent2Ui::CompactEnd {
-                    summary_chars: 0,
-                    turns_compacted: 0,
-                    turns_removed: 0,
-                });
                 // Ringing 双发：CompactFinished（空摘要 → 失败终态）
                 ctx.emitter
                     .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -1018,11 +963,6 @@ impl TurnEngine {
                 false
             }
             Err(e) => {
-                ctx.emitter.emit(deepx_proto::Agent2Ui::CompactEnd {
-                    summary_chars: 0,
-                    turns_compacted: 0,
-                    turns_removed: 0,
-                });
                 // Ringing 双发：CompactFinished（失败终态）
                 ctx.emitter
                     .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -1162,12 +1102,8 @@ impl TurnEngine {
 
             // ── Emit pending cache diagnostic ──
             if let Some((hash, reasons)) = ctx.agent.take_cache_diagnostics() {
-                ctx.emitter
-                    .emit_delta(deepx_proto::Agent2Ui::CacheDiagnostics {
-                        prefix_hash: hash,
-                        prefix_changed: true,
-                        change_reasons: reasons,
-                    });
+                // legacy CacheDiagnostics 退役：Ringing 无对应事件（§4.2 登记：诊断事件退役）
+                let _ = (hash, reasons);
             }
 
             let tools = Some(ctx.agent.tool_defs.clone());
@@ -1226,12 +1162,6 @@ impl TurnEngine {
                                 block_id,
                                 delta: d.clone(),
                             });
-                        ctx.emitter.emit_delta(Agent2Ui::RoundDelta {
-                            turn_id: turn_id.clone(),
-                            round_num,
-                            kind: RoundDeltaKind::Answering,
-                            delta: d.clone(),
-                        });
                         ctx.emitter
                             .emit_domain(deepx_domain::DomainEvent::Conversation(
                                 deepx_domain::ConversationEvent::RoundDelta {
@@ -1272,12 +1202,6 @@ impl TurnEngine {
                                 block_id,
                                 delta: r.clone(),
                             });
-                        ctx.emitter.emit_delta(Agent2Ui::RoundDelta {
-                            turn_id: turn_id.clone(),
-                            round_num,
-                            kind: RoundDeltaKind::Thinking,
-                            delta: r.clone(),
-                        });
                         ctx.emitter
                             .emit_domain(deepx_domain::DomainEvent::Conversation(
                                 deepx_domain::ConversationEvent::RoundDelta {
@@ -1331,13 +1255,6 @@ impl TurnEngine {
                                             model: ctx.agent.config.model.clone(),
                                         },
                                     ));
-                                ctx.emitter.emit_delta(Agent2Ui::UsageUpdated {
-                                    turn_id: turn_id.clone(),
-                                    round_num,
-                                    usage: final_usage,
-                                    context_limit: ctx.agent.config.context_limit,
-                                    model: ctx.agent.config.model.clone(),
-                                });
                             }
                         }
                         content.clear();
@@ -1407,14 +1324,6 @@ impl TurnEngine {
                                 args_so_far: args_so_far.clone(),
                             },
                         ));
-                        ctx.emitter.emit_delta(Agent2Ui::ToolCallPreview {
-                            turn_id: turn_id.clone(),
-                            round_num,
-                            index,
-                            id,
-                            name,
-                            args_so_far,
-                        });
                     }
                     deepx_gate::StreamEvent::WebSearchStatus(status) => {
                         // Server-side search progress (Responses API built-in
@@ -1460,13 +1369,6 @@ impl TurnEngine {
                                         model: ctx.agent.config.model.clone(),
                                     },
                                 ));
-                            ctx.emitter.emit_delta(Agent2Ui::UsageUpdated {
-                                turn_id: turn_id.clone(),
-                                round_num,
-                                usage: u,
-                                context_limit: ctx.agent.config.context_limit,
-                                model: ctx.agent.config.model.clone(),
-                            });
                         }
                     }
                     deepx_gate::StreamEvent::Retrying {
@@ -1475,14 +1377,6 @@ impl TurnEngine {
                         delay_secs,
                         error,
                     } => {
-                        ctx.emitter.emit(Agent2Ui::ProviderRetrying {
-                            turn_id: turn_id.clone(),
-                            round_num,
-                            attempt,
-                            max_retries,
-                            delay_secs,
-                            error: error.clone(),
-                        });
                         // Ringing 双发：ProviderRetrying（重试可见性）
                         ctx.emitter
                             .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -1643,9 +1537,6 @@ impl TurnEngine {
                         let mut seen = HashSet::new();
                         if pending.iter().any(|t| !seen.insert(t.id.clone())) {
                             ctx.agent.msg.remove_last_step_if_incomplete();
-                            ctx.emitter.emit(Agent2Ui::Error {
-                                message: "Duplicate tool-call ID from model".into(),
-                            });
                             // Ringing 双发：OperationFailed（结构化错误）
                             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                                 deepx_domain::ControlEvent::OperationFailed {
@@ -1745,12 +1636,6 @@ impl TurnEngine {
                             if let Some((call_id, plan_content, review_type, todo_items)) =
                                 plan_submitted
                             {
-                                ctx.emitter.emit(Agent2Ui::PlanSubmitted {
-                                    call_id: call_id.clone(),
-                                    plan_content: plan_content.clone(),
-                                    review_type: review_type.clone(),
-                                    todo_items: todo_items.clone(),
-                                });
                                 // Ringing 双发：PlanReviewRequested（plan 评审请求）
                                 ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                                     deepx_domain::ControlEvent::PlanReviewRequested {
@@ -1841,13 +1726,18 @@ impl TurnEngine {
                                                 .push((call_id.clone(), skill_effects));
                                             if let Some(ref delta) = code_delta {
                                                 ctx.stats.push_delta(delta.clone());
-                                                ctx.emitter.emit_delta(Agent2Ui::CodeDelta {
-                                                    lines_added: delta.lines_added,
-                                                    lines_removed: delta.lines_removed,
-                                                    files_created: delta.files_created,
-                                                    files_deleted: delta.files_deleted,
-                                                    file: delta.file.clone(),
-                                                });
+                                                // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
+                                                ctx.emitter.emit_domain(
+                                                    deepx_domain::DomainEvent::Tool(
+                                                        deepx_domain::ToolEvent::CodeChanged {
+                                                            lines_added: delta.lines_added,
+                                                            lines_removed: delta.lines_removed,
+                                                            files_created: delta.files_created,
+                                                            files_deleted: delta.files_deleted,
+                                                            file: delta.file.clone(),
+                                                        },
+                                                    ),
+                                                );
                                             }
                                         }
                                         Err(_) => {
@@ -1903,13 +1793,18 @@ impl TurnEngine {
                                     ordered_skill_effects.push((call_id.clone(), skill_effects));
                                     if let Some(ref delta) = code_delta {
                                         ctx.stats.push_delta(delta.clone());
-                                        ctx.emitter.emit_delta(Agent2Ui::CodeDelta {
-                                            lines_added: delta.lines_added,
-                                            lines_removed: delta.lines_removed,
-                                            files_created: delta.files_created,
-                                            files_deleted: delta.files_deleted,
-                                            file: delta.file.clone(),
-                                        });
+                                        // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
+                                        ctx.emitter.emit_domain(
+                                            deepx_domain::DomainEvent::Tool(
+                                                deepx_domain::ToolEvent::CodeChanged {
+                                                    lines_added: delta.lines_added,
+                                                    lines_removed: delta.lines_removed,
+                                                    files_created: delta.files_created,
+                                                    files_deleted: delta.files_deleted,
+                                                    file: delta.file.clone(),
+                                                },
+                                            ),
+                                        );
                                     }
                                 }
                                 Err(_) => ctx.agent.msg.push_tool_result_direct(
@@ -2004,12 +1899,6 @@ impl TurnEngine {
                             if let Some((call_id, plan_content, review_type, todo_items)) =
                                 plan_submitted
                             {
-                                ctx.emitter.emit(Agent2Ui::PlanSubmitted {
-                                    call_id: call_id.clone(),
-                                    plan_content: plan_content.clone(),
-                                    review_type: review_type.clone(),
-                                    todo_items: todo_items.clone(),
-                                });
                                 // Ringing 双发：PlanReviewRequested（plan 评审请求）
                                 ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                                     deepx_domain::ControlEvent::PlanReviewRequested {
@@ -2039,9 +1928,6 @@ impl TurnEngine {
                     self.emit_completed_tool_round(ctx, &turn_id, round_num);
 
                     if let Err(error) = ctx.agent.skills.complete_model_lap() {
-                        ctx.emitter.emit(Agent2Ui::Error {
-                            message: error.clone(),
-                        });
                         // Ringing 双发：OperationFailed（skill lap 失败）
                         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                             deepx_domain::ControlEvent::OperationFailed {
@@ -2070,9 +1956,6 @@ impl TurnEngine {
             let forced = match ctx.agent.skills.complete_model_lap() {
                 Ok(forced) => forced,
                 Err(error) => {
-                    ctx.emitter.emit(Agent2Ui::Error {
-                        message: error.clone(),
-                    });
                     // Ringing 双发：OperationFailed（skill lap 失败）
                     ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                         deepx_domain::ControlEvent::OperationFailed {
@@ -2113,7 +1996,6 @@ impl TurnEngine {
     ) -> Vec<(String, String, String, bool)> {
         let results = ctx.agent.msg.last_step_tool_results();
         let ts = util::chrono_local_datetime();
-        let mut tool_defs = Vec::with_capacity(results.len());
         for (tc_id, name, content, success) in &results {
             let args = ctx
                 .agent
@@ -2141,28 +2023,22 @@ impl TurnEngine {
                     args_ref: None,
                 },
             ));
-            ctx.emitter.emit_delta(Agent2Ui::AuditRecord {
-                tool_name: name.clone(),
-                result_summary: summary,
-                success: *success,
-                time: ts.clone(),
-                args,
-            });
-            tool_defs.push(deepx_proto::ToolResultDef {
-                tool_call_id: tc_id.clone(),
-                output: content.clone(),
-                success: *success,
-                file: None,
-            });
+            // Ringing 终态：ToolFinished（legacy 汇总 ToolResults 退役后的替代——
+            // 批量执行路径每个工具单独发终态，与 UI 主动调用路径一致）。
+            ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
+                deepx_domain::ToolEvent::ToolFinished {
+                    tool_call_id: tc_id.clone(),
+                    turn_id: turn_id.to_string(),
+                    round_num,
+                    result: if *success {
+                        deepx_types::ToolResult::ok(content.clone())
+                    } else {
+                        deepx_types::ToolResult::error(content.clone())
+                    },
+                },
+            ));
         }
 
-        if !tool_defs.is_empty() {
-            ctx.emitter.emit(Agent2Ui::ToolResults {
-                turn_id: turn_id.to_string(),
-                round_num,
-                results: tool_defs,
-            });
-        }
         for (tool_call_id, _, _, _) in &results {
             ctx.emitter
                 .emit_timeline(deepx_domain::TimelineIntent::BlockSealed {
@@ -2179,23 +2055,6 @@ impl TurnEngine {
             });
         // Refresh status bar tasks after every tool round
         if !results.is_empty() {
-            ctx.emitter.emit(Agent2Ui::Dashboard {
-                hp_connected: true,
-                session_seed: ctx.agent.session.seed.clone(),
-                context_limit: ctx.agent.config.context_limit,
-                tool_calls_total: 0,
-                tool_failures: 0,
-                current_phase: "single".into(),
-                streaming: false,
-                dsml_compat_count: ctx.agent.dsml_compat_count,
-                documents: dashboard::build_documents(),
-                recent_edits: dashboard::build_recent_edits(),
-                tasks: dashboard::build_tasks(),
-                current_todo_id: dashboard::build_current_todo_id(),
-                session_title: ctx.agent.session.title.clone(),
-                usage: None,
-                model: Some(ctx.agent.config.model.clone()),
-            });
             // Ringing 双发：DashboardUpdated（replaceable 覆盖）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
                 deepx_domain::ControlEvent::DashboardUpdated {

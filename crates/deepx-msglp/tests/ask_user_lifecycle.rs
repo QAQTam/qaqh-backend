@@ -1,6 +1,10 @@
-//! End-to-end ask_user lifecycle tests driven through UserInput and a mock
-//! OpenAI-compatible SSE endpoint. These tests exercise the production new
-//! Ring export and never use Ui2Agent::ToolCall as a lifecycle shortcut.
+//! End-to-end ask_user lifecycle tests driven through Ringing V1 commands and
+//! a mock OpenAI-compatible SSE endpoint. These tests exercise the production
+//! Ring export (dispatch_ringing_one) end to end: ConversationSendMessage →
+//! gate → InteractionRequested → InteractionAskRespond/Dismiss → terminal.
+//!
+//! M3：输入/输出全部走 Ringing worker 线格式（`wire: "Ringing_domain_v1"`），
+//! legacy `Ui2Agent`/`Agent2Ui` 已完全拆除。
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -9,9 +13,13 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use deepx_domain::{
+    AskAnswer, AskMode, AskResolution, AskQuestion, ControlCommand, ControlEvent,
+    ConversationCommand, ConversationEvent, DomainEvent, SessionState, ToolCommand, ToolEvent,
+};
 use deepx_msglp::ringing_v1::loop_core::Loop;
 use deepx_msglp::state::agent::AgentState;
-use deepx_proto::{Agent2Ui, AskAnswer, AskMode, AskResolution, Ui2Agent};
+use deepx_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
 use serde_json::{Value, json};
 use tiny_http::{Header, Response, Server};
 
@@ -92,6 +100,380 @@ impl Drop for MockServer {
     }
 }
 
+// ═══════════════════════════════════════════════════════
+// Ringing 命令发送 helper（M3：legacy Ui2Agent 输入已拆除）
+// ═══════════════════════════════════════════════════════
+
+fn send_cmd(writer: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
+    let env = RingingWorkerCommandEnvelope::new(seed, format!("c{}", next_command_id()), command);
+    writeln!(writer, "{}", serde_json::to_string(&env).unwrap()).unwrap();
+    writer.flush().unwrap();
+}
+
+fn next_command_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::SeqCst)
+}
+
+fn cmd_user_input(text: &str) -> RingingCommand {
+    RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+        text: text.into(),
+        images: vec![],
+        attachments: None,
+    })
+}
+
+fn cmd_ask_respond(ask_id: &str, answers: &[(&str, &str)]) -> RingingCommand {
+    RingingCommand::Control(ControlCommand::InteractionAskRespond {
+        interaction_id: ask_id.into(),
+        answers: answers
+            .iter()
+            .map(|(question_id, answer)| AskAnswer {
+                question_id: (*question_id).into(),
+                answer: (*answer).into(),
+            })
+            .collect(),
+    })
+}
+
+fn cmd_ask_dismiss(ask_id: &str) -> RingingCommand {
+    RingingCommand::Control(ControlCommand::InteractionAskDismiss {
+        interaction_id: ask_id.into(),
+    })
+}
+
+fn cmd_session_create(close_current: bool) -> RingingCommand {
+    RingingCommand::Control(ControlCommand::SessionCreate { close_current })
+}
+
+fn cmd_session_resume(seed: &str) -> RingingCommand {
+    RingingCommand::Control(ControlCommand::SessionResume { seed: seed.into() })
+}
+
+fn cmd_session_shutdown() -> RingingCommand {
+    RingingCommand::Control(ControlCommand::SessionShutdown)
+}
+
+fn cmd_cancel() -> RingingCommand {
+    RingingCommand::Conversation(ConversationCommand::ConversationCancel { turn_id: None })
+}
+
+fn cmd_undo(turn_id: &str) -> RingingCommand {
+    RingingCommand::Conversation(ConversationCommand::ConversationUndoTurn {
+        turn_id: turn_id.into(),
+    })
+}
+
+fn cmd_permission_respond(call_id: &str, approved: bool) -> RingingCommand {
+    RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+        tool_call_id: call_id.into(),
+        approved,
+        trust_folder: false,
+    })
+}
+
+// ═══════════════════════════════════════════════════════
+// Ringing 事件断言 helper
+// ═══════════════════════════════════════════════════════
+
+fn expect_event(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+    timeout: Duration,
+    predicate: impl Fn(&RingingEvent) -> bool,
+) -> RingingEvent {
+    let deadline = Instant::now() + timeout;
+    let mut seen = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok(event) if predicate(&event) => return event,
+            Ok(event) => seen.push(format!("{event:?}")),
+            Err(error) => panic!("event timeout/disconnect: {error}; seen={seen:#?}"),
+        }
+    }
+}
+
+fn expect_operation_failed(receiver: &std::sync::mpsc::Receiver<RingingEvent>, code: &str) {
+    expect_event(receiver, Duration::from_secs(5), |event| {
+        matches!(
+            event,
+            RingingEvent::Control(ControlEvent::OperationFailed { error, .. })
+                if error.code == code
+        )
+    });
+}
+
+fn expect_interaction_requested(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+    ask_id: &str,
+) -> (String, AskMode, Vec<AskQuestion>) {
+    let event = expect_event(receiver, Duration::from_secs(5), |event| {
+        matches!(
+            event,
+            RingingEvent::Control(ControlEvent::InteractionRequested {
+                interaction_id,
+                ..
+            }) if interaction_id == ask_id
+        )
+    });
+    match event {
+        RingingEvent::Control(ControlEvent::InteractionRequested {
+            turn_id,
+            mode,
+            questions,
+            ..
+        }) => {
+            assert!(!turn_id.is_empty());
+            assert!(!questions.is_empty());
+            (turn_id, mode, questions)
+        }
+        other => panic!("expected InteractionRequested, got {other:?}"),
+    }
+}
+
+fn expect_interaction_resolved(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+    ask_id: &str,
+    resolution: AskResolution,
+) {
+    expect_event(receiver, Duration::from_secs(5), |event| {
+        matches!(
+            event,
+            RingingEvent::Control(ControlEvent::InteractionResolved {
+                interaction_id,
+                resolution: actual,
+            }) if interaction_id == ask_id && *actual == resolution
+        )
+    });
+}
+
+fn expect_turn_started(receiver: &std::sync::mpsc::Receiver<RingingEvent>) {
+    expect_event(receiver, Duration::from_secs(5), |event| {
+        matches!(
+            event,
+            RingingEvent::Conversation(ConversationEvent::TurnStarted { .. })
+        )
+    });
+}
+
+fn expect_permission_requested(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+    call_id: &str,
+) {
+    expect_event(receiver, Duration::from_secs(5), |event| {
+        matches!(
+            event,
+            RingingEvent::Tool(ToolEvent::ToolPermissionRequested {
+                tool_call_id,
+                ..
+            }) if tool_call_id == call_id
+        )
+    });
+}
+
+/// 收集事件直到出现回合终态（TurnCompleted / TurnFailed / ConversationCancelled）。
+fn collect_through_terminal(receiver: &std::sync::mpsc::Receiver<RingingEvent>) -> Vec<RingingEvent> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut events = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = receiver
+            .recv_timeout(remaining)
+            .expect("turn did not reach a terminal event");
+        let terminal = matches!(
+            event,
+            RingingEvent::Conversation(
+                ConversationEvent::TurnCompleted { .. }
+                    | ConversationEvent::TurnFailed { .. }
+                    | ConversationEvent::ConversationCancelled { .. }
+            )
+        );
+        events.push(event);
+        if terminal {
+            return events;
+        }
+    }
+}
+
+fn tool_finished_ids(events: &[RingingEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            RingingEvent::Tool(ToolEvent::ToolFinished { tool_call_id, .. }) => {
+                Some(tool_call_id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn assert_no_turn_advance(receiver: &std::sync::mpsc::Receiver<RingingEvent>, duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        match receiver.recv_timeout(Duration::from_millis(25)) {
+            Ok(event)
+                if matches!(
+                    event,
+                    RingingEvent::Control(ControlEvent::InteractionRequested { .. })
+                        | RingingEvent::Conversation(
+                            ConversationEvent::TurnCompleted { .. }
+                                | ConversationEvent::TurnFailed { .. }
+                        )
+                ) =>
+            {
+                panic!("turn advanced before all permissions resolved: {event:?}")
+            }
+            Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+fn find_tool_result_content(value: &Value, call_id: &str) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            if object
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == call_id)
+                && object.get("role").and_then(Value::as_str) == Some("tool")
+            {
+                return object
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            object
+                .values()
+                .find_map(|child| find_tool_result_content(child, call_id))
+        }
+        Value::Array(array) => array
+            .iter()
+            .find_map(|child| find_tool_result_content(child, call_id)),
+        _ => None,
+    }
+}
+
+/// ToolResult 结构化后的工具输出：业务 JSON 在 `model.text`（或平铺 `text`）内嵌；
+/// ask 等内建交互工具直接存业务 JSON（无包装），三种形状都兼容。
+fn inner_tool_result(content: &str) -> Value {
+    let value: Value = serde_json::from_str(content).expect("tool result json");
+    let text = value
+        .get("model")
+        .and_then(|model| model.get("text"))
+        .or_else(|| value.get("text"))
+        .and_then(Value::as_str);
+    match text {
+        Some(text) => serde_json::from_str(text).unwrap_or(value),
+        None => value,
+    }
+}
+
+fn run_case(
+    scenarios: Vec<Vec<String>>,
+    expected_requests: usize,
+    test: impl FnOnce(
+        &mut os_pipe::PipeWriter,
+        &std::sync::mpsc::Receiver<RingingEvent>,
+        Arc<AtomicUsize>,
+        String,
+    ) + Send
+    + 'static,
+) -> Vec<String> {
+    run_case_with_delay(scenarios, Duration::ZERO, expected_requests, test)
+}
+
+fn run_case_with_delay(
+    scenarios: Vec<Vec<String>>,
+    response_delay: Duration,
+    expected_requests: usize,
+    test: impl FnOnce(
+        &mut os_pipe::PipeWriter,
+        &std::sync::mpsc::Receiver<RingingEvent>,
+        Arc<AtomicUsize>,
+        String,
+    ) + Send
+    + 'static,
+) -> Vec<String> {
+    SESSION_INIT.call_once(|| {
+        deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false);
+    });
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("input.txt"),
+        "hello from permission test\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("input2.txt"), "second permission input\n").unwrap();
+    let mock = MockServer::sequential_with_delay(scenarios, response_delay);
+    let request_count = mock.requests.clone();
+    deepx_workspace::set_workspace(&temp.path().to_string_lossy());
+
+    let mut agent = AgentState::init("ask-lifecycle-test");
+    agent.ephemeral = true;
+    agent.config.permission_level = 1;
+    agent.config.base_url = mock.base_url.clone();
+    agent.config.api_key = "sk-test".into();
+    agent.config.model = "test-model".into();
+    agent.config.provider_id.clear();
+    agent.config.endpoint.clear();
+    agent.config.compliance_enabled = false;
+
+    let (input_reader, mut input_writer) = os_pipe::pipe().unwrap();
+    let (output_reader, output_writer) = os_pipe::pipe().unwrap();
+    let mut agent_loop = Loop::new_ipc(agent, BufReader::new(input_reader), output_writer);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(output_reader).lines().map_while(Result::ok) {
+            if let Ok(env) = serde_json::from_str::<RingingWorkerCommandEnvelope>(&line) {
+                let _ = env; // 命令方向帧不应出现在 stdout；忽略
+                continue;
+            }
+            if let Ok(env) = serde_json::from_str::<deepx_ringing::RingingWorkerEventEnvelope>(&line)
+            {
+                if event_tx.send(env.event).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let workspace = temp.path().to_path_buf();
+    let driver = thread::spawn(move || {
+        send_cmd(&mut input_writer, "", cmd_session_create(false));
+        let seed = match expect_event(&event_rx, Duration::from_secs(5), |event| {
+            matches!(
+                event,
+                RingingEvent::Control(ControlEvent::SessionStateChanged {
+                    state: SessionState::Created,
+                    ..
+                })
+            )
+        }) {
+            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            other => panic!("expected SessionStateChanged(Created), got {other:?}"),
+        };
+        deepx_workspace::set_workspace(&workspace.to_string_lossy());
+        let seed_for_shutdown = seed.clone();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            test(&mut input_writer, &event_rx, request_count, seed)
+        }));
+        send_cmd(&mut input_writer, &seed_for_shutdown, cmd_session_shutdown());
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    });
+
+    agent_loop.run();
+    driver.join().expect("test driver");
+    assert_eq!(mock.requests.load(Ordering::SeqCst), expected_requests);
+    mock.bodies.lock().expect("body lock").clone()
+}
+
+// ═══════════════════════════════════════════════════════
+// Mock SSE 场景构造（与 legacy 版相同）
+// ═══════════════════════════════════════════════════════
+
 fn tool_round(calls: &[(&str, &str, Value)]) -> Vec<String> {
     let mut events = calls
         .iter()
@@ -136,192 +518,9 @@ fn final_round(text: &str) -> Vec<String> {
     ]
 }
 
-fn send(writer: &mut os_pipe::PipeWriter, command: Ui2Agent) {
-    writeln!(writer, "{}", serde_json::to_string(&command).unwrap()).unwrap();
-    writer.flush().unwrap();
-}
-
-fn expect_event(
-    receiver: &std::sync::mpsc::Receiver<Agent2Ui>,
-    timeout: Duration,
-    predicate: impl Fn(&Agent2Ui) -> bool,
-) -> Agent2Ui {
-    let deadline = Instant::now() + timeout;
-    let mut seen = Vec::new();
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match receiver.recv_timeout(remaining) {
-            Ok(event) if predicate(&event) => return event,
-            Ok(Agent2Ui::Error { message }) => panic!("unexpected agent error: {message}"),
-            Ok(event) => seen.push(format!("{event:?}")),
-            Err(error) => panic!("event timeout/disconnect: {error}; seen={seen:#?}"),
-        }
-    }
-}
-
-fn expect_error(receiver: &std::sync::mpsc::Receiver<Agent2Ui>, timeout: Duration) -> String {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match receiver.recv_timeout(remaining) {
-            Ok(Agent2Ui::Error { message }) => return message,
-            Ok(_) => {}
-            Err(error) => panic!("error event timeout/disconnect: {error}"),
-        }
-    }
-}
-
-fn collect_through_done(receiver: &std::sync::mpsc::Receiver<Agent2Ui>) -> Vec<Agent2Ui> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut events = Vec::new();
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = receiver
-            .recv_timeout(remaining)
-            .expect("resumed turn did not complete");
-        let done = matches!(event, Agent2Ui::Done);
-        if let Agent2Ui::Error { ref message } = event {
-            panic!("unexpected agent error: {message}");
-        }
-        events.push(event);
-        if done {
-            return events;
-        }
-    }
-}
-
-fn assert_no_terminal_event(receiver: &std::sync::mpsc::Receiver<Agent2Ui>, duration: Duration) {
-    let deadline = Instant::now() + duration;
-    while Instant::now() < deadline {
-        match receiver.recv_timeout(Duration::from_millis(25)) {
-            Ok(event)
-                if matches!(
-                    event,
-                    Agent2Ui::Cancelled | Agent2Ui::TurnEnd { .. } | Agent2Ui::Done
-                ) =>
-            {
-                panic!("duplicate terminal event after Done: {event:?}")
-            }
-            Ok(_) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-}
-
-fn find_tool_result_content(value: &Value, call_id: &str) -> Option<String> {
-    match value {
-        Value::Object(object) => {
-            if object
-                .get("tool_call_id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id == call_id)
-                && object.get("role").and_then(Value::as_str) == Some("tool")
-            {
-                return object
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-            }
-            object
-                .values()
-                .find_map(|child| find_tool_result_content(child, call_id))
-        }
-        Value::Array(array) => array
-            .iter()
-            .find_map(|child| find_tool_result_content(child, call_id)),
-        _ => None,
-    }
-}
-
-fn run_case(
-    scenarios: Vec<Vec<String>>,
-    expected_requests: usize,
-    test: impl FnOnce(
-        &mut os_pipe::PipeWriter,
-        &std::sync::mpsc::Receiver<Agent2Ui>,
-        Arc<AtomicUsize>,
-        String,
-    ) + Send
-    + 'static,
-) -> Vec<String> {
-    run_case_with_delay(scenarios, Duration::ZERO, expected_requests, test)
-}
-
-fn run_case_with_delay(
-    scenarios: Vec<Vec<String>>,
-    response_delay: Duration,
-    expected_requests: usize,
-    test: impl FnOnce(
-        &mut os_pipe::PipeWriter,
-        &std::sync::mpsc::Receiver<Agent2Ui>,
-        Arc<AtomicUsize>,
-        String,
-    ) + Send
-    + 'static,
-) -> Vec<String> {
-    SESSION_INIT.call_once(|| {
-        deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false);
-    });
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("input.txt"),
-        "hello from permission test\n",
-    )
-    .unwrap();
-    std::fs::write(temp.path().join("input2.txt"), "second permission input\n").unwrap();
-    let mock = MockServer::sequential_with_delay(scenarios, response_delay);
-    let request_count = mock.requests.clone();
-    deepx_workspace::set_workspace(&temp.path().to_string_lossy());
-
-    let mut agent = AgentState::init("ask-lifecycle-test");
-    agent.ephemeral = true;
-    agent.config.permission_level = 1;
-    agent.config.base_url = mock.base_url.clone();
-    agent.config.api_key = "sk-test".into();
-    agent.config.model = "test-model".into();
-    agent.config.provider_id.clear();
-    agent.config.endpoint.clear();
-    agent.config.compliance_enabled = false;
-
-    let (input_reader, mut input_writer) = os_pipe::pipe().unwrap();
-    let (output_reader, output_writer) = os_pipe::pipe().unwrap();
-    let mut agent_loop = Loop::new_ipc(agent, BufReader::new(input_reader), output_writer);
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        for line in BufReader::new(output_reader).lines().map_while(Result::ok) {
-            if let Ok(event) = serde_json::from_str::<Agent2Ui>(&line) {
-                if event_tx.send(event).is_err() {
-                    break;
-                }
-            }
-        }
-    });
-
-    let workspace = temp.path().to_path_buf();
-    let driver = thread::spawn(move || {
-        send(&mut input_writer, Ui2Agent::CreateSession);
-        let seed = match expect_event(&event_rx, Duration::from_secs(5), |event| {
-            matches!(event, Agent2Ui::SessionCreated { .. })
-        }) {
-            Agent2Ui::SessionCreated { seed } => seed,
-            _ => unreachable!(),
-        };
-        deepx_workspace::set_workspace(&workspace.to_string_lossy());
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            test(&mut input_writer, &event_rx, request_count, seed)
-        }));
-        send(&mut input_writer, Ui2Agent::Shutdown);
-        if let Err(payload) = outcome {
-            std::panic::resume_unwind(payload);
-        }
-    });
-
-    agent_loop.run();
-    driver.join().expect("test driver");
-    assert_eq!(mock.requests.load(Ordering::SeqCst), expected_requests);
-    mock.bodies.lock().expect("body lock").clone()
-}
+// ═══════════════════════════════════════════════════════
+// 测试
+// ═══════════════════════════════════════════════════════
 
 #[test]
 fn batch_ask_waits_for_every_answer_and_writes_one_exact_result() {
@@ -330,7 +529,7 @@ fn batch_ask_waits_for_every_answer_and_writes_one_exact_result() {
         vec![
             tool_round(&[(
                 "ask-batch",
-                "ask_user",
+                "ask",
                 json!({
                     "questions": [
                         {"id":"q1", "question":"First?", "options":["A","B"], "allow_custom":false},
@@ -341,112 +540,45 @@ fn batch_ask_waits_for_every_answer_and_writes_one_exact_result() {
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "ask me".into(),
-                    images: vec![],
-                },
-            );
-            let ask = expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(
-                    event,
-                    Agent2Ui::AskUser {
-                        ask_id,
-                        mode: AskMode::Batch,
-                        questions,
-                        ..
-                    } if ask_id == "ask-batch" && questions.len() == 2
-                )
-            });
-            assert!(matches!(
-                ask,
-                Agent2Ui::AskUser {
-                    turn_id,
-                    round_num: 0,
-                    ..
-                } if !turn_id.is_empty()
-            ));
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("ask me"));
+            let (_, mode, requested) = expect_interaction_requested(receiver, "ask-batch");
+            assert_eq!(mode, AskMode::Batch);
+            assert_eq!(requested.len(), 2);
 
-            send(
-                writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "ask-batch".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "A".into(),
-                    }],
-                },
-            );
-            expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(
-                    event,
-                    Agent2Ui::AskRejected { ask_id, .. } if ask_id == "ask-batch"
-                )
-            });
+            // 部分答案 → 拒绝（batch 需要全部）
+            send_cmd(writer, &seed, cmd_ask_respond("ask-batch", &[("q1", "A")]));
+            expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send(
+            // 完整答案 → resolved
+            send_cmd(
                 writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "ask-batch".into(),
-                    answers: vec![
-                        AskAnswer {
-                            question_id: "q1".into(),
-                            answer: "A".into(),
-                        },
-                        AskAnswer {
-                            question_id: "q2".into(),
-                            answer: "D".into(),
-                        },
-                    ],
-                },
+                &seed,
+                cmd_ask_respond("ask-batch", &[("q1", "A"), ("q2", "D")]),
             );
-            expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(
-                    event,
-                    Agent2Ui::AskResolved {
-                        ask_id,
-                        resolution: AskResolution::Answered
-                    } if ask_id == "ask-batch"
-                )
-            });
-            let events = collect_through_done(receiver);
-            let tool_results = events
-                .iter()
-                .filter_map(|event| match event {
-                    Agent2Ui::ToolResults { results, .. } => Some(results),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(tool_results.len(), 1);
-            assert_eq!(tool_results[0].len(), 1);
-            assert_eq!(tool_results[0][0].tool_call_id, "ask-batch");
+            expect_interaction_resolved(receiver, "ask-batch", AskResolution::Answered);
+            let events = collect_through_terminal(receiver);
+            let finished = tool_finished_ids(&events);
+            assert_eq!(finished, vec!["ask-batch"]);
             assert_eq!(
                 events
                     .iter()
-                    .filter(|event| matches!(event, Agent2Ui::TurnEnd { .. }))
+                    .filter(|event| matches!(
+                        event,
+                        RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+                    ))
                     .count(),
                 1
             );
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| matches!(event, Agent2Ui::Done))
-                    .count(),
-                1
-            );
-            assert_no_terminal_event(receiver, Duration::from_millis(250));
         },
     );
 
     let second_request: Value = serde_json::from_str(&bodies[1]).unwrap();
     let content = find_tool_result_content(&second_request, "ask-batch")
         .expect("second request must include ask result");
-    let result: Value = serde_json::from_str(&content).expect("ask result is structured JSON");
     assert_eq!(
-        result,
+        inner_tool_result(&content),
         json!({
             "status": "answered",
             "answers": [
@@ -465,85 +597,31 @@ fn multiple_ask_calls_are_presented_sequentially_before_one_resume() {
             tool_round(&[
                 (
                     "ask-1",
-                    "ask_user",
+                    "ask",
                     json!({"question":"First?", "options":["A"], "allow_custom":false}),
                 ),
                 (
                     "ask-2",
-                    "ask_user",
+                    "ask",
                     json!({"question":"Second?", "options":["B"], "allow_custom":false}),
                 ),
             ]),
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "ask twice".into(),
-                    images: vec![],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "ask-1"),
-            );
-            send(
-                writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "ask-1".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "A".into(),
-                    }],
-                },
-            );
-            expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(
-                    event,
-                    Agent2Ui::AskResolved {
-                        ask_id,
-                        resolution: AskResolution::Answered
-                    } if ask_id == "ask-1"
-                )
-            });
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "ask-2"),
-            );
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("ask twice"));
+            expect_interaction_requested(receiver, "ask-1");
+            send_cmd(writer, &seed, cmd_ask_respond("ask-1", &[("q1", "A")]));
+            expect_interaction_resolved(receiver, "ask-1", AskResolution::Answered);
+            expect_interaction_requested(receiver, "ask-2");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send(
-                writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "ask-2".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "B".into(),
-                    }],
-                },
-            );
-            expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(
-                    event,
-                    Agent2Ui::AskResolved {
-                        ask_id,
-                        resolution: AskResolution::Answered
-                    } if ask_id == "ask-2"
-                )
-            });
-            let events = collect_through_done(receiver);
-            let results = events.iter().find_map(|event| match event {
-                Agent2Ui::ToolResults { results, .. } => Some(results),
-                _ => None,
-            });
-            let results = results.expect("one unified tool result event");
-            assert_eq!(results.len(), 2);
-            assert_eq!(results[0].tool_call_id, "ask-1");
-            assert_eq!(results[1].tool_call_id, "ask-2");
+            send_cmd(writer, &seed, cmd_ask_respond("ask-2", &[("q1", "B")]));
+            expect_interaction_resolved(receiver, "ask-2", AskResolution::Answered);
+            let events = collect_through_terminal(receiver);
+            let finished = tool_finished_ids(&events);
+            assert_eq!(finished, vec!["ask-1", "ask-2"]);
         },
     );
 
@@ -551,8 +629,7 @@ fn multiple_ask_calls_are_presented_sequentially_before_one_resume() {
         let second_request: Value = serde_json::from_str(&bodies[1]).unwrap();
         let content = find_tool_result_content(&second_request, call_id)
             .expect("second request must include each ask result");
-        let result: Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(result["answers"][0]["answer"], expected);
+        assert_eq!(inner_tool_result(&content)["answers"][0]["answer"], expected);
     }
 }
 
@@ -563,94 +640,31 @@ fn invalid_or_stale_responses_do_not_consume_the_active_ask() {
         vec![
             tool_round(&[(
                 "active-ask",
-                "ask_user",
+                "ask",
                 json!({"question":"Pick A", "options":["A"], "allow_custom":false}),
             )]),
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "validate identity".into(),
-                    images: vec![],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "active-ask"),
-            );
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("validate identity"));
+            expect_interaction_requested(receiver, "active-ask");
 
-            let invalid = [
-                Ui2Agent::AskResponse {
-                    ask_id: "stale-ask".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "A".into(),
-                    }],
-                },
-                Ui2Agent::AskResponse {
-                    ask_id: "active-ask".into(),
-                    answers: vec![
-                        AskAnswer {
-                            question_id: "q1".into(),
-                            answer: "A".into(),
-                        },
-                        AskAnswer {
-                            question_id: "q1".into(),
-                            answer: "A".into(),
-                        },
-                    ],
-                },
-                Ui2Agent::AskResponse {
-                    ask_id: "active-ask".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "unknown".into(),
-                        answer: "A".into(),
-                    }],
-                },
-                Ui2Agent::AskResponse {
-                    ask_id: "active-ask".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "B".into(),
-                    }],
-                },
+            let invalid: [(&str, &[(&str, &str)]); 4] = [
+                ("stale-ask", &[("q1", "A")]),
+                ("active-ask", &[("q1", "A"), ("q1", "A")]),
+                ("active-ask", &[("unknown", "A")]),
+                ("active-ask", &[("q1", "B")]),
             ];
-
-            for command in invalid {
-                let rejected_id = match &command {
-                    Ui2Agent::AskResponse { ask_id, .. } => ask_id.clone(),
-                    _ => unreachable!(),
-                };
-                send(writer, command);
-                expect_event(receiver, Duration::from_secs(5), |event| {
-                    matches!(
-                        event,
-                        Agent2Ui::AskRejected { ask_id, .. } if ask_id == &rejected_id
-                    )
-                });
+            for (ask_id, answers) in invalid {
+                send_cmd(writer, &seed, cmd_ask_respond(ask_id, answers));
+                expect_operation_failed(receiver, "ask_rejected");
                 assert_eq!(request_count.load(Ordering::SeqCst), 1);
             }
 
-            send(
-                writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "active-ask".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "A".into(),
-                    }],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskResolved { ask_id, .. } if ask_id == "active-ask"),
-            );
-            collect_through_done(receiver);
+            send_cmd(writer, &seed, cmd_ask_respond("active-ask", &[("q1", "A")]));
+            expect_interaction_resolved(receiver, "active-ask", AskResolution::Answered);
+            collect_through_terminal(receiver);
         },
     );
 }
@@ -662,83 +676,38 @@ fn dismiss_validates_identity_and_does_not_swallow_the_next_user_input() {
         vec![
             tool_round(&[(
                 "dismiss-ask",
-                "ask_user",
+                "ask",
                 json!({"question":"Continue?", "options":["yes"], "allow_custom":false}),
             )]),
             final_round("fresh turn finished"),
         ],
         2,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "start dismiss case".into(),
-                    images: vec![],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "dismiss-ask"),
-            );
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("start dismiss case"));
+            expect_interaction_requested(receiver, "dismiss-ask");
 
-            send(
-                writer,
-                Ui2Agent::AskDismiss {
-                    ask_id: "stale-dismiss".into(),
-                },
-            );
-            expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(
-                    event,
-                    Agent2Ui::AskRejected { ask_id, .. } if ask_id == "stale-dismiss"
-                )
-            });
+            send_cmd(writer, &seed, cmd_ask_dismiss("stale-dismiss"));
+            expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send(
-                writer,
-                Ui2Agent::AskDismiss {
-                    ask_id: "dismiss-ask".into(),
-                },
-            );
-            expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(
-                    event,
-                    Agent2Ui::AskResolved {
-                        ask_id,
-                        resolution: AskResolution::Dismissed
-                    } if ask_id == "dismiss-ask"
-                )
-            });
-            let aborted = collect_through_done(receiver);
-            assert_eq!(
-                aborted
-                    .iter()
-                    .filter(|event| matches!(event, Agent2Ui::Cancelled))
-                    .count(),
-                1
-            );
-            assert_eq!(
-                aborted
-                    .iter()
-                    .filter(|event| matches!(event, Agent2Ui::TurnEnd { .. }))
-                    .count(),
-                1
-            );
+            send_cmd(writer, &seed, cmd_ask_dismiss("dismiss-ask"));
+            expect_interaction_resolved(receiver, "dismiss-ask", AskResolution::Dismissed);
+            let aborted = collect_through_terminal(receiver);
+            assert!(aborted.iter().any(|event| matches!(
+                event,
+                RingingEvent::Conversation(
+                    ConversationEvent::TurnCompleted { stop_reason, .. }
+                ) if stop_reason.as_deref() == Some("cancelled")
+            )));
 
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "fresh input".into(),
-                    images: vec![],
-                },
-            );
-            let fresh = collect_through_done(receiver);
+            send_cmd(writer, &seed, cmd_user_input("fresh input"));
+            let fresh = collect_through_terminal(receiver);
             assert!(fresh.iter().any(|event| matches!(
                 event,
-                Agent2Ui::RoundComplete { answer: Some(answer), .. }
-                    if answer == "fresh turn finished"
+                RingingEvent::Conversation(ConversationEvent::RoundCompleted {
+                    answer: Some(answer),
+                    ..
+                }) if answer == "fresh turn finished"
             )));
         },
     );
@@ -750,67 +719,29 @@ fn permission_then_ask_resolves_the_same_tool_round_once() {
     let bodies = run_case(
         vec![
             tool_round(&[
-                ("read-call", "read", json!({"path":"input.txt"})),
+                ("read-call", "read_file", json!({"path":"input.txt"})),
                 (
                     "ask-after-read",
-                    "ask_user",
+                    "ask",
                     json!({"question":"Continue?", "options":["yes"], "allow_custom":false}),
                 ),
             ]),
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "read then ask".into(),
-                    images: vec![],
-                },
-            );
-            expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(
-                    event,
-                    Agent2Ui::PermissionRequest { tool_call_id, .. }
-                        if tool_call_id == "read-call"
-                )
-            });
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("read then ask"));
+            expect_permission_requested(receiver, "read-call");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "read-call".into(),
-                    approved: true,
-                    trust_folder: false,
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "ask-after-read"),
-            );
+            send_cmd(writer, &seed, cmd_permission_respond("read-call", true));
+            expect_interaction_requested(receiver, "ask-after-read");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send(
-                writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "ask-after-read".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "yes".into(),
-                    }],
-                },
-            );
-            let events = collect_through_done(receiver);
-            let results = events.iter().find_map(|event| match event {
-                Agent2Ui::ToolResults { results, .. } => Some(results),
-                _ => None,
-            });
-            let results = results.expect("one unified tool result event");
-            assert_eq!(results.len(), 2);
-            assert_eq!(results[0].tool_call_id, "read-call");
-            assert_eq!(results[1].tool_call_id, "ask-after-read");
+            send_cmd(writer, &seed, cmd_ask_respond("ask-after-read", &[("q1", "yes")]));
+            let events = collect_through_terminal(receiver);
+            let finished = tool_finished_ids(&events);
+            assert_eq!(finished, vec!["read-call", "ask-after-read"]);
         },
     );
 
@@ -825,94 +756,37 @@ fn every_permission_resolves_before_the_queued_ask_is_presented() {
     run_case(
         vec![
             tool_round(&[
-                ("read-one", "read", json!({"path":"input.txt"})),
-                ("read-two", "read", json!({"path":"input2.txt"})),
+                ("read-one", "read_file", json!({"path":"input.txt"})),
+                ("read-two", "read_file", json!({"path":"input2.txt"})),
                 (
                     "ask-after-two-reads",
-                    "ask_user",
+                    "ask",
                     json!({"question":"Continue?", "options":["yes"], "allow_custom":false}),
                 ),
             ]),
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "approve both then ask".into(),
-                    images: vec![],
-                },
-            );
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("approve both then ask"));
             for expected in ["read-one", "read-two"] {
-                expect_event(receiver, Duration::from_secs(5), |event| {
-                    matches!(
-                        event,
-                        Agent2Ui::PermissionRequest { tool_call_id, .. }
-                            if tool_call_id == expected
-                    )
-                });
+                expect_permission_requested(receiver, expected);
             }
 
-            send(
-                writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "read-one".into(),
-                    approved: true,
-                    trust_folder: false,
-                },
-            );
-            let deadline = Instant::now() + Duration::from_millis(250);
-            while Instant::now() < deadline {
-                match receiver.recv_timeout(Duration::from_millis(25)) {
-                    Ok(event)
-                        if matches!(
-                            event,
-                            Agent2Ui::AskUser { .. }
-                                | Agent2Ui::ToolResults { .. }
-                                | Agent2Ui::TurnEnd { .. }
-                                | Agent2Ui::Done
-                        ) =>
-                    {
-                        panic!("turn advanced before all permissions resolved: {event:?}")
-                    }
-                    Ok(Agent2Ui::Error { message }) => panic!("unexpected error: {message}"),
-                    Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
+            send_cmd(writer, &seed, cmd_permission_respond("read-one", true));
+            assert_no_turn_advance(receiver, Duration::from_millis(250));
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send(
+            send_cmd(writer, &seed, cmd_permission_respond("read-two", true));
+            expect_interaction_requested(receiver, "ask-after-two-reads");
+            send_cmd(
                 writer,
-                Ui2Agent::PermissionResponse {
-                    tool_call_id: "read-two".into(),
-                    approved: true,
-                    trust_folder: false,
-                },
+                &seed,
+                cmd_ask_respond("ask-after-two-reads", &[("q1", "yes")]),
             );
-            expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(
-                    event,
-                    Agent2Ui::AskUser { ask_id, .. } if ask_id == "ask-after-two-reads"
-                )
-            });
-            send(
-                writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "ask-after-two-reads".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "yes".into(),
-                    }],
-                },
-            );
-            let events = collect_through_done(receiver);
-            let results = events.iter().find_map(|event| match event {
-                Agent2Ui::ToolResults { results, .. } => Some(results),
-                _ => None,
-            });
-            assert_eq!(results.expect("unified tool results").len(), 3);
+            let events = collect_through_terminal(receiver);
+            let finished = tool_finished_ids(&events);
+            assert_eq!(finished.len(), 3);
         },
     );
 }
@@ -923,63 +797,26 @@ fn cancel_aborts_one_suspended_turn_and_invalidates_its_ask_id() {
     run_case(
         vec![tool_round(&[(
             "cancel-ask",
-            "ask_user",
+            "ask",
             json!({"question":"Wait?", "options":["yes"], "allow_custom":false}),
         )])],
         1,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "start cancel case".into(),
-                    images: vec![],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "cancel-ask"),
-            );
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("start cancel case"));
+            expect_interaction_requested(receiver, "cancel-ask");
 
-            send(writer, Ui2Agent::Cancel);
-            let aborted = collect_through_done(receiver);
-            assert_eq!(
-                aborted
-                    .iter()
-                    .filter(|event| matches!(event, Agent2Ui::Cancelled))
-                    .count(),
-                1
-            );
-            assert_eq!(
-                aborted
-                    .iter()
-                    .filter(|event| matches!(event, Agent2Ui::TurnEnd { .. }))
-                    .count(),
-                1
-            );
-            assert_eq!(
-                aborted
-                    .iter()
-                    .filter(|event| matches!(event, Agent2Ui::Done))
-                    .count(),
-                1
-            );
+            send_cmd(writer, &seed, cmd_cancel());
+            let aborted = collect_through_terminal(receiver);
+            assert!(aborted.iter().any(|event| match event {
+                RingingEvent::Conversation(ConversationEvent::ConversationCancelled { .. }) => true,
+                RingingEvent::Conversation(ConversationEvent::TurnCompleted { stop_reason, .. }) => {
+                    stop_reason.as_deref() == Some("cancelled")
+                }
+                _ => false,
+            }));
 
-            send(
-                writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "cancel-ask".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "yes".into(),
-                    }],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskRejected { ask_id, .. } if ask_id == "cancel-ask"),
-            );
+            send_cmd(writer, &seed, cmd_ask_respond("cancel-ask", &[("q1", "yes")]));
+            expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
         },
     );
@@ -992,44 +829,31 @@ fn new_session_invalidates_the_suspended_ask() {
         vec![
             tool_round(&[(
                 "new-session-ask",
-                "ask_user",
+                "ask",
                 json!({"question":"Switch?", "options":["yes"], "allow_custom":false}),
             )]),
             final_round("stale answer was consumed"),
         ],
         1,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "start new-session case".into(),
-                    images: vec![],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "new-session-ask"),
-            );
-            send(writer, Ui2Agent::NewSession);
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("start new-session case"));
+            expect_interaction_requested(receiver, "new-session-ask");
+            send_cmd(writer, &seed, cmd_session_create(true));
             expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(event, Agent2Ui::SessionCreated { .. })
+                matches!(
+                    event,
+                    RingingEvent::Control(ControlEvent::SessionStateChanged {
+                        state: SessionState::Created,
+                        ..
+                    })
+                )
             });
-            send(
+            send_cmd(
                 writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "new-session-ask".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "yes".into(),
-                    }],
-                },
+                &seed,
+                cmd_ask_respond("new-session-ask", &[("q1", "yes")]),
             );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskRejected { ask_id, .. } if ask_id == "new-session-ask"),
-            );
+            expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
         },
     );
@@ -1042,44 +866,31 @@ fn resume_session_invalidates_the_suspended_ask() {
         vec![
             tool_round(&[(
                 "resume-session-ask",
-                "ask_user",
+                "ask",
                 json!({"question":"Resume?", "options":["yes"], "allow_custom":false}),
             )]),
             final_round("stale answer was consumed"),
         ],
         1,
         |writer, receiver, request_count, seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "start resume-session case".into(),
-                    images: vec![],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "resume-session-ask"),
-            );
-            send(writer, Ui2Agent::ResumeSession { seed });
+            send_cmd(writer, &seed, cmd_user_input("start resume-session case"));
+            expect_interaction_requested(receiver, "resume-session-ask");
+            send_cmd(writer, &seed, cmd_session_resume(&seed));
             expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(event, Agent2Ui::SessionRestored { .. })
+                matches!(
+                    event,
+                    RingingEvent::Control(ControlEvent::SessionStateChanged {
+                        state: SessionState::Resumed,
+                        ..
+                    })
+                )
             });
-            send(
+            send_cmd(
                 writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "resume-session-ask".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "yes".into(),
-                    }],
-                },
+                &seed,
+                cmd_ask_respond("resume-session-ask", &[("q1", "yes")]),
             );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskRejected { ask_id, .. } if ask_id == "resume-session-ask"),
-            );
+            expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
         },
     );
@@ -1091,45 +902,24 @@ fn undo_invalidates_the_suspended_ask() {
     run_case(
         vec![tool_round(&[(
             "undo-ask",
-            "ask_user",
+            "ask",
             json!({"question":"Undo?", "options":["yes"], "allow_custom":false}),
         )])],
         1,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "start undo case".into(),
-                    images: vec![],
-                },
-            );
-            let turn_id = match expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "undo-ask"),
-            ) {
-                Agent2Ui::AskUser { turn_id, .. } => turn_id,
-                _ => unreachable!(),
-            };
-            send(writer, Ui2Agent::UndoTurn { turn_id });
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("start undo case"));
+            let (turn_id, _, _) = expect_interaction_requested(receiver, "undo-ask");
+            send_cmd(writer, &seed, cmd_undo(&turn_id));
+            // undo 完成后不再有 legacy SessionRestored；Ringing 侧以
+            // OperationCompleted 表达，前端随后自行重拉 bootstrap 快照。
             expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(event, Agent2Ui::SessionRestored { .. })
+                matches!(
+                    event,
+                    RingingEvent::Control(ControlEvent::OperationCompleted { .. })
+                )
             });
-            send(
-                writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "undo-ask".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "yes".into(),
-                    }],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskRejected { ask_id, .. } if ask_id == "undo-ask"),
-            );
+            send_cmd(writer, &seed, cmd_ask_respond("undo-ask", &[("q1", "yes")]));
+            expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
         },
     );
@@ -1142,45 +932,22 @@ fn cancel_during_gate_emits_one_complete_terminal_transaction() {
         vec![final_round("too late")],
         Duration::from_millis(300),
         1,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "cancel during gate".into(),
-                    images: vec![],
-                },
-            );
-            expect_event(receiver, Duration::from_secs(5), |event| {
-                matches!(event, Agent2Ui::TurnStart { .. })
-            });
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("cancel during gate"));
+            expect_turn_started(receiver);
             let deadline = Instant::now() + Duration::from_secs(5);
             while request_count.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(10));
             }
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
-            send(writer, Ui2Agent::Cancel);
-            let events = collect_through_done(receiver);
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| matches!(event, Agent2Ui::Cancelled))
-                    .count(),
-                1
-            );
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| matches!(event, Agent2Ui::TurnEnd { .. }))
-                    .count(),
-                1
-            );
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| matches!(event, Agent2Ui::Done))
-                    .count(),
-                1
-            );
+            send_cmd(writer, &seed, cmd_cancel());
+            let events = collect_through_terminal(receiver);
+            assert!(events.iter().any(|event| matches!(
+                event,
+                RingingEvent::Conversation(ConversationEvent::ConversationCancelled { .. })
+                    | RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+                    | RingingEvent::Conversation(ConversationEvent::TurnFailed { .. })
+            )));
         },
     );
 }
@@ -1192,50 +959,26 @@ fn stale_undo_does_not_consume_the_active_ask() {
         vec![
             tool_round(&[(
                 "undo-identity-ask",
-                "ask_user",
+                "ask",
                 json!({"question":"Continue?", "options":["yes"], "allow_custom":false}),
             )]),
             final_round("finished"),
         ],
         2,
-        |writer, receiver, request_count, _seed| {
-            send(
-                writer,
-                Ui2Agent::UserInput {
-                    text: "validate undo identity".into(),
-                    images: vec![],
-                },
-            );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskUser { ask_id, .. } if ask_id == "undo-identity-ask"),
-            );
-            send(
-                writer,
-                Ui2Agent::UndoTurn {
-                    turn_id: "stale-turn".into(),
-                },
-            );
-            assert!(expect_error(receiver, Duration::from_secs(5)).contains("active turn"));
+        |writer, receiver, request_count, seed| {
+            send_cmd(writer, &seed, cmd_user_input("validate undo identity"));
+            expect_interaction_requested(receiver, "undo-identity-ask");
+            send_cmd(writer, &seed, cmd_undo("stale-turn"));
+            expect_operation_failed(receiver, "undo_conflict");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send(
+            send_cmd(
                 writer,
-                Ui2Agent::AskResponse {
-                    ask_id: "undo-identity-ask".into(),
-                    answers: vec![AskAnswer {
-                        question_id: "q1".into(),
-                        answer: "yes".into(),
-                    }],
-                },
+                &seed,
+                cmd_ask_respond("undo-identity-ask", &[("q1", "yes")]),
             );
-            expect_event(
-                receiver,
-                Duration::from_secs(5),
-                |event| matches!(event, Agent2Ui::AskResolved { ask_id, .. } if ask_id == "undo-identity-ask"),
-            );
-            collect_through_done(receiver);
+            expect_interaction_resolved(receiver, "undo-identity-ask", AskResolution::Answered);
+            collect_through_terminal(receiver);
         },
     );
 }

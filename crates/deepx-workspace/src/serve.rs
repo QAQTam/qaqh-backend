@@ -26,7 +26,7 @@
 //!   responsible for permission decisions before dispatch. `permission_level`
 //!   is fixed at the CLI level (4) inside this process.
 //! - Tool output is bounded by the tool handlers themselves (exec truncation,
-//!   apply_patch summaries); the response never streams unbounded body text.
+//!   edit_file summaries); the response never streams unbounded body text.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};

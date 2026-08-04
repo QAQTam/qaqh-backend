@@ -37,6 +37,62 @@ pub fn publish_activity_dual(
     );
 }
 
+/// 领域事件 → `SessionActivityTracker::observe` 的事件类型映射（生产接线）。
+///
+/// tracker 的 Working→Idle 迁移此前只存在于测试中：daemon 侧除 spawn 的
+/// Starting、输入预留的 Working、worker 断开的 Disconnected 之外没有任何
+/// 生产路径更新状态，导致 session 列表/`session.activity` 查询在回合结束后
+/// 永远显示 working/starting。本函数把 worker 事件流（registry stdout reader
+/// 已转成领域事件）映射为 tracker 能消费的观察事件。
+pub fn domain_activity_observe(event: &deepx_domain::DomainEvent) -> Option<serde_json::Value> {
+    use deepx_domain::{
+        AgentLifecycleState, ControlEvent, ConversationEvent, DomainEvent, ToolEvent,
+    };
+    match event {
+        DomainEvent::Control(ControlEvent::AgentLifecycleChanged {
+            state: AgentLifecycleState::Ready,
+        }) => Some(serde_json::json!({ "type": "ready" })),
+        DomainEvent::Conversation(ConversationEvent::TurnStarted { turn_id, .. }) => {
+            Some(serde_json::json!({ "type": "turn_start", "turn_id": turn_id }))
+        }
+        DomainEvent::Conversation(ConversationEvent::TurnCompleted { .. }) => {
+            Some(serde_json::json!({ "type": "turn_end" }))
+        }
+        DomainEvent::Conversation(ConversationEvent::TurnFailed { .. }) => {
+            Some(serde_json::json!({ "type": "cancelled" }))
+        }
+        DomainEvent::Conversation(ConversationEvent::ConversationCancelled { .. }) => {
+            Some(serde_json::json!({ "type": "cancelled" }))
+        }
+        DomainEvent::Conversation(ConversationEvent::CompactStarted { .. }) => {
+            Some(serde_json::json!({ "type": "compact_start" }))
+        }
+        DomainEvent::Conversation(ConversationEvent::CompactFinished { .. }) => {
+            Some(serde_json::json!({ "type": "compact_end" }))
+        }
+        DomainEvent::Control(ControlEvent::InteractionRequested { .. }) => {
+            Some(serde_json::json!({ "type": "ask_user" }))
+        }
+        DomainEvent::Control(ControlEvent::InteractionResolved { .. }) => {
+            Some(serde_json::json!({ "type": "ask_resolved" }))
+        }
+        DomainEvent::Control(ControlEvent::PlanReviewRequested { .. }) => {
+            Some(serde_json::json!({ "type": "plan_submitted" }))
+        }
+        DomainEvent::Control(ControlEvent::PlanReviewResolved { .. }) => {
+            Some(serde_json::json!({ "type": "plan_resolved" }))
+        }
+        DomainEvent::Tool(ToolEvent::ToolPermissionRequested { .. }) => {
+            Some(serde_json::json!({ "type": "permission_request" }))
+        }
+        // 工具执行期间回合仍在跑：保持 Working（终态由 TurnCompleted 收敛）。
+        DomainEvent::Tool(
+            ToolEvent::ToolStarted { .. } | ToolEvent::ToolFinished { .. },
+        ) => Some(serde_json::json!({ "type": "tool_results" })),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SessionActivityTracker {
     inner: Arc<Mutex<HashMap<String, TrackedActivity>>>,
@@ -353,5 +409,103 @@ mod tests {
             .restore_state_if_unchanged("seed", reserved.seq, previous)
             .expect("restore starting");
         assert_eq!(restored.state, SessionActivityState::Starting);
+    }
+
+    #[test]
+    fn domain_events_drive_tracker_transitions_end_to_end() {
+        use deepx_domain::{
+            AgentLifecycleState, ControlEvent, ConversationEvent, DomainEvent, ToolEvent,
+        };
+
+        let tracker = SessionActivityTracker::default();
+        let (generation, _) = tracker.begin("seed");
+
+        // worker ready → Idle（此前生产代码无任何路径迁移 Starting→Idle）
+        let ready = domain_activity_observe(&DomainEvent::Control(
+            ControlEvent::AgentLifecycleChanged {
+                state: AgentLifecycleState::Ready,
+            },
+        ))
+        .expect("ready maps");
+        assert_eq!(
+            tracker.observe("seed", generation, &ready).expect("ready").state,
+            SessionActivityState::Idle
+        );
+
+        // turn_start → Working + turn_id
+        let start = domain_activity_observe(&DomainEvent::Conversation(
+            ConversationEvent::TurnStarted {
+                turn_id: "t1".into(),
+                user_text: "hi".into(),
+            },
+        ))
+        .expect("turn_start maps");
+        let activity = tracker.observe("seed", generation, &start).expect("turn start");
+        assert_eq!(activity.state, SessionActivityState::Working);
+        assert_eq!(activity.turn_id.as_deref(), Some("t1"));
+
+        // ask_user → WaitingUser
+        let ask = domain_activity_observe(&DomainEvent::Control(ControlEvent::InteractionRequested {
+            interaction_id: "i1".into(),
+            turn_id: "t1".into(),
+            mode: deepx_domain::AskMode::Single,
+            questions: vec![],
+        }))
+        .expect("ask maps");
+        assert_eq!(
+            tracker.observe("seed", generation, &ask).expect("ask").state,
+            SessionActivityState::WaitingUser
+        );
+
+        // ask_resolved → Working（回合继续）
+        let resolved = domain_activity_observe(&DomainEvent::Control(ControlEvent::InteractionResolved {
+            interaction_id: "i1".into(),
+            resolution: deepx_domain::AskResolution::Answered,
+        }))
+        .expect("ask_resolved maps");
+        assert_eq!(
+            tracker.observe("seed", generation, &resolved).expect("resolved").state,
+            SessionActivityState::Working
+        );
+
+        // turn_end → Idle（回合结束，turn_id 清空）
+        let end = domain_activity_observe(&DomainEvent::Conversation(
+            ConversationEvent::TurnCompleted {
+                turn_id: "t1".into(),
+                stop_reason: None,
+                usage: None,
+            },
+        ))
+        .expect("turn_end maps");
+        let finished = tracker.observe("seed", generation, &end).expect("turn end");
+        assert_eq!(finished.state, SessionActivityState::Idle);
+        assert_eq!(finished.turn_id, None);
+
+        // permission_request → WaitingUser
+        let perm = domain_activity_observe(&DomainEvent::Tool(ToolEvent::ToolPermissionRequested {
+            tool_call_id: "c1".into(),
+            turn_id: "t2".into(),
+            round_num: 0,
+            tool_name: "exec".into(),
+            reason: "r".into(),
+            paths: vec![],
+            category: deepx_domain::PermissionCategory::Exec,
+            level: 3,
+            risk: deepx_domain::PermissionRisk::High,
+            consequence: "run".into(),
+        }))
+        .expect("permission maps");
+        assert_eq!(
+            tracker.observe("seed", generation, &perm).expect("perm").state,
+            SessionActivityState::WaitingUser
+        );
+
+        // 无关事件不产生观察事件
+        let none = domain_activity_observe(&DomainEvent::Tool(ToolEvent::ToolNotice {
+            tool_call_id: None,
+            level: deepx_domain::NoticeLevel::Info,
+            message: "m".into(),
+        }));
+        assert!(none.is_none());
     }
 }

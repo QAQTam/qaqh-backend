@@ -17,21 +17,18 @@ mod schema_spot_check {
         assert!(img["anyOf"].is_array(), "image missing anyOf");
         assert!(img["anyOf"][0]["required"].as_array().unwrap().contains(&serde_json::json!("image_index")));
 
-        // web: url required
-        let web = &by_name("web").function.parameters;
-        assert!(web["required"].as_array().unwrap().contains(&serde_json::json!("url")), "web.url not required");
+        // web_fetch: url required
+        let web = &by_name("web_fetch").function.parameters;
+        assert!(web["required"].as_array().unwrap().contains(&serde_json::json!("url")), "web_fetch.url not required");
 
-        // task: id 描述
+        // todo: id 描述
         let tid = &params("todo")["id"];
-        assert!(tid["description"].as_str().unwrap().contains("Omit for action=create"), "task.id description missing");
+        assert!(tid["description"].as_str().unwrap().contains("Omit for action=create"), "todo.id description missing");
 
         // 文件修改工具选择指引
         for (tool, needle) in [
-            ("apply_patch", "use edit for single-file"),
-            ("edit", "prefer apply_patch"),
-            ("edit_block", "For single-string replacement use edit"),
-            ("write", "use edit/edit_block for targeted changes"),
-            ("search", "it does not return file bodies"),
+            ("edit_file", "string mode"),
+            ("write", "use edit_file for targeted changes"),
         ] {
             let desc = by_name(tool).function.description.as_str();
             assert!(desc.contains(needle), "{tool} missing guidance: {needle}");
