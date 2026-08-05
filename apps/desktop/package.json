@@ -1,6 +1,6 @@
 {
   "name": "deepx-desktop",
-  "version": "1.0.0-beta.6",
+  "version": "1.0.0-beta.7",
   "description": "DeepX desktop client",
   "author": "DeepX",
   "private": true,
@@ -19,8 +19,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-  },
+  "dependencies": {},
   "devDependencies": {
     "@antv/g6": "^5.1.1",
     "@electron/asar": "3.4.1",
