@@ -1,128 +1,13 @@
-//! Versioned Desktop/TUI <-> daemon control protocol.
-
-use std::collections::HashMap;
+//! Daemon discovery contract.
+//!
+//! The legacy WebSocket control protocol (`ControlClientMessage` /
+//! `ControlServerMessage` / `ControlSnapshot`) was removed with the
+//! Ringing HTTP/SSE migration. What remains is the on-disk discovery
+//! record that lets clients locate and authenticate the daemon.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
-use crate::{Agent2Ui, SessionActivity};
 
 pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ControlClientMessage {
-    ClientHello {
-        protocol_version: u16,
-        client_version: String,
-        client_kind: String,
-        client_instance_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        after_epoch: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        after_seq: Option<u64>,
-    },
-    Request {
-        request_id: String,
-        method: String,
-        #[serde(default)]
-        params: Value,
-    },
-    SessionAttach {
-        request_id: String,
-        seed: String,
-    },
-    SessionDetach {
-        request_id: String,
-        seed: String,
-    },
-    Heartbeat {
-        nonce: u64,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ControlServerMessage {
-    ServerHello {
-        protocol_version: u16,
-        server_version: String,
-        server_epoch: String,
-        heartbeat_interval_ms: u64,
-        lease_timeout_ms: u64,
-        max_frame_bytes: usize,
-    },
-    Response {
-        request_id: String,
-        #[serde(default)]
-        result: Value,
-    },
-    Event {
-        server_epoch: String,
-        seq: u64,
-        seed: String,
-        session_seq: u64,
-        event: Agent2Ui,
-    },
-    /// Batched bulk-lane events (exec_progress, audit_record, etc.).
-    /// Multiple events share one WebSocket frame to reduce per-event overhead.
-    #[serde(rename = "event_batch")]
-    EventBatch {
-        server_epoch: String,
-        seq: u64,
-        seed: String,
-        session_seq: u64,
-        #[serde(default)]
-        events: Vec<Agent2Ui>,
-    },
-    SessionActivity {
-        activity: SessionActivity,
-    },
-    Snapshot {
-        server_epoch: String,
-        seq: u64,
-        snapshot: ControlSnapshot,
-    },
-    LeaseDenied {
-        request_id: String,
-        seed: String,
-        owner_kind: String,
-        retry_after_ms: u64,
-    },
-    Error {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
-        code: String,
-        message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        retry_after_ms: Option<u64>,
-    },
-    Heartbeat {
-        server_epoch: String,
-        seq: u64,
-        nonce: u64,
-    },
-    Shutdown {
-        server_epoch: String,
-        seq: u64,
-        reason: String,
-    },
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ControlSnapshot {
-    #[serde(default)]
-    pub sessions: Vec<Value>,
-    #[serde(default)]
-    pub activities: Vec<SessionActivity>,
-    #[serde(default)]
-    pub attached_sessions: Vec<String>,
-    /// Canonical event projections for attached sessions. Each projection
-    /// starts with SessionCreated or SessionRestored and can be reduced by any
-    /// client to reconstruct the current UI state.
-    #[serde(default)]
-    pub session_events: HashMap<String, Vec<Agent2Ui>>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonDiscovery {
@@ -154,21 +39,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_round_trip_is_tagged_and_typed() {
-        let message = ControlClientMessage::Request {
-            request_id: "r1".into(),
-            method: "session.list".into(),
-            params: serde_json::json!({}),
-        };
-        let json = serde_json::to_value(&message).unwrap();
-        assert_eq!(json["type"], "request");
-        assert_eq!(
-            serde_json::from_value::<ControlClientMessage>(json).unwrap(),
-            message
-        );
-    }
-
-    #[test]
     fn discovery_round_trip_preserves_protocol_version() {
         let discovery = DaemonDiscovery {
             endpoint: "ws://127.0.0.1:42/control/v1".into(),
@@ -189,7 +59,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_discovery_defaults_identity_fields() {
+    fn discovery_defaults_identity_fields() {
         let discovery: DaemonDiscovery = serde_json::from_value(serde_json::json!({
             "endpoint": "ws://127.0.0.1:42/control/v1",
             "token": "secret",
@@ -202,124 +72,5 @@ mod tests {
         assert!(discovery.build_id.is_empty());
         assert!(discovery.channel.is_empty());
         assert!(discovery.executable.is_empty());
-    }
-
-    #[test]
-    fn every_control_message_round_trips() {
-        let client_messages = vec![
-            ControlClientMessage::ClientHello {
-                protocol_version: CONTROL_PROTOCOL_VERSION,
-                client_version: "0.9.0".into(),
-                client_kind: "tui".into(),
-                client_instance_id: "client-1".into(),
-                after_epoch: Some("epoch".into()),
-                after_seq: Some(41),
-            },
-            ControlClientMessage::SessionAttach {
-                request_id: "r2".into(),
-                seed: "seed".into(),
-            },
-            ControlClientMessage::SessionDetach {
-                request_id: "r3".into(),
-                seed: "seed".into(),
-            },
-            ControlClientMessage::Heartbeat { nonce: 7 },
-        ];
-        for message in client_messages {
-            let json = serde_json::to_string(&message).unwrap();
-            let decoded: ControlClientMessage = serde_json::from_str(&json).unwrap();
-            assert_eq!(decoded, message);
-        }
-
-        let server_messages = vec![
-            ControlServerMessage::ServerHello {
-                protocol_version: CONTROL_PROTOCOL_VERSION,
-                server_version: "0.9.0".into(),
-                server_epoch: "epoch".into(),
-                heartbeat_interval_ms: 5_000,
-                lease_timeout_ms: 15_000,
-                max_frame_bytes: 1_048_576,
-            },
-            ControlServerMessage::Response {
-                request_id: "r1".into(),
-                result: serde_json::json!({"typed": true}),
-            },
-            ControlServerMessage::Event {
-                server_epoch: "epoch".into(),
-                seq: 1,
-                seed: "seed".into(),
-                session_seq: 1,
-                event: Agent2Ui::Ready,
-            },
-            ControlServerMessage::Snapshot {
-                server_epoch: "epoch".into(),
-                seq: 1,
-                snapshot: ControlSnapshot::default(),
-            },
-            ControlServerMessage::LeaseDenied {
-                request_id: "r2".into(),
-                seed: "seed".into(),
-                owner_kind: "desktop".into(),
-                retry_after_ms: 100,
-            },
-            ControlServerMessage::Error {
-                request_id: Some("r3".into()),
-                code: "request_failed".into(),
-                message: "failed".into(),
-                retry_after_ms: None,
-            },
-            ControlServerMessage::Shutdown {
-                server_epoch: "epoch".into(),
-                seq: 2,
-                reason: "requested".into(),
-            },
-        ];
-        for message in server_messages {
-            let json = serde_json::to_string(&message).unwrap();
-            let _: ControlServerMessage = serde_json::from_str(&json).unwrap();
-        }
-    }
-
-    #[test]
-    fn event_batch_round_trips() {
-        let events = vec![
-            Agent2Ui::ExecProgress {
-                tool_call_id: "c1".into(),
-                stream: "stdout".into(),
-                seq: 1,
-                chunk: "hello".into(),
-            },
-            Agent2Ui::ExecProgress {
-                tool_call_id: "c1".into(),
-                stream: "stderr".into(),
-                seq: 2,
-                chunk: "warn".into(),
-            },
-            Agent2Ui::AuditRecord {
-                tool_name: "exec".into(),
-                result_summary: "ok".into(),
-                success: true,
-                time: "2024-01-01T00:00:00Z".into(),
-                args: "{}".into(),
-            },
-        ];
-        let batch = ControlServerMessage::EventBatch {
-            server_epoch: "epoch".into(),
-            seq: 0,
-            seed: "seed".into(),
-            session_seq: 0,
-            events: events.clone(),
-        };
-        let json = serde_json::to_string(&batch).unwrap();
-        let parsed: ControlServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ControlServerMessage::EventBatch {
-                seed, events: parsed_events, ..
-            } => {
-                assert_eq!(seed, "seed");
-                assert_eq!(parsed_events.len(), 3);
-            }
-            other => panic!("expected EventBatch, got {:?}", other),
-        }
     }
 }

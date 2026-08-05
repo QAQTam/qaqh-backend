@@ -170,7 +170,7 @@ pub(super) fn exec_ask_user(args: &serde_json::Value) -> ToolResult {
 handler!(handle_ask_user, exec_ask_user);
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register(ToolHandler {
+    mgr.register_with_placement(ToolHandler {
         key: "ask".to_string(),
         description: "Ask the user one or more questions when blocked. This opens a Ringing interaction and is not treated as an ordinary successful tool result.",
         input_schema: serde_json::json!({
@@ -214,7 +214,9 @@ pub fn register(mgr: &mut crate::ToolManager) {
         handler: handle_ask_user,
         risk: ToolRisk::ReadOnly,
         default_timeout: std::time::Duration::ZERO,
-    });
+    },
+    crate::ToolPlacement::Workspace,
+);
 }
 
 #[cfg(test)]

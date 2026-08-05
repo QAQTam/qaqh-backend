@@ -1,9 +1,0 @@
-mod block;
-mod class_diagram;
-mod common;
-mod flowchart;
-mod gantt;
-mod pie;
-mod quadrant;
-mod sequence;
-mod state;

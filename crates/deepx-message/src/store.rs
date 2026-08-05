@@ -226,8 +226,8 @@ fn fold_retrieval_result(tool_name: &str, result: &str) -> String {
 }
 
 /// Preserve a small, verifiable edit receipt instead of only reporting that a
-/// write succeeded. The full diff remains in persistence/UI; later turns get
-/// the changed path/range and a deterministic instruction to verify it.
+/// write succeeded. Tools now return summary-only receipts (no diff body), so
+/// the fold keeps the first line plus a deterministic verify instruction.
 fn fold_file_mutation_result(tool_name: &str, result: &str) -> String {
     let first = result.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
     let cap = first.floor_char_boundary(first.len().min(400));

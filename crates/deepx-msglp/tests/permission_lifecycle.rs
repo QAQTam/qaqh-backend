@@ -315,7 +315,7 @@ fn run_case(
     test: impl FnOnce(&mut os_pipe::PipeWriter, &std::sync::mpsc::Receiver<RingingEvent>) + Send + 'static,
 ) -> Vec<String> {
     SESSION_INIT.call_once(|| {
-        deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false);
+        deepx_session::SessionManager::init(deepx_types::platform::data_dir());
     });
     let mock = MockServer::sequential(scenarios);
     deepx_workspace::set_workspace(&workspace.to_string_lossy());

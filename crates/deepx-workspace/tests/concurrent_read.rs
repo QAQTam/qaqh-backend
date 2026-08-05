@@ -26,7 +26,7 @@ fn ten_parallel_reads() {
         let done_tx = done_tx.clone();
         handles.push(std::thread::spawn(move || {
             let result = deepx_workspace::execution::execute_with_context(
-                "read",
+                "read_file",
                 "",
                 &args,
                 &format!("tc_{}", i),

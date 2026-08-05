@@ -323,16 +323,16 @@ impl AgentState {
     }
 
     /// Build a SkillsChanged payload for the frontend skills panel.
-    pub fn build_skills_status(&mut self, workspace: &str) -> deepx_proto::SkillsStatus {
+    pub fn build_skills_status(&mut self, workspace: &str) -> deepx_domain::SkillsStatus {
         self.skills.set_workspace(Path::new(workspace));
         self.skills.refresh();
-        let available: Vec<deepx_proto::SkillInfo> = self
+        let available: Vec<deepx_domain::SkillInfo> = self
             .skills
             .catalog_snapshot()
             .catalog
             .skills
             .iter()
-            .map(|s| deepx_proto::SkillInfo {
+            .map(|s| deepx_domain::SkillInfo {
                 name: s.name.clone(),
                 description: s.description.clone(),
                 scope: match s.scope {
@@ -359,7 +359,7 @@ impl AgentState {
             .skills
             .runtime_info()
             .into_iter()
-            .map(|item| deepx_proto::SkillRuntimeInfo {
+            .map(|item| deepx_domain::SkillRuntimeInfo {
                 name: item.name,
                 description: item.description,
                 state: match item.state {
@@ -382,7 +382,7 @@ impl AgentState {
             .iter()
             .map(|diagnostic| format!("{}: {}", diagnostic.path.display(), diagnostic.message))
             .collect();
-        deepx_proto::SkillsStatus {
+        deepx_domain::SkillsStatus {
             available,
             active,
             catalog_revision: self.skills.catalog_snapshot().fingerprint.clone(),

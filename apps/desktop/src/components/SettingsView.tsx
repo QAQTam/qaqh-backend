@@ -112,18 +112,8 @@ export default function SettingsView(props: SettingsViewProps) {
   const [autoCompactThreshold, setAutoCompactThreshold] = createSignal(0.75);
   const [autoCompactEnabled, setAutoCompactEnabled] = createSignal(true);
   const [complianceEnabled, setComplianceEnabled] = createSignal(true);
-  const [databaseEnabled, setDatabaseEnabled] = createSignal(false);
-  const [databaseAvailable, setDatabaseAvailable] = createSignal(false);
-  const [migrationPending, setMigrationPending] = createSignal(0);
-  const [migrating, setMigrating] = createSignal(false);
-  const [migrationResult, setMigrationResult] = createSignal("");
-  const [migrationFailed, setMigrationFailed] = createSignal(false);
-  const [migrationProgress, setMigrationProgress] = createSignal(0);
-  const [migrationPhase, setMigrationPhase] = createSignal<"idle" | "confirm" | "running" | "done">("idle");
-  const [dualWriteChecked, setDualWriteChecked] = createSignal(true);
   const [saved, setSaved] = createSignal(false);
   const [saveError, setSaveError] = createSignal<string | null>(null);
-  let dbToggled = false;
 
   // Subagent
   const [subModel, setSubModel] = createSignal("");
@@ -224,8 +214,6 @@ export default function SettingsView(props: SettingsViewProps) {
       setAutoCompactEnabled(data.auto_compact_threshold > 0);
     }
     if (data.compliance_enabled !== undefined) setComplianceEnabled(data.compliance_enabled);
-    if (data.database?.available !== undefined) setDatabaseAvailable(data.database.available);
-    if (data.database?.enabled !== undefined) setDatabaseEnabled(data.database.enabled);
     if (data.subagent) {
       if (data.subagent.model) setSubModel(data.subagent.model);
       if (data.subagent.base_url) setSubBaseUrl(data.subagent.base_url);
@@ -284,21 +272,6 @@ export default function SettingsView(props: SettingsViewProps) {
   }
   function toggleTool(name: string) {
     setSubTools(prev => prev.includes(name) ? prev.filter(t => t !== name) : [...prev, name]);
-  }
-
-  async function toggleDatabase(enabled: boolean) {
-    if (!databaseAvailable()) return;
-    setSaveError(null);
-    try {
-      const result = await request<{ enabled?: boolean }>("config.set_database_enabled", { enabled });
-      setDatabaseEnabled(result?.enabled ?? enabled);
-      dbToggled = false;
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
-    } catch (e) {
-      console.error(e);
-      setSaveError(String(e instanceof Error ? e.message : e));
-    }
   }
 
   async function applyWorkspaceMode() {
@@ -379,7 +352,6 @@ export default function SettingsView(props: SettingsViewProps) {
         subagentApiKey: subApiKeyReplacement,
         subagentMaxTokens: subMaxTokens(),
         subagentTimeoutSecs: subTimeout(), subagentDefaultTools: subTools(),
-        databaseEnabled: databaseEnabled(),
         tokenizerPath: tokenizerPath(),
         multimodalProviderType: mmProviderType(),
         multimodalEnabled: mmEnabled(),
@@ -403,91 +375,10 @@ export default function SettingsView(props: SettingsViewProps) {
       }
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
-      if (dbToggled) {
-        dbToggled = false;
-        await confirmDialog(t().settings.restartPrompt, {
-          title: t().settings.restartTitle,
-          kind: "info",
-        });
-      }
     } catch (e) {
       console.error(e);
       setSaveError(String(e instanceof Error ? e.message : e));
     }
-  }
-
-  // ── Migration ──
-  createEffect(
-    () => databaseEnabled(),
-    enabled => {
-    void (async () => {
-    if (!enabled) return;
-    try {
-      const data = await request<{ pending?: number }>("config.database_migration_count");
-      setMigrationPending(data.pending ?? 0);
-    } catch (_) { setMigrationPending(0); }
-    })();
-  });
-
-  function startMigrate() {
-    if (migrationPending() === 0) return;
-    setMigrationPhase("confirm");
-  }
-
-  async function doMigrate() {
-    setMigrationPhase("running");
-    setMigrationProgress(0);
-    setMigrationFailed(false);
-
-    try {
-      const data = await request<{ failed?: number; sessions?: number; messages?: number; outcomes?: { status?: string; seed?: string; reason?: string }[] }>("config.database_migrate");
-      const failed = Number(data.failed ?? 0);
-      const failures = Array.isArray(data.outcomes)
-        ? data.outcomes
-          .filter((outcome: { status?: string }) => outcome.status === "failed")
-          .map((outcome: { seed?: string; reason?: string }) => `${outcome.seed ?? "unknown"}: ${outcome.reason ?? "unknown error"}`)
-        : [];
-      setMigrationResult(failed === 0
-        ? t().settings.migrateDone
-          .replace("{sessions}", String(data.sessions ?? 0))
-          .replace("{messages}", String(data.messages ?? 0))
-        : t().settings.migratePartial
-          .replace("{sessions}", String(data.sessions ?? 0))
-          .replace("{failed}", String(failed))
-          .replace("{reasons}", failures.join("\n")));
-      setMigrationFailed(failed > 0);
-      setMigrationPending(failed);
-      setMigrationProgress(100);
-      setMigrationPhase("done");
-    } catch (e) {
-      setMigrationResult(t().settings.migrateFailed.replace("{reason}", String(e)));
-      setMigrationFailed(true);
-      setMigrationPhase("done");
-    }
-    setDualWriteChecked(databaseEnabled());
-  }
-
-  async function finishMigration() {
-    if (dualWriteChecked() !== databaseEnabled()) {
-      setDatabaseEnabled(dualWriteChecked());
-      dbToggled = true;
-      await request("config.save", {
-        apiKey: !apiKeyConfigured() || showApiKeyInput() ? apiKeyValue() : "",
-        model: model(), baseUrl: baseUrl(),
-        providerId: providerId(), endpoint: endpointId(),
-        maxTokens: maxTokens(), contextLimit: contextLimit(),
-        reasoningEffort: normalizeEffort(reasoningEffort()), autoCompactThreshold: autoCompactEnabled() ? autoCompactThreshold() : 0.0, lang: props.lang(),
-        subagentModel: subModel(), subagentBaseUrl: subBaseUrl(),
-        subagentApiKey: !subApiKeyConfigured() || showSubApiKeyInput() ? subApiKeyValue() : "",
-        subagentMaxTokens: subMaxTokens(),
-        subagentTimeoutSecs: subTimeout(), subagentDefaultTools: subTools(),
-        databaseEnabled: dualWriteChecked(),
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
-    }
-    setMigrationPhase("idle");
-    setMigrationResult("");
   }
 
   // ── Category definitions ──
@@ -868,58 +759,7 @@ export default function SettingsView(props: SettingsViewProps) {
               </Show>
 
               {/* Category: Data & Storage */}
-              <Show when={activeCategory() === "data"}>
-                <section class="settings-section">
-                  <h2 class="settings-section-title">{t().settings.sectionDatabase}</h2>
-                  <div class="settings-row">
-                    <label>{t().settings.databaseEnabled}</label>
-                    <div class="settings-input-group">
-                      <label class="settings-toggle">
-                        <input type="checkbox" checked={databaseEnabled()} disabled={!databaseAvailable()} onChange={(e) => void toggleDatabase(e.currentTarget.checked)} />
-                        <span class="settings-toggle-track" />
-                      </label>
-                      <div class="settings-hint">{databaseAvailable() ? t().settings.databaseEnabledHint : t().settings.databaseUnavailable}</div>
-                    </div>
-                  </div>
-                  <Show when={databaseEnabled()}>
-                    <div class="settings-row" style="grid-template-columns:1fr;">
-                      <p class="settings-db-desc">{t().settings.databaseDesc}</p>
-                    </div>
-                    <div class="settings-row">
-                      <label>
-                        {migrationPending() > 0
-                          ? t().settings.migrateCount.replace("{n}", String(migrationPending()))
-                          : t().settings.migrateUpToDate}
-                      </label>
-                      <Show when={migrationPending() > 0}>
-                        <div class="settings-input-group">
-                          <button class="settings-save-btn" onClick={startMigrate}>
-                            {t().settings.migrateBtn}
-                          </button>
-                        </div>
-                      </Show>
-                    </div>
-                  </Show>
-                  <Show when={migrationResult()}>
-                    <div class="settings-row">
-                      <div class="settings-hint" style={`color: ${migrationFailed() ? "var(--accent-red)" : "var(--accent-green)"}`}>{migrationResult()}</div>
-                    </div>
-                  </Show>
-                </section>
-                <section class="settings-section">
-                  <h2 class="settings-section-title">{t().settings.sectionCompliance}</h2>
-                  <div class="settings-row">
-                    <label>{t().settings.complianceEnabled}</label>
-                    <div class="settings-input-group">
-                      <label class="settings-toggle">
-                        <input type="checkbox" checked={complianceEnabled()} onChange={(e) => setComplianceEnabled(e.currentTarget.checked)} />
-                        <span class="settings-toggle-track" />
-                      </label>
-                      <div class="settings-hint">{t().settings.complianceEnabledHint}</div>
-                    </div>
-                  </div>
-                </section>
-              </Show>
+
 
               {/* Category: Appearance & Language */}
               <Show when={activeCategory() === "appearance"}>
@@ -973,45 +813,6 @@ export default function SettingsView(props: SettingsViewProps) {
         </Show>
       </Show>
 
-      {/* ── Migration Modal ── */}
-      <Show when={migrationPhase() !== "idle"}>
-        <div class="modal-overlay" onClick={() => { if (migrationPhase() === "done") setMigrationPhase("idle"); }}>
-          <div class="modal-card" onClick={(e) => e.stopPropagation()}>
-            <Show when={migrationPhase() === "confirm"}>
-              <h3 style="margin:0 0 12px;font-size:16px;font-weight:600;">{t().settings.migrateWarningTitle}</h3>
-              <p style="margin:0 0 8px;font-size:13px;color:var(--text-secondary);white-space:pre-wrap;">{t().settings.migrateWarningBody}</p>
-              <p style="margin:0 0 16px;font-size:13px;color:var(--text-secondary);white-space:pre-wrap;">
-                {t().settings.migrateConfirmBody.replace("{n}", String(migrationPending()))}
-              </p>
-              <div style="display:flex;gap:8px;justify-content:flex-end;">
-                <button class="settings-save-btn" style="background:var(--text-muted);" onClick={() => setMigrationPhase("idle")}>
-                  {t().settings.cancel}
-                </button>
-                <button class="settings-save-btn" onClick={doMigrate}>
-                  {t().settings.migrateBtn}
-                </button>
-              </div>
-            </Show>
-            <Show when={migrationPhase() === "running"}>
-              <h3 style="margin:0 0 4px;font-size:16px;font-weight:600;">{t().settings.migratingTitle}</h3>
-              <p style="margin:0 0 16px;font-size:13px;color:var(--text-secondary);">{t().settings.migratingHint}</p>
-              <div style="width:100%;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;margin-bottom:8px;">
-                <div style={`height:100%;width:${migrationProgress()}%;background:var(--accent);border-radius:3px;transition:width 0.3s ease;`} />
-              </div>
-              <p style="margin:0;font-size:12px;color:var(--text-muted);text-align:center;">{migrationProgress()}%</p>
-            </Show>
-            <Show when={migrationPhase() === "done"}>
-              <h3 style="margin:0 0 12px;font-size:16px;font-weight:600;">{t().settings.migrateDoneTitle}</h3>
-              <p style="margin:0 0 16px;font-size:13px;color:var(--text-secondary);white-space:pre-wrap;">{migrationResult()}</p>
-              <div style="display:flex;justify-content:flex-end;">
-                <button class="settings-save-btn" onClick={() => { setMigrationPhase("idle"); setMigrationResult(""); setMigrationFailed(false); }}>
-                  {t().settings.ok}
-                </button>
-              </div>
-            </Show>
-          </div>
-        </div>
-      </Show>
     </div>
   );
 }

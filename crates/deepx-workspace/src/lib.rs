@@ -4,6 +4,8 @@
 
 pub mod exec;
 
+pub mod apply_patch;
+
 pub mod file_edit;
 pub mod file_mutate;
 pub mod authorization;

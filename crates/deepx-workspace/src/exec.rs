@@ -1394,4 +1394,47 @@ mod tests {
             .expect("wait_for 必须返回");
         assert_eq!(final_info["status"], "exited");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn backgrounded_status_refreshes_when_child_exits_while_grandchild_holds_pipe() {
+        // 复现用户场景（cargo test 通过后孙进程未回收）：
+        // cmd /C 先 spawn 后台孙进程（ping 6 秒，继承 exec 管道写端），
+        // 子进程自身 ping 2 秒后退出。孙进程持有管道 → EOF 永不到达。
+        // 修复前：状态停在 running（mark_exited 只在 EOF 后执行），
+        // process check/wait 误以为任务未结束。
+        // 修复后：try_wait 感知子进程退出即刷新为 exited。
+        let argv = vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            "start /b cmd /c ping -n 6 127.0.0.1 >NUL & ping -n 2 127.0.0.1 >NUL & exit 0"
+                .to_string(),
+        ];
+        let result = direct_exec(&argv, None, None, 100, 15, Some(1), None, None, "bg-grandchild");
+        assert_eq!(result.status, "backgrounded", "1 秒观察窗到期应移交");
+        let pid = result.process_id.expect("process_id");
+
+        // 子进程约 2 秒退出；孙进程（ping 6 秒）继续持有管道
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let mut status = String::new();
+        while std::time::Instant::now() < deadline {
+            let _ = crate::process_registry::ProcessRegistry::try_wait(pid);
+            status = crate::process_registry::ProcessRegistry::get_info(pid)
+                .map(|i| i["status"].as_str().unwrap_or("").to_string())
+                .unwrap_or_default();
+            if status == "exited" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert_eq!(
+            status, "exited",
+            "子进程退出后状态必须刷新（不依赖孙进程管道 EOF）"
+        );
+
+        // 清理：kill 进程树（孙进程仍活着），验证整树终止
+        assert!(crate::process_registry::ProcessRegistry::kill(pid), "kill 应成功");
+        let after = crate::process_registry::ProcessRegistry::get_info(pid).expect("still tracked");
+        assert_eq!(after["status"], "killed");
+    }
 }

@@ -1,7 +1,7 @@
 //! ringing_v1/ — production Ringing V1 architecture loop (primary).
 //!
 //! This loop replaces the old monolithic `Loop` with a pluggable Engine model.
-//! Each Engine implements the [`Engine`] trait; the Loop dispatches `Ui2Agent`
+//! Each Engine implements the [`Engine`] trait; the Loop dispatches Ringing commands
 //! commands by iterating engines in a try-handle chain.
 //!
 //! ## Module map

@@ -22,8 +22,8 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use super::file_shared::{
-    atomic_write, closest_line, disambiguate_match, normalize_newlines, unified_diff,
-    verify_expected_hash,
+    atomic_write, closest_line, content_hash, disambiguate_match, normalize_newlines,
+    unified_diff, verify_expected_hash,
 };
 use crate::{ToolHandler, ToolResult, ToolRisk};
 
@@ -131,8 +131,11 @@ fn parse_file_request(v: &serde_json::Value) -> Result<FileRequest, String> {
 
 #[derive(Debug)]
 enum OpError {
-    /// 模式未命中
-    NoMatch { closest: Option<(usize, String)> },
+    /// 模式未命中（携带最近行与最佳前缀诊断，模型可据此自纠）
+    NoMatch {
+        closest: Option<(usize, String)>,
+        diagnostic: Option<String>,
+    },
     /// 多处命中且无法消歧（严格：拒绝，绝不猜测）
     Ambiguous { candidates: Vec<usize> },
     /// 行号模式交叉校验失败（逐行对比）
@@ -223,12 +226,121 @@ fn line_of(content: &str, byte_pos: usize) -> usize {
     content[..byte_pos].matches('\n').count() + 1
 }
 
+/// 多行字符串 → 行数组：只去掉首尾空元素（由换行边界产生），**保留中间空行**。
+/// old_lines / 多行 old_string / 多行 new_string 统一走这里，
+/// 避免空行被整体过滤导致行窗口错位（旧行为）。
+fn multiline_string_lines(s: &str) -> Vec<String> {
+    let lines: Vec<String> = s.split('\n').map(str::to_string).collect();
+    let mut start = 0;
+    let mut end = lines.len();
+    while start < end && lines[start].trim().is_empty() {
+        start += 1;
+    }
+    while end > start && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    lines[start..end].to_vec()
+}
+/// NO_MATCH 诊断：以 closest_line 为锚，在附近窗口找"最佳前缀匹配"，
+/// 报告匹配进度、首个失配行对比与转义差异提示。模型据此可直接修正
+/// 定位（转义/空白/内容差异），无需整文件重读。
+fn no_match_diagnostic(content: &str, pattern: &[String]) -> Option<String> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let needle = pattern.first().cloned().unwrap_or_default();
+    let anchor = closest_line(content, &needle)?;
+    let anchor_idx = anchor.0.saturating_sub(1);
+    let lo = anchor_idx.saturating_sub(8);
+    let hi = (anchor_idx + 8).min(lines.len().saturating_sub(1));
+    let mut best_start = lo;
+    let mut best_common = 0usize;
+    for s in lo..=hi {
+        let mut common = 0usize;
+        for (k, p) in pattern.iter().enumerate() {
+            if s + k >= lines.len() {
+                break;
+            }
+            if lines[s + k].trim_end() == p.trim_end() {
+                common += 1;
+            } else {
+                break;
+            }
+        }
+        if common > best_common {
+            best_common = common;
+            best_start = s;
+        }
+    }
+    if best_common == 0 {
+        let mut out = format!(
+            "no line matches; closest line is L{}: {}",
+            anchor.0,
+            truncate_line(&anchor.1, 200)
+        );
+        // 单行模式（pattern 只有一行）最常在这里命中转义差异
+        let anchor_trim = anchor.1.trim();
+        if anchor_trim.replace('\\', "") == needle.replace('\\', "")
+            && anchor_trim != needle
+        {
+            out.push_str(
+                "\n  [HINT] escape mismatch: the file contains backslash-escaped characters (e.g. \\\") that differ from your pattern — copy the exact characters from read_file output.",
+            );
+        }
+        return Some(out);
+    }
+    if best_common >= pattern.len() {
+        return None; // 理论不可达：NO_MATCH 已排除全匹配
+    }
+    let mismatch_idx = best_start + best_common;
+    let actual = lines.get(mismatch_idx).copied().unwrap_or("");
+    let expected = &pattern[best_common];
+    let mut out = format!(
+        "best partial match: {} of {} lines at L{}; first mismatch at pattern line {}:\n  L{} actual:   {}\n  L{} expected: {}",
+        best_common,
+        pattern.len(),
+        best_start + 1,
+        best_common + 1,
+        mismatch_idx + 1,
+        truncate_line(actual, 200),
+        mismatch_idx + 1,
+        truncate_line(expected, 200)
+    );
+    // 转义差异提示：文件里是 \" 而模式里是 "（或反之）——直接命中复制粘贴问题
+    if actual.replace('\\', "") == expected.replace('\\', "") && actual != expected {
+        out.push_str(
+            "\n  [HINT] escape mismatch: the file contains backslash-escaped characters (e.g. \\\") that differ from your pattern — copy the exact characters from read_file output.",
+        );
+    }
+    Some(out)
+}
+fn truncate_line(s: &str, max: usize) -> String {
+    let cut = s.floor_char_boundary(s.len().min(max));
+    let mut out = s[..cut].to_string();
+    if cut < s.len() {
+        out.push('…');
+    }
+    out
+}
 /// 定位单个 op 在内容中的命中窗口。返回 (start_line 0-based, 行数, was_fuzzy)。
 fn locate_op(
     content: &str,
     file_lines: &[&str],
     op: &EditOp,
 ) -> Result<(usize, usize, bool), OpError> {
+    // replace_all 的合法场景（单行子串 + 非 regex）已被 apply_op 快路径短路；
+    // 到达这里说明是 unsupported 组合——显式拒绝而非静默降级。
+    if op.replace_all {
+        if op.use_regex {
+            return Err(OpError::Other {
+                message: "replace_all=true is not supported with regex=true — regex mode replaces only the first match; drop replace_all or use old_string (substring mode)".into(),
+            });
+        }
+        return Err(OpError::Other {
+            message: "replace_all=true is only supported for a single-line old_string (substring mode); use ops to repeat targeted edits".into(),
+        });
+    }
     if op.use_regex {
         return locate_regex(content, file_lines, op);
     }
@@ -281,7 +393,7 @@ fn locate_op(
         }
         if let Some(old) = &op.old_string {
             let window: Vec<&str> = file_lines[s..=e].to_vec();
-            let want: Vec<String> = old.split('\n').filter(|l| !l.is_empty()).map(str::to_string).collect();
+            let want = multiline_string_lines(old);
             if !want.is_empty() {
                 let norm_win: Vec<String> = window.iter().map(|l| l.trim_end().to_string()).collect();
                 let norm_want: Vec<String> = want.iter().map(|l| l.trim_end().to_string()).collect();
@@ -312,6 +424,7 @@ fn locate_op(
             let s_sub = match positions.len() {
                 0 => return Err(OpError::NoMatch {
                     closest: closest_line(content, old),
+                    diagnostic: no_match_diagnostic(content, &[old.to_string()]),
                 }),
                 1 => line_of(content, positions[0]).saturating_sub(1),
                 _ if op.replace_all => line_of(content, positions[0]).saturating_sub(1),
@@ -383,14 +496,17 @@ fn locate_line_window(file_lines: &[&str], op: &EditOp) -> Result<(usize, usize,
     let pattern: Vec<String> = if !op.old_lines.is_empty() {
         op.old_lines.clone()
     } else if let Some(old) = &op.old_string {
-        old.split('\n').filter(|l| !l.is_empty()).map(str::to_string).collect()
+        multiline_string_lines(old)
     } else {
         return Err(OpError::Other {
             message: "op has no locator: provide old_string, old_lines, or start_line".into(),
         });
     };
     if pattern.is_empty() {
-        return Err(OpError::NoMatch { closest: None });
+        return Err(OpError::NoMatch {
+            closest: None,
+            diagnostic: None,
+        });
     }
     let (candidates, fuzzy) = find_windows(file_lines, &pattern, op.allow_fuzzy);
     let idx = disambiguate_op(candidates, file_lines, op, &pattern)?;
@@ -406,8 +522,12 @@ fn disambiguate_op(
 ) -> Result<usize, OpError> {
     if candidates.is_empty() {
         let needle = pattern.first().cloned().unwrap_or_default();
-        let closest = closest_line(&file_lines.join("\n"), &needle);
-        return Err(OpError::NoMatch { closest });
+        let content = file_lines.join("\n");
+        let closest = closest_line(&content, &needle);
+        return Err(OpError::NoMatch {
+            closest,
+            diagnostic: no_match_diagnostic(&content, pattern),
+        });
     }
     if candidates.len() == 1 {
         return Ok(candidates[0]);
@@ -441,6 +561,7 @@ fn locate_regex(
     if positions.is_empty() {
         return Err(OpError::NoMatch {
             closest: closest_line(content, old),
+            diagnostic: no_match_diagnostic(content, &[old.to_string()]),
         });
     }
     if positions.len() > 1 && !op.replace_all {
@@ -485,6 +606,8 @@ struct OpReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     mismatch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     hint: Option<String>,
 }
 
@@ -503,18 +626,23 @@ impl OpReport {
             closest_text: None,
             candidates: None,
             mismatch: None,
+            diagnostic: None,
             hint: None,
         }
     }
 
     fn err(index: usize, e: OpError, display: &str) -> Self {
-        let (code, closest_line, closest_text, candidates, mismatch, hint) = match e {
-            OpError::NoMatch { closest } => (
+        let (code, closest_line, closest_text, candidates, mismatch, diagnostic, hint) = match e {
+            OpError::NoMatch {
+                closest,
+                diagnostic,
+            } => (
                 "NO_MATCH",
                 closest.as_ref().map(|(l, _)| *l),
                 closest.map(|(_, t)| t),
                 None,
                 None,
+                diagnostic,
                 Some(format!(
                     "pattern not found in {display}. Use read_file to check current content, then retry with corrected old_* or start_line."
                 )),
@@ -524,6 +652,7 @@ impl OpReport {
                 None,
                 None,
                 Some(candidates.clone()),
+                None,
                 None,
                 Some(format!(
                     "pattern matches at {} locations: {} — add context_before/context_after to disambiguate, or use start_line, or set replace_all=true.",
@@ -537,6 +666,7 @@ impl OpReport {
                 None,
                 None,
                 Some(detail.clone()),
+                None,
                 Some("File content has changed since the referenced read. Use read_file to re-read and retry with corrected old_lines/start_line.".into()),
             ),
             OpError::CrossCheck { detail } => (
@@ -545,9 +675,18 @@ impl OpReport {
                 None,
                 None,
                 Some(detail),
+                None,
                 Some("old_string and old_lines locate different positions — keep only one locator per op, or align them.".into()),
             ),
-            OpError::Other { message } => ("OP_ERROR", None, None, None, Some(message.clone()), None),
+            OpError::Other { message } => (
+                "OP_ERROR",
+                None,
+                None,
+                None,
+                Some(message.clone()),
+                None,
+                Some(format!("op #{index} of {display} failed: {message}")),
+            ),
         };
         Self {
             index,
@@ -562,6 +701,7 @@ impl OpReport {
             closest_text,
             candidates,
             mismatch,
+            diagnostic,
             hint: hint.map(|h| format!("{h}\n       (op #{index} of {display} failed; other ops are unaffected)")),
         }
     }
@@ -583,6 +723,7 @@ fn apply_op(content: &str, op: &EditOp, index: usize, display: &str, dry_run: bo
                     index,
                     OpError::NoMatch {
                         closest: closest_line(content, old),
+                        diagnostic: no_match_diagnostic(content, &[old.to_string()]),
                     },
                     display,
                 ),
@@ -616,7 +757,7 @@ fn apply_op(content: &str, op: &EditOp, index: usize, display: &str, dry_run: bo
         op.new_lines.clone()
     } else if let Some(new) = &op.new_string {
         if new.contains('\n') {
-            new.split('\n').filter(|l| !l.is_empty()).map(str::to_string).collect()
+            multiline_string_lines(new)
         } else {
             vec![new.clone()]
         }
@@ -698,6 +839,8 @@ struct FileReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     diff: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    write_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     total: Option<String>,
     ops: Vec<OpReport>,
 }
@@ -710,6 +853,7 @@ fn execute_file(req: &FileRequest) -> FileReport {
                 path: req.display.clone(),
                 status: "error",
                 diff: None,
+                write_error: None,
                 total: None,
                 ops: vec![OpReport {
                     index: 0,
@@ -724,6 +868,7 @@ fn execute_file(req: &FileRequest) -> FileReport {
                     closest_text: None,
                     candidates: None,
                     mismatch: Some(e.to_string()),
+                    diagnostic: None,
                     hint: Some(format!(
                         "Cannot read {}. Use exec with argv [\"ls\", \"-la\"] (or rg --files) to inspect the parent directory first.",
                         req.display
@@ -743,6 +888,7 @@ fn execute_file(req: &FileRequest) -> FileReport {
             path: req.display.clone(),
             status: "error",
             diff: None,
+            write_error: None,
             total: None,
             ops: vec![OpReport {
                 index: 0,
@@ -757,41 +903,82 @@ fn execute_file(req: &FileRequest) -> FileReport {
                 closest_text: None,
                 candidates: None,
                 mismatch: Some(error),
+                diagnostic: None,
                 hint: Some("Use read_file to obtain current content and hash, then retry the edit.".into()),
             }],
         };
     }
 
+    // ── 工具侧账本（自动防漂移，模型无需回传 hash）──
+    // disk_hash：当前磁盘的 LF 视图指纹；ledger_hash：工具最近一次
+    // read/edit/write 该文件时记录的同视图指纹。两者仅用于行号盲定位
+    // （start_line 且无 old_string/old_lines）的安全放行——内容定位自带校验，
+    // 从不依赖账本。账本失配不拒绝内容定位（命中即安全），只挡盲定位。
+    let disk_hash = content_hash(&content);
+    let ledger_hash = crate::file_state::last_hash(&req.path.to_string_lossy());
+
     let original_lf = content.clone();
     let mut reports: Vec<OpReport> = Vec::with_capacity(req.ops.len());
     for (i, op) in req.ops.iter().enumerate() {
-        // 严格：行号定位且无内容校验时，必须提供 expected_hash（防漂移定位）
-        if op.start_line.is_some()
-            && op.old_lines.is_empty()
-            && op.old_string.is_none()
-            && req.expected_hash.is_none()
-        {
-            reports.push(OpReport {
-                index: i,
-                status: "error",
-                line: None,
-                summary: None,
-            description: None,
-                fuzzy: None,
-                diff: None,
-                code: Some("UNVERIFIED_LINE_EDIT".into()),
-                closest_line: None,
-                closest_text: None,
-                candidates: None,
-                mismatch: Some(format!(
-                    "op #{i}: start_line without old_lines/old_string requires expected_hash (from read)"
-                )),
-                hint: Some(format!(
-                    "Read the target range first, then retry with old_lines/old_string, or pass the expected_hash returned by read. (op #{i} of {} failed; other ops are unaffected)",
-                    req.display
-                )),
-            });
-            continue;
+        // 行号盲定位（start_line 且无内容校验）的防漂移：
+        // 1) 模型显式带 expected_hash → 已由文件级校验覆盖；
+        // 2) 否则用工具侧账本自动校验：账本匹配 → 放行；失配（工具外修改）
+        //    → STALE_FILE；无账本（本会话从未 read）→ UNVERIFIED_LINE_EDIT，
+        //    提示先 read 一次（read 后自动建立账本，**无需手动回传 hash**）。
+        if op.start_line.is_some() && op.old_lines.is_empty() && op.old_string.is_none() {
+            if req.expected_hash.is_none() {
+                match &ledger_hash {
+                    None => {
+                        reports.push(OpReport {
+                            index: i,
+                            status: "error",
+                            line: None,
+                            summary: None,
+                        description: None,
+                            fuzzy: None,
+                            diff: None,
+                            code: Some("UNVERIFIED_LINE_EDIT".into()),
+                            closest_line: None,
+                            closest_text: None,
+                            candidates: None,
+                            mismatch: Some(format!(
+                                "op #{i}: start_line without old_lines/old_string has no verification baseline — this file was not read this session"
+                            )),
+                            diagnostic: None,
+                            hint: Some(format!(
+                                "Use read_file on this file once — the tool then tracks its state automatically and start_line becomes safe (no hash needed). (op #{i} of {} failed; other ops are unaffected)",
+                                req.display
+                            )),
+                        });
+                        continue;
+                    }
+                    Some(known) if known != &disk_hash => {
+                        reports.push(OpReport {
+                            index: i,
+                            status: "error",
+                            line: None,
+                            summary: None,
+                        description: None,
+                            fuzzy: None,
+                            diff: None,
+                            code: Some("STALE_FILE".into()),
+                            closest_line: None,
+                            closest_text: None,
+                            candidates: None,
+                            mismatch: Some(format!(
+                                "op #{i}: file was modified outside the tool since the last read/edit (ledger hash mismatch)"
+                            )),
+                            diagnostic: None,
+                            hint: Some(format!(
+                                "Use read_file to refresh the tool's view of the file, then retry. (op #{i} of {} failed; other ops are unaffected)",
+                                req.display
+                            )),
+                        });
+                        continue;
+                    }
+                    Some(_) => {} // 账本匹配 → 放行
+                }
+            }
         }
         let (next, report) = apply_op(&content, op, i, &req.display, req.dry_run);
         content = next;
@@ -805,19 +992,34 @@ fn execute_file(req: &FileRequest) -> FileReport {
         String::new()
     };
 
+    let mut write_error: Option<String> = None;
     if ok_count > 0 && !req.dry_run {
         let write_content = if was_crlf {
             content.replace('\n', "\r\n")
         } else {
             content.clone()
         };
-        if atomic_write(&req.path.to_string_lossy(), &write_content).is_ok() {
-            crate::file_state::record_edit(&req.path.to_string_lossy(), write_content.lines().count());
+        match atomic_write(&req.path.to_string_lossy(), &write_content) {
+            Ok(_) => {
+                // 账本记录 LF 视图内容（与 read 的 hash 同视图），
+                // 即使文件是 CRLF 写回，账本 hash 仍与 read 一致。
+                crate::file_state::record_edit(&req.path.to_string_lossy(), &content);
+            }
+            Err(e) => {
+                // 写盘失败必须上报：ops 定位/应用成功 ≠ 改动落地。
+                // 模型需要知道磁盘上的文件并未被修改，才能决定重试或改路径。
+                write_error = Some(format!(
+                    "atomic write failed after {ok_count}/{} op(s) applied: {e} — the file on disk was NOT modified",
+                    req.ops.len()
+                ));
+            }
         }
-        // 写盘失败不在此细报：下一次调用会从 READ_FAILED/文件状态自愈
     }
 
-    let status = if ok_count == req.ops.len() {
+    // 写盘失败 → 整体失败（改动未落地），即使所有 op 定位/应用都成功。
+    let status = if write_error.is_some() {
+        "error"
+    } else if ok_count == req.ops.len() {
         "ok"
     } else if ok_count > 0 {
         "partial"
@@ -832,6 +1034,7 @@ fn execute_file(req: &FileRequest) -> FileReport {
         } else {
             None
         },
+        write_error,
         total: if ok_count > 0 {
             Some(format!(
                 "{ok_count}/{} op(s) applied at {}",
@@ -986,10 +1189,20 @@ fn render_text(reports: &[FileReport], status: &str, dry_run: bool) -> String {
                     op.code.as_deref().unwrap_or("error"),
                     op.mismatch.as_deref().unwrap_or("")
                 ));
+                if let (Some(line), Some(text)) = (op.closest_line, &op.closest_text) {
+                    let cap = text.floor_char_boundary(text.len().min(200));
+                    out.push_str(&format!("      closest: L{line}: {}\n", &text[..cap]));
+                }
+                if let Some(diag) = &op.diagnostic {
+                    out.push_str(&format!("      diagnostic: {diag}\n"));
+                }
                 if let Some(hint) = &op.hint {
                     out.push_str(&format!("      hint: {hint}\n"));
                 }
             }
+        }
+        if let Some(we) = &f.write_error {
+            out.push_str(&format!("    write error: {we}\n"));
         }
     }
     out
@@ -1004,7 +1217,7 @@ fn handle_edit_file(ctx: crate::ToolCallCtx) -> ToolResult {
 // ─────────────────────────────────────────────────────────────
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register(ToolHandler {
+    mgr.register_with_placement(ToolHandler {
         key: "edit_file".to_string(),
         description: concat!(
             "Unified file editor: string mode (old_string/new_string), line mode (old_lines/new_lines), ",
@@ -1013,7 +1226,8 @@ pub fn register(mgr: &mut crate::ToolManager) {
             "Trim-end whitespace is tolerated by default; allow_fuzzy=true adds trim + intra-line whitespace collapsing (tab/multiple spaces) + Unicode normalization (NFC combining-character folding, smart punctuation). ",
             "Ambiguous matches (multiple locations, no disambiguating context) are REJECTED with all candidate lines — never guessed: ",
             "context_before/context_after disambiguate (substring and line modes), or use start_line / replace_all=true. ",
-            "Expected_hash (from read) guards against stale content. Use write for whole-file creation; delete for removal."
+            "Expected_hash (from read) guards against stale content — optional: when omitted, the tool verifies against its own last-known state automatically (read once, then edit freely). ",
+            "For patch-style edits (unified diff), use the apply_patch tool. Use write for whole-file creation; delete for removal."
         ),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1032,7 +1246,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 "replace_all": {"type": "boolean", "description": "Replace all occurrences (substring mode only)", "default": false},
                 "regex": {"type": "boolean", "description": "Treat old_string as regex", "default": false},
                 "allow_fuzzy": {"type": "boolean", "description": "Whitespace collapsing + Unicode normalization fallback (trim, tab/multi-space folding, NFC)", "default": false},
-                "expected_hash": {"type": "string", "description": "Hash from read; edit fails safely if file changed"},
+                "expected_hash": {"type": "string", "description": "Optional. When omitted, the tool auto-verifies against its own last-known state (from read/edit/write) and rejects stale line-number edits — no need to pass the hash back"},
                 "dry_run": {"type": "boolean", "description": "Preview only (with diffs), do not write", "default": false},
                 "description": {"type": "string", "description": "Brief note explaining why this change is needed (optional)"}
             },
@@ -1041,7 +1255,9 @@ pub fn register(mgr: &mut crate::ToolManager) {
         handler: handle_edit_file,
         risk: ToolRisk::Write,
         default_timeout: std::time::Duration::from_secs(60),
-    });
+    },
+    crate::ToolPlacement::Workspace,
+);
 }
 
 #[cfg(test)]
@@ -1383,4 +1599,229 @@ mod tests {
         assert_eq!(out["files"][0]["ops"][0]["fuzzy"], true);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "CAFE\n");
     }
+    #[test]
+    fn multiline_old_string_with_blank_lines_matches() {
+        // 多行 old_string 中间的空白行必须参与匹配（与 old_lines 语义一致）
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "w.rs", "fn a() {\n\n    let x = 1;\n}\n");
+        let out = run(&p, serde_json::json!({
+            "old_string": "fn a() {\n\n    let x = 1;",
+            "new_string": "fn a() {\n\n    let y = 2;",
+        }));
+        assert_eq!(out["status"], "ok", "got: {out}");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "fn a() {\n\n    let y = 2;\n}\n"
+        );
+    }
+    #[test]
+    fn multiline_new_string_preserves_blank_lines() {
+        // 多行 new_string 中间的空白行不能被过滤
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "x.rs", "a\nb\n");
+        let out = run(&p, serde_json::json!({
+            "old_lines": ["a", "b"], "new_lines": ["A", "", "B"],
+        }));
+        assert_eq!(out["status"], "ok");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "A\n\nB\n");
+    }
+    #[test]
+    fn replace_all_with_regex_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "y.rs", "a a\n");
+        let out = run(&p, serde_json::json!({
+            "old_string": "a", "new_string": "b", "regex": true, "replace_all": true,
+        }));
+        assert_eq!(out["status"], "error");
+        assert_eq!(out["files"][0]["ops"][0]["code"], "OP_ERROR");
+        assert!(
+            out["files"][0]["ops"][0]["hint"]
+                .as_str()
+                .unwrap_or("")
+                .contains("replace_all=true is not supported with regex=true"),
+            "got: {out}"
+        );
+        // 文件未被修改（显式拒绝而非静默降级）
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a a\n");
+    }
+    #[test]
+    fn replace_all_with_multiline_old_string_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "z.rs", "a\nb\n");
+        let out = run(&p, serde_json::json!({
+            "old_string": "a\nb", "new_string": "c", "replace_all": true,
+        }));
+        assert_eq!(out["status"], "error");
+        assert!(
+            out["files"][0]["ops"][0]["hint"]
+                .as_str()
+                .unwrap_or("")
+                .contains("only supported for a single-line old_string"),
+            "got: {out}"
+        );
+    }
+    #[test]
+    fn no_match_reports_partial_match_diagnostic() {
+        // NO_MATCH 时给出最佳前缀诊断：已匹配行数 + 首个失配行对比
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "aa.rs", "fn a() {\n    let x = 1;\n}\n");
+        let out = run(&p, serde_json::json!({
+            "old_string": "fn a() {\n    let x = 999;\n}",
+            "new_string": "fn a() {\n    let x = 0;\n}",
+        }));
+        assert_eq!(out["status"], "error");
+        let diag = out["files"][0]["ops"][0]["diagnostic"]
+            .as_str()
+            .unwrap_or("");
+        assert!(diag.contains("best partial match"), "diag: {diag}");
+        assert!(diag.contains("1 of 3 lines"), "diag: {diag}");
+        assert!(diag.contains("actual"), "diag: {diag}");
+        assert!(diag.contains("expected"), "diag: {diag}");
+    }
+    #[test]
+    fn no_match_diagnostic_detects_escape_mismatch() {
+        // 文件里是普通引号，模式里带了反斜杠转义 → 专门提示
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "ab.rs", "print!(\"hi\");\n");
+        let out = run(&p, serde_json::json!({
+            "old_string": "print!(\\\"hi\\\");", "new_string": "print!(\"yo\");",
+        }));
+        assert_eq!(out["status"], "error");
+        let diag = out["files"][0]["ops"][0]["diagnostic"]
+            .as_str()
+            .unwrap_or("");
+        assert!(diag.contains("escape mismatch"), "diag: {diag}");
+    }
+
+    // ── 工具侧账本：模型无需回传 hash ──
+
+    #[test]
+    fn line_edit_without_hash_uses_ledger() {
+        // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
+        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // read 建立账本后，start_line 盲定位无需 expected_hash 即可安全放行
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "ledger1.rs", "a\nb\nc\n");
+        let content = std::fs::read_to_string(&p).unwrap();
+        crate::file_state::record_read(&p, &content, 3); // 模拟 read_file
+        let out = run(&p, serde_json::json!({
+            "start_line": 2, "new_string": "B",
+        }));
+        assert_eq!(out["status"], "ok", "got: {out}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nB\nc\n");
+    }
+
+    #[test]
+    fn line_edit_without_ledger_is_rejected_with_read_hint() {
+        // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
+        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // 从未 read（无账本）→ UNVERIFIED_LINE_EDIT；hint 指向 read 而非传 hash
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "ledger2.rs", "a\nb\nc\n");
+        let out = run(&p, serde_json::json!({
+            "start_line": 2, "new_string": "B",
+        }));
+        assert_eq!(out["files"][0]["ops"][0]["status"], "error");
+        assert_eq!(out["files"][0]["ops"][0]["code"], "UNVERIFIED_LINE_EDIT");
+        let hint = out["files"][0]["ops"][0]["hint"].as_str().unwrap_or("");
+        assert!(hint.contains("read_file"), "hint should point to read: {hint}");
+        assert!(
+            !hint.contains("expected_hash"),
+            "hint must not demand hash: {hint}"
+        );
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn line_edit_rejected_when_file_changed_externally() {
+        // read 后文件被工具外修改 → 账本失配 → 行号盲定位拒绝（防漂移）
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "ledger3.rs", "a\nb\nc\n");
+        let content = std::fs::read_to_string(&p).unwrap();
+        crate::file_state::record_read(&p, &content, 3);
+        std::fs::write(&p, "a\nB-EXTERNAL\nc\n").unwrap();
+        let out = run(&p, serde_json::json!({
+            "start_line": 2, "new_string": "B",
+        }));
+        assert_eq!(out["files"][0]["ops"][0]["status"], "error");
+        assert_eq!(out["files"][0]["ops"][0]["code"], "STALE_FILE");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nB-EXTERNAL\nc\n");
+    }
+
+    #[test]
+    fn substring_edit_succeeds_after_external_change() {
+        // 内容定位自带校验：外部修改后 old_string 命中即安全，无需 hash
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "ledger4.rs", "a\nb\nc\n");
+        let content = std::fs::read_to_string(&p).unwrap();
+        crate::file_state::record_read(&p, &content, 3);
+        std::fs::write(&p, "a\nb\nc\n// ext\n").unwrap(); // 外部追加
+        let out = run(&p, serde_json::json!({
+            "old_string": "b", "new_string": "B",
+        }));
+        assert_eq!(out["status"], "ok", "got: {out}");
+        // 写盘后账本已刷新为最新内容（下次盲定位继续安全）
+        let new_content = std::fs::read_to_string(&p).unwrap();
+        let ledger = crate::file_state::last_hash(&p);
+        assert_eq!(
+            ledger,
+            Some(crate::file_shared::content_hash(&new_content)),
+            "ledger must refresh after edit"
+        );
+    }
+
+    #[test]
+    fn write_rejected_when_file_changed_externally_without_hash() {
+        // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
+        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // write 未带 hash：账本失配（外部修改）→ STALE_FILE，不覆盖外部改动
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "ledger5.rs", "a\nb\n");
+        let content = std::fs::read_to_string(&p).unwrap();
+        crate::file_state::record_read(&p, &content, 2);
+        std::fs::write(&p, "external\n").unwrap();
+        let out = crate::file_mutate::exec_write_file(&serde_json::json!({
+            "path": p, "content": "new\n",
+        }));
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["code"], "STALE_FILE", "got: {out}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "external\n");
+    }
+
+    #[test]
+    fn write_updates_ledger_without_hash() {
+        // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
+        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // write 成功后账本自动更新为新内容指纹
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "ledger6.rs", "a\n");
+        let content = std::fs::read_to_string(&p).unwrap();
+        crate::file_state::record_read(&p, &content, 1);
+        let out = crate::file_mutate::exec_write_file(&serde_json::json!({
+            "path": p, "content": "NEW\n",
+        }));
+        assert!(out.contains("[OK]"), "got: {out}");
+        assert_eq!(
+            crate::file_state::last_hash(&p),
+            Some(crate::file_shared::content_hash("NEW\n"))
+        );
+    }
+
+    #[test]
+    fn delete_rejected_when_file_changed_externally_without_hash() {
+        // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
+        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // delete 是破坏性操作：账本失配（外部修改）→ STALE_FILE，文件保留
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "ledger7.rs", "a\n");
+        let content = std::fs::read_to_string(&p).unwrap();
+        crate::file_state::record_read(&p, &content, 1);
+        std::fs::write(&p, "external\n").unwrap();
+        let out = crate::file_mutate::exec_delete_file(&serde_json::json!({ "path": p }));
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["code"], "STALE_FILE", "got: {out}");
+        assert!(std::path::Path::new(&p).exists());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "external\n");
+    }
+
 }

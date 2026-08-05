@@ -85,18 +85,30 @@ impl ProcessRegistry {
         });
     }
 
-    /// 非阻塞查询子进程是否退出；已退出返回 exit code 并释放句柄。
+    /// 非阻塞查询子进程是否退出；已退出返回 exit code 并释放句柄、更新状态。
     /// 子进程句柄唯一持有在注册表（attach_child 移入），direct_exec 的
     /// poll 循环经此查询，避免 Child 双重持有。
+    ///
+    /// **终态自动更新**：检测到退出即置 `Exited`（幂等）。状态刷新不依赖
+    /// 管道 EOF——孙进程可能持有管道写端导致 EOF 永不到达（如 cargo test
+    /// 泄漏的后台 serve），若等 EOF 才 mark_exited，`process check/wait`
+    /// 会永远显示 running。任何查询路径（exec 轮询、check、wait）经此刷新。
     pub fn try_wait(id: u32) -> Option<i32> {
         Self::with(|r| {
             let entry = r.entries.get(&id)?;
+            // 终态缓存：child 句柄已释放，直接返回退出码（不再触碰句柄）
+            match *entry.status.lock().unwrap() {
+                ProcStatus::Exited(code) => return Some(code),
+                ProcStatus::Killed => return None,
+                ProcStatus::Running => {}
+            }
             let mut child_opt = entry.child.lock().unwrap();
             let child = child_opt.as_mut()?;
             match child.try_wait().ok()? {
                 Some(status) => {
                     let code = status.code().unwrap_or(-1);
                     *child_opt = None;
+                    *entry.status.lock().unwrap() = ProcStatus::Exited(code);
                     Some(code)
                 }
                 None => None,
@@ -251,12 +263,18 @@ impl ProcessRegistry {
     }
 
     /// Wait for a process to exit (polling up to timeout_secs).
+    ///
+    /// 每次轮询先经 `try_wait` 刷新终态：子进程退出即返回，不依赖管道 EOF
+    /// （孙进程可能持有管道写端，EOF 永不出现；原实现只查 status 字段，
+    /// 而 backgrounded 路径的 mark_exited 在 EOF 后才执行 → 永远 running）。
     pub fn wait_for(id: u32, timeout_secs: u64) -> Option<serde_json::Value> {
         let start = Instant::now();
         loop {
             if start.elapsed().as_secs() > timeout_secs {
                 return Self::get_info(id);
             }
+            // 刷新终态（幂等；子进程已退出则自动置 Exited）
+            let _ = Self::try_wait(id);
             let exited = Self::with(|r| {
                 r.entries
                     .get(&id)

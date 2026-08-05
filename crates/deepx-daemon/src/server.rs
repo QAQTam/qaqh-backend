@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use deepx_proto::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
-use deepx_runtime::{DeepxService, EventBus};
+use deepx_runtime::DeepxService;
 use deepx_runtime::RingingHub;
 use deepx_runtime::{WorkspaceMode, WorkspaceSupervisor};
 use tokio::net::{TcpListener, TcpStream};
@@ -46,12 +46,11 @@ pub async fn run() -> Result<(), String> {
             .unwrap_or_default(),
     };
     write_discovery(&discovery)?;
-    let events = EventBus::new(epoch);
     let hub = Arc::new(RingingHub::with_persistence(
-        events.epoch().to_string(),
+        epoch.clone(),
         data_root.join("ringing"),
     ));
-    let service = DeepxService::init(events);
+    let service = DeepxService::init();
     service.attach_ringing(hub.clone());
     // 工具套件运行环境：config `[workspace] mode`（local 默认 / wsl 可选）。
     // 拉起失败不阻塞 daemon——worker 回退进程内工具执行。

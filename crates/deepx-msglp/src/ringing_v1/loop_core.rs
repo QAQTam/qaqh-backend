@@ -142,10 +142,10 @@ impl Loop {
     /// Create a Loop backed by real stdin/stdout via background I/O threads.
     ///
     /// Spawns:
-    /// - **Reader thread**: reads JSON-LP from `input`, sends `Ui2Agent` frames
+    /// - **Reader thread**: reads JSON-LP from `input`, dispatches Ringing commands
     ///   to `cmd_rx`. Sets CancelToken on interrupt-type commands (Cancel,
     ///   ResumeSession, NewSession, Shutdown).
-    /// - **Writer thread**: receives `Agent2Ui` from `event_tx`, writes
+    /// - **Writer thread**: receives Ringing events from `event_tx`, writes
     ///   JSON-LP to `output`. Flushes every 2ms. Sets `writer_dead` on exit.
     ///
     /// Both threads use `catch_unwind` to log panics rather than silently dying.
@@ -945,13 +945,7 @@ impl Loop {
                     interaction_id,
                     answers,
                 } => {
-                    let answers = answers
-                        .into_iter()
-                        .map(|answer| deepx_proto::AskAnswer {
-                            question_id: answer.question_id,
-                            answer: answer.answer,
-                        })
-                        .collect::<Vec<_>>();
+                    // answers 已是 domain AskAnswer（Ringing 命令直接携带）。
                     let mut ctx = RingContext {
                         agent: &mut self.session.agent,
                         emitter: &self.paced_emitter,
@@ -1024,13 +1018,7 @@ impl Loop {
                     images,
                     attachments: _,
                 } => {
-                    let images = images
-                        .into_iter()
-                        .map(|image| deepx_proto::ImageBlock {
-                            mime_type: image.mime_type,
-                            data: image.data,
-                        })
-                        .collect();
+                    // images 已是 domain ImageBlock（Ringing 命令直接携带）。
                     let mut ctx = RingContext {
                         agent: &mut self.session.agent,
                         emitter: &self.paced_emitter,

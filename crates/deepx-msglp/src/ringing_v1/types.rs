@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
-use deepx_proto::{AskMode, AskQuestion};
+use deepx_domain::{AskMode, AskQuestion};
 use deepx_types::UsageInfo;
 
 use crate::state::agent::AgentState;

@@ -29,7 +29,7 @@ export default function SessionCard(props: SessionCardProps) {
       tabindex={0}
     >
       <div class="session-card-header">
-        <span class={`session-card-dot ${s.running ? "running" : ""} ${s.turso_backed ? "turso" : ""}`} />
+        <span class={`session-card-dot ${s.running ? "running" : ""}`} />
         <span class="session-card-title">{title}</span>
       </div>
       <div class="session-card-meta">

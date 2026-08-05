@@ -123,9 +123,6 @@ pub struct SessionMeta {
     #[ts(skip)]
     pub from_resume: bool,
 
-    /// True if this session has messages in the Turso SQLite store.
-    #[serde(skip)]
-    pub turso_backed: bool,
 }
 impl Default for SessionMeta {
     fn default() -> Self {
@@ -149,7 +146,6 @@ impl Default for SessionMeta {
             tokens: 0,
             title: None,
             from_resume: false,
-            turso_backed: false,
         }
     }
 }

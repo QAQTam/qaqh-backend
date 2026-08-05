@@ -17,7 +17,7 @@ impl InputEngine {
         &self,
         ctx: &mut RingContext,
         text: &str,
-        images: Vec<deepx_proto::ImageBlock>,
+        images: Vec<deepx_domain::ImageBlock>,
     ) -> Outcome {
         log::info!("[INPUT] handle_user_input called, text_len={}", text.len());
         // Auto-create session on first input

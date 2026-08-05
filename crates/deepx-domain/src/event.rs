@@ -255,6 +255,30 @@ pub struct SkillRuntimeInfo {
     pub error: Option<String>,
 }
 
+/// 技能面板全量状态（frontend skills panel 展示）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillsStatus {
+    /// 全部可发现技能。
+    pub available: Vec<SkillInfo>,
+    /// 当前已加载（显式 / $ 提及激活）的技能名。
+    pub active: Vec<String>,
+    #[serde(default)]
+    pub catalog_revision: String,
+    #[serde(default)]
+    pub context_epoch: u64,
+    #[serde(default)]
+    pub operation_revision: u64,
+    #[serde(default)]
+    pub token_budget: usize,
+    #[serde(default)]
+    pub token_usage: usize,
+    #[serde(default)]
+    pub runtime: Vec<SkillRuntimeInfo>,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversation 频道
 // ─────────────────────────────────────────────────────────────────────────────

@@ -315,7 +315,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
 // ── Registration ──────────────────────────────────────────────────────
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register(ToolHandler {
+    mgr.register_with_placement(ToolHandler {
         key: "image".to_string(),
         description: "Analyze an image using a multimodal vision model. Use image_index (preferred) to reference an uploaded image, or base64_image for direct data. Always provide a prompt describing what to analyze. Supports MiMo, Ollama, LM Studio, and OpenAI-compatible endpoints.",
         input_schema: serde_json::json!({
@@ -344,7 +344,9 @@ pub fn register(mgr: &mut crate::ToolManager) {
         handler: handle_image_query,
         risk: ToolRisk::ReadOnly,
         default_timeout: Duration::from_secs(300),
-    });
+    },
+    crate::ToolPlacement::Workspace,
+);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

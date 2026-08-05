@@ -2,7 +2,7 @@
 # 用法: just [recipe]
 #
 # 项目结构:
-#   crates/          Rust 后端 (15 crates)
+#   crates/          Rust 后端 (16 crates)
 #   apps/desktop/    Electron 前端
 #   apps/installer/  Windows 安装器
 

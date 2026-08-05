@@ -45,10 +45,6 @@ pub struct PersistentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compliance_allowlist: Option<Vec<String>>,
 
-    // ── Turso local database mirror ──
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub database: Option<PersistentDatabaseConfig>,
-
     // ── Multimodal (vision) LLM config ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multimodal: Option<PersistentMultimodalConfig>,
@@ -108,21 +104,6 @@ pub struct PersistentSubagentConfig {
     /// Default tool allowlist for subagents. Empty = all tools available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_tools: Option<Vec<String>>,
-}
-
-/// Persistence-friendly database config mirroring session data to local Turso.
-///
-/// When enabled, session messages are written to both JSONL (primary) and a
-/// local SQLite database via Turso for fast querying from external tools.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PersistentDatabaseConfig {
-    /// Whether the database mirror is enabled. `None` = use default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-    /// Path to the local Turso database file. If `None`, a default path is used
-    /// inside the DeepX data directory.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
 }
 
 /// Persistence-friendly multimodal (vision) LLM config.
@@ -190,8 +171,7 @@ fn default_base_url() -> String {
 /// Unified config I/O with atomic writes.
 ///
 /// Writes use a temp-file + rename pattern to prevent corruption from
-/// partial writes. When the Turso database backend is enabled, saves
-/// dual-write to both TOML and SQLite.
+/// partial writes.
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     path: PathBuf,

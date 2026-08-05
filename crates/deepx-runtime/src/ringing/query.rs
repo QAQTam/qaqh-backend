@@ -59,14 +59,13 @@ pub fn error_response(message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EventBus;
 
     // SessionManager 是全局单例，同一测试进程只能 init 一次；
     // 用 OnceLock 共享一个 service 实例（并行测试也不会重复初始化）。
     static SERVICE: std::sync::OnceLock<DeepxService> = std::sync::OnceLock::new();
 
     fn service() -> &'static DeepxService {
-        SERVICE.get_or_init(|| DeepxService::init(EventBus::new("test-epoch")))
+        SERVICE.get_or_init(DeepxService::init)
     }
 
     #[test]

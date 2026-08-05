@@ -11,7 +11,6 @@ members = [
     "crates/deepx-proto",
     "crates/deepx-runtime",
     "crates/deepx-ringing",
-    "crates/deepx-client",
     "crates/deepx-daemon",
     "crates/deepx-workspace",
     "crates/deepx-session",
@@ -20,7 +19,6 @@ members = [
     "crates/deepx-update",
     "apps/installer",
     "apps/updater",
-    "apps/deepx-tui",
 ]
 
 [workspace.package]
@@ -37,4 +35,3 @@ codegen-units = 1
 [workspace.lints.clippy]
 unwrap_used = "deny"
 string_slice = "deny"
-

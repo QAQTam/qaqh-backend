@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::services::dashboard;
 use crate::state::agent::PendingApproval;
-use deepx_proto::{AskMode, AskQuestion};
+use deepx_domain::{AskMode, AskQuestion};
 
 use super::types::*;
 

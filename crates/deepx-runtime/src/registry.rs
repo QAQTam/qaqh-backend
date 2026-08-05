@@ -3,9 +3,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use deepx_proto::{Agent2Ui, Ui2Agent};
 
-use crate::{EventBus, RingingHub, SessionActivityTracker};
+use crate::{RingingHub, SessionActivityTracker};
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
 
@@ -107,7 +106,6 @@ pub struct AgentInstance {
 
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
-    events: EventBus,
     activity: SessionActivityTracker,
     /// Ringing 运行时；None = 未启用 legacy worker-only 模式。
     hub: Option<Arc<RingingHub>>,
@@ -120,10 +118,9 @@ pub struct AgentRegistry {
 }
 
 impl AgentRegistry {
-    pub fn new(events: EventBus) -> Self {
+    pub fn new() -> Self {
         Self {
             instances: HashMap::new(),
-            events,
             activity: SessionActivityTracker::default(),
             hub: None,
             workspace_env: None,
@@ -253,7 +250,6 @@ impl AgentRegistry {
             let event_seed = seed.to_string();
             let activity = self.activity.clone();
             let hub = self.hub.clone();
-            let events = self.events.clone();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for line in BufReader::new(stdout).lines() {
@@ -310,8 +306,7 @@ impl AgentRegistry {
                                                 &observe,
                                             )
                                         {
-                                            crate::activity::publish_activity_dual(
-                                                &events,
+                                            crate::activity::publish_activity(
                                                 Some(hub.as_ref()),
                                                 &activity,
                                             );
@@ -337,7 +332,7 @@ impl AgentRegistry {
                 );
             }
             if let Some(update) = activity.disconnect(&event_seed, generation) {
-                crate::activity::publish_activity_dual(&events, hub.as_deref(), &update);
+                crate::activity::publish_activity(hub.as_deref(), &update);
             }
         });
 
@@ -352,26 +347,7 @@ impl AgentRegistry {
         Ok(())
     }
 
-    pub fn send(&mut self, seed: &str, frame: Ui2Agent) -> Result<(), String> {
-        self.get_or_spawn(seed)?;
-        let json = serde_json::to_string(&frame).map_err(|e| format!("serialize: {e}"))?;
-        let write = |instance: &AgentInstance| -> Result<(), String> {
-            let mut stdin = instance
-                .stdin
-                .lock()
-                .map_err(|e| format!("agent stdin lock: {e}"))?;
-            writeln!(*stdin, "{json}").map_err(|e| format!("agent write: {e}"))?;
-            stdin.flush().map_err(|e| format!("agent flush: {e}"))
-        };
-        if write(self.instances.get(seed).expect("spawned instance")).is_ok() {
-            return Ok(());
-        }
-        if let Some(dead) = self.instances.remove(seed) {
-            dead.shutdown();
-        }
-        self.get_or_spawn(seed)?;
-        write(self.instances.get(seed).expect("respawned instance"))
-    }
+
 
     /// 发送 Ringing worker 命令帧（携带 `wire` 判别字段；worker reader 按 wire 解析）。
     pub fn send_ringing(
@@ -504,17 +480,31 @@ impl AgentRegistry {
         self.instances.contains_key(seed)
     }
 
-    pub fn send_all(&mut self, frame: Ui2Agent) {
+    /// 向所有存活 agent 广播同一 Ringing 命令。
+    pub fn send_ringing_all(&mut self, command: deepx_ringing::RingingCommand) {
         let seeds: Vec<_> = self.instances.keys().cloned().collect();
         for seed in seeds {
-            let _ = self.send(&seed, frame.clone());
+            let env = deepx_ringing::RingingWorkerCommandEnvelope::new(
+                seed.clone(),
+                "daemon-broadcast",
+                command.clone(),
+            );
+            let _ = self.send_ringing(&seed, &env);
         }
     }
 }
 
 impl AgentInstance {
     fn shutdown(self) {
-        if let Ok(json) = serde_json::to_string(&Ui2Agent::Shutdown)
+        // 优雅关闭：agent 侧只识别 Ringing 帧（legacy Ui2Agent 已拆除）。
+        let env = deepx_ringing::RingingWorkerCommandEnvelope::new(
+            self.seed.clone(),
+            "daemon-shutdown",
+            deepx_ringing::RingingCommand::Control(
+                deepx_domain::ControlCommand::SessionShutdown,
+            ),
+        );
+        if let Ok(json) = serde_json::to_string(&env)
             && let Ok(mut stdin) = self.stdin.lock()
         {
             let _ = writeln!(*stdin, "{json}");
@@ -613,48 +603,6 @@ fn tail_text(text: &str, max_bytes: usize) -> String {
 }
 
 #[cfg(test)]
-fn agent2ui_channel(event: &Agent2Ui) -> Option<deepx_domain::RingingChannel> {
-    use deepx_domain::RingingChannel::{Control, Conversation, Tool};
-    Some(match event {
-        Agent2Ui::TurnStart { .. }
-        | Agent2Ui::TurnEnd { .. }
-        | Agent2Ui::RoundDelta { .. }
-        | Agent2Ui::RoundComplete { .. }
-        | Agent2Ui::SessionRestored { .. }
-        | Agent2Ui::MoreTurns { .. }
-        | Agent2Ui::ProviderRetrying { .. }
-        | Agent2Ui::UsageUpdated { .. }
-        | Agent2Ui::CacheDiagnostics { .. }
-        | Agent2Ui::CompactStart { .. }
-        | Agent2Ui::CompactEnd { .. }
-        | Agent2Ui::CompactDelta { .. }
-        | Agent2Ui::Cancelled => Conversation,
-        Agent2Ui::ToolResults { .. }
-        | Agent2Ui::ToolExecDelta { .. }
-        | Agent2Ui::ExecProgress { .. }
-        | Agent2Ui::ToolCallPreview { .. }
-        | Agent2Ui::ToolNotice { .. }
-        | Agent2Ui::AuditRecord { .. }
-        | Agent2Ui::CodeDelta { .. }
-        | Agent2Ui::PermissionRequest { .. } => Tool,
-        Agent2Ui::SessionCreated { .. }
-        | Agent2Ui::Error { .. }
-        | Agent2Ui::PlanSubmitted { .. }
-        | Agent2Ui::PlanResolved { .. }
-        | Agent2Ui::Dashboard { .. }
-        | Agent2Ui::Done
-        | Agent2Ui::ShutdownAck
-        | Agent2Ui::Ready
-        | Agent2Ui::SkillsChanged { .. }
-        | Agent2Ui::SkillOperationResolved { .. }
-        | Agent2Ui::AskUser { .. }
-        | Agent2Ui::AskResolved { .. }
-        | Agent2Ui::AskRejected { .. } => Control,
-        _ => return None,
-    })
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -747,250 +695,4 @@ mod tests {
         assert_eq!(tail, "汉".repeat(tail.chars().count()));
     }
 
-    /// 构造 Agent2Ui 最小变体（36 变体全覆盖，字段按 agent_protocol.rs 定义）。
-    fn sample_agent2ui(variant: &str) -> Agent2Ui {
-        use deepx_proto::{AskMode, AskResolution, PermissionRisk};
-        match variant {
-            "TurnStart" => Agent2Ui::TurnStart {
-                turn_id: "t".into(),
-                user_text: "u".into(),
-            },
-            "TurnEnd" => Agent2Ui::TurnEnd {
-                turn_id: "t".into(),
-                stop_reason: None,
-                usage: None,
-            },
-            "RoundDelta" => Agent2Ui::RoundDelta {
-                turn_id: "t".into(),
-                round_num: 0,
-                kind: deepx_proto::RoundDeltaKind::Answering,
-                delta: "d".into(),
-            },
-            "RoundComplete" => Agent2Ui::RoundComplete {
-                turn_id: "t".into(),
-                round_num: 0,
-                thinking: None,
-                answer: None,
-                tool_calls: vec![],
-                blocks: vec![],
-                is_final: true,
-            },
-            "ToolResults" => Agent2Ui::ToolResults {
-                turn_id: "t".into(),
-                round_num: 0,
-                results: vec![],
-            },
-            "ToolExecDelta" => Agent2Ui::ToolExecDelta {
-                tool_call_id: "c".into(),
-                delta: "d".into(),
-            },
-            "SessionRestored" => Agent2Ui::SessionRestored {
-                seed: "s".into(),
-                turns: vec![],
-                tokens_used: 0,
-                cache_hit_pct: 0.0,
-                usage: None,
-                usage_totals: deepx_types::UsageInfo::default(),
-                usage_requests: 0,
-                cache_reported_requests: 0,
-                total_turns: 0,
-                has_more: false,
-            },
-            "MoreTurns" => Agent2Ui::MoreTurns {
-                turns: vec![],
-                has_more: false,
-            },
-            "SessionCreated" => Agent2Ui::SessionCreated { seed: "s".into() },
-            "Error" => Agent2Ui::Error {
-                message: "e".into(),
-            },
-            "ProviderRetrying" => Agent2Ui::ProviderRetrying {
-                turn_id: "t".into(),
-                round_num: 0,
-                attempt: 1,
-                max_retries: 3,
-                delay_secs: 1,
-                error: "e".into(),
-            },
-            "ToolNotice" => Agent2Ui::ToolNotice {
-                message: "m".into(),
-                level: "info".into(),
-            },
-            "PlanSubmitted" => Agent2Ui::PlanSubmitted {
-                call_id: "c".into(),
-                plan_content: "p".into(),
-                review_type: "r".into(),
-                todo_items: None,
-            },
-            "PlanResolved" => Agent2Ui::PlanResolved {
-                call_id: "c".into(),
-                approved: true,
-            },
-            "Dashboard" => Agent2Ui::Dashboard {
-                hp_connected: false,
-                session_seed: "s".into(),
-                tool_calls_total: 0,
-                tool_failures: 0,
-                current_phase: "p".into(),
-                streaming: false,
-                dsml_compat_count: 0,
-                documents: vec![],
-                recent_edits: vec![],
-                tasks: vec![],
-                current_todo_id: None,
-                session_title: None,
-                usage: None,
-                context_limit: 0,
-                model: None,
-            },
-            "UsageUpdated" => Agent2Ui::UsageUpdated {
-                turn_id: "t".into(),
-                round_num: 0,
-                usage: deepx_types::UsageInfo::default(),
-                context_limit: 1,
-                model: "m".into(),
-            },
-            "CacheDiagnostics" => Agent2Ui::CacheDiagnostics {
-                prefix_hash: "h".into(),
-                prefix_changed: false,
-                change_reasons: vec![],
-            },
-            "Done" => Agent2Ui::Done,
-            "CompactStart" => Agent2Ui::CompactStart {
-                turns_total: 1,
-                turns_keeping: 1,
-            },
-            "CompactEnd" => Agent2Ui::CompactEnd {
-                summary_chars: 0,
-                turns_compacted: 0,
-                turns_removed: 0,
-            },
-            "CompactDelta" => Agent2Ui::CompactDelta { delta: "d".into() },
-            "Cancelled" => Agent2Ui::Cancelled,
-            "ShutdownAck" => Agent2Ui::ShutdownAck,
-            "Ready" => Agent2Ui::Ready,
-            "AuditRecord" => Agent2Ui::AuditRecord {
-                tool_name: "n".into(),
-                result_summary: "r".into(),
-                success: true,
-                time: "t".into(),
-                args: "a".into(),
-            },
-            "ExecProgress" => Agent2Ui::ExecProgress {
-                tool_call_id: "c".into(),
-                stream: "stdout".into(),
-                seq: 0,
-                chunk: "c".into(),
-            },
-            "ToolCallPreview" => Agent2Ui::ToolCallPreview {
-                turn_id: "t".into(),
-                round_num: 0,
-                index: 0,
-                id: "i".into(),
-                name: "n".into(),
-                args_so_far: "a".into(),
-            },
-            "CodeDelta" => Agent2Ui::CodeDelta {
-                lines_added: 1,
-                lines_removed: 0,
-                files_created: 0,
-                files_deleted: 0,
-                file: None,
-            },
-            "SkillsChanged" => Agent2Ui::SkillsChanged {
-                status: deepx_proto::SkillsStatus {
-                    available: vec![],
-                    active: vec![],
-                    catalog_revision: String::new(),
-                    context_epoch: 0,
-                    operation_revision: 0,
-                    token_budget: 0,
-                    token_usage: 0,
-                    runtime: vec![],
-                    diagnostics: vec![],
-                },
-            },
-            "SkillOperationResolved" => Agent2Ui::SkillOperationResolved {
-                operation_id: "o".into(),
-                success: true,
-                revision: 1,
-                error: None,
-            },
-            "PermissionRequest" => Agent2Ui::PermissionRequest {
-                tool_call_id: "c".into(),
-                tool_name: "n".into(),
-                reason: "r".into(),
-                paths: vec![],
-                category: "c".into(),
-                level: 1,
-                risk: PermissionRisk::Low,
-                consequence: "c".into(),
-            },
-            "AskUser" => Agent2Ui::AskUser {
-                turn_id: "t".into(),
-                round_num: 0,
-                ask_id: "a".into(),
-                mode: AskMode::Single,
-                questions: vec![],
-            },
-            "AskResolved" => Agent2Ui::AskResolved {
-                ask_id: "a".into(),
-                resolution: AskResolution::Answered,
-            },
-            "AskRejected" => Agent2Ui::AskRejected {
-                ask_id: "a".into(),
-                message: "m".into(),
-            },
-            other => panic!("unhandled variant in sample_agent2ui: {other}"),
-        }
-    }
-
-    #[test]
-    fn agent2ui_channel_covers_all_variants() {
-        use deepx_domain::RingingChannel::{Control, Conversation, Tool};
-        let expect = [
-            ("TurnStart", Conversation),
-            ("TurnEnd", Conversation),
-            ("RoundDelta", Conversation),
-            ("RoundComplete", Conversation),
-            ("SessionRestored", Conversation),
-            ("MoreTurns", Conversation),
-            ("ProviderRetrying", Conversation),
-            ("UsageUpdated", Conversation),
-            ("CacheDiagnostics", Conversation),
-            ("CompactStart", Conversation),
-            ("CompactEnd", Conversation),
-            ("CompactDelta", Conversation),
-            ("Cancelled", Conversation),
-            ("ToolResults", Tool),
-            ("ToolExecDelta", Tool),
-            ("ExecProgress", Tool),
-            ("ToolCallPreview", Tool),
-            ("ToolNotice", Tool),
-            ("AuditRecord", Tool),
-            ("CodeDelta", Tool),
-            ("PermissionRequest", Tool),
-            ("SessionCreated", Control),
-            ("Error", Control),
-            ("PlanSubmitted", Control),
-            ("PlanResolved", Control),
-            ("Dashboard", Control),
-            ("Done", Control),
-            ("ShutdownAck", Control),
-            ("Ready", Control),
-            ("SkillsChanged", Control),
-            ("SkillOperationResolved", Control),
-            ("AskUser", Control),
-            ("AskResolved", Control),
-            ("AskRejected", Control),
-        ];
-        for (name, expected) in expect {
-            let event = sample_agent2ui(name);
-            assert_eq!(
-                agent2ui_channel(&event),
-                Some(expected),
-                "variant {name} must belong to {expected:?}",
-            );
-        }
-    }
 }

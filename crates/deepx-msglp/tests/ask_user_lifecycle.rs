@@ -396,7 +396,7 @@ fn run_case_with_delay(
     + 'static,
 ) -> Vec<String> {
     SESSION_INIT.call_once(|| {
-        deepx_session::SessionManager::init(deepx_types::platform::data_dir(), false);
+        deepx_session::SessionManager::init(deepx_types::platform::data_dir());
     });
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(

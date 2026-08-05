@@ -96,6 +96,10 @@ fn process_id(ctx: &ToolCallCtx, operation: &str) -> Result<u32, ToolResult> {
 fn handle_check(ctx: ToolCallCtx) -> ToolResult {
     let id = match process_id(&ctx, "process.check") { Ok(id) => id, Err(result) => return result };
 
+    // 刷新终态：子进程已退出则立即反映（孙进程持管道时 EOF 不达，
+    // 原实现状态停在 running，模型会误以为任务未结束）。
+    let _ = ProcessRegistry::try_wait(id);
+
     match ProcessRegistry::get_info(id) {
         Some(info) => process_ok(process_info_ok(id, info)),
         None => process_error(

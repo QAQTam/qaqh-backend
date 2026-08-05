@@ -73,12 +73,16 @@ fn default_args() -> serde_json::Value {
     serde_json::Value::Object(Default::default())
 }
 
-type ExecuteResponse = crate::ToolResult;
+/// worker 执行结果 + 账本变更增量（随 HTTP 响应回传，daemon 侧同步本地账本）。
+struct ExecuteOutcome {
+    result: crate::ToolResult,
+    state_delta: Vec<crate::file_state::StateEntry>,
+}
 
 /// Job handed to the serial execution worker.
 struct ExecuteJob {
     request: ExecuteRequest,
-    respond: mpsc::Sender<ExecuteResponse>,
+    respond: mpsc::Sender<ExecuteOutcome>,
 }
 
 fn authorized(request: &tiny_http::Request, token: &str) -> bool {
@@ -130,6 +134,57 @@ fn text_response(
     )
 }
 
+/// 执行单个工具调用（catch_unwind 防护），返回结果 + 账本增量。
+/// 串行 worker 与 process 内联分支共用。
+fn run_tool(request: &ExecuteRequest) -> ExecuteOutcome {
+    let name = request.name.clone();
+    let args = serde_json::to_string(&request.args).unwrap_or_else(|_| "{}".into());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::execution::execute_with_context(&request.name, &request.action, &args, &request.call_id, None)
+    }))
+    .unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".into());
+        crate::execution::ToolExecResult {
+            content: format!("[ERROR] tool '{name}' panicked: {message}"),
+            success: false,
+            result: crate::ToolResult::error(format!("tool '{name}' panicked: {message}")),
+            meta: crate::ToolExecMeta {
+                name: name.clone(),
+                elapsed_ms: 0,
+                output_size: 0,
+                success: false,
+                args_summary: String::new(),
+            },
+            code_delta: None,
+            skill_effects: Vec::new(),
+        }
+    });
+    ExecuteOutcome {
+        result: result.result,
+        state_delta: crate::file_state::take_pending(),
+    }
+}
+
+/// 扁平协议响应：ToolResult 序列化为顶层字段 + state_delta 附加
+/// （daemon 端 HttpExecuteResponse 用 #[serde(flatten)] 解析）。
+fn respond_outcome(request: tiny_http::Request, outcome: ExecuteOutcome) {
+    let mut payload = serde_json::to_value(&outcome.result).unwrap_or_else(|_| {
+        serde_json::json!({ "status": "error", "message": "result serialization failed" })
+    });
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "state_delta".to_string(),
+            serde_json::to_value(&outcome.state_delta)
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        );
+    }
+    let _ = request.respond(json_response(tiny_http::StatusCode(200), &payload));
+}
+
 fn handle_execute(
     mut request: tiny_http::Request,
     _token: &str,
@@ -168,6 +223,18 @@ fn handle_execute(
     if parsed.call_id.is_empty() {
         parsed.call_id = format!("serve_{}", next_id.fetch_add(1, Ordering::SeqCst));
     }
+
+    // process 工具（check/wait/kill）内联执行：进程注册表是内存状态且线程
+    // 安全，无需串行 worker——长任务（如长 exec 跑数分钟）执行期间必须能
+    // 即时 check/kill 抢占，否则 kill 请求会排队到任务结束，无法中断。
+    // 不 set workspace：进程注册表与 workspace 无关，避免干扰 worker 状态。
+    if parsed.name == "process" {
+        crate::runtime::set_context(&parsed.session_id, 4);
+        let outcome = run_tool(&parsed);
+        respond_outcome(request, outcome);
+        return;
+    }
+
     let (respond, received) = mpsc::channel();
     match tx.send(ExecuteJob {
         request: parsed,
@@ -176,10 +243,13 @@ fn handle_execute(
         Ok(()) => {
             // Wait for the serial worker. No timeout: tool duration is the
             // contract; control endpoints are served on other threads.
-            let response = received
+            let outcome = received
                 .recv()
-                .unwrap_or_else(|_| crate::ToolResult::error("workspace execution worker unavailable"));
-            let _ = request.respond(json_response(tiny_http::StatusCode(200), &response));
+                .unwrap_or_else(|_| ExecuteOutcome {
+                    result: crate::ToolResult::error("workspace execution worker unavailable"),
+                    state_delta: Vec::new(),
+                });
+            respond_outcome(request, outcome);
         }
         Err(_) => {
             let _ = request.respond(text_response(
@@ -215,43 +285,8 @@ pub fn serve(host: &str, port: u16, token: &str) -> Result<(), String> {
             while let Ok(job) = rx.recv() {
                 crate::runtime::set_context(&job.request.session_id, 4);
                 crate::workspace::set_process_workspace(&job.request.workspace);
-                let args = serde_json::to_string(&job.request.args).unwrap_or_else(|_| "{}".into());
-                // 工具 panic 防护（Q: 工具 panic 后 daemon 怎么拿到结果？）：
-                // catch_unwind 捕获 handler panic → 返回结构化错误结果，
-                // executor 线程存活，serve 继续服务。panic 消息回传 LLM，
-                // 不静默丢弃也不杀死服务。
-                let name = job.request.name.clone();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::execution::execute_with_context(
-                        &job.request.name,
-                        &job.request.action,
-                        &args,
-                        &job.request.call_id,
-                        None,
-                    )
-                }))
-                .unwrap_or_else(|payload| {
-                    let message = payload
-                        .downcast_ref::<&str>()
-                        .map(|s| (*s).to_string())
-                        .or_else(|| payload.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "unknown panic".into());
-                    crate::execution::ToolExecResult {
-                        content: format!("[ERROR] tool '{name}' panicked: {message}"),
-                        success: false,
-                        result: crate::ToolResult::error(format!("tool '{name}' panicked: {message}")),
-                        meta: crate::ToolExecMeta {
-                            name: name.clone(),
-                            elapsed_ms: 0,
-                            output_size: 0,
-                            success: false,
-                            args_summary: String::new(),
-                        },
-                        code_delta: None,
-                        skill_effects: Vec::new(),
-                    }
-                });
-                let _ = job.respond.send(result.result);
+                let outcome = run_tool(&job.request);
+                let _ = job.respond.send(outcome);
             }
             // channel 断开（唯一 sender 是 HTTP 线程持有的 Arc<tx>，只有
             // 在 serve 关闭路径才会全断）→ 异常退出，让 supervisor 重启。

@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use deepx_message::Effect;
-use deepx_proto::AskAnswer;
+use deepx_domain::AskAnswer;
 use deepx_types::UsageInfo;
 
 use super::engine_tool::ToolEngine;
@@ -515,10 +515,7 @@ impl TurnEngine {
                 deepx_domain::ControlEvent::InteractionRequested {
                     interaction_id: ask.call_id.clone(),
                     turn_id: state.turn_id.clone(),
-                    mode: match ask.mode {
-                        deepx_proto::AskMode::Single => deepx_domain::AskMode::Single,
-                        deepx_proto::AskMode::Batch => deepx_domain::AskMode::Batch,
-                    },
+                    mode: ask.mode,
                     questions: ask
                         .questions
                         .iter()

@@ -20,8 +20,6 @@ compact_skip: number,
  * Persisted so PLAN/CODE mode survives agent restart within the same session.
  */
 mode: number, skills: SkillSessionStateV2,
-/** True if this session has messages in the Turso SQLite store. */
-turso_backed: boolean,
 /** True if an agent process is currently running for this session. */
 running: boolean,
 };

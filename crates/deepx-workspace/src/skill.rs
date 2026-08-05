@@ -181,7 +181,7 @@ fn handle_skills(ctx: crate::ToolCallCtx) -> ToolResult {
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register(ToolHandler {
+    mgr.register_with_placement(ToolHandler {
         key: "skills".to_string(),
         description: "Manage Agent Skills through one fixed typed interface. Use activate before acting when a task matches the catalog; retain or release when review is due; list for effective sources and diagnostics; resource for contained bundled files; validate for portability checks. Skill metadata never bypasses DeepX permissions.",
         input_schema: serde_json::json!({
@@ -244,5 +244,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         handler: handle_skills,
         risk: ToolRisk::ReadOnly,
         default_timeout: std::time::Duration::from_secs(15),
-    });
+    },
+    crate::ToolPlacement::Workspace,
+);
 }

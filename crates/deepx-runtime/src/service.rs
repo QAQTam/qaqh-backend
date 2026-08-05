@@ -1,10 +1,14 @@
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 
-use deepx_proto::{Agent2Ui, AskAnswer, ControlSnapshot, Ui2Agent};
+use deepx_domain::{
+    ConversationCommand, ConversationMode, ControlCommand, ImageBlock, ToolCommand,
+};
+use deepx_proto::SessionActivityState;
+use deepx_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
 use serde_json::{Value, json};
 
-use crate::{AgentRegistry, EventBus, RingingHub};
+use crate::{AgentRegistry, RingingHub};
 
 /// workspace serve 当前运行状态（daemon 内存态，供前端展示诊断依据）。
 #[derive(Debug, Clone, Default)]
@@ -22,28 +26,19 @@ pub struct WorkspaceRuntimeState {
 #[derive(Clone)]
 pub struct DeepxService {
     registry: Arc<Mutex<AgentRegistry>>,
-    events: EventBus,
     hub: std::sync::OnceLock<Arc<RingingHub>>,
     workspace_state: Arc<Mutex<WorkspaceRuntimeState>>,
 }
 
 impl DeepxService {
-    pub fn init(events: EventBus) -> Self {
+    pub fn init() -> Self {
         let config = deepx_config::Config::load().unwrap_or_default();
-        deepx_session::SessionManager::init(
-            deepx_types::platform::data_dir(),
-            config.turso_enabled(),
-        );
+        deepx_session::SessionManager::init(deepx_types::platform::data_dir());
         Self {
-            registry: Arc::new(Mutex::new(AgentRegistry::new(events.clone()))),
-            events,
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
             hub: std::sync::OnceLock::new(),
             workspace_state: Arc::new(Mutex::new(WorkspaceRuntimeState::default())),
         }
-    }
-
-    pub fn events(&self) -> &EventBus {
-        &self.events
     }
 
     /// 挂载 Ringing 运行时（worker 事件双投）。
@@ -85,33 +80,6 @@ impl DeepxService {
             );
         }
         Ok(())
-    }
-
-    pub fn snapshot(&self, attached_sessions: Vec<String>) -> ControlSnapshot {
-        let mut session_events = self.events.projections_for(&attached_sessions);
-        for seed in &attached_sessions {
-            let projected = session_events.entry(seed.clone()).or_default();
-            let has_baseline = projected.iter().any(|event| {
-                matches!(
-                    event,
-                    Agent2Ui::SessionCreated { .. } | Agent2Ui::SessionRestored { .. }
-                )
-            });
-            if !has_baseline && let Some(mut persisted) = persisted_session_projection(seed) {
-                persisted.append(projected);
-                *projected = persisted;
-            }
-        }
-        ControlSnapshot {
-            sessions: self.list_sessions(),
-            activities: self
-                .registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .activities(),
-            attached_sessions,
-            session_events,
-        }
     }
 
     pub fn session_scoped(method: &str) -> bool {
@@ -185,7 +153,6 @@ impl DeepxService {
                     return Ok(Value::Null);
                 };
                 let mut value = serde_json::to_value(&meta).map_err(err)?;
-                value["turso_backed"] = json!(manager.is_turso_backed(&meta.seed));
                 value["running"] = json!(self.registry()?.is_running(&meta.seed));
                 Ok(value)
             }
@@ -210,13 +177,13 @@ impl DeepxService {
                 let text = pstr(params, "text")?;
                 let files = pstrings(params, "files");
                 let text = with_file_previews(text, &files);
-                let images: Vec<deepx_proto::ImageBlock> = params
+                let images: Vec<ImageBlock> = params
                     .get("images")
                     .and_then(|v| v.as_array())
                     .map(|arr| {
                         arr.iter()
                             .filter_map(|img| {
-                                Some(deepx_proto::ImageBlock {
+                                Some(ImageBlock {
                                     mime_type: img.get("mimeType")?.as_str()?.to_string(),
                                     data: img.get("data")?.as_str()?.to_string(),
                                 })
@@ -226,43 +193,32 @@ impl DeepxService {
                     .unwrap_or_default();
                 self.send_user_input(seed, text, images)
             }
-            "session.set_mode" => self.send(
+            "session.set_mode" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::SetMode {
-                    mode: pstr(params, "mode")?,
-                },
+                RingingCommand::Conversation(ConversationCommand::ConversationSetMode {
+                    mode: parse_conversation_mode(&pstr(params, "mode")?)?,
+                }),
             ),
-            "session.cancel" => self.send(seed()?, Ui2Agent::Cancel),
+            "session.cancel" => self.send_ringing_cmd(
+                seed()?,
+                RingingCommand::Conversation(ConversationCommand::ConversationCancel {
+                    turn_id: None,
+                }),
+            ),
             "session.compact" => self.compact_idle_session(seed()?),
-            "session.undo_turn" => self.send(
+            "session.undo_turn" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::UndoTurn {
+                RingingCommand::Conversation(ConversationCommand::ConversationUndoTurn {
                     turn_id: pstr2(params, "turn_id", "turnId")?,
-                },
+                }),
             ),
-            "session.load_more_turns" => self.send(
+            "session.load_more_turns" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::LoadMoreTurns {
+                RingingCommand::Conversation(ConversationCommand::ConversationLoadMore {
                     before_turn_id: pstr2(params, "before_turn_id", "beforeTurnId")?,
                     count: 20,
-                },
+                }),
             ),
-            "session.replay_events" => {
-                let seed = seed()?;
-                let mut projections = self.events.projections_for(std::slice::from_ref(&seed));
-                let mut events = projections.remove(&seed).unwrap_or_default();
-                if !events.iter().any(|event| {
-                    matches!(
-                        event,
-                        Agent2Ui::SessionCreated { .. } | Agent2Ui::SessionRestored { .. }
-                    )
-                }) && let Some(mut persisted) = persisted_session_projection(&seed)
-                {
-                    persisted.append(&mut events);
-                    events = persisted;
-                }
-                Ok(serde_json::to_value(events).map_err(err)?)
-            }
             "session.close" => {
                 self.registry()?.close(&seed()?);
                 Ok(Value::Null)
@@ -275,64 +231,66 @@ impl DeepxService {
             }
             "session.dashboard" => dashboard(&seed()?),
             "session.get_activity" => activity(&seed()?),
-            "interaction.permission" => self.send(
+            "interaction.permission" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::PermissionResponse {
+                RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
                     tool_call_id: pstr2(params, "tool_call_id", "toolCallId")?,
                     approved: pbool(params, "approved"),
                     trust_folder: pbool2(params, "trust_folder", "trustFolder"),
-                },
+                }),
             ),
-            "interaction.ask_response" => self.send(
+            "interaction.ask_response" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::AskResponse {
-                    ask_id: pstr2(params, "ask_id", "askId")?,
+                RingingCommand::Control(ControlCommand::InteractionAskRespond {
+                    interaction_id: pstr2(params, "ask_id", "askId")?,
                     answers: serde_json::from_value(
                         params.get("answers").cloned().unwrap_or_else(|| json!([])),
                     )
                     .map_err(err)?,
-                },
+                }),
             ),
-            "interaction.ask_dismiss" => self.send(
+            "interaction.ask_dismiss" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::AskDismiss {
-                    ask_id: pstr2(params, "ask_id", "askId")?,
-                },
+                RingingCommand::Control(ControlCommand::InteractionAskDismiss {
+                    interaction_id: pstr2(params, "ask_id", "askId")?,
+                }),
             ),
-            "interaction.plan_review" => self.send(
+            "interaction.plan_review" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::PlanReview {
-                    call_id: pstr2(params, "call_id", "callId")?,
+                RingingCommand::Control(ControlCommand::PlanReviewRespond {
+                    interaction_id: pstr2(params, "call_id", "callId")?,
                     approved: pbool(params, "approved"),
                     message: params
                         .get("message")
                         .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
+                        .filter(|m| !m.is_empty())
+                        .map(str::to_string),
                     autonomous: pbool(params, "autonomous"),
-                },
+                }),
             ),
-            "skills.operation" => self.send(
+            "skills.operation" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::SkillOperation {
+                RingingCommand::Control(ControlCommand::SkillsOperation {
                     operation_id: pstr2(params, "operation_id", "operationId")?,
                     action: pstr(params, "action")?,
                     name: pstr(params, "name")?,
-                    expected_revision: pu64_2(params, "expected_revision", "expectedRevision"),
-                },
+                }),
             ),
-            "skills.reload" => self.send(seed()?, Ui2Agent::ReloadSkills),
-            "skills.activate" => self.send(
+            "skills.reload" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::ActivateSkill {
-                    name: pstr(params, "name")?,
-                },
+                RingingCommand::Control(ControlCommand::SkillsReload),
             ),
-            "skills.unload" => self.send(
+            "skills.activate" => self.send_ringing_cmd(
                 seed()?,
-                Ui2Agent::UnloadSkill {
+                RingingCommand::Control(ControlCommand::SkillsActivate {
                     name: pstr(params, "name")?,
-                },
+                }),
+            ),
+            "skills.unload" => self.send_ringing_cmd(
+                seed()?,
+                RingingCommand::Control(ControlCommand::SkillsRelease {
+                    name: pstr(params, "name")?,
+                }),
             ),
             "skills.list_tools" => Ok(json!(deepx_workspace::runtime::all_tool_names())),
             "workspace.get" => Ok(json!(workspace(&seed()?))),
@@ -342,7 +300,10 @@ impl DeepxService {
                 std::fs::create_dir_all(&dir).map_err(err)?;
                 std::fs::write(dir.join("workspace.txt"), pstr(params, "path")?.trim())
                     .map_err(err)?;
-                let _ = self.registry()?.send(&seed, Ui2Agent::ReloadConfig);
+                self.send_ringing_cmd(
+                    seed,
+                    RingingCommand::Control(ControlCommand::AgentReloadConfig),
+                )?;
                 Ok(Value::Null)
             }
             "git.diff" => git(
@@ -386,45 +347,6 @@ impl DeepxService {
                 self.save_config(params)?;
                 Ok(Value::Null)
             }
-            "config.set_database_enabled" => {
-                let mut config = deepx_config::Config::load().unwrap_or_default();
-                let available = deepx_session::turso_backend_available();
-                config.database.enabled = pbool(params, "enabled") && available;
-                config.save()?;
-                deepx_session::SessionManager::global().set_turso_enabled(config.database.enabled);
-                self.registry()?.send_all(Ui2Agent::ReloadConfig);
-                Ok(json!({"enabled": config.database.enabled, "available": available}))
-            }
-            "config.set_permission_level" => {
-                let level = pu64(params, "level") as u8;
-                if !(1..=4).contains(&level) {
-                    return Err("permission level must be between 1 and 4".into());
-                }
-                let mut config = deepx_config::Config::load().unwrap_or_default();
-                config.permission_level = level;
-                config.save()?;
-                self.registry()?.send_all(Ui2Agent::ReloadConfig);
-                Ok(Value::Null)
-            }
-            "config.database_migration_count" => Ok(
-                json!({"pending": deepx_session::SessionManager::global().count_pending_migration()}),
-            ),
-            "config.database_migrate" => Ok(serde_json::to_value(
-                deepx_session::SessionManager::global().migrate_all_to_turso()?,
-            )
-            .map_err(err)?),
-            "config.database_audit" => Ok(serde_json::to_value(
-                deepx_session::SessionManager::global().audit_all_mirrors(),
-            )
-            .map_err(err)?),
-            "config.database_reconcile" => Ok(serde_json::to_value(
-                deepx_session::SessionManager::global().reconcile_all_mirrors(),
-            )
-            .map_err(err)?),
-            "config.database_readiness" => Ok(serde_json::to_value(
-                deepx_session::SessionManager::global().db_primary_readiness(),
-            )
-            .map_err(err)?),
             "todo.status" => parse_json_string(deepx_workspace::todo::todo_status_json(&seed()?)?),
             "todo.cancel" => parse_json_string(deepx_workspace::todo::todo_cancel_json(
                 &seed()?,
@@ -467,7 +389,6 @@ impl DeepxService {
     /// interaction waiting for its lease owner. Used by lifecycle takeover so
     /// an updater cannot race a newly-started turn.
     pub fn has_active_work(&self) -> bool {
-        use deepx_proto::SessionActivityState;
 
         self.registry
             .lock()
@@ -505,8 +426,10 @@ impl DeepxService {
             .unwrap_or_else(|e| e.into_inner()) = state;
     }
 
-    fn send(&self, seed: String, frame: Ui2Agent) -> Result<Value, String> {
-        self.registry()?.send(&seed, frame)?;
+    /// 构造 Ringing worker 命令信封并转发给 agent（legacy Ui2Agent 帧已拆除）。
+    fn send_ringing_cmd(&self, seed: String, command: RingingCommand) -> Result<Value, String> {
+        let env = RingingWorkerCommandEnvelope::new(seed.clone(), command_id(), command);
+        self.send_ringing_command(&seed, &env)?;
         Ok(Value::Null)
     }
 
@@ -514,7 +437,7 @@ impl DeepxService {
         &self,
         seed: String,
         text: String,
-        images: Vec<deepx_proto::ImageBlock>,
+        images: Vec<ImageBlock>,
     ) -> Result<Value, String> {
         let mut registry = self.registry()?;
         // An inactive persisted session has no activity entry yet. Spawn it
@@ -554,19 +477,26 @@ impl DeepxService {
             return Err("session activity changed before message admission".into());
         }
         if let Some((activity, _)) = reservation.as_ref() {
-            crate::activity::publish_activity_dual(
-                &self.events,
+            crate::activity::publish_activity(
                 self.hub.get().map(|v| &**v),
                 activity,
             );
         }
-        if let Err(error) = registry.send(&seed, Ui2Agent::UserInput { text, images }) {
+        let env = RingingWorkerCommandEnvelope::new(
+            seed.clone(),
+            command_id(),
+            RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+                text,
+                images,
+                attachments: None,
+            }),
+        );
+        if let Err(error) = registry.send_ringing(&seed, &env) {
             if let Some((activity, previous)) = reservation
                 && let Some(rollback) =
                     registry.rollback_input_reservation(&seed, activity.seq, previous)
             {
-                crate::activity::publish_activity_dual(
-                    &self.events,
+                crate::activity::publish_activity(
                     self.hub.get().map(|v| &**v),
                     &rollback,
                 );
@@ -586,16 +516,21 @@ impl DeepxService {
             format!("session compact requires an idle session; current state: {state}")
         })?;
         let reservation_seq = reservation.seq;
-        crate::activity::publish_activity_dual(
-            &self.events,
+        crate::activity::publish_activity(
             self.hub.get().map(|v| &**v),
             &reservation,
         );
 
-        if let Err(error) = registry.send(&seed, Ui2Agent::Compact) {
+        let env = RingingWorkerCommandEnvelope::new(
+            seed.clone(),
+            command_id(),
+            RingingCommand::Conversation(ConversationCommand::ConversationCompact {
+                turn_id: None,
+            }),
+        );
+        if let Err(error) = registry.send_ringing(&seed, &env) {
             if let Some(rollback) = registry.rollback_idle_reservation(&seed, reservation_seq) {
-                crate::activity::publish_activity_dual(
-                    &self.events,
+                crate::activity::publish_activity(
                     self.hub.get().map(|v| &**v),
                     &rollback,
                 );
@@ -613,7 +548,6 @@ impl DeepxService {
             .into_iter()
             .map(|meta| {
                 let mut value = serde_json::to_value(&meta).unwrap_or_default();
-                value["turso_backed"] = json!(manager.is_turso_backed(&meta.seed));
                 value["running"] = json!(registry.is_running(&meta.seed));
                 value
             })
@@ -688,11 +622,6 @@ impl DeepxService {
                 .map(str::to_string)
                 .collect();
         }
-        if let Some(enabled) =
-            value2(params, "database_enabled", "databaseEnabled").and_then(Value::as_bool)
-        {
-            cfg.database.enabled = enabled;
-        }
         if let Some(path) =
             value2(params, "tokenizer_path", "tokenizerPath").and_then(Value::as_str)
         {
@@ -746,8 +675,9 @@ impl DeepxService {
             cfg.auto_compact_threshold = threshold;
         }
         cfg.save()?;
-        deepx_session::SessionManager::global().set_turso_enabled(cfg.database.enabled);
-        self.registry()?.send_all(Ui2Agent::ReloadConfig);
+        self.registry()?.send_ringing_all(RingingCommand::Control(
+            ControlCommand::AgentReloadConfig,
+        ));
         Ok(())
     }
 }
@@ -778,11 +708,6 @@ fn pbool2(params: &Value, snake: &str, camel: &str) -> bool {
 }
 fn pu64(params: &Value, key: &str) -> u64 {
     params.get(key).and_then(Value::as_u64).unwrap_or_default()
-}
-fn pu64_2(params: &Value, snake: &str, camel: &str) -> u64 {
-    value2(params, snake, camel)
-        .and_then(Value::as_u64)
-        .unwrap_or_default()
 }
 fn pstrings(params: &Value, key: &str) -> Vec<String> {
     params
@@ -908,45 +833,6 @@ fn dashboard(seed: &str) -> Result<Value, String> {
     Ok(json!({"tasks":tasks,"recent_edits":edits}))
 }
 
-fn persisted_session_projection(seed: &str) -> Option<Vec<Agent2Ui>> {
-    const INITIAL_LOAD_COUNT: usize = 20;
-    let (meta, archive_messages, compact_context) =
-        deepx_session::SessionManager::global().load_for_resume(seed)?;
-    // The daemon snapshot and the agent resume event must describe the same
-    // active transcript. Mixing the immutable archive here with the compact
-    // checkpoint in the worker produced incompatible restore baselines.
-    let messages = compact_context
-        .as_ref()
-        .map(|context| context.messages.as_slice())
-        .unwrap_or(archive_messages.as_slice());
-    let (total, turns) =
-        deepx_msglp::util::project_recent_turns_from_messages(seed, &messages, INITIAL_LOAD_COUNT);
-    let cache_reported_requests = meta.effective_cache_reported_requests();
-    Some(vec![Agent2Ui::SessionRestored {
-        seed: seed.to_string(),
-        turns,
-        tokens_used: meta.usage_totals.total_tokens,
-        cache_hit_pct: cache_hit_pct(&meta.usage_totals),
-        usage: meta.last_usage,
-        usage_totals: meta.usage_totals,
-        usage_requests: meta.usage_requests,
-        cache_reported_requests,
-        total_turns: total as u32,
-        has_more: total > INITIAL_LOAD_COUNT,
-    }])
-}
-
-fn cache_hit_pct(usage: &deepx_types::UsageInfo) -> f64 {
-    let total = usage
-        .prompt_cache_hit_tokens
-        .saturating_add(usage.prompt_cache_miss_tokens);
-    if total == 0 {
-        0.0
-    } else {
-        f64::from(usage.prompt_cache_hit_tokens) * 100.0 / f64::from(total)
-    }
-}
-
 fn activity(seed: &str) -> Result<Value, String> {
     let (_, messages) = deepx_session::SessionManager::global()
         .load(seed)
@@ -982,10 +868,9 @@ fn activity(seed: &str) -> Result<Value, String> {
 
 fn load_config() -> Result<Value, String> {
     let cfg = deepx_config::Config::load().map_err(err)?;
-    let database_available = deepx_session::turso_backend_available();
     let providers = deepx_config::registry::all_providers().into_iter().map(|provider| json!({"id":provider.id,"display":provider.display,"endpoints":provider.endpoints.into_iter().map(|endpoint|json!({"id":endpoint.id,"display":endpoint.display,"base_url":endpoint.base_url,"default_model":endpoint.default_model,"models":endpoint.models,"stateful":endpoint.stateful,"beta":endpoint.beta})).collect::<Vec<_>>() })).collect::<Vec<_>>();
     Ok(
-        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"active_profile":cfg.active_profile,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"database":{"enabled":cfg.database.enabled && database_available,"available":database_available},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"workspace":{"mode":cfg.workspace.mode},"tokenizer_path":cfg.tokenizer_path}),
+        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"active_profile":cfg.active_profile,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"workspace":{"mode":cfg.workspace.mode},"tokenizer_path":cfg.tokenizer_path}),
     )
 }
 
@@ -1132,7 +1017,6 @@ fn plan_action(seed: &str, item_id: &str, action: &str, comment: &str) -> Result
 }
 
 #[allow(dead_code)]
-fn _assert_answers(_: Vec<AskAnswer>) {}
 
 #[cfg(test)]
 mod control_scope_tests {
@@ -1144,5 +1028,22 @@ mod control_scope_tests {
         assert!(!DeepxService::session_scoped("session.list"));
         assert!(DeepxService::session_scoped("session.get_activity"));
         assert!(DeepxService::session_scoped("session.send_message"));
+    }
+}
+
+fn command_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("svc-{nanos:x}")
+}
+
+fn parse_conversation_mode(mode: &str) -> Result<ConversationMode, String> {
+    match mode {
+        "normal" | "" => Ok(ConversationMode::Normal),
+        "plan" => Ok(ConversationMode::Plan),
+        "code" => Ok(ConversationMode::Code),
+        other => Err(format!("invalid conversation mode '{other}' (supported: normal | plan | code)")),
     }
 }

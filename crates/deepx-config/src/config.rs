@@ -1,15 +1,8 @@
 use deepx_types::{
-    ConfigStore, PersistentConfig, PersistentDatabaseConfig, PersistentMultimodalConfig,
+    ConfigStore, PersistentConfig, PersistentMultimodalConfig,
     PersistentSubagentConfig, PersistentWorkspaceConfig,
 };
 use std::collections::HashMap; // still used by profiles
-
-#[cfg(feature = "turso-backend")]
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ConfigMirrorOutbox {
-    version: u32,
-    config_json: String,
-}
 
 /// Subagent default configuration.
 ///
@@ -53,29 +46,6 @@ impl Default for SubagentConfig {
             max_tokens: 4096,
             timeout_secs: 120,
             default_tools: vec!["file".into(), "exec".into()],
-        }
-    }
-}
-
-/// Database mirror configuration (Turso local SQLite database).
-///
-/// When enabled, session messages are dual-written to both JSONL and a
-/// local SQLite database for fast querying from external tools.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DatabaseConfig {
-    /// Whether the database mirror is enabled.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Path to the local Turso database file. `None` = default location.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-
-impl Default for DatabaseConfig {
-    fn default() -> Self {
-        Self {
-            enabled: cfg!(feature = "turso-backend"),
-            url: None,
         }
     }
 }
@@ -212,8 +182,6 @@ pub struct Config {
     pub compliance_extra_keywords: Vec<String>,
     /// Whitelisted patterns exempt from content filtering.
     pub compliance_allowlist: Vec<String>,
-    /// Local Turso SQLite database mirror configuration.
-    pub database: DatabaseConfig,
     /// Multimodal (vision) LLM configuration for image understanding.
     pub multimodal: MultimodalConfig,
     /// RAG 向量引擎配置（embedding / 语义搜索 / 跨会话记忆）
@@ -280,7 +248,6 @@ impl Default for Config {
             compliance_enabled: true,
             compliance_extra_keywords: Vec::new(),
             compliance_allowlist: Vec::new(),
-            database: DatabaseConfig::default(),
             multimodal: MultimodalConfig::default(),
             rag: RagConfig::default(),
             permission_level: 4, // Unrestricted — backward compat
@@ -292,73 +259,17 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load config from disk (TOML, with optional Turso DB dual-read).
-    ///
-    /// # Loading order
-    /// 1. Read config.toml (always)
-    /// 2. If database.enabled, try reading config.db (SQLite mirror, may be newer)
-    /// 3. Apply provider registry defaults for missing fields
-    /// 4. Apply active profile overrides
+    /// Load config from disk (TOML primary store).
     pub fn load() -> Result<Self, String> {
         let store = ConfigStore::default_location();
-        let db_path = deepx_types::platform::data_dir().join("config.db");
-        Self::load_from_paths(store, db_path)
+        Self::load_from_paths(store)
     }
 
-    /// Load configuration from a TOML primary store, with a Turso fallback.
-    ///
-    /// The TOML file is authoritative whenever present because `save()` writes
-    /// it first. The database is a recovery mirror used when the TOML file is
-    /// missing or unreadable.
-    fn load_from_paths(store: ConfigStore, db_path: std::path::PathBuf) -> Result<Self, String> {
+    /// Load configuration from a TOML primary store.
+    fn load_from_paths(store: ConfigStore) -> Result<Self, String> {
         let mut cfg = Self::default();
 
-        // Step 1: always read TOML to get database.enabled flag (bootstrap)
-        let pc_toml = store.load();
-
-        // Step 2: if database mirror is enabled, try ConfigDb as a recovery fallback.
-        let db_enabled = pc_toml
-            .as_ref()
-            .and_then(|pc| pc.database.as_ref())
-            .and_then(|db| db.enabled)
-            .unwrap_or(cfg!(feature = "turso-backend"));
-
-        // A durable outbox is replayed before normal DB reads. TOML remains
-        // the bootstrap authority; the outbox only completes its DB mirror.
-        if db_enabled {
-            let _ = Self::replay_outbox_at(&db_path);
-        }
-
-        // Clone TOML data before potential move
-        let pc_toml_for_override = pc_toml.clone();
-
-        let pc = if db_enabled {
-            #[cfg(feature = "turso-backend")]
-            {
-                match Self::try_load_from_db_at(&db_path) {
-                    Ok(Some(db_pc)) => {
-                        if pc_toml.is_some() {
-                            pc_toml
-                        } else {
-                            log::info!("[Config] restored from config.db");
-                            Some(db_pc)
-                        }
-                    }
-                    Ok(None) => {
-                        // ConfigDb has no data yet (first boot after enabling)
-                        pc_toml
-                    }
-                    Err(e) => {
-                        log::warn!("[Config] config.db load failed: {e}, falling back to TOML");
-                        pc_toml
-                    }
-                }
-            }
-            #[cfg(not(feature = "turso-backend"))]
-            pc_toml
-        } else {
-            pc_toml
-        };
+        let pc = store.load();
 
         if let Some(pc) = pc {
             // ── Backward compat: migrate old provider_id → new (provider_id, endpoint) ──
@@ -477,14 +388,6 @@ impl Config {
                 cfg.compliance_allowlist = allowlist.clone();
             }
 
-            // ── Database (Turso mirror) ──
-            if let Some(ref db) = pc.database {
-                if let Some(enabled) = db.enabled {
-                    cfg.database.enabled = enabled;
-                }
-                cfg.database.url = db.url.clone();
-            }
-
             // ── Multimodal (vision) ──
             if let Some(ref mm) = pc.multimodal {
                 if let Some(enabled) = mm.enabled {
@@ -529,15 +432,6 @@ impl Config {
             if let Some(ref ws) = pc.workspace {
                 if let Some(ref mode) = ws.mode {
                     cfg.workspace.mode = mode.clone();
-                }
-            }
-        }
-
-        // TOML is authoritative for database.enabled (prevents stale ConfigDb value)
-        if let Some(ref pc_toml) = pc_toml_for_override {
-            if let Some(ref db) = pc_toml.database {
-                if let Some(enabled) = db.enabled {
-                    cfg.database.enabled = enabled;
                 }
             }
         }
@@ -629,10 +523,6 @@ impl Config {
             } else {
                 Some(self.compliance_allowlist.clone())
             },
-            database: Some(PersistentDatabaseConfig {
-                enabled: Some(self.database.enabled),
-                url: self.database.url.clone(),
-            }),
             multimodal: Some(PersistentMultimodalConfig {
                 enabled: Some(self.multimodal.enabled),
                 provider_type: if self.multimodal.provider_type.is_empty() {
@@ -665,14 +555,6 @@ impl Config {
                 mode: Some(self.workspace.mode.clone()),
             }),
         };
-        let json = serde_json::to_string(&pc).map_err(|e| format!("serialize config mirror: {e}"))?;
-        let db_path = deepx_types::platform::data_dir().join("config.db");
-        #[cfg(feature = "turso-backend")]
-        if self.database.enabled {
-            Self::write_outbox_at(&db_path, &json)?;
-        }
-        #[cfg(not(feature = "turso-backend"))]
-        let _ = (&db_path, &json);
         log::info!(
             "[Config::save] writing to {}",
             deepx_types::platform::config_path().display()
@@ -684,49 +566,7 @@ impl Config {
             ));
         }
 
-        // Dual-write: mirror to SQLite when database is enabled
-        if self.database.enabled {
-            #[cfg(feature = "turso-backend")]
-            {
-                Self::save_to_db(&json)
-                    .map_err(|e| format!("config.toml was saved but config.db mirror failed: {e}"))?;
-                Self::remove_outbox_at(&db_path)?;
-            }
-            #[cfg(not(feature = "turso-backend"))]
-            let _ = ();
-        }
-
         Ok(())
-    }
-
-    /// Try loading config from a config.db mirror. Returns Ok(None) if db is empty/unavailable.
-    #[cfg(feature = "turso-backend")]
-    fn try_load_from_db_at(db_path: &std::path::Path) -> Result<Option<PersistentConfig>, String> {
-        if !db_path.exists() {
-            return Ok(None);
-        }
-        let db = crate::config_db::ConfigDb::open(db_path)?;
-        if let Err(e) = db.init_table() {
-            log::warn!("[Config] config.db init failed: {e}");
-            return Ok(None);
-        }
-        let json_str = match db.load_config() {
-            Ok(Some(s)) => s,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let pc: PersistentConfig = serde_json::from_str(&json_str)
-            .map_err(|e| format!("deserialize config from db: {e}"))?;
-        Ok(Some(pc))
-    }
-
-    /// Write config JSON to config.db.
-    #[cfg(feature = "turso-backend")]
-    fn save_to_db(json: &str) -> Result<(), String> {
-        let db_path = deepx_types::platform::data_dir().join("config.db");
-        let db = crate::config_db::ConfigDb::open(&db_path)?;
-        db.init_table()?;
-        db.save_config(json)
     }
 
     pub fn apply_profile(&mut self, name: &str) -> Option<String> {
@@ -780,192 +620,14 @@ impl Config {
         !self.api_key.is_empty()
     }
 
-    /// Whether per-session Turso SQLite mirroring is enabled.
-    pub fn turso_enabled(&self) -> bool {
-        self.database.enabled
-    }
-
     /// Protocol derived from (provider_id, endpoint) in the registry.
     pub fn protocol(&self) -> String {
         crate::registry::protocol_for(&self.provider_id, &self.endpoint)
     }
 
-    #[cfg(any(feature = "turso-backend", test))]
-    fn outbox_path(db_path: &std::path::Path) -> std::path::PathBuf {
-        db_path.with_file_name("config-mirror-outbox.json")
-    }
 
-    #[cfg(feature = "turso-backend")]
-    fn write_outbox_at(db_path: &std::path::Path, json: &str) -> Result<(), String> {
-        let path = Self::outbox_path(db_path);
-        let tmp = path.with_extension("json.tmp");
-        let bytes = serde_json::to_vec_pretty(&ConfigMirrorOutbox { version: 1, config_json: json.into() })
-            .map_err(|e| format!("serialize config outbox: {e}"))?;
-        std::fs::write(&tmp, bytes).map_err(|e| format!("write config outbox: {e}"))?;
-        std::fs::rename(&tmp, &path).map_err(|e| format!("activate config outbox: {e}"))
-    }
 
-    #[cfg(feature = "turso-backend")]
-    fn remove_outbox_at(db_path: &std::path::Path) -> Result<(), String> {
-        let path = Self::outbox_path(db_path);
-        if path.exists() { std::fs::remove_file(path).map_err(|e| format!("remove config outbox: {e}"))?; }
-        Ok(())
-    }
 
-    fn replay_outbox_at(db_path: &std::path::Path) -> Result<(), String> {
-        #[cfg(not(feature = "turso-backend"))]
-        {
-            let _ = db_path;
-            return Ok(());
-        }
-        #[cfg(feature = "turso-backend")]
-        {
-            let path = Self::outbox_path(db_path);
-            if !path.exists() { return Ok(()); }
-            let outbox: ConfigMirrorOutbox = serde_json::from_slice(&std::fs::read(&path)
-                .map_err(|e| format!("read config outbox: {e}"))?)
-                .map_err(|e| format!("parse config outbox: {e}"))?;
-            let db = crate::config_db::ConfigDb::open(db_path)?;
-            db.init_table()?;
-            db.save_config(&outbox.config_json)?;
-            Self::remove_outbox_at(db_path)?;
-            Ok(())
-        }
-    }
-}
 
-#[cfg(all(test, not(feature = "turso-backend")))]
-mod file_only_tests {
-    use super::Config;
 
-    #[test]
-    fn disabled_backend_ignores_existing_mirror_outbox() {
-        let root = std::env::temp_dir().join(format!(
-            "deepx-config-file-only-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).expect("create test directory");
-        let db_path = root.join("config.db");
-        std::fs::write(Config::outbox_path(&db_path), b"not-json")
-            .expect("write stale outbox");
-
-        Config::replay_outbox_at(&db_path).expect("disabled backend must ignore stale outbox");
-        assert!(Config::outbox_path(&db_path).exists());
-
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
-}
-
-#[cfg(all(test, feature = "turso-backend"))]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-
-    fn temp_dir() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "deepx-config-dual-store-{}-{}-{}",
-            std::process::id(),
-            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ))
-    }
-
-    #[test]
-    fn toml_remains_authoritative_when_database_snapshot_is_stale() {
-        let root = temp_dir();
-        std::fs::create_dir_all(&root).expect("create test directory");
-        let toml_path = root.join("config.toml");
-        let db_path = root.join("config.db");
-        let store = ConfigStore::new(toml_path);
-
-        let toml = PersistentConfig {
-            api_key: Some("toml-new-key".into()),
-            database: Some(PersistentDatabaseConfig {
-                enabled: Some(true),
-                url: None,
-            }),
-            ..Default::default()
-        };
-        assert!(store.save(&toml));
-
-        let db = crate::config_db::ConfigDb::open(&db_path).expect("open database");
-        db.init_table().expect("initialize database");
-        db.save_config(
-            &serde_json::to_string(&PersistentConfig {
-                api_key: Some("stale-db-key".into()),
-                database: Some(PersistentDatabaseConfig {
-                    enabled: Some(true),
-                    url: None,
-                }),
-                ..Default::default()
-            })
-            .expect("serialize database snapshot"),
-        )
-        .expect("write database snapshot");
-
-        let cfg = Config::load_from_paths(store, db_path).expect("load config");
-        assert_eq!(cfg.api_key, "toml-new-key");
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
-
-    #[test]
-    fn database_restores_configuration_when_toml_is_missing() {
-        let root = temp_dir();
-        std::fs::create_dir_all(&root).expect("create test directory");
-        let store = ConfigStore::new(root.join("config.toml"));
-        let db_path = root.join("config.db");
-        let db = crate::config_db::ConfigDb::open(&db_path).expect("open database");
-        db.init_table().expect("initialize database");
-        db.save_config(
-            &serde_json::to_string(&PersistentConfig {
-                api_key: Some("database-only-key".into()),
-                database: Some(PersistentDatabaseConfig {
-                    enabled: Some(true),
-                    url: None,
-                }),
-                ..Default::default()
-            })
-            .expect("serialize database snapshot"),
-        )
-        .expect("write database snapshot");
-
-        let cfg = Config::load_from_paths(store, db_path).expect("restore config");
-        assert_eq!(cfg.api_key, "database-only-key");
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
-
-    #[test]
-    fn durable_outbox_replays_the_pending_database_config() {
-        let root = temp_dir();
-        std::fs::create_dir_all(&root).expect("create test directory");
-        let db_path = root.join("config.db");
-        let json = serde_json::to_string(&PersistentConfig {
-            api_key: Some("outbox-key".into()),
-            database: Some(PersistentDatabaseConfig {
-                enabled: Some(true),
-                url: None,
-            }),
-            ..Default::default()
-        })
-        .expect("serialize config");
-        Config::write_outbox_at(&db_path, &json).expect("write outbox");
-        Config::replay_outbox_at(&db_path).expect("replay outbox");
-        assert!(!Config::outbox_path(&db_path).exists());
-        let db = crate::config_db::ConfigDb::open(&db_path).expect("open database");
-        let saved = db
-            .load_config()
-            .expect("read database")
-            .expect("database config");
-        assert_eq!(saved, json);
-        std::fs::remove_dir_all(root).expect("remove test directory");
-    }
 }

@@ -230,9 +230,9 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
         continuation["end_line"] = serde_json::Value::Null;
         meta["continuation"] = continuation;
     }
-    if !explicit {
-        crate::file_state::record_read(&path, &content, total_lines);
-    }
+    // 任何 read（全文件或范围）都建立账本基线：模型后续用 start_line 盲定位时，
+    // 工具凭账本自动防漂移，无需模型手动回传 hash。
+    crate::file_state::record_read(&path, &content, total_lines);
     (ToolResult::ok_data(meta.clone(), body), meta)
 }
 
@@ -281,7 +281,7 @@ handler!(handle_diff, exec_diff);
 // ------ Registration ------
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register(ToolHandler {
+    mgr.register_with_placement(ToolHandler {
         key: "read_file".to_string(),
         description: "Read up to eight files as precise contiguous ranges. Every returned line has a stable L<number> prefix, and each file includes its hash, total line count, and a directly executable continuation when the model budget is insufficient. Directories are rejected with IS_DIRECTORY; list directory contents with exec (e.g. argv [\"rg\", \"--files\"]).",
         input_schema: serde_json::json!({
@@ -303,7 +303,9 @@ pub fn register(mgr: &mut crate::ToolManager) {
         handler: handle_read_file,
         risk: ToolRisk::ReadOnly,
         default_timeout: std::time::Duration::from_secs(15),
-    });
+    },
+    crate::ToolPlacement::Workspace,
+);
 }
 
 #[cfg(test)]

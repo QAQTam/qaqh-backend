@@ -10,6 +10,7 @@ use super::image_query;
 use super::file_edit;
 use super::file_mutate;
 use super::file_query;
+use super::apply_patch;
 
 use super::ask_user;
 use super::process_inspect;
@@ -33,6 +34,7 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     file_edit::register(&mut mgr);
     file_mutate::register(&mut mgr);
     file_query::register(&mut mgr);
+    apply_patch::register(&mut mgr);
 
     // ── Todo（直接、会话内状态工具）──
     todo::register(&mut mgr);
@@ -71,8 +73,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "ask", "delete", "edit_file", "exec", "image", "process", "read_file",
-                "skills", "todo", "web_fetch", "write",
+                "apply_patch", "ask", "delete", "edit_file", "exec", "image", "process",
+                "read_file", "skills", "todo", "web_fetch", "write",
             ]
         );
     }

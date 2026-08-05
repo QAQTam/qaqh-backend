@@ -33,10 +33,7 @@ pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
             log::info!("deepx-agent: workspace tools via HTTP backend");
         }
     }
-    let enabled = deepx_config::Config::load()
-        .map(|config| config.turso_enabled())
-        .unwrap_or(true);
-    deepx_session::SessionManager::init(deepx_types::platform::data_dir(), enabled);
+    deepx_session::SessionManager::init(deepx_types::platform::data_dir());
     let mut agent = deepx_msglp::state::agent::AgentState::init("daemon");
     if let Some(seed) = resume_seed {
         agent.session.resume_seed = Some(seed);

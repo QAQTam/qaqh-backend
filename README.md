@@ -32,8 +32,7 @@ DeepX/
 ├── apps/
 │   ├── desktop/            # Electron + Vite + SolidJS 前端
 │   ├── installer/          # egui 原生 Windows 安装器
-│   ├── updater/            # 统一更新、维护和卸载程序
-│   └── deepx-tui/          # 终端界面
+│   └── updater/            # 统一更新、维护和卸载程序
 ├── crates/
 │   ├── deepx-daemon        # 后端守护进程
 │   ├── deepx-runtime       # 应用服务与运行时

@@ -1,8 +1,8 @@
 //! deepx-msglp: message-loop driver for the agent child process.
 //!
 //! The primary production Loop is [`ringing_v1::loop_core::Loop`] (Ringing V1 architecture).
-//! It reads [`Ui2Agent`] frames via an mpsc channel fed by a background I/O
-//! thread, and writes [`Agent2Ui`] frames via a channel consumed by a background
+//! It reads Ringing worker command envelopes (`RingingWorkerCommandEnvelope`) via an mpsc channel fed by a background I/O
+//! thread, and writes Ringing worker event envelopes via a channel consumed by a background
 //! writer thread. It drives the full user-input → gate → tools → response
 //! pipeline through a set of pluggable `Engine` implementations.
 //!

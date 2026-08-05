@@ -5,15 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use deepx_domain::{ActivityState, ControlEvent, DomainEvent};
 use deepx_proto::{SessionActivity, SessionActivityState};
 
-use crate::{EventBus, RingingHub};
+use crate::RingingHub;
 
 /// 活动状态双发：legacy `SessionActivity` 流 + Ringing `SessionActivityChanged`。
-pub fn publish_activity_dual(
-    events: &EventBus,
-    hub: Option<&RingingHub>,
-    activity: &SessionActivity,
-) {
-    events.publish_activity(activity.clone());
+pub fn publish_activity(hub: Option<&RingingHub>, activity: &SessionActivity) {
     let Some(hub) = hub else {
         return;
     };

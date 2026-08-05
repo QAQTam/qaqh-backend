@@ -95,7 +95,7 @@ impl SessionEngine {
             agent.config.permission_level = cfg.permission_level;
             agent.config.permission_level = cfg.permission_level;
             deepx_workspace::workspace::load_session_workspace(&agent.session.seed);
-            deepx_session::SessionManager::global().set_turso_enabled(cfg.database.enabled);
+
         }
     }
 }

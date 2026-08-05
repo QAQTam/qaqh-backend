@@ -107,6 +107,45 @@ mod atomic_write_tests {
 
         assert_eq!(std::fs::read_to_string(target).unwrap(), "after");
     }
+
+    #[test]
+    fn diff_stats_between_counts_changes_and_first_line() {
+        let before = "a\nb\nc\nd\ne\n";
+        let after = "a\nb\nX\nY\ne\n";
+        // 第 3 行起：替换 2 行
+        let (added, removed, first_line) = diff_stats_between(before, after);
+        assert_eq!((added, removed, first_line), (2, 2, 3));
+    }
+
+    #[test]
+    fn diff_stats_between_handles_insert_and_delete() {
+        let before = "a\nb\nc\n";
+        let after = "a\nb\nB2\nc\nd\n";
+        let (added, removed, first_line) = diff_stats_between(before, after);
+        assert_eq!((added, removed, first_line), (2, 0, 3));
+    }
+
+    #[test]
+    fn diff_stats_between_identical_content_is_zero() {
+        let (added, removed, first_line) = diff_stats_between("x\ny\n", "x\ny\n");
+        assert_eq!((added, removed, first_line), (0, 0, 1));
+    }
+
+    #[test]
+    fn closest_line_prefers_content_similarity_over_length() {
+        // 行长接近但内容无关的行不应胜过内容相似的行
+        let content = "fn unrelated_but_long_function_signature() -> Result<(), String> {\nfn helper() -> i32 {\n";
+        let found = closest_line(content, "fn helper() -> i32").unwrap();
+        assert_eq!(found.0, 2);
+        assert!(found.1.contains("helper"));
+    }
+
+    #[test]
+    fn closest_line_skips_empty_lines() {
+        let content = "\n\nfn target() {}\n";
+        let found = closest_line(content, "fn target() {}").unwrap();
+        assert_eq!(found.0, 3);
+    }
 }
 
 /// Normalize CRLF → LF in content. Returns (normalized, was_crlf).
@@ -134,18 +173,33 @@ pub(crate) fn normalize_newlines(content: &str) -> (String, bool) {
 
 /// Find the closest line in content to the given search string.
 /// Returns (line_number, line_content).
+///
+/// Scoring: exact containment (either direction) wins and prefers a smaller
+/// length gap (original behavior); otherwise Jaro-Winkler similarity decides,
+/// so content-related lines beat mere length lookalikes. Empty lines are
+/// skipped — a blank line is never the best diagnostic anchor.
 pub(super) fn closest_line(content: &str, search: &str) -> Option<(usize, String)> {
     let needle = search.lines().next().unwrap_or(search).trim();
     if needle.is_empty() {
         return None;
     }
-    content
-        .lines()
-        .enumerate()
-        .map(|(i, l)| (i, l, l.trim().len() as i64 - needle.len() as i64))
-        .filter(|(_, l, _)| l.contains(needle) || needle.contains(l.trim()))
-        .min_by_key(|(_, _, diff)| diff.unsigned_abs())
-        .map(|(i, l, _)| (i + 1, l.to_string()))
+    let mut best: Option<(usize, String, f64)> = None;
+    for (i, l) in content.lines().enumerate() {
+        let line = l.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let score = if line.contains(needle) || needle.contains(line) {
+            // containment: prefer smaller length gap (original behavior)
+            1.0 + 1.0 / (1.0 + (line.len() as f64 - needle.len() as f64).abs())
+        } else {
+            strsim::jaro_winkler(line, needle)
+        };
+        if best.as_ref().map_or(true, |(_, _, s)| score > *s) {
+            best = Some((i + 1, l.to_string(), score));
+        }
+    }
+    best.map(|(n, s, _)| (n, s))
 }
 
 /// Produce a unified diff between two file contents.
@@ -163,29 +217,34 @@ pub(crate) fn unified_diff(before: &str, after: &str, path: &str) -> String {
         .to_string()
 }
 
-/// Count added/removed lines and find first changed line from a unified diff.
-/// Returns (added_lines, removed_lines, first_changed_line).
-pub(crate) fn diff_stats(diff: &str) -> (u32, u32, u32) {
+/// Count added/removed lines and find the first changed line between two
+/// contents, using `similar`'s structured diff ops — no diff-text parsing.
+///
+/// `first_line` is the 1-based line of the first actual change in `before`
+/// (more precise than the unified-diff hunk header, which includes context).
+pub(crate) fn diff_stats_between(before: &str, after: &str) -> (u32, u32, u32) {
+    use similar::DiffTag;
+    let diff = similar::TextDiff::from_lines(before, after);
     let mut added = 0u32;
     let mut removed = 0u32;
     let mut first_line = 1u32;
-    let mut got_hunk = false;
-    for line in diff.lines() {
-        if line.starts_with("@@") {
-            if let Some(rest) = line.strip_prefix("@@ -") {
-                if let Some(comma) = rest.find(',') {
-                    if let Ok(start) = rest[..comma].parse::<u32>() {
-                        if !got_hunk {
-                            first_line = start;
-                            got_hunk = true;
-                        }
-                    }
-                }
+    let mut got_change = false;
+    for op in diff.ops() {
+        if op.tag() == DiffTag::Equal {
+            continue;
+        }
+        if !got_change {
+            first_line = op.old_range().start as u32 + 1;
+            got_change = true;
+        }
+        match op.tag() {
+            DiffTag::Insert => added += op.new_range().len() as u32,
+            DiffTag::Delete => removed += op.old_range().len() as u32,
+            DiffTag::Replace => {
+                added += op.new_range().len() as u32;
+                removed += op.old_range().len() as u32;
             }
-        } else if line.starts_with('+') && !line.starts_with("+++") {
-            added += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            removed += 1;
+            DiffTag::Equal => {}
         }
     }
     (added, removed, first_line)

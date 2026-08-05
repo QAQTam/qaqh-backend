@@ -674,7 +674,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             risk: ToolRisk::Write,
             default_timeout: Duration::from_secs(15),
         },
-        crate::ToolPlacement::HostOnly,
+        crate::ToolPlacement::Workspace,
     );
 }
 
