@@ -500,3 +500,12 @@ grid((
 2. 重建分支：`git checkout -b deepx-base-new origin/master` + 重新应用本地补丁
    （`git cherry-pick 568d6c9ed` 或手动移植 TextTrimming 5 文件）
 3. `cargo check -p deepx-winui` + 全量测试后切换
+
+### 升级执行记录（2026-08-06 晚）
+
+- 已升级：deepx-base → **`deepx-next`**（origin/master `9254895ca` #4789 + cherry-pick
+  本地补丁，新 commit `282e4ea87`）——补丁零冲突，编译零破坏。
+- 应用的新特性：sidebar 拖拽原生指针捕获（删 GetCursorPos 轮询）、`App::on_exit`
+  （正常退出路径日志）、`App::on_fault`（panic 源头捕获——闪退调查工具链）。
+- 未应用（后续可选）：`use_resource`（异步数据加载）、`.transition()`（进出场动画）、
+  `resource_overrides`（轻量样式覆盖）、`Icon::bitmap_icon/path`（位图/路径图标）。
