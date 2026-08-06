@@ -165,6 +165,9 @@ pub async fn run() -> Result<(), String> {
         }
     }
     service.shutdown();
+    // 退出前主动收尾孤儿（stop 协议已在 handler 做过；此处兜底其他退出
+    // 路径，如生命周期接管/信号退出。幂等：已 seal 的 turn 跳过）。
+    hub.seal_all_orphans();
     // F2: timeline 持久化是异步合并 checkpoint；退出前同步落盘全部 pending
     // seed，缩小子进程被杀时 transcript 尾部的丢失窗口。
     hub.flush_timeline_persistence();
@@ -197,18 +200,36 @@ async fn handle_connection(
             .any(|line| line.eq_ignore_ascii_case(&format!("Authorization: Bearer {token}")));
         let idle_required = preview.starts_with("POST /control/v1/stop-if-idle ");
         let busy = idle_required && service.has_active_work();
-        let response = if !authorized {
-            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                .as_slice()
-        } else if busy {
-            b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
-        } else {
-            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
-        };
-        stream.write_all(response).await.map_err(stringify)?;
-        if authorized && !busy {
-            let _ = shutdown.send(true);
+        if !authorized {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .map_err(stringify)?;
+            return Ok(());
         }
+        if busy {
+            let _ = stream
+                .write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .map_err(stringify)?;
+            return Ok(());
+        }
+        // Windows 95 语义：收尾完成后才返回 200（"现在可以安全关闭电源了"）。
+        // ① worker 优雅退出（SessionShutdown 帧 + 等进程退出 + join stdout
+        //    消费线程排空管道——尾部 intent 含 seal_turn 已 publish/落盘）；
+        // ② seal_all_orphans 兜底：worker 超时被杀时不留未 seal turn；
+        // ③ flush 异步 timeline checkpoint（此时数据已齐）。
+        // 安装器收到 200 即确认可安全关闭；超时降级强杀（win_process.rs）。
+        service.shutdown();
+        hub.seal_all_orphans();
+        hub.flush_timeline_persistence();
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .map_err(stringify)?;
+        let _ = shutdown.send(true);
         return Ok(());
     }
 

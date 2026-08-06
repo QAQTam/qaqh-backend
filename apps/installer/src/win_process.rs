@@ -129,8 +129,8 @@ fn find_via_tasklist() -> Vec<ProcInfo> {
 ///   仍未退出则强杀。给 daemon 一个短窗口做 WS 关闭/文件 flush，
 ///   但不无限等待。
 pub fn graceful_close(procs: &mut [ProcInfo]) {
-    // ── 第一步：daemon 优雅关闭（HTTP stop，最多 ~2s）──
-    stop_daemon_via_http();
+    // ── 第一步：daemon 优雅关闭（HTTP stop，等 200 = 收尾完成确认）──
+    let _confirmed = stop_daemon_via_http();
 
     // ── 第二步：DeepX.exe 直接强杀（不等 WM_CLOSE / before-quit）──
     for p in procs.iter_mut() {
@@ -161,10 +161,13 @@ pub fn graceful_close(procs: &mut [ProcInfo]) {
     }
 }
 
-/// 通过 daemon 的 HTTP 端点发送优雅停止请求。
-/// 读取 `%USERPROFILE%\\.deepx\\daemon.json` 获取 token 和端口。
-fn stop_daemon_via_http() {
-    use std::io::Write;
+/// 通过 daemon 的 HTTP 端点发送优雅停止请求并等待收尾确认。
+///
+/// Windows 95 语义：daemon 完成收尾（worker 优雅退出 + stdout 管道排空 +
+/// seal 孤儿 + flush timeline）后才返回 200——读到 200 即"可以安全关闭"。
+/// 10s 超时未确认返回 false（调用方走强杀兜底）。
+fn stop_daemon_via_http() -> bool {
+    use std::io::{Read, Write};
 
     let home = std::env::var("USERPROFILE").unwrap_or_default();
     let discovery_path = std::path::PathBuf::from(&home)
@@ -173,13 +176,13 @@ fn stop_daemon_via_http() {
 
     let content = match std::fs::read_to_string(&discovery_path) {
         Ok(c) => c,
-        Err(_) => return, // 没有 discovery 文件，daemon 未运行
+        Err(_) => return false, // 没有 discovery 文件，daemon 未运行
     };
 
     // 用 serde_json 解析（已在 Cargo.toml 依赖中）
     let discovery: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     let endpoint = discovery
@@ -191,7 +194,7 @@ fn stop_daemon_via_http() {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if endpoint.is_empty() || token.is_empty() {
-        return;
+        return false;
     }
 
     // 从 "ws://127.0.0.1:PORT/control/v1" 提取 socket 地址
@@ -202,14 +205,16 @@ fn stop_daemon_via_http() {
         .unwrap_or("");
 
     let Ok(socket_addr) = addr.parse::<std::net::SocketAddr>() else {
-        return;
+        return false;
     };
 
     let Ok(mut stream) =
         std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(2))
     else {
-        return;
+        return false;
     };
+    // 收尾确认等待上限：worker 优雅退出（≤5s）+ seal/flush 均在其内。
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
 
     let request = format!(
         "POST /control/v1/stop HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -217,6 +222,19 @@ fn stop_daemon_via_http() {
     );
 
     let _ = stream.write_all(request.as_bytes());
+    // 读响应直到 200（daemon 收尾完成信号）或超时。
+    let mut buf = [0_u8; 256];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => {
+            let resp = String::from_utf8_lossy(&buf[..n]);
+            let confirmed = resp.starts_with("HTTP/1.1 200");
+            if !confirmed {
+                eprintln!("[installer] daemon stop not confirmed: {}", resp.lines().next().unwrap_or("?"));
+            }
+            confirmed
+        }
+        _ => false,
+    }
 }
 
 /// 强制终止：TerminateProcess（内核强杀）+ taskkill /f /t 兜底。

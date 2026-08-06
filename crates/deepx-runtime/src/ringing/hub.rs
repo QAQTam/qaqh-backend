@@ -435,6 +435,13 @@ impl RingingHub {
     /// - 磁盘有记录：读取该 seed 的持久化快照 → restore → 收尾孤儿 running
     ///   turn（原 `load_timeline_persisted` 语义，有变更则同步写回）。
     fn ensure_timeline_loaded(&self, seed: &str) {
+        // 登记（幂等）：退出时 seal_all_orphans 需要覆盖全部已知 seed——
+        // 包括本次运行新建、尚未异步落盘的 seed（异步 checkpoint 落盘前
+        // 磁盘清单还没有它，但内存里已有未 seal turn）。
+        self.disk_timeline_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(seed.to_string());
         let _serial = self.lazy_load.lock().unwrap_or_else(|e| e.into_inner());
         if self
             .timeline
@@ -681,6 +688,31 @@ impl RingingHub {
         }
 
         changed
+    }
+
+    /// 优雅关闭收尾：对所有已知 timeline seed 执行孤儿收尾（timeline +
+    /// 三频道投影）。正常路径下 worker 已优雅退出并自行 seal（terminal
+    /// intent 同步落盘），此处兜底 worker 超时被杀 / 未收尾的场景——
+    /// 退出时不留孤儿，安装器更新后重启不再出现 daemon_restart_interrupted。
+    ///
+    /// 只覆盖已加载 seed 的当前状态：磁盘上未加载的 seed 由下次
+    /// `ensure_timeline_loaded` 启动时收尾（懒加载路径自带孤儿 seal）。
+    pub fn seal_all_orphans(&self) {
+        let seeds: Vec<String> = self
+            .disk_timeline_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        for seed in &seeds {
+            if self.seal_orphan_running_turns(seed) {
+                log::info!("[timeline] sealed orphan turn(s) for {seed} at shutdown");
+            }
+            if self.seal_orphan_channel_state(seed) {
+                log::info!("[ringing] sealed orphan channel state for {seed} at shutdown");
+            }
+        }
     }
 
     pub fn epoch(&self) -> &str {
@@ -1773,6 +1805,45 @@ mod tests {
         let snapshot = hub.timeline_snapshot("s").expect("timeline snapshot");
         assert_eq!(snapshot.watermark, 1);
         assert_eq!(snapshot.turns[0].user_text, "question");
+    }
+
+    #[test]
+    fn seal_all_orphans_cleans_running_turn_at_shutdown() {
+        // 优雅关闭收尾（Windows 95 语义）：turn 已打开但未 seal（worker
+        // 被杀/收尾未完成）时，seal_all_orphans 必须把未 seal turn 收尾为
+        // Cancelled + daemon_restart_interrupted 并持久化——重启后不再残留
+        // 未 seal turn（安装器更新后不再出现 daemon_restart_interrupted）。
+        let root = temp_root("seal-all-orphans");
+        {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            hub.publish_timeline(
+                "s",
+                deepx_domain::TimelineIntent::TurnOpened {
+                    turn_id: "t1".into(),
+                    user_text: "question".into(),
+                },
+            )
+            .expect("timeline intent accepted");
+            // 退出收尾（模拟 daemon 优雅关闭路径）。
+            hub.seal_all_orphans();
+            let snapshot = hub.timeline_snapshot("s").expect("snapshot");
+            assert!(snapshot.turns[0].sealed, "orphan turn must be sealed");
+            assert_eq!(
+                snapshot.turns[0].state,
+                deepx_domain::TimelineTurnState::Cancelled
+            );
+            let failure = snapshot.turns[0].failure.as_ref().expect("failure marker");
+            assert_eq!(failure.code, "daemon_restart_interrupted");
+        }
+        // 重启（新 epoch）：退出时已收尾，懒加载不再触发孤儿 seal。
+        let hub = RingingHub::with_persistence("epoch-2", &root);
+        let snapshot = hub.timeline_snapshot("s").expect("snapshot after restart");
+        assert!(snapshot.turns[0].sealed, "no orphan after clean shutdown");
+        assert_eq!(
+            snapshot.turns[0].state,
+            deepx_domain::TimelineTurnState::Cancelled
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

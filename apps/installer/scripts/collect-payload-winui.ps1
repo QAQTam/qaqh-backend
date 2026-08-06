@@ -16,9 +16,9 @@ $ErrorActionPreference = "Stop"
 
 $workspaceRoot = (Resolve-Path ".").Path
 $stagingRoot = [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot "apps/installer/staging"))
-$package = Get-Content "apps/desktop/package.json" -Raw | ConvertFrom-Json
-$backendLock = Get-Content "apps/desktop/deepx-backend.lock.json" -Raw | ConvertFrom-Json
-$daemonManifestPath = Join-Path $workspaceRoot "apps/desktop/build/sidecar/daemon-manifest.json"
+$package = Get-Content "apps/winui/renderer/package.json" -Raw | ConvertFrom-Json
+$backendLock = Get-Content "apps/winui/renderer/deepx-backend.lock.json" -Raw | ConvertFrom-Json
+$daemonManifestPath = Join-Path $workspaceRoot "apps/winui/renderer/build/sidecar/daemon-manifest.json"
 $daemonManifest = if (Test-Path -LiteralPath $daemonManifestPath -PathType Leaf) {
     Get-Content $daemonManifestPath -Raw | ConvertFrom-Json
 } else {

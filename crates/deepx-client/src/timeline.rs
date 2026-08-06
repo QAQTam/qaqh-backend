@@ -1,8 +1,9 @@
 //! Per-session Ringing V1 timeline SSE stream.
 //!
-//! Mirrors the Electron reference implementation
-//! (`apps/desktop/electron/timelineClient.ts`): one transcript, one SSE
-//! stream, one monotonically increasing cursor (`{epoch}:timeline:{seq}`).
+//! Mirrors the Ringing V1 timeline semantics (the original Electron reference
+//! implementation `apps/desktop/electron/timelineClient.ts` was removed): one
+//! transcript, one SSE stream, one monotonically increasing cursor
+//! (`{epoch}:timeline:{seq}`).
 //! Gap recovery re-fetches the authoritative snapshot and advances the
 //! cursor to its watermark so `Last-Event-ID` never stalls.
 

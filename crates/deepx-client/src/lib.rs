@@ -4,8 +4,9 @@
 //! negotiation/renewal, three SSE event channels and the per-session timeline
 //! stream, plus commands, queries, bootstrap and graceful stop.
 //!
-//! Contract mirrors the Electron reference implementation
-//! (`apps/desktop/electron/controlClient.ts`, `ringingClient.ts`) and
+//! Contract mirrors the Ringing V1 reference implementation (the original
+//! Electron `apps/desktop/electron/controlClient.ts` / `ringingClient.ts`
+//! were removed; this crate is now the single reference) and
 //! `docs/backend-dataflow/protocol-anchor.md`.
 
 pub mod client;

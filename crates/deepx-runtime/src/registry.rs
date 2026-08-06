@@ -102,6 +102,10 @@ pub struct AgentInstance {
     seed: String,
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Option<Child>>>,
+    /// stdout 消费线程（registry 侧读取 worker 事件行）。daemon 关闭时
+    /// 必须 join：worker 进程退出 ≠ 尾部 intent（含 seal_turn）已消费——
+    /// 管道里的最后几行仍由本线程读取并 publish（见 shutdown）。
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 
 pub struct AgentRegistry {
@@ -250,7 +254,7 @@ impl AgentRegistry {
             let event_seed = seed.to_string();
             let activity = self.activity.clone();
             let hub = self.hub.clone();
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
@@ -342,6 +346,7 @@ impl AgentRegistry {
                 seed: seed.to_string(),
                 stdin: Arc::new(Mutex::new(Box::new(stdin))),
                 child,
+                reader: Some(reader),
             },
         );
         Ok(())
@@ -495,7 +500,7 @@ impl AgentRegistry {
 }
 
 impl AgentInstance {
-    fn shutdown(self) {
+    fn shutdown(mut self) {
         // 优雅关闭：agent 侧只识别 Ringing 帧（legacy Ui2Agent 已拆除）。
         let env = deepx_ringing::RingingWorkerCommandEnvelope::new(
             self.seed.clone(),
@@ -527,6 +532,14 @@ impl AgentInstance {
                     }
                 }
             }
+        }
+        // 进程退出后 stdout 已 EOF，join 消费线程把管道尾部排空：worker 的
+        // 最后几个 intent（含 seal_turn——terminal intent 同步落盘）必须被
+        // 读取并 publish 后才算收尾完成；否则退出后 flush 缺该 seal，重启
+        // 时被孤儿收尾误标 daemon_restart_interrupted（每次安装更新的
+        // 必现根因）。线程在 EOF 后自然退出，join 通常毫秒级返回。
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
         log::info!("stopped agent {}", self.seed);
     }

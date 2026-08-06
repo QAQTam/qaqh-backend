@@ -1,7 +1,8 @@
 //! Ringing V1 wire types (M4 slim envelopes).
 //!
-//! Contract source: `docs/backend-dataflow/protocol-anchor.md` and the Electron
-//! reference implementation in `apps/desktop/electron/ringingClient.ts`.
+//! Contract source: `docs/backend-dataflow/protocol-anchor.md` and the
+//! Ringing V1 client in `crates/deepx-client` (the original Electron
+//! reference implementation `apps/desktop/electron/` was removed).
 
 use serde::{Deserialize, Serialize};
 
