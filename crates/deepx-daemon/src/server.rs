@@ -290,9 +290,21 @@ fn acquire_single_instance() -> Result<File, String> {
             // accept —— 此时若按 TCP 判活会把正在初始化的实例误判为 stale
             // 并删锁接管，导致多个 daemon 并存、discovery 端口漂移）。
             // 仅当 lock 持有者确实已退出（pid 失效）才清理并接管。
-            let lock_pid = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|value| value.trim().parse::<u32>().ok());
+            //
+            // 空/坏锁窗口：`create_new` 与 `writeln(pid)` 之间有空窗，并发
+            // 启动的另一个实例可能已创建锁文件但尚未写入 pid。读到空锁时
+            // 短等重试（上限 300ms）而非立即接管——否则会把正在初始化的
+            // 实例误判为 stale 删锁接管，双 daemon 并存（根因，见
+            // acquire_single_instance 竞态分析）。重试后仍读不到 pid 才视为
+            // stale（持有者已退出或从未写完）。
+            let mut lock_pid = read_lock_pid(&path);
+            for _ in 0..10 {
+                if lock_pid.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                lock_pid = read_lock_pid(&path);
+            }
             #[cfg(windows)]
             let holder_alive = match lock_pid {
                 Some(pid) => deepx_types::platform::process_is_running(pid),
@@ -317,6 +329,13 @@ fn acquire_single_instance() -> Result<File, String> {
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// 读锁文件中的持有者 pid（文件缺失/内容非数字 → None）。
+fn read_lock_pid(path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
 }
 fn write_discovery(discovery: &DaemonDiscovery) -> Result<(), String> {
     let target = deepx_types::platform::daemon_discovery_path();

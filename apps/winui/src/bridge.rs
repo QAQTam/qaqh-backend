@@ -127,6 +127,9 @@ pub struct BridgeCore {
     channels_stall_since: Mutex<Option<Instant>>,
     /// 重建进行中（防 ensure_client 重入）。
     rebuilding: AtomicBool,
+    /// 连接进行中（防并发 invoke 各自 connect_async → 各自 spawn daemon）。
+    /// 首个调用者置位并真正发起连接，其余调用者轮询等待其结果。
+    connecting: AtomicBool,
     /// 最近一次重建时刻（冷却防抖，避免网络抖动时反复重建）。
     last_rebuild_at: Mutex<Instant>,
     /// 最近一次"无 client 自动重连"时刻（独立冷却，见 AUTO_RECONNECT_COOLDOWN）。
@@ -153,6 +156,9 @@ const REBUILD_COOLDOWN: Duration = Duration::from_secs(60);
 /// 无 client 自动重连冷却：首次 connect 失败（daemon 初始化窗口）后
 /// 尽快恢复，比 stall 重建的 60s 冷却短。
 const AUTO_RECONNECT_COOLDOWN: Duration = Duration::from_secs(5);
+/// 等待并发连接完成的上限：覆盖 discovery 等待（8s）+ open 协商（10s）+
+/// 余量。超过即视为连接失败（调用方重试机制兜底）。
+const CONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(25);
 /// 连续失败后 rebuild 冷却指数退避封顶（60s → 120s → 240s → 480s → 960s）。
 const REBUILD_BACKOFF_CAP: u32 = 4;
 
@@ -818,8 +824,15 @@ impl BridgeCore {
         if let Some(client) = self.client.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Ok(client);
         }
+        // 连接互斥：renderer 秒开后首屏多个 invoke（backend.connect + 会话
+        // 列表 + config.load + 侧栏刷新）几乎同时到达，若无互斥则每个调用
+        // 各自 connect_async → 各自 wait_for_daemon spawn daemon（双 daemon
+        // 并存触发源）。首个调用者置位并发起连接，其余轮询等待其结果。
+        if self.connecting.swap(true, Ordering::AcqRel) {
+            return self.wait_connect_result().await;
+        }
         log_diag("connect_client: connecting...");
-        let client = Client::connect_async(ClientOptions {
+        let result = Client::connect_async(ClientOptions {
             handlers: ClientHandlers {
                 on_batch: Arc::new({
                     let core = self.self_arc();
@@ -866,14 +879,35 @@ impl BridgeCore {
             launch_daemon_if_missing: true,
             ..Default::default()
         })
-        .await
-        .map_err(|e| {
+        .await;
+        // 无论成败都先复位互斥位，等待者据此退出/复用结果。
+        self.connecting.store(false, Ordering::Release);
+        let client = result.map_err(|e| {
             log_diag(&format!("connect_client connect failed: {e}"));
             e.to_string()
         })?;
         *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
         self.emit("backend.status", json!({ "connected": true, "transport": "ringing" }));
         Ok(client)
+    }
+
+    /// 等待并发连接发起者完成：成功 → 复用其 client；失败/超时 → 返回错误
+    /// （调用方各自的重试路径——auto-reconnect 冷却 5s 起——负责恢复）。
+    async fn wait_connect_result(&self) -> Result<Client, String> {
+        let deadline = Instant::now() + CONNECT_WAIT_TIMEOUT;
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Some(client) = self.client.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                return Ok(client);
+            }
+            if !self.connecting.load(Ordering::Acquire) {
+                // 发起者已结束且失败：直接失败，避免每个等待者再各发起一次。
+                return Err("backend connect failed (concurrent attempt)".into());
+            }
+            if Instant::now() >= deadline {
+                return Err("backend connect in progress timed out".into());
+            }
+        }
     }
 
     /// `ringing.reset_required`: re-bootstrap the affected session and push a
@@ -1288,6 +1322,7 @@ impl Bridge {
                     timeline_stall_since: Mutex::new(None),
                     channels_stall_since: Mutex::new(None),
                     rebuilding: AtomicBool::new(false),
+                    connecting: AtomicBool::new(false),
                     last_rebuild_at: Mutex::new(Instant::now()),
                     last_auto_reconnect_at: Mutex::new(Instant::now()),
                     rebuild_failures: AtomicU32::new(0),
@@ -1537,6 +1572,7 @@ mod tests {
             timeline_stall_since: Mutex::new(None),
             channels_stall_since: Mutex::new(None),
             rebuilding: AtomicBool::new(false),
+            connecting: AtomicBool::new(false),
             last_rebuild_at: Mutex::new(Instant::now()),
             last_auto_reconnect_at: Mutex::new(Instant::now()),
             rebuild_failures: AtomicU32::new(0),

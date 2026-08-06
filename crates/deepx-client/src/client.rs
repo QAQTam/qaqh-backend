@@ -548,6 +548,14 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// Spawn the daemon (`deepx-daemon run`) and wait for its discovery file.
+///
+/// 进程内 spawn 串行化：并发 `connect_async`（壳首屏多个 invoke 同时触发）
+/// 各自进入本函数时，仅第一个执行「检查 + spawn」决策，其余等待锁后重新
+/// 检查——发现 lock/discovery 已就绪则不再 spawn，杜绝并发 spawn 多个
+/// daemon 实例（双 daemon 并存触发源）。
+static DAEMON_SPAWN_GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
 async fn wait_for_daemon(
     daemon_path: Option<&std::path::Path>,
     timeout: std::time::Duration,
@@ -555,8 +563,22 @@ async fn wait_for_daemon(
     let executable = daemon_path
         .map(|p| p.to_path_buf())
         .unwrap_or_else(default_daemon_path);
-    log::info!("[deepx-client] spawning daemon: {}", executable.display());
-    spawn_detached(executable.as_ref())?;
+    // 串行化 spawn 决策（临界区只做文件检查 + spawn，很快）。
+    let guard = DAEMON_SPAWN_GUARD
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    // 已有存活 daemon（discovery pid 存活 或 lock 持有者存活）时不重复
+    // spawn：daemon 冷启动窗口内 lock 先行发布、discovery 延迟——lock
+    // 持有者活着即意味着有实例正在初始化，直接轮询等待其发布即可。
+    let live = read_discovery()
+        .ok()
+        .filter(|d| crate::discovery::process_is_running(d.pid));
+    if live.is_none() && !crate::discovery::lock_holder_alive() {
+        log::info!("[deepx-client] spawning daemon: {}", executable.display());
+        spawn_detached(executable.as_ref())?;
+    }
+    drop(guard);
 
     let deadline = tokio::time::Instant::now() + timeout;
     loop {

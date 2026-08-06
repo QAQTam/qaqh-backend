@@ -112,7 +112,8 @@ pub fn ensure_daemon_running(timeout: std::time::Duration) -> Result<DaemonDisco
 /// 检查 `daemon.lock` 持有者进程是否存活（daemon 单实例锁，见
 /// `deepx-daemon::server::acquire_single_instance`）。lock 持有者活着即
 /// 意味着有 daemon 正在启动/运行，即使 `daemon.json` 尚未发布。
-fn lock_holder_alive() -> bool {
+/// `pub(crate)`：`client::wait_for_daemon` 在 spawn 前据此避免重复拉起。
+pub(crate) fn lock_holder_alive() -> bool {
     #[cfg(not(windows))]
     {
         // 非 Windows 无 pid 判活实现（`process_is_running` stub 恒 true），
