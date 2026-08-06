@@ -203,10 +203,19 @@ fn resolve_frontend_url() -> String {
 
     // 2. Daemon debug endpoint: ensures the daemon is running, then uses
     //    its discovery to build `http://<host>/debug/`.
+    //    `ensure_daemon_running` 只保证 pid 存活（进程已启动），不保证
+    //    HTTP 监听就绪（daemon 启动/重启窗口）——先健康检查再导航，
+    //    避免 WebView2 导航到未就绪端口（错误页无自动重试）。
+    //    若已有 daemon 在跑（含 release 安装版），discovery pid 存活即
+    //    直接复用，不 spawn 新实例。
     match discovery::ensure_daemon_running(std::time::Duration::from_secs(8)) {
         Ok(discovery) => {
             if let Ok(base) = discovery.base_url() {
-                return format!("{base}/debug/");
+                if let Some(url) = wait_for_frontend_ready(&base, std::time::Duration::from_secs(6))
+                {
+                    return url;
+                }
+                eprintln!("[winui] /debug/ not ready at {base}");
             }
             eprintln!("[winui] cannot derive base url from discovery");
         }
@@ -226,4 +235,55 @@ fn resolve_frontend_url() -> String {
 
     // Fallback: daemon may already be reachable even if discovery raced.
     "about:blank".to_string()
+}
+
+/// 等待 daemon 的 `/debug/` 端点就绪（HTTP 200），返回完整前端 URL。
+///
+/// daemon 启动/重启窗口内 discovery 已发布但监听未就绪——WebView2 导航
+/// 到未就绪端口会显示错误页且不自动重试；此处同步轮询（300ms 间隔），
+/// 就绪后才让 WebView2 导航。
+fn wait_for_frontend_ready(base: &str, timeout: std::time::Duration) -> Option<String> {
+    let url = format!("{base}/debug/");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if debug_endpoint_ready(&url) {
+            return Some(url);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+/// 轻量 HTTP GET（同步 TcpStream，不依赖 tokio）：200 即就绪。
+fn debug_endpoint_ready(url: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let host_port = rest.split('/').next().unwrap_or("");
+    if host_port.is_empty() {
+        return false;
+    }
+    let Ok(mut stream) = TcpStream::connect(host_port) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(1500)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(1500)));
+    let req = format!("GET /debug/ HTTP/1.0\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    let Ok(n) = stream.read(&mut buf) else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&buf[..n]);
+    head.starts_with("HTTP/1.0 200") || head.starts_with("HTTP/1.1 200")
 }
