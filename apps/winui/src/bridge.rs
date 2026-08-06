@@ -31,8 +31,9 @@ use serde_json::{json, Value};
 use windows_webview::WebView;
 
 use crate::shell_store::{
-    parse_activities, parse_activity_event, parse_skills_event, parse_skills_payload,
-    project_session_meta, ActivityState, SessionItem, SkillsSnapshot,
+    parse_activities, parse_activity_event, parse_config_load, parse_skills_event,
+    parse_skills_payload, parse_tools, parse_workspace_status, project_session_meta,
+    ActivityState, SessionItem, SettingsSnapshot, SkillsSnapshot,
 };
 
 /// Outbound messages queued on the UI thread (STA) and pumped to the WebView.
@@ -77,6 +78,23 @@ pub struct HeaderState {
     pub compact_disabled: bool,
     pub undo_disabled: bool,
     pub pet_enabled: bool,
+}
+
+/// XAML 设置页 Web 侧初始投影（`shell.setSettings` 载荷）。
+///
+/// theme/lang/permissionLevel 的状态单一数据源在 Web（App.tsx：localStorage
+/// + config.load 派生）；壳侧设置页改动后经 `shell.settingsAction` 回传校正
+/// （对齐 D2 执行权原则：壳只渲染，不持有状态）。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SettingsProjection {
+    /// system | light | dark | dark-gray（三态进协议，P-5）。
+    pub theme: String,
+    /// en | zh。
+    pub lang: String,
+    pub permission_level: u64,
+    /// local | wsl | remote（workspace 运行环境）。
+    pub workspace_mode: String,
 }
 
 /// 标题栏动作（壳 → Web `shell.headerAction` 载荷）。
@@ -146,6 +164,14 @@ pub struct BridgeCore {
     skills_rev: AtomicU64,
     /// 壳主导的当前视图（`navigate` 同步；XAML 视图族接管 skills 的判定源）。
     current_view: Mutex<String>,
+    /// XAML 设置页数据源：`config.load` + `skills.list_tools` 合并投影。
+    settings: Mutex<Option<SettingsSnapshot>>,
+    /// 设置数据版本：config.load / tools 拉取后递增，UI 侧 timer 比对后刷新。
+    settings_rev: AtomicU64,
+    /// Web `shell.setSettings` 初始投影（theme/lang/permission/workspaceMode）。
+    settings_proj: Mutex<SettingsProjection>,
+    /// 投影版本：Web 推送后递增（同 header_rev）。
+    settings_proj_rev: AtomicU64,
     outbox_tx: std::sync::mpsc::Sender<OutMsg>,
 }
 
@@ -573,6 +599,268 @@ impl BridgeCore {
                 Err(err) => log_diag(&format!("skill reload: failed: {err}")),
             }
         });
+    }
+
+    // ── XAML 设置页（config.load 投影 + 壳直连命令，D-2 原则）───────
+
+    /// (snapshot, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新。
+    pub fn settings_snapshot(&self) -> (Option<SettingsSnapshot>, u64) {
+        let snap = self.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let rev = self.settings_rev.load(Ordering::Relaxed);
+        (snap, rev)
+    }
+
+    /// (projection, rev)：Web `shell.setSettings` 初始投影（theme/lang/…）。
+    pub fn settings_projection(&self) -> (SettingsProjection, u64) {
+        let proj = self
+            .settings_proj
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let rev = self.settings_proj_rev.load(Ordering::Relaxed);
+        (proj, rev)
+    }
+
+    /// Web `shell.setSettings` 载荷落缓存并递增 rev（坏载荷静默丢弃）。
+    pub fn apply_settings_projection(&self, payload: Value) {
+        let Ok(proj) = serde_json::from_value(payload) else {
+            log_diag("apply_settings_projection: invalid payload, keeping previous state");
+            return;
+        };
+        *self.settings_proj.lock().unwrap_or_else(|e| e.into_inner()) = proj;
+        self.settings_proj_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 拉取 `config.load` + `skills.list_tools` → 投影进缓存 → rev++。
+    /// 幂等：仅缓存为空或 `force` 时执行（进入设置页首次渲染兜底）。
+    pub fn spawn_config_load(&self, force: bool) {
+        if !force && self.settings.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return;
+        }
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("config_load: connect failed: {err}"));
+                    return;
+                }
+            };
+            let config = match client.query("config.load", json!({})).await {
+                Ok(v) => v,
+                Err(err) => {
+                    log_diag(&format!("config.load failed: {err}"));
+                    return;
+                }
+            };
+            let mut snap = parse_config_load(&config);
+            // workspace.status 与 config.load 并行（独立查询，失败不阻塞）。
+            if let Ok(status) = client.query("workspace.status", json!({})).await {
+                let (cfg, active, endpoint) = parse_workspace_status(&status);
+                snap.workspace_configured_mode = cfg;
+                snap.workspace_active_mode = active;
+                snap.workspace_endpoint = endpoint;
+            }
+            // 工具列表（subagent 勾选项）；失败不阻塞（页面显示空列表）。
+            if let Ok(tools) = client.query("skills.list_tools", json!({})).await {
+                snap.tools = parse_tools(&tools);
+            }
+            *core.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+            core.settings_rev.fetch_add(1, Ordering::Relaxed);
+            log_diag("config_load: settings snapshot cached");
+        });
+    }
+
+    /// 保存设置：`config.save`（camelCase 全字段，对齐 Web `save()`）。
+    pub fn spawn_config_save(&self, fields: Value) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("config.save: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.action("config.save", fields).await {
+                Ok(_) => log_diag("config.save: ok"),
+                Err(err) => log_diag(&format!("config.save failed: {err}")),
+            }
+        });
+    }
+
+    /// 权限等级：`config.set_permission_level`（对齐 Web changePermissionLevel）。
+    pub fn spawn_set_permission(&self, level: u64) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("set_permission: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client
+                .action("config.set_permission_level", json!({ "level": level }))
+                .await
+            {
+                Ok(_) => log_diag(&format!("set_permission {level}: ok")),
+                Err(err) => log_diag(&format!("set_permission {level}: failed: {err}")),
+            }
+        });
+    }
+
+    /// 工作区运行模式切换：`workspace.set_mode`（backend.restart 未实现，
+    /// 保存成功后由 UI 提示“下次启动生效”）。
+    pub fn spawn_workspace_set_mode(&self, mode: &str) {
+        let core = self.self_arc();
+        let mode = mode.to_string();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace.set_mode: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.action("workspace.set_mode", json!({ "mode": mode })).await {
+                Ok(_) => log_diag(&format!("workspace.set_mode {mode}: ok")),
+                Err(err) => log_diag(&format!("workspace.set_mode {mode}: failed: {err}")),
+            }
+        });
+    }
+
+    /// 刷新 workspace.status 并合并进 settings 缓存（rev++）。
+    pub fn spawn_workspace_status(&self) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace.status: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.query("workspace.status", json!({})).await {
+                Ok(status) => {
+                    let (cfg, active, endpoint) = parse_workspace_status(&status);
+                    if let Some(snap) = core.settings.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                        snap.workspace_configured_mode = cfg;
+                        snap.workspace_active_mode = active;
+                        snap.workspace_endpoint = endpoint;
+                        core.settings_rev.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(err) => log_diag(&format!("workspace.status failed: {err}")),
+            }
+        });
+    }
+
+    /// WSL 诊断（`workspace.diagnose`，workspace 分类只读展示）。
+    pub fn spawn_workspace_diagnose(&self) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace.diagnose: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.query("workspace.diagnose", json!({})).await {
+                Ok(v) => log_diag(&format!("workspace.diagnose: {v}")),
+                Err(err) => log_diag(&format!("workspace.diagnose failed: {err}")),
+            }
+        });
+    }
+
+    /// WSL 安装（`workspace.install_wsl`）。
+    pub fn spawn_workspace_install_wsl(&self) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace.install_wsl: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.action("workspace.install_wsl", json!({})).await {
+                Ok(_) => log_diag("workspace.install_wsl: ok"),
+                Err(err) => log_diag(&format!("workspace.install_wsl failed: {err}")),
+            }
+        });
+    }
+
+    /// home 视图发送：新建会话 + 首条消息（对齐 Web `startNewSessionAndSend`）。
+    ///
+    /// session_create（control）→ 轮询发现新 seed（15s 超时）→ attach →
+    /// `session.send_message`（action）→ navigate chat。
+    pub fn spawn_send_new_session(&self, text: &str) {
+        let core = self.self_arc();
+        let text = text.to_string();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("send_new_session: connect failed: {err}"));
+                    return;
+                }
+            };
+            core.refresh_sessions_inner().await;
+            let before = core.seed_set();
+            let command_id = core.next_command_id();
+            match client
+                .command(
+                    Channel::Control,
+                    None,
+                    command_id,
+                    json!({ "type": "session_create", "close_current": false }),
+                    None,
+                )
+                .await
+            {
+                Ok(_) => {
+                    let mut seed = String::new();
+                    for _ in 0..30 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        core.refresh_sessions_inner().await;
+                        let now = core.seed_set();
+                        if let Some(new_seed) = now.iter().find(|s| !before.contains(*s)) {
+                            seed = new_seed.clone();
+                            break;
+                        }
+                    }
+                    if seed.is_empty() {
+                        log_diag("send_new_session: no new seed within 15s");
+                        return;
+                    }
+                    if let Err(err) = client.attach(&seed).await {
+                        log_diag(&format!("send_new_session: attach failed: {err}"));
+                        return;
+                    }
+                    core.set_active_seed(&seed);
+                    if let Err(err) = client
+                        .action("session.send_message", json!({ "seed": seed, "text": text }))
+                        .await
+                    {
+                        log_diag(&format!("send_new_session: send_message failed: {err}"));
+                        return;
+                    }
+                    log_diag(&format!("send_new_session: created {seed}, message sent"));
+                    core.navigate("chat", Some(&seed));
+                }
+                Err(err) => log_diag(&format!("send_new_session: command failed: {err}")),
+            }
+        });
+    }
+
+    /// 设置页动作回传 Web（`shell.settingsAction` 事件；与 headerAction 同机制）。
+    ///
+    /// 载荷：`{action: "lang"|"theme"|"permission"|"workspace", ...}`——Web 侧
+    /// 订阅后校正其状态（i18n.setLang / switchTheme / setPermissionLevel）。
+    pub fn emit_settings_action(&self, payload: Value) {
+        self.emit("shell.settingsAction", payload);
     }
 
     /// 通知 renderer 切换视图（XAML 侧栏的导航出口）。
@@ -1331,6 +1619,10 @@ impl Bridge {
                     skills: Mutex::new(None),
                     skills_rev: AtomicU64::new(0),
                     current_view: Mutex::new(String::new()),
+                    settings: Mutex::new(None),
+                    settings_rev: AtomicU64::new(0),
+                    settings_proj: Mutex::new(SettingsProjection::default()),
+                    settings_proj_rev: AtomicU64::new(0),
                     outbox_tx: tx,
                 });
                 let _ = SHARED_CORE.set(core.clone());
@@ -1386,6 +1678,11 @@ impl Bridge {
         show_open_dialog(true, false, false, None)
     }
 
+    /// settings：文件选择对话框（tokenizer 路径；用户取消返回 Ok(null)）。
+    pub fn pick_file(&self) -> Result<Value, String> {
+        show_open_dialog(false, false, false, None)
+    }
+
     /// ②location：系统 shell 打开会话目录（bridge.rs `open_external`）。
     pub fn open_path(&self, target: &str) -> Result<(), String> {
         open_external(target)
@@ -1414,6 +1711,53 @@ impl Bridge {
             windows_reactor::ColorScheme::Dark => "dark",
         };
         self.core.emit("shell.themeChanged", json!({ "mode": mode }));
+    }
+
+    // ── XAML home / settings 视图透传（home_view.rs / settings_view.rs 只依赖 Bridge）──
+
+    /// home：新建会话 + 首条消息（壳直连，不回传 Web）。
+    pub fn spawn_send_new_session(&self, text: &str) {
+        self.core.spawn_send_new_session(text);
+    }
+
+    /// settings：拉取 config.load + tools（force=true 时忽略缓存）。
+    pub fn spawn_config_load(&self, force: bool) {
+        self.core.spawn_config_load(force);
+    }
+
+    /// settings：保存全字段（camelCase，对齐 Web `save()`）。
+    pub fn spawn_config_save(&self, fields: Value) {
+        self.core.spawn_config_save(fields);
+    }
+
+    /// settings：权限等级（config.set_permission_level）。
+    pub fn spawn_set_permission(&self, level: u64) {
+        self.core.spawn_set_permission(level);
+    }
+
+    /// settings：工作区运行模式（workspace.set_mode；restart 未实现，提示下次生效）。
+    pub fn spawn_workspace_set_mode(&self, mode: &str) {
+        self.core.spawn_workspace_set_mode(mode);
+    }
+
+    /// settings：刷新 workspace.status 进缓存。
+    pub fn spawn_workspace_status(&self) {
+        self.core.spawn_workspace_status();
+    }
+
+    /// settings：WSL 诊断（日志输出，无 UI 回显）。
+    pub fn spawn_workspace_diagnose(&self) {
+        self.core.spawn_workspace_diagnose();
+    }
+
+    /// settings：WSL 安装（日志输出，无 UI 回显）。
+    pub fn spawn_workspace_install_wsl(&self) {
+        self.core.spawn_workspace_install_wsl();
+    }
+
+    /// settings：lang/theme/permission/workspace 变更回传 Web（`shell.settingsAction`）。
+    pub fn emit_settings_action(&self, payload: Value) {
+        self.core.emit_settings_action(payload);
     }
 
     /// Keep the web-message event registration alive for the process lifetime.
@@ -1500,6 +1844,13 @@ impl Bridge {
             self.core.respond(id, true, json!(null), None);
             return;
         }
+        // shell.setSettings：Web 初始投影（theme/lang/permission/workspaceMode）
+        // → XAML 设置页数据源（P-3 模式，同 setHeader）。
+        if method == "shell.setSettings" {
+            self.core.apply_settings_projection(params);
+            self.core.respond(id, true, json!(null), None);
+            return;
+        }
         self.core.spawn_invoke(id, method, params);
     }
 
@@ -1581,6 +1932,10 @@ mod tests {
             skills: Mutex::new(None),
             skills_rev: AtomicU64::new(0),
             current_view: Mutex::new(String::new()),
+            settings: Mutex::new(None),
+            settings_rev: AtomicU64::new(0),
+            settings_proj: Mutex::new(SettingsProjection::default()),
+            settings_proj_rev: AtomicU64::new(0),
             outbox_tx: tx,
         }
     }

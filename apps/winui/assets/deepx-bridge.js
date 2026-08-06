@@ -56,7 +56,7 @@
   window.__DEEPX_XAML_SIDEBAR__ = true; // 原生侧栏接管：renderer 隐藏 web 侧栏（可回退）
   // P-3 统一 flag（WORKFLOW §6.1）：新组件查询 __DEEPX_XAML__.<component>；
   // 旧 __DEEPX_XAML_SIDEBAR__ 保留兼容已上线代码。
-  window.__DEEPX_XAML__ = { sidebar: true, header: true };
+  window.__DEEPX_XAML__ = { sidebar: true, header: true, home: true, settings: true };
   window.deepx = {
     backend: {
       connect: function () { return invoke('backend.connect'); },
@@ -97,7 +97,13 @@
       // 主题同步（P-5 三态）：light | dark | dark-gray | system
       setTheme: function (mode) { return invoke('shell.setTheme', { mode: mode }); },
       // 壳系统主题变化（host → renderer）：{ mode: "light"|"dark" }
-      onThemeChanged: function (l) { return sub('shell.themeChanged', l); }
+      onThemeChanged: function (l) { return sub('shell.themeChanged', l); },
+      // XAML 设置页（P2）：Web 初始投影（theme/lang/permission/workspaceMode）
+      // → 壳设置页数据源（P-3 模式，同 setHeader）。
+      setSettings: function (state) { return invoke('shell.setSettings', state || {}); },
+      // 壳设置页动作回传（host → renderer 事件）：
+      //   { action: "lang"|"theme"|"permission", lang?|mode?|level? }
+      onSettingsAction: function (l) { return sub('shell.settingsAction', l); }
     },
     desktop: {
       openDialog: function (o) { return invoke('desktop.openDialog', o || {}); },

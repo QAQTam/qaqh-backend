@@ -13,8 +13,10 @@
 
 mod bridge;
 mod header;
+mod home_view;
 mod shell;
 mod shell_store;
+mod settings_view;
 mod sidebar;
 mod skills_view;
 
@@ -220,11 +222,13 @@ fn app(cx: &mut RenderCx) -> Element {
     });
 
     // Step 1: 内容区元素——左 XAML 侧栏（可拖拽宽度）+ 右区。
-    // 右区 = 内层 Grid 两行（WORKFLOW §8 壳主导视图族）：
-    //   - row0 = WebView2（renderer）——view≠skills 时 STAR（常驻，不销毁）；
-    //   - row1 = XAML 技能页——view=skills 时 STAR。
+    // 右区 = 内层 Grid 多行（WORKFLOW §8 壳主导视图族）：
+    //   - row0 = WebView2（renderer）——view=chat 时 STAR（常驻，不销毁）；
+    //   - row1 = XAML 技能页——view=skills 时 STAR；
+    //   - row2 = XAML 首页（P1）——view=home 时 STAR；
+    //   - row3 = XAML 设置页（P2）——view=settings 时 STAR。
     // 非当前视图的行高 0：WebView2 尺寸 0 保留导航状态（不销毁不重建），
-    // XAML 技能页零命中零渲染；无 opacity/命中测试依赖。
+    // XAML 页零命中零渲染；无 opacity/命中测试依赖。
     let nav: Element =
         sidebar::sidebar(cx, bridge.clone(), sidebar_width, set_sidebar_width).into();
     let (view, set_view) = cx.use_state::<String>("home".to_string());
@@ -267,14 +271,32 @@ fn app(cx: &mut RenderCx) -> Element {
         .grid_row(1)
         .grid_column(0)
         .into();
-    let right: Element = grid((webview, skills))
+    let home: Element = home_view::home_view(cx, bridge.clone())
+        .grid_row(2)
+        .grid_column(0)
+        .into();
+    let settings: Element = settings_view::settings_view(cx, bridge.clone())
+        .grid_row(3)
+        .grid_column(0)
+        .into();
+    let right: Element = grid((webview, skills, home, settings))
         .rows([
-            if view == "skills" {
+            if view == "skills" || view == "home" || view == "settings" {
                 GridLength::Pixel(0.0)
             } else {
                 GridLength::STAR
             },
             if view == "skills" {
+                GridLength::STAR
+            } else {
+                GridLength::Pixel(0.0)
+            },
+            if view == "home" {
+                GridLength::STAR
+            } else {
+                GridLength::Pixel(0.0)
+            },
+            if view == "settings" {
                 GridLength::STAR
             } else {
                 GridLength::Pixel(0.0)

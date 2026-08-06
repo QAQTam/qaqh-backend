@@ -52,6 +52,17 @@ interface DeepxDesktopApi {
     setTheme(mode: "light" | "dark" | "dark-gray" | "system"): Promise<unknown>;
     /** 壳系统主题变化（host → renderer）：`{ mode: "light" | "dark" }`。 */
     onThemeChanged(listener: (update: { mode: "light" | "dark" }) => void): () => void;
+    /** XAML 设置页初始投影（Web → 壳；镜像 bridge.rs `SettingsProjection`）。 */
+    setSettings(state: {
+      theme: "light" | "dark" | "dark-gray" | "system";
+      lang: "en" | "zh";
+      permissionLevel: number;
+      workspaceMode: string;
+    }): Promise<unknown>;
+    /** 壳设置页动作回传（host → renderer 事件）。 */
+    onSettingsAction(
+      listener: (action: { action: string; lang?: string; mode?: string; level?: number }) => void,
+    ): () => void;
   };
   desktop: {
     openDialog(options: { directory?: boolean; multiple?: boolean; title?: string }): Promise<string | string[] | null>;
@@ -94,8 +105,8 @@ declare global {
     deepx?: DeepxDesktopApi;
     /** WinUI 壳注入：原生 XAML 侧栏接管时置 true（renderer 隐藏 web 侧栏）。 */
     __DEEPX_XAML_SIDEBAR__?: boolean;
-    /** P-3 统一 flag（WORKFLOW §6.1）：`{ sidebar: true, header: true, ... }`。 */
-    __DEEPX_XAML__?: Partial<Record<"sidebar" | "header", boolean>>;
+    /** P-3 统一 flag（WORKFLOW §6.1）：`{ sidebar: true, header: true, home: true, settings: true, ... }`。 */
+    __DEEPX_XAML__?: Partial<Record<"sidebar" | "header" | "home" | "settings", boolean>>;
     /** WebView2 宿主桥（winui 壳）：postMessage 双向通道。 */
     chrome?: {
       webview?: {

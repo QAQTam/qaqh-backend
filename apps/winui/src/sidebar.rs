@@ -65,22 +65,34 @@ fn state_dot(state: ActivityState) -> Element {
         .into()
 }
 
-/// 一行会话：状态圆点 + 标题（单行省略）+ 删除图标。
+/// 一行会话：选中竖条 + 状态圆点 + 标题（单行省略）+ 删除图标。
 ///
-/// active 行 = SubtleFill 圆角药丸 + AccentText 前景（Win11 NavigationView
-/// 选中态语言，柔和不刺眼；与 Web 版 `bg-hover` 高亮语义一致）。
-/// 非 active 行的 hover 反馈由 ListViewItem 容器原生 PointerOver 视觉状态
-/// 提供（reactor 行内容不参与，避免状态驱动重渲染的 entered/exited 循环）。
+/// 结构稳定性契约（D15）：**所有行恒为 `border(grid(竖条, 圆点, 标题,
+/// 删除))`**——active 只改竖条颜色 + 背景（modifiers 字段 diff，原地更新），
+/// 不切换元素类型（旧实现 active 时包 border / 非 active 裸 grid，kind 跳变
+/// 有控件树错位风险，settings nav 同款问题已修）。
+///
+/// 选中语义 = Win11 NavigationView：左侧 3px Accent 竖条 + SubtleFill 药丸
+/// 背景；标题恒 `PrimaryText`（不再随选中变色）。新行出现时淡入
+/// （`transition` = ImplicitShowAnimation，keyed 列表新行 mount 即触发；
+/// 行内 active 切换不重建行 → 不重放）。
 fn session_row(item: &SessionItem, active: bool, bridge: Arc<Bridge>) -> Element {
     let seed = item.seed.clone();
+    // 选中竖条（结构常驻，active 只改颜色）。
+    let indicator = border(text_block(""))
+        .width(3.0)
+        .height(16.0)
+        .corner_radius(1.5)
+        .vertical_alignment(VerticalAlignment::Center);
+    let indicator = if active {
+        indicator.background(ThemeRef::Accent)
+    } else {
+        indicator
+    };
     let dot: Element = state_dot(item.state);
     let title_el: Element = text_block(&item.title)
         .trim_ellipsis()
-        .foreground(if active {
-            ThemeRef::AccentText
-        } else {
-            ThemeRef::PrimaryText
-        })
+        .foreground(ThemeRef::PrimaryText)
         .vertical_alignment(VerticalAlignment::Center)
         .on_pointer_pressed({
             let seed = seed.clone();
@@ -98,22 +110,33 @@ fn session_row(item: &SessionItem, active: bool, bridge: Arc<Bridge>) -> Element
     )
     .vertical_alignment(VerticalAlignment::Center);
     let row: Element = grid((
-        dot.grid_column(0),
-        title_el.grid_column(1),
-        delete.grid_column(2),
+        indicator.grid_column(0),
+        dot.grid_column(1),
+        title_el.grid_column(2),
+        delete.grid_column(3),
     ))
-    .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+    .columns([
+        GridLength::Auto,
+        GridLength::Auto,
+        GridLength::STAR,
+        GridLength::Auto,
+    ])
     .column_spacing(8.0)
     .padding(Thickness::xy(10.0, 6.0))
     .into();
-    if active {
-        border(row)
-            .background(ThemeRef::SubtleFill)
-            .corner_radius(8.0)
-            .into()
+    // 恒为 border；仅 background 随 active（diff_modifiers 原地更新）。
+    let item_el = border(row).corner_radius(8.0);
+    let item_el = if active {
+        item_el.background(ThemeRef::SubtleFill)
     } else {
-        row
-    }
+        item_el
+    };
+    item_el
+        .transition(
+            Some(AnimationConfig::fade_in(Duration::from_millis(200))),
+            None,
+        )
+        .into()
 }
 
 /// XAML 侧栏组件（放入外层 Grid 第 0 列；宽度由 `width` 控制、可拖拽）。

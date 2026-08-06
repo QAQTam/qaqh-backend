@@ -259,6 +259,242 @@ pub fn parse_skills_event(event: &Value) -> Option<SkillsSnapshot> {
     Some(parse_skills_payload(event))
 }
 
+// ── XAML 设置页投影（settings_view.rs 的唯一数据源）────────────────
+
+/// 单个 provider 的 endpoint（config.load `providers[].endpoints[]`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderEndpoint {
+    pub id: String,
+    pub display: String,
+    pub base_url: String,
+    pub default_model: String,
+    pub models: Vec<String>,
+}
+
+/// provider 目录条目（config.load `providers[]`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub display: String,
+    pub endpoints: Vec<ProviderEndpoint>,
+}
+
+/// XAML 设置页数据投影——对齐 daemon `config.load` 返回（snake_case）
+/// + `skills.list_tools` + `workspace.status` 合并。
+///
+/// 缺失字段全部兜底（config 可能省略未配置项），不因字段缺失丢整份快照。
+/// `*_configured` 由 `api_key == "****"`（daemon 掩码约定）派生：掩码 =
+/// 已配置且值不落回 UI（与 Web `SettingsView` 的 isMasked 判定一致）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SettingsSnapshot {
+    // ── models / api / context ──
+    pub api_key: String,
+    pub api_key_configured: bool,
+    pub model: String,
+    pub base_url: String,
+    pub provider_id: String,
+    pub endpoint: String,
+    pub max_tokens: u64,
+    pub context_limit: u64,
+    pub reasoning_effort: String,
+    pub auto_compact_threshold: f64,
+    pub compliance_enabled: bool,
+    // ── subagent ──
+    pub sub_model: String,
+    pub sub_base_url: String,
+    pub sub_api_key: String,
+    pub sub_api_key_configured: bool,
+    pub sub_max_tokens: u64,
+    pub sub_timeout_secs: u64,
+    pub sub_tools: Vec<String>,
+    // ── multimodal ──
+    pub mm_enabled: bool,
+    pub mm_provider_type: String,
+    pub mm_api_key: String,
+    pub mm_api_key_configured: bool,
+    pub mm_base_url: String,
+    pub mm_model: String,
+    pub mm_max_tokens: u64,
+    // ── workspace 运行环境 ──
+    pub workspace_mode: String,
+    pub workspace_configured_mode: String,
+    pub workspace_active_mode: String,
+    pub workspace_endpoint: String,
+    // ── 杂项 ──
+    pub tokenizer_path: String,
+    pub lang: String,
+    pub permission_level: u64,
+    /// config.load `providers[]`（provider/endpoint 联动选择）。
+    pub providers: Vec<ProviderInfo>,
+    /// `skills.list_tools` 返回（subagent 工具勾选列表）。
+    pub tools: Vec<String>,
+}
+
+/// 掩码判定：daemon 对已配置的 secret 返回 `"****"`（与 Web isMasked 一致）。
+fn is_masked(v: &str) -> bool {
+    v == "****"
+}
+
+/// 解析 `config.load` 查询结果（Value::Object）→ SettingsSnapshot。
+///
+/// providers 形状：`[{id, display, endpoints: [{id, display, base_url,
+/// default_model, models: [...]}]}]`；子对象 subagent/multimodal/workspace
+/// 同理 snake_case。`lang`/`permission_level` 顶层返回（App.tsx L659 同源）。
+pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
+    let str_of = |key: &str| -> String {
+        v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    };
+    let u64_of = |key: &str| -> u64 {
+        v.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
+    };
+    let f64_of = |key: &str| -> f64 {
+        v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
+    };
+    let bool_of = |key: &str| -> bool {
+        v.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
+    };
+    let sub = v.get("subagent");
+    let sub_of = |key: &str| -> String {
+        sub.and_then(|s| s.get(key))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let sub_u64 = |key: &str| -> u64 {
+        sub.and_then(|s| s.get(key)).and_then(|x| x.as_u64()).unwrap_or(0)
+    };
+    let mm = v.get("multimodal");
+    let mm_of = |key: &str| -> String {
+        mm.and_then(|s| s.get(key))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let mm_u64 = |key: &str| -> u64 {
+        mm.and_then(|s| s.get(key)).and_then(|x| x.as_u64()).unwrap_or(0)
+    };
+    let ws = v.get("workspace");
+
+    let api_key = str_of("api_key");
+    let sub_api_key = sub_of("api_key");
+    let mm_api_key = mm_of("api_key");
+    SettingsSnapshot {
+        api_key: if is_masked(&api_key) { String::new() } else { api_key.clone() },
+        api_key_configured: is_masked(&api_key),
+        model: str_of("model"),
+        base_url: str_of("base_url"),
+        provider_id: str_of("provider_id"),
+        endpoint: str_of("endpoint"),
+        max_tokens: u64_of("max_tokens"),
+        context_limit: u64_of("context_limit"),
+        reasoning_effort: str_of("reasoning_effort"),
+        auto_compact_threshold: f64_of("auto_compact_threshold"),
+        compliance_enabled: bool_of("compliance_enabled"),
+        sub_model: sub_of("model"),
+        sub_base_url: sub_of("base_url"),
+        sub_api_key: if is_masked(&sub_api_key) { String::new() } else { sub_api_key.clone() },
+        sub_api_key_configured: is_masked(&sub_api_key),
+        sub_max_tokens: sub_u64("max_tokens"),
+        sub_timeout_secs: sub_u64("timeout_secs"),
+        sub_tools: sub
+            .and_then(|s| s.get("default_tools"))
+            .and_then(|x| x.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+        mm_enabled: mm.and_then(|s| s.get("enabled")).and_then(|x| x.as_bool()).unwrap_or(false),
+        mm_provider_type: mm_of("provider_type"),
+        mm_api_key: if is_masked(&mm_api_key) { String::new() } else { mm_api_key.clone() },
+        mm_api_key_configured: is_masked(&mm_api_key),
+        mm_base_url: mm_of("base_url"),
+        mm_model: mm_of("model"),
+        mm_max_tokens: mm_u64("max_tokens"),
+        workspace_mode: ws
+            .and_then(|s| s.get("mode"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("local")
+            .to_string(),
+        workspace_configured_mode: String::new(),
+        workspace_active_mode: String::new(),
+        workspace_endpoint: String::new(),
+        tokenizer_path: str_of("tokenizer_path"),
+        lang: str_of("lang"),
+        permission_level: u64_of("permission_level"),
+        providers: v
+            .get("providers")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        Some(ProviderInfo {
+                            id: p.get("id")?.as_str()?.to_string(),
+                            display: p.get("display")?.as_str()?.to_string(),
+                            endpoints: p
+                                .get("endpoints")
+                                .and_then(|e| e.as_array())
+                                .map(|eps| {
+                                    eps.iter()
+                                        .filter_map(|ep| {
+                                            Some(ProviderEndpoint {
+                                                id: ep.get("id")?.as_str()?.to_string(),
+                                                display: ep.get("display")?.as_str()?.to_string(),
+                                                base_url: ep
+                                                    .get("base_url")
+                                                    .and_then(|b| b.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                default_model: ep
+                                                    .get("default_model")
+                                                    .and_then(|m| m.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                models: ep
+                                                    .get("models")
+                                                    .and_then(|m| m.as_array())
+                                                    .map(|ms| {
+                                                        ms.iter()
+                                                            .filter_map(|m| m.as_str().map(str::to_string))
+                                                            .collect()
+                                                    })
+                                                    .unwrap_or_default(),
+                                            })
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        tools: Vec::new(),
+    }
+}
+
+/// 解析 `skills.list_tools` 查询结果（Value::Array of string）。
+pub fn parse_tools(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// 解析 `workspace.status` 查询结果 → (configured_mode, active_mode, endpoint)。
+pub fn parse_workspace_status(v: &Value) -> (String, String, String) {
+    (
+        v.get("configured_mode").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        v.get("active_mode").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        v.get("endpoint").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    )
+}
+
+/// 归一化 reasoning effort（对齐 Web `normalizeEffort`：off 值归到 low）。
+pub fn normalize_effort(effort: &str) -> &str {
+    match effort {
+        "none" | "minimal" | "disable" | "disabled" | "off" | "" => "low",
+        "low" | "medium" | "high" | "xhigh" | "max" => effort,
+        _ => effort,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,5 +669,111 @@ mod tests {
         assert_eq!(snap.available[0].name, "solidjs-v2");
         assert_eq!(snap.runtime[0].token_count, 42);
         assert_eq!(snap.operation_revision, 2);
+    }
+
+    #[test]
+    fn parses_config_load_full() {
+        // 对齐 daemon config.load 序列化（snake_case + 掩码约定）。
+        let v = json!({
+            "api_key": "****",
+            "model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com/v1",
+            "provider_id": "deepseek",
+            "endpoint": "openai",
+            "max_tokens": 16384,
+            "context_limit": 1000000,
+            "reasoning_effort": "high",
+            "auto_compact_threshold": 0.75,
+            "compliance_enabled": true,
+            "lang": "zh",
+            "permission_level": 3,
+            "tokenizer_path": "C:/tok.json",
+            "subagent": {
+                "model": "deepseek-reasoner",
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": "****",
+                "max_tokens": 4096,
+                "timeout_secs": 120,
+                "default_tools": ["read_file", "grep"],
+            },
+            "multimodal": {
+                "enabled": true,
+                "provider_type": "mimo",
+                "api_key": "real-key",
+                "base_url": "https://mm.example.com",
+                "model": "mimo-v2.5",
+                "max_tokens": 4096,
+            },
+            "workspace": { "mode": "wsl" },
+            "providers": [
+                {
+                    "id": "deepseek",
+                    "display": "DeepSeek",
+                    "endpoints": [{
+                        "id": "openai",
+                        "display": "OpenAI 兼容",
+                        "base_url": "https://api.deepseek.com/v1",
+                        "default_model": "deepseek-chat",
+                        "models": ["deepseek-chat", "deepseek-reasoner"],
+                    }],
+                }
+            ],
+        });
+        let snap = parse_config_load(&v);
+        assert!(snap.api_key_configured);
+        assert_eq!(snap.api_key, "");
+        assert_eq!(snap.model, "deepseek-chat");
+        assert_eq!(snap.provider_id, "deepseek");
+        assert_eq!(snap.max_tokens, 16384);
+        assert!((snap.auto_compact_threshold - 0.75).abs() < 1e-9);
+        assert!(snap.compliance_enabled);
+        assert_eq!(snap.lang, "zh");
+        assert_eq!(snap.permission_level, 3);
+        assert_eq!(snap.tokenizer_path, "C:/tok.json");
+        assert!(snap.sub_api_key_configured);
+        assert_eq!(snap.sub_api_key, "");
+        assert_eq!(snap.sub_model, "deepseek-reasoner");
+        assert_eq!(snap.sub_tools, vec!["read_file", "grep"]);
+        assert!(snap.mm_enabled);
+        assert_eq!(snap.mm_api_key, "real-key"); // 未掩码 → 原样（可回显）
+        assert!(!snap.mm_api_key_configured);
+        assert_eq!(snap.mm_model, "mimo-v2.5");
+        assert_eq!(snap.workspace_mode, "wsl");
+        assert_eq!(snap.providers.len(), 1);
+        assert_eq!(snap.providers[0].id, "deepseek");
+        assert_eq!(snap.providers[0].endpoints[0].models, vec!["deepseek-chat", "deepseek-reasoner"]);
+    }
+
+    #[test]
+    fn config_load_tolerates_missing_fields() {
+        let snap = parse_config_load(&json!({ "providers": [] }));
+        assert!(!snap.api_key_configured);
+        assert_eq!(snap.model, "");
+        assert_eq!(snap.workspace_mode, "local"); // workspace 缺省 local
+        assert_eq!(snap.permission_level, 0);
+        assert!(snap.providers.is_empty());
+        assert!(snap.sub_tools.is_empty());
+        assert!(!snap.mm_enabled);
+    }
+
+    #[test]
+    fn parses_tools_and_workspace_status() {
+        let tools = parse_tools(&json!(["read_file", "grep", "exec"]));
+        assert_eq!(tools, vec!["read_file", "grep", "exec"]);
+        assert!(parse_tools(&json!({})).is_empty());
+        let (cfg, active, ep) =
+            parse_workspace_status(&json!({ "configured_mode": "local", "active_mode": "local", "endpoint": "wsl://ubuntu" }));
+        assert_eq!(cfg, "local");
+        assert_eq!(active, "local");
+        assert_eq!(ep, "wsl://ubuntu");
+    }
+
+    #[test]
+    fn normalizes_effort_off_values() {
+        for off in ["none", "minimal", "disable", "disabled", "off", ""] {
+            assert_eq!(normalize_effort(off), "low");
+        }
+        assert_eq!(normalize_effort("high"), "high");
+        assert_eq!(normalize_effort("max"), "max");
     }
 }

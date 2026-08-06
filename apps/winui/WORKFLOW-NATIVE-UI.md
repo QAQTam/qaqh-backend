@@ -509,3 +509,113 @@ grid((
   （正常退出路径日志）、`App::on_fault`（panic 源头捕获——闪退调查工具链）。
 - 未应用（后续可选）：`use_resource`（异步数据加载）、`.transition()`（进出场动画）、
   `resource_overrides`（轻量样式覆盖）、`Icon::bitmap_icon/path`（位图/路径图标）。
+
+---
+
+## 9. P1（home 视图）+ P2（settings 视图）XAML 化（2026-08-07 落地）
+
+### 范围与边界
+
+- **home**：`StartupView` 整页接管（view=home 时内容区 XAML 渲染；Web 组件保留回退）。
+- **settings**：`SettingsView` 整页接管（view=settings 时内容区 XAML 渲染；Web 组件保留回退）。
+- **零后端改动**：全部走既有 Ringing 命令/查询（`config.load` / `config.save` /
+  `config.set_permission_level` / `workspace.set_mode` / `workspace.status` /
+  `workspace.diagnose` / `workspace.install_wsl` / `skills.list_tools` /
+  `session.list` + `session.activity` / `session.send_message`）。
+- **不动 daemon**：验证仅 `cargo check` + 单测 + `pnpm typecheck/test` + debug UI 拉起。
+
+### 新增/改动文件
+
+| 文件 | 内容 |
+|---|---|
+| `src/home_view.rs`（新） | hero + 输入（发送=新会话+首条消息）+ 30 天热力图 + 会话卡片网格；session_snapshot 同源投影 |
+| `src/settings_view.rs`（新） | 8 分类导航 + 全字段表单（models/api/context/subagent/workspace/appearance/multimodal/advanced）；草稿 + 全量保存 |
+| `src/shell_store.rs` | `SettingsSnapshot`/`ProviderInfo`/`ProviderEndpoint` + `parse_config_load`/`parse_tools`/`parse_workspace_status`/`normalize_effort` + 6 测试 |
+| `src/bridge.rs` | `SettingsProjection` typed struct + settings 缓存/rev + `spawn_config_load/save`、`spawn_set_permission`、`spawn_workspace_*`、`spawn_send_new_session`（会话创建+发消息壳直连）+ `shell.setSettings` 拦截 + `shell.settingsAction` 事件 + Bridge 透传 |
+| `src/main.rs` | 内容区视图族两行 → 四行（webview/skills/home/settings，行高按 current_view 切换） |
+| `assets/deepx-bridge.js` | flags `home/settings` + `shell.setSettings` + `shell.onSettingsAction` |
+| `renderer/src/runtime/shellBridge.ts` | `SettingsProjection`/`SettingsAction` 类型 + `setSettings`/`onSettingsAction` |
+| `renderer/src/runtime/electron.d.ts` | shell 类型 + flag 类型扩展 |
+| `renderer/src/App.tsx` | `xamlHome`/`xamlSettings` flags + Switch 条件 + setSettings 投影 effect + onSettingsAction 订阅 |
+
+### 通道契约（D-1 投影通道清单续）
+
+| 组件 | 通道(Web→壳) | 动作(壳→Web) | rev |
+|---|---|---|---|
+| 首页 | —（session_snapshot 同源，壳直连刷新） | —（spawn_resume / spawn_send_new_session 壳直连） | session_rev |
+| 设置页 | `shell.setSettings`（SettingsProjection） | `shell.settingsAction{action:lang\|theme\|permission}` | settings_rev + settings_proj_rev |
+
+### 偏差记录（本次新增）
+
+| # | 偏差 | 说明 |
+|---|---|---|
+| D10 | home 输入 Enter 提交缺失 | reactor text_box 无键盘事件 API → 发送按钮提交（行为等价） |
+| D11 | SecretInput 折叠交互简化 | password_box 常显 + "已配置"徽章；空输入=保留原值（对齐 apiKeyReplacement 语义） |
+| D12 | lang 变更不回 Web config.save | 壳设置页全量保存已含 lang；Web 侧仅 i18n/localStorage 校正，避免空字段覆盖（App.tsx onSettingsAction） |
+| D13 | workspace 切换无重启 | backend.restart 未实现（ELECTRON-MIGRATION P1#3）→ 保存后提示"下次启动生效" |
+| D14 | 热力图色阶用语义色近似 | hm-l0..l4 → ThemeRef LayerFill/SubtleFill/AccentSecondary/Accent/SystemSuccess |
+
+### 验证状态
+
+- `cargo check -p deepx-winui` ✅；`cargo test -p deepx-winui` 22 passed ✅
+- `pnpm typecheck` ✅；`pnpm test` 262 passed + 2 存量失败（SettingsView.test.tsx
+  `databaseEnabled` 断言与组件不同步，未触碰，与本次改动无关）
+- debug UI 拉起（DEEPX_DEBUG_URL + 本地 serve-renderer，连现有 daemon）：日志验证
+  `shell.setSettings` 投影、`config.load` 壳直连缓存、home `refresh_sessions`、视图切换 ✅
+
+### 9.1 设置页卡死/文字错位修复（2026-08-07）
+
+**现象**：设置页左侧分类导航多次切换后按钮文字错位（选中项文字残留到其他项）、
+随后 UI 假死不可点击。
+
+**根因**（reactor reconciler 机制核对后）：
+1. 原 nav 在 active 切换时元素类型跳变（`border(TextBlock)` ↔ 裸 `TextBlock`）——
+   positional reconcile 对 kind 不匹配项执行 unmount+mount，每次切换 2/8 项重建；
+   多次切换后控件树错位累积，渲染退化假死。
+2. 分类表单 rows 同 index 类型跳变（`field_row`(grid) ↔ `section_title`(TextBlock)）
+   跨分类复用错位。
+3. sidebar 无此问题：其列表走 `list_view` + `with_key_selector`（keyed
+   reconcile，结构稳定）；skills_view 卡片结构同构（恒 border）——本组件违反
+   了这两条已验证的"结构稳定性"约束。
+
+**修复**（`src/settings_view.rs` / `src/home_view.rs`）：
+1. **nav 项固定同构结构**：恒为 `Border(grid(竖条, 文字))`，active 只改
+   `background`/竖条颜色（modifiers 字段 diff，原地更新，无 unmount/mount）。
+2. **选中语义 = Win11 NavigationView 左侧竖条**（3px Accent 圆角条 +
+   SubtleFill 背景），文字恒 `PrimaryText`（不再全文字主题色）。
+3. **rows 统一 keyed**：`el.with_key("{category}-{idx}")`——跨分类 key 全异 →
+   切换分类干净重建；同分类内 key 相同 → 原地更新（表单输入状态保持）。
+4. **nav 项带 key**（`with_key(id)`）→ keyed reconcile 按身份匹配。
+5. home_view `sessions_section` 空/非空两结构（TextBlock↔vstack）加固定 key
+   "sessions"（同款防护）。
+
+**验证**：`cargo check` ✅；debug UI 重启后多次切换分类无错位/卡死。
+**后续约束（D15）**：XAML 视图动态列表一律固定元素结构 + key，禁止 active
+态切换元素类型（Border↔裸节点）；批量重建用 keyed reconcile 显式表达。
+
+### 9.2 会话列表 Win11 选中样式 + 进出场动画（2026-08-07）
+
+**选中样式统一**（`src/sidebar.rs` session_row）：
+- 恒为 `border(grid(竖条, 圆点, 标题, 删除))`——active 只改竖条颜色 + SubtleFill
+  背景（结构稳定性契约 D15：消除旧实现 active 时包 border / 非 active 裸 grid
+  的 kind 跳变隐患，与 settings nav 修复同款）。
+- 选中语义 = Win11 NavigationView 左侧 3px Accent 竖条；标题恒 PrimaryText。
+
+**动画能力核对**（reactor backend/winui/mod.rs 逐段确认）：
+| API | backend 实现 | 说明 |
+|---|---|---|
+| `transition(enter, exit)` | ✅ `SetImplicitShow/HideAnimation`（Composition 组动画） | 元素新建/显隐切换时自动播放 |
+| `animate(config)` | ✅ `run_property_animation` | 挂载时播一次；与 enter 互斥（property 优先） |
+| `with_opacity/scale/translation_transition` | ✅ Composition 隐式过渡 | 属性变化自动补间 |
+| `with_layout_animation` | ❌ 空实现（`set_layout_animation` 为 no-op） | 列表增删布局动画暂不可用，勿用 |
+
+**已落地动画**（`transition(fade_in 200ms)`，ImplicitShowAnimation）：
+1. sidebar 会话行：新会话出现时淡入（keyed 行 mount 触发；active 切换不重建
+   行 → 不重放）；
+2. settings 分类内容行：切分类时新行淡入（rows keyed 重建触发）；
+3. home 会话卡片：新卡片淡入。
+未做：视图级切换动画（行高 0↔STAR 不改变 Visibility，ImplicitShow 不触发；
+维持 WebView2 常驻设计）；颜色过渡动画（Composition 仅 opacity/scale/
+translation，无颜色补间——指示器/背景为瞬间切换，符合 Win11 简洁语义）。
+
+**验证**：`cargo check` ✅；debug UI 重启（PID 25160）无 fault/panic。

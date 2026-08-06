@@ -37,12 +37,26 @@ export interface HeaderAction {
 
 export type ShellThemeMode = "light" | "dark" | "dark-gray" | "system";
 
+/** XAML 设置页初始投影（Web → 壳 `shell.setSettings`）。 */
+export interface SettingsProjection {
+  theme: ShellThemeMode;
+  lang: "en" | "zh";
+  permissionLevel: number;
+  workspaceMode: string;
+}
+
+/** 壳设置页动作回传（壳 → Web `shell.settingsAction`）。 */
+export type SettingsAction =
+  | { action: "lang"; lang: "en" | "zh" }
+  | { action: "theme"; mode: ShellThemeMode }
+  | { action: "permission"; level: number };
+
 export interface ShellNavigate {
   view: "home" | "chat" | "skills" | "settings";
   seed?: string;
 }
 
-type XamlComponent = "sidebar" | "header";
+type XamlComponent = "sidebar" | "header" | "home" | "settings";
 
 /** 查询 P-3 统一 flag：组件是否由 XAML 壳接管。 */
 export function isXaml(component: XamlComponent): boolean {
@@ -95,4 +109,20 @@ export function onThemeChanged(
   const shell = window.deepx?.shell;
   if (!shell?.onThemeChanged) return undefined;
   return shell.onThemeChanged((update) => listener(update.mode));
+}
+
+/** 设置页初始投影（Web → 壳）。桥不存在时返回 undefined。 */
+export function setSettings(state: SettingsProjection): Promise<unknown> | undefined {
+  const shell = window.deepx?.shell;
+  if (!shell?.setSettings) return undefined;
+  return shell.setSettings(state);
+}
+
+/** 订阅壳设置页动作回传。桥不存在时返回 undefined。 */
+export function onSettingsAction(
+  listener: (action: SettingsAction) => void,
+): (() => void) | undefined {
+  const shell = window.deepx?.shell;
+  if (!shell?.onSettingsAction) return undefined;
+  return shell.onSettingsAction(listener as (a: { action: string; [k: string]: unknown }) => void);
 }

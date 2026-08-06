@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { backendStatus, connect, listen, request } from "./runtime/backendClient";
-import { isXaml, isXamlSidebar, onHeaderAction, onNavigate, onThemeChanged, setHeader, setTheme } from "./runtime/shellBridge";
+import { isXaml, isXamlSidebar, onHeaderAction, onNavigate, onSettingsAction, onThemeChanged, setHeader, setSettings, setTheme } from "./runtime/shellBridge";
 import { requestWithRinging } from "./runtime/ringingCommands";
 import {
   applyUpdate,
@@ -74,6 +74,9 @@ export default function App() {
   // WinUI 壳注入 flag：原生 XAML 侧栏/标题栏接管时隐藏 web 对应组件（代码保留可回退）。
   const xamlSidebar = isXamlSidebar();
   const xamlHeader = isXaml("header");
+  // P1/P2：XAML 首页 / 设置页接管时隐藏 web 对应视图（flag 关闭即回退）。
+  const xamlHome = isXaml("home");
+  const xamlSettings = isXaml("settings");
   const registry = createSessionRegistry({ storage: sessionStorage });
   // Ringing v1 三频道状态源
   const ringingMonitor = createRingingMonitor();
@@ -101,6 +104,7 @@ export default function App() {
   let unlistenShellNavigate: (() => void) | undefined;
   let unlistenHeaderAction: (() => void) | undefined;
   let unlistenThemeChanged: (() => void) | undefined;
+  let unlistenSettingsAction: (() => void) | undefined;
   let unlistenRingingBatch: (() => void) | undefined;
   let unlistenRingingStatus: (() => void) | undefined;
   let unlistenTimelineEntry: (() => void) | undefined;
@@ -548,6 +552,22 @@ export default function App() {
     unlistenThemeChanged = onThemeChanged(mode => {
       if ((localStorage.getItem(LS_THEME) ?? "system") === "system") applyTheme("system");
     });
+    // XAML 设置页动作回传（P2）：壳侧变更 → Web 校正状态。
+    // lang：i18n + localStorage（config.save 由壳设置页全量提交，避免
+    // Web switchLang 的空字段覆盖——不重复请求）；
+    // theme：switchTheme（localStorage + applyTheme，无 config 写）；
+    // permission：壳已直连 config.set_permission_level，Web 仅同步信号。
+    unlistenSettingsAction = onSettingsAction(action => {
+      if (action.action === "lang") {
+        i18n.setLang(action.lang);
+        setConfigLang(action.lang);
+        localStorage.setItem("deepx:lang", action.lang);
+      } else if (action.action === "theme") {
+        switchTheme(action.mode);
+      } else if (action.action === "permission") {
+        setPermissionLevel(action.level);
+      }
+    });
     void (async () => {
     const savedTheme = (localStorage.getItem(LS_THEME) ?? "system") as ThemeMode;
     setTheme(savedTheme);
@@ -746,6 +766,21 @@ export default function App() {
     );
   }
 
+  // ── XAML 设置页初始投影（xamlSettings flag 关闭时零开销）────────
+  // shell.setSettings：theme/lang/permissionLevel → 壳设置页数据源。
+  // config.load 落地后信号变化即重推；workspaceMode 由壳从 config.load 读。
+  createEffect(
+    () => ({
+      theme: theme(),
+      lang: configLang(),
+      permissionLevel: permissionLevel(),
+      workspaceMode: "",
+    }),
+    proj => {
+      if (xamlSettings) void setSettings(proj);
+    },
+  );
+
   onCleanup(() => {
     registry.disposeView();
     unlistenTheme?.();
@@ -757,6 +792,7 @@ export default function App() {
     unlistenShellNavigate?.();
     unlistenHeaderAction?.();
     unlistenThemeChanged?.();
+    unlistenSettingsAction?.();
     unlistenUpdate?.();
     unlistenUpdateFailure?.();
   });
@@ -788,7 +824,7 @@ export default function App() {
             {error => <div class="backend-disconnected" role="alert">Backend disconnected: {error()}</div>}
           </Show>
           <Switch>
-            <Match when={view() === "settings"}>
+            <Match when={view() === "settings" && !xamlSettings}>
               <SettingsView
                 lang={configLang}
                 onLangChange={switchLang}
@@ -840,7 +876,7 @@ export default function App() {
                 }}
               </Show>
             </Match>
-            <Match when={view() === "home"}>
+            <Match when={view() === "home" && !xamlHome}>
               <StartupView
                 sessions={sessions()}
                 onResume={resumeSession}
