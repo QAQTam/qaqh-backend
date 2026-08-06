@@ -3,7 +3,8 @@
 #
 # 项目结构:
 #   crates/          Rust 后端 (16 crates)
-#   apps/desktop/    Web renderer（由 winui 壳承载）
+#   apps/winui/renderer/  Web renderer 源码（由 winui 壳承载）
+#   apps/winui/out/renderer/  构建产物（唯一产物目录）
 #   apps/installer/  Windows 安装器
 
 set windows-shell := ["pwsh.exe", "-NoLogo", "-Command"]
@@ -30,7 +31,7 @@ build-updater:
 # 构建前端（typecheck + vite，不含 daemon）
 [windows]
 build-desktop:
-    Set-Location apps/desktop; pnpm build
+    Set-Location apps/winui/renderer; pnpm build
 
 # ── 打包（winui 壳）────────────────────────────────
 
@@ -43,7 +44,7 @@ build-winui: build-desktop
 # 打包 winui 运行目录（release/winui-app，完整安装包使用）
 [windows]
 package-winui-desktop: build-daemon build-winui
-    Set-Location apps/desktop; node scripts/prepare-daemon.mjs --backend-root ../..
+    Set-Location apps/winui/renderer; node scripts/prepare-daemon.mjs --backend-root ../../..
     ./apps/winui/scripts/assemble-winui.ps1
 
 # 生成完整安装包 EXE（winui 壳；效果等同 just package）
@@ -66,7 +67,7 @@ dev:
 # 启动 renderer dev server（winui 壳用 DEEPX_DEBUG_URL 指向它）
 [windows]
 dev-desktop:
-    Set-Location apps/desktop; pnpm dev
+    Set-Location apps/winui/renderer; pnpm dev
 
 # ── 检查 & 测试 ─────────────────────────────────────
 
@@ -77,7 +78,7 @@ check-rust:
 # 前端类型检查
 [windows]
 check-desktop:
-    Set-Location apps/desktop; pnpm typecheck
+    Set-Location apps/winui/renderer; pnpm typecheck
 
 # 全部静态检查
 [windows]
@@ -89,7 +90,7 @@ check: check-rust
 [windows]
 test:
     cargo test --workspace
-    Set-Location apps/desktop; pnpm test
+    Set-Location apps/winui/renderer; pnpm test
 [unix]
 test:
     cargo test --workspace
@@ -115,8 +116,8 @@ status:
     @if (Test-Path 'target/release/deepx-daemon.exe') { '  ✓ deepx-daemon.exe' } else { '  ✗ deepx-daemon.exe' }
     @if (Test-Path 'target/release/DeepXInstaller.exe') { '  ✓ DeepXInstaller.exe' } else { '  ✗ DeepXInstaller.exe' }
     @if (Test-Path 'target/release/deepx-updater.exe') { '  ✓ deepx-updater.exe' } else { '  ✗ deepx-updater.exe' }
-    @Write-Output "=== Desktop ==="
-    @if (Test-Path 'apps/desktop/out/renderer/index.html') { '  ✓ renderer' } else { '  ✗ renderer' }
+    @Write-Output "=== Renderer ==="
+    @if (Test-Path 'apps/winui/out/renderer/index.html') { '  ✓ renderer' } else { '  ✗ renderer' }
     @Write-Output "=== Packages ==="
     @if (Test-Path 'packages') { Get-ChildItem 'packages' -Force | ForEach-Object { "  ✓ $($_.Name)" } } else { '  ✗ no packages yet' }
 
@@ -124,9 +125,8 @@ status:
 [windows]
 clean:
     cargo clean
-    @"Remove-Item -Recurse -Force 'apps/desktop/out' -ErrorAction SilentlyContinue"
-    @"Remove-Item -Recurse -Force 'apps/desktop/release' -ErrorAction SilentlyContinue"
-    @"Remove-Item -Recurse -Force 'apps/desktop/build/sidecar' -ErrorAction SilentlyContinue"
+    @"Remove-Item -Recurse -Force 'apps/winui/out' -ErrorAction SilentlyContinue"
+    @"Remove-Item -Recurse -Force 'apps/winui/renderer/build/sidecar' -ErrorAction SilentlyContinue"
     @"Remove-Item -Recurse -Force 'packages' -ErrorAction SilentlyContinue"
     @"Remove-Item -Recurse -Force 'apps/installer/dist' -ErrorAction SilentlyContinue"
     @"Remove-Item -Recurse -Force 'apps/installer/staging' -ErrorAction SilentlyContinue"
@@ -136,7 +136,7 @@ clean:
 # 初始化开发环境
 [windows]
 setup:
-    Set-Location apps/desktop; pnpm install
+    Set-Location apps/winui/renderer; pnpm install
     @Write-Output "Setup done. Run 'just build-daemon' to compile the backend."
 
 # 从 version.txt 同步版本号到所有配置文件
@@ -148,33 +148,33 @@ sync-version:
 
 [unix]
 build-desktop:
-    cd apps/desktop && pnpm build
+    cd apps/winui/renderer && pnpm build
 
 [unix]
 dev-desktop:
-    cd apps/desktop && pnpm dev
+    cd apps/winui/renderer && pnpm dev
 
 [unix]
 check-desktop:
-    cd apps/desktop && pnpm typecheck
+    cd apps/winui/renderer && pnpm typecheck
 
 [unix]
 clean:
     cargo clean
-    rm -rf apps/desktop/out apps/desktop/release apps/desktop/build/sidecar
+    rm -rf apps/winui/out apps/winui/renderer/build/sidecar
     rm -rf packages apps/installer/dist apps/installer/staging apps/installer/payload/desktop
     @echo Clean done.
 
 [unix]
 setup:
-    cd apps/desktop && pnpm install
+    cd apps/winui/renderer && pnpm install
     @echo "Setup done. Run 'just build-daemon' to compile the backend."
 
 [unix]
 status:
     @echo "=== Rust binaries ==="
     @test -f target/release/deepx-daemon && echo "  ✓ deepx-daemon" || echo "  ✗ deepx-daemon"
-    @echo "=== Desktop ==="
-    @test -f apps/desktop/out/renderer/index.html && echo "  ✓ renderer" || echo "  ✗ renderer"
+    @echo "=== Renderer ==="
+    @test -f apps/winui/out/renderer/index.html && echo "  ✓ renderer" || echo "  ✗ renderer"
     @echo "=== Packages ==="
     @ls -la packages 2>/dev/null || echo "  ✗ no packages yet"

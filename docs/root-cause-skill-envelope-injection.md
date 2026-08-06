@@ -1,7 +1,7 @@
 # 根因分析报告：skill envelope 注入现象
 
 - **日期**：2026-08-04
-- **范围**：crates/deepx-msglp、crates/deepx-skills、crates/deepx-workspace、crates/deepx-gate、apps/desktop
+- **范围**：crates/deepx-msglp、crates/deepx-skills、crates/deepx-workspace、crates/deepx-gate、apps/winui/renderer
 - **状态**：已完成代码走查与 git 溯源；注入已临时禁用
 
 ---
@@ -62,7 +62,7 @@ context.push(deepx_types::Message::system(envelope_text));  // role = system
 | `deepx-gate/src/openai.rs:618-641 normalize_skill_envelope` | 仅在请求内部移动位置（尾部→头部 dynamic slot），不落盘 |
 | 事件双发（912810d）：TurnStart/RoundDelta | 传递的是 `user_text`/模型 delta，**不含 envelope** |
 | `projection.rs` / `conversation_snapshot.rs` / `util/mod.rs:310` | 投影只处理 user/assistant/tool 消息，无 system 注入消息 |
-| 前端 `apps/desktop/src/App.tsx` | 只处理 turn_started/turn_completed 等控制事件，无 envelope 渲染 |
+| 前端 `apps/winui/renderer/src/App.tsx` | 只处理 turn_started/turn_completed 等控制事件，无 envelope 渲染 |
 | 前端 grep "envelope" | 全部是 Ringing 协议信封，无 skill envelope 渲染逻辑 |
 
 **结论：DeepX 仓库代码中不存在「envelope 进入消息流/历史」的合法写入路径。**

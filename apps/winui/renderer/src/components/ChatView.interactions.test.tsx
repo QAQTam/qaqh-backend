@@ -55,6 +55,11 @@ function mountRawChat(initial: RawSessionState) {
         permissionLevel={2}
         onPermissionLevelChange={vi.fn()}
         onChangeWorkspace={vi.fn()}
+        infoOpen={false}
+        statsOpen={false}
+        onToggleInfo={vi.fn()}
+        onToggleStats={vi.fn()}
+        compactRequest={() => 0}
       />
     </I18nCtx>
   ), host));

@@ -27,7 +27,11 @@ apps/installer/.verify-install/
 .codegraph/
 .reasonix/
 /skills/
+# stale legacy product dir (pre-renderer-consolidation build output)
+apps/out/
 
 # WinUI shell test harness (parallel dev daemon home)
 /.deepx-test-home/
-apps/winui/
+# WinUI shell: source is tracked; only product directories are ignored
+apps/winui/out/
+apps/winui/release/.deepx-winui.log

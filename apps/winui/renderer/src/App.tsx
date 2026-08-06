@@ -1,5 +1,6 @@
-import { createMemo, createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { backendStatus, connect, listen, request } from "./runtime/backendClient";
+import { isXaml, isXamlSidebar, onHeaderAction, onNavigate, onThemeChanged, setHeader, setTheme } from "./runtime/shellBridge";
 import { requestWithRinging } from "./runtime/ringingCommands";
 import {
   applyUpdate,
@@ -44,6 +45,13 @@ import "./styles/skills.css";
 
 type View = "home" | "chat" | "settings" | "skills";
 
+/// 非 chat 视图的标题栏标题（XAML TitleBar title 槽；壳侧视图名）。
+const VIEW_LABELS: Record<Exclude<View, "chat">, string> = {
+  home: "首页",
+  skills: "技能",
+  settings: "设置",
+};
+
 const LS_KEY = "deepx:seed";
 const LS_THEME = "deepx:theme";
 const LS_WORKSPACE = "deepx:workspace";
@@ -54,12 +62,18 @@ function resolveTheme(mode: ThemeMode): "light" | "dark" | "dark-gray" {
 }
 
 function applyTheme(mode: ThemeMode) {
-  document.documentElement.setAttribute("data-theme", resolveTheme(mode));
+  const resolved = resolveTheme(mode);
+  document.documentElement.setAttribute("data-theme", resolved);
+  // P-5 三态进协议（WORKFLOW §6.1）：Web 发三态原始值，壳端映射渲染。
+  void setTheme(resolved);
 }
 
 export default function App() {
   const i18n = createI18n((localStorage.getItem("deepx:lang") ?? "en") as Lang);
   const toastCtrl = createToastCtrl();
+  // WinUI 壳注入 flag：原生 XAML 侧栏/标题栏接管时隐藏 web 对应组件（代码保留可回退）。
+  const xamlSidebar = isXamlSidebar();
+  const xamlHeader = isXaml("header");
   const registry = createSessionRegistry({ storage: sessionStorage });
   // Ringing v1 三频道状态源
   const ringingMonitor = createRingingMonitor();
@@ -77,8 +91,16 @@ export default function App() {
   const [backendError, setBackendError] = createSignal("");
   const [pendingUpdate, setPendingUpdate] = createSignal<UpdateInfo | null>(null);
   const [applyingUpdate, setApplyingUpdate] = createSignal(false);
+  // 标题栏面板开关（D3 上提：壳 headerAction 需触达，ChatView 内本地 signal 不可达）。
+  const [infoOpen, setInfoOpen] = createSignal(false);
+  const [statsOpen, setStatsOpen] = createSignal(false);
+  // compact 触发信号（D4）：壳 headerAction → ChatView 内执行 handleCompact。
+  const [compactRequest, setCompactRequest] = createSignal(0);
   let unlistenTheme: (() => void) | undefined;
   let unlistenBackendStatus: (() => void) | undefined;
+  let unlistenShellNavigate: (() => void) | undefined;
+  let unlistenHeaderAction: (() => void) | undefined;
+  let unlistenThemeChanged: (() => void) | undefined;
   let unlistenRingingBatch: (() => void) | undefined;
   let unlistenRingingStatus: (() => void) | undefined;
   let unlistenTimelineEntry: (() => void) | undefined;
@@ -454,9 +476,10 @@ export default function App() {
     }
   }
 
-  async function browseWorkspace() {
+  async function browseWorkspace(selectedPath?: string) {
     try {
-      const selected = await openDialog({
+      // 壳 headerAction 已带路径（XAML 对话框选中）时直接设置，不再弹框。
+      const selected = selectedPath ?? await openDialog({
         directory: true,
         multiple: false,
         title: i18n.t().session.workspace,
@@ -496,6 +519,35 @@ export default function App() {
   }
 
   onSettled(() => {
+    // XAML 原生侧栏导航：同步先挂接（消除 connect 等待期间的事件丢失窗口）。
+    // resumeSession 内部 request() 会自行完成 connect，无需等待连接就绪。
+    unlistenShellNavigate = onNavigate(nav => {
+      if (nav.view === "chat" && nav.seed) {
+        void resumeSession(nav.seed);
+      } else {
+        setView(nav.view);
+      }
+    });
+    // XAML 标题栏动作分发（壳点击 → Web 执行；状态单一数据源在 Web）。
+    // ①workspace：壳已选目录，path 直接设置；④-⑦ 翻转/执行既有 handler。
+    // ②location/③console 壳直接处理，Web 忽略；⑧pet 壳隐藏。
+    unlistenHeaderAction = onHeaderAction(action => {
+      if (action.action === "workspace") {
+        void browseWorkspace(action.path);
+      } else if (action.action === "info") {
+        setInfoOpen(v => !v);
+      } else if (action.action === "stats") {
+        setStatsOpen(v => !v);
+      } else if (action.action === "undo") {
+        void undoLastTurn();
+      } else if (action.action === "compact") {
+        setCompactRequest(n => n + 1);
+      }
+    });
+    // 壳系统主题变化（P-5）：system 模式下重新解析（WebView media 监听兜底）。
+    unlistenThemeChanged = onThemeChanged(mode => {
+      if ((localStorage.getItem(LS_THEME) ?? "system") === "system") applyTheme("system");
+    });
     void (async () => {
     const savedTheme = (localStorage.getItem(LS_THEME) ?? "system") as ThemeMode;
     setTheme(savedTheme);
@@ -632,6 +684,68 @@ export default function App() {
   })();
   });
 
+  // ── XAML 标题栏状态投影（xamlHeader flag 关闭时零开销）────────────
+  // shell.setHeader：view/title/workspace/各 action 使能态 → 壳 TitleBar。
+  // Solid 2.0 两参数 createEffect：compute 收集依赖，effect 发送载荷；
+  // 壳侧 rev 比对只刷新变化帧。
+  createEffect(
+    () => {
+      if (!xamlHeader) return undefined;
+      const entry = activeEntry();
+      const raw = entry ? presentationFor(entry) : undefined;
+      const streaming = raw ? isSessionStreaming(raw) : false;
+      return {
+        view: view(),
+        title: view() === "chat"
+          ? raw?.session.title || activeSeed().slice(0, 8)
+          : VIEW_LABELS[view() as Exclude<View, "chat">],
+        workspace: workspaceDraft(),
+        infoOpen: infoOpen(),
+        statsOpen: statsOpen(),
+        compacting: raw?.compact.active ?? false,
+        compactDisabled: streaming,
+        undoDisabled: !raw || raw.turns.length === 0 || streaming,
+        petEnabled: false,
+      };
+    },
+    proj => {
+      if (!proj) return;
+      void setHeader(proj);
+    },
+  );
+
+  // D-4 视图路由拆分点（WORKFLOW §6.2）：ChatView 是 Web 视图族的唯一
+  // 成员——壳主导视图渲染（XAML 视图族接管 home/skills/settings）时，
+  // 本函数即"WebView 内仅存内容"，可整体搬移或按 flag 挂载。
+  function renderChatView(entry: SessionEntry) {
+    // memo 化：同一帧内多次读取（turns/session/usage/compact…）
+    // 共享一次投影，依赖变化时才重算（此前每次调用全量重建）。
+    const rawSession = createMemo(() => presentationFor(entry));
+    return (
+      <ChatView
+        rawSession={rawSession}
+        dashboardStore={entry.dashboardStore}
+        pendingSend={entry.pendingSend}
+        setPendingSend={entry.setPendingSend}
+        ui={entry.ui}
+        onLoadMore={loadMoreTurns}
+        onAskSubmit={submitAsk}
+        onAskDismiss={dismissAsk}
+        onPermissionRespond={respondToPermission}
+        onPlanRespond={respondToPlan}
+        onUndo={undoLastTurn}
+        permissionLevel={permissionLevel()}
+        onPermissionLevelChange={changePermissionLevel}
+        onChangeWorkspace={browseWorkspace}
+        infoOpen={infoOpen()}
+        statsOpen={statsOpen()}
+        onToggleInfo={() => setInfoOpen(v => !v)}
+        onToggleStats={() => setStatsOpen(v => !v)}
+        compactRequest={compactRequest}
+      />
+    );
+  }
+
   onCleanup(() => {
     registry.disposeView();
     unlistenTheme?.();
@@ -640,6 +754,9 @@ export default function App() {
     unlistenTimelineEntry?.();
     unlistenTimelineSnapshot?.();
     unlistenBackendStatus?.();
+    unlistenShellNavigate?.();
+    unlistenHeaderAction?.();
+    unlistenThemeChanged?.();
     unlistenUpdate?.();
     unlistenUpdateFailure?.();
   });
@@ -648,7 +765,8 @@ export default function App() {
     <I18nCtx value={i18n}>
       <AppShell
         sidebar={
-          <TaskSidebar
+          xamlSidebar ? undefined : (
+            <TaskSidebar
             sessions={sessions()}
             activities={sessionActivities()}
             activeSeed={activeSeed()}
@@ -662,6 +780,7 @@ export default function App() {
             onSkills={() => setView("skills")}
             onSettings={() => setView("settings")}
           />
+          )
         }
         workspace={
           <>
@@ -731,27 +850,7 @@ export default function App() {
             </Match>
             <Match when={view() === "chat"}>
               <Show when={hasChosenSession() && activeEntry()} keyed>
-                {entry => {
-                  // memo 化：同一帧内多次读取（turns/session/usage/compact…）
-                  // 共享一次投影，依赖变化时才重算（此前每次调用全量重建）。
-                  const rawSession = createMemo(() => presentationFor(entry));
-                  return <ChatView
-                  rawSession={rawSession}
-                  dashboardStore={entry.dashboardStore}
-                  pendingSend={entry.pendingSend}
-                  setPendingSend={entry.setPendingSend}
-                  ui={entry.ui}
-                  onLoadMore={loadMoreTurns}
-                  onAskSubmit={submitAsk}
-                  onAskDismiss={dismissAsk}
-                  onPermissionRespond={respondToPermission}
-                  onPlanRespond={respondToPlan}
-                  onUndo={undoLastTurn}
-                  permissionLevel={permissionLevel()}
-                  onPermissionLevelChange={changePermissionLevel}
-                  onChangeWorkspace={browseWorkspace}
-                />;
-                }}
+                {entry => renderChatView(entry)}
               </Show>
             </Match>
           </Switch>

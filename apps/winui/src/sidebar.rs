@@ -1,0 +1,337 @@
+//! XAML 原生侧栏 — 第二版视觉语言 + 常驻手写布局 + 可拖拽宽度。
+//!
+//! 视觉还原第二版（NavigationView）设计：SymbolIcon 系统图标、分组头、
+//! 图标按钮、品牌区——但容器用手写 Grid，**常驻不折叠**（NavigationView
+//! 的自动收起行为不符合需求，已弃用）。
+//!
+//! 宽度交互（Win11 splitter 语义）：
+//!   - 右缘 12px 抓握条：按住拖拽调宽（180–400px），悬停显示强调色；
+//!   - 单击抓握条恢复默认宽度（260px）；
+//!   - 拖拽 = `GetCursorPos` 差分轮询（WinUI 路由事件无指针捕获，
+//!     moved 在指针移出抓握条后即失联；轮询不依赖捕获）。
+//!
+//! 交互（沿用已修复的链路）：
+//!   - 行内标题 pointer-pressed → `spawn_resume`（幂等，同 seed 跳过）；
+//!   - 行内 `×` 图标按钮 → `spawn_delete`；
+//!   - 列表 `SelectionMode::None`——无选中机制、无自动选中副作用；
+//!   - active 高亮 = SubtleFill 圆角药丸（Win11 选中态语言），由 timer
+//!     同步的 `active` state 渲染期驱动。
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use windows::Win32::windef::POINT;
+use windows::Win32::winuser::{GetAsyncKeyState, GetCursorPos, VK_LBUTTON};
+use windows_reactor::*;
+
+use crate::bridge::Bridge;
+use crate::shell_store::{ActivityState, SessionItem};
+
+/// 侧边栏宽度约束（拖拽范围）。
+pub const SIDEBAR_MIN_WIDTH: f64 = 180.0;
+pub const SIDEBAR_MAX_WIDTH: f64 = 400.0;
+pub const SIDEBAR_DEFAULT_WIDTH: f64 = 260.0;
+
+/// 纯图标按钮（subtle 样式，无文字）——用于行内删除。
+fn icon_button(icon: Icon, on_click: impl Fn() + 'static) -> Element {
+    button("")
+        .icon(icon)
+        .subtle()
+        .on_click(on_click)
+        .into()
+}
+
+/// 会话活动状态 → Fluent 语义色令牌（自动适配深浅主题）。
+///
+/// 与 Web 版 `TaskSidebar` 的 `task-state` 圆点配色对齐：
+/// working=绿 / waiting_user=强调色 / starting=蓝紫 / disconnected=红 / idle=灰。
+fn state_color(state: ActivityState) -> ThemeRef {
+    match state {
+        ActivityState::Working => ThemeRef::SystemSuccess,
+        ActivityState::WaitingUser => ThemeRef::Accent,
+        ActivityState::Starting => ThemeRef::SystemAttention,
+        ActivityState::Disconnected => ThemeRef::SystemCritical,
+        ActivityState::Idle => ThemeRef::SystemNeutral,
+    }
+}
+
+/// 状态圆点：8px 圆形（Border + 4px 圆角），Fluent 语义色。
+fn state_dot(state: ActivityState) -> Element {
+    border(text_block(""))
+        .width(8.0)
+        .height(8.0)
+        .corner_radius(4.0)
+        .background(state_color(state))
+        .vertical_alignment(VerticalAlignment::Center)
+        .into()
+}
+
+/// 一行会话：状态圆点 + 标题（单行省略）+ 删除图标。
+///
+/// active 行 = SubtleFill 圆角药丸 + AccentText 前景（Win11 NavigationView
+/// 选中态语言，柔和不刺眼；与 Web 版 `bg-hover` 高亮语义一致）。
+/// 非 active 行的 hover 反馈由 ListViewItem 容器原生 PointerOver 视觉状态
+/// 提供（reactor 行内容不参与，避免状态驱动重渲染的 entered/exited 循环）。
+fn session_row(item: &SessionItem, active: bool, bridge: Arc<Bridge>) -> Element {
+    let seed = item.seed.clone();
+    let dot: Element = state_dot(item.state);
+    let title_el: Element = text_block(&item.title)
+        .trim_ellipsis()
+        .foreground(if active {
+            ThemeRef::AccentText
+        } else {
+            ThemeRef::PrimaryText
+        })
+        .vertical_alignment(VerticalAlignment::Center)
+        .on_pointer_pressed({
+            let seed = seed.clone();
+            let bridge = bridge.clone();
+            move |_| bridge.spawn_resume(&seed)
+        })
+        .into();
+    let delete = icon_button(
+        Icon::symbol(Symbol::Delete),
+        {
+            let seed = seed.clone();
+            let bridge = bridge.clone();
+            move || bridge.spawn_delete(&seed)
+        },
+    )
+    .vertical_alignment(VerticalAlignment::Center);
+    let row: Element = grid((
+        dot.grid_column(0),
+        title_el.grid_column(1),
+        delete.grid_column(2),
+    ))
+    .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+    .column_spacing(8.0)
+    .padding(Thickness::xy(10.0, 6.0))
+    .into();
+    if active {
+        border(row)
+            .background(ThemeRef::SubtleFill)
+            .corner_radius(8.0)
+            .into()
+    } else {
+        row
+    }
+}
+
+/// XAML 侧栏组件（放入外层 Grid 第 0 列；宽度由 `width` 控制、可拖拽）。
+pub fn sidebar(
+    cx: &mut RenderCx,
+    bridge: Arc<Bridge>,
+    width: f64,
+    set_width: SetState<f64>,
+) -> Element {
+    let (items, set_items) = cx.use_state::<Vec<SessionItem>>(Vec::new());
+    let (active, set_active) = cx.use_state::<String>(String::new());
+    let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    let last_rev = cx.use_ref::<u64>(0);
+    // 拖拽状态：`(按下时屏幕 x, 按下时宽度)`——差分计算，不依赖 moved 事件。
+    let drag_start = cx.use_ref::<Option<(i32, f64)>>(None);
+    let drag_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    let (splitter_hover, set_splitter_hover) = cx.use_state::<bool>(false);
+
+    // 首次挂载：触发初始刷新；之后 500ms 轮询 rev，变化才 set_state 重渲染。
+    cx.use_effect((), {
+        let bridge = bridge.clone();
+        let set_items = set_items.clone();
+        let set_active = set_active.clone();
+        let timer = timer.clone();
+        let last_rev = last_rev.clone();
+        let drag_start = drag_start.clone();
+        let drag_timer = drag_timer.clone();
+        let set_width = set_width.clone();
+        move || {
+            let core = bridge.core();
+            bridge.spawn_refresh_sessions();
+            *last_rev.borrow_mut() = core.session_snapshot().1;
+            if let Ok(t) = DispatcherTimer::new(Duration::from_millis(500), {
+                let core = core.clone();
+                let set_items = set_items.clone();
+                let set_active = set_active.clone();
+                let last_rev = last_rev.clone();
+                move || {
+                    let (items, rev) = core.session_snapshot();
+                    if rev != *last_rev.borrow() {
+                        *last_rev.borrow_mut() = rev;
+                        set_items.call(items);
+                        set_active.call(core.active_seed());
+                    }
+                }
+            }) {
+                *timer.borrow_mut() = Some(t);
+            }
+            // 16ms 拖拽轮询：GetCursorPos 差分 + 左键状态兜底结束。
+            if let Ok(t) = DispatcherTimer::new(Duration::from_millis(16), {
+                let drag_start = drag_start.clone();
+                let set_width = set_width.clone();
+                move || {
+                    let Some((sx, sw)) = *drag_start.borrow() else { return };
+                    // 左键已释放（含窗口外释放）→ 结束拖拽。
+                    // 注意：按下时 GetAsyncKeyState 返回负数（高位 1）。
+                    if unsafe { GetAsyncKeyState(VK_LBUTTON) } >= 0 {
+                        *drag_start.borrow_mut() = None;
+                        return;
+                    }
+                    let mut pt = POINT::default();
+                    if unsafe { GetCursorPos(&mut pt) }.as_bool() {
+                        let new_w = (sw + (pt.x - sx) as f64)
+                            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                        if (new_w - sw).abs() >= 2.0 {
+                            set_width.call(new_w);
+                        }
+                    } else {
+                        *drag_start.borrow_mut() = None;
+                    }
+                }
+            }) {
+                *drag_timer.borrow_mut() = Some(t);
+            }
+        }
+    });
+
+    // ── 品牌区（第二版 pane_title 语义）────────────────────────
+    let brand: Element = {
+        let el: Element = text_block("DeepX").semibold().font_size(18.0).into();
+        el.on_pointer_pressed({
+            let bridge = bridge.clone();
+            move |_| bridge.navigate("home", None)
+        })
+        .margin(12.0)
+    };
+
+    // ── 操作区：新建任务 + 删除当前会话（第二版 pane_footer 语义）──
+    let actions: Element = {
+        let sp: Element = hstack((
+            button("新建任务")
+                .icon(Icon::symbol(Symbol::Add))
+                .subtle()
+                .on_click({
+                    let bridge = bridge.clone();
+                    move || bridge.spawn_new_session()
+                }),
+            icon_button(
+                Icon::symbol(Symbol::Delete),
+                {
+                    let bridge = bridge.clone();
+                    move || {
+                        let seed = bridge.core().active_seed();
+                        if !seed.is_empty() {
+                            bridge.spawn_delete(&seed);
+                        }
+                    }
+                },
+            ),
+        ))
+        .into();
+        sp.margin(12.0)
+    };
+
+    // ── 分组头（SecondaryText 主题色令牌，非 opacity hack）──────
+    let group_label: Element = {
+        let el: Element = text_block("任务")
+            .font_size(12.0)
+            .foreground(ThemeRef::SecondaryText)
+            .into();
+        el.margin(Thickness::xy(12.0, 6.0))
+    };
+
+    // ── 会话列表（SelectionMode::None 禁用选中）────────────────
+    let list = list_view(items.clone(), {
+        let bridge = bridge.clone();
+        let active = active.clone();
+        move |item, _| session_row(item, item.seed == active, bridge.clone())
+    })
+    .with_key_selector(|item| item.seed.clone())
+    .selection_mode(SelectionMode::None)
+    .build();
+    let session_list: Element = scroll_viewer(list).into();
+
+    // ── 底部导航：技能 / 设置 ──────────────────────────────────
+    let footer: Element = {
+        let sp: Element = hstack((
+            button("技能")
+                .icon(Icon::symbol(Symbol::Library))
+                .subtle()
+                .on_click({
+                    let bridge = bridge.clone();
+                    move || bridge.navigate("skills", None)
+                }),
+            button("设置")
+                .icon(Icon::symbol(Symbol::Setting))
+                .subtle()
+                .on_click({
+                    let bridge = bridge.clone();
+                    move || bridge.navigate("settings", None)
+                }),
+        ))
+        .into();
+        sp.margin(12.0)
+    };
+
+    // ── 内容列：品牌 / 操作区 / 分组头 / 列表 / 页脚 ────────────
+    let content: Element = grid((
+        brand.grid_row(0).grid_column(0),
+        actions.grid_row(1).grid_column(0),
+        group_label.grid_row(2).grid_column(0),
+        session_list.grid_row(3).grid_column(0),
+        footer.grid_row(4).grid_column(0),
+    ))
+    .rows([
+        GridLength::Auto,
+        GridLength::Auto,
+        GridLength::Auto,
+        GridLength::STAR,
+        GridLength::Auto,
+    ])
+    .into();
+
+    // ── 右缘抓握条（12px 命中区）：悬停强调色；双击恢复默认宽度 ──
+    let bar: Element = border(text_block(""))
+        .width(if splitter_hover { 2.0 } else { 1.0 })
+        .background(if splitter_hover {
+            ThemeRef::AccentSecondary
+        } else {
+            ThemeRef::DividerStroke
+        })
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .into();
+    let splitter: Element = border(bar)
+        .width(12.0)
+        .on_pointer_pressed({
+            let drag_start = drag_start.clone();
+            move |_| {
+                // 记录按下时屏幕 x 与当前宽度（差分基准）。
+                let mut pt = POINT::default();
+                if unsafe { GetCursorPos(&mut pt) }.as_bool() {
+                    *drag_start.borrow_mut() = Some((pt.x, width));
+                }
+            }
+        })
+        .on_pointer_entered({
+            let set_hover = set_splitter_hover.clone();
+            move |_| set_hover.call(true)
+        })
+        .on_pointer_exited({
+            let set_hover = set_splitter_hover.clone();
+            move || set_hover.call(false)
+        })
+        .on_tapped({
+            // 单击抓握条 = 恢复默认宽度。
+            // （WinUI 快速双击只触发一次 Tapped，无法做双击检测；
+            //   拖拽有位移时 Tapped 不触发，两者天然互斥。）
+            let set_width = set_width.clone();
+            move || set_width.call(SIDEBAR_DEFAULT_WIDTH)
+        })
+        .into();
+
+    // ── 根容器（无事件：WinUI 指针按下后隐式捕获到 splitter）──
+    grid((
+        content.grid_column(0),
+        splitter.grid_column(1),
+    ))
+    .columns([GridLength::STAR, GridLength::Pixel(12.0)])
+    .into()
+}

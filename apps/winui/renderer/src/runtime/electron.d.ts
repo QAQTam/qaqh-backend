@@ -31,6 +31,28 @@ interface DeepxDesktopApi {
     onSnapshot(listener: (snapshot: import("../store/timelineProtocol").TimelineSnapshotResponse) => void): () => void;
     onStatus(listener: (status: unknown) => void): () => void;
   };
+  shell?: {
+    /** XAML 原生侧栏导航事件（host → renderer 单向）。 */
+    onNavigate(listener: (nav: ShellNavigate) => void): () => void;
+    /** XAML 标题栏状态投影（Web → 壳；载荷镜像 bridge.rs `HeaderState`）。 */
+    setHeader(state: {
+      view: string;
+      title: string;
+      workspace: string;
+      infoOpen: boolean;
+      statsOpen: boolean;
+      compacting: boolean;
+      compactDisabled: boolean;
+      undoDisabled: boolean;
+      petEnabled: boolean;
+    }): Promise<unknown>;
+    /** 壳点击标题栏动作回传（host → renderer 事件）。 */
+    onHeaderAction(listener: (action: { action: string; path?: string }) => void): () => void;
+    /** 主题推送（P-5 三态）：light | dark | dark-gray | system。 */
+    setTheme(mode: "light" | "dark" | "dark-gray" | "system"): Promise<unknown>;
+    /** 壳系统主题变化（host → renderer）：`{ mode: "light" | "dark" }`。 */
+    onThemeChanged(listener: (update: { mode: "light" | "dark" }) => void): () => void;
+  };
   desktop: {
     openDialog(options: { directory?: boolean; multiple?: boolean; title?: string }): Promise<string | string[] | null>;
     confirm(message: string, options?: { title?: string; kind?: "info" | "warning" | "error" }): Promise<boolean>;
@@ -61,9 +83,26 @@ interface UpdateInfo {
   actions?: string[];
 }
 
+/** XAML 原生侧栏导航载荷（镜像 bridge.rs `shell.navigate`）。 */
+interface ShellNavigate {
+  view: "home" | "chat" | "skills" | "settings";
+  seed?: string;
+}
+
 declare global {
   interface Window {
     deepx?: DeepxDesktopApi;
+    /** WinUI 壳注入：原生 XAML 侧栏接管时置 true（renderer 隐藏 web 侧栏）。 */
+    __DEEPX_XAML_SIDEBAR__?: boolean;
+    /** P-3 统一 flag（WORKFLOW §6.1）：`{ sidebar: true, header: true, ... }`。 */
+    __DEEPX_XAML__?: Partial<Record<"sidebar" | "header", boolean>>;
+    /** WebView2 宿主桥（winui 壳）：postMessage 双向通道。 */
+    chrome?: {
+      webview?: {
+        postMessage(message: unknown): void;
+        addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+      };
+    };
   }
 }
 

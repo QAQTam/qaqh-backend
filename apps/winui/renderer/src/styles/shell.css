@@ -1,6 +1,8 @@
 /* ── Shell Layout ── */
 .deepx-shell{height:100%;display:flex;flex-direction:column;overflow:hidden;background:transparent;color:var(--dx-text,#20201e)}
 .shell-body{display:grid;grid-template-columns:var(--sidebar-width,258px) minmax(0,1fr);flex:1;min-height:0;overflow:hidden;position:relative}
+/* XAML 原生侧栏接管：无 web 侧栏 → 单列，workspace 全宽（无 258px 空占位列/拖拽条） */
+.shell-body--no-sidebar{grid-template-columns:minmax(0,1fr)}
 .app-container{grid-template-columns:var(--sidebar-width,258px) minmax(0,1fr)!important;background:transparent!important}.app-container>.sidebar{display:none!important}.app-container>.main-content{min-width:0;width:auto}.app-container .chat-area{display:block!important;width:100%;height:100%}.app-container .chat-view{position:relative;width:100%;height:100%}
 
 /* ── Sidebar: translucent for Mica bleed-through ── */

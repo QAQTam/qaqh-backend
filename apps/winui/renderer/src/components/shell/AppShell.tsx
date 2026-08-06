@@ -32,6 +32,9 @@ export default function AppShell(props: { sidebar: JSX.Element; workspace: JSX.E
     clampWidth(readSidebarWidth()),
   );
   const [dragging, setDragging] = createSignal(false);
+  // XAML 原生侧栏接管时（sidebar 传 undefined）：不渲染 web 侧栏占位列与
+  // 拖拽手柄——AppShell 退化为纯 workspace 容器（单列 grid）。
+  const hasSidebar = props.sidebar !== undefined;
 
   let shellBody: HTMLDivElement | undefined;
   let startX = 0;
@@ -71,16 +74,22 @@ export default function AppShell(props: { sidebar: JSX.Element; workspace: JSX.E
 
   return (
     <div class="deepx-shell">
-      <div class="shell-body" ref={shellBody} style={{ "--sidebar-width": `${width()}px` }}>
+      <div
+        class={hasSidebar ? "shell-body" : "shell-body shell-body--no-sidebar"}
+        ref={shellBody}
+        style={hasSidebar ? { "--sidebar-width": `${width()}px` } : undefined}
+      >
         {props.sidebar}
-        <div
-          class={`sidebar-resize-handle${dragging() ? " active" : ""}`}
-          onMouseDown={onMouseDown}
-          onDblClick={() => {
-            setWidth(DEFAULT_WIDTH);
-            updateSidebarWidth();
-          }}
-        />
+        {hasSidebar && (
+          <div
+            class={`sidebar-resize-handle${dragging() ? " active" : ""}`}
+            onMouseDown={onMouseDown}
+            onDblClick={() => {
+              setWidth(DEFAULT_WIDTH);
+              updateSidebarWidth();
+            }}
+          />
+        )}
         <main class="thread-workspace" data-thread-workspace>{props.workspace}</main>
       </div>
     </div>

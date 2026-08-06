@@ -13,7 +13,8 @@ export default defineConfig({
   resolve: { alias: { "@": resolve(import.meta.dirname, "src") } },
   build: {
     target: "chrome142",
-    outDir: "out/renderer",
+    // 统一产物目录：apps/winui/out/renderer（壳脚本/daemon 均以此为准）
+    outDir: "../out/renderer",
     emptyOutDir: true,
     rollupOptions: { input: resolve(import.meta.dirname, "index.html") },
   },

@@ -19,4 +19,16 @@ import { installBrowserBridge } from "./runtime/browserBridge";
 // 只读桥（Ringing SSE 观察）。必须在任何 runtime 模块初始化之前执行。
 installBrowserBridge();
 
-render(() => <App />, document.getElementById("root")!);
+// 诊断：render 失败时上报 host（winui 日志可见）。
+function postLog(msg: string): void {
+  try {
+    window.chrome?.webview?.postMessage({ type: "log", level: "error", msg });
+  } catch (_) { /* noop */ }
+}
+
+try {
+  render(() => <App />, document.getElementById("root")!);
+} catch (error) {
+  postLog("[main] render failed: " + String(error));
+  throw error;
+}

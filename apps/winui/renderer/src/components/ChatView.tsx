@@ -30,6 +30,7 @@ import ContextPanel from "./ContextPanel";
 import InfoPopover from "./shell/InfoPopover";
 import ThreadHeader from "./shell/ThreadHeader";
 import TodoStatusStrip from "./TodoStatusStrip";
+import { isXaml } from "../runtime/shellBridge";
 
 interface ChatViewProps {
   rawSession: Accessor<RawSessionState>;
@@ -56,12 +57,21 @@ interface ChatViewProps {
   permissionLevel: number;
   onPermissionLevelChange: (level: number) => void | Promise<void>;
   onChangeWorkspace: () => void | Promise<void>;
+  /** XAML 标题栏接管时（D3 上提）：info/stats 面板开关与回调受控。 */
+  infoOpen: boolean;
+  statsOpen: boolean;
+  onToggleInfo: () => void;
+  onToggleStats: () => void;
+  /** XAML 标题栏 ⑦compact 触发信号（D4）：>0 时执行 handleCompact。 */
+  compactRequest: Accessor<number>;
   /** Optimistic send: shows user's message immediately before backend confirms. */
   pendingSend: Accessor<RawTurn | null>;
   setPendingSend: (turn: RawTurn | null) => void;
 }
 
 export default function ChatView(props: ChatViewProps) {
+  // XAML 标题栏接管（P-3 统一 flag）：隐藏 Web ThreadHeader（代码保留可回退）。
+  const xamlHeader = isXaml("header");
   const session = () => props.rawSession();
   const projectedTurnCache = new WeakMap<RawTurn, TurnViewModel>();
   const projectCachedTurn = (turn: RawTurn): TurnViewModel => {
@@ -97,8 +107,6 @@ export default function ChatView(props: ChatViewProps) {
   const stalled = () => isSessionStalled(session());
   const usage = () => sessionUsage(session());
   const [mode, setMode] = createSignal("plan");
-  const [infoOpen, setInfoOpen] = createSignal(false);
-  const [statsOpen, setStatsOpen] = createSignal(false);
   const [branch, setBranch] = createSignal("");
   const [showGitWorkspace, setShowGitWorkspace] = createSignal(false);
   const [selectedGitFile, setSelectedGitFile] = createSignal<string | undefined>();
@@ -173,6 +181,15 @@ export default function ChatView(props: ChatViewProps) {
     yield requestWithRinging("session.compact", { seed: seed() });
   });
 
+  // D4（WORKFLOW §3）：壳标题栏 ⑦compact 触发信号 → 既有 handleCompact。
+  // Solid 2.0：createEffect 两参数（compute + effect）。
+  createEffect(
+    () => props.compactRequest(),
+    request => {
+      if (request > 0) void handleCompact();
+    },
+  );
+
   const followUps = createFollowUpQueue(untrack(seed), handleSend);
   let wasStreaming = untrack(streaming);
   createEffect(
@@ -185,7 +202,7 @@ export default function ChatView(props: ChatViewProps) {
   });
 
   createEffect(
-    () => ({ open: infoOpen(), seed: seed(), streaming: streaming() }),
+    () => ({ open: props.infoOpen, seed: seed(), streaming: streaming() }),
     ({ open, seed: currentSeed, streaming: activeStream }) => {
     // git.branch is a session-scoped request. On a reconnect it may need to
     // attach the lease and receive a snapshot, so defer this nonessential
@@ -198,33 +215,35 @@ export default function ChatView(props: ChatViewProps) {
 
   return (
     <div class="chat-view">
-      <ThreadHeader
-        title={session().session.title || seed().slice(0, 8)}
-        infoOpen={infoOpen()}
-        statsOpen={statsOpen()}
-        onToggleInfo={() => setInfoOpen(value => !value)}
-        onToggleStats={() => setStatsOpen(value => !value)}
-        onOpenLocation={() => { if (props.ui.workspace()) void openPath(props.ui.workspace()); }}
-        onOpenConsole={() => { void openDevTools(); }}
-        workspace={props.ui.workspace()}
-        onChangeWorkspace={props.onChangeWorkspace}
-        compacting={session().compact.active}
-        compactDisabled={streaming()}
-        onCompact={handleCompact}
-        undoDisabled={session().turns.length === 0 || streaming()}
-        onUndo={() => void props.onUndo()}
-        petEnabled={petEnabled()}
-        onTogglePet={() => {
-          console.log("[renderer] togglePet clicked");
-          togglePet().then(enabled => {
-            console.log("[renderer] togglePet result:", enabled);
-            setPetEnabled(enabled);
-          }).catch(err => {
-            console.error("[renderer] togglePet failed:", err);
-          });
-        }}
-      />
-      <Show when={infoOpen()}>
+      <Show when={!xamlHeader}>
+        <ThreadHeader
+          title={session().session.title || seed().slice(0, 8)}
+          infoOpen={props.infoOpen}
+          statsOpen={props.statsOpen}
+          onToggleInfo={props.onToggleInfo}
+          onToggleStats={props.onToggleStats}
+          onOpenLocation={() => { if (props.ui.workspace()) void openPath(props.ui.workspace()); }}
+          onOpenConsole={() => { void openDevTools(); }}
+          workspace={props.ui.workspace()}
+          onChangeWorkspace={props.onChangeWorkspace}
+          compacting={session().compact.active}
+          compactDisabled={streaming()}
+          onCompact={handleCompact}
+          undoDisabled={session().turns.length === 0 || streaming()}
+          onUndo={() => void props.onUndo()}
+          petEnabled={petEnabled()}
+          onTogglePet={() => {
+            console.log("[renderer] togglePet clicked");
+            togglePet().then(enabled => {
+              console.log("[renderer] togglePet result:", enabled);
+              setPetEnabled(enabled);
+            }).catch(err => {
+              console.error("[renderer] togglePet failed:", err);
+            });
+          }}
+        />
+      </Show>
+      <Show when={props.infoOpen}>
         <InfoPopover
           session={session()}
           workspace={props.ui.workspace()}
@@ -235,12 +254,12 @@ export default function ChatView(props: ChatViewProps) {
           }}
         />
       </Show>
-      <Show when={statsOpen()}>
+      <Show when={props.statsOpen}>
         <ContextPanel
           seed={seed()}
           metricHistory={session().telemetry}
           contextLimit={usage().contextLimit || 200000}
-          onClose={() => setStatsOpen(false)}
+          onClose={() => props.onToggleStats()}
         />
       </Show>
       <Show when={session().providerRetry}>
