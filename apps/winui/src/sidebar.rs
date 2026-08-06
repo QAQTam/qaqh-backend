@@ -7,8 +7,9 @@
 //! 宽度交互（Win11 splitter 语义）：
 //!   - 右缘 12px 抓握条：按住拖拽调宽（180–400px），悬停显示强调色；
 //!   - 单击抓握条恢复默认宽度（260px）；
-//!   - 拖拽 = `GetCursorPos` 差分轮询（WinUI 路由事件无指针捕获，
-//!     moved 在指针移出抓握条后即失联；轮询不依赖捕获）。
+//!   - 拖拽 = `capture_pointer_on_press` 原生指针捕获 + `PointerEventInfo.window_x`
+//!     差分（reactor ≥ #4782；此前用 GetCursorPos 16ms 轮询 hack——路由事件
+//!     无捕获时 moved 在指针移出抓握条后即失联）。
 //!
 //! 交互（沿用已修复的链路）：
 //!   - 行内标题 pointer-pressed → `spawn_resume`（幂等，同 seed 跳过）；
@@ -20,8 +21,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use windows::Win32::windef::POINT;
-use windows::Win32::winuser::{GetAsyncKeyState, GetCursorPos, VK_LBUTTON};
 use windows_reactor::*;
 
 use crate::bridge::Bridge;
@@ -128,9 +127,9 @@ pub fn sidebar(
     let (active, set_active) = cx.use_state::<String>(String::new());
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
-    // 拖拽状态：`(按下时屏幕 x, 按下时宽度)`——差分计算，不依赖 moved 事件。
-    let drag_start = cx.use_ref::<Option<(i32, f64)>>(None);
-    let drag_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    // 拖拽状态：`(按下时窗口 x, 按下时宽度)`——差分计算（window_x 稳定，
+    // 拖拽中窗口不动则与屏幕坐标等价）。
+    let drag_start = cx.use_ref::<Option<(f64, f64)>>(None);
     let (splitter_hover, set_splitter_hover) = cx.use_state::<bool>(false);
 
     // 首次挂载：触发初始刷新；之后 500ms 轮询 rev，变化才 set_state 重渲染。
@@ -140,9 +139,6 @@ pub fn sidebar(
         let set_active = set_active.clone();
         let timer = timer.clone();
         let last_rev = last_rev.clone();
-        let drag_start = drag_start.clone();
-        let drag_timer = drag_timer.clone();
-        let set_width = set_width.clone();
         move || {
             let core = bridge.core();
             bridge.spawn_refresh_sessions();
@@ -162,32 +158,6 @@ pub fn sidebar(
                 }
             }) {
                 *timer.borrow_mut() = Some(t);
-            }
-            // 16ms 拖拽轮询：GetCursorPos 差分 + 左键状态兜底结束。
-            if let Ok(t) = DispatcherTimer::new(Duration::from_millis(16), {
-                let drag_start = drag_start.clone();
-                let set_width = set_width.clone();
-                move || {
-                    let Some((sx, sw)) = *drag_start.borrow() else { return };
-                    // 左键已释放（含窗口外释放）→ 结束拖拽。
-                    // 注意：按下时 GetAsyncKeyState 返回负数（高位 1）。
-                    if unsafe { GetAsyncKeyState(VK_LBUTTON) } >= 0 {
-                        *drag_start.borrow_mut() = None;
-                        return;
-                    }
-                    let mut pt = POINT::default();
-                    if unsafe { GetCursorPos(&mut pt) }.as_bool() {
-                        let new_w = (sw + (pt.x - sx) as f64)
-                            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
-                        if (new_w - sw).abs() >= 2.0 {
-                            set_width.call(new_w);
-                        }
-                    } else {
-                        *drag_start.borrow_mut() = None;
-                    }
-                }
-            }) {
-                *drag_timer.borrow_mut() = Some(t);
             }
         }
     });
@@ -300,15 +270,40 @@ pub fn sidebar(
         .into();
     let splitter: Element = border(bar)
         .width(12.0)
+        // 按下即捕获指针：moved 持续到达（含移出抓握条），无需轮询。
+        .capture_pointer_on_press()
         .on_pointer_pressed({
             let drag_start = drag_start.clone();
-            move |_| {
-                // 记录按下时屏幕 x 与当前宽度（差分基准）。
-                let mut pt = POINT::default();
-                if unsafe { GetCursorPos(&mut pt) }.as_bool() {
-                    *drag_start.borrow_mut() = Some((pt.x, width));
+            move |info: PointerEventInfo| {
+                // 记录按下时窗口坐标 x 与当前宽度（差分基准）。
+                // window_x 为窗口相对坐标：拖拽中窗口不动，差分与屏幕坐标等价。
+                *drag_start.borrow_mut() = Some((info.window_x, width));
+            }
+        })
+        .on_pointer_moved({
+            let drag_start = drag_start.clone();
+            let set_width = set_width.clone();
+            move |info: PointerEventInfo| {
+                // 防御：capture 生效后无需左键检查，但保底（capture 失败时）。
+                if !info.is_left_button_pressed {
+                    return;
+                }
+                let Some((sx, sw)) = *drag_start.borrow() else { return };
+                let new_w = (sw + (info.window_x - sx))
+                    .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                if (new_w - sw).abs() >= 2.0 {
+                    set_width.call(new_w);
                 }
             }
+        })
+        .on_pointer_released({
+            let drag_start = drag_start.clone();
+            move |_| *drag_start.borrow_mut() = None
+        })
+        .on_pointer_capture_lost({
+            // 捕获被系统收回（窗口失焦/弹窗等）→ 结束拖拽，避免 stale 状态。
+            let drag_start = drag_start.clone();
+            move || *drag_start.borrow_mut() = None
         })
         .on_pointer_entered({
             let set_hover = set_splitter_hover.clone();
@@ -327,7 +322,7 @@ pub fn sidebar(
         })
         .into();
 
-    // ── 根容器（无事件：WinUI 指针按下后隐式捕获到 splitter）──
+    // ── 根容器（无事件：指针已由 splitter 捕获）────────────────────
     grid((
         content.grid_column(0),
         splitter.grid_column(1),

@@ -190,6 +190,19 @@ fn main() -> windows_reactor::Result<()> {
         .title("DeepX")
         .inner_size(1200.0, 800.0)
         .backdrop(Backdrop::Mica)
+        // 退出诊断（reactor #4787 on_exit）：窗口全关后、进程退出前执行。
+        // 日志里出现此行 = 正常退出路径；闪退（崩溃/强杀）不会执行到这里，
+        // 用于区分「正常关闭」与「异常终止」，辅助闪退调查。
+        .on_exit(|| log_diag("app exit: all windows closed (normal path)"))
+        // panic 诊断：渲染/事件回调/timer 的 panic 被 reactor 捕获后转发到这里
+        // （context = 捕获边界，message = panic 消息）。release 下 panic 逃逸到
+        // WinUI C++ 帧是 UB——此日志可在崩溃前留下源头证据（闪退调查工具链）。
+        .on_fault(|fault| {
+            log_diag(&format!(
+                "reactor fault [{}]: {}",
+                fault.context, fault.message
+            ))
+        })
         .render(app)
 }
 
