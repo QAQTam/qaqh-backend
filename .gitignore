@@ -34,4 +34,5 @@ apps/out/
 /.deepx-test-home/
 # WinUI shell: source is tracked; only product directories are ignored
 apps/winui/out/
-apps/winui/release/.deepx-winui.log
+apps/winui/release/
+.deepx-winui.log
