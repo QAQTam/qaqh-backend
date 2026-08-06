@@ -6,12 +6,12 @@
 #   bash scripts/ringing-bindings.sh --check    # 仅检查漂移（CI 用，有差异时退出码 1）
 #
 # 源: crates/deepx-domain/bindings + crates/deepx-ringing/bindings（ts-rs 自动导出）
-# 目标: apps/desktop/src/lib/types/ringing/
+# 目标: apps/winui/renderer/src/lib/types/ringing/
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIRS=("$ROOT/crates/deepx-domain/bindings" "$ROOT/crates/deepx-ringing/bindings")
-DEST="$ROOT/apps/desktop/src/lib/types/ringing"
+DEST="$ROOT/apps/winui/renderer/src/lib/types/ringing"
 CHECK_MODE=0
 [[ "${1:-}" == "--check" ]] && CHECK_MODE=1
 

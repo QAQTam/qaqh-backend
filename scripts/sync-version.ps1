@@ -2,8 +2,8 @@
 param(
     [string]$VersionFile = "version.txt",
     [string]$CargoToml   = "Cargo.toml",
-    [string]$PkgJson     = "apps/desktop/package.json",
-    [string]$LockJson    = "apps/desktop/deepx-backend.lock.json",
+    [string]$PkgJson     = "apps/winui/renderer/package.json",
+    [string]$LockJson    = "apps/winui/renderer/deepx-backend.lock.json",
     [string]$RootPkgJson = "package.json"
 )
 
@@ -40,4 +40,4 @@ $rp = Get-Content $RootPkgJson -Raw | ConvertFrom-Json
 $rp.version = $v
 $rp | ConvertTo-Json -Depth 4 | Set-Content $RootPkgJson -NoNewline
 
-Write-Host "Done — $v synced to Cargo.toml, desktop/package.json, deepx-backend.lock.json (including release URL), and root package.json"
+Write-Host "Done — $v synced to Cargo.toml, winui/renderer/package.json, deepx-backend.lock.json (including release URL), and root package.json"
