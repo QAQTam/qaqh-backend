@@ -470,3 +470,33 @@ grid((
 4. 动作后卡片转圈，`skills_updated` 到达（状态变更）后转圈消失（目标态提前解除）。
 5. 无会话时显示「请先选择或新建一个会话」。
 6. 行点击展开详情（路径 / 加载错误）。
+
+## 9. windows-reactor 依赖基线锁定（2026-08-06）
+
+### 现状与结论
+
+- **上游**：microsoft/windows-rs master（0.100.0，大更新阶段，API 快速变动）。
+- **旧快照** `F:\windows-rs-master`（非 git 压缩包）锁定 = 上游 commit **`ccca06a7f`**
+  （#4770 "Repo release prep"）+ **本地补丁**（TextTrimming/trim_ellipsis，5 文件，
+  上游无此功能）。
+- **git 目录** `F:\windows-rs`：分支 **`deepx-base`** = `ccca06a7f` + 本地补丁
+  commit `568d6c9ed`（"local: TextTrimming/trim_ellipsis support"）——与快照等效，
+  已切换为 DeepX 依赖源（apps/winui/Cargo.toml 3 处 path）。
+- **锁定方法**（快照非 git 时反查 commit）：`git hash-object` 关键文件 → 
+  `git rev-parse <c>:<path>` 二分比对树中 blob（注意：`--find-object` 匹配的是
+  diff 引用，不是树引用，会误判）。
+
+### 上游后续（暂不追平，评估记录）
+
+| commit | 内容 | 影响 |
+|---|---|---|
+| `a48e42ebe` #4782 | `windows-reactor` improvements——style.rs/icon.rs/templated.rs 大改（-1584 行重构） | **破坏性**：ThemeRef/Icon 相关 API 变动，需评估后升级 |
+| `32df9618d` #4787 | windows-tracing：`App::on_exit`（+64 行纯新增） | 无破坏，可选跟进 |
+| `9254895ca` HEAD | #4789（benchmark metadata 等） | 无关 |
+
+### 升级流程（将来）
+
+1. `git fetch origin && git log deepx-base..origin/master -- crates/libs/reactor` 评估破坏面
+2. 重建分支：`git checkout -b deepx-base-new origin/master` + 重新应用本地补丁
+   （`git cherry-pick 568d6c9ed` 或手动移植 TextTrimming 5 文件）
+3. `cargo check -p deepx-winui` + 全量测试后切换
