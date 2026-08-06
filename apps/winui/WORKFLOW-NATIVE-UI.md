@@ -619,3 +619,66 @@ grid((
 translation，无颜色补间——指示器/背景为瞬间切换，符合 Win11 简洁语义）。
 
 **验证**：`cargo check` ✅；debug UI 重启（PID 25160）无 fault/panic。
+
+## 10. Info 面板 XAML 化（P4a：用量核心区块，2026-08-07 落地）
+
+### 范围与边界
+
+- **迁移对象**：Web `InfoPopover`（`shell/InfoPopover.tsx`）→ `src/info_panel.rs`。
+  **本期只做用量核心区块**：环境标题 / model 行（live 点 + 等宽名 + live/等待）/
+  上下文进度卡 / 当前请求 4 格 + 缓存卡 / 会话累计 4 格 + 会话缓存卡。
+  **二期**：变更行（+added/-removed，点击开 GitDiffPanel）、变更文件列表、
+  cache prefix 警告——environment 数据通道未立项（daemon snapshot 无此字段，
+  需新立 dashboard 订阅）。stats 面板（`ContextPanel`）未动，维持 Web。
+- **状态所有权：零迁移**——`info_open` 仍由 Web 持有（点击 ④ → `headerAction
+  {action:"info"}` → Web 翻转 → `shell.setHeader` 回推），壳轮询
+  `header_state.info_open`（main.rs 250ms view timer / info_panel 500ms 双读）。
+  Web 侧仅短路渲染（`isXaml("info")`），状态链原样保留 → 回退模式零改动。
+- **数据通道（壳直连，D-2）**：`client.bootstrap(seed)` → `conversation.state`
+  （daemon conversation_snapshot.rs:29-39：usage/usage_totals/usage_requests/
+  cache_reported_requests/model/context_limit）→ `shell_store::SessionDetail`
+  投影缓存 + `info_rev`（同 session_rev 模式，500ms rev 比对轮询）。
+  刷新时机：面板打开瞬间拉一次 + control 频道 activity 边界事件（回合结束）
+  顺手刷新（emit_batch 内 info 缓存存在时）。
+- **布局**：内容区右区改 2 列——`right_content`（四行视图族）STAR +
+  Info 面板列 `0 ↔ 320px`（`info_open && view=="chat"` 时 320）。与行高切换
+  同模式：WebView2 常驻保留导航状态；面板空态返回占位元素零渲染。
+
+### 新增/改动文件
+
+| 文件 | 内容 |
+|---|---|
+| `src/info_panel.rs`（新，~460L） | 面板组件：区块固定结构 + keyed（D15）、自绘进度条（Star 比例列）、mono 数值（Consolas）、live 点光晕近似、fade_in 200ms |
+| `src/shell_store.rs` | `UsageInfo`/`SessionDetail` + `parse_usage`/`parse_conversation_state` + 2 单测 |
+| `src/bridge.rs` | `info`/`info_rev` 缓存 + `info_snapshot`/`spawn_refresh_info`/`refresh_info_inner` + emit_batch activity 边界触发 + `HeaderAction::OpenDiff`（二期接线） |
+| `src/main.rs` | mod + `info_open` 轮询（view timer 内）+ 右列 `right_content` 布局 |
+| `assets/deepx-bridge.js` | flag `info: true` |
+| `renderer/src/runtime/shellBridge.ts` / `electron.d.ts` | `XamlComponent+"info"`、`HeaderActionName+"open_diff"`、`file?` |
+| `renderer/src/components/ChatView.tsx` | InfoPopover 渲染短路 `!isXaml("info")`（回退保留） |
+| `renderer/src/App.tsx` | `open_diff` 分支占位（二期接 GitDiffPanel） |
+
+### UI 复刻矩阵（研究报告结论落地）
+
+| 类别 | 复刻方式 |
+|---|---|
+| 布局/字号阶梯（9/10/11/12/14px）/三层文字色/语义色分区/圆角 | 100% 保真（TextBlock/Grid/ThemeRef） |
+| 等宽数字仪表感 | `font_family("Consolas")` + 千分位格式化（自写 `fmt_thousands`） |
+| 进度条（5px 圆头、accent/green 双态） | 自绘：Border 轨道 + `Star(pct)` 比例列填充 |
+| live dot + 光晕 | 内点 SystemSuccess + 外环 SystemSuccessBackground（近似） |
+| 毛玻璃/双层阴影/内高光 | → `LayerFill` + 圆角 8px（Fluent 2 语义等价，壳内统一） |
+| RollingNumber / 宽度补间 / hover 过渡 | 静态数字 + 瞬间切换（Composition 能力边界，见 §9.2） |
+
+### 偏差记录（新增）
+
+| # | 偏差 | 说明 |
+|---|---|---|
+| D16 | 变更区块（变更行/文件/警告）二期 | environment 数据通道未立项；`OpenDiff` 通道已预留（HeaderAction + Web 占位） |
+
+### 验证状态
+
+- `cargo test -p deepx-winui` **24 passed**（22 + 2 新）✅；`cargo check` 1 warning
+  （HeaderAction::OpenDiff 未构造——二期接线，预期）
+- `pnpm typecheck` ✅；`pnpm test` 262 passed + 2 存量失败（databaseEnabled，未触碰）
+- renderer build ✅；debug UI 重启（PID 25104，DEEPX_DEBUG_URL + 独立日志
+  `.deepx-p4a.log`）：连接 daemon、4 会话、导航成功、headerAction 流转、
+  无 fault/panic。交互验证待用户：④info 点击 → 右列面板出现 + 刷新日志。

@@ -47,7 +47,7 @@ interface DeepxDesktopApi {
       petEnabled: boolean;
     }): Promise<unknown>;
     /** 壳点击标题栏动作回传（host → renderer 事件）。 */
-    onHeaderAction(listener: (action: { action: string; path?: string }) => void): () => void;
+    onHeaderAction(listener: (action: { action: string; path?: string; file?: string }) => void): () => void;
     /** 主题推送（P-5 三态）：light | dark | dark-gray | system。 */
     setTheme(mode: "light" | "dark" | "dark-gray" | "system"): Promise<unknown>;
     /** 壳系统主题变化（host → renderer）：`{ mode: "light" | "dark" }`。 */
@@ -106,7 +106,7 @@ declare global {
     /** WinUI 壳注入：原生 XAML 侧栏接管时置 true（renderer 隐藏 web 侧栏）。 */
     __DEEPX_XAML_SIDEBAR__?: boolean;
     /** P-3 统一 flag（WORKFLOW §6.1）：`{ sidebar: true, header: true, home: true, settings: true, ... }`。 */
-    __DEEPX_XAML__?: Partial<Record<"sidebar" | "header" | "home" | "settings", boolean>>;
+    __DEEPX_XAML__?: Partial<Record<"sidebar" | "header" | "home" | "settings" | "info", boolean>>;
     /** WebView2 宿主桥（winui 壳）：postMessage 双向通道。 */
     chrome?: {
       webview?: {

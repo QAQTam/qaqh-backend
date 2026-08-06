@@ -243,7 +243,7 @@ export default function ChatView(props: ChatViewProps) {
           }}
         />
       </Show>
-      <Show when={props.infoOpen}>
+      <Show when={props.infoOpen && !isXaml("info")}>
         <InfoPopover
           session={session()}
           workspace={props.ui.workspace()}

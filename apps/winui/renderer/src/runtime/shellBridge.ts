@@ -27,12 +27,15 @@ export type HeaderActionName =
   | "stats"
   | "undo"
   | "compact"
-  | "pet";
+  | "pet"
+  | "open_diff";
 
 export interface HeaderAction {
   action: HeaderActionName;
   /** workspace 动作：壳所选目录路径（D2，WORKFLOW §3）。 */
   path?: string;
+  /** open_diff 动作：变更文件路径（壳 Info 面板点击；file 缺省 = 全部变更）。 */
+  file?: string;
 }
 
 export type ShellThemeMode = "light" | "dark" | "dark-gray" | "system";
@@ -56,7 +59,7 @@ export interface ShellNavigate {
   seed?: string;
 }
 
-type XamlComponent = "sidebar" | "header" | "home" | "settings";
+type XamlComponent = "sidebar" | "header" | "home" | "settings" | "info";
 
 /** 查询 P-3 统一 flag：组件是否由 XAML 壳接管。 */
 export function isXaml(component: XamlComponent): boolean {

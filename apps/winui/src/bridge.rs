@@ -31,9 +31,10 @@ use serde_json::{json, Value};
 use windows_webview::WebView;
 
 use crate::shell_store::{
-    parse_activities, parse_activity_event, parse_config_load, parse_skills_event,
-    parse_skills_payload, parse_tools, parse_workspace_status, project_session_meta,
-    ActivityState, SessionItem, SettingsSnapshot, SkillsSnapshot,
+    parse_activities, parse_activity_event, parse_config_load, parse_conversation_state,
+    parse_skills_event, parse_skills_payload, parse_tools, parse_workspace_status,
+    project_session_meta, ActivityState, SessionDetail, SessionItem, SettingsSnapshot,
+    SkillsSnapshot,
 };
 
 /// Outbound messages queued on the UI thread (STA) and pumped to the WebView.
@@ -118,6 +119,8 @@ pub enum HeaderAction {
     Undo,
     /// ⑦compact：回传 Web 执行 session.compact。
     Compact,
+    /// info 面板"变更"点击：回传 Web 打开 GitDiffPanel（file=None = 全部变更）。
+    OpenDiff { file: Option<String> },
 }
 
 /// `Send + Sync` half of the bridge: client, lease bookkeeping, outbox sender.
@@ -172,6 +175,10 @@ pub struct BridgeCore {
     settings_proj: Mutex<SettingsProjection>,
     /// 投影版本：Web 推送后递增（同 header_rev）。
     settings_proj_rev: AtomicU64,
+    /// XAML Info 面板数据源：bootstrap `conversation.state` 投影。
+    info: Mutex<Option<SessionDetail>>,
+    /// Info 数据版本：refresh 后递增，UI 侧 timer 比对后刷新（同 session_rev）。
+    info_rev: AtomicU64,
     outbox_tx: std::sync::mpsc::Sender<OutMsg>,
 }
 
@@ -353,6 +360,56 @@ impl BridgeCore {
             "refresh_sessions: {} sessions",
             self.sessions.lock().unwrap_or_else(|e| e.into_inner()).len()
         ));
+    }
+
+    // ── XAML Info 面板（bootstrap conversation.state 投影）─────────────
+
+    /// (detail, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新面板。
+    pub fn info_snapshot(&self) -> (Option<SessionDetail>, u64) {
+        let detail = self.info.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let rev = self.info_rev.load(Ordering::Relaxed);
+        (detail, rev)
+    }
+
+    /// 后台拉取指定会话的用量详情：`client.bootstrap` → `conversation.state`
+    /// 投影 → 缓存 + rev++（对齐 conversation_snapshot.rs:29-39 形状）。
+    /// 快照为 None（会话无持久状态）时保留旧缓存。
+    pub fn spawn_refresh_info(&self, seed: String) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            core.refresh_info_inner(&seed).await;
+        });
+    }
+
+    async fn refresh_info_inner(&self, seed: &str) {
+        if seed.is_empty() {
+            return;
+        }
+        let client = match self.ensure_client().await {
+            Ok(client) => client,
+            Err(err) => {
+                log_diag(&format!("refresh_info: connect failed: {err}"));
+                return;
+            }
+        };
+        let bootstrap = match client.bootstrap(seed).await {
+            Ok(v) => v,
+            Err(err) => {
+                log_diag(&format!("refresh_info: bootstrap failed: {err}"));
+                return;
+            }
+        };
+        let Some(state) = bootstrap
+            .get("conversation")
+            .and_then(|c| c.get("state"))
+        else {
+            log_diag("refresh_info: conversation.state missing, keeping previous");
+            return;
+        };
+        *self.info.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(parse_conversation_state(state));
+        self.info_rev.fetch_add(1, Ordering::Relaxed);
+        log_diag(&format!("refresh_info: {seed} refreshed"));
     }
 
     /// 新建会话：`session_create`（control）+ 轮询发现新 seed（对齐前端
@@ -1260,6 +1317,16 @@ impl BridgeCore {
             }
             if changed {
                 self.session_rev.fetch_add(1, Ordering::Relaxed);
+                // Info 面板打开过（缓存存在）→ 活动状态变化（回合边界信号）
+                // 时顺手刷新用量（低频触发，bootstrap 一次成本可接受）。
+                let info_active = self
+                    .info
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+                if info_active {
+                    self.spawn_refresh_info(self.active_seed());
+                }
             }
             if skills_changed {
                 self.skills_rev.fetch_add(1, Ordering::Relaxed);
@@ -1623,6 +1690,8 @@ impl Bridge {
                     settings_rev: AtomicU64::new(0),
                     settings_proj: Mutex::new(SettingsProjection::default()),
                     settings_proj_rev: AtomicU64::new(0),
+                    info: Mutex::new(None),
+                    info_rev: AtomicU64::new(0),
                     outbox_tx: tx,
                 });
                 let _ = SHARED_CORE.set(core.clone());
@@ -1936,6 +2005,8 @@ mod tests {
             settings_rev: AtomicU64::new(0),
             settings_proj: Mutex::new(SettingsProjection::default()),
             settings_proj_rev: AtomicU64::new(0),
+            info: Mutex::new(None),
+            info_rev: AtomicU64::new(0),
             outbox_tx: tx,
         }
     }

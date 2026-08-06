@@ -546,6 +546,10 @@ export default function App() {
         void undoLastTurn();
       } else if (action.action === "compact") {
         setCompactRequest(n => n + 1);
+      } else if (action.action === "open_diff") {
+        // P4a：壳 Info 面板"变更"点击回传（environment 区块二期接线，
+        // 届时打开 GitDiffPanel：setSelectedGitFile + setShowGitWorkspace）。
+        console.log("[renderer] open_diff (P4a placeholder):", action.file);
       }
     });
     // 壳系统主题变化（P-5）：system 模式下重新解析（WebView media 监听兜底）。

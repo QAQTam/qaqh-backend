@@ -14,6 +14,7 @@
 mod bridge;
 mod header;
 mod home_view;
+mod info_panel;
 mod shell;
 mod shell_store;
 mod settings_view;
@@ -232,24 +233,36 @@ fn app(cx: &mut RenderCx) -> Element {
     let nav: Element =
         sidebar::sidebar(cx, bridge.clone(), sidebar_width, set_sidebar_width).into();
     let (view, set_view) = cx.use_state::<String>("home".to_string());
+    let (info_open, set_info_open) = cx.use_state::<bool>(false);
     let view_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_view = cx.use_ref::<String>("home".to_string());
+    let last_info_open = cx.use_ref::<bool>(false);
     cx.use_effect((), {
         let bridge = bridge.clone();
         let set_view = set_view.clone();
+        let set_info_open = set_info_open.clone();
         let view_timer = view_timer.clone();
         let last_view = last_view.clone();
+        let last_info_open = last_info_open.clone();
         move || {
             if view_timer.borrow().is_none() {
                 match DispatcherTimer::new(Duration::from_millis(250), {
                     let bridge = bridge.clone();
                     let set_view = set_view.clone();
+                    let set_info_open = set_info_open.clone();
                     let last_view = last_view.clone();
+                    let last_info_open = last_info_open.clone();
                     move || {
                         let v = bridge.core().current_view();
                         if v != *last_view.borrow() {
                             *last_view.borrow_mut() = v.clone();
                             set_view.call(v);
+                        }
+                        // Info 面板开关（Web shell.setHeader 投影的 info_open）。
+                        let o = bridge.core().header_snapshot().0.info_open;
+                        if o != *last_info_open.borrow() {
+                            *last_info_open.borrow_mut() = o;
+                            set_info_open.call(o);
                         }
                     }
                 }) {
@@ -279,7 +292,10 @@ fn app(cx: &mut RenderCx) -> Element {
         .grid_row(3)
         .grid_column(0)
         .into();
-    let right: Element = grid((webview, skills, home, settings))
+    // 内容区四行视图族（WORKFLOW §8 壳主导）：row0=WebView2（view=chat
+    // 时 STAR，常驻不销毁）、row1=skills、row2=home、row3=settings；
+    // 非当前视图行高 0（WebView2 尺寸 0 保留导航状态，零销毁重建）。
+    let right_content: Element = grid((webview, skills, home, settings))
         .rows([
             if view == "skills" || view == "home" || view == "settings" {
                 GridLength::Pixel(0.0)
@@ -302,6 +318,21 @@ fn app(cx: &mut RenderCx) -> Element {
                 GridLength::Pixel(0.0)
             },
         ])
+        .into();
+    // Step 1b: Info 面板右列（P4a）——chat 视图且 info_open 时 320px，
+    // 否则 0（与行高切换同模式：WebView2 常驻保留导航状态不受影响）。
+    // 面板内容组件自管刷新时机（打开瞬间拉取 bootstrap 用量）。
+    let info_el: Element = info_panel::info_panel(cx, bridge.clone())
+        .grid_row(0)
+        .grid_column(1)
+        .into();
+    let info_width = if info_open && view == "chat" {
+        GridLength::Pixel(info_panel::PANEL_WIDTH)
+    } else {
+        GridLength::Pixel(0.0)
+    };
+    let right: Element = grid((right_content, info_el))
+        .columns([GridLength::STAR, info_width])
         .grid_row(0)
         .grid_column(1)
         .into();

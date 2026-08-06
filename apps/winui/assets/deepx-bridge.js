@@ -56,7 +56,7 @@
   window.__DEEPX_XAML_SIDEBAR__ = true; // 原生侧栏接管：renderer 隐藏 web 侧栏（可回退）
   // P-3 统一 flag（WORKFLOW §6.1）：新组件查询 __DEEPX_XAML__.<component>；
   // 旧 __DEEPX_XAML_SIDEBAR__ 保留兼容已上线代码。
-  window.__DEEPX_XAML__ = { sidebar: true, header: true, home: true, settings: true };
+  window.__DEEPX_XAML__ = { sidebar: true, header: true, home: true, settings: true, info: true };
   window.deepx = {
     backend: {
       connect: function () { return invoke('backend.connect'); },

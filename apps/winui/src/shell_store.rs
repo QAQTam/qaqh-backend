@@ -330,6 +330,79 @@ pub struct SettingsSnapshot {
     pub tools: Vec<String>,
 }
 
+// ── Info 面板会话用量投影（info_panel.rs 的唯一数据源）──────────────
+
+/// 单次请求/会话累计用量（对齐 daemon `UsageInfo` / Web 侧同名字段）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageInfo {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub total_tokens: u64,
+    pub prompt_cache_hit_tokens: u64,
+    pub prompt_cache_miss_tokens: u64,
+    pub cache_usage_reported: bool,
+}
+
+/// XAML Info 面板数据（bootstrap `conversation.state` 投影）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionDetail {
+    pub model: String,
+    pub context_limit: u64,
+    /// 当前（最近一次）请求用量。
+    pub usage: UsageInfo,
+    /// 会话累计用量。
+    pub totals: UsageInfo,
+    pub usage_requests: u64,
+    pub cache_reported_requests: u64,
+}
+
+/// 解析 UsageInfo 对象（字段缺失兜底 0/false——与 Web `addUsage` 语义一致）。
+fn parse_usage(v: &Value) -> UsageInfo {
+    let u64_of = |key: &str| v.get(key).and_then(|x| x.as_u64()).unwrap_or(0);
+    UsageInfo {
+        prompt_tokens: u64_of("prompt_tokens"),
+        completion_tokens: u64_of("completion_tokens"),
+        reasoning_tokens: u64_of("reasoning_tokens"),
+        total_tokens: u64_of("total_tokens"),
+        prompt_cache_hit_tokens: u64_of("prompt_cache_hit_tokens"),
+        prompt_cache_miss_tokens: u64_of("prompt_cache_miss_tokens"),
+        cache_usage_reported: v
+            .get("cache_usage_reported")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+    }
+}
+
+/// 解析 bootstrap `conversation.state` → SessionDetail。
+///
+/// 形状（daemon conversation_snapshot.rs:29-39）：`{ usage, usage_totals,
+/// usage_requests, cache_reported_requests, model, context_limit, ... }`。
+/// 快照为 None（会话无持久状态）时由调用方保留旧缓存。
+pub fn parse_conversation_state(v: &Value) -> SessionDetail {
+    SessionDetail {
+        model: v
+            .get("model")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        context_limit: v
+            .get("context_limit")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0),
+        usage: v.get("usage").map(parse_usage).unwrap_or_default(),
+        totals: v.get("usage_totals").map(parse_usage).unwrap_or_default(),
+        usage_requests: v
+            .get("usage_requests")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0),
+        cache_reported_requests: v
+            .get("cache_reported_requests")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0),
+    }
+}
+
 /// 掩码判定：daemon 对已配置的 secret 返回 `"****"`（与 Web isMasked 一致）。
 fn is_masked(v: &str) -> bool {
     v == "****"
@@ -775,5 +848,59 @@ mod tests {
         }
         assert_eq!(normalize_effort("high"), "high");
         assert_eq!(normalize_effort("max"), "max");
+    }
+
+    #[test]
+    fn parses_conversation_state_full() {
+        // 对齐 daemon conversation_snapshot.rs:29-39 序列化（snake_case）。
+        let v = json!({
+            "turns": [],
+            "total_turns": 3,
+            "has_more": false,
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "reasoning_tokens": 20,
+                "total_tokens": 170,
+                "prompt_cache_hit_tokens": 30,
+                "prompt_cache_miss_tokens": 70,
+                "cache_usage_reported": true,
+            },
+            "usage_totals": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 500,
+                "reasoning_tokens": 200,
+                "total_tokens": 1700,
+                "prompt_cache_hit_tokens": 300,
+                "prompt_cache_miss_tokens": 700,
+                "cache_usage_reported": true,
+            },
+            "usage_requests": 3,
+            "cache_reported_requests": 2,
+            "model": "deepseek-chat",
+            "context_limit": 1000000,
+        });
+        let d = parse_conversation_state(&v);
+        assert_eq!(d.model, "deepseek-chat");
+        assert_eq!(d.context_limit, 1000000);
+        assert_eq!(d.usage.prompt_tokens, 100);
+        assert_eq!(d.usage.total_tokens, 170);
+        assert!(d.usage.cache_usage_reported);
+        assert_eq!(d.totals.completion_tokens, 500);
+        assert_eq!(d.totals.prompt_cache_hit_tokens, 300);
+        assert_eq!(d.usage_requests, 3);
+        assert_eq!(d.cache_reported_requests, 2);
+    }
+
+    #[test]
+    fn parses_conversation_state_missing_fields() {
+        // 旧 daemon / 未持久化字段全部兜底。
+        let d = parse_conversation_state(&json!({}));
+        assert_eq!(d.model, "");
+        assert_eq!(d.context_limit, 0);
+        assert_eq!(d.usage, UsageInfo::default());
+        assert_eq!(d.totals, UsageInfo::default());
+        assert_eq!(d.usage_requests, 0);
+        assert_eq!(d.cache_reported_requests, 0);
     }
 }
