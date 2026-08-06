@@ -16,6 +16,7 @@ mod header;
 mod shell;
 mod shell_store;
 mod sidebar;
+mod skills_view;
 
 use std::time::Duration;
 
@@ -80,28 +81,85 @@ fn app(cx: &mut RenderCx) -> Element {
         }
     });
 
-    // Step 1: 内容区元素——左 XAML 侧栏（可拖拽宽度）+ 右 WebView2。
+    // Step 1: 内容区元素——左 XAML 侧栏（可拖拽宽度）+ 右区。
+    // 右区 = 内层 Grid 两行（WORKFLOW §8 壳主导视图族）：
+    //   - row0 = WebView2（renderer）——view≠skills 时 STAR（常驻，不销毁）；
+    //   - row1 = XAML 技能页——view=skills 时 STAR。
+    // 非当前视图的行高 0：WebView2 尺寸 0 保留导航状态（不销毁不重建），
+    // XAML 技能页零命中零渲染；无 opacity/命中测试依赖。
     let nav: Element =
         sidebar::sidebar(cx, bridge.clone(), sidebar_width, set_sidebar_width).into();
+    let (view, set_view) = cx.use_state::<String>("home".to_string());
+    let view_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    let last_view = cx.use_ref::<String>("home".to_string());
+    cx.use_effect((), {
+        let bridge = bridge.clone();
+        let set_view = set_view.clone();
+        let view_timer = view_timer.clone();
+        let last_view = last_view.clone();
+        move || {
+            if view_timer.borrow().is_none() {
+                match DispatcherTimer::new(Duration::from_millis(250), {
+                    let bridge = bridge.clone();
+                    let set_view = set_view.clone();
+                    let last_view = last_view.clone();
+                    move || {
+                        let v = bridge.core().current_view();
+                        if v != *last_view.borrow() {
+                            *last_view.borrow_mut() = v.clone();
+                            set_view.call(v);
+                        }
+                    }
+                }) {
+                    Ok(t) => {
+                        *view_timer.borrow_mut() = Some(t);
+                    }
+                    Err(e) => log_diag(&format!("view timer failed: {e}")),
+                }
+            }
+        }
+    });
     let webview: Element = webview
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .vertical_alignment(VerticalAlignment::Stretch)
+        .grid_row(0)
+        .grid_column(0)
+        .into();
+    let skills: Element = skills_view::skills_view(cx, bridge.clone())
+        .grid_row(1)
+        .grid_column(0)
+        .into();
+    let right: Element = grid((webview, skills))
+        .rows([
+            if view == "skills" {
+                GridLength::Pixel(0.0)
+            } else {
+                GridLength::STAR
+            },
+            if view == "skills" {
+                GridLength::STAR
+            } else {
+                GridLength::Pixel(0.0)
+            },
+        ])
+        .grid_row(0)
+        .grid_column(1)
         .into();
 
     // Step 2: Grid 两行——row0 = XAML 标题栏（48px，SetTitleBar 拖拽区，
-    // host 自动接线 host.rs:277-288）；row1 = 内容区（侧栏 | WebView2）。
+    // host 自动接线 host.rs:277-288）；row1 = 内容区（侧栏 | 右区）。
     // WebView2 从 row 1 开始，与拖拽区无输入区域重叠。
     let titlebar: Element = header::header(cx, bridge.clone())
         .grid_row(0)
         .grid_column(0)
         .into();
-    // ── 内容区（row 1）：基础层（侧栏 | WebView2）────────────────
+    // ── 内容区（row 1）：基础层（侧栏 | 右区）────────────────
     // P-6 覆盖层预留（WORKFLOW §6.1）：未来 XAML 面板/对话框
     // （P1 Flyout anchor / P2 ContentDialog phantom child）作为覆盖层
     // 元素追加进本 Grid（同 cell 重叠渲染），零布局改动。
     let content: Element = grid((
         nav.grid_row(0).grid_column(0),
-        webview.grid_row(0).grid_column(1),
+        right,
     ))
     .columns([GridLength::Pixel(sidebar_width), GridLength::STAR])
     .grid_row(1)

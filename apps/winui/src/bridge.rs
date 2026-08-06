@@ -31,7 +31,8 @@ use serde_json::{json, Value};
 use windows_webview::WebView;
 
 use crate::shell_store::{
-    parse_activities, parse_activity_event, project_session_meta, ActivityState, SessionItem,
+    parse_activities, parse_activity_event, parse_skills_event, parse_skills_payload,
+    project_session_meta, ActivityState, SessionItem, SkillsSnapshot,
 };
 
 /// Outbound messages queued on the UI thread (STA) and pumped to the WebView.
@@ -132,6 +133,12 @@ pub struct BridgeCore {
     last_timeline_seed: Mutex<String>,
     /// timeline 连接状态缓存（检测用；ringing 状态走 channel_status）。
     timeline_status: Mutex<Option<TimelineStatus>>,
+    /// XAML 技能页数据源：最近 `skills_updated` 事件完整载荷（WORKFLOW §8）。
+    skills: Mutex<Option<SkillsSnapshot>>,
+    /// 技能数据版本：事件/拉取后递增，UI 侧 timer 比对后刷新（同 session_rev）。
+    skills_rev: AtomicU64,
+    /// 壳主导的当前视图（`navigate` 同步；XAML 视图族接管 skills 的判定源）。
+    current_view: Mutex<String>,
     outbox_tx: std::sync::mpsc::Sender<OutMsg>,
 }
 
@@ -406,8 +413,138 @@ impl BridgeCore {
         });
     }
 
+    // ── XAML 技能页（skills_updated 投影，WORKFLOW §8）────────────
+
+    /// (snapshot, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新。
+    pub fn skills_snapshot(&self) -> (Option<SkillsSnapshot>, u64) {
+        let snap = self.skills.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let rev = self.skills_rev.load(Ordering::Relaxed);
+        (snap, rev)
+    }
+
+    /// 壳主导的当前视图（main.rs 内容区视图切换判定）。
+    pub fn current_view(&self) -> String {
+        self.current_view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 无缓存时向 daemon 拉一次权威快照（进入技能页首次渲染兜底）。
+    ///
+    /// 正常路径下 `skills_updated` 事件持续推送（事件即完整快照），无需
+    /// 主动拉取；兜底覆盖“事件在页面挂载前已推送”的窗口。
+    pub fn ensure_skills(&self) {
+        if self.skills.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return;
+        }
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("ensure_skills: connect failed: {err}"));
+                    return;
+                }
+            };
+            let seed = core.active_seed();
+            if seed.is_empty() {
+                return;
+            }
+            match client.bootstrap(&seed).await {
+                Ok(snapshot) => {
+                    if let Some(skills) = snapshot.get("control").and_then(|c| c.get("skills")) {
+                        let mut snap = parse_skills_payload(skills);
+                        snap.seed = seed;
+                        core.skills
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .replace(snap);
+                        core.skills_rev.fetch_add(1, Ordering::Relaxed);
+                        log_diag("ensure_skills: bootstrap snapshot cached");
+                    } else {
+                        log_diag("ensure_skills: no control.skills in bootstrap snapshot");
+                    }
+                }
+                Err(err) => log_diag(&format!("ensure_skills: bootstrap failed: {err}")),
+            }
+        });
+    }
+
+    /// 技能动作（对齐 renderer `skills.operation`：request/release/retain）。
+    ///
+    /// seed 取当前激活会话；operation_id 用壳内序号（daemon 无 UUID 强校验，
+    /// 仅透传去重）；expected_revision 取快照 operation_revision（幂等）。
+    pub fn spawn_skill_operation(&self, action: &str, name: &str) {
+        let core = self.self_arc();
+        let action = action.to_string();
+        let name = name.to_string();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("skill {action} {name}: connect failed: {err}"));
+                    return;
+                }
+            };
+            let seed = core.active_seed();
+            if seed.is_empty() {
+                log_diag(&format!("skill {action} {name}: no active session"));
+                return;
+            }
+            let revision = core
+                .skills
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|s| s.operation_revision)
+                .unwrap_or(0);
+            let params = json!({
+                "seed": seed,
+                "operationId": core.next_command_id(),
+                "action": action,
+                "name": name,
+                "expectedRevision": revision,
+            });
+            match client.action("skills.operation", params).await {
+                Ok(_) => log_diag(&format!("skill operation {action} {name}: ok")),
+                Err(err) => log_diag(&format!("skill operation {action} {name}: failed: {err}")),
+            }
+        });
+    }
+
+    /// 技能目录重载（对齐 renderer `skills.reload`）。
+    pub fn spawn_skill_reload(&self) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("skill reload: connect failed: {err}"));
+                    return;
+                }
+            };
+            let seed = core.active_seed();
+            if seed.is_empty() {
+                log_diag("skill reload: no active session");
+                return;
+            }
+            match client.action("skills.reload", json!({ "seed": seed })).await {
+                Ok(_) => log_diag("skill reload: ok"),
+                Err(err) => log_diag(&format!("skill reload: failed: {err}")),
+            }
+        });
+    }
+
     /// 通知 renderer 切换视图（XAML 侧栏的导航出口）。
+    ///
+    /// 同步更新壳侧 `current_view`——XAML 视图族据此接管/让出 skills 视图
+    /// （main.rs 内容区同 cell 重叠 + opacity 切换，见 WORKFLOW §8）。
     pub fn navigate(&self, view: &str, seed: Option<&str>) {
+        *self
+            .current_view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = view.to_string();
         let mut payload = json!({ "view": view });
         if let Some(seed) = seed {
             payload["seed"] = json!(seed);
@@ -731,6 +868,7 @@ impl BridgeCore {
         // 增量更新缓存（不触发全量 refresh）。
         if batch.channel == Channel::Control {
             let mut changed = false;
+            let mut skills_changed = false;
             for env in &batch.envelopes {
                 if let Some((seed, state)) = parse_activity_event(&env.event) {
                     self.activities
@@ -743,9 +881,24 @@ impl BridgeCore {
                     }
                     changed = true;
                 }
+                // XAML 技能页：skills_updated 携带完整 SkillsStatus 载荷，
+                // 直接缓存为权威快照（含 seed，batch.seed 兜底）。
+                if let Some(mut snap) = parse_skills_event(&env.event) {
+                    if snap.seed.is_empty() {
+                        snap.seed = batch.seed.clone();
+                    }
+                    self.skills
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .replace(snap);
+                    skills_changed = true;
+                }
             }
             if changed {
                 self.session_rev.fetch_add(1, Ordering::Relaxed);
+            }
+            if skills_changed {
+                self.skills_rev.fetch_add(1, Ordering::Relaxed);
             }
         }
         self.emit(
@@ -1056,6 +1209,9 @@ impl Bridge {
                     last_rebuild_at: Mutex::new(Instant::now()),
                     last_timeline_seed: Mutex::new(String::new()),
                     timeline_status: Mutex::new(None),
+                    skills: Mutex::new(None),
+                    skills_rev: AtomicU64::new(0),
+                    current_view: Mutex::new(String::new()),
                     outbox_tx: tx,
                 });
                 let _ = SHARED_CORE.set(core.clone());
@@ -1271,6 +1427,9 @@ mod tests {
             last_rebuild_at: Mutex::new(Instant::now()),
             last_timeline_seed: Mutex::new(String::new()),
             timeline_status: Mutex::new(None),
+            skills: Mutex::new(None),
+            skills_rev: AtomicU64::new(0),
+            current_view: Mutex::new(String::new()),
             outbox_tx: tx,
         }
     }

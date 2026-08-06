@@ -422,3 +422,51 @@ grid((
 - 无新 ringing 通道/事件/命令 → daemon 无需重启、协议版本无感（与运行中的 daemon 兼容，验证仅需 `cargo check`）。
 
 **唯一边界提醒**：若未来 P3 设置页原生时发现 `config.save` 需批量原子写入等新语义，那是后端新需求——P0 不预判（X-3 store 归属决策同理）。
+
+## 8. 技能页 XAML 化（壳主导视图族第一步，2026-08-06 落地）
+
+### 目标与边界
+
+- **范围**：view=skills 时内容区由 XAML `skills_view.rs` 接管；renderer 的
+  `SkillsView` 分支**保留**（WebView2 行高 0 不可见，作为非壳环境回退路径）。
+- **零后端改动**：复用既有 `skills.operation` / `skills.reload` Ringing 命令
+  （deepx-runtime/service.rs 已存在）+ `skills_updated` control 事件。
+- **数据流**：壳是 deepx-client 所有者——`ControlEvent::SkillsUpdated`
+  （完整 `SkillsStatus` 载荷）经 `on_batch → emit_batch` 到达壳，
+  `shell_store::parse_skills_event` 解析为 typed `SkillsSnapshot` 缓存
+  （`skills` + `skills_rev`）；首次进入且无缓存时 `ensure_skills()`
+  兜底 `client.bootstrap(seed)` 解析 `control.skills`（同构，事件/快照
+  双源共用一个 `parse_skills_payload`）。
+
+### 新增/改动文件
+
+| 文件 | 内容 |
+|---|---|
+| `shell_store.rs` | `SkillsSnapshot`/`SkillRuntimeItem`/`SkillCatalogItem` + `parse_skills_payload`（任意源）/`parse_skills_event`（type 校验）+ 4 测试 |
+| `bridge.rs` | `skills`/`skills_rev`/`current_view` 字段；`emit_batch` 解析 skills_updated；`navigate` 同步 current_view；API：`skills_snapshot`/`current_view`/`ensure_skills`/`spawn_skill_operation`/`spawn_skill_reload` |
+| `skills_view.rs` | XAML 技能页（四列分组/搜索/ToggleSwitch/按钮/pending 防重入/展开详情） |
+| `main.rs` | 内容区右区改两行 Grid：row0=WebView2、row1=skills_view；view 状态 250ms 轮询；非当前视图行高 0（WebView2 尺寸 0 保留导航状态，零销毁重建） |
+
+### 关键决策
+
+- **视图切换**：右区两行**行高切换**（STAR ↔ Pixel(0)），非 opacity/命中测试
+  方案——WebView2 是合成层元素，opacity 与命中语义不可靠；行高 0 时元素
+  不渲染不命中，且 WebView2 控件保留（导航状态不丢）。
+- **pending 防重入**：`pending_at: HookRef<HashMap<name, Instant>>`——渲染期
+  判断（8s 超时 或 目标态已到达 即解除），无事件驱动复位、无 SetState::get
+  依赖（reactor 的 SetState 只有 call）。
+- **动作参数**：`skills.operation` 的 `operationId` 用壳内 `next_command_id()`
+  （daemon 无 UUID 强校验，仅透传去重）；`expectedRevision` 取快照
+  `operation_revision`（幂等）。
+- **事件即快照**：`skills_updated` 载荷即完整 `SkillsStatus`——无需增量合并，
+  直接 `replace` 缓存 + rev 自增；`ensure_skills` 仅作首次/窗口兜底。
+
+### 人工验证清单（追加）
+
+1. 侧栏点「技能」→ 内容区切换为 XAML 技能页（四列分组、数据与 Web 版一致）。
+2. 切回「任务/新建任务」→ 内容区恢复 WebView2（renderer 状态不丢，无重载）。
+3. 搜索过滤（名称/描述）；ToggleSwitch 开=request、关=release；requested→取消；
+   unavailable→重试；刷新按钮转圈→目录 revision 更新。
+4. 动作后卡片转圈，`skills_updated` 到达（状态变更）后转圈消失（目标态提前解除）。
+5. 无会话时显示「请先选择或新建一个会话」。
+6. 行点击展开详情（路径 / 加载错误）。
