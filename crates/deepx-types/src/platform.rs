@@ -33,7 +33,16 @@ pub fn home_dir() -> PathBuf {
 /// - Windows: `%USERPROFILE%\.deepx`
 /// - Unix: `$XDG_CONFIG_HOME/deepx` or `$HOME/.config/deepx`
 pub fn data_dir() -> PathBuf {
-    if cfg!(target_os = "windows") {
+    // `DEEPX_DATA_DIR` (full data root, e.g. `F:\DeepX\.deepx-test-home\.deepx`)
+    // overrides when set — used by test harnesses and multi-instance shells.
+    // The daemon resolves paths through this same function, so shell and
+    // daemon stay on the same data root.
+    if let Ok(dir) = std::env::var("DEEPX_DATA_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    if cfg!(windows) {
         home_dir().join(".deepx")
     } else {
         std::env::var("XDG_CONFIG_HOME")

@@ -1,20 +1,23 @@
 # DeepX Desktop
 
-Independent Electron + SolidJS frontend for the DeepX Rust daemon.
+Web renderer（SolidJS）for the DeepX Rust daemon. The UI is hosted by the
+WinUI3 shell (`apps/winui`, Rust + WebView2) or browsable directly against
+the daemon's `/debug/` endpoint.
 
 ## Architecture
 
 ```text
 SolidJS renderer
-      │ narrow contextBridge API
-Electron preload
-      │ validated IPC
-Electron main
-      │ authenticated loopback WebSocket
-deepx-daemon (D:\DeepX)
+      │ narrow window.deepx bridge
+WinUI3 shell (deepx-winui, Rust)
+      │ WebMessage ↔ deepx-client (Ringing V1 HTTP/SSE)
+deepx-daemon
 ```
 
-The renderer has no Node.js integration and never reads the daemon discovery token. Electron Main owns daemon discovery, detached startup, request correlation, heartbeats, reconnects, leases, native dialogs, and opening local paths.
+The renderer has no Node.js integration and never reads the daemon discovery
+token. The shell owns daemon discovery, lease, native dialogs and opening
+local paths. In a plain browser (daemon `/debug/`), a read-only bridge
+(`src/runtime/browserBridge.ts`) provides Ringing SSE observation.
 
 ## Development
 

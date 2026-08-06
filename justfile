@@ -3,7 +3,7 @@
 #
 # 项目结构:
 #   crates/          Rust 后端 (16 crates)
-#   apps/desktop/    Electron 前端
+#   apps/desktop/    Web renderer（由 winui 壳承载）
 #   apps/installer/  Windows 安装器
 
 set windows-shell := ["pwsh.exe", "-NoLogo", "-Command"]
@@ -32,78 +32,25 @@ build-updater:
 build-desktop:
     Set-Location apps/desktop; pnpm build
 
-# ── 打包 ────────────────────────────────────────────
+# ── 打包（winui 壳）────────────────────────────────
 
-# 打包桌面 Electron 运行目录（仅完整安装包使用）
+# 编译 winui 壳（release）+ 注入桥脚本到 renderer 产物
 [windows]
-package-desktop: build-daemon
+build-winui: build-desktop
+    cargo build --release -p deepx-winui
+    node apps/winui/scripts/patch-renderer.mjs
+
+# 打包 winui 运行目录（release/winui-app，完整安装包使用）
+[windows]
+package-winui-desktop: build-daemon build-winui
     Set-Location apps/desktop; node scripts/prepare-daemon.mjs --backend-root ../..
-    Set-Location apps/desktop; pnpm build
-    Set-Location apps/desktop; pnpm exec electron-builder --dir --win --x64 --publish never
+    ./apps/winui/scripts/assemble-winui.ps1
 
-# 只构建前端 ASAR，不构建 Electron Runtime 或 Rust 后端
+# 生成完整安装包 EXE（winui 壳；效果等同 just package）
 [windows]
-pack-frontend: build-desktop
-    Set-Location apps/desktop; node scripts/pack-frontend.mjs
-
-# 生成完整安装包 EXE（首次安装、修复或完整升级）
-[windows]
-package: package-desktop build-installer build-updater
-    ./apps/installer/scripts/collect-payload.ps1 -Kind full
+winui-package: package-winui-desktop build-installer build-updater
+    ./apps/installer/scripts/collect-payload-winui.ps1 -Kind full
     ./apps/installer/scripts/finalize.ps1 -Kind full
-
-# 生成仅前端的本地更新源（catalog.json + Bundle ZIP）
-[windows]
-package-update-frontend: pack-frontend build-installer
-    ./apps/installer/scripts/collect-payload.ps1 -Kind frontend
-    ./apps/installer/scripts/make-update-source.ps1 -Kinds frontend
-
-# 生成仅后端的本地更新源（catalog.json + Bundle ZIP）
-[windows]
-package-update-backend: build-daemon build-installer
-    Set-Location apps/desktop; node scripts/prepare-daemon.mjs --backend-root ../..
-    ./apps/installer/scripts/collect-payload.ps1 -Kind backend
-    ./apps/installer/scripts/make-update-source.ps1 -Kinds backend
-
-# 生成智能本地更新源（Full + Frontend + Backend）
-[windows]
-package-update: package-desktop build-installer build-updater
-    ./apps/installer/scripts/collect-payload.ps1 -Kind full
-    ./apps/installer/scripts/collect-payload.ps1 -Kind frontend -FrontendAsarPath apps/desktop/release/win-unpacked/resources/app.asar
-    ./apps/installer/scripts/collect-payload.ps1 -Kind backend
-    ./apps/installer/scripts/make-update-source.ps1 -Kinds full,frontend,backend
-
-# ── 旧打包命令（可调用，但不在 just --list 中显示）────
-
-[private]
-[windows]
-package-frontend: pack-frontend build-installer
-    ./apps/installer/scripts/collect-payload.ps1 -Kind frontend
-    ./apps/installer/scripts/finalize.ps1 -Kind frontend
-
-[private]
-[windows]
-package-backend: build-daemon build-installer
-    Set-Location apps/desktop; node scripts/prepare-daemon.mjs --backend-root ../..
-    ./apps/installer/scripts/collect-payload.ps1 -Kind backend
-    ./apps/installer/scripts/finalize.ps1 -Kind backend
-
-[private]
-[windows]
-package-full: package
-
-[private]
-[windows]
-package-installer: package
-
-[private]
-[windows]
-package-update-full: package
-    ./apps/installer/scripts/make-update-source.ps1 -Kinds full
-
-[private]
-[windows]
-package-update-all: package-update
 
 # SFX 快速拼接（staging 已就位，跳过构建和收集）
 [windows]
@@ -116,7 +63,7 @@ sfx-quick kind="full":
 dev:
     cargo run -p deepx-daemon -- run
 
-# 启动桌面开发模式（需先 build-daemon 或设 DEEPX_BACKEND_ROOT）
+# 启动 renderer dev server（winui 壳用 DEEPX_DEBUG_URL 指向它）
 [windows]
 dev-desktop:
     Set-Location apps/desktop; pnpm dev
@@ -169,7 +116,6 @@ status:
     @if (Test-Path 'target/release/DeepXInstaller.exe') { '  ✓ DeepXInstaller.exe' } else { '  ✗ DeepXInstaller.exe' }
     @if (Test-Path 'target/release/deepx-updater.exe') { '  ✓ deepx-updater.exe' } else { '  ✗ deepx-updater.exe' }
     @Write-Output "=== Desktop ==="
-    @if (Test-Path 'apps/desktop/out/main/main.js') { '  ✓ main.js' } else { '  ✗ main.js' }
     @if (Test-Path 'apps/desktop/out/renderer/index.html') { '  ✓ renderer' } else { '  ✗ renderer' }
     @Write-Output "=== Packages ==="
     @if (Test-Path 'packages') { Get-ChildItem 'packages' -Force | ForEach-Object { "  ✓ $($_.Name)" } } else { '  ✗ no packages yet' }
@@ -201,23 +147,6 @@ sync-version:
 # ── Linux ───────────────────────────────────────────
 
 [unix]
-package-desktop: build-daemon
-    cd apps/desktop && node scripts/prepare-daemon.mjs --backend-root ../..
-    cd apps/desktop && pnpm build
-    cd apps/desktop && pnpm exec electron-builder --dir --linux --x64 --publish never
-
-[unix]
-build-installer:
-    @echo "deepx-installer crate is Windows-only (uses COM, Registry, tasklist)"
-    @echo "See crates/deepx-msglp for how to cfg-gate the windows dependency."
-    @exit 1
-
-[unix]
-package: package-desktop
-    @echo "  ✓ Electron app packaged to release/"
-    @echo "  ⚠ Full installer (NSIS + SFX) is Windows-only; skipped"
-
-[unix]
 build-desktop:
     cd apps/desktop && pnpm build
 
@@ -228,10 +157,6 @@ dev-desktop:
 [unix]
 check-desktop:
     cd apps/desktop && pnpm typecheck
-
-[unix]
-pack-frontend: build-desktop
-    cd apps/desktop && node scripts/pack-frontend.mjs
 
 [unix]
 clean:
@@ -250,7 +175,6 @@ status:
     @echo "=== Rust binaries ==="
     @test -f target/release/deepx-daemon && echo "  ✓ deepx-daemon" || echo "  ✗ deepx-daemon"
     @echo "=== Desktop ==="
-    @test -f apps/desktop/out/main/main.js && echo "  ✓ main.js" || echo "  ✗ main.js"
     @test -f apps/desktop/out/renderer/index.html && echo "  ✓ renderer" || echo "  ✗ renderer"
     @echo "=== Packages ==="
     @ls -la packages 2>/dev/null || echo "  ✗ no packages yet"

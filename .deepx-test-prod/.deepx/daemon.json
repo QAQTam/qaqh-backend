@@ -1,0 +1,11 @@
+{
+  "endpoint": "ws://127.0.0.1:58660/control/v1",
+  "token": "1be0a2aad1f02faf811fa3da96f96d4485b7cd5bae9f813d5869df99322dacd5",
+  "pid": 13084,
+  "server_epoch": "11b1ee79063408028024fbae4345d0f8a7267140a14520b56b59cadbd040fad1",
+  "protocol_version": 1,
+  "daemon_version": "1.0.0-beta.7",
+  "build_id": "2bc1e7ebedf1577f7734491cf86b5bbc2618e505",
+  "channel": "stable",
+  "executable": "\\\\?\\F:\\DeepX\\apps\\winui\\release\\winui-app\\resources\\deepx-daemon.exe"
+}

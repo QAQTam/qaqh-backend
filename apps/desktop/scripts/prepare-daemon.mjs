@@ -15,7 +15,7 @@ const workspaceExecutable =
 const destination = join(projectRoot, "build", "sidecar", executable);
 const workspaceDestination = join(projectRoot, "build", "sidecar", workspaceExecutable);
 
-validateDesktopProtocol();
+validateDesktopProtocol(explicitBackend);
 const desktopVersion = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8").toString()).version;
 if (desktopVersion !== lock.version) throw new Error(`Desktop version ${desktopVersion} does not match backend lock ${lock.version}`);
 if (process.env.GITHUB_REF_NAME?.startsWith("v") && process.env.GITHUB_REF_NAME !== `v${desktopVersion}`) {
@@ -156,10 +156,20 @@ function verifyDaemonBuildId(executable, expectedBuildId) {
   }
 }
 
-function validateDesktopProtocol() {
-  const source = readFileSync(join(projectRoot, "electron", "controlClient.ts"), "utf8");
-  const protocol = Number(capture(source, /PROTOCOL_VERSION\s*=\s*(\d+)/, "Desktop protocol"));
-  if (protocol !== lock.protocol_version) throw new Error(`Desktop protocol ${protocol} does not match backend lock ${lock.protocol_version}`);
+function validateDesktopProtocol(backendRoot) {
+  // Protocol anchor lives in the Rust protocol crate inside the backend repo:
+  // crates/deepx-proto/src/control.rs. With a local backend we validate against
+  // it; the release-artifact path has no local source (the protocol is already
+  // checked against the release manifest below).
+  if (!backendRoot) return;
+  const source = readFileSync(
+    join(resolve(backendRoot), "crates", "deepx-proto", "src", "control.rs"),
+    "utf8",
+  );
+  const protocol = Number(
+    capture(source, /CONTROL_PROTOCOL_VERSION\s*:\s*u16\s*=\s*(\d+)/, "DeepX protocol"),
+  );
+  if (protocol !== lock.protocol_version) throw new Error(`DeepX protocol ${protocol} does not match backend lock ${lock.protocol_version}`);
 }
 
 function resolveTarget() {

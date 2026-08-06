@@ -27,3 +27,7 @@ apps/installer/.verify-install/
 .codegraph/
 .reasonix/
 /skills/
+
+# WinUI shell test harness (parallel dev daemon home)
+/.deepx-test-home/
+apps/winui/
