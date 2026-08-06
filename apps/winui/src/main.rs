@@ -18,14 +18,88 @@ mod shell_store;
 mod sidebar;
 mod skills_view;
 
-use std::time::Duration;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use deepx_client::discovery;
 use windows_reactor::*;
 use windows_webview::{WebView, webview};
 
+/// 初始导航状态机。
+///
+/// daemon 冷启动可达 40s+（加载历史会话），壳的固定等待窗口
+/// （ensure 8s + /debug/ 就绪 6s）在其首次被拉起时必然不够；WebView2
+/// 导航到未就绪端口会显示错误页且不自动重试。此状态机在导航失败或
+/// URL 未就绪时每 [`NAV_RETRY_INTERVAL`] 重新解析并导航，直到初始导航
+/// 成功（成功后不再干预，页面内后续导航不受影响）。
+#[derive(Default)]
+struct NavState {
+    /// 当前目标 URL；`None` = 尚未拿到可用 URL（daemon 未就绪）。
+    url: Option<String>,
+    /// 初始导航是否已成功；成功后不再自动重试。
+    succeeded: bool,
+    /// 重试定时器（排定中为 `Some`，避免重复排定）。
+    timer: Option<DispatcherTimer>,
+    /// NavigationCompleted 注册（保持 revoker 存活）。
+    completed: Option<windows_webview::EventRegistration>,
+    /// WebView 句柄（重试导航用；UI 线程独占，不 Send）。
+    webview: Option<WebView>,
+}
+
+const NAV_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
+/// 开屏覆盖层最长显示时间：超过后切换为失败文案并露出 renderer 的错误详情。
+const SPLASH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 排定一次导航重试（幂等：已有排定中的 timer 则跳过）。
+fn schedule_retry(state: &Rc<RefCell<NavState>>) {
+    if state.borrow().timer.is_some() {
+        return;
+    }
+    let retry_state = state.clone();
+    match DispatcherTimer::new(NAV_RETRY_INTERVAL, move || {
+        // 重新解析前端 URL（内部 ensure daemon + /debug/ 就绪轮询）。
+        // 此回调在 UI 线程同步执行，最坏阻塞约 14s（daemon 未就绪时），
+        // 仅发生在初始导航失败后的启动窗口内，可接受。
+        let url = resolve_frontend_url();
+        let mut s = retry_state.borrow_mut();
+        s.timer = None;
+        if url == "about:blank" {
+            drop(s);
+            log_diag("frontend url still not ready; will retry");
+            schedule_retry(&retry_state);
+            return;
+        }
+        s.url = Some(url.clone());
+        log_diag(&format!("retrying navigation to {url}"));
+        if let Some(webview) = s.webview.as_ref()
+            && let Err(e) = webview.navigate(&url)
+        {
+            log_diag(&format!("retry navigate failed: {e}"));
+            // navigate 同步失败不会触发 NavigationCompleted，手动重排定。
+            drop(s);
+            schedule_retry(&retry_state);
+        }
+    }) {
+        Ok(t) => state.borrow_mut().timer = Some(t),
+        Err(e) => log_diag(&format!("retry timer failed: {e}")),
+    }
+}
+
 /// The daemon's debug endpoint, resolved before the message loop starts.
 static FRONTEND_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 本地 renderer 的虚拟主机名（WebView2 `set_virtual_host_name_to_folder_mapping`）。
+/// 页面以 `https://appassets.local/` 真实 https origin 加载——ES module、
+/// 字体、fetch 均正常（区别于 file:// 的 CORS/module 限制）。
+const APPASSETS_HOST: &str = "appassets.local";
+
+/// 本地 renderer 产物目录（虚拟主机映射用），`main` 里解析一次。
+/// 存在则页面来源为 `https://appassets.local/`（秒开，不依赖 daemon）；
+/// 不存在则回退 daemon 的 `/debug/`。
+static RENDERER_DIR: std::sync::OnceLock<Option<std::path::PathBuf>> =
+    std::sync::OnceLock::new();
 
 fn app(cx: &mut RenderCx) -> Element {
     log_diag("render");
@@ -74,9 +148,73 @@ fn app(cx: &mut RenderCx) -> Element {
                 }
                 Err(e) => log_diag(&format!("message handler failed: {e}")),
             }
-            if let Some(url) = FRONTEND_URL.get() {
+            // ── 页面来源 + 初始导航（失败自动重试）────────────────
+            // 优先级：DEEPX_DEBUG_URL（dev Vite server）→ 本地 renderer 目录
+            // （WebView2 虚拟主机映射 https://appassets.local/，页面秒开，
+            // 不依赖 daemon 就绪）→ daemon 的 /debug/（浏览器调试入口/兜底）。
+            // 先注册 NavigationCompleted 再导航：本地回环加载极快时，
+            // 首个完成事件可能在注册前触发而丢失。
+            let debug_url = std::env::var("DEEPX_DEBUG_URL").ok().filter(|u| !u.is_empty());
+            let initial_url: Option<String> = if let Some(u) = debug_url {
+                Some(u)
+            } else if let Some(dir) = RENDERER_DIR.get().and_then(|d| d.as_ref()) {
+                match ready.set_virtual_host_name_to_folder_mapping(
+                    APPASSETS_HOST,
+                    &dir.to_string_lossy(),
+                    windows_webview::HostResourceAccessKind::DenyCors,
+                ) {
+                    Ok(()) => {
+                        let url = format!("https://{APPASSETS_HOST}/index.html");
+                        log_diag(&format!(
+                            "serving local renderer at {url} ({})",
+                            dir.display()
+                        ));
+                        Some(url)
+                    }
+                    Err(e) => {
+                        log_diag(&format!("virtual host mapping failed: {e}; falling back"));
+                        FRONTEND_URL.get().cloned()
+                    }
+                }
+            } else {
+                FRONTEND_URL.get().cloned()
+            };
+            let state = Rc::new(RefCell::new(NavState::default()));
+            let nav_state = state.clone();
+            match ready.on_navigation_completed(move |args| {
+                let mut s = nav_state.borrow_mut();
+                if s.succeeded {
+                    return;
+                }
+                let is_real = s.url.as_deref().is_some_and(|u| u != "about:blank");
+                if args.is_success() && is_real {
+                    log_diag("initial navigation succeeded");
+                    s.succeeded = true;
+                    return;
+                }
+                log_diag("initial navigation failed; scheduling retry");
+                drop(s);
+                schedule_retry(&nav_state);
+            }) {
+                Ok(reg) => state.borrow_mut().completed = Some(reg),
+                Err(e) => log_diag(&format!("navigation-completed handler failed: {e}")),
+            }
+            state.borrow_mut().webview = Some(ready.clone());
+            if let Some(url) = initial_url {
                 log_diag(&format!("navigating to {url}"));
-                let _ = ready.navigate(url);
+                if url != "about:blank" {
+                    state.borrow_mut().url = Some(url.clone());
+                    if let Err(e) = ready.navigate(&url) {
+                        log_diag(&format!("initial navigate failed: {e}"));
+                        // 同步失败不会触发 NavigationCompleted，直接进入重试。
+                        schedule_retry(&state);
+                    }
+                }
+            }
+            if state.borrow().url.is_none() {
+                // 首次解析失败：立即进入重试循环（resolve 会重新 ensure daemon）。
+                log_diag("frontend url not ready; scheduling initial retry");
+                schedule_retry(&state);
             }
         }
     });
@@ -146,6 +284,54 @@ fn app(cx: &mut RenderCx) -> Element {
         .grid_column(1)
         .into();
 
+    // ── 开屏覆盖层（P-6 同 cell 重叠预留的首次应用）────────────────
+    // 页面（WebView2）本地映射秒开，但 daemon 冷启动可达数十秒；等待期内
+    // renderer 会显示 "Backend disconnected" 错误横幅——覆盖层用原生
+    // ProgressRing 动画替代它，桥连上 daemon 即移除。
+    // 顺序语义：connected 分支优先于 timeout 分支（超时瞬间后端恰好连上
+    // 时覆盖层正常消失，不卡失败态）。超时（[`SPLASH_TIMEOUT`]）后释放
+    // 覆盖层，露出 renderer 的错误详情与可交互界面（含标题栏）——覆盖层
+    // 使命仅为启动期动画，不做错误拦截。
+    let (splash_visible, set_splash_visible) = cx.use_state::<bool>(true);
+    let splash_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    let splash_started = cx.use_ref::<Option<Instant>>(None);
+    let splash_done = cx.use_ref::<bool>(false);
+    cx.use_effect((), {
+        let bridge = bridge.clone();
+        let splash_timer = splash_timer.clone();
+        let splash_started = splash_started.clone();
+        let splash_done = splash_done.clone();
+        let set_splash_visible = set_splash_visible.clone();
+        move || {
+            if splash_timer.borrow().is_none() {
+                match DispatcherTimer::new(Duration::from_millis(250), move || {
+                    if *splash_done.borrow() {
+                        return;
+                    }
+                    if splash_started.borrow().is_none() {
+                        *splash_started.borrow_mut() = Some(Instant::now());
+                    }
+                    if bridge.core().backend_connected() {
+                        *splash_done.borrow_mut() = true;
+                        set_splash_visible.call(false);
+                        log_diag("backend connected; splash dismissed");
+                    } else if splash_started
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|t| t.elapsed() >= SPLASH_TIMEOUT)
+                    {
+                        *splash_done.borrow_mut() = true;
+                        set_splash_visible.call(false);
+                        log_diag("backend connection timed out; splash released");
+                    }
+                }) {
+                    Ok(t) => *splash_timer.borrow_mut() = Some(t),
+                    Err(e) => log_diag(&format!("splash timer failed: {e}")),
+                }
+            }
+        }
+    });
+
     // Step 2: Grid 两行——row0 = XAML 标题栏（48px，SetTitleBar 拖拽区，
     // host 自动接线 host.rs:277-288）；row1 = 内容区（侧栏 | 右区）。
     // WebView2 从 row 1 开始，与拖拽区无输入区域重叠。
@@ -165,9 +351,27 @@ fn app(cx: &mut RenderCx) -> Element {
     .grid_row(1)
     .grid_column(0)
     .into();
-    grid((titlebar, content))
+    let base: Element = grid((titlebar, content))
         .rows([GridLength::Pixel(header::HEADER_HEIGHT), GridLength::STAR])
+        .into();
+    // 覆盖层与基础层同 cell 重叠渲染（P-6 预留模式），盖住 titlebar + 内容区。
+    // 注意：`splash_visible=false` 时的空 `grid(())` 依赖 WinUI"无背景元素不参与
+    // 命中测试"的平台行为实现点击穿透——切勿给空 grid 添加背景，否则会无声
+    // 拦截下方 WebView2 的输入。
+    let splash: Element = if splash_visible {
+        grid((
+            ProgressRing::default().width(48.0).height(48.0),
+            text_block("正在连接 DeepX…")
+                .font_size(14.0)
+                .foreground(ThemeRef::SecondaryText),
+        ))
+        .rows([GridLength::Pixel(64.0), GridLength::Auto])
+        .background(ThemeRef::LayerFill)
         .into()
+    } else {
+        grid(()).into()
+    };
+    grid((base, splash)).into()
 }
 
 /// Minimal file logger for headless diagnosis (GUI subsystem has no console).
@@ -183,7 +387,22 @@ fn log_diag(msg: &str) {
 }
 
 fn main() -> windows_reactor::Result<()> {
-    let url = resolve_frontend_url();
+    let renderer_dir = resolve_local_renderer_dir();
+    if let Some(dir) = &renderer_dir {
+        log_diag(&format!("local renderer dir: {}", dir.display()));
+    }
+    let _ = RENDERER_DIR.set(renderer_dir);
+    // 页面来源选择：
+    // - DEEPX_DEBUG_URL（dev Vite server）→ 直接用它；
+    // - 本地 renderer 可用 → 不阻塞等待 daemon（页面秒开，daemon 由桥
+    //   后台连接），FRONTEND_URL 仅作兜底占位；
+    // - 否则 → 解析 daemon /debug/（阻塞等待，与旧行为一致）。
+    let has_debug_url = std::env::var("DEEPX_DEBUG_URL").is_ok_and(|u| !u.is_empty());
+    let url = if has_debug_url || RENDERER_DIR.get().is_none_or(|d| d.is_none()) {
+        resolve_frontend_url()
+    } else {
+        "about:blank".to_string()
+    };
     let _ = FRONTEND_URL.set(url);
 
     App::new()
@@ -235,19 +454,45 @@ fn resolve_frontend_url() -> String {
         Err(err) => eprintln!("[winui] daemon unavailable: {err}"),
     }
 
-    // 3. Static renderer output directory.
-    if let Ok(dir) = std::env::var("DEEPX_UI_DIR") {
-        if !dir.is_empty() {
-            let path = std::path::Path::new(&dir)
-                .join("index.html")
-                .to_string_lossy()
-                .replace('\\', "/");
-            return format!("file:///{path}");
-        }
-    }
+    // 3. 本地 renderer 目录由虚拟主机映射处理（resolve_local_renderer_dir），
+    //    不再生成 file:// 路径——WebView2（标准 Chromium）下 file:// 加载
+    //    ES module 产物会被 CORS 拦截。
 
     // Fallback: daemon may already be reachable even if discovery raced.
     "about:blank".to_string()
+}
+
+/// 本地 renderer 产物目录（虚拟主机映射用）。定位优先级：
+/// 1. `DEEPX_UI_DIR`（显式覆盖；旧语义是 file:// 路径，现已废弃——
+///    WebView2 下 file:// 会拦 ES module，统一改为映射为虚拟主机）；
+/// 2. exe 旁 `resources/out/renderer`（安装布局）；
+/// 3. exe 旁 `out/renderer`（dev 布局）。
+fn resolve_local_renderer_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("DEEPX_UI_DIR") {
+        if !dir.is_empty() {
+            // 相对路径按当前工作目录绝对化：存在性检查与 WebView2 映射
+            // （相对路径解释为相对 exe 目录）的基准保持一致。
+            let p = std::path::PathBuf::from(&dir);
+            let p = if p.is_absolute() {
+                p
+            } else {
+                std::env::current_dir().unwrap_or_default().join(p)
+            };
+            if p.join("index.html").is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    for base in [
+        exe_dir.join("resources").join("out").join("renderer"),
+        exe_dir.join("out").join("renderer"),
+    ] {
+        if base.join("index.html").is_file() {
+            return Some(base);
+        }
+    }
+    None
 }
 
 /// 等待 daemon 的 `/debug/` 端点就绪（HTTP 200），返回完整前端 URL。

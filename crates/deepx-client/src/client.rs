@@ -112,14 +112,27 @@ impl Client {
 
     /// Async variant for callers that already own a runtime.
     pub async fn connect_async(options: ClientOptions) -> Result<Client> {
-        let (discovery, launched) = match read_discovery() {
-            Ok(d) => (d, false),
-            Err(err) => {
+        // 只接受"pid 存活"的 discovery：残留的 daemon.json（daemon 被强杀
+        // 后遗留）会导致直连死端口（connection refused），此前仅检查文件
+        // 存在与否。pid 已死的 discovery 视为缺失，走拉起路径（新 daemon
+        // 启动时经单实例锁清理 stale lock/discovery 自愈）。
+        let (discovery, launched) = match read_discovery()
+            .ok()
+            .filter(|d| crate::discovery::process_is_running(d.pid))
+        {
+            Some(d) => (d, false),
+            None => {
                 if options.launch_daemon_if_missing {
-                    log::info!("[deepx-client] no discovery: {err}; launching daemon");
-                    (wait_for_daemon(options.daemon_path.as_deref(), options.start_timeout).await?, true)
+                    log::info!("[deepx-client] no live daemon discovery; launching daemon");
+                    (
+                        wait_for_daemon(options.daemon_path.as_deref(), options.start_timeout)
+                            .await?,
+                        true,
+                    )
                 } else {
-                    return Err(err);
+                    return Err(ClientError::Discovery(
+                        "no live daemon discovery (daemon.json missing or stale)".into(),
+                    ));
                 }
             }
         };
@@ -132,12 +145,14 @@ impl Client {
         let session = Arc::new(RingingSession::new(base_url.clone(), discovery.token.clone(), http.clone()));
 
         // Open negotiation (single lease; SSE streams and commands share it).
-        let state = session.open().await?;
+        session.open().await?;
 
         let (stop_tx, stop_rx) = watch::channel(false);
         // (server_epoch, client_session_id) shared with channel streams.
-        let (_ctx_tx, ctx_rx) =
-            watch::channel((state.server_epoch.clone(), state.client_session_id.clone()));
+        // Subscribe to the session's live ctx: renewal failure triggers a
+        // re-negotiation (new lease) that broadcasts a fresh value here,
+        // so reconnecting streams never pin a stale expired session.
+        let ctx_rx = session.session_ctx_rx();
 
         let tasks = Mutex::new(Vec::new());
         let client = Client {
@@ -546,31 +561,29 @@ async fn wait_for_daemon(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         match read_discovery() {
-            Ok(d) => return Ok(d),
-            Err(_) if tokio::time::Instant::now() >= deadline => {
-                return Err(ClientError::Discovery("daemon did not publish discovery in time".into()));
+            // 同样要求 pid 存活：spawn 前残留的 stale discovery 不得被
+            // 当作新 daemon 的就绪信号（旧 pid 已死）。
+            Ok(d) if crate::discovery::process_is_running(d.pid) => return Ok(d),
+            Ok(_) | Err(_) if tokio::time::Instant::now() >= deadline => {
+                return Err(ClientError::Discovery(
+                    "daemon did not publish live discovery in time".into(),
+                ));
             }
-            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(120)).await,
+            Ok(_) | Err(_) => tokio::time::sleep(std::time::Duration::from_millis(120)).await,
         }
     }
 }
 
-/// Resolve the daemon executable: `DEEPX_BACKEND_ROOT/target/debug/deepx-daemon`.
+/// Resolve the daemon executable. 与 [`crate::discovery::daemon_executable`]
+/// 的候选顺序保持一致：dev 布局（`DEEPX_BACKEND_ROOT`/cwd 的 `target/debug`）
+/// → exe 旁 `resources/`（安装布局）→ exe 旁 → PATH 兜底。
+///
+/// 注意：此前仅支持 dev 布局，安装版在「本地映射模式下由桥首次拉起 daemon」
+/// 时（`daemon.json` 不存在 → `wait_for_daemon` → 此处）会直接命中 PATH 裸名，
+/// 报 `io error: program not found`。统一为 `daemon_executable` 后安装布局
+/// 正确命中。
 fn default_daemon_path() -> std::path::PathBuf {
-    let exe = if cfg!(windows) { "deepx-daemon.exe" } else { "deepx-daemon" };
-    if let Ok(root) = std::env::var("DEEPX_BACKEND_ROOT") {
-        let p = std::path::PathBuf::from(root).join("target").join("debug").join(exe);
-        if p.exists() {
-            return p;
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        let p = cwd.join("target").join("debug").join(exe);
-        if p.exists() {
-            return p;
-        }
-    }
-    std::path::PathBuf::from(exe)
+    crate::discovery::daemon_executable()
 }
 
 /// Spawn a detached process (Windows: `CREATE_NEW_PROCESS_GROUP` + no console).

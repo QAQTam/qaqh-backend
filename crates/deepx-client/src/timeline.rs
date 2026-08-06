@@ -39,6 +39,12 @@ pub struct TimelineStream {
     status_tx: Option<watch::Sender<Option<TimelineStatus>>>,
     /// Cursor of the last accepted entry (starts at the snapshot watermark).
     cursor: u64,
+    /// Epoch of the last successful connect. A lease re-negotiation (renewal
+    /// failure -> reopen) changes the server epoch; the old cursor is invalid
+    /// against the new epoch (daemon treats a stale `Last-Event-ID` as 0 and
+    /// replays from the head, which the cursor guard rejects as Protocol
+    /// error — the exact reconnect-death loop this stream must break).
+    last_epoch: Option<String>,
 }
 
 impl TimelineStream {
@@ -66,6 +72,7 @@ impl TimelineStream {
             on_snapshot,
             status_tx,
             cursor: initial_cursor,
+            last_epoch: None,
         }
     }
 
@@ -156,6 +163,33 @@ impl TimelineStream {
             .state()
             .await
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
+
+        // Lease re-negotiation swapped the epoch: re-baseline against the
+        // authoritative snapshot so the reconnect cursor stays covered, then
+        // forward the snapshot so listeners rebuild the transcript.
+        if self.last_epoch.as_deref() != Some(state.server_epoch.as_str()) {
+            let epoch_changed = self.last_epoch.is_some();
+            self.last_epoch = Some(state.server_epoch.clone());
+            if epoch_changed {
+                match self.recover_gap().await {
+                    Ok(()) => log::info!(
+                        "[deepx-client] timeline {} re-baselined after session re-negotiation (cursor {})",
+                        self.seed,
+                        self.cursor
+                    ),
+                    Err(recovery_err) => {
+                        // 兜底：从 0 全量回放（daemon 按 0 处理旧 epoch 的
+                        // Last-Event-ID），避免带着旧 cursor 连进 Protocol
+                        // error 死循环。
+                        log::warn!(
+                            "[deepx-client] timeline {} re-baseline failed ({recovery_err}); replaying from head",
+                            self.seed
+                        );
+                        self.cursor = 0;
+                    }
+                }
+            }
+        }
 
         let path = format!(
             "/ringing/v1/sessions/{}/timeline/events",

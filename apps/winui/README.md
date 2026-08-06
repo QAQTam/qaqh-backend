@@ -124,7 +124,12 @@ $env:DEEPX_DEBUG_URL = "http://127.0.0.1:8642/"
 cargo run -p deepx-winui
 ```
 
-URL 解析顺序：`DEEPX_DEBUG_URL` → daemon discovery `/debug/` → `DEEPX_UI_DIR` → about:blank。
+URL 解析顺序：`DEEPX_DEBUG_URL` → 本地 renderer（WebView2 虚拟主机映射
+`https://appassets.local/`，`DEEPX_UI_DIR` 或 exe 旁 `resources/out/renderer`）→
+daemon discovery `/debug/` → about:blank。
+本地映射模式下页面**不依赖 daemon 就绪**（秒开；daemon 连接由桥后台重试），
+安装版始终命中 `resources/out/renderer`。`DEEPX_UI_DIR` 语义从 file:// 升级为
+虚拟主机映射目录（WebView2 下 file:// 会拦 ES module 产物，勿回退 file://）。
 调试日志：`$env:DEEPX_WINUI_LOG` 指向的文件（GUI 子系统无控制台）。
 
 > 踩坑记录（2026-08-06）：`DEEPX_DEBUG_RENDERER_DIR` 是 **daemon 进程**的环境

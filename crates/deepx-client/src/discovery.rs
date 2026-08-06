@@ -87,7 +87,12 @@ pub fn ensure_daemon_running(timeout: std::time::Duration) -> Result<DaemonDisco
             return Ok(discovery);
         }
     }
-    spawn_daemon_detached()?;
+    // 已有 daemon 实例正在启动（lock 持有者存活但 discovery 尚未发布——
+    // daemon 冷启动初始化可达数十秒，discovery 延迟到 HTTP 就绪后才写）：
+    // 不重复 spawn，直接轮询等待其发布。
+    if !lock_holder_alive() {
+        spawn_daemon_detached()?;
+    }
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match read_discovery() {
@@ -101,6 +106,29 @@ pub fn ensure_daemon_running(timeout: std::time::Duration) -> Result<DaemonDisco
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(120));
+    }
+}
+
+/// 检查 `daemon.lock` 持有者进程是否存活（daemon 单实例锁，见
+/// `deepx-daemon::server::acquire_single_instance`）。lock 持有者活着即
+/// 意味着有 daemon 正在启动/运行，即使 `daemon.json` 尚未发布。
+fn lock_holder_alive() -> bool {
+    #[cfg(not(windows))]
+    {
+        // 非 Windows 无 pid 判活实现（`process_is_running` stub 恒 true），
+        // 回退旧行为：始终允许 spawn，由 daemon 侧单实例锁兜底。
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let lock = data_dir().join("daemon.lock");
+        match std::fs::read_to_string(&lock)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        {
+            Some(pid) => process_is_running(pid),
+            None => false,
+        }
     }
 }
 
@@ -170,7 +198,7 @@ fn spawn_daemon_detached() -> Result<()> {
 }
 
 #[cfg(windows)]
-fn process_is_running(pid: u32) -> bool {
+pub fn process_is_running(pid: u32) -> bool {
     let handle = unsafe {
         windows_sys::Win32::System::Threading::OpenProcess(
             windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
@@ -193,6 +221,6 @@ fn process_is_running(pid: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-fn process_is_running(_pid: u32) -> bool {
+pub fn process_is_running(_pid: u32) -> bool {
     true // discovery presence is the check on non-Windows for now
 }

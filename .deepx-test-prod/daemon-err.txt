@@ -1,1 +1,0 @@
-deepx-daemon: DeepX data root must be the current user's direct .deepx directory: \\?\C:\Users\QAQTam\.deepx

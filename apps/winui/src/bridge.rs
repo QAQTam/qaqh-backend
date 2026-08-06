@@ -18,8 +18,8 @@
 //!                     { "type":"event", "kind":"ringing.batch", "payload":{...} }
 //! ```
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -129,6 +129,10 @@ pub struct BridgeCore {
     rebuilding: AtomicBool,
     /// 最近一次重建时刻（冷却防抖，避免网络抖动时反复重建）。
     last_rebuild_at: Mutex<Instant>,
+    /// 最近一次"无 client 自动重连"时刻（独立冷却，见 AUTO_RECONNECT_COOLDOWN）。
+    last_auto_reconnect_at: Mutex<Instant>,
+    /// 连续 rebuild 失败计数（指数退避冷却用；成功清零）。
+    rebuild_failures: AtomicU32,
     /// 最近一次 timeline.activate 的 seed（重建后恢复前端 transcript 流）。
     last_timeline_seed: Mutex<String>,
     /// timeline 连接状态缓存（检测用；ringing 状态走 channel_status）。
@@ -146,6 +150,30 @@ pub struct BridgeCore {
 const STALL_THRESHOLD: Duration = Duration::from_secs(15);
 /// 重建冷却：网络抖动时避免每 15s 重建一次。
 const REBUILD_COOLDOWN: Duration = Duration::from_secs(60);
+/// 无 client 自动重连冷却：首次 connect 失败（daemon 初始化窗口）后
+/// 尽快恢复，比 stall 重建的 60s 冷却短。
+const AUTO_RECONNECT_COOLDOWN: Duration = Duration::from_secs(5);
+/// 连续失败后 rebuild 冷却指数退避封顶（60s → 120s → 240s → 480s → 960s）。
+const REBUILD_BACKOFF_CAP: u32 = 4;
+
+/// rebuild 冷却：连续失败后指数拉长（60s→960s 封顶），防止 rebuild
+/// 风暴把 daemon 连接数打爆（32 连接信号量 → 静默 drop）。
+fn rebuild_cooldown_for(failures: u32) -> Duration {
+    REBUILD_COOLDOWN.saturating_mul(1u32 << failures.min(REBUILD_BACKOFF_CAP))
+}
+
+/// 无 client 自动重连冷却：同样受失败计数退避保护（5s→320s 封顶）。
+fn auto_reconnect_cooldown_for(failures: u32) -> Duration {
+    AUTO_RECONNECT_COOLDOWN.saturating_mul(1u32 << failures.min(REBUILD_BACKOFF_CAP + 2))
+}
+/// pump 每 tick 最多投递的消息数：WebView2 忙时逐条 post 会阻塞 UI 线程，
+/// 限量 + 时间预算保证 DispatcherQueue 消息泵始终有吞吐余量（AppHangB1）。
+const PUMP_BATCH_MAX: usize = 32;
+/// 单次 pump 投递总时间预算：超过即让出 UI 线程，下个 tick 续投。
+const PUMP_TIME_BUDGET: Duration = Duration::from_millis(20);
+/// pending 缓冲上限：积压超限丢弃最旧消息（snapshot/幂等去重兜底），
+/// 避免 outbox 无界堆积后 UI 线程长期 drain。
+const PUMP_PENDING_CAP: usize = 512;
 
 impl BridgeCore {
     fn respond(&self, id: u64, ok: bool, value: Value, error: Option<String>) {
@@ -428,6 +456,11 @@ impl BridgeCore {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// 后端是否已连接（daemon 就绪且 client 建立）。开屏覆盖层显隐依据。
+    pub fn backend_connected(&self) -> bool {
+        self.client.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     /// 无缓存时向 daemon 拉一次权威快照（进入技能页首次渲染兜底）。
@@ -767,16 +800,25 @@ impl BridgeCore {
     }
 
     /// Lazily connect the deepx-client and register event forwarding.
+    /// 外部入口：重建进行中时拒绝（防双 client 竞态），否则委托内部实现。
     async fn ensure_client(&self) -> Result<Client, String> {
         // A 方案：重建进行中时拒绝新连接（rebuild_client 内部持锁协调），
         // 避免双 client 竞态（两个 connect 各建一套 SSE 流）。
         if self.rebuilding.load(Ordering::Relaxed) {
             return Err("client is rebuilding after daemon stall".into());
         }
+        self.connect_client().await
+    }
+
+    /// 连接主体（无 `rebuilding` 检查）。`rebuild_client` 在
+    /// `rebuilding=true` 下调用本方法——若走 `ensure_client` 会自锁：
+    /// 重建永远返回 "client is rebuilding" 失败，client 被 close 后无法
+    /// 恢复，所有请求（config.load/session.list/attach）连接失败。
+    async fn connect_client(&self) -> Result<Client, String> {
         if let Some(client) = self.client.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Ok(client);
         }
-        log_diag("ensure_client: connecting...");
+        log_diag("connect_client: connecting...");
         let client = Client::connect_async(ClientOptions {
             handlers: ClientHandlers {
                 on_batch: Arc::new({
@@ -826,7 +868,7 @@ impl BridgeCore {
         })
         .await
         .map_err(|e| {
-            log_diag(&format!("ensure_client connect failed: {e}"));
+            log_diag(&format!("connect_client connect failed: {e}"));
             e.to_string()
         })?;
         *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
@@ -963,9 +1005,40 @@ impl BridgeCore {
             return;
         }
         let now = Instant::now();
+        // 无 client（首次 connect 失败/从未建立）时自动重连：renderer 只在
+        // 页面加载时发一次 backend.connect，若恰逢 daemon 初始化窗口而失败
+        // （open 超时/连接拒绝），原逻辑没有任何机制再触发 connect（health
+        // 仅覆盖"已建立后 stall"），页面会永久失败直到手动刷新/重启。
+        // 此处以独立冷却自动重试，直到 client 建立。
+        let client_missing = self
+            .client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none();
+        if client_missing {
+            let last = self
+                .last_auto_reconnect_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let reconnect_cooldown = auto_reconnect_cooldown_for(
+                self.rebuild_failures.load(Ordering::Relaxed),
+            );
+            if now.duration_since(*last) >= reconnect_cooldown {
+                *self
+                    .last_auto_reconnect_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = now;
+                log_diag("health: no client; auto-reconnecting");
+                self.rebuild_client();
+            }
+            return;
+        }
+        // 退避冷却：连续失败后指数拉长重建间隔（60s→960s 封顶），防止
+        // rebuild 风暴把 daemon 连接数打爆（32 连接信号量 → 静默 drop）。
+        let rebuild_cooldown = rebuild_cooldown_for(self.rebuild_failures.load(Ordering::Relaxed));
         let cooldown_ok = {
             let last = self.last_rebuild_at.lock().unwrap_or_else(|e| e.into_inner());
-            now.duration_since(*last) >= REBUILD_COOLDOWN
+            now.duration_since(*last) >= rebuild_cooldown
         };
         if !cooldown_ok {
             return;
@@ -1031,11 +1104,17 @@ impl BridgeCore {
                 log_diag("health: closed stale client");
             }
             // 2) 重新协商（新 server_epoch + client_session_id；
-            //    launch_daemon_if_missing 兜底拉起 daemon）。
-            match core.ensure_client().await {
-                Ok(_) => log_diag("health: reconnected with fresh session"),
+            //    launch_daemon_if_missing 兜底拉起 daemon）。用内部
+            //    connect_client：此时 rebuilding=true，走 ensure_client
+            //    会自锁失败（历史 bug：A 方案重建从未成功）。
+            match core.connect_client().await {
+                Ok(_) => {
+                    log_diag("health: reconnected with fresh session");
+                    core.rebuild_failures.store(0, Ordering::Relaxed);
+                }
                 Err(err) => {
                     log_diag(&format!("health: reconnect failed: {err}"));
+                    core.rebuild_failures.fetch_add(1, Ordering::Relaxed);
                     core.rebuilding.store(false, Ordering::Relaxed);
                     core.reset_stall_timers();
                     return;
@@ -1180,6 +1259,9 @@ struct UiState {
     webview: Mutex<Option<WebView>>,
     registration: Mutex<Option<windows_webview::EventRegistration>>,
     outbox_rx: std::sync::mpsc::Receiver<OutMsg>,
+    /// 待投递缓冲（UI 线程独占语义同 webview；Mutex 仅满足借用检查）。
+    /// post 失败/超预算时暂存，下个 tick 续投。
+    pending: Mutex<VecDeque<OutMsg>>,
 }
 
 static SHARED: OnceLock<Arc<Bridge>> = OnceLock::new();
@@ -1207,6 +1289,8 @@ impl Bridge {
                     channels_stall_since: Mutex::new(None),
                     rebuilding: AtomicBool::new(false),
                     last_rebuild_at: Mutex::new(Instant::now()),
+                    last_auto_reconnect_at: Mutex::new(Instant::now()),
+                    rebuild_failures: AtomicU32::new(0),
                     last_timeline_seed: Mutex::new(String::new()),
                     timeline_status: Mutex::new(None),
                     skills: Mutex::new(None),
@@ -1221,6 +1305,7 @@ impl Bridge {
                         webview: Mutex::new(None),
                         registration: Mutex::new(None),
                         outbox_rx: rx,
+                        pending: Mutex::new(VecDeque::new()),
                     }),
                 })
             })
@@ -1384,17 +1469,45 @@ impl Bridge {
     }
 
     /// Drain the outbox to the WebView (UI thread, called by a timer).
+    ///
+    /// 防 AppHangB1：绝不无界 drain + 同步 post。每 tick 限量（
+    /// [`PUMP_BATCH_MAX`]）且限时（[`PUMP_TIME_BUDGET`]）投递，WebView2
+    /// 忙（renderer 全量重建 snapshot）时单次 post 会阻塞 UI 线程——
+    /// 超预算/失败即让出，消息暂存 pending 下个 tick 续投，不丢失；
+    /// 积压超 [`PUMP_PENDING_CAP`] 丢弃最旧（snapshot/幂等兜底）。
     pub fn pump(&self) {
         // A 方案：daemon 失联检测（轻量内存检查；重建在 tokio 侧执行）。
         self.core.check_daemon_health();
         let Some(webview) = self.ui.0.webview.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
             return;
         };
+        // 1) 快速吸干 outbox（无阻塞，无跨进程调用），暂存 pending。
+        let mut fresh = Vec::with_capacity(64);
         while let Ok(msg) = self.ui.0.outbox_rx.try_recv() {
+            fresh.push(msg);
+        }
+        let mut pending = self.ui.0.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.extend(fresh);
+        while pending.len() > PUMP_PENDING_CAP {
+            pending.pop_front(); // 丢最旧：snapshot 重建语义兜底
+        }
+        // 2) 限量 + 限时投递；失败即停（消息放回 pending，不丢）。
+        let deadline = Instant::now() + PUMP_TIME_BUDGET;
+        for _ in 0..PUMP_BATCH_MAX {
+            let Some(msg) = pending.pop_front() else {
+                break;
+            };
+            if Instant::now() >= deadline {
+                pending.push_front(msg);
+                break;
+            }
             let json = msg.to_json().to_string();
-            let posted = webview.post_web_message_as_json(&json).is_ok();
+            if webview.post_web_message_as_json(&json).is_err() {
+                pending.push_front(msg);
+                break;
+            }
             if let OutMsg::Event { kind, .. } = &msg {
-                log_diag(&format!("pump: event {kind} posted={posted}"));
+                log_diag(&format!("pump: event {kind} posted"));
             }
         }
     }
@@ -1425,6 +1538,8 @@ mod tests {
             channels_stall_since: Mutex::new(None),
             rebuilding: AtomicBool::new(false),
             last_rebuild_at: Mutex::new(Instant::now()),
+            last_auto_reconnect_at: Mutex::new(Instant::now()),
+            rebuild_failures: AtomicU32::new(0),
             last_timeline_seed: Mutex::new(String::new()),
             timeline_status: Mutex::new(None),
             skills: Mutex::new(None),
@@ -1522,6 +1637,23 @@ mod tests {
         core.check_daemon_health();
         // rebuild_client 未执行（冷却）：rebuilding 保持 false。
         assert!(!core.rebuilding.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn rebuild_cooldown_backs_off_after_failures() {
+        // 无失败：60s；每失败翻倍，封顶 960s。
+        assert_eq!(rebuild_cooldown_for(0), Duration::from_secs(60));
+        assert_eq!(rebuild_cooldown_for(1), Duration::from_secs(120));
+        assert_eq!(rebuild_cooldown_for(2), Duration::from_secs(240));
+        assert_eq!(rebuild_cooldown_for(3), Duration::from_secs(480));
+        assert_eq!(rebuild_cooldown_for(4), Duration::from_secs(960));
+        // 超过封顶不再增长（防溢出/无限退避）。
+        assert_eq!(rebuild_cooldown_for(5), Duration::from_secs(960));
+        assert_eq!(rebuild_cooldown_for(u32::MAX), Duration::from_secs(960));
+        // 自动重连冷却同样退避（5s → 10/20/40/80/160/320 封顶）。
+        assert_eq!(auto_reconnect_cooldown_for(0), Duration::from_secs(5));
+        assert_eq!(auto_reconnect_cooldown_for(6), Duration::from_secs(320));
+        assert_eq!(auto_reconnect_cooldown_for(99), Duration::from_secs(320));
     }
 }
 

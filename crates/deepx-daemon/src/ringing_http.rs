@@ -43,6 +43,16 @@ fn stringify(error: impl std::fmt::Display) -> String {
 }
 
 const RENEW_TTL_MS: u64 = 30_000;
+
+/// Lease TTL：生产固定 [`RENEW_TTL_MS`]。`DEEPX_TEST_LEASE_TTL_MS` 仅供
+/// 集成测试缩短 TTL（使其小于客户端 renew 间隔）以制造 lease 过期场景，
+/// 验证客户端重新协商自愈路径。无该环境变量时行为与生产完全一致。
+fn lease_ttl_ms() -> u64 {
+    std::env::var("DEEPX_TEST_LEASE_TTL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(RENEW_TTL_MS)
+}
 const RENEW_INTERVAL_MS: u64 = 10_000;
 const RINGING_TIMELINE_BASE_PATH: &str = RINGING_BASE_PATH;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -379,7 +389,7 @@ impl RingingLeaseStore {
             client_instance_id,
             LeaseEntry {
                 client_session_id,
-                expiry: Instant::now() + Duration::from_millis(RENEW_TTL_MS),
+                expiry: Instant::now() + Duration::from_millis(lease_ttl_ms()),
             },
         );
     }
@@ -433,7 +443,7 @@ impl RingingLeaseStore {
             }
             return false;
         }
-        entry.expiry = Instant::now() + Duration::from_millis(RENEW_TTL_MS);
+        entry.expiry = Instant::now() + Duration::from_millis(lease_ttl_ms());
         true
     }
 
@@ -1062,7 +1072,7 @@ async fn handle_open(
         client_session_id: client_session_id.clone(),
         capabilities,
         server_epoch: hub.epoch().to_string(),
-        lease_ttl_ms: RENEW_TTL_MS,
+        lease_ttl_ms: lease_ttl_ms(),
         renew_interval_ms: RENEW_INTERVAL_MS,
     };
     write_response(
@@ -1099,7 +1109,7 @@ async fn handle_renew(
     }
     let resp = serde_json::json!({
         "ok": true,
-        "lease_ttl_ms": RENEW_TTL_MS,
+        "lease_ttl_ms": lease_ttl_ms(),
         "renew_interval_ms": RENEW_INTERVAL_MS,
     });
     write_response(

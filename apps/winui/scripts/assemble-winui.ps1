@@ -46,6 +46,20 @@ Get-ChildItem -LiteralPath $releaseDir -Filter "*.pri" | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $outFull $_.Name)
 }
 
+# 2c. WinAppSDK self-contained 语言资源目录（<lang>/*.mui）。
+#     每个语言目录含 Microsoft.ui.xaml.dll.mui / Microsoft.UI.Xaml.Phone.dll.mui。
+#     XAML 控件初始化时按系统 UI 语言加载对应 MUI 资源（如中文系统的
+#     zh-CN\Microsoft.ui.xaml.dll.mui），缺失会导致 MUI 加载失败
+#     （ERROR_MUI_FILE_NOT_LOADED 0x80073B01）→ WebView2/XAML 控件初始化失败
+#     → 白屏 + stowed exception 闪退（崩溃模块 Microsoft.ui.xaml.dll）。
+#     模式匹配 BCP-47 风格目录名（af-ZA、en-us、az-Latn-AZ、sr-Cyrl-RS 等），
+#     不会误伤 build/deps/examples 等 cargo 目录。
+Get-ChildItem -LiteralPath $releaseDir -Directory | Where-Object {
+    $_.Name -match '^[a-z]{2}(-[A-Za-z0-9]+)*$'
+} | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $outFull $_.Name) -Recurse -Force
+}
+
 # 3. resources/ — daemon sidecar + renderer
 $resources = Join-Path $outFull "resources"
 New-Item -ItemType Directory -Path $resources -Force | Out-Null

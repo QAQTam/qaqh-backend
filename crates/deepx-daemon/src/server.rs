@@ -1,7 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use deepx_proto::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 use deepx_runtime::DeepxService;
@@ -11,7 +10,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
 const LEASE_TIMEOUT_MS: u64 = 15_000;
-const MAX_CONNECTIONS: usize = 32;
+/// 并发 TCP 连接上限：1 个客户端常态占 5+ 连接（open/renew 短连 +
+/// 3 通道 SSE + timeline SSE 长连）。曾因 32 过紧 + 壳 rebuild 风暴
+/// 打满后静默 drop 新连接，导致 lease 无法续期、SSE 全断死循环。
+const MAX_CONNECTIONS: usize = 128;
 
 fn daemon_channel() -> String {
     std::env::var("DEEPX_CHANNEL").unwrap_or_else(|_| {
@@ -45,7 +47,6 @@ pub async fn run() -> Result<(), String> {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
     };
-    write_discovery(&discovery)?;
     let hub = Arc::new(RingingHub::with_persistence(
         epoch.clone(),
         data_root.join("ringing"),
@@ -144,11 +145,20 @@ pub async fn run() -> Result<(), String> {
             }
         });
     }
+    // 发布 discovery：HTTP accept 循环即将开始（listener 早已 bind，但
+    // 端口在 service 初始化完成前不可服务）。延迟发布避免客户端拿到
+    // "已写 daemon.json 但 HTTP 未就绪"的假端口而导航失败（白屏/错误页），
+    // 也让 ensure_daemon_running 的轮询与真实就绪时刻对齐。
+    write_discovery(&discovery)?;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { break };
                 let Ok(permit) = connections.clone().try_acquire_owned() else {
+                    log::warn!(
+                        "[deepx-daemon] connection rejected: {} concurrent connections (max {MAX_CONNECTIONS}); client should back off",
+                        MAX_CONNECTIONS - connections.available_permits()
+                    );
                     drop(stream);
                     continue;
                 };
@@ -275,7 +285,24 @@ fn acquire_single_instance() -> Result<File, String> {
             Ok(file)
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            if discovery_is_reachable() {
+            // 判活以 lock 文件里的 pid 为权威：pid 进程活着即视为已有实例，
+            // 无论其 HTTP 是否已就绪（daemon 启动窗口内端口可达但尚未
+            // accept —— 此时若按 TCP 判活会把正在初始化的实例误判为 stale
+            // 并删锁接管，导致多个 daemon 并存、discovery 端口漂移）。
+            // 仅当 lock 持有者确实已退出（pid 失效）才清理并接管。
+            let lock_pid = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok());
+            #[cfg(windows)]
+            let holder_alive = match lock_pid {
+                Some(pid) => deepx_types::platform::process_is_running(pid),
+                None => false,
+            };
+            // 非 Windows 无 pid 判活实现（stub 恒 true），回退旧行为：
+            // 视为 stale 并接管，保证 daemon 可重新启动（桌面端仅 Windows）。
+            #[cfg(not(windows))]
+            let holder_alive = false;
+            if holder_alive {
                 return Err("another daemon instance is already running".into());
             }
             std::fs::remove_file(&path).map_err(|e| format!("remove stale daemon lock: {e}"))?;
@@ -290,33 +317,6 @@ fn acquire_single_instance() -> Result<File, String> {
         }
         Err(error) => Err(error.to_string()),
     }
-}
-fn discovery_is_reachable() -> bool {
-    let Ok(content) = std::fs::read_to_string(deepx_types::platform::daemon_discovery_path())
-    else {
-        return false;
-    };
-    let Ok(discovery) = serde_json::from_str::<DaemonDiscovery>(&content) else {
-        return false;
-    };
-    let lock_pid = std::fs::read_to_string(deepx_types::platform::daemon_lock_path())
-        .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok());
-    if lock_pid != Some(discovery.pid) {
-        return false;
-    }
-    if !deepx_types::platform::process_is_running(discovery.pid) {
-        return false;
-    }
-    let address = discovery
-        .endpoint
-        .trim_start_matches("ws://")
-        .split('/')
-        .next()
-        .unwrap_or_default();
-    address.parse().ok().is_some_and(|address| {
-        std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
-    })
 }
 fn write_discovery(discovery: &DaemonDiscovery) -> Result<(), String> {
     let target = deepx_types::platform::daemon_discovery_path();

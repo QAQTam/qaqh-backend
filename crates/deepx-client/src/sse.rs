@@ -27,8 +27,9 @@ pub struct ChannelStream {
     channel: Channel,
     http: reqwest::Client,
     handlers: StreamHandlers,
-    /// (server_epoch, client_session_id) — read on each connect.
-    session_ctx: watch::Receiver<(String, String)>,
+    /// (server_epoch, client_session_id) — read on each connect. `None` until
+    /// the session is negotiated; updated by lease re-negotiation.
+    session_ctx: watch::Receiver<Option<(String, String)>>,
     /// Cursor of the last accepted frame (per channel).
     cursor: u64,
 }
@@ -40,7 +41,7 @@ impl ChannelStream {
         channel: Channel,
         http: reqwest::Client,
         handlers: StreamHandlers,
-        session_ctx: watch::Receiver<(String, String)>,
+        session_ctx: watch::Receiver<Option<(String, String)>>,
     ) -> Self {
         Self {
             url,
@@ -86,10 +87,9 @@ impl ChannelStream {
 
     async fn connect_once(&mut self, stop: &mut watch::Receiver<bool>) -> Result<()> {
         (self.handlers.on_status)(ChannelStatus::Connecting);
-        let (server_epoch, client_session_id) = self.session_ctx.borrow().clone();
-        if server_epoch.is_empty() {
+        let Some((server_epoch, client_session_id)) = self.session_ctx.borrow().clone() else {
             return Err(ClientError::Negotiation("session not open".into()));
-        }
+        };
 
         let mut request = self
             .http

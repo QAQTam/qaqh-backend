@@ -1,0 +1,5 @@
+# DeepX 项目级 Reasonix 配置
+# 仅放宽沙箱写入根：windows-webview/windows-reactor 是 F:/windows-rs 下的
+# path 依赖（DeepX 自有 fork，git 基线 deepx-base），开发时需直接修改。
+[sandbox]
+allow_write = ["F:/windows-rs"]
