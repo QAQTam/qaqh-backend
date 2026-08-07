@@ -88,12 +88,6 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             }
         }
     };
-    let on_console = {
-        let bridge = bridge.clone();
-        move || {
-            bridge.open_devtools();
-        }
-    };
     let on_info = {
         let bridge = bridge.clone();
         move || bridge.toggle_header_flag(HeaderFlag::Info)
@@ -122,11 +116,10 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         .into();
     let footer: Element = hstack((
         // 图标映射（bindings Symbol 枚举裁剪版，WORKFLOW §6.1 记录）：
-        // ①OpenLocal ②OpenFile ③Repair(替代 DeveloperTools) ┃
-        // ④ContactInfo(替代 Info) ⑤FourBars(替代 Diagnostic) ⑥Undo ⑦Clear(替代 Compress)
+        // ①OpenLocal ②OpenFile ┃ ③ContactInfo(替代 Info) ④FourBars(替代 Diagnostic)
+        // ⑤Undo ⑥Clear(替代 Compress)（⑧pet 隐藏；console 随 WebView 移除）。
         action_button(Icon::symbol(Symbol::OpenLocal), true, false, on_workspace),
         action_button(Icon::symbol(Symbol::OpenFile), true, false, on_location),
-        action_button(Icon::symbol(Symbol::Repair), true, false, on_console),
         divider,
         action_button(Icon::symbol(Symbol::ContactInfo), true, state.info_open, on_info),
         action_button(Icon::symbol(Symbol::FourBars), true, state.stats_open, on_stats),

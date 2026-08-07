@@ -1,24 +1,17 @@
-//! `window.deepx` bridge: WebView2 WebMessage <-> deepx-client.
+//! Bridge: deepx-client（Ringing 协议）<-> 原生 XAML 视图族。
 //!
-//! - The renderer's preload API shape (see `apps/desktop/electron/preload.ts`)
-//!   is recreated by an injected script that forwards every call over
-//!   `window.chrome.webview.postMessage` and dispatches host events.
-//! - The Rust side routes `invoke` messages to `deepx-client` (commands,
-//!   queries, bootstrap, actions) and pumps client events back to the
-//!   renderer as `event` messages.
+//! - `BridgeCore`（tokio 侧）：daemon 连接管理 + 三 SSE 频道事件解析
+//!   （conversation → ChatView/Composer 直连缓存；control/tool → 交互队列
+//!   状态机；control → 侧栏/技能/goalBar 快照）+ 命令/查询直发层。
+//! - `Bridge`（UI 线程侧）：`core` 引用 + pump 心跳（失联检测）。
+//!
+//! WebView 已移除：invoke/emit/outbox 通道整体下线；renderer（SolidJS）
+//! 仅供 daemon `/debug/` 浏览器调试入口使用（不经本桥）。
 //!
 //! Threading: `BridgeCore` is `Send + Sync` and lives on the tokio side;
-//! `Bridge` (WebView + outbox receiver) stays on the STA UI thread.
-//!
-//! Wire protocol (JSON):
-//! ```text
-//! renderer -> host : { "type":"invoke", "id":n, "method":"ringing.command", "params":{...} }
-//! host -> renderer : { "type":"response", "id":n, "ok":true, "value":... }
-//!                     { "type":"response", "id":n, "ok":false, "error":"..." }
-//!                     { "type":"event", "kind":"ringing.batch", "payload":{...} }
-//! ```
+//! `Bridge` 仅持 `Arc<BridgeCore>`，UI 线程调用均无锁跨线程约束。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -28,7 +21,6 @@ use deepx_client::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use windows_webview::WebView;
 
 use crate::chat_adapter;
 use crate::shell_store::{
@@ -37,32 +29,6 @@ use crate::shell_store::{
     parse_workspace_status, project_session_meta, ActivityState, DashboardSnapshot,
     SessionDetail, SessionItem, SettingsSnapshot, SkillsSnapshot,
 };
-
-/// Outbound messages queued on the UI thread (STA) and pumped to the WebView.
-#[derive(Debug, Clone)]
-pub enum OutMsg {
-    Response { id: u64, ok: bool, value: Value, error: Option<String> },
-    Event { kind: &'static str, payload: Value },
-}
-
-impl OutMsg {
-    fn to_json(&self) -> Value {
-        match self {
-            OutMsg::Response { id, ok, value, error } => json!({
-                "type": "response",
-                "id": id,
-                "ok": ok,
-                "value": value,
-                "error": error,
-            }),
-            OutMsg::Event { kind, payload } => json!({
-                "type": "event",
-                "kind": kind,
-                "payload": payload,
-            }),
-        }
-    }
-}
 
 /// 直连模式的发送反馈（替代 Web setComposer 的 submitError/sendAck 投影）。
 #[derive(Debug, Clone, Default)]
@@ -825,7 +791,6 @@ pub struct BridgeCore {
     dashboard: Mutex<Option<DashboardSnapshot>>,
     /// dashboard 数据版本：事件到达后递增，UI 侧 timer 比对后刷新。
     dashboard_rev: AtomicU64,
-    outbox_tx: std::sync::mpsc::Sender<OutMsg>,
 }
 
 /// 失联阈值：backoff 1+2+4+8=15s 内 4 次重试仍失败视为失联（daemon 重启/关闭）。
@@ -854,42 +819,8 @@ fn rebuild_cooldown_for(failures: u32) -> Duration {
 fn auto_reconnect_cooldown_for(failures: u32) -> Duration {
     AUTO_RECONNECT_COOLDOWN.saturating_mul(1u32 << failures.min(REBUILD_BACKOFF_CAP + 2))
 }
-/// pump 每 tick 最多投递的消息数：WebView2 忙时逐条 post 会阻塞 UI 线程，
-/// 限量 + 时间预算保证 DispatcherQueue 消息泵始终有吞吐余量（AppHangB1）。
-const PUMP_BATCH_MAX: usize = 32;
-/// 单次 pump 投递总时间预算：超过即让出 UI 线程，下个 tick 续投。
-const PUMP_TIME_BUDGET: Duration = Duration::from_millis(20);
-/// pending 缓冲上限：积压超限丢弃最旧消息（snapshot/幂等去重兜底），
-/// 避免 outbox 无界堆积后 UI 线程长期 drain。
-const PUMP_PENDING_CAP: usize = 512;
 
 impl BridgeCore {
-    fn respond(&self, id: u64, ok: bool, value: Value, error: Option<String>) {
-        if !ok {
-            log_diag(&format!("invoke {id} failed: {}", error.clone().unwrap_or_default()));
-        }
-        log_diag(&format!("respond {id} ok={ok}"));
-        let _ = self.outbox_tx.send(OutMsg::Response { id, ok, value, error });
-    }
-
-    fn emit(&self, kind: &'static str, payload: Value) {
-        let _ = self.outbox_tx.send(OutMsg::Event { kind, payload });
-    }
-
-    /// Spawn an invoke on the shared client runtime.
-    pub fn spawn_invoke(&self, id: u64, method: &str, params: Value) {
-        log_diag(&format!("invoke {id} {method}"));
-        let core = self.self_arc();
-        let method = method.to_string();
-        let _ = deepx_client::runtime_handle().spawn(async move {
-            let result = core.invoke(&method, params).await;
-            match result {
-                Ok(value) => core.respond(id, true, value, None),
-                Err(err) => core.respond(id, false, json!(null), Some(err)),
-            }
-        });
-    }
-
     /// Arc to self: `BridgeCore` is stored in an `Arc` by the UI-side Bridge.
     fn self_arc(&self) -> Arc<BridgeCore> {
         SHARED_CORE.get().expect("bridge core not initialized").clone()
@@ -2188,220 +2119,6 @@ impl BridgeCore {
         }
     }
 
-    async fn invoke(&self, method: &str, params: Value) -> Result<Value, String> {
-        match method {
-            // ── backend ────────────────────────────────────────────────
-            "backend.connect" => {
-                self.ensure_client().await?;
-                Ok(json!({ "ok": true, "transport": "ringing" }))
-            }
-            "backend.status" => {
-                let connected = self.client.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-                Ok(json!({ "connected": connected, "transport": if connected { "ringing" } else { "legacy" } }))
-            }
-            "backend.attach" | "backend.detach" => {
-                let seed = params.get("seed").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if seed.is_empty() {
-                    return Err("session seed is required".into());
-                }
-                self.ensure_client().await?;
-                let mut attached = self.attached.lock().unwrap_or_else(|e| e.into_inner());
-                if method.ends_with("attach") {
-                    // Ringing v1: attaching = session_resume (daemon records
-                    // seed ownership for this client session).
-                    let client = self.client.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    let client = client.ok_or("client not connected")?;
-                    drop(attached);
-                    client.attach(&seed).await.map_err(|e| e.to_string())?;
-                    self.attached
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(seed);
-                } else {
-                    attached.remove(&seed);
-                }
-                Ok(json!({ "ok": true, "transport": "ringing" }))
-            }
-            "backend.restart" => Err("backend.restart not implemented in winui shell".into()),
-            "backend.request" => {
-                let name = params.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                let inner = params.get("params").cloned().unwrap_or(json!({}));
-                if name.is_empty() {
-                    return Err("method is required".into());
-                }
-                let client = self.ensure_client().await?;
-                client.action(name, inner).await.map_err(|e| e.to_string())
-            }
-
-            // ── ringing ────────────────────────────────────────────────
-            "ringing.status" => {
-                let statuses = self
-                    .channel_status
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                Ok(json!(statuses))
-            }
-            "ringing.bootstrap" => {
-                let seed = params.get("seed").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if seed.is_empty() {
-                    return Err("seed is required".into());
-                }
-                let client = self.ensure_client().await?;
-                client.bootstrap(&seed).await.map_err(|e| e.to_string())
-            }
-            "ringing.snapshot" => {
-                let seed = params.get("seed").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let channel = params.get("channel").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let client = self.ensure_client().await?;
-                let snapshot = client.bootstrap(&seed).await.map_err(|e| e.to_string())?;
-                Ok(snapshot.get(&channel).cloned().unwrap_or(json!(null)))
-            }
-            "ringing.command" => {
-                let seed = params.get("seed").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let channel = params.get("channel").and_then(|v| v.as_str()).unwrap_or("");
-                let envelope = params.get("envelope").cloned().unwrap_or(json!({}));
-                let channel = match channel {
-                    "control" => Channel::Control,
-                    "conversation" => Channel::Conversation,
-                    "tool" => Channel::Tool,
-                    _ => return Err("invalid channel".into()),
-                };
-                let command_id = envelope
-                    .get("command_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let command = envelope.get("command").cloned().unwrap_or(json!({}));
-                let expected_revision = envelope.get("expected_revision").and_then(|v| v.as_u64());
-                let client = self.ensure_client().await?;
-                let seed = if seed.is_empty() { None } else { Some(seed) };
-                match client
-                    .command(channel, seed, command_id.clone(), command, expected_revision)
-                    .await
-                {
-                    Ok(ack) => Ok(ack),
-                    Err(err) => {
-                        // The POST response may be lost after daemon acceptance:
-                        // resolve the uncertainty with the same command id.
-                        match client.command_status(&command_id).await {
-                            Ok(receipt) => {
-                                if receipt.state == "failed" || receipt.state == "rejected" {
-                                    Ok(json!({
-                                        "command_id": command_id,
-                                        "status": "rejected",
-                                        "code": receipt.error_code.unwrap_or(receipt.state),
-                                    }))
-                                } else {
-                                    Ok(json!({
-                                        "command_id": command_id,
-                                        "status": "accepted",
-                                        "receipt_state": receipt.state,
-                                    }))
-                                }
-                            }
-                            Err(_) => Err(err.to_string()),
-                        }
-                    }
-                }
-            }
-            "ringing.query" => {
-                let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if path.is_empty() {
-                    return Err("query path is required".into());
-                }
-                let inner = params.get("params").cloned().unwrap_or(json!({}));
-                let client = self.ensure_client().await?;
-                client.query(&path, inner).await.map_err(|e| e.to_string())
-            }
-
-            // ── timeline ────────────────────────────────────────────────
-            "timeline.activate" => {
-                let seed = params.get("seed").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if seed.is_empty() {
-                    return Err("seed is required".into());
-                }
-                // A 方案：记录最近激活的 seed——daemon 失联重建后据此恢复
-                // 前端 transcript 流（新 client 新 epoch，快照 watermark 续传）。
-                *self
-                    .last_timeline_seed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = seed.clone();
-                let client = self.ensure_client().await?;
-                client.activate_timeline(&seed).await.map_err(|e| e.to_string())
-            }
-            "timeline.status" => {
-                let client = self.ensure_client().await?;
-                match client.timeline_status().await {
-                    Some(status) => Ok(timeline_status_to_json(&status)),
-                    None => Ok(json!(null)),
-                }
-            }
-
-            // ── desktop ─────────────────────────────────────────────────
-            // openDialog/openImageDialog are intercepted on the UI thread by
-            // Bridge::handle_message (COM dialogs need the STA apartment);
-            // this arm only guards against future callers routing them here.
-            "desktop.openDialog" | "desktop.openImageDialog" => {
-                Err("desktop.openDialog must be handled on the UI thread".into())
-            }
-            "desktop.readFileBase64" => {
-                let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if path.is_empty() {
-                    return Err("path is required".into());
-                }
-                let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-                let ext = std::path::Path::new(path)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                let mime = match ext.as_str() {
-                    "png" => "image/png",
-                    "jpg" | "jpeg" => "image/jpeg",
-                    "gif" => "image/gif",
-                    "webp" => "image/webp",
-                    "bmp" => "image/bmp",
-                    _ => "image/png",
-                };
-                Ok(json!({
-                    "mimeType": mime,
-                    "data": base64_encode(&bytes),
-                    "size": bytes.len(),
-                }))
-            }
-            "desktop.readTextFile" => {
-                let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if path.is_empty() {
-                    return Err("path is required".into());
-                }
-                let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-                Ok(json!({ "content": content, "size": content.len() }))
-            }
-            "desktop.confirm" => Ok(json!(true)),
-            "desktop.openPath" => {
-                let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
-                if target.is_empty() {
-                    return Err("target is required".into());
-                }
-                open_external(target)?;
-                Ok(json!(null))
-            }
-            "desktop.togglePet" | "desktop.getPetStatus" => Ok(json!(false)),
-            "desktop.checkUpdate" => Ok(json!(null)),
-            "desktop.stageUpdate" | "desktop.applyUpdate" => {
-                Err("update flow is not implemented in the winui shell yet".into())
-            }
-            "desktop.openDevTools" => {
-                // DevTools window is opened by the UI-side Bridge (has WebView).
-                Err("openDevTools must be handled on the UI thread".into())
-            }
-            "desktop.setBackgroundMaterial" => Ok(json!(true)),
-
-            _ => Err(format!("unknown bridge method: {method}")),
-        }
-    }
-
     /// Lazily connect the deepx-client and register event forwarding.
     /// 外部入口：重建进行中时拒绝（防双 client 竞态），否则委托内部实现。
     async fn ensure_client(&self) -> Result<Client, String> {
@@ -2547,14 +2264,8 @@ impl BridgeCore {
                 }
             };
             match client.bootstrap(&reset.seed).await {
-                Ok(snapshot) => core.emit(
-                    "ringing.snapshot",
-                    json!({
-                        "seed": reset.seed,
-                        "channel": reset.channel,
-                        "snapshot": snapshot,
-                    }),
-                ),
+                // WebView 移除：bootstrap 结果不再 emit（壳由事件流自愈）。
+                Ok(_snapshot) => {}
                 Err(err) => log_diag(&format!(
                     "reset: bootstrap {} failed: {err}",
                     reset.seed
@@ -2866,13 +2577,9 @@ impl BridgeCore {
             for seed in &seeds {
                 core.restore_seed(seed).await;
             }
-            // 4) 状态复位 + 前端通知。
+            // 4) 状态复位（WebView 移除：不再 emit backend.status）。
             core.rebuilding.store(false, Ordering::Relaxed);
             core.reset_stall_timers();
-            core.emit(
-                "backend.status",
-                json!({ "connected": true, "transport": "ringing" }),
-            );
             core.spawn_refresh_sessions();
             log_diag("health: rebuild complete");
         });
@@ -2915,26 +2622,13 @@ impl BridgeCore {
             return;
         }
         match client.bootstrap(seed).await {
-            Ok(snapshot) => {
-                // 前端 applySnapshotPayload 期望单通道快照（{state,
-                // baseline_stream_seq, turns, ...}），按通道逐个推送。
-                for channel in Channel::ALL {
-                    if let Some(snap) = snapshot.get(channel.as_str()) {
-                        self.emit(
-                            "ringing.snapshot",
-                            json!({
-                                "seed": seed,
-                                "channel": channel.as_str(),
-                                "snapshot": snap,
-                            }),
-                        );
-                    }
-                }
-            }
+            // WebView 移除：快照不再 emit（壳经事件流/主动快照自愈）。
+            Ok(_snapshot) => {}
             Err(err) => log_diag(&format!("health: bootstrap {seed} failed: {err}")),
         }
         match client.activate_timeline(seed).await {
-            Ok(snapshot) => self.emit("timeline.snapshot", snapshot),
+            // WebView 移除：timeline 快照经 on_timeline_snapshot 缓存直连。
+            Ok(_snapshot) => {}
             Err(err) => log_diag(&format!("health: timeline activate {seed} failed: {err}")),
         }
     }
@@ -2970,28 +2664,9 @@ fn timeline_status_to_json(status: &TimelineStatus) -> Value {
 
 static SHARED_CORE: OnceLock<Arc<BridgeCore>> = OnceLock::new();
 
-/// UI-thread half of the bridge: WebView + outbox receiver.
+/// UI-thread half of the bridge（WebView 移除后仅持 tokio 侧 core 引用）。
 pub struct Bridge {
     core: Arc<BridgeCore>,
-    ui: UiOnly<UiState>,
-}
-
-/// STA-bound state: only ever touched from the WinUI UI thread
-/// (`attach_webview` from on_ready, `pump` from the UI timer, devtools from
-/// the message handler). The unsafe impls are sound under that discipline.
-struct UiOnly<T>(T);
-// Safety: confined to the UI thread (see UiState doc).
-unsafe impl<T> Send for UiOnly<T> {}
-// Safety: confined to the UI thread (see UiState doc).
-unsafe impl<T> Sync for UiOnly<T> {}
-
-struct UiState {
-    webview: Mutex<Option<WebView>>,
-    registration: Mutex<Option<windows_webview::EventRegistration>>,
-    outbox_rx: std::sync::mpsc::Receiver<OutMsg>,
-    /// 待投递缓冲（UI 线程独占语义同 webview；Mutex 仅满足借用检查）。
-    /// post 失败/超预算时暂存，下个 tick 续投。
-    pending: Mutex<VecDeque<OutMsg>>,
 }
 
 static SHARED: OnceLock<Arc<Bridge>> = OnceLock::new();
@@ -3000,7 +2675,6 @@ impl Bridge {
     pub fn shared() -> Arc<Bridge> {
         SHARED
             .get_or_init(|| {
-                let (tx, rx) = std::sync::mpsc::channel();
                 let core = Arc::new(BridgeCore {
                     client: Mutex::new(None),
                     attached: Mutex::new(HashSet::new()),
@@ -3064,25 +2738,11 @@ impl Bridge {
                     ),
                     dashboard: Mutex::new(None),
                     dashboard_rev: AtomicU64::new(0),
-                    outbox_tx: tx,
                 });
                 let _ = SHARED_CORE.set(core.clone());
-                Arc::new(Bridge {
-                    core,
-                    ui: UiOnly(UiState {
-                        webview: Mutex::new(None),
-                        registration: Mutex::new(None),
-                        outbox_rx: rx,
-                        pending: Mutex::new(VecDeque::new()),
-                    }),
-                })
+                Arc::new(Bridge { core })
             })
             .clone()
-    }
-
-    /// Called from the webview `on_ready` callback (UI thread).
-    pub fn attach_webview(&self, webview: WebView) {
-        *self.ui.0.webview.lock().unwrap_or_else(|e| e.into_inner()) = Some(webview);
     }
 
     /// XAML 侧栏访问 tokio 侧状态（会话列表 / 命令出口）。
@@ -3127,14 +2787,6 @@ impl Bridge {
     /// ②location：系统 shell 打开会话目录（bridge.rs `open_external`）。
     pub fn open_path(&self, target: &str) -> Result<(), String> {
         open_external(target)
-    }
-
-    /// ③console：DevTools 窗口（WebView 在 STA 线程，与 handle_message 同约束）。
-    pub fn open_devtools(&self) -> bool {
-        if let Some(webview) = self.ui.0.webview.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-            return webview.open_dev_tools_window().is_ok();
-        }
-        false
     }
 
     /// 标题栏本地开关翻转（headerDirect：info/stats 壳本地维护）。
@@ -3232,193 +2884,19 @@ impl Bridge {
         self.core.spawn_workspace_install_wsl();
     }
 
-    /// settings：lang/theme/permission/workspace 变更回传 Web（`shell.settingsAction`）。
-    /// Keep the web-message event registration alive for the process lifetime.
-    pub fn attach_registration(&self, registration: windows_webview::EventRegistration) {
-        *self.ui.0.registration.lock().unwrap_or_else(|e| e.into_inner()) = Some(registration);
-    }
 
-    /// Called from `on_web_message_received` (UI thread).
-    pub fn handle_message(&self, raw: String) {
-        let Ok(msg) = serde_json::from_str::<Value>(&raw) else {
-            return;
-        };
-        // WebView2 may deliver the payload double-encoded (a JSON string
-        // literal); unwrap one layer when that happens.
-        let msg = match &msg {
-            Value::String(s) => serde_json::from_str::<Value>(s).unwrap_or(msg.clone()),
-            _ => msg,
-        };
-        // Renderer 上报（bridge.js reportError，无 id/method）——必须在取
-        // id 之前处理，否则被 `msg.get("id")` 的 else-return 静默丢弃。
-        if msg.get("type").and_then(|v| v.as_str()) == Some("log") {
-            let level = msg.get("level").and_then(|v| v.as_str()).unwrap_or("info");
-            let text = msg.get("msg").and_then(|v| v.as_str()).unwrap_or("");
-            log_diag(&format!("[renderer:{level}] {text}"));
-            return;
-        }
-        let Some(id) = msg.get("id").and_then(|v| v.as_u64()) else {
-            return;
-        };
-        let Some(method) = msg.get("method").and_then(|v| v.as_str()) else {
-            return;
-        };
-        let params = msg.get("params").cloned().unwrap_or(json!({}));
-        if method == "desktop.openDevTools" {
-            if let Some(webview) = self.ui.0.webview.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-                let _ = webview.open_dev_tools_window();
-            }
-            self.core.respond(id, true, json!(true), None);
-            return;
-        }
-        // File/folder dialogs must run on the STA UI thread (COM apartment):
-        // intercept here, mirroring the openDevTools pattern, instead of
-        // dispatching to the tokio-side BridgeCore::invoke.
-        if method == "desktop.openDialog" || method == "desktop.openImageDialog" {
-            let result = if method == "desktop.openImageDialog" {
-                show_open_dialog(false, false, true, None)
-            } else {
-                let directory = params
-                    .get("directory")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let multiple = params
-                    .get("multiple")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let title = params
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                show_open_dialog(directory, multiple, false, title.as_deref())
-            };
-            match result {
-                Ok(value) => self.core.respond(id, true, value, None),
-                Err(err) => self.core.respond(id, false, json!(null), Some(err)),
-            }
-            return;
-        }
-        // ── shell.* 壳本地方法（不进 client；P-1 分发表，见 WORKFLOW §6.1）──
-        // shell.setHeader：Web 状态投影 → TitleBar 数据源。
-        if method == "shell.setHeader" {
-            self.core.apply_header(params);
-            self.core.respond(id, true, json!(null), None);
-            return;
-        }
-        // shell.setTheme：三态进协议（P-5），壳映射渲染。
-        if method == "shell.setTheme" {
-            let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("");
-            let theme = match mode {
-                "light" => windows_reactor::RequestedTheme::Light,
-                "dark" | "dark-gray" => windows_reactor::RequestedTheme::Dark,
-                _ => windows_reactor::RequestedTheme::Default,
-            };
-            windows_reactor::set_requested_theme(theme);
-            self.core.respond(id, true, json!(null), None);
-            return;
-        }
-        // shell.setSettings：Web 初始投影（theme/lang/permission/workspaceMode）
-        // → XAML 设置页数据源（P-3 模式，同 setHeader）。
-        if method == "shell.setSettings" {
-            self.core.apply_settings_projection(params);
-            self.core.respond(id, true, json!(null), None);
-            return;
-        }
-        // shell.setInteraction：Web 交互模态状态投影 → 壳覆盖层面板数据源
-        // （P-3 模式，同 setHeader；kind="none" 关闭面板）。直连模式下
-        // （setInteractionDirect 置位后）被忽略——Rust 已从 daemon 事件解析。
-        if method == "shell.setInteraction" {
-            self.core.apply_interaction(params);
-            self.core.respond(id, true, json!(null), None);
-            return;
-        }
-        // shell.setInteractionDirect：Web 注入 `interactionDirect` flag 后置位
-        // Rust 直连模式——交互快照改由 daemon control/tool 事件解析组装
-        // （读路径直连，不经 WebView），`shell.setInteraction` 投影停发/忽略。
-        if method == "shell.setInteractionDirect" {
-            self.core.set_interaction_direct();
-            self.core.respond(id, true, json!(null), None);
-            return;
-        }
-        // shell.setComposer：Web Composer 状态投影 → 壳底部栏数据源
-        // （P-3 模式，同 setHeader；sendAck 驱动悲观清空）。直连模式下
-        // 只落 B 组（写路径伴生状态），A 组由 composer_snapshot 以 Rust
-        // 直连解析为准。
-        if method == "shell.setComposer" {
-            self.core.apply_composer(params);
-            self.core.respond(id, true, json!(null), None);
-            return;
-        }
-        // shell.setComposerDirect：Web 注入 `composerDirect` flag 后置位
-        // Rust 直连模式——A 组字段（isStreaming/gate/model/context）改由
-        // conversation 事件解析组装（读路径直连，不经 WebView）。
-        if method == "shell.setComposerDirect" {
-            self.core.set_composer_direct();
-            self.core.respond(id, true, json!(null), None);
-            return;
-        }
-        // shell.setChatDirect：Web 注入 `chatDirect` flag 后置位（幂等；
-        // 默认已开启——ChatView 原生迁移完成，此入口供显式确认/回切）。
-        if method == "shell.setChatDirect" {
-            self.core.set_chat_direct();
-            self.core.respond(id, true, json!(null), None);
-            return;
-        }
-        self.core.spawn_invoke(id, method, params);
-    }
-
-    /// Drain the outbox to the WebView (UI thread, called by a timer).
-    ///
-    /// 防 AppHangB1：绝不无界 drain + 同步 post。每 tick 限量（
-    /// [`PUMP_BATCH_MAX`]）且限时（[`PUMP_TIME_BUDGET`]）投递，WebView2
-    /// 忙（renderer 全量重建 snapshot）时单次 post 会阻塞 UI 线程——
-    /// 超预算/失败即让出，消息暂存 pending 下个 tick 续投，不丢失；
-    /// 积压超 [`PUMP_PENDING_CAP`] 丢弃最旧（snapshot/幂等兜底）。
+    /// 心跳（UI 线程 timer 每 50ms 调用）：daemon 失联检测（轻量内存检查，
+    /// 重建在 tokio 侧执行）。WebView 移除后无 outbox 投递。
     pub fn pump(&self) {
-        // A 方案：daemon 失联检测（轻量内存检查；重建在 tokio 侧执行）。
         self.core.check_daemon_health();
-        let Some(webview) = self.ui.0.webview.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
-            return;
-        };
-        // 1) 快速吸干 outbox（无阻塞，无跨进程调用），暂存 pending。
-        let mut fresh = Vec::with_capacity(64);
-        while let Ok(msg) = self.ui.0.outbox_rx.try_recv() {
-            fresh.push(msg);
-        }
-        let mut pending = self.ui.0.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.extend(fresh);
-        while pending.len() > PUMP_PENDING_CAP {
-            pending.pop_front(); // 丢最旧：snapshot 重建语义兜底
-        }
-        // 2) 限量 + 限时投递；失败即停（消息放回 pending，不丢）。
-        let deadline = Instant::now() + PUMP_TIME_BUDGET;
-        for _ in 0..PUMP_BATCH_MAX {
-            let Some(msg) = pending.pop_front() else {
-                break;
-            };
-            if Instant::now() >= deadline {
-                pending.push_front(msg);
-                break;
-            }
-            let json = msg.to_json().to_string();
-            if webview.post_web_message_as_json(&json).is_err() {
-                pending.push_front(msg);
-                break;
-            }
-            if let OutMsg::Event { kind, .. } = &msg {
-                log_diag(&format!("pump: event {kind} posted"));
-            }
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     fn test_core() -> BridgeCore {
-        let (tx, _rx) = mpsc::channel();
         BridgeCore {
             client: Mutex::new(None),
             attached: Mutex::new(HashSet::new()),
@@ -3472,7 +2950,6 @@ mod tests {
             timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
             dashboard: Mutex::new(None),
             dashboard_rev: AtomicU64::new(0),
-            outbox_tx: tx,
         }
     }
 

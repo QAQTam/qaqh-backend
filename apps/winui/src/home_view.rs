@@ -220,20 +220,10 @@ pub fn home_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .foreground(ThemeRef::SecondaryText)
             .vertical_alignment(VerticalAlignment::Center)
             .into();
-        let devtools: Element = button("</> DevTools")
-            .subtle()
-            .icon(Icon::symbol(Symbol::Repair))
-            .on_click({
-                let bridge = bridge.clone();
-                move || {
-                    bridge.open_devtools();
-                }
-            })
-            .vertical_alignment(VerticalAlignment::Center)
-            .into();
         let brand: Element = hstack((logo, title_el)).spacing(8.0).into();
         let left: Element = vstack((brand, subtitle)).spacing(2.0).into();
-        hstack((left, devtools))
+        // DevTools 按钮随 WebView 移除（home 页品牌区右端原为 </> DevTools）。
+        hstack((left,))
             .spacing(12.0)
             .horizontal_alignment(HorizontalAlignment::Stretch)
             .into()

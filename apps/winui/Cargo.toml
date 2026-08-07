@@ -2,12 +2,14 @@
 name = "deepx-winui"
 version.workspace = true
 edition = "2024"
-description = "DeepX WinUI desktop shell — windows-reactor + WebView2 hosting the SolidJS renderer"
+description = "DeepX WinUI desktop shell — windows-reactor 原生 XAML 视图族（WebView 已移除）"
 license = "MIT"
 publish = false
 
 [dependencies]
 deepx-client = { path = "../../crates/deepx-client" }
+# 原生 ChatView 渲染：协议事件 → Transcript → reactor 控件树
+markdown-winui = { path = "../../crates/markdown-winui" }
 # time: new_session 轮询等待 session_create 落库（对齐前端 15s 超时）。
 tokio = { version = "1", features = ["time"] }
 # preserve_order: action fingerprint 按 wire 字节序（renderer JSON 插入序）复算，
@@ -16,7 +18,6 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # P-2 typed struct：HeaderState/HeaderAction 编译期检查（预埋，见 WORKFLOW §6.1）。
 serde = { version = "1", features = ["derive"] }
 windows-reactor = { path = "F:/windows-rs/crates/libs/reactor" }
-windows-webview = { path = "F:/windows-rs/crates/libs/webview", features = ["reactor"] }
 # desktop.openDialog / openImageDialog: Win32 IFileOpenDialog (COM) 绑定。
 # 仅启用所需最小 feature 集（0.100.0 小写模块名 feature）。
 windows = { path = "F:/windows-rs/crates/libs/windows", default-features = false, features = [
