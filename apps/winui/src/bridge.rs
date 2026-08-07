@@ -790,6 +790,9 @@ pub struct BridgeCore {
     /// per-seed turns 计数（undo_disabled 判定源）：timeline 快照写入点缓存
     /// （不随 chat_view consume 清空），增量 turn 事件不改变计数。
     header_turns: Mutex<HashMap<String, usize>>,
+    /// per-seed 最近回合 id（undo 命令用）：turn_started 事件/快照写入点
+    /// 更新；无缓存时撤销按钮直发层拒绝发送。
+    last_turn_ids: Mutex<HashMap<String, String>>,
     /// daemon 失联检测（A 方案，WORKFLOW §7）：timeline 流非 Open 的起始时刻。
     timeline_stall_since: Mutex<Option<Instant>>,
     /// 三 ringing 通道无一 Open 的起始时刻。
@@ -1862,6 +1865,178 @@ impl BridgeCore {
         });
     }
 
+    // ── 直连动作（WebView 移除：协议请求 Rust 直发，不再经 Web 中转）──
+
+    /// conversation 频道命令直发（cancel/compact/set_mode 等）。
+    /// ack 仅表示 accepted；业务结果经事件流（causation_id）返回。
+    /// 失败只记日志（对齐 Web：错误 toast 由调用方本地判定，不阻塞 UI）。
+    pub fn spawn_conversation_command(&self, command: Value) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("cmd: connect failed: {err}"));
+                    return;
+                }
+            };
+            let seed = core.active_seed();
+            match client
+                .command(
+                    Channel::Conversation,
+                    Some(seed),
+                    core.next_command_id(),
+                    command,
+                    None,
+                )
+                .await
+            {
+                Ok(_) => log_diag("conversation command accepted"),
+                Err(err) => log_diag(&format!("conversation command failed: {err}")),
+            }
+        });
+    }
+
+    /// 发送消息：附件统一上传为 ContentRef（图片也走上传——命令中不允许
+    /// base64 或本地路径，对齐 daemon 约束与 Electron main 语义）。
+    pub fn spawn_send_message(
+        &self,
+        text: String,
+        image_paths: Vec<ComposerAttachment>,
+        text_files: Vec<ComposerTextFile>,
+    ) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("send: connect failed: {err}"));
+                    return;
+                }
+            };
+            let seed = core.active_seed();
+            let mut attachments: Vec<Value> = Vec::new();
+            for att in &image_paths {
+                match std::fs::read(&att.path) {
+                    Ok(bytes) => {
+                        match client
+                            .upload_content(&seed, &att.mime_type, bytes)
+                            .await
+                        {
+                            Ok(cr) => attachments.push(json!({
+                                "content_id": cr.content_id,
+                                "media_type": cr.media_type,
+                                "sha256": cr.sha256,
+                                "truncated": cr.truncated,
+                            })),
+                            Err(err) => log_diag(&format!(
+                                "send: upload {} failed: {err}",
+                                att.file_name
+                            )),
+                        }
+                    }
+                    Err(err) => log_diag(&format!("send: read {} failed: {err}", att.path)),
+                }
+            }
+            for tf in &text_files {
+                match std::fs::read(&tf.path) {
+                    Ok(bytes) => match client.upload_content(&seed, "text/plain", bytes).await {
+                        Ok(cr) => attachments.push(json!({
+                            "content_id": cr.content_id,
+                            "media_type": cr.media_type,
+                            "sha256": cr.sha256,
+                            "truncated": cr.truncated,
+                        })),
+                        Err(err) => log_diag(&format!(
+                            "send: upload {} failed: {err}",
+                            tf.file_name
+                        )),
+                    },
+                    Err(err) => log_diag(&format!("send: read {} failed: {err}", tf.path)),
+                }
+            }
+            let mut command = json!({ "type": "conversation_send_message", "text": text });
+            if !attachments.is_empty() {
+                command["attachments"] = json!(attachments);
+            }
+            match client
+                .command(
+                    Channel::Conversation,
+                    Some(seed),
+                    core.next_command_id(),
+                    command,
+                    None,
+                )
+                .await
+            {
+                Ok(_) => log_diag("send_message accepted"),
+                Err(err) => log_diag(&format!("send_message failed: {err}")),
+            }
+        });
+    }
+
+    /// 交互响应直发（permission/ask/plan）：`interaction.*` query（对齐
+    /// Web App.tsx respondToPermission / submitAsk / dismissAsk / respondToPlan）。
+    pub fn spawn_interaction_response(&self, method: &str, params: Value) {
+        let core = self.self_arc();
+        let method = method.to_string();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("{method}: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.query(&method, params).await {
+                Ok(_) => log_diag(&format!("{method}: ok")),
+                Err(err) => log_diag(&format!("{method}: failed: {err}")),
+            }
+        });
+    }
+
+    /// 工作区切换：`workspace.set`（headerAction::Workspace 直发）。
+    pub fn spawn_workspace_set(&self, path: String) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace.set: connect failed: {err}"));
+                    return;
+                }
+            };
+            let seed = core.active_seed();
+            match client
+                .query("workspace.set", json!({ "seed": seed, "path": path }))
+                .await
+            {
+                Ok(_) => log_diag("workspace.set: ok"),
+                Err(err) => log_diag(&format!("workspace.set failed: {err}")),
+            }
+        });
+    }
+
+    /// 撤销上一回合：`conversation_undo_turn`（turn_id 来自 per-seed 缓存，
+    /// turn_started 事件/快照写入点更新；无缓存则不发送）。
+    pub fn spawn_undo_last_turn(&self) {
+        let seed = self.active_seed();
+        let Some(turn_id) = self
+            .last_turn_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&seed)
+            .cloned()
+        else {
+            log_diag("undo: no last turn id cached");
+            return;
+        };
+        self.spawn_conversation_command(json!({
+            "type": "conversation_undo_turn",
+            "turn_id": turn_id,
+        }));
+    }
+
     /// 工作区运行模式切换：`workspace.set_mode`（backend.restart 未实现，
     /// 保存成功后由 UI 提示“下次启动生效”）。
     pub fn spawn_workspace_set_mode(&self, mode: &str) {
@@ -2335,6 +2510,16 @@ impl BridgeCore {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(seed.clone(), turns);
+                        // 撤销直发：快照恢复的历史会话缓存最近回合 id。
+                        if let Some(tid) = chat_adapter::timeline_turns(&snapshot)
+                            .last()
+                            .map(|t| t.turn_id.clone())
+                        {
+                            core.last_turn_ids
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(seed.clone(), tid);
+                        }
                         if core.header_direct.load(Ordering::Relaxed) {
                             core.refresh_header();
                         }
@@ -2498,6 +2683,13 @@ impl BridgeCore {
                             ConversationActivityEvent::Started | ConversationActivityEvent::Ended
                         ) {
                             turn_boundary = true;
+                            // 撤销直发：turn 事件带 turn_id，缓存最近回合。
+                            if let Some(tid) = env.event.get("turn_id").and_then(|v| v.as_str()) {
+                                self.last_turn_ids
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(batch.seed.clone(), tid.to_string());
+                            }
                         }
                         activity.apply(ev, now);
                     }
@@ -2872,6 +3064,7 @@ impl Bridge {
                     // 标题栏原生迁移完成：默认直连（壳侧组装，不经 Web 投影）。
                     header_direct: AtomicBool::new(true),
                     header_turns: Mutex::new(HashMap::new()),
+                    last_turn_ids: Mutex::new(HashMap::new()),
                     timeline_stall_since: Mutex::new(None),
                     channels_stall_since: Mutex::new(None),
                     rebuilding: AtomicBool::new(false),
@@ -2997,6 +3190,38 @@ impl Bridge {
     /// 标题栏本地开关翻转（headerDirect：info/stats 壳本地维护）。
     pub fn toggle_header_flag(&self, flag: HeaderFlag) {
         self.core.toggle_header_flag(flag);
+    }
+
+    // ── 直连动作转发（WebView 移除：协议请求 Rust 直发）──────────────
+
+    /// conversation 频道命令直发（cancel/compact/set_mode 等）。
+    pub fn spawn_conversation_command(&self, command: Value) {
+        self.core.spawn_conversation_command(command);
+    }
+
+    /// 发送消息（附件上传 ContentRef 后直发 send_message）。
+    pub fn spawn_send_message(
+        &self,
+        text: String,
+        image_paths: Vec<ComposerAttachment>,
+        text_files: Vec<ComposerTextFile>,
+    ) {
+        self.core.spawn_send_message(text, image_paths, text_files);
+    }
+
+    /// 交互响应直发（permission/ask/plan）。
+    pub fn spawn_interaction_response(&self, method: &str, params: Value) {
+        self.core.spawn_interaction_response(method, params);
+    }
+
+    /// 工作区切换直发（workspace.set）。
+    pub fn spawn_workspace_set(&self, path: String) {
+        self.core.spawn_workspace_set(path);
+    }
+
+    /// 撤销上一回合直发（conversation_undo_turn）。
+    pub fn spawn_undo_last_turn(&self) {
+        self.core.spawn_undo_last_turn();
     }
 
     /// 交互模态动作回传 Web（`shell.interactionAction` 事件；同 headerAction
@@ -3284,6 +3509,7 @@ mod tests {
             header_rev: AtomicU64::new(0),
             header_direct: AtomicBool::new(true),
             header_turns: Mutex::new(HashMap::new()),
+            last_turn_ids: Mutex::new(HashMap::new()),
             timeline_stall_since: Mutex::new(None),
             channels_stall_since: Mutex::new(None),
             rebuilding: AtomicBool::new(false),

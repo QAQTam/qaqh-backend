@@ -24,5 +24,6 @@ pub use error::{ClientError, Result};
 pub use session::{RingingSession, SessionState};
 pub use timeline::TimelineStream;
 pub use types::{
-    Channel, ChannelStatus, EventBatch, RingingEventEnvelope, TimelineEntry, TimelineStatus,
+    Channel, ChannelStatus, ContentRef, EventBatch, RingingEventEnvelope, TimelineEntry,
+    TimelineStatus,
 };

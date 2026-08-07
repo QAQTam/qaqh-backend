@@ -225,3 +225,12 @@ pub struct CommandReceipt {
     #[serde(default)]
     pub command_id: Option<String>,
 }
+
+/// Uploaded attachment reference (`POST /ringing/v1/content` response).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContentRef {
+    pub content_id: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub truncated: bool,
+}

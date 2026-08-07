@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use windows_reactor::*;
 
-use crate::bridge::{Bridge, HeaderAction, HeaderFlag, HeaderState};
+use crate::bridge::{Bridge, HeaderFlag, HeaderState};
 
 /// 标题栏高度（PLAN-NATIVE-UI.md 布局：row 0 = 48px）。
 pub const HEADER_HEIGHT: f64 = 48.0;
@@ -91,13 +91,13 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         }
     });
 
-    // ── 点击分发（①②③ 壳直接；④-⑦ 回传 Web）────────────────
+    // ── 点击分发（①②③ 壳直接；④-⑦ 直连动作，协议请求 Rust 直发）──
     let on_workspace = {
         let bridge = bridge.clone();
         move || match bridge.pick_workspace_directory() {
-            // 取消 → Ok(null) → 不动作；选择 → path 回传 Web 执行 workspace.set。
+            // 取消 → Ok(null) → 不动作；选择 → 直发 workspace.set（不再回传 Web）。
             Ok(serde_json::Value::String(path)) => {
-                bridge.emit_header_action(HeaderAction::Workspace { path: Some(path) });
+                bridge.spawn_workspace_set(path);
             }
             _ => {}
         }
@@ -127,11 +127,13 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     };
     let on_undo = {
         let bridge = bridge.clone();
-        move || bridge.emit_header_action(HeaderAction::Undo)
+        move || bridge.spawn_undo_last_turn()
     };
     let on_compact = {
         let bridge = bridge.clone();
-        move || bridge.emit_header_action(HeaderAction::Compact)
+        move || {
+            bridge.spawn_conversation_command(serde_json::json!({ "type": "conversation_compact" }))
+        }
     };
 
     // ── footer 槽：7 个 subtle 图标按钮（⑧pet 隐藏，规划决策）──

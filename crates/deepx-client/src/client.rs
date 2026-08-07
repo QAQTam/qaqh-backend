@@ -16,8 +16,8 @@ use crate::session::{RingingSession, SessionState};
 use crate::sse::{ChannelStream, StreamHandlers};
 use crate::timeline::TimelineStream;
 use crate::types::{
-    Channel, ChannelStatus, CommandReceipt, CommandRequest, EventBatch, TimelineEntry,
-    TimelineStatus,
+    Channel, ChannelStatus, CommandReceipt, CommandRequest, ContentRef, EventBatch,
+    TimelineEntry, TimelineStatus,
 };
 
 /// Callbacks delivered on the client's background tasks.
@@ -504,6 +504,59 @@ impl Client {
             .await
             .map(|s| s.client_session_id)
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))
+    }
+
+    /// `POST /ringing/v1/content` — upload a local attachment as a session
+    /// content reference.
+    ///
+    /// Hand-rolled multipart/form-data（daemon 受限解析只认
+    /// `seed` / `media_type` / `content` 三字段，见 `handle_content_upload`）；
+    /// 返回的 `ContentRef` 可放入 `conversation_send_message` 的
+    /// `attachments`（命令中不允许出现本地路径）。失败调用方自行记录。
+    pub async fn upload_content(
+        &self,
+        seed: &str,
+        media_type: &str,
+        data: Vec<u8>,
+    ) -> Result<ContentRef> {
+        let boundary = format!("deepx-{}", uuid::Uuid::new_v4());
+        let mut body = Vec::with_capacity(data.len() + 256);
+        let mut push_field = |name: &str, value: &[u8]| {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(value);
+            body.extend_from_slice(b"\r\n");
+        };
+        push_field("seed", seed.as_bytes());
+        push_field("media_type", media_type.as_bytes());
+        push_field("content", &data);
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+        let session_id = self.session_id_header().await?;
+        let response = self
+            .inner
+            .http
+            .post(format!("{}/ringing/v1/content", self.inner.base_url))
+            .bearer_auth(&self.inner.token)
+            .header("X-DeepX-Client-Session-Id", session_id)
+            .header(
+                "Content-Type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ClientError::Http {
+                status: response.status().as_u16(),
+                path: "/ringing/v1/content".into(),
+            });
+        }
+        Ok(response.json().await?)
     }
 
     /// `POST /control/v1/stop` / `stop-if-idle` — graceful daemon stop.
