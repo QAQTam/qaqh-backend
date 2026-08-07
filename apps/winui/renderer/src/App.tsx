@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { backendStatus, connect, listen, request } from "./runtime/backendClient";
-import { isXaml, isXamlSidebar, onHeaderAction, onNavigate, onSettingsAction, onThemeChanged, setHeader, setSettings, setTheme } from "./runtime/shellBridge";
+import { isXaml, isXamlSidebar, onHeaderAction, onInteractionAction, onNavigate, onSettingsAction, onThemeChanged, setHeader, setInteraction, setInteractionDirect, setSettings, setTheme, type InteractionProjection } from "./runtime/shellBridge";
 import { requestWithRinging } from "./runtime/ringingCommands";
 import {
   applyUpdate,
@@ -37,7 +37,7 @@ import {
   createSessionRegistry,
   type SessionEntry,
 } from "./store/sessionRegistry";
-import { isSessionStreaming } from "./store/sessionSelectors";
+import { activeInteraction, isSessionStreaming } from "./store/sessionSelectors";
 import "./styles/context-panel.css";
 import "./styles/git-diff-panel.css";
 import "./styles/change-review.css";
@@ -77,6 +77,11 @@ export default function App() {
   // P1/P2：XAML 首页 / 设置页接管时隐藏 web 对应视图（flag 关闭即回退）。
   const xamlHome = isXaml("home");
   const xamlSettings = isXaml("settings");
+  // P5 交互迁移块：XAML 覆盖层接管 permission/ask 模态（plan 保持 Web）。
+  const xamlInteraction = isXaml("interaction");
+  // 交互数据源直连（Rust 直连 daemon，读路径不经 WebView）：flag 注入后
+  // Web 停止 setInteraction 投影，壳侧由 control/tool 事件解析组装快照。
+  const xamlInteractionDirect = isXaml("interactionDirect");
   const registry = createSessionRegistry({ storage: sessionStorage });
   // Ringing v1 三频道状态源
   const ringingMonitor = createRingingMonitor();
@@ -105,6 +110,7 @@ export default function App() {
   let unlistenHeaderAction: (() => void) | undefined;
   let unlistenThemeChanged: (() => void) | undefined;
   let unlistenSettingsAction: (() => void) | undefined;
+  let unlistenInteractionAction: (() => void) | undefined;
   let unlistenRingingBatch: (() => void) | undefined;
   let unlistenRingingStatus: (() => void) | undefined;
   let unlistenTimelineEntry: (() => void) | undefined;
@@ -572,6 +578,42 @@ export default function App() {
         setPermissionLevel(action.level);
       }
     });
+    // XAML 交互覆盖层动作回传（P5 交互迁移块）：壳点击 → 分发到既有
+    // handler（respondToPermission / submitAsk / dismissAsk）——协议请求
+    // （interaction.permission / ask_response / ask_dismiss）仍在 Web 侧
+    // 发起，状态单一数据源不变。按 id 匹配 pendingInteractions（id 已被
+    // 消费则忽略，壳侧重复点击由 beginInteractionSubmit gate 兜底）。
+    unlistenInteractionAction = onInteractionAction(action => {
+      const entry = activeEntry();
+      if (!entry) return;
+      const pending = entry.state().pendingInteractions;
+      if (action.action === "permission") {
+        const item = pending.find(i => i.id === action.id && i.kind === "permission");
+        if (item?.kind === "permission") {
+          void respondToPermission(item, action.approved, action.trustFolder);
+        }
+      } else if (action.action === "ask") {
+        const item = pending.find(i => i.id === action.id && i.kind === "ask");
+        if (item?.kind === "ask") {
+          void submitAsk(item, action.answers);
+        }
+      } else if (action.action === "ask_dismiss") {
+        const item = pending.find(i => i.id === action.id && i.kind === "ask");
+        if (item?.kind === "ask") {
+          void dismissAsk(item);
+        }
+      } else if (action.action === "plan") {
+        const item = pending.find(i => i.id === action.id && i.kind === "plan");
+        if (item?.kind === "plan") {
+          void respondToPlan(
+            item,
+            action.approved ?? false,
+            action.message ?? undefined,
+            action.autonomous ?? false,
+          );
+        }
+      }
+    });
     void (async () => {
     const savedTheme = (localStorage.getItem(LS_THEME) ?? "system") as ThemeMode;
     setTheme(savedTheme);
@@ -740,6 +782,66 @@ export default function App() {
     },
   );
 
+  // ── XAML 交互模态状态投影（xamlInteraction flag 关闭时零开销）──────
+  // shell.setInteraction：pendingInteractions[0]（permission/ask/plan）→ 壳
+  // 覆盖层面板数据源（统一交互弹窗体系，三模板）。壳侧 rev 比对只刷新变化帧。
+  // 直连模式（interactionDirect flag）：投影停发——壳侧交互快照由 Rust 从
+  // daemon control/tool 事件直接解析组装（读路径直连，不经 WebView）。
+  createEffect(() => {
+    if (xamlInteractionDirect) void setInteractionDirect();
+  });
+  createEffect(
+    (): InteractionProjection | undefined => {
+      if (!xamlInteraction || xamlInteractionDirect) return undefined;
+      const entry = activeEntry();
+      const raw = entry ? presentationFor(entry) : undefined;
+      const item = raw ? activeInteraction(raw) : null;
+      if (!item) {
+        return { kind: "none", seed: activeSeed() };
+      }
+      if (item.kind === "plan") {
+        return {
+          kind: "plan",
+          id: item.id,
+          seed: activeSeed(),
+          planContent: item.content,
+          reviewType: item.reviewType,
+          todoItems: item.todoItems ?? null,
+        };
+      }
+      if (item.kind === "permission") {
+        return {
+          kind: "permission",
+          id: item.id,
+          seed: activeSeed(),
+          toolName: item.toolName,
+          reason: item.reason,
+          paths: item.paths,
+          category: item.category,
+          level: item.level,
+          risk: item.risk,
+          consequence: item.consequence,
+        };
+      }
+      return {
+        kind: "ask",
+        id: item.id,
+        seed: activeSeed(),
+        // camelCase 投影（桥协议键；AskQuestion 本体是 ts-rs snake_case）。
+        questions: item.questions.map(q => ({
+          id: q.id,
+          question: q.question,
+          options: q.options,
+          allowCustom: q.allow_custom,
+        })),
+      };
+    },
+    proj => {
+      if (!proj) return;
+      void setInteraction(proj);
+    },
+  );
+
   // D-4 视图路由拆分点（WORKFLOW §6.2）：ChatView 是 Web 视图族的唯一
   // 成员——壳主导视图渲染（XAML 视图族接管 home/skills/settings）时，
   // 本函数即"WebView 内仅存内容"，可整体搬移或按 flag 挂载。
@@ -799,6 +901,7 @@ export default function App() {
     unlistenHeaderAction?.();
     unlistenThemeChanged?.();
     unlistenSettingsAction?.();
+    unlistenInteractionAction?.();
     unlistenUpdate?.();
     unlistenUpdateFailure?.();
   });

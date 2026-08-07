@@ -1,7 +1,7 @@
 import { action, createEffect, createMemo, createSignal, Match, onSettled, Show, Switch, untrack, type Accessor } from "solid-js";
 import { request } from "../runtime/backendClient";
 import { requestWithRinging } from "../runtime/ringingCommands";
-import { openDevTools, openPath } from "../runtime/desktopApi";
+import { openDevTools, openPath, readFileBase64, readTextFile } from "../runtime/desktopApi";
 import { togglePet } from "../runtime/desktopApi";
 import type { AskAnswer } from "../lib/types/ringing";
 import { projectTurn, type ChangeReviewFile, type TurnViewModel } from "../presentation/turnProjection";
@@ -30,7 +30,7 @@ import ContextPanel from "./ContextPanel";
 import InfoPopover from "./shell/InfoPopover";
 import ThreadHeader from "./shell/ThreadHeader";
 import TodoStatusStrip from "./TodoStatusStrip";
-import { isXaml } from "../runtime/shellBridge";
+import { isXaml, onComposerAction, setComposer, setComposerDirect, type ComposerProjection } from "../runtime/shellBridge";
 
 interface ChatViewProps {
   rawSession: Accessor<RawSessionState>;
@@ -72,6 +72,13 @@ interface ChatViewProps {
 export default function ChatView(props: ChatViewProps) {
   // XAML 标题栏接管（P-3 统一 flag）：隐藏 Web ThreadHeader（代码保留可回退）。
   const xamlHeader = isXaml("header");
+  // XAML Composer 接管（P6 输入框迁移块）：隐藏 Web ComposerDock，壳底部栏
+  // 渲染；本组件仍持有发送/停止/队列逻辑（状态单源），经桥收发。
+  const xamlComposer = isXaml("composer");
+  // Composer 数据源直连（Rust 直连 daemon，读路径不经 WebView）：
+  // isStreaming/gate/model/context 由壳侧 conversation 事件解析组装；
+  // 本投影照发（mode/queue/sendAck 写路径伴生状态仍由本侧持有）。
+  const xamlComposerDirect = isXaml("composerDirect");
   const session = () => props.rawSession();
   const projectedTurnCache = new WeakMap<RawTurn, TurnViewModel>();
   const projectCachedTurn = (turn: RawTurn): TurnViewModel => {
@@ -90,7 +97,13 @@ export default function ChatView(props: ChatViewProps) {
     return projected;
   });
   const seed = () => session().seed;
-  const interaction = () => activeInteraction(session());
+  // XAML 交互覆盖层接管（P5 统一交互弹窗）：permission/ask/plan 三模板
+  // 全部由壳渲染（flag 关闭即回退 Web 模态）。
+  const xamlInteraction = isXaml("interaction");
+  const interaction = () => {
+    if (xamlInteraction) return null;
+    return activeInteraction(session());
+  };
   const permissionInteraction = () => {
     const item = interaction();
     return item?.kind === "permission" ? item : null;
@@ -200,6 +213,90 @@ export default function ChatView(props: ChatViewProps) {
     }
     wasStreaming = active;
   });
+
+  // ── XAML Composer（P6 输入框迁移块）：状态投影 + 动作回传 ─────────
+  // 草稿/输入在壳（XAML 底部栏），本侧只投影"发送所需"的会话状态并回传
+  // 动作（协议请求在本侧，状态单源不变）。flag 关闭时零开销（回退 Web 壳）。
+  const [composerError, setComposerError] = createSignal("");
+  const [composerAck, setComposerAck] = createSignal(0);
+
+  // 投影：seed/streaming/gate/mode/usage/permission/queue/sendAck → 壳。
+  // 壳侧 rev 比对只刷新变化帧；sendAck 变化驱动壳清空草稿（悲观清空）。
+  // 直连模式（composerDirect flag）：A 组字段（streaming/gate/model/context）
+  // 由壳侧 Rust 解析组装，本投影照发——壳侧合并读取（投影代码零改动）。
+  // 数据源直连挂接：flag 注入后置位壳侧 composer 直连（Rust 解析
+  // conversation 事件）。组件体一次性执行（flag 为常量，无需 effect）。
+  if (xamlComposerDirect) void setComposerDirect();
+  createEffect(
+    (): ComposerProjection | undefined => {
+      if (!xamlComposer) return undefined;
+      const u = usage();
+      const items = followUps.items();
+      return {
+        seed: seed(),
+        isStreaming: streaming(),
+        hasPendingGate: activeInteraction(session()) !== null,
+        mode: mode(),
+        model: u.model ?? "",
+        contextTokens: u.contextTokens ?? 0,
+        contextLimit: u.contextLimit ?? 0,
+        permissionLevel: props.permissionLevel,
+        queueCount: items.length,
+        queueItems: items.map(i => ({ id: i.id, text: i.text })),
+        submitError: composerError(),
+        sendAck: composerAck(),
+      };
+    },
+    proj => {
+      if (!proj) return;
+      void setComposer(proj);
+    },
+  );
+
+  // 动作分发：壳提交意图 → 既有 handler（handleSend/handleStop/…）。
+  // send 附件为路径 → 本侧复用 desktop.readFileBase64/readTextFile 转
+  // base64/content（与 Web ComposerDock 现有流程完全一致）。
+  // Solid 2.0：两参数 createEffect（compute + effect），effect 返回 unlisten。
+  createEffect(
+    () => xamlComposer,
+    enabled => {
+      if (!enabled) return;
+      const unlisten = onComposerAction(action => {
+        if (action.action === "send") {
+          void (async () => {
+            try {
+              const imageBlocks: Array<{ mimeType: string; data: string }> = [];
+              for (const img of action.imagePaths ?? []) {
+                const info = await readFileBase64(img.path);
+                imageBlocks.push({ mimeType: img.mimeType, data: info.data });
+              }
+              let combinedText = action.text;
+              for (const tf of action.textFiles ?? []) {
+                const info = await readTextFile(tf.path);
+                if (info.content) {
+                  combinedText += (combinedText ? "\n\n---\n" : "") + info.content;
+                }
+              }
+              await handleSend(combinedText, [], imageBlocks.length > 0 ? imageBlocks : undefined);
+              setComposerAck(n => n + 1);
+              setComposerError("");
+            } catch (error) {
+              setComposerError(error instanceof Error ? error.message : String(error));
+            }
+          })();
+        } else if (action.action === "stop") {
+          void handleStop();
+        } else if (action.action === "mode") {
+          void handleSetMode(action.mode);
+        } else if (action.action === "permission") {
+          void props.onPermissionLevelChange(action.level);
+        } else if (action.action === "queue_remove") {
+          followUps.remove(action.id);
+        }
+      });
+      return unlisten;
+    },
+  );
 
   createEffect(
     () => ({ open: props.infoOpen, seed: seed(), streaming: streaming() }),
@@ -330,21 +427,24 @@ export default function ChatView(props: ChatViewProps) {
           </InteractionModal>}
         </Match>
       </Switch>
-      <ComposerDock
-        goalBar={<TodoStatusStrip dashboard={props.dashboardStore} />}
-        onSend={handleSend}
-        onStop={handleStop}
-        isStreaming={streaming}
-        hasPendingGate={() => activeInteraction(session()) !== null}
-        queue={followUps}
-        mode={mode()}
-        onModeChange={handleSetMode}
-        model={usage().model}
-        contextTokens={usage().contextTokens}
-        contextLimit={usage().contextLimit}
-        permissionLevel={props.permissionLevel}
-        onPermissionLevelChange={props.onPermissionLevelChange}
-      />
+      {/* XAML Composer 接管时隐藏 Web 底部栏（P6 输入框迁移块；flag 关闭即回退）。 */}
+      <Show when={!xamlComposer}>
+        <ComposerDock
+          goalBar={<TodoStatusStrip dashboard={props.dashboardStore} />}
+          onSend={handleSend}
+          onStop={handleStop}
+          isStreaming={streaming}
+          hasPendingGate={() => activeInteraction(session()) !== null}
+          queue={followUps}
+          mode={mode()}
+          onModeChange={handleSetMode}
+          model={usage().model}
+          contextTokens={usage().contextTokens}
+          contextLimit={usage().contextLimit}
+          permissionLevel={props.permissionLevel}
+          onPermissionLevelChange={props.onPermissionLevelChange}
+        />
+      </Show>
       <GitDiffPanel
         open={showGitWorkspace()}
         seed={seed()}

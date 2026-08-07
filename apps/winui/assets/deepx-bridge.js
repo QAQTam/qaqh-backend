@@ -56,7 +56,7 @@
   window.__DEEPX_XAML_SIDEBAR__ = true; // 原生侧栏接管：renderer 隐藏 web 侧栏（可回退）
   // P-3 统一 flag（WORKFLOW §6.1）：新组件查询 __DEEPX_XAML__.<component>；
   // 旧 __DEEPX_XAML_SIDEBAR__ 保留兼容已上线代码。
-  window.__DEEPX_XAML__ = { sidebar: true, header: true, home: true, settings: true, info: true };
+  window.__DEEPX_XAML__ = { sidebar: true, header: true, home: true, settings: true, info: true, interaction: true, composer: true, interactionDirect: true, composerDirect: true };
   window.deepx = {
     backend: {
       connect: function () { return invoke('backend.connect'); },
@@ -103,7 +103,36 @@
       setSettings: function (state) { return invoke('shell.setSettings', state || {}); },
       // 壳设置页动作回传（host → renderer 事件）：
       //   { action: "lang"|"theme"|"permission", lang?|mode?|level? }
-      onSettingsAction: function (l) { return sub('shell.settingsAction', l); }
+      onSettingsAction: function (l) { return sub('shell.settingsAction', l); },
+      // XAML 交互模态（P5 交互迁移块）：Web 状态投影 → 壳覆盖层面板。
+      //   { kind: "none"|"permission"|"ask", id, seed, ...permission/ask 字段 }
+      setInteraction: function (state) { return invoke('shell.setInteraction', state || {}); },
+      // 交互数据源直连（读路径 Rust 直连 daemon，不经 WebView）：
+      // interactionDirect flag 注入后调用一次——壳侧改由 control/tool
+      // 事件解析组装交互快照，Web 停止 setInteraction 投影（可回退：
+      // flag 关闭即恢复投影路径，桥契约不变）。
+      setInteractionDirect: function () { return invoke('shell.setInteractionDirect', {}); },
+      // 壳覆盖层面板动作回传（host → renderer 事件）：
+      //   { action: "permission", id, approved, trustFolder }
+      //   { action: "ask", id, answers: [{question_id, answer}] }
+      //   { action: "ask_dismiss", id }
+      onInteractionAction: function (l) { return sub('shell.interactionAction', l); },
+      // XAML Composer（P6 输入框迁移块）：Web 状态投影 → 壳底部栏。
+      //   { isStreaming, hasPendingGate, mode, model, contextTokens,
+      //     contextLimit, permissionLevel, queueCount, queueItems,
+      //     submitError, sendAck }
+      setComposer: function (state) { return invoke('shell.setComposer', state || {}); },
+      // Composer 数据源直连（读路径 Rust 直连 daemon，不经 WebView）：
+      // composerDirect flag 注入后调用一次——壳侧 isStreaming/gate/model/
+      // context 改由 conversation 事件解析组装；投影照发（mode/queue/
+      // sendAck 等写路径伴生状态仍由本侧持有），壳侧合并读取。flag 关闭
+      // 即回退纯投影路径。
+      setComposerDirect: function () { return invoke('shell.setComposerDirect', {}); },
+      // 壳底部栏动作回传（host → renderer 事件）：
+      //   { action: "send", text, imagePaths: [{fileName,mimeType,path}], textFiles: [{fileName,path}] }
+      //   { action: "stop" } | { action: "mode", mode } | { action: "permission", level }
+      //   | { action: "queue_remove", id }
+      onComposerAction: function (l) { return sub('shell.composerAction', l); }
     },
     desktop: {
       openDialog: function (o) { return invoke('desktop.openDialog', o || {}); },

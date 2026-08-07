@@ -64,6 +64,71 @@ interface DeepxDesktopApi {
     onSettingsAction(
       listener: (action: { action: string; lang?: string; mode?: string; level?: number }) => void,
     ): () => void;
+    /** XAML 交互模态状态投影（Web → 壳；镜像 bridge.rs `InteractionState`）。 */
+    setInteraction(state: {
+      kind: "none" | "permission" | "ask" | "plan";
+      id?: string;
+      seed?: string;
+      toolName?: string;
+      reason?: string;
+      paths?: string[];
+      category?: string;
+      level?: number;
+      risk?: "low" | "medium" | "high";
+      consequence?: string;
+      questions?: Array<{
+        id: string;
+        question: string;
+        options?: string[];
+        allowCustom: boolean;
+      }>;
+      planContent?: string;
+      reviewType?: string;
+      todoItems?: Array<{ id: string; title: string; description: string; complexity: string }> | null;
+    }): Promise<unknown>;
+    /** 置位交互数据源直连（Rust 直连 daemon；置位后 setInteraction 投影停发）。 */
+    setInteractionDirect(): Promise<unknown>;
+    /** 壳交互覆盖层面板动作回传（host → renderer 事件）。 */
+    onInteractionAction(
+      listener: (action: {
+        action: string;
+        id?: string;
+        approved?: boolean;
+        trustFolder?: boolean;
+        answers?: Array<{ question_id: string; answer: string }>;
+        message?: string | null;
+        autonomous?: boolean;
+      }) => void,
+    ): () => void;
+    /** XAML Composer 状态投影（Web → 壳；镜像 bridge.rs `ComposerState`）。 */
+    setComposer(state: {
+      seed: string;
+      isStreaming: boolean;
+      hasPendingGate: boolean;
+      mode: string;
+      model: string;
+      contextTokens: number;
+      contextLimit: number;
+      permissionLevel: number;
+      queueCount: number;
+      queueItems: Array<{ id: string; text: string }>;
+      submitError: string;
+      sendAck: number;
+    }): Promise<unknown>;
+    /** 置位 Composer 数据源直连（Rust 直连 daemon；壳侧合并读取投影）。 */
+    setComposerDirect(): Promise<unknown>;
+    /** 壳底部栏动作回传（host → renderer 事件）。 */
+    onComposerAction(
+      listener: (action: {
+        action: string;
+        text?: string;
+        imagePaths?: Array<{ fileName: string; mimeType: string; path: string }>;
+        textFiles?: Array<{ fileName: string; path: string }>;
+        mode?: string;
+        level?: number;
+        id?: string;
+      }) => void,
+    ): () => void;
   };
   desktop: {
     openDialog(options: { directory?: boolean; multiple?: boolean; title?: string }): Promise<string | string[] | null>;
@@ -107,7 +172,7 @@ declare global {
     /** WinUI 壳注入：原生 XAML 侧栏接管时置 true（renderer 隐藏 web 侧栏）。 */
     __DEEPX_XAML_SIDEBAR__?: boolean;
     /** P-3 统一 flag（WORKFLOW §6.1）：`{ sidebar: true, header: true, home: true, settings: true, ... }`。 */
-    __DEEPX_XAML__?: Partial<Record<"sidebar" | "header" | "home" | "settings" | "info", boolean>>;
+    __DEEPX_XAML__?: Partial<Record<"sidebar" | "header" | "home" | "settings" | "info" | "interaction" | "composer" | "interactionDirect" | "composerDirect", boolean>>;
     /** WebView2 宿主桥（winui 壳）：postMessage 双向通道。 */
     chrome?: {
       webview?: {

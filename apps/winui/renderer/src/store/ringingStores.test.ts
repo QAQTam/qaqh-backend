@@ -285,8 +285,9 @@ describe("conversation events (single path applier)", () => {
     expect(state.turns).toHaveLength(1);
 
     // The worker reuses t12 for the new input (message store counting lags).
+    // Same-id turn must be replaced, not duplicated.
     state = reduce({ type: "turn_started", turn_id: "t12", user_text: "new question" });
-    expect(state.turns).toHaveLength(1, "same-id turn must be replaced, not duplicated");
+    expect(state.turns).toHaveLength(1);
     const turn = state.turns[0]!;
     expect(turn.userText).toBe("new question");
     expect(turn.status).toBe("running");
