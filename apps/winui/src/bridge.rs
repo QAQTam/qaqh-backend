@@ -64,6 +64,15 @@ impl OutMsg {
     }
 }
 
+/// 直连模式的发送反馈（替代 Web setComposer 的 submitError/sendAck 投影）。
+#[derive(Debug, Clone, Default)]
+struct ComposerFeedback {
+    /// 最近发送失败原因（空 = 无错误；composer_bar 显示且不清空草稿）。
+    submit_error: String,
+    /// 发送 accepted 后递增（悲观清空信号；UI 侧已本地清空，保留兼容）。
+    send_ack: u64,
+}
+
 /// XAML 标题栏状态（headerDirect：Rust 从壳导航/会话列表/conversation
 /// 事件组装；Web `shell.setHeader` 投影仅在直连关闭时生效）。
 ///
@@ -855,6 +864,10 @@ pub struct BridgeCore {
     /// B 组（mode/permissionLevel/queue/sendAck/submitError——写路径伴生状态）
     /// 保留 Web 投影，`composer_snapshot` 合并读取。flag 关即回退纯投影。
     composer_direct: AtomicBool,
+    /// 直连模式的 mode 本地缓存（Web 单例语义：会话共享，默认 "plan"）。
+    composer_mode: Mutex<String>,
+    /// 直连模式的发送反馈（submitError 显示 / sendAck 清空信号）。
+    composer_feedback: Mutex<ComposerFeedback>,
     /// 原生 ChatView 事件队列：conversation 频道渲染相关事件（turn/round/
     /// delta/checkpoint）直连缓存，UI 线程 timer drain 喂 Transcript。
     /// 事件为 wire JSON（`{"type":...}`），`chat_adapter::internal_event`
@@ -1217,21 +1230,38 @@ impl BridgeCore {
             .get(&active)
             .map(|m| m.has_pending())
             .unwrap_or(false);
-        let state = ComposerState {
-            seed: active,
-            is_streaming: activity.as_ref().map(|a| a.is_streaming(now)).unwrap_or(false),
-            has_pending_gate: gate,
-            model: activity.as_ref().map(|a| a.model.clone()).unwrap_or_default(),
-            context_tokens: activity.as_ref().map(|a| a.prompt_tokens).unwrap_or(0),
-            context_limit: activity.as_ref().map(|a| a.context_limit).unwrap_or(0),
-            // B 组：Web 投影保留（写路径伴生状态）。
-            mode: proj.mode,
-            permission_level: proj.permission_level,
-            queue_count: proj.queue_count,
-            queue_items: proj.queue_items,
-            submit_error: proj.submit_error,
-            send_ack: proj.send_ack,
-        };
+        let is_streaming = activity.as_ref().map(|a| a.is_streaming(now)).unwrap_or(false);
+        let model = activity.as_ref().map(|a| a.model.clone()).unwrap_or_default();
+        let context_tokens = activity.as_ref().map(|a| a.prompt_tokens).unwrap_or(0);
+        let context_limit = activity.as_ref().map(|a| a.context_limit).unwrap_or(0);
+        let mut state = ComposerState::default();
+        state.seed = active;
+        state.is_streaming = is_streaming;
+        state.has_pending_gate = gate;
+        state.model = model;
+        state.context_tokens = context_tokens;
+        state.context_limit = context_limit;
+        // B 组本地化（WebView 移除：mode 乐观缓存、权限级读 config.load
+        // 缓存、queue 本地无排队概念恒空、反馈由直发层写入）。
+        state.mode = self
+            .composer_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        state.permission_level = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|s| s.permission_level)
+            .unwrap_or(1);
+        let fb = self
+            .composer_feedback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        state.submit_error = fb.submit_error;
+        state.send_ack = fb.send_ack;
         (state, rev)
     }
 
@@ -1316,25 +1346,20 @@ impl BridgeCore {
 
     /// Web `shell.setComposer` 载荷落缓存并递增 rev。
     /// 反序列化失败时保留旧状态（静默丢弃坏载荷，不中断链路）。
-    /// 直连模式下**只落 B 组**（mode/permissionLevel/queue/sendAck/submitError），
-    /// A 组（isStreaming/gate/model/context）丢弃——由 composer_snapshot 合并
-    /// 时以 Rust 直连为准，避免双源竞态（Web 投影必然晚于本地事件解析）。
+    /// 直连模式（默认）整体忽略——A/B 组均由 Rust 直连组装
+    /// （A：conversation 事件；B：本地 mode/queue 缓存 + settings 权限级），
+    /// Web 投影必然过时，接受会覆盖直连状态（双源竞态）。
     pub fn apply_composer(&self, payload: Value) {
+        if self.composer_direct.load(Ordering::Relaxed) {
+            log_diag("apply_composer: direct mode active, ignoring Web projection");
+            return;
+        }
         let Ok(state) = serde_json::from_value::<ComposerState>(payload) else {
             log_diag("apply_composer: invalid payload, keeping previous state");
             return;
         };
         let mut cur = self.composer.lock().unwrap_or_else(|e| e.into_inner());
-        if self.composer_direct.load(Ordering::Relaxed) {
-            cur.mode = state.mode;
-            cur.permission_level = state.permission_level;
-            cur.queue_count = state.queue_count;
-            cur.queue_items = state.queue_items;
-            cur.submit_error = state.submit_error;
-            cur.send_ack = state.send_ack;
-        } else {
-            *cur = state;
-        }
+        *cur = state;
         self.composer_rev.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1969,8 +1994,28 @@ impl BridgeCore {
                 )
                 .await
             {
-                Ok(_) => log_diag("send_message accepted"),
-                Err(err) => log_diag(&format!("send_message failed: {err}")),
+                Ok(_) => {
+                    log_diag("send_message accepted");
+                    // B 组反馈本地写入：ack 递增（清空信号）+ 清除错误。
+                    let mut fb = core
+                        .composer_feedback
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    fb.send_ack = fb.send_ack.wrapping_add(1);
+                    fb.submit_error.clear();
+                    drop(fb);
+                    core.composer_rev.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(err) => {
+                    log_diag(&format!("send_message failed: {err}"));
+                    let mut fb = core
+                        .composer_feedback
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    fb.submit_error = err.to_string();
+                    drop(fb);
+                    core.composer_rev.fetch_add(1, Ordering::Relaxed);
+                }
             }
         });
     }
@@ -2015,6 +2060,20 @@ impl BridgeCore {
                 Err(err) => log_diag(&format!("workspace.set failed: {err}")),
             }
         });
+    }
+
+    /// 会话工作模式切换：`conversation_set_mode` 命令 + 本地 mode 缓存
+    /// （乐观更新——daemon 无 mode 领域事件，对齐 Web 单例 mode 语义）。
+    pub fn spawn_set_mode(&self, mode: &str) {
+        *self
+            .composer_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = mode.to_string();
+        self.composer_rev.fetch_add(1, Ordering::Relaxed);
+        self.spawn_conversation_command(json!({
+            "type": "conversation_set_mode",
+            "mode": mode,
+        }));
     }
 
     /// 撤销上一回合：`conversation_undo_turn`（turn_id 来自 per-seed 缓存，
@@ -3092,7 +3151,11 @@ impl Bridge {
                     composer: Mutex::new(ComposerState::default()),
                     composer_rev: AtomicU64::new(0),
                     composer_activity: Mutex::new(HashMap::new()),
-                    composer_direct: AtomicBool::new(false),
+                    // Composer 原生迁移完成：默认直连（A 组事件解析 + B 组
+                    // 本地缓存，不经 Web 投影）。
+                    composer_direct: AtomicBool::new(true),
+                    composer_mode: Mutex::new("plan".to_string()),
+                    composer_feedback: Mutex::new(ComposerFeedback::default()),
                     // ChatView 原生迁移完成：默认直连（conversation 渲染事件
                     // 入队供原生 ChatView 消费）；Web 注入 flag 可再置位（幂等）。
                     chat_events: Mutex::new(std::collections::VecDeque::new()),
@@ -3197,6 +3260,11 @@ impl Bridge {
     /// conversation 频道命令直发（cancel/compact/set_mode 等）。
     pub fn spawn_conversation_command(&self, command: Value) {
         self.core.spawn_conversation_command(command);
+    }
+
+    /// 会话工作模式切换（命令 + 本地 mode 缓存）。
+    pub fn spawn_set_mode(&self, mode: &str) {
+        self.core.spawn_set_mode(mode);
     }
 
     /// 发送消息（附件上传 ContentRef 后直发 send_message）。
@@ -3535,7 +3603,9 @@ mod tests {
             composer: Mutex::new(ComposerState::default()),
             composer_rev: AtomicU64::new(0),
             composer_activity: Mutex::new(HashMap::new()),
-            composer_direct: AtomicBool::new(false),
+            composer_direct: AtomicBool::new(true),
+            composer_mode: Mutex::new("plan".to_string()),
+            composer_feedback: Mutex::new(ComposerFeedback::default()),
             chat_events: Mutex::new(std::collections::VecDeque::new()),
             chat_timeline: Mutex::new(None),
             chat_rev: AtomicU64::new(0),
@@ -3867,7 +3937,8 @@ mod tests {
     fn composer_snapshot_merges_direct_and_projection() {
         let core = test_core();
         core.set_active_seed("seed1");
-        // 非直连：投影全量透传（现状路径）。
+        // 非直连：投影全量透传（flag 关闭时的回退路径）。
+        core.composer_direct.store(false, Ordering::Relaxed);
         core.apply_composer(json!({
             "seed": "seed1", "isStreaming": true, "hasPendingGate": true,
             "mode": "plan", "model": "m1", "contextTokens": 9, "contextLimit": 100,
@@ -3908,12 +3979,19 @@ mod tests {
         assert_eq!(s.context_tokens, 42);
         assert_eq!(s.context_limit, 200_000);
         assert_eq!(s.seed, "seed1");
-        // B 组：投影保留。
-        assert_eq!(s.mode, "code");
-        assert_eq!(s.permission_level, 2);
-        assert_eq!(s.queue_count, 2);
-        assert_eq!(s.send_ack, 6);
+        // B 组本地化（WebView 移除）：mode 乐观缓存、权限级读 config.load
+        // 缓存（此处未加载 → 1）、queue 恒空、反馈由直发层写入。
+        assert_eq!(s.mode, "plan"); // 本地默认（投影的 "code" 被忽略）
+        assert_eq!(s.permission_level, 1);
+        assert_eq!(s.queue_count, 0);
+        assert_eq!(s.send_ack, 0);
         assert_eq!(s.submit_error, "");
+        // 本地缓存生效验证：mode 切换 + 发送反馈写入。
+        *core.composer_mode.lock().unwrap() = "code".into();
+        core.composer_feedback.lock().unwrap().send_ack = 7;
+        let (s2, _) = core.composer_snapshot();
+        assert_eq!(s2.mode, "code");
+        assert_eq!(s2.send_ack, 7);
         // hasPendingGate 联动交互机器。
         assert!(!s.has_pending_gate);
         core.apply_interaction_event("seed1", parse_interaction_event(&ask_requested_event("i1", "t1")).expect("parse"));

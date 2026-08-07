@@ -436,10 +436,7 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let mode = state.mode.clone();
         move || {
             let next = if mode == "plan" { "code" } else { "plan" };
-            bridge.spawn_conversation_command(serde_json::json!({
-                "type": "conversation_set_mode",
-                "mode": next,
-            }));
+            bridge.spawn_set_mode(next);
         }
     };
     let on_permission: Arc<dyn Fn(u64) + 'static> = Arc::new({
