@@ -1167,6 +1167,60 @@ impl BridgeCore {
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
+    /// 缓存 timeline 快照（`on_timeline_snapshot` 回调主体；独立方法便于单测）。
+    ///
+    /// - **seed 标记**：优先从快照 body 顶层读取（daemon 写回请求 seed，
+    ///   权威来源）；缺失才回退 `last_timeline_seed`。不能依赖后者——
+    ///   `spawn_timeline_refresh` 重拉时不更新它，且并发 resume 交错时它
+    ///   会被后设值覆盖，快照被错误标记 → ChatView 泵永远判 stale →
+    ///   无限 deferred 循环 → 历史永不恢复（日志风暴实证）。
+    /// - **层级解包**：turns 在 `snapshot` 子对象（TimelineSnapshot：
+    ///   `{"watermark", "turns"}`）。缓存子对象——消费方
+    ///   `chat_adapter::timeline_turns` 直接读顶层 `turns`；缓存完整 body
+    ///   则解析恒空 → restore 空历史 → ChatView 恢复后仍空白。
+    fn cache_timeline_snapshot(&self, snapshot: Value) {
+        let seed = snapshot
+            .get("seed")
+            .and_then(|s| s.as_str())
+            .map(str::to_string)
+            .unwrap_or_default();
+        let seed = if seed.is_empty() {
+            // 防御：client 已校验 seed 字段存在，缺失时回退旧标记。
+            self.last_timeline_seed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        } else {
+            seed
+        };
+        let inner = snapshot.get("snapshot").cloned().unwrap_or(snapshot);
+        *self
+            .chat_timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((seed.clone(), inner.clone()));
+        self.chat_rev.fetch_add(1, Ordering::Relaxed);
+        // 标题栏直连：turns 计数在此缓存（不随 chat_view consume 清空）
+        // ——undo_disabled 判定源。
+        let turns = chat_adapter::timeline_turns(&inner).len();
+        self.header_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(seed.clone(), turns);
+        // 撤销直发：快照恢复的历史会话缓存最近回合 id。
+        if let Some(tid) = chat_adapter::timeline_turns(&inner)
+            .last()
+            .map(|t| t.turn_id.clone())
+        {
+            self.last_turn_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(seed.clone(), tid);
+        }
+        if self.header_direct.load(Ordering::Relaxed) {
+            self.refresh_header();
+        }
+    }
+
     /// 主动重拉指定 seed 的 timeline 快照（快照 seed 不匹配时的恢复路径）。
     /// daemon 对重复 activate 幂等（重推快照，无害）；节流 1s 防 16ms 泵
     /// 每 tick 触发。失败静默（快照保留在缓存，下一轮节流到期再试）。
@@ -1417,13 +1471,12 @@ impl BridgeCore {
         });
     }
 
-    /// 恢复会话：仅 `attach(seed)`（session_resume 语义）+ navigate chat。
-    /// bootstrap/timeline 由 renderer 的 `resumeSession` 完成（幂等，避免双拉）。
+    /// 恢复会话：`attach(seed)`（session_resume 语义）+ 显式激活 timeline 流
+    /// （快照 restore 历史）+ navigate chat。
     ///
     /// 幂等：seed 已是 active 时跳过 attach（挡重复 attach 的网络往返），
-    /// **但仍 emit `shell.navigate`**——壳的 active_seed 只代表壳侧状态，
-    /// renderer 视图可能已离开 chat（用户点过技能/设置，或 resume 失败回
-    /// home），必须通知 renderer 切回，否则"点同一会话无反应"。
+    /// 但仍 navigate 回 chat——壳的 current_view 可能已离开 chat（用户点过
+    /// 技能/设置，或 resume 失败回 home），否则"点同一会话无反应"。
     pub fn spawn_resume(&self, seed: &str) {
         if self.active_seed() == seed {
             log_diag(&format!("resume {seed}: already active, re-navigate only"));
@@ -2180,38 +2233,10 @@ impl BridgeCore {
                 on_timeline_snapshot: Arc::new({
                     let core = self.self_arc();
                     move |snapshot: Value| {
-                        // 原生 ChatView：缓存权威 turns 历史（resume 数据源），
-                        // 以最近激活的 timeline seed 标记（防跨会话错灌）。
-                        let seed = core
-                            .last_timeline_seed
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .clone();
-                        *core
-                            .chat_timeline
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = Some((seed.clone(), snapshot.clone()));
-                        core.chat_rev.fetch_add(1, Ordering::Relaxed);
-                        // 标题栏直连：turns 计数在此缓存（不随 chat_view
-                        // consume 清空）——undo_disabled 判定源。
-                        let turns = chat_adapter::timeline_turns(&snapshot).len();
-                        core.header_turns
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(seed.clone(), turns);
-                        // 撤销直发：快照恢复的历史会话缓存最近回合 id。
-                        if let Some(tid) = chat_adapter::timeline_turns(&snapshot)
-                            .last()
-                            .map(|t| t.turn_id.clone())
-                        {
-                            core.last_turn_ids
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(seed.clone(), tid);
-                        }
-                        if core.header_direct.load(Ordering::Relaxed) {
-                            core.refresh_header();
-                        }
+                        // 原生 ChatView：缓存权威 turns 历史（resume 数据源）。
+                        // seed 标记与层级解包见 `cache_timeline_snapshot`——
+                        // 从快照 body 顶层读权威 seed，缓存 `snapshot` 子对象。
+                        core.cache_timeline_snapshot(snapshot);
                         // WebView 移除：不再 emit timeline.snapshot（原生 ChatView
                         // 从 chat_timeline 缓存消费）。
                     }
@@ -3349,6 +3374,48 @@ mod tests {
         *core.timeline_stall_since.lock().unwrap() =
             Some(now - STALL_THRESHOLD - Duration::from_secs(1));
         assert!(core.compute_stall(now));
+    }
+
+    /// 快照缓存回归：seed 以 body 顶层为准（refresh/并发路径 last_timeline_seed
+    /// 陈旧时不错标），且缓存解包 `snapshot` 子对象（timeline_turns 可解析）。
+    /// 此前的两个根因——last_timeline_seed 错标 → 无限 deferred；缓存完整
+    /// body → 解析恒空 → restore 空历史——曾导致 ChatView 历史永不恢复。
+    #[test]
+    fn timeline_snapshot_caches_authoritative_seed_and_inner() {
+        let core = test_core();
+        // 模拟陈旧标记（spawn_timeline_refresh 路径不更新 last_timeline_seed）。
+        *core.last_timeline_seed.lock().unwrap() = "stale-seed".to_string();
+        let body = serde_json::json!({
+            "schema": "deepx.Ringing",
+            "version": 1,
+            "server_epoch": "e1",
+            "seed": "s1",
+            "snapshot": {
+                "watermark": 7,
+                "turns": [
+                    {"turn_id":"t1","user_text":"hi","state":"completed","rounds":[]},
+                    {"turn_id":"t2","user_text":"again","state":"running","rounds":[]}
+                ]
+            }
+        });
+        core.cache_timeline_snapshot(body);
+        // seed 标记取 body 权威值，不受 last_timeline_seed 陈旧影响。
+        let (cached_seed, cached) = core.chat_timeline.lock().unwrap().clone().expect("cached");
+        assert_eq!(cached_seed, "s1");
+        // 解包 snapshot 子对象：turns 可直接解析（完整 body 会恒空）。
+        assert!(cached.get("turns").is_some(), "must unwrap snapshot inner");
+        let turns = chat_adapter::timeline_turns(&cached);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].turn_id, "t1");
+        // 连带投影：header_turns / last_turn_ids 以权威 seed 写入。
+        assert_eq!(core.header_turns.lock().unwrap().get("s1"), Some(&2));
+        assert_eq!(
+            core.last_turn_ids.lock().unwrap().get("s1").map(String::as_str),
+            Some("t2")
+        );
+        // 消费后缓存清空（consume 语义保持）。
+        core.chat_timeline_consume();
+        assert!(core.chat_timeline.lock().unwrap().is_none());
     }
 
     #[test]

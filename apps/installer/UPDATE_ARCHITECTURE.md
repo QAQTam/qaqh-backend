@@ -9,7 +9,7 @@ DeepX 使用同一套更新计划和应用引擎处理首次安装、离线更�
 
 - `DeepXInstaller.exe` 提供离线更新源、首次安装 UI 和 Windows 系统集成。
 - `deepx-updater.exe` 是唯一的修改、更新、校验、回滚和卸载维护执行器。
-- Electron 主进程协调 renderer/shell 生命周期，并负责 daemon maintenance。
+- WinUI3 原生壳（`DeepX.exe`，windows-reactor）协调前端视图生命周期，并负责 daemon maintenance。
 - daemon 通过现有 `stop-if-idle` 接口安全退出。
 
 Installer 不是常驻服务。它与未来 HTTP/CDN 都实现 `UpdateSource`，向 updater
@@ -19,28 +19,27 @@ Installer 不是常驻服务。它与未来 HTTP/CDN 都实现 `UpdateSource`，
 
 | 组件 | 内容 | 最小切换动作 |
 | --- | --- | --- |
-| `renderer` | HTML、CSS、renderer JS、字体和静态资源 | reload BrowserWindow |
-| `shell` | Electron Main、Preload、运行时 Node 依赖 | 重启 Electron，保留 daemon |
-| `frontend` | 当前阶段的 shell + renderer (`app.asar`) | 重启 Electron，保留 daemon |
-| `backend` | `deepx-daemon.exe`、daemon manifest | 只重启 daemon |
-| `runtime` | Electron/Chromium Runtime、原生模块 | 重启 Electron |
-| `full` | runtime + frontend + backend + 系统安装文件 | 首次安装、修复或完整升级 |
+| `runtime` | `DeepX.exe`（WinUI3 原生壳）+ WinAppSDK self-contained 运行时 DLL/PRI/MUI | 重启壳，保留 daemon |
+| `backend` | `deepx-daemon.exe`、`deepx-workspace.exe`、daemon manifest | 只重启 daemon |
+| `updater` | `deepx-updater.exe` | 替换文件即可 |
+| `full` | runtime + backend + updater + 系统安装文件 | 首次安装、修复或完整升级 |
 
-在 renderer/shell 完成拆分前，`frontend` 保持为一个需要重启 Electron 的组件。
+前端与壳已合一（WebView/renderer 移除），不存在独立 `frontend` 组件；
+WinUI3 壳是唯一桌面前端，随 `runtime` 组件整体更新。
 
 ## 3. 稳定目录
 
-第一阶段保持 Electron 当前目录约定：
+保持 WinUI 壳当前目录约定：
 
 ```text
 DeepX/
-├── DeepX.exe
+├── DeepX.exe                   # WinUI3 原生壳
 ├── deepx-updater.exe
-├── .deepx-install-root.json       # 与规范化安装根绑定的破坏性操作哨兵
+├── .deepx-install-root.json    # 与规范化安装根绑定的破坏性操作哨兵
 ├── install-state.json
 ├── resources/
-│   ├── app.asar
 │   ├── deepx-daemon.exe
+│   ├── deepx-workspace.exe
 │   └── daemon-manifest.json
 └── .deepx-update/
     ├── pending.json
@@ -50,8 +49,8 @@ DeepX/
         └── runner/deepx-updater.exe
 ```
 
-1.0 引入稳定 launcher 后，再迁移为 `runtime/`、`components/` 和版本目录。
-Updater 协议不依赖物理目录，因此迁移不改变 UpdateSource/Catalog 接口。
+WinAppSDK self-contained 运行时（DLL/PRI/MUI）紧邻 `DeepX.exe` 布局。
+Updater 协议不依赖物理目录，目录演进不改变 UpdateSource/Catalog 接口。
 
 ## 4. UpdateSource
 
@@ -189,11 +188,11 @@ Updater 输出确定性的 `UpdatePlan`：
 
 ## 9. Backend 无窗口退出升级
 
-Electron 的 `DaemonControlClient` 已具备 daemon identity 检查、`stop-if-idle`、
+WinUI 壳的 bridge（`deepx-client`）已具备 daemon identity 检查、`stop-if-idle`、
 等待退出、重新拉起、重连和 session re-attach。Updater 复用该生命周期。
 
 ```text
-Updater                 Electron Main              daemon
+Updater                 WinUI 壳 (DeepX.exe)         daemon
    | prepareBackend(op)      |                       |
    |------------------------>| maintenance=true      |
    |                         | session.activity      |
@@ -220,19 +219,17 @@ Updater                 Electron Main              daemon
 - updater 应用成功后重新读取 `daemon-manifest.json`，再启动 daemon。
 - 新 daemon identity/协议验证失败时恢复 `.previous` 并拉起旧 daemon。
 
-## 10. Frontend 更新
+## 10. WinUI 壳（runtime）更新
 
-当前 frontend 是整个 `app.asar`，不能安全热替换：
+前端与壳合一：`DeepX.exe`（WinUI3 原生）是唯一桌面前端，更新即整体替换壳与
+self-contained 运行时文件，不能安全热替换运行中的 exe：
 
 1. Updater 将 Bundle stage 到 pending。
-2. Electron 显示“重启完成更新”。
-3. 用户确认后，Electron 释放 lease、断开 daemon，但不停止 daemon。
-4. Electron 让已安装 updater 执行 `handoff`；updater 将自身复制到事务 runner。
-5. Electron 退出；updater 替换 `app.asar` 并启动 `DeepX.exe`。
-6. 新 Electron 连接仍在运行的兼容 daemon。
-
-renderer/shell 拆分后，纯 renderer 更新可通过切换 renderer build 指针并 reload
-BrowserWindow 完成；shell、preload 或 main 变化仍需重启 Electron。
+2. WinUI 壳显示“重启完成更新”。
+3. 用户确认后，壳释放 lease、断开 daemon，但不停止 daemon。
+4. 壳让已安装 updater 执行 `handoff`；updater 将自身复制到事务 runner。
+5. 壳退出；updater 替换 `DeepX.exe` 及运行时文件并启动 `DeepX.exe`。
+6. 新壳连接仍在运行的兼容 daemon。
 
 ## 11. 本地协调接口
 
@@ -240,12 +237,12 @@ BrowserWindow 完成；shell、preload 或 main 变化仍需重启 Electron。
 
 ```text
 Installer --push-update -> updater stage
-updater -> .deepx-update/pending.json -> Electron Main IPC -> renderer UI
+updater -> .deepx-update/pending.json -> WinUI 壳（bridge 轮询/启动恢复）
 ```
 
-`pending.json` 是持久通知，即使 Electron 当时未运行，下次启动也能恢复提示。
-renderer 只能通过 context-isolated preload 调用 `checkUpdate/applyUpdate`，不能直接
-指定任意程序；Electron Main 会验证 operation 位于当前安装的 staging 根目录内。
+`pending.json` 是持久通知，即使壳当时未运行，下次启动也能恢复提示。
+壳只会对位于当前安装 staging 根目录内的 operation 执行 `checkUpdate/applyUpdate`，
+不能指定任意程序。
 
 若以后需要 installer/updater 主动推送细粒度进度，再增加当前用户 ACL 的 Named
 Pipe；MVP 不为单机离线更新引入常驻服务或额外 IPC 服务端。
@@ -322,7 +319,7 @@ Windows `ModifyPath` 指向 `deepx-updater.exe maintain --interactive`；
 
 - [x] 新建 `deepx-updater.exe`。
 - [x] 实现 Directory Source、规划、双层校验、stage 和 apply。
-- [x] 通过 Electron Main 协调 `stop-if-idle`、替换、重启和 session re-attach。
+- [x] 通过 WinUI 壳 bridge 协调 `stop-if-idle`、替换、重启和 session re-attach。
 - [x] 新 daemon 连接会校验 manifest identity；失败时恢复 `.previous` 与状态快照。
 - [ ] EmbeddedSfx Source（当前由 installer `--push-update` 投递目录 Source）。
 
@@ -330,19 +327,17 @@ Windows `ModifyPath` 指向 `deepx-updater.exe maintain --interactive`；
 
 - [x] 实现 durable pending、runner handoff 和 relaunch。
 - [x] UI 显示更新状态和立即/稍后重启。
-- [x] Electron 重启时保留 daemon。
-- [x] runner 使用进程句柄显式等待旧 Electron 退出。
-- [x] 新 Electron 在 renderer + daemon 就绪后写健康回执；Frontend 失败自动回滚。
+- [x] WinUI 壳重启时保留 daemon。
+- [x] runner 使用进程句柄显式等待旧壳退出。
+- [x] 新壳在 daemon 就绪后写健康回执；Frontend 失败自动回滚。
 - [ ] Full 失败自动回滚依赖 1.0 的版本化 runtime/launcher 目录；当前由 Full
   Installer 执行修复。
 - [x] updater 提供统一维护 UI 和显式 uninstall 操作。
 - [x] Windows 注册 ModifyPath、交互卸载和静默卸载入口。
 - [x] 移除旧 `uninstall.exe` 兼容入口，由 updater 统一负责卸载。
 
-### M4：Renderer/Shell 与联网 Source
+### M4：联网 Source
 
-- 拆分 renderer/shell。
-- 实现 renderer reload。
 - 实现签名 catalog 和 `HttpUpdateSource`。
 - 需要时增加精确 base hash 的二进制差分。
 
@@ -350,6 +345,6 @@ Windows `ModifyPath` 指向 `deepx-updater.exe maintain --interactive`；
 
 - updater 常驻 Windows Service。
 - 未经用户允许强制结束活动任务。
-- 在运行中的 Electron 内覆盖 `app.asar`。
+- 在运行中的 WinUI 壳进程内覆盖 `DeepX.exe`。
 - 仅靠文件名或版本号选择二进制差分。
 - Installer 和 updater 各自维护一套安装算法。

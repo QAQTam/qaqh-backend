@@ -30,6 +30,18 @@ pub enum RoundDeltaKind {
     Answering,
 }
 
+/// provider 内建/服务端工具状态（对齐 `deepx-domain::ProviderToolState`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderToolState {
+    /// 调用进行中。
+    InProgress,
+    /// 搜索执行中。
+    Searching,
+    /// 已完成（终态）。
+    Completed,
+}
+
 /// 会话对话事件（渲染所需子集，tag 与上游一致）。
 ///
 /// 未知变体（`provider_retrying` / `usage_updated` / `compact_*` /
@@ -62,6 +74,17 @@ pub enum ConversationEvent {
         kind: RoundDeltaKind,
         text: String,
     },
+    /// provider 内建/服务端工具状态（如 web_search；replaceable，按 call_id
+    /// 合并）。此前缺失该变体 → 被 `Unknown` 吞掉 → 前端不显示 tool 消息。
+    ProviderToolStatus {
+        turn_id: String,
+        round_num: u32,
+        /// provider 侧 call id，**不是** DeepX tool_call_id。
+        call_id: String,
+        /// 目前固定 "web_search"，为未来 provider 内建工具预留。
+        tool_kind: String,
+        state: ProviderToolState,
+    },
     /// 一轮 API 调用完成的权威终态。
     RoundCompleted {
         turn_id: String,
@@ -91,6 +114,7 @@ impl ConversationEvent {
             | Self::TurnFailed { turn_id, .. }
             | Self::RoundDelta { turn_id, .. }
             | Self::BlockCheckpoint { turn_id, .. }
+            | Self::ProviderToolStatus { turn_id, .. }
             | Self::RoundCompleted { turn_id, .. } => turn_id,
             Self::Unknown => "",
         }
@@ -116,5 +140,34 @@ mod tests {
             json.contains("\"type\":\"round_delta\"") && json.contains("\"kind\":\"answering\""),
             "wire shape: {json}"
         );
+    }
+
+    /// `provider_tool_status` 真实 wire 形状（deepx-domain `ProviderToolStatus`）
+    /// 可反序列化——此前缺失该变体被 `Unknown` 吞掉，tool 消息不显示。
+    #[test]
+    fn provider_tool_status_deserializes() {
+        let json = serde_json::json!({
+            "type": "provider_tool_status",
+            "turn_id": "t1",
+            "round_num": 0,
+            "call_id": "call-1",
+            "tool_kind": "web_search",
+            "state": "searching",
+        });
+        let ev: ConversationEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            ev,
+            ConversationEvent::ProviderToolStatus {
+                turn_id: "t1".into(),
+                round_num: 0,
+                call_id: "call-1".into(),
+                tool_kind: "web_search".into(),
+                state: ProviderToolState::Searching,
+            }
+        );
+        assert_eq!(ev.turn_id(), "t1");
+        // 序列化 roundtrip：snake_case state。
+        let back = serde_json::to_value(&ev).unwrap();
+        assert_eq!(back["state"], "searching");
     }
 }

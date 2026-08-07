@@ -147,6 +147,7 @@ fn parse_tool(tool: &serde_json::Value) -> ToolCardView {
         name,
         args_display,
         done,
+        provider: false,
     }
 }
 
@@ -264,6 +265,33 @@ mod tests {
     fn malformed_events_are_dropped() {
         assert_eq!(internal_event(&serde_json::json!({"type":"round_delta"})), None);
         assert_eq!(internal_event(&serde_json::json!({"foo":1})), None);
+    }
+
+    /// `provider_tool_status`（daemon 真实事件，replaceable by call_id）——
+    /// 此前协议缺该变体被 Unknown 吞掉，tool 消息不显示。回归：必须解析。
+    #[test]
+    fn provider_tool_status_is_parsed() {
+        let v = serde_json::json!({
+            "type": "provider_tool_status",
+            "turn_id": "t1",
+            "round_num": 0,
+            "call_id": "call-1",
+            "tool_kind": "web_search",
+            "state": "in_progress",
+        });
+        let ev = internal_event(&v).expect("parse provider_tool_status");
+        assert!(matches!(
+            ev,
+            ConversationEvent::ProviderToolStatus {
+                turn_id,
+                call_id,
+                tool_kind,
+                state,
+                ..
+            } if turn_id == "t1" && call_id == "call-1"
+                && tool_kind == "web_search"
+                && state == markdown_winui::ProviderToolState::InProgress
+        ));
     }
 
     /// timeline 快照 → 恢复 turns：块排序、thinking/answer 拼接、工具卡 done

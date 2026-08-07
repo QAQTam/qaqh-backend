@@ -56,8 +56,8 @@ fn column_label(state: &str) -> &'static str {
     }
 }
 
-/// 技能页主体（放入内容区 Grid 第 (0,1) cell；由 main.rs 与 WebView2 同 cell
-/// 重叠，opacity 按 `bridge.current_view()` 切换）。
+/// 技能页主体（放入内容区 Grid 第 (0,1) cell；由 main.rs 内容区四行视图族
+/// 行高切换控制显隐，非当前视图零命中零渲染）。
 pub fn skills_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (snapshot, set_snapshot) = cx.use_state::<Option<SkillsSnapshot>>(None);
     let (search, set_search) = cx.use_state::<String>(String::new());
@@ -383,7 +383,7 @@ fn build_card(
     let name_el: Element = text_block(&item.name)
         .font_size(14.0)
         .semibold()
-        .trim_ellipsis()
+        .text_trimming(TextTrimming::CharacterEllipsis)
         .into();
     let scope_el: Element = text_block(if item.scope == "user" { "用户" } else { "项目" })
         .font_size(11.0)
@@ -392,7 +392,7 @@ fn build_card(
     let desc_el: Element = text_block(&item.description)
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText)
-        .trim_ellipsis()
+        .text_trimming(TextTrimming::CharacterEllipsis)
         .into();
     let token_el: Element = text_block(format!("{}t", item.token_count))
         .font_size(11.0)
@@ -433,7 +433,7 @@ fn build_card(
         let path_el: Element = text_block(&item.path)
             .font_size(11.0)
             .foreground(ThemeRef::SecondaryText)
-            .trim_ellipsis()
+            .text_trimming(TextTrimming::CharacterEllipsis)
             .into();
         let mut rows: Vec<Element> = vec![path_el];
         if let Some(err) = &item.error {

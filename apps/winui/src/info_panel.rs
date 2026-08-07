@@ -401,7 +401,7 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     .font_size(11.0)
                     .font_family(MONO_FONT)
                     .foreground(ThemeRef::SecondaryText)
-                    .trim_ellipsis()
+                    .text_trimming(TextTrimming::CharacterEllipsis)
                     .grid_column(1),
                 text_block(if live { "live" } else { "等待用量" })
                     .font_size(11.0)
@@ -519,7 +519,7 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     text_block(&t.subject)
                         .font_size(11.0)
                         .foreground(ThemeRef::SecondaryText)
-                        .trim_ellipsis()
+                        .text_trimming(TextTrimming::CharacterEllipsis)
                         .grid_column(1),
                 ))
                 .columns([GridLength::Pixel(16.0), GridLength::STAR])

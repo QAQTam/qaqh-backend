@@ -1,8 +1,9 @@
 # collect-payload-winui.ps1 — 按组件收集 winui 壳安装文件并生成 bundle.json
 #
-# 与 collect-payload.ps1 输出同构的 bundle（installer/updater 消费无感知），
-# 但 full 包的 desktop 组件来自 winui 运行目录而非 Electron win-unpacked。
+# full 包的 desktop 组件来自 winui 运行目录（apps/winui/release/winui-app）。
 # 目前仅支持 -Kind full（frontend/backend 更新源后续接入）。
+# 版本来源：version.txt（权威）+ 根 deepx-backend.lock.json（版本锁）
+#         + apps/winui/out/sidecar/daemon-manifest.json（daemon 侧信息）。
 
 param(
     [ValidateSet("full")]
@@ -16,9 +17,9 @@ $ErrorActionPreference = "Stop"
 
 $workspaceRoot = (Resolve-Path ".").Path
 $stagingRoot = [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot "apps/installer/staging"))
-$package = Get-Content "apps/winui/renderer/package.json" -Raw | ConvertFrom-Json
-$backendLock = Get-Content "apps/winui/renderer/deepx-backend.lock.json" -Raw | ConvertFrom-Json
-$daemonManifestPath = Join-Path $workspaceRoot "apps/winui/renderer/build/sidecar/daemon-manifest.json"
+$appVersion = (Get-Content (Join-Path $workspaceRoot "version.txt")).Trim()
+$backendLock = Get-Content (Join-Path $workspaceRoot "deepx-backend.lock.json") -Raw | ConvertFrom-Json
+$daemonManifestPath = Join-Path $workspaceRoot "apps/winui/out/sidecar/daemon-manifest.json"
 $daemonManifest = if (Test-Path -LiteralPath $daemonManifestPath -PathType Leaf) {
     Get-Content $daemonManifestPath -Raw | ConvertFrom-Json
 } else {
@@ -27,7 +28,7 @@ $daemonManifest = if (Test-Path -LiteralPath $daemonManifestPath -PathType Leaf)
 if ([string]::IsNullOrWhiteSpace($BuildId)) {
     $gitCommit = (git rev-parse --short=12 HEAD).Trim()
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
-    $BuildId = "$($package.version)-$gitCommit-$timestamp"
+    $BuildId = "$appVersion-$gitCommit-$timestamp"
 }
 
 $usesLatestPointer = [string]::IsNullOrWhiteSpace($PayloadDir)
@@ -84,10 +85,6 @@ function Add-BundleTree {
     }
     $resolvedSource = (Resolve-Path -LiteralPath $SourceRoot).Path
     Get-ChildItem -LiteralPath $resolvedSource -File -Recurse | ForEach-Object {
-        # 排除 WebView2 运行时数据目录（安装包内不需要，且可能被占用）
-        if ($_.FullName -match '\\DeepX\.exe\.WebView2\\') {
-            return
-        }
         $relative = [System.IO.Path]::GetRelativePath($resolvedSource, $_.FullName)
         $target = if ($TargetRoot) { Join-Path $TargetRoot $relative } else { $relative }
         Add-BundleFile -Source $_.FullName -Target $target
@@ -97,7 +94,7 @@ function Add-BundleTree {
 $components = [ordered]@{}
 $backendComponent = [ordered]@{
     buildId = if ($daemonManifest) { "backend-$($daemonManifest.build_id)" } else { "backend-$BuildId" }
-    version = if ($daemonManifest) { $daemonManifest.version } else { $package.version }
+    version = if ($daemonManifest) { $daemonManifest.version } else { $appVersion }
     controlProtocol = if ($daemonManifest) { [int]$daemonManifest.protocol_version } else { [int]$backendLock.protocol_version }
 }
 
@@ -107,17 +104,12 @@ switch ($Kind) {
     "full" {
         $components.runtime = [ordered]@{
             buildId = "winui-shell-$BuildId"
-            version = $package.version
-        }
-        $components.frontend = [ordered]@{
-            buildId = "frontend-$BuildId"
-            version = $package.version
-            controlProtocol = [int]$backendLock.protocol_version
+            version = $appVersion
         }
         $components.backend = $backendComponent
         $components.updater = [ordered]@{
             buildId = "updater-$((Get-FileHash -LiteralPath 'target/release/deepx-updater.exe' -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 32))"
-            version = $package.version
+            version = $appVersion
         }
 
         $winuiFull = [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot $WinuiRoot))
@@ -136,7 +128,7 @@ $manifest = [ordered]@{
     formatVersion = 1
     kind = $Kind
     buildId = $BuildId
-    appVersion = $package.version
+    appVersion = $appVersion
     releaseId = $BuildId
     channel = if ($daemonManifest) { $daemonManifest.channel } else { "local" }
     components = $components

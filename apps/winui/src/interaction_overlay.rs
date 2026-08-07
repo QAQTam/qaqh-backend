@@ -295,7 +295,7 @@ pub fn interaction_overlay(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     .vertical_alignment(VerticalAlignment::Center)
     .into();
 
-    // 模态遮罩：有背景 → 拦截下方 WebView2 命中（与空 grid 穿透互补）。
+    // 模态遮罩：有背景 → 拦截下方基础层命中（与空 grid 穿透互补）。
     grid((card,))
         .background(Color {
             a: SCRIM_ALPHA,

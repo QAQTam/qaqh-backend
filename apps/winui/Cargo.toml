@@ -12,7 +12,7 @@ deepx-client = { path = "../../crates/deepx-client" }
 markdown-winui = { path = "../../crates/markdown-winui" }
 # time: new_session 轮询等待 session_create 落库（对齐前端 15s 超时）。
 tokio = { version = "1", features = ["time"] }
-# preserve_order: action fingerprint 按 wire 字节序（renderer JSON 插入序）复算，
+# preserve_order: action fingerprint 按 wire 字节序（事件字段顺序）复算，
 # 与 daemon（preserve_order）保持一致，否则 config.save 等非字典序键的 action 报 400。
 serde_json = { version = "1", features = ["preserve_order"] }
 # P-2 typed struct：HeaderState/HeaderAction 编译期检查（预埋，见 WORKFLOW §6.1）。

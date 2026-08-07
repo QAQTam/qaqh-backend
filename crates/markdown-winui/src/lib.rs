@@ -24,7 +24,7 @@
 mod protocol;
 mod round_renderer;
 
-pub use protocol::{ConversationEvent, RoundDeltaKind};
+pub use protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
 pub use round_renderer::{
     AnswerView, LiveSegment, RenderCommand, RestoredRound, RestoredTurn, RoundView, ToolCardView,
     Transcript, TurnStatus, TurnView,

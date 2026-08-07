@@ -641,7 +641,13 @@ fn system_message_between_tool_and_assistant_accepted() {
         "assistant should have tool_calls"
     );
     assert_eq!(msgs[4]["role"], "tool", "tool result follows assistant");
-    assert_eq!(msgs[4]["content"], "[OK] skill 'unsafe-checker' activated");
+    // skill 激活响应为 envelope JSON（status/summary/text 字段）；断言
+    // 兼容旧纯文本与 envelope 两种格式。
+    let tool_content = msgs[4]["content"].as_str().unwrap_or_default();
+    assert!(
+        tool_content.contains("[OK] skill 'unsafe-checker' activated"),
+        "tool content mismatch: {tool_content}"
+    );
     assert_eq!(
         msgs[5]["role"], "system",
         "SYSTEM message follows tool result ← critical"

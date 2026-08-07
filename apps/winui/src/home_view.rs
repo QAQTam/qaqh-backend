@@ -126,7 +126,7 @@ fn session_card(item: &SessionItem, bridge: &Arc<Bridge>) -> Element {
     let title: Element = text_block(&item.title)
         .font_size(14.0)
         .semibold()
-        .trim_ellipsis()
+        .text_trimming(TextTrimming::CharacterEllipsis)
         .into();
     let meta: Element = text_block(relative_time(item.updated_at))
         .font_size(11.0)

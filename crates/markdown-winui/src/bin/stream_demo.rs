@@ -170,6 +170,12 @@ fn print_event(ev: &ConversationEvent) {
             is_final,
             ..
         } => println!("▶ RoundCompleted round{round_num} (is_final={is_final})"),
+        ConversationEvent::ProviderToolStatus {
+            round_num,
+            tool_kind,
+            state,
+            ..
+        } => println!("▶ ProviderTool  round{round_num} [{tool_kind}] {state:?}"),
     }
 }
 

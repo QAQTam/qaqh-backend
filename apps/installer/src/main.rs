@@ -645,7 +645,7 @@ impl App {
                 .show(ui, |ui| {
                     ui.set_width(360.0);
                     let items = [
-                        "智能桌面应用 (Electron)",
+                        "智能桌面应用 (WinUI3 原生)",
                         "本地守护进程 (Rust 后端)",
                         "高效、安全、本地优先",
                     ];
@@ -794,7 +794,7 @@ impl App {
                     ui.vertical(|ui| {
                         ui.label(RichText::new("DeepX 桌面应用").strong());
                         ui.label(
-                            RichText::new("Electron 桌面客户端 + 本地守护进程，提供完整功能。")
+                            RichText::new("WinUI3 原生桌面客户端 + 本地守护进程，提供完整功能。")
                                 .size(12.0)
                                 .color(colors::TEXT_SECONDARY),
                         );

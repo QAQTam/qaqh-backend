@@ -91,7 +91,7 @@ fn session_row(item: &SessionItem, active: bool, bridge: Arc<Bridge>) -> Element
     };
     let dot: Element = state_dot(item.state);
     let title_el: Element = text_block(&item.title)
-        .trim_ellipsis()
+        .text_trimming(TextTrimming::CharacterEllipsis)
         .foreground(ThemeRef::PrimaryText)
         .vertical_alignment(VerticalAlignment::Center)
         .on_pointer_pressed({

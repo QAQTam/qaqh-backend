@@ -2,10 +2,13 @@
 # 用法: just [recipe]
 #
 # 项目结构:
-#   crates/          Rust 后端 (16 crates)
-#   apps/winui/renderer/  Web renderer 源码（由 winui 壳承载）
-#   apps/winui/out/renderer/  构建产物（唯一产物目录）
+#   crates/          Rust 后端 (17 crates)
+#   apps/winui/      WinUI3 原生桌面壳（windows-reactor，全原生 XAML 视图族）
 #   apps/installer/  Windows 安装器
+#   apps/updater/    统一更新/维护组件
+#
+# 说明：WebView/renderer（SolidJS）已整体移除，前端为纯 WinUI3 原生实现，
+# 构建链不依赖 node/pnpm。
 
 set windows-shell := ["pwsh.exe", "-NoLogo", "-Command"]
 
@@ -13,7 +16,7 @@ set windows-shell := ["pwsh.exe", "-NoLogo", "-Command"]
 default:
     @just --list
 
-# ── 构建 ──────────────────────────────��─────────────
+# ── 构建 ────────────────────────────────────────────
 
 # 编译 daemon（后端核心，release）
 build-daemon:
@@ -28,23 +31,17 @@ build-installer:
 build-updater:
     cargo build --release -p deepx-updater
 
-# 构建前端（typecheck + vite，不含 daemon）
-[windows]
-build-desktop:
-    Set-Location apps/winui/renderer; pnpm build
-
 # ── 打包（winui 壳）────────────────────────────────
 
-# 编译 winui 壳（release）+ 注入桥脚本到 renderer 产物
+# 编译 winui 壳（release）
 [windows]
-build-winui: build-desktop
+build-winui:
     cargo build --release -p deepx-winui
-    node apps/winui/scripts/patch-renderer.mjs
 
 # 打包 winui 运行目录（release/winui-app，完整安装包使用）
 [windows]
 package-winui-desktop: build-daemon build-winui
-    Set-Location apps/winui/renderer; node scripts/prepare-daemon.mjs --backend-root ../../..
+    pwsh -File apps/winui/scripts/prepare-daemon.ps1
     ./apps/winui/scripts/assemble-winui.ps1
 
 # 生成完整安装包 EXE（winui 壳；效果等同 just package）
@@ -64,34 +61,16 @@ sfx-quick kind="full":
 dev:
     cargo run -p deepx-daemon -- run
 
-# 启动 renderer dev server（winui 壳用 DEEPX_DEBUG_URL 指向它）
-[windows]
-dev-desktop:
-    Set-Location apps/winui/renderer; pnpm dev
-
 # ── 检查 & 测试 ─────────────────────────────────────
 
 # Rust workspace 检查
 check-rust:
     cargo check --workspace
 
-# 前端类型检查
-[windows]
-check-desktop:
-    Set-Location apps/winui/renderer; pnpm typecheck
-
 # 全部静态检查
-[windows]
-check: check-rust check-desktop
-[unix]
 check: check-rust
 
 # 全部测试
-[windows]
-test:
-    cargo test --workspace
-    Set-Location apps/winui/renderer; pnpm test
-[unix]
 test:
     cargo test --workspace
 
@@ -107,74 +86,34 @@ fmt:
 clippy:
     cargo clippy --workspace --all-targets
 
-# ── 工具 ──────────────────────────────��─────────────
+# ── 工具 ────────────────────────────────────────────
 
 # 产物状态
 [windows]
 status:
     @Write-Output "=== Rust binaries ==="
     @if (Test-Path 'target/release/deepx-daemon.exe') { '  ✓ deepx-daemon.exe' } else { '  ✗ deepx-daemon.exe' }
+    @if (Test-Path 'target/release/deepx-winui.exe') { '  ✓ deepx-winui.exe' } else { '  ✗ deepx-winui.exe' }
     @if (Test-Path 'target/release/DeepXInstaller.exe') { '  ✓ DeepXInstaller.exe' } else { '  ✗ DeepXInstaller.exe' }
     @if (Test-Path 'target/release/deepx-updater.exe') { '  ✓ deepx-updater.exe' } else { '  ✗ deepx-updater.exe' }
-    @Write-Output "=== Renderer ==="
-    @if (Test-Path 'apps/winui/out/renderer/index.html') { '  ✓ renderer' } else { '  ✗ renderer' }
+    @Write-Output "=== WinUI run dir ==="
+    @if (Test-Path 'apps/winui/release/winui-app/DeepX.exe') { '  ✓ winui-app/DeepX.exe' } else { '  ✗ winui-app (run just package-winui-desktop)' }
     @Write-Output "=== Packages ==="
-    @if (Test-Path 'packages') { Get-ChildItem 'packages' -Force | ForEach-Object { "  ✓ $($_.Name)" } } else { '  ✗ no packages yet' }
+    @if (Test-Path 'apps/installer/staging/builds') { Get-ChildItem 'apps/installer/staging/builds' -Recurse -Filter 'bundle.json' | ForEach-Object { "  ✓ $($_.Directory.Parent.Name)/$($_.Directory.Name)" } } else { '  ✗ no packages yet' }
 
 # 清理
 [windows]
 clean:
     cargo clean
-    @"Remove-Item -Recurse -Force 'apps/winui/out' -ErrorAction SilentlyContinue"
-    @"Remove-Item -Recurse -Force 'apps/winui/renderer/build/sidecar' -ErrorAction SilentlyContinue"
-    @"Remove-Item -Recurse -Force 'packages' -ErrorAction SilentlyContinue"
-    @"Remove-Item -Recurse -Force 'apps/installer/dist' -ErrorAction SilentlyContinue"
-    @"Remove-Item -Recurse -Force 'apps/installer/staging' -ErrorAction SilentlyContinue"
-    @"Remove-Item -Recurse -Force 'apps/installer/payload/desktop' -ErrorAction SilentlyContinue"
+    @Remove-Item -Recurse -Force 'apps/winui/out' -ErrorAction SilentlyContinue
+    @Remove-Item -Recurse -Force 'apps/winui/release/winui-app' -ErrorAction SilentlyContinue
+    @Remove-Item -Recurse -Force 'packages' -ErrorAction SilentlyContinue
+    @Remove-Item -Recurse -Force 'apps/installer/dist' -ErrorAction SilentlyContinue
+    @Remove-Item -Recurse -Force 'apps/installer/staging' -ErrorAction SilentlyContinue
+    @Remove-Item -Recurse -Force 'apps/installer/payload/desktop' -ErrorAction SilentlyContinue
     @Write-Output "Clean done."
-
-# 初始化开发环境
-[windows]
-setup:
-    Set-Location apps/winui/renderer; pnpm install
-    @Write-Output "Setup done. Run 'just build-daemon' to compile the backend."
 
 # 从 version.txt 同步版本号到所有配置文件
 [windows]
 sync-version:
     @pwsh -File scripts/sync-version.ps1
-
-# ── Linux ───────────────────────────────────────────
-
-[unix]
-build-desktop:
-    cd apps/winui/renderer && pnpm build
-
-[unix]
-dev-desktop:
-    cd apps/winui/renderer && pnpm dev
-
-[unix]
-check-desktop:
-    cd apps/winui/renderer && pnpm typecheck
-
-[unix]
-clean:
-    cargo clean
-    rm -rf apps/winui/out apps/winui/renderer/build/sidecar
-    rm -rf packages apps/installer/dist apps/installer/staging apps/installer/payload/desktop
-    @echo Clean done.
-
-[unix]
-setup:
-    cd apps/winui/renderer && pnpm install
-    @echo "Setup done. Run 'just build-daemon' to compile the backend."
-
-[unix]
-status:
-    @echo "=== Rust binaries ==="
-    @test -f target/release/deepx-daemon && echo "  ✓ deepx-daemon" || echo "  ✗ deepx-daemon"
-    @echo "=== Renderer ==="
-    @test -f apps/winui/out/renderer/index.html && echo "  ✓ renderer" || echo "  ✗ renderer"
-    @echo "=== Packages ==="
-    @ls -la packages 2>/dev/null || echo "  ✗ no packages yet"

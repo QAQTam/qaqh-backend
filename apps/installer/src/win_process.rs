@@ -118,11 +118,11 @@ fn find_via_tasklist() -> Vec<ProcInfo> {
 /// 关闭 DeepX 运行时进程。
 ///
 /// 策略（解决安装时 ~30s 卡顿问题）：
-/// - **DeepX.exe（Electron GUI）**：直接 `TerminateProcess` 强杀。
-///   原因：`taskkill` 不带 `/f` 发 WM_CLOSE 后，Electron 的 `before-quit`
-///   回调会执行 `backend.close()`（含 WebSocket detach 等待），如果
-///   daemon 正处于连接故障态，该回调可阻塞到系统 ~30s 的
-///   "程序未响应"超时才返回。对安装场景而言这个延迟不可接受。
+/// - **DeepX.exe（WinUI3 原生壳）**：直接 `TerminateProcess` 强杀。
+///   原因：`taskkill` 不带 `/f` 发 WM_CLOSE 后，壳的退出路径会执行
+///   daemon 连接清理（含 detach 等待），如果 daemon 正处于连接故障态，
+///   该回调可阻塞到系统 ~30s 的"程序未响应"超时才返回。对安装场景而言
+///   这个延迟不可接受。
 ///
 /// - **deepx-daemon.exe（后台 daemon）**：先发 HTTP `/control/v1/stop`
 ///   优雅关闭（daemon 没有窗口消息泵，WM_CLOSE 对它无效），等 2s，

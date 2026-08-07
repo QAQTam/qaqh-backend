@@ -35,7 +35,7 @@ use markdown_core::live::parse_live;
 use markdown_core::live_table::{LiveTableTracker, TableSnapshot};
 use markdown_core::parse_final;
 
-use crate::protocol::{ConversationEvent, RoundDeltaKind};
+use crate::protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
 use crate::{RichTextOutput, TableData, render_final};
 
 /// 渲染命令（UI 层按序执行；测试断言命令序列）。
@@ -109,10 +109,13 @@ pub struct ToolCardView {
     pub id: String,
     /// 从 ToolCalling 流中提取的工具名（未解析出时为 None）。
     pub name: Option<String>,
-    /// 参数 raw（原型简化：直接展示累积文本）。
+    /// 参数 raw（原型简化：直接展示累积文本）；provider 卡为状态文案。
     pub args_display: String,
     /// true = 工具卡完成（后续 delta 不再更新）。
     pub done: bool,
+    /// provider 内建工具卡（web_search 等，`provider_tool_status` 事件）：
+    /// 无参数流，展开区显示执行状态（args_display 承载）。
+    pub provider: bool,
 }
 
 /// 恢复的回合（timeline 快照解析产物；`Transcript::restore` 消费）。
@@ -321,6 +324,7 @@ impl RoundView {
             name,
             args_display: self.tool_raw.clone(),
             done: false,
+            provider: false,
         })
     }
 
@@ -594,6 +598,42 @@ impl Transcript {
                         .unwrap_or_default(),
                 }
             }
+            ConversationEvent::ProviderToolStatus {
+                turn_id,
+                round_num,
+                call_id,
+                tool_kind,
+                state,
+            } => {
+                let Some(&turn) = self.turn_index.get(turn_id) else {
+                    return Vec::new();
+                };
+                let (round_idx, round) = self.round_mut(turn, *round_num);
+                // provider 内建工具卡：无参数流，展开区显示执行状态。
+                let label = match state {
+                    ProviderToolState::InProgress => "进行中…".to_string(),
+                    ProviderToolState::Searching => "搜索中…".to_string(),
+                    ProviderToolState::Completed => String::new(),
+                };
+                let card = ToolCardView {
+                    id: call_id.clone(),
+                    name: Some(tool_kind.clone()),
+                    args_display: label,
+                    done: *state == ProviderToolState::Completed,
+                    provider: true,
+                };
+                // upsert by call_id（replaceable 语义：同 id 覆盖状态）。
+                if let Some(existing) = round.tool_calls.iter_mut().find(|c| c.id == card.id) {
+                    *existing = card.clone();
+                } else {
+                    round.tool_calls.push(card.clone());
+                }
+                vec![RenderCommand::UpsertToolCard {
+                    turn,
+                    round: round_idx,
+                    card,
+                }]
+            }
             ConversationEvent::RoundCompleted {
                 turn_id,
                 round_num,
@@ -669,5 +709,100 @@ impl Transcript {
             let idx = turn_view.rounds.len() - 1;
             (idx, &mut turn_view.rounds[idx])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
+
+    fn start_turn(ts: &mut Transcript, turn_id: &str) {
+        ts.apply(&ConversationEvent::TurnStarted {
+            turn_id: turn_id.into(),
+            user_text: "hi".into(),
+        });
+    }
+
+    /// `provider_tool_status` 按 call_id upsert：状态流 进行中→搜索中→完成，
+    /// 同 id 覆盖不重复加卡；done 随 completed 置位。
+    #[test]
+    fn provider_tool_status_upserts_card() {
+        let mut ts = Transcript::new();
+        start_turn(&mut ts, "t1");
+        ts.apply(&ConversationEvent::ProviderToolStatus {
+            turn_id: "t1".into(),
+            round_num: 0,
+            call_id: "call-1".into(),
+            tool_kind: "web_search".into(),
+            state: ProviderToolState::InProgress,
+        });
+        assert_eq!(ts.turns()[0].rounds[0].tool_calls.len(), 1);
+        let card = &ts.turns()[0].rounds[0].tool_calls[0];
+        assert_eq!(card.id, "call-1");
+        assert!(card.provider);
+        assert!(!card.done);
+        assert_eq!(card.args_display, "进行中…");
+
+        // 状态流转：同 id 覆盖。
+        ts.apply(&ConversationEvent::ProviderToolStatus {
+            turn_id: "t1".into(),
+            round_num: 0,
+            call_id: "call-1".into(),
+            tool_kind: "web_search".into(),
+            state: ProviderToolState::Searching,
+        });
+        ts.apply(&ConversationEvent::ProviderToolStatus {
+            turn_id: "t1".into(),
+            round_num: 0,
+            call_id: "call-1".into(),
+            tool_kind: "web_search".into(),
+            state: ProviderToolState::Completed,
+        });
+        let rounds = &ts.turns()[0].rounds;
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].tool_calls.len(), 1, "同 call_id 覆盖不新增卡");
+        assert!(rounds[0].tool_calls[0].done);
+        assert_eq!(rounds[0].tool_calls[0].args_display, "");
+    }
+
+    /// 未知 turn 的 provider 状态：忽略（防跨回合错灌）。
+    #[test]
+    fn provider_tool_status_unknown_turn_ignored() {
+        let mut ts = Transcript::new();
+        start_turn(&mut ts, "t1");
+        let cmds = ts.apply(&ConversationEvent::ProviderToolStatus {
+            turn_id: "ghost".into(),
+            round_num: 0,
+            call_id: "call-1".into(),
+            tool_kind: "web_search".into(),
+            state: ProviderToolState::Completed,
+        });
+        assert!(cmds.is_empty());
+        assert!(ts.turns()[0].rounds.is_empty());
+    }
+
+    /// 与 DeepX 工具调用卡（ToolCalling 流）共存：不同 id 各自成卡。
+    #[test]
+    fn provider_card_coexists_with_deepx_tool_card() {
+        let mut ts = Transcript::new();
+        start_turn(&mut ts, "t1");
+        ts.apply(&ConversationEvent::RoundDelta {
+            turn_id: "t1".into(),
+            round_num: 0,
+            kind: RoundDeltaKind::ToolCalling,
+            delta: "{\"id\":\"c1\",\"name\":\"web_search\"".into(),
+        });
+        ts.apply(&ConversationEvent::ProviderToolStatus {
+            turn_id: "t1".into(),
+            round_num: 0,
+            call_id: "call-1".into(),
+            tool_kind: "web_search".into(),
+            state: ProviderToolState::Searching,
+        });
+        let cards = &ts.turns()[0].rounds[0].tool_calls;
+        assert_eq!(cards.len(), 2);
+        assert!(cards.iter().any(|c| c.id == "c1" && !c.provider));
+        assert!(cards.iter().any(|c| c.id == "call-1" && c.provider));
     }
 }

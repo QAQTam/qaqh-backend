@@ -5,7 +5,6 @@ crates/deepx-tauri/src-tauri/binaries/
 *.swp
 *.swo
 .env
-node_modules/
 .deepx-trash/
 *.exe
 bindings/
@@ -15,10 +14,6 @@ tmp/
 !.deepx/skills/**
 /skills/
 # monorepo additions
-apps/desktop/out/
-apps/desktop/release/
-apps/desktop/build/
-apps/desktop/.cache/
 apps/installer/payload/desktop/
 apps/installer/dist/
 apps/installer/staging/
@@ -27,12 +22,11 @@ apps/installer/.verify-install/
 .codegraph/
 .reasonix/
 /skills/
-# stale legacy product dir (pre-renderer-consolidation build output)
-apps/out/
-
 # WinUI shell test harness (parallel dev daemon home)
 /.deepx-test-home/
 # WinUI shell: source is tracked; only product directories are ignored
 apps/winui/out/
 apps/winui/release/
 .deepx-winui.log
+# prepare-daemon release-artifact 下载缓存
+/.cache/

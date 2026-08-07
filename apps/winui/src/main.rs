@@ -2,8 +2,7 @@
 //!
 //! Mica 窗口承载全原生视图族（sidebar/header/composer/chat/interaction/
 //! home/skills/settings），`bridge.rs` 通过 `deepx-client` 直连 daemon
-//! （Ringing 协议：三 SSE 频道事件解析 + 命令/查询直发）。WebView 已移除，
-//! renderer（SolidJS）仅供 daemon `/debug/` 浏览器调试入口使用。
+//! （Ringing 协议：三 SSE 频道事件解析 + 命令/查询直发）。
 
 #![windows_subsystem = "windows"]
 
