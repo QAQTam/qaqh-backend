@@ -1,0 +1,13 @@
+[package]
+name = "markdown-winui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AST → windows-reactor 富文本模型对接原型：验证 fork 内 RichTextBlock 类型可直接消费解析产物"
+
+[dependencies]
+markdown-core = { path = "../markdown-core" }
+# 直接依赖 fork 内的 reactor —— 验证"解析产物 = reactor 富文本模型"零胶水
+windows-reactor = { path = "F:/windows-rs/crates/libs/reactor" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

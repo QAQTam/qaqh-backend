@@ -259,6 +259,87 @@ pub fn parse_skills_event(event: &Value) -> Option<SkillsSnapshot> {
     Some(parse_skills_payload(event))
 }
 
+// ── XAML composer goalBar 投影（composer_bar.rs 的 dashboard 数据源）──
+
+/// dashboard 任务行（对齐 daemon `DashboardTask`：id/subject/description/status）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DashboardTask {
+    pub id: String,
+    pub subject: String,
+    pub description: String,
+    pub status: String,
+}
+
+/// XAML goalBar 数据投影——对齐 daemon `DashboardSnapshot`（snake_case JSON）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DashboardSnapshot {
+    pub seed: String,
+    pub tasks: Vec<DashboardTask>,
+    pub recent_edits: Vec<String>,
+    pub current_todo_id: Option<String>,
+}
+
+/// 从 control 频道 `dashboard_snapshot` 事件提取完整快照。
+///
+/// 事件形状（deepx-domain `ControlEvent::DashboardSnapshot`，`tag="type"`）：
+/// `{ type: "dashboard_snapshot", snapshot: { seed, documents,
+/// recent_edits, tasks: [{id, subject, description, status}],
+/// current_todo_id } }`。`type` 不符返回 None。
+pub fn parse_dashboard_event(event: &Value) -> Option<DashboardSnapshot> {
+    if event.get("type")?.as_str()? != "dashboard_snapshot" {
+        return None;
+    }
+    let payload = event.get("snapshot")?;
+    let mut snap = DashboardSnapshot::default();
+    snap.seed = payload
+        .get("seed")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    snap.tasks = payload
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    Some(DashboardTask {
+                        id: t.get("id")?.as_str()?.to_string(),
+                        subject: t
+                            .get("subject")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        description: t
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        status: t
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    snap.recent_edits = payload
+        .get("recent_edits")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    snap.current_todo_id = payload
+        .get("current_todo_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some(snap)
+}
+
 // ── XAML 设置页投影（settings_view.rs 的唯一数据源）────────────────
 
 /// 单个 provider 的 endpoint（config.load `providers[].endpoints[]`）。

@@ -40,7 +40,7 @@ use std::time::Duration;
 use windows_reactor::*;
 
 use crate::bridge::Bridge;
-use crate::shell_store::{SessionDetail, UsageInfo};
+use crate::shell_store::{DashboardSnapshot, SessionDetail, UsageInfo};
 
 /// 诊断日志（同 main.rs log_diag 约定：GUI 子系统无控制台，写文件）。
 fn log_diag(msg: &str) {
@@ -223,34 +223,38 @@ fn cache_card(label: &str, u: &UsageInfo, accent: bool) -> Option<Element> {
             ThemeRef::SystemSuccess,
         )
     };
+    // label 行 Grid 两列（同 context_card，避免 hstack 双 Stretch 重叠）。
+    // 显式 Element 标注：内层 into 的目标类型无法从 vstack 泛型 tuple 推断。
+    let header: Element = grid((
+        text_block(label)
+            .font_size(11.0)
+            .foreground(ThemeRef::SecondaryText)
+            .grid_column(0),
+        text_block(format!("{pct:.1}%"))
+            .font_size(14.0)
+            .font_family(MONO_FONT)
+            .font_weight(650)
+            .foreground(strong)
+            .horizontal_alignment(HorizontalAlignment::Right)
+            .grid_column(1),
+    ))
+    .columns([GridLength::STAR, GridLength::Auto])
+    .into();
     Some(
-        border(vstack((
-            // label 行 Grid 两列（同 context_card，避免 hstack 双 Stretch 重叠）。
-            grid((
-                text_block(label)
-                    .font_size(11.0)
-                    .foreground(ThemeRef::SecondaryText)
-                    .grid_column(0),
-                text_block(format!("{pct:.1}%"))
-                    .font_size(14.0)
-                    .font_family(MONO_FONT)
-                    .font_weight(650)
-                    .foreground(strong)
-                    .horizontal_alignment(HorizontalAlignment::Right)
-                    .grid_column(1),
+        border(
+            vstack((
+                header,
+                text_block(format!(
+                    "命中 {} · 未命中 {}",
+                    fmt_thousands(u.prompt_cache_hit_tokens),
+                    fmt_thousands(u.prompt_cache_miss_tokens)
+                ))
+                .font_size(10.0)
+                .foreground(ThemeRef::SecondaryText),
+                progress_bar(pct, fill),
             ))
-            .columns([GridLength::STAR, GridLength::Auto])
-            .into(),
-            text_block(format!(
-                "命中 {} · 未命中 {}",
-                fmt_thousands(u.prompt_cache_hit_tokens),
-                fmt_thousands(u.prompt_cache_miss_tokens)
-            ))
-            .font_size(10.0)
-            .foreground(ThemeRef::SecondaryText),
-            progress_bar(pct, fill),
-        ))
-        .spacing(4.0))
+            .spacing(4.0),
+        )
         .background(bg)
         .corner_radius(8.0)
         .padding(Thickness::xy(10.0, 9.0))
@@ -311,6 +315,9 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
     let last_open = cx.use_ref::<bool>(false);
+    // 任务进度区块（dashboard 投影，control 事件驱动；P6 合并）。
+    let (dashboard, set_dashboard) = cx.use_state::<Option<DashboardSnapshot>>(None);
+    let last_dash_rev = cx.use_ref::<u64>(0);
     log_diag(&format!("info_panel render open={open}"));
 
     // 500ms 轮询：info 数据 rev（同 sidebar 模式）+ 标题栏 info_open 投影。
@@ -328,14 +335,22 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     let core = bridge.core();
                     let set_open = set_open.clone();
                     let set_detail = set_detail.clone();
+                    let set_dashboard = set_dashboard.clone();
                     let last_rev = last_rev.clone();
                     let last_open = last_open.clone();
+                    let last_dash_rev = last_dash_rev.clone();
                     move || {
                         // 用量数据。
                         let (detail_, rev) = core.info_snapshot();
                         if rev != *last_rev.borrow() {
                             *last_rev.borrow_mut() = rev;
                             set_detail.call(detail_);
+                        }
+                        // 任务进度（dashboard 快照 rev）。
+                        let (dash, dash_rev) = core.dashboard_snapshot();
+                        if dash_rev != *last_dash_rev.borrow() {
+                            *last_dash_rev.borrow_mut() = dash_rev;
+                            set_dashboard.call(dash);
                         }
                         // 面板开关（Web shell.setHeader 投影的 info_open）。
                         let hdr = core.header_snapshot();
@@ -452,15 +467,81 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         }
     }
 
-    border(vstack(blocks).spacing(10.0))
-        .background(ThemeRef::LayerFill)
-        .corner_radius(8.0)
-        .padding(Thickness::xy(14.0, 14.0))
-        .margin(Thickness::xy(8.0, 8.0))
-        // 打开时淡入（open 翻转 → 内容首次 mount → ImplicitShowAnimation）。
-        .transition(
-            Some(AnimationConfig::fade_in(Duration::from_millis(200))),
-            None,
-        )
-        .into()
+    // ⑥ 任务进度区块（P6 合并：dashboard 投影——当前任务 + 状态计数 + 列表）。
+    // 数据源 `bridge.core().dashboard_snapshot()`（control 事件驱动，同 composer goalBar）。
+    if let Some(snap) = dashboard.as_ref() {
+        if !snap.tasks.is_empty() {
+            blocks.push(section_heading("任务").with_key("todo-heading").into());
+            let current = snap
+                .current_todo_id
+                .as_deref()
+                .and_then(|id| snap.tasks.iter().find(|t| t.id == id));
+            let pending = snap.tasks.iter().filter(|t| t.status == "pending").count();
+            let in_progress = snap.tasks.iter().filter(|t| t.status == "in_progress").count();
+            let done = snap.tasks.iter().filter(|t| t.status == "completed").count();
+            if let Some(task) = current {
+                blocks.push(
+                    hstack((
+                        live_dot(true).with_key("todo-dot"),
+                        text_block(&task.subject)
+                            .font_size(12.0)
+                            .semibold()
+                            .wrap(),
+                        text_block(&task.status)
+                            .font_size(11.0)
+                            .foreground(ThemeRef::SystemCaution),
+                    ))
+                    .spacing(8.0)
+                    .with_key("todo-current")
+                    .into(),
+                );
+            }
+            blocks.push(
+                text_block(format!("待处理 {pending} · 进行中 {in_progress} · 已完成 {done}"))
+                    .font_size(11.0)
+                    .foreground(ThemeRef::SecondaryText)
+                    .with_key("todo-counts")
+                    .into(),
+            );
+            let mut todo_rows: Vec<Element> = Vec::new();
+            for (i, t) in snap.tasks.iter().enumerate() {
+                let status_color = match t.status.as_str() {
+                    "completed" => ThemeRef::SystemSuccess,
+                    "in_progress" => ThemeRef::SystemCaution,
+                    "cancelled" => ThemeRef::SystemNeutral,
+                    _ => ThemeRef::TertiaryText,
+                };
+                let row: Element = grid((
+                    text_block(if t.status == "completed" { "✓" } else { "○" })
+                        .font_size(11.0)
+                        .foreground(status_color)
+                        .grid_column(0),
+                    text_block(&t.subject)
+                        .font_size(11.0)
+                        .foreground(ThemeRef::SecondaryText)
+                        .trim_ellipsis()
+                        .grid_column(1),
+                ))
+                .columns([GridLength::Pixel(16.0), GridLength::STAR])
+                .into();
+                todo_rows.push(row.with_key(format!("todo-row-{i}-{}", t.id)));
+            }
+            blocks.push(vstack(todo_rows).spacing(3.0).with_key("todo-list").into());
+        }
+    }
+
+    // 面板内容可滚动（P6 加任务区块后可能超高；scroll_viewer 纵向 Auto）。
+    scroll_viewer(
+        border(vstack(blocks).spacing(10.0))
+            .background(ThemeRef::LayerFill)
+            .corner_radius(8.0)
+            .padding(Thickness::xy(14.0, 14.0))
+            .margin(Thickness::xy(8.0, 8.0)),
+    )
+    // 打开时淡入（open 翻转 → 内容首次 mount → ImplicitShowAnimation）。
+    .transition(
+        Some(AnimationConfig::fade_in(Duration::from_millis(200))),
+        None,
+    )
+    .into()
 }

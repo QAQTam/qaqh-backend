@@ -1,0 +1,11 @@
+[package]
+name = "markdown-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ChatView markdown 渲染核心原型：final 解析 + 流式 live 语义 + 数学/代码块规格（对齐 CHATVIEW-RENDERING-REFERENCE §3-§6）"
+
+[dependencies]
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -18,6 +18,8 @@ members = [
     "crates/deepx-client",
     "crates/deepx-gate-testui",
     "crates/deepx-update",
+    "crates/markdown-core",
+    "crates/markdown-winui",
     "apps/installer",
     "apps/updater",
     "apps/winui",
