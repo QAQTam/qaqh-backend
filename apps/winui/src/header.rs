@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use windows_reactor::*;
 
-use crate::bridge::{Bridge, HeaderAction, HeaderState};
+use crate::bridge::{Bridge, HeaderAction, HeaderFlag, HeaderState};
 
 /// 标题栏高度（PLAN-NATIVE-UI.md 布局：row 0 = 48px）。
 pub const HEADER_HEIGHT: f64 = 48.0;
@@ -119,11 +119,11 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     };
     let on_info = {
         let bridge = bridge.clone();
-        move || bridge.emit_header_action(HeaderAction::Info)
+        move || bridge.toggle_header_flag(HeaderFlag::Info)
     };
     let on_stats = {
         let bridge = bridge.clone();
-        move || bridge.emit_header_action(HeaderAction::Stats)
+        move || bridge.toggle_header_flag(HeaderFlag::Stats)
     };
     let on_undo = {
         let bridge = bridge.clone();

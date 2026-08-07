@@ -30,11 +30,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use windows_webview::WebView;
 
+use crate::chat_adapter;
 use crate::shell_store::{
     parse_activities, parse_activity_event, parse_config_load, parse_conversation_state,
-    parse_skills_event, parse_skills_payload, parse_tools, parse_workspace_status,
-    project_session_meta, ActivityState, SessionDetail, SessionItem, SettingsSnapshot,
-    SkillsSnapshot,
+    parse_dashboard_event, parse_skills_event, parse_skills_payload, parse_tools,
+    parse_workspace_status, project_session_meta, ActivityState, DashboardSnapshot,
+    SessionDetail, SessionItem, SettingsSnapshot, SkillsSnapshot,
 };
 
 /// Outbound messages queued on the UI thread (STA) and pumped to the WebView.
@@ -63,7 +64,8 @@ impl OutMsg {
     }
 }
 
-/// XAML 标题栏状态投影（Web `shell.setHeader` 载荷）。
+/// XAML 标题栏状态（headerDirect：Rust 从壳导航/会话列表/conversation
+/// 事件组装；Web `shell.setHeader` 投影仅在直连关闭时生效）。
 ///
 /// 字段名对齐 Web 侧 `HeaderState`（camelCase）。`#[serde(default)]` 保证
 /// 未来字段扩展向后兼容（P-2 typed struct 预埋，见 WORKFLOW §6.1）。
@@ -81,6 +83,15 @@ pub struct HeaderState {
     pub compact_disabled: bool,
     pub undo_disabled: bool,
     pub pet_enabled: bool,
+}
+
+/// 标题栏本地开关（headerDirect：壳本地翻转，不回传 Web）。
+#[derive(Debug, Clone, Copy)]
+pub enum HeaderFlag {
+    /// Info 面板开合。
+    Info,
+    /// Stats 面板开合。
+    Stats,
 }
 
 /// XAML 设置页 Web 侧初始投影（`shell.setSettings` 载荷）。
@@ -125,6 +136,634 @@ pub enum HeaderAction {
     OpenDiff { file: Option<String> },
 }
 
+/// XAML 交互模态状态投影（Web `shell.setInteraction` 载荷）。
+///
+/// 字段名对齐 Web 侧 `PendingInteraction`（camelCase，`kind` 直通）。
+/// `kind` = "none" 表示当前无活动交互（壳关闭覆盖层面板）；
+/// "permission" / "ask" / "plan" 三种用户介入模板（统一交互弹窗体系，
+/// 见 ELECTRON-MIGRATION.md Phase 5）。`#[serde(default)]` 保证字段扩展
+/// 向后兼容（P-2 typed struct 预埋）。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InteractionState {
+    /// "none" | "permission" | "ask" | "plan"。
+    pub kind: String,
+    /// 交互 id（permission = tool_call_id；ask = ask id）。
+    pub id: String,
+    /// 所属会话 seed（回传时定位 activeEntry）。
+    pub seed: String,
+    // ── permission 字段 ────────────────────────────────
+    pub tool_name: String,
+    pub reason: String,
+    pub paths: Vec<String>,
+    pub category: String,
+    pub level: u64,
+    /// low | medium | high。
+    pub risk: String,
+    pub consequence: String,
+    // ── ask 字段 ───────────────────────────────────────
+    pub questions: Vec<AskQuestion>,
+    // ── plan 字段 ───────────────────────────────────────
+    pub plan_content: String,
+    /// todo_activation | 其他（计划审核）。
+    pub review_type: String,
+    pub todo_items: Vec<PlanTodoItem>,
+}
+
+/// plan 审批的任务项（对齐 renderer `TodoActivationItem`）。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PlanTodoItem {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    /// small | medium | large。
+    pub complexity: String,
+}
+
+/// `ask_user` 中的单个问题（对齐 renderer `AskQuestion`，ts-rs 生成）。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AskQuestion {
+    pub id: String,
+    pub question: String,
+    pub options: Vec<String>,
+    pub allow_custom: bool,
+}
+
+// ── Rust 直连交互队列状态机（读路径直连，不经 WebView）──────────────────
+//
+// 等价移植 Web `sessionPresentation.pendingInteractions` 组装：
+//   permission（tool 频道 pendingPermission 卡片）优先于 ask/plan
+//   （control 频道 activeAskPlan），取 [0] 为活动交互。
+// daemon 事件 → `parse_interaction_event` / `parse_tool_permission_event`
+// → `InteractionMachine::apply` → `snapshot` 组装 InteractionState。
+// 幂等：事件重放（SSE 重连续传）经 PartialEq 比对不产生多余 rev。
+
+/// per-seed 交互队列状态机。
+#[derive(Debug, Clone, Default)]
+struct InteractionMachine {
+    /// tool 频道挂起的权限请求（等价 Web tool.cards 中 pendingPermission=true）。
+    pending_permissions: Vec<PendingPermission>,
+    /// control 频道活动 ask/plan（等价 Web control.activeAskPlan）。
+    active_ask_plan: Option<ActiveAskPlan>,
+}
+
+/// 挂起的权限请求（`tool_permission_requested` 完整字段；turn_id 仅在事件
+/// 层消费，快照形状不含——对齐 Web `PendingInteraction` 投影）。
+#[derive(Debug, Clone)]
+struct PendingPermission {
+    tool_call_id: String,
+    tool_name: String,
+    reason: String,
+    paths: Vec<String>,
+    category: String,
+    level: u64,
+    risk: String,
+    consequence: String,
+}
+
+/// control 频道活动 ask/plan（`activeAskPlan` 等价形状；turn_id 不投影）。
+#[derive(Debug, Clone)]
+enum ActiveAskPlan {
+    Ask {
+        id: String,
+        questions: Vec<AskQuestion>,
+    },
+    Plan {
+        id: String,
+        plan_content: String,
+        review_type: String,
+        todo_items: Vec<PlanTodoItem>,
+    },
+}
+
+/// control 频道交互事件（`parse_interaction_event` 解析产物，对齐 Web
+/// `controlReducer` 的 interaction_requested / interaction_resolved /
+/// plan_review_requested / plan_review_resolved / operation_failed 分支）。
+enum InteractionEvent {
+    AskRequested {
+        id: String,
+        questions: Vec<AskQuestion>,
+    },
+    AskResolved {
+        id: String,
+    },
+    PlanRequested {
+        id: String,
+        plan_content: String,
+        review_type: String,
+        todo_items: Vec<PlanTodoItem>,
+    },
+    PlanResolved {
+        id: String,
+    },
+    /// operation_failed（ask_rejected / interaction_not_found）→ 幽灵交互
+    /// 自愈：worker 重启后挂起态丢失，SSE 重放的历史 interaction_requested
+    /// 无终态时清除活动面板，让 UI 回到可操作状态（对齐 Web reducer）。
+    GhostCleanup,
+}
+
+/// tool 频道权限事件（`parse_tool_permission_event` 解析产物，对齐 Web
+/// `toolReducer` 的 tool_permission_requested / tool_finished 分支）。
+enum ToolPermissionEvent {
+    Requested {
+        tool_call_id: String,
+        tool_name: String,
+        reason: String,
+        paths: Vec<String>,
+        category: String,
+        level: u64,
+        risk: String,
+        consequence: String,
+    },
+    /// tool_finished：权限已响应（Web 侧置 pendingPermission=false，此处
+    /// 直接移除——组装只消费 pendingPermission 卡片，语义等价）。
+    Resolved {
+        tool_call_id: String,
+    },
+}
+
+impl InteractionMachine {
+    fn apply(&mut self, ev: InteractionEvent) {
+        match ev {
+            InteractionEvent::AskRequested { id, questions } => {
+                self.active_ask_plan = Some(ActiveAskPlan::Ask { id, questions });
+            }
+            InteractionEvent::AskResolved { id } => {
+                if matches!(&self.active_ask_plan, Some(ActiveAskPlan::Ask { id: cur, .. }) if cur == &id)
+                {
+                    self.active_ask_plan = None;
+                }
+            }
+            InteractionEvent::PlanRequested {
+                id,
+                plan_content,
+                review_type,
+                todo_items,
+            } => {
+                self.active_ask_plan = Some(ActiveAskPlan::Plan {
+                    id,
+                    plan_content,
+                    review_type,
+                    todo_items,
+                });
+            }
+            InteractionEvent::PlanResolved { id } => {
+                if matches!(&self.active_ask_plan, Some(ActiveAskPlan::Plan { id: cur, .. }) if cur == &id)
+                {
+                    self.active_ask_plan = None;
+                }
+            }
+            InteractionEvent::GhostCleanup => {
+                self.active_ask_plan = None;
+            }
+        }
+    }
+
+    /// 应用 tool 频道权限事件（独立于 control 的 ask/plan 状态机）。
+    fn apply_tool(&mut self, ev: ToolPermissionEvent) {
+        match ev {
+            ToolPermissionEvent::Requested {
+                tool_call_id,
+                tool_name,
+                reason,
+                paths,
+                category,
+                level,
+                risk,
+                consequence,
+            } => {
+                // upsert：同 tool_call_id 覆盖（对齐 Web 卡片 patch），
+                // 移除后 push 末尾 → 最新请求排最后，first 仍为最旧。
+                self.pending_permissions
+                    .retain(|p| p.tool_call_id != tool_call_id);
+                self.pending_permissions.push(PendingPermission {
+                    tool_call_id,
+                    tool_name,
+                    reason,
+                    paths,
+                    category,
+                    level,
+                    risk,
+                    consequence,
+                });
+            }
+            ToolPermissionEvent::Resolved { tool_call_id } => {
+                self.pending_permissions.retain(|p| p.tool_call_id != tool_call_id);
+            }
+        }
+    }
+
+    /// 组装活动交互（permission 优先，等价 Web `pendingInteractions[0]`）。
+    /// 无活动交互时返回 default（kind=""，XAML 覆盖层判空关闭）。
+    fn snapshot(&self, seed: &str) -> InteractionState {
+        if let Some(p) = self.pending_permissions.first() {
+            return InteractionState {
+                kind: "permission".into(),
+                id: p.tool_call_id.clone(),
+                seed: seed.to_string(),
+                tool_name: p.tool_name.clone(),
+                reason: p.reason.clone(),
+                paths: p.paths.clone(),
+                category: p.category.clone(),
+                level: p.level,
+                risk: p.risk.clone(),
+                consequence: p.consequence.clone(),
+                ..InteractionState::default()
+            };
+        }
+        match &self.active_ask_plan {
+            Some(ActiveAskPlan::Plan { id, plan_content, review_type, todo_items, .. }) => {
+                InteractionState {
+                    kind: "plan".into(),
+                    id: id.clone(),
+                    seed: seed.to_string(),
+                    plan_content: plan_content.clone(),
+                    review_type: review_type.clone(),
+                    todo_items: todo_items.clone(),
+                    ..InteractionState::default()
+                }
+            }
+            Some(ActiveAskPlan::Ask { id, questions, .. }) => InteractionState {
+                kind: "ask".into(),
+                id: id.clone(),
+                seed: seed.to_string(),
+                questions: questions.clone(),
+                ..InteractionState::default()
+            },
+            None => InteractionState::default(),
+        }
+    }
+
+    /// 是否存在挂起交互（composer `hasPendingGate` 直连来源，
+    /// 等价 Web `activeInteraction(session()) !== null`）。
+    fn has_pending(&self) -> bool {
+        !self.pending_permissions.is_empty() || self.active_ask_plan.is_some()
+    }
+}
+
+/// 从 control 频道事件提取交互队列更新。
+///
+/// 事件形状（deepx-domain `ControlEvent`，`tag="type"`）：
+/// `interaction_requested { interaction_id, turn_id, mode, questions[] }`、
+/// `interaction_resolved { interaction_id, resolution }`、
+/// `plan_review_requested { interaction_id, turn_id, plan_content, review_type,
+/// todo_items?[] }`、`plan_review_resolved { interaction_id, approved }`、
+/// `operation_failed { error: { code } }`（幽灵自愈）。`type` 不符返回 None。
+fn parse_interaction_event(event: &Value) -> Option<InteractionEvent> {
+    let ty = event.get("type")?.as_str()?;
+    match ty {
+        "interaction_requested" => {
+            // turn_id 校验存在（协议契约），不投影进状态（对齐 Web 投影形状）。
+            let _ = event.get("turn_id")?.as_str()?;
+            Some(InteractionEvent::AskRequested {
+                id: event.get("interaction_id")?.as_str()?.to_string(),
+                questions: parse_questions(event.get("questions")?),
+            })
+        }
+        "interaction_resolved" => Some(InteractionEvent::AskResolved {
+            id: event.get("interaction_id")?.as_str()?.to_string(),
+        }),
+        "plan_review_requested" => {
+            let _ = event.get("turn_id")?.as_str()?;
+            Some(InteractionEvent::PlanRequested {
+                id: event.get("interaction_id")?.as_str()?.to_string(),
+                plan_content: event.get("plan_content")?.as_str()?.to_string(),
+                review_type: event
+                    .get("review_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                todo_items: parse_todo_items(event.get("todo_items")),
+            })
+        }
+        "plan_review_resolved" => Some(InteractionEvent::PlanResolved {
+            id: event.get("interaction_id")?.as_str()?.to_string(),
+        }),
+        "operation_failed" => {
+            let code = event
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str())?;
+            match code {
+                "ask_rejected" | "interaction_not_found" => Some(InteractionEvent::GhostCleanup),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// 从 tool 频道事件提取权限队列更新。
+///
+/// 事件形状（deepx-domain `ToolEvent`）：`tool_permission_requested
+/// { tool_call_id, turn_id, round_num, tool_name, reason, paths[],
+/// category, level, risk, consequence }`、`tool_finished { tool_call_id, ... }`。
+/// 注意 daemon 字段为 snake_case（`allow_custom` 等），与壳投影
+/// （camelCase `allowCustom`）不同——解析时手动取 snake_case 键。
+fn parse_tool_permission_event(event: &Value) -> Option<ToolPermissionEvent> {
+    let ty = event.get("type")?.as_str()?;
+    match ty {
+        "tool_permission_requested" => {
+            // turn_id 校验存在（协议契约），不投影进状态。
+            let _ = event.get("turn_id")?.as_str()?;
+            Some(ToolPermissionEvent::Requested {
+                tool_call_id: event.get("tool_call_id")?.as_str()?.to_string(),
+                tool_name: event.get("tool_name")?.as_str()?.to_string(),
+                reason: event.get("reason")?.as_str()?.to_string(),
+                paths: event
+                    .get("paths")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default(),
+                category: event.get("category")?.as_str()?.to_string(),
+                level: event.get("level").and_then(|v| v.as_u64()).unwrap_or(0),
+                risk: event.get("risk")?.as_str()?.to_string(),
+                consequence: event.get("consequence")?.as_str()?.to_string(),
+            })
+        }
+        "tool_finished" => Some(ToolPermissionEvent::Resolved {
+            tool_call_id: event.get("tool_call_id")?.as_str()?.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// 解析 daemon `questions` 数组（snake_case 键 → 壳投影 camelCase 形状）。
+fn parse_questions(v: &Value) -> Vec<AskQuestion> {
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|q| {
+                    Some(AskQuestion {
+                        id: q.get("id")?.as_str()?.to_string(),
+                        question: q.get("question")?.as_str()?.to_string(),
+                        options: q
+                            .get("options")
+                            .and_then(|o| o.as_array())
+                            .map(|a| {
+                                a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()
+                            })
+                            .unwrap_or_default(),
+                        allow_custom: q.get("allow_custom").and_then(|v| v.as_bool()).unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 解析 daemon `todo_items`（可为 null；字段无 camelCase 转换需求）。
+fn parse_todo_items(v: Option<&Value>) -> Vec<PlanTodoItem> {
+    v.and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    Some(PlanTodoItem {
+                        id: t.get("id")?.as_str()?.to_string(),
+                        title: t.get("title")?.as_str()?.to_string(),
+                        description: t
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        complexity: t
+                            .get("complexity")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ── Rust 直连 composer 活动追踪（读路径直连，不经 WebView）─────────────
+//
+// 等价移植 Web `isSessionStreaming`（activeTurn 存在 + lastActivityAt 卡死
+// 检测，STALL = 4min）+ conversation store 的 lastUsage（model/contextLimit/
+// prompt_tokens，来自 `usage_updated` 事件）。composer 投影字段分两组：
+//   A 组（Rust 直连）：seed / isStreaming / hasPendingGate / model /
+//                      contextTokens / contextLimit
+//   B 组（Web 投影保留）：mode / permissionLevel / queueCount / queueItems /
+//                      submitError / sendAck（写路径伴生状态，终局写路径迁移后并入）
+// `composer_snapshot` 直连模式下合并两组；`apply_composer` 直连模式只落 B 组。
+
+/// 卡死阈值（对齐 Web `SESSION_STALL_TIMEOUT_MS`）：超时视为流式中断。
+const COMPOSER_STALL_TIMEOUT_MS: u64 = 4 * 60 * 1000;
+
+/// per-seed composer 活动追踪（isStreaming 判定 + usage 缓存）。
+#[derive(Debug, Clone, Default)]
+struct ComposerActivity {
+    /// activeTurn 是否存在（turn_started 置 true；终态置 false）。
+    active_turn: bool,
+    /// 最近领域事件时间（epoch ms；0 = 未知 → 保守视为流式中）。
+    last_activity_at: u64,
+    /// `usage_updated` 缓存（contextTokens = usage.prompt_tokens，对齐 Web）。
+    prompt_tokens: u64,
+    context_limit: u64,
+    model: String,
+}
+
+/// conversation 频道活动事件（`parse_conversation_activity_event` 解析产物）。
+enum ConversationActivityEvent {
+    /// turn_started：活动开始。
+    Started,
+    /// turn_completed / turn_failed / conversation_cancelled：活动结束。
+    Ended,
+    /// round_delta / block_checkpoint / round_completed / provider_retrying /
+    /// provider_tool_status：活动（刷新时间戳）。
+    Touched,
+    /// usage_updated：活动 + model/context_limit/prompt_tokens 缓存。
+    Usage { prompt_tokens: u64, context_limit: u64, model: String },
+}
+
+impl ComposerActivity {
+    /// 等价 Web `isSessionStreaming`：activeTurn 存在且最近活动未超时；
+    /// 时间戳未知（旧数据/恢复间隙）保守按流式中处理。
+    fn is_streaming(&self, now: u64) -> bool {
+        if !self.active_turn {
+            return false;
+        }
+        if self.last_activity_at == 0 {
+            return true;
+        }
+        now.saturating_sub(self.last_activity_at) < COMPOSER_STALL_TIMEOUT_MS
+    }
+
+    fn apply(&mut self, ev: ConversationActivityEvent, now: u64) {
+        match ev {
+            ConversationActivityEvent::Started => {
+                self.active_turn = true;
+                self.last_activity_at = now;
+            }
+            ConversationActivityEvent::Ended => {
+                self.active_turn = false;
+            }
+            ConversationActivityEvent::Touched => {
+                self.last_activity_at = now;
+            }
+            ConversationActivityEvent::Usage { prompt_tokens, context_limit, model } => {
+                self.prompt_tokens = prompt_tokens;
+                self.context_limit = context_limit;
+                self.model = model;
+                self.last_activity_at = now;
+            }
+        }
+    }
+}
+
+/// 从 conversation 频道事件提取活动更新（对齐 Web `applyConversationEventToDraft`
+/// 的活动刷新语义：除 compact_* 外所有领域事件都视为活动）。
+///
+/// 事件形状（deepx-domain `ConversationEvent`）：`turn_started { turn_id,
+/// user_text }`、`turn_completed { turn_id, stop_reason?, usage? }`、
+/// `turn_failed { turn_id, error }`、`conversation_cancelled { turn_id? }`、
+/// `usage_updated { turn_id, round_num, usage, context_limit, model }`、
+/// `round_delta / block_checkpoint / round_completed / provider_retrying /
+/// provider_tool_status`。`type` 不符返回 None。
+fn parse_conversation_activity_event(event: &Value) -> Option<ConversationActivityEvent> {
+    let ty = event.get("type")?.as_str()?;
+    match ty {
+        "turn_started" => Some(ConversationActivityEvent::Started),
+        "turn_completed" | "turn_failed" | "conversation_cancelled" => {
+            Some(ConversationActivityEvent::Ended)
+        }
+        "usage_updated" => {
+            let usage = event.get("usage")?;
+            Some(ConversationActivityEvent::Usage {
+                prompt_tokens: usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                context_limit: event.get("context_limit").and_then(|v| v.as_u64()).unwrap_or(0),
+                model: event
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        }
+        "round_delta" | "block_checkpoint" | "round_completed" | "provider_retrying"
+        | "provider_tool_status" => Some(ConversationActivityEvent::Touched),
+        _ => None,
+    }
+}
+
+/// 当前 unix 时间（epoch ms；系统时钟异常时回退 0——streaming 保守判定）。
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// `ask_user` 表单中的单个答案（对齐 renderer `AskAnswer`：question_id）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct AskAnswer {
+    pub question_id: String,
+    pub answer: String,
+}
+
+/// 交互模态动作（壳 → Web `shell.interactionAction` 载荷）。
+///
+/// `action` tag + snake_case（同 [`HeaderAction`] 模式）。Web 侧订阅后
+/// 分发到既有 handler（respondToPermission / submitAsk / dismissAsk），
+/// 协议请求（interaction.*）仍在 Web 侧发起——状态单一数据源不变。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum InteractionAction {
+    /// 权限响应（approved + trustFolder 复选框）。
+    Permission { id: String, approved: bool, trust_folder: bool },
+    /// Ask 提交（全部问题已答）。
+    Ask { id: String, answers: Vec<AskAnswer> },
+    /// Ask 跳过（Escape / 跳过按钮；协议 interaction.ask_dismiss）。
+    AskDismiss { id: String },
+    /// Plan 审批（approved + 可选拒绝理由 + 目标模式；协议 interaction.plan_review）。
+    Plan {
+        id: String,
+        approved: bool,
+        message: Option<String>,
+        autonomous: bool,
+    },
+}
+
+/// XAML Composer 状态投影（Web `shell.setComposer` 载荷）。
+///
+/// 字段名对齐 Web 侧 ComposerDock 依赖的 props（camelCase）。
+/// `#[serde(default)]` 保证字段扩展向后兼容（P-2 typed struct 预埋）。
+/// 终局演进（Web 移除后）：本 struct 即 XAML 直接消费的形状，数据源从
+/// "Web 投影"换成"Rust 直连 daemon 解析"，形状不变（见 PLAN-NATIVE-COMPOSER.md）。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ComposerState {
+    /// 当前会话 seed：壳据此重置草稿（会话切换即清空输入框，同 Web 行为）。
+    pub seed: String,
+    pub is_streaming: bool,
+    pub has_pending_gate: bool,
+    /// plan | code。
+    pub mode: String,
+    pub model: String,
+    pub context_tokens: u64,
+    pub context_limit: u64,
+    /// 1..=4（对齐 config.permission_level）。
+    pub permission_level: u64,
+    pub queue_count: u64,
+    pub queue_items: Vec<ComposerQueueItem>,
+    /// Web 发送失败回填（壳显示且不清空草稿）。
+    pub submit_error: String,
+    /// Web 每次 handleSend 成功（或入队）后递增——壳据此清空草稿（悲观清空）。
+    pub send_ack: u64,
+}
+
+/// followUpQueue 排队项（壳显示列表 + 删除）。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ComposerQueueItem {
+    pub id: String,
+    pub text: String,
+}
+
+/// 图片附件（壳选文件后传路径；Web 侧复用 desktop.readFileBase64 读 base64）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposerAttachment {
+    pub file_name: String,
+    pub mime_type: String,
+    pub path: String,
+}
+
+/// 文本附件（壳选文件后传路径；Web 侧复用 desktop.readTextFile 读内容）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposerTextFile {
+    pub file_name: String,
+    pub path: String,
+}
+
+/// Composer 动作（壳 → Web `shell.composerAction` 载荷）。
+///
+/// `action` tag + snake_case（同 [`HeaderAction`] 模式）。Web 侧订阅后
+/// 分发到既有 handler（handleSend / handleStop / handleSetMode /
+/// changePermissionLevel / queue.remove）——协议请求仍在 Web 侧发起。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ComposerAction {
+    /// 提交发送（附件传路径，base64 由 Web 侧读）。
+    Send {
+        text: String,
+        image_paths: Vec<ComposerAttachment>,
+        text_files: Vec<ComposerTextFile>,
+    },
+    /// 停止当前流式回合（session.cancel）。
+    Stop,
+    /// 模式切换（session.set_mode）。
+    Mode { mode: String },
+    /// 权限等级（config.set_permission_level）。
+    Permission { level: u64 },
+    /// 移除排队项（queue.remove）。
+    QueueRemove { id: String },
+}
+
 /// `Send + Sync` half of the bridge: client, lease bookkeeping, outbox sender.
 /// Lives on the tokio side.
 pub struct BridgeCore {
@@ -140,10 +779,17 @@ pub struct BridgeCore {
     session_rev: AtomicU64,
     /// XAML 侧栏当前选中的会话 seed。
     active_seed: Mutex<String>,
-    /// XAML 标题栏数据源：Web `shell.setHeader` 状态投影（typed struct）。
+    /// XAML 标题栏数据源：headerDirect 模式下由 `refresh_header` 组装
+    /// （壳导航/会话列表/conversation 事件），Web 投影关闭时保留现值。
     header_state: Mutex<HeaderState>,
-    /// 标题栏状态版本：Web 推送后递增，UI 侧 timer 比对后刷新（同 session_rev）。
+    /// 标题栏状态版本：组装/投影后递增，UI 侧 timer 比对后刷新（同 session_rev）。
     header_rev: AtomicU64,
+    /// 标题栏直连模式（默认开）：状态由壳侧组装，`apply_header`（Web 投影）
+    /// 忽略——0px WebView 的旧 seed 投影（Bug B 根源）随此永久失效。
+    header_direct: AtomicBool,
+    /// per-seed turns 计数（undo_disabled 判定源）：timeline 快照写入点缓存
+    /// （不随 chat_view consume 清空），增量 turn 事件不改变计数。
+    header_turns: Mutex<HashMap<String, usize>>,
     /// daemon 失联检测（A 方案，WORKFLOW §7）：timeline 流非 Open 的起始时刻。
     timeline_stall_since: Mutex<Option<Instant>>,
     /// 三 ringing 通道无一 Open 的起始时刻。
@@ -181,6 +827,60 @@ pub struct BridgeCore {
     info: Mutex<Option<SessionDetail>>,
     /// Info 数据版本：refresh 后递增，UI 侧 timer 比对后刷新（同 session_rev）。
     info_rev: AtomicU64,
+    /// XAML 交互模态数据源：Web `shell.setInteraction` 状态投影。
+    interaction: Mutex<InteractionState>,
+    /// 交互数据版本：Web 推送后递增，UI 侧 timer 比对后刷新（同 header_rev）。
+    interaction_rev: AtomicU64,
+    /// Rust 直连交互队列状态机（per seed）：daemon control/tool 事件直接
+    /// 解析组装 InteractionState（读路径直连，不经 WebView——终局数据源，
+    /// Web 移除后形状不变）。`apply_interaction`（Web 投影）在直连模式下
+    /// 被忽略，避免双源竞态。
+    interactions: Mutex<HashMap<String, InteractionMachine>>,
+    /// 直连模式：Web 注入 `interactionDirect` flag 后经 `shell.setInteractionDirect`
+    /// 置位；关闭时回退 Web 投影（现状路径，flag 关即回退）。
+    interaction_direct: AtomicBool,
+    /// XAML Composer 数据源：Web `shell.setComposer` 状态投影。
+    composer: Mutex<ComposerState>,
+    /// Composer 数据版本：Web 推送后递增，UI 侧 timer 比对后刷新（同 header_rev）。
+    composer_rev: AtomicU64,
+    /// Rust 直连 composer 活动追踪（per seed）：conversation 频道事件
+    /// 直连解析 isStreaming（卡死检测）/model/context（usage_updated 缓存）
+    /// ——读路径直连，不经 WebView（终局数据源）。`hasPendingGate` 复用
+    /// 交互队列状态机（interactions）。
+    composer_activity: Mutex<HashMap<String, ComposerActivity>>,
+    /// composer 直连模式：A 组字段（isStreaming/gate/model/context）Rust 直连，
+    /// B 组（mode/permissionLevel/queue/sendAck/submitError——写路径伴生状态）
+    /// 保留 Web 投影，`composer_snapshot` 合并读取。flag 关即回退纯投影。
+    composer_direct: AtomicBool,
+    /// 原生 ChatView 事件队列：conversation 频道渲染相关事件（turn/round/
+    /// delta/checkpoint）直连缓存，UI 线程 timer drain 喂 Transcript。
+    /// 事件为 wire JSON（`{"type":...}`），`chat_adapter::internal_event`
+    /// 反序列化为渲染协议——零映射胶水。
+    chat_events: Mutex<std::collections::VecDeque<serde_json::Value>>,
+    /// 最近一次 timeline 快照（`TimelineSnapshot` JSON + 所属 seed：
+    /// 权威 turns 历史，resume 旧对话的数据源；chat_view 泵消费 restore）。
+    /// seed 标记防竞态：快速切会话时旧快照晚到不会被灌进新会话。
+    chat_timeline: Mutex<Option<(String, serde_json::Value)>>,
+    /// ChatView 数据版本：事件入队后递增，UI 侧 timer 比对后 drain。
+    chat_rev: AtomicU64,
+    /// ChatView 直连模式：置位后 conversation 渲染事件入 `chat_events`
+    /// 队列（原生 ChatView 消费）。默认开启（ChatView 已原生迁移）；
+    /// Web 注入 `chatDirect` flag 可再置位（幂等）。
+    chat_direct: AtomicBool,
+    /// 侧栏 resume 进行中的目标 seed（active_seed 写入仲裁）：
+    /// `apply_header`（Web 投影）在 resume 目标未达成前**忽略** Web 的
+    /// seed 写入——0px WebView 仍持有旧会话时持续投影旧 seed，会把
+    /// `spawn_resume` 刚设置的 active_seed 覆盖回去（双 seed 竞争，
+    /// 快照因 seed 不匹配被丢弃 → ChatView 永久"加载会话…"）。
+    /// Web 投影 seed 与目标一致时视为已切换，清除仲裁并恢复正常同步。
+    resume_target: Mutex<Option<String>>,
+    /// 快照重拉节流：seed 不匹配时主动 `activate_timeline` 重拉（daemon
+    /// 幂等重推快照）；16ms 泵每 tick 都会看到不匹配快照，须限频。
+    timeline_refresh_at: Mutex<Instant>,
+    /// XAML goalBar 数据源：control 频道 `dashboard_snapshot` 事件投影。
+    dashboard: Mutex<Option<DashboardSnapshot>>,
+    /// dashboard 数据版本：事件到达后递增，UI 侧 timer 比对后刷新。
+    dashboard_rev: AtomicU64,
     outbox_tx: std::sync::mpsc::Sender<OutMsg>,
 }
 
@@ -194,6 +894,9 @@ const AUTO_RECONNECT_COOLDOWN: Duration = Duration::from_secs(5);
 /// 等待并发连接完成的上限：覆盖 discovery 等待（8s）+ open 协商（10s）+
 /// 余量。超过即视为连接失败（调用方重试机制兜底）。
 const CONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(25);
+/// ChatView 快照重拉节流：seed 不匹配时主动 activate_timeline 重拉，
+/// 16ms 泵每 tick 都会看到不匹配快照，1s 限频防 activate 风暴。
+const REFRESH_THROTTLE: Duration = Duration::from_secs(1);
 /// 连续失败后 rebuild 冷却指数退避封顶（60s → 120s → 240s → 480s → 960s）。
 const REBUILD_BACKOFF_CAP: u32 = 4;
 
@@ -263,6 +966,15 @@ impl BridgeCore {
 
     pub fn set_active_seed(&self, seed: &str) {
         *self.active_seed.lock().unwrap_or_else(|e| e.into_inner()) = seed.to_string();
+        // 直连模式：交互缓存跟随活动会话（对齐 Web activeEntry 投影语义——
+        // 只显示当前会话的交互，后台会话请求保持挂起直至切回）。
+        if self.interaction_direct.load(Ordering::Relaxed) {
+            self.refresh_interaction_snapshot();
+        }
+        // 标题栏直连：seed/view/title 随活动会话刷新。
+        if self.header_direct.load(Ordering::Relaxed) {
+            self.refresh_header();
+        }
     }
 
     // ── XAML 标题栏（header 投影，同 sessions 模式）────────────────
@@ -278,6 +990,72 @@ impl BridgeCore {
         (state, rev)
     }
 
+    /// 壳侧组装标题栏状态（headerDirect）：view/seed 来自壳导航与会话
+    /// 切换，title 查会话列表，undo/compact disabled 由 conversation 事件
+    /// 推断（对齐 Web：`turns.length === 0 || streaming` / `streaming`）。
+    /// info_open/stats_open/compacting/workspace 保留现值（本地状态，
+    /// 不经 Web）。每次调用递增 rev（调用方在状态实际变化时触发）。
+    pub fn refresh_header(&self) {
+        let view = self
+            .current_view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let seed = self.active_seed();
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let title = sessions
+            .iter()
+            .find(|s| s.seed == seed)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
+        let now = unix_ms();
+        let streaming = self
+            .composer_activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&seed)
+            .map(|a| a.is_streaming(now))
+            .unwrap_or(false);
+        let turns = self
+            .header_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&seed)
+            .copied()
+            .unwrap_or(0);
+        let mut h = self
+            .header_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        h.view = view;
+        h.seed = seed;
+        h.title = title;
+        h.undo_disabled = turns == 0 || streaming;
+        h.compact_disabled = streaming;
+        drop(h);
+        self.header_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 翻转标题栏本地开关（info_open / stats_open）并递增 rev——壳本地
+    /// 状态，不再回传 Web（headerAction::Info/Stats 通道随 WebView 移除
+    /// 而淘汰）。
+    pub fn toggle_header_flag(&self, flag: HeaderFlag) {
+        let mut h = self
+            .header_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match flag {
+            HeaderFlag::Info => h.info_open = !h.info_open,
+            HeaderFlag::Stats => h.stats_open = !h.stats_open,
+        }
+        drop(h);
+        self.header_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Web `shell.setHeader` 载荷落缓存并递增 rev。
     /// 反序列化失败时保留旧状态（静默丢弃坏载荷，不中断链路）。
     /// 同步副作用（D-2，Web 是视图/会话单一数据源）：
@@ -286,6 +1064,14 @@ impl BridgeCore {
     /// - `seed` → active_seed：Info 面板 bootstrap 用（壳侧 resume/navigate
     ///   路径之外，Web 发起的 session_resume 必须同步）。
     pub fn apply_header(&self, payload: Value) {
+        // 直连模式（默认）：标题栏状态由壳侧组装（refresh_header），Web
+        // 投影必然过时，接受会覆盖直连状态（双源竞态）——且 0px WebView
+        // 的旧 seed 投影正是"加载会话…"卡死的投影源（Bug B），直连后
+        // 不再写入 active_seed/current_view，该路径永久失效。
+        if self.header_direct.load(Ordering::Relaxed) {
+            log_diag("apply_header: direct mode active, ignoring Web projection");
+            return;
+        }
         let Ok(state) = serde_json::from_value::<HeaderState>(payload) else {
             log_diag("apply_header: invalid payload, keeping previous state");
             return;
@@ -294,10 +1080,278 @@ impl BridgeCore {
             *self.current_view.lock().unwrap_or_else(|e| e.into_inner()) = state.view.clone();
         }
         if !state.seed.is_empty() {
-            *self.active_seed.lock().unwrap_or_else(|e| e.into_inner()) = state.seed.clone();
+            // active_seed 写入仲裁（双 seed 竞争）：侧栏 resume 进行中且
+            // Web 投影的 seed 尚未跟上目标时，忽略 Web 写入——否则 0px
+            // WebView 的旧会话投影会把 resume 目标覆盖掉，ChatView 快照
+            // 因 seed 不匹配被丢弃，永久停在"加载会话…"。
+            let mut target = self.resume_target.lock().unwrap_or_else(|e| e.into_inner());
+            match target.as_deref() {
+                Some(t) if t != state.seed => {
+                    log_diag(&format!(
+                        "apply_header: ignore web seed {} (resume target {})",
+                        state.seed, t
+                    ));
+                }
+                Some(_) => {
+                    // Web 已跟上 resume 目标：解除仲裁，恢复正常双源同步。
+                    *target = None;
+                    *self.active_seed.lock().unwrap_or_else(|e| e.into_inner()) =
+                        state.seed.clone();
+                }
+                None => {
+                    *self.active_seed.lock().unwrap_or_else(|e| e.into_inner()) =
+                        state.seed.clone();
+                }
+            }
         }
         *self.header_state.lock().unwrap_or_else(|e| e.into_inner()) = state;
         self.header_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ── XAML 交互模态（interaction 投影，同 header 模式）────────────
+
+    /// (state, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新覆盖层面板。
+    pub fn interaction_snapshot(&self) -> (InteractionState, u64) {
+        let state = self
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let rev = self.interaction_rev.load(Ordering::Relaxed);
+        (state, rev)
+    }
+
+    /// Web `shell.setInteraction` 载荷落缓存并递增 rev。
+    /// 反序列化失败时保留旧状态（静默丢弃坏载荷，不中断链路）。
+    /// 注意：不隐藏 Web 侧对应组件——隐藏由 flag（`__DEEPX_XAML__.interaction`）
+    /// 决定，本投影仅驱动壳覆盖层面板的数据。
+    /// 直连模式下（`interaction_direct` 置位）忽略投影——Rust 已从 daemon
+    /// 事件同步解析，Web IPC 投影必然过时，接受会覆盖直连状态（双源竞态）。
+    pub fn apply_interaction(&self, payload: Value) {
+        if self.interaction_direct.load(Ordering::Relaxed) {
+            log_diag("apply_interaction: direct mode active, ignoring Web projection");
+            return;
+        }
+        let Ok(state) = serde_json::from_value::<InteractionState>(payload) else {
+            log_diag("apply_interaction: invalid payload, keeping previous state");
+            return;
+        };
+        *self.interaction.lock().unwrap_or_else(|e| e.into_inner()) = state;
+        self.interaction_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 置位 Rust 直连模式（Web 注入 `interactionDirect` flag 后调用）。
+    /// 交互快照改由 daemon 事件解析组装，`shell.setInteraction` 投影被忽略。
+    pub fn set_interaction_direct(&self) {
+        self.interaction_direct.store(true, Ordering::Relaxed);
+        log_diag("interaction direct mode: enabled");
+    }
+
+    /// 应用 daemon control 事件到交互队列状态机；活动会话快照变化时递增 rev。
+    /// 幂等：SSE 重连续传重放事件经 PartialEq 比对不产生多余 rev。
+    /// 注意：机器按**事件 seed** 更新（后台会话交互保持挂起），缓存只投影
+    /// **active_seed** 的机器（对齐 Web 投影只发 activeEntry 的语义）。
+    fn apply_interaction_event(&self, seed: &str, ev: InteractionEvent) {
+        let mut machines = self.interactions.lock().unwrap_or_else(|e| e.into_inner());
+        machines.entry(seed.to_string()).or_default().apply(ev);
+        drop(machines);
+        self.refresh_interaction_snapshot();
+    }
+
+    /// tool 频道变体（permission 队列独立于 ask/plan 状态机）。
+    fn apply_tool_permission_event(&self, seed: &str, ev: ToolPermissionEvent) {
+        let mut machines = self.interactions.lock().unwrap_or_else(|e| e.into_inner());
+        machines.entry(seed.to_string()).or_default().apply_tool(ev);
+        drop(machines);
+        self.refresh_interaction_snapshot();
+    }
+
+    /// 将 active_seed 对应机器的快照写入缓存（无该 seed 机器 → 空交互）。
+    /// 快照未变化（PartialEq）不递增 rev——重放/无关会话事件零开销。
+    fn refresh_interaction_snapshot(&self) {
+        let active = self.active_seed();
+        let machines = self.interactions.lock().unwrap_or_else(|e| e.into_inner());
+        let next = machines
+            .get(&active)
+            .map(|m| m.snapshot(&active))
+            .unwrap_or_default();
+        drop(machines);
+        let mut cur = self.interaction.lock().unwrap_or_else(|e| e.into_inner());
+        if *cur != next {
+            *cur = next;
+            self.interaction_rev.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // ── XAML Composer（composer 投影，同 header 模式）────────────────
+
+    /// (state, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新底部栏。
+    /// 直连模式下合并 A 组（Rust 直连：isStreaming/gate/model/context）+
+    /// B 组（Web 投影：mode/permissionLevel/queue/sendAck/submitError）。
+    pub fn composer_snapshot(&self) -> (ComposerState, u64) {
+        let rev = self.composer_rev.load(Ordering::Relaxed);
+        let proj = self
+            .composer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !self.composer_direct.load(Ordering::Relaxed) {
+            return (proj, rev);
+        }
+        let active = self.active_seed();
+        let now = unix_ms();
+        let activity = self
+            .composer_activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&active)
+            .cloned();
+        // hasPendingGate 复用交互队列状态机（permission/ask/plan 任一挂起）。
+        let gate = self
+            .interactions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&active)
+            .map(|m| m.has_pending())
+            .unwrap_or(false);
+        let state = ComposerState {
+            seed: active,
+            is_streaming: activity.as_ref().map(|a| a.is_streaming(now)).unwrap_or(false),
+            has_pending_gate: gate,
+            model: activity.as_ref().map(|a| a.model.clone()).unwrap_or_default(),
+            context_tokens: activity.as_ref().map(|a| a.prompt_tokens).unwrap_or(0),
+            context_limit: activity.as_ref().map(|a| a.context_limit).unwrap_or(0),
+            // B 组：Web 投影保留（写路径伴生状态）。
+            mode: proj.mode,
+            permission_level: proj.permission_level,
+            queue_count: proj.queue_count,
+            queue_items: proj.queue_items,
+            submit_error: proj.submit_error,
+            send_ack: proj.send_ack,
+        };
+        (state, rev)
+    }
+
+    /// 置位 composer 直连模式（Web 注入 `composerDirect` flag 后调用）。
+    /// A 组字段改由 conversation 事件解析；B 组投影照常（sendAck 驱动的
+    /// 悲观清空语义不变，Web 投影代码零改动）。
+    pub fn set_composer_direct(&self) {
+        self.composer_direct.store(true, Ordering::Relaxed);
+        log_diag("composer direct mode: enabled");
+    }
+
+    // ── 原生 ChatView（conversation 事件直连）──────────────────────
+
+    /// (事件队列快照, rev)：UI 线程 timer 比对 rev 后 drain 喂 Transcript。
+    /// 事件为 wire JSON（`{"type":...}`），消费方用
+    /// `chat_adapter::internal_event` 反序列化为渲染协议。
+    pub fn chat_drain(&self) -> (Vec<serde_json::Value>, u64) {
+        let rev = self.chat_rev.load(Ordering::Relaxed);
+        let events = self
+            .chat_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        (events, rev)
+    }
+
+    /// 查看最近一次 timeline 快照（`(seed, TimelineSnapshot JSON)`；resume
+    /// 历史数据源）。**peek 语义**：不消费——seed 校验失败的快照保留在缓存，
+    /// 等新快照覆盖或调用方主动重拉，避免"take 即弃"导致快照永久丢失后
+    /// ChatView 永远停在"加载会话…"。
+    pub fn chat_timeline_peek(&self) -> Option<(String, serde_json::Value)> {
+        self.chat_timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 消费当前快照（仅调用方确认 `seed == active_seed` 后调用）。
+    pub fn chat_timeline_consume(&self) {
+        *self
+            .chat_timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// 主动重拉指定 seed 的 timeline 快照（快照 seed 不匹配时的恢复路径）。
+    /// daemon 对重复 activate 幂等（重推快照，无害）；节流 1s 防 16ms 泵
+    /// 每 tick 触发。失败静默（快照保留在缓存，下一轮节流到期再试）。
+    pub fn spawn_timeline_refresh(&self, seed: &str) {
+        let mut last = self
+            .timeline_refresh_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if last.elapsed() < REFRESH_THROTTLE {
+            return;
+        }
+        *last = Instant::now();
+        drop(last);
+        let core = self.self_arc();
+        let seed = seed.to_string();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("timeline refresh {seed}: connect failed: {err}"));
+                    return;
+                }
+            };
+            if let Err(err) = client.activate_timeline(&seed).await {
+                log_diag(&format!("timeline refresh {seed}: activate failed: {err}"));
+            }
+        });
+    }
+
+    /// 置位 ChatView 直连模式（Web 注入 `chatDirect` flag 时调用；幂等）。
+    /// 默认已开启（ChatView 原生迁移完成）；保留此入口供回退切换。
+    pub fn set_chat_direct(&self) {
+        self.chat_direct.store(true, Ordering::Relaxed);
+        log_diag("chat direct mode: enabled");
+    }
+
+    /// Web `shell.setComposer` 载荷落缓存并递增 rev。
+    /// 反序列化失败时保留旧状态（静默丢弃坏载荷，不中断链路）。
+    /// 直连模式下**只落 B 组**（mode/permissionLevel/queue/sendAck/submitError），
+    /// A 组（isStreaming/gate/model/context）丢弃——由 composer_snapshot 合并
+    /// 时以 Rust 直连为准，避免双源竞态（Web 投影必然晚于本地事件解析）。
+    pub fn apply_composer(&self, payload: Value) {
+        let Ok(state) = serde_json::from_value::<ComposerState>(payload) else {
+            log_diag("apply_composer: invalid payload, keeping previous state");
+            return;
+        };
+        let mut cur = self.composer.lock().unwrap_or_else(|e| e.into_inner());
+        if self.composer_direct.load(Ordering::Relaxed) {
+            cur.mode = state.mode;
+            cur.permission_level = state.permission_level;
+            cur.queue_count = state.queue_count;
+            cur.queue_items = state.queue_items;
+            cur.submit_error = state.submit_error;
+            cur.send_ack = state.send_ack;
+        } else {
+            *cur = state;
+        }
+        self.composer_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ── XAML goalBar（dashboard 投影，control 事件驱动）─────────────
+
+    /// (snapshot, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新 goalBar。
+    pub fn dashboard_snapshot(&self) -> (Option<DashboardSnapshot>, u64) {
+        let snap = self
+            .dashboard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let rev = self.dashboard_rev.load(Ordering::Relaxed);
+        (snap, rev)
+    }
+
+    /// control 频道 `dashboard_snapshot` 事件落缓存并递增 rev。
+    pub fn apply_dashboard(&self, snap: DashboardSnapshot) {
+        *self.dashboard.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+        self.dashboard_rev.fetch_add(1, Ordering::Relaxed);
     }
 
     fn seed_set(&self) -> HashSet<String> {
@@ -373,6 +1427,10 @@ impl BridgeCore {
             "refresh_sessions: {} sessions",
             self.sessions.lock().unwrap_or_else(|e| e.into_inner()).len()
         ));
+        // 标题栏直连：会话列表刷新后 title 可能变化（重命名/首轮摘要）。
+        if self.header_direct.load(Ordering::Relaxed) {
+            self.refresh_header();
+        }
     }
 
     // ── XAML Info 面板（bootstrap conversation.state 投影）─────────────
@@ -485,6 +1543,13 @@ impl BridgeCore {
             self.navigate("chat", Some(seed));
             return;
         }
+        // active_seed 写入仲裁置位：目标达成前，apply_header 忽略 Web 投影
+        // 的旧 seed——0px WebView 双 seed 竞争（Web 旧会话投影覆盖 resume
+        // 目标 → 快照 seed 不匹配被丢弃 → ChatView 永久"加载会话…"）。
+        *self
+            .resume_target
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(seed.to_string());
         let core = self.self_arc();
         let seed = seed.to_string();
         let _ = deepx_client::runtime_handle().spawn(async move {
@@ -499,11 +1564,27 @@ impl BridgeCore {
                 log_diag(&format!("resume {seed}: attach failed: {err}"));
                 return;
             }
+            // 原生 ChatView 数据源：显式激活 timeline 流，daemon 推送
+            // `TimelineSnapshot`（权威 turns 历史）→ bridge 缓存 → restore。
+            // 先记录 seed 再 activate：快照可能瞬时到达，缓存标记须就绪。
+            *core
+                .last_timeline_seed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = seed.clone();
+            // 先同步 active_seed 再 activate：快照瞬时到达时 seed 校验已
+            // 就绪（原顺序 activate 在前，快照早到会在 chat_view 泵里被
+            // 当作 stale 丢弃——即使没有 Web 竞争也存在竞态窗口）。
             core.set_active_seed(&seed);
+            if let Err(err) = client.activate_timeline(&seed).await {
+                log_diag(&format!("resume {seed}: activate_timeline failed: {err}"));
+            }
             // rev++ 让侧栏 timer 同步 active 高亮（selected_tag 受控刷新）。
             core.session_rev.fetch_add(1, Ordering::Relaxed);
             log_diag(&format!("resume: attached {seed}"));
             core.navigate("chat", Some(&seed));
+            // 注意：resume_target 不在本处清除——Web 尚未跟随 navigate 时
+            // 投影的旧 seed 仍会覆盖 active_seed；由 apply_header 在 Web
+            // 投影 seed 与目标一致时解除仲裁（壳主导：侧栏最后点击优先）。
         });
     }
 
@@ -948,6 +2029,10 @@ impl BridgeCore {
             payload["seed"] = json!(seed);
         }
         self.emit("shell.navigate", payload);
+        // 标题栏直连：view 变化立即刷新（不再等 Web setHeader 回推）。
+        if self.header_direct.load(Ordering::Relaxed) {
+            self.refresh_header();
+        }
     }
 
     async fn invoke(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -1231,6 +2316,28 @@ impl BridgeCore {
                 on_timeline_snapshot: Arc::new({
                     let core = self.self_arc();
                     move |snapshot: Value| {
+                        // 原生 ChatView：缓存权威 turns 历史（resume 数据源），
+                        // 以最近激活的 timeline seed 标记（防跨会话错灌）。
+                        let seed = core
+                            .last_timeline_seed
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        *core
+                            .chat_timeline
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = Some((seed.clone(), snapshot.clone()));
+                        core.chat_rev.fetch_add(1, Ordering::Relaxed);
+                        // 标题栏直连：turns 计数在此缓存（不随 chat_view
+                        // consume 清空）——undo_disabled 判定源。
+                        let turns = chat_adapter::timeline_turns(&snapshot).len();
+                        core.header_turns
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(seed.clone(), turns);
+                        if core.header_direct.load(Ordering::Relaxed) {
+                            core.refresh_header();
+                        }
                         core.emit("timeline.snapshot", snapshot);
                     }
                 }),
@@ -1328,6 +2435,20 @@ impl BridgeCore {
                         .replace(snap);
                     skills_changed = true;
                 }
+                // XAML composer goalBar：dashboard_snapshot 携带完整
+                // DashboardSnapshot 载荷（tasks/recent_edits/current_todo_id），
+                // 直接缓存为权威快照（终局架构：Web 移除后 XAML 直消费）。
+                if let Some(snap) = parse_dashboard_event(&env.event) {
+                    self.apply_dashboard(snap);
+                }
+                // Rust 直连交互队列（读路径直连）：control 频道 ask/plan
+                // 事件直接组装 InteractionState，不经 WebView。仅直连模式
+                // 挂载（flag 关 → 回退 Web 投影，状态单一数据源不变）。
+                if self.interaction_direct.load(Ordering::Relaxed) {
+                    if let Some(ev) = parse_interaction_event(&env.event) {
+                        self.apply_interaction_event(&batch.seed, ev);
+                    }
+                }
             }
             if changed {
                 self.session_rev.fetch_add(1, Ordering::Relaxed);
@@ -1344,6 +2465,66 @@ impl BridgeCore {
             }
             if skills_changed {
                 self.skills_rev.fetch_add(1, Ordering::Relaxed);
+            }
+        } else if batch.channel == Channel::Tool {
+            // Rust 直连交互队列（读路径直连）：tool 频道权限请求
+            // （permission 优先于 ask/plan，对齐 Web pendingInteractions 组装）。
+            if self.interaction_direct.load(Ordering::Relaxed) {
+                for env in &batch.envelopes {
+                    if let Some(ev) = parse_tool_permission_event(&env.event) {
+                        self.apply_tool_permission_event(&batch.seed, ev);
+                    }
+                }
+            }
+        } else if batch.channel == Channel::Conversation {
+            // Rust 直连 composer（读路径直连）：conversation 事件活动追踪
+            // ——isStreaming（卡死检测）+ usage_updated 缓存（model/context）。
+            // 无条件挂载：streaming 信号同时驱动标题栏 undo/compact disabled
+            // （对齐 Web `streaming()` 判定）。事件高频（流式 delta），处理
+            // 为 O(1) 时间戳写入，rev 每 batch 递增一次（XAML 250ms 轮询
+            // 稀释，无害）。
+            let now = unix_ms();
+            let mut turn_boundary = false;
+            {
+                let mut map = self
+                    .composer_activity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let activity = map.entry(batch.seed.clone()).or_default();
+                for env in &batch.envelopes {
+                    if let Some(ev) = parse_conversation_activity_event(&env.event) {
+                        if matches!(
+                            &ev,
+                            ConversationActivityEvent::Started | ConversationActivityEvent::Ended
+                        ) {
+                            turn_boundary = true;
+                        }
+                        activity.apply(ev, now);
+                    }
+                }
+            }
+            if self.composer_direct.load(Ordering::Relaxed) {
+                self.composer_rev.fetch_add(1, Ordering::Relaxed);
+            }
+            // 标题栏直连：turn 边界（streaming 翻转）刷新 undo/compact disabled。
+            if turn_boundary && self.header_direct.load(Ordering::Relaxed) {
+                self.refresh_header();
+            }
+            // 原生 ChatView 直连：渲染相关事件（turn/round/delta/checkpoint）
+            // 入队，UI 线程 timer drain 喂 Transcript（读路径直连）。
+            if self.chat_direct.load(Ordering::Relaxed) {
+                let mut queue = self
+                    .chat_events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                for env in &batch.envelopes {
+                    if chat_adapter::internal_event(&env.event).is_some() {
+                        queue.push_back(env.event.clone());
+                    }
+                }
+                if !queue.is_empty() {
+                    self.chat_rev.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         self.emit(
@@ -1688,6 +2869,9 @@ impl Bridge {
                     active_seed: Mutex::new(String::new()),
                     header_state: Mutex::new(HeaderState::default()),
                     header_rev: AtomicU64::new(0),
+                    // 标题栏原生迁移完成：默认直连（壳侧组装，不经 Web 投影）。
+                    header_direct: AtomicBool::new(true),
+                    header_turns: Mutex::new(HashMap::new()),
                     timeline_stall_since: Mutex::new(None),
                     channels_stall_since: Mutex::new(None),
                     rebuilding: AtomicBool::new(false),
@@ -1706,6 +2890,29 @@ impl Bridge {
                     settings_proj_rev: AtomicU64::new(0),
                     info: Mutex::new(None),
                     info_rev: AtomicU64::new(0),
+                    interaction: Mutex::new(InteractionState::default()),
+                    interaction_rev: AtomicU64::new(0),
+                    interactions: Mutex::new(HashMap::new()),
+                    // 交互面板原生迁移完成：默认直连（daemon control/tool
+                    // 事件 → InteractionMachine → snapshot，不经 Web 投影）。
+                    interaction_direct: AtomicBool::new(true),
+                    composer: Mutex::new(ComposerState::default()),
+                    composer_rev: AtomicU64::new(0),
+                    composer_activity: Mutex::new(HashMap::new()),
+                    composer_direct: AtomicBool::new(false),
+                    // ChatView 原生迁移完成：默认直连（conversation 渲染事件
+                    // 入队供原生 ChatView 消费）；Web 注入 flag 可再置位（幂等）。
+                    chat_events: Mutex::new(std::collections::VecDeque::new()),
+                    chat_timeline: Mutex::new(None),
+                    chat_rev: AtomicU64::new(0),
+                    chat_direct: AtomicBool::new(true),
+                    resume_target: Mutex::new(None),
+                    // 初始化为远古时刻：首次 refresh 立即放行。
+                    timeline_refresh_at: Mutex::new(
+                        Instant::now() - Duration::from_secs(3600),
+                    ),
+                    dashboard: Mutex::new(None),
+                    dashboard_rev: AtomicU64::new(0),
                     outbox_tx: tx,
                 });
                 let _ = SHARED_CORE.set(core.clone());
@@ -1785,6 +2992,38 @@ impl Bridge {
         if let Ok(payload) = serde_json::to_value(action) {
             self.core.emit("shell.headerAction", payload);
         }
+    }
+
+    /// 标题栏本地开关翻转（headerDirect：info/stats 壳本地维护）。
+    pub fn toggle_header_flag(&self, flag: HeaderFlag) {
+        self.core.toggle_header_flag(flag);
+    }
+
+    /// 交互模态动作回传 Web（`shell.interactionAction` 事件；同 headerAction
+    /// 机制——壳点击覆盖层面板按钮 → Web 执行既有 handler，协议请求在 Web 侧）。
+    pub fn emit_interaction_action(&self, action: InteractionAction) {
+        if let Ok(payload) = serde_json::to_value(action) {
+            self.core.emit("shell.interactionAction", payload);
+        }
+    }
+
+    /// Composer 动作回传 Web（`shell.composerAction` 事件；同 headerAction
+    /// 机制——壳提交意图 → Web 执行既有 handler，协议请求在 Web 侧）。
+    pub fn emit_composer_action(&self, action: ComposerAction) {
+        if let Ok(payload) = serde_json::to_value(action) {
+            self.core.emit("shell.composerAction", payload);
+        }
+    }
+
+    /// 附件：图片文件选择对话框（STA COM；用户取消返回 Ok(null)）。
+    /// 复用 show_open_dialog 的 image_filter（png/jpg/jpeg/gif/webp/bmp）。
+    pub fn pick_image_file(&self) -> Result<Value, String> {
+        show_open_dialog(false, false, true, Some("选择图片"))
+    }
+
+    /// 附件：文本文件选择对话框（STA COM；用户取消返回 Ok(null)）。
+    pub fn pick_text_file(&self) -> Result<Value, String> {
+        show_open_dialog(false, false, false, Some("选择文本文件"))
     }
 
     /// 壳系统主题变化（P-5）→ Web 校正（`shell.themeChanged` 事件）。
@@ -1934,6 +3173,46 @@ impl Bridge {
             self.core.respond(id, true, json!(null), None);
             return;
         }
+        // shell.setInteraction：Web 交互模态状态投影 → 壳覆盖层面板数据源
+        // （P-3 模式，同 setHeader；kind="none" 关闭面板）。直连模式下
+        // （setInteractionDirect 置位后）被忽略——Rust 已从 daemon 事件解析。
+        if method == "shell.setInteraction" {
+            self.core.apply_interaction(params);
+            self.core.respond(id, true, json!(null), None);
+            return;
+        }
+        // shell.setInteractionDirect：Web 注入 `interactionDirect` flag 后置位
+        // Rust 直连模式——交互快照改由 daemon control/tool 事件解析组装
+        // （读路径直连，不经 WebView），`shell.setInteraction` 投影停发/忽略。
+        if method == "shell.setInteractionDirect" {
+            self.core.set_interaction_direct();
+            self.core.respond(id, true, json!(null), None);
+            return;
+        }
+        // shell.setComposer：Web Composer 状态投影 → 壳底部栏数据源
+        // （P-3 模式，同 setHeader；sendAck 驱动悲观清空）。直连模式下
+        // 只落 B 组（写路径伴生状态），A 组由 composer_snapshot 以 Rust
+        // 直连解析为准。
+        if method == "shell.setComposer" {
+            self.core.apply_composer(params);
+            self.core.respond(id, true, json!(null), None);
+            return;
+        }
+        // shell.setComposerDirect：Web 注入 `composerDirect` flag 后置位
+        // Rust 直连模式——A 组字段（isStreaming/gate/model/context）改由
+        // conversation 事件解析组装（读路径直连，不经 WebView）。
+        if method == "shell.setComposerDirect" {
+            self.core.set_composer_direct();
+            self.core.respond(id, true, json!(null), None);
+            return;
+        }
+        // shell.setChatDirect：Web 注入 `chatDirect` flag 后置位（幂等；
+        // 默认已开启——ChatView 原生迁移完成，此入口供显式确认/回切）。
+        if method == "shell.setChatDirect" {
+            self.core.set_chat_direct();
+            self.core.respond(id, true, json!(null), None);
+            return;
+        }
         self.core.spawn_invoke(id, method, params);
     }
 
@@ -2003,6 +3282,8 @@ mod tests {
             active_seed: Mutex::new(String::new()),
             header_state: Mutex::new(HeaderState::default()),
             header_rev: AtomicU64::new(0),
+            header_direct: AtomicBool::new(true),
+            header_turns: Mutex::new(HashMap::new()),
             timeline_stall_since: Mutex::new(None),
             channels_stall_since: Mutex::new(None),
             rebuilding: AtomicBool::new(false),
@@ -2021,6 +3302,22 @@ mod tests {
             settings_proj_rev: AtomicU64::new(0),
             info: Mutex::new(None),
             info_rev: AtomicU64::new(0),
+            interaction: Mutex::new(InteractionState::default()),
+            interaction_rev: AtomicU64::new(0),
+            interactions: Mutex::new(HashMap::new()),
+            interaction_direct: AtomicBool::new(false),
+            composer: Mutex::new(ComposerState::default()),
+            composer_rev: AtomicU64::new(0),
+            composer_activity: Mutex::new(HashMap::new()),
+            composer_direct: AtomicBool::new(false),
+            chat_events: Mutex::new(std::collections::VecDeque::new()),
+            chat_timeline: Mutex::new(None),
+            chat_rev: AtomicU64::new(0),
+            chat_direct: AtomicBool::new(true),
+            resume_target: Mutex::new(None),
+            timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
+            dashboard: Mutex::new(None),
+            dashboard_rev: AtomicU64::new(0),
             outbox_tx: tx,
         }
     }
@@ -2031,6 +3328,370 @@ mod tests {
             retry_ms: 1000,
             cursor: 3,
         }
+    }
+
+    // ── 交互队列状态机（Rust 直连读路径）──────────────────────────────
+
+    /// 真实 daemon control 事件（deepx-domain `ControlEvent` snake_case）。
+    fn ask_requested_event(id: &str, turn_id: &str) -> Value {
+        json!({
+            "type": "interaction_requested",
+            "interaction_id": id,
+            "turn_id": turn_id,
+            "mode": "single",
+            "questions": [
+                { "id": "q1", "question": "继续？", "options": ["是", "否"], "allow_custom": true }
+            ],
+        })
+    }
+
+    #[test]
+    fn parses_ask_requested_with_snake_case_keys() {
+        let ev = parse_interaction_event(&ask_requested_event("i1", "t1")).expect("parse");
+        let InteractionEvent::AskRequested { id, questions } = ev else {
+            panic!("expected AskRequested");
+        };
+        assert_eq!(id, "i1");
+        assert_eq!(questions.len(), 1);
+        // daemon snake_case `allow_custom` → 壳 camelCase 形状。
+        assert_eq!(questions[0].allow_custom, true);
+        assert_eq!(questions[0].options, vec!["是", "否"]);
+    }
+
+    #[test]
+    fn parses_plan_review_requested_with_nullable_todo() {
+        let ev = parse_interaction_event(&json!({
+            "type": "plan_review_requested",
+            "interaction_id": "p1",
+            "turn_id": "t2",
+            "plan_content": "1. 修 bug",
+            "review_type": "todo_activation",
+            "todo_items": [
+                { "id": "td1", "title": "修 bug", "description": "", "complexity": "small" }
+            ],
+        }))
+        .expect("parse");
+        let InteractionEvent::PlanRequested { id, plan_content, review_type, todo_items } = ev else {
+            panic!("expected PlanRequested");
+        };
+        assert_eq!(id, "p1");
+        assert_eq!(plan_content, "1. 修 bug");
+        assert_eq!(review_type, "todo_activation");
+        assert_eq!(todo_items.len(), 1);
+        assert_eq!(todo_items[0].complexity, "small");
+        // todo_items 可为 null → 空 Vec。
+        let null_ev = parse_interaction_event(&json!({
+            "type": "plan_review_requested",
+            "interaction_id": "p2",
+            "turn_id": "t3",
+            "plan_content": "x",
+            "review_type": "",
+            "todo_items": null,
+        }))
+        .expect("parse");
+        let InteractionEvent::PlanRequested { todo_items, .. } = null_ev else {
+            panic!("expected PlanRequested");
+        };
+        assert!(todo_items.is_empty());
+    }
+
+    #[test]
+    fn ghost_cleanup_only_for_rejection_codes() {
+        let ev = parse_interaction_event(&json!({
+            "type": "operation_failed",
+            "occurrence_id": "o1",
+            "scope": "session",
+            "error": { "code": "ask_rejected", "error_id": "e1", "message": "rejected" },
+        }))
+        .expect("parse");
+        assert!(matches!(ev, InteractionEvent::GhostCleanup));
+        // 其他错误码不触发自愈。
+        let ev2 = parse_interaction_event(&json!({
+            "type": "operation_failed",
+            "occurrence_id": "o2",
+            "scope": "session",
+            "error": { "code": "tool_failed", "error_id": "e2", "message": "boom" },
+        }));
+        assert!(ev2.is_none());
+    }
+
+    #[test]
+    fn parses_tool_permission_requested_and_finished() {
+        let ev = parse_tool_permission_event(&json!({
+            "type": "tool_permission_requested",
+            "tool_call_id": "tc1",
+            "turn_id": "t9",
+            "round_num": 1,
+            "tool_name": "shell",
+            "reason": "run cmd",
+            "paths": ["C:/x"],
+            "category": "exec",
+            "level": 2,
+            "risk": "high",
+            "consequence": "执行命令",
+        }))
+        .expect("parse");
+        let ToolPermissionEvent::Requested {
+            tool_call_id, paths, level, risk, ..
+        } = ev else {
+            panic!("expected Requested");
+        };
+        assert_eq!(tool_call_id, "tc1");
+        assert_eq!(paths, vec!["C:/x"]);
+        assert_eq!(level, 2);
+        assert_eq!(risk, "high");
+
+        let done = parse_tool_permission_event(&json!({
+            "type": "tool_finished",
+            "tool_call_id": "tc1",
+            "turn_id": "t9",
+            "round_num": 1,
+            "result": { "exit_code": 0 },
+        }))
+        .expect("parse");
+        assert!(matches!(done, ToolPermissionEvent::Resolved { .. }));
+    }
+
+    #[test]
+    fn machine_permission_priority_and_resolution() {
+        let mut m = InteractionMachine::default();
+        // permission 请求先到。
+        m.apply_tool(
+            parse_tool_permission_event(&json!({
+                "type": "tool_permission_requested",
+                "tool_call_id": "tc1",
+                "turn_id": "t9",
+                "round_num": 1,
+                "tool_name": "shell",
+                "reason": "run",
+                "paths": [],
+                "category": "exec",
+                "level": 2,
+                "risk": "high",
+                "consequence": "执行",
+            }))
+            .expect("parse"),
+        );
+        // ask 后到——permission 仍优先（对齐 Web pendingInteractions[0]）。
+        m.apply(
+            parse_interaction_event(&ask_requested_event("i1", "t1")).expect("parse"),
+        );
+        let snap = m.snapshot("seed1");
+        assert_eq!(snap.kind, "permission");
+        assert_eq!(snap.id, "tc1");
+        assert_eq!(snap.tool_name, "shell");
+        assert_eq!(snap.seed, "seed1");
+
+        // tool_finished 释放 permission → ask 上位。
+        m.apply_tool(ToolPermissionEvent::Resolved { tool_call_id: "tc1".into() });
+        let snap = m.snapshot("seed1");
+        assert_eq!(snap.kind, "ask");
+        assert_eq!(snap.id, "i1");
+        assert_eq!(snap.questions.len(), 1);
+
+        // interaction_resolved 清除 ask → 空（kind=""，XAML 判空关闭）。
+        m.apply(InteractionEvent::AskResolved { id: "i1".into() });
+        let snap = m.snapshot("seed1");
+        assert!(snap.kind.is_empty());
+        assert!(snap.id.is_empty());
+    }
+
+    #[test]
+    fn machine_plan_flow_and_ghost_cleanup() {
+        let mut m = InteractionMachine::default();
+        m.apply(
+            parse_interaction_event(&json!({
+                "type": "plan_review_requested",
+                "interaction_id": "p1",
+                "turn_id": "t2",
+                "plan_content": "plan",
+                "review_type": "todo_activation",
+                "todo_items": null,
+            }))
+            .expect("parse"),
+        );
+        let snap = m.snapshot("s");
+        assert_eq!(snap.kind, "plan");
+        assert_eq!(snap.plan_content, "plan");
+
+        // 幽灵自愈：operation_failed 清除挂起面板。
+        m.apply(InteractionEvent::GhostCleanup);
+        assert!(m.snapshot("s").kind.is_empty());
+
+        // 不匹配 id 的 resolved 不清除（对齐 Web reducer 的 id 匹配）。
+        m.apply(
+            parse_interaction_event(&json!({
+                "type": "plan_review_requested",
+                "interaction_id": "p2",
+                "turn_id": "t4",
+                "plan_content": "p2",
+                "review_type": "",
+            }))
+            .expect("parse"),
+        );
+        m.apply(InteractionEvent::PlanResolved { id: "p1".into() });
+        assert_eq!(m.snapshot("s").kind, "plan");
+        m.apply(InteractionEvent::PlanResolved { id: "p2".into() });
+        assert!(m.snapshot("s").kind.is_empty());
+    }
+
+    #[test]
+    fn apply_interaction_event_is_idempotent_for_replay() {
+        let core = test_core();
+        core.set_interaction_direct();
+        core.set_active_seed("seed1");
+        let ev = ask_requested_event("i1", "t1");
+        core.apply_interaction_event("seed1", parse_interaction_event(&ev).expect("parse"));
+        let rev1 = core.interaction_rev.load(Ordering::Relaxed);
+        assert_eq!(core.interaction_snapshot().0.kind, "ask");
+        // SSE 重放同一事件：快照无变化 → rev 不递增（幂等）。
+        core.apply_interaction_event("seed1", parse_interaction_event(&ev).expect("parse"));
+        let rev2 = core.interaction_rev.load(Ordering::Relaxed);
+        assert_eq!(rev1, rev2);
+        // 直连模式下 Web 投影被忽略（双源竞态防护）。
+        core.apply_interaction(json!({ "kind": "permission", "id": "ghost" }));
+        assert_eq!(core.interaction_snapshot().0.kind, "ask");
+    }
+
+    #[test]
+    fn interaction_cache_follows_active_seed() {
+        let core = test_core();
+        core.set_interaction_direct();
+        // 会话 A 请求 ask；active 尚未设置 → 缓存为空（后台不打扰当前显示）。
+        core.apply_interaction_event("seedA", parse_interaction_event(&ask_requested_event("iA", "tA")).expect("parse"));
+        assert!(core.interaction_snapshot().0.kind.is_empty());
+        // 切到 A → 缓存投影 A 的交互。
+        core.set_active_seed("seedA");
+        assert_eq!(core.interaction_snapshot().0.kind, "ask");
+        assert_eq!(core.interaction_snapshot().0.id, "iA");
+        // 会话 B 的交互事件不覆盖当前显示（A 保持）。
+        core.apply_interaction_event("seedB", parse_interaction_event(&ask_requested_event("iB", "tB")).expect("parse"));
+        assert_eq!(core.interaction_snapshot().0.id, "iA");
+        // 切到 B → B 的交互上位；切回 A → A 恢复（状态机按 seed 保留）。
+        core.set_active_seed("seedB");
+        assert_eq!(core.interaction_snapshot().0.id, "iB");
+        core.set_active_seed("seedA");
+        assert_eq!(core.interaction_snapshot().0.id, "iA");
+    }
+
+    // ── composer 直连（A 组 Rust 解析 + B 组投影合并）──────────────────
+
+    #[test]
+    fn parses_conversation_activity_events() {
+        use ConversationActivityEvent as E;
+        // turn_started → Started。
+        let ev = parse_conversation_activity_event(&json!({
+            "type": "turn_started", "turn_id": "t1", "user_text": "hi"
+        }))
+        .expect("parse");
+        assert!(matches!(ev, E::Started));
+        // 终态 → Ended。
+        for ty in ["turn_completed", "turn_failed", "conversation_cancelled"] {
+            let ev = parse_conversation_activity_event(&json!({ "type": ty, "turn_id": "t1" }))
+                .expect("parse");
+            assert!(matches!(ev, E::Ended), "{ty}");
+        }
+        // usage_updated → Usage（snake_case usage 字段）。
+        let ev = parse_conversation_activity_event(&json!({
+            "type": "usage_updated",
+            "turn_id": "t1", "round_num": 1,
+            "usage": { "prompt_tokens": 1234, "total_tokens": 2000 },
+            "context_limit": 200000,
+            "model": "gpt-5",
+        }))
+        .expect("parse");
+        let E::Usage { prompt_tokens, context_limit, model } = ev else {
+            panic!("expected Usage");
+        };
+        assert_eq!(prompt_tokens, 1234);
+        assert_eq!(context_limit, 200000);
+        assert_eq!(model, "gpt-5");
+        // 流式事件 → Touched。
+        for ty in ["round_delta", "block_checkpoint", "round_completed", "provider_retrying", "provider_tool_status"] {
+            let ev = parse_conversation_activity_event(&json!({ "type": ty, "turn_id": "t1" }))
+                .expect("parse");
+            assert!(matches!(ev, E::Touched), "{ty}");
+        }
+        // compact/未知 → None（不视为活动）。
+        assert!(parse_conversation_activity_event(&json!({ "type": "compact_started" })).is_none());
+        assert!(parse_conversation_activity_event(&json!({ "type": "bogus" })).is_none());
+    }
+
+    #[test]
+    fn composer_streaming_stall_detection() {
+        let mut a = ComposerActivity::default();
+        // 无活动 turn → 非流式。
+        assert!(!a.is_streaming(1_000));
+        // turn_started → 流式（时间戳未知保守 true，随后精确）。
+        a.apply(ConversationActivityEvent::Started, 1_000);
+        assert!(a.is_streaming(1_000));
+        // 4 分钟内 → 流式。
+        assert!(a.is_streaming(1_000 + COMPOSER_STALL_TIMEOUT_MS - 1));
+        // 超时 → 非流式（卡死）。
+        assert!(!a.is_streaming(1_000 + COMPOSER_STALL_TIMEOUT_MS));
+        // 活动事件刷新时间戳 → 恢复流式。
+        a.apply(ConversationActivityEvent::Touched, 10_000);
+        assert!(a.is_streaming(10_001));
+        // 终态 → 非流式。
+        a.apply(ConversationActivityEvent::Ended, 11_000);
+        assert!(!a.is_streaming(11_000));
+    }
+
+    #[test]
+    fn composer_snapshot_merges_direct_and_projection() {
+        let core = test_core();
+        core.set_active_seed("seed1");
+        // 非直连：投影全量透传（现状路径）。
+        core.apply_composer(json!({
+            "seed": "seed1", "isStreaming": true, "hasPendingGate": true,
+            "mode": "plan", "model": "m1", "contextTokens": 9, "contextLimit": 100,
+            "permissionLevel": 3, "queueCount": 1,
+            "queueItems": [{ "id": "q1", "text": "next" }],
+            "submitError": "boom", "sendAck": 5,
+        }));
+        let (s, _) = core.composer_snapshot();
+        assert!(s.is_streaming);
+        assert_eq!(s.model, "m1");
+        assert_eq!(s.send_ack, 5);
+
+        // 直连：A 组来自 conversation 事件，B 组来自投影。
+        core.set_composer_direct();
+        core.apply_composer(json!({
+            "seed": "seed1", "isStreaming": false, "hasPendingGate": false,
+            "mode": "code", "model": "stale", "contextTokens": 0, "contextLimit": 0,
+            "permissionLevel": 2, "queueCount": 2,
+            "queueItems": [{ "id": "q1", "text": "next" }, { "id": "q2", "text": "more" }],
+            "submitError": "", "sendAck": 6,
+        }));
+        // conversation 事件：turn_started + usage_updated。
+        let now = unix_ms();
+        {
+            let mut map = core.composer_activity.lock().unwrap();
+            let a = map.entry("seed1".into()).or_default();
+            a.apply(ConversationActivityEvent::Started, now);
+            a.apply(ConversationActivityEvent::Usage {
+                prompt_tokens: 42,
+                context_limit: 200_000,
+                model: "gpt-5".into(),
+            }, now);
+        }
+        let (s, _) = core.composer_snapshot();
+        // A 组：Rust 直连（覆盖投影的 stale/0/false）。
+        assert!(s.is_streaming);
+        assert_eq!(s.model, "gpt-5");
+        assert_eq!(s.context_tokens, 42);
+        assert_eq!(s.context_limit, 200_000);
+        assert_eq!(s.seed, "seed1");
+        // B 组：投影保留。
+        assert_eq!(s.mode, "code");
+        assert_eq!(s.permission_level, 2);
+        assert_eq!(s.queue_count, 2);
+        assert_eq!(s.send_ack, 6);
+        assert_eq!(s.submit_error, "");
+        // hasPendingGate 联动交互机器。
+        assert!(!s.has_pending_gate);
+        core.apply_interaction_event("seed1", parse_interaction_event(&ask_requested_event("i1", "t1")).expect("parse"));
+        assert!(core.composer_snapshot().0.has_pending_gate);
     }
 
     #[test]
