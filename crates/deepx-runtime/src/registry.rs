@@ -209,6 +209,27 @@ impl AgentRegistry {
             command.env("DEEPX_WORKSPACE_URL", endpoint);
             command.env("DEEPX_WORKSPACE_TOKEN", token);
         }
+        // Resume worker：timeline 是 turn 账本的权威源。meta.turn_count 只在
+        // turn 完成时持久化（compact 也会缩小消息视图），daemon 重启后它可能
+        // 远小于 timeline 已记录的 turn 数——worker 按它恢复分配器就会复用
+        // 已 sealed 的 turn id，timeline 侧所有 intent 被拒，transcript 空白。
+        // 把 timeline 最大 turn 序号注入环境变量，worker 恢复计数以它为下限。
+        // （hub.timeline_snapshot 顺带触发懒加载 + 孤儿收尾，spawn 前完成。）
+        if new_seed.is_none()
+            && let Some(hub) = self.hub.as_ref()
+            && let Some(snapshot) = hub.timeline_snapshot(seed)
+        {
+            let max_seq = snapshot
+                .turns
+                .iter()
+                .filter_map(|turn| turn.turn_id.strip_prefix('t'))
+                .filter_map(|seq| seq.parse::<u64>().ok())
+                .max()
+                .unwrap_or(0);
+            if max_seq > 0 {
+                command.env("DEEPX_TIMELINE_TURN_COUNT", max_seq.to_string());
+            }
+        }
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;

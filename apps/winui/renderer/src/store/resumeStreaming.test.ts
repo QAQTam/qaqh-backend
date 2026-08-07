@@ -170,6 +170,42 @@ describe("resume 会话后 send 的流式内容（timeline + conversation 双源
     expect(turn?.status).not.toBe("cancelled");
   });
 
+  it("BUG 复现：timeline 残留 completed 旧 turn + store 同名 running 新 turn（同文重发）时让位", () => {
+    const seed = "s-same-text-retry";
+    const stores = conversationWithStreamingTurn(seed);
+    const fallback = selectRingingPresentation(seed, stores, createRawSessionState(seed), {
+      includeTurns: true,
+    });
+    // 中断后用户原样重发同一句话：timeline 旧 t12 已 completed（旧内容），
+    // store 同名 t12 是新的 running 输入且 userText 相同——继续展示 timeline
+    // 会把新回复整个遮蔽掉（worker 重启后计数滞后复用了该 id）。
+    const snapshot: TimelineSnapshot = {
+      watermark: 12,
+      turns: [
+        {
+          turn_id: "t12",
+          user_text: "hi",
+          sealed: true,
+          state: "completed",
+          rounds: [
+            {
+              round_num: 0,
+              sealed: true,
+              is_final: true,
+              blocks: [
+                { block_id: "b1", block_order: 0, kind: "text", state: "sealed", text: "old stale answer" },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const merged = mergeTimelinePresentation(seed, snapshot, fallback);
+    const turn = merged.turns.find((t) => t.turnId === "t12");
+    // 新 running 输入可见（未被 timeline 旧 completed 内容遮蔽）
+    expect(turn?.rounds[0]?.answer ?? "").toContain("Hello from backend");
+  });
+
   it("用户主动取消的 turn（无 daemon 重启标记）保持 timeline 展示", () => {
     const seed = "s-user-cancelled";
     const [stores, setStores] = createStore(initialRingingStores(seed));

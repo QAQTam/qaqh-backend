@@ -3,8 +3,9 @@ use deepx_session::SessionManager;
 use deepx_types::{Message, ToolDef};
 
 /// Truncate tool result for LLM context. Tools return full output for the user,
-/// but long results are trimmed here before storage to keep KV-cache prefixes
-/// stable across turns.
+/// but long results are trimmed at STORAGE time so the stored message is the
+/// final form — the same bytes are rendered on every subsequent request,
+/// keeping KV-cache prefixes stable across rounds and turns.
 ///
 /// - JSON results: truncates only the `content` field, preserves metadata.
 /// - Truncation markers tell the model how to retrieve the omitted portion.
@@ -49,10 +50,14 @@ fn truncation_marker(tool_name: &str, total_chars: usize) -> String {
 }
 
 fn truncate_tool_result(tool_name: &str, result: &str) -> String {
+    truncate_tool_result_with_limit(tool_name, result, 4000)
+}
+
+/// Same as `truncate_tool_result` with an explicit character cap.
+fn truncate_tool_result_with_limit(tool_name: &str, result: &str, limit: usize) -> String {
     // ── JSON-aware truncation ──
     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(result) {
         if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-            let limit = 4000usize;
             if content.len() > limit {
                 let cut = if is_line_oriented_tool(tool_name) {
                     let head = &content[..content.floor_char_boundary(limit)];
@@ -123,17 +128,37 @@ fn truncate_tool_result(tool_name: &str, result: &str) -> String {
 ///   retrieval reference once they are no longer in the active step.
 /// - JSON results: preserve metadata, replace content with a fold marker.
 /// - Plain results: keep only the first non-empty line (status + key metadata).
-fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
-    // Active skill instructions are an explicit part of the system context and
-    // must not be folded into an opaque marker.
-    if tool_name == "skills" {
+/// Character cap for content-bearing tool results (web content, image
+/// analysis, diffs, …). Generous enough that the model can consume the head
+/// without re-calling the tool; applied ONCE at storage time so the message
+/// is byte-identical on every later request.
+const CONTENT_BEARING_CHAR_LIMIT: usize = 16_000;
+
+/// Finalize a tool result exactly once, at storage time.
+///
+/// The rendered message must be identical on every subsequent request: any
+/// position-dependent folding performed at build time (active vs historical
+/// step) changes the bytes of the same stored message between rounds and
+/// breaks the provider prefix cache at that position. The rule here is a
+/// pure function of (tool_name, result):
+/// - skills / read_file — pass through (active instructions / self-limited)
+/// - content-bearing    — truncate with a generous head cap
+/// - exec               — truncate (4000 cap, unchanged behavior)
+/// - everything else    — fold to a deterministic receipt
+fn finalize_tool_result(tool_name: &str, result: &str) -> String {
+    if tool_name == "skills" || tool_name == "read_file" {
         return result.to_string();
     }
-
-    if matches!(tool_name, "read_file" | "diff") {
-        return fold_retrieval_result(tool_name, result);
+    if is_content_bearing_tool(tool_name) {
+        return truncate_tool_result_with_limit(tool_name, result, CONTENT_BEARING_CHAR_LIMIT);
     }
+    if tool_name.starts_with("exec") {
+        return truncate_tool_result_with_limit(tool_name, result, 4000);
+    }
+    fold_completed_tool_result(tool_name, result)
+}
 
+fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
     if matches!(tool_name, "edit_file" | "write") {
         return fold_file_mutation_result(tool_name, result);
     }
@@ -175,53 +200,6 @@ fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
         return hint[1..].to_string(); // strip leading space
     }
     let cap = first.floor_char_boundary(first.len().min(400));
-    format!("{}{}", &first[..cap], hint)
-}
-
-/// Fold a historical read/search result into deterministic metadata plus an
-/// explicit recovery action. This keeps old tool output out of the stable
-/// prefix while preserving the information an agent needs to re-open it.
-fn fold_retrieval_result(tool_name: &str, result: &str) -> String {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(result) {
-        let mut folded = serde_json::Map::new();
-        for key in [
-            "status",
-            "path",
-            "start_line",
-            "end_line",
-            "total_lines",
-            "hash",
-            "unchanged",
-            "truncated",
-            // diff results: keep the two paths so a re-diff is trivial
-            "path_a",
-            "path_b",
-            "identical",
-        ] {
-            if let Some(value) = value.get(key) {
-                folded.insert(key.to_string(), value.clone());
-            }
-        }
-        let hint = if tool_name == "read_file" {
-            "[read_file content folded; call read_file with path and start_line/end_line to retrieve code]"
-        } else if tool_name == "diff" {
-            "[diff folded; call diff with the same paths to retrieve changes]"
-        } else {
-            "[matches folded; re-run with narrower arguments to retrieve them]"
-        };
-        folded.insert("content".to_string(), serde_json::Value::String(hint.to_string()));
-        return serde_json::Value::Object(folded).to_string();
-    }
-
-    let first = result.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
-    let cap = first.floor_char_boundary(first.len().min(400));
-    let hint = if tool_name == "read_file" {
-        " [read_file content folded; call read_file again with a path and range]"
-    } else if tool_name == "diff" {
-        " [diff folded; call diff again with the same paths]"
-    } else {
-        " [matches folded; re-run with narrower arguments to retrieve them]"
-    };
     format!("{}{}", &first[..cap], hint)
 }
 
@@ -644,7 +622,9 @@ impl MessageStore {
 
     fn push_tool_result_inner(&mut self, tool_call_id: &str, result: &str, success: bool) {
         // Look up tool name from any step that owns this tool_call_id.
-        let _tool_name: Option<String> = self.turns.iter().rev().find_map(|turn| {
+        // Look up the tool name so the result can be finalized once at
+        // storage time — the stored bytes are the final rendered form.
+        let tool_name: Option<String> = self.turns.iter().rev().find_map(|turn| {
             turn.steps.iter().rev().find_map(|step| {
                 step.assistant.content.iter().find_map(|b| {
                     if let deepx_types::ContentBlock::ToolUse { id, name, .. } = b {
@@ -659,7 +639,10 @@ impl MessageStore {
                 })
             })
         });
-        let final_result = result.to_string();
+        let final_result = match tool_name.as_deref() {
+            Some(name) => finalize_tool_result(name, result),
+            None => result.to_string(),
+        };
         let tool_msg = Message::tool(tool_call_id, &final_result, success);
 
         for turn in self.turns.iter_mut().rev() {
@@ -696,8 +679,8 @@ impl MessageStore {
     }
 
     pub fn replace_tool_result(&mut self, tool_call_id: &str, result: &str, success: bool) {
-        // Same truncation for replace path.
-        let _tool_name: Option<String> = self.turns.iter().rev().find_map(|turn| {
+        // Same finalization for the replace path: stored bytes are final.
+        let tool_name: Option<String> = self.turns.iter().rev().find_map(|turn| {
             turn.steps.iter().rev().find_map(|step| {
                 step.assistant.content.iter().find_map(|b| {
                     if let deepx_types::ContentBlock::ToolUse { id, name, .. } = b {
@@ -712,7 +695,10 @@ impl MessageStore {
                 })
             })
         });
-        let final_result = result.to_string();
+        let final_result = match tool_name.as_deref() {
+            Some(name) => finalize_tool_result(name, result),
+            None => result.to_string(),
+        };
 
         for turn in self.turns.iter_mut().rev() {
             if let Some(step) = turn.find_step_for_mut(tool_call_id) {
@@ -728,65 +714,21 @@ impl MessageStore {
         );
     }
 
-    pub fn build_context_for_gate(&mut self, annotations: &[String]) -> Vec<Message> {
+    pub fn build_context_for_gate(&self, annotations: &[String]) -> Vec<Message> {
         let mut full: Vec<Message> = {
             let mut v = Vec::new();
             v.extend(self.system_messages.clone());
-            let total_turns = self.turns.len();
-            for (i, turn) in self.turns.iter().enumerate() {
-                if i < self.compact_skip {
-                    continue;
-                }
+            for turn in self.turns.iter().skip(self.compact_skip) {
                 v.push(turn.user.clone());
-                let is_last_turn = i == total_turns - 1;
-                for (si, step) in turn.steps.iter().enumerate() {
+                for step in &turn.steps {
                     v.push(step.assistant.clone());
-                    // The active (last) step of the current turn is what the model
-                    // consumes on the next iteration. Content-bearing tools whose
-                    // results the model still needs (web content, image analysis,
-                    // todo list, diff, memory, process state, ask_user, patch
-                    // preview) must NOT be folded there — folding forces a
-                    // redundant second call. Earlier steps stay folded to keep
-                    // the historical prefix stable and bounded.
-                    let is_active_step = is_last_turn && si == turn.steps.len() - 1;
-                    for tr in &step.tool_results {
-                        let mut msg = tr.clone();
-                        for block in &mut msg.content {
-                            if let deepx_types::ContentBlock::ToolResult {
-                                tool_use_id,
-                                result,
-                            } = block
-                            {
-                                let tool_name =
-                                    step.tool_name_for_result(tool_use_id).unwrap_or("");
-                                // Unified rule (same for all steps) — keeps
-                                // the prefix stable across rounds within a turn.
-                                // Reasonix applies truncation at storage time;
-                                // we apply it here consistently regardless of
-                                // step position.
-                                if tool_name == "read_file" {
-                                    // read_file self-limits to head 50 + tail 30 lines
-                                    // (~4K chars); pass through unchanged.
-                                } else if tool_name == "skills" {
-                                    // Skill instructions / resources are active
-                                    // context; never folded (also below).
-                                } else if is_active_step
-                                    && is_content_bearing_tool(tool_name)
-                                {
-                                    // Last step of the current turn: keep the
-                                    // result intact so the model can consume it
-                                    // without calling the tool again.
-                                } else if tool_name.starts_with("exec") {
-                                    result.model.text = truncate_tool_result(tool_name, &result.model.text);
-                                    result.model.truncated = true;
-                                } else {
-                                    result.model.text = fold_completed_tool_result(tool_name, &result.model.text);
-                                    result.model.truncated = true;
-                                }
-                            }
-                        }
-                        v.push(msg);
-                    }
+                    // Tool results were finalized exactly once at storage time
+                    // (finalize_tool_result in push_tool_result_inner /
+                    // replace_tool_result). Passing them through verbatim makes
+                    // every request byte-identical for the same stored message —
+                    // the provider prefix cache never breaks on a tool message,
+                    // regardless of step position or turn boundary.
+                    v.extend(step.tool_results.clone());
                 }
             }
             v
@@ -794,8 +736,14 @@ impl MessageStore {
 
         if !annotations.is_empty() {
             let ann_text = annotations.join("\n");
-            if let Some(last_user) = full.iter_mut().rev().find(|m| m.role == "user") {
-                let existing = last_user.content.iter_mut().find_map(|b| {
+            // Inject into the FIRST user message: its position is fixed for the
+            // lifetime of the context, so the [Environment] block never moves
+            // between user messages. (Injecting into the last user message made
+            // turn-1's message render differently once turn 2 arrived, breaking
+            // the whole prefix cache at the first user message — cache hits
+            // collapsed to the system prefix only.)
+            if let Some(first_user) = full.iter_mut().find(|m| m.role == "user") {
+                let existing = first_user.content.iter_mut().find_map(|b| {
                     if let deepx_types::ContentBlock::Text { text } = b {
                         Some(text)
                     } else {
@@ -806,7 +754,7 @@ impl MessageStore {
                     let original = text.clone();
                     *text = format!("[Environment]\n{}\n\n[UserMessage]\n{}", ann_text, original);
                 } else {
-                    last_user
+                    first_user
                         .content
                         .push(deepx_types::ContentBlock::text(&ann_text));
                 }
@@ -1606,8 +1554,8 @@ mod tests {
 
     #[test]
     fn content_bearing_tool_kept_intact_on_active_step() {
-        // web is content-bearing: its result must stay visible on the active
-        // (last) step, otherwise the model would re-fetch the URL.
+        // web is content-bearing: a short result stays fully visible — the
+        // model must consume it without re-fetching the URL.
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("fetch page");
         store.push_assistant(assistant_with_tools(&[("web-1", "web_fetch")]));
@@ -1620,24 +1568,126 @@ mod tests {
     }
 
     #[test]
-    fn content_bearing_tool_folded_once_historical() {
-        // Once a later step exists, the web result is historical and folds to
-        // a marker — bounded prefix wins over re-readability.
+    fn content_bearing_tool_never_changes_after_storage() {
+        // Storage-time finalization: the SAME bytes are rendered whether the
+        // step is active or historical. A later step must not change the
+        // earlier result (that used to fold it, breaking the prefix cache at
+        // that tool message on the very next round).
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("fetch page");
         store.push_assistant(assistant_with_tools(&[("web-1", "web_fetch")]));
         store.push_tool_result_direct("web-1", "PAGE_TEXT_BODY", true);
+        let active_ctx = store.build_context_for_gate(&[]);
+        let active_render = context_result(&active_ctx, "web-1");
+
+        // New step arrives → the web result is now historical.
         store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
         store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
 
         let context = store.build_context_for_gate(&[]);
-        let folded = context_result(&context, "web-1");
-        assert!(folded.contains("folded"), "expected folded marker, got: {folded}");
+        assert_eq!(
+            context_result(&context, "web-1"),
+            active_render,
+            "historical web result must render identically to the active-step render"
+        );
         // The edit receipt stays folded too — edit is receipt-style even on
         // the active step.
         assert_eq!(
             context_result(&context, "edit-1"),
             "OK_RECEIPT\n[edit diff folded; verify the affected range with read_file before making dependent changes]"
+        );
+    }
+
+    #[test]
+    fn long_content_bearing_result_truncated_at_storage() {
+        // A long web_fetch result is bounded at storage time; the truncated
+        // form (with marker) is then rendered verbatim forever.
+        let body = "paragraph\n".repeat(4_000); // ~36K chars > 16K cap
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("fetch page");
+        store.push_assistant(assistant_with_tools(&[("web-1", "web_fetch")]));
+        store.push_tool_result_direct("web-1", &body, true);
+
+        let first = context_result(&store.build_context_for_gate(&[]), "web-1");
+        assert!(first.len() < body.len(), "result must be capped at storage time");
+        assert!(first.contains("[truncated:"), "truncation marker expected, got: {first}");
+
+        // Same bytes on every later render (historical position included).
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
+        store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
+        let second = context_result(&store.build_context_for_gate(&[]), "web-1");
+        assert_eq!(first, second, "stored truncation must be stable across renders");
+    }
+
+    #[test]
+    fn annotation_injected_into_first_user_message_not_last() {
+        // The [Environment] annotation is pinned to the FIRST user message:
+        // its position never moves, so turn-1's message renders identically
+        // once turn 2 arrives (prefix cache survives the turn boundary).
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("first turn");
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
+        store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
+        store.push_user("second turn");
+
+        let context = store.build_context_for_gate(&[String::from(
+            "<workspace_path>F:\\DeepX</workspace_path>",
+        )]);
+        let users: Vec<String> = context
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| {
+                m.content
+                    .iter()
+                    .filter_map(|b| match b {
+                        deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .collect();
+        assert_eq!(users.len(), 2);
+        assert!(
+            users[0].starts_with("[Environment]\n<workspace_path>F:\\DeepX</workspace_path>"),
+            "first user message must carry the annotation, got: {}",
+            users[0]
+        );
+        assert_eq!(users[1], "second turn", "later user messages stay untouched");
+    }
+
+    #[test]
+    fn prefix_stable_across_turns_with_tool_rounds() {
+        // Core regression: the entire turn-1 segment (user message, tool
+        // calls, tool results, final answer) must render byte-identically in
+        // turn-2 requests. This was broken by (a) annotation injection into
+        // the last user message and (b) position-dependent tool folding.
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("first turn");
+        store.push_assistant(assistant_with_tools(&[("web-1", "web_fetch")]));
+        store.push_tool_result_direct("web-1", "WEB_BODY", true);
+        store.push_assistant(assistant_with_tools(&[("exec-1", "exec")]));
+        store.push_tool_result_direct("exec-1", "EXEC_OUTPUT", true);
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![deepx_types::ContentBlock::Text {
+                text: "done".into(),
+            }],
+        });
+        let turn1_ctx = store.build_context_for_gate(&[String::from("ann")]);
+
+        store.push_user("second turn");
+        let turn2_ctx = store.build_context_for_gate(&[String::from("ann")]);
+
+        assert!(turn2_ctx.len() > turn1_ctx.len());
+        let turn1_ser = serde_json::to_string(&turn1_ctx).expect("serialize turn-1 context");
+        let turn2_prefix_ser = serde_json::to_string(&turn2_ctx[..turn1_ctx.len()])
+            .expect("serialize turn-2 prefix");
+        assert_eq!(
+            turn2_prefix_ser, turn1_ser,
+            "turn-1 message segment must be byte-identical in turn 2"
         );
     }
 

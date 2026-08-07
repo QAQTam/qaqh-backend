@@ -39,6 +39,7 @@ interface DeepxDesktopApi {
       view: string;
       title: string;
       workspace: string;
+      seed: string;
       infoOpen: boolean;
       statsOpen: boolean;
       compacting: boolean;

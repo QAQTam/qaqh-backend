@@ -16,6 +16,13 @@ struct PrefixShape {
     system_hash: String,
     catalog_hash: String,
     tools_hash: String,
+    /// FNV-1a hash of every rendered message (system included), in order.
+    /// A mismatch at index i (with i < previous length) means an EXISTING
+    /// message changed — a prefix-cache break that the three component
+    /// hashes cannot see (e.g. annotation injection into a user message, or
+    /// position-dependent tool-result folding). Appends (new rounds/turns)
+    /// leave all earlier hashes equal and are not reported.
+    msg_hashes: Vec<u64>,
 }
 
 fn prefix_hash(data: &str) -> String {
@@ -30,13 +37,41 @@ fn prefix_hash(data: &str) -> String {
     format!("{hash:016x}")
 }
 
+fn message_hash(message: &deepx_types::Message) -> u64 {
+    // Serialize the full message so role + every content block (text,
+    // tool_use, tool_result incl. text) participates in the hash.
+    let rendered =
+        serde_json::to_string(message).unwrap_or_else(|_| format!("{:?}", message));
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in rendered.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 impl PrefixShape {
-    fn capture(system_text: &str, catalog_text: &str, tool_defs: &[deepx_types::ToolDef]) -> Self {
+    fn capture(
+        context: &[deepx_types::Message],
+        catalog_text: &str,
+        tool_defs: &[deepx_types::ToolDef],
+    ) -> Self {
+        let sys_text: String = context
+            .iter()
+            .take_while(|m| m.role == "system")
+            .flat_map(|m| &m.content)
+            .filter_map(|block| match block {
+                deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let tools_json = serde_json::to_string(tool_defs).unwrap_or_default();
         Self {
-            system_hash: prefix_hash(system_text),
+            system_hash: prefix_hash(&sys_text),
             catalog_hash: prefix_hash(catalog_text),
             tools_hash: prefix_hash(&tools_json),
+            msg_hashes: context.iter().map(message_hash).collect(),
         }
     }
 
@@ -50,6 +85,22 @@ impl PrefixShape {
         }
         if !prev.tools_hash.is_empty() && self.tools_hash != prev.tools_hash {
             changed.push("tool_defs".into());
+        }
+        // Message-level prefix break: first index whose rendered bytes differ.
+        // Equal hashes up to the previous length mean only appends happened —
+        // the prefix cache is intact.
+        if !prev.msg_hashes.is_empty() {
+            for (i, (cur, old)) in self
+                .msg_hashes
+                .iter()
+                .zip(prev.msg_hashes.iter())
+                .enumerate()
+            {
+                if cur != old {
+                    changed.push(format!("message[{i}]"));
+                    break;
+                }
+            }
         }
         changed
     }
@@ -66,10 +117,13 @@ pub struct AgentState {
     /// If true, skip all disk persistence (subagent disposable mode).
     pub ephemeral: bool,
     pub skills: SkillContextManager,
-    /// Frozen [Environment] annotation for the current turn.
-    /// Generated once on first build_context() and reused for all
-    /// subsequent rounds within the same turn so the file_state
-    /// prefix stays cache-stable. Reset when a new user turn begins.
+    /// Frozen [Environment] annotation. Generated once on the FIRST
+    /// build_context() of the session and reused forever — never reset per
+    /// turn, because the annotation is injected into the FIRST user message
+    /// whose position is fixed for the lifetime of the context. Rebuilding
+    /// it on every turn (and moving it to the newest user message) made
+    /// turn-1's message render differently once turn 2 arrived, breaking the
+    /// whole prefix cache at the first user message.
     frozen_annotation: Option<String>,
     /// Last captured prefix hash; compared in build_context to detect
     /// cache-breaking changes (system prompt, catalog, tool defs).
@@ -175,13 +229,6 @@ impl AgentState {
         agent
     }
 
-    /// Freeze annotations for the current turn so subsequent rounds
-    /// reuse the cached [Environment] block and keep the prefix stable.
-    /// Called from engine_input when a new user turn starts.
-    pub fn reset_annotation(&mut self) {
-        self.frozen_annotation = None;
-    }
-
     /// Consume any pending cache diagnostics set by build_context().
     /// Returns (prefix_hash, change_reasons) if the prefix changed.
     pub fn take_cache_diagnostics(&mut self) -> Option<(String, Vec<String>)> {
@@ -190,13 +237,12 @@ impl AgentState {
         })
     }
 
+    /// Freeze annotations for the session so the first user message keeps an
+    /// identical prefix across rounds AND turns. file_state and skill state
+    /// change between rounds and turns; injecting a changed annotation would
+    /// break the prefix cache at the first user message. The frozen snapshot
+    /// is generated on the first gate call of the session and reused forever.
     pub fn build_context(&mut self) -> Vec<deepx_types::Message> {
-        // Freeze annotations at the first gate call of a turn.
-        // file_state changes between rounds within the same turn
-        // (e.g. reading a file adds to the state), and injecting a
-        // changed annotation into the last user message would break
-        // the prefix cache at that position.  Reusing the frozen
-        // snapshot keeps the entire context prefix cache-stable.
         let workspace = deepx_workspace::CURRENT_WORKSPACE
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -256,22 +302,16 @@ impl AgentState {
         }
 
         // ── 前缀稳定性校验 ──
-        // Hash the three cache-key components and compare with the
-        // previous turn.  If anything changed, emit a CacheDiagnostics
-        // event so the frontend can surface the reason.
+        // Hash the cache-key components (system text, catalog, tool defs)
+        // PLUS every rendered message in order, and compare with the
+        // previous request.  If anything changed, emit a CacheDiagnostics
+        // event so the frontend can surface the reason.  The message-level
+        // hashes catch breaks the three components cannot see — e.g. the
+        // [Environment] annotation moving between user messages, or a tool
+        // result whose fold state depends on step position.
         {
-            let sys_text: String = context
-                .iter()
-                .take_while(|m| m.role == "system")
-                .flat_map(|m| &m.content)
-                .filter_map(|block| match block {
-                    deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
             let cat_text = snapshot.catalog.clone();
-            let cur = PrefixShape::capture(&sys_text, &cat_text, &self.tool_defs);
+            let cur = PrefixShape::capture(&context, &cat_text, &self.tool_defs);
             if !self.prev_prefix.system_hash.is_empty() {
                 let changed = cur.diff(&self.prev_prefix);
                 if !changed.is_empty() {
@@ -429,6 +469,45 @@ mod tests {
     static SKILL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn prefix_shape_detects_message_level_breaks_but_not_appends() {
+        // Regression guard for the CacheDiagnostics blind spot: the message
+        // hashes must flag an EXISTING message changing (e.g. annotation
+        // moving between user messages) while ignoring pure appends (new
+        // rounds/turns).
+        let sys = vec![deepx_types::Message::system("base")];
+        let u1 = deepx_types::Message::user("first turn");
+        let u1_annotated = {
+            let mut m = u1.clone();
+            if let deepx_types::ContentBlock::Text { text } = &mut m.content[0] {
+                *text = format!("[Environment]\nann\n\n[UserMessage]\n{text}");
+            }
+            m
+        };
+        let u2 = deepx_types::Message::user("second turn");
+
+        // Append: new turn, earlier messages untouched → no break reported.
+        let before = PrefixShape::capture(&[sys[0].clone(), u1.clone()], "", &[]);
+        let appended = PrefixShape::capture(&[sys[0].clone(), u1.clone(), u2.clone()], "", &[]);
+        assert!(
+            appended.diff(&before).is_empty(),
+            "pure appends must not be reported as prefix breaks"
+        );
+
+        // Modification: the same stored message renders differently → break.
+        let mutated = PrefixShape::capture(&[sys[0].clone(), u1_annotated], "", &[]);
+        let changed = mutated.diff(&before);
+        assert!(
+            changed.iter().any(|r| r.starts_with("message[1]")),
+            "expected message[1] break, got: {changed:?}"
+        );
+
+        // System text change is still caught by the component hash.
+        let sys2 = vec![deepx_types::Message::system("base v2")];
+        let sys_changed = PrefixShape::capture(&[sys2[0].clone(), u1.clone()], "", &[]);
+        assert!(sys_changed.diff(&before).contains(&"system_prompt".to_string()));
+    }
+
+    #[test]
     fn ordinary_tool_text_cannot_activate_a_skill() {
         let _guard = SKILL_TEST_LOCK
             .lock()
@@ -492,10 +571,18 @@ mod tests {
             .skills
             .apply_tool_effect(deepx_skills::SkillEffect::Activate(activation))
             .unwrap();
+        // Envelope injection is TEMP-DISABLED (2026-08-04): the activated body
+        // is delivered via the `skills` tool result at execution time, not as
+        // a tail system message. Assert the context stays free of it and that
+        // the prefix remains stable.
         let context = agent.build_context();
-        assert!(context.last().unwrap().content.iter().any(
+        assert!(!context.iter().any(|message| message.content.iter().any(
             |block| matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("DYNAMIC_FULL_BODY"))
-        ));
+        )));
+        assert_eq!(
+            serde_json::to_value(&context).unwrap(),
+            serde_json::to_value(agent.build_context()).unwrap()
+        );
 
         deepx_workspace::set_workspace(".");
     }
@@ -527,9 +614,9 @@ mod tests {
         assert!(before[1].content.iter().any(
             |block| matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("cache-skill"))
         ));
-        assert!(before.last().unwrap().content.iter().any(
-            |block| matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("skill_context_envelope"))
-        ));
+        // NOTE: no tail skill envelope assertion — SKILL_ENVELOPE_INJECTION
+        // is TEMP-DISABLED (2026-08-04), so activated bodies only arrive via
+        // `skills` tool results.
 
         let after = agent.build_context();
         assert!(after[0].content.iter().any(

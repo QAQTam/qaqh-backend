@@ -35,6 +35,13 @@ export function createTimelineMonitor() {
   function handleSnapshot(response: TimelineSnapshotResponse): void {
     if (response.schema !== "deepx.Ringing" || response.version !== 1) return;
     if (!Number.isSafeInteger(response.snapshot?.watermark) || response.snapshot.watermark < 0) return;
+    const existing = snapshots.get(response.seed);
+    // 防回退：daemon 崩溃窗口（异步 checkpoint 落后于已发出的 entry）会让
+    // 重启后恢复的快照 watermark 低于 renderer 内存态。无条件替换会回退
+    // cursor，后续新 entry 被 handleEntry 的 `<= watermark` 判为重复而静默
+    // 丢弃——新 turn 的内容从此消失。保留更新的内存快照，让 entry 流继续
+    // 从现有 watermark 续传（daemon 的 timeline_seq 持久化单调，不会倒退）。
+    if (existing && response.snapshot.watermark < existing.watermark) return;
     cancelFrame();
     snapshots.set(response.seed, structuredClone(response.snapshot));
     turnRevisions.set(
@@ -79,12 +86,15 @@ function applyEntry(snapshot: TimelineSnapshot, entry: TimelineEntry): boolean {
   switch (event.type) {
     case "turn_opened":
       if (turn) {
-        // Reopen allowance: the daemon orphan-sealer marks an interrupted
-        // turn as Cancelled on restart, but the message store still counts
-        // it, so the worker legitimately reuses the same turn_id for the
-        // next input. Reset the cancelled placeholder in place; otherwise
-        // every subsequent delta is dropped and the transcript stays blank.
-        if (turn.state === "cancelled" && turn.sealed) {
+        // Reopen allowance (mirrors the daemon's TimelineAppender): the
+        // message store is the authoritative history, so after a daemon
+        // restart the worker's next input can reuse an id the timeline
+        // already sealed — orphan-Cancelled by the sealer, or Completed when
+        // the restored turn counter lagged further (observed: t14 reused as
+        // Completed). Any sealed turn is terminal history; a fresh TurnOpened
+        // for the same id resets it in place. Otherwise every subsequent
+        // delta is dropped and the transcript stays blank.
+        if (turn.sealed) {
           turn.user_text = event.user_text;
           turn.sealed = false;
           turn.state = "running";

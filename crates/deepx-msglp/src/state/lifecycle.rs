@@ -80,8 +80,24 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 // the unfinished turn. `meta.turn_count` additionally covers the
                 // compacted-history case where early turns were folded out of
                 // the active view, so the next id must be greater than both.
+                //
+                // The daemon additionally injects the timeline's recorded turn
+                // count (DEEPX_TIMELINE_TURN_COUNT) when spawning a resume
+                // worker: meta.turn_count only persists on completion, so after
+                // a restart it can lag the timeline's sealed turns by more than
+                // one (compaction shrinks the message view too). Without this
+                // floor the allocator reuses an id the timeline already sealed
+                // as Completed, and every timeline intent for the resumed turn
+                // is rejected — the frontend transcript stays blank while the
+                // session list title still refreshes.
                 let restored_turns = msg.turn_count() as u64;
-                let authority_turn_count = restored_turns.max(agent.session.turn_count as u64);
+                let timeline_turns = std::env::var("DEEPX_TIMELINE_TURN_COUNT")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let authority_turn_count = restored_turns
+                    .max(agent.session.turn_count as u64)
+                    .max(timeline_turns);
                 msg.ensure_next_turn_seq(authority_turn_count + 1);
                 // Keep the persisted metadata in sync with the authoritative
                 // replay so a later flush does not write a stale count back.

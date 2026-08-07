@@ -724,6 +724,8 @@ export default function App() {
           ? raw?.session.title || activeSeed().slice(0, 8)
           : VIEW_LABELS[view() as Exclude<View, "chat">],
         workspace: workspaceDraft(),
+        // 当前会话 seed：壳同步 active_seed（Info 面板 bootstrap 数据源）。
+        seed: activeSeed(),
         infoOpen: infoOpen(),
         statsOpen: statsOpen(),
         compacting: raw?.compact.active ?? false,

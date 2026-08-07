@@ -73,6 +73,8 @@ pub struct HeaderState {
     pub view: String,
     pub title: String,
     pub workspace: String,
+    /// 当前会话 seed（chat 视图；apply_header 同步 active_seed）。
+    pub seed: String,
     pub info_open: bool,
     pub stats_open: bool,
     pub compacting: bool,
@@ -278,11 +280,22 @@ impl BridgeCore {
 
     /// Web `shell.setHeader` 载荷落缓存并递增 rev。
     /// 反序列化失败时保留旧状态（静默丢弃坏载荷，不中断链路）。
+    /// 同步副作用（D-2，Web 是视图/会话单一数据源）：
+    /// - `view` → current_view：Web 内部恢复/切换会话不经过壳 navigate，
+    ///   不同步则 XAML 视图族行高与 Info 面板列宽判定滞后；
+    /// - `seed` → active_seed：Info 面板 bootstrap 用（壳侧 resume/navigate
+    ///   路径之外，Web 发起的 session_resume 必须同步）。
     pub fn apply_header(&self, payload: Value) {
-        let Ok(state) = serde_json::from_value(payload) else {
+        let Ok(state) = serde_json::from_value::<HeaderState>(payload) else {
             log_diag("apply_header: invalid payload, keeping previous state");
             return;
         };
+        if !state.view.is_empty() {
+            *self.current_view.lock().unwrap_or_else(|e| e.into_inner()) = state.view.clone();
+        }
+        if !state.seed.is_empty() {
+            *self.active_seed.lock().unwrap_or_else(|e| e.into_inner()) = state.seed.clone();
+        }
         *self.header_state.lock().unwrap_or_else(|e| e.into_inner()) = state;
         self.header_rev.fetch_add(1, Ordering::Relaxed);
     }
@@ -375,6 +388,7 @@ impl BridgeCore {
     /// 投影 → 缓存 + rev++（对齐 conversation_snapshot.rs:29-39 形状）。
     /// 快照为 None（会话无持久状态）时保留旧缓存。
     pub fn spawn_refresh_info(&self, seed: String) {
+        log_diag(&format!("spawn_refresh_info({seed})"));
         let core = self.self_arc();
         let _ = deepx_client::runtime_handle().spawn(async move {
             core.refresh_info_inner(&seed).await;

@@ -11,6 +11,8 @@ export interface HeaderState {
   view: "home" | "chat" | "skills" | "settings";
   title: string;
   workspace: string;
+  /** 当前会话 seed（chat 视图；壳同步 active_seed 供 Info 面板 bootstrap）。 */
+  seed: string;
   infoOpen: boolean;
   statsOpen: boolean;
   compacting: boolean;

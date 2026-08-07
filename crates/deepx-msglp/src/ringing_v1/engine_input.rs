@@ -69,7 +69,10 @@ impl InputEngine {
         };
 
         ctx.cancel.clear();
-        ctx.agent.reset_annotation();
+        // NOTE: annotations are frozen at the SESSION level (first gate call)
+        // and injected into the FIRST user message. They must NOT be reset
+        // here — a per-turn rebuild would move the [Environment] block to the
+        // newest user message and break the prefix cache at turn-1's message.
         deepx_workspace::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
 
         deepx_workspace::runtime::set_context(

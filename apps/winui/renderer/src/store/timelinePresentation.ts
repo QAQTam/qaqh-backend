@@ -68,7 +68,11 @@ export function mergeTimelinePresentation(
  *   必须让位，否则新对话被旧内容遮蔽，且每次 resume 都显示
  *   "Daemon restarted..." 错误；
  * - store 同名 turn 是明确的新输入（userText 与 timeline 不同）——
- *   turn_id 被复用（重启或用户取消后继续对话）。
+ *   turn_id 被复用（重启或用户取消后继续对话）；
+ * - timeline 已终态的旧 turn（completed/failed）遇 store 同名 running
+ *   turn：worker 重启后计数滞后复用了该 id，store 是活的新输入，即使
+ *   userText 相同（中断后原样重发同一句话）也必须让位——timeline 的
+ *   旧内容永远不再更新，继续展示会把新回复整个遮蔽掉。
  * 其余 cancelled 的 timeline turn（用户主动取消等）保持 timeline 展示。
  */
 function storeShouldWin(
@@ -79,6 +83,13 @@ function storeShouldWin(
   if (!storeTurn || storeTurn.status === "cancelled") return false;
   if (turn.status === "cancelled") {
     return isOrphanInterruptedTurn(turn) || storeTurn.userText !== turn.userText;
+  }
+  if (
+    (turn.status === "completed" || turn.status === "failed")
+    && storeTurn.status === "running"
+  ) {
+    // 同文重发：timeline 终态旧内容必须让位给 store 的新 running 输入。
+    return true;
   }
   return isPlaceholderTurn(turn) || storeTurn.userText !== turn.userText;
 }

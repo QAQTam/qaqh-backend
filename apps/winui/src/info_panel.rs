@@ -185,17 +185,25 @@ fn token_grid(u: &UsageInfo) -> Element {
         .background(ThemeRef::DividerStroke)
         .vertical_alignment(VerticalAlignment::Center)
         .into();
-    grid((cell("输入", p), vline.clone(), cell("输出", c), vline.clone(), cell("推理", r), vline, cell("总计", t)))
-        .columns([
-            GridLength::STAR,
-            GridLength::Auto,
-            GridLength::STAR,
-            GridLength::Auto,
-            GridLength::STAR,
-            GridLength::Auto,
-            GridLength::STAR,
-        ])
-        .into()
+    grid((
+        cell("输入", p).grid_column(0),
+        vline.clone().grid_column(1),
+        cell("输出", c).grid_column(2),
+        vline.clone().grid_column(3),
+        cell("推理", r).grid_column(4),
+        vline.grid_column(5),
+        cell("总计", t).grid_column(6),
+    ))
+    .columns([
+        GridLength::STAR,
+        GridLength::Auto,
+        GridLength::STAR,
+        GridLength::Auto,
+        GridLength::STAR,
+        GridLength::Auto,
+        GridLength::STAR,
+    ])
+    .into()
 }
 
 /// 缓存卡（Web `info-cache`：绿系 = 当前请求 / accent 系 = 会话累计；
@@ -217,16 +225,22 @@ fn cache_card(label: &str, u: &UsageInfo, accent: bool) -> Option<Element> {
     };
     Some(
         border(vstack((
-            hstack((
-                text_block(label).font_size(11.0).foreground(ThemeRef::SecondaryText),
+            // label 行 Grid 两列（同 context_card，避免 hstack 双 Stretch 重叠）。
+            grid((
+                text_block(label)
+                    .font_size(11.0)
+                    .foreground(ThemeRef::SecondaryText)
+                    .grid_column(0),
                 text_block(format!("{pct:.1}%"))
                     .font_size(14.0)
                     .font_family(MONO_FONT)
                     .font_weight(650)
-                    .foreground(strong),
+                    .foreground(strong)
+                    .horizontal_alignment(HorizontalAlignment::Right)
+                    .grid_column(1),
             ))
-            .spacing(8.0)
-            .horizontal_alignment(HorizontalAlignment::Stretch),
+            .columns([GridLength::STAR, GridLength::Auto])
+            .into(),
             text_block(format!(
                 "命中 {} · 未命中 {}",
                 fmt_thousands(u.prompt_cache_hit_tokens),
@@ -248,32 +262,38 @@ fn cache_card(label: &str, u: &UsageInfo, accent: bool) -> Option<Element> {
 /// 上下文卡（Web `info-context`：label 行 + 进度条 + 百分比，浅底圆角）。
 fn context_card(d: &SessionDetail) -> Element {
     let pct = context_pct(d);
-    let left: Element = vstack((
-        hstack((
-            text_block("上下文").font_size(11.0).foreground(ThemeRef::SecondaryText),
-            mono_text(
-                format!(
-                    "{} / {}",
-                    fmt_thousands(d.usage.prompt_tokens),
-                    fmt_thousands(d.context_limit)
-                ),
-                11.0,
+    // label 行用 Grid 两列（label STAR + 数值 Auto），避免 hstack 双 Stretch
+    // 在水平 StackPanel 中的剩余空间分配异常导致文字挤压重叠。
+    let label_row: Element = grid((
+        text_block("上下文")
+            .font_size(11.0)
+            .foreground(ThemeRef::SecondaryText)
+            .grid_column(0),
+        mono_text(
+            format!(
+                "{} / {}",
+                fmt_thousands(d.usage.prompt_tokens),
+                fmt_thousands(d.context_limit)
             ),
-        ))
-        .spacing(8.0)
-        .horizontal_alignment(HorizontalAlignment::Stretch),
-        progress_bar(pct, ThemeRef::Accent),
+            11.0,
+        )
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .grid_column(1),
     ))
-    .spacing(6.0)
+    .columns([GridLength::STAR, GridLength::Auto])
     .into();
+    let left: Element = vstack((label_row, progress_bar(pct, ThemeRef::Accent)))
+        .spacing(6.0)
+        .into();
     let pct_el: Element = text_block(format!("{pct:.1}%"))
         .font_size(10.0)
         .font_family(MONO_FONT)
         .foreground(ThemeRef::SecondaryText)
         .vertical_alignment(VerticalAlignment::Center)
+        .grid_column(1)
         .into();
     border(
-        grid((left, pct_el))
+        grid((left.grid_column(0), pct_el))
             .columns([GridLength::STAR, GridLength::Auto])
             .column_spacing(10.0),
     )
@@ -291,6 +311,7 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
     let last_open = cx.use_ref::<bool>(false);
+    log_diag(&format!("info_panel render open={open}"));
 
     // 500ms 轮询：info 数据 rev（同 sidebar 模式）+ 标题栏 info_open 投影。
     cx.use_effect((), {
@@ -301,6 +322,7 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_rev = last_rev.clone();
         let last_open = last_open.clone();
         move || {
+            log_diag("info_panel effect (mount)");
             if timer.borrow().is_none() {
                 match DispatcherTimer::new(POLL_INTERVAL, {
                     let core = bridge.core();
@@ -316,13 +338,17 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             set_detail.call(detail_);
                         }
                         // 面板开关（Web shell.setHeader 投影的 info_open）。
-                        let o = core.header_snapshot().0.info_open;
+                        let hdr = core.header_snapshot();
+                        let o = hdr.0.info_open;
+                        log_diag(&format!("info_panel tick open={o} rev={rev} header_rev={}", hdr.1));
                         if o != *last_open.borrow() {
                             *last_open.borrow_mut() = o;
+                            log_diag(&format!("open -> {o}"));
                             set_open.call(o);
                             if o {
                                 // 打开瞬间拉取当前会话详情（防旧缓存）。
                                 let seed = core.active_seed();
+                                log_diag(&format!("refresh requested, seed={seed:?}"));
                                 core.spawn_refresh_info(seed);
                             }
                         }
@@ -330,6 +356,7 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 }) {
                     Ok(t) => {
                         *timer.borrow_mut() = Some(t);
+                        log_diag("info_panel timer created");
                     }
                     Err(e) => log_diag(&format!("info_panel timer failed: {e}")),
                 }
@@ -351,20 +378,23 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     match detail.as_ref() {
         Some(d) => {
             let live = d.usage.total_tokens > 0;
-            // ② model 行：dot + model（等宽）+ live/等待用量
-            let model_row: Element = hstack((
-                live_dot(live),
+            // ② model 行：dot + model（等宽）+ live/等待用量（Grid 三列，
+            // 避免 hstack 双 Stretch 重叠——model 撑满中间列）。
+            let model_row: Element = grid((
+                live_dot(live).grid_column(0),
                 text_block(if d.model.is_empty() { "未知模型" } else { &d.model })
                     .font_size(11.0)
                     .font_family(MONO_FONT)
                     .foreground(ThemeRef::SecondaryText)
                     .trim_ellipsis()
-                    .horizontal_alignment(HorizontalAlignment::Stretch),
+                    .grid_column(1),
                 text_block(if live { "live" } else { "等待用量" })
                     .font_size(11.0)
-                    .foreground(ThemeRef::TertiaryText),
+                    .foreground(ThemeRef::TertiaryText)
+                    .grid_column(2),
             ))
-            .spacing(7.0)
+            .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+            .column_spacing(7.0)
             .with_key("model")
             .into();
             blocks.push(model_row);

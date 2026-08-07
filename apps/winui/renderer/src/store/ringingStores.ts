@@ -483,8 +483,19 @@ export function applyConversationEventToDraft(
             turn = applyRoundDeltaToTurn(turn, d.roundNum, d.kind, d.delta);
           }
         }
-        conv.turns.push(turn);
-        conv.turnsById.set(turn.turnId, conv.turns.length - 1);
+        // upsert：worker 重启后计数滞后可能复用已存在的 turn_id（daemon
+        // 重启快照已恢复同名旧 turn，或 timeline 复用场景）。重复 push 会让
+        // store 出现两个同名 turn——selectRingingPresentation 投影出重复
+        // RawTurn，ConversationTranscript 的 keyed For 撞重复 key 行为未定义。
+        // 同名 turn 原地替换为新的 running 输入（保持顺序稳定），否则追加。
+        const existingIdx = turnIndex(conv, event.turn_id);
+        if (existingIdx >= 0) {
+          conv.turns[existingIdx] = turn;
+          conv.turnsById.set(turn.turnId, existingIdx);
+        } else {
+          conv.turns.push(turn);
+          conv.turnsById.set(turn.turnId, conv.turns.length - 1);
+        }
         conv.activeTurn = turn;
         conv.cancelled = false;
         return;
@@ -881,4 +892,3 @@ export class AppliedEventRegistry {
     return true;
   }
 }
-

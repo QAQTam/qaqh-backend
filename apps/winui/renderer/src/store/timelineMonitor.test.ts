@@ -175,4 +175,50 @@ describe("Ringing V1 timeline renderer monitor", () => {
     // Timeline projection wins: richer block content, no store stub.
     expect(merged.turns[0]!.rounds[0]!.answer).toBe("partial");
   });
+
+  it("refuses a snapshot whose watermark would roll the cursor back", () => {
+    const monitor = createTimelineMonitor();
+    monitor.handleSnapshot(snapshot()); // watermark 1
+    expect(monitor.handleEntry("seed", {
+      timeline_seq: 2,
+      turn_id: "turn",
+      round_num: 0,
+      event: { type: "text_delta", block_id: "answer", fragment_seq: 1, delta: " more" },
+    })).toBe(true);
+    expect(monitor.snapshotFor("seed")!.watermark).toBe(2);
+
+    // A stale snapshot from a restarting daemon (async checkpoint lag)
+    // must not replace the newer in-memory state.
+    monitor.handleSnapshot({ ...snapshot(), snapshot: { ...snapshot().snapshot, watermark: 1 } });
+    expect(monitor.snapshotFor("seed")!.watermark).toBe(2);
+    // Entries continue from the preserved cursor.
+    expect(monitor.handleEntry("seed", {
+      timeline_seq: 3,
+      turn_id: "turn",
+      round_num: 0,
+      event: { type: "block_sealed", block_id: "answer" },
+    })).toBe(true);
+  });
+
+  it("reopens a sealed Completed turn when the worker reuses its id after restart", () => {
+    const monitor = createTimelineMonitor();
+    const response = snapshot();
+    response.snapshot.turns[0]!.sealed = true;
+    response.snapshot.turns[0]!.state = "completed";
+    monitor.handleSnapshot(response);
+
+    // The worker's restored turn counter lagged the timeline and reused the
+    // Completed id for the new input (mirrors daemon-side reopen allowance).
+    expect(monitor.handleEntry("seed", {
+      timeline_seq: 2,
+      turn_id: "turn",
+      event: { type: "turn_opened", user_text: "reused question" },
+    })).toBe(true);
+    const current = monitor.snapshotFor("seed")!;
+    const turn = current.turns.find(value => value.turn_id === "turn")!;
+    expect(turn.user_text).toBe("reused question");
+    expect(turn.sealed).toBe(false);
+    expect(turn.state).toBe("running");
+    expect(turn.rounds).toEqual([]);
+  });
 });

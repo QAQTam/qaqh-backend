@@ -262,6 +262,7 @@ fn app(cx: &mut RenderCx) -> Element {
                         let o = bridge.core().header_snapshot().0.info_open;
                         if o != *last_info_open.borrow() {
                             *last_info_open.borrow_mut() = o;
+                            log_diag(&format!("main: info_open -> {o}"));
                             set_info_open.call(o);
                         }
                     }

@@ -269,6 +269,32 @@ describe("conversation events (single path applier)", () => {
     expect(state.pendingDeltas).toHaveLength(0);
   });
 
+  it("replaces a same-id turn on turn_started instead of pushing a duplicate", () => {
+    // Regression: after a daemon restart the worker's restored turn counter
+    // can lag the timeline, so a new input reuses an id the store already
+    // restored (completed or cancelled). Unconditional push would leave two
+    // turns with the same id — selectRingingPresentation projects duplicate
+    // RawTurns and ConversationTranscript's keyed For hits duplicate keys.
+    const reduce = makeReducer("s1");
+    // Snapshot restore created the old same-id turn (daemon restart).
+    let state = applyConversationSnapshot(
+      initialConversationState("s1"),
+      [{ turn_id: "t12", user_text: "old question", rounds: [{ round_num: 0, is_final: true, answer: "old answer" }] }],
+      null,
+    );
+    expect(state.turns).toHaveLength(1);
+
+    // The worker reuses t12 for the new input (message store counting lags).
+    state = reduce({ type: "turn_started", turn_id: "t12", user_text: "new question" });
+    expect(state.turns).toHaveLength(1, "same-id turn must be replaced, not duplicated");
+    const turn = state.turns[0]!;
+    expect(turn.userText).toBe("new question");
+    expect(turn.status).toBe("running");
+    expect(turn.rounds).toEqual([]);
+    expect(state.activeTurn?.turnId).toBe("t12");
+    expect(state.turnsById.get("t12")).toBe(0);
+  });
+
   it("uses the authoritative snapshot to repair an already-created streaming turn", () => {
     const reduce = makeReducer("s1");
     // 流式现场：活动 turn 已有部分内容，快照合并时不得覆盖

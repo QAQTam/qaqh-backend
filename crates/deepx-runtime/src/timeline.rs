@@ -151,16 +151,23 @@ impl TimelineAppender {
         let user_text = user_text.into();
         let timeline = self.seeds.entry(seed.to_string()).or_default();
         if timeline.turns.contains_key(&turn_id) {
-            // Reopen allowance: after a daemon restart the orphan-sealer marks
-            // every unsealed turn as Cancelled, but the message store (the
-            // authoritative history) still counts that turn — the worker's
-            // next input can legitimately reuse the same id (meta.turn_count
-            // lags while a turn is running). Rejecting the intent would starve
-            // the frontend transcript for that turn forever, so an orphan
-            // Cancelled turn is reset in place.
+            // Reopen allowance: the message store is the authoritative history
+            // and counts every turn, while meta.turn_count only persists on
+            // completion — so a daemon restart can leave the worker's restored
+            // counter behind the timeline's recorded turns. The next input then
+            // legitimately reuses an id the timeline already sealed, either
+            // orphan-Cancelled by the sealer or Completed when the count lagged
+            // further (observed: t14 reused as Completed after restart).
+            // Rejecting the intent (DuplicateTurn) starves the frontend
+            // transcript for that turn forever: every later block/text intent
+            // fails against the sealed turn and the resumed stream stays blank.
+            // Any sealed turn is terminal history; a fresh TurnOpened for the
+            // same id means the worker reuses it for a new input, so reset it
+            // in place. Only an unsealed (still running) duplicate is a genuine
+            // error.
             let reopenable = {
                 let turn = timeline.turns.get(&turn_id).expect("checked above");
-                turn.sealed && turn.state == TimelineTurnState::Cancelled
+                turn.sealed
             };
             if reopenable {
                 let reopened_user_text = {
@@ -782,13 +789,39 @@ mod tests {
     }
 
     #[test]
-    fn completed_turn_is_not_reopened() {
+    fn completed_turn_is_reopened_when_id_is_reused() {
+        // Regression: after a daemon restart the worker's restored turn
+        // counter (message store) can lag behind the timeline's recorded
+        // turns, so the next input reuses an id the timeline already sealed
+        // as Completed (observed: t14 reused after restart). The timeline must
+        // reset that terminal turn in place instead of rejecting with
+        // DuplicateTurn — otherwise every intent for the resumed turn is
+        // dropped and the frontend transcript stays blank.
         let mut appender = TimelineAppender::new();
         appender.open_turn("s", "t1", "question").unwrap();
         appender.seal_turn("s", "t1").unwrap();
+        let reopened = appender
+            .open_turn("s", "t1", "reused question")
+            .expect("sealed turns must be reopenable on id reuse");
+        assert!(matches!(reopened.event, TimelineEvent::TurnOpened { .. }));
+        let snapshot = appender.snapshot("s").unwrap();
+        let turn = &snapshot.turns[0];
+        assert_eq!(turn.user_text, "reused question");
+        assert!(!turn.sealed);
+        assert_eq!(turn.state, TimelineTurnState::Running);
+        assert!(turn.failure.is_none());
+        assert!(turn.rounds.is_empty(), "stale rounds are cleared");
+    }
+
+    #[test]
+    fn running_turn_is_not_reopened() {
+        // An unsealed (still running) turn is a live producer; a second
+        // TurnOpened for the same id is a genuine duplicate and must fail.
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t1", "question").unwrap();
         let err = appender
             .open_turn("s", "t1", "duplicate")
-            .expect_err("completed turns must not be reopened");
+            .expect_err("running turns must not be reopened");
         assert!(matches!(err, TimelineError::DuplicateTurn(_)));
     }
 
