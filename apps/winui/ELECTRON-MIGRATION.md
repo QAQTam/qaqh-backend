@@ -82,20 +82,101 @@
 - `ringing.status`：返回三频道状态表（`{control, conversation, tool}`），renderer `ringingMonitor.activate` 不再静默提前返回
 - 桥协议：`deepx-bridge.js` 与 `preload.ts` API 形状完全对齐，renderer 无需改动
 
-## 混合 XAML + WebView2 路线图（下一步）
+## 混合 XAML + WebView2 路线图（真实进度，截至 2026-08-07）
 
 `windows-webview::webview()` 返回 `windows_reactor::WebView2`（XAML 控件，可嵌入布局树），混合方案可行：
 
 ```
-Phase 0  桥协议扩展（nav/settings 通道）+ Grid 布局（XAML TitleBar/NavigationView + WebView2 内容区）
+Phase 0  桥协议扩展（nav/settings 通道）+ Grid 布局（XAML TitleBar/NavigationView + WebView2 内容区） ✅ 完成（header.rs + sidebar.rs + 视图族行高切换）
 Phase 1  搬壳层：ContentDialog（confirm/权限/更新）+ MenuBar + 状态栏
-Phase 2  搬侧边导航 + 会话列表（NavigationView，数据走 Rust 查询）
-Phase 3  搬设置页（表单控件齐备，状态同步为核心工作）
+         ✅ 部分完成：权限/Ask 交互模态已原生（interaction_overlay.rs，P-6 覆盖层
+         模式，2026-08-07）；confirm/更新 ContentDialog 与 MenuBar/状态栏 未动
+Phase 2  搬侧边导航 + 会话列表（NavigationView，数据走 Rust 查询） ✅ 完成（sidebar.rs + shell_store.rs）
+Phase 3  搬设置页（表单控件齐备，状态同步为核心工作） ✅ 完成（settings_view.rs，2026-08-06）
 Phase 4  可选：Composer 搬迁评估（耦合深，风险高）
+         ✅ 阶段 A+B 完成（composer_bar.rs，2026-08-07）：主输入/slash/附件/队列/
+         goalBar 原生，发送协议仍在 Web（状态单源）；图片缩略图预览（%TEMP% 副本）
+         ✅ 读路径直连（2026-08-07）：composer A 组字段（isStreaming/gate/
+         model/context）改由 conversation 事件 Rust 直连解析——ComposerActivity
+         卡死检测（4min 阈值，对齐 Web isSessionStreaming）+ usage_updated 缓存
+         （model/context_limit/prompt_tokens），hasPendingGate 复用交互队列机器；
+         B 组（mode/permissionLevel/queue/sendAck/submitError——写路径伴生状态）
+         保留 Web 投影，composer_snapshot 合并读取（投影代码零改动）；
+         `composerDirect` flag 注入后置位（flag 关即回退纯投影）
+Phase 5  交互模态族收尾：PlanReviewPanel → 统一交互弹窗 ✅ 完成（2026-08-07）：
+         交互模态体系收敛——permission/ask/plan 三模板共用 P-6 覆盖层容器
+         （interaction_overlay.rs），协议统一（pendingInteractions 单一队列）
+         ✅ 读路径直连（2026-08-07）：交互队列状态机迁 Rust——daemon
+         control/tool 事件在 bridge.rs 直接解析组装 InteractionState
+         （InteractionMachine，permission 优先、ask/plan 单一活动槽、幽灵
+         自愈），不经 WebView；`interactionDirect` flag 注入后 Web 停发
+         setInteraction 投影（flag 关即回退投影路径，桥契约不变）；
+         缓存跟随 active_seed（后台会话交互挂起，切回才显示，对齐 Web
+         activeEntry 语义）；写路径（emit action → Web handler → daemon
+         协议请求）仍两跳，为下一个迁移块
+Phase 6  聊天视图（ChatView）迁移评估（难度极高，见 ChatView 迁移分析——富文本/
+         markdown/流式渲染需 Rust 渲染管线，暂留 WebView2）
+Phase 7  Info 面板合并 ✅ 部分完成（2026-08-07）：任务进度区块移入 info_panel
+         （dashboard 投影）；stats 图表不迁移——调研发现 Web 侧 telemetry 历史
+         从未被填充（死字段），图表无数据可显示；"上下文占用" Info 面板已有
+         等价进度条；telemetry 采集补全列待办
 ```
 
 原则：**单向数据流**（daemon → Rust → XAML 原生渲染 + 同步进 WebView），
 避免 web store 与 XAML 状态双写；聊天流/时间线/富文本留在 WebView2。
+
+### 已交付 XAML 视图清单（真实进度）
+
+| 视图 | 壳组件 | 状态 | 日期 |
+|---|---|---|---|
+| 侧栏（会话列表） | `sidebar.rs` + `shell_store.rs` | ✅ | Phase 2 |
+| 标题栏（ThreadHeader 8 actions + 主题同步） | `header.rs` | ✅ | 2026-08-06 |
+| 首页（StartupView） | `home_view.rs` | ✅ | P1 |
+| 设置页 | `settings_view.rs` | ✅ | 2026-08-06 |
+| 技能页 | `skills_view.rs` | ✅ | WORKFLOW §8 |
+| Info 面板（InfoPopover） | `info_panel.rs` | ✅ | P4a |
+| 交互模态（权限/Ask） | `interaction_overlay.rs` | ✅ | 2026-08-07 |
+| Composer 底部栏（阶段 A+B） | `composer_bar.rs` | ✅ | 2026-08-07 |
+| PlanReviewPanel / 更新确认 / 托盘 / 关闭行为 | — | ⏳ 待办 | — |
+| 聊天流（ChatView） | — | 🔴 留 WebView2 | 难度分析见上 |
+
+### 剩余未迁移总清单（截至 2026-08-07，真实进度）
+
+**A. 壳能力（Electron 曾提供，WinUI 未迁）**
+
+| 项 | 现状 | 优先级 |
+|---|---|---|
+| 托盘图标与菜单（Tray） | 无 | P1 |
+| 关闭行为（最小化到托盘/退出确认）+ 优雅退出（停 daemon 防孤儿） | 关窗直接退出 | P1 |
+| 自动更新链路（checkUpdate/stageUpdate/applyUpdate stub） | 底层 deepx-updater 已就绪，缺壳封装 | P1 |
+| backend.restart（运行环境切换） | 未实现 | P1 |
+| desktop.confirm 确认对话框 | renderer 无调用点（XAML ContentDialog 绑定已有） | P2 |
+| DevTools 快捷键（F12） | 未绑定 | P2 |
+| 桌面宠物 | 建议隐藏 UI 入口，不移植 | P2 |
+| 窗口背景材质 setBackgroundMaterial | 壳固定 Mica | P2 |
+
+**B. Web 组件仍在 WebView2**
+
+| 组件 | 现状 | 说明 |
+|---|---|---|
+| ChatView 主视图（transcript 全栈） | 🔴 留 Web | 难度分析见 `PLAN-NATIVE-CHATVIEW.md`（富文本基座前置） |
+| ├─ process 时间线族 | 🟡 可先迁 | 纯 JSON，1-2 天 |
+| ├─ 回合壳（气泡/状态/usage） | 🟡 可迁 | turnProjection 移植 |
+| ├─ MarkdownBody 富文本 | 🔴 前置依赖 | reactor 无 RichTextBlock |
+| ├─ GitDiffPanel / ChangeReviewPanel | 🔴 | diff 高亮无现成方案 |
+| └─ ContextPanel + StreamMetricsChart（stats） | 🟡 | Info 已迁，stats 未迁（chart 可自绘） |
+| PlanReviewPanel（plan 交互） | 🟡 部分 | interaction 覆盖层只接管 permission/ask |
+| Toast 通知 | 🟡 简单 | InfoBar 可迁 |
+| SessionCard / StartupView 等 flag 隐藏组件 | ✅ 壳接管 | Web 代码保留（debug 回退） |
+
+**C. 增强项待办**
+
+| 项 | 说明 |
+|---|---|
+| goalBar 展开列表（TodoStatusStrip 二期） | 现为计数徽标 + 当前任务 |
+| FileOpenPicker 升级 | 全 XAML 终局待办（reactor 无 HWND 封装） |
+| reactor 富文本基座 | ChatView 前置（RichTextBlock + markdown 管线） |
+| Web store 层终局迁移 | ringingStores/timelineMonitor → bridge 缓存（shell_store 模式） |
 
 ## 参考
 
