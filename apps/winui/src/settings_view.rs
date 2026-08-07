@@ -633,7 +633,6 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 })
                 .header("")
                 .on_selection_changed({
-                    let bridge = bridge.clone();
                     let proj_draft = proj_draft.clone();
                     let dirty = dirty.clone();
                     move |i: i32| {
@@ -645,8 +644,14 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         };
                         proj_draft.borrow_mut().theme = mode.to_string();
                         *dirty.borrow_mut() = true;
-                        // 立即回传 Web 校正（Web 三态主题是单一数据源）。
-                        bridge.emit_settings_action(json!({ "action": "theme", "mode": mode }));
+                        // WebView 移除：主题壳本地立即应用（三态映射同
+                        // handle_message shell.setTheme 逻辑）。
+                        let theme = match mode {
+                            "light" => windows_reactor::RequestedTheme::Light,
+                            "dark" | "dark-gray" => windows_reactor::RequestedTheme::Dark,
+                            _ => windows_reactor::RequestedTheme::Default,
+                        };
+                        windows_reactor::set_requested_theme(theme);
                     }
                 })
                 .into(),
@@ -657,15 +662,13 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .selected_index(if pd.lang == "en" { 1 } else { 0 })
                 .header("")
                 .on_selection_changed({
-                    let bridge = bridge.clone();
                     let proj_draft = proj_draft.clone();
                     let dirty = dirty.clone();
                     move |i: i32| {
                         let lang = if i == 1 { "en" } else { "zh" };
                         proj_draft.borrow_mut().lang = lang.to_string();
                         *dirty.borrow_mut() = true;
-                        // Web switchLang 负责 config.save(lang) + i18n 切换。
-                        bridge.emit_settings_action(json!({ "action": "lang", "lang": lang }));
+                        // WebView 移除：语言随保存按钮统一 config.save。
                     }
                 })
                 .into(),
@@ -759,7 +762,6 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         proj_draft.borrow_mut().permission_level = level;
                         *dirty.borrow_mut() = true;
                         bridge.spawn_set_permission(level);
-                        bridge.emit_settings_action(json!({ "action": "permission", "level": level }));
                     }
                 })
                 .into(),

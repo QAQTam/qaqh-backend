@@ -120,31 +120,6 @@ pub struct SettingsProjection {
     pub workspace_mode: String,
 }
 
-/// 标题栏动作（壳 → Web `shell.headerAction` 载荷）。
-///
-/// `action` tag + snake_case：`{"action":"workspace","path":...}`。
-/// `ns` 命名空间预埋（P-1）：未来面板/对话框动作复用同一通道时加 ns 字段。
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum HeaderAction {
-    /// ①workspace：壳弹目录对话框后把所选路径带回 Web（D2，见 WORKFLOW §3）。
-    Workspace { path: Option<String> },
-    /// ②location：壳直接处理（open_external），无需 Web 响应。
-    Location,
-    /// ③console：壳直接处理（DevTools），无需 Web 响应。
-    Console,
-    /// ④info：回传 Web 翻转 InfoPopover。
-    Info,
-    /// ⑤stats：回传 Web 翻转 ContextPanel。
-    Stats,
-    /// ⑥undo：回传 Web 执行 undoLastTurn。
-    Undo,
-    /// ⑦compact：回传 Web 执行 session.compact。
-    Compact,
-    /// info 面板"变更"点击：回传 Web 打开 GitDiffPanel（file=None = 全部变更）。
-    OpenDiff { file: Option<String> },
-}
-
 /// XAML 交互模态状态投影（Web `shell.setInteraction` 载荷）。
 ///
 /// 字段名对齐 Web 侧 `PendingInteraction`（camelCase，`kind` 直通）。
@@ -673,29 +648,6 @@ pub struct AskAnswer {
     pub answer: String,
 }
 
-/// 交互模态动作（壳 → Web `shell.interactionAction` 载荷）。
-///
-/// `action` tag + snake_case（同 [`HeaderAction`] 模式）。Web 侧订阅后
-/// 分发到既有 handler（respondToPermission / submitAsk / dismissAsk），
-/// 协议请求（interaction.*）仍在 Web 侧发起——状态单一数据源不变。
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum InteractionAction {
-    /// 权限响应（approved + trustFolder 复选框）。
-    Permission { id: String, approved: bool, trust_folder: bool },
-    /// Ask 提交（全部问题已答）。
-    Ask { id: String, answers: Vec<AskAnswer> },
-    /// Ask 跳过（Escape / 跳过按钮；协议 interaction.ask_dismiss）。
-    AskDismiss { id: String },
-    /// Plan 审批（approved + 可选拒绝理由 + 目标模式；协议 interaction.plan_review）。
-    Plan {
-        id: String,
-        approved: bool,
-        message: Option<String>,
-        autonomous: bool,
-    },
-}
-
 /// XAML Composer 状态投影（Web `shell.setComposer` 载荷）。
 ///
 /// 字段名对齐 Web 侧 ComposerDock 依赖的 props（camelCase）。
@@ -747,30 +699,6 @@ pub struct ComposerAttachment {
 pub struct ComposerTextFile {
     pub file_name: String,
     pub path: String,
-}
-
-/// Composer 动作（壳 → Web `shell.composerAction` 载荷）。
-///
-/// `action` tag + snake_case（同 [`HeaderAction`] 模式）。Web 侧订阅后
-/// 分发到既有 handler（handleSend / handleStop / handleSetMode /
-/// changePermissionLevel / queue.remove）——协议请求仍在 Web 侧发起。
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum ComposerAction {
-    /// 提交发送（附件传路径，base64 由 Web 侧读）。
-    Send {
-        text: String,
-        image_paths: Vec<ComposerAttachment>,
-        text_files: Vec<ComposerTextFile>,
-    },
-    /// 停止当前流式回合（session.cancel）。
-    Stop,
-    /// 模式切换（session.set_mode）。
-    Mode { mode: String },
-    /// 权限等级（config.set_permission_level）。
-    Permission { level: u64 },
-    /// 移除排队项（queue.remove）。
-    QueueRemove { id: String },
 }
 
 /// `Send + Sync` half of the bridge: client, lease bookkeeping, outbox sender.
@@ -2241,14 +2169,6 @@ impl BridgeCore {
         });
     }
 
-    /// 设置页动作回传 Web（`shell.settingsAction` 事件；与 headerAction 同机制）。
-    ///
-    /// 载荷：`{action: "lang"|"theme"|"permission"|"workspace", ...}`——Web 侧
-    /// 订阅后校正其状态（i18n.setLang / switchTheme / setPermissionLevel）。
-    pub fn emit_settings_action(&self, payload: Value) {
-        self.emit("shell.settingsAction", payload);
-    }
-
     /// 通知 renderer 切换视图（XAML 侧栏的导航出口）。
     ///
     /// 同步更新壳侧 `current_view`——XAML 视图族据此接管/让出 skills 视图
@@ -2258,11 +2178,10 @@ impl BridgeCore {
             .current_view
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = view.to_string();
-        let mut payload = json!({ "view": view });
+        // WebView 移除：不再 emit shell.navigate（视图切换壳本地持有）。
         if let Some(seed) = seed {
-            payload["seed"] = json!(seed);
+            self.set_active_seed(seed);
         }
-        self.emit("shell.navigate", payload);
         // 标题栏直连：view 变化立即刷新（不再等 Web setHeader 回推）。
         if self.header_direct.load(Ordering::Relaxed) {
             self.refresh_header();
@@ -2525,26 +2444,20 @@ impl BridgeCore {
                     move |reset: deepx_client::ResetRequired| core.handle_reset(reset)
                 })),
                 on_timeline_entry: Arc::new({
-                    let core = self.self_arc();
-                    move |seed: String, entry: deepx_client::TimelineEntry| {
-                        core.emit(
-                            "timeline.entry",
-                            json!({
-                                "seed": seed,
-                                "entry": serde_json::to_value(entry).unwrap_or(json!({})),
-                            }),
-                        );
+                    let _core = self.self_arc();
+                    move |_seed: String, _entry: deepx_client::TimelineEntry| {
+                        // WebView 移除：timeline.entry 不再转发 Web。
                     }
                 }),
                 on_timeline_status: Arc::new({
                     let core = self.self_arc();
                     move |status: TimelineStatus| {
                         // A 方案：缓存状态供失联检测（timeline 流死循环判据）。
+                        // WebView 移除：不再 emit timeline.status。
                         *core
                             .timeline_status
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = Some(status.clone());
-                        core.emit("timeline.status", timeline_status_to_json(&status));
+                            .unwrap_or_else(|e| e.into_inner()) = Some(status);
                     }
                 }),
                 on_timeline_snapshot: Arc::new({
@@ -2582,7 +2495,8 @@ impl BridgeCore {
                         if core.header_direct.load(Ordering::Relaxed) {
                             core.refresh_header();
                         }
-                        core.emit("timeline.snapshot", snapshot);
+                        // WebView 移除：不再 emit timeline.snapshot（原生 ChatView
+                        // 从 chat_timeline 缓存消费）。
                     }
                 }),
             },
@@ -2597,7 +2511,7 @@ impl BridgeCore {
             e.to_string()
         })?;
         *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
-        self.emit("backend.status", json!({ "connected": true, "transport": "ringing" }));
+        // WebView 移除：不再 emit backend.status（连接状态由壳本地持有）。
         Ok(client)
     }
 
@@ -2778,23 +2692,7 @@ impl BridgeCore {
                 }
             }
         }
-        self.emit(
-            "ringing.batch",
-            json!({
-                "schema": "deepx.Ringing",
-                "version": 1,
-                "channel": batch.channel.as_str(),
-                "seed": batch.seed,
-                "server_epoch": batch.server_epoch,
-                "from_stream_seq": batch.from_stream_seq,
-                "to_stream_seq": batch.to_stream_seq,
-                "envelopes": batch
-                    .envelopes
-                    .iter()
-                    .map(|e| serde_json::to_value(e).unwrap_or(json!({})))
-                    .collect::<Vec<_>>(),
-            }),
-        );
+        // WebView 移除：ringing.batch 不再转发 Web（原生直连消费上方各分支）。
     }
 
     fn emit_status(&self, channel: Channel, status: ChannelStatus) {
@@ -2817,11 +2715,8 @@ impl BridgeCore {
         self.channel_status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(channel.as_str().to_string(), payload.clone());
-        self.emit(
-            "ringing.status",
-            json!({ "channel": channel.as_str(), "status": payload }),
-        );
+            .insert(channel.as_str().to_string(), payload);
+        // WebView 移除：不再 emit ringing.status（通道状态供壳失联检测用）。
     }
 
     // ── A 方案：daemon 失联检测与 client 重建（WORKFLOW §7）────────────────
@@ -3242,14 +3137,6 @@ impl Bridge {
         false
     }
 
-    /// ④-⑦ 动作回传 Web（`shell.headerAction` 事件；D1 事件语义，
-    /// 与 shell.navigate 同机制——壳 → Web 无 invoke 通道）。
-    pub fn emit_header_action(&self, action: HeaderAction) {
-        if let Ok(payload) = serde_json::to_value(action) {
-            self.core.emit("shell.headerAction", payload);
-        }
-    }
-
     /// 标题栏本地开关翻转（headerDirect：info/stats 壳本地维护）。
     pub fn toggle_header_flag(&self, flag: HeaderFlag) {
         self.core.toggle_header_flag(flag);
@@ -3292,22 +3179,6 @@ impl Bridge {
         self.core.spawn_undo_last_turn();
     }
 
-    /// 交互模态动作回传 Web（`shell.interactionAction` 事件；同 headerAction
-    /// 机制——壳点击覆盖层面板按钮 → Web 执行既有 handler，协议请求在 Web 侧）。
-    pub fn emit_interaction_action(&self, action: InteractionAction) {
-        if let Ok(payload) = serde_json::to_value(action) {
-            self.core.emit("shell.interactionAction", payload);
-        }
-    }
-
-    /// Composer 动作回传 Web（`shell.composerAction` 事件；同 headerAction
-    /// 机制——壳提交意图 → Web 执行既有 handler，协议请求在 Web 侧）。
-    pub fn emit_composer_action(&self, action: ComposerAction) {
-        if let Ok(payload) = serde_json::to_value(action) {
-            self.core.emit("shell.composerAction", payload);
-        }
-    }
-
     /// 附件：图片文件选择对话框（STA COM；用户取消返回 Ok(null)）。
     /// 复用 show_open_dialog 的 image_filter（png/jpg/jpeg/gif/webp/bmp）。
     pub fn pick_image_file(&self) -> Result<Value, String> {
@@ -3317,15 +3188,6 @@ impl Bridge {
     /// 附件：文本文件选择对话框（STA COM；用户取消返回 Ok(null)）。
     pub fn pick_text_file(&self) -> Result<Value, String> {
         show_open_dialog(false, false, false, Some("选择文本文件"))
-    }
-
-    /// 壳系统主题变化（P-5）→ Web 校正（`shell.themeChanged` 事件）。
-    pub fn emit_theme_changed(&self, scheme: windows_reactor::ColorScheme) {
-        let mode = match scheme {
-            windows_reactor::ColorScheme::Light => "light",
-            windows_reactor::ColorScheme::Dark => "dark",
-        };
-        self.core.emit("shell.themeChanged", json!({ "mode": mode }));
     }
 
     // ── XAML home / settings 视图透传（home_view.rs / settings_view.rs 只依赖 Bridge）──
@@ -3371,10 +3233,6 @@ impl Bridge {
     }
 
     /// settings：lang/theme/permission/workspace 变更回传 Web（`shell.settingsAction`）。
-    pub fn emit_settings_action(&self, payload: Value) {
-        self.core.emit_settings_action(payload);
-    }
-
     /// Keep the web-message event registration alive for the process lifetime.
     pub fn attach_registration(&self, registration: windows_webview::EventRegistration) {
         *self.ui.0.registration.lock().unwrap_or_else(|e| e.into_inner()) = Some(registration);

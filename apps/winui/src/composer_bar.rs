@@ -37,7 +37,7 @@ use std::time::Duration;
 use windows_reactor::*;
 
 use crate::bridge::{
-    Bridge, ComposerAction, ComposerAttachment, ComposerState, ComposerTextFile,
+    Bridge, ComposerAttachment, ComposerState, ComposerTextFile,
 };
 use crate::shell_store::DashboardSnapshot;
 
@@ -451,9 +451,11 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             bridge.spawn_conversation_command(serde_json::json!({ "type": "conversation_cancel" }))
         }
     };
+    // 队列移除：queue 已随 B 组本地化恒空（本地无排队概念，WebView 移除），
+    // 保留绑定签名兼容 queue_row，但无实际动作。
     let on_queue_remove: Arc<dyn Fn(String) + 'static> = Arc::new({
-        let bridge = bridge.clone();
-        move |id: String| bridge.emit_composer_action(ComposerAction::QueueRemove { id })
+        let _bridge = bridge.clone();
+        move |_id: String| {}
     });
 
     // ── 渲染时读取草稿（版本号变化触发本函数重跑）────────────────

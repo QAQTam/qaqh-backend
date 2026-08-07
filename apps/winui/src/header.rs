@@ -47,9 +47,6 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (state, set_state) = cx.use_state::<HeaderState>(HeaderState::default());
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
-    // 主题轮询（P-5）：ActualTheme → ColorScheme 变化时推 Web 校正。
-    let theme_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
-    let last_scheme = cx.use_ref::<ColorScheme>(ColorScheme::default());
 
     // 首次挂载：500ms rev 轮询（同 sidebar 模式；shell::poll_rev helper）。
     cx.use_effect((), {
@@ -68,28 +65,8 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         }
     });
 
-    // 系统主题轮询（1s）：current_color_scheme 是 UI 线程 thread_local，
-    // reactor 由 ActualThemeChanged 驱动更新（engine.rs:733）。
-    cx.use_effect((), {
-        let bridge = bridge.clone();
-        let theme_timer = theme_timer.clone();
-        let last_scheme = last_scheme.clone();
-        move || {
-            if let Ok(t) = DispatcherTimer::new(Duration::from_millis(1000), {
-                let bridge = bridge.clone();
-                let last_scheme = last_scheme.clone();
-                move || {
-                    let scheme = current_color_scheme();
-                    if scheme != *last_scheme.borrow() {
-                        *last_scheme.borrow_mut() = scheme;
-                        bridge.emit_theme_changed(scheme);
-                    }
-                }
-            }) {
-                *theme_timer.borrow_mut() = Some(t);
-            }
-        }
-    });
+    // 系统主题：reactor 由 ActualThemeChanged 驱动更新（engine.rs:733），
+    // WebView 移除后无需回传 Web——轮询与 emit_theme_changed 一并删除。
 
     // ── 点击分发（①②③ 壳直接；④-⑦ 直连动作，协议请求 Rust 直发）──
     let on_workspace = {
