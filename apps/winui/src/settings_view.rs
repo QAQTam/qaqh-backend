@@ -28,6 +28,7 @@ use serde_json::json;
 use windows_reactor::*;
 
 use crate::bridge::{Bridge, SettingsProjection};
+use crate::fonts;
 use crate::shell_store::{normalize_effort, SettingsSnapshot};
 
 /// 快照轮询间隔（同 sidebar / skills_view）。
@@ -166,7 +167,9 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 "contextLimit": d.context_limit,
                 "reasoningEffort": normalize_effort(&d.reasoning_effort).to_string(),
                 "autoCompactThreshold": if d.auto_compact_threshold > 0.0 { d.auto_compact_threshold } else { 0.0 },
+                "complianceEnabled": d.compliance_enabled,
                 "lang": pd.lang,
+                "fontFamily": d.font_family,
                 "subagentModel": d.sub_model,
                 "subagentBaseUrl": d.sub_base_url,
                 "subagentApiKey": d.sub_api_key,
@@ -243,100 +246,200 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // models：provider / endpoint / baseUrl / model
     if category == "models" {
         rows.push(section_title("模型提供方"));
-        let providers = d.providers.clone();
-        let provider_names: Vec<String> = providers.iter().map(|p| p.display.clone()).collect();
-        let pidx = providers.iter().position(|p| p.id == d.provider_id).unwrap_or(0) as i32;
-        let provider_combo = if provider_names.is_empty() {
-            text_block("（无 provider 目录）").foreground(ThemeRef::SecondaryText).into()
+
+        // ── 加载态：daemon 未响应时显示「加载中」而非错误的「无 provider 目录」 ──
+        if !d.loaded {
+            rows.push(
+                text_block("正在加载配置…")
+                    .font_size(13.0)
+                    .foreground(ThemeRef::SecondaryText)
+                    .into(),
+            );
+            // 跳过其余字段渲染（避免显示 0 默认值）；保存按钮仍在底部可用。
         } else {
-            ComboBox::new(provider_names)
-                .selected_index(pidx)
-                .header("Provider")
-                .on_selection_changed({
-                    let providers = providers.clone();
-                    let draft = draft.clone();
-                    let dirty = dirty.clone();
-                    move |i: i32| {
-                        let Some(p) = providers.get(i as usize) else { return };
-                        let mut d = draft.borrow_mut();
-                        d.provider_id = p.id.clone();
-                        if let Some(ep) = p.endpoints.first() {
+            let providers = d.providers.clone();
+            let provider_names: Vec<String> = providers.iter().map(|p| p.display.clone()).collect();
+            let pidx = providers.iter().position(|p| p.id == d.provider_id).unwrap_or(0) as i32;
+            let provider_combo = if provider_names.is_empty() {
+                // 已加载但 providers 为空 = daemon 异常（不应发生，registry 硬编码 10 个）。
+                text_block("（未配置任何 provider，请检查 daemon）").foreground(ThemeRef::SecondaryText).into()
+            } else {
+                ComboBox::new(provider_names)
+                    .selected_index(pidx)
+                    .header("Provider")
+                    .on_selection_changed({
+                        let providers = providers.clone();
+                        let draft = draft.clone();
+                        let dirty = dirty.clone();
+                        move |i: i32| {
+                            let Some(p) = providers.get(i as usize) else { return };
+                            let mut d = draft.borrow_mut();
+                            d.provider_id = p.id.clone();
+                            // 仅当新 provider 不支持当前 endpoint 时才取首条 endpoint
+                            // （保留用户已选的 Responses API 等偏好）。
+                            let has_current = p.endpoints.iter().any(|e| e.id == d.endpoint);
+                            if !has_current {
+                                if let Some(ep) = p.endpoints.first() {
+                                    d.endpoint = ep.id.clone();
+                                    d.base_url = ep.base_url.clone();
+                                    if !ep.default_model.is_empty() {
+                                        d.model = ep.default_model.clone();
+                                    }
+                                }
+                            } else {
+                                // 同步 base_url 到当前 endpoint 在新 provider 下的预设。
+                                if let Some(ep) = p.endpoints.iter().find(|e| e.id == d.endpoint) {
+                                    d.base_url = ep.base_url.clone();
+                                    if !ep.default_model.is_empty() && d.model.is_empty() {
+                                        d.model = ep.default_model.clone();
+                                    }
+                                }
+                            }
+                            *dirty.borrow_mut() = true;
+                        }
+                    })
+                    .into()
+            };
+            rows.push(field_row("提供方", provider_combo));
+            let endpoints = providers
+                .iter()
+                .find(|p| p.id == d.provider_id)
+                .map(|p| p.endpoints.clone())
+                .unwrap_or_default();
+            // 使用 ui_label 显示协议 + Beta 标记，让用户能直观区分
+            // Chat Completions API 与 Responses API (Beta)。
+            let endpoint_labels: Vec<String> = endpoints.iter().map(|e| e.ui_label()).collect();
+            let eidx = endpoints.iter().position(|e| e.id == d.endpoint).unwrap_or(0) as i32;
+            let endpoint_combo = if endpoint_labels.is_empty() {
+                text_block("—").foreground(ThemeRef::SecondaryText).into()
+            } else {
+                ComboBox::new(endpoint_labels)
+                    .selected_index(eidx)
+                    .header("Endpoint")
+                    .on_selection_changed({
+                        let endpoints = endpoints.clone();
+                        let draft = draft.clone();
+                        let dirty = dirty.clone();
+                        move |i: i32| {
+                            let Some(ep) = endpoints.get(i as usize) else { return };
+                            let mut d = draft.borrow_mut();
                             d.endpoint = ep.id.clone();
                             d.base_url = ep.base_url.clone();
-                            d.model = ep.default_model.clone();
+                            if !ep.default_model.is_empty() {
+                                d.model = ep.default_model.clone();
+                            }
+                            *dirty.borrow_mut() = true;
                         }
-                        *dirty.borrow_mut() = true;
-                    }
-                })
-                .into()
-        };
-        rows.push(field_row("提供方", provider_combo));
-        let endpoints = providers
-            .iter()
-            .find(|p| p.id == d.provider_id)
-            .map(|p| p.endpoints.clone())
-            .unwrap_or_default();
-        let endpoint_names: Vec<String> = endpoints.iter().map(|e| e.display.clone()).collect();
-        let eidx = endpoints.iter().position(|e| e.id == d.endpoint).unwrap_or(0) as i32;
-        let endpoint_combo = if endpoint_names.is_empty() {
-            text_block("—").foreground(ThemeRef::SecondaryText).into()
-        } else {
-            ComboBox::new(endpoint_names)
-                .selected_index(eidx)
-                .header("Endpoint")
-                .on_selection_changed({
-                    let endpoints = endpoints.clone();
+                    })
+                    .into()
+            };
+            rows.push(field_row("接口", endpoint_combo));
+            rows.push(field_row(
+                "Base URL",
+                text_box(d.base_url.clone()).on_text_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |i: i32| {
-                        let Some(ep) = endpoints.get(i as usize) else { return };
-                        let mut d = draft.borrow_mut();
-                        d.endpoint = ep.id.clone();
-                        d.base_url = ep.base_url.clone();
-                        d.model = ep.default_model.clone();
-                        *dirty.borrow_mut() = true;
-                    }
-                })
-                .into()
-        };
-        rows.push(field_row("接口", endpoint_combo));
-        rows.push(field_row(
-            "Base URL",
-            text_box(d.base_url.clone()).on_text_changed({
-                let draft = draft.clone();
-                let dirty = dirty.clone();
-                move |v| { draft.borrow_mut().base_url = v; *dirty.borrow_mut() = true; }
-            }).into(),
-        ));
-        let model_names = endpoints
-            .iter()
-            .find(|e| e.id == d.endpoint)
-            .map(|e| e.models.clone())
-            .unwrap_or_default();
-        // 模型：可编辑文本框（models 列表仅作提示，不强制选择）。
-        rows.push(field_row(
-            "模型",
-            text_box(d.model.clone())
-                .placeholder_text(if model_names.is_empty() { "e.g. deepseek-chat" } else { "" })
-                .on_text_changed({
-                    let draft = draft.clone();
-                    let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().model = v; *dirty.borrow_mut() = true; }
-                })
+                    move |v| { draft.borrow_mut().base_url = v; *dirty.borrow_mut() = true; }
+                }).into(),
+            ));
+            let model_names = endpoints
+                .iter()
+                .find(|e| e.id == d.endpoint)
+                .map(|e| e.models.clone())
+                .unwrap_or_default();
+            // 模型：可编辑文本框（models 列表仅作提示，不强制选择）。
+            rows.push(field_row(
+                "模型",
+                text_box(d.model.clone())
+                    .placeholder_text(if model_names.is_empty() { "e.g. deepseek-chat" } else { "" })
+                    .on_text_changed({
+                        let draft = draft.clone();
+                        let dirty = dirty.clone();
+                        move |v| { draft.borrow_mut().model = v; *dirty.borrow_mut() = true; }
+                    })
+                    .into(),
+            ));
+            rows.push(field_row(
+                "最大 Tokens",
+                NumberBox::new(d.max_tokens as f64)
+                    // 下界 16（小模型可用），上界 1_000_000（主流长输出模型已支持 128K+）。
+                    .range(16.0, 1_000_000.0)
+                    .header("")
+                    .on_value_changed({
+                        let draft = draft.clone();
+                        let dirty = dirty.clone();
+                        move |v| { draft.borrow_mut().max_tokens = v as u64; *dirty.borrow_mut() = true; }
+                    })
+                    .into(),
+            ));
+        }
+
+        // ── Profile 切换器（在 models 区块底部展示并允许快速切换/管理） ──
+        if d.loaded && !d.profiles.is_empty() {
+            rows.push(section_title("预设"));
+            let profile_names = d.profiles.clone();
+            let pidx = profile_names.iter().position(|n| n == &d.active_profile).unwrap_or(0) as i32;
+            rows.push(field_row(
+                "当前预设",
+                ComboBox::new(profile_names.clone())
+                    .selected_index(pidx)
+                    .header("Profile")
+                    .on_selection_changed({
+                        let bridge = bridge.clone();
+                        let profile_names = profile_names.clone();
+                        move |i: i32| {
+                            if let Some(name) = profile_names.get(i as usize) {
+                                // apply_profile 经 daemon 触发 config reload；
+                                // 前端下次轮询会拿到新预设的字段。
+                                bridge.spawn_apply_profile(name);
+                            }
+                        }
+                    })
+                    .into(),
+            ));
+            rows.push(
+                text_block("切换预设会请求 daemon 应用并刷新配置（保存按钮不会触发切换）")
+                    .font_size(11.0)
+                    .foreground(ThemeRef::SecondaryText)
+                    .into(),
+            );
+            // ── 另存为 / 删除（active 非 default 才允许删除） ──
+            let active = d.active_profile.clone();
+            let can_delete = active != "default";
+            rows.push(field_row(
+                "",
+                hstack((
+                    button("另存为").subtle().on_click({
+                        let bridge = bridge.clone();
+                        let profiles = profile_names.clone();
+                        move || {
+                            // 自动命名：profile_<N>，N = 现有 profile 数量（不与已存在冲突）。
+                            let mut n = profiles.len();
+                            let mut name = format!("profile_{n}");
+                            while profiles.contains(&name) {
+                                n += 1;
+                                name = format!("profile_{n}");
+                            }
+                            bridge.spawn_save_profile(&name);
+                        }
+                    }),
+                    button("删除当前预设")
+                        .subtle()
+                        .enabled(can_delete)
+                        .on_click({
+                            let bridge = bridge.clone();
+                            let active = active.clone();
+                            move || {
+                                if active != "default" {
+                                    bridge.spawn_delete_profile(&active);
+                                }
+                            }
+                        }),
+                ))
+                .spacing(8.0)
                 .into(),
-        ));
-        rows.push(field_row(
-            "最大 Tokens",
-            NumberBox::new(d.max_tokens as f64)
-                .range(256.0, 131072.0)
-                .header("")
-                .on_value_changed({
-                    let draft = draft.clone();
-                    let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().max_tokens = v as u64; *dirty.borrow_mut() = true; }
-                })
-                .into(),
-        ));
+            ));
+        }
     }
 
     // api：apiKey / subagentApiKey
@@ -492,7 +595,7 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         rows.push(field_row(
             "最大 Tokens",
             NumberBox::new(d.sub_max_tokens as f64)
-                .range(512.0, 65536.0)
+                .range(16.0, 1_000_000.0)
                 .header("")
                 .on_value_changed({
                     let draft = draft.clone();
@@ -618,7 +721,7 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         ));
     }
 
-    // appearance：theme / lang（变更即发，不入 config.save 全量提交）
+    // appearance：theme / lang / font（theme/lang 变更即发；font 随保存提交）
     if category == "appearance" {
         rows.push(section_title("界面"));
         rows.push(field_row(
@@ -673,6 +776,47 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 })
                 .into(),
         ));
+        // ── 字体：Windows 系统字体族列表（fonts.rs 注册表枚举，进程级缓存）；
+        // 首项「系统默认」= 空值。切换立即全局生效（FontFamily 继承属性，
+        // set_font_family 设置内容根），随保存按钮 config.save 落盘。──
+        let font_options: Vec<String> = {
+            let mut v = vec!["系统默认".to_string()];
+            v.extend(fonts::system_fonts_cached().iter().cloned());
+            v
+        };
+        let font_idx = font_options
+            .iter()
+            .position(|f| *f == d.font_family)
+            .unwrap_or(0) as i32;
+        rows.push(field_row(
+            "字体",
+            ComboBox::new(font_options.clone())
+                .selected_index(font_idx)
+                .header("")
+                .on_selection_changed({
+                    let draft = draft.clone();
+                    let dirty = dirty.clone();
+                    let font_options = font_options.clone();
+                    move |i: i32| {
+                        let font = font_options.get(i as usize).cloned().unwrap_or_default();
+                        draft.borrow_mut().font_family = font.clone();
+                        *dirty.borrow_mut() = true;
+                        // 立即全局生效（空 = 恢复系统默认）。
+                        if font.is_empty() {
+                            windows_reactor::set_font_family(None);
+                        } else {
+                            windows_reactor::set_font_family(Some(&font));
+                        }
+                    }
+                })
+                .into(),
+        ));
+        rows.push(
+            text_block("字体应用于整个应用界面（FontFamily 继承属性；中文会回退到系统中文字体）")
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText)
+                .into(),
+        );
     }
 
     // multimodal：enabled / providerType / apiKey / baseUrl / model / maxTokens
@@ -734,7 +878,7 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         rows.push(field_row(
             "最大 Tokens",
             NumberBox::new(d.mm_max_tokens as f64)
-                .range(256.0, 65536.0)
+                .range(16.0, 1_000_000.0)
                 .header("")
                 .on_value_changed({
                     let draft = draft.clone();

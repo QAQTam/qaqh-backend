@@ -174,6 +174,8 @@ pub struct Config {
     pub active_profile: String,
     /// UI language preference.
     pub lang: Option<String>,
+    /// UI font family（WinUI 壳全局字体；空 = 跟随系统默认）。
+    pub font_family: String,
     /// Default configuration for sub-agent spawning.
     pub subagent: SubagentConfig,
     /// Whether the content filter is active.
@@ -244,6 +246,7 @@ impl Default for Config {
             profiles,
             active_profile: "default".into(),
             lang: None,
+            font_family: String::new(),
             subagent: SubagentConfig::default(),
             compliance_enabled: true,
             compliance_extra_keywords: Vec::new(),
@@ -344,10 +347,11 @@ impl Config {
             {
                 cfg.lang = Some(l.clone());
             }
-            if let Some(ref l) = pc.lang
-                && !l.is_empty()
+            // ── UI 字体（空 = 跟随系统默认）──
+            if let Some(ref f) = pc.font_family
+                && !f.is_empty()
             {
-                cfg.lang = Some(l.clone());
+                cfg.font_family = f.clone();
             }
             // ── Subagent defaults ──
             if let Some(ref s) = pc.subagent {
@@ -488,6 +492,11 @@ impl Config {
             profiles: Some(profiles),
             active_profile: Some(self.active_profile.clone()),
             lang: self.lang.clone(),
+            font_family: if self.font_family.is_empty() {
+                None
+            } else {
+                Some(self.font_family.clone())
+            },
             subagent: Some(PersistentSubagentConfig {
                 model: if self.subagent.model.is_empty() {
                     None

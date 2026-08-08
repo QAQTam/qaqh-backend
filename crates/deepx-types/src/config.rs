@@ -33,6 +33,11 @@ pub struct PersistentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
 
+    /// UI 字体（WinUI 壳全局 FontFamily）。`None`/空 = 跟随系统默认字体。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+
     // ── Subagent defaults ──
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<PersistentSubagentConfig>,
