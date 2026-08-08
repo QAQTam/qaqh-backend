@@ -17,10 +17,12 @@ tokio = { version = "1", features = ["time"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # P-2 typed struct：HeaderState/HeaderAction 编译期检查（预埋，见 WORKFLOW §6.1）。
 serde = { version = "1", features = ["derive"] }
-windows-reactor = { path = "F:/windows-rs/crates/libs/reactor" }
+# Downstream Reactor extensions are kept in the durable fork and pinned so a
+# clean machine reproduces the exact WinRT bindings and runtime setup.
+windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "494197a46de50a1fad35fc3e3801cdb7a1c2519e" }
 # desktop.openDialog / openImageDialog: Win32 IFileOpenDialog (COM) 绑定。
 # 仅启用所需最小 feature 集（0.100.0 小写模块名 feature）。
-windows = { path = "F:/windows-rs/crates/libs/windows", default-features = false, features = [
+windows = { git = "https://github.com/QAQTam/windows-rs.git", rev = "494197a46de50a1fad35fc3e3801cdb7a1c2519e", default-features = false, features = [
     "combaseapi",     # CoCreateInstance / CoTaskMemFree / CLSCTX_ALL
     "shobjidl_core",  # IFileOpenDialog / IFileDialog / IShellItem(Array) / SIGDN / FOS_*
     "shtypes",        # COMDLG_FILTERSPEC
@@ -30,7 +32,7 @@ windows = { path = "F:/windows-rs/crates/libs/windows", default-features = false
 ] }
 
 [build-dependencies]
-windows-reactor-setup = { path = "F:/windows-rs/crates/libs/reactor-setup" }
+windows-reactor-setup = { git = "https://github.com/QAQTam/windows-rs.git", rev = "494197a46de50a1fad35fc3e3801cdb7a1c2519e" }
 
 [lints]
 workspace = true

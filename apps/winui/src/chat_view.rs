@@ -60,10 +60,12 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 空会话 → "开始新的对话…"）与"快照未到达仍在加载"（→ "加载会话…"）。
     let last_restored_seed = cx.use_ref::<String>(String::new());
     // 跟随尾部滚动请求版本：pump 内容变化时递增（restore/新 turn 立即、
-    // live 增量 100ms 节流），render 时随 list_view.scroll_to_index 下发
-    // ——reconciler 检测版本变化后按 near_bottom 判定执行贴底滚动
+    // live 增量节流），render 时随 list_view.follow_tail 下发
+    // ——reconciler 检测版本变化后按 near-tail 判定执行贴底滚动
     // （用户离开底部时不打扰）。
     let scroll_version = cx.use_ref::<u64>(0);
+    // restore 是唯一需要无条件贴底的路径；普通增量必须尊重用户上滚。
+    let force_tail_version = cx.use_ref::<Option<u64>>(None);
     // 滚动请求节流基准（live 流式限频，见 SCROLL_REQUEST_THROTTLE）。
     let last_scroll_request = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     // 渲染节流基准（live 流式降频，见 RENDER_THROTTLE）。
@@ -74,7 +76,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (_, set_rev) = cx.use_state::<u64>(0);
     // 锚定补偿挂起标记：`Some(rows)` = 本帧渲染需用 within 滚动（顶部
     // 预加载后把「原窗口首行」锚回原位，视口不跳）。rows = 扩展前移量
-    // = 原首行的新下标。渲染闭包 take 后随 scroll_to_index_within 下发。
+    // = 原首行的新下标。渲染闭包 take 后随 preserve_anchor 下发。
     let pending_anchor = cx.use_ref::<Option<usize>>(None);
 
     // 事件泵：drain bridge 队列 → Transcript；rev 变化触发重渲染。
@@ -89,6 +91,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_scroll_request = last_scroll_request.clone();
         let last_render = last_render.clone();
         let scroll_version = scroll_version.clone();
+        let force_tail_version = force_tail_version.clone();
         let pending_anchor = pending_anchor.clone();
         let set_rev = set_rev.clone();
         move || {
@@ -105,6 +108,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let last_scroll_request = last_scroll_request.clone();
                 let last_render = last_render.clone();
                 let scroll_version = scroll_version.clone();
+                let force_tail_version = force_tail_version.clone();
                 let set_rev = set_rev.clone();
                 move || {
                     // 会话切换：active_seed 变化 → 重置 Transcript（旧会话内容
@@ -114,6 +118,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         *last_seed.borrow_mut() = seed.clone();
                         *transcript.borrow_mut() = Transcript::new();
                         *last_restored_seed.borrow_mut() = String::new();
+                        *force_tail_version.borrow_mut() = None;
                         *last_rev.borrow_mut() = 0;
                         log_diag(&format!("chat_view: switched to seed {seed}"));
                     }
@@ -136,6 +141,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             // （不节流；顺带更新节流基准防紧随的 live 抖动）。
                             let now = std::time::Instant::now();
                             *scroll_version.borrow_mut() += 1;
+                            *force_tail_version.borrow_mut() = Some(*scroll_version.borrow());
                             *last_scroll_request.borrow_mut() = now;
                             *last_render.borrow_mut() = now;
                             set_rev.call(rev);
@@ -270,20 +276,22 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .into();
     }
     let turns = s.window_turns().to_vec();
-    let last = turns.len() as i32 - 1;
-    // 顶部预加载后本帧需要锚定补偿：取走挂起标记，用 within 滚动把
+    // 顶部预加载后本帧需要锚定补偿：取走挂起标记，把
     // 「原窗口首行」（新下标 = 扩展前移量）锚回原位，视口不跳。
     let anchor_rows = pending_anchor.borrow_mut().take();
     let mut builder = list_view(turns, |turn: &TurnView, i: usize| turn_view(i, turn))
         .with_key_selector(|turn: &TurnView| turn.turn_id.clone());
     if let Some(anchor_rows) = anchor_rows {
-        builder = builder.scroll_to_index_within(
+        builder = builder.preserve_anchor(
             *scroll_version.borrow(),
-            anchor_rows as i32,
+            anchor_rows,
             0.0,
         );
+    } else if *force_tail_version.borrow() == Some(*scroll_version.borrow()) {
+        force_tail_version.borrow_mut().take();
+        builder = builder.force_tail(*scroll_version.borrow());
     } else {
-        builder = builder.scroll_to_index(*scroll_version.borrow(), last);
+        builder = builder.follow_tail(*scroll_version.borrow());
     }
     builder
         .on_top_reached({
