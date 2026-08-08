@@ -43,8 +43,8 @@ LRU，容量 64）。视口内行 rebuild 时内容未变的代码块不再重�
 ## 依赖管理（最终方案：git rev 指向 downstream snapshot）
 
 - 三处 manifest（`apps/winui`、`crates/deepx-fluent`、`crates/markdown-winui`）
-  以 `rev = "88c68602d3e79c0acb95085da68144be219d49ad"` 消费
-  `QAQTam/windows-rs` 的 `deepx/snapshot-v4` 分支（无父提交快照，含本批
+  以 `rev = "f159698407616f358e9f4b48e982d8313077eccd"` 消费
+  `QAQTam/deepx-winui-rs` 的 `deepx/snapshot-v5` 分支（无父提交快照，含本批
   ChatView 性能补丁）；
 - downstream 维护仓库：`F:\DeepX-windows-rs`（`DEEPX-DOWNSTREAM.md` 为
   维护手册）。升级流程：该仓库 `codex/chatview-perf` 集成分支 rebase 上游 →
@@ -53,14 +53,14 @@ LRU，容量 64）。视口内行 rebuild 时内容未变的代码块不再重�
 
 ## 协作者 / LLM 上下文（改 downstream 前先读）
 
-本地 downstream 仓库：**`F:\DeepX-windows-rs`**（QAQTam/windows-rs 的本地工作树，
+本地 downstream 仓库：**`F:\DeepX-windows-rs`**（QAQTam/deepx-winui-rs 的本地工作树，
 维护手册见其根目录 `DEEPX-DOWNSTREAM.md`）。切换脚本：`scripts/dev-downstream.ps1`
 （`on` / `off` / `status`）。
 
 给 LLM 的标准上下文模板（可整段粘贴）：
 
 > DeepX 的 windows-reactor / windows / windows-reactor-setup 依赖指向
-> `QAQTam/windows-rs` 的 immutable snapshot commit `88c68602d3e79c0acb95085da68144be219d49ad`
+> `QAQTam/deepx-winui-rs` 的 immutable snapshot commit `f159698407616f358e9f4b48e982d8313077eccd`
 > （无父快照分支 `deepx/snapshot-v4`，含 ChatView 流式性能补丁）。
 > 本地下游工作树在 `F:\DeepX-windows-rs`（集成分支 `codex/chatview-perf`，维护手册
 > `DEEPX-DOWNSTREAM.md`）。需要改动下游代码时：
