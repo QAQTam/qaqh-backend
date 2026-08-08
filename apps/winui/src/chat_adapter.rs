@@ -38,7 +38,7 @@ pub fn timeline_turns(v: &serde_json::Value) -> Vec<RestoredTurn> {
     let Some(turns) = v.get("turns").and_then(|t| t.as_array()) else {
         return Vec::new();
     };
-    turns
+    let parsed = turns
         .iter()
         .filter_map(|t| {
             let turn_id = t.get("turn_id")?.as_str()?.to_string();
@@ -114,14 +114,32 @@ pub fn timeline_turns(v: &serde_json::Value) -> Vec<RestoredTurn> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let created_seq = t
+                .get("created_seq")
+                .and_then(|s| s.as_u64())
+                .unwrap_or(0);
             Some(RestoredTurn {
                 turn_id,
+                created_seq,
                 user_text,
                 status,
                 rounds,
             })
         })
-        .collect()
+        .collect::<Vec<RestoredTurn>>();
+    // daemon 快照已按 created_seq 排序（旧数据退化 turn_id 数值序）；前端
+    // 防御性再排一次——旧 daemon / 第三方消费者可能给出无序数组，恢复窗口
+    // （尾部 N 个）依赖数组序 = 时间序，错乱会恢复出错误的回合集合。
+    let mut out: Vec<RestoredTurn> = parsed;
+    out.sort_by_key(|t| (t.created_seq, turn_num(&t.turn_id)));
+    out
+}
+
+/// turn_id → 数值序（t1/t10 → 1/10）；无数字后缀按 0（稳定排序兜底）。
+fn turn_num(id: &str) -> u64 {
+    id.trim_start_matches(|c: char| !c.is_ascii_digit())
+        .parse()
+        .unwrap_or(0)
 }
 
 /// timeline tool 块 → 工具卡视图。

@@ -198,10 +198,14 @@ impl TimelineAppender {
             }
             return Err(TimelineError::DuplicateTurn(turn_id));
         }
+        // 预分配：紧接其后的 TurnOpened entry 将占用 next_seq+1，作为该
+        // turn 的权威创建序（快照排序依据，不依赖 turn_id 命名格式）。
+        let created_seq = timeline.next_seq.saturating_add(1);
         timeline.turns.insert(
             turn_id.clone(),
             TimelineTurn {
                 turn_id: turn_id.clone(),
+                created_seq,
                 user_text: user_text.clone(),
                 sealed: false,
                 state: TimelineTurnState::Running,
@@ -568,9 +572,19 @@ impl TimelineAppender {
     }
 
     pub fn snapshot(&self, seed: &str) -> Option<TimelineSnapshot> {
-        self.seeds.get(seed).map(|timeline| TimelineSnapshot {
-            watermark: timeline.next_seq,
-            turns: timeline.turns.values().cloned().collect(),
+        self.seeds.get(seed).map(|timeline| {
+            let mut turns: Vec<TimelineTurn> = timeline.turns.values().cloned().collect();
+            // turns 存于 HashMap（无序）——按 created_seq 排序（TurnOpened
+            // entry 的 seq，权威时间序）；旧磁盘数据 created_seq=0 时退化为
+            // turn_id 数值序（t1..tN 递增）。两者混合时旧 turn 在前、新 turn
+            // 在后，时间序依然正确。快照数组序必须=时间序：前端恢复按"尾部
+            // 窗口"取最新回合，顺序错乱会恢复出错误的回合集合（实测：40
+            // turns 会话恢复窗口落在旧回合，最新消息缺失）。
+            turns.sort_by_key(|t| (t.created_seq, turn_num(&t.turn_id)));
+            TimelineSnapshot {
+                watermark: timeline.next_seq,
+                turns,
+            }
         })
     }
 
@@ -619,6 +633,13 @@ impl TimelineAppender {
             .get_mut(seed)
             .ok_or_else(|| TimelineError::MissingTurn(format!("seed:{seed}")))
     }
+}
+
+/// turn_id → 数值序（t1/t10 → 1/10）；无数字后缀按 0（保持原序兜底）。
+fn turn_num(id: &str) -> u64 {
+    id.trim_start_matches(|c: char| !c.is_ascii_digit())
+        .parse()
+        .unwrap_or(0)
 }
 
 fn next_entry(

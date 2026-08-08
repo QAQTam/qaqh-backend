@@ -21,13 +21,35 @@ use crate::sidebar::state_dot;
 
 /// 标签条高度（main.rs 内容区 row0）。
 pub const TAB_STRIP_HEIGHT: f64 = 44.0;
-/// 标签标题最大宽度（超长省略，防 TabView SizeToContent 撑爆）。
-const TAB_TITLE_MAX_WIDTH: f64 = 170.0;
+/// 标签标题最大像素宽度（截断后兜底，防极端字体/全角溢出撑爆标签）。
+const TAB_TITLE_MAX_WIDTH: f64 = 110.0;
+/// 标签标题显示宽度上限：ASCII=1、其他字符（中文等）=2 → 14 = 7 汉字
+/// / 14 英文字符。超出截断加省略号，标签条不随标题长度膨胀。
+const TAB_TITLE_WIDTH_LIMIT: usize = 14;
 
-/// 标签头组合：状态圆点 + 标题（单行省略）。
+/// 按显示宽度截断标题（中文字符计 2、ASCII 计 1），超限截断 + "…"。
+fn truncate_title(title: &str) -> String {
+    let mut width = 0usize;
+    let mut end = 0usize;
+    for (i, c) in title.char_indices() {
+        let w = if c.is_ascii() { 1 } else { 2 };
+        if width + w > TAB_TITLE_WIDTH_LIMIT {
+            break;
+        }
+        width += w;
+        end = i + c.len_utf8();
+    }
+    if end >= title.len() {
+        title.to_string()
+    } else {
+        format!("{}…", &title[..end])
+    }
+}
+
+/// 标签头组合：状态圆点 + 标题（字符级截断：7 汉字 / 14 英文字符）。
 fn tab_header(item: &SessionItem) -> Element {
     let dot: Element = state_dot(item.state).grid_column(0);
-    let title: Element = text_block(item.title.clone())
+    let title: Element = text_block(truncate_title(&item.title))
         .text_trimming(TextTrimming::CharacterEllipsis)
         .width(TAB_TITLE_MAX_WIDTH)
         .foreground(ThemeRef::PrimaryText)

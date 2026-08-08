@@ -124,6 +124,12 @@ pub struct TimelineRound {
 #[ts(export)]
 pub struct TimelineTurn {
     pub turn_id: String,
+    /// seq of the TurnOpened entry that created this turn — the authoritative
+    /// time order across snapshots. `0` means unknown (legacy persisted data);
+    /// consumers fall back to the turn_id numeric suffix in that case.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub created_seq: u64,
     pub user_text: String,
     pub sealed: bool,
     pub state: TimelineTurnState,

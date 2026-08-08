@@ -28,7 +28,7 @@
 //! 命令序列是纯数据（`RenderCommand`），UI 层（XAML 控件树）按命令执行；
 //! 测试断言命令序列即验证渲染路径，无需窗口实例。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use markdown_core::ast::{Block, Inline};
 use markdown_core::live::parse_live;
@@ -132,6 +132,9 @@ pub struct RestoredRound {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RestoredTurn {
     pub turn_id: String,
+    /// 快照里的权威创建序（TimelineTurn.created_seq）；0 = 未知（旧数据），
+    /// 排序时退化为 turn_id 数值兜底。
+    pub created_seq: u64,
     pub user_text: String,
     pub status: TurnStatus,
     pub rounds: Vec<RestoredRound>,
@@ -423,6 +426,12 @@ pub struct Transcript {
 /// 数解耦，restore/每帧 diff 成本恒定。经实机手感调优。
 pub const WINDOW_DEFAULT_LEN: usize = 30;
 
+/// restore 窗口的 round 预算：尾部累计 rounds 超过此值即收缩窗口
+/// （超大回合会话：30 turns 可能含 600+ rounds / 1800+ blocks，一次
+/// mount 数千 XAML 元素 → 切换标签秒级卡顿）。200 rounds ≈ 500 blocks，
+/// debug 构建单次 mount 可接受；可经实机手感调优。
+pub const RESTORE_ROUND_BUDGET: usize = 200;
+
 impl Transcript {
     pub fn new() -> Self {
         Self::default()
@@ -483,43 +492,44 @@ impl Transcript {
         self.tail_following = true;
     }
 
+    /// 前插一页更早的回合（分页加载：resume 只取尾部页，上滚翻页把更早
+    /// 的页插到最前）。已存在的 turn_id 跳过（页码边界可能重叠）；窗口
+    /// 起点右移 `n` 保持渲染窗口位置（新回合在窗口**前面**，chat_view
+    /// 以 `n` 做锚定补偿，视口不跳）。返回实际前插数；0 = 无新回合。
+    pub fn prepend_turns(&mut self, turns: Vec<RestoredTurn>) -> usize {
+        let known: HashSet<&str> = self
+            .turns
+            .iter()
+            .map(|t| t.turn_id.as_str())
+            .collect();
+        let fresh: Vec<RestoredTurn> = turns
+            .into_iter()
+            .filter(|t| !known.contains(t.turn_id.as_str()))
+            .collect();
+        if fresh.is_empty() {
+            return 0;
+        }
+        let n = fresh.len();
+        let mut new_turns: Vec<TurnView> = fresh.into_iter().map(to_turn_view).collect();
+        new_turns.extend(self.turns.drain(..));
+        self.turns = new_turns;
+        self.turn_index = self
+            .turns
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.turn_id.clone(), i))
+            .collect();
+        self.window_start += n;
+        n
+    }
+
     /// 快照恢复：用权威 turns（timeline 快照解析产物）整体替换当前状态。
     /// 历史回合直接落 Final（不再流式）；此后增量事件照常 append。
     ///
     /// 幂等语义：快照是权威全量（daemon timeline 快照），增量事件在其后
     /// 到达；调用方在 seed 切换时应先重置（`Transcript::new`）再 restore。
     pub fn restore(&mut self, turns: Vec<RestoredTurn>) {
-        self.turns = turns
-            .into_iter()
-            .map(|t| TurnView {
-                turn_id: t.turn_id.clone(),
-                user_text: t.user_text,
-                status: t.status,
-                rounds: t
-                    .rounds
-                    .into_iter()
-                    .map(|r| {
-                        let mut round = RoundView::new(r.round_num);
-                        round.thinking = r.thinking;
-                        round.tool_calls = r.tool_calls;
-                        round.answer = match r.answer {
-                            Some(a) => {
-                                let blocks = parse_final(&a);
-                                AnswerView::Final {
-                                    rich: render_final(&blocks),
-                                    blocks,
-                                }
-                            }
-                            None => AnswerView::Final {
-                                rich: RichTextOutput::default(),
-                                blocks: Vec::new(),
-                            },
-                        };
-                        round
-                    })
-                    .collect(),
-            })
-            .collect();
+        self.turns = turns.into_iter().map(to_turn_view).collect();
         self.turn_index = self
             .turns
             .iter()
@@ -527,7 +537,23 @@ impl Transcript {
             .map(|(i, t)| (t.turn_id.clone(), i))
             .collect();
         // 窗口化：只渲染最近 N 个回合（长会话 restore 成本与总回合数解耦）。
-        self.window_start = self.turns.len().saturating_sub(WINDOW_DEFAULT_LEN);
+        // 再叠加 **round 预算**：固定 30 turns 窗口在超大回合下仍会一次
+        // mount 数千元素（实测单 turn 可达 100+ rounds、40 turns 共 680
+        // rounds / 1783 blocks → 切换标签秒级卡顿）。预算从尾部累计
+        // rounds，超限即收缩窗口（保留最新回合，裁剪最旧）。
+        let mut budget = RESTORE_ROUND_BUDGET;
+        let mut start_budget = 0usize;
+        for (i, t) in self.turns.iter().enumerate().rev() {
+            if budget < t.rounds.len().max(1) {
+                // 当前 turn 超预算：保留它（含 i），但不再向前扩展。
+                start_budget = i;
+                break;
+            }
+            budget -= t.rounds.len().max(1);
+            start_budget = i;
+        }
+        self.window_start = start_budget
+            .max(self.turns.len().saturating_sub(WINDOW_DEFAULT_LEN));
         self.tail_following = true;
     }
 
@@ -885,6 +911,38 @@ fn upsert_tool_card(round: &mut RoundView, card: ToolCardView) {
     }
 }
 
+/// RestoredTurn → TurnView（历史回合直接落 Final；restore 与分页前插共用）。
+fn to_turn_view(t: RestoredTurn) -> TurnView {
+    TurnView {
+        turn_id: t.turn_id.clone(),
+        user_text: t.user_text,
+        status: t.status,
+        rounds: t
+            .rounds
+            .into_iter()
+            .map(|r| {
+                let mut round = RoundView::new(r.round_num);
+                round.thinking = r.thinking;
+                round.tool_calls = r.tool_calls;
+                round.answer = match r.answer {
+                    Some(a) => {
+                        let blocks = parse_final(&a);
+                        AnswerView::Final {
+                            rich: render_final(&blocks),
+                            blocks,
+                        }
+                    }
+                    None => AnswerView::Final {
+                        rich: RichTextOutput::default(),
+                        blocks: Vec::new(),
+                    },
+                };
+                round
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -901,6 +959,20 @@ mod tests {
         (0..n)
             .map(|i| RestoredTurn {
                 turn_id: format!("t{i}"),
+                created_seq: i as u64,
+                user_text: format!("q{i}"),
+                status: TurnStatus::Completed,
+                rounds: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// 生成 t{start}..t{start+count} 区间的 turns（分页页面前插测试用）。
+    fn restored_turns_range(start: usize, count: usize) -> Vec<RestoredTurn> {
+        (start..start + count)
+            .map(|i| RestoredTurn {
+                turn_id: format!("t{i}"),
+                created_seq: i as u64,
                 user_text: format!("q{i}"),
                 status: TurnStatus::Completed,
                 rounds: Vec::new(),
@@ -944,6 +1016,41 @@ mod tests {
         assert_eq!(ts.window_turns()[0].turn_id, "t0");
         ts.slide_window_tail();
         assert!(ts.tail_following(), "滑动恢复跟随尾部");
+    }
+
+    /// 分页前插：更早一页插到最前，窗口起点右移，turn 顺序正确。
+    #[test]
+    fn prepend_turns_puts_earlier_page_in_front() {
+        let mut ts = Transcript::new();
+        // resume 只拿到尾部页 t10..t39（30 个）。
+        ts.restore(restored_turns_range(10, 30));
+        assert_eq!(ts.turn_count(), 30);
+        assert_eq!(ts.window_len(), 30, "30 个全在窗口内");
+        // 上滚翻页：t0..t9 前插。
+        let n = ts.prepend_turns(restored_turns_range(0, 10));
+        assert_eq!(n, 10);
+        assert_eq!(ts.turn_count(), 40);
+        assert_eq!(ts.turns().first().unwrap().turn_id, "t0");
+        assert_eq!(ts.turns().last().unwrap().turn_id, "t39");
+        // 窗口起点右移 10：渲染视图仍是尾部 30 个（t10..t39）。
+        assert_eq!(ts.window_len(), 30);
+        assert_eq!(ts.window_turns().first().unwrap().turn_id, "t10");
+        assert_eq!(ts.expand_window(10), 10, "可继续向前扩展 t0..t9");
+    }
+
+    /// 页码边界重叠去重：重复 turn 跳过，不重复计数。
+    #[test]
+    fn prepend_turns_skips_overlapping_turn_ids() {
+        let mut ts = Transcript::new();
+        ts.restore(restored_turns_range(20, 20));
+        // 服务端翻页可能返回 t15..t25（重叠 t20..t24 已加载）。
+        let n = ts.prepend_turns(restored_turns_range(15, 10));
+        assert_eq!(n, 5, "t20..t24 已存在跳过");
+        assert_eq!(ts.turn_count(), 25);
+        assert_eq!(ts.turns().first().unwrap().turn_id, "t15");
+        // 空页 / 全重叠页 → 0。
+        assert_eq!(ts.prepend_turns(Vec::new()), 0);
+        assert_eq!(ts.prepend_turns(restored_turns_range(15, 10)), 0);
     }
 
     /// slide_window_tail：跟随尾部时窗口保持大小为 WINDOW_DEFAULT_LEN；
