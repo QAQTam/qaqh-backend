@@ -89,6 +89,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_scroll_request = last_scroll_request.clone();
         let last_render = last_render.clone();
         let scroll_version = scroll_version.clone();
+        let pending_anchor = pending_anchor.clone();
         let set_rev = set_rev.clone();
         move || {
             if timer.borrow().is_some() {
@@ -161,6 +162,27 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         // 空会话 restore 后 last_restored_seed == seed，不再重拉。
                         if !seed.is_empty() && *last_restored_seed.borrow() != seed {
                             bridge.core().spawn_timeline_refresh(&seed);
+                        }
+                    }
+                    // 1.5) 分页页（上滚翻页的更早回合）：drain → 前插 →
+                    //     锚定补偿。用户上滚浏览中（tail_following=false），
+                    //     前插后窗口起点已右移，用 pending_anchor 把
+                    //     「原窗口首行」锚回原位，视口不跳。
+                    let pages = bridge.core().chat_prepend_drain();
+                    if !pages.is_empty() {
+                        let mut t = transcript.borrow_mut();
+                        let mut prepended = 0usize;
+                        for (_, page) in pages {
+                            let turns = chat_adapter::timeline_turns(&page);
+                            prepended += t.prepend_turns(turns);
+                        }
+                        if prepended > 0 {
+                            *pending_anchor.borrow_mut() = Some(prepended);
+                            *scroll_version.borrow_mut() += 1;
+                            set_rev.call(rev);
+                            log_diag(&format!(
+                                "chat_view: prepended {prepended} turns for {seed}"
+                            ));
                         }
                     }
                     // 2) 增量事件（新对话流式）
@@ -265,25 +287,41 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     }
     builder
         .on_top_reached({
+            let bridge = bridge.clone();
             let transcript = transcript.clone();
             let pending_anchor = pending_anchor.clone();
             let scroll_version = scroll_version.clone();
             let set_rev = set_rev.clone();
             let last_rev = last_rev.clone();
             move |_| {
-                // 滚动接近窗口顶部（边沿触发一次）：扩展窗口预加载更早回合，
-                // 渲染时锚定补偿保持视口。已全量放行则短路。
+                // 滚动接近窗口顶部（边沿触发一次）：先扩展窗口内预加载更早
+                // 回合，渲染时锚定补偿保持视口。
                 let mut t = transcript.borrow_mut();
                 let moved = t.expand_window(WINDOW_PAGE);
-                if moved == 0 {
+                if moved > 0 {
+                    *pending_anchor.borrow_mut() = Some(moved);
+                    // 锚定补偿随 scroll_version 变化触发（reconciler 按版本
+                    // diff）；set_rev(+1) 保证触发渲染（use_state 同值跳过）。
+                    *scroll_version.borrow_mut() += 1;
+                    drop(t);
+                    set_rev.call(*last_rev.borrow() + 1);
                     return;
                 }
-                *pending_anchor.borrow_mut() = Some(moved);
-                // 锚定补偿随 scroll_version 变化触发（reconciler 按版本 diff）；
-                // set_rev(+1) 保证触发渲染（use_state 同值会跳过）。
-                *scroll_version.borrow_mut() += 1;
                 drop(t);
-                set_rev.call(*last_rev.borrow() + 1);
+                // 窗口内已全量放行：若服务端还有更早回合 → 翻页拉取
+                // （异步前插，bridge 在途防重入 + has_more 自动维护）。
+                let seed = bridge.core().active_seed();
+                if seed.is_empty() || !bridge.core().timeline_has_more(&seed) {
+                    return;
+                }
+                let before = transcript
+                    .borrow()
+                    .turns()
+                    .first()
+                    .map(|t| t.turn_id.clone());
+                if let Some(before) = before {
+                    bridge.core().spawn_fetch_earlier(&seed, &before);
+                }
             }
         })
         .top_threshold(NEAR_TOP_THRESHOLD_PX)

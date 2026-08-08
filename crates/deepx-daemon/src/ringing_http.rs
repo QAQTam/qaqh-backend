@@ -674,9 +674,11 @@ pub async fn handle_ringing_http(
         .await;
     }
     if method == "GET" && path.starts_with(&format!("{RINGING_TIMELINE_BASE_PATH}/sessions/")) {
-        let rest = path.trim_start_matches(&format!("{RINGING_TIMELINE_BASE_PATH}/sessions/"));
+        // query（?before_turn=..&limit=..）剥离开路由匹配；handler 自行解析。
+        let route = path.split('?').next().unwrap_or(&path);
+        let rest = route.trim_start_matches(&format!("{RINGING_TIMELINE_BASE_PATH}/sessions/"));
         if let Some(seed) = rest.strip_suffix("/timeline") {
-            return handle_timeline_snapshot(&mut stream, seed, session_id, &leases, &hub).await;
+            return handle_timeline_snapshot(&mut stream, seed, &path, session_id, &leases, &hub).await;
         }
         if let Some(seed) = rest.strip_suffix("/timeline/events") {
             let Some(session_id) = session_id else {
@@ -1540,6 +1542,16 @@ async fn handle_command(
                 .unwrap_or_else(|e| e.into_inner())
                 .detach_seed(session_id, &target);
         }
+        // 生命周期事件：前端据此全量刷新会话列表（替代轮询发现）。
+        let lifecycle = match op {
+            "archive" => Some(deepx_domain::SessionState::Archived),
+            "unarchive" => Some(deepx_domain::SessionState::Unarchived),
+            "delete" => Some(deepx_domain::SessionState::Deleted),
+            _ => None,
+        };
+        if let Some(state) = lifecycle {
+            publish_session_state(hub, &target, state, &env.command_id);
+        }
         pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1818,12 +1830,64 @@ async fn handle_bootstrap(
     .await
 }
 
+/// 默认快照分页大小（turns）：resume 只传输尾部一页（历史超大会话
+/// 实测 40 turns / 5.6MB JSON 全量传输+解析 → 秒级卡顿；尾部 30 turns
+/// 覆盖绝大多数场景，更早回合按 `before_turn` 翻页拉取）。
+const TIMELINE_PAGE_LIMIT: usize = 30;
+
+/// query 解析：`?before_turn=<turn_id>&limit=<n>`；缺失项为 None。
+fn parse_timeline_query(raw_path: &str) -> (Option<String>, Option<usize>) {
+    let Some(query) = raw_path.split('?').nth(1) else {
+        return (None, None);
+    };
+    let mut before_turn = None;
+    let mut limit = None;
+    for kv in query.split('&') {
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
+        match k {
+            "before_turn" => before_turn = Some(v.to_string()),
+            "limit" => limit = v.parse::<usize>().ok(),
+            _ => {}
+        }
+    }
+    (before_turn, limit)
+}
+
+/// turns（时间序）分页裁剪：无 `before_turn` 取尾部 `limit` 个（首页）；
+/// 有则取该 turn **之前**（更早）的 `limit` 个（翻页）。返回 (页, 是否
+/// 还有更早未返回)。`before_turn` 未命中时兜底取尾部页。
+fn paginate_turns(
+    turns: Vec<deepx_domain::TimelineTurn>,
+    before_turn: Option<&str>,
+    limit: usize,
+) -> (Vec<deepx_domain::TimelineTurn>, bool) {
+    if turns.is_empty() {
+        return (turns, false);
+    }
+    let (start, end) = match before_turn {
+        Some(id) => {
+            let idx = turns
+                .iter()
+                .position(|t| t.turn_id == id)
+                .unwrap_or(turns.len());
+            (idx.saturating_sub(limit), idx)
+        }
+        None => (turns.len().saturating_sub(limit), turns.len()),
+    };
+    let page: Vec<_> = turns[start..end].to_vec();
+    let has_more = start > 0;
+    (page, has_more)
+}
+
 /// Ringing V1 timeline transcript recovery state. It is intentionally separate from the
 /// three-channel bootstrap: a Timeline client receives one materialized model
 /// and one watermark only.
 async fn handle_timeline_snapshot(
     stream: &mut TcpStream,
     seed: &str,
+    raw_path: &str,
     session_id: Option<&str>,
     leases: &Arc<Mutex<RingingLeaseStore>>,
     hub: &Arc<RingingHub>,
@@ -1852,12 +1916,26 @@ async fn handle_timeline_snapshot(
             watermark: 0,
             turns: vec![],
         });
+    let total_turns = snapshot.turns.len();
+    let (before_turn, limit) = parse_timeline_query(raw_path);
+    let (page, has_more) = paginate_turns(
+        snapshot.turns,
+        before_turn.as_deref(),
+        limit.unwrap_or(TIMELINE_PAGE_LIMIT).min(200),
+    );
     let body = serde_json::json!({
         "schema": "deepx.Ringing",
         "version": 1,
         "server_epoch": hub.epoch(),
         "seed": seed,
-        "snapshot": snapshot,
+        "snapshot": {
+            "watermark": snapshot.watermark,
+            "turns": page,
+        },
+        // 分页元数据：has_more = 还有更早回合未返回（上滚时按
+        // before_turn 翻页）；total_turns = 会话回合总数。
+        "has_more": has_more,
+        "total_turns": total_turns,
     });
     write_response(
         stream,
@@ -2260,11 +2338,22 @@ fn session_close_seed(close_seed: &str, envelope_seed: &Option<String>) -> Strin
 }
 
 fn publish_session_created(hub: &RingingHub, seed: &str, command_id: &str) {
+    publish_session_state(hub, seed, deepx_domain::SessionState::Created, command_id);
+}
+
+/// 发布会话生命周期变更（created/archived/unarchived/deleted）。前端监听
+/// control 频道 `session_state_changed` 全量刷新列表，替代 500ms 轮询。
+fn publish_session_state(
+    hub: &RingingHub,
+    seed: &str,
+    state: deepx_domain::SessionState,
+    command_id: &str,
+) {
     let _ = hub.publish_with_causation(
         seed,
         deepx_domain::DomainEvent::Control(deepx_domain::ControlEvent::SessionStateChanged {
             seed: seed.to_string(),
-            state: deepx_domain::SessionState::Created,
+            state,
         }),
         Some(command_id),
     );
@@ -2488,6 +2577,77 @@ mod tests {
         assert_eq!(
             parse_timeline_cursor("epoch-1:timeline:42:extra", "epoch-1"),
             0
+        );
+    }
+
+    fn paged_turns(n: usize) -> Vec<deepx_domain::TimelineTurn> {
+        (1..=n)
+            .map(|i| deepx_domain::TimelineTurn {
+                turn_id: format!("t{i}"),
+                created_seq: i as u64,
+                user_text: format!("q{i}"),
+                sealed: true,
+                state: deepx_domain::TimelineTurnState::Completed,
+                failure: None,
+                rounds: vec![],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn timeline_pagination_first_page_is_tail_window() {
+        let (page, has_more) = paginate_turns(paged_turns(40), None, 30);
+        assert_eq!(page.len(), 30);
+        assert_eq!(page.first().unwrap().turn_id, "t11");
+        assert_eq!(page.last().unwrap().turn_id, "t40");
+        assert!(has_more, "40 回合取尾 30 → 还有更早 10 个");
+    }
+
+    #[test]
+    fn timeline_pagination_short_session_has_no_more() {
+        let (page, has_more) = paginate_turns(paged_turns(10), None, 30);
+        assert_eq!(page.len(), 10);
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn timeline_pagination_before_turn_fetches_earlier_page() {
+        let (page, has_more) = paginate_turns(paged_turns(40), Some("t11"), 10);
+        assert_eq!(page.len(), 10);
+        assert_eq!(page.first().unwrap().turn_id, "t1");
+        assert_eq!(page.last().unwrap().turn_id, "t10");
+        assert!(!has_more, "t11 之前只有 10 个，已到头");
+    }
+
+    #[test]
+    fn timeline_pagination_before_turn_mid_page_and_unknown_fallback() {
+        // t21 之前取 10 个 → t11..t20，且 t11 之前还有 → has_more。
+        let (page, has_more) = paginate_turns(paged_turns(40), Some("t21"), 10);
+        assert_eq!(page.first().unwrap().turn_id, "t11");
+        assert_eq!(page.last().unwrap().turn_id, "t20");
+        assert!(has_more);
+        // 未知 before_turn 兜底取尾部页。
+        let (page, _) = paginate_turns(paged_turns(40), Some("t-unknown"), 10);
+        assert_eq!(page.last().unwrap().turn_id, "t40");
+        // 空列表。
+        let (page, has_more) = paginate_turns(vec![], Some("t1"), 10);
+        assert!(page.is_empty());
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn timeline_query_parses_before_turn_and_limit() {
+        assert_eq!(
+            parse_timeline_query("/ringing/v1/sessions/s1/timeline?before_turn=t11&limit=10"),
+            (Some("t11".into()), Some(10))
+        );
+        assert_eq!(
+            parse_timeline_query("/ringing/v1/sessions/s1/timeline?limit=abc"),
+            (None, None)
+        );
+        assert_eq!(
+            parse_timeline_query("/ringing/v1/sessions/s1/timeline"),
+            (None, None)
         );
     }
 

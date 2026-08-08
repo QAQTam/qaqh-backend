@@ -127,6 +127,18 @@ pub fn parse_activity_event(event: &Value) -> Option<(String, ActivityState)> {
     Some((seed, state))
 }
 
+/// 从 control 频道 `session_state_changed` 事件载荷提取 (seed, state)。
+///
+/// 事件形状（domain `ControlEvent::SessionStateChanged`）：
+/// `{ type: "session_state_changed", seed, state: "created"|"resumed"|
+/// "closed"|"archived"|"unarchived"|"deleted" }`。
+/// 语义：会话生命周期变更（含归档/删除）→ 前端应全量刷新列表（替代轮询）。
+pub fn parse_session_state_event(event: &Value) -> Option<(String, String)> {
+    let seed = event.get("seed")?.as_str()?.to_string();
+    let state = event.get("state")?.as_str()?.to_string();
+    Some((seed, state))
+}
+
 // ── XAML 技能页投影（skills_view.rs 的唯一数据源）──────────────────
 
 /// 技能运行时条目（`skills_updated` 事件 runtime[] 元素 / bootstrap control.skills）。

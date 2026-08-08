@@ -400,7 +400,34 @@ impl Client {
     /// snapshot watermark, and return the snapshot. The seed must have been
     /// attached first (`backend.attach` / `session_resume`), otherwise the
     /// daemon rejects the request with 401.
-    pub async fn activate_timeline(&self, seed: &str) -> Result<Value> {
+    /// 拉取 timeline 快照页（服务端默认尾部窗口，见 daemon
+    /// `TIMELINE_PAGE_LIMIT`）。`before_turn` = 返回该 turn **之前**（更早）
+    /// 的页（上滚翻页）；`limit` 覆盖默认页大小。响应含分页元数据
+    /// `has_more` / `total_turns`。与 [`Self::activate_timeline`] 不同：
+    /// 纯读，**不重建** timeline SSE 流。
+    pub async fn fetch_timeline_page(
+        &self,
+        seed: &str,
+        before_turn: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Value> {
+        let mut query = String::new();
+        if let Some(before) = before_turn {
+            query.push_str(&format!("?before_turn={before}"));
+        }
+        if let Some(limit) = limit {
+            if query.is_empty() {
+                query.push('?');
+            } else {
+                query.push('&');
+            }
+            query.push_str(&format!("limit={limit}"));
+        }
+        self.get_timeline_snapshot(seed, &query).await
+    }
+
+    /// GET `/ringing/v1/sessions/{seed}/timeline[?query]` + 协议校验。
+    async fn get_timeline_snapshot(&self, seed: &str, query: &str) -> Result<Value> {
         if seed.is_empty() {
             return Err(ClientError::Negotiation("seed is required".into()));
         }
@@ -410,7 +437,7 @@ impl Client {
             .state()
             .await
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        let path = format!("/ringing/v1/sessions/{seed}/timeline");
+        let path = format!("/ringing/v1/sessions/{seed}/timeline{query}");
         let response = self
             .inner
             .http
@@ -439,6 +466,17 @@ impl Client {
                 "invalid Ringing V1 timeline snapshot".into(),
             ));
         }
+        Ok(snapshot)
+    }
+
+    /// Activate the native timeline for one session (mirrors Electron
+    /// `ringingManager.activateTimeline`): fetch the authoritative snapshot
+    /// (tail page), replace any previous timeline stream with a new one
+    /// seeded at the snapshot watermark, and return the snapshot. The seed
+    /// must have been attached first (`backend.attach` / `session_resume`),
+    /// otherwise the daemon rejects the request with 401.
+    pub async fn activate_timeline(&self, seed: &str) -> Result<Value> {
+        let snapshot = self.get_timeline_snapshot(seed, "").await?;
         let watermark = snapshot["snapshot"]["watermark"].as_u64().unwrap_or(0);
 
         // Replace any previous timeline stream (one transcript at a time).

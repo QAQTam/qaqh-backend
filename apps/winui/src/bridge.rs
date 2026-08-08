@@ -25,8 +25,8 @@ use serde_json::{json, Value};
 use crate::chat_adapter;
 use crate::shell_store::{
     parse_activities, parse_activity_event, parse_config_load, parse_conversation_state,
-    parse_dashboard_event, parse_skills_event, parse_skills_payload, parse_tools,
-    parse_workspace_status, project_session_meta, ActivityState, DashboardSnapshot,
+    parse_dashboard_event, parse_session_state_event, parse_skills_event, parse_skills_payload,
+    parse_tools, parse_workspace_status, project_session_meta, ActivityState, DashboardSnapshot,
     SessionDetail, SessionItem, SettingsSnapshot, SkillsSnapshot,
 };
 
@@ -778,6 +778,15 @@ pub struct BridgeCore {
     /// 权威 turns 历史，resume 旧对话的数据源；chat_view 泵消费 restore）。
     /// seed 标记防竞态：快速切会话时旧快照晚到不会被灌进新会话。
     chat_timeline: Mutex<Option<(String, serde_json::Value)>>,
+    /// 分页元数据：seed → 服务端是否还有更早回合（快照缓存时同步更新）。
+    /// ChatView 上滚到窗口顶部且 `expand_window` 已全量放行时据此翻页。
+    timeline_has_more: Mutex<std::collections::HashMap<String, bool>>,
+    /// 更早回合分页页（`(seed, TimelineSnapshot JSON)`）：`spawn_fetch_earlier`
+    /// 异步拉取后入队，chat_view 泵 drain 后 `Transcript::prepend_turns`
+    /// 前插（与 `chat_timeline` 的整包替换语义区分）。
+    chat_prepend: Mutex<std::collections::VecDeque<(String, serde_json::Value)>>,
+    /// 分页在途标记（seed 集合）：防止滚动抖动时重复发起同一翻页请求。
+    timeline_fetching: Mutex<std::collections::HashSet<String>>,
     /// ChatView 数据版本：事件入队后递增，UI 侧 timer 比对后 drain。
     chat_rev: AtomicU64,
     /// ChatView 直连模式：置位后 conversation 渲染事件入 `chat_events`
@@ -1181,6 +1190,96 @@ impl BridgeCore {
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
+    /// 分页：drain 更早回合页（`(seed, TimelineSnapshot JSON)` 队列，按
+    /// active_seed 过滤——与 `chat_drain` 同隔离语义）。
+    pub fn chat_prepend_drain(&self) -> Vec<(String, serde_json::Value)> {
+        let active = self.active_seed();
+        self.chat_prepend
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .filter(|(seed, _)| *seed == active)
+            .collect()
+    }
+
+    /// 服务端是否还有更早回合（上滚翻页判定）。
+    pub fn timeline_has_more(&self, seed: &str) -> bool {
+        self.timeline_has_more
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(seed)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// 翻页加载更早回合：`fetch_timeline_page(seed, before_turn)`（纯读，
+    /// 不重建 timeline SSE）→ 页入 `chat_prepend` 队列 + chat_rev++，
+    /// chat_view 泵 drain 后 `Transcript::prepend_turns` 前插。
+    /// 在途防重入（滚动抖动只发一次）；失败保留 has_more（下次滚动重试）。
+    pub fn spawn_fetch_earlier(&self, seed: &str, before_turn: &str) {
+        let seed = seed.to_string();
+        let before_turn = before_turn.to_string();
+        {
+            let mut fetching = self
+                .timeline_fetching
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !fetching.insert(seed.clone()) {
+                return; // 已在途
+            }
+        }
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("fetch_earlier {seed}: connect failed: {err}"));
+                    core.timeline_fetching
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&seed);
+                    return;
+                }
+            };
+            match client.fetch_timeline_page(&seed, Some(&before_turn), None).await {
+                Ok(body) => {
+                    let has_more = body
+                        .get("has_more")
+                        .and_then(|h| h.as_bool())
+                        .unwrap_or(false);
+                    core.timeline_has_more
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(seed.clone(), has_more);
+                    let inner = body.get("snapshot").cloned().unwrap_or(body);
+                    let turns = chat_adapter::timeline_turns(&inner);
+                    if turns.is_empty() {
+                        // 防御：空页（会话已删/竞态）——视为到底，不再翻页。
+                        core.timeline_has_more
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(seed.clone(), false);
+                    } else {
+                        core.chat_prepend
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push_back((seed.clone(), inner));
+                        core.chat_rev.fetch_add(1, Ordering::Relaxed);
+                        log_diag(&format!(
+                            "fetch_earlier {seed}: page before {before_turn} ({} turns, has_more={has_more})",
+                            turns.len()
+                        ));
+                    }
+                }
+                Err(err) => log_diag(&format!("fetch_earlier {seed}: failed: {err}")),
+            }
+            core.timeline_fetching
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&seed);
+        });
+    }
+
     /// 缓存 timeline 快照（`on_timeline_snapshot` 回调主体；独立方法便于单测）。
     ///
     /// - **seed 标记**：优先从快照 body 顶层读取（daemon 写回请求 seed，
@@ -1207,7 +1306,18 @@ impl BridgeCore {
         } else {
             seed
         };
+        // 分页元数据：完整响应 body 顶层 has_more（true = 还有更早回合，
+        // ChatView 上滚翻页依据）。快照缓存整体替换时同步更新。必须在
+        // inner 解包**之前**读取——unwrap_or 会 move snapshot。
+        let has_more = snapshot
+            .get("has_more")
+            .and_then(|h| h.as_bool())
+            .unwrap_or(false);
         let inner = snapshot.get("snapshot").cloned().unwrap_or(snapshot);
+        self.timeline_has_more
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(seed.clone(), has_more);
         *self
             .chat_timeline
             .lock()
@@ -2532,6 +2642,7 @@ impl BridgeCore {
         if batch.channel == Channel::Control {
             let mut changed = false;
             let mut skills_changed = false;
+            let mut list_changed = false;
             for env in &batch.envelopes {
                 if let Some((seed, state)) = parse_activity_event(&env.event) {
                     self.activities
@@ -2555,6 +2666,12 @@ impl BridgeCore {
                         .unwrap_or_else(|e| e.into_inner())
                         .replace(snap);
                     skills_changed = true;
+                }
+                // 会话生命周期变更（created/archived/unarchived/deleted）：
+                // 归档/删除/新建不再依赖 500ms 轮询，事件到达即全量刷新。
+                // （发起方命令成功后的主动 refresh 保留，作为快速路径。）
+                if parse_session_state_event(&env.event).is_some() {
+                    list_changed = true;
                 }
                 // XAML composer goalBar：dashboard_snapshot 携带完整
                 // DashboardSnapshot 载荷（tasks/recent_edits/current_todo_id），
@@ -2586,6 +2703,11 @@ impl BridgeCore {
             }
             if skills_changed {
                 self.skills_rev.fetch_add(1, Ordering::Relaxed);
+            }
+            if list_changed {
+                // 异步刷新：session.list + session.activity → 投影 → rev++，
+                // 侧栏/标签页 timer 比对 rev 后刷新（各视图同一数据源）。
+                self.spawn_refresh_sessions();
             }
         } else if batch.channel == Channel::Tool {
             // Rust 直连交互队列（读路径直连）：tool 频道权限请求
@@ -3004,6 +3126,9 @@ impl Bridge {
                     // 入队供原生 ChatView 消费）；Web 注入 flag 可再置位（幂等）。
                     chat_events: Mutex::new(std::collections::VecDeque::new()),
                     chat_timeline: Mutex::new(None),
+                    timeline_has_more: Mutex::new(std::collections::HashMap::new()),
+                    chat_prepend: Mutex::new(std::collections::VecDeque::new()),
+                    timeline_fetching: Mutex::new(std::collections::HashSet::new()),
                     chat_rev: AtomicU64::new(0),
                     chat_direct: AtomicBool::new(true),
                     resume_target: Mutex::new(None),
@@ -3242,6 +3367,9 @@ mod tests {
             composer_feedback: Mutex::new(ComposerFeedback::default()),
             chat_events: Mutex::new(std::collections::VecDeque::new()),
             chat_timeline: Mutex::new(None),
+            timeline_has_more: Mutex::new(std::collections::HashMap::new()),
+            chat_prepend: Mutex::new(std::collections::VecDeque::new()),
+            timeline_fetching: Mutex::new(std::collections::HashSet::new()),
             chat_rev: AtomicU64::new(0),
             chat_direct: AtomicBool::new(true),
             resume_target: Mutex::new(None),

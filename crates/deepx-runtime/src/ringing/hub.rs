@@ -939,7 +939,8 @@ impl RingingHub {
 
         let state_changed = st.projection.apply(channel, seed, &event);
         let revision = st.projection.revision(channel, seed);
-        let mut envelope = envelope;
+        // server_ts：服务器发布时间（unix ms），端到端延迟诊断用。
+        let mut envelope = envelope.with_server_ts(unix_ms());
         if state_changed {
             envelope = envelope.with_state_revision(revision);
         }
@@ -1317,6 +1318,14 @@ impl Drop for RingingHub {
             let _ = join.join();
         }
     }
+}
+
+/// 当前 unix 毫秒（事件信封 server_ts 用）。
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

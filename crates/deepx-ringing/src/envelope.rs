@@ -41,6 +41,12 @@ pub struct RingingEventEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(type = "number | null")]
     pub state_revision: Option<u64>,
+    /// 服务器发布时间（unix 毫秒）。诊断/遥测用：配合客户端本地到达时间
+    /// 可测端到端延迟（provider → daemon → SSE → drain → 渲染），定位
+    /// 流式"攒感"在链路的哪一段。可选——旧事件/回放不保证存在。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub server_ts: Option<u64>,
     pub event: RingingEvent,
 }
 
@@ -65,6 +71,7 @@ impl RingingEventEnvelope {
             causation_id: None,
             correlation_id: None,
             state_revision: None,
+            server_ts: None,
             event,
         }
     }
@@ -76,6 +83,11 @@ impl RingingEventEnvelope {
 
     pub fn with_state_revision(mut self, revision: u64) -> Self {
         self.state_revision = Some(revision);
+        self
+    }
+
+    pub fn with_server_ts(mut self, unix_ms: u64) -> Self {
+        self.server_ts = Some(unix_ms);
         self
     }
 

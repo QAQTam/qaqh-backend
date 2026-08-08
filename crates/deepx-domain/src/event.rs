@@ -87,6 +87,9 @@ pub enum SessionState {
     Created,
     Resumed,
     Closed,
+    Archived,
+    Unarchived,
+    Deleted,
 }
 
 /// 会话活动状态（与 legacy `SessionActivityState` 同义，domain 化）。
