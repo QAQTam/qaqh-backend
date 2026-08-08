@@ -82,6 +82,13 @@ pub mod tokens {
     pub const CONVERSATION_MAX_WIDTH: f64 = 1040.0;
     /// User prompts are intentionally narrower and right aligned.
     pub const USER_MESSAGE_MAX_WIDTH: f64 = 720.0;
+
+    /// Windows Community Toolkit SettingsCard switches to a stacked header /
+    /// content layout below this width. Reactor does not expose adaptive
+    /// triggers yet; keep the canonical threshold here for the future binding.
+    pub const SETTINGS_CARD_WRAP_THRESHOLD: f64 = 476.0;
+    /// Preferred desktop width for the action/control column of a setting row.
+    pub const SETTINGS_CARD_ACTION_MIN_WIDTH: f64 = 220.0;
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -318,6 +325,105 @@ pub fn metadata_badge(label: impl Into<String>) -> Element {
     .into()
 }
 
+/// Windows 11 settings row, adapted from the Community Toolkit SettingsCard
+/// composition for reactor's native WinUI elements.
+///
+/// This intentionally uses platform theme resources and standard controls
+/// instead of copying the Toolkit ControlTemplate. Once reactor exposes
+/// AdaptiveTrigger/VisualState support, the two-column grid can switch to the
+/// canonical stacked layout below [`tokens::SETTINGS_CARD_WRAP_THRESHOLD`].
+pub fn settings_card(
+    header: impl Into<String>,
+    description: impl Into<String>,
+    content: impl Into<Element>,
+) -> Element {
+    let header = header.into();
+    let description = description.into();
+    let content = content
+        .into()
+        .min_width(tokens::SETTINGS_CARD_ACTION_MIN_WIDTH)
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .vertical_alignment(VerticalAlignment::Center);
+
+    let body: Element = if header.trim().is_empty() {
+        content
+    } else {
+        let mut labels: Vec<Element> = vec![
+            text_block(header.clone())
+                .font_size(tokens::TYPE_BODY)
+                .semibold()
+                .wrap()
+                .into(),
+        ];
+        if !description.trim().is_empty() {
+            labels.push(
+                text_block(description.clone())
+                    .font_size(tokens::TYPE_CAPTION)
+                    .foreground(ThemeRef::SecondaryText)
+                    .wrap()
+                    .into(),
+            );
+        }
+        let labels: Element = vstack(labels)
+            .spacing(tokens::SPACE_1)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into();
+        grid((labels.grid_column(0), content.grid_column(1)))
+            .columns([GridLength::STAR, GridLength::Auto])
+            .column_spacing(tokens::SPACE_4)
+            .into()
+    };
+
+    let card = border(body)
+        .min_height(64.0)
+        .background(ThemeRef::CardBackground)
+        .border_brush(ThemeRef::CardStroke)
+        .border_thickness(hairline())
+        .corner_radius(tokens::RADIUS_CARD)
+        .padding(Thickness::xy(tokens::SPACE_4, tokens::SPACE_3))
+        .horizontal_alignment(HorizontalAlignment::Stretch);
+    if description.trim().is_empty() {
+        card.automation_name(header).into()
+    } else {
+        card.automation_name(header).help_text(description).into()
+    }
+}
+
+/// Heading used above a group of Windows 11 settings cards.
+pub fn settings_section_header(
+    title: impl Into<String>,
+    description: impl Into<String>,
+) -> Element {
+    let title = title.into();
+    let description = description.into();
+    let mut children: Vec<Element> = vec![
+        text_block(title.clone())
+            .font_size(tokens::TYPE_BODY_LARGE)
+            .semibold()
+            .heading_level(AutomationHeadingLevel::Level2)
+            .into(),
+    ];
+    if !description.trim().is_empty() {
+        children.push(
+            text_block(description)
+                .font_size(tokens::TYPE_BODY)
+                .foreground(ThemeRef::SecondaryText)
+                .wrap()
+                .into(),
+        );
+    }
+    vstack(children)
+        .spacing(tokens::SPACE_1)
+        .padding(Thickness {
+            left: tokens::SPACE_1,
+            top: tokens::SPACE_3,
+            right: tokens::SPACE_1,
+            bottom: tokens::SPACE_1,
+        })
+        .automation_name(title)
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +462,14 @@ mod tests {
         );
         assert_eq!(command_surface(grid(())).kind_name(), "Border");
         assert_eq!(metadata_badge("TXT").kind_name(), "Border");
+        assert_eq!(
+            settings_card("主题", "选择应用主题", ComboBox::new(vec!["系统"])).kind_name(),
+            "Border"
+        );
+        assert_eq!(
+            settings_section_header("外观", "个性化应用").kind_name(),
+            "StackPanel"
+        );
     }
 
     #[test]
@@ -366,5 +480,28 @@ mod tests {
         if let Some(exit) = motion::content_exit() {
             assert!(exit.duration < std::time::Duration::from_millis(180));
         }
+    }
+
+    #[test]
+    fn settings_card_keeps_platform_theme_resources() {
+        let card = settings_card("主题", "跟随系统", ToggleSwitch::new(true));
+        let Element::Border(card) = card else {
+            panic!("settings card must remain a native Border composition");
+        };
+        assert_eq!(card.corner_radius, Some(tokens::RADIUS_CARD));
+        assert!(
+            card.border_brush.is_none(),
+            "theme brushes live in bindings"
+        );
+        assert_eq!(card.modifiers.min_height, Some(64.0));
+        let bindings = card.modifiers.theme_bindings.as_deref().unwrap();
+        assert_eq!(
+            bindings.get(&Prop::Background),
+            Some(&ThemeRef::CardBackground)
+        );
+        assert_eq!(
+            bindings.get(&Prop::BorderBrush),
+            Some(&ThemeRef::CardStroke)
+        );
     }
 }

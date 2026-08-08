@@ -123,5 +123,6 @@ winui-app/
 - `docs/winui-native-migration.md` — WebView → WinUI3 最终迁移文档
 - `docs/windows-reactor-skill.md` — windows-reactor 开发要点
 - `docs/winui-chat-rendering-maintenance.md` — ChatView 单一渲染路径与上游同步门禁
+- `docs/winui-gallery-porting.md` — Gallery/Toolkit 视觉范式到 deepx-fluent 的移植边界
 - `apps/winui/CHATVIEW-RENDERING-REFERENCE.md` — ChatView 渲染规格
 - `crates/markdown-winui/` — 流式 markdown 渲染 crate

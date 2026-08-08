@@ -159,7 +159,9 @@ Ringing 的追加、覆盖和权威终态语义保持不变。
 - `StatusTone` 与 theme-aware status badge；
 - user/assistant conversation surface；
 - inset/code surface；
-- empty/loading state。
+- empty/loading state；
+- Windows 11 settings card / section 组合（移植边界见
+  `docs/winui-gallery-porting.md`）。
 
 它不得依赖 Ringing、Bridge、Transcript 或页面 ViewModel。页面负责把领域状态映射为
 `StatusTone`；通用 crate 只负责如何以 WinUI/Fluent 方式表达。未来 `markdown-winui`、

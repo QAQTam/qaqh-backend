@@ -27,7 +27,7 @@ use std::time::Duration;
 use serde_json::json;
 use windows_reactor::*;
 
-use deepx_fluent::motion;
+use deepx_fluent::{motion, tokens};
 
 use crate::bridge::{Bridge, SettingsProjection};
 use crate::fonts;
@@ -53,22 +53,14 @@ const EFFORT_LADDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// 工作区运行模式（对齐 Web workspace.mode 取值）。
 const WORKSPACE_MODES: [&str; 3] = ["local", "wsl", "remote"];
 
-/// 表单行：标签（140px）+ 控件（STAR）。
+/// Windows 11 SettingsCard 语义行：标题/说明 + 右侧原生控件。
 fn field_row(label: &str, control: Element) -> Element {
-    let label_el: Element = text_block(label)
-        .font_size(13.0)
-        .foreground(ThemeRef::SecondaryText)
-        .vertical_alignment(VerticalAlignment::Center)
-        .into();
-    grid((label_el.grid_column(0), control.grid_column(1)))
-        .columns([GridLength::Pixel(140.0), GridLength::STAR])
-        .column_spacing(8.0)
-        .into()
+    deepx_fluent::settings_card(label, "", control)
 }
 
 /// 分类标题（h2 语义）。
 fn section_title(text: &str) -> Element {
-    text_block(text).font_size(16.0).semibold().into()
+    deepx_fluent::settings_section_header(text, "")
 }
 
 /// 设置页主体（放入内容区 Grid；由 main.rs 按 `current_view == "settings"` 切换）。
@@ -1108,13 +1100,13 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .transition(motion::content_enter(), None)
         })
         .collect();
-    let form: Element = vstack(rows).spacing(10.0).into();
-    let body: Element = vstack((form, footer)).spacing(16.0).into();
+    let form: Element = vstack(rows).spacing(tokens::SPACE_2).into();
+    let body: Element = vstack((form, footer)).spacing(tokens::SPACE_4).into();
     let content: Element = scroll_viewer(body).into();
 
     // ── 根：左侧导航 + 右侧表单 ─────────────────────────────────────
     grid((nav.grid_column(0), content.grid_column(1)))
         .columns([GridLength::Pixel(180.0), GridLength::STAR])
-        .padding(Thickness::xy(16.0, 16.0))
+        .padding(Thickness::xy(tokens::SPACE_6, tokens::SPACE_6))
         .into()
 }
