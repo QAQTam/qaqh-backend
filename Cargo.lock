@@ -5854,7 +5854,7 @@ dependencies = [
 [[package]]
 name = "windows"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-collections",
  "windows-core 0.100.0",
@@ -5867,7 +5867,7 @@ dependencies = [
 [[package]]
 name = "windows-collections"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-core 0.100.0",
 ]
@@ -5875,7 +5875,7 @@ dependencies = [
 [[package]]
 name = "windows-composition"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-collections",
  "windows-core 0.100.0",
@@ -5921,7 +5921,7 @@ dependencies = [
 [[package]]
 name = "windows-core"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-link 0.100.0",
  "windows-result 0.100.0",
@@ -5931,7 +5931,7 @@ dependencies = [
 [[package]]
 name = "windows-future"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-core 0.100.0",
  "windows-link 0.100.0",
@@ -5991,12 +5991,12 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 [[package]]
 name = "windows-link"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 
 [[package]]
 name = "windows-numerics"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-core 0.100.0",
  "windows-link 0.100.0",
@@ -6005,7 +6005,7 @@ dependencies = [
 [[package]]
 name = "windows-reactor"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "rustc-hash 2.1.3",
  "windows-collections",
@@ -6021,12 +6021,12 @@ dependencies = [
 [[package]]
 name = "windows-reactor-setup"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 
 [[package]]
 name = "windows-reference"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-core 0.100.0",
  "windows-time",
@@ -6053,7 +6053,7 @@ dependencies = [
 [[package]]
 name = "windows-result"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-link 0.100.0",
 ]
@@ -6080,7 +6080,7 @@ dependencies = [
 [[package]]
 name = "windows-strings"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-link 0.100.0",
 ]
@@ -6157,7 +6157,7 @@ dependencies = [
 [[package]]
 name = "windows-threading"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-link 0.100.0",
 ]
@@ -6165,7 +6165,7 @@ dependencies = [
 [[package]]
 name = "windows-time"
 version = "0.100.0"
-source = "git+https://github.com/QAQTam/windows-rs.git?rev=494197a46de50a1fad35fc3e3801cdb7a1c2519e#494197a46de50a1fad35fc3e3801cdb7a1c2519e"
+source = "git+https://github.com/QAQTam/windows-rs.git?rev=55c1998afca7d6d9d6befaf445d086278b3214a3#55c1998afca7d6d9d6befaf445d086278b3214a3"
 dependencies = [
  "windows-core 0.100.0",
  "windows-link 0.100.0",

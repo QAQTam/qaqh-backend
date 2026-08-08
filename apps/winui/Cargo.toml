@@ -19,10 +19,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
 # Downstream Reactor extensions are kept in the durable fork and pinned so a
 # clean machine reproduces the exact WinRT bindings and runtime setup.
-windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "494197a46de50a1fad35fc3e3801cdb7a1c2519e" }
+windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3" }
 # desktop.openDialog / openImageDialog: Win32 IFileOpenDialog (COM) 绑定。
 # 仅启用所需最小 feature 集（0.100.0 小写模块名 feature）。
-windows = { git = "https://github.com/QAQTam/windows-rs.git", rev = "494197a46de50a1fad35fc3e3801cdb7a1c2519e", default-features = false, features = [
+windows = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3", default-features = false, features = [
     "combaseapi",     # CoCreateInstance / CoTaskMemFree / CLSCTX_ALL
     "shobjidl_core",  # IFileOpenDialog / IFileDialog / IShellItem(Array) / SIGDN / FOS_*
     "shtypes",        # COMDLG_FILTERSPEC
@@ -32,7 +32,7 @@ windows = { git = "https://github.com/QAQTam/windows-rs.git", rev = "494197a46de
 ] }
 
 [build-dependencies]
-windows-reactor-setup = { git = "https://github.com/QAQTam/windows-rs.git", rev = "494197a46de50a1fad35fc3e3801cdb7a1c2519e" }
+windows-reactor-setup = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3" }
 
 [lints]
 workspace = true

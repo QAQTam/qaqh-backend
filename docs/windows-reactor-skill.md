@@ -4,7 +4,7 @@
 > 来源：`crates/libs/reactor/`（实现）、`docs/crates/windows-reactor.md`（官方指南）、`crates/samples/reactor/`（示例）
 >
 > DeepX 实际使用 `QAQTam/windows-rs` 的无历史快照提交
-> `494197a46de50a1fad35fc3e3801cdb7a1c2519e`。补丁清单、生成规则、
+> `55c1998afca7d6d9d6befaf445d086278b3214a3`。补丁清单、生成规则、
 > 上游大改同步和重装恢复步骤见
 > [DEEPX-DOWNSTREAM.md](https://github.com/QAQTam/windows-rs/blob/codex/deepx-reactor/DEEPX-DOWNSTREAM.md)。
 
@@ -17,9 +17,9 @@
 ```toml
 # Cargo.toml
 [dependencies]
-windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "494197a46de50a1fad35fc3e3801cdb7a1c2519e" }
+windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3" }
 [build-dependencies]
-windows-reactor-setup = { git = "https://github.com/QAQTam/windows-rs.git", rev = "494197a46de50a1fad35fc3e3801cdb7a1c2519e" }
+windows-reactor-setup = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3" }
 
 [profile.release]
 panic = "abort"   # 见下方"错误模型"，release 建议加
