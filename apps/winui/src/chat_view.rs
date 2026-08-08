@@ -29,15 +29,27 @@ use crate::chat_adapter;
 /// 事件泵间隔（16ms ≈ 60fps；高吞吐时批量消费，同 demo 模式）。
 const PUMP_INTERVAL: Duration = Duration::from_millis(16);
 
-/// 跟随尾部滚动请求节流：live 流式期间 100ms 一次贴底请求。16ms 泵每
-/// tick 都请求会让滚动与用户滚轮/滚动条抢占，并形成"滚动 → 行 realize →
-/// 渲染 → 再滚动"反馈循环，UI 线程满载（表现为滚动条卡死）。结构性
-/// 变化（restore / 新 turn / round 完成）不受此限，立即滚底。
-const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
+/// 跟随尾部滚动请求节流：live 流式期间 50ms 一次贴底请求（原 100ms——
+/// 文本更新与视口贴底存在半拍延迟，视觉呈"内容在底部下方攒动"；减半
+/// 提升跟手性）。16ms 泵每 tick 都请求会让滚动与用户滚轮/滚动条抢占，
+/// 并形成"滚动 → 行 realize → 渲染 → 再滚动"反馈循环，UI 线程满载
+/// （表现为滚动条卡死）——若实机出现该现象回退 100ms。结构性变化
+/// （restore / 新 turn / round 完成）不受此限，立即滚底。
+const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(50);
 
-/// 渲染降频：live 流式 33ms 合并一次（≈30fps）。Transcript 状态在泵内
-/// 累积，渲染永远基于最新状态，文本更新 30fps 对用户感知无差，CPU 减半。
-const RENDER_THROTTLE: Duration = Duration::from_millis(33);
+/// 渲染降频：live 流式 16ms 合并一次（对齐泵 ≈60fps；原 33ms ≈30fps
+/// 在 100 token/s 时每帧攒 ~3 token，视觉呈"几字一跳"——降频后每泵
+/// tick 即渲染，攒感减半）。Transcript 状态在泵内累积，渲染永远基于
+/// 最新状态；若实测 CPU 升高明显（渲染成本随段落变长），可回退 33ms。
+const RENDER_THROTTLE: Duration = Duration::from_millis(16);
+
+/// 顶部预加载分页大小：滚动接近窗口顶部时一次扩展的回合数。
+/// 与 `markdown_winui::WINDOW_DEFAULT_LEN` 同量级，可经实机手感调优。
+const WINDOW_PAGE: usize = 30;
+
+/// near-top 判定阈值（DIPs）：滚动到距列表顶部此距离内触发预加载。
+/// 与 reactor 贴底阈值（120px）对称。
+const NEAR_TOP_THRESHOLD_PX: f64 = 120.0;
 
 pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let transcript = cx.use_ref::<Transcript>(Transcript::new());
@@ -60,6 +72,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 不节流会刷爆日志（spawn_timeline_refresh 本身有 1s 节流）。
     let last_deferred_log = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     let (_, set_rev) = cx.use_state::<u64>(0);
+    // 锚定补偿挂起标记：`Some(rows)` = 本帧渲染需用 within 滚动（顶部
+    // 预加载后把「原窗口首行」锚回原位，视口不跳）。rows = 扩展前移量
+    // = 原首行的新下标。渲染闭包 take 后随 scroll_to_index_within 下发。
+    let pending_anchor = cx.use_ref::<Option<usize>>(None);
 
     // 事件泵：drain bridge 队列 → Transcript；rev 变化触发重渲染。
     cx.use_effect((), {
@@ -176,6 +192,12 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                                 .duration_since(*last_scroll_request.borrow())
                                 >= SCROLL_REQUEST_THROTTLE
                         {
+                            // 窗口跟随尾部：仅当窗口未被用户上滚扩展时滑动
+                            // （保持最近 N 个回合，长会话不退化）；用户上滚
+                            // 扩展后窗口保持，避免浏览内容跳动。
+                            if structural && t.tail_following() {
+                                t.slide_window_tail();
+                            }
                             *scroll_version.borrow_mut() += 1;
                             *last_scroll_request.borrow_mut() = std::time::Instant::now();
                         }
@@ -225,11 +247,46 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .with_key("chat-empty")
             .into();
     }
-    let turns = s.turns().to_vec();
+    let turns = s.window_turns().to_vec();
     let last = turns.len() as i32 - 1;
-    list_view(turns, |turn: &TurnView, i: usize| turn_view(i, turn))
-        .with_key_selector(|turn: &TurnView| turn.turn_id.clone())
-        .scroll_to_index(*scroll_version.borrow(), last)
+    // 顶部预加载后本帧需要锚定补偿：取走挂起标记，用 within 滚动把
+    // 「原窗口首行」（新下标 = 扩展前移量）锚回原位，视口不跳。
+    let anchor_rows = pending_anchor.borrow_mut().take();
+    let mut builder = list_view(turns, |turn: &TurnView, i: usize| turn_view(i, turn))
+        .with_key_selector(|turn: &TurnView| turn.turn_id.clone());
+    if let Some(anchor_rows) = anchor_rows {
+        builder = builder.scroll_to_index_within(
+            *scroll_version.borrow(),
+            anchor_rows as i32,
+            0.0,
+        );
+    } else {
+        builder = builder.scroll_to_index(*scroll_version.borrow(), last);
+    }
+    builder
+        .on_top_reached({
+            let transcript = transcript.clone();
+            let pending_anchor = pending_anchor.clone();
+            let scroll_version = scroll_version.clone();
+            let set_rev = set_rev.clone();
+            let last_rev = last_rev.clone();
+            move |_| {
+                // 滚动接近窗口顶部（边沿触发一次）：扩展窗口预加载更早回合，
+                // 渲染时锚定补偿保持视口。已全量放行则短路。
+                let mut t = transcript.borrow_mut();
+                let moved = t.expand_window(WINDOW_PAGE);
+                if moved == 0 {
+                    return;
+                }
+                *pending_anchor.borrow_mut() = Some(moved);
+                // 锚定补偿随 scroll_version 变化触发（reconciler 按版本 diff）；
+                // set_rev(+1) 保证触发渲染（use_state 同值会跳过）。
+                *scroll_version.borrow_mut() += 1;
+                drop(t);
+                set_rev.call(*last_rev.borrow() + 1);
+            }
+        })
+        .top_threshold(NEAR_TOP_THRESHOLD_PX)
         .with_key("chat-transcript")
         .into()
 }
@@ -359,57 +416,120 @@ fn live_view(turn_idx: usize, round_num: u32, segments: &[LiveSegment]) -> Eleme
         .into()
 }
 
-/// 权威终态视图：RichTextBlock + 表格网格 + 代码块卡片。
+/// 权威终态视图：按文档块顺序渲染（正文/表格/代码块交错），
+/// 连续段落合并进同一 RichTextBlock，遇表格/代码块断开。
 fn final_view(turn_idx: usize, round_num: u32, rich: &RichTextOutput) -> Element {
     let mut items: Vec<Element> = Vec::new();
-    // RichTextBlock：真实富文本（加粗/列表/链接）
-    let mut rt = RichTextBlock::new();
-    rt.paragraphs = rich.paragraphs.clone();
-    rt.text_wrapping = TextWrapping::Wrap;
-    rt.is_text_selection_enabled = true;
-    items.push(rt.into());
-    // 表格通道（Grid 拼装：表头加粗 + 等分列）
-    for (ti, table) in rich.tables.iter().enumerate() {
-        items.push(markdown_winui::table_view(
-            table,
-            &format!("t{turn_idx}r{round_num}-table-{ti}"),
-        ));
-    }
-    // 代码块通道（独立卡片；高亮器未接入，先 plain）
-    for (ci, code) in rich.code_blocks.iter().enumerate() {
-        let lang = code.lang.as_deref().unwrap_or("");
-        items.push(
-            border(
-                vstack([
-                    text_block(if lang.is_empty() { "code" } else { lang })
-                        .font_size(10.0)
-                        .semibold()
-                        .foreground(Color {
+    // 连续段落累积；遇 Table/Code flush 成 RichTextBlock。
+    let mut pending: Vec<RichTextParagraph> = Vec::new();
+    let mut flush = |items: &mut Vec<Element>, pending: &mut Vec<RichTextParagraph>| {
+        if pending.is_empty() {
+            return;
+        }
+        let mut rt = RichTextBlock::new();
+        rt.paragraphs = std::mem::take(pending);
+        rt.text_wrapping = TextWrapping::Wrap;
+        rt.is_text_selection_enabled = true;
+        items.push(rt.into());
+    };
+    if !rich.blocks.is_empty() {
+        for b in &rich.blocks {
+            match b {
+                markdown_winui::FinalBlock::Paragraph(p) => pending.push(p.clone()),
+                markdown_winui::FinalBlock::Table(td) => {
+                    flush(&mut items, &mut pending);
+                    items.push(markdown_winui::table_view(
+                        td,
+                        &format!("t{turn_idx}r{round_num}-table-{n}", n = items.len()),
+                    ));
+                }
+                markdown_winui::FinalBlock::Code(code) => {
+                    flush(&mut items, &mut pending);
+                    let lang = code.lang.as_deref().unwrap_or("");
+                    items.push(
+                        border(
+                            vstack([
+                                text_block(if lang.is_empty() { "code" } else { lang })
+                                    .font_size(10.0)
+                                    .semibold()
+                                    .foreground(Color {
+                                        a: 255,
+                                        r: 150,
+                                        g: 150,
+                                        b: 150,
+                                    }),
+                                text_block(&code.text).wrap().selectable(),
+                            ])
+                            .spacing(4.0),
+                        )
+                        .corner_radius(8.0)
+                        .border_brush(Color {
                             a: 255,
-                            r: 150,
-                            g: 150,
-                            b: 150,
-                        }),
-                    text_block(&code.text).wrap().selectable(),
-                ])
-                .spacing(4.0),
-            )
-            .corner_radius(8.0)
-            .border_brush(Color {
-                a: 255,
-                r: 140,
-                g: 140,
-                b: 140,
-            })
-            .border_thickness(Thickness {
-                left: 1.0,
-                top: 1.0,
-                right: 1.0,
-                bottom: 1.0,
-            })
-            .with_key(format!("t{turn_idx}r{round_num}-code-{ci}"))
-            .into(),
-        );
+                            r: 140,
+                            g: 140,
+                            b: 140,
+                        })
+                        .border_thickness(Thickness {
+                            left: 1.0,
+                            top: 1.0,
+                            right: 1.0,
+                            bottom: 1.0,
+                        })
+                        .with_key(format!("t{turn_idx}r{round_num}-code-{n}", n = items.len()))
+                        .into(),
+                    );
+                }
+            }
+        }
+        flush(&mut items, &mut pending);
+    } else {
+        // 降级路径（blocks 为空的历史数据）：按通道渲染，保底不空白。
+        let mut rt = RichTextBlock::new();
+        rt.paragraphs = rich.paragraphs.clone();
+        rt.text_wrapping = TextWrapping::Wrap;
+        rt.is_text_selection_enabled = true;
+        items.push(rt.into());
+        for (ti, table) in rich.tables.iter().enumerate() {
+            items.push(markdown_winui::table_view(
+                table,
+                &format!("t{turn_idx}r{round_num}-table-{ti}"),
+            ));
+        }
+        for (ci, code) in rich.code_blocks.iter().enumerate() {
+            let lang = code.lang.as_deref().unwrap_or("");
+            items.push(
+                border(
+                    vstack([
+                        text_block(if lang.is_empty() { "code" } else { lang })
+                            .font_size(10.0)
+                            .semibold()
+                            .foreground(Color {
+                                a: 255,
+                                r: 150,
+                                g: 150,
+                                b: 150,
+                            }),
+                        text_block(&code.text).wrap().selectable(),
+                    ])
+                    .spacing(4.0),
+                )
+                .corner_radius(8.0)
+                .border_brush(Color {
+                    a: 255,
+                    r: 140,
+                    g: 140,
+                    b: 140,
+                })
+                .border_thickness(Thickness {
+                    left: 1.0,
+                    top: 1.0,
+                    right: 1.0,
+                    bottom: 1.0,
+                })
+                .with_key(format!("t{turn_idx}r{round_num}-code-{ci}"))
+                .into(),
+            );
+        }
     }
     vstack(items)
         .spacing(6.0)

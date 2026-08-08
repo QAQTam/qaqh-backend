@@ -42,11 +42,23 @@ use windows_reactor::{
 ///   多段落构造）
 /// - `code_blocks` → 独立代码块 widget（需求单 1.2，高亮器消费）
 /// - `tables` → Grid 拼装的表格 widget（[`table_view`]）
+/// - `blocks` → **有序块序列**（final 全量渲染按此遍历；paragraphs/tables/
+///   code_blocks 是它的三个分通道，供旧调用方/实时路径使用）
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RichTextOutput {
     pub paragraphs: Vec<RichTextParagraph>,
     pub code_blocks: Vec<CodeBlock>,
     pub tables: Vec<TableData>,
+    /// final 渲染的有序块（保持文档块顺序：正文/表格/代码块交错）。
+    pub blocks: Vec<FinalBlock>,
+}
+
+/// final 渲染的有序块（见 [`RichTextOutput::blocks`]）。
+#[derive(Clone, Debug, PartialEq)]
+pub enum FinalBlock {
+    Paragraph(RichTextParagraph),
+    Table(TableData),
+    Code(CodeBlock),
 }
 
 /// 表格数据（markdown GFM 表格的渲染中间表示）。
@@ -125,8 +137,9 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
     for block in blocks {
         match block {
             Block::Paragraph(inlines) => {
-                out.paragraphs
-                    .push(RichTextParagraph::new(inlines_to_rich(inlines)));
+                let para = RichTextParagraph::new(inlines_to_rich(inlines));
+                out.blocks.push(FinalBlock::Paragraph(para.clone()));
+                out.paragraphs.push(para);
             }
             Block::Heading { level, inlines } => {
                 // 标题层级（REFERENCE §7：h1=1.2em / h2=1.1em / h3=1em，500 字重）。
@@ -145,6 +158,7 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
                         r.is_bold = true;
                     }
                 }
+                out.blocks.push(FinalBlock::Paragraph(para.clone()));
                 out.paragraphs.push(para);
             }
             Block::List { ordered, start, items } => {
@@ -158,45 +172,65 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
                     } else if *ordered {
                         let label = n.to_string() + ". ";
                         n += 1;
-                        out.paragraphs.push(RichTextParagraph::new(vec![
+                        let para = RichTextParagraph::new(vec![
                             RichTextInline::Run(RichTextRun::plain(label)),
-                        ]));
+                        ]);
+                        out.blocks.push(FinalBlock::Paragraph(para.clone()));
+                        out.paragraphs.push(para);
                         // 前缀段已入，内容段继续
-                        out.paragraphs.push(RichTextParagraph::new(
-                            blocks_to_rich(&item.blocks),
-                        ));
+                        let para = RichTextParagraph::new(blocks_to_rich(&item.blocks));
+                        out.blocks.push(FinalBlock::Paragraph(para.clone()));
+                        out.paragraphs.push(para);
                         continue;
                     } else {
                         "• "
                     };
                     let mut inlines = vec![RichTextInline::Run(RichTextRun::plain(prefix))];
                     inlines.extend(blocks_to_rich(&item.blocks));
-                    out.paragraphs.push(RichTextParagraph::new(inlines));
+                    let para = RichTextParagraph::new(inlines);
+                    out.blocks.push(FinalBlock::Paragraph(para.clone()));
+                    out.paragraphs.push(para);
                 }
             }
             Block::ListItem { .. } => {} // 解析层已并入 List
             Block::Quote(children) => {
                 for child in children {
                     let mut para = render_final(std::slice::from_ref(child));
-                    for p in &mut para.paragraphs {
-                        p.inlines.insert(
-                            0,
-                            RichTextInline::Run(RichTextRun::plain("> ")),
-                        );
+                    for b in &mut para.blocks {
+                        if let FinalBlock::Paragraph(p) = b {
+                            p.inlines.insert(
+                                0,
+                                RichTextInline::Run(RichTextRun::plain("> ")),
+                            );
+                        }
                     }
                     out.paragraphs.extend(para.paragraphs);
                     out.code_blocks.extend(para.code_blocks);
+                    out.tables.extend(para.tables);
+                    out.blocks.extend(para.blocks);
                 }
             }
-            Block::Table { headers, rows } => out.tables.push(TableData {
-                headers: headers.clone(),
-                rows: rows.clone(),
-            }),
-            Block::Code { lang, text } => out.code_blocks.push(CodeBlock {
-                lang: lang.clone(),
-                text: text.clone(),
-            }),
-            Block::Rule => out.paragraphs.push(RichTextParagraph::new(Vec::new())),
+            Block::Table { headers, rows } => {
+                let table = TableData {
+                    headers: headers.clone(),
+                    rows: rows.clone(),
+                };
+                out.blocks.push(FinalBlock::Table(table.clone()));
+                out.tables.push(table);
+            }
+            Block::Code { lang, text } => {
+                let code = CodeBlock {
+                    lang: lang.clone(),
+                    text: text.clone(),
+                };
+                out.blocks.push(FinalBlock::Code(code.clone()));
+                out.code_blocks.push(code);
+            }
+            Block::Rule => {
+                let para = RichTextParagraph::new(Vec::new());
+                out.blocks.push(FinalBlock::Paragraph(para.clone()));
+                out.paragraphs.push(para);
+            }
         }
     }
     out
@@ -357,6 +391,37 @@ mod tests {
         })));
         assert_eq!(out.code_blocks.len(), 1);
         assert_eq!(out.code_blocks[0].lang.as_deref(), Some("rs"));
+    }
+
+    /// 有序块：正文/表格/代码块按文档顺序交错（修复「表格/代码块堆到
+    /// 文字之下」：final 渲染必须按 blocks 顺序，而非通道分组）。
+    #[test]
+    fn final_blocks_preserve_document_order() {
+        let md = "前言\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n中间\n\n```rs\nfn x() {}\n```\n\n结尾";
+        let out = render_final(&markdown_core::parse_final(md));
+        // 三通道各自计数正确。
+        assert_eq!(out.paragraphs.len(), 3);
+        assert_eq!(out.tables.len(), 1);
+        assert_eq!(out.code_blocks.len(), 1);
+        // 有序序列：Paragraph → Table → Paragraph → Code → Paragraph。
+        assert_eq!(out.blocks.len(), 5);
+        assert!(matches!(out.blocks[0], FinalBlock::Paragraph(_)));
+        assert!(matches!(out.blocks[1], FinalBlock::Table(_)));
+        assert!(matches!(out.blocks[2], FinalBlock::Paragraph(_)));
+        assert!(matches!(out.blocks[3], FinalBlock::Code(_)));
+        assert!(matches!(out.blocks[4], FinalBlock::Paragraph(_)));
+        // 通道内容与 blocks 一致（同序提取可还原文档）。
+        let texts: Vec<String> = out
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                FinalBlock::Paragraph(p) => Some(inline_text(p)),
+                _ => None,
+            })
+            .collect();
+        assert!(texts[0].starts_with("前言"));
+        assert!(texts[1].starts_with("中间"));
+        assert!(texts[2].starts_with("结尾"));
     }
 
     /// 数学降级：katex 端口前按字面输出

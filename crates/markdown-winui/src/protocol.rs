@@ -85,6 +85,31 @@ pub enum ConversationEvent {
         tool_kind: String,
         state: ProviderToolState,
     },
+    /// Tool 频道：流式响应中检测到工具调用（replaceable 预览，可被
+    /// ToolStarted 覆盖；对齐 `deepx-domain::ToolEvent::ToolCallPrepared`）。
+    ToolCallPrepared {
+        tool_call_id: String,
+        turn_id: String,
+        round_num: u32,
+        name: String,
+        args_so_far: String,
+    },
+    /// Tool 频道：工具真正开始执行（对齐 `ToolEvent::ToolStarted`）。
+    ToolStarted {
+        tool_call_id: String,
+        turn_id: String,
+        round_num: u32,
+        name: String,
+    },
+    /// Tool 频道：工具执行成功终态（对齐 `ToolEvent::ToolFinished`；
+    /// result 保留任意形状，渲染只取 `summary`）。
+    ToolFinished {
+        tool_call_id: String,
+        turn_id: String,
+        round_num: u32,
+        #[serde(default)]
+        result: serde_json::Value,
+    },
     /// 一轮 API 调用完成的权威终态。
     RoundCompleted {
         turn_id: String,
@@ -115,6 +140,9 @@ impl ConversationEvent {
             | Self::RoundDelta { turn_id, .. }
             | Self::BlockCheckpoint { turn_id, .. }
             | Self::ProviderToolStatus { turn_id, .. }
+            | Self::ToolCallPrepared { turn_id, .. }
+            | Self::ToolStarted { turn_id, .. }
+            | Self::ToolFinished { turn_id, .. }
             | Self::RoundCompleted { turn_id, .. } => turn_id,
             Self::Unknown => "",
         }

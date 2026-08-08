@@ -139,3 +139,22 @@ button("Delete").resource_overrides(|r| {
 - 没有 XAML 热重载/VS 设计器这类工具链，调 UI 全靠改代码重编译跑
 - `list_view`/虚拟化长列表控件目前**没有**在已包装的 ~60 个控件清单里出现，如果聊天记录这类需要虚拟滚动的长列表场景要用到它，需要额外确认支持情况或自己包装
 - Padding/Background/Foreground 等属性在不同控件上没有统一接口，reactor 内部按 `Handle` 变体分发，遇到"某个容器不支持某个通用修饰符"时会在 debug 模式下打警告（`diag::unhandled_modifier`）而不是报错，生产环境要留意这类静默降级
+
+## 开发约定：rg 参数陷阱（2026-08-08 实测确认）
+
+**`rg -rn` 不是"递归+行号"，而是 `--replace n`**——`-r` 在 ripgrep 里是 `--replace`（替换匹配文本），短选项组合 `-rn` 中 `r` 吞掉 `n` 作为替换文本，输出中所有匹配内容被替换为 `n`，且行号丢失。与 shell 无关（pwsh/bash/argv 直连三种模式实测结果一致），与 exec 解析无关。
+
+| 选项 | GNU grep | ripgrep |
+|---|---|---|
+| `-r` | `--recursive` | `--replace`（rg 对目录默认递归，`-r` 被让给 replace） |
+| `-n` | `--line-number` | `--line-number`（一致） |
+
+**规范用法**（代码探索一律遵守）：
+
+```bash
+rg -n 'pattern' path          # ✅ 目录自动递归 + 行号，唯一需要的写法
+rg --recursive --line-number 'pattern' path   # ✅ 想显式时用长参数
+rg -rn 'pattern' path         # ❌ 禁止（= --replace n，静默污染输出）
+```
+
+真需要替换输出时用长参数 `--replace 'text'`，避免缩写歧义。排查定位请优先 `read_file`（输出不经 rg 替换，中文编码也稳定）。

@@ -176,6 +176,30 @@ fn print_event(ev: &ConversationEvent) {
             state,
             ..
         } => println!("▶ ProviderTool  round{round_num} [{tool_kind}] {state:?}"),
+        ConversationEvent::ToolCallPrepared {
+            tool_call_id,
+            round_num,
+            name,
+            args_so_far,
+            ..
+        } => println!(
+            "▶ ToolPrepared round{round_num} [{name}] {tool_call_id}: {args_so_far:?}"
+        ),
+        ConversationEvent::ToolStarted {
+            tool_call_id,
+            round_num,
+            name,
+            ..
+        } => println!("▶ ToolStarted  round{round_num} [{name}] {tool_call_id}"),
+        ConversationEvent::ToolFinished {
+            tool_call_id,
+            round_num,
+            result,
+            ..
+        } => println!(
+            "▶ ToolFinished round{round_num} {tool_call_id}: {:?}",
+            result.get("summary").and_then(|s| s.as_str())
+        ),
     }
 }
 

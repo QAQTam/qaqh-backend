@@ -407,7 +407,21 @@ pub struct Transcript {
     turns: Vec<TurnView>,
     /// turn_id → index（长会话 O(1) 寻址，不做全量扫描）。
     turn_index: HashMap<String, usize>,
+    /// 渲染窗口起点（turns 下标）：`[window_start, turns.len())` 是实际
+    /// 传给 list_view 的回合。restore 后只渲染最近 `WINDOW_DEFAULT_LEN`
+    /// 个回合；向上滚动接近顶部时 `expand_window` 前移起点（预加载更早
+    /// 回合）。窗口是**渲染投影**：`turns()`/`turn_count()` 仍返回全量，
+    /// 增量事件与 key 稳定性不受影响。
+    window_start: usize,
+    /// 窗口是否处于「跟随尾部」模式：restore 后 true；用户上滚扩展
+    /// （`expand_window`）置 false（窗口保持，避免浏览内容跳动）；
+    /// `slide_window_tail` 恢复 true。
+    tail_following: bool,
 }
+
+/// 默认渲染窗口大小（回合数）：restore 后只渲染最近 N 个回合，与总回合
+/// 数解耦，restore/每帧 diff 成本恒定。经实机手感调优。
+pub const WINDOW_DEFAULT_LEN: usize = 30;
 
 impl Transcript {
     pub fn new() -> Self {
@@ -421,6 +435,52 @@ impl Transcript {
 
     pub fn turns(&self) -> &[TurnView] {
         &self.turns
+    }
+
+    /// 当前渲染窗口（尾部连续区间切片）——list_view 的实际数据源。
+    /// 窗口化后每帧 clone 量 ≤ `WINDOW_DEFAULT_LEN`。
+    pub fn window_turns(&self) -> &[TurnView] {
+        &self.turns[self.window_start..]
+    }
+
+    /// 窗口内回合数（= list_view 行数）。
+    pub fn window_len(&self) -> usize {
+        self.turns.len() - self.window_start
+    }
+
+    /// 向前扩展窗口（预加载更早回合）：起点前移 `by`，钳制到 0。
+    /// 返回实际前移量；0 = 已全量放行（调用方短路，避免无谓渲染）。
+    /// 扩展后窗口脱离「跟随尾部」模式（用户上滚浏览中）。
+    pub fn expand_window(&mut self, by: usize) -> usize {
+        let moved = self.window_start.min(by);
+        if moved > 0 {
+            self.window_start -= moved;
+            self.tail_following = false;
+        }
+        moved
+    }
+
+    /// 是否已全量放行（窗口覆盖全部 turns）。
+    pub fn window_full(&self) -> bool {
+        self.window_start == 0
+    }
+
+    /// 窗口是否处于「跟随尾部」模式（调用方据此决定新回合到达时是否
+    /// 调用 [`Self::slide_window_tail`]）。
+    pub fn tail_following(&self) -> bool {
+        self.tail_following
+    }
+
+    /// 窗口滑向末尾（跟随尾部语义）：起点右移，保持窗口大小为
+    /// `WINDOW_DEFAULT_LEN`，并恢复「跟随尾部」模式。由调用方在「新
+    /// turn 到达且本帧跟随尾部」时显式调用——用户上滚浏览时**不要**
+    /// 调用（窗口保持，避免视口跳动）。
+    pub fn slide_window_tail(&mut self) {
+        let keep = WINDOW_DEFAULT_LEN;
+        if self.turns.len() > keep {
+            self.window_start = self.window_start.max(self.turns.len() - keep);
+        }
+        self.tail_following = true;
     }
 
     /// 快照恢复：用权威 turns（timeline 快照解析产物）整体替换当前状态。
@@ -466,6 +526,9 @@ impl Transcript {
             .enumerate()
             .map(|(i, t)| (t.turn_id.clone(), i))
             .collect();
+        // 窗口化：只渲染最近 N 个回合（长会话 restore 成本与总回合数解耦）。
+        self.window_start = self.turns.len().saturating_sub(WINDOW_DEFAULT_LEN);
+        self.tail_following = true;
     }
 
     /// 应用一个协议事件，产出渲染命令（可能为空 = 无需触碰 UI）。
@@ -634,6 +697,90 @@ impl Transcript {
                     card,
                 }]
             }
+            ConversationEvent::ToolCallPrepared {
+                tool_call_id,
+                turn_id,
+                round_num,
+                name,
+                args_so_far,
+            } => {
+                let turn = self.ensure_turn(turn_id);
+                let (round_idx, round) = self.round_mut(turn, *round_num);
+                let card = ToolCardView {
+                    id: tool_call_id.clone(),
+                    name: Some(name.clone()),
+                    args_display: args_so_far.clone(),
+                    done: false,
+                    provider: false,
+                };
+                upsert_tool_card(round, card.clone());
+                vec![RenderCommand::UpsertToolCard {
+                    turn,
+                    round: round_idx,
+                    card,
+                }]
+            }
+            ConversationEvent::ToolStarted {
+                tool_call_id,
+                turn_id,
+                round_num,
+                name,
+            } => {
+                let turn = self.ensure_turn(turn_id);
+                let (round_idx, round) = self.round_mut(turn, *round_num);
+                let card = ToolCardView {
+                    id: tool_call_id.clone(),
+                    name: Some(name.clone()),
+                    args_display: String::new(),
+                    done: false,
+                    provider: false,
+                };
+                upsert_tool_card(round, card.clone());
+                vec![RenderCommand::UpsertToolCard {
+                    turn,
+                    round: round_idx,
+                    card,
+                }]
+            }
+            ConversationEvent::ToolFinished {
+                tool_call_id,
+                turn_id,
+                round_num,
+                result,
+            } => {
+                let turn = self.ensure_turn(turn_id);
+                let (round_idx, round) = self.round_mut(turn, *round_num);
+                // 结果摘要（对齐 timeline 块 summary）；失败保留 error 摘要。
+                let summary = result
+                    .get("summary")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        result.get("error").and_then(|e| {
+                            e.get("message")
+                                .and_then(|m| m.as_str())
+                                .map(str::to_string)
+                        })
+                    })
+                    .unwrap_or_default();
+                let card = ToolCardView {
+                    id: tool_call_id.clone(),
+                    name: round
+                        .tool_calls
+                        .iter()
+                        .find(|c| c.id == *tool_call_id)
+                        .and_then(|c| c.name.clone()),
+                    args_display: summary,
+                    done: true,
+                    provider: false,
+                };
+                upsert_tool_card(round, card.clone());
+                vec![RenderCommand::UpsertToolCard {
+                    turn,
+                    round: round_idx,
+                    card,
+                }]
+            }
             ConversationEvent::RoundCompleted {
                 turn_id,
                 round_num,
@@ -710,6 +857,32 @@ impl Transcript {
             (idx, &mut turn_view.rounds[idx])
         }
     }
+
+    /// 定位 turn；Tool 频道事件可能先于 Conversation 频道的 TurnStarted 到达
+    /// （双 SSE 频道无顺序保证），此时自动创建空 turn 兜底，避免工具卡丢失。
+    fn ensure_turn(&mut self, turn_id: &str) -> usize {
+        if let Some(&index) = self.turn_index.get(turn_id) {
+            return index;
+        }
+        let index = self.turns.len();
+        self.turns.push(TurnView {
+            turn_id: turn_id.to_string(),
+            user_text: String::new(),
+            status: TurnStatus::Running,
+            rounds: Vec::new(),
+        });
+        self.turn_index.insert(turn_id.to_string(), index);
+        index
+    }
+}
+
+/// 按 tool_call_id upsert 工具卡（同 id 覆盖状态，保持卡位置稳定）。
+fn upsert_tool_card(round: &mut RoundView, card: ToolCardView) {
+    if let Some(existing) = round.tool_calls.iter_mut().find(|c| c.id == card.id) {
+        *existing = card;
+    } else {
+        round.tool_calls.push(card);
+    }
 }
 
 #[cfg(test)]
@@ -722,6 +895,90 @@ mod tests {
             turn_id: turn_id.into(),
             user_text: "hi".into(),
         });
+    }
+
+    fn restored_turns(n: usize) -> Vec<RestoredTurn> {
+        (0..n)
+            .map(|i| RestoredTurn {
+                turn_id: format!("t{i}"),
+                user_text: format!("q{i}"),
+                status: TurnStatus::Completed,
+                rounds: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// restore 后只渲染最近 `WINDOW_DEFAULT_LEN` 个回合，全量 turns 保留。
+    #[test]
+    fn window_after_restore_is_tail_only() {
+        let mut ts = Transcript::new();
+        ts.restore(restored_turns(40));
+        assert_eq!(ts.turn_count(), 40, "全量保留");
+        assert_eq!(ts.window_len(), WINDOW_DEFAULT_LEN);
+        assert_eq!(ts.window_turns()[0].turn_id, "t10", "窗口 = 最近 30 个");
+        assert_eq!(ts.window_turns().last().unwrap().turn_id, "t39");
+        assert!(!ts.window_full());
+    }
+
+    /// 短会话（少于窗口大小）：窗口 = 全量，window_full 立即为 true。
+    #[test]
+    fn window_is_full_for_short_sessions() {
+        let mut ts = Transcript::new();
+        ts.restore(restored_turns(5));
+        assert_eq!(ts.window_len(), 5);
+        assert!(ts.window_full());
+        assert_eq!(ts.expand_window(10), 0, "无更早回合可扩展");
+    }
+
+    /// expand_window 前移起点；到 0 后短路（返回 0，避免无谓渲染）。
+    #[test]
+    fn expand_window_moves_start_and_short_circuits() {
+        let mut ts = Transcript::new();
+        ts.restore(restored_turns(40));
+        assert!(ts.tail_following());
+        assert_eq!(ts.expand_window(10), 10);
+        assert_eq!(ts.window_len(), 40);
+        assert!(ts.window_full());
+        assert!(!ts.tail_following(), "用户上滚扩展后脱离跟随尾部");
+        assert_eq!(ts.expand_window(10), 0, "已全量放行，短路");
+        assert_eq!(ts.window_turns()[0].turn_id, "t0");
+        ts.slide_window_tail();
+        assert!(ts.tail_following(), "滑动恢复跟随尾部");
+    }
+
+    /// slide_window_tail：跟随尾部时窗口保持大小为 WINDOW_DEFAULT_LEN；
+    /// 用户上滚扩展后调用则回到最近 N 个（由调用方决定何时调用）。
+    #[test]
+    fn slide_window_tail_keeps_window_size() {
+        let mut ts = Transcript::new();
+        ts.restore(restored_turns(40));
+        // 已是最新 30：滑动无变化。
+        ts.slide_window_tail();
+        assert_eq!(ts.window_len(), WINDOW_DEFAULT_LEN);
+        assert_eq!(ts.window_turns()[0].turn_id, "t10");
+        // 用户扩展窗口（上滚预加载）后，跟随尾部时滑回最近 N 个。
+        ts.expand_window(10);
+        assert_eq!(ts.window_len(), 40);
+        ts.slide_window_tail();
+        assert_eq!(ts.window_len(), WINDOW_DEFAULT_LEN);
+        assert_eq!(ts.window_turns()[0].turn_id, "t10");
+    }
+
+    /// 新 turn 追加（增量事件）不影响窗口起点；窗口是渲染投影，滑动由
+    /// 调用方在「跟随尾部」时显式 `slide_window_tail`。
+    #[test]
+    fn apply_growth_keeps_window_consistent() {
+        let mut ts = Transcript::new();
+        ts.restore(restored_turns(40));
+        start_turn(&mut ts, "t40");
+        assert_eq!(ts.turn_count(), 41);
+        assert_eq!(ts.window_len(), 31, "起点不动，窗口随尾部增长");
+        assert_eq!(ts.window_turns()[0].turn_id, "t10", "起点未变");
+        assert_eq!(ts.window_turns().last().unwrap().turn_id, "t40");
+        // 跟随尾部：显式滑动，窗口回到最近 N 个。
+        ts.slide_window_tail();
+        assert_eq!(ts.window_len(), WINDOW_DEFAULT_LEN);
+        assert_eq!(ts.window_turns()[0].turn_id, "t11");
     }
 
     /// `provider_tool_status` 按 call_id upsert：状态流 进行中→搜索中→完成，
@@ -764,6 +1021,68 @@ mod tests {
         assert_eq!(rounds[0].tool_calls.len(), 1, "同 call_id 覆盖不新增卡");
         assert!(rounds[0].tool_calls[0].done);
         assert_eq!(rounds[0].tool_calls[0].args_display, "");
+    }
+
+    /// Tool 频道事件（ToolCallPrepared → ToolStarted → ToolFinished）按
+    /// tool_call_id upsert；流式时工具卡从「预览」→「执行中」→「完成」。
+    #[test]
+    fn tool_channel_events_upsert_card() {
+        let mut ts = Transcript::new();
+        start_turn(&mut ts, "t1");
+
+        // Prepared：预览卡（带 args）。
+        ts.apply(&ConversationEvent::ToolCallPrepared {
+            tool_call_id: "call-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            name: "exec".into(),
+            args_so_far: "{\"cmd\":\"ls\"}".into(),
+        });
+        let card = &ts.turns()[0].rounds[0].tool_calls[0];
+        assert_eq!(card.id, "call-1");
+        assert_eq!(card.name.as_deref(), Some("exec"));
+        assert!(!card.done);
+        assert!(!card.provider);
+
+        // Started：同 id 覆盖（清 args 展示）。
+        ts.apply(&ConversationEvent::ToolStarted {
+            tool_call_id: "call-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            name: "exec".into(),
+        });
+        let rounds = &ts.turns()[0].rounds;
+        assert_eq!(rounds[0].tool_calls.len(), 1, "同 id 不新增卡");
+        assert!(!rounds[0].tool_calls[0].done);
+
+        // Finished：done 置位 + 结果摘要。
+        ts.apply(&ConversationEvent::ToolFinished {
+            tool_call_id: "call-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            result: serde_json::json!({ "summary": "8 files listed" }),
+        });
+        let rounds = &ts.turns()[0].rounds;
+        assert_eq!(rounds[0].tool_calls.len(), 1);
+        assert!(rounds[0].tool_calls[0].done);
+        assert_eq!(rounds[0].tool_calls[0].args_display, "8 files listed");
+    }
+
+    /// Tool 频道与 Conversation 频道无顺序保证：工具事件先于 TurnStarted
+    /// 到达时自动建 turn，不丢卡。
+    #[test]
+    fn tool_event_before_turn_started_creates_turn() {
+        let mut ts = Transcript::new();
+        ts.apply(&ConversationEvent::ToolCallPrepared {
+            tool_call_id: "call-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            name: "file".into(),
+            args_so_far: "{}".into(),
+        });
+        assert_eq!(ts.turns().len(), 1, "自动建 turn");
+        assert_eq!(ts.turns()[0].turn_id, "t1");
+        assert_eq!(ts.turns()[0].rounds[0].tool_calls.len(), 1);
     }
 
     /// 未知 turn 的 provider 状态：忽略（防跨回合错灌）。
