@@ -270,24 +270,24 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let is_streaming = state.is_streaming;
 
     // 文本输入：更新草稿 + 重置 slash 导航（对齐 Web updateText）。
+    // 自动高度用简单换行计数（避免逐字符 O(n²) 扫描），只在行数变化时触发。
+    let last_auto_height = cx.use_ref::<f64>(INPUT_DEFAULT_HEIGHT);
     let on_text_changed = {
         let draft = draft.clone();
         let draft_ver = draft_ver.clone();
         let set_draft_version = set_draft_version.clone();
         let set_input_height = set_input_height.clone();
+        let last_auto = last_auto_height.clone();
         move |value: String| {
             if !manual_height && !immersive {
-                // Exact DesiredSize is not exposed by reactor yet. Estimate
-                // wrapped visual lines conservatively; TextBox itself remains
-                // authoritative and scrolls after the cap.
-                let lines = value
-                    .lines()
-                    .map(|line| (line.chars().count().max(1) + 71) / 72)
-                    .sum::<usize>()
-                    .max(1);
-                let target =
-                    (44.0 + lines as f64 * 20.0).clamp(INPUT_MIN_HEIGHT, INPUT_AUTO_MAX_HEIGHT);
-                set_input_height.call(target);
+                let line_count = value.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1;
+                let target = (44.0 + line_count as f64 * 20.0)
+                    .clamp(INPUT_MIN_HEIGHT, INPUT_AUTO_MAX_HEIGHT);
+                let prev = *last_auto.borrow();
+                if (target - prev).abs() > 1.0 {
+                    *last_auto.borrow_mut() = target;
+                    set_input_height.call(target);
+                }
             }
             let mut d = draft.borrow_mut();
             d.text = value;
@@ -575,6 +575,7 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         ))
         .automation_name("消息输入")
         .automation_id("composer-input")
+        .with_key("composer-textbox")
         .into();
     if slash_visible {
         input = input

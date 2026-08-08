@@ -96,7 +96,9 @@ pub mod tokens {
         "ms-appx:///Assets/fonts/CascadiaMono.ttf#Cascadia Mono, Consolas";
 
     /// Comfortable reading measure for long-form assistant output.
-    pub const READING_MAX_WIDTH: f64 = 880.0;
+    /// Aligned with [`CONVERSATION_MAX_WIDTH`] so the transcript column and the
+    /// composer share the same visual measure.
+    pub const READING_MAX_WIDTH: f64 = 1040.0;
     /// Shared centered column for a transcript turn and its composer.
     pub const CONVERSATION_MAX_WIDTH: f64 = 1040.0;
     /// User prompts are intentionally narrower and right aligned.
