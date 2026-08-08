@@ -14,6 +14,7 @@
 //! Mermaid 与代码高亮均走 Rust + 原生 XAML；数学公式仍按字面文本降级。
 
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,13 +31,12 @@ use crate::chat_adapter;
 /// UI 线程的一次 retained-mode 更新中提交；不逐 token 触碰控件树。
 const PUMP_INTERVAL: Duration = Duration::from_millis(16);
 
-/// 跟随尾部滚动请求节流：live 流式期间 50ms 一次贴底请求（原 100ms——
-/// 文本更新与视口贴底存在半拍延迟，视觉呈"内容在底部下方攒动"；减半
-/// 提升跟手性）。16ms 泵每 tick 都请求会让滚动与用户滚轮/滚动条抢占，
-/// 并形成"滚动 → 行 realize → 渲染 → 再滚动"反馈循环，UI 线程满载
-/// （表现为滚动条卡死）——若实机出现该现象回退 100ms。结构性变化
-/// （restore / 新 turn / round 完成）不受此限，立即滚底。
-const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(50);
+/// 跟随尾部滚动请求节流：live 流式期间 100ms 一次贴底请求。16ms 泵每
+/// tick 都请求会让滚动与用户滚轮/滚动条抢占，并形成"滚动 → 行 realize
+/// → 渲染 → 再滚动"反馈循环，UI 线程满载（表现为滚动条卡死）；100ms
+/// 是经实机验证的折中（原 50ms 在长文本流式下仍会触发卡顿）。结构性
+/// 变化（restore / 新 turn / round 完成）不受此限，立即滚底。
+const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 
 /// 顶部预加载分页大小：滚动接近窗口顶部时一次扩展的回合数。
 /// 与 `markdown_winui::WINDOW_DEFAULT_LEN` 同量级，可经实机手感调优。
@@ -107,10 +107,18 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 独立提交，不会因构造 rev 与下一条传输 rev 碰撞而漏帧。
     let render_generation = cx.use_ref::<u64>(0);
     let (_, set_render_generation) = cx.use_state::<u64>(0);
+    // Live 渲染节流：流式 delta 不逐帧提交 XAML（60fps → ~20fps），
+    // 降低 reconciler diff 开销。Structural 变更立即提交。
+    let last_live_render = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     // 锚定补偿挂起标记：`Some(rows)` = 本帧渲染需用 within 滚动（顶部
     // 预加载后把「原窗口首行」锚回原位，视口不跳）。rows = 扩展前移量
     // = 原首行的新下标。渲染闭包 take 后随 preserve_anchor 下发。
     let pending_anchor = cx.use_ref::<Option<usize>>(None);
+    // 窗口快照缓存：`Transcript::mutation_rev` 未变时复用同一
+    // `Rc<Vec<TurnView>>`，`list_view_rc` 的 `same_items_as` 按指针命中，
+    // reconciler 完全跳过已 realize 行的 rebuild 与 diff——流式期间每帧
+    // 只 diff 真正变化的行，消除"视口内行全量重建 + 深比较"主热点。
+    let window_cache = cx.use_ref::<Option<(u64, Rc<Vec<TurnView>>)>>(None);
 
     // 事件泵：drain bridge 队列 → Transcript；rev 变化触发重渲染。
     cx.use_effect((), {
@@ -130,6 +138,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let pending_anchor = pending_anchor.clone();
         let render_generation = render_generation.clone();
         let set_render_generation = set_render_generation.clone();
+        let last_live_render = last_live_render.clone();
         move || {
             if timer.borrow().is_some() {
                 return;
@@ -149,6 +158,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let force_tail_version = force_tail_version.clone();
                 let render_generation = render_generation.clone();
                 let set_render_generation = set_render_generation.clone();
+                let last_live_render = last_live_render.clone();
+                let pending_anchor = pending_anchor.clone();
                 move || {
                     // 会话切换：缓存旧会话的原生投影，立即恢复目标会话；
                     // canonical 快照仍会异步刷新并覆盖缓存。
@@ -156,9 +167,11 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     if seed != *last_seed.borrow() {
                         let previous_seed = last_seed.borrow().clone();
                         if !previous_seed.is_empty() {
+                            let mut cached = transcript.borrow().clone();
+                            cached.trim_to_window();
                             session_cache
                                 .borrow_mut()
-                                .store(previous_seed, transcript.borrow().clone());
+                                .store(previous_seed, cached);
                         }
                         *last_seed.borrow_mut() = seed.clone();
                         let cached = session_cache.borrow_mut().restore(&seed);
@@ -336,8 +349,17 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             *scroll_version.borrow_mut() += 1;
                             *last_scroll_request.borrow_mut() = now;
                         }
-                        *render_generation.borrow_mut() += 1;
-                        set_render_generation.call(*render_generation.borrow());
+                        // Live（非结构性）更新节流：不逐帧提交 XAML，
+                        // 降低 reconciler diff 开销（~60fps → ~20fps）。
+                        // Structural 变更（新 turn/round 完成）立即提交。
+                        if structural
+                            || now.duration_since(*last_live_render.borrow())
+                                >= SCROLL_REQUEST_THROTTLE
+                        {
+                            *last_live_render.borrow_mut() = now;
+                            *render_generation.borrow_mut() += 1;
+                            set_render_generation.call(*render_generation.borrow());
+                        }
                     }
                 }
             }) {
@@ -379,11 +401,22 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .automation_id("chat-empty")
             .with_key(format!("chat-empty-{active_seed}"));
     }
-    let turns = s.window_turns().to_vec();
+    let turns: Rc<Vec<TurnView>> = {
+        let rev = s.mutation_rev();
+        let mut cache = window_cache.borrow_mut();
+        match cache.as_ref() {
+            Some((r, rc)) if *r == rev => rc.clone(),
+            _ => {
+                let rc = Rc::new(s.window_turns().to_vec());
+                *cache = Some((rev, rc.clone()));
+                rc
+            }
+        }
+    };
     // 顶部预加载后本帧需要锚定补偿：取走挂起标记，把
     // 「原窗口首行」（新下标 = 扩展前移量）锚回原位，视口不跳。
     let anchor_rows = pending_anchor.borrow_mut().take();
-    let mut builder = list_view(turns, move |turn: &TurnView, i: usize| {
+    let mut builder = list_view_rc(turns, move |turn: &TurnView, i: usize| {
         turn_view(i, turn, color_scheme)
     })
     .with_key_selector(|turn: &TurnView| turn.turn_id.clone())
@@ -529,17 +562,19 @@ fn turn_view(i: usize, turn: &TurnView, color_scheme: ColorScheme) -> Element {
 fn round_view(turn_idx: usize, round: &RoundView, color_scheme: ColorScheme) -> Element {
     let mut items: Vec<Element> = Vec::new();
     if let Some(thinking) = &round.thinking {
+        // 斜体 RichTextBlock（思考链专用；TextBlock 不支持 FontStyle）。
+        let mut run = RichTextRun::plain(thinking);
+        run.is_italic = true;
+        let mut rt = RichTextBlock::new();
+        rt.paragraphs = vec![RichTextParagraph::new(vec![RichTextInline::Run(run)])];
+        rt.font_size = Some(tokens::TYPE_BODY);
+        rt.line_height = Some(tokens::TYPE_BODY_LINE_HEIGHT);
+        rt.text_wrapping = TextWrapping::Wrap;
+        rt.is_text_selection_enabled = true;
         items.push(
-            Expander::new(
-                text_block(thinking)
-                    .font_size(tokens::TYPE_BODY)
-                    .line_height(tokens::TYPE_BODY_LINE_HEIGHT)
-                    .foreground(ThemeRef::SecondaryText)
-                    .wrap()
-                    .selectable(),
-            )
+            Expander::new(rt)
             .header("思考过程")
-            .expanded(false)
+            .expanded(true)
             // WinUI's default ExpanderMinHeight is 48 DIP (settings-card
             // density). Transcript disclosure rows use the native template at
             // a compact desktop height while preserving its animation/UIA.
