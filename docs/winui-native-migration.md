@@ -5,6 +5,12 @@
 > 「WinUI3 全原生视图族（Rust + windows-reactor）」的最终记录。
 > 本文件是迁移终局的事实来源；后续 Windows 侧打磨均以本文描述为基线。
 
+> **2026-08-08 架构补充**：这里的“已完成”仅指 WebView/Electron 和 Web
+> 工具链已经移除、控件树已经原生化；不代表 renderer 的状态模型与协议消费方式
+> 已经完全 WinUI 原生化。Ringing 2026-08-01 之后的 typed timeline、push state、
+> typed navigation 与平台能力升级，以
+> [WinUI 原生化架构审计](./winui-native-architecture-audit.md) 为后续事实来源。
+
 ---
 
 ## 1. 迁移目标与结果
