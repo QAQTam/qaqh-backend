@@ -54,9 +54,17 @@ impl StatusTone {
             Self::Running => ThemeRef::SystemCautionBackground,
             Self::Success => ThemeRef::SystemSuccessBackground,
             Self::Critical => ThemeRef::SystemCriticalBackground,
-            Self::Neutral => ThemeRef::ControlFillSecondary,
+            Self::Neutral => card_background_secondary(),
         }
     }
+}
+
+fn card_background_secondary() -> ThemeRef {
+    ThemeRef::custom("CardBackgroundFillColorSecondaryBrush")
+}
+
+fn text_on_accent() -> ThemeRef {
+    ThemeRef::custom("TextOnAccentFillColorPrimaryBrush")
 }
 
 fn hairline() -> Thickness {
@@ -82,8 +90,9 @@ pub fn status_badge(label: impl Into<String>, tone: StatusTone) -> Element {
     .into()
 }
 
-/// Right-aligned prompt surface with an accent-tinted fill. This expresses
-/// conversation authorship through layout and material, not an emoji prefix.
+/// Right-aligned prompt surface. Authorship is expressed through layout and a
+/// narrow accent indicator; the card itself uses a resting content brush, not
+/// an accent button's pointer-over/pressed state brush.
 pub fn user_message(body: impl Into<Element>, status: Element) -> Element {
     border(
         vstack((
@@ -99,9 +108,14 @@ pub fn user_message(body: impl Into<Element>, status: Element) -> Element {
         ))
         .spacing(tokens::SPACE_2),
     )
-    .background(ThemeRef::AccentTertiary)
-    .border_brush(ThemeRef::AccentSecondary)
-    .border_thickness(hairline())
+    .background(ThemeRef::CardBackground)
+    .border_brush(ThemeRef::Accent)
+    .border_thickness(Thickness {
+        left: 2.0,
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+    })
     .corner_radius(tokens::RADIUS_MESSAGE)
     .padding(tokens::SPACE_3)
     .max_width(tokens::USER_MESSAGE_MAX_WIDTH)
@@ -116,7 +130,7 @@ pub fn assistant_message(body: impl Into<Element>) -> Element {
         text_block("DeepX")
             .font_size(tokens::TYPE_BODY)
             .semibold()
-            .foreground(ThemeRef::AccentText),
+            .foreground(ThemeRef::PrimaryText),
         body.into(),
     ))
     .spacing(tokens::SPACE_2)
@@ -135,8 +149,8 @@ pub fn assistant_message(body: impl Into<Element>) -> Element {
 /// content that should remain subordinate to the answer.
 pub fn inset_surface(child: impl Into<Element>) -> Element {
     border(child)
-        .background(ThemeRef::ControlFillSecondary)
-        .border_brush(ThemeRef::ControlStrokeSecondary)
+        .background(card_background_secondary())
+        .border_brush(ThemeRef::CardStroke)
         .border_thickness(hairline())
         .corner_radius(tokens::RADIUS_CARD)
         .padding(tokens::SPACE_3)
@@ -168,8 +182,8 @@ pub fn code_surface(
         ))
         .spacing(tokens::SPACE_2),
     )
-    .background(ThemeRef::ControlFillSecondary)
-    .border_brush(ThemeRef::ControlStrokeSecondary)
+    .background(card_background_secondary())
+    .border_brush(ThemeRef::CardStroke)
     .border_thickness(hairline())
     .corner_radius(tokens::RADIUS_CARD)
     .padding(tokens::SPACE_3)
@@ -186,11 +200,11 @@ pub fn empty_state(title: impl Into<String>, detail: impl Into<String>, busy: bo
             text_block("DX")
                 .font_size(tokens::TYPE_CAPTION)
                 .semibold()
-                .foreground(ThemeRef::AccentText),
+                .foreground(text_on_accent()),
         )
         .width(40.0)
         .height(40.0)
-        .background(ThemeRef::AccentTertiary)
+        .background(ThemeRef::Accent)
         .corner_radius(20.0)
         .horizontal_alignment(HorizontalAlignment::Center)
         .into()
@@ -215,6 +229,33 @@ pub fn empty_state(title: impl Into<String>, detail: impl Into<String>, busy: bo
     .into()
 }
 
+/// Persistent command surface placed above Mica/content. It deliberately uses
+/// the layer brush instead of Acrylic; Acrylic remains reserved for transient
+/// flyouts and menus provided by WinUI controls.
+pub fn command_surface(child: impl Into<Element>) -> Element {
+    border(child)
+        .background(ThemeRef::LayerFill)
+        .border_brush(ThemeRef::SurfaceStroke)
+        .border_thickness(hairline())
+        .corner_radius(tokens::RADIUS_CARD)
+        .into()
+}
+
+/// Small non-interactive metadata marker such as a file type.
+pub fn metadata_badge(label: impl Into<String>) -> Element {
+    border(
+        text_block(label)
+            .font_size(tokens::TYPE_CAPTION)
+            .foreground(ThemeRef::SecondaryText),
+    )
+    .background(card_background_secondary())
+    .border_brush(ThemeRef::CardStroke)
+    .border_thickness(hairline())
+    .corner_radius(tokens::RADIUS_CONTROL)
+    .padding(Thickness::xy(6.0, 3.0))
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +270,18 @@ mod tests {
     }
 
     #[test]
+    fn resting_surfaces_do_not_reuse_interaction_state_brushes() {
+        assert_eq!(
+            card_background_secondary().resource_key(),
+            "CardBackgroundFillColorSecondaryBrush"
+        );
+        assert_eq!(
+            text_on_accent().resource_key(),
+            "TextOnAccentFillColorPrimaryBrush"
+        );
+    }
+
+    #[test]
     fn primitives_build_native_reactor_elements() {
         assert_eq!(
             status_badge("完成", StatusTone::Success).kind_name(),
@@ -239,5 +292,7 @@ mod tests {
             code_surface("rs", "fn main() {}", "code").kind_name(),
             "Border"
         );
+        assert_eq!(command_surface(grid(())).kind_name(), "Border");
+        assert_eq!(metadata_badge("TXT").kind_name(), "Border");
     }
 }

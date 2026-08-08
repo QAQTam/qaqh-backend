@@ -1,6 +1,6 @@
 # DeepX WinUI / Fluent 视觉系统
 
-> 状态：Phase 1 已落地（2026-08-08）
+> 状态：Phase 1 已落地；Phase 2 Composer 已落地（2026-08-08）
 >
 > 范围：`deepx-fluent`、`apps/winui`、`markdown-winui`
 > 目标：让 DeepX 成为遵循 Windows 11 交互与视觉语义的原生工作台，而不是把 Web
@@ -76,12 +76,28 @@ Acrylic 定位为临时或 light-dismiss surface；并排或嵌套的 Acrylic �
 这些是语义 token，不是任意页面常量。若视觉验收后需要调整，应修改 token 或新增明确
 variant，禁止重新在页面内散落 RGB 和魔法数。
 
+### ThemeResource 使用约束
+
+WinUI 资源名里的 `Secondary` / `Tertiary` 不等于“视觉层级较低”。很多资源是控件
+VisualState 专用状态，例如 `ControlFillColorSecondaryBrush` 是 pointer-over，
+`AccentFillColorSecondaryBrush` / `TertiaryBrush` 分别对应 pointer-over / pressed。它们
+不能作为静态卡片或消息的 resting fill。
+
+- 静态内容：`CardBackground*`、`LayerFill*` 与对应 stroke；
+- 交互状态：由 Button、ComboBox、MenuFlyout 等原生控件模板消费 Control/Accent state
+  brush，页面不直接借用；
+- accent 实心背景上的文本：`TextOnAccentFillColorPrimaryBrush`；
+- High Contrast：保持系统 ThemeResource 映射，不用 RGB 或自行计算透明度绕开系统资源。
+
+每次新增 surface 时，必须先回答它是 resting content、persistent command surface，还是
+transient interaction surface，再选择资源。
+
 ## 4. ChatView 语义
 
 ### 用户消息
 
 - 右对齐，最大宽度 720 DIP；
-- `AccentTertiary` 填充、`AccentSecondary` 细描边；
+- `CardBackground` resting fill，左侧 2 DIP accent ownership indicator；
 - 作者和状态在独立 header 行；
 - 状态使用“正在处理 / 已完成 / 失败”与系统 caution/success/critical 资源；
 - 消息文本保持可选择，不把状态字符混入复制内容。
@@ -97,7 +113,7 @@ variant，禁止重新在页面内散落 RGB 和魔法数。
 
 - 思考使用原生 `Expander`，默认折叠；
 - 工具调用使用原生 `Expander`，header 采用文本状态，不使用脑、扳手、沙漏等 emoji；
-- 代码块使用 `ControlFillSecondary`、`ControlStrokeSecondary` 和 Cascadia Mono；
+- 代码块使用 secondary card resting fill、`CardStroke` 和 Cascadia Mono；
 - 后续为工具 header 和代码复制动作增加真正的 `SymbolIcon`、Tooltip 和
   `CommandBarFlyout`，但不能用不可访问的 glyph 字符冒充按钮。
 
@@ -124,14 +140,14 @@ sidebar、settings 和独立诊断窗口可以复用同一 crate。
 
 ## 6. 后续阶段
 
-### Phase 2：Composer 与 Shell
+### Phase 2：Composer 与 Shell（Composer 已完成）
 
-1. Composer 改成 Windows 11 持久 command surface：输入区、附件、mode、permission、
-   send/stop 建立主次动作层级。
-2. 字符按钮替换为 `Icon::symbol` / `Icon::font`，全部 icon-only 控件补 Tooltip 和
-   AutomationName。
-3. sidebar、tab strip、info pane 统一 selection indicator、layer fill 和 divider。
-4. Mica 保留在窗口/标题栏基础层；面板不随意改 Acrylic。
+1. [完成] Composer 使用 Windows 11 持久 command surface；输入区、附件、mode、
+   permission、send/stop 建立主次动作层级。
+2. [完成] 附件使用原生 `MenuFlyout`；权限四选一使用 `ComboBox`；发送、停止、删除和
+   附件入口使用 `SymbolIcon`，icon-only 控件具备 Tooltip、AutomationName、AutomationId。
+3. [待办] sidebar、tab strip、info pane 统一 selection indicator、layer fill 和 divider。
+4. [持续约束] Mica 保留在窗口/标题栏基础层；面板不随意改 Acrylic。
 
 ### Phase 3：富内容与视觉状态
 
@@ -164,7 +180,22 @@ sidebar、settings 和独立诊断窗口可以复用同一 crate。
 
 本轮没有截图，也没有启动应用窗口。
 
-## 8. 验收门槛
+## 8. Microsoft winui-design skill
+
+设计审查基线采用
+[microsoft/win-dev-skills 的 winui-design](https://github.com/microsoft/win-dev-skills/tree/v0.5.0/plugins/winui/skills/winui-design)，
+并固定到 `v0.5.0`。升级 skill 时先阅读 release/tag diff，再审查本文件中的资源、控件、
+accessibility 和测试约束，不能把新示例语法机械复制到 Rust。
+
+该 skill 面向通用 WinUI 3，并不限定 C++：ThemeResource、XAML 控件选择、Fluent
+Design、键盘、UI Automation 和 High Contrast 规则对 C#、C++/WinRT、Rust/windows-rs
+都适用。它的示例和 `winui-search` 工具主要是 C#/XAML / microsoft-ui-reactor 写法；
+DeepX 只移植设计语义与控件映射，具体 API 使用 `windows-reactor` 投影。
+
+仓库提供的 `winui-search.exe` 未签名，不纳入 DeepX 构建或 CI；需要检索时优先查官方
+文档与可审计源码。
+
+## 9. 验收门槛
 
 - ChatView 生产代码不再用 literal RGB 或 emoji 表达状态；
 - light/dark/high-contrast 下信息层级和状态均可辨认；

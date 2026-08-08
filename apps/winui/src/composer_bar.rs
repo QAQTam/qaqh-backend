@@ -7,8 +7,8 @@
 //! ├ slash 菜单（composer 上方覆盖层 cell）                      │  ← 可选
 //! └ 卡片（LayerFill + 圆角 8px，对齐 .composer-dock）           │
 //!   ├ TextBox（多行 + Enter accelerator 发送 / Shift+Enter 换行）│
-//!   ├ submitError 行 / 附件预览行 / 附件菜单（图片|文本）        │
-//!   └ footer：mode 切换 | 权限 pill | token/model | 发送↑/停止■  │
+//!   ├ submitError 行 / 附件预览行                               │
+//!   └ footer：附件 MenuFlyout | mode | 权限 ComboBox | 发送/停止 │
 //! ```
 //!
 //! 数据源：`bridge.core().composer_snapshot()`（Web `shell.setComposer`
@@ -25,7 +25,7 @@
 //! - textarea 62→180px 自动高度 → TextBox 固定高（72px + 滚动）
 //! - 毛玻璃 backdrop-filter → LayerFill + 圆角（壳内统一，同 info_panel）
 //! - 附件图片预览（object URL）→ 一期仅文件名 + 大小（阶段 B 临时文件）
-//! - 附件/slash 菜单 absolute 定位 → 卡片内覆盖层 cell（语义等价）
+//! - 附件菜单 → 原生 MenuFlyout；slash 菜单仍在卡片上方 cell
 //! - TodoStatusStrip 展开列表 → 计数徽标 + 当前任务行（二期展开）
 //! - Enter 发送走 KeyboardAccelerator（reactor 无 KeyDown；Shift+Enter
 //!   因带修饰键不匹配 accelerator → TextBox 默认换行保留）
@@ -36,6 +36,8 @@ use std::time::Duration;
 
 use windows_reactor::*;
 
+use deepx_fluent::tokens;
+
 use crate::bridge::{Bridge, ComposerAttachment, ComposerState, ComposerTextFile};
 use crate::shell_store::DashboardSnapshot;
 
@@ -43,8 +45,6 @@ use crate::shell_store::DashboardSnapshot;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// 输入框高度（对齐 Web textarea 62px 起步视觉）。
 const INPUT_HEIGHT: f64 = 72.0;
-/// 等宽字体（附件路径/元信息；同 info_panel `MONO_FONT`）。
-const MONO_FONT: &str = "Consolas";
 
 /// 诊断日志（同 main.rs log_diag 约定：GUI 子系统无控制台，写文件）。
 fn log_diag(msg: &str) {
@@ -149,16 +149,14 @@ fn remove_preview(preview_path: Option<&str>) {
 struct Draft {
     text: String,
     attachments: Vec<AttachmentItem>,
-    attach_open: bool,
     selected_slash: usize,
     dismissed_slash: Option<String>,
 }
 
-/// 小标题（eyebrow：11px 600 muted，同 info_panel `section_heading`）。
+/// 小标题（Windows caption typography，避免低于 12 DIP 的自定义字号）。
 fn eyebrow(text: &str) -> Element {
     text_block(text)
-        .font_size(11.0)
-        .semibold()
+        .font_size(tokens::TYPE_CAPTION)
         .foreground(ThemeRef::SecondaryText)
         .into()
 }
@@ -238,7 +236,6 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     }
                     d.text.clear();
                     d.attachments.clear();
-                    d.attach_open = false;
                     log_diag("sendAck: draft cleared");
                 }
             }
@@ -250,7 +247,6 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 }
                 d.text.clear();
                 d.attachments.clear();
-                d.attach_open = false;
                 d.selected_slash = 0;
                 d.dismissed_slash = None;
                 log_diag("seed changed: draft reset");
@@ -356,7 +352,6 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     path,
                     preview_path,
                 });
-                d.attach_open = false;
                 drop(d);
                 let v = *draft_ver.borrow() + 1;
                 *draft_ver.borrow_mut() = v;
@@ -383,7 +378,6 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     path,
                     preview_path: None,
                 });
-                d.attach_open = false;
                 drop(d);
                 let v = *draft_ver.borrow() + 1;
                 *draft_ver.borrow_mut() = v;
@@ -409,21 +403,6 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             set_draft_version.call(v);
         }
     });
-    // 附件菜单开合。
-    let on_toggle_attach = {
-        let draft = draft.clone();
-        let draft_ver = draft_ver.clone();
-        let set_draft_version = set_draft_version.clone();
-        move || {
-            let mut d = draft.borrow_mut();
-            d.attach_open = !d.attach_open;
-            drop(d);
-            let v = *draft_ver.borrow() + 1;
-            *draft_ver.borrow_mut() = v;
-            set_draft_version.call(v);
-        }
-    };
-
     // footer 动作（直连动作：协议请求 Rust 直发，不再回传 Web）。
     let on_mode_toggle = {
         let bridge = bridge.clone();
@@ -458,7 +437,6 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let d = draft.borrow();
     let text = d.text.clone();
     let attachments = d.attachments.clone();
-    let attach_open = d.attach_open;
     let selected_slash = d.selected_slash;
     let dismissed = d.dismissed_slash.clone();
     // slash 菜单可见性（对齐 Web visibleSlashCommands）。
@@ -573,6 +551,8 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             VirtualKeyModifiers::None,
             on_enter,
         ))
+        .automation_name("消息输入")
+        .automation_id("composer-input")
         .into();
     if slash_visible {
         input = input
@@ -593,13 +573,23 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             ));
     }
 
-    // 附件预览行（图片：缩略图 + 文件名；文本：图标 + 文件名；均含大小与移除）。
+    // 原生附件菜单：让 WinUI 负责弹层、焦点、键盘和无障碍语义。
+    let attach_button = button("")
+        .icon(Symbol::Attach)
+        .subtle()
+        .menu_flyout(vec![menu_item("上传图片"), menu_item("上传文本")])
+        .on_item_clicked(move |label: String| match label.as_str() {
+            "上传图片" => on_pick_image(),
+            "上传文本" => on_pick_text(),
+            _ => {}
+        })
+        .tooltip("添加附件")
+        .automation_name("添加附件")
+        .automation_id("composer-attach");
+
+    // 附件预览行（图片：缩略图 + 文件名；文本：类型徽标 + 文件名）。
     let mut attach_rows: Vec<Element> = Vec::new();
     for (i, att) in attachments.iter().enumerate() {
-        let icon = match att.kind {
-            AttachmentKind::Image { .. } => "🖼️",
-            AttachmentKind::Text => "📄",
-        };
         // 图片缩略图：file:// URI 加载 %TEMP% 预览副本（48x48，等比裁切）。
         let thumb: Element = match (&att.kind, &att.preview_path) {
             (AttachmentKind::Image { .. }, Some(p)) => {
@@ -613,45 +603,37 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .corner_radius(4.0)
                 .into()
             }
-            _ => text_block(icon).font_size(16.0).into(),
+            (AttachmentKind::Image { .. }, None) => deepx_fluent::metadata_badge("IMG"),
+            (AttachmentKind::Text, _) => deepx_fluent::metadata_badge("TXT"),
         };
-        let row: Element = border(
+        let remove_name = format!("移除附件 {}", att.file_name);
+        let row: Element = deepx_fluent::inset_surface(
             hstack((
                 thumb,
                 text_block(format!("{} ({})", att.file_name, att.size_label()))
-                    .font_size(12.0)
-                    .font_family(MONO_FONT)
+                    .font_size(tokens::TYPE_CAPTION)
                     .foreground(ThemeRef::SecondaryText),
-                button("×").subtle().on_click({
-                    let on_remove_attach = on_remove_attach.clone();
-                    let id = att.id.clone();
-                    move || on_remove_attach(id.clone())
-                }),
+                button("")
+                    .icon(Symbol::Cancel)
+                    .subtle()
+                    .tooltip(remove_name.clone())
+                    .automation_name(remove_name)
+                    .automation_id(format!("composer-remove-{}", att.id))
+                    .on_click({
+                        let on_remove_attach = on_remove_attach.clone();
+                        let id = att.id.clone();
+                        move || on_remove_attach(id.clone())
+                    }),
             ))
-            .spacing(8.0),
+            .spacing(tokens::SPACE_2),
         )
-        .background(ThemeRef::ControlFillSecondary)
-        .corner_radius(4.0)
-        .padding(4.0)
-        .into();
+        .automation_name(format!("附件 {}", att.file_name));
         attach_rows.push(row.with_key(format!("att-{i}-{}", att.id)));
     }
     let attach_preview: Element = if attach_rows.is_empty() {
         grid(()).into()
     } else {
-        vstack(attach_rows).spacing(4.0).into()
-    };
-
-    // 附件菜单（attach_open 时在 footer 上方）。
-    let attach_menu: Element = if attach_open {
-        hstack((
-            button("🖼️ 上传图片").subtle().on_click(on_pick_image),
-            button("📄 上传文本").subtle().on_click(on_pick_text),
-        ))
-        .spacing(8.0)
-        .into()
-    } else {
-        grid(()).into()
+        vstack(attach_rows).spacing(tokens::SPACE_1).into()
     };
 
     // submitError 行（Web 失败回填；壳保留草稿不清空）。
@@ -659,9 +641,12 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         grid(()).into()
     } else {
         text_block(&state.submit_error)
-            .font_size(12.0)
+            .font_size(tokens::TYPE_CAPTION)
             .foreground(ThemeRef::SystemCritical)
             .wrap()
+            .accessibility_live_setting(AutomationLiveSetting::Assertive)
+            .automation_name(format!("发送失败：{}", state.submit_error))
+            .automation_id("composer-submit-error")
             .into()
     };
 
@@ -669,20 +654,31 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let can_send = (!text.trim().is_empty() || !attachments.is_empty()) && !has_pending_gate;
     let meta: Element = hstack((
         text_block(format!("{:.1}K", state.context_tokens as f64 / 1000.0))
-            .font_size(12.0)
+            .font_size(tokens::TYPE_CAPTION)
             .foreground(ThemeRef::SecondaryText),
         text_block(&state.model)
-            .font_size(12.0)
+            .font_size(tokens::TYPE_CAPTION)
             .foreground(ThemeRef::SecondaryText),
     ))
-    .spacing(8.0)
+    .spacing(tokens::SPACE_2)
     .into();
     let send_stop: Element = if is_streaming {
-        button("■").subtle().on_click(on_stop).into()
+        button("")
+            .icon(Symbol::Stop)
+            .subtle()
+            .tooltip("停止生成")
+            .automation_name("停止生成")
+            .automation_id("composer-stop")
+            .on_click(on_stop)
+            .into()
     } else {
-        button("↑")
+        button("")
+            .icon(Symbol::Send)
             .accent()
             .enabled(can_send)
+            .tooltip("发送消息 (Enter)")
+            .automation_name("发送消息")
+            .automation_id("composer-send")
             .on_click({
                 let cb = on_submit.clone();
                 move || cb()
@@ -690,46 +686,51 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .into()
     };
 
-    // 权限 pill（对齐 Web PermissionLevelSelect 4 档；active 用 accent）。
-    let mut pills: Vec<Element> = Vec::new();
-    for (value, label) in [(1u64, "L1"), (2u64, "L2"), (3u64, "L3"), (4u64, "L4")] {
-        let active = state.permission_level == value;
-        let mut pill = button(label).subtle().on_click({
+    // 四档权限属于 4+ 单选集合，用 ComboBox 避免网页式 pill 兼容层。
+    let permission_picker: Element = ComboBox::new(["L1", "L2", "L3", "L4"])
+        .selected_index(state.permission_level.saturating_sub(1).min(3) as i32)
+        .on_selection_changed({
             let on_permission = on_permission.clone();
-            move || on_permission(value)
-        });
-        if active {
-            pill = pill.accent();
-        }
-        pills.push(pill.into());
-    }
+            move |index: i32| {
+                if index >= 0 {
+                    on_permission((index + 1) as u64);
+                }
+            }
+        })
+        .width(80.0)
+        .tooltip("权限级别")
+        .automation_name("权限级别")
+        .automation_id("composer-permission-level")
+        .into();
 
     // footer 行：左（附件 + mode）| 右（元信息 + 发送/停止）。
     let footer: Element = hstack((
-        button("＋").subtle().on_click(on_toggle_attach),
+        attach_button,
         button(if state.mode == "plan" {
             "规划"
         } else {
             "执行"
         })
         .subtle()
+        .tooltip("切换工作模式")
+        .automation_name("工作模式")
+        .automation_id("composer-mode")
         .on_click(on_mode_toggle),
         grid(()).horizontal_alignment(HorizontalAlignment::Stretch),
-        vstack((meta, hstack(pills).spacing(4.0))).spacing(4.0),
+        vstack((meta, permission_picker)).spacing(tokens::SPACE_1),
         send_stop,
     ))
-    .spacing(8.0)
+    .spacing(tokens::SPACE_2)
     .into();
 
-    // 卡片。
-    let card: Element = border(
-        vstack((input, error_row, attach_preview, attach_menu, footer))
-            .spacing(8.0)
-            .padding(12.0),
+    // 持久命令表面使用 LayerFill；边框/圆角由共享 Fluent primitive 统一。
+    let card: Element = deepx_fluent::command_surface(
+        vstack((input, error_row, attach_preview, footer))
+            .spacing(tokens::SPACE_2)
+            .padding(tokens::SPACE_3),
     )
-    .corner_radius(8.0)
-    .background(ThemeRef::LayerFill)
-    .into();
+    .automation_name("消息编辑器")
+    .automation_id("composer-surface");
 
     // goalBar（dashboard 非空时）。
     let goal_bar: Element = match dashboard.as_ref() {
@@ -751,6 +752,8 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             let selected = i == selected_slash;
             let mut opt = button(format!("{cmd}  {label}  {desc}"))
                 .subtle()
+                .automation_name(format!("选择命令 {cmd}"))
+                .automation_id(format!("composer-slash-{i}"))
                 .on_click({
                     let on_slash_pick = on_slash_pick.clone();
                     let cmd = cmd.clone();
@@ -797,9 +800,12 @@ fn goal_bar_row(snap: &DashboardSnapshot) -> Element {
         parts.push(
             hstack((
                 eyebrow("当前任务"),
-                text_block(&task.subject).font_size(12.0).semibold().wrap(),
+                text_block(&task.subject)
+                    .font_size(tokens::TYPE_CAPTION)
+                    .semibold()
+                    .wrap(),
                 text_block(&task.status)
-                    .font_size(11.0)
+                    .font_size(tokens::TYPE_CAPTION)
                     .foreground(ThemeRef::SystemCaution),
             ))
             .spacing(8.0)
@@ -810,7 +816,7 @@ fn goal_bar_row(snap: &DashboardSnapshot) -> Element {
         text_block(format!(
             "待处理 {pending} · 进行中 {in_progress} · 已完成 {done}"
         ))
-        .font_size(11.0)
+        .font_size(tokens::TYPE_CAPTION)
         .foreground(ThemeRef::SecondaryText)
         .into(),
     );
@@ -824,16 +830,23 @@ fn goal_bar_row(snap: &DashboardSnapshot) -> Element {
 fn queue_row(state: &ComposerState, on_queue_remove: Arc<dyn Fn(String) + 'static>) -> Element {
     let mut items: Vec<Element> = Vec::new();
     for (i, item) in state.queue_items.iter().enumerate() {
+        let remove_name = format!("移除后续任务 {}", item.text);
         let row: Element = hstack((
             text_block(&item.text)
-                .font_size(12.0)
+                .font_size(tokens::TYPE_CAPTION)
                 .foreground(ThemeRef::SecondaryText)
                 .wrap(),
-            button("×").subtle().on_click({
-                let on_queue_remove = on_queue_remove.clone();
-                let id = item.id.clone();
-                move || on_queue_remove(id.clone())
-            }),
+            button("")
+                .icon(Symbol::Cancel)
+                .subtle()
+                .tooltip(remove_name.clone())
+                .automation_name(remove_name)
+                .automation_id(format!("composer-queue-remove-{}", item.id))
+                .on_click({
+                    let on_queue_remove = on_queue_remove.clone();
+                    let id = item.id.clone();
+                    move || on_queue_remove(id.clone())
+                }),
         ))
         .spacing(8.0)
         .into();
@@ -842,7 +855,7 @@ fn queue_row(state: &ComposerState, on_queue_remove: Arc<dyn Fn(String) + 'stati
     border(
         vstack((
             text_block(format!("{} 条后续任务已排队", state.queue_count))
-                .font_size(12.0)
+                .font_size(tokens::TYPE_CAPTION)
                 .semibold(),
             vstack(items).spacing(4.0),
         ))

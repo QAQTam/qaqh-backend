@@ -274,7 +274,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 false,
             )
         };
-        return deepx_fluent::empty_state(title, detail, busy).with_key("chat-empty");
+        return deepx_fluent::empty_state(title, detail, busy)
+            .automation_name(title)
+            .automation_id("chat-empty")
+            .with_key("chat-empty");
     }
     let turns = s.window_turns().to_vec();
     // 顶部预加载后本帧需要锚定补偿：取走挂起标记，把
@@ -291,7 +294,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     } else {
         builder = builder.follow_tail(*scroll_version.borrow());
     }
-    builder
+    let transcript_list: Element = builder
         .on_top_reached({
             let bridge = bridge.clone();
             let transcript = transcript.clone();
@@ -332,7 +335,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         })
         .top_threshold(NEAR_TOP_THRESHOLD_PX)
         .with_key("chat-transcript")
-        .into()
+        .into();
+    transcript_list
+        .automation_name("对话记录")
+        .automation_id("chat-transcript")
 }
 
 // ── turn / round / answer 渲染（移植自 streaming-demo）─────────────
@@ -379,6 +385,9 @@ fn round_view(turn_idx: usize, round: &RoundView) -> Element {
             )
             .header("思考过程")
             .expanded(false)
+            .tooltip("展开或折叠思考过程")
+            .automation_name("思考过程")
+            .automation_id(format!("chat-thinking-{turn_idx}-{}", round.round_num))
             .with_key(format!("t{turn_idx}r{}-thinking", round.round_num))
             .into(),
         );
@@ -528,6 +537,9 @@ fn tool_card(turn_idx: usize, round_num: u32, card: &markdown_winui::ToolCardVie
     Expander::new(body)
         .header(format!("{status} · {name}"))
         .expanded(false)
+        .tooltip(format!("展开或折叠工具详情：{name}"))
+        .automation_name(format!("工具 {name}，{status}"))
+        .automation_id(format!("chat-tool-{}", card.id))
         .with_key(format!("t{turn_idx}r{round_num}-card-{}", card.id))
         .into()
 }
