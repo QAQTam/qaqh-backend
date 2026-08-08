@@ -12,8 +12,8 @@
 //!
 //! 协议驱动渲染（针对后端设计，`round_renderer`）：
 //! - [`protocol`]：事件模型，形状对齐 `deepx-domain::ConversationEvent`
-//! - [`round_renderer`]：Transcript 状态机 → 渲染命令序列（live 尾巴 /
-//!   final 重建 / 工具卡 upsert / 内容局域化），UI 层按命令执行
+//! - [`round_renderer`]：协议事件 → Transcript 声明式状态；UI 由稳定 key
+//!   的 Element 树交给 windows-reactor reconciler 提交到 XAML
 //!
 //! 已知 fork 缺口（本原型暴露，见 README 可行性矩阵）：
 //! - `RichTextRun` 缺前景色字段（高亮 token 着色需要 fork 扩展）
@@ -26,12 +26,11 @@ mod round_renderer;
 
 pub use protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
 pub use round_renderer::{
-    AnswerView, LiveSegment, RenderCommand, RestoredRound, RestoredTurn, RoundView, ToolCardView,
-    Transcript, TurnStatus, TurnView, XamlFrameUpdate, XamlInvalidation,
+    AnswerView, LiveSegment, PendingOutput, RestoredRound, RestoredTurn, RoundView, ToolCardView,
+    Transcript, TranscriptChange, TranscriptInvalidation, TurnStatus, TurnView,
 };
 
 use markdown_core::ast::{Block, Inline};
-use markdown_core::{RenderOp, RenderPlan, StreamingMarkdown};
 use windows_reactor::{
     Element, ElementExt, GridLength, RichTextBlock, RichTextHyperlink, RichTextInline,
     RichTextParagraph, RichTextRun, border, grid, text_block,
@@ -73,51 +72,6 @@ pub struct TableData {
 pub struct CodeBlock {
     pub lang: Option<String>,
     pub text: String,
-}
-
-/// 流式渲染器：把 `StreamingMarkdown` 的渲染计划映射为
-/// `RichTextOutput` 增量（live 只更新段落，final 全量替换）。
-#[derive(Clone, Debug, Default)]
-pub struct StreamingRichText {
-    pub output: RichTextOutput,
-}
-
-impl StreamingRichText {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 追加增量并应用渲染计划。
-    pub fn append(&mut self, md: &mut StreamingMarkdown, delta: &str) {
-        let plan = md.append(delta);
-        self.apply(&plan);
-    }
-
-    pub fn finalize(&mut self, md: &mut StreamingMarkdown) {
-        let plan = md.finalize();
-        self.apply(&plan);
-    }
-
-    fn apply(&mut self, plan: &RenderPlan) {
-        for op in &plan.ops {
-            match op {
-                RenderOp::Final { blocks } => {
-                    self.output = render_final(blocks);
-                }
-                RenderOp::Live { inlines, .. } => {
-                    // live 阶段：仅替换"活尾段落"（最后一段）
-                    let tail_para = RichTextParagraph::new(inlines_to_rich(inlines));
-                    if self.output.paragraphs.is_empty() {
-                        self.output.paragraphs.push(tail_para);
-                    } else {
-                        let last = self.output.paragraphs.len() - 1;
-                        self.output.paragraphs[last] = tail_para;
-                    }
-                }
-                RenderOp::WaitFinal | RenderOp::Noop => {}
-            }
-        }
-    }
 }
 
 /// final 渲染：AST → 富文本产物。
@@ -453,25 +407,6 @@ mod tests {
             })
             .collect();
         assert!(joined.contains("$x^2=4$"), "必须回退字面: {joined}");
-    }
-
-    /// 流式：live 期间段落增量更新，final 全量替换
-    #[test]
-    fn streaming_live_then_final() {
-        let mut md = StreamingMarkdown::new();
-        let mut view = StreamingRichText::new();
-        view.append(&mut md, "hello **wor");
-        assert_eq!(view.output.paragraphs.len(), 1);
-        // 未闭合 **：字面
-        let joined = inline_text(&view.output.paragraphs[0]);
-        assert_eq!(joined, "hello **wor");
-
-        view.append(&mut md, "ld**");
-        let joined = inline_text(&view.output.paragraphs[0]);
-        assert!(
-            joined.contains("bold") || joined.contains("world"),
-            "{joined}"
-        );
     }
 
     fn inline_text(p: &RichTextParagraph) -> String {

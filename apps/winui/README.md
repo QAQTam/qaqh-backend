@@ -28,7 +28,7 @@ DeepX.exe（WinUI3 壳，windows-reactor）
 ├─ 原生视图族（XAML 控件树，reactor diff 只更新变化节点）
 │  ├─ sidebar / header / home / skills / settings / interaction_overlay
 │  └─ chat 区：composer_bar + chat_view
-│     └─ chat_view：16ms XAML 帧合并 → Transcript RenderCommand → ListView 虚拟化渲染
+│     └─ chat_view：16ms XAML 帧合并 → Transcript 状态 → keyed ListView 声明式渲染
 │        （turn 壳 + thinking 气泡框 + tool 折叠卡 + live/final 富文本）
 └─ bridge.rs（UI 线程侧）
    └─ BridgeCore（tokio 侧）：deepx-client 直连 daemon
@@ -42,7 +42,7 @@ DeepX.exe（WinUI3 壳，windows-reactor）
   UI 侧 DispatcherTimer 泵（16ms/250ms）drain 后触发重渲染；命令/查询
   （发送消息、会话管理、技能操作）Rust 直发，不经 Web 中转。
 - **ChatView**：快照恢复历史（seed 权威标记 + 子对象解包）、流式 live 渲染
-  （贴底滚动 + 100ms 滚动节流 + 33ms 渲染降频）、provider 工具状态
+  （贴底滚动 + 50ms 跟尾节流 + 16ms 帧合并）、provider 工具状态
   （`provider_tool_status` → 折叠工具卡）、思考链路气泡框。
 
 ## 状态矩阵
@@ -122,5 +122,6 @@ winui-app/
 
 - `docs/winui-native-migration.md` — WebView → WinUI3 最终迁移文档
 - `docs/windows-reactor-skill.md` — windows-reactor 开发要点
+- `docs/winui-chat-rendering-maintenance.md` — ChatView 单一渲染路径与上游同步门禁
 - `apps/winui/CHATVIEW-RENDERING-REFERENCE.md` — ChatView 渲染规格
 - `crates/markdown-winui/` — 流式 markdown 渲染 crate

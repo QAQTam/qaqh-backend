@@ -1,6 +1,6 @@
 //! 规模粗测（`#[ignore]`，显式运行：`cargo test -p markdown-winui --test scale -- --ignored --nocapture`）。
 //!
-//! 验证两个命题（虚拟化决策的数据依据）：
+//! 只验证 Transcript 模型层的两个命题（不代表 reactor/XAML benchmark）：
 //! 1. **追加成本与历史规模无关（O(1)）**：灌入 1k / 10k turn 后，
 //!    追加单个 turn 的耗时基本不变——协议局域化 + append-only 的实证；
 //! 2. **全量事件回放可线性扩展**：万级 turn 事件序列整体回放耗时线性。
@@ -10,7 +10,7 @@
 
 use std::time::Instant;
 
-use markdown_winui::{ConversationEvent, RenderCommand, RoundDeltaKind, Transcript};
+use markdown_winui::{ConversationEvent, RoundDeltaKind, Transcript};
 
 /// 构造一个 turn 的完整事件序列（2 rounds × 若干 delta + 终态）。
 fn turn_events(turn_id: &str) -> Vec<ConversationEvent> {
@@ -50,15 +50,15 @@ fn turn_events(turn_id: &str) -> Vec<ConversationEvent> {
 fn replay(n_turns: usize) -> (Transcript, u128) {
     let mut t = Transcript::new();
     let start = Instant::now();
-    let mut cmd_count = 0usize;
+    let mut changed_count = 0usize;
     for i in 0..n_turns {
         for ev in turn_events(&format!("turn{i:08x}")) {
-            cmd_count += t.apply(&ev).len();
+            changed_count += usize::from(t.apply(&ev).changed());
         }
     }
     let elapsed = start.elapsed().as_millis();
     println!(
-        "replay {n_turns} turns: {elapsed} ms total, {} ms/turn, {cmd_count} render commands",
+        "replay {n_turns} turns: {elapsed} ms total, {} ms/turn, {changed_count} model changes",
         elapsed as f64 / n_turns as f64
     );
     (t, elapsed)
@@ -94,20 +94,10 @@ fn append_cost_is_independent_of_history_size() {
         "追加成本随历史规模增长：t_1k={t_1k}µs t_10k={t_10k}µs"
     );
 
-    // 追加只产生该 turn 的命令（局域化不随规模失效）
-    let cmds = t10k.apply(&evs[0]);
-    assert!(
-        cmds.iter().all(|c| matches!(
-            c,
-            RenderCommand::MountTurn { .. }
-                | RenderCommand::UpdateLiveTail { turn: 10000, .. }
-                | RenderCommand::UpdateThinking { turn: 10000, .. }
-                | RenderCommand::UpsertToolCard { turn: 10000, .. }
-                | RenderCommand::RebuildRound { turn: 10000, .. }
-                | RenderCommand::UpdateTurnStatus { index: 10000, .. }
-        )),
-        "追加命令必须只指向新 turn: {cmds:?}"
-    );
+    // 新 turn 只追加到尾部；历史 turn 的状态保持可寻址且不被重建。
+    assert_eq!(t10k.turn_count(), 10_001);
+    assert_eq!(t10k.turns().last().unwrap().turn_id, "append_target");
+    assert_eq!(t10k.turns().first().unwrap().turn_id, "turn00000000");
 }
 
 #[test]
@@ -115,9 +105,9 @@ fn append_cost_is_independent_of_history_size() {
 fn replay_scales_linearly() {
     let (_, t_1k) = replay(1_000);
     let (_, t_5k) = replay(5_000);
-    println!("5k/1k time ratio: {:.2}x (expect ≈5x linear)", t_5k as f64 / t_1k.max(1) as f64);
-    assert!(
-        t_5k <= t_1k.max(1) * 8,
-        "回放应线性扩展（允许抖动）"
+    println!(
+        "5k/1k time ratio: {:.2}x (expect ≈5x linear)",
+        t_5k as f64 / t_1k.max(1) as f64
     );
+    assert!(t_5k <= t_1k.max(1) * 8, "回放应线性扩展（允许抖动）");
 }

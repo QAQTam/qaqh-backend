@@ -141,9 +141,9 @@ ChatView 采用 retained-mode 帧批处理，而不是复制 Web/SolidJS 的逐�
 
 1. Ringing 事件先保持 typed 形状进入活动会话队列；
 2. 每个 16ms UI 批次把同一 `(turn, round, kind)` 的相邻 delta 合并；
-3. `Transcript::apply_frame` 每批只解析一次活尾，并从实际 `RenderCommand` 推导
-   `None / Live / Structural` invalidation；
-4. 无 RenderCommand 的未知、重复事件不触发 reactor diff；
+3. `Transcript::apply_frame` 每批只解析一次活尾，直接返回紧凑的
+   `None / Live / Structural` 模型失效摘要，不复制 RichText/工具卡载荷；
+4. 未改变 Transcript 的未知、重复事件不触发 reactor diff；
 5. transport rev 只负责判断队列是否变化，XAML render generation 独立递增，避免
    seed 切换、快照、分页补偿与下一条 transport rev 数值碰撞；
 6. 跟尾请求只与可能改变内容 extent 的提交绑定，状态徽标变化不触发滚动。

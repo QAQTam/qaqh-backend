@@ -3,7 +3,8 @@
 //! 数据源：`bridge.chat_drain()`——bridge 在 conversation 频道把 canonical
 //! typed events 缓存入队，本组件以 16ms XAML 帧批次 drain，经
 //! `chat_adapter::render_event` 映射后先合并同目标的相邻 delta，再喂
-//! `Transcript` 状态机；实际 `RenderCommand` 决定是否提交 XAML diff。
+//! `Transcript` 状态机；紧凑的模型失效摘要决定是否声明新的 Element 树，
+//! `windows-reactor` 负责 keyed diff 与 XAML 提交。
 //!
 //! 渲染模型（对齐 CHATVIEW-RENDERING-REFERENCE）：
 //! - turn 壳：用户气泡 + 状态徽标；
@@ -122,6 +123,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     // 先 drain 拿 rev：restore 分支渲染也要用（快照到达时
                     // chat_rev 已 +1，直接下发触发重渲染）。
                     let (events, rev) = bridge.core().chat_drain();
+                    let output_resolutions = bridge.core().chat_output_drain();
                     // 1) timeline 快照（resume 历史；peek + seed 校验）：
                     //    匹配才消费；不匹配**保留**快照（不丢弃）并主动重拉
                     //    active seed 的快照——原 take 语义消费即弃，丢弃后
@@ -188,6 +190,34 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             ));
                         }
                     }
+                    // 1.75) 外置终态正文：transport 在后台校验并下载，UI
+                    // 线程只把结果归并回 Transcript 的同一个 round 状态。
+                    if !output_resolutions.is_empty() {
+                        let mut t = transcript.borrow_mut();
+                        let mut changed = false;
+                        for resolution in output_resolutions {
+                            let change = match resolution.result {
+                                Ok(text) => t.resolve_output(
+                                    &resolution.turn_id,
+                                    resolution.round_num,
+                                    &text,
+                                ),
+                                Err(error) => t.fail_output(
+                                    &resolution.turn_id,
+                                    resolution.round_num,
+                                    error,
+                                ),
+                            };
+                            changed |= change.changed();
+                        }
+                        drop(t);
+                        if changed {
+                            *scroll_version.borrow_mut() += 1;
+                            *last_scroll_request.borrow_mut() = std::time::Instant::now();
+                            *render_generation.borrow_mut() += 1;
+                            set_render_generation.call(*render_generation.borrow());
+                        }
+                    }
                     // 2) 增量事件（新对话流式）
                     if rev != *last_rev.borrow() {
                         *last_rev.borrow_mut() = rev;
@@ -198,6 +228,11 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             .filter_map(|event| chat_adapter::render_event(&event));
                         let mut t = transcript.borrow_mut();
                         let update = t.apply_frame(frame_events);
+                        let pending_outputs = t.take_pending_outputs();
+                        drop(t);
+                        for pending in pending_outputs {
+                            bridge.core().spawn_resolve_chat_output(&seed, pending);
+                        }
                         if !update.changed() {
                             return;
                         }
@@ -213,13 +248,12 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             // 窗口跟随尾部：仅当窗口未被用户上滚扩展时滑动
                             // （保持最近 N 个回合，长会话不退化）；用户上滚
                             // 扩展后窗口保持，避免浏览内容跳动。
-                            if structural && t.tail_following() {
-                                t.slide_window_tail();
+                            if structural && transcript.borrow().tail_following() {
+                                transcript.borrow_mut().slide_window_tail();
                             }
                             *scroll_version.borrow_mut() += 1;
                             *last_scroll_request.borrow_mut() = now;
                         }
-                        drop(t);
                         *render_generation.borrow_mut() += 1;
                         set_render_generation.call(*render_generation.borrow());
                     }
@@ -385,6 +419,28 @@ fn round_view(turn_idx: usize, round: &RoundView) -> Element {
         round.round_num,
         &round.answer,
     )));
+    if round.output_loading {
+        items.push(
+            text_block("正在读取完整回答…")
+                .font_size(tokens::TYPE_CAPTION)
+                .foreground(ThemeRef::SecondaryText)
+                .automation_name("正在读取完整回答")
+                .with_key(format!("t{turn_idx}r{}-output-loading", round.round_num))
+                .into(),
+        );
+    }
+    if let Some(error) = &round.output_error {
+        items.push(
+            text_block(format!("完整回答读取失败：{error}"))
+                .font_size(tokens::TYPE_CAPTION)
+                .foreground(ThemeRef::SystemCritical)
+                .wrap()
+                .selectable()
+                .automation_name("完整回答读取失败")
+                .with_key(format!("t{turn_idx}r{}-output-error", round.round_num))
+                .into(),
+        );
+    }
     vstack(items)
         .spacing(tokens::SPACE_2)
         .max_width(tokens::READING_MAX_WIDTH)

@@ -1,9 +1,8 @@
-//! Transcript 状态机：协议事件 → 渲染命令。
+//! Transcript 状态机：协议事件 → 声明式视图状态。
 //!
-//! 这是"针对后端写前端"的核心：**渲染是事件驱动的增量，不是全量投影**。
-//! Web 端 `sessionPresentation.ts` 每帧全量重建 turns（SolidJS 响应式
-//! diff 的产物）——XAML 侧不迁移该模式，改为按 `(turn, round, kind)`
-//! 键寻址的局部更新。
+//! 协议事件只负责增量更新 [`Transcript`]；UI 从 Transcript 声明
+//! `Element` 树，稳定 key 与 `windows-reactor` 的 reconciler 负责把状态
+//! 变化提交到 XAML 控件树。这里不维护第二套命令式控件 patch 协议。
 //!
 //! XAML 渲染模型对应：
 //! ```text
@@ -19,14 +18,10 @@
 //! ```
 //!
 //! 核心不变量（协议局域化，见设计讨论）：
-//! 1. **`RoundCompleted` 前的 round**：只有其"活尾"参与更新（`UpdateLiveTail`）；
-//! 2. **`RoundCompleted` 后的 round**：冻结，不再产生任何命令（内容永不重建）；
-//! 3. **前序 turn/round 永不被触碰**（append-only）——万级会话下追加成本
-//!    与历史规模无关，虚拟化的"高度估算/锚定"难题因此消失（round 高度在
-//!    final 时固定一次）。
-//!
-//! 命令序列是纯数据（`RenderCommand`），UI 层（XAML 控件树）按命令执行；
-//! 测试断言命令序列即验证渲染路径，无需窗口实例。
+//! 1. `RoundCompleted` 前只更新对应 round 的活尾；
+//! 2. `RoundCompleted` 后答案冻结，迟到 delta 被忽略；
+//! 3. 事件按 `(turn_id, round_num)` O(1) 定位，渲染窗口与完整历史分离；
+//! 4. 返回值只描述本帧最低失效等级，不复制 RichText/工具卡等渲染载荷。
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,87 +33,63 @@ use markdown_core::parse_final;
 use crate::protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
 use crate::{RichTextOutput, TableData, render_final};
 
-/// 渲染命令（UI 层按序执行；测试断言命令序列）。
-#[derive(Clone, Debug, PartialEq)]
-pub enum RenderCommand {
-    /// 挂载新 turn（append-only：只 push 尾部）。
-    MountTurn { index: usize, user_text: String },
-    /// turn 状态变更（running → completed / failed）。
-    UpdateTurnStatus { index: usize, status: TurnStatus },
-    /// 答案活尾预览替换（字面/表格交错序列；未闭合语法字面输出）。
-    ///
-    /// 协议表格（```table）在流式中渐进长出：表格行从字面剥离进 `segments`
-    /// 的 Table 段（网格渲染），残行实时显示在网格末行（逐字生长）；
-    /// 字面保留在 Text 段。多表格/闭合表格均按隐藏区间切分，内容不重复。
-    UpdateLiveTail {
-        turn: usize,
-        round: usize,
-        inlines: Vec<Inline>,
-        /// 可见字面全文（全部 Text 段拼接；诊断/CLI 用）。
-        raw: String,
-        /// 字面/表格交错序列（UI 按序渲染）。
-        segments: Vec<LiveSegment>,
-    },
-    /// 权威终态：全量重建该 round（RichTextBlock 段落 + 代码块通道）。
-    /// `thinking` 为权威思考文本（有则折叠区也一并重建）。
-    RebuildRound {
-        turn: usize,
-        round: usize,
-        rich: RichTextOutput,
-        thinking: Option<String>,
-    },
-    /// 思考块摘要增量（Expander 头部）。
-    UpdateThinking {
-        turn: usize,
-        round: usize,
-        text: String,
-    },
-    /// 工具卡创建/更新（upsert by tool_call_id）。
-    UpsertToolCard {
-        turn: usize,
-        round: usize,
-        card: ToolCardView,
-    },
-    /// 正文大时外置（output_ref）：UI 显示占位，应用层按 ref 拉取后
-    /// 调用 [`Transcript::resolve_output`]。
-    LoadOutput {
-        turn: usize,
-        round: usize,
-        output_ref: String,
-    },
-}
-
-/// The smallest XAML invalidation needed after applying one UI-frame batch.
-///
-/// This is intentionally derived from render commands rather than protocol
-/// event names: ignored/duplicate events produce no UI work, live text can be
-/// frame-coalesced, and mounts/finalization commit immediately.
+/// The smallest declarative render invalidation needed after a model update.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum XamlInvalidation {
+pub enum TranscriptInvalidation {
     #[default]
     None,
     Live,
     Structural,
 }
 
-/// Result of applying the events accumulated for one XAML presentation frame.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct XamlFrameUpdate {
-    pub commands: Vec<RenderCommand>,
-    pub invalidation: XamlInvalidation,
-    /// A command mounted content or changed live content height, so a
-    /// near-tail viewport may need one post-layout follow request.
+/// Compact result of applying one event or one presentation-frame batch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TranscriptChange {
+    pub invalidation: TranscriptInvalidation,
+    /// Content mounted or changed height, so a near-tail viewport may need a
+    /// post-layout follow request.
     pub extent_changed: bool,
 }
 
-impl XamlFrameUpdate {
+impl TranscriptChange {
+    const fn live(extent_changed: bool) -> Self {
+        Self {
+            invalidation: TranscriptInvalidation::Live,
+            extent_changed,
+        }
+    }
+
+    const fn structural(extent_changed: bool) -> Self {
+        Self {
+            invalidation: TranscriptInvalidation::Structural,
+            extent_changed,
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.invalidation = self.invalidation.max(other.invalidation);
+        self.extent_changed |= other.extent_changed;
+    }
+
     pub fn changed(&self) -> bool {
-        self.invalidation != XamlInvalidation::None
+        self.invalidation != TranscriptInvalidation::None
     }
 
     pub fn is_structural(&self) -> bool {
-        self.invalidation == XamlInvalidation::Structural
+        self.invalidation == TranscriptInvalidation::Structural
     }
+}
+
+/// An external final answer requested by `RoundCompleted.output_ref`.
+///
+/// This is model-owned work, not a UI patch command. The application drains
+/// these requests, resolves them through the Ringing content endpoint, then
+/// calls [`Transcript::resolve_output`] or [`Transcript::fail_output`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingOutput {
+    pub turn_id: String,
+    pub round_num: u32,
+    pub reference: serde_json::Value,
 }
 
 /// turn 生命周期（渲染用；对齐协议 `TurnStarted/TurnCompleted/TurnFailed`）。
@@ -183,9 +154,19 @@ pub struct RoundView {
     pub thinking: Option<String>,
     pub answer: AnswerView,
     pub tool_calls: Vec<ToolCardView>,
+    /// An external final answer is being resolved through the content service.
+    pub output_loading: bool,
+    /// Content resolution failed; the live preview remains visible and the
+    /// error is rendered alongside it instead of silently producing a blank.
+    pub output_error: Option<String>,
+    /// Last external reference, retained to make replayed completion events
+    /// idempotent after the content has already been resolved.
+    output_ref: Option<serde_json::Value>,
+    /// Authoritative final markdown used to make replayed completions cheap.
+    final_raw: Option<String>,
     /// 正在累积的工具调用 raw（未完成的 ToolCalling 流）。
     tool_raw: String,
-    /// 最近一次 live 的 raw（防抖：相同 raw 不重复发命令）。
+    /// 最近一次 live 的 raw（防抖：相同 raw 不产生模型失效）。
     last_live_raw: String,
     /// 协议表格流式跟踪（```table 围栏；增量行扫描）。
     table_tracker: LiveTableTracker,
@@ -240,15 +221,18 @@ impl RoundView {
     /// 重解析（O(段长)；UI 层以 DispatcherQueue 节流合并，同 Web rAF）。
     /// 协议表格（```table）行级确认：表格行从字面剥离进 `segments`，
     /// 残行实时显示在网格末行（逐字生长），字面保留在 Text 段。
-    /// 解析结果同步写回 `AnswerView::Streaming`（状态机自持，与命令一致）。
-    fn answer_delta(&mut self, delta: &str) -> Option<LiveTailView> {
+    /// 解析结果同步写回 `AnswerView::Streaming`（状态机自持）。
+    fn answer_delta(&mut self, delta: &str) -> bool {
+        if delta.is_empty() {
+            return false;
+        }
         let AnswerView::Streaming {
             raw,
             inlines,
             segments,
         } = &mut self.answer
         else {
-            return None; // 终态后忽略 delta（协议保证不会发生）
+            return false; // 终态后忽略 delta（协议保证不会发生）
         };
         raw.push_str(delta);
         // 表格跟踪：增量行扫描（O(新增行)）
@@ -258,26 +242,22 @@ impl RoundView {
         let parsed = parse_live(&visible);
         let changed = self.last_live_raw != *raw;
         if changed {
-            *inlines = parsed.clone();
-            *segments = segs.clone();
+            *inlines = parsed;
+            *segments = segs;
             self.last_live_raw.clone_from(raw);
         }
-        changed.then_some(LiveTailView {
-            inlines: parsed,
-            raw: visible,
-            segments: segs,
-        })
+        changed
     }
 
     /// BlockCheckpoint 覆盖（自愈）：整段替换，重解析（表格跟踪器重置）。
-    fn answer_checkpoint(&mut self, text: &str) -> Option<LiveTailView> {
+    fn answer_checkpoint(&mut self, text: &str) -> bool {
         let AnswerView::Streaming {
             raw,
             inlines,
             segments,
         } = &mut self.answer
         else {
-            return None;
+            return false;
         };
         self.table_tracker.reset();
         raw.clear();
@@ -287,46 +267,62 @@ impl RoundView {
         let parsed = parse_live(&visible);
         let changed = self.last_live_raw != *raw;
         if changed {
-            *inlines = parsed.clone();
-            *segments = segs.clone();
+            *inlines = parsed;
+            *segments = segs;
             self.last_live_raw.clone_from(raw);
         }
-        changed.then_some(LiveTailView {
-            inlines: parsed,
-            raw: visible,
-            segments: segs,
-        })
+        changed
     }
 
     /// RoundCompleted：以权威 answer 全量重建（忽略流式累积差异）。
-    fn finalize(&mut self, thinking: Option<&str>, answer: Option<&str>) {
+    fn finalize(&mut self, thinking: Option<&str>, answer: Option<&str>) -> bool {
+        let mut changed = false;
         if let Some(t) = thinking {
-            self.thinking = Some(t.to_string());
+            if self.thinking.as_deref() != Some(t) {
+                self.thinking = Some(t.to_string());
+                changed = true;
+            }
         }
         self.table_tracker.reset();
         if let Some(a) = answer {
-            let blocks = parse_final(a);
-            self.answer = AnswerView::Final {
-                rich: render_final(&blocks),
-                blocks,
-            };
-            self.last_live_raw.clear();
+            if self.final_raw.as_deref() != Some(a) {
+                let blocks = parse_final(a);
+                self.answer = AnswerView::Final {
+                    rich: render_final(&blocks),
+                    blocks,
+                };
+                self.final_raw = Some(a.to_string());
+                self.last_live_raw.clear();
+                changed = true;
+            }
+            if self.output_loading || self.output_error.is_some() {
+                self.output_loading = false;
+                self.output_error = None;
+                changed = true;
+            }
         }
+        changed
     }
 
     /// ToolCalling 增量：累积并尝试提取工具名（upsert by id）。
-    fn tool_delta(&mut self, delta: &str) -> Option<ToolCardView> {
+    fn tool_delta(&mut self, delta: &str) -> bool {
         if self.tool_calls.last().is_some_and(|c| c.done) {
-            return None; // 上一张卡已完成
+            return false; // 上一张卡已完成
+        }
+        if delta.is_empty() {
+            return false;
         }
         self.tool_raw.push_str(delta);
-        self.upsert_current_card()
+        self.upsert_current_card().is_some()
     }
 
-    fn tool_checkpoint(&mut self, text: &str) -> Option<ToolCardView> {
+    fn tool_checkpoint(&mut self, text: &str) -> bool {
+        if self.tool_raw == text {
+            return false;
+        }
         self.tool_raw.clear();
         self.tool_raw.push_str(text);
-        self.upsert_current_card()
+        self.upsert_current_card().is_some()
     }
 
     /// 把当前累积的卡写入 tool_calls（同 id 更新，否则新建）。
@@ -362,10 +358,13 @@ impl RoundView {
     }
 
     /// 工具调用完成（RoundCompleted 时收尾所有卡）。
-    fn finish_tool_cards(&mut self) {
+    fn finish_tool_cards(&mut self) -> bool {
+        let mut changed = false;
         for card in &mut self.tool_calls {
+            changed |= !card.done;
             card.done = true;
         }
+        changed
     }
 }
 
@@ -379,15 +378,6 @@ fn extract_json_str(raw: &str, key: &str) -> Option<String> {
     let value = value.strip_prefix('"')?;
     let end = value.find('"')?;
     Some(value[..end].to_string())
-}
-
-/// 活尾视图：live 答案的渲染产物（可见字面 + 字面/表格交错序列）。
-#[derive(Clone, Debug, PartialEq)]
-pub struct LiveTailView {
-    pub inlines: Vec<Inline>,
-    /// 可见字面全文（全部 Text 段拼接；诊断/CLI 用）。
-    pub raw: String,
-    pub segments: Vec<LiveSegment>,
 }
 
 /// raw → (可见字面拼接, 字面/表格交错序列)。
@@ -450,6 +440,8 @@ pub struct Transcript {
     /// （`expand_window`）置 false（窗口保持，避免浏览内容跳动）；
     /// `slide_window_tail` 恢复 true。
     tail_following: bool,
+    /// External final answers waiting for the application transport to load.
+    pending_outputs: Vec<PendingOutput>,
 }
 
 /// 默认渲染窗口大小（回合数）：restore 后只渲染最近 N 个回合，与总回合
@@ -582,10 +574,18 @@ impl Transcript {
         self.tail_following = true;
     }
 
-    /// 应用一个协议事件，产出渲染命令（可能为空 = 无需触碰 UI）。
-    pub fn apply(&mut self, ev: &ConversationEvent) -> Vec<RenderCommand> {
+    /// Apply one protocol event to the canonical presentation model.
+    pub fn apply(&mut self, ev: &ConversationEvent) -> TranscriptChange {
         match ev {
             ConversationEvent::TurnStarted { turn_id, user_text } => {
+                if let Some(&index) = self.turn_index.get(turn_id) {
+                    let turn = &mut self.turns[index];
+                    if turn.user_text == *user_text {
+                        return TranscriptChange::default();
+                    }
+                    turn.user_text.clone_from(user_text);
+                    return TranscriptChange::structural(true);
+                }
                 let index = self.turns.len();
                 self.turns.push(TurnView {
                     turn_id: turn_id.clone(),
@@ -594,34 +594,29 @@ impl Transcript {
                     rounds: Vec::new(),
                 });
                 self.turn_index.insert(turn_id.clone(), index);
-                vec![RenderCommand::MountTurn {
-                    index,
-                    user_text: user_text.clone(),
-                }]
+                TranscriptChange::structural(true)
             }
             ConversationEvent::TurnCompleted { turn_id } => {
                 let Some(&index) = self.turn_index.get(turn_id) else {
-                    return Vec::new();
+                    return TranscriptChange::default();
                 };
+                if self.turns[index].status == TurnStatus::Completed {
+                    return TranscriptChange::default();
+                }
                 self.turns[index].status = TurnStatus::Completed;
-                vec![RenderCommand::UpdateTurnStatus {
-                    index,
-                    status: TurnStatus::Completed,
-                }]
+                TranscriptChange::structural(false)
             }
             ConversationEvent::TurnFailed { turn_id, .. } => {
                 let Some(&index) = self.turn_index.get(turn_id) else {
-                    return Vec::new();
+                    return TranscriptChange::default();
                 };
+                if self.turns[index].status == TurnStatus::Failed {
+                    return TranscriptChange::default();
+                }
                 self.turns[index].status = TurnStatus::Failed;
-                vec![RenderCommand::UpdateTurnStatus {
-                    index,
-                    status: TurnStatus::Failed,
-                }]
+                TranscriptChange::structural(false)
             }
-            // 渲染不关心的领域事件（provider_retrying / usage_updated /
-            // compact_* / conversation_cancelled 等）：零命令。
-            ConversationEvent::Unknown => Vec::new(),
+            ConversationEvent::Unknown => TranscriptChange::default(),
             ConversationEvent::RoundDelta {
                 turn_id,
                 round_num,
@@ -629,40 +624,25 @@ impl Transcript {
                 delta,
             } => {
                 let Some(&turn) = self.turn_index.get(turn_id) else {
-                    return Vec::new();
+                    return TranscriptChange::default();
                 };
-                let (round_idx, round) = self.round_mut(turn, *round_num);
+                let (_, round) = self.round_mut(turn, *round_num);
                 match kind {
                     RoundDeltaKind::Answering => round
                         .answer_delta(delta)
-                        .map(|view| {
-                            vec![RenderCommand::UpdateLiveTail {
-                                turn,
-                                round: round_idx,
-                                inlines: view.inlines,
-                                raw: view.raw,
-                                segments: view.segments,
-                            }]
-                        })
+                        .then(|| TranscriptChange::live(true))
                         .unwrap_or_default(),
                     RoundDeltaKind::Thinking => {
+                        if delta.is_empty() {
+                            return TranscriptChange::default();
+                        }
                         let t = round.thinking.get_or_insert_with(String::new);
                         t.push_str(delta);
-                        vec![RenderCommand::UpdateThinking {
-                            turn,
-                            round: round_idx,
-                            text: t.clone(),
-                        }]
+                        TranscriptChange::live(true)
                     }
                     RoundDeltaKind::ToolCalling => round
                         .tool_delta(delta)
-                        .map(|card| {
-                            vec![RenderCommand::UpsertToolCard {
-                                turn,
-                                round: round_idx,
-                                card,
-                            }]
-                        })
+                        .then(|| TranscriptChange::structural(true))
                         .unwrap_or_default(),
                 }
             }
@@ -673,39 +653,24 @@ impl Transcript {
                 text,
             } => {
                 let Some(&turn) = self.turn_index.get(turn_id) else {
-                    return Vec::new();
+                    return TranscriptChange::default();
                 };
-                let (round_idx, round) = self.round_mut(turn, *round_num);
+                let (_, round) = self.round_mut(turn, *round_num);
                 match kind {
                     RoundDeltaKind::Answering => round
                         .answer_checkpoint(text)
-                        .map(|view| {
-                            vec![RenderCommand::UpdateLiveTail {
-                                turn,
-                                round: round_idx,
-                                inlines: view.inlines,
-                                raw: view.raw,
-                                segments: view.segments,
-                            }]
-                        })
+                        .then(|| TranscriptChange::live(true))
                         .unwrap_or_default(),
                     RoundDeltaKind::Thinking => {
+                        if round.thinking.as_deref() == Some(text) {
+                            return TranscriptChange::default();
+                        }
                         round.thinking = Some(text.clone());
-                        vec![RenderCommand::UpdateThinking {
-                            turn,
-                            round: round_idx,
-                            text: text.clone(),
-                        }]
+                        TranscriptChange::live(true)
                     }
                     RoundDeltaKind::ToolCalling => round
                         .tool_checkpoint(text)
-                        .map(|card| {
-                            vec![RenderCommand::UpsertToolCard {
-                                turn,
-                                round: round_idx,
-                                card,
-                            }]
-                        })
+                        .then(|| TranscriptChange::structural(true))
                         .unwrap_or_default(),
                 }
             }
@@ -717,9 +682,9 @@ impl Transcript {
                 state,
             } => {
                 let Some(&turn) = self.turn_index.get(turn_id) else {
-                    return Vec::new();
+                    return TranscriptChange::default();
                 };
-                let (round_idx, round) = self.round_mut(turn, *round_num);
+                let (_, round) = self.round_mut(turn, *round_num);
                 // provider 内建工具卡：无参数流，展开区显示执行状态。
                 let label = match state {
                     ProviderToolState::InProgress => "进行中…".to_string(),
@@ -734,16 +699,9 @@ impl Transcript {
                     provider: true,
                 };
                 // upsert by call_id（replaceable 语义：同 id 覆盖状态）。
-                if let Some(existing) = round.tool_calls.iter_mut().find(|c| c.id == card.id) {
-                    *existing = card.clone();
-                } else {
-                    round.tool_calls.push(card.clone());
-                }
-                vec![RenderCommand::UpsertToolCard {
-                    turn,
-                    round: round_idx,
-                    card,
-                }]
+                upsert_tool_card(round, card)
+                    .then(|| TranscriptChange::structural(true))
+                    .unwrap_or_default()
             }
             ConversationEvent::ToolCallPrepared {
                 tool_call_id,
@@ -753,7 +711,7 @@ impl Transcript {
                 args_so_far,
             } => {
                 let turn = self.ensure_turn(turn_id);
-                let (round_idx, round) = self.round_mut(turn, *round_num);
+                let (_, round) = self.round_mut(turn, *round_num);
                 let card = ToolCardView {
                     id: tool_call_id.clone(),
                     name: Some(name.clone()),
@@ -761,12 +719,9 @@ impl Transcript {
                     done: false,
                     provider: false,
                 };
-                upsert_tool_card(round, card.clone());
-                vec![RenderCommand::UpsertToolCard {
-                    turn,
-                    round: round_idx,
-                    card,
-                }]
+                upsert_tool_card(round, card)
+                    .then(|| TranscriptChange::structural(true))
+                    .unwrap_or_default()
             }
             ConversationEvent::ToolStarted {
                 tool_call_id,
@@ -775,7 +730,7 @@ impl Transcript {
                 name,
             } => {
                 let turn = self.ensure_turn(turn_id);
-                let (round_idx, round) = self.round_mut(turn, *round_num);
+                let (_, round) = self.round_mut(turn, *round_num);
                 let card = ToolCardView {
                     id: tool_call_id.clone(),
                     name: Some(name.clone()),
@@ -783,12 +738,9 @@ impl Transcript {
                     done: false,
                     provider: false,
                 };
-                upsert_tool_card(round, card.clone());
-                vec![RenderCommand::UpsertToolCard {
-                    turn,
-                    round: round_idx,
-                    card,
-                }]
+                upsert_tool_card(round, card)
+                    .then(|| TranscriptChange::structural(true))
+                    .unwrap_or_default()
             }
             ConversationEvent::ToolFinished {
                 tool_call_id,
@@ -797,7 +749,7 @@ impl Transcript {
                 result,
             } => {
                 let turn = self.ensure_turn(turn_id);
-                let (round_idx, round) = self.round_mut(turn, *round_num);
+                let (_, round) = self.round_mut(turn, *round_num);
                 // 结果摘要（对齐 timeline 块 summary）；失败保留 error 摘要。
                 let summary = result
                     .get("summary")
@@ -822,12 +774,9 @@ impl Transcript {
                     done: true,
                     provider: false,
                 };
-                upsert_tool_card(round, card.clone());
-                vec![RenderCommand::UpsertToolCard {
-                    turn,
-                    round: round_idx,
-                    card,
-                }]
+                upsert_tool_card(round, card)
+                    .then(|| TranscriptChange::structural(true))
+                    .unwrap_or_default()
             }
             ConversationEvent::RoundCompleted {
                 turn_id,
@@ -838,35 +787,45 @@ impl Transcript {
                 is_final: _,
             } => {
                 let Some(&turn) = self.turn_index.get(turn_id) else {
-                    return Vec::new();
+                    return TranscriptChange::default();
                 };
-                // 外置正文：占位，等应用层拉取后 resolve_output
+                let (_, round) = self.round_mut(turn, *round_num);
+                let mut changed = false;
+                if let Some(t) = thinking {
+                    if round.thinking.as_ref() != Some(t) {
+                        round.thinking = Some(t.clone());
+                        changed = true;
+                    }
+                }
+                changed |= round.finish_tool_cards();
+
+                // External content remains a model state. The app drains the
+                // request and resolves it asynchronously through deepx-client.
                 if let Some(ref_uri) = output_ref
                     && answer.is_none()
                 {
-                    let (round_idx, _) = self.round_mut(turn, *round_num);
-                    return vec![RenderCommand::LoadOutput {
-                        turn,
-                        round: round_idx,
-                        output_ref: ref_uri
-                            .as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| ref_uri.to_string()),
-                    }];
+                    if round.output_ref.as_ref() == Some(ref_uri)
+                        && (round.output_loading
+                            || matches!(round.answer, AnswerView::Final { .. }))
+                    {
+                        return changed
+                            .then(|| TranscriptChange::structural(true))
+                            .unwrap_or_default();
+                    }
+                    round.output_ref = Some(ref_uri.clone());
+                    round.output_loading = true;
+                    round.output_error = None;
+                    self.pending_outputs.push(PendingOutput {
+                        turn_id: turn_id.clone(),
+                        round_num: *round_num,
+                        reference: ref_uri.clone(),
+                    });
+                    return TranscriptChange::structural(true);
                 }
-                let (round_idx, round) = self.round_mut(turn, *round_num);
-                round.finalize(thinking.as_deref(), answer.as_deref());
-                round.finish_tool_cards();
-                let rich = match &round.answer {
-                    AnswerView::Final { rich, .. } => rich.clone(),
-                    _ => RichTextOutput::default(),
-                };
-                vec![RenderCommand::RebuildRound {
-                    turn,
-                    round: round_idx,
-                    rich,
-                    thinking: thinking.clone(),
-                }]
+                changed |= round.finalize(None, answer.as_deref());
+                changed
+                    .then(|| TranscriptChange::structural(true))
+                    .unwrap_or_default()
             }
         }
     }
@@ -880,18 +839,18 @@ impl Transcript {
     pub fn apply_frame(
         &mut self,
         events: impl IntoIterator<Item = ConversationEvent>,
-    ) -> XamlFrameUpdate {
+    ) -> TranscriptChange {
         let events = coalesce_adjacent_deltas(events);
-        let mut update = XamlFrameUpdate::default();
+        let mut update = TranscriptChange::default();
         for event in events {
-            let commands = self.apply(&event);
-            for command in commands {
-                update.invalidation = update.invalidation.max(command_invalidation(&command));
-                update.extent_changed |= command_changes_extent(&command);
-                update.commands.push(command);
-            }
+            update.merge(self.apply(&event));
         }
         update
+    }
+
+    /// Drain external content requests created while applying completion events.
+    pub fn take_pending_outputs(&mut self) -> Vec<PendingOutput> {
+        std::mem::take(&mut self.pending_outputs)
     }
 
     /// 外置正文拉取完成：以权威文本重建（对应 `output_ref` 加载路径）。
@@ -900,22 +859,32 @@ impl Transcript {
         turn_id: &str,
         round_num: u32,
         text: &str,
-    ) -> Vec<RenderCommand> {
+    ) -> TranscriptChange {
         let Some(&turn) = self.turn_index.get(turn_id) else {
-            return Vec::new();
+            return TranscriptChange::default();
         };
-        let (round_idx, round) = self.round_mut(turn, round_num);
-        round.finalize(None, Some(text));
-        let rich = match &round.answer {
-            AnswerView::Final { rich, .. } => rich.clone(),
-            _ => RichTextOutput::default(),
+        let (_, round) = self.round_mut(turn, round_num);
+        round
+            .finalize(None, Some(text))
+            .then(|| TranscriptChange::structural(true))
+            .unwrap_or_default()
+    }
+
+    /// Mark external content resolution as failed while preserving the live
+    /// preview. The UI can surface the failure instead of rendering blank text.
+    pub fn fail_output(
+        &mut self,
+        turn_id: &str,
+        round_num: u32,
+        message: impl Into<String>,
+    ) -> TranscriptChange {
+        let Some(&turn) = self.turn_index.get(turn_id) else {
+            return TranscriptChange::default();
         };
-        vec![RenderCommand::RebuildRound {
-            turn,
-            round: round_idx,
-            rich,
-            thinking: round.thinking.clone(),
-        }]
+        let (_, round) = self.round_mut(turn, round_num);
+        round.output_loading = false;
+        round.output_error = Some(message.into());
+        TranscriptChange::structural(true)
     }
 
     fn round_mut(&mut self, turn: usize, round_num: u32) -> (usize, &mut RoundView) {
@@ -949,23 +918,6 @@ impl Transcript {
         self.turn_index.insert(turn_id.to_string(), index);
         index
     }
-}
-
-fn command_invalidation(command: &RenderCommand) -> XamlInvalidation {
-    match command {
-        RenderCommand::UpdateLiveTail { .. } | RenderCommand::UpdateThinking { .. } => {
-            XamlInvalidation::Live
-        }
-        RenderCommand::MountTurn { .. }
-        | RenderCommand::UpdateTurnStatus { .. }
-        | RenderCommand::RebuildRound { .. }
-        | RenderCommand::UpsertToolCard { .. }
-        | RenderCommand::LoadOutput { .. } => XamlInvalidation::Structural,
-    }
-}
-
-fn command_changes_extent(command: &RenderCommand) -> bool {
-    !matches!(command, RenderCommand::UpdateTurnStatus { .. })
 }
 
 fn coalesce_adjacent_deltas(
@@ -1080,12 +1032,16 @@ fn provider_status_replaces(previous: &ConversationEvent, next: &ConversationEve
 }
 
 /// 按 tool_call_id upsert 工具卡（同 id 覆盖状态，保持卡位置稳定）。
-fn upsert_tool_card(round: &mut RoundView, card: ToolCardView) {
+fn upsert_tool_card(round: &mut RoundView, card: ToolCardView) -> bool {
     if let Some(existing) = round.tool_calls.iter_mut().find(|c| c.id == card.id) {
+        if *existing == card {
+            return false;
+        }
         *existing = card;
     } else {
         round.tool_calls.push(card);
     }
+    true
 }
 
 /// RestoredTurn → TurnView（历史回合直接落 Final；restore 与分页前插共用）。
@@ -1104,6 +1060,7 @@ fn to_turn_view(t: RestoredTurn) -> TurnView {
                 round.answer = match r.answer {
                     Some(a) => {
                         let blocks = parse_final(&a);
+                        round.final_raw = Some(a);
                         AnswerView::Final {
                             rich: render_final(&blocks),
                             blocks,
@@ -1374,14 +1331,14 @@ mod tests {
     fn provider_tool_status_unknown_turn_ignored() {
         let mut ts = Transcript::new();
         start_turn(&mut ts, "t1");
-        let cmds = ts.apply(&ConversationEvent::ProviderToolStatus {
+        let change = ts.apply(&ConversationEvent::ProviderToolStatus {
             turn_id: "ghost".into(),
             round_num: 0,
             call_id: "call-1".into(),
             tool_kind: "web_search".into(),
             state: ProviderToolState::Completed,
         });
-        assert!(cmds.is_empty());
+        assert!(!change.changed());
         assert!(ts.turns()[0].rounds.is_empty());
     }
 

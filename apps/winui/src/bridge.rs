@@ -18,11 +18,12 @@ use std::time::{Duration, Instant};
 
 use deepx_client::{
     ActionRequest, AskAnswer as DomainAskAnswer, Channel, ChannelStatus, Client, ClientHandlers,
-    ClientOptions, CommandOptions, ControlCommand, ControlEvent, ConversationCommand,
+    ClientOptions, CommandOptions, ContentRef, ControlCommand, ControlEvent, ConversationCommand,
     ConversationEvent as DomainConversationEvent, ConversationMode, EventBatch, PermissionCategory,
     PermissionRisk, QueryRequest, RingingCommand, RingingEvent, TimelinePage, TimelineSnapshot,
     TimelineStatus, ToolCommand, ToolEvent,
 };
+use markdown_winui::PendingOutput;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -716,6 +717,15 @@ pub struct ComposerTextFile {
     pub path: String,
 }
 
+/// Result of resolving one `RoundCompleted.output_ref` through the Ringing
+/// content service. The UI applies it back to the Transcript model.
+#[derive(Debug, Clone)]
+pub struct ChatOutputResolution {
+    pub turn_id: String,
+    pub round_num: u32,
+    pub result: Result<String, String>,
+}
+
 /// `Send + Sync` half of the bridge: client, lease bookkeeping, outbox sender.
 /// Lives on the tokio side.
 pub struct BridgeCore {
@@ -820,6 +830,10 @@ pub struct BridgeCore {
     chat_prepend: Mutex<std::collections::VecDeque<(String, TimelineSnapshot)>>,
     /// 分页在途标记（seed 集合）：防止滚动抖动时重复发起同一翻页请求。
     timeline_fetching: Mutex<std::collections::HashSet<String>>,
+    /// External answer bodies resolved asynchronously for the native ChatView.
+    chat_outputs: Mutex<std::collections::VecDeque<(String, ChatOutputResolution)>>,
+    /// `(seed, turn_id, round_num, content_id)` requests currently in flight.
+    content_fetching: Mutex<std::collections::HashSet<(String, String, u32, String)>>,
     /// ChatView 数据版本：事件入队后递增，UI 侧 timer 比对后 drain。
     chat_rev: AtomicU64,
     /// 快照重拉节流：seed 不匹配时主动 `activate_timeline` 重拉（daemon
@@ -1101,6 +1115,89 @@ impl BridgeCore {
             .map(|(_, ev)| ev)
             .collect();
         (events, rev)
+    }
+
+    /// Drain resolved external answer bodies for the active session.
+    pub fn chat_output_drain(&self) -> Vec<ChatOutputResolution> {
+        let active = self.active_seed();
+        self.chat_outputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .filter(|(seed, _)| *seed == active)
+            .map(|(_, resolution)| resolution)
+            .collect()
+    }
+
+    /// Resolve a model-owned `output_ref` without routing transport details
+    /// through the XAML renderer. Duplicate/replayed requests are coalesced.
+    pub fn spawn_resolve_chat_output(&self, seed: &str, pending: PendingOutput) {
+        let reference = match serde_json::from_value::<ContentRef>(pending.reference) {
+            Ok(reference) => reference,
+            Err(error) => {
+                self.chat_outputs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push_back((
+                        seed.to_string(),
+                        ChatOutputResolution {
+                            turn_id: pending.turn_id,
+                            round_num: pending.round_num,
+                            result: Err(format!("invalid output_ref: {error}")),
+                        },
+                    ));
+                self.chat_rev.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        };
+        let key = (
+            seed.to_string(),
+            pending.turn_id.clone(),
+            pending.round_num,
+            reference.content_id.clone(),
+        );
+        {
+            let mut fetching = self
+                .content_fetching
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !fetching.insert(key.clone()) {
+                return;
+            }
+        }
+        let core = self.self_arc();
+        let seed = seed.to_string();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = core
+                .client
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let result = match client {
+                Some(client) => match client.download_content(&seed, &reference).await {
+                    Ok(bytes) => String::from_utf8(bytes)
+                        .map_err(|error| format!("external answer is not UTF-8: {error}")),
+                    Err(error) => Err(error.to_string()),
+                },
+                None => Err("Ringing client is not connected".to_string()),
+            };
+            core.content_fetching
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
+            core.chat_outputs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back((
+                    seed,
+                    ChatOutputResolution {
+                        turn_id: pending.turn_id,
+                        round_num: pending.round_num,
+                        result,
+                    },
+                ));
+            core.chat_rev.fetch_add(1, Ordering::Relaxed);
+        });
     }
 
     /// 查看最近一次 timeline 快照（`(seed, TimelineSnapshot)`；resume
@@ -2968,6 +3065,8 @@ impl Bridge {
                     timeline_has_more: Mutex::new(std::collections::HashMap::new()),
                     chat_prepend: Mutex::new(std::collections::VecDeque::new()),
                     timeline_fetching: Mutex::new(std::collections::HashSet::new()),
+                    chat_outputs: Mutex::new(std::collections::VecDeque::new()),
+                    content_fetching: Mutex::new(std::collections::HashSet::new()),
                     chat_rev: AtomicU64::new(0),
                     // 初始化为远古时刻：首次 refresh 立即放行。
                     timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
@@ -3296,6 +3395,8 @@ mod tests {
             timeline_has_more: Mutex::new(std::collections::HashMap::new()),
             chat_prepend: Mutex::new(std::collections::VecDeque::new()),
             timeline_fetching: Mutex::new(std::collections::HashSet::new()),
+            chat_outputs: Mutex::new(std::collections::VecDeque::new()),
+            content_fetching: Mutex::new(std::collections::HashSet::new()),
             chat_rev: AtomicU64::new(0),
             timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
             dashboard: Mutex::new(None),

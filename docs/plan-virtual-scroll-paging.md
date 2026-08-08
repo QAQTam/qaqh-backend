@@ -64,7 +64,7 @@
 - `chat_view.rs` 16ms 泵：`chat_timeline_peek`（seed 校验）→ `chat_timeline_consume` → `chat_adapter::timeline_turns(&snap)` → `Transcript::restore(turns)` → `scroll_version += 1`（立即滚底）+ `set_rev`（立即渲染）；快照缺失/seed 不匹配 → `spawn_timeline_refresh` 主动重拉（L105-149）；
 - 增量：`chat_drain` → `Transcript::apply`；结构性事件（TurnStarted/TurnCompleted/TurnFailed/RoundCompleted）立即滚底 + 渲染，live 增量节流（滚动 100ms / 渲染 33ms）（L150-192）；
 - 投影渲染（L228-234）：`list_view(s.turns().to_vec(), turn_view).with_key_selector(turn_id).scroll_to_index(version, last)`——**全量 turns 每帧 clone 传入**；
-- `round_renderer.rs:406` `Transcript { turns: Vec<TurnView> }`：`turns() -> &[TurnView]`、`restore(Vec<RestoredTurn>)`、`apply(&ConversationEvent) -> Vec<RenderCommand>`；
+- `round_renderer.rs` `Transcript { turns: Vec<TurnView> }`：`turns() -> &[TurnView]`、`restore(Vec<RestoredTurn>)`、`apply(&ConversationEvent) -> TranscriptChange`；UI 从窗口状态声明 Element 树，reactor 负责 keyed diff；
 - `chat_adapter.rs` `timeline_turns`：快照 → `RestoredTurn` 映射（state → TurnStatus、rounds → thinking/answer/tool_calls），**该映射可复用为分页快照的映射**（按 turn 切片后同样适用）。
 
 ### 2.3 reactor：无顶部感知、无补偿语义

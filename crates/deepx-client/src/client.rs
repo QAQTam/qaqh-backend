@@ -547,6 +547,43 @@ impl Client {
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))
     }
 
+    /// `GET /ringing/v1/content/{content_id}` — resolve session-owned external
+    /// content and verify it against the digest carried by the canonical ref.
+    pub async fn download_content(&self, seed: &str, reference: &ContentRef) -> Result<Vec<u8>> {
+        let path = format!("/ringing/v1/content/{}", reference.content_id);
+        let session_id = self.session_id_header().await?;
+        let response = self
+            .inner
+            .http
+            .get(format!("{}{path}", self.inner.base_url))
+            .query(&[("seed", seed)])
+            .bearer_auth(&self.inner.token)
+            .header("X-DeepX-Client-Session-Id", session_id)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ClientError::Http {
+                status: response.status().as_u16(),
+                path,
+            });
+        }
+        let bytes = response.bytes().await?.to_vec();
+        let digest = {
+            use sha2::Digest;
+            let hash = sha2::Sha256::digest(&bytes);
+            hash.iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        if !digest.eq_ignore_ascii_case(&reference.sha256) {
+            return Err(ClientError::Protocol(format!(
+                "content digest mismatch for {}: expected {}, received {digest}",
+                reference.content_id, reference.sha256
+            )));
+        }
+        Ok(bytes)
+    }
+
     /// `POST /ringing/v1/content` — upload a local attachment as a session
     /// content reference.
     ///

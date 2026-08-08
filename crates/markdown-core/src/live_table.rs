@@ -19,8 +19,8 @@
 //!   内容零丢失（与 parse_final 的 `parse_table_protocol` 拒绝语义一致）；
 //! - **闭合后继续隐藏**：已封存的表格（sealed）保留隐藏区间，字面不会
 //!   重复出现表格内容（与网格并存）；
-//! - **增量 O(新增行)**：`feed` 只扫描上次位置之后的新行（`pos` 游标），
-//!   与 `StreamingMarkdown::append` 的 O(1) 追加契约同一量级。
+//! - **增量 O(新增行)**：`feed` 只扫描上次位置之后的新行（`pos` 游标）；
+//!   行内 markdown 仍由 Transcript 对当前可见活尾按帧重解析。
 //!
 //! 注意：JSON 协议形态（单行大块）无法渐进，保持等 final（围栏行恢复
 //! 字面，最终由 `parse_final` 权威渲染）——P0 只做 TSV/管道分隔符。
@@ -387,7 +387,10 @@ mod tests {
         // 区间互不重叠，且覆盖各自围栏
         assert!(spans[0].0.end <= spans[1].0.start);
         assert_eq!(spans[0].0.start, 0);
-        assert_eq!(spans[1].0.start, "```table\nA\tB\n1\t2\n```\n\n中间文本\n\n".len());
+        assert_eq!(
+            spans[1].0.start,
+            "```table\nA\tB\n1\t2\n```\n\n中间文本\n\n".len()
+        );
     }
 
     /// 增量幂等：重复 feed 相同 raw 不重复处理

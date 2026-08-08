@@ -2,7 +2,7 @@
 //!
 //! 模拟 `deepx-domain` 协议事件流（TurnStarted → RoundDelta×N →
 //! RoundCompleted → …），驱动 `Transcript` 状态机，逐事件打印
-//! 渲染命令与当前 transcript 的可视状态——直观展示：
+//! 模型失效摘要与当前 transcript 的可视状态——直观展示：
 //! - 未闭合语法（`**bo`）按字面输出，不破损
 //! - 跨 delta 闭合（`**bold**`）后 live 预览升级
 //! - RoundCompleted 权威终态重建（final 冻结）
@@ -15,9 +15,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use markdown_core::ast::Inline;
-use markdown_winui::{
-    AnswerView, ConversationEvent, LiveSegment, RenderCommand, RoundDeltaKind, Transcript,
-};
+use markdown_winui::{AnswerView, ConversationEvent, LiveSegment, RoundDeltaKind, Transcript};
 
 /// 事件与等待间隔（模拟流式节奏）。
 struct Ev(ConversationEvent, Duration);
@@ -35,13 +33,7 @@ fn d(id: &str, round: u32, kind: RoundDeltaKind, delta: &str) -> Ev {
 }
 
 /// 把一段文本切成字符级 delta（模拟 SSE/token 流）。
-fn stream_text(
-    turn: &str,
-    round: u32,
-    kind: RoundDeltaKind,
-    text: &str,
-    chunk: usize,
-) -> Vec<Ev> {
+fn stream_text(turn: &str, round: u32, kind: RoundDeltaKind, text: &str, chunk: usize) -> Vec<Ev> {
     let mut out = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
@@ -67,7 +59,11 @@ fn main() {
         Duration::from_millis(300),
     )];
     events.extend(stream_text(
-        "t1", 0, RoundDeltaKind::Thinking, "用户需要所有权概览，可以顺带搜索官方文档。", 3,
+        "t1",
+        0,
+        RoundDeltaKind::Thinking,
+        "用户需要所有权概览，可以顺带搜索官方文档。",
+        3,
     ));
     events.extend(stream_text(
         "t1",
@@ -126,10 +122,11 @@ fn main() {
     let mut t = Transcript::new();
     for Ev(ev, wait) in events {
         print_event(&ev);
-        let cmds = t.apply(&ev);
-        for cmd in &cmds {
-            print_command(cmd);
-        }
+        let change = t.apply(&ev);
+        println!(
+            "   ↳ model {:?}, extent_changed={}",
+            change.invalidation, change.extent_changed
+        );
         println!();
         render_transcript(&t);
         println!("──────────────────────────────────────────────────────────");
@@ -139,9 +136,9 @@ fn main() {
     println!("\n✓ 播放完毕。要点回顾：");
     println!("  • 全部 delta 为 token 级（2~4 字符/批），模拟 SSE 传输节奏");
     println!("  • round0 流式期间 `**很` 未闭合 → 字面输出，闭合后升级为加粗");
-    println!("  • RoundCompleted 后 round 冻结（final），不再产生命令");
+    println!("  • RoundCompleted 后 round 冻结（final），迟到 delta 不再改变模型");
     println!("  • 思考流 → Expander；工具流 → 卡片 upsert");
-    println!("  • 前文全程零命令（内容局域化）");
+    println!("  • 前文不被重算；reactor 只 diff 变化 key（内容局域化）");
 }
 
 fn print_event(ev: &ConversationEvent) {
@@ -155,16 +152,20 @@ fn print_event(ev: &ConversationEvent) {
         }
         ConversationEvent::Unknown => println!("▶ (忽略的领域事件)"),
         ConversationEvent::RoundDelta {
-            kind, delta, round_num, ..
+            kind,
+            delta,
+            round_num,
+            ..
         } => println!(
             "▶ RoundDelta    round{round_num} [{kind:?}] +{}: {delta:?}",
             delta.chars().count()
         ),
         ConversationEvent::BlockCheckpoint {
-            kind, text, round_num, ..
-        } => println!(
-            "▶ Checkpoint    round{round_num} [{kind:?}] = {text:?}"
-        ),
+            kind,
+            text,
+            round_num,
+            ..
+        } => println!("▶ Checkpoint    round{round_num} [{kind:?}] = {text:?}"),
         ConversationEvent::RoundCompleted {
             round_num,
             is_final,
@@ -182,9 +183,7 @@ fn print_event(ev: &ConversationEvent) {
             name,
             args_so_far,
             ..
-        } => println!(
-            "▶ ToolPrepared round{round_num} [{name}] {tool_call_id}: {args_so_far:?}"
-        ),
+        } => println!("▶ ToolPrepared round{round_num} [{name}] {tool_call_id}: {args_so_far:?}"),
         ConversationEvent::ToolStarted {
             tool_call_id,
             round_num,
@@ -203,70 +202,17 @@ fn print_event(ev: &ConversationEvent) {
     }
 }
 
-fn print_command(cmd: &RenderCommand) {
-    match cmd {
-        RenderCommand::MountTurn { index, user_text } => {
-            println!("   ↳ MountTurn #{index} 气泡: {user_text}")
-        }
-        RenderCommand::UpdateLiveTail {
-            turn,
-            round,
-            raw,
-            segments,
-            ..
-        } => {
-            let n_tables = segments
-                .iter()
-                .filter(|s| matches!(s, LiveSegment::Table(_)))
-                .count();
-            println!(
-                "   ↳ UpdateLiveTail t{turn}r{round}: {raw:?}{}",
-                if n_tables == 0 {
-                    String::new()
-                } else {
-                    format!(" +{n_tables} 个流式表格")
-                }
-            )
-        }
-        RenderCommand::RebuildRound {
-            turn,
-            round,
-            rich,
-            thinking,
-        } => {
-            println!(
-                "   ↳ RebuildRound  t{turn}r{round}: {} 段落, {} 代码块{}",
-                rich.paragraphs.len(),
-                rich.code_blocks.len(),
-                thinking
-                    .as_ref()
-                    .map(|_| ", +思考折叠区")
-                    .unwrap_or("")
-            )
-        }
-        RenderCommand::UpdateThinking {
-            turn, round, text, ..
-        } => println!("   ↳ UpdateThinking t{turn}r{round}: {text:?}"),
-        RenderCommand::UpsertToolCard { card, .. } => println!(
-            "   ↳ UpsertToolCard id={} name={:?}",
-            card.id, card.name
-        ),
-        RenderCommand::LoadOutput { output_ref, .. } => {
-            println!("   ↳ LoadOutput    {output_ref}")
-        }
-        RenderCommand::UpdateTurnStatus { index, status } => {
-            println!("   ↳ UpdateTurnStatus #{index} → {status:?}")
-        }
-    }
-}
-
 /// 把当前 transcript 渲染为"可视文本"（模拟 XAML 树的内容视图）。
 fn render_transcript(t: &Transcript) {
     for (ti, turn) in t.turns().iter().enumerate() {
         if ti > 0 {
             println!();
         }
-        println!("┌─ Turn #{ti} [{}] {}", turn_status(turn.status), turn.user_text);
+        println!(
+            "┌─ Turn #{ti} [{}] {}",
+            turn_status(turn.status),
+            turn.user_text
+        );
         for round in &turn.rounds {
             // 思考区
             if let Some(thinking) = &round.thinking {
