@@ -39,6 +39,8 @@ use std::time::Duration;
 
 use windows_reactor::*;
 
+use deepx_fluent::motion;
+
 use crate::bridge::Bridge;
 use crate::shell_store::{DashboardSnapshot, SessionDetail, UsageInfo};
 
@@ -123,10 +125,7 @@ fn progress_bar(pct: f64, fill: ThemeRef) -> Element {
                 .background(ThemeRef::ControlFillSecondary)
                 .grid_column(1),
         ))
-        .columns([
-            GridLength::Star(fill_w),
-            GridLength::Star(empty_w),
-        ]),
+        .columns([GridLength::Star(fill_w), GridLength::Star(empty_w)]),
     )
     .height(5.0)
     .corner_radius(2.5)
@@ -211,11 +210,7 @@ fn token_grid(u: &UsageInfo) -> Element {
 fn cache_card(label: &str, u: &UsageInfo, accent: bool) -> Option<Element> {
     let pct = cache_hit_pct(u)?;
     let (fill, bg, strong) = if accent {
-        (
-            ThemeRef::Accent,
-            ThemeRef::SubtleFill,
-            ThemeRef::AccentText,
-        )
+        (ThemeRef::Accent, ThemeRef::SubtleFill, ThemeRef::AccentText)
     } else {
         (
             ThemeRef::SystemSuccess,
@@ -355,7 +350,10 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         // 面板开关（Web shell.setHeader 投影的 info_open）。
                         let hdr = core.header_snapshot();
                         let o = hdr.0.info_open;
-                        log_diag(&format!("info_panel tick open={o} rev={rev} header_rev={}", hdr.1));
+                        log_diag(&format!(
+                            "info_panel tick open={o} rev={rev} header_rev={}",
+                            hdr.1
+                        ));
                         if o != *last_open.borrow() {
                             *last_open.borrow_mut() = o;
                             log_diag(&format!("open -> {o}"));
@@ -397,12 +395,16 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             // 避免 hstack 双 Stretch 重叠——model 撑满中间列）。
             let model_row: Element = grid((
                 live_dot(live).grid_column(0),
-                text_block(if d.model.is_empty() { "未知模型" } else { &d.model })
-                    .font_size(11.0)
-                    .font_family(MONO_FONT)
-                    .foreground(ThemeRef::SecondaryText)
-                    .text_trimming(TextTrimming::CharacterEllipsis)
-                    .grid_column(1),
+                text_block(if d.model.is_empty() {
+                    "未知模型"
+                } else {
+                    &d.model
+                })
+                .font_size(11.0)
+                .font_family(MONO_FONT)
+                .foreground(ThemeRef::SecondaryText)
+                .text_trimming(TextTrimming::CharacterEllipsis)
+                .grid_column(1),
                 text_block(if live { "live" } else { "等待用量" })
                     .font_size(11.0)
                     .foreground(ThemeRef::TertiaryText)
@@ -418,7 +420,11 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             blocks.push(context_card(d));
 
             // ④ 当前请求
-            blocks.push(section_heading("当前请求").with_key("request-heading").into());
+            blocks.push(
+                section_heading("当前请求")
+                    .with_key("request-heading")
+                    .into(),
+            );
             if d.usage.total_tokens > 0 {
                 blocks.push(token_grid(&d.usage).with_key("request-grid").into());
                 if let Some(card) = cache_card("缓存", &d.usage, false) {
@@ -437,7 +443,10 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             // ⑤ 会话累计
             let session_heading: Element = if d.usage_requests > 0 {
                 hstack((
-                    text_block("会话累计").font_size(11.0).semibold().foreground(ThemeRef::SecondaryText),
+                    text_block("会话累计")
+                        .font_size(11.0)
+                        .semibold()
+                        .foreground(ThemeRef::SecondaryText),
                     text_block(format!("{} 次请求", d.usage_requests))
                         .font_size(11.0)
                         .foreground(ThemeRef::TertiaryText),
@@ -446,7 +455,9 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .with_key("session-heading")
                 .into()
             } else {
-                section_heading("会话累计").with_key("session-heading").into()
+                section_heading("会话累计")
+                    .with_key("session-heading")
+                    .into()
             };
             blocks.push(session_heading);
             blocks.push(token_grid(&d.totals).with_key("session-grid").into());
@@ -477,16 +488,21 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .as_deref()
                 .and_then(|id| snap.tasks.iter().find(|t| t.id == id));
             let pending = snap.tasks.iter().filter(|t| t.status == "pending").count();
-            let in_progress = snap.tasks.iter().filter(|t| t.status == "in_progress").count();
-            let done = snap.tasks.iter().filter(|t| t.status == "completed").count();
+            let in_progress = snap
+                .tasks
+                .iter()
+                .filter(|t| t.status == "in_progress")
+                .count();
+            let done = snap
+                .tasks
+                .iter()
+                .filter(|t| t.status == "completed")
+                .count();
             if let Some(task) = current {
                 blocks.push(
                     hstack((
                         live_dot(true).with_key("todo-dot"),
-                        text_block(&task.subject)
-                            .font_size(12.0)
-                            .semibold()
-                            .wrap(),
+                        text_block(&task.subject).font_size(12.0).semibold().wrap(),
                         text_block(&task.status)
                             .font_size(11.0)
                             .foreground(ThemeRef::SystemCaution),
@@ -497,11 +513,13 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 );
             }
             blocks.push(
-                text_block(format!("待处理 {pending} · 进行中 {in_progress} · 已完成 {done}"))
-                    .font_size(11.0)
-                    .foreground(ThemeRef::SecondaryText)
-                    .with_key("todo-counts")
-                    .into(),
+                text_block(format!(
+                    "待处理 {pending} · 进行中 {in_progress} · 已完成 {done}"
+                ))
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText)
+                .with_key("todo-counts")
+                .into(),
             );
             let mut todo_rows: Vec<Element> = Vec::new();
             for (i, t) in snap.tasks.iter().enumerate() {
@@ -512,10 +530,14 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     _ => ThemeRef::TertiaryText,
                 };
                 let row: Element = grid((
-                    text_block(if t.status == "completed" { "✓" } else { "○" })
-                        .font_size(11.0)
-                        .foreground(status_color)
-                        .grid_column(0),
+                    text_block(if t.status == "completed" {
+                        "✓"
+                    } else {
+                        "○"
+                    })
+                    .font_size(11.0)
+                    .foreground(status_color)
+                    .grid_column(0),
                     text_block(&t.subject)
                         .font_size(11.0)
                         .foreground(ThemeRef::SecondaryText)
@@ -539,9 +561,6 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .margin(Thickness::xy(8.0, 8.0)),
     )
     // 打开时淡入（open 翻转 → 内容首次 mount → ImplicitShowAnimation）。
-    .transition(
-        Some(AnimationConfig::fade_in(Duration::from_millis(200))),
-        None,
-    )
+    .transition(motion::content_enter(), motion::content_exit())
     .into()
 }

@@ -27,9 +27,11 @@ use std::time::Duration;
 use serde_json::json;
 use windows_reactor::*;
 
+use deepx_fluent::motion;
+
 use crate::bridge::{Bridge, SettingsProjection};
 use crate::fonts;
-use crate::shell_store::{normalize_effort, SettingsSnapshot};
+use crate::shell_store::{SettingsSnapshot, normalize_effort};
 
 /// 快照轮询间隔（同 sidebar / skills_view）。
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -259,10 +261,15 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         } else {
             let providers = d.providers.clone();
             let provider_names: Vec<String> = providers.iter().map(|p| p.display.clone()).collect();
-            let pidx = providers.iter().position(|p| p.id == d.provider_id).unwrap_or(0) as i32;
+            let pidx = providers
+                .iter()
+                .position(|p| p.id == d.provider_id)
+                .unwrap_or(0) as i32;
             let provider_combo = if provider_names.is_empty() {
                 // 已加载但 providers 为空 = daemon 异常（不应发生，registry 硬编码 10 个）。
-                text_block("（未配置任何 provider，请检查 daemon）").foreground(ThemeRef::SecondaryText).into()
+                text_block("（未配置任何 provider，请检查 daemon）")
+                    .foreground(ThemeRef::SecondaryText)
+                    .into()
             } else {
                 ComboBox::new(provider_names)
                     .selected_index(pidx)
@@ -272,7 +279,9 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         let draft = draft.clone();
                         let dirty = dirty.clone();
                         move |i: i32| {
-                            let Some(p) = providers.get(i as usize) else { return };
+                            let Some(p) = providers.get(i as usize) else {
+                                return;
+                            };
                             let mut d = draft.borrow_mut();
                             d.provider_id = p.id.clone();
                             // 仅当新 provider 不支持当前 endpoint 时才取首条 endpoint
@@ -309,7 +318,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             // 使用 ui_label 显示协议 + Beta 标记，让用户能直观区分
             // Chat Completions API 与 Responses API (Beta)。
             let endpoint_labels: Vec<String> = endpoints.iter().map(|e| e.ui_label()).collect();
-            let eidx = endpoints.iter().position(|e| e.id == d.endpoint).unwrap_or(0) as i32;
+            let eidx = endpoints
+                .iter()
+                .position(|e| e.id == d.endpoint)
+                .unwrap_or(0) as i32;
             let endpoint_combo = if endpoint_labels.is_empty() {
                 text_block("—").foreground(ThemeRef::SecondaryText).into()
             } else {
@@ -321,7 +333,9 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         let draft = draft.clone();
                         let dirty = dirty.clone();
                         move |i: i32| {
-                            let Some(ep) = endpoints.get(i as usize) else { return };
+                            let Some(ep) = endpoints.get(i as usize) else {
+                                return;
+                            };
                             let mut d = draft.borrow_mut();
                             d.endpoint = ep.id.clone();
                             d.base_url = ep.base_url.clone();
@@ -336,11 +350,16 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             rows.push(field_row("接口", endpoint_combo));
             rows.push(field_row(
                 "Base URL",
-                text_box(d.base_url.clone()).on_text_changed({
-                    let draft = draft.clone();
-                    let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().base_url = v; *dirty.borrow_mut() = true; }
-                }).into(),
+                text_box(d.base_url.clone())
+                    .on_text_changed({
+                        let draft = draft.clone();
+                        let dirty = dirty.clone();
+                        move |v| {
+                            draft.borrow_mut().base_url = v;
+                            *dirty.borrow_mut() = true;
+                        }
+                    })
+                    .into(),
             ));
             let model_names = endpoints
                 .iter()
@@ -351,11 +370,18 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             rows.push(field_row(
                 "模型",
                 text_box(d.model.clone())
-                    .placeholder_text(if model_names.is_empty() { "e.g. deepseek-chat" } else { "" })
+                    .placeholder_text(if model_names.is_empty() {
+                        "e.g. deepseek-chat"
+                    } else {
+                        ""
+                    })
                     .on_text_changed({
                         let draft = draft.clone();
                         let dirty = dirty.clone();
-                        move |v| { draft.borrow_mut().model = v; *dirty.borrow_mut() = true; }
+                        move |v| {
+                            draft.borrow_mut().model = v;
+                            *dirty.borrow_mut() = true;
+                        }
                     })
                     .into(),
             ));
@@ -368,7 +394,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     .on_value_changed({
                         let draft = draft.clone();
                         let dirty = dirty.clone();
-                        move |v| { draft.borrow_mut().max_tokens = v as u64; *dirty.borrow_mut() = true; }
+                        move |v| {
+                            draft.borrow_mut().max_tokens = v as u64;
+                            *dirty.borrow_mut() = true;
+                        }
                     })
                     .into(),
             ));
@@ -378,7 +407,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         if d.loaded && !d.profiles.is_empty() {
             rows.push(section_title("预设"));
             let profile_names = d.profiles.clone();
-            let pidx = profile_names.iter().position(|n| n == &d.active_profile).unwrap_or(0) as i32;
+            let pidx = profile_names
+                .iter()
+                .position(|n| n == &d.active_profile)
+                .unwrap_or(0) as i32;
             rows.push(field_row(
                 "当前预设",
                 ComboBox::new(profile_names.clone())
@@ -457,11 +489,18 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             }
             let input = PasswordBox::new()
                 .value(d.api_key.clone())
-                .placeholder_text(if d.api_key_configured { "输入新值以替换" } else { "sk-…" })
+                .placeholder_text(if d.api_key_configured {
+                    "输入新值以替换"
+                } else {
+                    "sk-…"
+                })
                 .on_password_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().api_key = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().api_key = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into();
             let mut els: Vec<Element> = vec![input];
@@ -479,11 +518,18 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             "子代理 API Key",
             PasswordBox::new()
                 .value(d.sub_api_key.clone())
-                .placeholder_text(if d.sub_api_key_configured { "输入新值以替换" } else { "sk-…" })
+                .placeholder_text(if d.sub_api_key_configured {
+                    "输入新值以替换"
+                } else {
+                    "sk-…"
+                })
                 .on_password_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().sub_api_key = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().sub_api_key = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -500,26 +546,39 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_value_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().context_limit = v as u64; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().context_limit = v as u64;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
         rows.push(field_row(
             "推理强度",
-            ComboBox::new(EFFORT_LADDER.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-                .selected_index(EFFORT_LADDER.iter().position(|e| *e == normalize_effort(&d.reasoning_effort)).unwrap_or(2) as i32)
-                .header("")
-                .on_selection_changed({
-                    let draft = draft.clone();
-                    let dirty = dirty.clone();
-                    move |i: i32| {
-                        if let Some(e) = EFFORT_LADDER.get(i as usize) {
-                            draft.borrow_mut().reasoning_effort = e.to_string();
-                            *dirty.borrow_mut() = true;
-                        }
+            ComboBox::new(
+                EFFORT_LADDER
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .selected_index(
+                EFFORT_LADDER
+                    .iter()
+                    .position(|e| *e == normalize_effort(&d.reasoning_effort))
+                    .unwrap_or(2) as i32,
+            )
+            .header("")
+            .on_selection_changed({
+                let draft = draft.clone();
+                let dirty = dirty.clone();
+                move |i: i32| {
+                    if let Some(e) = EFFORT_LADDER.get(i as usize) {
+                        draft.borrow_mut().reasoning_effort = e.to_string();
+                        *dirty.borrow_mut() = true;
                     }
-                })
-                .into(),
+                }
+            })
+            .into(),
         ));
         rows.push(field_row(
             "自动压缩",
@@ -540,7 +599,11 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 })
                 .into(),
         ));
-        let threshold = if d.auto_compact_threshold > 0.0 { d.auto_compact_threshold } else { 0.75 };
+        let threshold = if d.auto_compact_threshold > 0.0 {
+            d.auto_compact_threshold
+        } else {
+            0.75
+        };
         rows.push(field_row(
             "压缩阈值",
             Slider::new(threshold)
@@ -550,7 +613,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_value_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().auto_compact_threshold = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().auto_compact_threshold = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -561,7 +627,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_toggled({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |on: bool| { draft.borrow_mut().compliance_enabled = on; *dirty.borrow_mut() = true; }
+                    move |on: bool| {
+                        draft.borrow_mut().compliance_enabled = on;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -577,7 +646,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_text_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().sub_model = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().sub_model = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -588,7 +660,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_text_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().sub_base_url = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().sub_base_url = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -600,7 +675,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_value_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().sub_max_tokens = v as u64; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().sub_max_tokens = v as u64;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -612,14 +690,19 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_value_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().sub_timeout_secs = v as u64; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().sub_timeout_secs = v as u64;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
         rows.push(section_title("默认工具"));
         if d.tools.is_empty() {
             rows.push(
-                text_block("（暂无可用工具）").foreground(ThemeRef::SecondaryText).into(),
+                text_block("（暂无可用工具）")
+                    .foreground(ThemeRef::SecondaryText)
+                    .into(),
             );
         } else {
             let tools = d.tools.clone();
@@ -636,7 +719,9 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             move |on: bool| {
                                 let mut d = draft.borrow_mut();
                                 if on {
-                                    if !d.sub_tools.contains(&t) { d.sub_tools.push(t.clone()); }
+                                    if !d.sub_tools.contains(&t) {
+                                        d.sub_tools.push(t.clone());
+                                    }
                                 } else {
                                     d.sub_tools.retain(|x| x != &t);
                                 }
@@ -654,20 +739,30 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         rows.push(section_title("工具套件运行环境"));
         rows.push(field_row(
             "运行模式",
-            ComboBox::new(WORKSPACE_MODES.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-                .selected_index(WORKSPACE_MODES.iter().position(|m| *m == d.workspace_mode).unwrap_or(0) as i32)
-                .header("")
-                .on_selection_changed({
-                    let draft = draft.clone();
-                    let dirty = dirty.clone();
-                    move |i: i32| {
-                        if let Some(m) = WORKSPACE_MODES.get(i as usize) {
-                            draft.borrow_mut().workspace_mode = m.to_string();
-                            *dirty.borrow_mut() = true;
-                        }
+            ComboBox::new(
+                WORKSPACE_MODES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .selected_index(
+                WORKSPACE_MODES
+                    .iter()
+                    .position(|m| *m == d.workspace_mode)
+                    .unwrap_or(0) as i32,
+            )
+            .header("")
+            .on_selection_changed({
+                let draft = draft.clone();
+                let dirty = dirty.clone();
+                move |i: i32| {
+                    if let Some(m) = WORKSPACE_MODES.get(i as usize) {
+                        draft.borrow_mut().workspace_mode = m.to_string();
+                        *dirty.borrow_mut() = true;
                     }
-                })
-                .into(),
+                }
+            })
+            .into(),
         ));
         let status_text = if d.workspace_active_mode.is_empty() {
             "（未查询到运行状态）".to_string()
@@ -726,38 +821,43 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         rows.push(section_title("界面"));
         rows.push(field_row(
             "主题",
-            ComboBox::new(vec!["system".to_string(), "light".to_string(), "dark".to_string(), "dark-gray".to_string()])
-                .selected_index(match pd.theme.as_str() {
-                    "system" => 0,
-                    "light" => 1,
-                    "dark" => 2,
-                    "dark-gray" => 3,
-                    _ => 0,
-                })
-                .header("")
-                .on_selection_changed({
-                    let proj_draft = proj_draft.clone();
-                    let dirty = dirty.clone();
-                    move |i: i32| {
-                        let mode = match i {
-                            1 => "light",
-                            2 => "dark",
-                            3 => "dark-gray",
-                            _ => "system",
-                        };
-                        proj_draft.borrow_mut().theme = mode.to_string();
-                        *dirty.borrow_mut() = true;
-                        // WebView 移除：主题壳本地立即应用（三态映射同
-                        // handle_message shell.setTheme 逻辑）。
-                        let theme = match mode {
-                            "light" => windows_reactor::RequestedTheme::Light,
-                            "dark" | "dark-gray" => windows_reactor::RequestedTheme::Dark,
-                            _ => windows_reactor::RequestedTheme::Default,
-                        };
-                        windows_reactor::set_requested_theme(theme);
-                    }
-                })
-                .into(),
+            ComboBox::new(vec![
+                "system".to_string(),
+                "light".to_string(),
+                "dark".to_string(),
+                "dark-gray".to_string(),
+            ])
+            .selected_index(match pd.theme.as_str() {
+                "system" => 0,
+                "light" => 1,
+                "dark" => 2,
+                "dark-gray" => 3,
+                _ => 0,
+            })
+            .header("")
+            .on_selection_changed({
+                let proj_draft = proj_draft.clone();
+                let dirty = dirty.clone();
+                move |i: i32| {
+                    let mode = match i {
+                        1 => "light",
+                        2 => "dark",
+                        3 => "dark-gray",
+                        _ => "system",
+                    };
+                    proj_draft.borrow_mut().theme = mode.to_string();
+                    *dirty.borrow_mut() = true;
+                    // WebView 移除：主题壳本地立即应用（三态映射同
+                    // handle_message shell.setTheme 逻辑）。
+                    let theme = match mode {
+                        "light" => windows_reactor::RequestedTheme::Light,
+                        "dark" | "dark-gray" => windows_reactor::RequestedTheme::Dark,
+                        _ => windows_reactor::RequestedTheme::Default,
+                    };
+                    windows_reactor::set_requested_theme(theme);
+                }
+            })
+            .into(),
         ));
         rows.push(field_row(
             "语言",
@@ -829,7 +929,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_toggled({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |on: bool| { draft.borrow_mut().mm_enabled = on; *dirty.borrow_mut() = true; }
+                    move |on: bool| {
+                        draft.borrow_mut().mm_enabled = on;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -839,7 +942,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_text_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().mm_provider_type = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().mm_provider_type = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -847,11 +953,18 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             "API Key",
             PasswordBox::new()
                 .value(d.mm_api_key.clone())
-                .placeholder_text(if d.mm_api_key_configured { "输入新值以替换" } else { "sk-…" })
+                .placeholder_text(if d.mm_api_key_configured {
+                    "输入新值以替换"
+                } else {
+                    "sk-…"
+                })
                 .on_password_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().mm_api_key = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().mm_api_key = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -861,7 +974,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_text_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().mm_base_url = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().mm_base_url = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -871,7 +987,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_text_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().mm_model = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().mm_model = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -883,7 +1002,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_value_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().mm_max_tokens = v as u64; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().mm_max_tokens = v as u64;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into(),
         ));
@@ -894,21 +1016,26 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         rows.push(section_title("权限控制"));
         rows.push(field_row(
             "权限等级",
-            RadioButtons::new(vec!["1 · 保守".to_string(), "2 · 询问".to_string(), "3 · 自动".to_string(), "4 · 全自动".to_string()])
-                .selected_index((pd.permission_level.saturating_sub(1).min(3)) as i32)
-                .header("")
-                .on_selection_changed({
-                    let bridge = bridge.clone();
-                    let proj_draft = proj_draft.clone();
-                    let dirty = dirty.clone();
-                    move |i: i32| {
-                        let level = (i.max(0) + 1) as u64;
-                        proj_draft.borrow_mut().permission_level = level;
-                        *dirty.borrow_mut() = true;
-                        bridge.spawn_set_permission(level);
-                    }
-                })
-                .into(),
+            RadioButtons::new(vec![
+                "1 · 保守".to_string(),
+                "2 · 询问".to_string(),
+                "3 · 自动".to_string(),
+                "4 · 全自动".to_string(),
+            ])
+            .selected_index((pd.permission_level.saturating_sub(1).min(3)) as i32)
+            .header("")
+            .on_selection_changed({
+                let bridge = bridge.clone();
+                let proj_draft = proj_draft.clone();
+                let dirty = dirty.clone();
+                move |i: i32| {
+                    let level = (i.max(0) + 1) as u64;
+                    proj_draft.borrow_mut().permission_level = level;
+                    *dirty.borrow_mut() = true;
+                    bridge.spawn_set_permission(level);
+                }
+            })
+            .into(),
         ));
         rows.push(section_title("性能"));
         let tokenizer_row: Element = {
@@ -917,7 +1044,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .on_text_changed({
                     let draft = draft.clone();
                     let dirty = dirty.clone();
-                    move |v| { draft.borrow_mut().tokenizer_path = v; *dirty.borrow_mut() = true; }
+                    move |v| {
+                        draft.borrow_mut().tokenizer_path = v;
+                        *dirty.borrow_mut() = true;
+                    }
                 })
                 .into();
             let browse = button("浏览…").subtle().on_click({
@@ -953,12 +1083,10 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             None => text_block("").into(),
         };
         hstack((
-            button("保存设置")
-                .accent()
-                .on_click({
-                    let on_save = on_save.clone();
-                    move || on_save()
-                }),
+            button("保存设置").accent().on_click({
+                let on_save = on_save.clone();
+                move || on_save()
+            }),
             saved_text,
             error_text,
         ))
@@ -971,16 +1099,13 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 同 index 类型跳变（grid↔TextBlock）导致的控件复用错位）；同分类内
     // 重渲染 key 相同 → 原地更新（表单输入状态保持）。
     // 动画：每行挂 enter transition（ImplicitShowAnimation）——切分类时
-    // 新行 mount 淡入 200ms；同分类内重渲染不重建 → 不重放。
+    // 新行 mount 使用统一内容动效；系统关闭动画时不挂 Composition 动画。
     let rows: Vec<Element> = rows
         .into_iter()
         .enumerate()
         .map(|(i, el)| {
             el.with_key(format!("{category}-{i}"))
-                .transition(
-                    Some(AnimationConfig::fade_in(Duration::from_millis(200))),
-                    None,
-                )
+                .transition(motion::content_enter(), None)
         })
         .collect();
     let form: Element = vstack(rows).spacing(10.0).into();

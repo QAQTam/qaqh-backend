@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use windows_reactor::*;
 
-use deepx_fluent::tokens;
+use deepx_fluent::{motion, tokens};
 
 use crate::bridge::{Bridge, ComposerAttachment, ComposerState, ComposerTextFile};
 use crate::shell_store::DashboardSnapshot;
@@ -627,6 +627,7 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             ))
             .spacing(tokens::SPACE_2),
         )
+        .transition(motion::reveal(), motion::content_exit())
         .automation_name(format!("附件 {}", att.file_name));
         attach_rows.push(row.with_key(format!("att-{i}-{}", att.id)));
     }
@@ -767,14 +768,23 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         border(vstack(items).spacing(2.0).padding(6.0))
             .corner_radius(6.0)
             .background(ThemeRef::CardBackground)
+            .transition(motion::reveal(), motion::content_exit())
+            .with_key("composer-slash-menu")
             .into()
     } else {
         grid(()).into()
     };
 
     vstack((goal_bar, queue_bar, slash_menu, card))
-        .spacing(8.0)
-        .padding(16.0)
+        .spacing(tokens::SPACE_2)
+        .padding(Thickness {
+            left: tokens::SPACE_6,
+            top: tokens::SPACE_3,
+            right: tokens::SPACE_6,
+            bottom: tokens::SPACE_3,
+        })
+        .max_width(tokens::CONVERSATION_MAX_WIDTH)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
         .into()
 }
 
@@ -823,6 +833,8 @@ fn goal_bar_row(snap: &DashboardSnapshot) -> Element {
     border(hstack(parts).spacing(16.0).padding(8.0))
         .corner_radius(6.0)
         .background(ThemeRef::CardBackground)
+        .transition(motion::reveal(), motion::content_exit())
+        .with_key("composer-goal")
         .into()
 }
 
@@ -864,6 +876,8 @@ fn queue_row(state: &ComposerState, on_queue_remove: Arc<dyn Fn(String) + 'stati
     )
     .corner_radius(6.0)
     .background(ThemeRef::CardBackground)
+    .transition(motion::reveal(), motion::content_exit())
+    .with_key("composer-queue")
     .into()
 }
 

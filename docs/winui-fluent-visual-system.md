@@ -124,6 +124,33 @@ transient interaction surface，再选择资源。
 - 每个 turn 使用稳定 key、24 DIP 横向 gutter 和虚拟化；
 - 跟尾、顶部分页、锚点保持属于行为层，不得因换皮退化。
 
+### 动效语义
+
+- 非必要动效统一从 `deepx_fluent::motion` 获取，不在页面散落毫秒常量；
+- reveal 为 120ms、内容切换为 180ms、退出为 100ms，退出不得慢于进入；
+- 自定义 Composition 动效必须先读取 Windows `SM_CLIENTAREAANIMATION`，系统关闭
+  动画时不向元素挂载 transition；ProgressRing 等平台控件继续由 WinUI 管理；
+- 只给语义状态变化做动效：工具卡出现、菜单/面板打开、live 答案封口；流式文字
+  本身不逐 token 淡入、缩放或闪烁；
+- 不给 ListView 虚拟化行挂 entrance transition，避免容器回收后重新 realize 时重播；
+- ChatView 的 running 状态使用原生 ProgressRing，完成/失败后替换为静态语义徽标。
+
+### XAML 流式提交
+
+ChatView 采用 retained-mode 帧批处理，而不是复制 Web/SolidJS 的逐事件响应模型：
+
+1. Ringing 事件先保持 typed 形状进入活动会话队列；
+2. 每个 16ms UI 批次把同一 `(turn, round, kind)` 的相邻 delta 合并；
+3. `Transcript::apply_frame` 每批只解析一次活尾，并从实际 `RenderCommand` 推导
+   `None / Live / Structural` invalidation；
+4. 无 RenderCommand 的未知、重复事件不触发 reactor diff；
+5. transport rev 只负责判断队列是否变化，XAML render generation 独立递增，避免
+   seed 切换、快照、分页补偿与下一条 transport rev 数值碰撞；
+6. 跟尾请求只与可能改变内容 extent 的提交绑定，状态徽标变化不触发滚动。
+
+帧批处理只合并相邻追加事件，不跨 checkpoint、工具状态或 round 边界重排，确保
+Ringing 的追加、覆盖和权威终态语义保持不变。
+
 ## 5. 通用 crate 边界
 
 `deepx-fluent` 只拥有视觉语义和无状态构建函数：

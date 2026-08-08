@@ -1,10 +1,9 @@
 //! 原生 ChatView：conversation 事件直连 → `Transcript` → reactor 控件树。
 //!
 //! 数据源：`bridge.chat_drain()`——bridge 在 conversation 频道把 canonical
-//! typed events 缓存入队，本组件以 16ms 事件泵 drain，经
-//! `chat_adapter::render_event` 映射为视图模型后喂 `Transcript` 状态机；
-//! 每次有变化以 rev 触发重渲染（reactor diff 只
-//! 更新变化节点——与 demo 同模式）。
+//! typed events 缓存入队，本组件以 16ms XAML 帧批次 drain，经
+//! `chat_adapter::render_event` 映射后先合并同目标的相邻 delta，再喂
+//! `Transcript` 状态机；实际 `RenderCommand` 决定是否提交 XAML diff。
 //!
 //! 渲染模型（对齐 CHATVIEW-RENDERING-REFERENCE）：
 //! - turn 壳：用户气泡 + 状态徽标；
@@ -17,17 +16,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use deepx_fluent::{StatusTone, tokens};
+use deepx_fluent::{StatusTone, motion, tokens};
 use markdown_winui::{
-    AnswerView, ConversationEvent, LiveSegment, RichTextOutput, RoundView, Transcript, TurnStatus,
-    TurnView,
+    AnswerView, LiveSegment, RichTextOutput, RoundView, Transcript, TurnStatus, TurnView,
 };
 use windows_reactor::*;
 
 use crate::bridge::Bridge;
 use crate::chat_adapter;
 
-/// 事件泵间隔（16ms ≈ 60fps；高吞吐时批量消费，同 demo 模式）。
+/// XAML 提交批次（16ms ≈ 60fps）：队列中的 token delta 先合并，再在
+/// UI 线程的一次 retained-mode 更新中提交；不逐 token 触碰控件树。
 const PUMP_INTERVAL: Duration = Duration::from_millis(16);
 
 /// 跟随尾部滚动请求节流：live 流式期间 50ms 一次贴底请求（原 100ms——
@@ -37,12 +36,6 @@ const PUMP_INTERVAL: Duration = Duration::from_millis(16);
 /// （表现为滚动条卡死）——若实机出现该现象回退 100ms。结构性变化
 /// （restore / 新 turn / round 完成）不受此限，立即滚底。
 const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(50);
-
-/// 渲染降频：live 流式 16ms 合并一次（对齐泵 ≈60fps；原 33ms ≈30fps
-/// 在 100 token/s 时每帧攒 ~3 token，视觉呈"几字一跳"——降频后每泵
-/// tick 即渲染，攒感减半）。Transcript 状态在泵内累积，渲染永远基于
-/// 最新状态；若实测 CPU 升高明显（渲染成本随段落变长），可回退 33ms。
-const RENDER_THROTTLE: Duration = Duration::from_millis(16);
 
 /// 顶部预加载分页大小：滚动接近窗口顶部时一次扩展的回合数。
 /// 与 `markdown_winui::WINDOW_DEFAULT_LEN` 同量级，可经实机手感调优。
@@ -69,12 +62,13 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let force_tail_version = cx.use_ref::<Option<u64>>(None);
     // 滚动请求节流基准（live 流式限频，见 SCROLL_REQUEST_THROTTLE）。
     let last_scroll_request = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
-    // 渲染节流基准（live 流式降频，见 RENDER_THROTTLE）。
-    let last_render = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     // deferred（快照 seed 不匹配）日志限频：16ms 泵每 tick 都会命中，
     // 不节流会刷爆日志（spawn_timeline_refresh 本身有 1s 节流）。
     let last_deferred_log = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
-    let (_, set_rev) = cx.use_state::<u64>(0);
+    // UI 提交代次与 transport rev 解耦：seed、快照、分页和事件批次都可
+    // 独立提交，不会因构造 rev 与下一条传输 rev 碰撞而漏帧。
+    let render_generation = cx.use_ref::<u64>(0);
+    let (_, set_render_generation) = cx.use_state::<u64>(0);
     // 锚定补偿挂起标记：`Some(rows)` = 本帧渲染需用 within 滚动（顶部
     // 预加载后把「原窗口首行」锚回原位，视口不跳）。rows = 扩展前移量
     // = 原首行的新下标。渲染闭包 take 后随 preserve_anchor 下发。
@@ -90,11 +84,11 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_restored_seed = last_restored_seed.clone();
         let last_deferred_log = last_deferred_log.clone();
         let last_scroll_request = last_scroll_request.clone();
-        let last_render = last_render.clone();
         let scroll_version = scroll_version.clone();
         let force_tail_version = force_tail_version.clone();
         let pending_anchor = pending_anchor.clone();
-        let set_rev = set_rev.clone();
+        let render_generation = render_generation.clone();
+        let set_render_generation = set_render_generation.clone();
         move || {
             if timer.borrow().is_some() {
                 return;
@@ -107,10 +101,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let last_restored_seed = last_restored_seed.clone();
                 let last_deferred_log = last_deferred_log.clone();
                 let last_scroll_request = last_scroll_request.clone();
-                let last_render = last_render.clone();
                 let scroll_version = scroll_version.clone();
                 let force_tail_version = force_tail_version.clone();
-                let set_rev = set_rev.clone();
+                let render_generation = render_generation.clone();
+                let set_render_generation = set_render_generation.clone();
                 move || {
                     // 会话切换：active_seed 变化 → 重置 Transcript（旧会话内容
                     // 不残留），等新快照/增量。
@@ -121,6 +115,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         *last_restored_seed.borrow_mut() = String::new();
                         *force_tail_version.borrow_mut() = None;
                         *last_rev.borrow_mut() = 0;
+                        *render_generation.borrow_mut() += 1;
+                        set_render_generation.call(*render_generation.borrow());
                         log_diag(&format!("chat_view: switched to seed {seed}"));
                     }
                     // 先 drain 拿 rev：restore 分支渲染也要用（快照到达时
@@ -138,14 +134,13 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             let n = turns.len();
                             transcript.borrow_mut().restore(turns);
                             *last_restored_seed.borrow_mut() = seed.clone();
-                            // restore 是结构性变化：立即滚底 + 立即渲染
-                            // （不节流；顺带更新节流基准防紧随的 live 抖动）。
+                            // restore 是结构性变化：立即滚底 + 立即提交。
                             let now = std::time::Instant::now();
                             *scroll_version.borrow_mut() += 1;
                             *force_tail_version.borrow_mut() = Some(*scroll_version.borrow());
                             *last_scroll_request.borrow_mut() = now;
-                            *last_render.borrow_mut() = now;
-                            set_rev.call(rev);
+                            *render_generation.borrow_mut() += 1;
+                            set_render_generation.call(*render_generation.borrow());
                             log_diag(&format!("chat_view: restored {n} turns for {seed}"));
                         } else {
                             // 快照 seed 不匹配（旧会话残留/并发交错）：主动重拉
@@ -186,40 +181,34 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         if prepended > 0 {
                             *pending_anchor.borrow_mut() = Some(prepended);
                             *scroll_version.borrow_mut() += 1;
-                            set_rev.call(rev);
+                            *render_generation.borrow_mut() += 1;
+                            set_render_generation.call(*render_generation.borrow());
                             log_diag(&format!(
                                 "chat_view: prepended {prepended} turns for {seed}"
                             ));
                         }
                     }
                     // 2) 增量事件（新对话流式）
-                    if rev != *last_rev.borrow() && !events.is_empty() {
+                    if rev != *last_rev.borrow() {
                         *last_rev.borrow_mut() = rev;
+                    }
+                    if !events.is_empty() {
+                        let frame_events = events
+                            .into_iter()
+                            .filter_map(|event| chat_adapter::render_event(&event));
                         let mut t = transcript.borrow_mut();
-                        let mut structural = false;
-                        for domain_event in events {
-                            if let Some(ev) = chat_adapter::render_event(&domain_event) {
-                                // 结构性变化（新 turn / 回合封口）：立即跟随
-                                // 滚底；live 增量（delta/checkpoint）节流。
-                                if matches!(
-                                    ev,
-                                    ConversationEvent::TurnStarted { .. }
-                                        | ConversationEvent::TurnCompleted { .. }
-                                        | ConversationEvent::TurnFailed { .. }
-                                        | ConversationEvent::RoundCompleted { .. }
-                                ) {
-                                    structural = true;
-                                }
-                                t.apply(&ev);
-                            }
+                        let update = t.apply_frame(frame_events);
+                        if !update.changed() {
+                            return;
                         }
-                        // 滚动请求：结构性变化立即；live 增量 ≥100ms 节流
-                        // （16ms 泵每 tick 请求会与滚轮抢占，并形成
-                        // "滚动 → realize → 渲染 → 再滚动"反馈循环）。
-                        if structural
-                            || std::time::Instant::now()
-                                .duration_since(*last_scroll_request.borrow())
-                                >= SCROLL_REQUEST_THROTTLE
+                        let structural = update.is_structural();
+                        let now = std::time::Instant::now();
+                        // 滚动只随真正改变内容 extent 的 XAML 提交发生；
+                        // 状态徽标更新不再制造多余 ScrollViewer 请求。
+                        if update.extent_changed
+                            && (structural
+                                || now.duration_since(*last_scroll_request.borrow())
+                                    >= SCROLL_REQUEST_THROTTLE)
                         {
                             // 窗口跟随尾部：仅当窗口未被用户上滚扩展时滑动
                             // （保持最近 N 个回合，长会话不退化）；用户上滚
@@ -228,18 +217,11 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                                 t.slide_window_tail();
                             }
                             *scroll_version.borrow_mut() += 1;
-                            *last_scroll_request.borrow_mut() = std::time::Instant::now();
+                            *last_scroll_request.borrow_mut() = now;
                         }
-                        // 渲染：结构性变化立即；live 增量 ≥33ms 合并
-                        // （Transcript 状态累积，渲染基于最新状态）。
-                        if structural
-                            || std::time::Instant::now()
-                                .duration_since(*last_render.borrow())
-                                >= RENDER_THROTTLE
-                        {
-                            *last_render.borrow_mut() = std::time::Instant::now();
-                            set_rev.call(rev);
-                        }
+                        drop(t);
+                        *render_generation.borrow_mut() += 1;
+                        set_render_generation.call(*render_generation.borrow());
                     }
                 }
             }) {
@@ -275,6 +257,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             )
         };
         return deepx_fluent::empty_state(title, detail, busy)
+            .transition(motion::content_enter(), motion::content_exit())
             .automation_name(title)
             .automation_id("chat-empty")
             .with_key("chat-empty");
@@ -300,8 +283,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             let transcript = transcript.clone();
             let pending_anchor = pending_anchor.clone();
             let scroll_version = scroll_version.clone();
-            let set_rev = set_rev.clone();
-            let last_rev = last_rev.clone();
+            let render_generation = render_generation.clone();
+            let set_render_generation = set_render_generation.clone();
             move |_| {
                 // 滚动接近窗口顶部（边沿触发一次）：先扩展窗口内预加载更早
                 // 回合，渲染时锚定补偿保持视口。
@@ -310,10 +293,11 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 if moved > 0 {
                     *pending_anchor.borrow_mut() = Some(moved);
                     // 锚定补偿随 scroll_version 变化触发（reconciler 按版本
-                    // diff）；set_rev(+1) 保证触发渲染（use_state 同值跳过）。
+                    // diff）；独立 UI 代次保证触发渲染。
                     *scroll_version.borrow_mut() += 1;
                     drop(t);
-                    set_rev.call(*last_rev.borrow() + 1);
+                    *render_generation.borrow_mut() += 1;
+                    set_render_generation.call(*render_generation.borrow());
                     return;
                 }
                 drop(t);
@@ -367,6 +351,7 @@ fn turn_view(i: usize, turn: &TurnView) -> Element {
             right: tokens::SPACE_6,
             bottom: tokens::SPACE_3,
         })
+        .max_width(tokens::CONVERSATION_MAX_WIDTH)
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .with_key(turn.turn_id.clone())
         .into()
@@ -510,6 +495,7 @@ fn final_view(turn_idx: usize, round_num: u32, rich: &RichTextOutput) -> Element
     }
     vstack(items)
         .spacing(tokens::SPACE_3)
+        .transition(motion::content_enter(), None)
         .with_key(format!("t{turn_idx}r{round_num}-final"))
         .into()
 }
@@ -540,6 +526,7 @@ fn tool_card(turn_idx: usize, round_num: u32, card: &markdown_winui::ToolCardVie
         .tooltip(format!("展开或折叠工具详情：{name}"))
         .automation_name(format!("工具 {name}，{status}"))
         .automation_id(format!("chat-tool-{}", card.id))
+        .transition(motion::reveal(), motion::content_exit())
         .with_key(format!("t{turn_idx}r{round_num}-card-{}", card.id))
         .into()
 }

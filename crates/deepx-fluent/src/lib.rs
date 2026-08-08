@@ -7,6 +7,57 @@
 
 use windows_reactor::*;
 
+pub mod motion {
+    //! Fluent motion tokens shared by native surfaces.
+    //!
+    //! Composition animations do not automatically inherit WinUI theme
+    //! transition policy, so consult the Windows client-area animation flag
+    //! before returning a transition. Callers can use the returned `Option`
+    //! directly with `ElementExt::transition`.
+
+    use std::time::Duration;
+
+    use windows_reactor::AnimationConfig;
+
+    const SM_CLIENTAREAANIMATION: i32 = 0x2002;
+
+    #[cfg(windows)]
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+
+    /// Whether Windows currently permits non-essential client-area motion.
+    pub fn animations_enabled() -> bool {
+        #[cfg(windows)]
+        {
+            // SAFETY: GetSystemMetrics is process-global, takes a constant
+            // metric index, and has no pointer or lifetime requirements.
+            unsafe { GetSystemMetrics(SM_CLIENTAREAANIMATION) != 0 }
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    }
+
+    /// Short reveal for a newly mounted status, tool, or command surface.
+    pub fn reveal() -> Option<AnimationConfig> {
+        animations_enabled().then(|| AnimationConfig::fade_in(Duration::from_millis(120)))
+    }
+
+    /// Content-level entrance used when a page or finalized answer replaces
+    /// another semantic state. Kept below 200 ms to avoid blocking reading.
+    pub fn content_enter() -> Option<AnimationConfig> {
+        animations_enabled().then(|| AnimationConfig::fade_in(Duration::from_millis(180)))
+    }
+
+    /// Faster exit so dismissed UI never feels slower than its invocation.
+    pub fn content_exit() -> Option<AnimationConfig> {
+        animations_enabled().then(|| AnimationConfig::fade_out(Duration::from_millis(100)))
+    }
+}
+
 pub mod tokens {
     //! Shared geometry and type ramp for DeepX native surfaces.
 
@@ -27,6 +78,8 @@ pub mod tokens {
 
     /// Comfortable reading measure for long-form assistant output.
     pub const READING_MAX_WIDTH: f64 = 880.0;
+    /// Shared centered column for a transcript turn and its composer.
+    pub const CONVERSATION_MAX_WIDTH: f64 = 1040.0;
     /// User prompts are intentionally narrower and right aligned.
     pub const USER_MESSAGE_MAX_WIDTH: f64 = 720.0;
 }
@@ -74,20 +127,29 @@ fn hairline() -> Thickness {
 /// Compact semantic state label. It uses system status resources instead of
 /// literal colors, so high contrast and dark mode retain meaning.
 pub fn status_badge(label: impl Into<String>, tone: StatusTone) -> Element {
-    border(
-        text_block(label)
-            .font_size(tokens::TYPE_CAPTION)
-            .foreground(tone.foreground()),
-    )
-    .background(tone.background())
-    .corner_radius(tokens::RADIUS_CONTROL)
-    .padding(Thickness {
-        left: 6.0,
-        top: 2.0,
-        right: 6.0,
-        bottom: 2.0,
-    })
-    .into()
+    let label = label.into();
+    let text: Element = text_block(label.clone())
+        .font_size(tokens::TYPE_CAPTION)
+        .foreground(tone.foreground())
+        .into();
+    let content: Element = if tone == StatusTone::Running {
+        hstack((ProgressRing::default().width(12.0).height(12.0), text))
+            .spacing(tokens::SPACE_1)
+            .into()
+    } else {
+        text
+    };
+    border(content)
+        .background(tone.background())
+        .corner_radius(tokens::RADIUS_CONTROL)
+        .padding(Thickness {
+            left: 6.0,
+            top: 2.0,
+            right: 6.0,
+            bottom: 2.0,
+        })
+        .automation_name(label)
+        .into()
 }
 
 /// Right-aligned prompt surface. Authorship is expressed through layout and a
@@ -294,5 +356,15 @@ mod tests {
         );
         assert_eq!(command_surface(grid(())).kind_name(), "Border");
         assert_eq!(metadata_badge("TXT").kind_name(), "Border");
+    }
+
+    #[test]
+    fn fluent_motion_tokens_are_short_and_optional() {
+        if let Some(reveal) = motion::reveal() {
+            assert_eq!(reveal.duration, std::time::Duration::from_millis(120));
+        }
+        if let Some(exit) = motion::content_exit() {
+            assert!(exit.duration < std::time::Duration::from_millis(180));
+        }
     }
 }

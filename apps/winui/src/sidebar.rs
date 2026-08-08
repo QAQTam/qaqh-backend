@@ -33,11 +33,7 @@ pub const SIDEBAR_DEFAULT_WIDTH: f64 = 260.0;
 
 /// 纯图标按钮（subtle 样式，无文字）——用于行内删除。
 fn icon_button(icon: Icon, on_click: impl Fn() + 'static) -> Element {
-    button("")
-        .icon(icon)
-        .subtle()
-        .on_click(on_click)
-        .into()
+    button("").icon(icon).subtle().on_click(on_click).into()
 }
 
 /// 会话活动状态 → Fluent 语义色令牌（自动适配深浅主题）。
@@ -108,14 +104,11 @@ fn session_row(
             move |_| bridge.spawn_resume(&seed)
         })
         .into();
-    let delete = icon_button(
-        Icon::symbol(Symbol::Delete),
-        {
-            let seed = seed.clone();
-            let set_confirm = set_confirm.clone();
-            move || set_confirm.call(Some(seed.clone()))
-        },
-    )
+    let delete = icon_button(Icon::symbol(Symbol::Delete), {
+        let seed = seed.clone();
+        let set_confirm = set_confirm.clone();
+        move || set_confirm.call(Some(seed.clone()))
+    })
     .vertical_alignment(VerticalAlignment::Center);
     let row: Element = grid((
         indicator.grid_column(0),
@@ -139,12 +132,9 @@ fn session_row(
     } else {
         item_el
     };
-    item_el
-        .transition(
-            Some(AnimationConfig::fade_in(Duration::from_millis(200))),
-            None,
-        )
-        .into()
+    // 不给虚拟化行挂 entrance：滚动回收/重新 realize 时重播动画会让列表
+    // 看起来抖动。新增会话的状态变化由 WinUI 自带 pointer/selection 视觉表达。
+    item_el.into()
 }
 
 /// 归档会话行：置灰标题 + 状态点 + ×（彻底删除确认）。
@@ -170,14 +160,11 @@ fn archive_row(
             move |_| bridge.spawn_unarchive(&seed)
         })
         .into();
-    let delete = icon_button(
-        Icon::symbol(Symbol::Delete),
-        {
-            let seed = seed.clone();
-            let set_confirm = set_confirm.clone();
-            move || set_confirm.call(Some(seed.clone()))
-        },
-    )
+    let delete = icon_button(Icon::symbol(Symbol::Delete), {
+        let seed = seed.clone();
+        let set_confirm = set_confirm.clone();
+        move || set_confirm.call(Some(seed.clone()))
+    })
     .vertical_alignment(VerticalAlignment::Center);
     let row: Element = grid((
         dot.grid_column(0),
@@ -260,19 +247,16 @@ pub fn sidebar(
                     let bridge = bridge.clone();
                     move || bridge.spawn_new_session()
                 }),
-            icon_button(
-                Icon::symbol(Symbol::Delete),
-                {
-                    let bridge = bridge.clone();
-                    let set_confirm = set_confirm_seed.clone();
-                    move || {
-                        let seed = bridge.core().active_seed();
-                        if !seed.is_empty() {
-                            set_confirm.call(Some(seed));
-                        }
+            icon_button(Icon::symbol(Symbol::Delete), {
+                let bridge = bridge.clone();
+                let set_confirm = set_confirm_seed.clone();
+                move || {
+                    let seed = bridge.core().active_seed();
+                    if !seed.is_empty() {
+                        set_confirm.call(Some(seed));
                     }
-                },
-            ),
+                }
+            }),
         ))
         .into();
         sp.margin(12.0)
@@ -296,7 +280,12 @@ pub fn sidebar(
         let set_confirm = set_confirm_seed.clone();
         let active = active.clone();
         move |item, _| {
-            session_row(item, item.seed == active, bridge.clone(), set_confirm.clone())
+            session_row(
+                item,
+                item.seed == active,
+                bridge.clone(),
+                set_confirm.clone(),
+            )
         }
     })
     .with_key_selector(|item| item.seed.clone())
@@ -320,12 +309,8 @@ pub fn sidebar(
     .with_key_selector(|item| item.seed.clone())
     .selection_mode(SelectionMode::None)
     .build();
-    let session_list: Element = scroll_viewer(vstack((
-        list_active,
-        archived_label,
-        list_archived,
-    )))
-    .into();
+    let session_list: Element =
+        scroll_viewer(vstack((list_active, archived_label, list_archived))).into();
 
     // ── 底部导航：技能 / 设置 ──────────────────────────────────
     let footer: Element = {
@@ -396,9 +381,10 @@ pub fn sidebar(
                 if !info.is_left_button_pressed {
                     return;
                 }
-                let Some((sx, sw)) = *drag_start.borrow() else { return };
-                let new_w = (sw + (info.window_x - sx))
-                    .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                let Some((sx, sw)) = *drag_start.borrow() else {
+                    return;
+                };
+                let new_w = (sw + (info.window_x - sx)).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
                 if (new_w - sw).abs() >= 2.0 {
                     set_width.call(new_w);
                 }

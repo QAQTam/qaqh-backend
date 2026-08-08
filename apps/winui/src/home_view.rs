@@ -22,6 +22,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows_reactor::*;
 
+use deepx_fluent::motion;
+
 use crate::bridge::Bridge;
 use crate::shell_store::SessionItem;
 
@@ -132,10 +134,7 @@ fn session_card(item: &SessionItem, bridge: &Arc<Bridge>) -> Element {
         .font_size(11.0)
         .foreground(ThemeRef::SecondaryText)
         .into();
-    let mut rows: Vec<Element> = vec![
-        hstack((dot, title)).spacing(6.0).into(),
-        meta,
-    ];
+    let mut rows: Vec<Element> = vec![hstack((dot, title)).spacing(6.0).into(), meta];
     if item.running {
         rows.push(
             text_block("运行中")
@@ -154,10 +153,7 @@ fn session_card(item: &SessionItem, bridge: &Arc<Bridge>) -> Element {
             move |_| bridge.spawn_resume(&seed)
         })
         // 新卡片出现时淡入（ImplicitShowAnimation；会话列表刷新新增行时触发）。
-        .transition(
-            Some(AnimationConfig::fade_in(Duration::from_millis(200))),
-            None,
-        )
+        .transition(motion::reveal(), None)
         .into()
 }
 
@@ -281,13 +277,37 @@ pub fn home_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             })
             .collect();
         let legend: Element = hstack((
-            text_block("少").font_size(11.0).foreground(ThemeRef::SecondaryText),
-            border(text_block("")).width(10.0).height(10.0).corner_radius(2.0).background(heat_color(0)),
-            border(text_block("")).width(10.0).height(10.0).corner_radius(2.0).background(heat_color(1)),
-            border(text_block("")).width(10.0).height(10.0).corner_radius(2.0).background(heat_color(2)),
-            border(text_block("")).width(10.0).height(10.0).corner_radius(2.0).background(heat_color(3)),
-            border(text_block("")).width(10.0).height(10.0).corner_radius(2.0).background(heat_color(4)),
-            text_block("多").font_size(11.0).foreground(ThemeRef::SecondaryText),
+            text_block("少")
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText),
+            border(text_block(""))
+                .width(10.0)
+                .height(10.0)
+                .corner_radius(2.0)
+                .background(heat_color(0)),
+            border(text_block(""))
+                .width(10.0)
+                .height(10.0)
+                .corner_radius(2.0)
+                .background(heat_color(1)),
+            border(text_block(""))
+                .width(10.0)
+                .height(10.0)
+                .corner_radius(2.0)
+                .background(heat_color(2)),
+            border(text_block(""))
+                .width(10.0)
+                .height(10.0)
+                .corner_radius(2.0)
+                .background(heat_color(3)),
+            border(text_block(""))
+                .width(10.0)
+                .height(10.0)
+                .corner_radius(2.0)
+                .background(heat_color(4)),
+            text_block("多")
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText),
         ))
         .spacing(4.0)
         .into();
@@ -297,18 +317,20 @@ pub fn home_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .column_spacing(4.0)
             .row_spacing(4.0)
             .into();
-        border(vstack((
-            hstack((
-                text_block("活动").font_size(13.0).semibold(),
-                text_block(format!("{} 个任务", items.len()))
-                    .font_size(11.0)
-                    .foreground(ThemeRef::SecondaryText),
+        border(
+            vstack((
+                hstack((
+                    text_block("活动").font_size(13.0).semibold(),
+                    text_block(format!("{} 个任务", items.len()))
+                        .font_size(11.0)
+                        .foreground(ThemeRef::SecondaryText),
+                ))
+                .spacing(8.0),
+                grid_el,
+                legend,
             ))
             .spacing(8.0),
-            grid_el,
-            legend,
-        ))
-        .spacing(8.0))
+        )
         .background(ThemeRef::LayerFill)
         .corner_radius(8.0)
         .padding(Thickness::xy(16.0, 12.0))
@@ -329,7 +351,11 @@ pub fn home_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let card_els: Vec<Element> = cards
             .iter()
             .enumerate()
-            .map(|(i, item)| session_card(item, &bridge).grid_column((i % 4) as i32).grid_row((i / 4) as i32))
+            .map(|(i, item)| {
+                session_card(item, &bridge)
+                    .grid_column((i % 4) as i32)
+                    .grid_row((i / 4) as i32)
+            })
             .collect();
         // key："sessions" 固定——空/非空两种结构（TextBlock↔vstack）之间
         // 切换时 key 相同但 kind 不同 → keyed reconcile 干净重建，杜绝

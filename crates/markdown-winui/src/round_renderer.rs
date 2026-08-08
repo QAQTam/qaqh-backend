@@ -42,15 +42,9 @@ use crate::{RichTextOutput, TableData, render_final};
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderCommand {
     /// 挂载新 turn（append-only：只 push 尾部）。
-    MountTurn {
-        index: usize,
-        user_text: String,
-    },
+    MountTurn { index: usize, user_text: String },
     /// turn 状态变更（running → completed / failed）。
-    UpdateTurnStatus {
-        index: usize,
-        status: TurnStatus,
-    },
+    UpdateTurnStatus { index: usize, status: TurnStatus },
     /// 答案活尾预览替换（字面/表格交错序列；未闭合语法字面输出）。
     ///
     /// 协议表格（```table）在流式中渐进长出：表格行从字面剥离进 `segments`
@@ -92,6 +86,39 @@ pub enum RenderCommand {
         round: usize,
         output_ref: String,
     },
+}
+
+/// The smallest XAML invalidation needed after applying one UI-frame batch.
+///
+/// This is intentionally derived from render commands rather than protocol
+/// event names: ignored/duplicate events produce no UI work, live text can be
+/// frame-coalesced, and mounts/finalization commit immediately.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum XamlInvalidation {
+    #[default]
+    None,
+    Live,
+    Structural,
+}
+
+/// Result of applying the events accumulated for one XAML presentation frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct XamlFrameUpdate {
+    pub commands: Vec<RenderCommand>,
+    pub invalidation: XamlInvalidation,
+    /// A command mounted content or changed live content height, so a
+    /// near-tail viewport may need one post-layout follow request.
+    pub extent_changed: bool,
+}
+
+impl XamlFrameUpdate {
+    pub fn changed(&self) -> bool {
+        self.invalidation != XamlInvalidation::None
+    }
+
+    pub fn is_structural(&self) -> bool {
+        self.invalidation == XamlInvalidation::Structural
+    }
 }
 
 /// turn 生命周期（渲染用；对齐协议 `TurnStarted/TurnCompleted/TurnFailed`）。
@@ -184,7 +211,10 @@ pub enum AnswerView {
         segments: Vec<LiveSegment>,
     },
     /// 权威终态：全量块（冻结，不再变化）。
-    Final { blocks: Vec<Block>, rich: RichTextOutput },
+    Final {
+        blocks: Vec<Block>,
+        rich: RichTextOutput,
+    },
 }
 
 impl Default for AnswerView {
@@ -497,11 +527,7 @@ impl Transcript {
     /// 起点右移 `n` 保持渲染窗口位置（新回合在窗口**前面**，chat_view
     /// 以 `n` 做锚定补偿，视口不跳）。返回实际前插数；0 = 无新回合。
     pub fn prepend_turns(&mut self, turns: Vec<RestoredTurn>) -> usize {
-        let known: HashSet<&str> = self
-            .turns
-            .iter()
-            .map(|t| t.turn_id.as_str())
-            .collect();
+        let known: HashSet<&str> = self.turns.iter().map(|t| t.turn_id.as_str()).collect();
         let fresh: Vec<RestoredTurn> = turns
             .into_iter()
             .filter(|t| !known.contains(t.turn_id.as_str()))
@@ -511,7 +537,7 @@ impl Transcript {
         }
         let n = fresh.len();
         let mut new_turns: Vec<TurnView> = fresh.into_iter().map(to_turn_view).collect();
-        new_turns.extend(self.turns.drain(..));
+        new_turns.append(&mut self.turns);
         self.turns = new_turns;
         self.turn_index = self
             .turns
@@ -552,18 +578,14 @@ impl Transcript {
             budget -= t.rounds.len().max(1);
             start_budget = i;
         }
-        self.window_start = start_budget
-            .max(self.turns.len().saturating_sub(WINDOW_DEFAULT_LEN));
+        self.window_start = start_budget.max(self.turns.len().saturating_sub(WINDOW_DEFAULT_LEN));
         self.tail_following = true;
     }
 
     /// 应用一个协议事件，产出渲染命令（可能为空 = 无需触碰 UI）。
     pub fn apply(&mut self, ev: &ConversationEvent) -> Vec<RenderCommand> {
         match ev {
-            ConversationEvent::TurnStarted {
-                turn_id,
-                user_text,
-            } => {
+            ConversationEvent::TurnStarted { turn_id, user_text } => {
                 let index = self.turns.len();
                 self.turns.push(TurnView {
                     turn_id: turn_id.clone(),
@@ -849,6 +871,29 @@ impl Transcript {
         }
     }
 
+    /// Apply a presentation-frame batch.
+    ///
+    /// Adjacent deltas for the same `(turn, round, kind)` are concatenated
+    /// before parsing. A burst of token events therefore updates the live
+    /// RichText/TextBlock tail once per dispatcher frame instead of repeatedly
+    /// reparsing the growing answer on the UI thread.
+    pub fn apply_frame(
+        &mut self,
+        events: impl IntoIterator<Item = ConversationEvent>,
+    ) -> XamlFrameUpdate {
+        let events = coalesce_adjacent_deltas(events);
+        let mut update = XamlFrameUpdate::default();
+        for event in events {
+            let commands = self.apply(&event);
+            for command in commands {
+                update.invalidation = update.invalidation.max(command_invalidation(&command));
+                update.extent_changed |= command_changes_extent(&command);
+                update.commands.push(command);
+            }
+        }
+        update
+    }
+
     /// 外置正文拉取完成：以权威文本重建（对应 `output_ref` 加载路径）。
     pub fn resolve_output(
         &mut self,
@@ -875,7 +920,11 @@ impl Transcript {
 
     fn round_mut(&mut self, turn: usize, round_num: u32) -> (usize, &mut RoundView) {
         let turn_view = &mut self.turns[turn];
-        if let Some(r) = turn_view.rounds.iter().position(|r| r.round_num == round_num) {
+        if let Some(r) = turn_view
+            .rounds
+            .iter()
+            .position(|r| r.round_num == round_num)
+        {
             (r, &mut turn_view.rounds[r])
         } else {
             turn_view.rounds.push(RoundView::new(round_num));
@@ -900,6 +949,134 @@ impl Transcript {
         self.turn_index.insert(turn_id.to_string(), index);
         index
     }
+}
+
+fn command_invalidation(command: &RenderCommand) -> XamlInvalidation {
+    match command {
+        RenderCommand::UpdateLiveTail { .. } | RenderCommand::UpdateThinking { .. } => {
+            XamlInvalidation::Live
+        }
+        RenderCommand::MountTurn { .. }
+        | RenderCommand::UpdateTurnStatus { .. }
+        | RenderCommand::RebuildRound { .. }
+        | RenderCommand::UpsertToolCard { .. }
+        | RenderCommand::LoadOutput { .. } => XamlInvalidation::Structural,
+    }
+}
+
+fn command_changes_extent(command: &RenderCommand) -> bool {
+    !matches!(command, RenderCommand::UpdateTurnStatus { .. })
+}
+
+fn coalesce_adjacent_deltas(
+    events: impl IntoIterator<Item = ConversationEvent>,
+) -> Vec<ConversationEvent> {
+    let mut coalesced: Vec<ConversationEvent> = Vec::new();
+    for event in events {
+        match event {
+            ConversationEvent::RoundDelta {
+                turn_id,
+                round_num,
+                kind,
+                delta,
+            } => {
+                if let Some(ConversationEvent::RoundDelta {
+                    turn_id: previous_turn,
+                    round_num: previous_round,
+                    kind: previous_kind,
+                    delta: previous_delta,
+                }) = coalesced.last_mut()
+                    && *previous_turn == turn_id
+                    && *previous_round == round_num
+                    && *previous_kind == kind
+                {
+                    previous_delta.push_str(&delta);
+                    continue;
+                }
+                coalesced.push(ConversationEvent::RoundDelta {
+                    turn_id,
+                    round_num,
+                    kind,
+                    delta,
+                });
+            }
+            checkpoint @ ConversationEvent::BlockCheckpoint { .. } => {
+                // A checkpoint is the complete current block value. If it
+                // immediately follows same-target deltas/checkpoint in this
+                // presentation frame, parsing the superseded value is wasted.
+                if coalesced
+                    .last()
+                    .is_some_and(|previous| checkpoint_replaces(previous, &checkpoint))
+                {
+                    coalesced.pop();
+                }
+                coalesced.push(checkpoint);
+            }
+            status @ ConversationEvent::ProviderToolStatus { .. } => {
+                // Provider status is replaceable by call_id; only its latest
+                // value in an adjacent frame run needs to touch the tool card.
+                if coalesced
+                    .last()
+                    .is_some_and(|previous| provider_status_replaces(previous, &status))
+                {
+                    coalesced.pop();
+                }
+                coalesced.push(status);
+            }
+            other => coalesced.push(other),
+        }
+    }
+    coalesced
+}
+
+fn checkpoint_replaces(previous: &ConversationEvent, next: &ConversationEvent) -> bool {
+    let ConversationEvent::BlockCheckpoint {
+        turn_id,
+        round_num,
+        kind,
+        ..
+    } = next
+    else {
+        return false;
+    };
+    match previous {
+        ConversationEvent::RoundDelta {
+            turn_id: previous_turn,
+            round_num: previous_round,
+            kind: previous_kind,
+            ..
+        }
+        | ConversationEvent::BlockCheckpoint {
+            turn_id: previous_turn,
+            round_num: previous_round,
+            kind: previous_kind,
+            ..
+        } => previous_turn == turn_id && previous_round == round_num && previous_kind == kind,
+        _ => false,
+    }
+}
+
+fn provider_status_replaces(previous: &ConversationEvent, next: &ConversationEvent) -> bool {
+    let ConversationEvent::ProviderToolStatus {
+        turn_id,
+        round_num,
+        call_id,
+        ..
+    } = next
+    else {
+        return false;
+    };
+    matches!(
+        previous,
+        ConversationEvent::ProviderToolStatus {
+            turn_id: previous_turn,
+            round_num: previous_round,
+            call_id: previous_call,
+            ..
+        } if previous_turn == turn_id
+            && previous_round == round_num
+            && previous_call == call_id
+    )
 }
 
 /// 按 tool_call_id upsert 工具卡（同 id 覆盖状态，保持卡位置稳定）。

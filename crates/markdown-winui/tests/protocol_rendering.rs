@@ -11,7 +11,7 @@
 
 use markdown_core::ast::Inline;
 use markdown_winui::{
-    ConversationEvent, LiveSegment, RenderCommand, RoundDeltaKind, Transcript,
+    ConversationEvent, LiveSegment, RenderCommand, RoundDeltaKind, Transcript, XamlInvalidation,
 };
 
 fn turn_started(id: &str) -> ConversationEvent {
@@ -90,7 +90,12 @@ fn answer_delta_table_grows_progressively() {
     let mut t = Transcript::new();
     t.apply(&turn_started("t1"));
     // 围栏 + 表头：表格立即出现（表头网格），围栏前文本为 Text 段
-    let cmds = t.apply(&delta("t1", 0, RoundDeltaKind::Answering, "速查：\n\n```table\n语言\t类型\n"));
+    let cmds = t.apply(&delta(
+        "t1",
+        0,
+        RoundDeltaKind::Answering,
+        "速查：\n\n```table\n语言\t类型\n",
+    ));
     let RenderCommand::UpdateLiveTail { segments, .. } = &cmds[0] else {
         panic!("expect live tail: {cmds:?}");
     };
@@ -141,7 +146,11 @@ fn answer_delta_table_grows_progressively() {
     let LiveSegment::Table(t3) = &segments[1] else {
         panic!("expect table segment");
     };
-    assert_eq!(markdown_core::ast::concat_inlines(&t3.rows[1][1]), "静态", "残行逐字生长");
+    assert_eq!(
+        markdown_core::ast::concat_inlines(&t3.rows[1][1]),
+        "静态",
+        "残行逐字生长"
+    );
 
     // 残行完成 + 围栏闭合：表格封存（sealed），字面不重复出现表格内容
     let cmds = t.apply(&delta("t1", 0, RoundDeltaKind::Answering, "\n```\n"));
@@ -165,7 +174,12 @@ fn answer_delta_table_falls_back_on_bad_header() {
     use markdown_winui::LiveSegment;
     let mut t = Transcript::new();
     t.apply(&turn_started("t1"));
-    let cmds = t.apply(&delta("t1", 0, RoundDeltaKind::Answering, "```table\n这不是表格\n"));
+    let cmds = t.apply(&delta(
+        "t1",
+        0,
+        RoundDeltaKind::Answering,
+        "```table\n这不是表格\n",
+    ));
     let RenderCommand::UpdateLiveTail { segments, .. } = &cmds[0] else {
         panic!("expect live tail: {cmds:?}");
     };
@@ -183,7 +197,12 @@ fn checkpoint_overrides_and_self_heals() {
     t.apply(&turn_started("t1"));
     t.apply(&delta("t1", 0, RoundDeltaKind::Answering, "hel"));
     // 假设 delta 丢失，checkpoint 给出权威完整值
-    let cmds = t.apply(&checkpoint("t1", 0, RoundDeltaKind::Answering, "hello **world**"));
+    let cmds = t.apply(&checkpoint(
+        "t1",
+        0,
+        RoundDeltaKind::Answering,
+        "hello **world**",
+    ));
     let RenderCommand::UpdateLiveTail { raw, inlines, .. } = &cmds[0] else {
         panic!("expect live tail");
     };
@@ -212,7 +231,10 @@ fn round_completed_rebuilds_authoritative() {
             windows_reactor::RichTextInline::LineBreak => "\n".into(),
         })
         .collect();
-    assert!(joined.contains("bold") || joined.contains("world"), "{joined}");
+    assert!(
+        joined.contains("bold") || joined.contains("world"),
+        "{joined}"
+    );
     // final 后答案冻结为 Final
     assert!(matches!(
         t.turns()[0].rounds[0].answer,
@@ -325,7 +347,12 @@ fn mixed_round_smoke() {
         turn_started("t1"),
         delta("t1", 0, RoundDeltaKind::Thinking, "think"),
         delta("t1", 0, RoundDeltaKind::Answering, "let me check **"),
-        delta("t1", 0, RoundDeltaKind::ToolCalling, r#"{"id":"c1","name":"grep""#),
+        delta(
+            "t1",
+            0,
+            RoundDeltaKind::ToolCalling,
+            r#"{"id":"c1","name":"grep""#,
+        ),
         completed("t1", 0, "done **here**"),
         delta("t1", 1, RoundDeltaKind::Answering, "follow up"),
         completed("t1", 1, "follow up"),
@@ -337,13 +364,66 @@ fn mixed_round_smoke() {
     }
     assert!(total >= 6);
     assert_eq!(t.turns()[0].rounds.len(), 2);
-    assert_eq!(
-        t.turns()[0].status,
-        markdown_winui::TurnStatus::Completed
-    );
+    assert_eq!(t.turns()[0].status, markdown_winui::TurnStatus::Completed);
     // round0 权威终态冻结
     assert!(matches!(
         t.turns()[0].rounds[0].answer,
         markdown_winui::AnswerView::Final { .. }
     ));
+}
+
+/// 8. XAML 帧批处理：同目标的相邻 token delta 只解析/投影一次。
+#[test]
+fn xaml_frame_coalesces_adjacent_live_deltas() {
+    let mut t = Transcript::new();
+    t.apply(&turn_started("t1"));
+
+    let update = t.apply_frame([
+        delta("t1", 0, RoundDeltaKind::Answering, "one "),
+        delta("t1", 0, RoundDeltaKind::Answering, "two "),
+        delta("t1", 0, RoundDeltaKind::Answering, "three"),
+    ]);
+
+    assert_eq!(update.invalidation, XamlInvalidation::Live);
+    assert!(update.extent_changed);
+    assert_eq!(update.commands.len(), 1, "一个 UI 帧只更新一次活尾");
+    let RenderCommand::UpdateLiveTail { raw, .. } = &update.commands[0] else {
+        panic!("expect live tail: {:?}", update.commands);
+    };
+    assert_eq!(raw, "one two three");
+}
+
+/// 9. 结构性命令优先级高于同帧 live 更新；无效事件不触发 XAML diff。
+#[test]
+fn xaml_frame_invalidation_follows_render_commands() {
+    let mut t = Transcript::new();
+    let structural = t.apply_frame([
+        turn_started("t1"),
+        delta("t1", 0, RoundDeltaKind::Answering, "hello"),
+    ]);
+    assert!(structural.changed());
+    assert!(structural.is_structural());
+
+    let ignored = t.apply_frame([ConversationEvent::Unknown]);
+    assert_eq!(ignored.invalidation, XamlInvalidation::None);
+    assert!(ignored.commands.is_empty());
+}
+
+/// 10. 同帧 checkpoint 覆盖此前追加值，只投影权威完整值一次。
+#[test]
+fn xaml_frame_checkpoint_supersedes_adjacent_deltas() {
+    let mut t = Transcript::new();
+    t.apply(&turn_started("t1"));
+
+    let update = t.apply_frame([
+        delta("t1", 0, RoundDeltaKind::Answering, "stale "),
+        delta("t1", 0, RoundDeltaKind::Answering, "tail"),
+        checkpoint("t1", 0, RoundDeltaKind::Answering, "authoritative"),
+    ]);
+
+    assert_eq!(update.commands.len(), 1);
+    let RenderCommand::UpdateLiveTail { raw, .. } = &update.commands[0] else {
+        panic!("expect live tail: {:?}", update.commands);
+    };
+    assert_eq!(raw, "authoritative");
 }

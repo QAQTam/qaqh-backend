@@ -27,7 +27,7 @@ mod round_renderer;
 pub use protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
 pub use round_renderer::{
     AnswerView, LiveSegment, RenderCommand, RestoredRound, RestoredTurn, RoundView, ToolCardView,
-    Transcript, TurnStatus, TurnView,
+    Transcript, TurnStatus, TurnView, XamlFrameUpdate, XamlInvalidation,
 };
 
 use markdown_core::ast::{Block, Inline};
@@ -161,7 +161,11 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
                 out.blocks.push(FinalBlock::Paragraph(para.clone()));
                 out.paragraphs.push(para);
             }
-            Block::List { ordered, start, items } => {
+            Block::List {
+                ordered,
+                start,
+                items,
+            } => {
                 let mut n = *start;
                 for item in items {
                     let prefix = if item.task.is_some() {
@@ -172,9 +176,9 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
                     } else if *ordered {
                         let label = n.to_string() + ". ";
                         n += 1;
-                        let para = RichTextParagraph::new(vec![
-                            RichTextInline::Run(RichTextRun::plain(label)),
-                        ]);
+                        let para = RichTextParagraph::new(vec![RichTextInline::Run(
+                            RichTextRun::plain(label),
+                        )]);
                         out.blocks.push(FinalBlock::Paragraph(para.clone()));
                         out.paragraphs.push(para);
                         // 前缀段已入，内容段继续
@@ -198,10 +202,8 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
                     let mut para = render_final(std::slice::from_ref(child));
                     for b in &mut para.blocks {
                         if let FinalBlock::Paragraph(p) = b {
-                            p.inlines.insert(
-                                0,
-                                RichTextInline::Run(RichTextRun::plain("> ")),
-                            );
+                            p.inlines
+                                .insert(0, RichTextInline::Run(RichTextRun::plain("> ")));
                         }
                     }
                     out.paragraphs.extend(para.paragraphs);
@@ -332,7 +334,10 @@ fn push_run(out: &mut Vec<RichTextInline>, run: RichTextRun) {
 pub fn markdown_block(markdown: &str) -> RichTextBlock {
     let blocks = markdown_core::parse_final(markdown);
     let out = render_final(&blocks);
-    RichTextBlock::new().with_paragraphs(out.paragraphs).wrap().selectable()
+    RichTextBlock::new()
+        .with_paragraphs(out.paragraphs)
+        .wrap()
+        .selectable()
 }
 
 /// RichTextBlock 便捷扩展（原型用；fork 内可并入 widget.rs）。
@@ -359,16 +364,22 @@ mod tests {
         assert_eq!(rt.paragraphs.len(), 4, "标题 + 段落 + 2 列表项");
         // 标题
         let title = &rt.paragraphs[0].inlines[0];
-        let RichTextInline::Run(run) = title else { panic!("expect run") };
+        let RichTextInline::Run(run) = title else {
+            panic!("expect run")
+        };
         assert_eq!(run.text, "Title");
         // 加粗
         let bold = &rt.paragraphs[1].inlines[1];
-        let RichTextInline::Run(run) = bold else { panic!("expect run") };
+        let RichTextInline::Run(run) = bold else {
+            panic!("expect run")
+        };
         assert!(run.is_bold);
         assert_eq!(run.text, "bold");
         // 任务列表前缀
         let task = &rt.paragraphs[2].inlines[0];
-        let RichTextInline::Run(run) = task else { panic!("expect run") };
+        let RichTextInline::Run(run) = task else {
+            panic!("expect run")
+        };
         assert!(run.text.contains('☑'));
     }
 
@@ -385,10 +396,14 @@ mod tests {
     /// 代码块走独立通道（不混入段落）
     #[test]
     fn code_block_separate_channel() {
-        let out = render_final(&markdown_core::parse_final("text\n```rs\nfn main() {}\n```"));
-        assert!(!out.paragraphs.iter().any(|p| p.inlines.iter().any(|i| {
-            matches!(i, RichTextInline::Run(r) if r.text.contains("fn main"))
-        })));
+        let out = render_final(&markdown_core::parse_final(
+            "text\n```rs\nfn main() {}\n```",
+        ));
+        assert!(!out.paragraphs.iter().any(|p| {
+            p.inlines
+                .iter()
+                .any(|i| matches!(i, RichTextInline::Run(r) if r.text.contains("fn main")))
+        }));
         assert_eq!(out.code_blocks.len(), 1);
         assert_eq!(out.code_blocks[0].lang.as_deref(), Some("rs"));
     }
@@ -453,7 +468,10 @@ mod tests {
 
         view.append(&mut md, "ld**");
         let joined = inline_text(&view.output.paragraphs[0]);
-        assert!(joined.contains("bold") || joined.contains("world"), "{joined}");
+        assert!(
+            joined.contains("bold") || joined.contains("world"),
+            "{joined}"
+        );
     }
 
     fn inline_text(p: &RichTextParagraph) -> String {
@@ -552,17 +570,15 @@ pub fn table_view(table: &TableData, key: &str) -> Element {
 
     // 表头行（row 0）：加粗 + 背景 + 底部粗线
     for (ci, cell) in table.headers.iter().enumerate() {
-        children.push(
-            table_cell(
-                markdown_core::ast::concat_inlines(cell),
-                format!("{key}-h{ci}"),
-                0,
-                ci as i32,
-                n_cols as i32,
-                n_rows as i32,
-                true,
-            ),
-        );
+        children.push(table_cell(
+            markdown_core::ast::concat_inlines(cell),
+            format!("{key}-h{ci}"),
+            0,
+            ci as i32,
+            n_cols as i32,
+            n_rows as i32,
+            true,
+        ));
     }
     // 数据行（row 1..）：单元格右/下 1px 细线
     for (ri, row) in table.rows.iter().enumerate() {
@@ -617,11 +633,7 @@ fn table_cell(
         g: 150,
         b: 150,
     };
-    let (bottom, top) = if is_header {
-        (2.0, 1.0)
-    } else {
-        (1.0, 0.0)
-    };
+    let (bottom, top) = if is_header { (2.0, 1.0) } else { (1.0, 0.0) };
     let mut tb = text_block(text).wrap().center_aligned();
     if is_header {
         tb = tb.semibold();
@@ -643,8 +655,5 @@ fn table_cell(
             b: 128,
         });
     }
-    cell.grid_row(row)
-        .grid_column(col)
-        .with_key(key)
-        .into()
+    cell.grid_row(row).grid_column(col).with_key(key).into()
 }
