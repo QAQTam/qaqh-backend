@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use deepx_client::{
-    Channel, Client, ClientHandlers, ClientOptions, EventBatch,
+    Channel, Client, ClientHandlers, ClientOptions, CommandOptions, ControlCommand,
+    ConversationCommand, EventBatch, QueryRequest, RingingCommand,
 };
-use serde_json::json;
 
 fn main() {
     let handlers = ClientHandlers {
@@ -58,7 +58,7 @@ fn main() {
         // 1. Session discovery. `session.list` returns a top-level array of
         //    sessions (or `{ sessions: [...] }` from some daemon versions).
         let sessions = client
-            .query("session.list", json!({}))
+            .query(QueryRequest::SessionList)
             .await
             .expect("session.list");
         println!("[query] session.list = {sessions}");
@@ -76,21 +76,21 @@ fn main() {
         // 2. Create a session when none exists (control channel command).
         if seed.is_none() {
             let ack = client
-                .command(
-                    Channel::Control,
+                .send_command(
                     None,
-                    uuid::Uuid::new_v4().to_string(),
-                    json!({ "type": "session_create", "close_current": false }),
-                    None,
+                    RingingCommand::Control(ControlCommand::SessionCreate {
+                        close_current: false,
+                    }),
+                    CommandOptions::default(),
                 )
                 .await
                 .expect("session_create");
-            println!("[cmd] session_create ack = {ack}");
+            println!("[cmd] session_create ack = {ack:?}");
             // Creation is confirmed through the event stream; poll session.list.
             for _ in 0..10 {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 let sessions = client
-                    .query("session.list", json!({}))
+                    .query(QueryRequest::SessionList)
                     .await
                     .expect("session.list re-query");
                 if let Some(s) = first_seed(&sessions) {
@@ -107,19 +107,21 @@ fn main() {
         println!("[cmd] attached session {seed}");
         let command_id = uuid::Uuid::new_v4().to_string();
         let ack = client
-            .command(
-                Channel::Conversation,
-                Some(seed.clone()),
-                command_id.clone(),
-                json!({
-                    "type": "conversation_send_message",
-                    "text": format!("[deepx-client smoke] hello at {}", now_unix()),
+            .send_command(
+                Some(&seed),
+                RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+                    text: format!("[deepx-client smoke] hello at {}", now_unix()),
+                    images: vec![],
+                    attachments: None,
                 }),
-                None,
+                CommandOptions {
+                    command_id: Some(command_id.clone()),
+                    expected_revision: None,
+                },
             )
             .await
             .expect("send_message");
-        println!("[cmd] send_message ack = {ack}");
+        println!("[cmd] send_message ack = {ack:?}");
 
         // 4. Observe the event echo for a few seconds.
         println!("[wait] observing events for 4s...");

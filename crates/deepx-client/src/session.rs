@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 use crate::error::{ClientError, Result};
+use deepx_ringing::CapabilityName;
+
 use crate::types::{OpenRequest, OpenResponse};
 
 /// Negotiated session state (mirrors `RingingSessionOpen` in TS).
@@ -37,11 +39,11 @@ const MAX_RENEW_FAILURES: u32 = 2;
 /// open 请求超时（秒）：daemon 冷启动/重启窗口内 TCP 可达但 HTTP 未 accept
 /// 时，请求会排队不响应——无超时则 open 永久挂起，卡死桥的 rebuild 循环。
 const OPEN_TIMEOUT_SECS: u64 = 10;
-const CAPABILITIES: [&str; 4] = [
-    "Ringing_v1",
-    "Ringing_batch_v1",
-    "Ringing_bootstrap_v1",
-    "Ringing_command_status_v1",
+const CAPABILITIES: [CapabilityName; 4] = [
+    CapabilityName::RingingV1,
+    CapabilityName::RingingBatchV1,
+    CapabilityName::RingingBootstrapV1,
+    CapabilityName::RingingCommandStatusV1,
 ];
 
 impl RingingSession {
@@ -73,12 +75,10 @@ impl RingingSession {
             // 排队）而响应迟迟不来——无超时会让 open 永久挂起，进而卡死桥的
             // rebuild 循环（rebuilding 永不复位，所有请求被拒）。
             .timeout(std::time::Duration::from_secs(OPEN_TIMEOUT_SECS))
-            .json(&OpenRequest {
-                schema: "deepx.Ringing",
-                version: 1,
-                client_instance_id: client_instance_id.clone(),
-                capabilities: CAPABILITIES.to_vec(),
-            })
+            .json(&OpenRequest::new(
+                client_instance_id.clone(),
+                CAPABILITIES.to_vec(),
+            ))
             .send()
             .await?;
         if !response.status().is_success() {
@@ -88,15 +88,22 @@ impl RingingSession {
             });
         }
         let result: OpenResponse = response.json().await?;
-        if !result.accepted {
-            return Err(ClientError::Negotiation("open not accepted by daemon".into()));
+        if result.schema != deepx_ringing::RINGING_SCHEMA
+            || result.version != deepx_ringing::RINGING_VERSION
+            || !result.accepted
+        {
+            return Err(ClientError::Negotiation(
+                "open not accepted by daemon".into(),
+            ));
         }
         if result.client_session_id.is_empty()
             || result.server_epoch.is_empty()
             || result.lease_ttl_ms == 0
             || result.renew_interval_ms == 0
         {
-            return Err(ClientError::Negotiation("open returned an incomplete session".into()));
+            return Err(ClientError::Negotiation(
+                "open returned an incomplete session".into(),
+            ));
         }
         let state = SessionState {
             client_instance_id,
@@ -122,10 +129,8 @@ impl RingingSession {
     /// Adopt a session opened elsewhere (e.g. by a control client in the same process).
     pub async fn adopt(&self, state: SessionState) {
         *self.state.lock().await = Some(state.clone());
-        self.session_ctx.send_replace(Some((
-            state.server_epoch,
-            state.client_session_id,
-        )));
+        self.session_ctx
+            .send_replace(Some((state.server_epoch, state.client_session_id)));
     }
 
     /// Current session state, if negotiated.
@@ -143,9 +148,8 @@ impl RingingSession {
         let Some(state) = self.state.lock().await.clone() else {
             return;
         };
-        let interval = std::time::Duration::from_millis(
-            std::cmp::max(1000, state.renew_interval_ms / 2),
-        );
+        let interval =
+            std::time::Duration::from_millis(std::cmp::max(1000, state.renew_interval_ms / 2));
         let mut ticker = tokio::time::interval(interval);
         // First tick fires immediately; skip it so the first renewal happens after
         // one interval (mirrors TS `setInterval` semantics).

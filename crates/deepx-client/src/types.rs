@@ -1,33 +1,33 @@
-//! Ringing V1 wire types (M4 slim envelopes).
+//! Native Ringing client contracts.
 //!
-//! Contract source: `docs/backend-dataflow/protocol-anchor.md` and the
-//! Ringing V1 client in `crates/deepx-client` (the original Electron
-//! reference implementation `apps/desktop/electron/` was removed).
+//! The daemon, transport client, and native shells share the canonical domain
+//! and wire types. JSON is a serialization detail at the HTTP/SSE boundary;
+//! it is not an application-facing event model.
 
+use deepx_ringing::{RINGING_SCHEMA, RINGING_VERSION};
 use serde::{Deserialize, Serialize};
 
-/// Ringing event channels. Three independent SSE streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Channel {
-    Control,
-    Conversation,
-    Tool,
-}
+pub use deepx_domain::{
+    ActivityState as DomainActivityState, AskAnswer, AskQuestion as DomainAskQuestion, ContentRef,
+    ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, ConversationMode,
+    DashboardSnapshot as DomainDashboardSnapshot, PermissionCategory, PermissionRisk,
+    ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
+    SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, TimelineBlockKind,
+    TimelineEntry, TimelineSnapshot, TimelineTool, TimelineToolState, TimelineTurnState, TodoItem,
+    ToolCommand, ToolEvent,
+};
+pub use deepx_ringing::{
+    ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse, RingingCommand,
+    RingingCommandAck, RingingCommandState, RingingCommandStatus, RingingEvent,
+    RingingEventBatch as EventBatch, RingingEventEnvelope, RingingResetRequired as ResetRequired,
+};
 
-impl Channel {
-    pub const ALL: [Channel; 3] = [Channel::Control, Channel::Conversation, Channel::Tool];
+/// Stable channel order used to start the three independent SSE streams.
+pub const CHANNELS: [Channel; 3] = [Channel::Control, Channel::Conversation, Channel::Tool];
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Channel::Control => "control",
-            Channel::Conversation => "conversation",
-            Channel::Tool => "tool",
-        }
-    }
-}
-
-/// Per-channel SSE connection state (mirrors `ChannelStatus` in TS).
-#[derive(Debug, Clone)]
+/// Per-channel SSE connection state. This is a native transport state rather
+/// than a renderer payload; UI shells marshal it onto their dispatcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelStatus {
     Connecting,
     Open { server_epoch: String, cursor: u64 },
@@ -35,70 +35,68 @@ pub enum ChannelStatus {
     Closed { reason: String },
 }
 
-/// Single Ringing event envelope (M4: schema/version/channel/server_epoch removed).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RingingEventEnvelope {
-    pub seed: String,
-    pub event_id: String,
-    pub stream_seq: u64,
-    pub channel_seq: u64,
-    pub session_seq: u64,
-    #[serde(default)]
-    pub state_revision: Option<u64>,
-    pub event: serde_json::Value,
-}
-
-/// Batch delivered to the shell: a single envelope wrapped in transport context.
-/// Kept structurally compatible with the TS `RingingEventBatch`.
-#[derive(Debug, Clone)]
-pub struct EventBatch {
-    pub channel: Channel,
-    pub seed: String,
-    pub server_epoch: String,
-    pub from_stream_seq: u64,
-    pub to_stream_seq: u64,
-    pub envelopes: Vec<RingingEventEnvelope>,
-}
-
-/// Payload of the special `ringing.reset_required` SSE event.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ResetRequired {
-    pub channel: String,
-    /// Session that needs a fresh snapshot (mirrors TS `RingingResetRequired`).
-    pub seed: String,
-    /// Earliest stream_seq the server can still replay for seed+channel.
-    pub earliest_available_seq: u64,
-    pub reason: String,
-}
-
-/// One entry from the per-session timeline stream.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TimelineEntry {
-    pub timeline_seq: u64,
-    #[serde(flatten)]
-    pub kind: serde_json::Value,
-}
-
-/// Per-session timeline connection state (mirrors `TimelineStatus` in TS).
-#[derive(Debug, Clone)]
+/// Per-session timeline connection state.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimelineStatus {
-    Connecting { seed: String },
-    Open { seed: String, server_epoch: String, cursor: u64 },
-    Reconnecting { seed: String, retry_ms: u64, cursor: u64 },
-    Closed { seed: String, reason: String },
+    Connecting {
+        seed: String,
+    },
+    Open {
+        seed: String,
+        server_epoch: String,
+        cursor: u64,
+    },
+    Reconnecting {
+        seed: String,
+        retry_ms: u64,
+        cursor: u64,
+    },
+    Closed {
+        seed: String,
+        reason: String,
+    },
 }
 
-/// Ringing V1 timeline SSE frame — validated before dispatch.
+/// Versioned response from `GET /ringing/v1/sessions/{seed}/timeline`.
+///
+/// `snapshot` is the authoritative materialized transcript. Pagination
+/// metadata remains outside it because it describes the current HTTP page,
+/// not transcript state.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct TimelinePage {
+    pub schema: String,
+    pub version: u32,
+    pub server_epoch: String,
+    pub seed: String,
+    pub snapshot: TimelineSnapshot,
+    pub has_more: bool,
+    pub total_turns: usize,
+}
+
+impl TimelinePage {
+    pub fn validate_for(&self, seed: &str) -> Result<(), String> {
+        if self.schema != RINGING_SCHEMA
+            || self.version != RINGING_VERSION
+            || self.seed != seed
+            || self.server_epoch.is_empty()
+        {
+            return Err("invalid Ringing V1 timeline page".into());
+        }
+        Ok(())
+    }
+}
+
+/// Ringing V1 timeline SSE frame.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TimelineSseFrame {
     pub schema: String,
-    pub version: u64,
+    pub version: u32,
     pub server_epoch: String,
     pub seed: String,
     pub entry: TimelineEntry,
 }
 
-/// Parsed SSE frame (a block of `key: value` lines separated by blank lines).
+/// Parsed SSE frame (a block of `key: value` lines separated by a blank line).
 #[derive(Debug, Clone, Default)]
 pub struct SseFrame {
     pub id: String,
@@ -106,13 +104,10 @@ pub struct SseFrame {
     pub data: String,
 }
 
-/// Parse one SSE frame. Comment lines (`: keepalive`) are skipped; `data:`
-/// lines accumulate with a single trailing newline per line (trimmed by caller).
 pub fn parse_sse_frame(frame: &str) -> SseFrame {
     let mut parsed = SseFrame::default();
     for line in frame.split('\n') {
-        if let Some(rest) = line.strip_prefix(':') {
-            let _ = rest; // comment / keepalive
+        if line.starts_with(':') {
             continue;
         }
         if let Some(id) = line.strip_prefix("id:") {
@@ -129,44 +124,31 @@ pub fn parse_sse_frame(frame: &str) -> SseFrame {
     parsed
 }
 
-/// Extract the stream sequence from an SSE `id: <epoch>:<channel>:<seq>`.
-/// Returns `None` when the id does not match the given channel or the seq is invalid.
+/// Extract the stream sequence from `id: <epoch>:<channel>:<seq>`.
 pub fn cursor_from_sse_id(id: &str, channel: Channel) -> Option<u64> {
     let mut parts = id.split(':');
     let epoch = parts.next()?;
-    let chan = parts.next()?;
+    let frame_channel = parts.next()?;
     let seq = parts.next()?;
-    if epoch.is_empty() || chan != channel.as_str() || parts.next().is_some() {
+    if epoch.is_empty() || frame_channel != channel.as_str() || parts.next().is_some() {
         return None;
     }
     seq.parse::<u64>().ok()
 }
 
-/// Validate an M4 envelope shape. Returns `Ok(())` when the envelope can be
-/// accepted; errors are surfaced as protocol violations.
 pub fn validate_envelope(envelope: &RingingEventEnvelope, channel: Channel) -> Result<(), String> {
-    if envelope.seed.is_empty() {
-        return Err("envelope seed is empty".into());
-    }
-    if envelope.event_id.is_empty() {
-        return Err("envelope event_id is empty".into());
-    }
-    let event_channel = envelope
-        .event
-        .get("channel")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if !event_channel.is_empty() && event_channel != channel.as_str() {
+    envelope.validate().map_err(str::to_string)?;
+    if envelope.event.channel() != channel {
         return Err(format!(
-            "envelope channel {event_channel:?} != connection channel {:?}",
-            channel.as_str()
+            "envelope channel {:?} != connection channel {:?}",
+            envelope.event.channel(),
+            channel
         ));
     }
     Ok(())
 }
 
-/// `{ schema, version, channel, seed, server_epoch, from_stream_seq, to_stream_seq, envelopes }`
-/// — the batch shape forwarded to renderers. Built from a validated envelope.
+/// Wrap one validated SSE envelope in the canonical Ringing batch type.
 pub fn envelope_to_batch(
     channel: Channel,
     envelope: RingingEventEnvelope,
@@ -174,6 +156,8 @@ pub fn envelope_to_batch(
 ) -> EventBatch {
     let seq = envelope.stream_seq;
     EventBatch {
+        schema: RINGING_SCHEMA.to_string(),
+        version: RINGING_VERSION,
         channel,
         seed: envelope.seed.clone(),
         server_epoch,
@@ -183,54 +167,54 @@ pub fn envelope_to_batch(
     }
 }
 
-/// Negotiation request body for `POST /ringing/v1/clients/open`.
-#[derive(Debug, Serialize)]
-pub struct OpenRequest {
-    pub schema: &'static str,
-    pub version: u32,
-    pub client_instance_id: String,
-    pub capabilities: Vec<&'static str>,
-}
-
-/// Negotiation response from the daemon.
-#[derive(Debug, Deserialize)]
-pub struct OpenResponse {
-    pub accepted: bool,
-    pub client_session_id: String,
-    pub server_epoch: String,
-    pub lease_ttl_ms: u64,
-    pub renew_interval_ms: u64,
-}
-
-/// Command envelope for `POST /ringing/v1/commands/{channel}`.
-#[derive(Debug, Serialize)]
-pub struct CommandRequest {
-    pub schema: &'static str,
-    pub version: u32,
-    pub channel: &'static str,
-    pub command_id: String,
-    pub client_instance_id: String,
-    pub client_session_id: String,
-    pub seed: Option<String>,
-    pub expected_revision: Option<u64>,
-    pub command: serde_json::Value,
-}
-
-/// Command receipt queried via `GET /ringing/v1/commands/{id}`.
-#[derive(Debug, Deserialize)]
-pub struct CommandReceipt {
-    pub state: String,
-    #[serde(default)]
-    pub error_code: Option<String>,
-    #[serde(default)]
+/// Options for one typed command submission. The client creates an id when
+/// callers do not need to supply one for durable retry/correlation.
+#[derive(Debug, Clone, Default)]
+pub struct CommandOptions {
     pub command_id: Option<String>,
+    pub expected_revision: Option<u64>,
 }
 
-/// Uploaded attachment reference (`POST /ringing/v1/content` response).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ContentRef {
-    pub content_id: String,
-    pub media_type: String,
-    pub sha256: String,
-    pub truncated: bool,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deepx_domain::{ConversationEvent, Delivery};
+    use deepx_ringing::RingingEvent;
+
+    #[test]
+    fn canonical_envelope_keeps_domain_event_typed() {
+        let envelope = RingingEventEnvelope::new(
+            "seed-1",
+            7,
+            3,
+            3,
+            "event-1",
+            RingingEvent::Conversation(ConversationEvent::TurnStarted {
+                turn_id: "t1".into(),
+                user_text: "hello".into(),
+            }),
+        );
+        assert_eq!(envelope.delivery, Delivery::Reliable);
+        validate_envelope(&envelope, Channel::Conversation).expect("valid envelope");
+        let batch = envelope_to_batch(Channel::Conversation, envelope, "epoch-1".into());
+        batch.validate().expect("canonical batch");
+    }
+
+    #[test]
+    fn timeline_page_validates_version_and_seed() {
+        let page = TimelinePage {
+            schema: RINGING_SCHEMA.into(),
+            version: RINGING_VERSION,
+            server_epoch: "epoch-1".into(),
+            seed: "seed-1".into(),
+            snapshot: TimelineSnapshot {
+                watermark: 0,
+                turns: vec![],
+            },
+            has_more: false,
+            total_turns: 0,
+        };
+        page.validate_for("seed-1").expect("valid page");
+        assert!(page.validate_for("seed-2").is_err());
+    }
 }

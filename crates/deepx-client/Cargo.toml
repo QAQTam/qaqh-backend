@@ -7,6 +7,8 @@ license = "MIT"
 
 [dependencies]
 bytes = "1"
+deepx-domain = { path = "../deepx-domain" }
+deepx-ringing = { path = "../deepx-ringing" }
 futures-util = "0.3"
 log = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

@@ -4,26 +4,33 @@
 //! negotiation/renewal, three SSE event channels and the per-session timeline
 //! stream, plus commands, queries, bootstrap and graceful stop.
 //!
-//! Contract mirrors the Ringing V1 reference implementation (the original
-//! Electron `apps/desktop/electron/controlClient.ts` / `ringingClient.ts`
-//! were removed; this crate is now the single reference) and
-//! `docs/backend-dataflow/protocol-anchor.md`.
+//! The public API uses the canonical `deepx-domain` and `deepx-ringing`
+//! contracts. HTTP/SSE JSON is decoded at this boundary and never becomes a
+//! renderer-facing compatibility protocol.
 
 pub mod client;
 pub mod discovery;
+pub mod endpoint;
 pub mod error;
 pub mod session;
 pub mod sse;
 pub mod timeline;
 pub mod types;
 
-pub use client::{runtime_handle, Client, ClientHandlers, ClientOptions, StopStatus};
-pub use types::ResetRequired;
-pub use discovery::{ensure_daemon_running, read_discovery, DaemonDiscovery};
+pub use client::{Client, ClientHandlers, ClientOptions, StopStatus, runtime_handle};
+pub use discovery::{DaemonDiscovery, ensure_daemon_running, read_discovery};
+pub use endpoint::{ActionRequest, QueryRequest};
 pub use error::{ClientError, Result};
 pub use session::{RingingSession, SessionState};
 pub use timeline::TimelineStream;
+pub use types::ResetRequired;
 pub use types::{
-    Channel, ChannelStatus, ContentRef, EventBatch, RingingEventEnvelope, TimelineEntry,
-    TimelineStatus,
+    AskAnswer, Channel, ChannelStatus, CommandOptions, ContentRef, ControlCommand, ControlEvent,
+    ConversationCommand, ConversationEvent, ConversationMode, DomainActivityState,
+    DomainAskQuestion, DomainDashboardSnapshot, DomainSessionState, EventBatch, PermissionCategory,
+    PermissionRisk, ProviderToolState, RingingCommand, RingingCommandAck, RingingCommandState,
+    RingingCommandStatus, RingingEvent, RingingEventEnvelope, RoundDeltaKind, SkillInfo,
+    SkillRuntimeInfo, TimelineBlockKind, TimelineEntry, TimelinePage, TimelineSnapshot,
+    TimelineStatus, TimelineTool, TimelineToolState, TimelineTurnState, TodoItem, ToolCommand,
+    ToolEvent,
 };

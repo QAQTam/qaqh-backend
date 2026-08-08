@@ -103,7 +103,9 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let on_compact = {
         let bridge = bridge.clone();
         move || {
-            bridge.spawn_conversation_command(serde_json::json!({ "type": "conversation_compact" }))
+            bridge.spawn_conversation_command(
+                deepx_client::ConversationCommand::ConversationCompact { turn_id: None },
+            )
         }
     };
 
@@ -121,9 +123,24 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         action_button(Icon::symbol(Symbol::OpenLocal), true, false, on_workspace),
         action_button(Icon::symbol(Symbol::OpenFile), true, false, on_location),
         divider,
-        action_button(Icon::symbol(Symbol::ContactInfo), true, state.info_open, on_info),
-        action_button(Icon::symbol(Symbol::FourBars), true, state.stats_open, on_stats),
-        action_button(Icon::symbol(Symbol::Undo), !state.undo_disabled, false, on_undo),
+        action_button(
+            Icon::symbol(Symbol::ContactInfo),
+            true,
+            state.info_open,
+            on_info,
+        ),
+        action_button(
+            Icon::symbol(Symbol::FourBars),
+            true,
+            state.stats_open,
+            on_stats,
+        ),
+        action_button(
+            Icon::symbol(Symbol::Undo),
+            !state.undo_disabled,
+            false,
+            on_undo,
+        ),
         action_button(
             Icon::symbol(Symbol::Clear),
             !(state.compacting || state.compact_disabled),

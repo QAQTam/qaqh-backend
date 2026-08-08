@@ -15,7 +15,9 @@ use tokio::sync::watch;
 
 use crate::error::{ClientError, Result};
 use crate::session::RingingSession;
-use crate::types::{parse_sse_frame, TimelineEntry, TimelineSseFrame, TimelineStatus, SseFrame};
+use crate::types::{
+    SseFrame, TimelineEntry, TimelinePage, TimelineSseFrame, TimelineStatus, parse_sse_frame,
+};
 
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const RETRY_BASE_MS: u64 = 1_000;
@@ -34,7 +36,7 @@ pub struct TimelineStream {
     on_entry: Arc<dyn Fn(String, TimelineEntry) + Send + Sync>,
     on_status: Arc<dyn Fn(TimelineStatus) + Send + Sync>,
     /// Forwarded on gap recovery: the fresh snapshot becomes the new baseline.
-    on_snapshot: Arc<dyn Fn(serde_json::Value) + Send + Sync>,
+    on_snapshot: Arc<dyn Fn(TimelinePage) + Send + Sync>,
     /// Optional sink for `Client::timeline_status()` (also fed on exit).
     status_tx: Option<watch::Sender<Option<TimelineStatus>>>,
     /// Cursor of the last accepted entry (starts at the snapshot watermark).
@@ -57,7 +59,7 @@ impl TimelineStream {
         session: Arc<RingingSession>,
         on_entry: Arc<dyn Fn(String, TimelineEntry) + Send + Sync>,
         on_status: Arc<dyn Fn(TimelineStatus) + Send + Sync>,
-        on_snapshot: Arc<dyn Fn(serde_json::Value) + Send + Sync>,
+        on_snapshot: Arc<dyn Fn(TimelinePage) + Send + Sync>,
         initial_cursor: u64,
         status_tx: Option<watch::Sender<Option<TimelineStatus>>>,
     ) -> Self {
@@ -191,10 +193,7 @@ impl TimelineStream {
             }
         }
 
-        let path = format!(
-            "/ringing/v1/sessions/{}/timeline/events",
-            self.seed
-        );
+        let path = format!("/ringing/v1/sessions/{}/timeline/events", self.seed);
         let mut request = self
             .http
             .get(format!("{}{path}", self.base_url))
@@ -279,8 +278,8 @@ impl TimelineStream {
     fn dispatch(&mut self, frame: SseFrame, server_epoch: &str) -> Result<()> {
         let parsed: TimelineSseFrame = serde_json::from_str(frame.data.trim())
             .map_err(|e| ClientError::Protocol(format!("bad timeline frame: {e}")))?;
-        if parsed.schema != "deepx.Ringing"
-            || parsed.version != 1
+        if parsed.schema != deepx_ringing::RINGING_SCHEMA
+            || parsed.version != deepx_ringing::RINGING_VERSION
             || parsed.seed != self.seed
             || parsed.server_epoch != server_epoch
         {
@@ -334,14 +333,11 @@ impl TimelineStream {
                 path,
             });
         }
-        let snapshot: serde_json::Value = response.json().await?;
-        let watermark = snapshot
-            .get("snapshot")
-            .and_then(|s| s.get("watermark"))
-            .and_then(|w| w.as_u64())
-            .ok_or_else(|| ClientError::Protocol("invalid timeline snapshot (no watermark)".into()))?;
-        self.cursor = watermark;
-        (self.on_snapshot)(snapshot);
+        let page: TimelinePage = response.json().await?;
+        page.validate_for(&self.seed)
+            .map_err(ClientError::Protocol)?;
+        self.cursor = page.snapshot.watermark;
+        (self.on_snapshot)(page);
         Ok(())
     }
 }

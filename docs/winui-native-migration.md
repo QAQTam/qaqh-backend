@@ -10,6 +10,8 @@
 > 已经完全 WinUI 原生化。Ringing 2026-08-01 之后的 typed timeline、push state、
 > typed navigation 与平台能力升级，以
 > [WinUI 原生化架构审计](./winui-native-architecture-audit.md) 为后续事实来源。
+> RC4 的 typed client 冻结与上游同步门禁见
+> [RC4 原生客户端协议冻结与维护手册](./rc4-native-client-contract.md)。
 
 ---
 

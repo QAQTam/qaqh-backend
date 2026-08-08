@@ -30,15 +30,13 @@
 //! - Enter 发送走 KeyboardAccelerator（reactor 无 KeyDown；Shift+Enter
 //!   因带修饰键不匹配 accelerator → TextBox 默认换行保留）
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use windows_reactor::*;
 
-use crate::bridge::{
-    Bridge, ComposerAttachment, ComposerState, ComposerTextFile,
-};
+use crate::bridge::{Bridge, ComposerAttachment, ComposerState, ComposerTextFile};
 use crate::shell_store::DashboardSnapshot;
 
 /// 快照轮询间隔（同 interaction_overlay：交互响应优先）。
@@ -375,11 +373,7 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         move || match bridge.pick_text_file() {
             Ok(serde_json::Value::String(path)) => {
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                let file_name = path
-                    .split(['/', '\\'])
-                    .last()
-                    .unwrap_or("file")
-                    .to_string();
+                let file_name = path.split(['/', '\\']).last().unwrap_or("file").to_string();
                 let mut d = draft.borrow_mut();
                 d.attachments.push(AttachmentItem {
                     id: format!("att-{}-{}", ATT_ID.fetch_add(1, Ordering::Relaxed), size),
@@ -448,7 +442,9 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let on_stop = {
         let bridge = bridge.clone();
         move || {
-            bridge.spawn_conversation_command(serde_json::json!({ "type": "conversation_cancel" }))
+            bridge.spawn_conversation_command(
+                deepx_client::ConversationCommand::ConversationCancel { turn_id: None },
+            )
         }
     };
     // 队列移除：queue 已随 B 组本地化恒空（本地无排队概念，WebView 移除），
@@ -608,9 +604,14 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let thumb: Element = match (&att.kind, &att.preview_path) {
             (AttachmentKind::Image { .. }, Some(p)) => {
                 let uri = format!("file:///{}", p.replace('\\', "/"));
-                border(Image::new_with_uri(uri).width(48.0).height(48.0).stretch(Stretch::UniformToFill))
-                    .corner_radius(4.0)
-                    .into()
+                border(
+                    Image::new_with_uri(uri)
+                        .width(48.0)
+                        .height(48.0)
+                        .stretch(Stretch::UniformToFill),
+                )
+                .corner_radius(4.0)
+                .into()
             }
             _ => text_block(icon).font_size(16.0).into(),
         };
@@ -621,13 +622,11 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     .font_size(12.0)
                     .font_family(MONO_FONT)
                     .foreground(ThemeRef::SecondaryText),
-                button("×")
-                    .subtle()
-                    .on_click({
-                        let on_remove_attach = on_remove_attach.clone();
-                        let id = att.id.clone();
-                        move || on_remove_attach(id.clone())
-                    }),
+                button("×").subtle().on_click({
+                    let on_remove_attach = on_remove_attach.clone();
+                    let id = att.id.clone();
+                    move || on_remove_attach(id.clone())
+                }),
             ))
             .spacing(8.0),
         )
@@ -679,10 +678,7 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     .spacing(8.0)
     .into();
     let send_stop: Element = if is_streaming {
-        button("■")
-            .subtle()
-            .on_click(on_stop)
-            .into()
+        button("■").subtle().on_click(on_stop).into()
     } else {
         button("↑")
             .accent()
@@ -698,12 +694,10 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let mut pills: Vec<Element> = Vec::new();
     for (value, label) in [(1u64, "L1"), (2u64, "L2"), (3u64, "L3"), (4u64, "L4")] {
         let active = state.permission_level == value;
-        let mut pill = button(label)
-            .subtle()
-            .on_click({
-                let on_permission = on_permission.clone();
-                move || on_permission(value)
-            });
+        let mut pill = button(label).subtle().on_click({
+            let on_permission = on_permission.clone();
+            move || on_permission(value)
+        });
         if active {
             pill = pill.accent();
         }
@@ -713,9 +707,13 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // footer 行：左（附件 + mode）| 右（元信息 + 发送/停止）。
     let footer: Element = hstack((
         button("＋").subtle().on_click(on_toggle_attach),
-        button(if state.mode == "plan" { "规划" } else { "执行" })
-            .subtle()
-            .on_click(on_mode_toggle),
+        button(if state.mode == "plan" {
+            "规划"
+        } else {
+            "执行"
+        })
+        .subtle()
+        .on_click(on_mode_toggle),
         grid(()).horizontal_alignment(HorizontalAlignment::Stretch),
         vstack((meta, hstack(pills).spacing(4.0))).spacing(4.0),
         send_stop,
@@ -725,15 +723,9 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
 
     // 卡片。
     let card: Element = border(
-        vstack((
-            input,
-            error_row,
-            attach_preview,
-            attach_menu,
-            footer,
-        ))
-        .spacing(8.0)
-        .padding(12.0),
+        vstack((input, error_row, attach_preview, attach_menu, footer))
+            .spacing(8.0)
+            .padding(12.0),
     )
     .corner_radius(8.0)
     .background(ThemeRef::LayerFill)
@@ -790,17 +782,22 @@ fn goal_bar_row(snap: &DashboardSnapshot) -> Element {
         .as_deref()
         .and_then(|id| snap.tasks.iter().find(|t| t.id == id));
     let pending = snap.tasks.iter().filter(|t| t.status == "pending").count();
-    let in_progress = snap.tasks.iter().filter(|t| t.status == "in_progress").count();
-    let done = snap.tasks.iter().filter(|t| t.status == "completed").count();
+    let in_progress = snap
+        .tasks
+        .iter()
+        .filter(|t| t.status == "in_progress")
+        .count();
+    let done = snap
+        .tasks
+        .iter()
+        .filter(|t| t.status == "completed")
+        .count();
     let mut parts: Vec<Element> = Vec::new();
     if let Some(task) = current {
         parts.push(
             hstack((
                 eyebrow("当前任务"),
-                text_block(&task.subject)
-                    .font_size(12.0)
-                    .semibold()
-                    .wrap(),
+                text_block(&task.subject).font_size(12.0).semibold().wrap(),
                 text_block(&task.status)
                     .font_size(11.0)
                     .foreground(ThemeRef::SystemCaution),
@@ -810,10 +807,12 @@ fn goal_bar_row(snap: &DashboardSnapshot) -> Element {
         );
     }
     parts.push(
-        text_block(format!("待处理 {pending} · 进行中 {in_progress} · 已完成 {done}"))
-            .font_size(11.0)
-            .foreground(ThemeRef::SecondaryText)
-            .into(),
+        text_block(format!(
+            "待处理 {pending} · 进行中 {in_progress} · 已完成 {done}"
+        ))
+        .font_size(11.0)
+        .foreground(ThemeRef::SecondaryText)
+        .into(),
     );
     border(hstack(parts).spacing(16.0).padding(8.0))
         .corner_radius(6.0)
@@ -822,10 +821,7 @@ fn goal_bar_row(snap: &DashboardSnapshot) -> Element {
 }
 
 /// 队列行："n 条后续任务已排队" + items + 删除。
-fn queue_row(
-    state: &ComposerState,
-    on_queue_remove: Arc<dyn Fn(String) + 'static>,
-) -> Element {
+fn queue_row(state: &ComposerState, on_queue_remove: Arc<dyn Fn(String) + 'static>) -> Element {
     let mut items: Vec<Element> = Vec::new();
     for (i, item) in state.queue_items.iter().enumerate() {
         let row: Element = hstack((
@@ -833,13 +829,11 @@ fn queue_row(
                 .font_size(12.0)
                 .foreground(ThemeRef::SecondaryText)
                 .wrap(),
-            button("×")
-                .subtle()
-                .on_click({
-                    let on_queue_remove = on_queue_remove.clone();
-                    let id = item.id.clone();
-                    move || on_queue_remove(id.clone())
-                }),
+            button("×").subtle().on_click({
+                let on_queue_remove = on_queue_remove.clone();
+                let id = item.id.clone();
+                move || on_queue_remove(id.clone())
+            }),
         ))
         .spacing(8.0)
         .into();

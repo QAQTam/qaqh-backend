@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use deepx_client::{Client, ClientHandlers, ClientOptions, ChannelStatus};
+use deepx_client::{ChannelStatus, Client, ClientHandlers, ClientOptions, QueryRequest};
 
 fn main() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -18,18 +18,13 @@ fn main() {
         let client = Client::connect_async(ClientOptions {
             handlers: ClientHandlers {
                 on_batch: std::sync::Arc::new(|batch| {
-                    let kind = batch
-                        .envelopes
-                        .first()
-                        .and_then(|e| e.event.get("type"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
                     println!(
-                        "[batch] {} seed={} seq={}..{} event={kind}",
+                        "[batch] {} seed={} seq={}..{} envelopes={}",
                         batch.channel.as_str(),
                         batch.seed,
                         batch.from_stream_seq,
-                        batch.to_stream_seq
+                        batch.to_stream_seq,
+                        batch.envelopes.len(),
                     );
                 }),
                 on_status: std::sync::Arc::new(|channel, status| {
@@ -66,7 +61,7 @@ fn main() {
         // Observe events for a few seconds, then run a typed query.
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        match client.query("session.list", serde_json::json!({})).await {
+        match client.query(QueryRequest::SessionList).await {
             Ok(value) => println!("[query] session.list -> {value}"),
             Err(err) => println!("[query] session.list failed: {err}"),
         }

@@ -8,16 +8,20 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
-use crate::discovery::{read_discovery, DaemonDiscovery};
+use deepx_domain::ControlCommand;
+use deepx_ringing::{RingingCommandEnvelope, RingingCommandStatus};
+
+use crate::discovery::{DaemonDiscovery, read_discovery};
+use crate::endpoint::{ActionRequest, QueryRequest};
 use crate::error::{ClientError, Result};
 use crate::session::{RingingSession, SessionState};
 use crate::sse::{ChannelStream, StreamHandlers};
 use crate::timeline::TimelineStream;
 use crate::types::{
-    Channel, ChannelStatus, CommandReceipt, CommandRequest, ContentRef, EventBatch,
-    TimelineEntry, TimelineStatus,
+    CHANNELS, Channel, ChannelStatus, CommandOptions, ContentRef, EventBatch, RingingCommand,
+    RingingCommandAck, TimelineEntry, TimelinePage, TimelineStatus,
 };
 
 /// Callbacks delivered on the client's background tasks.
@@ -30,7 +34,7 @@ pub struct ClientHandlers {
     pub on_timeline_entry: std::sync::Arc<dyn Fn(String, TimelineEntry) + Send + Sync>,
     pub on_timeline_status: std::sync::Arc<dyn Fn(TimelineStatus) + Send + Sync>,
     /// Fresh timeline snapshot pushed on gap recovery.
-    pub on_timeline_snapshot: std::sync::Arc<dyn Fn(serde_json::Value) + Send + Sync>,
+    pub on_timeline_snapshot: std::sync::Arc<dyn Fn(TimelinePage) + Send + Sync>,
 }
 
 pub struct ClientOptions {
@@ -142,7 +146,11 @@ impl Client {
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()?;
-        let session = Arc::new(RingingSession::new(base_url.clone(), discovery.token.clone(), http.clone()));
+        let session = Arc::new(RingingSession::new(
+            base_url.clone(),
+            discovery.token.clone(),
+            http.clone(),
+        ));
 
         // Open negotiation (single lease; SSE streams and commands share it).
         session.open().await?;
@@ -177,7 +185,7 @@ impl Client {
         client.push_task(renewal).await;
 
         // Three SSE channels.
-        for channel in Channel::ALL {
+        for channel in CHANNELS {
             let stream = ChannelStream::new(
                 format!("{base_url}/ringing/v1/events/{}", channel.as_str()),
                 discovery.token.clone(),
@@ -214,42 +222,40 @@ impl Client {
         self.inner.session.state().await
     }
 
-    /// `POST /ringing/v1/commands/{channel}` with the shared lease identity.
+    /// Submit a canonical Ringing command with the shared lease identity.
     ///
-    /// `seed` may be `None` only for `SessionCreate`-style commands.
-    pub async fn command(
+    /// The command determines its own channel. `seed` may be `None` only for
+    /// `ControlCommand::SessionCreate`; callers never assemble wire JSON or
+    /// duplicate the channel tag.
+    pub async fn send_command(
         &self,
-        channel: Channel,
-        seed: Option<String>,
-        command_id: String,
-        command: Value,
-        expected_revision: Option<u64>,
-    ) -> Result<Value> {
+        seed: Option<&str>,
+        command: RingingCommand,
+        options: CommandOptions,
+    ) -> Result<RingingCommandAck> {
         let state = self
             .inner
             .session
             .state()
             .await
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        let mut command = command;
-        // The daemon's RingingCommand is internally tagged by `channel`
-        // (`#[serde(tag = "channel")]`); the wire envelope also carries a
-        // top-level channel. Mirror Electron main, which aligns both at the
-        // preload boundary.
-        if let Some(obj) = command.as_object_mut() {
-            obj.insert("channel".into(), serde_json::json!(channel.as_str()));
-        }
-        let payload = CommandRequest {
-            schema: "deepx.Ringing",
-            version: 1,
-            channel: channel.as_str(),
-            command_id,
-            client_instance_id: state.client_instance_id.clone(),
-            client_session_id: state.client_session_id.clone(),
-            seed,
-            expected_revision,
+        let channel = command.channel();
+        let command_id = options
+            .command_id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let mut payload = RingingCommandEnvelope::new(
+            command_id.clone(),
+            state.client_instance_id.clone(),
             command,
-        };
+        )
+        .with_client_session_id(state.client_session_id.clone());
+        if let Some(seed) = seed {
+            payload = payload.with_seed(seed);
+        }
+        payload.expected_revision = options.expected_revision;
+        payload
+            .validate()
+            .map_err(|code| ClientError::Protocol(format!("invalid command: {code}")))?;
         let path = format!("/ringing/v1/commands/{}", channel.as_str());
         let session_id = self.session_id_header().await?;
         let response = self
@@ -267,11 +273,17 @@ impl Client {
                 path,
             });
         }
-        Ok(response.json().await?)
+        let ack: RingingCommandAck = response.json().await?;
+        if ack.command_id != command_id {
+            return Err(ClientError::Protocol(
+                "command ack id does not match submission".into(),
+            ));
+        }
+        Ok(ack)
     }
 
     /// `GET /ringing/v1/commands/{command_id}` — resolve post-acceptance uncertainty.
-    pub async fn command_status(&self, command_id: &str) -> Result<CommandReceipt> {
+    pub async fn command_status(&self, command_id: &str) -> Result<RingingCommandStatus> {
         let path = format!("/ringing/v1/commands/{}", command_id);
         let session_id = self.session_id_header().await?;
         let response = self
@@ -292,7 +304,8 @@ impl Client {
     }
 
     /// `POST /ringing/v1/queries/{name}` — typed query.
-    pub async fn query(&self, name: &str, params: Value) -> Result<Value> {
+    pub async fn query(&self, request: QueryRequest) -> Result<Value> {
+        let (name, params) = request.into_parts();
         let session_id = self.session_id_header().await?;
         let path = format!("/ringing/v1/queries/{name}");
         let response = self
@@ -314,7 +327,7 @@ impl Client {
     }
 
     /// `GET /ringing/v1/sessions/{seed}/bootstrap` — authoritative snapshot.
-    pub async fn bootstrap(&self, seed: &str) -> Result<Value> {
+    pub async fn bootstrap(&self, seed: &str) -> Result<deepx_ringing::RingingSessionBootstrap> {
         let session_id = self.session_id_header().await?;
         let path = format!("/ringing/v1/sessions/{seed}/bootstrap");
         let response = self
@@ -334,10 +347,11 @@ impl Client {
         Ok(response.json().await?)
     }
 
-    /// `POST /ringing/v1/actions/{name}` — connection-level auxiliary action
-    /// (git/workspace/config/skills/plan/todo etc). Mirrors the Electron
-    /// `ringingManager.action` payload (action_id + sha256 fingerprint).
-    pub async fn action(&self, name: &str, mut params: Value) -> Result<Value> {
+    /// Execute a closed, typed auxiliary action. Method names and wire params
+    /// are centralized in `ActionRequest`; native shells cannot route a
+    /// mutation through the read-only query endpoint.
+    pub async fn action(&self, request: ActionRequest) -> Result<Value> {
+        let (name, mut params) = request.into_parts();
         let session_id = self.session_id_header().await?;
         let action_id = uuid::Uuid::new_v4().to_string();
         let fingerprint = {
@@ -348,7 +362,10 @@ impl Client {
                 "params": params,
             }))?);
             let digest = hasher.finalize();
-            digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
         };
         if let Some(obj) = params.as_object_mut() {
             obj.insert("action_id".into(), serde_json::json!(action_id));
@@ -383,13 +400,13 @@ impl Client {
     /// ownership so subsequent seed-scoped commands are accepted). The seed
     /// is carried both in the envelope and in the command body (validate
     /// requires a non-empty envelope seed for every command except create).
-    pub async fn attach(&self, seed: &str) -> Result<Value> {
-        self.command(
-            Channel::Control,
-            Some(seed.to_string()),
-            uuid::Uuid::new_v4().to_string(),
-            serde_json::json!({ "type": "session_resume", "seed": seed }),
-            None,
+    pub async fn attach(&self, seed: &str) -> Result<RingingCommandAck> {
+        self.send_command(
+            Some(seed),
+            RingingCommand::Control(ControlCommand::SessionResume {
+                seed: seed.to_string(),
+            }),
+            CommandOptions::default(),
         )
         .await
     }
@@ -410,24 +427,17 @@ impl Client {
         seed: &str,
         before_turn: Option<&str>,
         limit: Option<u32>,
-    ) -> Result<Value> {
-        let mut query = String::new();
-        if let Some(before) = before_turn {
-            query.push_str(&format!("?before_turn={before}"));
-        }
-        if let Some(limit) = limit {
-            if query.is_empty() {
-                query.push('?');
-            } else {
-                query.push('&');
-            }
-            query.push_str(&format!("limit={limit}"));
-        }
-        self.get_timeline_snapshot(seed, &query).await
+    ) -> Result<TimelinePage> {
+        self.get_timeline_page(seed, before_turn, limit).await
     }
 
-    /// GET `/ringing/v1/sessions/{seed}/timeline[?query]` + 协议校验。
-    async fn get_timeline_snapshot(&self, seed: &str, query: &str) -> Result<Value> {
+    /// GET `/ringing/v1/sessions/{seed}/timeline` + typed protocol validation.
+    async fn get_timeline_page(
+        &self,
+        seed: &str,
+        before_turn: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<TimelinePage> {
         if seed.is_empty() {
             return Err(ClientError::Negotiation("seed is required".into()));
         }
@@ -437,36 +447,29 @@ impl Client {
             .state()
             .await
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        let path = format!("/ringing/v1/sessions/{seed}/timeline{query}");
-        let response = self
+        let path = format!("/ringing/v1/sessions/{seed}/timeline");
+        let mut request = self
             .inner
             .http
             .get(format!("{}{path}", self.inner.base_url))
             .bearer_auth(&self.inner.token)
-            .header("X-DeepX-Client-Session-Id", &state.client_session_id)
-            .send()
-            .await?;
+            .header("X-DeepX-Client-Session-Id", &state.client_session_id);
+        if let Some(before_turn) = before_turn {
+            request = request.query(&[("before_turn", before_turn)]);
+        }
+        if let Some(limit) = limit {
+            request = request.query(&[("limit", limit)]);
+        }
+        let response = request.send().await?;
         if !response.status().is_success() {
             return Err(ClientError::Http {
                 status: response.status().as_u16(),
                 path,
             });
         }
-        let snapshot: Value = response.json().await?;
-        if snapshot.get("schema").and_then(|v| v.as_str()) != Some("deepx.Ringing")
-            || snapshot.get("version").and_then(|v| v.as_u64()) != Some(1)
-            || snapshot.get("seed").and_then(|v| v.as_str()) != Some(seed)
-            || snapshot
-                .get("snapshot")
-                .and_then(|s| s.get("watermark"))
-                .and_then(|w| w.as_u64())
-                .is_none()
-        {
-            return Err(ClientError::Protocol(
-                "invalid Ringing V1 timeline snapshot".into(),
-            ));
-        }
-        Ok(snapshot)
+        let page: TimelinePage = response.json().await?;
+        page.validate_for(seed).map_err(ClientError::Protocol)?;
+        Ok(page)
     }
 
     /// Activate the native timeline for one session (mirrors Electron
@@ -475,9 +478,9 @@ impl Client {
     /// seeded at the snapshot watermark, and return the snapshot. The seed
     /// must have been attached first (`backend.attach` / `session_resume`),
     /// otherwise the daemon rejects the request with 401.
-    pub async fn activate_timeline(&self, seed: &str) -> Result<Value> {
-        let snapshot = self.get_timeline_snapshot(seed, "").await?;
-        let watermark = snapshot["snapshot"]["watermark"].as_u64().unwrap_or(0);
+    pub async fn activate_timeline(&self, seed: &str) -> Result<TimelinePage> {
+        let page = self.get_timeline_page(seed, None, None).await?;
+        let watermark = page.snapshot.watermark;
 
         // Replace any previous timeline stream (one transcript at a time).
         let mut guard = self.inner.timeline.lock().await;
@@ -522,8 +525,8 @@ impl Client {
         // Mirror Electron: the activate response is both returned to the
         // caller and pushed as a snapshot event so listeners rebuild the
         // transcript immediately.
-        (self.inner.handlers.on_timeline_snapshot)(snapshot.clone());
-        Ok(snapshot)
+        (self.inner.handlers.on_timeline_snapshot)(page.clone());
+        Ok(page)
     }
 
     /// Current timeline connection status (`None` when never activated).
@@ -561,10 +564,8 @@ impl Client {
         let mut body = Vec::with_capacity(data.len() + 256);
         let mut push_field = |name: &str, value: &[u8]| {
             body.extend_from_slice(
-                format!(
-                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
-                )
-                .as_bytes(),
+                format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n")
+                    .as_bytes(),
             );
             body.extend_from_slice(value);
             body.extend_from_slice(b"\r\n");
@@ -599,7 +600,11 @@ impl Client {
 
     /// `POST /control/v1/stop` / `stop-if-idle` — graceful daemon stop.
     pub async fn stop_daemon(&self, idle_only: bool) -> Result<StopStatus> {
-        let path = if idle_only { "/control/v1/stop-if-idle" } else { "/control/v1/stop" };
+        let path = if idle_only {
+            "/control/v1/stop-if-idle"
+        } else {
+            "/control/v1/stop"
+        };
         let response = self
             .inner
             .http
@@ -644,8 +649,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// 各自进入本函数时，仅第一个执行「检查 + spawn」决策，其余等待锁后重新
 /// 检查——发现 lock/discovery 已就绪则不再 spawn，杜绝并发 spawn 多个
 /// daemon 实例（双 daemon 并存触发源）。
-static DAEMON_SPAWN_GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> =
-    std::sync::OnceLock::new();
+static DAEMON_SPAWN_GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
 async fn wait_for_daemon(
     daemon_path: Option<&std::path::Path>,

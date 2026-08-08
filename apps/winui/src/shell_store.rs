@@ -9,6 +9,7 @@
 //! 依赖。纯函数，便于单测（feed daemon `session.list` / `session.activity`
 //! 的真实 fixture）。
 
+use deepx_client::{ControlEvent, DomainActivityState, DomainSessionState};
 use serde_json::Value;
 
 /// 会话活动状态（镜像 TS `SessionActivityState`）。
@@ -121,10 +122,18 @@ pub fn parse_activities(v: &Value) -> Vec<(String, ActivityState)> {
 ///
 /// 事件形状（与前端 `ringingStores.ts` 的 `session_activity_changed` case 一致）：
 /// `{ type: "session_activity_changed", seed, state, ... }`。
-pub fn parse_activity_event(event: &Value) -> Option<(String, ActivityState)> {
-    let seed = event.get("seed")?.as_str()?.to_string();
-    let state = event.get("state")?.as_str().and_then(ActivityState::parse)?;
-    Some((seed, state))
+pub fn activity_event(event: &ControlEvent) -> Option<(String, ActivityState)> {
+    let ControlEvent::SessionActivityChanged { seed, state, .. } = event else {
+        return None;
+    };
+    let state = match state {
+        DomainActivityState::Starting => ActivityState::Starting,
+        DomainActivityState::Idle => ActivityState::Idle,
+        DomainActivityState::Working => ActivityState::Working,
+        DomainActivityState::WaitingUser => ActivityState::WaitingUser,
+        DomainActivityState::Disconnected => ActivityState::Disconnected,
+    };
+    Some((seed.clone(), state))
 }
 
 /// 从 control 频道 `session_state_changed` 事件载荷提取 (seed, state)。
@@ -133,10 +142,19 @@ pub fn parse_activity_event(event: &Value) -> Option<(String, ActivityState)> {
 /// `{ type: "session_state_changed", seed, state: "created"|"resumed"|
 /// "closed"|"archived"|"unarchived"|"deleted" }`。
 /// 语义：会话生命周期变更（含归档/删除）→ 前端应全量刷新列表（替代轮询）。
-pub fn parse_session_state_event(event: &Value) -> Option<(String, String)> {
-    let seed = event.get("seed")?.as_str()?.to_string();
-    let state = event.get("state")?.as_str()?.to_string();
-    Some((seed, state))
+pub fn session_state_event(event: &ControlEvent) -> Option<(String, String)> {
+    let ControlEvent::SessionStateChanged { seed, state } = event else {
+        return None;
+    };
+    let state = match state {
+        DomainSessionState::Created => "created",
+        DomainSessionState::Resumed => "resumed",
+        DomainSessionState::Closed => "closed",
+        DomainSessionState::Archived => "archived",
+        DomainSessionState::Unarchived => "unarchived",
+        DomainSessionState::Deleted => "deleted",
+    };
+    Some((seed.clone(), state.to_string()))
 }
 
 // ── XAML 技能页投影（skills_view.rs 的唯一数据源）──────────────────
@@ -186,7 +204,11 @@ pub fn parse_skills_payload(v: &Value) -> SkillsSnapshot {
     let arr_str = |key: &str| -> Vec<String> {
         v.get(key)
             .and_then(|x| x.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     SkillsSnapshot {
@@ -243,8 +265,14 @@ pub fn parse_skills_payload(v: &Value) -> SkillsSnapshot {
                                 .and_then(|s| s.as_str())
                                 .unwrap_or("")
                                 .to_string(),
-                            token_count: item.get("token_count").and_then(|t| t.as_u64()).unwrap_or(0),
-                            error: item.get("error").and_then(|e| e.as_str()).map(str::to_string),
+                            token_count: item
+                                .get("token_count")
+                                .and_then(|t| t.as_u64())
+                                .unwrap_or(0),
+                            error: item
+                                .get("error")
+                                .and_then(|e| e.as_str())
+                                .map(str::to_string),
                         })
                     })
                     .collect()
@@ -256,7 +284,10 @@ pub fn parse_skills_payload(v: &Value) -> SkillsSnapshot {
             .unwrap_or("")
             .to_string(),
         context_epoch: v.get("context_epoch").and_then(|x| x.as_u64()).unwrap_or(0),
-        operation_revision: v.get("operation_revision").and_then(|x| x.as_u64()).unwrap_or(0),
+        operation_revision: v
+            .get("operation_revision")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0),
         token_budget: v.get("token_budget").and_then(|x| x.as_u64()).unwrap_or(0),
         token_usage: v.get("token_usage").and_then(|x| x.as_u64()).unwrap_or(0),
         diagnostics: arr_str("diagnostics"),
@@ -269,11 +300,51 @@ pub fn parse_skills_payload(v: &Value) -> SkillsSnapshot {
 /// snake_case）：`{ type: "skills_updated", available, active,
 /// catalog_revision?, operation_revision?, context_epoch, token_budget,
 /// token_usage, runtime, diagnostics }`。`type` 不符返回 None。
-pub fn parse_skills_event(event: &Value) -> Option<SkillsSnapshot> {
-    if event.get("type")?.as_str()? != "skills_updated" {
+pub fn skills_event(event: &ControlEvent) -> Option<SkillsSnapshot> {
+    let ControlEvent::SkillsUpdated {
+        available,
+        active,
+        catalog_revision,
+        operation_revision,
+        context_epoch,
+        token_budget,
+        token_usage,
+        runtime,
+        diagnostics,
+    } = event
+    else {
         return None;
-    }
-    Some(parse_skills_payload(event))
+    };
+    Some(SkillsSnapshot {
+        seed: String::new(),
+        available: available
+            .iter()
+            .map(|item| SkillCatalogItem {
+                name: item.name.clone(),
+                description: item.description.clone(),
+                scope: item.scope.clone(),
+                source: item.source.clone(),
+            })
+            .collect(),
+        active: active.clone(),
+        runtime: runtime
+            .iter()
+            .map(|item| SkillRuntimeItem {
+                name: item.name.clone(),
+                description: item.description.clone(),
+                state: item.state.clone(),
+                source: item.source.clone(),
+                token_count: item.token_count as u64,
+                error: item.error.clone(),
+            })
+            .collect(),
+        catalog_revision: catalog_revision.clone().unwrap_or_default(),
+        context_epoch: *context_epoch as u64,
+        operation_revision: operation_revision.unwrap_or_default(),
+        token_budget: *token_budget as u64,
+        token_usage: *token_usage as u64,
+        diagnostics: diagnostics.clone(),
+    })
 }
 
 // ── XAML composer goalBar 投影（composer_bar.rs 的 dashboard 数据源）──
@@ -302,59 +373,25 @@ pub struct DashboardSnapshot {
 /// `{ type: "dashboard_snapshot", snapshot: { seed, documents,
 /// recent_edits, tasks: [{id, subject, description, status}],
 /// current_todo_id } }`。`type` 不符返回 None。
-pub fn parse_dashboard_event(event: &Value) -> Option<DashboardSnapshot> {
-    if event.get("type")?.as_str()? != "dashboard_snapshot" {
+pub fn dashboard_event(event: &ControlEvent) -> Option<DashboardSnapshot> {
+    let ControlEvent::DashboardSnapshot { snapshot } = event else {
         return None;
-    }
-    let payload = event.get("snapshot")?;
-    let mut snap = DashboardSnapshot::default();
-    snap.seed = payload
-        .get("seed")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    snap.tasks = payload
-        .get("tasks")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|t| {
-                    Some(DashboardTask {
-                        id: t.get("id")?.as_str()?.to_string(),
-                        subject: t
-                            .get("subject")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        description: t
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        status: t
-                            .get("status")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    snap.recent_edits = payload
-        .get("recent_edits")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    snap.current_todo_id = payload
-        .get("current_todo_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    Some(snap)
+    };
+    Some(DashboardSnapshot {
+        seed: snapshot.seed.clone(),
+        tasks: snapshot
+            .tasks
+            .iter()
+            .map(|task| DashboardTask {
+                id: task.id.clone(),
+                subject: task.subject.clone(),
+                description: task.description.clone(),
+                status: task.status.clone(),
+            })
+            .collect(),
+        recent_edits: snapshot.recent_edits.clone(),
+        current_todo_id: snapshot.current_todo_id.clone(),
+    })
 }
 
 // ── XAML 设置页投影（settings_view.rs 的唯一数据源）────────────────
@@ -517,10 +554,7 @@ pub fn parse_conversation_state(v: &Value) -> SessionDetail {
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string(),
-        context_limit: v
-            .get("context_limit")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0),
+        context_limit: v.get("context_limit").and_then(|x| x.as_u64()).unwrap_or(0),
         usage: v.get("usage").map(parse_usage).unwrap_or_default(),
         totals: v.get("usage_totals").map(parse_usage).unwrap_or_default(),
         usage_requests: v
@@ -546,17 +580,14 @@ fn is_masked(v: &str) -> bool {
 /// 同理 snake_case。`lang`/`permission_level` 顶层返回（App.tsx L659 同源）。
 pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
     let str_of = |key: &str| -> String {
-        v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+        v.get(key)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
     };
-    let u64_of = |key: &str| -> u64 {
-        v.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
-    };
-    let f64_of = |key: &str| -> f64 {
-        v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
-    };
-    let bool_of = |key: &str| -> bool {
-        v.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
-    };
+    let u64_of = |key: &str| -> u64 { v.get(key).and_then(|x| x.as_u64()).unwrap_or(0) };
+    let f64_of = |key: &str| -> f64 { v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0) };
+    let bool_of = |key: &str| -> bool { v.get(key).and_then(|x| x.as_bool()).unwrap_or(false) };
     let sub = v.get("subagent");
     let sub_of = |key: &str| -> String {
         sub.and_then(|s| s.get(key))
@@ -565,7 +596,9 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
             .to_string()
     };
     let sub_u64 = |key: &str| -> u64 {
-        sub.and_then(|s| s.get(key)).and_then(|x| x.as_u64()).unwrap_or(0)
+        sub.and_then(|s| s.get(key))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0)
     };
     let mm = v.get("multimodal");
     let mm_of = |key: &str| -> String {
@@ -575,7 +608,9 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
             .to_string()
     };
     let mm_u64 = |key: &str| -> u64 {
-        mm.and_then(|s| s.get(key)).and_then(|x| x.as_u64()).unwrap_or(0)
+        mm.and_then(|s| s.get(key))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0)
     };
     let ws = v.get("workspace");
 
@@ -584,7 +619,11 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
     let mm_api_key = mm_of("api_key");
     SettingsSnapshot {
         loaded: true,
-        api_key: if is_masked(&api_key) { String::new() } else { api_key.clone() },
+        api_key: if is_masked(&api_key) {
+            String::new()
+        } else {
+            api_key.clone()
+        },
         api_key_configured: is_masked(&api_key),
         model: str_of("model"),
         base_url: str_of("base_url"),
@@ -599,22 +638,41 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
         profiles: v
             .get("profiles")
             .and_then(|x| x.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
         sub_model: sub_of("model"),
         sub_base_url: sub_of("base_url"),
-        sub_api_key: if is_masked(&sub_api_key) { String::new() } else { sub_api_key.clone() },
+        sub_api_key: if is_masked(&sub_api_key) {
+            String::new()
+        } else {
+            sub_api_key.clone()
+        },
         sub_api_key_configured: is_masked(&sub_api_key),
         sub_max_tokens: sub_u64("max_tokens"),
         sub_timeout_secs: sub_u64("timeout_secs"),
         sub_tools: sub
             .and_then(|s| s.get("default_tools"))
             .and_then(|x| x.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
-        mm_enabled: mm.and_then(|s| s.get("enabled")).and_then(|x| x.as_bool()).unwrap_or(false),
+        mm_enabled: mm
+            .and_then(|s| s.get("enabled"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
         mm_provider_type: mm_of("provider_type"),
-        mm_api_key: if is_masked(&mm_api_key) { String::new() } else { mm_api_key.clone() },
+        mm_api_key: if is_masked(&mm_api_key) {
+            String::new()
+        } else {
+            mm_api_key.clone()
+        },
         mm_api_key_configured: is_masked(&mm_api_key),
         mm_base_url: mm_of("base_url"),
         mm_model: mm_of("model"),
@@ -646,7 +704,7 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
                                 .map(|eps| {
                                     eps.iter()
                                         .filter_map(|ep| {
-                                             Some(ProviderEndpoint {
+                                            Some(ProviderEndpoint {
                                                 id: ep.get("id")?.as_str()?.to_string(),
                                                 display: ep.get("display")?.as_str()?.to_string(),
                                                 protocol: ep
@@ -669,7 +727,9 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
                                                     .and_then(|m| m.as_array())
                                                     .map(|ms| {
                                                         ms.iter()
-                                                            .filter_map(|m| m.as_str().map(str::to_string))
+                                                            .filter_map(|m| {
+                                                                m.as_str().map(str::to_string)
+                                                            })
                                                             .collect()
                                                     })
                                                     .unwrap_or_default(),
@@ -694,16 +754,29 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
 /// 解析 `skills.list_tools` 查询结果（Value::Array of string）。
 pub fn parse_tools(v: &Value) -> Vec<String> {
     v.as_array()
-        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 /// 解析 `workspace.status` 查询结果 → (configured_mode, active_mode, endpoint)。
 pub fn parse_workspace_status(v: &Value) -> (String, String, String) {
     (
-        v.get("configured_mode").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        v.get("active_mode").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        v.get("endpoint").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        v.get("configured_mode")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        v.get("active_mode")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        v.get("endpoint")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
     )
 }
 
@@ -714,6 +787,21 @@ pub fn normalize_effort(effort: &str) -> &str {
         "low" | "medium" | "high" | "xhigh" | "max" => effort,
         _ => effort,
     }
+}
+
+#[cfg(test)]
+fn control_event(value: &Value) -> Option<ControlEvent> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+#[cfg(test)]
+fn parse_activity_event(value: &Value) -> Option<(String, ActivityState)> {
+    activity_event(&control_event(value)?)
+}
+
+#[cfg(test)]
+fn parse_skills_event(value: &Value) -> Option<SkillsSnapshot> {
+    skills_event(&control_event(value)?)
 }
 
 #[cfg(test)]
@@ -800,7 +888,13 @@ mod tests {
 
     #[test]
     fn activity_state_roundtrip() {
-        for s in ["starting", "idle", "working", "waiting_user", "disconnected"] {
+        for s in [
+            "starting",
+            "idle",
+            "working",
+            "waiting_user",
+            "disconnected",
+        ] {
             let state = ActivityState::parse(s).unwrap_or_else(|| panic!("{s}"));
             assert_eq!(state.as_str(), s);
         }
@@ -962,7 +1056,10 @@ mod tests {
         assert_eq!(snap.workspace_mode, "wsl");
         assert_eq!(snap.providers.len(), 1);
         assert_eq!(snap.providers[0].id, "deepseek");
-        assert_eq!(snap.providers[0].endpoints[0].models, vec!["deepseek-chat", "deepseek-reasoner"]);
+        assert_eq!(
+            snap.providers[0].endpoints[0].models,
+            vec!["deepseek-chat", "deepseek-reasoner"]
+        );
     }
 
     #[test]
@@ -982,8 +1079,9 @@ mod tests {
         let tools = parse_tools(&json!(["read_file", "grep", "exec"]));
         assert_eq!(tools, vec!["read_file", "grep", "exec"]);
         assert!(parse_tools(&json!({})).is_empty());
-        let (cfg, active, ep) =
-            parse_workspace_status(&json!({ "configured_mode": "local", "active_mode": "local", "endpoint": "wsl://ubuntu" }));
+        let (cfg, active, ep) = parse_workspace_status(
+            &json!({ "configured_mode": "local", "active_mode": "local", "endpoint": "wsl://ubuntu" }),
+        );
         assert_eq!(cfg, "local");
         assert_eq!(active, "local");
         assert_eq!(ep, "wsl://ubuntu");

@@ -17,17 +17,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use deepx_client::{
-    Channel, ChannelStatus, Client, ClientHandlers, ClientOptions, EventBatch, TimelineStatus,
+    ActionRequest, AskAnswer as DomainAskAnswer, Channel, ChannelStatus, Client, ClientHandlers,
+    ClientOptions, CommandOptions, ControlCommand, ControlEvent, ConversationCommand,
+    ConversationEvent as DomainConversationEvent, ConversationMode, EventBatch, PermissionCategory,
+    PermissionRisk, QueryRequest, RingingCommand, RingingEvent, TimelinePage, TimelineSnapshot,
+    TimelineStatus, ToolCommand, ToolEvent,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::chat_adapter;
 use crate::shell_store::{
-    parse_activities, parse_activity_event, parse_config_load, parse_conversation_state,
-    parse_dashboard_event, parse_session_state_event, parse_skills_event, parse_skills_payload,
-    parse_tools, parse_workspace_status, project_session_meta, ActivityState, DashboardSnapshot,
-    SessionDetail, SessionItem, SettingsSnapshot, SkillsSnapshot,
+    ActivityState, DashboardSnapshot, SessionDetail, SessionItem, SettingsSnapshot, SkillsSnapshot,
+    activity_event, dashboard_event, parse_activities, parse_config_load, parse_conversation_state,
+    parse_skills_payload, parse_tools, parse_workspace_status, project_session_meta,
+    session_state_event, skills_event,
 };
 
 /// 直连模式的发送反馈（替代 Web setComposer 的 submitError/sendAck 投影）。
@@ -229,9 +233,7 @@ enum ToolPermissionEvent {
     },
     /// tool_finished：权限已响应（Web 侧置 pendingPermission=false，此处
     /// 直接移除——组装只消费 pendingPermission 卡片，语义等价）。
-    Resolved {
-        tool_call_id: String,
-    },
+    Resolved { tool_call_id: String },
 }
 
 impl InteractionMachine {
@@ -300,7 +302,8 @@ impl InteractionMachine {
                 });
             }
             ToolPermissionEvent::Resolved { tool_call_id } => {
-                self.pending_permissions.retain(|p| p.tool_call_id != tool_call_id);
+                self.pending_permissions
+                    .retain(|p| p.tool_call_id != tool_call_id);
             }
         }
     }
@@ -324,17 +327,21 @@ impl InteractionMachine {
             };
         }
         match &self.active_ask_plan {
-            Some(ActiveAskPlan::Plan { id, plan_content, review_type, todo_items, .. }) => {
-                InteractionState {
-                    kind: "plan".into(),
-                    id: id.clone(),
-                    seed: seed.to_string(),
-                    plan_content: plan_content.clone(),
-                    review_type: review_type.clone(),
-                    todo_items: todo_items.clone(),
-                    ..InteractionState::default()
-                }
-            }
+            Some(ActiveAskPlan::Plan {
+                id,
+                plan_content,
+                review_type,
+                todo_items,
+                ..
+            }) => InteractionState {
+                kind: "plan".into(),
+                id: id.clone(),
+                seed: seed.to_string(),
+                plan_content: plan_content.clone(),
+                review_type: review_type.clone(),
+                todo_items: todo_items.clone(),
+                ..InteractionState::default()
+            },
             Some(ActiveAskPlan::Ask { id, questions, .. }) => InteractionState {
                 kind: "ask".into(),
                 id: id.clone(),
@@ -361,45 +368,63 @@ impl InteractionMachine {
 /// `plan_review_requested { interaction_id, turn_id, plan_content, review_type,
 /// todo_items?[] }`、`plan_review_resolved { interaction_id, approved }`、
 /// `operation_failed { error: { code } }`（幽灵自愈）。`type` 不符返回 None。
-fn parse_interaction_event(event: &Value) -> Option<InteractionEvent> {
-    let ty = event.get("type")?.as_str()?;
-    match ty {
-        "interaction_requested" => {
-            // turn_id 校验存在（协议契约），不投影进状态（对齐 Web 投影形状）。
-            let _ = event.get("turn_id")?.as_str()?;
-            Some(InteractionEvent::AskRequested {
-                id: event.get("interaction_id")?.as_str()?.to_string(),
-                questions: parse_questions(event.get("questions")?),
+fn interaction_event(event: &ControlEvent) -> Option<InteractionEvent> {
+    match event {
+        ControlEvent::InteractionRequested {
+            interaction_id,
+            questions,
+            ..
+        } => Some(InteractionEvent::AskRequested {
+            id: interaction_id.clone(),
+            questions: questions
+                .iter()
+                .map(|question| AskQuestion {
+                    id: question.id.clone(),
+                    question: question.question.clone(),
+                    options: question.options.clone(),
+                    allow_custom: question.allow_custom,
+                })
+                .collect(),
+        }),
+        ControlEvent::InteractionResolved { interaction_id, .. } => {
+            Some(InteractionEvent::AskResolved {
+                id: interaction_id.clone(),
             })
         }
-        "interaction_resolved" => Some(InteractionEvent::AskResolved {
-            id: event.get("interaction_id")?.as_str()?.to_string(),
+        ControlEvent::PlanReviewRequested {
+            interaction_id,
+            plan_content,
+            review_type,
+            todo_items,
+            ..
+        } => Some(InteractionEvent::PlanRequested {
+            id: interaction_id.clone(),
+            plan_content: plan_content.clone(),
+            review_type: review_type.clone(),
+            todo_items: todo_items
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|item| PlanTodoItem {
+                    id: item.id.clone(),
+                    title: item.title.clone(),
+                    description: item.description.clone(),
+                    complexity: item.complexity.clone(),
+                })
+                .collect(),
         }),
-        "plan_review_requested" => {
-            let _ = event.get("turn_id")?.as_str()?;
-            Some(InteractionEvent::PlanRequested {
-                id: event.get("interaction_id")?.as_str()?.to_string(),
-                plan_content: event.get("plan_content")?.as_str()?.to_string(),
-                review_type: event
-                    .get("review_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                todo_items: parse_todo_items(event.get("todo_items")),
+        ControlEvent::PlanReviewResolved { interaction_id, .. } => {
+            Some(InteractionEvent::PlanResolved {
+                id: interaction_id.clone(),
             })
         }
-        "plan_review_resolved" => Some(InteractionEvent::PlanResolved {
-            id: event.get("interaction_id")?.as_str()?.to_string(),
-        }),
-        "operation_failed" => {
-            let code = event
-                .get("error")
-                .and_then(|e| e.get("code"))
-                .and_then(|c| c.as_str())?;
-            match code {
-                "ask_rejected" | "interaction_not_found" => Some(InteractionEvent::GhostCleanup),
-                _ => None,
-            }
+        ControlEvent::OperationFailed { error, .. }
+            if matches!(
+                error.code.as_str(),
+                "ask_rejected" | "interaction_not_found"
+            ) =>
+        {
+            Some(InteractionEvent::GhostCleanup)
         }
         _ => None,
     }
@@ -412,35 +437,48 @@ fn parse_interaction_event(event: &Value) -> Option<InteractionEvent> {
 /// category, level, risk, consequence }`、`tool_finished { tool_call_id, ... }`。
 /// 注意 daemon 字段为 snake_case（`allow_custom` 等），与壳投影
 /// （camelCase `allowCustom`）不同——解析时手动取 snake_case 键。
-fn parse_tool_permission_event(event: &Value) -> Option<ToolPermissionEvent> {
-    let ty = event.get("type")?.as_str()?;
-    match ty {
-        "tool_permission_requested" => {
-            // turn_id 校验存在（协议契约），不投影进状态。
-            let _ = event.get("turn_id")?.as_str()?;
-            Some(ToolPermissionEvent::Requested {
-                tool_call_id: event.get("tool_call_id")?.as_str()?.to_string(),
-                tool_name: event.get("tool_name")?.as_str()?.to_string(),
-                reason: event.get("reason")?.as_str()?.to_string(),
-                paths: event
-                    .get("paths")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
-                    .unwrap_or_default(),
-                category: event.get("category")?.as_str()?.to_string(),
-                level: event.get("level").and_then(|v| v.as_u64()).unwrap_or(0),
-                risk: event.get("risk")?.as_str()?.to_string(),
-                consequence: event.get("consequence")?.as_str()?.to_string(),
-            })
-        }
-        "tool_finished" => Some(ToolPermissionEvent::Resolved {
-            tool_call_id: event.get("tool_call_id")?.as_str()?.to_string(),
+fn tool_permission_event(event: &ToolEvent) -> Option<ToolPermissionEvent> {
+    match event {
+        ToolEvent::ToolPermissionRequested {
+            tool_call_id,
+            tool_name,
+            reason,
+            paths,
+            category,
+            level,
+            risk,
+            consequence,
+            ..
+        } => Some(ToolPermissionEvent::Requested {
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            reason: reason.clone(),
+            paths: paths.clone(),
+            category: match category {
+                PermissionCategory::Read => "read",
+                PermissionCategory::Write => "write",
+                PermissionCategory::Exec => "exec",
+                PermissionCategory::Net => "net",
+            }
+            .to_string(),
+            level: u64::from(*level),
+            risk: match risk {
+                PermissionRisk::Low => "low",
+                PermissionRisk::Medium => "medium",
+                PermissionRisk::High => "high",
+            }
+            .to_string(),
+            consequence: consequence.clone(),
+        }),
+        ToolEvent::ToolFinished { tool_call_id, .. } => Some(ToolPermissionEvent::Resolved {
+            tool_call_id: tool_call_id.clone(),
         }),
         _ => None,
     }
 }
 
 /// 解析 daemon `questions` 数组（snake_case 键 → 壳投影 camelCase 形状）。
+#[cfg(test)]
 fn parse_questions(v: &Value) -> Vec<AskQuestion> {
     v.as_array()
         .map(|arr| {
@@ -453,10 +491,15 @@ fn parse_questions(v: &Value) -> Vec<AskQuestion> {
                             .get("options")
                             .and_then(|o| o.as_array())
                             .map(|a| {
-                                a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_string))
+                                    .collect()
                             })
                             .unwrap_or_default(),
-                        allow_custom: q.get("allow_custom").and_then(|v| v.as_bool()).unwrap_or(false),
+                        allow_custom: q
+                            .get("allow_custom")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
                     })
                 })
                 .collect()
@@ -465,6 +508,7 @@ fn parse_questions(v: &Value) -> Vec<AskQuestion> {
 }
 
 /// 解析 daemon `todo_items`（可为 null；字段无 camelCase 转换需求）。
+#[cfg(test)]
 fn parse_todo_items(v: Option<&Value>) -> Vec<PlanTodoItem> {
     v.and_then(|v| v.as_array())
         .map(|arr| {
@@ -490,16 +534,10 @@ fn parse_todo_items(v: Option<&Value>) -> Vec<PlanTodoItem> {
         .unwrap_or_default()
 }
 
-// ── Rust 直连 composer 活动追踪（读路径直连，不经 WebView）─────────────
+// ── Native composer activity tracking ────────────────────────────────
 //
-// 等价移植 Web `isSessionStreaming`（activeTurn 存在 + lastActivityAt 卡死
-// 检测，STALL = 4min）+ conversation store 的 lastUsage（model/contextLimit/
-// prompt_tokens，来自 `usage_updated` 事件）。composer 投影字段分两组：
-//   A 组（Rust 直连）：seed / isStreaming / hasPendingGate / model /
-//                      contextTokens / contextLimit
-//   B 组（Web 投影保留）：mode / permissionLevel / queueCount / queueItems /
-//                      submitError / sendAck（写路径伴生状态，终局写路径迁移后并入）
-// `composer_snapshot` 直连模式下合并两组；`apply_composer` 直连模式只落 B 组。
+// Canonical conversation events own streaming/usage state. Mode and send
+// feedback are local UI state; permission comes from the typed settings cache.
 
 /// 卡死阈值（对齐 Web `SESSION_STALL_TIMEOUT_MS`）：超时视为流式中断。
 const COMPOSER_STALL_TIMEOUT_MS: u64 = 4 * 60 * 1000;
@@ -527,7 +565,11 @@ enum ConversationActivityEvent {
     /// provider_tool_status：活动（刷新时间戳）。
     Touched,
     /// usage_updated：活动 + model/context_limit/prompt_tokens 缓存。
-    Usage { prompt_tokens: u64, context_limit: u64, model: String },
+    Usage {
+        prompt_tokens: u64,
+        context_limit: u64,
+        model: String,
+    },
 }
 
 impl ComposerActivity {
@@ -555,7 +597,11 @@ impl ComposerActivity {
             ConversationActivityEvent::Touched => {
                 self.last_activity_at = now;
             }
-            ConversationActivityEvent::Usage { prompt_tokens, context_limit, model } => {
+            ConversationActivityEvent::Usage {
+                prompt_tokens,
+                context_limit,
+                model,
+            } => {
                 self.prompt_tokens = prompt_tokens;
                 self.context_limit = context_limit;
                 self.model = model;
@@ -574,28 +620,36 @@ impl ComposerActivity {
 /// `usage_updated { turn_id, round_num, usage, context_limit, model }`、
 /// `round_delta / block_checkpoint / round_completed / provider_retrying /
 /// provider_tool_status`。`type` 不符返回 None。
-fn parse_conversation_activity_event(event: &Value) -> Option<ConversationActivityEvent> {
-    let ty = event.get("type")?.as_str()?;
-    match ty {
-        "turn_started" => Some(ConversationActivityEvent::Started),
-        "turn_completed" | "turn_failed" | "conversation_cancelled" => {
+fn conversation_activity_event(
+    event: &DomainConversationEvent,
+) -> Option<ConversationActivityEvent> {
+    match event {
+        DomainConversationEvent::TurnStarted { .. } => Some(ConversationActivityEvent::Started),
+        DomainConversationEvent::TurnCompleted { .. }
+        | DomainConversationEvent::TurnFailed { .. }
+        | DomainConversationEvent::ConversationCancelled { .. } => {
             Some(ConversationActivityEvent::Ended)
         }
-        "usage_updated" => {
-            let usage = event.get("usage")?;
-            Some(ConversationActivityEvent::Usage {
-                prompt_tokens: usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                context_limit: event.get("context_limit").and_then(|v| v.as_u64()).unwrap_or(0),
-                model: event
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            })
+        DomainConversationEvent::UsageUpdated {
+            usage,
+            context_limit,
+            model,
+            ..
+        } => Some(ConversationActivityEvent::Usage {
+            prompt_tokens: u64::from(usage.prompt_tokens),
+            context_limit: u64::from(*context_limit),
+            model: model.clone(),
+        }),
+        DomainConversationEvent::RoundDelta { .. }
+        | DomainConversationEvent::BlockCheckpoint { .. }
+        | DomainConversationEvent::RoundCompleted { .. }
+        | DomainConversationEvent::ProviderRetrying { .. }
+        | DomainConversationEvent::ProviderToolStatus { .. } => {
+            Some(ConversationActivityEvent::Touched)
         }
-        "round_delta" | "block_checkpoint" | "round_completed" | "provider_retrying"
-        | "provider_tool_status" => Some(ConversationActivityEvent::Touched),
-        _ => None,
+        DomainConversationEvent::CompactStarted { .. }
+        | DomainConversationEvent::CompactProgress { .. }
+        | DomainConversationEvent::CompactFinished { .. } => None,
     }
 }
 
@@ -614,12 +668,7 @@ pub struct AskAnswer {
     pub answer: String,
 }
 
-/// XAML Composer 状态投影（Web `shell.setComposer` 载荷）。
-///
-/// 字段名对齐 Web 侧 ComposerDock 依赖的 props（camelCase）。
-/// `#[serde(default)]` 保证字段扩展向后兼容（P-2 typed struct 预埋）。
-/// 终局演进（Web 移除后）：本 struct 即 XAML 直接消费的形状，数据源从
-/// "Web 投影"换成"Rust 直连 daemon 解析"，形状不变（见 PLAN-NATIVE-COMPOSER.md）。
+/// View model consumed directly by the native XAML composer.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ComposerState {
@@ -636,9 +685,9 @@ pub struct ComposerState {
     pub permission_level: u64,
     pub queue_count: u64,
     pub queue_items: Vec<ComposerQueueItem>,
-    /// Web 发送失败回填（壳显示且不清空草稿）。
+    /// Native send failure shown without clearing the draft.
     pub submit_error: String,
-    /// Web 每次 handleSend 成功（或入队）后递增——壳据此清空草稿（悲观清空）。
+    /// Incremented after a command is accepted so the shell can clear its draft.
     pub send_ack: u64,
 }
 
@@ -672,8 +721,8 @@ pub struct ComposerTextFile {
 pub struct BridgeCore {
     client: Mutex<Option<Client>>,
     attached: Mutex<HashSet<String>>,
-    /// Latest per-channel status payloads (mirrors Electron `ringing.status`).
-    channel_status: Mutex<HashMap<String, Value>>,
+    /// Latest native transport state for each Ringing channel.
+    channel_status: Mutex<HashMap<Channel, ChannelStatus>>,
     /// XAML 侧栏数据源：会话列表投影（`session.list` + `session.activity`）。
     sessions: Mutex<Vec<SessionItem>>,
     /// 实时活动状态（control `session_activity_changed` 事件增量更新）。
@@ -682,14 +731,10 @@ pub struct BridgeCore {
     session_rev: AtomicU64,
     /// XAML 侧栏当前选中的会话 seed。
     active_seed: Mutex<String>,
-    /// XAML 标题栏数据源：headerDirect 模式下由 `refresh_header` 组装
-    /// （壳导航/会话列表/conversation 事件），Web 投影关闭时保留现值。
+    /// XAML 标题栏数据源，由壳导航、会话列表和 conversation 事件组装。
     header_state: Mutex<HeaderState>,
     /// 标题栏状态版本：组装/投影后递增，UI 侧 timer 比对后刷新（同 session_rev）。
     header_rev: AtomicU64,
-    /// 标题栏直连模式（默认开）：状态由壳侧组装，`apply_header`（Web 投影）
-    /// 忽略——0px WebView 的旧 seed 投影（Bug B 根源）随此永久失效。
-    header_direct: AtomicBool,
     /// per-seed turns 计数（undo_disabled 判定源）：timeline 快照写入点缓存
     /// （不随 chat_view consume 清空），增量 turn 事件不改变计数。
     header_turns: Mutex<HashMap<String, usize>>,
@@ -725,47 +770,35 @@ pub struct BridgeCore {
     settings: Mutex<Option<SettingsSnapshot>>,
     /// 设置数据版本：config.load / tools 拉取后递增，UI 侧 timer 比对后刷新。
     settings_rev: AtomicU64,
-    /// Web `shell.setSettings` 初始投影（theme/lang/permission/workspaceMode）。
+    /// XAML-local appearance and workspace preferences.
     settings_proj: Mutex<SettingsProjection>,
-    /// 投影版本：Web 推送后递增（同 header_rev）。
+    /// Local preference version used by the UI refresh loop.
     settings_proj_rev: AtomicU64,
     /// XAML Info 面板数据源：bootstrap `conversation.state` 投影。
     info: Mutex<Option<SessionDetail>>,
     /// Info 数据版本：refresh 后递增，UI 侧 timer 比对后刷新（同 session_rev）。
     info_rev: AtomicU64,
-    /// XAML 交互模态数据源：Web `shell.setInteraction` 状态投影。
+    /// XAML interaction modal view model.
     interaction: Mutex<InteractionState>,
-    /// 交互数据版本：Web 推送后递增，UI 侧 timer 比对后刷新（同 header_rev）。
+    /// Interaction version used by the UI refresh loop.
     interaction_rev: AtomicU64,
-    /// Rust 直连交互队列状态机（per seed）：daemon control/tool 事件直接
-    /// 解析组装 InteractionState（读路径直连，不经 WebView——终局数据源，
-    /// Web 移除后形状不变）。`apply_interaction`（Web 投影）在直连模式下
-    /// 被忽略，避免双源竞态。
+    /// daemon control/tool 事件直接组装的 per-seed 交互状态机。
     interactions: Mutex<HashMap<String, InteractionMachine>>,
-    /// 直连模式：Web 注入 `interactionDirect` flag 后经 `shell.setInteractionDirect`
-    /// 置位；关闭时回退 Web 投影（现状路径，flag 关即回退）。
-    interaction_direct: AtomicBool,
-    /// XAML Composer 数据源：Web `shell.setComposer` 状态投影。
-    composer: Mutex<ComposerState>,
-    /// Composer 数据版本：Web 推送后递增，UI 侧 timer 比对后刷新（同 header_rev）。
+    /// Composer version used by the UI refresh loop.
     composer_rev: AtomicU64,
     /// Rust 直连 composer 活动追踪（per seed）：conversation 频道事件
     /// 直连解析 isStreaming（卡死检测）/model/context（usage_updated 缓存）
     /// ——读路径直连，不经 WebView（终局数据源）。`hasPendingGate` 复用
     /// 交互队列状态机（interactions）。
     composer_activity: Mutex<HashMap<String, ComposerActivity>>,
-    /// composer 直连模式：A 组字段（isStreaming/gate/model/context）Rust 直连，
-    /// B 组（mode/permissionLevel/queue/sendAck/submitError——写路径伴生状态）
-    /// 保留 Web 投影，`composer_snapshot` 合并读取。flag 关即回退纯投影。
-    composer_direct: AtomicBool,
     /// 直连模式的 mode 本地缓存（Web 单例语义：会话共享，默认 "plan"）。
     composer_mode: Mutex<String>,
     /// 直连模式的发送反馈（submitError 显示 / sendAck 清空信号）。
     composer_feedback: Mutex<ComposerFeedback>,
     /// 原生 ChatView 事件队列：conversation 频道渲染相关事件（turn/round/
     /// delta/checkpoint）直连缓存，UI 线程 timer drain 喂 Transcript。
-    /// 事件为 wire JSON（`{"type":...}`），`chat_adapter::internal_event`
-    /// 反序列化为渲染协议——零映射胶水。
+    /// Queue entries are canonical typed Ringing events; the adapter only maps
+    /// domain variants into presentation models.
     ///
     /// **seed 标记（2026-08-08 修复）**：队列元素为 `(seed, event)`——
     /// daemon 的 SSE 流按 lease 推送**所有**会话的事件（batch.seed 区分），
@@ -773,33 +806,22 @@ pub struct BridgeCore {
     /// Transcript（切换瞬间残留事件串台）。现入队带 seed、`chat_drain`
     /// 按 active_seed 过滤（非活动事件丢弃，切回时由权威快照 + 切回后的
     /// 增量补齐）。
-    chat_events: Mutex<std::collections::VecDeque<(String, serde_json::Value)>>,
-    /// 最近一次 timeline 快照（`TimelineSnapshot` JSON + 所属 seed：
+    chat_events: Mutex<std::collections::VecDeque<(String, RingingEvent)>>,
+    /// 最近一次 typed timeline 快照（`TimelineSnapshot` + 所属 seed：
     /// 权威 turns 历史，resume 旧对话的数据源；chat_view 泵消费 restore）。
     /// seed 标记防竞态：快速切会话时旧快照晚到不会被灌进新会话。
-    chat_timeline: Mutex<Option<(String, serde_json::Value)>>,
+    chat_timeline: Mutex<Option<(String, TimelineSnapshot)>>,
     /// 分页元数据：seed → 服务端是否还有更早回合（快照缓存时同步更新）。
     /// ChatView 上滚到窗口顶部且 `expand_window` 已全量放行时据此翻页。
     timeline_has_more: Mutex<std::collections::HashMap<String, bool>>,
-    /// 更早回合分页页（`(seed, TimelineSnapshot JSON)`）：`spawn_fetch_earlier`
+    /// 更早回合分页页（`(seed, TimelineSnapshot)`）：`spawn_fetch_earlier`
     /// 异步拉取后入队，chat_view 泵 drain 后 `Transcript::prepend_turns`
     /// 前插（与 `chat_timeline` 的整包替换语义区分）。
-    chat_prepend: Mutex<std::collections::VecDeque<(String, serde_json::Value)>>,
+    chat_prepend: Mutex<std::collections::VecDeque<(String, TimelineSnapshot)>>,
     /// 分页在途标记（seed 集合）：防止滚动抖动时重复发起同一翻页请求。
     timeline_fetching: Mutex<std::collections::HashSet<String>>,
     /// ChatView 数据版本：事件入队后递增，UI 侧 timer 比对后 drain。
     chat_rev: AtomicU64,
-    /// ChatView 直连模式：置位后 conversation 渲染事件入 `chat_events`
-    /// 队列（原生 ChatView 消费）。默认开启（ChatView 已原生迁移）；
-    /// Web 注入 `chatDirect` flag 可再置位（幂等）。
-    chat_direct: AtomicBool,
-    /// 侧栏 resume 进行中的目标 seed（active_seed 写入仲裁）：
-    /// `apply_header`（Web 投影）在 resume 目标未达成前**忽略** Web 的
-    /// seed 写入——0px WebView 仍持有旧会话时持续投影旧 seed，会把
-    /// `spawn_resume` 刚设置的 active_seed 覆盖回去（双 seed 竞争，
-    /// 快照因 seed 不匹配被丢弃 → ChatView 永久"加载会话…"）。
-    /// Web 投影 seed 与目标一致时视为已切换，清除仲裁并恢复正常同步。
-    resume_target: Mutex<Option<String>>,
     /// 快照重拉节流：seed 不匹配时主动 `activate_timeline` 重拉（daemon
     /// 幂等重推快照）；16ms 泵每 tick 都会看到不匹配快照，须限频。
     timeline_refresh_at: Mutex<Instant>,
@@ -839,33 +861,39 @@ fn auto_reconnect_cooldown_for(failures: u32) -> Duration {
 impl BridgeCore {
     /// Arc to self: `BridgeCore` is stored in an `Arc` by the UI-side Bridge.
     fn self_arc(&self) -> Arc<BridgeCore> {
-        SHARED_CORE.get().expect("bridge core not initialized").clone()
+        SHARED_CORE
+            .get()
+            .expect("bridge core not initialized")
+            .clone()
     }
 
     // ── XAML 侧栏（shell_store 投影）──────────────────────────────
 
     /// (items, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新列表。
     pub fn session_snapshot(&self) -> (Vec<SessionItem>, u64) {
-        let items = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let items = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let rev = self.session_rev.load(Ordering::Relaxed);
         (items, rev)
     }
 
     pub fn active_seed(&self) -> String {
-        self.active_seed.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.active_seed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_active_seed(&self, seed: &str) {
         *self.active_seed.lock().unwrap_or_else(|e| e.into_inner()) = seed.to_string();
-        // 直连模式：交互缓存跟随活动会话（对齐 Web activeEntry 投影语义——
+        // 交互缓存跟随活动会话：
         // 只显示当前会话的交互，后台会话请求保持挂起直至切回）。
-        if self.interaction_direct.load(Ordering::Relaxed) {
-            self.refresh_interaction_snapshot();
-        }
+        self.refresh_interaction_snapshot();
         // 标题栏直连：seed/view/title 随活动会话刷新。
-        if self.header_direct.load(Ordering::Relaxed) {
-            self.refresh_header();
-        }
+        self.refresh_header();
     }
 
     // ── XAML 标题栏（header 投影，同 sessions 模式）────────────────
@@ -881,7 +909,7 @@ impl BridgeCore {
         (state, rev)
     }
 
-    /// 壳侧组装标题栏状态（headerDirect）：view/seed 来自壳导航与会话
+    /// 壳侧组装标题栏状态：view/seed 来自壳导航与会话
     /// 切换，title 查会话列表，undo/compact disabled 由 conversation 事件
     /// 推断（对齐 Web：`turns.length === 0 || streaming` / `streaming`）。
     /// info_open/stats_open/compacting/workspace 保留现值（本地状态，
@@ -918,10 +946,7 @@ impl BridgeCore {
             .get(&seed)
             .copied()
             .unwrap_or(0);
-        let mut h = self
-            .header_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut h = self.header_state.lock().unwrap_or_else(|e| e.into_inner());
         h.view = view;
         h.seed = seed;
         h.title = title;
@@ -935,67 +960,12 @@ impl BridgeCore {
     /// 状态，不再回传 Web（headerAction::Info/Stats 通道随 WebView 移除
     /// 而淘汰）。
     pub fn toggle_header_flag(&self, flag: HeaderFlag) {
-        let mut h = self
-            .header_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut h = self.header_state.lock().unwrap_or_else(|e| e.into_inner());
         match flag {
             HeaderFlag::Info => h.info_open = !h.info_open,
             HeaderFlag::Stats => h.stats_open = !h.stats_open,
         }
         drop(h);
-        self.header_rev.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Web `shell.setHeader` 载荷落缓存并递增 rev。
-    /// 反序列化失败时保留旧状态（静默丢弃坏载荷，不中断链路）。
-    /// 同步副作用（D-2，Web 是视图/会话单一数据源）：
-    /// - `view` → current_view：Web 内部恢复/切换会话不经过壳 navigate，
-    ///   不同步则 XAML 视图族行高与 Info 面板列宽判定滞后；
-    /// - `seed` → active_seed：Info 面板 bootstrap 用（壳侧 resume/navigate
-    ///   路径之外，Web 发起的 session_resume 必须同步）。
-    pub fn apply_header(&self, payload: Value) {
-        // 直连模式（默认）：标题栏状态由壳侧组装（refresh_header），Web
-        // 投影必然过时，接受会覆盖直连状态（双源竞态）——且 0px WebView
-        // 的旧 seed 投影正是"加载会话…"卡死的投影源（Bug B），直连后
-        // 不再写入 active_seed/current_view，该路径永久失效。
-        if self.header_direct.load(Ordering::Relaxed) {
-            log_diag("apply_header: direct mode active, ignoring Web projection");
-            return;
-        }
-        let Ok(state) = serde_json::from_value::<HeaderState>(payload) else {
-            log_diag("apply_header: invalid payload, keeping previous state");
-            return;
-        };
-        if !state.view.is_empty() {
-            *self.current_view.lock().unwrap_or_else(|e| e.into_inner()) = state.view.clone();
-        }
-        if !state.seed.is_empty() {
-            // active_seed 写入仲裁（双 seed 竞争）：侧栏 resume 进行中且
-            // Web 投影的 seed 尚未跟上目标时，忽略 Web 写入——否则 0px
-            // WebView 的旧会话投影会把 resume 目标覆盖掉，ChatView 快照
-            // 因 seed 不匹配被丢弃，永久停在"加载会话…"。
-            let mut target = self.resume_target.lock().unwrap_or_else(|e| e.into_inner());
-            match target.as_deref() {
-                Some(t) if t != state.seed => {
-                    log_diag(&format!(
-                        "apply_header: ignore web seed {} (resume target {})",
-                        state.seed, t
-                    ));
-                }
-                Some(_) => {
-                    // Web 已跟上 resume 目标：解除仲裁，恢复正常双源同步。
-                    *target = None;
-                    *self.active_seed.lock().unwrap_or_else(|e| e.into_inner()) =
-                        state.seed.clone();
-                }
-                None => {
-                    *self.active_seed.lock().unwrap_or_else(|e| e.into_inner()) =
-                        state.seed.clone();
-                }
-            }
-        }
-        *self.header_state.lock().unwrap_or_else(|e| e.into_inner()) = state;
         self.header_rev.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1012,36 +982,10 @@ impl BridgeCore {
         (state, rev)
     }
 
-    /// Web `shell.setInteraction` 载荷落缓存并递增 rev。
-    /// 反序列化失败时保留旧状态（静默丢弃坏载荷，不中断链路）。
-    /// 注意：不隐藏 Web 侧对应组件——隐藏由 flag（`__DEEPX_XAML__.interaction`）
-    /// 决定，本投影仅驱动壳覆盖层面板的数据。
-    /// 直连模式下（`interaction_direct` 置位）忽略投影——Rust 已从 daemon
-    /// 事件同步解析，Web IPC 投影必然过时，接受会覆盖直连状态（双源竞态）。
-    pub fn apply_interaction(&self, payload: Value) {
-        if self.interaction_direct.load(Ordering::Relaxed) {
-            log_diag("apply_interaction: direct mode active, ignoring Web projection");
-            return;
-        }
-        let Ok(state) = serde_json::from_value::<InteractionState>(payload) else {
-            log_diag("apply_interaction: invalid payload, keeping previous state");
-            return;
-        };
-        *self.interaction.lock().unwrap_or_else(|e| e.into_inner()) = state;
-        self.interaction_rev.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// 置位 Rust 直连模式（Web 注入 `interactionDirect` flag 后调用）。
-    /// 交互快照改由 daemon 事件解析组装，`shell.setInteraction` 投影被忽略。
-    pub fn set_interaction_direct(&self) {
-        self.interaction_direct.store(true, Ordering::Relaxed);
-        log_diag("interaction direct mode: enabled");
-    }
-
     /// 应用 daemon control 事件到交互队列状态机；活动会话快照变化时递增 rev。
     /// 幂等：SSE 重连续传重放事件经 PartialEq 比对不产生多余 rev。
     /// 注意：机器按**事件 seed** 更新（后台会话交互保持挂起），缓存只投影
-    /// **active_seed** 的机器（对齐 Web 投影只发 activeEntry 的语义）。
+    /// **active_seed** 的机器，后台会话不会覆盖当前 UI。
     fn apply_interaction_event(&self, seed: &str, ev: InteractionEvent) {
         let mut machines = self.interactions.lock().unwrap_or_else(|e| e.into_inner());
         machines.entry(seed.to_string()).or_default().apply(ev);
@@ -1074,21 +1018,13 @@ impl BridgeCore {
         }
     }
 
-    // ── XAML Composer（composer 投影，同 header 模式）────────────────
+    // ── XAML Composer native view model ──────────────────────────────
 
     /// (state, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新底部栏。
-    /// 直连模式下合并 A 组（Rust 直连：isStreaming/gate/model/context）+
-    /// B 组（Web 投影：mode/permissionLevel/queue/sendAck/submitError）。
+    /// Combines typed conversation activity, interaction gates, settings, and
+    /// UI-local command feedback.
     pub fn composer_snapshot(&self) -> (ComposerState, u64) {
         let rev = self.composer_rev.load(Ordering::Relaxed);
-        let proj = self
-            .composer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if !self.composer_direct.load(Ordering::Relaxed) {
-            return (proj, rev);
-        }
         let active = self.active_seed();
         let now = unix_ms();
         let activity = self
@@ -1105,8 +1041,14 @@ impl BridgeCore {
             .get(&active)
             .map(|m| m.has_pending())
             .unwrap_or(false);
-        let is_streaming = activity.as_ref().map(|a| a.is_streaming(now)).unwrap_or(false);
-        let model = activity.as_ref().map(|a| a.model.clone()).unwrap_or_default();
+        let is_streaming = activity
+            .as_ref()
+            .map(|a| a.is_streaming(now))
+            .unwrap_or(false);
+        let model = activity
+            .as_ref()
+            .map(|a| a.model.clone())
+            .unwrap_or_default();
         let context_tokens = activity.as_ref().map(|a| a.prompt_tokens).unwrap_or(0);
         let context_limit = activity.as_ref().map(|a| a.context_limit).unwrap_or(0);
         let mut state = ComposerState::default();
@@ -1116,8 +1058,7 @@ impl BridgeCore {
         state.model = model;
         state.context_tokens = context_tokens;
         state.context_limit = context_limit;
-        // B 组本地化（WebView 移除：mode 乐观缓存、权限级读 config.load
-        // 缓存、queue 本地无排队概念恒空、反馈由直发层写入）。
+        // Mode and feedback are UI-local; permission comes from config.load.
         state.mode = self
             .composer_mode
             .lock()
@@ -1140,24 +1081,15 @@ impl BridgeCore {
         (state, rev)
     }
 
-    /// 置位 composer 直连模式（Web 注入 `composerDirect` flag 后调用）。
-    /// A 组字段改由 conversation 事件解析；B 组投影照常（sendAck 驱动的
-    /// 悲观清空语义不变，Web 投影代码零改动）。
-    pub fn set_composer_direct(&self) {
-        self.composer_direct.store(true, Ordering::Relaxed);
-        log_diag("composer direct mode: enabled");
-    }
-
     // ── 原生 ChatView（conversation 事件直连）──────────────────────
 
     /// (事件队列快照, rev)：UI 线程 timer 比对 rev 后 drain 喂 Transcript。
-    /// 事件为 wire JSON（`{"type":...}`），消费方用
-    /// `chat_adapter::internal_event` 反序列化为渲染协议。
+    /// Events stay typed through the queue and are mapped once to view models.
     ///
     /// **按活动会话隔离**：只返回 `seed == active_seed` 的事件；非活动
     /// 会话的事件在此丢弃（切换瞬间的残留事件不会污染新会话的
     /// Transcript；切回时由权威快照 + 切回后的增量补齐）。
-    pub fn chat_drain(&self) -> (Vec<serde_json::Value>, u64) {
+    pub fn chat_drain(&self) -> (Vec<RingingEvent>, u64) {
         let rev = self.chat_rev.load(Ordering::Relaxed);
         let active = self.active_seed();
         let events = self
@@ -1171,11 +1103,11 @@ impl BridgeCore {
         (events, rev)
     }
 
-    /// 查看最近一次 timeline 快照（`(seed, TimelineSnapshot JSON)`；resume
+    /// 查看最近一次 timeline 快照（`(seed, TimelineSnapshot)`；resume
     /// 历史数据源）。**peek 语义**：不消费——seed 校验失败的快照保留在缓存，
     /// 等新快照覆盖或调用方主动重拉，避免"take 即弃"导致快照永久丢失后
     /// ChatView 永远停在"加载会话…"。
-    pub fn chat_timeline_peek(&self) -> Option<(String, serde_json::Value)> {
+    pub fn chat_timeline_peek(&self) -> Option<(String, TimelineSnapshot)> {
         self.chat_timeline
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1184,15 +1116,12 @@ impl BridgeCore {
 
     /// 消费当前快照（仅调用方确认 `seed == active_seed` 后调用）。
     pub fn chat_timeline_consume(&self) {
-        *self
-            .chat_timeline
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self.chat_timeline.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// 分页：drain 更早回合页（`(seed, TimelineSnapshot JSON)` 队列，按
     /// active_seed 过滤——与 `chat_drain` 同隔离语义）。
-    pub fn chat_prepend_drain(&self) -> Vec<(String, serde_json::Value)> {
+    pub fn chat_prepend_drain(&self) -> Vec<(String, TimelineSnapshot)> {
         let active = self.active_seed();
         self.chat_prepend
             .lock()
@@ -1242,17 +1171,13 @@ impl BridgeCore {
                 }
             };
             match client.fetch_timeline_page(&seed, Some(&before_turn), None).await {
-                Ok(body) => {
-                    let has_more = body
-                        .get("has_more")
-                        .and_then(|h| h.as_bool())
-                        .unwrap_or(false);
+                Ok(page) => {
+                    let has_more = page.has_more;
                     core.timeline_has_more
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(seed.clone(), has_more);
-                    let inner = body.get("snapshot").cloned().unwrap_or(body);
-                    let turns = chat_adapter::timeline_turns(&inner);
+                    let turns = chat_adapter::restored_turns(&page.snapshot);
                     if turns.is_empty() {
                         // 防御：空页（会话已删/竞态）——视为到底，不再翻页。
                         core.timeline_has_more
@@ -1263,7 +1188,7 @@ impl BridgeCore {
                         core.chat_prepend
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .push_back((seed.clone(), inner));
+                            .push_back((seed.clone(), page.snapshot));
                         core.chat_rev.fetch_add(1, Ordering::Relaxed);
                         log_diag(&format!(
                             "fetch_earlier {seed}: page before {before_turn} ({} turns, has_more={has_more})",
@@ -1291,12 +1216,8 @@ impl BridgeCore {
     ///   `{"watermark", "turns"}`）。缓存子对象——消费方
     ///   `chat_adapter::timeline_turns` 直接读顶层 `turns`；缓存完整 body
     ///   则解析恒空 → restore 空历史 → ChatView 恢复后仍空白。
-    fn cache_timeline_snapshot(&self, snapshot: Value) {
-        let seed = snapshot
-            .get("seed")
-            .and_then(|s| s.as_str())
-            .map(str::to_string)
-            .unwrap_or_default();
+    fn cache_timeline_snapshot(&self, page: TimelinePage) {
+        let seed = page.seed.clone();
         let seed = if seed.is_empty() {
             // 防御：client 已校验 seed 字段存在，缺失时回退旧标记。
             self.last_timeline_seed
@@ -1309,29 +1230,24 @@ impl BridgeCore {
         // 分页元数据：完整响应 body 顶层 has_more（true = 还有更早回合，
         // ChatView 上滚翻页依据）。快照缓存整体替换时同步更新。必须在
         // inner 解包**之前**读取——unwrap_or 会 move snapshot。
-        let has_more = snapshot
-            .get("has_more")
-            .and_then(|h| h.as_bool())
-            .unwrap_or(false);
-        let inner = snapshot.get("snapshot").cloned().unwrap_or(snapshot);
+        let has_more = page.has_more;
+        let snapshot = page.snapshot;
         self.timeline_has_more
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(seed.clone(), has_more);
-        *self
-            .chat_timeline
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some((seed.clone(), inner.clone()));
+        *self.chat_timeline.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((seed.clone(), snapshot.clone()));
         self.chat_rev.fetch_add(1, Ordering::Relaxed);
         // 标题栏直连：turns 计数在此缓存（不随 chat_view consume 清空）
         // ——undo_disabled 判定源。
-        let turns = chat_adapter::timeline_turns(&inner).len();
+        let turns = chat_adapter::restored_turns(&snapshot).len();
         self.header_turns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(seed.clone(), turns);
         // 撤销直发：快照恢复的历史会话缓存最近回合 id。
-        if let Some(tid) = chat_adapter::timeline_turns(&inner)
+        if let Some(tid) = chat_adapter::restored_turns(&snapshot)
             .last()
             .map(|t| t.turn_id.clone())
         {
@@ -1340,9 +1256,7 @@ impl BridgeCore {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(seed.clone(), tid);
         }
-        if self.header_direct.load(Ordering::Relaxed) {
-            self.refresh_header();
-        }
+        self.refresh_header();
     }
 
     /// 主动重拉指定 seed 的 timeline 快照（快照 seed 不匹配时的恢复路径）。
@@ -1372,32 +1286,6 @@ impl BridgeCore {
                 log_diag(&format!("timeline refresh {seed}: activate failed: {err}"));
             }
         });
-    }
-
-    /// 置位 ChatView 直连模式（Web 注入 `chatDirect` flag 时调用；幂等）。
-    /// 默认已开启（ChatView 原生迁移完成）；保留此入口供回退切换。
-    pub fn set_chat_direct(&self) {
-        self.chat_direct.store(true, Ordering::Relaxed);
-        log_diag("chat direct mode: enabled");
-    }
-
-    /// Web `shell.setComposer` 载荷落缓存并递增 rev。
-    /// 反序列化失败时保留旧状态（静默丢弃坏载荷，不中断链路）。
-    /// 直连模式（默认）整体忽略——A/B 组均由 Rust 直连组装
-    /// （A：conversation 事件；B：本地 mode/queue 缓存 + settings 权限级），
-    /// Web 投影必然过时，接受会覆盖直连状态（双源竞态）。
-    pub fn apply_composer(&self, payload: Value) {
-        if self.composer_direct.load(Ordering::Relaxed) {
-            log_diag("apply_composer: direct mode active, ignoring Web projection");
-            return;
-        }
-        let Ok(state) = serde_json::from_value::<ComposerState>(payload) else {
-            log_diag("apply_composer: invalid payload, keeping previous state");
-            return;
-        };
-        let mut cur = self.composer.lock().unwrap_or_else(|e| e.into_inner());
-        *cur = state;
-        self.composer_rev.fetch_add(1, Ordering::Relaxed);
     }
 
     // ── XAML goalBar（dashboard 投影，control 事件驱动）─────────────
@@ -1456,14 +1344,14 @@ impl BridgeCore {
                 return;
             }
         };
-        let list = match client.query("session.list", json!({})).await {
+        let list = match client.query(QueryRequest::SessionList).await {
             Ok(v) => v,
             Err(err) => {
                 log_diag(&format!("refresh_sessions: session.list failed: {err}"));
                 return;
             }
         };
-        let acts = match client.query("session.activity", json!({})).await {
+        let acts = match client.query(QueryRequest::SessionActivity).await {
             Ok(v) => v,
             Err(err) => {
                 log_diag(&format!("refresh_sessions: session.activity failed: {err}"));
@@ -1478,8 +1366,7 @@ impl BridgeCore {
             for v in arr {
                 let seed = v.get("seed").and_then(|s| s.as_str()).unwrap_or("");
                 let running = v.get("running").and_then(|r| r.as_bool()).unwrap_or(false);
-                if let Some(item) =
-                    project_session_meta(v, activities.get(seed).copied(), running)
+                if let Some(item) = project_session_meta(v, activities.get(seed).copied(), running)
                 {
                     items.push(item);
                 }
@@ -1490,12 +1377,13 @@ impl BridgeCore {
         self.session_rev.fetch_add(1, Ordering::Relaxed);
         log_diag(&format!(
             "refresh_sessions: {} sessions",
-            self.sessions.lock().unwrap_or_else(|e| e.into_inner()).len()
+            self.sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len()
         ));
         // 标题栏直连：会话列表刷新后 title 可能变化（重命名/首轮摘要）。
-        if self.header_direct.load(Ordering::Relaxed) {
-            self.refresh_header();
-        }
+        self.refresh_header();
     }
 
     // ── XAML Info 面板（bootstrap conversation.state 投影）─────────────
@@ -1536,13 +1424,7 @@ impl BridgeCore {
                 return;
             }
         };
-        let Some(state) = bootstrap
-            .get("conversation")
-            .and_then(|c| c.get("state"))
-        else {
-            log_diag("refresh_info: conversation.state missing, keeping previous");
-            return;
-        };
+        let state = &bootstrap.conversation.state;
         *self.info.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(parse_conversation_state(state));
         self.info_rev.fetch_add(1, Ordering::Relaxed);
@@ -1564,14 +1446,13 @@ impl BridgeCore {
             // 先刷新拿基线，避免"空列表时把旧会话当新会话"。
             core.refresh_sessions_inner().await;
             let before = core.seed_set();
-            let command_id = core.next_command_id();
             match client
-                .command(
-                    Channel::Control,
+                .send_command(
                     None,
-                    command_id,
-                    json!({ "type": "session_create", "close_current": false }),
-                    None,
+                    RingingCommand::Control(ControlCommand::SessionCreate {
+                        close_current: false,
+                    }),
+                    CommandOptions::default(),
                 )
                 .await
             {
@@ -1607,13 +1488,6 @@ impl BridgeCore {
             self.navigate("chat", Some(seed));
             return;
         }
-        // active_seed 写入仲裁置位：目标达成前，apply_header 忽略 Web 投影
-        // 的旧 seed——0px WebView 双 seed 竞争（Web 旧会话投影覆盖 resume
-        // 目标 → 快照 seed 不匹配被丢弃 → ChatView 永久"加载会话…"）。
-        *self
-            .resume_target
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(seed.to_string());
         let core = self.self_arc();
         let seed = seed.to_string();
         let _ = deepx_client::runtime_handle().spawn(async move {
@@ -1646,9 +1520,6 @@ impl BridgeCore {
             core.session_rev.fetch_add(1, Ordering::Relaxed);
             log_diag(&format!("resume: attached {seed}"));
             core.navigate("chat", Some(&seed));
-            // 注意：resume_target 不在本处清除——Web 尚未跟随 navigate 时
-            // 投影的旧 seed 仍会覆盖 active_seed；由 apply_header 在 Web
-            // 投影 seed 与目标一致时解除仲裁（壳主导：侧栏最后点击优先）。
         });
     }
 
@@ -1679,14 +1550,11 @@ impl BridgeCore {
                     return;
                 }
             };
-            let command_id = core.next_command_id();
             match client
-                .command(
-                    Channel::Control,
-                    Some(seed.clone()),
-                    command_id,
-                    json!({ "type": "session_archive", "seed": seed }),
-                    None,
+                .send_command(
+                    Some(&seed),
+                    RingingCommand::Control(ControlCommand::SessionArchive { seed: seed.clone() }),
+                    CommandOptions::default(),
                 )
                 .await
             {
@@ -1717,14 +1585,13 @@ impl BridgeCore {
                     return;
                 }
             };
-            let command_id = core.next_command_id();
             match client
-                .command(
-                    Channel::Control,
-                    Some(seed.clone()),
-                    command_id,
-                    json!({ "type": "session_unarchive", "seed": seed }),
-                    None,
+                .send_command(
+                    Some(&seed),
+                    RingingCommand::Control(ControlCommand::SessionUnarchive {
+                        seed: seed.clone(),
+                    }),
+                    CommandOptions::default(),
                 )
                 .await
             {
@@ -1751,14 +1618,11 @@ impl BridgeCore {
                     return;
                 }
             };
-            let command_id = core.next_command_id();
             match client
-                .command(
-                    Channel::Control,
-                    Some(seed.clone()),
-                    command_id,
-                    json!({ "type": "session_delete", "seed": seed }),
-                    None,
+                .send_command(
+                    Some(&seed),
+                    RingingCommand::Control(ControlCommand::SessionDelete { seed: seed.clone() }),
+                    CommandOptions::default(),
                 )
                 .await
             {
@@ -1778,7 +1642,11 @@ impl BridgeCore {
 
     /// (snapshot, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新。
     pub fn skills_snapshot(&self) -> (Option<SkillsSnapshot>, u64) {
-        let snap = self.skills.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let snap = self
+            .skills
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let rev = self.skills_rev.load(Ordering::Relaxed);
         (snap, rev)
     }
@@ -1793,7 +1661,10 @@ impl BridgeCore {
 
     /// 后端是否已连接（daemon 就绪且 client 建立）。开屏覆盖层显隐依据。
     pub fn backend_connected(&self) -> bool {
-        self.client.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     /// 无缓存时向 daemon 拉一次权威快照（进入技能页首次渲染兜底）。
@@ -1801,7 +1672,12 @@ impl BridgeCore {
     /// 正常路径下 `skills_updated` 事件持续推送（事件即完整快照），无需
     /// 主动拉取；兜底覆盖“事件在页面挂载前已推送”的窗口。
     pub fn ensure_skills(&self) {
-        if self.skills.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        if self
+            .skills
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
             return;
         }
         let core = self.self_arc();
@@ -1819,7 +1695,7 @@ impl BridgeCore {
             }
             match client.bootstrap(&seed).await {
                 Ok(snapshot) => {
-                    if let Some(skills) = snapshot.get("control").and_then(|c| c.get("skills")) {
+                    if let Some(skills) = snapshot.control.state.get("skills") {
                         let mut snap = parse_skills_payload(skills);
                         snap.seed = seed;
                         core.skills
@@ -1865,14 +1741,16 @@ impl BridgeCore {
                 .as_ref()
                 .map(|s| s.operation_revision)
                 .unwrap_or(0);
-            let params = json!({
-                "seed": seed,
-                "operationId": core.next_command_id(),
-                "action": action,
-                "name": name,
-                "expectedRevision": revision,
-            });
-            match client.action("skills.operation", params).await {
+            match client
+                .action(ActionRequest::SkillsOperation {
+                    seed,
+                    operation_id: core.next_command_id(),
+                    action: action.clone(),
+                    name: name.clone(),
+                    expected_revision: revision,
+                })
+                .await
+            {
                 Ok(_) => log_diag(&format!("skill operation {action} {name}: ok")),
                 Err(err) => log_diag(&format!("skill operation {action} {name}: failed: {err}")),
             }
@@ -1895,7 +1773,7 @@ impl BridgeCore {
                 log_diag("skill reload: no active session");
                 return;
             }
-            match client.action("skills.reload", json!({ "seed": seed })).await {
+            match client.action(ActionRequest::SkillsReload { seed }).await {
                 Ok(_) => log_diag("skill reload: ok"),
                 Err(err) => log_diag(&format!("skill reload: failed: {err}")),
             }
@@ -1906,7 +1784,11 @@ impl BridgeCore {
 
     /// (snapshot, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新。
     pub fn settings_snapshot(&self) -> (Option<SettingsSnapshot>, u64) {
-        let snap = self.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let snap = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let rev = self.settings_rev.load(Ordering::Relaxed);
         (snap, rev)
     }
@@ -1922,20 +1804,16 @@ impl BridgeCore {
         (proj, rev)
     }
 
-    /// Web `shell.setSettings` 载荷落缓存并递增 rev（坏载荷静默丢弃）。
-    pub fn apply_settings_projection(&self, payload: Value) {
-        let Ok(proj) = serde_json::from_value(payload) else {
-            log_diag("apply_settings_projection: invalid payload, keeping previous state");
-            return;
-        };
-        *self.settings_proj.lock().unwrap_or_else(|e| e.into_inner()) = proj;
-        self.settings_proj_rev.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// 拉取 `config.load` + `skills.list_tools` → 投影进缓存 → rev++。
     /// 幂等：仅缓存为空或 `force` 时执行（进入设置页首次渲染兜底）。
     pub fn spawn_config_load(&self, force: bool) {
-        if !force && self.settings.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        if !force
+            && self
+                .settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        {
             return;
         }
         let core = self.self_arc();
@@ -1947,7 +1825,7 @@ impl BridgeCore {
                     return;
                 }
             };
-            let config = match client.query("config.load", json!({})).await {
+            let config = match client.query(QueryRequest::ConfigLoad).await {
                 Ok(v) => v,
                 Err(err) => {
                     log_diag(&format!("config.load failed: {err}"));
@@ -1956,14 +1834,14 @@ impl BridgeCore {
             };
             let mut snap = parse_config_load(&config);
             // workspace.status 与 config.load 并行（独立查询，失败不阻塞）。
-            if let Ok(status) = client.query("workspace.status", json!({})).await {
+            if let Ok(status) = client.query(QueryRequest::WorkspaceStatus).await {
                 let (cfg, active, endpoint) = parse_workspace_status(&status);
                 snap.workspace_configured_mode = cfg;
                 snap.workspace_active_mode = active;
                 snap.workspace_endpoint = endpoint;
             }
             // 工具列表（subagent 勾选项）；失败不阻塞（页面显示空列表）。
-            if let Ok(tools) = client.query("skills.list_tools", json!({})).await {
+            if let Ok(tools) = client.query(QueryRequest::SkillsListTools).await {
                 snap.tools = parse_tools(&tools);
             }
             *core.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
@@ -1983,7 +1861,7 @@ impl BridgeCore {
                     return;
                 }
             };
-            match client.action("config.save", fields).await {
+            match client.action(ActionRequest::ConfigSave { fields }).await {
                 Ok(_) => log_diag("config.save: ok"),
                 Err(err) => log_diag(&format!("config.save failed: {err}")),
             }
@@ -2001,7 +1879,7 @@ impl BridgeCore {
                     return;
                 }
             };
-            match client.action("profile.apply", json!({ "name": name })).await {
+            match client.action(ActionRequest::ProfileApply { name }).await {
                 Ok(_) => log_diag("profile.apply: ok"),
                 Err(err) => log_diag(&format!("profile.apply failed: {err}")),
             }
@@ -2019,7 +1897,10 @@ impl BridgeCore {
                     return;
                 }
             };
-            match client.action("profile.save_current", json!({ "name": name })).await {
+            match client
+                .action(ActionRequest::ProfileSaveCurrent { name })
+                .await
+            {
                 Ok(_) => log_diag("profile.save_current: ok"),
                 Err(err) => log_diag(&format!("profile.save_current failed: {err}")),
             }
@@ -2037,7 +1918,7 @@ impl BridgeCore {
                     return;
                 }
             };
-            match client.action("profile.delete", json!({ "name": name })).await {
+            match client.action(ActionRequest::ProfileDelete { name }).await {
                 Ok(_) => log_diag("profile.delete: ok"),
                 Err(err) => log_diag(&format!("profile.delete failed: {err}")),
             }
@@ -2056,7 +1937,9 @@ impl BridgeCore {
                 }
             };
             match client
-                .action("config.set_permission_level", json!({ "level": level }))
+                .action(ActionRequest::ConfigSetPermissionLevel {
+                    level: level.clone(),
+                })
                 .await
             {
                 Ok(_) => log_diag(&format!("set_permission {level}: ok")),
@@ -2070,7 +1953,7 @@ impl BridgeCore {
     /// conversation 频道命令直发（cancel/compact/set_mode 等）。
     /// ack 仅表示 accepted；业务结果经事件流（causation_id）返回。
     /// 失败只记日志（对齐 Web：错误 toast 由调用方本地判定，不阻塞 UI）。
-    pub fn spawn_conversation_command(&self, command: Value) {
+    pub fn spawn_conversation_command(&self, command: ConversationCommand) {
         let core = self.self_arc();
         let _ = deepx_client::runtime_handle().spawn(async move {
             let client = match core.ensure_client().await {
@@ -2082,12 +1965,10 @@ impl BridgeCore {
             };
             let seed = core.active_seed();
             match client
-                .command(
-                    Channel::Conversation,
-                    Some(seed),
-                    core.next_command_id(),
-                    command,
-                    None,
+                .send_command(
+                    Some(&seed),
+                    RingingCommand::Conversation(command),
+                    CommandOptions::default(),
                 )
                 .await
             {
@@ -2115,57 +1996,38 @@ impl BridgeCore {
                 }
             };
             let seed = core.active_seed();
-            let mut attachments: Vec<Value> = Vec::new();
+            let mut attachments = Vec::new();
             for att in &image_paths {
                 match std::fs::read(&att.path) {
-                    Ok(bytes) => {
-                        match client
-                            .upload_content(&seed, &att.mime_type, bytes)
-                            .await
-                        {
-                            Ok(cr) => attachments.push(json!({
-                                "content_id": cr.content_id,
-                                "media_type": cr.media_type,
-                                "sha256": cr.sha256,
-                                "truncated": cr.truncated,
-                            })),
-                            Err(err) => log_diag(&format!(
-                                "send: upload {} failed: {err}",
-                                att.file_name
-                            )),
+                    Ok(bytes) => match client.upload_content(&seed, &att.mime_type, bytes).await {
+                        Ok(content_ref) => attachments.push(content_ref),
+                        Err(err) => {
+                            log_diag(&format!("send: upload {} failed: {err}", att.file_name))
                         }
-                    }
+                    },
                     Err(err) => log_diag(&format!("send: read {} failed: {err}", att.path)),
                 }
             }
             for tf in &text_files {
                 match std::fs::read(&tf.path) {
                     Ok(bytes) => match client.upload_content(&seed, "text/plain", bytes).await {
-                        Ok(cr) => attachments.push(json!({
-                            "content_id": cr.content_id,
-                            "media_type": cr.media_type,
-                            "sha256": cr.sha256,
-                            "truncated": cr.truncated,
-                        })),
-                        Err(err) => log_diag(&format!(
-                            "send: upload {} failed: {err}",
-                            tf.file_name
-                        )),
+                        Ok(content_ref) => attachments.push(content_ref),
+                        Err(err) => {
+                            log_diag(&format!("send: upload {} failed: {err}", tf.file_name))
+                        }
                     },
                     Err(err) => log_diag(&format!("send: read {} failed: {err}", tf.path)),
                 }
             }
-            let mut command = json!({ "type": "conversation_send_message", "text": text });
-            if !attachments.is_empty() {
-                command["attachments"] = json!(attachments);
-            }
             match client
-                .command(
-                    Channel::Conversation,
-                    Some(seed),
-                    core.next_command_id(),
-                    command,
-                    None,
+                .send_command(
+                    Some(&seed),
+                    RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+                        text,
+                        images: vec![],
+                        attachments: (!attachments.is_empty()).then_some(attachments),
+                    }),
+                    CommandOptions::default(),
                 )
                 .await
             {
@@ -2225,52 +2087,57 @@ impl BridgeCore {
                     .to_string()
             };
             let gb = |k: &str| params.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-            // method → (频道, envelope)。serde tag 对齐 deepx-domain。
-            let (channel, envelope) = match method.as_str() {
-                "interaction.permission" => (
-                    Channel::Tool,
-                    json!({
-                        "type": "tool_permission_respond",
-                        "tool_call_id": gs("toolCallId"),
-                        "approved": gb("approved"),
-                        "trust_folder": gb("trustFolder"),
-                    }),
-                ),
-                "interaction.ask_response" => (
-                    Channel::Control,
-                    json!({
-                        "type": "interaction_ask_respond",
-                        "interaction_id": gs("askId"),
-                        "answers": params.get("answers").cloned().unwrap_or_else(|| json!([])),
-                    }),
-                ),
-                "interaction.ask_dismiss" => (
-                    Channel::Control,
-                    json!({
-                        "type": "interaction_ask_dismiss",
-                        "interaction_id": gs("askId"),
-                    }),
-                ),
-                "interaction.plan_review" => (
-                    Channel::Control,
-                    json!({
-                        "type": "plan_review_respond",
-                        "interaction_id": gs("callId"),
-                        "approved": gb("approved"),
-                        "message": params
+            let command = match method.as_str() {
+                "interaction.permission" => {
+                    RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+                        tool_call_id: gs("toolCallId"),
+                        approved: gb("approved"),
+                        trust_folder: gb("trustFolder"),
+                    })
+                }
+                "interaction.ask_response" => {
+                    let answers = params
+                        .get("answers")
+                        .cloned()
+                        .map(serde_json::from_value::<Vec<DomainAskAnswer>>)
+                        .transpose();
+                    let answers = match answers {
+                        Ok(Some(answers)) => answers,
+                        Ok(None) => Vec::new(),
+                        Err(error) => {
+                            log_diag(&format!("{method}: invalid typed answers: {error}"));
+                            return;
+                        }
+                    };
+                    RingingCommand::Control(ControlCommand::InteractionAskRespond {
+                        interaction_id: gs("askId"),
+                        answers,
+                    })
+                }
+                "interaction.ask_dismiss" => {
+                    RingingCommand::Control(ControlCommand::InteractionAskDismiss {
+                        interaction_id: gs("askId"),
+                    })
+                }
+                "interaction.plan_review" => {
+                    RingingCommand::Control(ControlCommand::PlanReviewRespond {
+                        interaction_id: gs("callId"),
+                        approved: gb("approved"),
+                        message: params
                             .get("message")
                             .and_then(|v| v.as_str())
-                            .filter(|m| !m.is_empty()),
-                        "autonomous": gb("autonomous"),
-                    }),
-                ),
+                            .filter(|message| !message.is_empty())
+                            .map(str::to_string),
+                        autonomous: gb("autonomous"),
+                    })
+                }
                 _ => {
                     log_diag(&format!("{method}: unknown interaction method"));
                     return;
                 }
             };
             match client
-                .command(channel, seed, core.next_command_id(), envelope, None)
+                .send_command(seed.as_deref(), command, CommandOptions::default())
                 .await
             {
                 Ok(_) => log_diag(&format!("{method}: accepted")),
@@ -2292,7 +2159,7 @@ impl BridgeCore {
             };
             let seed = core.active_seed();
             match client
-                .query("workspace.set", json!({ "seed": seed, "path": path }))
+                .action(ActionRequest::WorkspaceSet { seed, path })
                 .await
             {
                 Ok(_) => log_diag("workspace.set: ok"),
@@ -2304,15 +2171,14 @@ impl BridgeCore {
     /// 会话工作模式切换：`conversation_set_mode` 命令 + 本地 mode 缓存
     /// （乐观更新——daemon 无 mode 领域事件，对齐 Web 单例 mode 语义）。
     pub fn spawn_set_mode(&self, mode: &str) {
-        *self
-            .composer_mode
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = mode.to_string();
+        *self.composer_mode.lock().unwrap_or_else(|e| e.into_inner()) = mode.to_string();
         self.composer_rev.fetch_add(1, Ordering::Relaxed);
-        self.spawn_conversation_command(json!({
-            "type": "conversation_set_mode",
-            "mode": mode,
-        }));
+        let mode = match mode {
+            "plan" => ConversationMode::Plan,
+            "code" => ConversationMode::Code,
+            _ => ConversationMode::Normal,
+        };
+        self.spawn_conversation_command(ConversationCommand::ConversationSetMode { mode });
     }
 
     /// 撤销上一回合：`conversation_undo_turn`（turn_id 来自 per-seed 缓存，
@@ -2329,10 +2195,7 @@ impl BridgeCore {
             log_diag("undo: no last turn id cached");
             return;
         };
-        self.spawn_conversation_command(json!({
-            "type": "conversation_undo_turn",
-            "turn_id": turn_id,
-        }));
+        self.spawn_conversation_command(ConversationCommand::ConversationUndoTurn { turn_id });
     }
 
     /// 工作区运行模式切换：`workspace.set_mode`（backend.restart 未实现，
@@ -2348,7 +2211,10 @@ impl BridgeCore {
                     return;
                 }
             };
-            match client.action("workspace.set_mode", json!({ "mode": mode })).await {
+            match client
+                .action(ActionRequest::WorkspaceSetMode { mode: mode.clone() })
+                .await
+            {
                 Ok(_) => log_diag(&format!("workspace.set_mode {mode}: ok")),
                 Err(err) => log_diag(&format!("workspace.set_mode {mode}: failed: {err}")),
             }
@@ -2366,10 +2232,15 @@ impl BridgeCore {
                     return;
                 }
             };
-            match client.query("workspace.status", json!({})).await {
+            match client.query(QueryRequest::WorkspaceStatus).await {
                 Ok(status) => {
                     let (cfg, active, endpoint) = parse_workspace_status(&status);
-                    if let Some(snap) = core.settings.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    if let Some(snap) = core
+                        .settings
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                    {
                         snap.workspace_configured_mode = cfg;
                         snap.workspace_active_mode = active;
                         snap.workspace_endpoint = endpoint;
@@ -2392,7 +2263,7 @@ impl BridgeCore {
                     return;
                 }
             };
-            match client.query("workspace.diagnose", json!({})).await {
+            match client.query(QueryRequest::WorkspaceDiagnose).await {
                 Ok(v) => log_diag(&format!("workspace.diagnose: {v}")),
                 Err(err) => log_diag(&format!("workspace.diagnose failed: {err}")),
             }
@@ -2410,7 +2281,7 @@ impl BridgeCore {
                     return;
                 }
             };
-            match client.action("workspace.install_wsl", json!({})).await {
+            match client.action(ActionRequest::WorkspaceInstallWsl).await {
                 Ok(_) => log_diag("workspace.install_wsl: ok"),
                 Err(err) => log_diag(&format!("workspace.install_wsl failed: {err}")),
             }
@@ -2438,14 +2309,13 @@ impl BridgeCore {
             };
             core.refresh_sessions_inner().await;
             let before = core.seed_set();
-            let command_id = core.next_command_id();
             match client
-                .command(
-                    Channel::Control,
+                .send_command(
                     None,
-                    command_id,
-                    json!({ "type": "session_create", "close_current": false }),
-                    None,
+                    RingingCommand::Control(ControlCommand::SessionCreate {
+                        close_current: false,
+                    }),
+                    CommandOptions::default(),
                 )
                 .await
             {
@@ -2470,12 +2340,16 @@ impl BridgeCore {
                     }
                     core.set_active_seed(&seed);
                     if let Err(err) = client
-                        .command(
-                            Channel::Conversation,
-                            Some(seed.clone()),
-                            core.next_command_id(),
-                            json!({ "type": "conversation_send_message", "text": text }),
-                            None,
+                        .send_command(
+                            Some(&seed),
+                            RingingCommand::Conversation(
+                                ConversationCommand::ConversationSendMessage {
+                                    text,
+                                    images: vec![],
+                                    attachments: None,
+                                },
+                            ),
+                            CommandOptions::default(),
                         )
                         .await
                     {
@@ -2495,18 +2369,13 @@ impl BridgeCore {
     /// 同步更新壳侧 `current_view`——XAML 视图族据此接管/让出 skills 视图
     /// （main.rs 内容区同 cell 重叠 + opacity 切换，见 WORKFLOW §8）。
     pub fn navigate(&self, view: &str, seed: Option<&str>) {
-        *self
-            .current_view
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = view.to_string();
+        *self.current_view.lock().unwrap_or_else(|e| e.into_inner()) = view.to_string();
         // WebView 移除：不再 emit shell.navigate（视图切换壳本地持有）。
         if let Some(seed) = seed {
             self.set_active_seed(seed);
         }
         // 标题栏直连：view 变化立即刷新（不再等 Web setHeader 回推）。
-        if self.header_direct.load(Ordering::Relaxed) {
-            self.refresh_header();
-        }
+        self.refresh_header();
     }
 
     /// Lazily connect the deepx-client and register event forwarding.
@@ -2525,7 +2394,12 @@ impl BridgeCore {
     /// 重建永远返回 "client is rebuilding" 失败，client 被 close 后无法
     /// 恢复，所有请求（config.load/session.list/attach）连接失败。
     async fn connect_client(&self) -> Result<Client, String> {
-        if let Some(client) = self.client.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        if let Some(client) = self
+            .client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
             return Ok(client);
         }
         // 连接互斥：renderer 秒开后首屏多个 invoke（backend.connect + 会话
@@ -2569,7 +2443,7 @@ impl BridgeCore {
                 }),
                 on_timeline_snapshot: Arc::new({
                     let core = self.self_arc();
-                    move |snapshot: Value| {
+                    move |snapshot: TimelinePage| {
                         // 原生 ChatView：缓存权威 turns 历史（resume 数据源）。
                         // seed 标记与层级解包见 `cache_timeline_snapshot`——
                         // 从快照 body 顶层读权威 seed，缓存 `snapshot` 子对象。
@@ -2600,7 +2474,12 @@ impl BridgeCore {
         let deadline = Instant::now() + CONNECT_WAIT_TIMEOUT;
         loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            if let Some(client) = self.client.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            if let Some(client) = self
+                .client
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
                 return Ok(client);
             }
             if !self.connecting.load(Ordering::Acquire) {
@@ -2628,10 +2507,7 @@ impl BridgeCore {
             match client.bootstrap(&reset.seed).await {
                 // WebView 移除：bootstrap 结果不再 emit（壳由事件流自愈）。
                 Ok(_snapshot) => {}
-                Err(err) => log_diag(&format!(
-                    "reset: bootstrap {} failed: {err}",
-                    reset.seed
-                )),
+                Err(err) => log_diag(&format!("reset: bootstrap {} failed: {err}", reset.seed)),
             }
         });
     }
@@ -2644,7 +2520,10 @@ impl BridgeCore {
             let mut skills_changed = false;
             let mut list_changed = false;
             for env in &batch.envelopes {
-                if let Some((seed, state)) = parse_activity_event(&env.event) {
+                let RingingEvent::Control(event) = &env.event else {
+                    continue;
+                };
+                if let Some((seed, state)) = activity_event(event) {
                     self.activities
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -2657,7 +2536,7 @@ impl BridgeCore {
                 }
                 // XAML 技能页：skills_updated 携带完整 SkillsStatus 载荷，
                 // 直接缓存为权威快照（含 seed，batch.seed 兜底）。
-                if let Some(mut snap) = parse_skills_event(&env.event) {
+                if let Some(mut snap) = skills_event(event) {
                     if snap.seed.is_empty() {
                         snap.seed = batch.seed.clone();
                     }
@@ -2670,22 +2549,17 @@ impl BridgeCore {
                 // 会话生命周期变更（created/archived/unarchived/deleted）：
                 // 归档/删除/新建不再依赖 500ms 轮询，事件到达即全量刷新。
                 // （发起方命令成功后的主动 refresh 保留，作为快速路径。）
-                if parse_session_state_event(&env.event).is_some() {
+                if session_state_event(event).is_some() {
                     list_changed = true;
                 }
                 // XAML composer goalBar：dashboard_snapshot 携带完整
                 // DashboardSnapshot 载荷（tasks/recent_edits/current_todo_id），
                 // 直接缓存为权威快照（终局架构：Web 移除后 XAML 直消费）。
-                if let Some(snap) = parse_dashboard_event(&env.event) {
+                if let Some(snap) = dashboard_event(event) {
                     self.apply_dashboard(snap);
                 }
-                // Rust 直连交互队列（读路径直连）：control 频道 ask/plan
-                // 事件直接组装 InteractionState，不经 WebView。仅直连模式
-                // 挂载（flag 关 → 回退 Web 投影，状态单一数据源不变）。
-                if self.interaction_direct.load(Ordering::Relaxed) {
-                    if let Some(ev) = parse_interaction_event(&env.event) {
-                        self.apply_interaction_event(&batch.seed, ev);
-                    }
+                if let Some(ev) = interaction_event(event) {
+                    self.apply_interaction_event(&batch.seed, ev);
                 }
             }
             if changed {
@@ -2712,11 +2586,12 @@ impl BridgeCore {
         } else if batch.channel == Channel::Tool {
             // Rust 直连交互队列（读路径直连）：tool 频道权限请求
             // （permission 优先于 ask/plan，对齐 Web pendingInteractions 组装）。
-            if self.interaction_direct.load(Ordering::Relaxed) {
-                for env in &batch.envelopes {
-                    if let Some(ev) = parse_tool_permission_event(&env.event) {
-                        self.apply_tool_permission_event(&batch.seed, ev);
-                    }
+            for env in &batch.envelopes {
+                let RingingEvent::Tool(event) = &env.event else {
+                    continue;
+                };
+                if let Some(ev) = tool_permission_event(event) {
+                    self.apply_tool_permission_event(&batch.seed, ev);
                 }
             }
             // 原生 ChatView 直连：Tool 频道渲染事件（tool_call_prepared /
@@ -2724,22 +2599,17 @@ impl BridgeCore {
             // 供 Transcript 流式渲染工具卡。与 conversation 频道事件交错
             // 到达无顺序保证——round_renderer 按 turn/round 定位 + 自动建
             // turn 兜底，不依赖频道间顺序。
-            if self.chat_direct.load(Ordering::Relaxed) {
-                let mut queue = self
-                    .chat_events
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                let mut pushed = false;
-                for env in &batch.envelopes {
-                    if chat_adapter::internal_event(&env.event).is_some() {
-                        // seed 标记：drain 侧按 active_seed 过滤（会话隔离）。
-                        queue.push_back((batch.seed.clone(), env.event.clone()));
-                        pushed = true;
-                    }
+            let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pushed = false;
+            for env in &batch.envelopes {
+                if chat_adapter::render_event(&env.event).is_some() {
+                    // seed 标记：drain 侧按 active_seed 过滤（会话隔离）。
+                    queue.push_back((batch.seed.clone(), env.event.clone()));
+                    pushed = true;
                 }
-                if pushed {
-                    self.chat_rev.fetch_add(1, Ordering::Relaxed);
-                }
+            }
+            if pushed {
+                self.chat_rev.fetch_add(1, Ordering::Relaxed);
             }
         } else if batch.channel == Channel::Conversation {
             // Rust 直连 composer（读路径直连）：conversation 事件活动追踪
@@ -2757,14 +2627,28 @@ impl BridgeCore {
                     .unwrap_or_else(|e| e.into_inner());
                 let activity = map.entry(batch.seed.clone()).or_default();
                 for env in &batch.envelopes {
-                    if let Some(ev) = parse_conversation_activity_event(&env.event) {
+                    let RingingEvent::Conversation(event) = &env.event else {
+                        continue;
+                    };
+                    if let Some(ev) = conversation_activity_event(event) {
                         if matches!(
                             &ev,
                             ConversationActivityEvent::Started | ConversationActivityEvent::Ended
                         ) {
                             turn_boundary = true;
                             // 撤销直发：turn 事件带 turn_id，缓存最近回合。
-                            if let Some(tid) = env.event.get("turn_id").and_then(|v| v.as_str()) {
+                            let tid = match event {
+                                DomainConversationEvent::TurnStarted { turn_id, .. }
+                                | DomainConversationEvent::TurnCompleted { turn_id, .. }
+                                | DomainConversationEvent::TurnFailed { turn_id, .. } => {
+                                    Some(turn_id.as_str())
+                                }
+                                DomainConversationEvent::ConversationCancelled { turn_id } => {
+                                    turn_id.as_deref()
+                                }
+                                _ => None,
+                            };
+                            if let Some(tid) = tid {
                                 self.last_turn_ids
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
@@ -2775,56 +2659,32 @@ impl BridgeCore {
                     }
                 }
             }
-            if self.composer_direct.load(Ordering::Relaxed) {
-                self.composer_rev.fetch_add(1, Ordering::Relaxed);
-            }
+            self.composer_rev.fetch_add(1, Ordering::Relaxed);
             // 标题栏直连：turn 边界（streaming 翻转）刷新 undo/compact disabled。
-            if turn_boundary && self.header_direct.load(Ordering::Relaxed) {
+            if turn_boundary {
                 self.refresh_header();
             }
             // 原生 ChatView 直连：渲染相关事件（turn/round/delta/checkpoint）
             // 入队，UI 线程 timer drain 喂 Transcript（读路径直连）。
             // seed 标记：drain 侧按 active_seed 过滤（会话隔离）。
-            if self.chat_direct.load(Ordering::Relaxed) {
-                let mut queue = self
-                    .chat_events
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                for env in &batch.envelopes {
-                    if chat_adapter::internal_event(&env.event).is_some() {
-                        queue.push_back((batch.seed.clone(), env.event.clone()));
-                    }
+            let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
+            for env in &batch.envelopes {
+                if chat_adapter::render_event(&env.event).is_some() {
+                    queue.push_back((batch.seed.clone(), env.event.clone()));
                 }
-                if !queue.is_empty() {
-                    self.chat_rev.fetch_add(1, Ordering::Relaxed);
-                }
+            }
+            if !queue.is_empty() {
+                self.chat_rev.fetch_add(1, Ordering::Relaxed);
             }
         }
         // WebView 移除：ringing.batch 不再转发 Web（原生直连消费上方各分支）。
     }
 
     fn emit_status(&self, channel: Channel, status: ChannelStatus) {
-        // Field names mirror the TS `ChannelStatus` (camelCase): renderer code
-        // inspects `state` and `serverEpoch` (e.g. ringingMonitor.activate).
-        let payload = match status {
-            ChannelStatus::Connecting => json!({ "state": "connecting" }),
-            ChannelStatus::Open { server_epoch, cursor } => json!({
-                "state": "open",
-                "serverEpoch": server_epoch,
-                "cursor": cursor,
-            }),
-            ChannelStatus::Reconnecting { retry_ms, last_cursor } => json!({
-                "state": "reconnecting",
-                "retryMs": retry_ms,
-                "lastCursor": last_cursor,
-            }),
-            ChannelStatus::Closed { reason } => json!({ "state": "closed", "reason": reason }),
-        };
         self.channel_status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(channel.as_str().to_string(), payload);
-        // WebView 移除：不再 emit ringing.status（通道状态供壳失联检测用）。
+            .insert(channel, status);
     }
 
     // ── A 方案：daemon 失联检测与 client 重建（WORKFLOW §7）────────────────
@@ -2858,9 +2718,8 @@ impl BridgeCore {
                 .last_auto_reconnect_at
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let reconnect_cooldown = auto_reconnect_cooldown_for(
-                self.rebuild_failures.load(Ordering::Relaxed),
-            );
+            let reconnect_cooldown =
+                auto_reconnect_cooldown_for(self.rebuild_failures.load(Ordering::Relaxed));
             if now.duration_since(*last) >= reconnect_cooldown {
                 *self
                     .last_auto_reconnect_at
@@ -2875,7 +2734,10 @@ impl BridgeCore {
         // rebuild 风暴把 daemon 连接数打爆（32 连接信号量 → 静默 drop）。
         let rebuild_cooldown = rebuild_cooldown_for(self.rebuild_failures.load(Ordering::Relaxed));
         let cooldown_ok = {
-            let last = self.last_rebuild_at.lock().unwrap_or_else(|e| e.into_inner());
+            let last = self
+                .last_rebuild_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             now.duration_since(*last) >= rebuild_cooldown
         };
         if !cooldown_ok {
@@ -2896,9 +2758,14 @@ impl BridgeCore {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
         {
-            let healthy =
-                matches!(status, TimelineStatus::Open { .. } | TimelineStatus::Closed { .. });
-            let mut since = self.timeline_stall_since.lock().unwrap_or_else(|e| e.into_inner());
+            let healthy = matches!(
+                status,
+                TimelineStatus::Open { .. } | TimelineStatus::Closed { .. }
+            );
+            let mut since = self
+                .timeline_stall_since
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if healthy {
                 *since = None;
             } else if since.is_none() {
@@ -2910,12 +2777,18 @@ impl BridgeCore {
         }
 
         // 2) ringing 三通道无一 Open 持续超阈值——daemon 完全不可达场景。
-        let statuses = self.channel_status.lock().unwrap_or_else(|e| e.into_inner());
+        let statuses = self
+            .channel_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let any_open = statuses
             .values()
-            .any(|v| v.get("state").and_then(|s| s.as_str()) == Some("open"));
-        let any_tracked = statuses.values().any(|v| !v.is_null());
-        let mut since = self.channels_stall_since.lock().unwrap_or_else(|e| e.into_inner());
+            .any(|status| matches!(status, ChannelStatus::Open { .. }));
+        let any_tracked = !statuses.is_empty();
+        let mut since = self
+            .channels_stall_since
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if any_open || !any_tracked {
             *since = None;
         } else if since.is_none() {
@@ -2931,7 +2804,10 @@ impl BridgeCore {
     /// 重建 client：停旧（close）→ 重新 open（新 epoch）→ 恢复已激活的流。
     fn rebuild_client(&self) {
         self.rebuilding.store(true, Ordering::Relaxed);
-        *self.last_rebuild_at.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        *self
+            .last_rebuild_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Instant::now();
         log_diag("health: rebuilding client (daemon stall detected)");
         let core = self.self_arc();
         let _ = deepx_client::runtime_handle().spawn(async move {
@@ -2960,7 +2836,11 @@ impl BridgeCore {
             }
             // 3) 恢复已 attach 的 seed（XAML 侧栏）+ Web 最近激活的 seed。
             let seeds: Vec<String> = {
-                let mut set = core.attached.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let mut set = core
+                    .attached
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 let tseed = core
                     .last_timeline_seed
                     .lock()
@@ -3031,34 +2911,6 @@ impl BridgeCore {
     }
 }
 
-/// Timeline connection status -> renderer shape (mirrors TS `TimelineStatus`).
-fn timeline_status_to_json(status: &TimelineStatus) -> Value {
-    match status {
-        TimelineStatus::Connecting { seed } => json!({ "state": "connecting", "seed": seed }),
-        TimelineStatus::Open {
-            seed,
-            server_epoch,
-            cursor,
-        } => json!({
-            "state": "open",
-            "seed": seed,
-            "serverEpoch": server_epoch,
-            "cursor": cursor,
-        }),
-        TimelineStatus::Reconnecting { seed, retry_ms, cursor } => json!({
-            "state": "reconnecting",
-            "seed": seed,
-            "retryMs": retry_ms,
-            "cursor": cursor,
-        }),
-        TimelineStatus::Closed { seed, reason } => json!({
-            "state": "closed",
-            "seed": seed,
-            "reason": reason,
-        }),
-    }
-}
-
 static SHARED_CORE: OnceLock<Arc<BridgeCore>> = OnceLock::new();
 
 /// UI-thread half of the bridge（WebView 移除后仅持 tokio 侧 core 引用）。
@@ -3075,19 +2927,13 @@ impl Bridge {
                 let core = Arc::new(BridgeCore {
                     client: Mutex::new(None),
                     attached: Mutex::new(HashSet::new()),
-                    channel_status: Mutex::new(HashMap::from([
-                        ("control".to_string(), json!(null)),
-                        ("conversation".to_string(), json!(null)),
-                        ("tool".to_string(), json!(null)),
-                    ])),
+                    channel_status: Mutex::new(HashMap::new()),
                     sessions: Mutex::new(Vec::new()),
                     activities: Mutex::new(HashMap::new()),
                     session_rev: AtomicU64::new(0),
                     active_seed: Mutex::new(String::new()),
                     header_state: Mutex::new(HeaderState::default()),
                     header_rev: AtomicU64::new(0),
-                    // 标题栏原生迁移完成：默认直连（壳侧组装，不经 Web 投影）。
-                    header_direct: AtomicBool::new(true),
                     header_turns: Mutex::new(HashMap::new()),
                     last_turn_ids: Mutex::new(HashMap::new()),
                     timeline_stall_since: Mutex::new(None),
@@ -3111,31 +2957,20 @@ impl Bridge {
                     interaction: Mutex::new(InteractionState::default()),
                     interaction_rev: AtomicU64::new(0),
                     interactions: Mutex::new(HashMap::new()),
-                    // 交互面板原生迁移完成：默认直连（daemon control/tool
-                    // 事件 → InteractionMachine → snapshot，不经 Web 投影）。
-                    interaction_direct: AtomicBool::new(true),
-                    composer: Mutex::new(ComposerState::default()),
                     composer_rev: AtomicU64::new(0),
                     composer_activity: Mutex::new(HashMap::new()),
-                    // Composer 原生迁移完成：默认直连（A 组事件解析 + B 组
-                    // 本地缓存，不经 Web 投影）。
-                    composer_direct: AtomicBool::new(true),
                     composer_mode: Mutex::new("plan".to_string()),
                     composer_feedback: Mutex::new(ComposerFeedback::default()),
-                    // ChatView 原生迁移完成：默认直连（conversation 渲染事件
-                    // 入队供原生 ChatView 消费）；Web 注入 flag 可再置位（幂等）。
+                    // Canonical conversation events are queued for the native
+                    // ChatView; no renderer projection participates here.
                     chat_events: Mutex::new(std::collections::VecDeque::new()),
                     chat_timeline: Mutex::new(None),
                     timeline_has_more: Mutex::new(std::collections::HashMap::new()),
                     chat_prepend: Mutex::new(std::collections::VecDeque::new()),
                     timeline_fetching: Mutex::new(std::collections::HashSet::new()),
                     chat_rev: AtomicU64::new(0),
-                    chat_direct: AtomicBool::new(true),
-                    resume_target: Mutex::new(None),
                     // 初始化为远古时刻：首次 refresh 立即放行。
-                    timeline_refresh_at: Mutex::new(
-                        Instant::now() - Duration::from_secs(3600),
-                    ),
+                    timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
                     dashboard: Mutex::new(None),
                     dashboard_rev: AtomicU64::new(0),
                 });
@@ -3205,7 +3040,7 @@ impl Bridge {
     // ── 直连动作转发（WebView 移除：协议请求 Rust 直发）──────────────
 
     /// conversation 频道命令直发（cancel/compact/set_mode 等）。
-    pub fn spawn_conversation_command(&self, command: Value) {
+    pub fn spawn_conversation_command(&self, command: ConversationCommand) {
         self.core.spawn_conversation_command(command);
     }
 
@@ -3307,11 +3142,110 @@ impl Bridge {
         self.core.spawn_workspace_install_wsl();
     }
 
-
     /// 心跳（UI 线程 timer 每 50ms 调用）：daemon 失联检测（轻量内存检查，
     /// 重建在 tokio 侧执行）。WebView 移除后无 outbox 投递。
     pub fn pump(&self) {
         self.core.check_daemon_health();
+    }
+}
+
+#[cfg(test)]
+fn parse_interaction_event(event: &Value) -> Option<InteractionEvent> {
+    match event.get("type")?.as_str()? {
+        "interaction_requested" => Some(InteractionEvent::AskRequested {
+            id: event.get("interaction_id")?.as_str()?.to_string(),
+            questions: parse_questions(event.get("questions")?),
+        }),
+        "interaction_resolved" => Some(InteractionEvent::AskResolved {
+            id: event.get("interaction_id")?.as_str()?.to_string(),
+        }),
+        "plan_review_requested" => Some(InteractionEvent::PlanRequested {
+            id: event.get("interaction_id")?.as_str()?.to_string(),
+            plan_content: event.get("plan_content")?.as_str()?.to_string(),
+            review_type: event
+                .get("review_type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            todo_items: parse_todo_items(event.get("todo_items")),
+        }),
+        "plan_review_resolved" => Some(InteractionEvent::PlanResolved {
+            id: event.get("interaction_id")?.as_str()?.to_string(),
+        }),
+        "operation_failed" => match event
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)?
+        {
+            "ask_rejected" | "interaction_not_found" => Some(InteractionEvent::GhostCleanup),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn parse_tool_permission_event(event: &Value) -> Option<ToolPermissionEvent> {
+    match event.get("type")?.as_str()? {
+        "tool_permission_requested" => Some(ToolPermissionEvent::Requested {
+            tool_call_id: event.get("tool_call_id")?.as_str()?.to_string(),
+            tool_name: event.get("tool_name")?.as_str()?.to_string(),
+            reason: event.get("reason")?.as_str()?.to_string(),
+            paths: event
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            category: event.get("category")?.as_str()?.to_string(),
+            level: event
+                .get("level")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            risk: event.get("risk")?.as_str()?.to_string(),
+            consequence: event.get("consequence")?.as_str()?.to_string(),
+        }),
+        "tool_finished" => Some(ToolPermissionEvent::Resolved {
+            tool_call_id: event.get("tool_call_id")?.as_str()?.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn parse_conversation_activity_event(event: &Value) -> Option<ConversationActivityEvent> {
+    match event.get("type")?.as_str()? {
+        "turn_started" => Some(ConversationActivityEvent::Started),
+        "turn_completed" | "turn_failed" | "conversation_cancelled" => {
+            Some(ConversationActivityEvent::Ended)
+        }
+        "usage_updated" => Some(ConversationActivityEvent::Usage {
+            prompt_tokens: event
+                .get("usage")
+                .and_then(|usage| usage.get("prompt_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            context_limit: event
+                .get("context_limit")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            model: event
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }),
+        "round_delta"
+        | "block_checkpoint"
+        | "round_completed"
+        | "provider_retrying"
+        | "provider_tool_status" => Some(ConversationActivityEvent::Touched),
+        _ => None,
     }
 }
 
@@ -3323,18 +3257,13 @@ mod tests {
         BridgeCore {
             client: Mutex::new(None),
             attached: Mutex::new(HashSet::new()),
-            channel_status: Mutex::new(HashMap::from([
-                ("control".to_string(), json!(null)),
-                ("conversation".to_string(), json!(null)),
-                ("tool".to_string(), json!(null)),
-            ])),
+            channel_status: Mutex::new(HashMap::new()),
             sessions: Mutex::new(Vec::new()),
             activities: Mutex::new(HashMap::new()),
             session_rev: AtomicU64::new(0),
             active_seed: Mutex::new(String::new()),
             header_state: Mutex::new(HeaderState::default()),
             header_rev: AtomicU64::new(0),
-            header_direct: AtomicBool::new(true),
             header_turns: Mutex::new(HashMap::new()),
             last_turn_ids: Mutex::new(HashMap::new()),
             timeline_stall_since: Mutex::new(None),
@@ -3358,11 +3287,8 @@ mod tests {
             interaction: Mutex::new(InteractionState::default()),
             interaction_rev: AtomicU64::new(0),
             interactions: Mutex::new(HashMap::new()),
-            interaction_direct: AtomicBool::new(false),
-            composer: Mutex::new(ComposerState::default()),
             composer_rev: AtomicU64::new(0),
             composer_activity: Mutex::new(HashMap::new()),
-            composer_direct: AtomicBool::new(true),
             composer_mode: Mutex::new("plan".to_string()),
             composer_feedback: Mutex::new(ComposerFeedback::default()),
             chat_events: Mutex::new(std::collections::VecDeque::new()),
@@ -3371,8 +3297,6 @@ mod tests {
             chat_prepend: Mutex::new(std::collections::VecDeque::new()),
             timeline_fetching: Mutex::new(std::collections::HashSet::new()),
             chat_rev: AtomicU64::new(0),
-            chat_direct: AtomicBool::new(true),
-            resume_target: Mutex::new(None),
             timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
             dashboard: Mutex::new(None),
             dashboard_rev: AtomicU64::new(0),
@@ -3397,21 +3321,49 @@ mod tests {
         core.set_active_seed("sA");
         {
             let mut q = core.chat_events.lock().unwrap();
-            q.push_back(("sA".into(), json!({ "type": "turn_started", "turn_id": "t1" })));
-            q.push_back(("sB".into(), json!({ "type": "turn_started", "turn_id": "t2" })));
-            q.push_back(("sA".into(), json!({ "type": "turn_completed", "turn_id": "t1" })));
+            let started = |turn_id: &str| {
+                RingingEvent::Conversation(DomainConversationEvent::TurnStarted {
+                    turn_id: turn_id.to_string(),
+                    user_text: String::new(),
+                })
+            };
+            q.push_back(("sA".into(), started("t1")));
+            q.push_back(("sB".into(), started("t2")));
+            q.push_back((
+                "sA".into(),
+                RingingEvent::Conversation(DomainConversationEvent::TurnCompleted {
+                    turn_id: "t1".into(),
+                    stop_reason: None,
+                    usage: None,
+                }),
+            ));
         }
         let (events, _) = core.chat_drain();
         assert_eq!(events.len(), 2, "只返回活动会话 sA 的事件");
-        assert!(events.iter().all(|e| e["turn_id"] != "t2"), "sB 事件被丢弃");
-        assert!(events.iter().any(|e| e["type"] == "turn_started"));
-        assert!(events.iter().any(|e| e["type"] == "turn_completed"));
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { turn_id, .. })
+                if turn_id == "t2"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { .. })
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RingingEvent::Conversation(DomainConversationEvent::TurnCompleted { .. })
+        )));
 
         // 切换后：sA 的残留事件（若有）不再泄漏到 sB。
         core.set_active_seed("sB");
         core.chat_events.lock().unwrap().push_back((
             "sA".into(),
-            json!({ "type": "round_delta", "turn_id": "t1" }),
+            RingingEvent::Conversation(DomainConversationEvent::RoundDelta {
+                turn_id: "t1".into(),
+                round_num: 0,
+                kind: deepx_client::RoundDeltaKind::Answering,
+                delta: String::new(),
+            }),
         ));
         let (events, _) = core.chat_drain();
         assert!(events.is_empty(), "切换后 sA 残留事件被丢弃");
@@ -3458,7 +3410,13 @@ mod tests {
             ],
         }))
         .expect("parse");
-        let InteractionEvent::PlanRequested { id, plan_content, review_type, todo_items } = ev else {
+        let InteractionEvent::PlanRequested {
+            id,
+            plan_content,
+            review_type,
+            todo_items,
+        } = ev
+        else {
             panic!("expected PlanRequested");
         };
         assert_eq!(id, "p1");
@@ -3519,8 +3477,13 @@ mod tests {
         }))
         .expect("parse");
         let ToolPermissionEvent::Requested {
-            tool_call_id, paths, level, risk, ..
-        } = ev else {
+            tool_call_id,
+            paths,
+            level,
+            risk,
+            ..
+        } = ev
+        else {
             panic!("expected Requested");
         };
         assert_eq!(tool_call_id, "tc1");
@@ -3560,9 +3523,7 @@ mod tests {
             .expect("parse"),
         );
         // ask 后到——permission 仍优先（对齐 Web pendingInteractions[0]）。
-        m.apply(
-            parse_interaction_event(&ask_requested_event("i1", "t1")).expect("parse"),
-        );
+        m.apply(parse_interaction_event(&ask_requested_event("i1", "t1")).expect("parse"));
         let snap = m.snapshot("seed1");
         assert_eq!(snap.kind, "permission");
         assert_eq!(snap.id, "tc1");
@@ -3570,7 +3531,9 @@ mod tests {
         assert_eq!(snap.seed, "seed1");
 
         // tool_finished 释放 permission → ask 上位。
-        m.apply_tool(ToolPermissionEvent::Resolved { tool_call_id: "tc1".into() });
+        m.apply_tool(ToolPermissionEvent::Resolved {
+            tool_call_id: "tc1".into(),
+        });
         let snap = m.snapshot("seed1");
         assert_eq!(snap.kind, "ask");
         assert_eq!(snap.id, "i1");
@@ -3625,7 +3588,6 @@ mod tests {
     #[test]
     fn apply_interaction_event_is_idempotent_for_replay() {
         let core = test_core();
-        core.set_interaction_direct();
         core.set_active_seed("seed1");
         let ev = ask_requested_event("i1", "t1");
         core.apply_interaction_event("seed1", parse_interaction_event(&ev).expect("parse"));
@@ -3635,24 +3597,26 @@ mod tests {
         core.apply_interaction_event("seed1", parse_interaction_event(&ev).expect("parse"));
         let rev2 = core.interaction_rev.load(Ordering::Relaxed);
         assert_eq!(rev1, rev2);
-        // 直连模式下 Web 投影被忽略（双源竞态防护）。
-        core.apply_interaction(json!({ "kind": "permission", "id": "ghost" }));
-        assert_eq!(core.interaction_snapshot().0.kind, "ask");
     }
 
     #[test]
     fn interaction_cache_follows_active_seed() {
         let core = test_core();
-        core.set_interaction_direct();
         // 会话 A 请求 ask；active 尚未设置 → 缓存为空（后台不打扰当前显示）。
-        core.apply_interaction_event("seedA", parse_interaction_event(&ask_requested_event("iA", "tA")).expect("parse"));
+        core.apply_interaction_event(
+            "seedA",
+            parse_interaction_event(&ask_requested_event("iA", "tA")).expect("parse"),
+        );
         assert!(core.interaction_snapshot().0.kind.is_empty());
         // 切到 A → 缓存投影 A 的交互。
         core.set_active_seed("seedA");
         assert_eq!(core.interaction_snapshot().0.kind, "ask");
         assert_eq!(core.interaction_snapshot().0.id, "iA");
         // 会话 B 的交互事件不覆盖当前显示（A 保持）。
-        core.apply_interaction_event("seedB", parse_interaction_event(&ask_requested_event("iB", "tB")).expect("parse"));
+        core.apply_interaction_event(
+            "seedB",
+            parse_interaction_event(&ask_requested_event("iB", "tB")).expect("parse"),
+        );
         assert_eq!(core.interaction_snapshot().0.id, "iA");
         // 切到 B → B 的交互上位；切回 A → A 恢复（状态机按 seed 保留）。
         core.set_active_seed("seedB");
@@ -3661,7 +3625,7 @@ mod tests {
         assert_eq!(core.interaction_snapshot().0.id, "iA");
     }
 
-    // ── composer 直连（A 组 Rust 解析 + B 组投影合并）──────────────────
+    // ── native composer state ─────────────────────────────────────────
 
     #[test]
     fn parses_conversation_activity_events() {
@@ -3687,14 +3651,25 @@ mod tests {
             "model": "gpt-5",
         }))
         .expect("parse");
-        let E::Usage { prompt_tokens, context_limit, model } = ev else {
+        let E::Usage {
+            prompt_tokens,
+            context_limit,
+            model,
+        } = ev
+        else {
             panic!("expected Usage");
         };
         assert_eq!(prompt_tokens, 1234);
         assert_eq!(context_limit, 200000);
         assert_eq!(model, "gpt-5");
         // 流式事件 → Touched。
-        for ty in ["round_delta", "block_checkpoint", "round_completed", "provider_retrying", "provider_tool_status"] {
+        for ty in [
+            "round_delta",
+            "block_checkpoint",
+            "round_completed",
+            "provider_retrying",
+            "provider_tool_status",
+        ] {
             let ev = parse_conversation_activity_event(&json!({ "type": ty, "turn_id": "t1" }))
                 .expect("parse");
             assert!(matches!(ev, E::Touched), "{ty}");
@@ -3725,67 +3700,47 @@ mod tests {
     }
 
     #[test]
-    fn composer_snapshot_merges_direct_and_projection() {
+    fn composer_snapshot_uses_typed_activity_and_local_state() {
         let core = test_core();
         core.set_active_seed("seed1");
-        // 非直连：投影全量透传（flag 关闭时的回退路径）。
-        core.composer_direct.store(false, Ordering::Relaxed);
-        core.apply_composer(json!({
-            "seed": "seed1", "isStreaming": true, "hasPendingGate": true,
-            "mode": "plan", "model": "m1", "contextTokens": 9, "contextLimit": 100,
-            "permissionLevel": 3, "queueCount": 1,
-            "queueItems": [{ "id": "q1", "text": "next" }],
-            "submitError": "boom", "sendAck": 5,
-        }));
-        let (s, _) = core.composer_snapshot();
-        assert!(s.is_streaming);
-        assert_eq!(s.model, "m1");
-        assert_eq!(s.send_ack, 5);
-
-        // 直连：A 组来自 conversation 事件，B 组来自投影。
-        core.set_composer_direct();
-        core.apply_composer(json!({
-            "seed": "seed1", "isStreaming": false, "hasPendingGate": false,
-            "mode": "code", "model": "stale", "contextTokens": 0, "contextLimit": 0,
-            "permissionLevel": 2, "queueCount": 2,
-            "queueItems": [{ "id": "q1", "text": "next" }, { "id": "q2", "text": "more" }],
-            "submitError": "", "sendAck": 6,
-        }));
-        // conversation 事件：turn_started + usage_updated。
+        // Canonical conversation events drive activity and usage.
         let now = unix_ms();
         {
             let mut map = core.composer_activity.lock().unwrap();
             let a = map.entry("seed1".into()).or_default();
             a.apply(ConversationActivityEvent::Started, now);
-            a.apply(ConversationActivityEvent::Usage {
-                prompt_tokens: 42,
-                context_limit: 200_000,
-                model: "gpt-5".into(),
-            }, now);
+            a.apply(
+                ConversationActivityEvent::Usage {
+                    prompt_tokens: 42,
+                    context_limit: 200_000,
+                    model: "gpt-5".into(),
+                },
+                now,
+            );
         }
         let (s, _) = core.composer_snapshot();
-        // A 组：Rust 直连（覆盖投影的 stale/0/false）。
         assert!(s.is_streaming);
         assert_eq!(s.model, "gpt-5");
         assert_eq!(s.context_tokens, 42);
         assert_eq!(s.context_limit, 200_000);
         assert_eq!(s.seed, "seed1");
-        // B 组本地化（WebView 移除）：mode 乐观缓存、权限级读 config.load
-        // 缓存（此处未加载 → 1）、queue 恒空、反馈由直发层写入。
-        assert_eq!(s.mode, "plan"); // 本地默认（投影的 "code" 被忽略）
+        // UI-local state owns mode and send feedback; config owns permission.
+        assert_eq!(s.mode, "plan");
         assert_eq!(s.permission_level, 1);
         assert_eq!(s.queue_count, 0);
         assert_eq!(s.send_ack, 0);
         assert_eq!(s.submit_error, "");
-        // 本地缓存生效验证：mode 切换 + 发送反馈写入。
         *core.composer_mode.lock().unwrap() = "code".into();
         core.composer_feedback.lock().unwrap().send_ack = 7;
         let (s2, _) = core.composer_snapshot();
         assert_eq!(s2.mode, "code");
         assert_eq!(s2.send_ack, 7);
-        // hasPendingGate 联动交互机器。
+        // Pending gates come from the typed interaction machine.
         assert!(!s.has_pending_gate);
-        core.apply_interaction_event("seed1", parse_interaction_event(&ask_requested_event("i1", "t1")).expect("parse"));
+        core.apply_interaction_event(
+            "seed1",
+            parse_interaction_event(&ask_requested_event("i1", "t1")).expect("parse"),
+        );
         assert!(core.composer_snapshot().0.has_pending_gate);
     }
 
@@ -3824,24 +3779,30 @@ mod tests {
             "snapshot": {
                 "watermark": 7,
                 "turns": [
-                    {"turn_id":"t1","user_text":"hi","state":"completed","rounds":[]},
-                    {"turn_id":"t2","user_text":"again","state":"running","rounds":[]}
+                    {"turn_id":"t1","created_seq":1,"user_text":"hi","sealed":true,"state":"completed","rounds":[]},
+                    {"turn_id":"t2","created_seq":2,"user_text":"again","sealed":false,"state":"running","rounds":[]}
                 ]
-            }
+            },
+            "has_more": false,
+            "total_turns": 2
         });
-        core.cache_timeline_snapshot(body);
+        core.cache_timeline_snapshot(serde_json::from_value(body).expect("typed page"));
         // seed 标记取 body 权威值，不受 last_timeline_seed 陈旧影响。
         let (cached_seed, cached) = core.chat_timeline.lock().unwrap().clone().expect("cached");
         assert_eq!(cached_seed, "s1");
         // 解包 snapshot 子对象：turns 可直接解析（完整 body 会恒空）。
-        assert!(cached.get("turns").is_some(), "must unwrap snapshot inner");
-        let turns = chat_adapter::timeline_turns(&cached);
+        assert_eq!(cached.turns.len(), 2, "must cache typed snapshot inner");
+        let turns = chat_adapter::restored_turns(&cached);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].turn_id, "t1");
         // 连带投影：header_turns / last_turn_ids 以权威 seed 写入。
         assert_eq!(core.header_turns.lock().unwrap().get("s1"), Some(&2));
         assert_eq!(
-            core.last_turn_ids.lock().unwrap().get("s1").map(String::as_str),
+            core.last_turn_ids
+                .lock()
+                .unwrap()
+                .get("s1")
+                .map(String::as_str),
             Some("t2")
         );
         // 消费后缓存清空（consume 语义保持）。
@@ -3866,9 +3827,15 @@ mod tests {
     fn all_channels_stalled_triggers_but_single_open_resets() {
         let core = test_core();
         let now = Instant::now();
-        let mut reconnecting_map: HashMap<String, Value> = HashMap::new();
-        for ch in ["control", "conversation", "tool"] {
-            reconnecting_map.insert(ch.to_string(), json!({ "state": "reconnecting" }));
+        let mut reconnecting_map: HashMap<Channel, ChannelStatus> = HashMap::new();
+        for ch in [Channel::Control, Channel::Conversation, Channel::Tool] {
+            reconnecting_map.insert(
+                ch,
+                ChannelStatus::Reconnecting {
+                    retry_ms: 1_000,
+                    last_cursor: 0,
+                },
+            );
         }
         *core.channel_status.lock().unwrap() = reconnecting_map;
         // 开始计时，不触发。
@@ -3884,8 +3851,11 @@ mod tests {
         *core2.channels_stall_since.lock().unwrap() =
             Some(now - STALL_THRESHOLD - Duration::from_secs(1));
         core2.channel_status.lock().unwrap().insert(
-            "conversation".into(),
-            json!({ "state": "open", "serverEpoch": "e1", "cursor": 0 }),
+            Channel::Conversation,
+            ChannelStatus::Open {
+                server_epoch: "e1".into(),
+                cursor: 0,
+            },
         );
         assert!(!core2.compute_stall(now));
         assert!(core2.channels_stall_since.lock().unwrap().is_none());
@@ -3943,32 +3913,6 @@ fn log_diag(msg: &str) {
     }
 }
 
-/// Minimal base64 encoder (avoid a dependency for a single-use helper).
-fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        if chunk.len() > 1 {
-            out.push(ALPHABET[(n >> 6) as usize & 63] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(ALPHABET[n as usize & 63] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
 /// Open a path/URL with the system shell (best effort).
 fn open_external(target: &str) -> Result<(), String> {
     #[cfg(windows)]
@@ -4005,11 +3949,10 @@ fn show_open_dialog(
     title: Option<&str>,
 ) -> Result<Value, String> {
     use windows::Win32::{
-        CLSCTX_ALL, COMDLG_FILTERSPEC, CoCreateInstance, ERROR_CANCELLED,
-        FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS,
-        FileOpenDialog, IFileOpenDialog,
+        CLSCTX_ALL, COMDLG_FILTERSPEC, CoCreateInstance, ERROR_CANCELLED, FOS_ALLOWMULTISELECT,
+        FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
     };
-    use windows::core::{w, HSTRING};
+    use windows::core::{HSTRING, w};
 
     unsafe {
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL as u32)
@@ -4091,8 +4034,8 @@ fn shell_item_path(item: &windows::Win32::IShellItem) -> Result<String, String> 
     use windows::Win32::{CoTaskMemFree, SIGDN_FILESYSPATH};
     let pw = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }
         .map_err(|e| format!("IShellItem::GetDisplayName(SIGDN_FILESYSPATH): {e}"))?;
-    let path = unsafe { pw.to_string() }
-        .map_err(|e| format!("selected path is not valid UTF-16: {e}"))?;
+    let path =
+        unsafe { pw.to_string() }.map_err(|e| format!("selected path is not valid UTF-16: {e}"))?;
     unsafe { CoTaskMemFree(pw.0 as _) };
     Ok(path)
 }

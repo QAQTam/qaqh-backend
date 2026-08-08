@@ -1,9 +1,9 @@
 //! 原生 ChatView：conversation 事件直连 → `Transcript` → reactor 控件树。
 //!
-//! 数据源：`bridge.chat_drain()`——bridge 在 conversation 频道把渲染相关
-//! 事件（turn/round/delta/checkpoint）缓存入队（wire JSON），本组件以
-//! 16ms 事件泵 drain → `chat_adapter::internal_event` 反序列化 → 喂
-//! `Transcript` 状态机；每次有变化以 rev 触发重渲染（reactor diff 只
+//! 数据源：`bridge.chat_drain()`——bridge 在 conversation 频道把 canonical
+//! typed events 缓存入队，本组件以 16ms 事件泵 drain，经
+//! `chat_adapter::render_event` 映射为视图模型后喂 `Transcript` 状态机；
+//! 每次有变化以 rev 触发重渲染（reactor diff 只
 //! 更新变化节点——与 demo 同模式）。
 //!
 //! 渲染模型（对齐 CHATVIEW-RENDERING-REFERENCE）：
@@ -133,7 +133,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     if let Some((snap_seed, snap)) = bridge.core().chat_timeline_peek() {
                         if snap_seed == seed {
                             bridge.core().chat_timeline_consume();
-                            let turns = chat_adapter::timeline_turns(&snap);
+                            let turns = chat_adapter::restored_turns(&snap);
                             let n = turns.len();
                             transcript.borrow_mut().restore(turns);
                             *last_restored_seed.borrow_mut() = seed.clone();
@@ -179,7 +179,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         let mut t = transcript.borrow_mut();
                         let mut prepended = 0usize;
                         for (_, page) in pages {
-                            let turns = chat_adapter::timeline_turns(&page);
+                            let turns = chat_adapter::restored_turns(&page);
                             prepended += t.prepend_turns(turns);
                         }
                         if prepended > 0 {
@@ -196,8 +196,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         *last_rev.borrow_mut() = rev;
                         let mut t = transcript.borrow_mut();
                         let mut structural = false;
-                        for ev_json in events {
-                            if let Some(ev) = chat_adapter::internal_event(&ev_json) {
+                        for domain_event in events {
+                            if let Some(ev) = chat_adapter::render_event(&domain_event) {
                                 // 结构性变化（新 turn / 回合封口）：立即跟随
                                 // 滚底；live 增量（delta/checkpoint）节流。
                                 if matches!(
@@ -282,11 +282,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let mut builder = list_view(turns, |turn: &TurnView, i: usize| turn_view(i, turn))
         .with_key_selector(|turn: &TurnView| turn.turn_id.clone());
     if let Some(anchor_rows) = anchor_rows {
-        builder = builder.preserve_anchor(
-            *scroll_version.borrow(),
-            anchor_rows,
-            0.0,
-        );
+        builder = builder.preserve_anchor(*scroll_version.borrow(), anchor_rows, 0.0);
     } else if *force_tail_version.borrow() == Some(*scroll_version.borrow()) {
         force_tail_version.borrow_mut().take();
         builder = builder.force_tail(*scroll_version.borrow());
@@ -468,7 +464,7 @@ fn final_view(turn_idx: usize, round_num: u32, rich: &RichTextOutput) -> Element
     let mut items: Vec<Element> = Vec::new();
     // 连续段落累积；遇 Table/Code flush 成 RichTextBlock。
     let mut pending: Vec<RichTextParagraph> = Vec::new();
-    let mut flush = |items: &mut Vec<Element>, pending: &mut Vec<RichTextParagraph>| {
+    let flush = |items: &mut Vec<Element>, pending: &mut Vec<RichTextParagraph>| {
         if pending.is_empty() {
             return;
         }
@@ -594,7 +590,11 @@ fn tool_card(turn_idx: usize, round_num: u32, card: &markdown_winui::ToolCardVie
     let body: Element = if card.args_display.trim().is_empty() {
         text_block("").font_size(11.0).into()
     } else {
-        text_block(&card.args_display).font_size(11.0).wrap().selectable().into()
+        text_block(&card.args_display)
+            .font_size(11.0)
+            .wrap()
+            .selectable()
+            .into()
     };
     Expander::new(body)
         .header(format!("{icon} {status} {name}"))
@@ -607,7 +607,11 @@ fn tool_card(turn_idx: usize, round_num: u32, card: &markdown_winui::ToolCardVie
 fn log_diag(msg: &str) {
     use std::io::Write;
     let path = std::env::temp_dir().join("deepx-winui.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(
             f,
             "[{}] {msg}",

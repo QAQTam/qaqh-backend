@@ -108,19 +108,15 @@ entries/snapshots 决定 transcript 布局。
 `DispatcherQueue` 发出精确变更；reactor hook 订阅 store，组件卸载即取消订阅。
 timer 只保留给动画、显式 debounce、超时和连接健康检查。
 
-### P0：shell-facing 协议仍是 stringly JSON
+### P0：typed shell-facing 协议（RC4 已完成）
 
-`crates/deepx-client/src/types.rs` 仍以兼容旧 TS 形状为目标：
+`deepx-client` 现直接复用 `deepx-domain` / `deepx-ringing` 的 canonical event、command、
+timeline、envelope 和 ack 类型；timeline callback、WinUI chat queue、timeline cache 与
+channel health 均已强类型化。WinUI 的 query/action 调用点改用封闭 enum，不再拼裸
+method string 或 command JSON。
 
-- `RingingEventEnvelope.event: serde_json::Value`；
-- `TimelineEntry.kind: serde_json::Value`；
-- `CommandRequest.command: serde_json::Value`；
-- timeline snapshot callback 接收 `Value`；
-- channel/timeline status 注释仍以 TS 类型为参照。
-
-runtime 的只读 query 入口以 `"session.list"`、`"config.load"` 等字符串分发并返回
-`Value`；`RingingChannelSnapshot.state` 和 `SnapshotProjector` 也仍是通用 JSON
-对象。它们是合理的 wire/debug 边界，但不应继续成为 WinUI 的应用 API。
+辅助 service response 仍返回 `Value`，并集中在 `shell_store` 解析；这是当前登记的
+剩余 wire/application 边界，而不是 renderer 协议。后续应逐个引入 typed response DTO。
 
 **原生目标**：wire 可以保留 JSON，反序列化必须在 client/repository 边界完成。
 WinUI 只看到 `SessionSummary`、`SettingsSnapshot`、`DomainEvent`、
@@ -129,15 +125,10 @@ router 留在 HTTP 服务器内部。
 
 ### P1：`BridgeCore` 是 browser preload/store 的集中复刻
 
-`bridge.rs` 已增长到 4098 行，同时承担：连接、重连、command/query、所有页面
+`bridge.rs` 仍同时承担：连接、重连、command/query、所有页面
 projection、全局缓存、revision、会话切换、timeline/chat 队列、文件对话框和 UI
-facade。字段和注释中仍存在：
-
-- `mirrors Electron ringing.status`；
-- `same as Web projection`、`ignoring Web projection`；
-- `direct mode` / fallback 标志；
-- `apply_header`、`apply_composer`、`apply_interaction` 等投影入口；
-- UI `Bridge` 对 `BridgeCore` 的大量重复转发方法。
+facade。RC4 已删除 header/interaction/composer/chat 的 direct/fallback 双源开关、
+`resume_target` 和对应 Web projection 入口，但职责集中问题仍在。
 
 即使 WebView 已删除，这个对象仍扮演 `window.deepx + renderer store`。一个状态变更
 需要跨越 JSON、bridge cache、rev、timer、view state 多层，维护成本随协议字段数
@@ -155,13 +146,13 @@ SettingsRepository       配置读取、编辑、提交
 ShellState               Route、选中会话、窗口级状态
 ```
 
-`Bridge` 名称和 Web compatibility 开关最终应消失；若为渐进迁移暂时保留，必须只做
-composition root，不再拥有业务投影。
+`Bridge` 最终应只做 composition root，不再拥有业务投影。
 
 ### P1：`active_seed` 单例导致后台会话数据被丢弃
 
 `BridgeCore` 用全局 `active_seed` 过滤 chat 队列；注释明确说明非活动事件丢弃，切回
-后依靠权威快照恢复。为解决旧投影回写错误，又引入 `resume_target` 和双 seed 仲裁。
+后依靠权威快照恢复。旧 `resume_target` 双 seed 仲裁已在 RC4 清理，但单 active seed
+的数据生命周期问题仍然存在。
 
 这符合单页 Web chat 的活动 store，却不适合有 tab、多窗口潜力和后台通知的桌面
 应用。它让“切换会话”同时成为数据生命周期切换，并迫使恢复与渲染耦合。
@@ -172,9 +163,9 @@ composition root，不再拥有业务投影。
 
 ### P1：ChatView 是 Web golden reference 的二次实现
 
-`chat_adapter.rs` 明确以 `serde_json::Value` 为输入，手工识别 `type`、tool payload
-和 timeline turns。`chat_view.rs` 通过 16ms pump 把这些值喂给 `Transcript`；已有
-迁移文档又把滚动和流式语义描述成对齐 Web golden reference。
+`chat_adapter.rs` 生产路径现以 canonical `RingingEvent` / `TimelineSnapshot` 为输入并
+穷举映射；JSON fixture adapter 仅在测试编译。`chat_view.rs` 仍通过 16ms pump 把事件
+喂给 `Transcript`，而 live conversation 与 authority timeline 仍是两条 reducer 路径。
 
 行为对齐对迁移期很重要，但不应长期成为架构权威。native timeline 已经定义统一
 排序、稳定 block id、fragment sequence 和 seal 边界，继续维护 conversation JSON
@@ -297,6 +288,9 @@ apps/winui/src/view/
 **退出条件**：协议升级后能用测试回答“语义是否改变”，而不是靠手工比较界面。
 
 ### Phase 1：建立 typed client facade
+
+**状态：RC4 已完成。** 冻结规则和上游同步流程见
+[RC4 原生客户端协议冻结与维护手册](./rc4-native-client-contract.md)。
 
 1. `deepx-client` 依赖权威 domain/ringing 类型或一个无 runtime 依赖的 contract crate；
 2. typed `TimelineEntry`/`TimelineSnapshot` 替换 client 内的 flattened `Value`；
