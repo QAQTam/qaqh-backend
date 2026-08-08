@@ -458,6 +458,11 @@ pub struct Transcript {
     tail_following: bool,
     /// External final answers waiting for the application transport to load.
     pending_outputs: Vec<PendingOutput>,
+    /// 变更版本号：所有 mut 方法入口无条件 +1（default 返回也递增，仅多
+    /// 一次快照重建，can_skip_update 兜底）。ChatView 据此复用窗口快照
+    /// `Rc<Vec<TurnView>>`——版本未变时 `same_items_as` 指针命中，
+    /// reconciler 完全跳过已 realize 行的 rebuild 与 diff。
+    rev: u64,
 }
 
 /// 默认渲染窗口大小（回合数）：restore 后只渲染最近 N 个回合，与总回合
@@ -469,6 +474,11 @@ pub const WINDOW_DEFAULT_LEN: usize = 30;
 /// mount 数千 XAML 元素 → 切换标签秒级卡顿）。200 rounds ≈ 500 blocks，
 /// debug 构建单次 mount 可接受；可经实机手感调优。
 pub const RESTORE_ROUND_BUDGET: usize = 200;
+
+/// 渲染窗口之前最多保留的 turn 数量（上滚预加载缓冲）。
+/// 超出此限制的最旧 turn 在 `slide_window_tail` 时被驱逐，
+/// 以限制长对话的内存占用。用户上滚超出缓冲时由分页拉取兜底。
+const MAX_RETAINED_BEFORE_WINDOW: usize = 100;
 
 impl Transcript {
     pub fn new() -> Self {
@@ -495,10 +505,16 @@ impl Transcript {
         self.turns.len() - self.window_start
     }
 
+    /// 当前变更版本号（见 [`Self::rev`] 注释）。
+    pub fn mutation_rev(&self) -> u64 {
+        self.rev
+    }
+
     /// 向前扩展窗口（预加载更早回合）：起点前移 `by`，钳制到 0。
     /// 返回实际前移量；0 = 已全量放行（调用方短路，避免无谓渲染）。
     /// 扩展后窗口脱离「跟随尾部」模式（用户上滚浏览中）。
     pub fn expand_window(&mut self, by: usize) -> usize {
+        self.rev += 1;
         let moved = self.window_start.min(by);
         if moved > 0 {
             self.window_start -= moved;
@@ -522,12 +538,56 @@ impl Transcript {
     /// `WINDOW_DEFAULT_LEN`，并恢复「跟随尾部」模式。由调用方在「新
     /// turn 到达且本帧跟随尾部」时显式调用——用户上滚浏览时**不要**
     /// 调用（窗口保持，避免视口跳动）。
+    ///
+    /// 同时驱逐最早期的 turn（超出 [`MAX_RETAINED_BEFORE_WINDOW`] 缓冲），
+    /// 以限制长对话的内存占用。
     pub fn slide_window_tail(&mut self) {
+        self.rev += 1;
         let keep = WINDOW_DEFAULT_LEN;
         if self.turns.len() > keep {
             self.window_start = self.window_start.max(self.turns.len() - keep);
         }
         self.tail_following = true;
+        self.evict_old_turns();
+    }
+
+    /// 驱逐渲染窗口前超出缓冲的最旧 turn，释放其内存。
+    ///
+    /// 保留 `MAX_RETAINED_BEFORE_WINDOW` 个 turn 在窗口前作为上滚预加载缓冲；
+    /// 超出部分从 `turns` 头部移除，同时重建 `turn_index` 并校正 `window_start`。
+    /// 用户上滚超出缓冲时由 `spawn_fetch_earlier`（服务端分页）兜底。
+    fn evict_old_turns(&mut self) {
+        let keep_before = MAX_RETAINED_BEFORE_WINDOW.min(self.window_start);
+        let evict = self.window_start - keep_before;
+        if evict == 0 {
+            return;
+        }
+        self.turns.drain(..evict);
+        self.window_start -= evict;
+        self.turn_index = self
+            .turns
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.turn_id.clone(), i))
+            .collect();
+    }
+
+    /// 裁剪到仅保留渲染窗口内的 turn（会话缓存用，降低 clone 体积）。
+    /// 返回后 `turns` 只含 `window_turns()` 的内容，`window_start` 归零。
+    /// 被裁剪的旧 turn 在切回时由 daemon 权威快照恢复。
+    pub fn trim_to_window(&mut self) {
+        self.rev += 1;
+        if self.window_start == 0 {
+            return;
+        }
+        self.turns.drain(..self.window_start);
+        self.window_start = 0;
+        self.turn_index = self
+            .turns
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.turn_id.clone(), i))
+            .collect();
     }
 
     /// 前插一页更早的回合（分页加载：resume 只取尾部页，上滚翻页把更早
@@ -535,6 +595,7 @@ impl Transcript {
     /// 起点右移 `n` 保持渲染窗口位置（新回合在窗口**前面**，chat_view
     /// 以 `n` 做锚定补偿，视口不跳）。返回实际前插数；0 = 无新回合。
     pub fn prepend_turns(&mut self, turns: Vec<RestoredTurn>) -> usize {
+        self.rev += 1;
         let known: HashSet<&str> = self.turns.iter().map(|t| t.turn_id.as_str()).collect();
         let fresh: Vec<RestoredTurn> = turns
             .into_iter()
@@ -563,6 +624,7 @@ impl Transcript {
     /// 幂等语义：快照是权威全量（daemon timeline 快照），增量事件在其后
     /// 到达；调用方在 seed 切换时应先重置（`Transcript::new`）再 restore。
     pub fn restore(&mut self, turns: Vec<RestoredTurn>) {
+        self.rev += 1;
         self.turns = turns.into_iter().map(to_turn_view).collect();
         self.turn_index = self
             .turns
@@ -592,6 +654,7 @@ impl Transcript {
 
     /// Apply one protocol event to the canonical presentation model.
     pub fn apply(&mut self, ev: &ConversationEvent) -> TranscriptChange {
+        self.rev += 1;
         match ev {
             ConversationEvent::TurnStarted { turn_id, user_text } => {
                 if let Some(&index) = self.turn_index.get(turn_id) {
@@ -933,6 +996,7 @@ impl Transcript {
         &mut self,
         events: impl IntoIterator<Item = ConversationEvent>,
     ) -> TranscriptChange {
+        self.rev += 1;
         let events = coalesce_adjacent_deltas(events);
         let mut update = TranscriptChange::default();
         for event in events {
@@ -953,6 +1017,7 @@ impl Transcript {
         round_num: u32,
         text: &str,
     ) -> TranscriptChange {
+        self.rev += 1;
         let Some(&turn) = self.turn_index.get(turn_id) else {
             return TranscriptChange::default();
         };
@@ -971,6 +1036,7 @@ impl Transcript {
         round_num: u32,
         message: impl Into<String>,
     ) -> TranscriptChange {
+        self.rev += 1;
         let Some(&turn) = self.turn_index.get(turn_id) else {
             return TranscriptChange::default();
         };

@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use syntect::easy::HighlightLines;
@@ -13,6 +16,76 @@ use crate::CodeBlock;
 static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
 static THEMES: OnceLock<ThemeSet> = OnceLock::new();
 
+/// 高亮产物缓存上限。视口内行 rebuild 时 `highlighted_code_block` 会被反复
+/// 调用（内容未变），缓存避免每次重新 syntect lexing——大代码块单次 lex
+/// 可达数十毫秒，且发生在 UI 线程，是"大量 markdown/代码块卡顿"的主热点。
+const HIGHLIGHT_CACHE_CAPACITY: usize = 64;
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct HighlightKey {
+    lang: String,
+    text: String,
+    dark: bool,
+    font_family: String,
+}
+
+struct CacheEntry {
+    stamp: u64,
+    block: Rc<RichTextBlock>,
+}
+
+type HighlightCache = RefCell<HashMap<HighlightKey, CacheEntry>>;
+
+thread_local! {
+    /// 高亮产物缓存。渲染闭包在 UI 线程调用 `highlighted_code_block`，
+    /// thread_local 免锁且保留 `Rc<RichTextBlock>` 零拷贝命中；
+    /// 后台线程将来调用时仅缓存不共享（无害的 miss）。
+    static HIGHLIGHT_CACHE: HighlightCache = RefCell::new(HashMap::new());
+}
+
+fn with_cache<T>(f: impl FnOnce(&mut HashMap<HighlightKey, CacheEntry>) -> T) -> T {
+    HIGHLIGHT_CACHE.with(|cache| f(&mut cache.borrow_mut()))
+}
+
+fn next_stamp() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STAMP: AtomicU64 = AtomicU64::new(1);
+    STAMP.fetch_add(1, Ordering::Relaxed)
+}
+
+fn cache_get(key: &HighlightKey) -> Option<RichTextBlock> {
+    with_cache(|cache| {
+        let entry = cache.get_mut(key)?;
+        entry.stamp = next_stamp();
+        Some((*entry.block).clone())
+    })
+}
+
+fn cache_put(key: HighlightKey, block: RichTextBlock) {
+    with_cache(|cache| {
+        if cache.len() >= HIGHLIGHT_CACHE_CAPACITY {
+            // 驱逐最久未命中项（stamp 最小）。显式循环结束迭代借用。
+            let mut best: Option<(u64, HighlightKey)> = None;
+            for (k, e) in cache.iter() {
+                match &best {
+                    Some((stamp, _)) if *stamp <= e.stamp => {}
+                    _ => best = Some((e.stamp, k.clone())),
+                }
+            }
+            if let Some((_, evict)) = best {
+                cache.remove(&evict);
+            }
+        }
+        cache.insert(
+            key,
+            CacheEntry {
+                stamp: next_stamp(),
+                block: Rc::new(block),
+            },
+        );
+    })
+}
+
 /// Convert a fenced code block into native RichText runs colored by syntect.
 /// Unknown language tags intentionally remain plain text.
 pub fn highlighted_code_block(
@@ -20,6 +93,16 @@ pub fn highlighted_code_block(
     scheme: ColorScheme,
     font_family: &str,
 ) -> RichTextBlock {
+    let key = HighlightKey {
+        lang: code.lang.clone().unwrap_or_default(),
+        text: code.text.clone(),
+        dark: scheme == ColorScheme::Dark,
+        font_family: font_family.to_string(),
+    };
+    if let Some(cached) = cache_get(&key) {
+        return cached;
+    }
+
     let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
     let themes = THEMES.get_or_init(ThemeSet::load_defaults);
     let syntax = code
@@ -44,6 +127,7 @@ pub fn highlighted_code_block(
     block.line_height = Some(20.0);
     block.text_wrapping = TextWrapping::NoWrap;
     block.is_text_selection_enabled = true;
+    cache_put(key, block.clone());
     block
 }
 
