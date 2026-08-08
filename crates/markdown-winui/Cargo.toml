@@ -8,7 +8,7 @@ description = "AST → windows-reactor 富文本模型对接原型：验证 fork
 [dependencies]
 markdown-core = { path = "../markdown-core" }
 # 直接依赖 fork 内的 reactor —— 验证"解析产物 = reactor 富文本模型"零胶水
-windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "f159698407616f358e9f4b48e982d8313077eccd" }
+windows-reactor = { git = "https://github.com/QAQTam/deepx-winui-rs.git", rev = "f159698407616f358e9f4b48e982d8313077eccd" }
 syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
 serde = { version = "1", features = ["derive"] }

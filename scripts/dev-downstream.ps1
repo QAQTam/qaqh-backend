@@ -1,6 +1,6 @@
 # Downstream 本地开发切换（windows-rs fork）
 #
-# DeepX 正式依赖 QAQTam/windows-rs 的 immutable snapshot commit（git rev）。
+# DeepX 正式依赖 QAQTam/deepx-winui-rs 的 immutable snapshot commit（git rev）。
 # 开发下游代码时，把三个 manifest 临时切到本地仓库 F:\DeepX-windows-rs，
 # 验证完再切回 git rev。
 #
@@ -21,7 +21,7 @@ $ErrorActionPreference = "Stop"
 
 # ---- 配置（改 rev 时同步更新这里）------------------------------------------
 $Rev      = "f159698407616f358e9f4b48e982d8313077eccd"
-$GitUrl   = "https://github.com/QAQTam/windows-rs.git"
+$GitUrl   = "https://github.com/QAQTam/deepx-winui-rs.git"
 $Local    = "F:/DeepX-windows-rs"                      # downstream 工作树
 # -----------------------------------------------------------------------------
 
