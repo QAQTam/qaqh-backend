@@ -20,7 +20,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ---- 配置（改 rev 时同步更新这里）------------------------------------------
-$Rev      = "f159698407616f358e9f4b48e982d8313077eccd"
+$Rev      = "608258e1e62cd84c2fed4a7bf39f4d805c6a0785"
 $GitUrl   = "https://github.com/QAQTam/deepx-winui-rs.git"
 $Local    = "F:/DeepX-windows-rs"                      # downstream 工作树
 # -----------------------------------------------------------------------------
