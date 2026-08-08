@@ -10,12 +10,14 @@ mod bridge;
 mod chat_adapter;
 mod chat_view;
 mod composer_bar;
+mod fonts;
 mod header;
 mod home_view;
 mod info_panel;
 mod interaction_overlay;
 mod shell;
 mod shell_store;
+mod session_tabs;
 mod settings_view;
 mod sidebar;
 mod skills_view;
@@ -103,6 +105,42 @@ fn app(cx: &mut RenderCx) -> Element {
                         *view_timer.borrow_mut() = Some(t);
                     }
                     Err(e) => log_diag(&format!("view timer failed: {e}")),
+                }
+            }
+        }
+    });
+
+    // ── 字体：settings 快照到达/变化时全局应用（FontFamily 为继承属性，
+    // 设置内容根一次即全树生效；空 = 恢复系统默认）。常驻轮询保证
+    // 启动后（不打开设置页）也能应用上次保存的字体。──────────────
+    let font_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    let last_font = cx.use_ref::<String>(String::new());
+    cx.use_effect((), {
+        let bridge = bridge.clone();
+        let font_timer = font_timer.clone();
+        let last_font = last_font.clone();
+        move || {
+            if font_timer.borrow().is_none() {
+                match DispatcherTimer::new(Duration::from_millis(500), {
+                    let bridge = bridge.clone();
+                    let last_font = last_font.clone();
+                    move || {
+                        let (snap, _) = bridge.core().settings_snapshot();
+                        if let Some(snap) = snap {
+                            let font = snap.font_family;
+                            if font != *last_font.borrow() {
+                                *last_font.borrow_mut() = font.clone();
+                                if font.is_empty() {
+                                    windows_reactor::set_font_family(None);
+                                } else {
+                                    windows_reactor::set_font_family(Some(&font));
+                                }
+                            }
+                        }
+                    }
+                }) {
+                    Ok(t) => *font_timer.borrow_mut() = Some(t),
+                    Err(e) => log_diag(&format!("font timer failed: {e}")),
                 }
             }
         }
@@ -226,15 +264,23 @@ fn app(cx: &mut RenderCx) -> Element {
         .grid_row(0)
         .grid_column(0)
         .into();
-    // ── 内容区（row 1）：基础层（侧栏 | 右区）────────────────
+    // ── 内容区（row 1）：row0 = 顶部会话标签条（跨侧栏全宽）；
+    // row1 = 基础层（侧栏 | 右区）────────────────────────────
     // P-6 覆盖层预留（WORKFLOW §6.1）：未来 XAML 面板/对话框
     // （P1 Flyout anchor / P2 ContentDialog phantom child）作为覆盖层
     // 元素追加进本 Grid（同 cell 重叠渲染），零布局改动。
+    let tabs: Element = session_tabs::session_tabs(cx, bridge.clone())
+        .grid_row(0)
+        .grid_column(0)
+        .into();
     let content: Element = grid((
-        nav.grid_row(0).grid_column(0),
-        right,
+        tabs,
+        grid((nav.grid_column(0), right))
+            .columns([GridLength::Pixel(sidebar_width), GridLength::STAR])
+            .grid_row(1)
+            .grid_column(0),
     ))
-    .columns([GridLength::Pixel(sidebar_width), GridLength::STAR])
+    .rows([GridLength::Pixel(session_tabs::TAB_STRIP_HEIGHT), GridLength::STAR])
     .grid_row(1)
     .grid_column(0)
     .into();

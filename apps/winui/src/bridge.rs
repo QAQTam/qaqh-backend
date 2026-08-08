@@ -766,7 +766,14 @@ pub struct BridgeCore {
     /// delta/checkpoint）直连缓存，UI 线程 timer drain 喂 Transcript。
     /// 事件为 wire JSON（`{"type":...}`），`chat_adapter::internal_event`
     /// 反序列化为渲染协议——零映射胶水。
-    chat_events: Mutex<std::collections::VecDeque<serde_json::Value>>,
+    ///
+    /// **seed 标记（2026-08-08 修复）**：队列元素为 `(seed, event)`——
+    /// daemon 的 SSE 流按 lease 推送**所有**会话的事件（batch.seed 区分），
+    /// 此前入队忽略 seed、drain 全量返回，后台会话增量会污染活动会话的
+    /// Transcript（切换瞬间残留事件串台）。现入队带 seed、`chat_drain`
+    /// 按 active_seed 过滤（非活动事件丢弃，切回时由权威快照 + 切回后的
+    /// 增量补齐）。
+    chat_events: Mutex<std::collections::VecDeque<(String, serde_json::Value)>>,
     /// 最近一次 timeline 快照（`TimelineSnapshot` JSON + 所属 seed：
     /// 权威 turns 历史，resume 旧对话的数据源；chat_view 泵消费 restore）。
     /// seed 标记防竞态：快速切会话时旧快照晚到不会被灌进新会话。
@@ -1137,13 +1144,20 @@ impl BridgeCore {
     /// (事件队列快照, rev)：UI 线程 timer 比对 rev 后 drain 喂 Transcript。
     /// 事件为 wire JSON（`{"type":...}`），消费方用
     /// `chat_adapter::internal_event` 反序列化为渲染协议。
+    ///
+    /// **按活动会话隔离**：只返回 `seed == active_seed` 的事件；非活动
+    /// 会话的事件在此丢弃（切换瞬间的残留事件不会污染新会话的
+    /// Transcript；切回时由权威快照 + 切回后的增量补齐）。
     pub fn chat_drain(&self) -> (Vec<serde_json::Value>, u64) {
         let rev = self.chat_rev.load(Ordering::Relaxed);
+        let active = self.active_seed();
         let events = self
             .chat_events
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .drain(..)
+            .filter(|(seed, _)| *seed == active)
+            .map(|(_, ev)| ev)
             .collect();
         (events, rev)
     }
@@ -1528,9 +1542,94 @@ impl BridgeCore {
         });
     }
 
-    /// 删除会话：Ringing `session_close`（与前端 `request("session.delete")`
-    /// 的映射一致）。注意 Ringing 面无专门删除命令——session_close 只关闭
-    /// registry 实例、不删持久化文件（与 web 前端现状对齐；缺口待后端统一）。
+    /// 归档会话（标签 ×）：Ringing `session_archive`——daemon 侧关实例 +
+    /// meta `archived=true`（磁盘保留，左侧列表归档组可见可恢复）。
+    ///
+    /// 归档的是活动会话时自动切邻居：列表首个非归档会话（updated_at 序），
+    /// 无则清空活动态回 home（空态 + 加号引导）。
+    pub fn spawn_archive(&self, seed: &str) {
+        let is_active = self.active_seed() == seed;
+        let neighbor = if is_active {
+            self.sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .find(|s| !s.archived && s.seed != seed)
+                .map(|s| s.seed.clone())
+        } else {
+            None
+        };
+        let core = self.self_arc();
+        let seed = seed.to_string();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("archive {seed}: connect failed: {err}"));
+                    return;
+                }
+            };
+            let command_id = core.next_command_id();
+            match client
+                .command(
+                    Channel::Control,
+                    Some(seed.clone()),
+                    command_id,
+                    json!({ "type": "session_archive", "seed": seed }),
+                    None,
+                )
+                .await
+            {
+                Ok(_) => {
+                    core.refresh_sessions_inner().await;
+                    if let Some(neighbor) = neighbor {
+                        core.spawn_resume(&neighbor);
+                    } else {
+                        core.set_active_seed("");
+                        core.navigate("home", None);
+                    }
+                }
+                Err(err) => log_diag(&format!("archive {seed}: command failed: {err}")),
+            }
+        });
+    }
+
+    /// 恢复归档会话：Ringing `session_unarchive`（meta `archived=false` +
+    /// 重新拉起实例），成功后走 resume 链路（attach + timeline 快照）。
+    pub fn spawn_unarchive(&self, seed: &str) {
+        let core = self.self_arc();
+        let seed = seed.to_string();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("unarchive {seed}: connect failed: {err}"));
+                    return;
+                }
+            };
+            let command_id = core.next_command_id();
+            match client
+                .command(
+                    Channel::Control,
+                    Some(seed.clone()),
+                    command_id,
+                    json!({ "type": "session_unarchive", "seed": seed }),
+                    None,
+                )
+                .await
+            {
+                Ok(_) => {
+                    core.refresh_sessions_inner().await;
+                    core.spawn_resume(&seed);
+                }
+                Err(err) => log_diag(&format!("unarchive {seed}: command failed: {err}")),
+            }
+        });
+    }
+
+    /// 彻底删除会话：Ringing `session_delete`（daemon 侧先关实例再删磁盘
+    /// 目录与索引——区别于归档；原 `session_close` 只关实例不删文件）。
+    /// 删除的是活动会话时清空活动态回 home。
     pub fn spawn_delete(&self, seed: &str) {
         let core = self.self_arc();
         let seed = seed.to_string();
@@ -1548,7 +1647,7 @@ impl BridgeCore {
                     Channel::Control,
                     Some(seed.clone()),
                     command_id,
-                    json!({ "type": "session_close", "seed": seed }),
+                    json!({ "type": "session_delete", "seed": seed }),
                     None,
                 )
                 .await
@@ -1781,6 +1880,60 @@ impl BridgeCore {
         });
     }
 
+    /// 切换预设：`profile.apply`（daemon 应用后下次 config.load 拿到新值）。
+    pub fn spawn_apply_profile(&self, name: String) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("profile.apply: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.action("profile.apply", json!({ "name": name })).await {
+                Ok(_) => log_diag("profile.apply: ok"),
+                Err(err) => log_diag(&format!("profile.apply failed: {err}")),
+            }
+        });
+    }
+
+    /// 把当前编辑的草稿保存为新预设：`profile.save_current`。
+    pub fn spawn_save_profile(&self, name: String) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("profile.save_current: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.action("profile.save_current", json!({ "name": name })).await {
+                Ok(_) => log_diag("profile.save_current: ok"),
+                Err(err) => log_diag(&format!("profile.save_current failed: {err}")),
+            }
+        });
+    }
+
+    /// 删除预设：`profile.delete`（default 不可删，daemon 会返回 Err）。
+    pub fn spawn_delete_profile(&self, name: String) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("profile.delete: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.action("profile.delete", json!({ "name": name })).await {
+                Ok(_) => log_diag("profile.delete: ok"),
+                Err(err) => log_diag(&format!("profile.delete failed: {err}")),
+            }
+        });
+    }
+
     /// 权限等级：`config.set_permission_level`（对齐 Web changePermissionLevel）。
     pub fn spawn_set_permission(&self, level: u64) {
         let core = self.self_arc();
@@ -1932,8 +2085,13 @@ impl BridgeCore {
         });
     }
 
-    /// 交互响应直发（permission/ask/plan）：`interaction.*` query（对齐
-    /// Web App.tsx respondToPermission / submitAsk / dismissAsk / respondToPlan）。
+    /// 交互响应直发（permission/ask/plan）：Ringing command envelope
+    /// （`POST /commands/{control|tool}`，对齐 composer send_message 模式）。
+    ///
+    /// 2026-08-08 修复：此前误用 query 通道（`/queries/` 白名单不含
+    /// `interaction.*` → daemon 404），弹窗按钮全部无效、回合永久挂起；
+    /// 现按 method 映射到 deepx-domain `ControlCommand`/`ToolCommand`
+    /// 的 serde tag（snake_case）与频道。
     pub fn spawn_interaction_response(&self, method: &str, params: Value) {
         let core = self.self_arc();
         let method = method.to_string();
@@ -1945,8 +2103,67 @@ impl BridgeCore {
                     return;
                 }
             };
-            match client.query(&method, params).await {
-                Ok(_) => log_diag(&format!("{method}: ok")),
+            let seed = params
+                .get("seed")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let gs = |k: &str| {
+                params
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let gb = |k: &str| params.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+            // method → (频道, envelope)。serde tag 对齐 deepx-domain。
+            let (channel, envelope) = match method.as_str() {
+                "interaction.permission" => (
+                    Channel::Tool,
+                    json!({
+                        "type": "tool_permission_respond",
+                        "tool_call_id": gs("toolCallId"),
+                        "approved": gb("approved"),
+                        "trust_folder": gb("trustFolder"),
+                    }),
+                ),
+                "interaction.ask_response" => (
+                    Channel::Control,
+                    json!({
+                        "type": "interaction_ask_respond",
+                        "interaction_id": gs("askId"),
+                        "answers": params.get("answers").cloned().unwrap_or_else(|| json!([])),
+                    }),
+                ),
+                "interaction.ask_dismiss" => (
+                    Channel::Control,
+                    json!({
+                        "type": "interaction_ask_dismiss",
+                        "interaction_id": gs("askId"),
+                    }),
+                ),
+                "interaction.plan_review" => (
+                    Channel::Control,
+                    json!({
+                        "type": "plan_review_respond",
+                        "interaction_id": gs("callId"),
+                        "approved": gb("approved"),
+                        "message": params
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .filter(|m| !m.is_empty()),
+                        "autonomous": gb("autonomous"),
+                    }),
+                ),
+                _ => {
+                    log_diag(&format!("{method}: unknown interaction method"));
+                    return;
+                }
+            };
+            match client
+                .command(channel, seed, core.next_command_id(), envelope, None)
+                .await
+            {
+                Ok(_) => log_diag(&format!("{method}: accepted")),
                 Err(err) => log_diag(&format!("{method}: failed: {err}")),
             }
         });
@@ -2093,7 +2310,11 @@ impl BridgeCore {
     /// home 视图发送：新建会话 + 首条消息（对齐 Web `startNewSessionAndSend`）。
     ///
     /// session_create（control）→ 轮询发现新 seed（15s 超时）→ attach →
-    /// `session.send_message`（action）→ navigate chat。
+    /// 创建新会话并发送首条消息（`session_create` command + 轮询新 seed +
+    /// `conversation_send_message` command → navigate chat）。
+    ///
+    /// 2026-08-08 修复：首条消息此前误用 `action("session.send_message")`
+    /// （action 白名单不含 session.* → daemon 拒绝），改走 command 通道。
     pub fn spawn_send_new_session(&self, text: &str) {
         let core = self.self_arc();
         let text = text.to_string();
@@ -2139,7 +2360,13 @@ impl BridgeCore {
                     }
                     core.set_active_seed(&seed);
                     if let Err(err) = client
-                        .action("session.send_message", json!({ "seed": seed, "text": text }))
+                        .command(
+                            Channel::Conversation,
+                            Some(seed.clone()),
+                            core.next_command_id(),
+                            json!({ "type": "conversation_send_message", "text": text }),
+                            None,
+                        )
                         .await
                     {
                         log_diag(&format!("send_new_session: send_message failed: {err}"));
@@ -2370,6 +2597,28 @@ impl BridgeCore {
                     }
                 }
             }
+            // 原生 ChatView 直连：Tool 频道渲染事件（tool_call_prepared /
+            // tool_started / tool_finished）与 conversation 事件同一队列，
+            // 供 Transcript 流式渲染工具卡。与 conversation 频道事件交错
+            // 到达无顺序保证——round_renderer 按 turn/round 定位 + 自动建
+            // turn 兜底，不依赖频道间顺序。
+            if self.chat_direct.load(Ordering::Relaxed) {
+                let mut queue = self
+                    .chat_events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let mut pushed = false;
+                for env in &batch.envelopes {
+                    if chat_adapter::internal_event(&env.event).is_some() {
+                        // seed 标记：drain 侧按 active_seed 过滤（会话隔离）。
+                        queue.push_back((batch.seed.clone(), env.event.clone()));
+                        pushed = true;
+                    }
+                }
+                if pushed {
+                    self.chat_rev.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         } else if batch.channel == Channel::Conversation {
             // Rust 直连 composer（读路径直连）：conversation 事件活动追踪
             // ——isStreaming（卡死检测）+ usage_updated 缓存（model/context）。
@@ -2413,6 +2662,7 @@ impl BridgeCore {
             }
             // 原生 ChatView 直连：渲染相关事件（turn/round/delta/checkpoint）
             // 入队，UI 线程 timer drain 喂 Transcript（读路径直连）。
+            // seed 标记：drain 侧按 active_seed 过滤（会话隔离）。
             if self.chat_direct.load(Ordering::Relaxed) {
                 let mut queue = self
                     .chat_events
@@ -2420,7 +2670,7 @@ impl BridgeCore {
                     .unwrap_or_else(|e| e.into_inner());
                 for env in &batch.envelopes {
                     if chat_adapter::internal_event(&env.event).is_some() {
-                        queue.push_back(env.event.clone());
+                        queue.push_back((batch.seed.clone(), env.event.clone()));
                     }
                 }
                 if !queue.is_empty() {
@@ -2789,6 +3039,14 @@ impl Bridge {
         self.core.spawn_resume(seed);
     }
 
+    pub fn spawn_archive(&self, seed: &str) {
+        self.core.spawn_archive(seed);
+    }
+
+    pub fn spawn_unarchive(&self, seed: &str) {
+        self.core.spawn_unarchive(seed);
+    }
+
     pub fn spawn_delete(&self, seed: &str) {
         self.core.spawn_delete(seed);
     }
@@ -2882,6 +3140,21 @@ impl Bridge {
     /// settings：保存全字段（camelCase，对齐 Web `save()`）。
     pub fn spawn_config_save(&self, fields: Value) {
         self.core.spawn_config_save(fields);
+    }
+
+    /// settings：切换预设（profile.apply；daemon 应用后前端轮询拿到新值）。
+    pub fn spawn_apply_profile(&self, name: &str) {
+        self.core.spawn_apply_profile(name.to_string());
+    }
+
+    /// settings：把当前草稿保存为新预设（profile.save_current）。
+    pub fn spawn_save_profile(&self, name: &str) {
+        self.core.spawn_save_profile(name.to_string());
+    }
+
+    /// settings：删除预设（profile.delete；default 不可删）。
+    pub fn spawn_delete_profile(&self, name: &str) {
+        self.core.spawn_delete_profile(name.to_string());
     }
 
     /// settings：权限等级（config.set_permission_level）。
@@ -2984,6 +3257,36 @@ mod tests {
             retry_ms: 1000,
             cursor: 3,
         }
+    }
+
+    // ── ChatView 事件队列（seed 隔离）────────────────────────────────
+
+    /// chat_drain 只返回 active_seed 的事件：后台会话增量不污染活动
+    /// 会话的 Transcript（切换瞬间残留事件同样被丢弃）。
+    #[test]
+    fn chat_drain_filters_by_active_seed() {
+        let core = test_core();
+        core.set_active_seed("sA");
+        {
+            let mut q = core.chat_events.lock().unwrap();
+            q.push_back(("sA".into(), json!({ "type": "turn_started", "turn_id": "t1" })));
+            q.push_back(("sB".into(), json!({ "type": "turn_started", "turn_id": "t2" })));
+            q.push_back(("sA".into(), json!({ "type": "turn_completed", "turn_id": "t1" })));
+        }
+        let (events, _) = core.chat_drain();
+        assert_eq!(events.len(), 2, "只返回活动会话 sA 的事件");
+        assert!(events.iter().all(|e| e["turn_id"] != "t2"), "sB 事件被丢弃");
+        assert!(events.iter().any(|e| e["type"] == "turn_started"));
+        assert!(events.iter().any(|e| e["type"] == "turn_completed"));
+
+        // 切换后：sA 的残留事件（若有）不再泄漏到 sB。
+        core.set_active_seed("sB");
+        core.chat_events.lock().unwrap().push_back((
+            "sA".into(),
+            json!({ "type": "round_delta", "turn_id": "t1" }),
+        ));
+        let (events, _) = core.chat_drain();
+        assert!(events.is_empty(), "切换后 sA 残留事件被丢弃");
     }
 
     // ── 交互队列状态机（Rust 直连读路径）──────────────────────────────

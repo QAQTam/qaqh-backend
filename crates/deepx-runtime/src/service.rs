@@ -82,6 +82,29 @@ impl DeepxService {
         Ok(())
     }
 
+    /// 归档会话（标签 × 语义）：关闭 registry 实例 + meta `archived=true`。
+    /// 磁盘与消息文件保留，左侧列表归档组可见可恢复。会话不存在同样
+    /// 幂等成功（close 幂等 + set_archived 补写 meta）。
+    pub fn archive_session(&self, seed: &str, causation_id: Option<&str>) -> Result<(), String> {
+        self.close_session(seed, causation_id)?;
+        deepx_session::SessionManager::global().set_archived(seed, true);
+        Ok(())
+    }
+
+    /// 恢复归档会话：meta `archived=false` + 重新拉起实例（resume 语义，
+    /// 对齐 `session.resume` 查询——get_or_spawn + active seed 更新）。
+    pub fn unarchive_session(&self, seed: &str) -> Result<(), String> {
+        deepx_session::SessionManager::global().set_archived(seed, false);
+        self.registry()?.get_or_spawn(seed)
+    }
+
+    /// 彻底删除会话（左侧列表 × 语义）：先关实例（若运行，幂等）再删
+    /// 磁盘目录与索引。会话不存在返回 Err（由 daemon 拦截层按幂等处理）。
+    pub fn delete_session(&self, seed: &str, causation_id: Option<&str>) -> Result<(), String> {
+        let _ = self.close_session(seed, causation_id);
+        deepx_session::SessionManager::global().delete(seed)
+    }
+
     pub fn session_scoped(method: &str) -> bool {
         matches!(
             method.split('.').next(),
@@ -347,6 +370,28 @@ impl DeepxService {
                 self.save_config(params)?;
                 Ok(Value::Null)
             }
+            "profile.apply" => {
+                let name = pstr(params, "name")?;
+                let mut cfg = deepx_config::Config::load().map_err(err)?;
+                if cfg.apply_profile(&name).is_none() {
+                    return Err(format!("profile '{name}' not found"));
+                }
+                Ok(Value::Null)
+            }
+            "profile.save_current" => {
+                let name = pstr(params, "name")?;
+                let mut cfg = deepx_config::Config::load().map_err(err)?;
+                cfg.save_profile(&name);
+                Ok(Value::Null)
+            }
+            "profile.delete" => {
+                let name = pstr(params, "name")?;
+                let mut cfg = deepx_config::Config::load().map_err(err)?;
+                if !cfg.delete_profile(&name) {
+                    return Err(format!("profile '{name}' cannot be deleted (not found or default)"));
+                }
+                Ok(Value::Null)
+            }
             "todo.status" => parse_json_string(deepx_workspace::todo::todo_status_json(&seed()?)?),
             "todo.cancel" => parse_json_string(deepx_workspace::todo::todo_cancel_json(
                 &seed()?,
@@ -582,6 +627,12 @@ impl DeepxService {
         {
             cfg.lang = Some(lang.to_string());
         }
+        // ── UI 字体（空字符串 = 恢复系统默认；掩码守卫同 update_string）──
+        if let Some(value) = value2(params, "font_family", "fontFamily").and_then(Value::as_str) {
+            if value != "****" {
+                cfg.font_family = value.to_string();
+            }
+        }
         update_string(
             &mut cfg.subagent.model,
             params,
@@ -673,6 +724,11 @@ impl DeepxService {
             value2(params, "auto_compact_threshold", "autoCompactThreshold").and_then(Value::as_f64)
         {
             cfg.auto_compact_threshold = threshold;
+        }
+        if let Some(enabled) =
+            value2(params, "compliance_enabled", "complianceEnabled").and_then(Value::as_bool)
+        {
+            cfg.compliance_enabled = enabled;
         }
         cfg.save()?;
         self.registry()?.send_ringing_all(RingingCommand::Control(
@@ -868,9 +924,11 @@ fn activity(seed: &str) -> Result<Value, String> {
 
 fn load_config() -> Result<Value, String> {
     let cfg = deepx_config::Config::load().map_err(err)?;
-    let providers = deepx_config::registry::all_providers().into_iter().map(|provider| json!({"id":provider.id,"display":provider.display,"endpoints":provider.endpoints.into_iter().map(|endpoint|json!({"id":endpoint.id,"display":endpoint.display,"base_url":endpoint.base_url,"default_model":endpoint.default_model,"models":endpoint.models,"stateful":endpoint.stateful,"beta":endpoint.beta})).collect::<Vec<_>>() })).collect::<Vec<_>>();
+    let providers = deepx_config::registry::all_providers().into_iter().map(|provider| json!({"id":provider.id,"display":provider.display,"endpoints":provider.endpoints.into_iter().map(|endpoint|json!({"id":endpoint.id,"display":endpoint.display,"protocol":endpoint.protocol,"base_url":endpoint.base_url,"default_model":endpoint.default_model,"models":endpoint.models,"stateful":endpoint.stateful,"beta":endpoint.beta})).collect::<Vec<_>>() })).collect::<Vec<_>>();
+    // profile 名称列表（前端 profile 管理 UI 用；不含敏感字段）。
+    let profile_names: Vec<String> = cfg.profiles.keys().cloned().collect();
     Ok(
-        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"active_profile":cfg.active_profile,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"workspace":{"mode":cfg.workspace.mode},"tokenizer_path":cfg.tokenizer_path}),
+        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"font_family":cfg.font_family,"active_profile":cfg.active_profile,"profiles":profile_names,"compliance_enabled":cfg.compliance_enabled,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"workspace":{"mode":cfg.workspace.mode},"tokenizer_path":cfg.tokenizer_path}),
     )
 }
 

@@ -1447,6 +1447,119 @@ async fn handle_command(
         .await;
     }
 
+    // SessionArchive / SessionUnarchive / SessionDelete（归档语义）：daemon 侧
+    // 拦截，不转发 worker——与 SessionClose 同模式。
+    //   - archive：close registry 实例 + meta archived=true（磁盘保留）；
+    //   - unarchive：meta archived=false + 重新拉起实例（resume 语义）；
+    //   - delete：先关实例（若运行）再删磁盘目录；不存在同样 Accepted（幂等）。
+    if let deepx_ringing::RingingCommand::Control(
+        cmd @ (ControlCommand::SessionArchive { .. }
+        | ControlCommand::SessionUnarchive { .. }
+        | ControlCommand::SessionDelete { .. }),
+    ) = &env.command
+    {
+        let (op, target) = match cmd {
+            ControlCommand::SessionArchive { seed } => ("archive", seed),
+            ControlCommand::SessionUnarchive { seed } => ("unarchive", seed),
+            ControlCommand::SessionDelete { seed } => ("delete", seed),
+            _ => unreachable!(),
+        };
+        let target = session_close_seed(target, &env.seed);
+        if target.is_empty() {
+            pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .rollback(&env.command_id);
+            let ack = RingingCommandAck {
+                command_id: env.command_id,
+                status: RingingCommandAckStatus::Rejected,
+                code: Some("missing_seed".into()),
+                message: Some(format!("Session{op} requires seed")),
+                retry_after_ms: None,
+            };
+            return write_response(
+                stream,
+                "400 Bad Request",
+                "application/json",
+                &serde_json::to_vec(&ack).map_err(stringify)?,
+            )
+            .await;
+        }
+        let result: Result<(), String> = match op {
+            "archive" => {
+                if let Err(error) = service.archive_session(&target, Some(&env.command_id)) {
+                    return write_response(
+                        stream,
+                        "502 Bad Gateway",
+                        "application/json",
+                        &serde_json::to_vec(&RingingCommandAck {
+                            command_id: env.command_id,
+                            status: RingingCommandAckStatus::Rejected,
+                            code: Some("dispatch_failed".into()),
+                            message: Some(format!("{error}")),
+                            retry_after_ms: None,
+                        })
+                        .map_err(stringify)?,
+                    )
+                    .await;
+                }
+                Ok(())
+            }
+            "unarchive" => service.unarchive_session(&target),
+            "delete" => match service.delete_session(&target, Some(&env.command_id)) {
+                Ok(()) => Ok(()),
+                // 会话不存在同样 Accepted（幂等删除，对齐 SessionClose 语义）。
+                Err(e) if e.contains("not found") => Ok(()),
+                Err(e) => Err(e),
+            },
+            _ => unreachable!(),
+        };
+        if let Err(error) = result {
+            pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .rollback(&env.command_id);
+            let ack = RingingCommandAck {
+                command_id: env.command_id,
+                status: RingingCommandAckStatus::Rejected,
+                code: Some("dispatch_failed".into()),
+                message: Some(format!("{error}")),
+                retry_after_ms: None,
+            };
+            return write_response(
+                stream,
+                "502 Bad Gateway",
+                "application/json",
+                &serde_json::to_vec(&ack).map_err(stringify)?,
+            )
+            .await;
+        }
+        if let Some(session_id) = client_session_id {
+            leases
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .detach_seed(session_id, &target);
+        }
+        pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_terminal(&env.command_id, RingingCommandState::Succeeded, None, None);
+        let ack = RingingCommandAck {
+            command_id: env.command_id,
+            status: RingingCommandAckStatus::Accepted,
+            code: None,
+            message: None,
+            retry_after_ms: None,
+        };
+        return write_response(
+            stream,
+            "200 OK",
+            "application/json",
+            &serde_json::to_vec(&ack).map_err(stringify)?,
+        )
+        .await;
+    }
+
     // SessionCreate/Resume are registry operations. They select the worker
     // instance for the whole connection and are not ordinary worker commands.
     match &env.command {

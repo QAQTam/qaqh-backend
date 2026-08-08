@@ -53,6 +53,13 @@ pub enum ControlCommand {
     SessionResume { seed: String },
     /// 关闭指定会话。
     SessionClose { seed: String },
+    /// 归档会话（标签 ×）：daemon 侧拦截——关闭 registry 实例 + meta
+    /// `archived=true`（磁盘保留，左侧列表归档组可见可恢复）。
+    SessionArchive { seed: String },
+    /// 恢复归档会话：meta `archived=false` + 重新拉起实例（对齐 resume 语义）。
+    SessionUnarchive { seed: String },
+    /// 彻底删除会话（左侧列表 ×）：daemon 侧拦截——先关实例再删磁盘目录。
+    SessionDelete { seed: String },
     /// 优雅关闭整个 agent 进程。
     SessionShutdown,
     /// 重载配置（provider、model、permission 等）。

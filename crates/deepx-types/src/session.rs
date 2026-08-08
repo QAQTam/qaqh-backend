@@ -86,6 +86,10 @@ pub struct SessionMeta {
     /// Persisted so PLAN/CODE mode survives agent restart within the same session.
     #[serde(default)]
     pub mode: u8,
+    /// 归档标记：标签 × 归档后置 true（会话停止、不出现在标签条，左侧
+    /// 列表归档组可见可恢复）。旧 meta.json 缺失该字段 = 未归档。
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default)]
     pub skills: SkillSessionStateV2,
     /// Provider-confirmed usage accumulated across model requests in this session.
@@ -137,6 +141,7 @@ impl Default for SessionMeta {
             last_summary: String::new(),
             compact_skip: 0,
             mode: 0,
+            archived: false,
             skills: SkillSessionStateV2::default(),
             usage_totals: crate::UsageInfo::default(),
             last_usage: None,

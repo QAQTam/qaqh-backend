@@ -941,6 +941,15 @@ impl Loop {
                 ControlCommand::SessionClose { .. } => {
                     log::debug!("SessionClose is handled by daemon registry");
                 }
+                ControlCommand::SessionArchive { .. } => {
+                    log::debug!("SessionArchive is handled by daemon registry");
+                }
+                ControlCommand::SessionUnarchive { .. } => {
+                    log::debug!("SessionUnarchive is handled by daemon registry");
+                }
+                ControlCommand::SessionDelete { .. } => {
+                    log::debug!("SessionDelete is handled by daemon registry");
+                }
                 ControlCommand::InteractionAskRespond {
                     interaction_id,
                     answers,

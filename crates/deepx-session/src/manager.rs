@@ -226,7 +226,24 @@ impl SessionManager {
         meta.skills = skills;
         let _ = store::write_meta(&dir, &meta);
         store::upsert_index(&self.sessions_dir, &meta);
-            }
+    }
+
+    /// 设置会话归档标记（标签 × 归档 / 左侧列表恢复）。
+    /// 仅改 meta.json（atomic replace-write），不触碰消息文件与 registry
+    /// 实例——实例启停由调用方（daemon 拦截层）负责。
+    pub fn set_archived(&self, seed: &str, archived: bool) {
+        let lock = self.session_lock(seed);
+        let _guard = lock.lock().unwrap();
+        let dir = self.session_path_dir(seed);
+        let mut meta = self.load_meta(seed).unwrap_or_default();
+        if meta.seed.is_empty() {
+            meta.seed = seed.to_string();
+        }
+        meta.archived = archived;
+        meta.updated_at = Self::now_epoch();
+        let _ = store::write_meta(&dir, &meta);
+        store::upsert_index(&self.sessions_dir, &meta);
+    }
 
     /// Synchronously create a new session directory and initial meta.json
     /// on disk, so that the session exists before the agent process starts.
@@ -733,4 +750,3 @@ mod skill_persistence_tests {
     }
 
 }
-

@@ -54,6 +54,9 @@ pub struct SessionItem {
     pub state: ActivityState,
     pub running: bool,
     pub updated_at: u64,
+    /// 归档标记（标签 × 归档）：true = 不出现在标签条，侧栏归档组显示。
+    /// 缺省 false（旧 daemon 无该字段）。
+    pub archived: bool,
 }
 
 /// 从 daemon `session.list` 查询结果的一个元素投影一行。
@@ -78,6 +81,7 @@ pub fn project_session_meta(
         last_summary
     };
     let updated_at = v.get("updated_at").and_then(|u| u.as_u64()).unwrap_or(0);
+    let archived = v.get("archived").and_then(|a| a.as_bool()).unwrap_or(false);
     let state = activity.unwrap_or(if running {
         ActivityState::Starting
     } else {
@@ -89,6 +93,7 @@ pub fn project_session_meta(
         state,
         running,
         updated_at,
+        archived,
     })
 }
 
@@ -347,9 +352,35 @@ pub fn parse_dashboard_event(event: &Value) -> Option<DashboardSnapshot> {
 pub struct ProviderEndpoint {
     pub id: String,
     pub display: String,
+    /// 协议标识："openai"（Chat Completions）| "responses"（Responses API）| ...
+    pub protocol: String,
     pub base_url: String,
     pub default_model: String,
     pub models: Vec<String>,
+    pub beta: bool,
+}
+
+impl ProviderEndpoint {
+    /// UI 显示名：附上协议与 Beta 标记，对齐后端 registry `display` + `beta`。
+    /// 例：`"OpenAI-compatible (Chat Completions)"` / `"Responses API (Beta)"`。
+    pub fn ui_label(&self) -> String {
+        let proto_suffix = match self.protocol.as_str() {
+            "responses" => "Responses API",
+            "openai" => "Chat Completions",
+            other if !other.is_empty() => other,
+            _ => "",
+        };
+        let base = if proto_suffix.is_empty() || self.display.contains(proto_suffix) {
+            self.display.clone()
+        } else {
+            format!("{} ({})", self.display, proto_suffix)
+        };
+        if self.beta {
+            format!("{} · Beta", base)
+        } else {
+            base
+        }
+    }
 }
 
 /// provider 目录条目（config.load `providers[]`）。
@@ -368,6 +399,8 @@ pub struct ProviderInfo {
 /// 已配置且值不落回 UI（与 Web `SettingsView` 的 isMasked 判定一致）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SettingsSnapshot {
+    /// 是否已从 daemon 加载（false = 首次进入/未响应，前端应显示「加载中」而非默认值）。
+    pub loaded: bool,
     // ── models / api / context ──
     pub api_key: String,
     pub api_key_configured: bool,
@@ -380,6 +413,9 @@ pub struct SettingsSnapshot {
     pub reasoning_effort: String,
     pub auto_compact_threshold: f64,
     pub compliance_enabled: bool,
+    pub active_profile: String,
+    /// config.load `profiles`（profile 名列表，用于 profile 管理 UI）。
+    pub profiles: Vec<String>,
     // ── subagent ──
     pub sub_model: String,
     pub sub_base_url: String,
@@ -404,6 +440,8 @@ pub struct SettingsSnapshot {
     // ── 杂项 ──
     pub tokenizer_path: String,
     pub lang: String,
+    /// UI 字体（空 = 跟随系统默认）。
+    pub font_family: String,
     pub permission_level: u64,
     /// config.load `providers[]`（provider/endpoint 联动选择）。
     pub providers: Vec<ProviderInfo>,
@@ -533,6 +571,7 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
     let sub_api_key = sub_of("api_key");
     let mm_api_key = mm_of("api_key");
     SettingsSnapshot {
+        loaded: true,
         api_key: if is_masked(&api_key) { String::new() } else { api_key.clone() },
         api_key_configured: is_masked(&api_key),
         model: str_of("model"),
@@ -544,6 +583,12 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
         reasoning_effort: str_of("reasoning_effort"),
         auto_compact_threshold: f64_of("auto_compact_threshold"),
         compliance_enabled: bool_of("compliance_enabled"),
+        active_profile: str_of("active_profile"),
+        profiles: v
+            .get("profiles")
+            .and_then(|x| x.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
         sub_model: sub_of("model"),
         sub_base_url: sub_of("base_url"),
         sub_api_key: if is_masked(&sub_api_key) { String::new() } else { sub_api_key.clone() },
@@ -572,6 +617,7 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
         workspace_endpoint: String::new(),
         tokenizer_path: str_of("tokenizer_path"),
         lang: str_of("lang"),
+        font_family: str_of("font_family"),
         permission_level: u64_of("permission_level"),
         providers: v
             .get("providers")
@@ -588,9 +634,14 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
                                 .map(|eps| {
                                     eps.iter()
                                         .filter_map(|ep| {
-                                            Some(ProviderEndpoint {
+                                             Some(ProviderEndpoint {
                                                 id: ep.get("id")?.as_str()?.to_string(),
                                                 display: ep.get("display")?.as_str()?.to_string(),
+                                                protocol: ep
+                                                    .get("protocol")
+                                                    .and_then(|b| b.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
                                                 base_url: ep
                                                     .get("base_url")
                                                     .and_then(|b| b.as_str())
@@ -610,6 +661,10 @@ pub fn parse_config_load(v: &Value) -> SettingsSnapshot {
                                                             .collect()
                                                     })
                                                     .unwrap_or_default(),
+                                                beta: ep
+                                                    .get("beta")
+                                                    .and_then(|b| b.as_bool())
+                                                    .unwrap_or(false),
                                             })
                                         })
                                         .collect()

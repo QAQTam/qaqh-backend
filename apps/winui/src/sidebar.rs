@@ -44,7 +44,7 @@ fn icon_button(icon: Icon, on_click: impl Fn() + 'static) -> Element {
 ///
 /// 与 Web 版 `TaskSidebar` 的 `task-state` 圆点配色对齐：
 /// working=绿 / waiting_user=强调色 / starting=蓝紫 / disconnected=红 / idle=灰。
-fn state_color(state: ActivityState) -> ThemeRef {
+pub(crate) fn state_color(state: ActivityState) -> ThemeRef {
     match state {
         ActivityState::Working => ThemeRef::SystemSuccess,
         ActivityState::WaitingUser => ThemeRef::Accent,
@@ -55,7 +55,7 @@ fn state_color(state: ActivityState) -> ThemeRef {
 }
 
 /// 状态圆点：8px 圆形（Border + 4px 圆角），Fluent 语义色。
-fn state_dot(state: ActivityState) -> Element {
+pub(crate) fn state_dot(state: ActivityState) -> Element {
     border(text_block(""))
         .width(8.0)
         .height(8.0)
@@ -76,7 +76,15 @@ fn state_dot(state: ActivityState) -> Element {
 /// 背景；标题恒 `PrimaryText`（不再随选中变色）。新行出现时淡入
 /// （`transition` = ImplicitShowAnimation，keyed 列表新行 mount 即触发；
 /// 行内 active 切换不重建行 → 不重放）。
-fn session_row(item: &SessionItem, active: bool, bridge: Arc<Bridge>) -> Element {
+///
+/// 删除语义（B 拍板）：行内 × = **彻底删除**（真删磁盘 + 确认对话框）；
+/// 归档走标签页 ×（`spawn_archive`）。
+fn session_row(
+    item: &SessionItem,
+    active: bool,
+    bridge: Arc<Bridge>,
+    set_confirm: SetState<Option<String>>,
+) -> Element {
     let seed = item.seed.clone();
     // 选中竖条（结构常驻，active 只改颜色）。
     let indicator = border(text_block(""))
@@ -90,7 +98,7 @@ fn session_row(item: &SessionItem, active: bool, bridge: Arc<Bridge>) -> Element
         indicator
     };
     let dot: Element = state_dot(item.state);
-    let title_el: Element = text_block(&item.title)
+    let title_el: Element = text_block(item.title.clone())
         .text_trimming(TextTrimming::CharacterEllipsis)
         .foreground(ThemeRef::PrimaryText)
         .vertical_alignment(VerticalAlignment::Center)
@@ -104,8 +112,8 @@ fn session_row(item: &SessionItem, active: bool, bridge: Arc<Bridge>) -> Element
         Icon::symbol(Symbol::Delete),
         {
             let seed = seed.clone();
-            let bridge = bridge.clone();
-            move || bridge.spawn_delete(&seed)
+            let set_confirm = set_confirm.clone();
+            move || set_confirm.call(Some(seed.clone()))
         },
     )
     .vertical_alignment(VerticalAlignment::Center);
@@ -139,6 +147,50 @@ fn session_row(item: &SessionItem, active: bool, bridge: Arc<Bridge>) -> Element
         .into()
 }
 
+/// 归档会话行：置灰标题 + 状态点 + ×（彻底删除确认）。
+///
+/// 点击标题 = 恢复归档（`spawn_unarchive` → meta 标记清除 + resume 拉起
+/// 实例并打开）；× = 彻底删除（同活动行语义，走确认对话框）。
+/// 结构契约同 `session_row`：恒为 border(grid(圆点, 标题, 删除))。
+fn archive_row(
+    item: &SessionItem,
+    bridge: Arc<Bridge>,
+    set_confirm: SetState<Option<String>>,
+) -> Element {
+    let seed = item.seed.clone();
+    let dot: Element = state_dot(item.state);
+    let title_el: Element = text_block(item.title.clone())
+        .text_trimming(TextTrimming::CharacterEllipsis)
+        // 归档 = 告一段落：标题置灰（SecondaryText）。
+        .foreground(ThemeRef::SecondaryText)
+        .vertical_alignment(VerticalAlignment::Center)
+        .on_pointer_pressed({
+            let seed = seed.clone();
+            let bridge = bridge.clone();
+            move |_| bridge.spawn_unarchive(&seed)
+        })
+        .into();
+    let delete = icon_button(
+        Icon::symbol(Symbol::Delete),
+        {
+            let seed = seed.clone();
+            let set_confirm = set_confirm.clone();
+            move || set_confirm.call(Some(seed.clone()))
+        },
+    )
+    .vertical_alignment(VerticalAlignment::Center);
+    let row: Element = grid((
+        dot.grid_column(0),
+        title_el.grid_column(1),
+        delete.grid_column(2),
+    ))
+    .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+    .column_spacing(8.0)
+    .padding(Thickness::xy(10.0, 6.0))
+    .into();
+    border(row).corner_radius(8.0).into()
+}
+
 /// XAML 侧栏组件（放入外层 Grid 第 0 列；宽度由 `width` 控制、可拖拽）。
 pub fn sidebar(
     cx: &mut RenderCx,
@@ -148,6 +200,9 @@ pub fn sidebar(
 ) -> Element {
     let (items, set_items) = cx.use_state::<Vec<SessionItem>>(Vec::new());
     let (active, set_active) = cx.use_state::<String>(String::new());
+    // 彻底删除确认对话框的待删会话（None = 关闭）。行内 × / 操作区删除
+    // 按钮只置位此 state，确认后（Primary）才真正 `spawn_delete`。
+    let (confirm_seed, set_confirm_seed) = cx.use_state::<Option<String>>(None);
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
     // 拖拽状态：`(按下时窗口 x, 按下时宽度)`——差分计算（window_x 稳定，
@@ -209,10 +264,11 @@ pub fn sidebar(
                 Icon::symbol(Symbol::Delete),
                 {
                     let bridge = bridge.clone();
+                    let set_confirm = set_confirm_seed.clone();
                     move || {
                         let seed = bridge.core().active_seed();
                         if !seed.is_empty() {
-                            bridge.spawn_delete(&seed);
+                            set_confirm.call(Some(seed));
                         }
                     }
                 },
@@ -232,15 +288,44 @@ pub fn sidebar(
     };
 
     // ── 会话列表（SelectionMode::None 禁用选中）────────────────
-    let list = list_view(items.clone(), {
+    // 分组：活动（标签条同源：非归档）在上；归档组置灰显示、点击恢复。
+    let (active_items, archived_items): (Vec<SessionItem>, Vec<SessionItem>) =
+        items.iter().cloned().partition(|s| !s.archived);
+    let list_active = list_view(active_items.clone(), {
         let bridge = bridge.clone();
+        let set_confirm = set_confirm_seed.clone();
         let active = active.clone();
-        move |item, _| session_row(item, item.seed == active, bridge.clone())
+        move |item, _| {
+            session_row(item, item.seed == active, bridge.clone(), set_confirm.clone())
+        }
     })
     .with_key_selector(|item| item.seed.clone())
     .selection_mode(SelectionMode::None)
     .build();
-    let session_list: Element = scroll_viewer(list).into();
+    // 归档组头（仅归档非空时显示）。
+    let archived_label: Element = if archived_items.is_empty() {
+        grid(()).into()
+    } else {
+        let el: Element = text_block("归档")
+            .font_size(12.0)
+            .foreground(ThemeRef::SecondaryText)
+            .into();
+        el.margin(Thickness::xy(12.0, 8.0))
+    };
+    let list_archived = list_view(archived_items.clone(), {
+        let bridge = bridge.clone();
+        let set_confirm = set_confirm_seed.clone();
+        move |item, _| archive_row(item, bridge.clone(), set_confirm.clone())
+    })
+    .with_key_selector(|item| item.seed.clone())
+    .selection_mode(SelectionMode::None)
+    .build();
+    let session_list: Element = scroll_viewer(vstack((
+        list_active,
+        archived_label,
+        list_archived,
+    )))
+    .into();
 
     // ── 底部导航：技能 / 设置 ──────────────────────────────────
     let footer: Element = {
@@ -345,11 +430,37 @@ pub fn sidebar(
         })
         .into();
 
+    // ── 彻底删除确认对话框（phantom child 覆盖层：同 cell 重叠渲染）──
+    // 归档请用标签页的 ×（spawn_archive）；列表 × 与操作区删除按钮 =
+    // 真删（manager.delete 磁盘目录），确认后执行。
+    let dialog: Element = match confirm_seed.clone() {
+        Some(seed) => {
+            let bridge = bridge.clone();
+            let set_confirm = set_confirm_seed.clone();
+            ContentDialog::new("彻底删除会话")
+                .content("将删除该会话及其全部消息文件，不可恢复。\n\n归档会话请使用标签页的关闭按钮（×）。")
+                .primary_button_text("彻底删除")
+                .close_button_text("取消")
+                .is_open(true)
+                .on_closed(move |result: ContentDialogResult| {
+                    if result == ContentDialogResult::Primary {
+                        bridge.spawn_delete(&seed);
+                    }
+                    set_confirm.call(None);
+                })
+                .into()
+        }
+        None => grid(()).into(),
+    };
+
     // ── 根容器（无事件：指针已由 splitter 捕获）────────────────────
     grid((
-        content.grid_column(0),
-        splitter.grid_column(1),
+        grid((content.grid_column(0), splitter.grid_column(1)))
+            .columns([GridLength::STAR, GridLength::Pixel(12.0)])
+            .grid_row(0)
+            .grid_column(0),
+        dialog.grid_row(0).grid_column(0),
     ))
-    .columns([GridLength::STAR, GridLength::Pixel(12.0)])
+    .rows([GridLength::STAR])
     .into()
 }
