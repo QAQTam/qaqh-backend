@@ -1,0 +1,12 @@
+[package]
+name = "deepx-fluent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable Windows 11 Fluent visual primitives for DeepX WinUI surfaces"
+
+[dependencies]
+windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3" }
+
+[lints]
+workspace = true

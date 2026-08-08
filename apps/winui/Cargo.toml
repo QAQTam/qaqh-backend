@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 deepx-client = { path = "../../crates/deepx-client" }
+deepx-fluent = { path = "../../crates/deepx-fluent" }
 # 原生 ChatView 渲染：协议事件 → Transcript → reactor 控件树
 markdown-winui = { path = "../../crates/markdown-winui" }
 # time: new_session 轮询等待 session_create 落库（对齐前端 15s 超时）。

@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use deepx_fluent::{StatusTone, tokens};
 use markdown_winui::{
     AnswerView, ConversationEvent, LiveSegment, RichTextOutput, RoundView, Transcript, TurnStatus,
     TurnView,
@@ -264,23 +265,24 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         } else {
             "加载会话…"
         };
-        return text_block(label)
-            .font_size(13.0)
-            .foreground(Color {
-                a: 255,
-                r: 130,
-                g: 130,
-                b: 130,
-            })
-            .with_key("chat-empty")
-            .into();
+        let (title, detail, busy) = if label == "加载会话…" {
+            ("正在恢复对话", "正在读取时间线与最近的消息。", true)
+        } else {
+            (
+                "开始新的对话",
+                "输入消息，或使用斜杠命令开始一项任务。",
+                false,
+            )
+        };
+        return deepx_fluent::empty_state(title, detail, busy).with_key("chat-empty");
     }
     let turns = s.window_turns().to_vec();
     // 顶部预加载后本帧需要锚定补偿：取走挂起标记，把
     // 「原窗口首行」（新下标 = 扩展前移量）锚回原位，视口不跳。
     let anchor_rows = pending_anchor.borrow_mut().take();
     let mut builder = list_view(turns, |turn: &TurnView, i: usize| turn_view(i, turn))
-        .with_key_selector(|turn: &TurnView| turn.turn_id.clone());
+        .with_key_selector(|turn: &TurnView| turn.turn_id.clone())
+        .selection_mode(SelectionMode::None);
     if let Some(anchor_rows) = anchor_rows {
         builder = builder.preserve_anchor(*scroll_version.borrow(), anchor_rows, 0.0);
     } else if *force_tail_version.borrow() == Some(*scroll_version.borrow()) {
@@ -336,35 +338,30 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
 // ── turn / round / answer 渲染（移植自 streaming-demo）─────────────
 
 fn turn_view(i: usize, turn: &TurnView) -> Element {
-    let status = match turn.status {
-        TurnStatus::Running => "⏳",
-        TurnStatus::Completed => "✅",
-        TurnStatus::Failed => "❌",
+    let (status, tone) = match turn.status {
+        TurnStatus::Running => ("正在处理", StatusTone::Running),
+        TurnStatus::Completed => ("已完成", StatusTone::Success),
+        TurnStatus::Failed => ("失败", StatusTone::Critical),
     };
-    let user_line = format!("{status} {}\n", turn.user_text);
-    let mut items: Vec<Element> = vec![
-        // 用户气泡（Border 无 padding builder，用换行撑开）
-        border(text_block(user_line).wrap().selectable())
-            .corner_radius(10.0)
-            .border_brush(Color {
-                a: 255,
-                r: 0,
-                g: 120,
-                b: 212,
-            })
-            .border_thickness(Thickness {
-                left: 1.0,
-                top: 1.0,
-                right: 1.0,
-                bottom: 1.0,
-            })
-            .into(),
-    ];
+    let mut items: Vec<Element> = vec![deepx_fluent::user_message(
+        text_block(&turn.user_text)
+            .font_size(tokens::TYPE_BODY)
+            .wrap()
+            .selectable(),
+        deepx_fluent::status_badge(status, tone),
+    )];
     for round in &turn.rounds {
         items.push(round_view(i, round));
     }
     vstack(items)
-        .spacing(6.0)
+        .spacing(tokens::SPACE_3)
+        .padding(Thickness {
+            left: tokens::SPACE_6,
+            top: tokens::SPACE_3,
+            right: tokens::SPACE_6,
+            bottom: tokens::SPACE_3,
+        })
+        .horizontal_alignment(HorizontalAlignment::Stretch)
         .with_key(turn.turn_id.clone())
         .into()
 }
@@ -372,37 +369,16 @@ fn turn_view(i: usize, turn: &TurnView) -> Element {
 fn round_view(turn_idx: usize, round: &RoundView) -> Element {
     let mut items: Vec<Element> = Vec::new();
     if let Some(thinking) = &round.thinking {
-        // 思考链路：气泡框（同用户 chat 的 border 样式，灰边区分）——
-        // 完整内容直接展示，不再用折叠器（折叠让给 tool 卡）。
         items.push(
-            border(
-                vstack([
-                    text_block("🧠 思考")
-                        .font_size(11.0)
-                        .semibold()
-                        .foreground(Color {
-                            a: 255,
-                            r: 140,
-                            g: 140,
-                            b: 140,
-                        }),
-                    text_block(thinking).wrap().selectable(),
-                ])
-                .spacing(4.0),
+            Expander::new(
+                text_block(thinking)
+                    .font_size(tokens::TYPE_BODY)
+                    .foreground(ThemeRef::SecondaryText)
+                    .wrap()
+                    .selectable(),
             )
-            .corner_radius(10.0)
-            .border_brush(Color {
-                a: 255,
-                r: 160,
-                g: 160,
-                b: 160,
-            })
-            .border_thickness(Thickness {
-                left: 1.0,
-                top: 1.0,
-                right: 1.0,
-                bottom: 1.0,
-            })
+            .header("思考过程")
+            .expanded(false)
             .with_key(format!("t{turn_idx}r{}-thinking", round.round_num))
             .into(),
         );
@@ -410,9 +386,15 @@ fn round_view(turn_idx: usize, round: &RoundView) -> Element {
     for card in &round.tool_calls {
         items.push(tool_card(turn_idx, round.round_num, card));
     }
-    items.push(answer_view(turn_idx, round.round_num, &round.answer));
+    items.push(deepx_fluent::assistant_message(answer_view(
+        turn_idx,
+        round.round_num,
+        &round.answer,
+    )));
     vstack(items)
-        .spacing(4.0)
+        .spacing(tokens::SPACE_2)
+        .max_width(tokens::READING_MAX_WIDTH)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
         .with_key(format!("t{turn_idx}r{}", round.round_num))
         .into()
 }
@@ -453,7 +435,7 @@ fn live_view(turn_idx: usize, round_num: u32, segments: &[LiveSegment]) -> Eleme
         );
     }
     vstack(items)
-        .spacing(4.0)
+        .spacing(tokens::SPACE_2)
         .with_key(format!("t{turn_idx}r{round_num}-live"))
         .into()
 }
@@ -487,39 +469,11 @@ fn final_view(turn_idx: usize, round_num: u32, rich: &RichTextOutput) -> Element
                 }
                 markdown_winui::FinalBlock::Code(code) => {
                     flush(&mut items, &mut pending);
-                    let lang = code.lang.as_deref().unwrap_or("");
-                    items.push(
-                        border(
-                            vstack([
-                                text_block(if lang.is_empty() { "code" } else { lang })
-                                    .font_size(10.0)
-                                    .semibold()
-                                    .foreground(Color {
-                                        a: 255,
-                                        r: 150,
-                                        g: 150,
-                                        b: 150,
-                                    }),
-                                text_block(&code.text).wrap().selectable(),
-                            ])
-                            .spacing(4.0),
-                        )
-                        .corner_radius(8.0)
-                        .border_brush(Color {
-                            a: 255,
-                            r: 140,
-                            g: 140,
-                            b: 140,
-                        })
-                        .border_thickness(Thickness {
-                            left: 1.0,
-                            top: 1.0,
-                            right: 1.0,
-                            bottom: 1.0,
-                        })
-                        .with_key(format!("t{turn_idx}r{round_num}-code-{n}", n = items.len()))
-                        .into(),
-                    );
+                    items.push(deepx_fluent::code_surface(
+                        code.lang.as_deref().unwrap_or(""),
+                        &code.text,
+                        format!("t{turn_idx}r{round_num}-code-{n}", n = items.len()),
+                    ));
                 }
             }
         }
@@ -538,66 +492,41 @@ fn final_view(turn_idx: usize, round_num: u32, rich: &RichTextOutput) -> Element
             ));
         }
         for (ci, code) in rich.code_blocks.iter().enumerate() {
-            let lang = code.lang.as_deref().unwrap_or("");
-            items.push(
-                border(
-                    vstack([
-                        text_block(if lang.is_empty() { "code" } else { lang })
-                            .font_size(10.0)
-                            .semibold()
-                            .foreground(Color {
-                                a: 255,
-                                r: 150,
-                                g: 150,
-                                b: 150,
-                            }),
-                        text_block(&code.text).wrap().selectable(),
-                    ])
-                    .spacing(4.0),
-                )
-                .corner_radius(8.0)
-                .border_brush(Color {
-                    a: 255,
-                    r: 140,
-                    g: 140,
-                    b: 140,
-                })
-                .border_thickness(Thickness {
-                    left: 1.0,
-                    top: 1.0,
-                    right: 1.0,
-                    bottom: 1.0,
-                })
-                .with_key(format!("t{turn_idx}r{round_num}-code-{ci}"))
-                .into(),
-            );
+            items.push(deepx_fluent::code_surface(
+                code.lang.as_deref().unwrap_or(""),
+                &code.text,
+                format!("t{turn_idx}r{round_num}-code-{ci}"),
+            ));
         }
     }
     vstack(items)
-        .spacing(6.0)
+        .spacing(tokens::SPACE_3)
         .with_key(format!("t{turn_idx}r{round_num}-final"))
         .into()
 }
 
-/// 工具卡（流式累积，id 稳定；done 打勾）。折叠器承载：
-/// header = 图标 + 状态 + 工具名；展开 = 参数 raw（DeepX 工具）或
+/// 工具卡（流式累积，id 稳定）。折叠器承载：
+/// header = 状态 + 工具名；展开 = 参数 raw（DeepX 工具）或
 /// 执行状态（provider 内建工具，如 web_search 搜索中…）。
 fn tool_card(turn_idx: usize, round_num: u32, card: &markdown_winui::ToolCardView) -> Element {
-    let status = if card.done { "✓" } else { "…" };
+    let status = if card.done {
+        "已完成"
+    } else {
+        "正在运行"
+    };
     let name = card.name.as_deref().unwrap_or("<解析中>");
-    let icon = if card.provider { "🔍" } else { "🛠" };
     // 展开区：provider 卡显示状态文案（args_display 承载），其余显示参数。
     let body: Element = if card.args_display.trim().is_empty() {
-        text_block("").font_size(11.0).into()
+        text_block("").font_size(tokens::TYPE_CAPTION).into()
     } else {
         text_block(&card.args_display)
-            .font_size(11.0)
+            .font_size(tokens::TYPE_CAPTION)
             .wrap()
             .selectable()
             .into()
     };
     Expander::new(body)
-        .header(format!("{icon} {status} {name}"))
+        .header(format!("{status} · {name}"))
         .expanded(false)
         .with_key(format!("t{turn_idx}r{round_num}-card-{}", card.id))
         .into()

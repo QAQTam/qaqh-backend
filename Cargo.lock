@@ -1156,6 +1156,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepx-fluent"
+version = "1.0.0-rc.1"
+dependencies = [
+ "windows-reactor",
+]
+
+[[package]]
 name = "deepx-gate"
 version = "1.0.0-rc.1"
 dependencies = [
@@ -1349,6 +1356,7 @@ name = "deepx-winui"
 version = "1.0.0-rc.1"
 dependencies = [
  "deepx-client",
+ "deepx-fluent",
  "markdown-winui",
  "serde",
  "serde_json",
