@@ -5,9 +5,11 @@
 //!    已有的 `RichTextParagraph` / `RichTextInline` / `RichTextRun` 类型
 //!    —— 无需新类型，widget 层（widget.rs）与后端（set_rich_text_paragraphs）
 //!    已就绪；
-//! 2. 代码块**不**映射到段落：走独立 `CodeBlock` 通道（需求单 1.2 的
-//!    `code_block(text, lang, theme)`，由高亮器填充 token Run）；
-//! 3. 数学公式在 katex Rust 端口就绪前按**字面文本**回退（`throwOnError:
+//! 2. 代码块**不**映射到段落：走独立 `CodeBlock` 通道，由 syntect
+//!    填充带前景色的原生 token Run；
+//! 3. Mermaid 由纯 Rust renderer 生成静态 SVG，再交给 WinUI 原生
+//!    `SvgImageSource`；不承载 HTML/JavaScript，也不使用 WebView；
+//! 4. 数学公式在 katex Rust 端口就绪前按**字面文本**回退（`throwOnError:
 //!    false` 语义 + REFERENCE §9 降级阶梯：图片 / 公式 → 文本降级）。
 //!
 //! 协议驱动渲染（针对后端设计，`round_renderer`）：
@@ -16,18 +18,26 @@
 //!   的 Element 树交给 windows-reactor reconciler 提交到 XAML
 //!
 //! 已知 fork 缺口（本原型暴露，见 README 可行性矩阵）：
-//! - `RichTextRun` 缺前景色字段（高亮 token 着色需要 fork 扩展）
 //! - `RichTextInline::Hyperlink` 后端只渲染为普通 Run（无点击事件）
-//! - `RichTextRun::is_italic / is_strikethrough / font_family / font_size`
-//!   后端 `set_rich_text_paragraphs` 尚未消费（半成品）
+//! - `RichTextRun::is_italic / is_strikethrough` 后端尚未消费
 
+mod diagram;
+mod highlight;
 mod protocol;
 mod round_renderer;
+mod tool_content;
 
+pub use diagram::{DiagramBlock, diagram_view};
+pub use highlight::highlighted_code_block;
 pub use protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
 pub use round_renderer::{
     AnswerView, LiveSegment, PendingOutput, RestoredRound, RestoredTurn, RoundView, ToolCardView,
     Transcript, TranscriptChange, TranscriptInvalidation, TurnStatus, TurnView,
+};
+pub use tool_content::{
+    ChangeStats, CodeDocument, DiffDocument, DiffFile, DiffRow, DiffRowKind, ToolBody,
+    change_stats_from_result, change_stats_from_timeline, parse_unified_diff,
+    tool_body_from_result, tool_body_from_timeline, tool_body_view,
 };
 
 use markdown_core::ast::{Block, Inline};
@@ -41,12 +51,13 @@ use windows_reactor::{
 ///   多段落构造）
 /// - `code_blocks` → 独立代码块 widget（需求单 1.2，高亮器消费）
 /// - `tables` → Grid 拼装的表格 widget（[`table_view`]）
-/// - `blocks` → **有序块序列**（final 全量渲染按此遍历；paragraphs/tables/
-///   code_blocks 是它的三个分通道，供旧调用方/实时路径使用）
+/// - `blocks` → **有序块序列**（final 全量渲染按此遍历；其余字段是分通道，
+///   供旧调用方/实时路径使用）
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RichTextOutput {
     pub paragraphs: Vec<RichTextParagraph>,
     pub code_blocks: Vec<CodeBlock>,
+    pub diagrams: Vec<DiagramBlock>,
     pub tables: Vec<TableData>,
     /// final 渲染的有序块（保持文档块顺序：正文/表格/代码块交错）。
     pub blocks: Vec<FinalBlock>,
@@ -58,6 +69,7 @@ pub enum FinalBlock {
     Paragraph(RichTextParagraph),
     Table(TableData),
     Code(CodeBlock),
+    Diagram(DiagramBlock),
 }
 
 /// 表格数据（markdown GFM 表格的渲染中间表示）。
@@ -162,6 +174,7 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
                     }
                     out.paragraphs.extend(para.paragraphs);
                     out.code_blocks.extend(para.code_blocks);
+                    out.diagrams.extend(para.diagrams);
                     out.tables.extend(para.tables);
                     out.blocks.extend(para.blocks);
                 }
@@ -175,6 +188,12 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
                 out.tables.push(table);
             }
             Block::Code { lang, text } => {
+                if lang.as_deref() == Some("mermaid") {
+                    let diagram = DiagramBlock::render(text);
+                    out.blocks.push(FinalBlock::Diagram(diagram.clone()));
+                    out.diagrams.push(diagram);
+                    continue;
+                }
                 let code = CodeBlock {
                     lang: lang.clone(),
                     text: text.clone(),
@@ -362,6 +381,22 @@ mod tests {
         assert_eq!(out.code_blocks[0].lang.as_deref(), Some("rs"));
     }
 
+    #[test]
+    fn mermaid_fence_becomes_native_diagram_channel() {
+        let out = render_final(&markdown_core::parse_final(
+            "before\n\n```mermaid\nflowchart LR; A-->B\n```\n\nafter",
+        ));
+        assert_eq!(out.diagrams.len(), 1);
+        assert!(out.code_blocks.is_empty());
+        assert!(matches!(out.blocks[1], FinalBlock::Diagram(_)));
+        assert!(
+            out.diagrams[0]
+                .light_svg
+                .as_deref()
+                .is_some_and(|svg| svg.contains("<svg"))
+        );
+    }
+
     /// 有序块：正文/表格/代码块按文档顺序交错（修复「表格/代码块堆到
     /// 文字之下」：final 渲染必须按 blocks 顺序，而非通道分组）。
     #[test]
@@ -458,14 +493,16 @@ mod tests {
         assert!(out.paragraphs.is_empty(), "表格不应进段落通道");
     }
 
-    /// table_view 产出 Grid 元素树（表头加粗 + grid_row/column 定位）
+    /// table_view 产出可横向滚动的 Grid 元素树。
     #[test]
     fn table_view_builds_grid() {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |";
         let out = render_final(&markdown_core::parse_final(md));
         let el = table_view(&out.tables[0], "tbl");
-        // 外层是描边卡片（Border），内层是 Grid
-        let Element::Border(b) = &el else {
+        let Element::ScrollViewer(scroll) = &el else {
+            panic!("expect horizontal scroll viewer");
+        };
+        let Element::Border(b) = &*scroll.child else {
             panic!("expect border card");
         };
         let Element::Grid(g) = &*b.child else {
@@ -495,8 +532,9 @@ mod tests {
 
 /// 表格 → reactor Grid 元素树。
 ///
-/// 布局：表头行（row 0，加粗 + 半透明背景 + 底部粗线）+ 数据行（row 1..，
-/// 单元格右/下 1px 细线构成网格）；列宽等分 Star；整表描边卡片。
+/// 布局：表头行（row 0，加粗 + 主题背景 + 底部粗线）+ 数据行（row 1..，
+/// 单元格右/下 1px 细线构成网格）；列宽按内容 Auto，并由 ScrollViewer
+/// 处理窄窗口，避免压缩成不可读的多行窄列；整表使用 Fluent 主题资源。
 /// 行/列必须显式定义（WinUI Grid 无定义时 SetRow 会重叠）。
 pub fn table_view(table: &TableData, key: &str) -> Element {
     let n_cols = table.headers.len().max(1);
@@ -530,29 +568,23 @@ pub fn table_view(table: &TableData, key: &str) -> Element {
         }
     }
 
-    let cols = std::iter::repeat_n(GridLength::Star(1.0), n_cols);
+    let cols = std::iter::repeat_n(GridLength::Auto, n_cols);
     let rows = std::iter::repeat_n(GridLength::Auto, n_rows);
-    border(grid(children).columns(cols).rows(rows))
+    let card = border(grid(children).columns(cols).rows(rows))
+        .background(windows_reactor::ThemeRef::CardBackground)
         .corner_radius(6.0)
-        .border_brush(windows_reactor::Color {
-            a: 255,
-            r: 190,
-            g: 190,
-            b: 190,
-        })
-        .border_thickness(windows_reactor::Thickness {
-            left: 1.0,
-            top: 1.0,
-            right: 1.0,
-            bottom: 1.0,
-        })
+        .border_brush(windows_reactor::ThemeRef::CardStroke)
+        .border_thickness(windows_reactor::Thickness::uniform(1.0))
+        .with_key(format!("{key}-card"));
+    windows_reactor::scroll_viewer(card)
+        .horizontal_scroll_bar_visibility(windows_reactor::ScrollBarVisibility::Auto)
+        .vertical_scroll_bar_visibility(windows_reactor::ScrollBarVisibility::Disabled)
         .with_key(key)
         .into()
 }
 
-/// 单个表格单元格：Border 描边（右/下 1px；表头底部 2px + 半透明背景）。
+/// 单个表格单元格：Border 描边（右/下 1px；表头底部 2px + 主题背景）。
 /// 最右列去掉右线、最后一行去掉底线，避免与外框双线。
-/// 线色 150 灰（深/浅主题均可见；205 灰在浅色 Mica 上几乎隐形）。
 fn table_cell(
     text: String,
     key: String,
@@ -562,33 +594,22 @@ fn table_cell(
     n_rows: i32,
     is_header: bool,
 ) -> Element {
-    let line = windows_reactor::Color {
-        a: 255,
-        r: 150,
-        g: 150,
-        b: 150,
-    };
     let (bottom, top) = if is_header { (2.0, 1.0) } else { (1.0, 0.0) };
     let mut tb = text_block(text).wrap().center_aligned();
     if is_header {
         tb = tb.semibold();
     }
     let mut cell = border(tb)
-        .border_brush(line)
+        .border_brush(windows_reactor::ThemeRef::CardStroke)
         .border_thickness(windows_reactor::Thickness {
             left: 0.0,
             top,
             right: if col + 1 < n_cols { 1.0 } else { 0.0 },
             bottom: if row + 1 < n_rows { bottom } else { 0.0 },
-        });
+        })
+        .padding(windows_reactor::Thickness::xy(12.0, 8.0));
     if is_header {
-        // 半透明灰背景（表头区视觉区分）
-        cell = cell.background(windows_reactor::Color {
-            a: 52,
-            r: 128,
-            g: 128,
-            b: 128,
-        });
+        cell = cell.background(windows_reactor::ThemeRef::ControlFillSecondary);
     }
     cell.grid_row(row).grid_column(col).with_key(key).into()
 }

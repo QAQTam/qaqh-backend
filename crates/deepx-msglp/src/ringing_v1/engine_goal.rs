@@ -57,7 +57,9 @@ impl GoalEngine {
         let mut store = load_todo()?;
 
         if store.mode == TodoMode::Goal {
-            return Err("A goal is already active. Stop it first with todo(action=\"cancel\").".into());
+            return Err(
+                "A goal is already active. Stop it first with todo(action=\"cancel\").".into(),
+            );
         }
 
         // Filter items to activate
@@ -77,7 +79,9 @@ impl GoalEngine {
         };
 
         if active_items.is_empty() {
-            return Err("No items to activate. Use todo(action=\"create\") first or specify ids.".into());
+            return Err(
+                "No items to activate. Use todo(action=\"create\") first or specify ids.".into(),
+            );
         }
 
         // Items are activated in their natural order (complexity sorting removed).

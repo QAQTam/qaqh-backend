@@ -199,6 +199,15 @@ fn print_event(ev: &ConversationEvent) {
             "▶ ToolFinished round{round_num} {tool_call_id}: {:?}",
             result.get("summary").and_then(|s| s.as_str())
         ),
+        ConversationEvent::CodeChanged {
+            lines_added,
+            lines_removed,
+            file,
+            ..
+        } => println!(
+            "▶ CodeChanged   {} +{lines_added} -{lines_removed}",
+            file.as_deref().unwrap_or("代码")
+        ),
     }
 }
 

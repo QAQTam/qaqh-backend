@@ -15,10 +15,10 @@ mod header;
 mod home_view;
 mod info_panel;
 mod interaction_overlay;
-mod shell;
-mod shell_store;
 mod session_tabs;
 mod settings_view;
+mod shell;
+mod shell_store;
 mod sidebar;
 mod skills_view;
 
@@ -34,8 +34,7 @@ fn app(cx: &mut RenderCx) -> Element {
     let bridge = bridge::Bridge::shared();
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     // 侧栏宽度：可拖拽（splitter），双击抓握条恢复默认。
-    let (sidebar_width, set_sidebar_width) =
-        cx.use_state::<f64>(sidebar::SIDEBAR_DEFAULT_WIDTH);
+    let (sidebar_width, set_sidebar_width) = cx.use_state::<f64>(sidebar::SIDEBAR_DEFAULT_WIDTH);
 
     cx.use_effect((), {
         let bridge = bridge.clone();
@@ -55,7 +54,6 @@ fn app(cx: &mut RenderCx) -> Element {
             }
         }
     });
-
 
     // Step 1: 内容区元素——左 XAML 侧栏（可拖拽宽度）+ 右区。
     // 右区 = 内层 Grid 多行（WORKFLOW §8 壳主导视图族）：
@@ -127,14 +125,10 @@ fn app(cx: &mut RenderCx) -> Element {
                     move || {
                         let (snap, _) = bridge.core().settings_snapshot();
                         if let Some(snap) = snap {
-                            let font = snap.font_family;
+                            let font = fonts::effective_ui_font(&snap.font_family).to_string();
                             if font != *last_font.borrow() {
                                 *last_font.borrow_mut() = font.clone();
-                                if font.is_empty() {
-                                    windows_reactor::set_font_family(None);
-                                } else {
-                                    windows_reactor::set_font_family(Some(&font));
-                                }
+                                windows_reactor::set_font_family(Some(&font));
                             }
                         }
                     }
@@ -206,9 +200,23 @@ fn app(cx: &mut RenderCx) -> Element {
     } else {
         GridLength::Pixel(0.0)
     };
-    let right: Element = grid((right_content, info_el))
+    let right_body: Element = grid((right_content, info_el))
         .columns([GridLength::STAR, info_width])
+        .grid_row(1)
+        .grid_column(0)
+        .into();
+    // Session tabs belong to the document workspace, not to the navigation
+    // rail. Keeping both in one right-side grid aligns their coordinate space
+    // while the transcript retains its narrower centered reading measure.
+    let tabs: Element = session_tabs::session_tabs(cx, bridge.clone())
         .grid_row(0)
+        .grid_column(0)
+        .into();
+    let right: Element = grid((tabs, right_body))
+        .rows([
+            GridLength::Pixel(session_tabs::TAB_STRIP_HEIGHT),
+            GridLength::STAR,
+        ])
         .grid_column(1)
         .into();
 
@@ -264,26 +272,15 @@ fn app(cx: &mut RenderCx) -> Element {
         .grid_row(0)
         .grid_column(0)
         .into();
-    // ── 内容区（row 1）：row0 = 顶部会话标签条（跨侧栏全宽）；
-    // row1 = 基础层（侧栏 | 右区）────────────────────────────
+    // ── 内容区（row 1）：侧栏 | 文档工作区（标签条 + 视图）──────
     // P-6 覆盖层预留（WORKFLOW §6.1）：未来 XAML 面板/对话框
     // （P1 Flyout anchor / P2 ContentDialog phantom child）作为覆盖层
     // 元素追加进本 Grid（同 cell 重叠渲染），零布局改动。
-    let tabs: Element = session_tabs::session_tabs(cx, bridge.clone())
-        .grid_row(0)
+    let content: Element = grid((nav.grid_column(0), right))
+        .columns([GridLength::Pixel(sidebar_width), GridLength::STAR])
+        .grid_row(1)
         .grid_column(0)
         .into();
-    let content: Element = grid((
-        tabs,
-        grid((nav.grid_column(0), right))
-            .columns([GridLength::Pixel(sidebar_width), GridLength::STAR])
-            .grid_row(1)
-            .grid_column(0),
-    ))
-    .rows([GridLength::Pixel(session_tabs::TAB_STRIP_HEIGHT), GridLength::STAR])
-    .grid_row(1)
-    .grid_column(0)
-    .into();
     let base: Element = grid((titlebar, content))
         .rows([GridLength::Pixel(header::HEADER_HEIGHT), GridLength::STAR])
         .into();
@@ -305,8 +302,7 @@ fn app(cx: &mut RenderCx) -> Element {
     };
     // 交互模态覆盖层（P-6 同模式）：kind="none" 时内部空 grid 穿透；
     // 有交互时半透明遮罩 + 卡片（permission/ask 模板）。置于最上层。
-    let interaction: Element =
-        interaction_overlay::interaction_overlay(cx, bridge.clone()).into();
+    let interaction: Element = interaction_overlay::interaction_overlay(cx, bridge.clone()).into();
     grid((base, splash, interaction)).into()
 }
 
@@ -323,7 +319,6 @@ fn log_diag(msg: &str) {
 }
 
 fn main() -> windows_reactor::Result<()> {
-
     App::new()
         .title("DeepX")
         .inner_size(1200.0, 800.0)

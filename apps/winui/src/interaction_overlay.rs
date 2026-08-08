@@ -50,7 +50,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// 模态卡片宽度（对齐 Web `.interaction-modal-card` 语义宽度）。
 const CARD_WIDTH: f64 = 420.0;
 /// 等宽字体（路径列表；同 info_panel `MONO_FONT`）。
-const MONO_FONT: &str = "Consolas";
+const MONO_FONT: &str = deepx_fluent::tokens::CODE_FONT_FAMILY;
 /// 遮罩透明度（半透明黑 scrim，拦截命中 + 保留上下文可见）。
 const SCRIM_ALPHA: u8 = 120;
 
@@ -278,22 +278,24 @@ pub fn interaction_overlay(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let body: Element = if state.kind == "permission" {
         permission_body(&state, trust, on_approve, on_reject)
     } else if state.kind == "plan" {
-        plan_body(&state, feedback, autonomous, on_plan_approve, on_plan_reject)
+        plan_body(
+            &state,
+            feedback,
+            autonomous,
+            on_plan_approve,
+            on_plan_reject,
+        )
     } else {
         ask_body(&state, selected, custom, on_ask_submit, on_ask_dismiss)
     };
 
-    let card: Element = border(
-        vstack((body,))
-            .spacing(12.0)
-            .padding(20.0),
-    )
-    .corner_radius(8.0)
-    .background(ThemeRef::LayerFill)
-    .width(CARD_WIDTH)
-    .horizontal_alignment(HorizontalAlignment::Center)
-    .vertical_alignment(VerticalAlignment::Center)
-    .into();
+    let card: Element = border(vstack((body,)).spacing(12.0).padding(20.0))
+        .corner_radius(8.0)
+        .background(ThemeRef::LayerFill)
+        .width(CARD_WIDTH)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .vertical_alignment(VerticalAlignment::Center)
+        .into();
 
     // 模态遮罩：有背景 → 拦截下方基础层命中（与空 grid 穿透互补）。
     grid((card,))
@@ -318,7 +320,9 @@ fn permission_body(
 ) -> Element {
     let risk = risk_color(&state.risk);
     let meta: Element = hstack((
-        text_block(&state.category).font_size(12.0).foreground(ThemeRef::SecondaryText),
+        text_block(&state.category)
+            .font_size(12.0)
+            .foreground(ThemeRef::SecondaryText),
         text_block(" · ")
             .font_size(12.0)
             .foreground(ThemeRef::TertiaryText),
@@ -365,9 +369,7 @@ fn permission_body(
         eyebrow("需要授权"),
         text_block(&state.tool_name).font_size(16.0).semibold(),
         meta,
-        text_block(&state.reason)
-            .font_size(13.0)
-            .wrap(),
+        text_block(&state.reason).font_size(13.0).wrap(),
         text_block(&state.consequence)
             .font_size(13.0)
             .foreground(ThemeRef::SecondaryText)
@@ -460,10 +462,7 @@ fn ask_body(
             q.question.clone()
         };
         let q_row: Element = vstack((
-            text_block(title)
-                .font_size(13.0)
-                .semibold()
-                .wrap(),
+            text_block(title).font_size(13.0).semibold().wrap(),
             options,
             input,
         ))
@@ -539,10 +538,7 @@ fn plan_body(
             text_block(&item.id)
                 .font_size(12.0)
                 .foreground(ThemeRef::SecondaryText),
-            text_block(&item.title)
-                .font_size(13.0)
-                .semibold()
-                .wrap(),
+            text_block(&item.title).font_size(13.0).semibold().wrap(),
             text_block(&item.complexity)
                 .font_size(11.0)
                 .foreground(complexity_color(&item.complexity)),
@@ -637,7 +633,11 @@ fn plan_body(
     } else {
         "批准并继续"
     };
-    let reject_label = if is_todo { "拒绝激活" } else { "拒绝计划" };
+    let reject_label = if is_todo {
+        "拒绝激活"
+    } else {
+        "拒绝计划"
+    };
 
     vstack((
         eyebrow(eyebrow_text),

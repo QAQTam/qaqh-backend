@@ -39,12 +39,10 @@ pub fn read_worker_command_frame<R: BufRead>(
     let value: serde_json::Value = serde_json::from_str(&line)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     match value.get("wire") {
-        None => {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "worker command frame missing `wire` tag (legacy frames removed in M3)",
-            ))
-        }
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "worker command frame missing `wire` tag (legacy frames removed in M3)",
+        )),
         Some(w) if w == WIRE_RINGING_DOMAIN_V1 => {
             let frame = serde_json::from_value::<RingingWorkerCommandEnvelope>(value)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;

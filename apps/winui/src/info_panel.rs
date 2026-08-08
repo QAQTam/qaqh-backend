@@ -10,7 +10,7 @@
 //! 布局（对齐 Web InfoPopover，Fluent 2 语义色；main.rs 按 `info_open` 切
 //! 列宽 0 ↔ [`PANEL_WIDTH`]）：
 //! ```text
-//! ┌ 卡片（LayerFill + 圆角 8px）──────────────────────────────┐
+//! ┌ 卡片（CardBackground + CardStroke + 圆角 8px）────────────┐
 //! │ 环境                                            (11px 600) │
 //! │ ● model 名                         live / 等待用量          │
 //! │ 上下文  123,456 / 1,000,000      ▓▓▓▓▓░░░        12.3%     │
@@ -24,7 +24,7 @@
 //! ```
 //!
 //! 复刻偏差（WORKFLOW §9.2 / P4a 研究报告）：
-//! - 毛玻璃/双层阴影/内高光 → LayerFill + 圆角（Fluent 2 语义等价，壳内统一）
+//! - 毛玻璃/双层阴影/内高光 → CardBackground + CardStroke（原生主题语义）
 //! - RollingNumber 滚动动画 → 静态数字（千分位格式化保留"仪表感"）
 //! - 进度条宽度补间 → 无（Composition 无宽度补间；值变化瞬间切换）
 //! - live dot 3px 光晕 → 外环 `SystemSuccessBackground` + 内点（近似）
@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use windows_reactor::*;
 
-use deepx_fluent::motion;
+use deepx_fluent::{motion, tokens};
 
 use crate::bridge::Bridge;
 use crate::shell_store::{DashboardSnapshot, SessionDetail, UsageInfo};
@@ -60,8 +60,8 @@ fn log_diag(msg: &str) {
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// 面板宽度（main.rs 列宽；对齐 Web 340px − 阴影/内边距余量）。
 pub const PANEL_WIDTH: f64 = 320.0;
-/// 等宽字体（Win11 自带；对齐 Web `--font-mono` Cascadia Code 的仪表感）。
-const MONO_FONT: &str = "Consolas";
+/// 内置等宽字体；无资产时由 WinUI 回退到 Consolas。
+const MONO_FONT: &str = deepx_fluent::tokens::CODE_FONT_FAMILY;
 
 /// 千分位格式化（对齐 Web `formatRawNumber`：无缩写，逗号分组）。
 fn fmt_thousands(n: u64) -> String {
@@ -94,10 +94,10 @@ fn cache_hit_pct(u: &UsageInfo) -> Option<f64> {
     }
 }
 
-/// 区块标题（Web `environment-heading`：11px 600 muted；中文无 uppercase 效果）。
+/// 区块标题：使用 Fluent caption 级别，避免 9–11 DIP 字号在高 DPI 下过密。
 fn section_heading(text: &str) -> Element {
     text_block(text)
-        .font_size(11.0)
+        .font_size(tokens::TYPE_CAPTION)
         .semibold()
         .foreground(ThemeRef::SecondaryText)
         .into()
@@ -159,7 +159,7 @@ fn live_dot(active: bool) -> Element {
     }
 }
 
-/// token 四格（Web `info-token-grid`：9px muted 标签 + 12px 等宽数值，
+/// token 四格：caption 标签 + 13px 等宽数值，
 /// 列间 1px DividerStroke 分隔线，第一格无）。
 fn token_grid(u: &UsageInfo) -> Element {
     let (p, c, r, t) = (
@@ -171,9 +171,9 @@ fn token_grid(u: &UsageInfo) -> Element {
     let cell = |label: &str, value: u64| -> Element {
         vstack((
             text_block(label)
-                .font_size(9.0)
+                .font_size(tokens::TYPE_CAPTION)
                 .foreground(ThemeRef::SecondaryText),
-            mono_text(fmt_thousands(value), 12.0),
+            mono_text(fmt_thousands(value), 13.0),
         ))
         .spacing(2.0)
         .into()
@@ -222,7 +222,7 @@ fn cache_card(label: &str, u: &UsageInfo, accent: bool) -> Option<Element> {
     // 显式 Element 标注：内层 into 的目标类型无法从 vstack 泛型 tuple 推断。
     let header: Element = grid((
         text_block(label)
-            .font_size(11.0)
+            .font_size(tokens::TYPE_CAPTION)
             .foreground(ThemeRef::SecondaryText)
             .grid_column(0),
         text_block(format!("{pct:.1}%"))
@@ -244,7 +244,7 @@ fn cache_card(label: &str, u: &UsageInfo, accent: bool) -> Option<Element> {
                     fmt_thousands(u.prompt_cache_hit_tokens),
                     fmt_thousands(u.prompt_cache_miss_tokens)
                 ))
-                .font_size(10.0)
+                .font_size(tokens::TYPE_CAPTION)
                 .foreground(ThemeRef::SecondaryText),
                 progress_bar(pct, fill),
             ))
@@ -265,7 +265,7 @@ fn context_card(d: &SessionDetail) -> Element {
     // 在水平 StackPanel 中的剩余空间分配异常导致文字挤压重叠。
     let label_row: Element = grid((
         text_block("上下文")
-            .font_size(11.0)
+            .font_size(tokens::TYPE_CAPTION)
             .foreground(ThemeRef::SecondaryText)
             .grid_column(0),
         mono_text(
@@ -274,7 +274,7 @@ fn context_card(d: &SessionDetail) -> Element {
                 fmt_thousands(d.usage.prompt_tokens),
                 fmt_thousands(d.context_limit)
             ),
-            11.0,
+            tokens::TYPE_CAPTION,
         )
         .horizontal_alignment(HorizontalAlignment::Right)
         .grid_column(1),
@@ -285,7 +285,7 @@ fn context_card(d: &SessionDetail) -> Element {
         .spacing(6.0)
         .into();
     let pct_el: Element = text_block(format!("{pct:.1}%"))
-        .font_size(10.0)
+        .font_size(tokens::TYPE_CAPTION)
         .font_family(MONO_FONT)
         .foreground(ThemeRef::SecondaryText)
         .vertical_alignment(VerticalAlignment::Center)
@@ -400,13 +400,13 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 } else {
                     &d.model
                 })
-                .font_size(11.0)
+                .font_size(tokens::TYPE_CAPTION)
                 .font_family(MONO_FONT)
                 .foreground(ThemeRef::SecondaryText)
                 .text_trimming(TextTrimming::CharacterEllipsis)
                 .grid_column(1),
                 text_block(if live { "live" } else { "等待用量" })
-                    .font_size(11.0)
+                    .font_size(tokens::TYPE_CAPTION)
                     .foreground(ThemeRef::TertiaryText)
                     .grid_column(2),
             ))
@@ -433,7 +433,7 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             } else {
                 blocks.push(
                     text_block("等待用量")
-                        .font_size(11.0)
+                        .font_size(tokens::TYPE_CAPTION)
                         .foreground(ThemeRef::TertiaryText)
                         .with_key("request-empty")
                         .into(),
@@ -444,11 +444,11 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             let session_heading: Element = if d.usage_requests > 0 {
                 hstack((
                     text_block("会话累计")
-                        .font_size(11.0)
+                        .font_size(tokens::TYPE_CAPTION)
                         .semibold()
                         .foreground(ThemeRef::SecondaryText),
                     text_block(format!("{} 次请求", d.usage_requests))
-                        .font_size(11.0)
+                        .font_size(tokens::TYPE_CAPTION)
                         .foreground(ThemeRef::TertiaryText),
                 ))
                 .spacing(8.0)
@@ -470,7 +470,7 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         None => {
             blocks.push(
                 text_block("暂无用量数据")
-                    .font_size(11.0)
+                    .font_size(tokens::TYPE_CAPTION)
                     .foreground(ThemeRef::TertiaryText)
                     .with_key("empty")
                     .into(),
@@ -502,9 +502,12 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 blocks.push(
                     hstack((
                         live_dot(true).with_key("todo-dot"),
-                        text_block(&task.subject).font_size(12.0).semibold().wrap(),
+                        text_block(&task.subject)
+                            .font_size(tokens::TYPE_CAPTION)
+                            .semibold()
+                            .wrap(),
                         text_block(&task.status)
-                            .font_size(11.0)
+                            .font_size(tokens::TYPE_CAPTION)
                             .foreground(ThemeRef::SystemCaution),
                     ))
                     .spacing(8.0)
@@ -516,7 +519,7 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 text_block(format!(
                     "待处理 {pending} · 进行中 {in_progress} · 已完成 {done}"
                 ))
-                .font_size(11.0)
+                .font_size(tokens::TYPE_CAPTION)
                 .foreground(ThemeRef::SecondaryText)
                 .with_key("todo-counts")
                 .into(),
@@ -535,11 +538,11 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     } else {
                         "○"
                     })
-                    .font_size(11.0)
+                    .font_size(tokens::TYPE_CAPTION)
                     .foreground(status_color)
                     .grid_column(0),
                     text_block(&t.subject)
-                        .font_size(11.0)
+                        .font_size(tokens::TYPE_CAPTION)
                         .foreground(ThemeRef::SecondaryText)
                         .text_trimming(TextTrimming::CharacterEllipsis)
                         .grid_column(1),
@@ -555,7 +558,9 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 面板内容可滚动（P6 加任务区块后可能超高；scroll_viewer 纵向 Auto）。
     scroll_viewer(
         border(vstack(blocks).spacing(10.0))
-            .background(ThemeRef::LayerFill)
+            .background(ThemeRef::CardBackground)
+            .border_brush(ThemeRef::CardStroke)
+            .border_thickness(Thickness::uniform(1.0))
             .corner_radius(8.0)
             .padding(Thickness::xy(14.0, 14.0))
             .margin(Thickness::xy(8.0, 8.0)),

@@ -54,10 +54,10 @@ fn handle_process(ctx: ToolCallCtx) -> ToolResult {
 
 /// Format a process info payload as a flat structured response.
 ///
-    /// `ProcessRegistry::get_info` already returns a structured JSON object
+/// `ProcessRegistry::get_info` already returns a structured JSON object
 /// (id/name/status/exit_code/output…). Serializing it into a `content` string
-    /// would double-escape it (JSON inside a JSON string), so we keep the
-    /// fields in the model payload and add a short human-readable summary
+/// would double-escape it (JSON inside a JSON string), so we keep the
+/// fields in the model payload and add a short human-readable summary
 /// that the context-fold logic can later replace with a hint.
 fn process_info_ok(id: u32, info: serde_json::Value) -> String {
     let mut v = info;
@@ -94,7 +94,10 @@ fn process_id(ctx: &ToolCallCtx, operation: &str) -> Result<u32, ToolResult> {
 }
 
 fn handle_check(ctx: ToolCallCtx) -> ToolResult {
-    let id = match process_id(&ctx, "process.check") { Ok(id) => id, Err(result) => return result };
+    let id = match process_id(&ctx, "process.check") {
+        Ok(id) => id,
+        Err(result) => return result,
+    };
 
     // 刷新终态：子进程已退出则立即反映（孙进程持管道时 EOF 不达，
     // 原实现状态停在 running，模型会误以为任务未结束）。
@@ -103,15 +106,18 @@ fn handle_check(ctx: ToolCallCtx) -> ToolResult {
     match ProcessRegistry::get_info(id) {
         Some(info) => process_ok(process_info_ok(id, info)),
         None => process_error(
-                "NOT_FOUND",
-                format!("process.check: process {id} not found"),
-                "Process may have already exited and been cleaned up.",
-            ),
+            "NOT_FOUND",
+            format!("process.check: process {id} not found"),
+            "Process may have already exited and been cleaned up.",
+        ),
     }
 }
 
 fn handle_wait(ctx: ToolCallCtx) -> ToolResult {
-    let id = match process_id(&ctx, "process.wait") { Ok(id) => id, Err(result) => return result };
+    let id = match process_id(&ctx, "process.wait") {
+        Ok(id) => id,
+        Err(result) => return result,
+    };
     let timeout_secs: u64 = ctx
         .args
         .get("timeout_secs")
@@ -121,31 +127,37 @@ fn handle_wait(ctx: ToolCallCtx) -> ToolResult {
     match ProcessRegistry::wait_for(id, timeout_secs) {
         Some(info) => process_ok(process_info_ok(id, info)),
         None => process_error(
-                "NOT_FOUND",
-                format!("process.wait: process {id} not found"),
-                "Check that the process ID is correct.",
-            ),
+            "NOT_FOUND",
+            format!("process.wait: process {id} not found"),
+            "Check that the process ID is correct.",
+        ),
     }
 }
 
 fn handle_kill(ctx: ToolCallCtx) -> ToolResult {
-    let id = match process_id(&ctx, "process.kill") { Ok(id) => id, Err(result) => return result };
+    let id = match process_id(&ctx, "process.kill") {
+        Ok(id) => id,
+        Err(result) => return result,
+    };
 
     if ProcessRegistry::kill(id) {
         process_ok(crate::json_ok(
-                serde_json::json!({"content": format!("Process {id} killed.")}),
-            ))
+            serde_json::json!({"content": format!("Process {id} killed.")}),
+        ))
     } else {
         process_error(
-                "NOT_FOUND",
-                format!("process.kill: process {id} not found or already exited"),
-                "Check the process ID.",
-            )
+            "NOT_FOUND",
+            format!("process.kill: process {id} not found or already exited"),
+            "Check the process ID.",
+        )
     }
 }
 
 fn handle_write(ctx: ToolCallCtx) -> ToolResult {
-    let id = match process_id(&ctx, "process.write") { Ok(id) => id, Err(result) => return result };
+    let id = match process_id(&ctx, "process.write") {
+        Ok(id) => id,
+        Err(result) => return result,
+    };
     let text = match ctx.args.get("text").and_then(|v| v.as_str()) {
         Some(t) if !t.is_empty() => t,
         _ => {
@@ -159,12 +171,12 @@ fn handle_write(ctx: ToolCallCtx) -> ToolResult {
 
     match ProcessRegistry::write_to(id, text) {
         Ok(n) => process_ok(crate::json_ok(
-                serde_json::json!({"content": format!("Wrote {n} bytes to process {id}.")}),
-            )),
+            serde_json::json!({"content": format!("Wrote {n} bytes to process {id}.")}),
+        )),
         Err(e) => process_error(
-                "WRITE_FAILED",
-                &format!("process write: {e}"),
-                "Check that the process is still running.",
-            ),
+            "WRITE_FAILED",
+            &format!("process write: {e}"),
+            "Check that the process is still running.",
+        ),
     }
 }

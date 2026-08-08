@@ -128,20 +128,20 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
 
     if task.is_empty() {
         return ToolResult::error(deepx_workspace::json_err(
-                "MISSING_TASK",
-                "spawn_subagent: task is required",
-                "Provide a task description.",
-            ));
+            "MISSING_TASK",
+            "spawn_subagent: task is required",
+            "Provide a task description.",
+        ));
     }
 
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
             return ToolResult::error(deepx_workspace::json_err(
-                    "EXE_ERROR",
-                    &format!("spawn_subagent: cannot get exe path: {e}"),
-                    "Check the installation.",
-                ));
+                "EXE_ERROR",
+                &format!("spawn_subagent: cannot get exe path: {e}"),
+                "Check the installation.",
+            ));
         }
     };
 
@@ -211,10 +211,10 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         Ok(c) => c,
         Err(e) => {
             return ToolResult::error(deepx_workspace::json_err(
-                    "SPAWN_ERROR",
-                    &format!("spawn_subagent: failed to spawn: {e}"),
-                    "Check that deepx is installed correctly.",
-                ));
+                "SPAWN_ERROR",
+                &format!("spawn_subagent: failed to spawn: {e}"),
+                "Check that deepx is installed correctly.",
+            ));
         }
     };
 
@@ -222,20 +222,20 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         Some(s) => s,
         None => {
             return ToolResult::error(deepx_workspace::json_err(
-                    "STDIN_ERROR",
-                    "spawn_subagent: failed to get stdin",
-                    "Check subagent process.",
-                ));
+                "STDIN_ERROR",
+                "spawn_subagent: failed to get stdin",
+                "Check subagent process.",
+            ));
         }
     };
     let child_stdout = match child.stdout.take() {
         Some(s) => s,
         None => {
             return ToolResult::error(deepx_workspace::json_err(
-                    "STDOUT_ERROR",
-                    "spawn_subagent: failed to get stdout",
-                    "Check subagent process.",
-                ));
+                "STDOUT_ERROR",
+                "spawn_subagent: failed to get stdout",
+                "Check subagent process.",
+            ));
         }
     };
 
@@ -249,10 +249,10 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         if writeln!(stdin_writer, "{}", line).is_err() || stdin_writer.flush().is_err() {
             deepx_workspace::process_registry::ProcessRegistry::kill(registry_id);
             return ToolResult::error(deepx_workspace::json_err(
-                    "WRITE_ERROR",
-                    "spawn_subagent: failed to write task",
-                    "Check subagent process.",
-                ));
+                "WRITE_ERROR",
+                "spawn_subagent: failed to write task",
+                "Check subagent process.",
+            ));
         }
     }
 
@@ -344,11 +344,17 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
             }
         }
         let answer_len = final_answer.len();
-        deepx_workspace::process_registry::ProcessRegistry::set_answer(registry_id_bg, final_answer);
+        deepx_workspace::process_registry::ProcessRegistry::set_answer(
+            registry_id_bg,
+            final_answer,
+        );
         if did_cancel {
             deepx_workspace::process_registry::ProcessRegistry::kill(registry_id_bg);
         } else if did_finish {
-            deepx_workspace::process_registry::ProcessRegistry::mark_exited(registry_id_bg, exit_code);
+            deepx_workspace::process_registry::ProcessRegistry::mark_exited(
+                registry_id_bg,
+                exit_code,
+            );
         } else {
             // Abnormal exit: pipe broke before turn_end/error/cancelled
             deepx_workspace::process_registry::ProcessRegistry::mark_exited(registry_id_bg, -1);
@@ -372,8 +378,8 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         registry_id
     );
     ToolResult::ok(deepx_workspace::json_ok(serde_json::json!({
-            "process_id": registry_id,
-            "name": name,
-            "content": format!("Subagent '{}' spawned successfully.", name),
-        })))
+        "process_id": registry_id,
+        "name": name,
+        "content": format!("Subagent '{}' spawned successfully.", name),
+    })))
 }

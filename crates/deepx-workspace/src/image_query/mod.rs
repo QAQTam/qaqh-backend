@@ -57,12 +57,10 @@ struct ImageEntry {
 /// Register an uploaded image for a session. Called from engine_input.
 pub fn store_image(seed: &str, mime_type: &str, data: &str) {
     if let Ok(mut reg) = IMAGE_REGISTRY.lock() {
-        reg.entry(seed.to_string())
-            .or_default()
-            .push(ImageEntry {
-                mime_type: mime_type.to_string(),
-                data: data.to_string(),
-            });
+        reg.entry(seed.to_string()).or_default().push(ImageEntry {
+            mime_type: mime_type.to_string(),
+            data: data.to_string(),
+        });
     }
 }
 
@@ -71,7 +69,9 @@ pub fn store_image(seed: &str, mime_type: &str, data: &str) {
 pub fn peek_image(seed: &str, index: usize) -> Option<(String, String)> {
     let reg = IMAGE_REGISTRY.lock().ok()?;
     let entries = reg.get(seed)?;
-    entries.get(index).map(|e| (e.mime_type.clone(), e.data.clone()))
+    entries
+        .get(index)
+        .map(|e| (e.mime_type.clone(), e.data.clone()))
 }
 
 /// Remove a specific image from the registry after successful processing.
@@ -219,9 +219,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     let body = backend.build_request(&model, &mime_type, &image_data, &prompt, max_tokens);
 
     // ── 7. Send request ──
-    let timeout_secs = ctx
-        .timeout_secs
-        .unwrap_or(backend.default_timeout_secs());
+    let timeout_secs = ctx.timeout_secs.unwrap_or(backend.default_timeout_secs());
     let url = format!(
         "{}{}",
         base_url.trim_end_matches('/'),
@@ -264,7 +262,8 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
             })
             .unwrap_or_else(|| body_str[..body_str.len().min(500)].to_string());
         return ToolResult::error(&format!(
-            "image: API returned HTTP {}: {err_msg}", status.as_u16(),
+            "image: API returned HTTP {}: {err_msg}",
+            status.as_u16(),
         ));
     }
 
@@ -358,15 +357,11 @@ mod tests {
     /// A minimal valid PNG (1×1 pixel, red)
     fn test_png_bytes() -> Vec<u8> {
         vec![
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-            0xDE, 0x00, 0x00, 0x00, 0x0E, 0x49, 0x44, 0x41,
-            0x54, 0x78, 0x9C, 0x62, 0x60, 0x60, 0x60, 0x00,
-            0x00, 0x00, 0x04, 0x00, 0x01, 0x27, 0x34, 0x03,
-            0x7A, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
-            0x44, 0xAE, 0x42, 0x60, 0x82,
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0E, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x60, 0x60, 0x60, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x27, 0x34, 0x03,
+            0x7A, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
         ]
     }
 
@@ -382,14 +377,8 @@ mod tests {
         let body = backend.build_request("mimo-v2.5", "image/png", "Zm9v", "describe", 1024);
 
         assert_eq!(body["model"], "mimo-v2.5");
-        assert_eq!(
-            body["messages"][0]["content"][0]["type"],
-            "image_url"
-        );
-        assert_eq!(
-            body["messages"][0]["content"][1]["type"],
-            "text"
-        );
+        assert_eq!(body["messages"][0]["content"][0]["type"], "image_url");
+        assert_eq!(body["messages"][0]["content"][1]["type"], "text");
         let url = body["messages"][0]["content"][0]["image_url"]["url"]
             .as_str()
             .unwrap();

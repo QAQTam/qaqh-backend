@@ -8,10 +8,7 @@ fn public_schema_exposes_one_todo_tool_with_no_alias_and_no_goal_entrypoint() {
         .collect();
 
     // 主工具：todo（prompt/文档统一命名）。
-    assert!(
-        names.contains(&"todo"),
-        "missing todo tool"
-    );
+    assert!(names.contains(&"todo"), "missing todo tool");
     // 旧名别名 task 已移除：公开 schema 不得再暴露，避免模型调用失效工具。
     assert!(
         !names.contains(&"task"),

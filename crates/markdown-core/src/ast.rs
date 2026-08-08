@@ -20,7 +20,10 @@ pub enum Block {
         items: Vec<ListItem>,
     },
     /// 列表项（内部表示，仅在 List 内出现；解析层转 ListItem 收集）。
-    ListItem { task: Option<bool>, blocks: Vec<Block> },
+    ListItem {
+        task: Option<bool>,
+        blocks: Vec<Block>,
+    },
     /// 引用块（可嵌套）。
     Quote(Vec<Block>),
     /// GFM 表格。
@@ -54,12 +57,21 @@ pub enum Inline {
     /// 行内代码（`` `code` ``）。
     Code(String),
     /// 链接。`url` 已做实体解码。
-    Link { text: Vec<Inline>, url: String },
+    Link {
+        text: Vec<Inline>,
+        url: String,
+    },
     /// 图片（远程 URL，最终渲染；live 阶段不产出）。
-    Image { url: String, alt: String },
+    Image {
+        url: String,
+        alt: String,
+    },
     /// 数学公式。`display=true` 对应 `$$..$$` / `\[..\]`。
     /// 渲染失败时由上层回退为字面文本（`throwOnError: false` 语义）。
-    Math { source: String, display: bool },
+    Math {
+        source: String,
+        display: bool,
+    },
     /// 软换行（markdown 单换行，`breaks: false` 时不产生 `<br>`）。
     SoftBreak,
 }
@@ -71,9 +83,7 @@ impl Inline {
             Self::Text(s) => s.clone(),
             Self::Code(s) => s.clone(),
             Self::Math { source, .. } => source.clone(),
-            Self::Bold(v) | Self::Italic(v) | Self::Strikethrough(v) => {
-                concat_inlines(v)
-            }
+            Self::Bold(v) | Self::Italic(v) | Self::Strikethrough(v) => concat_inlines(v),
             Self::Link { text, .. } => concat_inlines(text),
             Self::Image { alt, .. } => alt.clone(),
             Self::SoftBreak => "\n".to_string(),

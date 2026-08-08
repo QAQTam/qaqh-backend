@@ -126,7 +126,6 @@ pub struct SessionMeta {
     #[serde(skip)]
     #[ts(skip)]
     pub from_resume: bool,
-
 }
 impl Default for SessionMeta {
     fn default() -> Self {
@@ -159,7 +158,9 @@ impl SessionMeta {
     pub fn effective_cache_reported_requests(&self) -> u32 {
         if self.cache_reported_requests == 0
             && self.usage_requests > 0
-            && self.usage_totals.prompt_cache_hit_tokens
+            && self
+                .usage_totals
+                .prompt_cache_hit_tokens
                 .saturating_add(self.usage_totals.prompt_cache_miss_tokens)
                 > 0
         {

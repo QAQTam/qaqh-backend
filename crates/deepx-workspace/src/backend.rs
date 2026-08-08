@@ -119,7 +119,9 @@ impl ToolExecutionBackend for HttpToolExecutionBackend {
         let body = match serde_json::to_vec(&payload) {
             Ok(body) => body,
             Err(error) => {
-                log::warn!("[workspace-backend] serialize execute request: {error}; fallback local");
+                log::warn!(
+                    "[workspace-backend] serialize execute request: {error}; fallback local"
+                );
                 return (request.local_handler)(request.ctx);
             }
         };
@@ -150,7 +152,9 @@ impl ToolExecutionBackend for HttpToolExecutionBackend {
                         if !resp.state_delta.is_empty() {
                             let n = resp.state_delta.len();
                             crate::file_state::apply_pending(resp.state_delta);
-                            log::debug!("[workspace-backend] applied {n} file-state entries from serve");
+                            log::debug!(
+                                "[workspace-backend] applied {n} file-state entries from serve"
+                            );
                         }
                         resp.result
                     }
@@ -202,8 +206,7 @@ fn workspace_exec_failed(detail: &str) -> ToolResult {
 
 fn backend_slot() -> &'static RwLock<Arc<dyn ToolExecutionBackend>> {
     static WORKSPACE_BACKEND: OnceLock<RwLock<Arc<dyn ToolExecutionBackend>>> = OnceLock::new();
-    WORKSPACE_BACKEND
-        .get_or_init(|| RwLock::new(Arc::new(LocalToolExecutionBackend)))
+    WORKSPACE_BACKEND.get_or_init(|| RwLock::new(Arc::new(LocalToolExecutionBackend)))
 }
 
 fn active_workspace_backend() -> Arc<dyn ToolExecutionBackend> {
@@ -213,9 +216,7 @@ fn active_workspace_backend() -> Arc<dyn ToolExecutionBackend> {
         .clone()
 }
 
-fn swap_workspace_backend(
-    backend: Arc<dyn ToolExecutionBackend>,
-) -> Arc<dyn ToolExecutionBackend> {
+fn swap_workspace_backend(backend: Arc<dyn ToolExecutionBackend>) -> Arc<dyn ToolExecutionBackend> {
     let mut current = backend_slot()
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -397,7 +398,9 @@ mod tests {
         // 用户场景：长任务（如 cargo test 跑数分钟）期间必须能 kill 抢占。
         // 修复前：process kill 走串行 worker，排队到长任务结束（数分钟）。
         // 修复后：process 内联执行，kill 立即生效。
-        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let ws = tmp.path().to_str().unwrap().to_string();
         crate::set_workspace(&ws);
@@ -424,7 +427,10 @@ mod tests {
         let exec_text = exec_result.model_text();
         let parsed: serde_json::Value =
             serde_json::from_str(&exec_text).unwrap_or_else(|_| serde_json::json!({}));
-        assert_eq!(parsed["status"], "backgrounded", "exec 应转后台: {exec_text}");
+        assert_eq!(
+            parsed["status"], "backgrounded",
+            "exec 应转后台: {exec_text}"
+        );
         let pid = parsed["process_id"].as_u64().expect("process_id in result");
 
         // 2) process kill 必须立即生效（不被串行队列阻塞到 60s）
@@ -439,10 +445,7 @@ mod tests {
             "kill 必须抢占（<10s），实际 {kill_elapsed:.1}s——若走串行队列会阻塞到长任务结束"
         );
         let kill_text = kill_result.model_text();
-        assert!(
-            kill_text.contains("killed"),
-            "kill 应成功: {kill_text}"
-        );
+        assert!(kill_text.contains("killed"), "kill 应成功: {kill_text}");
 
         // 3) 抢占后 serve 仍健康（串行 worker 未被 kill 阻塞）
         let probe = backend.execute(req(make_ctx(
@@ -457,7 +460,9 @@ mod tests {
     }
     #[test]
     fn http_backend_executes_write_in_serve_and_syncs_ledger() {
-        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let ws = tmp.path().to_str().unwrap().to_string();
         crate::set_workspace(&ws);

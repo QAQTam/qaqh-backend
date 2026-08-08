@@ -123,9 +123,7 @@ pub fn replaceable_key_for(event: &RingingEvent) -> Option<ReplaceableKey> {
 pub fn terminal_replaceable_keys(event: &RingingEvent) -> Vec<ReplaceableKey> {
     use deepx_domain::{ConversationEvent as CE, ToolEvent as TE};
     match event {
-        RingingEvent::Tool(
-            TE::ToolFinished { tool_call_id, .. },
-        ) => {
+        RingingEvent::Tool(TE::ToolFinished { tool_call_id, .. }) => {
             vec![ReplaceableKey::tool_progress(tool_call_id)]
         }
         RingingEvent::Conversation(CE::RoundCompleted {
@@ -296,14 +294,7 @@ mod tests {
     use deepx_domain::{ConversationEvent, DomainEvent, ToolEvent};
 
     fn env_for(seed: &str, seq: u64, event: DomainEvent) -> RingingEventEnvelope {
-        RingingEventEnvelope::new(
-            seed,
-            seq,
-            seq,
-            seq,
-            format!("e{seq}"),
-            event.into(),
-        )
+        RingingEventEnvelope::new(seed, seq, seq, seq, format!("e{seq}"), event.into())
     }
 
     #[test]
@@ -480,7 +471,11 @@ mod tests {
         router.route(checkpoint(3, "complete-value"));
         assert_eq!(router.replaceable_len(), 1, "same identity covers");
         let replay = router.replay_since(0);
-        assert_eq!(replay.len(), 1, "slow consumer gets the latest complete value");
+        assert_eq!(
+            replay.len(),
+            1,
+            "slow consumer gets the latest complete value"
+        );
         match &replay[0].event {
             RingingEvent::Conversation(ConversationEvent::BlockCheckpoint { text, .. }) => {
                 assert_eq!(text, "complete-value");

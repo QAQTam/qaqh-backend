@@ -81,9 +81,9 @@ pub fn domain_activity_observe(event: &deepx_domain::DomainEvent) -> Option<serd
             Some(serde_json::json!({ "type": "permission_request" }))
         }
         // 工具执行期间回合仍在跑：保持 Working（终态由 TurnCompleted 收敛）。
-        DomainEvent::Tool(
-            ToolEvent::ToolStarted { .. } | ToolEvent::ToolFinished { .. },
-        ) => Some(serde_json::json!({ "type": "tool_results" })),
+        DomainEvent::Tool(ToolEvent::ToolStarted { .. } | ToolEvent::ToolFinished { .. }) => {
+            Some(serde_json::json!({ "type": "tool_results" }))
+        }
         _ => None,
     }
 }
@@ -416,50 +416,61 @@ mod tests {
         let (generation, _) = tracker.begin("seed");
 
         // worker ready → Idle（此前生产代码无任何路径迁移 Starting→Idle）
-        let ready = domain_activity_observe(&DomainEvent::Control(
-            ControlEvent::AgentLifecycleChanged {
+        let ready =
+            domain_activity_observe(&DomainEvent::Control(ControlEvent::AgentLifecycleChanged {
                 state: AgentLifecycleState::Ready,
-            },
-        ))
-        .expect("ready maps");
+            }))
+            .expect("ready maps");
         assert_eq!(
-            tracker.observe("seed", generation, &ready).expect("ready").state,
+            tracker
+                .observe("seed", generation, &ready)
+                .expect("ready")
+                .state,
             SessionActivityState::Idle
         );
 
         // turn_start → Working + turn_id
-        let start = domain_activity_observe(&DomainEvent::Conversation(
-            ConversationEvent::TurnStarted {
+        let start =
+            domain_activity_observe(&DomainEvent::Conversation(ConversationEvent::TurnStarted {
                 turn_id: "t1".into(),
                 user_text: "hi".into(),
-            },
-        ))
-        .expect("turn_start maps");
-        let activity = tracker.observe("seed", generation, &start).expect("turn start");
+            }))
+            .expect("turn_start maps");
+        let activity = tracker
+            .observe("seed", generation, &start)
+            .expect("turn start");
         assert_eq!(activity.state, SessionActivityState::Working);
         assert_eq!(activity.turn_id.as_deref(), Some("t1"));
 
         // ask_user → WaitingUser
-        let ask = domain_activity_observe(&DomainEvent::Control(ControlEvent::InteractionRequested {
-            interaction_id: "i1".into(),
-            turn_id: "t1".into(),
-            mode: deepx_domain::AskMode::Single,
-            questions: vec![],
-        }))
-        .expect("ask maps");
+        let ask =
+            domain_activity_observe(&DomainEvent::Control(ControlEvent::InteractionRequested {
+                interaction_id: "i1".into(),
+                turn_id: "t1".into(),
+                mode: deepx_domain::AskMode::Single,
+                questions: vec![],
+            }))
+            .expect("ask maps");
         assert_eq!(
-            tracker.observe("seed", generation, &ask).expect("ask").state,
+            tracker
+                .observe("seed", generation, &ask)
+                .expect("ask")
+                .state,
             SessionActivityState::WaitingUser
         );
 
         // ask_resolved → Working（回合继续）
-        let resolved = domain_activity_observe(&DomainEvent::Control(ControlEvent::InteractionResolved {
-            interaction_id: "i1".into(),
-            resolution: deepx_domain::AskResolution::Answered,
-        }))
-        .expect("ask_resolved maps");
+        let resolved =
+            domain_activity_observe(&DomainEvent::Control(ControlEvent::InteractionResolved {
+                interaction_id: "i1".into(),
+                resolution: deepx_domain::AskResolution::Answered,
+            }))
+            .expect("ask_resolved maps");
         assert_eq!(
-            tracker.observe("seed", generation, &resolved).expect("resolved").state,
+            tracker
+                .observe("seed", generation, &resolved)
+                .expect("resolved")
+                .state,
             SessionActivityState::Working
         );
 
@@ -477,21 +488,25 @@ mod tests {
         assert_eq!(finished.turn_id, None);
 
         // permission_request → WaitingUser
-        let perm = domain_activity_observe(&DomainEvent::Tool(ToolEvent::ToolPermissionRequested {
-            tool_call_id: "c1".into(),
-            turn_id: "t2".into(),
-            round_num: 0,
-            tool_name: "exec".into(),
-            reason: "r".into(),
-            paths: vec![],
-            category: deepx_domain::PermissionCategory::Exec,
-            level: 3,
-            risk: deepx_domain::PermissionRisk::High,
-            consequence: "run".into(),
-        }))
-        .expect("permission maps");
+        let perm =
+            domain_activity_observe(&DomainEvent::Tool(ToolEvent::ToolPermissionRequested {
+                tool_call_id: "c1".into(),
+                turn_id: "t2".into(),
+                round_num: 0,
+                tool_name: "exec".into(),
+                reason: "r".into(),
+                paths: vec![],
+                category: deepx_domain::PermissionCategory::Exec,
+                level: 3,
+                risk: deepx_domain::PermissionRisk::High,
+                consequence: "run".into(),
+            }))
+            .expect("permission maps");
         assert_eq!(
-            tracker.observe("seed", generation, &perm).expect("perm").state,
+            tracker
+                .observe("seed", generation, &perm)
+                .expect("perm")
+                .state,
             SessionActivityState::WaitingUser
         );
 

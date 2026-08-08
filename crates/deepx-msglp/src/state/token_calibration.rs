@@ -190,7 +190,10 @@ mod tests {
         for _ in 0..5 {
             assert!(calibrator.observe("provider", 1_000, 600));
         }
-        assert_eq!(calibrator.estimate("provider", 1_000).predicted_tokens, 1_000);
+        assert_eq!(
+            calibrator.estimate("provider", 1_000).predicted_tokens,
+            1_000
+        );
 
         assert!(calibrator.observe("provider", 1_000, 600));
         let learned = calibrator.estimate("provider", 1_000);

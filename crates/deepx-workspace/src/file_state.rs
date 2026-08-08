@@ -123,13 +123,23 @@ pub fn record_write(path: &str, content: &str) {
         "created"
     };
     drop(s);
-    insert(path, op, content.lines().count(), Some(ledger_hash(content)));
+    insert(
+        path,
+        op,
+        content.lines().count(),
+        Some(ledger_hash(content)),
+    );
 }
 
 /// Record a file edit.
 pub fn record_edit(path: &str, content: &str) {
     crate::file_cache::invalidate(path);
-    insert(path, "edited", content.lines().count(), Some(ledger_hash(content)));
+    insert(
+        path,
+        "edited",
+        content.lines().count(),
+        Some(ledger_hash(content)),
+    );
 }
 
 /// Record a file deletion (ledger cleared — the file no longer exists).

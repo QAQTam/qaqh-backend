@@ -71,9 +71,7 @@ impl MultimodalBackend for LmStudioBackend {
         // LM Studio: stats.input_tokens / stats.total_output_tokens
         let stats = json.get("stats")?;
         let prompt = stats.get("input_tokens")?.as_u64()?;
-        let completion = stats
-            .get("total_output_tokens")?
-            .as_u64()?;
+        let completion = stats.get("total_output_tokens")?.as_u64()?;
         Some((prompt, completion))
     }
 

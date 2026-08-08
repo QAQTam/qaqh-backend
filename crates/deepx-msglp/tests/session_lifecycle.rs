@@ -16,10 +16,14 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use deepx_domain::{ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, SessionState};
+use deepx_domain::{
+    ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, SessionState,
+};
 use deepx_msglp::ringing_v1::loop_core::Loop;
 use deepx_msglp::state::agent::AgentState;
-use deepx_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope};
+use deepx_ringing::{
+    RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
+};
 use serde_json::json;
 use tiny_http::{Header, Response, Server};
 
@@ -121,7 +125,9 @@ fn send_cmd(w: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
 }
 
 fn cmd_session_create() -> RingingCommand {
-    RingingCommand::Control(ControlCommand::SessionCreate { close_current: false })
+    RingingCommand::Control(ControlCommand::SessionCreate {
+        close_current: false,
+    })
 }
 
 fn cmd_session_resume(seed: &str) -> RingingCommand {
@@ -181,9 +187,8 @@ fn create_session_emits_session_state() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
     deepx_workspace::set_workspace(&ws.to_string_lossy());
-    SESSION_INIT.call_once(|| {
-        deepx_session::SessionManager::init(deepx_types::platform::data_dir())
-    });
+    SESSION_INIT
+        .call_once(|| deepx_session::SessionManager::init(deepx_types::platform::data_dir()));
 
     let mut agent = AgentState::init("test");
     agent.ephemeral = true;
@@ -224,9 +229,8 @@ fn send_message_triggers_turn_lifecycle() {
     std::fs::create_dir(&ws).unwrap();
     deepx_workspace::set_workspace(&ws.to_string_lossy());
 
-    SESSION_INIT.call_once(|| {
-        deepx_session::SessionManager::init(deepx_types::platform::data_dir())
-    });
+    SESSION_INIT
+        .call_once(|| deepx_session::SessionManager::init(deepx_types::platform::data_dir()));
 
     let mut agent = AgentState::init("test");
     agent.ephemeral = true;
@@ -310,9 +314,8 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
     deepx_workspace::set_workspace(&ws.to_string_lossy());
-    SESSION_INIT.call_once(|| {
-        deepx_session::SessionManager::init(deepx_types::platform::data_dir())
-    });
+    SESSION_INIT
+        .call_once(|| deepx_session::SessionManager::init(deepx_types::platform::data_dir()));
 
     let mut agent = AgentState::init("test");
     agent.ephemeral = true;
@@ -352,7 +355,11 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
         while mock.requests.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(25));
         }
-        assert_eq!(mock.requests.load(Ordering::SeqCst), 1, "queued send must reach the provider");
+        assert_eq!(
+            mock.requests.load(Ordering::SeqCst),
+            1,
+            "queued send must reach the provider"
+        );
         send_cmd(&mut iw, &seed, cmd_session_shutdown());
     });
     lp.run();

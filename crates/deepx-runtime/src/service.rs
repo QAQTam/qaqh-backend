@@ -2,7 +2,7 @@ use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 
 use deepx_domain::{
-    ConversationCommand, ConversationMode, ControlCommand, ImageBlock, ToolCommand,
+    ControlCommand, ConversationCommand, ConversationMode, ImageBlock, ToolCommand,
 };
 use deepx_proto::SessionActivityState;
 use deepx_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
@@ -388,7 +388,9 @@ impl DeepxService {
                 let name = pstr(params, "name")?;
                 let mut cfg = deepx_config::Config::load().map_err(err)?;
                 if !cfg.delete_profile(&name) {
-                    return Err(format!("profile '{name}' cannot be deleted (not found or default)"));
+                    return Err(format!(
+                        "profile '{name}' cannot be deleted (not found or default)"
+                    ));
                 }
                 Ok(Value::Null)
             }
@@ -434,7 +436,6 @@ impl DeepxService {
     /// interaction waiting for its lease owner. Used by lifecycle takeover so
     /// an updater cannot race a newly-started turn.
     pub fn has_active_work(&self) -> bool {
-
         self.registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -522,10 +523,7 @@ impl DeepxService {
             return Err("session activity changed before message admission".into());
         }
         if let Some((activity, _)) = reservation.as_ref() {
-            crate::activity::publish_activity(
-                self.hub.get().map(|v| &**v),
-                activity,
-            );
+            crate::activity::publish_activity(self.hub.get().map(|v| &**v), activity);
         }
         let env = RingingWorkerCommandEnvelope::new(
             seed.clone(),
@@ -541,10 +539,7 @@ impl DeepxService {
                 && let Some(rollback) =
                     registry.rollback_input_reservation(&seed, activity.seq, previous)
             {
-                crate::activity::publish_activity(
-                    self.hub.get().map(|v| &**v),
-                    &rollback,
-                );
+                crate::activity::publish_activity(self.hub.get().map(|v| &**v), &rollback);
             }
             return Err(error);
         }
@@ -561,10 +556,7 @@ impl DeepxService {
             format!("session compact requires an idle session; current state: {state}")
         })?;
         let reservation_seq = reservation.seq;
-        crate::activity::publish_activity(
-            self.hub.get().map(|v| &**v),
-            &reservation,
-        );
+        crate::activity::publish_activity(self.hub.get().map(|v| &**v), &reservation);
 
         let env = RingingWorkerCommandEnvelope::new(
             seed.clone(),
@@ -575,10 +567,7 @@ impl DeepxService {
         );
         if let Err(error) = registry.send_ringing(&seed, &env) {
             if let Some(rollback) = registry.rollback_idle_reservation(&seed, reservation_seq) {
-                crate::activity::publish_activity(
-                    self.hub.get().map(|v| &**v),
-                    &rollback,
-                );
+                crate::activity::publish_activity(self.hub.get().map(|v| &**v), &rollback);
             }
             return Err(error);
         }
@@ -731,9 +720,8 @@ impl DeepxService {
             cfg.compliance_enabled = enabled;
         }
         cfg.save()?;
-        self.registry()?.send_ringing_all(RingingCommand::Control(
-            ControlCommand::AgentReloadConfig,
-        ));
+        self.registry()?
+            .send_ringing_all(RingingCommand::Control(ControlCommand::AgentReloadConfig));
         Ok(())
     }
 }
@@ -1075,7 +1063,6 @@ fn plan_action(seed: &str, item_id: &str, action: &str, comment: &str) -> Result
 }
 
 #[allow(dead_code)]
-
 #[cfg(test)]
 mod control_scope_tests {
     use super::DeepxService;
@@ -1102,6 +1089,8 @@ fn parse_conversation_mode(mode: &str) -> Result<ConversationMode, String> {
         "normal" | "" => Ok(ConversationMode::Normal),
         "plan" => Ok(ConversationMode::Plan),
         "code" => Ok(ConversationMode::Code),
-        other => Err(format!("invalid conversation mode '{other}' (supported: normal | plan | code)")),
+        other => Err(format!(
+            "invalid conversation mode '{other}' (supported: normal | plan | code)"
+        )),
     }
 }

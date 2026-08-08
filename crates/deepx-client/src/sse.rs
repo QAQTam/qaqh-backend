@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use tokio::sync::watch;
 
 use crate::error::{ClientError, Result};
-use crate::types::{parse_sse_frame, Channel, ChannelStatus, SseFrame};
+use crate::types::{Channel, ChannelStatus, SseFrame, parse_sse_frame};
 
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const RETRY_BASE_MS: u64 = 1_000;
@@ -180,8 +180,7 @@ impl ChannelStream {
 
         let envelope: crate::types::RingingEventEnvelope = serde_json::from_str(frame.data.trim())
             .map_err(|e| ClientError::Protocol(format!("bad envelope: {e}")))?;
-        crate::types::validate_envelope(&envelope, self.channel)
-            .map_err(ClientError::Protocol)?;
+        crate::types::validate_envelope(&envelope, self.channel).map_err(ClientError::Protocol)?;
 
         // Cursor must match the frame id exactly; only accepted envelopes advance it.
         if let Some(frame_cursor) = crate::types::cursor_from_sse_id(&frame.id, self.channel) {
@@ -193,7 +192,8 @@ impl ChannelStream {
             }
             self.cursor = frame_cursor;
         }
-        let batch = crate::types::envelope_to_batch(self.channel, envelope, server_epoch.to_string());
+        let batch =
+            crate::types::envelope_to_batch(self.channel, envelope, server_epoch.to_string());
         (self.handlers.on_batch)(batch);
         Ok(())
     }

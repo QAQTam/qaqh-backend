@@ -302,11 +302,7 @@ mod tests {
     fn closed_bold_parses() {
         assert_eq!(
             parse_live("a **b** c"),
-            vec![
-                text("a "),
-                Inline::Bold(vec![text("b")]),
-                text(" c"),
-            ]
+            vec![text("a "), Inline::Bold(vec![text("b")]), text(" c"),]
         );
     }
 
@@ -314,11 +310,10 @@ mod tests {
     #[test]
     fn unclosed_bold_is_literal() {
         assert_eq!(parse_live("a **b"), vec![text("a **b")]);
-        assert_eq!(parse_live("a **b** c **d"), vec![
-            text("a "),
-            Inline::Bold(vec![text("b")]),
-            text(" c **d"),
-        ]);
+        assert_eq!(
+            parse_live("a **b** c **d"),
+            vec![text("a "), Inline::Bold(vec![text("b")]), text(" c **d"),]
+        );
     }
 
     #[test]
@@ -357,10 +352,7 @@ mod tests {
     fn strikethrough_closed() {
         assert_eq!(
             parse_live("~~gone~~ here"),
-            vec![
-                Inline::Strikethrough(vec![text("gone")]),
-                text(" here"),
-            ]
+            vec![Inline::Strikethrough(vec![text("gone")]), text(" here"),]
         );
     }
 
@@ -397,7 +389,10 @@ mod tests {
 
     #[test]
     fn soft_break_emitted() {
-        assert_eq!(parse_live("a\nb"), vec![text("a"), Inline::SoftBreak, text("b")]);
+        assert_eq!(
+            parse_live("a\nb"),
+            vec![text("a"), Inline::SoftBreak, text("b")]
+        );
     }
 
     /// 流式追加的不变量：`parse_live(prefix + delta)` 在 delta 未闭合语法时

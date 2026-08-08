@@ -707,6 +707,9 @@ impl ToolEngine {
             ctx.stats.push_delta(delta.clone());
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
                 deepx_domain::ToolEvent::CodeChanged {
+                    tool_call_id: tid.clone(),
+                    turn_id: turn_id.clone(),
+                    round_num: 0,
                     lines_added: delta.lines_added,
                     lines_removed: delta.lines_removed,
                     files_created: delta.files_created,

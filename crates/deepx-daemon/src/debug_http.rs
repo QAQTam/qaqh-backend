@@ -114,12 +114,22 @@ pub async fn handle_debug_http(
     token: &str,
 ) -> Result<(), String> {
     let Some(path) = get_path(preview) else {
-        return write_static(&mut stream, "405 Method Not Allowed", "text/plain", b"GET only")
-            .await;
+        return write_static(
+            &mut stream,
+            "405 Method Not Allowed",
+            "text/plain",
+            b"GET only",
+        )
+        .await;
     };
     if !path.starts_with("/debug") {
-        return write_static(&mut stream, "404 Not Found", "text/plain", b"not a debug path")
-            .await;
+        return write_static(
+            &mut stream,
+            "404 Not Found",
+            "text/plain",
+            b"not a debug path",
+        )
+        .await;
     }
 
     // 桥配置 JS（CSP 兼容：index.html 注入的是 `<script src>` 同源外部脚本，
@@ -192,7 +202,11 @@ async fn write_static(
     // Windows 上直接 close 带未读数据的 socket 会发 RST，客户端收不全 body。
     stream.shutdown().await.map_err(stringify)?;
     let mut sink = [0_u8; 4096];
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(300), stream.read(&mut sink)).await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        stream.read(&mut sink),
+    )
+    .await;
     Ok(())
 }
 

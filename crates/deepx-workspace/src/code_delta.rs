@@ -136,9 +136,7 @@ fn git_file_meta(file_path: &str) -> Option<GitFileMeta> {
     }
     let repo = git2::Repository::open(workspace).ok()?;
     let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
-    let is_new = head_tree
-        .get_path(std::path::Path::new(file_path))
-        .is_err();
+    let is_new = head_tree.get_path(std::path::Path::new(file_path)).is_err();
     Some(GitFileMeta {
         files_created: usize::from(is_new),
         files_deleted: 0,

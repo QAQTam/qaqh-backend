@@ -70,6 +70,14 @@ foreach ($f in @("deepx-daemon.exe", "deepx-workspace.exe", "daemon-manifest.jso
     Copy-Item -LiteralPath $src -Destination (Join-Path $resources $f)
 }
 
+# 3b. WinUI 内容资产——内置字体与其完整许可证。目录名大小写必须与
+# `ms-appx:///Assets/...` FontFamily URI 完全一致。
+$assetsSrc = Join-Path $workspaceRoot "apps/winui/assets"
+if (-not (Test-Path -LiteralPath $assetsSrc -PathType Container)) {
+    throw "缺少 WinUI 内容资产: $assetsSrc"
+}
+Copy-Item -LiteralPath $assetsSrc -Destination (Join-Path $outFull "Assets") -Recurse -Force
+
 # 4. config
 $configSrc = Join-Path $workspaceRoot $ConfigToml
 if (Test-Path -LiteralPath $configSrc -PathType Leaf) {

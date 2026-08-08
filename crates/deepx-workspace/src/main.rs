@@ -101,16 +101,19 @@ fn serve_main(args: &[String]) {
         }
         index += 1;
     }
-    let token = match std::env::var("DEEPX_WORKSPACE_TOKEN").ok().filter(|t| !t.is_empty()) {
+    let token = match std::env::var("DEEPX_WORKSPACE_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+    {
         Some(env_token) => env_token,
         None => match token {
-        Some(token) if !token.is_empty() => token,
-        _ => {
-            eprintln!(
-                "serve requires DEEPX_WORKSPACE_TOKEN env or --token <secret> (fail-closed)"
-            );
-            std::process::exit(2);
-        }
+            Some(token) if !token.is_empty() => token,
+            _ => {
+                eprintln!(
+                    "serve requires DEEPX_WORKSPACE_TOKEN env or --token <secret> (fail-closed)"
+                );
+                std::process::exit(2);
+            }
         },
     };
     if let Err(error) = deepx_workspace::serve::serve(&host, port, &token) {

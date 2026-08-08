@@ -184,7 +184,9 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
     // cache prefix stays stable across daemon restarts.
     let catalog = agent.skills.initial_catalog_text().to_string();
     if !catalog.is_empty() {
-        agent.msg.push_system(deepx_types::Message::system(&catalog));
+        agent
+            .msg
+            .push_system(deepx_types::Message::system(&catalog));
     }
     agent
         .msg
@@ -227,7 +229,9 @@ pub fn create_session(agent: &mut AgentState) {
     // cache prefix stays stable across daemon restarts.
     let catalog = agent.skills.initial_catalog_text().to_string();
     if !catalog.is_empty() {
-        agent.msg.push_system(deepx_types::Message::system(&catalog));
+        agent
+            .msg
+            .push_system(deepx_types::Message::system(&catalog));
     }
     agent
         .msg
@@ -268,7 +272,9 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
     // cache prefix stays stable across daemon restarts.
     let catalog = agent.skills.initial_catalog_text().to_string();
     if !catalog.is_empty() {
-        agent.msg.push_system(deepx_types::Message::system(&catalog));
+        agent
+            .msg
+            .push_system(deepx_types::Message::system(&catalog));
     }
     agent
         .msg

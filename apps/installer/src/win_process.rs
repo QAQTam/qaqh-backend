@@ -229,7 +229,10 @@ fn stop_daemon_via_http() -> bool {
             let resp = String::from_utf8_lossy(&buf[..n]);
             let confirmed = resp.starts_with("HTTP/1.1 200");
             if !confirmed {
-                eprintln!("[installer] daemon stop not confirmed: {}", resp.lines().next().unwrap_or("?"));
+                eprintln!(
+                    "[installer] daemon stop not confirmed: {}",
+                    resp.lines().next().unwrap_or("?")
+                );
             }
             confirmed
         }

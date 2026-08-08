@@ -9,11 +9,7 @@ use deepx_update::{is_reparse_or_symlink, verify_install_root};
 
 type AnyError = Box<dyn std::error::Error>;
 
-const DEEPX_PROCESS_NAMES: &[&str] = &[
-    "DeepX.exe",
-    "deepx-daemon.exe",
-    "deepx-updater.exe",
-];
+const DEEPX_PROCESS_NAMES: &[&str] = &["DeepX.exe", "deepx-daemon.exe", "deepx-updater.exe"];
 const MAX_UNINSTALL_ENTRIES: u64 = 100_000;
 const MAX_UNINSTALL_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 

@@ -34,8 +34,7 @@ pub use event::{
     ContentRef, ControlEvent, ConversationEvent, DashboardDocument, DashboardSnapshot,
     DashboardTask, DomainError, DomainEvent, ErrorScope, NoticeLevel, PermissionCategory,
     PermissionRisk, ProviderToolState, RoundDeltaKind, SessionState, SkillInfo, SkillRuntimeInfo,
-    SkillsStatus,
-    TodoItem, ToolEvent, ToolResult,
+    SkillsStatus, TodoItem, ToolEvent, ToolResult,
 };
 pub use timeline::{
     TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,

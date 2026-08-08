@@ -87,12 +87,26 @@ impl ToolResult {
 
     pub fn partial(text: impl Into<String>) -> Self {
         let text = text.into();
-        Self::with_error(ToolStatus::Partial, text.clone(), "PARTIAL", text, false, None)
+        Self::with_error(
+            ToolStatus::Partial,
+            text.clone(),
+            "PARTIAL",
+            text,
+            false,
+            None,
+        )
     }
 
     pub fn cancelled(text: impl Into<String>) -> Self {
         let text = text.into();
-        Self::with_error(ToolStatus::Cancelled, text.clone(), "CANCELLED", text, false, None)
+        Self::with_error(
+            ToolStatus::Cancelled,
+            text.clone(),
+            "CANCELLED",
+            text,
+            false,
+            None,
+        )
     }
 
     pub fn backgrounded(text: impl Into<String>) -> Self {
@@ -245,12 +259,8 @@ mod tests {
 
     #[test]
     fn failure_status_is_the_only_failure_authority() {
-        let result = ToolResult::error_with(
-            "NOT_FOUND",
-            "missing",
-            false,
-            Some("retry read".into()),
-        );
+        let result =
+            ToolResult::error_with("NOT_FOUND", "missing", false, Some("retry read".into()));
         assert_eq!(result.status, ToolStatus::Error);
         assert!(result.error.is_some());
         assert!(!result.is_success());

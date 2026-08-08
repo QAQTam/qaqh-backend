@@ -1,6 +1,6 @@
 use deepx_types::{
-    ConfigStore, PersistentConfig, PersistentMultimodalConfig,
-    PersistentSubagentConfig, PersistentWorkspaceConfig,
+    ConfigStore, PersistentConfig, PersistentMultimodalConfig, PersistentSubagentConfig,
+    PersistentWorkspaceConfig,
 };
 use std::collections::HashMap; // still used by profiles
 
@@ -81,9 +81,15 @@ pub struct MultimodalConfig {
     pub max_tokens: u32,
 }
 
-fn default_multimodal_provider_type() -> String { "mimo".into() }
-fn default_multimodal_model() -> String { "mimo-v2.5".into() }
-fn default_multimodal_max_tokens() -> u32 { 4096 }
+fn default_multimodal_provider_type() -> String {
+    "mimo".into()
+}
+fn default_multimodal_model() -> String {
+    "mimo-v2.5".into()
+}
+fn default_multimodal_max_tokens() -> u32 {
+    4096
+}
 
 impl Default for MultimodalConfig {
     fn default() -> Self {
@@ -125,11 +131,21 @@ pub struct RagConfig {
     pub local_model: Option<String>,
 }
 
-fn default_true() -> bool { true }
-fn default_rag_model() -> String { "BAAI/bge-small-zh-v1.5".into() }
-fn default_embed_dim() -> usize { 512 }
-fn default_skill_top_k() -> usize { 5 }
-fn default_memory_top_k() -> usize { 3 }
+fn default_true() -> bool {
+    true
+}
+fn default_rag_model() -> String {
+    "BAAI/bge-small-zh-v1.5".into()
+}
+fn default_embed_dim() -> usize {
+    512
+}
+fn default_skill_top_k() -> usize {
+    5
+}
+fn default_memory_top_k() -> usize {
+    3
+}
 
 impl Default for RagConfig {
     fn default() -> Self {
@@ -633,10 +649,4 @@ impl Config {
     pub fn protocol(&self) -> String {
         crate::registry::protocol_for(&self.provider_id, &self.endpoint)
     }
-
-
-
-
-
-
 }

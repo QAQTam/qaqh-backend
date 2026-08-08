@@ -678,7 +678,8 @@ pub async fn handle_ringing_http(
         let route = path.split('?').next().unwrap_or(&path);
         let rest = route.trim_start_matches(&format!("{RINGING_TIMELINE_BASE_PATH}/sessions/"));
         if let Some(seed) = rest.strip_suffix("/timeline") {
-            return handle_timeline_snapshot(&mut stream, seed, &path, session_id, &leases, &hub).await;
+            return handle_timeline_snapshot(&mut stream, seed, &path, session_id, &leases, &hub)
+                .await;
         }
         if let Some(seed) = rest.strip_suffix("/timeline/events") {
             let Some(session_id) = session_id else {
@@ -2413,7 +2414,11 @@ async fn handle_sse(
 
     // 可靠 tail + 当前 replaceable 值（PLAN：Last-Event-ID 有效时只回放可靠 tail）
     for env in &replay.events {
-        if stream.write_all(sse_frame(&hub.epoch(), channel, env).as_bytes()).await.is_err() {
+        if stream
+            .write_all(sse_frame(&hub.epoch(), channel, env).as_bytes())
+            .await
+            .is_err()
+        {
             return Ok(());
         }
         let _ = stream.flush().await;
@@ -2745,7 +2750,10 @@ mod tests {
         let js_payload =
             br#"{"method":"config.save","params":{"lang":"en","autoCompactThreshold":0.75,"subagentDefaultTools":["file","exec"]}}"#;
         let js_fingerprint = deepx_runtime::ringing::content_store::sha256_hex(js_payload);
-        assert_eq!(fingerprint, js_fingerprint, "fingerprint payload must match JS JSON.stringify byte-for-byte");
+        assert_eq!(
+            fingerprint, js_fingerprint,
+            "fingerprint payload must match JS JSON.stringify byte-for-byte"
+        );
     }
 
     #[test]

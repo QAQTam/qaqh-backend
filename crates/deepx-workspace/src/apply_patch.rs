@@ -19,11 +19,7 @@ fn workspace_root() -> String {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    if ws.is_empty() {
-        ".".to_string()
-    } else {
-        ws
-    }
+    if ws.is_empty() { ".".to_string() } else { ws }
 }
 
 /// 执行 apply_patch：patch（必填）+ location（workdir/index/both）+ dry_run。
@@ -44,8 +40,14 @@ fn exec_apply_patch(args: &serde_json::Value) -> ToolResult {
             }).to_string());
         }
     };
-    let location = args.get("location").and_then(|x| x.as_str()).unwrap_or("workdir");
-    let dry_run = args.get("dry_run").and_then(|x| x.as_bool()).unwrap_or(false);
+    let location = args
+        .get("location")
+        .and_then(|x| x.as_str())
+        .unwrap_or("workdir");
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
 
     let ws = workspace_root();
     let result = if dry_run {
@@ -82,10 +84,7 @@ fn exec_apply_patch(args: &serde_json::Value) -> ToolResult {
             }
 
             let text = if dry_run {
-                let pre = v["hunks"]
-                    .as_array()
-                    .map(|h| h.len())
-                    .unwrap_or(0);
+                let pre = v["hunks"].as_array().map(|h| h.len()).unwrap_or(0);
                 let mism = v["hunks"]
                     .as_array()
                     .map(|h| h.iter().filter(|x| x["context_match"] != true).count())
@@ -114,7 +113,10 @@ fn exec_apply_patch(args: &serde_json::Value) -> ToolResult {
             });
             if !dry_run {
                 data["touched"] = serde_json::Value::Array(
-                    touched.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+                    touched
+                        .iter()
+                        .map(|s| serde_json::Value::String(s.clone()))
+                        .collect(),
                 );
                 data["offset_used"] = serde_json::Value::Number(offset.into());
             } else if let Some(hunks) = v["hunks"].as_array() {
@@ -264,7 +266,9 @@ mod tests {
         assert_eq!(out["insertions"], 1);
         assert_eq!(out["deletions"], 1);
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "line1\nLINE2\nline3\n"
         );
     }
@@ -277,7 +281,9 @@ mod tests {
         let out = run_in(&ws, &patch, serde_json::json!({}));
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "ONE\ntwo\n"
         );
     }
@@ -294,11 +300,15 @@ mod tests {
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(out["files"], 2);
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "ONE\n"
         );
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("b.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("b.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "TWO\n"
         );
     }
@@ -312,7 +322,9 @@ mod tests {
         assert_eq!(out["status"], "error");
         assert_eq!(out["code"], "APPLY_FAILED");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "aaa\nbbb\nccc\n"
         );
     }
@@ -322,7 +334,12 @@ mod tests {
         let (_dir, ws) = repo_with_commit(&[("a.txt", "x\n")]);
         let out = run_in(&ws, "this is not a patch", serde_json::json!({}));
         assert_eq!(out["status"], "error");
-        assert!(out["message"].as_str().unwrap_or("").contains("parse patch"));
+        assert!(
+            out["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("parse patch")
+        );
     }
 
     #[test]
@@ -343,7 +360,9 @@ mod tests {
         assert_eq!(out["insertions"], 1);
         // 未应用
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "line1\nline2\n"
         );
     }
@@ -358,7 +377,9 @@ mod tests {
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(out["offset_used"], -4, "got: {out}");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "l1\nL2\nl3\nl4\nl5\n"
         );
     }
@@ -374,9 +395,14 @@ mod tests {
         // 诊断包含锚行实际位置
         let msg = out["message"].as_str().unwrap_or("");
         assert!(msg.contains("a.txt"), "diagnostics missing file: {msg}");
-        assert!(msg.contains("actually at L1"), "diagnostics missing position: {msg}");
+        assert!(
+            msg.contains("actually at L1"),
+            "diagnostics missing position: {msg}"
+        );
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "l1\nl2\nl3\n"
         );
     }
@@ -389,7 +415,9 @@ mod tests {
         let out = run_in(&ws, &patch, serde_json::json!({}));
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "l1\nL2\nl3\n"
         );
     }
@@ -404,9 +432,8 @@ mod tests {
         assert_eq!(out["touched"], serde_json::json!(["a.txt"]));
         // 账本 hash 必须与磁盘一致（LF canonical 视图）
         let disk = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
-        let expected = crate::file_shared::content_hash(
-            &crate::file_shared::normalize_newlines(&disk).0,
-        );
+        let expected =
+            crate::file_shared::content_hash(&crate::file_shared::normalize_newlines(&disk).0);
         assert_eq!(crate::file_state::last_hash("a.txt"), Some(expected));
     }
 
@@ -437,7 +464,9 @@ mod tests {
         assert_eq!(hunks[0]["context_match"], true);
         // 未应用
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "l1\nl2\nl3\n"
         );
     }
@@ -459,7 +488,9 @@ mod tests {
             .unwrap();
         assert_eq!(diff.deltas().len(), 1, "index must differ from HEAD");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n"),
+            std::fs::read_to_string(dir.path().join("a.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "one\n"
         );
     }
@@ -470,6 +501,11 @@ mod tests {
         let patch = full_patch("a.txt", &["x"], &["X"], 1);
         let out = run_in(&ws, &patch, serde_json::json!({ "location": "elsewhere" }));
         assert_eq!(out["status"], "error");
-        assert!(out["message"].as_str().unwrap_or("").contains("invalid apply location"));
+        assert!(
+            out["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("invalid apply location")
+        );
     }
 }

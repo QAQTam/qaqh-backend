@@ -185,14 +185,9 @@ pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
         .join(seed)
         .join("todo.json");
     if !path.exists() {
-        return Err(json_err(
-            "NOT_FOUND",
-            "no todo list for this session",
-            "",
-        ));
+        return Err(json_err("NOT_FOUND", "no todo list for this session", ""));
     }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read todo.json: {e}"))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("read todo.json: {e}"))?;
     let mut store: TodoStore =
         serde_json::from_str(&content).map_err(|e| format!("parse todo.json: {e}"))?;
     let idx = store
@@ -214,8 +209,7 @@ pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
 
     let item_json = todo_item_json(&store.items[idx]);
     let tmp = path.with_extension("json.tmp");
-    let data =
-        serde_json::to_vec_pretty(&store).map_err(|e| format!("serialize todo: {e}"))?;
+    let data = serde_json::to_vec_pretty(&store).map_err(|e| format!("serialize todo: {e}"))?;
     std::fs::write(&tmp, data).map_err(|e| format!("write todo.tmp: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("rename todo: {e}"))?;
 
@@ -374,13 +368,16 @@ fn exec_todo_create_batch(args: &Value) -> Result<String, String> {
         .lock()
         .map_err(|_| "todo lock poisoned".to_string())?;
 
-    let items_arg = args.get("items").and_then(|v| v.as_array()).ok_or_else(|| {
-        json_err(
-            "INVALID_INPUT",
-            "items array is required for create_batch",
-            "Provide items: [{\"title\": \"...\", \"description\": \"...\"}, ...]",
-        )
-    })?;
+    let items_arg = args
+        .get("items")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            json_err(
+                "INVALID_INPUT",
+                "items array is required for create_batch",
+                "Provide items: [{\"title\": \"...\", \"description\": \"...\"}, ...]",
+            )
+        })?;
     if items_arg.is_empty() {
         return Err(json_err(
             "INVALID_INPUT",
@@ -570,7 +567,8 @@ fn exec_todo_list(args: &Value) -> Result<String, String> {
 
     if items.is_empty() {
         return Ok(json_ok(Value::String(
-            "No tasks yet. Use task(action=\"create\", title=..., description=...) to create one.".to_string(),
+            "No tasks yet. Use task(action=\"create\", title=..., description=...) to create one."
+                .to_string(),
         )));
     }
 
@@ -614,14 +612,22 @@ fn handle_todo_list(ctx: ToolCallCtx) -> ToolResult {
 }
 
 fn handle_task(ctx: ToolCallCtx) -> ToolResult {
-    let action = ctx.args.get("action").and_then(|v| v.as_str()).unwrap_or_default();
+    let action = ctx
+        .args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     let result = match action {
         "create" => exec_todo_create(&ctx.args),
         "create_batch" => exec_todo_create_batch(&ctx.args),
         "update" => exec_todo_update(&ctx.args),
         "cancel" => exec_todo_cancel(&ctx.args),
         "list" => exec_todo_list(&ctx.args),
-        _ => return ToolResult::error("task.action must be create, create_batch, update, cancel, or list"),
+        _ => {
+            return ToolResult::error(
+                "task.action must be create, create_batch, update, cancel, or list",
+            );
+        }
     };
     tool_result(result)
 }
@@ -753,7 +759,8 @@ mod tests {
                 ]
             }));
             assert!(result.is_err());
-            let err: serde_json::Value = serde_json::from_str(result.unwrap_err().as_str()).unwrap();
+            let err: serde_json::Value =
+                serde_json::from_str(result.unwrap_err().as_str()).unwrap();
             assert_eq!(err["code"], "INVALID_INPUT");
             // 零写入：store 文件不存在或为空
             let store = read_store().unwrap();

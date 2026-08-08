@@ -15,7 +15,6 @@ use deepx_types::{Message, SessionMeta};
 
 use crate::store;
 
-
 static INSTANCE: OnceLock<SessionManager> = OnceLock::new();
 
 /// The LLM-facing view after a compact operation.  Raw messages remain in the
@@ -113,7 +112,6 @@ impl SessionManager {
 
         store::remove_from_index(&self.sessions_dir, seed);
 
-        
         log::info!("SessionManager: deleted session {seed}");
         Ok(())
     }
@@ -143,9 +141,12 @@ impl SessionManager {
     pub fn save_compact_context(&self, seed: &str, messages: &[Message]) {
         let lock = self.session_lock(seed);
         let _guard = lock.lock().unwrap();
-        let archive_count = store::read_messages(&self.session_path_dir(seed))
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let archive_count = self
+            .load_meta(seed)
+            .map(|meta| meta.message_count)
+            .unwrap_or_else(|| {
+                store::count_message_lines(&self.session_path_dir(seed)).unwrap_or(0)
+            });
         let parent_checkpoint_id = self
             .read_compact_context(seed)
             .map(|context| context.checkpoint_id);
@@ -171,9 +172,12 @@ impl SessionManager {
         };
         let lock = self.session_lock(seed);
         let _guard = lock.lock().unwrap();
-        context.archive_message_count = store::read_messages(&self.session_path_dir(seed))
-            .map(|m| m.len())
-            .unwrap_or(0);
+        context.archive_message_count = self
+            .load_meta(seed)
+            .map(|meta| meta.message_count)
+            .unwrap_or_else(|| {
+                store::count_message_lines(&self.session_path_dir(seed)).unwrap_or(0)
+            });
         context.messages = messages.to_vec();
         if let Err(error) = self.write_compact_context(seed, &context) {
             log::error!("SessionManager: update compact context failed for {seed}: {error}");
@@ -209,7 +213,7 @@ impl SessionManager {
         let mut meta = self.load_meta(seed).unwrap_or_default();
         meta.mode = mode;
         let _ = store::write_meta(&dir, &meta);
-            }
+    }
 
     pub fn persist_skills(&self, seed: &str, skills: deepx_types::SkillSessionStateV2) {
         let lock = self.session_lock(seed);
@@ -265,7 +269,7 @@ impl SessionManager {
         }
         let _ = store::write_meta(&dir, &meta);
         store::upsert_index(&self.sessions_dir, &meta);
-            }
+    }
 
     pub fn persist_usage(
         &self,
@@ -288,10 +292,9 @@ impl SessionManager {
         meta.cache_reported_requests = cache_reported_requests;
         let _ = store::write_meta(&dir, &meta);
         store::upsert_index(&self.sessions_dir, &meta);
-            }
+    }
 
     /// Append a single message to JSONL immediately (per-message persistence).
-    /// Writes a complete target snapshot to the durable outbox before appending.
     pub fn save_one(&self, seed: &str, msg: &Message) {
         let lock = self.session_lock(seed);
         let _guard = lock.lock().unwrap();
@@ -304,10 +307,8 @@ impl SessionManager {
             meta.created_at = now;
         }
         meta.updated_at = now;
-        let mut target_messages = store::read_messages(&dir).unwrap_or_default();
-        target_messages.push(msg.clone());
-        meta.message_count = target_messages.len();
-                if let Err(e) = store::append_one(&dir, msg) {
+        meta.message_count = meta.message_count.saturating_add(1);
+        if let Err(e) = store::append_one(&dir, msg) {
             log::error!("SessionManager: save_one failed: {e}");
             return;
         }
@@ -316,7 +317,7 @@ impl SessionManager {
             return;
         }
         store::upsert_index(&self.sessions_dir, &meta);
-            }
+    }
 
     /// Update session metadata and index after messages have been appended.
     pub fn update_meta(
@@ -331,42 +332,22 @@ impl SessionManager {
         let _guard = lock.lock().unwrap();
         let now = Self::now_epoch();
         let dir = self.session_path_dir(seed);
-        let created_at = self.load_meta(seed).map(|m| m.created_at).unwrap_or(now);
-        let total = store::count_message_lines(&dir).unwrap_or(0);
-
-        // Extract summary: read last few messages for title
-        let last_summary = match store::read_messages(&dir) {
-            Ok(msgs) => Self::extract_summary(&msgs),
-            Err(_) => String::new(),
-        };
-
-        let existing = self.load_meta(seed).unwrap_or_default();
-
-        let meta = SessionMeta {
-            seed: seed.to_string(),
-            created_at,
-            updated_at: now,
-            model: model.to_string(),
-            effort: effort.map(String::from),
-            message_count: total,
-            turn_count,
-            last_summary,
-            compact_skip,
-            mode: existing.mode,
-            skills: existing.skills,
-            usage_totals: existing.usage_totals,
-            last_usage: existing.last_usage,
-            usage_requests: existing.usage_requests,
-            cache_reported_requests: existing.cache_reported_requests,
-            ..Default::default()
-        };
-                if let Err(e) = store::write_meta(&dir, &meta) {
+        let mut meta = self.load_meta(seed).unwrap_or_default();
+        meta.seed = seed.to_string();
+        if meta.created_at == 0 {
+            meta.created_at = now;
+        }
+        meta.updated_at = now;
+        meta.model = model.to_string();
+        meta.effort = effort.map(String::from);
+        meta.turn_count = turn_count;
+        meta.compact_skip = compact_skip;
+        if let Err(e) = store::write_meta(&dir, &meta) {
             log::error!("SessionManager: write_meta failed: {e}");
             return;
         }
         store::upsert_index(&self.sessions_dir, &meta);
-
-            }
+    }
 
     /// Save session: write meta + rewrite all messages.
     /// Used for initial save or after undo/compact.
@@ -405,7 +386,6 @@ impl SessionManager {
             ..Default::default()
         };
 
-        
         if let Err(e) = store::rewrite_messages(&dir, messages) {
             log::error!("SessionManager: rewrite_messages failed: {e}");
             return;
@@ -415,8 +395,7 @@ impl SessionManager {
             return;
         }
         store::upsert_index(&self.sessions_dir, &meta);
-
-            }
+    }
 
     /// Append new messages (since last save) to the session JSONL.
     /// Updates meta and index.
@@ -439,32 +418,20 @@ impl SessionManager {
         let dir = self.session_path_dir(seed);
         let _ = std::fs::create_dir_all(&dir);
 
-        let existing = self.load_meta(seed).unwrap_or_default();
-        let created_at = if existing.created_at == 0 {
-            now
-        } else {
-            existing.created_at
-        };
-
-        let existing_messages = store::read_messages(&dir).unwrap_or_default();
+        let mut meta = self.load_meta(seed).unwrap_or_default();
+        if meta.created_at == 0 {
+            meta.created_at = now;
+        }
         let last_summary = Self::extract_summary(new_messages);
-        let meta = SessionMeta {
-            seed: seed.to_string(),
-            created_at,
-            updated_at: now,
-            model: model.to_string(),
-            effort: effort.map(String::from),
-            message_count: existing_messages.len() + new_messages.len(),
-            turn_count,
-            last_summary,
-            compact_skip,
-            mode: existing.mode,
-            skills: existing.skills,
-            ..Default::default()
-        };
-        let mut target_messages = existing_messages;
-        target_messages.extend_from_slice(new_messages);
-        
+        meta.seed = seed.to_string();
+        meta.updated_at = now;
+        meta.model = model.to_string();
+        meta.effort = effort.map(String::from);
+        meta.message_count = meta.message_count.saturating_add(new_messages.len());
+        meta.turn_count = turn_count;
+        meta.last_summary = last_summary;
+        meta.compact_skip = compact_skip;
+
         // Append messages
         if let Err(e) = store::append_messages(&dir, new_messages) {
             log::error!("SessionManager: append_messages failed: {e}");
@@ -476,8 +443,7 @@ impl SessionManager {
             return;
         }
         store::upsert_index(&self.sessions_dir, &meta);
-
-            }
+    }
 
     /// Truncate messages.jsonl to `keep_lines` lines.
     /// Returns the truncated messages.
@@ -488,7 +454,7 @@ impl SessionManager {
             .session_dir(seed)
             .ok_or_else(|| format!("Session not found: {seed}"))?;
         let truncated = store::truncate_messages(&dir, keep_lines)?;
-                Ok(truncated)
+        Ok(truncated)
     }
 
     // ── Active session ──
@@ -748,5 +714,4 @@ mod skill_persistence_tests {
         );
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
-
 }

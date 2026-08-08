@@ -230,9 +230,7 @@ impl JournalStore {
                     }
                     if let Some(seed) = path.file_stem().and_then(|s| s.to_str()) {
                         if !seed.is_empty() {
-                            out.entry(channel)
-                                .or_default()
-                                .insert(seed.to_string());
+                            out.entry(channel).or_default().insert(seed.to_string());
                         }
                     }
                 }
@@ -253,7 +251,11 @@ impl JournalStore {
 
     /// 装载单个 (channel, seed) 的磁盘操作序列（reliable jsonl + replaceable
     /// latest 槽，顺序与 `load()` 一致）。懒加载按需恢复用。
-    pub fn load_seed(&self, channel: RingingChannel, seed: &str) -> std::io::Result<Vec<JournalOp>> {
+    pub fn load_seed(
+        &self,
+        channel: RingingChannel,
+        seed: &str,
+    ) -> std::io::Result<Vec<JournalOp>> {
         let mut ops = Vec::new();
         let path = self.path_for(channel, seed);
         if path.is_file() {
@@ -270,14 +272,14 @@ impl JournalStore {
                 if path.extension().and_then(|value| value.to_str()) != Some("json") {
                     continue;
                 }
-                match std::fs::read(&path).ok().and_then(|bytes| {
-                    serde_json::from_slice::<RingingEventEnvelope>(&bytes).ok()
-                }) {
+                match std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<RingingEventEnvelope>(&bytes).ok())
+                {
                     Some(envelope) => ops.push(JournalOp::Append { envelope }),
-                    None => log::warn!(
-                        "[ringing] skip corrupt replaceable slot {}",
-                        path.display()
-                    ),
+                    None => {
+                        log::warn!("[ringing] skip corrupt replaceable slot {}", path.display())
+                    }
                 }
             }
         }
@@ -605,10 +607,9 @@ mod tests {
             })
             .collect();
         assert_eq!(appends, vec!["turn-2", "e3"]);
-        assert!(
-            ops.iter()
-                .any(|op| matches!(op, JournalOp::Checkpoint { identity, .. } if identity == "tool:c1"))
-        );
+        assert!(ops.iter().any(
+            |op| matches!(op, JournalOp::Checkpoint { identity, .. } if identity == "tool:c1")
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

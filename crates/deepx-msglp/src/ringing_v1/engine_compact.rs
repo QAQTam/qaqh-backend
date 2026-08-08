@@ -531,7 +531,9 @@ fn serialize_messages(
                     Some(format!("[{role} web search]: {action_str}"))
                 }
                 deepx_types::ContentBlock::ToolResult { result, .. } => {
-                    let compact: String = result.model.text
+                    let compact: String = result
+                        .model
+                        .text
                         .lines()
                         .take(5)
                         .map(|l| l.chars().take(200).collect::<String>())
@@ -552,7 +554,9 @@ fn serialize_messages(
     for m in kept {
         if m.role == "tool" {
             if let Some(deepx_types::ContentBlock::ToolResult { result, .. }) = m.content.first() {
-                let compact: String = result.model.text
+                let compact: String = result
+                    .model
+                    .text
                     .lines()
                     .take(3)
                     .map(|l| l.chars().take(200).collect::<String>())

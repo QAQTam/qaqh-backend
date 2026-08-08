@@ -8,6 +8,8 @@ description = "AST → windows-reactor 富文本模型对接原型：验证 fork
 [dependencies]
 markdown-core = { path = "../markdown-core" }
 # 直接依赖 fork 内的 reactor —— 验证"解析产物 = reactor 富文本模型"零胶水
-windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3" }
+windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "0666e624d6fa692afb0822d193a2331898157d80" }
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+mermaid-rs-renderer = { version = "0.3.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

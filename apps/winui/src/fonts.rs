@@ -18,6 +18,32 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::OnceLock;
 
+/// Explicit Windows-native choice used when the user opts out of DeepX's
+/// packaged HarmonyOS Sans default.
+pub const WINDOWS_UI_FONT_FAMILY: &str =
+    "Segoe UI Variable, Segoe UI, Microsoft YaHei UI, Microsoft YaHei";
+
+/// Resolve the persisted preference. An empty value intentionally means the
+/// DeepX packaged default; older configs therefore migrate without a write.
+pub fn effective_ui_font(configured: &str) -> &str {
+    if configured.trim().is_empty() {
+        deepx_fluent::tokens::DEFAULT_UI_FONT_FAMILY
+    } else {
+        configured
+    }
+}
+
+/// Installed notice path used by Settings' visible licensing affordance.
+pub fn notices_path() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let path = exe
+        .parent()?
+        .join("Assets")
+        .join("fonts")
+        .join("THIRD_PARTY_NOTICES.txt");
+    path.is_file().then(|| path.to_string_lossy().to_string())
+}
+
 /// 进程级缓存：首次调用枚举注册表，之后直接返回（字体列表不常变）。
 static CACHE: OnceLock<Vec<String>> = OnceLock::new();
 
@@ -204,5 +230,14 @@ mod tests {
         assert_eq!(strip_variant("Segoe UI Semibold Italic"), "Segoe UI");
         assert_eq!(strip_variant("Consolas"), "Consolas");
         assert_eq!(strip_variant("Cascadia Code"), "Cascadia Code");
+    }
+
+    #[test]
+    fn empty_preference_uses_packaged_default() {
+        assert_eq!(
+            effective_ui_font(""),
+            deepx_fluent::tokens::DEFAULT_UI_FONT_FAMILY
+        );
+        assert_eq!(effective_ui_font("Arial"), "Arial");
     }
 }

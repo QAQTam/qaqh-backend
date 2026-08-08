@@ -29,9 +29,9 @@
 //!   edit_file summaries); the response never streams unbounded body text.
 
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -103,13 +103,7 @@ fn json_response(
     let headers = vec![
         tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
     ];
-    tiny_http::Response::new(
-        status,
-        headers,
-        std::io::Cursor::new(body),
-        Some(len),
-        None,
-    )
+    tiny_http::Response::new(status, headers, std::io::Cursor::new(body), Some(len), None)
 }
 
 fn text_response(
@@ -119,19 +113,10 @@ fn text_response(
     let body = text.as_bytes().to_vec();
     let len = body.len();
     let headers = vec![
-        tiny_http::Header::from_bytes(
-            &b"Content-Type"[..],
-            &b"text/plain; charset=utf-8"[..],
-        )
-        .unwrap(),
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
+            .unwrap(),
     ];
-    tiny_http::Response::new(
-        status,
-        headers,
-        std::io::Cursor::new(body),
-        Some(len),
-        None,
-    )
+    tiny_http::Response::new(status, headers, std::io::Cursor::new(body), Some(len), None)
 }
 
 /// 执行单个工具调用（catch_unwind 防护），返回结果 + 账本增量。
@@ -140,7 +125,13 @@ fn run_tool(request: &ExecuteRequest) -> ExecuteOutcome {
     let name = request.name.clone();
     let args = serde_json::to_string(&request.args).unwrap_or_else(|_| "{}".into());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::execution::execute_with_context(&request.name, &request.action, &args, &request.call_id, None)
+        crate::execution::execute_with_context(
+            &request.name,
+            &request.action,
+            &args,
+            &request.call_id,
+            None,
+        )
     }))
     .unwrap_or_else(|payload| {
         let message = payload
@@ -172,9 +163,9 @@ fn run_tool(request: &ExecuteRequest) -> ExecuteOutcome {
 /// 扁平协议响应：ToolResult 序列化为顶层字段 + state_delta 附加
 /// （daemon 端 HttpExecuteResponse 用 #[serde(flatten)] 解析）。
 fn respond_outcome(request: tiny_http::Request, outcome: ExecuteOutcome) {
-    let mut payload = serde_json::to_value(&outcome.result).unwrap_or_else(|_| {
-        serde_json::json!({ "status": "error", "message": "result serialization failed" })
-    });
+    let mut payload = serde_json::to_value(&outcome.result).unwrap_or_else(
+        |_| serde_json::json!({ "status": "error", "message": "result serialization failed" }),
+    );
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(
             "state_delta".to_string(),
@@ -193,7 +184,10 @@ fn handle_execute(
 ) {
     let mut body = Vec::new();
     if request.as_reader().read_to_end(&mut body).is_err() {
-        let _ = request.respond(text_response(tiny_http::StatusCode(400), "read body failed"));
+        let _ = request.respond(text_response(
+            tiny_http::StatusCode(400),
+            "read body failed",
+        ));
         return;
     }
     let mut parsed: ExecuteRequest = match serde_json::from_slice(&body) {
@@ -213,7 +207,10 @@ fn handle_execute(
         ));
         return;
     }
-    if crate::runtime::all_tools().iter().all(|def| def.function.name != parsed.name) {
+    if crate::runtime::all_tools()
+        .iter()
+        .all(|def| def.function.name != parsed.name)
+    {
         let _ = request.respond(text_response(
             tiny_http::StatusCode(404),
             &format!("unknown tool: {}", parsed.name),
@@ -243,12 +240,10 @@ fn handle_execute(
         Ok(()) => {
             // Wait for the serial worker. No timeout: tool duration is the
             // contract; control endpoints are served on other threads.
-            let outcome = received
-                .recv()
-                .unwrap_or_else(|_| ExecuteOutcome {
-                    result: crate::ToolResult::error("workspace execution worker unavailable"),
-                    state_delta: Vec::new(),
-                });
+            let outcome = received.recv().unwrap_or_else(|_| ExecuteOutcome {
+                result: crate::ToolResult::error("workspace execution worker unavailable"),
+                state_delta: Vec::new(),
+            });
             respond_outcome(request, outcome);
         }
         Err(_) => {
@@ -291,7 +286,9 @@ pub fn serve(host: &str, port: u16, token: &str) -> Result<(), String> {
             // channel 断开（唯一 sender 是 HTTP 线程持有的 Arc<tx>，只有
             // 在 serve 关闭路径才会全断）→ 异常退出，让 supervisor 重启。
             // 正常 shutdown 由外部 taskkill 完成，不会走到这里。
-            log::error!("[workspace] executor thread ended unexpectedly; exiting for supervisor restart");
+            log::error!(
+                "[workspace] executor thread ended unexpectedly; exiting for supervisor restart"
+            );
             std::process::exit(70);
         })
         .map_err(|e| format!("spawn executor thread: {e}"))?;
@@ -313,7 +310,8 @@ pub fn serve(host: &str, port: u16, token: &str) -> Result<(), String> {
             .name("workspace-http".into())
             .spawn(move || {
                 if !authorized(&request, &token) {
-                    let _ = request.respond(text_response(tiny_http::StatusCode(401), "unauthorized"));
+                    let _ =
+                        request.respond(text_response(tiny_http::StatusCode(401), "unauthorized"));
                     return;
                 }
                 let path = url.split('?').next().unwrap_or("");
@@ -344,7 +342,8 @@ pub fn serve(host: &str, port: u16, token: &str) -> Result<(), String> {
                         handle_execute(request, &token, &tx, &next_id);
                     }
                     _ => {
-                        let _ = request.respond(text_response(tiny_http::StatusCode(404), "not found"));
+                        let _ =
+                            request.respond(text_response(tiny_http::StatusCode(404), "not found"));
                     }
                 }
             })

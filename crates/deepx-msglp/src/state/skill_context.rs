@@ -378,11 +378,8 @@ impl SkillContextManager {
             self.activation_order = self.activation_order.max(saved.activation_order);
             match self.load_named(&saved.name) {
                 Ok(activation) => {
-                    let _ = self.activate_with_order(
-                        activation,
-                        &saved.source,
-                        saved.activation_order,
-                    );
+                    let _ =
+                        self.activate_with_order(activation, &saved.source, saved.activation_order);
                 }
                 Err(error) => {
                     self.entries.insert(
@@ -517,9 +514,7 @@ impl SkillContextManager {
             .entries
             .iter()
             .filter(|(name, entry)| entry.activation.is_some() && except != Some(name.as_str()))
-            .map(|(name, entry)| {
-                (name.clone(), entry.last_retained_revision)
-            })
+            .map(|(name, entry)| (name.clone(), entry.last_retained_revision))
             .collect::<Vec<_>>();
         candidates.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
         for (name, _) in candidates {

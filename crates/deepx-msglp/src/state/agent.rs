@@ -40,8 +40,7 @@ fn prefix_hash(data: &str) -> String {
 fn message_hash(message: &deepx_types::Message) -> u64 {
     // Serialize the full message so role + every content block (text,
     // tool_use, tool_result incl. text) participates in the hash.
-    let rendered =
-        serde_json::to_string(message).unwrap_or_else(|_| format!("{:?}", message));
+    let rendered = serde_json::to_string(message).unwrap_or_else(|_| format!("{:?}", message));
     let mut hash = 0xcbf29ce484222325u64;
     for byte in rendered.as_bytes() {
         hash ^= u64::from(*byte);
@@ -168,7 +167,10 @@ impl AgentState {
             self.config.base_url,
             protocol,
             self.config.model,
-            self.config.tokenizer_path.as_deref().unwrap_or("<heuristic>"),
+            self.config
+                .tokenizer_path
+                .as_deref()
+                .unwrap_or("<heuristic>"),
         )
     }
 
@@ -232,9 +234,9 @@ impl AgentState {
     /// Consume any pending cache diagnostics set by build_context().
     /// Returns (prefix_hash, change_reasons) if the prefix changed.
     pub fn take_cache_diagnostics(&mut self) -> Option<(String, Vec<String>)> {
-        self.pending_cache_diagnostics.take().map(|reasons| {
-            (self.prev_prefix.system_hash.clone(), reasons)
-        })
+        self.pending_cache_diagnostics
+            .take()
+            .map(|reasons| (self.prev_prefix.system_hash.clone(), reasons))
     }
 
     /// Freeze annotations for the session so the first user message keeps an
@@ -504,7 +506,11 @@ mod tests {
         // System text change is still caught by the component hash.
         let sys2 = vec![deepx_types::Message::system("base v2")];
         let sys_changed = PrefixShape::capture(&[sys2[0].clone(), u1.clone()], "", &[]);
-        assert!(sys_changed.diff(&before).contains(&"system_prompt".to_string()));
+        assert!(
+            sys_changed
+                .diff(&before)
+                .contains(&"system_prompt".to_string())
+        );
     }
 
     #[test]

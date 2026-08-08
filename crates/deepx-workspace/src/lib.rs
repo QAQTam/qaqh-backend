@@ -6,13 +6,13 @@ pub mod exec;
 
 pub mod apply_patch;
 
-pub mod file_edit;
-pub mod file_mutate;
 pub mod authorization;
 pub mod backend;
 mod code_delta;
 pub mod execution;
 pub mod file_cache;
+pub mod file_edit;
+pub mod file_mutate;
 pub mod file_query;
 pub mod file_shared;
 pub mod file_state;
@@ -31,16 +31,15 @@ pub mod todo;
 
 pub mod workspace;
 
-
 pub mod process_inspect;
 pub mod process_registry;
 
 pub mod registration;
 
 pub mod manager;
-pub mod serve;
 /// Permission engine: tool categories, levels, trusted folders.
 pub mod permission;
+pub mod serve;
 
 pub mod agentfs_bridge;
 pub mod audit;
@@ -48,8 +47,7 @@ pub mod auth;
 
 pub use backend::{
     BackendRequest, HttpToolExecutionBackend, LocalToolExecutionBackend, ToolExecutionBackend,
-    ToolPlacement,
-    install_workspace_backend, use_local_workspace_backend,
+    ToolPlacement, install_workspace_backend, use_local_workspace_backend,
 };
 pub use manager::{ToolExecMeta, ToolExecReport, ToolManager, ToolStats};
 pub use safety::SafetyVerdict;
@@ -169,11 +167,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
+use deepx_types::ToolDef;
 pub use deepx_types::{
     ContentRef, ToolContinuation, ToolError as CanonicalToolError, ToolModelPayload, ToolResult,
     ToolStatus,
 };
-use deepx_types::ToolDef;
 
 // ── Global state ──
 
@@ -200,7 +198,7 @@ pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>>
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 /// Tools blocked in PLAN mode. Keep in sync with permission::categorize_tool.
-    pub const PLAN_BLOCKED: &[&str] = &["edit_file", "exec", "process", "todo"];
+pub const PLAN_BLOCKED: &[&str] = &["edit_file", "exec", "process", "todo"];
 
 pub fn set_workspace(path: &str) {
     let mut ws = CURRENT_WORKSPACE.write().unwrap_or_else(|e| e.into_inner());
@@ -422,13 +420,19 @@ impl std::fmt::Display for ToolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ManagerUnavailable => {
-                write!(f, "[ERROR] tool manager unavailable — poisoned or not initialised")
+                write!(
+                    f,
+                    "[ERROR] tool manager unavailable — poisoned or not initialised"
+                )
             }
             Self::UnknownTool { name } => {
                 write!(f, "[ERROR] Unknown tool: {name}")
             }
             Self::SessionMismatch => {
-                write!(f, "[ERROR] session mismatch — authorization doesn't match active session")
+                write!(
+                    f,
+                    "[ERROR] session mismatch — authorization doesn't match active session"
+                )
             }
             Self::PermissionDenied { reason } => {
                 write!(f, "[PERMISSION_REQUIRED] {reason}")
@@ -442,16 +446,30 @@ impl std::fmt::Display for ToolError {
             Self::InvalidArgs { message } => {
                 write!(f, "[ERROR] invalid arguments: {message}")
             }
-            Self::Io { tool, path, message } => {
+            Self::Io {
+                tool,
+                path,
+                message,
+            } => {
                 write!(f, "[ERROR] {tool}: {path} — {message}")
             }
             Self::ResourceMismatch => {
-                write!(f, "[ERROR] Resource mismatch — tool invocation targets different resources than authorized")
+                write!(
+                    f,
+                    "[ERROR] Resource mismatch — tool invocation targets different resources than authorized"
+                )
             }
             Self::RuntimeNotInitialized => {
-                write!(f,"[ERROR] Tool execution requires an initialized runtime context — call set_context() first")
+                write!(
+                    f,
+                    "[ERROR] Tool execution requires an initialized runtime context — call set_context() first"
+                )
             }
-            Self::ToolSpecific { tool, code, message } => {
+            Self::ToolSpecific {
+                tool,
+                code,
+                message,
+            } => {
                 write!(f, "[ERROR] {tool}: {code} — {message}")
             }
             Self::Partial { message } => {

@@ -22,8 +22,8 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use super::file_shared::{
-    atomic_write, closest_line, content_hash, disambiguate_match, normalize_newlines,
-    unified_diff, verify_expected_hash,
+    atomic_write, closest_line, content_hash, disambiguate_match, normalize_newlines, unified_diff,
+    verify_expected_hash,
 };
 use crate::{ToolHandler, ToolResult, ToolRisk};
 
@@ -51,18 +51,40 @@ struct EditOp {
 impl EditOp {
     fn parse(v: &serde_json::Value) -> Result<Self, String> {
         let op = EditOp {
-            old_string: v.get("old_string").and_then(|x| x.as_str()).map(str::to_string),
-            new_string: v.get("new_string").and_then(|x| x.as_str()).map(str::to_string),
+            old_string: v
+                .get("old_string")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            new_string: v
+                .get("new_string")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
             old_lines: str_array(v, "old_lines"),
             new_lines: str_array(v, "new_lines"),
-            start_line: v.get("start_line").and_then(|x| x.as_u64()).map(|n| n as usize),
-            end_line: v.get("end_line").and_then(|x| x.as_u64()).map(|n| n as usize),
+            start_line: v
+                .get("start_line")
+                .and_then(|x| x.as_u64())
+                .map(|n| n as usize),
+            end_line: v
+                .get("end_line")
+                .and_then(|x| x.as_u64())
+                .map(|n| n as usize),
             context_before: str_array(v, "context_before"),
             context_after: str_array(v, "context_after"),
-            replace_all: v.get("replace_all").and_then(|x| x.as_bool()).unwrap_or(false),
+            replace_all: v
+                .get("replace_all")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
             use_regex: v.get("regex").and_then(|x| x.as_bool()).unwrap_or(false),
-            allow_fuzzy: v.get("allow_fuzzy").and_then(|x| x.as_bool()).unwrap_or(false),
-            description: v.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            allow_fuzzy: v
+                .get("allow_fuzzy")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+            description: v
+                .get("description")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
         };
         if op.old_string.is_none()
             && op.old_lines.is_empty()
@@ -70,7 +92,10 @@ impl EditOp {
             && op.new_string.is_none()
             && op.new_lines.is_empty()
         {
-            return Err("op is empty: provide old_string/new_string, old_lines/new_lines, or start_line".into());
+            return Err(
+                "op is empty: provide old_string/new_string, old_lines/new_lines, or start_line"
+                    .into(),
+            );
         }
         if op.new_string.is_none() && op.new_lines.is_empty() {
             return Err("op is missing a replacement: provide new_string or new_lines".into());
@@ -82,7 +107,11 @@ impl EditOp {
 fn str_array(v: &serde_json::Value, key: &str) -> Vec<String> {
     v.get(key)
         .and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -103,7 +132,10 @@ fn parse_file_request(v: &serde_json::Value) -> Result<FileRequest, String> {
         .ok_or_else(|| "edit_file: missing 'path'".to_string())?;
     let display = path.to_string();
     let path = crate::resolve_workspace_path(&path);
-    let expected_hash = v.get("expected_hash").and_then(|x| x.as_str()).map(str::to_string);
+    let expected_hash = v
+        .get("expected_hash")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
     let dry_run = v.get("dry_run").and_then(|x| x.as_bool()).unwrap_or(false);
     let ops = if let Some(ops) = v.get("ops").and_then(|x| x.as_array()) {
         if ops.is_empty() {
@@ -148,11 +180,7 @@ enum OpError {
 
 /// 行窗口匹配：返回所有 candidate 起始行（0-based）与是否启用了 fuzzy。
 /// 层级：trim_end 精确 → (allow_fuzzy) trim → (allow_fuzzy) Unicode NFC + 行内空白折叠。
-fn find_windows(
-    file_lines: &[&str],
-    pattern: &[String],
-    allow_fuzzy: bool,
-) -> (Vec<usize>, bool) {
+fn find_windows(file_lines: &[&str], pattern: &[String], allow_fuzzy: bool) -> (Vec<usize>, bool) {
     if pattern.is_empty() || pattern.len() > file_lines.len() {
         return (Vec::new(), false);
     }
@@ -281,9 +309,7 @@ fn no_match_diagnostic(content: &str, pattern: &[String]) -> Option<String> {
         );
         // 单行模式（pattern 只有一行）最常在这里命中转义差异
         let anchor_trim = anchor.1.trim();
-        if anchor_trim.replace('\\', "") == needle.replace('\\', "")
-            && anchor_trim != needle
-        {
+        if anchor_trim.replace('\\', "") == needle.replace('\\', "") && anchor_trim != needle {
             out.push_str(
                 "\n  [HINT] escape mismatch: the file contains backslash-escaped characters (e.g. \\\") that differ from your pattern — copy the exact characters from read_file output.",
             );
@@ -351,13 +377,19 @@ fn locate_op(
         let e = op.end_line.map(|n| n.saturating_sub(1)).unwrap_or(s);
         if s >= file_lines.len() {
             return Err(OpError::Other {
-                message: format!("start_line {start} is past end of file ({} lines)", file_lines.len()),
+                message: format!(
+                    "start_line {start} is past end of file ({} lines)",
+                    file_lines.len()
+                ),
             });
         }
         let e = e.min(file_lines.len().saturating_sub(1));
         if s > e {
             return Err(OpError::Other {
-                message: format!("start_line {start} > end_line {}", op.end_line.unwrap_or(start)),
+                message: format!(
+                    "start_line {start} > end_line {}",
+                    op.end_line.unwrap_or(start)
+                ),
             });
         }
         // 行号 + 无任何内容校验时，必须提供 expected_hash（严格：防漂移定位）
@@ -369,8 +401,13 @@ fn locate_op(
         // 校验行号窗口内容（若有 old_lines / old_string）
         if !op.old_lines.is_empty() {
             let actual: Vec<&str> = file_lines[s..=e].to_vec();
-            let norm_actual: Vec<String> = actual.iter().map(|l| l.trim_end().to_string()).collect();
-            let norm_old: Vec<String> = op.old_lines.iter().map(|l| l.trim_end().to_string()).collect();
+            let norm_actual: Vec<String> =
+                actual.iter().map(|l| l.trim_end().to_string()).collect();
+            let norm_old: Vec<String> = op
+                .old_lines
+                .iter()
+                .map(|l| l.trim_end().to_string())
+                .collect();
             if norm_actual != norm_old {
                 let mut ctx = String::new();
                 for (i, line) in actual.iter().enumerate() {
@@ -395,8 +432,10 @@ fn locate_op(
             let window: Vec<&str> = file_lines[s..=e].to_vec();
             let want = multiline_string_lines(old);
             if !want.is_empty() {
-                let norm_win: Vec<String> = window.iter().map(|l| l.trim_end().to_string()).collect();
-                let norm_want: Vec<String> = want.iter().map(|l| l.trim_end().to_string()).collect();
+                let norm_win: Vec<String> =
+                    window.iter().map(|l| l.trim_end().to_string()).collect();
+                let norm_want: Vec<String> =
+                    want.iter().map(|l| l.trim_end().to_string()).collect();
                 if norm_win != norm_want {
                     return Err(OpError::LineMismatch {
                         detail: format!(
@@ -422,14 +461,17 @@ fn locate_op(
             let (s_lines, _, _) = locate_line_window(file_lines, op)?;
             let positions: Vec<usize> = content.match_indices(old).map(|(i, _)| i).collect();
             let s_sub = match positions.len() {
-                0 => return Err(OpError::NoMatch {
-                    closest: closest_line(content, old),
-                    diagnostic: no_match_diagnostic(content, &[old.to_string()]),
-                }),
+                0 => {
+                    return Err(OpError::NoMatch {
+                        closest: closest_line(content, old),
+                        diagnostic: no_match_diagnostic(content, &[old.to_string()]),
+                    });
+                }
                 1 => line_of(content, positions[0]).saturating_sub(1),
                 _ if op.replace_all => line_of(content, positions[0]).saturating_sub(1),
                 _ => {
-                    let lines: Vec<usize> = positions.iter().map(|&p| line_of(content, p)).collect();
+                    let lines: Vec<usize> =
+                        positions.iter().map(|&p| line_of(content, p)).collect();
                     return Err(OpError::Ambiguous { candidates: lines });
                 }
             };
@@ -457,7 +499,9 @@ fn locate_op(
                 let mut per_line: std::collections::HashMap<usize, usize> =
                     std::collections::HashMap::new();
                 for &p in &positions {
-                    *per_line.entry(line_of(content, p).saturating_sub(1)).or_insert(0) += 1;
+                    *per_line
+                        .entry(line_of(content, p).saturating_sub(1))
+                        .or_insert(0) += 1;
                 }
                 if !op.context_before.is_empty() || !op.context_after.is_empty() {
                     if let Ok(line) = disambiguate_match(
@@ -612,7 +656,15 @@ struct OpReport {
 }
 
 impl OpReport {
-    fn ok(index: usize, line: usize, added: usize, removed: usize, fuzzy: bool, diff: Option<String>, description: String) -> Self {
+    fn ok(
+        index: usize,
+        line: usize,
+        added: usize,
+        removed: usize,
+        fuzzy: bool,
+        diff: Option<String>,
+        description: String,
+    ) -> Self {
         Self {
             index,
             status: "ok",
@@ -702,13 +754,21 @@ impl OpReport {
             candidates,
             mismatch,
             diagnostic,
-            hint: hint.map(|h| format!("{h}\n       (op #{index} of {display} failed; other ops are unaffected)")),
+            hint: hint.map(|h| {
+                format!("{h}\n       (op #{index} of {display} failed; other ops are unaffected)")
+            }),
         }
     }
 }
 
 /// 对当前内容应用单个 op。返回 (新内容, 报告)。
-fn apply_op(content: &str, op: &EditOp, index: usize, display: &str, dry_run: bool) -> (String, OpReport) {
+fn apply_op(
+    content: &str,
+    op: &EditOp,
+    index: usize,
+    display: &str,
+    dry_run: bool,
+) -> (String, OpReport) {
     // replace_all 子串全量替换（不经过行窗口，直接 content.replace）
     if op.replace_all
         && !op.use_regex
@@ -780,7 +840,10 @@ fn apply_op(content: &str, op: &EditOp, index: usize, display: &str, dry_run: bo
         && win == 1
         && new_lines.len() == 1
     {
-        let line_before = replaced_lines.first().map(|l| l.to_string()).unwrap_or_default();
+        let line_before = replaced_lines
+            .first()
+            .map(|l| l.to_string())
+            .unwrap_or_default();
         if line_before.contains(old) {
             let replaced = line_before.replacen(old, &new_lines[0], 1);
             final_lines[start] = replaced.as_str();
@@ -789,7 +852,9 @@ fn apply_op(content: &str, op: &EditOp, index: usize, display: &str, dry_run: bo
             if content.ends_with('\n') && !rebuilt.ends_with('\n') {
                 rebuilt.push('\n');
             }
-            return finish_op(content, &rebuilt, start, 1, 1, fuzzy, index, display, dry_run, op);
+            return finish_op(
+                content, &rebuilt, start, 1, 1, fuzzy, index, display, dry_run, op,
+            );
         }
     }
 
@@ -799,7 +864,18 @@ fn apply_op(content: &str, op: &EditOp, index: usize, display: &str, dry_run: bo
     }
     let added = new_lines.len();
     let removed = win;
-    finish_op(content, &new_content, start, added, removed, fuzzy, index, display, dry_run, op)
+    finish_op(
+        content,
+        &new_content,
+        start,
+        added,
+        removed,
+        fuzzy,
+        index,
+        display,
+        dry_run,
+        op,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -824,7 +900,15 @@ fn finish_op(
     };
     (
         new_content.to_string(),
-        OpReport::ok(index, start + 1, added, removed, fuzzy, diff, _op.description.clone()),
+        OpReport::ok(
+            index,
+            start + 1,
+            added,
+            removed,
+            fuzzy,
+            diff,
+            _op.description.clone(),
+        ),
     )
 }
 
@@ -860,7 +944,7 @@ fn execute_file(req: &FileRequest) -> FileReport {
                     status: "error",
                     line: None,
                     summary: None,
-            description: None,
+                    description: None,
                     fuzzy: None,
                     diff: None,
                     code: Some("READ_FAILED".into()),
@@ -895,7 +979,7 @@ fn execute_file(req: &FileRequest) -> FileReport {
                 status: "error",
                 line: None,
                 summary: None,
-            description: None,
+                description: None,
                 fuzzy: None,
                 diff: None,
                 code: Some("STALE_FILE".into()),
@@ -904,7 +988,9 @@ fn execute_file(req: &FileRequest) -> FileReport {
                 candidates: None,
                 mismatch: Some(error),
                 diagnostic: None,
-                hint: Some("Use read_file to obtain current content and hash, then retry the edit.".into()),
+                hint: Some(
+                    "Use read_file to obtain current content and hash, then retry the edit.".into(),
+                ),
             }],
         };
     }
@@ -1069,12 +1155,19 @@ pub(crate) fn extract_target_paths(args: &serde_json::Value) -> Vec<PathBuf> {
 // ─────────────────────────────────────────────────────────────
 
 fn exec_edit_file(args: &serde_json::Value) -> ToolResult {
-    let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // 多文件模式：files 数组；单文件模式：顶层 path
     let mut requests: Vec<FileRequest> = Vec::new();
     if let Some(files) = args.get("files").and_then(|v| v.as_array()) {
-        if args.get("path").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+        if args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+        {
             return crate::ToolResult::error(serde_json::json!({
                 "timeis": crate::now_utc8(),
                 "status": "error",
@@ -1084,13 +1177,16 @@ fn exec_edit_file(args: &serde_json::Value) -> ToolResult {
             }).to_string());
         }
         if files.is_empty() {
-            return crate::ToolResult::error(serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "error",
-                "code": "EMPTY_FILES",
-                "message": "files array is empty",
-                "hint": "Provide at least one file entry.",
-            }).to_string());
+            return crate::ToolResult::error(
+                serde_json::json!({
+                    "timeis": crate::now_utc8(),
+                    "status": "error",
+                    "code": "EMPTY_FILES",
+                    "message": "files array is empty",
+                    "hint": "Provide at least one file entry.",
+                })
+                .to_string(),
+            );
         }
         for (i, f) in files.iter().enumerate() {
             let mut f = f.clone();
@@ -1180,7 +1276,10 @@ fn render_text(reports: &[FileReport], status: &str, dry_run: bool) -> String {
                     op.index,
                     op.line.unwrap_or(0),
                     op.summary.as_deref().unwrap_or(""),
-                    op.fuzzy.unwrap_or(false).then_some(" (fuzzy)").unwrap_or("")
+                    op.fuzzy
+                        .unwrap_or(false)
+                        .then_some(" (fuzzy)")
+                        .unwrap_or("")
                 ));
             } else {
                 out.push_str(&format!(
@@ -1292,9 +1391,12 @@ mod tests {
     fn substring_mode_replaces_in_line() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "a.rs", "fn main() {\n    let x = 1;\n}\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "let x = 1;", "new_string": "let y = 2;",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "let x = 1;", "new_string": "let y = 2;",
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(out["files"][0]["status"], "ok");
         assert_eq!(out["files"][0]["ops"][0]["line"], 2);
@@ -1306,9 +1408,12 @@ mod tests {
     fn line_window_mode_replaces_block() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "b.rs", "a\nb\nc\nd\n");
-        let out = run(&p, serde_json::json!({
-            "old_lines": ["b", "c"], "new_lines": ["B", "C", "C2"],
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["b", "c"], "new_lines": ["B", "C", "C2"],
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(out["files"][0]["ops"][0]["summary"], "+3 -2");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nB\nC\nC2\nd\n");
@@ -1319,15 +1424,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "c.rs", "a\nb\nc\n");
         // 行号 + 正确内容 → 成功
-        let out = run(&p, serde_json::json!({
-            "start_line": 2, "old_lines": ["b"], "new_lines": ["B"],
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "start_line": 2, "old_lines": ["b"], "new_lines": ["B"],
+            }),
+        );
         assert_eq!(out["status"], "ok");
         // 行号 + 错误内容 → LINE_MISMATCH（严格）
         let p2 = write_tmp(dir.path(), "d.rs", "a\nb\nc\n");
-        let out = run(&p2, serde_json::json!({
-            "start_line": 2, "old_lines": ["WRONG"], "new_lines": ["B"],
-        }));
+        let out = run(
+            &p2,
+            serde_json::json!({
+                "start_line": 2, "old_lines": ["WRONG"], "new_lines": ["B"],
+            }),
+        );
         assert_eq!(out["files"][0]["ops"][0]["status"], "error");
         assert_eq!(out["files"][0]["ops"][0]["code"], "LINE_MISMATCH");
     }
@@ -1338,9 +1449,12 @@ mod tests {
         let p = write_tmp(dir.path(), "e.rs", "a\nb\nc\n");
         let content = std::fs::read_to_string(&p).unwrap();
         let hash = content_hash(&content);
-        let out = run(&p, serde_json::json!({
-            "start_line": 2, "end_line": 2, "new_lines": ["B"], "expected_hash": hash,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "start_line": 2, "end_line": 2, "new_lines": ["B"], "expected_hash": hash,
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nB\nc\n");
     }
@@ -1349,39 +1463,54 @@ mod tests {
     fn ambiguous_match_is_rejected_with_candidates() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "f.rs", "x\nmark\nx\nmark\nx\n");
-        let out = run(&p, serde_json::json!({
-            "old_lines": ["mark"], "new_lines": ["replaced"],
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["mark"], "new_lines": ["replaced"],
+            }),
+        );
         assert_eq!(out["files"][0]["ops"][0]["status"], "error");
         assert_eq!(out["files"][0]["ops"][0]["code"], "AMBIGUOUS_MATCH");
         let candidates = out["files"][0]["ops"][0]["candidates"].as_array().unwrap();
         assert_eq!(candidates.len(), 2);
         // 未写入
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "x\nmark\nx\nmark\nx\n");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "x\nmark\nx\nmark\nx\n"
+        );
     }
 
     #[test]
     fn context_disambiguates() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "g.rs", "x\nmark\nfirst\nx\nmark\nsecond\n");
-        let out = run(&p, serde_json::json!({
-            "old_lines": ["mark"], "new_lines": ["replaced"], "context_after": ["first"],
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["mark"], "new_lines": ["replaced"], "context_after": ["first"],
+            }),
+        );
         assert_eq!(out["status"], "ok");
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "x\nreplaced\nfirst\nx\nmark\nsecond\n");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "x\nreplaced\nfirst\nx\nmark\nsecond\n"
+        );
     }
 
     #[test]
     fn ops_are_independent_transactions() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "h.rs", "a\nb\nc\n");
-        let out = run(&p, serde_json::json!({
-            "ops": [
-                {"old_lines": ["a"], "new_lines": ["A"]},
-                {"old_lines": ["DOES_NOT_EXIST"], "new_lines": ["X"]},
-                {"old_lines": ["c"], "new_lines": ["C"]},
-            ],
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "ops": [
+                    {"old_lines": ["a"], "new_lines": ["A"]},
+                    {"old_lines": ["DOES_NOT_EXIST"], "new_lines": ["X"]},
+                    {"old_lines": ["c"], "new_lines": ["C"]},
+                ],
+            }),
+        );
         assert_eq!(out["status"], "partial");
         let ops = out["files"][0]["ops"].as_array().unwrap();
         assert_eq!(ops[0]["status"], "ok");
@@ -1416,15 +1545,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "k.rs", "a\nb\nc\n");
         // 一致 → ok
-        let out = run(&p, serde_json::json!({
-            "old_string": "b", "old_lines": ["b"], "new_string": "B",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "b", "old_lines": ["b"], "new_string": "B",
+            }),
+        );
         assert_eq!(out["status"], "ok");
         // 不一致 → CROSS_CHECK
         let p2 = write_tmp(dir.path(), "l.rs", "a\nb\nc\n");
-        let out = run(&p2, serde_json::json!({
-            "old_string": "c", "old_lines": ["a"], "new_string": "X",
-        }));
+        let out = run(
+            &p2,
+            serde_json::json!({
+                "old_string": "c", "old_lines": ["a"], "new_string": "X",
+            }),
+        );
         assert_eq!(out["files"][0]["ops"][0]["code"], "CROSS_CHECK");
     }
 
@@ -1432,9 +1567,12 @@ mod tests {
     fn replace_all_substring() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "m.rs", "x y x\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "x", "new_string": "z", "replace_all": true,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "x", "new_string": "z", "replace_all": true,
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "z y z\n");
     }
@@ -1444,22 +1582,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "n.rs", "fn main() {\n    call();\n}\n");
         // 缩进错误 + allow_fuzzy → 命中
-        let out = run(&p, serde_json::json!({
-            "old_lines": ["fn main() {", "call();"], "new_lines": ["fn main() {", "  call();"],
-            "allow_fuzzy": true,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["fn main() {", "call();"], "new_lines": ["fn main() {", "  call();"],
+                "allow_fuzzy": true,
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(out["files"][0]["ops"][0]["fuzzy"], true);
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "fn main() {\n  call();\n}\n");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "fn main() {\n  call();\n}\n"
+        );
     }
 
     #[test]
     fn dry_run_does_not_write() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "o.rs", "a\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "a", "new_string": "b", "dry_run": true,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "a", "new_string": "b", "dry_run": true,
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(out["dry_run"], true);
         assert!(out["files"][0]["ops"][0]["diff"].is_string());
@@ -1470,9 +1617,12 @@ mod tests {
     fn stale_hash_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "p.rs", "a\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "a", "new_string": "b", "expected_hash": "deadbeef",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "a", "new_string": "b", "expected_hash": "deadbeef",
+            }),
+        );
         assert_eq!(out["files"][0]["ops"][0]["code"], "STALE_FILE");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\n");
     }
@@ -1481,9 +1631,12 @@ mod tests {
     fn crlf_is_preserved() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "q.rs", "a\r\nb\r\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "b", "new_string": "B",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "b", "new_string": "B",
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\r\nB\r\n");
     }
@@ -1497,9 +1650,12 @@ mod tests {
         let raw = std::fs::read_to_string(&p).unwrap();
         let lf_view = raw.replace("\r\n", "\n");
         let hash = content_hash(&lf_view);
-        let out = run(&p, serde_json::json!({
-            "old_string": "b", "new_string": "B", "expected_hash": hash,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "b", "new_string": "B", "expected_hash": hash,
+            }),
+        );
         assert_eq!(out["files"][0]["ops"][0]["status"], "ok");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\r\nB\r\n");
     }
@@ -1509,29 +1665,40 @@ mod tests {
         // 换行差异不得污染 diff：CRLF 文件单行修改，diff 只含变化行。
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "q3.rs", "line1\r\nline2\r\nline3\r\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "line2", "new_string": "LINE2", "dry_run": true,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "line2", "new_string": "LINE2", "dry_run": true,
+            }),
+        );
         assert_eq!(out["status"], "ok");
         let diff = out["files"][0]["ops"][0]["diff"].as_str().unwrap();
         // line1/line3 允许作为上下文行（' ' 前缀）出现，但绝不能被标记为删除
         assert!(diff.contains("-line2"), "diff must remove line2: {diff}");
         assert!(diff.contains("+LINE2"), "diff must add LINE2: {diff}");
         assert!(
-            !diff.lines().any(|l| l.starts_with("-line1") || l.starts_with("-line3")),
+            !diff
+                .lines()
+                .any(|l| l.starts_with("-line1") || l.starts_with("-line3")),
             "unchanged lines must not be deleted: {diff}"
         );
         // 未写入
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "line1\r\nline2\r\nline3\r\n");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "line1\r\nline2\r\nline3\r\n"
+        );
     }
 
     #[test]
     fn multi_line_string_locator() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "r.rs", "a\nb\nc\nd\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "a\nb", "new_string": "A\nB",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "a\nb", "new_string": "A\nB",
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "A\nB\nc\nd\n");
     }
@@ -1552,9 +1719,12 @@ mod tests {
         // 子串模式多处命中：context_after 参与消歧（Claude 风格）
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "s.rs", "x\nmark\nfirst\nx\nmark\nsecond\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "mark", "new_string": "replaced", "context_after": ["second"],
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "mark", "new_string": "replaced", "context_after": ["second"],
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(
             std::fs::read_to_string(&p).unwrap(),
@@ -1567,9 +1737,12 @@ mod tests {
         // 同一行内多处命中：context 只能定位到行，无法消歧到行内位置 → 保持拒绝
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "t.rs", "a\nmark x mark\nb\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "mark", "new_string": "M", "context_after": ["b"],
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "mark", "new_string": "M", "context_after": ["b"],
+            }),
+        );
         assert_eq!(out["status"], "error");
         assert_eq!(out["files"][0]["ops"][0]["code"], "AMBIGUOUS_MATCH");
     }
@@ -1579,9 +1752,12 @@ mod tests {
         // allow_fuzzy：行内多空格与 tab 等价
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "u.rs", "let x = 1;\n");
-        let out = run(&p, serde_json::json!({
-            "old_lines": ["let  x\t=\t1;"], "new_lines": ["let y = 2;"], "allow_fuzzy": true,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["let  x\t=\t1;"], "new_lines": ["let y = 2;"], "allow_fuzzy": true,
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(out["files"][0]["ops"][0]["fuzzy"], true);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "let y = 2;\n");
@@ -1592,9 +1768,12 @@ mod tests {
         // allow_fuzzy：NFC 组合字符折叠（é == e + U+0301）
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "v.rs", "café\n");
-        let out = run(&p, serde_json::json!({
-            "old_lines": ["cafe\u{301}"], "new_lines": ["CAFE"], "allow_fuzzy": true,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["cafe\u{301}"], "new_lines": ["CAFE"], "allow_fuzzy": true,
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(out["files"][0]["ops"][0]["fuzzy"], true);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "CAFE\n");
@@ -1604,10 +1783,13 @@ mod tests {
         // 多行 old_string 中间的空白行必须参与匹配（与 old_lines 语义一致）
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "w.rs", "fn a() {\n\n    let x = 1;\n}\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "fn a() {\n\n    let x = 1;",
-            "new_string": "fn a() {\n\n    let y = 2;",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "fn a() {\n\n    let x = 1;",
+                "new_string": "fn a() {\n\n    let y = 2;",
+            }),
+        );
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(
             std::fs::read_to_string(&p).unwrap(),
@@ -1619,9 +1801,12 @@ mod tests {
         // 多行 new_string 中间的空白行不能被过滤
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "x.rs", "a\nb\n");
-        let out = run(&p, serde_json::json!({
-            "old_lines": ["a", "b"], "new_lines": ["A", "", "B"],
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["a", "b"], "new_lines": ["A", "", "B"],
+            }),
+        );
         assert_eq!(out["status"], "ok");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "A\n\nB\n");
     }
@@ -1629,9 +1814,12 @@ mod tests {
     fn replace_all_with_regex_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "y.rs", "a a\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "a", "new_string": "b", "regex": true, "replace_all": true,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "a", "new_string": "b", "regex": true, "replace_all": true,
+            }),
+        );
         assert_eq!(out["status"], "error");
         assert_eq!(out["files"][0]["ops"][0]["code"], "OP_ERROR");
         assert!(
@@ -1648,9 +1836,12 @@ mod tests {
     fn replace_all_with_multiline_old_string_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "z.rs", "a\nb\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "a\nb", "new_string": "c", "replace_all": true,
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "a\nb", "new_string": "c", "replace_all": true,
+            }),
+        );
         assert_eq!(out["status"], "error");
         assert!(
             out["files"][0]["ops"][0]["hint"]
@@ -1665,10 +1856,13 @@ mod tests {
         // NO_MATCH 时给出最佳前缀诊断：已匹配行数 + 首个失配行对比
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "aa.rs", "fn a() {\n    let x = 1;\n}\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "fn a() {\n    let x = 999;\n}",
-            "new_string": "fn a() {\n    let x = 0;\n}",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "fn a() {\n    let x = 999;\n}",
+                "new_string": "fn a() {\n    let x = 0;\n}",
+            }),
+        );
         assert_eq!(out["status"], "error");
         let diag = out["files"][0]["ops"][0]["diagnostic"]
             .as_str()
@@ -1683,9 +1877,12 @@ mod tests {
         // 文件里是普通引号，模式里带了反斜杠转义 → 专门提示
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "ab.rs", "print!(\"hi\");\n");
-        let out = run(&p, serde_json::json!({
-            "old_string": "print!(\\\"hi\\\");", "new_string": "print!(\"yo\");",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "print!(\\\"hi\\\");", "new_string": "print!(\"yo\");",
+            }),
+        );
         assert_eq!(out["status"], "error");
         let diag = out["files"][0]["ops"][0]["diagnostic"]
             .as_str()
@@ -1698,15 +1895,20 @@ mod tests {
     #[test]
     fn line_edit_without_hash_uses_ledger() {
         // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
-        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // read 建立账本后，start_line 盲定位无需 expected_hash 即可安全放行
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "ledger1.rs", "a\nb\nc\n");
         let content = std::fs::read_to_string(&p).unwrap();
         crate::file_state::record_read(&p, &content, 3); // 模拟 read_file
-        let out = run(&p, serde_json::json!({
-            "start_line": 2, "new_string": "B",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "start_line": 2, "new_string": "B",
+            }),
+        );
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nB\nc\n");
     }
@@ -1714,17 +1916,25 @@ mod tests {
     #[test]
     fn line_edit_without_ledger_is_rejected_with_read_hint() {
         // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
-        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // 从未 read（无账本）→ UNVERIFIED_LINE_EDIT；hint 指向 read 而非传 hash
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "ledger2.rs", "a\nb\nc\n");
-        let out = run(&p, serde_json::json!({
-            "start_line": 2, "new_string": "B",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "start_line": 2, "new_string": "B",
+            }),
+        );
         assert_eq!(out["files"][0]["ops"][0]["status"], "error");
         assert_eq!(out["files"][0]["ops"][0]["code"], "UNVERIFIED_LINE_EDIT");
         let hint = out["files"][0]["ops"][0]["hint"].as_str().unwrap_or("");
-        assert!(hint.contains("read_file"), "hint should point to read: {hint}");
+        assert!(
+            hint.contains("read_file"),
+            "hint should point to read: {hint}"
+        );
         assert!(
             !hint.contains("expected_hash"),
             "hint must not demand hash: {hint}"
@@ -1740,9 +1950,12 @@ mod tests {
         let content = std::fs::read_to_string(&p).unwrap();
         crate::file_state::record_read(&p, &content, 3);
         std::fs::write(&p, "a\nB-EXTERNAL\nc\n").unwrap();
-        let out = run(&p, serde_json::json!({
-            "start_line": 2, "new_string": "B",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "start_line": 2, "new_string": "B",
+            }),
+        );
         assert_eq!(out["files"][0]["ops"][0]["status"], "error");
         assert_eq!(out["files"][0]["ops"][0]["code"], "STALE_FILE");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nB-EXTERNAL\nc\n");
@@ -1756,9 +1969,12 @@ mod tests {
         let content = std::fs::read_to_string(&p).unwrap();
         crate::file_state::record_read(&p, &content, 3);
         std::fs::write(&p, "a\nb\nc\n// ext\n").unwrap(); // 外部追加
-        let out = run(&p, serde_json::json!({
-            "old_string": "b", "new_string": "B",
-        }));
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_string": "b", "new_string": "B",
+            }),
+        );
         assert_eq!(out["status"], "ok", "got: {out}");
         // 写盘后账本已刷新为最新内容（下次盲定位继续安全）
         let new_content = std::fs::read_to_string(&p).unwrap();
@@ -1773,7 +1989,9 @@ mod tests {
     #[test]
     fn write_rejected_when_file_changed_externally_without_hash() {
         // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
-        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // write 未带 hash：账本失配（外部修改）→ STALE_FILE，不覆盖外部改动
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "ledger5.rs", "a\nb\n");
@@ -1791,7 +2009,9 @@ mod tests {
     #[test]
     fn write_updates_ledger_without_hash() {
         // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
-        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // write 成功后账本自动更新为新内容指纹
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "ledger6.rs", "a\n");
@@ -1810,7 +2030,9 @@ mod tests {
     #[test]
     fn delete_rejected_when_file_changed_externally_without_hash() {
         // 账本是进程全局状态：与 init_tools（清账本）互斥，避免并行 flaky
-        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // delete 是破坏性操作：账本失配（外部修改）→ STALE_FILE，文件保留
         let dir = tempfile::tempdir().unwrap();
         let p = write_tmp(dir.path(), "ledger7.rs", "a\n");
@@ -1823,5 +2045,4 @@ mod tests {
         assert!(std::path::Path::new(&p).exists());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "external\n");
     }
-
 }

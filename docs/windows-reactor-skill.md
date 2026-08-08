@@ -4,7 +4,7 @@
 > 来源：`crates/libs/reactor/`（实现）、`docs/crates/windows-reactor.md`（官方指南）、`crates/samples/reactor/`（示例）
 >
 > DeepX 实际使用 `QAQTam/windows-rs` 的无历史快照提交
-> `55c1998afca7d6d9d6befaf445d086278b3214a3`。补丁清单、生成规则、
+> `89aa099b781b3561df4326d9cf68fe103c556415`（snapshot v3）。补丁清单、生成规则、
 > 上游大改同步和重装恢复步骤见
 > [DEEPX-DOWNSTREAM.md](https://github.com/QAQTam/windows-rs/blob/codex/deepx-reactor/DEEPX-DOWNSTREAM.md)。
 
@@ -17,13 +17,17 @@
 ```toml
 # Cargo.toml
 [dependencies]
-windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3" }
+windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "89aa099b781b3561df4326d9cf68fe103c556415" }
 [build-dependencies]
-windows-reactor-setup = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3" }
+windows-reactor-setup = { git = "https://github.com/QAQTam/windows-rs.git", rev = "89aa099b781b3561df4326d9cf68fe103c556415" }
 
 [profile.release]
 panic = "abort"   # 见下方"错误模型"，release 建议加
 ```
+
+`apps/winui`、`deepx-fluent`、`markdown-winui` 以及 build dependency 必须使用
+同一 SHA；`windows_reactor::Element` 跨 revision 不是同一个 Rust 类型。更新后运行
+`cargo tree -p deepx-winui -d`，不得保留第二份 `windows-reactor`。
 
 ```rust
 use windows_reactor::*;
@@ -102,6 +106,19 @@ button("Delete").resource_overrides(|r| {
 });
 ```
 - 进出场动画：`.transition(enter, exit)`，逻辑元素立刻移除，但 WinUI Composition 会让退场动画播完再真正销毁
+
+### 原生字体与行高（snapshot v3）
+
+- `TextBlock::line_height(dip)` 和 `RichTextBlock::line_height(dip)` 直接投影到
+  WinUI `LineHeight`；正文 14 DIP 推荐由应用 token 统一给出 22 DIP 行框，不要用
+  每段 Margin 伪造行距。
+- `RichTextRun.font_size` / `font_family` 会投影到 XAML `Run` 的
+  `ITextElement`，因此 Markdown 标题和行内代码可以覆盖段落默认排版。
+- 增加新的 WinRT 字体属性时，只改 `crates/tools/reactor/src/base.txt`，再运行
+  `cargo run -p tool_reactor`；主 bindings 与 `reactor_selftest` 镜像必须一起变化，
+  禁止手工编辑生成的 vtable。
+- 打包字体使用 `ms-appx:///Assets/.../font.ttf#Family Name`，并在逗号后保留
+  Windows 系统回退族；字体文件和许可证由应用打包层负责，reactor 不内置资产。
 
 ## 事件处理的一个隐藏坑：handler identity
 

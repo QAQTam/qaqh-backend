@@ -114,10 +114,7 @@ impl SkillCatalog {
                     skill.description // double-weight description
                 )
                 .to_lowercase();
-                let hits = query_tokens
-                    .iter()
-                    .filter(|t| text.contains(*t))
-                    .count();
+                let hits = query_tokens.iter().filter(|t| text.contains(*t)).count();
                 (i, hits)
             })
             .collect();
@@ -131,7 +128,6 @@ impl SkillCatalog {
             .map(|(idx, _)| self.skills[*idx].clone())
             .collect()
     }
-
 }
 
 /// A fully loaded skill ready for injection into the agent context.

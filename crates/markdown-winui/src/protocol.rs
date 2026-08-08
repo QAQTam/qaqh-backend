@@ -110,6 +110,18 @@ pub enum ConversationEvent {
         #[serde(default)]
         result: serde_json::Value,
     },
+    /// File-change totals emitted immediately after a mutating tool completes.
+    CodeChanged {
+        tool_call_id: String,
+        turn_id: String,
+        round_num: u32,
+        lines_added: usize,
+        lines_removed: usize,
+        files_created: usize,
+        files_deleted: usize,
+        #[serde(default)]
+        file: Option<String>,
+    },
     /// 一轮 API 调用完成的权威终态。
     RoundCompleted {
         turn_id: String,
@@ -143,6 +155,7 @@ impl ConversationEvent {
             | Self::ToolCallPrepared { turn_id, .. }
             | Self::ToolStarted { turn_id, .. }
             | Self::ToolFinished { turn_id, .. }
+            | Self::CodeChanged { turn_id, .. }
             | Self::RoundCompleted { turn_id, .. } => turn_id,
             Self::Unknown => "",
         }

@@ -57,7 +57,9 @@ fn find_daemon_binary() -> PathBuf {
 
     if let Ok(dir) = std::env::var("CARGO_BUILD_TARGET_DIR") {
         for profile in &["debug", "release"] {
-            let c = std::path::PathBuf::from(&dir).join(profile).join("deepx-daemon.exe");
+            let c = std::path::PathBuf::from(&dir)
+                .join(profile)
+                .join("deepx-daemon.exe");
             if c.exists() {
                 return c;
             }

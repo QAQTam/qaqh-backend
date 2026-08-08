@@ -96,10 +96,12 @@ $env:CARGO_INCREMENTAL='0'
 cargo fmt --all -- --check
 cargo check -p markdown-winui -p deepx-client -p deepx-winui
 cargo test -p markdown-core -p markdown-winui -p deepx-client --lib --tests
+cargo tree -p deepx-winui -d | rg "windows-reactor"
 rg -n "RenderCommand|StreamingMarkdown|XamlFrameUpdate" crates apps/winui
 ```
 
-最后一条应无生产命中。Golden reference 文档可描述旧 Web 实现，但必须明确它是
+倒数第二条应无输出（全仓只允许一个 reactor revision）；最后一条应无生产命中。
+Golden reference 文档可描述旧 Web 实现，但必须明确它是
 能力对照，不是当前 WinUI 架构。
 
 代码评审至少回答：

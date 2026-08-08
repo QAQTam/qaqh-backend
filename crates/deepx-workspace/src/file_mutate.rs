@@ -6,13 +6,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::file_shared::{
     atomic_write, diff_stats_between, normalize_newlines, unified_diff, verify_expected_hash,
 };
-use crate::{handler_from_string, JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk};
+use crate::{JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler_from_string};
 
 // ── Shared helpers ──
 
 /// 成功摘要行：模型视角默认不回传 diff 正文（省上下文），只给可验证的
 /// 变更统计（路径、首行、+N -M，真实增减行数）。需要预览时用 dry_run=true 单独请求。
-fn format_write_result(prefix: &str, path: &str, added: u32, removed: u32, first_line: u32, label: &str) -> String {
+fn format_write_result(
+    prefix: &str,
+    path: &str,
+    added: u32,
+    removed: u32,
+    first_line: u32,
+    label: &str,
+) -> String {
     format!("[{prefix}] {path}:{first_line} +{added} -{removed} | {label}")
 }
 
@@ -20,9 +27,15 @@ fn format_write_result(prefix: &str, path: &str, added: u32, removed: u32, first
 fn write_error(path: &str, error: &std::io::Error) -> String {
     use std::io::ErrorKind;
     let hint = match error.kind() {
-        ErrorKind::NotFound => "The parent directory may not exist. Use exec with argv [\"ls\", \"-la\"] to inspect it, and create the directory first.",
-        ErrorKind::PermissionDenied => "The target is not writable (read-only attribute or missing permissions). Check with exec argv [\"ls\", \"-la\"], and remove the read-only flag if needed.",
-        ErrorKind::IsADirectory => "The target path is a directory, not a file. Use delete first, or write to a file path instead.",
+        ErrorKind::NotFound => {
+            "The parent directory may not exist. Use exec with argv [\"ls\", \"-la\"] to inspect it, and create the directory first."
+        }
+        ErrorKind::PermissionDenied => {
+            "The target is not writable (read-only attribute or missing permissions). Check with exec argv [\"ls\", \"-la\"], and remove the read-only flag if needed."
+        }
+        ErrorKind::IsADirectory => {
+            "The target path is a directory, not a file. Use delete first, or write to a file path instead."
+        }
         ErrorKind::StorageFull => "The disk is full. Free up space or choose another location.",
         _ => "Check disk space, file locks (another process may hold the file), and permissions.",
     };
@@ -350,7 +363,10 @@ mod tests {
         assert!(!out.contains("+++ b/"), "diff body leaked: {out}");
         assert!(!out.contains("CHANGED"), "content echo leaked: {out}");
         // 文件确实被写
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "line1\nCHANGED\nline3\n");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "line1\nCHANGED\nline3\n"
+        );
     }
     #[test]
     fn dry_run_previews_diff_without_writing() {
@@ -387,12 +403,21 @@ mod tests {
     fn write_error_classifies_by_io_kind() {
         let err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such dir");
         let out = write_error("x/y.txt", &err);
-        assert!(out.starts_with("[ERROR] Cannot write x/y.txt"), "got: {out}");
+        assert!(
+            out.starts_with("[ERROR] Cannot write x/y.txt"),
+            "got: {out}"
+        );
         assert!(out.contains("[HINT]"), "got: {out}");
-        assert!(out.contains("parent directory"), "kind-specific hint missing: {out}");
+        assert!(
+            out.contains("parent directory"),
+            "kind-specific hint missing: {out}"
+        );
         let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         let out = write_error("x/y.txt", &err);
-        assert!(out.contains("read-only"), "kind-specific hint missing: {out}");
+        assert!(
+            out.contains("read-only"),
+            "kind-specific hint missing: {out}"
+        );
     }
     #[test]
     fn write_to_directory_path_reports_error() {

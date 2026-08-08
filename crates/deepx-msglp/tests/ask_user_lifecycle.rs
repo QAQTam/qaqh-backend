@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use deepx_domain::{
-    AskAnswer, AskMode, AskResolution, AskQuestion, ControlCommand, ControlEvent,
+    AskAnswer, AskMode, AskQuestion, AskResolution, ControlCommand, ControlEvent,
     ConversationCommand, ConversationEvent, DomainEvent, SessionState, ToolCommand, ToolEvent,
 };
 use deepx_msglp::ringing_v1::loop_core::Loop;
@@ -256,10 +256,7 @@ fn expect_turn_started(receiver: &std::sync::mpsc::Receiver<RingingEvent>) {
     });
 }
 
-fn expect_permission_requested(
-    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
-    call_id: &str,
-) {
+fn expect_permission_requested(receiver: &std::sync::mpsc::Receiver<RingingEvent>, call_id: &str) {
     expect_event(receiver, Duration::from_secs(5), |event| {
         matches!(
             event,
@@ -272,7 +269,9 @@ fn expect_permission_requested(
 }
 
 /// 收集事件直到出现回合终态（TurnCompleted / TurnFailed / ConversationCancelled）。
-fn collect_through_terminal(receiver: &std::sync::mpsc::Receiver<RingingEvent>) -> Vec<RingingEvent> {
+fn collect_through_terminal(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+) -> Vec<RingingEvent> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut events = Vec::new();
     loop {
@@ -429,7 +428,8 @@ fn run_case_with_delay(
                 let _ = env; // 命令方向帧不应出现在 stdout；忽略
                 continue;
             }
-            if let Ok(env) = serde_json::from_str::<deepx_ringing::RingingWorkerEventEnvelope>(&line)
+            if let Ok(env) =
+                serde_json::from_str::<deepx_ringing::RingingWorkerEventEnvelope>(&line)
             {
                 if event_tx.send(env.event).is_err() {
                     break;
@@ -458,7 +458,11 @@ fn run_case_with_delay(
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             test(&mut input_writer, &event_rx, request_count, seed)
         }));
-        send_cmd(&mut input_writer, &seed_for_shutdown, cmd_session_shutdown());
+        send_cmd(
+            &mut input_writer,
+            &seed_for_shutdown,
+            cmd_session_shutdown(),
+        );
         if let Err(payload) = outcome {
             std::panic::resume_unwind(payload);
         }
@@ -629,7 +633,10 @@ fn multiple_ask_calls_are_presented_sequentially_before_one_resume() {
         let second_request: Value = serde_json::from_str(&bodies[1]).unwrap();
         let content = find_tool_result_content(&second_request, call_id)
             .expect("second request must include each ask result");
-        assert_eq!(inner_tool_result(&content)["answers"][0]["answer"], expected);
+        assert_eq!(
+            inner_tool_result(&content)["answers"][0]["answer"],
+            expected
+        );
     }
 }
 
@@ -738,7 +745,11 @@ fn permission_then_ask_resolves_the_same_tool_round_once() {
             expect_interaction_requested(receiver, "ask-after-read");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
-            send_cmd(writer, &seed, cmd_ask_respond("ask-after-read", &[("q1", "yes")]));
+            send_cmd(
+                writer,
+                &seed,
+                cmd_ask_respond("ask-after-read", &[("q1", "yes")]),
+            );
             let events = collect_through_terminal(receiver);
             let finished = tool_finished_ids(&events);
             assert_eq!(finished, vec!["read-call", "ask-after-read"]);
@@ -809,13 +820,20 @@ fn cancel_aborts_one_suspended_turn_and_invalidates_its_ask_id() {
             let aborted = collect_through_terminal(receiver);
             assert!(aborted.iter().any(|event| match event {
                 RingingEvent::Conversation(ConversationEvent::ConversationCancelled { .. }) => true,
-                RingingEvent::Conversation(ConversationEvent::TurnCompleted { stop_reason, .. }) => {
+                RingingEvent::Conversation(ConversationEvent::TurnCompleted {
+                    stop_reason,
+                    ..
+                }) => {
                     stop_reason.as_deref() == Some("cancelled")
                 }
                 _ => false,
             }));
 
-            send_cmd(writer, &seed, cmd_ask_respond("cancel-ask", &[("q1", "yes")]));
+            send_cmd(
+                writer,
+                &seed,
+                cmd_ask_respond("cancel-ask", &[("q1", "yes")]),
+            );
             expect_operation_failed(receiver, "ask_rejected");
             assert_eq!(request_count.load(Ordering::SeqCst), 1);
         },

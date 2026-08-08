@@ -35,7 +35,9 @@ fn is_content_bearing_tool(tool_name: &str) -> bool {
 
 fn truncation_hint(tool_name: &str) -> &'static str {
     match tool_name {
-        "read_file" => "Call read_file again with the same path and a later start_line/end_line range.",
+        "read_file" => {
+            "Call read_file again with the same path and a later start_line/end_line range."
+        }
         "exec" => "Call exec again with narrower argv or a filtering command.",
         "web_fetch" => "Call web_fetch again with a narrower URL or query.",
         _ => "Call this tool again with narrower arguments to retrieve the omitted portion.",
@@ -207,7 +209,10 @@ fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
 /// write succeeded. Tools now return summary-only receipts (no diff body), so
 /// the fold keeps the first line plus a deterministic verify instruction.
 fn fold_file_mutation_result(tool_name: &str, result: &str) -> String {
-    let first = result.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+    let first = result
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
     let cap = first.floor_char_boundary(first.len().min(400));
     let action = match tool_name {
         "edit_file" => "edit",
@@ -216,7 +221,8 @@ fn fold_file_mutation_result(tool_name: &str, result: &str) -> String {
     };
     format!(
         "{}\n[{} diff folded; verify the affected range with read_file before making dependent changes]",
-        &first[..cap], action
+        &first[..cap],
+        action
     )
 }
 
@@ -1078,11 +1084,7 @@ impl MessageStore {
                                         ..
                                     } = b
                                     {
-                                        if tid == id {
-                                            Some(name.clone())
-                                        } else {
-                                            None
-                                        }
+                                        if tid == id { Some(name.clone()) } else { None }
                                     } else {
                                         None
                                     }
@@ -1188,11 +1190,7 @@ impl MessageStore {
         // message is intentionally omitted — it's redundant with the
         // summary and, after a manual compact, the user will send a fresh
         // message to resume work.
-        let compact_text = format!(
-            "[Compacted {} turns]\n{}",
-            skip,
-            summary.trim(),
-        );
+        let compact_text = format!("[Compacted {} turns]\n{}", skip, summary.trim(),);
         let compact_turn = Turn::new(Message::user(&compact_text));
 
         // Physically remove compacted turns, keep only the most recent `keep`.
@@ -1348,7 +1346,7 @@ impl MessageStore {
                                 .unwrap_or("");
 
                             let effective = if is_last_step_of_last_turn {
-                            let keep_full = tool_name == "read_file"
+                                let keep_full = tool_name == "read_file"
                                     || tool_name == "skills"
                                     || tool_name.starts_with("exec");
                                 if keep_full {
@@ -1391,11 +1389,7 @@ fn auto_complete_unfulfilled(step: &mut Step, reason: &str) {
                     .iter()
                     .find_map(|b| {
                         if let deepx_types::ContentBlock::ToolUse { id: tid, name, .. } = b {
-                            if tid == id {
-                                Some(name.clone())
-                            } else {
-                                None
-                            }
+                            if tid == id { Some(name.clone()) } else { None }
                         } else {
                             None
                         }
@@ -1463,7 +1457,7 @@ mod tests {
         store.push_user("inspect files");
         store.push_assistant(assistant_with_tools(&[
             ("write-1", "write"),
-    ("read-1", "read_file"),
+            ("read-1", "read_file"),
             ("exec-1", "exec"),
         ]));
         store.push_tool_result_direct("write-1", "WRITE_RESULT", true);
@@ -1486,7 +1480,7 @@ mod tests {
         store.push_user("first turn");
         store.push_assistant(assistant_with_tools(&[
             ("write-1", "write"),
-    ("read-1", "read_file"),
+            ("read-1", "read_file"),
         ]));
         store.push_tool_result_direct("write-1", "WRITE_RESULT", true);
         store.push_tool_result_direct("read-1", "READ_RESULT", true);
@@ -1498,10 +1492,7 @@ mod tests {
             context_result(&context, "write-1"),
             "WRITE_RESULT\n[write diff folded; verify the affected range with read_file before making dependent changes]"
         );
-        assert_eq!(
-            context_result(&context, "read-1"),
-            "READ_RESULT"
-        );
+        assert_eq!(context_result(&context, "read-1"), "READ_RESULT");
     }
 
     #[test]
@@ -1609,14 +1600,23 @@ mod tests {
         store.push_tool_result_direct("web-1", &body, true);
 
         let first = context_result(&store.build_context_for_gate(&[]), "web-1");
-        assert!(first.len() < body.len(), "result must be capped at storage time");
-        assert!(first.contains("[truncated:"), "truncation marker expected, got: {first}");
+        assert!(
+            first.len() < body.len(),
+            "result must be capped at storage time"
+        );
+        assert!(
+            first.contains("[truncated:"),
+            "truncation marker expected, got: {first}"
+        );
 
         // Same bytes on every later render (historical position included).
         store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
         store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
         let second = context_result(&store.build_context_for_gate(&[]), "web-1");
-        assert_eq!(first, second, "stored truncation must be stable across renders");
+        assert_eq!(
+            first, second,
+            "stored truncation must be stable across renders"
+        );
     }
 
     #[test]
@@ -1630,9 +1630,8 @@ mod tests {
         store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
         store.push_user("second turn");
 
-        let context = store.build_context_for_gate(&[String::from(
-            "<workspace_path>F:\\DeepX</workspace_path>",
-        )]);
+        let context = store
+            .build_context_for_gate(&[String::from("<workspace_path>F:\\DeepX</workspace_path>")]);
         let users: Vec<String> = context
             .iter()
             .filter(|m| m.role == "user")
@@ -1653,7 +1652,10 @@ mod tests {
             "first user message must carry the annotation, got: {}",
             users[0]
         );
-        assert_eq!(users[1], "second turn", "later user messages stay untouched");
+        assert_eq!(
+            users[1], "second turn",
+            "later user messages stay untouched"
+        );
     }
 
     #[test]
@@ -1683,8 +1685,8 @@ mod tests {
 
         assert!(turn2_ctx.len() > turn1_ctx.len());
         let turn1_ser = serde_json::to_string(&turn1_ctx).expect("serialize turn-1 context");
-        let turn2_prefix_ser = serde_json::to_string(&turn2_ctx[..turn1_ctx.len()])
-            .expect("serialize turn-2 prefix");
+        let turn2_prefix_ser =
+            serde_json::to_string(&turn2_ctx[..turn1_ctx.len()]).expect("serialize turn-2 prefix");
         assert_eq!(
             turn2_prefix_ser, turn1_ser,
             "turn-1 message segment must be byte-identical in turn 2"
@@ -1774,12 +1776,14 @@ mod tests {
         let raw = serde_json::json!({"content": content}).to_string();
 
         let truncated: serde_json::Value =
-        serde_json::from_str(&truncate_tool_result("read_file", &raw)).expect("valid JSON result");
+            serde_json::from_str(&truncate_tool_result("read_file", &raw))
+                .expect("valid JSON result");
         let content = truncated["content"].as_str().expect("content string");
 
         assert!(truncated["truncated"].as_bool().unwrap_or(false));
-        assert!(content
-        .contains("Call read_file again with the same path and a later start_line/end_line range."));
+        assert!(content.contains(
+            "Call read_file again with the same path and a later start_line/end_line range."
+        ));
     }
 
     #[test]
@@ -1788,8 +1792,9 @@ mod tests {
         let truncated = truncate_tool_result("read_file", &result);
 
         assert!(truncated.len() < result.len());
-        assert!(truncated
-        .contains("Call read_file again with the same path and a later start_line/end_line range."));
+        assert!(truncated.contains(
+            "Call read_file again with the same path and a later start_line/end_line range."
+        ));
     }
 
     #[test]

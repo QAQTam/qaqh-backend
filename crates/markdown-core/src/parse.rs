@@ -41,11 +41,9 @@ pub fn parse_final(input: &str) -> Vec<Block> {
                 Tag::Item => frames.push(Frame::item()),
                 Tag::CodeBlock(kind) => {
                     let lang = match kind {
-                        CodeBlockKind::Fenced(info) => info
-                            .trim()
-                            .split_whitespace()
-                            .next()
-                            .map(normalize_lang),
+                        CodeBlockKind::Fenced(info) => {
+                            info.trim().split_whitespace().next().map(normalize_lang)
+                        }
                         CodeBlockKind::Indented => None,
                     };
                     frames.push(Frame::code(lang));
@@ -57,14 +55,10 @@ pub fn parse_final(input: &str) -> Vec<Block> {
                 Tag::Emphasis => frames.push(Frame::inline(InlineKind::Emphasis)),
                 Tag::Strong => frames.push(Frame::inline(InlineKind::Strong)),
                 Tag::Strikethrough => frames.push(Frame::inline(InlineKind::Strikethrough)),
-                Tag::Link {
-                    dest_url, ..
-                } => frames.push(Frame::inline(InlineKind::Link {
+                Tag::Link { dest_url, .. } => frames.push(Frame::inline(InlineKind::Link {
                     url: dest_url.to_string(),
                 })),
-                Tag::Image {
-                    dest_url, ..
-                } => frames.push(Frame::inline(InlineKind::Image {
+                Tag::Image { dest_url, .. } => frames.push(Frame::inline(InlineKind::Image {
                     url: dest_url.to_string(),
                     alt: String::new(), // alt 由 children 文本收集（End 时填充）
                 })),
@@ -88,16 +82,17 @@ pub fn parse_final(input: &str) -> Vec<Block> {
                     match frame.into_node() {
                         Node::Block(b) => push_block(b, &mut frames, &mut blocks),
                         Node::Inline(i) => push_inline(i, &mut frames),
-                        Node::Item { task, blocks: item_blocks } => {
-                            push_block(
-                                Block::ListItem {
-                                    task,
-                                    blocks: item_blocks,
-                                },
-                                &mut frames,
-                                &mut blocks,
-                            )
-                        }
+                        Node::Item {
+                            task,
+                            blocks: item_blocks,
+                        } => push_block(
+                            Block::ListItem {
+                                task,
+                                blocks: item_blocks,
+                            },
+                            &mut frames,
+                            &mut blocks,
+                        ),
                         Node::TableCellCell(_) | Node::None => {}
                     }
                 }
@@ -121,9 +116,7 @@ pub fn parse_final(input: &str) -> Vec<Block> {
                 }
             }
             Event::Code(c) => push_inline(Inline::Code(c.to_string()), &mut frames),
-            Event::SoftBreak | Event::HardBreak => {
-                push_inline(Inline::SoftBreak, &mut frames)
-            }
+            Event::SoftBreak | Event::HardBreak => push_inline(Inline::SoftBreak, &mut frames),
             Event::TaskListMarker(checked) => {
                 if let Some(frame) = frames.iter_mut().rev().find(|f| f.is_item()) {
                     frame.task = Some(checked);
@@ -137,7 +130,11 @@ pub fn parse_final(input: &str) -> Vec<Block> {
     }
 
     while let Some(frame) = frames.pop() {
-        push_block(frame.into_node().into_block_or_empty(), &mut frames, &mut blocks);
+        push_block(
+            frame.into_node().into_block_or_empty(),
+            &mut frames,
+            &mut blocks,
+        );
     }
     blocks
 }
@@ -338,9 +335,7 @@ impl Frame {
 
     fn into_node(self) -> Node {
         match self.kind {
-            FrameKind::Paragraph => {
-                Node::Block(Block::Paragraph(self.children.into_inlines()))
-            }
+            FrameKind::Paragraph => Node::Block(Block::Paragraph(self.children.into_inlines())),
             FrameKind::Heading { level } => {
                 let inlines = self.children.into_inlines();
                 if level >= 4 {
@@ -351,10 +346,7 @@ impl Frame {
                 }
             }
             FrameKind::Quote => Node::Block(Block::Quote(self.children.into_blocks())),
-            FrameKind::List {
-                ordered,
-                start,
-            } => {
+            FrameKind::List { ordered, start } => {
                 let items = self
                     .children
                     .into_iter()
@@ -405,7 +397,10 @@ enum Node {
     Block(Block),
     Inline(Inline),
     /// 列表项（task 标记 + 子块），List 出栈时转 ListItem。
-    Item { task: Option<bool>, blocks: Vec<Block> },
+    Item {
+        task: Option<bool>,
+        blocks: Vec<Block>,
+    },
     /// 表格单元格内容（独立游标通道，不经 Node 灌入）。
     TableCellCell(Vec<Inline>),
     None,
@@ -464,9 +459,11 @@ fn push_block(block: Block, frames: &mut [Frame], blocks: &mut Vec<Block>) {
             }
             FrameKind::Paragraph | FrameKind::Heading { .. } => {
                 // 防御：块进段落（pulldown 正常不会发生）→ 按纯文本并入
-                frame.children.push(Node::Inline(Inline::Text(
-                    crate::ast::block_plain_text(&block),
-                )));
+                frame
+                    .children
+                    .push(Node::Inline(Inline::Text(crate::ast::block_plain_text(
+                        &block,
+                    ))));
             }
             FrameKind::Code { text, .. } => {
                 text.push_str(&crate::ast::block_plain_text(&block));
@@ -486,10 +483,14 @@ fn push_inline(inline: Inline, frames: &mut [Frame]) {
         }
         FrameKind::Item => {
             // 紧凑列表项没有 Paragraph 容器：行内文本直接包 Paragraph 落块
-            let has_open_paragraph =
-                matches!(frame.children.last(), Some(Node::Block(Block::Paragraph(_))));
+            let has_open_paragraph = matches!(
+                frame.children.last(),
+                Some(Node::Block(Block::Paragraph(_)))
+            );
             if !has_open_paragraph {
-                frame.children.push(Node::Block(Block::Paragraph(Vec::new())));
+                frame
+                    .children
+                    .push(Node::Block(Block::Paragraph(Vec::new())));
             }
             if let Some(Node::Block(Block::Paragraph(v))) = frame.children.last_mut() {
                 v.push(inline);
@@ -504,7 +505,9 @@ fn push_inline(inline: Inline, frames: &mut [Frame]) {
         FrameKind::Inline(_) => frame.children.push(Node::Inline(inline)),
         FrameKind::Quote | FrameKind::List { .. } => {
             // 引用/列表里悬空的行内文本：包 Paragraph（防御）
-            frame.children.push(Node::Block(Block::Paragraph(vec![inline])));
+            frame
+                .children
+                .push(Node::Block(Block::Paragraph(vec![inline])));
         }
         FrameKind::Ignore => {}
     }
@@ -553,15 +556,18 @@ fn parse_table_protocol(text: &str) -> Option<(Vec<Vec<Inline>>, Vec<Vec<Vec<Inl
 
 /// TSV 解析：首行表头；分隔符检测（`\t` 优先，否则 `|`）。
 fn parse_table_tsv(text: &str) -> Option<(Vec<Vec<Inline>>, Vec<Vec<Vec<Inline>>>)> {
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     let header = *lines.first()?;
     let sep = if header.contains('\t') { '\t' } else { '|' };
     if !header.contains(sep) {
         return None; // 无分隔符 → 不是表格
     }
-    let split = |s: &str| -> Vec<String> {
-        s.split(sep).map(str::trim).map(String::from).collect()
-    };
+    let split =
+        |s: &str| -> Vec<String> { s.split(sep).map(str::trim).map(String::from).collect() };
     let headers = split(header);
     if headers.is_empty() {
         return None;

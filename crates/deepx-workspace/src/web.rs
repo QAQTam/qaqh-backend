@@ -22,7 +22,12 @@ pub(super) fn handle_web_fetch(ctx: ToolCallCtx) -> ToolResult {
         let payload = web_fetch(&ctx.args, timeout_secs);
         let is_error = serde_json::from_str::<serde_json::Value>(&payload)
             .ok()
-            .and_then(|value| value.get("status").and_then(|status| status.as_str()).map(|status| status == "error"))
+            .and_then(|value| {
+                value
+                    .get("status")
+                    .and_then(|status| status.as_str())
+                    .map(|status| status == "error")
+            })
             .unwrap_or(false);
         if is_error {
             ToolResult::error(payload)

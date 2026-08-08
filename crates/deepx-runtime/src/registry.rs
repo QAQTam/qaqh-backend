@@ -3,7 +3,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
-
 use crate::{RingingHub, SessionActivityTracker};
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
@@ -272,9 +271,9 @@ impl AgentRegistry {
             );
         });
 
-            let event_seed = seed.to_string();
-            let activity = self.activity.clone();
-            let hub = self.hub.clone();
+        let event_seed = seed.to_string();
+        let activity = self.activity.clone();
+        let hub = self.hub.clone();
         let reader = std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for line in BufReader::new(stdout).lines() {
@@ -291,7 +290,8 @@ impl AgentRegistry {
                                     deepx_ringing::RingingTimelineIntentEnvelope,
                                 >(&line)
                                 {
-                                    if let Err(error) = hub.publish_timeline(&env.seed, env.intent) {
+                                    if let Err(error) = hub.publish_timeline(&env.seed, env.intent)
+                                    {
                                         // A rejected intent silently starves the frontend
                                         // transcript (the Ringing conversation store keeps
                                         // delivering, so the session-list title still
@@ -305,9 +305,10 @@ impl AgentRegistry {
                                     }
                                     continue;
                                 }
-                                match serde_json::from_str::<deepx_ringing::RingingWorkerEventEnvelope>(
-                                    &line,
-                                ) {
+                                match serde_json::from_str::<
+                                    deepx_ringing::RingingWorkerEventEnvelope,
+                                >(&line)
+                                {
                                     Ok(env) => {
                                         let domain: deepx_domain::DomainEvent = env.event.into();
                                         // Ringing 是唯一的 native consumer；大内容在进入
@@ -325,11 +326,8 @@ impl AgentRegistry {
                                         // 在回合结束后永远停留在 Working）。
                                         if let Some(observe) =
                                             crate::activity::domain_activity_observe(&domain)
-                                            && let Some(activity) = activity.observe(
-                                                &event_seed,
-                                                generation,
-                                                &observe,
-                                            )
+                                            && let Some(activity) =
+                                                activity.observe(&event_seed, generation, &observe)
                                         {
                                             crate::activity::publish_activity(
                                                 Some(hub.as_ref()),
@@ -372,8 +370,6 @@ impl AgentRegistry {
         );
         Ok(())
     }
-
-
 
     /// 发送 Ringing worker 命令帧（携带 `wire` 判别字段；worker reader 按 wire 解析）。
     pub fn send_ringing(
@@ -442,9 +438,7 @@ impl AgentRegistry {
                 .get(&seed)
                 .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
             {
-                log::warn!(
-                    "[AGENT:{seed}] worker exited immediately after spawn; backing off"
-                );
+                log::warn!("[AGENT:{seed}] worker exited immediately after spawn; backing off");
                 continue;
             }
             if let Some(instance) = self.instances.remove(&seed) {
@@ -526,9 +520,7 @@ impl AgentInstance {
         let env = deepx_ringing::RingingWorkerCommandEnvelope::new(
             self.seed.clone(),
             "daemon-shutdown",
-            deepx_ringing::RingingCommand::Control(
-                deepx_domain::ControlCommand::SessionShutdown,
-            ),
+            deepx_ringing::RingingCommand::Control(deepx_domain::ControlCommand::SessionShutdown),
         );
         if let Ok(json) = serde_json::to_string(&env)
             && let Ok(mut stdin) = self.stdin.lock()
@@ -728,5 +720,4 @@ mod tests {
         assert!(tail.chars().all(|c| c == '汉'));
         assert_eq!(tail, "汉".repeat(tail.chars().count()));
     }
-
 }

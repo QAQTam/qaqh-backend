@@ -6,7 +6,7 @@ license.workspace = true
 description = "Reusable Windows 11 Fluent visual primitives for DeepX WinUI surfaces"
 
 [dependencies]
-windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "55c1998afca7d6d9d6befaf445d086278b3214a3" }
+windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "0666e624d6fa692afb0822d193a2331898157d80" }
 
 [lints]
 workspace = true

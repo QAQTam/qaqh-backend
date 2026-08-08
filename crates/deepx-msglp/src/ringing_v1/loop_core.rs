@@ -323,16 +323,22 @@ impl Loop {
             self.paced_emitter
                 .emit_domain(deepx_domain::DomainEvent::Control(
                     deepx_domain::ControlEvent::OperationFailed {
-                        occurrence_id: format!("occ-panic-{}", std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0)),
-                        scope: deepx_domain::ErrorScope::System,
-                        error: deepx_domain::DomainError {
-                            error_id: format!("panic-{}", std::time::SystemTime::now()
+                        occurrence_id: format!(
+                            "occ-panic-{}",
+                            std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_millis())
-                                .unwrap_or(0)),
+                                .unwrap_or(0)
+                        ),
+                        scope: deepx_domain::ErrorScope::System,
+                        error: deepx_domain::DomainError {
+                            error_id: format!(
+                                "panic-{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0)
+                            ),
                             code: "engine_panic_recovered".into(),
                             message: format!("Internal error (recovered): {msg}"),
                             retryable: false,
@@ -415,30 +421,29 @@ impl Loop {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             let super::wire::WorkerCommandFrame::Ringing(env) = cmd.frame;
             if ringing_command_is_interrupt(&env) {
-                        self.cancel.set();
-                        deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
-                        self.phase = LoopPhase::Idle;
-                        return true;
-                    }
-                    // 忙碌期非中断 Ringing 命令：显式拒绝而非静默丢弃。
-                    // 命令在 daemon 侧已被 ACK（accepted），若 worker 无声
-                    // 丢弃，前端将永远等待业务终态（消息无限排队/乐观 turn
-                    // 永不结束）。以被拒命令的 command_id 作为 causation，
-                    // 使 daemon 能把 OperationFailed 折叠进对应 receipt。
-                    if let deepx_ringing::RingingCommand::Conversation(
-                        deepx_domain::ConversationCommand::ConversationSendMessage { .. },
-                    ) = &env.command
-                    {
-                        let command_id = env.command_id.clone();
-                        let _scope =
-                            self.paced_emitter.enter_causation(Some(&command_id));
-                        self.emit_operation_failed(
-                            &command_id,
-                            deepx_domain::ErrorScope::Conversation,
-                            "busy",
-                            "A turn is already running; cancel it before sending a new message",
-                        );
-                    }
+                self.cancel.set();
+                deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
+                self.phase = LoopPhase::Idle;
+                return true;
+            }
+            // 忙碌期非中断 Ringing 命令：显式拒绝而非静默丢弃。
+            // 命令在 daemon 侧已被 ACK（accepted），若 worker 无声
+            // 丢弃，前端将永远等待业务终态（消息无限排队/乐观 turn
+            // 永不结束）。以被拒命令的 command_id 作为 causation，
+            // 使 daemon 能把 OperationFailed 折叠进对应 receipt。
+            if let deepx_ringing::RingingCommand::Conversation(
+                deepx_domain::ConversationCommand::ConversationSendMessage { .. },
+            ) = &env.command
+            {
+                let command_id = env.command_id.clone();
+                let _scope = self.paced_emitter.enter_causation(Some(&command_id));
+                self.emit_operation_failed(
+                    &command_id,
+                    deepx_domain::ErrorScope::Conversation,
+                    "busy",
+                    "A turn is already running; cancel it before sending a new message",
+                );
+            }
         }
         false
     }
@@ -597,10 +602,11 @@ impl Loop {
                 let _scope = self.paced_emitter.enter_causation(causation.as_deref());
                 self.dispatch_ringing_one(env);
             } else {
-                self.deferred_ringing.push_back(super::types::WorkerCommand {
-                    frame: super::wire::WorkerCommandFrame::Ringing(env),
-                    causation: cmd.causation,
-                });
+                self.deferred_ringing
+                    .push_back(super::types::WorkerCommand {
+                        frame: super::wire::WorkerCommandFrame::Ringing(env),
+                        causation: cmd.causation,
+                    });
             }
         }
 
@@ -1069,8 +1075,7 @@ impl Loop {
                     }
                     self.session.turn.reset();
                     self.session.tool.clear_pending();
-                    self.misc
-                        .handle_undo(&mut self.session.agent, &turn_id);
+                    self.misc.handle_undo(&mut self.session.agent, &turn_id);
                     self.emit_operation_completed(
                         &command_id,
                         deepx_domain::ErrorScope::Conversation,
@@ -1173,7 +1178,6 @@ impl Loop {
             },
         }
     }
-
 
     // ═══════════════════════════════════════════════════
     // Outcome handler — the Ring's decision point

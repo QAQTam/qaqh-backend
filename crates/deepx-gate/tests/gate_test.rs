@@ -913,21 +913,42 @@ fn responses_chat_stream_basic_text() {
     assert!(result.is_ok(), "chat_stream failed: {:?}", result);
 
     // Should have ContentDelta for text
-    let texts: Vec<&str> = events.iter().filter_map(|ev| {
-        if let StreamEvent::ContentDelta(t) = ev { Some(t.as_str()) } else { None }
-    }).collect();
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|ev| {
+            if let StreamEvent::ContentDelta(t) = ev {
+                Some(t.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
     assert_eq!(texts, vec!["Hello", " world"]);
 
     // Should have ReasoningDelta
-    let reasoning: Vec<&str> = events.iter().filter_map(|ev| {
-        if let StreamEvent::ReasoningDelta(t) = ev { Some(t.as_str()) } else { None }
-    }).collect();
+    let reasoning: Vec<&str> = events
+        .iter()
+        .filter_map(|ev| {
+            if let StreamEvent::ReasoningDelta(t) = ev {
+                Some(t.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
     assert_eq!(reasoning, vec!["thinking..."]);
 
     // Should have a Done event with usage
-    let done = events.iter().find_map(|ev| {
-        if let StreamEvent::Done { usage, .. } = ev { Some(usage.clone()) } else { None }
-    }).flatten();
+    let done = events
+        .iter()
+        .find_map(|ev| {
+            if let StreamEvent::Done { usage, .. } = ev {
+                Some(usage.clone())
+            } else {
+                None
+            }
+        })
+        .flatten();
     assert!(done.is_some(), "should have Done event");
     let usage = done.unwrap();
     assert_eq!(usage.prompt_tokens, 10);
@@ -973,11 +994,19 @@ fn responses_chat_stream_with_tool_calls() {
     assert!(result.is_ok());
 
     // Should have tool call progress
-    let tool_events: Vec<_> = events.iter().filter_map(|ev| {
-        if let StreamEvent::ToolCallProgress { name, args_so_far, .. } = ev {
-            Some((name.clone(), args_so_far.clone()))
-        } else { None }
-    }).collect();
+    let tool_events: Vec<_> = events
+        .iter()
+        .filter_map(|ev| {
+            if let StreamEvent::ToolCallProgress {
+                name, args_so_far, ..
+            } = ev
+            {
+                Some((name.clone(), args_so_far.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
     assert!(!tool_events.is_empty(), "should have tool call events");
     assert_eq!(tool_events[0].0, "read_file");
     assert_eq!(tool_events[0].1, "{\"path\":\"/x.txt\"}");
@@ -1021,10 +1050,16 @@ fn responses_search_alias_is_wire_only_with_web_search_enabled() {
 
     let request = mock.last_request_json().expect("request body must be JSON");
     let request_tools = request["tools"].as_array().expect("tools must be an array");
-    assert!(request_tools.iter().any(|tool| {
-        tool["type"] == "function" && tool["name"] == "deepx_search"
-    }));
-    assert!(request_tools.iter().any(|tool| tool["type"] == "web_search"));
+    assert!(
+        request_tools
+            .iter()
+            .any(|tool| { tool["type"] == "function" && tool["name"] == "deepx_search" })
+    );
+    assert!(
+        request_tools
+            .iter()
+            .any(|tool| tool["type"] == "web_search")
+    );
     assert!(events.iter().any(|event| matches!(
         event,
         StreamEvent::ToolCallProgress { name, .. } if name == "search"
@@ -1039,9 +1074,10 @@ fn responses_search_alias_is_wire_only_with_web_search_enabled() {
 
 #[test]
 fn responses_chat_stream_http_error_retries() {
-    let scenario1 = vec![
-        mock_server::SseChunk::HttpError(503, json!({"error": {"message": "overloaded"}})),
-    ];
+    let scenario1 = vec![mock_server::SseChunk::HttpError(
+        503,
+        json!({"error": {"message": "overloaded"}}),
+    )];
     // Second attempt succeeds
     let scenario2 = vec![
         mock_server::SseChunk::Raw(
@@ -1068,5 +1104,9 @@ fn responses_chat_stream_http_error_retries() {
         &mut |ev| events.push(ev),
     );
     assert!(result.is_ok(), "should succeed after retry: {:?}", result);
-    assert_eq!(mock.request_count.load(Ordering::SeqCst), 2, "should have retried once");
+    assert_eq!(
+        mock.request_count.load(Ordering::SeqCst),
+        2,
+        "should have retried once"
+    );
 }

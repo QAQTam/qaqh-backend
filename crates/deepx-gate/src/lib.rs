@@ -73,7 +73,11 @@ pub fn chat_sync(
     max_tokens: u32,
 ) -> Result<String, String> {
     match provider.kind {
-        ProviderKind::Responses => responses::chat_sync_responses(provider, &provider.model, messages, max_tokens),
-        ProviderKind::OpenAi => openai::chat_sync_openai(provider, &provider.model, messages, max_tokens),
+        ProviderKind::Responses => {
+            responses::chat_sync_responses(provider, &provider.model, messages, max_tokens)
+        }
+        ProviderKind::OpenAi => {
+            openai::chat_sync_openai(provider, &provider.model, messages, max_tokens)
+        }
     }
 }

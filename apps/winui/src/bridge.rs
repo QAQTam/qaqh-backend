@@ -20,8 +20,8 @@ use deepx_client::{
     ActionRequest, AskAnswer as DomainAskAnswer, Channel, ChannelStatus, Client, ClientHandlers,
     ClientOptions, CommandOptions, ContentRef, ControlCommand, ControlEvent, ConversationCommand,
     ConversationEvent as DomainConversationEvent, ConversationMode, EventBatch, PermissionCategory,
-    PermissionRisk, QueryRequest, RingingCommand, RingingEvent, TimelinePage, TimelineSnapshot,
-    TimelineStatus, ToolCommand, ToolEvent,
+    PermissionRisk, QueryRequest, RingingCommand, RingingCommandState, RingingEvent, TimelinePage,
+    TimelineSnapshot, TimelineStatus, ToolCommand, ToolEvent,
 };
 use markdown_winui::PendingOutput;
 use serde::{Deserialize, Serialize};
@@ -30,9 +30,9 @@ use serde_json::{Value, json};
 use crate::chat_adapter;
 use crate::shell_store::{
     ActivityState, DashboardSnapshot, SessionDetail, SessionItem, SettingsSnapshot, SkillsSnapshot,
-    activity_event, dashboard_event, parse_activities, parse_config_load, parse_conversation_state,
-    parse_skills_payload, parse_tools, parse_workspace_status, project_session_meta,
-    session_state_event, skills_event,
+    UsageInfo as UiUsageInfo, activity_event, dashboard_event, parse_activities, parse_config_load,
+    parse_conversation_state, parse_skills_payload, parse_tools, parse_workspace_status,
+    project_session_meta, session_state_event, skills_event,
 };
 
 /// 直连模式的发送反馈（替代 Web setComposer 的 submitError/sendAck 投影）。
@@ -596,6 +596,10 @@ impl ComposerActivity {
                 self.active_turn = false;
             }
             ConversationActivityEvent::Touched => {
+                // A delta/checkpoint is itself proof that a turn is active. This
+                // also recovers after reconnect when TurnStarted was emitted
+                // before this client subscribed.
+                self.active_turn = true;
                 self.last_activity_at = now;
             }
             ConversationActivityEvent::Usage {
@@ -603,6 +607,9 @@ impl ComposerActivity {
                 context_limit,
                 model,
             } => {
+                // Usage can be the first replayed event after reconnect; treat
+                // it as an active-turn signal for the same reason as Touched.
+                self.active_turn = true;
                 self.prompt_tokens = prompt_tokens;
                 self.context_limit = context_limit;
                 self.model = model;
@@ -745,8 +752,8 @@ pub struct BridgeCore {
     header_state: Mutex<HeaderState>,
     /// 标题栏状态版本：组装/投影后递增，UI 侧 timer 比对后刷新（同 session_rev）。
     header_rev: AtomicU64,
-    /// per-seed turns 计数（undo_disabled 判定源）：timeline 快照写入点缓存
-    /// （不随 chat_view consume 清空），增量 turn 事件不改变计数。
+    /// per-seed turns 计数（undo_disabled 判定源）：timeline 快照提供精确
+    /// 数量；实时 TurnStarted 至少把存在性置为 1（标题栏只关心是否为空）。
     header_turns: Mutex<HashMap<String, usize>>,
     /// per-seed 最近回合 id（undo 命令用）：turn_started 事件/快照写入点
     /// 更新；无缓存时撤销按钮直发层拒绝发送。
@@ -803,8 +810,9 @@ pub struct BridgeCore {
     composer_activity: Mutex<HashMap<String, ComposerActivity>>,
     /// 直连模式的 mode 本地缓存（Web 单例语义：会话共享，默认 "plan"）。
     composer_mode: Mutex<String>,
-    /// 直连模式的发送反馈（submitError 显示 / sendAck 清空信号）。
-    composer_feedback: Mutex<ComposerFeedback>,
+    /// 直连模式的发送反馈（submitError / sendAck），按 seed 隔离。
+    /// 上传或 ACK 可能在切换会话后才返回，不能污染新会话草稿。
+    composer_feedback: Mutex<HashMap<String, ComposerFeedback>>,
     /// 原生 ChatView 事件队列：conversation 频道渲染相关事件（turn/round/
     /// delta/checkpoint）直连缓存，UI 线程 timer drain 喂 Transcript。
     /// Queue entries are canonical typed Ringing events; the adapter only maps
@@ -839,8 +847,9 @@ pub struct BridgeCore {
     /// 快照重拉节流：seed 不匹配时主动 `activate_timeline` 重拉（daemon
     /// 幂等重推快照）；16ms 泵每 tick 都会看到不匹配快照，须限频。
     timeline_refresh_at: Mutex<Instant>,
-    /// XAML goalBar 数据源：control 频道 `dashboard_snapshot` 事件投影。
-    dashboard: Mutex<Option<DashboardSnapshot>>,
+    /// XAML goalBar 数据源：control 频道 `dashboard_snapshot` 按 seed 缓存。
+    /// 后台会话仍会收到 control 事件，不能用单份全局快照承载。
+    dashboards: Mutex<HashMap<String, DashboardSnapshot>>,
     /// dashboard 数据版本：事件到达后递增，UI 侧 timer 比对后刷新。
     dashboard_rev: AtomicU64,
 }
@@ -903,11 +912,37 @@ impl BridgeCore {
 
     pub fn set_active_seed(&self, seed: &str) {
         *self.active_seed.lock().unwrap_or_else(|e| e.into_inner()) = seed.to_string();
+        // Composer 与 Dashboard 都是 active_seed 的投影。即使各自数据本身
+        // 没有新事件，会话切换也必须唤醒 UI 重新读取对应 seed 的快照。
+        self.composer_rev.fetch_add(1, Ordering::Relaxed);
+        self.dashboard_rev.fetch_add(1, Ordering::Relaxed);
         // 交互缓存跟随活动会话：
         // 只显示当前会话的交互，后台会话请求保持挂起直至切回）。
         self.refresh_interaction_snapshot();
         // 标题栏直连：seed/view/title 随活动会话刷新。
         self.refresh_header();
+    }
+
+    /// Per-seed streaming projection. Conversation events are canonical once
+    /// observed; session.activity is the reconnect/bootstrap fallback before
+    /// this client has seen a turn event for that seed.
+    fn seed_is_streaming(&self, seed: &str, now: u64) -> bool {
+        if let Some(activity) = self
+            .composer_activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(seed)
+            .cloned()
+        {
+            return activity.is_streaming(now);
+        }
+        matches!(
+            self.activities
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(seed),
+            Some(ActivityState::Starting | ActivityState::Working | ActivityState::WaitingUser)
+        )
     }
 
     // ── XAML 标题栏（header 投影，同 sessions 模式）────────────────
@@ -946,13 +981,7 @@ impl BridgeCore {
             .map(|s| s.title.clone())
             .unwrap_or_default();
         let now = unix_ms();
-        let streaming = self
-            .composer_activity
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&seed)
-            .map(|a| a.is_streaming(now))
-            .unwrap_or(false);
+        let streaming = self.seed_is_streaming(&seed, now);
         let turns = self
             .header_turns
             .lock()
@@ -968,6 +997,15 @@ impl BridgeCore {
         h.compact_disabled = streaming;
         drop(h);
         self.header_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record only the fact that this seed has at least one turn. Exact counts
+    /// come from timeline snapshots; the header needs a replay-idempotent
+    /// non-empty signal so Undo is enabled for a new session's first live turn.
+    fn record_live_turn_started(&self, seed: &str) {
+        let mut turns = self.header_turns.lock().unwrap_or_else(|e| e.into_inner());
+        let count = turns.entry(seed.to_string()).or_default();
+        *count = (*count).max(1);
     }
 
     /// 翻转标题栏本地开关（info_open / stats_open）并递增 rev——壳本地
@@ -1058,7 +1096,7 @@ impl BridgeCore {
         let is_streaming = activity
             .as_ref()
             .map(|a| a.is_streaming(now))
-            .unwrap_or(false);
+            .unwrap_or_else(|| self.seed_is_streaming(&active, now));
         let model = activity
             .as_ref()
             .map(|a| a.model.clone())
@@ -1066,7 +1104,7 @@ impl BridgeCore {
         let context_tokens = activity.as_ref().map(|a| a.prompt_tokens).unwrap_or(0);
         let context_limit = activity.as_ref().map(|a| a.context_limit).unwrap_or(0);
         let mut state = ComposerState::default();
-        state.seed = active;
+        state.seed = active.clone();
         state.is_streaming = is_streaming;
         state.has_pending_gate = gate;
         state.model = model;
@@ -1089,7 +1127,9 @@ impl BridgeCore {
             .composer_feedback
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .get(&active)
+            .cloned()
+            .unwrap_or_default();
         state.submit_error = fb.submit_error;
         state.send_ack = fb.send_ack;
         (state, rev)
@@ -1344,15 +1384,16 @@ impl BridgeCore {
             .unwrap_or_else(|e| e.into_inner())
             .insert(seed.clone(), turns);
         // 撤销直发：快照恢复的历史会话缓存最近回合 id。
-        if let Some(tid) = chat_adapter::restored_turns(&snapshot)
+        let last_turn_id = chat_adapter::restored_turns(&snapshot)
             .last()
-            .map(|t| t.turn_id.clone())
-        {
-            self.last_turn_ids
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(seed.clone(), tid);
+            .map(|t| t.turn_id.clone());
+        let mut last_turn_ids = self.last_turn_ids.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tid) = last_turn_id {
+            last_turn_ids.insert(seed.clone(), tid);
+        } else {
+            last_turn_ids.remove(&seed);
         }
+        drop(last_turn_ids);
         self.refresh_header();
     }
 
@@ -1389,18 +1430,27 @@ impl BridgeCore {
 
     /// (snapshot, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新 goalBar。
     pub fn dashboard_snapshot(&self) -> (Option<DashboardSnapshot>, u64) {
+        let seed = self.active_seed();
         let snap = self
-            .dashboard
+            .dashboards
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .get(&seed)
+            .cloned();
         let rev = self.dashboard_rev.load(Ordering::Relaxed);
         (snap, rev)
     }
 
-    /// control 频道 `dashboard_snapshot` 事件落缓存并递增 rev。
+    /// control 频道 `dashboard_snapshot` 按 seed 落缓存并递增 rev。
     pub fn apply_dashboard(&self, snap: DashboardSnapshot) {
-        *self.dashboard.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+        if snap.seed.is_empty() {
+            log_diag("dashboard: ignore snapshot without seed");
+            return;
+        }
+        self.dashboards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(snap.seed.clone(), snap);
         self.dashboard_rev.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1522,6 +1572,12 @@ impl BridgeCore {
             }
         };
         let state = &bootstrap.conversation.state;
+        // A slow response for a tab that is no longer active must not replace
+        // the new tab's InfoPanel.
+        if self.active_seed() != seed {
+            log_diag(&format!("refresh_info: discard stale response for {seed}"));
+            return;
+        }
         *self.info.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(parse_conversation_state(state));
         self.info_rev.fetch_add(1, Ordering::Relaxed);
@@ -1612,6 +1668,17 @@ impl BridgeCore {
             core.set_active_seed(&seed);
             if let Err(err) = client.activate_timeline(&seed).await {
                 log_diag(&format!("resume {seed}: activate_timeline failed: {err}"));
+            }
+            // An already-open InfoPanel must follow the selected tab. Waiting
+            // here also prevents the previous seed's bootstrap from winning a
+            // race against this navigation.
+            let info_open = core
+                .header_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .info_open;
+            if info_open {
+                core.refresh_info_inner(&seed).await;
             }
             // rev++ 让侧栏 timer 同步 active 高亮（selected_tag 受控刷新）。
             core.session_rev.fetch_add(1, Ordering::Relaxed);
@@ -2052,6 +2119,10 @@ impl BridgeCore {
     /// 失败只记日志（对齐 Web：错误 toast 由调用方本地判定，不阻塞 UI）。
     pub fn spawn_conversation_command(&self, command: ConversationCommand) {
         let core = self.self_arc();
+        // Capture synchronously at click time. Reading active_seed inside the
+        // spawned future lets a fast tab switch retarget Stop/Undo to another
+        // conversation while ensure_client is awaiting.
+        let seed = self.active_seed();
         let _ = deepx_client::runtime_handle().spawn(async move {
             let client = match core.ensure_client().await {
                 Ok(client) => client,
@@ -2060,7 +2131,6 @@ impl BridgeCore {
                     return;
                 }
             };
-            let seed = core.active_seed();
             match client
                 .send_command(
                     Some(&seed),
@@ -2084,6 +2154,9 @@ impl BridgeCore {
         text_files: Vec<ComposerTextFile>,
     ) {
         let core = self.self_arc();
+        // Uploads can take long enough for the user to switch tabs. The
+        // message and its eventual feedback belong to the seed at submit time.
+        let seed = self.active_seed();
         let _ = deepx_client::runtime_handle().spawn(async move {
             let client = match core.ensure_client().await {
                 Ok(client) => client,
@@ -2092,7 +2165,6 @@ impl BridgeCore {
                     return;
                 }
             };
-            let seed = core.active_seed();
             let mut attachments = Vec::new();
             for att in &image_paths {
                 match std::fs::read(&att.path) {
@@ -2131,23 +2203,25 @@ impl BridgeCore {
                 Ok(_) => {
                     log_diag("send_message accepted");
                     // B 组反馈本地写入：ack 递增（清空信号）+ 清除错误。
-                    let mut fb = core
+                    let mut feedback = core
                         .composer_feedback
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
+                    let fb = feedback.entry(seed.clone()).or_default();
                     fb.send_ack = fb.send_ack.wrapping_add(1);
                     fb.submit_error.clear();
-                    drop(fb);
+                    drop(feedback);
                     core.composer_rev.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(err) => {
                     log_diag(&format!("send_message failed: {err}"));
-                    let mut fb = core
+                    let mut feedback = core
                         .composer_feedback
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
+                    let fb = feedback.entry(seed.clone()).or_default();
                     fb.submit_error = err.to_string();
-                    drop(fb);
+                    drop(feedback);
                     core.composer_rev.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -2292,7 +2366,78 @@ impl BridgeCore {
             log_diag("undo: no last turn id cached");
             return;
         };
-        self.spawn_conversation_command(ConversationCommand::ConversationUndoTurn { turn_id });
+        let core = self.self_arc();
+        let command_id = self.next_command_id();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("undo {seed}: connect failed: {err}"));
+                    return;
+                }
+            };
+            let result = client
+                .send_command(
+                    Some(&seed),
+                    RingingCommand::Conversation(ConversationCommand::ConversationUndoTurn {
+                        turn_id,
+                    }),
+                    CommandOptions {
+                        command_id: Some(command_id.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            if let Err(err) = result {
+                log_diag(&format!("undo {seed}: command failed: {err}"));
+                return;
+            }
+
+            // ACK only means accepted. Wait for the durable receipt before
+            // reloading timeline; otherwise a fast GET can still return the
+            // pre-undo snapshot and leave ChatView/Header stale.
+            let mut succeeded = false;
+            for _ in 0..20 {
+                match client.command_status(&command_id).await {
+                    Ok(status) if status.state == RingingCommandState::Succeeded => {
+                        succeeded = true;
+                        break;
+                    }
+                    Ok(status)
+                        if matches!(
+                            status.state,
+                            RingingCommandState::Failed | RingingCommandState::Rejected
+                        ) =>
+                    {
+                        log_diag(&format!(
+                            "undo {seed}: terminal {:?} ({:?})",
+                            status.state, status.error_code
+                        ));
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(err) => log_diag(&format!("undo {seed}: status pending: {err}")),
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if !succeeded {
+                log_diag(&format!("undo {seed}: completion timed out"));
+            }
+            // The client owns one active timeline stream. If the user switched
+            // away while Undo was completing, refreshing A here would silently
+            // replace B's stream. A will be reloaded when it is selected again.
+            if core.active_seed() != seed {
+                log_diag(&format!(
+                    "undo {seed}: timeline refresh deferred (inactive seed)"
+                ));
+                return;
+            }
+            if let Err(err) = client.activate_timeline(&seed).await {
+                log_diag(&format!("undo {seed}: timeline refresh failed: {err}"));
+            } else {
+                log_diag(&format!("undo {seed}: completed and refreshed"));
+            }
+        });
     }
 
     /// 工作区运行模式切换：`workspace.set_mode`（backend.restart 未实现，
@@ -2652,7 +2797,10 @@ impl BridgeCore {
                 // XAML composer goalBar：dashboard_snapshot 携带完整
                 // DashboardSnapshot 载荷（tasks/recent_edits/current_todo_id），
                 // 直接缓存为权威快照（终局架构：Web 移除后 XAML 直消费）。
-                if let Some(snap) = dashboard_event(event) {
+                if let Some(mut snap) = dashboard_event(event) {
+                    if snap.seed.is_empty() {
+                        snap.seed = batch.seed.clone();
+                    }
                     self.apply_dashboard(snap);
                 }
                 if let Some(ev) = interaction_event(event) {
@@ -2717,6 +2865,9 @@ impl BridgeCore {
             // 稀释，无害）。
             let now = unix_ms();
             let mut turn_boundary = false;
+            let mut turn_ended = false;
+            let mut compacting_update: Option<bool> = None;
+            let mut live_usage: Option<(UiUsageInfo, u64, String)> = None;
             {
                 let mut map = self
                     .composer_activity
@@ -2728,11 +2879,21 @@ impl BridgeCore {
                         continue;
                     };
                     if let Some(ev) = conversation_activity_event(event) {
+                        if matches!(event, DomainConversationEvent::TurnStarted { .. }) {
+                            // A new session activates timeline before its first
+                            // turn, so that snapshot contains zero turns. Keep
+                            // Undo enabled after the live turn without waiting
+                            // for another full timeline snapshot. max(1) is
+                            // replay-idempotent; exact count is restored by the
+                            // next authoritative snapshot.
+                            self.record_live_turn_started(&batch.seed);
+                        }
                         if matches!(
                             &ev,
                             ConversationActivityEvent::Started | ConversationActivityEvent::Ended
                         ) {
                             turn_boundary = true;
+                            turn_ended |= matches!(&ev, ConversationActivityEvent::Ended);
                             // 撤销直发：turn 事件带 turn_id，缓存最近回合。
                             let tid = match event {
                                 DomainConversationEvent::TurnStarted { turn_id, .. }
@@ -2754,12 +2915,80 @@ impl BridgeCore {
                         }
                         activity.apply(ev, now);
                     }
+                    match event {
+                        DomainConversationEvent::UsageUpdated {
+                            usage,
+                            context_limit,
+                            model,
+                            ..
+                        } => {
+                            live_usage = Some((
+                                UiUsageInfo {
+                                    prompt_tokens: u64::from(usage.prompt_tokens),
+                                    completion_tokens: u64::from(usage.completion_tokens),
+                                    reasoning_tokens: u64::from(usage.reasoning_tokens),
+                                    total_tokens: u64::from(usage.total_tokens),
+                                    prompt_cache_hit_tokens: u64::from(
+                                        usage.prompt_cache_hit_tokens,
+                                    ),
+                                    prompt_cache_miss_tokens: u64::from(
+                                        usage.prompt_cache_miss_tokens,
+                                    ),
+                                    cache_usage_reported: usage
+                                        .cache_usage_reported
+                                        .unwrap_or(false),
+                                },
+                                u64::from(*context_limit),
+                                model.clone(),
+                            ));
+                        }
+                        DomainConversationEvent::CompactStarted { .. } => {
+                            compacting_update = Some(true)
+                        }
+                        DomainConversationEvent::CompactFinished { .. } => {
+                            compacting_update = Some(false)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let is_active_seed = batch.seed == self.active_seed();
+            if is_active_seed {
+                if let Some((usage, context_limit, model)) = live_usage {
+                    let mut info = self.info.lock().unwrap_or_else(|e| e.into_inner());
+                    let detail = info.get_or_insert_with(SessionDetail::default);
+                    detail.usage = usage;
+                    detail.context_limit = context_limit;
+                    detail.model = model;
+                    drop(info);
+                    self.info_rev.fetch_add(1, Ordering::Relaxed);
+                }
+                if let Some(compacting) = compacting_update {
+                    let mut header = self.header_state.lock().unwrap_or_else(|e| e.into_inner());
+                    if header.compacting != compacting {
+                        header.compacting = compacting;
+                        drop(header);
+                        self.header_rev.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
             self.composer_rev.fetch_add(1, Ordering::Relaxed);
             // 标题栏直连：turn 边界（streaming 翻转）刷新 undo/compact disabled。
             if turn_boundary {
                 self.refresh_header();
+            }
+            // Totals remain authoritative in persisted bootstrap state. Refresh
+            // once at the request boundary; live UsageUpdated above supplies the
+            // current request without polling.
+            if is_active_seed && turn_ended {
+                let info_open = self
+                    .header_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .info_open;
+                if info_open {
+                    self.spawn_refresh_info(batch.seed.clone());
+                }
             }
             // 原生 ChatView 直连：渲染相关事件（turn/round/delta/checkpoint）
             // 入队，UI 线程 timer drain 喂 Transcript（读路径直连）。
@@ -3057,7 +3286,7 @@ impl Bridge {
                     composer_rev: AtomicU64::new(0),
                     composer_activity: Mutex::new(HashMap::new()),
                     composer_mode: Mutex::new("plan".to_string()),
-                    composer_feedback: Mutex::new(ComposerFeedback::default()),
+                    composer_feedback: Mutex::new(HashMap::new()),
                     // Canonical conversation events are queued for the native
                     // ChatView; no renderer projection participates here.
                     chat_events: Mutex::new(std::collections::VecDeque::new()),
@@ -3070,7 +3299,7 @@ impl Bridge {
                     chat_rev: AtomicU64::new(0),
                     // 初始化为远古时刻：首次 refresh 立即放行。
                     timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
-                    dashboard: Mutex::new(None),
+                    dashboards: Mutex::new(HashMap::new()),
                     dashboard_rev: AtomicU64::new(0),
                 });
                 let _ = SHARED_CORE.set(core.clone());
@@ -3389,7 +3618,7 @@ mod tests {
             composer_rev: AtomicU64::new(0),
             composer_activity: Mutex::new(HashMap::new()),
             composer_mode: Mutex::new("plan".to_string()),
-            composer_feedback: Mutex::new(ComposerFeedback::default()),
+            composer_feedback: Mutex::new(HashMap::new()),
             chat_events: Mutex::new(std::collections::VecDeque::new()),
             chat_timeline: Mutex::new(None),
             timeline_has_more: Mutex::new(std::collections::HashMap::new()),
@@ -3399,7 +3628,7 @@ mod tests {
             content_fetching: Mutex::new(std::collections::HashSet::new()),
             chat_rev: AtomicU64::new(0),
             timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
-            dashboard: Mutex::new(None),
+            dashboards: Mutex::new(HashMap::new()),
             dashboard_rev: AtomicU64::new(0),
         }
     }
@@ -3801,6 +4030,83 @@ mod tests {
     }
 
     #[test]
+    fn composer_recovers_streaming_when_start_event_was_missed() {
+        let mut a = ComposerActivity::default();
+        a.apply(ConversationActivityEvent::Touched, 10_000);
+        assert!(a.is_streaming(10_001));
+        a.apply(ConversationActivityEvent::Ended, 11_000);
+        assert!(!a.is_streaming(11_000));
+    }
+
+    #[test]
+    fn active_seed_switch_invalidates_composer_and_dashboard_projections() {
+        let core = test_core();
+        let composer_before = core.composer_rev.load(Ordering::Relaxed);
+        let dashboard_before = core.dashboard_rev.load(Ordering::Relaxed);
+        core.set_active_seed("seed1");
+        assert!(core.composer_rev.load(Ordering::Relaxed) > composer_before);
+        assert!(core.dashboard_rev.load(Ordering::Relaxed) > dashboard_before);
+    }
+
+    #[test]
+    fn first_live_turn_enables_undo_without_waiting_for_a_snapshot() {
+        let core = test_core();
+        core.set_active_seed("seed1");
+        assert!(core.header_snapshot().0.undo_disabled);
+        core.record_live_turn_started("seed1");
+        core.refresh_header();
+        assert!(!core.header_snapshot().0.undo_disabled);
+        // Replayed TurnStarted remains idempotent for the non-empty projection.
+        core.record_live_turn_started("seed1");
+        assert_eq!(core.header_turns.lock().unwrap().get("seed1"), Some(&1));
+    }
+
+    #[test]
+    fn composer_uses_session_activity_before_first_turn_event() {
+        let core = test_core();
+        core.activities
+            .lock()
+            .unwrap()
+            .insert("seed1".into(), ActivityState::Working);
+        core.set_active_seed("seed1");
+        assert!(core.composer_snapshot().0.is_streaming);
+        core.activities
+            .lock()
+            .unwrap()
+            .insert("seed1".into(), ActivityState::Idle);
+        assert!(!core.composer_snapshot().0.is_streaming);
+    }
+
+    #[test]
+    fn dashboard_cache_follows_active_seed() {
+        use crate::shell_store::DashboardTask;
+
+        let core = test_core();
+        let snapshot = |seed: &str, task: &str| DashboardSnapshot {
+            seed: seed.into(),
+            tasks: vec![DashboardTask {
+                id: format!("{seed}-todo"),
+                subject: task.into(),
+                description: String::new(),
+                status: "in_progress".into(),
+            }],
+            recent_edits: Vec::new(),
+            current_todo_id: Some(format!("{seed}-todo")),
+        };
+        core.apply_dashboard(snapshot("seedA", "A task"));
+        core.apply_dashboard(snapshot("seedB", "B task"));
+
+        core.set_active_seed("seedA");
+        let (a, _) = core.dashboard_snapshot();
+        assert_eq!(a.expect("seed A snapshot").tasks[0].subject, "A task");
+        core.set_active_seed("seedB");
+        let (b, _) = core.dashboard_snapshot();
+        assert_eq!(b.expect("seed B snapshot").tasks[0].subject, "B task");
+        core.set_active_seed("seedC");
+        assert!(core.dashboard_snapshot().0.is_none());
+    }
+
+    #[test]
     fn composer_snapshot_uses_typed_activity_and_local_state() {
         let core = test_core();
         core.set_active_seed("seed1");
@@ -3832,7 +4138,12 @@ mod tests {
         assert_eq!(s.send_ack, 0);
         assert_eq!(s.submit_error, "");
         *core.composer_mode.lock().unwrap() = "code".into();
-        core.composer_feedback.lock().unwrap().send_ack = 7;
+        core.composer_feedback
+            .lock()
+            .unwrap()
+            .entry("seed1".into())
+            .or_default()
+            .send_ack = 7;
         let (s2, _) = core.composer_snapshot();
         assert_eq!(s2.mode, "code");
         assert_eq!(s2.send_ack, 7);

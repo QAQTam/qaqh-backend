@@ -1,0 +1,15 @@
+DeepX includes the following unmodified font software.
+
+HarmonyOS Sans SC
+Copyright 2021 Huawei Device Co., Ltd.
+Used as the default Simplified Chinese and application UI font.
+Licensed under the HarmonyOS Sans Fonts License Agreement. The complete
+license is distributed as HARMONYOS_SANS_LICENSE.txt in this directory.
+
+Cascadia Mono 2407.24
+Copyright (c) 2019 - Present, Microsoft Corporation.
+Used as the default code and numeric font.
+Licensed under the SIL Open Font License, Version 1.1. The complete license
+is distributed as CASCADIA_CODE_LICENSE.txt in this directory.
+
+The font files are redistributed unmodified and are not sold separately.

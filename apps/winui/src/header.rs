@@ -27,6 +27,8 @@ pub const HEADER_HEIGHT: f64 = 48.0;
 /// 语言一致（偏差 D6，WORKFLOW §3）。
 fn action_button(
     icon: Icon,
+    label: &'static str,
+    automation_id: &'static str,
     enabled: bool,
     active: bool,
     on_click: impl Fn() + 'static,
@@ -35,6 +37,9 @@ fn action_button(
         .icon(icon)
         .subtle()
         .enabled(enabled)
+        .tooltip(label)
+        .automation_name(label)
+        .automation_id(automation_id)
         .on_click(on_click);
     if active {
         btn = btn.accent();
@@ -45,8 +50,11 @@ fn action_button(
 /// XAML 标题栏组件（放入外层 Grid row 0；host 检测到 TitleBar 自动接线）。
 pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (state, set_state) = cx.use_state::<HeaderState>(HeaderState::default());
+    let (lang, set_lang) = cx.use_state::<String>("zh".to_string());
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    let lang_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
+    let last_lang_rev = cx.use_ref::<u64>(0);
 
     // 首次挂载：500ms rev 轮询（同 sidebar 模式；shell::poll_rev helper）。
     cx.use_effect((), {
@@ -61,6 +69,25 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 Duration::from_millis(500),
                 move || bridge.core().header_snapshot(),
                 move |s| set_state.call(s),
+            );
+        }
+    });
+
+    // Locale is owned by config rather than HeaderState. Poll its independent
+    // revision so changing language updates tooltips without requiring an
+    // unrelated conversation/header event.
+    cx.use_effect((), {
+        let bridge = bridge.clone();
+        let set_lang = set_lang.clone();
+        let lang_timer = lang_timer.clone();
+        let last_lang_rev = last_lang_rev.clone();
+        move || {
+            crate::shell::poll_rev(
+                lang_timer,
+                last_lang_rev,
+                Duration::from_millis(500),
+                move || bridge.core().settings_snapshot(),
+                move |s| set_lang.call(s.map(|v| v.lang).unwrap_or_else(|| "zh".into())),
             );
         }
     });
@@ -116,33 +143,102 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         .background(ThemeRef::DividerStroke)
         .vertical_alignment(VerticalAlignment::Center)
         .into();
+    let en = lang == "en";
+    let workspace_label = if en {
+        "Choose workspace"
+    } else {
+        "选择工作区"
+    };
+    let location_label = if en {
+        "Open workspace in File Explorer"
+    } else {
+        "在文件资源管理器中打开工作区"
+    };
+    let info_label = if en {
+        "Session information"
+    } else {
+        "会话信息"
+    };
+    let stats_label = if en {
+        "Usage statistics"
+    } else {
+        "用量统计"
+    };
+    let undo_label = if en {
+        "Undo last turn"
+    } else {
+        "撤销上一轮"
+    };
+    let compact_label = if state.compacting {
+        if en {
+            "Compacting context…"
+        } else {
+            "正在压缩上下文…"
+        }
+    } else if en {
+        "Compact context"
+    } else {
+        "压缩上下文"
+    };
+    let compact_progress: Element = if state.compacting {
+        ProgressRing::default()
+            .width(16.0)
+            .height(16.0)
+            .automation_name(compact_label)
+            .into()
+    } else {
+        grid(()).into()
+    };
     let footer: Element = hstack((
         // 图标映射（bindings Symbol 枚举裁剪版，WORKFLOW §6.1 记录）：
         // ①OpenLocal ②OpenFile ┃ ③ContactInfo(替代 Info) ④FourBars(替代 Diagnostic)
         // ⑤Undo ⑥Clear(替代 Compress)（⑧pet 隐藏；console 随 WebView 移除）。
-        action_button(Icon::symbol(Symbol::OpenLocal), true, false, on_workspace),
-        action_button(Icon::symbol(Symbol::OpenFile), true, false, on_location),
+        action_button(
+            Icon::symbol(Symbol::OpenLocal),
+            workspace_label,
+            "header-workspace",
+            true,
+            false,
+            on_workspace,
+        ),
+        action_button(
+            Icon::symbol(Symbol::OpenFile),
+            location_label,
+            "header-location",
+            true,
+            false,
+            on_location,
+        ),
         divider,
         action_button(
             Icon::symbol(Symbol::ContactInfo),
+            info_label,
+            "header-info",
             true,
             state.info_open,
             on_info,
         ),
         action_button(
             Icon::symbol(Symbol::FourBars),
+            stats_label,
+            "header-stats",
             true,
             state.stats_open,
             on_stats,
         ),
         action_button(
             Icon::symbol(Symbol::Undo),
+            undo_label,
+            "header-undo",
             !state.undo_disabled,
             false,
             on_undo,
         ),
+        compact_progress,
         action_button(
             Icon::symbol(Symbol::Clear),
+            compact_label,
+            "header-compact",
             !(state.compacting || state.compact_disabled),
             false,
             on_compact,

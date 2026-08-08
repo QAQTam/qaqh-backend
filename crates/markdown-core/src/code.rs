@@ -5,9 +5,9 @@
 
 /// shiki 语言集（27 种），与 REFERENCE §4 完全一致。
 pub const LANGUAGES: &[&str] = &[
-    "ts", "tsx", "js", "jsx", "json", "yaml", "toml", "rs", "rust", "py", "python", "go",
-    "java", "kt", "css", "scss", "html", "bash", "sh", "shell", "sql", "graphql", "md",
-    "markdown", "diff", "c", "cpp", "zig", "nim",
+    "ts", "tsx", "js", "jsx", "json", "yaml", "toml", "rs", "rust", "py", "python", "go", "java",
+    "kt", "css", "scss", "html", "bash", "sh", "shell", "sql", "graphql", "md", "markdown", "diff",
+    "c", "cpp", "zig", "nim",
 ];
 
 /// 语言别名归一表。
@@ -67,9 +67,9 @@ mod tests {
         // 语法数——rs/rust、py/python、md/markdown、sh/shell/bash 为别名族，
         // 具体族数依 shiki 别名映射而定，验收以标注名清单为准）
         let spec: [&str; 29] = [
-            "ts", "tsx", "js", "jsx", "json", "yaml", "toml", "rs", "rust", "py", "python",
-            "go", "java", "kt", "css", "scss", "html", "bash", "sh", "shell", "sql",
-            "graphql", "md", "markdown", "diff", "c", "cpp", "zig", "nim",
+            "ts", "tsx", "js", "jsx", "json", "yaml", "toml", "rs", "rust", "py", "python", "go",
+            "java", "kt", "css", "scss", "html", "bash", "sh", "shell", "sql", "graphql", "md",
+            "markdown", "diff", "c", "cpp", "zig", "nim",
         ];
         for lang in spec {
             assert!(LANGUAGES.contains(&lang), "{lang} 缺失于语言表");

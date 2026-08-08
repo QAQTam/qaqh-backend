@@ -11,7 +11,9 @@ use std::time::Duration;
 use deepx_domain::{ControlCommand, ControlEvent, ConversationEvent, SessionState, ToolCommand};
 use deepx_msglp::ringing_v1::loop_core::Loop;
 use deepx_msglp::state::agent::AgentState;
-use deepx_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope};
+use deepx_ringing::{
+    RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
+};
 
 #[test]
 fn ten_parallel_reads_same_file() {
@@ -71,7 +73,9 @@ fn ten_parallel_reads_same_file() {
         send_cmd(
             &mut input_writer,
             "",
-            RingingCommand::Control(ControlCommand::SessionCreate { close_current: false }),
+            RingingCommand::Control(ControlCommand::SessionCreate {
+                close_current: false,
+            }),
         );
 
         // Wait for SessionStateChanged(Created)
@@ -89,7 +93,10 @@ fn ten_parallel_reads_same_file() {
                 Err(_) => break,
             }
         }
-        assert!(!seed.is_empty(), "SessionStateChanged(Created) not received");
+        assert!(
+            !seed.is_empty(),
+            "SessionStateChanged(Created) not received"
+        );
 
         // Send 10 ToolInvoke frames with incrementing IDs
         for i in 0..10 {

@@ -77,14 +77,12 @@ pub fn classify_risk(
 pub fn categorize_tool(name: &str) -> ToolCategory {
     match name {
         // ── Read ──
-        "read_file" | "skills" | "ask" | "image" | "git_diff" | "git_log"
-        | "git_show" | "git_status" => ToolCategory::Read,
+        "read_file" | "skills" | "ask" | "image" | "git_diff" | "git_log" | "git_show"
+        | "git_status" => ToolCategory::Read,
 
         // ── Write ──
-        "edit_file" | "git_add" | "git_commit" | "git_branch" | "git_checkout"
-                    | "git_merge" | "git_restore" | "todo" => {
-            ToolCategory::Write
-        }
+        "edit_file" | "git_add" | "git_commit" | "git_branch" | "git_checkout" | "git_merge"
+        | "git_restore" | "todo" => ToolCategory::Write,
 
         // ── Exec ──
         "exec" | "spawn_subagent" => ToolCategory::Exec,
@@ -166,7 +164,10 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
     if tool_name == "read_file" {
         if let Some(requests) = args.get("requests").and_then(|value| value.as_array()) {
             paths.extend(requests.iter().filter_map(|request| {
-                request.get("path").and_then(|value| value.as_str()).map(PathBuf::from)
+                request
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .map(PathBuf::from)
             }));
         }
     }
@@ -304,9 +305,7 @@ pub fn needs_permission(
     // touch workspace files, run code, or access external resources. Requiring
     // approval for each model-authored status transition creates recursive,
     // repeated prompts without protecting a user-controlled resource.
-    if matches!(
-            tool_name, "todo"
-    ) {
+    if matches!(tool_name, "todo") {
         return PermissionDecision::AutoApprove;
     }
 
@@ -544,7 +543,7 @@ mod tests {
             PermissionLevel::WorkspaceFree,
             PermissionLevel::Unrestricted,
         ] {
-        for tool_name in ["todo"] {
+            for tool_name in ["todo"] {
                 let decision = needs_permission(
                     level,
                     tool_name,

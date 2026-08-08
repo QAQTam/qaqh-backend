@@ -79,11 +79,7 @@ impl ToolManager {
         self.register_with_placement(handler, ToolPlacement::HostOnly);
     }
 
-    pub fn register_with_placement(
-        &mut self,
-        handler: ToolHandler,
-        placement: ToolPlacement,
-    ) {
+    pub fn register_with_placement(&mut self, handler: ToolHandler, placement: ToolPlacement) {
         let key = handler.key.clone();
         self.handlers.insert(key.clone(), handler);
         self.placements.insert(key, placement);

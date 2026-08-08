@@ -868,47 +868,79 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 })
                 .into(),
         ));
-        // ── 字体：Windows 系统字体族列表（fonts.rs 注册表枚举，进程级缓存）；
-        // 首项「系统默认」= 空值。切换立即全局生效（FontFamily 继承属性，
-        // set_font_family 设置内容根），随保存按钮 config.save 落盘。──
-        let font_options: Vec<String> = {
-            let mut v = vec!["系统默认".to_string()];
-            v.extend(fonts::system_fonts_cached().iter().cloned());
+        // ── 字体：首项是随应用分发的默认字体；第二项显式选择 Windows
+        // UI 字体，之后才是注册表枚举出的系统字体。显示名和值分离，避免
+        // 把“内置默认”文案误写入 config。──
+        let font_options: Vec<(String, String)> = {
+            let mut v = vec![
+                ("内置默认（HarmonyOS Sans SC）".to_string(), String::new()),
+                (
+                    "Windows 系统界面字体".to_string(),
+                    fonts::WINDOWS_UI_FONT_FAMILY.to_string(),
+                ),
+            ];
+            v.extend(
+                fonts::system_fonts_cached()
+                    .iter()
+                    .filter(|f| !f.starts_with("Segoe UI") && !f.starts_with("Microsoft YaHei"))
+                    .cloned()
+                    .map(|f| (f.clone(), f)),
+            );
             v
         };
         let font_idx = font_options
             .iter()
-            .position(|f| *f == d.font_family)
+            .position(|(_, value)| *value == d.font_family)
             .unwrap_or(0) as i32;
         rows.push(field_row(
             "字体",
-            ComboBox::new(font_options.clone())
-                .selected_index(font_idx)
-                .header("")
-                .on_selection_changed({
-                    let draft = draft.clone();
-                    let dirty = dirty.clone();
-                    let font_options = font_options.clone();
-                    move |i: i32| {
-                        let font = font_options.get(i as usize).cloned().unwrap_or_default();
-                        draft.borrow_mut().font_family = font.clone();
-                        *dirty.borrow_mut() = true;
-                        // 立即全局生效（空 = 恢复系统默认）。
-                        if font.is_empty() {
-                            windows_reactor::set_font_family(None);
-                        } else {
-                            windows_reactor::set_font_family(Some(&font));
-                        }
-                    }
-                })
-                .into(),
+            ComboBox::new(
+                font_options
+                    .iter()
+                    .map(|(label, _)| label.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .selected_index(font_idx)
+            .header("")
+            .on_selection_changed({
+                let draft = draft.clone();
+                let dirty = dirty.clone();
+                let font_options = font_options.clone();
+                move |i: i32| {
+                    let font = font_options
+                        .get(i as usize)
+                        .map(|(_, value)| value.clone())
+                        .unwrap_or_default();
+                    draft.borrow_mut().font_family = font.clone();
+                    *dirty.borrow_mut() = true;
+                    // 空值 = 应用内置默认；旧配置无需迁移即可获得新字体。
+                    windows_reactor::set_font_family(Some(fonts::effective_ui_font(&font)));
+                }
+            })
+            .into(),
         ));
         rows.push(
-            text_block("字体应用于整个应用界面（FontFamily 继承属性；中文会回退到系统中文字体）")
-                .font_size(11.0)
+            text_block("DeepX 内置并使用 HarmonyOS Sans SC；代码与数字使用 Cascadia Mono。字体均未修改，完整许可随应用分发。")
+                .font_size(tokens::TYPE_CAPTION)
                 .foreground(ThemeRef::SecondaryText)
+                .wrap()
                 .into(),
         );
+        if let Some(notices) = fonts::notices_path() {
+            rows.push(
+                button("查看字体许可")
+                    .subtle()
+                    .tooltip("打开随应用分发的第三方字体许可")
+                    .automation_name("查看字体许可")
+                    .on_click({
+                        let bridge = bridge.clone();
+                        move || {
+                            let _ = bridge.open_path(&notices);
+                        }
+                    })
+                    .into(),
+            );
+        }
     }
 
     // multimodal：enabled / providerType / apiKey / baseUrl / model / maxTokens

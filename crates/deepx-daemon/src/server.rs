@@ -90,9 +90,7 @@ pub async fn run() -> Result<(), String> {
             generation: 0,
         });
     }
-    let ringing_leases = Arc::new(Mutex::new(
-        crate::ringing_http::RingingLeaseStore::new(),
-    ));
+    let ringing_leases = Arc::new(Mutex::new(crate::ringing_http::RingingLeaseStore::new()));
     let pending_commands = Arc::new(Mutex::new(
         crate::ringing_http::PendingCommandStore::new_persistent(),
     ));
@@ -221,7 +219,9 @@ async fn handle_connection(
         }
         if busy {
             let _ = stream
-                .write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .await
                 .map_err(stringify)?;
             return Ok(());

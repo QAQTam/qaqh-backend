@@ -130,20 +130,16 @@ impl Shell {
     /// Path to the shell executable.
     fn path(&self) -> &str {
         match self {
-            Shell::Bash => {
-                DETECTED_BASH_PATH
-                    .get()
-                    .map(String::as_str)
-                    .unwrap_or("bash")
-            }
+            Shell::Bash => DETECTED_BASH_PATH
+                .get()
+                .map(String::as_str)
+                .unwrap_or("bash"),
             Shell::Zsh => "zsh",
             Shell::Sh => "sh",
-            Shell::PowerShell => {
-                DETECTED_PWSH_PATH
-                    .get()
-                    .map(String::as_str)
-                    .unwrap_or("pwsh")
-            }
+            Shell::PowerShell => DETECTED_PWSH_PATH
+                .get()
+                .map(String::as_str)
+                .unwrap_or("pwsh"),
             Shell::Cmd => "cmd",
         }
     }
@@ -152,7 +148,11 @@ impl Shell {
     fn derive_exec_args(&self, command: &str) -> Vec<String> {
         match self {
             Shell::Bash | Shell::Zsh | Shell::Sh => {
-                vec![self.path().to_string(), "-c".to_string(), command.to_string()]
+                vec![
+                    self.path().to_string(),
+                    "-c".to_string(),
+                    command.to_string(),
+                ]
             }
             Shell::PowerShell => {
                 vec![
@@ -346,8 +346,12 @@ fn forward_progress(
 /// 将已解码的输出块追加到进程注册表（backgrounded 后 process_check 可查 tail）。
 fn append_registry(id: u32, stream: ExecOutputStream, chunk: &str) {
     match stream {
-        ExecOutputStream::Stdout => crate::process_registry::ProcessRegistry::append_output(id, chunk),
-        ExecOutputStream::Stderr => crate::process_registry::ProcessRegistry::append_stderr(id, chunk),
+        ExecOutputStream::Stdout => {
+            crate::process_registry::ProcessRegistry::append_output(id, chunk)
+        }
+        ExecOutputStream::Stderr => {
+            crate::process_registry::ProcessRegistry::append_stderr(id, chunk)
+        }
     }
 }
 
@@ -637,7 +641,8 @@ fn direct_exec(
             // 进程退出存在毫秒级竞态，try_wait 一次可能恰逢 None）。
             if handoff.load(std::sync::atomic::Ordering::SeqCst) {
                 for _ in 0..100 {
-                    if let Some(code) = crate::process_registry::ProcessRegistry::try_wait(proc_id) {
+                    if let Some(code) = crate::process_registry::ProcessRegistry::try_wait(proc_id)
+                    {
                         crate::process_registry::ProcessRegistry::mark_exited(proc_id, code);
                         break;
                     }
@@ -666,7 +671,8 @@ fn direct_exec(
             let _ = stderr_tx.send((s, t));
             if handoff.load(std::sync::atomic::Ordering::SeqCst) {
                 for _ in 0..100 {
-                    if let Some(code) = crate::process_registry::ProcessRegistry::try_wait(proc_id) {
+                    if let Some(code) = crate::process_registry::ProcessRegistry::try_wait(proc_id)
+                    {
                         crate::process_registry::ProcessRegistry::mark_exited(proc_id, code);
                         break;
                     }
@@ -846,10 +852,10 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
     let argv: Vec<String> = if let Some(command) = ctx.get_str("command") {
         if command.is_empty() {
             return ToolResult::error(crate::json_err(
-                    "EMPTY_COMMAND",
-                    "command string is empty",
-                    "Provide a shell command string.",
-                ));
+                "EMPTY_COMMAND",
+                "command string is empty",
+                "Provide a shell command string.",
+            ));
         }
         // Explicit shell override (exec `shell` param) or platform default.
         let shell = match ctx.args.get("shell").and_then(|v| v.as_str()) {
@@ -857,10 +863,10 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
                 Some(shell) => shell,
                 None => {
                     return ToolResult::error(crate::json_err(
-                            "UNKNOWN_SHELL",
-                            format!("unknown shell '{name}'"),
-                            "Use one of: bash, zsh, sh, pwsh, cmd. The default is auto-detected (bash on Windows).",
-                        ));
+                        "UNKNOWN_SHELL",
+                        format!("unknown shell '{name}'"),
+                        "Use one of: bash, zsh, sh, pwsh, cmd. The default is auto-detected (bash on Windows).",
+                    ));
                 }
             },
             _ => Shell::detect(),
@@ -874,19 +880,19 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
                 .collect(),
             None => {
                 return ToolResult::error(crate::json_err(
-                        "MISSING_ARGV",
-                        "exec requires argv or command",
-                        "Example: {\"argv\": [\"cargo\", \"check\"]} or {\"command\": \"cargo check\"}",
-                    ));
+                    "MISSING_ARGV",
+                    "exec requires argv or command",
+                    "Example: {\"argv\": [\"cargo\", \"check\"]} or {\"command\": \"cargo check\"}",
+                ));
             }
         }
     };
     if argv.is_empty() {
         return ToolResult::error(crate::json_err(
-                "EMPTY_ARGV",
-                "argv array is empty",
-                "Provide at least one element.",
-            ));
+            "EMPTY_ARGV",
+            "argv array is empty",
+            "Provide at least one element.",
+        ));
     }
     let max_output_tokens = ctx
         .get_u64("max_output_tokens")
@@ -904,17 +910,21 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
     // Fall back to workspace root when the caller doesn't supply cwd.
     // A relative cwd resolves against the workspace root (or the process
     // directory when no workspace is set) — same semantics as file tools.
-    let cwd: Option<String> = ctx.get_str("cwd").map(String::from).map(|cwd| {
-        let resolved = crate::resolve_workspace_path(&cwd);
-        if resolved.is_empty() { cwd } else { resolved }
-    }).or_else(|| {
-        let ws = crate::CURRENT_WORKSPACE.read().ok()?;
-        if ws.is_empty() || *ws == "." {
-            None
-        } else {
-            Some(ws.clone())
-        }
-    });
+    let cwd: Option<String> = ctx
+        .get_str("cwd")
+        .map(String::from)
+        .map(|cwd| {
+            let resolved = crate::resolve_workspace_path(&cwd);
+            if resolved.is_empty() { cwd } else { resolved }
+        })
+        .or_else(|| {
+            let ws = crate::CURRENT_WORKSPACE.read().ok()?;
+            if ws.is_empty() || *ws == "." {
+                None
+            } else {
+                Some(ws.clone())
+            }
+        });
     let cwd_ref: Option<&str> = cwd.as_deref();
     // 可选环境变量覆盖（传入完整 env 供子进程使用）。
     let env: Option<Vec<(String, String)>> = ctx
@@ -1117,7 +1127,17 @@ mod tests {
             signal.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let result = direct_exec(&argv, None, None, 100, 10, None, Some(cancel.as_ref()), None, "test");
+        let result = direct_exec(
+            &argv,
+            None,
+            None,
+            100,
+            10,
+            None,
+            Some(cancel.as_ref()),
+            None,
+            "test",
+        );
         assert!(
             result.cancelled,
             "per-call cancellation should stop the child"
@@ -1127,10 +1147,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn per_call_cancel_stops_only_the_running_command() {
-        let argv = vec![
-            "sleep".to_string(),
-            "6".to_string(),
-        ];
+        let argv = vec!["sleep".to_string(), "6".to_string()];
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let signal = cancel.clone();
         std::thread::spawn(move || {
@@ -1138,7 +1155,17 @@ mod tests {
             signal.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        let result = direct_exec(&argv, None, None, 100, 10, None, Some(cancel.as_ref()), None, "test");
+        let result = direct_exec(
+            &argv,
+            None,
+            None,
+            100,
+            10,
+            None,
+            Some(cancel.as_ref()),
+            None,
+            "test",
+        );
         assert!(
             result.cancelled,
             "per-call cancellation should stop the child"
@@ -1149,9 +1176,7 @@ mod tests {
     fn truncated_output_instructs_the_model_to_retry_narrowly() {
         let text = "token ".repeat(1_000);
         let truncated = token_truncate(&text, 10);
-        assert!(
-            truncated.contains("Call exec again with narrower argv or a filtering command.")
-        );
+        assert!(truncated.contains("Call exec again with narrower argv or a filtering command."));
     }
 
     #[test]
@@ -1191,7 +1216,17 @@ mod tests {
         ];
         let (tx, rx) = crate::bounded_exec_progress_channel();
 
-        let result = direct_exec(&argv, None, None, 100, 10, None, None, Some(tx), "call-stream-2");
+        let result = direct_exec(
+            &argv,
+            None,
+            None,
+            100,
+            10,
+            None,
+            None,
+            Some(tx),
+            "call-stream-2",
+        );
         let chunks: Vec<_> = rx.try_iter().collect();
 
         assert!(result.output.contains("streamed-output"));
@@ -1253,7 +1288,11 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
-        assert!(status.is_ok(), "detected shell '{path}' should be runnable (got {:?})", shell);
+        assert!(
+            status.is_ok(),
+            "detected shell '{path}' should be runnable (got {:?})",
+            shell
+        );
     }
 
     #[test]
@@ -1261,7 +1300,12 @@ mod tests {
         // 默认检测的 shell（Windows=pwsh / Unix=bash）应可运行 command 模式
         let argv = Shell::detect().derive_exec_args("echo hello-from-shell");
         let result = direct_exec(&argv, None, None, 100, 10, None, None, None, "shell-test");
-        assert_eq!(result.exit_code, Some(0), "shell exec failed: {}", result.output);
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "shell exec failed: {}",
+            result.output
+        );
         // Should output "hello-from-shell" from the echo command
         assert!(
             result.output.contains("hello-from-shell"),
@@ -1279,7 +1323,12 @@ mod tests {
             .expect("bash name resolves")
             .derive_exec_args("echo posix-ok | tr a-z A-Z");
         let result = direct_exec(&argv, None, None, 100, 10, None, None, None, "bash-test");
-        assert_eq!(result.exit_code, Some(0), "bash exec failed: {}", result.output);
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "bash exec failed: {}",
+            result.output
+        );
         assert!(
             result.output.contains("POSIX-OK"),
             "bash pipeline output missing marker: {}",
@@ -1331,13 +1380,16 @@ mod tests {
         assert_eq!(result.status, "backgrounded", "超时 = 移交后台");
         let pid = result.process_id.expect("移交必须携带 process_id");
         // 进程存活于注册表（running）
-        let info = crate::process_registry::ProcessRegistry::get_info(pid)
-            .expect("进程必须在注册表");
+        let info =
+            crate::process_registry::ProcessRegistry::get_info(pid).expect("进程必须在注册表");
         assert_eq!(info["status"], "running", "移交后进程不得被杀");
-        assert!(result.output.contains("process(action="), "提示应指向 process 检查动作");
+        assert!(
+            result.output.contains("process(action="),
+            "提示应指向 process 检查动作"
+        );
         // process(wait) 语义：等待自然退出
-        let final_info = crate::process_registry::ProcessRegistry::wait_for(pid, 15)
-            .expect("wait_for 必须返回");
+        let final_info =
+            crate::process_registry::ProcessRegistry::wait_for(pid, 15).expect("wait_for 必须返回");
         eprintln!("final_info: {final_info}");
         assert_eq!(final_info["status"], "exited", "ping 自然结束后应为 exited");
         // 输出已逐 chunk 追加到注册表（backgrounded 期间也累积）
@@ -1360,7 +1412,10 @@ mod tests {
             "running"
         );
         // 注册表 kill = 进程树终止
-        assert!(crate::process_registry::ProcessRegistry::kill(pid), "kill 应成功");
+        assert!(
+            crate::process_registry::ProcessRegistry::kill(pid),
+            "kill 应成功"
+        );
         let after = crate::process_registry::ProcessRegistry::get_info(pid).expect("still tracked");
         assert_eq!(after["status"], "killed");
     }
@@ -1381,7 +1436,10 @@ mod tests {
         let elapsed = started.elapsed().as_secs_f64();
         assert!(result.timed_out, "观察窗口到期应移交");
         assert_eq!(result.status, "backgrounded");
-        assert!(elapsed < 10.0, "移交必须远早于 timeout=60s，实际 {elapsed}s");
+        assert!(
+            elapsed < 10.0,
+            "移交必须远早于 timeout=60s，实际 {elapsed}s"
+        );
         let pid = result.process_id.expect("移交必须携带 process_id");
         let info = crate::process_registry::ProcessRegistry::get_info(pid).expect("in registry");
         assert_eq!(info["status"], "running", "移交后进程存活");
@@ -1390,8 +1448,8 @@ mod tests {
             "backgrounded 输出应包含移交耗时字段"
         );
         // 清理：等待自然退出（8 秒 sleep 早已结束）
-        let final_info = crate::process_registry::ProcessRegistry::wait_for(pid, 15)
-            .expect("wait_for 必须返回");
+        let final_info =
+            crate::process_registry::ProcessRegistry::wait_for(pid, 15).expect("wait_for 必须返回");
         assert_eq!(final_info["status"], "exited");
     }
 
@@ -1410,7 +1468,17 @@ mod tests {
             "start /b cmd /c ping -n 6 127.0.0.1 >NUL & ping -n 2 127.0.0.1 >NUL & exit 0"
                 .to_string(),
         ];
-        let result = direct_exec(&argv, None, None, 100, 15, Some(1), None, None, "bg-grandchild");
+        let result = direct_exec(
+            &argv,
+            None,
+            None,
+            100,
+            15,
+            Some(1),
+            None,
+            None,
+            "bg-grandchild",
+        );
         assert_eq!(result.status, "backgrounded", "1 秒观察窗到期应移交");
         let pid = result.process_id.expect("process_id");
 
@@ -1433,7 +1501,10 @@ mod tests {
         );
 
         // 清理：kill 进程树（孙进程仍活着），验证整树终止
-        assert!(crate::process_registry::ProcessRegistry::kill(pid), "kill 应成功");
+        assert!(
+            crate::process_registry::ProcessRegistry::kill(pid),
+            "kill 应成功"
+        );
         let after = crate::process_registry::ProcessRegistry::get_info(pid).expect("still tracked");
         assert_eq!(after["status"], "killed");
     }

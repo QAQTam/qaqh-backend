@@ -45,9 +45,7 @@ impl MultimodalBackend for OllamaBackend {
 
     fn extract_content<'a>(&self, json: &'a serde_json::Value) -> Option<&'a str> {
         // Ollama response: { "message": { "content": "..." }, ... }
-        json.get("message")?
-            .get("content")?
-            .as_str()
+        json.get("message")?.get("content")?.as_str()
     }
 
     fn extract_usage(&self, json: &serde_json::Value) -> Option<(u64, u64)> {

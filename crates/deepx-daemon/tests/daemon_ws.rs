@@ -7,8 +7,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -29,17 +29,26 @@ fn find_daemon_binary() -> std::path::PathBuf {
 
     // target/debug/deps/ → target/debug/  (or release)
     let rel = test_dir.join("../deepx-daemon.exe");
-    if rel.exists() { return rel.canonicalize().unwrap_or(rel); }
+    if rel.exists() {
+        return rel.canonicalize().unwrap_or(rel);
+    }
 
     // fallback: try CARGO_BUILD_TARGET_DIR env var
     if let Ok(dir) = std::env::var("CARGO_BUILD_TARGET_DIR") {
         for profile in &["debug", "release"] {
-            let c = std::path::PathBuf::from(&dir).join(profile).join("deepx-daemon.exe");
-            if c.exists() { return c; }
+            let c = std::path::PathBuf::from(&dir)
+                .join(profile)
+                .join("deepx-daemon.exe");
+            if c.exists() {
+                return c;
+            }
         }
     }
 
-    panic!("daemon binary not found at {:?}; build with: cargo build -p deepx-daemon", rel);
+    panic!(
+        "daemon binary not found at {:?}; build with: cargo build -p deepx-daemon",
+        rel
+    );
 }
 
 fn spawn_daemon() -> (Child, String) {
@@ -56,7 +65,9 @@ fn spawn_daemon() -> (Child, String) {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".into());
-    let discovery_path = std::path::PathBuf::from(home).join(".deepx").join("daemon.json");
+    let discovery_path = std::path::PathBuf::from(home)
+        .join(".deepx")
+        .join("daemon.json");
 
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
@@ -79,9 +90,13 @@ fn read_token() -> String {
         .unwrap_or_else(|_| ".".into());
     let discovery: Value = serde_json::from_str(
         &std::fs::read_to_string(
-            std::path::PathBuf::from(home).join(".deepx").join("daemon.json"),
-        ).unwrap(),
-    ).unwrap();
+            std::path::PathBuf::from(home)
+                .join(".deepx")
+                .join("daemon.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     discovery["token"].as_str().unwrap().to_string()
 }
 
@@ -137,9 +152,12 @@ fn recv_ws(reader: &mut BufReader<TcpStream>) -> Option<Value> {
     }
 
     match opcode {
-        0x1 => String::from_utf8(payload).ok().and_then(|s| serde_json::from_str(&s).ok()),
+        0x1 => String::from_utf8(payload)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok()),
         0x8 => None,
-        0x9 => { // ping → pong
+        0x9 => {
+            // ping → pong
             let mut pong = header;
             pong[0] = 0x8A; // FIN + pong
             let _ = reader.get_mut().write_all(&pong);
@@ -149,7 +167,11 @@ fn recv_ws(reader: &mut BufReader<TcpStream>) -> Option<Value> {
     }
 }
 
-fn expect_ws_event(reader: &mut BufReader<TcpStream>, event_type: &str, timeout: Duration) -> Value {
+fn expect_ws_event(
+    reader: &mut BufReader<TcpStream>,
+    event_type: &str,
+    timeout: Duration,
+) -> Value {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if let Some(msg) = recv_ws(reader) {
@@ -188,7 +210,8 @@ fn daemon_full_session_lifecycle() {
     let mut writer = stream;
 
     let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
-    write!(writer,
+    write!(
+        writer,
         "GET /control/v1 HTTP/1.1\r\n\
          Host: {host}\r\n\
          Upgrade: websocket\r\n\
@@ -197,8 +220,11 @@ fn daemon_full_session_lifecycle() {
          Sec-WebSocket-Version: 13\r\n\
          Authorization: Bearer {token}\r\n\
          \r\n",
-        host = host_port, key = ws_key, token = token,
-    ).unwrap();
+        host = host_port,
+        key = ws_key,
+        token = token,
+    )
+    .unwrap();
     writer.flush().unwrap();
 
     // Read upgrade response.
@@ -207,52 +233,77 @@ fn daemon_full_session_lifecycle() {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         response.push_str(&line);
-        if line == "\r\n" || line.trim().is_empty() { break; }
+        if line == "\r\n" || line.trim().is_empty() {
+            break;
+        }
     }
     assert!(response.contains("101"), "WS upgrade failed:\n{response}");
 
     // --- ClientHello ---
-    send_ws(&mut writer, &json!({
-        "type": "client_hello",
-        "protocol_version": 1,
-        "client_version": "test",
-        "client_kind": "tui",
-        "client_instance_id": "test-instance",
-    }).to_string());
+    send_ws(
+        &mut writer,
+        &json!({
+            "type": "client_hello",
+            "protocol_version": 1,
+            "client_version": "test",
+            "client_kind": "tui",
+            "client_instance_id": "test-instance",
+        })
+        .to_string(),
+    );
     let hello = recv_ws(&mut reader).expect("server_hello");
-    assert_eq!(hello["type"], "server_hello", "expected server_hello, got {hello}");
+    assert_eq!(
+        hello["type"], "server_hello",
+        "expected server_hello, got {hello}"
+    );
 
     // --- session.new ---
-    send_ws(&mut writer, &json!({
-        "type": "request", "request_id": "r1",
-        "method": "session.new", "params": {}
-    }).to_string());
+    send_ws(
+        &mut writer,
+        &json!({
+            "type": "request", "request_id": "r1",
+            "method": "session.new", "params": {}
+        })
+        .to_string(),
+    );
     let resp = recv_ws(&mut reader).expect("session.new response");
     let seed = resp["result"].as_str().expect("seed").to_string();
     assert!(!seed.is_empty(), "session.new returned empty seed");
 
     // --- session attach ---
-    send_ws(&mut writer, &json!({
-        "type": "session_attach", "request_id": "r2", "seed": seed
-    }).to_string());
+    send_ws(
+        &mut writer,
+        &json!({
+            "type": "session_attach", "request_id": "r2", "seed": seed
+        })
+        .to_string(),
+    );
     let _attach = recv_ws(&mut reader).expect("attach response");
 
     // --- session.resume ---
-    send_ws(&mut writer, &json!({
-        "type": "request", "request_id": "r3",
-        "method": "session.resume", "params": {"seed": seed}
-    }).to_string());
+    send_ws(
+        &mut writer,
+        &json!({
+            "type": "request", "request_id": "r3",
+            "method": "session.resume", "params": {"seed": seed}
+        })
+        .to_string(),
+    );
     let _resume = recv_ws(&mut reader).expect("resume response");
 
     // Wait for SessionCreated (may arrive as event or in snapshot).
     expect_ws_event(&mut reader, "session_created", Duration::from_secs(15));
 
     // --- session.send_message ---
-    send_ws(&mut writer, &json!({
-        "type": "request", "request_id": "r4",
-        "method": "session.send_message",
-        "params": {"seed": seed, "text": "Hello from daemon test"}
-    }).to_string());
+    send_ws(
+        &mut writer,
+        &json!({
+            "type": "request", "request_id": "r4",
+            "method": "session.send_message",
+            "params": {"seed": seed, "text": "Hello from daemon test"}
+        })
+        .to_string(),
+    );
     let _send_resp = recv_ws(&mut reader).expect("send_message response");
 
     // Wait for TurnStart (LLM may take time).

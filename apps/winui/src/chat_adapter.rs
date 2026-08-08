@@ -136,6 +136,27 @@ pub fn render_event(event: &RingingEvent) -> Option<ConversationEvent> {
                 round_num: *round_num,
                 result: serde_json::to_value(result).unwrap_or_default(),
             }),
+            ToolEvent::CodeChanged {
+                tool_call_id,
+                turn_id,
+                round_num,
+                lines_added,
+                lines_removed,
+                files_created,
+                files_deleted,
+                file,
+            } if !tool_call_id.is_empty() && !turn_id.is_empty() => {
+                Some(ConversationEvent::CodeChanged {
+                    tool_call_id: tool_call_id.clone(),
+                    turn_id: turn_id.clone(),
+                    round_num: *round_num,
+                    lines_added: *lines_added,
+                    lines_removed: *lines_removed,
+                    files_created: *files_created,
+                    files_deleted: *files_deleted,
+                    file: file.clone(),
+                })
+            }
             ToolEvent::ToolProgress { .. }
             | ToolEvent::ToolPermissionRequested { .. }
             | ToolEvent::ToolNotice { .. }
@@ -236,19 +257,31 @@ fn turn_num(id: &str) -> u64 {
 /// timeline tool 块 → 工具卡视图。
 fn parse_tool(tool: &TimelineTool) -> ToolCardView {
     let args_display = tool
-        .args_json
+        .summary
         .as_deref()
-        .or(tool.summary.as_deref())
+        .or(tool.args_json.as_deref())
         .unwrap_or("")
         .to_string();
     let done = matches!(
         tool.state,
         TimelineToolState::Succeeded | TimelineToolState::Failed
     );
+    let body = markdown_winui::tool_body_from_timeline(
+        &tool.name,
+        tool.args_json.as_deref(),
+        tool.output.as_deref(),
+    );
+    let changes = markdown_winui::change_stats_from_timeline(
+        &body,
+        tool.summary.as_deref().or(tool.output.as_deref()),
+    );
     ToolCardView {
         id: tool.tool_call_id.clone(),
         name: Some(tool.name.clone()),
         args_display,
+        args_json: tool.args_json.clone(),
+        body,
+        changes,
         done,
         provider: false,
     }
@@ -428,6 +461,45 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn code_changed_maps_target_and_stats() {
+        let v = serde_json::json!({
+            "type": "code_changed",
+            "tool_call_id": "edit-1",
+            "turn_id": "t1",
+            "round_num": 2,
+            "lines_added": 5,
+            "lines_removed": 1,
+            "files_created": 0,
+            "files_deleted": 0,
+            "file": "src/lib.rs"
+        });
+        assert!(matches!(
+            internal_event(&v),
+            Some(ConversationEvent::CodeChanged {
+                tool_call_id,
+                turn_id,
+                round_num: 2,
+                lines_added: 5,
+                lines_removed: 1,
+                ..
+            }) if tool_call_id == "edit-1" && turn_id == "t1"
+        ));
+    }
+
+    #[test]
+    fn legacy_untargeted_code_changed_is_ignored() {
+        let v = serde_json::json!({
+            "type": "code_changed",
+            "lines_added": 1,
+            "lines_removed": 0,
+            "files_created": 0,
+            "files_deleted": 0,
+            "file": null
+        });
+        assert_eq!(internal_event(&v), None);
+    }
+
     /// timeline 快照 → 恢复 turns：块排序、thinking/answer 拼接、工具卡 done
     #[test]
     fn timeline_snapshot_restores_turns() {
@@ -486,6 +558,45 @@ mod tests {
             "running 显示为完成态（内容封存）"
         );
         assert!(turns[1].rounds.is_empty());
+    }
+
+    #[test]
+    fn timeline_snapshot_restores_native_patch_body_and_badge() {
+        let patch = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,2 @@\n-old\n+new\n+extra\n";
+        let v = serde_json::json!({
+            "watermark": 1,
+            "turns": [{
+                "turn_id": "t1",
+                "user_text": "patch",
+                "sealed": true,
+                "state": "completed",
+                "rounds": [{
+                    "round_num": 0,
+                    "sealed": true,
+                    "is_final": true,
+                    "blocks": [{
+                        "block_id": "tool:patch-1",
+                        "block_order": 0,
+                        "kind": "tool",
+                        "state": "sealed",
+                        "tool": {
+                            "tool_call_id": "patch-1",
+                            "name": "apply_patch",
+                            "state": "succeeded",
+                            "summary": "[OK] +2 -1",
+                            "args_json": serde_json::json!({"patch": patch}).to_string(),
+                            "output": "[OK] +2 -1"
+                        }
+                    }]
+                }]
+            }]
+        });
+        let turns = timeline_turns(&v);
+        let card = &turns[0].rounds[0].tool_calls[0];
+        assert!(matches!(card.body, markdown_winui::ToolBody::Diff(_)));
+        let changes = card.changes.as_ref().expect("change badge");
+        assert_eq!((changes.lines_added, changes.lines_removed), (2, 1));
+        assert_eq!(changes.file.as_deref(), Some("src/lib.rs"));
     }
 
     /// 无 turns / 非快照：空（防御）

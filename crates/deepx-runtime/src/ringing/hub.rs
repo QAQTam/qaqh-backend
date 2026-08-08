@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use deepx_domain::{
     AskResolution, ControlEvent, ConversationEvent, Delivery, DomainEvent, RingingChannel,
@@ -40,14 +41,49 @@ use crate::{TimelineAppender, TimelineError, TimelineLiveEntry};
 /// RoundDelta）。append-only 日志若不重写，磁盘与装载成本永久累积。
 const JOURNAL_REWRITE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Non-terminal timeline changes are checkpointed at most once per interval.
+/// Live delivery is still immediate; only the full snapshot rewrite is paced.
+const TIMELINE_PERSIST_INTERVAL: Duration = Duration::from_secs(1);
+
 /// 测试用阈值覆盖（OnceLock 一次性；仅测试模块设置）。
-static JOURNAL_REWRITE_THRESHOLD_OVERRIDE: std::sync::OnceLock<u64> =
-    std::sync::OnceLock::new();
+static JOURNAL_REWRITE_THRESHOLD_OVERRIDE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 fn journal_rewrite_threshold() -> u64 {
     *JOURNAL_REWRITE_THRESHOLD_OVERRIDE
         .get()
         .unwrap_or(&JOURNAL_REWRITE_THRESHOLD_BYTES)
+}
+
+/// Overlay persisted conversation data onto the live event projection.
+/// Metadata used by native clients belongs to the same authoritative
+/// bootstrap state as turns and usage; keeping this list centralized prevents
+/// a newly added field from silently disappearing when the projection already
+/// contains its structural `{seed, channel, revision}` object.
+fn merge_persisted_conversation_state(
+    projected: &mut serde_json::Value,
+    persisted: serde_json::Value,
+) {
+    const PERSISTED_KEYS: &[&str] = &[
+        "turns",
+        "total_turns",
+        "has_more",
+        "usage",
+        "usage_totals",
+        "usage_requests",
+        "cache_reported_requests",
+        "model",
+        "context_limit",
+    ];
+    match projected.as_object_mut() {
+        Some(obj) => {
+            for key in PERSISTED_KEYS {
+                if let Some(value) = persisted.get(*key) {
+                    obj.insert((*key).to_string(), value.clone());
+                }
+            }
+        }
+        None => *projected = persisted,
+    }
 }
 
 #[cfg(test)]
@@ -151,9 +187,6 @@ pub struct RingingHub {
     disk_seeds: Mutex<HashMap<RingingChannel, HashSet<String>>>,
     /// 磁盘 timeline seed 清单（懒加载索引；`ensure_timeline_loaded` 按需恢复）。
     disk_timeline_seeds: Mutex<HashSet<String>>,
-    /// timeline 持久化根目录（父目录；`start_timeline_persistence` 会 take 掉
-    /// `timeline_store`，懒加载必须保留独立路径以按需读取磁盘）。
-    timeline_root: Mutex<Option<PathBuf>>,
     /// 懒加载串行化：防止并发首访同一 seed 时双重重放。
     lazy_load: Mutex<()>,
     /// 大内容外置存储（会话所有权 + TTL）。
@@ -168,7 +201,7 @@ pub struct RingingHub {
     /// 不依赖 legacy 事件投影。
     timeline: Arc<Mutex<TimelineAppender>>,
     timeline_live: broadcast::Sender<TimelineLiveEntry>,
-    timeline_store: Mutex<Option<TimelineStore>>,
+    timeline_store: Arc<Mutex<Option<TimelineStore>>>,
     timeline_persistence: Mutex<Option<TimelinePersistence>>,
 }
 
@@ -196,8 +229,6 @@ impl RingingHub {
                     None
                 }
             });
-        // 存父目录：TimelineStore::new 内部会 join "ringing-timeline"。
-        let timeline_root = root.clone();
         let journal_store = match root {
             Some(root) => match JournalStore::new(&root) {
                 Ok(store) => Some(store),
@@ -214,7 +245,6 @@ impl RingingHub {
             sequencer: Sequencer::new(),
             disk_seeds: Mutex::new(HashMap::new()),
             disk_timeline_seeds: Mutex::new(HashSet::new()),
-            timeline_root: Mutex::new(timeline_root),
             lazy_load: Mutex::new(()),
             content_store: Mutex::new(ContentStore::new()),
             channels: Mutex::new(HashMap::new()),
@@ -222,7 +252,7 @@ impl RingingHub {
             journal_store: Mutex::new(journal_store),
             timeline: Arc::new(Mutex::new(TimelineAppender::new())),
             timeline_live,
-            timeline_store: Mutex::new(timeline_store),
+            timeline_store: Arc::new(Mutex::new(timeline_store)),
             timeline_persistence: Mutex::new(None),
         }
     }
@@ -231,21 +261,26 @@ impl RingingHub {
     ///
     /// The live TimelineAppender remains the sole source of sequence allocation and
     /// broadcast ordering. Persistence is a best-effort, single-writer checkpoint
-    /// queue: notifications are coalesced per seed, and the worker snapshots the
-    /// latest in-memory state only after it wakes. The on-disk record shape is
-    /// unchanged, so bootstrap/replay compatibility is preserved.
+    /// queue: notifications are coalesced per seed for a fixed checkpoint window,
+    /// and the worker snapshots the latest in-memory state only when the window
+    /// expires. The on-disk record shape is unchanged, so bootstrap/replay
+    /// compatibility is preserved. Terminal intents still use synchronous
+    /// persistence as the recovery boundary.
     fn start_timeline_persistence(&self) {
-        let store = self
+        let enabled = self
             .timeline_store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take();
-        let Some(store) = store else { return };
+            .is_some();
+        if !enabled {
+            return;
+        }
 
         let (wake, rx) = mpsc::channel::<()>();
         let pending_seeds = Arc::new(Mutex::new(HashSet::<String>::new()));
         let pending_for_worker = Arc::clone(&pending_seeds);
         let timeline = Arc::clone(&self.timeline);
+        let timeline_store = Arc::clone(&self.timeline_store);
         let join = match std::thread::Builder::new()
             .name("deepx-timeline-persist".into())
             .spawn(move || {
@@ -256,11 +291,20 @@ impl RingingHub {
                         pending.drain().collect()
                     };
                     for seed in seeds {
+                        // Serialize snapshot selection and file replacement with
+                        // terminal persistence. Taking the store lock first
+                        // prevents an older async snapshot from overwriting a
+                        // newer terminal checkpoint.
+                        let store = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+                        let Some(store) = store.as_ref() else {
+                            continue;
+                        };
                         let Some((snapshot, journal)) = ({
                             let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
                             timeline.snapshot(&seed).map(|snapshot| {
                                 let journal = timeline.replay_since(&seed, 0);
-                                let journal = Self::prune_sealed_timeline_journal(&snapshot, journal);
+                                let journal =
+                                    Self::prune_sealed_timeline_journal(&snapshot, journal);
                                 (snapshot, journal)
                             })
                         }) else {
@@ -273,7 +317,29 @@ impl RingingHub {
                 };
 
                 while rx.recv().is_ok() {
+                    // Fixed window rather than a quiet-period debounce: a long,
+                    // uninterrupted model stream still receives periodic crash
+                    // checkpoints without rewriting at disk speed.
+                    let deadline = Instant::now() + TIMELINE_PERSIST_INTERVAL;
+                    let mut disconnected = false;
+                    loop {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        match rx.recv_timeout(remaining) {
+                            Ok(()) => {}
+                            Err(mpsc::RecvTimeoutError::Timeout) => break,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                disconnected = true;
+                                break;
+                            }
+                        }
+                    }
                     persist_pending();
+                    if disconnected {
+                        return;
+                    }
                 }
                 // Drain the final coalesced notifications before the worker exits.
                 persist_pending();
@@ -459,18 +525,13 @@ impl RingingHub {
         {
             return;
         }
-        // `timeline_store` 已被 start_timeline_persistence take 走，按需读取
-        // 必须用保留的独立根目录构造临时 store（new 幂等：仅 create_dir_all）。
         let persisted = {
-            let root = self
-                .timeline_root
+            let store = self
+                .timeline_store
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            match root.as_ref() {
-                Some(root) => match TimelineStore::new(root) {
-                    Ok(store) => store.load_seed(seed),
-                    Err(_) => None,
-                },
+            match store.as_ref() {
+                Some(store) => store.load_seed(seed),
                 None => return,
             }
         };
@@ -500,7 +561,10 @@ impl RingingHub {
                     None => (persisted.snapshot, Vec::new()),
                 }
             };
-            let store = self.timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+            let store = self
+                .timeline_store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(store) = store.as_ref()
                 && let Err(error) = store.persist(seed, &snapshot, journal)
             {
@@ -627,7 +691,10 @@ impl RingingHub {
                         if let Some(id) = obj.get("tool_call_id").and_then(|v| v.as_str()) {
                             orphans.push((
                                 id.to_string(),
-                                obj.get("turn_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                obj.get("turn_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                                 obj.get("round_num").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                             ));
                         }
@@ -642,14 +709,15 @@ impl RingingHub {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         {
-            if !orphans.iter().any(|(tool_call_id, _, _)| tool_call_id == id) {
+            if !orphans
+                .iter()
+                .any(|(tool_call_id, _, _)| tool_call_id == id)
+            {
                 orphans.push((id.to_string(), String::new(), 0));
             }
         }
         for (tool_call_id, turn_id, round_num) in orphans {
-            log::info!(
-                "[ringing] sealing orphan tool {tool_call_id} for {seed} (no ToolFinished)"
-            );
+            log::info!("[ringing] sealing orphan tool {tool_call_id} for {seed} (no ToolFinished)");
             let _ = self.publish_with_causation(
                 seed,
                 DomainEvent::Tool(ToolEvent::ToolFinished {
@@ -673,9 +741,7 @@ impl RingingHub {
             .and_then(|v| v.get("id"))
             .and_then(|v| v.as_str())
         {
-            log::info!(
-                "[ringing] sealing orphan interaction {id} for {seed} (no resolution)"
-            );
+            log::info!("[ringing] sealing orphan interaction {id} for {seed} (no resolution)");
             let _ = self.publish_with_causation(
                 seed,
                 DomainEvent::Control(ControlEvent::InteractionResolved {
@@ -768,7 +834,10 @@ impl RingingHub {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(seed);
         }
-        let store_guard = self.timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+        let store_guard = self
+            .timeline_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(store) = store_guard.as_ref() else {
             return;
         };
@@ -1130,24 +1199,7 @@ impl RingingHub {
     pub fn conversation_snapshot(&self, seed: &str) -> RingingChannelSnapshot {
         let mut snap = self.snapshot(RingingChannel::Conversation, seed);
         if let Some(state) = super::conversation_snapshot::persisted_conversation_state(seed) {
-            match snap.state.as_object_mut() {
-                Some(obj) => {
-                    for key in [
-                        "turns",
-                        "total_turns",
-                        "has_more",
-                        "usage",
-                        "usage_totals",
-                        "usage_requests",
-                        "cache_reported_requests",
-                    ] {
-                        if let Some(value) = state.get(key) {
-                            obj.insert(key.to_string(), value.clone());
-                        }
-                    }
-                }
-                None => snap.state = state,
-            }
+            merge_persisted_conversation_state(&mut snap.state, state);
         }
         snap
     }
@@ -1333,6 +1385,29 @@ mod tests {
     use super::*;
     use deepx_domain::{ConversationEvent, ToolEvent};
 
+    #[test]
+    fn persisted_conversation_metadata_survives_projection_overlay() {
+        let mut projected = serde_json::json!({
+            "seed": "s",
+            "channel": "conversation",
+            "revision": 7,
+            "compact_status": "running"
+        });
+        merge_persisted_conversation_state(
+            &mut projected,
+            serde_json::json!({
+                "turns": [],
+                "usage": { "prompt_tokens": 42 },
+                "model": "deepx-test",
+                "context_limit": 200000
+            }),
+        );
+        assert_eq!(projected["model"], "deepx-test");
+        assert_eq!(projected["context_limit"], 200000);
+        assert_eq!(projected["usage"]["prompt_tokens"], 42);
+        assert_eq!(projected["compact_status"], "running");
+    }
+
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "deepx-ringing-hub-{label}-{}-{}",
@@ -1392,7 +1467,11 @@ mod tests {
         let replayed_a = hub
             .replay_since(RingingChannel::Conversation, "a", 0)
             .expect("replay a");
-        assert_eq!(replayed_a.len(), 3, "seed a history restored on first access");
+        assert_eq!(
+            replayed_a.len(),
+            3,
+            "seed a history restored on first access"
+        );
         // seed b 未被访问 → 仍不在内存。
         {
             let guard = hub.channel_state(RingingChannel::Conversation);
@@ -1407,7 +1486,11 @@ mod tests {
         let replayed_b = hub
             .replay_since(RingingChannel::Conversation, "b", 0)
             .expect("replay b");
-        assert_eq!(replayed_b.len(), 1, "seed b history restored on first access");
+        assert_eq!(
+            replayed_b.len(),
+            1,
+            "seed b history restored on first access"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1426,7 +1509,10 @@ mod tests {
         }
         let path = root.join("journal").join("conversation").join("s.jsonl");
         let before_lines = std::fs::read_to_string(&path).unwrap().lines().count();
-        assert!(before_lines > 8500, "fixture must exceed the bounded window");
+        assert!(
+            before_lines > 8500,
+            "fixture must exceed the bounded window"
+        );
         // 重启：启动不加载；首次访问触发懒加载 + force rewrite（窗口收敛）。
         let hub = RingingHub::with_persistence("epoch-2", &root);
         {
@@ -1460,9 +1546,7 @@ mod tests {
             9000,
             "sequence watermark restored from replayed history"
         );
-        if let PublishOutcome::Published { envelope } =
-            hub.publish("s", round_delta(9999))
-        {
+        if let PublishOutcome::Published { envelope } = hub.publish("s", round_delta(9999)) {
             assert!(
                 envelope.stream_seq > 9000,
                 "new events must continue after the restored watermark"
@@ -1817,6 +1901,66 @@ mod tests {
     }
 
     #[test]
+    fn terminal_timeline_intent_is_persisted_before_publish_returns() {
+        let root = temp_root("timeline-terminal-sync");
+        let hub = RingingHub::with_persistence("epoch", &root);
+        hub.publish_timeline(
+            "s",
+            TimelineIntent::TurnOpened {
+                turn_id: "t".into(),
+                user_text: "question".into(),
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            "s",
+            TimelineIntent::BlockOpened {
+                turn_id: "t".into(),
+                round_num: 0,
+                block_id: "text".into(),
+                kind: deepx_domain::TimelineBlockKind::Text,
+                tool: None,
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            "s",
+            TimelineIntent::TextDelta {
+                turn_id: "t".into(),
+                round_num: 0,
+                block_id: "text".into(),
+                delta: "hello".into(),
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            "s",
+            TimelineIntent::BlockSealed {
+                turn_id: "t".into(),
+                round_num: 0,
+                block_id: "text".into(),
+            },
+        )
+        .unwrap();
+
+        let persisted = TimelineStore::new(&root)
+            .unwrap()
+            .load_seed("s")
+            .expect("terminal snapshot persisted synchronously");
+        assert_eq!(persisted.snapshot.watermark, 4);
+        assert_eq!(
+            persisted.snapshot.turns[0].rounds[0].blocks[0].text,
+            "hello"
+        );
+        assert_eq!(
+            persisted.snapshot.turns[0].rounds[0].blocks[0].state,
+            deepx_domain::TimelineBlockState::Sealed
+        );
+        drop(hub);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn seal_all_orphans_cleans_running_turn_at_shutdown() {
         // 优雅关闭收尾（Windows 95 语义）：turn 已打开但未 seal（worker
         // 被杀/收尾未完成）时，seal_all_orphans 必须把未 seal turn 收尾为
@@ -1984,10 +2128,18 @@ mod tests {
         }
         let hub = RingingHub::with_persistence("epoch-2", &root);
         let snapshot = hub.timeline_snapshot("s").unwrap();
-        let t1 = snapshot.turns.iter().find(|turn| turn.turn_id == "t1").unwrap();
+        let t1 = snapshot
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == "t1")
+            .unwrap();
         assert_eq!(t1.state, deepx_domain::TimelineTurnState::Completed);
         assert!(t1.sealed);
-        let t2 = snapshot.turns.iter().find(|turn| turn.turn_id == "t2").unwrap();
+        let t2 = snapshot
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == "t2")
+            .unwrap();
         assert_eq!(t2.state, deepx_domain::TimelineTurnState::Cancelled);
         assert!(t2.sealed);
         assert_eq!(
@@ -2118,14 +2270,8 @@ mod tests {
         // 收尾后：三个投影全部收敛
         assert!(hub.snapshot(RingingChannel::Conversation, "s").state["active_turn"].is_null());
         assert!(hub.snapshot(RingingChannel::Tool, "s").state["running"].is_null());
-        assert!(hub
-            .snapshot(RingingChannel::Tool, "s")
-            .state["pending_permission"]
-            .is_null());
-        assert!(hub
-            .snapshot(RingingChannel::Control, "s")
-            .state["pending_interaction"]
-            .is_null());
+        assert!(hub.snapshot(RingingChannel::Tool, "s").state["pending_permission"].is_null());
+        assert!(hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"].is_null());
 
         // journal 已包含终态事件（SSE 客户端与重启后的重放都收敛）
         let replay = hub

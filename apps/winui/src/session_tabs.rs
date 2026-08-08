@@ -63,7 +63,7 @@ fn tab_header(item: &SessionItem) -> Element {
         .into()
 }
 
-/// 顶部会话标签条组件（放入内容区 row0，跨侧栏全宽）。
+/// 顶部会话标签条组件（放入右侧文档工作区 row0，不跨导航侧栏）。
 pub fn session_tabs(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (items, set_items) = cx.use_state::<Vec<SessionItem>>(Vec::new());
     let (active, set_active) = cx.use_state::<String>(String::new());

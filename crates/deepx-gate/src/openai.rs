@@ -11,7 +11,9 @@ use std::time::Duration;
 use deepx_types::{CacheTokenField, ThinkingParamMode};
 use deepx_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
-use super::types::{ProviderConfig, StreamEvent, normalize_reasoning_effort, safe_provider_error_body};
+use super::types::{
+    ProviderConfig, StreamEvent, normalize_reasoning_effort, safe_provider_error_body,
+};
 
 /// Polling interval for SSE streaming. When no data arrives within this
 /// interval, the outer Tokio timeout lets us check the cancel flag before
@@ -424,12 +426,6 @@ fn stream_sse(
                                 .and_then(|v| v.as_str())
                             {
                                 entry.2.push_str(args);
-                                log::info!(
-                                    "[GATE] ToolCallProgress idx={idx} id={} name={} args_len={}",
-                                    entry.0,
-                                    entry.1,
-                                    entry.2.len()
-                                );
                                 on_event(StreamEvent::ToolCallProgress {
                                     index: idx,
                                     id: entry.0.clone(),
@@ -469,9 +465,7 @@ fn stream_sse(
                     let cached_value = u
                         .get("prompt_tokens_details")
                         .and_then(|d| d.get("cached_tokens"));
-                    let cached = cached_value
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32;
+                    let cached = cached_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                     (cached, pt.saturating_sub(cached), cached_value.is_some())
                 }
                 CacheTokenField::UsageCachedTokens => {

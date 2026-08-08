@@ -4,13 +4,13 @@
 
 use super::ToolManager;
 use super::exec;
-use super::web;
 use super::image_query;
+use super::web;
 
+use super::apply_patch;
 use super::file_edit;
 use super::file_mutate;
 use super::file_query;
-use super::apply_patch;
 
 use super::ask_user;
 use super::process_inspect;
@@ -73,8 +73,18 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "apply_patch", "ask", "delete", "edit_file", "exec", "image", "process",
-                "read_file", "skills", "todo", "web_fetch", "write",
+                "apply_patch",
+                "ask",
+                "delete",
+                "edit_file",
+                "exec",
+                "image",
+                "process",
+                "read_file",
+                "skills",
+                "todo",
+                "web_fetch",
+                "write",
             ]
         );
     }

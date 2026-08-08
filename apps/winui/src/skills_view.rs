@@ -128,7 +128,10 @@ pub fn skills_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .map(|a| (a.name.as_str(), (a.scope.as_str(), a.source.as_str())))
             .collect();
         for item in &snap.runtime {
-            let (scope, path) = meta.get(item.name.as_str()).copied().unwrap_or(("project", ""));
+            let (scope, path) = meta
+                .get(item.name.as_str())
+                .copied()
+                .unwrap_or(("project", ""));
             let desc = if item.description.is_empty() {
                 // 目录元数据缺失时用 runtime 描述兜底（一般同源）。
                 item.description.as_str()
@@ -141,18 +144,24 @@ pub fn skills_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             {
                 continue;
             }
-            columns.entry(item.state.as_str()).or_default().push(ViewSkill {
-                name: item.name.clone(),
-                description: desc.to_string(),
-                state: item.state.clone(),
-                scope: scope.to_string(),
-                path: path.to_string(),
-                token_count: item.token_count,
-                error: item.error.clone(),
-            });
+            columns
+                .entry(item.state.as_str())
+                .or_default()
+                .push(ViewSkill {
+                    name: item.name.clone(),
+                    description: desc.to_string(),
+                    state: item.state.clone(),
+                    scope: scope.to_string(),
+                    path: path.to_string(),
+                    token_count: item.token_count,
+                    error: item.error.clone(),
+                });
         }
     }
-    let has_session = snapshot.as_ref().map(|s| !s.seed.is_empty()).unwrap_or(false);
+    let has_session = snapshot
+        .as_ref()
+        .map(|s| !s.seed.is_empty())
+        .unwrap_or(false);
     let has_items = columns.values().any(|v| !v.is_empty());
 
     // ── 动作闭包（渲染期重建；捕获当次渲染的值）────────────────────
@@ -192,10 +201,18 @@ pub fn skills_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .vertical_alignment(VerticalAlignment::Center)
             .into();
         let meta: Element = hstack((
-            text_block(&workspace).font_size(12.0).foreground(ThemeRef::SecondaryText),
-            text_block(format!("目录 {rev8}")).font_size(12.0).foreground(ThemeRef::SecondaryText),
-            text_block(format!("epoch {epoch}")).font_size(12.0).foreground(ThemeRef::SecondaryText),
-            text_block(format!("{used}/{budget} tokens")).font_size(12.0).foreground(ThemeRef::SecondaryText),
+            text_block(&workspace)
+                .font_size(12.0)
+                .foreground(ThemeRef::SecondaryText),
+            text_block(format!("目录 {rev8}"))
+                .font_size(12.0)
+                .foreground(ThemeRef::SecondaryText),
+            text_block(format!("epoch {epoch}"))
+                .font_size(12.0)
+                .foreground(ThemeRef::SecondaryText),
+            text_block(format!("{used}/{budget} tokens"))
+                .font_size(12.0)
+                .foreground(ThemeRef::SecondaryText),
         ))
         .spacing(12.0)
         .into();
@@ -205,24 +222,26 @@ pub fn skills_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .on_text_changed(set_search)
             .vertical_alignment(VerticalAlignment::Center)
             .into();
-        let refresh_btn: Element = button(if *refreshing.borrow() { "…" } else { "刷新" })
-            .subtle()
-            .enabled(!*refreshing.borrow())
-            .on_click({
-                let reload = reload.clone();
-                move || reload()
-            })
-            .vertical_alignment(VerticalAlignment::Center)
-            .into();
+        let refresh_btn: Element = button(if *refreshing.borrow() {
+            "…"
+        } else {
+            "刷新"
+        })
+        .subtle()
+        .enabled(!*refreshing.borrow())
+        .on_click({
+            let reload = reload.clone();
+            move || reload()
+        })
+        .vertical_alignment(VerticalAlignment::Center)
+        .into();
         let actions: Element = hstack((search_box, refresh_btn)).spacing(8.0).into();
         let left: Element = vstack((title, meta)).spacing(4.0).into();
         let row: Element = hstack((left, actions))
             .spacing(12.0)
             .horizontal_alignment(HorizontalAlignment::Stretch)
             .into();
-        grid((row,))
-            .padding(Thickness::xy(20.0, 16.0))
-            .into()
+        grid((row,)).padding(Thickness::xy(20.0, 16.0)).into()
     };
     // ── 主体：四列分组 ─────────────────────────────────────────────
     let body: Element = if !has_session {
@@ -231,21 +250,26 @@ pub fn skills_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .into();
         el.margin(Thickness::xy(20.0, 24.0))
     } else if !has_items {
-        let el: Element = text_block(if q.is_empty() { "暂无技能" } else { "没有匹配的技能" })
-            .foreground(ThemeRef::SecondaryText)
-            .into();
+        let el: Element = text_block(if q.is_empty() {
+            "暂无技能"
+        } else {
+            "没有匹配的技能"
+        })
+        .foreground(ThemeRef::SecondaryText)
+        .into();
         el.margin(Thickness::xy(20.0, 24.0))
     } else {
         let mut column_els: Vec<Element> = Vec::new();
         for (i, state) in COLUMNS.iter().enumerate() {
             let items = columns.get(state).cloned().unwrap_or_default();
-            let header_el: Element = hstack((
-                text_block(format!("{} ({})", column_label(state), items.len()))
-                    .font_size(14.0)
-                    .semibold(),
-            ))
-            .margin(Thickness::xy(12.0, 8.0))
-            .into();
+            let header_el: Element =
+                hstack((
+                    text_block(format!("{} ({})", column_label(state), items.len()))
+                        .font_size(14.0)
+                        .semibold(),
+                ))
+                .margin(Thickness::xy(12.0, 8.0))
+                .into();
             let list_el: Element = if items.is_empty() {
                 let el: Element = text_block("—")
                     .font_size(12.0)
@@ -256,7 +280,14 @@ pub fn skills_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let cards: Vec<Element> = items
                     .iter()
                     .map(|item| {
-                        build_card(item, &expanded, &pending_at, &pending_targets, &bridge, &set_expanded)
+                        build_card(
+                            item,
+                            &expanded,
+                            &pending_at,
+                            &pending_targets,
+                            &bridge,
+                            &set_expanded,
+                        )
                     })
                     .collect();
                 scroll_viewer(vstack(cards).spacing(6.0)).into()
@@ -268,7 +299,12 @@ pub fn skills_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             column_els.push(col);
         }
         grid(column_els)
-            .columns([GridLength::STAR, GridLength::STAR, GridLength::STAR, GridLength::STAR])
+            .columns([
+                GridLength::STAR,
+                GridLength::STAR,
+                GridLength::STAR,
+                GridLength::STAR,
+            ])
             .column_spacing(8.0)
             .padding(Thickness::xy(12.0, 0.0))
             .into()
@@ -315,7 +351,11 @@ fn build_card(
         .borrow()
         .get(&name)
         .map(|at| {
-            let target = pending_targets.borrow().get(&name).copied().unwrap_or(false);
+            let target = pending_targets
+                .borrow()
+                .get(&name)
+                .copied()
+                .unwrap_or(false);
             let resolved = match item.state.as_str() {
                 "requested" | "active" => target,
                 "catalog" | "unavailable" => !target,
@@ -385,10 +425,14 @@ fn build_card(
         .semibold()
         .text_trimming(TextTrimming::CharacterEllipsis)
         .into();
-    let scope_el: Element = text_block(if item.scope == "user" { "用户" } else { "项目" })
-        .font_size(11.0)
-        .foreground(ThemeRef::AccentText)
-        .into();
+    let scope_el: Element = text_block(if item.scope == "user" {
+        "用户"
+    } else {
+        "项目"
+    })
+    .font_size(11.0)
+    .foreground(ThemeRef::AccentText)
+    .into();
     let desc_el: Element = text_block(&item.description)
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText)
@@ -399,12 +443,9 @@ fn build_card(
         .foreground(ThemeRef::SecondaryText)
         .vertical_alignment(VerticalAlignment::Center)
         .into();
-    let left: Element = vstack((
-        hstack((name_el, scope_el)).spacing(6.0),
-        desc_el,
-    ))
-    .spacing(2.0)
-    .into();
+    let left: Element = vstack((hstack((name_el, scope_el)).spacing(6.0), desc_el))
+        .spacing(2.0)
+        .into();
     let main_row: Element = grid((
         left.grid_column(0),
         token_el.grid_column(1),

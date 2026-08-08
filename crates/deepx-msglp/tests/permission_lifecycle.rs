@@ -17,7 +17,9 @@ use deepx_domain::{
 };
 use deepx_msglp::ringing_v1::loop_core::Loop;
 use deepx_msglp::state::agent::AgentState;
-use deepx_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope};
+use deepx_ringing::{
+    RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
+};
 use serde_json::{Value, json};
 use tiny_http::{Header, Response, Server};
 
@@ -251,7 +253,9 @@ fn assert_no_round_completion(receiver: &std::sync::mpsc::Receiver<RingingEvent>
     }
 }
 
-fn collect_through_terminal(receiver: &std::sync::mpsc::Receiver<RingingEvent>) -> Vec<RingingEvent> {
+fn collect_through_terminal(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+) -> Vec<RingingEvent> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut events = Vec::new();
     loop {
@@ -284,7 +288,11 @@ fn assert_single_completion(events: &[RingingEvent], expected_results: usize) {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(finished.len(), expected_results, "tool results must be emitted once");
+    assert_eq!(
+        finished.len(),
+        expected_results,
+        "tool results must be emitted once"
+    );
     assert_eq!(
         events
             .iter()
@@ -298,9 +306,7 @@ fn assert_single_completion(events: &[RingingEvent], expected_results: usize) {
     );
 }
 
-fn finished_result<'a>(
-    events: &'a [RingingEvent],
-) -> Option<&'a deepx_types::ToolResult> {
+fn finished_result<'a>(events: &'a [RingingEvent]) -> Option<&'a deepx_types::ToolResult> {
     events.iter().find_map(|event| match event {
         RingingEvent::Tool(ToolEvent::ToolFinished { result, .. }) => Some(result),
         _ => None,
@@ -312,7 +318,9 @@ fn run_case(
     workspace: &std::path::Path,
     scenarios: Vec<Vec<String>>,
     expected_requests: usize,
-    test: impl FnOnce(&mut os_pipe::PipeWriter, &std::sync::mpsc::Receiver<RingingEvent>) + Send + 'static,
+    test: impl FnOnce(&mut os_pipe::PipeWriter, &std::sync::mpsc::Receiver<RingingEvent>)
+    + Send
+    + 'static,
 ) -> Vec<String> {
     SESSION_INIT.call_once(|| {
         deepx_session::SessionManager::init(deepx_types::platform::data_dir());
@@ -697,12 +705,10 @@ fn llm_session_switch_invalidates_suspended_turn() {
             );
             send_cmd(writer, "", cmd_user_input("continue in new session"));
             let events = collect_through_terminal(receiver);
-            assert!(
-                events.iter().any(|event| matches!(
-                    event,
-                    RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
-                ))
-            );
+            assert!(events.iter().any(|event| matches!(
+                event,
+                RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+            )));
             assert!(!stale_output.exists());
         },
     );

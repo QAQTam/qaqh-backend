@@ -51,7 +51,9 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
     const MAX_LINES: usize = 400;
     const MAX_MODEL_CHARS: usize = 24_000;
     let path = crate::resolve_workspace_path(
-        args.get("path").and_then(|value| value.as_str()).unwrap_or_default(),
+        args.get("path")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
     );
     if path.is_empty() {
         return (
@@ -91,14 +93,26 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
         );
     }
 
-    let start = args.get("start_line").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let end = args.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let start = args
+        .get("start_line")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let end = args
+        .get("end_line")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
     if start.is_some_and(|value| value == 0) || end.is_some_and(|value| value == 0) {
-        return (ToolResult::error("read line numbers start at 1"), serde_json::json!({}));
+        return (
+            ToolResult::error("read line numbers start at 1"),
+            serde_json::json!({}),
+        );
     }
     if let (Some(start), Some(end)) = (start, end) {
         if end < start {
-            return (ToolResult::error("end_line must be greater than or equal to start_line"), serde_json::json!({}));
+            return (
+                ToolResult::error("end_line must be greater than or equal to start_line"),
+                serde_json::json!({}),
+            );
         }
         if end - start + 1 > MAX_LINES {
             return (
@@ -126,7 +140,7 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
                     serde_json::json!({"path": path}),
                 ),
                 serde_json::json!({}),
-            )
+            );
         }
         Err(error) => {
             return (
@@ -138,7 +152,7 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
                     serde_json::json!({"path": path}),
                 ),
                 serde_json::json!({}),
-            )
+            );
         }
     };
     let content = raw.replace("\r\n", "\n").replace('\r', "\n");
@@ -181,7 +195,10 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
         );
     }
     if !explicit {
-        let full_chars = lines.iter().map(|line| line.chars().count() + 8).sum::<usize>();
+        let full_chars = lines
+            .iter()
+            .map(|line| line.chars().count() + 8)
+            .sum::<usize>();
         if total_lines > MAX_LINES || full_chars > MAX_MODEL_CHARS {
             end_index = first;
             while end_index < total_lines {
@@ -338,12 +355,18 @@ mod tests {
             "end_line": 3,
         }));
 
-        assert!(result.is_success(), "range read should succeed: {}", result.model_text());
+        assert!(
+            result.is_success(),
+            "range read should succeed: {}",
+            result.model_text()
+        );
         assert_eq!(result.model_text(), "L2: two\nL3: three");
         assert_eq!(result.data["files"][0]["start_line"], 2);
         assert_eq!(result.data["files"][0]["end_line"], 3);
         // 防呆闭环：响应必须带 hash（LF 视图 content_hash），供 edit_file 的 expected_hash 校验
-        let hash = result.data["files"][0]["hash"].as_str().expect("read_file must return hash");
+        let hash = result.data["files"][0]["hash"]
+            .as_str()
+            .expect("read_file must return hash");
         assert_eq!(hash, crate::file_shared::content_hash("one\ntwo\nthree\n"));
     }
 }

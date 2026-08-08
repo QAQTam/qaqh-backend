@@ -43,8 +43,10 @@ use crate::shell_store::DashboardSnapshot;
 
 /// 快照轮询间隔（同 interaction_overlay：交互响应优先）。
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// 输入框高度（对齐 Web textarea 62px 起步视觉）。
-const INPUT_HEIGHT: f64 = 72.0;
+const INPUT_MIN_HEIGHT: f64 = 64.0;
+const INPUT_DEFAULT_HEIGHT: f64 = 84.0;
+const INPUT_AUTO_MAX_HEIGHT: f64 = 180.0;
+const INPUT_MANUAL_MAX_HEIGHT: f64 = 360.0;
 
 /// 诊断日志（同 main.rs log_diag 约定：GUI 子系统无控制台，写文件）。
 fn log_diag(msg: &str) {
@@ -178,6 +180,12 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // sendAck/seed 基线（effect 比对用）。
     let last_ack = cx.use_ref::<u64>(0);
     let last_seed = cx.use_ref::<String>(String::new());
+    // Desktop editor sizing: content estimates grow the editor until the user
+    // takes ownership with the native pointer-captured resize handle.
+    let (input_height, set_input_height) = cx.use_state::<f64>(INPUT_DEFAULT_HEIGHT);
+    let (manual_height, set_manual_height) = cx.use_state::<bool>(false);
+    let (immersive, set_immersive) = cx.use_state::<bool>(false);
+    let resize_start = cx.use_ref::<Option<(f64, f64)>>(None);
 
     // composer 投影轮询（250ms rev 比对）。
     cx.use_effect((), {
@@ -266,7 +274,21 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let draft = draft.clone();
         let draft_ver = draft_ver.clone();
         let set_draft_version = set_draft_version.clone();
+        let set_input_height = set_input_height.clone();
         move |value: String| {
+            if !manual_height && !immersive {
+                // Exact DesiredSize is not exposed by reactor yet. Estimate
+                // wrapped visual lines conservatively; TextBox itself remains
+                // authoritative and scrolls after the cap.
+                let lines = value
+                    .lines()
+                    .map(|line| (line.chars().count().max(1) + 71) / 72)
+                    .sum::<usize>()
+                    .max(1);
+                let target =
+                    (44.0 + lines as f64 * 20.0).clamp(INPUT_MIN_HEIGHT, INPUT_AUTO_MAX_HEIGHT);
+                set_input_height.call(target);
+            }
             let mut d = draft.borrow_mut();
             d.text = value;
             d.selected_slash = 0;
@@ -542,9 +564,9 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
 
     // TextBox + Enter accelerator（菜单可见时附加 ↓↑ Esc）。
     let mut input: Element = text_box(text.clone())
-        .accepts_return(true)
+        .multiline()
         .placeholder_text(placeholder)
-        .height(INPUT_HEIGHT)
+        .height(input_height)
         .on_text_changed(on_text_changed)
         .keyboard_accelerator(KeyboardAccelerator::new(
             VirtualKey::Enter,
@@ -704,29 +726,135 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         .automation_id("composer-permission-level")
         .into();
 
-    // footer 行：左（附件 + mode）| 右（元信息 + 发送/停止）。
-    let footer: Element = hstack((
-        attach_button,
-        button(if state.mode == "plan" {
-            "规划"
-        } else {
-            "执行"
-        })
-        .subtle()
-        .tooltip("切换工作模式")
-        .automation_name("工作模式")
-        .automation_id("composer-mode")
-        .on_click(on_mode_toggle),
-        grid(()).horizontal_alignment(HorizontalAlignment::Stretch),
-        vstack((meta, permission_picker)).spacing(tokens::SPACE_1),
-        send_stop,
-    ))
-    .spacing(tokens::SPACE_2)
+    let mode_button: Element = button(if state.mode == "plan" {
+        "规划"
+    } else {
+        "执行"
+    })
+    .subtle()
+    .tooltip("切换工作模式")
+    .automation_name("工作模式")
+    .automation_id("composer-mode")
+    .on_click(on_mode_toggle)
     .into();
+    let immersive_button: Element = button("")
+        .icon(Icon::symbol(if immersive {
+            Symbol::BackToWindow
+        } else {
+            Symbol::FullScreen
+        }))
+        .subtle()
+        .tooltip(if immersive {
+            "退出沉浸式编辑"
+        } else {
+            "展开编辑器"
+        })
+        .automation_name(if immersive {
+            "退出沉浸式编辑"
+        } else {
+            "展开编辑器"
+        })
+        .automation_id("composer-immersive")
+        .on_click({
+            let set_immersive = set_immersive.clone();
+            let set_manual_height = set_manual_height.clone();
+            let set_input_height = set_input_height.clone();
+            move || {
+                let next = !immersive;
+                set_immersive.call(next);
+                set_manual_height.call(false);
+                set_input_height.call(if next {
+                    INPUT_MANUAL_MAX_HEIGHT
+                } else {
+                    INPUT_DEFAULT_HEIGHT
+                });
+            }
+        })
+        .into();
+
+    // Grid provides real left/right command groups. A horizontal StackPanel
+    // cannot emulate a web flex spacer because it measures children at infinity.
+    let footer: Element = grid((
+        attach_button.grid_column(0),
+        mode_button.grid_column(1),
+        immersive_button.grid_column(2),
+        hstack((meta, permission_picker))
+            .spacing(tokens::SPACE_2)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(4),
+        send_stop.grid_column(5),
+    ))
+    .columns([
+        GridLength::Auto,
+        GridLength::Auto,
+        GridLength::Auto,
+        GridLength::STAR,
+        GridLength::Auto,
+        GridLength::Auto,
+    ])
+    .column_spacing(tokens::SPACE_2)
+    .into();
+
+    // Twelve-DIP hit target with a quiet two-DIP visual grip. Dragging upward
+    // grows the editor; tapping returns ownership to automatic sizing.
+    let grip: Element = border(text_block(""))
+        .width(40.0)
+        .height(2.0)
+        .corner_radius(1.0)
+        .background(ThemeRef::DividerStroke)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .into();
+    let resize_handle: Element = border(grip)
+        .height(12.0)
+        .capture_pointer_on_press()
+        .on_pointer_pressed({
+            let resize_start = resize_start.clone();
+            move |info: PointerEventInfo| {
+                *resize_start.borrow_mut() = Some((info.window_y, input_height));
+            }
+        })
+        .on_pointer_moved({
+            let resize_start = resize_start.clone();
+            let set_input_height = set_input_height.clone();
+            let set_manual_height = set_manual_height.clone();
+            move |info: PointerEventInfo| {
+                if !info.is_left_button_pressed {
+                    return;
+                }
+                let Some((start_y, start_height)) = *resize_start.borrow() else {
+                    return;
+                };
+                set_manual_height.call(true);
+                set_input_height.call(
+                    (start_height - (info.window_y - start_y))
+                        .clamp(INPUT_MIN_HEIGHT, INPUT_MANUAL_MAX_HEIGHT),
+                );
+            }
+        })
+        .on_pointer_released({
+            let resize_start = resize_start.clone();
+            move |_| *resize_start.borrow_mut() = None
+        })
+        .on_pointer_capture_lost({
+            let resize_start = resize_start.clone();
+            move || *resize_start.borrow_mut() = None
+        })
+        .on_tapped({
+            let set_manual_height = set_manual_height.clone();
+            let set_input_height = set_input_height.clone();
+            move || {
+                set_manual_height.call(false);
+                set_input_height.call(INPUT_DEFAULT_HEIGHT);
+            }
+        })
+        .tooltip("拖动调整输入框高度；单击恢复自动高度")
+        .automation_name("调整输入框高度")
+        .automation_id("composer-resize-handle")
+        .into();
 
     // 持久命令表面使用 LayerFill；边框/圆角由共享 Fluent primitive 统一。
     let card: Element = deepx_fluent::command_surface(
-        vstack((input, error_row, attach_preview, footer))
+        vstack((resize_handle, input, error_row, attach_preview, footer))
             .spacing(tokens::SPACE_2)
             .padding(tokens::SPACE_3),
     )

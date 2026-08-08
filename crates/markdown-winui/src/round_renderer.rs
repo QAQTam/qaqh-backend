@@ -31,7 +31,10 @@ use markdown_core::live_table::{LiveTableTracker, TableSnapshot};
 use markdown_core::parse_final;
 
 use crate::protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
-use crate::{RichTextOutput, TableData, render_final};
+use crate::{
+    ChangeStats, RichTextOutput, TableData, ToolBody, change_stats_from_result, render_final,
+    tool_body_from_result,
+};
 
 /// The smallest declarative render invalidation needed after a model update.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -109,6 +112,13 @@ pub struct ToolCardView {
     pub name: Option<String>,
     /// 参数 raw（原型简化：直接展示累积文本）；provider 卡为状态文案。
     pub args_display: String,
+    /// Original structured arguments, retained so patch/read renderers can
+    /// derive a useful body even when the terminal receipt is compact.
+    pub args_json: Option<String>,
+    /// Typed native presentation instead of one undifferentiated text blob.
+    pub body: ToolBody,
+    /// Optional file-change totals delivered by the code-change channel.
+    pub changes: Option<ChangeStats>,
     /// true = 工具卡完成（后续 delta 不再更新）。
     pub done: bool,
     /// provider 内建工具卡（web_search 等，`provider_tool_status` 事件）：
@@ -335,6 +345,9 @@ impl RoundView {
         {
             existing.name = card.name.clone();
             existing.args_display.clone_from(&card.args_display);
+            existing.args_json.clone_from(&card.args_json);
+            existing.body.clone_from(&card.body);
+            existing.changes.clone_from(&card.changes);
         } else {
             self.tool_calls.push(card.clone());
         }
@@ -352,6 +365,9 @@ impl RoundView {
             id,
             name,
             args_display: self.tool_raw.clone(),
+            args_json: Some(self.tool_raw.clone()),
+            body: ToolBody::Text(self.tool_raw.clone()),
+            changes: None,
             done: false,
             provider: false,
         })
@@ -695,6 +711,9 @@ impl Transcript {
                     id: call_id.clone(),
                     name: Some(tool_kind.clone()),
                     args_display: label,
+                    args_json: None,
+                    body: ToolBody::Empty,
+                    changes: None,
                     done: *state == ProviderToolState::Completed,
                     provider: true,
                 };
@@ -716,6 +735,13 @@ impl Transcript {
                     id: tool_call_id.clone(),
                     name: Some(name.clone()),
                     args_display: args_so_far.clone(),
+                    args_json: Some(args_so_far.clone()),
+                    body: if args_so_far.trim().is_empty() {
+                        ToolBody::Empty
+                    } else {
+                        ToolBody::Text(args_so_far.clone())
+                    },
+                    changes: None,
                     done: false,
                     provider: false,
                 };
@@ -731,10 +757,24 @@ impl Transcript {
             } => {
                 let turn = self.ensure_turn(turn_id);
                 let (_, round) = self.round_mut(turn, *round_num);
+                let existing = round
+                    .tool_calls
+                    .iter()
+                    .find(|card| card.id == *tool_call_id)
+                    .cloned();
                 let card = ToolCardView {
                     id: tool_call_id.clone(),
                     name: Some(name.clone()),
-                    args_display: String::new(),
+                    args_display: existing
+                        .as_ref()
+                        .map(|card| card.args_display.clone())
+                        .unwrap_or_default(),
+                    args_json: existing.as_ref().and_then(|card| card.args_json.clone()),
+                    body: existing
+                        .as_ref()
+                        .map(|card| card.body.clone())
+                        .unwrap_or_default(),
+                    changes: existing.and_then(|card| card.changes),
                     done: false,
                     provider: false,
                 };
@@ -763,20 +803,73 @@ impl Transcript {
                         })
                     })
                     .unwrap_or_default();
+                let existing = round
+                    .tool_calls
+                    .iter()
+                    .find(|card| card.id == *tool_call_id)
+                    .cloned();
+                let name = existing.as_ref().and_then(|card| card.name.clone());
+                let args_json = existing.as_ref().and_then(|card| card.args_json.clone());
+                let candidate_body = name
+                    .as_deref()
+                    .map(|name| tool_body_from_result(name, args_json.as_deref(), result))
+                    .unwrap_or_default();
+                let body = match (candidate_body, existing.as_ref().map(|card| &card.body)) {
+                    (ToolBody::Empty, Some(existing_body)) => existing_body.clone(),
+                    (
+                        ToolBody::Text(_),
+                        Some(existing_body @ (ToolBody::Code(_) | ToolBody::Diff(_))),
+                    ) => existing_body.clone(),
+                    (candidate_body, _) => candidate_body,
+                };
+                let changes = change_stats_from_result(result, &body)
+                    .or_else(|| existing.as_ref().and_then(|card| card.changes.clone()));
                 let card = ToolCardView {
                     id: tool_call_id.clone(),
-                    name: round
-                        .tool_calls
-                        .iter()
-                        .find(|c| c.id == *tool_call_id)
-                        .and_then(|c| c.name.clone()),
+                    name,
                     args_display: summary,
+                    args_json,
+                    body,
+                    changes,
                     done: true,
                     provider: false,
                 };
                 upsert_tool_card(round, card)
                     .then(|| TranscriptChange::structural(true))
                     .unwrap_or_default()
+            }
+            ConversationEvent::CodeChanged {
+                tool_call_id,
+                turn_id,
+                round_num,
+                lines_added,
+                lines_removed,
+                files_created,
+                files_deleted,
+                file,
+            } => {
+                let turn = self.ensure_turn(turn_id);
+                let (_, round) = self.round_mut(turn, *round_num);
+                let Some(card) = round
+                    .tool_calls
+                    .iter_mut()
+                    .find(|card| card.id == *tool_call_id)
+                else {
+                    return TranscriptChange::default();
+                };
+                let changes = ChangeStats {
+                    lines_added: *lines_added,
+                    lines_removed: *lines_removed,
+                    files_created: *files_created,
+                    files_deleted: *files_deleted,
+                    file: file.clone(),
+                };
+                if card.changes.as_ref() == Some(&changes) {
+                    TranscriptChange::default()
+                } else {
+                    card.changes = Some(changes);
+                    TranscriptChange::structural(true)
+                }
             }
             ConversationEvent::RoundCompleted {
                 turn_id,
@@ -1307,6 +1400,117 @@ mod tests {
         assert_eq!(rounds[0].tool_calls.len(), 1);
         assert!(rounds[0].tool_calls[0].done);
         assert_eq!(rounds[0].tool_calls[0].args_display, "8 files listed");
+    }
+
+    #[test]
+    fn read_tool_keeps_args_and_finishes_as_native_code() {
+        let mut ts = Transcript::new();
+        start_turn(&mut ts, "t1");
+        ts.apply(&ConversationEvent::ToolCallPrepared {
+            tool_call_id: "read-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            name: "read_file".into(),
+            args_so_far: r#"{"path":"src/lib.rs","start_line":4}"#.into(),
+        });
+        ts.apply(&ConversationEvent::ToolStarted {
+            tool_call_id: "read-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            name: "read_file".into(),
+        });
+        ts.apply(&ConversationEvent::ToolFinished {
+            tool_call_id: "read-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            result: serde_json::json!({
+                "summary": "read src/lib.rs",
+                "data": {"files": [{"path": "src/lib.rs", "start_line": 4, "total_lines": 8}]},
+                "model": {"text": "L4: pub fn answer() -> u32 {\nL5:     42\nL6: }"}
+            }),
+        });
+
+        let card = &ts.turns()[0].rounds[0].tool_calls[0];
+        assert_eq!(
+            card.args_json.as_deref(),
+            Some(r#"{"path":"src/lib.rs","start_line":4}"#)
+        );
+        let ToolBody::Code(documents) = &card.body else {
+            panic!("read_file should render as native code");
+        };
+        assert_eq!(documents[0].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(documents[0].start_line, 4);
+        assert_eq!(
+            documents[0].text.lines().next(),
+            Some("pub fn answer() -> u32 {")
+        );
+    }
+
+    #[test]
+    fn code_changed_targets_one_card_and_is_idempotent() {
+        let mut ts = Transcript::new();
+        start_turn(&mut ts, "t1");
+        for call_id in ["edit-1", "edit-2"] {
+            ts.apply(&ConversationEvent::ToolCallPrepared {
+                tool_call_id: call_id.into(),
+                turn_id: "t1".into(),
+                round_num: 0,
+                name: "edit_file".into(),
+                args_so_far: "{}".into(),
+            });
+        }
+        let changed = ConversationEvent::CodeChanged {
+            tool_call_id: "edit-2".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            lines_added: 7,
+            lines_removed: 3,
+            files_created: 1,
+            files_deleted: 0,
+            file: Some("src/lib.rs".into()),
+        };
+        assert!(ts.apply(&changed).changed());
+        assert!(
+            !ts.apply(&changed).changed(),
+            "same stats should not invalidate twice"
+        );
+
+        let cards = &ts.turns()[0].rounds[0].tool_calls;
+        assert!(cards[0].changes.is_none());
+        assert_eq!(cards[1].changes.as_ref().unwrap().label(), "+7  −3  新建 1");
+    }
+
+    #[test]
+    fn compact_duplicate_finish_does_not_replace_exact_diff() {
+        let mut ts = Transcript::new();
+        start_turn(&mut ts, "t1");
+        ts.apply(&ConversationEvent::ToolCallPrepared {
+            tool_call_id: "edit-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            name: "edit_file".into(),
+            args_so_far: r#"{"path":"src/lib.rs"}"#.into(),
+        });
+        ts.apply(&ConversationEvent::ToolFinished {
+            tool_call_id: "edit-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            result: serde_json::json!({
+                "summary": "edited",
+                "data": {"files": [{"ops": [{"diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"}]}]},
+                "model": {"text": "+1 -1"}
+            }),
+        });
+        ts.apply(&ConversationEvent::ToolFinished {
+            tool_call_id: "edit-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            result: serde_json::json!({"summary": "+1 -1", "model": {"text": "+1 -1"}}),
+        });
+        assert!(matches!(
+            ts.turns()[0].rounds[0].tool_calls[0].body,
+            ToolBody::Diff(_)
+        ));
     }
 
     /// Tool 频道与 Conversation 频道无顺序保证：工具事件先于 TurnStarted

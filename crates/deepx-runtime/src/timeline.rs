@@ -759,7 +759,9 @@ mod tests {
         // otherwise every timeline intent for the turn is dropped and the
         // frontend transcript stays blank.
         let mut appender = TimelineAppender::new();
-        appender.open_turn("s", "t1", "interrupted question").unwrap();
+        appender
+            .open_turn("s", "t1", "interrupted question")
+            .unwrap();
         appender
             .open_block("s", "t1", 0, "answer", TimelineBlockKind::Text, None)
             .unwrap();

@@ -232,7 +232,9 @@ fn auto_header(patch_text: &str) -> Result<String, String> {
     if old_path.is_empty() {
         return Err("parse patch: no '--- a/<path>' header found in patch text".into());
     }
-    Ok(format!("diff --git a/{old_path} b/{old_path}\n{patch_text}"))
+    Ok(format!(
+        "diff --git a/{old_path} b/{old_path}\n{patch_text}"
+    ))
 }
 
 /// 手写解析 `@@ -a[,b] +c[,d] @@ [section]` hunk 头。
@@ -377,9 +379,13 @@ fn extract_hunks(patch_text: &str) -> Vec<(String, Vec<(usize, String)>)> {
             cur_path = Some(if a == b { a.to_string() } else { b.to_string() });
             pending_start = None;
         } else if line.starts_with("--- ") && cur_path.is_none() {
-            cur_path = Some(line.trim_start_matches("--- ").trim_start_matches("a/").to_string());
+            cur_path = Some(
+                line.trim_start_matches("--- ")
+                    .trim_start_matches("a/")
+                    .to_string(),
+            );
         } else if let Some(h) = parse_hunk_header(line) {
-            pending_start = Some(h.0 .0);
+            pending_start = Some(h.0.0);
         } else if let Some(start) = pending_start.take() {
             let is_anchor = (line.starts_with(' ') || line.starts_with('-'))
                 && !line.starts_with("--- ")
@@ -408,7 +414,9 @@ fn diagnose_apply_failure(workspace: &str, patch_text: &str) -> String {
     for (path, hunks) in extract_hunks(patch_text) {
         let full = std::path::Path::new(workspace).join(&path);
         if !full.exists() {
-            msgs.push(format!("{path}: file does not exist in the repo (check the patch path)"));
+            msgs.push(format!(
+                "{path}: file does not exist in the repo (check the patch path)"
+            ));
             continue;
         }
         let Ok(content) = std::fs::read_to_string(&full) else {
@@ -434,7 +442,8 @@ fn diagnose_apply_failure(workspace: &str, patch_text: &str) -> String {
         }
     }
     if msgs.is_empty() {
-        "context mismatch within the declared ranges (read the file and regenerate the patch)".to_string()
+        "context mismatch within the declared ranges (read the file and regenerate the patch)"
+            .to_string()
     } else {
         msgs.join("; ")
     }
@@ -490,7 +499,7 @@ pub fn apply_patch(workspace: &str, patch_text: &str, location: &str) -> Result<
         other => {
             return Err(format!(
                 "invalid apply location {other:?} — use \"workdir\" | \"index\" | \"both\""
-            ))
+            ));
         }
     };
 
@@ -546,8 +555,8 @@ pub fn check_patch(workspace: &str, patch_text: &str) -> Result<String, String> 
     // 校验 workspace 是 git 仓库（失败即报错，不应用）
     open_repo(workspace)?;
     let normalized = normalize_hunk_counts(&auto_header(patch_text)?)?;
-    let diff = git2::Diff::from_buffer(normalized.as_bytes())
-        .map_err(|e| format!("parse patch: {e}"))?;
+    let diff =
+        git2::Diff::from_buffer(normalized.as_bytes()).map_err(|e| format!("parse patch: {e}"))?;
     let stats = diff.stats().map_err(|e| format!("diff stats: {e}"))?;
 
     let mut hunks: Vec<serde_json::Value> = Vec::new();
@@ -706,7 +715,12 @@ mod tests {
     #[test]
     fn apply_patch_rejects_invalid_location() {
         let (_dir, ws) = repo_with_commit("line1\n");
-        let err = apply_patch(&ws, "--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-line1\n+line2\n", "elsewhere").unwrap_err();
+        let err = apply_patch(
+            &ws,
+            "--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-line1\n+line2\n",
+            "elsewhere",
+        )
+        .unwrap_err();
         assert!(err.contains("invalid apply location"), "got: {err}");
     }
 }

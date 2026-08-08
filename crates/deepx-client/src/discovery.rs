@@ -27,15 +27,18 @@ impl DaemonDiscovery {
             .endpoint
             .strip_prefix("ws://")
             .or_else(|| self.endpoint.strip_prefix("wss://"))
-            .ok_or_else(|| ClientError::Discovery(format!("unexpected endpoint: {}", self.endpoint)))?;
-        let host = rest
-            .split('/')
-            .next()
-            .unwrap_or("");
+            .ok_or_else(|| {
+                ClientError::Discovery(format!("unexpected endpoint: {}", self.endpoint))
+            })?;
+        let host = rest.split('/').next().unwrap_or("");
         if host.is_empty() {
             return Err(ClientError::Discovery("endpoint has no host".into()));
         }
-        let scheme = if self.endpoint.starts_with("wss://") { "https" } else { "http" };
+        let scheme = if self.endpoint.starts_with("wss://") {
+            "https"
+        } else {
+            "http"
+        };
         Ok(format!("{scheme}://{host}"))
     }
 }
@@ -143,22 +146,34 @@ pub(crate) fn lock_holder_alive() -> bool {
 ///   4. `<exe_dir>/deepx-daemon` — side-by-side layout
 ///   5. bare name (PATH lookup)
 pub fn daemon_executable() -> std::path::PathBuf {
-    let exe = if cfg!(windows) { "deepx-daemon.exe" } else { "deepx-daemon" };
+    let exe = if cfg!(windows) {
+        "deepx-daemon.exe"
+    } else {
+        "deepx-daemon"
+    };
 
     for base in [
         std::env::var("DEEPX_BACKEND_ROOT").ok(),
-        std::env::current_dir().ok().map(|p| p.display().to_string()),
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string()),
     ]
     .into_iter()
     .flatten()
     {
-        let p = std::path::PathBuf::from(base).join("target").join("debug").join(exe);
+        let p = std::path::PathBuf::from(base)
+            .join("target")
+            .join("debug")
+            .join(exe);
         if p.exists() {
             return p;
         }
     }
 
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
         for base in [dir.join("resources"), dir.clone()] {
             let p = base.join(exe);
             if p.exists() {

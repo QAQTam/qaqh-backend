@@ -29,11 +29,7 @@ impl MiscEngine {
     ///
     /// Caller (Loop) MUST call `turn.reset()` and `tool.reset()` before
     /// calling this method, to ensure cross-engine consistency.
-    pub fn handle_undo(
-        &self,
-        agent: &mut AgentState,
-        turn_id: &str,
-    ) {
+    pub fn handle_undo(&self, agent: &mut AgentState, turn_id: &str) {
         log::info!(
             "[MISC] UndoTurn {turn_id} — turns before: {}",
             agent.msg.turn_count()

@@ -129,18 +129,27 @@ fn convert_messages_to_input(
                     }
                 }
 
-                let text_parts: Vec<_> = msg.content.iter().filter_map(|b| {
-                    if let ContentBlock::Text { text } = b {
-                        if !text.is_empty() { Some(text.clone()) } else { None }
-                    } else {
-                        None
-                    }
-                }).collect();
+                let text_parts: Vec<_> = msg
+                    .content
+                    .iter()
+                    .filter_map(|b| {
+                        if let ContentBlock::Text { text } = b {
+                            if !text.is_empty() {
+                                Some(text.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
 
                 if !text_parts.is_empty() {
-                    let content: Vec<serde_json::Value> = text_parts.iter().map(|t| {
-                        serde_json::json!({"type": "output_text", "text": t})
-                    }).collect();
+                    let content: Vec<serde_json::Value> = text_parts
+                        .iter()
+                        .map(|t| serde_json::json!({"type": "output_text", "text": t}))
+                        .collect();
                     items.push(serde_json::json!({
                         "type": "message",
                         "role": "assistant",
@@ -180,7 +189,11 @@ fn convert_messages_to_input(
             "tool" => {
                 // ToolResult blocks → function_call_output
                 for block in &msg.content {
-                    if let ContentBlock::ToolResult { tool_use_id, result } = block {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        result,
+                    } = block
+                    {
                         items.push(serde_json::json!({
                             "type": "function_call_output",
                             "call_id": tool_use_id,
@@ -255,11 +268,7 @@ fn convert_tools(
     if compat.web_search {
         items.push(serde_json::json!({"type": "web_search"}));
     }
-    if items.is_empty() {
-        None
-    } else {
-        Some(items)
-    }
+    if items.is_empty() { None } else { Some(items) }
 }
 
 /// Map DeepX's stable tool name to a provider-safe wire name. The mapping is
@@ -295,10 +304,7 @@ fn clamp_effort(effort: Option<String>, max: &str) -> String {
         .as_deref()
         .and_then(|e| normalize_reasoning_effort(Some(e)))
         .unwrap_or_else(|| "medium".into());
-    let max_idx = EFFORT_LADDER
-        .iter()
-        .position(|&v| v == max)
-        .unwrap_or(4);
+    let max_idx = EFFORT_LADDER.iter().position(|&v| v == max).unwrap_or(4);
     let idx = EFFORT_LADDER
         .iter()
         .position(|&v| v == requested)
@@ -482,7 +488,8 @@ pub fn chat_sync_responses(
             .body(serde_json::to_string(&body).unwrap_or_default())
             .send()
             .await
-    }).map_err(|e| format!("Request failed: {}", e))?;
+    })
+    .map_err(|e| format!("Request failed: {}", e))?;
 
     let status = resp.status().as_u16();
     let text = block_on(async { resp.text().await }).map_err(|e| format!("Read error: {}", e))?;
@@ -632,7 +639,9 @@ fn handle_responses_event(
         "response.web_search_call.in_progress"
         | "response.web_search_call.searching"
         | "response.web_search_call.completed" => {
-            let status = typ.trim_start_matches("response.web_search_call.").to_string();
+            let status = typ
+                .trim_start_matches("response.web_search_call.")
+                .to_string();
             on_event(StreamEvent::WebSearchStatus(status));
             EventAction::Continue
         }
@@ -662,9 +671,11 @@ fn handle_responses_event(
                     return EventAction::Continue;
                 }
                 let item_id = data.get("item_id").and_then(|i| i.as_str()).unwrap_or("");
-                if let Some(tc) = state.tool_calls.iter_mut().find(|tc| {
-                    tc.get("item_id").and_then(|i| i.as_str()) == Some(item_id)
-                }) {
+                if let Some(tc) = state
+                    .tool_calls
+                    .iter_mut()
+                    .find(|tc| tc.get("item_id").and_then(|i| i.as_str()) == Some(item_id))
+                {
                     let cur = tc.get("args").and_then(|a| a.as_str()).unwrap_or("");
                     let new_args = format!("{}{}", cur, delta);
                     if let Some(obj) = tc.as_object_mut() {
@@ -699,9 +710,7 @@ fn handle_responses_event(
                     let input: serde_json::Value =
                         serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
                     if !call_id.is_empty() && !name.is_empty() {
-                        state
-                            .tool_uses
-                            .push((call_id.to_string(), name, input));
+                        state.tool_uses.push((call_id.to_string(), name, input));
                     }
                     state.tool_index += 1;
                 } else if item_type == "web_search_call" {
@@ -711,9 +720,7 @@ fn handle_responses_event(
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({"type": "search"}));
                     if !call_id.is_empty() {
-                        state
-                            .web_search_calls
-                            .push((call_id.to_string(), action));
+                        state.web_search_calls.push((call_id.to_string(), action));
                     }
                 }
             }
@@ -1100,7 +1107,10 @@ mod tests {
         let msgs = vec![Message::system("you are helpful")];
         let (input, instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(instructions.as_deref(), Some("you are helpful"));
-        assert!(input.is_empty(), "base system must not duplicate into input[]");
+        assert!(
+            input.is_empty(),
+            "base system must not duplicate into input[]"
+        );
 
         // 动态注入的后续 system → developer item
         let msgs = vec![
@@ -1110,7 +1120,11 @@ mod tests {
         ];
         let (input, instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(instructions.as_deref(), Some("base prompt"));
-        assert_eq!(input.len(), 2, "two dynamic system messages stay as developer items");
+        assert_eq!(
+            input.len(),
+            2,
+            "two dynamic system messages stay as developer items"
+        );
         for item in &input {
             assert_eq!(item["role"], "developer");
         }
@@ -1122,7 +1136,9 @@ mod tests {
             msg_id: None,
             role: "assistant".into(),
             name: None,
-            content: vec![ContentBlock::Text { text: "I'll help".into() }],
+            content: vec![ContentBlock::Text {
+                text: "I'll help".into(),
+            }],
         }];
         let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["role"], "assistant");
@@ -1166,7 +1182,9 @@ mod tests {
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "tc_1");
         let output: serde_json::Value = serde_json::from_str(
-            input[0]["output"].as_str().expect("canonical tool result output"),
+            input[0]["output"]
+                .as_str()
+                .expect("canonical tool result output"),
         )
         .expect("canonical tool result JSON");
         assert_eq!(output["status"], "ok");
@@ -1180,7 +1198,9 @@ mod tests {
             role: "assistant".into(),
             name: None,
             content: vec![
-                ContentBlock::Text { text: "let me check".into() },
+                ContentBlock::Text {
+                    text: "let me check".into(),
+                },
                 ContentBlock::ToolUse {
                     id: "tc_2".into(),
                     name: "search".into(),
@@ -1212,7 +1232,9 @@ mod tests {
     #[test]
     fn reasoning_content_preserved_in_final_message() {
         // Verify the ContentBlock::Reasoning variant is used correctly
-        let block = ContentBlock::Reasoning { reasoning: "thinking...".into() };
+        let block = ContentBlock::Reasoning {
+            reasoning: "thinking...".into(),
+        };
         assert_eq!(
             match &block {
                 ContentBlock::Reasoning { reasoning } => reasoning.clone(),
@@ -1231,8 +1253,12 @@ mod tests {
             role: "assistant".into(),
             name: None,
             content: vec![
-                ContentBlock::Reasoning { reasoning: "step by step".into() },
-                ContentBlock::Text { text: "checking".into() },
+                ContentBlock::Reasoning {
+                    reasoning: "step by step".into(),
+                },
+                ContentBlock::Text {
+                    text: "checking".into(),
+                },
                 ContentBlock::ToolUse {
                     id: "tc_r".into(),
                     name: "read_file".into(),
@@ -1267,7 +1293,9 @@ mod tests {
             role: "assistant".into(),
             name: None,
             content: vec![
-                ContentBlock::Reasoning { reasoning: String::new() },
+                ContentBlock::Reasoning {
+                    reasoning: String::new(),
+                },
                 ContentBlock::Text { text: "ok".into() },
             ],
         }];
@@ -1446,7 +1474,9 @@ mod tests {
             role: "assistant".into(),
             name: None,
             content: vec![
-                ContentBlock::Text { text: "searching...".into() },
+                ContentBlock::Text {
+                    text: "searching...".into(),
+                },
                 ContentBlock::WebSearchCall {
                     id: "ws_1".into(),
                     action: serde_json::json!({"type": "search"}),
@@ -1488,7 +1518,9 @@ mod tests {
 
     #[test]
     fn extract_text_from_blocks() {
-        let blocks = vec![ContentBlock::Text { text: "hello".into() }];
+        let blocks = vec![ContentBlock::Text {
+            text: "hello".into(),
+        }];
         assert_eq!(extract_text(&blocks), "hello");
     }
 
@@ -1508,7 +1540,9 @@ mod tests {
                 msg_id: None,
                 role: "assistant".into(),
                 name: None,
-                content: vec![ContentBlock::Text { text: "hello!".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "hello!".into(),
+                }],
             },
             Message::user("read x.txt"),
         ];
@@ -1540,7 +1574,10 @@ mod tests {
             }
         });
         let action = handle_responses_event(&data, &mut state, &mut |e| events.push(e));
-        assert!(matches!(action, EventAction::Completed { stop_reason: None }));
+        assert!(matches!(
+            action,
+            EventAction::Completed { stop_reason: None }
+        ));
         assert_eq!(events.len(), 1);
         match &events[0] {
             StreamEvent::UsageUpdate(u) => {
@@ -1810,15 +1847,24 @@ mod tests {
 
         emit_done(&mut state, None, &mut |e| events.push(e));
         match &events[3] {
-            StreamEvent::Done { raw_message, stop_reason, .. } => {
+            StreamEvent::Done {
+                raw_message,
+                stop_reason,
+                ..
+            } => {
                 assert_eq!(stop_reason, &None);
-                assert!(raw_message
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::Reasoning { .. })));
-                assert!(raw_message.content.iter().any(
-                    |b| matches!(b, ContentBlock::Text { text } if text == "Hello world")
-                ));
+                assert!(
+                    raw_message
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Reasoning { .. }))
+                );
+                assert!(
+                    raw_message
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Text { text } if text == "Hello world"))
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }

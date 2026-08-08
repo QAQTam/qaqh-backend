@@ -56,6 +56,16 @@ pub mod motion {
     pub fn content_exit() -> Option<AnimationConfig> {
         animations_enabled().then(|| AnimationConfig::fade_out(Duration::from_millis(100)))
     }
+
+    /// Brief cross-fade for changing the active session transcript.
+    pub fn session_enter() -> Option<AnimationConfig> {
+        animations_enabled().then(|| AnimationConfig::fade_in(Duration::from_millis(140)))
+    }
+
+    /// Session content exits faster than it enters to keep tab changes crisp.
+    pub fn session_exit() -> Option<AnimationConfig> {
+        animations_enabled().then(|| AnimationConfig::fade_out(Duration::from_millis(80)))
+    }
 }
 
 pub mod tokens {
@@ -73,8 +83,17 @@ pub mod tokens {
 
     pub const TYPE_CAPTION: f64 = 12.0;
     pub const TYPE_BODY: f64 = 14.0;
+    /// Fluent reading line box for 14-DIP body copy (about 1.57×).
+    pub const TYPE_BODY_LINE_HEIGHT: f64 = 22.0;
     pub const TYPE_BODY_LARGE: f64 = 18.0;
     pub const TYPE_SUBTITLE: f64 = 20.0;
+
+    /// Packaged UI font followed by native Windows fallbacks. The corresponding
+    /// files are staged by `deepx-winui` under `Assets/fonts`.
+    pub const DEFAULT_UI_FONT_FAMILY: &str = "ms-appx:///Assets/fonts/HarmonyOS_Sans_SC_Regular.ttf#HarmonyOS Sans SC, Segoe UI Variable, Microsoft YaHei UI, Segoe UI";
+    /// Variable monospaced font for code, numeric telemetry, and raw tool data.
+    pub const CODE_FONT_FAMILY: &str =
+        "ms-appx:///Assets/fonts/CascadiaMono.ttf#Cascadia Mono, Consolas";
 
     /// Comfortable reading measure for long-form assistant output.
     pub const READING_MAX_WIDTH: f64 = 880.0;
@@ -232,6 +251,20 @@ pub fn code_surface(
     code: impl Into<String>,
     key: impl Into<String>,
 ) -> Element {
+    let code = text_block(code)
+        .font_size(13.0)
+        .font_family(tokens::CODE_FONT_FAMILY)
+        .selectable();
+    code_surface_content(language, code, key)
+}
+
+/// Native code surface accepting pre-built content, such as a syntect-colored
+/// `RichTextBlock`. Horizontal overflow is kept inside the code card.
+pub fn code_surface_content(
+    language: impl Into<String>,
+    content: impl Into<Element>,
+    key: impl Into<String>,
+) -> Element {
     let language = language.into();
     let language = if language.trim().is_empty() {
         "代码".to_string()
@@ -243,11 +276,9 @@ pub fn code_surface(
             text_block(language)
                 .font_size(tokens::TYPE_CAPTION)
                 .foreground(ThemeRef::SecondaryText),
-            text_block(code)
-                .font_size(13.0)
-                .font_family("Cascadia Mono")
-                .wrap()
-                .selectable(),
+            scroll_viewer(content)
+                .horizontal_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                .vertical_scroll_bar_visibility(ScrollBarVisibility::Disabled),
         ))
         .spacing(tokens::SPACE_2),
     )

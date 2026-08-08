@@ -63,10 +63,13 @@ pub fn execute_authorized(
     }
 
     if crate::runtime::is_plan_mode() && crate::PLAN_BLOCKED.contains(&name.as_str()) {
-        return failure(&name, crate::ToolError::BlockedByMode {
-            mode: "PLAN".into(),
-            tool: name.clone(),
-        });
+        return failure(
+            &name,
+            crate::ToolError::BlockedByMode {
+                mode: "PLAN".into(),
+                tool: name.clone(),
+            },
+        );
     }
 
     // Phase 1: prepare while holding the manager lock.
@@ -165,7 +168,9 @@ pub fn execute_with_context(
         Err(error) => {
             return failure(
                 &resolve_name(name, action),
-                crate::ToolError::InvalidArgs { message: error.to_string() },
+                crate::ToolError::InvalidArgs {
+                    message: error.to_string(),
+                },
             );
         }
     };
@@ -214,7 +219,9 @@ pub fn execute_with_context(
         Admission::Authorized(authorized) => execute_authorized(authorized, progress_tx),
         Admission::ApprovalRequired(challenge) => failure(
             &resolved_name,
-            crate::ToolError::PermissionDenied { reason: challenge.reason().to_string() },
+            crate::ToolError::PermissionDenied {
+                reason: challenge.reason().to_string(),
+            },
         ),
         Admission::Denied(reason) => failure(
             &resolved_name,
@@ -401,7 +408,11 @@ mod tests {
         );
         assert!(!generic_read.success);
         assert_eq!(
-            generic_read.result.error.as_ref().map(|error| error.code.as_str()),
+            generic_read
+                .result
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str()),
             Some("USE_SKILLS_TOOL")
         );
 
@@ -470,11 +481,10 @@ mod tests {
         let _test_guard = setup_test_manager();
         crate::runtime::set_context("test_session", 4);
         let backend_calls = Arc::new(AtomicU32::new(0));
-        let _backend_guard = crate::backend::replace_workspace_backend_for_test(Arc::new(
-            TestWorkspaceBackend {
+        let _backend_guard =
+            crate::backend::replace_workspace_backend_for_test(Arc::new(TestWorkspaceBackend {
                 calls: backend_calls.clone(),
-            },
-        ));
+            }));
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
 
@@ -528,18 +538,14 @@ mod tests {
         let _test_guard = setup_test_manager();
         crate::runtime::set_context("test_session", 4);
         let backend_calls = Arc::new(AtomicU32::new(0));
-        let _backend_guard = crate::backend::replace_workspace_backend_for_test(Arc::new(
-            TestProcessBackend {
+        let _backend_guard =
+            crate::backend::replace_workspace_backend_for_test(Arc::new(TestProcessBackend {
                 calls: backend_calls.clone(),
-            },
-        ));
+            }));
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
 
-        for tool in [
-            "exec",
-            "process",
-        ] {
+        for tool in ["exec", "process"] {
             backend_calls.store(0, Ordering::SeqCst);
             let call = match admit(
                 make_invocation(tool, &format!("proc-route-{tool}")),
@@ -551,7 +557,10 @@ mod tests {
                 _ => panic!("expected {tool} to be authorized"),
             };
             let result = execute_authorized(call, None);
-            assert!(result.success, "{tool} should succeed via workspace backend");
+            assert!(
+                result.success,
+                "{tool} should succeed via workspace backend"
+            );
             assert_eq!(
                 backend_calls.load(Ordering::SeqCst),
                 1,
@@ -956,11 +965,7 @@ mod tests {
             action: String::new(),
             args: serde_json::json!({}),
         };
-        let auth = AuthorizedToolCall::new(
-            inv,
-            vec![],
-            crate::runtime::active_workspace_root(),
-        );
+        let auth = AuthorizedToolCall::new(inv, vec![], crate::runtime::active_workspace_root());
         let result = execute_authorized(auth, None);
         assert!(!result.success, "session mismatch should be rejected");
         assert!(

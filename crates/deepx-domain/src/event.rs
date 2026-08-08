@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub use deepx_types::{ContentRef, ToolResult};
 use deepx_types::UsageInfo;
+pub use deepx_types::{ContentRef, ToolResult};
 
 use crate::channel::RingingChannel;
 use crate::delivery::Delivery;
@@ -479,6 +479,12 @@ pub enum ToolEvent {
     },
     /// 文件操作后的实时代码统计增量。
     CodeChanged {
+        #[serde(default)]
+        tool_call_id: String,
+        #[serde(default)]
+        turn_id: String,
+        #[serde(default)]
+        round_num: u32,
         lines_added: usize,
         lines_removed: usize,
         files_created: usize,
@@ -507,6 +513,9 @@ impl ToolEvent {
             | ToolEvent::ToolFinished { tool_call_id, .. }
             | ToolEvent::ToolPermissionRequested { tool_call_id, .. } => Some(tool_call_id),
             ToolEvent::ToolNotice { tool_call_id, .. } => tool_call_id.as_deref(),
+            ToolEvent::CodeChanged { tool_call_id, .. } if !tool_call_id.is_empty() => {
+                Some(tool_call_id)
+            }
             ToolEvent::AuditRecorded { .. } | ToolEvent::CodeChanged { .. } => None,
         }
     }
@@ -706,6 +715,34 @@ mod tests {
         assert!(json.contains("\"seq_start\":10"));
         assert!(json.contains("\"seq_end\":20"));
         assert!(json.contains("\"dropped_bytes\":0"));
+    }
+
+    #[test]
+    fn code_changed_accepts_legacy_shape_and_targets_new_events() {
+        let legacy: ToolEvent = serde_json::from_value(serde_json::json!({
+            "type": "code_changed",
+            "lines_added": 2,
+            "lines_removed": 1,
+            "files_created": 0,
+            "files_deleted": 0,
+            "file": "src/lib.rs"
+        }))
+        .expect("legacy event remains readable");
+        assert_eq!(legacy.tool_call_id(), None);
+
+        let current = ToolEvent::CodeChanged {
+            tool_call_id: "edit-1".into(),
+            turn_id: "t1".into(),
+            round_num: 0,
+            lines_added: 2,
+            lines_removed: 1,
+            files_created: 0,
+            files_deleted: 0,
+            file: Some("src/lib.rs".into()),
+        };
+        assert_eq!(current.tool_call_id(), Some("edit-1"));
+        let json = serde_json::to_string(&current).expect("serialize");
+        assert!(json.contains("\"turn_id\":\"t1\""));
     }
 
     #[test]
