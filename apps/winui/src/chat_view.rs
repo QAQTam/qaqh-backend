@@ -571,6 +571,9 @@ fn round_view(turn_idx: usize, round: &RoundView, color_scheme: ColorScheme) -> 
         rt.line_height = Some(tokens::TYPE_BODY_LINE_HEIGHT);
         rt.text_wrapping = TextWrapping::Wrap;
         rt.is_text_selection_enabled = true;
+        // RichTextBlock 不参与 XAML 字体属性继承（host 全局字体只覆盖
+        // TextBlock 系），必须显式指定 UI 字体，否则 fallback 系统字体。
+        rt.modifiers.font_family = Some(tokens::DEFAULT_UI_FONT_FAMILY.to_string());
         items.push(
             Expander::new(rt)
             .header("思考过程")
@@ -695,6 +698,9 @@ fn final_view(
         rt.line_height = Some(tokens::TYPE_BODY_LINE_HEIGHT);
         rt.text_wrapping = TextWrapping::Wrap;
         rt.is_text_selection_enabled = true;
+        // RichTextBlock 不参与 XAML 字体属性继承（host 全局字体只覆盖
+        // TextBlock 系），必须显式指定 UI 字体，否则 fallback 系统字体。
+        rt.modifiers.font_family = Some(tokens::DEFAULT_UI_FONT_FAMILY.to_string());
         items.push(rt.into());
     };
     if !rich.blocks.is_empty() {
@@ -740,6 +746,9 @@ fn final_view(
         rt.line_height = Some(tokens::TYPE_BODY_LINE_HEIGHT);
         rt.text_wrapping = TextWrapping::Wrap;
         rt.is_text_selection_enabled = true;
+        // RichTextBlock 不参与 XAML 字体属性继承（host 全局字体只覆盖
+        // TextBlock 系），必须显式指定 UI 字体，否则 fallback 系统字体。
+        rt.modifiers.font_family = Some(tokens::DEFAULT_UI_FONT_FAMILY.to_string());
         items.push(rt.into());
         for (ti, table) in rich.tables.iter().enumerate() {
             items.push(markdown_winui::table_view(

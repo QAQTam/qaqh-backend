@@ -125,6 +125,8 @@ pub fn highlighted_code_block(
     let mut block = RichTextBlock::single_paragraph(inlines);
     block.font_size = Some(13.0);
     block.line_height = Some(20.0);
+    // Run 级已带 font_family；block 级兜底（RichTextBlock 不参与全局继承）。
+    block.modifiers.font_family = Some(font_family.to_string());
     block.text_wrapping = TextWrapping::NoWrap;
     block.is_text_selection_enabled = true;
     cache_put(key, block.clone());
