@@ -195,7 +195,44 @@ DeepX 只移植设计语义与控件映射，具体 API 使用 `windows-reactor`
 仓库提供的 `winui-search.exe` 未签名，不纳入 DeepX 构建或 CI；需要检索时优先查官方
 文档与可审计源码。
 
-## 9. 验收门槛
+## 9. DeepX 1.1：WinUI 上游能力采用
+
+RC4 继续使用稳定 Windows App SDK，并以接口清理和正确性为主；以下能力进入 1.1
+观察与采用清单，不反向扩大 RC4 的改动范围。
+
+### 原生 ThemeResource 绑定
+
+优先跟踪 `FrameworkElement.SetThemeResourceBinding`。该 API 已于 2026-07-25
+[合入 microsoft-ui-xaml 源码](https://github.com/microsoft/microsoft-ui-xaml/commit/16ff74d626f676d92920855984c2e1eb991d1bef)，
+但尚未进入 Windows App SDK 2.3 Experimental A 的 WinMD/runtime，当前不得在生产代码中
+假定它存在。
+
+1. 保留 `ThemeRef` 作为 `windows-reactor` 的声明式前端，不把上游实验接口泄漏到页面；
+2. API 进入可采用的 Windows App SDK WinMD/runtime 后，重新生成 `windows-rs` 投影与
+   `windows-reactor` 补丁；
+3. 将当前动态生成 `Style`、调用 `XamlReader::Load`、登记主题变化并清空/重设 Style 的
+   后端，替换为直接对目标 DependencyProperty 建立 ThemeResource 绑定；
+4. 用 light、dark、high-contrast、运行时切换主题和元素 reparent 覆盖回归测试，再决定
+   是否保留旧后端作为旧版 Windows App SDK 的兼容路径。
+
+采用门槛是：接口出现在可分发包而非仅源码、Rust 投影可稳定生成、运行时行为通过上述
+测试。实验接口重命名或撤销时只调整 `ThemeRef` 后端，页面调用保持不变。
+
+### Window 逻辑尺寸
+
+[Windows App SDK 2.3 Experimental A](https://github.com/microsoft/WindowsAppSDK/releases/tag/v2.3.2-expA)
+已经提供实验性的 `Window.Width`、`Height`、`MinWidth`、`MinHeight`、`MaxWidth` 和
+`MaxHeight`。它们以客户端区域的逻辑像素（DIP）表达尺寸，可在稳定后替代 DeepX 的
+`AppWindow` + 手工 DPI 换算，并为窄窗口下的 sidebar/composer 设定可用性下限。
+
+该实现目前仍有 restored-size 状态跟踪和极端窗口状态的实验性边界；1.1 只在 API
+转为稳定、WinMD 与 runtime 同步后采用。聊天应用通常只需要默认 Width/Height 与合理的
+MinWidth/MinHeight，不应无理由限制最大化窗口。
+
+`TableView` 等刚进入 `microsoft-ui-xaml` main、但尚未随 Windows App SDK 发包的控件，
+同样只列为 1.1 候选；必须等到打包、投影和无障碍行为均可验证后再替换现有内容组件。
+
+## 10. 验收门槛
 
 - ChatView 生产代码不再用 literal RGB 或 emoji 表达状态；
 - light/dark/high-contrast 下信息层级和状态均可辨认；
