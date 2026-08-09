@@ -554,6 +554,8 @@ struct ComposerActivity {
     prompt_tokens: u64,
     context_limit: u64,
     model: String,
+    /// 工作阶段（状态栏）：round_delta kind / tool 生命周期更新。
+    phase: WorkPhase,
 }
 
 /// conversation 频道活动事件（`parse_conversation_activity_event` 解析产物）。
@@ -562,8 +564,9 @@ enum ConversationActivityEvent {
     Started,
     /// turn_completed / turn_failed / conversation_cancelled：活动结束。
     Ended,
-    /// round_delta / block_checkpoint / round_completed / provider_retrying /
-    /// provider_tool_status：活动（刷新时间戳）。
+    /// round_delta（携带阶段）：thinking/answering 细分。
+    Delta(WorkPhase),
+    /// round_completed / provider_retrying / provider_tool_status：活动（刷新时间戳）。
     Touched,
     /// usage_updated：活动 + model/context_limit/prompt_tokens 缓存。
     Usage {
@@ -594,6 +597,7 @@ impl ComposerActivity {
             }
             ConversationActivityEvent::Ended => {
                 self.active_turn = false;
+                self.phase = WorkPhase::Idle;
             }
             ConversationActivityEvent::Touched => {
                 // A delta/checkpoint is itself proof that a turn is active. This
@@ -601,6 +605,12 @@ impl ComposerActivity {
                 // before this client subscribed.
                 self.active_turn = true;
                 self.last_activity_at = now;
+            }
+            ConversationActivityEvent::Delta(phase) => {
+                self.active_turn = true;
+                self.last_activity_at = now;
+                // 阶段细分：thinking/answering 流式即状态（与渲染同源）。
+                self.phase = phase;
             }
             ConversationActivityEvent::Usage {
                 prompt_tokens,
@@ -648,8 +658,16 @@ fn conversation_activity_event(
             context_limit: u64::from(*context_limit),
             model: model.clone(),
         }),
-        DomainConversationEvent::RoundDelta { .. }
-        | DomainConversationEvent::BlockCheckpoint { .. }
+        DomainConversationEvent::RoundDelta { kind, .. } => {
+            // 阶段细分（与渲染同源：thinking/answering 流式即状态）。
+            let phase = match kind {
+                deepx_client::RoundDeltaKind::Thinking => WorkPhase::Thinking,
+                deepx_client::RoundDeltaKind::Answering => WorkPhase::Answering,
+                deepx_client::RoundDeltaKind::ToolCalling => WorkPhase::Thinking,
+            };
+            Some(ConversationActivityEvent::Delta(phase))
+        }
+        DomainConversationEvent::BlockCheckpoint { .. }
         | DomainConversationEvent::RoundCompleted { .. }
         | DomainConversationEvent::ProviderRetrying { .. }
         | DomainConversationEvent::ProviderToolStatus { .. } => {
@@ -699,6 +717,24 @@ pub struct AskAnswer {
     pub answer: String,
 }
 
+/// 工作阶段（composer 顶部状态栏数据源）：由 conversation/tool 频道
+/// 事件推导（round_delta kind / tool 生命周期 / 交互挂起）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPhase {
+    /// 无活动回合。
+    #[default]
+    Idle,
+    /// 模型推理中（round_delta kind=thinking 流式）。
+    Thinking,
+    /// 模型生成回答中（round_delta kind=answering 流式）。
+    Answering,
+    /// 工具执行中（tool 频道 ToolStarted；携带工具名）。
+    Tool(String),
+    /// 交互挂起等待用户（permission/ask/plan 任一 pending）。
+    WaitingUser,
+}
+
 /// View model consumed directly by the native XAML composer.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -707,6 +743,8 @@ pub struct ComposerState {
     pub seed: String,
     pub is_streaming: bool,
     pub has_pending_gate: bool,
+    /// 工作阶段（状态栏）。
+    pub phase: WorkPhase,
     /// plan | code。
     pub mode: String,
     pub model: String,
@@ -1122,6 +1160,21 @@ impl BridgeCore {
     /// (state, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新底部栏。
     /// Combines typed conversation activity, interaction gates, settings, and
     /// UI-local command feedback.
+    /// tool 频道生命周期更新工作阶段（状态栏数据源）。
+    fn set_composer_phase(&self, seed: &str, phase: WorkPhase) {
+        let now = unix_ms();
+        let mut map = self
+            .composer_activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(seed.to_string()).or_default();
+        entry.phase = phase;
+        entry.last_activity_at = now;
+        drop(map);
+        // 状态变化 → 唤醒 composer 刷新（UI timer 比对 rev）。
+        self.composer_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn composer_snapshot(&self) -> (ComposerState, u64) {
         let rev = self.composer_rev.load(Ordering::Relaxed);
         let active = self.active_seed();
@@ -1154,6 +1207,11 @@ impl BridgeCore {
         state.seed = active.clone();
         state.is_streaming = is_streaming;
         state.has_pending_gate = gate;
+        state.phase = activity.map(|a| a.phase).unwrap_or_default();
+        // 交互挂起优先级最高：即使流式进行中，用户必须先响应弹窗。
+        if gate {
+            state.phase = WorkPhase::WaitingUser;
+        }
         state.model = model;
         state.context_tokens = context_tokens;
         state.context_limit = context_limit;
@@ -2884,6 +2942,22 @@ impl BridgeCore {
                 };
                 if let Some(ev) = tool_permission_event(event) {
                     self.apply_tool_permission_event(&batch.seed, ev);
+                    // 权限请求挂起：状态栏切到"等待用户"。
+                    self.set_composer_phase(&batch.seed, WorkPhase::WaitingUser);
+                }
+                // 工作状态：工具执行生命周期（tool_started 带工具名）。
+                match event {
+                    deepx_client::ToolEvent::ToolStarted { name, .. } => {
+                        self.set_composer_phase(
+                            &batch.seed,
+                            WorkPhase::Tool(name.clone()),
+                        );
+                    }
+                    deepx_client::ToolEvent::ToolFinished { .. } => {
+                        // 工具完成 → 回到生成（后续 thinking/answering delta 会覆盖）。
+                        self.set_composer_phase(&batch.seed, WorkPhase::Thinking);
+                    }
+                    _ => {}
                 }
             }
             // 原生 ChatView 直连：Tool 频道渲染事件（tool_call_prepared /
@@ -3615,8 +3689,15 @@ fn parse_conversation_activity_event(event: &Value) -> Option<ConversationActivi
                 .unwrap_or_default()
                 .to_string(),
         }),
-        "round_delta"
-        | "block_checkpoint"
+        "round_delta" => Some(ConversationActivityEvent::Delta(match event
+            .get("kind")
+            .and_then(Value::as_str)
+        {
+            Some("thinking") => WorkPhase::Thinking,
+            Some("answering") => WorkPhase::Answering,
+            _ => return None,
+        })),
+        "block_checkpoint"
         | "round_completed"
         | "provider_retrying"
         | "provider_tool_status" => Some(ConversationActivityEvent::Touched),
@@ -4039,9 +4120,26 @@ mod tests {
         assert_eq!(prompt_tokens, 1234);
         assert_eq!(context_limit, 200000);
         assert_eq!(model, "gpt-5");
-        // 流式事件 → Touched。
+        // round_delta → Delta（阶段细分；thinking/answering 生效）。
+        let ev = parse_conversation_activity_event(&json!({
+            "type": "round_delta", "turn_id": "t1", "round_num": 1,
+            "kind": "thinking", "delta": "x",
+        }))
+        .expect("parse");
+        assert!(matches!(ev, E::Delta(WorkPhase::Thinking)));
+        let ev = parse_conversation_activity_event(&json!({
+            "type": "round_delta", "turn_id": "t1", "round_num": 1,
+            "kind": "answering", "delta": "y",
+        }))
+        .expect("parse");
+        assert!(matches!(ev, E::Delta(WorkPhase::Answering)));
+        // round_delta 缺 kind → 不视为活动事件（None）。
+        assert!(parse_conversation_activity_event(&json!({
+            "type": "round_delta", "turn_id": "t1",
+        }))
+        .is_none());
+        // 其余流式事件 → Touched。
         for ty in [
-            "round_delta",
             "block_checkpoint",
             "round_completed",
             "provider_retrying",
