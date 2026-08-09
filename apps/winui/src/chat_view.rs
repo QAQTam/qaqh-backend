@@ -466,9 +466,17 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             set_render_generation.call(*render_generation.borrow());
                         }
                     }
-                    // 覆盖层存活期间（后台恢复，快照未达）：每帧推进
-                    // shimmer 光带相位并强制渲染（无事件也要动起来）。
-                    if recovering.borrow().is_some() {
+                    // 覆盖层/加载态存活期间（后台恢复未完成，或快照未达
+                    // 的加载空态）：每帧推进 shimmer 光带相位并强制渲染
+                    // （无事件也要动起来）。加载态判定与渲染分支一致：
+                    // turns 空 + seed 非空 + 尚未 restore。
+                    let loading_state = {
+                        let t = transcript.borrow();
+                        !seed.is_empty()
+                            && t.turns().is_empty()
+                            && *last_restored_seed.borrow() != seed
+                    };
+                    if recovering.borrow().is_some() || loading_state {
                         *shimmer_tick.borrow_mut() += 1;
                         *render_generation.borrow_mut() += 1;
                         set_render_generation.call(*render_generation.borrow());
@@ -510,6 +518,16 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 false,
             )
         };
+        // 加载中统一用 shimmer 覆盖层（与后台恢复同款：转圈 + 光带
+        // 流动，加载全程有动画，不白屏）。shimmer 相位由 vsync 泵在
+        // 加载态期间每帧推进（见回调末尾的 shimmer 驱动）。
+        if busy {
+            let tick = *shimmer_tick.borrow();
+            return deepx_fluent::loading_overlay("chat-loading", title, "加载中，请稍候", tick)
+                .automation_name(title)
+                .automation_id("chat-loading")
+                .with_key(format!("chat-loading-{active_seed}"));
+        }
         return deepx_fluent::empty_state(title, detail, busy)
             .transition(motion::session_enter(), motion::session_exit())
             .automation_name(title)
