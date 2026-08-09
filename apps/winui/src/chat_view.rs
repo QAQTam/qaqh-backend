@@ -48,6 +48,11 @@ const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 /// 滚动有关）。结构变化（restore / 新 turn / round 完成）不受此限。
 const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(8);
 
+/// 后台时长超过此值（窗口不可见，vsync 回调暂停）→ 恢复时走快照
+/// resume：丢弃积压增量事件，拉 timeline 快照一次到位（复用 restore
+/// 分支，毫秒级），而不是重放后台期间积压的增量（可能数千条）。
+const BACKGROUND_RESUME_AFTER: Duration = Duration::from_secs(30);
+
 /// 显式跟随状态机：Following = 新内容贴底；Idle = 用户上滚离开
 /// （浮层"回到最新"按钮出现；点击 → force_tail 回底 + 重新跟随）。
 /// 进入跟随必须是显式动作（点击 / 新会话 / restore 到尾部），不做
@@ -131,9 +136,17 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 独立提交，不会因构造 rev 与下一条传输 rev 碰撞而漏帧。
     let render_generation = cx.use_ref::<u64>(0);
     let (_, set_render_generation) = cx.use_state::<u64>(0);
-    // Live 渲染间隔基准：流式 delta 帧级提交（16ms，不做时间限频），
+    // Live 渲染间隔基准：流式 delta 帧级提交（8ms，不做时间限频），
     // 峰值成本由段级 diff + 窗口回收兜底；Structural 变更立即提交。
     let last_live_render = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
+    // 后台恢复检测：上一次 vsync 帧回调时刻。窗口最小化/不可见时合成器
+    // 暂停回调，恢复可见后首帧 elapsed 即后台时长——超过阈值走"快照
+    // 恢复"（丢弃积压增量 + 拉 timeline 快照一次到位），而非重放后台
+    // 期间积压的几千条增量事件。vsync 未停（可见）则增量正常消费，
+    // 此检测永不触发——逻辑自洽。
+    let last_frame_at = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
+    // 本"可见期"是否已做过后台恢复（每帧检测，只处理一次）。
+    let background_resumed = cx.use_ref::<bool>(false);
     // 锚定补偿挂起标记：`Some(rows)` = 本帧渲染需用 within 滚动（顶部
     // 预加载后把「原窗口首行」锚回原位，视口不跳）。rows = 扩展前移量
     // = 原首行的新下标。渲染闭包 take 后随 preserve_anchor 下发。
@@ -165,6 +178,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let render_generation = render_generation.clone();
         let set_render_generation = set_render_generation.clone();
         let last_live_render = last_live_render.clone();
+        let last_frame_at = last_frame_at.clone();
+        let background_resumed = background_resumed.clone();
         move || {
             if frame_revoker.borrow().is_some() {
                 return;
@@ -185,11 +200,28 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let render_generation = render_generation.clone();
                 let set_render_generation = set_render_generation.clone();
                 let last_live_render = last_live_render.clone();
+                let last_frame_at = last_frame_at.clone();
+                let background_resumed = background_resumed.clone();
                 let pending_anchor = pending_anchor.clone();
                 move || {
+                    // 后台恢复检测：窗口不可见时 vsync 回调暂停，恢复可见
+                    // 后首帧 elapsed = 后台时长。超过阈值 → 丢弃积压增量
+                    // （快照会覆盖 transcript）+ 清 last_restored_seed 触发
+                    // 快照重拉 → 复用 restore 分支一次到位（毫秒级）。
+                    let now = std::time::Instant::now();
+                    if now.duration_since(*last_frame_at.borrow())
+                        >= BACKGROUND_RESUME_AFTER
+                        && !*background_resumed.borrow()
+                    {
+                        *background_resumed.borrow_mut() = true;
+                        bridge.core().chat_drain();
+                        bridge.core().chat_output_drain();
+                        *last_restored_seed.borrow_mut() = String::new();
+                        log_diag("chat_view: background resume (drop backlog + snapshot refresh)");
+                    }
+                    *last_frame_at.borrow_mut() = now;
                     // DeepX perf diagnostic: data-scale snapshot every 5s
                     // (turns in memory vs windowed render rows vs viewports).
-                    let now = std::time::Instant::now();
                     if now.duration_since(*last_scale_log.borrow())
                         >= std::time::Duration::from_secs(5)
                     {
