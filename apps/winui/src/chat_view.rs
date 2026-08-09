@@ -38,6 +38,16 @@ const PUMP_INTERVAL: Duration = Duration::from_millis(16);
 /// 变化（restore / 新 turn / round 完成）不受此限，立即滚底。
 const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 
+/// 显式跟随状态机：Following = 新内容贴底；Idle = 用户上滚离开
+/// （浮层"回到最新"按钮出现；点击 → force_tail 回底 + 重新跟随）。
+/// 进入跟随必须是显式动作（点击 / 新会话 / restore 到尾部），不做
+/// 每帧隐式判定——用户完全掌控"我在底部"的意图。
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FollowState {
+    Following,
+    Idle,
+}
+
 /// 顶部预加载分页大小：滚动接近窗口顶部时一次扩展的回合数。
 /// 与 `markdown_winui::WINDOW_DEFAULT_LEN` 同量级，可经实机手感调优。
 const WINDOW_PAGE: usize = 30;
@@ -88,6 +98,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let session_cache = cx.use_ref::<SessionTranscriptCache>(SessionTranscriptCache::default());
     let session_viewports = cx.use_ref::<HashMap<String, TemplatedViewport>>(HashMap::new());
     let pending_viewport_restore = cx.use_ref::<Option<(String, u64, TemplatedViewport)>>(None);
+    // 显式跟随状态机：按钮/会话切换进入，on_view_changed 离开驱动
+    let follow_state = cx.use_ref::<FollowState>(FollowState::Following);
     // 已成功 restore 的 seed：空态文案区分"快照已加载但会话为空"（全新
     // 空会话 → "开始新的对话…"）与"快照未到达仍在加载"（→ "加载会话…"）。
     let last_restored_seed = cx.use_ref::<String>(String::new());
@@ -135,6 +147,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_scroll_request = last_scroll_request.clone();
         let scroll_version = scroll_version.clone();
         let force_tail_version = force_tail_version.clone();
+        let follow_state = follow_state.clone();
         let pending_anchor = pending_anchor.clone();
         let render_generation = render_generation.clone();
         let set_render_generation = set_render_generation.clone();
@@ -193,6 +206,12 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             None if cached.is_some() => Some(generation),
                             _ => None,
                         };
+                        // 显式状态机：只有"用户之前滚走"的会话恢复为 Idle
+                        // （浮层按钮出现）；其余（全新/尾部离开）进入跟随。
+                        *follow_state.borrow_mut() = match &viewport {
+                            Some(v) if !v.following_tail => FollowState::Idle,
+                            _ => FollowState::Following,
+                        };
                         *render_generation.borrow_mut() += 1;
                         set_render_generation.call(*render_generation.borrow());
                         if !seed.is_empty() {
@@ -235,6 +254,13 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             if !preserve_viewport {
                                 *force_tail_version.borrow_mut() = Some(*scroll_version.borrow());
                             }
+                            // restore 到用户滚走的位置 → 保持 Idle（按钮回底）；
+                            // 否则贴底并进入跟随。
+                            *follow_state.borrow_mut() = if preserve_viewport {
+                                FollowState::Idle
+                            } else {
+                                FollowState::Following
+                            };
                             *last_scroll_request.borrow_mut() = now;
                             *render_generation.borrow_mut() += 1;
                             set_render_generation.call(*render_generation.borrow());
@@ -435,15 +461,31 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     } else if *force_tail_version.borrow() == Some(*scroll_version.borrow()) {
         force_tail_version.borrow_mut().take();
         builder = builder.force_tail(*scroll_version.borrow());
-    } else {
+    } else if *follow_state.borrow() == FollowState::Following {
+        // 显式跟随：仅 Following 态下发（Idle = 用户上滚，不打扰）
         builder = builder.follow_tail(*scroll_version.borrow());
     }
     let viewport_seed = active_seed.clone();
     let transcript_list: Element = builder
         .on_view_changed({
+            let follow_state = follow_state.clone();
+            let render_generation = render_generation.clone();
+            let set_render_generation = set_render_generation.clone();
             let session_viewports = session_viewports.clone();
             let pending_viewport_restore = pending_viewport_restore.clone();
             move |viewport: TemplatedViewport| {
+                // 显式状态机驱动：backend 的 near-tail 判定 → 状态切换 →
+                // 重渲染（浮层按钮显隐）。状态切换不产生滚动请求，无反馈环。
+                let next = if viewport.following_tail {
+                    FollowState::Following
+                } else {
+                    FollowState::Idle
+                };
+                if *follow_state.borrow() != next {
+                    *follow_state.borrow_mut() = next;
+                    *render_generation.borrow_mut() += 1;
+                    set_render_generation.call(*render_generation.borrow());
+                }
                 session_viewports
                     .borrow_mut()
                     .insert(viewport_seed.clone(), viewport);
@@ -500,7 +542,42 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         .top_threshold(NEAR_TOP_THRESHOLD_PX)
         .with_key(format!("chat-transcript-{active_seed}"))
         .into();
-    transcript_list
+    // 显式跟随入口：Idle 时浮层"回到最新"按钮（点击 → force_tail +
+    // 重新跟随；跟随态隐藏，不挡内容）
+    let jump_button: Element = if *follow_state.borrow() == FollowState::Idle {
+        let btn: Element = button("回到最新 ↓")
+            .on_click({
+                let follow_state = follow_state.clone();
+                let scroll_version = scroll_version.clone();
+                let force_tail_version = force_tail_version.clone();
+                let render_generation = render_generation.clone();
+                let set_render_generation = set_render_generation.clone();
+                move || {
+                    *scroll_version.borrow_mut() += 1;
+                    *force_tail_version.borrow_mut() = Some(*scroll_version.borrow());
+                    *follow_state.borrow_mut() = FollowState::Following;
+                    *render_generation.borrow_mut() += 1;
+                    set_render_generation.call(*render_generation.borrow());
+                }
+            })
+            .into();
+        btn.vertical_alignment(VerticalAlignment::Bottom)
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .margin(Thickness {
+                left: 0.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: tokens::SPACE_4,
+            })
+            .with_key("jump-tail")
+    } else {
+        Element::Empty
+    };
+    let transcript: Element = grid([transcript_list, jump_button])
+        .columns([GridLength::Star(1.0)])
+        .rows([GridLength::Star(1.0)])
+        .into();
+    transcript
         .transition(motion::session_enter(), motion::session_exit())
         .automation_name("对话记录")
         .automation_id("chat-transcript")
