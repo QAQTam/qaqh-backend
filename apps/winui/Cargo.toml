@@ -20,10 +20,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
 # Downstream Reactor extensions are kept in the durable fork and pinned so a
 # clean machine reproduces the exact WinRT bindings and runtime setup.
-windows-reactor = { git = "https://github.com/QAQTam/deepx-winui-rs.git", rev = "d8c8ac7a62d83b5b1e43bda84a00fb5335f43905" }
+# 本地开发态：path 指向 fork 工作区；release 打包前切回 git rev（同 deepx-fluent）。
+windows-reactor = { path = "../../../DeepX-windows-rs/crates/libs/reactor" }
 # desktop.openDialog / openImageDialog: Win32 IFileOpenDialog (COM) 绑定。
 # 仅启用所需最小 feature 集（0.100.0 小写模块名 feature）。
-windows = { git = "https://github.com/QAQTam/deepx-winui-rs.git", rev = "d8c8ac7a62d83b5b1e43bda84a00fb5335f43905", default-features = false, features = [
+windows = { path = "../../../DeepX-windows-rs/crates/libs/windows", default-features = false, features = [
     "combaseapi",     # CoCreateInstance / CoTaskMemFree / CLSCTX_ALL
     "shobjidl_core",  # IFileOpenDialog / IFileDialog / IShellItem(Array) / SIGDN / FOS_*
     "shtypes",        # COMDLG_FILTERSPEC
@@ -33,7 +34,7 @@ windows = { git = "https://github.com/QAQTam/deepx-winui-rs.git", rev = "d8c8ac7
 ] }
 
 [build-dependencies]
-windows-reactor-setup = { git = "https://github.com/QAQTam/deepx-winui-rs.git", rev = "d8c8ac7a62d83b5b1e43bda84a00fb5335f43905" }
+windows-reactor-setup = { path = "../../../DeepX-windows-rs/crates/libs/reactor-setup" }
 
 [lints]
 workspace = true

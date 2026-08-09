@@ -6,7 +6,10 @@ license.workspace = true
 description = "Reusable Windows 11 Fluent visual primitives for DeepX WinUI surfaces"
 
 [dependencies]
-windows-reactor = { git = "https://github.com/QAQTam/deepx-winui-rs.git", rev = "d8c8ac7a62d83b5b1e43bda84a00fb5335f43905" }
+# 本地开发态：直接依赖 fork 工作区（F:\DeepX-windows-rs）。
+# release 打包前切回跨仓库：
+#   windows-reactor = { git = "https://github.com/QAQTam/deepx-winui-rs.git", rev = "<deepx-reactor HEAD>" }
+windows-reactor = { path = "../../../DeepX-windows-rs/crates/libs/reactor" }
 
 [lints]
 workspace = true
