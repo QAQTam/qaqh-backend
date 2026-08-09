@@ -95,6 +95,28 @@ pub struct PendingOutput {
     pub reference: serde_json::Value,
 }
 
+/// TurnFailed 的 DomainError（`{error_id, code, message, retryable, ..}`）
+/// 提取为 UI 可显示文本；未知形状时给出兜底文案。
+fn extract_failed_error(error: &serde_json::Value) -> String {
+    let code = error
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("turn_failed");
+    let message = error
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Model request failed");
+    let retryable = error
+        .get("retryable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if retryable {
+        format!("{code}: {message}（可重试）")
+    } else {
+        format!("{code}: {message}")
+    }
+}
+
 /// turn 生命周期（渲染用；对齐协议 `TurnStarted/TurnCompleted/TurnFailed`）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TurnStatus {
@@ -154,6 +176,8 @@ pub struct TurnView {
     pub turn_id: String,
     pub user_text: String,
     pub status: TurnStatus,
+    /// TurnFailed 的错误信息（`code: message`，含 retryable 提示），UI 显示用。
+    pub failed_error: Option<String>,
     pub rounds: Vec<RoundView>,
 }
 
@@ -670,6 +694,7 @@ impl Transcript {
                     turn_id: turn_id.clone(),
                     user_text: user_text.clone(),
                     status: TurnStatus::Running,
+                    failed_error: None,
                     rounds: Vec::new(),
                 });
                 self.turn_index.insert(turn_id.clone(), index);
@@ -685,7 +710,7 @@ impl Transcript {
                 self.turns[index].status = TurnStatus::Completed;
                 TranscriptChange::structural(false)
             }
-            ConversationEvent::TurnFailed { turn_id, .. } => {
+            ConversationEvent::TurnFailed { turn_id, error } => {
                 let Some(&index) = self.turn_index.get(turn_id) else {
                     return TranscriptChange::default();
                 };
@@ -693,7 +718,19 @@ impl Transcript {
                     return TranscriptChange::default();
                 }
                 self.turns[index].status = TurnStatus::Failed;
-                TranscriptChange::structural(false)
+                self.turns[index].failed_error = Some(extract_failed_error(&error));
+                // Best-effort：若流式内容已完整输出（如 [DONE] 后断连误判），
+                // 把 Live 答案冻结为 Final 富文本，避免"永远 Live"状态残留。
+                let mut changed = false;
+                for round in &mut self.turns[index].rounds {
+                    if let AnswerView::Streaming { raw, .. } = &round.answer {
+                        if !raw.is_empty() {
+                            let raw_text = raw.clone();
+                            changed |= round.finalize(None, Some(&raw_text));
+                        }
+                    }
+                }
+                TranscriptChange::structural(changed)
             }
             ConversationEvent::Unknown => TranscriptChange::default(),
             ConversationEvent::RoundDelta {
@@ -1072,6 +1109,7 @@ impl Transcript {
             turn_id: turn_id.to_string(),
             user_text: String::new(),
             status: TurnStatus::Running,
+            failed_error: None,
             rounds: Vec::new(),
         });
         self.turn_index.insert(turn_id.to_string(), index);
@@ -1209,6 +1247,7 @@ fn to_turn_view(t: RestoredTurn) -> TurnView {
         turn_id: t.turn_id.clone(),
         user_text: t.user_text,
         status: t.status,
+        failed_error: None,
         rounds: t
             .rounds
             .into_iter()
