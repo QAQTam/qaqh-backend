@@ -1,6 +1,6 @@
 use mermaid_rs_renderer::{RenderOptions, Theme, render_with_options};
 use windows_reactor::{
-    ColorScheme, Element, ElementExt, HorizontalAlignment, Image, ImageSource, ScrollBarVisibility,
+    AccessibilityExt, BackgroundExt, ColorScheme, Element, HorizontalAlignment, Image, ImageSource, KeyExt, LayoutExt, PaddingExt, TextStyleExt, ScrollBarVisibility,
     Stretch, ThemeRef, Thickness, VerticalAlignment, border, scroll_viewer, text_block, vstack,
 };
 
