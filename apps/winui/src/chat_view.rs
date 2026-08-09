@@ -38,6 +38,12 @@ const PUMP_INTERVAL: Duration = Duration::from_millis(16);
 /// 变化（restore / 新 turn / round 完成）不受此限，立即滚底。
 const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 
+/// Live（非结构性）渲染间隔：**帧级**（16ms，与泵对齐）——流式 delta
+/// 每帧提交一次 XAML，不做时间限频（"快显示"优先；峰值成本由段级 diff
+/// 与窗口回收兜底）。与滚动节流解耦：渲染快 ≠ 滚动请求快（反馈环只与
+/// 滚动有关）。结构变化（restore / 新 turn / round 完成）不受此限。
+const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(16);
+
 /// 显式跟随状态机：Following = 新内容贴底；Idle = 用户上滚离开
 /// （浮层"回到最新"按钮出现；点击 → force_tail 回底 + 重新跟随）。
 /// 进入跟随必须是显式动作（点击 / 新会话 / restore 到尾部），不做
@@ -100,6 +106,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let pending_viewport_restore = cx.use_ref::<Option<(String, u64, TemplatedViewport)>>(None);
     // 显式跟随状态机：按钮/会话切换进入，on_view_changed 离开驱动
     let follow_state = cx.use_ref::<FollowState>(FollowState::Following);
+    // 数据规模诊断日志节流基准（5s；见 timer 泵内的 scale 快照）
+    let last_scale_log = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     // 已成功 restore 的 seed：空态文案区分"快照已加载但会话为空"（全新
     // 空会话 → "开始新的对话…"）与"快照未到达仍在加载"（→ "加载会话…"）。
     let last_restored_seed = cx.use_ref::<String>(String::new());
@@ -119,8 +127,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 独立提交，不会因构造 rev 与下一条传输 rev 碰撞而漏帧。
     let render_generation = cx.use_ref::<u64>(0);
     let (_, set_render_generation) = cx.use_state::<u64>(0);
-    // Live 渲染节流：流式 delta 不逐帧提交 XAML（60fps → ~20fps），
-    // 降低 reconciler diff 开销。Structural 变更立即提交。
+    // Live 渲染间隔基准：流式 delta 帧级提交（16ms，不做时间限频），
+    // 峰值成本由段级 diff + 窗口回收兜底；Structural 变更立即提交。
     let last_live_render = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     // 锚定补偿挂起标记：`Some(rows)` = 本帧渲染需用 within 滚动（顶部
     // 预加载后把「原窗口首行」锚回原位，视口不跳）。rows = 扩展前移量
@@ -148,6 +156,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let scroll_version = scroll_version.clone();
         let force_tail_version = force_tail_version.clone();
         let follow_state = follow_state.clone();
+        let last_scale_log = last_scale_log.clone();
         let pending_anchor = pending_anchor.clone();
         let render_generation = render_generation.clone();
         let set_render_generation = set_render_generation.clone();
@@ -174,6 +183,22 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let last_live_render = last_live_render.clone();
                 let pending_anchor = pending_anchor.clone();
                 move || {
+                    // DeepX perf diagnostic: data-scale snapshot every 5s
+                    // (turns in memory vs windowed render rows vs viewports).
+                    let now = std::time::Instant::now();
+                    if now.duration_since(*last_scale_log.borrow())
+                        >= std::time::Duration::from_secs(5)
+                    {
+                        *last_scale_log.borrow_mut() = now;
+                        let t = transcript.borrow();
+                        log_diag(&format!(
+                            "chat_view scale: turns={} window={} rev={} viewports={}",
+                            t.turns().len(),
+                            t.window_len(),
+                            t.mutation_rev(),
+                            session_viewports.borrow().len(),
+                        ));
+                    }
                     // 会话切换：缓存旧会话的原生投影，立即恢复目标会话；
                     // canonical 快照仍会异步刷新并覆盖缓存。
                     let seed = bridge.core().active_seed();
@@ -375,12 +400,13 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             *scroll_version.borrow_mut() += 1;
                             *last_scroll_request.borrow_mut() = now;
                         }
-                        // Live（非结构性）更新节流：不逐帧提交 XAML，
-                        // 降低 reconciler diff 开销（~60fps → ~20fps）。
-                        // Structural 变更（新 turn/round 完成）立即提交。
+                        // Live（非结构性）更新：帧级提交（16ms，与泵
+                        // 对齐），不做时间限频——流式"快显示"优先，峰值
+                        // 成本由段级 diff 与窗口回收兜底。Structural 变更
+                        // （新 turn/round 完成）立即提交。
                         if structural
                             || now.duration_since(*last_live_render.borrow())
-                                >= SCROLL_REQUEST_THROTTLE
+                                >= LIVE_RENDER_INTERVAL
                         {
                             *last_live_render.borrow_mut() = now;
                             *render_generation.borrow_mut() += 1;
