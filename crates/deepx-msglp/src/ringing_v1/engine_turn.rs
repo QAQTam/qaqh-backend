@@ -1142,6 +1142,8 @@ impl TurnEngine {
             let mut timeline_segment = 0u32;
             let mut timeline_tools_open = HashSet::new();
             let mut had_error = false;
+            // 已收到 Done（内容完整流式输出）标记：gate 尾部错误不再否定完成。
+            let mut done_seen = false;
             let mut gate_error = None;
             let mut current_request_usage: Option<UsageInfo> = None;
             let request_fingerprint = ctx.agent.token_calibration_fingerprint();
@@ -1247,6 +1249,7 @@ impl TurnEngine {
                     deepx_gate::StreamEvent::Done {
                         raw_message, usage, ..
                     } => {
+                        done_seen = true;
                         if let Some(ref u) = usage {
                             ctx.agent.session.record_usage(u);
                             if !ctx.agent.ephemeral {
@@ -1432,7 +1435,7 @@ impl TurnEngine {
                 return Self::abort_running_turn(ctx, turn_id, last_usage);
             }
 
-            if had_error || result.is_err() {
+            if (had_error || result.is_err()) && !done_seen {
                 log::info!(
                     "[TURN] run_lap turn_id={} round_num={} gate error or had_error={}",
                     turn_id,
@@ -1462,6 +1465,20 @@ impl TurnEngine {
                     usage: last_usage,
                     message,
                 };
+            }
+            if done_seen && (had_error || result.is_err()) {
+                // 内容已完整流式输出后才报错（[DONE] 后断连/杂散错误）：
+                // 不否定已完成的作答——"作答完成却 TurnFailed"会造成前端
+                // 状态残留（markdown 不集中渲染、下一条消息带上一条）。
+                log::warn!(
+                    "[TURN] run_lap turn_id={} round_num={} gate error after Done (ignored): {}",
+                    turn_id,
+                    round_num,
+                    gate_error
+                        .clone()
+                        .or_else(|| result.as_ref().err().map(|e| e.to_string()))
+                        .unwrap_or_default()
+                );
             }
 
             if let Some(usage) = current_request_usage {

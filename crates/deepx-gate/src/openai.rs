@@ -331,8 +331,15 @@ fn stream_sse(
 
         // eventsource-stream appends \n after each data line per SSE spec.
         let data_str = event.data.trim_end().to_string();
-        if data_str.is_empty() || data_str == "[DONE]" {
+        if data_str.is_empty() {
             continue;
+        }
+        // `[DONE]` 是 chat completions 官方流终止标记：立即结束读取。
+        // 此前此处 `continue` 会在 [DONE] 后继续读——若连接随后被服务器
+        // RST（资源紧张/代理超时），events.next() 返回 Err → 已完整输出
+        // 的作答被误判为 TurnFailed（"完成作答后返回错误"的根因）。
+        if data_str == "[DONE]" {
+            break;
         }
 
         let ev: serde_json::Value = match serde_json::from_str(&data_str) {

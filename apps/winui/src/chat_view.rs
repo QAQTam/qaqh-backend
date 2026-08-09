@@ -542,6 +542,20 @@ fn turn_view(i: usize, turn: &TurnView, color_scheme: ColorScheme) -> Element {
             .selectable(),
         deepx_fluent::status_badge(status, tone),
     )];
+    if turn.status == TurnStatus::Failed {
+        if let Some(error) = &turn.failed_error {
+            items.push(
+                text_block(format!("回合失败：{error}"))
+                    .font_size(tokens::TYPE_CAPTION)
+                    .foreground(ThemeRef::SystemCritical)
+                    .wrap()
+                    .selectable()
+                    .automation_name("回合失败详情")
+                    .with_key(format!("t{i}-failed-error"))
+                    .into(),
+            );
+        }
+    }
     for round in &turn.rounds {
         items.push(round_view(i, round, color_scheme));
     }
