@@ -27,9 +27,11 @@ use windows_reactor::*;
 use crate::bridge::Bridge;
 use crate::chat_adapter;
 
-/// XAML 提交批次（16ms ≈ 60fps）：队列中的 token delta 先合并，再在
-/// UI 线程的一次 retained-mode 更新中提交；不逐 token 触碰控件树。
-const PUMP_INTERVAL: Duration = Duration::from_millis(16);
+/// XAML 提交批次：DispatcherTimer 间隔（8ms 请求 → 实际 15.6ms = 系统
+/// 时钟粒度 → ~60fps；16ms 请求会被合并到 ~31ms → 帧率减半至 ~33fps，
+/// streaming-bench 实测证实）。队列中的 token delta 先合并，再在 UI
+/// 线程的一次 retained-mode 更新中提交；不逐 token 触碰控件树。
+const PUMP_INTERVAL: Duration = Duration::from_millis(8);
 
 /// 跟随尾部滚动请求节流：live 流式期间 100ms 一次贴底请求。16ms 泵每
 /// tick 都请求会让滚动与用户滚轮/滚动条抢占，并形成"滚动 → 行 realize
