@@ -48,19 +48,7 @@ fn action_button(
 }
 
 /// XAML 标题栏组件（放入外层 Grid row 0；host 检测到 TitleBar 自动接线）。
-///
-/// `info_flyout` 是会话信息面板的内容元素（`info_panel` 组件输出），挂到
-/// 标题栏 Info 按钮的富内容 Flyout（P4a 停靠列 → 浮层，win-dev-skills
-/// winui-design：上下文浮层用 Flyout + 平台主题阴影）；`info_flyout_open`
-/// 由 main.rs 计算（`info_open && view == chat`），驱动 ShowAt/Hide。
-/// light dismiss / Esc 关闭时 `on_flyout_closed` 把 header flag 翻回，
-/// 按钮 active 高亮与浮层状态保持同源。
-pub fn header(
-    cx: &mut RenderCx,
-    bridge: Arc<Bridge>,
-    info_flyout: Element,
-    info_flyout_open: bool,
-) -> Element {
+pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (state, set_state) = cx.use_state::<HeaderState>(HeaderState::default());
     let (lang, set_lang) = cx.use_state::<String>("zh".to_string());
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
@@ -167,9 +155,9 @@ pub fn header(
         "在文件资源管理器中打开工作区"
     };
     let info_label = if en {
-        "Session information"
+        "Session info (always on)"
     } else {
-        "会话信息"
+        "会话信息（常驻）"
     };
     let stats_label = if en {
         "Usage statistics"
@@ -222,29 +210,15 @@ pub fn header(
             on_location,
         ),
         divider,
-        // ④info：富内容 Flyout（InfoPopover 原生承载）。按钮点击翻转
-        // header flag（轮询驱动 flyout ShowAt）；light dismiss/Esc 由
-        // FlyoutClosed 回调翻转回 false，active 高亮与浮层双向同步。
-        // 关闭瞬间由 main.rs 的 info_open 翻转触发 spawn_refresh_info。
-        {
-            let mut info_btn = button("")
-                .icon(Icon::symbol(Symbol::ContactInfo))
-                .subtle()
-                .tooltip(info_label)
-                .automation_name(info_label)
-                .automation_id("header-info")
-                .flyout_element(info_flyout, FlyoutPlacementMode::Bottom)
-                .flyout_open(info_flyout_open)
-                .on_flyout_closed({
-                    let bridge = bridge.clone();
-                    move || bridge.toggle_header_flag(HeaderFlag::Info)
-                })
-                .on_click(on_info);
-            if state.info_open {
-                info_btn = info_btn.accent();
-            }
-            Element::from(info_btn)
-        },
+        action_button(
+            Icon::symbol(Symbol::ContactInfo),
+            info_label,
+            "header-info",
+            // 常驻面板（2026-08 决策：省动画，关不掉）——按钮禁用示意。
+            false,
+            false,
+            on_info,
+        ),
         action_button(
             Icon::symbol(Symbol::FourBars),
             stats_label,

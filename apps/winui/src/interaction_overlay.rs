@@ -98,11 +98,19 @@ fn approval_label(risk: &str, category: &str) -> &'static str {
 /// XAML 交互模态覆盖层（追加进 main.rs 覆盖层 grid，与 splash 同 cell）。
 pub fn interaction_overlay(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (state, set_state) = cx.use_state::<InteractionState>(InteractionState::default());
+    // HookRef 修改不触发重渲染（SetState 同值短路，engine.rs make_state_setter）：
+    // 表单回调（选项选中 / 自定义输入 / checkbox）改 HookRef 后必须 bump 递增强制
+    // 重渲染，使 all_answered / approve_label 等派生值重算。
+    // （此前无此机制：轮询只在快照 rev 变化时 set_state，用户交互不改变快照 →
+    //  确认按钮永远灰 / 批准文案不更新——占位实现的遗留 bug。）
+    let (_, bump) = cx.use_reducer::<u64>(0);
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
     // ask 本地表单：选项选中 / 自定义输入（qid → 值）。仅壳渲染层持有。
     let selected = cx.use_ref::<HashMap<String, String>>(HashMap::new());
     let custom = cx.use_ref::<HashMap<String, String>>(HashMap::new());
+    // ask 横向切换：当前题索引（多题时单题视图 + 上一题/下一题导航）。
+    let cur_q = cx.use_ref::<usize>(0);
     // permission 本地表单：信任此目录。
     let trust = cx.use_ref::<bool>(false);
     // plan 本地表单：拒绝理由 / 目标模式。
@@ -139,12 +147,14 @@ pub fn interaction_overlay(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let feedback = feedback.clone();
         let autonomous = autonomous.clone();
         let last_key = last_key.clone();
+        let cur_q = cur_q.clone();
         move || {
             let key = format!("{kind_key}:{id_key}");
             if key != *last_key.borrow() {
                 *last_key.borrow_mut() = key.clone();
                 selected.borrow_mut().clear();
                 custom.borrow_mut().clear();
+                *cur_q.borrow_mut() = 0;
                 *trust.borrow_mut() = false;
                 *feedback.borrow_mut() = String::new();
                 *autonomous.borrow_mut() = false;
@@ -282,23 +292,34 @@ pub fn interaction_overlay(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             &state,
             feedback,
             autonomous,
+            &bump,
             on_plan_approve,
             on_plan_reject,
         )
     } else {
-        ask_body(&state, selected, custom, on_ask_submit, on_ask_dismiss)
+        ask_body(&state, selected, custom, &bump, &cur_q, on_ask_submit, on_ask_dismiss)
     };
 
+    // 卡片实底（SolidBackground 100% 不透明 + CardStroke 描边）：CardBackground
+    // 约 90% 不透明会让底层文字透出形成"重叠"观感（demo 实证）；模态弹窗
+    // 需要清晰可读 → 全实底。reactor 无元素级 Acrylic，虚化不可行（窗口级
+    // backdrop=Mica 已启用），scrim 变暗承担背景降噪。
     let card: Element = border(vstack((body,)).spacing(12.0).padding(20.0))
         .corner_radius(8.0)
-        .background(ThemeRef::LayerFill)
+        .background(ThemeRef::SolidBackground)
+        .border_brush(ThemeRef::CardStroke)
+        .border_thickness(Thickness::uniform(1.0))
         .width(CARD_WIDTH)
         .horizontal_alignment(HorizontalAlignment::Center)
         .vertical_alignment(VerticalAlignment::Center)
         .into();
 
-    // 模态遮罩：有背景 → 拦截下方基础层命中（与空 grid 穿透互补）。
+    // 模态遮罩：显式 STAR 行/列让 scrim 全窗铺满（Grid 默认 Auto 行高会让
+    // Stretch 子元素只覆盖内容大小——"遮罩不全窗"的根因，demo 已实证）。
+    // 有背景 → 拦截下方基础层命中（与空 grid 穿透互补）。
     grid((card,))
+        .rows([GridLength::STAR])
+        .columns([GridLength::STAR])
         .background(Color {
             a: SCRIM_ALPHA,
             r: 0,
@@ -394,92 +415,163 @@ fn permission_body(
     .into()
 }
 
-/// ask 模板：问题（编号）/ 选项 RadioButton 组 / 自定义输入 TextBox /
-/// [跳过] [确认]。
+/// ask 模板：单题视图（多题时上一题/下一题横向切换）+ 选项 RadioButton 组
+/// + 自定义输入 TextBox + [跳过] [确认]。
+///
+/// 多题时一次只渲染当前题（cur_q 索引），导航行 [上一题] 第 x/y 题 [下一题]
+/// 切换；已答内容保留在 selected/custom map 中，切回时从 map 恢复。
+/// 确认按钮使能 = 全部题目已答（对齐 Web allAnswered，跨题计算）。
 fn ask_body(
     state: &InteractionState,
     selected: HookRef<HashMap<String, String>>,
     custom: HookRef<HashMap<String, String>>,
+    bump: &Updater<u64>,
+    cur_q: &HookRef<usize>,
     on_submit: impl Fn() + 'static,
     on_dismiss: impl Fn() + 'static,
 ) -> Element {
-    let mut question_rows: Vec<Element> = Vec::new();
-    for (i, q) in state.questions.iter().enumerate() {
-        // 选项：RadioButton 组（group = qid；选中 → 清自定义输入）。
-        let mut option_els: Vec<Element> = Vec::new();
-        for (j, opt) in q.options.iter().enumerate() {
-            let opt = opt.clone();
-            let qid = q.id.clone();
-            let checked = selected.borrow().get(&q.id) == Some(&opt);
-            let radio = RadioButton::new(opt.clone())
-                .group(q.id.clone())
-                .checked(checked)
-                .on_checked({
-                    let selected = selected.clone();
-                    let custom = custom.clone();
-                    let qid = qid.clone();
-                    move || {
-                        selected.borrow_mut().insert(qid.clone(), opt.clone());
-                        custom.borrow_mut().remove(&qid);
-                    }
-                })
-                .with_key(format!("opt-{}-{j}", q.id));
-            option_els.push(radio.into());
-        }
-        let options: Element = if option_els.is_empty() {
-            grid(()).into()
-        } else {
-            vstack(option_els).spacing(2.0).into()
-        };
+    let total = state.questions.len();
+    // 当前题索引（越界保护）。HookRef 修改不触发重渲染：导航回调里 bump。
+    let cur = (*cur_q.borrow()).min(total.saturating_sub(1));
+    let q = &state.questions[cur];
 
-        // 自定义输入（无选项或 allow_custom 时；输入 → 清选项选中）。
-        let input: Element = if q.options.is_empty() || q.allow_custom {
-            let qid = q.id.clone();
-            text_box(custom.borrow().get(&q.id).cloned().unwrap_or_default())
-                .placeholder_text("输入自定义答案...")
-                .on_text_changed({
-                    let selected = selected.clone();
-                    let custom = custom.clone();
-                    let qid = qid.clone();
-                    move |t: String| {
-                        if t.trim().is_empty() {
-                            custom.borrow_mut().remove(&qid);
-                        } else {
-                            custom.borrow_mut().insert(qid.clone(), t);
-                            selected.borrow_mut().remove(&qid);
-                        }
-                    }
-                })
-                .with_key(format!("input-{}", q.id))
-                .into()
-        } else {
-            grid(()).into()
-        };
-
-        let title = if state.questions.len() > 1 {
-            format!("{}. {}", i + 1, q.question)
-        } else {
-            q.question.clone()
-        };
-        let q_row: Element = vstack((
-            text_block(title).font_size(13.0).semibold().wrap(),
-            options,
-            input,
-        ))
-        .spacing(6.0)
-        .into();
-        question_rows.push(q_row.with_key(format!("q-{}", q.id)));
+    // 当前题选项：RadioButton 组（group = qid；选中 → 清自定义输入）。
+    // 切换题目后切回，checked 从 selected map 恢复（map 跨题保留）。
+    let mut option_els: Vec<Element> = Vec::new();
+    for (j, opt) in q.options.iter().enumerate() {
+        let opt = opt.clone();
+        let qid = q.id.clone();
+        let checked = selected.borrow().get(&q.id) == Some(&opt);
+        let radio = RadioButton::new(opt.clone())
+            .group(q.id.clone())
+            .checked(checked)
+            .on_checked({
+                let selected = selected.clone();
+                let custom = custom.clone();
+                let bump = bump.clone();
+                let qid = qid.clone();
+                move || {
+                    selected.borrow_mut().insert(qid.clone(), opt.clone());
+                    custom.borrow_mut().remove(&qid);
+                    // HookRef 修改不触发重渲染：bump 递增强制重渲染
+                    // （all_answered 重算 → 确认按钮使能）。
+                    bump.call(|n| n.wrapping_add(1));
+                }
+            })
+            .with_key(format!("opt-{}-{j}", q.id));
+        option_els.push(radio.into());
     }
+    let options: Element = if option_els.is_empty() {
+        grid(()).into()
+    } else {
+        vstack(option_els).spacing(2.0).into()
+    };
+
+    // 当前题自定义输入（无选项或 allow_custom 时；输入 → 清选项选中）。
+    let input: Element = if q.options.is_empty() || q.allow_custom {
+        let qid = q.id.clone();
+        text_box(custom.borrow().get(&q.id).cloned().unwrap_or_default())
+            .placeholder_text("输入自定义答案...")
+            .on_text_changed({
+                let selected = selected.clone();
+                let custom = custom.clone();
+                let bump = bump.clone();
+                let qid = qid.clone();
+                move |t: String| {
+                    if t.trim().is_empty() {
+                        custom.borrow_mut().remove(&qid);
+                    } else {
+                        custom.borrow_mut().insert(qid.clone(), t);
+                        selected.borrow_mut().remove(&qid);
+                    }
+                    bump.call(|n| n.wrapping_add(1));
+                }
+            })
+            .with_key(format!("input-{}", q.id))
+            .into()
+    } else {
+        grid(()).into()
+    };
+
+    let title = if total > 1 {
+        format!("{}. {}", cur + 1, q.question)
+    } else {
+        q.question.clone()
+    };
 
     // 确认按钮使能 = 全部问题已答（对齐 Web allAnswered）。
+    // 工具语义（normalize_ask_user）：每问必答——options 空 + allow_custom
+    // （纯自定义）同样必答；options 空 + 禁自定义会被 UNANSWERABLE_QUESTION
+    // 拒绝，不会到达 UI。
     let all_answered = state.questions.iter().all(|q| {
         let c = custom.borrow().get(&q.id).cloned().unwrap_or_default();
         !c.trim().is_empty() || selected.borrow().get(&q.id).is_some()
     });
+    let answered_count = state
+        .questions
+        .iter()
+        .filter(|q| {
+            let c = custom.borrow().get(&q.id).cloned().unwrap_or_default();
+            !c.trim().is_empty() || selected.borrow().get(&q.id).is_some()
+        })
+        .count();
+
+    // 导航行（仅多题时）：对称布局——[上一题] 贴左、第 x/y 题居中、[下一题]
+    // 贴右（Grid 三列 Auto/STAR/Auto，STAR 列把两端按钮顶到边缘）。
+    // 首题"上一题"灰、末题"下一题"灰；切换只改 cur_q + bump，
+    // 已答内容保留在 map 中，切回时从 map 恢复。
+    let nav: Element = if total > 1 {
+        grid((
+            button("上一题")
+                .subtle()
+                .enabled(cur > 0)
+                .on_click({
+                    let cur_q = cur_q.clone();
+                    let bump = bump.clone();
+                    move || {
+                        let next = cur_q.borrow().saturating_sub(1);
+                        *cur_q.borrow_mut() = next;
+                        bump.call(|n| n.wrapping_add(1));
+                    }
+                })
+                .grid_column(0),
+            text_block(format!("第 {}/{} 题", cur + 1, total))
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .grid_column(1),
+            button("下一题")
+                .subtle()
+                .enabled(cur + 1 < total)
+                .on_click({
+                    let cur_q = cur_q.clone();
+                    let bump = bump.clone();
+                    move || {
+                        let next = (*cur_q.borrow() + 1).min(total - 1);
+                        *cur_q.borrow_mut() = next;
+                        bump.call(|n| n.wrapping_add(1));
+                    }
+                })
+                .grid_column(2),
+        ))
+        .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+        .into()
+    } else {
+        grid(()).into()
+    };
 
     vstack((
         eyebrow("问题"),
-        vstack(question_rows).spacing(12.0),
+        text_block(title).font_size(13.0).semibold().wrap(),
+        options,
+        input,
+        nav,
+        // 已答进度提示：实时反映 bump 重渲染；未答完时说明确认按钮为何灰。
+        text_block(format!(
+            "已答 {answered_count}/{total} 题，全部回答后可确认"
+        ))
+        .font_size(11.0)
+        .foreground(ThemeRef::SecondaryText),
         grid((
             grid(()).grid_column(0),
             hstack((
@@ -513,6 +605,7 @@ fn plan_body(
     state: &InteractionState,
     feedback: HookRef<String>,
     autonomous: HookRef<bool>,
+    bump: &Updater<u64>,
     on_approve: impl Fn() + 'static,
     on_reject: impl Fn() + 'static,
 ) -> Element {
@@ -605,8 +698,10 @@ fn plan_body(
         .height(56.0)
         .on_text_changed({
             let feedback = feedback.clone();
+            let bump = bump.clone();
             move |t: String| {
                 *feedback.borrow_mut() = t;
+                bump.call(|n| n.wrapping_add(1));
             }
         })
         .into();
@@ -614,10 +709,14 @@ fn plan_body(
     // 目标模式（非 todo_activation 时；对齐 Web autonomous checkbox）。
     let auto_row: Element = if !is_todo {
         let auto_for_cb = autonomous.clone();
+        let bump_for_cb = bump.clone();
         check_box(*autonomous.borrow())
             .content("以目标模式执行")
             .on_checked(move |v: bool| {
                 *auto_for_cb.borrow_mut() = v;
+                // 批准按钮文案（"批准并启动目标模式"）依赖 autonomous：
+                // 勾选后必须重渲染才能更新。
+                bump_for_cb.call(|n| n.wrapping_add(1));
             })
             .into()
     } else {
