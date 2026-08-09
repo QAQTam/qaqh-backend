@@ -500,9 +500,18 @@ pub const WINDOW_DEFAULT_LEN: usize = 30;
 pub const RESTORE_ROUND_BUDGET: usize = 200;
 
 /// 渲染窗口之前最多保留的 turn 数量（上滚预加载缓冲）。
-/// 超出此限制的最旧 turn 在 `slide_window_tail` 时被驱逐，
+/// 超出此限制的最旧 turn 在 `slide_window_tail` / `restore` 时被驱逐，
 /// 以限制长对话的内存占用。用户上滚超出缓冲时由分页拉取兜底。
-const MAX_RETAINED_BEFORE_WINDOW: usize = 100;
+pub const MAX_RETAINED_BEFORE_WINDOW: usize = 100;
+
+/// restore 时最多保留的 turn 数量（窗口 + 上滚缓冲）。
+///
+/// `chat_adapter::restored_turns` 在**解析前**只取尾部这么多 turn，
+/// 窗口外的历史由 daemon 分页（`spawn_fetch_earlier`）按需回放——
+/// 对齐 Reasonix history-slice 的窗口化思路：内存只驻留可立即浏览的
+/// 部分，更早内容按页从后端申请。9MB 快照 + 数百 turn 的会话不再
+/// 全量解析驻留（restore 秒级 → 毫秒级，内存降低一个量级）。
+pub const RESTORE_KEEP_TURNS: usize = WINDOW_DEFAULT_LEN + MAX_RETAINED_BEFORE_WINDOW;
 
 impl Transcript {
     pub fn new() -> Self {
@@ -674,6 +683,11 @@ impl Transcript {
         }
         self.window_start = start_budget.max(self.turns.len().saturating_sub(WINDOW_DEFAULT_LEN));
         self.tail_following = true;
+        // 立即驱逐窗口前超出缓冲的最旧 turn：restore 是全量权威快照，
+        // 但内存只保留可立即浏览的部分（窗口 + 上滚缓冲），更早历史
+        // 由 daemon 分页按需回放（on_top_reached → spawn_fetch_earlier）。
+        // 释放 9MB 级长会话的解析产物驻留，避免切换标签内存台阶。
+        self.evict_old_turns();
     }
 
     /// Apply one protocol event to the canonical presentation model.
@@ -1312,16 +1326,38 @@ mod tests {
             .collect()
     }
 
-    /// restore 后只渲染最近 `WINDOW_DEFAULT_LEN` 个回合，全量 turns 保留。
+    /// restore 后只渲染最近 `WINDOW_DEFAULT_LEN` 个回合；短会话（未超过
+    /// `RESTORE_KEEP_TURNS`）全量保留。
     #[test]
     fn window_after_restore_is_tail_only() {
         let mut ts = Transcript::new();
         ts.restore(restored_turns(40));
-        assert_eq!(ts.turn_count(), 40, "全量保留");
+        assert_eq!(ts.turn_count(), 40, "未超裁剪阈值 → 全量保留");
         assert_eq!(ts.window_len(), WINDOW_DEFAULT_LEN);
         assert_eq!(ts.window_turns()[0].turn_id, "t10", "窗口 = 最近 30 个");
         assert_eq!(ts.window_turns().last().unwrap().turn_id, "t39");
         assert!(!ts.window_full());
+    }
+
+    /// 大快照（超过窗口 + 上滚缓冲）restore 时：窗口外历史立即驱逐，
+    /// 内存只驻留 `RESTORE_KEEP_TURNS` 个 turn；更早历史由 daemon 分页
+    /// 按需回放（expand_window 耗尽缓冲后返回 0，调用方转分页拉取）。
+    #[test]
+    fn restore_evicts_history_beyond_buffer() {
+        let mut ts = Transcript::new();
+        ts.restore(restored_turns(300));
+        // 窗口前 270 个 → 保留 100 上滚缓冲 → 共 30 + 100 = 130。
+        assert_eq!(ts.turn_count(), RESTORE_KEEP_TURNS, "窗口外历史已驱逐");
+        assert_eq!(ts.window_len(), WINDOW_DEFAULT_LEN);
+        assert_eq!(ts.window_turns()[0].turn_id, "t270", "窗口 = 最新 30 个");
+        assert_eq!(ts.window_turns().last().unwrap().turn_id, "t299");
+        assert_eq!(ts.turns()[0].turn_id, "t170", "缓冲起点 = 窗口前 100");
+        // 上滚缓冲可本地扩展：expand 100 后窗口起点到达 t170。
+        assert_eq!(ts.expand_window(100), 100);
+        assert_eq!(ts.window_turns()[0].turn_id, "t170");
+        assert!(ts.window_full());
+        // 缓冲耗尽后再扩展返回 0（调用方转 daemon 分页）。
+        assert_eq!(ts.expand_window(10), 0);
     }
 
     /// 短会话（少于窗口大小）：窗口 = 全量，window_full 立即为 true。

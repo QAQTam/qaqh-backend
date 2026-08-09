@@ -244,6 +244,13 @@ pub fn restored_turns(snapshot: &TimelineSnapshot) -> Vec<RestoredTurn> {
     // （尾部 N 个）依赖数组序 = 时间序，错乱会恢复出错误的回合集合。
     let mut out: Vec<RestoredTurn> = parsed;
     out.sort_by_key(|t| (t.created_seq, turn_num(&t.turn_id)));
+    // 窗口化裁剪：只保留尾部 `RESTORE_KEEP_TURNS` 个 turn（窗口 30 +
+    // 上滚缓冲 100），**解析前**丢弃更早历史——9MB 级长会话不再全量
+    // 转换/解析/驻留（对齐 Reasonix history-slice 的窗口化思路）。
+    // 被裁剪的历史由 daemon 分页（spawn_fetch_earlier → prepend_turns
+    // + 锚定补偿）在用户上滚时按页回放。
+    let keep = out.len().min(markdown_winui::RESTORE_KEEP_TURNS);
+    out.truncate(keep);
     out
 }
 

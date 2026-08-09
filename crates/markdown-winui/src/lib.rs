@@ -31,8 +31,9 @@ pub use diagram::{DiagramBlock, diagram_view};
 pub use highlight::highlighted_code_block;
 pub use protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
 pub use round_renderer::{
-    AnswerView, LiveSegment, PendingOutput, RestoredRound, RestoredTurn, RoundView, ToolCardView,
-    Transcript, TranscriptChange, TranscriptInvalidation, TurnStatus, TurnView,
+    AnswerView, LiveSegment, PendingOutput, RESTORE_KEEP_TURNS, RestoredRound, RestoredTurn,
+    RoundView, ToolCardView, Transcript, TranscriptChange, TranscriptInvalidation, TurnStatus,
+    TurnView,
 };
 pub use tool_content::{
     ChangeStats, CodeDocument, DiffDocument, DiffFile, DiffRow, DiffRowKind, ToolBody,
