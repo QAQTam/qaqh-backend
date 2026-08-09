@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use windows_reactor::*;
 
-use deepx_fluent::{motion, tokens};
+use deepx_fluent::{motion, shimmer_runs, tokens};
 
 use crate::bridge::{
     Bridge, ComposerAttachment, ComposerState, ComposerTextFile, WorkPhase,
@@ -969,36 +969,8 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
 
 /// 队列行："n 条后续任务已排队" + items + 删除。
 // ── 工作状态栏（输入框之上；Codex loading-shimmer 气质复刻）───────
-
-/// Codex 同色系灰阶（浅背景）：基色深灰 → 峰值中灰微蓝，高斯衰减。
-/// （逆向自 Codex app.asar：background-clip:text + 主色变体渐变 +
-/// steps(120) 阶梯动画；字符级近似的字符内不做渐变，靠灰阶过渡。）
-fn shimmer_color(dist: f64) -> Color {
-    let peak = 155.0f64;
-    let base = 72.0f64;
-    let t = peak * (-(dist * dist) / (2.0 * 1.9 * 1.9)).exp();
-    let v = (base + (t - base)).clamp(0.0, 255.0) as u8;
-    Color {
-        a: 255,
-        r: v,
-        g: v,
-        b: (v as f64 * 0.85 + 28.0).min(255.0) as u8,
-    }
-}
-
-/// 逐字 Run：光带中心 `center`（字符坐标）处的高斯灰阶。
-fn shimmer_runs(text: &str, center: f64) -> Vec<RichTextInline> {
-    text.chars()
-        .enumerate()
-        .map(|(i, c)| {
-            RichTextInline::Run(RichTextRun {
-                text: c.to_string(),
-                foreground: Some(shimmer_color(i as f64 - center)),
-                ..Default::default()
-            })
-        })
-        .collect()
-}
+// shimmer 实现已提取到 deepx_fluent::{shimmer_runs}（chat_view 的
+// 加载覆盖层复用同一光带风格），本文件仅引用。
 
 /// 工作状态栏：转圈 + 俏皮文案（shimmer 流动）。空闲时零高占位。
 ///
