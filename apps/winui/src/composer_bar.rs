@@ -31,14 +31,16 @@
 //!   因带修饰键不匹配 accelerator → TextBox 默认换行保留）
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use windows_reactor::*;
 
 use deepx_fluent::{motion, tokens};
 
-use crate::bridge::{Bridge, ComposerAttachment, ComposerState, ComposerTextFile};
+use crate::bridge::{
+    Bridge, ComposerAttachment, ComposerState, ComposerTextFile, WorkPhase,
+};
 use crate::shell_store::{ContextStats, DashboardSnapshot};
 
 /// 快照轮询间隔（同 interaction_overlay：交互响应优先）。
@@ -986,7 +988,10 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         grid(()).into()
     };
 
-    vstack((goal_bar, queue_bar, slash_menu, card))
+    // 工作状态栏（输入框之上最顶行；活动时显示，空闲零高占位）。
+    let status_bar = work_status_bar(cx, &state);
+
+    vstack((status_bar, goal_bar, queue_bar, slash_menu, card))
         .spacing(tokens::SPACE_2)
         .padding(Thickness {
             left: tokens::SPACE_6,
@@ -1050,6 +1055,107 @@ fn goal_bar_row(snap: &DashboardSnapshot) -> Element {
 }
 
 /// 队列行："n 条后续任务已排队" + items + 删除。
+// ── 工作状态栏（输入框之上；Codex loading-shimmer 气质复刻）───────
+
+/// Codex 同色系灰阶（浅背景）：基色深灰 → 峰值中灰微蓝，高斯衰减。
+/// （逆向自 Codex app.asar：background-clip:text + 主色变体渐变 +
+/// steps(120) 阶梯动画；字符级近似的字符内不做渐变，靠灰阶过渡。）
+fn shimmer_color(dist: f64) -> Color {
+    let peak = 155.0f64;
+    let base = 72.0f64;
+    let t = peak * (-(dist * dist) / (2.0 * 1.9 * 1.9)).exp();
+    let v = (base + (t - base)).clamp(0.0, 255.0) as u8;
+    Color {
+        a: 255,
+        r: v,
+        g: v,
+        b: (v as f64 * 0.85 + 28.0).min(255.0) as u8,
+    }
+}
+
+/// 逐字 Run：光带中心 `center`（字符坐标）处的高斯灰阶。
+fn shimmer_runs(text: &str, center: f64) -> Vec<RichTextInline> {
+    text.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            RichTextInline::Run(RichTextRun {
+                text: c.to_string(),
+                foreground: Some(shimmer_color(i as f64 - center)),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+/// 工作状态栏：转圈 + 俏皮文案（shimmer 流动）。空闲时零高占位。
+///
+/// **独立组件边界**：tick 的 use_async_state 在组件内部——90ms 步进只
+/// 重渲染本组件子树，不再连带重建整个 composer（此前挂在 composer
+/// render 链上，每 tick 全量 diff 输入框/footer/context 条 → UI 线程
+/// 卡顿，ChatView 16ms 泵被拖）。props=WorkPhase（Clone+PartialEq），
+/// 阶段变化才触发组件重渲染。
+fn work_status_bar(cx: &mut RenderCx, state: &ComposerState) -> Element {
+    let _ = cx;
+    component(work_status_component, state.phase.clone())
+}
+
+/// 组件内部实现：label 推导 + shimmer tick + 渲染。
+fn work_status_component(props: &WorkPhase, cx: &mut RenderCx) -> Element {
+    let label: String = match props {
+        WorkPhase::Idle => String::new(),
+        WorkPhase::Thinking => "飞速思考中…".into(),
+        WorkPhase::Answering => "奋力回答中…".into(),
+        WorkPhase::Tool(name) => format!("探索中…正在调用「{name}」"),
+        WorkPhase::WaitingUser => "等待你确认…".into(),
+    };
+    let active = !label.is_empty();
+
+    // shimmer 阶梯步进（90ms/步，仿 Codex steps(120) 的离散跳动感）；
+    // 仅活动时启动线程（deps=props，阶段变化重启）。
+    let (tick, set_tick) = cx.use_async_state::<u32>(0);
+    let label_len = label.chars().count() as u32;
+    cx.use_effect_with_cleanup((props.clone(),), {
+        let set_tick = set_tick.clone();
+        move || -> Option<Box<dyn FnOnce()>> {
+            if !active {
+                return None;
+            }
+            let period = label_len + 8;
+            let stop = Arc::new(AtomicBool::new(false));
+            let s2 = stop.clone();
+            std::thread::spawn(move || {
+                let mut t = 0u32;
+                while !s2.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(90));
+                    t = (t + 1) % period;
+                    set_tick.call(t);
+                }
+            });
+            Some(Box::new(move || stop.store(true, Ordering::Relaxed)))
+        }
+    });
+
+    if !active {
+        return grid(()).with_key("work-status-empty").into();
+    }
+
+    let runs = shimmer_runs(&label, tick as f64 - 4.0);
+    hstack((
+        ProgressRing::indeterminate().width(14.0).height(14.0),
+        RichTextBlock::single_paragraph(runs).font_size(tokens::TYPE_CAPTION),
+    ))
+    .spacing(tokens::SPACE_2)
+    .padding(Thickness {
+        left: tokens::SPACE_2,
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+    })
+    .horizontal_alignment(HorizontalAlignment::Left)
+    .with_key("work-status-bar")
+    .into()
+}
+
 fn queue_row(state: &ComposerState, on_queue_remove: Arc<dyn Fn(String) + 'static>) -> Element {
     let mut items: Vec<Element> = Vec::new();
     for (i, item) in state.queue_items.iter().enumerate() {
