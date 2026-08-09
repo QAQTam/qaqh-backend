@@ -2,13 +2,21 @@
 //!
 //! 数据源：`bridge.core().info_snapshot()`——`client.bootstrap` 的
 //! `conversation.state` 投影（`shell_store::SessionDetail`）；500ms rev 比对
-//! 轮询（同 sidebar / home_view 模式）。打开时机：轮询 `header_snapshot()`
-//! 的 `info_open`（Web `shell.setHeader` 投影，与标题栏按钮 active 同源）——
-//! 翻转打开瞬间触发 `spawn_refresh_info(active_seed)`；面板打开期间 control
-//! 频道活动边界事件（回合结束）由 bridge 顺手刷新缓存，打开即见最新。
+//! 轮询（同 sidebar / home_view 模式）。打开时机：main.rs 轮询
+//! `header_snapshot()` 的 `info_open`（Web `shell.setHeader` 投影，与标题栏
+//! 按钮 active 同源）——翻转打开瞬间触发 `spawn_refresh_info(active_seed)`
+//! 且驱动标题栏 Info 按钮的富内容 Flyout `ShowAt`（header.rs）；light
+//! dismiss / Esc 由 `FlyoutClosed` 回调把 header flag 翻回。面板打开期间
+//! control 频道活动边界事件（回合结束）由 bridge 顺手刷新缓存，打开即见最新。
 //!
-//! 布局（对齐 Web InfoPopover，Fluent 2 语义色；main.rs 按 `info_open` 切
-//! 列宽 0 ↔ [`PANEL_WIDTH`]）：
+//! 承载形态（P4a 停靠列 → 富内容 Flyout，2026-08 下游补丁
+//! `FlyoutDef.content` / `flyout_element` / `flyout_open` / `on_flyout_closed`，
+//! 见 F:/DeepX-windows-rs DEEPX-DOWNSTREAM.md patch inventory）：
+//! 内容元素挂标题栏 `header-info` 按钮的 `Flyout`（Bottom placement），
+//! 平台自带主题阴影（FlyoutPresenter 默认样式）、开合动画与 light dismiss；
+//! 宽度固定 [`PANEL_WIDTH`]，高度封顶 [`PANEL_MAX_HEIGHT`] 内部滚动。
+//!
+//! 布局（对齐 Web InfoPopover，Fluent 2 语义色）：
 //! ```text
 //! ┌ 卡片（CardBackground + CardStroke + 圆角 8px）────────────┐
 //! │ 环境                                            (11px 600) │
@@ -33,13 +41,27 @@
 //!
 //! D15 结构稳定：面板区块全部固定结构 + `with_key`；cache 区块有/无两种
 //! 形态按 keyed 干净重建（同 settings rows 模式，杜绝 kind 跳变错位）。
+//!
+//! 规范对齐（microsoft/win-dev-skills `winui-design` / `winui-code-review`，
+//! 2026-08 审计，字体与色板未动）：
+//! - 语义色全部走 `ThemeRef`（主题资源按用途命名，无硬编码色值）；
+//! - 圆角统一 `tokens::RADIUS_CARD`（= Fluent OverlayCornerRadius 8px，
+//!   浮层表面规范，不写裸 8.0）；
+//! - 间距收敛 4px 网格：卡片 padding 16×16、内卡 12×8、margin 8、
+//!   区块间距 12（SPACE_1..4）；token_grid 内 2px 标签-数值间隙为
+//!   排印行距（caption/value 配对），非布局间距，保留；
+//! - 面板根带 AutomationProperties（名称 + AutomationId，屏幕阅读器可达；
+//!   header 触发按钮 `header-info` 早已带 name/id/tooltip）；
+//! - 浮层形态：富内容 `Flyout`（winui-design 上下文浮层规范）承载，平台
+//!   主题阴影 + 开合动画 + light dismiss 全免费；ThemeShadow 绑定已随
+//!   下游补丁进 fork（`UIElement.Shadow`），留作未来自定义 Popup 用。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use windows_reactor::*;
 
-use deepx_fluent::{motion, tokens};
+use deepx_fluent::tokens;
 
 use crate::bridge::Bridge;
 use crate::shell_store::{DashboardSnapshot, SessionDetail, UsageInfo};
@@ -58,8 +80,10 @@ fn log_diag(msg: &str) {
 
 /// 快照轮询间隔（同 sidebar / home_view）。
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// 面板宽度（main.rs 列宽；对齐 Web 340px − 阴影/内边距余量）。
+/// 面板宽度（对齐 Web 340px − 阴影/内边距余量；flyout 内容固定宽）。
 pub const PANEL_WIDTH: f64 = 320.0;
+/// 面板最大高度（任务列表较长时内部滚动，避免浮层超高）。
+pub const PANEL_MAX_HEIGHT: f64 = 560.0;
 /// 内置等宽字体；无资产时由 WinUI 回退到 Consolas。
 const MONO_FONT: &str = deepx_fluent::tokens::CODE_FONT_FAMILY;
 
@@ -248,11 +272,11 @@ fn cache_card(label: &str, u: &UsageInfo, accent: bool) -> Option<Element> {
                 .foreground(ThemeRef::SecondaryText),
                 progress_bar(pct, fill),
             ))
-            .spacing(4.0),
+            .spacing(tokens::SPACE_1),
         )
         .background(bg)
-        .corner_radius(8.0)
-        .padding(Thickness::xy(10.0, 9.0))
+        .corner_radius(tokens::RADIUS_CARD)
+        .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2))
         .with_key("cache")
         .into(),
     )
@@ -282,7 +306,7 @@ fn context_card(d: &SessionDetail) -> Element {
     .columns([GridLength::STAR, GridLength::Auto])
     .into();
     let left: Element = vstack((label_row, progress_bar(pct, ThemeRef::Accent)))
-        .spacing(6.0)
+        .spacing(tokens::SPACE_2)
         .into();
     let pct_el: Element = text_block(format!("{pct:.1}%"))
         .font_size(tokens::TYPE_CAPTION)
@@ -294,45 +318,40 @@ fn context_card(d: &SessionDetail) -> Element {
     border(
         grid((left.grid_column(0), pct_el))
             .columns([GridLength::STAR, GridLength::Auto])
-            .column_spacing(10.0),
+            .column_spacing(tokens::SPACE_3),
     )
     .background(ThemeRef::SubtleFill)
-    .corner_radius(8.0)
-    .padding(Thickness::xy(11.0, 10.0))
+    .corner_radius(tokens::RADIUS_CARD)
+    .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2))
     .with_key("context")
     .into()
 }
 
-/// 面板主体（main.rs 挂到内容区 Grid 右列；宽度由列宽 0 ↔ PANEL_WIDTH 控制）。
+/// 面板主体（header Info 按钮富内容 Flyout 的内容；宽度固定
+/// [`PANEL_WIDTH`]，高度自适应 + [`PANEL_MAX_HEIGHT`] 封顶滚动）。
 pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
-    let (open, set_open) = cx.use_state::<bool>(false);
     let (detail, set_detail) = cx.use_state::<Option<SessionDetail>>(None);
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
-    let last_open = cx.use_ref::<bool>(false);
     // 任务进度区块（dashboard 投影，control 事件驱动；P6 合并）。
     let (dashboard, set_dashboard) = cx.use_state::<Option<DashboardSnapshot>>(None);
     let last_dash_rev = cx.use_ref::<u64>(0);
-    log_diag(&format!("info_panel render open={open}"));
 
-    // 500ms 轮询：info 数据 rev（同 sidebar 模式）+ 标题栏 info_open 投影。
+    // 500ms 轮询：info 数据 rev（同 sidebar 模式）。面板开关由 header
+    // flyout 承载（main.rs info_open 轮询 → ShowAt/Hide + 打开瞬间刷新）。
     cx.use_effect((), {
         let bridge = bridge.clone();
-        let set_open = set_open.clone();
         let set_detail = set_detail.clone();
         let timer = timer.clone();
         let last_rev = last_rev.clone();
-        let last_open = last_open.clone();
         move || {
             log_diag("info_panel effect (mount)");
             if timer.borrow().is_none() {
                 match DispatcherTimer::new(POLL_INTERVAL, {
                     let core = bridge.core();
-                    let set_open = set_open.clone();
                     let set_detail = set_detail.clone();
                     let set_dashboard = set_dashboard.clone();
                     let last_rev = last_rev.clone();
-                    let last_open = last_open.clone();
                     let last_dash_rev = last_dash_rev.clone();
                     move || {
                         // 用量数据。
@@ -347,24 +366,6 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             *last_dash_rev.borrow_mut() = dash_rev;
                             set_dashboard.call(dash);
                         }
-                        // 面板开关（Web shell.setHeader 投影的 info_open）。
-                        let hdr = core.header_snapshot();
-                        let o = hdr.0.info_open;
-                        log_diag(&format!(
-                            "info_panel tick open={o} rev={rev} header_rev={}",
-                            hdr.1
-                        ));
-                        if o != *last_open.borrow() {
-                            *last_open.borrow_mut() = o;
-                            log_diag(&format!("open -> {o}"));
-                            set_open.call(o);
-                            if o {
-                                // 打开瞬间拉取当前会话详情（防旧缓存）。
-                                let seed = core.active_seed();
-                                log_diag(&format!("refresh requested, seed={seed:?}"));
-                                core.spawn_refresh_info(seed);
-                            }
-                        }
                     }
                 }) {
                     Ok(t) => {
@@ -376,11 +377,6 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             }
         }
     });
-
-    if !open {
-        // 列宽 0（main.rs）已隐藏；返回空占位避免无谓渲染。
-        return text_block("").with_key("info-hidden").into();
-    }
 
     // ── 面板内容（全部固定结构 + keyed，D15）───────────────────────
     let mut blocks: Vec<Element> = Vec::new();
@@ -411,7 +407,7 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     .grid_column(2),
             ))
             .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
-            .column_spacing(7.0)
+            .column_spacing(tokens::SPACE_2)
             .with_key("model")
             .into();
             blocks.push(model_row);
@@ -556,16 +552,22 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     }
 
     // 面板内容可滚动（P6 加任务区块后可能超高；scroll_viewer 纵向 Auto）。
+    // 宽度固定 PANEL_WIDTH（flyout 内容自适应尺寸），高度封顶滚动；
+    // 打开/关闭动画由平台 Flyout 自带（ImplicitShowAnimation），不再
+    // 手动挂 transition（winui-design：popup 用平台动画）。
     scroll_viewer(
-        border(vstack(blocks).spacing(10.0))
+        border(vstack(blocks).spacing(tokens::SPACE_3))
             .background(ThemeRef::CardBackground)
             .border_brush(ThemeRef::CardStroke)
             .border_thickness(Thickness::uniform(1.0))
-            .corner_radius(8.0)
-            .padding(Thickness::xy(14.0, 14.0))
-            .margin(Thickness::xy(8.0, 8.0)),
+            .corner_radius(tokens::RADIUS_CARD)
+            .padding(Thickness::xy(tokens::SPACE_4, tokens::SPACE_4))
+            .margin(Thickness::xy(tokens::SPACE_2, tokens::SPACE_2))
+            // winui-code-review 无障碍项：面板根提供 AutomationProperties。
+            .automation_name("会话信息面板")
+            .automation_id("info-panel"),
     )
-    // 打开时淡入（open 翻转 → 内容首次 mount → ImplicitShowAnimation）。
-    .transition(motion::content_enter(), motion::content_exit())
+    .width(PANEL_WIDTH)
+    .max_height(PANEL_MAX_HEIGHT)
     .into()
 }

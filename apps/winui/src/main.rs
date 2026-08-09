@@ -96,6 +96,12 @@ fn app(cx: &mut RenderCx) -> Element {
                             *last_info_open.borrow_mut() = o;
                             log_diag(&format!("main: info_open -> {o}"));
                             set_info_open.call(o);
+                            if o {
+                                // 打开瞬间拉取当前会话详情（防旧缓存；
+                                // flyout ShowAt 由同一 info_open 驱动）。
+                                let seed = bridge.core().active_seed();
+                                bridge.core().spawn_refresh_info(seed);
+                            }
                         }
                     }
                 }) {
@@ -189,22 +195,11 @@ fn app(cx: &mut RenderCx) -> Element {
             },
         ])
         .into();
-    // Step 1b: Info 面板右列（P4a）——chat 视图且 info_open 时 320px，
-    // 否则 0（面板内容组件自管刷新时机：打开瞬间拉取 bootstrap 用量）。
-    let info_el: Element = info_panel::info_panel(cx, bridge.clone())
-        .grid_row(0)
-        .grid_column(1)
-        .into();
-    let info_width = if info_open && view == "chat" {
-        GridLength::Pixel(info_panel::PANEL_WIDTH)
-    } else {
-        GridLength::Pixel(0.0)
-    };
-    let right_body: Element = grid((right_content, info_el))
-        .columns([GridLength::STAR, info_width])
-        .grid_row(1)
-        .grid_column(0)
-        .into();
+    // Step 1b: Info 面板（P4a→P4a+）——不再占用右列：内容元素传给标题栏
+    // Info 按钮的富内容 Flyout（header.rs），打开由 `info_open` 轮询驱动
+    // ShowAt，light dismiss 回调翻回 header flag；关闭瞬间此处刷新用量。
+    let info_el: Element = info_panel::info_panel(cx, bridge.clone());
+    let right_body: Element = right_content.grid_row(1).grid_column(0).into();
     // Session tabs belong to the document workspace, not to the navigation
     // rail. Keeping both in one right-side grid aligns their coordinate space
     // while the transcript retains its narrower centered reading measure.
@@ -268,10 +263,16 @@ fn app(cx: &mut RenderCx) -> Element {
 
     // Step 2: Grid 两行——row0 = XAML 标题栏（48px，SetTitleBar 拖拽区，
     // host 自动接线 host.rs:277-288）；row1 = 内容区（侧栏 | 右区）。
-    let titlebar: Element = header::header(cx, bridge.clone())
-        .grid_row(0)
-        .grid_column(0)
-        .into();
+    // Info 面板内容挂标题栏 Info 按钮的 Flyout（浮层，不占布局）。
+    let titlebar: Element = header::header(
+        cx,
+        bridge.clone(),
+        info_el,
+        info_open && view == "chat",
+    )
+    .grid_row(0)
+    .grid_column(0)
+    .into();
     // ── 内容区（row 1）：侧栏 | 文档工作区（标签条 + 视图）──────
     // P-6 覆盖层预留（WORKFLOW §6.1）：未来 XAML 面板/对话框
     // （P1 Flyout anchor / P2 ContentDialog phantom child）作为覆盖层
