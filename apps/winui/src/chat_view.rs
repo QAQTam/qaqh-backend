@@ -27,24 +27,26 @@ use windows_reactor::*;
 use crate::bridge::Bridge;
 use crate::chat_adapter;
 
-/// XAML 提交批次：DispatcherTimer 间隔（8ms 请求 → 实际 15.6ms = 系统
-/// 时钟粒度 → ~60fps；16ms 请求会被合并到 ~31ms → 帧率减半至 ~33fps，
-/// streaming-bench 实测证实）。队列中的 token delta 先合并，再在 UI
-/// 线程的一次 retained-mode 更新中提交；不逐 token 触碰控件树。
-const PUMP_INTERVAL: Duration = Duration::from_millis(8);
-
-/// 跟随尾部滚动请求节流：live 流式期间 100ms 一次贴底请求。16ms 泵每
-/// tick 都请求会让滚动与用户滚轮/滚动条抢占，并形成"滚动 → 行 realize
+/// XAML 提交批次：事件泵由 `CompositionTarget::Rendering`（vsync 对齐）
+/// 驱动——60Hz 屏 60 次/s、120Hz 屏 120 次/s，天然跟随客户显示器刷新
+/// 率（DispatcherTimer 受系统时钟 15.6ms 粒度限制，最多 ~64fps，
+/// 120Hz 屏只有一半帧率——"渲染慢"吐槽的根因）。队列中的 token delta
+/// 先合并，再在 UI 线程的一次 retained-mode 更新中提交；不逐 token
+/// 触碰控件树。
+///
+/// 跟随尾部滚动请求节流：live 流式期间 100ms 一次贴底请求。vsync 泵每
+/// 帧都请求会让滚动与用户滚轮/滚动条抢占，并形成"滚动 → 行 realize
 /// → 渲染 → 再滚动"反馈循环，UI 线程满载（表现为滚动条卡死）；100ms
 /// 是经实机验证的折中（原 50ms 在长文本流式下仍会触发卡顿）。结构性
 /// 变化（restore / 新 turn / round 完成）不受此限，立即滚底。
 const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 
-/// Live（非结构性）渲染间隔：**帧级**（16ms，与泵对齐）——流式 delta
-/// 每帧提交一次 XAML，不做时间限频（"快显示"优先；峰值成本由段级 diff
-/// 与窗口回收兜底）。与滚动节流解耦：渲染快 ≠ 滚动请求快（反馈环只与
+/// Live（非结构性）渲染间隔：**帧级**（8ms——60Hz 屏每帧提交，120Hz
+/// 屏每帧提交）——流式 delta 不做时间限频（"快显示"优先；峰值成本由
+/// 段级 diff 与窗口回收兜底）。与滚动节流解耦：渲染快 ≠ 滚动请求快
+/// （反馈环只与
 /// 滚动有关）。结构变化（restore / 新 turn / round 完成）不受此限。
-const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(16);
+const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(8);
 
 /// 显式跟随状态机：Following = 新内容贴底；Idle = 用户上滚离开
 /// （浮层"回到最新"按钮出现；点击 → force_tail 回底 + 重新跟随）。
@@ -100,7 +102,7 @@ impl SessionTranscriptCache {
 pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let color_scheme = cx.use_color_scheme();
     let transcript = cx.use_ref::<Transcript>(Transcript::new());
-    let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    let frame_revoker = cx.use_ref::<Option<EventRevoker>>(None);
     let last_rev = cx.use_ref::<u64>(0);
     let last_seed = cx.use_ref::<String>(String::new());
     let session_cache = cx.use_ref::<SessionTranscriptCache>(SessionTranscriptCache::default());
@@ -122,7 +124,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let force_tail_version = cx.use_ref::<Option<u64>>(None);
     // 滚动请求节流基准（live 流式限频，见 SCROLL_REQUEST_THROTTLE）。
     let last_scroll_request = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
-    // deferred（快照 seed 不匹配）日志限频：16ms 泵每 tick 都会命中，
+    // deferred（快照 seed 不匹配）日志限频：vsync 泵每帧都会命中，
     // 不节流会刷爆日志（spawn_timeline_refresh 本身有 1s 节流）。
     let last_deferred_log = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     // UI 提交代次与 transport rev 解耦：seed、快照、分页和事件批次都可
@@ -146,7 +148,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     cx.use_effect((), {
         let bridge = bridge.clone();
         let transcript = transcript.clone();
-        let timer = timer.clone();
+        let frame_revoker = frame_revoker.clone();
         let last_rev = last_rev.clone();
         let last_seed = last_seed.clone();
         let session_cache = session_cache.clone();
@@ -164,10 +166,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let set_render_generation = set_render_generation.clone();
         let last_live_render = last_live_render.clone();
         move || {
-            if timer.borrow().is_some() {
+            if frame_revoker.borrow().is_some() {
                 return;
             }
-            match DispatcherTimer::new(PUMP_INTERVAL, {
+            match on_frame({
                 let bridge = bridge.clone();
                 let transcript = transcript.clone();
                 let last_rev = last_rev.clone();
@@ -295,7 +297,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         } else {
                             // 快照 seed 不匹配（旧会话残留/并发交错）：主动重拉
                             // active seed（1s 节流在 bridge 内）。日志限频，
-                            // 避免 16ms 泵每 tick 刷屏。
+                            // 避免 vsync 泵每帧刷屏。
                             let now = std::time::Instant::now();
                             if now.duration_since(*last_deferred_log.borrow())
                                 >= std::time::Duration::from_secs(1)
@@ -402,7 +404,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             *scroll_version.borrow_mut() += 1;
                             *last_scroll_request.borrow_mut() = now;
                         }
-                        // Live（非结构性）更新：帧级提交（16ms，与泵
+                        // Live（非结构性）更新：帧级提交（8ms，60Hz 每帧
                         // 对齐），不做时间限频——流式"快显示"优先，峰值
                         // 成本由段级 diff 与窗口回收兜底。Structural 变更
                         // （新 turn/round 完成）立即提交。
@@ -417,8 +419,11 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     }
                 }
             }) {
-                Ok(t) => *timer.borrow_mut() = Some(t),
-                Err(e) => log_diag(&format!("chat_view: pump timer failed: {e}")),
+                Ok(r) => {
+                    *frame_revoker.borrow_mut() = Some(r);
+                    log_diag("chat_view: vsync pump started (CompositionTarget.Rendering)");
+                }
+                Err(e) => log_diag(&format!("chat_view: on_frame failed: {e}")),
             }
         }
     });
