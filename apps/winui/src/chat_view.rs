@@ -147,6 +147,11 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let last_frame_at = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     // 本"可见期"是否已做过后台恢复（每帧检测，只处理一次）。
     let background_resumed = cx.use_ref::<bool>(false);
+    // 后台恢复进行中（`Some(seed)` = 快照已重拉、尚未到达）：渲染
+    // shimmer 加载覆盖层盖住内容（不白屏）；快照 restore 后清除。
+    let recovering = cx.use_ref::<Option<String>>(None);
+    // 覆盖层 shimmer 光带相位（90ms 步进，覆盖层存活期间每帧递增）。
+    let shimmer_tick = cx.use_ref::<u64>(0);
     // 锚定补偿挂起标记：`Some(rows)` = 本帧渲染需用 within 滚动（顶部
     // 预加载后把「原窗口首行」锚回原位，视口不跳）。rows = 扩展前移量
     // = 原首行的新下标。渲染闭包 take 后随 preserve_anchor 下发。
@@ -180,6 +185,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_live_render = last_live_render.clone();
         let last_frame_at = last_frame_at.clone();
         let background_resumed = background_resumed.clone();
+        let recovering = recovering.clone();
+        let shimmer_tick = shimmer_tick.clone();
         move || {
             if frame_revoker.borrow().is_some() {
                 return;
@@ -202,12 +209,15 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let last_live_render = last_live_render.clone();
                 let last_frame_at = last_frame_at.clone();
                 let background_resumed = background_resumed.clone();
+                let recovering = recovering.clone();
+                let shimmer_tick = shimmer_tick.clone();
                 let pending_anchor = pending_anchor.clone();
                 move || {
                     // 后台恢复检测：窗口不可见时 vsync 回调暂停，恢复可见
                     // 后首帧 elapsed = 后台时长。超过阈值 → 丢弃积压增量
                     // （快照会覆盖 transcript）+ 清 last_restored_seed 触发
                     // 快照重拉 → 复用 restore 分支一次到位（毫秒级）。
+                    // 同时点亮 shimmer 覆盖层（快照到达 restore 后熄灭）。
                     let now = std::time::Instant::now();
                     if now.duration_since(*last_frame_at.borrow())
                         >= BACKGROUND_RESUME_AFTER
@@ -217,6 +227,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         bridge.core().chat_drain();
                         bridge.core().chat_output_drain();
                         *last_restored_seed.borrow_mut() = String::new();
+                        *recovering.borrow_mut() = Some(bridge.core().active_seed());
                         log_diag("chat_view: background resume (drop backlog + snapshot refresh)");
                     }
                     *last_frame_at.borrow_mut() = now;
@@ -307,6 +318,12 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             }
                             drop(transcript);
                             *last_restored_seed.borrow_mut() = seed.clone();
+                            // 后台恢复完成：熄灭 shimmer 覆盖层（快照内容已
+                            // 就位 + 贴底滚动在同一帧下发，无白屏窗口）。
+                            if recovering.borrow().as_ref() == Some(&seed) {
+                                *recovering.borrow_mut() = None;
+                                log_diag("chat_view: recovery overlay dismissed");
+                            }
                             // Fresh restore defaults to the tail. A cached
                             // session that the user had scrolled away from
                             // keeps its captured native viewport instead.
@@ -448,6 +465,13 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             *render_generation.borrow_mut() += 1;
                             set_render_generation.call(*render_generation.borrow());
                         }
+                    }
+                    // 覆盖层存活期间（后台恢复，快照未达）：每帧推进
+                    // shimmer 光带相位并强制渲染（无事件也要动起来）。
+                    if recovering.borrow().is_some() {
+                        *shimmer_tick.borrow_mut() += 1;
+                        *render_generation.borrow_mut() += 1;
+                        set_render_generation.call(*render_generation.borrow());
                     }
                 }
             }) {
@@ -638,7 +662,15 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     } else {
         Element::Empty
     };
-    let transcript: Element = grid([transcript_list, jump_button])
+    // 后台恢复覆盖层：快照未到达期间盖住内容（半透明 + 转圈 + shimmer
+    // 光带），不白屏不闪烁；restore 完成后同帧熄灭（见恢复分支）。
+    let recovery_overlay: Element = if recovering.borrow().as_ref() == Some(&active_seed) {
+        let tick = *shimmer_tick.borrow();
+        deepx_fluent::loading_overlay("recovery-overlay", "正在恢复对话…", "恢复中，请稍候", tick)
+    } else {
+        Element::Empty
+    };
+    let transcript: Element = grid([transcript_list, jump_button, recovery_overlay])
         .columns([GridLength::Star(1.0)])
         .rows([GridLength::Star(1.0)])
         .into();

@@ -358,6 +358,61 @@ pub fn metadata_badge(label: impl Into<String>) -> Element {
     .into()
 }
 
+// ── Loading shimmer（Codex loading-shimmer 气质复刻，字符级灰阶光带）────
+
+/// Codex 同色系灰阶（浅背景）：基色深灰 → 峰值中灰微蓝，高斯衰减。
+/// （逆向自 Codex app.asar：background-clip:text + 主色变体渐变 +
+/// steps(120) 阶梯动画；字符级近似的字符内不做渐变，靠灰阶过渡。）
+pub fn shimmer_color(dist: f64) -> Color {
+    let peak = 155.0f64;
+    let base = 72.0f64;
+    let t = peak * (-(dist * dist) / (2.0 * 1.9 * 1.9)).exp();
+    let v = (base + (t - base)).clamp(0.0, 255.0) as u8;
+    Color {
+        a: 255,
+        r: v,
+        g: v,
+        b: (v as f64 * 0.85 + 28.0).min(255.0) as u8,
+    }
+}
+
+/// 逐字 Run：光带中心 `center`（字符坐标）处的高斯灰阶。
+/// `center` 按 90ms/步的 tick 相位推进即产生流动效果（调用方驱动）。
+pub fn shimmer_runs(text: &str, center: f64) -> Vec<RichTextInline> {
+    text.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            RichTextInline::Run(RichTextRun {
+                text: c.to_string(),
+                foreground: Some(shimmer_color(i as f64 - center)),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+/// 加载覆盖层：转圈 + 标题 + shimmer 文案（骨架条流动）。
+/// 用于 resume/恢复期间盖在内容上（不白屏、不闪烁），由调用方按
+/// `tick`（90ms 步进）驱动光带移动。`key` 必须稳定（覆盖层生命周期）。
+pub fn loading_overlay(key: &str, title: &str, label: &str, tick: u64) -> Element {
+    vstack((
+        ProgressRing::indeterminate().width(28.0).height(28.0),
+        text_block(title)
+            .font_size(tokens::TYPE_SUBTITLE)
+            .semibold()
+            .foreground(ThemeRef::SecondaryText)
+            .horizontal_alignment(HorizontalAlignment::Center),
+        RichTextBlock::single_paragraph(shimmer_runs(label, tick as f64 - 6.0))
+            .horizontal_alignment(HorizontalAlignment::Center),
+    ))
+    .spacing(tokens::SPACE_4)
+    .horizontal_alignment(HorizontalAlignment::Center)
+    .vertical_alignment(VerticalAlignment::Center)
+    .transition(motion::session_enter(), motion::session_exit())
+    .with_key(key)
+    .into()
+}
+
 /// Windows 11 settings row, adapted from the Community Toolkit SettingsCard
 /// composition for reactor's native WinUI elements.
 ///

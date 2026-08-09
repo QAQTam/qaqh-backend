@@ -885,6 +885,12 @@ pub struct BridgeCore {
     /// Transcript（切换瞬间残留事件串台）。现入队带 seed、`chat_drain`
     /// 按 active_seed 过滤（非活动事件丢弃，切回时由权威快照 + 切回后的
     /// 增量补齐）。
+    ///
+    /// **队列上限（保险丝）**：窗口不可见期间 vsync 暂停、事件不消费，
+    /// 队列会无限积压（后台 1 小时 × 1000 token/s ≈ 百万级事件）。
+    /// 超限时优先丢弃 RoundDelta（由 round 完成的 final 覆盖兜底，且
+    /// 后台恢复走快照）；结构性事件强制入队（挤出最旧）。恢复可见时
+    /// `chat_view` 的 background resume 会整体丢弃积压再拉快照。
     chat_events: Mutex<std::collections::VecDeque<(String, RingingEvent)>>,
     /// 最近一次 typed timeline 快照（`TimelineSnapshot` + 所属 seed：
     /// 权威 turns 历史，resume 旧对话的数据源；chat_view 泵消费 restore）。
@@ -930,6 +936,13 @@ const CONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(25);
 const REFRESH_THROTTLE: Duration = Duration::from_secs(1);
 /// 连续失败后 rebuild 冷却指数退避封顶（60s → 120s → 240s → 480s → 960s）。
 const REBUILD_BACKOFF_CAP: u32 = 4;
+
+/// Chat 事件队列上限（保险丝）：窗口不可见期间 vsync 暂停、事件不消费，
+/// 无上限会无限积压（后台 1 小时 × 1000 token/s ≈ 百万级事件 ≈ 数百 MB）。
+/// 超限时丢弃 RoundDelta（round 完成的 final 覆盖兜底；后台恢复走快照，
+/// 增量只是过渡）；结构性事件强制入队（挤出最旧）。20K ≈ 前台 300s 缓冲，
+/// 正常前台消费远达不到。
+const CHAT_QUEUE_CAP: usize = 20_000;
 
 /// rebuild 冷却：连续失败后指数拉长（60s→960s 封顶），防止 rebuild
 /// 风暴把 daemon 连接数打爆（32 连接信号量 → 静默 drop）。
@@ -2969,6 +2982,20 @@ impl BridgeCore {
             let mut pushed = false;
             for env in &batch.envelopes {
                 if chat_adapter::render_event(&env.event).is_some() {
+                    // 队列上限（保险丝）：delta 可丢（final 覆盖兜底），
+                    // 结构性事件强制入队（挤出最旧）。
+                    let is_delta = matches!(
+                        &env.event,
+                        RingingEvent::Conversation(
+                            deepx_client::ConversationEvent::RoundDelta { .. }
+                        )
+                    );
+                    if queue.len() >= CHAT_QUEUE_CAP {
+                        if is_delta {
+                            continue;
+                        }
+                        queue.pop_front();
+                    }
                     // seed 标记：drain 侧按 active_seed 过滤（会话隔离）。
                     queue.push_back((batch.seed.clone(), env.event.clone()));
                     pushed = true;
@@ -3117,6 +3144,20 @@ impl BridgeCore {
             let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
             for env in &batch.envelopes {
                 if chat_adapter::render_event(&env.event).is_some() {
+                    // 队列上限（保险丝）：delta 可丢（final 覆盖兜底），
+                    // 结构性事件强制入队（挤出最旧）。
+                    let is_delta = matches!(
+                        &env.event,
+                        RingingEvent::Conversation(
+                            deepx_client::ConversationEvent::RoundDelta { .. }
+                        )
+                    );
+                    if queue.len() >= CHAT_QUEUE_CAP {
+                        if is_delta {
+                            continue;
+                        }
+                        queue.pop_front();
+                    }
                     queue.push_back((batch.seed.clone(), env.event.clone()));
                 }
             }
