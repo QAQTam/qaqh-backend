@@ -1,5 +1,5 @@
 use windows_reactor::{
-    ColorScheme, Element, ElementExt, GridLength, HorizontalAlignment, ScrollBarVisibility,
+    AccessibilityExt, BackgroundExt, ColorScheme, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt, PaddingExt, TextStyleExt, ScrollBarVisibility,
     SelectionMode, TextWrapping, ThemeRef, Thickness, VerticalAlignment, border, grid, list_view,
     scroll_viewer, text_block, vstack,
 };
@@ -609,7 +609,7 @@ fn code_document_view(
         .background(ThemeRef::ControlFillSecondary)
         .padding(Thickness::xy(8.0, 0.0))
         .grid_column(0),
-        Element::from(highlighted).grid_column(1),
+        Element::from(highlighted.grid_column(1)),
     ))
     .columns([GridLength::Auto, GridLength::STAR])
     .column_spacing(10.0);

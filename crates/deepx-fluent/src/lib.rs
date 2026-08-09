@@ -372,14 +372,16 @@ pub fn settings_card(
 ) -> Element {
     let header = header.into();
     let description = description.into();
-    let content = content
-        .into()
+    // capability 模型下 Element 无 builder 方法：content 为泛型参数
+    // （可能已是 Element），用 hstack 容器包裹实现原语义
+    // （min_width + 右对齐 + 垂直居中）。
+    let content = hstack((content,))
         .min_width(tokens::SETTINGS_CARD_ACTION_MIN_WIDTH)
         .horizontal_alignment(HorizontalAlignment::Right)
         .vertical_alignment(VerticalAlignment::Center);
 
     let body: Element = if header.trim().is_empty() {
-        content
+        content.into()
     } else {
         let mut labels: Vec<Element> = vec![
             text_block(header.clone())
@@ -400,8 +402,9 @@ pub fn settings_card(
         let labels: Element = vstack(labels)
             .spacing(tokens::SPACE_1)
             .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(0)
             .into();
-        grid((labels.grid_column(0), content.grid_column(1)))
+        grid((labels, content.grid_column(1)))
             .columns([GridLength::STAR, GridLength::Auto])
             .column_spacing(tokens::SPACE_4)
             .into()

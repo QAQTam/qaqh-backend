@@ -21,10 +21,10 @@ serde = { version = "1", features = ["derive"] }
 # Downstream Reactor extensions are kept in the durable fork and pinned so a
 # clean machine reproduces the exact WinRT bindings and runtime setup.
 # 本地开发态：path 指向 fork 工作区；release 打包前切回 git rev（同 deepx-fluent）。
-windows-reactor = { path = "../../../DeepX-windows-rs/crates/libs/reactor" }
+windows-reactor = { path = "../../../deepx-winui-reactor/crates/libs/reactor" }
 # desktop.openDialog / openImageDialog: Win32 IFileOpenDialog (COM) 绑定。
 # 仅启用所需最小 feature 集（0.100.0 小写模块名 feature）。
-windows = { path = "../../../DeepX-windows-rs/crates/libs/windows", default-features = false, features = [
+windows = { path = "../../../deepx-winui-reactor/crates/libs/windows", default-features = false, features = [
     "combaseapi",     # CoCreateInstance / CoTaskMemFree / CLSCTX_ALL
     "shobjidl_core",  # IFileOpenDialog / IFileDialog / IShellItem(Array) / SIGDN / FOS_*
     "shtypes",        # COMDLG_FILTERSPEC
@@ -34,7 +34,7 @@ windows = { path = "../../../DeepX-windows-rs/crates/libs/windows", default-feat
 ] }
 
 [build-dependencies]
-windows-reactor-setup = { path = "../../../DeepX-windows-rs/crates/libs/reactor-setup" }
+windows-reactor-setup = { path = "../../../deepx-winui-reactor/crates/libs/reactor-setup" }
 
 [lints]
 workspace = true

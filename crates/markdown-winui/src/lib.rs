@@ -42,7 +42,7 @@ pub use tool_content::{
 
 use markdown_core::ast::{Block, Inline};
 use windows_reactor::{
-    Element, ElementExt, GridLength, RichTextBlock, RichTextHyperlink, RichTextInline,
+    BackgroundExt, Element, GridChildExt, GridLength, KeyExt, PaddingExt, RichTextBlock, RichTextHyperlink, RichTextInline,
     RichTextParagraph, RichTextRun, border, grid, text_block,
 };
 
@@ -328,7 +328,7 @@ impl RichTextBlockExt for RichTextBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_reactor::{Element, ElementExt};
+    use windows_reactor::{Element, KeyExt, LayoutExt, PaddingExt};
 
     /// 端到端：markdown → RichTextBlock（widget 层），验证零胶水对接
     #[test]
