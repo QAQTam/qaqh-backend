@@ -2,7 +2,6 @@
 //!
 //! 布局（挂载于 main.rs right_content row0 内层 grid row1，chat 视图可见）：
 //! ```text
-//! ┌ goalBar（dashboard 投影：当前任务 + 状态计数）───────────────┐  ← 可选
 //! ├ queue 行（"n 条后续任务已排队" + 列表 + 删除）              │  ← 可选
 //! ├ slash 菜单（composer 上方覆盖层 cell）                      │  ← 可选
 //! └ 卡片（LayerFill + 圆角 8px，对齐 .composer-dock）           │
@@ -12,8 +11,8 @@
 //! ```
 //!
 //! 数据源：`bridge.core().composer_snapshot()`（Web `shell.setComposer`
-//! 投影，250ms rev 轮询）+ `dashboard_snapshot()`（control 事件投影，
-//! goalBar）。`sendAck` 变化 → 清空草稿（悲观清空）；`seed` 变化 → 重置
+//! 投影，250ms rev 轮询；goal 功能冻结后 `dashboard_snapshot()` 不再
+//! 消费，bridge 通道保留待复活）。`sendAck` 变化 → 清空草稿（悲观清空）；`seed` 变化 → 重置
 //! 草稿（会话切换）。
 //!
 //! 草稿态（text/附件/slash 状态）为纯 UI 态：`use_ref` 真实存储 +
@@ -26,7 +25,6 @@
 //! - 毛玻璃 backdrop-filter → LayerFill + 圆角（壳内统一，同 info_panel）
 //! - 附件图片预览（object URL）→ 一期仅文件名 + 大小（阶段 B 临时文件）
 //! - 附件菜单 → 原生 MenuFlyout；slash 菜单仍在卡片上方 cell
-//! - TodoStatusStrip 展开列表 → 计数徽标 + 当前任务行（二期展开）
 //! - Enter 发送走 KeyboardAccelerator（reactor 无 KeyDown；Shift+Enter
 //!   因带修饰键不匹配 accelerator → TextBox 默认换行保留）
 
@@ -41,7 +39,7 @@ use deepx_fluent::{motion, tokens};
 use crate::bridge::{
     Bridge, ComposerAttachment, ComposerState, ComposerTextFile, WorkPhase,
 };
-use crate::shell_store::{ContextStats, DashboardSnapshot};
+use crate::shell_store::ContextStats;
 
 /// 快照轮询间隔（同 interaction_overlay：交互响应优先）。
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -170,23 +168,11 @@ struct Draft {
     dismissed_slash: Option<String>,
 }
 
-/// 小标题（Windows caption typography，避免低于 12 DIP 的自定义字号）。
-fn eyebrow(text: &str) -> Element {
-    text_block(text)
-        .font_size(tokens::TYPE_CAPTION)
-        .foreground(ThemeRef::SecondaryText)
-        .into()
-}
-
 /// XAML Composer 底部栏（chat 视图；main.rs 内层 grid row1 挂载）。
 pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (state, set_state) = cx.use_state::<ComposerState>(ComposerState::default());
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
-    // dashboard（goalBar）投影。
-    let (dashboard, set_dashboard) = cx.use_state::<Option<DashboardSnapshot>>(None);
-    let dash_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
-    let last_dash_rev = cx.use_ref::<u64>(0);
     // 草稿：ref 真实存储 + 版本号驱动渲染（SetState 无 get，回调从 ref 读写）。
     let draft = cx.use_ref::<Draft>(Draft::default());
     let (_draft_version, set_draft_version) = cx.use_state::<u64>(0);
@@ -220,23 +206,6 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 POLL_INTERVAL,
                 move || bridge.core().composer_snapshot(),
                 move |s| set_state.call(s),
-            );
-        }
-    });
-
-    // goalBar dashboard 轮询（同模式；快照为空时 UI 不渲染）。
-    cx.use_effect((), {
-        let bridge = bridge.clone();
-        let set_dashboard = set_dashboard.clone();
-        let dash_timer = dash_timer.clone();
-        let last_dash_rev = last_dash_rev.clone();
-        move || {
-            crate::shell::poll_rev(
-                dash_timer,
-                last_dash_rev,
-                POLL_INTERVAL,
-                move || bridge.core().dashboard_snapshot(),
-                move |s| set_dashboard.call(s),
             );
         }
     });
@@ -946,12 +915,6 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     .automation_name("消息编辑器")
     .automation_id("composer-surface");
 
-    // goalBar（dashboard 非空时）。
-    let goal_bar: Element = match dashboard.as_ref() {
-        Some(snap) if !snap.tasks.is_empty() => goal_bar_row(snap),
-        _ => grid(()).into(),
-    };
-
     // 队列行（queue_count > 0 时）。
     let queue_bar: Element = if state.queue_count > 0 {
         queue_row(&state, on_queue_remove)
@@ -991,7 +954,7 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 工作状态栏（输入框之上最顶行；活动时显示，空闲零高占位）。
     let status_bar = work_status_bar(cx, &state);
 
-    vstack((status_bar, goal_bar, queue_bar, slash_menu, card))
+    vstack((status_bar, queue_bar, slash_menu, card))
         .spacing(tokens::SPACE_2)
         .padding(Thickness {
             left: tokens::SPACE_6,
@@ -1001,56 +964,6 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         })
         .max_width(tokens::CONVERSATION_MAX_WIDTH)
         .horizontal_alignment(HorizontalAlignment::Stretch)
-        .into()
-}
-
-/// goalBar 简化行：当前任务（subject + status）+ 状态计数。
-fn goal_bar_row(snap: &DashboardSnapshot) -> Element {
-    let current = snap
-        .current_todo_id
-        .as_deref()
-        .and_then(|id| snap.tasks.iter().find(|t| t.id == id));
-    let pending = snap.tasks.iter().filter(|t| t.status == "pending").count();
-    let in_progress = snap
-        .tasks
-        .iter()
-        .filter(|t| t.status == "in_progress")
-        .count();
-    let done = snap
-        .tasks
-        .iter()
-        .filter(|t| t.status == "completed")
-        .count();
-    let mut parts: Vec<Element> = Vec::new();
-    if let Some(task) = current {
-        parts.push(
-            hstack((
-                eyebrow("当前任务"),
-                text_block(&task.subject)
-                    .font_size(tokens::TYPE_CAPTION)
-                    .semibold()
-                    .wrap(),
-                text_block(&task.status)
-                    .font_size(tokens::TYPE_CAPTION)
-                    .foreground(ThemeRef::SystemCaution),
-            ))
-            .spacing(8.0)
-            .into(),
-        );
-    }
-    parts.push(
-        text_block(format!(
-            "待处理 {pending} · 进行中 {in_progress} · 已完成 {done}"
-        ))
-        .font_size(tokens::TYPE_CAPTION)
-        .foreground(ThemeRef::SecondaryText)
-        .into(),
-    );
-    border(hstack(parts).spacing(16.0).padding(8.0))
-        .corner_radius(6.0)
-        .background(ThemeRef::CardBackground)
-        .transition(motion::reveal(), motion::content_exit())
-        .with_key("composer-goal")
         .into()
 }
 
