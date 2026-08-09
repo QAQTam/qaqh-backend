@@ -525,6 +525,31 @@ pub struct SessionDetail {
     pub cache_reported_requests: u64,
 }
 
+/// 上下文构成分布（对齐 Web ContextPanel 饼图 6 段）——daemon 在回合结束
+/// 时写入 `<data>/sessions/{seed}/context_stats.json`（engine_misc.rs），
+/// 字段即 JSON 键：对话/思考/工具调用/工具结果/工具定义/系统提示 的 token 数。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct ContextStats {
+    pub chat_text: u64,
+    pub thinking: u64,
+    pub tool_calls: u64,
+    pub tool_results: u64,
+    pub tools_schema: u64,
+    pub system_prompt: u64,
+}
+
+impl ContextStats {
+    /// 六段总和（空文件/全零 → 0）。
+    pub fn total(&self) -> u64 {
+        self.chat_text
+            + self.thinking
+            + self.tool_calls
+            + self.tool_results
+            + self.tools_schema
+            + self.system_prompt
+    }
+}
+
 /// 解析 UsageInfo 对象（字段缺失兜底 0/false——与 Web `addUsage` 语义一致）。
 fn parse_usage(v: &Value) -> UsageInfo {
     let u64_of = |key: &str| v.get(key).and_then(|x| x.as_u64()).unwrap_or(0);

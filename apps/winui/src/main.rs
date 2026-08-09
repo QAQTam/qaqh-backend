@@ -65,7 +65,7 @@ fn app(cx: &mut RenderCx) -> Element {
     let nav: Element =
         sidebar::sidebar(cx, bridge.clone(), sidebar_width, set_sidebar_width).into();
     let (view, set_view) = cx.use_state::<String>("home".to_string());
-    let (info_open, set_info_open) = cx.use_state::<bool>(false);
+    let (_, set_info_open) = cx.use_state::<bool>(false);
     let view_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_view = cx.use_ref::<String>("home".to_string());
     let last_info_open = cx.use_ref::<bool>(false);
@@ -88,20 +88,16 @@ fn app(cx: &mut RenderCx) -> Element {
                         let v = bridge.core().current_view();
                         if v != *last_view.borrow() {
                             *last_view.borrow_mut() = v.clone();
-                            set_view.call(v);
+                            set_view.call(v.clone());
                         }
-                        // Info 面板开关（Web shell.setHeader 投影的 info_open）。
+                        // Info 面板开关（Web shell.setHeader 投影的 info_open；
+                        // 面板已常驻（2026-08 决策：省动画），此处仅同步 flag
+                        // 供 header 按钮状态使用，不再驱动列宽。
                         let o = bridge.core().header_snapshot().0.info_open;
                         if o != *last_info_open.borrow() {
                             *last_info_open.borrow_mut() = o;
                             log_diag(&format!("main: info_open -> {o}"));
                             set_info_open.call(o);
-                            if o {
-                                // 打开瞬间拉取当前会话详情（防旧缓存；
-                                // flyout ShowAt 由同一 info_open 驱动）。
-                                let seed = bridge.core().active_seed();
-                                bridge.core().spawn_refresh_info(seed);
-                            }
                         }
                     }
                 }) {
@@ -195,11 +191,22 @@ fn app(cx: &mut RenderCx) -> Element {
             },
         ])
         .into();
-    // Step 1b: Info 面板（P4a→P4a+）——不再占用右列：内容元素传给标题栏
-    // Info 按钮的富内容 Flyout（header.rs），打开由 `info_open` 轮询驱动
-    // ShowAt，light dismiss 回调翻回 header flag；关闭瞬间此处刷新用量。
-    let info_el: Element = info_panel::info_panel(cx, bridge.clone());
-    let right_body: Element = right_content.grid_row(1).grid_column(0).into();
+    // Step 1b: Info 面板右列（P4a）——常驻（2026-08 决策：省动画，关闭不可
+    // 用；chat 视图恒显，其他视图隐藏；面板内容自管数据刷新）。
+    let info_el: Element = info_panel::info_panel(cx, bridge.clone())
+        .grid_row(0)
+        .grid_column(1)
+        .into();
+    let info_width = if view == "chat" {
+        GridLength::Pixel(info_panel::PANEL_WIDTH)
+    } else {
+        GridLength::Pixel(0.0)
+    };
+    let right_body: Element = grid((right_content, info_el))
+        .columns([GridLength::STAR, info_width])
+        .grid_row(1)
+        .grid_column(0)
+        .into();
     // Session tabs belong to the document workspace, not to the navigation
     // rail. Keeping both in one right-side grid aligns their coordinate space
     // while the transcript retains its narrower centered reading measure.
@@ -263,16 +270,10 @@ fn app(cx: &mut RenderCx) -> Element {
 
     // Step 2: Grid 两行——row0 = XAML 标题栏（48px，SetTitleBar 拖拽区，
     // host 自动接线 host.rs:277-288）；row1 = 内容区（侧栏 | 右区）。
-    // Info 面板内容挂标题栏 Info 按钮的 Flyout（浮层，不占布局）。
-    let titlebar: Element = header::header(
-        cx,
-        bridge.clone(),
-        info_el,
-        info_open && view == "chat",
-    )
-    .grid_row(0)
-    .grid_column(0)
-    .into();
+    let titlebar: Element = header::header(cx, bridge.clone())
+        .grid_row(0)
+        .grid_column(0)
+        .into();
     // ── 内容区（row 1）：侧栏 | 文档工作区（标签条 + 视图）──────
     // P-6 覆盖层预留（WORKFLOW §6.1）：未来 XAML 面板/对话框
     // （P1 Flyout anchor / P2 ContentDialog phantom child）作为覆盖层
@@ -304,7 +305,13 @@ fn app(cx: &mut RenderCx) -> Element {
     // 交互模态覆盖层（P-6 同模式）：kind="none" 时内部空 grid 穿透；
     // 有交互时半透明遮罩 + 卡片（permission/ask 模板）。置于最上层。
     let interaction: Element = interaction_overlay::interaction_overlay(cx, bridge.clone()).into();
-    grid((base, splash, interaction)).into()
+    // 覆盖层 grid 必须显式 STAR 行/列：Grid 默认 Auto 会让 Stretch 子元素只
+    // 覆盖内容大小（scrim 不全窗，遮罩不生效）——demo 已实证，同 interaction
+    // 内部 grid 的修复。三个子元素重叠同一 cell（P-6 覆盖层模式）。
+    grid((base, splash, interaction))
+        .rows([GridLength::STAR])
+        .columns([GridLength::STAR])
+        .into()
 }
 
 /// Minimal file logger for headless diagnosis (GUI subsystem has no console).

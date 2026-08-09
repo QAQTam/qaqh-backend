@@ -669,6 +669,29 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// daemon 落盘的上下文构成文件路径（`<data>/sessions/{seed}/context_stats.json`）。
+/// 数据根对齐 deepx_types::platform::data_dir：`DEEPX_DATA_DIR` 覆盖，
+/// 否则 Windows `%USERPROFILE%\.deepx` / Unix `$HOME/.deepx`。
+fn context_stats_path(seed: &str) -> std::path::PathBuf {
+    let root = std::env::var("DEEPX_DATA_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = if cfg!(windows) {
+                std::env::var_os("USERPROFILE")
+            } else {
+                std::env::var_os("HOME")
+            };
+            home.map(std::path::PathBuf::from)
+                .unwrap_or_default()
+                .join(".deepx")
+        });
+    root.join("sessions")
+        .join(seed)
+        .join("context_stats.json")
+}
+
 /// `ask_user` 表单中的单个答案（对齐 renderer `AskAnswer`：question_id）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct AskAnswer {
@@ -1032,6 +1055,30 @@ impl BridgeCore {
             .clone();
         let rev = self.interaction_rev.load(Ordering::Relaxed);
         (state, rev)
+    }
+
+    // ── 上下文构成分布（composer 底部堆叠条数据源）──────────────────
+
+    /// (stats, rev) 快照：读 daemon 回合结束写入的
+    /// `<data>/sessions/{seed}/context_stats.json`（engine_misc.rs 落盘；
+    /// 6 段构成同 Web ContextPanel 饼图）。rev = 文件 mtime（变化才刷新）；
+    /// 文件缺失 → (None, 0)。同步读小文件，轮询间隔内开销可忽略。
+    pub fn context_stats_snapshot(&self) -> (Option<crate::shell_store::ContextStats>, u64) {
+        let seed = self.active_seed();
+        let path = crate::bridge::context_stats_path(&seed);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return (None, 0);
+        };
+        let rev = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let stats = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+        (stats, rev)
     }
 
     /// 应用 daemon control 事件到交互队列状态机；活动会话快照变化时递增 rev。

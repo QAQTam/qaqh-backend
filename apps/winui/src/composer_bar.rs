@@ -39,7 +39,7 @@ use windows_reactor::*;
 use deepx_fluent::{motion, tokens};
 
 use crate::bridge::{Bridge, ComposerAttachment, ComposerState, ComposerTextFile};
-use crate::shell_store::DashboardSnapshot;
+use crate::shell_store::{ContextStats, DashboardSnapshot};
 
 /// 快照轮询间隔（同 interaction_overlay：交互响应优先）。
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -126,6 +126,19 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// 千分位数字格式化（token 计数；对齐 info_panel fmt_thousands）。
+fn fmt_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// 复制图片到 %TEMP% 做预览源（WinUI Image 不支持 base64，用 file:// 加载）。
 /// 返回临时文件路径；失败返回 None（预览降级为仅文件名，不影响发送）。
 fn write_preview_copy(src: &str, id: &str) -> Option<String> {
@@ -186,6 +199,11 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (manual_height, set_manual_height) = cx.use_state::<bool>(false);
     let (immersive, set_immersive) = cx.use_state::<bool>(false);
     let resize_start = cx.use_ref::<Option<(f64, f64)>>(None);
+    // 上下文构成分布（输入框下常驻堆叠条）：daemon 回合结束写入
+    // context_stats.json（6 段 token 分布，同 Web ContextPanel 饼图）。
+    let (ctx_stats, set_ctx_stats) = cx.use_state::<Option<ContextStats>>(None);
+    let ctx_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    let last_ctx_rev = cx.use_ref::<u64>(0);
 
     // composer 投影轮询（250ms rev 比对）。
     cx.use_effect((), {
@@ -217,6 +235,23 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 POLL_INTERVAL,
                 move || bridge.core().dashboard_snapshot(),
                 move |s| set_dashboard.call(s),
+            );
+        }
+    });
+
+    // 上下文构成轮询（context_stats 文件 mtime rev；文件缺失 → None）。
+    cx.use_effect((), {
+        let bridge = bridge.clone();
+        let set_ctx_stats = set_ctx_stats.clone();
+        let ctx_timer = ctx_timer.clone();
+        let last_ctx_rev = last_ctx_rev.clone();
+        move || {
+            crate::shell::poll_rev(
+                ctx_timer,
+                last_ctx_rev,
+                POLL_INTERVAL,
+                move || bridge.core().context_stats_snapshot(),
+                move |s| set_ctx_stats.call(s),
             );
         }
     });
@@ -674,18 +709,8 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .into()
     };
 
-    // 发送/停止 + 元信息。
+    // 发送/停止按钮。
     let can_send = (!text.trim().is_empty() || !attachments.is_empty()) && !has_pending_gate;
-    let meta: Element = hstack((
-        text_block(format!("{:.1}K", state.context_tokens as f64 / 1000.0))
-            .font_size(tokens::TYPE_CAPTION)
-            .foreground(ThemeRef::SecondaryText),
-        text_block(&state.model)
-            .font_size(tokens::TYPE_CAPTION)
-            .foreground(ThemeRef::SecondaryText),
-    ))
-    .spacing(tokens::SPACE_2)
-    .into();
     let send_stop: Element = if is_streaming {
         button("")
             .icon(Symbol::Stop)
@@ -779,7 +804,7 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         attach_button.grid_column(0),
         mode_button.grid_column(1),
         immersive_button.grid_column(2),
-        hstack((meta, permission_picker))
+        hstack((permission_picker,))
             .spacing(tokens::SPACE_2)
             .vertical_alignment(VerticalAlignment::Center)
             .grid_column(4),
@@ -853,9 +878,66 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         .automation_id("composer-resize-handle")
         .into();
 
+    // 上下文构成堆叠条（输入框下常驻）：6 段 token 分布（对齐 Web
+    // ContextPanel 饼图语义：对话/思考/工具调用/工具结果/工具定义/系统提示），
+    // 加权 Star 列按占比分宽，段间 1px 间隔，语义色 + tooltip。
+    // 悬停命中：4px 条 + 整行容器都挂 tooltip（细条难 hover，容器兜底）。
+    // 文件缺失或全零（无会话/回合未结束）时隐藏。
+    let ctx_bar: Element = match ctx_stats.as_ref() {
+        Some(s) if s.total() > 0 => {
+            let total = s.total();
+            let segs: [(u64, &str, ThemeRef); 6] = [
+                (s.chat_text, "对话", ThemeRef::Accent),
+                (s.thinking, "思考", ThemeRef::SystemCaution),
+                (s.tool_calls, "工具调用", ThemeRef::SystemAttention),
+                (s.tool_results, "工具结果", ThemeRef::SystemSuccess),
+                (s.tools_schema, "工具定义", ThemeRef::SystemNeutral),
+                (s.system_prompt, "系统提示", ThemeRef::SystemCritical),
+            ];
+            let mut cells: Vec<Element> = Vec::with_capacity(6);
+            let mut weights: Vec<GridLength> = Vec::with_capacity(6);
+            // 容器 tooltip：完整构成（多行，ToolTip TextBlock 支持 \n）。
+            let mut summary = String::from("上下文构成");
+            for (i, (v, name, color)) in segs.iter().enumerate() {
+                let pct = *v as f64 * 100.0 / total as f64;
+                cells.push(
+                    border(text_block(""))
+                        .background(color.clone())
+                        .tooltip(format!("{name} {pct:.1}% · {} tokens", fmt_thousands(*v)))
+                        .automation_name(format!("{name} {pct:.1}%"))
+                        .grid_column(i as i32)
+                        .into(),
+                );
+                // 权重 0 的段给极小值（Star(0) 列不参与分配）。
+                weights.push(GridLength::Star((*v as f64).max(0.001)));
+                summary.push_str(&format!(
+                    "\n{name} {pct:.1}% · {} tokens",
+                    fmt_thousands(*v)
+                ));
+            }
+            grid((
+                border(grid(cells).columns(weights).column_spacing(1.0))
+                    .height(4.0)
+                    .corner_radius(2.0)
+                    .tooltip(summary.clone())
+                    .automation_name(summary)
+                    .grid_column(0),
+                text_block(format!("{} tokens", fmt_thousands(total)))
+                    .font_size(11.0)
+                    .foreground(ThemeRef::SecondaryText)
+                    .grid_column(1),
+            ))
+            .columns([GridLength::STAR, GridLength::Auto])
+            .column_spacing(tokens::SPACE_2)
+            .with_key("ctx-bar")
+            .into()
+        }
+        _ => grid(()).with_key("ctx-bar-empty").into(),
+    };
+
     // 持久命令表面使用 LayerFill；边框/圆角由共享 Fluent primitive 统一。
     let card: Element = deepx_fluent::command_surface(
-        vstack((resize_handle, input, error_row, attach_preview, footer))
+        vstack((resize_handle, input, error_row, attach_preview, footer, ctx_bar))
             .spacing(tokens::SPACE_2)
             .padding(tokens::SPACE_3),
     )
