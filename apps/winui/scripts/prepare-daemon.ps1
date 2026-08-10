@@ -55,6 +55,24 @@ function Get-GitCommit([string]$RepoRoot) {
     $out.Trim()
 }
 
+# 后端源码路径集（软校验用：daemon 构建后这些路径有变更则提示重编）。
+# 维护规则：为 deepx-daemon / deepx-workspace 新增本地依赖时追加对应 crates/<name>。
+$BackendSourcePaths = @(
+    "crates/deepx-daemon",
+    "crates/deepx-workspace",
+    "crates/deepx-proto",
+    "crates/deepx-config",
+    "crates/deepx-domain",
+    "crates/deepx-ringing",
+    "crates/deepx-runtime",
+    "crates/deepx-types",
+    "crates/deepx-skills",
+    "crates/deepx-msglp",
+    "crates/deepx-session",
+    "Cargo.toml",
+    "Cargo.lock"
+)
+
 function Get-ProtocolVersion([string]$RepoRoot) {
     $control = Get-Content (Join-Path $RepoRoot "crates/deepx-proto/src/control.rs") -Raw
     if ($control -notmatch 'CONTROL_PROTOCOL_VERSION\s*:\s*u16\s*=\s*(\d+)') {
@@ -72,7 +90,7 @@ function Get-WorkspaceVersion([string]$RepoRoot) {
 }
 
 # ── 校验 daemon 二进制实际嵌入 build_id（防陈旧产物/无 git 回退）─────────
-function Test-DaemonBuildId([string]$ExePath, [string]$Expected) {
+function Test-DaemonBuildId([string]$ExePath, [string]$Expected, [string]$RepoRoot = "", [switch]$Strict) {
     if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
         throw "缺少 daemon 二进制: $ExePath（先跑 just build-daemon）"
     }
@@ -80,11 +98,43 @@ function Test-DaemonBuildId([string]$ExePath, [string]$Expected) {
     $bytes = [System.IO.File]::ReadAllBytes($ExePath)
     $latin1 = [System.Text.Encoding]::GetEncoding("ISO-8859-1")
     $content = $latin1.GetString($bytes)
-    if (-not $content.Contains($Expected)) {
-        throw "staged daemon does not embed build $Expected; " +
-            "daemon 二进制陈旧或构建时无 git（build.rs 回退 CARGO_PKG_VERSION）。" +
+
+    if ($Strict) {
+        # 发布后端：必须精确嵌入 lock.git_commit（manifest 身份校验的严格语义）。
+        if (-not $content.Contains($Expected)) {
+            throw "staged daemon does not embed build $Expected; " +
+                "daemon 二进制陈旧或构建时无 git（build.rs 回退 CARGO_PKG_VERSION）。" +
+                "请重跑 just build-daemon 后重试。"
+        }
+        return $Expected
+    }
+
+    # 本地后端：daemon 嵌入构建时 HEAD（build.rs 默认 git rev-parse HEAD）。
+    # 硬校验：嵌入值必须是 40 位 hex 且是当前 HEAD 的祖先（或等于）——
+    #   防无 git 回退版本号；docs/脚本等非后端提交前移 HEAD 不误报陈旧。
+    $candidates = [regex]::Matches($content, '[0-9a-f]{40}') |
+        ForEach-Object { $_.Value } |
+        Sort-Object -Unique |
+        Where-Object { $_ -ne ('0' * 40) }
+    $embedded = $null
+    foreach ($candidate in $candidates) {
+        & git -C $RepoRoot merge-base --is-ancestor $candidate $Expected 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $embedded = $candidate
+            break
+        }
+    }
+    if (-not $embedded) {
+        throw "daemon 二进制未嵌入有效 git commit（构建时无 git，build.rs 回退 CARGO_PKG_VERSION？）。" +
             "请重跑 just build-daemon 后重试。"
     }
+    # 软校验：嵌入之后到 HEAD 之间若有后端源码变更，提示重编（不阻断——
+    # dev 场景可能故意不重编，发布流程 CI 从 clean 构建）。
+    $pending = & git -C $RepoRoot log --oneline "$embedded..$Expected" -- @BackendSourcePaths 2>$null
+    if ($pending) {
+        Write-Warning "后端源码在 daemon 构建后有 $($pending.Count) 个提交变更（最近：$($pending[0])），建议重编：just build-daemon"
+    }
+    $embedded
 }
 
 $stagedBuildId = ""
@@ -150,7 +200,12 @@ if ($ReleaseArtifact) {
     Write-Host "Staged local backend $daemonSrc -> $daemonDest"
 }
 
-Test-DaemonBuildId $daemonDest $stagedBuildId
+if ($ReleaseArtifact) {
+    $stagedBuildId = Test-DaemonBuildId $daemonDest $stagedBuildId -Strict
+} else {
+    # 本地：返回真实嵌入的 commit（写 daemon-manifest 的 build_id）。
+    $stagedBuildId = Test-DaemonBuildId $daemonDest $stagedBuildId $BackendRoot
+}
 
 # ── daemon-manifest.json ─────────────────────────────────
 $workspaceSha256 = Get-Sha256 $workspaceDest
