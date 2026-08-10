@@ -41,11 +41,15 @@ use crate::chat_adapter;
 /// 变化（restore / 新 turn / round 完成）不受此限，立即滚底。
 const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 
-/// Live（非结构性）正文提交间隔：约 30fps。协议事件仍逐帧归并到模型，
+/// Live（非结构性）正文提交间隔：约 15fps。协议事件仍逐帧归并到模型，
 /// 但 growing markdown / Element / XAML 文本只按此频率提交；结构变化
-/// （新 turn、工具卡、round 完成）仍立即提交。33ms 在输入响应与 UI 线程
-/// 预算之间更稳妥，也避免 120Hz 屏把同一增长正文每 8ms 全量重解析。
-const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(33);
+/// （新 turn、工具卡、round 完成）仍立即提交。
+///
+/// 66ms 经 DEEPX_PERF_LOG 实测校准：稳态单次提交 reconcile 7-17ms
+/// （created 70-104 个 XAML 控件；turn memo 已把全量重建降为增量），
+/// 33ms 下 30fps × ~12ms ≈ 50% CPU 持续满载（输入排队卡顿）；66ms
+/// 减半到 ~25%，流式 15fps 逐字仍流畅（视觉 ≥24fps 无感）。
+const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(66);
 
 /// 单帧事件上限与 reducer 时间预算。数量上限限制极端微小事件，时间预算
 /// 则限制长 checkpoint / markdown 解析；任一先到即把余量留给下一帧。
