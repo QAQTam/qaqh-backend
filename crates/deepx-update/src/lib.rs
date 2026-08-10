@@ -17,7 +17,7 @@ pub use model::{
     BundleManifest, Catalog, CatalogComponent, ComponentHealth, ComponentState, InstalledState,
     RestartPolicy, StagedArtifact, StagedOperation, UpdateAction, UpdateMode, UpdatePlan,
 };
-pub use planner::{plan_delta, plan_update};
+pub use planner::{build_delta_manifest, plan_delta, plan_update};
 pub use source::{DirectoryUpdateSource, UpdateSource, sha256_reader, validate_relative_path};
 pub use state::{
     commit_bundle_state, installation_id_for_path, load_installed_state, migrate_installed_state,
