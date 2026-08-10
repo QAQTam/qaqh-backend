@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-client"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "bytes",
  "deepx-domain",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-config"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-types",
  "log",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-daemon"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-config",
  "deepx-domain",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-domain"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-types",
  "serde",
@@ -1190,14 +1190,14 @@ dependencies = [
 
 [[package]]
 name = "deepx-fluent"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "windows-reactor",
 ]
 
 [[package]]
 name = "deepx-gate"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "anyhow",
  "deepx-types",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-gate-testui"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-gate",
  "deepx-types",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-installer"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-types",
  "deepx-update",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-message"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-session",
  "deepx-types",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-msglp"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-config",
  "deepx-domain",
@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-proto"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-types",
  "serde",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-ringing"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-domain",
  "serde",
@@ -1298,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-runtime"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "chrono",
  "deepx-config",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-session"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-types",
  "hex",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-skills"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-subagent"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-workspace",
  "log",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-types"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1362,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-update"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "hex",
  "serde",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-updater"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-types",
  "deepx-update",
@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-winui"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "deepx-client",
  "deepx-fluent",
@@ -1401,7 +1401,7 @@ dependencies = [
 
 [[package]]
 name = "deepx-workspace"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "chrono",
  "deepx-config",
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "markdown-core"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "pulldown-cmark",
  "serde",
@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "markdown-winui"
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 dependencies = [
  "markdown-core",
  "mermaid-rs-renderer",

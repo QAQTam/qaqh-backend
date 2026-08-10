@@ -1,6 +1,6 @@
 {
   "name": "deepx-monorepo",
   "private": true,
-  "version": "1.0.0-rc.2",
+  "version": "1.0.0-rc.3",
   "description": "DeepX monorepo — AI agent desktop application (native WinUI3 shell)"
 }
