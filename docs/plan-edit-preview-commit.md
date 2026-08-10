@@ -26,7 +26,7 @@
 3. undo / revert **本期不做**——留待沙箱阶段做体系化编辑工具时统一设计（集中 undo + 读路径 overlay）；
 4. `write` **纳入本期**——三个工具（apply_patch/edit/edit_block）升级时同步统一，全工具协议一致；
 5. **冗余防御（2026-08-04 补充）**：LLM 若在 commit 时仍按旧习惯附带完整 patch——附带 patch 重建的计划与 `commit_id` **一致 → 容忍并忽略冗余**（正常提交）；不一致/无法解析 → `COMMIT_WITH_PATCH` 拒绝。旧调用习惯不会无故断裂；
-6. **todo 命名统一（2026-08-04）**：主工具名由 `task` 统一为 **`todo`**（与 prompt/文档一致）；`task` 保留为兼容别名（同一 handler、schema 标注 deprecated），宿主侧全面切换后移除。系统 prompt（backend_prompt.md）[TASK MANAGEMENT] 改用 todo + create_batch、[WORKFLOW]/[FILE EDITING] 补充两阶段 commit 示例。
+6. **todo 命名与 V2 契约统一（2026-08-04，2026-08-10 更新）**：公开工具保持单一 **`todo`**；当前模型契约为 `create|insert|set|list`，状态为 `idle|in_progress|completed|cancelled`。`create` 可用 `items` 原子创建一组任务，`insert` 在稳定 ID 前后插入，`set` 只传 `id + status`（完成可附 evidence）。旧 `create_batch|update|cancel|pending` 仅作为未公开兼容入口保留。
 
 ## 1. 问题与目标
 

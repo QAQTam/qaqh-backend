@@ -48,6 +48,12 @@ const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 /// 滚动有关）。结构变化（restore / 新 turn / round 完成）不受此限。
 const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(8);
 
+/// 单帧最多消费的协议事件数。流式事件即使短时积压，也不能在
+/// `CompositionTarget::Rendering` 回调里无界 drain：该回调与 XAML 的
+/// measure/arrange/commit 共用 UI 线程，一次处理数千事件会直接阻塞输入、
+/// 标题栏和滚动。剩余事件保留到下一帧，结构性事件仍按到达顺序处理。
+const CHAT_EVENTS_PER_FRAME: usize = 512;
+
 /// 后台时长超过此值（窗口不可见，vsync 回调暂停）→ 恢复时走快照
 /// resume：丢弃积压增量事件，拉 timeline 快照一次到位（复用 restore
 /// 分支，毫秒级），而不是重放后台期间积压的增量（可能数千条）。
@@ -157,10 +163,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // = 原首行的新下标。渲染闭包 take 后随 preserve_anchor 下发。
     let pending_anchor = cx.use_ref::<Option<usize>>(None);
     // 窗口快照缓存：`Transcript::mutation_rev` 未变时复用同一
-    // `Rc<Vec<TurnView>>`，`list_view_rc` 的 `same_items_as` 按指针命中，
-    // reconciler 完全跳过已 realize 行的 rebuild 与 diff——流式期间每帧
-    // 只 diff 真正变化的行，消除"视口内行全量重建 + 深比较"主热点。
-    let window_cache = cx.use_ref::<Option<(u64, Rc<Vec<TurnView>>)>>(None);
+    // `Rc<Vec<Rc<TurnView>>>`；有变化时按 turn_id + turn mutation_rev
+    // 结构共享未变化行，仅克隆真正变化的活尾。`list_view_rc` 仍以外层
+    // Rc 指针判定整包不变，变化帧则由每行 Rc 的 PartialEq 快速跳过旧行。
+    let window_cache = cx.use_ref::<Option<(u64, Rc<Vec<Rc<TurnView>>>)>>(None);
 
     // 事件泵：drain bridge 队列 → Transcript；rev 变化触发重渲染。
     cx.use_effect((), {
@@ -293,7 +299,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     }
                     // 先 drain 拿 rev：restore 分支渲染也要用（快照到达时
                     // chat_rev 已 +1，直接下发触发重渲染）。
-                    let (events, rev) = bridge.core().chat_drain();
+                    let (events, rev) = bridge.core().chat_drain_limit(CHAT_EVENTS_PER_FRAME);
                     let output_resolutions = bridge.core().chat_output_drain();
                     // 1) timeline 快照（resume 历史；peek + seed 校验）：
                     //    匹配才消费；不匹配**保留**快照（不丢弃）并主动重拉
@@ -534,13 +540,31 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .automation_id("chat-empty")
             .with_key(format!("chat-empty-{active_seed}"));
     }
-    let turns: Rc<Vec<TurnView>> = {
+    let turns: Rc<Vec<Rc<TurnView>>> = {
         let rev = s.mutation_rev();
         let mut cache = window_cache.borrow_mut();
         match cache.as_ref() {
             Some((r, rc)) if *r == rev => rc.clone(),
             _ => {
-                let rc = Rc::new(s.window_turns().to_vec());
+                let previous_by_id: HashMap<&str, &Rc<TurnView>> = cache
+                    .as_ref()
+                    .map(|(_, rows)| {
+                        rows.iter().map(|turn| (turn.turn_id.as_str(), turn)).collect()
+                    })
+                    .unwrap_or_default();
+                let rows = s
+                    .window_turns()
+                    .iter()
+                    .map(|turn| {
+                        previous_by_id
+                            .get(turn.turn_id.as_str())
+                            .filter(|old| old.mutation_rev == turn.mutation_rev)
+                            .cloned()
+                            .cloned()
+                            .unwrap_or_else(|| Rc::new(turn.clone()))
+                    })
+                    .collect();
+                let rc = Rc::new(rows);
                 *cache = Some((rev, rc.clone()));
                 rc
             }
@@ -549,10 +573,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 顶部预加载后本帧需要锚定补偿：取走挂起标记，把
     // 「原窗口首行」（新下标 = 扩展前移量）锚回原位，视口不跳。
     let anchor_rows = pending_anchor.borrow_mut().take();
-    let mut builder = list_view_rc(turns, move |turn: &TurnView, i: usize| {
-        turn_view(i, turn, color_scheme)
+    let mut builder = list_view_rc(turns, move |turn: &Rc<TurnView>, i: usize| {
+        turn_view(i, turn.as_ref(), color_scheme)
     })
-    .with_key_selector(|turn: &TurnView| turn.turn_id.clone())
+    .with_key_selector(|turn: &Rc<TurnView>| turn.turn_id.clone())
     .selection_mode(SelectionMode::None);
     if let Some(anchor_rows) = anchor_rows {
         builder = builder.preserve_anchor(*scroll_version.borrow(), anchor_rows, 0.0);

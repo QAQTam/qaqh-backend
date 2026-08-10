@@ -179,6 +179,9 @@ pub struct TurnView {
     /// TurnFailed 的错误信息（`code: message`，含 retryable 提示），UI 显示用。
     pub failed_error: Option<String>,
     pub rounds: Vec<RoundView>,
+    /// 仅本 turn 可见内容变化时递增。ChatView 的窗口快照用它复用
+    /// 未变化 turn 的 `Rc<TurnView>`，避免每个 token 都深拷贝整个窗口。
+    pub mutation_rev: u64,
 }
 
 /// 一个 round 的视图状态。
@@ -483,9 +486,8 @@ pub struct Transcript {
     /// External final answers waiting for the application transport to load.
     pending_outputs: Vec<PendingOutput>,
     /// 变更版本号：所有 mut 方法入口无条件 +1（default 返回也递增，仅多
-    /// 一次快照重建，can_skip_update 兜底）。ChatView 据此复用窗口快照
-    /// `Rc<Vec<TurnView>>`——版本未变时 `same_items_as` 指针命中，
-    /// reconciler 完全跳过已 realize 行的 rebuild 与 diff。
+    /// 一次快照重建，can_skip_update 兜底）。ChatView 据此复用窗口快照；
+    /// 每个 TurnView 另有局部 mutation_rev，使变化帧也能结构共享未变化行。
     rev: u64,
 }
 
@@ -693,7 +695,8 @@ impl Transcript {
     /// Apply one protocol event to the canonical presentation model.
     pub fn apply(&mut self, ev: &ConversationEvent) -> TranscriptChange {
         self.rev += 1;
-        match ev {
+        let target_turn_id = (!ev.turn_id().is_empty()).then(|| ev.turn_id().to_owned());
+        let change = match ev {
             ConversationEvent::TurnStarted { turn_id, user_text } => {
                 if let Some(&index) = self.turn_index.get(turn_id) {
                     let turn = &mut self.turns[index];
@@ -710,6 +713,7 @@ impl Transcript {
                     status: TurnStatus::Running,
                     failed_error: None,
                     rounds: Vec::new(),
+                    mutation_rev: 0,
                 });
                 self.turn_index.insert(turn_id.clone(), index);
                 TranscriptChange::structural(true)
@@ -1034,7 +1038,14 @@ impl Transcript {
                     .then(|| TranscriptChange::structural(true))
                     .unwrap_or_default()
             }
+        };
+        if change.changed()
+            && let Some(turn_id) = target_turn_id
+            && let Some(&index) = self.turn_index.get(&turn_id)
+        {
+            self.turns[index].mutation_rev = self.turns[index].mutation_rev.wrapping_add(1);
         }
+        change
     }
 
     /// Apply a presentation-frame batch.
@@ -1125,6 +1136,7 @@ impl Transcript {
             status: TurnStatus::Running,
             failed_error: None,
             rounds: Vec::new(),
+            mutation_rev: 0,
         });
         self.turn_index.insert(turn_id.to_string(), index);
         index
@@ -1286,6 +1298,7 @@ fn to_turn_view(t: RestoredTurn) -> TurnView {
                 round
             })
             .collect(),
+        mutation_rev: 0,
     }
 }
 

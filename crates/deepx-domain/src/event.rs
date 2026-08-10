@@ -135,6 +135,8 @@ pub struct DashboardTask {
     pub subject: String,
     pub description: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 /// Replaceable dashboard/activity payload. It is deliberately separate from
@@ -743,6 +745,30 @@ mod tests {
         assert_eq!(current.tool_call_id(), Some("edit-1"));
         let json = serde_json::to_string(&current).expect("serialize");
         assert!(json.contains("\"turn_id\":\"t1\""));
+    }
+
+    #[test]
+    fn dashboard_task_round_trip_keeps_evidence_and_accepts_legacy_rows() {
+        let current = DashboardTask {
+            id: "T1".into(),
+            subject: "Verify".into(),
+            description: "Run checks".into(),
+            status: "completed".into(),
+            evidence: Some("all checks passed".into()),
+        };
+        let json = serde_json::to_string(&current).expect("serialize dashboard task");
+        assert!(json.contains("\"evidence\":\"all checks passed\""));
+        let back: DashboardTask = serde_json::from_str(&json).expect("deserialize dashboard task");
+        assert_eq!(back.evidence.as_deref(), Some("all checks passed"));
+
+        let legacy: DashboardTask = serde_json::from_value(serde_json::json!({
+            "id": "T2",
+            "subject": "Legacy",
+            "description": "",
+            "status": "idle"
+        }))
+        .expect("legacy dashboard row without evidence remains readable");
+        assert!(legacy.evidence.is_none());
     }
 
     #[test]

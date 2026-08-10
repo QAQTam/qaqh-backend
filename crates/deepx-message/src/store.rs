@@ -344,6 +344,9 @@ pub struct MessageStore {
     /// Next externally visible turn sequence. Unlike `turns.len()`, this never
     /// moves backwards when old turns are replaced by a compact checkpoint.
     next_turn_seq: u64,
+    /// Monotonic in-memory context generation. Background compaction captures
+    /// this value and must only apply its result while the generation matches.
+    context_revision: u64,
     /// If true, save_msg is a no-op — used during from_messages replay.
     replaying: bool,
     /// Messages assigned msg_id but not yet flushed to disk.
@@ -377,6 +380,7 @@ impl Clone for MessageStore {
             has_compact_context: self.has_compact_context,
             next_msg_id: self.next_msg_id,
             next_turn_seq: self.next_turn_seq,
+            context_revision: self.context_revision,
             replaying: false,
             pending_save: Vec::new(),
             ephemeral: self.ephemeral,
@@ -396,6 +400,7 @@ impl MessageStore {
             has_compact_context: false,
             next_msg_id: 1,
             next_turn_seq: 1,
+            context_revision: 0,
             replaying: false,
             pending_save: Vec::new(),
             ephemeral: false,
@@ -413,6 +418,10 @@ impl MessageStore {
         &self.seed
     }
 
+    pub fn context_revision(&self) -> u64 {
+        self.context_revision
+    }
+
     pub fn switch_seed(&mut self, new_seed: &str) {
         self.seed = new_seed.to_string();
         self.system_messages.clear();
@@ -422,6 +431,7 @@ impl MessageStore {
         self.has_compact_context = false;
         self.next_msg_id = 1;
         self.next_turn_seq = 1;
+        self.context_revision = self.context_revision.saturating_add(1);
         self.replaying = false;
         self.pending_save.clear();
     }
@@ -505,6 +515,7 @@ impl MessageStore {
             return Effect::None;
         }
         self.system_messages.push(msg.clone());
+        self.context_revision = self.context_revision.saturating_add(1);
         self.save_msg(&msg);
         Effect::None
     }
@@ -513,6 +524,7 @@ impl MessageStore {
     /// given prefix. Used to replace catalog messages without relying on
     /// the [DEEPX_SKILL_V1] format.
     pub fn remove_system_messages_by_prefix(&mut self, prefix: &str) {
+        let before = self.system_messages.len();
         self.system_messages.retain(|message| {
             let text = message
                 .content
@@ -524,6 +536,9 @@ impl MessageStore {
                 .unwrap_or("");
             !text.starts_with(prefix)
         });
+        if self.system_messages.len() != before {
+            self.context_revision = self.context_revision.saturating_add(1);
+        }
     }
 
     pub fn push_user(&mut self, text: &str) -> Effect {
@@ -539,6 +554,7 @@ impl MessageStore {
         }
         let msg = Message::user(text);
         self.turns.push(Turn::new(msg.clone()));
+        self.context_revision = self.context_revision.saturating_add(1);
         self.save_msg(&msg);
         Effect::None
     }
@@ -550,6 +566,7 @@ impl MessageStore {
                 mime_type: mime_type.to_string(),
                 data: data.to_string(),
             });
+            self.context_revision = self.context_revision.saturating_add(1);
         }
     }
 
@@ -581,6 +598,7 @@ impl MessageStore {
         let step = Step::new(msg.clone());
         let has_tools = step.has_tool_use();
         turn.steps.push(step);
+        self.context_revision = self.context_revision.saturating_add(1);
         self.save_msg(&msg);
 
         if has_tools {
@@ -591,7 +609,9 @@ impl MessageStore {
     }
 
     pub fn push_tool_result(&mut self, tool_call_id: &str, result: &str, success: bool) -> Effect {
-        self.push_tool_result_inner(tool_call_id, result, success);
+        if self.push_tool_result_inner(tool_call_id, result, success) {
+            self.context_revision = self.context_revision.saturating_add(1);
+        }
 
         if let Some(turn) = self.turns.last() {
             if let Some(step) = turn.steps.last() {
@@ -608,8 +628,12 @@ impl MessageStore {
     }
 
     pub fn push_tool_results_batch(&mut self, results: &[(String, String, bool)]) -> Effect {
+        let mut changed = false;
         for (tc_id, result, success) in results {
-            self.push_tool_result_inner(tc_id, result, *success);
+            changed |= self.push_tool_result_inner(tc_id, result, *success);
+        }
+        if changed {
+            self.context_revision = self.context_revision.saturating_add(1);
         }
 
         if let Some(turn) = self.turns.last() {
@@ -626,7 +650,7 @@ impl MessageStore {
         Effect::None
     }
 
-    fn push_tool_result_inner(&mut self, tool_call_id: &str, result: &str, success: bool) {
+    fn push_tool_result_inner(&mut self, tool_call_id: &str, result: &str, success: bool) -> bool {
         // Look up tool name from any step that owns this tool_call_id.
         // Look up the tool name so the result can be finalized once at
         // storage time — the stored bytes are the final rendered form.
@@ -656,8 +680,9 @@ impl MessageStore {
                 if !step.tool_result_has_id(tool_call_id) {
                     step.tool_results.push(tool_msg.clone());
                     self.save_msg(&tool_msg);
+                    return true;
                 }
-                return;
+                return false;
             }
         }
         if let Some(turn) = self.turns.last_mut() {
@@ -669,19 +694,20 @@ impl MessageStore {
                     );
                     step.tool_results.push(tool_msg.clone());
                     self.save_msg(&tool_msg);
-                    return;
+                    return true;
                 }
                 log::error!(
                     "push_tool_result: orphan tool_result {} — last step does not own this call_id, dropped",
                     tool_call_id
                 );
-                return;
+                return false;
             }
         }
         log::error!(
             "push_tool_result: orphan tool_result {} — nowhere to place, dropped",
             tool_call_id
         );
+        false
     }
 
     pub fn replace_tool_result(&mut self, tool_call_id: &str, result: &str, success: bool) {
@@ -711,6 +737,7 @@ impl MessageStore {
                 step.tool_results.retain(|tr| !tr.content.iter().any(|b| matches!(b, deepx_types::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == tool_call_id)));
                 step.tool_results
                     .push(Message::tool(tool_call_id, &final_result, success));
+                self.context_revision = self.context_revision.saturating_add(1);
                 return;
             }
         }
@@ -785,7 +812,9 @@ impl MessageStore {
 
     /// Push a tool result directly (for manual execution).
     pub fn push_tool_result_direct(&mut self, tool_call_id: &str, result: &str, success: bool) {
-        self.push_tool_result_inner(tool_call_id, result, success);
+        if self.push_tool_result_inner(tool_call_id, result, success) {
+            self.context_revision = self.context_revision.saturating_add(1);
+        }
     }
 
     /// Execute all pending tools in the current step. When `tool_executor` is None
@@ -825,8 +854,12 @@ impl MessageStore {
             let report = executor(req);
             reports.push((tool.id.clone(), report.content, report.success));
         }
+        let mut changed = false;
         for (tc_id, content, success) in reports {
-            self.push_tool_result_inner(&tc_id, &content, success);
+            changed |= self.push_tool_result_inner(&tc_id, &content, success);
+        }
+        if changed {
+            self.context_revision = self.context_revision.saturating_add(1);
         }
 
         // Tools executed; caller re-evaluates (build context → gate → push_assistant)
@@ -1147,6 +1180,7 @@ impl MessageStore {
             if let Some(step) = turn.steps.last() {
                 if !step.all_tools_satisfied() {
                     turn.steps.pop();
+                    self.context_revision = self.context_revision.saturating_add(1);
                     return true;
                 }
             }
@@ -1166,6 +1200,7 @@ impl MessageStore {
             return false;
         }
         self.turns.truncate(idx);
+        self.context_revision = self.context_revision.saturating_add(1);
         // After truncation, need full rewrite on next save.
         true
     }
@@ -1201,6 +1236,7 @@ impl MessageStore {
         // No skipping needed — compacted data is physically gone.
         self.compact_skip = 0;
         self.has_compact_context = true;
+        self.context_revision = self.context_revision.saturating_add(1);
     }
 
     /// Get the text of any previous compaction summary (for incremental update mode).

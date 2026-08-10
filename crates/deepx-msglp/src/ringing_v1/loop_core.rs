@@ -132,6 +132,7 @@ pub struct Loop {
 
     /// Pending compact result (set when compact is running in background).
     pending_compact_rx: Option<mpsc::Receiver<CompactMeta>>,
+    pending_compact_id: Option<String>,
     pending_compact_causation: Option<String>,
 
     /// Direct output emitter. The renderer performs frame-level coalescing.
@@ -280,6 +281,7 @@ impl Loop {
                 tx: notification::NotificationThread::spawn().into_sender(),
             },
             pending_compact_rx: None,
+            pending_compact_id: None,
             pending_compact_causation: None,
             paced_emitter,
         }
@@ -365,8 +367,7 @@ impl Loop {
         // Session-agnostic engines：无状态（M3 后无 Engine trait reset）
         self.goal = GoalEngine::new();
         self.misc.reset();
-        self.pending_compact_rx = None;
-        self.pending_compact_causation = None;
+        self.finish_pending_compact(deepx_domain::CompactStatus::Cancelled);
 
         self.pending.clear();
     }
@@ -375,6 +376,7 @@ impl Loop {
     /// An unanswered ask/tool round must never be persisted into, or resumed
     /// against, the next session.
     fn prepare_session_switch(&mut self) {
+        self.session.agent.reset_compaction_coordination();
         if self.session.turn.is_suspended() {
             self.session.agent.msg.remove_last_step_if_incomplete();
         }
@@ -482,6 +484,7 @@ impl Loop {
             }
 
             if self.writer_dead.load(Ordering::SeqCst) {
+                self.finish_pending_compact(deepx_domain::CompactStatus::Cancelled);
                 log::error!("[AGENT] writer thread died — exiting");
                 eprintln!("[DEEPX AGENT] writer thread died — stdout pipe broken. Exiting.");
                 break;
@@ -508,6 +511,7 @@ impl Loop {
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.finish_pending_compact(deepx_domain::CompactStatus::Cancelled);
                     log::error!("[AGENT] cmd_rx closed — stdin pipe broken. Exiting.");
                     eprintln!("[DEEPX AGENT] stdin pipe broken — exiting.");
                     break;
@@ -652,14 +656,43 @@ impl Loop {
         }
     }
 
+    fn finish_pending_compact(&mut self, status: deepx_domain::CompactStatus) {
+        self.session.agent.finish_manual_compact();
+        self.pending_compact_rx = None;
+        let Some(compact_id) = self.pending_compact_id.take() else {
+            self.pending_compact_causation = None;
+            return;
+        };
+        let causation = self.pending_compact_causation.take();
+        let _scope = self.paced_emitter.enter_causation(causation.as_deref());
+        self.paced_emitter
+            .emit_domain(deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::CompactFinished {
+                    compact_id,
+                    status,
+                    summary_chars: Some(0),
+                    turns_compacted: Some(0),
+                    turns_removed: Some(0),
+                },
+            ));
+    }
+
     /// Check if a background compact has completed and apply the result.
     fn check_pending_compact(&mut self) {
         if let Some(ref rx) = self.pending_compact_rx {
             match rx.try_recv() {
                 Ok(meta) => {
+                    self.session.agent.finish_manual_compact();
                     self.pending_compact_rx = None;
+                    let compact_id = self.pending_compact_id.take();
                     let causation = self.pending_compact_causation.take();
                     let _scope = self.paced_emitter.enter_causation(causation.as_deref());
+                    if compact_id.as_deref() != Some(meta.compact_id.as_str()) {
+                        log::warn!(
+                            "[COMPACT] pending/result id mismatch: pending={compact_id:?}, result={}",
+                            meta.compact_id
+                        );
+                    }
                     let mut ctx = RingContext {
                         agent: &mut self.session.agent,
                         emitter: &self.paced_emitter,
@@ -678,8 +711,8 @@ impl Loop {
                     // doesn't stay stuck at the "compacting" animation.
                     log::error!("[COMPACT] worker thread disconnected without result");
                     self.pending_compact_rx = None;
-                    self.pending_compact_causation = None;
-                    // legacy Error/CompactEnd 已退役：失败由 OperationFailed 表达。
+                    self.finish_pending_compact(deepx_domain::CompactStatus::Failed);
+                    // 失败同时由 OperationFailed 暴露具体原因。
                     self.emit_operation_failed(
                         "compact-worker-crashed",
                         deepx_domain::ErrorScope::Conversation,
@@ -741,7 +774,7 @@ impl Loop {
     // ═══════════════════════════════════════════════════
 
     fn start_compact(&mut self, causation: Option<String>) -> Outcome {
-        if self.pending_compact_rx.is_some() {
+        if self.pending_compact_rx.is_some() || self.session.agent.manual_compact_running() {
             return Outcome::Error("Context compaction is already running.".into());
         }
         let compact = {
@@ -758,6 +791,9 @@ impl Loop {
             self.compact.build_prompt_and_meta(&mut ctx)
         };
         if let Some((prompt, kept, head, provider, compact_id)) = compact {
+            self.session.agent.begin_manual_compact();
+            let context_revision = self.session.agent.msg.context_revision();
+            let pending_compact_id = compact_id.clone();
             let (tx, rx) = mpsc::channel();
             let event_tx = self.event_tx.clone();
             let compact_seed = self.session.agent.session.seed.clone();
@@ -773,6 +809,7 @@ impl Loop {
                             provider,
                             kept,
                             head,
+                            context_revision,
                             event_tx,
                             worker_causation,
                         )
@@ -784,6 +821,7 @@ impl Loop {
                             summary: String::new(),
                             kept_user_count: kept,
                             head_user_count: head,
+                            context_revision,
                             error: Some(format!(
                                 "Compact worker panicked: {}",
                                 Self::panic_msg_from_err(error)
@@ -794,6 +832,7 @@ impl Loop {
                 })
                 .ok();
             self.pending_compact_rx = Some(rx);
+            self.pending_compact_id = Some(pending_compact_id);
             self.pending_compact_causation = causation;
         } else {
             self.paced_emitter
@@ -860,6 +899,9 @@ impl Loop {
                 ControlCommand::SessionCreate { close_current } => {
                     if close_current {
                         self.prepare_session_switch();
+                    } else {
+                        self.finish_pending_compact(deepx_domain::CompactStatus::Cancelled);
+                        self.session.agent.reset_compaction_coordination();
                     }
                     self.session_eng
                         .create(&mut self.session.agent, &self.cancel);
@@ -1033,6 +1075,15 @@ impl Loop {
                     images,
                     attachments: _,
                 } => {
+                    if self.session.agent.manual_compact_running() {
+                        self.emit_operation_failed(
+                            &command_id,
+                            deepx_domain::ErrorScope::Conversation,
+                            "compact_in_progress",
+                            "Context compaction is running; wait for it to finish before sending a new message",
+                        );
+                        return;
+                    }
                     // images 已是 domain ImageBlock（Ringing 命令直接携带）。
                     let mut ctx = RingContext {
                         agent: &mut self.session.agent,
@@ -1211,7 +1262,7 @@ impl Loop {
                 self.misc.maybe_notify(&self.session.agent, &self.notify.tx);
 
                 // Goal mode auto-advance: if the LLM completed a step
-                // (via todo(action=update, status=completed)), inject the next step.
+                // (via todo(action=set, status=completed)), inject the next step.
                 if let Ok(store) = deepx_workspace::todo::load_todo() {
                     if store.mode == deepx_workspace::todo::TodoMode::Goal {
                         if let Some(ref current_id) = store.current_id {
@@ -1220,7 +1271,7 @@ impl Loop {
                                     let prompt = format!(
                                         "[自动执行计划 / 目标模式]\n\n\
                                          T{}: {}\n{}\n\n\
-                                         完成此步骤后，调用 todo(action=\"update\", id=\"{}\", status=\"completed\", evidence=\"...\").",
+                                         完成此步骤后，调用 todo(action=\"set\", id=\"{}\", status=\"completed\", evidence=\"...\").",
                                         item.id, item.title, item.description, item.id
                                     );
                                     let mut ctx = RingContext {

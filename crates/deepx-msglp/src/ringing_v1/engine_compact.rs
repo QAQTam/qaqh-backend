@@ -17,6 +17,7 @@ pub(crate) struct CompactMeta {
     pub summary: String,
     pub kept_user_count: usize,
     pub head_user_count: usize,
+    pub context_revision: u64,
     pub error: Option<String>,
 }
 
@@ -277,6 +278,25 @@ impl CompactEngine {
 
     /// Step 2: Apply compact result on the live message store (called from main thread).
     pub(crate) fn apply_result(&self, ctx: &mut RingContext, meta: &CompactMeta) {
+        if meta.context_revision != ctx.agent.msg.context_revision() {
+            log::warn!(
+                "[COMPACT] rejecting stale result {}: source revision {}, current {}",
+                meta.compact_id,
+                meta.context_revision,
+                ctx.agent.msg.context_revision()
+            );
+            ctx.emitter
+                .emit_domain(deepx_domain::DomainEvent::Conversation(
+                    deepx_domain::ConversationEvent::CompactFinished {
+                        compact_id: meta.compact_id.clone(),
+                        status: deepx_domain::CompactStatus::Cancelled,
+                        summary_chars: Some(0),
+                        turns_compacted: Some(0),
+                        turns_removed: Some(0),
+                    },
+                ));
+            return;
+        }
         if let Some(ref err) = meta.error {
             // Ringing 双发：OperationFailed（compact 失败）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
@@ -403,6 +423,7 @@ pub(crate) fn run_compact_worker(
     provider: deepx_gate::ProviderConfig,
     kept_user_count: usize,
     head_user_count: usize,
+    context_revision: u64,
     event_tx: std::sync::mpsc::SyncSender<crate::ringing_v1::types::WriterEvent>,
     causation_id: Option<String>,
 ) -> CompactMeta {
@@ -455,6 +476,7 @@ pub(crate) fn run_compact_worker(
             summary,
             kept_user_count,
             head_user_count,
+            context_revision,
             error: None,
         },
         Ok(()) => CompactMeta {
@@ -462,6 +484,7 @@ pub(crate) fn run_compact_worker(
             summary: String::new(),
             kept_user_count,
             head_user_count,
+            context_revision,
             error: Some("Compact failed: model returned empty response.".into()),
         },
         Err(e) => CompactMeta {
@@ -469,6 +492,7 @@ pub(crate) fn run_compact_worker(
             summary: String::new(),
             kept_user_count,
             head_user_count,
+            context_revision,
             error: Some(format!("{e}")),
         },
     }

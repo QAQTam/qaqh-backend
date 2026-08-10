@@ -1,13 +1,13 @@
 //! Session-scoped todo management.
 //!
 //! Persisted to `sessions/{seed}/todo.json` (session-scoped).
-//! The public model contract supports create, status update, cancel, and list.
+//! The public model contract supports create, ordered insert, ID-only state changes, and list.
 //!
 //! Data model:
 //! ```json
 //! {
 //!   "items": [
-//!     {"id":"T1","title":"...","description":"...","status":"pending","evidence":null}
+//!     {"id":"T1","title":"...","description":"...","status":"idle","evidence":null}
 //!   ]
 //! }
 //! ```
@@ -115,11 +115,12 @@ pub fn get_todo_infos() -> Vec<deepx_proto::TaskInfo> {
             subject: item.title.clone(),
             description: item.description.clone(),
             status: match item.status {
-                TodoStatus::Pending => "pending".into(),
+                TodoStatus::Pending => "idle".into(),
                 TodoStatus::InProgress => "in_progress".into(),
                 TodoStatus::Completed => "completed".into(),
                 TodoStatus::Cancelled => "cancelled".into(),
             },
+            evidence: item.evidence.clone(),
         })
         .collect()
 }
@@ -163,6 +164,7 @@ pub fn todo_status_json(seed: &str) -> Result<String, String> {
         "mode": "manual",
         "current_id": current.map(|item| item.id.clone()),
         "current_title": current.map(|i| i.title.clone()),
+        "idle": pending,
         "pending": pending,
         "in_progress": in_progress,
         "completed": completed,
@@ -203,9 +205,7 @@ pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
         })?;
 
     store.items[idx].status = TodoStatus::Cancelled;
-    if store.current_id.as_deref() == Some(id) {
-        store.current_id = None;
-    }
+    normalize_current_id(&mut store);
 
     let item_json = todo_item_json(&store.items[idx]);
     let tmp = path.with_extension("json.tmp");
@@ -238,7 +238,7 @@ fn read_store() -> Result<TodoStore, String> {
 
 fn status_name(status: &TodoStatus) -> &'static str {
     match status {
-        TodoStatus::Pending => "pending",
+        TodoStatus::Pending => "idle",
         TodoStatus::InProgress => "in_progress",
         TodoStatus::Completed => "completed",
         TodoStatus::Cancelled => "cancelled",
@@ -304,170 +304,224 @@ fn parse_todo_id(value: Option<&Value>) -> Option<String> {
 }
 
 // ═══════════════════════════════════════════════════════
-// CRUD operations
+// Todo V2 operations
 // ═══════════════════════════════════════════════════════
 
-fn exec_todo_create(args: &Value) -> Result<String, String> {
-    let _guard = TODO_LOCK
-        .lock()
-        .map_err(|_| "todo lock poisoned".to_string())?;
-    let mut store = read_store()?;
+/// A single model-authored task description before its permanent ID is assigned.
+#[derive(Debug, Clone)]
+struct NewTodo {
+    title: String,
+    description: String,
+}
 
-    let title = args
+/// One mutation can create at most this many tasks. Keeping creation in one
+/// transaction prevents parallel tool calls from racing the T{n} allocator.
+const MAX_CREATE_ITEMS: usize = 20;
+
+fn parse_new_todo(value: &Value, label: &str) -> Result<NewTodo, String> {
+    let title = value
         .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
         .trim()
         .to_string();
-    let description = args
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
     if title.is_empty() || title.chars().count() > 100 {
         return Err(json_err(
             "INVALID_INPUT",
-            "title must be 1-100 chars",
-            "Keep the title short and imperative, e.g. 'Add login API'",
+            &format!("{label}.title must be 1-100 chars"),
+            "Use a short imperative title, e.g. 'Add login API'.",
         ));
     }
+    let description = value
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if description.chars().count() > 200 {
-        return Err(json_err("INVALID_INPUT", "description max 200 chars", ""));
+        return Err(json_err(
+            "INVALID_INPUT",
+            &format!("{label}.description max 200 chars"),
+            "",
+        ));
     }
-
-    let id = format!("T{}", next_id(&store.items));
-    let item = TodoItem {
-        id: id.clone(),
-        title,
-        description,
-        status: TodoStatus::Pending,
-        evidence: None,
-    };
-    store.items.push(item.clone());
-    write_store(&store)?;
-    Ok(json_ok(serde_json::json!({
-        "item": todo_item_json(&item),
-        "message": format!("Todo {} created.", item.id)
-    })))
+    Ok(NewTodo { title, description })
 }
 
-/// 单次 create_batch 的 items 上限（防滥用；模型单轮计划任务通常 ≤ 10）。
-const BATCH_CREATE_MAX_ITEMS: usize = 20;
+fn parse_create_items(args: &Value) -> Result<Vec<NewTodo>, String> {
+    if let Some(items) = args.get("items").and_then(Value::as_array) {
+        if items.is_empty() {
+            return Err(json_err(
+                "INVALID_INPUT",
+                "items must not be empty",
+                "Provide at least one {title, description?} item.",
+            ));
+        }
+        if items.len() > MAX_CREATE_ITEMS {
+            return Err(json_err(
+                "INVALID_INPUT",
+                &format!("items max {MAX_CREATE_ITEMS} entries per call"),
+                "Split the plan into multiple create calls.",
+            ));
+        }
+        return items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| parse_new_todo(item, &format!("items[{index}]")))
+            .collect();
+    }
+    Ok(vec![parse_new_todo(args, "todo")?])
+}
 
-/// 批量创建：一条命令串行创建一群 todo。
-///
-/// 与多次并行 `create` 的关键差异（解决编号排序错误）：
-/// - 单次 `TODO_LOCK` 内完成 read → 分配 → write，无 read-modify-write 交错窗口；
-/// - 基于**一次快照**连续分配编号 T{n}, T{n+1}, …，编号必然连续、无重复、无跳号；
-/// - 全量校验先行：任一 title/description 非法 → 整体失败、零写入（原子性），
-///   模型修正后重试不会产生半批残留。
-fn exec_todo_create_batch(args: &Value) -> Result<String, String> {
+fn insertion_index(store: &TodoStore, args: &Value) -> Result<usize, String> {
+    let before_raw = args.get("before_id");
+    let after_raw = args.get("after_id");
+    let before = parse_todo_id(before_raw);
+    let after = parse_todo_id(after_raw);
+    if before_raw.is_some() && before.is_none() {
+        return Err(json_err(
+            "INVALID_INPUT",
+            "invalid before_id",
+            "Use an assigned ID such as T1.",
+        ));
+    }
+    if after_raw.is_some() && after.is_none() {
+        return Err(json_err(
+            "INVALID_INPUT",
+            "invalid after_id",
+            "Use an assigned ID such as T1.",
+        ));
+    }
+    if before.is_some() && after.is_some() {
+        return Err(json_err(
+            "INVALID_INPUT",
+            "use only one of before_id or after_id",
+            "",
+        ));
+    }
+    if before.is_none() && after.is_none() {
+        return Err(json_err(
+            "INVALID_INPUT",
+            "insert requires before_id or after_id",
+            "Use action=create to append tasks at the end.",
+        ));
+    }
+    if let Some(id) = before {
+        return store
+            .items
+            .iter()
+            .position(|item| item.id == id)
+            .ok_or_else(|| {
+                json_err(
+                    "NOT_FOUND",
+                    &format!("todo {id} not found"),
+                    "Use todo(action=\"list\") to inspect IDs.",
+                )
+            });
+    }
+    if let Some(id) = after {
+        return store
+            .items
+            .iter()
+            .position(|item| item.id == id)
+            .map(|index| index + 1)
+            .ok_or_else(|| {
+                json_err(
+                    "NOT_FOUND",
+                    &format!("todo {id} not found"),
+                    "Use todo(action=\"list\") to inspect IDs.",
+                )
+            });
+    }
+    unreachable!("insert anchor presence was validated above")
+}
+
+fn exec_todo_create(args: &Value, positioned: bool) -> Result<String, String> {
     let _guard = TODO_LOCK
         .lock()
         .map_err(|_| "todo lock poisoned".to_string())?;
-
-    let items_arg = args
-        .get("items")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            json_err(
-                "INVALID_INPUT",
-                "items array is required for create_batch",
-                "Provide items: [{\"title\": \"...\", \"description\": \"...\"}, ...]",
-            )
-        })?;
-    if items_arg.is_empty() {
-        return Err(json_err(
-            "INVALID_INPUT",
-            "items must not be empty",
-            "Provide at least one {title, description?} entry.",
-        ));
-    }
-    if items_arg.len() > BATCH_CREATE_MAX_ITEMS {
-        return Err(json_err(
-            "INVALID_INPUT",
-            &format!("items max {BATCH_CREATE_MAX_ITEMS} entries per call"),
-            "Split the list into multiple create_batch calls.",
-        ));
-    }
-
-    // 全量校验先行：任一非法 → 整体失败，零写入。
-    let mut pending: Vec<(String, String)> = Vec::with_capacity(items_arg.len());
-    for (index, entry) in items_arg.iter().enumerate() {
-        let title = entry
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if title.is_empty() || title.chars().count() > 100 {
-            return Err(json_err(
-                "INVALID_INPUT",
-                &format!("items[{index}].title must be 1-100 chars"),
-                "Keep titles short and imperative, e.g. 'Add login API'",
-            ));
-        }
-        let description = entry
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if description.chars().count() > 200 {
-            return Err(json_err(
-                "INVALID_INPUT",
-                &format!("items[{index}].description max 200 chars"),
-                "",
-            ));
-        }
-        pending.push((title, description));
-    }
-
     let mut store = read_store()?;
-    // 一次快照内连续分配：base 之后逐个 +1，保证无重复、无跳号。
+    if !positioned && (args.get("after_id").is_some() || args.get("before_id").is_some()) {
+        return Err(json_err(
+            "INVALID_INPUT",
+            "create does not accept before_id or after_id",
+            "Use action=insert for positioned tasks.",
+        ));
+    }
+    let insertion = if positioned {
+        insertion_index(&store, args)?
+    } else {
+        store.items.len()
+    };
+    let pending = parse_create_items(args)?;
+
+    // IDs are permanent monotonically assigned identities. Inserting a subtask
+    // changes display order only; existing IDs are never renumbered.
     let mut next = next_id(&store.items);
     let mut created = Vec::with_capacity(pending.len());
-    for (title, description) in pending {
-        let item = TodoItem {
+    for todo in pending {
+        created.push(TodoItem {
             id: format!("T{next}"),
-            title,
-            description,
+            title: todo.title,
+            description: todo.description,
             status: TodoStatus::Pending,
             evidence: None,
-        };
+        });
         next += 1;
-        created.push(item);
     }
-    store.items.extend(created.iter().cloned());
+    store
+        .items
+        .splice(insertion..insertion, created.iter().cloned());
+    normalize_current_id(&mut store);
     write_store(&store)?;
 
     Ok(json_ok(serde_json::json!({
         "created": created.iter().map(todo_item_json).collect::<Vec<_>>(),
         "count": created.len(),
         "message": format!(
-            "Created {} todos: {}",
+            "Created {} todo(s): {}",
             created.len(),
             created.iter().map(|item| item.id.as_str()).collect::<Vec<_>>().join(", ")
         ),
     })))
 }
 
-fn exec_todo_update(args: &Value) -> Result<String, String> {
+fn parse_status(value: &str) -> Option<TodoStatus> {
+    match value {
+        // V2 public vocabulary.
+        "idle" => Some(TodoStatus::Pending),
+        "in_progress" => Some(TodoStatus::InProgress),
+        "completed" | "complete" => Some(TodoStatus::Completed),
+        "cancelled" | "canceled" => Some(TodoStatus::Cancelled),
+        // V1 compatibility for persisted/model calls during rollout.
+        "pending" => Some(TodoStatus::Pending),
+        _ => None,
+    }
+}
+
+fn exec_todo_set(args: &Value) -> Result<String, String> {
     let _guard = TODO_LOCK
         .lock()
         .map_err(|_| "todo lock poisoned".to_string())?;
     let mut store = read_store()?;
-
     let id = parse_todo_id(args.get("id")).ok_or_else(|| {
         json_err(
             "INVALID_INPUT",
-            "missing or invalid 'id'",
-            "Provide the todo ID, e.g. T1 or 1",
+            "missing or invalid id",
+            "Provide the assigned ID, e.g. T1.",
         )
     })?;
-
+    let requested = args
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let status = parse_status(requested).ok_or_else(|| {
+        json_err(
+            "INVALID_INPUT",
+            &format!("unknown status: {requested}"),
+            "Use idle, in_progress, completed, or cancelled.",
+        )
+    })?;
     let idx = store
         .items
         .iter()
@@ -476,106 +530,81 @@ fn exec_todo_update(args: &Value) -> Result<String, String> {
             json_err(
                 "NOT_FOUND",
                 &format!("todo {id} not found"),
-                "Use task(action=\"list\") to see all IDs.",
+                "Use todo(action=\"list\") to inspect IDs.",
             )
         })?;
 
-    let item = &mut store.items[idx];
-
-    if let Some(s) = args.get("status").and_then(|v| v.as_str()) {
-        item.status = match s {
-            "pending" => TodoStatus::Pending,
-            "in_progress" => TodoStatus::InProgress,
-            "completed" => TodoStatus::Completed,
-            "cancelled" => TodoStatus::Cancelled,
-            _ => {
-                return Err(json_err(
-                    "INVALID_INPUT",
-                    &format!("unknown status: {s}"),
-                    "Use: pending, in_progress, completed, or cancelled.",
-                ));
-            }
-        };
+    let evidence = args
+        .get("evidence")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if args.get("evidence").is_some() && evidence.is_none() {
+        return Err(json_err(
+            "INVALID_INPUT",
+            "evidence must be a non-empty string when provided",
+            "Omit evidence unless there is a concrete result summary.",
+        ));
     }
-    if let Some(t) = args.get("title").and_then(|v| v.as_str()) {
-        let t = t.trim().to_string();
-        if t.len() > 100 {
-            return Err(json_err("INVALID_INPUT", "title max 100 chars", ""));
+    {
+        let item = &mut store.items[idx];
+        item.status = status.clone();
+        if evidence.is_some() {
+            item.evidence = evidence;
         }
-        item.title = t;
-    }
-    if let Some(d) = args.get("description").and_then(|v| v.as_str()) {
-        let d = d.trim().to_string();
-        if d.len() > 200 {
-            return Err(json_err("INVALID_INPUT", "description max 200 chars", ""));
-        }
-        item.description = d;
-    }
-    if let Some(ev) = args.get("evidence").and_then(|v| v.as_str()) {
-        item.evidence = Some(ev.trim().to_string());
+        // V1 clients may still send schema-filled empty strings. Status changes
+        // are deliberately ID-only and must never erase task metadata.
     }
 
-    let status = item.status.clone();
-    let item_json = todo_item_json(item);
-    match status {
-        TodoStatus::InProgress => store.current_id = Some(id.clone()),
-        TodoStatus::Pending | TodoStatus::Completed | TodoStatus::Cancelled
-            if store.current_id.as_deref() == Some(id.as_str()) =>
-        {
-            store.current_id = None;
-        }
-        _ => {}
-    }
+    normalize_current_id(&mut store);
+    let item_json = todo_item_json(&store.items[idx]);
     write_store(&store)?;
     Ok(json_ok(serde_json::json!({
         "item": item_json,
-        "message": format!("Todo {id} status is now {}.", status_name(&status))
+        "message": format!("Todo {id} is now {}.", status_name(&status))
     })))
 }
 
-fn exec_todo_cancel(args: &Value) -> Result<String, String> {
-    let mut args = args.clone();
-    let object = args
-        .as_object_mut()
-        .ok_or_else(|| json_err("INVALID_INPUT", "arguments must be an object", ""))?;
-    object.insert("status".to_string(), Value::String("cancelled".to_string()));
-    exec_todo_update(&args)
+fn normalize_current_id(store: &mut TodoStore) {
+    if let Some(active) = store
+        .items
+        .iter()
+        .find(|item| item.status == TodoStatus::InProgress)
+    {
+        store.current_id = Some(active.id.clone());
+    } else {
+        store.current_id = None;
+    }
 }
 
 fn exec_todo_list(args: &Value) -> Result<String, String> {
     let store = read_store()?;
-
-    let filter_status = args.get("status").and_then(|v| v.as_str()).unwrap_or("");
-
-    let items: Vec<&TodoItem> = if filter_status.is_empty() {
-        store.items.iter().collect()
-    } else {
-        store
-            .items
-            .iter()
-            .filter(|item| {
-                let s = match item.status {
-                    TodoStatus::Pending => "pending",
-                    TodoStatus::InProgress => "in_progress",
-                    TodoStatus::Completed => "completed",
-                    TodoStatus::Cancelled => "cancelled",
-                };
-                s == filter_status
+    let filter = args
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            parse_status(value).ok_or_else(|| {
+                json_err(
+                    "INVALID_INPUT",
+                    &format!("unknown status: {value}"),
+                    "Use idle, in_progress, completed, or cancelled.",
+                )
             })
-            .collect()
-    };
-
-    if items.is_empty() {
-        return Ok(json_ok(Value::String(
-            "No tasks yet. Use task(action=\"create\", title=..., description=...) to create one."
-                .to_string(),
-        )));
-    }
+        })
+        .transpose()?;
+    let items: Vec<&TodoItem> = store
+        .items
+        .iter()
+        .filter(|item| filter.as_ref().is_none_or(|status| item.status == *status))
+        .collect();
 
     Ok(json_ok(serde_json::json!({
         "items": items.into_iter().map(todo_item_json).collect::<Vec<_>>(),
+        "current_id": store.current_id,
         "counts": {
-            "pending": count_status(&store, TodoStatus::Pending),
+            "idle": count_status(&store, TodoStatus::Pending),
             "in_progress": count_status(&store, TodoStatus::InProgress),
             "completed": count_status(&store, TodoStatus::Completed),
             "cancelled": count_status(&store, TodoStatus::Cancelled),
@@ -585,7 +614,7 @@ fn exec_todo_list(args: &Value) -> Result<String, String> {
 }
 
 // ═══════════════════════════════════════════════════════
-// Dispatcher
+// Dispatcher and registration
 // ═══════════════════════════════════════════════════════
 
 fn tool_result(result: Result<String, String>) -> ToolResult {
@@ -595,88 +624,247 @@ fn tool_result(result: Result<String, String>) -> ToolResult {
     }
 }
 
-fn handle_todo_create(ctx: ToolCallCtx) -> ToolResult {
-    tool_result(exec_todo_create(&ctx.args))
+fn reject_fields(args: &Value, fields: &[&str], action: &str) -> Result<(), String> {
+    let present: Vec<&str> = fields
+        .iter()
+        .copied()
+        .filter(|field| args.get(*field).is_some())
+        .collect();
+    if present.is_empty() {
+        Ok(())
+    } else {
+        Err(json_err(
+            "INVALID_INPUT",
+            &format!("action={action} does not accept: {}", present.join(", ")),
+            "Follow the action-specific Todo V2 schema.",
+        ))
+    }
 }
 
-fn handle_todo_update(ctx: ToolCallCtx) -> ToolResult {
-    tool_result(exec_todo_update(&ctx.args))
-}
-
-fn handle_todo_cancel(ctx: ToolCallCtx) -> ToolResult {
-    tool_result(exec_todo_cancel(&ctx.args))
-}
-
-fn handle_todo_list(ctx: ToolCallCtx) -> ToolResult {
-    tool_result(exec_todo_list(&ctx.args))
-}
-
-fn handle_task(ctx: ToolCallCtx) -> ToolResult {
+fn handle_todo(ctx: ToolCallCtx) -> ToolResult {
     let action = ctx
         .args
         .get("action")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .unwrap_or_default();
     let result = match action {
-        "create" => exec_todo_create(&ctx.args),
-        "create_batch" => exec_todo_create_batch(&ctx.args),
-        "update" => exec_todo_update(&ctx.args),
-        "cancel" => exec_todo_cancel(&ctx.args),
-        "list" => exec_todo_list(&ctx.args),
-        _ => {
-            return ToolResult::error(
-                "task.action must be create, create_batch, update, cancel, or list",
-            );
+        "create" => reject_fields(
+            &ctx.args,
+            &["id", "status", "evidence", "after_id", "before_id"],
+            action,
+        )
+        .and_then(|_| exec_todo_create(&ctx.args, false)),
+        "insert" => reject_fields(&ctx.args, &["id", "status", "evidence"], action)
+            .and_then(|_| exec_todo_create(&ctx.args, true)),
+        "set" => reject_fields(
+            &ctx.args,
+            &["title", "description", "items", "after_id", "before_id"],
+            action,
+        )
+        .and_then(|_| exec_todo_set(&ctx.args)),
+        "list" => reject_fields(
+            &ctx.args,
+            &[
+                "title",
+                "description",
+                "items",
+                "id",
+                "evidence",
+                "after_id",
+                "before_id",
+            ],
+            action,
+        )
+        .and_then(|_| exec_todo_list(&ctx.args)),
+        // V1 compatibility aliases. They are accepted but no longer advertised.
+        "create_batch" => exec_todo_create(&ctx.args, false),
+        "update" => exec_todo_set(&ctx.args),
+        "cancel" => {
+            let mut args = ctx.args.clone();
+            if let Some(object) = args.as_object_mut() {
+                object.insert("status".into(), Value::String("cancelled".into()));
+            }
+            exec_todo_set(&args)
         }
+        _ => Err(json_err(
+            "INVALID_INPUT",
+            "todo.action must be create, insert, set, or list",
+            "",
+        )),
     };
     tool_result(result)
 }
-
-// ═══════════════════════════════════════════════════════
-// Registration
-// ═══════════════════════════════════════════════════════
 
 use crate::{ToolHandler, ToolRisk};
 use std::time::Duration;
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    // 主工具：todo（prompt/文档统一用 todo 命名）。
     mgr.register_with_placement(
         ToolHandler {
             key: "todo".to_string(),
-            description: "Manage the session task list through one typed interface. USE create_batch (not multiple parallel create calls) when creating a GROUP of tasks: one command creates them atomically with consecutive IDs T{n}, T{n+1}, ... inside a single locked read-modify-write — parallel-safe, never duplicates or reorders numbering. Example: todo(action=\"create_batch\", items=[{\"title\": \"实现登录\", \"description\": \"...\"}, {\"title\": \"写测试\"}]). Use create for a single task (todo(action=\"create\", title=\"...\")), update/cancel by id, list to view. task state is internal session state and does not grant file permissions.",
+            description: "Manage the ordered session task list. Create one or many tasks with action=create and title/description (or items); IDs T1, T2, ... are assigned atomically. After creation, change state using only action=set, id, and status (idle, in_progress, completed, cancelled); evidence is optional when completed. If work reveals a subtask, action=insert creates it after_id or before_id without renumbering existing IDs. action=list returns the ordered list. Do not send title/description during state changes.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["create", "create_batch", "update", "cancel", "list"]},
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "insert", "set", "list"],
+                        "description": "create tasks; insert a discovered subtask; set one task state; or list tasks."
+                    },
                     "title": {
                         "type": "string",
-                        "description": "Short imperative title, 1-100 characters. Format: '[动作] [对象]'. Examples: '实现 JWT 刷新', '修复搜索框卡顿', '编写 API 文档'. Required for action=create."
+                        "description": "For single create/insert: short imperative title, 1-100 chars."
                     },
                     "description": {
                         "type": "string",
-                        "description": "Optional context or acceptance criteria, at most 200 characters."
+                        "description": "For single create/insert: optional context or acceptance criteria, max 200 chars."
                     },
                     "items": {
                         "type": "array",
+                        "maxItems": 20,
+                        "description": "For creating a group atomically. IDs are assigned in array order.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "title": {"type": "string", "description": "Short imperative title, 1-100 characters."},
-                                "description": {"type": "string", "description": "Optional context or acceptance criteria, at most 200 characters."}
+                                "title": {"type": "string"},
+                                "description": {"type": "string"}
                             },
-                            "required": ["title"]
-                        },
-                        "description": "Required for action=create_batch. The group of tasks to create atomically in ONE command — do NOT fire parallel create calls. IDs are assigned consecutively (T{n}, T{n+1}, ...) inside one locked read-modify-write. All-or-nothing validation (any invalid entry rejects the whole batch with zero writes). Max 20 entries. Example: [{\"title\": \"实现登录 API\"}, {\"title\": \"修复搜索卡顿\", \"description\": \"...\"}]."
+                            "required": ["title"],
+                            "additionalProperties": false
+                        }
                     },
-                    "id": {"type": ["string", "integer"], "description": "Task id (e.g. \"T1\" or 1). Omit for action=create/create_batch (new ids are generated); pass the id returned by create/list for action=update or cancel."},
-                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]},
-                    "evidence": {"type": "string"}
+                    "id": {
+                        "type": ["string", "integer"],
+                        "description": "For action=set: assigned task ID, e.g. T1."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["idle", "in_progress", "completed", "cancelled"],
+                        "description": "For action=set."
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Optional completion/result summary for action=set."
+                    },
+                    "after_id": {
+                        "type": ["string", "integer"],
+                        "description": "For action=insert: place new task(s) after this stable ID."
+                    },
+                    "before_id": {
+                        "type": ["string", "integer"],
+                        "description": "For action=insert: place new task(s) before this stable ID."
+                    }
                 },
                 "required": ["action"],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "oneOf": [
+                    {
+                        "title": "Create one task",
+                        "properties": {"action": {"const": "create"}},
+                        "required": ["action", "title"],
+                        "not": {"anyOf": [
+                            {"required": ["items"]},
+                            {"required": ["id"]},
+                            {"required": ["status"]},
+                            {"required": ["evidence"]},
+                            {"required": ["after_id"]},
+                            {"required": ["before_id"]}
+                        ]}
+                    },
+                    {
+                        "title": "Create a task group",
+                        "properties": {"action": {"const": "create"}},
+                        "required": ["action", "items"],
+                        "not": {"anyOf": [
+                            {"required": ["title"]},
+                            {"required": ["description"]},
+                            {"required": ["id"]},
+                            {"required": ["status"]},
+                            {"required": ["evidence"]},
+                            {"required": ["after_id"]},
+                            {"required": ["before_id"]}
+                        ]}
+                    },
+                    {
+                        "title": "Insert one task after an ID",
+                        "properties": {"action": {"const": "insert"}},
+                        "required": ["action", "title", "after_id"],
+                        "not": {"anyOf": [
+                            {"required": ["items"]},
+                            {"required": ["id"]},
+                            {"required": ["status"]},
+                            {"required": ["evidence"]},
+                            {"required": ["before_id"]}
+                        ]}
+                    },
+                    {
+                        "title": "Insert one task before an ID",
+                        "properties": {"action": {"const": "insert"}},
+                        "required": ["action", "title", "before_id"],
+                        "not": {"anyOf": [
+                            {"required": ["items"]},
+                            {"required": ["id"]},
+                            {"required": ["status"]},
+                            {"required": ["evidence"]},
+                            {"required": ["after_id"]}
+                        ]}
+                    },
+                    {
+                        "title": "Insert a task group after an ID",
+                        "properties": {"action": {"const": "insert"}},
+                        "required": ["action", "items", "after_id"],
+                        "not": {"anyOf": [
+                            {"required": ["title"]},
+                            {"required": ["description"]},
+                            {"required": ["id"]},
+                            {"required": ["status"]},
+                            {"required": ["evidence"]},
+                            {"required": ["before_id"]}
+                        ]}
+                    },
+                    {
+                        "title": "Insert a task group before an ID",
+                        "properties": {"action": {"const": "insert"}},
+                        "required": ["action", "items", "before_id"],
+                        "not": {"anyOf": [
+                            {"required": ["title"]},
+                            {"required": ["description"]},
+                            {"required": ["id"]},
+                            {"required": ["status"]},
+                            {"required": ["evidence"]},
+                            {"required": ["after_id"]}
+                        ]}
+                    },
+
+                    {
+                        "title": "Set task state",
+                        "properties": {"action": {"const": "set"}},
+                        "required": ["action", "id", "status"],
+                        "not": {"anyOf": [
+                            {"required": ["title"]},
+                            {"required": ["description"]},
+                            {"required": ["items"]},
+                            {"required": ["after_id"]},
+                            {"required": ["before_id"]}
+                        ]}
+                    },
+                    {
+                        "title": "List tasks",
+                        "properties": {"action": {"const": "list"}},
+                        "required": ["action"],
+                        "not": {"anyOf": [
+                            {"required": ["title"]},
+                            {"required": ["description"]},
+                            {"required": ["items"]},
+                            {"required": ["id"]},
+                            {"required": ["evidence"]},
+                            {"required": ["after_id"]},
+                            {"required": ["before_id"]}
+                        ]}
+                    }
+                ]
             }),
-            handler: handle_task,
+            handler: handle_todo,
             risk: ToolRisk::Write,
             default_timeout: Duration::from_secs(15),
         },
@@ -724,73 +912,19 @@ mod tests {
     }
 
     #[test]
-    fn batch_create_assigns_consecutive_ids() {
+    fn create_group_assigns_consecutive_ids_atomically() {
         with_isolated_todo(|_seed| {
-            // 已有 T1（单 create）→ batch 3 个必须为 T2,T3,T4
-            exec_todo_create(&serde_json::json!({"title": "single"})).unwrap();
-            let result = exec_todo_create_batch(&serde_json::json!({
-                "items": [
-                    {"title": "a"},
-                    {"title": "b", "description": "desc b"},
-                    {"title": "c"},
-                ]
-            }));
-            let value = parse(&result);
-            let created = value["created"].as_array().unwrap();
-            assert_eq!(created.len(), 3);
-            let got: Vec<&str> = created
-                .iter()
-                .map(|item| item["id"].as_str().unwrap())
-                .collect();
-            assert_eq!(got, ["T2", "T3", "T4"]);
-            assert_eq!(value["count"], 3);
-            let store = read_store().unwrap();
-            assert_eq!(ids(&store), ["T1", "T2", "T3", "T4"]);
-        });
-    }
-
-    #[test]
-    fn batch_create_is_atomic_on_validation_failure() {
-        with_isolated_todo(|_seed| {
-            let result = exec_todo_create_batch(&serde_json::json!({
-                "items": [
-                    {"title": "good"},
-                    {"title": "   "}, // 空 title → 全批失败
-                ]
-            }));
-            assert!(result.is_err());
-            let err: serde_json::Value =
-                serde_json::from_str(result.unwrap_err().as_str()).unwrap();
-            assert_eq!(err["code"], "INVALID_INPUT");
-            // 零写入：store 文件不存在或为空
-            let store = read_store().unwrap();
-            assert!(store.items.is_empty());
-        });
-    }
-
-    #[test]
-    fn batch_create_rejects_empty_and_oversized() {
-        with_isolated_todo(|_seed| {
-            let empty = exec_todo_create_batch(&serde_json::json!({"items": []}));
-            assert!(empty.is_err());
-            let items: Vec<serde_json::Value> = (0..21)
-                .map(|index| serde_json::json!({"title": format!("t{index}")}))
-                .collect();
-            let oversized = exec_todo_create_batch(&serde_json::json!({"items": items}));
-            assert!(oversized.is_err());
-            let store = read_store().unwrap();
-            assert!(store.items.is_empty());
-        });
-    }
-
-    #[test]
-    fn batch_create_keeps_numbering_consistent_after_cancel() {
-        with_isolated_todo(|_seed| {
-            exec_todo_create(&serde_json::json!({"title": "t1"})).unwrap();
-            exec_todo_cancel(&serde_json::json!({"id": "T1"})).unwrap();
-            let result = exec_todo_create_batch(&serde_json::json!({
-                "items": [{"title": "x"}, {"title": "y"}]
-            }));
+            exec_todo_create(&serde_json::json!({"title": "single"}), false).unwrap();
+            let result = exec_todo_create(
+                &serde_json::json!({
+                    "items": [
+                        {"title": "a"},
+                        {"title": "b", "description": "desc b"},
+                        {"title": "c"}
+                    ]
+                }),
+                false,
+            );
             let value = parse(&result);
             let got: Vec<&str> = value["created"]
                 .as_array()
@@ -798,35 +932,161 @@ mod tests {
                 .iter()
                 .map(|item| item["id"].as_str().unwrap())
                 .collect();
-            // max+1 语义：即使 T1 已取消，新编号从 T2 继续，无重复
-            assert_eq!(got, ["T2", "T3"]);
+            assert_eq!(got, ["T2", "T3", "T4"]);
+            assert_eq!(ids(&read_store().unwrap()), ["T1", "T2", "T3", "T4"]);
         });
     }
 
     #[test]
-    fn batch_and_single_create_interleave_without_duplicates() {
+    fn create_group_is_atomic_on_validation_failure() {
         with_isolated_todo(|_seed| {
-            let r1 = exec_todo_create_batch(&serde_json::json!({
-                "items": [{"title": "a"}, {"title": "b"}]
-            }))
-            .unwrap();
-            let v1: serde_json::Value = serde_json::from_str(&r1).unwrap();
-            let ids1: Vec<&str> = v1["created"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|item| item["id"].as_str().unwrap())
-                .collect();
-            assert_eq!(ids1, ["T1", "T2"]);
-            exec_todo_create(&serde_json::json!({"title": "c"})).unwrap();
-            let r2 = exec_todo_create_batch(&serde_json::json!({
-                "items": [{"title": "d"}]
-            }))
-            .unwrap();
-            let v2: serde_json::Value = serde_json::from_str(&r2).unwrap();
-            assert_eq!(v2["created"][0]["id"], "T4");
-            let store = read_store().unwrap();
-            assert_eq!(ids(&store), ["T1", "T2", "T3", "T4"]);
+            let result = exec_todo_create(
+                &serde_json::json!({
+                    "items": [{"title": "good"}, {"title": "   "}]
+                }),
+                false,
+            );
+            assert!(result.is_err());
+            assert!(read_store().unwrap().items.is_empty());
         });
+    }
+
+    #[test]
+    fn create_rejects_empty_and_oversized_groups() {
+        with_isolated_todo(|_seed| {
+            assert!(exec_todo_create(&serde_json::json!({"items": []}), false).is_err());
+            let items: Vec<Value> = (0..21)
+                .map(|index| serde_json::json!({"title": format!("t{index}")}))
+                .collect();
+            assert!(exec_todo_create(&serde_json::json!({"items": items}), false).is_err());
+            assert!(read_store().unwrap().items.is_empty());
+        });
+    }
+
+    #[test]
+    fn insert_preserves_ids_and_changes_display_order() {
+        with_isolated_todo(|_seed| {
+            exec_todo_create(
+                &serde_json::json!({
+                    "items": [{"title": "a"}, {"title": "b"}]
+                }),
+                false,
+            )
+            .unwrap();
+            let result = exec_todo_create(
+                &serde_json::json!({"title": "child", "after_id": "T1"}),
+                true,
+            );
+            assert_eq!(parse(&result)["created"][0]["id"], "T3");
+            assert_eq!(ids(&read_store().unwrap()), ["T1", "T3", "T2"]);
+        });
+    }
+
+    #[test]
+    fn set_status_is_id_only_and_never_erases_metadata() {
+        with_isolated_todo(|_seed| {
+            exec_todo_create(
+                &serde_json::json!({"title": "Keep me", "description": "Keep this too"}),
+                false,
+            )
+            .unwrap();
+            exec_todo_set(&serde_json::json!({
+                "id": "T1",
+                "status": "in_progress",
+                "title": "",
+                "description": ""
+            }))
+            .unwrap();
+            exec_todo_set(&serde_json::json!({
+                "id": "T1",
+                "status": "completed",
+                "evidence": "verified",
+                "title": "",
+                "description": ""
+            }))
+            .unwrap();
+            let store = read_store().unwrap();
+            assert_eq!(store.items[0].title, "Keep me");
+            assert_eq!(store.items[0].description, "Keep this too");
+            assert_eq!(store.items[0].evidence.as_deref(), Some("verified"));
+            assert_eq!(store.items[0].status, TodoStatus::Completed);
+            assert!(store.current_id.is_none());
+        });
+    }
+
+    #[test]
+    fn idle_is_public_alias_for_pending() {
+        with_isolated_todo(|_seed| {
+            exec_todo_create(&serde_json::json!({"title": "a"}), false).unwrap();
+            exec_todo_set(&serde_json::json!({"id": "T1", "status": "in_progress"})).unwrap();
+            exec_todo_set(&serde_json::json!({"id": "T1", "status": "idle"})).unwrap();
+            assert_eq!(read_store().unwrap().items[0].status, TodoStatus::Pending);
+        });
+    }
+
+    #[test]
+    fn current_id_falls_back_to_another_in_progress_task() {
+        with_isolated_todo(|_seed| {
+            exec_todo_create(
+                &serde_json::json!({"items": [{"title": "a"}, {"title": "b"}]}),
+                false,
+            )
+            .unwrap();
+            exec_todo_set(&serde_json::json!({"id": "T1", "status": "in_progress"})).unwrap();
+            exec_todo_set(&serde_json::json!({"id": "T2", "status": "in_progress"})).unwrap();
+            exec_todo_set(&serde_json::json!({"id": "T1", "status": "completed"})).unwrap();
+            assert_eq!(read_store().unwrap().current_id.as_deref(), Some("T2"));
+        });
+    }
+
+    #[test]
+    fn insert_requires_exactly_one_existing_anchor() {
+        with_isolated_todo(|_seed| {
+            exec_todo_create(&serde_json::json!({"title": "parent"}), false).unwrap();
+
+            let missing = exec_todo_create(&serde_json::json!({"title": "child"}), true);
+            assert!(missing.is_err());
+
+            let invalid = exec_todo_create(
+                &serde_json::json!({"title": "child", "after_id": "not-an-id"}),
+                true,
+            );
+            assert!(invalid.is_err());
+
+            let absent = exec_todo_create(
+                &serde_json::json!({"title": "child", "before_id": "T99"}),
+                true,
+            );
+            assert!(absent.is_err());
+
+            let conflicting = exec_todo_create(
+                &serde_json::json!({
+                    "title": "child",
+                    "after_id": "T1",
+                    "before_id": "T1"
+                }),
+                true,
+            );
+            assert!(conflicting.is_err());
+            assert_eq!(ids(&read_store().unwrap()), ["T1"]);
+        });
+    }
+
+    #[test]
+    fn v2_field_guard_rejects_metadata_on_set() {
+        let args = serde_json::json!({
+            "action": "set",
+            "id": "T1",
+            "status": "completed",
+            "title": ""
+        });
+        assert!(
+            reject_fields(
+                &args,
+                &["title", "description", "items", "after_id", "before_id"],
+                "set"
+            )
+            .is_err()
+        );
     }
 }

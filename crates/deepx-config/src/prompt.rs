@@ -151,8 +151,8 @@ mod tests {
         let prompt = full_system_prompt();
         assert!(prompt.contains("[TASK MANAGEMENT]"));
         assert!(prompt.contains("统一 `todo` 工具"));
-        assert!(prompt.contains("create_batch"));
-        assert!(prompt.contains("不要并行发多个 create"));
+        assert!(prompt.contains("action=create|insert|set|list"));
+        assert!(prompt.contains("不要重复传 title/description"));
     }
 
     #[test]

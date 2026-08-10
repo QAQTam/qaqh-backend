@@ -349,13 +349,14 @@ pub fn skills_event(event: &ControlEvent) -> Option<SkillsSnapshot> {
 
 // ── XAML composer goalBar 投影（composer_bar.rs 的 dashboard 数据源）──
 
-/// dashboard 任务行（对齐 daemon `DashboardTask`：id/subject/description/status）。
+/// dashboard 任务行（对齐 daemon `DashboardTask`，含完成 evidence）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DashboardTask {
     pub id: String,
     pub subject: String,
     pub description: String,
     pub status: String,
+    pub evidence: Option<String>,
 }
 
 /// XAML goalBar 数据投影——对齐 daemon `DashboardSnapshot`（snake_case JSON）。
@@ -371,7 +372,7 @@ pub struct DashboardSnapshot {
 ///
 /// 事件形状（deepx-domain `ControlEvent::DashboardSnapshot`，`tag="type"`）：
 /// `{ type: "dashboard_snapshot", snapshot: { seed, documents,
-/// recent_edits, tasks: [{id, subject, description, status}],
+/// recent_edits, tasks: [{id, subject, description, status, evidence}],
 /// current_todo_id } }`。`type` 不符返回 None。
 pub fn dashboard_event(event: &ControlEvent) -> Option<DashboardSnapshot> {
     let ControlEvent::DashboardSnapshot { snapshot } = event else {
@@ -387,6 +388,7 @@ pub fn dashboard_event(event: &ControlEvent) -> Option<DashboardSnapshot> {
                 subject: task.subject.clone(),
                 description: task.description.clone(),
                 status: task.status.clone(),
+                evidence: task.evidence.clone(),
             })
             .collect(),
         recent_edits: snapshot.recent_edits.clone(),
@@ -924,6 +926,55 @@ mod tests {
             assert_eq!(state.as_str(), s);
         }
         assert!(ActivityState::parse("unknown").is_none());
+    }
+
+    #[test]
+    fn dashboard_event_projects_evidence_and_accepts_missing_evidence() {
+        let with_evidence: ControlEvent = serde_json::from_value(json!({
+            "type": "dashboard_snapshot",
+            "snapshot": {
+                "seed": "s1",
+                "documents": [],
+                "recent_edits": [],
+                "tasks": [{
+                    "id": "T1",
+                    "subject": "Verify",
+                    "description": "Run checks",
+                    "status": "completed",
+                    "evidence": "all checks passed"
+                }],
+                "current_todo_id": null
+            }
+        }))
+        .expect("dashboard event with evidence");
+        let snapshot = dashboard_event(&with_evidence).expect("project dashboard event");
+        assert_eq!(
+            snapshot.tasks[0].evidence.as_deref(),
+            Some("all checks passed")
+        );
+
+        let legacy: ControlEvent = serde_json::from_value(json!({
+            "type": "dashboard_snapshot",
+            "snapshot": {
+                "seed": "s1",
+                "documents": [],
+                "recent_edits": [],
+                "tasks": [{
+                    "id": "T2",
+                    "subject": "Legacy",
+                    "description": "",
+                    "status": "idle"
+                }]
+            }
+        }))
+        .expect("legacy dashboard event without evidence");
+        assert!(
+            dashboard_event(&legacy)
+                .expect("project legacy event")
+                .tasks[0]
+                .evidence
+                .is_none()
+        );
     }
 
     #[test]

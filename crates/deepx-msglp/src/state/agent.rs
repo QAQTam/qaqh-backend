@@ -132,6 +132,12 @@ pub struct AgentState {
     pending_cache_diagnostics: Option<Vec<String>>,
     /// Per-session/provider online calibration for request preflight estimates.
     token_calibration: SessionTokenCalibrator,
+    /// True while the loop owns a background manual compaction transaction.
+    /// TurnEngine reads this session-scoped flag to suppress auto compaction.
+    manual_compact_running: bool,
+    /// Failed/skipped automatic compaction candidate. Retried only after the
+    /// request candidate changes, preventing one failed attempt per gate lap.
+    auto_compact_blocked_revision: Option<u64>,
 }
 
 impl AgentState {
@@ -153,6 +159,8 @@ impl AgentState {
             prev_prefix: PrefixShape::default(),
             pending_cache_diagnostics: None,
             token_calibration: SessionTokenCalibrator::default(),
+            manual_compact_running: false,
+            auto_compact_blocked_revision: None,
         }
     }
 
@@ -182,6 +190,36 @@ impl AgentState {
         let raw_tokens = estimate_prepared_request_tokens(messages, tools);
         self.token_calibration
             .estimate(&self.token_calibration_fingerprint(), raw_tokens)
+    }
+
+    pub(crate) fn auto_compact_allowed(&self) -> bool {
+        !self.manual_compact_running
+            && self.auto_compact_blocked_revision != Some(self.msg.context_revision())
+    }
+
+    pub(crate) fn manual_compact_running(&self) -> bool {
+        self.manual_compact_running
+    }
+
+    pub(crate) fn begin_manual_compact(&mut self) {
+        self.manual_compact_running = true;
+    }
+
+    pub(crate) fn finish_manual_compact(&mut self) {
+        self.manual_compact_running = false;
+    }
+
+    pub(crate) fn record_auto_compact_result(&mut self, succeeded: bool) {
+        self.auto_compact_blocked_revision = if succeeded {
+            None
+        } else {
+            Some(self.msg.context_revision())
+        };
+    }
+
+    pub(crate) fn reset_compaction_coordination(&mut self) {
+        self.manual_compact_running = false;
+        self.auto_compact_blocked_revision = None;
     }
 
     pub(crate) fn observe_prepared_request(
