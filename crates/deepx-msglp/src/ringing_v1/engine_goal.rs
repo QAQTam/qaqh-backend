@@ -58,7 +58,7 @@ impl GoalEngine {
 
         if store.mode == TodoMode::Goal {
             return Err(
-                "A goal is already active. Stop it first with todo(action=\"cancel\").".into(),
+                "A goal is already active. Stop the frozen Goal workflow before activating another one.".into(),
             );
         }
 
@@ -174,13 +174,14 @@ impl GoalEngine {
             "[自动执行计划 / 目标模式]\n\n\
              T{}: {}\n{}\n\n\
              进度: {}/{} 已完成\n\n\
-             完成此步骤后，必须调用 todo(action=\\\"update\\\", id=\\\"{}\\\", status=\\\"completed\\\", evidence=\\\"...\\\")。\n\
-             如果遇到无法自行安全解决的阻塞，调用 todo(action=\\\"cancel\\\", reason=\\\"...\\\") 或 ask。",
+             完成此步骤后，必须调用 todo(action=\\\"set\\\", id=\\\"{}\\\", status=\\\"completed\\\", evidence=\\\"...\\\")。\n\
+             如果遇到无法自行安全解决的阻塞，调用 todo(action=\\\"set\\\", id=\\\"{}\\\", status=\\\"cancelled\\\") 或 ask。",
             item.id,
             item.title,
             item.description,
             progress + 1,
             store.items.len(),
+            item.id,
             item.id,
         ))
     }
@@ -408,6 +409,31 @@ fn find_after_label(line: &str, label: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_step_prompt_uses_todo_v2_actions() {
+        let mut engine = GoalEngine::new();
+        engine.store = Some(TodoStore {
+            items: vec![TodoItem {
+                id: "T1".into(),
+                title: "verify".into(),
+                description: "run checks".into(),
+                status: TodoStatus::InProgress,
+                evidence: None,
+            }],
+            mode: TodoMode::Goal,
+            current_id: Some("T1".into()),
+            auto_turns: 0,
+            max_auto_turns: 24,
+        });
+
+        let prompt = engine.current_step_prompt().expect("step prompt");
+        assert!(prompt.contains("action=\\\"set\\\""));
+        assert!(prompt.contains("status=\\\"completed\\\""));
+        assert!(prompt.contains("status=\\\"cancelled\\\""));
+        assert!(!prompt.contains("action=\\\"update\\\""));
+        assert!(!prompt.contains("action=\\\"cancel\\\""));
+    }
 
     #[test]
     fn test_parse_compact_tasks() {

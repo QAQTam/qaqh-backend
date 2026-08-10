@@ -848,15 +848,19 @@ fn dashboard(seed: &str) -> Result<Value, String> {
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| {
-            v.get("items")?
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .map(|item| {
-                            json!({"id":item["id"],"subject":item["title"],"description":item["description"],"status":item["status"]})
+            v.get("items")?.as_array().map(|arr| {
+                arr.iter()
+                    .map(|item| {
+                        json!({
+                            "id": item["id"],
+                            "subject": item["title"],
+                            "description": item["description"],
+                            "status": item["status"],
+                            "evidence": item["evidence"],
                         })
-                        .collect()
-                })
+                    })
+                    .collect()
+            })
         })
         .unwrap_or_default();
     let mut edits = std::fs::File::open(dir.join("code_stats.jsonl"))

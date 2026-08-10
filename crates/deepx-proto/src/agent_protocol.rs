@@ -119,6 +119,8 @@ pub struct TaskInfo {
     pub subject: String,
     pub description: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 /// One round of a turn (one API call).

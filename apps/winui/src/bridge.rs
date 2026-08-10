@@ -705,9 +705,7 @@ fn context_stats_path(seed: &str) -> std::path::PathBuf {
                 .unwrap_or_default()
                 .join(".deepx")
         });
-    root.join("sessions")
-        .join(seed)
-        .join("context_stats.json")
+    root.join("sessions").join(seed).join("context_stats.json")
 }
 
 /// `ask_user` 表单中的单个答案（对齐 renderer `AskAnswer`：question_id）。
@@ -1262,16 +1260,32 @@ impl BridgeCore {
     /// 会话的事件在此丢弃（切换瞬间的残留事件不会污染新会话的
     /// Transcript；切回时由权威快照 + 切回后的增量补齐）。
     pub fn chat_drain(&self) -> (Vec<RingingEvent>, u64) {
+        self.chat_drain_limit(usize::MAX)
+    }
+
+    /// Drain at most `limit` events for the active session while discarding
+    /// stale events from other sessions. Keeping the remainder in the queue
+    /// gives the XAML frame pump a bounded amount of UI-thread reducer work.
+    pub fn chat_drain_limit(&self, limit: usize) -> (Vec<RingingEvent>, u64) {
         let rev = self.chat_rev.load(Ordering::Relaxed);
         let active = self.active_seed();
-        let events = self
-            .chat_events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .filter(|(seed, _)| *seed == active)
-            .map(|(_, ev)| ev)
-            .collect();
+        let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
+        let mut events = Vec::with_capacity(limit.min(queue.len()));
+        let mut retained = std::collections::VecDeque::new();
+
+        while let Some((seed, event)) = queue.pop_front() {
+            if seed != active {
+                continue;
+            }
+            if events.len() < limit {
+                events.push(event);
+            } else {
+                retained.push_back((seed, event));
+                retained.append(&mut queue);
+                break;
+            }
+        }
+        *queue = retained;
         (events, rev)
     }
 
@@ -2961,10 +2975,7 @@ impl BridgeCore {
                 // 工作状态：工具执行生命周期（tool_started 带工具名）。
                 match event {
                     deepx_client::ToolEvent::ToolStarted { name, .. } => {
-                        self.set_composer_phase(
-                            &batch.seed,
-                            WorkPhase::Tool(name.clone()),
-                        );
+                        self.set_composer_phase(&batch.seed, WorkPhase::Tool(name.clone()));
                     }
                     deepx_client::ToolEvent::ToolFinished { .. } => {
                         // 工具完成 → 回到生成（后续 thinking/answering delta 会覆盖）。
@@ -3730,18 +3741,16 @@ fn parse_conversation_activity_event(event: &Value) -> Option<ConversationActivi
                 .unwrap_or_default()
                 .to_string(),
         }),
-        "round_delta" => Some(ConversationActivityEvent::Delta(match event
-            .get("kind")
-            .and_then(Value::as_str)
-        {
-            Some("thinking") => WorkPhase::Thinking,
-            Some("answering") => WorkPhase::Answering,
-            _ => return None,
-        })),
-        "block_checkpoint"
-        | "round_completed"
-        | "provider_retrying"
-        | "provider_tool_status" => Some(ConversationActivityEvent::Touched),
+        "round_delta" => Some(ConversationActivityEvent::Delta(
+            match event.get("kind").and_then(Value::as_str) {
+                Some("thinking") => WorkPhase::Thinking,
+                Some("answering") => WorkPhase::Answering,
+                _ => return None,
+            },
+        )),
+        "block_checkpoint" | "round_completed" | "provider_retrying" | "provider_tool_status" => {
+            Some(ConversationActivityEvent::Touched)
+        }
         _ => None,
     }
 }
@@ -4175,10 +4184,12 @@ mod tests {
         .expect("parse");
         assert!(matches!(ev, E::Delta(WorkPhase::Answering)));
         // round_delta 缺 kind → 不视为活动事件（None）。
-        assert!(parse_conversation_activity_event(&json!({
-            "type": "round_delta", "turn_id": "t1",
-        }))
-        .is_none());
+        assert!(
+            parse_conversation_activity_event(&json!({
+                "type": "round_delta", "turn_id": "t1",
+            }))
+            .is_none()
+        );
         // 其余流式事件 → Touched。
         for ty in [
             "block_checkpoint",
@@ -4274,7 +4285,8 @@ mod tests {
                 id: format!("{seed}-todo"),
                 subject: task.into(),
                 description: String::new(),
-                status: "in_progress".into(),
+                status: "completed".into(),
+                evidence: Some(format!("{task} evidence")),
             }],
             recent_edits: Vec::new(),
             current_todo_id: Some(format!("{seed}-todo")),
@@ -4284,10 +4296,14 @@ mod tests {
 
         core.set_active_seed("seedA");
         let (a, _) = core.dashboard_snapshot();
-        assert_eq!(a.expect("seed A snapshot").tasks[0].subject, "A task");
+        let a = a.expect("seed A snapshot");
+        assert_eq!(a.tasks[0].subject, "A task");
+        assert_eq!(a.tasks[0].evidence.as_deref(), Some("A task evidence"));
         core.set_active_seed("seedB");
         let (b, _) = core.dashboard_snapshot();
-        assert_eq!(b.expect("seed B snapshot").tasks[0].subject, "B task");
+        let b = b.expect("seed B snapshot");
+        assert_eq!(b.tasks[0].subject, "B task");
+        assert_eq!(b.tasks[0].evidence.as_deref(), Some("B task evidence"));
         core.set_active_seed("seedC");
         assert!(core.dashboard_snapshot().0.is_none());
     }

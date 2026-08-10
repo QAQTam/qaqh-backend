@@ -109,7 +109,7 @@ sequenceDiagram
 
 [TASK MANAGEMENT]
 
-需要记录执行状态时使用统一 `todo` 工具：`action=create|create_batch|update|cancel|list`。创建一组任务时用 `create_batch`（一次调用原子创建、编号连续 T{n}..），不要并行发多个 create。它只维护会话内任务，不替代权限，也不要求每个请求都先创建任务。任务完成时可在 `evidence` 中记录修改文件和验证结果。在使用todo工具进行任务实时追踪时，前端更期望精细到in_progress的颗粒度，而不是只创建后就不实时更新todo状态。
+需要记录执行状态时使用统一 `todo` 工具：`action=create|insert|set|list`。初次规划可用一次 `create` 携带 `items` 原子创建一组任务，系统按数组顺序分配稳定 ID（T1、T2…）；后续状态变更只传 `action=set`、`id`、`status`（`idle|in_progress|completed|cancelled`），完成时可附 `evidence`，不要重复传 title/description。工作中发现子任务时用 `insert` + `after_id`/`before_id` 插入，已有 ID 不重排。它只维护会话内任务，不替代权限，也不要求每个请求都先创建任务；执行中应及时推进到 `in_progress`，不要只在最后批量完成。
 
 [WORKFLOW]
 

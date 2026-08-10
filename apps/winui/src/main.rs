@@ -29,8 +29,56 @@ use windows_reactor::*;
 /// 开屏覆盖层最长显示时间：超过后切换为失败文案并露出错误详情。
 const SPLASH_TIMEOUT: Duration = Duration::from_secs(60);
 
+fn header_component(bridge: &std::sync::Arc<bridge::Bridge>, cx: &mut RenderCx) -> Element {
+    header::header(cx, bridge.clone())
+}
+
+fn sidebar_component(
+    props: &(std::sync::Arc<bridge::Bridge>, f64, SetState<f64>),
+    cx: &mut RenderCx,
+) -> Element {
+    sidebar::sidebar(cx, props.0.clone(), props.1, props.2.clone()).into()
+}
+
+fn session_tabs_component(
+    bridge: &std::sync::Arc<bridge::Bridge>,
+    cx: &mut RenderCx,
+) -> Element {
+    session_tabs::session_tabs(cx, bridge.clone())
+}
+
+fn chat_component(bridge: &std::sync::Arc<bridge::Bridge>, cx: &mut RenderCx) -> Element {
+    chat_view::chat_view(cx, bridge.clone())
+}
+
+fn composer_component(bridge: &std::sync::Arc<bridge::Bridge>, cx: &mut RenderCx) -> Element {
+    composer_bar::composer_bar(cx, bridge.clone())
+}
+
+fn info_panel_component(bridge: &std::sync::Arc<bridge::Bridge>, cx: &mut RenderCx) -> Element {
+    info_panel::info_panel(cx, bridge.clone())
+}
+
+fn home_component(bridge: &std::sync::Arc<bridge::Bridge>, cx: &mut RenderCx) -> Element {
+    home_view::home_view(cx, bridge.clone())
+}
+
+fn skills_component(bridge: &std::sync::Arc<bridge::Bridge>, cx: &mut RenderCx) -> Element {
+    skills_view::skills_view(cx, bridge.clone())
+}
+
+fn settings_component(bridge: &std::sync::Arc<bridge::Bridge>, cx: &mut RenderCx) -> Element {
+    settings_view::settings_view(cx, bridge.clone())
+}
+
+fn interaction_component(
+    bridge: &std::sync::Arc<bridge::Bridge>,
+    cx: &mut RenderCx,
+) -> Element {
+    interaction_overlay::interaction_overlay(cx, bridge.clone()).into()
+}
+
 fn app(cx: &mut RenderCx) -> Element {
-    log_diag("render");
     let bridge = bridge::Bridge::shared();
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     // 侧栏宽度：可拖拽（splitter），双击抓握条恢复默认。
@@ -62,8 +110,11 @@ fn app(cx: &mut RenderCx) -> Element {
     //   - row2 = XAML 首页（P1）——view=home 时 STAR；
     //   - row3 = XAML 设置页（P2）——view=settings 时 STAR。
     // 非当前视图的行高 0：XAML 页零命中零渲染；无 opacity/命中测试依赖。
-    let nav: Element =
-        sidebar::sidebar(cx, bridge.clone(), sidebar_width, set_sidebar_width).into();
+    let nav: Element = component(
+        sidebar_component,
+        (bridge.clone(), sidebar_width, set_sidebar_width.clone()),
+    )
+    .with_key("shell-sidebar");
     let (view, set_view) = cx.use_state::<String>("home".to_string());
     let (_, set_info_open) = cx.use_state::<bool>(false);
     let view_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
@@ -141,29 +192,29 @@ fn app(cx: &mut RenderCx) -> Element {
             }
         }
     });
-    let skills: Element = skills_view::skills_view(cx, bridge.clone())
+    let skills: Element = component(skills_component, bridge.clone())
+        .with_key("shell-skills")
         .grid_row(1)
-        .grid_column(0)
-        .into();
-    let home: Element = home_view::home_view(cx, bridge.clone())
+        .grid_column(0);
+    let home: Element = component(home_component, bridge.clone())
+        .with_key("shell-home")
         .grid_row(2)
-        .grid_column(0)
-        .into();
-    let settings: Element = settings_view::settings_view(cx, bridge.clone())
+        .grid_column(0);
+    let settings: Element = component(settings_component, bridge.clone())
+        .with_key("shell-settings")
         .grid_row(3)
-        .grid_column(0)
-        .into();
+        .grid_column(0);
     // 内容区四行视图族（WORKFLOW §8 壳主导）：row0=chat 区（原生 ChatView
     // + Composer 底部栏，view=chat 时 STAR）、row1=skills、row2=home、
     // row3=settings；非当前视图行高 0（零渲染零命中）。
-    let composer: Element = composer_bar::composer_bar(cx, bridge.clone())
+    let composer: Element = component(composer_component, bridge.clone())
+        .with_key("shell-composer")
         .grid_row(1)
-        .grid_column(0)
-        .into();
-    let native_chat: Element = chat_view::chat_view(cx, bridge.clone())
+        .grid_column(0);
+    let native_chat: Element = component(chat_component, bridge.clone())
+        .with_key("shell-chat")
         .grid_row(0)
-        .grid_column(0)
-        .into();
+        .grid_column(0);
     let chat_area: Element = grid((native_chat, composer))
         .rows([GridLength::STAR, GridLength::Auto])
         .into();
@@ -193,10 +244,10 @@ fn app(cx: &mut RenderCx) -> Element {
         .into();
     // Step 1b: Info 面板右列（P4a）——常驻（2026-08 决策：省动画，关闭不可
     // 用；chat 视图恒显，其他视图隐藏；面板内容自管数据刷新）。
-    let info_el: Element = info_panel::info_panel(cx, bridge.clone())
+    let info_el: Element = component(info_panel_component, bridge.clone())
+        .with_key("shell-info")
         .grid_row(0)
-        .grid_column(1)
-        .into();
+        .grid_column(1);
     let info_width = if view == "chat" {
         GridLength::Pixel(info_panel::PANEL_WIDTH)
     } else {
@@ -210,10 +261,10 @@ fn app(cx: &mut RenderCx) -> Element {
     // Session tabs belong to the document workspace, not to the navigation
     // rail. Keeping both in one right-side grid aligns their coordinate space
     // while the transcript retains its narrower centered reading measure.
-    let tabs: Element = session_tabs::session_tabs(cx, bridge.clone())
+    let tabs: Element = component(session_tabs_component, bridge.clone())
+        .with_key("shell-tabs")
         .grid_row(0)
-        .grid_column(0)
-        .into();
+        .grid_column(0);
     let right: Element = grid((tabs, right_body))
         .rows([
             GridLength::Pixel(session_tabs::TAB_STRIP_HEIGHT),
@@ -270,10 +321,10 @@ fn app(cx: &mut RenderCx) -> Element {
 
     // Step 2: Grid 两行——row0 = XAML 标题栏（48px，SetTitleBar 拖拽区，
     // host 自动接线 host.rs:277-288）；row1 = 内容区（侧栏 | 右区）。
-    let titlebar: Element = header::header(cx, bridge.clone())
+    let titlebar: Element = component(header_component, bridge.clone())
+        .with_key("shell-header")
         .grid_row(0)
-        .grid_column(0)
-        .into();
+        .grid_column(0);
     // ── 内容区（row 1）：侧栏 | 文档工作区（标签条 + 视图）──────
     // P-6 覆盖层预留（WORKFLOW §6.1）：未来 XAML 面板/对话框
     // （P1 Flyout anchor / P2 ContentDialog phantom child）作为覆盖层
@@ -304,7 +355,8 @@ fn app(cx: &mut RenderCx) -> Element {
     };
     // 交互模态覆盖层（P-6 同模式）：kind="none" 时内部空 grid 穿透；
     // 有交互时半透明遮罩 + 卡片（permission/ask 模板）。置于最上层。
-    let interaction: Element = interaction_overlay::interaction_overlay(cx, bridge.clone()).into();
+    let interaction: Element =
+        component(interaction_component, bridge.clone()).with_key("shell-interaction");
     // 覆盖层 grid 必须显式 STAR 行/列：Grid 默认 Auto 会让 Stretch 子元素只
     // 覆盖内容大小（scrim 不全窗，遮罩不生效）——demo 已实证，同 interaction
     // 内部 grid 的修复。三个子元素重叠同一 cell（P-6 覆盖层模式）。

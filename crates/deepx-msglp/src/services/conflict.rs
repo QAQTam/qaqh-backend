@@ -30,6 +30,13 @@ pub(crate) fn file_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec
                 paths.push(p.to_string());
             }
         }
+        "todo" => {
+            // Todo is session state rather than a workspace file, but multiple
+            // model calls in one tool round still share one ordered ID stream.
+            // A synthetic conflict key preserves model call order even when a
+            // provider ignores the guidance to use one create(items=[...]).
+            paths.push("__deepx_session_todo__".to_string());
+        }
         _ => {}
     }
     paths
@@ -141,5 +148,20 @@ mod tests {
 
         assert!(groups.is_empty());
         assert!(serial_after.is_empty());
+    }
+
+    #[test]
+    fn todo_mutations_are_serialized_in_model_order() {
+        let pending = vec![
+            tool("todo-1", "todo", ""),
+            tool("todo-2", "todo", ""),
+            tool("read-1", "read_file", ""),
+            tool("todo-3", "todo", ""),
+        ];
+
+        let (groups, serial_after) = resolve_write_conflicts(&pending);
+
+        assert_eq!(groups, vec![vec![0, 1, 3]]);
+        assert_eq!(serial_after, HashSet::from([1, 3]));
     }
 }

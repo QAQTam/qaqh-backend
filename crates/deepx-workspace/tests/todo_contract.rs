@@ -18,13 +18,53 @@ fn public_schema_exposes_one_todo_tool_with_no_alias_and_no_goal_entrypoint() {
         !names.contains(&"todo_") || !names.iter().any(|name| name.starts_with("todo_")),
         "split todo tools must stay hidden"
     );
+    let todo = definitions
+        .iter()
+        .find(|definition| definition.function.name == "todo")
+        .expect("todo definition");
     assert!(
-        definitions
-            .iter()
-            .filter(|definition| definition.function.name == "todo")
-            .all(|definition| !definition.function.description.contains("Goal")),
+        !todo.function.description.contains("Goal"),
         "the frozen Goal workflow must not be advertised to the model"
     );
+    assert_eq!(
+        todo.function.parameters["properties"]["action"]["enum"],
+        serde_json::json!(["create", "insert", "set", "list"])
+    );
+    assert_eq!(
+        todo.function.parameters["properties"]["status"]["enum"],
+        serde_json::json!(["idle", "in_progress", "completed", "cancelled"])
+    );
+    let branches = todo.function.parameters["oneOf"]
+        .as_array()
+        .expect("action-specific schema branches");
+    assert_eq!(
+        branches.len(),
+        8,
+        "only anchored insert variants are public"
+    );
+    let set_branch = branches
+        .iter()
+        .find(|branch| branch["title"] == "Set task state")
+        .expect("set branch");
+    assert_eq!(
+        set_branch["required"],
+        serde_json::json!(["action", "id", "status"])
+    );
+    assert!(
+        set_branch["not"].to_string().contains("description"),
+        "set schema must forbid task metadata"
+    );
+    let insert_branches: Vec<_> = branches
+        .iter()
+        .filter(|branch| branch["properties"]["action"]["const"] == "insert")
+        .collect();
+    assert_eq!(insert_branches.len(), 4);
+    assert!(insert_branches.iter().all(|branch| {
+        let required = branch["required"].as_array().expect("required array");
+        required
+            .iter()
+            .any(|field| field == "before_id" || field == "after_id")
+    }));
 }
 
 #[test]
@@ -62,7 +102,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     let working = deepx_workspace::execution::execute_with_context(
         "todo",
         "",
-        r#"{"action":"update","id":1,"status":"in_progress"}"#,
+        r#"{"action":"set","id":1,"status":"in_progress"}"#,
         "todo-working",
         None,
     );
@@ -75,7 +115,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     let completed = deepx_workspace::execution::execute_with_context(
         "todo",
         "",
-        r#"{"action":"update","id":"T2","status":"completed","evidence":"verified"}"#,
+        r#"{"action":"set","id":"T2","status":"completed","evidence":"verified"}"#,
         "todo-completed",
         None,
     );
@@ -88,7 +128,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     let cancelled = deepx_workspace::execution::execute_with_context(
         "todo",
         "",
-        r#"{"action":"cancel","id":"3"}"#,
+        r#"{"action":"set","id":"3","status":"cancelled"}"#,
         "todo-cancelled",
         None,
     );
@@ -111,8 +151,11 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(list_json["counts"]["in_progress"], 1);
     assert_eq!(list_json["counts"]["completed"], 1);
     assert_eq!(list_json["counts"]["cancelled"], 1);
-    assert_eq!(list_json["counts"]["pending"], 1);
+    assert_eq!(list_json["counts"]["idle"], 1);
     assert_eq!(list_json["items"][0]["id"], "T1");
+    assert_eq!(list_json["items"][1]["status"], "completed");
+    assert_eq!(list_json["items"][1]["evidence"], "verified");
+    assert_eq!(list_json["items"][3]["status"], "idle");
 
     let status: serde_json::Value = serde_json::from_str(
         &deepx_workspace::todo::todo_status_json("todo-contract").expect("status JSON"),
@@ -121,6 +164,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(status["mode"], "manual");
     assert_eq!(status["current_id"], "T1");
     assert_eq!(status["current_title"], "Working");
+    assert_eq!(status["idle"], 1);
     assert_eq!(status["pending"], 1);
     assert_eq!(status["in_progress"], 1);
     assert_eq!(status["completed"], 1);

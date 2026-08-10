@@ -44,7 +44,7 @@ use windows_reactor::*;
 use deepx_fluent::{motion, tokens};
 
 use crate::bridge::Bridge;
-use crate::shell_store::{DashboardSnapshot, SessionDetail, UsageInfo};
+use crate::shell_store::{DashboardSnapshot, DashboardTask, SessionDetail, UsageInfo};
 
 /// 诊断日志（同 main.rs log_diag 约定：GUI 子系统无控制台，写文件）。
 fn log_diag(msg: &str) {
@@ -161,6 +161,172 @@ fn live_dot(active: bool) -> Element {
     }
 }
 
+/// Todo 行标题。历史数据可能被旧 `update` 清空 title，此时稳定 ID 仍可见。
+fn todo_title(task: &DashboardTask) -> String {
+    let title = task.subject.trim();
+    if title.is_empty() {
+        format!("{} · 未命名任务", task.id)
+    } else {
+        format!("{} · {title}", task.id)
+    }
+}
+
+/// Todo 展开区内容。完成态优先展示 evidence，同时保留非空 description，
+/// 避免把任务说明和完成证据混为同一字段。
+fn todo_detail(task: &DashboardTask) -> Element {
+    let description = task.description.trim();
+    let evidence = task
+        .evidence
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut rows: Vec<Element> = Vec::new();
+
+    if !description.is_empty() {
+        rows.push(
+            vstack((
+                text_block("描述")
+                    .font_size(tokens::TYPE_CAPTION)
+                    .semibold()
+                    .foreground(ThemeRef::TertiaryText),
+                text_block(description)
+                    .font_size(tokens::TYPE_CAPTION)
+                    .foreground(ThemeRef::SecondaryText)
+                    .wrap()
+                    .selectable(),
+            ))
+            .spacing(2.0)
+            .with_key("description")
+            .into(),
+        );
+    }
+
+    if let Some(evidence) = evidence {
+        rows.push(
+            vstack((
+                text_block("完成证据")
+                    .font_size(tokens::TYPE_CAPTION)
+                    .semibold()
+                    .foreground(ThemeRef::TertiaryText),
+                text_block(evidence)
+                    .font_size(tokens::TYPE_CAPTION)
+                    .foreground(ThemeRef::SecondaryText)
+                    .wrap()
+                    .selectable(),
+            ))
+            .spacing(2.0)
+            .with_key("evidence")
+            .into(),
+        );
+    }
+
+    if rows.is_empty() {
+        let fallback = match task.status.as_str() {
+            "completed" => "该任务没有保存描述或完成证据",
+            "in_progress" => "正在执行，暂无补充描述",
+            "cancelled" => "该任务已取消，暂无补充描述",
+            _ => "等待开始，暂无补充描述",
+        };
+        rows.push(
+            text_block(fallback)
+                .font_size(tokens::TYPE_CAPTION)
+                .foreground(ThemeRef::TertiaryText)
+                .wrap()
+                .with_key("fallback")
+                .into(),
+        );
+    }
+
+    vstack(rows)
+        .spacing(8.0)
+        .padding(Thickness {
+            left: 22.0,
+            top: 4.0,
+            right: 8.0,
+            bottom: 8.0,
+        })
+        .into()
+}
+
+/// Todo 状态图示。进行中且系统允许动效时使用 WinUI 原生 ProgressRing；
+/// reduced-motion/关闭系统动画时回退静态 glyph，避免强制持续运动。
+fn todo_status_indicator(
+    status: &str,
+    glyph: &str,
+    status_color: ThemeRef,
+    animations_enabled: bool,
+) -> Element {
+    if status == "in_progress" && animations_enabled {
+        ProgressRing::indeterminate()
+            .width(12.0)
+            .height(12.0)
+            .foreground(status_color)
+            .vertical_alignment(VerticalAlignment::Center)
+            .automation_name("进行中")
+            .into()
+    } else {
+        text_block(glyph)
+            .font_size(tokens::TYPE_CAPTION)
+            .foreground(status_color)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into()
+    }
+}
+
+/// 可交互 Todo 卡片：header 只保留稳定 ID、标题和状态；点击 header 后
+/// 由 WinUI 原生 Expander 展开 description/evidence，避免列表常态过长。
+fn todo_card(task: &DashboardTask, expanded: bool, set_expanded: SetState<bool>) -> Element {
+    let (glyph, status_label, status_color) = match task.status.as_str() {
+        "completed" => ("✓", "已完成", ThemeRef::SystemSuccess),
+        "in_progress" => ("●", "进行中", ThemeRef::SystemCaution),
+        "cancelled" => ("×", "已取消", ThemeRef::SystemNeutral),
+        _ => ("○", "空闲", ThemeRef::TertiaryText),
+    };
+    let title = todo_title(task);
+    let status_indicator = todo_status_indicator(
+        &task.status,
+        glyph,
+        status_color.clone(),
+        motion::animations_enabled(),
+    );
+
+    let header = grid((
+        status_indicator.grid_column(0),
+        text_block(title)
+            .font_size(tokens::TYPE_CAPTION)
+            .semibold()
+            .text_trimming(TextTrimming::CharacterEllipsis)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(1),
+        text_block(status_label)
+            .font_size(tokens::TYPE_CAPTION)
+            .foreground(status_color)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(2),
+    ))
+    .columns([GridLength::Pixel(16.0), GridLength::STAR, GridLength::Auto])
+    .column_spacing(6.0)
+    .horizontal_alignment(HorizontalAlignment::Stretch);
+
+    Expander::new(todo_detail(task))
+        .header_content(header)
+        .expanded(expanded)
+        .on_expanding(set_expanded)
+        .min_height(36.0)
+        .padding(Thickness::xy(6.0, 2.0))
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .tooltip(format!("展开或折叠任务详情：{}", task.id))
+        .automation_name(format!("任务 {}，{status_label}", task.id))
+        .automation_id(format!("info-todo-{}", task.id))
+        .transition(motion::reveal(), motion::content_exit())
+        .into()
+}
+
+fn todo_card_component(task: &DashboardTask, cx: &mut RenderCx) -> Element {
+    let (expanded, set_expanded) = cx.use_state(false);
+    todo_card(task, expanded, set_expanded)
+}
+
 /// token 四格：caption 标签 + 13px 等宽数值，
 /// 列间 1px DividerStroke 分隔线，第一格无）。
 fn token_grid(u: &UsageInfo) -> Element {
@@ -257,7 +423,11 @@ fn cache_card(label: &str, u: &UsageInfo, accent: bool) -> Option<Element> {
         .padding(Thickness::xy(10.0, 9.0))
         // key 必须唯一（keyed diff）：当前请求/会话累计两张缓存卡
         // 此前共用 "cache" 导致 reconciler 匹配错乱、区块顺序颠倒。
-        .with_key(if accent { "cache-session" } else { "cache-request" })
+        .with_key(if accent {
+            "cache-session"
+        } else {
+            "cache-request"
+        })
         .into(),
     )
 }
@@ -457,35 +627,54 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         }
     }
 
-    // ⑥ 任务进度区块（P6 合并：dashboard 投影——当前任务 + 状态计数 + 列表）。
+    // ⑥ 任务进度区块（Todo V2：稳定 ID、idle 状态、description/evidence）。
     // 数据源 `bridge.core().dashboard_snapshot()`（control 事件驱动，同 composer goalBar）。
     if let Some(snap) = dashboard.as_ref() {
-        if !snap.tasks.is_empty() {
-            blocks.push(section_heading("任务").with_key("todo-heading").into());
+        blocks.push(section_heading("任务").with_key("todo-heading").into());
+        if snap.tasks.is_empty() {
+            blocks.push(
+                text_block("当前会话尚未创建 Todo")
+                    .font_size(tokens::TYPE_CAPTION)
+                    .foreground(ThemeRef::TertiaryText)
+                    .wrap()
+                    .with_key("todo-empty")
+                    .into(),
+            );
+        } else {
             let current = snap
                 .current_todo_id
                 .as_deref()
-                .and_then(|id| snap.tasks.iter().find(|t| t.id == id));
-            let pending = snap.tasks.iter().filter(|t| t.status == "pending").count();
+                .and_then(|id| snap.tasks.iter().find(|task| task.id == id));
+            let idle = snap
+                .tasks
+                .iter()
+                .filter(|task| matches!(task.status.as_str(), "idle" | "pending"))
+                .count();
             let in_progress = snap
                 .tasks
                 .iter()
-                .filter(|t| t.status == "in_progress")
+                .filter(|task| task.status == "in_progress")
                 .count();
             let done = snap
                 .tasks
                 .iter()
-                .filter(|t| t.status == "completed")
+                .filter(|task| task.status == "completed")
+                .count();
+            let cancelled = snap
+                .tasks
+                .iter()
+                .filter(|task| task.status == "cancelled")
                 .count();
             if let Some(task) = current {
+                let title = todo_title(task);
                 blocks.push(
                     hstack((
                         live_dot(true).with_key("todo-dot"),
-                        text_block(&task.subject)
+                        text_block(title)
                             .font_size(tokens::TYPE_CAPTION)
                             .semibold()
                             .wrap(),
-                        text_block(&task.status)
+                        text_block("进行中")
                             .font_size(tokens::TYPE_CAPTION)
                             .foreground(ThemeRef::SystemCaution),
                     ))
@@ -496,42 +685,40 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             }
             blocks.push(
                 text_block(format!(
-                    "待处理 {pending} · 进行中 {in_progress} · 已完成 {done}"
+                    "空闲 {idle} · 进行中 {in_progress} · 已完成 {done} · 已取消 {cancelled}"
                 ))
                 .font_size(tokens::TYPE_CAPTION)
                 .foreground(ThemeRef::SecondaryText)
+                .wrap()
                 .with_key("todo-counts")
                 .into(),
             );
-            let mut todo_rows: Vec<Element> = Vec::new();
-            for (i, t) in snap.tasks.iter().enumerate() {
-                let status_color = match t.status.as_str() {
-                    "completed" => ThemeRef::SystemSuccess,
-                    "in_progress" => ThemeRef::SystemCaution,
-                    "cancelled" => ThemeRef::SystemNeutral,
-                    _ => ThemeRef::TertiaryText,
-                };
-                let row: Element = grid((
-                    text_block(if t.status == "completed" {
-                        "✓"
-                    } else {
-                        "○"
-                    })
-                    .font_size(tokens::TYPE_CAPTION)
-                    .foreground(status_color)
-                    .grid_column(0),
-                    text_block(&t.subject)
-                        .font_size(tokens::TYPE_CAPTION)
-                        .foreground(ThemeRef::SecondaryText)
-                        .text_trimming(TextTrimming::CharacterEllipsis)
-                        .grid_column(1),
-                ))
-                .columns([GridLength::Pixel(16.0), GridLength::STAR])
-                .into();
-                todo_rows.push(row.with_key(format!("todo-row-{i}-{}", t.id)));
-            }
-            blocks.push(vstack(todo_rows).spacing(3.0).with_key("todo-list").into());
+            let todo_rows: Vec<Element> = snap
+                .tasks
+                .iter()
+                .map(|task| {
+                    component(todo_card_component, task.clone())
+                        .with_key(format!("todo-card-{}", task.id))
+                })
+                .collect();
+            blocks.push(
+                vstack(todo_rows)
+                    .spacing(4.0)
+                    .horizontal_alignment(HorizontalAlignment::Stretch)
+                    .with_key("todo-list")
+                    .into(),
+            );
         }
+    } else {
+        blocks.push(section_heading("任务").with_key("todo-heading").into());
+        blocks.push(
+            text_block("任务数据将在当前会话创建 Todo 后显示")
+                .font_size(tokens::TYPE_CAPTION)
+                .foreground(ThemeRef::TertiaryText)
+                .wrap()
+                .with_key("todo-unavailable")
+                .into(),
+        );
     }
 
     // 面板内容可滚动（P6 加任务区块后可能超高；scroll_viewer 纵向 Auto）。
@@ -547,4 +734,165 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 打开时淡入（open 翻转 → 内容首次 mount → ImplicitShowAnimation）。
     .transition(motion::content_enter(), motion::content_exit())
     .into()
+}
+
+#[cfg(test)]
+mod todo_card_tests {
+    use super::*;
+
+    fn task(
+        id: &str,
+        subject: &str,
+        description: &str,
+        status: &str,
+        evidence: Option<&str>,
+    ) -> DashboardTask {
+        DashboardTask {
+            id: id.into(),
+            subject: subject.into(),
+            description: description.into(),
+            status: status.into(),
+            evidence: evidence.map(str::to_string),
+        }
+    }
+
+    fn text_values(element: &Element) -> Vec<String> {
+        fn walk(element: &Element, out: &mut Vec<String>) {
+            match element {
+                Element::TextBlock(text) => out.push(text.text.clone()),
+                Element::StackPanel(panel) => {
+                    for child in &panel.children {
+                        walk(child, out);
+                    }
+                }
+                Element::Grid(grid) => {
+                    for child in &grid.children {
+                        walk(child, out);
+                    }
+                }
+                Element::Border(border) => walk(&border.child, out),
+                Element::ScrollViewer(scroll) => walk(&scroll.child, out),
+                Element::Expander(expander) => {
+                    if let Some(ExpanderHeader::Text(text)) = &expander.header {
+                        out.push(text.clone());
+                    }
+                    if let Some(ExpanderHeader::Element(header)) = &expander.header {
+                        walk(header, out);
+                    }
+                    walk(&expander.child, out);
+                }
+                Element::ProgressRing(_) => {}
+                _ => {}
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(element, &mut out);
+        out
+    }
+
+    #[test]
+    fn empty_title_uses_stable_id_fallback() {
+        let task = task("T19", "", "", "completed", Some("最终复验通过"));
+        assert_eq!(todo_title(&task), "T19 · 未命名任务");
+    }
+
+    #[test]
+    fn todo_card_is_collapsed_and_keeps_details_in_expander_content() {
+        let task = task(
+            "T21",
+            "核对交互",
+            "检查原生控件",
+            "completed",
+            Some("Expander 已支持"),
+        );
+        let expansion_events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let events = expansion_events.clone();
+        let element = todo_card(
+            &task,
+            false,
+            SetState::new(move |expanded| events.borrow_mut().push(expanded)),
+        );
+        let Element::Expander(expander) = &element else {
+            panic!("todo row must render as an Expander");
+        };
+        assert!(!expander.is_expanded);
+        assert_eq!(
+            expander.modifiers.horizontal_alignment,
+            Some(HorizontalAlignment::Stretch),
+            "Todo cards must fill the available panel width"
+        );
+        let header = expander
+            .header_element()
+            .expect("todo Expander must have a clickable header");
+        let Element::Grid(header_grid) = header else {
+            panic!("todo header must remain a Grid");
+        };
+        assert_eq!(
+            header_grid.modifiers.horizontal_alignment,
+            Some(HorizontalAlignment::Stretch),
+            "Todo header content must fill its Expander"
+        );
+
+        let on_expanding = expander
+            .on_expanding
+            .as_ref()
+            .expect("todo Expander must forward expansion state");
+        on_expanding.invoke(true);
+        on_expanding.invoke(false);
+        assert_eq!(*expansion_events.borrow(), vec![true, false]);
+
+        let header_text = text_values(header);
+        assert!(header_text.iter().any(|text| text == "T21 · 核对交互"));
+        assert!(header_text.iter().any(|text| text == "已完成"));
+        assert!(!header_text.iter().any(|text| text == "检查原生控件"));
+        assert!(!header_text.iter().any(|text| text == "Expander 已支持"));
+
+        let detail_text = text_values(&expander.child);
+        assert!(detail_text.iter().any(|text| text == "描述"));
+        assert!(detail_text.iter().any(|text| text == "检查原生控件"));
+        assert!(detail_text.iter().any(|text| text == "完成证据"));
+        assert!(detail_text.iter().any(|text| text == "Expander 已支持"));
+    }
+
+    #[test]
+    fn in_progress_uses_native_ring_and_reduced_motion_fallback() {
+        let animated = todo_status_indicator("in_progress", "●", ThemeRef::SystemCaution, true);
+        let Element::ProgressRing(ring) = animated else {
+            panic!("animated in-progress Todo must use the native ProgressRing");
+        };
+        assert!(ring.is_active);
+        assert!(ring.is_indeterminate);
+        assert_eq!(ring.modifiers.width, Some(12.0));
+        assert_eq!(ring.modifiers.height, Some(12.0));
+
+        let reduced_motion =
+            todo_status_indicator("in_progress", "●", ThemeRef::SystemCaution, false);
+        let Element::TextBlock(glyph) = reduced_motion else {
+            panic!("reduced-motion in-progress Todo must use a static glyph");
+        };
+        assert_eq!(glyph.text, "●");
+
+        let task = task("T22", "实现动画", "", "in_progress", None);
+        let element = todo_card(&task, false, SetState::new(|_| {}));
+        let Element::Expander(expander) = &element else {
+            panic!("todo row must render as an Expander");
+        };
+        let header_text = text_values(expander.header_element().unwrap());
+        assert!(header_text.iter().any(|text| text == "T22 · 实现动画"));
+        assert!(header_text.iter().any(|text| text == "进行中"));
+    }
+
+    #[test]
+    fn cancelled_uses_cancel_semantics_not_delete_iconography() {
+        let task = task("T23", "停止实验", "", "cancelled", None);
+        let element = todo_card(&task, false, SetState::new(|_| {}));
+        let Element::Expander(expander) = &element else {
+            panic!("todo row must render as an Expander");
+        };
+        let header_text = text_values(expander.header_element().unwrap());
+        assert!(header_text.iter().any(|text| text == "×"));
+        assert!(header_text.iter().any(|text| text == "已取消"));
+        assert!(!header_text.iter().any(|text| text == "🗑"));
+    }
 }

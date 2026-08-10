@@ -60,6 +60,7 @@ pub fn build_snapshot(seed: String) -> deepx_domain::DashboardSnapshot {
                 subject: task.subject,
                 description: task.description,
                 status: task.status,
+                evidence: task.evidence,
             })
             .collect(),
         current_todo_id: build_current_todo_id(),

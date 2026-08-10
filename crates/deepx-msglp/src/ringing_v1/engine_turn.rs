@@ -378,7 +378,7 @@ impl TurnEngine {
 
         let content = if approved && autonomous {
             format!(
-                "Plan approved. Goal automation is currently frozen. Track execution with todo(action=\"create|update\"); use todo(action=\"cancel\") for work that is no longer needed.\n\n{}",
+                "Plan approved. Goal automation is currently frozen. Track execution with todo(action=\"create\") and todo(action=\"set\", id=\"T…\", status=\"…\"); mark unnecessary work with status=\"cancelled\".\n\n{}",
                 plan.content
             )
         } else if approved {
@@ -908,6 +908,7 @@ impl TurnEngine {
                 Some(v) => v,
                 None => return false,
             };
+        let context_revision = ctx.agent.msg.context_revision();
         let turns_removed = ctx.agent.msg.turns().len().saturating_sub(kept);
 
         let emitter = ctx.emitter;
@@ -944,6 +945,24 @@ impl TurnEngine {
 
         match result {
             Ok(()) if !summary.trim().is_empty() => {
+                if ctx.agent.msg.context_revision() != context_revision {
+                    log::warn!(
+                        "[TURN] auto-compact result became stale: source revision {}, current {}",
+                        context_revision,
+                        ctx.agent.msg.context_revision()
+                    );
+                    ctx.emitter
+                        .emit_domain(deepx_domain::DomainEvent::Conversation(
+                            deepx_domain::ConversationEvent::CompactFinished {
+                                compact_id,
+                                status: deepx_domain::CompactStatus::Cancelled,
+                                summary_chars: Some(0),
+                                turns_compacted: Some(0),
+                                turns_removed: Some(0),
+                            },
+                        ));
+                    return false;
+                }
                 let before = {
                     let (c, t, tc, tr, ts, sp, _, _) = ctx.agent.msg.compute_context_stats(None);
                     c + t + tc + tr + ts + sp
@@ -1097,26 +1116,36 @@ impl TurnEngine {
             if threshold > 0.0 {
                 let limit = ctx.agent.config.context_limit as u64;
                 if request_estimate.upper_bound_tokens as f64 > limit as f64 * threshold {
-                    log::info!(
-                        "[TURN] auto-compact preflight: raw={}, predicted={}, upper={}/{limit} tokens ({} samples, {:.0}% threshold)",
-                        request_estimate.raw_tokens,
-                        request_estimate.predicted_tokens,
-                        request_estimate.upper_bound_tokens,
-                        request_estimate.sample_count,
-                        threshold * 100.0
-                    );
-                    if Self::run_auto_compact(ctx) {
-                        messages = ctx.agent.build_context();
-                        request_estimate = ctx
-                            .agent
-                            .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
-                        if request_estimate.upper_bound_tokens as f64 > limit as f64 * threshold {
-                            // One compact attempt per gate boundary. Remaining
-                            // pressure may be non-compactable system/tool overhead.
-                            log::warn!(
-                                "[TURN] post-compact preflight remains above threshold: upper={}/{limit}",
-                                request_estimate.upper_bound_tokens
-                            );
+                    if !ctx.agent.auto_compact_allowed() {
+                        log::debug!(
+                            "[TURN] auto-compact skipped for unchanged failed candidate at revision {}",
+                            ctx.agent.msg.context_revision()
+                        );
+                    } else {
+                        log::info!(
+                            "[TURN] auto-compact preflight: raw={}, predicted={}, upper={}/{limit} tokens ({} samples, {:.0}% threshold)",
+                            request_estimate.raw_tokens,
+                            request_estimate.predicted_tokens,
+                            request_estimate.upper_bound_tokens,
+                            request_estimate.sample_count,
+                            threshold * 100.0
+                        );
+                        let compacted = Self::run_auto_compact(ctx);
+                        ctx.agent.record_auto_compact_result(compacted);
+                        if compacted {
+                            messages = ctx.agent.build_context();
+                            request_estimate = ctx
+                                .agent
+                                .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
+                            if request_estimate.upper_bound_tokens as f64 > limit as f64 * threshold
+                            {
+                                // One compact attempt per gate boundary. Remaining
+                                // pressure may be non-compactable system/tool overhead.
+                                log::warn!(
+                                    "[TURN] post-compact preflight remains above threshold: upper={}/{limit}",
+                                    request_estimate.upper_bound_tokens
+                                );
+                            }
                         }
                     }
                 }
