@@ -31,6 +31,28 @@ pub const SIDEBAR_MIN_WIDTH: f64 = 180.0;
 pub const SIDEBAR_MAX_WIDTH: f64 = 400.0;
 pub const SIDEBAR_DEFAULT_WIDTH: f64 = 260.0;
 
+/// 构建标识（版本号标识数据源）。
+///
+/// 优先读 exe 同目录 `build-info.json`（installer 打包时由
+/// collect-payload-winui.ps1 注入，与 BuildId/staging 目录名同源：
+/// `<版本>-<commit12>-<UTC yyyyMMddHHmmss>`，已到秒粒度）；
+/// dev 运行（无该文件）fallback 到编译期 `CARGO_PKG_VERSION`。
+fn build_id_label() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let info = dir.join("build-info.json");
+            if let Ok(text) = std::fs::read_to_string(&info) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(id) = v.get("build_id").and_then(|x| x.as_str()) {
+                        return format!("v{id}");
+                    }
+                }
+            }
+        }
+    }
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
 /// 纯图标按钮（subtle 样式，无文字）——用于行内删除。
 fn icon_button(icon: Icon, on_click: impl Fn() + 'static) -> Element {
     button("").icon(icon).subtle().on_click(on_click).into()
@@ -95,6 +117,7 @@ fn session_row(
     };
     let dot: Element = state_dot(item.state);
     let title_el: Element = text_block(item.title.clone())
+        .max_lines(1)
         .text_trimming(TextTrimming::CharacterEllipsis)
         .foreground(ThemeRef::PrimaryText)
         .vertical_alignment(VerticalAlignment::Center)
@@ -150,6 +173,7 @@ fn archive_row(
     let seed = item.seed.clone();
     let dot: Element = state_dot(item.state);
     let title_el: Element = text_block(item.title.clone())
+        .max_lines(1)
         .text_trimming(TextTrimming::CharacterEllipsis)
         // 归档 = 告一段落：标题置灰（SecondaryText）。
         .foreground(ThemeRef::SecondaryText)
@@ -195,6 +219,8 @@ pub fn sidebar(
     // 拖拽状态：`(按下时窗口 x, 按下时宽度)`——差分计算（window_x 稳定，
     // 拖拽中窗口不动则与屏幕坐标等价）。
     let drag_start = cx.use_ref::<Option<(f64, f64)>>(None);
+    // 构建标识缓存（footer 版本小字；读一次避免每帧读文件）。
+    let build_label = cx.use_ref::<Option<String>>(None);
     let (splitter_hover, set_splitter_hover) = cx.use_state::<bool>(false);
 
     // 首次挂载：触发初始刷新；之后 500ms 轮询 rev，变化才 set_state 重渲染。
@@ -331,7 +357,26 @@ pub fn sidebar(
                 }),
         ))
         .into();
-        sp.margin(12.0)
+        // 版本标识小字（与安装包 BuildId 同源；单行省略，tooltip 全量）。
+        let label = build_label
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| {
+                let s = build_id_label();
+                *build_label.borrow_mut() = Some(s.clone());
+                s
+            });
+        let version: Element = text_block(&label)
+            .font_size(10.0)
+            .foreground(ThemeRef::TertiaryText)
+            .max_lines(1)
+            .text_trimming(TextTrimming::CharacterEllipsis)
+            .tooltip(format!(
+                "构建标识：{label}\n格式：<版本>-<commit12>-<UTC yyyyMMddHHmmss>"
+            ))
+            .automation_name("构建版本")
+            .into();
+        vstack((sp, version)).spacing(4.0).margin(12.0).into()
     };
 
     // ── 内容列：品牌 / 操作区 / 分组头 / 列表 / 页脚 ────────────
@@ -443,6 +488,7 @@ pub fn sidebar(
     grid((
         grid((content.grid_column(0), splitter.grid_column(1)))
             .columns([GridLength::STAR, GridLength::Pixel(12.0)])
+            .rows([GridLength::STAR])
             .grid_row(0)
             .grid_column(0),
         dialog.grid_row(0).grid_column(0),

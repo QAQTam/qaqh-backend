@@ -30,3 +30,6 @@ apps/winui/release/
 .deepx-winui.log
 # prepare-daemon release-artifact 下载缓存
 /.cache/
+
+# 诊断临时目录（截图像素分析脚本等，不入库）
+/.deepx-tmp/

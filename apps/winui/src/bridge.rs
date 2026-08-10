@@ -814,6 +814,10 @@ pub struct BridgeCore {
     /// per-seed turns 计数（undo_disabled 判定源）：timeline 快照提供精确
     /// 数量；实时 TurnStarted 至少把存在性置为 1（标题栏只关心是否为空）。
     header_turns: Mutex<HashMap<String, usize>>,
+    /// Per-seed compact projection restored from conversation events/bootstrap.
+    /// The header only selects the active seed; background sessions never mutate
+    /// another tab's progress state.
+    compact_statuses: Mutex<HashMap<String, String>>,
     /// per-seed 最近回合 id（undo 命令用）：turn_started 事件/快照写入点
     /// 更新；无缓存时撤销按钮直发层拒绝发送。
     last_turn_ids: Mutex<HashMap<String, String>>,
@@ -880,9 +884,8 @@ pub struct BridgeCore {
     /// **seed 标记（2026-08-08 修复）**：队列元素为 `(seed, event)`——
     /// daemon 的 SSE 流按 lease 推送**所有**会话的事件（batch.seed 区分），
     /// 此前入队忽略 seed、drain 全量返回，后台会话增量会污染活动会话的
-    /// Transcript（切换瞬间残留事件串台）。现入队带 seed、`chat_drain`
-    /// 按 active_seed 过滤（非活动事件丢弃，切回时由权威快照 + 切回后的
-    /// 增量补齐）。
+    /// Transcript（切换瞬间残留事件串台）。现入队带 seed；有界帧泵只
+    /// 消费 active_seed 并保留其它 seed，无界恢复入口才统一丢积压。
     ///
     /// **队列上限（保险丝）**：窗口不可见期间 vsync 暂停、事件不消费，
     /// 队列会无限积压（后台 1 小时 × 1000 token/s ≈ 百万级事件）。
@@ -1061,10 +1064,17 @@ impl BridgeCore {
             .get(&seed)
             .copied()
             .unwrap_or(0);
+        let compacting = self
+            .compact_statuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&seed)
+            .is_some_and(|status| status == "running");
         let mut h = self.header_state.lock().unwrap_or_else(|e| e.into_inner());
         h.view = view;
         h.seed = seed;
         h.title = title;
+        h.compacting = compacting;
         h.undo_disabled = turns == 0 || streaming;
         h.compact_disabled = streaming;
         drop(h);
@@ -1256,16 +1266,26 @@ impl BridgeCore {
     /// (事件队列快照, rev)：UI 线程 timer 比对 rev 后 drain 喂 Transcript。
     /// Events stay typed through the queue and are mapped once to view models.
     ///
-    /// **按活动会话隔离**：只返回 `seed == active_seed` 的事件；非活动
-    /// 会话的事件在此丢弃（切换瞬间的残留事件不会污染新会话的
-    /// Transcript；切回时由权威快照 + 切回后的增量补齐）。
+    /// **按活动会话隔离**：只返回 `seed == active_seed` 的事件；此无界
+    /// 入口同时丢弃非活动会话事件，供后台恢复/显式清积压使用。普通帧泵
+    /// 使用 `chat_drain_limit`，会保留其它 seed，避免活跃会话积压卡住它们。
     pub fn chat_drain(&self) -> (Vec<RingingEvent>, u64) {
-        self.chat_drain_limit(usize::MAX)
+        let rev = self.chat_rev.load(Ordering::Relaxed);
+        let active = self.active_seed();
+        let events = self
+            .chat_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .filter(|(seed, _)| *seed == active)
+            .map(|(_, event)| event)
+            .collect();
+        (events, rev)
     }
 
-    /// Drain at most `limit` events for the active session while discarding
-    /// stale events from other sessions. Keeping the remainder in the queue
-    /// gives the XAML frame pump a bounded amount of UI-thread reducer work.
+    /// Drain at most `limit` events for the active session. Stale events from
+    /// other sessions are discarded immediately; active overflow stays queued
+    /// in FIFO order for the next XAML frame.
     pub fn chat_drain_limit(&self, limit: usize) -> (Vec<RingingEvent>, u64) {
         let rev = self.chat_rev.load(Ordering::Relaxed);
         let active = self.active_seed();
@@ -1274,15 +1294,10 @@ impl BridgeCore {
         let mut retained = std::collections::VecDeque::new();
 
         while let Some((seed, event)) = queue.pop_front() {
-            if seed != active {
-                continue;
-            }
-            if events.len() < limit {
+            if seed == active && events.len() < limit {
                 events.push(event);
             } else {
                 retained.push_back((seed, event));
-                retained.append(&mut queue);
-                break;
             }
         }
         *queue = retained;
@@ -1651,6 +1666,11 @@ impl BridgeCore {
                 }
             }
         }
+        let live_seeds: HashSet<String> = items.iter().map(|item| item.seed.clone()).collect();
+        self.compact_statuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|seed, _| live_seeds.contains(seed));
         *self.sessions.lock().unwrap_or_else(|e| e.into_inner()) = items;
         *self.activities.lock().unwrap_or_else(|e| e.into_inner()) = activities;
         self.session_rev.fetch_add(1, Ordering::Relaxed);
@@ -1685,6 +1705,26 @@ impl BridgeCore {
         });
     }
 
+    fn apply_bootstrap_conversation_state(&self, seed: &str, state: &Value) {
+        let detail = parse_conversation_state(state);
+        let status = detail.compact_status.clone();
+        let mut compact_statuses = self
+            .compact_statuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if status.is_empty() {
+            compact_statuses.remove(seed);
+        } else {
+            compact_statuses.insert(seed.to_string(), status);
+        }
+        drop(compact_statuses);
+        if self.active_seed() == seed {
+            *self.info.lock().unwrap_or_else(|e| e.into_inner()) = Some(detail);
+            self.info_rev.fetch_add(1, Ordering::Relaxed);
+            self.refresh_header();
+        }
+    }
+
     async fn refresh_info_inner(&self, seed: &str) {
         if seed.is_empty() {
             return;
@@ -1703,16 +1743,13 @@ impl BridgeCore {
                 return;
             }
         };
-        let state = &bootstrap.conversation.state;
-        // A slow response for a tab that is no longer active must not replace
-        // the new tab's InfoPanel.
+        self.apply_bootstrap_conversation_state(seed, &bootstrap.conversation.state);
         if self.active_seed() != seed {
-            log_diag(&format!("refresh_info: discard stale response for {seed}"));
+            log_diag(&format!(
+                "refresh_info: cached compact state but discarded stale info projection for {seed}"
+            ));
             return;
         }
-        *self.info.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(parse_conversation_state(state));
-        self.info_rev.fetch_add(1, Ordering::Relaxed);
         log_diag(&format!("refresh_info: {seed} refreshed"));
     }
 
@@ -1798,6 +1835,12 @@ impl BridgeCore {
             // 就绪（原顺序 activate 在前，快照早到会在 chat_view 泵里被
             // 当作 stale 丢弃——即使没有 Web 竞争也存在竞态窗口）。
             core.set_active_seed(&seed);
+            match client.bootstrap(&seed).await {
+                Ok(snapshot) => {
+                    core.apply_bootstrap_conversation_state(&seed, &snapshot.conversation.state)
+                }
+                Err(err) => log_diag(&format!("resume {seed}: bootstrap failed: {err}")),
+            }
             if let Err(err) = client.activate_timeline(&seed).await {
                 log_diag(&format!("resume {seed}: activate_timeline failed: {err}"));
             }
@@ -1923,6 +1966,10 @@ impl BridgeCore {
                 .await
             {
                 Ok(_) => {
+                    core.compact_statuses
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&seed);
                     if core.active_seed() == seed {
                         core.set_active_seed("");
                         core.navigate("home", None);
@@ -2879,8 +2926,8 @@ impl BridgeCore {
                 }
             };
             match client.bootstrap(&reset.seed).await {
-                // WebView 移除：bootstrap 结果不再 emit（壳由事件流自愈）。
-                Ok(_snapshot) => {}
+                Ok(snapshot) => core
+                    .apply_bootstrap_conversation_state(&reset.seed, &snapshot.conversation.state),
                 Err(err) => log_diag(&format!("reset: bootstrap {} failed: {err}", reset.seed)),
             }
         });
@@ -2934,6 +2981,18 @@ impl BridgeCore {
                         snap.seed = batch.seed.clone();
                     }
                     self.apply_dashboard(snap);
+                }
+                if let ControlEvent::OperationFailed { error, .. } = event
+                    && error.code == "compact_failed"
+                {
+                    let mut feedback = self
+                        .composer_feedback
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    feedback.entry(batch.seed.clone()).or_default().submit_error =
+                        error.message.clone();
+                    drop(feedback);
+                    self.composer_rev.fetch_add(1, Ordering::Relaxed);
                 }
                 if let Some(ev) = interaction_event(event) {
                     self.apply_interaction_event(&batch.seed, ev);
@@ -3025,7 +3084,7 @@ impl BridgeCore {
             let now = unix_ms();
             let mut turn_boundary = false;
             let mut turn_ended = false;
-            let mut compacting_update: Option<bool> = None;
+            let mut compact_status_update: Option<String> = None;
             let mut live_usage: Option<(UiUsageInfo, u64, String)> = None;
             {
                 let mut map = self
@@ -3102,14 +3161,34 @@ impl BridgeCore {
                             ));
                         }
                         DomainConversationEvent::CompactStarted { .. } => {
-                            compacting_update = Some(true)
+                            compact_status_update = Some("running".into());
+                            let mut feedback = self
+                                .composer_feedback
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            feedback
+                                .entry(batch.seed.clone())
+                                .or_default()
+                                .submit_error
+                                .clear();
                         }
-                        DomainConversationEvent::CompactFinished { .. } => {
-                            compacting_update = Some(false)
+                        DomainConversationEvent::CompactFinished { status, .. } => {
+                            compact_status_update = Some(
+                                serde_json::to_value(status)
+                                    .ok()
+                                    .and_then(|value| value.as_str().map(str::to_string))
+                                    .unwrap_or_else(|| "failed".into()),
+                            )
                         }
                         _ => {}
                     }
                 }
+            }
+            if let Some(status) = compact_status_update.as_ref() {
+                self.compact_statuses
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(batch.seed.clone(), status.clone());
             }
             let is_active_seed = batch.seed == self.active_seed();
             if is_active_seed {
@@ -3122,14 +3201,9 @@ impl BridgeCore {
                     drop(info);
                     self.info_rev.fetch_add(1, Ordering::Relaxed);
                 }
-                if let Some(compacting) = compacting_update {
-                    let mut header = self.header_state.lock().unwrap_or_else(|e| e.into_inner());
-                    if header.compacting != compacting {
-                        header.compacting = compacting;
-                        drop(header);
-                        self.header_rev.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+            }
+            if compact_status_update.is_some() && is_active_seed {
+                self.refresh_header();
             }
             self.composer_rev.fetch_add(1, Ordering::Relaxed);
             // 标题栏直连：turn 边界（streaming 翻转）刷新 undo/compact disabled。
@@ -3311,6 +3385,13 @@ impl BridgeCore {
         let core = self.self_arc();
         let _ = deepx_client::runtime_handle().spawn(async move {
             // 1) 停旧 client 及其全部任务（renewal + 3 通道 + timeline 流）。
+            // Per-seed compact state belongs to one daemon epoch. Clear it before
+            // reconnect; authoritative bootstrap repopulates each restored seed.
+            core.compact_statuses
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            core.refresh_header();
             let old = core.client.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(client) = old {
                 client.close();
@@ -3398,8 +3479,9 @@ impl BridgeCore {
             return;
         }
         match client.bootstrap(seed).await {
-            // WebView 移除：快照不再 emit（壳经事件流/主动快照自愈）。
-            Ok(_snapshot) => {}
+            Ok(snapshot) => {
+                self.apply_bootstrap_conversation_state(seed, &snapshot.conversation.state)
+            }
             Err(err) => log_diag(&format!("health: bootstrap {seed} failed: {err}")),
         }
         match client.activate_timeline(seed).await {
@@ -3434,6 +3516,7 @@ impl Bridge {
                     header_state: Mutex::new(HeaderState::default()),
                     header_rev: AtomicU64::new(0),
                     header_turns: Mutex::new(HashMap::new()),
+                    compact_statuses: Mutex::new(HashMap::new()),
                     last_turn_ids: Mutex::new(HashMap::new()),
                     timeline_stall_since: Mutex::new(None),
                     channels_stall_since: Mutex::new(None),
@@ -3771,6 +3854,7 @@ mod tests {
             header_state: Mutex::new(HeaderState::default()),
             header_rev: AtomicU64::new(0),
             header_turns: Mutex::new(HashMap::new()),
+            compact_statuses: Mutex::new(HashMap::new()),
             last_turn_ids: Mutex::new(HashMap::new()),
             timeline_stall_since: Mutex::new(None),
             channels_stall_since: Mutex::new(None),
@@ -3874,7 +3958,53 @@ mod tests {
             }),
         ));
         let (events, _) = core.chat_drain();
-        assert!(events.is_empty(), "切换后 sA 残留事件被丢弃");
+        assert!(events.is_empty(), "无界恢复 drain 不返回 sA 残留事件");
+        assert!(
+            core.chat_events.lock().unwrap().is_empty(),
+            "无界恢复 drain 同时清除非活动积压"
+        );
+    }
+
+    #[test]
+    fn chat_drain_limit_preserves_other_seeds_and_active_remainder() {
+        let core = test_core();
+        core.set_active_seed("sA");
+        let started = |turn_id: &str| {
+            RingingEvent::Conversation(DomainConversationEvent::TurnStarted {
+                turn_id: turn_id.to_string(),
+                user_text: String::new(),
+            })
+        };
+        {
+            let mut q = core.chat_events.lock().unwrap();
+            q.push_back(("sA".into(), started("a1")));
+            q.push_back(("sB".into(), started("b1")));
+            q.push_back(("sA".into(), started("a2")));
+        }
+
+        let (first, _) = core.chat_drain_limit(1);
+        assert_eq!(first.len(), 1);
+        assert!(matches!(
+            &first[0],
+            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { turn_id, .. })
+                if turn_id == "a1"
+        ));
+
+        core.set_active_seed("sB");
+        let (background, _) = core.chat_drain_limit(1);
+        assert!(matches!(
+            &background[0],
+            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { turn_id, .. })
+                if turn_id == "b1"
+        ));
+
+        core.set_active_seed("sA");
+        let (remainder, _) = core.chat_drain_limit(1);
+        assert!(matches!(
+            &remainder[0],
+            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { turn_id, .. })
+                if turn_id == "a2"
+        ));
     }
 
     // ── 交互队列状态机（Rust 直连读路径）──────────────────────────────
@@ -4105,6 +4235,78 @@ mod tests {
         core.apply_interaction_event("seed1", parse_interaction_event(&ev).expect("parse"));
         let rev2 = core.interaction_rev.load(Ordering::Relaxed);
         assert_eq!(rev1, rev2);
+    }
+
+    #[test]
+    fn compact_failure_is_visible_in_active_composer() {
+        let core = test_core();
+        core.set_active_seed("seedA");
+        let error = deepx_client::ControlEvent::OperationFailed {
+            occurrence_id: "occ-1".into(),
+            scope: deepx_client::ErrorScope::Conversation,
+            error: deepx_client::DomainError {
+                error_id: "err-1".into(),
+                code: "compact_failed".into(),
+                message: "provider rejected compact request".into(),
+                retryable: true,
+                dedupe_key: Some("compact_failed".into()),
+            },
+            operation_id: None,
+        };
+        core.emit_batch(deepx_client::EventBatch {
+            schema: "deepx.ringing".into(),
+            version: 1,
+            channel: Channel::Control,
+            seed: "seedA".into(),
+            server_epoch: "epoch".into(),
+            from_stream_seq: 1,
+            to_stream_seq: 1,
+            envelopes: vec![deepx_client::RingingEventEnvelope::new(
+                "seedA",
+                1,
+                1,
+                1,
+                "event-1",
+                deepx_client::RingingEvent::Control(error),
+            )],
+        });
+        assert_eq!(
+            core.composer_snapshot().0.submit_error,
+            "provider rejected compact request"
+        );
+    }
+
+    #[test]
+    fn compact_status_cache_follows_active_seed_and_bootstrap() {
+        let core = test_core();
+        *core.current_view.lock().unwrap() = "chat".into();
+        core.compact_statuses
+            .lock()
+            .unwrap()
+            .insert("seedA".into(), "running".into());
+        core.compact_statuses
+            .lock()
+            .unwrap()
+            .insert("seedB".into(), "completed".into());
+
+        core.set_active_seed("seedA");
+        assert!(core.header_snapshot().0.compacting);
+        core.set_active_seed("seedB");
+        assert!(!core.header_snapshot().0.compacting);
+
+        core.apply_bootstrap_conversation_state(
+            "seedB",
+            &serde_json::json!({"compact_status": "running"}),
+        );
+        assert!(core.header_snapshot().0.compacting);
+        core.apply_bootstrap_conversation_state(
+            "seedA",
+            &serde_json::json!({"compact_status": "failed"}),
+        );
+        assert!(
+            core.header_snapshot().0.compacting,
+            "background bootstrap must not overwrite the active seed projection"
+        );
     }
 
     #[test]

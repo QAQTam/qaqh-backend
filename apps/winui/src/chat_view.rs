@@ -41,18 +41,16 @@ use crate::chat_adapter;
 /// 变化（restore / 新 turn / round 完成）不受此限，立即滚底。
 const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 
-/// Live（非结构性）渲染间隔：**帧级**（8ms——60Hz 屏每帧提交，120Hz
-/// 屏每帧提交）——流式 delta 不做时间限频（"快显示"优先；峰值成本由
-/// 段级 diff 与窗口回收兜底）。与滚动节流解耦：渲染快 ≠ 滚动请求快
-/// （反馈环只与
-/// 滚动有关）。结构变化（restore / 新 turn / round 完成）不受此限。
-const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(8);
+/// Live（非结构性）正文提交间隔：约 30fps。协议事件仍逐帧归并到模型，
+/// 但 growing markdown / Element / XAML 文本只按此频率提交；结构变化
+/// （新 turn、工具卡、round 完成）仍立即提交。33ms 在输入响应与 UI 线程
+/// 预算之间更稳妥，也避免 120Hz 屏把同一增长正文每 8ms 全量重解析。
+const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(33);
 
-/// 单帧最多消费的协议事件数。流式事件即使短时积压，也不能在
-/// `CompositionTarget::Rendering` 回调里无界 drain：该回调与 XAML 的
-/// measure/arrange/commit 共用 UI 线程，一次处理数千事件会直接阻塞输入、
-/// 标题栏和滚动。剩余事件保留到下一帧，结构性事件仍按到达顺序处理。
+/// 单帧事件上限与 reducer 时间预算。数量上限限制极端微小事件，时间预算
+/// 则限制长 checkpoint / markdown 解析；任一先到即把余量留给下一帧。
 const CHAT_EVENTS_PER_FRAME: usize = 512;
+const CHAT_REDUCER_BUDGET: Duration = Duration::from_millis(4);
 
 /// 后台时长超过此值（窗口不可见，vsync 回调暂停）→ 恢复时走快照
 /// resume：丢弃积压增量事件，拉 timeline 快照一次到位（复用 restore
@@ -110,6 +108,86 @@ impl SessionTranscriptCache {
     }
 }
 
+/// 只合并 deferred 队尾的同目标流式事件；任何结构事件都会留在队尾，
+/// 因而不会跨 turn/round/tool/final 边界重排协议顺序。
+fn merge_deferred_event(
+    deferred: &mut VecDeque<markdown_winui::ConversationEvent>,
+    event: markdown_winui::ConversationEvent,
+) {
+    use markdown_winui::ConversationEvent;
+
+    match event {
+        ConversationEvent::RoundDelta {
+            turn_id,
+            round_num,
+            kind,
+            delta,
+        } => {
+            if let Some(ConversationEvent::RoundDelta {
+                turn_id: previous_turn,
+                round_num: previous_round,
+                kind: previous_kind,
+                delta: previous_delta,
+            }) = deferred.back_mut()
+                && *previous_turn == turn_id
+                && *previous_round == round_num
+                && *previous_kind == kind
+            {
+                previous_delta.push_str(&delta);
+            } else {
+                deferred.push_back(ConversationEvent::RoundDelta {
+                    turn_id,
+                    round_num,
+                    kind,
+                    delta,
+                });
+            }
+        }
+        checkpoint @ ConversationEvent::BlockCheckpoint { .. } => {
+            let replaces_previous = deferred.back().is_some_and(|previous| {
+                same_stream_target(previous, &checkpoint)
+                    && matches!(
+                        previous,
+                        ConversationEvent::RoundDelta { .. }
+                            | ConversationEvent::BlockCheckpoint { .. }
+                    )
+            });
+            if replaces_previous {
+                deferred.pop_back();
+            }
+            deferred.push_back(checkpoint);
+        }
+        other => deferred.push_back(other),
+    }
+}
+
+fn same_stream_target(
+    previous: &markdown_winui::ConversationEvent,
+    next: &markdown_winui::ConversationEvent,
+) -> bool {
+    use markdown_winui::ConversationEvent;
+
+    fn target(event: &ConversationEvent) -> Option<(&str, u32, markdown_winui::RoundDeltaKind)> {
+        match event {
+            ConversationEvent::RoundDelta {
+                turn_id,
+                round_num,
+                kind,
+                ..
+            }
+            | ConversationEvent::BlockCheckpoint {
+                turn_id,
+                round_num,
+                kind,
+                ..
+            } => Some((turn_id.as_str(), *round_num, *kind)),
+            _ => None,
+        }
+    }
+
+    target(previous) == target(next) && target(next).is_some()
+}
+
 pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let color_scheme = cx.use_color_scheme();
     let transcript = cx.use_ref::<Transcript>(Transcript::new());
@@ -142,9 +220,12 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 独立提交，不会因构造 rev 与下一条传输 rev 碰撞而漏帧。
     let render_generation = cx.use_ref::<u64>(0);
     let (_, set_render_generation) = cx.use_state::<u64>(0);
-    // Live 渲染间隔基准：流式 delta 帧级提交（8ms，不做时间限频），
-    // 峰值成本由段级 diff + 窗口回收兜底；Structural 变更立即提交。
+    // Live 正文提交节流基准；Structural 变更立即提交。
     let last_live_render = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
+    // 跨帧 reducer 余量：bridge 的数量限额先取一批，再按 UI 时间预算
+    // 分段应用；未处理事件保留在此，下一次 CompositionTarget 帧继续。
+    let deferred_events =
+        cx.use_ref::<VecDeque<markdown_winui::ConversationEvent>>(VecDeque::new());
     // 后台恢复检测：上一次 vsync 帧回调时刻。窗口最小化/不可见时合成器
     // 暂停回调，恢复可见后首帧 elapsed 即后台时长——超过阈值走"快照
     // 恢复"（丢弃积压增量 + 拉 timeline 快照一次到位），而非重放后台
@@ -162,11 +243,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 预加载后把「原窗口首行」锚回原位，视口不跳）。rows = 扩展前移量
     // = 原首行的新下标。渲染闭包 take 后随 preserve_anchor 下发。
     let pending_anchor = cx.use_ref::<Option<usize>>(None);
-    // 窗口快照缓存：`Transcript::mutation_rev` 未变时复用同一
-    // `Rc<Vec<Rc<TurnView>>>`；有变化时按 turn_id + turn mutation_rev
-    // 结构共享未变化行，仅克隆真正变化的活尾。`list_view_rc` 仍以外层
-    // Rc 指针判定整包不变，变化帧则由每行 Rc 的 PartialEq 快速跳过旧行。
-    let window_cache = cx.use_ref::<Option<(u64, Rc<Vec<Rc<TurnView>>>)>>(None);
+    // 窗口快照缓存：按 Transcript 投影 rev + theme 复用整包；有变化时
+    // 按 turn_id + turn mutation_rev 结构共享未变化行。主题纳入缓存键，
+    // 避免 ActualThemeChanged 时仍把旧主题的 realized 行当作同一数据包。
+    let window_cache = cx.use_ref::<Option<((u64, ColorScheme), Rc<Vec<Rc<TurnView>>>)>>(None);
 
     // 事件泵：drain bridge 队列 → Transcript；rev 变化触发重渲染。
     cx.use_effect((), {
@@ -189,6 +269,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let render_generation = render_generation.clone();
         let set_render_generation = set_render_generation.clone();
         let last_live_render = last_live_render.clone();
+        let deferred_events = deferred_events.clone();
         let last_frame_at = last_frame_at.clone();
         let background_resumed = background_resumed.clone();
         let recovering = recovering.clone();
@@ -213,6 +294,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let render_generation = render_generation.clone();
                 let set_render_generation = set_render_generation.clone();
                 let last_live_render = last_live_render.clone();
+                let deferred_events = deferred_events.clone();
                 let last_frame_at = last_frame_at.clone();
                 let background_resumed = background_resumed.clone();
                 let recovering = recovering.clone();
@@ -231,6 +313,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     {
                         *background_resumed.borrow_mut() = true;
                         bridge.core().chat_drain();
+                        deferred_events.borrow_mut().clear();
                         bridge.core().chat_output_drain();
                         *last_restored_seed.borrow_mut() = String::new();
                         *recovering.borrow_mut() = Some(bridge.core().active_seed());
@@ -265,6 +348,9 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                                 .store(previous_seed, cached);
                         }
                         *last_seed.borrow_mut() = seed.clone();
+                        // UI 侧尚未归并的旧会话事件不能跨 seed 留存。bridge
+                        // 队列有 seed 过滤，但本地 deferred 队列也必须清空。
+                        deferred_events.borrow_mut().clear();
                         let cached = session_cache.borrow_mut().restore(&seed);
                         *transcript.borrow_mut() = cached.clone().unwrap_or_else(Transcript::new);
                         *last_restored_seed.borrow_mut() = if cached.is_some() {
@@ -299,7 +385,14 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     }
                     // 先 drain 拿 rev：restore 分支渲染也要用（快照到达时
                     // chat_rev 已 +1，直接下发触发重渲染）。
-                    let (events, rev) = bridge.core().chat_drain_limit(CHAT_EVENTS_PER_FRAME);
+                    // deferred 非空时仍继续有限 transport drain，避免 reducer
+                    // 积压反过来阻塞结构事件；两层预算彼此独立。
+                    let fetch_limit = if deferred_events.borrow().is_empty() {
+                        CHAT_EVENTS_PER_FRAME
+                    } else {
+                        CHAT_EVENTS_PER_FRAME / 4
+                    };
+                    let (events, rev) = bridge.core().chat_drain_limit(fetch_limit);
                     let output_resolutions = bridge.core().chat_output_drain();
                     // 1) timeline 快照（resume 历史；peek + seed 校验）：
                     //    匹配才消费；不匹配**保留**快照（不丢弃）并主动重拉
@@ -423,53 +516,63 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             set_render_generation.call(*render_generation.borrow());
                         }
                     }
-                    // 2) 增量事件（新对话流式）
+                    // 2) 增量事件（新对话流式）。先映射进跨帧队列，再按
+                    // reducer 时间预算应用；积压显式保留，下一帧继续。
                     if rev != *last_rev.borrow() {
                         *last_rev.borrow_mut() = rev;
                     }
                     if !events.is_empty() {
-                        let frame_events = events
-                            .into_iter()
-                            .filter_map(|event| chat_adapter::render_event(&event));
+                        let mapped = events
+                            .iter()
+                            .filter_map(|event| chat_adapter::render_event(event));
+                        let mut deferred = deferred_events.borrow_mut();
+                        for event in mapped {
+                            merge_deferred_event(&mut deferred, event);
+                        }
+                    }
+                    let reducer_started = std::time::Instant::now();
+                    let mut update = markdown_winui::TranscriptChange::default();
+                    let pending_outputs = {
                         let mut t = transcript.borrow_mut();
-                        let update = t.apply_frame(frame_events);
-                        let pending_outputs = t.take_pending_outputs();
-                        drop(t);
+                        while reducer_started.elapsed() < CHAT_REDUCER_BUDGET {
+                            let Some(event) = deferred_events.borrow_mut().pop_front() else {
+                                break;
+                            };
+                            update.merge(t.apply_coalesced(event));
+                        }
+                        t.take_pending_outputs()
+                    };
+                    if update.changed() || !pending_outputs.is_empty() {
                         for pending in pending_outputs {
                             bridge.core().spawn_resolve_chat_output(&seed, pending);
                         }
-                        if !update.changed() {
-                            return;
-                        }
-                        let structural = update.is_structural();
-                        let now = std::time::Instant::now();
-                        // 滚动只随真正改变内容 extent 的 XAML 提交发生；
-                        // 状态徽标更新不再制造多余 ScrollViewer 请求。
-                        if update.extent_changed
-                            && (structural
-                                || now.duration_since(*last_scroll_request.borrow())
-                                    >= SCROLL_REQUEST_THROTTLE)
-                        {
-                            // 窗口跟随尾部：仅当窗口未被用户上滚扩展时滑动
-                            // （保持最近 N 个回合，长会话不退化）；用户上滚
-                            // 扩展后窗口保持，避免浏览内容跳动。
-                            if structural && transcript.borrow().tail_following() {
-                                transcript.borrow_mut().slide_window_tail();
+                        if update.changed() {
+                            let structural = update.is_structural();
+                            let now = std::time::Instant::now();
+                            // 滚动只随真正改变内容 extent 的 XAML 提交发生；
+                            // 状态徽标更新不再制造多余 ScrollViewer 请求。
+                            if update.extent_changed
+                                && (structural
+                                    || now.duration_since(*last_scroll_request.borrow())
+                                        >= SCROLL_REQUEST_THROTTLE)
+                            {
+                                // 窗口跟随尾部：仅当窗口未被用户上滚扩展时滑动
+                                // （保持最近 N 个回合，长会话不退化）；用户上滚
+                                // 扩展后窗口保持，避免浏览内容跳动。
+                                if structural && transcript.borrow().tail_following() {
+                                    transcript.borrow_mut().slide_window_tail();
+                                }
+                                *scroll_version.borrow_mut() += 1;
+                                *last_scroll_request.borrow_mut() = now;
                             }
-                            *scroll_version.borrow_mut() += 1;
-                            *last_scroll_request.borrow_mut() = now;
-                        }
-                        // Live（非结构性）更新：帧级提交（8ms，60Hz 每帧
-                        // 对齐），不做时间限频——流式"快显示"优先，峰值
-                        // 成本由段级 diff 与窗口回收兜底。Structural 变更
-                        // （新 turn/round 完成）立即提交。
-                        if structural
-                            || now.duration_since(*last_live_render.borrow())
-                                >= LIVE_RENDER_INTERVAL
-                        {
-                            *last_live_render.borrow_mut() = now;
-                            *render_generation.borrow_mut() += 1;
-                            set_render_generation.call(*render_generation.borrow());
+                            if structural
+                                || now.duration_since(*last_live_render.borrow())
+                                    >= LIVE_RENDER_INTERVAL
+                            {
+                                *last_live_render.borrow_mut() = now;
+                                *render_generation.borrow_mut() += 1;
+                                set_render_generation.call(*render_generation.borrow());
+                            }
                         }
                     }
                     // 覆盖层/加载态存活期间（后台恢复未完成，或快照未达
@@ -541,18 +644,20 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .with_key(format!("chat-empty-{active_seed}"));
     }
     let turns: Rc<Vec<Rc<TurnView>>> = {
-        let rev = s.mutation_rev();
+        let cache_key = (s.mutation_rev(), color_scheme);
         let mut cache = window_cache.borrow_mut();
         match cache.as_ref() {
-            Some((r, rc)) if *r == rev => rc.clone(),
+            Some((key, rc)) if *key == cache_key => rc.clone(),
             _ => {
                 let previous_by_id: HashMap<&str, &Rc<TurnView>> = cache
                     .as_ref()
                     .map(|(_, rows)| {
-                        rows.iter().map(|turn| (turn.turn_id.as_str(), turn)).collect()
+                        rows.iter()
+                            .map(|turn| (turn.turn_id.as_str(), turn))
+                            .collect()
                     })
                     .unwrap_or_default();
-                let rows = s
+                let rows: Vec<Rc<TurnView>> = s
                     .window_turns()
                     .iter()
                     .map(|turn| {
@@ -565,7 +670,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     })
                     .collect();
                 let rc = Rc::new(rows);
-                *cache = Some((rev, rc.clone()));
+                *cache = Some((cache_key, rc.clone()));
                 rc
             }
         }
@@ -725,6 +830,43 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
 #[cfg(test)]
 mod session_cache_tests {
     use super::*;
+    use markdown_winui::{ConversationEvent, RoundDeltaKind};
+
+    #[test]
+    fn deferred_queue_merges_across_bridge_drains() {
+        let mut deferred = VecDeque::new();
+        for delta in ["a", "b"] {
+            merge_deferred_event(
+                &mut deferred,
+                ConversationEvent::RoundDelta {
+                    turn_id: "t1".into(),
+                    round_num: 0,
+                    kind: RoundDeltaKind::Answering,
+                    delta: delta.into(),
+                },
+            );
+        }
+        assert_eq!(deferred.len(), 1);
+        assert!(matches!(
+            deferred.front(),
+            Some(ConversationEvent::RoundDelta { delta, .. }) if delta == "ab"
+        ));
+        merge_deferred_event(
+            &mut deferred,
+            ConversationEvent::BlockCheckpoint {
+                turn_id: "t1".into(),
+                round_num: 0,
+                kind: RoundDeltaKind::Answering,
+                text: "authoritative".into(),
+            },
+        );
+        assert_eq!(deferred.len(), 1);
+        assert!(matches!(
+            deferred.front(),
+            Some(ConversationEvent::BlockCheckpoint { text, .. })
+                if text == "authoritative"
+        ));
+    }
 
     #[test]
     fn cache_restores_recent_transcript_and_evicts_oldest() {
@@ -806,18 +948,18 @@ fn round_view(turn_idx: usize, round: &RoundView, color_scheme: ColorScheme) -> 
         rt.modifiers.font_family = Some(tokens::DEFAULT_UI_FONT_FAMILY.to_string());
         items.push(
             Expander::new(rt)
-            .header("思考过程")
-            .expanded(true)
-            // WinUI's default ExpanderMinHeight is 48 DIP (settings-card
-            // density). Transcript disclosure rows use the native template at
-            // a compact desktop height while preserving its animation/UIA.
-            .min_height(36.0)
-            .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2))
-            .tooltip("展开或折叠思考过程")
-            .automation_name("思考过程")
-            .automation_id(format!("chat-thinking-{turn_idx}-{}", round.round_num))
-            .with_key(format!("t{turn_idx}r{}-thinking", round.round_num))
-            .into(),
+                .header("思考过程")
+                .expanded(true)
+                // WinUI's default ExpanderMinHeight is 48 DIP (settings-card
+                // density). Transcript disclosure rows use the native template at
+                // a compact desktop height while preserving its animation/UIA.
+                .min_height(36.0)
+                .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2))
+                .tooltip("展开或折叠思考过程")
+                .automation_name("思考过程")
+                .automation_id(format!("chat-thinking-{turn_idx}-{}", round.round_num))
+                .with_key(format!("t{turn_idx}r{}-thinking", round.round_num))
+                .into(),
         );
     }
     for card in &round.tool_calls {

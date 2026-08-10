@@ -297,7 +297,15 @@ pub fn interaction_overlay(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             on_plan_reject,
         )
     } else {
-        ask_body(&state, selected, custom, &bump, &cur_q, on_ask_submit, on_ask_dismiss)
+        ask_body(
+            &state,
+            selected,
+            custom,
+            &bump,
+            &cur_q,
+            on_ask_submit,
+            on_ask_dismiss,
+        )
     };
 
     // 卡片实底（SolidBackground 100% 不透明 + CardStroke 描边）：CardBackground

@@ -2,86 +2,57 @@
 
 > 症状：ChatView 内大量文字/markdown（长回答流式、大代码块）时 UI 冻结，
 > 滚动条卡死，其它区域全部无响应。
-> 根因分析见会话记录：全链路 UI 线程 + 视口内行每帧全量重建 + RichTextBlock
-> 无 diff 重建 + syntect 高亮无缓存。
+> 根因：高频聊天状态触发声明树重复构造，叠加 live Markdown/XAML 提交、
+> 无预算事件 drain，以及隐藏页面仍保留轮询和帧回调。
 
-## 改动清单
+## 本轮改动
 
-### 1. syntect 高亮产物缓存 — `crates/markdown-winui/src/highlight.rs`
+### 1. 壳层与生命周期边界
 
-`highlighted_code_block` 按 `(lang, text, dark, font_family)` memo 化（thread_local
-LRU，容量 64）。视口内行 rebuild 时内容未变的代码块不再重复 lexing——
-大代码块单次 syntect lex 数十毫秒且发生在 UI 线程，这是"大量代码块卡顿"
-的首要热点。
+- `main.rs` 用 reactor `Component` 隔离 sidebar/header/tabs 与 chat/composer/info、
+  home/skills/settings。
+- 当前页面之外不声明对应组件；组件卸载时 `use_effect` cleanup、
+  `DispatcherTimer::drop`、`EventRevoker::drop` 停止轮询和 `CompositionTarget::Rendering`
+  回调，避免隐藏页面继续 set_state。
+- 不使用 `active` prop、动态 shell key 或零高度常驻组件作为隐藏方案。
 
-### 2. 窗口快照 Rc 缓存 — `crates/markdown-winui/src/round_renderer.rs` + `apps/winui/src/chat_view.rs`
+### 2. Bridge 事件队列预算
 
-- `Transcript` 新增 `rev`（`mutation_rev()`）：所有变更入口无条件 +1；
-- `chat_view` 缓存 `(rev, Rc<Vec<TurnView>>)`：rev 未变时复用同一 Rc；
-- 配合 vendor 补丁 `list_view_rc`，`same_items_as` 按 `Rc::as_ptr` 命中 →
-  reconciler **完全跳过已 realize 行的 rebuild 与 diff**。
+- `chat_drain_limit(limit) -> (Vec<RingingEvent>, u64)` 每帧只消费活动会话有限数量。
+- 活动会话超额事件与非活动 seed 事件都保持 FIFO；切换 active seed 后再消费对应队列，避免后台会话事件被提前丢弃。
+- `limit == 0` 仍不消费活动事件；恢复路径使用无界 `chat_drain()` 显式清空积压。
+- 队列自身仍有保险丝，极端后台积压不会无限增长。
 
-效果：流式期间每帧不再深拷贝 30 turns、不再重建视口内全部行的 Element 树，
-只 diff 真正变化的行。这是"每 50ms 卡一下"的主因。
+### 3. reducer 与 live 提交预算
 
-### 3. 节流回退 — `apps/winui/src/chat_view.rs`
+- transport 每帧默认最多 512 个事件；deferred 非空时仍继续较小的 transport drain，
+  避免结构事件被 live 积压阻塞。
+- Transcript reducer 使用约 4ms 墙钟预算，未处理事件跨帧保留。
+- live 正文约 33ms 提交一次；新 turn、工具卡、checkpoint/final 等结构变化立即提交。
+- deferred 队尾只合并同 `turn_id + round_num + kind` 的 `RoundDelta`；同目标
+  `BlockCheckpoint` 可替换紧邻的 delta/checkpoint；不跨结构事件边界重排。
 
-`SCROLL_REQUEST_THROTTLE` 50ms → 100ms（滚动请求与 live 渲染共用）：
-断开"滚动 → 行 realize → 渲染 → 再滚动"反馈循环（原注释即警告过该现象）。
+### 4. 双层 revision 与窗口缓存
 
-### 4. RichTextBlock 段落级 diff — vendor 补丁 `backend/winui/mod.rs`
+- `Transcript::rev` 只表达窗口结构或真实内容变化；unknown、重复、实际 no-op 不使缓存失效。
+- `TurnView::mutation_rev` 只在目标 turn 内容真实变化时递增，窗口快照按
+  `turn_id + mutation_rev` 复用未变化行。
+- restore 会比较影响渲染的 turn/round/status/工具卡/正文/error 字段：相同内容继承
+  `mutation_rev`，内容变化递增，新 turn 从独立版本开始。
+- ChatView 窗口缓存键包含 Transcript revision 与 `ColorScheme`，避免主题切换复用旧投影。
 
-`set_rich_text_paragraphs` 增加按 ControlId 的段落快照缓存：内容未变直接跳过
-`Blocks.Clear()` + 全量 Run 新建（该操作会触发整段文本重新布局）。
-流式期间未变化的富文本块不再反复重建。
+## 已知风险与验证边界
 
-### 5. `list_view_rc` API — vendor 补丁 `reactor/src/widget.rs`
+本轮遵循约束，未运行 `cargo check`、build 或 test。当前只完成静态搜索、定点读取、
+`git diff` 和 `git diff --check`；因此 Rust 借用、类型签名及 Windows 构建结果仍需后续
+在 Windows 环境验证。
 
-`TemplatedListBuilder::new_rc` + `list_view_rc`：接收 `Rc<Vec<T>>`，
-数据未变时复用同一 Rc（见 #2）。
+建议下一步：
 
-## 依赖管理（最终方案：git rev 指向 downstream snapshot）
-
-- 三处 manifest（`apps/winui`、`crates/deepx-fluent`、`crates/markdown-winui`）
-  以 `rev = "f159698407616f358e9f4b48e982d8313077eccd"` 消费
-  `QAQTam/deepx-winui-rs` 的 `deepx/snapshot-v5` 分支（无父提交快照，含本批
-  ChatView 性能补丁）；
-- downstream 维护仓库：`F:\DeepX-windows-rs`（`DEEPX-DOWNSTREAM.md` 为
-  维护手册）。升级流程：该仓库 `codex/chatview-perf` 集成分支 rebase 上游 →
-  生成新 snapshot 分支 → 推送 fork → DeepX 三处 rev 改新 commit；
-- 补丁清单见 `DEEPX-DOWNSTREAM.md`（Streaming list perf / RichText commit perf）。
-
-## 协作者 / LLM 上下文（改 downstream 前先读）
-
-本地 downstream 仓库：**`F:\DeepX-windows-rs`**（QAQTam/deepx-winui-rs 的本地工作树，
-维护手册见其根目录 `DEEPX-DOWNSTREAM.md`）。切换脚本：`scripts/dev-downstream.ps1`
-（`on` / `off` / `status`）。
-
-给 LLM 的标准上下文模板（可整段粘贴）：
-
-> DeepX 的 windows-reactor / windows / windows-reactor-setup 依赖指向
-> `QAQTam/deepx-winui-rs` 的 immutable snapshot commit `f159698407616f358e9f4b48e982d8313077eccd`
-> （无父快照分支 `deepx/snapshot-v4`，含 ChatView 流式性能补丁）。
-> 本地下游工作树在 `F:\DeepX-windows-rs`（集成分支 `codex/chatview-perf`，维护手册
-> `DEEPX-DOWNSTREAM.md`）。需要改动下游代码时：
-> 1. 在 `F:\DeepX-windows-rs` 的集成分支上改（遵守 DEEPX-DOWNSTREAM.md 的补丁清单与
->    生成绑定规则：`bindings.rs` 不许手改，改 `base.txt` 跑 `cargo run -p tool_reactor`）；
-> 2. 跑 `pwsh scripts/dev-downstream.ps1 on` 让 DeepX 指向本地 → `cargo check` 验证；
-> 3. 验证后 `off` 恢复 git rev；提交 downstream → 按 runbook 生成 `deepx/snapshot-vN`
->    并推送 → DeepX 三个 manifest 的 rev 改新 commit。
-> 注意：DeepX 工作区的 `composer_bar.rs` / `deepx-fluent/src/lib.rs` 有历史未提交
-> 改动，提交时勿混入本次变更。
-
-## 验证
-
-- `cargo check -p markdown-winui` / `-p deepx-winui`：通过；
-- `cargo test -p markdown-winui`：10 passed；
-- `cargo test -p deepx-winui`：60 passed；
-- 实机验证建议：长回答流式 + 500 行以上代码块滚入视口 + 滚动跟手性。
-
-## 后续可选项（本次未做）
-
-- markdown 解析 / syntect / mermaid SVG 生成移后台线程（UI 只做 diff+提交，
-  对齐 CHATVIEW-RENDERING-REFERENCE §8"渲染不阻塞交互线程"）；
-- `answer_delta` 增量解析（跨 delta 边界语法需保留扫描状态机，风险较高）；
-- turn 内部子虚拟化（超大 round 拆 realize 单元）。
+1. 先执行 `cargo check -p markdown-winui -p deepx-winui`，修复编译/借用问题。
+2. 执行 markdown-winui 与 deepx-winui 测试，重点覆盖 mutation revision、restore、
+   drain limit、deferred 合并边界。
+3. 实机压测长回答、500 行以上代码块、快速切换会话和最小化恢复，记录 reducer、
+   XAML commit、输入延迟与 ListView realize 数量。
+4. 若 4ms 预算在低端机器造成持续 backlog，再调小 live 解析工作或把 final Markdown、
+   syntect、Mermaid 生成移到后台线程，UI 线程只接收不可变渲染快照。

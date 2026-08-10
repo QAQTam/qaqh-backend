@@ -1,4 +1,4 @@
-# collect-payload-winui.ps1 — 按组件收集 winui 壳安装文件并生成 bundle.json
+﻿# collect-payload-winui.ps1 — 按组件收集 winui 壳安装文件并生成 bundle.json
 #
 # full 包的 desktop 组件来自 winui 运行目录（apps/winui/release/winui-app）。
 # 目前仅支持 -Kind full（frontend/backend 更新源后续接入）。
@@ -25,9 +25,13 @@ $daemonManifest = if (Test-Path -LiteralPath $daemonManifestPath -PathType Leaf)
 } else {
     $null
 }
+
+
+# BuildId 组成：<version.txt>-<git short12>-<UTC yyyyMMddHHmmss>（已到秒粒度）。
+# git/timestamp 恒提取（BuildId 显式传入时 build-info 也能写入）。
+$gitCommit = (git rev-parse --short=12 HEAD).Trim()
+$timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
 if ([string]::IsNullOrWhiteSpace($BuildId)) {
-    $gitCommit = (git rev-parse --short=12 HEAD).Trim()
-    $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
     $BuildId = "$appVersion-$gitCommit-$timestamp"
 }
 
@@ -123,6 +127,23 @@ switch ($Kind) {
         }
     }
 }
+
+# ── 构建标识文件（前端版本标识数据源，与 BuildId/staging 目录名同源）──
+# 安装后落在安装根目录 build-info.json，winui 壳启动时读取并显示。
+$buildInfoPath = Join-Path $filesRoot "build-info.json"
+$buildInfoObj = [ordered]@{
+    version   = $appVersion
+    commit    = $gitCommit
+    timestamp = $timestamp
+    build_id  = $BuildId
+}
+$buildInfoObj | ConvertTo-Json -Compress | Set-Content -LiteralPath $buildInfoPath -Encoding UTF8
+$manifestFiles.Add([ordered]@{
+    source = "files/build-info.json"
+    target = "build-info.json"
+    size   = (Get-Item -LiteralPath $buildInfoPath).Length
+    sha256 = (Get-FileHash -LiteralPath $buildInfoPath -Algorithm SHA256).Hash.ToLowerInvariant()
+})
 
 $manifest = [ordered]@{
     formatVersion = 1
