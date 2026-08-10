@@ -727,7 +727,16 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             viewport.vertical_offset,
             viewport.following_tail,
         );
-    } else if *force_tail_version.borrow() == Some(*scroll_version.borrow()) {
+    } else if force_tail_version
+        .borrow()
+        .is_some_and(|v| v <= *scroll_version.borrow())
+        && *follow_state.borrow() == FollowState::Following
+    {
+        // 版本握手用 `<=`（原 `==`）：restore 设 force_tail_version 后，
+        // 流式内容增长（extent_changed）/ prepend / output resolve 都会
+        // 递增 scroll_version，相等匹配被系统操作打断 → resume 永不贴底
+        // （用户反馈"恢复不追踪最新"）。`<=` + Following 态保护：用户上滚
+        // （Idle）不触发，恢复跟随或点击"回到最新"后仍消费一次。
         force_tail_version.borrow_mut().take();
         builder = builder.force_tail(*scroll_version.borrow());
     } else if *follow_state.borrow() == FollowState::Following {
