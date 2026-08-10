@@ -44,6 +44,16 @@ impl Catalog {
         }
         Ok(())
     }
+
+    /// 按 id 插入 / 替换 artifact（同 id 覆盖，保持 catalog 其余字段）。
+    /// 用于打包 CLI：增量包 / 完整包产出后把 artifact 条目写回 catalog。
+    pub fn upsert_artifact(&mut self, artifact: Artifact) {
+        if let Some(slot) = self.artifacts.iter_mut().find(|a| a.id == artifact.id) {
+            *slot = artifact;
+        } else {
+            self.artifacts.push(artifact);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

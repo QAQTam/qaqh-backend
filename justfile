@@ -55,6 +55,25 @@ winui-package: package-winui-desktop build-installer build-updater
 sfx-quick kind="full":
     ./apps/installer/scripts/finalize.ps1 -Kind {{kind}}
 
+# ── 更新发布（基线累积模型，docs/winui-update-design.md）────────
+
+# 编译 deepx-pack（更新包打包 CLI）
+[windows]
+build-pack:
+    cargo build --release -p deepx-update
+
+# 发布增量更新包（基于最近检查点基线；runtime/backend）
+# 产物：package/update/bundles/<kind>-<buildId>.zip + catalog.json 更新
+[windows]
+upgrade-package kind="runtime": build-pack
+    pwsh -File apps/installer/scripts/upgrade-package.ps1 -Kind {{kind}}
+
+# 发布检查点完整包 + 新基线（版本形如 1.0.0 / 1.1.0）
+# 用法：just baseline-release version=1.0.0
+[windows]
+baseline-release version: build-pack
+    pwsh -File apps/installer/scripts/baseline-release.ps1 -Version {{version}}
+
 # ── 开发 ────────────────────────────────────────────
 
 # 启动 daemon（dev profile）

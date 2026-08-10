@@ -12,5 +12,9 @@ sha2 = "0.11"
 hex = "0.4"
 zip = "8.6"
 
+[[bin]]
+name = "deepx-pack"
+path = "src/bin/pack.rs"
+
 [lints]
 workspace = true

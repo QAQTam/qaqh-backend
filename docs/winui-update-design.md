@@ -140,17 +140,17 @@ plan_delta(baseline_manifest, target_dir) -> DeltaPlan {
 
 ## 9. 实施顺序与验收
 
-| 步 | 内容 | 位置 |
-|---|---|---|
-| 1 | catalog v1.1（strategy/baseline）+ `plan_delta` 纯函数 + 单测 | deepx-update |
-| 2 | updater stage 本地复制分支 | deepx-update/apply.rs |
-| 3 | `just upgrade-package` 脚本（调用库，前后端各自增量） | apps/installer/scripts |
-| 4 | 更新源地址配置 + 检测（启动时/手动） | winui 壳 |
-| 5 | Toast + ContentDialog + 进度（后端热升级 / 前端 restart 两路径） | winui 壳 |
-| 6 | 端到端验收：打 1.0.0 基线 → 改代码 → 打 1.0.1 增量 → 1.0.0 客户端升级验证（含跳过版本） | 手工 |
+| 步 | 内容 | 位置 | 状态 |
+|---|---|---|---|
+| 1 | catalog v1.1（strategy/baseline）+ `plan_delta` 纯函数 + 单测 | deepx-update | ✅ a3a8e8a |
+| 2 | 增量包应用/回滚验证（覆盖式语义天然支持，零改动）+ 单测 | deepx-update/apply.rs | ✅ 已提交 |
+| 3 | `just upgrade-package` 脚本（调用库，前后端各自增量） | apps/installer/scripts | ⬜ |
+| 4 | 更新源地址配置 + 检测（启动时/手动） | winui 壳 | ⬜ |
+| 5 | Toast + ContentDialog + 进度（后端热升级 / 前端 restart 两路径） | winui 壳 | ⬜ |
+| 6 | 端到端验收：打 1.0.0 基线 → 改代码 → 打 1.0.1 增量 → 1.0.0 客户端升级验证（含跳过版本） | 手工 | ⬜ |
 
-验收标准：1.0.0 → 1.0.1 增量包仅含变化文件；1.0.0 与 1.0.1 客户端都能升
-1.0.2（后者本地复制 0 下载）；后端更新前端无感；前端更新重启后健康回执 + 回滚可用。
+说明：step 2 的「stage 本地复制分支」（网络下载场景 sha256 本地复用）因
+目录源无下载概念，延后到 M4 HttpUpdateSource 一并实现。
 
 ## 10. 决策记录（已定）
 

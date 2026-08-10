@@ -61,6 +61,18 @@ fn collect_changed(
     Ok(())
 }
 
+/// 由目标 manifest + 变化文件清单组装增量 BundleManifest（file-level-delta）。
+///
+/// 元数据（kind / buildId / appVersion / components…）继承目标构建，
+/// `files` 替换为变化清单，`requires_full_install` 强制 `false`（增量必须在
+/// 已有安装上应用，不携带安装引导语义）。
+pub fn build_delta_manifest(target: &BundleManifest, changed: &[BundleFile]) -> BundleManifest {
+    let mut delta = target.clone();
+    delta.files = changed.to_vec();
+    delta.requires_full_install = false;
+    delta
+}
+
 pub fn plan_update(state: Option<&InstalledState>, catalog: &Catalog) -> Result<UpdatePlan> {
     catalog.validate()?;
     let Some(state) = state else {
@@ -380,6 +392,53 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn delta_manifest_inherits_metadata_and_forces_no_full_install() {
+        let target = BundleManifest {
+            format_version: 1,
+            kind: "runtime".into(),
+            build_id: "runtime-new".into(),
+            app_version: "1.0.1".into(),
+            release_id: "release-delta".into(),
+            channel: "stable".into(),
+            components: BTreeMap::from([(
+                "runtime".into(),
+                CatalogComponent {
+                    build_id: "runtime-new".into(),
+                    version: "1.0.1".into(),
+                    control_protocol: Some(1),
+                },
+            )]),
+            requires_full_install: true,
+            files: vec![delta_file("files/a.txt", "a.txt", b"target")],
+        };
+        let changed = vec![delta_file("files/b.txt", "b.txt", b"new")];
+        let delta = build_delta_manifest(&target, &changed);
+        assert_eq!(delta.kind, "runtime");
+        assert_eq!(delta.build_id, "runtime-new");
+        assert!(!delta.requires_full_install, "delta must not require full install");
+        assert_eq!(delta.files.len(), 1);
+        assert_eq!(delta.files[0].target, "b.txt");
+        assert!(delta.components.contains_key("runtime"));
+    }
+
+    #[test]
+    fn catalog_upsert_adds_and_replaces_artifact() {
+        let mut c = catalog();
+        let base_count = c.artifacts.len();
+        let mut delta_artifact = artifact("runtime", ArtifactKind::Runtime);
+        delta_artifact.strategy = ArtifactStrategy::FileLevelDelta;
+        delta_artifact.baseline = Some("1.0.0".into());
+        // 新增
+        c.upsert_artifact(delta_artifact.clone());
+        assert_eq!(c.artifacts.len(), base_count + 1);
+        // 同 id 替换
+        delta_artifact.baseline = Some("1.1.0".into());
+        c.upsert_artifact(delta_artifact.clone());
+        assert_eq!(c.artifacts.len(), base_count + 1);
+        assert_eq!(c.artifacts.iter().find(|a| a.id == "runtime").unwrap().baseline.as_deref(), Some("1.1.0"));
     }
 
     #[test]
