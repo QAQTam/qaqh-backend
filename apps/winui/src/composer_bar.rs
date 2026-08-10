@@ -36,9 +36,7 @@ use windows_reactor::*;
 
 use deepx_fluent::{motion, shimmer_runs, tokens};
 
-use crate::bridge::{
-    Bridge, ComposerAttachment, ComposerState, ComposerTextFile, WorkPhase,
-};
+use crate::bridge::{Bridge, ComposerAttachment, ComposerState, ComposerTextFile, WorkPhase};
 use crate::shell_store::ContextStats;
 
 /// 快照轮询间隔（同 interaction_overlay：交互响应优先）。
@@ -908,9 +906,16 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
 
     // 持久命令表面使用 LayerFill；边框/圆角由共享 Fluent primitive 统一。
     let card: Element = deepx_fluent::command_surface(
-        vstack((resize_handle, input, error_row, attach_preview, footer, ctx_bar))
-            .spacing(tokens::SPACE_2)
-            .padding(tokens::SPACE_3),
+        vstack((
+            resize_handle,
+            input,
+            error_row,
+            attach_preview,
+            footer,
+            ctx_bar,
+        ))
+        .spacing(tokens::SPACE_2)
+        .padding(tokens::SPACE_3),
     )
     .automation_name("消息编辑器")
     .automation_id("composer-surface");

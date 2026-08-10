@@ -519,6 +519,8 @@ pub struct UsageInfo {
 pub struct SessionDetail {
     pub model: String,
     pub context_limit: u64,
+    /// daemon conversation projection: running/completed/skipped/failed/cancelled.
+    pub compact_status: String,
     /// 当前（最近一次）请求用量。
     pub usage: UsageInfo,
     /// 会话累计用量。
@@ -582,6 +584,11 @@ pub fn parse_conversation_state(v: &Value) -> SessionDetail {
             .unwrap_or("")
             .to_string(),
         context_limit: v.get("context_limit").and_then(|x| x.as_u64()).unwrap_or(0),
+        compact_status: v
+            .get("compact_status")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         usage: v.get("usage").map(parse_usage).unwrap_or_default(),
         totals: v.get("usage_totals").map(parse_usage).unwrap_or_default(),
         usage_requests: v
