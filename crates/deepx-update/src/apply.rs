@@ -267,6 +267,104 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn delta_bundle_applies_changed_files_only_and_rolls_back() {
+        // 增量包（strategy=file-level-delta 产物）：files[] 只列变化文件。
+        // apply_bundle_zip 是覆盖式——未列文件完全不动，增量天然成立。
+        let root = test_root("delta-apply");
+        let target = root.join("DeepX");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("DeepX.exe"), b"launcher").unwrap();
+        fs::write(target.join("a.txt"), b"same").unwrap(); // 未变化（不在增量）
+        fs::write(target.join("b.txt"), b"old").unwrap(); // 变化（在增量）
+        // 初始安装态：runtime 当前 = runtime-old（1.0.0 检查点安装）。
+        let installation_id = installation_id_for_path(&target);
+        write_installed_state(
+            &target.join("install-state.json"),
+            &InstalledState {
+                format_version: 2,
+                installation_id: installation_id.clone(),
+                release_id: "release-old".into(),
+                channel: "test".into(),
+                components: BTreeMap::from([(
+                    "runtime".into(),
+                    ComponentState {
+                        current: "runtime-old".into(),
+                        previous: None,
+                        version: "1.0.0".into(),
+                        protocol: Some(1),
+                        health: ComponentHealth::Healthy,
+                    },
+                )]),
+                last_committed_operation: None,
+            },
+        )
+        .unwrap();
+        let bundle = root.join("delta.zip");
+        write_delta_bundle(&bundle, b"new");
+
+        apply_bundle_zip(&bundle, &target, "op-delta").unwrap();
+
+        // 变化文件替换 + 旧版本保留 .previous；未变化文件保持不动。
+        assert_eq!(fs::read(target.join("b.txt")).unwrap(), b"new");
+        assert_eq!(fs::read(target.join("b.txt.previous")).unwrap(), b"old");
+        assert_eq!(fs::read(target.join("a.txt")).unwrap(), b"same");
+        assert_eq!(fs::read(target.join("DeepX.exe")).unwrap(), b"launcher");
+        // state 推进：runtime current=new，previous=old。
+        let state = load_installed_state(&target.join("install-state.json"), &installation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.components["runtime"].current, "runtime-new");
+        assert_eq!(
+            state.components["runtime"].previous.as_deref(),
+            Some("runtime-old")
+        );
+
+        // 回滚：变化文件复原，未变化文件仍不动。
+        rollback_bundle_zip(&bundle, &target).unwrap();
+        assert_eq!(fs::read(target.join("b.txt")).unwrap(), b"old");
+        assert!(!target.join("b.txt.previous").exists());
+        assert_eq!(fs::read(target.join("a.txt")).unwrap(), b"same");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_delta_bundle(path: &Path, payload: &[u8]) {
+        let digest = hex::encode(Sha256::digest(payload));
+        let manifest = json!({
+            "formatVersion": 1,
+            "kind": "runtime",
+            "buildId": "runtime-new",
+            "appVersion": "1.0.1",
+            "releaseId": "release-delta",
+            "channel": "test",
+            "components": {
+                "runtime": {
+                    "buildId": "runtime-new",
+                    "version": "1.0.1",
+                    "controlProtocol": 1
+                }
+            },
+            "requiresFullInstall": false,
+            "files": [{
+                "source": "files/b.txt",
+                "target": "b.txt",
+                "size": payload.len(),
+                "sha256": digest
+            }]
+        });
+        let file = fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("bundle.json", SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        archive.start_file("files/b.txt", SimpleFileOptions::default()).unwrap();
+        archive.write_all(payload).unwrap();
+        archive.finish().unwrap();
+    }
+
     fn write_bundle(path: &Path, payload: &[u8]) {
         let digest = hex::encode(Sha256::digest(payload));
         let manifest = json!({
