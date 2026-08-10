@@ -41,16 +41,17 @@ use crate::chat_adapter;
 /// 变化（restore / 新 turn / round 完成）不受此限，立即滚底。
 const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 
-/// Live（非结构性）正文提交间隔：约 30fps。协议事件仍逐帧归并到模型，
-/// 但 growing markdown / Element / XAML 文本只按此频率提交；结构变化
-/// （新 turn、工具卡、round 完成）仍立即提交。33ms 在输入响应与 UI 线程
-/// 预算之间更稳妥，也避免 120Hz 屏把同一增长正文每 8ms 全量重解析。
-const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(33);
+/// Live（非结构性）正文提交下限防抖：deferred 清空（已追上后端）时
+/// 立即提交，不等待；此值只防御同帧重复提交。结构变化（新 turn、工具卡、
+/// round 完成）仍立即提交。追平即吐让流式节奏跟随后端速度，不再“攒批”。
+const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(2);
 
-/// 单帧事件上限与 reducer 时间预算。数量上限限制极端微小事件，时间预算
-/// 则限制长 checkpoint / markdown 解析；任一先到即把余量留给下一帧。
-const CHAT_EVENTS_PER_FRAME: usize = 512;
-const CHAT_REDUCER_BUDGET: Duration = Duration::from_millis(4);
+/// 单帧事件上限；reducer 时间预算为帧长自适应（见 on_frame 内计算）。
+/// 数量上限限制极端微小事件，时间预算限制长 checkpoint / markdown 解析；
+/// 任一先到即把余量留给下一帧。
+const CHAT_EVENTS_PER_FRAME: usize = 2048;
+/// reducer 每帧预算上限（帧长自适应夹取上界；60Hz 帧长一半≈8ms）。
+const CHAT_REDUCER_BUDGET_MAX: Duration = Duration::from_millis(8);
 
 /// 后台时长超过此值（窗口不可见，vsync 回调暂停）→ 恢复时走快照
 /// resume：丢弃积压增量事件，拉 timeline 快照一次到位（复用 restore
@@ -307,8 +308,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     // 快照重拉 → 复用 restore 分支一次到位（毫秒级）。
                     // 同时点亮 shimmer 覆盖层（快照到达 restore 后熄灭）。
                     let now = std::time::Instant::now();
-                    if now.duration_since(*last_frame_at.borrow())
-                        >= BACKGROUND_RESUME_AFTER
+                    let frame_len = now.duration_since(*last_frame_at.borrow());
+                    if frame_len >= BACKGROUND_RESUME_AFTER
                         && !*background_resumed.borrow()
                     {
                         *background_resumed.borrow_mut() = true;
@@ -320,6 +321,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         log_diag("chat_view: background resume (drop backlog + snapshot refresh)");
                     }
                     *last_frame_at.borrow_mut() = now;
+                    // reducer 预算自适应实测帧长（60Hz≈8ms、120Hz≈4ms，各留
+                    // 一半给 XAML commit/排版，防高刷屏下 reducer 占满帧掉帧）。
+                    let reducer_budget = (frame_len / 2)
+                        .clamp(Duration::from_millis(2), CHAT_REDUCER_BUDGET_MAX);
                     // DeepX perf diagnostic: data-scale snapshot every 5s
                     // (turns in memory vs windowed render rows vs viewports).
                     if now.duration_since(*last_scale_log.borrow())
@@ -390,7 +395,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     let fetch_limit = if deferred_events.borrow().is_empty() {
                         CHAT_EVENTS_PER_FRAME
                     } else {
-                        CHAT_EVENTS_PER_FRAME / 4
+                        CHAT_EVENTS_PER_FRAME / 2
                     };
                     let (events, rev) = bridge.core().chat_drain_limit(fetch_limit);
                     let output_resolutions = bridge.core().chat_output_drain();
@@ -534,7 +539,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     let mut update = markdown_winui::TranscriptChange::default();
                     let pending_outputs = {
                         let mut t = transcript.borrow_mut();
-                        while reducer_started.elapsed() < CHAT_REDUCER_BUDGET {
+                        while reducer_started.elapsed() < reducer_budget {
                             let Some(event) = deferred_events.borrow_mut().pop_front() else {
                                 break;
                             };
@@ -565,7 +570,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                                 *scroll_version.borrow_mut() += 1;
                                 *last_scroll_request.borrow_mut() = now;
                             }
+                            // 追平即提交：deferred 清空（已追上后端）立即吐，
+                            // 不等节流；否则按帧节奏（下限 2ms 防同帧重复）。
                             if structural
+                                || deferred_events.borrow().is_empty()
                                 || now.duration_since(*last_live_render.borrow())
                                     >= LIVE_RENDER_INTERVAL
                             {
