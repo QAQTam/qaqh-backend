@@ -93,6 +93,14 @@ Artifact 的 `kind` 描述它覆盖的组件；`targets` 描述应用后的组�
 V1 的“增量”是组件级增量。二进制差分以后使用 `strategy=binary-delta` 扩展，
 并必须包含精确的 `baseSha256`；基础文件不匹配时回退到组件完整包或 Full。
 
+**Catalog v1.1（2026-08-10 已落地，见 `docs/winui-update-design.md`）**：
+新增 `strategy=file-level-delta`（文件级增量，基线累积模型）与 artifact 可选
+字段 `baseline`（增量参照的检查点版本）。增量 bundle 与完整包同构，`files[]`
+只列相对基线变化的文件；客户端按逐文件 sha256 自适应（匹配当前安装文件则
+本地复用，0 下载），删除文件不列入增量（覆盖式应用无删除语义，残留由检查点
+完整包清理）。实现：`deepx-update::plan_delta` / `build_delta_manifest` +
+`deepx-pack` 打包 CLI + `just upgrade-package` / `baseline-release`。
+
 ## 6. Bundle Manifest v1
 
 Bundle 是不可变归档，根目录包含：
@@ -340,6 +348,9 @@ Windows `ModifyPath` 指向 `deepx-updater.exe maintain --interactive`；
 
 - 实现签名 catalog 和 `HttpUpdateSource`。
 - 需要时增加精确 base hash 的二进制差分。
+- （2026-08-10 前置完成：文件级增量 `file-level-delta` 已落地——`plan_delta`
+  纯函数、`deepx-pack` CLI、`just upgrade-package`/`baseline-release` 发布
+  流程；stage 本地复制分支随 HttpUpdateSource 一并实现。）
 
 ## 15. V1 明确不做
 

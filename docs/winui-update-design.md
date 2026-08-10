@@ -99,9 +99,12 @@ plan_delta(baseline_manifest, target_dir) -> DeltaPlan {
 
 ## 6. updater 改动（crates/deepx-update）
 
-- `apply.rs` stage 加**本地复制分支**：目标 sha256 与当前安装文件匹配 →
-  从安装目录复制进 staging（0 下载）。当前逻辑只支持"解压覆盖"，新增分支
-  不改动既有 full/component-full 路径。
+- ✅ **增量应用零改动**（step 2 已验证）：`apply_bundle_zip` 是纯覆盖式——
+  只动 `files[]` 列出的文件，未列文件保持现状，增量 zip 直接可应用；回滚
+  （`rollback_bundle_zip`）按同一 `files[]` 反向恢复，天然适配。单测覆盖
+  增量应用（变化替换 + `.previous` 备份 + 未变不动 + state 推进）与回滚。
+- `stage` 本地复制分支（网络下载场景 sha256 本地复用）**延后到 M4**
+  HttpUpdateSource 一并实现（目录源无下载概念，无此需求）。
 - planner 识别 `strategy=file-level-delta`（解析即可，决策仍走 sha256）。
 
 ## 7. WinUI 弹窗 UX
@@ -143,14 +146,23 @@ plan_delta(baseline_manifest, target_dir) -> DeltaPlan {
 | 步 | 内容 | 位置 | 状态 |
 |---|---|---|---|
 | 1 | catalog v1.1（strategy/baseline）+ `plan_delta` 纯函数 + 单测 | deepx-update | ✅ a3a8e8a |
-| 2 | 增量包应用/回滚验证（覆盖式语义天然支持，零改动）+ 单测 | deepx-update/apply.rs | ✅ 已提交 |
-| 3 | `just upgrade-package` 脚本（调用库，前后端各自增量） | apps/installer/scripts | ⬜ |
-| 4 | 更新源地址配置 + 检测（启动时/手动） | winui 壳 | ⬜ |
-| 5 | Toast + ContentDialog + 进度（后端热升级 / 前端 restart 两路径） | winui 壳 | ⬜ |
-| 6 | 端到端验收：打 1.0.0 基线 → 改代码 → 打 1.0.1 增量 → 1.0.0 客户端升级验证（含跳过版本） | 手工 | ⬜ |
+| 2 | 增量包应用/回滚验证（覆盖式语义天然支持，零改动）+ 单测 | deepx-update/apply.rs | ✅ ae3891b |
+| 3 | `deepx-pack` CLI + `just upgrade-package` / `baseline-release` 发布流程 | deepx-update/bin + apps/installer/scripts + justfile | ✅ 22d8b52 |
+| 4 | 更新源地址配置 + 检测（启动时/手动） | winui 壳 | ⬜ 待排期 |
+| 5 | Toast + ContentDialog + 进度（后端热升级 / 前端 restart 两路径） | winui 壳 | ⬜ 待排期 |
+| 6 | 端到端验收：打 1.0.0 基线 → 改代码 → 打 1.0.1 增量 → 1.0.0 客户端升级验证（含跳过版本） | 手工 | ⬜ 待排期 |
+
+已落地（step 3）的发布命令：
+
+```text
+just baseline-release version=1.0.0   # 检查点：完整包重建 + baselines/1.0.0/manifest.json
+just upgrade-package kind=runtime     # 增量：基于最近基线 → package/update/bundles/ + catalog
+just upgrade-package kind=backend     # 同上，restartPolicy=daemon
+```
 
 说明：step 2 的「stage 本地复制分支」（网络下载场景 sha256 本地复用）因
-目录源无下载概念，延后到 M4 HttpUpdateSource 一并实现。
+目录源无下载概念，延后到 M4 HttpUpdateSource 一并实现。step 4-6 待 rc.4
+冻结后排期（或随 M4 网络源一并做）。
 
 ## 10. 决策记录（已定）
 
