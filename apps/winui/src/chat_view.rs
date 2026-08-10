@@ -333,6 +333,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         log_diag("chat_view: background resume (drop backlog + snapshot refresh)");
                     }
                     *last_frame_at.borrow_mut() = now;
+                    // 诊断：帧间隔（>2s = 暂停恢复，diagnostics 内过滤）。
+                    crate::diagnostics::record_frame_interval(
+                        now.duration_since(*last_frame_at.borrow()).as_secs_f64() * 1000.0,
+                    );
                     // DeepX perf diagnostic: data-scale snapshot every 5s
                     // (turns in memory vs windowed render rows vs viewports).
                     if now.duration_since(*last_scale_log.borrow())
@@ -347,6 +351,12 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             t.mutation_rev(),
                             session_viewports.borrow().len(),
                         ));
+                        // 诊断：数据规模快照（与 log_diag 同频）。
+                        crate::diagnostics::record_scale(
+                            t.turns().len() as u32,
+                            t.window_len() as u32,
+                            t.mutation_rev(),
+                        );
                     }
                     // 会话切换：缓存旧会话的原生投影，立即恢复目标会话；
                     // canonical 快照仍会异步刷新并覆盖缓存。
@@ -415,6 +425,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     };
                     let (events, rev) = bridge.core().chat_drain_limit(fetch_limit);
                     let output_resolutions = bridge.core().chat_output_drain();
+                    // 诊断：drain 吞吐（chat 事件 + output 决议）。
+                    crate::diagnostics::record_drain(
+                        (events.len() + output_resolutions.len()) as u32,
+                    );
                     // 1) timeline 快照（resume 历史；peek + seed 校验）：
                     //    匹配才消费；不匹配**保留**快照（不丢弃）并主动重拉
                     //    active seed 的快照——原 take 语义消费即弃，丢弃后

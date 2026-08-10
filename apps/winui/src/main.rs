@@ -10,6 +10,7 @@ mod bridge;
 mod chat_adapter;
 mod chat_view;
 mod composer_bar;
+mod diagnostics;
 mod fonts;
 mod header;
 mod home_view;
@@ -427,6 +428,19 @@ fn log_diag(msg: &str) {
 }
 
 fn main() -> windows_reactor::Result<()> {
+    // 壳侧性能诊断：恢复上次采集模式（默认 ZDR）；必须在 render 前注册
+    // render observer（thread_local，UI 线程 = main 线程）。
+    diagnostics::init();
+    windows_reactor::set_render_observer(Some(Box::new(|info| {
+        diagnostics::record_render(
+            info.tree_build_ms,
+            info.reconcile_ms,
+            info.effects_ms,
+            info.elements_diffed,
+            info.elements_skipped,
+            info.elements_created,
+        );
+    })));
     App::new()
         .title("DeepX")
         .inner_size(1200.0, 800.0)
@@ -442,7 +456,9 @@ fn main() -> windows_reactor::Result<()> {
             log_diag(&format!(
                 "reactor fault [{}]: {}",
                 fault.context, fault.message
-            ))
+            ));
+            // 诊断：仅记 context 名（panic message 可能含敏感内容，不入诊断）。
+            diagnostics::record_fault(fault.context);
         })
         .render(app)
 }
