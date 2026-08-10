@@ -358,14 +358,19 @@ pub fn sidebar(
         ))
         .into();
         // 版本标识小字（与安装包 BuildId 同源；单行省略，tooltip 全量）。
-        let label = build_label
-            .borrow()
-            .clone()
-            .unwrap_or_else(|| {
+        // ⚠ 不能写 `build_label.borrow().clone().unwrap_or_else(|| …borrow_mut()…)`：
+        // Ref 临时值存活到整个语句末尾，闭包内的 borrow_mut 会触发
+        // 「RefCell already borrowed」panic（rc.3 白屏根因，on_fault[render]）。
+        // 必须先 clone 出 owned 值、让 Ref 在语句末 drop，再分支写入缓存。
+        let cached_label = build_label.borrow().clone();
+        let label = match cached_label {
+            Some(s) => s,
+            None => {
                 let s = build_id_label();
                 *build_label.borrow_mut() = Some(s.clone());
                 s
-            });
+            }
+        };
         let version: Element = text_block(&label)
             .font_size(10.0)
             .foreground(ThemeRef::TertiaryText)
