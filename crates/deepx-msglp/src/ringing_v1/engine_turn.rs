@@ -897,6 +897,35 @@ impl TurnEngine {
         true
     }
 
+    fn emit_compact_failure(ctx: &RingContext, message: String) {
+        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Control(
+            deepx_domain::ControlEvent::OperationFailed {
+                occurrence_id: format!(
+                    "occ-auto-compact-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_millis())
+                        .unwrap_or(0),
+                ),
+                scope: deepx_domain::ErrorScope::Conversation,
+                error: deepx_domain::DomainError {
+                    error_id: format!(
+                        "err-auto-compact-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|duration| duration.as_millis())
+                            .unwrap_or(0),
+                    ),
+                    code: "compact_failed".into(),
+                    message,
+                    retryable: true,
+                    dedupe_key: Some("compact_failed".into()),
+                },
+                operation_id: None,
+            },
+        ));
+    }
+
     /// Run compact inline during a gate lap boundary.
     /// Uses CompactEngine to build prompt, calls LLM inline (blocking),
     /// applies result, and streams CompactDelta events to the frontend.
@@ -990,6 +1019,8 @@ impl TurnEngine {
                 true
             }
             Ok(()) => {
+                let message = "Compact failed: model returned an empty response.".to_string();
+                Self::emit_compact_failure(ctx, message.clone());
                 // Ringing 双发：CompactFinished（空摘要 → 失败终态）
                 ctx.emitter
                     .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -1001,9 +1032,12 @@ impl TurnEngine {
                             turns_removed: Some(0),
                         },
                     ));
+                log::error!("[TURN] auto-compact failed: {message}");
                 false
             }
             Err(e) => {
+                let message = format!("Compact failed: {e}");
+                Self::emit_compact_failure(ctx, message);
                 // Ringing 双发：CompactFinished（失败终态）
                 ctx.emitter
                     .emit_domain(deepx_domain::DomainEvent::Conversation(
@@ -1104,10 +1138,11 @@ impl TurnEngine {
             }
 
             // ── Build and measure the exact request snapshot for this gate lap ──
-            // Auto-compaction has one authoritative decision source: a local
-            // preflight estimate of the messages + tool schema that are about to
-            // be sent. Provider usage is terminal telemetry and only calibrates
-            // future estimates; it never directly controls compaction.
+            // The API's prompt/input token count is authoritative. An exact
+            // prepared messages + tools reading wins; otherwise the last API
+            // context remains the trigger source until this request returns a
+            // replacement reading. Only sessions without API usage fall back to
+            // the calibrated local upper bound.
             let mut messages = ctx.agent.build_context();
             let mut request_estimate = ctx
                 .agent
@@ -1115,7 +1150,13 @@ impl TurnEngine {
             let threshold = ctx.agent.config.auto_compact_threshold;
             if threshold > 0.0 {
                 let limit = ctx.agent.config.context_limit as u64;
-                if request_estimate.upper_bound_tokens as f64 > limit as f64 * threshold {
+                // Provider-returned prompt/input tokens are the primary source
+                // for the current session context. Exact-shape readings win;
+                // otherwise retain the last API reading until this changed
+                // request is sent and returns its replacement usage.
+                let api_context_tokens = request_estimate.api_context_tokens;
+                let decision_tokens = ctx.agent.auto_compact_decision_tokens(&request_estimate);
+                if decision_tokens as f64 > limit as f64 * threshold {
                     if !ctx.agent.auto_compact_allowed() {
                         log::debug!(
                             "[TURN] auto-compact skipped for unchanged failed candidate at revision {}",
@@ -1123,7 +1164,13 @@ impl TurnEngine {
                         );
                     } else {
                         log::info!(
-                            "[TURN] auto-compact preflight: raw={}, predicted={}, upper={}/{limit} tokens ({} samples, {:.0}% threshold)",
+                            "[TURN] auto-compact preflight: source={}, decision={}, raw={}, predicted={}, upper={}/{limit} tokens ({} samples, {:.0}% threshold)",
+                            if api_context_tokens.is_some() {
+                                "api"
+                            } else {
+                                "estimate"
+                            },
+                            decision_tokens,
                             request_estimate.raw_tokens,
                             request_estimate.predicted_tokens,
                             request_estimate.upper_bound_tokens,
@@ -1137,12 +1184,24 @@ impl TurnEngine {
                             request_estimate = ctx
                                 .agent
                                 .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
-                            if request_estimate.upper_bound_tokens as f64 > limit as f64 * threshold
-                            {
+                            // The compacted shape may already have an exact API
+                            // observation from an earlier identical request; use
+                            // it when available, otherwise keep the local upper
+                            // bound until the request below returns fresh usage.
+                            let post_compact_tokens = request_estimate
+                                .api_context_tokens
+                                .unwrap_or(request_estimate.upper_bound_tokens);
+                            if post_compact_tokens as f64 > limit as f64 * threshold {
                                 // One compact attempt per gate boundary. Remaining
                                 // pressure may be non-compactable system/tool overhead.
                                 log::warn!(
-                                    "[TURN] post-compact preflight remains above threshold: upper={}/{limit}",
+                                    "[TURN] post-compact preflight remains above threshold: source={}, decision={}/{limit}, upper={}",
+                                    if request_estimate.api_context_tokens.is_some() {
+                                        "api"
+                                    } else {
+                                        "estimate"
+                                    },
+                                    post_compact_tokens,
                                     request_estimate.upper_bound_tokens
                                 );
                             }
@@ -1176,6 +1235,9 @@ impl TurnEngine {
             let mut gate_error = None;
             let mut current_request_usage: Option<UsageInfo> = None;
             let request_fingerprint = ctx.agent.token_calibration_fingerprint();
+            let request_key = ctx
+                .agent
+                .prepared_request_key(&messages, Some(&ctx.agent.tool_defs));
 
             *ctx.phase = LoopPhase::GateRunning;
             let cancel_arc = ctx.cancel.arc();
@@ -1513,6 +1575,7 @@ impl TurnEngine {
             if let Some(usage) = current_request_usage {
                 let accepted = ctx.agent.observe_prepared_request(
                     &request_fingerprint,
+                    &request_key,
                     request_estimate.raw_tokens,
                     u64::from(usage.prompt_tokens),
                 );

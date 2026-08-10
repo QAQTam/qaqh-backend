@@ -7,6 +7,7 @@ const MAX_SAMPLES: usize = 16;
 const MIN_SAMPLE_TOKENS: u64 = 32;
 const MIN_ACCEPTED_RATIO: f64 = 0.5;
 const MAX_ACCEPTED_RATIO: f64 = 2.5;
+const MAX_API_CONTEXT_KEYS: usize = 64;
 const MIN_CALIBRATED_SAMPLES: usize = 6;
 const MIN_CALIBRATED_SCALE: f64 = 0.85;
 const COLD_START_MARGIN_PERCENT: u64 = 10;
@@ -20,12 +21,18 @@ pub(crate) struct RequestTokenEstimate {
     pub predicted_tokens: u64,
     pub upper_bound_tokens: u64,
     pub sample_count: usize,
+    /// Exact provider-reported input tokens for this unchanged prepared request.
+    /// When present this is the authoritative context size; the heuristic upper
+    /// bound remains telemetry only and must not retrigger compaction.
+    pub api_context_tokens: Option<u64>,
 }
 
 #[derive(Debug, Default)]
 struct CalibrationState {
     ratios: VecDeque<f64>,
     positive_residuals: VecDeque<u64>,
+    api_context_by_request: HashMap<String, u64>,
+    api_context_order: VecDeque<String>,
 }
 
 impl CalibrationState {
@@ -60,6 +67,7 @@ impl CalibrationState {
             predicted_tokens,
             upper_bound_tokens: predicted_tokens.saturating_add(margin),
             sample_count,
+            api_context_tokens: None,
         }
     }
 
@@ -88,37 +96,75 @@ pub(crate) struct SessionTokenCalibrator {
 }
 
 impl SessionTokenCalibrator {
-    pub fn estimate(&self, fingerprint: &str, raw_tokens: u64) -> RequestTokenEstimate {
-        self.states.get(fingerprint).map_or_else(
+    pub fn estimate(
+        &self,
+        fingerprint: &str,
+        request_key: &str,
+        raw_tokens: u64,
+    ) -> RequestTokenEstimate {
+        let mut estimate = self.states.get(fingerprint).map_or_else(
             || CalibrationState::default().estimate(raw_tokens),
             |state| state.estimate(raw_tokens),
-        )
+        );
+        estimate.api_context_tokens = self
+            .states
+            .get(fingerprint)
+            .and_then(|state| state.api_context_by_request.get(request_key))
+            .copied();
+        estimate
     }
 
-    pub fn observe(&mut self, fingerprint: &str, raw_tokens: u64, observed_tokens: u64) -> bool {
+    pub fn observe(
+        &mut self,
+        fingerprint: &str,
+        request_key: &str,
+        raw_tokens: u64,
+        observed_tokens: u64,
+    ) -> bool {
         if !self.states.contains_key(fingerprint)
             && self.states.len() >= MAX_CALIBRATORS
             && let Some(expired) = self.states.keys().next().cloned()
         {
             self.states.remove(&expired);
         }
-        self.states
-            .entry(fingerprint.to_string())
-            .or_default()
-            .observe(raw_tokens, observed_tokens)
+        let state = self.states.entry(fingerprint.to_string()).or_default();
+        let accepted = state.observe(raw_tokens, observed_tokens);
+        // Exact request bindings are trusted only when the usage sample is
+        // plausible for the locally serialized shape. Zero/extreme readings
+        // may be provider telemetry for a different internal request and must
+        // not become the auto-compaction source.
+        if accepted {
+            if !state.api_context_by_request.contains_key(request_key) {
+                if state.api_context_order.len() >= MAX_API_CONTEXT_KEYS
+                    && let Some(expired) = state.api_context_order.pop_front()
+                {
+                    state.api_context_by_request.remove(&expired);
+                }
+                state.api_context_order.push_back(request_key.to_string());
+            }
+            state
+                .api_context_by_request
+                .insert(request_key.to_string(), observed_tokens);
+        }
+        accepted
     }
 }
 
 /// Estimate the complete semantic request surface that is about to be sent.
 ///
-/// Provider-reported usage later calibrates this value, but never replaces it
-/// as the auto-compaction decision source.
-pub(crate) fn estimate_prepared_request_tokens(
+/// Provider-reported usage later calibrates future estimates and becomes the
+/// authoritative source when the exact same prepared request shape is seen again.
+pub(crate) fn prepared_request_metrics(
     messages: &[Message],
     tools: Option<&[ToolDef]>,
-) -> u64 {
+) -> (u64, String) {
+    use std::hash::{Hash, Hasher};
+
     let serialized = serde_json::to_string(&(messages, tools)).unwrap_or_default();
-    u64::from(deepx_types::count_tokens(&serialized)).max(1)
+    let raw_tokens = u64::from(deepx_types::count_tokens(&serialized)).max(1);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    (raw_tokens, format!("{:016x}", hasher.finish()))
 }
 
 fn push_bounded<T>(values: &mut VecDeque<T>, value: T) {
@@ -154,24 +200,26 @@ mod tests {
     #[test]
     fn cold_start_uses_a_conservative_upper_bound() {
         let calibrator = SessionTokenCalibrator::default();
-        let estimate = calibrator.estimate("session/provider/model", 1_000);
+        let estimate = calibrator.estimate("session/provider/model", "request-a", 1_000);
         assert_eq!(estimate.predicted_tokens, 1_000);
         assert_eq!(estimate.upper_bound_tokens, 1_256);
         assert_eq!(estimate.sample_count, 0);
+        assert_eq!(estimate.api_context_tokens, None);
     }
 
     #[test]
     fn learns_a_provider_ratio_without_cross_fingerprint_leakage() {
         let mut calibrator = SessionTokenCalibrator::default();
         for raw in [1_000, 2_000, 3_000, 4_000] {
-            assert!(calibrator.observe("provider-a", raw, raw * 6 / 5));
+            assert!(calibrator.observe("provider-a", &format!("request-{raw}"), raw, raw * 6 / 5,));
         }
 
-        let learned = calibrator.estimate("provider-a", 5_000);
+        let learned = calibrator.estimate("provider-a", "request-new", 5_000);
         assert_eq!(learned.predicted_tokens, 6_000);
+        assert_eq!(learned.api_context_tokens, None);
         assert!(learned.upper_bound_tokens >= learned.predicted_tokens);
 
-        let isolated = calibrator.estimate("provider-b", 5_000);
+        let isolated = calibrator.estimate("provider-b", "request-new", 5_000);
         assert_eq!(isolated.predicted_tokens, 5_000);
         assert_eq!(isolated.sample_count, 0);
     }
@@ -179,26 +227,53 @@ mod tests {
     #[test]
     fn rejects_unusable_or_extreme_samples() {
         let mut calibrator = SessionTokenCalibrator::default();
-        assert!(!calibrator.observe("provider", 1_000, 0));
-        assert!(!calibrator.observe("provider", 1_000, 10_000));
-        assert_eq!(calibrator.estimate("provider", 1_000).sample_count, 0);
+        assert!(!calibrator.observe("provider", "zero", 1_000, 0));
+        assert!(!calibrator.observe("provider", "extreme", 1_000, 10_000));
+        assert_eq!(
+            calibrator
+                .estimate("provider", "unseen", 1_000)
+                .sample_count,
+            0
+        );
+        assert_eq!(
+            calibrator
+                .estimate("provider", "extreme", 1_000)
+                .api_context_tokens,
+            None,
+            "rejected telemetry must not bind an exact prepared request"
+        );
     }
 
     #[test]
     fn downward_adjustment_needs_enough_samples_and_stays_bounded() {
         let mut calibrator = SessionTokenCalibrator::default();
         for _ in 0..5 {
-            assert!(calibrator.observe("provider", 1_000, 600));
+            assert!(calibrator.observe("provider", "same", 1_000, 600));
         }
         assert_eq!(
-            calibrator.estimate("provider", 1_000).predicted_tokens,
+            calibrator
+                .estimate("provider", "unseen", 1_000)
+                .predicted_tokens,
             1_000
         );
 
-        assert!(calibrator.observe("provider", 1_000, 600));
-        let learned = calibrator.estimate("provider", 1_000);
+        assert!(calibrator.observe("provider", "same", 1_000, 600));
+        let learned = calibrator.estimate("provider", "unseen", 1_000);
         assert_eq!(learned.predicted_tokens, 850);
         assert!(learned.upper_bound_tokens >= 900);
+    }
+
+    #[test]
+    fn exact_prepared_request_uses_provider_reported_context() {
+        let mut calibrator = SessionTokenCalibrator::default();
+        assert!(calibrator.observe("provider", "exact-shape", 1_000, 740));
+
+        let same = calibrator.estimate("provider", "exact-shape", 1_000);
+        assert_eq!(same.api_context_tokens, Some(740));
+        assert!(same.upper_bound_tokens >= same.predicted_tokens);
+
+        let changed = calibrator.estimate("provider", "different-shape", 1_000);
+        assert_eq!(changed.api_context_tokens, None);
     }
 
     #[test]
@@ -212,8 +287,9 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             },
         };
-        let without_tools = estimate_prepared_request_tokens(&messages, None);
-        let with_tools = estimate_prepared_request_tokens(&messages, Some(&[tool]));
+        let (without_tools, without_key) = prepared_request_metrics(&messages, None);
+        let (with_tools, with_key) = prepared_request_metrics(&messages, Some(&[tool]));
         assert!(with_tools > without_tools);
+        assert_ne!(with_key, without_key);
     }
 }

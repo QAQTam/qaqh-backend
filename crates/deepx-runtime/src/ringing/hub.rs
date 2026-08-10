@@ -17,9 +17,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use deepx_domain::{
-    AskResolution, ControlEvent, ConversationEvent, Delivery, DomainEvent, RingingChannel,
-    TimelineBlockState, TimelineEntry, TimelineFailure, TimelineIntent, TimelineSnapshot,
-    TimelineTurnState, ToolEvent,
+    AskResolution, CompactStatus, ControlEvent, ConversationEvent, Delivery, DomainEvent,
+    RingingChannel, TimelineBlockState, TimelineEntry, TimelineFailure, TimelineIntent,
+    TimelineSnapshot, TimelineTurnState, ToolEvent,
 };
 use deepx_ringing::{
     RingingChannelSnapshot, RingingEvent, RingingEventEnvelope, RingingResetRequired,
@@ -677,7 +677,36 @@ impl RingingHub {
             changed = true;
         }
 
-        // 2) tool：running 列表 + pending_permission 无 ToolFinished 终态 → 取消。
+        // 2) conversation compact：CompactStarted 无 CompactFinished → 失败。
+        //    压缩 worker 的网络请求与结果仅存于旧进程内存，daemon/worker
+        //    恢复后不可能继续；必须经正常终态事件收敛 journal、snapshot 和 SSE。
+        let conv = self.snapshot(RingingChannel::Conversation, seed);
+        if conv.state.get("compact_status").and_then(|v| v.as_str()) == Some("running") {
+            let compact_id = conv
+                .state
+                .get("compact_id")
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("orphan-compact")
+                .to_string();
+            log::info!(
+                "[ringing] sealing orphan compact {compact_id} for {seed} (worker operation cannot resume)"
+            );
+            let _ = self.publish_with_causation(
+                seed,
+                DomainEvent::Conversation(ConversationEvent::CompactFinished {
+                    compact_id,
+                    status: CompactStatus::Failed,
+                    summary_chars: Some(0),
+                    turns_compacted: Some(0),
+                    turns_removed: Some(0),
+                }),
+                None,
+            );
+            changed = true;
+        }
+
+        // 3) tool：running 列表 + pending_permission 无 ToolFinished 终态 → 取消。
         //    兼容旧投影的字符串数组与当前的对象数组两种格式。
         let tool = self.snapshot(RingingChannel::Tool, seed);
         let mut orphans: Vec<(String, String, u32)> = Vec::new();
@@ -733,7 +762,7 @@ impl RingingHub {
             changed = true;
         }
 
-        // 3) control：pending_interaction 无 InteractionResolved → 关闭（Dismissed）。
+        // 4) control：pending_interaction 无 InteractionResolved → 关闭（Dismissed）。
         let control = self.snapshot(RingingChannel::Control, seed);
         if let Some(id) = control
             .state
@@ -1495,6 +1524,49 @@ mod tests {
     }
 
     #[test]
+    fn orphan_compact_from_persisted_journal_is_failed_before_bootstrap() {
+        let root = temp_root("orphan-compact");
+        {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            let _ = hub.publish(
+                "s",
+                DomainEvent::Conversation(ConversationEvent::CompactStarted {
+                    compact_id: "compact-persisted".into(),
+                    turns_total: 9,
+                    turns_keeping: 3,
+                }),
+            );
+        }
+
+        let hub = RingingHub::with_persistence("epoch-2", &root);
+        assert_eq!(
+            hub.snapshot(RingingChannel::Conversation, "s").state["compact_status"],
+            "running",
+            "journal replay alone restores the interrupted operation"
+        );
+        assert!(hub.seal_orphan_channel_state("s"));
+        // daemon bootstrap 在 SessionManager 初始化后会调用 conversation_snapshot；
+        // 此处只需验证由 journal 驱动、随后会被持久消息 overlay 保留的投影字段。
+        let bootstrap_state = hub.snapshot(RingingChannel::Conversation, "s").state;
+        assert_eq!(bootstrap_state["compact_status"], "failed");
+        assert_eq!(bootstrap_state["compact_id"], "compact-persisted");
+        assert!(!hub.seal_orphan_channel_state("s"));
+
+        let replay = hub
+            .replay_since(RingingChannel::Conversation, "s", 0)
+            .expect("replay compact recovery");
+        assert!(replay.iter().any(|envelope| matches!(
+            &envelope.event,
+            RingingEvent::Conversation(ConversationEvent::CompactFinished {
+                compact_id,
+                status: CompactStatus::Failed,
+                ..
+            }) if compact_id == "compact-persisted"
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn journal_rewrite_converges_on_lazy_load_without_round_completed() {
         // P0 回归：轮次未完成（无 RoundCompleted）时 delta 持续 append 也必须收敛。
         // 阈值降到 1MB 加速测试；此覆盖为 OnceLock 一次性，仅本测试使用。
@@ -2206,12 +2278,20 @@ mod tests {
     #[test]
     fn seal_orphan_channel_state_converges_three_channels() {
         let hub = RingingHub::new("epoch-seal");
-        // 无终态的中断现场：running turn、running tool + 挂起权限、未决 ask
+        // 无终态的中断现场：running turn、running compact、running tool + 挂起权限、未决 ask
         hub.publish(
             "s",
             DomainEvent::Conversation(ConversationEvent::TurnStarted {
                 turn_id: "t1".into(),
                 user_text: "hi".into(),
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Conversation(ConversationEvent::CompactStarted {
+                compact_id: "compact-1".into(),
+                turns_total: 8,
+                turns_keeping: 2,
             }),
         );
         hub.publish(
@@ -2253,6 +2333,10 @@ mod tests {
             hub.snapshot(RingingChannel::Conversation, "s").state["active_turn"],
             "t1"
         );
+        assert_eq!(
+            hub.snapshot(RingingChannel::Conversation, "s").state["compact_status"],
+            "running"
+        );
         assert!(hub.snapshot(RingingChannel::Tool, "s").state["running"].is_array());
         assert_eq!(
             hub.snapshot(RingingChannel::Tool, "s").state["pending_permission"],
@@ -2268,7 +2352,10 @@ mod tests {
         assert!(!hub.seal_orphan_channel_state("s"));
 
         // 收尾后：三个投影全部收敛
-        assert!(hub.snapshot(RingingChannel::Conversation, "s").state["active_turn"].is_null());
+        let conversation = hub.snapshot(RingingChannel::Conversation, "s");
+        assert!(conversation.state["active_turn"].is_null());
+        assert_eq!(conversation.state["compact_status"], "failed");
+        assert_eq!(conversation.state["compact_id"], "compact-1");
         assert!(hub.snapshot(RingingChannel::Tool, "s").state["running"].is_null());
         assert!(hub.snapshot(RingingChannel::Tool, "s").state["pending_permission"].is_null());
         assert!(hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"].is_null());
@@ -2282,6 +2369,14 @@ mod tests {
             deepx_ringing::RingingEvent::Conversation(ConversationEvent::ConversationCancelled {
                 turn_id: Some(id)
             }) if id == "t1"
+        )));
+        assert!(replay.iter().any(|env| matches!(
+            &env.event,
+            deepx_ringing::RingingEvent::Conversation(ConversationEvent::CompactFinished {
+                compact_id,
+                status: CompactStatus::Failed,
+                ..
+            }) if compact_id == "compact-1"
         )));
         let tool_replay = hub
             .replay_since(RingingChannel::Tool, "s", 0)

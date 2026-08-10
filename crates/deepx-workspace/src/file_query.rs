@@ -1,7 +1,7 @@
 //! Query tools: file read, diff.
 
-use super::file_shared::{content_hash, is_binary_read_error, unified_diff};
-use crate::{JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
+use super::file_shared::{content_hash, is_binary_read_error};
+use crate::{ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
 
 // ------ exec_read_file (from file_read.rs) ------
 
@@ -255,45 +255,7 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
 
 handler!(handle_read_file, exec_read_file);
 
-// ------ exec_diff (from file_diff.rs) ------
 
-pub(super) fn exec_diff(args: &serde_json::Value) -> ToolResult {
-    let path_a = crate::resolve_workspace_path(&args.s("path_a"));
-    let path_b = crate::resolve_workspace_path(&args.s("path_b"));
-
-    let content_a = match std::fs::read_to_string(&path_a) {
-        Ok(c) => c,
-        Err(e) => {
-            return ToolResult::error(crate::json_err(
-                "READ_FAILED",
-                &format!("Cannot read {}: {}", path_a, e),
-                "Verify the file exists. Use exec with argv [\"ls\", \"-la\"] to check.",
-            ));
-        }
-    };
-    let content_b = match std::fs::read_to_string(&path_b) {
-        Ok(c) => c,
-        Err(e) => {
-            return ToolResult::error(crate::json_err(
-                "READ_FAILED",
-                &format!("Cannot read {}: {}", path_b, e),
-                "Verify the file exists. Use exec with argv [\"ls\", \"-la\"] to check.",
-            ));
-        }
-    };
-
-    if content_a == content_b {
-        return ToolResult::ok(crate::json_ok(
-            serde_json::json!({"path_a": path_a, "path_b": path_b, "identical": true, "content": "Files are identical"}),
-        ));
-    }
-
-    ToolResult::ok(crate::json_ok(
-        serde_json::json!({"path_a": path_a, "path_b": path_b, "identical": false, "content": unified_diff(&content_a, &content_b, &path_a)}),
-    ))
-}
-
-handler!(handle_diff, exec_diff);
 
 // ------ Registration ------
 

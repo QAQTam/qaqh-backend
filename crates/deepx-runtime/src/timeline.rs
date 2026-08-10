@@ -8,8 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use deepx_domain::{
-    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
-    TimelineFailure, TimelineIntent, TimelineRound, TimelineSnapshot, TimelineTool,
+    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent, TimelineIntent, TimelineRound, TimelineSnapshot, TimelineTool,
     TimelineToolState, TimelineTurn, TimelineTurnState,
 };
 

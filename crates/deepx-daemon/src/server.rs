@@ -9,7 +9,6 @@ use deepx_runtime::{WorkspaceMode, WorkspaceSupervisor};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
-const LEASE_TIMEOUT_MS: u64 = 15_000;
 /// 并发 TCP 连接上限：1 个客户端常态占 5+ 连接（open/renew 短连 +
 /// 3 通道 SSE + timeline SSE 长连）。曾因 32 过紧 + 壳 rebuild 风暴
 /// 打满后静默 drop 新连接，导致 lease 无法续期、SSE 全断死循环。
