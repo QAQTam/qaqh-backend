@@ -679,7 +679,19 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 「原窗口首行」（新下标 = 扩展前移量）锚回原位，视口不跳。
     let anchor_rows = pending_anchor.borrow_mut().take();
     let mut builder = list_view_rc(turns, move |turn: &Rc<TurnView>, i: usize| {
-        turn_view(i, turn.as_ref(), color_scheme)
+        // turn 级 memo：mutation_rev 未变 → reconciler 完全跳过 turn_view
+        // （不深克隆 RichTextParagraph / 不重跑代码高亮 / 不 diff 行内部），
+        // 只有本 turn 内容变化才重建。每次 XAML 提交从「重建整个可见
+        // 窗口」降为「重建变化的 1 行」——这是输入卡顿/CPU 满载的根治。
+        memo(
+            turn_memo,
+            TurnProps {
+                turn: turn.clone(),
+                index: i,
+                color_scheme: color_scheme.clone(),
+            },
+        )
+        .with_key(turn.turn_id.clone())
     })
     .with_key_selector(|turn: &Rc<TurnView>| turn.turn_id.clone())
     .selection_mode(SelectionMode::None);
@@ -885,6 +897,31 @@ mod session_cache_tests {
 }
 
 // ── turn / round / answer 渲染（移植自 streaming-demo）─────────────
+
+/// turn 级 memo 的 props。等价 = 同一份 TurnView 数据（Rc 指针命中，或
+/// turn_id + mutation_rev 相同）+ 位置 + 主题。memo 命中时 reconciler
+/// 复用上次渲染输出（不执行组件函数），行 diff 也直接走 props 比较。
+#[derive(Clone)]
+struct TurnProps {
+    turn: Rc<TurnView>,
+    index: usize,
+    color_scheme: ColorScheme,
+}
+
+impl PartialEq for TurnProps {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+            && self.color_scheme == other.color_scheme
+            && (Rc::ptr_eq(&self.turn, &other.turn)
+                || (self.turn.turn_id == other.turn.turn_id
+                    && self.turn.mutation_rev == other.turn.mutation_rev))
+    }
+}
+
+/// turn 渲染的 memo 组件：props 等价时 reconciler 跳过执行（复用旧输出）。
+fn turn_memo(props: &TurnProps, _cx: &mut RenderCx) -> Element {
+    turn_view(props.index, props.turn.as_ref(), props.color_scheme.clone())
+}
 
 fn turn_view(i: usize, turn: &TurnView, color_scheme: ColorScheme) -> Element {
     let (status, tone) = match turn.status {
