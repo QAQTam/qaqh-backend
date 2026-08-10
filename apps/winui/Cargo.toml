@@ -31,6 +31,8 @@ windows = { path = "../../../deepx-winui-reactor/crates/libs/windows", default-f
     "windef",         # HWND（Show owner）
     "winerror",       # ERROR_CANCELLED（用户取消判定）
     "winuser",        # GetCursorPos / GetAsyncKeyState（splitter 差分拖拽）
+    "winnt",          # RtlGetVersion / OSVERSIONINFOW（诊断：系统版本号，非指纹）
+    "wdm",            # Win32::wdm 模块（RtlGetVersion 所在模块，需显式 feature）
 ] }
 
 [build-dependencies]

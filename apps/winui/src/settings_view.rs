@@ -30,6 +30,7 @@ use windows_reactor::*;
 use deepx_fluent::{motion, tokens};
 
 use crate::bridge::{Bridge, SettingsProjection};
+use crate::diagnostics::{self, Mode};
 use crate::fonts;
 use crate::shell_store::{SettingsSnapshot, normalize_effort};
 
@@ -70,6 +71,9 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (category, set_category) = cx.use_state::<String>("models".to_string());
     let (saved_at, set_saved_at) = cx.use_state::<Option<std::time::Instant>>(None);
     let (save_error, set_save_error) = cx.use_state::<Option<String>>(None);
+    // 诊断区块：模式切换/导出后自增驱动状态行重渲染。
+    let (diag_rev, set_diag_rev) = cx.use_state::<u32>(0);
+    let (export_path, set_export_path) = cx.use_state::<Option<String>>(None);
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
     let last_proj_rev = cx.use_ref::<u64>(0);
@@ -1088,6 +1092,77 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             hstack((input, browse)).spacing(8.0).into()
         };
         rows.push(field_row("Tokenizer 路径", tokenizer_row));
+
+        // ── 诊断（纯本地 · 白名单 · 三档采集）────────────────────────
+        // 隐私合规是结构性保证：白名单字段、仅性能侧、无系统指纹、默认 ZDR。
+        rows.push(section_title("诊断"));
+        let cur_mode = diagnostics::mode();
+        let mode_idx = match cur_mode {
+            Mode::Full => 0,
+            Mode::Minimal => 1,
+            Mode::Zero => 2,
+        };
+        rows.push(field_row(
+            "数据采集",
+            RadioButtons::new(vec![
+                "完整数据采集".to_string(),
+                "最小数据采集".to_string(),
+                "ZDR（零诊断数据记录）".to_string(),
+            ])
+            .selected_index(mode_idx)
+            .header("")
+            .on_selection_changed({
+                let set_diag_rev = set_diag_rev.clone();
+                move |i: i32| {
+                    let m = match i.max(0) {
+                        0 => Mode::Full,
+                        1 => Mode::Minimal,
+                        _ => Mode::Zero,
+                    };
+                    diagnostics::set_mode(m);
+                    set_diag_rev.call(diag_rev + 1);
+                }
+            })
+            .into(),
+        ));
+        rows.push(
+            text_block(
+                "仅采集运行时性能数据（渲染耗时 / 帧间隔 / 事件吞吐），不含对话内容、路径或系统指纹；唯一系统信息为 OS 版本号。数据仅保存在本机，导出后可审查。默认 ZDR，不主动记录任何数据。",
+            )
+            .font_size(11.0)
+            .foreground(ThemeRef::SecondaryText)
+            .into(),
+        );
+        let status_text = format!(
+            "当前：{} · 缓冲 {} 条事件",
+            cur_mode.label(),
+            diagnostics::buffered_events()
+        );
+        let export_btn = button("导出 JSON")
+            .subtle()
+            .enabled(cur_mode != Mode::Zero)
+            .on_click({
+                let set_export_path = set_export_path.clone();
+                move || {
+                    if let Some(p) = diagnostics::export_to_file() {
+                        set_export_path.call(Some(p));
+                    }
+                }
+            });
+        let export_status: Element = match export_path.clone() {
+            Some(p) => text_block(format!("已导出：{p}"))
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText)
+                .into(),
+            None => text_block(status_text)
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText)
+                .into(),
+        };
+        rows.push(field_row(
+            "导出诊断包",
+            vstack((export_btn, export_status)).spacing(4.0).into(),
+        ));
     }
 
     // ── 底部：保存按钮 + 状态 ───────────────────────────────────────
