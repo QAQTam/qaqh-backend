@@ -56,6 +56,12 @@ const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(66);
 const CHAT_EVENTS_PER_FRAME: usize = 512;
 const CHAT_REDUCER_BUDGET: Duration = Duration::from_millis(4);
 
+/// transport drain 节流：事件密集期 60fps 每帧 drain 512 + reducer 4ms
+/// 预算 ≈ 98% CPU（DEEPX_PERF_LOG 实测渲染仅占 2.5%，瓶颈在帧回调的
+/// 事件处理）。32ms 节流 → 30fps 批处理，事件多等一帧（≤32ms）无感；
+/// 结构事件（restore/新 turn）同队列最多延迟 32ms，可接受。
+const DRAIN_INTERVAL: Duration = Duration::from_millis(32);
+
 /// 后台时长超过此值（窗口不可见，vsync 回调暂停）→ 恢复时走快照
 /// resume：丢弃积压增量事件，拉 timeline 快照一次到位（复用 restore
 /// 分支，毫秒级），而不是重放后台期间积压的增量（可能数千条）。
@@ -251,6 +257,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 按 turn_id + turn mutation_rev 结构共享未变化行。主题纳入缓存键，
     // 避免 ActualThemeChanged 时仍把旧主题的 realized 行当作同一数据包。
     let window_cache = cx.use_ref::<Option<((u64, ColorScheme), Rc<Vec<Rc<TurnView>>>)>>(None);
+    // transport drain 节流闸：事件密集期降批处理频率（见 DRAIN_INTERVAL）。
+    let last_drain = cx.use_ref::<Option<std::time::Instant>>(None);
 
     // 事件泵：drain bridge 队列 → Transcript；rev 变化触发重渲染。
     cx.use_effect((), {
@@ -272,6 +280,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let pending_anchor = pending_anchor.clone();
         let render_generation = render_generation.clone();
         let set_render_generation = set_render_generation.clone();
+        let last_drain = last_drain.clone();
         let last_live_render = last_live_render.clone();
         let deferred_events = deferred_events.clone();
         let last_frame_at = last_frame_at.clone();
@@ -387,11 +396,19 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         }
                         log_diag(&format!("chat_view: switched to seed {seed}"));
                     }
-                    // 先 drain 拿 rev：restore 分支渲染也要用（快照到达时
-                    // chat_rev 已 +1，直接下发触发重渲染）。
-                    // deferred 非空时仍继续有限 transport drain，避免 reducer
-                    // 积压反过来阻塞结构事件；两层预算彼此独立。
-                    let fetch_limit = if deferred_events.borrow().is_empty() {
+                    // drain 节流：事件密集时 60fps 每帧 drain 512 + reducer 4ms
+                    // ≈ 98% CPU（瓶颈在事件处理，不在渲染）。32ms 节流 →
+                    // 30fps 批处理；deferred 非空时仍每帧放行小批（/8）避免
+                    // 结构事件被 32ms 闸整体堵死（restore/新 turn 及时性）。
+                    let drain_gate = last_drain
+                        .borrow()
+                        .is_none_or(|t| now.duration_since(t) >= DRAIN_INTERVAL);
+                    if drain_gate {
+                        *last_drain.borrow_mut() = Some(now);
+                    }
+                    let fetch_limit = if !drain_gate && deferred_events.borrow().is_empty() {
+                        0
+                    } else if deferred_events.borrow().is_empty() {
                         CHAT_EVENTS_PER_FRAME
                     } else {
                         CHAT_EVENTS_PER_FRAME / 4
