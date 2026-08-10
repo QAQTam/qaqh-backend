@@ -1,7 +1,65 @@
+use std::fs;
+use std::path::Path;
+
 use crate::{
-    Artifact, ArtifactKind, Catalog, InstalledState, Result, UpdateAction, UpdateError, UpdateMode,
-    UpdatePlan,
+    sha256_reader, Artifact, ArtifactKind, BundleFile, BundleManifest, Catalog, InstalledState,
+    Result, UpdateAction, UpdateError, UpdateMode, UpdatePlan,
 };
+
+/// 文件级增量规划（基线累积模型，docs/winui-update-design.md §4）。
+///
+/// 输入：基线（检查点完整包）manifest + 目标构建目录（collect-payload 的
+/// files/ 内容）。输出：增量包变化文件清单。
+///
+/// 规则：目标目录每个文件与基线同 `target` 的 sha256 比对——
+/// - 相同 → 跳过（未变化；客户端 sha256 匹配当前安装文件时本地复制 0 下载）；
+/// - 不同 / 基线缺失 → 列入增量（`source` 带 `files/` 前缀，与完整包解压布局一致）。
+///
+/// 基线存在但目标已删除的文件**不列入**：增量模型无删除语义（覆盖式应用），
+/// 删除残留由检查点完整包 / 重装清理（设计文档契约 5）。
+pub fn plan_delta(baseline: &BundleManifest, target_dir: &Path) -> Result<Vec<BundleFile>> {
+    let mut changed = Vec::new();
+    collect_changed(baseline, target_dir, "", &mut changed)?;
+    Ok(changed)
+}
+
+fn collect_changed(
+    baseline: &BundleManifest,
+    dir: &Path,
+    prefix: &str,
+    changed: &mut Vec<BundleFile>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_changed(baseline, &path, &rel, changed)?;
+        } else if file_type.is_file() {
+            let (size, sha256) = sha256_reader(fs::File::open(&path)?)?;
+            let unchanged = baseline
+                .files
+                .iter()
+                .any(|file| file.target == rel && file.size == size && file.sha256 == sha256);
+            if !unchanged {
+                changed.push(BundleFile {
+                    source: format!("files/{rel}"),
+                    target: rel,
+                    size,
+                    sha256,
+                });
+            }
+        }
+        // 符号链接 / 其它类型跳过（安装 payload 不应含链接）。
+    }
+    Ok(())
+}
 
 pub fn plan_update(state: Option<&InstalledState>, catalog: &Catalog) -> Result<UpdatePlan> {
     catalog.validate()?;
@@ -168,6 +226,8 @@ fn operation_id(release_id: &str, artifacts: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
 
     use super::*;
     use crate::{
@@ -220,6 +280,7 @@ mod tests {
             id: id.into(),
             kind,
             strategy: ArtifactStrategy::ComponentFull,
+            baseline: None,
             targets: BTreeMap::from([(id.into(), format!("{id}-2"))]),
             requires: ArtifactRequires::default(),
             restart_policy: RestartPolicy::Full,
@@ -294,5 +355,113 @@ mod tests {
         let plan = plan_update(Some(&state("frontend-1", "backend-1")), &next).unwrap();
         assert_eq!(plan.artifacts, ["frontend"]);
         assert!(!plan.actions.contains(&UpdateAction::ApplyFull));
+    }
+
+    // ── plan_delta（文件级增量）──────────────────────────────────
+
+    fn file_sha(content: &[u8]) -> String {
+        crate::sha256_reader(std::io::Cursor::new(content)).unwrap().1
+    }
+
+    fn delta_file(source: &str, target: &str, content: &[u8]) -> BundleFile {
+        BundleFile {
+            source: source.into(),
+            target: target.into(),
+            size: content.len() as u64,
+            sha256: file_sha(content),
+        }
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "deepx-update-delta-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn delta_lists_changed_and_added_only() {
+        let dir = temp_dir("changed");
+        fs::write(dir.join("a.txt"), b"same").unwrap();
+        fs::write(dir.join("b.txt"), b"new").unwrap();
+        fs::write(dir.join("c.txt"), b"added").unwrap();
+        let baseline = BundleManifest {
+            format_version: 1,
+            kind: "runtime".into(),
+            build_id: "baseline-1".into(),
+            app_version: "1.0.0".into(),
+            release_id: String::new(),
+            channel: "local".into(),
+            components: BTreeMap::new(),
+            requires_full_install: false,
+            files: vec![
+                delta_file("files/a.txt", "a.txt", b"same"),
+                delta_file("files/b.txt", "b.txt", b"old"),
+                delta_file("files/gone.txt", "gone.txt", b"deleted"),
+            ],
+        };
+
+        let delta = plan_delta(&baseline, &dir).unwrap();
+        let targets: Vec<&str> = delta.iter().map(|f| f.target.as_str()).collect();
+        // 变化 + 新增列入；未变跳过；已删除不列。
+        assert!(targets.contains(&"b.txt"), "changed file listed");
+        assert!(targets.contains(&"c.txt"), "added file listed");
+        assert!(!targets.contains(&"a.txt"), "unchanged file skipped");
+        assert!(!targets.contains(&"gone.txt"), "deleted file not listed");
+        // source 带 files/ 前缀；sha256 为目标实际内容。
+        let b = delta.iter().find(|f| f.target == "b.txt").unwrap();
+        assert_eq!(b.source, "files/b.txt");
+        assert_eq!(b.sha256, file_sha(b"new"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delta_empty_when_unchanged() {
+        let dir = temp_dir("same");
+        fs::write(dir.join("a.txt"), b"same").unwrap();
+        let baseline = BundleManifest {
+            format_version: 1,
+            kind: "backend".into(),
+            build_id: "baseline-1".into(),
+            app_version: "1.0.0".into(),
+            release_id: String::new(),
+            channel: "local".into(),
+            components: BTreeMap::new(),
+            requires_full_install: false,
+            files: vec![delta_file("files/a.txt", "a.txt", b"same")],
+        };
+        let delta = plan_delta(&baseline, &dir).unwrap();
+        assert!(delta.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delta_handles_subdirectories() {
+        let dir = temp_dir("subdir");
+        fs::create_dir_all(dir.join("resources")).unwrap();
+        fs::write(dir.join("resources/daemon.exe"), b"v2").unwrap();
+        fs::write(dir.join("app.exe"), b"same").unwrap();
+        let baseline = BundleManifest {
+            format_version: 1,
+            kind: "backend".into(),
+            build_id: "baseline-1".into(),
+            app_version: "1.0.0".into(),
+            release_id: String::new(),
+            channel: "local".into(),
+            components: BTreeMap::new(),
+            requires_full_install: false,
+            files: vec![
+                delta_file("files/resources/daemon.exe", "resources/daemon.exe", b"v1"),
+                delta_file("files/app.exe", "app.exe", b"same"),
+            ],
+        };
+        let delta = plan_delta(&baseline, &dir).unwrap();
+        assert_eq!(delta.len(), 1);
+        assert_eq!(delta[0].target, "resources/daemon.exe");
+        assert_eq!(delta[0].source, "files/resources/daemon.exe");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -61,6 +61,10 @@ pub struct Artifact {
     pub id: String,
     pub kind: ArtifactKind,
     pub strategy: ArtifactStrategy,
+    /// 增量参照的检查点版本（仅 `file-level-delta` artifact 携带；
+    /// 完整包/组件全量不填）。客户端升级决策只看 sha256，此字段仅展示用。
+    #[serde(default)]
+    pub baseline: Option<String>,
     pub targets: BTreeMap<String, String>,
     #[serde(default)]
     pub requires: ArtifactRequires,
@@ -124,6 +128,10 @@ impl ArtifactKind {
 #[serde(rename_all = "kebab-case")]
 pub enum ArtifactStrategy {
     ComponentFull,
+    /// 文件级增量（基线累积模型，docs/winui-update-design.md）：
+    /// bundle `files[]` 只列相对 `baseline` 检查点变化的文件；
+    /// 客户端按 sha256 自适应（匹配当前安装文件则本地复制，0 下载）。
+    FileLevelDelta,
     BinaryDelta,
 }
 
