@@ -32,7 +32,7 @@ pub struct DeepxService {
 
 impl DeepxService {
     pub fn init() -> Self {
-        let config = deepx_config::Config::load().unwrap_or_default();
+        let _config = deepx_config::Config::load().unwrap_or_default();
         deepx_session::SessionManager::init(deepx_types::platform::data_dir());
         Self {
             registry: Arc::new(Mutex::new(AgentRegistry::new())),

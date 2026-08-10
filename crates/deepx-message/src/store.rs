@@ -288,16 +288,6 @@ impl Step {
             .collect()
     }
 
-    fn tool_name_for_result(&self, tool_call_id: &str) -> Option<&str> {
-        self.assistant.content.iter().find_map(|block| {
-            if let deepx_types::ContentBlock::ToolUse { id, name, .. } = block {
-                (id == tool_call_id).then_some(name.as_str())
-            } else {
-                None
-            }
-        })
-    }
-
     fn has_tool_use(&self) -> bool {
         self.assistant
             .content

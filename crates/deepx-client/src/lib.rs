@@ -27,10 +27,10 @@ pub use types::ResetRequired;
 pub use types::{
     AskAnswer, Channel, ChannelStatus, CommandOptions, ContentRef, ControlCommand, ControlEvent,
     ConversationCommand, ConversationEvent, ConversationMode, DomainActivityState,
-    DomainAskQuestion, DomainDashboardSnapshot, DomainSessionState, EventBatch, PermissionCategory,
-    PermissionRisk, ProviderToolState, RingingCommand, RingingCommandAck, RingingCommandState,
-    RingingCommandStatus, RingingEvent, RingingEventEnvelope, RoundDeltaKind, SkillInfo,
-    SkillRuntimeInfo, TimelineBlockKind, TimelineEntry, TimelinePage, TimelineSnapshot,
-    TimelineStatus, TimelineTool, TimelineToolState, TimelineTurnState, TodoItem, ToolCommand,
-    ToolEvent,
+    DomainAskQuestion, DomainDashboardSnapshot, DomainError, DomainSessionState, ErrorScope,
+    EventBatch, PermissionCategory, PermissionRisk, ProviderToolState, RingingCommand,
+    RingingCommandAck, RingingCommandState, RingingCommandStatus, RingingEvent,
+    RingingEventEnvelope, RoundDeltaKind, SkillInfo, SkillRuntimeInfo, TimelineBlockKind,
+    TimelineEntry, TimelinePage, TimelineSnapshot, TimelineStatus, TimelineTool, TimelineToolState,
+    TimelineTurnState, TodoItem, ToolCommand, ToolEvent,
 };

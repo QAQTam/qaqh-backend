@@ -395,8 +395,8 @@ impl ToolEngine {
         let mut authorized = Vec::new();
         let mut pending_permission_ids = Vec::new();
         let mut pending_asks = VecDeque::new();
-        let mut pending_plans = VecDeque::new();
-        let mut pending_todo_activation = None;
+        let pending_plans = VecDeque::new();
+        let pending_todo_activation = None;
 
         for tool in tools {
             let inv = deepx_workspace::authorization::ToolInvocation {

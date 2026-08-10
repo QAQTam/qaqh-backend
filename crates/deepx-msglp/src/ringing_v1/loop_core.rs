@@ -798,7 +798,7 @@ impl Loop {
             let event_tx = self.event_tx.clone();
             let compact_seed = self.session.agent.session.seed.clone();
             let worker_causation = causation.clone();
-            std::thread::Builder::new()
+            match std::thread::Builder::new()
                 .name("compact-worker".into())
                 .spawn(move || {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -829,11 +829,43 @@ impl Loop {
                         },
                     };
                     let _ = tx.send(meta);
-                })
-                .ok();
-            self.pending_compact_rx = Some(rx);
-            self.pending_compact_id = Some(pending_compact_id);
-            self.pending_compact_causation = causation;
+                }) {
+                Ok(_) => {
+                    self.pending_compact_rx = Some(rx);
+                    self.pending_compact_id = Some(pending_compact_id);
+                    self.pending_compact_causation = causation;
+                }
+                Err(error) => {
+                    log::error!("[COMPACT] failed to spawn worker: {error}");
+                    self.session.agent.finish_manual_compact();
+                    let _scope = self.paced_emitter.enter_causation(causation.as_deref());
+                    self.paced_emitter
+                        .emit_domain(deepx_domain::DomainEvent::Control(
+                            deepx_domain::ControlEvent::OperationFailed {
+                                occurrence_id: pending_compact_id.clone(),
+                                scope: deepx_domain::ErrorScope::Conversation,
+                                error: deepx_domain::DomainError {
+                                    error_id: pending_compact_id.clone(),
+                                    code: "compact_failed".into(),
+                                    message: "Context compaction could not start.".into(),
+                                    retryable: true,
+                                    dedupe_key: Some("compact_failed".into()),
+                                },
+                                operation_id: Some(pending_compact_id.clone()),
+                            },
+                        ));
+                    self.paced_emitter
+                        .emit_domain(deepx_domain::DomainEvent::Conversation(
+                            deepx_domain::ConversationEvent::CompactFinished {
+                                compact_id: pending_compact_id,
+                                status: deepx_domain::CompactStatus::Failed,
+                                summary_chars: Some(0),
+                                turns_compacted: Some(0),
+                                turns_removed: Some(0),
+                            },
+                        ));
+                }
+            }
         } else {
             self.paced_emitter
                 .emit_domain(deepx_domain::DomainEvent::Conversation(

@@ -159,12 +159,16 @@ impl SnapshotProjector {
                         });
                         true
                     }
-                    CE::CompactStarted { .. } => {
+                    CE::CompactStarted { compact_id, .. } => {
                         state["compact_status"] = serde_json::json!("running");
+                        state["compact_id"] = serde_json::json!(compact_id);
                         true
                     }
-                    CE::CompactFinished { status, .. } => {
+                    CE::CompactFinished {
+                        compact_id, status, ..
+                    } => {
                         state["compact_status"] = serde_json::json!(status);
+                        state["compact_id"] = serde_json::json!(compact_id);
                         true
                     }
                     CE::ConversationCancelled { .. } => {

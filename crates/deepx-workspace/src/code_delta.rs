@@ -43,7 +43,7 @@ pub(crate) fn compute(
             let mut added = 0usize;
             let mut removed = 0usize;
             let mut files_created = 0usize;
-            let mut count_one = |v: &serde_json::Value, added: &mut usize, removed: &mut usize| {
+            let count_one = |v: &serde_json::Value, added: &mut usize, removed: &mut usize| {
                 if let Some(ops) = v.get("ops").and_then(|x| x.as_array()) {
                     for op in ops {
                         *added += op

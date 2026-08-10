@@ -174,7 +174,9 @@ fn output_ref_is_explicit_model_owned_work() {
     assert!(!ts.apply(&completed).changed(), "replay must not refetch");
     assert!(ts.take_pending_outputs().is_empty());
 
+    let before_resolve = ts.turns()[0].mutation_rev;
     ts.resolve_output("t1", 0, "full final");
+    assert!(ts.turns()[0].mutation_rev > before_resolve);
     assert!(!ts.turns()[0].rounds[0].output_loading);
     assert!(matches!(
         ts.turns()[0].rounds[0].answer,
@@ -210,12 +212,21 @@ fn frame_coalesces_adjacent_deltas_and_reports_one_live_change() {
 #[test]
 fn unknown_and_replayed_turn_start_are_noops() {
     let mut ts = Transcript::new();
+    let rev0 = ts.mutation_rev();
     assert!(!ts.apply(&ConversationEvent::Unknown).changed());
+    assert_eq!(ts.mutation_rev(), rev0, "unknown must not invalidate the window");
     let started = ConversationEvent::TurnStarted {
         turn_id: "t1".into(),
         user_text: "same".into(),
     };
     assert!(ts.apply(&started).changed());
+    let rev1 = ts.mutation_rev();
+    let turn_rev1 = ts.turns()[0].mutation_rev;
     assert!(!ts.apply(&started).changed());
+    assert_eq!(ts.mutation_rev(), rev1, "replay must keep the outer Rc cache valid");
+    assert_eq!(
+        ts.turns()[0].mutation_rev, turn_rev1,
+        "replay must keep the row Rc cache valid"
+    );
     assert_eq!(ts.turn_count(), 1);
 }

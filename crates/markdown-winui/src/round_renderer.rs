@@ -69,7 +69,7 @@ impl TranscriptChange {
         }
     }
 
-    fn merge(&mut self, other: Self) {
+    pub fn merge(&mut self, other: Self) {
         self.invalidation = self.invalidation.max(other.invalidation);
         self.extent_changed |= other.extent_changed;
     }
@@ -485,9 +485,9 @@ pub struct Transcript {
     tail_following: bool,
     /// External final answers waiting for the application transport to load.
     pending_outputs: Vec<PendingOutput>,
-    /// 变更版本号：所有 mut 方法入口无条件 +1（default 返回也递增，仅多
-    /// 一次快照重建，can_skip_update 兜底）。ChatView 据此复用窗口快照；
-    /// 每个 TurnView 另有局部 mutation_rev，使变化帧也能结构共享未变化行。
+    /// 渲染投影版本号：仅当窗口结构或某个 turn 的可见内容真实变化时递增。
+    /// ChatView 据此复用窗口快照；每个 TurnView 另有局部 mutation_rev，
+    /// 使变化帧也能结构共享未变化行。协议 no-op 不再使缓存失效。
     rev: u64,
 }
 
@@ -549,11 +549,11 @@ impl Transcript {
     /// 返回实际前移量；0 = 已全量放行（调用方短路，避免无谓渲染）。
     /// 扩展后窗口脱离「跟随尾部」模式（用户上滚浏览中）。
     pub fn expand_window(&mut self, by: usize) -> usize {
-        self.rev += 1;
         let moved = self.window_start.min(by);
         if moved > 0 {
             self.window_start -= moved;
             self.tail_following = false;
+            self.bump_rev();
         }
         moved
     }
@@ -577,13 +577,21 @@ impl Transcript {
     /// 同时驱逐最早期的 turn（超出 [`MAX_RETAINED_BEFORE_WINDOW`] 缓冲），
     /// 以限制长对话的内存占用。
     pub fn slide_window_tail(&mut self) {
-        self.rev += 1;
+        let old_start = self.window_start;
+        let old_len = self.turns.len();
+        let old_following = self.tail_following;
         let keep = WINDOW_DEFAULT_LEN;
         if self.turns.len() > keep {
             self.window_start = self.window_start.max(self.turns.len() - keep);
         }
         self.tail_following = true;
         self.evict_old_turns();
+        if self.window_start != old_start
+            || self.turns.len() != old_len
+            || self.tail_following != old_following
+        {
+            self.bump_rev();
+        }
     }
 
     /// 驱逐渲染窗口前超出缓冲的最旧 turn，释放其内存。
@@ -611,7 +619,6 @@ impl Transcript {
     /// 返回后 `turns` 只含 `window_turns()` 的内容，`window_start` 归零。
     /// 被裁剪的旧 turn 在切回时由 daemon 权威快照恢复。
     pub fn trim_to_window(&mut self) {
-        self.rev += 1;
         if self.window_start == 0 {
             return;
         }
@@ -623,6 +630,7 @@ impl Transcript {
             .enumerate()
             .map(|(i, t)| (t.turn_id.clone(), i))
             .collect();
+        self.bump_rev();
     }
 
     /// 前插一页更早的回合（分页加载：resume 只取尾部页，上滚翻页把更早
@@ -630,7 +638,6 @@ impl Transcript {
     /// 起点右移 `n` 保持渲染窗口位置（新回合在窗口**前面**，chat_view
     /// 以 `n` 做锚定补偿，视口不跳）。返回实际前插数；0 = 无新回合。
     pub fn prepend_turns(&mut self, turns: Vec<RestoredTurn>) -> usize {
-        self.rev += 1;
         let known: HashSet<&str> = self.turns.iter().map(|t| t.turn_id.as_str()).collect();
         let fresh: Vec<RestoredTurn> = turns
             .into_iter()
@@ -650,6 +657,7 @@ impl Transcript {
             .map(|(i, t)| (t.turn_id.clone(), i))
             .collect();
         self.window_start += n;
+        self.bump_rev();
         n
     }
 
@@ -659,8 +667,24 @@ impl Transcript {
     /// 幂等语义：快照是权威全量（daemon timeline 快照），增量事件在其后
     /// 到达；调用方在 seed 切换时应先重置（`Transcript::new`）再 restore。
     pub fn restore(&mut self, turns: Vec<RestoredTurn>) {
-        self.rev += 1;
-        self.turns = turns.into_iter().map(to_turn_view).collect();
+        let previous: HashMap<String, TurnView> = std::mem::take(&mut self.turns)
+            .into_iter()
+            .map(|turn| (turn.turn_id.clone(), turn))
+            .collect();
+        let mut restored = Vec::with_capacity(turns.len());
+        for turn in turns {
+            let turn_id = turn.turn_id.clone();
+            let mut view = to_turn_view(turn);
+            if let Some(old) = previous.get(&turn_id) {
+                view.mutation_rev = if same_rendered_turn(old, &view) {
+                    old.mutation_rev
+                } else {
+                    old.mutation_rev.wrapping_add(1)
+                };
+            }
+            restored.push(view);
+        }
+        self.turns = restored;
         self.turn_index = self
             .turns
             .iter()
@@ -690,11 +714,11 @@ impl Transcript {
         // 由 daemon 分页按需回放（on_top_reached → spawn_fetch_earlier）。
         // 释放 9MB 级长会话的解析产物驻留，避免切换标签内存台阶。
         self.evict_old_turns();
+        self.bump_rev();
     }
 
     /// Apply one protocol event to the canonical presentation model.
     pub fn apply(&mut self, ev: &ConversationEvent) -> TranscriptChange {
-        self.rev += 1;
         let target_turn_id = (!ev.turn_id().is_empty()).then(|| ev.turn_id().to_owned());
         let change = match ev {
             ConversationEvent::TurnStarted { turn_id, user_text } => {
@@ -704,6 +728,7 @@ impl Transcript {
                         return TranscriptChange::default();
                     }
                     turn.user_text.clone_from(user_text);
+                    self.bump_turn(index);
                     return TranscriptChange::structural(true);
                 }
                 let index = self.turns.len();
@@ -1019,9 +1044,13 @@ impl Transcript {
                         && (round.output_loading
                             || matches!(round.answer, AnswerView::Final { .. }))
                     {
-                        return changed
+                        let change = changed
                             .then(|| TranscriptChange::structural(true))
                             .unwrap_or_default();
+                        if change.changed() {
+                            self.bump_turn(turn);
+                        }
+                        return change;
                     }
                     round.output_ref = Some(ref_uri.clone());
                     round.output_loading = true;
@@ -1031,6 +1060,7 @@ impl Transcript {
                         round_num: *round_num,
                         reference: ref_uri.clone(),
                     });
+                    self.bump_turn(turn);
                     return TranscriptChange::structural(true);
                 }
                 changed |= round.finalize(None, answer.as_deref());
@@ -1039,11 +1069,14 @@ impl Transcript {
                     .unwrap_or_default()
             }
         };
-        if change.changed()
-            && let Some(turn_id) = target_turn_id
-            && let Some(&index) = self.turn_index.get(&turn_id)
-        {
-            self.turns[index].mutation_rev = self.turns[index].mutation_rev.wrapping_add(1);
+        if change.changed() {
+            if let Some(turn_id) = target_turn_id
+                && let Some(&index) = self.turn_index.get(&turn_id)
+            {
+                self.bump_turn(index);
+            } else {
+                self.bump_rev();
+            }
         }
         change
     }
@@ -1058,13 +1091,20 @@ impl Transcript {
         &mut self,
         events: impl IntoIterator<Item = ConversationEvent>,
     ) -> TranscriptChange {
-        self.rev += 1;
-        let events = coalesce_adjacent_deltas(events);
         let mut update = TranscriptChange::default();
-        for event in events {
+        for event in coalesce_adjacent_deltas(events) {
             update.merge(self.apply(&event));
         }
         update
+    }
+
+    /// Apply one already-coalesced presentation event.
+    ///
+    /// The app frame pump uses this when enforcing a wall-clock reducer budget
+    /// across a queued batch. It intentionally skips the temporary Vec and
+    /// coalescing pass because the app-side deferred queue has already grouped it.
+    pub fn apply_coalesced(&mut self, event: ConversationEvent) -> TranscriptChange {
+        self.apply(&event)
     }
 
     /// Drain external content requests created while applying completion events.
@@ -1079,15 +1119,18 @@ impl Transcript {
         round_num: u32,
         text: &str,
     ) -> TranscriptChange {
-        self.rev += 1;
         let Some(&turn) = self.turn_index.get(turn_id) else {
             return TranscriptChange::default();
         };
         let (_, round) = self.round_mut(turn, round_num);
-        round
+        let change = round
             .finalize(None, Some(text))
             .then(|| TranscriptChange::structural(true))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if change.changed() {
+            self.bump_turn(turn);
+        }
+        change
     }
 
     /// Mark external content resolution as failed while preserving the live
@@ -1098,14 +1141,27 @@ impl Transcript {
         round_num: u32,
         message: impl Into<String>,
     ) -> TranscriptChange {
-        self.rev += 1;
         let Some(&turn) = self.turn_index.get(turn_id) else {
             return TranscriptChange::default();
         };
+        let message = message.into();
         let (_, round) = self.round_mut(turn, round_num);
+        if !round.output_loading && round.output_error.as_deref() == Some(message.as_str()) {
+            return TranscriptChange::default();
+        }
         round.output_loading = false;
-        round.output_error = Some(message.into());
+        round.output_error = Some(message);
+        self.bump_turn(turn);
         TranscriptChange::structural(true)
+    }
+
+    fn bump_rev(&mut self) {
+        self.rev = self.rev.wrapping_add(1);
+    }
+
+    fn bump_turn(&mut self, turn: usize) {
+        self.turns[turn].mutation_rev = self.turns[turn].mutation_rev.wrapping_add(1);
+        self.bump_rev();
     }
 
     fn round_mut(&mut self, turn: usize, round_num: u32) -> (usize, &mut RoundView) {
@@ -1265,6 +1321,22 @@ fn upsert_tool_card(round: &mut RoundView, card: ToolCardView) -> bool {
         round.tool_calls.push(card);
     }
     true
+}
+
+fn same_rendered_turn(old: &TurnView, new: &TurnView) -> bool {
+    old.turn_id == new.turn_id
+        && old.user_text == new.user_text
+        && old.status == new.status
+        && old.failed_error == new.failed_error
+        && old.rounds.len() == new.rounds.len()
+        && old.rounds.iter().zip(&new.rounds).all(|(old, new)| {
+            old.round_num == new.round_num
+                && old.thinking == new.thinking
+                && old.answer == new.answer
+                && old.tool_calls == new.tool_calls
+                && old.output_loading == new.output_loading
+                && old.output_error == new.output_error
+        })
 }
 
 /// RestoredTurn → TurnView（历史回合直接落 Final；restore 与分页前插共用）。

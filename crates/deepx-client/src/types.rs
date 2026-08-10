@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 pub use deepx_domain::{
     ActivityState as DomainActivityState, AskAnswer, AskQuestion as DomainAskQuestion, ContentRef,
     ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, ConversationMode,
-    DashboardSnapshot as DomainDashboardSnapshot, PermissionCategory, PermissionRisk,
-    ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
+    DashboardSnapshot as DomainDashboardSnapshot, DomainError, ErrorScope, PermissionCategory,
+    PermissionRisk, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
     SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, TimelineBlockKind,
     TimelineEntry, TimelineSnapshot, TimelineTool, TimelineToolState, TimelineTurnState, TodoItem,
     ToolCommand, ToolEvent,

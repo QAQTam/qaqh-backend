@@ -3,7 +3,7 @@ use deepx_session::SessionMeta;
 
 use super::skill_context::SkillContextManager;
 use super::token_calibration::{
-    RequestTokenEstimate, SessionTokenCalibrator, estimate_prepared_request_tokens,
+    RequestTokenEstimate, SessionTokenCalibrator, prepared_request_metrics,
 };
 use deepx_message::{ToolExecReport, ToolExecRequest};
 use deepx_workspace::runtime;
@@ -130,14 +130,25 @@ pub struct AgentState {
     /// Pending cache diagnostic reasons set by build_context() and
     /// consumed by the engine to emit a CacheDiagnostics event.
     pending_cache_diagnostics: Option<Vec<String>>,
-    /// Per-session/provider online calibration for request preflight estimates.
+    /// Per-session/provider online calibration plus exact API context readings
+    /// for prepared request shapes.
     token_calibration: SessionTokenCalibrator,
+    /// Most recent provider-reported input context plus the MessageStore
+    /// revision that produced it. It remains authoritative after a successful
+    /// compact (one revision change), but not after arbitrary later mutations.
+    last_api_context: Option<ApiContextObservation>,
     /// True while the loop owns a background manual compaction transaction.
     /// TurnEngine reads this session-scoped flag to suppress auto compaction.
     manual_compact_running: bool,
     /// Failed/skipped automatic compaction candidate. Retried only after the
     /// request candidate changes, preventing one failed attempt per gate lap.
     auto_compact_blocked_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ApiContextObservation {
+    tokens: u64,
+    context_revision: u64,
 }
 
 impl AgentState {
@@ -159,6 +170,7 @@ impl AgentState {
             prev_prefix: PrefixShape::default(),
             pending_cache_diagnostics: None,
             token_calibration: SessionTokenCalibrator::default(),
+            last_api_context: None,
             manual_compact_running: false,
             auto_compact_blocked_revision: None,
         }
@@ -187,9 +199,28 @@ impl AgentState {
         messages: &[deepx_types::Message],
         tools: Option<&[deepx_types::ToolDef]>,
     ) -> RequestTokenEstimate {
-        let raw_tokens = estimate_prepared_request_tokens(messages, tools);
-        self.token_calibration
-            .estimate(&self.token_calibration_fingerprint(), raw_tokens)
+        let (raw_tokens, request_key) = prepared_request_metrics(messages, tools);
+        self.token_calibration.estimate(
+            &self.token_calibration_fingerprint(),
+            &request_key,
+            raw_tokens,
+        )
+    }
+
+    pub(crate) fn auto_compact_decision_tokens(&self, estimate: &RequestTokenEstimate) -> u64 {
+        estimate
+            .api_context_tokens
+            .or_else(|| {
+                self.last_api_context
+                    .filter(|observation| {
+                        self.msg
+                            .context_revision()
+                            .saturating_sub(observation.context_revision)
+                            <= 1
+                    })
+                    .map(|observation| observation.tokens)
+            })
+            .unwrap_or(estimate.upper_bound_tokens)
     }
 
     pub(crate) fn auto_compact_allowed(&self) -> bool {
@@ -220,16 +251,46 @@ impl AgentState {
     pub(crate) fn reset_compaction_coordination(&mut self) {
         self.manual_compact_running = false;
         self.auto_compact_blocked_revision = None;
+        self.last_api_context = None;
+    }
+
+    pub(crate) fn prepared_request_key(
+        &self,
+        messages: &[deepx_types::Message],
+        tools: Option<&[deepx_types::ToolDef]>,
+    ) -> String {
+        prepared_request_metrics(messages, tools).1
     }
 
     pub(crate) fn observe_prepared_request(
         &mut self,
         fingerprint: &str,
+        request_key: &str,
         raw_tokens: u64,
         observed_tokens: u64,
     ) -> bool {
-        self.token_calibration
-            .observe(fingerprint, raw_tokens, observed_tokens)
+        let accepted =
+            self.token_calibration
+                .observe(fingerprint, request_key, raw_tokens, observed_tokens);
+        if accepted {
+            self.last_api_context = Some(ApiContextObservation {
+                tokens: observed_tokens,
+                context_revision: self.msg.context_revision(),
+            });
+        }
+        accepted
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_current_prepared_request_for_test(
+        &mut self,
+        messages: &[deepx_types::Message],
+        tools: Option<&[deepx_types::ToolDef]>,
+        observed_tokens: u64,
+    ) -> bool {
+        let fingerprint = self.token_calibration_fingerprint();
+        let (raw_tokens, request_key) = prepared_request_metrics(messages, tools);
+        self.observe_prepared_request(&fingerprint, &request_key, raw_tokens, observed_tokens)
     }
 
     pub fn init(caller: &str) -> Self {
@@ -630,6 +691,99 @@ mod tests {
 
         deepx_workspace::set_workspace(".");
     }
+    #[test]
+    fn api_usage_matches_only_the_prepared_request_that_produced_it() {
+        let mut agent = AgentState::new(deepx_config::Config::default());
+        agent.session.seed = "token-session".into();
+        let original = vec![deepx_types::Message::user(&"original request ".repeat(80))];
+        let original_raw = agent.estimate_prepared_request(&original, None).raw_tokens;
+        let observed = original_raw.saturating_add(40);
+        assert!(agent.observe_current_prepared_request_for_test(&original, None, observed));
+
+        let exact = agent.estimate_prepared_request(&original, None);
+        assert_eq!(exact.api_context_tokens, Some(observed));
+
+        let changed = vec![deepx_types::Message::user("changed request")];
+        let changed_estimate = agent.estimate_prepared_request(&changed, None);
+        assert_eq!(changed_estimate.api_context_tokens, None);
+        assert_eq!(
+            agent.auto_compact_decision_tokens(&changed_estimate),
+            observed,
+            "a changed request must retain the last normal API context until it returns replacement usage"
+        );
+    }
+
+    #[test]
+    fn compact_request_usage_cannot_pollute_normal_request_context() {
+        let mut agent = AgentState::new(deepx_config::Config::default());
+        agent.session.seed = "token-session".into();
+        let normal = vec![deepx_types::Message::user(&"normal request ".repeat(80))];
+        let compact = vec![deepx_types::Message::user("[COMPACT] summarize history")];
+        let normal_raw = agent.estimate_prepared_request(&normal, None).raw_tokens;
+        let observed = normal_raw.saturating_add(32);
+
+        // Compaction uses deepx_gate directly and must not call the normal-request
+        // observation API. Only the normal request is bound into session state.
+        assert!(agent.observe_current_prepared_request_for_test(&normal, None, observed));
+        let compact_estimate = agent.estimate_prepared_request(&compact, None);
+        assert_eq!(compact_estimate.api_context_tokens, None);
+        assert_eq!(
+            agent.auto_compact_decision_tokens(&compact_estimate),
+            observed,
+            "constructing a compact request must not observe or replace normal-request usage"
+        );
+    }
+
+    #[test]
+    fn post_compact_next_lap_keeps_last_api_context_until_fresh_usage() {
+        let mut config = deepx_config::Config::default();
+        config.context_limit = 1_000;
+        let mut agent = AgentState::new(config);
+        agent.session.seed = "token-session".into();
+
+        let before = vec![deepx_types::Message::user(&"large context ".repeat(400))];
+        let before_raw = agent.estimate_prepared_request(&before, None).raw_tokens;
+        let before_observed = before_raw.clamp(700, 900);
+        assert!(agent.observe_current_prepared_request_for_test(&before, None, before_observed));
+
+        // A successful compact changes MessageStore exactly once. The previous
+        // normal API usage remains the safe decision source for this first lap.
+        agent.msg.push_user("revision changed by compact");
+        let after = vec![deepx_types::Message::user(&format!(
+            "[Compacted 8 turns]\n{}",
+            "checkpoint ".repeat(80)
+        ))];
+        let after_estimate = agent.estimate_prepared_request(&after, None);
+        assert_eq!(after_estimate.api_context_tokens, None);
+        assert_eq!(
+            agent.auto_compact_decision_tokens(&after_estimate),
+            before_observed
+        );
+        assert!(
+            agent.auto_compact_decision_tokens(&after_estimate) < 1_000,
+            "the first post-compact lap must not immediately compact again from a stale local upper bound"
+        );
+
+        let after_raw = after_estimate.raw_tokens;
+        let after_observed = after_raw.max(32).saturating_mul(6) / 5;
+        assert!(agent.observe_current_prepared_request_for_test(&after, None, after_observed));
+        let exact_after = agent.estimate_prepared_request(&after, None);
+        assert_eq!(
+            agent.auto_compact_decision_tokens(&exact_after),
+            after_observed
+        );
+
+        agent.msg.push_user("later mutation one");
+        agent.msg.push_user("later mutation two");
+        let later = vec![deepx_types::Message::user("substantially newer context")];
+        let later_estimate = agent.estimate_prepared_request(&later, None);
+        assert_eq!(
+            agent.auto_compact_decision_tokens(&later_estimate),
+            later_estimate.upper_bound_tokens,
+            "usage older than one context revision must not mask a newer oversized request"
+        );
+    }
+
     #[test]
     fn catalog_prefix_is_stable_when_a_skill_is_activated() {
         let _guard = SKILL_TEST_LOCK
