@@ -20,6 +20,7 @@
 | 文档 | 内容 | 状态 |
 |---|---|---|
 | [winui-gallery-porting.md](./winui-gallery-porting.md) | WinUI Gallery / Community Toolkit 视觉移植 | ✅ 现行 |
+| [chat-pagination-design.md](./chat-pagination-design.md) | ChatView 历史分页：机制实测 + 设计细化（衔接 virtual-scroll-paging 阶段 3；含 2026-08-10 性能数据与修复链） | ✅ 现行 |
 | [PLAN-NATIVE-CHATVIEW.md](../apps/winui/PLAN-NATIVE-CHATVIEW.md) | ChatView 迁移计划（分层路线） | ✅ 已执行（对照现状阅读） |
 | [PLAN-NATIVE-COMPOSER.md](../apps/winui/PLAN-NATIVE-COMPOSER.md) | Composer 原生化计划 | ✅ 已执行 |
 | [PLAN-NATIVE-STATEMACHINE.md](../apps/winui/PLAN-NATIVE-STATEMACHINE.md) | 状态机迁移计划（Web → Rust 直连） | ✅ 已执行 |
