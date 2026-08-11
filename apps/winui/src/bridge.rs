@@ -2624,20 +2624,11 @@ impl BridgeCore {
         self.spawn_conversation_command(ConversationCommand::ConversationSetMode { mode });
     }
 
-    /// 撤销上一回合：`conversation_undo_turn`（turn_id 来自 per-seed 缓存，
-    /// turn_started 事件/快照写入点更新；无缓存则不发送）。
-    pub fn spawn_undo_last_turn(&self) {
+    /// 按 turn_id 撤销（聊天右键「撤回此消息」）：删除该 turn 及其后全部
+    /// 回合（daemon `truncate_before_turn` 语义）。命令 + 状态轮询 +
+    /// timeline 重拉；turn_id 来自消息本身，不依赖 last_turn_ids 缓存。
+    pub fn spawn_undo_turn(&self, turn_id: String) {
         let seed = self.active_seed();
-        let Some(turn_id) = self
-            .last_turn_ids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&seed)
-            .cloned()
-        else {
-            log_diag("undo: no last turn id cached");
-            return;
-        };
         let core = self.self_arc();
         let command_id = self.next_command_id();
         let _ = deepx_client::runtime_handle().spawn(async move {
@@ -3600,7 +3591,7 @@ impl Bridge {
                     timeline_status: Mutex::new(None),
                     skills: Mutex::new(None),
                     skills_rev: AtomicU64::new(0),
-                    current_view: Mutex::new(String::new()),
+                    current_view: Mutex::new("home".to_string()),
                     settings: Mutex::new(None),
                     settings_rev: AtomicU64::new(0),
                     settings_proj: Mutex::new(SettingsProjection::default()),
@@ -3724,9 +3715,9 @@ impl Bridge {
         self.core.spawn_workspace_set(path);
     }
 
-    /// 撤销上一回合直发（conversation_undo_turn）。
-    pub fn spawn_undo_last_turn(&self) {
-        self.core.spawn_undo_last_turn();
+    /// 按 turn_id 撤回直发（聊天右键「撤回此消息」）。
+    pub fn spawn_undo_turn(&self, turn_id: String) {
+        self.core.spawn_undo_turn(turn_id);
     }
 
     /// 附件：图片文件选择对话框（STA COM；用户取消返回 Ok(null)）。

@@ -33,3 +33,7 @@ apps/winui/release/
 
 # 诊断临时目录（截图像素分析脚本等，不入库）
 /.deepx-tmp/
+
+# MSIX 壳包：私钥与构建产物不入库
+apps/installer/msix/DeepX.pfx
+apps/installer/msix/DeepX-shell.msix

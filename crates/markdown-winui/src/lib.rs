@@ -43,7 +43,7 @@ pub use tool_content::{
 
 use markdown_core::ast::{Block, Inline};
 use windows_reactor::{
-    BackgroundExt, Element, GridChildExt, GridLength, InputExt, KeyExt, LayoutExt, PaddingExt,
+    BackgroundExt, Element, GridChildExt, GridLength, InputExt, KeyExt, PaddingExt,
     PointerEventInfo, RenderCx, RichTextBlock, RichTextHyperlink, RichTextInline,
     RichTextParagraph, RichTextRun, TextStyleExt, TextAlignment, Updater, border, grid, text_block,
 };
@@ -123,7 +123,10 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
                 for inline in &mut para.inlines {
                     if let RichTextInline::Run(r) = inline {
                         r.font_size = Some(size);
-                        r.is_bold = true;
+                        // 标题不加粗（2026-08：RichTextRun 仅有 is_bold 布尔，
+                        // 700 太粗；改纯字号层次 h1 20 / h2 18 / h3 16。
+                        // 若需 Medium 500 需 fork reactor 给 RichTextRun 加
+                        // font_weight（run 级）+ 后端绑定）。
                     }
                 }
                 out.blocks.push(FinalBlock::Paragraph(para.clone()));
@@ -259,9 +262,12 @@ pub fn inlines_to_rich(inlines: &[Inline]) -> Vec<RichTextInline> {
                 push_run(&mut out, run);
             }
             Inline::Code(c) => {
-                // 行内代码：mono 字体（fork 的 font_family 字段已预留）
+                // 行内代码：等宽 + CJK fallback（裸 "Consolas" 无中文字形，
+                // 中文会落系统默认雅黑，与正文 HarmonyOS 混排割裂——与
+                // 代码块 CODE_FONT_FAMILY 同链，此处用系统字体名免资源依赖）。
                 let mut run = RichTextRun::plain(c);
-                run.font_family = Some("Consolas".to_string());
+                run.font_family =
+                    Some("Cascadia Mono, Consolas, Microsoft YaHei UI, HarmonyOS Sans SC".to_string());
                 push_run(&mut out, run);
             }
             Inline::Link { text, url } => out.push(RichTextInline::Hyperlink(RichTextHyperlink {
@@ -330,7 +336,7 @@ impl RichTextBlockExt for RichTextBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_reactor::{Element, KeyExt, LayoutExt, PaddingExt};
+    use windows_reactor::{Element, KeyExt};
 
     /// 端到端：markdown → RichTextBlock（widget 层），验证零胶水对接
     #[test]
@@ -457,7 +463,8 @@ mod tests {
             .collect()
     }
 
-    /// 标题层级：h1 > h2 > h3 字号递减 + 加粗；h4+ 降级为加粗段落
+    /// 标题层级：h1 > h2 > h3 字号递减、不加粗（700 太粗，纯字号层次）；
+    /// h4+ 降级为加粗段落。
     #[test]
     fn heading_levels_apply_sizes() {
         let out = render_final(&markdown_core::parse_final(
@@ -468,9 +475,9 @@ mod tests {
             RichTextInline::Run(r) => (r.font_size, r.is_bold),
             _ => (None, false),
         };
-        assert_eq!(size_of(&out.paragraphs[0]), (Some(20.0), true));
-        assert_eq!(size_of(&out.paragraphs[1]), (Some(18.0), true));
-        assert_eq!(size_of(&out.paragraphs[2]), (Some(16.0), true));
+        assert_eq!(size_of(&out.paragraphs[0]), (Some(20.0), false));
+        assert_eq!(size_of(&out.paragraphs[1]), (Some(18.0), false));
+        assert_eq!(size_of(&out.paragraphs[2]), (Some(16.0), false));
         // h4 降级：Bold 包裹、无字号（与正文同尺寸，仅加粗）
         assert!(matches!(
             &out.paragraphs[3].inlines[0],
@@ -580,8 +587,8 @@ mod tests {
         assert_eq!(c0.text, "1");
         assert_eq!(
             c0.text_alignment,
-            Some(windows_reactor::TextAlignment::Right),
-            "数字单元格右对齐"
+            Some(windows_reactor::TextAlignment::Center),
+            "表格单元格全居中（非 Excel 语义）"
         );
         // hover=None：数据行不注册指针处理器（静态渲染）
         assert!(
@@ -617,19 +624,6 @@ mod tests {
         );
         // 权重不小于 1（空内容列保底）
         assert!(*w0 >= 1.0 && *w1 >= 1.0);
-    }
-
-    /// 数字/百分比判断：右对齐的数据列语义（大小、进度、统计）。
-    #[test]
-    fn numeric_cells_are_detected() {
-        assert!(!is_numeric_cell("38.4 MB")); // 含单位 → 非纯数字
-        assert!(is_numeric_cell("92%"));
-        assert!(is_numeric_cell("1,234"));
-        assert!(is_numeric_cell("3.14"));
-        assert!(is_numeric_cell("-7"));
-        assert!(!is_numeric_cell("Rust"));
-        assert!(!is_numeric_cell(""));
-        assert!(!is_numeric_cell("1.2.3"));
     }
 }
 
@@ -685,16 +679,6 @@ impl TableHover {
 
 /// 数字/百分比单元格判断 → 右对齐（大小、进度等数据列）。
 /// 支持 `%` 后缀、千分位逗号、小数（至多一个 `.`）、负数。
-fn is_numeric_cell(s: &str) -> bool {
-    let t = s.trim();
-    let t = t.strip_suffix('%').unwrap_or(t);
-    if t.is_empty() {
-        return false;
-    }
-    let t = t.replace([' ', ','], "");
-    t.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-') && t.matches('.').count() <= 1
-}
-
 /// 表格 → reactor Grid 元素树（现代行分隔线风格）。
 ///
 /// 布局：表头行（row 0，无填充、semibold + 次级色，底部 1px 分隔线）+
@@ -737,12 +721,13 @@ pub fn table_view(table: &TableData, key: &str, hover: Option<&TableHover>) -> E
     // 表头行（row 0）：跨列 Border，无背景，底部 1px 分隔线。
     let mut header_cells: Vec<Element> = Vec::new();
     for (ci, cell) in table.headers.iter().enumerate() {
+        let mut tb = text_block(markdown_core::ast::concat_inlines(cell))
+            .wrap()
+            .semibold()
+            .foreground(windows_reactor::ThemeRef::SecondaryText);
+        tb.text_alignment = Some(TextAlignment::Center);
         header_cells.push(
-            text_block(markdown_core::ast::concat_inlines(cell))
-                .wrap()
-                .semibold()
-                .foreground(windows_reactor::ThemeRef::SecondaryText)
-                .grid_column(ci as i32)
+            tb.grid_column(ci as i32)
                 .with_key(format!("{key}-h{ci}"))
                 .into(),
         );
@@ -771,12 +756,10 @@ pub fn table_view(table: &TableData, key: &str, hover: Option<&TableHover>) -> E
         for (ci, cell) in row.iter().enumerate() {
             let text = markdown_core::ast::concat_inlines(cell);
             let mut tb = text_block(text.clone()).wrap();
+            // 全居中（对话工具语义，非 Excel 网格）；主键列 semibold。
+            tb.text_alignment = Some(TextAlignment::Center);
             if ci == 0 {
-                // 主键列（第一列）semibold，建立行内层次。
                 tb = tb.semibold();
-            }
-            if is_numeric_cell(&text) {
-                tb.text_alignment = Some(TextAlignment::Right);
             }
             cells.push(
                 tb.grid_column(ci as i32)

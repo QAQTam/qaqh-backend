@@ -123,16 +123,43 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let bridge = bridge.clone();
         move || bridge.toggle_header_flag(HeaderFlag::Stats)
     };
-    let on_undo = {
-        let bridge = bridge.clone();
-        move || bridge.spawn_undo_last_turn()
-    };
     let on_compact = {
         let bridge = bridge.clone();
         move || {
             bridge.spawn_conversation_command(
                 deepx_client::ConversationCommand::ConversationCompact { turn_id: None },
             )
+        }
+    };
+
+    // ── 刷新（安慰剂 + 真实重拉：会话列表 + 配置 force）────────────
+    // 点击 → 按钮转圈 900ms（"正在刷新"仪式感）→ 自动复位。数据重拉是
+    // 异步的，各视图 500ms 轮询自动反映结果——刷新本身无需等待。
+    let (refreshing, set_refreshing) = cx.use_state::<bool>(false);
+    let refresh_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    let on_refresh = {
+        let bridge = bridge.clone();
+        let set_refreshing = set_refreshing.clone();
+        let refresh_timer = refresh_timer.clone();
+        move || {
+            bridge.spawn_refresh_sessions();
+            bridge.spawn_config_load(true);
+            set_refreshing.call(true);
+            if refresh_timer.borrow().is_none() {
+                if let Ok(t) = DispatcherTimer::new(Duration::from_millis(900), {
+                    let set_refreshing = set_refreshing.clone();
+                    let refresh_timer = refresh_timer.clone();
+                    move || {
+                        set_refreshing.call(false);
+                        if let Some(t) = refresh_timer.borrow().as_ref() {
+                            let _ = t.stop();
+                        }
+                        *refresh_timer.borrow_mut() = None;
+                    }
+                }) {
+                    *refresh_timer.borrow_mut() = Some(t);
+                }
+            }
         }
     };
 
@@ -164,11 +191,6 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     } else {
         "用量统计"
     };
-    let undo_label = if en {
-        "Undo last turn"
-    } else {
-        "撤销上一轮"
-    };
     let compact_label = if state.compacting {
         if en {
             "Compacting context…"
@@ -188,6 +210,34 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .into()
     } else {
         grid(()).into()
+    };
+    let refresh_label = if refreshing {
+        if en {
+            "Refreshing…"
+        } else {
+            "正在刷新…"
+        }
+    } else if en {
+        "Refresh"
+    } else {
+        "刷新"
+    };
+    // 转圈期间图标按钮替换为 ProgressRing（同 compact 模式），禁用防连点。
+    let refresh_el: Element = if refreshing {
+        ProgressRing::default()
+            .width(16.0)
+            .height(16.0)
+            .automation_name(refresh_label)
+            .into()
+    } else {
+        action_button(
+            Icon::symbol(Symbol::Refresh),
+            refresh_label,
+            "header-refresh",
+            true,
+            false,
+            on_refresh,
+        )
     };
     let footer: Element = hstack((
         // 图标映射（bindings Symbol 枚举裁剪版，WORKFLOW §6.1 记录）：
@@ -209,7 +259,7 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             false,
             on_location,
         ),
-        divider,
+        divider.clone(),
         action_button(
             Icon::symbol(Symbol::ContactInfo),
             info_label,
@@ -227,14 +277,6 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             state.stats_open,
             on_stats,
         ),
-        action_button(
-            Icon::symbol(Symbol::Undo),
-            undo_label,
-            "header-undo",
-            !state.undo_disabled,
-            false,
-            on_undo,
-        ),
         compact_progress,
         action_button(
             Icon::symbol(Symbol::Clear),
@@ -244,6 +286,8 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             false,
             on_compact,
         ),
+        divider.clone(),
+        refresh_el,
     ))
     .spacing(4.0)
     .vertical_alignment(VerticalAlignment::Center)

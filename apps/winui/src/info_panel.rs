@@ -485,7 +485,6 @@ pub fn info_panel(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 任务进度区块（dashboard 投影，control 事件驱动；P6 合并）。
     let (dashboard, set_dashboard) = cx.use_state::<Option<DashboardSnapshot>>(None);
     let last_dash_rev = cx.use_ref::<u64>(0);
-    log_diag("info_panel render (常驻)");
 
     // 500ms 轮询：info 数据 rev（同 sidebar 模式）。常驻面板：挂载时
     // 主动拉一次当前会话详情（防旧缓存），后续 rev 变化自动刷新。

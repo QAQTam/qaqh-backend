@@ -30,6 +30,7 @@ use windows_reactor::*;
 use deepx_fluent::{motion, tokens};
 
 use crate::bridge::{Bridge, SettingsProjection};
+use crate::oobe_view;
 use crate::diagnostics::{self, Mode};
 use crate::fonts;
 use crate::shell_store::{SettingsSnapshot, normalize_effort};
@@ -477,6 +478,13 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .foreground(ThemeRef::SecondaryText)
                 .into(),
         );
+        rows.push(field_row(
+            "重新运行引导",
+            button("重开首次引导")
+                .subtle()
+                .on_click(|| oobe_view::request_rerun())
+                .into(),
+        ));
         rows.push(field_row(
             "子代理 API Key",
             PasswordBox::new()

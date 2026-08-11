@@ -1046,8 +1046,50 @@ fn turn_memo(props: &TurnProps, _cx: &mut RenderCx) -> Element {
     .with_key(format!("{}-boundary", props.turn.turn_id))
 }
 
-fn turn_body(props: &TurnProps, _cx: &mut RenderCx) -> Element {
-    turn_view(props.turn.as_ref(), props.color_scheme.clone())
+fn turn_body(props: &TurnProps, cx: &mut RenderCx) -> Element {
+    // 右键撤回菜单（局部状态：memo 命中时保留，随历史释放）。
+    let (menu_open, set_menu_open) = cx.use_state::<bool>(false);
+    let (confirm_open, set_confirm_open) = cx.use_state::<bool>(false);
+    let turn_id = props.turn.turn_id.clone();
+    let on_undo = {
+        let set_menu_open = set_menu_open.clone();
+        let set_confirm_open = set_confirm_open.clone();
+        move || {
+            set_menu_open.call(false);
+            set_confirm_open.call(true);
+        }
+    };
+    // 确认对话框（modal，不在 visual tree）：确认后按 turn_id 撤回
+    // （删除该 turn 及之后全部内容）；关闭总是复位 is_open。
+    let confirm_dialog: Element = ContentDialog::new("撤回此消息？")
+        .content("将删除该消息及其后的所有内容，此操作不可恢复。")
+        .primary_button_text("撤回")
+        .close_button_text("取消")
+        .is_open(confirm_open)
+        .on_closed({
+            let turn_id = turn_id.clone();
+            let set_confirm_open = set_confirm_open.clone();
+            move |result| {
+                set_confirm_open.call(false);
+                if result == ContentDialogResult::Primary {
+                    Bridge::shared().spawn_undo_turn(turn_id.clone());
+                }
+            }
+        })
+        .into();
+    grid((
+        turn_view(
+            props.turn.as_ref(),
+            props.color_scheme.clone(),
+            menu_open,
+            on_undo,
+            set_menu_open.clone(),
+        ),
+        confirm_dialog,
+    ))
+    .rows([GridLength::STAR])
+    .columns([GridLength::STAR])
+    .into()
 }
 
 fn turn_render_fallback(turn_id: &str) -> Element {
@@ -1114,7 +1156,29 @@ fn round_memo(props: &RoundProps, cx: &mut RenderCx) -> Element {
     )
 }
 
-fn turn_view(turn: &TurnView, color_scheme: ColorScheme) -> Element {
+/// 撤回菜单浮层（右键弹出；图标 + 文字，仿 MenuFlyout 视觉）。
+fn undo_menu_float(on_undo: impl Fn() + 'static) -> Element {
+    border(
+        button("撤回此消息（及之后内容）")
+            .icon(Icon::symbol(Symbol::Undo))
+            .subtle()
+            .on_click(on_undo),
+    )
+    .background(ThemeRef::LayerFill)
+    .corner_radius(8.0)
+    .padding(Thickness::uniform(tokens::SPACE_1))
+    .horizontal_alignment(HorizontalAlignment::Right)
+    .with_key("turn-undo-menu")
+    .into()
+}
+
+fn turn_view(
+    turn: &TurnView,
+    color_scheme: ColorScheme,
+    menu_open: bool,
+    on_undo: impl Fn() + 'static,
+    set_menu_open: SetState<bool>,
+) -> Element {
     let (status, tone) = match turn.status {
         TurnStatus::Running => ("正在处理", StatusTone::Running),
         TurnStatus::Completed => ("已完成", StatusTone::Success),
@@ -1128,6 +1192,10 @@ fn turn_view(turn: &TurnView, color_scheme: ColorScheme) -> Element {
             .selectable(),
         deepx_fluent::status_badge(status, tone),
     )];
+    // 右键菜单浮层：插在消息上方（右对齐），点消息任意处关闭。
+    if menu_open {
+        items.insert(0, undo_menu_float(on_undo));
+    }
     if turn.status == TurnStatus::Failed {
         if let Some(error) = &turn.failed_error {
             items.push(
@@ -1169,6 +1237,14 @@ fn turn_view(turn: &TurnView, color_scheme: ColorScheme) -> Element {
         })
         .max_width(tokens::CONVERSATION_MAX_WIDTH)
         .horizontal_alignment(HorizontalAlignment::Stretch)
+        .on_right_tapped({
+            let set_menu_open = set_menu_open.clone();
+            move || set_menu_open.call(true)
+        })
+        .on_tapped({
+            let set_menu_open = set_menu_open.clone();
+            move || set_menu_open.call(false)
+        })
         .with_key(turn.turn_id.clone())
         .into()
 }

@@ -16,6 +16,7 @@ mod header;
 mod home_view;
 mod info_panel;
 mod interaction_overlay;
+mod oobe_view;
 mod session_tabs;
 mod settings_view;
 mod shell;
@@ -34,6 +35,10 @@ const SPLASH_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn header_component(_: &(), cx: &mut RenderCx) -> Element {
     header::header(cx, bridge::Bridge::shared())
+}
+
+fn oobe_component(props: &SetState<bool>, cx: &mut RenderCx) -> Element {
+    oobe_view::oobe_view(cx, props.clone())
 }
 
 fn sidebar_component(props: &(f64, SetState<f64>), cx: &mut RenderCx) -> Element {
@@ -191,6 +196,55 @@ fn app(cx: &mut RenderCx) -> Element {
             }
         }
     });
+
+    // ── OOBE：首次启动引导（P-6 覆盖层最上层，盖住整个壳）────────────
+    // 无完成标志 → 显示引导；config 快照到达且已配置 key → 自动收尾
+    // （老用户/标志丢失场景，一闪而过）；设置页「重新运行引导」→ 强制
+    // 重开且关闭自动收尾（否则刚打开就被"已配置"判定关掉）。
+    let (oobe_visible, set_oobe_visible) = cx.use_state::<bool>(!oobe_view::oobe_done());
+    let oobe_auto = cx.use_ref::<bool>(!oobe_view::oobe_done());
+    let oobe_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    cx.use_effect((), {
+        let bridge = bridge.clone();
+        let set_oobe_visible = set_oobe_visible.clone();
+        let oobe_auto = oobe_auto.clone();
+        let oobe_timer = oobe_timer.clone();
+        move || {
+            if oobe_timer.borrow().is_none() {
+                match DispatcherTimer::new(Duration::from_millis(500), {
+                    let core = bridge.core();
+                    let set_oobe_visible = set_oobe_visible.clone();
+                    let oobe_auto = oobe_auto.clone();
+                    move || {
+                        // 设置页「重新运行引导」：强制重开，本次不自动收尾。
+                        if oobe_view::take_rerun_request() {
+                            *oobe_auto.borrow_mut() = false;
+                            set_oobe_visible.call(true);
+                            log_diag("oobe: rerun requested");
+                            return;
+                        }
+                        // 首次路径：daemon 已配置主 key（老用户/标志丢失）→ 自动完成。
+                        if *oobe_auto.borrow() {
+                            let configured = core
+                                .settings_snapshot()
+                                .0
+                                .is_some_and(|s| s.api_key_configured);
+                            if configured {
+                                oobe_view::mark_oobe_done();
+                                *oobe_auto.borrow_mut() = false;
+                                set_oobe_visible.call(false);
+                                log_diag("oobe: config present, auto-dismissed");
+                            }
+                        }
+                    }
+                }) {
+                    Ok(t) => *oobe_timer.borrow_mut() = Some(t),
+                    Err(e) => log_diag(&format!("oobe timer failed: {e}")),
+                }
+            }
+        }
+    });
+
     let skills: Element = if view == "skills" {
         grid((component(skills_component, ()).with_key("shell-skills"),))
             .with_key("shell-skills-wrap")
@@ -424,10 +478,18 @@ fn app(cx: &mut RenderCx) -> Element {
     // 图表放大覆盖层（P-6 同模式）：chat_view 点击写入 DIAGRAM_ZOOM，
     // 本组件轮询弹开全窗大图。无请求时空 grid 穿透。
     let diagram_zoom: Element = component(diagram_zoom_component, ()).with_key("shell-diagram-zoom");
+    // 首次启动引导（P-6 同模式）：无完成标志时盖住整个壳（含 titlebar，
+    // 内部自带全屏 LayerFill 背景）；完成/跳过写标志后组件卸载，空 grid
+    // 穿透（同 splash 注释：切勿给空 grid 添加背景）。
+    let oobe: Element = if oobe_visible {
+        component(oobe_component, set_oobe_visible.clone()).with_key("shell-oobe")
+    } else {
+        grid(()).into()
+    };
     // 覆盖层 grid 必须显式 STAR 行/列：Grid 默认 Auto 会让 Stretch 子元素只
     // 覆盖内容大小（scrim 不全窗，遮罩不生效）——demo 已实证，同 interaction
-    // 内部 grid 的修复。四个子元素重叠同一 cell（P-6 覆盖层模式）。
-    grid((base, splash, interaction, diagram_zoom))
+    // 内部 grid 的修复。五个子元素重叠同一 cell（P-6 覆盖层模式）。
+    grid((base, splash, interaction, diagram_zoom, oobe))
         .rows([GridLength::STAR])
         .columns([GridLength::STAR])
         .into()
