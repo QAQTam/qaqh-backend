@@ -52,11 +52,20 @@ fn handle_skill(ctx: crate::ToolCallCtx) -> ToolResult {
     match load_activation(&ctx.args) {
         Ok(activation) => {
             let name = activation.metadata.name.clone();
+            let body = activation.body.clone();
+            let resources: Vec<String> = activation
+                .resources
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
             ctx.push_skill_effect(deepx_skills::SkillEffect::Activate(activation));
             ToolResult::ok(serde_json::json!({
                 "status": "ok",
                 "skill": name,
-                "content": format!("[OK] skill activated. The skill instructions are available in the context above. Use them directly.")
+                "resources": resources,
+                "content": format!(
+                    "[OK] skill '{name}' activated. Follow these instructions:\n\n<skill_instructions name=\"{name}\">\n{body}\n</skill_instructions>"
+                )
             }).to_string())
         }
         Err(error) => ToolResult::error(crate::json_err(
@@ -72,20 +81,6 @@ fn handle_skill_resource(ctx: crate::ToolCallCtx) -> ToolResult {
         Ok(content) => ToolResult::ok(content),
         Err((code, message, hint)) => ToolResult::error(crate::json_err(code, message, hint)),
     }
-}
-
-fn handle_lifecycle(ctx: crate::ToolCallCtx, retain: bool) -> ToolResult {
-    let name = ctx.args.s("name");
-    if name.is_empty() {
-        return ToolResult::error("skill name is required");
-    }
-    let effect = if retain {
-        deepx_skills::SkillEffect::Retain { name: name.clone() }
-    } else {
-        deepx_skills::SkillEffect::Release { name: name.clone() }
-    };
-    ctx.push_skill_effect(effect);
-    ToolResult::ok(serde_json::json!({"status":"ok", "skill":name}).to_string())
 }
 
 fn handle_skills_list(_ctx: crate::ToolCallCtx) -> ToolResult {
@@ -162,12 +157,10 @@ fn handle_skills(ctx: crate::ToolCallCtx) -> ToolResult {
     let has_path = ctx.args.get("path").is_some();
     match action.as_str() {
         "activate" if has_name && !has_path => handle_skill(ctx),
-        "retain" if has_name && !has_path => handle_lifecycle(ctx, true),
-        "release" if has_name && !has_path => handle_lifecycle(ctx, false),
         "list" if !has_name && !has_path => handle_skills_list(ctx),
         "resource" if has_name && has_path => handle_skill_resource(ctx),
         "validate" if has_name && !has_path => handle_skill_validate(ctx),
-        "activate" | "retain" | "release" | "list" | "resource" | "validate" => {
+        "activate" | "list" | "resource" | "validate" => {
             ToolResult::error(crate::json_err(
                 "INVALID_ARGUMENTS",
                 format!("arguments do not match skills action '{action}'"),
@@ -176,7 +169,7 @@ fn handle_skills(ctx: crate::ToolCallCtx) -> ToolResult {
         }
         _ => ToolResult::error(crate::json_err(
             "INVALID_ACTION",
-            "skills action must be activate, retain, release, list, resource, or validate",
+            "skills action must be activate, list, resource, or validate",
             "Choose the action matching the required skill operation.",
         )),
     }
@@ -185,14 +178,14 @@ fn handle_skills(ctx: crate::ToolCallCtx) -> ToolResult {
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(ToolHandler {
         key: "skills".to_string(),
-        description: "Manage Agent Skills through one fixed typed interface. Use activate before acting when a task matches the catalog; retain or release when review is due; list for effective sources and diagnostics; resource for contained bundled files; validate for portability checks. Skill metadata never bypasses DeepX permissions.",
+        description: "Manage Agent Skills through one fixed interface. Use activate before acting when a task matches the catalog — the full instructions are returned in the tool result; resource reads bundled files on demand; list for catalog diagnostics; validate for portability checks. Skill metadata never bypasses DeepX permissions.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["activate", "retain", "release", "list", "resource", "validate"],
-                    "description": "activate: load instructions; retain: renew a lease; release: unload; list: inspect catalog diagnostics; resource: read a bundled resource; validate: validate one SKILL.md"
+                    "enum": ["activate", "list", "resource", "validate"],
+                    "description": "activate: load instructions and return the full body; list: inspect catalog diagnostics; resource: read a bundled resource; validate: validate one SKILL.md"
                 },
                 "name": {
                     "type": "string",
@@ -209,20 +202,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 {
                     "title": "Activate a skill",
                     "properties": {"action": {"const": "activate"}},
-                    "required": ["action", "name"],
-                    "not": {"required": ["path"]}
-                },
-                {
-                    "title": "Retain an active skill",
-                    "properties": {"action": {"const": "retain"}},
-                    "required": ["action", "name"],
-                    "not": {"required": ["path"]}
-                },
-                {
-                    "title": "Release an active skill",
-                    "properties": {"action": {"const": "release"}},
-                    "required": ["action", "name"],
-                    "not": {"required": ["path"]}
+                    "required": ["action", "name"]
                 },
                 {
                     "title": "List effective skills",
@@ -238,8 +218,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 {
                     "title": "Validate a skill",
                     "properties": {"action": {"const": "validate"}},
-                    "required": ["action", "name"],
-                    "not": {"required": ["path"]}
+                    "required": ["action", "name"]
                 }
             ]
         }),
