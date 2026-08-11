@@ -15,17 +15,88 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use deepx_fluent::{StatusTone, motion, tokens};
 use markdown_winui::{
-    AnswerView, LiveSegment, RichTextOutput, RoundView, Transcript, TurnStatus, TurnView,
+    AnswerView, LiveSegment, RichTextOutput, RoundView, TableHover, Transcript, TurnStatus,
+    TurnView,
 };
 use windows_reactor::*;
 
 use crate::bridge::Bridge;
 use crate::chat_adapter;
+
+/// 图表放大请求（壳内 UI 状态）：`final_view` 点击图表卡片时写入，
+/// `main.rs` 挂载的 [`diagram_zoom_overlay`] 轮询消费（与 interaction_overlay
+/// 同款「写端组件 / 读端覆盖层」分离模式，避免跨组件 props 穿透）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiagramZoomRequest {
+    /// 图表定位标签（turn/round 索引，作覆盖层标题）。
+    pub label: String,
+    /// 当前主题下的 SVG（透明背景 + text→path 后的纯 path 版）。
+    pub svg: String,
+    /// SVG 自然尺寸（DIP，从 `<svg width height>` 解析；fit 缩放基准）。
+    pub width: f64,
+    pub height: f64,
+}
+
+/// 从 SVG 头部解析 `width`/`height` 属性（usvg 输出格式固定为
+/// `<svg width=".." height=".."`）。解析失败回退 800x600。
+fn svg_natural_size(svg: &str) -> (f64, f64) {
+    let head = svg.get(..svg.len().min(300)).unwrap_or(svg);
+    let mut w = 800.0;
+    let mut h = 600.0;
+    if let Some(i) = head.find("width=\"") {
+        if let Some(v) = head
+            .get(i + 7..)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|s| s.parse::<f64>().ok())
+        {
+            w = v;
+        }
+    }
+    if let Some(i) = head.find("height=\"") {
+        if let Some(v) = head
+            .get(i + 8..)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|s| s.parse::<f64>().ok())
+        {
+            h = v;
+        }
+    }
+    (w, h)
+}
+
+pub static DIAGRAM_ZOOM: Mutex<Option<DiagramZoomRequest>> = Mutex::new(None);
+
+/// 图表放大弹窗：视口占主窗口比例（跟随窗口尺寸动态变化）与遮罩透明度。
+const DIAGRAM_ZOOM_W_RATIO: f64 = 0.78;
+const DIAGRAM_ZOOM_H_RATIO: f64 = 0.72;
+const SCRIM_ALPHA: u8 = 140;
+
+/// 图表点击 → 写入放大请求（覆盖层轮询消费）。
+/// `Callback<()>` 的闭包签名为 `Fn(())`（reactor 约定，invoke 传 unit）。
+fn zoom_request_callback(
+    diagram: &markdown_winui::DiagramBlock,
+    scheme: ColorScheme,
+    key: &str,
+) -> windows_reactor::Callback<()> {
+    let label = key.to_string();
+    let svg = diagram.svg(scheme).unwrap_or_default().to_string();
+    let (width, height) = svg_natural_size(&svg);
+    windows_reactor::Callback::new(move |_: ()| {
+        if let Ok(mut slot) = DIAGRAM_ZOOM.lock() {
+            *slot = Some(DiagramZoomRequest {
+                label: label.clone(),
+                svg: svg.clone(),
+                width,
+                height,
+            });
+        }
+    })
+}
 
 /// XAML 提交批次：事件泵由 `CompositionTarget::Rendering`（vsync 对齐）
 /// 驱动——60Hz 屏 60 次/s、120Hz 屏 120 次/s，天然跟随客户显示器刷新
@@ -41,26 +112,26 @@ use crate::chat_adapter;
 /// 变化（restore / 新 turn / round 完成）不受此限，立即滚底。
 const SCROLL_REQUEST_THROTTLE: Duration = Duration::from_millis(100);
 
-/// Live（非结构性）正文提交间隔：约 15fps。协议事件仍逐帧归并到模型，
-/// 但 growing markdown / Element / XAML 文本只按此频率提交；结构变化
-/// （新 turn、工具卡、round 完成）仍立即提交。
-///
-/// 66ms 经 DEEPX_PERF_LOG 实测校准：稳态单次提交 reconcile 7-17ms
-/// （created 70-104 个 XAML 控件；turn memo 已把全量重建降为增量），
-/// 33ms 下 30fps × ~12ms ≈ 50% CPU 持续满载（输入排队卡顿）；66ms
-/// 减半到 ~25%，流式 15fps 逐字仍流畅（视觉 ≥24fps 无感）。
-const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(66);
+/// Live（非结构性）正文提交间隔：8ms 下限，与 vsync 帧泵配合时在
+/// 60Hz/120Hz 屏上都可逐帧提交。协议事件先归并到模型，再由一次
+/// retained-mode 更新提交 growing markdown / Element / XAML 文本；结构变化
+/// （新 turn、工具卡、round 完成）仍立即提交。滚动请求继续单独按 100ms
+/// 节流，避免恢复“滚动 → realize → 渲染 → 滚动”的反馈环。
+const LIVE_RENDER_INTERVAL: Duration = Duration::from_millis(8);
 
 /// 单帧事件上限与 reducer 时间预算。数量上限限制极端微小事件，时间预算
 /// 则限制长 checkpoint / markdown 解析；任一先到即把余量留给下一帧。
 const CHAT_EVENTS_PER_FRAME: usize = 512;
 const CHAT_REDUCER_BUDGET: Duration = Duration::from_millis(4);
 
-/// transport drain 节流：事件密集期 60fps 每帧 drain 512 + reducer 4ms
-/// 预算 ≈ 98% CPU（DEEPX_PERF_LOG 实测渲染仅占 2.5%，瓶颈在帧回调的
-/// 事件处理）。32ms 节流 → 30fps 批处理，事件多等一帧（≤32ms）无感；
-/// 结构事件（restore/新 turn）同队列最多延迟 32ms，可接受。
-const DRAIN_INTERVAL: Duration = Duration::from_millis(32);
+/// transport drain 闸：8ms 下限使 60Hz/120Hz 的 vsync 回调均可逐帧取数，
+/// 避免原 32ms 批处理造成明显的成批吐字。单帧仍受 512 事件上限和 reducer
+/// 4ms 墙钟预算保护；滚动与 XAML 提交还有各自独立预算。
+const DRAIN_INTERVAL: Duration = Duration::from_millis(8);
+
+/// 字符 shimmer 的相位步长。ProgressRing 由 WinUI 合成器独立动画，文本
+/// 光带只需低频推进；按 vsync 每帧重建 RichText 会既过快又浪费 UI 线程。
+const SHIMMER_STEP_INTERVAL: Duration = Duration::from_millis(90);
 
 /// 后台时长超过此值（窗口不可见，vsync 回调暂停）→ 恢复时走快照
 /// resume：丢弃积压增量事件，拉 timeline 快照一次到位（复用 restore
@@ -247,8 +318,9 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 后台恢复进行中（`Some(seed)` = 快照已重拉、尚未到达）：渲染
     // shimmer 加载覆盖层盖住内容（不白屏）；快照 restore 后清除。
     let recovering = cx.use_ref::<Option<String>>(None);
-    // 覆盖层 shimmer 光带相位（90ms 步进，覆盖层存活期间每帧递增）。
+    // 覆盖层 shimmer 光带相位（90ms 步进）。
     let shimmer_tick = cx.use_ref::<u64>(0);
+    let last_shimmer_step = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     // 锚定补偿挂起标记：`Some(rows)` = 本帧渲染需用 within 滚动（顶部
     // 预加载后把「原窗口首行」锚回原位，视口不跳）。rows = 扩展前移量
     // = 原首行的新下标。渲染闭包 take 后随 preserve_anchor 下发。
@@ -257,7 +329,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 按 turn_id + turn mutation_rev 结构共享未变化行。主题纳入缓存键，
     // 避免 ActualThemeChanged 时仍把旧主题的 realized 行当作同一数据包。
     let window_cache = cx.use_ref::<Option<((u64, ColorScheme), Rc<Vec<Rc<TurnView>>>)>>(None);
-    // transport drain 节流闸：事件密集期降批处理频率（见 DRAIN_INTERVAL）。
+    // transport drain 快速闸：8ms 下限，随 vsync 逐帧消费（见 DRAIN_INTERVAL）。
     let last_drain = cx.use_ref::<Option<std::time::Instant>>(None);
 
     // 事件泵：drain bridge 队列 → Transcript；rev 变化触发重渲染。
@@ -287,6 +359,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let background_resumed = background_resumed.clone();
         let recovering = recovering.clone();
         let shimmer_tick = shimmer_tick.clone();
+        let last_shimmer_step = last_shimmer_step.clone();
         move || {
             if frame_revoker.borrow().is_some() {
                 return;
@@ -312,6 +385,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let background_resumed = background_resumed.clone();
                 let recovering = recovering.clone();
                 let shimmer_tick = shimmer_tick.clone();
+                let last_shimmer_step = last_shimmer_step.clone();
                 let pending_anchor = pending_anchor.clone();
                 move || {
                     // 后台恢复检测：窗口不可见时 vsync 回调暂停，恢复可见
@@ -320,8 +394,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     // 快照重拉 → 复用 restore 分支一次到位（毫秒级）。
                     // 同时点亮 shimmer 覆盖层（快照到达 restore 后熄灭）。
                     let now = std::time::Instant::now();
-                    if now.duration_since(*last_frame_at.borrow())
-                        >= BACKGROUND_RESUME_AFTER
+                    let frame_interval = now.duration_since(*last_frame_at.borrow());
+                    if frame_interval >= BACKGROUND_RESUME_AFTER
                         && !*background_resumed.borrow()
                     {
                         *background_resumed.borrow_mut() = true;
@@ -334,9 +408,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     }
                     *last_frame_at.borrow_mut() = now;
                     // 诊断：帧间隔（>2s = 暂停恢复，diagnostics 内过滤）。
-                    crate::diagnostics::record_frame_interval(
-                        now.duration_since(*last_frame_at.borrow()).as_secs_f64() * 1000.0,
-                    );
+                    crate::diagnostics::record_frame_interval(frame_interval.as_secs_f64() * 1000.0);
                     // DeepX perf diagnostic: data-scale snapshot every 5s
                     // (turns in memory vs windowed render rows vs viewports).
                     if now.duration_since(*last_scale_log.borrow())
@@ -406,10 +478,10 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         }
                         log_diag(&format!("chat_view: switched to seed {seed}"));
                     }
-                    // drain 节流：事件密集时 60fps 每帧 drain 512 + reducer 4ms
-                    // ≈ 98% CPU（瓶颈在事件处理，不在渲染）。32ms 节流 →
-                    // 30fps 批处理；deferred 非空时仍每帧放行小批（/8）避免
-                    // 结构事件被 32ms 闸整体堵死（restore/新 turn 及时性）。
+                    // drain 快速路径：8ms 下限在 60Hz/120Hz 屏上逐帧放行，
+                    // 避免 32ms 攒批造成可见的成批吐字。deferred 非空时仍
+                    // 放行小批（/4），单帧总成本由事件上限和 reducer 4ms
+                    // 预算兜底，结构事件也不会被 backlog 长时间阻塞。
                     let drain_gate = last_drain
                         .borrow()
                         .is_none_or(|t| now.duration_since(t) >= DRAIN_INTERVAL);
@@ -611,8 +683,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         }
                     }
                     // 覆盖层/加载态存活期间（后台恢复未完成，或快照未达
-                    // 的加载空态）：每帧推进 shimmer 光带相位并强制渲染
-                    // （无事件也要动起来）。加载态判定与渲染分支一致：
+                    // 的加载空态）：每 90ms 推进 shimmer 光带相位并重渲染
+                    // （无协议事件也要动起来）。加载态判定与渲染分支一致：
                     // turns 空 + seed 非空 + 尚未 restore。
                     let loading_state = {
                         let t = transcript.borrow();
@@ -620,8 +692,13 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             && t.turns().is_empty()
                             && *last_restored_seed.borrow() != seed
                     };
-                    if recovering.borrow().is_some() || loading_state {
-                        *shimmer_tick.borrow_mut() += 1;
+                    if (recovering.borrow().is_some() || loading_state)
+                        && now.duration_since(*last_shimmer_step.borrow())
+                            >= SHIMMER_STEP_INTERVAL
+                    {
+                        *last_shimmer_step.borrow_mut() = now;
+                        let next_shimmer_tick = shimmer_tick.borrow().wrapping_add(1);
+                        *shimmer_tick.borrow_mut() = next_shimmer_tick;
                         *render_generation.borrow_mut() += 1;
                         set_render_generation.call(*render_generation.borrow());
                     }
@@ -713,7 +790,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 顶部预加载后本帧需要锚定补偿：取走挂起标记，把
     // 「原窗口首行」（新下标 = 扩展前移量）锚回原位，视口不跳。
     let anchor_rows = pending_anchor.borrow_mut().take();
-    let mut builder = list_view_rc(turns, move |turn: &Rc<TurnView>, i: usize| {
+    let mut builder = list_view_rc(turns, move |turn: &Rc<TurnView>, _i: usize| {
         // turn 级 memo：mutation_rev 未变 → reconciler 完全跳过 turn_view
         // （不深克隆 RichTextParagraph / 不重跑代码高亮 / 不 diff 行内部），
         // 只有本 turn 内容变化才重建。每次 XAML 提交从「重建整个可见
@@ -722,7 +799,6 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             turn_memo,
             TurnProps {
                 turn: turn.clone(),
-                index: i,
                 color_scheme: color_scheme.clone(),
             },
         )
@@ -833,6 +909,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         })
         .top_threshold(NEAR_TOP_THRESHOLD_PX)
         .with_key(format!("chat-transcript-{active_seed}"))
+        .transition(motion::session_enter(), motion::session_exit())
         .into();
     // 显式跟随入口：Idle 时浮层"回到最新"按钮（点击 → force_tail +
     // 重新跟随；跟随态隐藏，不挡内容）
@@ -878,7 +955,6 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         .rows([GridLength::Star(1.0)])
         .into();
     transcript
-        .transition(motion::session_enter(), motion::session_exit())
         .automation_name("对话记录")
         .automation_id("chat-transcript")
 }
@@ -948,26 +1024,97 @@ mod session_cache_tests {
 #[derive(Clone)]
 struct TurnProps {
     turn: Rc<TurnView>,
-    index: usize,
     color_scheme: ColorScheme,
 }
 
 impl PartialEq for TurnProps {
     fn eq(&self, other: &Self) -> bool {
-        self.index == other.index
-            && self.color_scheme == other.color_scheme
+        self.color_scheme == other.color_scheme
             && (Rc::ptr_eq(&self.turn, &other.turn)
                 || (self.turn.turn_id == other.turn.turn_id
                     && self.turn.mutation_rev == other.turn.mutation_rev))
     }
 }
 
-/// turn 渲染的 memo 组件：props 等价时 reconciler 跳过执行（复用旧输出）。
+/// 外层 memo 先截断未变化 turn；只有 props 变化时才重建 ErrorBoundary。
+/// 实际 turn 声明放在边界的子组件中，确保声明阶段 panic 也能被捕获。
 fn turn_memo(props: &TurnProps, _cx: &mut RenderCx) -> Element {
-    turn_view(props.index, props.turn.as_ref(), props.color_scheme.clone())
+    let fallback_turn_id = props.turn.turn_id.clone();
+    error_boundary(component(turn_body, props.clone()), move |_message| {
+        turn_render_fallback(&fallback_turn_id)
+    })
+    .with_key(format!("{}-boundary", props.turn.turn_id))
 }
 
-fn turn_view(i: usize, turn: &TurnView, color_scheme: ColorScheme) -> Element {
+fn turn_body(props: &TurnProps, _cx: &mut RenderCx) -> Element {
+    turn_view(props.turn.as_ref(), props.color_scheme.clone())
+}
+
+fn turn_render_fallback(turn_id: &str) -> Element {
+    vstack((
+        text_block("此回合暂时无法渲染")
+            .font_size(tokens::TYPE_BODY)
+            .foreground(ThemeRef::SystemCritical)
+            .wrap()
+            .automation_name("回合渲染失败"),
+        text_block("内容已被隔离；后续状态更新会自动重试。")
+            .font_size(tokens::TYPE_CAPTION)
+            .foreground(ThemeRef::SecondaryText)
+            .wrap(),
+    ))
+    .spacing(tokens::SPACE_2)
+    .padding(Thickness::uniform(tokens::SPACE_4))
+    .max_width(tokens::CONVERSATION_MAX_WIDTH)
+    .horizontal_alignment(HorizontalAlignment::Stretch)
+    .with_key(format!("{turn_id}-render-fallback"))
+    .into()
+}
+
+#[derive(Clone)]
+struct RoundProps {
+    turn_id: Rc<str>,
+    round: Rc<RoundView>,
+    turn_status: TurnStatus,
+    is_latest: bool,
+    color_scheme: ColorScheme,
+}
+
+impl PartialEq for RoundProps {
+    fn eq(&self, other: &Self) -> bool {
+        self.turn_id == other.turn_id
+            && self.turn_status == other.turn_status
+            && self.is_latest == other.is_latest
+            && self.color_scheme == other.color_scheme
+            && (Rc::ptr_eq(&self.round, &other.round)
+                || (self.round.round_num == other.round.round_num
+                    && self.round.mutation_rev == other.round.mutation_rev))
+    }
+}
+
+fn round_memo(props: &RoundProps, cx: &mut RenderCx) -> Element {
+    let auto_expanded =
+        activity_presentation(props.round.as_ref(), props.turn_status, props.is_latest)
+            .is_some_and(|presentation| presentation.state == ActivityState::Running);
+    let (activity_expanded, set_activity_expanded) = cx.use_state(auto_expanded);
+    cx.use_effect(auto_expanded, {
+        let set_activity_expanded = set_activity_expanded.clone();
+        move || set_activity_expanded.call(auto_expanded)
+    });
+    // 表格行悬停状态：按 round 隔离，组件销毁即随历史释放。
+    let table_hover = TableHover::new(cx);
+    round_view(
+        props.turn_id.as_ref(),
+        props.round.as_ref(),
+        props.turn_status,
+        props.is_latest,
+        activity_expanded,
+        set_activity_expanded,
+        &table_hover,
+        props.color_scheme.clone(),
+    )
+}
+
+fn turn_view(turn: &TurnView, color_scheme: ColorScheme) -> Element {
     let (status, tone) = match turn.status {
         TurnStatus::Running => ("正在处理", StatusTone::Running),
         TurnStatus::Completed => ("已完成", StatusTone::Success),
@@ -990,13 +1137,27 @@ fn turn_view(i: usize, turn: &TurnView, color_scheme: ColorScheme) -> Element {
                     .wrap()
                     .selectable()
                     .automation_name("回合失败详情")
-                    .with_key(format!("t{i}-failed-error"))
+                    .with_key(format!("{}-failed-error", turn.turn_id))
                     .into(),
             );
         }
     }
-    for round in &turn.rounds {
-        items.push(round_view(i, round, color_scheme));
+    let turn_id: Rc<str> = Rc::from(turn.turn_id.as_str());
+    let round_count = turn.rounds.len();
+    for (round_index, round) in turn.rounds.iter().enumerate() {
+        items.push(
+            memo(
+                round_memo,
+                RoundProps {
+                    turn_id: turn_id.clone(),
+                    round: round.clone(),
+                    turn_status: turn.status,
+                    is_latest: round_index + 1 == round_count,
+                    color_scheme: color_scheme.clone(),
+                },
+            )
+            .with_key(format!("{}-round-{}", turn.turn_id, round.round_num)),
+        );
     }
     vstack(items)
         .spacing(tokens::SPACE_3)
@@ -1012,53 +1173,44 @@ fn turn_view(i: usize, turn: &TurnView, color_scheme: ColorScheme) -> Element {
         .into()
 }
 
-fn round_view(turn_idx: usize, round: &RoundView, color_scheme: ColorScheme) -> Element {
+fn round_view(
+    turn_id: &str,
+    round: &RoundView,
+    turn_status: TurnStatus,
+    is_latest: bool,
+    activity_expanded: bool,
+    set_activity_expanded: SetState<bool>,
+    table_hover: &TableHover,
+    color_scheme: ColorScheme,
+) -> Element {
     let mut items: Vec<Element> = Vec::new();
-    if let Some(thinking) = &round.thinking {
-        // 斜体 RichTextBlock（思考链专用；TextBlock 不支持 FontStyle）。
-        let mut run = RichTextRun::plain(thinking);
-        run.is_italic = true;
-        let mut rt = RichTextBlock::new();
-        rt.paragraphs = vec![RichTextParagraph::new(vec![RichTextInline::Run(run)])];
-        rt.font_size = Some(tokens::TYPE_BODY);
-        rt.line_height = Some(tokens::TYPE_BODY_LINE_HEIGHT);
-        rt.text_wrapping = TextWrapping::Wrap;
-        rt.is_text_selection_enabled = true;
-        // RichTextBlock 不参与 XAML 字体属性继承（host 全局字体只覆盖
-        // TextBlock 系），必须显式指定 UI 字体，否则 fallback 系统字体。
-        rt.modifiers.font_family = Some(tokens::DEFAULT_UI_FONT_FAMILY.to_string());
-        items.push(
-            Expander::new(rt)
-                .header("思考过程")
-                .expanded(true)
-                // WinUI's default ExpanderMinHeight is 48 DIP (settings-card
-                // density). Transcript disclosure rows use the native template at
-                // a compact desktop height while preserving its animation/UIA.
-                .min_height(36.0)
-                .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2))
-                .tooltip("展开或折叠思考过程")
-                .automation_name("思考过程")
-                .automation_id(format!("chat-thinking-{turn_idx}-{}", round.round_num))
-                .with_key(format!("t{turn_idx}r{}-thinking", round.round_num))
-                .into(),
-        );
+    if let Some(activity) = activity_group(
+        turn_id,
+        round,
+        turn_status,
+        is_latest,
+        activity_expanded,
+        set_activity_expanded,
+        color_scheme.clone(),
+    ) {
+        items.push(activity);
     }
-    for card in &round.tool_calls {
-        items.push(tool_card(turn_idx, round.round_num, card, color_scheme));
+    if answer_has_visible_content(&round.answer) {
+        items.push(deepx_fluent::assistant_message(answer_view(
+            turn_id,
+            round.round_num,
+            &round.answer,
+            table_hover,
+            color_scheme,
+        )));
     }
-    items.push(deepx_fluent::assistant_message(answer_view(
-        turn_idx,
-        round.round_num,
-        &round.answer,
-        color_scheme,
-    )));
     if round.output_loading {
         items.push(
             text_block("正在读取完整回答…")
                 .font_size(tokens::TYPE_CAPTION)
                 .foreground(ThemeRef::SecondaryText)
                 .automation_name("正在读取完整回答")
-                .with_key(format!("t{turn_idx}r{}-output-loading", round.round_num))
+                .with_key(format!("{turn_id}-r{}-output-loading", round.round_num))
                 .into(),
         );
     }
@@ -1070,7 +1222,7 @@ fn round_view(turn_idx: usize, round: &RoundView, color_scheme: ColorScheme) -> 
                 .wrap()
                 .selectable()
                 .automation_name("完整回答读取失败")
-                .with_key(format!("t{turn_idx}r{}-output-error", round.round_num))
+                .with_key(format!("{turn_id}-r{}-output-error", round.round_num))
                 .into(),
         );
     }
@@ -1078,25 +1230,221 @@ fn round_view(turn_idx: usize, round: &RoundView, color_scheme: ColorScheme) -> 
         .spacing(tokens::SPACE_2)
         .max_width(tokens::READING_MAX_WIDTH)
         .horizontal_alignment(HorizontalAlignment::Stretch)
-        .with_key(format!("t{turn_idx}r{}", round.round_num))
+        .with_key(format!("{turn_id}-r{}-body", round.round_num))
         .into()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivityState {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActivityPresentation {
+    state: ActivityState,
+    title: String,
+    meta: String,
+}
+
+fn activity_presentation(
+    round: &RoundView,
+    turn_status: TurnStatus,
+    is_latest: bool,
+) -> Option<ActivityPresentation> {
+    let has_thinking = round
+        .thinking
+        .as_deref()
+        .is_some_and(|thinking| !thinking.trim().is_empty());
+    if !has_thinking && round.tool_calls.is_empty() {
+        return None;
+    }
+
+    let has_running_tool = round.tool_calls.iter().any(|card| !card.done);
+    let state = if has_running_tool || (is_latest && turn_status == TurnStatus::Running) {
+        ActivityState::Running
+    } else if is_latest && turn_status == TurnStatus::Failed {
+        ActivityState::Failed
+    } else {
+        ActivityState::Completed
+    };
+    let current_action = round
+        .tool_calls
+        .iter()
+        .rev()
+        .find(|card| !card.done)
+        .or_else(|| round.tool_calls.last())
+        .map(tool_action)
+        .unwrap_or_else(|| "整理过程摘要".to_string());
+    let title = match state {
+        ActivityState::Running => format!("正在{current_action}"),
+        ActivityState::Completed if round.tool_calls.len() > 1 => {
+            format!("已完成 · {current_action}等操作")
+        }
+        ActivityState::Completed => format!("已完成 · {current_action}"),
+        ActivityState::Failed => format!("处理未完成 · {current_action}"),
+    };
+    let meta = match (round.tool_calls.len(), has_thinking) {
+        (0, _) => "过程摘要".to_string(),
+        (count, true) => format!("{count} 次工具调用 · 含摘要"),
+        (count, false) => format!("{count} 次工具调用"),
+    };
+    Some(ActivityPresentation { state, title, meta })
+}
+
+fn activity_group(
+    turn_id: &str,
+    round: &RoundView,
+    turn_status: TurnStatus,
+    is_latest: bool,
+    expanded: bool,
+    set_expanded: SetState<bool>,
+    color_scheme: ColorScheme,
+) -> Option<Element> {
+    let presentation = activity_presentation(round, turn_status, is_latest)?;
+    let (glyph, status_color) = match presentation.state {
+        ActivityState::Running => ("●", ThemeRef::SystemCaution),
+        ActivityState::Completed => ("✓", ThemeRef::SystemSuccess),
+        ActivityState::Failed => ("×", ThemeRef::SystemCritical),
+    };
+    let header = grid((
+        text_block(glyph)
+            .font_size(tokens::TYPE_CAPTION)
+            .foreground(status_color)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(0),
+        text_block(&presentation.title)
+            .font_size(tokens::TYPE_CAPTION)
+            .semibold()
+            .text_trimming(TextTrimming::CharacterEllipsis)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(1),
+        text_block(&presentation.meta)
+            .font_size(tokens::TYPE_CAPTION)
+            .foreground(ThemeRef::SecondaryText)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(2),
+    ))
+    .columns([GridLength::Pixel(16.0), GridLength::STAR, GridLength::Auto])
+    .column_spacing(tokens::SPACE_2)
+    .horizontal_alignment(HorizontalAlignment::Stretch);
+
+    let mut details: Vec<Element> = Vec::new();
+    if let Some(thinking) = round
+        .thinking
+        .as_deref()
+        .filter(|thinking| !thinking.trim().is_empty())
+    {
+        // 过程文本留在活动组内，不再单独占据一个常态展开的卡片。
+        let mut run = RichTextRun::plain(thinking);
+        run.is_italic = true;
+        let mut summary = RichTextBlock::new();
+        summary.paragraphs = vec![RichTextParagraph::new(vec![RichTextInline::Run(run)])];
+        summary.font_size = Some(tokens::TYPE_BODY);
+        summary.line_height = Some(tokens::TYPE_BODY_LINE_HEIGHT);
+        summary.text_wrapping = TextWrapping::Wrap;
+        summary.is_text_selection_enabled = true;
+        // RichTextBlock 不参与 XAML 字体属性继承，继续显式使用应用 UI 字体。
+        summary.modifiers.font_family = Some(tokens::DEFAULT_UI_FONT_FAMILY.to_string());
+        details.push(
+            vstack((
+                text_block("过程摘要")
+                    .font_size(tokens::TYPE_CAPTION)
+                    .semibold()
+                    .foreground(ThemeRef::SecondaryText),
+                Element::from(summary).with_key(format!("{turn_id}-r{}-thinking", round.round_num)),
+            ))
+            .spacing(tokens::SPACE_1)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .with_key(format!("{turn_id}-r{}-thinking-group", round.round_num))
+            .into(),
+        );
+    }
+    if !round.tool_calls.is_empty() {
+        details.push(
+            text_block("工具详情")
+                .font_size(tokens::TYPE_CAPTION)
+                .semibold()
+                .foreground(ThemeRef::SecondaryText)
+                .with_key(format!("{turn_id}-r{}-tools-heading", round.round_num))
+                .into(),
+        );
+        for card in &round.tool_calls {
+            details.push(tool_card(
+                turn_id,
+                round.round_num,
+                card,
+                color_scheme.clone(),
+            ));
+        }
+    }
+
+    let automation_name = format!("{}，{}", presentation.title, presentation.meta);
+    Some(
+        Expander::new(
+            vstack(details)
+                .spacing(tokens::SPACE_2)
+                .padding(Thickness {
+                    left: tokens::SPACE_2,
+                    top: tokens::SPACE_1,
+                    right: 0.0,
+                    bottom: tokens::SPACE_2,
+                })
+                .horizontal_alignment(HorizontalAlignment::Stretch),
+        )
+        .header_content(header)
+        .expanded(expanded)
+        .on_expanding(set_expanded)
+        .min_height(40.0)
+        .padding(Thickness::xy(tokens::SPACE_2, tokens::SPACE_1))
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .tooltip("展开或折叠本轮活动详情")
+        .automation_name(automation_name)
+        .automation_id(format!("chat-activity-{turn_id}-{}", round.round_num))
+        .with_key(format!("{turn_id}-r{}-activity", round.round_num))
+        .into(),
+    )
+}
+
+fn answer_has_visible_content(answer: &AnswerView) -> bool {
+    match answer {
+        AnswerView::Streaming { raw, .. } => !raw.trim().is_empty(),
+        AnswerView::Final { blocks, rich } => {
+            !blocks.is_empty()
+                || !rich.paragraphs.is_empty()
+                || !rich.code_blocks.is_empty()
+                || !rich.diagrams.is_empty()
+                || !rich.tables.is_empty()
+        }
+    }
+}
+
 fn answer_view(
-    turn_idx: usize,
+    turn_id: &str,
     round_num: u32,
     answer: &AnswerView,
+    table_hover: &TableHover,
     color_scheme: ColorScheme,
 ) -> Element {
     match answer {
-        AnswerView::Streaming { segments, .. } => live_view(turn_idx, round_num, segments),
-        AnswerView::Final { rich, .. } => final_view(turn_idx, round_num, rich, color_scheme),
+        AnswerView::Streaming { segments, .. } => {
+            live_view(turn_id, round_num, segments, table_hover)
+        }
+        AnswerView::Final { rich, .. } => {
+            final_view(turn_id, round_num, rich, table_hover, color_scheme)
+        }
     }
 }
 
 /// 流式答案视图：字面/表格交错序列按序渲染
 /// （协议表格渐进长出；残行逐字生长在网格末行）。
-fn live_view(turn_idx: usize, round_num: u32, segments: &[LiveSegment]) -> Element {
+fn live_view(
+    turn_id: &str,
+    round_num: u32,
+    segments: &[LiveSegment],
+    table_hover: &TableHover,
+) -> Element {
     let mut items: Vec<Element> = Vec::new();
     for (si, seg) in segments.iter().enumerate() {
         match seg {
@@ -1106,12 +1454,13 @@ fn live_view(turn_idx: usize, round_num: u32, segments: &[LiveSegment]) -> Eleme
                     .line_height(tokens::TYPE_BODY_LINE_HEIGHT)
                     .wrap()
                     .selectable()
-                    .with_key(format!("t{turn_idx}r{round_num}-live-t{si}"))
+                    .with_key(format!("{turn_id}-r{round_num}-live-t{si}"))
                     .into(),
             ),
             LiveSegment::Table(td) => items.push(markdown_winui::table_view(
                 td,
-                &format!("t{turn_idx}r{round_num}-live-table-{si}"),
+                &format!("{turn_id}-r{round_num}-live-table-{si}"),
+                Some(table_hover),
             )),
             LiveSegment::Text(_) => {}
         }
@@ -1120,22 +1469,23 @@ fn live_view(turn_idx: usize, round_num: u32, segments: &[LiveSegment]) -> Eleme
         // 空内容：占位保持 key 稳定
         items.push(
             text_block("")
-                .with_key(format!("t{turn_idx}r{round_num}-live"))
+                .with_key(format!("{turn_id}-r{round_num}-live-empty"))
                 .into(),
         );
     }
     vstack(items)
         .spacing(tokens::SPACE_2)
-        .with_key(format!("t{turn_idx}r{round_num}-live"))
+        .with_key(format!("{turn_id}-r{round_num}-live"))
         .into()
 }
 
 /// 权威终态视图：按文档块顺序渲染（正文/表格/代码块交错），
 /// 连续段落合并进同一 RichTextBlock，遇表格/代码块/图表断开。
 fn final_view(
-    turn_idx: usize,
+    turn_id: &str,
     round_num: u32,
     rich: &RichTextOutput,
+    table_hover: &TableHover,
     color_scheme: ColorScheme,
 ) -> Element {
     let mut items: Vec<Element> = Vec::new();
@@ -1164,7 +1514,8 @@ fn final_view(
                     flush(&mut items, &mut pending);
                     items.push(markdown_winui::table_view(
                         td,
-                        &format!("t{turn_idx}r{round_num}-table-{n}", n = items.len()),
+                        &format!("{turn_id}-r{round_num}-table-{n}", n = items.len()),
+                        Some(table_hover),
                     ));
                 }
                 markdown_winui::FinalBlock::Code(code) => {
@@ -1177,15 +1528,17 @@ fn final_view(
                     items.push(deepx_fluent::code_surface_content(
                         code.lang.as_deref().unwrap_or(""),
                         highlighted,
-                        format!("t{turn_idx}r{round_num}-code-{n}", n = items.len()),
+                        format!("{turn_id}-r{round_num}-code-{n}", n = items.len()),
                     ));
                 }
                 markdown_winui::FinalBlock::Diagram(diagram) => {
                     flush(&mut items, &mut pending);
+                    let key = format!("{turn_id}-r{round_num}-diagram-{n}", n = items.len());
                     items.push(markdown_winui::diagram_view(
                         diagram,
                         color_scheme,
-                        &format!("t{turn_idx}r{round_num}-diagram-{n}", n = items.len()),
+                        &key,
+                        Some(zoom_request_callback(diagram, color_scheme, &key)),
                     ));
                 }
             }
@@ -1206,7 +1559,8 @@ fn final_view(
         for (ti, table) in rich.tables.iter().enumerate() {
             items.push(markdown_winui::table_view(
                 table,
-                &format!("t{turn_idx}r{round_num}-table-{ti}"),
+                &format!("{turn_id}-r{round_num}-table-{ti}"),
+                Some(table_hover),
             ));
         }
         for (ci, code) in rich.code_blocks.iter().enumerate() {
@@ -1218,29 +1572,87 @@ fn final_view(
             items.push(deepx_fluent::code_surface_content(
                 code.lang.as_deref().unwrap_or(""),
                 highlighted,
-                format!("t{turn_idx}r{round_num}-code-{ci}"),
+                format!("{turn_id}-r{round_num}-code-{ci}"),
             ));
         }
         for (di, diagram) in rich.diagrams.iter().enumerate() {
+            let key = format!("{turn_id}-r{round_num}-diagram-{di}");
             items.push(markdown_winui::diagram_view(
                 diagram,
                 color_scheme,
-                &format!("t{turn_idx}r{round_num}-diagram-{di}"),
+                &key,
+                Some(zoom_request_callback(diagram, color_scheme, &key)),
             ));
         }
     }
     vstack(items)
         .spacing(tokens::SPACE_3)
         .transition(motion::content_enter(), None)
-        .with_key(format!("t{turn_idx}r{round_num}-final"))
+        .with_key(format!("{turn_id}-r{round_num}-final"))
         .into()
 }
 
 /// 工具卡（流式累积，id 稳定）。折叠器承载：
-/// header = 状态 + 工具名；展开 = 参数 raw（DeepX 工具）或
+/// header = 状态 + 语义动作 + 目标摘要；展开 = 参数 raw（DeepX 工具）或
 /// 执行状态（provider 内建工具，如 web_search 搜索中…）。
+fn tool_action(card: &markdown_winui::ToolCardView) -> String {
+    let Some(name) = card.name.as_deref() else {
+        return "解析工具调用".to_string();
+    };
+    let short_name = name
+        .rsplit(|ch| matches!(ch, '.' | ':' | '/'))
+        .next()
+        .unwrap_or(name);
+    match short_name.to_ascii_lowercase().as_str() {
+        "exec" | "exec_command" | "shell" | "shell_command" => "运行命令".to_string(),
+        "read" | "read_file" => "读取文件".to_string(),
+        "write" | "write_file" => "写入文件".to_string(),
+        "apply_patch" | "edit" | "edit_file" => "修改文件".to_string(),
+        "grep" | "rg" | "search_files" | "search_text" => "搜索内容".to_string(),
+        "web_search" | "search_query" => "搜索网页".to_string(),
+        "view_image" | "open_image" => "查看图片".to_string(),
+        "list_files" | "list_directory" => "列出文件".to_string(),
+        _ => format!("调用 {short_name}"),
+    }
+}
+
+fn compact_preview(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    let mut preview = compact
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    preview.push('…');
+    preview
+}
+
+fn tool_argument_hint(card: &markdown_winui::ToolCardView) -> Option<String> {
+    let raw = card.args_json.as_deref()?;
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    const HINT_KEYS: [&str; 8] = [
+        "path", "file", "command", "query", "q", "pattern", "url", "name",
+    ];
+    if let serde_json::Value::Object(args) = &value {
+        for key in HINT_KEYS {
+            if let Some(value) = args.get(key).and_then(serde_json::Value::as_str) {
+                let preview = compact_preview(value, 52);
+                if !preview.is_empty() {
+                    return Some(preview);
+                }
+            }
+        }
+    }
+    value
+        .as_str()
+        .map(|value| compact_preview(value, 52))
+        .filter(|value| !value.is_empty())
+}
+
 fn tool_card(
-    turn_idx: usize,
+    turn_id: &str,
     round_num: u32,
     card: &markdown_winui::ToolCardView,
     color_scheme: ColorScheme,
@@ -1250,8 +1662,12 @@ fn tool_card(
     } else {
         "正在运行"
     };
-    let name = card.name.as_deref().unwrap_or("<解析中>");
-    let content_key = format!("t{turn_idx}r{round_num}-card-{}-body", card.id);
+    let name = card.name.as_deref().unwrap_or("解析中");
+    let action = tool_action(card);
+    let action_label = tool_argument_hint(card)
+        .map(|hint| format!("{action} · {hint}"))
+        .unwrap_or(action);
+    let content_key = format!("{turn_id}-r{round_num}-card-{}-body", card.id);
     let body: Element = if !matches!(card.body, markdown_winui::ToolBody::Empty) {
         markdown_winui::tool_body_view(
             &card.body,
@@ -1272,19 +1688,90 @@ fn tool_card(
         .changes
         .as_ref()
         .filter(|changes| !changes.is_empty())
-        .map(|changes| format!("{status} · {name} · {}", changes.label()))
-        .unwrap_or_else(|| format!("{status} · {name}"));
+        .map(|changes| format!("{status} · {action_label} · {}", changes.label()))
+        .unwrap_or_else(|| format!("{status} · {action_label}"));
     Expander::new(body)
         .header(header)
         .expanded(false)
         .min_height(36.0)
         .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2))
+        .horizontal_alignment(HorizontalAlignment::Stretch)
         .tooltip(format!("展开或折叠工具详情：{name}"))
-        .automation_name(format!("工具 {name}，{status}"))
+        .automation_name(format!("{action_label}，{status}"))
         .automation_id(format!("chat-tool-{}", card.id))
         .transition(motion::reveal(), motion::content_exit())
-        .with_key(format!("t{turn_idx}r{round_num}-card-{}", card.id))
+        .with_key(format!("{turn_id}-r{round_num}-card-{}", card.id))
         .into()
+}
+
+#[cfg(test)]
+mod activity_group_tests {
+    use super::*;
+
+    fn card(name: &str, args_json: Option<&str>, done: bool) -> markdown_winui::ToolCardView {
+        markdown_winui::ToolCardView {
+            id: format!("{name}-1"),
+            name: Some(name.to_string()),
+            args_display: String::new(),
+            args_json: args_json.map(str::to_string),
+            body: markdown_winui::ToolBody::Empty,
+            changes: None,
+            done,
+            provider: false,
+        }
+    }
+
+    #[test]
+    fn completed_round_collapses_to_one_activity_summary() {
+        let mut round = RoundView::default();
+        round.thinking = Some("核对配置".into());
+        round.tool_calls = vec![card("exec", None, true), card("read_file", None, true)];
+
+        let presentation = activity_presentation(&round, TurnStatus::Completed, true)
+            .expect("round should expose activity");
+        assert_eq!(presentation.state, ActivityState::Completed);
+        assert_eq!(presentation.meta, "2 次工具调用 · 含摘要");
+        assert!(presentation.title.starts_with("已完成"));
+    }
+
+    #[test]
+    fn active_latest_round_opens_even_before_a_tool_is_created() {
+        let mut round = RoundView::default();
+        round.thinking = Some("正在规划".into());
+
+        let presentation = activity_presentation(&round, TurnStatus::Running, true)
+            .expect("thinking should expose activity");
+        assert_eq!(presentation.state, ActivityState::Running);
+        assert_eq!(presentation.title, "正在整理过程摘要");
+        assert_eq!(presentation.meta, "过程摘要");
+    }
+
+    #[test]
+    fn tool_header_uses_semantic_action_and_argument_hint() {
+        let tool = card(
+            "functions.exec",
+            Some(r#"{"command":"cargo test -p deepx-winui"}"#),
+            true,
+        );
+        assert_eq!(tool_action(&tool), "运行命令");
+        assert_eq!(
+            tool_argument_hint(&tool).as_deref(),
+            Some("cargo test -p deepx-winui")
+        );
+    }
+
+    #[test]
+    fn empty_answer_does_not_create_an_assistant_shell() {
+        let empty = AnswerView::default();
+        assert!(!answer_has_visible_content(&empty));
+
+        let visible = AnswerView::Streaming {
+            raw: "答案".into(),
+            inlines: Vec::new(),
+            segments: vec![LiveSegment::Text("答案".into())],
+        };
+        assert!(answer_has_visible_content(&visible));
+    }
 }
 
 /// 诊断日志（窗口程序无控制台：写 %TEMP%）。
@@ -1305,4 +1792,128 @@ fn log_diag(msg: &str) {
                 .unwrap_or(0)
         );
     }
+}
+
+/// 图表放大覆盖层（挂 main.rs 覆盖层 grid，P-6 同 cell 模式）。
+///
+/// 轮询 [`DIAGRAM_ZOOM`] 静态槽（写端在 `final_view` 的图表点击回调），
+/// 80ms 周期；请求出现即弹开全窗实底大图，点遮罩/关闭按钮清除。
+/// 与 interaction_overlay 同款「写端组件 / 读端覆盖层」分离模式。
+pub fn diagram_zoom_overlay(cx: &mut RenderCx) -> Element {
+    // ⚠ hooks 必须在所有条件分支之前（React 规则：zoom=None 提前 return
+    // 时顺序不能变，否则状态错位导致按钮/状态更新不生效）。
+    let (zoom, set_zoom) = cx.use_state::<Option<DiagramZoomRequest>>(None);
+    let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    // 视口跟随主窗口尺寸：宽 78%、高 72%（clamp 到合理范围，窗口极小时不崩）。
+    let win = cx.use_inner_size();
+    let view_w = (win.width * DIAGRAM_ZOOM_W_RATIO).clamp(420.0, 1100.0);
+    let view_h = (win.height * DIAGRAM_ZOOM_H_RATIO).clamp(320.0, 760.0);
+
+    cx.use_effect((), {
+        let set_zoom = set_zoom.clone();
+        let timer = timer.clone();
+        move || {
+            if timer.borrow().is_some() {
+                return;
+            }
+            if let Ok(t) = DispatcherTimer::new(Duration::from_millis(80), move || {
+                if let Ok(slot) = DIAGRAM_ZOOM.lock()
+                    && let Some(req) = slot.as_ref()
+                {
+                    let req = req.clone();
+                    set_zoom.call(Some(req));
+                }
+            }) {
+                *timer.borrow_mut() = Some(t);
+            }
+        }
+    });
+
+    let Some(req) = zoom else {
+        // 无请求：空 grid（无背景 → 不参与命中测试，点击穿透，同 splash）。
+        return grid(()).into();
+    };
+
+    // 关闭：清本地 state + 清静态槽（下次点击同一图表可重新弹开）。
+    let close = {
+        let set_zoom = set_zoom.clone();
+        move || {
+            set_zoom.call(None);
+            if let Ok(mut slot) = DIAGRAM_ZOOM.lock() {
+                *slot = None;
+            }
+        }
+    };
+
+    // fit 基准：完整图缩放进视口（小图不放大），原生 ZoomMode 在此基础上
+    // 放大（Ctrl+滚轮 / 触摸捏合），放大后由 ScrollViewer 滚动查看细节。
+    let fit = (view_w / req.width.max(1.0))
+        .min(view_h / req.height.max(1.0))
+        .min(1.0);
+    let img_w = (req.width * fit).max(1.0);
+    let img_h = (req.height * fit).max(1.0);
+
+    let esc = KeyboardAccelerator::new(
+        VirtualKey::Escape,
+        VirtualKeyModifiers::None,
+        close.clone(),
+    );
+    let card: Element = border(
+        vstack((
+            hstack((
+                text_block(&req.label)
+                    .semibold()
+                    .vertical_alignment(VerticalAlignment::Center),
+                button("✕ 关闭")
+                    .on_click(close.clone())
+                    .vertical_alignment(VerticalAlignment::Center),
+            ))
+            .spacing(12.0),
+            scroll_viewer(
+                border(
+                    Image::new(ImageSource::svg(req.svg))
+                        .stretch(Stretch::Uniform)
+                        .width(img_w)
+                        .height(img_h),
+                )
+                .background(ThemeRef::CardBackground)
+                .padding(12.0),
+            )
+            .width(view_w)
+            .height(view_h)
+            .horizontal_scroll_bar_visibility(ScrollBarVisibility::Auto)
+            .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+            // 原生缩放：ScrollViewerZoomMode::Enabled（0=Disabled, 1=Enabled）
+            .zoom_mode(1)
+            .min_zoom_factor(1.0)
+            .max_zoom_factor(4.0),
+            text_block("Ctrl+滚轮 / 双指捏合缩放 · Esc 关闭")
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText)
+                .horizontal_alignment(HorizontalAlignment::Center),
+        ))
+        .spacing(12.0)
+        .padding(20.0),
+    )
+    .background(ThemeRef::SolidBackground)
+    .border_brush(ThemeRef::CardStroke)
+    .border_thickness(Thickness::uniform(1.0))
+    .corner_radius(8.0)
+    .keyboard_accelerator(esc)
+    .horizontal_alignment(HorizontalAlignment::Center)
+    .vertical_alignment(VerticalAlignment::Center)
+    .into();
+
+    grid((card,))
+        .rows([GridLength::STAR])
+        .columns([GridLength::STAR])
+        // 半透明遮罩仅作背景降噪（不再拦截点击关闭——卡片内滚动会误触）。
+        .background(Color {
+            a: SCRIM_ALPHA,
+            r: 0,
+            g: 0,
+            b: 0,
+        })
+        .with_key("diagram-zoom-overlay")
+        .into()
 }

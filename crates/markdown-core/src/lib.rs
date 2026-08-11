@@ -13,13 +13,20 @@
 
 pub mod ast;
 pub mod code;
+pub mod gfm_live_table;
 pub mod live;
 pub mod live_table;
+mod markdown_unwrap;
 pub mod math;
 pub mod parse;
+mod table_detect;
+pub mod table_layout;
 
 pub use ast::{Block, Inline, ListItem};
 pub use code::{LANGUAGES, is_supported, normalize_lang};
+pub use gfm_live_table::GfmTableTracker;
 pub use live::parse_live;
+pub use live_table::{LiveTableTracker, TableHiddenSpan, TableSnapshot};
 pub use math::{MathSpan, scan_math};
 pub use parse::parse_final;
+pub use table_layout::{ColumnKind, ColumnMetrics, collect_column_metrics, compute_column_widths, display_width};

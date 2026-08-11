@@ -22,7 +22,9 @@ fn copy_dir(source: &Path, destination: &Path) {
 }
 
 fn stage_app_assets() {
-    let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let manifest_dir = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set"),
+    );
     let source = manifest_dir.join("assets");
     println!("cargo:rerun-if-changed={}", source.display());
 
@@ -30,7 +32,8 @@ fn stage_app_assets() {
     // resolves ms-appx:/// content relative to target/<profile> in unpackaged
     // development runs, so keep the same Assets layout used by the release
     // assembler.
-    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let out_dir =
+        PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is always set"));
     let profile_dir = out_dir
         .ancestors()
         .nth(3)

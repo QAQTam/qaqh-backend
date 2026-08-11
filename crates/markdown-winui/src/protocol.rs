@@ -160,6 +160,25 @@ impl ConversationEvent {
             Self::Unknown => "",
         }
     }
+
+    /// Event target round, when the event mutates round-local presentation
+    /// state. Turn lifecycle events intentionally return `None`.
+    pub fn round_num(&self) -> Option<u32> {
+        match self {
+            Self::RoundDelta { round_num, .. }
+            | Self::BlockCheckpoint { round_num, .. }
+            | Self::ProviderToolStatus { round_num, .. }
+            | Self::ToolCallPrepared { round_num, .. }
+            | Self::ToolStarted { round_num, .. }
+            | Self::ToolFinished { round_num, .. }
+            | Self::CodeChanged { round_num, .. }
+            | Self::RoundCompleted { round_num, .. } => Some(*round_num),
+            Self::TurnStarted { .. }
+            | Self::TurnCompleted { .. }
+            | Self::TurnFailed { .. }
+            | Self::Unknown => None,
+        }
+    }
 }
 
 #[cfg(test)]

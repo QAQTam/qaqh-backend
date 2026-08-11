@@ -12,5 +12,8 @@ markdown-core = { path = "../markdown-core" }
 windows-reactor = { path = "../../../deepx-winui-reactor/crates/libs/reactor" }
 syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+# SvgImageSource（Direct2D SVG）不支持 <text> 元素；usvg 负责把文字轮廓化为
+# <path>（WriteOptions.preserve_text=false 默认行为），纯 Rust、系统字体兜底。
+usvg = "0.47"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

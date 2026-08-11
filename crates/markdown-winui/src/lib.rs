@@ -43,8 +43,9 @@ pub use tool_content::{
 
 use markdown_core::ast::{Block, Inline};
 use windows_reactor::{
-    BackgroundExt, Element, GridChildExt, GridLength, KeyExt, PaddingExt, RichTextBlock, RichTextHyperlink, RichTextInline,
-    RichTextParagraph, RichTextRun, border, grid, text_block,
+    BackgroundExt, Element, GridChildExt, GridLength, InputExt, KeyExt, LayoutExt, PaddingExt,
+    PointerEventInfo, RenderCx, RichTextBlock, RichTextHyperlink, RichTextInline,
+    RichTextParagraph, RichTextRun, TextStyleExt, TextAlignment, Updater, border, grid, text_block,
 };
 
 /// 一段 markdown 的富文本渲染产物：
@@ -499,7 +500,7 @@ mod tests {
     fn table_view_builds_grid() {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |";
         let out = render_final(&markdown_core::parse_final(md));
-        let el = table_view(&out.tables[0], "tbl");
+        let el = table_view(&out.tables[0], "tbl", None);
         let Element::ScrollViewer(scroll) = &el else {
             panic!("expect horizontal scroll viewer");
         };
@@ -510,70 +511,309 @@ mod tests {
             panic!("expect grid inside border");
         };
         assert_eq!(g.columns.len(), 2);
-        // 表头 2 个 + 数据行 2 个 = 4 个子元素
-        assert_eq!(g.children.len(), 4);
-        // 表头单元格携带 grid_row=0（单元格是 Border 卡片）
-        let grid = g.children[0].modifiers().and_then(|m| m.grid.as_ref());
-        assert_eq!(grid.map(|g| g.row), Some(0));
-        assert_eq!(grid.map(|g| g.column), Some(0));
-        // 表头加粗 + 背景（视觉区分）
-        let Element::Border(h0) = &g.children[0] else {
-            panic!("expect border cell");
+        // 全 Star 列（内容比例铺满，无表格右侧空白；见
+        // table_columns_are_content_weighted_star）
+        assert!(
+            g.columns.iter().all(|c| matches!(c, GridLength::Star(_))),
+            "expect star columns, got {:?}",
+            g.columns
+        );
+        // 卡片背景：半透明次级填充（mica 友好），而非纯白 CardBackground
+        let bg = b
+            .modifiers
+            .theme_bindings
+            .as_ref()
+            .and_then(|m| m.get(&windows_reactor::Prop::Background))
+            .map(|t| t.resource_key().to_string());
+        assert_eq!(
+            bg.as_deref(),
+            Some("CardBackgroundFillColorSecondaryBrush"),
+            "表格卡片必须用半透明次级填充"
+        );
+        // 表头行 + 1 数据行 = 2 个跨列行 Border（不再是逐单元格网格）
+        assert_eq!(g.children.len(), 2);
+        // 表头行：grid_row=0、跨全部列、无背景填充
+        let Element::Border(hdr) = &g.children[0] else {
+            panic!("expect header row border");
         };
-        let Element::TextBlock(tb) = &*h0.child else {
-            panic!("expect textblock in cell");
+        let gp = hdr.modifiers.grid.as_ref().expect("header grid placement");
+        assert_eq!(gp.row, 0);
+        assert_eq!(gp.column_span, 2);
+        assert!(
+            hdr.modifiers
+                .theme_bindings
+                .as_ref()
+                .and_then(|m| m.get(&windows_reactor::Prop::Background))
+                .is_none(),
+            "方向 A 表头无填充背景"
+        );
+        // 表头单元格：semibold + 次级色前景
+        let Element::Grid(hg) = &*hdr.child else {
+            panic!("expect inner grid in header row");
         };
-        assert_eq!(tb.font_weight, Some(600));
-        // 数据行单元格 grid_row=1
-        let grid = g.children[2].modifiers().and_then(|m| m.grid.as_ref());
-        assert_eq!(grid.map(|g| g.row), Some(1));
-        assert_eq!(grid.map(|g| g.column), Some(0));
+        assert_eq!(hg.columns.len(), 2);
+        let Element::TextBlock(h0) = &hg.children[0] else {
+            panic!("expect header textblock");
+        };
+        assert_eq!(h0.text, "A");
+        assert_eq!(h0.font_weight, Some(600));
+        let fg = h0
+            .modifiers
+            .theme_bindings
+            .as_ref()
+            .and_then(|m| m.get(&windows_reactor::Prop::Foreground))
+            .map(|t| t.resource_key().to_string());
+        assert_eq!(fg.as_deref(), Some("TextFillColorSecondaryBrush"));
+        // 数据行：grid_row=1、跨列、行间分隔线；数字单元格右对齐
+        let Element::Border(r0) = &g.children[1] else {
+            panic!("expect data row border");
+        };
+        let gp = r0.modifiers.grid.as_ref().expect("row grid placement");
+        assert_eq!(gp.row, 1);
+        assert_eq!(gp.column_span, 2);
+        let Element::Grid(rg) = &*r0.child else {
+            panic!("expect inner grid in data row");
+        };
+        let Element::TextBlock(c0) = &rg.children[0] else {
+            panic!("expect cell textblock");
+        };
+        assert_eq!(c0.text, "1");
+        assert_eq!(
+            c0.text_alignment,
+            Some(windows_reactor::TextAlignment::Right),
+            "数字单元格右对齐"
+        );
+        // hover=None：数据行不注册指针处理器（静态渲染）
+        assert!(
+            r0.modifiers.pointer_handlers.is_none(),
+            "无 hover 状态时不得注册指针处理器"
+        );
+    }
+
+    /// 列宽 = 内容估算的 Star 权重：长内容列权重 > 短内容列。
+    /// 内容少 → 剩余空间按内容比例吸收（无表格右侧空白）；
+    /// 内容多 → 列压缩、单元格换行（不横向爆长）。
+    #[test]
+    fn table_columns_are_content_weighted_star() {
+        let md = "| 状态 | 一个比较长的中文单元格内容说明 |\n|---|---|\n| OK | 短 |";
+        let out = render_final(&markdown_core::parse_final(md));
+        let el = table_view(&out.tables[0], "t", None);
+        let Element::ScrollViewer(scroll) = &el else {
+            panic!("expect scroll viewer");
+        };
+        let Element::Border(b) = &*scroll.child else {
+            panic!("expect border card");
+        };
+        let Element::Grid(g) = &*b.child else {
+            panic!("expect grid inside border");
+        };
+        let [GridLength::Star(w0), GridLength::Star(w1)] = g.columns.as_slice() else {
+            panic!("expect star columns, got {:?}", g.columns);
+        };
+        // 长内容列（col1）权重 > 短内容列（col0）
+        assert!(
+            *w1 > *w0,
+            "长内容列权重应更大: col0={w0} vs col1={w1}"
+        );
+        // 权重不小于 1（空内容列保底）
+        assert!(*w0 >= 1.0 && *w1 >= 1.0);
+    }
+
+    /// 数字/百分比判断：右对齐的数据列语义（大小、进度、统计）。
+    #[test]
+    fn numeric_cells_are_detected() {
+        assert!(!is_numeric_cell("38.4 MB")); // 含单位 → 非纯数字
+        assert!(is_numeric_cell("92%"));
+        assert!(is_numeric_cell("1,234"));
+        assert!(is_numeric_cell("3.14"));
+        assert!(is_numeric_cell("-7"));
+        assert!(!is_numeric_cell("Rust"));
+        assert!(!is_numeric_cell(""));
+        assert!(!is_numeric_cell("1.2.3"));
     }
 }
 
-/// 表格 → reactor Grid 元素树。
+/// 表格行悬停状态：由组件层持有（`use_reducer`），经渲染链透传给
+/// [`table_view`] 只读消费。行 key 由调用方生成（表格 key + 行号）。
 ///
-/// 布局：表头行（row 0，加粗 + 主题背景 + 底部粗线）+ 数据行（row 1..，
-/// 单元格右/下 1px 细线构成网格）；列宽按内容 Auto，并由 ScrollViewer
-/// 处理窄窗口，避免压缩成不可读的多行窄列；整表使用 Fluent 主题资源。
-/// 行/列必须显式定义（WinUI Grid 无定义时 SetRow 会重叠）。
-pub fn table_view(table: &TableData, key: &str) -> Element {
-    let n_cols = table.headers.len().max(1);
-    let n_rows = 1 + table.rows.len();
-    let mut children: Vec<Element> = Vec::new();
+/// 每次渲染时 `rows` 是当前快照；进入/离开回调由行元素注册，内部走
+/// `Updater` 函数式更新（不需要读旧值）。
+#[derive(Clone)]
+pub struct TableHover {
+    rows: std::collections::HashMap<String, bool>,
+    updater: Updater<std::collections::HashMap<String, bool>>,
+}
 
-    // 表头行（row 0）：加粗 + 背景 + 底部粗线
-    for (ci, cell) in table.headers.iter().enumerate() {
-        children.push(table_cell(
-            markdown_core::ast::concat_inlines(cell),
-            format!("{key}-h{ci}"),
-            0,
-            ci as i32,
-            n_cols as i32,
-            n_rows as i32,
-            true,
-        ));
+impl TableHover {
+    /// 在组件渲染函数中创建（hook 调用，顺序必须稳定）。
+    pub fn new(cx: &mut RenderCx) -> Self {
+        let (rows, updater) = cx.use_reducer::<std::collections::HashMap<String, bool>>(
+            std::collections::HashMap::new(),
+        );
+        Self { rows, updater }
     }
-    // 数据行（row 1..）：单元格右/下 1px 细线
-    for (ri, row) in table.rows.iter().enumerate() {
-        for (ci, cell) in row.iter().enumerate() {
-            children.push(table_cell(
-                markdown_core::ast::concat_inlines(cell),
-                format!("{key}-r{ri}c{ci}"),
-                ri as i32 + 1,
-                ci as i32,
-                n_cols as i32,
-                n_rows as i32,
-                false,
-            ));
+
+    /// 某行当前是否悬停。
+    pub fn row_hovered(&self, key: &str) -> bool {
+        self.rows.get(key).copied().unwrap_or(false)
+    }
+
+    /// 行进入悬停的回调（`on_pointer_entered`）。
+    pub fn row_enter(&self, key: String) -> impl Fn(PointerEventInfo) + Clone + 'static {
+        let updater = self.updater.clone();
+        move |_info: PointerEventInfo| {
+            let key = key.clone();
+            updater.call(move |mut rows: std::collections::HashMap<String, bool>| {
+                rows.insert(key, true);
+                rows
+            });
         }
     }
 
-    let cols = std::iter::repeat_n(GridLength::Auto, n_cols);
-    let rows = std::iter::repeat_n(GridLength::Auto, n_rows);
-    let card = border(grid(children).columns(cols).rows(rows))
-        .background(windows_reactor::ThemeRef::CardBackground)
-        .corner_radius(6.0)
+    /// 行离开悬停的回调（`on_pointer_exited`）。
+    pub fn row_leave(&self, key: String) -> impl Fn() + Clone + 'static {
+        let updater = self.updater.clone();
+        move || {
+            let key = key.clone();
+            updater.call(move |mut rows: std::collections::HashMap<String, bool>| {
+                rows.insert(key, false);
+                rows
+            });
+        }
+    }
+}
+
+/// 数字/百分比单元格判断 → 右对齐（大小、进度等数据列）。
+/// 支持 `%` 后缀、千分位逗号、小数（至多一个 `.`）、负数。
+fn is_numeric_cell(s: &str) -> bool {
+    let t = s.trim();
+    let t = t.strip_suffix('%').unwrap_or(t);
+    if t.is_empty() {
+        return false;
+    }
+    let t = t.replace([' ', ','], "");
+    t.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-') && t.matches('.').count() <= 1
+}
+
+/// 表格 → reactor Grid 元素树（现代行分隔线风格）。
+///
+/// 布局：表头行（row 0，无填充、semibold + 次级色，底部 1px 分隔线）+
+/// 数据行（row 1..，行间 1px 分隔线、悬停 `SubtleFill` 整行高亮）。
+/// 无竖线（去 Excel 网格感）；数字列右对齐；主键列（第一列）semibold。
+///
+/// `hover` 为 `Some` 时启用行悬停（由组件层持有状态）；`None` 则静态渲染
+/// （单元测试 / 无需交互的场景）。
+///
+/// 列宽策略（修复「字少右侧空白 / 字多横向爆长」）：
+/// - 每列按内容估算宽度生成 Star 权重（全 Star，无 Auto 列）；
+/// - 内容少：剩余空间按内容比例吸收 → 表格铺满视口，右侧不留白；
+/// - 内容多：列被压缩、单元格换行（wrap）→ 表格保持视口宽，不横向拉长；
+/// - 超长内容（长 URL 等）在 Star 列内换行，不会撑爆表格。
+pub fn table_view(table: &TableData, key: &str, hover: Option<&TableHover>) -> Element {
+    let n_cols = table.headers.len().max(1);
+    let n_rows = 1 + table.rows.len();
+
+    // 列宽：内容分类 + 精确显示宽（Codex 移植，markdown-core::table_layout）。
+    // Star 按内容宽度比例铺满可用宽（方向 A：无表格右侧空白）；字符单元
+    // 权重（ASCII=1/CJK=2）即真实渲染 px 的比例，长内容列份额大属正常。
+    // 压缩能力已就位（compute_column_widths 的 available_width），后续
+    // 接入视口宽度时启用优先级压缩（TokenHeavy 先让 / Compact 保底）。
+    let metrics = markdown_core::table_layout::collect_column_metrics(
+        &table.headers,
+        &table.rows,
+        n_cols,
+    );
+    let widths = markdown_core::table_layout::compute_column_widths(&metrics, None)
+        .unwrap_or_else(|| vec![3; n_cols]);
+    // 列宽 = 内容比例（Star 铺满，无右侧空白）。数字列不做权重上浮
+    // （曾尝试 ×1.5/×2.0，带单位识别生效后数字列被撑到右侧列，回退）。
+    let cols: Vec<GridLength> = widths
+        .iter()
+        .map(|w| GridLength::Star(*w as f64))
+        .collect();
+
+    let mut children: Vec<Element> = Vec::new();
+
+    // 表头行（row 0）：跨列 Border，无背景，底部 1px 分隔线。
+    let mut header_cells: Vec<Element> = Vec::new();
+    for (ci, cell) in table.headers.iter().enumerate() {
+        header_cells.push(
+            text_block(markdown_core::ast::concat_inlines(cell))
+                .wrap()
+                .semibold()
+                .foreground(windows_reactor::ThemeRef::SecondaryText)
+                .grid_column(ci as i32)
+                .with_key(format!("{key}-h{ci}"))
+                .into(),
+        );
+    }
+    children.push(
+        border(grid(header_cells).columns(cols.clone()))
+            .border_brush(windows_reactor::ThemeRef::DividerStroke)
+            .border_thickness(windows_reactor::Thickness {
+                left: 0.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 1.0,
+            })
+            .padding(windows_reactor::Thickness::xy(12.0, 10.0))
+            .grid_row(0)
+            .grid_column_span(n_cols as i32)
+            .with_key(format!("{key}-header"))
+            .into(),
+    );
+
+    // 数据行（row 1..）：跨列 Border，行间 1px 分隔线（末行无），悬停高亮。
+    for (ri, row) in table.rows.iter().enumerate() {
+        let row_key = format!("{key}-r{ri}");
+        let hovered = hover.is_some_and(|h| h.row_hovered(&row_key));
+        let mut cells: Vec<Element> = Vec::new();
+        for (ci, cell) in row.iter().enumerate() {
+            let text = markdown_core::ast::concat_inlines(cell);
+            let mut tb = text_block(text.clone()).wrap();
+            if ci == 0 {
+                // 主键列（第一列）semibold，建立行内层次。
+                tb = tb.semibold();
+            }
+            if is_numeric_cell(&text) {
+                tb.text_alignment = Some(TextAlignment::Right);
+            }
+            cells.push(
+                tb.grid_column(ci as i32)
+                    .with_key(format!("{row_key}c{ci}"))
+                    .into(),
+            );
+        }
+        let mut row_el = border(grid(cells).columns(cols.clone()))
+            .border_brush(windows_reactor::ThemeRef::DividerStroke)
+            .border_thickness(windows_reactor::Thickness {
+                left: 0.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: if ri + 1 < table.rows.len() { 1.0 } else { 0.0 },
+            })
+            .padding(windows_reactor::Thickness::xy(12.0, 10.0))
+            .grid_row(ri as i32 + 1)
+            .grid_column_span(n_cols as i32)
+            .with_key(row_key.clone());
+        if let Some(h) = hover {
+            row_el = row_el
+                .on_pointer_entered(h.row_enter(row_key.clone()))
+                .on_pointer_exited(h.row_leave(row_key.clone()));
+            if hovered {
+                row_el = row_el.background(windows_reactor::ThemeRef::SubtleFill);
+            }
+        }
+        children.push(row_el.into());
+    }
+
+    let rows_def = std::iter::repeat_n(GridLength::Auto, n_rows);
+    let card = border(grid(children).columns(cols).rows(rows_def))
+        // 半透明次级卡片填充：与代码卡片一致，mica 背景下透出质感而非纯白块。
+        .background(windows_reactor::ThemeRef::custom(
+            "CardBackgroundFillColorSecondaryBrush",
+        ))
+        .corner_radius(8.0)
         .border_brush(windows_reactor::ThemeRef::CardStroke)
         .border_thickness(windows_reactor::Thickness::uniform(1.0))
         .with_key(format!("{key}-card"));
@@ -582,35 +822,4 @@ pub fn table_view(table: &TableData, key: &str) -> Element {
         .vertical_scroll_bar_visibility(windows_reactor::ScrollBarVisibility::Disabled)
         .with_key(key)
         .into()
-}
-
-/// 单个表格单元格：Border 描边（右/下 1px；表头底部 2px + 主题背景）。
-/// 最右列去掉右线、最后一行去掉底线，避免与外框双线。
-fn table_cell(
-    text: String,
-    key: String,
-    row: i32,
-    col: i32,
-    n_cols: i32,
-    n_rows: i32,
-    is_header: bool,
-) -> Element {
-    let (bottom, top) = if is_header { (2.0, 1.0) } else { (1.0, 0.0) };
-    let mut tb = text_block(text).wrap().center_aligned();
-    if is_header {
-        tb = tb.semibold();
-    }
-    let mut cell = border(tb)
-        .border_brush(windows_reactor::ThemeRef::CardStroke)
-        .border_thickness(windows_reactor::Thickness {
-            left: 0.0,
-            top,
-            right: if col + 1 < n_cols { 1.0 } else { 0.0 },
-            bottom: if row + 1 < n_rows { bottom } else { 0.0 },
-        })
-        .padding(windows_reactor::Thickness::xy(12.0, 8.0));
-    if is_header {
-        cell = cell.background(windows_reactor::ThemeRef::ControlFillSecondary);
-    }
-    cell.grid_row(row).grid_column(col).with_key(key).into()
 }
