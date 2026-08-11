@@ -156,6 +156,24 @@ mod tests {
     }
 
     #[test]
+    fn prompt_contains_responses_phase_contract() {
+        let prompt = full_system_prompt();
+        assert!(prompt.contains("[USER COMMUNICATION AND RESPONSE PHASES]"));
+        assert!(prompt.contains("`commentary`"));
+        assert!(prompt.contains("`final_answer`"));
+        assert!(prompt.contains("在首次工具调用前先发送一到两句简短 `commentary`"));
+        assert!(prompt.contains("`phase` 是 Responses API assistant item 的传输元数据"));
+        assert!(prompt.contains("不要在正文中显示 `phase=commentary`"));
+    }
+
+    #[test]
+    fn prompt_keeps_hidden_reasoning_out_of_user_visible_output() {
+        let prompt = full_system_prompt();
+        assert!(prompt.contains("内部推理保持隐藏"));
+        assert!(!prompt.contains("使用简体中文思考链进行思考"));
+    }
+
+    #[test]
     fn executable_discovery_reads_directories_without_starting_the_candidate() {
         let root = std::env::temp_dir().join(format!("deepx-shell-probe-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();

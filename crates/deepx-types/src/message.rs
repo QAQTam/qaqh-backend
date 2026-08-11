@@ -56,6 +56,14 @@ pub enum ContentBlock {
         /// The server-executed search action, e.g. {"type": "search"}.
         action: serde_json::Value,
     },
+    /// Opaque output item returned by the Responses API.
+    ///
+    /// This block is protocol state rather than user-visible content. It keeps
+    /// provider-owned fields such as Codex `phase` and reasoning
+    /// `encrypted_content` intact across persistence and tool-loop replay.
+    /// UI projections intentionally ignore it.
+    #[serde(rename = "response_output_item")]
+    ResponseOutputItem { item: serde_json::Value },
 }
 
 impl ContentBlock {
@@ -81,7 +89,8 @@ impl ContentBlock {
 ///
 /// Roles:
 /// - `"user"` — contains `Text`, `Image`, and/or `ToolResult` blocks
-/// - `"assistant"` — contains `Text`, `Reasoning`, and/or `ToolUse` blocks
+/// - `"assistant"` — contains visible `Text`/`Reasoning`/`ToolUse` blocks and
+///   may carry hidden `ResponseOutputItem` protocol state
 /// - `"system"` — system-level context and instructions
 /// - `"tool"` — tool execution results
 ///

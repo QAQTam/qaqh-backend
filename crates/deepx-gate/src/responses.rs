@@ -110,13 +110,34 @@ fn convert_messages_to_input(
                 }));
             }
             "assistant" => {
+                // Responses output items are provider-owned protocol state.
+                // Replay them verbatim so fields that DeepX does not interpret
+                // (notably Codex `phase` and reasoning `encrypted_content`)
+                // survive stateless tool-loop requests.
+                let response_items: Vec<&serde_json::Value> = msg
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::ResponseOutputItem { item } => Some(item),
+                        _ => None,
+                    })
+                    .collect();
+                for item in &response_items {
+                    items.push((*item).clone());
+                }
+                let has_response_type = |expected: &str| {
+                    response_items.iter().any(|item| {
+                        item.get("type").and_then(|value| value.as_str()) == Some(expected)
+                    })
+                };
+
                 // Reasoning blocks → top-level reasoning items, echoed verbatim.
                 // Default on: DeepSeek / MiMo thinking mode requires assistant
                 // reasoning to be passed back when the input continues a tool
                 // loop (ends with function_call_output) — HTTP 400 otherwise;
                 // Kimi K3 / k2.7-code need it for preserved thinking; GLM /
                 // Qwen / MiniMax / OpenAI accept it silently.
-                if compat.echo_reasoning_content {
+                if compat.echo_reasoning_content && !has_response_type("reasoning") {
                     for block in &msg.content {
                         if let ContentBlock::Reasoning { reasoning } = block {
                             if !reasoning.is_empty() {
@@ -145,7 +166,7 @@ fn convert_messages_to_input(
                     })
                     .collect();
 
-                if !text_parts.is_empty() {
+                if !text_parts.is_empty() && !has_response_type("message") {
                     let content: Vec<serde_json::Value> = text_parts
                         .iter()
                         .map(|t| serde_json::json!({"type": "output_text", "text": t}))
@@ -160,6 +181,15 @@ fn convert_messages_to_input(
                 // ToolUse blocks → top-level function_call items
                 for block in &msg.content {
                     if let ContentBlock::ToolUse { id, name, input } = block {
+                        let already_replayed = response_items.iter().any(|item| {
+                            item.get("type").and_then(|value| value.as_str())
+                                == Some("function_call")
+                                && item.get("call_id").and_then(|value| value.as_str())
+                                    == Some(id.as_str())
+                        });
+                        if already_replayed {
+                            continue;
+                        }
                         let args = serde_json::to_string(input).unwrap_or_default();
                         let name = provider_function_name(name, compat);
                         items.push(serde_json::json!({
@@ -177,6 +207,15 @@ fn convert_messages_to_input(
                 if compat.echo_web_search_call {
                     for block in &msg.content {
                         if let ContentBlock::WebSearchCall { id, action } = block {
+                            let already_replayed = response_items.iter().any(|item| {
+                                item.get("type").and_then(|value| value.as_str())
+                                    == Some("web_search_call")
+                                    && item.get("id").and_then(|value| value.as_str())
+                                        == Some(id.as_str())
+                            });
+                            if already_replayed {
+                                continue;
+                            }
                             items.push(serde_json::json!({
                                 "type": "web_search_call",
                                 "id": id,
@@ -553,6 +592,10 @@ struct ResponsesParseState {
     /// Attached to `Done.raw_message` as `WebSearchCall` blocks so the agent
     /// loop can echo them back and the server restores its search results.
     web_search_calls: Vec<(String, serde_json::Value)>,
+    /// Completed Responses output items in provider order. These are attached
+    /// to the assistant message as opaque protocol state and replayed verbatim
+    /// on the next request.
+    response_output_items: Vec<serde_json::Value>,
     usage: Option<deepx_types::UsageInfo>,
     /// Provider compatibility used to reverse function aliases before any
     /// event or persisted message observes the tool name.
@@ -611,6 +654,9 @@ fn emit_done(
     for (id, action) in std::mem::take(&mut state.web_search_calls) {
         content_blocks.push(ContentBlock::WebSearchCall { id, action });
     }
+    for item in std::mem::take(&mut state.response_output_items) {
+        content_blocks.push(ContentBlock::ResponseOutputItem { item });
+    }
     let raw_message = Message {
         msg_id: None,
         role: "assistant".into(),
@@ -655,7 +701,7 @@ fn handle_responses_event(
             }
             EventAction::Continue
         }
-        "response.reasoning_text.delta" => {
+        "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
             if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
                 if delta.is_empty() {
                     return EventAction::Continue;
@@ -692,41 +738,14 @@ fn handle_responses_event(
         }
         "response.output_item.done" => {
             if let Some(item) = data.get("item") {
-                let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if item_type == "function_call" {
-                    let provider_name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    let name = canonical_function_name(provider_name, &state.compat);
-                    let args = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-                    let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
-                    on_event(StreamEvent::ToolCallProgress {
-                        index: state.tool_index,
-                        id: call_id.to_string(),
-                        name: name.clone(),
-                        args_so_far: args.to_string(),
-                    });
-                    // Preserve the completed call so `emit_done` can attach
-                    // ToolUse blocks — the agent loop executes tools from
-                    // Done.raw_message, not from preview events.
-                    let input: serde_json::Value =
-                        serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
-                    if !call_id.is_empty() && !name.is_empty() {
-                        state.tool_uses.push((call_id.to_string(), name, input));
-                    }
-                    state.tool_index += 1;
-                } else if item_type == "web_search_call" {
-                    let call_id = item.get("id").and_then(|c| c.as_str()).unwrap_or("");
-                    let action = item
-                        .get("action")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({"type": "search"}));
-                    if !call_id.is_empty() {
-                        state.web_search_calls.push((call_id.to_string(), action));
-                    }
-                }
+                preserve_completed_output_item(item, state, on_event);
             }
             EventAction::Continue
         }
         "response.completed" => {
+            if let Some(response) = data.get("response") {
+                preserve_terminal_output(response, state, on_event);
+            }
             if let Some(usage) = data.get("response").and_then(parse_usage) {
                 state.usage = Some(usage.clone());
                 on_event(StreamEvent::UsageUpdate(usage));
@@ -734,6 +753,9 @@ fn handle_responses_event(
             EventAction::Completed { stop_reason: None }
         }
         "response.incomplete" => {
+            if let Some(response) = data.get("response") {
+                preserve_terminal_output(response, state, on_event);
+            }
             if let Some(usage) = data.get("response").and_then(parse_usage) {
                 state.usage = Some(usage.clone());
                 on_event(StreamEvent::UsageUpdate(usage));
@@ -759,6 +781,79 @@ fn handle_responses_event(
             EventAction::Failed(message)
         }
         _ => EventAction::Continue,
+    }
+}
+
+/// Preserve one completed provider output item and project the item types that
+/// DeepX executes or displays into its existing UI-neutral content blocks.
+fn preserve_completed_output_item(
+    item: &serde_json::Value,
+    state: &mut ResponsesParseState,
+    on_event: &mut dyn FnMut(StreamEvent),
+) {
+    let duplicate = item.get("id").and_then(|value| value.as_str()).map_or_else(
+        || {
+            state
+                .response_output_items
+                .iter()
+                .any(|stored| stored == item)
+        },
+        |id| {
+            state
+                .response_output_items
+                .iter()
+                .any(|stored| stored.get("id").and_then(|value| value.as_str()) == Some(id))
+        },
+    );
+    if duplicate {
+        return;
+    }
+    state.response_output_items.push(item.clone());
+
+    let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if item_type == "function_call" {
+        let provider_name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let name = canonical_function_name(provider_name, &state.compat);
+        let args = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+        let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+        on_event(StreamEvent::ToolCallProgress {
+            index: state.tool_index,
+            id: call_id.to_string(),
+            name: name.clone(),
+            args_so_far: args.to_string(),
+        });
+        // Preserve the completed call so `emit_done` can attach
+        // ToolUse blocks — the agent loop executes tools from
+        // Done.raw_message, not from preview events.
+        let input: serde_json::Value =
+            serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+        if !call_id.is_empty() && !name.is_empty() {
+            state.tool_uses.push((call_id.to_string(), name, input));
+        }
+        state.tool_index += 1;
+    } else if item_type == "web_search_call" {
+        let call_id = item.get("id").and_then(|c| c.as_str()).unwrap_or("");
+        let action = item
+            .get("action")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"type": "search"}));
+        if !call_id.is_empty() {
+            state.web_search_calls.push((call_id.to_string(), action));
+        }
+    }
+}
+
+/// Some compatible endpoints omit individual `output_item.done` events but
+/// still include the authoritative output array on the terminal response.
+fn preserve_terminal_output(
+    response: &serde_json::Value,
+    state: &mut ResponsesParseState,
+    on_event: &mut dyn FnMut(StreamEvent),
+) {
+    if let Some(output) = response.get("output").and_then(|value| value.as_array()) {
+        for item in output {
+            preserve_completed_output_item(item, state, on_event);
+        }
     }
 }
 
@@ -817,13 +912,13 @@ fn parse_responses_sse(
         }
     }
 
-    // Stream closed without a terminal event: emit whatever was accumulated.
-    emit_done(&mut state, None, on_event);
-
-    Ok(())
+    Err(anyhow::anyhow!(
+        "Responses stream closed before response.completed, response.incomplete, or response.failed"
+    ))
 }
 
-/// SSE 处理进展：`Done` 表示应终止读取（收到 `[DONE]` 或 terminal 事件）。
+/// SSE 处理进展：`Done` 表示已收到 Responses terminal 事件。
+/// A bare `[DONE]` is rejected because it cannot prove the response completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SseProgress {
     Continue,
@@ -884,7 +979,10 @@ fn feed_responses_sse(
         };
 
         if data_str == "[DONE]" {
-            return Ok(SseProgress::Done);
+            return Err(
+                "Responses stream ended before response.completed, response.incomplete, or response.failed"
+                    .into(),
+            );
         }
 
         let data: serde_json::Value = match serde_json::from_str(&data_str) {
@@ -1014,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn sse_done_terminates_and_final_line_without_newline_is_consumed() {
+    fn sse_final_line_is_consumed_and_done_without_terminal_is_rejected() {
         let mut state = ResponsesParseState::default();
         let mut buf: Vec<u8> = Vec::new();
         let mut events: Vec<StreamEvent> = Vec::new();
@@ -1035,8 +1133,9 @@ mod tests {
         assert_eq!(state.accumulated_text, "oktail");
 
         buf.extend_from_slice(b"data: [DONE]\n\n");
-        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
-        assert_eq!(progress, SseProgress::Done);
+        let error = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e))
+            .expect_err("[DONE] without a Responses terminal event must fail");
+        assert!(error.contains("before response.completed"));
     }
 
     /// OpenAI-reference compat used by conversion tests. `web_search` stays on
@@ -1416,8 +1515,8 @@ mod tests {
         assert!(matches!(
             events.last(),
             Some(StreamEvent::Done { raw_message, .. })
-                if matches!(raw_message.content.as_slice(),
-                    [ContentBlock::ToolUse { name, .. }] if name == "search")
+                if raw_message.content.iter().any(|block|
+                    matches!(block, ContentBlock::ToolUse { name, .. } if name == "search"))
         ));
     }
 
@@ -1820,6 +1919,110 @@ mod tests {
         assert_eq!(input[0]["name"], "read_file");
         assert_eq!(input[0]["status"], "completed");
         assert!(input[0]["arguments"].as_str().unwrap().contains("x.txt"));
+    }
+
+    #[test]
+    fn codex_phase_and_encrypted_reasoning_survive_persistence_and_replay() {
+        let mut state = ResponsesParseState::default();
+        let mut events: Vec<StreamEvent> = Vec::new();
+
+        let summary_delta = serde_json::json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "delta": "Checking the workspace"
+        });
+        handle_responses_event(&summary_delta, &mut state, &mut |event| events.push(event));
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ReasoningDelta(delta) if delta == "Checking the workspace"
+        ));
+
+        let reasoning_item = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "Checking the workspace"}],
+            "encrypted_content": "gAAAA-test-encrypted-reasoning"
+        });
+        let commentary_item = serde_json::json!({
+            "type": "message",
+            "id": "msg_1",
+            "status": "completed",
+            "role": "assistant",
+            "phase": "commentary",
+            "content": [{"type": "output_text", "text": "I am checking now."}]
+        });
+        let function_item = serde_json::json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "read_file",
+            "arguments": "{\"path\":\"README.md\"}",
+            "status": "completed"
+        });
+        for item in [&reasoning_item, &commentary_item, &function_item] {
+            let event = serde_json::json!({
+                "type": "response.output_item.done",
+                "item": item,
+            });
+            handle_responses_event(&event, &mut state, &mut |event| events.push(event));
+        }
+
+        emit_done(&mut state, None, &mut |event| events.push(event));
+        let raw_message = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Done { raw_message, .. } => Some(raw_message.clone()),
+                _ => None,
+            })
+            .expect("Done message");
+
+        // Session persistence must not strip provider-owned fields.
+        let persisted = serde_json::to_string(&raw_message).expect("serialize assistant message");
+        let restored: Message =
+            serde_json::from_str(&persisted).expect("deserialize assistant message");
+        let (input, _) = convert_messages_to_input(&[restored], &test_compat());
+
+        assert_eq!(
+            input.len(),
+            3,
+            "visible projections must not duplicate raw items"
+        );
+        assert_eq!(input[0]["type"], "reasoning");
+        assert_eq!(
+            input[0]["encrypted_content"],
+            "gAAAA-test-encrypted-reasoning"
+        );
+        assert_eq!(input[1]["phase"], "commentary");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn terminal_output_is_used_when_output_item_done_is_missing() {
+        let mut state = ResponsesParseState::default();
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let completed = serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "output": [{
+                    "type": "reasoning",
+                    "id": "rs_terminal",
+                    "summary": [],
+                    "encrypted_content": "gAAAA-terminal"
+                }]
+            }
+        });
+
+        assert!(matches!(
+            handle_responses_event(&completed, &mut state, &mut |event| events.push(event)),
+            EventAction::Completed { .. }
+        ));
+        assert_eq!(state.response_output_items.len(), 1);
+        assert_eq!(
+            state.response_output_items[0]["encrypted_content"],
+            "gAAAA-terminal"
+        );
     }
 
     #[test]

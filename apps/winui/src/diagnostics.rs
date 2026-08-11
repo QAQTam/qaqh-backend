@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ── 模式（原子档位）─────────────────────────────────────
 const MODE_ZERO: u8 = 0;
@@ -96,7 +96,12 @@ enum Event {
     /// 单帧 drain 的事件数（chat 事件 + output 决议）。
     Drain { at_ms: u32, events: u32 },
     /// 数据规模快照（每 5s 一次）。
-    Scale { at_ms: u32, turns: u32, window: u32, rev: u64 },
+    Scale {
+        at_ms: u32,
+        turns: u32,
+        window: u32,
+        rev: u64,
+    },
     /// reactor fault（仅 context 名，panic message 含敏感内容不入诊断）。
     Fault { at_ms: u32, context: &'static str },
 }
@@ -150,11 +155,14 @@ pub fn init() {
     if let Ok(text) = std::fs::read_to_string(config_path()) {
         if let Ok(v) = serde_json::from_str::<Value>(&text) {
             if let Some(m) = v.get("mode").and_then(|x| x.as_str()) {
-                MODE.store(match m {
-                    "full" => MODE_FULL,
-                    "minimal" => MODE_MINIMAL,
-                    _ => MODE_ZERO,
-                }, Ordering::Relaxed);
+                MODE.store(
+                    match m {
+                        "full" => MODE_FULL,
+                        "minimal" => MODE_MINIMAL,
+                        _ => MODE_ZERO,
+                    },
+                    Ordering::Relaxed,
+                );
             }
         }
     }
@@ -177,15 +185,23 @@ pub fn mode() -> Mode {
 }
 
 fn config_path() -> PathBuf {
-    let base =
-        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(base).join("DeepX").join("diagnostics-mode.json")
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(base)
+        .join("DeepX")
+        .join("diagnostics-mode.json")
 }
 
 // ── 采集入口（ZDR 下均为一次原子读）────────────────────
 
 /// reactor 渲染完成回调（fork engine.rs set_render_observer 每帧调用）。
-pub fn record_render(tree_ms: f64, reconcile_ms: f64, effects_ms: f64, diffed: u64, skipped: u64, created: u64) {
+pub fn record_render(
+    tree_ms: f64,
+    reconcile_ms: f64,
+    effects_ms: f64,
+    diffed: u64,
+    skipped: u64,
+    created: u64,
+) {
     if MODE.load(Ordering::Relaxed) == MODE_ZERO {
         return;
     }
@@ -201,15 +217,18 @@ pub fn record_render(tree_ms: f64, reconcile_ms: f64, effects_ms: f64, diffed: u
     agg.effects_ms_max = agg.effects_ms_max.max(effects_ms);
     agg.total_ms_max = agg.total_ms_max.max(tree_ms + reconcile_ms + effects_ms);
     if MODE.load(Ordering::Relaxed) == MODE_FULL {
-        push_event(Event::Render {
-            at_ms,
-            tree_ms: tree_ms as f32,
-            reconcile_ms: reconcile_ms as f32,
-            effects_ms: effects_ms as f32,
-            diffed: diffed.min(u32::MAX as u64) as u32,
-            skipped: skipped.min(u32::MAX as u64) as u32,
-            created: created.min(u32::MAX as u64) as u32,
-        }, &mut buf);
+        push_event(
+            Event::Render {
+                at_ms,
+                tree_ms: tree_ms as f32,
+                reconcile_ms: reconcile_ms as f32,
+                effects_ms: effects_ms as f32,
+                diffed: diffed.min(u32::MAX as u64) as u32,
+                skipped: skipped.min(u32::MAX as u64) as u32,
+                created: created.min(u32::MAX as u64) as u32,
+            },
+            &mut buf,
+        );
     }
 }
 
@@ -228,7 +247,13 @@ pub fn record_frame_interval(interval_ms: f64) {
     agg.frame_ms_sum += interval_ms;
     agg.frame_ms_max = agg.frame_ms_max.max(interval_ms);
     if MODE.load(Ordering::Relaxed) == MODE_FULL {
-        push_event(Event::Frame { at_ms, interval_ms: interval_ms as f32 }, &mut buf);
+        push_event(
+            Event::Frame {
+                at_ms,
+                interval_ms: interval_ms as f32,
+            },
+            &mut buf,
+        );
     }
 }
 
@@ -257,7 +282,15 @@ pub fn record_scale(turns: u32, window: u32, rev: u64) {
     let mut buf = buffer().lock().unwrap();
     buf.agg.scales += 1;
     if MODE.load(Ordering::Relaxed) == MODE_FULL {
-        push_event(Event::Scale { at_ms, turns, window, rev }, &mut buf);
+        push_event(
+            Event::Scale {
+                at_ms,
+                turns,
+                window,
+                rev,
+            },
+            &mut buf,
+        );
     }
 }
 
@@ -373,7 +406,15 @@ pub fn buffered_events() -> usize {
 
 fn event_to_json(ev: &Event) -> Value {
     match ev {
-        Event::Render { at_ms, tree_ms, reconcile_ms, effects_ms, diffed, skipped, created } => json!({
+        Event::Render {
+            at_ms,
+            tree_ms,
+            reconcile_ms,
+            effects_ms,
+            diffed,
+            skipped,
+            created,
+        } => json!({
             "t_ms": at_ms, "k": "render",
             "tree_ms": tree_ms, "reconcile_ms": reconcile_ms, "effects_ms": effects_ms,
             "diffed": diffed, "skipped": skipped, "created": created,
@@ -384,7 +425,12 @@ fn event_to_json(ev: &Event) -> Value {
         Event::Drain { at_ms, events } => json!({
             "t_ms": at_ms, "k": "drain", "events": events,
         }),
-        Event::Scale { at_ms, turns, window, rev } => json!({
+        Event::Scale {
+            at_ms,
+            turns,
+            window,
+            rev,
+        } => json!({
             "t_ms": at_ms, "k": "scale", "turns": turns, "window": window, "rev": rev,
         }),
         Event::Fault { at_ms, context } => json!({
@@ -489,8 +535,16 @@ mod tests {
         let top: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
         for k in top {
             assert!(
-                ["schema", "mode", "generated_uptime_secs", "app", "os", "perf", "recent_events"]
-                    .contains(&k),
+                [
+                    "schema",
+                    "mode",
+                    "generated_uptime_secs",
+                    "app",
+                    "os",
+                    "perf",
+                    "recent_events"
+                ]
+                .contains(&k),
                 "unexpected top-level field: {k}"
             );
         }

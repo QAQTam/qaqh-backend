@@ -57,6 +57,13 @@ pub mod motion {
         animations_enabled().then(|| AnimationConfig::fade_out(Duration::from_millis(100)))
     }
 
+    /// Page entrance used after a navigation selection changes.  The small
+    /// vertical offset mirrors Fluent's content-navigation language while the
+    /// opacity component keeps the transition legible on dense settings pages.
+    pub fn navigation_enter() -> Option<AnimationConfig> {
+        animations_enabled().then(|| AnimationConfig::slide_up(Duration::from_millis(220), 20.0))
+    }
+
     /// Brief cross-fade for changing the active session transcript.
     pub fn session_enter() -> Option<AnimationConfig> {
         animations_enabled().then(|| AnimationConfig::fade_in(Duration::from_millis(140)))
@@ -366,8 +373,8 @@ pub fn metadata_badge(label: impl Into<String>) -> Element {
 pub fn shimmer_color(dist: f64) -> Color {
     let peak = 155.0f64;
     let base = 72.0f64;
-    let t = peak * (-(dist * dist) / (2.0 * 1.9 * 1.9)).exp();
-    let v = (base + (t - base)).clamp(0.0, 255.0) as u8;
+    let strength = (-(dist * dist) / (2.0 * 1.9 * 1.9)).exp();
+    let v = (base + (peak - base) * strength).clamp(0.0, 255.0) as u8;
     Color {
         a: 255,
         r: v,
@@ -391,6 +398,14 @@ pub fn shimmer_runs(text: &str, center: f64) -> Vec<RichTextInline> {
         .collect()
 }
 
+fn shimmer_center(text: &str, tick: u64) -> f64 {
+    // Start off the leading edge and wrap after the highlight has fully left
+    // the trailing edge.  Without this modulo a long-running load completes
+    // one pass and then appears permanently static.
+    let span = text.chars().count().max(1) as u64 + 12;
+    (tick % span) as f64 - 6.0
+}
+
 /// 加载覆盖层：转圈 + 标题 + shimmer 文案（骨架条流动）。
 /// 用于 resume/恢复期间盖在内容上（不白屏、不闪烁），由调用方按
 /// `tick`（90ms 步进）驱动光带移动。`key` 必须稳定（覆盖层生命周期）。
@@ -402,7 +417,7 @@ pub fn loading_overlay(key: &str, title: &str, label: &str, tick: u64) -> Elemen
             .semibold()
             .foreground(ThemeRef::SecondaryText)
             .horizontal_alignment(HorizontalAlignment::Center),
-        RichTextBlock::single_paragraph(shimmer_runs(label, tick as f64 - 6.0))
+        RichTextBlock::single_paragraph(shimmer_runs(label, shimmer_center(label, tick)))
             .horizontal_alignment(HorizontalAlignment::Center),
     ))
     .spacing(tokens::SPACE_4)
@@ -571,6 +586,14 @@ mod tests {
         if let Some(exit) = motion::content_exit() {
             assert!(exit.duration < std::time::Duration::from_millis(180));
         }
+    }
+
+    #[test]
+    fn shimmer_keeps_a_visible_base_and_repeats() {
+        let far = shimmer_color(100.0);
+        assert_eq!((far.r, far.g), (72, 72));
+        let span = "加载中".chars().count() as u64 + 12;
+        assert_eq!(shimmer_center("加载中", 0), shimmer_center("加载中", span));
     }
 
     #[test]

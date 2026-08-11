@@ -13,6 +13,41 @@ use markdown_winui::{
     ToolCardView, TurnStatus,
 };
 
+/// Cheap, allocation-free admission check for the native transcript queue.
+///
+/// The bridge uses this on every incoming event. Calling `render_event` there would
+/// clone high-frequency delta strings only to discard the temporary presentation
+/// event; the actual mapping is deferred until the UI frame drains the queue.
+pub fn is_renderable_event(event: &RingingEvent) -> bool {
+    match event {
+        RingingEvent::Conversation(event) => matches!(
+            event,
+            DomainConversationEvent::TurnStarted { .. }
+                | DomainConversationEvent::TurnCompleted { .. }
+                | DomainConversationEvent::TurnFailed { .. }
+                | DomainConversationEvent::RoundDelta { .. }
+                | DomainConversationEvent::BlockCheckpoint { .. }
+                | DomainConversationEvent::ProviderToolStatus { .. }
+                | DomainConversationEvent::RoundCompleted { .. }
+        ),
+        RingingEvent::Tool(event) => match event {
+            ToolEvent::ToolCallPrepared { .. }
+            | ToolEvent::ToolStarted { .. }
+            | ToolEvent::ToolFinished { .. } => true,
+            ToolEvent::CodeChanged {
+                tool_call_id,
+                turn_id,
+                ..
+            } => !tool_call_id.is_empty() && !turn_id.is_empty(),
+            ToolEvent::ToolProgress { .. }
+            | ToolEvent::ToolPermissionRequested { .. }
+            | ToolEvent::ToolNotice { .. }
+            | ToolEvent::AuditRecorded { .. } => false,
+        },
+        RingingEvent::Control(_) => false,
+    }
+}
+
 /// Convert one canonical Ringing event into the subset used by the current
 /// Transcript view model. Events unrelated to transcript presentation return
 /// `None`; they remain available to their typed application stores.
@@ -326,6 +361,31 @@ fn timeline_turns(value: &serde_json::Value) -> Vec<RestoredTurn> {
 mod tests {
     use super::*;
     use markdown_winui::RoundDeltaKind;
+
+    #[test]
+    fn renderable_admission_matches_mapper_for_representative_events() {
+        let values = [
+            serde_json::json!({"type":"turn_started","turn_id":"t1","user_text":"hi"}),
+            serde_json::json!({"type":"round_delta","turn_id":"t1","round_num":0,"kind":"answering","delta":"x"}),
+            serde_json::json!({"type":"provider_retrying","turn_id":"t1","round_num":0,"attempt":1,"max_retries":3,"delay_secs":2,"error_message":"boom"}),
+            serde_json::json!({"type":"usage_updated","turn_id":"t1","round_num":0,"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"context_limit":8192,"model":"m"}),
+        ];
+        for value in values {
+            let event_type = value["type"].as_str().expect("type");
+            let event = if event_type.starts_with("tool_") || event_type == "code_changed" {
+                RingingEvent::Tool(serde_json::from_value(value.clone()).expect("tool event"))
+            } else {
+                RingingEvent::Conversation(
+                    serde_json::from_value(value.clone()).expect("conversation event"),
+                )
+            };
+            assert_eq!(
+                is_renderable_event(&event),
+                render_event(&event).is_some(),
+                "admission mismatch: {value}"
+            );
+        }
+    }
 
     /// 真实形状：turn_started（与 deepx-domain 字段一致）
     #[test]

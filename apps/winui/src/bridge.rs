@@ -11,7 +11,7 @@
 //! Threading: `BridgeCore` is `Send + Sync` and lives on the tokio side;
 //! `Bridge` 仅持 `Arc<BridgeCore>`，UI 线程调用均无锁跨线程约束。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -42,6 +42,107 @@ struct ComposerFeedback {
     submit_error: String,
     /// 发送 accepted 后递增（悲观清空信号；UI 侧已本地清空，保留兼容）。
     send_ack: u64,
+}
+
+/// Per-session ChatView queues. The UI drains only the active seed, so a flat
+/// queue would otherwise scan and rebuild every background entry on each 8ms
+/// gate. `total_len` keeps the existing process-wide memory fuse intact.
+#[derive(Default)]
+struct ChatEventQueues {
+    by_seed: HashMap<String, VecDeque<RingingEvent>>,
+    total_len: usize,
+}
+
+fn is_chat_delta(event: &RingingEvent) -> bool {
+    matches!(
+        event,
+        RingingEvent::Conversation(DomainConversationEvent::RoundDelta { .. })
+    )
+}
+
+impl ChatEventQueues {
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.total_len
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.total_len == 0
+    }
+
+    /// Enqueue one renderable event. Deltas are dropped at the global fuse;
+    /// structural events retain the previous force-in behavior by evicting an
+    /// older event, preferring the same seed to avoid cross-session churn.
+    fn push(&mut self, seed: String, event: RingingEvent, is_delta: bool) -> bool {
+        if self.total_len >= CHAT_QUEUE_CAP && (is_delta || !self.evict_one(seed.as_str())) {
+            return false;
+        }
+        self.by_seed.entry(seed).or_default().push_back(event);
+        self.total_len += 1;
+        true
+    }
+
+    fn evict_one(&mut self, preferred_seed: &str) -> bool {
+        let mut removed = self
+            .by_seed
+            .get_mut(preferred_seed)
+            .is_some_and(remove_oldest_delta);
+        if !removed {
+            removed = self.by_seed.values_mut().any(remove_oldest_delta);
+        }
+        if !removed {
+            removed = self
+                .by_seed
+                .get_mut(preferred_seed)
+                .is_some_and(|queue| queue.pop_front().is_some());
+        }
+        if !removed {
+            removed = self
+                .by_seed
+                .values_mut()
+                .any(|queue| queue.pop_front().is_some());
+        }
+        if removed {
+            self.total_len -= 1;
+            self.by_seed.retain(|_, queue| !queue.is_empty());
+        }
+        removed
+    }
+
+    /// Normal frame-pump path: O(limit), independent of background backlog.
+    fn drain_seed(&mut self, seed: &str, limit: usize) -> Vec<RingingEvent> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let Some(queue) = self.by_seed.get_mut(seed) else {
+            return Vec::new();
+        };
+        let count = limit.min(queue.len());
+        let events: Vec<_> = queue.drain(..count).collect();
+        self.total_len -= events.len();
+        if queue.is_empty() {
+            self.by_seed.remove(seed);
+        }
+        events
+    }
+
+    /// Background recovery path: return active events and discard every other
+    /// seed in one ownership swap before the authoritative snapshot refresh.
+    fn take_active_and_clear(&mut self, seed: &str) -> Vec<RingingEvent> {
+        let active = self.by_seed.remove(seed).unwrap_or_default();
+        self.by_seed.clear();
+        self.total_len = 0;
+        active.into_iter().collect()
+    }
+}
+
+fn remove_oldest_delta(queue: &mut VecDeque<RingingEvent>) -> bool {
+    queue
+        .iter()
+        .position(is_chat_delta)
+        .and_then(|index| queue.remove(index))
+        .is_some()
 }
 
 /// XAML 标题栏状态（headerDirect：Rust 从壳导航/会话列表/conversation
@@ -881,7 +982,7 @@ pub struct BridgeCore {
     /// Queue entries are canonical typed Ringing events; the adapter only maps
     /// domain variants into presentation models.
     ///
-    /// **seed 标记（2026-08-08 修复）**：队列元素为 `(seed, event)`——
+    /// **seed 标记（2026-08-08 修复）**：事件按 seed 分队列——
     /// daemon 的 SSE 流按 lease 推送**所有**会话的事件（batch.seed 区分），
     /// 此前入队忽略 seed、drain 全量返回，后台会话增量会污染活动会话的
     /// Transcript（切换瞬间残留事件串台）。现入队带 seed；有界帧泵只
@@ -892,7 +993,7 @@ pub struct BridgeCore {
     /// 超限时优先丢弃 RoundDelta（由 round 完成的 final 覆盖兜底，且
     /// 后台恢复走快照）；结构性事件强制入队（挤出最旧）。恢复可见时
     /// `chat_view` 的 background resume 会整体丢弃积压再拉快照。
-    chat_events: Mutex<std::collections::VecDeque<(String, RingingEvent)>>,
+    chat_events: Mutex<ChatEventQueues>,
     /// 最近一次 typed timeline 快照（`TimelineSnapshot` + 所属 seed：
     /// 权威 turns 历史，resume 旧对话的数据源；chat_view 泵消费 restore）。
     /// seed 标记防竞态：快速切会话时旧快照晚到不会被灌进新会话。
@@ -1276,31 +1377,23 @@ impl BridgeCore {
             .chat_events
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .filter(|(seed, _)| *seed == active)
-            .map(|(_, event)| event)
-            .collect();
+            .take_active_and_clear(&active);
         (events, rev)
     }
 
-    /// Drain at most `limit` events for the active session. Stale events from
-    /// other sessions are discarded immediately; active overflow stays queued
-    /// in FIFO order for the next XAML frame.
+    /// Drain at most `limit` events for the active session. Events from other
+    /// sessions and active overflow stay queued in FIFO order for a later frame
+    /// or after the active session switches. `limit == 0` is an O(1) no-op.
     pub fn chat_drain_limit(&self, limit: usize) -> (Vec<RingingEvent>, u64) {
         let rev = self.chat_rev.load(Ordering::Relaxed);
+        // 高刷屏上 8ms drain 闸可能隔帧返回 limit=0。此时绝不能扫描并
+        // 重建整条队列；直接返回也符合“不消费活动事件”的契约。
+        if limit == 0 {
+            return (Vec::new(), rev);
+        }
         let active = self.active_seed();
         let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
-        let mut events = Vec::with_capacity(limit.min(queue.len()));
-        let mut retained = std::collections::VecDeque::new();
-
-        while let Some((seed, event)) = queue.pop_front() {
-            if seed == active && events.len() < limit {
-                events.push(event);
-            } else {
-                retained.push_back((seed, event));
-            }
-        }
-        *queue = retained;
+        let events = queue.drain_seed(&active, limit);
         (events, rev)
     }
 
@@ -3051,24 +3144,12 @@ impl BridgeCore {
             let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
             let mut pushed = false;
             for env in &batch.envelopes {
-                if chat_adapter::render_event(&env.event).is_some() {
+                if chat_adapter::is_renderable_event(&env.event) {
                     // 队列上限（保险丝）：delta 可丢（final 覆盖兜底），
                     // 结构性事件强制入队（挤出最旧）。
-                    let is_delta = matches!(
-                        &env.event,
-                        RingingEvent::Conversation(
-                            deepx_client::ConversationEvent::RoundDelta { .. }
-                        )
-                    );
-                    if queue.len() >= CHAT_QUEUE_CAP {
-                        if is_delta {
-                            continue;
-                        }
-                        queue.pop_front();
-                    }
-                    // seed 标记：drain 侧按 active_seed 过滤（会话隔离）。
-                    queue.push_back((batch.seed.clone(), env.event.clone()));
-                    pushed = true;
+                    let is_delta = is_chat_delta(&env.event);
+                    // seed 分队列：活动会话 drain 不扫描后台积压。
+                    pushed |= queue.push(batch.seed.clone(), env.event.clone(), is_delta);
                 }
             }
             if pushed {
@@ -3227,26 +3308,16 @@ impl BridgeCore {
             // 入队，UI 线程 timer drain 喂 Transcript（读路径直连）。
             // seed 标记：drain 侧按 active_seed 过滤（会话隔离）。
             let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pushed = false;
             for env in &batch.envelopes {
-                if chat_adapter::render_event(&env.event).is_some() {
+                if chat_adapter::is_renderable_event(&env.event) {
                     // 队列上限（保险丝）：delta 可丢（final 覆盖兜底），
                     // 结构性事件强制入队（挤出最旧）。
-                    let is_delta = matches!(
-                        &env.event,
-                        RingingEvent::Conversation(
-                            deepx_client::ConversationEvent::RoundDelta { .. }
-                        )
-                    );
-                    if queue.len() >= CHAT_QUEUE_CAP {
-                        if is_delta {
-                            continue;
-                        }
-                        queue.pop_front();
-                    }
-                    queue.push_back((batch.seed.clone(), env.event.clone()));
+                    let is_delta = is_chat_delta(&env.event);
+                    pushed |= queue.push(batch.seed.clone(), env.event.clone(), is_delta);
                 }
             }
-            if !queue.is_empty() {
+            if pushed {
                 self.chat_rev.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -3545,7 +3616,7 @@ impl Bridge {
                     composer_feedback: Mutex::new(HashMap::new()),
                     // Canonical conversation events are queued for the native
                     // ChatView; no renderer projection participates here.
-                    chat_events: Mutex::new(std::collections::VecDeque::new()),
+                    chat_events: Mutex::new(ChatEventQueues::default()),
                     chat_timeline: Mutex::new(None),
                     timeline_has_more: Mutex::new(std::collections::HashMap::new()),
                     chat_prepend: Mutex::new(std::collections::VecDeque::new()),
@@ -3881,7 +3952,7 @@ mod tests {
             composer_activity: Mutex::new(HashMap::new()),
             composer_mode: Mutex::new("plan".to_string()),
             composer_feedback: Mutex::new(HashMap::new()),
-            chat_events: Mutex::new(std::collections::VecDeque::new()),
+            chat_events: Mutex::new(ChatEventQueues::default()),
             chat_timeline: Mutex::new(None),
             timeline_has_more: Mutex::new(std::collections::HashMap::new()),
             chat_prepend: Mutex::new(std::collections::VecDeque::new()),
@@ -3919,15 +3990,16 @@ mod tests {
                     user_text: String::new(),
                 })
             };
-            q.push_back(("sA".into(), started("t1")));
-            q.push_back(("sB".into(), started("t2")));
-            q.push_back((
+            assert!(q.push("sA".into(), started("t1"), false));
+            assert!(q.push("sB".into(), started("t2"), false));
+            assert!(q.push(
                 "sA".into(),
                 RingingEvent::Conversation(DomainConversationEvent::TurnCompleted {
                     turn_id: "t1".into(),
                     stop_reason: None,
                     usage: None,
                 }),
+                false,
             ));
         }
         let (events, _) = core.chat_drain();
@@ -3948,7 +4020,7 @@ mod tests {
 
         // 切换后：sA 的残留事件（若有）不再泄漏到 sB。
         core.set_active_seed("sB");
-        core.chat_events.lock().unwrap().push_back((
+        assert!(core.chat_events.lock().unwrap().push(
             "sA".into(),
             RingingEvent::Conversation(DomainConversationEvent::RoundDelta {
                 turn_id: "t1".into(),
@@ -3956,6 +4028,7 @@ mod tests {
                 kind: deepx_client::RoundDeltaKind::Answering,
                 delta: String::new(),
             }),
+            true,
         ));
         let (events, _) = core.chat_drain();
         assert!(events.is_empty(), "无界恢复 drain 不返回 sA 残留事件");
@@ -3977,10 +4050,18 @@ mod tests {
         };
         {
             let mut q = core.chat_events.lock().unwrap();
-            q.push_back(("sA".into(), started("a1")));
-            q.push_back(("sB".into(), started("b1")));
-            q.push_back(("sA".into(), started("a2")));
+            assert!(q.push("sA".into(), started("a1"), false));
+            assert!(q.push("sB".into(), started("b1"), false));
+            assert!(q.push("sA".into(), started("a2"), false));
         }
+
+        let (none, _) = core.chat_drain_limit(0);
+        assert!(none.is_empty());
+        assert_eq!(
+            core.chat_events.lock().unwrap().len(),
+            3,
+            "limit=0 must preserve the queue"
+        );
 
         let (first, _) = core.chat_drain_limit(1);
         assert_eq!(first.len(), 1);
@@ -4004,6 +4085,31 @@ mod tests {
             &remainder[0],
             RingingEvent::Conversation(DomainConversationEvent::TurnStarted { turn_id, .. })
                 if turn_id == "a2"
+        ));
+    }
+
+    #[test]
+    fn queue_eviction_prefers_replaceable_delta_over_structure() {
+        let started = RingingEvent::Conversation(DomainConversationEvent::TurnStarted {
+            turn_id: "t1".into(),
+            user_text: String::new(),
+        });
+        let delta = RingingEvent::Conversation(DomainConversationEvent::RoundDelta {
+            turn_id: "t1".into(),
+            round_num: 0,
+            kind: deepx_client::RoundDeltaKind::Answering,
+            delta: "x".into(),
+        });
+        let mut queues = ChatEventQueues::default();
+        assert!(queues.push("sA".into(), started, false));
+        assert!(queues.push("sA".into(), delta, true));
+        assert!(queues.evict_one("sA"));
+
+        let remaining = queues.drain_seed("sA", usize::MAX);
+        assert_eq!(remaining.len(), 1);
+        assert!(matches!(
+            remaining[0],
+            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { .. })
         ));
     }
 
