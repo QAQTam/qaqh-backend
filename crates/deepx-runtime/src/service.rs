@@ -309,12 +309,6 @@ impl DeepxService {
                     name: pstr(params, "name")?,
                 }),
             ),
-            "skills.unload" => self.send_ringing_cmd(
-                seed()?,
-                RingingCommand::Control(ControlCommand::SkillsRelease {
-                    name: pstr(params, "name")?,
-                }),
-            ),
             "skills.list_tools" => Ok(json!(deepx_workspace::runtime::all_tool_names())),
             "workspace.get" => Ok(json!(workspace(&seed()?))),
             "workspace.set" => {

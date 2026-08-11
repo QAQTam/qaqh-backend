@@ -39,7 +39,6 @@ struct RuntimeEntry {
     state: SkillRuntimeState,
     source: String,
     activation_order: u64,
-    last_retained_revision: u64,
     ignored_request_laps: u8,
     error: Option<String>,
 }
@@ -47,8 +46,6 @@ struct RuntimeEntry {
 #[derive(Debug, Clone)]
 enum UiTransition {
     Request { name: String, source: String },
-    Retain { name: String },
-    Release { name: String },
 }
 
 #[derive(Debug)]
@@ -127,8 +124,6 @@ impl SkillContextManager {
     pub fn apply_tool_effect(&mut self, effect: SkillEffect) -> Result<(), String> {
         match effect {
             SkillEffect::Activate(activation) => self.activate(activation, "model"),
-            SkillEffect::Retain { name } => self.retain_now(&name),
-            SkillEffect::Release { name } => self.release_now(&name),
         }?;
         self.refresh_frozen_envelope();
         Ok(())
@@ -186,26 +181,6 @@ impl SkillContextManager {
         self.request_now(name, source)
     }
 
-    pub fn queue_retain(&mut self, name: &str) -> Result<(), String> {
-        if self.frozen.is_some() {
-            self.queued_ui.push_back(UiTransition::Retain {
-                name: name.to_string(),
-            });
-            return Ok(());
-        }
-        self.retain_now(name)
-    }
-
-    pub fn queue_release(&mut self, name: &str) -> Result<(), String> {
-        if self.frozen.is_some() {
-            self.queued_ui.push_back(UiTransition::Release {
-                name: name.to_string(),
-            });
-            return Ok(());
-        }
-        self.release_now(name)
-    }
-
     pub fn apply_ui_operation(
         &mut self,
         operation_id: &str,
@@ -224,8 +199,6 @@ impl SkillContextManager {
         } else {
             match action {
                 "request" | "activate" => self.queue_request(name, "user"),
-                "retain" => self.queue_retain(name),
-                "release" | "cancel" => self.queue_release(name),
                 _ => Err(format!("SKILL_INVALID_ACTION: '{action}'")),
             }
         };
@@ -250,6 +223,14 @@ impl SkillContextManager {
 
     pub fn context_epoch(&self) -> u64 {
         self.context_epoch
+    }
+
+    /// True when at least one skill is activated with a loaded body.
+    /// Used by the injection gate: an empty active set injects nothing.
+    pub fn has_active(&self) -> bool {
+        self.entries.values().any(|entry| {
+            entry.state == SkillRuntimeState::Active && entry.activation.is_some()
+        })
     }
 
     pub fn operation_revision(&self) -> u64 {
@@ -282,7 +263,6 @@ impl SkillContextManager {
                 state: SkillRuntimeState::Catalog,
                 source: "catalog".into(),
                 activation_order: 0,
-                last_retained_revision: 0,
                 ignored_request_laps: 0,
                 error: None,
             });
@@ -303,7 +283,6 @@ impl SkillContextManager {
                 state: SkillRuntimeState::Unavailable,
                 source: diagnostic.path.to_string_lossy().into_owned(),
                 activation_order: 0,
-                last_retained_revision: 0,
                 ignored_request_laps: 0,
                 error: Some(diagnostic.message.clone()),
             });
@@ -389,7 +368,6 @@ impl SkillContextManager {
                             state: SkillRuntimeState::Unavailable,
                             source: saved.source,
                             activation_order: saved.activation_order,
-                            last_retained_revision: self.operation_revision,
                             ignored_request_laps: 0,
                             error: Some(error),
                         },
@@ -416,7 +394,6 @@ impl SkillContextManager {
                 state: SkillRuntimeState::Requested,
                 source: source.to_string(),
                 activation_order: 0,
-                last_retained_revision: self.operation_revision,
                 ignored_request_laps: 0,
                 error: None,
             },
@@ -472,7 +449,6 @@ impl SkillContextManager {
                 state: SkillRuntimeState::Active,
                 source: source.to_string(),
                 activation_order: order,
-                last_retained_revision: self.operation_revision,
                 ignored_request_laps: 0,
                 error: None,
             },
@@ -482,39 +458,12 @@ impl SkillContextManager {
         Ok(())
     }
 
-    fn retain_now(&mut self, name: &str) -> Result<(), String> {
-        let entry = self
-            .entries
-            .get_mut(name)
-            .ok_or_else(|| format!("SKILL_INVALID_STATE: '{name}' is not active"))?;
-        if !matches!(entry.state, SkillRuntimeState::Active) {
-            return Err(format!("SKILL_INVALID_STATE: '{name}' cannot be retained"));
-        }
-        entry.state = SkillRuntimeState::Active;
-        entry.last_retained_revision = self.operation_revision;
-        self.operation_revision = self.operation_revision.saturating_add(1);
-        Ok(())
-    }
-
-    fn release_now(&mut self, name: &str) -> Result<(), String> {
-        let removed = self
-            .entries
-            .remove(name)
-            .ok_or_else(|| format!("SKILL_INVALID_STATE: '{name}' is not loaded"))?;
-        if removed.activation.is_some() {
-            self.context_epoch = self.context_epoch.saturating_add(1);
-            self.notices.push(format!("{name} 已移除"));
-        }
-        self.operation_revision = self.operation_revision.saturating_add(1);
-        Ok(())
-    }
-
     fn reclaim_budget(&mut self, mut required: usize, except: Option<&str>) {
         let mut candidates = self
             .entries
             .iter()
             .filter(|(name, entry)| entry.activation.is_some() && except != Some(name.as_str()))
-            .map(|(name, entry)| (name.clone(), entry.last_retained_revision))
+            .map(|(name, entry)| (name.clone(), entry.activation_order))
             .collect::<Vec<_>>();
         candidates.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
         for (name, _) in candidates {
@@ -535,8 +484,6 @@ impl SkillContextManager {
         while let Some(transition) = self.queued_ui.pop_front() {
             let result = match transition {
                 UiTransition::Request { name, source } => self.request_now(&name, &source),
-                UiTransition::Retain { name } => self.retain_now(&name),
-                UiTransition::Release { name } => self.release_now(&name),
             };
             if let Err(error) = result {
                 self.notices.push(error);

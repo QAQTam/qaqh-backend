@@ -82,8 +82,6 @@ pub enum ControlCommand {
     },
     /// 显式激活 skill（等价 $skill-name 提及）。
     SkillsActivate { name: String },
-    /// 从上下文卸载显式激活的 skill。
-    SkillsRelease { name: String },
     /// 从磁盘重载 skill 目录并刷新目录系统消息。
     SkillsReload,
     /// 带 operation id/revision 保护的 skill UI 操作。

@@ -438,19 +438,22 @@ fn skill_activation_reaches_followup_round_and_next_user_turn() {
         },
     );
 
-    // Envelope injection is TEMP-DISABLED (2026-08-04, agent.rs
-    // SKILL_ENVELOPE_INJECTION=false): activated skill bodies are delivered via
-    // the `skills` tool result at execution time, not as system messages, so
-    // no request body carries STICKY_SKILL_INSTRUCTION. The lifecycle itself
-    // (activation survives follow-up rounds and user turns) is owned by
-    // SkillContextManager and covered by its state tests; here we pin the
-    // disabled-injection contract so a re-enable must update this test too.
-    for (index, body) in bodies.iter().enumerate() {
-        assert!(
-            !body.contains("STICKY_SKILL_INSTRUCTION"),
-            "disabled injection leaked skill body into request #{index}: {body}"
-        );
-    }
+    // Activation-set injection (Codex world-state mode, agent.rs
+    // build_context): once the active set changes, the envelope carrying the
+    // activated body is persisted as a system message in the MessageStore, so
+    // later request bodies DO carry STICKY_SKILL_INSTRUCTION (in the system
+    // prefix region). The lifecycle itself (activation survives follow-up
+    // rounds and user turns) is owned by SkillContextManager; here we pin the
+    // injection contract so a regression to per-round tail injection must
+    // update this test too.
+    let injected = bodies
+        .iter()
+        .filter(|body| body.contains("STICKY_SKILL_INSTRUCTION"))
+        .count();
+    assert!(
+        injected >= 1,
+        "activated skill body must reach later requests via the system envelope"
+    );
 }
 
 #[test]

@@ -976,10 +976,6 @@ impl Loop {
                     let _ = self.session.agent.skills.queue_request(&name, "user");
                     self.emit_ringing_skills_status();
                 }
-                ControlCommand::SkillsRelease { name } => {
-                    self.session.agent.deactivate_explicit_skill(&name);
-                    self.emit_ringing_skills_status();
-                }
                 ControlCommand::SkillsOperation {
                     operation_id,
                     action,

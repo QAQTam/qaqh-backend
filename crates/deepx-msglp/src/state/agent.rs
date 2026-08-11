@@ -143,6 +143,10 @@ pub struct AgentState {
     /// Failed/skipped automatic compaction candidate. Retried only after the
     /// request candidate changes, preventing one failed attempt per gate lap.
     auto_compact_blocked_revision: Option<u64>,
+    /// Last skill activation-set epoch that was materialized as a persisted
+    /// system message. The envelope is injected once per change (Codex-style
+    /// world-state diff), not on every request build.
+    last_injected_epoch: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,6 +177,7 @@ impl AgentState {
             last_api_context: None,
             manual_compact_running: false,
             auto_compact_blocked_revision: None,
+            last_injected_epoch: 0,
         }
     }
 
@@ -370,6 +375,21 @@ impl AgentState {
             if text.is_empty() { vec![] } else { vec![text] }
         };
 
+        // ── 激活集注入（Codex world-state 模式）──
+        // 激活集变化（context_epoch 变更）时，把 envelope 作为持久化
+        // system 消息写入 MessageStore：只注入一次、位于 system 前缀区、
+        // 历史幂等（后续轮次不再重复）。激活集会话内只增；同名 re-activate
+        // 更新 body（epoch +1）→ 重新注入替换旧 envelope。
+        const SKILL_ENVELOPE_PREFIX: &str = "<skill_context_envelope";
+        let epoch = self.skills.context_epoch();
+        if epoch != self.last_injected_epoch {
+            self.last_injected_epoch = epoch;
+            self.msg.remove_system_messages_by_prefix(SKILL_ENVELOPE_PREFIX);
+            if self.skills.has_active() {
+                self.msg.push_system(deepx_types::Message::system(&snapshot.envelope));
+            }
+        }
+
         let mut context = self.msg.build_context_for_gate(&annotations);
         // Catalog is now persisted as a system message on session creation.
         // Only inject transiently when the stored messages lack it (first
@@ -386,22 +406,6 @@ impl AgentState {
                 .count();
             context.insert(prefix_end, deepx_types::Message::system(&snapshot.catalog));
         }
-        // TEMP-DISABLED (2026-08-04): skill envelope injection is temporarily
-        // disabled per user request — the per-round tail system message was
-        // observed leaking into the message stream and caused the model to
-        // repeat "skill re-injected" after every tool call.
-        //
-        // NOTE: while disabled, activated skill bodies are NOT delivered to
-        // the model (they live inside the envelope). Re-enable by flipping
-        // SKILL_ENVELOPE_INJECTION to true, or delete this block entirely to
-        // restore the original behavior.
-        const SKILL_ENVELOPE_INJECTION: bool = false;
-        if SKILL_ENVELOPE_INJECTION {
-            // The complete authoritative active set is always the final message.
-            let envelope_text = snapshot.envelope.as_str();
-            context.push(deepx_types::Message::system(envelope_text));
-        }
-
         // ── 前缀稳定性校验 ──
         // Hash the cache-key components (system text, catalog, tool defs)
         // PLUS every rendered message in order, and compare with the
@@ -455,12 +459,6 @@ impl AgentState {
             .clone();
         self.skills.set_workspace(Path::new(&workspace));
         let _ = self.skills.begin_user_turn(text);
-    }
-
-    /// Remove an explicitly-activated skill from system_messages.
-    /// Returns true if the skill was unloaded.
-    pub fn deactivate_explicit_skill(&mut self, name: &str) -> bool {
-        self.skills.queue_release(name).is_ok()
     }
 
     /// Build a SkillsChanged payload for the frontend skills panel.
@@ -676,14 +674,17 @@ mod tests {
             .skills
             .apply_tool_effect(deepx_skills::SkillEffect::Activate(activation))
             .unwrap();
-        // Envelope injection is TEMP-DISABLED (2026-08-04): the activated body
-        // is delivered via the `skills` tool result at execution time, not as
-        // a tail system message. Assert the context stays free of it and that
-        // the prefix remains stable.
+        // Activation-set injection (Codex world-state mode): once the active
+        // set changes (context_epoch bump), the envelope is persisted as a
+        // system message in the MessageStore — the body lands in the system
+        // prefix region exactly once; later builds stay identical (idempotent).
         let context = agent.build_context();
-        assert!(!context.iter().any(|message| message.content.iter().any(
+        assert!(context.iter().any(|message| message.content.iter().any(
             |block| matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("DYNAMIC_FULL_BODY"))
         )));
+        assert_eq!(agent.msg.system_messages().len(), 2); // base + envelope
+        // The second build must be byte-identical: no re-injection on the
+        // same epoch, so the provider prefix cache never breaks on skill state.
         assert_eq!(
             serde_json::to_value(&context).unwrap(),
             serde_json::to_value(agent.build_context()).unwrap()
