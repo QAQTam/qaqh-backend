@@ -1005,18 +1005,18 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(
         ToolHandler {
             key: "exec".to_string(),
-            description: "Execute a command. Two modes: (1) {\"argv\": [\"program\", \"arg1\", ...]} — direct exec, no shell. (2) {\"command\": \"pipeline | grep foo\"} — auto-wrapped in the platform shell (bash -c / pwsh -Command / cmd /c), enabling pipes, redirects, and shell builtins. For the argv mode, the first element is the executable, the rest are arguments. Returns {\"status\": \"completed\", \"exit_code\": 0, \"output\": \"...\", \"wall_time_seconds\": 0.5, \"timed_out\": false}",
+            description: "执行命令。两种模式：(1) argv=[程序, 参数…] 直接执行（无 shell）；(2) command=shell 字符串（自动包装到平台 shell，支持管道/重定向/一行脚本）。返回 {status, exit_code, output, wall_time_seconds, timed_out}；超时移交时返回 backgrounded + process_id。",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "argv": { "type": "array", "items": {"type": "string"}, "description": "Command as array of strings. argv[0]=executable, argv[1..]=args. Example: [\"cargo\",\"check\"]" },
-                    "command": { "type": "string", "description": "Shell command string. Auto-wrapped in platform shell (bash -c, pwsh -Command, or cmd /c). Use for pipes, redirects, or one-liners. Example: \"ls -la | grep foo\"" },
-                    "shell": { "type": "string", "enum": ["bash", "zsh", "sh", "pwsh", "cmd"], "description": "Shell to wrap `command` with (optional). Default: pwsh (PowerShell 7, powershell.exe fallback) on Windows, bash on Unix. Pick bash when the command uses POSIX syntax (e.g. ls | grep, $VAR, &&). Ignored in argv mode." },
-                    "cwd": {"type": "string", "description": "Working directory (optional). Relative paths resolve against the workspace root (or process directory when no workspace is set). Defaults to workspace root."},
-                    "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Environment variables to set for the child (optional). Keys/values must be strings; existing variables with the same name are overridden."},
-                    "timeout_secs": {"type": "integer", "description": "Timeout in seconds (1-3600, default 30)"},
-                    "background_after_secs": {"type": "integer", "description": "Fast handoff window in seconds (1-3600, optional). If the child is still running after this many seconds, the call returns immediately with status \"backgrounded\" plus a process_id (instead of waiting until timeout_secs). Use this when launching long-running services (serve/daemon/watch): the model then takes over with process(action=\"check|wait|kill\", id=process_id)."},
-                    "max_output_tokens": { "type": "integer", "description": "Max tokens of output before smart truncation (head 70% + tail 30%). Default 10000, min 100, max 50000." }
+                    "argv": { "type": "array", "items": {"type": "string"}, "description": "命令数组：argv[0]=可执行文件，argv[1..]=参数；无 shell" },
+                    "command": { "type": "string", "description": "shell 命令字符串（bash -c / pwsh -Command / cmd /c 包装），用于管道/重定向/一行脚本" },
+                    "shell": { "type": "string", "enum": ["bash", "zsh", "sh", "pwsh", "cmd"], "description": "command 的包装 shell（默认：Windows pwsh、Unix bash）；POSIX 语法选 bash。argv 模式忽略" },
+                    "cwd": {"type": "string", "description": "工作目录（默认 workspace 根；相对路径基于 workspace 解析）"},
+                    "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "子进程环境变量（可选）；同名覆盖"},
+                    "timeout_secs": {"type": "integer", "description": "超时秒数（1-3600，默认 30）"},
+                    "background_after_secs": {"type": "integer", "description": "快速移交窗口：子进程运行超过该秒数即返回 backgrounded + process_id（用于长驻服务，随后用 process action=check/wait/kill 接管）"},
+                    "max_output_tokens": { "type": "integer", "description": "输出截断上限（默认 10000，范围 100-50000）" }
                 },
                 "required": [],
                 "additionalProperties": false,

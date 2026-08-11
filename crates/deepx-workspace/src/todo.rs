@@ -702,32 +702,32 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(
         ToolHandler {
             key: "todo".to_string(),
-            description: "Manage the ordered session task list. Create one or many tasks with action=create and title/description (or items); IDs T1, T2, ... are assigned atomically. After creation, change state using only action=set, id, and status (idle, in_progress, completed, cancelled); evidence is optional when completed. If work reveals a subtask, action=insert creates it after_id or before_id without renumbering existing IDs. action=list returns the ordered list. Do not send title/description during state changes.",
+            description: "管理会话内有序任务列表。action=create 创建任务（单个或 items 批量）、insert 插入到锚点 ID、set 更新状态、list 列出。ID 由系统分配（T1、T2…）；状态变更只传 action=set、id、status。",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
                         "enum": ["create", "insert", "set", "list"],
-                        "description": "create tasks; insert a discovered subtask; set one task state; or list tasks."
+                        "description": "create/insert/set/list 之一"
                     },
                     "title": {
                         "type": "string",
-                        "description": "For single create/insert: short imperative title, 1-100 chars."
+                        "description": "create/insert 的任务标题（1-100 字符）"
                     },
                     "description": {
                         "type": "string",
-                        "description": "For single create/insert: optional context or acceptance criteria, max 200 chars."
+                        "description": "可选上下文或验收标准（≤200 字符）"
                     },
                     "items": {
                         "type": "array",
                         "maxItems": 20,
-                        "description": "For creating a group atomically. IDs are assigned in array order.",
+                        "description": "create 批量创建（按数组序分配 ID）或 insert 批量插入",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "title": {"type": "string"},
-                                "description": {"type": "string"}
+                                "title": {"type": "string", "description": "任务标题"},
+                                "description": {"type": "string", "description": "可选上下文"}
                             },
                             "required": ["title"],
                             "additionalProperties": false
@@ -735,133 +735,37 @@ pub fn register(mgr: &mut crate::ToolManager) {
                     },
                     "id": {
                         "type": ["string", "integer"],
-                        "description": "For action=set: assigned task ID, e.g. T1."
+                        "description": "set 的目标任务 ID（如 T1）；Omit for action=create"
                     },
                     "status": {
                         "type": "string",
                         "enum": ["idle", "in_progress", "completed", "cancelled"],
-                        "description": "For action=set."
+                        "description": "set 的目标状态"
                     },
                     "evidence": {
                         "type": "string",
-                        "description": "Optional completion/result summary for action=set."
+                        "description": "set 时的完成摘要（可选，非空字符串）"
                     },
                     "after_id": {
                         "type": ["string", "integer"],
-                        "description": "For action=insert: place new task(s) after this stable ID."
+                        "description": "insert 锚点：插入到该 ID 之后"
                     },
                     "before_id": {
                         "type": ["string", "integer"],
-                        "description": "For action=insert: place new task(s) before this stable ID."
+                        "description": "insert 锚点：插入到该 ID 之前"
                     }
                 },
                 "required": ["action"],
                 "additionalProperties": false,
                 "oneOf": [
-                    {
-                        "title": "Create one task",
-                        "properties": {"action": {"const": "create"}},
-                        "required": ["action", "title"],
-                        "not": {"anyOf": [
-                            {"required": ["items"]},
-                            {"required": ["id"]},
-                            {"required": ["status"]},
-                            {"required": ["evidence"]},
-                            {"required": ["after_id"]},
-                            {"required": ["before_id"]}
-                        ]}
-                    },
-                    {
-                        "title": "Create a task group",
-                        "properties": {"action": {"const": "create"}},
-                        "required": ["action", "items"],
-                        "not": {"anyOf": [
-                            {"required": ["title"]},
-                            {"required": ["description"]},
-                            {"required": ["id"]},
-                            {"required": ["status"]},
-                            {"required": ["evidence"]},
-                            {"required": ["after_id"]},
-                            {"required": ["before_id"]}
-                        ]}
-                    },
-                    {
-                        "title": "Insert one task after an ID",
-                        "properties": {"action": {"const": "insert"}},
-                        "required": ["action", "title", "after_id"],
-                        "not": {"anyOf": [
-                            {"required": ["items"]},
-                            {"required": ["id"]},
-                            {"required": ["status"]},
-                            {"required": ["evidence"]},
-                            {"required": ["before_id"]}
-                        ]}
-                    },
-                    {
-                        "title": "Insert one task before an ID",
-                        "properties": {"action": {"const": "insert"}},
-                        "required": ["action", "title", "before_id"],
-                        "not": {"anyOf": [
-                            {"required": ["items"]},
-                            {"required": ["id"]},
-                            {"required": ["status"]},
-                            {"required": ["evidence"]},
-                            {"required": ["after_id"]}
-                        ]}
-                    },
-                    {
-                        "title": "Insert a task group after an ID",
-                        "properties": {"action": {"const": "insert"}},
-                        "required": ["action", "items", "after_id"],
-                        "not": {"anyOf": [
-                            {"required": ["title"]},
-                            {"required": ["description"]},
-                            {"required": ["id"]},
-                            {"required": ["status"]},
-                            {"required": ["evidence"]},
-                            {"required": ["before_id"]}
-                        ]}
-                    },
-                    {
-                        "title": "Insert a task group before an ID",
-                        "properties": {"action": {"const": "insert"}},
-                        "required": ["action", "items", "before_id"],
-                        "not": {"anyOf": [
-                            {"required": ["title"]},
-                            {"required": ["description"]},
-                            {"required": ["id"]},
-                            {"required": ["status"]},
-                            {"required": ["evidence"]},
-                            {"required": ["after_id"]}
-                        ]}
-                    },
-
-                    {
-                        "title": "Set task state",
-                        "properties": {"action": {"const": "set"}},
-                        "required": ["action", "id", "status"],
-                        "not": {"anyOf": [
-                            {"required": ["title"]},
-                            {"required": ["description"]},
-                            {"required": ["items"]},
-                            {"required": ["after_id"]},
-                            {"required": ["before_id"]}
-                        ]}
-                    },
-                    {
-                        "title": "List tasks",
-                        "properties": {"action": {"const": "list"}},
-                        "required": ["action"],
-                        "not": {"anyOf": [
-                            {"required": ["title"]},
-                            {"required": ["description"]},
-                            {"required": ["items"]},
-                            {"required": ["id"]},
-                            {"required": ["evidence"]},
-                            {"required": ["after_id"]},
-                            {"required": ["before_id"]}
-                        ]}
-                    }
+                    {"title": "Create one task", "properties": {"action": {"const": "create"}}, "required": ["action", "title"]},
+                    {"title": "Create a task group", "properties": {"action": {"const": "create"}}, "required": ["action", "items"]},
+                    {"title": "Insert one task after an ID", "properties": {"action": {"const": "insert"}}, "required": ["action", "title", "after_id"]},
+                    {"title": "Insert one task before an ID", "properties": {"action": {"const": "insert"}}, "required": ["action", "title", "before_id"]},
+                    {"title": "Insert a task group after an ID", "properties": {"action": {"const": "insert"}}, "required": ["action", "items", "after_id"]},
+                    {"title": "Insert a task group before an ID", "properties": {"action": {"const": "insert"}}, "required": ["action", "items", "before_id"]},
+                    {"title": "Set task state", "properties": {"action": {"const": "set"}}, "required": ["action", "id", "status"]},
+                    {"title": "List tasks", "properties": {"action": {"const": "list"}}, "required": ["action"]}
                 ]
             }),
             handler: handle_todo,

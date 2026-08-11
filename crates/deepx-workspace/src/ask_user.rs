@@ -174,7 +174,7 @@ handler!(handle_ask_user, exec_ask_user);
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(ToolHandler {
         key: "ask".to_string(),
-        description: "Ask the user one or more questions when blocked. This opens a Ringing interaction and is not treated as an ordinary successful tool result.",
+        description: "Ask the user one or more questions when clarification or a user decision is needed. This opens a Ringing interaction and is not treated as an ordinary successful tool result.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
