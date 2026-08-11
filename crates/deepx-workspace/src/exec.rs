@@ -597,14 +597,9 @@ fn direct_exec(
                 command: display_name,
                 exit_code: Some(-1),
                 output: format!("SPAWN FAILED: {e}"),
-                wall_time_seconds: 0.0,
-                original_tokens: 0,
                 truncated: false,
                 timed_out: false,
                 cancelled: false,
-                stdout_bytes: 0,
-                stderr_bytes: 0,
-                ui_dropped_bytes: 0,
                 process_id: None,
             };
         }
@@ -746,14 +741,9 @@ fn direct_exec(
                 "info": info,
             })
             .to_string(),
-            wall_time_seconds: start_time.elapsed().as_secs_f64(),
-            original_tokens: 0,
             truncated: false,
             timed_out: true,
             cancelled: false,
-            stdout_bytes: 0,
-            stderr_bytes: 0,
-            ui_dropped_bytes: 0,
             process_id: Some(proc_id),
         };
     }
@@ -773,11 +763,6 @@ fn direct_exec(
         .recv_timeout(std::time::Duration::from_secs(2))
         .unwrap_or_else(|_| (b"[WARN] stderr pipe timed out\n".to_vec(), true));
 
-    let stdout_bytes = stdout_out.len() as u64;
-    let stderr_bytes = stderr_out.len() as u64;
-    let ui_dropped_bytes = progress_tx
-        .as_ref()
-        .map_or(0, ExecProgressSender::dropped_bytes);
     let stdout_out = decode_captured(&stdout_out);
     let stderr_out = decode_captured(&stderr_out);
 
@@ -804,14 +789,9 @@ fn direct_exec(
         command: display_name,
         exit_code,
         output: output_str,
-        wall_time_seconds: start_time.elapsed().as_secs_f64(),
-        original_tokens: total_tokens,
         truncated,
         timed_out,
         cancelled,
-        stdout_bytes,
-        stderr_bytes,
-        ui_dropped_bytes,
         process_id: Some(proc_id),
     }
 }
@@ -823,15 +803,9 @@ pub(crate) struct ExecOutput {
     command: String,
     exit_code: Option<i32>,
     output: String,
-    wall_time_seconds: f64,
-    original_tokens: u32,
     truncated: bool,
     timed_out: bool,
     cancelled: bool,
-    stdout_bytes: u64,
-    stderr_bytes: u64,
-    /// Bytes not sent to the UI because its bounded event queue was full.
-    ui_dropped_bytes: u64,
     /// 超时移交后台时的注册表进程 id（由 process 的 action 使用）。
     #[serde(skip_serializing_if = "Option::is_none")]
     process_id: Option<u32>,
@@ -1077,8 +1051,8 @@ mod tests {
         let argv = vec!["git".to_string(), "status".to_string()];
         let result = direct_exec(&argv, None, None, 10000, 10, None, None, None, "test");
         eprintln!(
-            "exit_code={:?} timed_out={} time={:.3}s tokens={}",
-            result.exit_code, result.timed_out, result.wall_time_seconds, result.original_tokens
+            "exit_code={:?} timed_out={}",
+            result.exit_code, result.timed_out
         );
         assert!(!result.timed_out, "timed out");
         assert!(!result.output.is_empty(), "no output");
@@ -1089,8 +1063,8 @@ mod tests {
         let argv = vec!["git".to_string(), "diff".to_string(), "--stat".to_string()];
         let result = direct_exec(&argv, None, None, 10000, 10, None, None, None, "test");
         eprintln!(
-            "exit_code={:?} timed_out={} time={:.3}s tokens={}",
-            result.exit_code, result.timed_out, result.wall_time_seconds, result.original_tokens
+            "exit_code={:?} timed_out={}",
+            result.exit_code, result.timed_out
         );
         assert!(!result.timed_out, "timed out");
     }
@@ -1105,8 +1079,8 @@ mod tests {
         ];
         let result = direct_exec(&argv, None, None, 10000, 60, None, None, None, "test");
         eprintln!(
-            "exit_code={:?} timed_out={} time={:.3}s tokens={}",
-            result.exit_code, result.timed_out, result.wall_time_seconds, result.original_tokens
+            "exit_code={:?} timed_out={}",
+            result.exit_code, result.timed_out
         );
         assert!(!result.timed_out, "timed out");
         assert!(!result.output.is_empty(), "no output");
