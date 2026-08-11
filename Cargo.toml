@@ -21,6 +21,7 @@ members = [
     "crates/markdown-core",
     "crates/markdown-winui",
     "crates/deepx-fluent",
+    "crates/deepx-app-notifications",
     "apps/installer",
     "apps/updater",
     "apps/winui",
