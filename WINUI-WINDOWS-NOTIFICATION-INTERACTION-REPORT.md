@@ -117,6 +117,51 @@ P0 实验必须覆盖一台没有预装目标 Windows App Runtime 的干净 Wind
 
 若 `IsSupported()` 为 false 或激活失败，安装器应按微软自包含部署指南安装对应架构、对应版本的受信任 Runtime MSIX（至少核对 Framework 与 Singleton，最终以官方 runtime installer 的适用包集合为准），或改用带包/框架依赖部署。运行时仍应保留 `IsSupported()` 检测和功能降级。
 
+#### 2026-08-11 开发机验证进展（Phase 0 绑定 + API 链路）
+
+已完成 `crates/deepx-app-notifications`：用 fork 的 `windows-bindgen` 从已安装 Windows App Runtime（2.3.1）的 `Microsoft.Windows.AppNotifications.winmd`（含 `Builder.winmd`）生成绑定，依赖 fork 的 `windows-core/collections/future/time`。`build.rs` 自动探测 `C:\Program Files\WindowsApps\Microsoft.WindowsAppRuntime.*`（可用 `DEEPX_WINMD_DIR` 覆盖），filter 含 `Windows.Foundation.TypedEventHandler`（否则事件访问器退化为裸 `usize`）。
+
+开发机（Win11 26xxx）实测结论：
+
+| 实验 | 结果 |
+|---|---|
+| 裸 exe（无 runtime 绑定） | `0x80040154` 没有注册类 |
+| + LoadLibrary `Microsoft.WindowsAppRuntime.dll`（自包含模拟） | 仍失败 |
+| + Bootstrap（`MddBootstrapInitialize(0x00020003, L"", 0)`，Bootstrap.dll 2.3.5） | IsSupported=true，但 Default() 仍 `0x80040154` |
+| + 注册 Runtime MSIX（`WindowsAppRuntimeInstall-x64.exe --msix`：Main + **Singleton** + DDLM x64/x86） | **全链路通过**：IsSupported → 事件注册 → Register → Show → 点击回调 `NotificationInvoked` |
+
+关键结论：
+
+1. **Singleton 包确为激活必需**：此前开发机只有 Framework 包（`Microsoft.WindowsAppRuntime.2`），`AppNotificationManager::Default()` 返回 `REGDB_E_CLASSNOTREG`；用 `WindowsAppRuntimeInstall-x64.exe --msix`（2.3.1，`--msix` 选项无需提权；`--license` 才需要）补装 `MicrosoftCorporationII.WinAppRuntime.Singleton` + `DDLM` 后激活成功。NuGet 缓存中的 `Microsoft.WindowsAppRuntime.Bootstrap.dll`（foundation 2.3.5）导出名为 **`MddBootstrapInitialize`**（1.x 的 `BootstrapInitialize` 别名已移除）。
+2. **Bootstrap 是 unpackaged 必需**：仅把 `Microsoft.WindowsAppRuntime.dll` 放到 exe 旁（LoadLibrary）不足以建立激活（无 Bootstrap 时即使 Singleton 已注册仍 CLASSNOTREG）。自包含部署下 DeepX.exe 的链接期 auto-initializer 是否等效 Bootstrap，需在真实 DeepX.exe 进程内验证（见下）。
+3. **API 约定**：`NotificationInvoked` 事件处理器必须在 `Register()` 之前注册（否则 `0x80070490`）；`AppNotification::CreateInstance` 的 payload 是 **XML**（`<toast><visual>...`），非纯文本（否则 `0xC00CE556`）。
+4. **干净 VM 验证仍然必要**，但验证点已收窄为：自包含 DeepX.exe（含链接期 auto-init）在**无任何 runtime 包**的机器上 `IsSupported()`/激活是否成功；失败则安装器补装 Main+Singleton+DDLM 包（`--msix` 流程，安装器静默完成，用户无感）。
+
+#### 2026-08-11 MSIX 壳包（external location）spike
+
+为现有目录部署补注册一个"壳包"（sparse package，只含 manifest + 图标），获得 Identity 与 Windows App Runtime 框架依赖解析。产物：`apps/installer/msix/`（manifest、打包目录）+ `apps/installer/scripts/build-msix-shell.ps1`（build/register/unregister 全流程）。
+
+实测要点（Win11 26xxx，全部通过）：
+
+| 步骤 | 结果 |
+|---|---|
+| `makeappx pack /nv`（壳包引用外部 exe，须 `/nv` 跳过打包期校验） | ✅ |
+| `signtool` 自签证书签名 | ✅ |
+| `Add-AppxPackage -Path ... -ExternalLocation <安装目录>` | ✅ `DeepX_1.0.0.0_x64__v8499m78g15e0`，AUMID `DeepX_v8499m78g15e0!DeepX` 出现在 StartApps |
+| WindowsApps 内只放元数据（Assets/Manifest/BlockMap），exe 仍从外部位置解析 | ✅ |
+| 卸载 `Remove-AppxPackage`：包干净移除，外部安装目录文件不受影响 | ✅ |
+
+三个坑（已解决，脚本已固化）：
+
+1. **`uap10:AllowExternalContent=true`** 必须声明在 `<Properties>`，否则 `0x80073D2E`；
+2. **`PackageDependency` 的 Publisher 必须与框架包 Identity 的完整 DN 精确匹配**：本机 runtime 2.3.1 是 CBS 安装版，Publisher 为 `CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US`——短形式 `CN=Microsoft Corporation` 导致 `0x80073CF3`（部署日志 ID 672 明示 publisher mismatch）；
+3. **证书信任是机器级**：`Add-AppxPackage`（非 `-Register`）要求签名链到 `LocalMachine\Root`，用户级信任不够（`0x800B0109`）；脚本用 `certutil -addstore Root`（弹一次 UAC）导入自签证书。`-Register` 可绕过签名校验但框架依赖解析行为不同（external location 的正规安装路径是 `-Path + -ExternalLocation`）。
+
+结论：**方案 B（壳包）生命周期全通**。与"自包含 + Bootstrap"两条路并存：
+- 打包激活路径（壳包注册后以包身份启动）：系统解析框架依赖，免 Bootstrap——待通知代码接入后用真实 DeepX.exe 验证；
+- 目录直启路径（双击 exe）：unpackaged 语义，仍需 Bootstrap 或自包含 auto-init。
+- 安装器集成点：安装/升级后注册壳包（版本号变更时重注册），卸载时 `Remove-AppxPackage`；开始菜单会出现壳包入口与安装器快捷方式两个 DeepX，需在安装器中移除旧快捷方式。
+
 ## 5. 总体架构
 
 ```mermaid

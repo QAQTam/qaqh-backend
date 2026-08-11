@@ -1,0 +1,15 @@
+[package]
+name = "deepx-app-notifications"
+version = "1.0.0-rc.3"
+edition = "2024"
+description = "Microsoft.Windows.AppNotifications (Windows App SDK) WinMD bindings + DeepX wrapper"
+
+[dependencies]
+windows-core = { path = "../../../deepx-winui-reactor/crates/libs/core" }
+windows-collections = { path = "../../../deepx-winui-reactor/crates/libs/collections" }
+windows-future = { path = "../../../deepx-winui-reactor/crates/libs/future" }
+windows-time = { path = "../../../deepx-winui-reactor/crates/libs/time" }
+windows = { path = "../../../deepx-winui-reactor/crates/libs/windows", default-features = false, features = ["ro", "libloaderapi"] }
+
+[build-dependencies]
+windows-bindgen = { path = "../../../deepx-winui-reactor/crates/libs/bindgen" }
