@@ -13,7 +13,7 @@
 //! │  │   ├─ turn: TurnEngine                         │
 //! │  │   └─ tool: ToolEngine                         │
 //! │  └─ Stateless engines: session_eng, input,       │
-//! │     compact, misc, notify                        │
+//! │     compact, misc                                │
 //! └──────────────────────────────────────────────────┘
 //! ```
 //!
@@ -61,7 +61,6 @@ use super::engine_session::SessionEngine;
 use super::engine_tool::PermissionDisposition;
 use super::paced_emitter::PacedEmitter;
 use super::types::*;
-use crate::services::notification;
 use crate::state::agent::AgentState;
 
 fn ringing_command_is_interrupt(env: &deepx_ringing::RingingWorkerCommandEnvelope) -> bool {
@@ -125,11 +124,8 @@ pub struct Loop {
     compact: CompactEngine,
     /// Goal mode: autonomous plan execution with compact-aware scheduling.
     goal: GoalEngine,
-    /// Miscellaneous: undo, dashboard, mode, notifications.
+    /// Miscellaneous: undo, dashboard, mode.
     misc: MiscEngine,
-    /// Desktop notification channel.
-    notify: NotifyHandle,
-
     /// Pending compact result (set when compact is running in background).
     pending_compact_rx: Option<mpsc::Receiver<CompactMeta>>,
     pending_compact_id: Option<String>,
@@ -277,9 +273,6 @@ impl Loop {
             compact: CompactEngine::new(),
             goal: GoalEngine::new(),
             misc: MiscEngine::new(),
-            notify: NotifyHandle {
-                tx: notification::NotificationThread::spawn().into_sender(),
-            },
             pending_compact_rx: None,
             pending_compact_id: None,
             pending_compact_causation: None,
@@ -701,7 +694,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
-                        notify: &self.notify,
+
                     };
                     self.compact.apply_result(&mut ctx, &meta);
                 }
@@ -786,7 +779,7 @@ impl Loop {
                 pending: &mut self.pending,
                 writer_dead: &self.writer_dead,
                 stats: &mut self.session.stats,
-                notify: &self.notify,
+
             };
             self.compact.build_prompt_and_meta(&mut ctx)
         };
@@ -1043,7 +1036,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
-                        notify: &self.notify,
+
                     };
                     let outcome = self.session.turn.handle_ask_response(
                         &mut ctx,
@@ -1063,7 +1056,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
-                        notify: &self.notify,
+
                     };
                     let outcome = self.session.turn.handle_ask_dismiss(
                         &mut ctx,
@@ -1087,7 +1080,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
-                        notify: &self.notify,
+
                     };
                     let outcome = self.session.turn.handle_plan_response(
                         &mut ctx,
@@ -1125,7 +1118,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
-                        notify: &self.notify,
+
                     };
                     let outcome = self.input.handle_user_input(&mut ctx, &text, images);
                     drop(ctx);
@@ -1204,7 +1197,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
-                        notify: &self.notify,
+
                     };
                     self.session.tool.handle_ui_tool_call(
                         &mut ctx,
@@ -1228,7 +1221,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
-                        notify: &self.notify,
+
                     };
                     match self.session.tool.handle_permission_response(
                         &mut ctx,
@@ -1271,7 +1264,7 @@ impl Loop {
     /// This is the central decision point of the Ringing V1 architecture.
     /// Each Outcome variant maps to a specific Loop action:
     ///
-    /// - `TurnComplete` → flush, emit TurnEnd + Done, notify, return to Idle
+    /// - `TurnComplete` → flush, emit TurnEnd + Done, return to Idle
     /// - `ContinueTurn` → re-enter TurnEngine for another gate lap (recursive)
     /// - `YieldToUser` → do nothing, wait for PermissionResponse or UserInput
     /// - `Handled` / `Error` / `Shutdown` → straightforward
@@ -1290,8 +1283,7 @@ impl Loop {
                         },
                     ));
 
-                // Desktop notification: preview of assistant response
-                self.misc.maybe_notify(&self.session.agent, &self.notify.tx);
+
 
                 // Goal mode auto-advance: if the LLM completed a step
                 // (via todo(action=set, status=completed)), inject the next step.
@@ -1314,7 +1306,6 @@ impl Loop {
                                         pending: &mut self.pending,
                                         writer_dead: &self.writer_dead,
                                         stats: &mut self.session.stats,
-                                        notify: &self.notify,
                                     };
                                     let next_outcome =
                                         self.input.handle_user_input(&mut ctx, &prompt, vec![]);
@@ -1390,7 +1381,6 @@ impl Loop {
                     pending: &mut self.pending,
                     writer_dead: &self.writer_dead,
                     stats: &mut self.session.stats,
-                    notify: &self.notify,
                 };
                 let next_outcome = self.session.turn.run(
                     &mut ctx,
