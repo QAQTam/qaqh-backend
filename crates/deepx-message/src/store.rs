@@ -213,7 +213,7 @@ fn fold_file_mutation_result(tool_name: &str, result: &str) -> String {
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
-    let cap = first.floor_char_boundary(first.len().min(400));
+    let cap = first.floor_char_boundary(first.len().min(600));
     let action = match tool_name {
         "edit_file" => "edit",
         "write" => "write",

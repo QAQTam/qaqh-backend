@@ -7,7 +7,9 @@
 //!   - `old_lines`：行数组定位（行序列窗口匹配）
 //!   - `start_line`/`end_line`：行号定位（与 old_lines/old_string/expected_hash 交叉校验）
 //!   单文件多块用 `ops` 数组；多文件并行用 `files` 数组。CRLF 自动归一化；
-//!   默认 trim_end 容错，`allow_fuzzy` 启用空白折叠（tab/多空格）与 Unicode 归一化（NFC、智能标点）兜底。
+//!   默认 trim_end 容错，另自动容忍：定位块首空行（丢弃）、整块统一缩进偏移
+//!   （定位命中后缩进补回给替换行）。`allow_fuzzy` 启用空白折叠（tab/多空格）
+//!   与 Unicode 归一化（NFC、智能标点）兜底。
 //!
 //! - **严格（命中）**：多 candidate 且无法用 `context_before/after` 消歧 → 拒绝并
 //!   列出全部位置（绝不猜测）；行号模式逐行交叉校验（LINE_MISMATCH 带逐行对比）；
@@ -178,53 +180,155 @@ enum OpError {
     Other { message: String },
 }
 
-/// 行窗口匹配：返回所有 candidate 起始行（0-based）与是否启用了 fuzzy。
-/// 层级：trim_end 精确 → (allow_fuzzy) trim → (allow_fuzzy) Unicode NFC + 行内空白折叠。
-fn find_windows(file_lines: &[&str], pattern: &[String], allow_fuzzy: bool) -> (Vec<usize>, bool) {
+/// 行窗口匹配结果：定位窗口 + 容错元数据。
+#[derive(Debug, Clone)]
+struct WindowMatch {
+    /// 0-based 起始行。
+    start: usize,
+    /// 窗口行数（首空行容错命中时 = pattern.len()-1）。
+    len: usize,
+    /// 统一缩进偏移命中时，文件行比 pattern 统一多出的前导空白
+    /// （补回给替换行，保持目标块的缩进风格）。
+    indent: String,
+    /// 是否经过非精确容错层（首空行/缩进偏移/fuzzy）。
+    fuzzy: bool,
+}
+
+/// 行窗口匹配：返回所有 candidate（含窗口元数据）。
+/// 层级（一旦某层有候选即返回，不混合）：
+///   L0 trim_end 精确
+///   L1 首空行丢弃（pattern[0] 为空行时用 pattern[1..] 匹配；替换窗口不含该空行）
+///   L2 统一缩进偏移（非空行 lstrip 全等 + 前导空白偏移一致 → 定位成功，
+///      偏移补回给替换行；Aider match_but_for_leading_whitespace 移植）
+///   L3 (allow_fuzzy) trim
+///   L4 (allow_fuzzy) Unicode NFC + 行内空白折叠
+fn find_windows(file_lines: &[&str], pattern: &[String], allow_fuzzy: bool) -> Vec<WindowMatch> {
     if pattern.is_empty() || pattern.len() > file_lines.len() {
-        return (Vec::new(), false);
+        return Vec::new();
     }
     let norm: Vec<String> = pattern.iter().map(|l| l.trim_end().to_string()).collect();
-    let mut candidates: Vec<usize> = Vec::new();
+
+    // L0: trim_end 精确
+    let mut hits: Vec<WindowMatch> = Vec::new();
     for i in 0..=file_lines.len() - pattern.len() {
-        let win: Vec<String> = file_lines[i..i + pattern.len()]
-            .iter()
-            .map(|l| l.trim_end().to_string())
-            .collect();
-        if win == norm {
-            candidates.push(i);
+        let win = &file_lines[i..i + pattern.len()];
+        if win.iter().enumerate().all(|(k, l)| l.trim_end() == norm[k]) {
+            hits.push(WindowMatch {
+                start: i,
+                len: pattern.len(),
+                indent: String::new(),
+                fuzzy: false,
+            });
         }
     }
-    if !candidates.is_empty() {
-        return (candidates, false);
+    if !hits.is_empty() {
+        return hits;
     }
+
+    // L1: 首空行丢弃（模型常在定位块前多加一个空行）
+    if pattern.len() > 1 && norm[0].trim().is_empty() {
+        let inner_len = pattern.len() - 1;
+        for i in 0..=file_lines.len() - inner_len {
+            let win = &file_lines[i..i + inner_len];
+            if win.iter().enumerate().all(|(k, l)| l.trim_end() == norm[k + 1]) {
+                hits.push(WindowMatch {
+                    start: i,
+                    len: inner_len,
+                    indent: String::new(),
+                    fuzzy: true,
+                });
+            }
+        }
+        if !hits.is_empty() {
+            return hits;
+        }
+    }
+
+    // L2: 统一缩进偏移（模型复制时整体丢了前导空白）
+    {
+        let mut off_hits: Vec<WindowMatch> = Vec::new();
+        for i in 0..=file_lines.len() - pattern.len() {
+            let win = &file_lines[i..i + pattern.len()];
+            let mut add: Option<&str> = None;
+            let mut ok = true;
+            for (k, l) in win.iter().enumerate() {
+                let p = norm[k].as_str();
+                if p.trim().is_empty() {
+                    if !l.trim().is_empty() {
+                        ok = false;
+                        break;
+                    }
+                    continue;
+                }
+                if l.trim_end().trim_start() != p.trim_end().trim_start() {
+                    ok = false;
+                    break;
+                }
+                // 偏移 = 文件行前导空白 − pattern 行前导空白（仅处理文件更多的情况）
+                let lead_file = l.len() - l.trim_start().len();
+                let lead_pat = p.len() - p.trim_start().len();
+                if lead_file < lead_pat {
+                    ok = false;
+                    break;
+                }
+                let off = &l[..lead_file - lead_pat];
+                match add {
+                    None => add = Some(off),
+                    Some(prev) if prev != off => {
+                        ok = false;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if ok
+                && let Some(off) = add
+            {
+                off_hits.push(WindowMatch {
+                    start: i,
+                    len: pattern.len(),
+                    indent: off.to_string(),
+                    fuzzy: true,
+                });
+            }
+        }
+        if !off_hits.is_empty() {
+            return off_hits;
+        }
+    }
+
+    // L3/L4: allow_fuzzy 层
     if !allow_fuzzy {
-        return (candidates, false);
+        return hits;
     }
     let trim_norm: Vec<String> = pattern.iter().map(|l| l.trim().to_string()).collect();
     for i in 0..=file_lines.len() - pattern.len() {
-        let win: Vec<String> = file_lines[i..i + pattern.len()]
-            .iter()
-            .map(|l| l.trim().to_string())
-            .collect();
-        if win == trim_norm {
-            candidates.push(i);
+        let win = &file_lines[i..i + pattern.len()];
+        if win.iter().enumerate().all(|(k, l)| l.trim() == trim_norm[k]) {
+            hits.push(WindowMatch {
+                start: i,
+                len: pattern.len(),
+                indent: String::new(),
+                fuzzy: true,
+            });
         }
     }
-    if !candidates.is_empty() {
-        return (candidates, true);
+    if !hits.is_empty() {
+        return hits;
     }
     let uni_norm: Vec<String> = pattern.iter().map(|l| normalise(l)).collect();
     for i in 0..=file_lines.len() - pattern.len() {
-        let win: Vec<String> = file_lines[i..i + pattern.len()]
-            .iter()
-            .map(|l| normalise(l))
-            .collect();
-        if win == uni_norm {
-            candidates.push(i);
+        let win = &file_lines[i..i + pattern.len()];
+        if win.iter().enumerate().all(|(k, l)| normalise(l) == uni_norm[k]) {
+            hits.push(WindowMatch {
+                start: i,
+                len: pattern.len(),
+                indent: String::new(),
+                fuzzy: true,
+            });
         }
     }
-    (candidates, true)
+    hits
 }
 
 /// Unicode/空白归一化（allow_fuzzy 兜底层）：
@@ -305,14 +409,25 @@ fn no_match_diagnostic(content: &str, pattern: &[String]) -> Option<String> {
         let mut out = format!(
             "no line matches; closest line is L{}: {}",
             anchor.0,
-            truncate_line(&anchor.1, 200)
+            truncate_line(&anchor.1, 120)
         );
+        // 窗口级相似块提示（Aider find_similar_lines 移植）：模型直接知道
+        // 该去哪重读（行号区间 + 首行摘录），无需整文件扫描。
+        if let Some((s, e, sim, first)) = best_similar_window(content, pattern) {
+            out.push_str(&format!(
+                " [DID YOU MEAN] similar block at L{}-L{} (similarity {:.2}): {}",
+                s + 1,
+                e,
+                sim,
+                truncate_line(&first, 100)
+            ));
+        }
         // 单行模式（pattern 只有一行）最常在这里命中转义差异。
         // HINT 必须并入第一行：存储时折叠只保留首行（fold_file_mutation_result）。
         let anchor_trim = anchor.1.trim();
         if anchor_trim.replace('\\', "") == needle.replace('\\', "") && anchor_trim != needle {
             out.push_str(
-                " [HINT] escape mismatch: the file contains backslash-escaped characters (e.g. \\\") that differ from your pattern — copy the exact characters from read_file output.",
+                " [HINT] escape mismatch: the file contains backslash-escaped characters (e.g. \") that differ from your pattern — copy the exact characters from read_file output.",
             );
         }
         return Some(out);
@@ -350,12 +465,47 @@ fn truncate_line(s: &str, max: usize) -> String {
     }
     out
 }
-/// 定位单个 op 在内容中的命中窗口。返回 (start_line 0-based, 行数, was_fuzzy)。
+
+/// 全文件滑动窗口：与 pattern 最相似的行块（逐行 jaro_winkler 均值，
+/// Aider find_similar_lines 移植）。返回 (start 0-based, end 排他, 均值相似度, 首行)。
+/// 阈值 0.6：低于该值视为无参考价值，返回 None。
+fn best_similar_window(content: &str, pattern: &[String]) -> Option<(usize, usize, f64, String)> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() || pattern.len() > lines.len() {
+        return None;
+    }
+    let mut best: Option<(usize, usize, f64)> = None;
+    for i in 0..=lines.len() - pattern.len() {
+        let mut total = 0.0;
+        for (k, p) in pattern.iter().enumerate() {
+            let a = lines[i + k].trim();
+            let b = p.trim();
+            total += if a.is_empty() || b.is_empty() {
+                if a == b { 1.0 } else { 0.4 }
+            } else {
+                strsim::jaro_winkler(a, b)
+            };
+        }
+        let avg = total / pattern.len() as f64;
+        if best.as_ref().map_or(true, |(_, _, s)| avg > *s) {
+            best = Some((i, i + pattern.len(), avg));
+        }
+    }
+    let (s, e, avg) = best?;
+    if avg < 0.6 {
+        return None;
+    }
+    Some((s, e, avg, lines[s].to_string()))
+}
+/// 定位单个 op 在内容中的命中窗口。返回 WindowMatch（start/len/fuzzy/indent）。
 fn locate_op(
     content: &str,
     file_lines: &[&str],
     op: &EditOp,
-) -> Result<(usize, usize, bool), OpError> {
+) -> Result<WindowMatch, OpError> {
     // replace_all 的合法场景（单行子串 + 非 regex）已被 apply_op 快路径短路；
     // 到达这里说明是 unsupported 组合——显式拒绝而非静默降级。
     if op.replace_all {
@@ -397,7 +547,12 @@ fn locate_op(
         if op.old_lines.is_empty() && op.old_string.is_none() {
             // execute_file 层已做 UNVERIFIED_LINE_EDIT 预检（需要 expected_hash）；
             // 到达这里说明文件级 expected_hash 已校验通过，直接按窗口替换。
-            return Ok((s, e - s + 1, false));
+            return Ok(WindowMatch {
+                start: s,
+                len: e - s + 1,
+                indent: String::new(),
+                fuzzy: false,
+            });
         }
         // 校验行号窗口内容（若有 old_lines / old_string）
         if !op.old_lines.is_empty() {
@@ -427,7 +582,12 @@ fn locate_op(
                     ),
                 });
             }
-            return Ok((s, e - s + 1, false));
+            return Ok(WindowMatch {
+                start: s,
+                len: e - s + 1,
+                indent: String::new(),
+                fuzzy: false,
+            });
         }
         if let Some(old) = &op.old_string {
             let window: Vec<&str> = file_lines[s..=e].to_vec();
@@ -449,7 +609,12 @@ fn locate_op(
             }
         }
         // 行号 + 内容校验通过（或 expected_hash 已校验）：按窗口替换
-        return Ok((s, e - s + 1, false));
+        return Ok(WindowMatch {
+            start: s,
+            len: e - s + 1,
+            indent: String::new(),
+            fuzzy: false,
+        });
     }
 
     // ── 单行子串定位（old_string 无换行，Claude 风格）──
@@ -459,7 +624,7 @@ fn locate_op(
     {
         // old_string 与 old_lines 同时给出 → 交叉校验（严格：两处定位必须一致）
         if !op.old_lines.is_empty() {
-            let (s_lines, _, _) = locate_line_window(file_lines, op)?;
+            let m_lines = locate_line_window(file_lines, op)?;
             let positions: Vec<usize> = content.match_indices(old).map(|(i, _)| i).collect();
             let s_sub = match positions.len() {
                 0 => {
@@ -476,16 +641,21 @@ fn locate_op(
                     return Err(OpError::Ambiguous { candidates: lines });
                 }
             };
-            if s_sub != s_lines {
+            if s_sub != m_lines.start {
                 return Err(OpError::CrossCheck {
                     detail: format!(
                         "old_string locates L{} but old_lines locates L{}",
                         s_sub + 1,
-                        s_lines + 1
+                        m_lines.start + 1
                     ),
                 });
             }
-            return Ok((s_sub, 1, false));
+            return Ok(WindowMatch {
+                start: s_sub,
+                len: 1,
+                indent: String::new(),
+                fuzzy: false,
+            });
         }
         let positions: Vec<usize> = content.match_indices(old).map(|(i, _)| i).collect();
         if !positions.is_empty() {
@@ -515,29 +685,38 @@ fn locate_op(
                     ) {
                         // 选中行内仍有多个命中 → context 无法消歧到具体位置，保持拒绝
                         if per_line.get(&line).copied().unwrap_or(1) == 1 {
-                            return Ok((line, 1, false));
+                            return Ok(WindowMatch {
+                                start: line,
+                                len: 1,
+                                indent: String::new(),
+                                fuzzy: false,
+                            });
                         }
                     }
                 }
                 let lines: Vec<usize> = cand_lines.iter().map(|l| l + 1).collect();
                 return Err(OpError::Ambiguous { candidates: lines });
             }
-            return Ok((line_of(content, positions[0]).saturating_sub(1), 1, false));
+            return Ok(WindowMatch {
+                start: line_of(content, positions[0]).saturating_sub(1),
+                len: 1,
+                indent: String::new(),
+                fuzzy: false,
+            });
         }
-        // 子串未命中 → 回退单行窗口（trim_end/fuzzy 容错）
+        // 子串未命中 → 回退单行窗口（trim_end/首空行/缩进偏移/fuzzy 容错）
         let pattern = vec![old.clone()];
-        let (candidates, fuzzy) = find_windows(file_lines, &pattern, op.allow_fuzzy);
-        let idx = disambiguate_op(candidates, file_lines, op, &pattern)?;
-        return Ok((idx, 1, fuzzy));
+        let matches = find_windows(file_lines, &pattern, op.allow_fuzzy);
+        let m = disambiguate_op(matches, file_lines, op, &pattern)?;
+        return Ok(m);
     }
 
     // ── 行窗口定位（old_lines 或多行 old_string）──
-    let (start, win, fuzzy) = locate_line_window(file_lines, op)?;
-    Ok((start, win, fuzzy))
+    locate_line_window(file_lines, op)
 }
 
-/// 行窗口定位：old_lines 或多行 old_string → (start, win, fuzzy)。
-fn locate_line_window(file_lines: &[&str], op: &EditOp) -> Result<(usize, usize, bool), OpError> {
+/// 行窗口定位：old_lines 或多行 old_string → WindowMatch。
+fn locate_line_window(file_lines: &[&str], op: &EditOp) -> Result<WindowMatch, OpError> {
     let pattern: Vec<String> = if !op.old_lines.is_empty() {
         op.old_lines.clone()
     } else if let Some(old) = &op.old_string {
@@ -553,18 +732,18 @@ fn locate_line_window(file_lines: &[&str], op: &EditOp) -> Result<(usize, usize,
             diagnostic: None,
         });
     }
-    let (candidates, fuzzy) = find_windows(file_lines, &pattern, op.allow_fuzzy);
-    let idx = disambiguate_op(candidates, file_lines, op, &pattern)?;
-    Ok((idx, pattern.len(), fuzzy))
+    let matches = find_windows(file_lines, &pattern, op.allow_fuzzy);
+    let m = disambiguate_op(matches, file_lines, op, &pattern)?;
+    Ok(m)
 }
 
 /// 行窗口 candidate 消歧（严格：无法唯一确定 → Ambiguous）。
 fn disambiguate_op(
-    candidates: Vec<usize>,
+    candidates: Vec<WindowMatch>,
     file_lines: &[&str],
     op: &EditOp,
     pattern: &[String],
-) -> Result<usize, OpError> {
+) -> Result<WindowMatch, OpError> {
     if candidates.is_empty() {
         let needle = pattern.first().cloned().unwrap_or_default();
         let content = file_lines.join("\n");
@@ -575,18 +754,26 @@ fn disambiguate_op(
         });
     }
     if candidates.len() == 1 {
-        return Ok(candidates[0]);
+        return Ok(candidates[0].clone());
     }
+    let starts: Vec<usize> = candidates.iter().map(|c| c.start).collect();
     match disambiguate_match(
-        &candidates,
+        &starts,
         &op.context_before,
         &op.context_after,
         file_lines,
         "",
-        pattern.len(),
+        candidates[0].len,
     ) {
-        Ok(idx) => Ok(idx),
-        Err(_) => Err(OpError::Ambiguous { candidates }),
+        Ok(idx) => {
+            // 多候选仅在窗口长度一致时才能用行号消歧（同层候选 len 一致）
+            if let Some(m) = candidates.iter().find(|c| c.start == idx) {
+                Ok(m.clone())
+            } else {
+                Err(OpError::Ambiguous { candidates: starts })
+            }
+        }
+        Err(_) => Err(OpError::Ambiguous { candidates: starts }),
     }
 }
 
@@ -595,7 +782,7 @@ fn locate_regex(
     content: &str,
     file_lines: &[&str],
     op: &EditOp,
-) -> Result<(usize, usize, bool), OpError> {
+) -> Result<WindowMatch, OpError> {
     let old = op.old_string.as_deref().ok_or_else(|| OpError::Other {
         message: "regex mode requires old_string".into(),
     })?;
@@ -616,7 +803,12 @@ fn locate_regex(
     positions.truncate(1);
     let line = line_of(content, positions[0]);
     let _ = file_lines;
-    Ok((line.saturating_sub(1), 1, false))
+    Ok(WindowMatch {
+        start: line.saturating_sub(1),
+        len: 1,
+        indent: String::new(),
+        fuzzy: false,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -808,13 +1000,14 @@ fn apply_op(
     // 定位
     let file_lines: Vec<&str> = content.lines().collect();
     let locate = locate_op(content, &file_lines, op);
-    let (start, win, fuzzy) = match locate {
+    let m = match locate {
         Ok(v) => v,
         Err(e) => return (content.to_string(), OpReport::err(index, e, display)),
     };
+    let (start, win, fuzzy) = (m.start, m.len, m.fuzzy);
 
     // 应用：行窗口替换（统一路径；单行子串命中时行内替换）
-    let new_lines: Vec<String> = if !op.new_lines.is_empty() {
+    let mut new_lines: Vec<String> = if !op.new_lines.is_empty() {
         op.new_lines.clone()
     } else if let Some(new) = &op.new_string {
         if new.contains('\n') {
@@ -825,6 +1018,15 @@ fn apply_op(
     } else {
         Vec::new()
     };
+    // 统一缩进偏移容错：文件行比 pattern 多出的前导空白补回给替换行，
+    // 保持目标块的缩进风格（模型 old/new 整体丢缩进时，new 也要补回）。
+    if !m.indent.is_empty() {
+        for line in &mut new_lines {
+            if !line.trim().is_empty() {
+                *line = format!("{}{}", m.indent, line);
+            }
+        }
+    }
 
     let mut out_lines: Vec<&str> = file_lines.clone();
     let replaced_lines: Vec<&str> = out_lines[start..start + win].to_vec();
@@ -1324,7 +1526,11 @@ pub fn register(mgr: &mut crate::ToolManager) {
             "or line-number mode (start_line/end_line). Multi-block: ops array; multi-file: files array. ",
             "Every op is an independent transaction — a failed op reports its closest_line, other ops still apply. ",
             "Ambiguous matches are REJECTED with candidate lines, never guessed — use context_before/context_after or ",
-            "start_line / replace_all=true to disambiguate. expected_hash (from read) guards stale content (optional). ",
+            "start_line / replace_all=true to disambiguate. Matching is tolerant by default: trailing whitespace, a spurious ", 
+            "leading blank line in the locator, and uniform indent offset are auto-accepted; allow_fuzzy=true adds intra-line ", 
+            "whitespace collapsing + Unicode normalization. On NO_MATCH the error includes the closest line plus a DID YOU MEAN ", 
+            "block range — read those lines and retry with exact content. ", 
+            "expected_hash (from read) guards stale content (optional). ",
             "For patch-style edits (unified diff), use apply_patch; use write for whole-file creation; delete for removal."
         ),
         input_schema: serde_json::json!({
@@ -2043,5 +2249,106 @@ mod tests {
         assert_eq!(v["code"], "STALE_FILE", "got: {out}");
         assert!(std::path::Path::new(&p).exists());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "external\n");
+    }
+
+    #[test]
+    fn leading_blank_line_in_old_lines_is_dropped() {
+        // 模型在定位块前多加一个空行 → 首空行容错命中，替换窗口不含该空行
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "blank.rs", "fn main() {\n    call();\n}\n");
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["", "fn main() {", "    call();"],
+                "new_lines": ["fn main() {", "    call();", "    extra();"],
+            }),
+        );
+        assert_eq!(out["status"], "ok", "got: {out}");
+        assert_eq!(out["files"][0]["ops"][0]["fuzzy"], true);
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "fn main() {\n    call();\n    extra();\n}\n"
+        );
+    }
+
+    #[test]
+    fn uniform_indent_offset_is_tolerated_and_reapplied_to_new_lines() {
+        // 模型 old/new 整体丢了统一前导空白（整块相对移动）→ 缩进偏移容错命中，
+        // 偏移补回给替换行。嵌套行差不同（如 4/8）不属于本层，由 allow_fuzzy 处理。
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(
+            dir.path(),
+            "indent.rs",
+            "fn outer() {\n    aaa();\n    bbb();\n}\n",
+        );
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["aaa();", "bbb();"],
+                "new_lines": ["aaa();", "BBB();"],
+            }),
+        );
+        assert_eq!(out["status"], "ok", "got: {out}");
+        assert_eq!(out["files"][0]["ops"][0]["fuzzy"], true);
+        // 替换行补回 4 空格缩进（与文件风格一致）
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "fn outer() {\n    aaa();\n    BBB();\n}\n"
+        );
+    }
+
+    #[test]
+    fn uniform_indent_offset_ambiguous_is_rejected() {
+        // 两处相同缩进偏移候选 → 不猜测，AMBIGUOUS
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(
+            dir.path(),
+            "dup.rs",
+            "    aaa();\n    bbb();\n    aaa();\n    ccc();\n",
+        );
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["aaa();"],
+                "new_lines": ["AAA();"],
+            }),
+        );
+        assert_eq!(out["files"][0]["ops"][0]["code"], "AMBIGUOUS_MATCH");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "    aaa();\n    bbb();\n    aaa();\n    ccc();\n");
+    }
+
+    #[test]
+    fn inconsistent_indent_offset_still_no_match() {
+        // 偏移不一致（一行无缩进、一行有缩进）→ 缩进偏移层拒绝，避免误替换
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "mixed.rs", "fn main() {\n    call();\n}\n");
+        let out = run(
+            &p,
+            serde_json::json!({
+                "old_lines": ["fn main() {", "call();"],
+                "new_lines": ["fn main() {", "call();"],
+            }),
+        );
+        assert_eq!(out["files"][0]["ops"][0]["code"], "NO_MATCH");
+    }
+
+    #[test]
+    fn no_match_diagnostic_offers_similar_block() {
+        let content = "fn get_factorial(n: u32) -> u32 {\n    if n == 0 {\n        return 1;\n    }\n    n * get_factorial(n - 1)\n}\n";
+        let pattern = vec!["fn get_factorialx(n: u32) -> u32 {".to_string(), "    if n == 0 {".to_string()];
+        let diag = no_match_diagnostic(content, &pattern).expect("diagnostic");
+        assert!(diag.contains("DID YOU MEAN"), "got: {diag}");
+        assert!(diag.contains("L1-L2"), "got: {diag}");
+    }
+
+    #[test]
+    fn best_similar_window_finds_closest_block() {
+        let content = "a\nb\nfn target() {\n    x();\n}\nc\n";
+        let pattern = vec!["fn targt() {".to_string(), "    x();".to_string()];
+        let (s, e, sim, first) = best_similar_window(content, &pattern).unwrap();
+        assert_eq!(s, 2);
+        assert_eq!(e, 4);
+        assert!(sim > 0.6, "sim: {sim}");
+        assert!(first.contains("fn target"));
     }
 }
