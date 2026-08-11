@@ -349,7 +349,7 @@ mod tests {
         assert!(
             skill_definitions[0].function.parameters["oneOf"]
                 .as_array()
-                .is_some_and(|variants| variants.len() == 6)
+                .is_some_and(|variants| variants.len() == 4)
         );
         assert!(!definitions.iter().any(|definition| matches!(
             definition.function.name.as_str(),

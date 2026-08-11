@@ -1,7 +1,6 @@
 //! Session lifecycle: initialization, health status.
 
 use super::agent::AgentState;
-use crate::util::chrono_local_date;
 use deepx_session::SessionManager;
 use deepx_workspace;
 
@@ -172,8 +171,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
         agent.config.context_limit as usize,
     );
     agent.msg.push_system(deepx_types::Message::system(
-        &deepx_config::prompt::full_system_prompt_with_date(
-            &chrono_local_date(),
+        &deepx_config::prompt::full_system_prompt_with_env(
             deepx_config::prompt::OS_INFO
                 .get()
                 .map(|s| s.as_str())
@@ -209,8 +207,7 @@ pub fn create_session(agent: &mut AgentState) {
         agent.config.context_limit as usize,
     );
     agent.msg.push_system(deepx_types::Message::system(
-        &deepx_config::prompt::full_system_prompt_with_date(
-            &chrono_local_date(),
+        &deepx_config::prompt::full_system_prompt_with_env(
             deepx_config::prompt::OS_INFO
                 .get()
                 .map(|s| s.as_str())
@@ -244,8 +241,7 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
         agent.config.context_limit as usize,
     );
     agent.msg.push_system(deepx_types::Message::system(
-        &deepx_config::prompt::full_system_prompt_with_date(
-            &chrono_local_date(),
+        &deepx_config::prompt::full_system_prompt_with_env(
             deepx_config::prompt::OS_INFO
                 .get()
                 .map(|s| s.as_str())

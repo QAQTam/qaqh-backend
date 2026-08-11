@@ -50,9 +50,11 @@ fn public_schema_exposes_one_todo_tool_with_no_alias_and_no_goal_entrypoint() {
         set_branch["required"],
         serde_json::json!(["action", "id", "status"])
     );
+    // The oneOf branch no longer carries `not` anti-constraints (schema
+    // simplification): required + action.const are the sole discriminator.
     assert!(
-        set_branch["not"].to_string().contains("description"),
-        "set schema must forbid task metadata"
+        set_branch.get("not").is_none(),
+        "set branch must not carry redundant not anti-constraints"
     );
     let insert_branches: Vec<_> = branches
         .iter()

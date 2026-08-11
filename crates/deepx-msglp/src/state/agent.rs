@@ -363,6 +363,13 @@ impl AgentState {
             if !workspace.is_empty() && workspace != "." {
                 parts.push(format!("<workspace_path>{workspace}</workspace_path>"));
             }
+            // The date lives in the frozen per-session annotation (first user
+            // message), NOT in the system prompt: a per-day date in the base
+            // prompt would break the provider prefix cache once per day.
+            parts.push(format!(
+                "<today>{}</today>",
+                crate::util::chrono_local_date()
+            ));
             let fs = deepx_workspace::file_state::summary();
             if !fs.is_empty() {
                 parts.push(fs);
