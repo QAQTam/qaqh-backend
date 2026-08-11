@@ -24,6 +24,7 @@ use deepx_client::{
     TimelineSnapshot, TimelineStatus, ToolCommand, ToolEvent,
 };
 use markdown_winui::PendingOutput;
+use deepx_app_notifications::{InitOutcome, Notifier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -1019,6 +1020,11 @@ pub struct BridgeCore {
     /// XAML goalBar 数据源：control 频道 `dashboard_snapshot` 按 seed 缓存。
     /// 后台会话仍会收到 control 事件，不能用单份全局快照承载。
     dashboards: Mutex<HashMap<String, DashboardSnapshot>>,
+    /// 桌面通知器（Phase 1：TurnCompleted 预览 + 点击回前台）。
+    /// Arc：show 可在独立线程执行（WinRT 调用不进 UI 线程消息泵）。
+    notifier: Mutex<Option<Arc<Notifier>>>,
+    /// 桌面通知开关（前端本地偏好 ui-preferences.json，不入 daemon config）。
+    notif_enabled: AtomicBool,
     /// dashboard 数据版本：事件到达后递增，UI 侧 timer 比对后刷新。
     dashboard_rev: AtomicU64,
 }
@@ -1055,6 +1061,29 @@ fn rebuild_cooldown_for(failures: u32) -> Duration {
 /// 无 client 自动重连冷却：同样受失败计数退避保护（5s→320s 封顶）。
 fn auto_reconnect_cooldown_for(failures: u32) -> Duration {
     AUTO_RECONNECT_COOLDOWN.saturating_mul(1u32 << failures.min(REBUILD_BACKOFF_CAP + 2))
+}
+
+/// 前端本地偏好文件（`%LOCALAPPDATA%\DeepX\ui-preferences.json`；无
+/// LOCALAPPDATA 时落 cwd——与 oobe.done 同目录惯例）。
+fn notif_prefs_path() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(base)
+        .join("DeepX")
+        .join("ui-preferences.json")
+}
+
+/// 点击通知 → 激活主窗口（WinUI 3 桌面窗口类名；最小化则恢复）。
+fn activate_main_window() {
+    unsafe {
+        use windows::Win32::winuser as w;
+        let class = windows::core::w!("WinUIDesktopWin32WindowClass");
+        let hwnd = w::FindWindowW(class, None);
+        if hwnd.0.is_null() {
+            return;
+        }
+        let _ = w::ShowWindow(hwnd, w::SW_RESTORE);
+        let _ = w::SetForegroundWindow(hwnd);
+    }
 }
 
 impl BridgeCore {
@@ -1776,6 +1805,115 @@ impl BridgeCore {
         ));
         // 标题栏直连：会话列表刷新后 title 可能变化（重命名/首轮摘要）。
         self.refresh_header();
+    }
+
+    // ── 桌面通知（Phase 1：TurnCompleted 预览 + 点击回前台）───────────
+
+    /// 通知开关当前值（启动时从 ui-preferences.json 载入；默认开启）。
+    pub fn notif_enabled(&self) -> bool {
+        self.notif_enabled.load(Ordering::Relaxed)
+    }
+
+    /// 设置通知开关：写前端本地偏好文件 + 更新内存；开启时惰性初始化通知器。
+    /// 偏好不入 daemon config（纯前端功能，daemon 无字段流）。
+    pub fn spawn_set_notif_pref(&self, enabled: bool) {
+        self.notif_enabled.store(enabled, Ordering::Relaxed);
+        let path = notif_prefs_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let prefs = serde_json::json!({ "notificationsEnabled": enabled });
+        let _ = std::fs::write(path, serde_json::to_string_pretty(&prefs).unwrap_or_default());
+        if enabled {
+            self.ensure_notifier();
+        }
+    }
+
+    /// 启动初始化：读偏好 → 开启时初始化通知器（幂等）。
+    fn init_notifications(&self) {
+        let enabled = std::fs::read_to_string(notif_prefs_path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("notificationsEnabled").and_then(|x| x.as_bool()))
+            .unwrap_or(true); // 默认开启（对齐旧后端 after-turn 通知行为）
+        self.notif_enabled.store(enabled, Ordering::Relaxed);
+        if enabled {
+            self.ensure_notifier();
+        }
+    }
+
+    /// 惰性创建通知器（幂等）。直连失败自动走 Bootstrap 重试
+    /// （见 deepx_app_notifications::Notifier::init）。
+    fn ensure_notifier(&self) {
+        let mut guard = self.notifier.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            return;
+        }
+        *guard = match Notifier::init(|_arg| activate_main_window()) {
+            InitOutcome::Supported(n) => {
+                log_diag("desktop notifications: initialized");
+                Some(Arc::new(n))
+            }
+            InitOutcome::Unsupported => {
+                log_diag("desktop notifications: unsupported (IsSupported=false)");
+                None
+            }
+            InitOutcome::Failed(err) => {
+                log_diag(&format!("desktop notifications: init failed: {err}"));
+                None
+            }
+        };
+    }
+
+    /// TurnCompleted 时弹通知：预览该会话最后一条助手回复（≤200 字符）。
+    fn maybe_notify_turn_completed(&self, seed: &str) {
+        let seed = seed.to_string();
+        if !self.notif_enabled.load(Ordering::Relaxed) {
+            log_diag(&format!("[notify] turn completed {seed}: disabled"));
+            return;
+        }
+        let notifier = self.notifier.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(notifier) = notifier else {
+            log_diag(&format!("[notify] turn completed {seed}: notifier missing"));
+            return; // 未初始化（不支持/失败）；不重复尝试
+        };
+        let text = self
+            .chat_timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|(s, _)| *s == seed)
+            .and_then(|(_, snap)| {
+                let turns = chat_adapter::restored_turns(snap);
+                turns.last().and_then(|t| t.rounds.last()).and_then(|r| r.answer.clone())
+            });
+        let Some(text) = text else {
+            log_diag(&format!("[notify] turn completed {seed}: no preview text"));
+            return;
+        };
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = if flat.chars().count() > 200 {
+            let cut: String = flat.chars().take(200).collect();
+            format!("{cut}…")
+        } else {
+            flat
+        };
+        if body.is_empty() {
+            log_diag(&format!("[notify] turn completed {seed}: empty preview"));
+            return;
+        }
+        let body_len = body.chars().count();
+        // show 在独立线程执行：WinRT Show 调用不进 UI 线程消息泵
+        // （COM 消息泵重入 reconciler 会触发 render fault）。
+        std::thread::Builder::new()
+            .name("deepx-notif-show".into())
+            .spawn(move || {
+                let ok = notifier.show("DeepX", &body);
+                log_diag(&format!(
+                    "[notify] turn completed {seed}: show={ok} len={body_len}"
+                ));
+            })
+            .expect("spawn notif show thread");
     }
 
     // ── XAML Info 面板（bootstrap conversation.state 投影）─────────────
@@ -3205,6 +3343,15 @@ impl BridgeCore {
                         }
                         activity.apply(ev, now);
                     }
+                    if turn_ended {
+                        // 桌面通知：回合完成预览（Phase 1；仅活动会话）。
+                        if matches!(
+                            event,
+                            DomainConversationEvent::TurnCompleted { .. }
+                        ) {
+                            self.maybe_notify_turn_completed(&batch.seed);
+                        }
+                    }
                     match event {
                         DomainConversationEvent::UsageUpdated {
                             usage,
@@ -3618,10 +3765,32 @@ impl Bridge {
                     // 初始化为远古时刻：首次 refresh 立即放行。
                     timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
                     dashboards: Mutex::new(HashMap::new()),
+                    notifier: Mutex::new(None),
+                    notif_enabled: AtomicBool::new(true),
                     dashboard_rev: AtomicU64::new(0),
                 });
                 let _ = SHARED_CORE.set(core.clone());
-                Arc::new(Bridge { core })
+                let init_core = core.clone();
+                let bridge = Arc::new(Bridge { core });
+                // 桌面通知初始化**不在 get_or_init 内同步执行**：Bridge::shared()
+                // 首次调用发生在 render pass 中（main.rs 各视图组件），WinRT
+                // 激活/Register 在此路径执行会破坏 reconciler 状态机（
+                // "state-dirty component was not re-rendered"）。改为后台线程
+                // 延迟初始化：线程内显式 STA，避开 render；用户开开关时经
+                // spawn_set_notif_pref 走 UI 事件回调路径（非 render pass）。
+                std::thread::Builder::new()
+                    .name("deepx-notif-init".into())
+                    .spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        unsafe {
+                            let _ = windows::Win32::ro::RoInitialize(
+                                windows::Win32::ro::RO_INIT_SINGLETHREADED,
+                            );
+                        }
+                        init_core.init_notifications();
+                    })
+                    .expect("spawn notif init thread");
+                bridge
             })
             .clone()
     }
@@ -3693,6 +3862,11 @@ impl Bridge {
     /// 会话工作模式切换（命令 + 本地 mode 缓存）。
     pub fn spawn_set_mode(&self, mode: &str) {
         self.core.spawn_set_mode(mode);
+    }
+
+    /// 桌面通知开关（转 BridgeCore；写本地偏好 + 惰性初始化通知器）。
+    pub fn spawn_set_notif_pref(&self, enabled: bool) {
+        self.core.spawn_set_notif_pref(enabled);
     }
 
     /// 发送消息（附件上传 ContentRef 后直发 send_message）。
@@ -3953,6 +4127,8 @@ mod tests {
             chat_rev: AtomicU64::new(0),
             timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
             dashboards: Mutex::new(HashMap::new()),
+            notifier: Mutex::new(None),
+            notif_enabled: AtomicBool::new(true),
             dashboard_rev: AtomicU64::new(0),
         }
     }

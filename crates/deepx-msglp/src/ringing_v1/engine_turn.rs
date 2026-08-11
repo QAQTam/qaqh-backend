@@ -36,10 +36,13 @@ pub struct TurnEngine {
 
 impl TurnEngine {
     /// A1：按 delta 次数 / 时间窗发射 `block_checkpoint`（该 round 当前完整文本）。
+    /// Ringing 双发：同一完整值同时作为 timeline 块级 checkpoint（replaceable
+    /// 覆盖，乱序/丢 delta 自愈；`convergence-plan` §10.2 方向）。
     fn maybe_emit_block_checkpoint(
         ctx: &mut RingContext,
         turn_id: &str,
         round_num: u32,
+        block_id: &str,
         kind: deepx_domain::RoundDeltaKind,
         text: &str,
         tokens_since_checkpoint: &mut u32,
@@ -63,6 +66,13 @@ impl TurnEngine {
                     char_count: text.chars().count() as u32,
                 },
             ));
+        ctx.emitter
+            .emit_timeline(deepx_domain::TimelineIntent::BlockCheckpoint {
+                turn_id: turn_id.to_string(),
+                round_num,
+                block_id: block_id.to_string(),
+                text: text.to_string(),
+            });
     }
 
     pub fn new() -> Self {
@@ -736,18 +746,10 @@ impl TurnEngine {
                     continue;
                 }
                 match handle.join() {
-                    Ok((_id, content, success, canonical_result, code_delta, skill_effects)) => {
+                    Ok((_id, content, success, _canonical_result, code_delta, skill_effects)) => {
                         ctx.agent
                             .msg
                             .push_tool_result_direct(&call_id, &content, success);
-                        ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
-                            deepx_domain::ToolEvent::ToolFinished {
-                                tool_call_id: call_id.clone(),
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                result: canonical_result,
-                            },
-                        ));
                         ordered_skill_effects.push((call_id.clone(), skill_effects));
                         if let Some(ref delta) = code_delta {
                             ctx.stats.push_delta(delta.clone());
@@ -825,18 +827,10 @@ impl TurnEngine {
                 .expect("tool thread spawn");
             tool.drain_progress_external(ctx, progress_rx, turn_id, round_num);
             match handle.join() {
-                Ok((content, success, canonical_result, code_delta, skill_effects)) => {
+                Ok((content, success, _canonical_result, code_delta, skill_effects)) => {
                     ctx.agent
                         .msg
                         .push_tool_result_direct(&call_id, &content, success);
-                    ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
-                        deepx_domain::ToolEvent::ToolFinished {
-                            tool_call_id: call_id.clone(),
-                            turn_id: turn_id.to_string(),
-                            round_num,
-                            result: canonical_result,
-                        },
-                    ));
                     ordered_skill_effects.push((call_id.clone(), skill_effects));
                     if let Some(ref delta) = code_delta {
                         ctx.stats.push_delta(delta.clone());
@@ -1277,7 +1271,7 @@ impl TurnEngine {
                             .emit_timeline(deepx_domain::TimelineIntent::TextDelta {
                                 turn_id: turn_id.clone(),
                                 round_num,
-                                block_id,
+                                block_id: block_id.clone(),
                                 delta: d.clone(),
                             });
                         ctx.emitter
@@ -1294,6 +1288,7 @@ impl TurnEngine {
                             ctx,
                             &turn_id,
                             round_num,
+                            &block_id,
                             deepx_domain::RoundDeltaKind::Answering,
                             &content,
                             &mut checkpoint_tokens,
@@ -1317,7 +1312,7 @@ impl TurnEngine {
                             .emit_timeline(deepx_domain::TimelineIntent::TextDelta {
                                 turn_id: turn_id.clone(),
                                 round_num,
-                                block_id,
+                                block_id: block_id.clone(),
                                 delta: r.clone(),
                             });
                         ctx.emitter
@@ -1334,6 +1329,7 @@ impl TurnEngine {
                             ctx,
                             &turn_id,
                             round_num,
+                            &block_id,
                             deepx_domain::RoundDeltaKind::Thinking,
                             &reasoning,
                             &mut checkpoint_tokens,
@@ -1858,22 +1854,12 @@ impl TurnEngine {
                                             _cid,
                                             content,
                                             success,
-                                            canonical_result,
+                                            _canonical_result,
                                             code_delta,
                                             skill_effects,
                                         )) => {
                                             ctx.agent.msg.push_tool_result_direct(
                                                 &call_id, &content, success,
-                                            );
-                                            ctx.emitter.emit_domain(
-                                                deepx_domain::DomainEvent::Tool(
-                                                    deepx_domain::ToolEvent::ToolFinished {
-                                                        tool_call_id: call_id.clone(),
-                                                        turn_id: turn_id.clone(),
-                                                        round_num,
-                                                        result: canonical_result,
-                                                    },
-                                                ),
                                             );
                                             ordered_skill_effects
                                                 .push((call_id.clone(), skill_effects));
@@ -1946,21 +1932,13 @@ impl TurnEngine {
                                 Ok((
                                     content,
                                     success,
-                                    canonical_result,
+                                    _canonical_result,
                                     code_delta,
                                     skill_effects,
                                 )) => {
                                     ctx.agent
                                         .msg
                                         .push_tool_result_direct(&call_id, &content, success);
-                                    ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
-                                        deepx_domain::ToolEvent::ToolFinished {
-                                            tool_call_id: call_id.clone(),
-                                            turn_id: turn_id.clone(),
-                                            round_num,
-                                            result: canonical_result,
-                                        },
-                                    ));
                                     ordered_skill_effects.push((call_id.clone(), skill_effects));
                                     if let Some(ref delta) = code_delta {
                                         ctx.stats.push_delta(delta.clone());
@@ -2196,7 +2174,9 @@ impl TurnEngine {
                 },
             ));
             // Ringing 终态：ToolFinished（legacy 汇总 ToolResults 退役后的替代——
-            // 批量执行路径每个工具单独发终态，与 UI 主动调用路径一致）。
+            // 批量执行路径每个工具单独发终态，与 UI 主动调用路径一致）。发射
+            // 时机在 round 交互全部裁决之后（ask/plan/permission 收口处），
+            // 保证事件顺序为"裁决先、终态后"，前端/测试按序消费。
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
                 deepx_domain::ToolEvent::ToolFinished {
                     tool_call_id: tc_id.clone(),

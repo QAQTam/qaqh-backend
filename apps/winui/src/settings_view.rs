@@ -1016,6 +1016,25 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
 
     // advanced：permissionLevel（radio）+ tokenizerPath（浏览）
     if category == "advanced" {
+        rows.push(section_title("通知"));
+        rows.push(field_row(
+            "桌面通知",
+            ToggleSwitch::new(bridge.core().notif_enabled())
+                .header("")
+                .on_toggled({
+                    let bridge = bridge.clone();
+                    move |on: bool| {
+                        bridge.spawn_set_notif_pref(on);
+                    }
+                })
+                .into(),
+        ));
+        rows.push(
+            text_block("回合完成后弹出系统通知；点击通知可回到窗口")
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText)
+                .into(),
+        );
         rows.push(section_title("权限控制"));
         rows.push(field_row(
             "权限等级",
