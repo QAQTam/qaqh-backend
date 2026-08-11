@@ -133,6 +133,11 @@ impl LiveTableTracker {
                 let mut cells = split_cells(&self.partial, *sep);
                 // 防御：残行列数超过表头 → 截断（避免 Grid 越界）
                 cells.truncate(headers.len());
+                // 补空到表头列数：网格骨架先行，单元格逐字填充——
+                // 否则新列在第一个分隔符到达前"不存在"，产生列跳变。
+                while cells.len() < headers.len() {
+                    cells.push(String::new());
+                }
                 snap.rows.push(cells);
             }
             out.push((
@@ -326,7 +331,7 @@ mod tests {
             let last = snap.rows.last().expect("残行在网格末行");
             let expect: String = "&mut".chars().take(i + 1).collect();
             assert_eq!(last[0], expect, "残行逐字生长（第 {} 字符）", i + 1);
-            assert_eq!(last.len(), 1, "残行尚无 \\t → 仅一列（其余列由网格留空）");
+            assert_eq!(last.len(), 2, "残行按表头列数补空（骨架先行）");
         }
     }
 

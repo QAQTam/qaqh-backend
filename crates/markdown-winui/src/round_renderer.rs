@@ -24,6 +24,7 @@
 //! 4. 返回值只描述本帧最低失效等级，不复制 RichText/工具卡等渲染载荷。
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use markdown_core::ast::{Block, Inline};
 use markdown_core::live::parse_live;
@@ -178,7 +179,10 @@ pub struct TurnView {
     pub status: TurnStatus,
     /// TurnFailed 的错误信息（`code: message`，含 retryable 提示），UI 显示用。
     pub failed_error: Option<String>,
-    pub rounds: Vec<RoundView>,
+    /// Round payloads use copy-on-write identity. Cloning a changed turn for the
+    /// declarative tree therefore stays shallow; completed rounds keep the same
+    /// `Rc` and are eligible for round-level memo skips.
+    pub rounds: Vec<Rc<RoundView>>,
     /// 仅本 turn 可见内容变化时递增。ChatView 的窗口快照用它复用
     /// 未变化 turn 的 `Rc<TurnView>`，避免每个 token 都深拷贝整个窗口。
     pub mutation_rev: u64,
@@ -207,6 +211,9 @@ pub struct RoundView {
     last_live_raw: String,
     /// 协议表格流式跟踪（```table 围栏；增量行扫描）。
     table_tracker: LiveTableTracker,
+    /// 仅本 round 的可见内容变化时递增。声明树用它在同一 turn 内跳过
+    /// 已完成的 rounds，只重建当前活尾或状态发生变化的工具卡。
+    pub mutation_rev: u64,
 }
 
 /// 流式答案的可见内容片段（字面文本与表格交错；UI 按序渲染）。
@@ -676,6 +683,20 @@ impl Transcript {
             let turn_id = turn.turn_id.clone();
             let mut view = to_turn_view(turn);
             if let Some(old) = previous.get(&turn_id) {
+                for round in &mut view.rounds {
+                    if let Some(old_round) = old
+                        .rounds
+                        .iter()
+                        .find(|old_round| old_round.round_num == round.round_num)
+                    {
+                        if same_rendered_round(old_round, round) {
+                            *round = old_round.clone();
+                        } else {
+                            Rc::make_mut(round).mutation_rev =
+                                old_round.mutation_rev.wrapping_add(1);
+                        }
+                    }
+                }
                 view.mutation_rev = if same_rendered_turn(old, &view) {
                     old.mutation_rev
                 } else {
@@ -720,6 +741,7 @@ impl Transcript {
     /// Apply one protocol event to the canonical presentation model.
     pub fn apply(&mut self, ev: &ConversationEvent) -> TranscriptChange {
         let target_turn_id = (!ev.turn_id().is_empty()).then(|| ev.turn_id().to_owned());
+        let target_round_num = ev.round_num();
         let change = match ev {
             ConversationEvent::TurnStarted { turn_id, user_text } => {
                 if let Some(&index) = self.turn_index.get(turn_id) {
@@ -766,10 +788,14 @@ impl Transcript {
                 // 把 Live 答案冻结为 Final 富文本，避免"永远 Live"状态残留。
                 let mut changed = false;
                 for round in &mut self.turns[index].rounds {
-                    if let AnswerView::Streaming { raw, .. } = &round.answer {
-                        if !raw.is_empty() {
-                            let raw_text = raw.clone();
-                            changed |= round.finalize(None, Some(&raw_text));
+                    let round = Rc::make_mut(round);
+                    if let AnswerView::Streaming { raw, .. } = &round.answer
+                        && !raw.is_empty()
+                    {
+                        let raw_text = raw.clone();
+                        if round.finalize(None, Some(&raw_text)) {
+                            round.mutation_rev = round.mutation_rev.wrapping_add(1);
+                            changed = true;
                         }
                     }
                 }
@@ -1048,7 +1074,7 @@ impl Transcript {
                             .then(|| TranscriptChange::structural(true))
                             .unwrap_or_default();
                         if change.changed() {
-                            self.bump_turn(turn);
+                            self.bump_round(turn, *round_num);
                         }
                         return change;
                     }
@@ -1060,7 +1086,7 @@ impl Transcript {
                         round_num: *round_num,
                         reference: ref_uri.clone(),
                     });
-                    self.bump_turn(turn);
+                    self.bump_round(turn, *round_num);
                     return TranscriptChange::structural(true);
                 }
                 changed |= round.finalize(None, answer.as_deref());
@@ -1073,7 +1099,11 @@ impl Transcript {
             if let Some(turn_id) = target_turn_id
                 && let Some(&index) = self.turn_index.get(&turn_id)
             {
-                self.bump_turn(index);
+                if let Some(round_num) = target_round_num {
+                    self.bump_round(index, round_num);
+                } else {
+                    self.bump_turn(index);
+                }
             } else {
                 self.bump_rev();
             }
@@ -1128,7 +1158,7 @@ impl Transcript {
             .then(|| TranscriptChange::structural(true))
             .unwrap_or_default();
         if change.changed() {
-            self.bump_turn(turn);
+            self.bump_round(turn, round_num);
         }
         change
     }
@@ -1151,7 +1181,7 @@ impl Transcript {
         }
         round.output_loading = false;
         round.output_error = Some(message);
-        self.bump_turn(turn);
+        self.bump_round(turn, round_num);
         TranscriptChange::structural(true)
     }
 
@@ -1164,6 +1194,18 @@ impl Transcript {
         self.bump_rev();
     }
 
+    fn bump_round(&mut self, turn: usize, round_num: u32) {
+        if let Some(round) = self.turns[turn]
+            .rounds
+            .iter_mut()
+            .find(|round| round.round_num == round_num)
+        {
+            let round = Rc::make_mut(round);
+            round.mutation_rev = round.mutation_rev.wrapping_add(1);
+        }
+        self.bump_turn(turn);
+    }
+
     fn round_mut(&mut self, turn: usize, round_num: u32) -> (usize, &mut RoundView) {
         let turn_view = &mut self.turns[turn];
         if let Some(r) = turn_view
@@ -1171,11 +1213,11 @@ impl Transcript {
             .iter()
             .position(|r| r.round_num == round_num)
         {
-            (r, &mut turn_view.rounds[r])
+            (r, Rc::make_mut(&mut turn_view.rounds[r]))
         } else {
-            turn_view.rounds.push(RoundView::new(round_num));
+            turn_view.rounds.push(Rc::new(RoundView::new(round_num)));
             let idx = turn_view.rounds.len() - 1;
-            (idx, &mut turn_view.rounds[idx])
+            (idx, Rc::make_mut(&mut turn_view.rounds[idx]))
         }
     }
 
@@ -1329,14 +1371,20 @@ fn same_rendered_turn(old: &TurnView, new: &TurnView) -> bool {
         && old.status == new.status
         && old.failed_error == new.failed_error
         && old.rounds.len() == new.rounds.len()
-        && old.rounds.iter().zip(&new.rounds).all(|(old, new)| {
-            old.round_num == new.round_num
-                && old.thinking == new.thinking
-                && old.answer == new.answer
-                && old.tool_calls == new.tool_calls
-                && old.output_loading == new.output_loading
-                && old.output_error == new.output_error
-        })
+        && old
+            .rounds
+            .iter()
+            .zip(&new.rounds)
+            .all(|(old, new)| same_rendered_round(old, new))
+}
+
+fn same_rendered_round(old: &RoundView, new: &RoundView) -> bool {
+    old.round_num == new.round_num
+        && old.thinking == new.thinking
+        && old.answer == new.answer
+        && old.tool_calls == new.tool_calls
+        && old.output_loading == new.output_loading
+        && old.output_error == new.output_error
 }
 
 /// RestoredTurn → TurnView（历史回合直接落 Final；restore 与分页前插共用）。
@@ -1367,7 +1415,7 @@ fn to_turn_view(t: RestoredTurn) -> TurnView {
                         blocks: Vec::new(),
                     },
                 };
-                round
+                Rc::new(round)
             })
             .collect(),
         mutation_rev: 0,
@@ -1794,5 +1842,55 @@ mod tests {
         assert_eq!(cards.len(), 2);
         assert!(cards.iter().any(|c| c.id == "c1" && !c.provider));
         assert!(cards.iter().any(|c| c.id == "call-1" && c.provider));
+    }
+
+    #[test]
+    fn round_copy_on_write_preserves_completed_sibling_identity() {
+        let mut ts = Transcript::new();
+        start_turn(&mut ts, "t1");
+        for round_num in [0, 1] {
+            ts.apply(&ConversationEvent::RoundDelta {
+                turn_id: "t1".into(),
+                round_num,
+                kind: RoundDeltaKind::Answering,
+                delta: format!("round-{round_num}"),
+            });
+        }
+
+        let completed = ts.turns()[0].rounds[0].clone();
+        let active_before = ts.turns()[0].rounds[1].clone();
+        let active_rev = active_before.mutation_rev;
+        ts.apply(&ConversationEvent::RoundDelta {
+            turn_id: "t1".into(),
+            round_num: 1,
+            kind: RoundDeltaKind::Answering,
+            delta: "-next".into(),
+        });
+
+        let rounds = &ts.turns()[0].rounds;
+        assert!(Rc::ptr_eq(&completed, &rounds[0]));
+        assert!(!Rc::ptr_eq(&active_before, &rounds[1]));
+        assert_eq!(rounds[1].mutation_rev, active_rev.wrapping_add(1));
+    }
+
+    #[test]
+    fn restore_reuses_unchanged_round_identity() {
+        let snapshot = RestoredTurn {
+            turn_id: "t1".into(),
+            created_seq: 1,
+            user_text: "question".into(),
+            status: TurnStatus::Completed,
+            rounds: vec![RestoredRound {
+                round_num: 0,
+                thinking: None,
+                answer: Some("answer".into()),
+                tool_calls: Vec::new(),
+            }],
+        };
+        let mut ts = Transcript::new();
+        ts.restore(vec![snapshot.clone()]);
+        let first = ts.turns()[0].rounds[0].clone();
+        ts.restore(vec![snapshot]);
+        assert!(Rc::ptr_eq(&first, &ts.turns()[0].rounds[0]));
     }
 }

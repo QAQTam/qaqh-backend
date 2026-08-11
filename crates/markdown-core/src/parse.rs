@@ -27,11 +27,15 @@ fn options() -> Options {
 }
 
 /// 全量解析一段 markdown 为块级 AST（final 渲染用）。
+///
+/// 入口先做 `` ```markdown `` 围栏解包（LLM 包表格习惯）：含表格的
+/// markdown 围栏剥掉围栏行，让 pulldown-cmark 原生解析表格。
 pub fn parse_final(input: &str) -> Vec<Block> {
+    let input = crate::markdown_unwrap::unwrap_markdown_fence_tables(input);
     let mut frames: Vec<Frame> = Vec::new();
     let mut blocks: Vec<Block> = Vec::new();
 
-    for event in Parser::new_ext(input, options()) {
+    for event in Parser::new_ext(&input, options()) {
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => frames.push(Frame::paragraph()),

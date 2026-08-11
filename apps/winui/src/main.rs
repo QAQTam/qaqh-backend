@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 
 use windows_reactor::*;
 
+use deepx_fluent::motion;
+
 /// 开屏覆盖层最长显示时间：超过后切换为失败文案并露出错误详情。
 const SPLASH_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -68,6 +70,10 @@ fn settings_component(_: &(), cx: &mut RenderCx) -> Element {
 
 fn interaction_component(_: &(), cx: &mut RenderCx) -> Element {
     interaction_overlay::interaction_overlay(cx, bridge::Bridge::shared()).into()
+}
+
+fn diagram_zoom_component(_: &(), cx: &mut RenderCx) -> Element {
+    chat_view::diagram_zoom_overlay(cx).into()
 }
 
 fn app(cx: &mut RenderCx) -> Element {
@@ -192,6 +198,7 @@ fn app(cx: &mut RenderCx) -> Element {
             .columns([GridLength::STAR])
             .grid_row(1)
             .grid_column(0)
+            .transition(motion::navigation_enter(), motion::content_exit())
             .into()
     } else {
         Element::Empty
@@ -203,6 +210,7 @@ fn app(cx: &mut RenderCx) -> Element {
             .columns([GridLength::STAR])
             .grid_row(2)
             .grid_column(0)
+            .transition(motion::navigation_enter(), motion::content_exit())
             .into()
     } else {
         Element::Empty
@@ -214,6 +222,7 @@ fn app(cx: &mut RenderCx) -> Element {
             .columns([GridLength::STAR])
             .grid_row(3)
             .grid_column(0)
+            .transition(motion::navigation_enter(), motion::content_exit())
             .into()
     } else {
         Element::Empty
@@ -248,10 +257,16 @@ fn app(cx: &mut RenderCx) -> Element {
     // chat_area 必须显式 STAR 列：缺列定义时 WinUI 按隐式 Auto 测量，
     // chat_view（Star 列 ListView）与 composer 宽度由内容决定而非可用空间
     // （长行不换行撑爆列宽 / 窗口缩放不跟随）——L376-378 覆盖层同款实证。
-    let chat_area: Element = grid((native_chat, composer))
-        .rows([GridLength::STAR, GridLength::Auto])
-        .columns([GridLength::STAR])
-        .into();
+    let chat_area: Element = if chat_visible {
+        grid((native_chat, composer))
+            .with_key("shell-chat-area")
+            .rows([GridLength::STAR, GridLength::Auto])
+            .columns([GridLength::STAR])
+            .transition(motion::navigation_enter(), motion::content_exit())
+            .into()
+    } else {
+        Element::Empty
+    };
     let right_content: Element = grid((chat_area, skills, home, settings))
         .rows([
             if view == "skills" || view == "home" || view == "settings" {
@@ -406,10 +421,13 @@ fn app(cx: &mut RenderCx) -> Element {
     // 交互模态覆盖层（P-6 同模式）：kind="none" 时内部空 grid 穿透；
     // 有交互时半透明遮罩 + 卡片（permission/ask 模板）。置于最上层。
     let interaction: Element = component(interaction_component, ()).with_key("shell-interaction");
+    // 图表放大覆盖层（P-6 同模式）：chat_view 点击写入 DIAGRAM_ZOOM，
+    // 本组件轮询弹开全窗大图。无请求时空 grid 穿透。
+    let diagram_zoom: Element = component(diagram_zoom_component, ()).with_key("shell-diagram-zoom");
     // 覆盖层 grid 必须显式 STAR 行/列：Grid 默认 Auto 会让 Stretch 子元素只
     // 覆盖内容大小（scrim 不全窗，遮罩不生效）——demo 已实证，同 interaction
-    // 内部 grid 的修复。三个子元素重叠同一 cell（P-6 覆盖层模式）。
-    grid((base, splash, interaction))
+    // 内部 grid 的修复。四个子元素重叠同一 cell（P-6 覆盖层模式）。
+    grid((base, splash, interaction, diagram_zoom))
         .rows([GridLength::STAR])
         .columns([GridLength::STAR])
         .into()
