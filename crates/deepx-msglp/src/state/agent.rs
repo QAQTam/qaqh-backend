@@ -375,21 +375,6 @@ impl AgentState {
             if text.is_empty() { vec![] } else { vec![text] }
         };
 
-        // ── 激活集注入（Codex world-state 模式）──
-        // 激活集变化（context_epoch 变更）时，把 envelope 作为持久化
-        // system 消息写入 MessageStore：只注入一次、位于 system 前缀区、
-        // 历史幂等（后续轮次不再重复）。激活集会话内只增；同名 re-activate
-        // 更新 body（epoch +1）→ 重新注入替换旧 envelope。
-        const SKILL_ENVELOPE_PREFIX: &str = "<skill_context_envelope";
-        let epoch = self.skills.context_epoch();
-        if epoch != self.last_injected_epoch {
-            self.last_injected_epoch = epoch;
-            self.msg.remove_system_messages_by_prefix(SKILL_ENVELOPE_PREFIX);
-            if self.skills.has_active() {
-                self.msg.push_system(deepx_types::Message::system(&snapshot.envelope));
-            }
-        }
-
         let mut context = self.msg.build_context_for_gate(&annotations);
         // Catalog is now persisted as a system message on session creation.
         // Only inject transiently when the stored messages lack it (first
@@ -447,6 +432,27 @@ impl AgentState {
             if let Err(error) = result {
                 log::warn!("cannot apply skill effect: {error}");
             }
+        }
+        self.sync_skill_injection();
+    }
+
+    /// Materialize the activation-set envelope as a trailing system message
+    /// exactly once per change. Called right after tool effects are applied
+    /// (tool result → injection → next model reply), so the injected message
+    /// lands at the "latest message" position and is never re-injected or
+    /// removed afterwards — the request prefix stays byte-stable.
+    pub fn sync_skill_injection(&mut self) {
+        let epoch = self.skills.context_epoch();
+        if epoch == self.last_injected_epoch {
+            return;
+        }
+        self.last_injected_epoch = epoch;
+        if !self.skills.has_active() {
+            return;
+        }
+        let envelope = self.skills.snapshot_for_context().envelope.clone();
+        if !envelope.is_empty() {
+            self.msg.push_trailing_system(deepx_types::Message::system(&envelope));
         }
     }
 
@@ -645,11 +651,8 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().unwrap();
         deepx_workspace::set_workspace(&temp.path().to_string_lossy());
-        let mut agent = AgentState::new(deepx_config::Config::default());
-        agent.msg = deepx_message::MessageStore::new_ephemeral("test");
-        agent.msg.push_system(deepx_types::Message::system("base"));
 
-        // Create skill on disk
+        // Create skill on disk FIRST so the catalog snapshot sees it.
         let skill_dir = temp.path().join(".agents/skills/dynamic-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
@@ -658,11 +661,22 @@ mod tests {
         )
         .unwrap();
 
-        // Catalog is a transient fixed slot, never persisted in MessageStore.
+        let mut agent = AgentState::new(deepx_config::Config::default());
+        agent.msg = deepx_message::MessageStore::new_ephemeral("test");
+        agent.msg.push_system(deepx_types::Message::system("base"));
+        // Simulate session creation: the catalog is persisted as a system
+        // message right after the base prompt.
+        agent.skills.set_workspace(temp.path());
+        agent
+            .msg
+            .push_system(deepx_types::Message::system(agent.skills.initial_catalog_text()));
+
+        // Catalog is persisted as a system message (session creation), so the
+        // context carries it without any transient slot injection.
         assert!(agent.build_context().iter().any(|message| message.content.iter().any(
             |block| matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("dynamic-skill"))
         )));
-        assert_eq!(agent.msg.system_messages().len(), 1);
+        assert_eq!(agent.msg.system_messages().len(), 2); // base + catalog
 
         // Explicit mention creates Requested only; the body arrives through a typed effect.
         agent.activate_explicit_skills("please use $dynamic-skill");
@@ -674,17 +688,30 @@ mod tests {
             .skills
             .apply_tool_effect(deepx_skills::SkillEffect::Activate(activation))
             .unwrap();
-        // Activation-set injection (Codex world-state mode): once the active
-        // set changes (context_epoch bump), the envelope is persisted as a
-        // system message in the MessageStore — the body lands in the system
-        // prefix region exactly once; later builds stay identical (idempotent).
+        // Activation-set injection: the envelope is materialized as a
+        // TRAILING system message right after the tool effects are applied
+        // (tool result → injection → next reply), and is never re-injected
+        // or removed afterwards. The request prefix stays byte-stable.
+        agent.sync_skill_injection();
+        assert_eq!(agent.msg.trailing_messages().len(), 1);
         let context = agent.build_context();
         assert!(context.iter().any(|message| message.content.iter().any(
             |block| matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("DYNAMIC_FULL_BODY"))
         )));
-        assert_eq!(agent.msg.system_messages().len(), 2); // base + envelope
-        // The second build must be byte-identical: no re-injection on the
-        // same epoch, so the provider prefix cache never breaks on skill state.
+        // Trailing injection sits at the LATEST message position (after the
+        // last stored message), not in the system prefix region.
+        let last = context.last().unwrap();
+        assert_eq!(last.role, "system");
+        assert!(last.content.iter().any(|block| matches!(
+            block,
+            deepx_types::ContentBlock::Text { text } if text.contains("DYNAMIC_FULL_BODY")
+        )));
+        // Idempotent: a second sync on the same epoch injects nothing, and
+        // the rebuilt context is byte-identical (prefix cache stable).
+        agent.sync_skill_injection();
+        assert_eq!(agent.msg.trailing_messages().len(), 1);
+        eprintln!("DBG roles: {:?}", context.iter().map(|m| m.role.as_str()).collect::<Vec<_>>());
+        eprintln!("DBG last: {:?}", context.last().map(|m| m.content.clone()));
         assert_eq!(
             serde_json::to_value(&context).unwrap(),
             serde_json::to_value(agent.build_context()).unwrap()

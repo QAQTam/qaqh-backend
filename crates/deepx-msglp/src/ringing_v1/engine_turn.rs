@@ -2088,6 +2088,10 @@ impl TurnEngine {
                             },
                         ));
                     }
+                    // Host-forced activation (second ignored lap) changes the
+                    // active set: materialize the envelope at the latest
+                    // message position before the next model reply.
+                    ctx.agent.sync_skill_injection();
 
                     // Another lap: tools executed, back to Gate
                     return Outcome::ContinueTurn {
@@ -2119,6 +2123,9 @@ impl TurnEngine {
                 }
             };
             if ctx.agent.skills.has_requested() || !forced.is_empty() {
+                // Host-forced activation changed the active set: materialize
+                // the envelope before the next model lap.
+                ctx.agent.sync_skill_injection();
                 return Outcome::ContinueTurn {
                     turn_id,
                     round_num: round_num + 1,
