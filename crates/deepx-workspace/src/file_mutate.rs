@@ -39,7 +39,7 @@ fn write_error(path: &str, error: &std::io::Error) -> String {
         ErrorKind::StorageFull => "The disk is full. Free up space or choose another location.",
         _ => "Check disk space, file locks (another process may hold the file), and permissions.",
     };
-    format!("[ERROR] Cannot write {path}: {error}\n[HINT] {hint}")
+    format!("[ERROR] Cannot write {path}: {error} [HINT] {hint}")
 }
 
 // ── Helpers from file_edit ──
