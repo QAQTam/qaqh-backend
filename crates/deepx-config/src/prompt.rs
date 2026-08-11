@@ -26,11 +26,16 @@ pub fn full_system_prompt() -> String {
 /// Full system prompt with runtime environment injected from os_env.md.
 ///
 /// Placeholders in os_env.md:
-///   {{DATE}}   → today's date
 ///   {{OS}}     → OS_INFO (set at startup via agent_bridge)
 ///   {{SHELLS}} → auto-detected shells available on this machine
 ///   {{TOOLS}}  → TOOLS_INFO (toolchain versions detected at startup)
-pub fn full_system_prompt_with_date(today: &str, os_info: &str) -> String {
+///
+/// The date is intentionally NOT part of the system prompt: it would break
+/// the provider prefix cache once per day. It is delivered instead via the
+/// frozen [Environment] annotation on the first user message (see
+/// AgentState::build_context), which regenerates per session without
+/// touching the cache prefix.
+pub fn full_system_prompt_with_env(os_info: &str) -> String {
     let shells = detect_shells();
     let tools = TOOLS_INFO
         .get()
@@ -42,7 +47,6 @@ pub fn full_system_prompt_with_date(today: &str, os_info: &str) -> String {
         os_info
     };
     let env_block = OS_ENV_TEMPLATE
-        .replace("{{DATE}}", today)
         .replace("{{OS}}", os)
         .replace("{{SHELLS}}", shells)
         .replace("{{TOOLS}}", tools);
