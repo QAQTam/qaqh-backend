@@ -92,6 +92,7 @@ fn handle_skills_list(_ctx: crate::ToolCallCtx) -> ToolResult {
         .map(|skill| {
             serde_json::json!({
                 "name": skill.name,
+                "description": skill.description,
                 "scope": match skill.scope {
                     deepx_skills::SkillScope::Project => "project",
                     deepx_skills::SkillScope::User => "user",
