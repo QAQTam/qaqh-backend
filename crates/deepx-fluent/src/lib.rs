@@ -99,8 +99,10 @@ pub mod tokens {
     /// files are staged by `deepx-winui` under `Assets/fonts`.
     pub const DEFAULT_UI_FONT_FAMILY: &str = "ms-appx:///Assets/fonts/HarmonyOS_Sans_SC_Regular.ttf#HarmonyOS Sans SC, Segoe UI Variable, Microsoft YaHei UI, Segoe UI";
     /// Variable monospaced font for code, numeric telemetry, and raw tool data.
+    /// CJK fallback 链：等宽字体不含中文，缺省时中文会落系统默认（雅黑），
+    /// 与正文 HarmonyOS 混排观感割裂——显式带回退。
     pub const CODE_FONT_FAMILY: &str =
-        "ms-appx:///Assets/fonts/CascadiaMono.ttf#Cascadia Mono, Consolas";
+        "ms-appx:///Assets/fonts/CascadiaMono.ttf#Cascadia Mono, Consolas, Microsoft YaHei UI, HarmonyOS Sans SC";
 
     /// Comfortable reading measure for long-form assistant output.
     /// Aligned with [`CONVERSATION_MAX_WIDTH`] so the transcript column and the

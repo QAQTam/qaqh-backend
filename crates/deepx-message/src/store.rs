@@ -1178,14 +1178,38 @@ impl MessageStore {
         false
     }
 
+    /// Undo semantics: keep turns strictly before `turn_id`, drop the target
+    /// turn and everything after it.
+    ///
+    /// `turn_id` is a session-monotonic sequence (`t{next_turn_seq}`) — it is
+    /// NOT an index into `turns`. After a physical compaction
+    /// ([`Self::apply_compact`]) `turns` only holds the live suffix (synthetic
+    /// summary + kept turns) while `next_turn_seq` keeps counting, so the live
+    /// array's first element maps to `compacted_count + 1`, recovered from the
+    /// summary's `[Compacted N turns]` header (same encoding
+    /// [`Self::previous_compact_summary`] parses).
     pub fn truncate_before_turn(&mut self, turn_id: &str) -> bool {
-        let idx: usize = match turn_id
+        let seq: usize = match turn_id
             .strip_prefix('t')
             .and_then(|n| n.parse::<usize>().ok())
         {
-            Some(n) if n > 0 => n.saturating_sub(1),
+            Some(n) if n > 0 => n,
             _ => return false,
         };
+        // 活跃 turns 数组起点的全局序号：无 compact 时 = 1；物理 compact 后
+        // turns[0] 是合成摘要（占一个数组位），起点 = 被压缩 turn 数 + 1。
+        let (first_seq, summary_offset) =
+            match self.turns.first().and_then(|t| Self::compacted_turn_count(&t.user)) {
+                Some(skip) => (skip + 1, 1),
+                None => (1, 0),
+            };
+        if seq < first_seq {
+            // 撤回已被压缩的 turn：清空全部（含摘要——它正是这些 turn 的替身）。
+            self.turns.clear();
+            self.context_revision = self.context_revision.saturating_add(1);
+            return true;
+        }
+        let idx = seq - first_seq + summary_offset;
         if idx >= self.turns.len() {
             return false;
         }
@@ -1251,6 +1275,21 @@ impl MessageStore {
                     None
                 }
             })
+        })
+    }
+
+    /// Parse the `[Compacted N turns]` header of a synthetic summary turn.
+    /// Used to map global turn sequence numbers onto the live `turns` array
+    /// after physical compaction (see [`Self::truncate_before_turn`]).
+    fn compacted_turn_count(msg: &deepx_types::Message) -> Option<usize> {
+        msg.content.iter().find_map(|b| {
+            if let deepx_types::ContentBlock::Text { text } = b {
+                let rest = text.strip_prefix("[Compacted ")?;
+                let n = rest.split_whitespace().next()?.parse::<usize>().ok()?;
+                Some(n)
+            } else {
+                None
+            }
         })
     }
 
@@ -1872,6 +1911,49 @@ mod tests {
 
         assert_eq!(store.turn_count(), 3); // summary + two kept turns
         assert_eq!(store.allocate_turn_id(), "t6");
+    }
+
+    #[test]
+    fn truncate_before_turn_uses_global_sequence_after_compact() {
+        let mut store = MessageStore::new_ephemeral("test");
+        for index in 1..=5 {
+            store.allocate_turn_id();
+            store.push_user(&format!("turn {index}"));
+        }
+        // 物理裁剪：turns = [summary, t4, t5]，next_turn_seq 继续涨（t6 下一个）。
+        store.apply_compact("checkpoint", 2);
+        assert_eq!(store.turn_count(), 3);
+
+        // 撤 t5（活跃最后一条）：t5 → idx 2 → 删除 t5，剩 [summary, t4]。
+        assert!(store.truncate_before_turn("t5"));
+        assert_eq!(store.turn_count(), 2);
+
+        // 撤 t4（第一个活跃 turn）：保留合成摘要，剩 [summary]。
+        assert!(store.truncate_before_turn("t4"));
+        assert_eq!(store.turn_count(), 1);
+
+        // 撤已被 compact 的 t3（序号早于活跃段起点）：清空（含摘要）。
+        assert!(store.truncate_before_turn("t3"));
+        assert_eq!(store.turn_count(), 0);
+
+        // 越界序号（未来 turn）拒绝。
+        assert!(!store.truncate_before_turn("t99"));
+        // 非数字/零前缀拒绝。
+        assert!(!store.truncate_before_turn("abc"));
+        assert!(!store.truncate_before_turn("t0"));
+    }
+
+    #[test]
+    fn truncate_before_turn_without_compact_keeps_index_equivalence() {
+        let mut store = MessageStore::new_ephemeral("test");
+        for index in 1..=4 {
+            store.allocate_turn_id();
+            store.push_user(&format!("turn {index}"));
+        }
+        // 无 compact：t1..t4 即 turns[0..4]，next_turn_seq = 5。
+        assert!(store.truncate_before_turn("t3"));
+        assert_eq!(store.turn_count(), 2); // 剩 t1, t2
+        assert!(!store.truncate_before_turn("t3")); // 已删，越界拒绝
     }
 
     #[test]

@@ -161,28 +161,43 @@ fn session_card(item: &SessionItem, bridge: &Arc<Bridge>) -> Element {
 pub fn home_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (items, set_items) = cx.use_state::<Vec<SessionItem>>(Vec::new());
     let (text, set_text) = cx.use_state::<String>(String::new());
+    // 未配置主 API Key 提示横幅（settings 快照 rev 驱动）。
+    let (need_key, set_need_key) = cx.use_state::<bool>(false);
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
+    let last_settings_rev = cx.use_ref::<u64>(0);
 
     // 首次挂载：初始刷新 + 500ms rev 轮询（同 sidebar 模式）。
     cx.use_effect((), {
         let bridge = bridge.clone();
         let set_items = set_items.clone();
+        let set_need_key = set_need_key.clone();
         let timer = timer.clone();
         let last_rev = last_rev.clone();
+        let last_settings_rev = last_settings_rev.clone();
         move || {
             let core = bridge.core();
             bridge.spawn_refresh_sessions();
             *last_rev.borrow_mut() = core.session_snapshot().1;
+            *last_settings_rev.borrow_mut() = core.settings_snapshot().1;
             if let Ok(t) = DispatcherTimer::new(POLL_INTERVAL, {
                 let core = core.clone();
                 let set_items = set_items.clone();
+                let set_need_key = set_need_key.clone();
                 let last_rev = last_rev.clone();
+                let last_settings_rev = last_settings_rev.clone();
                 move || {
                     let (items, rev) = core.session_snapshot();
                     if rev != *last_rev.borrow() {
                         *last_rev.borrow_mut() = rev;
                         set_items.call(items);
+                    }
+                    // 设置快照到达/变化 → 更新"未配置 key"横幅（跳过后兜底提示）。
+                    let (snap, srev) = core.settings_snapshot();
+                    if srev != *last_settings_rev.borrow() {
+                        *last_settings_rev.borrow_mut() = srev;
+                        let missing = snap.is_none_or(|s| !s.api_key_configured);
+                        set_need_key.call(missing);
                     }
                 }
             }) {
@@ -375,8 +390,35 @@ pub fn home_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         .into()
     };
 
-    // ── 根：scroll_viewer(hero / composer / heatmap / sessions) ────
-    let content: Element = vstack((hero, composer, heatmap, sessions_section))
+    // ── 未配置 API Key 兜底横幅（跳过 OOBE 的出口，防止用户迷路）────
+    // settings 快照未到达时先不显示（need_key 初始 false，避免闪横幅）。
+    let banner: Element = if need_key {
+        border(
+            hstack((
+                text_block("尚未配置 API Key，配置后即可开始对话")
+                    .font_size(13.0)
+                    .foreground(ThemeRef::SecondaryText),
+                button("去设置")
+                    .subtle()
+                    .on_click({
+                        let bridge = bridge.clone();
+                        move || bridge.navigate("settings", None)
+                    }),
+            ))
+            .spacing(12.0)
+            .horizontal_alignment(HorizontalAlignment::Stretch),
+        )
+        .padding(Thickness::xy(16.0, 10.0))
+        .background(ThemeRef::LayerFill)
+        .corner_radius(8.0)
+        .with_key("home-key-banner")
+        .into()
+    } else {
+        Element::Empty
+    };
+
+    // ── 根：scroll_viewer(banner / hero / composer / heatmap / sessions)
+    let content: Element = vstack((banner, hero, composer, heatmap, sessions_section))
         .spacing(16.0)
         .padding(Thickness::xy(32.0, 24.0))
         .into();

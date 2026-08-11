@@ -28,7 +28,8 @@ use std::rc::Rc;
 
 use markdown_core::ast::{Block, Inline};
 use markdown_core::live::parse_live;
-use markdown_core::live_table::{LiveTableTracker, TableSnapshot};
+use markdown_core::gfm_live_table::GfmTableTracker;
+use markdown_core::live_table::{LiveTableTracker, TableHiddenSpan, TableSnapshot};
 use markdown_core::parse_final;
 
 use crate::protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
@@ -211,6 +212,9 @@ pub struct RoundView {
     last_live_raw: String,
     /// 协议表格流式跟踪（```table 围栏；增量行扫描）。
     table_tracker: LiveTableTracker,
+    /// GFM 表格流式跟踪（`| 头 | 分隔行 |`；延迟确认 + 围栏感知）。与协议
+    /// tracker 输出同构（TableHiddenSpan/TableSnapshot），UI 共用 table_view。
+    gfm_table_tracker: GfmTableTracker,
     /// 仅本 round 的可见内容变化时递增。声明树用它在同一 turn 内跳过
     /// 已完成的 rounds，只重建当前活尾或状态发生变化的工具卡。
     pub mutation_rev: u64,
@@ -279,10 +283,11 @@ impl RoundView {
             return false; // 终态后忽略 delta（协议保证不会发生）
         };
         raw.push_str(delta);
-        // 表格跟踪：增量行扫描（O(新增行)）
+        // 表格跟踪：增量行扫描（O(新增行)）——协议表格 + GFM 表格。
         self.table_tracker.feed(raw);
+        self.gfm_table_tracker.feed(raw);
         // 可见字面 = raw 减去表格隐藏区间；segments = 字面/表格交错
-        let (visible, segs) = split_segments(raw, &self.table_tracker);
+        let (visible, segs) = split_segments(raw, &self.table_tracker, &self.gfm_table_tracker);
         let parsed = parse_live(&visible);
         let changed = self.last_live_raw != *raw;
         if changed {
@@ -304,10 +309,12 @@ impl RoundView {
             return false;
         };
         self.table_tracker.reset();
+        self.gfm_table_tracker.reset();
         raw.clear();
         raw.push_str(text);
         self.table_tracker.feed(raw);
-        let (visible, segs) = split_segments(raw, &self.table_tracker);
+        self.gfm_table_tracker.feed(raw);
+        let (visible, segs) = split_segments(raw, &self.table_tracker, &self.gfm_table_tracker);
         let parsed = parse_live(&visible);
         let changed = self.last_live_raw != *raw;
         if changed {
@@ -328,6 +335,7 @@ impl RoundView {
             }
         }
         self.table_tracker.reset();
+        self.gfm_table_tracker.reset();
         if let Some(a) = answer {
             if self.final_raw.as_deref() != Some(a) {
                 let blocks = parse_final(a);
@@ -435,11 +443,21 @@ fn extract_json_str(raw: &str, key: &str) -> Option<String> {
 /// 按表格隐藏区间切分：区间外字面进 Text 段，区间内进 Table 段
 /// （sealed 表格为完整快照；打开表格含残行 partial 作为网格末行）。
 /// 残行不重复出现在 Text 段（`open_tail_start` 截断）。
-fn split_segments(raw: &str, tracker: &LiveTableTracker) -> (String, Vec<LiveSegment>) {
+/// 字面/表格分段：协议表格（```table）与 GFM 表格（|...|）各自隐藏
+/// 区间合并（GFM tracker 围栏感知 → 两者 span 不重叠），按起点排序后
+/// 统一产出可见字面 + 表格段。尾部字面到两个 tracker 中更早的残行起点。
+fn split_segments(
+    raw: &str,
+    protocol_tracker: &LiveTableTracker,
+    gfm_tracker: &GfmTableTracker,
+) -> (String, Vec<LiveSegment>) {
+    let mut spans: Vec<(TableHiddenSpan, TableSnapshot)> = protocol_tracker.tables_with_spans();
+    spans.extend(gfm_tracker.tables_with_spans());
+    spans.sort_by_key(|(s, _)| s.start);
     let mut segments: Vec<LiveSegment> = Vec::new();
     let mut visible = String::new();
     let mut prev = 0usize;
-    for (span, snap) in tracker.tables_with_spans() {
+    for (span, snap) in spans {
         if span.start > prev {
             let text = raw[prev..span.start].to_string();
             visible.push_str(&text);
@@ -449,7 +467,11 @@ fn split_segments(raw: &str, tracker: &LiveTableTracker) -> (String, Vec<LiveSeg
         prev = span.end;
     }
     // 尾部字面：从 prev 到残行起点（残行已在网格末行，不重复显示）
-    let tail_end = tracker.open_tail_start().unwrap_or(raw.len());
+    let tail_end = [protocol_tracker.open_tail_start(), gfm_tracker.open_tail_start()]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(raw.len());
     if prev < tail_end {
         let text = raw[prev..tail_end].to_string();
         visible.push_str(&text);
@@ -1501,6 +1523,42 @@ mod tests {
         assert_eq!(ts.window_len(), 5);
         assert!(ts.window_full());
         assert_eq!(ts.expand_window(10), 0, "无更早回合可扩展");
+    }
+
+    /// GFM 表格流式分段：增量喂表头/分隔/数据行 → 产出 Table 段，
+    /// 表头行从可见字面剥离（骨架先行、逐格填充的输入侧）。
+    #[test]
+    fn gfm_table_streams_to_table_segment() {
+        let mut rv = RoundView::new(1);
+        rv.answer_delta("| A | B |\n");
+        rv.answer_delta("| --- | --- |\n");
+        rv.answer_delta("| 1 | 2 |\n");
+        let AnswerView::Streaming { raw, segments, .. } = &rv.answer else {
+            panic!("expected streaming")
+        };
+        assert!(
+            segments.iter().any(|s| matches!(s, LiveSegment::Table(_))),
+            "GFM 表格应产出 Table 段"
+        );
+        let (visible, _) = split_segments(raw, &rv.table_tracker, &rv.gfm_table_tracker);
+        assert!(!visible.contains("| A | B |"), "表头行应从可见字面剥离");
+    }
+
+    /// GFM 表格在 ``` 代码围栏内不激活（FenceState 围栏感知），保持字面。
+    #[test]
+    fn gfm_table_inside_code_fence_stays_literal() {
+        let mut rv = RoundView::new(1);
+        rv.answer_delta("```\n");
+        rv.answer_delta("| A | B |\n");
+        rv.answer_delta("| --- | --- |\n");
+        rv.answer_delta("```\n");
+        let AnswerView::Streaming { segments, .. } = &rv.answer else {
+            panic!("expected streaming")
+        };
+        assert!(
+            !segments.iter().any(|s| matches!(s, LiveSegment::Table(_))),
+            "代码围栏内表格不激活"
+        );
     }
 
     /// expand_window 前移起点；到 0 后短路（返回 0，避免无谓渲染）。
