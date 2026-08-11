@@ -1406,6 +1406,7 @@ dependencies = [
 name = "deepx-winui"
 version = "1.0.0-rc.3"
 dependencies = [
+ "deepx-app-notifications",
  "deepx-client",
  "deepx-fluent",
  "markdown-winui",

@@ -166,6 +166,14 @@ pub enum TimelineEvent {
         fragment_seq: u64,
         delta: String,
     },
+    /// Periodic **full value** of a reasoning/text block (replaceable,
+    /// overwrite semantics). Self-heals lost/reordered text deltas: the next
+    /// checkpoint replaces the accumulated text in full, while `fragment_seq`
+    /// accounting keeps validating subsequent incremental deltas.
+    BlockCheckpoint {
+        block_id: String,
+        text: String,
+    },
     ToolUpdated {
         block_id: String,
         tool: TimelineTool,
@@ -232,6 +240,16 @@ pub enum TimelineIntent {
         round_num: u32,
         block_id: String,
         delta: String,
+    },
+    /// Replaceable full value for one reasoning/text block. The writer
+    /// overwrites `block.text`; fragment accounting is left untouched so
+    /// later `TextDelta`s keep validating against the monotonic counter.
+    BlockCheckpoint {
+        turn_id: String,
+        #[ts(type = "number")]
+        round_num: u32,
+        block_id: String,
+        text: String,
     },
     ToolUpdated {
         turn_id: String,

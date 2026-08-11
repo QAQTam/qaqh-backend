@@ -438,19 +438,19 @@ fn skill_activation_reaches_followup_round_and_next_user_turn() {
         },
     );
 
-    assert!(!bodies[0].contains("STICKY_SKILL_INSTRUCTION"));
-    assert!(
-        bodies[1].contains("STICKY_SKILL_INSTRUCTION"),
-        "follow-up body omitted activation: {}",
-        bodies[1]
-    );
-    // Active state is owned by SkillContextManager and remains authoritative
-    // across user turns until its three-successful-turn lease expires.
-    assert!(
-        bodies[2].contains("STICKY_SKILL_INSTRUCTION"),
-        "next-turn should retain leased skill activation: {}",
-        bodies[2]
-    );
+    // Envelope injection is TEMP-DISABLED (2026-08-04, agent.rs
+    // SKILL_ENVELOPE_INJECTION=false): activated skill bodies are delivered via
+    // the `skills` tool result at execution time, not as system messages, so
+    // no request body carries STICKY_SKILL_INSTRUCTION. The lifecycle itself
+    // (activation survives follow-up rounds and user turns) is owned by
+    // SkillContextManager and covered by its state tests; here we pin the
+    // disabled-injection contract so a re-enable must update this test too.
+    for (index, body) in bodies.iter().enumerate() {
+        assert!(
+            !body.contains("STICKY_SKILL_INSTRUCTION"),
+            "disabled injection leaked skill body into request #{index}: {body}"
+        );
+    }
 }
 
 #[test]

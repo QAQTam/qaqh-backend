@@ -308,6 +308,42 @@ impl TimelineAppender {
         ))
     }
 
+    /// Applies a replaceable full-value overwrite for one reasoning/text
+    /// block. Self-healing for lost/reordered streamed deltas: the producer
+    /// emits the complete accumulated text on a timer/token window, and a
+    /// consumer replaces instead of appending. `next_fragment` accounting is
+    /// intentionally left untouched so subsequent `TextDelta`s still validate
+    /// against the monotonic counter (their text appends after the overwrite).
+    pub fn checkpoint_block(
+        &mut self,
+        seed: &str,
+        turn_id: &str,
+        round_num: u32,
+        block_id: &str,
+        text: impl Into<String>,
+    ) -> Result<TimelineEntry, TimelineError> {
+        let timeline = self.timeline_mut(seed)?;
+        let round = existing_round_mut(timeline, turn_id, round_num)?;
+        let block = block_mut(round, block_id)?;
+        if block.state == TimelineBlockState::Sealed {
+            return Err(TimelineError::SealedBlock(block_id.to_string()));
+        }
+        if !matches!(
+            block.kind,
+            TimelineBlockKind::Reasoning | TimelineBlockKind::Text
+        ) {
+            return Err(TimelineError::InvalidBlockKind(block_id.to_string()));
+        }
+        let text = text.into();
+        block.text = text.clone();
+        Ok(next_entry(
+            timeline,
+            turn_id.to_string(),
+            Some(round_num),
+            TimelineEvent::BlockCheckpoint { block_id: block_id.to_string(), text },
+        ))
+    }
+
     pub fn update_tool(
         &mut self,
         seed: &str,
@@ -449,6 +485,12 @@ impl TimelineAppender {
                     .unwrap_or(0);
                 self.append_text(seed, &turn_id, round_num, &block_id, fragment_seq, delta)
             }
+            TimelineIntent::BlockCheckpoint {
+                turn_id,
+                round_num,
+                block_id,
+                text,
+            } => self.checkpoint_block(seed, &turn_id, round_num, &block_id, text),
             TimelineIntent::ToolUpdated {
                 turn_id,
                 round_num,
@@ -734,6 +776,7 @@ fn block_mut<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deepx_domain::TimelineFailure;
 
     fn tool() -> TimelineTool {
         TimelineTool {
@@ -1062,5 +1105,102 @@ mod tests {
             appender.snapshot("s").unwrap().turns[0].rounds[0].blocks[0].text,
             "hello"
         );
+    }
+
+    #[test]
+    fn checkpoint_overwrites_text_and_later_deltas_keep_appending() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t", "question").unwrap();
+        appender
+            .open_block("s", "t", 0, "answer", TimelineBlockKind::Text, None)
+            .unwrap();
+        appender
+            .append_text("s", "t", 0, "answer", 0, "hel")
+            .unwrap();
+        // Replaceable full value: simulates self-healing after a lost delta.
+        let checkpoint = appender
+            .checkpoint_block("s", "t", 0, "answer", "hello wor")
+            .unwrap();
+        assert!(matches!(
+            checkpoint.event,
+            TimelineEvent::BlockCheckpoint {
+                ref block_id,
+                ref text,
+            } if block_id == "answer" && text == "hello wor"
+        ));
+        // fragment accounting is untouched: next delta validates against 1.
+        appender
+            .append_text("s", "t", 0, "answer", 1, "ld")
+            .unwrap();
+        let snapshot = appender.snapshot("s").unwrap();
+        assert_eq!(snapshot.turns[0].rounds[0].blocks[0].text, "hello world");
+    }
+
+    #[test]
+    fn checkpoint_via_intent_roundtrips_as_event() {
+        let mut appender = TimelineAppender::new();
+        let intents = [
+            TimelineIntent::TurnOpened {
+                turn_id: "t".into(),
+                user_text: "question".into(),
+            },
+            TimelineIntent::BlockOpened {
+                turn_id: "t".into(),
+                round_num: 0,
+                block_id: "reasoning".into(),
+                kind: TimelineBlockKind::Reasoning,
+                tool: None,
+            },
+            TimelineIntent::BlockCheckpoint {
+                turn_id: "t".into(),
+                round_num: 0,
+                block_id: "reasoning".into(),
+                text: "full thinking".into(),
+            },
+        ];
+        let entries: Vec<_> = intents
+            .into_iter()
+            .map(|intent| appender.apply_intent("s", intent).unwrap())
+            .collect();
+        assert!(matches!(
+            &entries[2].event,
+            TimelineEvent::BlockCheckpoint { block_id, text }
+                if block_id == "reasoning" && text == "full thinking"
+        ));
+        assert_eq!(
+            appender.snapshot("s").unwrap().turns[0].rounds[0].blocks[0].text,
+            "full thinking"
+        );
+    }
+
+    #[test]
+    fn checkpoint_rejected_on_sealed_block() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t", "question").unwrap();
+        appender
+            .open_block("s", "t", 0, "answer", TimelineBlockKind::Text, None)
+            .unwrap();
+        appender.seal_block("s", "t", 0, "answer").unwrap();
+        assert!(matches!(
+            appender.checkpoint_block("s", "t", 0, "answer", "late"),
+            Err(TimelineError::SealedBlock(_))
+        ));
+    }
+
+    #[test]
+    fn checkpoint_rejected_on_tool_or_missing_block() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t", "question").unwrap();
+        appender
+            .open_block("s", "t", 0, "tool:1", TimelineBlockKind::Tool, Some(tool()))
+            .unwrap();
+        assert!(matches!(
+            appender.checkpoint_block("s", "t", 0, "tool:1", "nope"),
+            Err(TimelineError::InvalidBlockKind(_))
+        ));
+        assert!(matches!(
+            appender.checkpoint_block("s", "t", 0, "ghost", "nope"),
+            Err(TimelineError::MissingBlock(_))
+        ));
     }
 }
