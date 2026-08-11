@@ -9,11 +9,6 @@
 //! |------------------|---------------------------------|
 //! | `conflict.rs`    | Write-conflict detection        |
 //! | `dashboard.rs`   | Status / metrics reporting      |
-//! | `notification.rs`| Inter-process notification      |
-//! | `toast_com.rs`  | Toast IPC (Windows-only)        |
 
 pub(crate) mod conflict;
 pub(crate) mod dashboard;
-pub(crate) mod notification;
-#[cfg(windows)]
-pub(crate) mod toast_com;

@@ -25,7 +25,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+
 
 use deepx_domain::{AskMode, AskQuestion};
 use deepx_types::UsageInfo;
@@ -322,7 +322,7 @@ pub struct WorkerCommand {
 /// - `pending` — deferred interrupt queue
 /// - `writer_dead` — set when stdout pipe breaks
 /// - `stats` — code delta accumulator
-/// - `notify` — desktop notification channel
+
 ///
 /// Engines CANNOT access:
 /// - Other engines' private state
@@ -344,8 +344,7 @@ pub struct RingContext<'a> {
     pub writer_dead: &'a Arc<AtomicBool>,
     /// Accumulated code deltas for the current session.
     pub stats: &'a mut StatsCollector,
-    /// Desktop notification channel.
-    pub notify: &'a NotifyHandle,
+
 }
 
 // ═══════════════════════════════════════════════════════
@@ -391,22 +390,7 @@ impl StatsCollector {
     }
 }
 
-// ═══════════════════════════════════════════════════════
-// NotifyHandle
-// ═══════════════════════════════════════════════════════
 
-/// Wrapper around the notification thread's sender channel.
-pub struct NotifyHandle {
-    pub tx: mpsc::Sender<crate::services::notification::NotifyMessage>,
-}
-
-impl NotifyHandle {
-    pub fn notify(&self, body: String) {
-        let _ = self
-            .tx
-            .send(crate::services::notification::NotifyMessage::Toast(body));
-    }
-}
 
 // ═══════════════════════════════════════════════════════
 // SessionBundle — session-scoped state

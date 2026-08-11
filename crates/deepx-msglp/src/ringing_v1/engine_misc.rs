@@ -1,6 +1,6 @@
-//! MiscEngine: undo, dashboard, mode, notifications.
+//! MiscEngine: undo, dashboard, mode.
 //!
-//! Handles undo, dashboard, mode, and notifications.
+//! Handles undo, dashboard, and mode.
 //!
 //! # Undo consistency (cross-engine transaction)
 //!
@@ -9,8 +9,6 @@
 //! to the deleted turn (suspended state, pending approvals).
 //! The Loop orchestrates this by calling `turn.reset()` and `tool.reset()`
 //! BEFORE calling `handle_undo()`.
-
-use std::sync::mpsc;
 
 use crate::services::dashboard;
 use crate::state::agent::AgentState;
@@ -105,38 +103,4 @@ impl MiscEngine {
         log::info!("[MISC] mode set to {mode_str} (internal={m})");
     }
 
-    // ── After-turn notification ──
-
-    pub fn maybe_notify(
-        &self,
-        agent: &AgentState,
-        notify_tx: &mpsc::Sender<crate::services::notification::NotifyMessage>,
-    ) {
-        let preview = agent
-            .msg
-            .turns()
-            .last()
-            .and_then(|t| t.steps.last())
-            .map(|s| {
-                s.assistant
-                    .content
-                    .iter()
-                    .filter_map(|b| match b {
-                        deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .unwrap_or_default();
-        if !preview.is_empty() {
-            let words: Vec<_> = preview.split_whitespace().take(20).collect();
-            let body = if preview.split_whitespace().count() > 20 {
-                format!("{}...", words.join(" "))
-            } else {
-                words.join(" ")
-            };
-            let _ = notify_tx.send(crate::services::notification::NotifyMessage::Toast(body));
-        }
-    }
 }

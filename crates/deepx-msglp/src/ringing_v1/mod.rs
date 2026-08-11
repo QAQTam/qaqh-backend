@@ -15,7 +15,7 @@
 //! | `engine_session.rs` | SessionEngine: create/resume/reload    |
 //! | `engine_input.rs`   | InputEngine: user input → turn start   |
 //! | `engine_compact.rs` | CompactEngine: context summarization   |
-//! | `engine_misc.rs`    | MiscEngine: undo/dashboard/mode/notify |
+//! | `engine_misc.rs`    | MiscEngine: undo/dashboard/mode        |
 //!
 //! ## Ring interface
 //!
