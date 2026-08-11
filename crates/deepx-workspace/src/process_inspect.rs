@@ -16,7 +16,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 "action": {
                     "type": "string",
                     "enum": ["check", "wait", "write", "kill"],
-                    "description": "check: query status, output tail and metadata of a tracked process; wait: block until the process exits (or timeout_secs elapses) and return its final state; write: send text to the process stdin; kill: terminate the process tree."
+                    "description": "check: query status, output tail and metadata of a tracked process; wait: block until the process exits (or timeout_secs elapses) and return its current state; write: send text to the process stdin; kill: terminate the process tree."
                 },
                 "id": {
                     "type": "integer",
