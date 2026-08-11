@@ -307,11 +307,12 @@ fn no_match_diagnostic(content: &str, pattern: &[String]) -> Option<String> {
             anchor.0,
             truncate_line(&anchor.1, 200)
         );
-        // 单行模式（pattern 只有一行）最常在这里命中转义差异
+        // 单行模式（pattern 只有一行）最常在这里命中转义差异。
+        // HINT 必须并入第一行：存储时折叠只保留首行（fold_file_mutation_result）。
         let anchor_trim = anchor.1.trim();
         if anchor_trim.replace('\\', "") == needle.replace('\\', "") && anchor_trim != needle {
             out.push_str(
-                "\n  [HINT] escape mismatch: the file contains backslash-escaped characters (e.g. \\\") that differ from your pattern — copy the exact characters from read_file output.",
+                " [HINT] escape mismatch: the file contains backslash-escaped characters (e.g. \\\") that differ from your pattern — copy the exact characters from read_file output.",
             );
         }
         return Some(out);
