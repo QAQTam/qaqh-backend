@@ -321,6 +321,11 @@ impl Turn {
 pub struct MessageStore {
     seed: String,
     system_messages: Vec<Message>,
+    /// Trailing system messages appended after the last turn (persisted).
+    /// Used for one-shot activation-set injection: written once when the
+    /// active set changes, then left in place forever so the request prefix
+    /// stays byte-stable across rounds.
+    trailing_messages: Vec<Message>,
     turns: Vec<Turn>,
     cancelled: bool,
     tool_executor: Option<ToolExecutorFn>,
@@ -363,6 +368,7 @@ impl Clone for MessageStore {
         Self {
             seed: self.seed.clone(),
             system_messages: self.system_messages.clone(),
+            trailing_messages: self.trailing_messages.clone(),
             turns: self.turns.clone(),
             cancelled: self.cancelled,
             tool_executor: None,
@@ -383,6 +389,7 @@ impl MessageStore {
         Self {
             seed: seed.to_string(),
             system_messages: Vec::new(),
+            trailing_messages: Vec::new(),
             turns: Vec::new(),
             cancelled: false,
             tool_executor: None,
@@ -415,6 +422,7 @@ impl MessageStore {
     pub fn switch_seed(&mut self, new_seed: &str) {
         self.seed = new_seed.to_string();
         self.system_messages.clear();
+        self.trailing_messages.clear();
         self.turns.clear();
         self.cancelled = false;
         self.compact_skip = 0;
@@ -529,6 +537,43 @@ impl MessageStore {
         if self.system_messages.len() != before {
             self.context_revision = self.context_revision.saturating_add(1);
         }
+    }
+
+    /// Append a trailing system message after the last turn, once.
+    ///
+    /// Idempotent: an identical message is skipped, so repeated sync calls on
+    /// an unchanged activation set never duplicate. The message is persisted
+    /// (save_msg) and stays in place for the rest of the session — never
+    /// re-injected, never removed — keeping the request prefix byte-stable.
+    pub fn push_trailing_system(&mut self, msg: Message) -> bool {
+        debug_assert_eq!(msg.role, "system", "push_trailing_system requires role=system");
+        let new_text = msg
+            .content
+            .iter()
+            .find_map(|b| match b {
+                deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        if !new_text.is_empty()
+            && self.trailing_messages.iter().any(|m| {
+                m.content.iter().any(|b| match b {
+                    deepx_types::ContentBlock::Text { text } => text == new_text,
+                    _ => false,
+                })
+            })
+        {
+            return false;
+        }
+        self.trailing_messages.push(msg.clone());
+        self.context_revision = self.context_revision.saturating_add(1);
+        self.save_msg(&msg);
+        true
+    }
+
+    /// Access the persisted trailing system messages (injection history).
+    pub fn trailing_messages(&self) -> &[Message] {
+        &self.trailing_messages
     }
 
     pub fn push_user(&mut self, text: &str) -> Effect {
@@ -754,6 +799,11 @@ impl MessageStore {
                     v.extend(step.tool_results.clone());
                 }
             }
+            // Trailing injections (activation-set envelopes) sit right after
+            // the last stored message — the "latest message" position the
+            // model saw when they were written. New turns append after them,
+            // so their position in history never moves.
+            v.extend(self.trailing_messages.clone());
             v
         };
 
@@ -1083,6 +1133,20 @@ impl MessageStore {
                     i += 1;
                 }
                 _ => {
+                    // Mid-stream system messages: recognize persisted
+                    // activation-set envelopes and restore them as trailing
+                    // injections; drop anything else silently.
+                    let text = msgs[i]
+                        .content
+                        .iter()
+                        .find_map(|block| match block {
+                            deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .unwrap_or("");
+                    if text.starts_with("<skill_context_envelope") {
+                        store.trailing_messages.push(msgs[i].clone());
+                    }
                     i += 1;
                 }
             }
