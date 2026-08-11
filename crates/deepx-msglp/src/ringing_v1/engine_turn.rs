@@ -1219,6 +1219,9 @@ impl TurnEngine {
             let tools = Some(ctx.agent.tool_defs.clone());
             let mut content = String::new();
             let mut reasoning = String::new();
+            // Opaque Responses output items are persisted for protocol replay
+            // only. They never enter timeline/UI projections.
+            let mut response_output_items: Vec<deepx_types::ContentBlock> = Vec::new();
             // A1：block_checkpoint 节流（delta 次数 + 时间窗，先到为准）。
             let mut checkpoint_tokens: u32 = 0;
             let mut last_checkpoint_at = std::time::Instant::now();
@@ -1386,6 +1389,9 @@ impl TurnEngine {
                                     blocks.push(serde_json::json!({
                                         "id": id, "name": name, "arguments": input.to_string(),
                                     }));
+                                }
+                                deepx_types::ContentBlock::ResponseOutputItem { .. } => {
+                                    response_output_items.push(block.clone());
                                 }
                                 _ => {}
                             }
@@ -1625,7 +1631,8 @@ impl TurnEngine {
                         });
                 }
             }
-            let assistant_msg = util::build_assistant_message(&content, &reasoning, &parsed);
+            let mut assistant_msg = util::build_assistant_message(&content, &reasoning, &parsed);
+            assistant_msg.content.extend(response_output_items);
             let effect = ctx.agent.msg.push_assistant(assistant_msg.clone());
             ctx.agent
                 .msg

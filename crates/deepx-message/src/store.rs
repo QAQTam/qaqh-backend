@@ -1323,6 +1323,10 @@ impl MessageStore {
                             // Use a conservative estimate of 512 tokens per image.
                             chat_text += 512;
                         }
+                        deepx_types::ContentBlock::ResponseOutputItem { .. } => {
+                            // Opaque provider replay state is already accounted
+                            // for by its visible Text/Reasoning/ToolUse projection.
+                        }
                     }
                 }
             }

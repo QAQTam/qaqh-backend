@@ -569,6 +569,7 @@ fn serialize_messages(
                 deepx_types::ContentBlock::Image { .. } => {
                     Some(format!("[{role}]: [Image attached]"))
                 }
+                deepx_types::ContentBlock::ResponseOutputItem { .. } => None,
             })
             .collect();
         if !lines.is_empty() {

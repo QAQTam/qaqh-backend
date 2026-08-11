@@ -21,7 +21,8 @@ Ringing typed event
 
 必须保持以下边界：
 
-- `Transcript` 更新 Rust 状态，不创建或保存 XAML 控件；
+- `Transcript` 更新 Rust 状态，不创建或保存 XAML 控件；`TurnView` 以
+  `Rc<RoundView>` 保留 round 身份，copy-on-write 只复制发生变化的 round；
 - `chat_view` 只声明当前状态对应的 `Element`，不重放命令式 patch；
 - `windows-reactor` 是唯一的控件树 diff/patch 层；
 - Bridge 承担 HTTP/SSE、后台任务、seed 隔离，渲染 crate 不持有 client；
@@ -82,8 +83,14 @@ checkpoint、工具状态或 round 边界排序。未知事件必须安全 no-op
 ## 5. 性能判断边界
 
 - `scale.rs` 只测 Transcript 寻址/回放，不证明 XAML 或 reactor 性能；
-- 16ms frame coalescing 减少同一活尾的重复解析，但当前行内 markdown 仍会对
+- vsync frame coalescing 减少同一活尾的重复解析，但当前行内 markdown 仍会对
   可见活尾整体重解析；这是明确、可测的实现，不宣称 O(1)；
+- Element 层依次以 `turn_id + turn mutation_rev`、`round_num + round mutation_rev`
+  做两级 memo；分页前插不得把数组下标纳入组件身份；
+- turn memo 的实际声明子树必须位于 `error_boundary` 内；单个回合声明失败只挂载
+  fallback，不能让 panic 逃逸并使整个 reconciler 进入 teardown-only；
+- Bridge 的 Chat 事件必须按 seed 分队列；活动会话 drain 为 O(limit)，不得因后台
+  会话积压而扫描或重建全局事件队列；
 - `LiveTableTracker` 只对新增表格行增量扫描；
 - 真正的 UI 性能要分别记录：model apply、Element 声明、reactor reconcile、XAML
   layout/realize、跟尾滚动；不能把总耗时归因给某一层；

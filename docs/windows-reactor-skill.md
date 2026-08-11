@@ -1,12 +1,12 @@
 # windows-reactor 开发 Skill
 
 > 基于 microsoft/windows-rs master 源码研究整理（2026-08-06 抓取，crate 版本 0.100.0；
-> 2026-08-10 更新基线）。来源：`crates/libs/reactor/`（实现）、`docs/crates/windows-reactor.md`（官方指南）、`crates/samples/reactor/`（示例）。
+> 2026-08-11 更新基线）。来源：`crates/libs/reactor/`（实现）、`docs/crates/windows-reactor.md`（官方指南）、`crates/samples/reactor/`（示例）。
 >
 > ⚠️ **当前基线已变更**（见 [reactor-winui3-knowledge.md](./reactor-winui3-knowledge.md) §1）：
-> - 上游基线 = `9e4eb04e4`（PR #4807，reactor 落地 windows-rs master，2026-08-08）
-> - DeepX fork = 本地 `F:\deepx-winui-reactor`（16 个补丁叠于基线上，`2aee8c52` 重放），
->   开发期用 path 依赖；本文件下方 `rev = 89aa099b...` 的 git 依赖写法为旧整合线示例，release 打包前改用新 tag。
+> - 上游基线 = `c318f55a2`（PR #4824，2026-08-11）
+> - DeepX fork = `QAQTam/deepx-winui-reactor` 的 `deepx-winui` 分支；本地路径
+>   `F:\deepx-winui-reactor`，当前融合提交 `d57da0ccc`。
 > - 补丁清单见 fork 内 `DEEPX-DOWNSTREAM.md`。
 
 ## 一句话心智模型
@@ -18,9 +18,9 @@
 ```toml
 # Cargo.toml
 [dependencies]
-windows-reactor = { git = "https://github.com/QAQTam/windows-rs.git", rev = "89aa099b781b3561df4326d9cf68fe103c556415" }
+windows-reactor = { git = "https://github.com/QAQTam/deepx-winui-reactor.git", rev = "d57da0ccccec32218afdea6a0110936cb355b724" }
 [build-dependencies]
-windows-reactor-setup = { git = "https://github.com/QAQTam/windows-rs.git", rev = "89aa099b781b3561df4326d9cf68fe103c556415" }
+windows-reactor-setup = { git = "https://github.com/QAQTam/deepx-winui-reactor.git", rev = "d57da0ccccec32218afdea6a0110936cb355b724" }
 
 [profile.release]
 panic = "abort"   # 见下方"错误模型"，release 建议加

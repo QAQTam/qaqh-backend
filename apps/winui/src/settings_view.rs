@@ -37,16 +37,16 @@ use crate::shell_store::{SettingsSnapshot, normalize_effort};
 /// 快照轮询间隔（同 sidebar / skills_view）。
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 分类定义（id + 中文标签，对齐 Web `categories()`）。
-const CATEGORIES: [(&str, &str); 8] = [
-    ("models", "模型"),
-    ("api", "API 密钥"),
-    ("context", "上下文"),
-    ("subagent", "子代理"),
-    ("workspace", "工具套件"),
-    ("appearance", "外观"),
-    ("multimodal", "多模态"),
-    ("advanced", "高级"),
+/// 分类定义（id + 中文标签 + Fluent Symbol，对齐 Web `categories()`）。
+const CATEGORIES: [(&str, &str, Symbol); 8] = [
+    ("models", "模型", Symbol::Library),
+    ("api", "API 密钥", Symbol::Setting),
+    ("context", "上下文", Symbol::Document),
+    ("subagent", "子代理", Symbol::People),
+    ("workspace", "工具套件", Symbol::AllApps),
+    ("appearance", "外观", Symbol::Pictures),
+    ("multimodal", "多模态", Symbol::Camera),
+    ("advanced", "高级", Symbol::Repair),
 ];
 
 /// effort 档位（对齐 Web EFFORT_LADDER）。
@@ -192,51 +192,18 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // ── 字段 setter（写草稿 + 置 dirty）─────────────────────────────
     // 每个闭包捕获 bridge/draft/dirty；通用 helper 不便（借用冲突），逐字段生成。
 
-    // ── 左侧分类导航（固定同构结构：Border(grid(竖条, 文字))）────────
-    // 结构稳定性契约（卡死/错位根因修复）：所有 item 恒为 Border，active
-    // 只改 background / 竖条颜色（modifiers 字段 diff），**绝不切换元素
-    // 类型**（Border↔裸 TextBlock 的 kind 跳变会触发反复 unmount/mount，
-    // 多次切换后控件树错位 → 渲染退化假死）。选中语义 = Win11
-    // NavigationView 左侧竖条（3px Accent 圆角条），文字恒 PrimaryText。
-    let nav_items: Vec<Element> = CATEGORIES
+    // ── 左侧分类导航（原生 NavigationView 菜单项）──────────────────
+    // 选中条、hover/pressed、键盘焦点与系统动效由 WinUI 控件模板负责。
+    // 内容页仍在下方使用稳定 keyed host，避免早期手写 Border↔TextBlock
+    // 类型跳变造成的 reconciler 控件树复用错误。
+    let nav_items: Vec<NavViewItem> = CATEGORIES
         .iter()
-        .map(|(id, label)| {
-            let active = *id == category;
-            let indicator = border(text_block(""))
-                .width(3.0)
-                .height(16.0)
-                .corner_radius(1.5)
-                .vertical_alignment(VerticalAlignment::Center);
-            let indicator = if active {
-                indicator.background(ThemeRef::Accent)
-            } else {
-                indicator
-            };
-            let label_el: Element = text_block(*label)
-                .font_size(13.0)
-                .foreground(ThemeRef::PrimaryText)
-                .vertical_alignment(VerticalAlignment::Center)
-                .into();
-            let row = grid((indicator.grid_column(0), label_el.grid_column(1)))
-                .columns([GridLength::Auto, GridLength::STAR])
-                .column_spacing(8.0)
-                .padding(Thickness::xy(8.0, 8.0))
-                .on_pointer_pressed({
-                    let set_category = set_category.clone();
-                    let id = id.to_string();
-                    move |_| set_category.call(id.clone())
-                });
-            // 结构恒为 Border；仅 background 随 active 变化（diff_modifiers 原地更新）。
-            let item = border(row).corner_radius(6.0);
-            let item = if active {
-                item.background(ThemeRef::SubtleFill)
-            } else {
-                item
-            };
-            item.with_key(id.to_string()).into()
+        .map(|(id, label, symbol)| {
+            NavViewItem::new(*label)
+                .tag(*id)
+                .icon(Icon::symbol(*symbol))
         })
         .collect();
-    let nav: Element = scroll_viewer(vstack(nav_items).spacing(2.0)).into();
 
     // ── 右侧表单区（按分类）────────────────────────────────────────
     let mut rows: Vec<Element> = Vec::new();
@@ -1197,23 +1164,38 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // keyed reconcile：跨分类 key 全不同 → 切换分类时整行干净重建（杜绝
     // 同 index 类型跳变（grid↔TextBlock）导致的控件复用错位）；同分类内
     // 重渲染 key 相同 → 原地更新（表单输入状态保持）。
-    // 动画：每行挂 enter transition（ImplicitShowAnimation）——切分类时
-    // 新行 mount 使用统一内容动效；系统关闭动画时不挂 Composition 动画。
+    // 跨分类 key 全不同；动画挂在整页而非每一行，避免密集表单产生瀑布闪烁。
     let rows: Vec<Element> = rows
         .into_iter()
         .enumerate()
-        .map(|(i, el)| {
-            el.with_key(format!("{category}-{i}"))
-                .transition(motion::content_enter(), None)
-        })
+        .map(|(i, el)| el.with_key(format!("{category}-{i}")))
         .collect();
     let form: Element = vstack(rows).spacing(tokens::SPACE_2).into();
     let body: Element = vstack((form, footer)).spacing(tokens::SPACE_4).into();
-    let content: Element = scroll_viewer(body).into();
-
-    // ── 根：左侧导航 + 右侧表单 ─────────────────────────────────────
-    grid((nav.grid_column(0), content.grid_column(1)))
-        .columns([GridLength::Pixel(180.0), GridLength::STAR])
+    let page: Element = grid((scroll_viewer(body),))
+        .with_key(format!("settings-page-{category}"))
+        .rows([GridLength::STAR])
+        .columns([GridLength::STAR])
         .padding(Thickness::xy(tokens::SPACE_6, tokens::SPACE_6))
+        .transition(motion::navigation_enter(), motion::content_exit())
+        .into();
+    let content_host: Element = grid((page,))
+        .rows([GridLength::STAR])
+        .columns([GridLength::STAR])
+        .into();
+
+    // ── 根：固定展开的标准 NavigationView ─────────────────────────
+    // `Left` 明确禁止 Auto 模式因窗口宽度自行折叠；这正是最初弃用标准
+    // 控件时漏掉的配置。NavigationView 的 content host 保持同构，只有带
+    // category key 的页面子树替换，因此既有稳定性修复仍然成立。
+    NavigationView::new(nav_items, content_host)
+        .selected_tag(category.clone())
+        .on_selection_changed(set_category)
+        .pane_display_mode(NavigationViewPaneDisplayMode::Left)
+        .pane_open(true)
+        .pane_toggle_button_visible(false)
+        .back_button_visible(false)
+        .settings_visible(false)
+        .open_pane_length(200.0)
         .into()
 }

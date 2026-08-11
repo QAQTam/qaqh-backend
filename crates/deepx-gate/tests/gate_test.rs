@@ -957,6 +957,39 @@ fn responses_chat_stream_basic_text() {
 }
 
 #[test]
+fn responses_stream_without_terminal_event_is_rejected() {
+    let mock = MockServer::new(vec![mock_server::SseChunk::Raw(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"delta\":\"partial\"}\n\n".into(),
+    )]);
+    let provider = make_responses_provider(&mock);
+    let mut events: Vec<StreamEvent> = Vec::new();
+
+    let result = deepx_gate::chat_stream(
+        &provider,
+        vec![Message::user("hi")],
+        None,
+        4096,
+        Some("high".into()),
+        None,
+        None,
+        &mut |event| events.push(event),
+    );
+
+    let error = result.expect_err("truncated Responses streams must not be accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("closed before response.completed")
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Done { .. })),
+        "a truncated stream must not persist a partial assistant response"
+    );
+}
+
+#[test]
 fn responses_chat_stream_with_tool_calls() {
     let scenario = vec![
         mock_server::SseChunk::Raw(
@@ -1067,8 +1100,8 @@ fn responses_search_alias_is_wire_only_with_web_search_enabled() {
     assert!(events.iter().any(|event| matches!(
         event,
         StreamEvent::Done { raw_message, .. }
-            if matches!(raw_message.content.as_slice(),
-                [ContentBlock::ToolUse { name, .. }] if name == "search")
+            if raw_message.content.iter().any(|block|
+                matches!(block, ContentBlock::ToolUse { name, .. } if name == "search"))
     )));
 }
 

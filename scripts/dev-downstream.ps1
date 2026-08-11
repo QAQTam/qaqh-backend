@@ -1,7 +1,7 @@
 # Downstream 本地开发切换（windows-rs fork）
 #
-# DeepX 正式依赖 QAQTam/deepx-winui-rs 的 immutable snapshot commit（git rev）。
-# 开发下游代码时，把三个 manifest 临时切到本地仓库 F:\DeepX-windows-rs，
+# DeepX 正式依赖 QAQTam/deepx-winui-reactor 的 immutable snapshot commit（git rev）。
+# 开发下游代码时，把三个 manifest 临时切到本地仓库 F:\deepx-winui-reactor，
 # 验证完再切回 git rev。
 #
 # 用法（PowerShell 7）：
@@ -20,9 +20,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ---- 配置（改 rev 时同步更新这里）------------------------------------------
-$Rev      = "608258e1e62cd84c2fed4a7bf39f4d805c6a0785"
-$GitUrl   = "https://github.com/QAQTam/deepx-winui-rs.git"
-$Local    = "F:/DeepX-windows-rs"                      # downstream 工作树
+$Rev      = "d57da0ccccec32218afdea6a0110936cb355b724"
+$GitUrl   = "https://github.com/QAQTam/deepx-winui-reactor.git"
+$LocalDependency = "../../../deepx-winui-reactor"      # manifest 中的相对 path
+$LocalRepo       = "F:/deepx-winui-reactor"             # downstream 工作树
 # -----------------------------------------------------------------------------
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -33,7 +34,7 @@ $manifests = @(
 )
 
 function Git-Line([string]$crate) { "git = `"$GitUrl`", rev = `"$Rev`"" }
-function Path-Line([string]$crate) { "path = `"$Local/crates/libs/$crate`"" }
+function Path-Line([string]$crate) { "path = `"$LocalDependency/crates/libs/$crate`"" }
 
 $crateFor = @{
     "windows-reactor"        = "reactor"
@@ -42,7 +43,7 @@ $crateFor = @{
 }
 
 function Test-PointingLocal([string]$text) {
-    $text -match "windows-reactor\s*=\s*\{[^}]*path\s*=\s*`"$([regex]::Escape($Local))"
+    $text -match "windows-reactor\s*=\s*\{[^}]*path\s*=\s*`"$([regex]::Escape($LocalDependency))"
 }
 
 function Switch-ToLocal {
@@ -62,7 +63,7 @@ function Switch-ToLocal {
         }
         Set-Content $m $out
     }
-    Write-Host "已切换到本地 path 依赖：$Local（记得跑 cargo check 验证）"
+    Write-Host "已切换到本地 path 依赖：$LocalRepo（记得跑 cargo check 验证）"
 }
 
 function Switch-ToRev {
@@ -71,7 +72,7 @@ function Switch-ToRev {
         $out = foreach ($l in $lines) {
             $hit = $false
             foreach ($k in $crateFor.Keys) {
-                if ($l -match "^\s*$([regex]::Escape($k))\s*=\s*\{.*path\s*=\s*`"$([regex]::Escape($Local))") {
+                if ($l -match "^\s*$([regex]::Escape($k))\s*=\s*\{.*path\s*=\s*`"$([regex]::Escape($LocalDependency))") {
                     $out_line = $l -replace '\{\s*path\s*=\s*"[^"]*"', "{ $(Git-Line $crateFor[$k])"
                     $out_line
                     $hit = $true
@@ -94,10 +95,10 @@ function Show-Status {
         Write-Host ("{0,-45} {1}" -f $m.Replace($root, "."), $state)
     }
     Write-Host ""
-    Write-Host "本地 downstream: $Local"
-    if (Test-Path $Local) {
-        git -C $Local log --oneline -1 2>&1
-        git -C $Local branch --list "deepx/snapshot-*" 2>&1 | ForEach-Object { "  $_" }
+    Write-Host "本地 downstream: $LocalRepo"
+    if (Test-Path $LocalRepo) {
+        git -C $LocalRepo log --oneline -1 2>&1
+        git -C $LocalRepo branch --list "deepx/snapshot-*" 2>&1 | ForEach-Object { "  $_" }
     } else {
         Write-Host "  (不存在！)"
     }

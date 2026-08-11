@@ -8,7 +8,7 @@ description = "Reusable Windows 11 Fluent visual primitives for DeepX WinUI surf
 [dependencies]
 # 本地开发态：直接依赖 fork 工作区（F:\deepx-winui-reactor）。
 # release 打包前切回跨仓库：
-#   windows-reactor = { git = "https://github.com/QAQTam/deepx-winui-rs.git", rev = "<deepx-reactor HEAD>" }
+#   windows-reactor = { git = "https://github.com/QAQTam/deepx-winui-reactor.git", rev = "<deepx-winui HEAD>" }
 windows-reactor = { path = "../../../deepx-winui-reactor/crates/libs/reactor" }
 
 [lints]
