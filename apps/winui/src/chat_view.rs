@@ -1036,14 +1036,12 @@ impl PartialEq for TurnProps {
     }
 }
 
-/// 外层 memo 先截断未变化 turn；只有 props 变化时才重建 ErrorBoundary。
-/// 实际 turn 声明放在边界的子组件中，确保声明阶段 panic 也能被捕获。
+/// 外层 memo 先截断未变化 turn；只有 props 变化时才重建 turn 内容。
+/// 注：reactor #4828 已移除 error_boundary（#4829 起 callback panic fatal）——
+/// turn 渲染 panic 不再降级为 fallback，而是传播到 render 边界后 abort。
 fn turn_memo(props: &TurnProps, _cx: &mut RenderCx) -> Element {
-    let fallback_turn_id = props.turn.turn_id.clone();
-    error_boundary(component(turn_body, props.clone()), move |_message| {
-        turn_render_fallback(&fallback_turn_id)
-    })
-    .with_key(format!("{}-boundary", props.turn.turn_id))
+    component(turn_body, props.clone())
+        .with_key(format!("{}-turn", props.turn.turn_id))
 }
 
 fn turn_body(props: &TurnProps, cx: &mut RenderCx) -> Element {
@@ -1092,25 +1090,7 @@ fn turn_body(props: &TurnProps, cx: &mut RenderCx) -> Element {
     .into()
 }
 
-fn turn_render_fallback(turn_id: &str) -> Element {
-    vstack((
-        text_block("此回合暂时无法渲染")
-            .font_size(tokens::TYPE_BODY)
-            .foreground(ThemeRef::SystemCritical)
-            .wrap()
-            .automation_name("回合渲染失败"),
-        text_block("内容已被隔离；后续状态更新会自动重试。")
-            .font_size(tokens::TYPE_CAPTION)
-            .foreground(ThemeRef::SecondaryText)
-            .wrap(),
-    ))
-    .spacing(tokens::SPACE_2)
-    .padding(Thickness::uniform(tokens::SPACE_4))
-    .max_width(tokens::CONVERSATION_MAX_WIDTH)
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .with_key(format!("{turn_id}-render-fallback"))
-    .into()
-}
+
 
 #[derive(Clone)]
 struct RoundProps {

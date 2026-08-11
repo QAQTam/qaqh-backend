@@ -103,6 +103,8 @@ enum Event {
         rev: u64,
     },
     /// reactor fault（仅 context 名，panic message 含敏感内容不入诊断）。
+    /// 注：reactor #4829 删除 on_fault 后暂无生产者；保留以待新钩子重接。
+    #[allow(dead_code)]
     Fault { at_ms: u32, context: &'static str },
 }
 
@@ -295,6 +297,8 @@ pub fn record_scale(turns: u32, window: u32, rev: u64) {
 }
 
 /// reactor fault（仅 context 名；message 不入诊断）。
+/// 注：reactor #4829 删除 on_fault 后暂无调用者；保留以待新钩子重接。
+#[allow(dead_code)]
 pub fn record_fault(context: &'static str) {
     if MODE.load(Ordering::Relaxed) == MODE_ZERO {
         return;
