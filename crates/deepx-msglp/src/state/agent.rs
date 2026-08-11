@@ -376,21 +376,6 @@ impl AgentState {
         };
 
         let mut context = self.msg.build_context_for_gate(&annotations);
-        // Catalog is now persisted as a system message on session creation.
-        // Only inject transiently when the stored messages lack it (first
-        // turn of a session created before this change, or empty catalog).
-        let has_catalog = context.iter().any(|message| {
-            message.role == "system" && message.content.iter().any(|block| {
-                matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("</available_skills>"))
-            })
-        });
-        if !snapshot.catalog.is_empty() && !has_catalog {
-            let prefix_end = context
-                .iter()
-                .take_while(|message| message.role == "system")
-                .count();
-            context.insert(prefix_end, deepx_types::Message::system(&snapshot.catalog));
-        }
         // ── 前缀稳定性校验 ──
         // Hash the cache-key components (system text, catalog, tool defs)
         // PLUS every rendered message in order, and compare with the
@@ -836,13 +821,9 @@ mod tests {
         assert!(before[0].content.iter().any(
             |block| matches!(block, deepx_types::ContentBlock::Text { text } if text == "stable base")
         ));
-        assert_eq!(before[1].role, "system");
-        assert!(before[1].content.iter().any(
-            |block| matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("cache-skill"))
-        ));
-        // NOTE: no tail skill envelope assertion — SKILL_ENVELOPE_INJECTION
-        // is TEMP-DISABLED (2026-08-04), so activated bodies only arrive via
-        // `skills` tool results.
+        // The skill catalog is NOT injected anymore: the model discovers it
+        // via a mandatory first `skills list` tool call. The base system
+        // prompt is the only fixed prefix.
 
         let after = agent.build_context();
         assert!(after[0].content.iter().any(
