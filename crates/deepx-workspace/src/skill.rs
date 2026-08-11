@@ -52,7 +52,6 @@ fn handle_skill(ctx: crate::ToolCallCtx) -> ToolResult {
     match load_activation(&ctx.args) {
         Ok(activation) => {
             let name = activation.metadata.name.clone();
-            let body = activation.body.clone();
             let resources: Vec<String> = activation
                 .resources
                 .iter()
@@ -64,7 +63,7 @@ fn handle_skill(ctx: crate::ToolCallCtx) -> ToolResult {
                 "skill": name,
                 "resources": resources,
                 "content": format!(
-                    "[OK] skill '{name}' activated. Follow these instructions:\n\n<skill_instructions name=\"{name}\">\n{body}\n</skill_instructions>"
+                    "[OK] skill '{name}' activated. The full instructions are injected as the trailing <skill_context_envelope> system message (authoritative — it replaces all older skill instructions). If the envelope is not visible, call resource to read bundled files on demand."
                 )
             }).to_string())
         }
@@ -179,7 +178,7 @@ fn handle_skills(ctx: crate::ToolCallCtx) -> ToolResult {
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(ToolHandler {
         key: "skills".to_string(),
-        description: "Manage Agent Skills through one fixed interface. Use activate before acting when a task matches the catalog — the full instructions are returned in the tool result; resource reads bundled files on demand; list for catalog diagnostics; validate for portability checks. Skill metadata never bypasses DeepX permissions.",
+        description: "Manage Agent Skills through one fixed interface. Use activate before acting when a task matches the catalog — the full instructions are injected as a trailing skill_context_envelope system message; resource reads bundled files on demand; list for catalog diagnostics; validate for portability checks. Skill metadata never bypasses DeepX permissions.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

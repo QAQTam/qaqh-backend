@@ -14,7 +14,6 @@ use std::path::Path;
 #[derive(Debug, Clone, Default)]
 struct PrefixShape {
     system_hash: String,
-    catalog_hash: String,
     tools_hash: String,
     /// FNV-1a hash of every rendered message (system included), in order.
     /// A mismatch at index i (with i < previous length) means an EXISTING
@@ -52,7 +51,6 @@ fn message_hash(message: &deepx_types::Message) -> u64 {
 impl PrefixShape {
     fn capture(
         context: &[deepx_types::Message],
-        catalog_text: &str,
         tool_defs: &[deepx_types::ToolDef],
     ) -> Self {
         let sys_text: String = context
@@ -68,7 +66,6 @@ impl PrefixShape {
         let tools_json = serde_json::to_string(tool_defs).unwrap_or_default();
         Self {
             system_hash: prefix_hash(&sys_text),
-            catalog_hash: prefix_hash(catalog_text),
             tools_hash: prefix_hash(&tools_json),
             msg_hashes: context.iter().map(message_hash).collect(),
         }
@@ -78,9 +75,6 @@ impl PrefixShape {
         let mut changed = Vec::new();
         if !prev.system_hash.is_empty() && self.system_hash != prev.system_hash {
             changed.push("system_prompt".into());
-        }
-        if !prev.catalog_hash.is_empty() && self.catalog_hash != prev.catalog_hash {
-            changed.push("catalog".into());
         }
         if !prev.tools_hash.is_empty() && self.tools_hash != prev.tools_hash {
             changed.push("tool_defs".into());
@@ -382,18 +376,17 @@ impl AgentState {
             if text.is_empty() { vec![] } else { vec![text] }
         };
 
-        let mut context = self.msg.build_context_for_gate(&annotations);
+        let context = self.msg.build_context_for_gate(&annotations);
         // ── 前缀稳定性校验 ──
-        // Hash the cache-key components (system text, catalog, tool defs)
+        // Hash the cache-key components (system text, tool defs)
         // PLUS every rendered message in order, and compare with the
         // previous request.  If anything changed, emit a CacheDiagnostics
         // event so the frontend can surface the reason.  The message-level
-        // hashes catch breaks the three components cannot see — e.g. the
+        // hashes catch breaks the two components cannot see — e.g. the
         // [Environment] annotation moving between user messages, or a tool
         // result whose fold state depends on step position.
         {
-            let cat_text = snapshot.catalog.clone();
-            let cur = PrefixShape::capture(&context, &cat_text, &self.tool_defs);
+            let cur = PrefixShape::capture(&context, &self.tool_defs);
             if !self.prev_prefix.system_hash.is_empty() {
                 let changed = cur.diff(&self.prev_prefix);
                 if !changed.is_empty() {
@@ -583,15 +576,15 @@ mod tests {
         let u2 = deepx_types::Message::user("second turn");
 
         // Append: new turn, earlier messages untouched → no break reported.
-        let before = PrefixShape::capture(&[sys[0].clone(), u1.clone()], "", &[]);
-        let appended = PrefixShape::capture(&[sys[0].clone(), u1.clone(), u2.clone()], "", &[]);
+        let before = PrefixShape::capture(&[sys[0].clone(), u1.clone()], &[]);
+        let appended = PrefixShape::capture(&[sys[0].clone(), u1.clone(), u2.clone()], &[]);
         assert!(
             appended.diff(&before).is_empty(),
             "pure appends must not be reported as prefix breaks"
         );
 
         // Modification: the same stored message renders differently → break.
-        let mutated = PrefixShape::capture(&[sys[0].clone(), u1_annotated], "", &[]);
+        let mutated = PrefixShape::capture(&[sys[0].clone(), u1_annotated], &[]);
         let changed = mutated.diff(&before);
         assert!(
             changed.iter().any(|r| r.starts_with("message[1]")),
@@ -600,7 +593,7 @@ mod tests {
 
         // System text change is still caught by the component hash.
         let sys2 = vec![deepx_types::Message::system("base v2")];
-        let sys_changed = PrefixShape::capture(&[sys2[0].clone(), u1.clone()], "", &[]);
+        let sys_changed = PrefixShape::capture(&[sys2[0].clone(), u1.clone()], &[]);
         assert!(
             sys_changed
                 .diff(&before)
