@@ -105,6 +105,7 @@ DeepX 的 transcript（会话展示）存在**两条事件通道**：
 | `rc4-contract.md` §7 | 辅助 query/action 响应补齐 typed DTO，收缩 `shell_store` JSON 边界 | ⏳ 待实施 | 独立 |
 | `rc4-contract.md` §7 | typed `Route`、observable/incremental collection、activation/accessibility | ⏳ 待实施 | 独立 |
 | 本次会话 | 死循环/过度思考防护（n-gram 重复检测 + 打断 + 截断 thinking + effort 降级重发） | ⏳ backlog | 用户暂缓；依赖 Phase 2 稳定 |
+| 本次会话（2026-08-13） | **三频道 orphan seal 失效语义协议化**：`InteractionRequested`/`ToolPermissionRequested` 的失效判定（worker 存活 vs journal 重放 vs 超时）写入协议契约。代码已修（`hub.rs` live_interactions 守卫 + `force` 参数，回归测试 `seal_orphan_channel_state_preserves_live_interaction_awaiting_user`），协议条目待补；与 L20「done 判定失效」同源 | ⏳ 待实施 | 独立 |
 | 本次会话 | `permission_lifecycle`/`ask_user_lifecycle` 回归纳入 CI 门禁 | ✅ 已修复，待纳入 | 独立 |
 
 ## 6. 外部事实记录（2026-08-12 核实自 DeepSeek 官方文档）

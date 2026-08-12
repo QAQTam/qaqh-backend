@@ -4,19 +4,16 @@
 //! 读取对应频道的权威 snapshot，并以 snapshot 的 `baseline_stream_seq` 继续。
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use deepx_domain::RingingChannel;
 
 /// `event: ringing.reset_required` 的 data payload。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RingingResetRequired {
     pub channel: RingingChannel,
     /// 需要重新拉取 snapshot 的会话。
     pub seed: String,
     /// 服务端该 seed+channel 仍可回放的最早 stream_seq。
-    #[ts(type = "number")]
     pub earliest_available_seq: u64,
 }
 

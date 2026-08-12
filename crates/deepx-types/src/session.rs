@@ -1,12 +1,10 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// Activation state of a single skill within a session.
 ///
 /// Tracks whether a skill is currently loaded and available in the
 /// agent's context window.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillSessionEntryState {
     /// Skill is loaded and active in the current session.
@@ -17,8 +15,7 @@ pub enum SkillSessionEntryState {
 }
 
 /// Runtime tracking for one skill in a session.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillSessionEntry {
     /// Skill name matching SKILL.md metadata.
     pub name: String,
@@ -34,8 +31,7 @@ pub struct SkillSessionEntry {
 ///
 /// Version 2 adds `context_epoch` and `operation_revision` for tracking
 /// skill activation/deactivation across context compaction cycles.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillSessionStateV2 {
     /// Schema version (always 2).
     pub version: u8,
@@ -62,8 +58,7 @@ impl Default for SkillSessionStateV2 {
 /// Session metadata — unified persistence + runtime state.
 ///
 /// Fields marked `#[serde(skip)]` are runtime-only and not persisted to meta.json.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     // ── Persisted fields ──
     pub seed: String,
@@ -71,7 +66,6 @@ pub struct SessionMeta {
     pub updated_at: u64,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub effort: Option<String>,
     pub message_count: usize,
     /// Number of conversation turns (one user query + its assistant/tool chain).
@@ -94,37 +88,29 @@ pub struct SessionMeta {
     pub skills: SkillSessionStateV2,
     /// Provider-confirmed usage accumulated across model requests in this session.
     #[serde(default)]
-    #[ts(skip)]
     pub usage_totals: crate::UsageInfo,
     /// Last provider-confirmed request usage, used to restore the live Info panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(skip)]
     pub last_usage: Option<crate::UsageInfo>,
     /// Number of model requests included in `usage_totals`.
     #[serde(default)]
-    #[ts(skip)]
     pub usage_requests: u32,
     /// Number of requests whose provider explicitly returned cache usage.
     #[serde(default)]
-    #[ts(skip)]
     pub cache_reported_requests: u32,
 
     // ── Runtime fields (not persisted) ──
     /// If set, this seed is passed as a CLI argument to the agent subprocess for auto-restore on startup.
     #[serde(skip)]
-    #[ts(skip)]
     pub resume_seed: Option<String>,
     /// Cumulative tokens consumed across all turns.
     #[serde(skip)]
-    #[ts(skip)]
     pub tokens: u64,
     /// Display title extracted from first user message.
     #[serde(skip)]
-    #[ts(skip)]
     pub title: Option<String>,
     /// True if session was restored from disk — system prompt preserved.
     #[serde(skip)]
-    #[ts(skip)]
     pub from_resume: bool,
 }
 impl Default for SessionMeta {

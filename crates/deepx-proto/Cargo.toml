@@ -6,7 +6,7 @@ description = "DeepX shared data models and daemon discovery"
 
 [dependencies]
 deepx-types = { path = "../deepx-types" }
-ts-rs = { version = "12", features = ["serde-compat"] }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

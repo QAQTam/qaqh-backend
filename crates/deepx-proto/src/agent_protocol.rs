@@ -7,15 +7,13 @@
 //! (`deepx-ringing` / `deepx-domain`).
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// Authoritative runtime state for one desktop session.
 ///
 /// Emitted via the Ringing `SessionActivityChanged` domain event whenever the
 /// agent session transitions between lifecycle states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum SessionActivityState {
     /// Agent is initializing (loading config, creating session, etc.).
     Starting,
@@ -30,8 +28,7 @@ pub enum SessionActivityState {
 }
 
 /// Snapshot/event payload emitted for every session state change.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionActivity {
     /// Session identifier (8 hex chars).
     pub seed: String,
@@ -39,19 +36,15 @@ pub struct SessionActivity {
     pub state: SessionActivityState,
     /// Active turn ID, if a turn is in progress or suspended.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub turn_id: Option<String>,
     /// Monotonic event sequence number for this session.
-    #[ts(type = "number")]
     pub seq: u64,
     /// Unix timestamp of this state change.
-    #[ts(type = "number")]
     pub updated_at: u64,
 }
 
 /// An item pending review for todo_activate. Carried in PlanSubmitted.review_type="todo_activation".
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoActivationItem {
     pub id: String,
     pub title: String,
@@ -61,8 +54,7 @@ pub struct TodoActivationItem {
 }
 
 /// Tool call definition used in turn projections.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallDef {
     pub id: String,
     pub name: String,
@@ -73,38 +65,31 @@ pub struct ToolCallDef {
 }
 
 /// Tool execution result used in turn projections.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultDef {
     pub tool_call_id: String,
     pub output: String,
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub file: Option<FileSnapshotInfo>,
 }
 
 /// File metadata snapshot for rich rendering.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSnapshotInfo {
     pub path: String,
     pub lines: u32,
     pub size_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub start_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub end_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub tag: Option<String>,
 }
 
 /// Document tracking entry.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocInfo {
     pub tag: String,
     pub path: String,
@@ -112,8 +97,7 @@ pub struct DocInfo {
     pub is_stale: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskInfo {
     pub id: String,
     pub subject: String,
@@ -124,8 +108,7 @@ pub struct TaskInfo {
 }
 
 /// One round of a turn (one API call).
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoundData {
     pub round_num: u32,
     #[serde(default)]
@@ -140,8 +123,7 @@ pub struct RoundData {
 }
 
 /// One full turn (user message + all rounds).
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnData {
     pub turn_id: String,
     pub user_text: String,
@@ -152,9 +134,8 @@ pub struct TurnData {
 ///
 /// Blocks are streamed to the frontend in order so it can reconstruct
 /// the exact sequence of reasoning → text → tool calls from the model.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[ts(export)]
 pub enum RoundBlock {
     /// Model reasoning/thinking block (collapsible in UI).
     Reasoning { content: String },
@@ -169,8 +150,7 @@ pub enum RoundBlock {
 }
 
 /// A single code delta record for persistence.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeDeltaRecord {
     pub timestamp: u64,
     pub lines_added: usize,
@@ -178,6 +158,5 @@ pub struct CodeDeltaRecord {
     pub files_created: usize,
     pub files_deleted: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub file: Option<String>,
 }

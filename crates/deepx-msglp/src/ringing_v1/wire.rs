@@ -133,7 +133,6 @@ mod tests {
                 assert_eq!(parsed.command_id, "cmd-1");
                 assert_eq!(parsed.seed, "s1");
             }
-            other => panic!("expected ringing frame, got {other:?}"),
         }
     }
 

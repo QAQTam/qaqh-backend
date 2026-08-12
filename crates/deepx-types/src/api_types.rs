@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 // ── Usage ──
 
@@ -7,8 +6,7 @@ use ts_rs::TS;
 ///
 /// Captures both standard token counts and provider-specific fields
 /// like cache hit/miss and reasoning tokens.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageInfo {
     /// Tokens consumed by the input (prompt + conversation history).
     pub prompt_tokens: u32,
@@ -28,6 +26,5 @@ pub struct UsageInfo {
     /// Whether the provider actually returned cache usage fields. This keeps a
     /// genuine zero-percent hit rate distinct from unsupported/missing data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub cache_usage_reported: Option<bool>,
 }

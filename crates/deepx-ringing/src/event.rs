@@ -5,7 +5,6 @@
 
 use deepx_domain::{ControlEvent, ConversationEvent, ToolEvent};
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use deepx_domain::{Delivery, RingingChannel};
 
@@ -17,9 +16,8 @@ pub type RingingConversationEvent = ConversationEvent;
 pub type RingingToolEvent = ToolEvent;
 
 /// 统一 Ringing 事件（envelope `event` 字段）。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case")]
-#[ts(export)]
 pub enum RingingEvent {
     Control(RingingControlEvent),
     Conversation(RingingConversationEvent),

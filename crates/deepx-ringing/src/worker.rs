@@ -2,7 +2,6 @@
 
 use deepx_domain::RingingChannel;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::command::RingingCommand;
 use crate::event::RingingEvent;
@@ -19,17 +18,15 @@ pub const WIRE_RINGING_DOMAIN_V1: &str = "Ringing_domain_v1";
 pub const WIRE_RINGING_TIMELINE_INTENT_V1: &str = "Ringing_timeline_intent_v1";
 
 /// frame 方向（stdin 只承载 Command，stdout 只承载 Event；stderr 只承载脱敏日志）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum WorkerDirection {
     Command,
     Event,
 }
 
 /// daemon → worker 命令 frame。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingWorkerCommandEnvelope {
     pub schema: String,
     pub version: u32,
@@ -40,7 +37,6 @@ pub struct RingingWorkerCommandEnvelope {
     pub seed: String,
     pub command_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "number | null")]
     pub expected_revision: Option<u64>,
     pub command: RingingCommand,
 }
@@ -72,8 +68,7 @@ impl RingingWorkerCommandEnvelope {
 }
 
 /// worker → daemon 事件 frame。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingWorkerEventEnvelope {
     pub schema: String,
     pub version: u32,
@@ -113,8 +108,7 @@ impl RingingWorkerEventEnvelope {
 
 /// Worker → daemon Ringing V1 timeline intent. It is intentionally distinct
 /// from the per-channel `RingingWorkerEventEnvelope`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingTimelineIntentEnvelope {
     pub schema: String,
     pub version: u32,

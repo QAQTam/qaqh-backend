@@ -5,7 +5,6 @@
 //! never have to infer failure from the shape of textual output.
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 pub const TOOL_SUMMARY_MAX_CHARS: usize = 512;
 // Keep the model projection near the planned six-thousand-token budget.
@@ -13,7 +12,7 @@ pub const TOOL_SUMMARY_MAX_CHARS: usize = 512;
 // are not available at this shared contract boundary.
 pub const TOOL_MODEL_MAX_CHARS: usize = 24_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
     Ok,
@@ -33,7 +32,7 @@ impl ToolStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentRef {
     pub content_id: String,
     pub media_type: String,
@@ -41,24 +40,22 @@ pub struct ContentRef {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolContinuation {
     pub tool: String,
-    #[ts(type = "any")]
     pub args: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolModelPayload {
     pub text: String,
     pub truncated: bool,
-    #[ts(type = "number")]
     pub total_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ToolContinuation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolError {
     pub code: String,
     pub message: String,
@@ -67,11 +64,10 @@ pub struct ToolError {
     pub hint: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub status: ToolStatus,
     pub summary: String,
-    #[ts(type = "any")]
     pub data: serde_json::Value,
     pub model: ToolModelPayload,
     /// 展示平面的 unified diff（文件修改类工具的原始 diff 文本）。

@@ -2,7 +2,6 @@
 
 use deepx_domain::{ControlCommand, ConversationCommand, ToolCommand};
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use deepx_domain::RingingChannel;
 
@@ -14,9 +13,8 @@ pub type RingingConversationCommand = ConversationCommand;
 pub type RingingToolCommand = ToolCommand;
 
 /// 统一 Ringing 命令（envelope `command` 字段）。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case")]
-#[ts(export)]
 pub enum RingingCommand {
     Control(RingingControlCommand),
     Conversation(RingingConversationCommand),
