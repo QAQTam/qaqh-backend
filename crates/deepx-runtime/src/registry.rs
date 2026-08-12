@@ -173,7 +173,8 @@ impl AgentRegistry {
             // Ringing 三频道投影的等价收尾：重放的无终态 TurnStarted/
             // ToolStarted/InteractionRequested 同样会污染 bootstrap 快照，
             // 使前端显示陈旧 running turn 与无法批准的幽灵交互面板。
-            hub.seal_orphan_channel_state(seed);
+            // force=true：旧 worker 已死，所有挂起状态都是孤儿，无视活交互守卫。
+            hub.seal_orphan_channel_state(seed, true);
         }
         Ok(())
     }
@@ -451,7 +452,8 @@ impl AgentRegistry {
                 // 与 get_or_spawn 一致：新 worker 接管前，把 timeline 中任何
                 // 未 seal 的 running turn 收尾为 Cancelled。
                 hub.seal_orphan_running_turns(&seed);
-                hub.seal_orphan_channel_state(&seed);
+                // force=true：worker 已死亡，挂起交互必为孤儿，强制收尾。
+                hub.seal_orphan_channel_state(&seed, true);
             }
         }
     }

@@ -1,21 +1,23 @@
 # Reactor/WinUI3 开发知识库（实战踩坑与当前基线）
 
-> 2026-08-11 更新：补丁已重放到 windows-rs #4824。**任何 LLM 会话在改 `apps/winui` 或 fork 前必读本节"致命陷阱清单"**。
+> 2026-08-13 更新：上游已合并至 #4829（破坏性：callback panic → fatal，适配见
+> [WINDOWS-REACTOR-UPSTREAM-ADAPTATION.md](./WINDOWS-REACTOR-UPSTREAM-ADAPTATION.md)）。
+> **任何 LLM 会话在改 `apps/winui` 或 fork 前必读本节"致命陷阱清单"**。
 >
-> 配套文档：[windows-reactor-skill.md](./windows-reactor-skill.md)（心智模型/骨架/错误模型）、[PERF-FIX-NOTES.md](../apps/winui/PERF-FIX-NOTES.md)（chat 性能）、[winui-native-migration.md](./winui-native-migration.md)（迁移史）。
+> 配套文档：[windows-reactor-skill.md](./windows-reactor-skill.md)（心智模型/骨架/错误模型）、[PERF-FIX-NOTES.md](../apps/winui/PERF-FIX-NOTES.md)（chat 性能）、[winui-native-migration.md](../archive/winui-native-migration.md)（迁移史）。
 
 ---
 
-## 1. 当前基线（2026-08-11，重要！）
+## 1. 当前基线（2026-08-13，重要！）
 
 | 项 | 值 |
 |---|---|
 | reactor 来源 | 本地 fork `F:\deepx-winui-reactor`（独立 git 仓库），**开发期 path 依赖** |
-| 上游基线 | `c318f55a2`（PR #4824，2026-08-11） |
-| DeepX 补丁 | `42e951803` 文件级重放 + `d57da0ccc` 语义融合；包含 on_frame、RichText 增量 diff、虚拟滚动、Element 修饰等能力 |
+| 上游基线 | `5f8e1504d`（#4829，2026-08-11 合并；破坏性变更：callback panic 改 fatal） |
+| DeepX 补丁 | `42e951803` 文件级重放 + `d57da0ccc` 语义融合 + `27541a0b1` 合并上游 #4825–#4829；包含 on_frame、RichText 增量 diff、虚拟滚动、Element 修饰等能力；fork HEAD = `06c114742` |
 | 补丁清单 | `F:\deepx-winui-reactor\DEEPX-DOWNSTREAM.md` |
 | release 打包 | `apps/winui/Cargo.toml` 的 path 依赖通过 `scripts/dev-downstream.ps1 off` 切到 `QAQTam/deepx-winui-reactor` immutable rev |
-| 上游状态 | #4815–#4824 已融合；后续更新从最新 `master` 重放 `deepx-winui` |
+| 上游状态 | #4815–#4829 已融合；后续更新从最新 `master` 重放 `deepx-winui` |
 
 旧 shallow fork `F:\deepx-winui-reactor-1` 不再参与构建、发布或补丁审计。
 

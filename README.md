@@ -68,7 +68,7 @@ DeepX/
 │   ├── deepx-types        #   共享类型定义
 │   └── deepx-gate-testui  #   Gate 交互式调试 Web UI
 ├── skills/                # 项目级 Agent Skills
-├── docs/                  # 协议、迁移与设计文档（含 legal/）
+├── docs/                  # 文档（archive/ 历史归档 + nextdev/ 现行文档，含 legal/）
 ├── packages/              # 生成的安装包（gitignored）
 ├── scripts/               # 构建与版本同步脚本
 ├── justfile               # 统一构建入口
@@ -144,7 +144,7 @@ just sync-version
 
 该命令会同步 Rust workspace、根 `deepx-backend.lock.json`（含 Release manifest URL）与根 `package.json`。项目内置的版本审计脚本还会检查安装器及 Windows `DisplayVersion` 链路。
 
-协议文档使用独立版本号，位于 `docs/legal/version.txt`。安装器会将用户同意状态、文档版本和文档哈希写入本地 `legal-consent.json`，供后续协议更新提示复用。
+协议文档使用独立版本号，位于 `docs/nextdev/legal/version.txt`。安装器会将用户同意状态、文档版本和文档哈希写入本地 `legal-consent.json`，供后续协议更新提示复用。
 
 ## 安装与更新
 
@@ -178,8 +178,8 @@ DeepX 默认将配置、会话、日志和工具审计保存在当前用户的�
 
 发布前请阅读：
 
-- [DeepX 用户协议](docs/legal/USER_AGREEMENT.zh-CN.md)
-- [DeepX 隐私政策](docs/legal/PRIVACY_POLICY.zh-CN.md)
+- [DeepX 用户协议](docs/nextdev/legal/USER_AGREEMENT.zh-CN.md)
+- [DeepX 隐私政策](docs/nextdev/legal/PRIVACY_POLICY.zh-CN.md)
 
 ## License
 

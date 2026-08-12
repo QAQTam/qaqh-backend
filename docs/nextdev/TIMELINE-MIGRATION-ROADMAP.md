@@ -1,7 +1,7 @@
 # Timeline 迁移路线图（rc3 → rc5）
 
-> 状态：进行中（Phase 1 已完成，2026-08-12）
-> 关联文档：`docs/timeline-protocol-design.md`（协议决策）、`docs/backend-dataflow/convergence-plan.md`（收敛计划）、`docs/rc4-native-client-contract.md`（客户端契约）
+> 状态：进行中（Phase 1+2 已完成，Phase 3 前端部分已落地；2026-08-12 重写）
+> 关联文档：`docs/nextdev/timeline-protocol-design.md`（协议决策）、`docs/archive/backend-dataflow/convergence-plan.md`（收敛计划）、`docs/nextdev/rc4-native-client-contract.md`（客户端契约）
 
 ## 1. 背景与动机
 

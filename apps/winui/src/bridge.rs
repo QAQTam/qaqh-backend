@@ -520,6 +520,8 @@ fn interaction_event(event: &ControlEvent) -> Option<InteractionEvent> {
     }
 }
 
+
+
 /// 从 tool 频道事件提取权限队列更新。
 ///
 /// 事件形状（deepx-domain `ToolEvent`）：`tool_permission_requested
@@ -1210,6 +1212,38 @@ impl BridgeCore {
 
     // ── XAML 交互模态（interaction 投影，同 header 模式）────────────
 
+    /// 调试入口：标题栏「Ask 测试」按钮直接注入一个 ask 交互。
+    ///
+    /// 与 daemon 事件走**同一条** `apply_interaction_event` → 快照 → rev 链路
+    /// （仅数据源不同，事件形状与 `interaction_requested` 完全一致）——
+    /// 用于二分定位「ask 弹不出」：按钮注入后若弹窗出现 → 前端渲染 OK，
+    /// 问题在后端/协议/传输（真实事件未到达）；若仍不弹 → 前端渲染/轮询问题。
+    pub fn spawn_test_ask(&self) {
+        let seed = self.active_seed();
+        let ev = InteractionEvent::AskRequested {
+            id: "test-ask".to_string(),
+            questions: vec![
+                AskQuestion {
+                    id: "tq1".to_string(),
+                    question: "Ask 面板渲染链路测试：你能看到这个弹窗吗？".to_string(),
+                    options: vec![
+                        "看到了，渲染正常".to_string(),
+                        "看到了，但样式有问题".to_string(),
+                        "没看到（弹窗未出现）".to_string(),
+                    ],
+                    allow_custom: true,
+                },
+                AskQuestion {
+                    id: "tq2".to_string(),
+                    question: "补充说明（必填）".to_string(),
+                    options: vec![],
+                    allow_custom: true,
+                },
+            ],
+        };
+        self.apply_interaction_event(&seed, ev);
+    }
+
     /// (state, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新覆盖层面板。
     pub fn interaction_snapshot(&self) -> (InteractionState, u64) {
         let state = self
@@ -1250,9 +1284,23 @@ impl BridgeCore {
     /// 注意：机器按**事件 seed** 更新（后台会话交互保持挂起），缓存只投影
     /// **active_seed** 的机器，后台会话不会覆盖当前 UI。
     fn apply_interaction_event(&self, seed: &str, ev: InteractionEvent) {
+        let ev_kind = match &ev {
+            InteractionEvent::AskRequested { .. } => "AskRequested",
+            InteractionEvent::AskResolved { .. } => "AskResolved",
+            InteractionEvent::PlanRequested { .. } => "PlanRequested",
+            InteractionEvent::PlanResolved { .. } => "PlanResolved",
+            InteractionEvent::GhostCleanup => "GhostCleanup",
+        };
         let mut machines = self.interactions.lock().unwrap_or_else(|e| e.into_inner());
         machines.entry(seed.to_string()).or_default().apply(ev);
+        let keys: Vec<String> = machines.keys().cloned().collect();
         drop(machines);
+        // 【ask 弹不出诊断】投影前实值：事件类型/事件 seed vs active_seed vs 机器键集。
+        log_diag(&format!(
+            "[INTERACT] t={} applied ev={ev_kind} ev_seed={seed} active_seed={} machines={keys:?}",
+            unix_ms(),
+            self.active_seed()
+        ));
         self.refresh_interaction_snapshot();
     }
 
@@ -1269,12 +1317,23 @@ impl BridgeCore {
     fn refresh_interaction_snapshot(&self) {
         let active = self.active_seed();
         let machines = self.interactions.lock().unwrap_or_else(|e| e.into_inner());
+        let hit = machines.get(&active).is_some();
         let next = machines
             .get(&active)
             .map(|m| m.snapshot(&active))
             .unwrap_or_default();
         drop(machines);
         let mut cur = self.interaction.lock().unwrap_or_else(|e| e.into_inner());
+        let rev = self.interaction_rev.load(Ordering::Relaxed);
+        // 【ask 弹不出诊断】仅在投影将变化或未命中时打（避免稳态刷屏）。
+        if *cur != next || !hit {
+            log_diag(&format!(
+                "[INTERACT] t={} refresh active={active} hit={hit} next_kind={} cur_kind={} rev={rev}",
+                unix_ms(),
+                next.kind,
+                cur.kind
+            ));
+        }
         if *cur != next {
             *cur = next;
             self.interaction_rev.fetch_add(1, Ordering::Relaxed);

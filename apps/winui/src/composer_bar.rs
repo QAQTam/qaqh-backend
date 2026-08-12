@@ -199,6 +199,7 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_rev = last_rev.clone();
         move || {
             crate::shell::poll_rev(
+                "composer",
                 timer,
                 last_rev,
                 POLL_INTERVAL,
@@ -216,6 +217,7 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_ctx_rev = last_ctx_rev.clone();
         move || {
             crate::shell::poll_rev(
+                "composer_ctx",
                 ctx_timer,
                 last_ctx_rev,
                 POLL_INTERVAL,

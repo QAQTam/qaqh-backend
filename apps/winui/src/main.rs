@@ -497,7 +497,11 @@ fn app(cx: &mut RenderCx) -> Element {
     // 覆盖层 grid 必须显式 STAR 行/列：Grid 默认 Auto 会让 Stretch 子元素只
     // 覆盖内容大小（scrim 不全窗，遮罩不生效）——demo 已实证，同 interaction
     // 内部 grid 的修复。五个子元素重叠同一 cell（P-6 覆盖层模式）。
-    grid((base, splash, interaction, diagram_zoom, diff_drawer, oobe))
+    // ⚠ 顺序 = z-order（后声明在上层）：interaction（agent 阻塞交互）必须在
+    // diagram_zoom / diff_drawer **之后**——否则 diff 面板/图表放大打开时其
+    // 全屏遮罩会盖住 ask 面板（「ask 弹不出来」根因，2026-08-12 实测定位）。
+    // 模态互斥时 agent 交互优先：即使 diff 面板开着，ask 也应弹在最上层。
+    grid((base, splash, diagram_zoom, diff_drawer, interaction, oobe))
         .rows([GridLength::STAR])
         .columns([GridLength::STAR])
         .into()

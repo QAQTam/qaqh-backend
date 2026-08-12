@@ -195,6 +195,11 @@ pub struct RingingHub {
     channels: Mutex<HashMap<RingingChannel, HashMap<String, SeedChannelState>>>,
     /// 每频道实时推送通道（SSE 消费；可靠性由 journal/cursor 保证）。
     live: Mutex<HashMap<RingingChannel, broadcast::Sender<RingingEventEnvelope>>>,
+    /// 当前进程生命周期内发布且未 resolved 的活交互（seed → interaction_id）。
+    /// journal 重放的幽灵交互不在此表：daemon 重启后表为空，bootstrap 孤儿
+    /// 收尾据此区分「等待用户响应的活交互」（保护，不 seal）与「daemon 重启
+    /// 遗留的幽灵交互」（seal）。worker 死亡/重启路径用 force 无视该守卫。
+    live_interactions: Mutex<HashMap<String, String>>,
     /// 持久化 journal（None = 非持久模式；I/O 失败只记录日志，不阻塞事件路径）。
     journal_store: Mutex<Option<JournalStore>>,
     /// Ringing V1 timeline transcript 的唯一 writer。它与三频道 Ringing v1 完全隔离，
@@ -249,6 +254,7 @@ impl RingingHub {
             content_store: Mutex::new(ContentStore::new()),
             channels: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            live_interactions: Mutex::new(HashMap::new()),
             journal_store: Mutex::new(journal_store),
             timeline: Arc::new(Mutex::new(TimelineAppender::new())),
             timeline_live,
@@ -653,7 +659,7 @@ impl RingingHub {
     ///
     /// 调用方必须在 `ensure_seed_loaded` 完成之后调用（本函数内部 publish 会
     /// 再次调用 `ensure_seed_loaded`，重入 lazy_load 锁会死锁）。
-    pub fn seal_orphan_channel_state(&self, seed: &str) -> bool {
+    pub fn seal_orphan_channel_state(&self, seed: &str, force: bool) -> bool {
         let mut changed = false;
 
         // 1) conversation：active_turn 无终态（journal 重放后仍有值）→ 取消。
@@ -763,6 +769,9 @@ impl RingingHub {
         }
 
         // 4) control：pending_interaction 无 InteractionResolved → 关闭（Dismissed）。
+        //    守卫：当前进程发布、仍在等待用户响应的活交互不 seal——bootstrap
+        //    路径（force=false）会误杀 1ms 前刚发布的 ask（「ask 弹不出」根因）；
+        //    force=true（worker 死亡/重启的 registry 收尾路径）无视守卫强制收尾。
         let control = self.snapshot(RingingChannel::Control, seed);
         if let Some(id) = control
             .state
@@ -770,16 +779,33 @@ impl RingingHub {
             .and_then(|v| v.get("id"))
             .and_then(|v| v.as_str())
         {
-            log::info!("[ringing] sealing orphan interaction {id} for {seed} (no resolution)");
-            let _ = self.publish_with_causation(
-                seed,
-                DomainEvent::Control(ControlEvent::InteractionResolved {
-                    interaction_id: id.to_string(),
-                    resolution: AskResolution::Dismissed,
-                }),
-                None,
-            );
-            changed = true;
+            let is_live = self
+                .live_interactions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(seed)
+                .is_some_and(|cur| cur == id);
+            if is_live && !force {
+                log::info!(
+                    "[ringing] keeping live interaction {id} for {seed} (awaiting user response)"
+                );
+            } else {
+                log::info!("[ringing] sealing orphan interaction {id} for {seed} (no resolution)");
+                let _ = self.publish_with_causation(
+                    seed,
+                    DomainEvent::Control(ControlEvent::InteractionResolved {
+                        interaction_id: id.to_string(),
+                        resolution: AskResolution::Dismissed,
+                    }),
+                    None,
+                );
+                // 强制收尾后从活交互表清除，防止残留误导后续 bootstrap 守卫。
+                self.live_interactions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(seed);
+                changed = true;
+            }
         }
 
         changed
@@ -804,7 +830,7 @@ impl RingingHub {
             if self.seal_orphan_running_turns(seed) {
                 log::info!("[timeline] sealed orphan turn(s) for {seed} at shutdown");
             }
-            if self.seal_orphan_channel_state(seed) {
+            if self.seal_orphan_channel_state(seed, true) {
                 log::info!("[ringing] sealed orphan channel state for {seed} at shutdown");
             }
         }
@@ -1073,6 +1099,38 @@ impl RingingHub {
                     st.router.flush_replaceable(&key);
                     st.replaceable_since_checkpoint.remove(&key);
                     self.persist_remove_replaceable(channel, seed, &format!("{key:?}"));
+                }
+                // 活交互登记：当前进程发布的 InteractionRequested/PlanReviewRequested
+                // 进入内存表，resolved 时移除。daemon 重启后表为空 → journal 重放的
+                // 幽灵交互不在表 → bootstrap 孤儿收尾仍可收尾它们（原设计意图）；
+                // 活交互在表 → 收尾跳过（修复「ask 发布后 1ms 被 bootstrap 秒杀」）。
+                match &envelope.event {
+                    RingingEvent::Control(ControlEvent::InteractionRequested {
+                        interaction_id, ..
+                    })
+                    | RingingEvent::Control(ControlEvent::PlanReviewRequested {
+                        interaction_id, ..
+                    }) => {
+                        self.live_interactions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(seed.to_string(), interaction_id.clone());
+                    }
+                    RingingEvent::Control(ControlEvent::InteractionResolved {
+                        interaction_id, ..
+                    })
+                    | RingingEvent::Control(ControlEvent::PlanReviewResolved {
+                        interaction_id, ..
+                    }) => {
+                        let mut live = self
+                            .live_interactions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if live.get(seed).is_some_and(|cur| cur == interaction_id) {
+                            live.remove(seed);
+                        }
+                    }
+                    _ => {}
                 }
                 // Reliable replay/backpressure belongs to the journal. Keeping a
                 // second reliable queue in the router would fill permanently
@@ -1544,13 +1602,13 @@ mod tests {
             "running",
             "journal replay alone restores the interrupted operation"
         );
-        assert!(hub.seal_orphan_channel_state("s"));
+        assert!(hub.seal_orphan_channel_state("s", false));
         // daemon bootstrap 在 SessionManager 初始化后会调用 conversation_snapshot；
         // 此处只需验证由 journal 驱动、随后会被持久消息 overlay 保留的投影字段。
         let bootstrap_state = hub.snapshot(RingingChannel::Conversation, "s").state;
         assert_eq!(bootstrap_state["compact_status"], "failed");
         assert_eq!(bootstrap_state["compact_id"], "compact-persisted");
-        assert!(!hub.seal_orphan_channel_state("s"));
+        assert!(!hub.seal_orphan_channel_state("s", false));
 
         let replay = hub
             .replay_since(RingingChannel::Conversation, "s", 0)
@@ -2347,9 +2405,11 @@ mod tests {
             "i1"
         );
 
-        assert!(hub.seal_orphan_channel_state("s"));
+        // force=true：本测试的 InteractionRequested 由当前进程发布（活表内），
+        // 语义为「worker 死亡/重启后的强制收尾」，故 force=true。
+        assert!(hub.seal_orphan_channel_state("s", true));
         // 幂等：再次调用无变更
-        assert!(!hub.seal_orphan_channel_state("s"));
+        assert!(!hub.seal_orphan_channel_state("s", true));
 
         // 收尾后：三个投影全部收敛
         let conversation = hub.snapshot(RingingChannel::Conversation, "s");
@@ -2405,5 +2465,41 @@ mod tests {
                 ..
             }) if interaction_id == "i1"
         )));
+    }
+
+    #[test]
+    fn seal_orphan_channel_state_preserves_live_interaction_awaiting_user() {
+        // 回归测试：修复「ask 发布 1ms 后被 bootstrap 孤儿收尾秒杀」——
+        // 当前进程发布、等待用户响应的活交互必须被 bootstrap 路径保护；
+        // worker 死亡/重启路径（force=true）仍要强制收尾。
+        let hub = RingingHub::new("epoch-live-ask");
+        hub.publish(
+            "s",
+            DomainEvent::Control(ControlEvent::InteractionRequested {
+                interaction_id: "live-1".into(),
+                turn_id: "t1".into(),
+                mode: deepx_domain::AskMode::Single,
+                questions: vec![],
+            }),
+        );
+        assert_eq!(
+            hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"]["id"],
+            "live-1"
+        );
+        // bootstrap 路径（force=false）：活交互不被误判为孤儿，无其他孤儿 → false。
+        assert!(!hub.seal_orphan_channel_state("s", false));
+        assert_eq!(
+            hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"]["id"],
+            "live-1",
+            "live interaction must survive the bootstrap seal path"
+        );
+        // worker 死亡/重启收尾路径（force=true）：无视守卫，强制收尾。
+        assert!(hub.seal_orphan_channel_state("s", true));
+        assert!(hub
+            .snapshot(RingingChannel::Control, "s")
+            .state["pending_interaction"]
+            .is_null());
+        // 收尾后活表清空：后续 bootstrap 路径不再保护（幂等）。
+        assert!(!hub.seal_orphan_channel_state("s", false));
     }
 }

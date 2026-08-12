@@ -1814,7 +1814,9 @@ async fn handle_bootstrap(
     // daemon 重启后可能没有 worker 存活（用户直接打开历史会话）：journal
     // 重放的无终态 TurnStarted/ToolStarted/InteractionRequested 必须在
     // 快照构建前收尾，否则 bootstrap 携带陈旧 running turn 与幽灵交互面板。
-    hub.seal_orphan_channel_state(seed);
+    // force=false：当前进程发布、等待用户响应的活交互受活表守卫保护——
+    // 修复「ask 发布后 info 面板刷新触发 bootstrap，1ms 内被误判孤儿秒杀」。
+    hub.seal_orphan_channel_state(seed, false);
     let bootstrap = RingingSessionBootstrap::new(
         hub.epoch(),
         seed,
