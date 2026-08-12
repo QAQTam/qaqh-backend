@@ -18,17 +18,15 @@ use std::time::{Duration, Instant};
 
 use deepx_client::{
     ActionRequest, AskAnswer as DomainAskAnswer, Channel, ChannelStatus, Client, ClientHandlers,
-    ClientOptions, CommandOptions, ContentRef, ControlCommand, ControlEvent, ConversationCommand,
+    ClientOptions, CommandOptions, ControlCommand, ControlEvent, ConversationCommand,
     ConversationEvent as DomainConversationEvent, ConversationMode, EventBatch, PermissionCategory,
     PermissionRisk, QueryRequest, RingingCommand, RingingCommandState, RingingEvent, TimelinePage,
     TimelineSnapshot, TimelineStatus, ToolCommand, ToolEvent,
 };
-use markdown_winui::PendingOutput;
 use deepx_app_notifications::{InitOutcome, Notifier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::chat_adapter;
 use crate::shell_store::{
     ActivityState, DashboardSnapshot, SessionDetail, SessionItem, SettingsSnapshot, SkillsSnapshot,
     UsageInfo as UiUsageInfo, activity_event, dashboard_event, parse_activities, parse_config_load,
@@ -45,41 +43,31 @@ struct ComposerFeedback {
     send_ack: u64,
 }
 
-/// Per-session ChatView queues. The UI drains only the active seed, so a flat
-/// queue would otherwise scan and rebuild every background entry on each 8ms
-/// gate. `total_len` keeps the existing process-wide memory fuse intact.
+/// Per-session **timeline** live entry queues（Phase 2：timeline 单源）。
+///
+/// 与 [`ChatEventQueues`] 并存（双通道对照期）；timeline 事件带全局单调
+/// `timeline_seq`，delta 可丢（BlockCheckpoint 覆盖自愈 + 快照兜底），
+/// 结构性事件（打开/封存/终态）强制保留——丢封存会断 done 判定链。
 #[derive(Default)]
-struct ChatEventQueues {
-    by_seed: HashMap<String, VecDeque<RingingEvent>>,
+struct TimelineEventQueues {
+    by_seed: HashMap<String, VecDeque<deepx_client::TimelineEntry>>,
     total_len: usize,
 }
 
-fn is_chat_delta(event: &RingingEvent) -> bool {
-    matches!(
-        event,
-        RingingEvent::Conversation(DomainConversationEvent::RoundDelta { .. })
-    )
-}
-
-impl ChatEventQueues {
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.total_len
-    }
-
+impl TimelineEventQueues {
     #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.total_len == 0
     }
 
-    /// Enqueue one renderable event. Deltas are dropped at the global fuse;
-    /// structural events retain the previous force-in behavior by evicting an
-    /// older event, preferring the same seed to avoid cross-session churn.
-    fn push(&mut self, seed: String, event: RingingEvent, is_delta: bool) -> bool {
-        if self.total_len >= CHAT_QUEUE_CAP && (is_delta || !self.evict_one(seed.as_str())) {
+    /// Enqueue one timeline entry. Deltas are dropped at the global fuse;
+    /// structural entries force-in by evicting an older delta (same seed
+    /// first, mirroring `ChatEventQueues`).
+    fn push(&mut self, seed: String, entry: deepx_client::TimelineEntry, is_delta: bool) -> bool {
+        if self.total_len >= TIMELINE_QUEUE_CAP && (is_delta || !self.evict_one(seed.as_str())) {
             return false;
         }
-        self.by_seed.entry(seed).or_default().push_back(event);
+        self.by_seed.entry(seed).or_default().push_back(entry);
         self.total_len += 1;
         true
     }
@@ -88,9 +76,9 @@ impl ChatEventQueues {
         let mut removed = self
             .by_seed
             .get_mut(preferred_seed)
-            .is_some_and(remove_oldest_delta);
+            .is_some_and(remove_oldest_timeline_delta);
         if !removed {
-            removed = self.by_seed.values_mut().any(remove_oldest_delta);
+            removed = self.by_seed.values_mut().any(remove_oldest_timeline_delta);
         }
         if !removed {
             removed = self
@@ -112,38 +100,37 @@ impl ChatEventQueues {
     }
 
     /// Normal frame-pump path: O(limit), independent of background backlog.
-    fn drain_seed(&mut self, seed: &str, limit: usize) -> Vec<RingingEvent> {
+    fn drain_seed(&mut self, seed: &str, limit: usize) -> Vec<deepx_client::TimelineEntry> {
         if limit == 0 {
             return Vec::new();
         }
         let Some(queue) = self.by_seed.get_mut(seed) else {
             return Vec::new();
         };
-        let count = limit.min(queue.len());
-        let events: Vec<_> = queue.drain(..count).collect();
+        let take = limit.min(queue.len());
+        let events: Vec<_> = queue.drain(..take).collect();
         self.total_len -= events.len();
         if queue.is_empty() {
             self.by_seed.remove(seed);
         }
         events
     }
-
-    /// Background recovery path: return active events and discard every other
-    /// seed in one ownership swap before the authoritative snapshot refresh.
-    fn take_active_and_clear(&mut self, seed: &str) -> Vec<RingingEvent> {
-        let active = self.by_seed.remove(seed).unwrap_or_default();
-        self.by_seed.clear();
-        self.total_len = 0;
-        active.into_iter().collect()
-    }
 }
 
-fn remove_oldest_delta(queue: &mut VecDeque<RingingEvent>) -> bool {
-    queue
-        .iter()
-        .position(is_chat_delta)
-        .and_then(|index| queue.remove(index))
-        .is_some()
+/// 移除队列中最早的 delta 条目（保险丝挤出；保留结构性条目）。
+fn remove_oldest_timeline_delta(queue: &mut VecDeque<deepx_client::TimelineEntry>) -> bool {
+    let index = queue.iter().position(is_timeline_delta);
+    index.map(|i| queue.remove(i)).is_some()
+}
+
+/// timeline 高频可丢事件（checkpoint 覆盖自愈 + 快照兜底）。
+fn is_timeline_delta(entry: &deepx_client::TimelineEntry) -> bool {
+    matches!(
+        entry.event,
+        deepx_client::TimelineEvent::TextDelta { .. }
+            | deepx_client::TimelineEvent::BlockCheckpoint { .. }
+            | deepx_client::TimelineEvent::ToolProgress { .. }
+    )
 }
 
 /// XAML 标题栏状态（headerDirect：Rust 从壳导航/会话列表/conversation
@@ -885,15 +872,6 @@ pub struct ComposerTextFile {
     pub path: String,
 }
 
-/// Result of resolving one `RoundCompleted.output_ref` through the Ringing
-/// content service. The UI applies it back to the Transcript model.
-#[derive(Debug, Clone)]
-pub struct ChatOutputResolution {
-    pub turn_id: String,
-    pub round_num: u32,
-    pub result: Result<String, String>,
-}
-
 /// `Send + Sync` half of the bridge: client, lease bookkeeping, outbox sender.
 /// Lives on the tokio side.
 pub struct BridgeCore {
@@ -994,7 +972,11 @@ pub struct BridgeCore {
     /// 超限时优先丢弃 RoundDelta（由 round 完成的 final 覆盖兜底，且
     /// 后台恢复走快照）；结构性事件强制入队（挤出最旧）。恢复可见时
     /// `chat_view` 的 background resume 会整体丢弃积压再拉快照。
-    chat_events: Mutex<ChatEventQueues>,
+    /// timeline live 事件队列（Phase 2：BlockTranscript 单源；delta 可丢
+    /// （checkpoint 自愈 + 快照兜底），结构性事件强制入队。
+    timeline_events: Mutex<TimelineEventQueues>,
+    /// timeline 事件数据版本：入队后递增，UI 侧 timer 比对后 drain。
+    timeline_rev: AtomicU64,
     /// 最近一次 typed timeline 快照（`TimelineSnapshot` + 所属 seed：
     /// 权威 turns 历史，resume 旧对话的数据源；chat_view 泵消费 restore）。
     /// seed 标记防竞态：快速切会话时旧快照晚到不会被灌进新会话。
@@ -1008,12 +990,6 @@ pub struct BridgeCore {
     chat_prepend: Mutex<std::collections::VecDeque<(String, TimelineSnapshot)>>,
     /// 分页在途标记（seed 集合）：防止滚动抖动时重复发起同一翻页请求。
     timeline_fetching: Mutex<std::collections::HashSet<String>>,
-    /// External answer bodies resolved asynchronously for the native ChatView.
-    chat_outputs: Mutex<std::collections::VecDeque<(String, ChatOutputResolution)>>,
-    /// `(seed, turn_id, round_num, content_id)` requests currently in flight.
-    content_fetching: Mutex<std::collections::HashSet<(String, String, u32, String)>>,
-    /// ChatView 数据版本：事件入队后递增，UI 侧 timer 比对后 drain。
-    chat_rev: AtomicU64,
     /// 快照重拉节流：seed 不匹配时主动 `activate_timeline` 重拉（daemon
     /// 幂等重推快照）；16ms 泵每 tick 都会看到不匹配快照，须限频。
     timeline_refresh_at: Mutex<Instant>,
@@ -1045,12 +1021,11 @@ const REFRESH_THROTTLE: Duration = Duration::from_secs(1);
 /// 连续失败后 rebuild 冷却指数退避封顶（60s → 120s → 240s → 480s → 960s）。
 const REBUILD_BACKOFF_CAP: u32 = 4;
 
-/// Chat 事件队列上限（保险丝）：窗口不可见期间 vsync 暂停、事件不消费，
-/// 无上限会无限积压（后台 1 小时 × 1000 token/s ≈ 百万级事件 ≈ 数百 MB）。
-/// 超限时丢弃 RoundDelta（round 完成的 final 覆盖兜底；后台恢复走快照，
-/// 增量只是过渡）；结构性事件强制入队（挤出最旧）。20K ≈ 前台 300s 缓冲，
-/// 正常前台消费远达不到。
-const CHAT_QUEUE_CAP: usize = 20_000;
+/// Timeline 事件队列上限（保险丝）：窗口不可见期间 vsync 暂停、事件不消费，
+/// 无上限会无限积压。delta 可丢（BlockCheckpoint 覆盖自愈 + 快照兜底），
+/// 结构性事件强制入队。4K ≈ 前台 60s 缓冲（timeline 每 token 一 delta，
+/// checkpoint 自愈 + 快照兜底使其对丢弃更鲁棒）。
+const TIMELINE_QUEUE_CAP: usize = 4_000;
 
 /// rebuild 冷却：连续失败后指数拉长（60s→960s 封顶），防止 rebuild
 /// 风暴把 daemon 连接数打爆（32 连接信号量 → 静默 drop）。
@@ -1391,122 +1366,25 @@ impl BridgeCore {
         (state, rev)
     }
 
-    // ── 原生 ChatView（conversation 事件直连）──────────────────────
+    // ── 原生 ChatView（timeline 单源，Phase 2）──────────────────────
 
-    /// (事件队列快照, rev)：UI 线程 timer 比对 rev 后 drain 喂 Transcript。
-    /// Events stay typed through the queue and are mapped once to view models.
+    /// Drain at most `limit` timeline live entries for the active session.
+    /// Events from other sessions and active overflow stay queued in FIFO
+    /// order for a later frame. `limit == 0` is an O(1) no-op.
     ///
-    /// **按活动会话隔离**：只返回 `seed == active_seed` 的事件；此无界
-    /// 入口同时丢弃非活动会话事件，供后台恢复/显式清积压使用。普通帧泵
-    /// 使用 `chat_drain_limit`，会保留其它 seed，避免活跃会话积压卡住它们。
-    pub fn chat_drain(&self) -> (Vec<RingingEvent>, u64) {
-        let rev = self.chat_rev.load(Ordering::Relaxed);
-        let active = self.active_seed();
-        let events = self
-            .chat_events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take_active_and_clear(&active);
-        (events, rev)
-    }
-
-    /// Drain at most `limit` events for the active session. Events from other
-    /// sessions and active overflow stay queued in FIFO order for a later frame
-    /// or after the active session switches. `limit == 0` is an O(1) no-op.
-    pub fn chat_drain_limit(&self, limit: usize) -> (Vec<RingingEvent>, u64) {
-        let rev = self.chat_rev.load(Ordering::Relaxed);
-        // 高刷屏上 8ms drain 闸可能隔帧返回 limit=0。此时绝不能扫描并
-        // 重建整条队列；直接返回也符合“不消费活动事件”的契约。
+    /// 返回的 entries 保持 `timeline_seq` 单调序（writer 单写保证）。
+    pub fn timeline_drain_limit(&self, limit: usize) -> (Vec<deepx_client::TimelineEntry>, u64) {
+        let rev = self.timeline_rev.load(Ordering::Relaxed);
         if limit == 0 {
             return (Vec::new(), rev);
         }
         let active = self.active_seed();
-        let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
-        let events = queue.drain_seed(&active, limit);
-        (events, rev)
-    }
-
-    /// Drain resolved external answer bodies for the active session.
-    pub fn chat_output_drain(&self) -> Vec<ChatOutputResolution> {
-        let active = self.active_seed();
-        self.chat_outputs
+        let mut queue = self
+            .timeline_events
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .filter(|(seed, _)| *seed == active)
-            .map(|(_, resolution)| resolution)
-            .collect()
-    }
-
-    /// Resolve a model-owned `output_ref` without routing transport details
-    /// through the XAML renderer. Duplicate/replayed requests are coalesced.
-    pub fn spawn_resolve_chat_output(&self, seed: &str, pending: PendingOutput) {
-        let reference = match serde_json::from_value::<ContentRef>(pending.reference) {
-            Ok(reference) => reference,
-            Err(error) => {
-                self.chat_outputs
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push_back((
-                        seed.to_string(),
-                        ChatOutputResolution {
-                            turn_id: pending.turn_id,
-                            round_num: pending.round_num,
-                            result: Err(format!("invalid output_ref: {error}")),
-                        },
-                    ));
-                self.chat_rev.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        };
-        let key = (
-            seed.to_string(),
-            pending.turn_id.clone(),
-            pending.round_num,
-            reference.content_id.clone(),
-        );
-        {
-            let mut fetching = self
-                .content_fetching
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if !fetching.insert(key.clone()) {
-                return;
-            }
-        }
-        let core = self.self_arc();
-        let seed = seed.to_string();
-        let _ = deepx_client::runtime_handle().spawn(async move {
-            let client = core
-                .client
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let result = match client {
-                Some(client) => match client.download_content(&seed, &reference).await {
-                    Ok(bytes) => String::from_utf8(bytes)
-                        .map_err(|error| format!("external answer is not UTF-8: {error}")),
-                    Err(error) => Err(error.to_string()),
-                },
-                None => Err("Ringing client is not connected".to_string()),
-            };
-            core.content_fetching
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&key);
-            core.chat_outputs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push_back((
-                    seed,
-                    ChatOutputResolution {
-                        turn_id: pending.turn_id,
-                        round_num: pending.round_num,
-                        result,
-                    },
-                ));
-            core.chat_rev.fetch_add(1, Ordering::Relaxed);
-        });
+            .unwrap_or_else(|e| e.into_inner());
+        let entries = queue.drain_seed(&active, limit);
+        (entries, rev)
     }
 
     /// 查看最近一次 timeline 快照（`(seed, TimelineSnapshot)`；resume
@@ -1583,8 +1461,8 @@ impl BridgeCore {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(seed.clone(), has_more);
-                    let turns = chat_adapter::restored_turns(&page.snapshot);
-                    if turns.is_empty() {
+                    let turns = page.snapshot.turns.len();
+                    if turns == 0 {
                         // 防御：空页（会话已删/竞态）——视为到底，不再翻页。
                         core.timeline_has_more
                             .lock()
@@ -1595,10 +1473,8 @@ impl BridgeCore {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .push_back((seed.clone(), page.snapshot));
-                        core.chat_rev.fetch_add(1, Ordering::Relaxed);
                         log_diag(&format!(
-                            "fetch_earlier {seed}: page before {before_turn} ({} turns, has_more={has_more})",
-                            turns.len()
+                            "fetch_earlier {seed}: page before {before_turn} ({turns} turns, has_more={has_more})"
                         ));
                     }
                 }
@@ -1644,18 +1520,15 @@ impl BridgeCore {
             .insert(seed.clone(), has_more);
         *self.chat_timeline.lock().unwrap_or_else(|e| e.into_inner()) =
             Some((seed.clone(), snapshot.clone()));
-        self.chat_rev.fetch_add(1, Ordering::Relaxed);
         // 标题栏直连：turns 计数在此缓存（不随 chat_view consume 清空）
-        // ——undo_disabled 判定源。
-        let turns = chat_adapter::restored_turns(&snapshot).len();
+        // ——undo_disabled 判定源。timeline 快照即权威 turns（block 模型）。
+        let turns = snapshot.turns.len();
         self.header_turns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(seed.clone(), turns);
         // 撤销直发：快照恢复的历史会话缓存最近回合 id。
-        let last_turn_id = chat_adapter::restored_turns(&snapshot)
-            .last()
-            .map(|t| t.turn_id.clone());
+        let last_turn_id = snapshot.turns.last().map(|t| t.turn_id.clone());
         let mut last_turn_ids = self.last_turn_ids.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tid) = last_turn_id {
             last_turn_ids.insert(seed.clone(), tid);
@@ -1884,8 +1757,14 @@ impl BridgeCore {
             .as_ref()
             .filter(|(s, _)| *s == seed)
             .and_then(|(_, snap)| {
-                let turns = chat_adapter::restored_turns(snap);
-                turns.last().and_then(|t| t.rounds.last()).and_then(|r| r.answer.clone())
+                // 通知预览：最后一个 turn 的最后一个 text 块（block 模型）。
+                snap.turns
+                    .iter()
+                    .rev()
+                    .flat_map(|t| t.rounds.iter().rev().flat_map(|r| r.blocks.iter().rev()))
+                    .find(|b| b.kind == deepx_client::TimelineBlockKind::Text)
+                    .filter(|b| !b.text.trim().is_empty())
+                    .map(|b| b.text.clone())
             });
         let Some(text) = text else {
             log_diag(&format!("[notify] turn completed {seed}: no preview text"));
@@ -3068,9 +2947,19 @@ impl BridgeCore {
                     move |reset: deepx_client::ResetRequired| core.handle_reset(reset)
                 })),
                 on_timeline_entry: Arc::new({
-                    let _core = self.self_arc();
-                    move |_seed: String, _entry: deepx_client::TimelineEntry| {
-                        // WebView 移除：timeline.entry 不再转发 Web。
+                    let core = self.self_arc();
+                    move |seed: String, entry: deepx_client::TimelineEntry| {
+                        // Phase 2：timeline live 事件入队 → BlockTranscript
+                        // 单源渲染（delta 可丢，结构性强制入队）。
+                        let is_delta = is_timeline_delta(&entry);
+                        let pushed = core
+                            .timeline_events
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(seed, entry, is_delta);
+                        if pushed {
+                            core.timeline_rev.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }),
                 on_timeline_status: Arc::new({
@@ -3265,25 +3154,9 @@ impl BridgeCore {
                     _ => {}
                 }
             }
-            // 原生 ChatView 直连：Tool 频道渲染事件（tool_call_prepared /
-            // tool_started / tool_finished）与 conversation 事件同一队列，
-            // 供 Transcript 流式渲染工具卡。与 conversation 频道事件交错
-            // 到达无顺序保证——round_renderer 按 turn/round 定位 + 自动建
-            // turn 兜底，不依赖频道间顺序。
-            let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
-            let mut pushed = false;
-            for env in &batch.envelopes {
-                if chat_adapter::is_renderable_event(&env.event) {
-                    // 队列上限（保险丝）：delta 可丢（final 覆盖兜底），
-                    // 结构性事件强制入队（挤出最旧）。
-                    let is_delta = is_chat_delta(&env.event);
-                    // seed 分队列：活动会话 drain 不扫描后台积压。
-                    pushed |= queue.push(batch.seed.clone(), env.event.clone(), is_delta);
-                }
-            }
-            if pushed {
-                self.chat_rev.fetch_add(1, Ordering::Relaxed);
-            }
+            // Phase 2：Tool 频道 transcript 事件退役——工具块由 timeline
+            // `ToolUpdated`/`ToolProgress` 单源驱动（BlockTranscript），
+            // 此处仅保留工作状态（composer phase）等遥测消费。
         } else if batch.channel == Channel::Conversation {
             // Rust 直连 composer（读路径直连）：conversation 事件活动追踪
             // ——isStreaming（卡死检测）+ usage_updated 缓存（model/context）。
@@ -3442,22 +3315,9 @@ impl BridgeCore {
                     self.spawn_refresh_info(batch.seed.clone());
                 }
             }
-            // 原生 ChatView 直连：渲染相关事件（turn/round/delta/checkpoint）
-            // 入队，UI 线程 timer drain 喂 Transcript（读路径直连）。
-            // seed 标记：drain 侧按 active_seed 过滤（会话隔离）。
-            let mut queue = self.chat_events.lock().unwrap_or_else(|e| e.into_inner());
-            let mut pushed = false;
-            for env in &batch.envelopes {
-                if chat_adapter::is_renderable_event(&env.event) {
-                    // 队列上限（保险丝）：delta 可丢（final 覆盖兜底），
-                    // 结构性事件强制入队（挤出最旧）。
-                    let is_delta = is_chat_delta(&env.event);
-                    pushed |= queue.push(batch.seed.clone(), env.event.clone(), is_delta);
-                }
-            }
-            if pushed {
-                self.chat_rev.fetch_add(1, Ordering::Relaxed);
-            }
+            // Phase 2：conversation 频道 transcript 事件退役——turn/round/
+            // delta 由 timeline 单源驱动（BlockTranscript）；此处保留的
+            // activity/usage/compact 消费属遥测与控制平面（composer、header）。
         }
         // WebView 移除：ringing.batch 不再转发 Web（原生直连消费上方各分支）。
     }
@@ -3754,14 +3614,12 @@ impl Bridge {
                     composer_feedback: Mutex::new(HashMap::new()),
                     // Canonical conversation events are queued for the native
                     // ChatView; no renderer projection participates here.
-                    chat_events: Mutex::new(ChatEventQueues::default()),
+                    timeline_events: Mutex::new(TimelineEventQueues::default()),
+                    timeline_rev: AtomicU64::new(0),
                     chat_timeline: Mutex::new(None),
                     timeline_has_more: Mutex::new(std::collections::HashMap::new()),
                     chat_prepend: Mutex::new(std::collections::VecDeque::new()),
                     timeline_fetching: Mutex::new(std::collections::HashSet::new()),
-                    chat_outputs: Mutex::new(std::collections::VecDeque::new()),
-                    content_fetching: Mutex::new(std::collections::HashSet::new()),
-                    chat_rev: AtomicU64::new(0),
                     // 初始化为远古时刻：首次 refresh 立即放行。
                     timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
                     dashboards: Mutex::new(HashMap::new()),
@@ -4117,14 +3975,12 @@ mod tests {
             composer_activity: Mutex::new(HashMap::new()),
             composer_mode: Mutex::new("plan".to_string()),
             composer_feedback: Mutex::new(HashMap::new()),
-            chat_events: Mutex::new(ChatEventQueues::default()),
+            timeline_events: Mutex::new(TimelineEventQueues::default()),
+            timeline_rev: AtomicU64::new(0),
             chat_timeline: Mutex::new(None),
             timeline_has_more: Mutex::new(std::collections::HashMap::new()),
             chat_prepend: Mutex::new(std::collections::VecDeque::new()),
             timeline_fetching: Mutex::new(std::collections::HashSet::new()),
-            chat_outputs: Mutex::new(std::collections::VecDeque::new()),
-            content_fetching: Mutex::new(std::collections::HashSet::new()),
-            chat_rev: AtomicU64::new(0),
             timeline_refresh_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
             dashboards: Mutex::new(HashMap::new()),
             notifier: Mutex::new(None),
@@ -4141,142 +3997,108 @@ mod tests {
         }
     }
 
-    // ── ChatView 事件队列（seed 隔离）────────────────────────────────
+    // ── Timeline 事件队列（seed 隔离；Phase 2 单源）─────────────────
 
-    /// chat_drain 只返回 active_seed 的事件：后台会话增量不污染活动
-    /// 会话的 Transcript（切换瞬间残留事件同样被丢弃）。
+    fn timeline_entry(seq: u64, turn_id: &str) -> deepx_client::TimelineEntry {
+        deepx_client::TimelineEntry {
+            timeline_seq: seq,
+            turn_id: turn_id.to_string(),
+            round_num: Some(0),
+            event: deepx_client::TimelineEvent::TextDelta {
+                block_id: "text:b1".into(),
+                fragment_seq: seq,
+                delta: "x".into(),
+            },
+        }
+    }
+
+    /// timeline_drain_limit 只返回 active_seed 的事件：后台会话增量不污染
+    /// 活动会话的 BlockTranscript（切换瞬间残留事件同样被丢弃）。
     #[test]
-    fn chat_drain_filters_by_active_seed() {
+    fn timeline_drain_filters_by_active_seed() {
         let core = test_core();
         core.set_active_seed("sA");
         {
-            let mut q = core.chat_events.lock().unwrap();
-            let started = |turn_id: &str| {
-                RingingEvent::Conversation(DomainConversationEvent::TurnStarted {
-                    turn_id: turn_id.to_string(),
-                    user_text: String::new(),
-                })
-            };
-            assert!(q.push("sA".into(), started("t1"), false));
-            assert!(q.push("sB".into(), started("t2"), false));
-            assert!(q.push(
-                "sA".into(),
-                RingingEvent::Conversation(DomainConversationEvent::TurnCompleted {
-                    turn_id: "t1".into(),
-                    stop_reason: None,
-                    usage: None,
-                }),
-                false,
-            ));
+            let mut q = core.timeline_events.lock().unwrap();
+            assert!(q.push("sA".into(), timeline_entry(1, "t1"), true));
+            assert!(q.push("sB".into(), timeline_entry(2, "t2"), true));
+            assert!(q.push("sA".into(), timeline_entry(3, "t3"), true));
         }
-        let (events, _) = core.chat_drain();
+        let (events, _) = core.timeline_drain_limit(usize::MAX);
         assert_eq!(events.len(), 2, "只返回活动会话 sA 的事件");
-        assert!(events.iter().all(|event| !matches!(
-            event,
-            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { turn_id, .. })
-                if turn_id == "t2"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { .. })
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RingingEvent::Conversation(DomainConversationEvent::TurnCompleted { .. })
-        )));
+        assert!(events.iter().all(|e| e.turn_id != "t2"));
 
-        // 切换后：sA 的残留事件（若有）不再泄漏到 sB。
+        // 切换后：sA 的残留事件不再泄漏到 sB（sB 自有 b1 正常返回）。
         core.set_active_seed("sB");
-        assert!(core.chat_events.lock().unwrap().push(
-            "sA".into(),
-            RingingEvent::Conversation(DomainConversationEvent::RoundDelta {
-                turn_id: "t1".into(),
-                round_num: 0,
-                kind: deepx_client::RoundDeltaKind::Answering,
-                delta: String::new(),
-            }),
-            true,
-        ));
-        let (events, _) = core.chat_drain();
-        assert!(events.is_empty(), "无界恢复 drain 不返回 sA 残留事件");
-        assert!(
-            core.chat_events.lock().unwrap().is_empty(),
-            "无界恢复 drain 同时清除非活动积压"
+        assert!(core
+            .timeline_events
+            .lock()
+            .unwrap()
+            .push("sA".into(), timeline_entry(4, "t4"), true));
+        let (events, _) = core.timeline_drain_limit(usize::MAX);
+        assert_eq!(events.len(), 1, "只返回 sB 自身事件");
+        assert_eq!(events[0].turn_id, "t2", "sA 残留事件不泄漏");
+        // 有界 drain 保留其它 seed（防后台积压被误清）；切回 sA 可消费。
+        assert_eq!(
+            core.timeline_events.lock().unwrap().drain_seed("sA", usize::MAX)[0].turn_id,
+            "t4",
+            "sA 残留保留待切回"
         );
     }
 
     #[test]
-    fn chat_drain_limit_preserves_other_seeds_and_active_remainder() {
+    fn timeline_drain_limit_preserves_other_seeds_and_active_remainder() {
         let core = test_core();
         core.set_active_seed("sA");
-        let started = |turn_id: &str| {
-            RingingEvent::Conversation(DomainConversationEvent::TurnStarted {
-                turn_id: turn_id.to_string(),
-                user_text: String::new(),
-            })
-        };
         {
-            let mut q = core.chat_events.lock().unwrap();
-            assert!(q.push("sA".into(), started("a1"), false));
-            assert!(q.push("sB".into(), started("b1"), false));
-            assert!(q.push("sA".into(), started("a2"), false));
+            let mut q = core.timeline_events.lock().unwrap();
+            assert!(q.push("sA".into(), timeline_entry(1, "a1"), true));
+            assert!(q.push("sB".into(), timeline_entry(2, "b1"), true));
+            assert!(q.push("sA".into(), timeline_entry(3, "a2"), true));
         }
 
-        let (none, _) = core.chat_drain_limit(0);
+        let (none, _) = core.timeline_drain_limit(0);
         assert!(none.is_empty());
         assert_eq!(
-            core.chat_events.lock().unwrap().len(),
-            3,
+            core.timeline_events.lock().unwrap().is_empty(),
+            false,
             "limit=0 must preserve the queue"
         );
 
-        let (first, _) = core.chat_drain_limit(1);
+        let (first, _) = core.timeline_drain_limit(1);
         assert_eq!(first.len(), 1);
-        assert!(matches!(
-            &first[0],
-            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { turn_id, .. })
-                if turn_id == "a1"
-        ));
+        assert_eq!(first[0].turn_id, "a1");
 
         core.set_active_seed("sB");
-        let (background, _) = core.chat_drain_limit(1);
-        assert!(matches!(
-            &background[0],
-            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { turn_id, .. })
-                if turn_id == "b1"
-        ));
+        let (background, _) = core.timeline_drain_limit(1);
+        assert_eq!(background[0].turn_id, "b1");
 
         core.set_active_seed("sA");
-        let (remainder, _) = core.chat_drain_limit(1);
-        assert!(matches!(
-            &remainder[0],
-            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { turn_id, .. })
-                if turn_id == "a2"
-        ));
+        let (remainder, _) = core.timeline_drain_limit(1);
+        assert_eq!(remainder[0].turn_id, "a2");
     }
 
     #[test]
-    fn queue_eviction_prefers_replaceable_delta_over_structure() {
-        let started = RingingEvent::Conversation(DomainConversationEvent::TurnStarted {
+    fn timeline_queue_eviction_prefers_delta_over_structure() {
+        let structural = deepx_client::TimelineEntry {
+            timeline_seq: 1,
             turn_id: "t1".into(),
-            user_text: String::new(),
-        });
-        let delta = RingingEvent::Conversation(DomainConversationEvent::RoundDelta {
-            turn_id: "t1".into(),
-            round_num: 0,
-            kind: deepx_client::RoundDeltaKind::Answering,
-            delta: "x".into(),
-        });
-        let mut queues = ChatEventQueues::default();
-        assert!(queues.push("sA".into(), started, false));
+            round_num: None,
+            event: deepx_client::TimelineEvent::TurnOpened {
+                user_text: "hi".into(),
+            },
+        };
+        let delta = timeline_entry(2, "t1");
+        let mut queues = TimelineEventQueues::default();
+        assert!(queues.push("sA".into(), structural, false));
         assert!(queues.push("sA".into(), delta, true));
         assert!(queues.evict_one("sA"));
 
         let remaining = queues.drain_seed("sA", usize::MAX);
         assert_eq!(remaining.len(), 1);
         assert!(matches!(
-            remaining[0],
-            RingingEvent::Conversation(DomainConversationEvent::TurnStarted { .. })
+            remaining[0].event,
+            deepx_client::TimelineEvent::TurnOpened { .. }
         ));
     }
 
@@ -4881,9 +4703,7 @@ mod tests {
         assert_eq!(cached_seed, "s1");
         // 解包 snapshot 子对象：turns 可直接解析（完整 body 会恒空）。
         assert_eq!(cached.turns.len(), 2, "must cache typed snapshot inner");
-        let turns = chat_adapter::restored_turns(&cached);
-        assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].turn_id, "t1");
+        assert_eq!(cached.turns[0].turn_id, "t1");
         // 连带投影：header_turns / last_turn_ids 以权威 seed 写入。
         assert_eq!(core.header_turns.lock().unwrap().get("s1"), Some(&2));
         assert_eq!(

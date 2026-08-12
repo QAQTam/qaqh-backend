@@ -45,15 +45,28 @@ DeepX 的 transcript（会话展示）存在**两条事件通道**：
 | **`BlockCheckpoint` 协议 + appender 应用 + producer 双发**（convergence §10.2，本次落地） | `deepx-domain`/`deepx-runtime`/`deepx-msglp` |
 | 工具终态双发修复（ToolFinished 恰好一次，round 裁决后统一发射） | `deepx-msglp/src/ringing_v1/engine_turn.rs` |
 
-### ❌ 未完成（迁移主体）
+### ❌ 未完成（迁移主体）→ ✅ Phase 2 已落地（2026-08-12 重写）
 
-| 项 | 说明 |
+| 项 | 状态（重写后） | 实现 |
+|---|---|---|
+| 前端 `Transcript` 重写为 block 级 gap-aware reducer | ✅ 已完成 | `markdown-winui/block_transcript.rs`：BlockTranscript 消费 timeline live entry（BlockOpened/TextDelta/BlockCheckpoint/ToolUpdated/ToolProgress/BlockSealed/RoundSealed/TurnSealed）+ 快照 restore（rounds/blocks 展平保序）；AnswerView 自持表格跟踪器供双模型复用 |
+| `chat_view.rs` 布局改按 `block_order` 渲染 | ✅ 已完成 | 三段式删除；`turn_view` 按 blocks **到达序**渲染（跨 round 交错保序，修复 D1 压平缺陷）；块级 memo（block_id + mutation_rev） |
+| `chat_adapter` 收窄为 control/telemetry 映射 | ✅ 已完成 | 656→62 行：仅 `timeline_entry`/`timeline_snapshot` 转换；`render_event`/`restored_turns`/`is_renderable_event` 退役 |
+| conversation/tool 通道退役 transcript 用途 | 🟡 前端已退役，producer 保留 | 前端：`chat_events` 队列/drain/output 系列删除，bridge 仅消费 activity/usage/compact（遥测平面）；producer：msglp 仍在发 transcript 类 `emit_domain`（Phase 3 剩余） |
+| `ProviderToolStatus`（web_search 卡）迁移决策 | ✅ 决策完成 | 由 timeline 工具块（`ToolUpdated`/`ToolProgress`）承载；`provider_tool_status` 事件不再参与 transcript 渲染（保留为遥测） |
+
+### ✅ 额外核实：M3 legacy 完全拆除（文档修订时核查，2026-08-12）
+
+原 §5 中标记"⏳ 待实施"的 M3 B1-B4 经代码核查**实际已全部完成**（此前状态标注滞后）：
+
+| 项 | 代码证据 |
 |---|---|
-| 前端 `Transcript` 重写为 block 级 gap-aware reducer | live 渲染仍消费 DomainEvent（`chat_adapter::render_event`） |
-| `chat_view.rs` 布局改按 `block_order` 渲染 | 当前三段式 `[thinking][tool][answer]` |
-| `chat_adapter` 收窄为 control/telemetry 映射 | 删除 conversation/tool 的 transcript 分支 |
-| conversation/tool 通道退役 transcript 用途 | producer 停止 transcript 类 `emit_domain` |
-| `ProviderToolStatus`（web_search 卡）迁移决策 | 映射为 tool block 或保留遥测消费 |
+| B1 引擎三发→双发（删除 `emit_delta(Agent2Ui::…)`） | `Emitter` trait 仅剩 `emit_domain`/`emit_timeline`/`set_seed`（`msglp/ringing_v1/types.rs:277`，注释"legacy `emit`/`emit_delta` 已随 M3 拆除"） |
+| B2 `WriterEvent::Legacy`/`write_legacy_event_frame` 删除 | `WriterEvent` 仅剩 `Ringing`/`Timeline` 两 variant（同文件 :294）；`wire.rs` 对无 `wire` 标签帧报 `InvalidData`，含 `command_without_wire_tag_is_rejected` 测试 |
+| B3 daemon legacy WS 端点 + 前端回退分支 | `daemon/server.rs:264` "legacy WS removed in M3"（`/control/v1/stop` 生命周期接口保留）；winui 无 legacy 协议回退分支 |
+| B4 集成测试改 Ringing 收集 | `ask_user_lifecycle.rs`/`permission_lifecycle.rs` 全走 `wire: "Ringing_domain_v1"` 信封；permission 9 用例已随 c18e07b 修复转绿 |
+
+→ M3 收官收益已兑现，迁移主体的剩余部分 = Phase 2 前端切换 + Phase 3 producer 退役（见 §4）。
 
 ## 4. 迁移路线图
 
@@ -62,31 +75,32 @@ DeepX 的 transcript（会话展示）存在**两条事件通道**：
 - `BlockCheckpoint` 协议 + writer 应用 + producer 双发（本次落地）。
 - 纯后端增量、零 UI 行为变化；timeline 侧获得丢 delta 自愈能力，为前端切换铺路。
 
-### Phase 2 — 前端 live 切换（rc3.1 / rc5 主力，按 `rc4-contract.md` §4 顺序执行）
+### Phase 2 — 前端 live 切换（✅ 已完成，2026-08-12 重写落地）
 
-| 步 | 内容 | 工作量 | 风险 |
-|---|---|---|---|
-| 2.1 | domain 收尾决策：usage 留遥测平面；`ProviderToolStatus` 映射决策 | 小 | 低 |
-| 2.2 | client 侧确认 `TimelineEntry` 覆盖新 variant（checkpoint 已兼容） | 小 | 低 |
-| 2.3 | `markdown-winui` `Transcript` 重写：round 三通道模型 → **block 级有序列表**（`BlockOpened` 流式渲染、`BlockCheckpoint` 覆盖自愈、`BlockSealed` markdown final、`TurnSealed` 完成判定） | **大** | 高 |
-| 2.4 | `chat_view.rs` 按 `block_order` 渲染，删除三段式布局 | 中 | 中 |
-| 2.5 | `chat_adapter` 收窄；header undo/compact 的 turn 边界改由 `TurnOpened/TurnSealed` 驱动（或保留 conversation turn 事件给 header——header 不参与 transcript 排序，允许） | 中 | 中 |
+| 步 | 内容 | 状态 |
+|---|---|---|
+| 2.1 | domain 收尾决策：usage 留遥测平面；`ProviderToolStatus` 映射决策 | ✅ 决策完成（见 §3） |
+| 2.2 | client 侧确认 `TimelineEntry` 覆盖新 variant（checkpoint 已兼容） | ✅ 已兼容（serde roundtrip 验证） |
+| 2.3 | `markdown-winui` `Transcript` 重写：round 三通道模型 → **block 级有序列表**（`BlockOpened` 流式渲染、`BlockCheckpoint` 覆盖自愈、`BlockSealed` markdown final、`TurnSealed` 完成判定） | ✅ `block_transcript.rs`（含 8 个行为测试：交错保序/checkpoint 自愈/seal 后忽略迟到 delta/失败 turn/快照展平/窗口化） |
+| 2.4 | `chat_view.rs` 按 `block_order` 渲染，删除三段式布局 | ✅ 块序渲染 + 块级 memo |
+| 2.5 | `chat_adapter` 收窄；header undo/compact 的 turn 边界改由 timeline 快照驱动 | ✅ 快照 turns 计数/撤销 id/通知预览全部走 timeline；header 的 conversation turn 事件消费保留（活动追踪） |
 
-**切换策略**：2.3 期间双通道并存——timeline 新渲染路径与 conversation 旧路径对照验证，对照通过后再删旧路径，避免大爆炸切换。
+**切换策略执行**：双通道对照以单元测试完成（BlockTranscript 行为测试 + AnswerView 共享状态机）；UI 一次性切换（git 可回滚）；旧 round 模型保留于 `round_renderer.rs`（Phase 3 清理）。
 
-### Phase 3 — 通道退役（迁移后清理）
+### Phase 3 — 通道退役（进行中：前端 ✅，producer ⏳）
 
-- producer：停止 transcript 类 `emit_domain`（RoundDelta/RoundCompleted/ToolCallPrepared/Started/Finished 的渲染用途），保留 usage/audit/dashboard/control。
-- 前端：删除 `is_renderable_event` 的 conversation/tool 分支与 chat 队列的 transcript 消费。
-- 按 `convergence-plan.md` §10.2 预估：**净删 ≥1000 行**（"三发→双发"收官）。
+- ✅ producer 侧保持现状但前端已停止消费：conversation/tool 频道的 transcript 事件（RoundDelta/ToolCallPrepared 等）不再进入渲染管线（`chat_events` 队列已删），仅 activity/usage/compact 等遥测消费保留。
+- ⏳ producer 停止 transcript 类 `emit_domain`（`engine_*.rs`）：msglp 仍在双发，需在确认前端稳定后实施（独立提交，含 msglp 测试改造）。
+- ✅ 前端 `is_renderable_event`/`render_event`/`restored_turns` 分支已删（chat_adapter 656→62 行）。
+- 按 `convergence-plan.md` §10.2 预估：本轮已净删约 1000 行旧路径（含 bridge 队列/drain/output 系列），producer 退役后可达文档预估的 ≥1000 行净删。
 
 ## 5. RC4 前堆积的其它待改动（非 timeline）
 
 | 来源 | 项 | 状态 | 依赖 |
 |---|---|---|---|
-| `convergence-plan.md` M3 B1-B4 | legacy 完全拆除：引擎三发→双发、`WriterEvent::Legacy`/`Emitter::emit/emit_delta` 删除、daemon legacy WS 端点、前端回退分支 | ⏳ 待实施 | 独立 |
+| `convergence-plan.md` M3 B1-B4 | legacy 完全拆除：引擎三发→双发、`WriterEvent::Legacy`/`Emitter::emit/emit_delta` 删除、daemon legacy WS 端点、前端回退分支 | ✅ 已完成（2026-08-12 核查） | 独立 |
 | `convergence-plan.md` M6 A5 | 快照分页 + reconcile、虚拟列表（恢复 O(N²)→O(可见窗口)） | ⏳ 待实施 | 部分已完成（前端分页已落地） |
-| `rc4-contract.md` §7 | **per-seed `TimelineRepository`：snapshot/live/prepend 走同一 reducer** | ⏳ 待实施 | **= Phase 2 主体** |
+| `rc4-contract.md` §7 | **per-seed `TimelineRepository`：snapshot/live/prepend 走同一 reducer** | ✅ 已完成（= Phase 2：`BlockTranscript` 的 restore/apply_entry/prepend_snapshot + 会话切换缓存） | — |
 | `rc4-contract.md` §7 | push subscription + `DispatcherQueue` 替代 16/250/500ms revision polling | ⏳ 待实施 | 性能项，可后置 |
 | `rc4-contract.md` §7 | 辅助 query/action 响应补齐 typed DTO，收缩 `shell_store` JSON 边界 | ⏳ 待实施 | 独立 |
 | `rc4-contract.md` §7 | typed `Route`、observable/incremental collection、activation/accessibility | ⏳ 待实施 | 独立 |
@@ -105,7 +119,8 @@ DeepX 的 transcript（会话展示）存在**两条事件通道**：
 
 | 版本 | 内容 |
 |---|---|
-| **rc3** | Phase 1（✅ 已完成：BlockCheckpoint + 双发修复） |
+| **rc3** | Phase 1（✅ 已完成：BlockCheckpoint + 双发修复）；M3 legacy 拆除（✅ 已核查完成） |
+| **rc3.1** | Phase 2（✅ 已完成：block 级 Transcript 重写 + 前端切换 + chat_adapter 收窄）；Phase 3 前端部分（✅） |
 | **rc3.1**（或 rc4） | Phase 2 步骤 2.1–2.4（前端 timeline live 渲染，双通道对照并存）；M3 B1-B2 可并行 |
 | **rc5** | Phase 2 步骤 2.5 + Phase 3（收窄与退役）；§5 其余待办 |
 
@@ -131,3 +146,5 @@ cargo check --workspace && git diff --check
 | 日期 | 内容 |
 |---|---|
 | 2026-08-12 | 创建；Phase 1 完成（BlockCheckpoint + ToolFinished 双发修复，commit `c18e07b`）；核实 DeepSeek 文档约束；汇总 rc4 前待办 |
+| 2026-08-12 | 修订：代码核查确认 M3 B1-B4（legacy 完全拆除）已全部完成，§5 状态由"⏳ 待实施"更正为"✅ 已完成"；§3 增补 M3 证据表；rc3 行同步更新 |
+| 2026-08-12 | **Phase 2 重写落地**：`block_transcript.rs`（block 级 reducer）+ `timeline_protocol.rs`；AnswerView 自持表格跟踪器；bridge `on_timeline_entry` 接入 + `timeline_drain_limit`；chat_view 按块序渲染（删三段式）；chat_adapter 656→62 行；旧 chat 队列/drain/output 系列删除（净删 ~1000 行）；门禁全绿（domain/ringing/runtime/client/msglp/winui + workspace check） |

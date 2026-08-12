@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::file_shared::{
     atomic_write, diff_stats_between, normalize_newlines, unified_diff, verify_expected_hash,
 };
-use crate::{JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler_from_string};
+use crate::{JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler, handler_from_string};
 
 // ── Shared helpers ──
 
@@ -46,7 +46,7 @@ fn write_error(path: &str, error: &std::io::Error) -> String {
 
 // ── exec_write_file (from file_write.rs) ──
 
-pub(super) fn exec_write_file(args: &serde_json::Value) -> String {
+pub(super) fn exec_write_file(args: &serde_json::Value) -> ToolResult {
     let path = crate::resolve_workspace_path(&args.s("path"));
     let content = args.s("content");
     let append = args.opt_bool("append").unwrap_or(false);
@@ -67,7 +67,7 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> String {
         .map(|(content, _)| content)
         .unwrap_or_default();
     if let Err(error) = verify_expected_hash(&path, &normalized_old, Some(&expected_hash)) {
-        return error;
+        return ToolResult::error(error);
     }
     // 工具侧账本自动防漂移（模型无需回传 hash）：未显式带 expected_hash 时，
     // 用最近一次 read/edit/write 记录的指纹校验。失配 = 文件在工具外被修改，
@@ -76,38 +76,44 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> String {
         if let Some(known) = crate::file_state::last_hash(&path) {
             let disk_lf_hash = crate::file_shared::content_hash(&normalized_old);
             if known != disk_lf_hash {
-                return serde_json::json!({
-                    "timeis": crate::now_utc8(), "status": "error", "code": "STALE_FILE", "path": path,
-                    "message": "File was modified outside the tool since the last read/edit",
-                    "expected_hash": known, "actual_hash": disk_lf_hash,
-                    "hint": "Use read_file to refresh the tool's view of the file, then retry the write."
-                }).to_string();
+                return ToolResult::error(
+                    serde_json::json!({
+                        "timeis": crate::now_utc8(), "status": "error", "code": "STALE_FILE", "path": path,
+                        "message": "File was modified outside the tool since the last read/edit",
+                        "expected_hash": known, "actual_hash": disk_lf_hash,
+                        "hint": "Use read_file to refresh the tool's view of the file, then retry the write."
+                    })
+                    .to_string(),
+                );
             }
         }
     }
 
+    // 统一在 LF 视图计算 diff（dry_run 文本预览 + 展示平面共用，不重复计算）。
+    let (old_norm, _) = normalize_newlines(old_content.as_deref().unwrap_or(""));
+    let preview = if append {
+        format!("{normalized_old}{content}")
+    } else {
+        content.clone()
+    };
+    let (new_norm, _) = normalize_newlines(&preview);
+    let diff = unified_diff(&old_norm, &new_norm, &path);
+    let diff_text = (!diff.trim().is_empty()).then(|| diff.trim_end().to_string());
+
     // dry_run: 只预览 diff（与 edit_file 的 dry_run 语义一致），不写盘。
     if dry_run {
-        let preview = if append {
-            format!("{normalized_old}{content}")
-        } else {
-            content.clone()
-        };
-        let (old_norm, _) = normalize_newlines(old_content.as_deref().unwrap_or(""));
-        let (new_norm, _) = normalize_newlines(&preview);
-        let diff = unified_diff(&old_norm, &new_norm, &path);
         if diff.is_empty() {
-            return format!(
+            return ToolResult::ok(format!(
                 "[DRY RUN] {path} — {} bytes, {line_count} lines (no changes would be made)",
                 content.len()
-            );
+            ));
         }
         let (added, removed, first_line) = diff_stats_between(&old_norm, &new_norm);
-        return format!(
+        return ToolResult::ok(format!(
             "{}\n\n{}",
             format_write_result("DRY RUN", &path, added, removed, first_line, "write"),
             diff.trim_end()
-        );
+        ));
     }
 
     if append {
@@ -119,7 +125,7 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> String {
         {
             Ok(f) => f,
             Err(e) => {
-                return write_error(&path, &e);
+                return ToolResult::error(write_error(&path, &e));
             }
         };
         match file.write_all(content.as_bytes()) {
@@ -130,7 +136,7 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> String {
                     None => content.clone(),
                 };
                 crate::file_state::record_write(&path, &full);
-                if let Some(ref old) = old_content {
+                let text = if let Some(ref old) = old_content {
                     let old_line_count = old.lines().count();
                     let first_line = if old_line_count == 0 {
                         1u32
@@ -146,17 +152,22 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> String {
                         content.len(),
                         line_count
                     )
+                };
+                let mut result = ToolResult::ok(text);
+                if let Some(diff_text) = diff_text {
+                    result = result.with_diff(diff_text);
                 }
+                result
             }
-            Err(e) => write_error(&path, &e),
+            Err(e) => ToolResult::error(write_error(&path, &e)),
         }
     } else {
         match atomic_write(&path, &content) {
             Ok(_) => {
                 crate::file_state::record_write(&path, &content);
-                if let Some(ref old) = old_content {
+                let text = if let Some(ref old) = old_content {
                     // Overwrite：用 similar ops() 直接算统计（+N -M / 首个变更行），
-                    // 不再生成 diff 文本，正文默认不回传。
+                    // 正文默认不回传（diff 走展示平面，不占模型上下文）。
                     let (old_norm, _) = normalize_newlines(old);
                     let (new_norm, _) = normalize_newlines(&content);
                     if old_norm == new_norm {
@@ -177,14 +188,19 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> String {
                         content.len(),
                         line_count
                     )
+                };
+                let mut result = ToolResult::ok(text);
+                if let Some(diff_text) = diff_text {
+                    result = result.with_diff(diff_text);
                 }
+                result
             }
-            Err(e) => write_error(&path, &e),
+            Err(e) => ToolResult::error(write_error(&path, &e)),
         }
     }
 }
 
-handler_from_string!(handle_write_file, exec_write_file);
+handler!(handle_write_file, exec_write_file);
 
 // ── exec_delete_file (from file_delete.rs) ──
 
@@ -344,7 +360,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
 mod tests {
     use super::*;
     fn write(args: serde_json::Value) -> String {
-        exec_write_file(&args)
+        exec_write_file(&args).model_text().to_string()
     }
     #[test]
     fn overwrite_returns_summary_without_diff_body() {

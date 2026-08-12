@@ -1423,6 +1423,7 @@ impl TurnEngine {
                                         summary: None,
                                         args_json: Some(args_so_far.clone()),
                                         output: None,
+                                        diff: None,
                                         progress: String::new(),
                                         failure: None,
                                         permission: None,
@@ -1620,6 +1621,7 @@ impl TurnEngine {
                                 summary: None,
                                 args_json: Some(args_json),
                                 output: None,
+                                diff: None,
                                 progress: String::new(),
                                 failure: None,
                                 permission: None,
@@ -1858,9 +1860,14 @@ impl TurnEngine {
                                             code_delta,
                                             skill_effects,
                                         )) => {
-                                            ctx.agent.msg.push_tool_result_direct(
-                                                &call_id, &content, success,
-                                            );
+                                            ctx.agent
+                                                .msg
+                                                .push_tool_result_direct_with_diff(
+                                                    &call_id,
+                                                    &content,
+                                                    success,
+                                                    _canonical_result.diff.clone(),
+                                                );
                                             ordered_skill_effects
                                                 .push((call_id.clone(), skill_effects));
                                             if let Some(ref delta) = code_delta {
@@ -1938,7 +1945,12 @@ impl TurnEngine {
                                 )) => {
                                     ctx.agent
                                         .msg
-                                        .push_tool_result_direct(&call_id, &content, success);
+                                        .push_tool_result_direct_with_diff(
+                                            &call_id,
+                                            &content,
+                                            success,
+                                            _canonical_result.diff.clone(),
+                                        );
                                     ordered_skill_effects.push((call_id.clone(), skill_effects));
                                     if let Some(ref delta) = code_delta {
                                         ctx.stats.push_delta(delta.clone());
@@ -2150,10 +2162,10 @@ impl TurnEngine {
         ctx: &mut RingContext,
         turn_id: &str,
         round_num: u32,
-    ) -> Vec<(String, String, String, bool)> {
+    ) -> Vec<(String, String, String, bool, Option<String>)> {
         let results = ctx.agent.msg.last_step_tool_results();
         let ts = util::chrono_local_datetime();
-        for (tc_id, name, content, success) in &results {
+        for (tc_id, name, content, success, diff) in &results {
             let args = ctx
                 .agent
                 .msg
@@ -2168,7 +2180,7 @@ impl TurnEngine {
                 .take(120)
                 .collect();
             ToolEngine::emit_timeline_tool_result(
-                ctx, turn_id, round_num, tc_id, name, &args, content, *success,
+                ctx, turn_id, round_num, tc_id, name, &args, content, *success, diff.clone(),
             );
             // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
             ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
@@ -2198,7 +2210,7 @@ impl TurnEngine {
             ));
         }
 
-        for (tool_call_id, _, _, _) in &results {
+        for (tool_call_id, _, _, _, _) in &results {
             ctx.emitter
                 .emit_timeline(deepx_domain::TimelineIntent::BlockSealed {
                     turn_id: turn_id.to_string(),

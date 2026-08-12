@@ -1,6 +1,6 @@
 use windows_reactor::{
     AccessibilityExt, BackgroundExt, ColorScheme, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt, PaddingExt, TextStyleExt, ScrollBarVisibility,
-    SelectionMode, TextWrapping, ThemeRef, Thickness, VerticalAlignment, border, grid, list_view,
+    TextWrapping, ThemeRef, Thickness, VerticalAlignment, border, grid,
     scroll_viewer, text_block, vstack,
 };
 
@@ -117,6 +117,14 @@ pub fn tool_body_from_result(
         .unwrap_or_default();
 
     let mut diffs = Vec::new();
+    // 展示平面显式 diff（ToolResult.diff，结构化事件承载）。
+    if let Some(explicit) = result
+        .get("diff")
+        .and_then(serde_json::Value::as_str)
+        .filter(|d| looks_like_diff(d))
+    {
+        diffs.push(explicit.to_string());
+    }
     collect_diff_strings(result.get("data"), &mut diffs);
     if diffs.is_empty() && looks_like_diff(model_text) {
         diffs.push(model_text.to_string());
@@ -196,11 +204,22 @@ pub fn change_stats_from_result(
 }
 
 /// Build the same presentation from a retained timeline tool.
+///
+/// `diff` 是 timeline 明确携带的展示平面 diff（编辑/写入类工具）：显式提供时
+/// 优先解析（不依赖 output 文本猜测）；缺省回退到旧逻辑。
 pub fn tool_body_from_timeline(
     name: &str,
     args_json: Option<&str>,
     output: Option<&str>,
+    diff: Option<&str>,
 ) -> ToolBody {
+    if let Some(diff) = diff
+        && looks_like_diff(diff)
+        && let document = parse_unified_diff(diff)
+        && !document.files.is_empty()
+    {
+        return ToolBody::Diff(document);
+    }
     let output = output.unwrap_or_default();
     if looks_like_diff(output) {
         let document = parse_unified_diff(output);
@@ -513,7 +532,32 @@ pub fn parse_unified_diff(text: &str) -> DiffDocument {
         }
     }
     flush(&mut document, &mut current);
+    merge_diff_by_file(&mut document);
     document
+}
+
+/// 合并同 `display_path` 的 diff 文件块：多 op 编辑同一文件时（如
+/// edit_file 的 ops[].diff 各自独立成块），拼接解析会产生多个同路径块；
+/// 合并 rows（行号为各 hunk 的绝对行号，跳变自然）+ 统计重算，呈现为
+/// 干净的单文件 diff。
+fn merge_diff_by_file(document: &mut DiffDocument) {
+    let mut merged: Vec<DiffFile> = Vec::new();
+    for file in std::mem::take(&mut document.files) {
+        let path = file.display_path().to_string();
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|f| f.display_path() == path)
+        {
+            existing.rows.extend(file.rows);
+            existing.lines_added += file.lines_added;
+            existing.lines_removed += file.lines_removed;
+        } else {
+            merged.push(file);
+        }
+    }
+    document.files = merged;
+    document.lines_added = document.files.iter().map(|f| f.lines_added).sum();
+    document.lines_removed = document.files.iter().map(|f| f.lines_removed).sum();
 }
 
 fn parse_hunk_starts(header: &str) -> Option<(usize, usize)> {
@@ -637,6 +681,155 @@ fn code_document_view(
     .into()
 }
 
+// ── 单列 unified diff（V4：edit 类工具展开区；紧凑 + 行号对齐）───────
+/// 单列 diff 行：`[旧行号|新行号|marker|文本]`。
+/// 行号列带底色与内容列区分（VS Code 风格）；行高统一、行间 0 间距；
+/// 文本 NoWrap + 横向滚动由外层 scroll_viewer 负责。
+fn unified_diff_row(row: &DiffRow, font_family: &str, index: usize) -> Element {
+    if row.kind == DiffRowKind::Hunk {
+        return border(
+            text_block(&row.text)
+                .font_family(font_family)
+                .font_size(12.0)
+                .foreground(ThemeRef::AccentText)
+                .selectable(),
+        )
+        .background(ThemeRef::ControlFillSecondary)
+        .padding(Thickness::xy(8.0, 3.0))
+        .automation_name(format!("差异区段 {}", row.text))
+        .with_key(format!("hunk-{index}"))
+        .into();
+    }
+    let old = row
+        .old_line
+        .map(|line| line.to_string())
+        .unwrap_or_default();
+    let new = row
+        .new_line
+        .map(|line| line.to_string())
+        .unwrap_or_default();
+    let marker = match row.kind {
+        DiffRowKind::Added => "+",
+        DiffRowKind::Removed => "−",
+        DiffRowKind::Meta => "·",
+        _ => " ",
+    };
+    let fg = match row.kind {
+        DiffRowKind::Added => ThemeRef::SystemSuccess,
+        DiffRowKind::Removed => ThemeRef::SystemCritical,
+        _ => ThemeRef::PrimaryText,
+    };
+    let mut text_tb = text_block(&row.text)
+        .font_family(font_family)
+        .font_size(13.0)
+        .foreground(fg)
+        .selectable();
+    // V4.1：自动换行（弃横向滚动）。行号/marker 列固定宽、垂直顶对齐，
+    // 换行产生的物理行只延伸底色与文本，不重复标注行号（行号仅属逻辑行首）。
+    text_tb.text_wrapping = TextWrapping::Wrap;
+    // 行号格（带底色；两列宽度一致，数值右对齐，顶对齐保证首行对齐）。
+    let old_cell = border(
+        text_block(&old)
+            .font_family(font_family)
+            .font_size(12.0)
+            .foreground(ThemeRef::SecondaryText)
+            .horizontal_alignment(HorizontalAlignment::Right)
+            .vertical_alignment(VerticalAlignment::Top),
+    )
+    .background(ThemeRef::ControlFillSecondary)
+    .padding(Thickness::xy(6.0, 1.0));
+    let new_cell = border(
+        text_block(&new)
+            .font_family(font_family)
+            .font_size(12.0)
+            .foreground(ThemeRef::SecondaryText)
+            .horizontal_alignment(HorizontalAlignment::Right)
+            .vertical_alignment(VerticalAlignment::Top),
+    )
+    .background(ThemeRef::ControlFillSecondary)
+    .padding(Thickness::xy(6.0, 1.0));
+    let mut surface = border(
+        grid((
+            old_cell.grid_column(0),
+            new_cell.grid_column(1),
+            text_block(marker)
+                .font_family(font_family)
+                .font_size(13.0)
+                .semibold()
+                .vertical_alignment(VerticalAlignment::Top)
+                .grid_column(2),
+            text_tb.grid_column(3),
+        ))
+        .columns([
+            GridLength::Pixel(44.0),
+            GridLength::Pixel(44.0),
+            GridLength::Pixel(18.0),
+            GridLength::STAR,
+        ])
+        .column_spacing(0.0)
+        .padding(Thickness::xy(0.0, 0.0)),
+    );
+    surface = match row.kind {
+        DiffRowKind::Added => surface.background(ThemeRef::SystemSuccessBackground),
+        DiffRowKind::Removed => surface.background(ThemeRef::SystemCriticalBackground),
+        DiffRowKind::Meta => surface.background(ThemeRef::ControlFillSecondary),
+        _ => surface,
+    };
+    surface
+        .automation_name(match row.kind {
+            DiffRowKind::Added => format!("新增第 {} 行：{}", row.new_line.unwrap_or(0), row.text),
+            DiffRowKind::Removed => {
+                format!("删除原第 {} 行：{}", row.old_line.unwrap_or(0), row.text)
+            }
+            _ => row.text.clone(),
+        })
+        .with_key(format!("row-{index}"))
+        .into()
+}
+
+/// 单列文件视图：header（路径 + ±N）+ 紧凑行堆叠（NoWrap + 横纵滚动）。
+/// pub：diff 抽屉等外部视图复用（传入 `font_family` 与稳定 `key`）。
+pub fn diff_file_view(file: &DiffFile, font_family: &str, key: &str) -> Element {
+    let font = font_family.to_string();
+    let rows = scroll_viewer(
+        vstack(
+            file.rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| unified_diff_row(row, &font, index))
+                .collect::<Vec<_>>(),
+        )
+        .spacing(0.0),
+    )
+    .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+    .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+    .max_height(520.0);
+    border(vstack((
+        grid((
+            text_block(file.display_path())
+                .font_size(12.0)
+                .semibold()
+                .text_trimming(windows_reactor::TextTrimming::CharacterEllipsis)
+                .grid_column(0),
+            text_block(format!("+{}  −{}", file.lines_added, file.lines_removed))
+                .font_size(12.0)
+                .foreground(ThemeRef::SecondaryText)
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .grid_column(1),
+        ))
+        .columns([GridLength::STAR, GridLength::Auto])
+        .padding(Thickness::xy(8.0, 6.0)),
+        rows,
+    )))
+    .background(ThemeRef::CardBackground)
+    .border_brush(ThemeRef::CardStroke)
+    .border_thickness(Thickness::uniform(1.0))
+    .corner_radius(6.0)
+    .with_key(key)
+    .into()
+}
+
+/// 单列文档视图：统计头（N 个文件 +N −N）+ 文件列表。
 fn diff_document_view(document: &DiffDocument, font_family: &str, key: &str) -> Element {
     let mut files = Vec::new();
     for (index, file) in document.files.iter().enumerate() {
@@ -668,128 +861,47 @@ fn diff_document_view(document: &DiffDocument, font_family: &str, key: &str) -> 
     .into()
 }
 
-fn diff_file_view(file: &DiffFile, font_family: &str, key: &str) -> Element {
-    let row_count = file.rows.len();
-    let height = ((row_count as f64 * 24.0) + 4.0).clamp(48.0, 520.0);
-    let font = font_family.to_string();
-    let rows = list_view(file.rows.clone(), move |row: &DiffRow, index| {
-        diff_row_view(row, &font, index)
-    })
-    .selection_mode(SelectionMode::None)
-    .height(height)
-    .with_key(format!("{key}-rows"));
-    border(vstack((
-        grid((
-            text_block(file.display_path())
-                .font_size(12.0)
-                .semibold()
-                .text_trimming(windows_reactor::TextTrimming::CharacterEllipsis)
-                .grid_column(0),
-            text_block(format!("+{}  −{}", file.lines_added, file.lines_removed))
-                .font_size(12.0)
-                .foreground(ThemeRef::SecondaryText)
-                .horizontal_alignment(HorizontalAlignment::Right)
-                .grid_column(1),
-        ))
-        .columns([GridLength::STAR, GridLength::Auto])
-        .padding(Thickness::xy(8.0, 6.0)),
-        rows,
-    )))
-    .background(ThemeRef::CardBackground)
-    .border_brush(ThemeRef::CardStroke)
-    .border_thickness(Thickness::uniform(1.0))
-    .corner_radius(6.0)
-    .with_key(key)
-    .into()
-}
-
-fn diff_row_view(row: &DiffRow, font_family: &str, index: usize) -> Element {
-    if row.kind == DiffRowKind::Hunk {
-        return border(
-            text_block(&row.text)
-                .font_family(font_family)
-                .font_size(12.0)
-                .foreground(ThemeRef::AccentText)
-                .selectable(),
-        )
-        .background(ThemeRef::ControlFillSecondary)
-        .padding(Thickness::xy(8.0, 3.0))
-        .automation_name(format!("差异区段 {}", row.text))
-        .with_key(format!("hunk-{index}"))
-        .into();
-    }
-    let marker = match row.kind {
-        DiffRowKind::Added => "+",
-        DiffRowKind::Removed => "−",
-        DiffRowKind::Meta => "·",
-        _ => " ",
-    };
-    let old = row
-        .old_line
-        .map(|line| line.to_string())
-        .unwrap_or_default();
-    let new = row
-        .new_line
-        .map(|line| line.to_string())
-        .unwrap_or_default();
-    let mut surface = border(
-        grid((
-            text_block(old)
-                .font_family(font_family)
-                .font_size(12.0)
-                .foreground(ThemeRef::SecondaryText)
-                .horizontal_alignment(HorizontalAlignment::Right)
-                .vertical_alignment(VerticalAlignment::Top)
-                .grid_column(0),
-            text_block(new)
-                .font_family(font_family)
-                .font_size(12.0)
-                .foreground(ThemeRef::SecondaryText)
-                .horizontal_alignment(HorizontalAlignment::Right)
-                .vertical_alignment(VerticalAlignment::Top)
-                .grid_column(1),
-            text_block(marker)
-                .font_family(font_family)
-                .font_size(13.0)
-                .semibold()
-                .grid_column(2),
-            text_block(&row.text)
-                .font_family(font_family)
-                .font_size(13.0)
-                .wrap()
-                .selectable()
-                .grid_column(3),
-        ))
-        .columns([
-            GridLength::Pixel(42.0),
-            GridLength::Pixel(42.0),
-            GridLength::Pixel(18.0),
-            GridLength::STAR,
-        ])
-        .column_spacing(4.0)
-        .padding(Thickness::xy(4.0, 2.0)),
-    );
-    surface = match row.kind {
-        DiffRowKind::Added => surface.background(ThemeRef::SystemSuccessBackground),
-        DiffRowKind::Removed => surface.background(ThemeRef::SystemCriticalBackground),
-        DiffRowKind::Meta => surface.background(ThemeRef::ControlFillSecondary),
-        _ => surface,
-    };
-    surface
-        .automation_name(match row.kind {
-            DiffRowKind::Added => format!("新增第 {} 行：{}", row.new_line.unwrap_or(0), row.text),
-            DiffRowKind::Removed => {
-                format!("删除原第 {} 行：{}", row.old_line.unwrap_or(0), row.text)
-            }
-            _ => row.text.clone(),
-        })
-        .with_key(format!("row-{index}"))
-        .into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 同路径 diff 块合并：多 op 编辑同一文件 → 单文件块（rows + 统计）。
+    #[test]
+    fn merge_diff_by_file_combines_same_path_blocks() {
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new1\ndiff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -5 +5 @@\n-keep\n+new2\n";
+        let parsed = parse_unified_diff(diff);
+        assert_eq!(parsed.files.len(), 1, "同路径合并为单文件块");
+        assert_eq!((parsed.lines_added, parsed.lines_removed), (2, 2));
+        let rows = &parsed.files[0].rows;
+        assert!(rows.iter().any(|r| r.kind == DiffRowKind::Added && r.text == "new2"));
+        assert!(rows.iter().any(|r| r.kind == DiffRowKind::Removed && r.text == "old"));
+    }
+
+    /// 不同路径保持独立块（合并不误伤）。
+    #[test]
+    fn merge_diff_by_file_keeps_distinct_paths() {
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n";
+        let parsed = parse_unified_diff(diff);
+        assert_eq!(parsed.files.len(), 2);
+    }
+
+    /// 双栏→单列回归：行配对结构（pair_side_by_side 的输入形态）。
+    #[test]
+    fn parse_keeps_row_order_for_unified_render() {
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -2,2 +2,3 @@\n keep\n-old\n+new\n+extra\n";
+        let parsed = parse_unified_diff(diff);
+        let kinds: Vec<DiffRowKind> = parsed.files[0].rows.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                DiffRowKind::Hunk,
+                DiffRowKind::Context,
+                DiffRowKind::Removed,
+                DiffRowKind::Added,
+                DiffRowKind::Added,
+            ]
+        );
+    }
 
     #[test]
     fn parses_multi_file_unified_diff_with_line_numbers() {
@@ -830,6 +942,32 @@ mod tests {
     }
 
     #[test]
+    fn timeline_explicit_diff_wins_over_compact_output() {
+        // 展示平面 diff（TimelineTool.diff）优先：output 是紧凑摘要行时
+        // 也能得到 Diff body——这是 turn 末尾「查看详情」按钮的数据源。
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n line1\n-old\n+new\n line3\n";
+        let body = tool_body_from_timeline(
+            "edit_file",
+            Some(r#"{"old_string":"old","new_string":"new"}"#),
+            Some("[OK] edit_file\n  src/a.rs: 1/1 op(s) applied at L2 (+1 -1)"),
+            Some(diff),
+        );
+        assert!(matches!(
+            body,
+            ToolBody::Diff(DiffDocument { files, .. })
+                if files.len() == 1 && files[0].display_path() == "src/a.rs"
+        ));
+        // 无显式 diff 时退化为 Text（旧行为）。
+        let fallback = tool_body_from_timeline(
+            "edit_file",
+            None,
+            Some("[OK] edit_file\n  src/a.rs: 1/1 op(s) applied at L2 (+1 -1)"),
+            None,
+        );
+        assert!(matches!(fallback, ToolBody::Text(_)));
+    }
+
+    #[test]
     fn read_result_becomes_code_and_strips_transport_line_prefix() {
         let result = serde_json::json!({
             "data": {"files": [{"path": "src/lib.rs", "start_line": 10, "total_lines": 20}]},
@@ -854,6 +992,7 @@ mod tests {
             "apply_patch",
             Some(r#"{"patch":"--- a/a.rs\n+++ b/a.rs\n@@ -1 +1,2 @@\n-old\n+new\n+extra\n"}"#),
             Some("[OK] 1 file(s), +99 -88"),
+            None,
         );
         let stats = change_stats_from_timeline(&body, Some("+99 -88")).unwrap();
         assert_eq!((stats.lines_added, stats.lines_removed), (2, 1));

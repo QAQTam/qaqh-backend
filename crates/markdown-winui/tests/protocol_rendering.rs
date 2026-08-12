@@ -31,6 +31,7 @@ fn live(ts: &Transcript, turn: usize) -> (&str, &[Inline], &[LiveSegment]) {
             raw,
             inlines,
             segments,
+            ..
         } => (raw, inlines, segments),
         AnswerView::Final { .. } => panic!("expected streaming answer"),
     }

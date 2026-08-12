@@ -88,6 +88,10 @@ pub struct TimelineTool {
     /// truncated by the transcript protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// Display-plane unified diff (file-mutation tools). Never projected to the
+    /// model; consumed by the transcript renderer (diff drawer / tool cards).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub progress: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -644,7 +644,7 @@ impl MessageStore {
     }
 
     pub fn push_tool_result(&mut self, tool_call_id: &str, result: &str, success: bool) -> Effect {
-        if self.push_tool_result_inner(tool_call_id, result, success) {
+        if self.push_tool_result_inner(tool_call_id, result, success, None) {
             self.context_revision = self.context_revision.saturating_add(1);
         }
 
@@ -665,7 +665,7 @@ impl MessageStore {
     pub fn push_tool_results_batch(&mut self, results: &[(String, String, bool)]) -> Effect {
         let mut changed = false;
         for (tc_id, result, success) in results {
-            changed |= self.push_tool_result_inner(tc_id, result, *success);
+            changed |= self.push_tool_result_inner(tc_id, result, *success, None);
         }
         if changed {
             self.context_revision = self.context_revision.saturating_add(1);
@@ -685,7 +685,13 @@ impl MessageStore {
         Effect::None
     }
 
-    fn push_tool_result_inner(&mut self, tool_call_id: &str, result: &str, success: bool) -> bool {
+    fn push_tool_result_inner(
+        &mut self,
+        tool_call_id: &str,
+        result: &str,
+        success: bool,
+        diff: Option<String>,
+    ) -> bool {
         // Look up tool name from any step that owns this tool_call_id.
         // Look up the tool name so the result can be finalized once at
         // storage time — the stored bytes are the final rendered form.
@@ -708,7 +714,16 @@ impl MessageStore {
             Some(name) => finalize_tool_result(name, result),
             None => result.to_string(),
         };
-        let tool_msg = Message::tool(tool_call_id, &final_result, success);
+        let mut tool_msg = Message::tool(tool_call_id, &final_result, success);
+        // 展示平面 diff 附着在结构化 ToolResult 上（project_for_model 不携带，
+        // 模型上下文不受影响）；供 last_step_tool_results → timeline 消费。
+        if let Some(diff) = diff {
+            if let Some(deepx_types::ContentBlock::ToolResult { result, .. }) =
+                tool_msg.content.first_mut()
+            {
+                result.diff = Some(diff);
+            }
+        }
 
         for turn in self.turns.iter_mut().rev() {
             if let Some(step) = turn.find_step_for_mut(tool_call_id) {
@@ -852,7 +867,21 @@ impl MessageStore {
 
     /// Push a tool result directly (for manual execution).
     pub fn push_tool_result_direct(&mut self, tool_call_id: &str, result: &str, success: bool) {
-        if self.push_tool_result_inner(tool_call_id, result, success) {
+        if self.push_tool_result_inner(tool_call_id, result, success, None) {
+            self.context_revision = self.context_revision.saturating_add(1);
+        }
+    }
+
+    /// 同 `push_tool_result_direct`，另附着展示平面 diff（编辑/写入类工具）。
+    /// diff 仅存在于结构化 ToolResult（不进模型投影），供 timeline 抽屉消费。
+    pub fn push_tool_result_direct_with_diff(
+        &mut self,
+        tool_call_id: &str,
+        result: &str,
+        success: bool,
+        diff: Option<String>,
+    ) {
+        if self.push_tool_result_inner(tool_call_id, result, success, diff) {
             self.context_revision = self.context_revision.saturating_add(1);
         }
     }
@@ -896,7 +925,7 @@ impl MessageStore {
         }
         let mut changed = false;
         for (tc_id, content, success) in reports {
-            changed |= self.push_tool_result_inner(&tc_id, &content, success);
+            changed |= self.push_tool_result_inner(&tc_id, &content, success, None);
         }
         if changed {
             self.context_revision = self.context_revision.saturating_add(1);
@@ -906,14 +935,14 @@ impl MessageStore {
         Effect::None
     }
 
-    pub fn last_step_tool_results(&self) -> Vec<(String, String, String, bool)> {
+    pub fn last_step_tool_results(&self) -> Vec<(String, String, String, bool, Option<String>)> {
         let step = match self.turns.last().and_then(|t| t.steps.last()) {
             Some(s) => s,
             None => return Vec::new(),
         };
         let mut results = Vec::new();
         for tr in &step.tool_results {
-            if let Some((tc_id, result_text, ok)) = tr.content.iter().find_map(|b| {
+            if let Some((tc_id, result_text, ok, diff)) = tr.content.iter().find_map(|b| {
                 if let deepx_types::ContentBlock::ToolResult {
                     tool_use_id,
                     result,
@@ -923,6 +952,7 @@ impl MessageStore {
                         tool_use_id.clone(),
                         result.model.text.clone(),
                         result.is_success(),
+                        result.diff.clone(),
                     ))
                 } else {
                     None
@@ -944,7 +974,7 @@ impl MessageStore {
                         }
                     })
                     .unwrap_or_default();
-                results.push((tc_id, tool_name, result_text, ok));
+                results.push((tc_id, tool_name, result_text, ok, diff));
             }
         }
         results
@@ -1605,6 +1635,37 @@ mod tests {
         );
         assert_eq!(context_result(&context, "read-1"), "READ_RESULT");
         assert_eq!(context_result(&context, "exec-1"), "EXEC_RESULT");
+    }
+
+    #[test]
+    fn display_diff_flows_to_last_step_results_but_not_model_projection() {
+        // 展示平面 diff：push_tool_result_direct_with_diff 存入结构化 ToolResult
+        // → last_step_tool_results 带出（timeline 消费）→ 模型投影（gate context）
+        // 绝不携带 diff 正文。
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("edit a file");
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
+        let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        store.push_tool_result_direct_with_diff(
+            "edit-1",
+            "[OK] edit_file\n  src/a.rs: 1/1 op(s) applied at L2 (+1 -1)",
+            true,
+            Some(diff.to_string()),
+        );
+
+        let results = store.last_step_tool_results();
+        assert_eq!(results.len(), 1);
+        let (tc_id, _name, content, success, got_diff) = &results[0];
+        assert_eq!(tc_id, "edit-1");
+        assert!(content.starts_with("[OK] edit_file"));
+        assert!(*success);
+        assert_eq!(got_diff.as_deref(), Some(diff));
+
+        // 模型投影保持精简：折叠摘要行存在，diff 正文缺席。
+        let context = store.build_context_for_gate(&[]);
+        let projected = context_result(&context, "edit-1");
+        assert!(projected.contains("[edit diff folded"));
+        assert!(!projected.contains("+++ b/"), "diff leaked to model: {projected}");
     }
 
     #[test]

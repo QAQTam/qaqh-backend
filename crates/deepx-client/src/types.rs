@@ -12,8 +12,9 @@ pub use deepx_domain::{
     ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, ConversationMode,
     DashboardSnapshot as DomainDashboardSnapshot, DomainError, ErrorScope, PermissionCategory,
     PermissionRisk, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
-    SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, TimelineBlockKind,
-    TimelineEntry, TimelineSnapshot, TimelineTool, TimelineToolState, TimelineTurnState, TodoItem,
+    SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, TimelineBlock,
+    TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent, TimelineRound,
+    TimelineSnapshot, TimelineTool, TimelineToolState, TimelineTurn, TimelineTurnState, TodoItem,
     ToolCommand, ToolEvent,
 };
 pub use deepx_ringing::{

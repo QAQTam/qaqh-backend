@@ -1414,6 +1414,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "windows 0.100.0",
+ "windows-numerics",
  "windows-reactor",
  "windows-reactor-setup",
 ]

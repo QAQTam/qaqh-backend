@@ -21,6 +21,7 @@ fn timeline_tool(
     state: deepx_domain::TimelineToolState,
     args_json: Option<String>,
     output: Option<String>,
+    diff: Option<String>,
     failure: Option<deepx_domain::TimelineFailure>,
 ) -> deepx_domain::TimelineTool {
     deepx_domain::TimelineTool {
@@ -30,6 +31,7 @@ fn timeline_tool(
         summary: output.clone(),
         args_json,
         output,
+        diff,
         progress: String::new(),
         failure,
         permission: None,
@@ -90,6 +92,7 @@ impl ToolEngine {
                     Some(args.to_string()),
                     None,
                     None,
+                    None,
                 ),
             });
     }
@@ -103,6 +106,7 @@ impl ToolEngine {
         args: &str,
         output: &str,
         success: bool,
+        diff: Option<String>,
     ) {
         let failure = (!success).then(|| deepx_domain::TimelineFailure {
             code: "TOOL_EXECUTION_FAILED".into(),
@@ -123,6 +127,7 @@ impl ToolEngine {
                     },
                     Some(args.to_string()),
                     Some(output.to_string()),
+                    diff,
                     failure,
                 ),
             });
@@ -231,6 +236,7 @@ impl ToolEngine {
                             summary: None,
                             args_json: Some(args.to_string()),
                             output: None,
+                            diff: None,
                             progress: String::new(),
                             failure: None,
                             permission: Some(permission),
@@ -475,6 +481,7 @@ impl ToolEngine {
                                 summary: None,
                                 args_json: Some(tool.args.to_string()),
                                 output: None,
+                                diff: None,
                                 progress: String::new(),
                                 failure: None,
                                 permission: Some(deepx_domain::TimelineToolPermission {
@@ -610,6 +617,7 @@ impl ToolEngine {
                         Some(args.to_string()),
                         None,
                         None,
+                        None,
                     )),
                 });
         }
@@ -623,6 +631,7 @@ impl ToolEngine {
                     name,
                     deepx_domain::TimelineToolState::Running,
                     Some(args.to_string()),
+                    None,
                     None,
                     None,
                 ),
@@ -719,6 +728,9 @@ impl ToolEngine {
             ));
         }
 
+        // 展示平面 diff：先取出（ToolFinished 会 move 整个 result）。
+        let display_diff = result.diff.clone();
+
         ctx.emitter.emit_domain(deepx_domain::DomainEvent::Tool(
             deepx_domain::ToolEvent::ToolFinished {
                 tool_call_id: tid,
@@ -747,6 +759,7 @@ impl ToolEngine {
                     terminal_state,
                     Some(args.to_string()),
                     Some(output.clone()),
+                    display_diff,
                     failure,
                 ),
             });
@@ -905,11 +918,12 @@ impl ToolEngine {
                         Some(args_json.to_string()),
                         None,
                         None,
+                        None,
                     )),
                 });
         }
         Self::emit_timeline_tool_result(
-            ctx, &turn_id, 0, call_id, tool_name, args_json, &output, false,
+            ctx, &turn_id, 0, call_id, tool_name, args_json, &output, false, None,
         );
         ctx.emitter
             .emit_timeline(deepx_domain::TimelineIntent::BlockSealed {

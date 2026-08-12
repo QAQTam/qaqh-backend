@@ -30,7 +30,8 @@ pub use types::{
     DomainAskQuestion, DomainDashboardSnapshot, DomainError, DomainSessionState, ErrorScope,
     EventBatch, PermissionCategory, PermissionRisk, ProviderToolState, RingingCommand,
     RingingCommandAck, RingingCommandState, RingingCommandStatus, RingingEvent,
-    RingingEventEnvelope, RoundDeltaKind, SkillInfo, SkillRuntimeInfo, TimelineBlockKind,
-    TimelineEntry, TimelinePage, TimelineSnapshot, TimelineStatus, TimelineTool, TimelineToolState,
-    TimelineTurnState, TodoItem, ToolCommand, ToolEvent,
+    RingingEventEnvelope, RoundDeltaKind, SkillInfo, SkillRuntimeInfo, TimelineBlock,
+    TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent, TimelinePage,
+    TimelineRound, TimelineSnapshot, TimelineStatus, TimelineTool, TimelineToolState,
+    TimelineTurn, TimelineTurnState, TodoItem, ToolCommand, ToolEvent,
 };
