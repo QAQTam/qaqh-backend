@@ -2,24 +2,20 @@
 
 use deepx_domain::RingingChannel;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::protocol::{RINGING_SCHEMA, RINGING_VERSION};
 
 /// 频道领域快照。**必须表达领域状态，禁止用事件数组模拟状态**
 /// （PLAN 硬规则）。`state` 为对应频道的领域快照 payload
 /// （Conversation/Tool/Control snapshot projection 在 transport 层注入强类型）。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingChannelSnapshot {
     pub schema: String,
     pub version: u32,
     pub channel: RingingChannel,
     pub seed: String,
     /// 快照覆盖到的 stream_seq 基线（其后的可靠事件需从 cursor 回放）。
-    #[ts(type = "number")]
     pub baseline_stream_seq: u64,
-    #[ts(type = "number")]
     pub state_revision: u64,
     pub snapshot_version: u32,
     pub state: serde_json::Value,
@@ -47,8 +43,7 @@ impl RingingChannelSnapshot {
 }
 
 /// 原子恢复一个 session 所需的完整三频道快照。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingingSessionBootstrap {
     pub schema: String,
     pub version: u32,

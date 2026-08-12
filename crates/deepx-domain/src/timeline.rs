@@ -5,12 +5,10 @@
 //! projection of a legacy message protocol.
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// A display block in one model round.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum TimelineBlockKind {
     Reasoning,
     Text,
@@ -19,18 +17,16 @@ pub enum TimelineBlockKind {
 }
 
 /// Lifecycle of a display block. Markdown is rendered only after `Sealed`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum TimelineBlockState {
     Open,
     Sealed,
 }
 
 /// State updates for a tool block; all updates retain the block's position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum TimelineToolState {
     Prepared,
     Running,
@@ -40,9 +36,8 @@ pub enum TimelineToolState {
 
 /// Terminal state of a transcript turn. This is distinct from block sealing:
 /// a cancelled or failed turn may have valid, already-sealed Markdown blocks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum TimelineTurnState {
     Running,
     Completed,
@@ -51,8 +46,7 @@ pub enum TimelineTurnState {
 }
 
 /// Sanitised failure information retained with a transcript terminal event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineFailure {
     pub code: String,
     pub message: String,
@@ -60,8 +54,7 @@ pub struct TimelineFailure {
 
 /// Tool permission data belongs to the transcript tool block, while the
 /// interaction request/response lifecycle stays on the native control plane.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineToolPermission {
     pub reason: String,
     pub paths: Vec<String>,
@@ -72,8 +65,7 @@ pub struct TimelineToolPermission {
 }
 
 /// Immutable identity and mutable presentation state for one tool block.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineTool {
     pub tool_call_id: String,
     pub name: String,
@@ -101,8 +93,7 @@ pub struct TimelineTool {
 }
 
 /// Fully materialized display block saved in timeline snapshots.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineBlock {
     pub block_id: String,
     /// Stable order within one round. It never changes when the block updates.
@@ -115,8 +106,7 @@ pub struct TimelineBlock {
     pub tool: Option<TimelineTool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineRound {
     pub round_num: u32,
     pub sealed: bool,
@@ -124,15 +114,13 @@ pub struct TimelineRound {
     pub blocks: Vec<TimelineBlock>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineTurn {
     pub turn_id: String,
     /// seq of the TurnOpened entry that created this turn — the authoritative
     /// time order across snapshots. `0` means unknown (legacy persisted data);
     /// consumers fall back to the turn_id numeric suffix in that case.
     #[serde(default)]
-    #[ts(type = "number")]
     pub created_seq: u64,
     pub user_text: String,
     pub sealed: bool,
@@ -143,19 +131,16 @@ pub struct TimelineTurn {
 }
 
 /// Authoritative recovery state, not an event array.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineSnapshot {
     /// The largest timeline sequence included in `turns`.
-    #[ts(type = "number")]
     pub watermark: u64,
     pub turns: Vec<TimelineTurn>,
 }
 
 /// One mutation of the ordered transcript.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[ts(export)]
 pub enum TimelineEvent {
     TurnOpened {
         user_text: String,
@@ -166,7 +151,6 @@ pub enum TimelineEvent {
     /// `fragment_seq` is monotonic within a text/reasoning block.
     TextDelta {
         block_id: String,
-        #[ts(type = "number")]
         fragment_seq: u64,
         delta: String,
     },
@@ -202,11 +186,9 @@ pub enum TimelineEvent {
 }
 
 /// A globally ordered record for one session seed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineEntry {
     /// Strictly monotonic for one `(server epoch, seed)` across all display kinds.
-    #[ts(type = "number")]
     pub timeline_seq: u64,
     pub turn_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,9 +203,8 @@ pub struct TimelineEntry {
 ///
 /// This is deliberately not an `Agent2Ui` or Ringing-event wrapper. It has no
 /// channel, delivery, SSE, or legacy message fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[ts(export)]
 pub enum TimelineIntent {
     TurnOpened {
         turn_id: String,
@@ -231,7 +212,6 @@ pub enum TimelineIntent {
     },
     BlockOpened {
         turn_id: String,
-        #[ts(type = "number")]
         round_num: u32,
         block_id: String,
         kind: TimelineBlockKind,
@@ -240,7 +220,6 @@ pub enum TimelineIntent {
     },
     TextDelta {
         turn_id: String,
-        #[ts(type = "number")]
         round_num: u32,
         block_id: String,
         delta: String,
@@ -250,14 +229,12 @@ pub enum TimelineIntent {
     /// later `TextDelta`s keep validating against the monotonic counter.
     BlockCheckpoint {
         turn_id: String,
-        #[ts(type = "number")]
         round_num: u32,
         block_id: String,
         text: String,
     },
     ToolUpdated {
         turn_id: String,
-        #[ts(type = "number")]
         round_num: u32,
         block_id: String,
         tool: TimelineTool,
@@ -266,20 +243,17 @@ pub enum TimelineIntent {
     /// arguments. The transcript writer applies this patch to the block.
     ToolProgress {
         turn_id: String,
-        #[ts(type = "number")]
         round_num: u32,
         block_id: String,
         chunk: String,
     },
     BlockSealed {
         turn_id: String,
-        #[ts(type = "number")]
         round_num: u32,
         block_id: String,
     },
     RoundSealed {
         turn_id: String,
-        #[ts(type = "number")]
         round_num: u32,
         is_final: bool,
     },

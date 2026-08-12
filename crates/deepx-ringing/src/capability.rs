@@ -1,14 +1,12 @@
 //! 客户端 open 与能力协商（`POST /ringing/v1/clients/open` 的 payload 类型）。
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::protocol::{RINGING_SCHEMA, RINGING_VERSION};
 
 /// 能力名称（PLAN 固定命名）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum CapabilityName {
     /// 基础 Ringing v1 协议（HTTP command/query + 三 SSE）。
     RingingV1,
@@ -33,8 +31,7 @@ impl CapabilityName {
 
 /// 客户端 open 请求。端点不存在或版本不兼容时才显式选择 legacy；
 /// 禁止在同一连接上猜测 frame 类型。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientOpenRequest {
     pub schema: String,
     pub version: u32,
@@ -60,8 +57,7 @@ impl ClientOpenRequest {
 }
 
 /// 服务端 open 响应。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientOpenResponse {
     pub schema: String,
     pub version: u32,

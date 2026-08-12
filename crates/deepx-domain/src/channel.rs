@@ -1,13 +1,11 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// Ringing 协议族的频道。
 ///
 /// 每个频道拥有独立的可靠事件流、snapshot、cursor 与消费预算
 /// （Control / Conversation / Tool 物理隔离）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum RingingChannel {
     /// 会话/agent 生命周期、interaction、skills、系统通知与失败终态。
     Control,
