@@ -21,15 +21,26 @@
 //! - `RichTextInline::Hyperlink` 后端只渲染为普通 Run（无点击事件）
 //! - `RichTextRun::is_italic / is_strikethrough` 后端尚未消费
 
+mod block_transcript;
 mod diagram;
 mod highlight;
 mod protocol;
 mod round_renderer;
+mod timeline_protocol;
 mod tool_content;
 
+pub use block_transcript::{
+    BLOCK_RESTORE_KEEP_TURNS, BLOCK_WINDOW_DEFAULT_LEN, BlockRestoredTurn, BlockTranscript,
+    BlockTurnView, BlockView, MAX_RETAINED_BEFORE_WINDOW, RESTORE_BLOCK_BUDGET,
+};
 pub use diagram::{DiagramBlock, diagram_view};
 pub use highlight::highlighted_code_block;
 pub use protocol::{ConversationEvent, ProviderToolState, RoundDeltaKind};
+pub use timeline_protocol::{
+    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
+    TimelineFailure, TimelineRound, TimelineSnapshot, TimelineTool, TimelineToolPermission,
+    TimelineToolState, TimelineTurn, TimelineTurnState,
+};
 pub use round_renderer::{
     AnswerView, LiveSegment, PendingOutput, RESTORE_KEEP_TURNS, RestoredRound, RestoredTurn,
     RoundView, ToolCardView, Transcript, TranscriptChange, TranscriptInvalidation, TurnStatus,
@@ -37,7 +48,7 @@ pub use round_renderer::{
 };
 pub use tool_content::{
     ChangeStats, CodeDocument, DiffDocument, DiffFile, DiffRow, DiffRowKind, ToolBody,
-    change_stats_from_result, change_stats_from_timeline, parse_unified_diff,
+    change_stats_from_result, change_stats_from_timeline, diff_file_view, parse_unified_diff,
     tool_body_from_result, tool_body_from_timeline, tool_body_view,
 };
 

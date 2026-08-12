@@ -11,6 +11,7 @@ mod chat_adapter;
 mod chat_view;
 mod composer_bar;
 mod diagnostics;
+mod diff_drawer;
 mod fonts;
 mod header;
 mod home_view;
@@ -79,6 +80,10 @@ fn interaction_component(_: &(), cx: &mut RenderCx) -> Element {
 
 fn diagram_zoom_component(_: &(), cx: &mut RenderCx) -> Element {
     chat_view::diagram_zoom_overlay(cx).into()
+}
+
+fn diff_drawer_component(_: &(), cx: &mut RenderCx) -> Element {
+    diff_drawer::diff_drawer_overlay(cx).into()
 }
 
 fn app(cx: &mut RenderCx) -> Element {
@@ -478,6 +483,9 @@ fn app(cx: &mut RenderCx) -> Element {
     // 图表放大覆盖层（P-6 同模式）：chat_view 点击写入 DIAGRAM_ZOOM，
     // 本组件轮询弹开全窗大图。无请求时空 grid 穿透。
     let diagram_zoom: Element = component(diagram_zoom_component, ()).with_key("shell-diagram-zoom");
+    // diff 抽屉覆盖层（V4）：turn 末尾「查看详情」→ 右侧滑入面板。
+    // 无请求时空 grid 穿透（同 interaction 模式）。
+    let diff_drawer: Element = component(diff_drawer_component, ()).with_key("shell-diff-drawer");
     // 首次启动引导（P-6 同模式）：无完成标志时盖住整个壳（含 titlebar，
     // 内部自带全屏 LayerFill 背景）；完成/跳过写标志后组件卸载，空 grid
     // 穿透（同 splash 注释：切勿给空 grid 添加背景）。
@@ -489,7 +497,7 @@ fn app(cx: &mut RenderCx) -> Element {
     // 覆盖层 grid 必须显式 STAR 行/列：Grid 默认 Auto 会让 Stretch 子元素只
     // 覆盖内容大小（scrim 不全窗，遮罩不生效）——demo 已实证，同 interaction
     // 内部 grid 的修复。五个子元素重叠同一 cell（P-6 覆盖层模式）。
-    grid((base, splash, interaction, diagram_zoom, oobe))
+    grid((base, splash, interaction, diagram_zoom, diff_drawer, oobe))
         .rows([GridLength::STAR])
         .columns([GridLength::STAR])
         .into()

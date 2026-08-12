@@ -5,6 +5,9 @@
 //! Usage (against the parallel dev daemon):
 //!   $env:DEEPX_DATA_DIR = "F:\DeepX\.deepx-test-home\.deepx"
 //!   cargo run -p deepx-client --example command
+//!
+//! V4 链路验证：默认连真实数据目录（%USERPROFILE%\.deepx），向当前会话
+//! 发一条「执行 edit 工具」指令，主应用应显示工具胶囊/总结行/抽屉。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,7 +113,7 @@ fn main() {
             .send_command(
                 Some(&seed),
                 RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
-                    text: format!("[deepx-client smoke] hello at {}", now_unix()),
+                    text: "请执行一次文件编辑（edit 工具）：在 apps/winui/src/diff_drawer.rs 的顶部模块文档注释里追加一行：//! V4 链路验证 #2：总结行修复后的真实 edit 工具事件。只做这一个改动，不要改其他文件。".to_string(),
                     images: vec![],
                     attachments: None,
                 }),
@@ -123,9 +126,9 @@ fn main() {
             .expect("send_message");
         println!("[cmd] send_message ack = {ack:?}");
 
-        // 4. Observe the event echo for a few seconds.
-        println!("[wait] observing events for 4s...");
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        // 4. Observe the event echo briefly (agent turn runs after this CLI exits).
+        println!("[wait] observing events for 6s...");
+        tokio::time::sleep(Duration::from_secs(6)).await;
 
         // 5. Resolve uncertainty: command receipt (works even after success).
         let receipt = client.command_status(&command_id).await;
@@ -133,11 +136,4 @@ fn main() {
 
         println!("[done] write-path smoke complete");
     });
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }

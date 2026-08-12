@@ -20,13 +20,15 @@ use std::time::Duration;
 
 use deepx_fluent::{StatusTone, motion, tokens};
 use markdown_winui::{
-    AnswerView, LiveSegment, RichTextOutput, RoundView, TableHover, Transcript, TurnStatus,
-    TurnView,
+    AnswerView, BlockTranscript, BlockTurnView, BlockView, LiveSegment, RichTextOutput,
+    TableHover, TimelineBlockKind, ToolCardView,
 };
 use windows_reactor::*;
 
 use crate::bridge::Bridge;
 use crate::chat_adapter;
+use crate::diff_drawer;
+use crate::diff_drawer::{DiffDrawerRequest, DrawerFile};
 
 /// 图表放大请求（壳内 UI 状态）：`final_view` 点击图表卡片时写入，
 /// `main.rs` 挂载的 [`diagram_zoom_overlay`] 轮询消费（与 interaction_overlay
@@ -162,12 +164,12 @@ const SESSION_CACHE_CAPACITY: usize = 8;
 
 #[derive(Default)]
 struct SessionTranscriptCache {
-    entries: HashMap<String, Transcript>,
+    entries: HashMap<String, BlockTranscript>,
     order: VecDeque<String>,
 }
 
 impl SessionTranscriptCache {
-    fn store(&mut self, seed: String, transcript: Transcript) {
+    fn store(&mut self, seed: String, transcript: BlockTranscript) {
         if seed.is_empty() {
             return;
         }
@@ -181,7 +183,7 @@ impl SessionTranscriptCache {
         }
     }
 
-    fn restore(&mut self, seed: &str) -> Option<Transcript> {
+    fn restore(&mut self, seed: &str) -> Option<BlockTranscript> {
         let transcript = self.entries.get(seed)?.clone();
         self.order.retain(|item| item != seed);
         self.order.push_back(seed.to_string());
@@ -189,89 +191,12 @@ impl SessionTranscriptCache {
     }
 }
 
-/// 只合并 deferred 队尾的同目标流式事件；任何结构事件都会留在队尾，
-/// 因而不会跨 turn/round/tool/final 边界重排协议顺序。
-fn merge_deferred_event(
-    deferred: &mut VecDeque<markdown_winui::ConversationEvent>,
-    event: markdown_winui::ConversationEvent,
-) {
-    use markdown_winui::ConversationEvent;
-
-    match event {
-        ConversationEvent::RoundDelta {
-            turn_id,
-            round_num,
-            kind,
-            delta,
-        } => {
-            if let Some(ConversationEvent::RoundDelta {
-                turn_id: previous_turn,
-                round_num: previous_round,
-                kind: previous_kind,
-                delta: previous_delta,
-            }) = deferred.back_mut()
-                && *previous_turn == turn_id
-                && *previous_round == round_num
-                && *previous_kind == kind
-            {
-                previous_delta.push_str(&delta);
-            } else {
-                deferred.push_back(ConversationEvent::RoundDelta {
-                    turn_id,
-                    round_num,
-                    kind,
-                    delta,
-                });
-            }
-        }
-        checkpoint @ ConversationEvent::BlockCheckpoint { .. } => {
-            let replaces_previous = deferred.back().is_some_and(|previous| {
-                same_stream_target(previous, &checkpoint)
-                    && matches!(
-                        previous,
-                        ConversationEvent::RoundDelta { .. }
-                            | ConversationEvent::BlockCheckpoint { .. }
-                    )
-            });
-            if replaces_previous {
-                deferred.pop_back();
-            }
-            deferred.push_back(checkpoint);
-        }
-        other => deferred.push_back(other),
-    }
-}
-
-fn same_stream_target(
-    previous: &markdown_winui::ConversationEvent,
-    next: &markdown_winui::ConversationEvent,
-) -> bool {
-    use markdown_winui::ConversationEvent;
-
-    fn target(event: &ConversationEvent) -> Option<(&str, u32, markdown_winui::RoundDeltaKind)> {
-        match event {
-            ConversationEvent::RoundDelta {
-                turn_id,
-                round_num,
-                kind,
-                ..
-            }
-            | ConversationEvent::BlockCheckpoint {
-                turn_id,
-                round_num,
-                kind,
-                ..
-            } => Some((turn_id.as_str(), *round_num, *kind)),
-            _ => None,
-        }
-    }
-
-    target(previous) == target(next) && target(next).is_some()
-}
-
+// Phase 2：timeline 单源后，conversation 事件的跨帧合并（merge_deferred_event/
+// same_stream_target）随 chat_events 队列退役（M3 双发→timeline 单源），
+// 见 TIMELINE-MIGRATION-ROADMAP Phase 3。
 pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let color_scheme = cx.use_color_scheme();
-    let transcript = cx.use_ref::<Transcript>(Transcript::new());
+    let transcript = cx.use_ref::<BlockTranscript>(BlockTranscript::new());
     let frame_revoker = cx.use_ref::<Option<EventRevoker>>(None);
     let last_rev = cx.use_ref::<u64>(0);
     let last_seed = cx.use_ref::<String>(String::new());
@@ -305,8 +230,9 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let last_live_render = cx.use_ref::<std::time::Instant>(std::time::Instant::now());
     // 跨帧 reducer 余量：bridge 的数量限额先取一批，再按 UI 时间预算
     // 分段应用；未处理事件保留在此，下一次 CompositionTarget 帧继续。
+    // Phase 2：timeline entry（全局单调 seq，无需 coalesce）。
     let deferred_events =
-        cx.use_ref::<VecDeque<markdown_winui::ConversationEvent>>(VecDeque::new());
+        cx.use_ref::<VecDeque<markdown_winui::TimelineEntry>>(VecDeque::new());
     // 后台恢复检测：上一次 vsync 帧回调时刻。窗口最小化/不可见时合成器
     // 暂停回调，恢复可见后首帧 elapsed 即后台时长——超过阈值走"快照
     // 恢复"（丢弃积压增量 + 拉 timeline 快照一次到位），而非重放后台
@@ -328,7 +254,8 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 窗口快照缓存：按 Transcript 投影 rev + theme 复用整包；有变化时
     // 按 turn_id + turn mutation_rev 结构共享未变化行。主题纳入缓存键，
     // 避免 ActualThemeChanged 时仍把旧主题的 realized 行当作同一数据包。
-    let window_cache = cx.use_ref::<Option<((u64, ColorScheme), Rc<Vec<Rc<TurnView>>>)>>(None);
+    let window_cache =
+        cx.use_ref::<Option<((u64, ColorScheme), Rc<Vec<Rc<BlockTurnView>>>)>>(None);
     // transport drain 快速闸：8ms 下限，随 vsync 逐帧消费（见 DRAIN_INTERVAL）。
     let last_drain = cx.use_ref::<Option<std::time::Instant>>(None);
 
@@ -399,9 +326,9 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         && !*background_resumed.borrow()
                     {
                         *background_resumed.borrow_mut() = true;
-                        bridge.core().chat_drain();
+                        // 丢弃积压 timeline 增量（快照覆盖兜底）。
+                        bridge.core().timeline_drain_limit(usize::MAX);
                         deferred_events.borrow_mut().clear();
-                        bridge.core().chat_output_drain();
                         *last_restored_seed.borrow_mut() = String::new();
                         *recovering.borrow_mut() = Some(bridge.core().active_seed());
                         log_diag("chat_view: background resume (drop backlog + snapshot refresh)");
@@ -447,7 +374,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         // 队列有 seed 过滤，但本地 deferred 队列也必须清空。
                         deferred_events.borrow_mut().clear();
                         let cached = session_cache.borrow_mut().restore(&seed);
-                        *transcript.borrow_mut() = cached.clone().unwrap_or_else(Transcript::new);
+                        *transcript.borrow_mut() = cached.clone().unwrap_or_else(BlockTranscript::new);
                         *last_restored_seed.borrow_mut() = if cached.is_some() {
                             seed.clone()
                         } else {
@@ -495,12 +422,9 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     } else {
                         CHAT_EVENTS_PER_FRAME / 4
                     };
-                    let (events, rev) = bridge.core().chat_drain_limit(fetch_limit);
-                    let output_resolutions = bridge.core().chat_output_drain();
-                    // 诊断：drain 吞吐（chat 事件 + output 决议）。
-                    crate::diagnostics::record_drain(
-                        (events.len() + output_resolutions.len()) as u32,
-                    );
+                    let (events, rev) = bridge.core().timeline_drain_limit(fetch_limit);
+                    // 诊断：drain 吞吐（timeline 事件）。
+                    crate::diagnostics::record_drain(events.len() as u32);
                     // 1) timeline 快照（resume 历史；peek + seed 校验）：
                     //    匹配才消费；不匹配**保留**快照（不丢弃）并主动重拉
                     //    active seed 的快照——原 take 语义消费即弃，丢弃后
@@ -509,15 +433,16 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                     if let Some((snap_seed, snap)) = bridge.core().chat_timeline_peek() {
                         if snap_seed == seed {
                             bridge.core().chat_timeline_consume();
-                            let turns = chat_adapter::restored_turns(&snap);
-                            let n = turns.len();
+                            let snap_view =
+                                chat_adapter::timeline_snapshot(&snap).unwrap_or_default();
+                            let n = snap_view.turns.len();
                             let preserve_viewport = pending_viewport_restore
                                 .borrow()
                                 .as_ref()
                                 .is_some_and(|(restore_seed, _, _)| restore_seed == &seed);
                             let prior_window_len = transcript.borrow().window_len();
                             let mut transcript = transcript.borrow_mut();
-                            transcript.restore(turns);
+                            transcript.restore(&snap_view);
                             let restored_window_len = transcript.window_len();
                             if preserve_viewport && prior_window_len > restored_window_len {
                                 transcript.expand_window(prior_window_len - restored_window_len);
@@ -582,8 +507,9 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         let mut t = transcript.borrow_mut();
                         let mut prepended = 0usize;
                         for (_, page) in pages {
-                            let turns = chat_adapter::restored_turns(&page);
-                            prepended += t.prepend_turns(turns);
+                            let snap_view =
+                                chat_adapter::timeline_snapshot(&page).unwrap_or_default();
+                            prepended += t.prepend_snapshot(&snap_view);
                         }
                         if prepended > 0 {
                             *pending_anchor.borrow_mut() = Some(prepended);
@@ -595,91 +521,55 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             ));
                         }
                     }
-                    // 1.75) 外置终态正文：transport 在后台校验并下载，UI
-                    // 线程只把结果归并回 Transcript 的同一个 round 状态。
-                    if !output_resolutions.is_empty() {
-                        let mut t = transcript.borrow_mut();
-                        let mut changed = false;
-                        for resolution in output_resolutions {
-                            let change = match resolution.result {
-                                Ok(text) => t.resolve_output(
-                                    &resolution.turn_id,
-                                    resolution.round_num,
-                                    &text,
-                                ),
-                                Err(error) => t.fail_output(
-                                    &resolution.turn_id,
-                                    resolution.round_num,
-                                    error,
-                                ),
-                            };
-                            changed |= change.changed();
-                        }
-                        drop(t);
-                        if changed {
-                            *scroll_version.borrow_mut() += 1;
-                            *last_scroll_request.borrow_mut() = std::time::Instant::now();
-                            *render_generation.borrow_mut() += 1;
-                            set_render_generation.call(*render_generation.borrow());
-                        }
-                    }
-                    // 2) 增量事件（新对话流式）。先映射进跨帧队列，再按
-                    // reducer 时间预算应用；积压显式保留，下一帧继续。
+                    // 2) 增量事件（新对话流式）：timeline live entry → 跨帧
+                    // 队列 → reducer 时间预算应用；积压显式保留，下一帧继续。
                     if rev != *last_rev.borrow() {
                         *last_rev.borrow_mut() = rev;
                     }
                     if !events.is_empty() {
                         let mapped = events
                             .iter()
-                            .filter_map(|event| chat_adapter::render_event(event));
+                            .filter_map(chat_adapter::timeline_entry);
                         let mut deferred = deferred_events.borrow_mut();
-                        for event in mapped {
-                            merge_deferred_event(&mut deferred, event);
-                        }
+                        deferred.extend(mapped);
                     }
                     let reducer_started = std::time::Instant::now();
                     let mut update = markdown_winui::TranscriptChange::default();
-                    let pending_outputs = {
+                    {
                         let mut t = transcript.borrow_mut();
                         while reducer_started.elapsed() < CHAT_REDUCER_BUDGET {
-                            let Some(event) = deferred_events.borrow_mut().pop_front() else {
+                            let Some(entry) = deferred_events.borrow_mut().pop_front() else {
                                 break;
                             };
-                            update.merge(t.apply_coalesced(event));
+                            update.merge(t.apply_entry(&entry));
                         }
-                        t.take_pending_outputs()
-                    };
-                    if update.changed() || !pending_outputs.is_empty() {
-                        for pending in pending_outputs {
-                            bridge.core().spawn_resolve_chat_output(&seed, pending);
+                    }
+                    if update.changed() {
+                        let structural = update.is_structural();
+                        let now = std::time::Instant::now();
+                        // 滚动只随真正改变内容 extent 的 XAML 提交发生；
+                        // 状态徽标更新不再制造多余 ScrollViewer 请求。
+                        if update.extent_changed
+                            && (structural
+                                || now.duration_since(*last_scroll_request.borrow())
+                                    >= SCROLL_REQUEST_THROTTLE)
+                        {
+                            // 窗口跟随尾部：仅当窗口未被用户上滚扩展时滑动
+                            // （保持最近 N 个回合，长会话不退化）；用户上滚
+                            // 扩展后窗口保持，避免浏览内容跳动。
+                            if structural && transcript.borrow().tail_following() {
+                                transcript.borrow_mut().slide_window_tail();
+                            }
+                            *scroll_version.borrow_mut() += 1;
+                            *last_scroll_request.borrow_mut() = now;
                         }
-                        if update.changed() {
-                            let structural = update.is_structural();
-                            let now = std::time::Instant::now();
-                            // 滚动只随真正改变内容 extent 的 XAML 提交发生；
-                            // 状态徽标更新不再制造多余 ScrollViewer 请求。
-                            if update.extent_changed
-                                && (structural
-                                    || now.duration_since(*last_scroll_request.borrow())
-                                        >= SCROLL_REQUEST_THROTTLE)
-                            {
-                                // 窗口跟随尾部：仅当窗口未被用户上滚扩展时滑动
-                                // （保持最近 N 个回合，长会话不退化）；用户上滚
-                                // 扩展后窗口保持，避免浏览内容跳动。
-                                if structural && transcript.borrow().tail_following() {
-                                    transcript.borrow_mut().slide_window_tail();
-                                }
-                                *scroll_version.borrow_mut() += 1;
-                                *last_scroll_request.borrow_mut() = now;
-                            }
-                            if structural
-                                || now.duration_since(*last_live_render.borrow())
-                                    >= LIVE_RENDER_INTERVAL
-                            {
-                                *last_live_render.borrow_mut() = now;
-                                *render_generation.borrow_mut() += 1;
-                                set_render_generation.call(*render_generation.borrow());
-                            }
+                        if structural
+                            || now.duration_since(*last_live_render.borrow())
+                                >= LIVE_RENDER_INTERVAL
+                        {
+                            *last_live_render.borrow_mut() = now;
+                            *render_generation.borrow_mut() += 1;
+                            set_render_generation.call(*render_generation.borrow());
                         }
                     }
                     // 覆盖层/加载态存活期间（后台恢复未完成，或快照未达
@@ -755,13 +645,13 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .automation_id("chat-empty")
             .with_key(format!("chat-empty-{active_seed}"));
     }
-    let turns: Rc<Vec<Rc<TurnView>>> = {
+    let turns: Rc<Vec<Rc<BlockTurnView>>> = {
         let cache_key = (s.mutation_rev(), color_scheme);
         let mut cache = window_cache.borrow_mut();
         match cache.as_ref() {
             Some((key, rc)) if *key == cache_key => rc.clone(),
             _ => {
-                let previous_by_id: HashMap<&str, &Rc<TurnView>> = cache
+                let previous_by_id: HashMap<&str, &Rc<BlockTurnView>> = cache
                     .as_ref()
                     .map(|(_, rows)| {
                         rows.iter()
@@ -769,7 +659,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                             .collect()
                     })
                     .unwrap_or_default();
-                let rows: Vec<Rc<TurnView>> = s
+                let rows: Vec<Rc<BlockTurnView>> = s
                     .window_turns()
                     .iter()
                     .map(|turn| {
@@ -790,7 +680,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 顶部预加载后本帧需要锚定补偿：取走挂起标记，把
     // 「原窗口首行」（新下标 = 扩展前移量）锚回原位，视口不跳。
     let anchor_rows = pending_anchor.borrow_mut().take();
-    let mut builder = list_view_rc(turns, move |turn: &Rc<TurnView>, _i: usize| {
+    let mut builder = list_view_rc(turns, move |turn: &Rc<BlockTurnView>, _i: usize| {
         // turn 级 memo：mutation_rev 未变 → reconciler 完全跳过 turn_view
         // （不深克隆 RichTextParagraph / 不重跑代码高亮 / 不 diff 行内部），
         // 只有本 turn 内容变化才重建。每次 XAML 提交从「重建整个可见
@@ -804,7 +694,7 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         )
         .with_key(turn.turn_id.clone())
     })
-    .with_key_selector(|turn: &Rc<TurnView>| turn.turn_id.clone())
+    .with_key_selector(|turn: &Rc<BlockTurnView>| turn.turn_id.clone())
     .selection_mode(SelectionMode::None);
     if let Some(anchor_rows) = anchor_rows {
         builder = builder.preserve_anchor(*scroll_version.borrow(), anchor_rows, 0.0);
@@ -962,53 +852,25 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
 #[cfg(test)]
 mod session_cache_tests {
     use super::*;
-    use markdown_winui::{ConversationEvent, RoundDeltaKind};
+    use markdown_winui::TimelineEntry as TLEntry;
 
-    #[test]
-    fn deferred_queue_merges_across_bridge_drains() {
-        let mut deferred = VecDeque::new();
-        for delta in ["a", "b"] {
-            merge_deferred_event(
-                &mut deferred,
-                ConversationEvent::RoundDelta {
-                    turn_id: "t1".into(),
-                    round_num: 0,
-                    kind: RoundDeltaKind::Answering,
-                    delta: delta.into(),
-                },
-            );
-        }
-        assert_eq!(deferred.len(), 1);
-        assert!(matches!(
-            deferred.front(),
-            Some(ConversationEvent::RoundDelta { delta, .. }) if delta == "ab"
-        ));
-        merge_deferred_event(
-            &mut deferred,
-            ConversationEvent::BlockCheckpoint {
-                turn_id: "t1".into(),
-                round_num: 0,
-                kind: RoundDeltaKind::Answering,
-                text: "authoritative".into(),
+    fn turn_opened(seq: u64, turn_id: &str, user_text: &str) -> TLEntry {
+        TLEntry {
+            timeline_seq: seq,
+            turn_id: turn_id.into(),
+            round_num: None,
+            event: markdown_winui::TimelineEvent::TurnOpened {
+                user_text: user_text.into(),
             },
-        );
-        assert_eq!(deferred.len(), 1);
-        assert!(matches!(
-            deferred.front(),
-            Some(ConversationEvent::BlockCheckpoint { text, .. })
-                if text == "authoritative"
-        ));
+        }
     }
 
     #[test]
     fn cache_restores_recent_transcript_and_evicts_oldest() {
         let mut cache = SessionTranscriptCache::default();
         for i in 0..=SESSION_CACHE_CAPACITY {
-            let mut transcript = Transcript::new();
-            transcript.apply(&markdown_winui::ConversationEvent::TurnStarted {
-                turn_id: format!("t{i}"),
-                user_text: format!("q{i}"),
-            });
+            let mut transcript = BlockTranscript::new();
+            transcript.apply_entry(&turn_opened(1, &format!("t{i}"), &format!("q{i}")));
             cache.store(format!("s{i}"), transcript);
         }
         assert!(cache.restore("s0").is_none());
@@ -1016,14 +878,14 @@ mod session_cache_tests {
     }
 }
 
-// ── turn / round / answer 渲染（移植自 streaming-demo）─────────────
+// ── turn / block 渲染（timeline 单源，Phase 2）────────────────────
 
-/// turn 级 memo 的 props。等价 = 同一份 TurnView 数据（Rc 指针命中，或
-/// turn_id + mutation_rev 相同）+ 位置 + 主题。memo 命中时 reconciler
+/// turn 级 memo 的 props。等价 = 同一份 BlockTurnView 数据（Rc 指针命中，或
+/// turn_id + mutation_rev 相同）+ 主题。memo 命中时 reconciler
 /// 复用上次渲染输出（不执行组件函数），行 diff 也直接走 props 比较。
 #[derive(Clone)]
 struct TurnProps {
-    turn: Rc<TurnView>,
+    turn: Rc<BlockTurnView>,
     color_scheme: ColorScheme,
 }
 
@@ -1090,52 +952,6 @@ fn turn_body(props: &TurnProps, cx: &mut RenderCx) -> Element {
     .into()
 }
 
-
-
-#[derive(Clone)]
-struct RoundProps {
-    turn_id: Rc<str>,
-    round: Rc<RoundView>,
-    turn_status: TurnStatus,
-    is_latest: bool,
-    color_scheme: ColorScheme,
-}
-
-impl PartialEq for RoundProps {
-    fn eq(&self, other: &Self) -> bool {
-        self.turn_id == other.turn_id
-            && self.turn_status == other.turn_status
-            && self.is_latest == other.is_latest
-            && self.color_scheme == other.color_scheme
-            && (Rc::ptr_eq(&self.round, &other.round)
-                || (self.round.round_num == other.round.round_num
-                    && self.round.mutation_rev == other.round.mutation_rev))
-    }
-}
-
-fn round_memo(props: &RoundProps, cx: &mut RenderCx) -> Element {
-    let auto_expanded =
-        activity_presentation(props.round.as_ref(), props.turn_status, props.is_latest)
-            .is_some_and(|presentation| presentation.state == ActivityState::Running);
-    let (activity_expanded, set_activity_expanded) = cx.use_state(auto_expanded);
-    cx.use_effect(auto_expanded, {
-        let set_activity_expanded = set_activity_expanded.clone();
-        move || set_activity_expanded.call(auto_expanded)
-    });
-    // 表格行悬停状态：按 round 隔离，组件销毁即随历史释放。
-    let table_hover = TableHover::new(cx);
-    round_view(
-        props.turn_id.as_ref(),
-        props.round.as_ref(),
-        props.turn_status,
-        props.is_latest,
-        activity_expanded,
-        set_activity_expanded,
-        &table_hover,
-        props.color_scheme.clone(),
-    )
-}
-
 /// 撤回菜单浮层（右键弹出；图标 + 文字，仿 MenuFlyout 视觉）。
 fn undo_menu_float(on_undo: impl Fn() + 'static) -> Element {
     border(
@@ -1152,17 +968,21 @@ fn undo_menu_float(on_undo: impl Fn() + 'static) -> Element {
     .into()
 }
 
+/// turn 级视图：用户气泡 + 状态徽标 + 失败提示 + blocks 按**到达序**渲染
+/// （跨 round 交错保序——修复“思考-工具-回复”被三段式压平的缺陷 D1）。
 fn turn_view(
-    turn: &TurnView,
+    turn: &BlockTurnView,
     color_scheme: ColorScheme,
     menu_open: bool,
     on_undo: impl Fn() + 'static,
     set_menu_open: SetState<bool>,
 ) -> Element {
-    let (status, tone) = match turn.status {
-        TurnStatus::Running => ("正在处理", StatusTone::Running),
-        TurnStatus::Completed => ("已完成", StatusTone::Success),
-        TurnStatus::Failed => ("失败", StatusTone::Critical),
+    let (status, tone) = if turn.failed {
+        ("失败", StatusTone::Critical)
+    } else if turn.sealed {
+        ("已完成", StatusTone::Success)
+    } else {
+        ("正在处理", StatusTone::Running)
     };
     let mut items: Vec<Element> = vec![deepx_fluent::user_message(
         text_block(&turn.user_text)
@@ -1176,8 +996,8 @@ fn turn_view(
     if menu_open {
         items.insert(0, undo_menu_float(on_undo));
     }
-    if turn.status == TurnStatus::Failed {
-        if let Some(error) = &turn.failed_error {
+    if turn.failed {
+        if let Some(error) = &turn.failure {
             items.push(
                 text_block(format!("回合失败：{error}"))
                     .font_size(tokens::TYPE_CAPTION)
@@ -1190,22 +1010,34 @@ fn turn_view(
             );
         }
     }
-    let turn_id: Rc<str> = Rc::from(turn.turn_id.as_str());
-    let round_count = turn.rounds.len();
-    for (round_index, round) in turn.rounds.iter().enumerate() {
+    // blocks 按到达序渲染（每块独立 memo：block_id + mutation_rev）。
+    // Tool 块不占原位：全部收集，区段**集中渲染在 turn 底部**（答案之后）
+    // ——对话流 = 思考 → 答案 → [工具工作区]（V4-C）；区段整体 memo
+    // （内部任一块 rev 变化才重建）；其余块保持逐块 memo。
+    let mut tool_group: Vec<Rc<BlockView>> = Vec::new();
+    for block in &turn.blocks {
+        if block.kind == TimelineBlockKind::Tool {
+            tool_group.push(block.clone());
+            continue;
+        }
         items.push(
             memo(
-                round_memo,
-                RoundProps {
-                    turn_id: turn_id.clone(),
-                    round: round.clone(),
-                    turn_status: turn.status,
-                    is_latest: round_index + 1 == round_count,
+                block_memo,
+                BlockProps {
+                    turn_id: Rc::from(turn.turn_id.as_str()),
+                    block: block.clone(),
                     color_scheme: color_scheme.clone(),
                 },
             )
-            .with_key(format!("{}-round-{}", turn.turn_id, round.round_num)),
+            .with_key(format!("{}-block-{}", turn.turn_id, block.block_id)),
         );
+    }
+    // 含 diff 的工具块 → turn 末尾总结行「已修改 N 个文件 · 查看详情」（V4）。
+    // ⚠ 必须先收集再 push_tool_section：后者 `std::mem::take(group)` 会清空列表。
+    let drawer_req = collect_diff_drawer(&turn.turn_id, &tool_group);
+    push_tool_section(&mut items, &turn.turn_id, &mut tool_group, &color_scheme);
+    if let Some(req) = drawer_req {
+        items.push(diff_summary_row(&turn.turn_id, req));
     }
     vstack(items)
         .spacing(tokens::SPACE_3)
@@ -1229,239 +1061,182 @@ fn turn_view(
         .into()
 }
 
-fn round_view(
-    turn_id: &str,
-    round: &RoundView,
-    turn_status: TurnStatus,
-    is_latest: bool,
-    activity_expanded: bool,
-    set_activity_expanded: SetState<bool>,
-    table_hover: &TableHover,
+/// block 级 memo：block_id + mutation_rev 等价判据（live delta 只重建
+/// 变化的块，不重建整个 turn）。
+#[derive(Clone)]
+struct BlockProps {
+    turn_id: Rc<str>,
+    block: Rc<BlockView>,
     color_scheme: ColorScheme,
-) -> Element {
-    let mut items: Vec<Element> = Vec::new();
-    if let Some(activity) = activity_group(
-        turn_id,
-        round,
-        turn_status,
-        is_latest,
-        activity_expanded,
-        set_activity_expanded,
-        color_scheme.clone(),
-    ) {
-        items.push(activity);
+}
+
+impl PartialEq for BlockProps {
+    fn eq(&self, other: &Self) -> bool {
+        self.color_scheme == other.color_scheme
+            && self.turn_id == other.turn_id
+            && (Rc::ptr_eq(&self.block, &other.block)
+                || (self.block.block_id == other.block.block_id
+                    && self.block.mutation_rev == other.block.mutation_rev))
     }
-    if answer_has_visible_content(&round.answer) {
-        items.push(deepx_fluent::assistant_message(answer_view(
-            turn_id,
-            round.round_num,
-            &round.answer,
-            table_hover,
-            color_scheme,
-        )));
+}
+
+fn block_memo(props: &BlockProps, _cx: &mut RenderCx) -> Element {
+    component(block_view, props.clone())
+        .with_key(format!("{}-block-{}", props.turn_id, props.block.block_id))
+}
+
+/// 块渲染分派（按 kind；顺序由 turn.blocks 到达序决定）。
+fn block_view(props: &BlockProps, cx: &mut RenderCx) -> Element {
+    let block = props.block.as_ref();
+    match block.kind {
+        TimelineBlockKind::Reasoning => component(reasoning_view, props.clone())
+            .with_key(format!("{}-block-reasoning-{}", props.turn_id, block.block_id)),
+        TimelineBlockKind::Tool => {
+            let card = block.tool.clone().unwrap_or_else(|| ToolCardView {
+                id: block.block_id.clone(),
+                name: None,
+                args_display: String::new(),
+                args_json: None,
+                body: markdown_winui::ToolBody::Empty,
+                changes: None,
+                done: false,
+                failed: false,
+                failure: None,
+                provider: false,
+            });
+            tool_row(
+                props.turn_id.as_ref(),
+                block.block_order,
+                &card,
+                block.duration_ms,
+                props.color_scheme.clone(),
+            )
+        }
+        TimelineBlockKind::Text => {
+            if answer_has_visible_content(&block.answer) {
+                // 表格行悬停状态：按块隔离，组件销毁即随历史释放。
+                let table_hover = TableHover::new(cx);
+                deepx_fluent::assistant_message(answer_view(
+                    props.turn_id.as_ref(),
+                    block.block_order,
+                    &block.answer,
+                    &table_hover,
+                    props.color_scheme.clone(),
+                ))
+                .with_key(format!("{}-block-answer-{}", props.turn_id, block.block_id))
+            } else {
+                Element::Empty
+            }
+        }
+        TimelineBlockKind::Notice => notice_block(props.turn_id.as_ref(), block),
     }
-    if round.output_loading {
-        items.push(
-            text_block("正在读取完整回答…")
-                .font_size(tokens::TYPE_CAPTION)
-                .foreground(ThemeRef::SecondaryText)
-                .automation_name("正在读取完整回答")
-                .with_key(format!("{turn_id}-r{}-output-loading", round.round_num))
-                .into(),
-        );
+}
+
+/// reasoning 块（V4）：可折叠"过程摘要"。
+///
+/// - 头部：状态点（思考中=spinner / 完成=✓ 绿）+ 标题 + meta + chevron；
+/// - 内容：固定高 8 行**尾部窗口**（永远显示最新内容 = 语义等价自动追尾；
+///   思考过程是过程性内容，不提供向上回溯——比 ScrollViewer 编程滚动
+///   便宜且行为确定，fork 未暴露 ChangeView）；
+/// - 交互：思考中默认展开，sealed 且用户未手动操作 → 自动折叠为一行。
+fn reasoning_view(props: &BlockProps, cx: &mut RenderCx) -> Element {
+    let block = props.block.as_ref();
+    if block.text.trim().is_empty() {
+        return Element::Empty;
     }
-    if let Some(error) = &round.output_error {
-        items.push(
-            text_block(format!("完整回答读取失败：{error}"))
-                .font_size(tokens::TYPE_CAPTION)
-                .foreground(ThemeRef::SystemCritical)
-                .wrap()
-                .selectable()
-                .automation_name("完整回答读取失败")
-                .with_key(format!("{turn_id}-r{}-output-error", round.round_num))
-                .into(),
-        );
+    let (open, set_open) = cx.use_state::<bool>(true);
+    let user_touched = cx.use_ref::<bool>(false);
+    let done = block.sealed;
+    // 自动折叠：sealed 且用户从未手动开合过。
+    cx.use_effect((done,), {
+        let set_open = set_open.clone();
+        let user_touched = user_touched.clone();
+        move || {
+            if done && !*user_touched.borrow() {
+                set_open.call(false);
+            }
+        }
+    });
+    // 尾部 8 行（lines 保留空行；取最后 8 行倒序还原）。
+    const REASONING_TAIL_LINES: usize = 8;
+    const REASONING_TAIL_HEIGHT: f64 = 176.0;
+    let lines: Vec<&str> = block.text.lines().collect();
+    let tail: Vec<&str> = lines
+        .iter()
+        .rev()
+        .take(REASONING_TAIL_LINES)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let tail_text = tail.join("\n");
+    let mut run = RichTextRun::plain(&tail_text);
+    run.is_italic = true;
+    let mut summary = RichTextBlock::new();
+    summary.paragraphs = vec![RichTextParagraph::new(vec![RichTextInline::Run(run)])];
+    summary.font_size = Some(tokens::TYPE_BODY);
+    summary.line_height = Some(tokens::TYPE_BODY_LINE_HEIGHT);
+    summary.text_wrapping = TextWrapping::Wrap;
+    summary.is_text_selection_enabled = true;
+    summary.modifiers.font_family = Some(tokens::DEFAULT_UI_FONT_FAMILY.to_string());
+    let _ = props.color_scheme.clone();
+    // 头部：状态点 + 标题 + meta + chevron（Expander 自带折叠交互）。
+    let dot: Element = if done {
+        text_block("✓")
+            .font_size(10.0)
+            .foreground(ThemeRef::SystemSuccess)
+            .into()
+    } else {
+        ProgressRing::indeterminate().width(10.0).height(10.0).into()
+    };
+    let head = hstack((
+        dot,
+        text_block(if done { "过程摘要" } else { "正在整理过程摘要" })
+            .font_size(tokens::TYPE_CAPTION)
+            .semibold(),
+        text_block(if done { "已折叠" } else { "思考中…" })
+            .font_size(tokens::TYPE_CAPTION)
+            .foreground(ThemeRef::SecondaryText),
+    ))
+    .spacing(tokens::SPACE_2);
+    Expander::new(
+        vstack((Element::from(summary),))
+            .max_height(REASONING_TAIL_HEIGHT)
+            .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2)),
+    )
+    .header_content(head)
+    .expanded(open)
+    .on_expanding({
+        let user_touched = user_touched.clone();
+        let set_open = set_open.clone();
+        move |v| {
+            *user_touched.borrow_mut() = true;
+            set_open.call(v);
+        }
+    })
+    .min_height(34.0)
+    .automation_name(if done { "过程摘要" } else { "正在整理过程摘要" })
+    .automation_id(format!("chat-reasoning-{}", block.block_id))
+    .with_key(format!("{}-block-reasoning-{}", props.turn_id, block.block_id))
+    .into()
+}
+
+/// notice 块：系统/服务端通知文本（遥测平面，不参与正文排序语义）。
+fn notice_block(turn_id: &str, block: &BlockView) -> Element {
+    if block.text.trim().is_empty() {
+        return Element::Empty;
     }
-    vstack(items)
-        .spacing(tokens::SPACE_2)
-        .max_width(tokens::READING_MAX_WIDTH)
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .with_key(format!("{turn_id}-r{}-body", round.round_num))
+    text_block(&block.text)
+        .font_size(tokens::TYPE_CAPTION)
+        .foreground(ThemeRef::SecondaryText)
+        .wrap()
+        .selectable()
+        .automation_name("系统通知")
+        .with_key(format!("{turn_id}-block-notice-{}", block.block_id))
         .into()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ActivityState {
-    Running,
-    Completed,
-    Failed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ActivityPresentation {
-    state: ActivityState,
-    title: String,
-    meta: String,
-}
-
-fn activity_presentation(
-    round: &RoundView,
-    turn_status: TurnStatus,
-    is_latest: bool,
-) -> Option<ActivityPresentation> {
-    let has_thinking = round
-        .thinking
-        .as_deref()
-        .is_some_and(|thinking| !thinking.trim().is_empty());
-    if !has_thinking && round.tool_calls.is_empty() {
-        return None;
-    }
-
-    let has_running_tool = round.tool_calls.iter().any(|card| !card.done);
-    let state = if has_running_tool || (is_latest && turn_status == TurnStatus::Running) {
-        ActivityState::Running
-    } else if is_latest && turn_status == TurnStatus::Failed {
-        ActivityState::Failed
-    } else {
-        ActivityState::Completed
-    };
-    let current_action = round
-        .tool_calls
-        .iter()
-        .rev()
-        .find(|card| !card.done)
-        .or_else(|| round.tool_calls.last())
-        .map(tool_action)
-        .unwrap_or_else(|| "整理过程摘要".to_string());
-    let title = match state {
-        ActivityState::Running => format!("正在{current_action}"),
-        ActivityState::Completed if round.tool_calls.len() > 1 => {
-            format!("已完成 · {current_action}等操作")
-        }
-        ActivityState::Completed => format!("已完成 · {current_action}"),
-        ActivityState::Failed => format!("处理未完成 · {current_action}"),
-    };
-    let meta = match (round.tool_calls.len(), has_thinking) {
-        (0, _) => "过程摘要".to_string(),
-        (count, true) => format!("{count} 次工具调用 · 含摘要"),
-        (count, false) => format!("{count} 次工具调用"),
-    };
-    Some(ActivityPresentation { state, title, meta })
-}
-
-fn activity_group(
-    turn_id: &str,
-    round: &RoundView,
-    turn_status: TurnStatus,
-    is_latest: bool,
-    expanded: bool,
-    set_expanded: SetState<bool>,
-    color_scheme: ColorScheme,
-) -> Option<Element> {
-    let presentation = activity_presentation(round, turn_status, is_latest)?;
-    let (glyph, status_color) = match presentation.state {
-        ActivityState::Running => ("●", ThemeRef::SystemCaution),
-        ActivityState::Completed => ("✓", ThemeRef::SystemSuccess),
-        ActivityState::Failed => ("×", ThemeRef::SystemCritical),
-    };
-    let header = grid((
-        text_block(glyph)
-            .font_size(tokens::TYPE_CAPTION)
-            .foreground(status_color)
-            .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(0),
-        text_block(&presentation.title)
-            .font_size(tokens::TYPE_CAPTION)
-            .semibold()
-            .text_trimming(TextTrimming::CharacterEllipsis)
-            .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(1),
-        text_block(&presentation.meta)
-            .font_size(tokens::TYPE_CAPTION)
-            .foreground(ThemeRef::SecondaryText)
-            .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(2),
-    ))
-    .columns([GridLength::Pixel(16.0), GridLength::STAR, GridLength::Auto])
-    .column_spacing(tokens::SPACE_2)
-    .horizontal_alignment(HorizontalAlignment::Stretch);
-
-    let mut details: Vec<Element> = Vec::new();
-    if let Some(thinking) = round
-        .thinking
-        .as_deref()
-        .filter(|thinking| !thinking.trim().is_empty())
-    {
-        // 过程文本留在活动组内，不再单独占据一个常态展开的卡片。
-        let mut run = RichTextRun::plain(thinking);
-        run.is_italic = true;
-        let mut summary = RichTextBlock::new();
-        summary.paragraphs = vec![RichTextParagraph::new(vec![RichTextInline::Run(run)])];
-        summary.font_size = Some(tokens::TYPE_BODY);
-        summary.line_height = Some(tokens::TYPE_BODY_LINE_HEIGHT);
-        summary.text_wrapping = TextWrapping::Wrap;
-        summary.is_text_selection_enabled = true;
-        // RichTextBlock 不参与 XAML 字体属性继承，继续显式使用应用 UI 字体。
-        summary.modifiers.font_family = Some(tokens::DEFAULT_UI_FONT_FAMILY.to_string());
-        details.push(
-            vstack((
-                text_block("过程摘要")
-                    .font_size(tokens::TYPE_CAPTION)
-                    .semibold()
-                    .foreground(ThemeRef::SecondaryText),
-                Element::from(summary).with_key(format!("{turn_id}-r{}-thinking", round.round_num)),
-            ))
-            .spacing(tokens::SPACE_1)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .with_key(format!("{turn_id}-r{}-thinking-group", round.round_num))
-            .into(),
-        );
-    }
-    if !round.tool_calls.is_empty() {
-        details.push(
-            text_block("工具详情")
-                .font_size(tokens::TYPE_CAPTION)
-                .semibold()
-                .foreground(ThemeRef::SecondaryText)
-                .with_key(format!("{turn_id}-r{}-tools-heading", round.round_num))
-                .into(),
-        );
-        for card in &round.tool_calls {
-            details.push(tool_card(
-                turn_id,
-                round.round_num,
-                card,
-                color_scheme.clone(),
-            ));
-        }
-    }
-
-    let automation_name = format!("{}，{}", presentation.title, presentation.meta);
-    Some(
-        Expander::new(
-            vstack(details)
-                .spacing(tokens::SPACE_2)
-                .padding(Thickness {
-                    left: tokens::SPACE_2,
-                    top: tokens::SPACE_1,
-                    right: 0.0,
-                    bottom: tokens::SPACE_2,
-                })
-                .horizontal_alignment(HorizontalAlignment::Stretch),
-        )
-        .header_content(header)
-        .expanded(expanded)
-        .on_expanding(set_expanded)
-        .min_height(40.0)
-        .padding(Thickness::xy(tokens::SPACE_2, tokens::SPACE_1))
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .tooltip("展开或折叠本轮活动详情")
-        .automation_name(automation_name)
-        .automation_id(format!("chat-activity-{turn_id}-{}", round.round_num))
-        .with_key(format!("{turn_id}-r{}-activity", round.round_num))
-        .into(),
-    )
-}
 
 fn answer_has_visible_content(answer: &AnswerView) -> bool {
     match answer {
@@ -1707,57 +1482,339 @@ fn tool_argument_hint(card: &markdown_winui::ToolCardView) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn tool_card(
+/// 工具行（V4 胶囊）：状态图标 + 动作短语 + 参数摘要 + 统计（±N · 耗时），
+/// 点击展开详情（参数 raw / 执行状态；失败时顶部为错误摘要）。
+fn tool_row(
     turn_id: &str,
-    round_num: u32,
+    block_order: u32,
     card: &markdown_winui::ToolCardView,
+    duration_ms: Option<u64>,
     color_scheme: ColorScheme,
 ) -> Element {
-    let status = if card.done {
-        "已完成"
-    } else {
-        "正在运行"
-    };
-    let name = card.name.as_deref().unwrap_or("解析中");
     let action = tool_action(card);
-    let action_label = tool_argument_hint(card)
-        .map(|hint| format!("{action} · {hint}"))
-        .unwrap_or(action);
-    let content_key = format!("{turn_id}-r{round_num}-card-{}-body", card.id);
-    let body: Element = if !matches!(card.body, markdown_winui::ToolBody::Empty) {
-        markdown_winui::tool_body_view(
+    let hint = tool_argument_hint(card);
+    let mut line = action.clone();
+    if let Some(h) = &hint {
+        line.push_str(" · ");
+        line.push_str(h);
+    }
+    // 统计：±N（changes.label）+ 耗时（block 墙钟）。
+    let mut stats: Vec<String> = Vec::new();
+    if let Some(changes) = &card.changes {
+        if !changes.is_empty() {
+            stats.push(changes.label());
+        }
+    }
+    if let Some(ms) = duration_ms {
+        stats.push(format_duration(ms));
+    }
+    if !stats.is_empty() {
+        line.push_str("   ");
+        line.push_str(&stats.join("  "));
+    }
+    // 状态图标（文案不随状态变化；状态由图标/颜色表达）。
+    let icon: Element = if !card.done {
+        ProgressRing::indeterminate().width(12.0).height(12.0).into()
+    } else if card.failed {
+        text_block("✕")
+            .font_size(12.0)
+            .foreground(ThemeRef::SystemCritical)
+            .into()
+    } else {
+        text_block("✓")
+            .font_size(12.0)
+            .foreground(ThemeRef::SystemSuccess)
+            .into()
+    };
+    let header = hstack((
+        icon,
+        text_block(&line)
+            .font_size(tokens::TYPE_CAPTION)
+            .foreground(if card.failed {
+                ThemeRef::SystemCritical
+            } else {
+                ThemeRef::PrimaryText
+            }),
+    ))
+    .spacing(tokens::SPACE_2);
+    // 详情（手动展开）：失败 → 错误摘要置顶；随后参数 raw / 执行状态。
+    let content_key = format!("{turn_id}-r{block_order}-card-{}-body", card.id);
+    let mut body: Vec<Element> = Vec::new();
+    if card.failed {
+        if let Some(f) = &card.failure {
+            body.push(
+                text_block(format!("错误：{f}"))
+                    .font_size(tokens::TYPE_CAPTION)
+                    .foreground(ThemeRef::SystemCritical)
+                    .wrap()
+                    .selectable()
+                    .into(),
+            );
+        }
+    }
+    if !matches!(card.body, markdown_winui::ToolBody::Empty) {
+        body.push(markdown_winui::tool_body_view(
             &card.body,
             color_scheme,
             tokens::CODE_FONT_FAMILY,
             &content_key,
-        )
+        ));
     } else if card.args_display.trim().is_empty() {
-        text_block("").font_size(tokens::TYPE_CAPTION).into()
+        body.push(text_block("").font_size(tokens::TYPE_CAPTION).into());
     } else {
-        text_block(&card.args_display)
-            .font_size(tokens::TYPE_CAPTION)
-            .wrap()
-            .selectable()
-            .into()
-    };
-    let header = card
-        .changes
-        .as_ref()
-        .filter(|changes| !changes.is_empty())
-        .map(|changes| format!("{status} · {action_label} · {}", changes.label()))
-        .unwrap_or_else(|| format!("{status} · {action_label}"));
-    Expander::new(body)
-        .header(header)
+        body.push(
+            text_block(&card.args_display)
+                .font_size(tokens::TYPE_CAPTION)
+                .wrap()
+                .selectable()
+                .into(),
+        );
+    }
+    let name = card.name.as_deref().unwrap_or("工具");
+    Expander::new(vstack(body).spacing(tokens::SPACE_2))
+        .header_content(header)
         .expanded(false)
-        .min_height(36.0)
-        .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2))
-        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .min_height(30.0)
         .tooltip(format!("展开或折叠工具详情：{name}"))
-        .automation_name(format!("{action_label}，{status}"))
+        .automation_name(format!("{line}"))
         .automation_id(format!("chat-tool-{}", card.id))
-        .transition(motion::reveal(), motion::content_exit())
-        .with_key(format!("{turn_id}-r{round_num}-card-{}", card.id))
+        .with_key(format!("{turn_id}-r{block_order}-tool-{}", card.id))
         .into()
+}
+
+/// 耗时格式化（block 墙钟；1s 内显示毫秒，之后一位小数秒）。
+fn format_duration(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
+// ── ToolView：连续工具块聚合区段（V4）────────────────────────────
+
+/// ToolSection props（memo：区段内任一块 mutation_rev 变化才重建；
+/// 工具块低频更新——ToolUpdated/ToolProgress/BlockSealed——聚合粒度可接受）。
+#[derive(Clone)]
+struct ToolSectionProps {
+    turn_id: Rc<str>,
+    /// 区段内工具块（全部 kind=Tool，按到达序）。
+    blocks: Vec<Rc<BlockView>>,
+    color_scheme: ColorScheme,
+}
+
+impl PartialEq for ToolSectionProps {
+    fn eq(&self, other: &Self) -> bool {
+        self.color_scheme == other.color_scheme
+            && self.turn_id == other.turn_id
+            && self.blocks.len() == other.blocks.len()
+            && self.blocks.iter().zip(&other.blocks).all(|(a, b)| {
+                Rc::ptr_eq(a, b)
+                    || (a.block_id == b.block_id && a.mutation_rev == b.mutation_rev)
+            })
+    }
+}
+
+/// turn 渲染末尾：工具块集中区段 → ToolSection memo（group 非空才插入；
+/// 区段渲染在 turn 底部 = 答案之后）。
+fn push_tool_section(
+    items: &mut Vec<Element>,
+    turn_id: &str,
+    group: &mut Vec<Rc<BlockView>>,
+    color_scheme: &ColorScheme,
+) {
+    if group.is_empty() {
+        return;
+    }
+    let props = ToolSectionProps {
+        turn_id: Rc::from(turn_id),
+        blocks: std::mem::take(group),
+        color_scheme: color_scheme.clone(),
+    };
+    items.push(memo(tool_section_memo, props).with_key(format!("{turn_id}-toolsection")));
+}
+
+/// 收集区段内工具块的 diff 数据（ToolBody::Diff → 按文件合并）→ 抽屉请求。
+/// 同路径多工具块（如 read 后 write）合并 rows + 统计；failed 取 OR。
+fn collect_diff_drawer(turn_id: &str, blocks: &[Rc<BlockView>]) -> Option<DiffDrawerRequest> {
+    let mut by_path: Vec<(String, bool, markdown_winui::DiffFile)> = Vec::new();
+    for block in blocks {
+        let Some(card) = &block.tool else { continue };
+        let markdown_winui::ToolBody::Diff(doc) = &card.body else {
+            continue;
+        };
+        let failed = card.failed;
+        for f in &doc.files {
+            let path = f.display_path().to_string();
+            if let Some((_, f_failed, existing)) =
+                by_path.iter_mut().find(|(p, _, _)| *p == path)
+            {
+                existing.rows.extend(f.rows.clone());
+                existing.lines_added += f.lines_added;
+                existing.lines_removed += f.lines_removed;
+                *f_failed = *f_failed || failed;
+            } else {
+                by_path.push((path, failed, f.clone()));
+            }
+        }
+    }
+    if by_path.is_empty() {
+        return None;
+    }
+    let files = by_path
+        .into_iter()
+        .map(|(path, failed, file)| DrawerFile {
+            path,
+            added: file.lines_added,
+            removed: file.lines_removed,
+            failed,
+            file,
+        })
+        .collect();
+    Some(DiffDrawerRequest {
+        turn_id: turn_id.to_string(),
+        files,
+    })
+}
+
+/// turn 末尾总结行：「已修改 N 个文件（+X −Y）· 查看详情 ›」→ 打开 diff 抽屉。
+fn diff_summary_row(turn_id: &str, req: DiffDrawerRequest) -> Element {
+    let n = req.files.len();
+    let added: usize = req.files.iter().map(|f| f.added).sum();
+    let removed: usize = req.files.iter().map(|f| f.removed).sum();
+    let failed_n = req.files.iter().filter(|f| f.failed).count();
+    let label = if failed_n > 0 {
+        format!("已修改 {n} 个文件（+{added} −{removed}）· {failed_n} 个异常")
+    } else {
+        format!("已修改 {n} 个文件（+{added} −{removed}）")
+    };
+    border(
+        hstack((
+            text_block(&label)
+                .font_size(12.0)
+                .foreground(ThemeRef::SecondaryText),
+            text_block("查看详情 ›")
+                .font_size(12.0)
+                .semibold()
+                .foreground(ThemeRef::AccentText),
+        ))
+        .spacing(8.0)
+        .padding(Thickness::xy(10.0, 6.0)),
+    )
+    .background(ThemeRef::LayerFill)
+    .border_brush(ThemeRef::CardStroke)
+    .border_thickness(Thickness::uniform(1.0))
+    .corner_radius(6.0)
+    .on_tapped(move || diff_drawer::open_diff_drawer(req.clone()))
+    .automation_name(&label)
+    .with_key(format!("{turn_id}-diff-summary"))
+    .into()
+}
+
+fn tool_section_memo(props: &ToolSectionProps, _cx: &mut RenderCx) -> Element {
+    component(tool_section, props.clone())
+        .with_key(format!("{}-toolsection", props.turn_id))
+}
+
+/// ToolView 聚合区段（V4-B：Codex 模式）——**Border 分组 + 状态头（非折叠）**，
+/// 工具行保留单层展开（详情完整可控）。头部状态机：running > error > done
+/// （不掩盖失败）：
+/// - 运行中：`⟳ 正在运行 N 个工具…`（spinner；并行计数）
+/// - 有失败：`⚠ 工具调用 (N) · M 个异常`
+/// - 全成功：`✓ 工具调用 (N)`
+fn tool_section(props: &ToolSectionProps, _cx: &mut RenderCx) -> Element {
+    let total = props.blocks.len();
+    let running = props
+        .blocks
+        .iter()
+        .filter(|b| b.tool.as_ref().map(|t| !t.done).unwrap_or(true))
+        .count();
+    let failed = props
+        .blocks
+        .iter()
+        .filter(|b| b.tool.as_ref().map(|t| t.failed).unwrap_or(false))
+        .count();
+    let head: Element = if running > 0 {
+        hstack((
+            ProgressRing::indeterminate().width(14.0).height(14.0),
+            text_block(if running > 1 {
+                format!("正在运行 {running} 个工具…")
+            } else {
+                "正在运行工具…".to_string()
+            })
+            .font_size(tokens::TYPE_CAPTION)
+            .semibold(),
+        ))
+        .spacing(tokens::SPACE_2)
+        .into()
+    } else if failed > 0 {
+        hstack((
+            text_block("⚠")
+                .font_size(12.0)
+                .foreground(ThemeRef::SystemCaution),
+            text_block(format!("工具调用 ({total})"))
+                .font_size(tokens::TYPE_CAPTION)
+                .semibold(),
+            text_block(format!("{failed} 个异常"))
+                .font_size(tokens::TYPE_CAPTION)
+                .foreground(ThemeRef::SystemCritical),
+        ))
+        .spacing(tokens::SPACE_2)
+        .into()
+    } else {
+        hstack((
+            text_block("✓")
+                .font_size(12.0)
+                .foreground(ThemeRef::SystemSuccess),
+            text_block(format!("工具调用 ({total})"))
+                .font_size(tokens::TYPE_CAPTION)
+                .semibold(),
+        ))
+        .spacing(tokens::SPACE_2)
+        .into()
+    };
+    let rows: Vec<Element> = props
+        .blocks
+        .iter()
+        .map(|block| {
+            let card = block.tool.clone().unwrap_or_else(|| ToolCardView {
+                id: block.block_id.clone(),
+                name: None,
+                args_display: String::new(),
+                args_json: None,
+                body: markdown_winui::ToolBody::Empty,
+                changes: None,
+                done: false,
+                failed: false,
+                failure: None,
+                provider: false,
+            });
+            tool_row(
+                props.turn_id.as_ref(),
+                block.block_order,
+                &card,
+                block.duration_ms,
+                props.color_scheme.clone(),
+            )
+        })
+        .collect();
+    border(
+        vstack((head, vstack(rows).spacing(tokens::SPACE_1)))
+            .spacing(tokens::SPACE_2)
+            .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2)),
+    )
+    .background(ThemeRef::LayerFill)
+    .border_brush(ThemeRef::CardStroke)
+    .border_thickness(Thickness::uniform(1.0))
+    .corner_radius(8.0)
+    .automation_name(if running > 0 {
+        format!("正在运行 {running} 个工具")
+    } else {
+        format!("工具调用 ({total})")
+    })
+    .automation_id(format!("chat-toolview-{}", props.turn_id))
+    .with_key(format!("{}-toolsection", props.turn_id))
+    .into()
 }
 
 #[cfg(test)]
@@ -1773,33 +1830,10 @@ mod activity_group_tests {
             body: markdown_winui::ToolBody::Empty,
             changes: None,
             done,
+            failed: false,
+            failure: None,
             provider: false,
         }
-    }
-
-    #[test]
-    fn completed_round_collapses_to_one_activity_summary() {
-        let mut round = RoundView::default();
-        round.thinking = Some("核对配置".into());
-        round.tool_calls = vec![card("exec", None, true), card("read_file", None, true)];
-
-        let presentation = activity_presentation(&round, TurnStatus::Completed, true)
-            .expect("round should expose activity");
-        assert_eq!(presentation.state, ActivityState::Completed);
-        assert_eq!(presentation.meta, "2 次工具调用 · 含摘要");
-        assert!(presentation.title.starts_with("已完成"));
-    }
-
-    #[test]
-    fn active_latest_round_opens_even_before_a_tool_is_created() {
-        let mut round = RoundView::default();
-        round.thinking = Some("正在规划".into());
-
-        let presentation = activity_presentation(&round, TurnStatus::Running, true)
-            .expect("thinking should expose activity");
-        assert_eq!(presentation.state, ActivityState::Running);
-        assert_eq!(presentation.title, "正在整理过程摘要");
-        assert_eq!(presentation.meta, "过程摘要");
     }
 
     #[test]
@@ -1825,6 +1859,8 @@ mod activity_group_tests {
             raw: "答案".into(),
             inlines: Vec::new(),
             segments: vec![LiveSegment::Text("答案".into())],
+            table_tracker: Default::default(),
+            gfm_table_tracker: Default::default(),
         };
         assert!(answer_has_visible_content(&visible));
     }

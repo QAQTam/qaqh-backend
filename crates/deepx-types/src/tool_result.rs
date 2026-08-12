@@ -74,6 +74,13 @@ pub struct ToolResult {
     #[ts(type = "any")]
     pub data: serde_json::Value,
     pub model: ToolModelPayload,
+    /// 展示平面的 unified diff（文件修改类工具的原始 diff 文本）。
+    ///
+    /// ⚠ 绝不进入模型投影（`project_for_model` 不携带它）：模型看到的仍是
+    /// 紧凑摘要行，diff 只供 timeline/前端抽屉消费。发送方在成功路径上
+    /// 显式填充；缺失时默认 None（向后兼容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_ref: Option<ContentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,9 +175,16 @@ impl ToolResult {
                 total_tokens: estimate_tokens(&text),
                 continuation: None,
             },
+            diff: None,
             output_ref: None,
             error: None,
         }
+    }
+
+    /// Attach display-plane diff text (never projected to the model).
+    pub fn with_diff(mut self, diff: impl Into<String>) -> Self {
+        self.diff = Some(diff.into());
+        self
     }
 
     pub fn with_error(

@@ -1125,6 +1125,10 @@ struct FileReport {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     diff: Option<String>,
+    /// 展示平面 diff（`#[serde(skip)]`：绝不进 data/模型投影）。常规执行也
+    /// 携带，供 ToolResult.diff → timeline → 前端 diff 抽屉消费。
+    #[serde(skip)]
+    display_diff: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     write_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1140,6 +1144,7 @@ fn execute_file(req: &FileRequest) -> FileReport {
                 path: req.display.clone(),
                 status: "error",
                 diff: None,
+                display_diff: None,
                 write_error: None,
                 total: None,
                 ops: vec![OpReport {
@@ -1175,6 +1180,7 @@ fn execute_file(req: &FileRequest) -> FileReport {
             path: req.display.clone(),
             status: "error",
             diff: None,
+            display_diff: None,
             write_error: None,
             total: None,
             ops: vec![OpReport {
@@ -1319,10 +1325,11 @@ fn execute_file(req: &FileRequest) -> FileReport {
         path: req.display.clone(),
         status,
         diff: if req.dry_run && ok_count > 0 {
-            Some(file_diff)
+            Some(file_diff.clone())
         } else {
             None
         },
+        display_diff: (ok_count > 0 && !file_diff.is_empty()).then_some(file_diff),
         write_error,
         total: if ok_count > 0 {
             Some(format!(
@@ -1440,7 +1447,13 @@ fn exec_edit_file(args: &serde_json::Value) -> ToolResult {
     };
 
     let text = render_text(&reports, status, dry_run);
-    crate::ToolResult::ok_data(
+    // 展示平面 diff：所有成功文件的最小 unified diff 拼接（不进 data/模型投影）。
+    let display_diff = reports
+        .iter()
+        .filter_map(|r| r.display_diff.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut result = crate::ToolResult::ok_data(
         serde_json::json!({
             "timeis": crate::now_utc8(),
             "status": status,
@@ -1448,7 +1461,11 @@ fn exec_edit_file(args: &serde_json::Value) -> ToolResult {
             "files": reports,
         }),
         text,
-    )
+    );
+    if !display_diff.is_empty() {
+        result = result.with_diff(display_diff);
+    }
+    result
 }
 
 /// 模型可见的紧凑文本报告（data 字段携带结构化 JSON 供审计/前端）。
@@ -1590,6 +1607,26 @@ mod tests {
         } else {
             data
         }
+    }
+
+    #[test]
+    fn non_dry_run_edit_attaches_display_diff() {
+        // 展示平面 diff：常规（非 dry_run）edit_file 必须把 unified diff 附着到
+        // ToolResult.diff（不进 data/模型投影）——turn 末尾「查看详情」按钮的数据源。
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_tmp(dir.path(), "d.rs", "line1\nold\nline3\n");
+        let result = exec_edit_file(&serde_json::json!({
+            "path": p, "old_string": "old", "new_string": "new",
+        }));
+        assert_eq!(result.status, crate::ToolStatus::Ok);
+        let diff = result.diff.expect("edit_file must attach display diff");
+        assert!(diff.contains("--- a/"), "missing --- header: {diff}");
+        assert!(diff.contains("+++ b/"), "missing +++ header: {diff}");
+        assert!(diff.contains("-old"), "missing removed line: {diff}");
+        assert!(diff.contains("+new"), "missing added line: {diff}");
+        // data 里不携带 diff 正文（模型投影保持精简）
+        let data = result.data.to_string();
+        assert!(!data.contains("--- a/"), "diff must not leak into data: {data}");
     }
 
     #[test]
@@ -2206,8 +2243,8 @@ mod tests {
         let out = crate::file_mutate::exec_write_file(&serde_json::json!({
             "path": p, "content": "new\n",
         }));
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["code"], "STALE_FILE", "got: {out}");
+        let v: serde_json::Value = serde_json::from_str(out.model_text()).unwrap();
+        assert_eq!(v["code"], "STALE_FILE", "got: {}", out.model_text());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "external\n");
     }
 
@@ -2225,7 +2262,7 @@ mod tests {
         let out = crate::file_mutate::exec_write_file(&serde_json::json!({
             "path": p, "content": "NEW\n",
         }));
-        assert!(out.contains("[OK]"), "got: {out}");
+        assert!(out.model_text().contains("[OK]"), "got: {}", out.model_text());
         assert_eq!(
             crate::file_state::last_hash(&p),
             Some(crate::file_shared::content_hash("NEW\n"))

@@ -786,6 +786,7 @@ mod tests {
             summary: None,
             args_json: None,
             output: None,
+            diff: None,
             progress: String::new(),
             failure: None,
             permission: None,

@@ -24,6 +24,8 @@ serde = { version = "1", features = ["derive"] }
 # clean machine reproduces the exact WinRT bindings and runtime setup.
 # 本地开发态：path 指向 fork 工作区；release 打包前切回 git rev（同 deepx-fluent）。
 windows-reactor = { path = "../../../deepx-winui-reactor/crates/libs/reactor" }
+# diff 抽屉滑入动画：Visual.Translation 的 Vector3 构造（reactor 未 re-export）。
+windows-numerics = { path = "../../../deepx-winui-reactor/crates/libs/numerics" }
 # desktop.openDialog / openImageDialog: Win32 IFileOpenDialog (COM) 绑定。
 # 仅启用所需最小 feature 集（0.100.0 小写模块名 feature）。
 windows = { path = "../../../deepx-winui-reactor/crates/libs/windows", default-features = false, features = [

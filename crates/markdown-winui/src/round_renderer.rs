@@ -57,14 +57,14 @@ pub struct TranscriptChange {
 }
 
 impl TranscriptChange {
-    const fn live(extent_changed: bool) -> Self {
+    pub(crate) const fn live(extent_changed: bool) -> Self {
         Self {
             invalidation: TranscriptInvalidation::Live,
             extent_changed,
         }
     }
 
-    const fn structural(extent_changed: bool) -> Self {
+    pub(crate) const fn structural(extent_changed: bool) -> Self {
         Self {
             invalidation: TranscriptInvalidation::Structural,
             extent_changed,
@@ -145,6 +145,10 @@ pub struct ToolCardView {
     pub changes: Option<ChangeStats>,
     /// true = 工具卡完成（后续 delta 不再更新）。
     pub done: bool,
+    /// Failed 终态标记（渲染 ✕ 红色 + failure 摘要；头部按最差状态显示）。
+    pub failed: bool,
+    /// 失败摘要（"code: message"，TimelineTool.failure 透传）。
+    pub failure: Option<String>,
     /// provider 内建工具卡（web_search 等，`provider_tool_status` 事件）：
     /// 无参数流，展开区显示执行状态（args_display 承载）。
     pub provider: bool,
@@ -208,13 +212,6 @@ pub struct RoundView {
     final_raw: Option<String>,
     /// 正在累积的工具调用 raw（未完成的 ToolCalling 流）。
     tool_raw: String,
-    /// 最近一次 live 的 raw（防抖：相同 raw 不产生模型失效）。
-    last_live_raw: String,
-    /// 协议表格流式跟踪（```table 围栏；增量行扫描）。
-    table_tracker: LiveTableTracker,
-    /// GFM 表格流式跟踪（`| 头 | 分隔行 |`；延迟确认 + 围栏感知）。与协议
-    /// tracker 输出同构（TableHiddenSpan/TableSnapshot），UI 共用 table_view。
-    gfm_table_tracker: GfmTableTracker,
     /// 仅本 round 的可见内容变化时递增。声明树用它在同一 turn 内跳过
     /// 已完成的 rounds，只重建当前活尾或状态发生变化的工具卡。
     pub mutation_rev: u64,
@@ -230,6 +227,10 @@ pub enum LiveSegment {
 }
 
 /// 答案视图状态机：流式预览 → 权威终态。
+///
+/// 表格跟踪器自持在 `Streaming` 内（协议表格 + GFM 表格），使状态机可被
+/// round 模型（[`RoundView`]）与 block 模型（[`crate::block_transcript`]）
+/// 共用——两个 reducer 对答案流的处理是同一份实现。
 #[derive(Clone, Debug, PartialEq)]
 pub enum AnswerView {
     /// 流式中：字面/表格交错序列（仅已闭合语法；未闭合字面输出；
@@ -238,6 +239,8 @@ pub enum AnswerView {
         raw: String,
         inlines: Vec<Inline>,
         segments: Vec<LiveSegment>,
+        table_tracker: LiveTableTracker,
+        gfm_table_tracker: GfmTableTracker,
     },
     /// 权威终态：全量块（冻结，不再变化）。
     Final {
@@ -252,7 +255,88 @@ impl Default for AnswerView {
             raw: String::new(),
             inlines: Vec::new(),
             segments: Vec::new(),
+            table_tracker: LiveTableTracker::default(),
+            gfm_table_tracker: GfmTableTracker::default(),
         }
+    }
+}
+
+impl AnswerView {
+    /// 当前是否处于流式且有可见内容（失败冻结兜底判定用）。
+    pub fn streaming_nonempty(&self) -> bool {
+        matches!(self, Self::Streaming { raw, .. } if !raw.trim().is_empty())
+    }
+
+    /// 追加增量：累积 raw → 表格跟踪 → 行内预览。
+    ///
+    /// 未闭合语法跨 delta 边界（`**bo` + `ld**`），必须对**整段 raw**
+    /// 重解析（O(段长)；UI 层以 DispatcherQueue 节流合并，同 Web rAF）。
+    /// 协议表格（```table）行级确认：表格行从字面剥离进 `segments`，
+    /// 残行实时显示在网格末行（逐字生长），字面保留在 Text 段。
+    /// 解析结果同步写回 `Self::Streaming`（状态机自持）。
+    pub fn live_delta(&mut self, delta: &str) -> bool {
+        if delta.is_empty() {
+            return false;
+        }
+        let Self::Streaming {
+            raw,
+            inlines,
+            segments,
+            table_tracker,
+            gfm_table_tracker,
+        } = self
+        else {
+            return false; // 终态后忽略 delta（协议保证不会发生）
+        };
+        raw.push_str(delta);
+        // 表格跟踪：增量行扫描（O(新增行)）——协议表格 + GFM 表格。
+        table_tracker.feed(raw);
+        gfm_table_tracker.feed(raw);
+        // 可见字面 = raw 减去表格隐藏区间；segments = 字面/表格交错
+        let (visible, segs) = split_segments(raw, table_tracker, gfm_table_tracker);
+        *inlines = parse_live(&visible);
+        *segments = segs;
+        true
+    }
+
+    /// BlockCheckpoint 覆盖（自愈）：整段替换，重解析（表格跟踪器重置）。
+    /// 相同值幂等（防抖：不产生模型失效）。
+    pub fn live_checkpoint(&mut self, text: &str) -> bool {
+        let Self::Streaming {
+            raw,
+            inlines,
+            segments,
+            table_tracker,
+            gfm_table_tracker,
+        } = self
+        else {
+            return false;
+        };
+        if *raw == text {
+            return false;
+        }
+        table_tracker.reset();
+        gfm_table_tracker.reset();
+        raw.clear();
+        raw.push_str(text);
+        table_tracker.feed(raw);
+        gfm_table_tracker.feed(raw);
+        let (visible, segs) = split_segments(raw, table_tracker, gfm_table_tracker);
+        *inlines = parse_live(&visible);
+        *segments = segs;
+        true
+    }
+
+    /// 权威终态：以完整文本全量重建为 Final（冻结，忽略流式累积差异）。
+    /// 幂等：已是 Final 时返回 false。
+    pub fn finalize_text(&mut self, text: &str) -> bool {
+        let Self::Streaming { .. } = self else {
+            return false;
+        };
+        let blocks = parse_final(text);
+        let rich = render_final(&blocks);
+        *self = Self::Final { rich, blocks };
+        true
     }
 }
 
@@ -264,65 +348,14 @@ impl RoundView {
         }
     }
 
-    /// 追加 Answering 增量：累积 raw → 表格跟踪 → 行内预览。
-    /// 未闭合语法跨 delta 边界（`**bo` + `ld**`），必须对**整段 raw**
-    /// 重解析（O(段长)；UI 层以 DispatcherQueue 节流合并，同 Web rAF）。
-    /// 协议表格（```table）行级确认：表格行从字面剥离进 `segments`，
-    /// 残行实时显示在网格末行（逐字生长），字面保留在 Text 段。
-    /// 解析结果同步写回 `AnswerView::Streaming`（状态机自持）。
+    /// 追加 Answering 增量（委托 [`AnswerView::live_delta`]，同一份答案状态机）。
     fn answer_delta(&mut self, delta: &str) -> bool {
-        if delta.is_empty() {
-            return false;
-        }
-        let AnswerView::Streaming {
-            raw,
-            inlines,
-            segments,
-        } = &mut self.answer
-        else {
-            return false; // 终态后忽略 delta（协议保证不会发生）
-        };
-        raw.push_str(delta);
-        // 表格跟踪：增量行扫描（O(新增行)）——协议表格 + GFM 表格。
-        self.table_tracker.feed(raw);
-        self.gfm_table_tracker.feed(raw);
-        // 可见字面 = raw 减去表格隐藏区间；segments = 字面/表格交错
-        let (visible, segs) = split_segments(raw, &self.table_tracker, &self.gfm_table_tracker);
-        let parsed = parse_live(&visible);
-        let changed = self.last_live_raw != *raw;
-        if changed {
-            *inlines = parsed;
-            *segments = segs;
-            self.last_live_raw.clone_from(raw);
-        }
-        changed
+        self.answer.live_delta(delta)
     }
 
-    /// BlockCheckpoint 覆盖（自愈）：整段替换，重解析（表格跟踪器重置）。
+    /// BlockCheckpoint 覆盖（委托 [`AnswerView::live_checkpoint`]）。
     fn answer_checkpoint(&mut self, text: &str) -> bool {
-        let AnswerView::Streaming {
-            raw,
-            inlines,
-            segments,
-        } = &mut self.answer
-        else {
-            return false;
-        };
-        self.table_tracker.reset();
-        self.gfm_table_tracker.reset();
-        raw.clear();
-        raw.push_str(text);
-        self.table_tracker.feed(raw);
-        self.gfm_table_tracker.feed(raw);
-        let (visible, segs) = split_segments(raw, &self.table_tracker, &self.gfm_table_tracker);
-        let parsed = parse_live(&visible);
-        let changed = self.last_live_raw != *raw;
-        if changed {
-            *inlines = parsed;
-            *segments = segs;
-            self.last_live_raw.clone_from(raw);
-        }
-        changed
+        self.answer.live_checkpoint(text)
     }
 
     /// RoundCompleted：以权威 answer 全量重建（忽略流式累积差异）。
@@ -334,17 +367,11 @@ impl RoundView {
                 changed = true;
             }
         }
-        self.table_tracker.reset();
-        self.gfm_table_tracker.reset();
         if let Some(a) = answer {
             if self.final_raw.as_deref() != Some(a) {
-                let blocks = parse_final(a);
-                self.answer = AnswerView::Final {
-                    rich: render_final(&blocks),
-                    blocks,
-                };
+                // final_raw 不同 ⇒ 文本不同或仍流式 ⇒ finalize_text 必返回 true
+                self.answer.finalize_text(a);
                 self.final_raw = Some(a.to_string());
-                self.last_live_raw.clear();
                 changed = true;
             }
             if self.output_loading || self.output_error.is_some() {
@@ -411,6 +438,8 @@ impl RoundView {
             body: ToolBody::Text(self.tool_raw.clone()),
             changes: None,
             done: false,
+            failed: false,
+            failure: None,
             provider: false,
         })
     }
@@ -906,6 +935,8 @@ impl Transcript {
                     body: ToolBody::Empty,
                     changes: None,
                     done: *state == ProviderToolState::Completed,
+                    failed: false,
+                    failure: None,
                     provider: true,
                 };
                 // upsert by call_id（replaceable 语义：同 id 覆盖状态）。
@@ -934,6 +965,8 @@ impl Transcript {
                     },
                     changes: None,
                     done: false,
+                    failed: false,
+                    failure: None,
                     provider: false,
                 };
                 upsert_tool_card(round, card)
@@ -967,6 +1000,8 @@ impl Transcript {
                         .unwrap_or_default(),
                     changes: existing.and_then(|card| card.changes),
                     done: false,
+                    failed: false,
+                    failure: None,
                     provider: false,
                 };
                 upsert_tool_card(round, card)
@@ -1023,6 +1058,8 @@ impl Transcript {
                     body,
                     changes,
                     done: true,
+                    failed: false,
+                    failure: None,
                     provider: false,
                 };
                 upsert_tool_card(round, card)
@@ -1533,14 +1570,21 @@ mod tests {
         rv.answer_delta("| A | B |\n");
         rv.answer_delta("| --- | --- |\n");
         rv.answer_delta("| 1 | 2 |\n");
-        let AnswerView::Streaming { raw, segments, .. } = &rv.answer else {
+        let AnswerView::Streaming {
+            raw,
+            segments,
+            table_tracker,
+            gfm_table_tracker,
+            ..
+        } = &rv.answer
+        else {
             panic!("expected streaming")
         };
         assert!(
             segments.iter().any(|s| matches!(s, LiveSegment::Table(_))),
             "GFM 表格应产出 Table 段"
         );
-        let (visible, _) = split_segments(raw, &rv.table_tracker, &rv.gfm_table_tracker);
+        let (visible, _) = split_segments(raw, table_tracker, gfm_table_tracker);
         assert!(!visible.contains("| A | B |"), "表头行应从可见字面剥离");
     }
 
