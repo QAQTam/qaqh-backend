@@ -4,9 +4,9 @@
 > 2026-08-11 更新基线）。来源：`crates/libs/reactor/`（实现）、`docs/crates/windows-reactor.md`（官方指南）、`crates/samples/reactor/`（示例）。
 >
 > ⚠️ **当前基线已变更**（见 [reactor-winui3-knowledge.md](./reactor-winui3-knowledge.md) §1）：
-> - 上游基线 = `c318f55a2`（PR #4824，2026-08-11）
+> - 上游基线 = `5f8e1504d`（#4829，2026-08-11 合并；callback panic 改 fatal）
 > - DeepX fork = `QAQTam/deepx-winui-reactor` 的 `deepx-winui` 分支；本地路径
->   `F:\deepx-winui-reactor`，当前融合提交 `d57da0ccc`。
+>   `F:\deepx-winui-reactor`，当前融合提交 `27541a0b1`（fork HEAD `06c114742`）。
 > - 补丁清单见 fork 内 `DEEPX-DOWNSTREAM.md`。
 
 ## 一句话心智模型

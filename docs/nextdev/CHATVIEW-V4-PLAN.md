@@ -1,6 +1,6 @@
 # ChatView V4 改进计划（ToolView 聚合 + 状态设计）
 
-> 状态：**原型 v4 已定稿**（`docs/chat-live-prototype.html`），等待 Rust 落地。
+> 状态：**已落地**（2026-08-12 完成代码，待人工视觉验证；原型见 `docs/nextdev/chat-live-prototype.html`）
 > 日期：2026-08-12
 
 ## 1. 背景
@@ -153,6 +153,33 @@ winmd（WinAppSDK 2.3.1 固定，含 Microsoft.UI.Xaml.winmd）
   - workspace：edit_file 的 `FileReport.display_diff`（`#[serde(skip)]`，常规执行也计算）；write 改结构化返回并算 `unified_diff`
   - 模型路径：engine_turn 内联执行拿到 `_canonical_result.diff` → `push_tool_result_direct_with_diff` → 消息存储 ToolResult.diff（`last_step_tool_results` 带出）；UI 路径：`result.diff` → timeline
   - `TimelineTool.diff`（deepx-domain + markdown-winui timeline_protocol 双 mirror，serde default/skip）→ `tool_body_from_timeline(…, diff)` 显式优先解析
+  - **抽屉灰屏修复**：`transition` 走 `ElementCompositionPreview::SetImplicitShowAnimation`，只在 Visibility 切换时播放；抽屉是新建控件挂载进视觉树 → 动画不触发但元素停在起始帧（偏移 520px 屏幕外 / opacity 0）→ 遮罩灰屏无抽屉（diff_drawer_demo 注释已实证）→ **移除 transition，与 demo 对齐**
+- ✅ **11. V5 子窗口式弹层 + 帧驱动动画**：灰屏修复后改为正式弹层设计——
+  - **子窗口**：主窗口 70% 尺寸（`DRAWER_RATIO=0.70`，宽高同比例保持纵横比，clamp 640..1280 × 480..920）、居中、圆角 12 + 边框 + 底部合计条
+  - **动画**：reactor 隐式动画全路径证伪（transition 不触发、animate 无起点帧）→ **DispatcherTimer 16ms 帧驱动 state**（rAF 式）：progress 放 use_ref + tick state 触发重渲染，ease-out cubic 映射，每帧更新 `canvas_left`（右缘外→居中）/ `opacity` / 遮罩 alpha
+  - 生命周期：打开动画完成清静态槽（防轮询重播）；关闭 ✕/遮罩/Esc 反向动画，完成清 state+槽；动画期间轮询暂停（防打断）
+  - **0xc0000409 崩溃修复**：timer 回调 `anim.borrow_mut()` 借用存活到回调末尾，动画静止时轮询分支再次 `borrow_mut` → RefCell 双重借用 panic → `abort_on_panic("timer")` → fail-fast abort；修复：借用限定块作用域（demo 同款坑一并修复）
+  - **关闭失效修复**：close 条件 `a.active && !a.closing` 在打开动画完成（active=false）后永假 → ✕/Esc/遮罩无响应；改为 `!closing && progress>0`（可见即响应）+ 静止态激活反向推进
+  - **弹出卡顿修复**：帧驱动每帧重建 file_rows + diff 行子树 → 内容抽为 `drawer_content` memo 组件（props 忽略回调字段，动画期间不变 → reconciler 复用输出），每帧只提交外层 border 的 canvas_left/opacity + 遮罩 alpha 两个属性
+- ✅ **12. V6 原生 ContentDialog 弹层（方案 C 落地）**：软件动画 15fps 卡顿感 → 换 WinUI 原生模态：
+  - **reactor 扩展**（deepx-winui-reactor fork）：`Widget::content_element()` slot（仿 header/pane/flyout 全套：mounted_tree contents 存储、widget_dispatch mount/update 四分支、backend `set_content_element` → `IContentControl.SetContent`）；`ContentDialog.content_element(el)` 与 text 模式互斥
+  - **弹层**：系统级弹出/关闭动画（Composition 合成层，零卡顿、零帧驱动）；Esc/返回手势/✕ 原生关闭（on_closed 收口）；模态遮罩原生；尺寸 70% 主窗口（覆盖模板默认 MaxWidth 548）
+  - 架构简化：静态槽 + 80ms 轮询保留（写端 chat_view 零改动），删掉 AnimState/帧 timer/Canvas/遮罩自绘
+  - demo 同步 V6（ContentDialog 常驻 + is_open 驱动，✕ 走 Hide 动画）
+  - 测试：reactor 38 全绿；deepx-winui 编译 + demo 构建通过
+- ✅ **13. V6.1 修复两个实测回归**：
+  - **面板变小**：ContentDialog 模板内容区是 Auto 高度，控件级 `Height` 不参与模板布局 → 内容 STAR 行无约束退化 → 面板被压小。修复：**尺寸设在内容根 grid**（`width/height` 固定 70% 窗口，rows=[Auto, STAR, Auto]）
+  - **关闭后阴影残留拦截输入**：关闭动画期间卸载销毁 ContentDialog（on_closed → set_req(None) → unmount destroy）→ WinUI 模态遮罩残留。修复：**ContentDialog 常驻**（永不卸载），is_open 驱动显隐；on_closed 只清 open/槽，内容保留复用
+- ✅ **14. V6.2 根治关闭残影（面板形状阴影拦截点击）**：实测常驻后输入拦截消失但**视觉残影仍在**（对话框内容+投影形状残留，覆盖屏幕中央，可 hit-test）。机制：WinUI 3 ContentDialog 关闭动画（Composition）在特定条件下中断，popup 视觉层滞留。修复（backend 层透明，app/demo 零改动）：
+  - bindings：补 `ContentDialogClosingEventArgs` + `IContentDialog::Closing`（vtable 补齐）
+  - **Closing 事件**（动画播放前同步触发，✕/Esc/系统关闭统一路径）：清空 Content + 缩小到 1x1 → 关闭动画只播空壳 → 无视觉残影
+  - **重新打开前恢复**：`dialog_state` 表（set_prop 记录 Width/Height、set_content_element 记录 content_id）→ IsOpen(true) 时回写尺寸+内容再 ShowAsync
+  - reactor 38 测试全绿；demo 构建通过
+- ✅ **15. V6.3 ✕ 关闭残影的最终根因与修复**：实测 ✕ 有残影、**Esc 无残影** → 差异不在关闭动画（Closing 清场对两者都生效），而在**关闭调用时机**：✕ 在 **Click 事件栈内**调用 `Hide()`，WinUI 在 pointer/焦点事件处理中关闭承载 Popup 会清理失败（视觉残留）；Esc 是系统路径（对话框自己处理键事件后关闭）→ 干净。修复（backend 层）：
+  - `IsOpen(false)` 不再直接 `Hide()`，改为 `DispatcherQueue.TryEnqueue` **下一周期**执行（事件链完成后，与系统路径等效；零用户感知延迟）
+  - `Rc<AtomicBool>` 取消标志：排队期间 `IsOpen(true)` 置 false，防止快速重开被排队的 Hide 误关
+  - 兜底：队列不可用时同步 Hide
+  - demo 同步 V5（纯 bin crate 无法共享模块，内联同构实现；数据解析走 markdown-winui）
   - 测试：`non_dry_run_edit_attaches_display_diff`、`display_diff_flows_to_last_step_results_but_not_model_projection`、`timeline_explicit_diff_wins_over_compact_output`、`tool_diff_from_timeline_becomes_diff_body`
 - ✅ **验证**：`cargo check --workspace` 零错误；deepx-workspace 191 / deepx-message 23 / markdown-winui 60 / deepx-domain 56 / deepx-runtime 103 / deepx-daemon 4 全绿。
 - ⏳ **待人工**：真实 daemon 流式会话视觉验证 + 抽屉在真实数据下的表现。

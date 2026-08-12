@@ -1,20 +1,15 @@
-//! Diff 抽屉演示（V4）：模拟 turn 视图 + 总结行 → 右侧滑入抽屉。
-//! V4 链路验证：真实 edit 工具事件。
+//! Diff 弹层演示（V7）：模拟 turn 视图 + 总结行 → 全屏覆盖层面板。
 //!
 //! 运行：`cargo run -p deepx-winui --bin diff_drawer_demo`
 //!
+//! ⚠ 包为纯 bin crate（无 lib.rs），bin 之间无法共享模块；本 demo 内联
+//! `diff_drawer.rs` 的 V7 渲染逻辑（数据解析仍走共享的 markdown-winui）。
+//! 与真实 overlay 同构：静态槽语义简化为 open state + 覆盖层 grid。
+//!
 //! 验证对象：
-//! - 总结行「已修改 2 个文件 · 查看详情 ›」点击 → 抽屉右滑入
-//! - 抽屉：左文件列表（✓/✕ + 路径 + ±N，选中高亮）/ 右单列 unified diff
-//! - 多 op 同文件合并（file_edit.rs 两个 hunk 合并为一块）
-//! - 关闭：✕ / 遮罩点击 / Esc
-//!
-//! 白屏根因备忘（已实证）：
-//! 1. `#[path]` 重复编译 `diff_drawer.rs` → bin 白屏（仅声明即白）——已弃用，demo 内联渲染。
-//! 2. **根元素无背景 → 窗口纯白不渲染**（grid/vstack/border 根均如此）；
-//!    根必须带 `.background(ThemeRef::SolidBackground)`。diff_demo 正常因为它根带背景。
-//!
-//! 字体：统一 Cascadia Code（2407.24 变量字体，全字重 + 连字）。
+//! - 总结行点击 → 覆盖层面板弹出（70% 尺寸真实生效，无 ContentDialog 模板钳制）
+//! - 弹层 = 主窗口 70%（保持纵横比），内容：文件列表 + 单列 diff + 底部合计
+//! - 关闭：✕ / Esc（KeyboardAccelerator）
 
 use markdown_winui::{parse_unified_diff, diff_file_view};
 use windows_reactor::*;
@@ -68,45 +63,37 @@ diff --git a/src/chat_adapter.rs b/src/chat_adapter.rs
  }
 ";
 
+/// 与真实 overlay 同构的常量。
+const DRAWER_RATIO: f64 = 0.70;
+const DRAWER_W_MIN: f64 = 640.0;
+const DRAWER_W_MAX: f64 = 1280.0;
+const DRAWER_H_MIN: f64 = 480.0;
+const DRAWER_H_MAX: f64 = 920.0;
+const FILE_LIST_WIDTH: f64 = 280.0;
+
 fn demo_files() -> Vec<(String, usize, usize, bool, markdown_winui::DiffFile)> {
-    let doc_a = parse_unified_diff(DEMO_DIFF_A);
-    let doc_b = parse_unified_diff(DEMO_DIFF_B);
     let mut out = Vec::new();
-    for f in &doc_a.files {
-        out.push((
-            f.display_path().to_string(),
-            f.lines_added,
-            f.lines_removed,
-            false,
-            f.clone(),
-        ));
-    }
-    for f in &doc_b.files {
-        out.push((
-            f.display_path().to_string(),
-            f.lines_added,
-            f.lines_removed,
-            false,
-            f.clone(),
-        ));
+    for text in [DEMO_DIFF_A, DEMO_DIFF_B] {
+        let doc = parse_unified_diff(text);
+        for f in &doc.files {
+            out.push((
+                f.display_path().to_string(),
+                f.lines_added,
+                f.lines_removed,
+                false,
+                f.clone(),
+            ));
+        }
     }
     out
 }
 
 fn render_app(cx: &mut RenderCx) -> Element {
-    // ⚠ hooks 必须无条件调用（React 规则）。
     let (open, set_open) = cx.use_state::<bool>(false);
     let (selected, set_selected) = cx.use_state::<usize>(0);
     let (dark, set_dark) = cx.use_state::<bool>(false);
-    let (use_code, set_use_code) = cx.use_state::<bool>(true);
     let win = cx.use_inner_size();
     let files = demo_files();
-    let diff_font = if use_code {
-        "ms-appx:///Assets/fonts/CascadiaCode.ttf#Cascadia Code"
-    } else {
-        // 备用：无连字等宽（仅对比用）
-        "ms-appx:///Assets/fonts/CascadiaMono.ttf#Cascadia Mono, Consolas"
-    };
 
     let content = vstack((
         // 明暗主题切换（验证 ThemeRef 跟随）
@@ -127,13 +114,6 @@ fn render_app(cx: &mut RenderCx) -> Element {
                         });
                     }
                 }),
-            text_block("字体：")
-                .font_size(11.0)
-                .foreground(ThemeRef::SecondaryText),
-            button(if use_code { "Cascadia Code" } else { "Cascadia Mono" }).on_click({
-                let set_use_code = set_use_code.clone();
-                move || set_use_code.call(!use_code)
-            }),
         ))
         .spacing(8.0),
         // 模拟 turn 视图：工具胶囊行
@@ -159,7 +139,7 @@ fn render_app(cx: &mut RenderCx) -> Element {
         .background(ThemeRef::CardBackground)
         .padding(Thickness::xy(12.0, 8.0))
         .corner_radius(8.0),
-        // 总结行（点击 → 抽屉）
+        // 总结行（点击 → 覆盖层面板）
         border(
             hstack((
                 text_block("已修改 2 个文件（+8 −5）")
@@ -185,7 +165,7 @@ fn render_app(cx: &mut RenderCx) -> Element {
                 set_open.call(true);
             }
         }),
-        text_block("点击「查看详情 ›」→ 抽屉右滑入；✕ / 遮罩 / Esc 关闭；顶部可切明暗与字体")
+        text_block("点击「查看详情 ›」→ 覆盖层面板（70% 尺寸）；✕ / Esc 关闭")
             .font_size(11.0)
             .foreground(ThemeRef::SecondaryText),
     ))
@@ -195,133 +175,163 @@ fn render_app(cx: &mut RenderCx) -> Element {
     .horizontal_alignment(HorizontalAlignment::Center)
     .vertical_alignment(VerticalAlignment::Top);
 
-    // 抽屉层（open 时显示）
-    let drawer_layer: Element = if open {
-        let drawer_w = (win.width * 0.82).clamp(760.0, 1440.0);
-        // 文件列表
-        let file_rows: Vec<Element> = files
-            .iter()
-            .enumerate()
-            .map(|(i, (path, added, removed, failed, _))| {
-                let (marker, fg) = if *failed {
-                    ("✕", ThemeRef::SystemCritical)
-                } else {
-                    ("✓", ThemeRef::SystemSuccess)
-                };
-                let is_sel = i == selected;
-                border(
-                    hstack((
-                        text_block(marker).font_size(12.0).foreground(fg),
-                        text_block(path)
-                            .font_size(12.0)
-                            .text_trimming(TextTrimming::CharacterEllipsis)
-                            .foreground(if is_sel {
-                                ThemeRef::AccentText
-                            } else {
-                                ThemeRef::PrimaryText
-                            }),
-                        text_block(format!("+{added} −{removed}"))
-                            .font_size(11.0)
-                            .foreground(ThemeRef::SecondaryText),
-                    ))
-                    .spacing(8.0)
-                    .padding(Thickness::xy(10.0, 7.0)),
-                )
-                .background(if is_sel {
-                    ThemeRef::AccentSecondary
-                } else {
-                    ThemeRef::LayerFill
-                })
-                .corner_radius(4.0)
-                .on_tapped({
-                    let set_selected = set_selected.clone();
-                    move || set_selected.call(i)
-                })
-                .into()
+    // 覆盖层弹层（V7）：open 时全屏遮罩 + 居中卡片；否则空 grid 穿透。
+    let drawer_w = (win.width * DRAWER_RATIO).clamp(DRAWER_W_MIN, DRAWER_W_MAX);
+    let drawer_h = (win.height * DRAWER_RATIO).clamp(DRAWER_H_MIN, DRAWER_H_MAX);
+
+    // 文件列表（左列）
+    let file_rows: Vec<Element> = files
+        .iter()
+        .enumerate()
+        .map(|(i, (path, added, removed, failed, _))| {
+            let (marker, fg) = if *failed {
+                ("✕", ThemeRef::SystemCritical)
+            } else {
+                ("✓", ThemeRef::SystemSuccess)
+            };
+            let is_sel = i == selected;
+            border(
+                hstack((
+                    text_block(marker).font_size(12.0).foreground(fg),
+                    text_block(path)
+                        .font_size(12.0)
+                        .text_trimming(TextTrimming::CharacterEllipsis)
+                        .foreground(if is_sel {
+                            ThemeRef::AccentText
+                        } else {
+                            ThemeRef::PrimaryText
+                        }),
+                    text_block(format!("+{added} −{removed}"))
+                        .font_size(11.0)
+                        .foreground(ThemeRef::SecondaryText),
+                ))
+                .spacing(8.0)
+                .padding(Thickness::xy(10.0, 7.0)),
+            )
+            .background(if is_sel {
+                ThemeRef::AccentSecondary
+            } else {
+                ThemeRef::LayerFill
             })
-            .collect();
-        let total_added: usize = files.iter().map(|f| f.1).sum();
-        let total_removed: usize = files.iter().map(|f| f.2).sum();
-        let current = files.get(selected).cloned();
-        let diff_panel: Element = match &current {
-            Some((_, _, _, _, file)) if !file.rows.is_empty() => diff_file_view(
-                file,
-                &diff_font,
-                &format!("demo-drawer-diff-{selected}"),
-            ),
-            _ => text_block("无 diff 数据").font_size(12.0).into(),
-        };
-        let close = {
+            .corner_radius(4.0)
+            .on_tapped({
+                let set_selected = set_selected.clone();
+                move || set_selected.call(i)
+            })
+            .into()
+        })
+        .collect();
+    let total_added: usize = files.iter().map(|f| f.1).sum();
+    let total_removed: usize = files.iter().map(|f| f.2).sum();
+    let current = files.get(selected).cloned();
+    let diff_panel: Element = match &current {
+        Some((_, _, _, _, file)) if !file.rows.is_empty() => diff_file_view(
+            file,
+            "ms-appx:///Assets/fonts/CascadiaCode.ttf#Cascadia Code",
+            &format!("demo-drawer-diff-{selected}"),
+        ),
+        _ => text_block("无 diff 数据").font_size(12.0).into(),
+    };
+
+    let dialog_content = grid((
+        // 头部
+        hstack((
+            text_block("Diff 详情").font_size(14.0).semibold(),
+            text_block(format!(
+                "{} 个文件  +{}  −{}",
+                files.len(),
+                total_added,
+                total_removed
+            ))
+            .font_size(12.0)
+            .foreground(ThemeRef::SecondaryText),
+            button("✕ 关闭")
+                .on_click({
+                    let set_open = set_open.clone();
+                    move || set_open.call(false)
+                })
+                .horizontal_alignment(HorizontalAlignment::Right),
+        ))
+        .spacing(12.0)
+        .padding(Thickness::xy(16.0, 12.0))
+        .grid_row(0),
+        // 主体：左文件列表 + 右 diff
+        grid((
+            border(
+                vstack(file_rows)
+                    .spacing(2.0)
+                    .padding(Thickness::xy(10.0, 8.0)),
+            )
+            .background(ThemeRef::LayerFill)
+            .grid_column(0),
+            border(diff_panel)
+                .padding(Thickness::xy(16.0, 8.0))
+                .grid_column(1),
+        ))
+        .columns([GridLength::Pixel(FILE_LIST_WIDTH), GridLength::STAR])
+        .rows([GridLength::STAR])
+        .grid_row(1),
+        // 底部：合计
+        hstack((
+            text_block(format!("合计  +{}  −{}", total_added, total_removed))
+                .font_size(12.0)
+                .foreground(ThemeRef::SecondaryText),
+            text_block("Esc 或 ✕ 关闭")
+                .font_size(11.0)
+                .foreground(ThemeRef::TertiaryText)
+                .horizontal_alignment(HorizontalAlignment::Right),
+        ))
+        .spacing(12.0)
+        .padding(Thickness::xy(16.0, 10.0))
+        .grid_row(2),
+    ))
+    .rows([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+    .width(drawer_w)
+    .height(drawer_h);
+
+    // 覆盖层（V7）：open 时全屏遮罩 + 居中卡片；否则空 grid（无背景 →
+    // 不参与命中测试，点击穿透）。与真实 overlay 同构——本 demo 无静态槽，
+    // 直接以 open state 驱动显隐。
+    let dialog_layer: Element = if open {
+        let on_close = {
             let set_open = set_open.clone();
             move || set_open.call(false)
         };
         let esc = KeyboardAccelerator::new(
             VirtualKey::Escape,
             VirtualKeyModifiers::None,
-            close.clone(),
+            on_close.clone(),
         );
-        let drawer_el: Element = border(
-            vstack((
-                hstack((
-                    text_block("Diff 详情").font_size(14.0).semibold(),
-                    text_block(format!(
-                        "{} 个文件  +{}  −{}",
-                        files.len(),
-                        total_added,
-                        total_removed
-                    ))
-                    .font_size(12.0)
-                    .foreground(ThemeRef::SecondaryText),
-                    button("✕ 关闭")
-                        .on_click(close.clone())
-                        .horizontal_alignment(HorizontalAlignment::Right),
-                ))
-                .spacing(12.0)
-                .padding(Thickness::xy(16.0, 12.0)),
-                grid((
-                    border(vstack(file_rows).spacing(2.0).padding(Thickness::xy(10.0, 8.0)))
-                        .background(ThemeRef::LayerFill)
-                        .grid_column(0),
-                    border(diff_panel)
-                        .padding(Thickness::xy(16.0, 8.0))
-                        .grid_column(1),
-                ))
-                .columns([GridLength::Pixel(280.0), GridLength::STAR])
-                .rows([GridLength::STAR]),
-            ))
-            .spacing(0.0),
-        )
-        .background(ThemeRef::SolidBackground)
-        .border_brush(ThemeRef::CardStroke)
-        .border_thickness(Thickness::uniform(1.0))
-        .width(drawer_w)
-        .height(win.height)
-        // 注：demo 环境 transition 动画不播（元素停在偏移位 → 屏幕外），
-        // 真实应用的滑入动画走 main.rs diff_drawer（已挂载，独立验证）。
-        .keyboard_accelerator(esc)
-        .with_key("demo-drawer")
-        .into();
-        let mask = grid(())
+        let card: Element = border(dialog_content)
+            .background(ThemeRef::SolidBackground)
+            .border_brush(ThemeRef::CardStroke)
+            .border_thickness(Thickness::uniform(1.0))
+            .corner_radius(8.0)
+            .keyboard_accelerator(esc)
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .with_key("demo-drawer-card")
+            .into();
+        grid((card,))
+            .rows([GridLength::STAR])
+            .columns([GridLength::STAR])
+            // 半透明遮罩：拦截主界面输入（模态）；点击遮罩不关闭。
             .background(Color {
-                a: 0x8C,
+                a: 140,
                 r: 0,
                 g: 0,
                 b: 0,
             })
-            .on_tapped(close)
-            .with_key("demo-drawer-mask");
-        grid((mask, drawer_el))
-            .rows([GridLength::STAR])
-            .columns([GridLength::STAR])
+            .with_key("demo-drawer-overlay")
             .into()
     } else {
         grid(()).into()
     };
 
-    // 覆盖层 grid（同 main.rs 模式）：内容 + 抽屉层同 cell。
+    // 内容 + 弹层同 cell。
     // ⚠ 根元素必须带背景，否则窗口纯白（已实证）。
     border(
-        grid((content, drawer_layer))
+        grid((content, dialog_layer))
             .rows([GridLength::STAR])
             .columns([GridLength::STAR]),
     )
@@ -331,7 +341,7 @@ fn render_app(cx: &mut RenderCx) -> Element {
 
 fn main() -> windows_reactor::Result<()> {
     App::new()
-        .title("DeepX — Diff 抽屉演示")
+        .title("DeepX — Diff 弹层演示")
         .inner_size(1100.0, 800.0)
         .render(render_app)
 }

@@ -1348,6 +1348,6 @@ fn native_folder_picker() -> Option<String> {
     }
 }
 
-const LEGAL_DOCUMENT_VERSION: &str = include_str!("../../../docs/legal/version.txt");
-const USER_AGREEMENT_TEXT: &str = include_str!("../../../docs/legal/USER_AGREEMENT.zh-CN.md");
-const PRIVACY_POLICY_TEXT: &str = include_str!("../../../docs/legal/PRIVACY_POLICY.zh-CN.md");
+const LEGAL_DOCUMENT_VERSION: &str = include_str!("../../../docs/nextdev/legal/version.txt");
+const USER_AGREEMENT_TEXT: &str = include_str!("../../../docs/nextdev/legal/USER_AGREEMENT.zh-CN.md");
+const PRIVACY_POLICY_TEXT: &str = include_str!("../../../docs/nextdev/legal/PRIVACY_POLICY.zh-CN.md");

@@ -64,6 +64,7 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_rev = last_rev.clone();
         move || {
             crate::shell::poll_rev(
+                "header",
                 timer,
                 last_rev,
                 Duration::from_millis(500),
@@ -83,6 +84,7 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_lang_rev = last_lang_rev.clone();
         move || {
             crate::shell::poll_rev(
+                "header_lang",
                 lang_timer,
                 last_lang_rev,
                 Duration::from_millis(500),
@@ -285,6 +287,19 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             !(state.compacting || state.compact_disabled),
             false,
             on_compact,
+        ),
+        // 调试按钮：直接注入 ask 交互（bridge.core().spawn_test_ask），
+        // 与真实事件同一渲染链路——验证「弹不出」是前端还是后端/协议问题。
+        action_button(
+            Icon::symbol(Symbol::Send),
+            "Ask 测试（调试弹窗）",
+            "header-test-ask",
+            true,
+            false,
+            {
+                let bridge = bridge.clone();
+                move || bridge.core().spawn_test_ask()
+            },
         ),
         divider.clone(),
         refresh_el,

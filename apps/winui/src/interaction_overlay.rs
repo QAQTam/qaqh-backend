@@ -127,6 +127,7 @@ pub fn interaction_overlay(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         let last_rev = last_rev.clone();
         move || {
             crate::shell::poll_rev(
+                "overlay",
                 timer,
                 last_rev,
                 POLL_INTERVAL,

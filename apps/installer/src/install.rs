@@ -866,9 +866,9 @@ mod tests {
 
     #[test]
     fn bundled_legal_documents_declare_the_current_document_version() {
-        let version = include_str!("../../../docs/legal/version.txt").trim();
-        let agreement = include_str!("../../../docs/legal/USER_AGREEMENT.zh-CN.md");
-        let privacy = include_str!("../../../docs/legal/PRIVACY_POLICY.zh-CN.md");
+        let version = include_str!("../../../docs/nextdev/legal/version.txt").trim();
+        let agreement = include_str!("../../../docs/nextdev/legal/USER_AGREEMENT.zh-CN.md");
+        let privacy = include_str!("../../../docs/nextdev/legal/PRIVACY_POLICY.zh-CN.md");
 
         assert!(agreement.contains(&format!("文档版本：{version}")));
         assert!(privacy.contains(&format!("文档版本：{version}")));

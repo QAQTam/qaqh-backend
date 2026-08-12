@@ -18,8 +18,8 @@ ChatView/Composer/首页/技能/设置），`bridge.rs` 通过 `deepx-client`
   `deepx-bridge.js`、patch/serve 脚本全部移除；daemon `/debug/` 静态服务保留
   框架，不再承载前端产物。
 
-> 迁移细节与 Web 端 golden reference 见 `docs/winui-native-migration.md`
-> （最终迁移文档）与 `docs/windows-reactor-skill.md`。
+> 迁移细节与 Web 端 golden reference 见 `docs/archive/winui-native-migration.md`
+> （最终迁移文档）与 `docs/nextdev/windows-reactor-skill.md`。
 
 ## Architecture
 
@@ -120,9 +120,9 @@ winui-app/
 
 ## 参考
 
-- `docs/winui-native-migration.md` — WebView → WinUI3 最终迁移文档
-- `docs/windows-reactor-skill.md` — windows-reactor 开发要点
-- `docs/winui-chat-rendering-maintenance.md` — ChatView 单一渲染路径与上游同步门禁
-- `docs/winui-gallery-porting.md` — Gallery/Toolkit 视觉范式到 deepx-fluent 的移植边界
+- `docs/archive/winui-native-migration.md` — WebView → WinUI3 最终迁移文档
+- `docs/nextdev/windows-reactor-skill.md` — windows-reactor 开发要点
+- `docs/nextdev/winui-chat-rendering-maintenance.md` — ChatView 单一渲染路径与上游同步门禁
+- `docs/nextdev/winui-gallery-porting.md` — Gallery/Toolkit 视觉范式到 deepx-fluent 的移植边界
 - `apps/winui/CHATVIEW-RENDERING-REFERENCE.md` — ChatView 渲染规格
 - `crates/markdown-winui/` — 流式 markdown 渲染 crate
