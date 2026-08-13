@@ -251,7 +251,7 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 }
 
 /// Check if ALL target paths are inside the workspace root.
-fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool {
+pub(crate) fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool {
     if paths.is_empty() {
         return true;
     } // tools without paths (e.g. ask) are considered safe

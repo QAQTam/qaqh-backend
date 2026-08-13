@@ -66,6 +66,24 @@ pub enum ActionRequest {
         mode: String,
     },
     WorkspaceInstallWsl,
+    /// Spawn an isolated subagent worker (daemon `subagent.spawn`). Returns
+    /// `{ "seed": "<8-hex>" }`; the caller then attaches the seed and drives
+    /// it with ordinary Ringing commands/events.
+    SubagentSpawn {
+        /// Tool allowlist (empty = all tools available).
+        tools: Vec<String>,
+        /// Model override; `None` = inherit parent config.
+        model: Option<String>,
+        /// API base URL override; `None` = inherit parent config.
+        base_url: Option<String>,
+        /// Max output tokens override.
+        max_tokens: Option<u32>,
+        /// Workspace the subagent inherits from the parent agent. Persisted to
+        /// `sessions/{sub_seed}/workspace.txt` before the worker starts, so the
+        /// subagent resolves relative paths and enforces its permission
+        /// boundary against the *parent's* workspace.
+        workspace: Option<String>,
+    },
 }
 
 impl ActionRequest {
@@ -100,6 +118,28 @@ impl ActionRequest {
             }
             Self::WorkspaceSetMode { mode } => ("workspace.set_mode", json!({ "mode": mode })),
             Self::WorkspaceInstallWsl => ("workspace.install_wsl", json!({})),
+            Self::SubagentSpawn {
+                tools,
+                model,
+                base_url,
+                max_tokens,
+                workspace,
+            } => {
+                let mut params = json!({ "tools": tools });
+                if let Some(model) = model {
+                    params["model"] = json!(model);
+                }
+                if let Some(base_url) = base_url {
+                    params["base_url"] = json!(base_url);
+                }
+                if let Some(max_tokens) = max_tokens {
+                    params["max_tokens"] = json!(max_tokens);
+                }
+                if let Some(workspace) = workspace {
+                    params["workspace"] = json!(workspace);
+                }
+                ("subagent.spawn", params)
+            }
         }
     }
 }

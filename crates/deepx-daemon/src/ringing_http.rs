@@ -2202,7 +2202,8 @@ async fn handle_action(
         || method.starts_with("skills.")
         || method.starts_with("stats.")
         || method.starts_with("plan.")
-        || method.starts_with("todo.");
+        || method.starts_with("todo.")
+        || method.starts_with("subagent.");
     if !allowed {
         return write_response(
             stream,

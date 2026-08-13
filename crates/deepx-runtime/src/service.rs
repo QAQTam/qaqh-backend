@@ -364,6 +364,34 @@ impl DeepxService {
                 self.save_config(params)?;
                 Ok(Value::Null)
             }
+            // 权限等级（L1-L4）：前端独立通道（不参与 config.save 全量提交）。
+            // 此前 daemon 从未实现该 action —— 前端能选但配置永远是默认 4
+            // (Unrestricted)，agent 永远不会受限。这里补上：校验 → 写
+            // config.toml → 广播 AgentReloadConfig 让所有活跃 worker
+            // （含子代理，子代理继承同一全局权限）重载。
+            "config.set_permission_level" => {
+                let level = params
+                    .get("level")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "permission level (1-4) is required".to_string())?;
+                if !(1..=4).contains(&level) {
+                    return Err(format!("invalid permission level {level} (must be 1-4)"));
+                }
+                let mut cfg = deepx_config::Config::load().unwrap_or_default();
+                cfg.permission_level = level as u8;
+                cfg.save().map_err(|e| format!("save config: {e}"))?;
+                let failed = self.registry()?.broadcast_ringing(
+                    &RingingCommand::Control(ControlCommand::AgentReloadConfig),
+                );
+                if !failed.is_empty() {
+                    log::warn!(
+                        "[config] permission reload broadcast failed for: {}",
+                        failed.join("; ")
+                    );
+                }
+                log::info!("[config] permission level set to {level}");
+                Ok(json!({ "permission_level": level }))
+            }
             "profile.apply" => {
                 let name = pstr(params, "name")?;
                 let mut cfg = deepx_config::Config::load().map_err(err)?;
@@ -406,6 +434,70 @@ impl DeepxService {
                         .unwrap_or_default(),
                 )?;
                 Ok(Value::Null)
+            }
+            // ── Subagent orchestration ──────────────────────────────────────
+            // Spawn an isolated subagent worker and return its seed. The
+            // caller (parent agent) then attaches the seed and drives it with
+            // ordinary Ringing commands/events (ConversationSendMessage →
+            // TurnCompleted). The worker runs ephemeral with the given tool
+            // allowlist and optional model/base-url/max-tokens overrides.
+            "subagent.spawn" => {
+                let tools: Vec<String> = params
+                    .get("tools")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let model = params
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                let base_url = params
+                    .get("base_url")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                let max_tokens = params
+                    .get("max_tokens")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as u32);
+                // 子代理继承主代理的 workspace：spawn 前写入
+                // `sessions/{sub_seed}/workspace.txt`，子 worker 启动时
+                // `load_session_workspace` 读到，从而正确解析相对路径并
+                // 以主代理工作区为权限边界（修复子代理"不知道工作区、
+                // 相对路径落到 daemon cwd"的问题）。
+                let workspace = params
+                    .get("workspace")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|w| !w.is_empty() && *w != ".")
+                    .map(String::from);
+                let seed = deepx_session::SessionManager::generate_seed();
+                if let Some(workspace) = &workspace {
+                    let dir = deepx_types::platform::sessions_dir().join(&seed);
+                    if std::fs::create_dir_all(&dir).is_ok() {
+                        let _ = std::fs::write(dir.join("workspace.txt"), workspace);
+                        log::info!(
+                            "[subagent] inherited workspace for seed={seed}: {workspace}"
+                        );
+                    }
+                }
+                self.registry()?.spawn_subagent(
+                    &seed,
+                    &tools,
+                    model.as_deref(),
+                    base_url.as_deref(),
+                    max_tokens,
+                )?;
+                log::info!(
+                    "[subagent] spawned subagent worker seed={seed} tools={}",
+                    tools.len()
+                );
+                Ok(json!({ "seed": seed }))
             }
             _ => Err(format!("unknown method: {method}")),
         }
@@ -646,9 +738,10 @@ impl DeepxService {
         {
             cfg.subagent.timeout_secs = value;
         }
+        // 允许空数组保存：配置语义中 `default_tools = []` 表示"全部工具可用"，
+        // 用户在前端取消所有勾选时应能表达该状态（此前空数组被过滤、无法保存）。
         if let Some(values) = value2(params, "subagent_default_tools", "subagentDefaultTools")
             .and_then(Value::as_array)
-            .filter(|v| !v.is_empty())
         {
             cfg.subagent.default_tools = values
                 .iter()

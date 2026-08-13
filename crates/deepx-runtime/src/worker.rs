@@ -3,6 +3,12 @@ use std::io::BufReader;
 pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
     let mut resume_seed = None;
     let mut new_seed = None;
+    // ── Subagent mode flags (spawned via `subagent.spawn` daemon action) ──
+    let mut subagent_tools: Option<Vec<String>> = None;
+    let mut ephemeral = false;
+    let mut model_override: Option<String> = None;
+    let mut base_url_override: Option<String> = None;
+    let mut max_tokens_override: Option<u32> = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -12,6 +18,23 @@ pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
             }
             "--seed" if index + 1 < args.len() => {
                 new_seed = Some(args[index + 1].clone());
+                index += 1;
+            }
+            "--tools" if index + 1 < args.len() => {
+                subagent_tools = serde_json::from_str(&args[index + 1]).ok();
+                index += 1;
+            }
+            "--ephemeral" => ephemeral = true,
+            "--model" if index + 1 < args.len() => {
+                model_override = Some(args[index + 1].clone());
+                index += 1;
+            }
+            "--base-url" if index + 1 < args.len() => {
+                base_url_override = Some(args[index + 1].clone());
+                index += 1;
+            }
+            "--max-tokens" if index + 1 < args.len() => {
+                max_tokens_override = args[index + 1].parse().ok();
                 index += 1;
             }
             _ => {}
@@ -34,7 +57,50 @@ pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
         }
     }
     deepx_session::SessionManager::init(deepx_types::platform::data_dir());
-    let mut agent = deepx_msglp::state::agent::AgentState::init("daemon");
+    // Subagent worker：受限工具白名单 + ephemeral（不落盘）；普通 worker 走 init。
+    // `--tools` 与 `--ephemeral` 任一出现即视为 subagent 模式（daemon `subagent.spawn` 注入）。
+    let is_subagent = ephemeral || subagent_tools.is_some();
+    // 子代理沙箱：无用户审批通道 —— workspace 内文件操作自动批准，
+    // exec/网络/跨 workspace 自动拒绝（authorization::admit 内部判定）。
+    if is_subagent {
+        deepx_workspace::authorization::set_subagent_sandbox(true);
+    }
+    let mut agent = if is_subagent {
+        deepx_msglp::state::agent::AgentState::init_subagent(
+            subagent_tools.as_deref().unwrap_or(&[]),
+            ephemeral,
+        )
+    } else {
+        deepx_msglp::state::agent::AgentState::init("daemon")
+    };
+    // Subagent 模式：把设置页的 cfg.subagent.*（模型 / base-url / **独立 API Key** /
+    // max-tokens）应用到请求字段。此前子代理独立 Key 从未生效——worker 一直用
+    // 主代理 key 请求 provider。随后 CLI 覆盖（daemon `subagent.spawn` 注入）优先。
+    if is_subagent {
+        let sub = agent.config.subagent.clone();
+        if !sub.model.is_empty() && model_override.is_none() {
+            agent.config.model = sub.model;
+        }
+        if !sub.base_url.is_empty() && base_url_override.is_none() {
+            agent.config.base_url = sub.base_url;
+        }
+        if !sub.api_key.is_empty() {
+            agent.config.api_key = sub.api_key;
+        }
+        if sub.max_tokens > 0 && max_tokens_override.is_none() {
+            agent.config.max_tokens = sub.max_tokens;
+        }
+    }
+    // CLI 覆盖优先于 cfg.subagent 默认值（daemon `subagent.spawn` 按调用方参数注入）。
+    if let Some(model) = model_override {
+        agent.config.model = model;
+    }
+    if let Some(base_url) = base_url_override {
+        agent.config.base_url = base_url;
+    }
+    if let Some(max_tokens) = max_tokens_override {
+        agent.config.max_tokens = max_tokens;
+    }
     if let Some(seed) = resume_seed {
         agent.session.resume_seed = Some(seed);
     }

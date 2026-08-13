@@ -2,7 +2,31 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// 子代理沙箱标志：worker 进程内全局（`run_agent_worker` subagent 分支设置）。
+///
+/// 沙箱语义（方案 B）：子代理**没有用户审批通道**——
+/// - 文件级操作（Read/Write）且全部路径在 workspace 内 → 自动批准
+///   （等价 Level 3 的 workspace 内语义，子代理可以正常干活）；
+/// - 其余（Exec / Net / 跨 workspace 路径）→ **自动拒绝**（返回
+///   `PermissionDenied` 失败，不产生 `ToolPermissionRequested` 弹窗事件，
+///   不挂起回合）。
+///
+/// 同时解决"卡死"（L1-L3 下子代理审批无人响应）与"越狱"（子代理
+/// 跨 workspace / exec / 网络访问）两个问题。
+static SUBAGENT_SANDBOX: AtomicBool = AtomicBool::new(false);
+
+/// 启用/关闭子代理沙箱（仅 worker 进程内调用）。
+pub fn set_subagent_sandbox(on: bool) {
+    SUBAGENT_SANDBOX.store(on, Ordering::SeqCst);
+}
+
+/// 当前进程是否处于子代理沙箱模式。
+pub fn is_subagent_sandbox() -> bool {
+    SUBAGENT_SANDBOX.load(Ordering::SeqCst)
+}
 
 /// Identity of a single tool invocation destined for a handler.
 pub struct ToolInvocation {
@@ -242,15 +266,46 @@ pub fn admit(
             category,
             risk,
             consequence,
-        } => Admission::ApprovalRequired(PermissionChallenge::new(
-            invocation,
-            reason,
-            paths,
-            workspace_root,
-            category,
-            risk,
-            consequence,
-        )),
+        } => {
+            if is_subagent_sandbox() {
+                // 子代理沙箱：无审批通道，不产生弹窗事件。
+                let file_ops = matches!(
+                    category,
+                    crate::permission::ToolCategory::Read
+                        | crate::permission::ToolCategory::Write
+                );
+                if file_ops && crate::permission::all_within_workspace(&paths, &workspace_root) {
+                    // workspace 内文件操作：自动批准（等价 Level 3 语义）。
+                    let mut resources = crate::permission::extract_target_paths(
+                        &invocation.tool_name,
+                        &invocation.args,
+                    );
+                    resources.sort();
+                    resources.dedup();
+                    Admission::Authorized(AuthorizedToolCall::new(
+                        invocation,
+                        resources,
+                        workspace_root,
+                    ))
+                } else {
+                    // Exec / Net / 跨 workspace：自动拒绝，防止越狱。
+                    Admission::Denied(format!(
+                        "subagent sandbox denied '{}': {reason}",
+                        invocation.tool_name
+                    ))
+                }
+            } else {
+                Admission::ApprovalRequired(PermissionChallenge::new(
+                    invocation,
+                    reason,
+                    paths,
+                    workspace_root,
+                    category,
+                    risk,
+                    consequence,
+                ))
+            }
+        }
     }
 }
 
@@ -280,6 +335,118 @@ mod tests {
         assert_eq!(
             challenge.consequence(),
             "Changes files inside the current workspace."
+        );
+    }
+
+    // ── 子代理沙箱（方案 B）──
+
+    /// 持锁 + 置位沙箱；Drop 时复位。全局 AtomicBool 会被并行测试干扰，
+    /// 必须经 `TEST_RUNTIME_SERIAL` 串行化（同 crate 其他全局状态测试）。
+    fn sandbox_guard() -> impl Drop {
+        struct Guard {
+            _serial: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                set_subagent_sandbox(false);
+            }
+        }
+        let serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set_subagent_sandbox(true);
+        Guard { _serial: serial }
+    }
+
+    fn invoke(tool: &str, args: serde_json::Value, ws: &std::path::Path) -> Admission {
+        admit(
+            ToolInvocation {
+                session_id: "sub-a".into(),
+                call_id: "call-s".into(),
+                tool_name: tool.into(),
+                action: String::new(),
+                args,
+            },
+            1, // 即使主代理是 MaxLockdown，沙箱下 workspace 内文件操作也自动批准
+            ws,
+            &HashSet::new(),
+        )
+    }
+
+    #[test]
+    fn sandbox_auto_approves_workspace_file_ops_even_at_level_1() {
+        let _g = sandbox_guard();
+        let ws = std::env::temp_dir().join("deepx-sandbox-a");
+        // workspace 内写：Level 1 本应 AskUser，沙箱下自动批准。
+        let admission = invoke(
+            "write",
+            serde_json::json!({ "path": ws.join("notes.md") }),
+            &ws,
+        );
+        assert!(matches!(admission, Admission::Authorized(_)), "expected authorized");
+        // workspace 内读：同样自动。
+        let admission = invoke(
+            "read_file",
+            serde_json::json!({ "path": ws.join("notes.md") }),
+            &ws,
+        );
+        assert!(matches!(admission, Admission::Authorized(_)), "expected authorized");
+    }
+
+    #[test]
+    fn sandbox_denies_cross_workspace_access() {
+        let _g = sandbox_guard();
+        let ws = std::env::temp_dir().join("deepx-sandbox-b");
+        let outside = std::env::temp_dir().join("deepx-sandbox-b-outside");
+        let admission = invoke(
+            "write",
+            serde_json::json!({ "path": outside.join("secret.txt") }),
+            &ws,
+        );
+        match admission {
+            Admission::Denied(reason) => {
+                assert!(reason.contains("sandbox"), "{reason}");
+            }
+            other => panic!("cross-workspace write must be denied, got non-denied"),
+        }
+    }
+
+    #[test]
+    fn sandbox_denies_exec_and_net() {
+        let _g = sandbox_guard();
+        let ws = std::env::temp_dir().join("deepx-sandbox-c");
+        for (tool, args) in [
+            ("exec", serde_json::json!({ "command": "whoami" })),
+            (
+                "web_fetch",
+                serde_json::json!({ "url": "https://example.com" }),
+            ),
+        ] {
+            let admission = invoke(tool, args, &ws);
+            assert!(
+                matches!(admission, Admission::Denied(_)),
+                "{tool} must be denied in sandbox, got non-denied"
+            );
+        }
+    }
+
+    #[test]
+    fn non_sandbox_still_requires_approval() {
+        // 未启用沙箱：Level 1 写仍需审批（主代理行为不受影响）。
+        // 全局 AtomicBool 需串行（与 sandbox_guard 同锁）。
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set_subagent_sandbox(false);
+        let ws = std::env::temp_dir().join("deepx-sandbox-d");
+        let admission = invoke(
+            "write",
+            serde_json::json!({ "path": ws.join("notes.md") }),
+            &ws,
+        );
+        assert!(
+            matches!(admission, Admission::ApprovalRequired(_)),
+            "non-sandbox must keep approval path"
         );
     }
 }

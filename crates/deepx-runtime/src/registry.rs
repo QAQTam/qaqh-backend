@@ -183,10 +183,55 @@ impl AgentRegistry {
         if self.instances.contains_key(seed) {
             return Err(format!("agent already running for {seed}"));
         }
-        self.spawn(seed, Some(seed))
+        self.spawn_with(seed, Some(seed), &[])
+    }
+
+    /// Spawn an isolated subagent worker (`deepx agent --seed … --ephemeral
+    /// --tools […] [--model] [--base-url] [--max-tokens]`). The worker runs
+    /// the same Ringing worker protocol on its own stdin/stdout pipe; the
+    /// caller (parent agent via `subagent.spawn` action) then attaches the
+    /// seed and drives it with ordinary Ringing commands/events.
+    pub fn spawn_subagent(
+        &mut self,
+        seed: &str,
+        tools: &[String],
+        model: Option<&str>,
+        base_url: Option<&str>,
+        max_tokens: Option<u32>,
+    ) -> Result<(), String> {
+        if self.instances.contains_key(seed) {
+            return Err(format!("agent already running for {seed}"));
+        }
+        let mut extra: Vec<String> = vec!["--ephemeral".to_string()];
+        let tools_json =
+            serde_json::to_string(tools).map_err(|e| format!("serialize tools: {e}"))?;
+        extra.push("--tools".to_string());
+        extra.push(tools_json);
+        if let Some(model) = model {
+            extra.push("--model".to_string());
+            extra.push(model.to_string());
+        }
+        if let Some(base_url) = base_url {
+            extra.push("--base-url".to_string());
+            extra.push(base_url.to_string());
+        }
+        if let Some(max_tokens) = max_tokens {
+            extra.push("--max-tokens".to_string());
+            extra.push(max_tokens.to_string());
+        }
+        self.spawn_with(seed, Some(seed), &extra)
     }
 
     fn spawn(&mut self, seed: &str, new_seed: Option<&str>) -> Result<(), String> {
+        self.spawn_with(seed, new_seed, &[])
+    }
+
+    fn spawn_with(
+        &mut self,
+        seed: &str,
+        new_seed: Option<&str>,
+        extra_args: &[String],
+    ) -> Result<(), String> {
         self.last_spawn
             .insert(seed.to_string(), std::time::Instant::now());
         let (generation, _) = self.activity.begin(seed);
@@ -197,6 +242,9 @@ impl AgentRegistry {
             command.arg("--seed").arg(seed);
         } else {
             command.arg("--resume-seed").arg(seed);
+        }
+        for arg in extra_args {
+            command.arg(arg);
         }
         command
             .stdin(Stdio::piped())
@@ -396,6 +444,27 @@ impl AgentRegistry {
         }
         self.get_or_spawn(seed)?;
         write(self.instances.get(seed).expect("respawned instance"))
+    }
+
+    /// 向所有活跃 worker（含子代理）广播同一条 Ringing 命令。
+    /// 只发给已运行的实例，不触发 spawn。返回失败项列表（seed: error）。
+    pub fn broadcast_ringing(
+        &mut self,
+        command: &deepx_ringing::RingingCommand,
+    ) -> Vec<String> {
+        let seeds: Vec<String> = self.instances.keys().cloned().collect();
+        let mut failed = Vec::new();
+        for seed in seeds {
+            let env = deepx_ringing::RingingWorkerCommandEnvelope::new(
+                &seed,
+                broadcast_command_id(),
+                command.clone(),
+            );
+            if let Err(error) = self.send_ringing(&seed, &env) {
+                failed.push(format!("{seed}: {error}"));
+            }
+        }
+        failed
     }
 
     pub fn close(&mut self, seed: &str) {
@@ -722,4 +791,13 @@ mod tests {
         assert!(tail.chars().all(|c| c == '汉'));
         assert_eq!(tail, "汉".repeat(tail.chars().count()));
     }
+}
+
+/// Broadcast 命令 id（时间戳十六进制，语义同 service.rs 的 `command_id`）。
+fn broadcast_command_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("bcast-{nanos:x}")
 }

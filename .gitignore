@@ -37,3 +37,5 @@ apps/winui/release/
 # MSIX 壳包：私钥与构建产物不入库
 apps/installer/msix/DeepX.pfx
 apps/installer/msix/DeepX-shell.msix
+
+/.deepx-test/

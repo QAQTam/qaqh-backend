@@ -90,10 +90,31 @@ impl ToolManager {
     }
 
     pub fn apply_init(&mut self, allowed_tools: Vec<String>, session_seed: &str) {
-        self.allowed = if allowed_tools.is_empty() {
+        // 防御：剔除不在注册表中的工具名。工具冻结期间改名/删除后（如
+        // read→read_file、edit→edit_file、web→web_fetch、search 移除），
+        // 旧配置的 allowlist 会指向不存在的工具——保留则执行期报
+        // "Unknown tool"，剔除则按当前正式词汇表生效。全部无效时回退
+        // 到"全部工具"（空 allowlist 语义），宁全开不瘫痪。
+        let total = allowed_tools.len();
+        let known: Vec<String> = allowed_tools
+            .into_iter()
+            .filter(|name| self.handlers.contains_key(name))
+            .collect();
+        if known.len() != total {
+            log::warn!(
+                "[TOOLS] allowlist filtered: {} of {total} tool names unknown (renamed/removed); kept: {}",
+                total - known.len(),
+                if known.is_empty() {
+                    "<all tools>".to_string()
+                } else {
+                    known.join(", ")
+                }
+            );
+        }
+        self.allowed = if known.is_empty() {
             None
         } else {
-            Some(allowed_tools)
+            Some(known)
         };
         crate::set_current_session(session_seed);
     }
@@ -395,5 +416,72 @@ fn audit_args_summary(_tool: &str, args: &serde_json::Value) -> String {
         format!("{}…", &s[..end])
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ToolCallCtx, ToolResult, ToolRisk};
+
+    fn noop(_ctx: ToolCallCtx) -> ToolResult {
+        ToolResult::ok("noop")
+    }
+
+    fn handler(key: &str) -> ToolHandler {
+        ToolHandler {
+            key: key.to_string(),
+            description: "test handler",
+            input_schema: serde_json::json!({ "type": "object" }),
+            handler: noop,
+            risk: ToolRisk::ReadOnly,
+            default_timeout: std::time::Duration::from_secs(10),
+        }
+    }
+
+    fn names(mgr: &ToolManager) -> Vec<String> {
+        let mut v: Vec<String> = mgr
+            .filtered_defs()
+            .into_iter()
+            .map(|d| d.function.name)
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn apply_init_filters_unknown_renamed_tool_names() {
+        let mut mgr = ToolManager::new();
+        mgr.register(handler("read_file"));
+        mgr.register(handler("exec"));
+        // 冻结期间改名/删除的旧名（read/edit/web/search）必须被剔除。
+        mgr.apply_init(
+            vec![
+                "read_file".to_string(),
+                "edit".to_string(),
+                "read".to_string(),
+                "exec".to_string(),
+            ],
+            "s1",
+        );
+        assert_eq!(names(&mgr), vec!["exec", "read_file"]);
+    }
+
+    #[test]
+    fn apply_init_all_unknown_falls_back_to_all_tools() {
+        let mut mgr = ToolManager::new();
+        mgr.register(handler("exec"));
+        // 旧配置全是已移除的工具名：回退到"全部工具"（空 allowlist 语义），
+        // 而不是把子代理锁死成零工具。
+        mgr.apply_init(vec!["read".to_string(), "edit".to_string()], "s1");
+        assert_eq!(names(&mgr), vec!["exec"]);
+    }
+
+    #[test]
+    fn apply_init_empty_stays_all_tools() {
+        let mut mgr = ToolManager::new();
+        mgr.register(handler("exec"));
+        mgr.apply_init(vec![], "s1");
+        assert_eq!(names(&mgr), vec!["exec"]);
     }
 }
