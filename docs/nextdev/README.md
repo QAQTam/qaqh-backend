@@ -51,6 +51,18 @@
 | [responses-api-support.md](./responses-api-support.md) | Responses API 支持矩阵 | ✅ 现行 |
 | [doc/future-optimizations.md](./doc/future-optimizations.md) | daemon 未来优化方向（P2+） | ✅ 参考 |
 
+## 子代理（subagent）
+
+| 文档 | 内容 | 状态 |
+|---|---|---|
+| [subagent-exec-sandbox.md](./subagent-exec-sandbox.md) | B2：子代理 exec 沙箱化设计（弱沙箱 → AppContainer/Landlock 分层） | 📋 设计稿（B1 已落地：权限沙箱自动批准/拒绝） |
+
+## 外部对标（deepseek-harness）
+
+| 文档 | 内容 | 状态 |
+|---|---|---|
+| [dsh-alignment.md](./dsh-alignment.md) | dsh（@deepseek-ai/dsh）调研：技术栈/模型增益机制/分级对齐清单（A 随发版、B 第一批、C 排期）/co-work-subagent 前瞻 | ✅ 清单定稿（dsh 8/13 开源） |
+
 ## 法律与合规
 
 | 文档 | 内容 | 状态 |

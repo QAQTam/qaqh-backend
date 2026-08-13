@@ -300,7 +300,7 @@ impl AgentState {
                 Config::default()
             }
         };
-        runtime::init_tools(caller, &[], vec![]);
+        runtime::init_tools(caller, &[deepx_subagent::register], vec![]);
         let mut agent = Self::new(config);
         agent.tool_defs = runtime::all_tools(); // all tools, no allowlist
         agent

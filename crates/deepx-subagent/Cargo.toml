@@ -2,9 +2,11 @@
 name = "deepx-subagent"
 version.workspace = true
 edition.workspace = true
-description = "DeepX subagent tool — spawn sub-agents for focused tasks"
+description = "DeepX subagent tool — spawn isolated Ringing sub-sessions for focused tasks"
 
 [dependencies]
+deepx-client = { path = "../deepx-client" }
+deepx-config = { path = "../deepx-config" }
 deepx-workspace = { path = "../deepx-workspace" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

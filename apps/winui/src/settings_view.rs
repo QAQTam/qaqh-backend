@@ -54,6 +54,27 @@ const CATEGORIES: [(&str, &str, Symbol); 8] = [
 const EFFORT_LADDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// 工作区运行模式（对齐 Web workspace.mode 取值）。
 const WORKSPACE_MODES: [&str; 3] = ["local", "wsl", "remote"];
+/// 权限档位滑杆（UAC 安全设置范式）：标题 + 描述，随滑杆实时切换。
+const PERMISSION_LADDER: [(&str, &str); 4] = [
+    (
+        "Level 1 · 最大锁定",
+        "每个工具调用都需要你确认，最安全。",
+    ),
+    (
+        "Level 2 · 读取自由",
+        "工作区读取自动批准；写入、执行、网络操作需要确认。",
+    ),
+    (
+        "Level 3 · 工作区自由",
+        "工作区内操作自动批准；跨工作区写入需要一次性文件夹信任。",
+    ),
+    (
+        "Level 4 · 不受限",
+        "无权限检查（默认）。谨慎使用。",
+    ),
+];
+/// 滑杆档位短标签（对齐滑杆刻度）。
+const PERMISSION_TICKS: [&str; 4] = ["保守", "询问", "自动", "全自动"];
 
 /// Windows 11 SettingsCard 语义行：标题/说明 + 右侧原生控件。
 fn field_row(label: &str, control: Element) -> Element {
@@ -74,6 +95,9 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (save_error, set_save_error) = cx.use_state::<Option<String>>(None);
     // 诊断区块：模式切换/导出后自增驱动状态行重渲染。
     let (diag_rev, set_diag_rev) = cx.use_state::<u32>(0);
+    // 权限滑杆当前档位显示（0 = 尚未滑动，渲染期回退到 config 值）；
+    // on_value_changed 里 set 它驱动档位说明文字重渲染。
+    let (perm_desc, set_perm_desc) = cx.use_state::<u8>(0);
     let (export_path, set_export_path) = cx.use_state::<Option<String>>(None);
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
@@ -504,6 +528,12 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 })
                 .into(),
         ));
+        rows.push(
+            text_block("留空 = 保留已配置值；子代理使用独立 Key 时，worker 请求 provider 将携带此 Key")
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText)
+                .into(),
+        );
     }
 
     // context：contextLimit / reasoningEffort / autoCompact / compliance
@@ -1036,28 +1066,51 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .into(),
         );
         rows.push(section_title("权限控制"));
-        rows.push(field_row(
-            "权限等级",
-            RadioButtons::new(vec![
-                "1 · 保守".to_string(),
-                "2 · 询问".to_string(),
-                "3 · 自动".to_string(),
-                "4 · 全自动".to_string(),
-            ])
-            .selected_index((pd.permission_level.saturating_sub(1).min(3)) as i32)
+        // UAC 安全设置范式：4 档滑杆（离散步进）+ 档位标签 + 当前档说明。
+        let level = pd.permission_level.clamp(1, 4) as u8;
+        let desc_idx = if (1..=4).contains(&perm_desc) {
+            (perm_desc - 1) as usize
+        } else {
+            (level - 1) as usize
+        };
+        let tick_row: Element = hstack(
+            PERMISSION_TICKS
+                .iter()
+                .map(|t| text_block(*t).width(76.0).font_size(11.0).into())
+                .collect::<Vec<Element>>(),
+        )
+        .spacing(0.0)
+        .into();
+        let desc_title: Element = text_block(PERMISSION_LADDER[desc_idx].0)
+            .font_size(13.0)
+            .foreground(ThemeRef::AccentText)
+            .into();
+        let desc_body: Element = text_block(PERMISSION_LADDER[desc_idx].1)
+            .font_size(11.0)
+            .foreground(ThemeRef::SecondaryText)
+            .into();
+        let desc_row: Element = vstack((desc_title, desc_body)).spacing(2.0).into();
+        let perm_slider: Element = Slider::new(level as f64)
+            .range(1.0, 4.0)
+            .step(1.0)
             .header("")
-            .on_selection_changed({
+            .on_value_changed({
                 let bridge = bridge.clone();
                 let proj_draft = proj_draft.clone();
                 let dirty = dirty.clone();
-                move |i: i32| {
-                    let level = (i.max(0) + 1) as u64;
-                    proj_draft.borrow_mut().permission_level = level;
+                let set_perm = set_perm_desc.clone();
+                move |v: f64| {
+                    let lvl = v.round().clamp(1.0, 4.0) as u64;
+                    proj_draft.borrow_mut().permission_level = lvl;
                     *dirty.borrow_mut() = true;
-                    bridge.spawn_set_permission(level);
+                    bridge.spawn_set_permission(lvl);
+                    set_perm.call(lvl as u8);
                 }
             })
-            .into(),
+            .into();
+        rows.push(field_row(
+            "权限等级",
+            vstack((perm_slider, tick_row, desc_row)).spacing(6.0).into(),
         ));
         rows.push(section_title("性能"));
         let tokenizer_row: Element = {
