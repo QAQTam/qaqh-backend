@@ -36,7 +36,10 @@ use windows_reactor::*;
 
 use deepx_fluent::{motion, shimmer_runs, tokens};
 
-use crate::bridge::{Bridge, ComposerAttachment, ComposerState, ComposerTextFile, WorkPhase};
+use crate::bridge::{
+    Bridge, ComposerAttachment, ComposerState, ComposerTextFile, SubagentItem, SubagentState,
+    WorkPhase,
+};
 use crate::shell_store::ContextStats;
 
 /// 快照轮询间隔（同 interaction_overlay：交互响应优先）。
@@ -1000,14 +1003,33 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
 /// render 链上，每 tick 全量 diff 输入框/footer/context 条 → UI 线程
 /// 卡顿，ChatView 16ms 泵被拖）。props=WorkPhase（Clone+PartialEq），
 /// 阶段变化才触发组件重渲染。
-fn work_status_bar(cx: &mut RenderCx, state: &ComposerState) -> Element {
-    let _ = cx;
-    component(work_status_component, state.phase.clone())
+/// 工作状态区 props：父代理阶段 + 子代理胶囊（任一变化才重渲染组件）。
+#[derive(Debug, Clone, PartialEq)]
+struct WorkStatusProps {
+    phase: WorkPhase,
+    subagents: Vec<SubagentItem>,
 }
 
-/// 组件内部实现：label 推导 + shimmer tick + 渲染。
-fn work_status_component(props: &WorkPhase, cx: &mut RenderCx) -> Element {
-    let label: String = match props {
+/// 工作状态区：父代理状态行（转圈 + 俏皮文案 shimmer，现有单行）+
+/// 子代理胶囊行（WrapLayout 语义：hstack + 上限折叠）。空闲/无胶囊时零高占位。
+///
+/// **独立组件边界**：父行 shimmer 90ms tick 与胶囊 1s 时钟都在组件内部——
+/// 只重渲染本组件子树；props=WorkStatusProps（Clone+PartialEq），
+/// phase 或 subagents 变化才触发重渲染。胶囊**不逐卡开线程**（共用 1s 时钟）。
+fn work_status_bar(cx: &mut RenderCx, state: &ComposerState) -> Element {
+    let _ = cx;
+    component(
+        work_status_component,
+        WorkStatusProps {
+            phase: state.phase.clone(),
+            subagents: state.subagents.clone(),
+        },
+    )
+}
+
+/// 组件内部实现：父行 label 推导 + shimmer tick + 子代理胶囊 + 渲染。
+fn work_status_component(props: &WorkStatusProps, cx: &mut RenderCx) -> Element {
+    let label: String = match &props.phase {
         WorkPhase::Idle => String::new(),
         WorkPhase::Thinking => "飞速思考中…".into(),
         WorkPhase::Answering => "奋力回答中…".into(),
@@ -1015,9 +1037,10 @@ fn work_status_component(props: &WorkPhase, cx: &mut RenderCx) -> Element {
         WorkPhase::WaitingUser => "等待你确认…".into(),
     };
     let active = !label.is_empty();
+    let has_pills = !props.subagents.is_empty();
 
-    // shimmer 阶梯步进（90ms/步，仿 Codex steps(120) 的离散跳动感）；
-    // 仅活动时启动线程（deps=props，阶段变化重启）。
+    // 父行 shimmer 阶梯步进（90ms/步，仿 Codex steps(120) 的离散跳动感）；
+    // 仅父行活动时启动线程（deps=props，阶段变化重启）。
     let (tick, set_tick) = cx.use_async_state::<u32>(0);
     let label_len = label.chars().count() as u32;
     cx.use_effect_with_cleanup((props.clone(),), {
@@ -1041,25 +1064,126 @@ fn work_status_component(props: &WorkPhase, cx: &mut RenderCx) -> Element {
         }
     });
 
-    if !active {
-        return grid(()).with_key("work-status-empty").into();
-    }
+    // 胶囊共用 1s 时钟：仅存在胶囊时启动（刷新耗时文本，不逐卡开线程）。
+    let (sec_tick, set_sec_tick) = cx.use_async_state::<u32>(0);
+    cx.use_effect_with_cleanup((has_pills,), {
+        let set_sec_tick = set_sec_tick.clone();
+        move || -> Option<Box<dyn FnOnce()>> {
+            if !has_pills {
+                return None;
+            }
+            let stop = Arc::new(AtomicBool::new(false));
+            let s2 = stop.clone();
+            std::thread::spawn(move || {
+                while !s2.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_secs(1));
+                    set_sec_tick.call(0);
+                }
+            });
+            Some(Box::new(move || stop.store(true, Ordering::Relaxed)))
+        }
+    });
+    let _ = sec_tick;
+    let now = unix_ms();
 
-    let runs = shimmer_runs(&label, tick as f64 - 4.0);
-    hstack((
-        ProgressRing::indeterminate().width(14.0).height(14.0),
-        RichTextBlock::single_paragraph(runs).font_size(tokens::TYPE_CAPTION),
-    ))
-    .spacing(tokens::SPACE_2)
-    .padding(Thickness {
-        left: tokens::SPACE_2,
-        top: 0.0,
-        right: 0.0,
-        bottom: 0.0,
-    })
-    .horizontal_alignment(HorizontalAlignment::Left)
-    .with_key("work-status-bar")
+    let parent_row: Element = if !active {
+        grid(()).with_key("work-status-empty").into()
+    } else {
+        let runs = shimmer_runs(&label, tick as f64 - 4.0);
+        hstack((
+            ProgressRing::indeterminate().width(14.0).height(14.0),
+            RichTextBlock::single_paragraph(runs).font_size(tokens::TYPE_CAPTION),
+        ))
+        .spacing(tokens::SPACE_2)
+        .padding(Thickness {
+            left: tokens::SPACE_2,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+        })
+        .horizontal_alignment(HorizontalAlignment::Left)
+        .with_key("work-status-bar")
+        .into()
+    };
+
+    // 子代理胶囊行（第二行；空 = 零高占位，与现状完全一致）。
+    let pills_row: Element = if !has_pills {
+        grid(()).into()
+    } else {
+        let mut items: Vec<Element> = props
+            .subagents
+            .iter()
+            .map(|item| subagent_pill(item, now))
+            .collect();
+        const PILL_CAP: usize = 8;
+        let extra = items.len().saturating_sub(PILL_CAP);
+        items.truncate(PILL_CAP);
+        if extra > 0 {
+            items.push(
+                text_block(&format!("+{extra}"))
+                    .font_size(tokens::TYPE_CAPTION)
+                    .into(),
+            );
+        }
+        hstack(items)
+            .spacing(tokens::SPACE_2)
+            .horizontal_alignment(HorizontalAlignment::Left)
+            .with_key("subagent-pill-row")
+            .into()
+    };
+
+    vstack((parent_row, pills_row))
+        .spacing(tokens::SPACE_1)
+        .into()
+}
+
+/// 单个子代理胶囊：状态图标 + 名称 + 耗时 mm:ss；done 降透明。
+fn subagent_pill(item: &SubagentItem, now: u64) -> Element {
+    let glyph: Element = match item.state {
+        SubagentState::Working => ProgressRing::indeterminate()
+            .width(10.0)
+            .height(10.0)
+            .into(),
+        SubagentState::Done => text_block("✓").font_size(tokens::TYPE_CAPTION).into(),
+        SubagentState::Error => text_block("✗").font_size(tokens::TYPE_CAPTION).into(),
+        SubagentState::Timeout => text_block("⏱").font_size(tokens::TYPE_CAPTION).into(),
+        SubagentState::Cancelled => text_block("⊘").font_size(tokens::TYPE_CAPTION).into(),
+        SubagentState::Lost => text_block("⚠").font_size(tokens::TYPE_CAPTION).into(),
+    };
+    let label = format!("{} · {}", item.name, fmt_elapsed(item, now));
+    border(
+        hstack((glyph, text_block(&label).font_size(tokens::TYPE_CAPTION)))
+            .spacing(tokens::SPACE_1)
+            .padding(Thickness {
+                left: tokens::SPACE_2,
+                top: 2.0,
+                right: tokens::SPACE_2,
+                bottom: 2.0,
+            }),
+    )
+    .corner_radius(10.0)
+    .background(ThemeRef::CardBackground)
+    .with_key(format!("subagent-pill-{}", item.call_id))
     .into()
+}
+
+/// 耗时 mm:ss：运行中 = started_at → 现在；终态 = started_at → finished_at。
+fn fmt_elapsed(item: &SubagentItem, now: u64) -> String {
+    let end = if item.finished_at > 0 {
+        item.finished_at
+    } else {
+        now
+    };
+    let secs = end.saturating_sub(item.started_at) / 1000;
+    format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+/// 当前 unix 时间（epoch ms；同 bridge::unix_ms 语义）。
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn queue_row(state: &ComposerState, on_queue_remove: Arc<dyn Fn(String) + 'static>) -> Element {
