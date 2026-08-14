@@ -83,6 +83,7 @@ fn main() {
                     None,
                     RingingCommand::Control(ControlCommand::SessionCreate {
                         close_current: false,
+                        cwd: None,
                     }),
                     CommandOptions::default(),
                 )

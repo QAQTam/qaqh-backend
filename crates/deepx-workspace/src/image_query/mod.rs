@@ -342,6 +342,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         }),
         handler: handle_image_query,
         risk: ToolRisk::ReadOnly,
+        category: crate::permission::ToolCategory::Read,
         default_timeout: Duration::from_secs(300),
     },
     crate::ToolPlacement::Workspace,

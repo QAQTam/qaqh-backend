@@ -435,6 +435,7 @@ mod tests {
             input_schema: serde_json::json!({ "type": "object" }),
             handler: noop,
             risk: ToolRisk::ReadOnly,
+            category: crate::permission::ToolCategory::Read,
             default_timeout: std::time::Duration::from_secs(10),
         }
     }

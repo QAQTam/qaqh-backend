@@ -24,7 +24,27 @@ use std::time::Duration;
 use windows_reactor::*;
 
 use crate::bridge::Bridge;
-use crate::shell_store::{ActivityState, SessionItem};
+use crate::shell_store::{ActivityState, SessionItem, WorkspaceItem};
+
+/// 诊断日志（窗口程序无控制台：写 %TEMP%/deepx-winui.log；同 chat_view 模式）。
+fn log_diag(msg: &str) {
+    use std::io::Write;
+    let path = std::env::temp_dir().join("deepx-winui.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(
+            f,
+            "[{}] {msg}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+    }
+}
 
 /// 侧边栏宽度约束（拖拽范围）。
 pub const SIDEBAR_MIN_WIDTH: f64 = 180.0;
@@ -97,68 +117,7 @@ pub(crate) fn state_dot(state: ActivityState) -> Element {
 ///
 /// 删除语义（B 拍板）：行内 × = **彻底删除**（真删磁盘 + 确认对话框）；
 /// 归档走标签页 ×（`spawn_archive`）。
-fn session_row(
-    item: &SessionItem,
-    active: bool,
-    bridge: Arc<Bridge>,
-    set_confirm: SetState<Option<String>>,
-) -> Element {
-    let seed = item.seed.clone();
-    // 选中竖条（结构常驻，active 只改颜色）。
-    let indicator = border(text_block(""))
-        .width(3.0)
-        .height(16.0)
-        .corner_radius(1.5)
-        .vertical_alignment(VerticalAlignment::Center);
-    let indicator = if active {
-        indicator.background(ThemeRef::Accent)
-    } else {
-        indicator
-    };
-    let dot: Element = state_dot(item.state);
-    let title_el: Element = text_block(item.title.clone())
-        .max_lines(1)
-        .text_trimming(TextTrimming::CharacterEllipsis)
-        .foreground(ThemeRef::PrimaryText)
-        .vertical_alignment(VerticalAlignment::Center)
-        .on_pointer_pressed({
-            let seed = seed.clone();
-            let bridge = bridge.clone();
-            move |_| bridge.spawn_resume(&seed)
-        })
-        .into();
-    let delete = icon_button(Icon::symbol(Symbol::Delete), {
-        let seed = seed.clone();
-        let set_confirm = set_confirm.clone();
-        move || set_confirm.call(Some(seed.clone()))
-    })
-    .vertical_alignment(VerticalAlignment::Center);
-    let row: Element = grid((
-        indicator.grid_column(0),
-        dot.grid_column(1),
-        title_el.grid_column(2),
-        delete.grid_column(3),
-    ))
-    .columns([
-        GridLength::Auto,
-        GridLength::Auto,
-        GridLength::STAR,
-        GridLength::Auto,
-    ])
-    .column_spacing(8.0)
-    .padding(Thickness::xy(10.0, 6.0))
-    .into();
-    // 恒为 border；仅 background 随 active（diff_modifiers 原地更新）。
-    let item_el = border(row).corner_radius(8.0);
-    let item_el = if active {
-        item_el.background(ThemeRef::SubtleFill)
-    } else {
-        item_el
-    };
-    // 不给虚拟化行挂 entrance：滚动回收/重新 realize 时重播动画会让列表
-    // 看起来抖动。新增会话的状态变化由 WinUI 自带 pointer/selection 视觉表达。
-    item_el.into()
-}
+/// 活动区行实现已由 `workspace_session_row` 取代（D15 变体含「移出」列）。
 
 /// 归档会话行：置灰标题 + 状态点 + ×（彻底删除确认）。
 ///
@@ -202,6 +161,208 @@ fn archive_row(
     border(row).corner_radius(8.0).into()
 }
 
+/// workspace 展开区内的会话行：D15 变体 `border(grid(竖条, 圆点, 标题,
+/// 移动, 删除))`——在活动行基础上多一列移动按钮。`attach_to` 为 None 时
+/// 按钮 = 移出到未分组（`workspace.detach`）；`Some(ws_id)` 时按钮 =
+/// 移入该 workspace（`workspace.move_session`，未分组区行使用）。
+/// 结构契约与 `session_row` 同纪律：active 只改修饰字段，不切换元素类型。
+fn workspace_session_row(
+    item: &SessionItem,
+    active: bool,
+    bridge: Arc<Bridge>,
+    set_confirm: SetState<Option<String>>,
+    attach_to: Option<String>,
+) -> Element {
+    let seed = item.seed.clone();
+    let indicator = border(text_block(""))
+        .width(3.0)
+        .height(16.0)
+        .corner_radius(1.5)
+        .vertical_alignment(VerticalAlignment::Center);
+    let indicator = if active {
+        indicator.background(ThemeRef::Accent)
+    } else {
+        indicator
+    };
+    let dot: Element = state_dot(item.state);
+    let title_el: Element = text_block(item.title.clone())
+        .max_lines(1)
+        .text_trimming(TextTrimming::CharacterEllipsis)
+        .foreground(ThemeRef::PrimaryText)
+        .vertical_alignment(VerticalAlignment::Center)
+        .on_pointer_pressed({
+            let seed = seed.clone();
+            let bridge = bridge.clone();
+            move |_| bridge.spawn_resume(&seed)
+        })
+        .into();
+    // 移动按钮：移出（workspace 区内）或移入当前 workspace（未分组区内）。
+    let move_btn: Element = match attach_to.clone() {
+        Some(target) => icon_button(Icon::symbol(Symbol::Folder), {
+            let seed = seed.clone();
+            let bridge = bridge.clone();
+            move || bridge.spawn_workspace_move_session(seed.clone(), target.clone())
+        })
+        .vertical_alignment(VerticalAlignment::Center),
+        None => icon_button(Icon::symbol(Symbol::Undo), {
+            let seed = seed.clone();
+            let bridge = bridge.clone();
+            move || bridge.spawn_workspace_detach(seed.clone())
+        })
+        .vertical_alignment(VerticalAlignment::Center),
+    };
+    let delete = icon_button(Icon::symbol(Symbol::Delete), {
+        let seed = seed.clone();
+        let set_confirm = set_confirm.clone();
+        move || set_confirm.call(Some(seed.clone()))
+    })
+    .vertical_alignment(VerticalAlignment::Center);
+    let row: Element = grid((
+        indicator.grid_column(0),
+        dot.grid_column(1),
+        title_el.grid_column(2),
+        move_btn.grid_column(3),
+        delete.grid_column(4),
+    ))
+    .columns([
+        GridLength::Auto,
+        GridLength::Auto,
+        GridLength::STAR,
+        GridLength::Auto,
+        GridLength::Auto,
+    ])
+    .column_spacing(8.0)
+    .padding(Thickness::xy(10.0, 6.0))
+    .into();
+    let item_el = border(row).corner_radius(8.0);
+    let item_el = if active {
+        item_el.background(ThemeRef::SubtleFill)
+    } else {
+        item_el
+    };
+    item_el.into()
+}
+
+/// 一个 workspace 行：文件夹图标 + 标题 + 会话数徽标 + 重命名/删除按钮。
+/// 点击行主体 = 选中（`set_current_workspace`，标签页随之过滤）；选中态 =
+/// 药丸高亮（同会话行语义）。结构恒为 `border(grid(图标, 标题, 徽标, ✎, 🗑))`。
+fn workspace_row(
+    ws: &WorkspaceItem,
+    selected: bool,
+    count: usize,
+    bridge: Arc<Bridge>,
+    set_ws_confirm: SetState<Option<String>>,
+    set_ws_rename: SetState<Option<(String, String)>>,
+) -> Element {
+    let id = ws.id.clone();
+    let title = ws.title.clone();
+    let icon = icon_button(Icon::symbol(Symbol::Folder), {
+        let id = id.clone();
+        let bridge = bridge.clone();
+        move || bridge.set_current_workspace(Some(id.clone()))
+    })
+    .vertical_alignment(VerticalAlignment::Center);
+    let title_el: Element = text_block(title.clone())
+        .max_lines(1)
+        .text_trimming(TextTrimming::CharacterEllipsis)
+        .foreground(ThemeRef::PrimaryText)
+        .vertical_alignment(VerticalAlignment::Center)
+        .on_pointer_pressed({
+            let id = id.clone();
+            let bridge = bridge.clone();
+            move |_| bridge.set_current_workspace(Some(id.clone()))
+        })
+        .into();
+    // 会话数徽标（SecondaryText 小字）。
+    let badge: Element = text_block(count.to_string())
+        .font_size(11.0)
+        .foreground(ThemeRef::SecondaryText)
+        .vertical_alignment(VerticalAlignment::Center)
+        .into();
+    let rename = icon_button(Icon::symbol(Symbol::Edit), {
+        let id = id.clone();
+        let title = title.clone();
+        let set_ws_rename = set_ws_rename.clone();
+        move || set_ws_rename.call(Some((id.clone(), title.clone())))
+    })
+    .vertical_alignment(VerticalAlignment::Center);
+    let delete = icon_button(Icon::symbol(Symbol::Delete), {
+        let id = id.clone();
+        let set_ws_confirm = set_ws_confirm.clone();
+        move || set_ws_confirm.call(Some(id.clone()))
+    })
+    .vertical_alignment(VerticalAlignment::Center);
+    let row: Element = grid((
+        icon.grid_column(0),
+        title_el.grid_column(1),
+        badge.grid_column(2),
+        rename.grid_column(3),
+        delete.grid_column(4),
+    ))
+    .columns([
+        GridLength::Auto,
+        GridLength::STAR,
+        GridLength::Auto,
+        GridLength::Auto,
+        GridLength::Auto,
+    ])
+    .column_spacing(8.0)
+    .padding(Thickness::xy(10.0, 6.0))
+    .into();
+    let item_el = border(row).corner_radius(8.0);
+    let item_el = if selected {
+        item_el.background(ThemeRef::SubtleFill)
+    } else {
+        item_el
+    };
+    item_el.into()
+}
+
+/// 未分组固定项：点击 = 未分组视图（`current_workspace=None`，标签页显示
+/// 全部孤儿会话）。常驻不隐藏（D6），带计数徽标。
+fn ungrouped_row(
+    count: usize,
+    selected: bool,
+    bridge: Arc<Bridge>,
+) -> Element {
+    let icon = icon_button(Icon::symbol(Symbol::Folder), {
+        let bridge = bridge.clone();
+        move || bridge.set_current_workspace(None)
+    })
+    .vertical_alignment(VerticalAlignment::Center);
+    let title_el: Element = text_block("未分组")
+        .max_lines(1)
+        .text_trimming(TextTrimming::CharacterEllipsis)
+        .foreground(ThemeRef::PrimaryText)
+        .vertical_alignment(VerticalAlignment::Center)
+        .on_pointer_pressed({
+            let bridge = bridge.clone();
+            move |_| bridge.set_current_workspace(None)
+        })
+        .into();
+    let badge: Element = text_block(count.to_string())
+        .font_size(11.0)
+        .foreground(ThemeRef::SecondaryText)
+        .vertical_alignment(VerticalAlignment::Center)
+        .into();
+    let row: Element = grid((
+        icon.grid_column(0),
+        title_el.grid_column(1),
+        badge.grid_column(2),
+    ))
+    .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+    .column_spacing(8.0)
+    .padding(Thickness::xy(10.0, 6.0))
+    .into();
+    let item_el = border(row).corner_radius(8.0);
+    let item_el = if selected {
+        item_el.background(ThemeRef::SubtleFill)
+    } else {
+        item_el
+    };
+    item_el.into()
+}
+
 /// XAML 侧栏组件（放入外层 Grid 第 0 列；宽度由 `width` 控制、可拖拽）。
 pub fn sidebar(
     cx: &mut RenderCx,
@@ -211,11 +372,22 @@ pub fn sidebar(
 ) -> Element {
     let (items, set_items) = cx.use_state::<Vec<SessionItem>>(Vec::new());
     let (active, set_active) = cx.use_state::<String>(String::new());
+    // workspace 数据源（同 session 轮询模式，独立 rev）。
+    let (workspaces, set_workspaces) = cx.use_state::<Vec<WorkspaceItem>>(Vec::new());
+    let (current_ws, set_current_ws) = cx.use_state::<Option<String>>(None);
     // 彻底删除确认对话框的待删会话（None = 关闭）。行内 × / 操作区删除
     // 按钮只置位此 state，确认后（Primary）才真正 `spawn_delete`。
     let (confirm_seed, set_confirm_seed) = cx.use_state::<Option<String>>(None);
+    // 删除 workspace 确认（None = 关闭）；确认后 `spawn_workspace_delete`。
+    let (ws_confirm, set_ws_confirm) = cx.use_state::<Option<String>>(None);
+    // 重命名对话框：`Some((id, 当前标题))` = 打开；输入文本独立 ref（
+    // 对话框闭包内读写，无需驱动重渲染）。
+    let (ws_rename, set_ws_rename) = cx.use_state::<Option<(String, String)>>(None);
+    let ws_rename_input = cx.use_ref::<String>(String::new());
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
+    let last_ws_rev = cx.use_ref::<u64>(0);
+    let last_cur_ws = cx.use_ref::<Option<String>>(None);
     // 拖拽状态：`(按下时窗口 x, 按下时宽度)`——差分计算（window_x 稳定，
     // 拖拽中窗口不动则与屏幕坐标等价）。
     let drag_start = cx.use_ref::<Option<(f64, f64)>>(None);
@@ -228,23 +400,44 @@ pub fn sidebar(
         let bridge = bridge.clone();
         let set_items = set_items.clone();
         let set_active = set_active.clone();
+        let set_workspaces = set_workspaces.clone();
+        let set_current_ws = set_current_ws.clone();
         let timer = timer.clone();
         let last_rev = last_rev.clone();
+        let last_ws_rev = last_ws_rev.clone();
         move || {
             let core = bridge.core();
             bridge.spawn_refresh_sessions();
+            bridge.spawn_refresh_workspaces();
             *last_rev.borrow_mut() = core.session_snapshot().1;
+            *last_ws_rev.borrow_mut() = core.workspace_snapshot().1;
             if let Ok(t) = DispatcherTimer::new(Duration::from_millis(500), {
                 let core = core.clone();
                 let set_items = set_items.clone();
                 let set_active = set_active.clone();
+                let set_workspaces = set_workspaces.clone();
+                let set_current_ws = set_current_ws.clone();
                 let last_rev = last_rev.clone();
+                let last_ws_rev = last_ws_rev.clone();
                 move || {
                     let (items, rev) = core.session_snapshot();
                     if rev != *last_rev.borrow() {
                         *last_rev.borrow_mut() = rev;
                         set_items.call(items);
                         set_active.call(core.active_seed());
+                    }
+                    let (workspaces, ws_rev) = core.workspace_snapshot();
+                    if ws_rev != *last_ws_rev.borrow() {
+                        *last_ws_rev.borrow_mut() = ws_rev;
+                        set_workspaces.call(workspaces);
+                    }
+                    // current_workspace 可能被 tabs 侧（新建归属）或外部修改，
+                    // 轮询对齐，避免两侧状态分叉（值变化才 set）。
+                    let cur = core.current_workspace();
+                    let prev = last_cur_ws.borrow().clone();
+                    if cur != prev {
+                        *last_cur_ws.borrow_mut() = cur.clone();
+                        set_current_ws.call(cur);
                     }
                 }
             }) {
@@ -288,29 +481,99 @@ pub fn sidebar(
         sp.margin(12.0)
     };
 
-    // ── 分组头（SecondaryText 主题色令牌，非 opacity hack）──────
+    // ── 分组头：工作区 + 添加按钮（SecondaryText 主题色令牌）──────
     let group_label: Element = {
-        let el: Element = text_block("任务")
+        let label: Element = text_block("工作区")
             .font_size(12.0)
             .foreground(ThemeRef::SecondaryText)
             .into();
-        el.margin(Thickness::xy(12.0, 6.0))
+        // ➕ 添加 workspace：目录选择对话框 → `workspace.create`。
+        let add = icon_button(Icon::symbol(Symbol::Add), {
+            let bridge = bridge.clone();
+            move || match bridge.pick_workspace_directory() {
+                // 取消 → Ok(null) → 不动作；选择 → 注册为工作区。
+                Ok(serde_json::Value::String(path)) => {
+                    bridge.spawn_workspace_create(path);
+                }
+                Ok(_) => {}
+                Err(err) => log_diag(&format!("pick workspace directory failed: {err}")),
+            }
+        })
+        .vertical_alignment(VerticalAlignment::Center);
+        grid((label.grid_column(0), add.grid_column(1)))
+            .columns([GridLength::STAR, GridLength::Auto])
+            .margin(Thickness::xy(8.0, 2.0))
+            .into()
     };
 
-    // ── 会话列表（SelectionMode::None 禁用选中）────────────────
-    // 分组：活动（标签条同源：非归档）在上；归档组置灰显示、点击恢复。
+    // ── 三段列表：Workspace 树 / 未分组 / 归档 ─────────────────────
+    // 分区：非归档会话按 workspace_id 归类；workspace 树由 daemon 账户驱动。
     let (active_items, archived_items): (Vec<SessionItem>, Vec<SessionItem>) =
         items.iter().cloned().partition(|s| !s.archived);
-    let list_active = list_view(active_items.clone(), {
+
+    // 会话归属查找：按 workspace_id 索引（与 daemon `session.list.workspace_id`
+    // 同源，workspace.session_ids 账户不在此处二次校验——展示层以列表为准）。
+    let ws_sessions = |ws_id: &str| -> Vec<SessionItem> {
+        active_items
+            .iter()
+            .filter(|s| s.workspace_id.as_deref() == Some(ws_id))
+            .cloned()
+            .collect()
+    };
+    let ungrouped_items: Vec<SessionItem> = active_items
+        .iter()
+        .filter(|s| s.workspace_id.is_none())
+        .cloned()
+        .collect();
+
+    let mut rows: Vec<Element> = Vec::new();
+    for ws in &workspaces {
+        let ws_items = ws_sessions(&ws.id);
+        let ws_row = workspace_row(
+            ws,
+            current_ws.as_deref() == Some(ws.id.as_str()),
+            ws_items.len(),
+            bridge.clone(),
+            set_ws_confirm.clone(),
+            set_ws_rename.clone(),
+        );
+        let ws_list = list_view(ws_items, {
+            let bridge = bridge.clone();
+            let set_confirm = set_confirm_seed.clone();
+            let active = active.clone();
+            move |item, _| {
+                workspace_session_row(
+                    item,
+                    item.seed == active,
+                    bridge.clone(),
+                    set_confirm.clone(),
+                    None,
+                )
+            }
+        })
+        .with_key_selector(|item| item.seed.clone())
+        .selection_mode(SelectionMode::None)
+        .build();
+        rows.push(ws_row);
+        rows.push(ws_list);
+    }
+    let ungrouped_row_el = ungrouped_row(
+        ungrouped_items.len(),
+        current_ws.is_none(),
+        bridge.clone(),
+    );
+    let ungrouped_list = list_view(ungrouped_items, {
         let bridge = bridge.clone();
         let set_confirm = set_confirm_seed.clone();
         let active = active.clone();
+        let target = current_ws.clone();
         move |item, _| {
-            session_row(
+            workspace_session_row(
                 item,
                 item.seed == active,
                 bridge.clone(),
                 set_confirm.clone(),
+                target.clone(),
             )
         }
     })
@@ -335,8 +598,11 @@ pub fn sidebar(
     .with_key_selector(|item| item.seed.clone())
     .selection_mode(SelectionMode::None)
     .build();
-    let session_list: Element =
-        scroll_viewer(vstack((list_active, archived_label, list_archived))).into();
+    rows.push(ungrouped_row_el);
+    rows.push(ungrouped_list);
+    rows.push(archived_label);
+    rows.push(list_archived);
+    let session_list: Element = scroll_viewer(vstack(rows)).into();
 
     // ── 底部导航：技能 / 设置 ──────────────────────────────────
     let footer: Element = {
@@ -466,9 +732,7 @@ pub fn sidebar(
         })
         .into();
 
-    // ── 彻底删除确认对话框（phantom child 覆盖层：同 cell 重叠渲染）──
-    // 归档请用标签页的 ×（spawn_archive）；列表 × 与操作区删除按钮 =
-    // 真删（manager.delete 磁盘目录），确认后执行。
+    // ── 彻底删除会话确认（phantom child 覆盖层：同 cell 重叠渲染）──
     let dialog: Element = match confirm_seed.clone() {
         Some(seed) => {
             let bridge = bridge.clone();
@@ -489,6 +753,87 @@ pub fn sidebar(
         None => grid(()).into(),
     };
 
+    // ── 删除 workspace 确认（会话保留，变为未分组）────────────────
+    let ws_delete_dialog: Element = match ws_confirm.clone() {
+        Some(id) => {
+            let bridge = bridge.clone();
+            let set_ws_confirm = set_ws_confirm.clone();
+            ContentDialog::new("删除工作区")
+                .content("删除该工作区分组。其下会话不会被删除，将移入「未分组」。")
+                .primary_button_text("删除")
+                .close_button_text("取消")
+                .is_open(true)
+                .on_closed(move |result: ContentDialogResult| {
+                    if result == ContentDialogResult::Primary {
+                        bridge.spawn_workspace_delete(id.clone());
+                    }
+                    set_ws_confirm.call(None);
+                })
+                .into()
+        }
+        None => grid(()).into(),
+    };
+
+    // ── 重命名 workspace（自定义浮层：居中卡片 + TextBox 输入）────
+    // ContentDialog.content 仅接受文本，故用 phantom overlay 实现
+    // （与确认对话框同 cell 重叠渲染机制）。
+    let ws_rename_dialog: Element = match ws_rename.clone() {
+        Some((id, current_title)) => {
+            let bridge = bridge.clone();
+            let set_ws_rename = set_ws_rename.clone();
+            let input_ref = ws_rename_input.clone();
+            // 每次打开以当前标题初始化输入。
+            *input_ref.borrow_mut() = current_title.clone();
+            let input: Element = text_box(input_ref.borrow().clone())
+                .on_text_changed({
+                    let input_ref = input_ref.clone();
+                    move |v| *input_ref.borrow_mut() = v
+                })
+                .width(280.0)
+                .into();
+            let confirm = button("确定").on_click({
+                let bridge = bridge.clone();
+                let set_ws_rename = set_ws_rename.clone();
+                let input_ref = input_ref.clone();
+                move || {
+                    let title = input_ref.borrow().trim().to_string();
+                    if !title.is_empty() {
+                        bridge.spawn_workspace_rename(id.clone(), title);
+                    }
+                    set_ws_rename.call(None);
+                }
+            });
+            let cancel = button("取消").on_click({
+                let set_ws_rename = set_ws_rename.clone();
+                move || set_ws_rename.call(None)
+            });
+            let card: Element = {
+                let title_el: Element = text_block("重命名工作区")
+                    .semibold()
+                    .font_size(14.0)
+                    .into();
+                let buttons: Element = hstack((cancel, confirm))
+                    .spacing(8.0)
+                    .horizontal_alignment(HorizontalAlignment::Right)
+                    .into();
+                border(vstack((title_el, input, buttons)).spacing(12.0))
+                    .corner_radius(8.0)
+                    .background(ThemeRef::CardBackground)
+                    .border_brush(ThemeRef::CardStroke)
+                    .border_thickness(Thickness::xy(1.0, 1.0))
+                    .padding(Thickness::xy(16.0, 16.0))
+                    .into()
+            };
+            grid((card,))
+                .columns([GridLength::STAR])
+                .rows([GridLength::STAR])
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .vertical_alignment(VerticalAlignment::Center)
+                .into()
+        }
+        None => grid(()).into(),
+    };
+
     // ── 根容器（无事件：指针已由 splitter 捕获）────────────────────
     grid((
         grid((content.grid_column(0), splitter.grid_column(1)))
@@ -497,6 +842,8 @@ pub fn sidebar(
             .grid_row(0)
             .grid_column(0),
         dialog.grid_row(0).grid_column(0),
+        ws_delete_dialog.grid_row(0).grid_column(0),
+        ws_rename_dialog.grid_row(0).grid_column(0),
     ))
     .rows([GridLength::STAR])
     .into()

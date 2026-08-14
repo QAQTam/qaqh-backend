@@ -70,6 +70,7 @@ pub fn register(mgr: &mut ToolManager) {
         }),
         handler: handle_spawn_subagent,
         risk: ToolRisk::Administrative,
+        category: deepx_workspace::permission::ToolCategory::Exec,
         default_timeout: std::time::Duration::from_secs(180),
     });
 }

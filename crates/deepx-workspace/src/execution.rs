@@ -56,6 +56,7 @@ pub fn execute_authorized(
         tool_name: name,
         action,
         args,
+        category: _,
     } = invocation;
 
     if crate::CANCEL.load(Ordering::SeqCst) {
@@ -202,12 +203,16 @@ pub fn execute_with_context(
         action.to_string()
     };
     let workspace_root = crate::runtime::active_workspace_root();
+    // 能力类别来自 handler 声明（单一事实源）；查不到时保守回退 Write。
+    let category = crate::runtime::lookup_category(&resolved_name)
+        .unwrap_or(crate::permission::ToolCategory::Write);
     let invocation = ToolInvocation {
         session_id: context.active_session,
         call_id,
         tool_name: resolved_name.clone(),
         action: resolved_action,
         args,
+        category,
     };
 
     match admit(
@@ -312,6 +317,7 @@ mod tests {
             input_schema: serde_json::json!({}),
             handler: test_counter_handler,
             risk: crate::ToolRisk::ReadOnly,
+            category: crate::permission::ToolCategory::Read,
             default_timeout: std::time::Duration::from_secs(5),
         });
         crate::runtime::register_test_handler(crate::ToolHandler {
@@ -320,6 +326,7 @@ mod tests {
             input_schema: serde_json::json!({}),
             handler: test_counter_handler,
             risk: crate::ToolRisk::Destructive,
+            category: crate::permission::ToolCategory::Write,
             default_timeout: std::time::Duration::from_secs(5),
         });
         crate::runtime::register_test_handler_with_placement(
@@ -329,6 +336,7 @@ mod tests {
                 input_schema: serde_json::json!({}),
                 handler: test_counter_handler,
                 risk: crate::ToolRisk::ReadOnly,
+                category: crate::permission::ToolCategory::Read,
                 default_timeout: std::time::Duration::from_secs(5),
             },
             crate::ToolPlacement::Workspace,
@@ -444,12 +452,17 @@ mod tests {
     }
 
     fn make_invocation(tool_name: &str, call_id: &str) -> ToolInvocation {
+        // 与生产路径（execute_with_context）一致：从 manager lookup handler
+        // 声明的 category（单一事实源）；测试 manager 已注册 test_* handler。
+        let category = crate::runtime::lookup_category(tool_name)
+            .unwrap_or(crate::permission::ToolCategory::Read);
         ToolInvocation {
             session_id: "test_session".to_string(),
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
             action: String::new(),
             args: serde_json::json!({}),
+            category,
         }
     }
 
@@ -964,6 +977,7 @@ mod tests {
             tool_name: "test_counter".to_string(),
             action: String::new(),
             args: serde_json::json!({}),
+            category: crate::permission::ToolCategory::Read,
         };
         let auth = AuthorizedToolCall::new(inv, vec![], crate::runtime::active_workspace_root());
         let result = execute_authorized(auth, None);
@@ -1000,6 +1014,7 @@ mod tests {
             tool_name: "test_counter".to_string(),
             action: String::new(),
             args: serde_json::json!({"path": "a.txt"}),
+            category: crate::permission::ToolCategory::Read,
         };
         let admission = admit(inv1, 4, &ws, &trusted);
         let auth = match admission {
@@ -1017,6 +1032,7 @@ mod tests {
             tool_name: "test_counter".to_string(),
             action: String::new(),
             args: serde_json::json!({"path": "b.txt"}),
+            category: crate::permission::ToolCategory::Read,
         };
         let forged_auth = AuthorizedToolCall::new(
             inv2,

@@ -132,6 +132,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             }),
             handler: handle_glob,
             risk: ToolRisk::ReadOnly,
+            category: crate::permission::ToolCategory::Read,
             default_timeout: std::time::Duration::from_secs(30),
         },
         crate::ToolPlacement::HostOnly,
@@ -229,11 +230,19 @@ mod tests {
     }
 
     #[test]
-    fn glob_is_categorized_read_only() {
-        // 权限引擎必须把 glob 归为 Read：Level 2+ 自动批准（无弹窗），
-        // 子代理沙箱 workspace 内同样自动放行。误归 Write 会弹审批。
-        use crate::permission::{ToolCategory, categorize_tool};
-        assert_eq!(categorize_tool("glob"), ToolCategory::Read);
+    fn glob_is_read_only_under_permission_engine() {
+        // 权限引擎必须把 glob（handler 声明 Read）视为只读：Level 2 自动批准。
+        use crate::permission::{needs_permission, PermissionDecision, PermissionLevel};
+        let ws = std::env::temp_dir().join("deepx-glob-perm");
+        let decision = needs_permission(
+            PermissionLevel::ReadFree,
+            "glob",
+            &serde_json::json!({ "pattern": "**/*.rs" }),
+            &ws,
+            &Default::default(),
+            crate::permission::ToolCategory::Read,
+        );
+        assert!(matches!(decision, PermissionDecision::AutoApprove));
     }
 
     #[test]

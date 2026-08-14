@@ -215,6 +215,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         }),
         handler: handle_ask_user,
         risk: ToolRisk::ReadOnly,
+        category: crate::permission::ToolCategory::Read,
         default_timeout: std::time::Duration::ZERO,
     },
     crate::ToolPlacement::Workspace,

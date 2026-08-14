@@ -170,6 +170,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         }),
         handler: handle_apply_patch,
         risk: ToolRisk::Write,
+        category: crate::permission::ToolCategory::Write,
         default_timeout: std::time::Duration::from_secs(60),
     },
     crate::ToolPlacement::Workspace,

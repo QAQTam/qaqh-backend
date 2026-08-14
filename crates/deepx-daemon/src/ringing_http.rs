@@ -1576,8 +1576,12 @@ async fn handle_command(
     // SessionCreate/Resume are registry operations. They select the worker
     // instance for the whole connection and are not ordinary worker commands.
     match &env.command {
-        deepx_ringing::RingingCommand::Control(ControlCommand::SessionCreate { .. }) => {
-            let created_seed = match service.handle("session.new", &serde_json::json!({})) {
+        deepx_ringing::RingingCommand::Control(ControlCommand::SessionCreate { cwd, .. }) => {
+            let params = match cwd {
+                Some(cwd) => serde_json::json!({ "cwd": cwd }),
+                None => serde_json::json!({}),
+            };
+            let created_seed = match service.handle("session.new", &params) {
                 Ok(value) => value,
                 Err(error) => {
                     pending

@@ -43,6 +43,10 @@ pub enum ControlCommand {
     SessionCreate {
         #[serde(default)]
         close_current: bool,
+        /// 可选工作目录：daemon 拦截层透传给 `session.new` 的 cwd 参数，
+        /// 落 SessionMeta.cwd 并触发 workspace 自动归属（None = 未分组）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     /// 恢复已保存会话。accepted 后由三个频道分别完成 snapshot/cursor 恢复。
     SessionResume { seed: String },

@@ -921,7 +921,10 @@ impl Loop {
         let command_id = env.command_id.clone();
         match env.command {
             RingingCommand::Control(command) => match command {
-                ControlCommand::SessionCreate { close_current } => {
+                ControlCommand::SessionCreate {
+                    close_current,
+                    cwd: _,
+                } => {
                     if close_current {
                         self.prepare_session_switch();
                     } else {

@@ -144,7 +144,10 @@ fn cmd_ask_dismiss(ask_id: &str) -> RingingCommand {
 }
 
 fn cmd_session_create(close_current: bool) -> RingingCommand {
-    RingingCommand::Control(ControlCommand::SessionCreate { close_current })
+    RingingCommand::Control(ControlCommand::SessionCreate {
+        close_current,
+        cwd: None,
+    })
 }
 
 fn cmd_session_resume(seed: &str) -> RingingCommand {

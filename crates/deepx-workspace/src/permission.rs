@@ -73,28 +73,6 @@ pub fn classify_risk(
     }
 }
 
-/// Classify a tool by its registered name.
-pub fn categorize_tool(name: &str) -> ToolCategory {
-    match name {
-        // ── Read ──
-        "read_file" | "skills" | "ask" | "image" | "git_diff" | "git_log" | "git_show"
-        | "git_status" | "glob" => ToolCategory::Read,
-
-        // ── Write ──
-        "edit_file" | "git_add" | "git_commit" | "git_branch" | "git_checkout" | "git_merge"
-        | "git_restore" | "todo" => ToolCategory::Write,
-
-        // ── Exec ──
-        "exec" | "spawn_subagent" => ToolCategory::Exec,
-
-        // ── Net ──
-        "web_fetch" => ToolCategory::Net,
-
-        // Unknown tools default to Write (conservative: assume mutation).
-        _ => ToolCategory::Write,
-    }
-}
-
 // ──────────────────────────────────────
 // Permission level
 // ──────────────────────────────────────
@@ -294,12 +272,15 @@ pub enum PermissionDecision {
 /// - `args`: tool arguments (JSON)
 /// - `workspace_root`: workspace root directory (used for boundary checks)
 /// - `trusted_dirs`: set of previously trusted directories
+/// - `declared_category`: capability category from the handler declaration
+///   （单一事实源；`process` 等按 action 细分的工具在内部覆盖）
 pub fn needs_permission(
     level: PermissionLevel,
     tool_name: &str,
     args: &serde_json::Value,
     workspace_root: &Path,
     trusted_dirs: &HashSet<PathBuf>,
+    declared_category: ToolCategory,
 ) -> PermissionDecision {
     // Task only mutates the active session's own todo.json. It does not
     // touch workspace files, run code, or access external resources. Requiring
@@ -321,6 +302,8 @@ pub fn needs_permission(
         return PermissionDecision::AutoApprove;
     }
 
+    // `process` 是唯一需要按 action 细分的工具：check/wait 只读、kill/write
+    // 控制进程。其余工具一律使用 handler 声明的类别。
     let category = if tool_name == "process" {
         match args.get("action").and_then(|value| value.as_str()) {
             Some("check" | "wait") => ToolCategory::Read,
@@ -328,7 +311,7 @@ pub fn needs_permission(
             _ => ToolCategory::Write,
         }
     } else {
-        categorize_tool(tool_name)
+        declared_category
     };
     let paths = extract_target_paths(tool_name, args);
     let workspace_root = resolve_target_path(workspace_root.to_path_buf());
@@ -523,13 +506,13 @@ mod tests {
 
     #[test]
     fn ask_user_does_not_open_a_second_permission_dialog() {
-        assert_eq!(categorize_tool("ask"), ToolCategory::Read);
         let decision = needs_permission(
             PermissionLevel::MaxLockdown,
             "ask",
             &serde_json::json!({"question":"Continue?"}),
             Path::new("."),
             &HashSet::new(),
+            ToolCategory::Read,
         );
 
         assert!(matches!(decision, PermissionDecision::AutoApprove));
@@ -550,6 +533,7 @@ mod tests {
                     &serde_json::json!({"id": "T1", "status": "completed"}),
                     Path::new("."),
                     &HashSet::new(),
+                    ToolCategory::Write,
                 );
                 assert!(
                     matches!(decision, PermissionDecision::AutoApprove),
@@ -600,6 +584,7 @@ mod tests {
             &serde_json::json!({"path": target}),
             &workspace,
             &HashSet::new(),
+            ToolCategory::Write,
         );
 
         assert!(
@@ -624,6 +609,7 @@ mod tests {
             &serde_json::json!({"path": target}),
             &workspace,
             &HashSet::new(),
+            ToolCategory::Write,
         );
 
         assert!(
@@ -634,13 +620,18 @@ mod tests {
 
     #[test]
     fn workspace_free_still_requires_approval_for_exec_and_network() {
-        for tool in ["exec", "spawn_subagent", "web_fetch"] {
+        for (tool, category) in [
+            ("exec", ToolCategory::Exec),
+            ("spawn_subagent", ToolCategory::Exec),
+            ("web_fetch", ToolCategory::Net),
+        ] {
             let decision = needs_permission(
                 PermissionLevel::WorkspaceFree,
                 tool,
                 &serde_json::json!({}),
                 Path::new("."),
                 &HashSet::new(),
+                category,
             );
             assert!(
                 matches!(decision, PermissionDecision::AskUser { .. }),

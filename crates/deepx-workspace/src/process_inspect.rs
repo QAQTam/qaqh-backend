@@ -38,6 +38,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         }),
         handler: handle_process,
         risk: ToolRisk::Administrative,
+        category: crate::permission::ToolCategory::Exec,
         default_timeout: std::time::Duration::from_secs(180),
     }, ToolPlacement::Workspace);
 }
