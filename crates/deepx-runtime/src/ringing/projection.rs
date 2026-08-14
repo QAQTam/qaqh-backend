@@ -132,7 +132,10 @@ impl SnapshotProjector {
                         state["dashboard_snapshot"] = serde_json::json!(snapshot);
                         true
                     }
-                    CE::SkillsUpdated { .. } | CE::DashboardUpdated { .. } => false,
+                    CE::SkillsUpdated { .. }
+                    | CE::DashboardUpdated { .. }
+                    // 瞬态终态推送：不折叠进快照（tracker 收敛走实时事件）。
+                    | CE::SubagentStatus { .. } => false,
                 }
             }
             (RingingChannel::Conversation, DomainEvent::Conversation(ce)) => {

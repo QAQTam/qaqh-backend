@@ -84,6 +84,11 @@ pub struct SessionMeta {
     /// 列表归档组可见可恢复）。旧 meta.json 缺失该字段 = 未归档。
     #[serde(default)]
     pub archived: bool,
+    /// 临时会话标记（子代理）：`index=false` 写入时置 true。会话关闭时
+    /// 整个目录被删除（用完即走，磁盘零残留）；正规会话恒为 false。
+    /// 旧 meta.json 缺失该字段 = 非临时会话。
+    #[serde(default)]
+    pub ephemeral: bool,
     #[serde(default)]
     pub skills: SkillSessionStateV2,
     /// Provider-confirmed usage accumulated across model requests in this session.
@@ -137,6 +142,7 @@ impl Default for SessionMeta {
             compact_skip: 0,
             mode: 0,
             archived: false,
+            ephemeral: false,
             skills: SkillSessionStateV2::default(),
             usage_totals: crate::UsageInfo::default(),
             last_usage: None,

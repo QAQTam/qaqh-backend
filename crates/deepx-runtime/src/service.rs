@@ -67,6 +67,15 @@ impl DeepxService {
     /// causation 挂命令 id。会话不存在同样返回 Ok（幂等关闭）。
     pub fn close_session(&self, seed: &str, causation_id: Option<&str>) -> Result<(), String> {
         self.registry()?.close(seed);
+        // 临时会话（子代理）用完即走：关闭后删除会话目录，磁盘零残留。
+        // 目录已不存在（重复 close / 已被清理）时静默跳过，保持幂等。
+        if deepx_session::SessionManager::global().is_ephemeral(seed) {
+            match deepx_session::SessionManager::global().delete(seed) {
+                Ok(()) => log::info!("[session] ephemeral session {seed} cleaned up (auto-unload)"),
+                Err(e) if e.contains("Session not found") => {}
+                Err(e) => log::warn!("[session] ephemeral cleanup {seed} failed: {e}"),
+            }
+        }
         if let Some(hub) = self.hub.get() {
             let _ = hub.publish_with_causation(
                 seed,

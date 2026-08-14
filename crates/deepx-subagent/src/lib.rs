@@ -738,6 +738,25 @@ fn collect_subagent_result(
     }
 
     registry_ref.finish(&final_answer, exit_code);
+
+    // ── 自动卸载：终态后关闭子 worker 进程，释放后台资源。──
+    // 子代理完成任务后其 worker 进程不会自行退出（idle 循环等待命令），
+    // 会永久挂在后台占用进程/管道/内存。SessionClose 由 daemon 拦截
+    // （契约 §2：registry.close → SessionShutdown 帧 → worker 优雅退出 →
+    // 进程消失），collector 已 attach 子 seed（owns 关系），命令可直达。
+    // 失败仅告警：结果已注入主会话 + 终态已回写注册表，进程残留不丢数据。
+    if let Err(e) = rt_block_on(client.send_command(
+        Some(seed),
+        RingingCommand::Control(deepx_client::ControlCommand::SessionClose {
+            seed: seed.to_string(),
+        }),
+        CommandOptions::default(),
+    )) {
+        log::warn!("[SUBAGENT] '{name}' close worker {seed} failed: {e}");
+    } else {
+        log::info!("[SUBAGENT] '{name}' worker {seed} closed (auto-unload)");
+    }
+
     client.close();
     log::info!(
         "[SUBAGENT] '{name}' collector complete (seed={seed}), answer_len={answer_len}, exit={exit_code}, cancelled={did_cancel}, first_event={first_event_logged}"

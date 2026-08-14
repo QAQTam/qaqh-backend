@@ -584,6 +584,15 @@ pub enum ControlEvent {
         level: NoticeLevel,
         message: String,
     },
+    /// 子代理终态推送：注入被回合 lap 边界吸收（无独立注入回合）时，
+    /// 前端 tracker 的唯一收敛信号仍缺失——本事件补发轻量终态，不进入
+    /// 回合状态机、不进模型上下文。`state` 为注入标签原样
+    /// （COMPLETED / ERROR / TIMEOUT / CANCELLED）。
+    SubagentStatus {
+        seed: String,
+        name: String,
+        state: String,
+    },
     /// 无专用领域终态载荷的命令已完成。用于 undo/set-mode/reload 等
     /// 操作的 receipt 收口，不承担 UI 通知语义。
     OperationCompleted {

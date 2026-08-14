@@ -76,6 +76,65 @@ fn ringing_command_is_interrupt(env: &deepx_ringing::RingingWorkerCommandEnvelop
     )
 }
 
+/// 解析注入文本首行的 `[SUBAGENT 'name' STATE]` 标签 → (name, state)。
+/// 标签规范见 `crates/deepx-subagent/src/lib.rs` collect 收尾（COMPLETED /
+/// ERROR / TIMEOUT / CANCELLED 变体）。与前端 `parse_subagent_injection`
+/// 保持同一格式约定；解析失败返回 None（静默，不阻断注入本身）。
+fn parse_subagent_status_tag(text: &str) -> Option<(String, String)> {
+    let first = text.lines().next()?.trim_start();
+    let rest = first.strip_prefix("[SUBAGENT '")?;
+    let (name, rest) = rest.split_once("' ")?;
+    let state = if rest.starts_with("COMPLETED]") {
+        "COMPLETED"
+    } else if rest.starts_with("ERROR") {
+        "ERROR"
+    } else if rest.starts_with("TIMEOUT") {
+        "TIMEOUT"
+    } else if rest.starts_with("CANCELLED]") {
+        "CANCELLED"
+    } else {
+        return None;
+    };
+    Some((name.to_string(), state.to_string()))
+}
+
+#[cfg(test)]
+mod parse_subagent_status_tag_tests {
+    use super::parse_subagent_status_tag;
+
+    #[test]
+    fn parses_all_terminal_tags() {
+        assert_eq!(
+            parse_subagent_status_tag("[SUBAGENT 'explore' COMPLETED]\n\nfinal answer"),
+            Some(("explore".to_string(), "COMPLETED".to_string()))
+        );
+        assert_eq!(
+            parse_subagent_status_tag("[SUBAGENT 'x' ERROR exit=1]"),
+            Some(("x".to_string(), "ERROR".to_string()))
+        );
+        assert_eq!(
+            parse_subagent_status_tag("[SUBAGENT 'x' TIMEOUT after 120s]"),
+            Some(("x".to_string(), "TIMEOUT".to_string()))
+        );
+        assert_eq!(
+            parse_subagent_status_tag("[SUBAGENT 'x' CANCELLED]"),
+            Some(("x".to_string(), "CANCELLED".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_non_injection_text() {
+        assert_eq!(parse_subagent_status_tag("normal user message"), None);
+        assert_eq!(parse_subagent_status_tag("[SUBAGENT 'x' RUNNING]"), None);
+        assert_eq!(parse_subagent_status_tag(""), None);
+        // 标签不在首行（注入文本规范要求首行即标签）→ 不匹配。
+        assert_eq!(
+            parse_subagent_status_tag("some text\n[SUBAGENT 'x' COMPLETED]"),
+            None
+        );
+    }
+}
+
 // ═══════════════════════════════════════════════════════
 // Loop — the dispatcher
 // ═══════════════════════════════════════════════════════
@@ -444,6 +503,24 @@ impl Loop {
                                 text.len(),
                                 self.flow.pending_len()
                             );
+                            // 吸收路径无独立注入回合 → 前端 tracker 收不到
+                            // TurnStarted 标签，终态收敛缺失（幽灵 Lost）。
+                            // 补发轻量控制面事件：不进回合状态机、不进模型
+                            // 上下文，仅作为前端子代理状态区的收敛信号。
+                            if let Some((name, state)) = parse_subagent_status_tag(text) {
+                                log::info!(
+                                    "[INJECT] subagent status emitted (name={name}, state={state}) for absorbed injection"
+                                );
+                                self.paced_emitter.emit_domain(
+                                    deepx_domain::DomainEvent::Control(
+                                        deepx_domain::ControlEvent::SubagentStatus {
+                                            seed: self.session.agent.session.seed.clone(),
+                                            name,
+                                            state,
+                                        },
+                                    ),
+                                );
+                            }
                         }
                         Err(e) => {
                             log::error!("[INJECT] ContextFlow submit failed: {e}");
