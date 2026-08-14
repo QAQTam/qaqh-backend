@@ -21,7 +21,8 @@
 | 文档 | 内容 | 状态 |
 |---|---|---|
 | [CHATVIEW-V4-PLAN.md](./CHATVIEW-V4-PLAN.md) | ChatView V4 改进计划（ToolView 聚合 + 状态设计） | ✅ 原型已定稿，待 Rust 落地 |
-| [PLAN-SUBAGENT-STATUS-AREA.md](./PLAN-SUBAGENT-STATUS-AREA.md) | 并行子代理 UI（工作状态区）实施计划 | 🔲 待实施（2026-08-14 定稿） |
+| [PLAN-SUBAGENT-STATUS-AREA.md](./PLAN-SUBAGENT-STATUS-AREA.md) | 并行子代理 UI（工作状态区）实施计划 | ✅ 进行中（MVP 已落地） |
+| [PLAN-WORKSPACE-CAPABILITY.md](./PLAN-WORKSPACE-CAPABILITY.md) | Workspace 升级：Capability 抽象 + MCP + Hooks 权限模型 | 🔲 待实施（P1 已落地） |
 | [PLAN-WINUI-WORKSPACE-NAV.md](./PLAN-WINUI-WORKSPACE-NAV.md) | WinUI 侧栏工作区化：Workspace 导航 + 标签页过滤 + 未分组孤儿语义 | 🔲 待实施（2026-08-14 定稿） |
 | [chat-live-prototype.html](./chat-live-prototype.html) | ChatView V4 交互原型（定稿） | ✅ 落地依据 |
 | [chat-pagination-design.md](./chat-pagination-design.md) | ChatView 历史分页：机制实测 + 设计细化（阶段 3 后端分页待实施） | ✅ 现行（待 rc4 冻结决策） |
