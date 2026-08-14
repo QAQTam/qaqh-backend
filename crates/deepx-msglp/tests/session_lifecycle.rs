@@ -37,17 +37,26 @@ struct MockServer {
     requests: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    /// 每个 gate 请求体（按序），用于断言注入内容进入后续请求。
+    bodies: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockServer {
     fn single_response(events: Vec<String>) -> Self {
+        Self::multi_response(vec![events])
+    }
+
+    /// 按序应答多轮 gate 请求（每轮一个 scenario）；记录每个请求体。
+    fn multi_response(scenarios: Vec<Vec<String>>) -> Self {
         let server = Server::http("127.0.0.1:0").expect("bind mock");
         let port = server.server_addr().to_ip().expect("addr").port();
         let requests = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
         let req_count = requests.clone();
-        let scenarios = Arc::new(Mutex::new(VecDeque::from([events])));
+        let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+        let bodies_store = bodies.clone();
+        let scenarios = Arc::new(Mutex::new(VecDeque::from(scenarios)));
         let handle =
             thread::spawn(move || {
                 loop {
@@ -62,6 +71,7 @@ impl MockServer {
                     let mut body = String::new();
                     let _ = request.as_reader().read_to_string(&mut body);
                     req_count.fetch_add(1, Ordering::SeqCst);
+                    bodies_store.lock().expect("lock").push(body);
                     let scenario = scenarios
                         .lock()
                         .expect("lock")
@@ -85,6 +95,7 @@ impl MockServer {
             requests,
             stop,
             handle: Some(handle),
+            bodies,
         }
     }
 }
@@ -107,6 +118,17 @@ fn text_round(content: &str) -> Vec<String> {
         json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
                "usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}})
         .to_string(),
+        "[DONE]".into(),
+    ]
+}
+
+/// A round that emits one tool call (drives tools → ContinueTurn → next lap).
+fn tool_round(tool_id: &str, name: &str, args: &str) -> Vec<String> {
+    vec![
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[
+            {"index":0,"id":tool_id,"type":"function","function":{"name":name,"arguments":args}}
+        ]}}]}).to_string(),
+        json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}).to_string(),
         "[DONE]".into(),
     ]
 }
@@ -145,6 +167,16 @@ fn cmd_user_input(text: &str) -> RingingCommand {
         images: vec![],
         attachments: None,
         as_system: false,
+    })
+}
+
+/// 子代理结果注入（system 角色，见缝插针进当前回合）。
+fn cmd_system_inject(text: &str) -> RingingCommand {
+    RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+        text: text.into(),
+        images: vec![],
+        attachments: None,
+        as_system: true,
     })
 }
 
@@ -306,6 +338,110 @@ fn send_message_triggers_turn_lifecycle() {
         1,
         "expected exactly 1 LLM request"
     );
+}
+
+/// 见缝插针注入：子代理报告（as_system）在回合工具调用结束后、下一轮 gate
+/// 前被吸收进当前回合消息流——回合不被打断（不产生第二个 TurnStarted），
+/// 且第二轮 LLM 请求立即可见注入内容（此前要等整个回合结束才注入）。
+#[test]
+fn system_injection_lands_inside_running_turn() {
+    let _test_lock = SESSION_TEST_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let probe_file = ws.join("probe.txt");
+    std::fs::write(&probe_file, "probe content").unwrap();
+    deepx_workspace::set_workspace(&ws.to_string_lossy());
+
+    // 第一轮 gate：调用 read_file（真实工具执行）→ lap 边界；
+    // 第二轮 gate：最终文本回答。
+    let mock = MockServer::multi_response(vec![
+        tool_round(
+            "call_probe",
+            "read_file",
+            &json!({"path": probe_file.to_string_lossy()}).to_string(),
+        ),
+        text_round("done after tool"),
+    ]);
+
+    SESSION_INIT
+        .call_once(|| deepx_session::SessionManager::init(deepx_types::platform::data_dir()));
+
+    let mut agent = AgentState::init("test");
+    agent.ephemeral = true;
+    agent.config.base_url = mock.base_url.clone();
+    agent.config.api_key = "sk-test".into();
+    agent.config.model = "test-model".into();
+    agent.config.provider_id.clear();
+    agent.config.endpoint.clear();
+    agent.config.compliance_enabled = false;
+
+    let (ir, mut iw) = os_pipe::pipe().unwrap();
+    let (oread, owrite) = os_pipe::pipe().unwrap();
+    let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
+    let rx = spawn_event_reader(oread);
+
+    let drv = thread::spawn(move || {
+        send_cmd(&mut iw, "", cmd_session_create());
+        let seed = match expect(&rx, Duration::from_secs(10), |e| {
+            matches!(
+                e,
+                RingingEvent::Control(ControlEvent::SessionStateChanged {
+                    state: SessionState::Created,
+                    ..
+                })
+            )
+        }) {
+            RingingEvent::Control(ControlEvent::SessionStateChanged { seed, .. }) => seed,
+            other => panic!("expected SessionStateChanged(Created), got {other:?}"),
+        };
+
+        send_cmd(&mut iw, &seed, cmd_user_input("Run the probe tool"));
+        expect(&rx, Duration::from_secs(15), |e| {
+            matches!(
+                e,
+                RingingEvent::Conversation(ConversationEvent::TurnStarted { .. })
+            )
+        });
+
+        // ── 关键时序：第一轮 gate 进行中注入到达 → cmd_rx 排队 →
+        //    工具执行完的 lap 边界被 drain_pending_injections 吸收 ──
+        send_cmd(
+            &mut iw,
+            &seed,
+            cmd_system_inject("[SUBAGENT 'probe' COMPLETED]\n\nprobe answer"),
+        );
+
+        // 回合正常完成（注入不应产生第二个 TurnStarted；若开新回合，
+        // mock 会收到第三次请求而 panic "unexpected gate request"）。
+        expect(&rx, Duration::from_secs(20), |e| {
+            matches!(
+                e,
+                RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+            )
+        });
+
+        // 断言：两轮 gate，且第二轮请求体包含注入文本（回合内立即可见）。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while mock.requests.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        let bodies = mock.bodies.lock().expect("lock");
+        assert_eq!(
+            bodies.len(),
+            2,
+            "expected exactly 2 gate requests (in-turn injection must not open a new turn)"
+        );
+        assert!(
+            bodies[1].contains("probe answer"),
+            "injected report must be visible in the next gate request; got: {}",
+            bodies[1]
+        );
+
+        send_cmd(&mut iw, &seed, cmd_session_shutdown());
+    });
+    lp.run();
+    drv.join().unwrap();
 }
 
 #[test]

@@ -59,11 +59,33 @@ pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
     deepx_session::SessionManager::init(deepx_types::platform::data_dir());
     // Subagent worker：受限工具白名单 + ephemeral（不落盘）；普通 worker 走 init。
     // `--tools` 与 `--ephemeral` 任一出现即视为 subagent 模式（daemon `subagent.spawn` 注入）。
+    // 临时诊断开关：DEEPX_SUBAGENT_PERSIST=1 时关闭 ephemeral，子代理消息落盘
+    // （用于排查子代理“未开始/中途卡死”）。
+    let ephemeral = if ephemeral {
+        match std::env::var("DEEPX_SUBAGENT_PERSIST").as_deref() {
+            Ok("1") | Ok("true") | Ok("on") => {
+                log::warn!(
+                    "deepx-agent: DEEPX_SUBAGENT_PERSIST set — subagent messages WILL be persisted (diagnostic mode)"
+                );
+                false
+            }
+            _ => true,
+        }
+    } else {
+        false
+    };
     let is_subagent = ephemeral || subagent_tools.is_some();
     // 子代理沙箱：无用户审批通道 —— workspace 内文件操作自动批准，
     // exec/网络/跨 workspace 自动拒绝（authorization::admit 内部判定）。
     if is_subagent {
         deepx_workspace::authorization::set_subagent_sandbox(true);
+        log::warn!(
+            "[SUBAGENT-WORKER] starting subagent worker seed={:?} tools={:?} ephemeral={} persist_env={:?}",
+            new_seed,
+            subagent_tools,
+            ephemeral,
+            std::env::var("DEEPX_SUBAGENT_PERSIST").ok()
+        );
     }
     let mut agent = if is_subagent {
         deepx_msglp::state::agent::AgentState::init_subagent(

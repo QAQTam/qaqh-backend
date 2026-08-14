@@ -255,6 +255,94 @@ fn handle_execute(
     }
 }
 
+/// ── 子代理状态端点 ──────────────────────────────────────────────
+///
+/// 子代理（spawn_subagent）的进程记录注册在**本进程**的 ProcessRegistry，
+/// 使主代理的 `process check/wait/kill`（Workspace placement，同样在本进程
+/// 执行）能查到子代理状态——修复此前“子代理记录注册在 worker 进程、process
+/// 工具却在 serve 进程执行”的跨进程错位（查不到/误杀同号进程）。
+///
+/// 协议：POST /subagent，Bearer 鉴权；body:
+///   {"action":"register","name":"subagent:xxx"}          -> {"ok":true,"id":N}
+///   {"action":"update","id":N,"answer":"...","exit_code":0} -> {"ok":true}
+///   {"action":"status","id":N}                            -> {"ok":true,"info":{...}}
+///   {"action":"kill","id":N}                              -> {"ok":true|false}
+/// 未知 action / 缺参数 -> 400。id 不存在时 update 仍返回 ok（幂等）。
+#[derive(Debug, Deserialize)]
+struct SubagentRequest {
+    action: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    id: u32,
+    #[serde(default)]
+    answer: String,
+    #[serde(default)]
+    exit_code: i32,
+}
+
+fn handle_subagent(mut request: tiny_http::Request) {
+    let mut body = Vec::new();
+    if request.as_reader().read_to_end(&mut body).is_err() {
+        let _ = request.respond(text_response(
+            tiny_http::StatusCode(400),
+            "read body failed",
+        ));
+        return;
+    }
+    let parsed: SubagentRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(error) => {
+            let _ = request.respond(text_response(
+                tiny_http::StatusCode(400),
+                &format!("invalid subagent body: {error}"),
+            ));
+            return;
+        }
+    };
+    let outcome: serde_json::Value = match parsed.action.as_str() {
+        "register" => {
+            if parsed.name.trim().is_empty() {
+                let _ = request.respond(text_response(
+                    tiny_http::StatusCode(400),
+                    "register requires a non-empty name",
+                ));
+                return;
+            }
+            let id = crate::process_registry::ProcessRegistry::register(parsed.name.trim());
+            log::info!("[serve] subagent registered id={id} name={}", parsed.name.trim());
+            serde_json::json!({ "ok": true, "id": id })
+        }
+        "update" => {
+            if !parsed.answer.is_empty() {
+                crate::process_registry::ProcessRegistry::set_answer(parsed.id, parsed.answer);
+            }
+            crate::process_registry::ProcessRegistry::mark_exited(parsed.id, parsed.exit_code);
+            serde_json::json!({ "ok": true })
+        }
+        "status" => {
+            let _ = crate::process_registry::ProcessRegistry::try_wait(parsed.id);
+            match crate::process_registry::ProcessRegistry::get_info(parsed.id) {
+                Some(info) => serde_json::json!({ "ok": true, "info": info }),
+                None => serde_json::json!({ "ok": false, "info": null }),
+            }
+        }
+        "kill" => {
+            let ok = crate::process_registry::ProcessRegistry::kill(parsed.id);
+            log::info!("[serve] subagent kill id={} ok={ok}", parsed.id);
+            serde_json::json!({ "ok": ok })
+        }
+        other => {
+            let _ = request.respond(text_response(
+                tiny_http::StatusCode(400),
+                &format!("unknown subagent action: {other}"),
+            ));
+            return;
+        }
+    };
+    let _ = request.respond(json_response(tiny_http::StatusCode(200), &outcome));
+}
+
 /// Run the tool service until the process is terminated.
 ///
 /// Binds `host:port` (port 0 picks an ephemeral port), prints the ready line
@@ -340,6 +428,9 @@ pub fn serve(host: &str, port: u16, token: &str) -> Result<(), String> {
                     }
                     ("POST", "/execute") => {
                         handle_execute(request, &token, &tx, &next_id);
+                    }
+                    ("POST", "/subagent") => {
+                        handle_subagent(request);
                     }
                     _ => {
                         let _ =

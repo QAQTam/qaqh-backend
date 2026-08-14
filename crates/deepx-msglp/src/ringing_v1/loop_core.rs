@@ -404,43 +404,60 @@ impl Loop {
     // ═══════════════════════════════════════════════════
 
     /// Poll the command channel for interrupt-type commands.
-    /// Returns true if the current operation should abort.
     ///
-    /// Called by TurnEngine between gate rounds and by ToolEngine
-    /// during progress draining. Most non-interrupt commands received during
-    /// a busy phase are dropped; Compact is explicitly rejected because it
-    /// cannot replace context inside an in-flight lap, and Ringing
-    /// ConversationSendMessage is explicitly rejected because the daemon has
-    /// already ACKed it (a silent drop would strand the frontend forever).
-    pub fn poll_interrupts(&mut self) -> bool {
+    /// **已废弃（2026-08-14）：由 [`Loop::drain_pending_injections`] 取代。**
+    /// 原设计在 gate 轮询/tool drain 时拒绝忙碌期 ConversationSendMessage，
+    /// 但从未接线（全库无调用点）；其"中断命令 → cancel"语义已由 reader
+    /// 线程在命令入队前直接设置 CancelToken 承担（见 `Loop::spawn_io_threads`），
+    /// 而注入命令改走回合 lap 边界的见缝插针通道，不再需要拒绝路径。
+    pub fn drain_pending_injections(&mut self) {
+        use deepx_domain::ConversationCommand;
+        use deepx_ringing::RingingCommand;
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            let super::wire::WorkerCommandFrame::Ringing(env) = cmd.frame;
-            if ringing_command_is_interrupt(&env) {
-                self.cancel.set();
-                deepx_workspace::CANCEL.store(true, Ordering::SeqCst);
-                self.phase = LoopPhase::Idle;
-                return true;
-            }
-            // 忙碌期非中断 Ringing 命令：显式拒绝而非静默丢弃。
-            // 命令在 daemon 侧已被 ACK（accepted），若 worker 无声
-            // 丢弃，前端将永远等待业务终态（消息无限排队/乐观 turn
-            // 永不结束）。以被拒命令的 command_id 作为 causation，
-            // 使 daemon 能把 OperationFailed 折叠进对应 receipt。
-            if let deepx_ringing::RingingCommand::Conversation(
-                deepx_domain::ConversationCommand::ConversationSendMessage { .. },
-            ) = &env.command
-            {
-                let command_id = env.command_id.clone();
-                let _scope = self.paced_emitter.enter_causation(Some(&command_id));
-                self.emit_operation_failed(
-                    &command_id,
-                    deepx_domain::ErrorScope::Conversation,
-                    "busy",
-                    "A turn is already running; cancel it before sending a new message",
-                );
+            let super::wire::WorkerCommandFrame::Ringing(ref env) = cmd.frame;
+            match &env.command {
+                // ── 见缝插针注入：as_system 消息（子代理报告等）──────────
+                // 在回合 lap 边界（工具调用结束 → 下一轮 gate 前）直接 push
+                // 进当前回合消息流（role=system 独立 turn，落盘），下一轮
+                // LLM 请求立即可见——不打断当前回合，也不等回合结束。
+                RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+                    text,
+                    as_system: true,
+                    ..
+                }) => {
+                    // ── 见缝插针注入：as_system 消息（子代理报告等）──────────
+                    // 与 skills envelope 同通道（trailing system）：追加在消息流
+                    // 末尾而非插入回合中间。回合闭合后 wire 序列自动合法
+                    // （assistant/user → developer），不再在 function_call_output
+                    // 之后固化非法 system 位置——此前走 turn 通道（push_system_input）
+                    // 导致 provider 端丢弃/挂起该消息（实测：注入成功 push、落盘，
+                    // 但模型从未收到）。
+                    log::info!(
+                        "[INJECT] in-turn system injection via trailing channel (seed={}, text_len={})",
+                        self.session.agent.session.seed,
+                        text.len()
+                    );
+                    self.session
+                        .agent
+                        .msg
+                        .push_trailing_system(deepx_types::Message::system(text));
+                    self.session
+                        .agent
+                        .msg
+                        .flush_meta(
+                            &self.session.agent.config.model,
+                            &self.session.agent.config.reasoning_effort,
+                        );
+                }
+                // ── 其它命令（用户消息/非注入）：绝不丢弃 ────────────────
+                // daemon 侧已 ACK（accepted），静默丢弃会让调用方永久悬挂。
+                // 放入 deferred_ringing，主循环 idle 时按 FIFO 派发（复用
+                // 既有 session 切换保留队列，语义一致）。
+                _ => {
+                    self.deferred_ringing.push_back(cmd);
+                }
             }
         }
-        false
     }
 
     // ═══════════════════════════════════════════════════
@@ -1377,6 +1394,11 @@ impl Loop {
                 round_num,
                 usage,
             } => {
+                // 见缝插针注入：工具调用回合结束 → 下一轮 gate 前，消费
+                // cmd_rx 中排队的 as_system 注入（子代理报告等）进当前回合
+                // 消息流，使下一轮 LLM 请求立即可见——既不打断回合，又无需
+                // 等回合结束才开新回合。非注入命令移入 deferred 队列兜底。
+                self.drain_pending_injections();
                 // Another lap: re-enter TurnEngine.
                 let mut ctx = RingContext {
                     agent: &mut self.session.agent,

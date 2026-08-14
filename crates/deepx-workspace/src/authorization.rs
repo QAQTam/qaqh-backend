@@ -320,6 +320,11 @@ mod tests {
 
     #[test]
     fn approval_challenge_preserves_backend_risk_and_consequence() {
+        // 与 sandbox 测试共享全局 SUBAGENT_SANDBOX：并行时沙箱置位会使本测试的
+        // "level 1 write 必须要求审批"断言失败（沙箱下写自动批准）——串行化。
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let workspace = std::env::temp_dir().join("deepx-authorization-risk");
         let invocation = ToolInvocation {
             session_id: "seed-a".into(),

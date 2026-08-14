@@ -236,17 +236,24 @@ impl InputEngine {
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
 
         log::info!("[INPUT] emitting TurnStart turn_id={} round_num=0", turn_id);
+        // 注入回合的用户可见文本**只保留 [SUBAGENT ...] 标签行**：
+        // 正文仅进模型消息流（push_system_input 已全文落盘，build_context
+        // 从消息流取），不再进入前端 timeline/事件——否则注入正文会以
+        // user 身份泄露到前端聊天流（前端把 TurnOpened.user_text 渲染为
+        // 用户气泡）。前端 parse_subagent_injection 只需标签行即可收敛
+        // 子代理状态区，语义不变。
+        let label = text.lines().next().unwrap_or(text).to_string();
         ctx.emitter
             .emit_timeline(deepx_domain::TimelineIntent::TurnOpened {
                 turn_id: turn_id.clone(),
-                user_text: text.to_string(),
+                user_text: label.clone(),
             });
         // Ringing 双发：TurnStarted（权威开始事件）
         ctx.emitter
             .emit_domain(deepx_domain::DomainEvent::Conversation(
                 deepx_domain::ConversationEvent::TurnStarted {
                     turn_id: turn_id.clone(),
-                    user_text: text.to_string(),
+                    user_text: label,
                 },
             ));
 

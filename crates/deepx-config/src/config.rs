@@ -45,7 +45,7 @@ impl Default for SubagentConfig {
             api_key: String::new(),
             max_tokens: 4096,
             timeout_secs: 120,
-            default_tools: vec!["file".into(), "exec".into()],
+            default_tools: vec!["read_file".into(), "exec".into()],
         }
     }
 }
@@ -302,10 +302,16 @@ impl Config {
             // New endpoint field takes priority over backward-compat migration
             cfg.endpoint = pc.endpoint.filter(|e| !e.is_empty()).unwrap_or(endpoint);
 
-            // ── Resolve base_url from endpoint (user override takes priority) ──
-            let endpoint_base_url = crate::registry::base_url_for(&cfg.provider_id, &cfg.endpoint);
-            if !endpoint_base_url.is_empty() {
-                cfg.base_url = endpoint_base_url.clone();
+            // ── Resolve base_url from endpoint ──
+            // 预设仅作空值兜底：仅当配置文件中未保存 base_url（空文件/旧版无此字段）
+            // 时才用 endpoint 预设；用户已保存的值（含自定义 URL）绝不在此覆盖，
+            // 由下方 pc.base_url 权威回填。修复：改 max_tokens 后端点被强制改回预设。
+            if pc.base_url.as_deref().map_or(true, |u| u.is_empty()) {
+                let endpoint_base_url =
+                    crate::registry::base_url_for(&cfg.provider_id, &cfg.endpoint);
+                if !endpoint_base_url.is_empty() {
+                    cfg.base_url = endpoint_base_url.clone();
+                }
             }
 
             if let Some(profiles) = pc.profiles {
@@ -323,8 +329,10 @@ impl Config {
                         && !ep.is_empty()
                     {
                         cfg.endpoint = ep.clone();
+                        // 仅 profile 未配置 base_url（空值）时回退到 endpoint 预设；
+                        // profile 已保存的值（含自定义 URL）绝不覆盖。
                         let ep_burl = crate::registry::base_url_for(&cfg.provider_id, ep);
-                        if !ep_burl.is_empty() && ep_burl != cfg.base_url {
+                        if cfg.base_url.is_empty() && !ep_burl.is_empty() {
                             cfg.base_url = ep_burl;
                         }
                     }
@@ -340,17 +348,12 @@ impl Config {
             {
                 cfg.model = m;
             }
-            // User base_url override: only apply if differs from all known endpoint defaults
+            // User base_url override: 用户显式保存的值（含自定义 URL）无条件优先。
+            // 预设仅在配置文件为空（base_url 缺失）时兜底，用户修改后不再预设。
             if let Some(ref u) = pc.base_url
                 && !u.is_empty()
             {
-                let is_ep_default = crate::registry::all_providers()
-                    .iter()
-                    .flat_map(|p| &p.endpoints)
-                    .any(|e| e.base_url == *u || e.models_url.as_deref() == Some(u.as_str()));
-                if !is_ep_default {
-                    cfg.base_url = u.clone();
-                }
+                cfg.base_url = u.clone();
             }
             if let Some(mt) = pc.max_tokens {
                 cfg.max_tokens = mt;
@@ -393,7 +396,14 @@ impl Config {
                     cfg.subagent.timeout_secs = ts;
                 }
                 if let Some(ref tools) = s.default_tools {
-                    cfg.subagent.default_tools = tools.clone();
+                    // 存量迁移：工具改名后（file→read_file）旧配置持久化的
+                    // 默认白名单仍指向旧名；加载时归一化为当前正式词汇表，
+                    // 否则 apply_init 会静默剔除旧名，子代理丢失读文件能力。
+                    cfg.subagent.default_tools = tools
+                        .iter()
+                        .map(|t| if t == "file" { "read_file" } else { t })
+                        .map(String::from)
+                        .collect();
                 }
             }
 
@@ -603,8 +613,11 @@ impl Config {
         self.base_url = profile.base_url;
         if let Some(ref ep) = profile.endpoint {
             self.endpoint = ep.clone();
+            // 仅 profile 未配置 base_url（空值）时回退到 endpoint 预设；
+            // 已保存的值（含自定义 URL）绝不覆盖（此前 `ep_burl != self.base_url`
+            // 会把自定义 URL 强制改回预设并落盘——修改 max_tokens 后端点被重置的根因）。
             let ep_burl = crate::registry::base_url_for(&self.provider_id, ep);
-            if !ep_burl.is_empty() && ep_burl != self.base_url {
+            if self.base_url.is_empty() && !ep_burl.is_empty() {
                 self.base_url = ep_burl;
             }
         }

@@ -29,7 +29,7 @@ pub use types::{
     ConversationCommand, ConversationEvent, ConversationMode, DomainActivityState,
     DomainAskQuestion, DomainDashboardSnapshot, DomainError, DomainSessionState, ErrorScope,
     EventBatch, PermissionCategory, PermissionRisk, ProviderToolState, RingingCommand,
-    RingingCommandAck, RingingCommandState, RingingCommandStatus, RingingEvent,
+    RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus, RingingEvent,
     RingingEventEnvelope, RoundDeltaKind, SkillInfo, SkillRuntimeInfo, TimelineBlock,
     TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent, TimelinePage,
     TimelineRound, TimelineSnapshot, TimelineStatus, TimelineTool, TimelineToolState,

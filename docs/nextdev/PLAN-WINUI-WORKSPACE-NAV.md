@@ -1,7 +1,7 @@
 # WinUI 侧栏工作区化（Workspace 导航 + 标签页过滤）实施计划（计划）
 
-> 状态：待实施（2026-08-14 定稿）
-> 范围：`crates/deepx-types`、`crates/deepx-session`、`crates/deepx-runtime`、`apps/winui`（`shell_store.rs`、`bridge.rs`、`sidebar.rs`、`session_tabs.rs`、`main.rs`）
+> 状态：进行中（P1+P2 代码已落地，待人工视觉验证；2026-08-14 更新）
+> 范围：`crates/deepx-types`、`crates/deepx-session`、`crates/deepx-runtime`、`crates/deepx-client`、`crates/deepx-daemon`、`apps/winui`（`shell_store.rs`、`bridge.rs`、`sidebar.rs`、`session_tabs.rs`）
 > 关联：[README.md](./README.md)、[rc4-native-client-contract.md](./rc4-native-client-contract.md)、[dsh-alignment.md](./dsh-alignment.md)
 
 ## 1. 结论 / 决策
@@ -115,12 +115,15 @@ daemon:  persist_new_session(cwd) → workspace.list 自动归属 → index.json
 
 | 计划条目 | 结果 |
 |---|---|
-| P1：SessionMeta.cwd + WorkspaceStore + RPC | 待实施 |
-| P2：sidebar 三段式 + tabs 过滤 + bridge 接线 | 待实施 |
-| 回归：零迁移兼容 / 双 rev 同步 / 单测 | 待实施 |
+| P1：SessionMeta.cwd + WorkspaceStore + RPC | ✅ 已落地：`deepx-types/src/session.rs` L62 起 `cwd: Option<String>`（serde default 零迁移）；`deepx-session/src/workspace.rs` 新建（uuid 风格 id + canonical path + 双轨归属 + `attach_by_cwd/move_session/remove_session` + 3 单测）；`manager.rs` `persist_new_session_with_cwd` + delete 清理账户；RPC `workspace.list/create/rename/delete/move_session/detach`（`service.rs` + `query.rs` 白名单）；`session.list` enrich `workspace_id`；`SessionCreate` 命令透传 cwd（`deepx-domain/src/command.rs` + daemon 拦截层） |
+| P2：sidebar 三段式 + tabs 过滤 + bridge 接线 | ✅ 已落地：`shell_store.rs` `SessionItem.workspace_id/cwd` + `WorkspaceItem/parse_workspaces`；`bridge.rs` workspace 快照/current_workspace/5 个命令；`sidebar.rs` 三段式（workspace 行选中/✎重命名/🗑删除/➕添加 + 会话行移出/移入）；`session_tabs.rs` 按 workspace 过滤（渲染与 selection 同源）；`main.rs` 零改动（tabs/sidebar 自读 core 状态） |
+| 回归：零迁移兼容 / 双 rev 同步 / 单测 | ✅ cargo check --workspace 全绿；deepx-session 7 测试（+3 新）、deepx-runtime 104 测试、deepx-winui 68 测试全绿；clippy 无新增违规 |
+| 一期偏差 | 会话跨 workspace 移动 = workspace 区行「移出」+ 未分组区行「移入当前选中 workspace」两步；拖拽/搜索/flat 视图留二期（D5 范围收敛，move_session RPC 已就绪） |
 
 ## 6. 变更记录
 
 | 日期 | 改动摘要 | 触发原因 |
 |---|---|---|
 | 2026-08-14 | 初稿：方案定稿（Workspace 实体 + 双轨归属 + 三段侧栏 + tabs 过滤 + 未分组孤儿语义；参考 dsh `packages/workspace` 与 `ui-workspace` 实现） | WinUI 会话按 workspace 分类需求 |
+| 2026-08-14 | P1 落地：SessionMeta.cwd + WorkspaceStore + 6 个 RPC + SessionCreate 透传 cwd；deepx-session/deepx-runtime 测试全绿 | 按计划实施 |
+| 2026-08-14 | P2 落地：sidebar 三段式 + tabs 过滤 + bridge 接线；winui 68 测试全绿；修复 Windows canonicalize `\\?\` 前缀与 id 碰撞 | 按计划实施 |

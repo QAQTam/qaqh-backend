@@ -820,6 +820,54 @@ impl ExecOutput {
 
 // ── Tool handler ──
 
+/// ripgrep `-rn` 习惯陷阱防御（grep 迁移）。
+///
+/// `grep -rn`（`-r` 递归 + `-n` 行号）是 POSIX 经典组合；ripgrep 中 `-r` 被
+/// 定义为 `--replace`，`rg -rn "pat"` 会被解析为 `-r n`（把匹配替换成字面
+/// `n`），输出被污染、搜索不到预期内容。exec 层在调用前把误用的紧贴组合
+/// 改写为 rg 的正确写法（递归默认开启，行号用 `-n`）：
+///   `rg -rn`  → `rg -n`
+///   `rg -rni` → `rg -ni`   （+ 忽略大小写）
+///   `rg -rnl` → `rg -nl`   （+ 仅列文件名）
+/// 仅改写紧贴组合；`-r` 单独出现（`--replace` 的合法用法，如 `rg -r x pat`）
+/// 与长选项 `--replace` 不受影响。grep 本身（`grep -rn` 合法）不处理。
+fn normalize_rg_argv(argv: &mut [String]) {
+    if !matches!(
+        argv.first().map(|p| p.to_lowercase()).as_deref(),
+        Some("rg") | Some("rg.exe")
+    ) {
+        return;
+    }
+    for arg in argv.iter_mut().skip(1) {
+        if let Some(rest) = arg.strip_prefix("-rn") {
+            let cleaned = format!("-n{rest}");
+            log::info!("[exec] rg habit fix (argv): '{arg}' -> '{cleaned}'");
+            *arg = cleaned;
+        }
+    }
+}
+
+/// command 模式版本：在 shell 命令字符串里改写 `rg -rn...` → `rg -n...`。
+/// 匹配 `rg` / `rg.exe` 后紧跟的 `-rn` 前缀组合（大小写不敏感，适配
+/// Windows `RG.EXE`）；管道/多命令场景同样覆盖。引号内出现的字面文本
+/// 也会被改写——罕见且语义无害，接受。
+fn normalize_command_rg(command: &str) -> String {
+    use std::sync::OnceLock;
+    static RG_HABIT_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RG_HABIT_RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\b(rg(\.exe)?)\s+-rn([a-z]*)").expect("rg habit regex")
+    });
+    re.replace_all(command, |caps: &regex::Captures| {
+        // caps[1] 为完整程序名（含 .exe，原始大小写），caps[3] 为组合尾缀
+        let prog = &caps[1];
+        let rest = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+        let cleaned = format!("{prog} -n{rest}");
+        log::info!("[exec] rg habit fix (command): 'rg -rn{rest}' -> '{cleaned}'");
+        cleaned
+    })
+    .into_owned()
+}
+
 pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
     // ── Resolve argv ──
     // Two modes: `command` (auto-wrapped in platform shell) or `argv` (direct exec).
@@ -831,6 +879,12 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
                 "Provide a shell command string.",
             ));
         }
+        // ── rg 习惯陷阱防御（grep 迁移）：`rg -rn` → `rg -n` ──
+        // `grep -rn`（-r 递归 + -n 行号）是 POSIX 经典组合；ripgrep 中
+        // `-r` 是 --replace，`rg -rn "pat"` 会被解析成 `-r n`（把匹配替换成
+        // 字面 `n`），输出被污染。在此把 command 字符串中的紧贴组合改写为
+        // rg 正确写法（递归默认开启，行号用 -n）。
+        let command = normalize_command_rg(command);
         // Explicit shell override (exec `shell` param) or platform default.
         let shell = match ctx.args.get("shell").and_then(|v| v.as_str()) {
             Some(name) if !name.is_empty() => match Shell::from_name(name) {
@@ -845,13 +899,18 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
             },
             _ => Shell::detect(),
         };
-        shell.derive_exec_args(command)
+        shell.derive_exec_args(&command)
     } else {
         match ctx.args.get("argv").and_then(|v| v.as_array()) {
-            Some(arr) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect(),
+            Some(arr) => {
+                let mut argv: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                // ── rg 习惯陷阱防御（argv 模式）：`rg -rn...` → `rg -n...` ──
+                normalize_rg_argv(&mut argv);
+                argv
+            }
             None => {
                 return ToolResult::error(crate::json_err(
                     "MISSING_ARGV",
@@ -1022,6 +1081,56 @@ mod tests {
         assert_eq!(Shell::from_name("bash"), Some(Shell::Bash));
         assert_eq!(Shell::from_name("fish"), None);
         assert_eq!(Shell::from_name(""), None);
+    }
+
+    #[test]
+    fn rg_habit_fix_argv_mode() {
+        // grep 习惯组合 -rn / -rni / -rnl → rg 正确写法（-n 前缀）
+        let mut argv = vec!["rg".into(), "-rn".into(), "pattern".into()];
+        normalize_rg_argv(&mut argv);
+        assert_eq!(argv, vec!["rg", "-n", "pattern"]);
+
+        let mut argv = vec!["rg".into(), "-rni".into(), "pattern".into()];
+        normalize_rg_argv(&mut argv);
+        assert_eq!(argv, vec!["rg", "-ni", "pattern"]);
+
+        let mut argv = vec!["rg.exe".into(), "-rnl".into()];
+        normalize_rg_argv(&mut argv);
+        assert_eq!(argv, vec!["rg.exe", "-nl"]);
+
+        // 合法用法不受影响：-r 单独（--replace 等待参数）、长选项、非 rg 程序
+        let mut argv = vec!["rg".into(), "-r".into(), "x".into(), "pat".into()];
+        normalize_rg_argv(&mut argv);
+        assert_eq!(argv, vec!["rg", "-r", "x", "pat"]);
+
+        let mut argv = vec!["rg".into(), "--replace".into(), "x".into()];
+        normalize_rg_argv(&mut argv);
+        assert_eq!(argv, vec!["rg", "--replace", "x"]);
+
+        // grep 的 -rn 是合法组合，不处理
+        let mut argv = vec!["grep".into(), "-rn".into(), "pat".into()];
+        normalize_rg_argv(&mut argv);
+        assert_eq!(argv, vec!["grep", "-rn", "pat"]);
+    }
+
+    #[test]
+    fn rg_habit_fix_command_mode() {
+        // 简单形态
+        assert_eq!(normalize_command_rg("rg -rn \"pat\" | head"), "rg -n \"pat\" | head");
+        // 组合变体
+        assert_eq!(normalize_command_rg("rg -rni foo"), "rg -ni foo");
+        // 管道后的第二个 rg、Windows 可执行名
+        assert_eq!(
+            normalize_command_rg("rg --files | rg -rn foo"),
+            "rg --files | rg -n foo"
+        );
+        assert_eq!(normalize_command_rg("RG.EXE -rn foo"), "RG.EXE -n foo");
+        // 合法用法不受影响
+        assert_eq!(normalize_command_rg("rg -r x pat"), "rg -r x pat");
+        assert_eq!(normalize_command_rg("rg --replace x pat"), "rg --replace x pat");
+        assert_eq!(normalize_command_rg("grep -rn foo"), "grep -rn foo");
+        // 无 rg 调用原样
+        assert_eq!(normalize_command_rg("cargo test"), "cargo test");
     }
 
     #[test]

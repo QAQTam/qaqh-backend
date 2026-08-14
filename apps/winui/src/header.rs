@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use windows_reactor::*;
 
-use crate::bridge::{Bridge, HeaderFlag, HeaderState};
+use crate::bridge::{log_diag, Bridge, HeaderFlag, HeaderState};
 
 /// 标题栏高度（PLAN-NATIVE-UI.md 布局：row 0 = 48px）。
 pub const HEADER_HEIGHT: f64 = 48.0;
@@ -25,8 +25,11 @@ pub const HEADER_HEIGHT: f64 = 48.0;
 ///
 /// WinUI Button 的 Icon+Content 只能水平排列，无法「icon 之下带 label」；
 /// 自组 vstack(icon 按钮, label)：icon 区域走 Button（hover/按压/active
-/// 高亮原生语义），label 区域同样可点（外层 on_tapped，Button 内部已
-/// handled 不冒泡，无双触发）。label 常显——裸图标按钮无中文说明，
+/// 高亮原生语义），label 区域同样可点——但点击入口**只挂 label 自身**
+/// （`on_tapped`），不挂父 vstack：Button 的 Click 与 label 的 Tapped
+/// 命中目标不相交，单次点击最多触发一次（曾把 `on_tapped` 挂在父 vstack
+/// 上，若 Button 的 Tapped 未被标记 handled，一次点击会串行弹出两个目录
+/// 对话框——「二次弹窗」根因之一）。label 常显——裸图标按钮无中文说明，
 /// 与 Windows 右键菜单缺 label 同样令人困惑（D6 撤销）。
 fn action_button(
     icon: Icon,
@@ -48,26 +51,25 @@ fn action_button(
         btn = btn.accent();
     }
     let btn_el: Element = btn.into();
-    vstack((
-        btn_el,
-        text_block(label)
-            .font_size(10.0)
-            .foreground(if enabled {
-                ThemeRef::SecondaryText
-            } else {
-                ThemeRef::DisabledText
-            }),
-    ))
-    .spacing(1.0)
-    .on_tapped(move || {
-        if enabled {
-            on_click();
-        }
-    })
-    .automation_name(label)
-    .automation_id(automation_id)
-    .tooltip(label)
-    .into()
+    let label_el: Element = text_block(label)
+        .font_size(10.0)
+        .foreground(if enabled {
+            ThemeRef::SecondaryText
+        } else {
+            ThemeRef::DisabledText
+        })
+        .on_tapped(move || {
+            if enabled {
+                on_click();
+            }
+        })
+        .into();
+    vstack((btn_el, label_el))
+        .spacing(1.0)
+        .automation_name(label)
+        .automation_id(automation_id)
+        .tooltip(label)
+        .into()
 }
 
 /// XAML 标题栏组件（放入外层 Grid row 0；host 检测到 TitleBar 自动接线）。
@@ -128,7 +130,14 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             Ok(serde_json::Value::String(path)) => {
                 bridge.spawn_workspace_set(path);
             }
-            _ => {}
+            Ok(_) => {}
+            Err(err) => {
+                // 修复：picker 失败曾被 `_ => {}` 静默吞掉——用户选了目录但
+                // 程序无动作、无日志、无提示（误判「后端未收到」）。现写日志
+                // 并在标题栏展示错误文案（bridge.report_workspace_error）。
+                log_diag(&format!("pick workspace directory failed: {err}"));
+                bridge.report_workspace_error(format!("选择工作区失败：{err}"));
+            }
         }
     };
     let on_stats = {
@@ -189,9 +198,20 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         "选择工作区"
     };
     // 工作区路径只读显示（替代原「在资源管理器中打开」按钮）：当前选择
-    // 一目了然；过长省略号裁剪（标题栏空间有限），完整路径进 tooltip 语义
-    // 由 automation_name 承载（Element 无 tooltip 能力）。
-    let workspace_path: Element = if state.workspace.is_empty() {
+    // 一目了然；过长省略号裁剪（标题栏空间有限），完整路径进 tooltip。
+    // 错误文案优先展示（`workspace.set`/picker 失败反馈，SystemCritical）。
+    let workspace_path: Element = if let Some(err) = &state.workspace_error {
+        text_block(err)
+            .font_size(11.0)
+            .foreground(ThemeRef::SystemCritical)
+            .max_width(260.0)
+            .text_trimming(TextTrimming::CharacterEllipsis)
+            .vertical_alignment(VerticalAlignment::Center)
+            .tooltip(err.clone())
+            .automation_name(err)
+            .with_key("header-workspace-error")
+            .into()
+    } else if state.workspace.is_empty() {
         text_block(if en { "No workspace" } else { "未选择工作区" })
             .font_size(11.0)
             .foreground(ThemeRef::TertiaryText)
@@ -206,6 +226,7 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             .max_width(260.0)
             .text_trimming(TextTrimming::CharacterEllipsis)
             .vertical_alignment(VerticalAlignment::Center)
+            .tooltip(state.workspace.clone())
             .automation_name(&state.workspace)
             .with_key("header-workspace-path")
             .into()
