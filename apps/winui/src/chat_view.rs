@@ -28,7 +28,7 @@ use windows_reactor::*;
 use crate::bridge::Bridge;
 use crate::chat_adapter;
 use crate::diff_drawer;
-use crate::diff_drawer::{DiffDrawerRequest, DrawerFile};
+use crate::diff_drawer::{DrawerFile, DrawerRequest};
 
 /// 图表放大请求（壳内 UI 状态）：`final_view` 点击图表卡片时写入，
 /// `main.rs` 挂载的 [`diagram_zoom_overlay`] 轮询消费（与 interaction_overlay
@@ -1150,12 +1150,12 @@ fn block_view(props: &BlockProps, cx: &mut RenderCx) -> Element {
     }
 }
 
-/// reasoning 块（V4）：可折叠"过程摘要"。
+/// reasoning 块（V4+）：可折叠"过程摘要"。
 ///
 /// - 头部：状态点（思考中=spinner / 完成=✓ 绿）+ 标题 + meta + chevron；
-/// - 内容：固定高 8 行**尾部窗口**（永远显示最新内容 = 语义等价自动追尾；
-///   思考过程是过程性内容，不提供向上回溯——比 ScrollViewer 编程滚动
-///   便宜且行为确定，fork 未暴露 ChangeView）；
+/// - 内容：ScrollViewer 包完整文本（max 176px），流式思考中自动追底
+///   （text 增长 → generation 递增 → `scroll_to_bottom` diff）；
+///   思考完成（sealed）后停止追底，用户可自由滚动回溯完整过程；
 /// - 交互：思考中默认展开，sealed 且用户未手动操作 → 自动折叠为一行。
 fn reasoning_view(props: &BlockProps, cx: &mut RenderCx) -> Element {
     let block = props.block.as_ref();
@@ -1175,21 +1175,19 @@ fn reasoning_view(props: &BlockProps, cx: &mut RenderCx) -> Element {
             }
         }
     });
-    // 尾部 8 行（lines 保留空行；取最后 8 行倒序还原）。
-    const REASONING_TAIL_LINES: usize = 8;
+    // 流式追底：文本增长 → generation 递增 → `scroll_to_bottom` diff 触发
+    // backend ChangeView。sealed 后 text 不再变化，effect 不再触发，
+    // 最后一次滚动请求在 sealed 帧执行（layout 通常已跟上）。
     const REASONING_TAIL_HEIGHT: f64 = 176.0;
-    let lines: Vec<&str> = block.text.lines().collect();
-    let tail: Vec<&str> = lines
-        .iter()
-        .rev()
-        .take(REASONING_TAIL_LINES)
-        .copied()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let tail_text = tail.join("\n");
-    let mut run = RichTextRun::plain(&tail_text);
+    let (scroll_gen, set_scroll_gen) = cx.use_state::<i32>(0);
+    cx.use_effect((block.text.clone(),), {
+        let set_scroll_gen = set_scroll_gen.clone();
+        // 闭包捕获本次渲染的 scroll_gen 值；text 变化 → effect 执行 → 递增。
+        move || {
+            set_scroll_gen.call(scroll_gen + 1);
+        }
+    });
+    let mut run = RichTextRun::plain(&block.text);
     run.is_italic = true;
     let mut summary = RichTextBlock::new();
     summary.paragraphs = vec![RichTextParagraph::new(vec![RichTextInline::Run(run)])];
@@ -1219,9 +1217,11 @@ fn reasoning_view(props: &BlockProps, cx: &mut RenderCx) -> Element {
     ))
     .spacing(tokens::SPACE_2);
     Expander::new(
-        vstack((Element::from(summary),))
-            .max_height(REASONING_TAIL_HEIGHT)
-            .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2)),
+        ScrollViewer::new(vstack((Element::from(summary),))
+            .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2)))
+        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+        .max_height(REASONING_TAIL_HEIGHT)
+        .scroll_to_bottom(scroll_gen),
     )
     .header_content(head)
     .expanded(open)
@@ -1637,7 +1637,7 @@ fn format_duration(ms: u64) -> String {
 
 /// 收集工具块的 diff 数据（ToolBody::Diff → 按文件合并）→ 抽屉请求。
 /// 同路径多工具块（如 read 后 write）合并 rows + 统计；failed 取 OR。
-fn collect_diff_drawer(turn_id: &str, blocks: &[Rc<BlockView>]) -> Option<DiffDrawerRequest> {
+fn collect_diff_drawer(turn_id: &str, blocks: &[Rc<BlockView>]) -> Option<DrawerRequest> {
     let mut by_path: Vec<(String, bool, markdown_winui::DiffFile)> = Vec::new();
     for block in blocks {
         let Some(card) = &block.tool else { continue };
@@ -1672,18 +1672,21 @@ fn collect_diff_drawer(turn_id: &str, blocks: &[Rc<BlockView>]) -> Option<DiffDr
             file,
         })
         .collect();
-    Some(DiffDrawerRequest {
+    Some(DrawerRequest::Diff {
         turn_id: turn_id.to_string(),
         files,
     })
 }
 
 /// turn 末尾总结行：「已修改 N 个文件（+X −Y）· 查看详情 ›」→ 打开 diff 抽屉。
-fn diff_summary_row(turn_id: &str, req: DiffDrawerRequest) -> Element {
-    let n = req.files.len();
-    let added: usize = req.files.iter().map(|f| f.added).sum();
-    let removed: usize = req.files.iter().map(|f| f.removed).sum();
-    let failed_n = req.files.iter().filter(|f| f.failed).count();
+fn diff_summary_row(turn_id: &str, req: DrawerRequest) -> Element {
+    let DrawerRequest::Diff { files, .. } = &req else {
+        return grid(()).into();
+    };
+    let n = files.len();
+    let added: usize = files.iter().map(|f| f.added).sum();
+    let removed: usize = files.iter().map(|f| f.removed).sum();
+    let failed_n = files.iter().filter(|f| f.failed).count();
     let label = if failed_n > 0 {
         format!("已修改 {n} 个文件（+{added} −{removed}）· {failed_n} 个异常")
     } else {
