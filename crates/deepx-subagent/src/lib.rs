@@ -27,8 +27,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use deepx_client::{
-    ActionRequest, Client, ClientHandlers, ClientOptions, CommandOptions, ConversationEvent,
-    EventBatch, RingingCommand, RingingEvent,
+    ActionRequest, Client, ClientError, ClientHandlers, ClientOptions, CommandOptions, ControlEvent,
+    ConversationEvent, EventBatch, RingingCommand, RingingCommandAck, RingingCommandAckStatus,
+    RingingEvent,
 };
 use deepx_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
 
@@ -155,6 +156,153 @@ fn build_subagent_task(task_description: &str, context: &str) -> String {
     }
     parts.push(format!("[TASK]\n{}", task_description.trim()));
     parts.join("\n\n")
+}
+
+// ── serve 端子代理注册表（ProcessRegistry 权威进程）─────────────────
+//
+// ProcessRegistry 是进程内单例：exec 后台进程与 process 工具（Workspace
+// placement）在 workspace serve 进程执行，而 spawn_subagent（HostOnly）在
+// 主代理 worker 进程执行——此前子代理记录注册在 worker 进程，主代理的
+// `process check/wait/kill` 却在 serve 进程查询，永远 NOT_FOUND（甚至因
+// 两个进程 ID 都从 1 编号而误查/误杀同号的 exec 后台进程）。
+//
+// 修复：子代理记录注册到 serve 进程（`POST /subagent`），与 process 工具
+// 的执行进程一致；collect 线程轮询 serve 检测 kill、收尾时回写终态。
+// serve 不可达时回退到本地注册表（退化到旧行为，仅影响进程可见性）。
+
+/// 子代理进程记录的实际存放位置。
+enum RegistryRef {
+    /// serve 进程注册表（process 工具可见）。
+    Remote { client: ServeRegistryClient, id: u32 },
+    /// 本地（worker 进程）注册表——serve 不可达时的降级路径。
+    Local { id: u32 },
+}
+
+impl RegistryRef {
+    fn id(&self) -> u32 {
+        match self {
+            RegistryRef::Remote { id, .. } | RegistryRef::Local { id } => *id,
+        }
+    }
+
+    /// 是否已被 `process kill` 标记为 killed。
+    fn killed(&self) -> bool {
+        match self {
+            RegistryRef::Remote { client, id } => client
+                .post("status", *id, "", "", 0)
+                .and_then(|v| v.get("info").cloned())
+                .and_then(|info| {
+                    info.get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s == "killed")
+                })
+                .unwrap_or(false),
+            RegistryRef::Local { id } => deepx_workspace::process_registry::ProcessRegistry::get_info(*id)
+                .and_then(|info| {
+                    info.get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s == "killed")
+                })
+                .unwrap_or(false),
+        }
+    }
+
+    /// 收尾：写入最终作答与退出码。
+    fn finish(&self, answer: &str, exit_code: i32) {
+        match self {
+            RegistryRef::Remote { client, id } => {
+                let _ = client.post("update", *id, "", answer, exit_code);
+            }
+            RegistryRef::Local { id } => {
+                deepx_workspace::process_registry::ProcessRegistry::set_answer(*id, answer.to_string());
+                deepx_workspace::process_registry::ProcessRegistry::mark_exited(*id, exit_code);
+            }
+        }
+    }
+}
+
+/// workspace serve 的 `/subagent` 端点访问器（worker 环境变量注入端点）。
+#[derive(Clone)]
+struct ServeRegistryClient {
+    endpoint: String,
+    token: String,
+}
+
+impl ServeRegistryClient {
+    /// 从 daemon 注入的 worker 环境发现 serve 端点。
+    fn discover() -> Option<Self> {
+        let endpoint = std::env::var("DEEPX_WORKSPACE_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())?;
+        let token = std::env::var("DEEPX_WORKSPACE_TOKEN")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())?;
+        Some(Self { endpoint, token })
+    }
+
+    fn post(
+        &self,
+        action: &str,
+        id: u32,
+        name: &str,
+        answer: &str,
+        exit_code: i32,
+    ) -> Option<serde_json::Value> {
+        let url = format!("{}/subagent", self.endpoint.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "action": action,
+            "id": id,
+            "name": name,
+            "answer": answer,
+            "exit_code": exit_code,
+        });
+        let result = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_per_call(Some(std::time::Duration::from_secs(10)))
+            .build()
+            .new_agent()
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .send_json(body);
+        match result {
+            Ok(mut response) => response.body_mut().read_json::<serde_json::Value>().ok(),
+            Err(error) => {
+                log::warn!("[SUBAGENT] serve /subagent {action} failed: {error}");
+                None
+            }
+        }
+    }
+}
+
+/// 注册子代理进程记录：优先 serve 进程（process 工具可见），失败回退本地。
+fn register_subagent_process(name: &str) -> RegistryRef {
+    if let Some(client) = ServeRegistryClient::discover() {
+        match client
+            .post("register", 0, name, "", 0)
+            .and_then(|v| v.get("id").and_then(|x| x.as_u64()))
+        {
+            Some(id) => {
+                log::info!("[SUBAGENT] '{name}' registered in serve registry id={id}");
+                return RegistryRef::Remote { client, id: id as u32 };
+            }
+            None => {
+                log::warn!(
+                    "[SUBAGENT] '{name}' serve register failed; falling back to local registry (process tools will NOT see it)"
+                );
+            }
+        }
+    }
+    let id = deepx_workspace::process_registry::ProcessRegistry::register(name);
+    log::info!("[SUBAGENT] '{name}' registered in local registry id={id}");
+    RegistryRef::Local { id }
+}
+
+/// 命令 ACK 是否被 daemon 接受（Accepted）。
+fn ack_accepted(result: &Result<RingingCommandAck, ClientError>) -> bool {
+    matches!(result, Ok(ack) if matches!(ack.status, RingingCommandAckStatus::Accepted))
 }
 
 fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
@@ -308,24 +456,41 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
             as_system: false,
         },
     );
-    if let Err(e) = rt_block_on(client.send_command(Some(&seed), send, CommandOptions::default())) {
-        client.close();
-        return ToolResult::error(deepx_workspace::json_err(
-            "SEND_ERROR",
-            &format!("spawn_subagent: send task: {e}"),
-            "Check daemon/worker logs.",
-        ));
+    // 任务发送 ACK 校验：Rejected 意味着子 worker 未收到任务，立即失败，
+    // 不要让 collect 空等 timeout。
+    let send_ack = rt_block_on(client.send_command(Some(&seed), send, CommandOptions::default()));
+    match send_ack {
+        Ok(ack) => {
+            if !matches!(ack.status, RingingCommandAckStatus::Accepted) {
+                client.close();
+                return ToolResult::error(deepx_workspace::json_err(
+                    "SEND_REJECTED",
+                    &format!(
+                        "spawn_subagent: daemon rejected task send (status={:?}, code={:?})",
+                        ack.status, ack.code
+                    ),
+                    "Check daemon/worker logs for lease or state conflicts.",
+                ));
+            }
+        }
+        Err(e) => {
+            client.close();
+            return ToolResult::error(deepx_workspace::json_err(
+                "SEND_ERROR",
+                &format!("spawn_subagent: send task: {e}"),
+                "Check daemon/worker logs.",
+            ));
+        }
     }
+    log::info!("[SUBAGENT] '{name}' task delivered to {seed} (ACK accepted)");
 
-    // ── 4. Register the process and collect the result in the background,
-    //        reusing the existing ProcessRegistry (process check/wait/kill). ──
+    // ── 4. Register the process and collect the result in the background. ──
     //
-    // 进程隔离说明：ProcessRegistry 是进程内单例（exec 后台进程在 serve 进程、
-    // 子代理在 worker 进程各自从 1 编号），跨进程的 `process wait {id}` 查不到
-    // 子代理。因此最终结果经 Ringing 注入主代理会话回传（下方 collect 完成时），
-    // ProcessRegistry 仅保留进程内存在性记录。
-    let registry_id =
-        deepx_workspace::process_registry::ProcessRegistry::register(&format!("subagent:{name}"));
+    // 记录注册到 serve 进程（ProcessRegistry 权威进程，process 工具同进程），
+    // 主代理的 `process check/wait/kill` 才能看到子代理；serve 不可达时回退
+    // 本地注册表。最终结果仍经 Ringing 注入主代理会话回传。
+    let registry_ref = register_subagent_process(&format!("subagent:{name}"));
+    let registry_id = registry_ref.id();
     // 主代理会话 seed：collect 完成后把最终作答注入回主会话（模型下一轮自然看到）。
     let parent_seed = deepx_workspace::runtime::context()
         .map(|ctx| ctx.active_session.clone())
@@ -337,7 +502,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
             client,
             &seed_bg,
             &name_bg,
-            registry_id,
+            registry_ref,
             timeout_secs,
             batch_rx,
             &parent_seed,
@@ -360,29 +525,37 @@ fn collect_subagent_result(
     client: Client,
     seed: &str,
     name: &str,
-    registry_id: u32,
+    registry_ref: RegistryRef,
     timeout_secs: u64,
     batch_rx: mpsc::Receiver<EventBatch>,
     parent_seed: &str,
 ) {
-    use deepx_workspace::process_registry::ProcessRegistry;
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut final_answer = String::new();
     let mut exit_code: i32 = 0;
     let mut did_finish = false;
     let mut did_cancel = false;
+    // 诊断：是否收到过子 seed 的任意事件（用于区分"子代理一开始就死了"
+    // 与"中途卡死"——worker 侧 [SUBAGENT-WORKER] 日志 + 落盘开关配合）。
+    let mut first_event_logged = false;
 
     while !did_finish && !did_cancel {
         // Kill requested (process kill {id}) → cancel the sub turn.
-        if ProcessRegistry::get_info(registry_id)
-            .and_then(|info| info.get("status").and_then(|s| s.as_str()).map(String::from))
-            .as_deref()
-            == Some("killed")
-        {
+        // 状态权威在 serve 进程（Remote），或本地注册表（Local 降级）。
+        if registry_ref.killed() {
+            log::info!("[SUBAGENT] '{name}' kill requested via process registry — cancelling");
             let cancel = RingingCommand::Conversation(
                 deepx_client::ConversationCommand::ConversationCancel { turn_id: None },
             );
-            let _ = rt_block_on(client.send_command(Some(seed), cancel, CommandOptions::default()));
+            match rt_block_on(client.send_command(Some(seed), cancel, CommandOptions::default())) {
+                Ok(ack) if matches!(ack.status, RingingCommandAckStatus::Accepted) => {}
+                other => {
+                    log::warn!(
+                        "[SUBAGENT] '{name}' cancel send result: {:?}",
+                        other.map(|a| (a.status, a.code)).map_err(|e| e.to_string())
+                    );
+                }
+            }
             final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
             did_cancel = true;
             break;
@@ -391,6 +564,14 @@ fn collect_subagent_result(
             Ok(batch) => {
                 if batch.seed != seed {
                     continue;
+                }
+                if !first_event_logged && !batch.envelopes.is_empty() {
+                    first_event_logged = true;
+                    log::info!(
+                        "[SUBAGENT] '{name}' first event received ({} envelopes, stream_seq {})",
+                        batch.envelopes.len(),
+                        batch.from_stream_seq
+                    );
                 }
                 for envelope in batch.envelopes {
                     match envelope.event {
@@ -419,19 +600,36 @@ fn collect_subagent_result(
                             }
                         }
                         RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. }) => {
+                            log::info!("[SUBAGENT] '{name}' turn completed");
                             did_finish = true;
                         }
-                        RingingEvent::Conversation(ConversationEvent::TurnFailed { error, .. }) => {
-                            final_answer =
-                                format!("[SUBAGENT '{name}' ERROR] {error:?}");
+                        RingingEvent::Conversation(ConversationEvent::TurnFailed {
+                            error,
+                            ..
+                        }) => {
+                            log::warn!("[SUBAGENT] '{name}' turn failed: {error:?}");
+                            final_answer = format!("[SUBAGENT '{name}' ERROR] {error:?}");
                             exit_code = 1;
                             did_finish = true;
                         }
                         RingingEvent::Conversation(
                             ConversationEvent::ConversationCancelled { .. },
                         ) => {
+                            log::info!("[SUBAGENT] '{name}' conversation cancelled");
                             final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
                             did_cancel = true;
+                        }
+                        // 控制面失败（compact 拒绝注入、lease 拒绝等）：此前被
+                        // 静默忽略导致"等到超时"。至少记入日志便于归因。
+                        RingingEvent::Control(ControlEvent::OperationFailed {
+                            error,
+                            ..
+                        }) => {
+                            log::warn!(
+                                "[SUBAGENT] '{name}' operation failed: code={:?} message={:?}",
+                                error.code,
+                                error.message
+                            );
                         }
                         _ => {}
                     }
@@ -442,17 +640,27 @@ fn collect_subagent_result(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if Instant::now() >= deadline {
+                    log::warn!(
+                        "[SUBAGENT] '{name}' timeout after {timeout_secs}s (first_event={first_event_logged}) — cancelling sub turn"
+                    );
                     let cancel = RingingCommand::Conversation(
                         deepx_client::ConversationCommand::ConversationCancel { turn_id: None },
                     );
-                    let _ = rt_block_on(client.send_command(
+                    match rt_block_on(client.send_command(
                         Some(seed),
                         cancel,
                         CommandOptions::default(),
-                    ));
-                    final_answer = format!(
-                        "[SUBAGENT '{name}' TIMEOUT after {timeout_secs}s]"
-                    );
+                    )) {
+                        Ok(ack) if matches!(ack.status, RingingCommandAckStatus::Accepted) => {}
+                        other => {
+                            log::warn!(
+                                "[SUBAGENT] '{name}' timeout cancel send result: {:?}",
+                                other.map(|a| (a.status, a.code)).map_err(|e| e.to_string())
+                            );
+                        }
+                    }
+                    final_answer =
+                        format!("[SUBAGENT '{name}' TIMEOUT after {timeout_secs}s]");
                     exit_code = 1;
                     did_finish = true;
                 }
@@ -470,9 +678,10 @@ fn collect_subagent_result(
 
     let answer_len = final_answer.len();
 
-    // ── 结果回传：注入主代理会话（绕开跨进程 ProcessRegistry 隔离）。 ──
+    // ── 结果回传：注入主代理会话。 ──
     // 主代理 idle 时这条消息触发新回合（模型自动看到子代理结果并继续）；
-    // 主代理仍在运行中则进入 inbox，下一轮合并。注入失败仅告警，不影响注册表。
+    // 主代理仍在运行中则进入回合 lap 边界的见缝插针通道。注入被 daemon 拒绝
+    // （lease/compact 等）时重试一次并告警，避免静默丢失。
     let header = if did_cancel {
         format!("[SUBAGENT '{name}' CANCELLED]")
     } else if exit_code != 0 {
@@ -496,19 +705,41 @@ fn collect_subagent_result(
                 as_system: true,
             },
         );
-        if let Err(e) = rt_block_on(client.send_command(
+        let first = rt_block_on(client.send_command(
             Some(parent_seed),
-            inject,
+            inject.clone(),
             CommandOptions::default(),
-        )) {
-            log::warn!("[SUBAGENT] '{name}' inject result to parent {parent_seed}: {e}");
+        ));
+        if !ack_accepted(&first) {
+            log::warn!(
+                "[SUBAGENT] '{name}' inject to parent {parent_seed} not accepted ({:?}); retrying once",
+                first.map(|a| (a.status, a.code)).map_err(|e| e.to_string())
+            );
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let retry = rt_block_on(client.send_command(
+                Some(parent_seed),
+                inject,
+                CommandOptions::default(),
+            ));
+            if !ack_accepted(&retry) {
+                log::error!(
+                    "[SUBAGENT] '{name}' inject FAILED after retry: {:?}",
+                    retry.map(|a| (a.status, a.code)).map_err(|e| e.to_string())
+                );
+            } else {
+                log::info!("[SUBAGENT] '{name}' inject accepted on retry");
+            }
+        } else {
+            log::info!(
+                "[SUBAGENT] '{name}' inject accepted ({} bytes)",
+                answer_len
+            );
         }
     }
 
-    ProcessRegistry::set_answer(registry_id, final_answer);
-    ProcessRegistry::mark_exited(registry_id, exit_code);
+    registry_ref.finish(&final_answer, exit_code);
     client.close();
     log::info!(
-        "[SUBAGENT] '{name}' collector complete (seed={seed}), answer_len={answer_len}, exit={exit_code}, cancelled={did_cancel}"
+        "[SUBAGENT] '{name}' collector complete (seed={seed}), answer_len={answer_len}, exit={exit_code}, cancelled={did_cancel}, first_event={first_event_logged}"
     );
 }

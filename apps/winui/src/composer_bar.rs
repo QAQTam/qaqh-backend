@@ -724,8 +724,15 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             // 防程序化同步误触发：WinUI 渲染应用 SelectedIndex（如 -1→0）也会
             // 触发 SelectionChanged，回调里 index+1 与渲染时的实际权限一致则
             // 视为同步事件，跳过——否则冷启动/重渲染会把权限误写成 L1。
+            // 防护补洞：rendered_pl==0（config 未加载，SelectedIndex=-1 被
+            // WinUI 规范化为 0 → index+1=1 ≠ 0）时任何 SelectionChanged 都是
+            // 程序化同步事件，一律跳过——此前该窗口未闭合导致每次启动都把
+            // 权限误写成 L1 并持久化（Bug#2）。
             let rendered_pl = pl;
             move |index: i32| {
+                if rendered_pl == 0 {
+                    return;
+                }
                 if index >= 0 {
                     let lvl = (index + 1) as u64;
                     if lvl != rendered_pl {

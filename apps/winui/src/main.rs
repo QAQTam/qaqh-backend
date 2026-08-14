@@ -92,6 +92,19 @@ fn app(cx: &mut RenderCx) -> Element {
     // 侧栏宽度：可拖拽（splitter），双击抓握条恢复默认。
     let (sidebar_width, set_sidebar_width) = cx.use_state::<f64>(sidebar::SIDEBAR_DEFAULT_WIDTH);
 
+    // ── 启动即拉配置（Bug#2 修复）──────────────────────────────
+    // 此前 config.load 只在设置页/OOBE/「刷新」按钮触发：老用户启动后
+    // bridge settings 缓存恒为空 → composer 权限 ComboBox 渲染
+    // permission_level=0（SelectedIndex=-1 被 WinUI 规范化触发误写 L1）、
+    // home 误报「未配置 API Key」、字体/权限投影不生效。
+    // 此处首帧挂载即拉一次权威快照（spawn_config_load 幂等：缓存非空跳过）。
+    cx.use_effect((), {
+        let bridge = bridge.clone();
+        move || {
+            bridge.spawn_config_load(false);
+        }
+    });
+
     cx.use_effect((), {
         let bridge = bridge.clone();
         let timer = timer.clone();

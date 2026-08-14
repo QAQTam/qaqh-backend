@@ -148,7 +148,9 @@ const CONTENT_BEARING_CHAR_LIMIT: usize = 16_000;
 /// - exec               — truncate (4000 cap, unchanged behavior)
 /// - everything else    — fold to a deterministic receipt
 fn finalize_tool_result(tool_name: &str, result: &str) -> String {
-    if tool_name == "skills" || tool_name == "read_file" {
+    // glob 与 read_file 同理由透传：工具自身以 max_results 熔断（self-limited），
+    // 且产物就是文件清单——折叠成首行会让模型拿不到清单、被迫换 exec 绕行。
+    if tool_name == "skills" || tool_name == "read_file" || tool_name == "glob" {
         return result.to_string();
     }
     if is_content_bearing_tool(tool_name) {
@@ -1187,10 +1189,11 @@ impl MessageStore {
                 }
                 _ => {
                     // Mid-stream system messages: recognize persisted
-                    // activation-set envelopes and restore them as trailing
-                    // injections; recognize sub-agent result injections
-                    // ([SUBAGENT ...] tag) and restore them as system turns;
-                    // drop anything else silently.
+                    // activation-set envelopes AND sub-agent result injections
+                    // ([SUBAGENT ...] tag) and restore them as trailing
+                    // injections (消息流末尾，wire 序列合法)；drop anything
+                    // else silently. 此前 [SUBAGENT] 被恢复为 system turn、
+                    // 固化在 function_call_output 之后，provider 端丢弃/挂起。
                     let text = msgs[i]
                         .content
                         .iter()
@@ -1199,10 +1202,8 @@ impl MessageStore {
                             _ => None,
                         })
                         .unwrap_or("");
-                    if text.starts_with("<skill_context_envelope") {
+                    if text.starts_with("<skill_context_envelope") || text.starts_with("[SUBAGENT ") {
                         store.trailing_messages.push(msgs[i].clone());
-                    } else if text.starts_with("[SUBAGENT ") {
-                        store.push_system_input(&text);
                     }
                     i += 1;
                 }
@@ -1669,12 +1670,20 @@ mod tests {
             .iter()
             .any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT 'explore' COMPLETED]"))));
 
-        // from_messages replay restores the [SUBAGENT ...] turn.
+        // from_messages replay restores the [SUBAGENT ...] injection as a
+        // TRAILING system message（wire 合法位置），而非 mid-stream turn
+        // （function_call_output 之后固化的非法位置曾导致 provider 丢弃）。
         let (restored, repairs) = MessageStore::from_messages("test", &vec, 0);
         assert!(repairs.is_empty(), "replay should not report repairs: {repairs:?}");
         let restored_vec = restored.to_vec();
         let restored_roles: Vec<&str> = restored_vec.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(restored_roles, roles);
+        assert_eq!(restored_roles, vec!["user", "assistant", "user", "assistant"]);
+        let trailing = restored.trailing_messages();
+        assert_eq!(trailing.len(), 1, "subagent injection must restore as trailing");
+        assert!(trailing[0]
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT 'explore' COMPLETED]"))));
     }
 
     #[test]
@@ -2000,6 +2009,28 @@ mod tests {
         assert_eq!(
             context_result(&store.build_context_for_gate(&[]), "skill-1"),
             activation
+        );
+    }
+
+    #[test]
+    fn glob_listing_remains_complete_across_steps_and_turns() {
+        // glob 的产物就是文件清单：折叠成首行会让模型拿不到清单、
+        // 被迫换 exec rg 绕行。与 read_file/skills 同理由透传
+        // （工具自身 max_results 熔断 = self-limited）。
+        let listing = "crates/deepx-config/src/config.rs\ncrates/deepx-config/src/lib.rs\ncrates/deepx-config/src/prompt.rs\ncrates/deepx-config/src/registry.rs\n";
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("list files");
+        store.push_assistant(assistant_with_tools(&[("glob-1", "glob")]));
+        store.push_tool_result_direct("glob-1", listing, true);
+
+        assert_eq!(
+            context_result(&store.build_context_for_gate(&[]), "glob-1"),
+            listing
+        );
+        store.push_user("continue");
+        assert_eq!(
+            context_result(&store.build_context_for_gate(&[]), "glob-1"),
+            listing
         );
     }
 

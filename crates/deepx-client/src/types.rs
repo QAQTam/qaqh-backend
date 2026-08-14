@@ -19,7 +19,7 @@ pub use deepx_domain::{
 };
 pub use deepx_ringing::{
     ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse, RingingCommand,
-    RingingCommandAck, RingingCommandState, RingingCommandStatus, RingingEvent,
+    RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus, RingingEvent,
     RingingEventBatch as EventBatch, RingingEventEnvelope, RingingResetRequired as ResetRequired,
 };
 

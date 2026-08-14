@@ -23,7 +23,8 @@
 | [CHATVIEW-V4-PLAN.md](./CHATVIEW-V4-PLAN.md) | ChatView V4 改进计划（ToolView 聚合 + 状态设计） | ✅ 原型已定稿，待 Rust 落地 |
 | [PLAN-SUBAGENT-STATUS-AREA.md](./PLAN-SUBAGENT-STATUS-AREA.md) | 并行子代理 UI（工作状态区）实施计划 | ✅ 进行中（MVP 已落地） |
 | [PLAN-WORKSPACE-CAPABILITY.md](./PLAN-WORKSPACE-CAPABILITY.md) | Workspace 升级：Capability 抽象 + MCP + Hooks 权限模型 | 🔲 待实施（P1 已落地） |
-| [PLAN-WINUI-WORKSPACE-NAV.md](./PLAN-WINUI-WORKSPACE-NAV.md) | WinUI 侧栏工作区化：Workspace 导航 + 标签页过滤 + 未分组孤儿语义 | 🔲 待实施（2026-08-14 定稿） |
+| [PLAN-SESSION-EDIT-LEASE.md](./PLAN-SESSION-EDIT-LEASE.md) | 会话编辑租约（EditLease）传话系统 + Subagent Co-work 路线 | 🔲 待实施 |
+| [PLAN-WINUI-WORKSPACE-NAV.md](./PLAN-WINUI-WORKSPACE-NAV.md) | WinUI 侧栏工作区化：Workspace 导航 + 标签页过滤 + 未分组孤儿语义 | ⏳ 进行中（P1+P2 已落地，待视觉验证） |
 | [chat-live-prototype.html](./chat-live-prototype.html) | ChatView V4 交互原型（定稿） | ✅ 落地依据 |
 | [chat-pagination-design.md](./chat-pagination-design.md) | ChatView 历史分页：机制实测 + 设计细化（阶段 3 后端分页待实施） | ✅ 现行（待 rc4 冻结决策） |
 | [plan-virtual-scroll-paging.md](./plan-virtual-scroll-paging.md) | Chat 分页虚拟滚动方案（阶段 1-2 已完成） | ✅ 进行中（阶段 3） |
@@ -65,6 +66,12 @@
 | 文档 | 内容 | 状态 |
 |---|---|---|
 | [dsh-alignment.md](./dsh-alignment.md) | dsh（@deepseek-ai/dsh）调研：技术栈/模型增益机制/分级对齐清单（A 随发版、B 第一批、C 排期）/co-work-subagent 前瞻 | ✅ 清单定稿（dsh 8/13 开源） |
+
+## 工程工作流（git / 构建）
+
+| 文档 | 内容 | 状态 |
+|---|---|---|
+| [PLAN-git-worktree-sandbox.md](./PLAN-git-worktree-sandbox.md) | Git UI + 模型沙箱（worktree + 快照）计划；§4 通用 worktree 感知（对标 codex：trust 锚定主仓库根/配置继承/P0-P4） | 🔲 待实施（§4 设计已确认） |
 
 ## 法律与合规
 

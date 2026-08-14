@@ -984,14 +984,25 @@ fn turn_view(
     } else {
         ("正在处理", StatusTone::Running)
     };
-    let mut items: Vec<Element> = vec![deepx_fluent::user_message(
+    let mut items: Vec<Element> = vec![if turn.user_text.trim_start().starts_with("[SUBAGENT ") {
+        // 子代理注入回合：不渲染用户气泡（注入正文/标签不得以 user 身份
+        // 泄露到聊天流——后端已只发标签行，这里对历史数据/旧 timeline
+        // 全文兜底过滤）。注入内容的模型回复仍按 blocks 正常渲染。
         text_block(&turn.user_text)
-            .font_size(tokens::TYPE_BODY)
-            .line_height(tokens::TYPE_BODY_LINE_HEIGHT)
-            .wrap()
-            .selectable(),
-        deepx_fluent::status_badge(status, tone),
-    )];
+            .font_size(11.0)
+            .foreground(ThemeRef::SecondaryText)
+            .padding(Thickness::uniform(4.0))
+            .into()
+    } else {
+        deepx_fluent::user_message(
+            text_block(&turn.user_text)
+                .font_size(tokens::TYPE_BODY)
+                .line_height(tokens::TYPE_BODY_LINE_HEIGHT)
+                .wrap()
+                .selectable(),
+            deepx_fluent::status_badge(status, tone),
+        )
+    }];
     // 右键菜单浮层：插在消息上方（右对齐），点消息任意处关闭。
     if menu_open {
         items.insert(0, undo_menu_float(on_undo));

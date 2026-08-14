@@ -67,16 +67,68 @@
 | 3.2 事后审查 | 执行后 `changeset()`：safe（≤N 文件且无敏感路径）自动放行；suspicious 回滚 + 生成报告请求用户批准 | 🔲 |
 | 3.3 审计日志 | 脚本原文 + 变更清单 + 决策结果 → `.deepx/sandbox-audit.log` | 🔲 |
 
-## 4. 决策点
+## 4. 通用 worktree 支持（worktree-aware）——对标 codex 体系
+
+> 2026-08-14 修订：§4 从"开发侧 worktree 管理"改为"通用 worktree 感知"。产品面向任意用户仓库（含 linked worktree），不是只服务自身开发。
+
+### 4.1 对标研究：codex 的 worktree 体系（F:\codex 代码实证）
+
+**定位：worktree-aware（感知）而非 worktree-manager（管理）**——codex 不创建/管理 worktree，但保证用户在 linked worktree 中运行 codex 时行为正确。四大机制：
+
+| 机制 | 实现 | 原则 |
+|---|---|---|
+| Trust 锚定主仓库根 | `git-utils/src/info.rs` `resolve_root_git_project_for_trust`（L771-821）：纯文件系统解析 .git 文件 → 读 `gitdir:` → 校验父目录名为 `worktrees/` → 上溯 common_dir 的 parent = 主仓库根；**不调 git 可执行文件** | one trust state per repo |
+| 权威配置继承 | `config/src/loader/mod.rs` `merge_root_checkout_project_hooks`（L1453）+ `config/src/state.rs` `hooks_config_folder`（L225）：worktree 中项目 hooks 从 root checkout 的匹配 `.codex/` 层继承，worktree 本地分叉声明被替换；其余项目配置仍读 worktree 本地 | one authoritative definition per repo |
+| `.worktreeinclude` 清单 | 仓库根文件列出 gitignore 的本地文件（`user.bazelrc`）——git 不跟踪的文件在 worktree 中天然缺失，清单桥接"worktree 需要 include 的本地文件" | 未跟踪本地文件的显式继承通道 |
+| 轻量探测分层 | `get_git_repo_root`（L35，.git 文件/目录都认）用于普通探测；trust 路径单独走文件系统检查，职责分离 | 探测与信任解析分离 |
+
+### 4.2 DeepX 现状差距（代码实证，2026-08-14）
+
+| 差距 | 现状 | 后果 |
+|---|---|---|
+| workspace 归属纯路径前缀 | `deepx-session/src/workspace.rs` `attach_by_cwd`（L227）`cwd_belongs` 前缀匹配 | worktree（如 `F:\DeepX-worktrees\x`）与主仓无前缀关系 → 判为**独立 workspace**，会话/编辑记录分裂 |
+| trust 按文件夹路径 | `permission.rs` `TrustedFolderSet`（L7 跨 workspace 文件夹信任） | worktree 内写主仓外路径触发新信任弹窗，与"one trust state"相悖 |
+| git service 未验证 worktree | `git.rs` L11 `Repository::open`（git2 原生支持 worktree，但 `is_worktree()`/`commondir()` 未使用） | status/switch/commit/apply 在 worktree 中行为未测试 |
+
+### 4.3 设计（对齐 codex 原则）
+
+**P0 识别层**：`resolve_repo_root_for_workspace(path) -> {repo_root, is_worktree, root_repo_root}`（纯文件系统，复制 codex 算法）：
+- 向上找 `.git`；目录型 → 普通 checkout；文件型 → 读 `gitdir:` → 父目录名为 `worktrees` → common_dir.parent() = 主仓库根
+- 单点实现，供 workspace 归属与 trust 判定共用
+
+**P1 归属层**（决策点 5）：worktree 会话归属策略：
+- 方案 A（**建议**）：worktree 独立 workspace，元数据带 `root_workspace_id`——保留分支隔离（不同分支会话/编辑历史分开），EditLease/trust 跨引用
+- 方案 B：worktree 会话直接并入主仓 workspace——最简单，但不同分支同一 workspace 会串上下文
+
+**P2 信任层**：权限判定 worktree-aware：worktree 内路径 → 继承主仓库 trust 状态（`TrustedFolderSet` 查询前先解析 root）；worktree 写入主仓外路径仍走原跨 workspace 规则
+
+**P3 配置层**（决策点 6）：`.deepx/` 继承策略：
+- 跟踪文件（skills 部分跟踪）天然存在
+- 未跟踪本地配置（settings/trust 标记）→ 对齐 codex 双机制：权威配置从 root checkout 继承 + 清单文件（`.deepx-worktreeinclude`）声明需携带的本地文件
+- 会话数据（sessions/workspaces.json）在全局 data_dir，不入 worktree
+
+**P4 git service 验证**：git2 在 worktree 中的 status/switch/commit/apply 集成测试（`Repository::open` 自动处理 .git 文件，但需覆盖：分支切换、apply location、index 状态）
+
+### 4.4 与开发工作流的关系
+
+开发侧自身用 worktree 并行验证 plan 仍是合法场景（`git worktree add` + 每 plan 一分支），但那是"用户已有 worktree"的特例——通用支持（P0-P4）落地后开发侧无需特殊处理，天然正确。
+
+
+## 5. 决策点
 
 1. **worktree 路径与生命周期**：`.deepx-worktrees/agent` 常驻一个还是每任务一个？（建议：常驻一个 + 每次任务前 `git reset --hard` 重置）
 2. **「safe」阈值**：默认建议 ≤20 文件且无删除、不触碰敏感路径；是否放宽？
 3. **CLI 起步的可用性假设**：开发机有 Git for Windows；用户机不依赖（Phase 2 后清零）。接受此窗口期吗？
 4. **status 行数统计的解除条件**（约束①）：需先修 git2 pathspec 过滤（或沿用 c4e61f4 的 text-based 统计方案）；修好后 UI 再开行数展示。
+5. **worktree 归属**（§4.3 P1）：方案 A 独立 workspace + `root_workspace_id` 引用（建议，对齐 codex trust 单一/上下文独立）vs 方案 B 并入主仓 workspace。
+6. **`.deepx/` 继承**（§4.3 P3）：权威配置从 root checkout 继承 + `.deepx-worktreeinclude` 清单 vs worktree 全本地化（后者会分裂 trust/配置）。
 
-## 5. 变更记录
+## 6. 变更记录
 
 | 日期 | 改动 |
 |---|---|
+| 2026-08-14 | §4 重写为**通用 worktree 感知**：对标 codex 体系（trust 锚定主仓库根/权威配置继承/.worktreeinclude 清单），识别 DeepX 三处差距（workspace 前缀归属、trust 按路径、git service 未验证），P0-P4 设计 |
+| 2026-08-14 | 原 §4 开发工作流（仓库外布局 + 共享 target）撤销——用户澄清面向通用 worktree，非仅开发侧 |
+| 2026-08-14 | 新增 §4 开发工作流（dev workflow）：仓库外 worktree 布局 + 共享 target 构建策略 + recipes；确认主仓与远端同步 |
 | 2026-08-13 | 初稿：基于 git2 现状核对（deepx-workspace 已 vendored 0.21、service 已暴露、worktree_add 缺失） |
 | 2026-08-13 | 补 Phase 1 交互约束①②③ + 1.5 并发隔离验证：源自 Electron 时期 git UI bug 史（c4e61f4 pathspec 全量 diff、48aaf62 盲轮询与重操作阻塞、2cd80a3 WebSocket 级联、10efce9 TS 绑定 typecheck） |

@@ -144,7 +144,12 @@ fn is_timeline_delta(entry: &deepx_client::TimelineEntry) -> bool {
 pub struct HeaderState {
     pub view: String,
     pub title: String,
+    /// 当前会话运行工作区路径（`workspace.set` 成功后写入；此前该字段
+    /// 只声明从未赋值，标题栏永远显示「未选择工作区」→ 用户无任何反馈）。
     pub workspace: String,
+    /// 工作区选择/设置失败文案（None = 无错误；header 500ms 轮询展示，
+    /// 成功选择或新会话刷新后清除——修复「选择失败但零提示」）。
+    pub workspace_error: Option<String>,
     /// 当前会话 seed（chat 视图；apply_header 同步 active_seed）。
     pub seed: String,
     pub info_open: bool,
@@ -2824,6 +2829,26 @@ impl BridgeCore {
 
     /// 权限等级：`config.set_permission_level`（对齐 Web changePermissionLevel）。
     pub fn spawn_set_permission(&self, level: u64) {
+        // 写前守卫（Bug#2 修复）：settings 缓存未加载（启动时序 config.load
+        // 未到达）或 level 与当前已加载值一致时直接跳过，不向 daemon 发送——
+        // 否则 ComboBox/Slider 的初始化同步事件会把权限误写成 L1 并持久化。
+        let current = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|s| s.permission_level);
+        match current {
+            Some(cur) if cur == level => {
+                log_diag(&format!("set_permission {level}: skipped (unchanged)"));
+                return;
+            }
+            None => {
+                log_diag(&format!("set_permission {level}: skipped (config not loaded)"));
+                return;
+            }
+            _ => {}
+        }
         let core = self.self_arc();
         let _ = deepx_client::runtime_handle().spawn(async move {
             let client = match core.ensure_client().await {
@@ -3052,6 +3077,11 @@ impl BridgeCore {
     }
 
     /// 工作区切换：`workspace.set`（headerAction::Workspace 直发）。
+    ///
+    /// 反馈闭环（2026-08-14 修复）：此前结果只写日志，标题栏永远显示
+    /// 「未选择工作区」——用户选了目录但界面零变化，反复点击 → 反复弹窗
+    /// → 误判「选择失败（后端未收到）」。现成功写路径、失败写错误文案，
+    /// 均经 `header_rev` 递增让标题栏 500ms 轮询即时反映。
     pub fn spawn_workspace_set(&self, path: String) {
         let core = self.self_arc();
         let _ = deepx_client::runtime_handle().spawn(async move {
@@ -3059,18 +3089,47 @@ impl BridgeCore {
                 Ok(client) => client,
                 Err(err) => {
                     log_diag(&format!("workspace.set: connect failed: {err}"));
+                    core.apply_workspace_feedback(None, Some(format!("连接失败：{err}")));
                     return;
                 }
             };
             let seed = core.active_seed();
+            if seed.is_empty() {
+                // daemon 要求 seed 非空且持有 lease（否则 400 invalid seed /
+                // 401 lease_required）——Home 视图无活动会话时主动拦截并提示。
+                log_diag("workspace.set: no active session, skipped");
+                core.apply_workspace_feedback(None, Some("请先打开一个会话，再选择工作区".into()));
+                return;
+            }
             match client
-                .action(ActionRequest::WorkspaceSet { seed, path })
+                .action(ActionRequest::WorkspaceSet { seed, path: path.clone() })
                 .await
             {
-                Ok(_) => log_diag("workspace.set: ok"),
-                Err(err) => log_diag(&format!("workspace.set failed: {err}")),
+                Ok(_) => {
+                    log_diag("workspace.set: ok");
+                    core.apply_workspace_feedback(Some(path), None);
+                }
+                Err(err) => {
+                    log_diag(&format!("workspace.set failed: {err}"));
+                    core.apply_workspace_feedback(None, Some(format!("设置失败：{err}")));
+                }
             }
         });
+    }
+
+    /// 标题栏工作区反馈投影：成功路径写入 `workspace`（并清错误），失败
+    /// 路径写入 `workspace_error`。`header_rev` 递增驱动 header 轮询刷新。
+    fn apply_workspace_feedback(&self, path: Option<String>, error: Option<String>) {
+        let mut h = self.header_state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(path) = path {
+            h.workspace = path;
+            h.workspace_error = None;
+        }
+        if let Some(error) = error {
+            h.workspace_error = Some(error);
+        }
+        drop(h);
+        self.header_rev.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 会话工作模式切换：`conversation_set_mode` 命令 + 本地 mode 缓存
@@ -4200,8 +4259,15 @@ impl Bridge {
     // ── XAML 标题栏 STA 能力（header.rs 只依赖 Bridge；①②③ 壳直接处理）──
 
     /// ①workspace：目录选择对话框（STA COM；用户取消返回 Ok(null)）。
+    /// 必须在 UI 线程调用（当前调用方：header/sidebar 的点击处理器）。
     pub fn pick_workspace_directory(&self) -> Result<Value, String> {
         show_open_dialog(true, false, false, None)
+    }
+
+    /// 工作区选择/设置失败反馈（picker `Err` 路径：header 静默吞错曾导致
+    /// 「用户选了目录但程序无动作、无日志、无提示」——现标题栏展示文案）。
+    pub fn report_workspace_error(&self, msg: String) {
+        self.core.apply_workspace_feedback(None, Some(msg));
     }
 
     /// settings：文件选择对话框（tokenizer 路径；用户取消返回 Ok(null)）。
@@ -5407,7 +5473,8 @@ mod tests {
 }
 
 /// Minimal file logger (GUI subsystem has no console).
-fn log_diag(msg: &str) {
+/// `pub(crate)`：header.rs 的 picker `Err` 分支也写入同一日志（此前静默吞错）。
+pub(crate) fn log_diag(msg: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -5440,9 +5507,9 @@ fn open_external(target: &str) -> Result<(), String> {
 
 /// Show the native file/folder picker (Win32 `IFileOpenDialog`).
 ///
-/// **Must be called on the STA UI thread** — this is enforced by the only
-/// call site (`Bridge::handle_message`). Mirrors Electron
-/// `dialog.showOpenDialog` semantics consumed by the renderer:
+/// **Must be called on the STA UI thread** — current call sites are the
+/// header/sidebar click handlers (UI thread), previously `Bridge::handle_message`.
+/// Mirrors Electron `dialog.showOpenDialog` semantics consumed by the renderer:
 ///   - `directory` -> `FOS_PICKFOLDERS` (folder picker)
 ///   - `multiple`  -> `FOS_ALLOWMULTISELECT` (result becomes a JSON array)
 ///   - `image_filter` -> picture file types filter
@@ -5503,7 +5570,10 @@ fn show_open_dialog(
         // Show() is modal; ERROR_CANCELLED (user pressed Cancel / Esc) is
         // mapped to `null`, matching the preload API's cancel semantics.
         // (0.100 HRESULT has no from_win32 helper; build the code inline.)
-        let hr = dialog.Show(None);
+        // 传真实 owner：此前 `Show(None)` 无 owner——对话框打开期间主窗口
+        // 未被禁用、模态循环仍泵送主窗口消息，此时再点「选择工作区」会
+        // 嵌套弹出第二个对话框（「二次弹窗」根因之一）。
+        let hr = dialog.Show(active_owner_hwnd());
         if hr.is_err() && hr.0 == ((ERROR_CANCELLED as u32 | 0x8007_0000) as i32) {
             return Ok(json!(null));
         }
@@ -5543,4 +5613,25 @@ fn shell_item_path(item: &windows::Win32::IShellItem) -> Result<String, String> 
         unsafe { pw.to_string() }.map_err(|e| format!("selected path is not valid UTF-16: {e}"))?;
     unsafe { CoTaskMemFree(pw.0 as _) };
     Ok(path)
+}
+
+/// 文件/目录对话框的 owner 窗口：取当前线程的活动顶层窗口（用户点击按钮
+/// 时即主窗口）。取不到（理论边界）时回退 `None`，等价旧行为。
+///
+/// 用真实 owner 后，`IFileOpenDialog` 会禁用 owner 窗口——对话框打开期间
+/// 主窗口不可点击，「再点一次按钮 → 嵌套弹出第二个对话框」不再可能。
+/// （user32 的 `GetActiveWindow` 不在 windows fork 的 feature 集内，用
+/// 最小 extern 声明直连。）
+fn active_owner_hwnd() -> Option<windows::Win32::HWND> {
+    use windows::Win32::HWND;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetActiveWindow() -> *mut core::ffi::c_void;
+    }
+    let hwnd = unsafe { GetActiveWindow() };
+    if hwnd.is_null() {
+        None
+    } else {
+        Some(HWND(hwnd))
+    }
 }
