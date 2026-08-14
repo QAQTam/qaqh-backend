@@ -124,4 +124,8 @@ impl Emitter for PacedEmitter {
         };
         let _ = self.tx.send(WriterEvent::Timeline(env));
     }
+
+    fn event_tx(&self) -> Option<std::sync::mpsc::SyncSender<WriterEvent>> {
+        Some(self.tx.clone())
+    }
 }

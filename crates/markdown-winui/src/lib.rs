@@ -158,13 +158,11 @@ pub fn render_final(blocks: &[Block]) -> RichTextOutput {
                     } else if *ordered {
                         let label = n.to_string() + ". ";
                         n += 1;
-                        let para = RichTextParagraph::new(vec![RichTextInline::Run(
-                            RichTextRun::plain(label),
-                        )]);
-                        out.blocks.push(FinalBlock::Paragraph(para.clone()));
-                        out.paragraphs.push(para);
-                        // 前缀段已入，内容段继续
-                        let para = RichTextParagraph::new(blocks_to_rich(&item.blocks));
+                        // 前缀与内容合并为同一段（对齐无序列表 `• ` 写法）——
+                        // 拆段会导致「1.」独占一行、内容另起一段（2026-08 修复）。
+                        let mut inlines = vec![RichTextInline::Run(RichTextRun::plain(label))];
+                        inlines.extend(blocks_to_rich(&item.blocks));
+                        let para = RichTextParagraph::new(inlines);
                         out.blocks.push(FinalBlock::Paragraph(para.clone()));
                         out.paragraphs.push(para);
                         continue;

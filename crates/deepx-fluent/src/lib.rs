@@ -97,7 +97,7 @@ pub mod tokens {
 
     /// Packaged UI font followed by native Windows fallbacks. The corresponding
     /// files are staged by `deepx-winui` under `Assets/fonts`.
-    pub const DEFAULT_UI_FONT_FAMILY: &str = "ms-appx:///Assets/fonts/HarmonyOS_Sans_SC_Regular.ttf#HarmonyOS Sans SC, Segoe UI Variable, Microsoft YaHei UI, Segoe UI";
+    pub const DEFAULT_UI_FONT_FAMILY: &str = "ms-appx:///Assets/fonts/HarmonyOS_Sans_SC_Regular.ttf#HarmonyOS Sans SC, Segoe UI Variable, Microsoft YaHei UI, Segoe UI, Segoe UI Emoji";
     /// Variable monospaced font for code, numeric telemetry, and raw tool data.
     /// CJK fallback 链：等宽字体不含中文，缺省时中文会落系统默认（雅黑），
     /// 与正文 HarmonyOS 混排观感割裂——显式带回退。

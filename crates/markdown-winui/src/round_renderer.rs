@@ -152,6 +152,10 @@ pub struct ToolCardView {
     /// provider 内建工具卡（web_search 等，`provider_tool_status` 事件）：
     /// 无参数流，展开区显示执行状态（args_display 承载）。
     pub provider: bool,
+    /// 工具是否已真正开始执行（ToolStarted / state=Running）。
+    /// Prepared（LLM 刚吐出 tool_call 的 replaceable 预览）为 false——
+    /// 前端在 started 前不渲染，避免「一收到调用就闪烁」。
+    pub started: bool,
 }
 
 /// 恢复的回合（timeline 快照解析产物；`Transcript::restore` 消费）。
@@ -441,6 +445,7 @@ impl RoundView {
             failed: false,
             failure: None,
             provider: false,
+            started: true,
         })
     }
 
@@ -938,6 +943,7 @@ impl Transcript {
                     failed: false,
                     failure: None,
                     provider: true,
+                    started: true,
                 };
                 // upsert by call_id（replaceable 语义：同 id 覆盖状态）。
                 upsert_tool_card(round, card)
@@ -968,6 +974,8 @@ impl Transcript {
                     failed: false,
                     failure: None,
                     provider: false,
+                    // Prepared 预览：尚未真正执行，前端不渲染。
+                    started: false,
                 };
                 upsert_tool_card(round, card)
                     .then(|| TranscriptChange::structural(true))
@@ -1003,6 +1011,7 @@ impl Transcript {
                     failed: false,
                     failure: None,
                     provider: false,
+                    started: true,
                 };
                 upsert_tool_card(round, card)
                     .then(|| TranscriptChange::structural(true))
@@ -1061,6 +1070,7 @@ impl Transcript {
                     failed: false,
                     failure: None,
                     provider: false,
+                    started: true,
                 };
                 upsert_tool_card(round, card)
                     .then(|| TranscriptChange::structural(true))

@@ -287,6 +287,12 @@ pub trait Emitter {
     /// 会话创建/恢复后必须调用，否则事件被 daemon 按 seed 过滤丢弃。
     /// 默认空实现：未持有 seed 的 emitter（测试 mock）无需处理。
     fn set_seed(&self, _seed: &str) {}
+
+    /// 后台线程（标题生成等）直发 writer 通道的句柄；未持有（测试 mock）
+    /// 返回 None——调用方降级为仅主线程事件。
+    fn event_tx(&self) -> Option<std::sync::mpsc::SyncSender<WriterEvent>> {
+        None
+    }
 }
 
 /// writer 线程通道载荷：Ringing worker envelope 或 timeline intent（互不嵌套）。

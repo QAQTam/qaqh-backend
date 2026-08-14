@@ -101,6 +101,11 @@ pub enum ConversationCommand {
         /// Electron main 上传后的会话附件引用；命令中不允许出现本地路径。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attachments: Option<Vec<ContentRef>>,
+        /// 系统级注入（如子代理结果回传）：以 system 角色进入 transcript 并
+        /// 触发新回合，跳过用户输入专属处理（compliance guard / 技能激活 /
+        /// todo 模式切换）。false 时行为与普通用户消息完全一致。
+        #[serde(default)]
+        as_system: bool,
     },
     /// 取消当前回合（停止 gate 流式输出与工具执行）。
     ConversationCancel {

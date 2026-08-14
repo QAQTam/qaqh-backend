@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 /// Explicit Windows-native choice used when the user opts out of DeepX's
 /// packaged HarmonyOS Sans default.
 pub const WINDOWS_UI_FONT_FAMILY: &str =
-    "Segoe UI Variable, Segoe UI, Microsoft YaHei UI, Microsoft YaHei";
+    "Segoe UI Variable, Segoe UI, Microsoft YaHei UI, Microsoft YaHei, Segoe UI Emoji";
 
 /// Resolve the persisted preference. An empty value intentionally means the
 /// DeepX packaged default; older configs therefore migrate without a write.

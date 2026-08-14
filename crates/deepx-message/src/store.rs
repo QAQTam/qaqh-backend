@@ -594,6 +594,29 @@ impl MessageStore {
         Effect::None
     }
 
+    /// Push a system-role message as a standalone turn (e.g. sub-agent result
+    /// injection). Persisted like a user turn (`save_msg`), so `to_vec()`
+    /// emits a mid-stream `system` message that OpenAI/Responses both accept.
+    /// Callers must keep the `[SUBAGENT ...]` tag in `text` so the model can
+    /// distinguish injected data from system instructions.
+    pub fn push_system_input(&mut self, text: &str) -> Effect {
+        if !self.replaying {
+            if let Some(turn) = self.turns.last_mut() {
+                if let Some(step) = turn.steps.last_mut() {
+                    auto_complete_unfulfilled(
+                        step,
+                        "[CANCELLED] Tool was not executed (system injection arrived).",
+                    );
+                }
+            }
+        }
+        let msg = Message::system(text);
+        self.turns.push(Turn::new(msg.clone()));
+        self.context_revision = self.context_revision.saturating_add(1);
+        self.save_msg(&msg);
+        Effect::None
+    }
+
     /// Add an image block to the last user message (the most recent turn's user message).
     pub fn push_image_to_last_user(&mut self, mime_type: &str, data: &str) {
         if let Some(turn) = self.turns.last_mut() {
@@ -1165,7 +1188,9 @@ impl MessageStore {
                 _ => {
                     // Mid-stream system messages: recognize persisted
                     // activation-set envelopes and restore them as trailing
-                    // injections; drop anything else silently.
+                    // injections; recognize sub-agent result injections
+                    // ([SUBAGENT ...] tag) and restore them as system turns;
+                    // drop anything else silently.
                     let text = msgs[i]
                         .content
                         .iter()
@@ -1176,6 +1201,8 @@ impl MessageStore {
                         .unwrap_or("");
                     if text.starts_with("<skill_context_envelope") {
                         store.trailing_messages.push(msgs[i].clone());
+                    } else if text.starts_with("[SUBAGENT ") {
+                        store.push_system_input(&text);
                     }
                     i += 1;
                 }
@@ -1612,6 +1639,58 @@ mod tests {
                 _ => None,
             })
             .expect("tool result must be present in gate context")
+    }
+
+    #[test]
+    fn system_input_roundtrip_preserves_mid_stream_system_message() {
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("first user turn");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("first answer")],
+        });
+        store.push_system_input("[SUBAGENT 'explore' COMPLETED]\n\nfinal answer here");
+        store.push_user("second user turn");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("second answer")],
+        });
+
+        // to_vec: mid-stream system message keeps its role and position.
+        let vec = store.to_vec();
+        let roles: Vec<&str> = vec.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "system", "user", "assistant"]);
+        assert!(vec[2]
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT 'explore' COMPLETED]"))));
+
+        // from_messages replay restores the [SUBAGENT ...] turn.
+        let (restored, repairs) = MessageStore::from_messages("test", &vec, 0);
+        assert!(repairs.is_empty(), "replay should not report repairs: {repairs:?}");
+        let restored_vec = restored.to_vec();
+        let restored_roles: Vec<&str> = restored_vec.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(restored_roles, roles);
+    }
+
+    #[test]
+    fn push_system_input_starts_a_turn_that_accepts_assistant_reply() {
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_system_input("[SUBAGENT 'x' COMPLETED]\n\nresult");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("ack")],
+        });
+
+        let vec = store.to_vec();
+        let roles: Vec<&str> = vec.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["system", "assistant"]);
     }
 
     #[test]

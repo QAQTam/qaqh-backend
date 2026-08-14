@@ -1095,6 +1095,7 @@ impl Loop {
                     text,
                     images,
                     attachments: _,
+                    as_system,
                 } => {
                     if self.session.agent.manual_compact_running() {
                         self.emit_operation_failed(
@@ -1106,6 +1107,7 @@ impl Loop {
                         return;
                     }
                     // images 已是 domain ImageBlock（Ringing 命令直接携带）。
+                    // as_system=true 时走系统注入通道（跳过用户输入专属处理）。
                     let mut ctx = RingContext {
                         agent: &mut self.session.agent,
                         emitter: &self.paced_emitter,
@@ -1116,7 +1118,11 @@ impl Loop {
                         stats: &mut self.session.stats,
 
                     };
-                    let outcome = self.input.handle_user_input(&mut ctx, &text, images);
+                    let outcome = if as_system {
+                        self.input.handle_system_input(&mut ctx, &text)
+                    } else {
+                        self.input.handle_user_input(&mut ctx, &text, images)
+                    };
                     drop(ctx);
                     self.apply_outcome(outcome);
                 }

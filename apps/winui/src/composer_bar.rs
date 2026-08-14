@@ -707,13 +707,27 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     };
 
     // 四档权限属于 4+ 单选集合，用 ComboBox 避免网页式 pill 兼容层。
+    // permission_level==0（config 未加载/失败）：SelectedIndex=-1（WinUI 无选中
+    // 空白），避免 0.saturating_sub(1)=0 显示成 L1 误导用户以为被重置。
+    let pl = state.permission_level;
     let permission_picker: Element = ComboBox::new(["L1", "L2", "L3", "L4"])
-        .selected_index(state.permission_level.saturating_sub(1).min(3) as i32)
+        .selected_index(if pl == 0 {
+            -1
+        } else {
+            pl.saturating_sub(1).min(3) as i32
+        })
         .on_selection_changed({
             let on_permission = on_permission.clone();
+            // 防程序化同步误触发：WinUI 渲染应用 SelectedIndex（如 -1→0）也会
+            // 触发 SelectionChanged，回调里 index+1 与渲染时的实际权限一致则
+            // 视为同步事件，跳过——否则冷启动/重渲染会把权限误写成 L1。
+            let rendered_pl = pl;
             move |index: i32| {
                 if index >= 0 {
-                    on_permission((index + 1) as u64);
+                    let lvl = (index + 1) as u64;
+                    if lvl != rendered_pl {
+                        on_permission(lvl);
+                    }
                 }
             }
         })

@@ -618,6 +618,7 @@ impl DeepxService {
                 text,
                 images,
                 attachments: None,
+                as_system: false,
             }),
         );
         if let Err(error) = registry.send_ringing(&seed, &env) {
