@@ -9,6 +9,7 @@ use super::web;
 
 use super::apply_patch;
 use super::file_edit;
+use super::file_edit_v2;
 use super::file_mutate;
 use super::file_query;
 use super::file_glob;
@@ -33,6 +34,7 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
 
     // ── 文件操作 ──
     file_edit::register(&mut mgr);
+    file_edit_v2::register(&mut mgr);
     file_mutate::register(&mut mgr);
     file_query::register(&mut mgr);
     file_glob::register(&mut mgr);
@@ -79,6 +81,7 @@ mod tests {
                 "ask",
                 "delete",
                 "edit_file",
+                "edit_file_v2",
                 "exec",
                 "glob",
                 "image",

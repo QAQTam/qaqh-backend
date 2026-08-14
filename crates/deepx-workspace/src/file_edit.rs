@@ -1553,8 +1553,8 @@ pub fn register(mgr: &mut crate::ToolManager) {
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "目标文件（单文件模式；与 files 互斥）"},
-                "files": {"type": "array", "description": "多文件模式：元素为 {path, ops?, old_string?, new_string?, old_lines?, new_lines?, start_line?, expected_hash?}"},
+                "path": {"type": "string", "description": "目标文件路径（必填，除非用 files 多文件模式；相对 workspace 或绝对路径）"},
+                "files": {"type": "array", "description": "多文件模式（必填，除非用 path 单文件模式）：元素为 {path, ops?, old_string?, new_string?, old_lines?, new_lines?, start_line?, expected_hash?}"},
                 "ops": {"type": "array", "description": "多块模式：按序应用的定位 op 列表，每个 op 独立事务"},
                 "old_string": {"type": "string", "description": "字符串定位：单行=行内子串；多行=行窗口"},
                 "new_string": {"type": "string", "description": "替换文本"},
@@ -1571,6 +1571,10 @@ pub fn register(mgr: &mut crate::ToolManager) {
                 "dry_run": {"type": "boolean", "description": "仅预览不写入", "default": false},
                 "description": {"type": "string", "description": "改动原因说明（可选）"}
             },
+            "anyOf": [
+                {"required": ["path"]},
+                {"required": ["files"]}
+            ],
             "additionalProperties": false
         }),
         handler: handle_edit_file,
