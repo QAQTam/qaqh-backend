@@ -110,6 +110,11 @@ pub struct SessionMeta {
     /// 生成链路：worker 首 turn 完成后异步 LLM 总结用户需求（失败降级为
     /// 首条用户消息截断）→ 写盘 → daemon 广播 `SessionMetaChanged` → 前端刷新。
     pub title: Option<String>,
+    /// 会话创建时的工作目录（canonical path，persisted）。Workspace 归属判定
+    /// 基础：新会话 cwd 位于某 workspace path 内自动 attach；旧 meta.json 缺省
+    /// None = 未分组（零迁移兼容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// True if session was restored from disk — system prompt preserved.
     #[serde(skip)]
     pub from_resume: bool,
@@ -136,6 +141,7 @@ impl Default for SessionMeta {
             resume_seed: None,
             tokens: 0,
             title: None,
+            cwd: None,
             from_resume: false,
         }
     }
