@@ -636,6 +636,12 @@ fn parse_todo_items(v: Option<&Value>) -> Vec<PlanTodoItem> {
 /// 卡死阈值（对齐 Web `SESSION_STALL_TIMEOUT_MS`）：超时视为流式中断。
 const COMPOSER_STALL_TIMEOUT_MS: u64 = 4 * 60 * 1000;
 
+/// 子代理幽灵检测窗口：`ToolFinished`（spawn 确认）后超过该时长仍无
+/// `[SUBAGENT ...]` 注入 tag 收敛，即标记 Lost（UI 琥珀提示）。
+/// 与 spawn 的 cfg.subagent.timeout_secs 默认值相比足够宽容；注入迟到时
+/// 真实终态仍会覆盖 Lost（Lost 优先级最低）。
+const SUBAGENT_GHOST_TIMEOUT_MS: u64 = 10 * 60 * 1000;
+
 /// per-seed composer 活动追踪（isStreaming 判定 + usage 缓存）。
 #[derive(Debug, Clone, Default)]
 struct ComposerActivity {
@@ -780,6 +786,38 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 从 `ToolCallPrepared.args_so_far`（流式 JSON，可能截断）解析 `agent_name`。
+/// 解析失败返回 None → 调用方回退短哈希标识。
+fn parse_agent_name(args_so_far: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(args_so_far).ok()?;
+    value
+        .get("agent_name")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// 解析子代理注入回合文本 `[SUBAGENT 'name' COMPLETED]` 等 → (name, state)。
+/// 标签规范见 `crates/deepx-subagent/src/lib.rs` collect 收尾（COMPLETED /
+/// ERROR / CANCELLED / TIMEOUT 变体）。不匹配返回 None。
+fn parse_subagent_injection(text: &str) -> Option<(String, SubagentState)> {
+    let text = text.trim_start();
+    let rest = text.strip_prefix("[SUBAGENT '")?;
+    let (name, rest) = rest.split_once("' ")?;
+    let state = if rest.starts_with("COMPLETED]") {
+        SubagentState::Done
+    } else if rest.starts_with("ERROR") {
+        SubagentState::Error
+    } else if rest.starts_with("TIMEOUT") {
+        SubagentState::Timeout
+    } else if rest.starts_with("CANCELLED]") {
+        SubagentState::Cancelled
+    } else {
+        return None;
+    };
+    Some((name.to_string(), state))
+}
+
 /// daemon 落盘的上下文构成文件路径（`<data>/sessions/{seed}/context_stats.json`）。
 /// 数据根对齐 deepx_types::platform::data_dir：`DEEPX_DATA_DIR` 覆盖，
 /// 否则 Windows `%USERPROFILE%\.deepx` / Unix `$HOME/.deepx`。
@@ -849,6 +887,45 @@ pub struct ComposerState {
     pub submit_error: String,
     /// Incremented after a command is accepted so the shell can clear its draft.
     pub send_ack: u64,
+    /// 工作状态区模式：`agent`（子代理胶囊）/ `goal_progress`（预留）/ `idle`。
+    /// goal 模式后端未接线，本期仅 agent/idle 实际产生。
+    pub status_zone: String,
+    /// 并行子代理胶囊（工作状态区第二行；空 = 不渲染，行为与现状一致）。
+    pub subagents: Vec<SubagentItem>,
+}
+
+/// 子代理运行状态（工作状态区胶囊数据源）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentState {
+    /// 后台运行中（ToolStarted 建实例 → 注入 tag 收敛前）。
+    #[default]
+    Working,
+    /// 注入 `[SUBAGENT 'name' COMPLETED]` 到达。
+    Done,
+    /// 注入 `[SUBAGENT 'name' ERROR]` 到达。
+    Error,
+    /// 注入 `[SUBAGENT 'name' TIMEOUT...]` 到达。
+    Timeout,
+    /// 注入 `[SUBAGENT 'name' CANCELLED]` 到达。
+    Cancelled,
+    /// 幽灵：spawn 确认后窗口内无注入（注入丢失/被 busy 拒绝）。
+    Lost,
+}
+
+/// 单个子代理胶囊的视图模型（bridge → composer 状态区）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SubagentItem {
+    /// 工具调用 id（tracker 主键；注入 tag 无 call_id，靠 name 关联）。
+    pub call_id: String,
+    /// 子代理名称（ToolCallPrepared.args_so_far 解析；失败回退短哈希）。
+    pub name: String,
+    pub state: SubagentState,
+    /// 启动时刻（epoch ms；ToolStarted）。
+    pub started_at: u64,
+    /// 终态时刻（epoch ms；0 = 运行中）。
+    pub finished_at: u64,
 }
 
 /// followUpQueue 排队项（壳显示列表 + 删除）。
@@ -960,6 +1037,11 @@ pub struct BridgeCore {
     /// 直连模式的发送反馈（submitError / sendAck），按 seed 隔离。
     /// 上传或 ACK 可能在切换会话后才返回，不能污染新会话草稿。
     composer_feedback: Mutex<HashMap<String, ComposerFeedback>>,
+    /// 子代理工具调用追踪（per-seed，key=tool_call_id）：工作状态区数据源。
+    /// `ToolCallPrepared`/`ToolStarted` 建实例（解析 agent_name），
+    /// `[SUBAGENT ...]` 注入 tag 收敛终态，快照时惰性幽灵检测。
+    /// 内存态：重连/换 seed 后不恢复（transcript 中注入回合仍可见）。
+    subagent_tracker: Mutex<HashMap<String, HashMap<String, SubagentItem>>>,
     /// 原生 ChatView 事件队列：conversation 频道渲染相关事件（turn/round/
     /// delta/checkpoint）直连缓存，UI 线程 timer drain 喂 Transcript。
     /// Queue entries are canonical typed Ringing events; the adapter only maps
@@ -1364,6 +1446,96 @@ impl BridgeCore {
         self.composer_rev.fetch_add(1, Ordering::Relaxed);
     }
 
+    // ── 子代理追踪（工作状态区数据源）────────────────────────────
+
+    /// 建/更新子代理实例：`ToolCallPrepared`（带 args_so_far 解析 agent_name）
+    /// 与 `ToolStarted` 都会到达；后者无参数，只补 started_at。
+    fn upsert_subagent(&self, seed: &str, call_id: &str, args_so_far: Option<&str>) {
+        let now = unix_ms();
+        let mut map = self
+            .subagent_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let per_seed = map.entry(seed.to_string()).or_default();
+        let entry = per_seed.entry(call_id.to_string()).or_insert_with(|| SubagentItem {
+            call_id: call_id.to_string(),
+            // 解析失败回退短哈希：保证胶囊有可读标识。
+            name: format!("sub-{}", call_id.chars().take(6).collect::<String>()),
+            state: SubagentState::Working,
+            started_at: now,
+            finished_at: 0,
+        });
+        if let Some(args) = args_so_far
+            && let Some(name) = parse_agent_name(args)
+        {
+            entry.name = name;
+        }
+        drop(map);
+        self.composer_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 按注入 tag 收敛终态：`[SUBAGENT 'name' COMPLETED]` 等。
+    /// 只收敛 Working/Lost 项（真实终态优先于幽灵标记）；找不到同名项
+    /// （重连丢失 tracker）静默忽略——注入回合本身仍在 transcript 可见。
+    fn converge_subagent(&self, seed: &str, name: &str, state: SubagentState) {
+        let now = unix_ms();
+        let mut map = self
+            .subagent_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        if let Some(per_seed) = map.get_mut(seed) {
+            for item in per_seed.values_mut() {
+                if item.name == name
+                    && matches!(item.state, SubagentState::Working | SubagentState::Lost)
+                {
+                    item.state = state;
+                    item.finished_at = now;
+                    changed = true;
+                }
+            }
+        }
+        drop(map);
+        if changed {
+            self.composer_rev.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 快照时惰性幽灵检测：Working 超过窗口 → Lost（不 bump rev；
+    /// 下一轮事件自然刷新，10 分钟级别滞后无感知）。
+    fn ghost_sweep(&self, seed: &str, now: u64) {
+        let mut map = self
+            .subagent_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(per_seed) = map.get_mut(seed) {
+            for item in per_seed.values_mut() {
+                if item.state == SubagentState::Working
+                    && item.started_at > 0
+                    && now.saturating_sub(item.started_at) > SUBAGENT_GHOST_TIMEOUT_MS
+                {
+                    item.state = SubagentState::Lost;
+                    item.finished_at = now;
+                }
+            }
+        }
+    }
+
+    /// 当前 seed 的子代理胶囊（按启动时刻升序；供 composer_snapshot 合并）。
+    fn subagent_items(&self, seed: &str, now: u64) -> Vec<SubagentItem> {
+        self.ghost_sweep(seed, now);
+        let map = self
+            .subagent_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut items: Vec<SubagentItem> = map
+            .get(seed)
+            .map(|per_seed| per_seed.values().cloned().collect())
+            .unwrap_or_default();
+        items.sort_by_key(|i| i.started_at);
+        items
+    }
+
     pub fn composer_snapshot(&self) -> (ComposerState, u64) {
         let rev = self.composer_rev.load(Ordering::Relaxed);
         let active = self.active_seed();
@@ -1427,6 +1599,14 @@ impl BridgeCore {
             .unwrap_or_default();
         state.submit_error = fb.submit_error;
         state.send_ack = fb.send_ack;
+        // 子代理胶囊（工作状态区第二行）+ 区域模式（goal 预留）。
+        let subagents = self.subagent_items(&active, now);
+        state.subagents = subagents;
+        state.status_zone = if state.subagents.is_empty() {
+            "idle".into()
+        } else {
+            "agent".into()
+        };
         (state, rev)
     }
 
@@ -3226,12 +3406,28 @@ impl BridgeCore {
                 }
                 // 工作状态：工具执行生命周期（tool_started 带工具名）。
                 match event {
-                    deepx_client::ToolEvent::ToolStarted { name, .. } => {
+                    deepx_client::ToolEvent::ToolCallPrepared {
+                        name,
+                        tool_call_id,
+                        args_so_far,
+                        ..
+                    } if name == "spawn_subagent" => {
+                        // 流式预览即登记：agent_name 仅此处可解析。
+                        self.upsert_subagent(&batch.seed, tool_call_id, Some(args_so_far));
+                    }
+                    deepx_client::ToolEvent::ToolStarted { name, tool_call_id, .. } => {
                         self.set_composer_phase(&batch.seed, WorkPhase::Tool(name.clone()));
+                        if name == "spawn_subagent" {
+                            // Started 无参数：仅确保实例存在（Prepared 已登记）。
+                            self.upsert_subagent(&batch.seed, tool_call_id, None);
+                        }
                     }
                     deepx_client::ToolEvent::ToolFinished { .. } => {
                         // 工具完成 → 回到生成（后续 thinking/answering delta 会覆盖）。
                         self.set_composer_phase(&batch.seed, WorkPhase::Thinking);
+                        // spawn_subagent 的 Finished 仅确认 spawn 成功，子代理仍在
+                        // 后台运行：不销毁 tracker 条目，终态由 [SUBAGENT ...]
+                        // 注入 tag 收敛（ToolFinished ≠ 子代理完成）。
                     }
                     _ => {}
                 }
@@ -3270,6 +3466,14 @@ impl BridgeCore {
                             // replay-idempotent; exact count is restored by the
                             // next authoritative snapshot.
                             self.record_live_turn_started(&batch.seed);
+                            // 子代理注入收敛：`[SUBAGENT 'name' STATE]` 回合
+                            // 是子代理终态的唯一可靠信号（ToolFinished 仅
+                            // spawn 确认）。
+                            if let DomainConversationEvent::TurnStarted { user_text, .. } = event
+                                && let Some((name, state)) = parse_subagent_injection(user_text)
+                            {
+                                self.converge_subagent(&batch.seed, &name, state);
+                            }
                         }
                         if matches!(
                             &ev,
@@ -3690,6 +3894,7 @@ impl Bridge {
                     interaction: Mutex::new(InteractionState::default()),
                     interaction_rev: AtomicU64::new(0),
                     interactions: Mutex::new(HashMap::new()),
+                    subagent_tracker: Mutex::new(HashMap::new()),
                     composer_rev: AtomicU64::new(0),
                     composer_activity: Mutex::new(HashMap::new()),
                     composer_mode: Mutex::new("plan".to_string()),
@@ -4018,6 +4223,88 @@ fn parse_conversation_activity_event(event: &Value) -> Option<ConversationActivi
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_subagent_injection_matches_all_terminal_tags() {
+        assert_eq!(
+            parse_subagent_injection("[SUBAGENT 'explore' COMPLETED]\n\nanswer"),
+            Some(("explore".to_string(), SubagentState::Done))
+        );
+        assert_eq!(
+            parse_subagent_injection("[SUBAGENT 'x' ERROR exit=1]"),
+            Some(("x".to_string(), SubagentState::Error))
+        );
+        assert_eq!(
+            parse_subagent_injection("[SUBAGENT 'x' TIMEOUT after 120s]"),
+            Some(("x".to_string(), SubagentState::Timeout))
+        );
+        assert_eq!(
+            parse_subagent_injection("[SUBAGENT 'x' CANCELLED]"),
+            Some(("x".to_string(), SubagentState::Cancelled))
+        );
+        // 非注入文本 / 运行中标签不匹配。
+        assert_eq!(parse_subagent_injection("normal user message"), None);
+        assert_eq!(parse_subagent_injection("[SUBAGENT 'x' RUNNING]"), None);
+    }
+
+    #[test]
+    fn parse_agent_name_reads_agent_name_field() {
+        assert_eq!(
+            parse_agent_name(r#"{"task_description":"t","agent_name":"explore_task","timeout_secs":120}"#),
+            Some("explore_task".to_string())
+        );
+        // 流式截断 / 非法 JSON / 空 → None（回退短哈希标识）。
+        assert_eq!(parse_agent_name(r#"{"task_description":"t","agent_nam"#), None);
+        assert_eq!(parse_agent_name(""), None);
+    }
+
+    #[test]
+    fn subagent_tracker_lifecycle_converges_on_injection_tag() {
+        let core = test_core();
+        // ToolCallPrepared 解析 agent_name → ToolStarted 补时间戳。
+        core.upsert_subagent(
+            "seed-a",
+            "call-1",
+            Some(r#"{"agent_name":"explore_a","task_description":"t"}"#),
+        );
+        core.upsert_subagent("seed-a", "call-1", None);
+        let items = core.subagent_items("seed-a", 1_000);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "explore_a");
+        assert_eq!(items[0].state, SubagentState::Working);
+
+        // 注入 tag 收敛（只收敛同名 Working/Lost 项）。
+        core.converge_subagent("seed-a", "explore_a", SubagentState::Done);
+        let items = core.subagent_items("seed-a", 2_000);
+        assert_eq!(items[0].state, SubagentState::Done);
+        assert!(items[0].finished_at > 0, "finished_at set by real clock");
+
+        // 幽灵：Working 超过窗口 → Lost（真实时钟无法在单测中模拟，
+        // 直接拨回 started_at 到窗口外）。
+        core.upsert_subagent("seed-a", "call-2", Some(r#"{"agent_name":"ghost_b"}"#));
+        {
+            let mut map = core.subagent_tracker.lock().unwrap();
+            map.get_mut("seed-a")
+                .unwrap()
+                .get_mut("call-2")
+                .unwrap()
+                .started_at = 1_000;
+        }
+        let items = core.subagent_items(
+            "seed-a",
+            1_000 + SUBAGENT_GHOST_TIMEOUT_MS + 1,
+        );
+        let ghost = items.iter().find(|i| i.name == "ghost_b").expect("ghost item");
+        assert_eq!(ghost.state, SubagentState::Lost);
+        // 迟到注入仍覆盖 Lost。
+        core.converge_subagent("seed-a", "ghost_b", SubagentState::Done);
+        let items = core.subagent_items(
+            "seed-a",
+            1_000 + SUBAGENT_GHOST_TIMEOUT_MS + 2,
+        );
+        let ghost = items.iter().find(|i| i.name == "ghost_b").expect("ghost item");
+        assert_eq!(ghost.state, SubagentState::Done);
+    }
+
     fn test_core() -> BridgeCore {
         BridgeCore {
             client: Mutex::new(None),
@@ -4053,6 +4340,7 @@ mod tests {
             interaction: Mutex::new(InteractionState::default()),
             interaction_rev: AtomicU64::new(0),
             interactions: Mutex::new(HashMap::new()),
+            subagent_tracker: Mutex::new(HashMap::new()),
             composer_rev: AtomicU64::new(0),
             composer_activity: Mutex::new(HashMap::new()),
             composer_mode: Mutex::new("plan".to_string()),

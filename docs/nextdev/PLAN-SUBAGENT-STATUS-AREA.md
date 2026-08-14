@@ -1,6 +1,6 @@
 # 并行子代理 UI（工作状态区）实施计划（计划）
 
-> 状态：待实施（2026-08-14 定稿）
+> 状态：进行中（MVP 代码已落地，待人工视觉验证；2026-08-14 更新）
 > 范围：`apps/winui`（`bridge.rs`、`composer_bar.rs`）；后端配套另列
 > 关联：[README.md](./README.md)、[CHATVIEW-V4-PLAN.md](./CHATVIEW-V4-PLAN.md)、[timeline-protocol-design.md](./timeline-protocol-design.md)
 
@@ -69,14 +69,15 @@ system 注入：conversation 频道 TurnOpened 解析 tag → 同一 tracker 收
 
 | 计划条目 | 结果 |
 |---|---|
-| SubagentTracker + 事件接线（bridge.rs） | 🔲 |
-| work_status_area 渲染 + 胶囊（composer_bar.rs） | 🔲 |
-| 幽灵检测（D1 窗口） | 🔲 |
-| status_zone 契约 + goal 空占位 | 🔲 |
-| 回归：N=1 与现状一致 / cargo check / 壳编译 | 🔲 |
+| SubagentTracker + 事件接线（bridge.rs） | ✅ 已落地：`upsert_subagent`/`converge_subagent`/`ghost_sweep`/`subagent_items` + Tool 频道（Prepared/Started）与 Conversation 频道（TurnStarted tag）接线 |
+| work_status_area 渲染 + 胶囊（composer_bar.rs） | ✅ 已落地：`WorkStatusProps` + 父行/胶囊行组合，共用 1s 时钟，上限 8 折叠 |
+| 幽灵检测（D1 窗口） | ✅ 已落地：`SUBAGENT_GHOST_TIMEOUT_MS` 10min，快照时惰性扫描，真实终态可覆盖 Lost |
+| status_zone 契约 + goal 空占位 | ✅ 已落地：`ComposerState.status_zone`（idle/agent，goal_progress 预留） |
+| 回归：N=1 与现状一致 / cargo check / 壳编译 | ✅ cargo check + clippy 无新增告警；winui 68 tests 通过（含 3 新增：tag 解析/agent_name 解析/tracker 生命周期） |
 
 ## 6. 变更记录
 
 | 日期 | 改动摘要 | 触发原因 |
 |---|---|---|
 | 2026-08-14 | 初稿：工作状态区方案定稿（三份子代理探索注入：UI 设计 / 事件链路 / goal 契约） | 并行子代理 UI 设计需求 |
+| 2026-08-14 | MVP 落地：bridge.rs tracker + composer_bar.rs 胶囊渲染 + 3 单测（68 全绿） | 按计划实施 |
