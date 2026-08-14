@@ -58,6 +58,10 @@ pub struct SessionItem {
     /// 归档标记（标签 × 归档）：true = 不出现在标签条，侧栏归档组显示。
     /// 缺省 false（旧 daemon 无该字段）。
     pub archived: bool,
+    /// 归属 workspace id（None = 未分组）；daemon `session.list` 附带。
+    pub workspace_id: Option<String>,
+    /// 会话创建时工作目录（canonical path，None = 旧会话/未记录）。
+    pub cwd: Option<String>,
 }
 
 /// 从 daemon `session.list` 查询结果的一个元素投影一行。
@@ -93,6 +97,16 @@ pub fn project_session_meta(
         .unwrap_or_default();
     let updated_at = v.get("updated_at").and_then(|u| u.as_u64()).unwrap_or(0);
     let archived = v.get("archived").and_then(|a| a.as_bool()).unwrap_or(false);
+    let workspace_id = v
+        .get("workspace_id")
+        .and_then(|w| w.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let cwd = v
+        .get("cwd")
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let state = activity.unwrap_or(if running {
         ActivityState::Starting
     } else {
@@ -105,6 +119,8 @@ pub fn project_session_meta(
         running,
         updated_at,
         archived,
+        workspace_id,
+        cwd,
     })
 }
 
@@ -165,6 +181,64 @@ pub fn session_state_event(event: &ControlEvent) -> Option<(String, String)> {
         DomainSessionState::Deleted => "deleted",
     };
     Some((seed.clone(), state.to_string()))
+}
+
+// ── Workspace 投影（sidebar workspace 树数据源）────────────────────
+
+/// 侧栏的一个工作区条目（daemon `workspace.list` 元素投影）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceItem {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+    pub order: u32,
+    /// 账户内会话 seed（手动有序；会话标题/状态由 session 快照侧提供）。
+    pub session_ids: Vec<String>,
+    /// 目录当前不存在（仅展示标记，不阻止恢复/移动）。
+    pub missing_dir: bool,
+}
+
+/// 解析 daemon `workspace.list` 查询结果（Value::Array）。
+///
+/// 缺失/畸形字段按默认值兜底（id 缺失的条目丢弃）；顺序保持 daemon
+/// 返回序（order 升序，daemon 侧已保证）。
+pub fn parse_workspaces(v: &Value) -> Vec<WorkspaceItem> {
+    let Some(items) = v.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id")?.as_str()?.to_string();
+            Some(WorkspaceItem {
+                id,
+                title: item
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                path: item
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                order: item.get("order").and_then(|o| o.as_u64()).unwrap_or(0) as u32,
+                session_ids: item
+                    .get("session_ids")
+                    .and_then(|s| s.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                missing_dir: item
+                    .get("missing_dir")
+                    .and_then(|m| m.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
 }
 
 // ── XAML 技能页投影（skills_view.rs 的唯一数据源）──────────────────

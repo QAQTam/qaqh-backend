@@ -13,6 +13,7 @@ pub enum QueryRequest {
     SessionActivity,
     ConfigLoad,
     WorkspaceStatus,
+    WorkspaceList,
     SkillsListTools,
     WorkspaceDiagnose,
 }
@@ -24,6 +25,7 @@ impl QueryRequest {
             Self::SessionActivity => "session.activity",
             Self::ConfigLoad => "config.load",
             Self::WorkspaceStatus => "workspace.status",
+            Self::WorkspaceList => "workspace.list",
             Self::SkillsListTools => "skills.list_tools",
             Self::WorkspaceDiagnose => "workspace.diagnose",
         };
@@ -66,6 +68,28 @@ pub enum ActionRequest {
         mode: String,
     },
     WorkspaceInstallWsl,
+    /// 注册一个目录为 UI 工作区（组织语义；daemon `workspace.create`）。
+    WorkspaceCreate {
+        path: String,
+    },
+    /// 重命名工作区（daemon `workspace.rename`）。
+    WorkspaceRename {
+        id: String,
+        title: String,
+    },
+    /// 删除工作区注册（不删会话；daemon `workspace.delete`）。
+    WorkspaceDelete {
+        id: String,
+    },
+    /// 把会话移入指定工作区（daemon `workspace.move_session`）。
+    WorkspaceMoveSession {
+        seed: String,
+        workspace_id: String,
+    },
+    /// 把会话移出工作区 → 未分组（daemon `workspace.detach`）。
+    WorkspaceDetach {
+        seed: String,
+    },
     /// Spawn an isolated subagent worker (daemon `subagent.spawn`). Returns
     /// `{ "seed": "<8-hex>" }`; the caller then attaches the seed and drives
     /// it with ordinary Ringing commands/events.
@@ -118,6 +142,16 @@ impl ActionRequest {
             }
             Self::WorkspaceSetMode { mode } => ("workspace.set_mode", json!({ "mode": mode })),
             Self::WorkspaceInstallWsl => ("workspace.install_wsl", json!({})),
+            Self::WorkspaceCreate { path } => ("workspace.create", json!({ "path": path })),
+            Self::WorkspaceRename { id, title } => {
+                ("workspace.rename", json!({ "id": id, "title": title }))
+            }
+            Self::WorkspaceDelete { id } => ("workspace.delete", json!({ "id": id })),
+            Self::WorkspaceMoveSession { seed, workspace_id } => (
+                "workspace.move_session",
+                json!({ "seed": seed, "workspace_id": workspace_id }),
+            ),
+            Self::WorkspaceDetach { seed } => ("workspace.detach", json!({ "seed": seed })),
             Self::SubagentSpawn {
                 tools,
                 model,

@@ -160,6 +160,56 @@ impl DeepxService {
                     "generation": state.generation,
                 }))
             }
+            // ── UI 工作区注册表（组织语义，与运行环境 workspace 解耦）──
+            "workspace.list" => {
+                let ws = deepx_session::WorkspaceStore::global();
+                let items: Vec<Value> = ws
+                    .list()
+                    .into_iter()
+                    .map(|w| {
+                        json!({
+                            "id": w.id,
+                            "path": w.path,
+                            "title": w.title,
+                            "order": w.order,
+                            "session_ids": w.session_ids,
+                            "missing_dir": !ws.path_status(&w.path),
+                        })
+                    })
+                    .collect();
+                Ok(Value::Array(items))
+            }
+            "workspace.create" => {
+                let path = pstr(params, "path")?;
+                let ws = deepx_session::WorkspaceStore::global();
+                let existing = deepx_session::SessionManager::global().list();
+                let created = ws.create(&path, &existing)?;
+                Ok(serde_json::to_value(created).map_err(err)?)
+            }
+            "workspace.rename" => {
+                let id = pstr(params, "id")?;
+                let title = pstr(params, "title")?;
+                let ws = deepx_session::WorkspaceStore::global();
+                let renamed = ws.rename(&id, title)?;
+                Ok(serde_json::to_value(renamed).map_err(err)?)
+            }
+            "workspace.delete" => {
+                let id = pstr(params, "id")?;
+                deepx_session::WorkspaceStore::global().delete(&id)?;
+                Ok(Value::Null)
+            }
+            "workspace.move_session" => {
+                let seed = pstr(params, "seed")?;
+                let workspace_id = pstr(params, "workspace_id")?;
+                deepx_session::WorkspaceStore::global()
+                    .move_session(&seed, &workspace_id)?;
+                Ok(Value::Null)
+            }
+            "workspace.detach" => {
+                let seed = pstr(params, "seed")?;
+                deepx_session::WorkspaceStore::global().remove_session(&seed);
+                Ok(Value::Null)
+            }
             "workspace.diagnose" => Ok(crate::workspace_supervisor::diagnose_wsl().map_err(err)?),
             "workspace.install_wsl" => {
                 let repo_root = params
@@ -185,7 +235,13 @@ impl DeepxService {
             "session.new" => {
                 let seed = deepx_session::SessionManager::generate_seed();
                 deepx_session::SessionManager::global().clear_active();
-                deepx_session::SessionManager::global().persist_new_session(&seed);
+                // 可选 cwd（前端在 workspace 上下文新建时传入）→ 记录 + 自动归属。
+                let cwd = params
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                deepx_session::SessionManager::global()
+                    .persist_new_session_with_cwd(&seed, cwd.as_deref());
                 self.registry()?.spawn_new(&seed)?;
                 Ok(json!(seed))
             }
@@ -664,12 +720,17 @@ impl DeepxService {
     fn list_sessions(&self) -> Vec<Value> {
         let manager = deepx_session::SessionManager::global();
         let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        let workspaces = deepx_session::WorkspaceStore::global();
         manager
             .list()
             .into_iter()
             .map(|meta| {
                 let mut value = serde_json::to_value(&meta).unwrap_or_default();
                 value["running"] = json!(registry.is_running(&meta.seed));
+                value["workspace_id"] = workspaces
+                    .workspace_of(&meta.seed)
+                    .map(Value::String)
+                    .unwrap_or(Value::Null);
                 value
             })
             .collect()

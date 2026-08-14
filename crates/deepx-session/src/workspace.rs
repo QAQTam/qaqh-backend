@@ -9,11 +9,41 @@
 //! - 一个会话最多属于一个 workspace；不在任何 workspace = 未分组（Ungrouped）。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use deepx_types::SessionMeta;
 
-use crate::SessionManager;
+/// 生成稳定 id：`ws-{unix_ms}-{path 哈希前 8 位}-{计数器}`（不引入 uuid 依赖；
+/// 时间戳 + 路径哈希 + 进程内计数器防碰撞，同一毫秒同路径也得不同 id）。
+fn generate_id(path: &str) -> String {
+    use sha2::Digest;
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let hash = sha2::Sha256::digest(path.as_bytes());
+    let short = hex::encode(&hash[..4]);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("ws-{ms}-{short}-{n}")
+}
+
+/// canonicalize 并归一化为可比较路径串：Windows 下去掉 `\\?\` 扩展前缀
+/// （`std::fs::canonicalize` 在 Windows 返回 verbatim 路径，与用户输入/前端
+/// 传入路径不匹配会导致归属判定失效），分隔符统一 `\`。失败返回原样字符串。
+pub fn canonical_cwd(path: &Path) -> String {
+    match std::fs::canonicalize(path) {
+        Ok(p) => {
+            let mut s = p.to_string_lossy().replace('/', "\\");
+            if let Some(stripped) = s.strip_prefix("\\\\?\\") {
+                s = stripped.to_string();
+            }
+            s
+        }
+        Err(_) => path.to_string_lossy().replace('/', "\\"),
+    }
+}
 
 /// 一个工作区：稳定 id + canonical path + 标题 + 会话账户（手动有序）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -28,6 +58,7 @@ pub struct WorkspaceMeta {
 static INSTANCE: OnceLock<WorkspaceStore> = OnceLock::new();
 
 /// 工作区注册表单例：内存态 = 磁盘态（每次变更 atomic replace-write）。
+#[derive(Debug)]
 pub struct WorkspaceStore {
     file: PathBuf,
     inner: Mutex<Vec<WorkspaceMeta>>,
@@ -55,19 +86,6 @@ fn cwd_belongs(cwd: &str, ws_path: &str) -> bool {
         return false;
     }
     c == w || c.starts_with(&format!("{w}\\"))
-}
-
-/// 生成稳定 id：`ws-{unix_ms}-{path 哈希前 8 位}`（不引入 uuid 依赖，
-/// 时间戳 + 路径哈希防碰撞；同一路径重复 create 得不同 id）。
-fn generate_id(path: &str) -> String {
-    use sha2::Digest;
-    let hash = sha2::Sha256::digest(path.as_bytes());
-    let short = hex::encode(&hash[..4]);
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("ws-{ms}-{short}")
 }
 
 impl WorkspaceStore {
@@ -115,8 +133,8 @@ impl WorkspaceStore {
             .map_err(|e| format!("rename workspaces: {e}"))
     }
 
-    fn save(&self, items: Vec<WorkspaceMeta>) {
-        if let Err(e) = self.persist(&items) {
+    fn save(&self, items: &[WorkspaceMeta]) {
+        if let Err(e) = self.persist(items) {
             log::error!("WorkspaceStore: persist failed: {e}");
         }
     }
@@ -141,10 +159,11 @@ impl WorkspaceStore {
     /// 注册一个目录为 workspace。目录必须存在（canonicalize）；
     /// 已存在的 cwd 匹配会话自动归属（D1 双轨自动侧）。
     pub fn create(&self, path: &str, existing: &[SessionMeta]) -> Result<WorkspaceMeta, String> {
-        let canonical = std::fs::canonicalize(Path::new(path))
-            .map_err(|e| format!("workspace.create: cannot resolve {path}: {e}"))?;
-        let canonical_str = canonical.to_string_lossy().replace('/', "\\");
-        let title = canonical
+        if !Path::new(path).is_dir() {
+            return Err(format!("workspace.create: not a directory: {path}"));
+        }
+        let canonical_str = canonical_cwd(Path::new(path));
+        let title = Path::new(path)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .filter(|t| !t.is_empty())
@@ -174,7 +193,7 @@ impl WorkspaceStore {
             session_ids,
         };
         items.push(ws.clone());
-        self.save(items);
+        self.save(&items);
         Ok(ws)
     }
 
@@ -187,7 +206,7 @@ impl WorkspaceStore {
             .ok_or_else(|| format!("workspace.rename: unknown id {id}"))?;
         ws.title = title;
         let out = ws.clone();
-        self.save(items);
+        self.save(&items);
         Ok(out)
     }
 
@@ -199,7 +218,7 @@ impl WorkspaceStore {
         if items.len() == before {
             return Err(format!("workspace.delete: unknown id {id}"));
         }
-        self.save(items);
+        self.save(&items);
         Ok(())
     }
 
@@ -217,7 +236,7 @@ impl WorkspaceStore {
             .expect("target workspace vanished");
         ws.session_ids.push(seed.to_string());
         let out = ws.id.clone();
-        self.save(items);
+        self.save(&items);
         Some(out)
     }
 
@@ -237,7 +256,7 @@ impl WorkspaceStore {
         if !ws.session_ids.iter().any(|s| s == seed) {
             ws.session_ids.push(seed.to_string());
         }
-        self.save(items);
+        self.save(&items);
         Ok(())
     }
 
@@ -251,7 +270,7 @@ impl WorkspaceStore {
             changed |= w.session_ids.len() != before;
         }
         if changed {
-            self.save(items);
+            self.save(&items);
         }
     }
 
@@ -264,13 +283,6 @@ impl WorkspaceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn meta(seed: &str, cwd: Option<&str>) -> SessionMeta {
-        let mut m = SessionMeta::default();
-        m.seed = seed.to_string();
-        m.cwd = cwd.map(str::to_string);
-        m
-    }
 
     #[test]
     fn cwd_belongs_matches_self_and_children() {

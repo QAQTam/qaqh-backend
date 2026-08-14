@@ -275,11 +275,7 @@ impl SessionManager {
         meta.seed = seed.to_string();
         meta.created_at = now;
         meta.updated_at = now;
-        meta.cwd = cwd.map(|c| {
-            std::fs::canonicalize(c)
-                .map(|p| p.to_string_lossy().replace('/', "\\"))
-                .unwrap_or_else(|_| c.to_string())
-        });
+        meta.cwd = cwd.map(|c| crate::workspace::canonical_cwd(std::path::Path::new(c)));
         if !dir.join("messages.jsonl").exists() {
             let _ = store::append_messages(&dir, &[]);
         }

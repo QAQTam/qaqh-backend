@@ -78,7 +78,7 @@ pub fn categorize_tool(name: &str) -> ToolCategory {
     match name {
         // ── Read ──
         "read_file" | "skills" | "ask" | "image" | "git_diff" | "git_log" | "git_show"
-        | "git_status" => ToolCategory::Read,
+        | "git_status" | "glob" => ToolCategory::Read,
 
         // ── Write ──
         "edit_file" | "git_add" | "git_commit" | "git_branch" | "git_checkout" | "git_merge"
