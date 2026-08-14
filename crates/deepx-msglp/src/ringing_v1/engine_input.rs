@@ -13,9 +13,15 @@ impl InputEngine {
 
     /// Handle user input. Returns an Outcome telling the Loop whether
     /// to start a turn, yield, or report an error.
+    ///
+    /// `source_id` selects the registered ContextFlow source (`"user"` for
+    /// human input, `"goal"` for goal-mode auto-advance prompts) — every
+    /// message enters the store through [`ContextFlow::ingest`], so the
+    /// ingest trace covers user input exactly like any other source.
     pub fn handle_user_input(
         &self,
         ctx: &mut RingContext,
+        source_id: &'static str,
         text: &str,
         images: Vec<deepx_domain::ImageBlock>,
     ) -> Outcome {
@@ -159,9 +165,17 @@ impl InputEngine {
             ));
         }
 
-        log::info!("[INPUT] pushing user message to store");
+        log::info!("[INPUT] pushing user message via ContextFlow (source={source_id})");
         let turn_id = ctx.agent.msg.allocate_turn_id();
-        ctx.agent.msg.push_user(&text);
+        let receipt = ctx
+            .flow
+            .ingest(&mut ctx.agent.msg, source_id, deepx_types::Message::user(&text));
+        if !receipt.stored {
+            log::warn!(
+                "[INPUT] ContextFlow refused user message (source={source_id}): trace={:?}",
+                ctx.flow.trace().back()
+            );
+        }
 
         // Add image blocks to the user message and register them globally
         // so image can look them up by index.
@@ -228,9 +242,22 @@ impl InputEngine {
             ctx.agent.config.permission_level,
         );
 
-        log::info!("[INPUT] pushing system injection to store");
+        log::info!("[INPUT] pushing system injection via ContextFlow (subagent source)");
         let turn_id = ctx.agent.msg.allocate_turn_id();
-        ctx.agent.msg.push_system_input(text);
+        // 统一管道：submit → drain（idle 时立即落盘 trailing developer）
+        // ——与回合中的 lap 边界消费同一代码路径，不再分叉。
+        if let Err(e) = ctx
+            .flow
+            .submit(deepx_message::builtin::SUBAGENT, deepx_types::Message::developer(text))
+        {
+            log::error!("[INPUT] ContextFlow submit failed for system injection: {e}");
+        }
+        {
+            let model = ctx.agent.config.model.clone();
+            let effort = ctx.agent.config.reasoning_effort.clone();
+            ctx.flow
+                .drain_turn_boundary(&mut ctx.agent.msg, &model, &effort);
+        }
         ctx.agent
             .msg
             .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);

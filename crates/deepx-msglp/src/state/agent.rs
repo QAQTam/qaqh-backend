@@ -409,7 +409,11 @@ impl AgentState {
         self.skills.refresh();
     }
 
-    pub fn apply_tool_effects(&mut self, effects: Vec<deepx_workspace::ToolEffect>) {
+    pub fn apply_tool_effects(
+        &mut self,
+        effects: Vec<deepx_workspace::ToolEffect>,
+        flow: &mut deepx_message::ContextFlow,
+    ) {
         for effect in effects {
             let result = match effect {
                 deepx_workspace::ToolEffect::Skill(effect) => self.skills.apply_tool_effect(effect),
@@ -418,15 +422,16 @@ impl AgentState {
                 log::warn!("cannot apply skill effect: {error}");
             }
         }
-        self.sync_skill_injection();
+        self.sync_skill_injection(flow);
     }
 
-    /// Materialize the activation-set envelope as a trailing system message
-    /// exactly once per change. Called right after tool effects are applied
-    /// (tool result → injection → next model reply), so the injected message
-    /// lands at the "latest message" position and is never re-injected or
-    /// removed afterwards — the request prefix stays byte-stable.
-    pub fn sync_skill_injection(&mut self) {
+    /// Materialize the activation-set envelope as a trailing developer
+    /// message exactly once per epoch change, routed through ContextFlow —
+    /// skills is a registered source (role=developer, sink=trailing,
+    /// lifecycle=Preserved), same pipeline as subagent reports. The injected
+    /// message lands at the "latest message" position and is never re-injected
+    /// or removed afterwards — the request prefix stays byte-stable.
+    pub fn sync_skill_injection(&mut self, flow: &mut deepx_message::ContextFlow) {
         let epoch = self.skills.context_epoch();
         if epoch == self.last_injected_epoch {
             return;
@@ -437,7 +442,15 @@ impl AgentState {
         }
         let envelope = self.skills.snapshot_for_context().envelope.clone();
         if !envelope.is_empty() {
-            self.msg.push_trailing_system(deepx_types::Message::system(&envelope));
+            let receipt = flow.ingest(
+                &mut self.msg,
+                deepx_message::builtin::SKILLS,
+                deepx_types::Message::developer(&envelope),
+            );
+            log::debug!(
+                "[SKILLS] envelope injected via ContextFlow (epoch={epoch}, stored={})",
+                receipt.stored
+            );
         }
     }
 
@@ -674,26 +687,29 @@ mod tests {
             .apply_tool_effect(deepx_skills::SkillEffect::Activate(activation))
             .unwrap();
         // Activation-set injection: the envelope is materialized as a
-        // TRAILING system message right after the tool effects are applied
+        // TRAILING developer message right after the tool effects are applied
         // (tool result → injection → next reply), and is never re-injected
         // or removed afterwards. The request prefix stays byte-stable.
-        agent.sync_skill_injection();
+        let mut flow = deepx_message::ContextFlow::new();
+        deepx_message::builtin::register_all(&mut flow);
+        agent.sync_skill_injection(&mut flow);
         assert_eq!(agent.msg.trailing_messages().len(), 1);
         let context = agent.build_context();
         assert!(context.iter().any(|message| message.content.iter().any(
             |block| matches!(block, deepx_types::ContentBlock::Text { text } if text.contains("DYNAMIC_FULL_BODY"))
         )));
         // Trailing injection sits at the LATEST message position (after the
-        // last stored message), not in the system prefix region.
+        // last stored message), not in the system prefix region. Injected
+        // with the explicit developer role (ContextFlow skills source).
         let last = context.last().unwrap();
-        assert_eq!(last.role, "system");
+        assert_eq!(last.role, "developer");
         assert!(last.content.iter().any(|block| matches!(
             block,
             deepx_types::ContentBlock::Text { text } if text.contains("DYNAMIC_FULL_BODY")
         )));
         // Idempotent: a second sync on the same epoch injects nothing, and
         // the rebuilt context is byte-identical (prefix cache stable).
-        agent.sync_skill_injection();
+        agent.sync_skill_injection(&mut flow);
         assert_eq!(agent.msg.trailing_messages().len(), 1);
         eprintln!("DBG roles: {:?}", context.iter().map(|m| m.role.as_str()).collect::<Vec<_>>());
         eprintln!("DBG last: {:?}", context.last().map(|m| m.content.clone()));

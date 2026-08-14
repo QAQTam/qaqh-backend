@@ -696,7 +696,7 @@ impl ToolEngine {
         let output = result.model_text().to_string();
         let success = result.is_success();
 
-        ctx.agent.apply_tool_effects(skill_effects);
+        ctx.agent.apply_tool_effects(skill_effects, ctx.flow);
 
         // Instant refresh for todo tools
         if matches!(name, "todo") {

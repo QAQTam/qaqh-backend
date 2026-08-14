@@ -110,11 +110,32 @@ pub struct Message {
 }
 
 impl Message {
+    /// Role constants — the four open roles of the context flow.
+    pub const ROLE_SYSTEM: &'static str = "system";
+    pub const ROLE_USER: &'static str = "user";
+    pub const ROLE_ASSISTANT: &'static str = "assistant";
+    pub const ROLE_TOOL: &'static str = "tool";
+    /// Responses-protocol-only role for runtime-injected instructions
+    /// (skills envelope, subagent reports, …). Downgrades to `system` on
+    /// Chat Completions providers, maps to a `developer` item on Responses.
+    pub const ROLE_DEVELOPER: &'static str = "developer";
+
     /// Create a system message with a single text block.
     pub fn system(content: &str) -> Self {
         Self {
             msg_id: None,
-            role: "system".into(),
+            role: Self::ROLE_SYSTEM.into(),
+            name: None,
+            content: vec![ContentBlock::text(content)],
+        }
+    }
+    /// Create a developer message (Responses runtime-injection role). Falls
+    /// back to `system` semantics on Chat Completions providers — the
+    /// downgrade happens at the gate conversion layer, not at storage.
+    pub fn developer(content: &str) -> Self {
+        Self {
+            msg_id: None,
+            role: Self::ROLE_DEVELOPER.into(),
             name: None,
             content: vec![ContentBlock::text(content)],
         }
@@ -123,7 +144,7 @@ impl Message {
     pub fn user(content: &str) -> Self {
         Self {
             msg_id: None,
-            role: "user".into(),
+            role: Self::ROLE_USER.into(),
             name: None,
             content: vec![ContentBlock::text(content)],
         }
@@ -142,7 +163,7 @@ impl Message {
     pub fn tool_result(tool_call_id: &str, result: ToolResult) -> Self {
         Self {
             msg_id: None,
-            role: "tool".into(),
+            role: Self::ROLE_TOOL.into(),
             name: None,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tool_call_id.into(),

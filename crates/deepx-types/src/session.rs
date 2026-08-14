@@ -115,6 +115,10 @@ pub struct SessionMeta {
     /// None = 未分组（零迁移兼容）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// 上下文统计快照（可再生缓存：compact/dashboard 时重算）。原独立文件
+    /// `sessions/{seed}/context_stats.json` 已退役，并入 meta.json。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_stats: Option<serde_json::Value>,
     /// True if session was restored from disk — system prompt preserved.
     #[serde(skip)]
     pub from_resume: bool,
@@ -142,6 +146,7 @@ impl Default for SessionMeta {
             tokens: 0,
             title: None,
             cwd: None,
+            context_stats: None,
             from_resume: false,
         }
     }

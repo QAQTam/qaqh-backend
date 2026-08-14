@@ -66,9 +66,9 @@ impl MiscEngine {
             "thinking_blocks": thinking_blocks, "tool_call_blocks": tool_call_blocks,
             "messages": 0,
         });
-        let stats_dir = deepx_types::platform::sessions_dir().join(&agent.session.seed);
-        let _ = std::fs::create_dir_all(&stats_dir);
-        let _ = std::fs::write(stats_dir.join("context_stats.json"), stats.to_string());
+        // 统一数据源：上下文统计并入 meta.json（原 context_stats.json 退役）。
+        deepx_session::SessionManager::global()
+            .set_context_stats(&agent.session.seed, &stats);
 
         // Ringing 双发：DashboardUpdated（replaceable 覆盖）
         emitter.emit_domain(deepx_domain::DomainEvent::Control(

@@ -350,6 +350,12 @@ pub struct RingContext<'a> {
     pub writer_dead: &'a Arc<AtomicBool>,
     /// Accumulated code deltas for the current session.
     pub stats: &'a mut StatsCollector,
+    /// Unified context-ingestion pipeline. Engines route every message
+    /// entering the model context (user input, assistant output, tool
+    /// results, skills envelopes, subagent reports, goal prompts) through
+    /// [`ContextFlow::ingest`](deepx_message::ContextFlow::ingest) — the
+    /// single door to the message store.
+    pub flow: &'a mut deepx_message::ContextFlow,
 
 }
 

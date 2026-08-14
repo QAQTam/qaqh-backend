@@ -142,14 +142,6 @@ pub fn execute_authorized(
                 files: report.files_affected,
             };
             crate::audit::append_audit(&audit_entry);
-            let params_json = serde_json::to_string(&args).unwrap_or_default();
-            crate::agentfs_bridge::try_record_tool(
-                &name,
-                &action,
-                &params_json,
-                if result.success { "ok" } else { "fail" },
-                result.meta.elapsed_ms,
-            );
             result
         }
         None => failure(&name, crate::ToolError::ManagerUnavailable),

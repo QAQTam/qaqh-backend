@@ -316,11 +316,7 @@ pub fn config_path() -> PathBuf {
     data_dir().join("config.toml")
 }
 
-/// deepx HP port file path.
-pub fn hp_port_path() -> PathBuf {
-    data_dir().join("hp.port")
-}
-
+/// deepx daemon discovery file path.
 pub fn daemon_discovery_path() -> PathBuf {
     data_dir().join("daemon.json")
 }
@@ -337,11 +333,6 @@ pub fn sessions_dir() -> PathBuf {
 /// deepx plans directory.
 pub fn plans_dir() -> PathBuf {
     data_dir().join("plans")
-}
-
-/// deepx workspace path file.
-pub fn workspace_path() -> PathBuf {
-    data_dir().join("workspace.txt")
 }
 
 /// Kill a process by PID (cross-platform).

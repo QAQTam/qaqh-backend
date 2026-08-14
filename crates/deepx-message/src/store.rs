@@ -548,7 +548,11 @@ impl MessageStore {
     /// (save_msg) and stays in place for the rest of the session — never
     /// re-injected, never removed — keeping the request prefix byte-stable.
     pub fn push_trailing_system(&mut self, msg: Message) -> bool {
-        debug_assert_eq!(msg.role, "system", "push_trailing_system requires role=system");
+        debug_assert!(
+            msg.role == "system" || msg.role == "developer",
+            "push_trailing_system requires role=system|developer, got {}",
+            msg.role
+        );
         let new_text = msg
             .content
             .iter()
@@ -1075,6 +1079,11 @@ impl MessageStore {
                 v.extend(step.tool_results.clone());
             }
         }
+        // Trailing injections are part of the authoritative message stream:
+        // they persist via save_msg on write AND must survive full-snapshot
+        // round-trips (snapshot_full → save_full → from_messages), otherwise
+        // a daemon restart loses skills/subagent injections.
+        v.extend(self.trailing_messages.clone());
         v
     }
 
@@ -1188,12 +1197,14 @@ impl MessageStore {
                     i += 1;
                 }
                 _ => {
-                    // Mid-stream system messages: recognize persisted
+                    // Mid-stream system/developer messages: recognize persisted
                     // activation-set envelopes AND sub-agent result injections
                     // ([SUBAGENT ...] tag) and restore them as trailing
-                    // injections (消息流末尾，wire 序列合法)；drop anything
-                    // else silently. 此前 [SUBAGENT] 被恢复为 system turn、
-                    // 固化在 function_call_output 之后，provider 端丢弃/挂起。
+                    // injections (消息流末尾，wire 序列合法)；显式 developer
+                    // role 的消息（ContextFlow 注入）无论文本一律恢复为
+                    // trailing；drop anything else silently. 此前 [SUBAGENT]
+                    // 被恢复为 system turn、固化在 function_call_output 之后，
+                    // provider 端丢弃/挂起。
                     let text = msgs[i]
                         .content
                         .iter()
@@ -1202,7 +1213,10 @@ impl MessageStore {
                             _ => None,
                         })
                         .unwrap_or("");
-                    if text.starts_with("<skill_context_envelope") || text.starts_with("[SUBAGENT ") {
+                    if msgs[i].role == "developer"
+                        || text.starts_with("<skill_context_envelope")
+                        || text.starts_with("[SUBAGENT ")
+                    {
                         store.trailing_messages.push(msgs[i].clone());
                     }
                     i += 1;
@@ -1677,7 +1691,12 @@ mod tests {
         assert!(repairs.is_empty(), "replay should not report repairs: {repairs:?}");
         let restored_vec = restored.to_vec();
         let restored_roles: Vec<&str> = restored_vec.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(restored_roles, vec!["user", "assistant", "user", "assistant"]);
+        // to_vec 是权威快照：trailing 注入必须出现在末尾，否则 daemon 重启
+        // 全量快照路径会丢注入（此前 to_vec 不含 trailing）。
+        assert_eq!(
+            restored_roles,
+            vec!["user", "assistant", "user", "assistant", "system"]
+        );
         let trailing = restored.trailing_messages();
         assert_eq!(trailing.len(), 1, "subagent injection must restore as trailing");
         assert!(trailing[0]

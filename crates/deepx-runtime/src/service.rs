@@ -369,10 +369,12 @@ impl DeepxService {
             "workspace.get" => Ok(json!(workspace(&seed()?))),
             "workspace.set" => {
                 let seed = seed()?;
-                let dir = deepx_types::platform::sessions_dir().join(&seed);
-                std::fs::create_dir_all(&dir).map_err(err)?;
-                std::fs::write(dir.join("workspace.txt"), pstr(params, "path")?.trim())
-                    .map_err(err)?;
+                // 统一数据源：运行环境工作目录存 meta.cwd（workspace.txt 退役）。
+                deepx_session::SessionManager::global().set_cwd(
+                    &seed,
+                    pstr(params, "path")?.trim(),
+                    true,
+                );
                 self.send_ringing_cmd(
                     seed,
                     RingingCommand::Control(ControlCommand::AgentReloadConfig),
@@ -534,13 +536,13 @@ impl DeepxService {
                     .map(String::from);
                 let seed = deepx_session::SessionManager::generate_seed();
                 if let Some(workspace) = &workspace {
-                    let dir = deepx_types::platform::sessions_dir().join(&seed);
-                    if std::fs::create_dir_all(&dir).is_ok() {
-                        let _ = std::fs::write(dir.join("workspace.txt"), workspace);
-                        log::info!(
-                            "[subagent] inherited workspace for seed={seed}: {workspace}"
-                        );
-                    }
+                    // 子代理继承主代理的 workspace：写入 meta.cwd（统一数据源），
+                    // 子 worker 启动时 `load_session_workspace` 读到，从而正确解析
+                    // 相对路径并以主代理工作区为权限边界。
+                    deepx_session::SessionManager::global().set_cwd(&seed, workspace, false);
+                    log::info!(
+                        "[subagent] inherited workspace for seed={seed}: {workspace}"
+                    );
                 }
                 self.registry()?.spawn_subagent(
                     &seed,
@@ -945,14 +947,8 @@ fn workspace(seed: &str) -> String {
     if seed.is_empty() {
         return String::new();
     }
-    std::fs::read_to_string(
-        deepx_types::platform::sessions_dir()
-            .join(seed)
-            .join("workspace.txt"),
-    )
-    .unwrap_or_default()
-    .trim()
-    .to_string()
+    // 统一数据源：meta.cwd（workspace.txt 退役，读取侧惰性迁移）。
+    deepx_session::workspace::session_workspace_cwd(seed).unwrap_or_default()
 }
 
 fn git<F>(seed: &str, operation: F, empty: Value) -> Result<Value, String>
@@ -1074,11 +1070,12 @@ fn load_config() -> Result<Value, String> {
 }
 
 fn context_stats(seed: &str) -> Result<Value, String> {
-    let path = deepx_types::platform::sessions_dir()
-        .join(seed)
-        .join("context_stats.json");
-    if path.exists() {
-        return serde_json::from_str(&std::fs::read_to_string(path).map_err(err)?).map_err(err);
+    // 统一数据源：meta.json 的 context_stats 字段（原独立文件退役）。
+    // 旧 context_stats.json 为可再生缓存，忽略不迁移。
+    if let Some(meta) = deepx_session::SessionManager::global().load_meta(seed) {
+        if let Some(stats) = meta.context_stats {
+            return Ok(stats);
+        }
     }
     Ok(
         json!({"messages":0,"chat_text":0,"thinking":0,"tool_calls":0,"tool_results":0,"tools_schema":0,"system_prompt":0,"thinking_blocks":0,"tool_call_blocks":0}),

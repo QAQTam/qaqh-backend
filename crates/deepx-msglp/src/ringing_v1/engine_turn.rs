@@ -891,7 +891,7 @@ impl TurnEngine {
                 .unwrap_or(usize::MAX)
         });
         for (_, effects) in ordered_skill_effects {
-            ctx.agent.apply_tool_effects(effects);
+            ctx.agent.apply_tool_effects(effects, ctx.flow);
         }
         true
     }
@@ -1636,7 +1636,12 @@ impl TurnEngine {
             }
             let mut assistant_msg = util::build_assistant_message(&content, &reasoning, &parsed);
             assistant_msg.content.extend(response_output_items);
-            let effect = ctx.agent.msg.push_assistant(assistant_msg.clone());
+            let receipt = ctx
+                .flow
+                .ingest(&mut ctx.agent.msg, deepx_message::builtin::MODEL, assistant_msg.clone());
+            // model 源（Sink::Step）的 store 层决策透传：TurnComplete 结束回合，
+            // None 表示可能有工具待执行。
+            let effect = receipt.effect.unwrap_or(Effect::None);
             ctx.agent
                 .msg
                 .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
@@ -2001,7 +2006,7 @@ impl TurnEngine {
                                 .unwrap_or(usize::MAX)
                         });
                         for (_, effects) in ordered_skill_effects {
-                            ctx.agent.apply_tool_effects(effects);
+                            ctx.agent.apply_tool_effects(effects, ctx.flow);
                         }
 
                         // Suspend before the next gate lap while any approval,
@@ -2108,7 +2113,7 @@ impl TurnEngine {
                     // Host-forced activation (second ignored lap) changes the
                     // active set: materialize the envelope at the latest
                     // message position before the next model reply.
-                    ctx.agent.sync_skill_injection();
+                    ctx.agent.sync_skill_injection(ctx.flow);
 
                     // Another lap: tools executed, back to Gate
                     return Outcome::ContinueTurn {
@@ -2142,7 +2147,7 @@ impl TurnEngine {
             if ctx.agent.skills.has_requested() || !forced.is_empty() {
                 // Host-forced activation changed the active set: materialize
                 // the envelope before the next model lap.
-                ctx.agent.sync_skill_injection();
+                ctx.agent.sync_skill_injection(ctx.flow);
                 return Outcome::ContinueTurn {
                     turn_id,
                     round_num: round_num + 1,
