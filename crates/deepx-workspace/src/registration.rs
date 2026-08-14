@@ -11,6 +11,7 @@ use super::apply_patch;
 use super::file_edit;
 use super::file_mutate;
 use super::file_query;
+use super::file_glob;
 
 use super::ask_user;
 use super::process_inspect;
@@ -34,6 +35,7 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     file_edit::register(&mut mgr);
     file_mutate::register(&mut mgr);
     file_query::register(&mut mgr);
+    file_glob::register(&mut mgr);
     apply_patch::register(&mut mgr);
 
     // ── Todo（直接、会话内状态工具）──
@@ -78,6 +80,7 @@ mod tests {
                 "delete",
                 "edit_file",
                 "exec",
+                "glob",
                 "image",
                 "process",
                 "read_file",

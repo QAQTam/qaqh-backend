@@ -14,6 +14,7 @@ pub mod file_cache;
 pub mod file_edit;
 pub mod file_mutate;
 pub mod file_query;
+pub mod file_glob;
 pub mod file_shared;
 pub mod file_state;
 pub mod git;

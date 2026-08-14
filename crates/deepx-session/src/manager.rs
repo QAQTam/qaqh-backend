@@ -64,6 +64,8 @@ impl SessionManager {
         };
         // Migrate old TOML sessions on first startup of v0.4.0
         crate::migrate::run(&mgr.sessions_dir);
+        // Workspace 注册表与 session 存储同根（组织语义，与运行环境 workspace 解耦）。
+        crate::workspace::WorkspaceStore::init(data_dir);
         INSTANCE
             .set(mgr)
             .expect("SessionManager already initialized");
@@ -111,6 +113,8 @@ impl SessionManager {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete session: {e}"))?;
 
         store::remove_from_index(&self.sessions_dir, seed);
+        // 同步清理 workspace 账户（会话删除后不留悬空引用）。
+        crate::workspace::WorkspaceStore::global().remove_session(seed);
 
         log::info!("SessionManager: deleted session {seed}");
         Ok(())
@@ -255,6 +259,13 @@ impl SessionManager {
     /// `session.new` but the session directory isn't created until the
     /// agent writes it asynchronously during boot.
     pub fn persist_new_session(&self, seed: &str) {
+        self.persist_new_session_with_cwd(seed, None);
+    }
+
+    /// 同上，但记录创建时工作目录（workspace 归属基础）：
+    /// canonicalize 成功存 canonical 路径，失败存原样字符串；
+    /// cwd 命中某 workspace 路径时自动 attach（D1 双轨自动侧）。
+    pub fn persist_new_session_with_cwd(&self, seed: &str, cwd: Option<&str>) {
         let lock = self.session_lock(seed);
         let _guard = lock.lock().unwrap();
         let dir = self.session_path_dir(seed);
@@ -264,11 +275,19 @@ impl SessionManager {
         meta.seed = seed.to_string();
         meta.created_at = now;
         meta.updated_at = now;
+        meta.cwd = cwd.map(|c| {
+            std::fs::canonicalize(c)
+                .map(|p| p.to_string_lossy().replace('/', "\\"))
+                .unwrap_or_else(|_| c.to_string())
+        });
         if !dir.join("messages.jsonl").exists() {
             let _ = store::append_messages(&dir, &[]);
         }
         let _ = store::write_meta(&dir, &meta);
         store::upsert_index(&self.sessions_dir, &meta);
+        if let Some(cwd) = meta.cwd.as_deref() {
+            crate::workspace::WorkspaceStore::global().attach_by_cwd(seed, cwd);
+        }
     }
 
     pub fn persist_usage(
