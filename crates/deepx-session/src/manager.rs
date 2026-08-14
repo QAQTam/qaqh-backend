@@ -268,11 +268,21 @@ impl SessionManager {
             meta.seed = seed.to_string();
         }
         meta.cwd = Some(crate::workspace::canonical_cwd(std::path::Path::new(cwd)));
+        // 非索引会话（子代理继承 workspace 等临时场景）= 临时会话：关闭时
+        // 整个目录删除（用完即走）；正规会话（index=true）恒为 false。
+        meta.ephemeral = !index;
         meta.updated_at = Self::now_epoch();
         let _ = store::write_meta(&dir, &meta);
         if index {
             store::upsert_index(&self.sessions_dir, &meta);
         }
+    }
+
+    /// 该 seed 是否为临时会话（子代理）：meta 存在且标记 ephemeral。
+    /// 目录缺失（已清理）视为非临时，避免误触发删除路径。
+    pub fn is_ephemeral(&self, seed: &str) -> bool {
+        self.session_dir(seed).is_some()
+            && self.load_meta(seed).map(|m| m.ephemeral).unwrap_or(false)
     }
 
     /// 上下文统计快照（可再生缓存）。写入 meta.json；只有正规会话

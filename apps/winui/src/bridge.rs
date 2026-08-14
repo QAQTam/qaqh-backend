@@ -824,6 +824,19 @@ fn parse_subagent_injection(text: &str) -> Option<(String, SubagentState)> {
     Some((name.to_string(), state))
 }
 
+/// 后端 `SubagentStatus` 控制面事件的 `state` 字段（注入标签原样）→
+/// tracker 状态。与 [`parse_subagent_injection`] 保持同一标签约定；
+/// 未知值返回 None（忽略，不产生错误状态）。
+fn subagent_state_from_tag(state: &str) -> Option<SubagentState> {
+    match state {
+        "COMPLETED" => Some(SubagentState::Done),
+        "ERROR" => Some(SubagentState::Error),
+        "TIMEOUT" => Some(SubagentState::Timeout),
+        "CANCELLED" => Some(SubagentState::Cancelled),
+        _ => None,
+    }
+}
+
 /// 会话元数据文件路径（`<data>/sessions/{seed}/meta.json`）。上下文构成
 /// 快照（context_stats）已并入 meta.json（原独立 context_stats.json 退役）。
 /// 数据根对齐 deepx_types::platform::data_dir：`DEEPX_DATA_DIR` 覆盖，
@@ -3622,6 +3635,14 @@ impl BridgeCore {
                 }
                 if let Some(ev) = interaction_event(event) {
                     self.apply_interaction_event(&batch.seed, ev);
+                }
+                // 子代理终态推送：注入被回合 lap 边界吸收（无独立注入回合）
+                // 时，TurnStarted 收敛信号缺失——后端补发 `SubagentStatus`
+                // 控制面事件，此处直接收敛 tracker，避免幽灵 Lost 假阴性。
+                if let ControlEvent::SubagentStatus { name, state, .. } = event
+                    && let Some(sub_state) = subagent_state_from_tag(state)
+                {
+                    self.converge_subagent(&batch.seed, name, sub_state);
                 }
             }
             if changed {
