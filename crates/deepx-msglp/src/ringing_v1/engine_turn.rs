@@ -630,6 +630,11 @@ impl TurnEngine {
                 state,
                 failure,
             });
+        // 标题生成挂点：仅 Completed 终态触发（取消/失败不生成）；幂等由
+        // engine_title 内部冻结守卫保证（首 turn 后一次）。
+        if state == deepx_domain::TimelineTurnState::Completed {
+            super::engine_title::maybe_generate_title(ctx);
+        }
     }
 
     fn seal_active_stream_block(

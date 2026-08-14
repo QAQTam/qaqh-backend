@@ -157,7 +157,9 @@ pub struct HeaderState {
 /// 标题栏本地开关（headerDirect：壳本地翻转，不回传 Web）。
 #[derive(Debug, Clone, Copy)]
 pub enum HeaderFlag {
-    /// Info 面板开合。
+    /// Info 面板开合（2026-08 移除标题栏按钮后暂未使用；保留变体，
+    /// 恢复入口时即用）。
+    #[allow(dead_code)]
     Info,
     /// Stats 面板开合。
     Stats,
@@ -1218,6 +1220,8 @@ impl BridgeCore {
     /// （仅数据源不同，事件形状与 `interaction_requested` 完全一致）——
     /// 用于二分定位「ask 弹不出」：按钮注入后若弹窗出现 → 前端渲染 OK，
     /// 问题在后端/协议/传输（真实事件未到达）；若仍不弹 → 前端渲染/轮询问题。
+    /// （2026-08 标题栏按钮已移除；保留入口供调试，需要时从 main.rs 挂载。）
+    #[allow(dead_code)]
     pub fn spawn_test_ask(&self) {
         let seed = self.active_seed();
         let ev = InteractionEvent::AskRequested {
@@ -1412,7 +1416,8 @@ impl BridgeCore {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|s| s.permission_level)
-            .unwrap_or(1);
+            // 未加载：0（ComboBox 显示无选中）而非 1——1 会误导显示 L1。
+            .unwrap_or(0);
         let fb = self
             .composer_feedback
             .lock()
@@ -2356,6 +2361,17 @@ impl BridgeCore {
             if let Ok(tools) = client.query(QueryRequest::SkillsListTools).await {
                 snap.tools = parse_tools(&tools);
             }
+            // 同步投影缓存：settings_view 的权限滑杆/ComboBox 读 settings_proj。
+            // Web 时代由 shell.setSettings 填充；原生迁移后该通道被移除 → 投影恒
+            // 默认（permission_level=0 → UI 误导为 L1/"加载中"）。此处从权威
+            // snapshot 补齐（theme 无 snapshot 来源，保持投影现状不动）。
+            {
+                let mut proj = core.settings_proj.lock().unwrap_or_else(|e| e.into_inner());
+                proj.permission_level = snap.permission_level;
+                proj.lang = snap.lang.clone();
+                proj.workspace_mode = snap.workspace_active_mode.clone();
+            }
+            core.settings_proj_rev.fetch_add(1, Ordering::Relaxed);
             *core.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
             core.settings_rev.fetch_add(1, Ordering::Relaxed);
             log_diag("config_load: settings snapshot cached");
@@ -2543,6 +2559,7 @@ impl BridgeCore {
                         text,
                         images: vec![],
                         attachments: (!attachments.is_empty()).then_some(attachments),
+                        as_system: false,
                     }),
                     CommandOptions::default(),
                 )
@@ -2928,6 +2945,7 @@ impl BridgeCore {
                                     text,
                                     images: vec![],
                                     attachments: None,
+                                    as_system: false,
                                 },
                             ),
                             CommandOptions::default(),
@@ -3141,6 +3159,11 @@ impl BridgeCore {
                 // 归档/删除/新建不再依赖 500ms 轮询，事件到达即全量刷新。
                 // （发起方命令成功后的主动 refresh 保留，作为快速路径。）
                 if session_state_event(event).is_some() {
+                    list_changed = true;
+                }
+                // 会话标题生成/更新（首 turn 后）：事件到达即重拉 session.list，
+                // 三处显示（标题栏/标签页/侧栏）同步刷新——不再依赖重启。
+                if matches!(event, ControlEvent::SessionMetaChanged { .. }) {
                     list_changed = true;
                 }
                 // XAML composer goalBar：dashboard_snapshot 携带完整
@@ -4691,7 +4714,8 @@ mod tests {
         assert_eq!(s.seed, "seed1");
         // UI-local state owns mode and send feedback; config owns permission.
         assert_eq!(s.mode, "plan");
-        assert_eq!(s.permission_level, 1);
+        // 权限未配置（settings 缓存空）→ 0（"加载中"），不再误报 L1（2026-08 修复）。
+        assert_eq!(s.permission_level, 0);
         assert_eq!(s.queue_count, 0);
         assert_eq!(s.send_ack, 0);
         assert_eq!(s.submit_error, "");

@@ -1067,7 +1067,18 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         );
         rows.push(section_title("权限控制"));
         // UAC 安全设置范式：4 档滑杆（离散步进）+ 档位标签 + 当前档说明。
-        let level = pd.permission_level.clamp(1, 4) as u8;
+        // permission_level==0（config 未加载/失败）：不渲染滑杆——clamp(1,4)
+        // 会把 0 显示成 L1，误导用户以为权限被重置。
+        let raw_level = pd.permission_level;
+        if raw_level == 0 {
+            rows.push(
+                text_block("权限配置加载中…")
+                    .font_size(11.0)
+                    .foreground(ThemeRef::SecondaryText)
+                    .into(),
+            );
+        } else {
+        let level = raw_level.clamp(1, 4) as u8;
         let desc_idx = if (1..=4).contains(&perm_desc) {
             (perm_desc - 1) as usize
         } else {
@@ -1099,8 +1110,14 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let proj_draft = proj_draft.clone();
                 let dirty = dirty.clone();
                 let set_perm = set_perm_desc.clone();
+                // 防程序化同步误触发：渲染应用 Slider value 会触发 ValueChanged，
+                // 值等于渲染时的实际权限则视为同步事件跳过（不写回、不标 dirty）。
+                let rendered_level = level as u64;
                 move |v: f64| {
                     let lvl = v.round().clamp(1.0, 4.0) as u64;
+                    if lvl == rendered_level {
+                        return;
+                    }
                     proj_draft.borrow_mut().permission_level = lvl;
                     *dirty.borrow_mut() = true;
                     bridge.spawn_set_permission(lvl);
@@ -1112,6 +1129,7 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             "权限等级",
             vstack((perm_slider, tick_row, desc_row)).spacing(6.0).into(),
         ));
+        }
         rows.push(section_title("性能"));
         let tokenizer_row: Element = {
             let input: Element = text_box(d.tokenizer_path.clone())

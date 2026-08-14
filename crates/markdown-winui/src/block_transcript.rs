@@ -77,6 +77,8 @@ pub struct BlockView {
     pub block_id: String,
     /// round 内稳定序（更新永不改变；渲染顺序以到达序为准）。
     pub block_order: u32,
+    /// 所属模型轮次（turn 内分步展示的分组键；restore 自快照层级）。
+    pub round_num: u32,
     pub kind: TimelineBlockKind,
     /// 封存标记：sealed 后冻结为 final markdown。
     pub sealed: bool,
@@ -97,10 +99,11 @@ pub struct BlockView {
 }
 
 impl BlockView {
-    fn new(block: &TimelineBlock, restored: bool) -> Self {
+    fn new(block: &TimelineBlock, restored: bool, round_num: u32) -> Self {
         let mut view = Self {
             block_id: block.block_id.clone(),
             block_order: block.block_order,
+            round_num,
             kind: block.kind,
             sealed: block.state == TimelineBlockState::Sealed,
             text: block.text.clone(),
@@ -431,11 +434,16 @@ impl BlockTranscript {
                 // 防御：同 id 已存在则覆盖（writer 单写保证不会发生）。
                 if let Some(existing) = turn.blocks.iter_mut().find(|b| b.block_id == block.block_id)
                 {
-                    let mut view = BlockView::new(block, false);
+                    let mut view = BlockView::new(
+                        block,
+                        false,
+                        entry.round_num.unwrap_or(0),
+                    );
                     view.mutation_rev = existing.mutation_rev.wrapping_add(1);
                     *existing = Rc::new(view);
                 } else {
-                    turn.blocks.push(Rc::new(BlockView::new(block, false)));
+                    turn.blocks
+                        .push(Rc::new(BlockView::new(block, false, entry.round_num.unwrap_or(0))));
                 }
                 self.bump_turn(index);
                 TranscriptChange::structural(true)
@@ -612,6 +620,9 @@ fn parse_tool(tool: &crate::timeline_protocol::TimelineTool) -> ToolCardView {
         TimelineToolState::Succeeded | TimelineToolState::Failed
     );
     let failed = tool.state == TimelineToolState::Failed;
+    // Prepared = LLM 刚吐出 tool_call 的 replaceable 预览（未真正执行）——
+    // 前端在 started 前不渲染，ToolStarted 后才显示转圈。
+    let started = tool.state != TimelineToolState::Prepared;
     let failure = tool
         .failure
         .as_ref()
@@ -637,6 +648,7 @@ fn parse_tool(tool: &crate::timeline_protocol::TimelineTool) -> ToolCardView {
         failed,
         failure,
         provider: false,
+        started,
     }
 }
 
@@ -650,7 +662,7 @@ fn flatten_turn(turn: &TimelineTurn) -> BlockRestoredTurn {
         let mut round_blocks: Vec<&TimelineBlock> = round.blocks.iter().collect();
         round_blocks.sort_by_key(|b| b.block_order);
         for block in round_blocks {
-            blocks.push(BlockView::new(block, true));
+            blocks.push(BlockView::new(block, true, round.round_num));
         }
     }
     BlockRestoredTurn {

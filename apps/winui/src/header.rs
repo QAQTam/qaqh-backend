@@ -21,17 +21,20 @@ use crate::bridge::{Bridge, HeaderFlag, HeaderState};
 /// 标题栏高度（PLAN-NATIVE-UI.md 布局：row 0 = 48px）。
 pub const HEADER_HEIGHT: f64 = 48.0;
 
-/// 图标按钮（subtle；active = accent 高亮）。
+/// 标题栏动作按钮：icon 上方按钮 + label 默认显示在 icon 之下。
 ///
-/// reactor 未封装 ToolTipService → icon-only，与侧栏 `icon_button` 视觉
-/// 语言一致（偏差 D6，WORKFLOW §3）。
+/// WinUI Button 的 Icon+Content 只能水平排列，无法「icon 之下带 label」；
+/// 自组 vstack(icon 按钮, label)：icon 区域走 Button（hover/按压/active
+/// 高亮原生语义），label 区域同样可点（外层 on_tapped，Button 内部已
+/// handled 不冒泡，无双触发）。label 常显——裸图标按钮无中文说明，
+/// 与 Windows 右键菜单缺 label 同样令人困惑（D6 撤销）。
 fn action_button(
     icon: Icon,
     label: &'static str,
     automation_id: &'static str,
     enabled: bool,
     active: bool,
-    on_click: impl Fn() + 'static,
+    on_click: impl Fn() + Clone + 'static,
 ) -> Element {
     let mut btn = button("")
         .icon(icon)
@@ -40,11 +43,31 @@ fn action_button(
         .tooltip(label)
         .automation_name(label)
         .automation_id(automation_id)
-        .on_click(on_click);
+        .on_click(on_click.clone());
     if active {
         btn = btn.accent();
     }
-    btn.into()
+    let btn_el: Element = btn.into();
+    vstack((
+        btn_el,
+        text_block(label)
+            .font_size(10.0)
+            .foreground(if enabled {
+                ThemeRef::SecondaryText
+            } else {
+                ThemeRef::DisabledText
+            }),
+    ))
+    .spacing(1.0)
+    .on_tapped(move || {
+        if enabled {
+            on_click();
+        }
+    })
+    .automation_name(label)
+    .automation_id(automation_id)
+    .tooltip(label)
+    .into()
 }
 
 /// XAML 标题栏组件（放入外层 Grid row 0；host 检测到 TitleBar 自动接线）。
@@ -97,7 +120,7 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // 系统主题：reactor 由 ActualThemeChanged 驱动更新（engine.rs:733），
     // WebView 移除后无需回传 Web——轮询与 emit_theme_changed 一并删除。
 
-    // ── 点击分发（①②③ 壳直接；④-⑦ 直连动作，协议请求 Rust 直发）──
+    // ── 点击分发（①②壳直接；③-⑥ 直连动作，协议请求 Rust 直发）──
     let on_workspace = {
         let bridge = bridge.clone();
         move || match bridge.pick_workspace_directory() {
@@ -107,19 +130,6 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             }
             _ => {}
         }
-    };
-    let on_location = {
-        let bridge = bridge.clone();
-        let workspace = state.workspace.clone();
-        move || {
-            if !workspace.is_empty() {
-                let _ = bridge.open_path(&workspace);
-            }
-        }
-    };
-    let on_info = {
-        let bridge = bridge.clone();
-        move || bridge.toggle_header_flag(HeaderFlag::Info)
     };
     let on_stats = {
         let bridge = bridge.clone();
@@ -165,7 +175,7 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         }
     };
 
-    // ── footer 槽：7 个 subtle 图标按钮（⑧pet 隐藏，规划决策）──
+    // ── footer 槽：工作区（按钮+路径显示）+ 用量统计 + 压缩 + 刷新 ──
     let divider: Element = border(text_block(""))
         .width(1.0)
         .height(18.0)
@@ -178,15 +188,27 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     } else {
         "选择工作区"
     };
-    let location_label = if en {
-        "Open workspace in File Explorer"
+    // 工作区路径只读显示（替代原「在资源管理器中打开」按钮）：当前选择
+    // 一目了然；过长省略号裁剪（标题栏空间有限），完整路径进 tooltip 语义
+    // 由 automation_name 承载（Element 无 tooltip 能力）。
+    let workspace_path: Element = if state.workspace.is_empty() {
+        text_block(if en { "No workspace" } else { "未选择工作区" })
+            .font_size(11.0)
+            .foreground(ThemeRef::TertiaryText)
+            .vertical_alignment(VerticalAlignment::Center)
+            .automation_name("工作区路径（空）")
+            .with_key("header-workspace-path-empty")
+            .into()
     } else {
-        "在文件资源管理器中打开工作区"
-    };
-    let info_label = if en {
-        "Session info (always on)"
-    } else {
-        "会话信息（常驻）"
+        text_block(&state.workspace)
+            .font_size(11.0)
+            .foreground(ThemeRef::SecondaryText)
+            .max_width(260.0)
+            .text_trimming(TextTrimming::CharacterEllipsis)
+            .vertical_alignment(VerticalAlignment::Center)
+            .automation_name(&state.workspace)
+            .with_key("header-workspace-path")
+            .into()
     };
     let stats_label = if en {
         "Usage statistics"
@@ -242,9 +264,6 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         )
     };
     let footer: Element = hstack((
-        // 图标映射（bindings Symbol 枚举裁剪版，WORKFLOW §6.1 记录）：
-        // ①OpenLocal ②OpenFile ┃ ③ContactInfo(替代 Info) ④FourBars(替代 Diagnostic)
-        // ⑤Undo ⑥Clear(替代 Compress)（⑧pet 隐藏；console 随 WebView 移除）。
         action_button(
             Icon::symbol(Symbol::OpenLocal),
             workspace_label,
@@ -253,24 +272,8 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             false,
             on_workspace,
         ),
-        action_button(
-            Icon::symbol(Symbol::OpenFile),
-            location_label,
-            "header-location",
-            true,
-            false,
-            on_location,
-        ),
+        workspace_path,
         divider.clone(),
-        action_button(
-            Icon::symbol(Symbol::ContactInfo),
-            info_label,
-            "header-info",
-            // 常驻面板（2026-08 决策：省动画，关不掉）——按钮禁用示意。
-            false,
-            false,
-            on_info,
-        ),
         action_button(
             Icon::symbol(Symbol::FourBars),
             stats_label,
@@ -288,23 +291,10 @@ pub fn header(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             false,
             on_compact,
         ),
-        // 调试按钮：直接注入 ask 交互（bridge.core().spawn_test_ask），
-        // 与真实事件同一渲染链路——验证「弹不出」是前端还是后端/协议问题。
-        action_button(
-            Icon::symbol(Symbol::Send),
-            "Ask 测试（调试弹窗）",
-            "header-test-ask",
-            true,
-            false,
-            {
-                let bridge = bridge.clone();
-                move || bridge.core().spawn_test_ask()
-            },
-        ),
         divider.clone(),
         refresh_el,
     ))
-    .spacing(4.0)
+    .spacing(6.0)
     .vertical_alignment(VerticalAlignment::Center)
     .into();
 

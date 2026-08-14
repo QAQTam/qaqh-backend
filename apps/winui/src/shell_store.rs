@@ -70,17 +70,27 @@ pub fn project_session_meta(
     running: bool,
 ) -> Option<SessionItem> {
     let seed = v.get("seed")?.as_str()?.to_string();
-    let last_summary = v
-        .get("last_summary")
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let title = if last_summary.is_empty() {
-        seed.chars().take(8).collect()
-    } else {
-        last_summary
-    };
+    // 标题优先级：冻结标题（首轮生成，2026-08）> last_summary（历史兜底）
+    // > seed 前缀（连摘要都没有的占位）。
+    let title = v
+        .get("title")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let last_summary = v
+                .get("last_summary")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if last_summary.is_empty() {
+                Some(seed.chars().take(8).collect())
+            } else {
+                Some(last_summary)
+            }
+        })
+        .unwrap_or_default();
     let updated_at = v.get("updated_at").and_then(|u| u.as_u64()).unwrap_or(0);
     let archived = v.get("archived").and_then(|a| a.as_bool()).unwrap_or(false);
     let state = activity.unwrap_or(if running {

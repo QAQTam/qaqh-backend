@@ -513,6 +513,12 @@ pub enum ControlEvent {
         seq: u64,
         updated_at: u64,
     },
+    /// 会话元数据变更（标题生成/重命名）——前端收到后重拉 session.list。
+    SessionMetaChanged {
+        seed: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
     /// agent **进程**生命周期（决策记录 Q8：不含回合状态）。
     AgentLifecycleChanged { state: AgentLifecycleState },
     /// 会话仪表盘（replaceable，覆盖式）。

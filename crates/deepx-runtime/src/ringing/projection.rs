@@ -91,6 +91,12 @@ impl SnapshotProjector {
                         state["activity"] = serde_json::json!(s);
                         true
                     }
+                    CE::SessionMetaChanged { title, .. } => {
+                        // 元数据变更（标题）：快照只记录"已变更"事实，
+                        // 具体值由前端 session.list 重拉（全量权威）。
+                        state["meta_changed"] = serde_json::json!(title);
+                        true
+                    }
                     CE::AgentLifecycleChanged { state: s } => {
                         state["agent_lifecycle"] = serde_json::json!(s);
                         true

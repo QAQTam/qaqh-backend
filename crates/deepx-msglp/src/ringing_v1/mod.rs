@@ -42,6 +42,7 @@ pub mod engine_goal;
 pub mod engine_input;
 pub mod engine_misc;
 pub mod engine_session;
+pub mod engine_title;
 pub mod engine_tool;
 pub mod engine_turn;
 pub mod loop_core;

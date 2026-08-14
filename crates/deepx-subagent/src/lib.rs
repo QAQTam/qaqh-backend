@@ -51,10 +51,12 @@ pub fn register(mgr: &mut ToolManager) {
         description: "Spawn a sub-agent to handle a focused task independently. \
             The subagent runs as an isolated Ringing session with its own context \
             and the parent's tool set (restricted by user settings). Returns a \
-            process_id immediately; use `process wait {id}` (or `process check`) \
-            to retrieve the final answer. Use for complex multi-step sub-tasks \
-            that benefit from isolation. `agent_name` should be a verb+task phrase \
-            (e.g. 'explore_task').",
+            process_id immediately for optional kill/check tracking; the final \
+            answer is automatically injected into your conversation as a \
+            [SUBAGENT ...] system message when the subagent finishes - do NOT \
+            poll with `process wait`, just continue after the injection arrives. \
+            Use for complex multi-step sub-tasks that benefit from isolation. \
+            `agent_name` should be a verb+task phrase (e.g. 'explore_task').",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -302,6 +304,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
             text: task_text,
             images: vec![],
             attachments: None,
+            as_system: false,
         },
     );
     if let Err(e) = rt_block_on(client.send_command(Some(&seed), send, CommandOptions::default())) {
@@ -315,12 +318,29 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
 
     // ── 4. Register the process and collect the result in the background,
     //        reusing the existing ProcessRegistry (process check/wait/kill). ──
+    //
+    // 进程隔离说明：ProcessRegistry 是进程内单例（exec 后台进程在 serve 进程、
+    // 子代理在 worker 进程各自从 1 编号），跨进程的 `process wait {id}` 查不到
+    // 子代理。因此最终结果经 Ringing 注入主代理会话回传（下方 collect 完成时），
+    // ProcessRegistry 仅保留进程内存在性记录。
     let registry_id =
         deepx_workspace::process_registry::ProcessRegistry::register(&format!("subagent:{name}"));
+    // 主代理会话 seed：collect 完成后把最终作答注入回主会话（模型下一轮自然看到）。
+    let parent_seed = deepx_workspace::runtime::context()
+        .map(|ctx| ctx.active_session.clone())
+        .unwrap_or_default();
     let name_bg = name.clone();
     let seed_bg = seed.clone();
     std::thread::spawn(move || {
-        collect_subagent_result(client, &seed_bg, &name_bg, registry_id, timeout_secs, batch_rx);
+        collect_subagent_result(
+            client,
+            &seed_bg,
+            &name_bg,
+            registry_id,
+            timeout_secs,
+            batch_rx,
+            &parent_seed,
+        );
     });
 
     log::info!("[SUBAGENT] '{name}' spawned (seed={seed}, process={registry_id})");
@@ -328,7 +348,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         "process_id": registry_id,
         "seed": seed,
         "name": name,
-        "content": format!("Subagent '{name}' spawned (process {registry_id}); use `process wait {registry_id}` for the final answer."),
+        "content": format!("Subagent '{name}' spawned (process {registry_id}); the final answer will be injected into the conversation as a [SUBAGENT] system message when it completes."),
     })))
 }
 
@@ -342,6 +362,7 @@ fn collect_subagent_result(
     registry_id: u32,
     timeout_secs: u64,
     batch_rx: mpsc::Receiver<EventBatch>,
+    parent_seed: &str,
 ) {
     use deepx_workspace::process_registry::ProcessRegistry;
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -447,6 +468,42 @@ fn collect_subagent_result(
     }
 
     let answer_len = final_answer.len();
+
+    // ── 结果回传：注入主代理会话（绕开跨进程 ProcessRegistry 隔离）。 ──
+    // 主代理 idle 时这条消息触发新回合（模型自动看到子代理结果并继续）；
+    // 主代理仍在运行中则进入 inbox，下一轮合并。注入失败仅告警，不影响注册表。
+    let header = if did_cancel {
+        format!("[SUBAGENT '{name}' CANCELLED]")
+    } else if exit_code != 0 {
+        format!("[SUBAGENT '{name}' ERROR exit={exit_code}]")
+    } else {
+        format!("[SUBAGENT '{name}' COMPLETED]")
+    };
+    if !parent_seed.is_empty() {
+        // 401 lease_required 根因：collect 的 client 只 attach 了子 seed，
+        // 向主 seed 发命令需先建立 owns 关系（SessionResume）。失败仅告警。
+        if let Err(e) = rt_block_on(client.attach(parent_seed)) {
+            log::warn!("[SUBAGENT] '{name}' attach parent {parent_seed} for inject: {e}");
+        }
+        let inject = RingingCommand::Conversation(
+            deepx_client::ConversationCommand::ConversationSendMessage {
+                text: format!("{header}\n\n{final_answer}"),
+                images: vec![],
+                attachments: None,
+                // 以 system 角色注入（而非 user）：模型可见但不等同于用户输入，
+                // 保留 [SUBAGENT ...] 标签供模型区分注入数据与系统指令。
+                as_system: true,
+            },
+        );
+        if let Err(e) = rt_block_on(client.send_command(
+            Some(parent_seed),
+            inject,
+            CommandOptions::default(),
+        )) {
+            log::warn!("[SUBAGENT] '{name}' inject result to parent {parent_seed}: {e}");
+        }
+    }
+
     ProcessRegistry::set_answer(registry_id, final_answer);
     ProcessRegistry::mark_exited(registry_id, exit_code);
     client.close();

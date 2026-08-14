@@ -1011,15 +1011,11 @@ fn turn_view(
         }
     }
     // blocks 按到达序渲染（每块独立 memo：block_id + mutation_rev）。
-    // Tool 块不占原位：全部收集，区段**集中渲染在 turn 底部**（答案之后）
-    // ——对话流 = 思考 → 答案 → [工具工作区]（V4-C）；区段整体 memo
-    // （内部任一块 rev 变化才重建）；其余块保持逐块 memo。
-    let mut tool_group: Vec<Rc<BlockView>> = Vec::new();
+    // Tool 块**交错渲染在消息流中**（思考 → 工具窄行 → 答案，V4-E：
+    // 尊重模型输出顺序）——不再收集到 turn 底部。完成态工具行自动
+    // 压缩（只读/修改类完成即回收空间），最终答案位于流末尾（底部），
+    // 用户视线跟随最新内容无需滚动（对齐 Claude Code 交互模式）。
     for block in &turn.blocks {
-        if block.kind == TimelineBlockKind::Tool {
-            tool_group.push(block.clone());
-            continue;
-        }
         items.push(
             memo(
                 block_memo,
@@ -1032,10 +1028,8 @@ fn turn_view(
             .with_key(format!("{}-block-{}", turn.turn_id, block.block_id)),
         );
     }
-    // 含 diff 的工具块 → turn 末尾总结行「已修改 N 个文件 · 查看详情」（V4）。
-    // ⚠ 必须先收集再 push_tool_section：后者 `std::mem::take(group)` 会清空列表。
-    let drawer_req = collect_diff_drawer(&turn.turn_id, &tool_group);
-    push_tool_section(&mut items, &turn.turn_id, &mut tool_group, &color_scheme);
+    // 含 diff 的工具块 → 流末尾总结行「已修改 N 个文件 · 查看详情」（V4）。
+    let drawer_req = collect_diff_drawer(&turn.turn_id, &turn.blocks);
     if let Some(req) = drawer_req {
         items.push(diff_summary_row(&turn.turn_id, req));
     }
@@ -1103,7 +1097,20 @@ fn block_view(props: &BlockProps, cx: &mut RenderCx) -> Element {
                 failed: false,
                 failure: None,
                 provider: false,
+                started: true,
             });
+            // 工具行可见性（V4-E 空间回收）：
+            // 1) Prepared 预览（LLM 刚吐出、未真正执行）不渲染——
+            //    ToolStarted（state=Running）后才显示转圈；
+            // 2) 文件修改类工具**成功**完成态不渲染（「已修改 N 个文件」
+            //    diff 汇总卡片承担；失败态无 diff 数据，保留 ✕ 错误行）；
+            // 3) 只读/搜索类工具（read/grep/list/web_search）完成即回收
+            //    ——高频调用不占空间（工具频繁场景的核心压缩手段）。
+            if (!card.started && !card.done)
+                || (card.done && !card.failed && (is_file_mutation(&card) || is_readonly(&card)))
+            {
+                return Element::Empty;
+            }
             tool_row(
                 props.turn_id.as_ref(),
                 block.block_order,
@@ -1482,14 +1489,59 @@ fn tool_argument_hint(card: &markdown_winui::ToolCardView) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// 工具行（V4 胶囊）：状态图标 + 动作短语 + 参数摘要 + 统计（±N · 耗时），
-/// 点击展开详情（参数 raw / 执行状态；失败时顶部为错误摘要）。
+/// 是否文件修改类工具（write/edit_file/apply_patch）：完成态由
+/// 「已修改 N 个文件」diff 汇总卡片承担，不再渲染独立工具行；
+/// 运行中保留转圈行（正在修改文件 · path）。
+fn is_file_mutation(card: &markdown_winui::ToolCardView) -> bool {
+    let Some(name) = card.name.as_deref() else {
+        return false;
+    };
+    let short_name = name
+        .rsplit(|ch| matches!(ch, '.' | ':' | '/'))
+        .next()
+        .unwrap_or(name);
+    matches!(
+        short_name.to_ascii_lowercase().as_str(),
+        "write" | "write_file" | "apply_patch" | "edit" | "edit_file"
+    )
+}
+
+/// 是否只读/搜索类工具（read/grep/list/web_search/view_image）：高频低信息
+/// 密度——**完成即回收空间**（V4-E），运行中保留转圈行，失败保留 ✕ 行。
+fn is_readonly(card: &markdown_winui::ToolCardView) -> bool {
+    let Some(name) = card.name.as_deref() else {
+        return false;
+    };
+    let short_name = name
+        .rsplit(|ch| matches!(ch, '.' | ':' | '/'))
+        .next()
+        .unwrap_or(name);
+    matches!(
+        short_name.to_ascii_lowercase().as_str(),
+        "read"
+            | "read_file"
+            | "grep"
+            | "rg"
+            | "search_files"
+            | "search_text"
+            | "list_files"
+            | "list_directory"
+            | "ls"
+            | "web_search"
+            | "search_query"
+            | "view_image"
+            | "open_image"
+    )
+}
+
+/// 工具行（V4-D 精简）：状态图标 + 动作短语 + 参数摘要 + 统计（±N · 耗时），
+/// 直接显示在对话流内（不再 Expander 折叠）；失败时错误摘要内联在行下方。
 fn tool_row(
     turn_id: &str,
     block_order: u32,
     card: &markdown_winui::ToolCardView,
     duration_ms: Option<u64>,
-    color_scheme: ColorScheme,
+    _color_scheme: ColorScheme,
 ) -> Element {
     let action = tool_action(card);
     let hint = tool_argument_hint(card);
@@ -1526,7 +1578,7 @@ fn tool_row(
             .foreground(ThemeRef::SystemSuccess)
             .into()
     };
-    let header = hstack((
+    let line_el: Element = hstack((
         icon,
         text_block(&line)
             .font_size(tokens::TYPE_CAPTION)
@@ -1536,49 +1588,30 @@ fn tool_row(
                 ThemeRef::PrimaryText
             }),
     ))
-    .spacing(tokens::SPACE_2);
-    // 详情（手动展开）：失败 → 错误摘要置顶；随后参数 raw / 执行状态。
-    let content_key = format!("{turn_id}-r{block_order}-card-{}-body", card.id);
-    let mut body: Vec<Element> = Vec::new();
-    if card.failed {
+    .spacing(tokens::SPACE_2)
+    .into();
+    // 失败：错误摘要内联在行下方（不再需要展开折叠）。
+    let el: Element = if card.failed {
         if let Some(f) = &card.failure {
-            body.push(
+            vstack((
+                line_el,
                 text_block(format!("错误：{f}"))
                     .font_size(tokens::TYPE_CAPTION)
                     .foreground(ThemeRef::SystemCritical)
                     .wrap()
-                    .selectable()
-                    .into(),
-            );
+                    .selectable(),
+            ))
+            .spacing(tokens::SPACE_1)
+            .into()
+        } else {
+            line_el
         }
-    }
-    if !matches!(card.body, markdown_winui::ToolBody::Empty) {
-        body.push(markdown_winui::tool_body_view(
-            &card.body,
-            color_scheme,
-            tokens::CODE_FONT_FAMILY,
-            &content_key,
-        ));
-    } else if card.args_display.trim().is_empty() {
-        body.push(text_block("").font_size(tokens::TYPE_CAPTION).into());
     } else {
-        body.push(
-            text_block(&card.args_display)
-                .font_size(tokens::TYPE_CAPTION)
-                .wrap()
-                .selectable()
-                .into(),
-        );
-    }
-    let name = card.name.as_deref().unwrap_or("工具");
-    Expander::new(vstack(body).spacing(tokens::SPACE_2))
-        .header_content(header)
-        .expanded(false)
-        .min_height(30.0)
-        .tooltip(format!("展开或折叠工具详情：{name}"))
-        .automation_name(format!("{line}"))
+        line_el
+    };
+    el.with_key(format!("{turn_id}-r{block_order}-tool-{}", card.id))
+        .automation_name(&line)
         .automation_id(format!("chat-tool-{}", card.id))
-        .with_key(format!("{turn_id}-r{block_order}-tool-{}", card.id))
         .into()
 }
 
@@ -1591,50 +1624,7 @@ fn format_duration(ms: u64) -> String {
     }
 }
 
-// ── ToolView：连续工具块聚合区段（V4）────────────────────────────
-
-/// ToolSection props（memo：区段内任一块 mutation_rev 变化才重建；
-/// 工具块低频更新——ToolUpdated/ToolProgress/BlockSealed——聚合粒度可接受）。
-#[derive(Clone)]
-struct ToolSectionProps {
-    turn_id: Rc<str>,
-    /// 区段内工具块（全部 kind=Tool，按到达序）。
-    blocks: Vec<Rc<BlockView>>,
-    color_scheme: ColorScheme,
-}
-
-impl PartialEq for ToolSectionProps {
-    fn eq(&self, other: &Self) -> bool {
-        self.color_scheme == other.color_scheme
-            && self.turn_id == other.turn_id
-            && self.blocks.len() == other.blocks.len()
-            && self.blocks.iter().zip(&other.blocks).all(|(a, b)| {
-                Rc::ptr_eq(a, b)
-                    || (a.block_id == b.block_id && a.mutation_rev == b.mutation_rev)
-            })
-    }
-}
-
-/// turn 渲染末尾：工具块集中区段 → ToolSection memo（group 非空才插入；
-/// 区段渲染在 turn 底部 = 答案之后）。
-fn push_tool_section(
-    items: &mut Vec<Element>,
-    turn_id: &str,
-    group: &mut Vec<Rc<BlockView>>,
-    color_scheme: &ColorScheme,
-) {
-    if group.is_empty() {
-        return;
-    }
-    let props = ToolSectionProps {
-        turn_id: Rc::from(turn_id),
-        blocks: std::mem::take(group),
-        color_scheme: color_scheme.clone(),
-    };
-    items.push(memo(tool_section_memo, props).with_key(format!("{turn_id}-toolsection")));
-}
-
-/// 收集区段内工具块的 diff 数据（ToolBody::Diff → 按文件合并）→ 抽屉请求。
+/// 收集工具块的 diff 数据（ToolBody::Diff → 按文件合并）→ 抽屉请求。
 /// 同路径多工具块（如 read 后 write）合并 rows + 统计；failed 取 OR。
 fn collect_diff_drawer(turn_id: &str, blocks: &[Rc<BlockView>]) -> Option<DiffDrawerRequest> {
     let mut by_path: Vec<(String, bool, markdown_winui::DiffFile)> = Vec::new();
@@ -1711,111 +1701,7 @@ fn diff_summary_row(turn_id: &str, req: DiffDrawerRequest) -> Element {
     .into()
 }
 
-fn tool_section_memo(props: &ToolSectionProps, _cx: &mut RenderCx) -> Element {
-    component(tool_section, props.clone())
-        .with_key(format!("{}-toolsection", props.turn_id))
-}
-
-/// ToolView 聚合区段（V4-B：Codex 模式）——**Border 分组 + 状态头（非折叠）**，
-/// 工具行保留单层展开（详情完整可控）。头部状态机：running > error > done
-/// （不掩盖失败）：
-/// - 运行中：`⟳ 正在运行 N 个工具…`（spinner；并行计数）
-/// - 有失败：`⚠ 工具调用 (N) · M 个异常`
-/// - 全成功：`✓ 工具调用 (N)`
-fn tool_section(props: &ToolSectionProps, _cx: &mut RenderCx) -> Element {
-    let total = props.blocks.len();
-    let running = props
-        .blocks
-        .iter()
-        .filter(|b| b.tool.as_ref().map(|t| !t.done).unwrap_or(true))
-        .count();
-    let failed = props
-        .blocks
-        .iter()
-        .filter(|b| b.tool.as_ref().map(|t| t.failed).unwrap_or(false))
-        .count();
-    let head: Element = if running > 0 {
-        hstack((
-            ProgressRing::indeterminate().width(14.0).height(14.0),
-            text_block(if running > 1 {
-                format!("正在运行 {running} 个工具…")
-            } else {
-                "正在运行工具…".to_string()
-            })
-            .font_size(tokens::TYPE_CAPTION)
-            .semibold(),
-        ))
-        .spacing(tokens::SPACE_2)
-        .into()
-    } else if failed > 0 {
-        hstack((
-            text_block("⚠")
-                .font_size(12.0)
-                .foreground(ThemeRef::SystemCaution),
-            text_block(format!("工具调用 ({total})"))
-                .font_size(tokens::TYPE_CAPTION)
-                .semibold(),
-            text_block(format!("{failed} 个异常"))
-                .font_size(tokens::TYPE_CAPTION)
-                .foreground(ThemeRef::SystemCritical),
-        ))
-        .spacing(tokens::SPACE_2)
-        .into()
-    } else {
-        hstack((
-            text_block("✓")
-                .font_size(12.0)
-                .foreground(ThemeRef::SystemSuccess),
-            text_block(format!("工具调用 ({total})"))
-                .font_size(tokens::TYPE_CAPTION)
-                .semibold(),
-        ))
-        .spacing(tokens::SPACE_2)
-        .into()
-    };
-    let rows: Vec<Element> = props
-        .blocks
-        .iter()
-        .map(|block| {
-            let card = block.tool.clone().unwrap_or_else(|| ToolCardView {
-                id: block.block_id.clone(),
-                name: None,
-                args_display: String::new(),
-                args_json: None,
-                body: markdown_winui::ToolBody::Empty,
-                changes: None,
-                done: false,
-                failed: false,
-                failure: None,
-                provider: false,
-            });
-            tool_row(
-                props.turn_id.as_ref(),
-                block.block_order,
-                &card,
-                block.duration_ms,
-                props.color_scheme.clone(),
-            )
-        })
-        .collect();
-    border(
-        vstack((head, vstack(rows).spacing(tokens::SPACE_1)))
-            .spacing(tokens::SPACE_2)
-            .padding(Thickness::xy(tokens::SPACE_3, tokens::SPACE_2)),
-    )
-    .background(ThemeRef::LayerFill)
-    .border_brush(ThemeRef::CardStroke)
-    .border_thickness(Thickness::uniform(1.0))
-    .corner_radius(8.0)
-    .automation_name(if running > 0 {
-        format!("正在运行 {running} 个工具")
-    } else {
-        format!("工具调用 ({total})")
-    })
-    .automation_id(format!("chat-toolview-{}", props.turn_id))
-    .with_key(format!("{}-toolsection", props.turn_id))
-    .into()
-}
+// （ToolSection 聚合区段已移除：V4-E 工具行交错渲染在消息流中）
 
 #[cfg(test)]
 mod activity_group_tests {
@@ -1833,6 +1719,7 @@ mod activity_group_tests {
             failed: false,
             failure: None,
             provider: false,
+            started: true,
         }
     }
 

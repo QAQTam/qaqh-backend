@@ -349,6 +349,23 @@ impl SessionManager {
         store::upsert_index(&self.sessions_dir, &meta);
     }
 
+    /// 更新会话标题（冻结语义：调用方负责只在首轮后调用一次；幂等覆盖）。
+    /// 写 meta + index（daemon 的 `list()` 每次读盘，无需跨进程通知即可见）。
+    pub fn update_title(&self, seed: &str, title: &str) {
+        let lock = self.session_lock(seed);
+        let _guard = lock.lock().unwrap();
+        let dir = self.session_path_dir(seed);
+        let mut meta = self.load_meta(seed).unwrap_or_default();
+        meta.seed = seed.to_string();
+        meta.title = Some(title.to_string());
+        meta.updated_at = Self::now_epoch();
+        if let Err(e) = store::write_meta(&dir, &meta) {
+            log::error!("SessionManager: update_title write_meta failed: {e}");
+            return;
+        }
+        store::upsert_index(&self.sessions_dir, &meta);
+    }
+
     /// Save session: write meta + rewrite all messages.
     /// Used for initial save or after undo/compact.
     pub fn save_full(
@@ -383,6 +400,9 @@ impl SessionManager {
             compact_skip,
             mode: existing.mode,
             skills: existing.skills,
+            // 保留既有标题（save_messages 全量重写 meta；title 冻结语义
+            // 不能在保存时被 Default 清空——早期缺陷，2026-08 修复）。
+            title: existing.title.clone(),
             ..Default::default()
         };
 

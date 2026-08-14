@@ -120,6 +120,7 @@ fn cmd_user_input(text: &str) -> RingingCommand {
         text: text.into(),
         images: vec![],
         attachments: None,
+        as_system: false,
     })
 }
 

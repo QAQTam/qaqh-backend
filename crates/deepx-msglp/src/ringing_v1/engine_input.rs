@@ -201,4 +201,59 @@ impl InputEngine {
             usage: None,
         }
     }
+
+    /// Handle a system-level injection (e.g. sub-agent result). Same turn
+    /// lifecycle as user input, but the message is stored with `role=system`
+    /// and user-input-only processing is skipped: compliance guard, explicit
+    /// skill activation and todo/goal mode switches do not apply to injected
+    /// data. Callers must keep the `[SUBAGENT ...]` tag in `text` so the model
+    /// can distinguish injected content from system instructions.
+    pub fn handle_system_input(&self, ctx: &mut RingContext, text: &str) -> Outcome {
+        log::info!(
+            "[INPUT] handle_system_input called, text_len={}",
+            text.len()
+        );
+        // Auto-create session on first input (same as user path).
+        if ctx.agent.session.seed.is_empty() {
+            log::info!("[INPUT] auto-creating session on system injection");
+            crate::state::lifecycle::create_session(ctx.agent);
+            ctx.agent.rebind_store();
+            ctx.emitter.set_seed(&ctx.agent.session.seed);
+        }
+
+        ctx.cancel.clear();
+        deepx_workspace::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+        deepx_workspace::runtime::set_context(
+            &ctx.agent.session.seed,
+            ctx.agent.config.permission_level,
+        );
+
+        log::info!("[INPUT] pushing system injection to store");
+        let turn_id = ctx.agent.msg.allocate_turn_id();
+        ctx.agent.msg.push_system_input(text);
+        ctx.agent
+            .msg
+            .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
+
+        log::info!("[INPUT] emitting TurnStart turn_id={} round_num=0", turn_id);
+        ctx.emitter
+            .emit_timeline(deepx_domain::TimelineIntent::TurnOpened {
+                turn_id: turn_id.clone(),
+                user_text: text.to_string(),
+            });
+        // Ringing 双发：TurnStarted（权威开始事件）
+        ctx.emitter
+            .emit_domain(deepx_domain::DomainEvent::Conversation(
+                deepx_domain::ConversationEvent::TurnStarted {
+                    turn_id: turn_id.clone(),
+                    user_text: text.to_string(),
+                },
+            ));
+
+        Outcome::ContinueTurn {
+            turn_id,
+            round_num: 0,
+            usage: None,
+        }
+    }
 }
