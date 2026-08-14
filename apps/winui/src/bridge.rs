@@ -962,6 +962,12 @@ pub struct BridgeCore {
     channel_status: Mutex<HashMap<Channel, ChannelStatus>>,
     /// XAML 侧栏数据源：会话列表投影（`session.list` + `session.activity`）。
     sessions: Mutex<Vec<SessionItem>>,
+    /// XAML 侧栏工作区数据源（`workspace.list` 投影）。
+    workspaces: Mutex<Vec<WorkspaceItem>>,
+    /// 工作区数据版本：refresh 后递增，UI 侧 timer 比对后刷新（同 session_rev）。
+    workspace_rev: AtomicU64,
+    /// 当前选中 workspace id（None = 未分组视图）；sidebar/tabs 共享。
+    current_workspace: Mutex<Option<String>>,
     /// 实时活动状态（control `session_activity_changed` 事件增量更新）。
     activities: Mutex<HashMap<String, ActivityState>>,
     /// 侧栏数据版本：refresh / activity 事件后递增，UI 侧 timer 比对后刷新。
