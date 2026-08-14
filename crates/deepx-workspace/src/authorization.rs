@@ -35,6 +35,8 @@ pub struct ToolInvocation {
     pub tool_name: String,
     pub action: String,
     pub args: serde_json::Value,
+    /// 能力类别（handler 声明）：权限决策的单一事实源，取代名字表。
+    pub category: crate::permission::ToolCategory,
 }
 
 /// Authorization proof required to dispatch a handler.
@@ -217,6 +219,7 @@ impl PermissionChallenge {
             tool_name: self.tool_name,
             action: self.action,
             args: self.normalized_args,
+            category: self.category,
         };
         Ok(AuthorizedToolCall::new(
             invocation,
@@ -248,6 +251,7 @@ pub fn admit(
         &invocation.args,
         &workspace_root,
         trusted_dirs,
+        invocation.category,
     ) {
         crate::permission::PermissionDecision::AutoApprove => {
             let mut resources =
@@ -323,6 +327,7 @@ mod tests {
             tool_name: "write".into(),
             action: String::new(),
             args: serde_json::json!({ "path": workspace.join("src/lib.rs") }),
+            category: crate::permission::ToolCategory::Write,
         };
 
         let Admission::ApprovalRequired(challenge) =
@@ -358,7 +363,12 @@ mod tests {
         Guard { _serial: serial }
     }
 
-    fn invoke(tool: &str, args: serde_json::Value, ws: &std::path::Path) -> Admission {
+    fn invoke(
+        tool: &str,
+        args: serde_json::Value,
+        ws: &std::path::Path,
+        category: crate::permission::ToolCategory,
+    ) -> Admission {
         admit(
             ToolInvocation {
                 session_id: "sub-a".into(),
@@ -366,6 +376,7 @@ mod tests {
                 tool_name: tool.into(),
                 action: String::new(),
                 args,
+                category,
             },
             1, // 即使主代理是 MaxLockdown，沙箱下 workspace 内文件操作也自动批准
             ws,
@@ -382,6 +393,7 @@ mod tests {
             "write",
             serde_json::json!({ "path": ws.join("notes.md") }),
             &ws,
+            crate::permission::ToolCategory::Write,
         );
         assert!(matches!(admission, Admission::Authorized(_)), "expected authorized");
         // workspace 内读：同样自动。
@@ -389,6 +401,7 @@ mod tests {
             "read_file",
             serde_json::json!({ "path": ws.join("notes.md") }),
             &ws,
+            crate::permission::ToolCategory::Read,
         );
         assert!(matches!(admission, Admission::Authorized(_)), "expected authorized");
     }
@@ -402,6 +415,7 @@ mod tests {
             "write",
             serde_json::json!({ "path": outside.join("secret.txt") }),
             &ws,
+            crate::permission::ToolCategory::Write,
         );
         match admission {
             Admission::Denied(reason) => {
@@ -422,7 +436,12 @@ mod tests {
                 serde_json::json!({ "url": "https://example.com" }),
             ),
         ] {
-            let admission = invoke(tool, args, &ws);
+            let category = if tool == "exec" {
+                crate::permission::ToolCategory::Exec
+            } else {
+                crate::permission::ToolCategory::Net
+            };
+            let admission = invoke(tool, args, &ws, category);
             assert!(
                 matches!(admission, Admission::Denied(_)),
                 "{tool} must be denied in sandbox, got non-denied"
@@ -443,6 +462,7 @@ mod tests {
             "write",
             serde_json::json!({ "path": ws.join("notes.md") }),
             &ws,
+            crate::permission::ToolCategory::Write,
         );
         assert!(
             matches!(admission, Admission::ApprovalRequired(_)),

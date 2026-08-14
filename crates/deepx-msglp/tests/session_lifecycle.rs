@@ -127,6 +127,7 @@ fn send_cmd(w: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
 fn cmd_session_create() -> RingingCommand {
     RingingCommand::Control(ControlCommand::SessionCreate {
         close_current: false,
+        cwd: None,
     })
 }
 

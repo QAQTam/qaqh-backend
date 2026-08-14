@@ -770,6 +770,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             }),
             handler: handle_todo,
             risk: ToolRisk::Write,
+            category: crate::permission::ToolCategory::Write,
             default_timeout: Duration::from_secs(15),
         },
         crate::ToolPlacement::Workspace,

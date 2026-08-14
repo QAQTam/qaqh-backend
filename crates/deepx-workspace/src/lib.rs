@@ -198,7 +198,8 @@ pub static CURRENT_WORKSPACE: RwLock<String> = RwLock::new(String::new());
 pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
-/// Tools blocked in PLAN mode. Keep in sync with permission::categorize_tool.
+/// Tools blocked in PLAN mode. 分类与 handler 声明的 category 对应
+/// （Read 类不入表；Write/Exec/Net 按语义列名）。
 pub const PLAN_BLOCKED: &[&str] = &["edit_file", "exec", "process", "todo"];
 
 pub fn set_workspace(path: &str) {
@@ -535,6 +536,10 @@ pub struct ToolHandler {
     pub input_schema: serde_json::Value,
     pub handler: fn(ToolCallCtx) -> ToolResult,
     pub risk: ToolRisk,
+    /// 能力类别（权限决策单一事实源）：Read/Write/Exec/Net。
+    /// 取代按工具名字表分类（categorize_tool 已删除）——加新工具必须
+    /// 显式声明，MCP 等动态工具未来包装为 Capability 时复用同字段。
+    pub category: crate::permission::ToolCategory,
     pub default_timeout: Duration,
 }
 

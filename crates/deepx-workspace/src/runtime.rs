@@ -170,6 +170,12 @@ pub fn all_tools() -> Vec<ToolDef> {
     with_manager(|manager| manager.filtered_defs()).unwrap_or_default()
 }
 
+/// 查询 handler 声明的能力类别（权限决策单一事实源）。
+/// 未注册/未初始化返回 None——调用方回退保守默认（Write）。
+pub fn lookup_category(name: &str) -> Option<crate::permission::ToolCategory> {
+    with_manager(|manager| manager.lookup(name).map(|handler| handler.category)).flatten()
+}
+
 pub fn all_tool_names() -> Vec<String> {
     with_manager(|manager| {
         manager

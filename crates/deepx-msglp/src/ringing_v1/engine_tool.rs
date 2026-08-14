@@ -159,6 +159,9 @@ impl ToolEngine {
             tool_name: effective_name.clone(),
             action: String::new(),
             args: args.clone(),
+            // 能力类别来自 handler 声明（单一事实源）；查不到时保守回退 Write。
+            category: deepx_workspace::runtime::lookup_category(&effective_name)
+                .unwrap_or(deepx_workspace::permission::ToolCategory::Write),
         };
 
         match deepx_workspace::authorization::admit(
@@ -411,6 +414,9 @@ impl ToolEngine {
                 tool_name: tool.name.clone(),
                 action: String::new(),
                 args: tool.args.clone(),
+                // 与单工具路径一致：handler 声明为权威，未注册回退 Write。
+                category: deepx_workspace::runtime::lookup_category(&tool.name)
+                    .unwrap_or(deepx_workspace::permission::ToolCategory::Write),
             };
             match deepx_workspace::authorization::admit(
                 inv,

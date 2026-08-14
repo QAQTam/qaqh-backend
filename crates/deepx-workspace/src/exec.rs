@@ -1001,6 +1001,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             }),
             handler: handle_run,
             risk: ToolRisk::Destructive,
+            category: crate::permission::ToolCategory::Exec,
             default_timeout: Duration::from_secs(30),
         },
         ToolPlacement::Workspace,

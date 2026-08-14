@@ -69,14 +69,19 @@ pub fn session_tabs(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     let (active, set_active) = cx.use_state::<String>(String::new());
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
     let last_rev = cx.use_ref::<u64>(0);
+    // 当前 workspace 过滤（None = 未分组视图）；与 sidebar 同源轮询对齐。
+    let (current_ws, set_current_ws) = cx.use_state::<Option<String>>(None);
+    let last_cur_ws = cx.use_ref::<Option<String>>(None);
 
     // 首次挂载：触发初始刷新；之后 500ms 轮询 rev，变化才 set_state 重渲染。
     cx.use_effect((), {
         let bridge = bridge.clone();
         let set_items = set_items.clone();
         let set_active = set_active.clone();
+        let set_current_ws = set_current_ws.clone();
         let timer = timer.clone();
         let last_rev = last_rev.clone();
+        let last_cur_ws = last_cur_ws.clone();
         move || {
             let core = bridge.core();
             bridge.spawn_refresh_sessions();
@@ -85,13 +90,21 @@ pub fn session_tabs(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let core = core.clone();
                 let set_items = set_items.clone();
                 let set_active = set_active.clone();
+                let set_current_ws = set_current_ws.clone();
                 let last_rev = last_rev.clone();
+                let last_cur_ws = last_cur_ws.clone();
                 move || {
                     let (items, rev) = core.session_snapshot();
                     if rev != *last_rev.borrow() {
                         *last_rev.borrow_mut() = rev;
                         set_items.call(items);
                         set_active.call(core.active_seed());
+                    }
+                    let cur = core.current_workspace();
+                    let prev = last_cur_ws.borrow().clone();
+                    if cur != prev {
+                        *last_cur_ws.borrow_mut() = cur.clone();
+                        set_current_ws.call(cur);
                     }
                 }
             }) {
@@ -100,11 +113,20 @@ pub fn session_tabs(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         }
     });
 
+    // 标签可见性：非归档 + 属于当前 workspace（None = 未分组视图，只显示
+    // 未分组会话；D3：活跃会话跨 workspace 时标签无高亮但 chat 保持）。
+    let ws_match = |s: &SessionItem| -> bool {
+        match current_ws.as_deref() {
+            Some(id) => s.workspace_id.as_deref() == Some(id),
+            None => s.workspace_id.is_none(),
+        }
+    };
+
     // 非归档会话 → TabItem（content 空占位：内容区在 TabView 外，单
     // chat_view 实例由 seed 切换驱动，不建每会话 pageview）。
     let tabs: Vec<TabItem> = items
         .iter()
-        .filter(|s| !s.archived)
+        .filter(|s| !s.archived && ws_match(s))
         .map(|item| {
             TabItem::new(item.title.clone(), grid(()))
                 .with_key(item.seed.clone())
@@ -127,10 +149,16 @@ pub fn session_tabs(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             let bridge = bridge.clone();
             move |index: i32| {
                 // 回调在用户点击时触发（受控刷新不走此路径）；index 越界防御。
+                // 过滤与渲染同源：非归档 + 当前 workspace。
                 let items = bridge.core().session_snapshot().0;
+                let cur = bridge.core().current_workspace();
                 let seed = items
                     .iter()
                     .filter(|s| !s.archived)
+                    .filter(|s| match cur.as_deref() {
+                        Some(id) => s.workspace_id.as_deref() == Some(id),
+                        None => s.workspace_id.is_none(),
+                    })
                     .nth(index as usize)
                     .map(|s| s.seed.clone());
                 if let Some(seed) = seed {

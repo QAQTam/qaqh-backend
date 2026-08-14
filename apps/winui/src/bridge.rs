@@ -29,9 +29,10 @@ use serde_json::{Value, json};
 
 use crate::shell_store::{
     ActivityState, DashboardSnapshot, SessionDetail, SessionItem, SettingsSnapshot, SkillsSnapshot,
-    UsageInfo as UiUsageInfo, activity_event, dashboard_event, parse_activities, parse_config_load,
-    parse_conversation_state, parse_skills_payload, parse_tools, parse_workspace_status,
-    project_session_meta, session_state_event, skills_event,
+    UsageInfo as UiUsageInfo, WorkspaceItem, activity_event, dashboard_event, parse_activities,
+    parse_config_load, parse_conversation_state, parse_skills_payload, parse_tools,
+    parse_workspace_status, parse_workspaces, project_session_meta, session_state_event,
+    skills_event,
 };
 
 /// 直连模式的发送反馈（替代 Web setComposer 的 submitError/sendAck 投影）。
@@ -1930,6 +1931,184 @@ impl BridgeCore {
         self.refresh_header();
     }
 
+    // ── Workspace（sidebar workspace 树数据源）────────────────────
+
+    /// (items, rev) 快照：UI 侧 timer 比对 rev 决定是否刷新（同 session_snapshot）。
+    pub fn workspace_snapshot(&self) -> (Vec<WorkspaceItem>, u64) {
+        let items = self
+            .workspaces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let rev = self.workspace_rev.load(Ordering::Relaxed);
+        (items, rev)
+    }
+
+    /// 当前选中 workspace id（None = 未分组视图）。
+    pub fn current_workspace(&self) -> Option<String> {
+        self.current_workspace
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 设置当前选中 workspace（sidebar 点击 / tabs 新建归属）。
+    pub fn set_current_workspace(&self, id: Option<String>) {
+        *self.current_workspace.lock().unwrap_or_else(|e| e.into_inner()) = id;
+    }
+
+    /// 当前选中 workspace 的 path（新建会话 cwd 归属用；未选中返回 None）。
+    pub fn current_workspace_path(&self) -> Option<String> {
+        let id = self.current_workspace()?;
+        self.workspaces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| w.path.clone())
+    }
+
+    /// 后台刷新 `workspace.list` → 投影进缓存 → rev++。
+    pub fn spawn_refresh_workspaces(&self) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            core.refresh_workspaces_inner().await;
+        });
+    }
+
+    async fn refresh_workspaces_inner(&self) {
+        let client = match self.ensure_client().await {
+            Ok(client) => client,
+            Err(err) => {
+                log_diag(&format!("refresh_workspaces: connect failed: {err}"));
+                return;
+            }
+        };
+        let v = match client.query(QueryRequest::WorkspaceList).await {
+            Ok(v) => v,
+            Err(err) => {
+                log_diag(&format!("refresh_workspaces: workspace.list failed: {err}"));
+                return;
+            }
+        };
+        let items = parse_workspaces(&v);
+        *self.workspaces.lock().unwrap_or_else(|e| e.into_inner()) = items;
+        self.workspace_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 注册目录为 workspace（`workspace.create`）→ 刷新列表。
+    pub fn spawn_workspace_create(&self, path: String) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace_create: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client
+                .action(ActionRequest::WorkspaceCreate { path })
+                .await
+            {
+                Ok(_) => log_diag("workspace_create: ok"),
+                Err(err) => log_diag(&format!("workspace_create failed: {err}")),
+            }
+            core.refresh_workspaces_inner().await;
+            core.refresh_sessions_inner().await;
+        });
+    }
+
+    /// 重命名 workspace（`workspace.rename`）→ 刷新列表。
+    pub fn spawn_workspace_rename(&self, id: String, title: String) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace_rename: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client
+                .action(ActionRequest::WorkspaceRename { id, title })
+                .await
+            {
+                Ok(_) => log_diag("workspace_rename: ok"),
+                Err(err) => log_diag(&format!("workspace_rename failed: {err}")),
+            }
+            core.refresh_workspaces_inner().await;
+        });
+    }
+
+    /// 删除 workspace 注册（`workspace.delete`，不删会话）→ 刷新列表。
+    /// 若删除的是当前选中项，回落未分组视图。
+    pub fn spawn_workspace_delete(&self, id: String) {
+        let core = self.self_arc();
+        let was_current = core.current_workspace().as_deref() == Some(id.as_str());
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace_delete: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.action(ActionRequest::WorkspaceDelete { id }).await {
+                Ok(_) => log_diag("workspace_delete: ok"),
+                Err(err) => log_diag(&format!("workspace_delete failed: {err}")),
+            }
+            if was_current {
+                core.set_current_workspace(None);
+            }
+            core.refresh_workspaces_inner().await;
+            core.refresh_sessions_inner().await;
+        });
+    }
+
+    /// 把会话移入指定 workspace（菜单移动，`workspace.move_session`）。
+    pub fn spawn_workspace_move_session(&self, seed: String, workspace_id: String) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace_move: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client
+                .action(ActionRequest::WorkspaceMoveSession { seed, workspace_id })
+                .await
+            {
+                Ok(_) => log_diag("workspace_move: ok"),
+                Err(err) => log_diag(&format!("workspace_move failed: {err}")),
+            }
+            core.refresh_workspaces_inner().await;
+            core.refresh_sessions_inner().await;
+        });
+    }
+
+    /// 把会话移出 workspace → 未分组（`workspace.detach`）。
+    pub fn spawn_workspace_detach(&self, seed: String) {
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("workspace_detach: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client.action(ActionRequest::WorkspaceDetach { seed }).await {
+                Ok(_) => log_diag("workspace_detach: ok"),
+                Err(err) => log_diag(&format!("workspace_detach failed: {err}")),
+            }
+            core.refresh_workspaces_inner().await;
+            core.refresh_sessions_inner().await;
+        });
+    }
+
     // ── 桌面通知（Phase 1：TurnCompleted 预览 + 点击回前台）───────────
 
     /// 通知开关当前值（启动时从 ui-preferences.json 载入；默认开启）。
@@ -2115,8 +2294,11 @@ impl BridgeCore {
 
     /// 新建会话：`session_create`（control）+ 轮询发现新 seed（对齐前端
     /// `waitForSessionCreated` 的 15s 超时）→ navigate chat。
+    /// 若当前选中 workspace（sidebar 上下文），SessionCreate 携带其 path →
+    /// daemon 记录 cwd 并自动归属。
     pub fn spawn_new_session(&self) {
         let core = self.self_arc();
+        let cwd = core.current_workspace_path();
         let _ = deepx_client::runtime_handle().spawn(async move {
             let client = match core.ensure_client().await {
                 Ok(client) => client,
@@ -2133,6 +2315,7 @@ impl BridgeCore {
                     None,
                     RingingCommand::Control(ControlCommand::SessionCreate {
                         close_current: false,
+                        cwd: cwd.clone(),
                     }),
                     CommandOptions::default(),
                 )
@@ -3083,6 +3266,7 @@ impl BridgeCore {
     pub fn spawn_send_new_session(&self, text: &str) {
         let core = self.self_arc();
         let text = text.to_string();
+        let cwd = core.current_workspace_path();
         let _ = deepx_client::runtime_handle().spawn(async move {
             let client = match core.ensure_client().await {
                 Ok(client) => client,
@@ -3098,6 +3282,7 @@ impl BridgeCore {
                     None,
                     RingingCommand::Control(ControlCommand::SessionCreate {
                         close_current: false,
+                        cwd: cwd.clone(),
                     }),
                     CommandOptions::default(),
                 )
@@ -3873,6 +4058,9 @@ impl Bridge {
                     sessions: Mutex::new(Vec::new()),
                     activities: Mutex::new(HashMap::new()),
                     session_rev: AtomicU64::new(0),
+                    workspaces: Mutex::new(Vec::new()),
+                    workspace_rev: AtomicU64::new(0),
+                    current_workspace: Mutex::new(None),
                     active_seed: Mutex::new(String::new()),
                     header_state: Mutex::new(HeaderState::default()),
                     header_rev: AtomicU64::new(0),
@@ -3955,6 +4143,34 @@ impl Bridge {
 
     pub fn spawn_refresh_sessions(&self) {
         self.core.spawn_refresh_sessions();
+    }
+
+    pub fn spawn_refresh_workspaces(&self) {
+        self.core.spawn_refresh_workspaces();
+    }
+
+    pub fn set_current_workspace(&self, id: Option<String>) {
+        self.core.set_current_workspace(id);
+    }
+
+    pub fn spawn_workspace_create(&self, path: String) {
+        self.core.spawn_workspace_create(path);
+    }
+
+    pub fn spawn_workspace_rename(&self, id: String, title: String) {
+        self.core.spawn_workspace_rename(id, title);
+    }
+
+    pub fn spawn_workspace_delete(&self, id: String) {
+        self.core.spawn_workspace_delete(id);
+    }
+
+    pub fn spawn_workspace_move_session(&self, seed: String, workspace_id: String) {
+        self.core.spawn_workspace_move_session(seed, workspace_id);
+    }
+
+    pub fn spawn_workspace_detach(&self, seed: String) {
+        self.core.spawn_workspace_detach(seed);
     }
 
     pub fn spawn_new_session(&self) {
@@ -4319,6 +4535,9 @@ mod tests {
             sessions: Mutex::new(Vec::new()),
             activities: Mutex::new(HashMap::new()),
             session_rev: AtomicU64::new(0),
+            workspaces: Mutex::new(Vec::new()),
+            workspace_rev: AtomicU64::new(0),
+            current_workspace: Mutex::new(None),
             active_seed: Mutex::new(String::new()),
             header_state: Mutex::new(HeaderState::default()),
             header_rev: AtomicU64::new(0),
