@@ -253,6 +253,48 @@ impl SessionManager {
         store::upsert_index(&self.sessions_dir, &meta);
     }
 
+    /// 设置会话运行环境工作目录（`workspace.set` / 子代理继承）。
+    /// 统一数据源：`SessionMeta.cwd`——旧的 `sessions/{seed}/workspace.txt`
+    /// 已退役（读取侧惰性迁移，见 `workspace::session_workspace_cwd`）。
+    /// 仅改 meta.json（atomic replace-write）；`index` 控制是否同步会话索引
+    /// （子代理 ephemeral，不进列表）。
+    pub fn set_cwd(&self, seed: &str, cwd: &str, index: bool) {
+        let lock = self.session_lock(seed);
+        let _guard = lock.lock().unwrap();
+        let dir = self.session_path_dir(seed);
+        let _ = std::fs::create_dir_all(&dir);
+        let mut meta = self.load_meta(seed).unwrap_or_default();
+        if meta.seed.is_empty() {
+            meta.seed = seed.to_string();
+        }
+        meta.cwd = Some(crate::workspace::canonical_cwd(std::path::Path::new(cwd)));
+        meta.updated_at = Self::now_epoch();
+        let _ = store::write_meta(&dir, &meta);
+        if index {
+            store::upsert_index(&self.sessions_dir, &meta);
+        }
+    }
+
+    /// 上下文统计快照（可再生缓存）。写入 meta.json；只有正规会话
+    /// （`created_at > 0`，即 persist_new_session 建立过）才同步索引——
+    /// 子代理 worker 的 dashboard/compact 路径不会污染会话列表。
+    pub fn set_context_stats(&self, seed: &str, stats: &serde_json::Value) {
+        let lock = self.session_lock(seed);
+        let _guard = lock.lock().unwrap();
+        let dir = self.session_path_dir(seed);
+        let _ = std::fs::create_dir_all(&dir);
+        let mut meta = self.load_meta(seed).unwrap_or_default();
+        if meta.seed.is_empty() {
+            meta.seed = seed.to_string();
+        }
+        meta.context_stats = Some(stats.clone());
+        meta.updated_at = Self::now_epoch();
+        let _ = store::write_meta(&dir, &meta);
+        if meta.created_at > 0 {
+            store::upsert_index(&self.sessions_dir, &meta);
+        }
+    }
+
     /// Synchronously create a new session directory and initial meta.json
     /// on disk, so that the session exists before the agent process starts.
     /// This prevents the race where the frontend receives a seed from

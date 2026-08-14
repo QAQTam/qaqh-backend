@@ -68,11 +68,12 @@ pub fn set_current_session(seed: &str) {
 }
 
 /// Load and activate the workspace persisted for a session.
+///
+/// 统一数据源：`SessionMeta.cwd`（deepx-session）——旧的
+/// `sessions/{seed}/workspace.txt` 由读取侧惰性迁移（零停机）。
 pub fn load_session_workspace(seed: &str) {
-    let dir = deepx_types::platform::sessions_dir().join(seed);
-    let workspace = std::fs::read_to_string(dir.join("workspace.txt")).unwrap_or_default();
-    let workspace = workspace.trim();
-    set_process_workspace(if workspace.is_empty() { "." } else { workspace });
+    let workspace = deepx_session::workspace::session_workspace_cwd(seed).unwrap_or_default();
+    set_process_workspace(if workspace.is_empty() { "." } else { &workspace });
 }
 
 /// Update tool path resolution and the process working directory together.

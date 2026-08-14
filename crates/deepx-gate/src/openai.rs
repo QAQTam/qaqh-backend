@@ -656,7 +656,9 @@ fn convert_messages(
     for msg in messages {
         let name = &msg.name;
         match msg.role.as_str() {
-            "system" => {
+            "system" | "developer" => {
+                // `developer`（Responses 专属运行时注入角色）在 Chat
+                // Completions 协议下不存在——降级为 system，语义最接近。
                 if let Some(tb) = msg.content.iter().find_map(|b| match b {
                     ContentBlock::Text { text } => Some(text.clone()),
                     _ => None,

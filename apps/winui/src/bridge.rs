@@ -824,7 +824,8 @@ fn parse_subagent_injection(text: &str) -> Option<(String, SubagentState)> {
     Some((name.to_string(), state))
 }
 
-/// daemon 落盘的上下文构成文件路径（`<data>/sessions/{seed}/context_stats.json`）。
+/// 会话元数据文件路径（`<data>/sessions/{seed}/meta.json`）。上下文构成
+/// 快照（context_stats）已并入 meta.json（原独立 context_stats.json 退役）。
 /// 数据根对齐 deepx_types::platform::data_dir：`DEEPX_DATA_DIR` 覆盖，
 /// 否则 Windows `%USERPROFILE%\.deepx` / Unix `$HOME/.deepx`。
 fn context_stats_path(seed: &str) -> std::path::PathBuf {
@@ -842,7 +843,7 @@ fn context_stats_path(seed: &str) -> std::path::PathBuf {
                 .unwrap_or_default()
                 .join(".deepx")
         });
-    root.join("sessions").join(seed).join("context_stats.json")
+    root.join("sessions").join(seed).join("meta.json")
 }
 
 /// `ask_user` 表单中的单个答案（对齐 renderer `AskAnswer`：question_id）。
@@ -1355,10 +1356,10 @@ impl BridgeCore {
 
     // ── 上下文构成分布（composer 底部堆叠条数据源）──────────────────
 
-    /// (stats, rev) 快照：读 daemon 回合结束写入的
-    /// `<data>/sessions/{seed}/context_stats.json`（engine_misc.rs 落盘；
-    /// 6 段构成同 Web ContextPanel 饼图）。rev = 文件 mtime（变化才刷新）；
-    /// 文件缺失 → (None, 0)。同步读小文件，轮询间隔内开销可忽略。
+    /// (stats, rev) 快照：读 `sessions/{seed}/meta.json` 的 `context_stats`
+    /// 字段（engine_misc/engine_compact 写入；6 段构成同 Web ContextPanel
+    /// 饼图）。rev = meta.json 文件 mtime（变化才刷新）；字段缺失 →
+    /// (None, 0)。同步读小文件，轮询间隔内开销可忽略。
     pub fn context_stats_snapshot(&self) -> (Option<crate::shell_store::ContextStats>, u64) {
         let seed = self.active_seed();
         let path = crate::bridge::context_stats_path(&seed);
@@ -1373,7 +1374,9 @@ impl BridgeCore {
             .unwrap_or(0);
         let stats = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok());
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|meta| meta.get("context_stats").cloned())
+            .and_then(|field| serde_json::from_value(field).ok());
         (stats, rev)
     }
 

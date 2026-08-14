@@ -126,6 +126,11 @@ pub struct Loop {
     goal: GoalEngine,
     /// Miscellaneous: undo, dashboard, mode.
     misc: MiscEngine,
+    /// Unified context-ingestion pipeline — the single door into the message
+    /// store for every message source (user/model/tool/skills/subagent/goal).
+    /// Registered with the built-in sources at construction; new sources
+    /// (ACP/MCP loops) register here without touching the dispatcher.
+    flow: deepx_message::ContextFlow,
     /// Pending compact result (set when compact is running in background).
     pending_compact_rx: Option<mpsc::Receiver<CompactMeta>>,
     pending_compact_id: Option<String>,
@@ -257,6 +262,9 @@ impl Loop {
         let paced_emitter =
             PacedEmitter::new(seed, event_tx.clone(), writer_dead.clone(), cancel.arc());
 
+        let mut flow = deepx_message::ContextFlow::new();
+        deepx_message::builtin::register_all(&mut flow);
+
         Loop {
             cmd_rx,
             event_tx,
@@ -273,6 +281,7 @@ impl Loop {
             compact: CompactEngine::new(),
             goal: GoalEngine::new(),
             misc: MiscEngine::new(),
+            flow,
             pending_compact_rx: None,
             pending_compact_id: None,
             pending_compact_causation: None,
@@ -417,37 +426,29 @@ impl Loop {
             let super::wire::WorkerCommandFrame::Ringing(ref env) = cmd.frame;
             match &env.command {
                 // ── 见缝插针注入：as_system 消息（子代理报告等）──────────
-                // 在回合 lap 边界（工具调用结束 → 下一轮 gate 前）直接 push
-                // 进当前回合消息流（role=system 独立 turn，落盘），下一轮
-                // LLM 请求立即可见——不打断当前回合，也不等回合结束。
+                // 统一收敛到 ContextFlow：submit 挂起 pending，lap 边界由
+                // drain_turn_boundary 落盘（trailing developer 消息）——
+                // 注入按 role 注入（developer），与 skills envelope 同通道、
+                // 同生命周期语义（Preserved）。不再有 turn/trailing 双路径。
                 RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
                     text,
                     as_system: true,
                     ..
                 }) => {
-                    // ── 见缝插针注入：as_system 消息（子代理报告等）──────────
-                    // 与 skills envelope 同通道（trailing system）：追加在消息流
-                    // 末尾而非插入回合中间。回合闭合后 wire 序列自动合法
-                    // （assistant/user → developer），不再在 function_call_output
-                    // 之后固化非法 system 位置——此前走 turn 通道（push_system_input）
-                    // 导致 provider 端丢弃/挂起该消息（实测：注入成功 push、落盘，
-                    // 但模型从未收到）。
-                    log::info!(
-                        "[INJECT] in-turn system injection via trailing channel (seed={}, text_len={})",
-                        self.session.agent.session.seed,
-                        text.len()
-                    );
-                    self.session
-                        .agent
-                        .msg
-                        .push_trailing_system(deepx_types::Message::system(text));
-                    self.session
-                        .agent
-                        .msg
-                        .flush_meta(
-                            &self.session.agent.config.model,
-                            &self.session.agent.config.reasoning_effort,
-                        );
+                    let msg = deepx_types::Message::developer(text);
+                    match self.flow.submit(deepx_message::builtin::SUBAGENT, msg) {
+                        Ok(()) => {
+                            log::info!(
+                                "[INJECT] subagent report queued via ContextFlow (seed={}, text_len={}, pending={})",
+                                self.session.agent.session.seed,
+                                text.len(),
+                                self.flow.pending_len()
+                            );
+                        }
+                        Err(e) => {
+                            log::error!("[INJECT] ContextFlow submit failed: {e}");
+                        }
+                    }
                 }
                 // ── 其它命令（用户消息/非注入）：绝不丢弃 ────────────────
                 // daemon 侧已 ACK（accepted），静默丢弃会让调用方永久悬挂。
@@ -711,6 +712,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
+                        flow: &mut self.flow,
 
                     };
                     self.compact.apply_result(&mut ctx, &meta);
@@ -796,6 +798,7 @@ impl Loop {
                 pending: &mut self.pending,
                 writer_dead: &self.writer_dead,
                 stats: &mut self.session.stats,
+                flow: &mut self.flow,
 
             };
             self.compact.build_prompt_and_meta(&mut ctx)
@@ -1052,6 +1055,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
+                        flow: &mut self.flow,
 
                     };
                     let outcome = self.session.turn.handle_ask_response(
@@ -1072,6 +1076,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
+                        flow: &mut self.flow,
 
                     };
                     let outcome = self.session.turn.handle_ask_dismiss(
@@ -1096,6 +1101,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
+                        flow: &mut self.flow,
 
                     };
                     let outcome = self.session.turn.handle_plan_response(
@@ -1136,12 +1142,14 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
+                        flow: &mut self.flow,
 
                     };
                     let outcome = if as_system {
                         self.input.handle_system_input(&mut ctx, &text)
                     } else {
-                        self.input.handle_user_input(&mut ctx, &text, images)
+                        self.input
+                            .handle_user_input(&mut ctx, deepx_message::builtin::USER, &text, images)
                     };
                     drop(ctx);
                     self.apply_outcome(outcome);
@@ -1219,6 +1227,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
+                        flow: &mut self.flow,
 
                     };
                     self.session.tool.handle_ui_tool_call(
@@ -1243,6 +1252,7 @@ impl Loop {
                         pending: &mut self.pending,
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
+                        flow: &mut self.flow,
 
                     };
                     match self.session.tool.handle_permission_response(
@@ -1328,9 +1338,14 @@ impl Loop {
                                         pending: &mut self.pending,
                                         writer_dead: &self.writer_dead,
                                         stats: &mut self.session.stats,
+                                        flow: &mut self.flow,
                                     };
-                                    let next_outcome =
-                                        self.input.handle_user_input(&mut ctx, &prompt, vec![]);
+                                    let next_outcome = self.input.handle_user_input(
+                                        &mut ctx,
+                                        deepx_message::builtin::GOAL,
+                                        &prompt,
+                                        vec![],
+                                    );
                                     drop(ctx);
                                     self.apply_outcome(next_outcome);
                                     return;
@@ -1395,10 +1410,22 @@ impl Loop {
                 usage,
             } => {
                 // 见缝插针注入：工具调用回合结束 → 下一轮 gate 前，消费
-                // cmd_rx 中排队的 as_system 注入（子代理报告等）进当前回合
-                // 消息流，使下一轮 LLM 请求立即可见——既不打断回合，又无需
-                // 等回合结束才开新回合。非注入命令移入 deferred 队列兜底。
+                // cmd_rx 中排队的 as_system 注入（子代理报告等）——submit 进
+                // ContextFlow pending，lap 边界统一落盘（trailing developer），
+                // 使下一轮 LLM 请求立即可见。非注入命令移入 deferred 队列兜底。
                 self.drain_pending_injections();
+                {
+                    let model = self.session.agent.config.model.clone();
+                    let effort = self.session.agent.config.reasoning_effort.clone();
+                    let drained = self
+                        .flow
+                        .drain_turn_boundary(&mut self.session.agent.msg, &model, &effort);
+                    if drained > 0 {
+                        log::info!(
+                            "[INJECT] lap boundary drained {drained} injection(s) via ContextFlow"
+                        );
+                    }
+                }
                 // Another lap: re-enter TurnEngine.
                 let mut ctx = RingContext {
                     agent: &mut self.session.agent,
@@ -1408,6 +1435,7 @@ impl Loop {
                     pending: &mut self.pending,
                     writer_dead: &self.writer_dead,
                     stats: &mut self.session.stats,
+                    flow: &mut self.flow,
                 };
                 let next_outcome = self.session.turn.run(
                     &mut ctx,

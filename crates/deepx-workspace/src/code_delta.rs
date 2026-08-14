@@ -128,12 +128,9 @@ struct GitFileMeta {
 
 fn git_file_meta(file_path: &str) -> Option<GitFileMeta> {
     let seed = crate::CURRENT_SESSION.lock().ok()?.clone()?;
-    let directory = deepx_types::platform::sessions_dir().join(seed);
-    let workspace = std::fs::read_to_string(directory.join("workspace.txt")).ok()?;
-    let workspace = workspace.trim();
-    if workspace.is_empty() {
-        return None;
-    }
+    // 无 SessionManager 环境（serve 进程）用只读版；meta.cwd 优先，
+    // 旧 workspace.txt 兜底（存量，不迁移）。
+    let workspace = deepx_session::workspace::session_workspace_from_disk(&seed)?;
     let repo = git2::Repository::open(workspace).ok()?;
     let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
     let is_new = head_tree.get_path(std::path::Path::new(file_path)).is_err();

@@ -103,7 +103,7 @@ pub enum ActionRequest {
         /// Max output tokens override.
         max_tokens: Option<u32>,
         /// Workspace the subagent inherits from the parent agent. Persisted to
-        /// `sessions/{sub_seed}/workspace.txt` before the worker starts, so the
+        /// the subagent's `SessionMeta.cwd` before the worker starts, so the
         /// subagent resolves relative paths and enforces its permission
         /// boundary against the *parent's* workspace.
         workspace: Option<String>,

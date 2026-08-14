@@ -121,7 +121,6 @@ pub fn init_tools(
     crate::file_cache::clear();
     crate::file_state::clear();
     log::info!("deepx: tool manager inited ({} tools)", all_tools().len());
-    crate::agentfs_bridge::init_bridge(session_seed);
 }
 
 pub(crate) fn with_manager<F, R>(f: F) -> Option<R>

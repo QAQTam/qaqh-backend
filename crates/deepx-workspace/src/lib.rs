@@ -12,6 +12,7 @@ mod code_delta;
 pub mod execution;
 pub mod file_cache;
 pub mod file_edit;
+pub mod file_edit_v2;
 pub mod file_mutate;
 pub mod file_query;
 pub mod file_glob;
@@ -42,7 +43,6 @@ pub mod manager;
 pub mod permission;
 pub mod serve;
 
-pub mod agentfs_bridge;
 pub mod audit;
 pub mod auth;
 
@@ -200,7 +200,7 @@ pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>>
 
 /// Tools blocked in PLAN mode. 分类与 handler 声明的 category 对应
 /// （Read 类不入表；Write/Exec/Net 按语义列名）。
-pub const PLAN_BLOCKED: &[&str] = &["edit_file", "exec", "process", "todo"];
+pub const PLAN_BLOCKED: &[&str] = &["edit_file", "edit_file_v2", "exec", "process", "todo"];
 
 pub fn set_workspace(path: &str) {
     let mut ws = CURRENT_WORKSPACE.write().unwrap_or_else(|e| e.into_inner());

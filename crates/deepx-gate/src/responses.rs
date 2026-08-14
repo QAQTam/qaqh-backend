@@ -101,6 +101,17 @@ fn convert_messages_to_input(
                     }));
                 }
             }
+            // 显式 developer role：运行时动态注入（skills envelope、subagent
+            // 报告等）。与隐式路径（后续 system → developer item）语义一致，
+            // 但注入方显式声明角色，不再依赖位置推断。
+            "developer" => {
+                let text = extract_text(&msg.content);
+                items.push(serde_json::json!({
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": text}],
+                }));
+            }
             "user" => {
                 let parts = convert_user_content(&msg.content);
                 items.push(serde_json::json!({
