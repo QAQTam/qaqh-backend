@@ -62,7 +62,11 @@ pub async fn run() -> Result<(), String> {
         workspace_mode,
         Arc::new(move |connection| {
             // 新 endpoint/token 仅经 daemon 内存注入后续 worker，绝不进日志或 IPC。
-            workspace_service.attach_workspace(connection.endpoint.clone(), connection.token);
+            workspace_service.attach_workspace(
+                connection.endpoint.clone(),
+                connection.token,
+                workspace_mode.label(),
+            );
             workspace_service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
                 configured_mode: workspace_mode.label().into(),
                 active_mode: connection.mode.label().into(),
@@ -74,7 +78,11 @@ pub async fn run() -> Result<(), String> {
     .ok();
     if let Some(ref ws) = workspace {
         let connection = ws.connection();
-        service.attach_workspace(connection.endpoint.clone(), connection.token);
+        service.attach_workspace(
+            connection.endpoint.clone(),
+            connection.token,
+            workspace_mode.label(),
+        );
         service.attach_workspace_state(deepx_runtime::WorkspaceRuntimeState {
             configured_mode: workspace_mode.label().into(),
             active_mode: connection.mode.label().into(),

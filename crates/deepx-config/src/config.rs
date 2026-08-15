@@ -2,6 +2,7 @@ use deepx_types::{
     ConfigStore, PersistentConfig, PersistentMultimodalConfig, PersistentSubagentConfig,
     PersistentWorkspaceConfig,
 };
+use crate::secrets::{CONFIG_MARKER, SecretSlot, SecretStore};
 use std::collections::HashMap; // still used by profiles
 
 /// Subagent default configuration.
@@ -281,16 +282,24 @@ impl Config {
     /// Load config from disk (TOML primary store).
     pub fn load() -> Result<Self, String> {
         let store = ConfigStore::default_location();
-        Self::load_from_paths(store)
+        Self::load_from_paths_with(store, SecretStore::default_location())
     }
 
-    /// Load configuration from a TOML primary store.
-    fn load_from_paths(store: ConfigStore) -> Result<Self, String> {
+    fn load_from_paths_with(
+        store: ConfigStore,
+        secrets: SecretStore,
+    ) -> Result<Self, String> {
         let mut cfg = Self::default();
 
         let pc = store.load();
 
-        if let Some(pc) = pc {
+        let mut needs_rewrite = false;
+        // 审计 P0-1：API key 不落 config.toml 明文。
+        // - 标记 "set" → 从 secrets.toml 解密（失败 = 无 key，绝不回退旧明文）；
+        // - 旧明文（升级前配置）→ 迁移入 secrets.toml，config.toml 写回标记；
+        // - None/空 → 未配置。
+
+        if let Some(mut pc) = pc {
             // ── Backward compat: migrate old provider_id → new (provider_id, endpoint) ──
             let raw_pid = pc.provider_id.unwrap_or_default();
             let (provider_id, endpoint) = if raw_pid.is_empty() {
@@ -341,7 +350,17 @@ impl Config {
             if let Some(k) = pc.api_key
                 && !k.is_empty()
             {
-                cfg.api_key = k;
+                if k == CONFIG_MARKER {
+                    cfg.api_key = secrets.load(SecretSlot::Main).unwrap_or_default();
+                } else {
+                    match secrets.set(SecretSlot::Main, &k) {
+                        Ok(()) => needs_rewrite = true,
+                        Err(e) => log::warn!(
+                            "[config] migrate main api key to secret store failed: {e}; keeping plaintext until retry"
+                        ),
+                    }
+                    cfg.api_key = k;
+                }
             }
             if let Some(m) = pc.model
                 && !m.is_empty()
@@ -373,7 +392,7 @@ impl Config {
                 cfg.font_family = f.clone();
             }
             // ── Subagent defaults ──
-            if let Some(ref s) = pc.subagent {
+            if let Some(ref mut s) = pc.subagent {
                 if let Some(ref m) = s.model
                     && !m.is_empty()
                 {
@@ -384,10 +403,20 @@ impl Config {
                 {
                     cfg.subagent.base_url = u.clone();
                 }
-                if let Some(ref k) = s.api_key
+                if let Some(k) = s.api_key.clone()
                     && !k.is_empty()
                 {
-                    cfg.subagent.api_key = k.clone();
+                    if k == CONFIG_MARKER {
+                        cfg.subagent.api_key = secrets.load(SecretSlot::Subagent).unwrap_or_default();
+                    } else {
+                        match secrets.set(SecretSlot::Subagent, &k) {
+                            Ok(()) => needs_rewrite = true,
+                            Err(e) => log::warn!(
+                                "[config] migrate subagent api key to secret store failed: {e}; keeping plaintext until retry"
+                            ),
+                        }
+                        cfg.subagent.api_key = k;
+                    }
                 }
                 if let Some(mt) = s.max_tokens {
                     cfg.subagent.max_tokens = mt;
@@ -419,7 +448,7 @@ impl Config {
             }
 
             // ── Multimodal (vision) ──
-            if let Some(ref mm) = pc.multimodal {
+            if let Some(ref mut mm) = pc.multimodal {
                 if let Some(enabled) = mm.enabled {
                     cfg.multimodal.enabled = enabled;
                 }
@@ -429,8 +458,18 @@ impl Config {
                 if let Some(ref pid) = mm.provider_id {
                     cfg.multimodal.provider_id = pid.clone();
                 }
-                if let Some(ref key) = mm.api_key {
-                    cfg.multimodal.api_key = key.clone();
+                if let Some(key) = mm.api_key.clone() {
+                    if key == CONFIG_MARKER {
+                        cfg.multimodal.api_key = secrets.load(SecretSlot::Multimodal).unwrap_or_default();
+                    } else {
+                        match secrets.set(SecretSlot::Multimodal, &key) {
+                            Ok(()) => needs_rewrite = true,
+                            Err(e) => log::warn!(
+                                "[config] migrate multimodal api key to secret store failed: {e}; keeping plaintext until retry"
+                            ),
+                        }
+                        cfg.multimodal.api_key = key;
+                    }
                 }
                 if let Some(ref url) = mm.base_url {
                     cfg.multimodal.base_url = url.clone();
@@ -464,6 +503,31 @@ impl Config {
                     cfg.workspace.mode = mode.clone();
                 }
             }
+
+            // 迁移写回：config.toml 中旧明文已入 secret store，把明文替换为
+            // "set" 标记（重新 load 磁盘原值，只改"确为明文"的槽位——迁移
+            // 失败的槽位保持明文，下次 load 重试；已标记/未配置的原样保留）。
+            if needs_rewrite {
+                if let Some(mut fresh) = store.load() {
+                    let is_plain = |k: &Option<String>| {
+                        k.as_deref().is_some_and(|v| !v.is_empty() && v != CONFIG_MARKER)
+                    };
+                    if is_plain(&fresh.api_key) {
+                        fresh.api_key = Some(CONFIG_MARKER.to_owned());
+                    }
+                    if let Some(ref mut s) = fresh.subagent
+                        && is_plain(&s.api_key)
+                    {
+                        s.api_key = Some(CONFIG_MARKER.to_owned());
+                    }
+                    if let Some(ref mut m) = fresh.multimodal
+                        && is_plain(&m.api_key)
+                    {
+                        m.api_key = Some(CONFIG_MARKER.to_owned());
+                    }
+                    let _ = store.save(&fresh);
+                }
+            }
         }
 
         if !cfg.profiles.contains_key("default") {
@@ -489,7 +553,37 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let store = ConfigStore::default_location();
+        self.save_with(
+            &ConfigStore::default_location(),
+            &SecretStore::default_location(),
+        )
+    }
+
+    fn save_with(&self, store: &ConfigStore, secrets: &SecretStore) -> Result<(), String> {
+        // 审计 P0-1：凭据先入 secret store；失败则中止保存（config.toml 永不
+        // 出现明文）。空值 = 显式删除凭据（service 层空串删除语义）。
+        if self.api_key.is_empty() {
+            let _ = secrets.delete(SecretSlot::Main);
+        } else {
+            secrets
+                .set(SecretSlot::Main, &self.api_key)
+                .map_err(|e| format!("failed to store main api key: {e}"))?;
+        }
+        if self.subagent.api_key.is_empty() {
+            let _ = secrets.delete(SecretSlot::Subagent);
+        } else {
+            secrets
+                .set(SecretSlot::Subagent, &self.subagent.api_key)
+                .map_err(|e| format!("failed to store subagent api key: {e}"))?;
+        }
+        if self.multimodal.api_key.is_empty() {
+            let _ = secrets.delete(SecretSlot::Multimodal);
+        } else {
+            secrets
+                .set(SecretSlot::Multimodal, &self.multimodal.api_key)
+                .map_err(|e| format!("failed to store multimodal api key: {e}"))?;
+        }
+
         let mut profiles = self.profiles.clone();
         profiles.insert(
             self.active_profile.clone(),
@@ -506,7 +600,7 @@ impl Config {
             api_key: if self.api_key.is_empty() {
                 None
             } else {
-                Some(self.api_key.clone())
+                Some(CONFIG_MARKER.to_owned())
             },
             model: Some(self.model.clone()),
             base_url: Some(self.base_url.clone()),
@@ -537,7 +631,7 @@ impl Config {
                 api_key: if self.subagent.api_key.is_empty() {
                     None
                 } else {
-                    Some(self.subagent.api_key.clone())
+                    Some(CONFIG_MARKER.to_owned())
                 },
                 max_tokens: Some(self.subagent.max_tokens),
                 timeout_secs: Some(self.subagent.timeout_secs),
@@ -573,7 +667,7 @@ impl Config {
                 api_key: if self.multimodal.api_key.is_empty() {
                     None
                 } else {
-                    Some(self.multimodal.api_key.clone())
+                    Some(CONFIG_MARKER.to_owned())
                 },
                 base_url: if self.multimodal.base_url.is_empty() {
                     None
@@ -661,5 +755,109 @@ impl Config {
     /// Protocol derived from (provider_id, endpoint) in the registry.
     pub fn protocol(&self) -> String {
         crate::registry::protocol_for(&self.provider_id, &self.endpoint)
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    use crate::secrets::{SecretSlot, SecretStore};
+    use std::path::PathBuf;
+
+    fn temp_dir() -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::env::temp_dir().join(format!(
+            "deepx-config-secret-test-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn legacy_plaintext_migrates_to_secret_store() {
+        let dir = temp_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.toml");
+        let secrets_path = dir.join("secrets.toml");
+        std::fs::write(
+            &config_path,
+            "provider_id = \"deepseek\"\napi_key = \"sk-legacy-secret\"\n",
+        )
+        .expect("write legacy config");
+
+        let store = ConfigStore::new(config_path.clone());
+        let secrets = SecretStore::new(secrets_path.clone());
+        let cfg = Config::load_from_paths_with(store, secrets.clone()).expect("load");
+
+        // 运行时拿到明文（内存），secrets 已迁移，config.toml 不再有明文。
+        assert_eq!(cfg.api_key, "sk-legacy-secret");
+        assert!(secrets.has(SecretSlot::Main));
+        assert_eq!(secrets.load(SecretSlot::Main).as_deref(), Some("sk-legacy-secret"));
+        let on_disk = std::fs::read_to_string(&config_path).expect("read back");
+        assert!(!on_disk.contains("sk-legacy-secret"), "plaintext must not remain");
+        assert!(on_disk.contains("api_key = \"set\""), "marker written back");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn marker_reads_secret_from_store() {
+        let dir = temp_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.toml");
+        let secrets_path = dir.join("secrets.toml");
+        std::fs::write(&config_path, "api_key = \"set\"\n").expect("write marker config");
+        let secrets = SecretStore::new(secrets_path);
+        secrets.set(SecretSlot::Main, "sk-from-store").expect("set secret");
+
+        let store = ConfigStore::new(config_path);
+        let cfg = Config::load_from_paths_with(store, secrets).expect("load");
+        assert_eq!(cfg.api_key, "sk-from-store");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_writes_marker_not_plaintext() {
+        let dir = temp_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.toml");
+        let secrets_path = dir.join("secrets.toml");
+
+        let mut cfg = Config::default();
+        cfg.api_key = "sk-new-secret".to_owned();
+        let store = ConfigStore::new(config_path.clone());
+        let secrets = SecretStore::new(secrets_path.clone());
+        cfg.save_with(&store, &secrets).expect("save");
+
+        let on_disk = std::fs::read_to_string(&config_path).expect("read back");
+        assert!(!on_disk.contains("sk-new-secret"), "plaintext must not be written");
+        assert!(on_disk.contains("api_key = \"set\""));
+        assert_eq!(
+            secrets.load(SecretSlot::Main).as_deref(),
+            Some("sk-new-secret")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_key_deletes_from_store() {
+        let dir = temp_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let secrets = SecretStore::new(dir.join("secrets.toml"));
+        secrets.set(SecretSlot::Main, "sk-to-delete").expect("set");
+        assert!(secrets.has(SecretSlot::Main));
+
+        // service 层空串语义 → save 时 delete。
+        secrets.delete(SecretSlot::Main).expect("delete");
+        assert!(!secrets.has(SecretSlot::Main));
+        assert!(secrets.load(SecretSlot::Main).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

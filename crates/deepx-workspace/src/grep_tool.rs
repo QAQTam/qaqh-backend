@@ -30,6 +30,8 @@ struct MatchLine {
 /// 达到 max_results 条匹配后返回 `Ok(false)` 停止当前文件。
 struct CollectSink {
     path: String,
+    /// 绝对路径（与 read 的账本 key 同形态，record_grep 清链用）。
+    abs_path: String,
     matches: Vec<MatchLine>,
     max_matches: usize,
     truncated: bool,
@@ -43,6 +45,9 @@ impl Sink for CollectSink {
             self.truncated = true;
             return Ok(false);
         }
+        // grep 输出的是实时行号：清空该文件的偏移链，防止后续 read 用
+        // grep 行号时被账本修正误伤（read→edit→grep→read 链）。
+        crate::file_state::record_grep(&self.abs_path);
         let content = mat
             .lines()
             .next()
@@ -292,6 +297,7 @@ fn exec_grep(args: &serde_json::Value) -> ToolResult {
             }
             let mut sink = CollectSink {
                 path: rel.clone(),
+                abs_path: path.to_string_lossy().into_owned(),
                 matches: Vec::new(),
                 max_matches: max_results - collected,
                 truncated: false,

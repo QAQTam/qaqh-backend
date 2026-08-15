@@ -41,6 +41,22 @@ pub struct StateEntry {
 
 static PENDING: OnceLock<Mutex<Vec<StateEntry>>> = OnceLock::new();
 
+/// 单次编辑的行号偏移（账本行号修正用）。
+///
+/// 语义：编辑前 1-based 起始行 `before_line` 及之后的所有行，行号增加
+/// `delta`（可负）。read 建立新基线（清空偏移链），write/delete/move 的
+/// 全覆盖语义同样使行号失效（清空）。
+#[derive(Clone, Debug)]
+struct LineShift {
+    before_line: usize,
+    delta: i64,
+}
+
+static SHIFTS: OnceLock<Mutex<HashMap<String, Vec<LineShift>>>> = OnceLock::new();
+
+fn shifts_map() -> &'static Mutex<HashMap<String, Vec<LineShift>>> {
+    SHIFTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 fn pending() -> &'static Mutex<Vec<StateEntry>> {
     PENDING.get_or_init(|| Mutex::new(Vec::new()))
 }
@@ -108,12 +124,15 @@ fn ledger_hash(content: &str) -> String {
 }
 
 /// Record a file read (full file or range — both establish the ledger).
+/// 同时建立行号基线：清空该文件的编辑偏移链。
 pub fn record_read(path: &str, content: &str, line_count: usize) {
     crate::file_cache::store(path, content, line_count);
     insert(path, "read", line_count, Some(ledger_hash(content)));
+    shifts_map().lock().unwrap_or_else(|e| e.into_inner()).remove(path);
 }
 
-/// Record a file write (create/overwrite/append).
+/// Record a file write (create/overwrite/append). 全覆盖语义：行号全失效，
+/// 清空偏移链（模型应重新 read 建立基线）。
 pub fn record_write(path: &str, content: &str) {
     crate::file_cache::invalidate(path);
     let s = state().lock().unwrap_or_else(|e| e.into_inner());
@@ -129,6 +148,53 @@ pub fn record_write(path: &str, content: &str) {
         content.lines().count(),
         Some(ledger_hash(content)),
     );
+    shifts_map().lock().unwrap_or_else(|e| e.into_inner()).remove(path);
+}
+
+/// Record a file edit with per-hunk line shifts (账本行号修正的数据源)。
+/// `shifts` = 编辑前 1-based 起始行 → 行号增量（按序应用，均相对同一快照）。
+pub fn record_edit_with_shifts(path: &str, content: &str, shifts: &[(usize, i64)]) {
+    crate::file_cache::invalidate(path);
+    insert(
+        path,
+        "edited",
+        content.lines().count(),
+        Some(ledger_hash(content)),
+    );
+    let mut m = shifts_map().lock().unwrap_or_else(|e| e.into_inner());
+    let list = m.entry(path.to_string()).or_default();
+    for (before_line, delta) in shifts {
+        if *delta != 0 {
+            list.push(LineShift {
+                before_line: *before_line,
+                delta: *delta,
+            });
+        }
+    }
+}
+
+/// 账本行号修正：把"基于最近一次 read 基线"的行号映射到当前行号。
+///
+/// 返回 `(修正后行号, 总偏移)`；无偏移链（该文件从未被 read 过或链已清）
+/// 返回 `Some((line, 0))` 原样，无基线返回 `None`。
+pub fn correct_line(path: &str, line: usize) -> Option<(usize, i64)> {
+    let m = shifts_map().lock().unwrap_or_else(|e| e.into_inner());
+    let list = m.get(path)?;
+    if list.is_empty() {
+        return Some((line, 0));
+    }
+    let mut delta: i64 = 0;
+    for s in list {
+        if line >= s.before_line {
+            delta += s.delta;
+        }
+    }
+    Some(((line as i64 + delta).max(1) as usize, delta))
+}
+
+/// grep 输出的是实时行号：清空偏移链，防止后续 read 用 grep 行号时被误修正。
+pub fn record_grep(path: &str) {
+    shifts_map().lock().unwrap_or_else(|e| e.into_inner()).remove(path);
 }
 
 /// Record a file edit.
@@ -233,11 +299,19 @@ mod tests {
         // 断言过滤自己的条目；apply_pending 也会产生 pending（daemon 端不回传，
         // 但测试环境里会混入队列），因此取过滤后的最后一条（最新记录）。
         let key = "pending-roundtrip-a.txt";
-        record_write(key, "hello\nworld\n");
-        let own: Vec<StateEntry> = take_pending()
-            .into_iter()
-            .filter(|e| e.path == key)
-            .collect();
+        // pending 是进程级全局队列且 take_pending 为清空语义：并行测试可能
+        // 抢走增量。先吞掉别人的，再写自己的并立刻取走；仍被抢则重试。
+        let own = (0..3)
+            .find_map(|_| {
+                let _ = take_pending();
+                record_write(key, "hello\nworld\n");
+                let got: Vec<StateEntry> = take_pending()
+                    .into_iter()
+                    .filter(|e| e.path == key)
+                    .collect();
+                (!got.is_empty()).then_some(got)
+            })
+            .expect("own pending entry after retries");
         assert_eq!(own.len(), 1, "one entry for our path");
         assert_eq!(own[0].op, "created");
         assert_eq!(own[0].line_count, 2);

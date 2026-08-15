@@ -36,7 +36,7 @@ pub mod plan;
 pub mod todo;
 
 pub mod workspace;
-
+pub mod wsl_path;
 pub mod process_inspect;
 pub mod process_registry;
 
@@ -220,9 +220,11 @@ pub fn resolve_workspace_path(path: &str) -> String {
     if path.is_empty() {
         return path.to_string();
     }
-    let p = Path::new(path);
+    // WSL serve 侧：把 worker 下发的 Windows 绝对路径（`F:\...`）归一化为 /mnt。
+    let path = crate::wsl_path::platform_workspace_path(path);
+    let p = Path::new(&path);
     if p.is_absolute() {
-        return path.to_string();
+        return path;
     }
     let ws = CURRENT_WORKSPACE.read().unwrap_or_else(|e| e.into_inner());
     if ws.is_empty() || *ws == "." {

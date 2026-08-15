@@ -690,11 +690,15 @@ fn collect_subagent_result(
         format!("[SUBAGENT '{name}' COMPLETED]")
     };
     if !parent_seed.is_empty() {
-        // 401 lease_required 根因：collect 的 client 只 attach 了子 seed，
-        // 向主 seed 发命令需先建立 owns 关系（SessionResume）。失败仅告警。
-        if let Err(e) = rt_block_on(client.attach(parent_seed)) {
-            log::warn!("[SUBAGENT] '{name}' attach parent {parent_seed} for inject: {e}");
-        }
+        // 注入到主代理会话。主代理 idle 时该消息触发新回合；运行中则进入
+        // cmd_rx 排队 / lap 边界见缝插针通道。daemon 的 Accepted ACK 只代表
+        // "已转发"，不代表 worker 落地；worker 侧的 compact 拒绝已改为延迟处理
+        // （loop_core deferral），此处再对转发级瞬时失败（daemon 写 stdin 阻塞 /
+        // lease 波动 / 网络抖动）做带退避重试，避免一次失败就静默丢弃子代理结果。
+        //
+        // 401 lease_required 根因：collect 的 client 只 attach 了子 seed，向主
+        // seed 发命令需先建立 owns 关系（SessionResume）。每次重试前重新 attach
+        // （SessionResume 幂等），覆盖 lease 过期后的恢复。
         let inject = RingingCommand::Conversation(
             deepx_client::ConversationCommand::ConversationSendMessage {
                 text: format!("{header}\n\n{final_answer}"),
@@ -705,34 +709,50 @@ fn collect_subagent_result(
                 as_system: true,
             },
         );
-        let first = rt_block_on(client.send_command(
-            Some(parent_seed),
-            inject.clone(),
-            CommandOptions::default(),
-        ));
-        if !ack_accepted(&first) {
-            log::warn!(
-                "[SUBAGENT] '{name}' inject to parent {parent_seed} not accepted ({:?}); retrying once",
-                first.map(|a| (a.status, a.code)).map_err(|e| e.to_string())
-            );
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let retry = rt_block_on(client.send_command(
+        let mut accepted = false;
+        let mut last_rejected: Option<String> = None;
+        const INJECT_ATTEMPTS: usize = 5;
+        for attempt in 0..INJECT_ATTEMPTS {
+            if attempt > 0 {
+                // 线性退避：300ms → 600ms → 1200ms → 2400ms
+                std::thread::sleep(std::time::Duration::from_millis(
+                    300 * (1 << attempt.min(3)),
+                ));
+            }
+            if let Err(e) = rt_block_on(client.attach(parent_seed)) {
+                log::warn!(
+                    "[SUBAGENT] '{name}' attach parent {parent_seed} for inject (attempt {}): {e}",
+                    attempt + 1
+                );
+            }
+            let result = rt_block_on(client.send_command(
                 Some(parent_seed),
-                inject,
+                inject.clone(),
                 CommandOptions::default(),
             ));
-            if !ack_accepted(&retry) {
-                log::error!(
-                    "[SUBAGENT] '{name}' inject FAILED after retry: {:?}",
-                    retry.map(|a| (a.status, a.code)).map_err(|e| e.to_string())
-                );
-            } else {
-                log::info!("[SUBAGENT] '{name}' inject accepted on retry");
+            if ack_accepted(&result) {
+                accepted = true;
+                break;
             }
-        } else {
+            last_rejected = Some(format!(
+                "{:?}",
+                result.map(|a| (a.status, a.code)).map_err(|e| e.to_string())
+            ));
+            log::warn!(
+                "[SUBAGENT] '{name}' inject attempt {} not accepted: {:?}",
+                attempt + 1,
+                last_rejected
+            );
+        }
+        if accepted {
             log::info!(
                 "[SUBAGENT] '{name}' inject accepted ({} bytes)",
                 answer_len
+            );
+        } else {
+            log::error!(
+                "[SUBAGENT] '{name}' inject FAILED after {INJECT_ATTEMPTS} attempts: {:?}",
+                last_rejected
             );
         }
     }

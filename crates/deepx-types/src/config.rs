@@ -240,14 +240,6 @@ impl ConfigStore {
         true
     }
 
-    /// Load only the `api_key` field from the config file.
-    /// Faster than deserializing the entire config.
-    pub fn load_api_key(&self) -> Option<String> {
-        let data = std::fs::read_to_string(&self.path).ok()?;
-        let v: toml::Value = toml::from_str(&data).ok()?;
-        v.get("api_key").and_then(|k| k.as_str()).map(String::from)
-    }
-
     /// Load the config file as a raw `serde_json::Value`.
     /// Used for backward compatibility with JSON-based consumers.
     pub fn load_value(&self) -> Option<serde_json::Value> {

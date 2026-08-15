@@ -42,19 +42,28 @@ pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
         index += 1;
     }
     let _ = crate::logger::init_agent_logger(&deepx_types::platform::data_dir());
-    // 工具套件 HTTP 后端：daemon 注入的 workspace serve endpoint。
-    // 存在则 exec 等 Workspace placement 工具经 HTTP 执行；缺失/不可达
-    // 时由 HttpToolExecutionBackend 自动回退进程内（渐进式，无配置 = 旧行为）。
-    if let (Ok(endpoint), Ok(token)) = (
-        std::env::var("DEEPX_WORKSPACE_URL"),
-        std::env::var("DEEPX_WORKSPACE_TOKEN"),
-    ) {
-        if !endpoint.is_empty() && !token.is_empty() {
-            deepx_workspace::install_workspace_backend(std::sync::Arc::new(
-                deepx_workspace::HttpToolExecutionBackend::new(endpoint, token),
-            ));
-            log::info!("deepx-agent: workspace tools via HTTP backend");
+    // 工具执行后端：默认进程内（WORKSPACE_BACKEND 默认 LocalToolExecutionBackend，
+    // L1 工具在 worker 内最短路径执行，不依赖 serve，无网络/串行/单点）。
+    // 仅 WSL2 跨 OS 场景（DEEPX_WORKSPACE_MODE=wsl）才启用 HTTP：经 localhost
+    // 反射远程到 WSL2 的 serve 执行 Linux 工具。Local 模式即使有 endpoint 也
+    // 保持进程内（serve 可退役；endpoint 仍供 subagent 注册表等使用）。
+    let remote_workspace = std::env::var("DEEPX_WORKSPACE_MODE")
+        .map(|m| m.eq_ignore_ascii_case("wsl"))
+        .unwrap_or(false);
+    if remote_workspace {
+        if let (Ok(endpoint), Ok(token)) = (
+            std::env::var("DEEPX_WORKSPACE_URL"),
+            std::env::var("DEEPX_WORKSPACE_TOKEN"),
+        ) {
+            if !endpoint.is_empty() && !token.is_empty() {
+                deepx_workspace::install_workspace_backend(std::sync::Arc::new(
+                    deepx_workspace::HttpToolExecutionBackend::new(endpoint, token),
+                ));
+                log::info!("deepx-agent: workspace tools via HTTP backend (WSL2 remote)");
+            }
         }
+    } else {
+        log::info!("deepx-agent: workspace tools in-process (Local backend)");
     }
     deepx_session::SessionManager::init(deepx_types::platform::data_dir());
     // Subagent worker：受限工具白名单 + ephemeral（不落盘）；普通 worker 走 init。

@@ -54,6 +54,9 @@
 | [timeline-protocol-design.md](./timeline-protocol-design.md) | Native timeline 协议 | ✅ 现行 |
 | [responses-api-support.md](./responses-api-support.md) | Responses API 支持矩阵 | ✅ 现行 |
 | [doc/future-optimizations.md](./doc/future-optimizations.md) | daemon 未来优化方向（P2+） | ✅ 参考 |
+| [PLAN-WORKSPACE-INPROCESS.md](./PLAN-WORKSPACE-INPROCESS.md) | Workspace 分层治理与进程内化（L1 进程内 / L2 慢路径 / L3 默认不可信）；serve 死亡事故复盘 + 三止血 | ✅ 进行中（止血 1-3 + 阶段 1.4 部分落地） |
+| [PLAN-FIX-INJECTION-CACHE.md](./PLAN-FIX-INJECTION-CACHE.md) | 注入 / 重放 / 缓存命中一致性（统一 user 注入、注入=history、退役 journal、compact 折叠） | ✅ 实施中（D1-D3 拍板已落地，D4-D6 待定） |
+| [PLAN-WSL2-PATH-BRIDGE.md](./PLAN-WSL2-PATH-BRIDGE.md) | WSL2 模式工具执行路径桥接缺口（Windows→/mnt 转换未接入工具链）+ 修复方案 | 🔲 已知缺口 · 暂不实施 |
 
 ## 子代理（subagent）
 

@@ -187,6 +187,11 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
 /// Resolve symlinks/junctions in the nearest existing ancestor, then append
 /// any missing suffix. This keeps authorization checks correct for new files.
 pub(crate) fn resolve_target_path(path: PathBuf) -> PathBuf {
+    // WSL serve 侧：worker 下发的 Windows 绝对路径转 /mnt，使授权资源路径与
+    // workspace_root（同样已被归一化为 /mnt）一致，避免被误判为跨 workspace。
+    let path = PathBuf::from(crate::wsl_path::platform_workspace_path(
+        path.to_string_lossy().as_ref(),
+    ));
     let absolute = if path.is_absolute() {
         path
     } else {

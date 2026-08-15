@@ -636,10 +636,11 @@ impl DeepxService {
             .map_err(|e| format!("registry lock: {e}"))
     }
 
-    /// 注入 workspace serve 连接信息（worker spawn 时写入 env）。
-    pub fn attach_workspace(&self, endpoint: String, token: String) {
+    /// 注入 workspace serve 连接信息与运行模式（worker spawn 时写入 env）。
+    /// `mode` ∈ {"local", "wsl"}：local 工具执行保持进程内，wsl 才启用远程 HTTP。
+    pub fn attach_workspace(&self, endpoint: String, token: String, mode: &str) {
         if let Ok(mut registry) = self.registry() {
-            registry.attach_workspace(endpoint, token);
+            registry.attach_workspace(endpoint, token, mode);
         }
     }
 
@@ -777,7 +778,13 @@ impl DeepxService {
         // Never log config.save payloads: they may contain provider credentials.
         log::info!("[config.save] saving configuration");
         let mut cfg = deepx_config::Config::load().unwrap_or_default();
-        update_string(&mut cfg.api_key, params, "api_key", "apiKey");
+        // 审计 P0-1：apiKey 空串 = 显式删除凭据（update_string 忽略空串，
+        // 这里单独处理；"****" 是 load_config 的掩码占位符，跳过保持现值）。
+        if let Some(value) = value2(params, "api_key", "apiKey").and_then(Value::as_str) {
+            if value != "****" {
+                cfg.api_key = value.to_string();
+            }
+        }
         update_string(&mut cfg.model, params, "model", "model");
         update_string(&mut cfg.base_url, params, "base_url", "baseUrl");
         update_string(&mut cfg.provider_id, params, "provider_id", "providerId");

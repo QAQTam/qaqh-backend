@@ -78,8 +78,10 @@ pub fn load_session_workspace(seed: &str) {
 
 /// Update tool path resolution and the process working directory together.
 pub fn set_process_workspace(path: &str) {
-    crate::set_workspace(path);
-    if let Err(error) = std::env::set_current_dir(path) {
+    // WSL serve 侧把 Windows 路径转 /mnt 后再落盘 + cd（Linux 下才能真实 cd 成功）。
+    let path = crate::wsl_path::platform_workspace_path(path);
+    crate::set_workspace(&path);
+    if let Err(error) = std::env::set_current_dir(&path) {
         log::warn!("set_process_workspace: cannot cd to '{}': {error}", path);
     }
 }
