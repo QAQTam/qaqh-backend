@@ -329,6 +329,7 @@ impl WorkspaceSupervisor {
         std::thread::Builder::new()
             .name("workspace-supervisor".into())
             .spawn(move || {
+                let mut health_failures: u32 = 0;
                 loop {
                     if stop.load(Ordering::SeqCst) {
                         return;
@@ -341,6 +342,25 @@ impl WorkspaceSupervisor {
                         }
                     };
                     if !exited {
+                        // 稳态健康轮询：/health 在 serve 的 HTTP 线程直接响应
+                        // （不经串行 worker），长 exec 不会误伤。连续失败判定
+                        // 进程挂死（活着但不再 accept/响应）→ 主动杀，走统一
+                        // 重启路径——防"端口无监听但进程未退出"的僵尸态。
+                        if probe_health(&connection) {
+                            health_failures = 0;
+                        } else {
+                            health_failures += 1;
+                            if health_failures >= HEALTH_FAILURE_LIMIT {
+                                log::warn!(
+                                    "[workspace] serve unhealthy ({health_failures} failed probes); killing for restart ({label})"
+                                );
+                                let mut guard = child.lock().unwrap_or_else(|e| e.into_inner());
+                                if let Some(c) = guard.as_mut() {
+                                    kill_serve_process(mode, c);
+                                }
+                                health_failures = 0;
+                            }
+                        }
                         std::thread::sleep(Duration::from_millis(500));
                         continue;
                     }
@@ -893,6 +913,54 @@ mod tests {
                 std::path::Path::new(&root).join("Cargo.toml").exists(),
                 "derived root must contain Cargo.toml: {root}"
             );
+        }
+    }
+}
+
+/// 连续健康探测失败多少次后判定 serve 挂死并主动杀。
+/// 每次探测 2s 超时，三次失败 ≈ 6-8s 内检出。
+const HEALTH_FAILURE_LIMIT: u32 = 3;
+
+/// 探测 serve `/health`（2s 超时）。连接未发布（启动初期）时返回 true，
+/// 不参与失败计数，避免误杀。
+fn probe_health(connection: &RwLock<WorkspaceConnection>) -> bool {
+    let Ok(conn) = connection.read() else {
+        return false;
+    };
+    if conn.endpoint.is_empty() {
+        return true;
+    }
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(2)))
+        .timeout_per_call(Some(Duration::from_secs(2)))
+        .build()
+        .new_agent()
+        .get(&format!("{}/health", conn.endpoint))
+        .header("Authorization", &format!("Bearer {}", conn.token))
+        .call()
+        .is_ok_and(|resp| resp.status() == 200)
+}
+
+/// 按运行模式杀 serve 进程树（与 stop() 同语义，供健康轮询重启路径用）。
+fn kill_serve_process(mode: WorkspaceMode, child: &mut Child) {
+    match mode {
+        WorkspaceMode::Wsl => {
+            let _ = Command::new("wsl.exe")
+                .args(["-e", "bash", "-lc", "pkill -f 'deepx-workspace serve'"])
+                .status();
+            let _ = child.kill();
+        }
+        WorkspaceMode::Local => {
+            #[cfg(target_os = "windows")]
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/pid", &child.id().to_string(), "/T", "/F"])
+                    .status();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = child.kill();
+            }
         }
     }
 }

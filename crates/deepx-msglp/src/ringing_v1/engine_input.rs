@@ -253,11 +253,20 @@ impl InputEngine {
 
         log::info!("[INPUT] pushing system injection via ContextFlow (subagent source)");
         let turn_id = ctx.agent.msg.allocate_turn_id();
-        // 统一管道：submit → drain（idle 时立即落盘 trailing developer）
+        // 统一管道：submit → drain（idle 时立即落盘 trailing）
         // ——与回合中的 lap 边界消费同一代码路径，不再分叉。
+        // 角色统一为 user + name=subagent（与 busy 见缝插针/崩溃恢复路径一致）：
+        // chat 协议下 developer 降级为中段 system 感知弱化，user 是两种协议
+        // 的对话流主体，可见性有保证；name 标记供前端/回放区分真实用户输入。
+        let msg = deepx_types::Message {
+            msg_id: None,
+            role: deepx_types::Message::ROLE_USER.into(),
+            name: Some("subagent".into()),
+            content: vec![deepx_types::ContentBlock::text(text)],
+        };
         if let Err(e) = ctx.flow.submit(
             deepx_message::builtin::SUBAGENT,
-            deepx_types::Message::developer(text),
+            msg,
             command_id.map(String::from),
         ) {
             log::error!("[INPUT] ContextFlow submit failed for system injection: {e}");
@@ -265,17 +274,12 @@ impl InputEngine {
         {
             let model = ctx.agent.config.model.clone();
             let effort = ctx.agent.config.reasoning_effort.clone();
-            let (_, committed_ids) = ctx
+            // 注入落盘到 messages.jsonl 即成 history（不随崩溃/重启重放）；
+            // 注入日志（injections.jsonl）已退役（PLAN B1），无需 committed
+            // 标记。drain_turn_boundary 消费 pending 并落盘 trailing。
+            let _ = ctx
                 .flow
                 .drain_turn_boundary(&mut ctx.agent.msg, &model, &effort);
-            // 已落盘到 messages.jsonl → 标记注入日志 committed（幂等）。
-            for cid in &committed_ids {
-                if let Err(e) = deepx_session::SessionManager::global()
-                    .append_injection_committed(&ctx.agent.session.seed, cid)
-                {
-                    log::warn!("[INPUT] mark injection committed failed for {cid}: {e}");
-                }
-            }
         }
         ctx.agent
             .msg

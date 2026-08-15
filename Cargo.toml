@@ -16,7 +16,7 @@ members = [
     "crates/deepx-session",
     "crates/deepx-subagent",
     "crates/deepx-client",
-    "crates/deepx-gate-testui",
+    "crates/deepx-lsp",    "crates/deepx-gate-testui",
     "crates/deepx-update",
     "crates/markdown-core",
     "crates/markdown-winui",

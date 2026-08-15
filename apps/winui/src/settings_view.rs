@@ -497,7 +497,7 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         };
         rows.push(field_row("主 API Key", key_row));
         rows.push(
-            text_block("留空 = 保留已配置值（对齐 Web apiKeyReplacement 语义）")
+            text_block("留空并保存 = 清除 Key；输入新值 = 替换（密钥已加密存储，界面不回显）")
                 .font_size(11.0)
                 .foreground(ThemeRef::SecondaryText)
                 .into(),
@@ -529,7 +529,7 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 .into(),
         ));
         rows.push(
-            text_block("留空 = 保留已配置值；子代理使用独立 Key 时，worker 请求 provider 将携带此 Key")
+            text_block("留空并保存 = 清除 Key；子代理使用独立 Key 时，worker 请求 provider 将携带此 Key")
                 .font_size(11.0)
                 .foreground(ThemeRef::SecondaryText)
                 .into(),
@@ -1001,6 +1001,12 @@ pub fn settings_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 })
                 .into(),
         ));
+        rows.push(
+            text_block("留空并保存 = 清除多模态 Key（密钥已加密存储，界面不回显）")
+                .font_size(11.0)
+                .foreground(ThemeRef::SecondaryText)
+                .into(),
+        );
         rows.push(field_row(
             "Base URL",
             text_box(d.mm_base_url.clone())

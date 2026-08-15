@@ -424,3 +424,189 @@ grep {path:line} → edit 读 {start_line/end_line 或 anchor} → edit 改 {同
 - permission.rs：注释更新（读形态三态）。
 - backend_prompt.md：TOOL DIRECTORY / 详解段 / 执行闭环（read+edit → grep+edit）三处教学更新。
 - 测试：R5-R18（+14），workspace 258/258 全绿。
+
+---
+
+## 13. replace_inline：sed `s///` 语义吸收（2026-08-15）
+
+**背景**：edit 的四层定位是整行级匹配，超长行（数百字符单行）只能整行替换；
+backend_prompt.md 教学更新时暴露此边界。讨论后决定**不引入 sed 引擎**（命令式变换
+与快照定位+事务+账本哲学冲突、正则方言/原地写风险），而是把 sed 真正独门的
+`s///` 行内替换语义吸收为 hunk kind。
+
+### 13a. 语义
+
+```json
+{"kind": "replace_inline", "anchor": "<整行锚>", "old": "<行内子串/正则>",
+ "new": "<替换文本>", "replace_all": false, "regex": false}
+```
+
+- **anchor 限定窗口**：复用 locate_anchor（四层定位）→ 只在命中窗口内替换；
+  sed 的"地址定址"由既有定位引擎接管，不引入第二套地址语法。
+- 不跨行、不改行结构（逐行处理）；`replace_all=false` 只替换第一处（按行序）。
+- `regex=true`：regex crate 语法（与 grep 同引擎族），大小写敏感（与 hunk 精确
+  语义一致，不用 CLI 的 smart-case）；new 支持 `$1`/`$2` 捕获组展开（sed `\1` 对应）。
+- 窗口内无 old → NO_MATCH（detail 标注窗口行号）；非法正则 → INVALID_REGEX。
+- 走完整管线：快照定位、事务、expected_hash、原子写、code_delta（old/new 单行
+  → 删 1 增 1，恰好表达"一行内容修改"）、permission（Write）。
+- 典型场景：超长行内子串替换（配置/文档单行）、同构代码批量改名（replace_all）。
+
+### 13b. 变更清单
+
+- file_edit_v2.rs：Hunk::ReplaceInline + parse + kind_name；LocateError::InvalidRegex；
+  locate_hunk（窗口内命中验证）；inline_replace（split_inclusive 逐行 + 子串/regex
+  分支）；resolve（窗口 char range 整窗替换）；run_edit 错误分支；hint；schema/description。
+- 测试：R19-R27（9 个：基本/全部/超长行/窗口无命中/regex 捕获组/非法正则/模糊锚/
+  混用事务/hash 链），workspace 267/267。
+- 实现教训：`done = !replace_all` 初始值写反（false 时永不替换）；手动拼接路径
+  不展开捕获组 → 改用 `re.replace`（支持 $1 且只换第一处）。
+
+### 13c. 教学迁移：backend_prompt.md → skill（不再撑爆 prompt）
+
+- 新建 `skills/deepx-edit-file/SKILL.md`：edit_file_v2 完整操作手册（hunk 表 /
+  读模式三态 / 四层匹配与错误码 / grep+glob 协作协议 / 陷阱）——按需 `skills
+  action=activate` 注入，不进系统提示。
+- backend_prompt.md：L18/L35 压缩为摘要 + 指向 skill；文件从 ~13KB 降至 ~6KB。
+- 动机：极限模式（3-mode）需要特定提示词触发——深度教学从常驻 prompt 迁到
+  按需 skill，标准模式保持轻量，极限/创造模式激活 skill 获取完整能力。
+
+## 14. 宽松行号 hint_line：行号作提示、内容作通行证（2026-08-15 设计确认）
+
+**动机**：模型从 read 结果复制行号是常态，但文件可能被其他工具改过（行号漂移
+≤10 行）。v2 字段刻意无行号（v1 教训：行号定位 = 漂移即错改）——hint_line 把
+行号降级为"搜索窗口提示"，内容匹配仍是唯一通行证。
+
+### 14a. 设计（四条铁律）
+
+```text
+hunk 加可选字段 hint_line: u32（1-based）
+
+1. 正常路径不变：全文件四层匹配，行号不参与定位 → 命中即正常应用
+2. Tier4 拒绝（NO_MATCH）时，若 hint_line 存在：
+   [hint_line-10, hint_line+10] 窗口内重跑四层 → 唯一命中 → 应用，
+   响应回传 { used_hint: true, actual_line, offset }（偏差透明）
+3. 窗口内歧义/不命中 → 拒绝，候选优先列窗口内内容（现代版 DID YOU MEAN）
+4. 偏差 >10 行 → 拒绝（模型行号概念已失效，应重读而非猜测）
+```
+
+### 14b. 安全约束
+
+- 行号永不单独定位（窗口内必须走完整 Tier1-4 阈值）
+- 窗口命中必须唯一（歧义即拒绝，不猜）
+- 默认路径零变化（不传 hint_line 行为与现状完全一致，向后兼容）
+
+### 14c. 实现成本
+
+- hunk schema + 解析加可选字段；匹配引擎加窗口参数（复用四层，仅搜索范围
+  从全文件缩到行窗口）；响应加 used_hint/actual_line/offset；测试 R28-R35
+  （窗口命中 / 窗口歧义 / 超窗拒绝 / 不传 hint 行为不变）
+
+## 15. 二次确认与省 token：现状确认 + 非 toolcall 自循环（2026-08-15）
+
+### 15a. 现状确认（已存在，无需新做）
+
+```text
+dry_run=true → 只定位+计算不写盘 → pending_id + diff 预览
+→ 模型看 diff：满意 → confirm_apply {pending_id, action: apply} 落盘
+             不满意 → 同 turn 重新 edit_file_v2 修正（无额外开销）
+→ confirm_apply 落盘【不重发 hunks】（pending 内存暂存）——省 token 现成答案
+```
+
+**Phase 0（零代码）**：把 dry_run→pending→confirm 工作流写进
+skills/deepx-edit-file/SKILL.md（模型养成"先预览后落盘"习惯）。
+
+### 15b. 非 toolcall 自循环（三阶段，用户提议）
+
+**动机**：toolcall JSON 协议冗长（schema 回显 + 参数重发）；模型天生擅长输出
+diff/hunk。成熟先例：Claude Code（```apply-patch）、Aider（```diff）。
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| Phase 0 | dry_run→pending→confirm 工作流文档化（零代码） | 待做 |
+| Phase 1 | ```` ```edit ```` fence：assistant 文本检测 fence → 提取 hunk JSON →
+  走【现有 execute_authorized 链】（身份/权限/admission/账本/audit 零绕过）→
+  结果注入下一轮。白名单工具（先仅 edit_file_v2）+ 解析失败回退提示工具 | 待做 |
+| Phase 2 | ```` ```diff ```` 直接解析（unified diff → hunk），更自然、解析成本高 | 观察 Phase 1 解析率再定 |
+
+**铁律**：fence 解析后必须走与 toolcall 完全相同的执行链——只是入口从
+"JSON toolcall"换成"文本解析"，内核零绕过（审计身份 = assistant 消息归属 session）。
+
+## 16. 读/编辑引擎一致性确认（2026-08-15）
+
+**结论：行号口径一致（1-based 文本行计数），锚定能力只在 edit 读模式。**
+
+| 能力 | read_file（独立工具，file_query.rs） | edit_file_v2 读模式（同文件） |
+|---|---|---|
+| 行号计算 | 文本行计数（split lines） | 同口径（start_line/end_line 闭区间） |
+| 行号展示 | `L<n>:` 前缀 | 同（读模式三态之一） |
+| 范围语义 | 1-based 闭区间、越界 LINE_OUT_OF_RANGE | 对齐 read_file（0→PARSE_ERROR 等） |
+| 范围上限 | 400 行 / 24K 字符 → RANGE_TOO_LARGE | **同上限**（刻意对齐） |
+| 结果折叠 | `[details folded]` 是**平台层通用机制**（所有工具大结果折叠），非 read 独有 | 同（通用机制） |
+| **续读 continuation** | **有**：超预算时回传可直接执行的续读参数（start_line 自动推进，L245-248） | **无**（仅截断标注 64KB/truncated） |
+| 内容锚定 | **无**（纯行计数） | **有**（anchor + 四层引擎，读-改同锚） |
+| 批量读 | 一次 8 文件 | 单文件 |
+
+**衔接设计**：read_file 的行号可直接喂给 edit 行号范围读（同口径）；edit 的
+锚定读解决"行号漂移"（anchor 与编辑共用四层引擎）。
+
+**展示层缺口（移除 read 前需补齐）**：
+1. **continuation 续读**——read 独有、edit 读缺失；模型读超预算时的续读体验会退化
+2. **8 文件批量读**——read 独有；需决策 edit 补批量或接受单文件轮询
+3. 折叠本身无需补（平台层通用，edit 读同样受益）
+
+**教学现状**：edit_file_v2 的 tool description 已含读模式说明（"Omit hunks (or
+send []) to READ the file…"），模型看 schema 即知。待办：SKILL.md 强化
+"读优先用 edit 读模式（同锚）"指引；注意 read_file 的 8 文件批量读是 edit
+读模式没有的能力——移除 read 前需决策：edit 补批量读或接受单文件轮询。
+
+## 17. 补强三件套：宽容化 / 账本行号修正 / hint_line（2026-08-15 实施完成）
+
+**动机**：行号漂移是模型盲定位错误的主要来源。三件套分别从"读的容错"、
+"行号自动补偿"、"编辑定位消歧"三个方向收敛，全部**默认路径零变化**。
+
+### 17.1 read 宽容化（file_query.rs，实施完成 5/5 测试）
+
+| 输入 | 旧行为 | 新行为 |
+|---|---|---|
+| `start_line=0` / `end_line=0` | 拒绝 `read line numbers start at 1` | 视为 1（LSP 0-based 混用宽容） |
+| `end_line` 越界 | `LINE_OUT_OF_RANGE` 拒绝 | **截断**到 `total_lines`（读少不读错，truncated 语义照旧） |
+| `start_line` 越界 | 拒绝 | **仍拒绝**（行号概念失效，data 带 total_lines 可立即重试） |
+| `end < start` / 超 MAX_LINES | 拒绝 | 不变 |
+
+### 17.2 账本行号修正（file_state.rs + file_query.rs + file_edit_v2.rs，8/8 测试）
+
+**机制**：read 建立行号基线（清空偏移链）→ edit 成功时按 hunk 记录
+`(before_line, delta)` 偏移 → read 再次请求旧行号时自动补偿。
+
+- `file_state::record_edit_with_shifts(path, content, shifts)`：edit 落盘后调用，
+  追加偏移链；`record_write`/`record_read` 清链（全覆盖/新基线语义）；
+  `record_grep(path)` 清链（grep 输出实时行号，防误修正）。
+- `apply_ops` 返回 `(String, Vec<(usize, i64)>)`：每 hunk 的
+  `(编辑前 1-based 起始行, 行号增量 = 新增换行数 - 移除换行数)`，单快照计算。
+- `read_one`：偏移链非空时对 start/end 逐行补偿（首尾偏移一致才修正），
+  meta 透明回传 `corrected/original_lines/line_offset`。
+- **修正触发条件 = 偏移链非空**（不依赖 hash 失配——账本 edit 后 hash 已更新，
+  失配检测会漏）；grep/write/read 清链保证实时行号与全覆盖场景不误伤。
+- 外部修改（不经账本）→ 链空 → 不修正，`expected_hash` 兜底。
+- 已知边界：`read → edit → grep → edit → read(用 grep 行号)` 链中 grep 清链
+  后只修正第二个 edit 的偏移，语义正确；grep 与 read 的账本 key 形态不同时
+  修正不触发（保守安全）。
+
+### 17.3 hint_line 宽松行号（file_edit_v2.rs，R30-R35 共 6 测试）
+
+**语义**：行号 = 提示/窗口（±10 行），内容 = 唯一通行证，唯一命中才应用。
+
+- hunk 可选字段 `hint_line`（1-based；0 视为 1），支持 replace /
+  insert_after / insert_before / replace_inline（replace_all 除外）。
+- **触发入口 = AMBIGUOUS_MATCH**（多命中消歧，设计修正：NO_MATCH 场景窗口内
+  Tier1 必然也无命中，无意义）：`[hint-10, hint+10]` 窗口内 Tier1 精确匹配，
+  0 命中 → 保留原 Ambiguous；1 命中 → 应用（tier=4）；>1 → 新 Ambiguous。
+- 透明回传：report JSON 加 `used_hint/actual_line/line_offset`（偏差 = 实际 - 提示）。
+- **默认路径零变化**：hint_line 缺省时行为与 §8 原引擎完全一致（既有 82 测试全过）。
+
+### 17.4 实施验证
+
+- `cargo test --workspace` 全绿（新增 17 测试：read 3 + 账本 3 + 偏移 3 + hint 6 + 竞态加固 2）。
+- `cargo build --workspace` 零警告零错误。
+- 顺带修复：file_state `pending_roundtrip_applies_remote_ledger` 的并行竞态
+  （全局 pending 队列互相抢增量 → 重试 3 次加固）。

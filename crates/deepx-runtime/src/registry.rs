@@ -114,6 +114,10 @@ pub struct AgentRegistry {
     hub: Option<Arc<RingingHub>>,
     /// daemon 拉起的 workspace serve endpoint + token（注入每个 worker env）。
     workspace_env: Option<(String, String)>,
+    /// workspace 运行模式（"local" / "wsl"）。工具执行后端据此决定：
+    /// local 默认进程内（worker 内最短路径，serve 可退役）；仅 wsl 才经 HTTP
+    /// 远程到 WSL2 serve 执行跨 OS 工具。
+    workspace_mode: String,
     /// daemon 正在关闭：worker 退出是预期的，禁止自动重生。
     shutting_down: bool,
     /// 最近一次 spawn 时间（防崩溃-重启风暴：同一 seed 1 秒内不重复拉起）。
@@ -127,14 +131,18 @@ impl AgentRegistry {
             activity: SessionActivityTracker::default(),
             hub: None,
             workspace_env: None,
+            workspace_mode: "local".to_string(),
             shutting_down: false,
             last_spawn: HashMap::new(),
         }
     }
 
-    /// 注入 workspace serve 连接信息；worker spawn 时写入其环境变量。
-    pub fn attach_workspace(&mut self, endpoint: String, token: String) {
+    /// 注入 workspace serve 连接信息与运行模式；worker spawn 时写入其环境变量。
+    /// `mode` ∈ {"local", "wsl"}：local 时 worker 仍可用 endpoint（subagent 注册表
+    /// 等），但工具执行后端保持进程内；wsl 时才启用 HTTP 远程工具执行。
+    pub fn attach_workspace(&mut self, endpoint: String, token: String, mode: &str) {
         self.workspace_env = Some((endpoint, token));
+        self.workspace_mode = mode.to_string();
     }
 
     /// 挂载 Ringing 运行时。Ringing worker 事件只进入 native hub。
@@ -257,6 +265,8 @@ impl AgentRegistry {
             command.env("DEEPX_WORKSPACE_URL", endpoint);
             command.env("DEEPX_WORKSPACE_TOKEN", token);
         }
+        // 工具执行后端模式：local → 进程内；wsl → 远程 HTTP 到 WSL2 serve。
+        command.env("DEEPX_WORKSPACE_MODE", &self.workspace_mode);
         // Resume worker：timeline 是 turn 账本的权威源。meta.turn_count 只在
         // turn 完成时持久化（compact 也会缩小消息视图），daemon 重启后它可能
         // 远小于 timeline 已记录的 turn 数——worker 按它恢复分配器就会复用

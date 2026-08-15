@@ -315,6 +315,11 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                 let last_shimmer_step = last_shimmer_step.clone();
                 let pending_anchor = pending_anchor.clone();
                 move || {
+                    // panic 防护：任何 RefCell 冲突/索引越界等 panic 只记日志，
+                    // 绝不穿过 WinUI FFI 边界（否则 = stowed exception
+                    // 0xc000027b 进程崩溃——2026-08-15 会话切换崩溃的止血）。
+                    let panic_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // 后台恢复检测：窗口不可见时 vsync 回调暂停，恢复可见
                     // 后首帧 elapsed = 后台时长。超过阈值 → 丢弃积压增量
                     // （快照会覆盖 transcript）+ 清 last_restored_seed 触发
@@ -591,6 +596,17 @@ pub fn chat_view(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
                         *shimmer_tick.borrow_mut() = next_shimmer_tick;
                         *render_generation.borrow_mut() += 1;
                         set_render_generation.call(*render_generation.borrow());
+                    }
+                    }));
+                    if let Err(payload) = panic_result {
+                        let message = payload
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown panic".into());
+                        log_diag(&format!(
+                            "chat_view: on_frame panicked (recovered): {message}"
+                        ));
                     }
                 }
             }) {

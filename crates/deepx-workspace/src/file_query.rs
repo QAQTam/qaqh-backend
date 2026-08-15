@@ -93,20 +93,16 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
         );
     }
 
-    let start = args
+    let mut start = args
         .get("start_line")
         .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
-    let end = args
+        .map(|v| v as usize)
+        .map(|v| if v == 0 { 1 } else { v });
+    let mut end = args
         .get("end_line")
         .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
-    if start.is_some_and(|value| value == 0) || end.is_some_and(|value| value == 0) {
-        return (
-            ToolResult::error("read line numbers start at 1"),
-            serde_json::json!({}),
-        );
-    }
+        .map(|v| v as usize)
+        .map(|v| if v == 0 { 1 } else { v });
     if let (Some(start), Some(end)) = (start, end) {
         if end < start {
             return (
@@ -166,9 +162,34 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
         lines.pop();
     }
     let total_lines = lines.len();
+
+    // ── 账本行号修正 ──────────────────────────────────────────────
+    // 偏移链非空 = 最近一次 read 基线之后发生过账本 edit → 模型仍用旧行号
+    // 盲定位时自动补偿（grep 输出清链、write 全覆盖清链、read 新基线清链，
+    // 因此实时行号/全覆盖场景不会被误修正）。仅当首尾偏移一致（范围宽度
+    // 不变）才修正；偏移不一致保持原样，由 expected_hash 兜底。修正信息经
+    // meta 透明回传（corrected/original_lines/line_offset）。
+    let mut corrected: Option<(usize, usize)> = None;
+    let mut offset: Option<i64> = None;
+    if let (Some(s), Some(e)) = (start, end) {
+        if let (Some((s2, ds)), Some((e2, de))) = (
+            crate::file_state::correct_line(&path, s),
+            crate::file_state::correct_line(&path, e),
+        ) {
+            if (s2 != s || e2 != e) && ds == de {
+                corrected = Some((s, e));
+                offset = Some(ds);
+                start = Some(s2);
+                end = Some(e2);
+            }
+        }
+    }
+
     let explicit = start.is_some() || end.is_some();
     let first = start.unwrap_or(1).saturating_sub(1);
-    if first > total_lines || end.is_some_and(|value| value > total_lines && explicit) {
+    // 宽容语义：仅 start 越界（行号概念失效）硬拒绝；end 越界截断到
+    // total_lines（读少不读错，与全文件读的截断一致，truncated 会标注）。
+    if first > total_lines {
         return (
             ToolResult::error_data(
                 "LINE_OUT_OF_RANGE",
@@ -246,6 +267,11 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
         continuation["start_line"] = serde_json::json!(end_index + 1);
         continuation["end_line"] = serde_json::Value::Null;
         meta["continuation"] = continuation;
+    }
+    if let (Some((os, oe)), Some(delta)) = (corrected, offset) {
+        meta["corrected"] = serde_json::json!(true);
+        meta["original_lines"] = serde_json::json!([os, oe]);
+        meta["line_offset"] = serde_json::json!(delta);
     }
     // 任何 read（全文件或范围）都建立账本基线：模型后续用 start_line 盲定位时，
     // 工具凭账本自动防漂移，无需模型手动回传 hash。
@@ -333,3 +359,201 @@ mod tests {
         assert_eq!(hash, crate::file_shared::content_hash("one\ntwo\nthree\n"));
     }
 }
+
+    #[test]
+    fn zero_line_is_tolerated_as_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.txt"), "one\ntwo\n").unwrap();
+
+        // 0-based 混用（LSP 习惯）：0 视为 1，不再拒绝。
+        let result = exec_read_file(&serde_json::json!({
+            "path": dir.path().join("x.txt").to_string_lossy(),
+            "start_line": 0,
+            "end_line": 1,
+        }));
+        assert!(result.is_success(), "0-based tolerance: {}", result.model_text());
+        assert_eq!(result.model_text(), "L1: one");
+        assert_eq!(result.data["files"][0]["start_line"], 1);
+    }
+
+    #[test]
+    fn out_of_range_end_truncates_instead_of_rejecting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+
+        // end 越界（行号漂移常见场景）：截断到文件尾 + truncated 标记，不拒绝。
+        let result = exec_read_file(&serde_json::json!({
+            "path": dir.path().join("x.txt").to_string_lossy(),
+            "start_line": 2,
+            "end_line": 99,
+        }));
+        assert!(
+            result.is_success(),
+            "end truncation should succeed: {}",
+            result.model_text()
+        );
+        assert_eq!(result.model_text(), "L2: two\nL3: three\nL4: four");
+        let meta = &result.data["files"][0];
+        assert_eq!(meta["end_line"], 4);
+        assert_eq!(meta["total_lines"], 4);
+        assert!(!meta["truncated"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn out_of_range_start_still_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.txt"), "one\ntwo\n").unwrap();
+
+        // start 越界 = 行号概念失效：仍硬拒绝（data 带 total_lines 可立即重试）。
+        let result = exec_read_file(&serde_json::json!({
+            "path": dir.path().join("x.txt").to_string_lossy(),
+            "start_line": 10,
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.error.as_ref().unwrap().code, "LINE_OUT_OF_RANGE");
+    }
+
+    #[test]
+    fn ledger_corrects_stale_line_numbers_after_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("y.txt");
+        std::fs::write(&p, "one\ntwo\nthree\n").unwrap();
+        let path = p.to_string_lossy().to_string();
+
+        // 基线 read（清空偏移链）
+        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        assert!(r1.is_success());
+
+        // 账本 edit：在 L2 处插入两行（模拟 edit_file_v2 的 record_edit_with_shifts）
+        let new_content = "one\nINS1\nINS2\ntwo\nthree\n";
+        crate::file_state::record_edit_with_shifts(&path, new_content, &[(2, 2)]);
+        std::fs::write(&p, new_content).unwrap();
+
+        // 模型仍用旧行号 L3（= 现在的 L5 three）盲定位 → 自动修正 + 透明回传
+        let r2 = exec_read_file(&serde_json::json!({
+            "path": path,
+            "start_line": 3,
+            "end_line": 3,
+        }));
+        assert!(r2.is_success(), "stale line correction: {}", r2.model_text());
+        assert_eq!(r2.model_text(), "L5: three");
+        let meta = &r2.data["files"][0];
+        assert_eq!(meta["corrected"], serde_json::json!(true));
+        assert_eq!(meta["original_lines"], serde_json::json!([3, 3]));
+        assert_eq!(meta["line_offset"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn external_modification_is_not_corrected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("z.txt");
+        std::fs::write(&p, "one\ntwo\nthree\n").unwrap();
+        let path = p.to_string_lossy().to_string();
+
+        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        assert!(r1.is_success());
+
+        // 外部直接改（不经账本）：偏移链为空 → 无法解释 → 不修正（hash 兜底）
+        std::fs::write(&p, "one\nEXT\nthree\n").unwrap();
+        let r2 = exec_read_file(&serde_json::json!({
+            "path": path,
+            "start_line": 3,
+            "end_line": 3,
+        }));
+        assert!(r2.is_success());
+        let meta = &r2.data["files"][0];
+        assert!(meta.get("corrected").is_none(), "external change must not be corrected");
+    }
+
+    #[test]
+    fn write_clears_shift_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("w.txt");
+        std::fs::write(&p, "one\ntwo\n").unwrap();
+        let path = p.to_string_lossy().to_string();
+
+        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        assert!(r1.is_success());
+        crate::file_state::record_edit_with_shifts(&path, "one\ntwo\n", &[(1, 3)]);
+        // write 全覆盖：行号全失效 → 清链
+        crate::file_state::record_write(&path, "a\nb\nc\nd\n");
+        std::fs::write(&p, "a\nb\nc\nd\n").unwrap();
+
+        let r2 = exec_read_file(&serde_json::json!({
+            "path": path,
+            "start_line": 3,
+            "end_line": 3,
+        }));
+        assert!(r2.is_success());
+        assert_eq!(r2.model_text(), "L3: c");
+        let meta = &r2.data["files"][0];
+        assert!(meta.get("corrected").is_none(), "write semantics must clear the shift chain");
+    }
+
+    #[test]
+    fn end_to_end_edit_then_stale_read_is_corrected() {
+        // 真实工具链路：read（基线）→ edit_file_v2（落账本偏移）→ 旧行号 read（自动修正）。
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("e2e.txt");
+        std::fs::write(&p, "a\nb\nc\nd\ne\n").unwrap();
+        let path = p.to_string_lossy().to_string();
+
+        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        assert!(r1.is_success());
+        let h1 = r1.data["files"][0]["hash"].as_str().unwrap().to_string();
+
+        // 真实 edit 工具：L3 的 c 后插入两行（+2 偏移）
+        let e = crate::file_edit_v2::exec_edit_file_v2(&serde_json::json!({
+            "path": path,
+            "expected_hash": h1,
+            "hunks": [{"kind": "insert_after", "anchor": "c", "new": "C1\nC2\n"}],
+        }));
+        assert!(e.is_success(), "edit: {}", e.model_text());
+
+        // 模型仍用旧行号 L5（现在 = L7 e）→ 自动修正 + 透明回传
+        let r2 = exec_read_file(&serde_json::json!({
+            "path": path,
+            "start_line": 5,
+            "end_line": 5,
+        }));
+        assert!(r2.is_success(), "stale read: {}", r2.model_text());
+        assert_eq!(r2.model_text(), "L7: e");
+        let meta = &r2.data["files"][0];
+        assert_eq!(meta["corrected"], serde_json::json!(true));
+        assert_eq!(meta["original_lines"], serde_json::json!([5, 5]));
+        assert_eq!(meta["line_offset"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn partial_edit_records_shifts_for_applied_hunks_only() {
+        // partial 模式：成功的 hunk 偏移入账本（失败的 no-op），随后旧行号 read 修正。
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("p.txt");
+        std::fs::write(&p, "a\nb\nc\nd\n").unwrap();
+        let path = p.to_string_lossy().to_string();
+        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        assert!(r1.is_success());
+
+        let e = crate::file_edit_v2::exec_edit_file_v2(&serde_json::json!({
+            "path": path,
+            "mode": "partial",
+            "hunks": [
+                {"kind": "replace", "old": "b", "new": "B1\nB2"},
+                {"kind": "replace", "old": "zzz", "new": "yyy"},
+            ],
+        }));
+        assert!(e.is_success(), "partial: {}", e.model_text());
+        assert_eq!(e.data["status"], "partial");
+
+        // 旧 L4 d → 新 L5 d（仅成功 hunk 的偏移生效）
+        let r2 = exec_read_file(&serde_json::json!({
+            "path": path,
+            "start_line": 4,
+            "end_line": 4,
+        }));
+        assert!(r2.is_success(), "{}", r2.model_text());
+        assert_eq!(r2.model_text(), "L5: d");
+        let meta = &r2.data["files"][0];
+        assert_eq!(meta["corrected"], serde_json::json!(true));
+        assert_eq!(meta["line_offset"], serde_json::json!(1));
+    }

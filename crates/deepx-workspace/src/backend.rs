@@ -169,11 +169,14 @@ impl ToolExecutionBackend for HttpToolExecutionBackend {
                 }
             }
             Err(error) => {
-                // 仅"服务不可达"（连接被拒）回退本地：渐进式兼容
-                // （serve 未启动时旧行为）。执行中的失败（读超时、断连、HTTP
-                // 错误）绝不本地重跑——serve 端工具可能仍在执行，重跑会重复
-                // 副作用（如 exec 的命令执行两遍、write 覆盖两次）。
-                if matches!(&error, ureq::Error::ConnectionFailed) {
+                // 仅"服务不可达"回退本地：请求从未到达 serve，无副作用风险。
+                // ureq 3 把 Connection refused 包装为 Error::Io（From<io::Error>），
+                // Error::ConnectionFailed 仅自定义 connector 才产生——必须同时
+                // 匹配 Io(ConnectionRefused|NotConnected)，否则回退永不触发，
+                // serve 一死 L1 工具（read/write/edit/exec/grep）全部不可用。
+                // 执行中的失败（ConnectionReset 断连、TimedOut 读超时、HTTP
+                // 错误）绝不本地重跑——serve 端工具可能已执行/仍在执行。
+                if is_connect_failure(&error) {
                     log::warn!(
                         "[workspace-backend] {} unreachable ({error}); fallback local",
                         self.endpoint
@@ -191,7 +194,23 @@ impl ToolExecutionBackend for HttpToolExecutionBackend {
 }
 
 /// 执行中失败的统一错误响应（不触发本地重跑）。
-fn workspace_exec_failed(detail: &str) -> ToolResult {
+/// 判定"请求从未到达 serve"的连接阶段失败：这些情况下本地回退是安全的
+/// （serve 端不可能已产生副作用）。
+///
+/// ureq 3 的 `Error::ConnectionFailed` 仅由自定义 connector 产生；默认
+/// connector 的 refused/not-connected 经 `From<io::Error>` 包装为
+/// `Error::Io`——两者都必须识别。`ConnectionReset`（断连）与 `TimedOut`
+/// （读超时）可能是执行中失败，绝不回退。
+fn is_connect_failure(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(e) => matches!(
+            e.kind(),
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotConnected
+        ),
+        _ => false,
+    }
+}fn workspace_exec_failed(detail: &str) -> ToolResult {
     ToolResult::error(
         serde_json::json!({
             "timeis": crate::now_utc8(),
@@ -287,7 +306,36 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
-    fn serve_bin_path() -> std::path::PathBuf {
+    #[test]
+    fn connect_failure_classification() {
+        use std::io;
+
+        // 请求从未到达 serve：安全回退本地。
+        assert!(is_connect_failure(&ureq::Error::ConnectionFailed));
+        assert!(is_connect_failure(&ureq::Error::Io(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "Connection refused"
+        ))));
+        assert!(is_connect_failure(&ureq::Error::Io(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "socket not connected"
+        ))));
+
+        // 执行中失败：绝不回退（副作用可能已发生）。
+        assert!(!is_connect_failure(&ureq::Error::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "remote closed"
+        ))));
+        assert!(!is_connect_failure(&ureq::Error::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "read timeout"
+        ))));
+        assert!(!is_connect_failure(&ureq::Error::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "peer disconnected"
+        ))));
+        assert!(!is_connect_failure(&ureq::Error::StatusCode(500)));
+    }    fn serve_bin_path() -> std::path::PathBuf {
         // 测试运行于 target/<profile>/deps/deepx_workspace-<hash>.exe；
         // serve 二进制在 target/<profile>/deepx-workspace(.exe)。
         let mut exe = std::env::current_exe().expect("test exe path");

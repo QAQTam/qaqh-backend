@@ -64,12 +64,24 @@ enum Hunk {
         context_before: String,
         context_after: String,
         replace_all: bool,
+        /// 宽松行号提示（1-based，±10 窗口）：四层定位全失败后，仅在
+        /// [hint-10, hint+10] 内重试 Tier1 精确匹配，唯一命中才应用。
+        /// 不触碰默认路径（未提供时行为与原来完全一致）。
+        hint_line: Option<usize>,
     },
     /// 整文件覆盖（等价 write 的 content 语义）：不要求 `old`，恒成功；
     /// **独占**——必须单独调用，与其它 hunk 混用报 OVERWRITE_EXCLUSIVE。
     Overwrite { new: String },
-    InsertAfter { anchor: String, new: String },
-    InsertBefore { anchor: String, new: String },
+    InsertAfter {
+        anchor: String,
+        new: String,
+        hint_line: Option<usize>,
+    },
+    InsertBefore {
+        anchor: String,
+        new: String,
+        hint_line: Option<usize>,
+    },
     PrependFile { new: String },
     AppendFile { new: String },
     /// 行内替换（sed `s///` 语义）：anchor 定位行窗口后，**仅在窗口内**做子串/
@@ -81,6 +93,7 @@ enum Hunk {
         new: String,
         replace_all: bool,
         regex: bool,
+        hint_line: Option<usize>,
     },
 }
 
@@ -140,6 +153,7 @@ impl Hunk {
                     context_before: norm(context_before, notes),
                     context_after: norm(context_after, notes),
                     replace_all,
+                    hint_line: parse_hint_line(v),
                 })
             }
             "overwrite" => {
@@ -162,9 +176,17 @@ impl Hunk {
                     .ok_or_else(|| format!("{kind} hunk requires 'new'"))?;
                 let (anchor, new) = (norm(anchor, notes), norm(new, notes));
                 if kind == "insert_after" {
-                    Ok(Hunk::InsertAfter { anchor, new })
+                    Ok(Hunk::InsertAfter {
+                        anchor,
+                        new,
+                        hint_line: parse_hint_line(v),
+                    })
                 } else {
-                    Ok(Hunk::InsertBefore { anchor, new })
+                    Ok(Hunk::InsertBefore {
+                        anchor,
+                        new,
+                        hint_line: parse_hint_line(v),
+                    })
                 }
             }
             "prepend_file" | "append_file" => {
@@ -211,6 +233,7 @@ impl Hunk {
                     new: norm(new, notes),
                     replace_all,
                     regex,
+                    hint_line: parse_hint_line(v),
                 })
             }
             other => Err(format!(
@@ -315,6 +338,8 @@ struct Located {
     tier: u8,
     score: f32,
     note: String,
+    /// hint_line 兜底命中时记录模型提示的 1-based 行号（透明回传用）。
+    hint_line: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -618,6 +643,7 @@ fn located(view: &FileView, s: usize, win: usize, tier: u8, score: f32, note: &s
         tier,
         score,
         note: note.to_string(),
+        hint_line: None,
     }
 }
 
@@ -713,7 +739,15 @@ fn locate_pure_insert(view: &FileView, before: &str, after: &str) -> Result<Loca
         tier,
         score,
         note,
+        hint_line: None,
     })
+}
+
+/// 解析可选的宽松行号提示（hint_line，1-based；0 视为 1）。
+fn parse_hint_line(v: &Value) -> Option<usize> {
+    v.get("hint_line")
+        .and_then(|x| x.as_u64())
+        .map(|x| x.max(1) as usize)
 }
 
 /// replace hunk 的定位：四层流水线。
@@ -839,6 +873,7 @@ fn locate_hunk(view: &FileView, hunk: &Hunk) -> Result<Vec<Located>, LocateError
             tier: 1,
             score: 1.0,
             note: "overwrite".to_string(),
+            hint_line: None,
         }]),
         Hunk::InsertAfter { anchor, .. } | Hunk::InsertBefore { anchor, .. } => {
             locate_anchor(view, anchor).map(|l| vec![l])
@@ -851,6 +886,7 @@ fn locate_hunk(view: &FileView, hunk: &Hunk) -> Result<Vec<Located>, LocateError
             tier: 1,
             score: 1.0,
             note: "prepend".to_string(),
+            hint_line: None,
         }]),
         Hunk::AppendFile { .. } => Ok(vec![Located {
             start_char: view.content.len(),
@@ -860,6 +896,7 @@ fn locate_hunk(view: &FileView, hunk: &Hunk) -> Result<Vec<Located>, LocateError
             tier: 1,
             score: 1.0,
             note: "append".to_string(),
+            hint_line: None,
         }]),
         Hunk::ReplaceInline {
             anchor,
@@ -893,6 +930,160 @@ fn locate_hunk(view: &FileView, hunk: &Hunk) -> Result<Vec<Located>, LocateError
             }
             Ok(vec![loc])
         }
+    }
+}
+
+/// Tier1 精确匹配限定在 [lo, hi)（0-based 行窗口）内。
+fn tier1_in_window(view: &FileView, pat: &[&str], lo: usize, hi: usize) -> Vec<usize> {
+    tier1(view, pat)
+        .into_iter()
+        .filter(|&s| s >= lo && s < hi)
+        .collect()
+}
+
+/// hint_line 兜底定位（宽松行号）：多命中（Ambiguous）时按行号窗口消歧。
+///
+/// 语义：行号 = 提示/窗口（±10 行），内容 = 唯一通行证——窗口内 Tier1 精确
+/// 匹配，**唯一命中才应用**（0 个 → None，调用方保留原 Ambiguous；多个 →
+/// 新 Ambiguous 附窗口信息）。不触碰默认路径：hint_line 为 None 返回 None。
+const HINT_WINDOW: usize = 10;
+
+fn locate_with_hint(view: &FileView, hunk: &Hunk) -> Option<Result<Located, LocateError>> {
+    let hint = match hunk {
+        Hunk::Replace {
+            hint_line: Some(h),
+            replace_all: false,
+            ..
+        }
+        | Hunk::InsertAfter {
+            hint_line: Some(h), ..
+        }
+        | Hunk::InsertBefore {
+            hint_line: Some(h), ..
+        }
+        | Hunk::ReplaceInline {
+            hint_line: Some(h), ..
+        } => (*h).max(1), // 0 视为 1（与 parse 层一致）
+        _ => return None,
+    };
+    let total = view.lines.len();
+    // 1-based hint → 0-based 窗口 [hint-11, hint+10)，钳制到文件范围。
+    let lo = hint.saturating_sub(HINT_WINDOW + 1).min(total);
+    let hi = (hint + HINT_WINDOW).min(total);
+    if lo >= hi {
+        return None; // 窗口为空 → hint 无意义，保留原错误
+    }
+
+    match hunk {
+        Hunk::Replace { old, .. } => {
+            let pat = pattern_lines(old);
+            if pat.is_empty() {
+                return None; // 纯插入走 locate_pure_insert，不做 hint 兜底
+            }
+            let cands = tier1_in_window(view, &pat, lo, hi);
+            match cands.len() {
+                0 => None,
+                1 => {
+                    let mut loc = located(
+                        view,
+                        cands[0],
+                        pat.len(),
+                        4,
+                        1.0,
+                        &format!("hint_line {hint} (window, exact)"),
+                    );
+                    loc.hint_line = Some(hint);
+                    Some(Ok(loc))
+                }
+                _ => Some(Err(LocateError::Ambiguous {
+                    candidates: make_candidates(view, &cands, pat.len(), 1, 1.0, &pat),
+                    detail: format!(
+                        "hint_line {hint}: 'old' still matches {} locations within window L{}-L{}; add context_before/context_after or a more specific hint",
+                        cands.len(),
+                        lo + 1,
+                        hi
+                    ),
+                })),
+            }
+        }
+        Hunk::InsertAfter { anchor, .. } | Hunk::InsertBefore { anchor, .. } => {
+            let pat = pattern_lines(anchor);
+            let cands = tier1_in_window(view, &pat, lo, hi);
+            match cands.len() {
+                0 => None,
+                1 => {
+                    let mut loc = located(
+                        view,
+                        cands[0],
+                        pat.len(),
+                        4,
+                        1.0,
+                        &format!("hint_line {hint} (window, exact)"),
+                    );
+                    loc.hint_line = Some(hint);
+                    Some(Ok(loc))
+                }
+                _ => Some(Err(LocateError::Ambiguous {
+                    candidates: make_candidates(view, &cands, pat.len(), 1, 1.0, &pat),
+                    detail: format!(
+                        "hint_line {hint}: anchor still matches {} locations within window L{}-L{}; refine the anchor",
+                        cands.len(),
+                        lo + 1,
+                        hi
+                    ),
+                })),
+            }
+        }
+        Hunk::ReplaceInline {
+            anchor,
+            old,
+            regex,
+            ..
+        } => {
+            let pat = pattern_lines(anchor);
+            let cands = tier1_in_window(view, &pat, lo, hi);
+            match cands.len() {
+                0 => None,
+                1 => {
+                    let mut loc = located(
+                        view,
+                        cands[0],
+                        pat.len(),
+                        4,
+                        1.0,
+                        &format!("hint_line {hint} (window, exact)"),
+                    );
+                    // 窗口内验证子串/regex 可命中（与 locate_hunk 的 ReplaceInline 一致）。
+                    let win_lines = loc.win_lines.max(1);
+                    let win = &view.lines[loc.start_line..loc.start_line + win_lines];
+                    let hit = if *regex {
+                        match regex::Regex::new(old) {
+                            Ok(re) => win.iter().any(|l| re.is_match(l)),
+                            Err(e) => {
+                                return Some(Err(LocateError::InvalidRegex(e.to_string())));
+                            }
+                        }
+                    } else {
+                        win.iter().any(|l| l.contains(old.as_str()))
+                    };
+                    if !hit {
+                        return None; // 窗口内无子串 → hint 无效，保留原错误
+                    }
+                    loc.hint_line = Some(hint);
+                    Some(Ok(loc))
+                }
+                _ => Some(Err(LocateError::Ambiguous {
+                    candidates: make_candidates(view, &cands, pat.len(), 1, 1.0, &pat),
+                    detail: format!(
+                        "hint_line {hint}: anchor still matches {} locations within window L{}-L{}",
+                        cands.len(),
+                        lo + 1,
+                        hi
+                    ),
+                })),
+            }
+        }
+        _ => None,
     }
 }
 
@@ -989,7 +1180,8 @@ fn inline_replace(
     if regex {
         let re = regex::Regex::new(old).map_err(|e| e.to_string())?;
         let mut out = String::with_capacity(window.len() + new.len());
-        let mut done = !replace_all;
+        // done = 首次替换已完成（仅 replace_all=false 时置位；=true 时每行都换）。
+        let mut done = false;
         for line in window.split_inclusive('\n') {
             if done {
                 out.push_str(line);
@@ -1004,12 +1196,9 @@ fn inline_replace(
                 out.push_str(&re.replace_all(body, new));
             } else {
                 match re.find(body) {
-                    Some(m) => {
-                        let mut replaced = String::with_capacity(body.len() + new.len());
-                        replaced.push_str(&body[..m.start()]);
-                        replaced.push_str(new);
-                        replaced.push_str(&body[m.end()..]);
-                        out.push_str(&replaced);
+                    Some(_) => {
+                        // re.replace 替换第一处并展开 $1/$2 捕获组（sed s/// 语义）。
+                        out.push_str(&re.replace(body, new));
                         done = true;
                     }
                     None => out.push_str(body),
@@ -1020,7 +1209,8 @@ fn inline_replace(
         Ok(out)
     } else {
         let mut out = String::with_capacity(window.len() + new.len());
-        let mut done = !replace_all;
+        // done = 首次替换已完成（仅 replace_all=false 时置位；=true 时每行都换）。
+        let mut done = false;
         for line in window.split_inclusive('\n') {
             if done {
                 out.push_str(line);
@@ -1156,13 +1346,25 @@ fn check_overlap(ops: &[(usize, ResolvedOp)]) -> Result<(), (usize, usize)> {
 }
 
 /// 倒序应用：位置大的先改，前面区间的 char index 不受后面编辑影响。
-fn apply_ops(content: &str, ops: &[(usize, ResolvedOp)]) -> String {
+/// 返回 (编辑后文本, 行号偏移表)——偏移基于同一快照（单快照两阶段），
+/// 供账本行号修正（read 用旧行号时自动补偿）。
+fn apply_ops(content: &str, ops: &[(usize, ResolvedOp)]) -> (String, Vec<(usize, i64)>) {
     let mut rope = Rope::from_str(content);
+    let mut shifts: Vec<(usize, i64)> = Vec::with_capacity(ops.len());
     let mut ordered: Vec<&ResolvedOp> = ops.iter().map(|(_, op)| op).collect();
     ordered.sort_by_key(|op| std::cmp::Reverse(op.start()));
     for op in ordered {
         match op {
             ResolvedOp::Replace { range, new } => {
+                // 行号增量 = 新增换行数 - 移除换行数（行级替换/行内子串统一）。
+                let before_line = rope.char_to_line(range.start) + 1;
+                let removed_lf = rope
+                    .slice(range.clone())
+                    .chars()
+                    .filter(|&c| c == '\n')
+                    .count() as i64;
+                let added_lf = new.chars().filter(|&c| c == '\n').count() as i64;
+                shifts.push((before_line, added_lf - removed_lf));
                 // ropey 的 remove/insert 为 in-place 修改（返回 ()）——与 spec 假定
                 // 的“返回新 rope”不同，以 crate 实际 API 为准。倒序应用保证前面
                 // 区间的 char index 不受后面编辑影响，in-place 同样安全。
@@ -1171,11 +1373,14 @@ fn apply_ops(content: &str, ops: &[(usize, ResolvedOp)]) -> String {
                 rope.insert(start, new.as_str());
             }
             ResolvedOp::Insert { pos, text } => {
+                let before_line = rope.char_to_line(*pos) + 1;
+                let added_lf = text.chars().filter(|&c| c == '\n').count() as i64;
+                shifts.push((before_line, added_lf));
                 rope.insert(*pos, text.as_str());
             }
         }
     }
-    rope.to_string()
+    (rope.to_string(), shifts)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1193,6 +1398,8 @@ struct HunkReport {
     code: Option<String>,
     detail: Option<String>,
     candidates: Option<Vec<Candidate>>,
+    /// hint_line 兜底命中时记录模型提示的 1-based 行号（透明回传）。
+    used_hint: Option<usize>,
 }
 
 struct FileOutcome {
@@ -1203,6 +1410,9 @@ struct FileOutcome {
     code: Option<String>,
     message: Option<String>,
     notes: Vec<String>,
+    /// 账本行号修正：每 hunk 的 (编辑前 1-based 起始行, 行号增量)。
+    /// 仅成功路径非空；错误/未落盘路径为空。
+    shifts: Vec<(usize, i64)>,
 }
 
 /// 应用语义：strict = 全事务（任一 hunk 失败零改动）；partial = 成功的 hunk
@@ -1234,6 +1444,7 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                     .to_string(),
             ),
             notes,
+            shifts: Vec::new(),
         };
     }
     let view = FileView::new(content);
@@ -1242,7 +1453,20 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
     let mut first_code: Option<String> = None;
 
     for (i, hunk) in hunks.iter().enumerate() {
-        match locate_hunk(&view, hunk) {
+        // hint_line 消歧：多命中（AMBIGUOUS_MATCH）时按提示行号 ±10 开窗口
+        // 过滤，窗口内唯一命中才应用（默认路径零变化：无 hint 原样报错）。
+        let located_result = match locate_hunk(&view, hunk) {
+            Ok(locs) => Ok(locs),
+            Err(LocateError::Ambiguous { candidates, detail }) => {
+                match locate_with_hint(&view, hunk) {
+                    Some(Ok(loc)) => Ok(vec![loc]),
+                    Some(Err(e)) => Err(e),
+                    None => Err(LocateError::Ambiguous { candidates, detail }),
+                }
+            }
+            Err(e) => Err(e),
+        };
+        match located_result {
             Ok(locs) => {
                 // replace_all 一个 hunk 可产出多个位置；报告仍按 hunk 一条，
                 // 位置/分数取首个，note 标注命中数量。
@@ -1265,6 +1489,7 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                     code: None,
                     detail: None,
                     candidates: None,
+                    used_hint: loc.hint_line,
                 });
                 located.push(locs);
             }
@@ -1302,6 +1527,7 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                     code: Some(code),
                     detail: Some(detail),
                     candidates,
+                    used_hint: None,
                 });
                 located.push(Vec::new());
             }
@@ -1324,6 +1550,7 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                     code: Some(code.clone()),
                     message: Some(message),
                     notes,
+                    shifts: Vec::new(),
                 };
             }
             Mode::Partial => {
@@ -1343,6 +1570,7 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                         code: Some(code.clone()),
                         message: Some(format!("{failed}/{failed} hunk(s) failed; nothing applied")),
                         notes,
+                        shifts: Vec::new(),
                     };
                 }
                 if let Err((a, b)) = check_overlap(&ops) {
@@ -1356,9 +1584,10 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                             "successful hunk {a} and hunk {b} resolve to overlapping ranges; no changes written"
                         )),
                         notes,
+                        shifts: Vec::new(),
                     };
                 }
-                let edited = apply_ops(content, &ops);
+                let (edited, shifts) = apply_ops(content, &ops);
                 let applied = ops.len();
                 return FileOutcome {
                     diff: unified_diff(content, &edited, "file"),
@@ -1370,6 +1599,7 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                         "{applied} hunk(s) applied, {failed} failed — re-send ONLY the failed hunks with the returned new_hash as expected_hash"
                     )),
                     notes,
+                    shifts,
                 };
             }
         }
@@ -1392,10 +1622,11 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                 "hunk {a} and hunk {b} resolve to overlapping ranges; no changes written"
             )),
             notes,
+            shifts: Vec::new(),
         };
     }
 
-    let edited = apply_ops(content, &ops);
+    let (edited, shifts) = apply_ops(content, &ops);
     FileOutcome {
         diff: unified_diff(content, &edited, "file"),
         new_hash: Some(content_hash(&edited)),
@@ -1404,6 +1635,7 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
         code: None,
         message: None,
         notes,
+        shifts,
     }
 }
 
@@ -1683,6 +1915,8 @@ fn read_anchored(
                 Some("Provide a non-empty anchor, or use start_line/end_line."),
             );
         }
+        // locate_anchor 不编译正则，InvalidRegex 只可能来自 replace_inline 的 locate_hunk。
+        Err(LocateError::InvalidRegex(_)) => unreachable!("locate_anchor never compiles a regex"),
     };
     let s = loc.start_line;
     let w = loc.win_lines.max(1);
@@ -2167,8 +2401,13 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
                     None,
                 );
             }
-            // 台账：对齐 write 工具（自动区分 created/edited）。
-            crate::file_state::record_write(&path, &write_content);
+            // 台账 + 行号偏移链：局部 hunk 编辑记录偏移（read 旧行号可自动修正）；
+            // 全覆盖/零偏移路径退化为 write 语义（清偏移链 = 行号全部失效）。
+            if outcome.shifts.is_empty() {
+                crate::file_state::record_write(&path, &write_content);
+            } else {
+                crate::file_state::record_edit_with_shifts(&path, &write_content, &outcome.shifts);
+            }
             let new_hash = outcome.new_hash.as_deref().unwrap_or_default();
             let text = render_text(raw_path, &outcome);
             let applied = outcome.reports.iter().filter(|r| r.status == "ok").count();
@@ -2212,6 +2451,14 @@ fn hunk_report_json(r: &HunkReport) -> Value {
     }
     if let Some((a, b)) = r.line_range {
         v["line_range"] = json!([a, b]);
+    }
+    // hint_line 兜底命中：透明回传 提示行号 / 实际行号 / 偏差（实际 - 提示）。
+    if let Some(h) = r.used_hint {
+        v["used_hint"] = json!(h);
+        if let Some((a, _)) = r.line_range {
+            v["actual_line"] = json!(a);
+            v["line_offset"] = json!(a as i64 - h as i64);
+        }
     }
     if let Some(n) = &r.note {
         v["note"] = json!(n);
@@ -2275,7 +2522,7 @@ pub fn register(mgr: &mut ToolManager) {
                     },
                     "hunks": {
                         "type": "array",
-                        "description": "Edit hunks. Each hunk: {\"kind\":\"replace\",\"old\":…,\"new\":…,\"context_before\":…,\"context_after\":…,\"replace_all\":false} | {\"kind\":\"overwrite\",\"new\":…} (whole-file replacement; must be the only hunk) | {\"kind\":\"insert_after\"|\"insert_before\",\"anchor\":…,\"new\":…} | {\"kind\":\"prepend_file\"|\"append_file\",\"new\":…} | {\"kind\":\"replace_inline\",\"anchor\":…,"old\":…,"new\":…,"replace_all\":false,"regex\":false} (sed s/// semantics: substring/regex replace ONLY inside the anchor's located window, never across lines; replace_all=false replaces the first occurrence only; regex uses regex-crate syntax, case-sensitive). Omit hunks or send [] to READ the file (read-only: content + hash + line_count, aligned with read_file; creation requires explicit hunks). Empty 'old' with contexts = pure insert. replace_all=true substitutes every exact occurrence of 'old' (Tier-1 exact only)."
+                        "description": "Edit hunks. Each hunk: {\"kind\":\"replace\",\"old\":…,\"new\":…,\"context_before\":…,\"context_after\":…,\"replace_all\":false} | {\"kind\":\"overwrite\",\"new\":…} (whole-file replacement; must be the only hunk) | {\"kind\":\"insert_after\"|\"insert_before\",\"anchor\":…,\"new\":…} | {\"kind\":\"prepend_file\"|\"append_file\",\"new\":…} | {\"kind\":\"replace_inline\",\"anchor\":…,\"old\":…,\"new\":…,\"replace_all\":false,\"regex\":false} (sed s/// semantics: substring/regex replace ONLY inside the anchor's located window, never across lines; replace_all=false replaces the first occurrence only; regex uses regex-crate syntax, case-sensitive). Omit hunks or send [] to READ the file (read-only: content + hash + line_count, aligned with read_file; creation requires explicit hunks). Empty 'old' with contexts = pure insert. replace_all=true substitutes every exact occurrence of 'old' (Tier-1 exact only)."
                     },
                     "mode": {
                         "type": "string",
@@ -2342,6 +2589,7 @@ mod tests {
             context_before: String::new(),
             context_after: String::new(),
             replace_all: false,
+            hint_line: None,
         }
     }
 
@@ -2352,6 +2600,7 @@ mod tests {
             context_before: String::new(),
             context_after: String::new(),
             replace_all: true,
+            hint_line: None,
         }
     }
 
@@ -2362,6 +2611,18 @@ mod tests {
             context_before: before.to_string(),
             context_after: after.to_string(),
             replace_all: false,
+            hint_line: None,
+        }
+    }
+
+    fn rp_hint(old: &str, new: &str, hint: usize) -> Hunk {
+        Hunk::Replace {
+            old: old.to_string(),
+            new: new.to_string(),
+            context_before: String::new(),
+            context_after: String::new(),
+            replace_all: false,
+            hint_line: Some(hint),
         }
     }
 
@@ -2496,6 +2757,7 @@ mod tests {
                 Hunk::InsertBefore {
                     anchor: "b".into(),
                     new: "BB\n".into(),
+                    hint_line: None,
                 },
             ],
         );
@@ -2569,6 +2831,7 @@ mod tests {
             &[Hunk::InsertAfter {
                 anchor: "b".into(),
                 new: "b2\n".into(),
+                hint_line: None,
             }],
         );
         assert_eq!(out.edited.as_deref(), Some("a\nb\nb2\nc\n"));
@@ -2577,6 +2840,7 @@ mod tests {
             &[Hunk::InsertBefore {
                 anchor: "c".into(),
                 new: "c0\n".into(),
+                hint_line: None,
             }],
         );
         assert_eq!(out.edited.as_deref(), Some("a\nb\nc0\nc\n"));
@@ -2591,10 +2855,12 @@ mod tests {
                 Hunk::InsertAfter {
                     anchor: "b".into(),
                     new: "b2\n".into(),
+                    hint_line: None,
                 },
                 Hunk::InsertBefore {
                     anchor: "c".into(),
                     new: "c0\n".into(),
+                    hint_line: None,
                 },
             ],
         );
@@ -2610,6 +2876,7 @@ mod tests {
             &[Hunk::InsertAfter {
                 anchor: "x".into(),
                 new: "y\n".into(),
+                hint_line: None,
             }],
         );
         assert_eq!(err_code(&out), "AMBIGUOUS_MATCH");
@@ -2760,6 +3027,7 @@ mod tests {
                 Hunk::InsertAfter {
                     anchor: "a".into(),
                     new: "a2\n".into(),
+                    hint_line: None,
                 },
             ],
         );
@@ -2807,6 +3075,7 @@ mod tests {
                 Hunk::InsertBefore {
                     anchor: "b".into(),
                     new: "BB\n".into(),
+                    hint_line: None,
                 },
                 rp("zzz", "Z"), // 失败的 hunk 不参与重叠检测
             ],
@@ -2942,6 +3211,7 @@ mod tests {
             &[Hunk::InsertAfter {
                 anchor: "// 头部注释".to_string(),
                 new: "// 追加注释\n".to_string(),
+                hint_line: None,
             }],
         );
         assert_eq!(
@@ -3686,4 +3956,159 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn f() {\n    let x = payload;\n}\n");
         assert!(edit.data.get("new_hash").is_some());
     }
-}}
+
+    #[test]
+    fn shifts_are_computed_for_line_level_edits() {
+        let content = "a\nb\nc\nd\ne\n";
+        // L2 的 b 换成两行 → (2, +1)；L4-5 的 d+e 行块换 e → (4, -1)
+        let outcome = edit(content, &[rp("b", "b1\nb2"), rp("d\ne", "e")]);
+        assert!(outcome.edited.is_some(), "strict edit should apply");
+        let mut shifts = outcome.shifts.clone();
+        shifts.sort(); // 应用序 = 倒序（位置大者先）；断言与顺序无关
+        assert_eq!(shifts, vec![(2, 1), (4, -1)]);
+    }
+
+    #[test]
+    fn inline_replace_has_zero_shift() {
+        let content = "aaa\nbbb\nccc\n";
+        let outcome = edit(content, &[rp("bbb", "BBB")]);
+        assert!(outcome.edited.is_some());
+        assert_eq!(outcome.shifts, vec![(2, 0)]);
+    }
+
+    #[test]
+    fn failed_edit_has_empty_shifts() {
+        let content = "aaa\nbbb\n";
+        let outcome = edit(content, &[rp("zzz", "yyy")]);
+        assert!(outcome.edited.is_none());
+        assert!(outcome.shifts.is_empty());
+    }
+
+    // ── R30-R35：hint_line 宽松行号 ──────────────────────────────
+
+    #[test]
+    fn hint_line_disambiguates_repeated_content() {
+        // x 出现两次（L3 与 L14），hint=14 的窗口 [4,24) 只含第二个 → 唯一命中。
+        let content = "a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nx\nm\n";
+        let out = edit(content, &[rp_hint("x", "X", 14)]);
+        assert!(out.edited.is_some(), "hint window should disambiguate");
+        // 只替换 L14 的 x（L3 保持小写）。
+        assert_eq!(
+            out.edited.as_deref(),
+            Some("a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nX\nm\n")
+        );
+        let r = &out.reports[0];
+        assert_eq!(r.status, "ok");
+        assert_eq!(r.tier, Some(4));
+        assert_eq!(r.used_hint, Some(14));
+        assert_eq!(r.line_range, Some((14, 14)));
+    }
+
+    #[test]
+    fn hint_line_window_still_ambiguous_keeps_error() {
+        // 两个 x 都在窗口 [1,12) 内 → hint 无法消歧 → 保持 AMBIGUOUS_MATCH。
+        let content = "x\nx\ny\n";
+        let out = edit(content, &[rp_hint("x", "X", 2)]);
+        assert!(out.edited.is_none());
+        assert_eq!(err_code(&out), "AMBIGUOUS_MATCH");
+        assert_eq!(out.reports[0].used_hint, None);
+    }
+
+    #[test]
+    fn hint_line_miss_keeps_original_error() {
+        // hint 偏太远（窗口内无 x）→ 保留原 Ambiguous（不误改）。
+        // x 位于 L2 与 L25；hint=13 的窗口 [3,23) 不含任何 x。
+        let content = "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nt\nu\nv\nw\nx\ny\n";
+        let out = edit(content, &[rp_hint("x", "X", 13)]);
+        assert!(out.edited.is_none());
+        assert_eq!(err_code(&out), "AMBIGUOUS_MATCH");
+    }
+
+    #[test]
+    fn hint_line_disambiguates_anchor_insert() {
+        // anchor "x" 两处，hint=14 窗口只含第二个 → insert_before 落到 L14。
+        let content = "a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nx\nm\n";
+        let out = edit(
+            content,
+            &[Hunk::InsertBefore {
+                anchor: "x".into(),
+                new: "INS\n".into(),
+                hint_line: Some(14),
+            }],
+        );
+        assert!(out.edited.is_some(), "hint should disambiguate the anchor");
+        assert_eq!(
+            out.edited.as_deref(),
+            Some("a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nINS\nx\nm\n")
+        );
+        assert_eq!(out.reports[0].used_hint, Some(14));
+    }
+
+    #[test]
+    fn no_hint_line_keeps_default_behavior() {
+        // 无 hint_line：多命中 → 原样 AMBIGUOUS_MATCH（默认路径零变化）。
+        let content = "a\nx\nb\nx\n";
+        let out = edit(content, &[rp("x", "X")]);
+        assert!(out.edited.is_none());
+        assert_eq!(err_code(&out), "AMBIGUOUS_MATCH");
+    }
+
+    #[test]
+    fn hint_line_zero_is_treated_as_one() {
+        // hint_line=0（LSP 习惯）→ 视为 1；窗口 [1,11) 含第一个 x（L2 的 0-based 1）。
+        let content = "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\nx\n";
+        let out = edit(content, &[rp_hint("x", "X", 0)]);
+        assert!(out.edited.is_some());
+        // 替换的是 0-based 1（L2）的 x。
+        assert_eq!(out.edited.as_deref(), Some(content.replacen("x", "X", 1).as_str()));
+        assert_eq!(out.reports[0].line_range, Some((2, 2)));
+        assert_eq!(out.reports[0].used_hint, Some(1));
+    }
+    #[test]
+    fn hint_line_via_json_parses_and_reports() {
+        // JSON 解析层："hint_line" 字段 → parse_hint_line → 窗口消歧 → JSON 回传。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.txt");
+        std::fs::write(&path, "a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nx\nm\n").unwrap();
+        let r = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{"kind": "replace", "old": "x", "new": "X", "hint_line": 14}],
+        }));
+        assert!(r.is_success(), "model text: {}", r.model.text);
+        // 只改 L14 的 x（L3 保持小写）。
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nX\nm\n"
+        );
+        let hr = &r.data["hunks"][0];
+        assert_eq!(hr["used_hint"], 14);
+        assert_eq!(hr["actual_line"], 14);
+        assert_eq!(hr["line_offset"], 0);
+    }
+
+    #[test]
+    fn hint_line_zero_via_json_is_normalized_to_one() {
+        // 两个 x 相距 >20 行（L2 与 L16），hint_line=0 → 归一化 1 → 窗口只含
+        // 第一个 → 消歧成功，used_hint 回传归一化后的 1。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h0.txt");
+        std::fs::write(
+            &path,
+            "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\nx\n",
+        )
+        .unwrap();
+        let r = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{"kind": "replace", "old": "x", "new": "X", "hint_line": 0}],
+        }));
+        assert!(r.is_success(), "model text: {}", r.model.text);
+        // 只改 L2 的 x（L16 保持小写）。
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a\nX\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\nx\n"
+        );
+        assert_eq!(r.data["hunks"][0]["used_hint"], 1);
+        assert_eq!(r.data["hunks"][0]["actual_line"], 2);
+    }
+}
+

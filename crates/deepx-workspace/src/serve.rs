@@ -32,6 +32,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -64,9 +65,8 @@ struct ExecuteRequest {
     args: serde_json::Value,
     #[serde(default)]
     call_id: String,
-    /// Reserved for wire compatibility; execution timeout is controlled by the tool arguments.
     #[serde(default, rename = "timeout_secs")]
-    _timeout_secs: Option<u64>,
+    timeout_secs: Option<u64>,
 }
 
 fn default_args() -> serde_json::Value {
@@ -176,6 +176,18 @@ fn respond_outcome(request: tiny_http::Request, outcome: ExecuteOutcome) {
     let _ = request.respond(json_response(tiny_http::StatusCode(200), &payload));
 }
 
+/// 工具真实超时：模型参数 `args.timeout_secs` 优先（与 daemon 侧
+/// `HttpToolExecutionBackend::tool_timeout_from_args` 同源），回退请求级
+/// `timeout_secs` 字段（= 注册 default_timeout），再回退 30s。serve 用它给
+/// `recv_timeout` 定上限，保证代理层不会比 exec 等长任务更早放弃。
+fn request_timeout(req: &ExecuteRequest) -> u64 {
+    req.args
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .filter(|&n| n > 0 && n <= 3600)
+        .or_else(|| req.timeout_secs.filter(|&n| n > 0 && n <= 3600))
+        .unwrap_or(30)
+}
 fn handle_execute(
     mut request: tiny_http::Request,
     _token: &str,
@@ -232,19 +244,32 @@ fn handle_execute(
         return;
     }
 
+    let wait_secs = request_timeout(&parsed).saturating_add(30);
     let (respond, received) = mpsc::channel();
     match tx.send(ExecuteJob {
         request: parsed,
         respond,
     }) {
         Ok(()) => {
-            // Wait for the serial worker. No timeout: tool duration is the
-            // contract; control endpoints are served on other threads.
-            let outcome = received.recv().unwrap_or_else(|_| ExecuteOutcome {
-                result: crate::ToolResult::error("workspace execution worker unavailable"),
-                state_delta: Vec::new(),
-            });
-            respond_outcome(request, outcome);
+            // 等待串行 worker，但带代理层超时（工具真实超时 + 30s 余量）：
+            // 防止 HTTP 线程无限挂起堆积（事故根因之一）。超时 ≠ 取消：
+            // worker 继续执行，仅释放 HTTP 线程；daemon 侧收到 error 结果
+            // 后按"执行中失败"处理，不会本地重跑（副作用安全）。
+            let wait = Duration::from_secs(wait_secs);
+            match received.recv_timeout(wait) {
+                Ok(outcome) => respond_outcome(request, outcome),
+                Err(_) => {
+                    let outcome = ExecuteOutcome {
+                        result: crate::ToolResult::error(format!(
+                            "execution still running after proxy timeout ({}s); \
+                             check with the `process` tool if the tool supports backgrounding",
+                            wait.as_secs()
+                        )),
+                        state_delta: Vec::new(),
+                    };
+                    respond_outcome(request, outcome);
+                }
+            }
         }
         Err(_) => {
             let _ = request.respond(text_response(
@@ -442,4 +467,43 @@ pub fn serve(host: &str, port: u16, token: &str) -> Result<(), String> {
             .ok();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(args: serde_json::Value) -> ExecuteRequest {
+        ExecuteRequest {
+            session_id: "s".into(),
+            workspace: "w".into(),
+            name: "exec".into(),
+            action: String::new(),
+            args,
+            call_id: "c".into(),
+            timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn request_timeout_prefers_args() {
+        assert_eq!(request_timeout(&req(serde_json::json!({ "timeout_secs": 120 }))), 120);
+    }
+
+    #[test]
+    fn request_timeout_falls_back_to_field() {
+        let mut r = req(serde_json::json!({}));
+        r.timeout_secs = Some(45);
+        assert_eq!(request_timeout(&r), 45);
+    }
+
+    #[test]
+    fn request_timeout_defaults_and_clamps() {
+        assert_eq!(request_timeout(&req(serde_json::json!({}))), 30);
+        // 超范围参数被忽略，回退默认。
+        assert_eq!(request_timeout(&req(serde_json::json!({ "timeout_secs": 0 }))), 30);
+        assert_eq!(request_timeout(&req(serde_json::json!({ "timeout_secs": 99999 }))), 30);
+        // 非数字参数被忽略。
+        assert_eq!(request_timeout(&req(serde_json::json!({ "timeout_secs": "fast" }))), 30);
+    }
 }

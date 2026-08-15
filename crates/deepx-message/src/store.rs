@@ -331,13 +331,16 @@ pub struct MessageStore {
     seed: String,
     system_messages: Vec<Message>,
     /// Trailing injections (persisted): subagent reports, skills envelopes.
-    /// Written exactly once at arrival; never re-injected, never removed
-    /// (undo=Keep, compact=Preserved). Serialized into the model context in
-    /// WRITE order together with turns (see [`Self::flat_in_write_order`]), so
-    /// an injection keeps the "latest message" position it had when it was
-    /// written — later turns and steps append AFTER it, and it becomes normal
-    /// history instead of being re-presented as a fresh user message on every
-    /// request.
+    /// Written exactly once at arrival; never re-injected, never removed while
+    /// they are in the live context (undo=Keep). Once the model consumes an
+    /// injection it becomes ordinary history — later turns/steps append after
+    /// it. On compact, injections in the folded region are folded with their
+    /// turns (their text is already in the summary input). Serialized into the
+    /// model context in WRITE order together with turns (see
+    /// [`Self::flat_in_write_order`]), so an injection keeps the position it
+    /// had when it was written — later turns and steps append AFTER it, and it
+    /// becomes normal history instead of being re-presented as a fresh user
+    /// message on every request.
     trailing_messages: Vec<Message>,
     turns: Vec<Turn>,
     cancelled: bool,
@@ -1459,6 +1462,13 @@ impl MessageStore {
     /// Inserts the summary as a synthetic user turn before the kept turns
     /// so that `to_vec()` serializes correctly without duplicating compacted data.
     /// Sets `compact_skip` to 0 because all turns now present are live.
+    ///
+    /// Trailing injections in the compacted region (msg_id < the first kept
+    /// turn) are folded together with the old turns: their text has already
+    /// entered the compact summary input (the summary request is built with
+    /// all trailing messages), so keeping them would both duplicate the text
+    /// and re-position a stale injection at the "latest message" slot. Only
+    /// injections in the kept region survive, at their original positions.
     pub fn apply_compact(&mut self, summary: &str, keep: usize) {
         // 防御：确保至少保留 1 个 turn，防止 caller 传入 keep=0 导致清空全部历史。
         let keep = keep.max(1);
@@ -1479,8 +1489,15 @@ impl MessageStore {
         // 摘要占据被压缩的最早 turn 的写入位置：与 trailing 注入按 msg_id 合并时，
         // 摘要保持最前，其后是按写入顺序的注入与保留 turn。
         let first_compacted_id = self.turns[0].user.msg_id;
+        // 首个保留 turn 的写入 id：压缩区内的 trailing 注入（id < 此值）随旧 turn
+        // 折叠丢弃；保留区内的注入留在原位（A1 折叠语义）。
+        let first_kept_id = self.turns[skip].user.msg_id.unwrap_or(0);
         let mut compact_turn = Turn::new(Message::user(&compact_text));
         compact_turn.user.msg_id = first_compacted_id;
+
+        // 折叠压缩区 trailing 注入：文本已进摘要输入，随旧 turn 一起丢弃，
+        // 不再"复活"到摘要之后/活跃 turn 之前（双重表示）。
+        self.trailing_messages.retain(|m| m.msg_id.map_or(true, |id| id >= first_kept_id));
 
         // Physically remove compacted turns, keep only the most recent `keep`.
         let kept = self.turns.split_off(skip);
@@ -1956,13 +1973,92 @@ mod tests {
                     .unwrap_or_default()
             })
             .collect();
-        // 摘要占据被压缩 turn 的写入位置（最前）；报告按其写入顺序位于
-        // 摘要与保留 turn 之间——模型仍按时间线阅读注入。
+        // A1 折叠语义：注入位于被压缩的第一轮（msg_id < 首个保留 turn）——
+        // 其文本已进入 compact 摘要输入，随旧 turn 一起折叠，不再出现在活跃
+        // 上下文（避免"注入复活 + 双重表示"）。摘要仍占据最早 turn 位置。
         assert!(texts[0].starts_with("[Compacted 1 turns]"));
-        let report_idx = texts.iter().position(|t| t.starts_with("[SUBAGENT ")).unwrap();
-        assert_eq!(report_idx, 1);
-        assert_eq!(texts[report_idx + 1], "第二轮");
-        assert_eq!(texts[report_idx + 2], "第二轮回答");
+        assert!(
+            !texts.iter().any(|t| t.starts_with("[SUBAGENT ")),
+            "compacted-region injection must be folded"
+        );
+        assert_eq!(texts[1], "第二轮");
+        assert_eq!(texts[2], "第二轮回答");
+    }
+
+    #[test]
+    fn compact_keeps_trailing_injection_in_kept_region() {
+        let mut store = MessageStore::new("seed");
+        store.push_user("第一轮");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("第一轮回答")],
+        });
+        store.push_user("第二轮");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("第二轮回答")],
+        });
+        // 注入落在第二个（保留）turn 之后——属于保留区，compact 后须存活。
+        let mut inject = Message::user("[SUBAGENT 'y' COMPLETED]\n\n后报告");
+        inject.name = Some("subagent".into());
+        store.push_trailing_system(inject);
+
+        store.apply_compact("前一轮摘要", 1);
+        let ctx = store.build_context_for_gate(&[]);
+        let texts: Vec<String> = ctx
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .find_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        // 摘要在前，保留 turn 居中，保留区注入在最后——不被折叠、不挂最前。
+        assert!(texts[0].starts_with("[Compacted 1 turns]"));
+        assert_eq!(texts[1], "第二轮");
+        assert_eq!(texts[2], "第二轮回答");
+        assert_eq!(texts[3], "[SUBAGENT 'y' COMPLETED]\n\n后报告");
+    }
+
+    #[test]
+    fn trailing_injection_never_splits_toolcall_from_result() {
+        // ② 不变量：write-order 合并后，任何 trailing 注入都不能夹在 assistant
+        // 的 tool_call 与对应 tool_result 之间（会破坏工具调用对完整性）。
+        let mut store = MessageStore::new("seed");
+        store.push_user("跑工具");
+        store.push_assistant(assistant_with_tools(&[("exec-1", "exec")]));
+        // 工具结果在注入之前已提交（lap 边界先落盘结果、后落盘注入）→ 注入
+        // 的写入 id 大于该步所有结果，排序后位于结果之后，不夹在中间。
+        store.push_tool_result_direct("exec-1", "EXEC_RESULT", true);
+        let mut inject = Message::user("[SUBAGENT 'z' COMPLETED]\n\nmid报告");
+        inject.name = Some("subagent".into());
+        store.push_trailing_system(inject);
+
+        let flat = store.flat_in_write_order(0);
+        // 辅助定位：tool_call 在 assistant，tool_result 在 tool 消息；注入必须
+        // 位于 tool_result 之后（同一写入序），绝不位于二者之间。
+        let has_tool_result = |m: &Message| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        };
+        let has_injection = |m: &Message| {
+            m.content.iter().any(|b| {
+                matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT "))
+            })
+        };
+        let result_idx = flat.iter().position(has_tool_result).unwrap();
+        let inject_idx = flat.iter().position(has_injection).unwrap();
+        // 注入排在 tool_result 之后（而非夹在 assistant 与其 tool_result 之间）。
+        assert!(inject_idx > result_idx, "injection must not split toolcall/result");
     }
 
     #[test]
