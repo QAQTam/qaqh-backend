@@ -90,6 +90,14 @@ pub enum ActionRequest {
     WorkspaceDetach {
         seed: String,
     },
+    /// 切换会话工具模式（standard/minimal/custom，PLAN-TOOL-MODES.md）。
+    /// daemon 侧先持久化 meta.json（persist_tool_mode）再经 Control 频道
+    /// 下发 worker 应用（set_allowed_tools + tool_defs 刷新）。
+    SessionSetToolMode {
+        seed: String,
+        tool_mode: String,
+        custom_tools: Vec<String>,
+    },
     /// Spawn an isolated subagent worker (daemon `subagent.spawn`). Returns
     /// `{ "seed": "<8-hex>" }`; the caller then attaches the seed and drives
     /// it with ordinary Ringing commands/events.
@@ -152,6 +160,18 @@ impl ActionRequest {
                 json!({ "seed": seed, "workspace_id": workspace_id }),
             ),
             Self::WorkspaceDetach { seed } => ("workspace.detach", json!({ "seed": seed })),
+            Self::SessionSetToolMode {
+                seed,
+                tool_mode,
+                custom_tools,
+            } => (
+                "session.set_tool_mode",
+                json!({
+                    "seed": seed,
+                    "tool_mode": tool_mode,
+                    "custom_tools": custom_tools,
+                }),
+            ),
             Self::SubagentSpawn {
                 tools,
                 model,
@@ -181,6 +201,20 @@ impl ActionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_set_tool_mode_uses_action_route() {
+        let (name, params) = ActionRequest::SessionSetToolMode {
+            seed: "s1".into(),
+            tool_mode: "minimal".into(),
+            custom_tools: vec!["bash".into(), "edit_file_v2".into()],
+        }
+        .into_parts();
+        assert_eq!(name, "session.set_tool_mode");
+        assert_eq!(params["seed"], "s1");
+        assert_eq!(params["tool_mode"], "minimal");
+        assert_eq!(params["custom_tools"][0], "bash");
+    }
 
     #[test]
     fn workspace_set_is_an_action_not_a_query() {

@@ -1,6 +1,6 @@
 # 工具模式（标准/极限/创造）+ Shell 独立工具（计划）
 
-> 状态：实施中（4.1-4.4 + 前端接口已落地，2026-08-15；4.5 UI 待 UI 团队）
+> 状态：实施中（4.1-4.4 + 前端接口已落地，2026-08-15；4.5 输入面板三选一已落地，创造模式精细勾选/模式徽标待做）
 > 范围：`crates/deepx-workspace`（`set_allowed_tools`、bash/pwsh 独立工具注册）、`crates/deepx-session`（`tool_mode` 元数据）、`crates/deepx-msglp`（session 应用 + `tool_defs` 刷新）、UI（输入面板/精细 session 配置）
 > 关联：[PLAN-EDIT-FILE-V2.md](./PLAN-EDIT-FILE-V2.md)、[PLAN-SESSION-EDIT-LEASE.md](./PLAN-SESSION-EDIT-LEASE.md)（session 元数据持久化同款模式）、`crates/deepx-workspace/src/exec.rs`（现有 Shell 抽象）
 
@@ -79,9 +79,9 @@
 
 ### 4.5 UI
 
-- 输入面板：模式选择器（标准 / 极限 / 创造），切换即时生效 + 持久化（D9 确认控件形态）；
-- 创造模式：勾选器（预设基底 = 标准或极限 + 增删；`skills` 取消时警告）；
-- session 列表/会话头显示当前模式徽标（复用 `session_rev` 刷新机制，见 PLAN-SESSION-EDIT-LEASE.md 4.3 同款）。
+- 输入面板：模式选择器（标准 / 极限 / 创造），切换即时生效 + 持久化（D9 确认控件形态）；**✅ 已落地（2026-08-15）**：composer footer `composer-tool-mode` ComboBox 三选一 → `session.set_tool_mode`（乐观更新 + meta.json 回填）；
+- 创造模式：勾选器（预设基底 = 标准或极限 + 增删；`skills` 取消时警告）——**🔲 待做**（当前 MVP：预设基底 = 全量注册工具，切换即生效）；
+- session 列表/会话头显示当前模式徽标（复用 `session_rev` 刷新机制，见 PLAN-SESSION-EDIT-LEASE.md 4.3 同款）——**🔲 待做**。
 
 ### 4.6 边界与安全
 
@@ -112,4 +112,4 @@
 - 2026-08-15：定稿初版（三模式 + bash/pwsh 独立工具 + 软检测/降级链策略，来源：设计讨论 + exec.rs Shell 抽象实证）。
 - 2026-08-15：修订一——极限模式档位化（A/B/C）；新增 D10（edit overwrite，档位 C 前置）；现状补 edit_file_v2 创建路径实证（L1425-1428/L773-790/L1560）；实施细节补 4.7。
 - 2026-08-15：**实施**——D10 overwrite（file_edit_v2.rs：Overwrite hunk/独占检查/创建提示/record_write，workspace 239 tests）；4.1 set_allowed_tools（manager.rs set_allowed + runtime 入口）；4.2 bash/pwsh 独立工具（exec.rs handle_run_with_shell + register_shell_tool + 软检测 + 描述注入）；4.3 SessionMeta.tool_mode/custom_tools + persist_tool_mode；4.4 ControlCommand::SetToolMode + AgentState::apply_tool_mode + lifecycle 恢复接入；前端接口 `session.set_tool_mode`（daemon service.rs，persist + Control 频道应用）；测试：types 2 + msglp 1。UI（4.5）与档位 B/C 切换 UI 待做。
-- 2026-08-15：**实施——edit 兼读**（二元组自洽）：`hunks` 为空/省略 = 读路径（read-only：内容走 model_text、data 放 hash/line_count/truncated，对齐 read_file；hash 直接链 expected_hash 续接编辑；不存在文件报 FILE_NOT_FOUND 不创建）；权限层 admit() 按空 hunks 动态分类 Read（permission.rs，与 process 并列的 per-action 颗粒度扩展点）；schema/教学同步。workspace 244 tests。
+- 2026-08-15：**实施——前端接线**：`deepx-client` `ActionRequest::SessionSetToolMode`（`session.set_tool_mode`，含测试）；`bridge.rs` `ComposerState.tool_mode/tool_mode_custom_tools` + `composer_tool_mode` 缓存 + `sync_tool_mode_from_meta`（meta.json 回填，250ms 轮询可见）+ `spawn_set_tool_mode`；`composer_bar.rs` footer 三选一 ComboBox（`composer-tool-mode`，防程序化同步误触发同 permission）。创造模式精细勾选/模式徽标待做。

@@ -64,6 +64,41 @@ fn log_diag(msg: &str) {
 /// 附件 id 计数器（同 Web makeImageId/makeTextId 的进程内唯一语义）。
 static ATT_ID: AtomicU64 = AtomicU64::new(0);
 
+/// 工具模式三选一（PLAN-TOOL-MODES.md；顺序对齐 daemon standard/minimal/custom）。
+const TOOL_MODE_OPTIONS: [&str; 3] = ["标准", "极限", "创造"];
+
+/// 创造模式默认基底（D6：预设为基底 + 勾选增删；此处用全量已注册工具，
+/// 避免从零勾选漏基础工具导致模型半瘫；精细勾选 UI 后续再做）。
+const CUSTOM_MODE_DEFAULT_TOOLS: &[&str] = &[
+    "bash",
+    "pwsh",
+    "exec",
+    "write",
+    "edit_file_v2",
+    "read_file",
+    "glob",
+    "grep",
+    "apply_patch",
+    "copy_range",
+    "delete",
+    "confirm_apply",
+    "todo",
+    "ask",
+    "web_fetch",
+    "image",
+    "process",
+    "skills",
+];
+
+/// 工具模式字符串 → ComboBox 选中索引（空 = standard）。
+fn tool_mode_index(mode: &str) -> i32 {
+    match mode {
+        "minimal" => 1,
+        "custom" => 2,
+        _ => 0,
+    }
+}
+
 // ── slash 命令（对齐 Web `slashCommands.ts` 常量表，纯展示）────────
 
 const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
@@ -449,6 +484,23 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
             bridge.spawn_set_permission(level);
         }
     });
+    // 工具模式三选一（标准/极限/创造）；创造模式用预设基底 custom_tools。
+    let on_tool_mode: Arc<dyn Fn(i32) + 'static> = Arc::new({
+        let bridge = bridge.clone();
+        move |index: i32| {
+            let mode = match index {
+                1 => "minimal",
+                2 => "custom",
+                _ => "standard",
+            };
+            let custom_tools = if mode == "custom" {
+                CUSTOM_MODE_DEFAULT_TOOLS.iter().map(|s| s.to_string()).collect()
+            } else {
+                Vec::new()
+            };
+            bridge.spawn_set_tool_mode(mode, custom_tools);
+        }
+    });
     let on_stop = {
         let bridge = bridge.clone();
         move || {
@@ -747,6 +799,34 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
         .automation_id("composer-permission-level")
         .into();
 
+    // 工具模式三选一（标准/极限/创造；PLAN-TOOL-MODES.md）。tool_mode 空
+    // （meta 未加载/无会话）时渲染 standard（index 0），程序化同步事件经
+    // rendered_tm 比对跳过（同 permission_picker 防误触发守卫）。
+    let tm = state.tool_mode.clone();
+    let tool_mode_picker: Element = ComboBox::new(TOOL_MODE_OPTIONS)
+        .selected_index(tool_mode_index(&tm))
+        .on_selection_changed({
+            let rendered_tm = tm;
+            move |index: i32| {
+                if rendered_tm.is_empty() {
+                    return;
+                }
+                let next = match index {
+                    1 => "minimal",
+                    2 => "custom",
+                    _ => "standard",
+                };
+                if next != rendered_tm.as_str() {
+                    on_tool_mode(index);
+                }
+            }
+        })
+        .width(88.0)
+        .tooltip("工具模式")
+        .automation_name("工具模式")
+        .automation_id("composer-tool-mode")
+        .into();
+
     let mode_button: Element = button(if state.mode == "plan" {
         "规划"
     } else {
@@ -797,15 +877,17 @@ pub fn composer_bar(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
     // cannot emulate a web flex spacer because it measures children at infinity.
     let footer: Element = grid((
         attach_button.grid_column(0),
-        mode_button.grid_column(1),
-        immersive_button.grid_column(2),
+        tool_mode_picker.grid_column(1),
+        mode_button.grid_column(2),
+        immersive_button.grid_column(3),
         hstack((permission_picker,))
             .spacing(tokens::SPACE_2)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(4),
-        send_stop.grid_column(5),
+            .grid_column(5),
+        send_stop.grid_column(6),
     ))
     .columns([
+        GridLength::Auto,
         GridLength::Auto,
         GridLength::Auto,
         GridLength::Auto,
