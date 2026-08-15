@@ -89,9 +89,11 @@ impl ToolManager {
         self.handlers.get(name)
     }
 
-    pub fn apply_init(&mut self, allowed_tools: Vec<String>, session_seed: &str) {
+    /// 运行时重设工具白名单（工具模式切换的入口）：空列表 = 全量（标准模式）。
+    /// 与 `apply_init` 共享 known 过滤语义；**不**改 session（区别于 apply_init）。
+    pub fn set_allowed(&mut self, allowed_tools: Vec<String>) {
         // 防御：剔除不在注册表中的工具名。工具冻结期间改名/删除后（如
-        // read→read_file、edit→edit_file、web→web_fetch、search 移除），
+        // read→read_file、edit→edit_file_v2、web→web_fetch、search 移除），
         // 旧配置的 allowlist 会指向不存在的工具——保留则执行期报
         // "Unknown tool"，剔除则按当前正式词汇表生效。全部无效时回退
         // 到"全部工具"（空 allowlist 语义），宁全开不瘫痪。
@@ -116,6 +118,10 @@ impl ToolManager {
         } else {
             Some(known)
         };
+    }
+
+    pub fn apply_init(&mut self, allowed_tools: Vec<String>, session_seed: &str) {
+        self.set_allowed(allowed_tools);
         crate::set_current_session(session_seed);
     }
 
@@ -275,7 +281,7 @@ impl ToolManager {
                         }
                     }
                 }
-                "edit_file" | "todo" => {
+                "edit_file_v2" | "todo" => {
                     for f in &files_affected {
                         if !self.files_written.contains(f) {
                             self.files_written.push(f.clone());
@@ -484,5 +490,72 @@ mod tests {
         mgr.register(handler("exec"));
         mgr.apply_init(vec![], "s1");
         assert_eq!(names(&mgr), vec!["exec"]);
+    }
+
+    // ── set_allowed（4.1：工具模式运行时切换入口）──
+
+    #[test]
+    fn set_allowed_restricts_and_restores() {
+        let mut mgr = ToolManager::new();
+        mgr.register(handler("exec"));
+        mgr.register(handler("read_file"));
+        mgr.register(handler("write"));
+        // 切到极限白名单
+        mgr.set_allowed(vec!["exec".to_string(), "read_file".to_string()]);
+        assert_eq!(names(&mgr), vec!["exec", "read_file"]);
+        // 切回全量（标准模式）
+        mgr.set_allowed(vec![]);
+        assert_eq!(names(&mgr), vec!["exec", "read_file", "write"]);
+    }
+
+    #[test]
+    fn set_allowed_filters_unknown_names() {
+        let mut mgr = ToolManager::new();
+        mgr.register(handler("exec"));
+        // 未知名剔除（不静默吞掉，log warn）；全无效 → 全量
+        mgr.set_allowed(vec!["exec".to_string(), "ghost".to_string()]);
+        assert_eq!(names(&mgr), vec!["exec"]);
+        mgr.set_allowed(vec!["ghost".to_string()]);
+        assert_eq!(names(&mgr), vec!["exec"]);
+    }
+
+    #[test]
+    fn set_allowed_does_not_touch_session() {
+        let mut mgr = ToolManager::new();
+        mgr.register(handler("exec"));
+        mgr.apply_init(vec![], "seed-A");
+        // set_allowed 只改工具集，不动 session（区别于 apply_init）
+        mgr.set_allowed(vec!["exec".to_string()]);
+        assert_eq!(
+            *crate::CURRENT_SESSION.lock().unwrap(),
+            Some("seed-A".to_string())
+        );
+    }
+
+    #[test]
+    fn set_allowed_gates_prepare_req() {
+        let mut mgr = ToolManager::new();
+        mgr.register(handler("exec"));
+        mgr.register(handler("read_file"));
+        mgr.set_allowed(vec!["read_file".to_string()]);
+        // 白名单外工具在执行层被拦截（纵深防御）
+        let err = mgr.prepare_req(
+            "c1".to_string(),
+            "exec",
+            "exec",
+            serde_json::json!({"argv": ["echo", "hi"]}),
+            None,
+            None,
+        );
+        assert!(err.is_err());
+        let ok = mgr.prepare_req(
+            "c2".to_string(),
+            "read_file",
+            "read_file",
+            serde_json::json!({"path": "x"}),
+            None,
+            None,
+        );
+        assert!(ok.is_ok());
     }
 }

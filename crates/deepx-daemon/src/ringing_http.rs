@@ -1707,6 +1707,40 @@ async fn handle_command(
         )
         .await;
     }
+    // 注入命令（as_system=true）持久化入队：ACK 语义 = 已入队（进程崩溃后
+    // worker 启动按注入日志重放），而非仅已转发。journal 写入失败 → 拒绝
+    // （不转发、不 ACK），client 重试由 command_id 幂等兜底。
+    if let deepx_ringing::RingingCommand::Conversation(
+        deepx_domain::ConversationCommand::ConversationSendMessage {
+            as_system: true,
+            text,
+            ..
+        },
+    ) = &worker_command
+    {
+        if let Err(e) = deepx_session::SessionManager::global()
+            .append_injection_enqueued(&seed, &env.command_id, text)
+        {
+            pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .rollback(&env.command_id);
+            let ack = RingingCommandAck {
+                command_id: env.command_id,
+                status: RingingCommandAckStatus::Rejected,
+                code: Some("journal_failed".into()),
+                message: Some(format!("{e}")),
+                retry_after_ms: None,
+            };
+            return write_response(
+                stream,
+                "502 Bad Gateway",
+                "application/json",
+                &serde_json::to_vec(&ack).map_err(stringify)?,
+            )
+            .await;
+        }
+    }
     let worker_env = deepx_ringing::RingingWorkerCommandEnvelope::new(
         seed.as_str(),
         env.command_id.clone(),

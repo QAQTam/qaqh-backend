@@ -19,7 +19,7 @@ pub enum ToolCategory {
     /// No side effects: read, search, skills, image, ask, process(check/wait),
     /// and read-only git queries.
     Read,
-    /// Mutates files or session state: edit_file, task, and write-oriented git
+    /// Mutates files or session state: edit_file_v2, task, and write-oriented git
     /// operations.
     Write,
     /// Executes arbitrary code or controls a running process: exec, process(kill/write).
@@ -136,9 +136,6 @@ impl PermissionLevel {
 pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if tool_name == "edit_file" {
-        paths.extend(crate::file_edit::extract_target_paths(args));
-    }
     if tool_name == "read_file" {
         if let Some(requests) = args.get("requests").and_then(|value| value.as_array()) {
             paths.extend(requests.iter().filter_map(|request| {
@@ -167,6 +164,15 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
     }
     if let Some(d) = args.get("dest").and_then(|v| v.as_str()) {
         paths.push(PathBuf::from(d));
+    }
+    // copy_range: source (read) + target (write) — both workspace-bounded
+    if tool_name == "copy_range" {
+        if let Some(s) = args.get("source_path").and_then(|v| v.as_str()) {
+            paths.push(PathBuf::from(s));
+        }
+        if let Some(t) = args.get("target_path").and_then(|v| v.as_str()) {
+            paths.push(PathBuf::from(t));
+        }
     }
     // exec: extract cwd
     if tool_name == "exec" {
@@ -302,16 +308,29 @@ pub fn needs_permission(
         return PermissionDecision::AutoApprove;
     }
 
-    // `process` 是唯一需要按 action 细分的工具：check/wait 只读、kill/write
-    // 控制进程。其余工具一律使用 handler 声明的类别。
-    let category = if tool_name == "process" {
-        match args.get("action").and_then(|value| value.as_str()) {
+    // `process` / `edit_file_v2` 按调用形态细分（per-action 授权颗粒度的扩展点）：
+    // - process: check/wait 只读、kill/write 控制进程；
+    // - edit_file_v2: hunks 缺失/空 = 读路径（Read，不触发写确认；整文件 /
+    //   行号范围 / 锚定读三种形态均只读），非空 = 编辑/创建（Write）。未来对
+    //   read/edit/create/overwrite 各自粒度授权时，在本 match 内扩展。
+    let category = match tool_name {
+        "process" => match args.get("action").and_then(|value| value.as_str()) {
             Some("check" | "wait") => ToolCategory::Read,
             Some("write" | "kill") => ToolCategory::Exec,
             _ => ToolCategory::Write,
+        },
+        "edit_file_v2" => {
+            let has_hunks = args
+                .get("hunks")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty());
+            if has_hunks {
+                ToolCategory::Write
+            } else {
+                ToolCategory::Read
+            }
         }
-    } else {
-        declared_category
+        _ => declared_category,
     };
     let paths = extract_target_paths(tool_name, args);
     let workspace_root = resolve_target_path(workspace_root.to_path_buf());
@@ -542,6 +561,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn edit_file_v2_empty_hunks_classified_as_read() {
+        // 空 hunks = 读路径 → 动态分类 Read（handler 声明仍为 Write，由
+        // admit() 按调用形态覆盖）→ ReadFree 下自动放行。
+        let read = needs_permission(
+            PermissionLevel::ReadFree,
+            "edit_file_v2",
+            &serde_json::json!({"path": "a.txt", "hunks": []}),
+            Path::new("."),
+            &HashSet::new(),
+            ToolCategory::Write,
+        );
+        assert!(
+            matches!(read, PermissionDecision::AutoApprove),
+            "read path should auto-approve at ReadFree, got: {read:?}"
+        );
+
+        // 非空 hunks = 编辑 → Write → ReadFree 下需确认。
+        let edit = needs_permission(
+            PermissionLevel::ReadFree,
+            "edit_file_v2",
+            &serde_json::json!({"path": "a.txt", "hunks": [{"kind": "replace", "old": "a", "new": "b"}]}),
+            Path::new("."),
+            &HashSet::new(),
+            ToolCategory::Write,
+        );
+        assert!(
+            matches!(edit, PermissionDecision::AskUser { .. }),
+            "edit path should ask at ReadFree, got: {edit:?}"
+        );
     }
 
     #[test]

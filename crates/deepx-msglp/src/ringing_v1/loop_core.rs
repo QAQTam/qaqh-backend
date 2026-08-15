@@ -494,8 +494,21 @@ impl Loop {
                     as_system: true,
                     ..
                 }) => {
-                    let msg = deepx_types::Message::developer(text);
-                    match self.flow.submit(deepx_message::builtin::SUBAGENT, msg) {
+                    // 子代理注入改走 user 角色（见缝插针 trailing 语义不变）：
+                    // chat 协议下 developer 会降级为中段 system 导致感知弱化，
+                    // user 是 chat/responses 两种协议的对话流主体，可见性有保证；
+                    // name 标记供回放/前端识别（不当作真实用户输入）。
+                    let msg = deepx_types::Message {
+                        msg_id: None,
+                        role: deepx_types::Message::ROLE_USER.into(),
+                        name: Some("subagent".into()),
+                        content: vec![deepx_types::ContentBlock::text(text)],
+                    };
+                    match self.flow.submit(
+                        deepx_message::builtin::SUBAGENT,
+                        msg,
+                        Some(env.command_id.clone()),
+                    ) {
                         Ok(()) => {
                             log::info!(
                                 "[INJECT] subagent report queued via ContextFlow (seed={}, text_len={}, pending={})",
@@ -672,6 +685,86 @@ impl Loop {
                         state: deepx_domain::AgentLifecycleState::Ready,
                     },
                 ));
+        }
+
+        // 崩溃恢复：重放注入日志中未 committed 的注入（daemon 已 ACK、
+        // 但未落盘到 messages.jsonl 的命令），确保不丢失。
+        self.replay_pending_injections();
+    }
+
+    /// 启动恢复：重放注入日志中未 committed 的注入。
+    ///
+    /// 决策：只入队落盘（进入 trailing），不触发模型回合——恢复时上一轮
+    /// 可能未完成（工具结果丢失），自动开回合会产生混乱上下文；注入进入
+    /// trailing 后，下一次模型请求自然可见，信息不丢。store 文本幂等
+    /// （push_trailing_system）保证重复重放无害。
+    fn replay_pending_injections(&mut self) {
+        let seed = self.session.agent.session.seed.clone();
+        if seed.is_empty() {
+            return;
+        }
+        let pending = deepx_session::SessionManager::global().read_pending_injections(&seed);
+        if pending.is_empty() {
+            return;
+        }
+        log::info!(
+            "[INJECT] replaying {} pending injection(s) on startup",
+            pending.len()
+        );
+        for (command_id, text) in &pending {
+            let msg = deepx_types::Message {
+                msg_id: None,
+                role: deepx_types::Message::ROLE_USER.into(),
+                name: Some("subagent".into()),
+                content: vec![deepx_types::ContentBlock::text(text)],
+            };
+            if let Err(e) = self.flow.submit(
+                deepx_message::builtin::SUBAGENT,
+                msg,
+                Some(command_id.clone()),
+            ) {
+                log::error!("[INJECT] replay submit failed for {command_id}: {e}");
+            }
+        }
+        let model = self.session.agent.config.model.clone();
+        let effort = self.session.agent.config.reasoning_effort.clone();
+        let (drained, committed_ids) = self
+            .flow
+            .drain_turn_boundary(&mut self.session.agent.msg, &model, &effort);
+        if drained > 0 {
+            log::info!("[INJECT] replay drained {drained} injection(s) into store");
+            self.mark_injections_committed(&committed_ids);
+            // 前端子代理状态区收敛信号（与运行中吸收路径一致）。
+            for (_, text) in &pending {
+                if let Some((name, state)) = parse_subagent_status_tag(text) {
+                    self.paced_emitter.emit_domain(deepx_domain::DomainEvent::Control(
+                        deepx_domain::ControlEvent::SubagentStatus {
+                            seed: seed.clone(),
+                            name,
+                            state,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    /// 把已落盘的注入命令标记为 journal committed（幂等；失败仅告警——
+    /// 下次启动重放时 store 文本幂等兜底）。
+    fn mark_injections_committed(&self, command_ids: &[String]) {
+        if command_ids.is_empty() {
+            return;
+        }
+        let seed = self.session.agent.session.seed.clone();
+        if seed.is_empty() {
+            return;
+        }
+        for cid in command_ids {
+            if let Err(e) =
+                deepx_session::SessionManager::global().append_injection_committed(&seed, cid)
+            {
+                log::warn!("[INJECT] mark committed failed for {cid}: {e}");
+            }
         }
     }
 
@@ -1071,6 +1164,15 @@ impl Loop {
                         .reload_config(&mut self.session.agent, &self.cancel);
                     self.emit_operation_completed(&command_id, deepx_domain::ErrorScope::Control);
                 }
+                ControlCommand::SetToolMode {
+                    tool_mode,
+                    custom_tools,
+                } => {
+                    self.session
+                        .agent
+                        .apply_tool_mode(&tool_mode, &custom_tools);
+                    self.emit_operation_completed(&command_id, deepx_domain::ErrorScope::Control);
+                }
                 ControlCommand::SkillsReload => self.emit_ringing_skills_status(),
                 ControlCommand::SkillsActivate { name } => {
                     let _ = self.session.agent.skills.queue_request(&name, "user");
@@ -1223,7 +1325,8 @@ impl Loop {
 
                     };
                     let outcome = if as_system {
-                        self.input.handle_system_input(&mut ctx, &text)
+                        self.input
+                            .handle_system_input(&mut ctx, &text, Some(command_id.as_str()))
                     } else {
                         self.input
                             .handle_user_input(&mut ctx, deepx_message::builtin::USER, &text, images)
@@ -1494,13 +1597,16 @@ impl Loop {
                 {
                     let model = self.session.agent.config.model.clone();
                     let effort = self.session.agent.config.reasoning_effort.clone();
-                    let drained = self
+                    let (drained, committed_ids) = self
                         .flow
                         .drain_turn_boundary(&mut self.session.agent.msg, &model, &effort);
                     if drained > 0 {
                         log::info!(
                             "[INJECT] lap boundary drained {drained} injection(s) via ContextFlow"
                         );
+                        // 已落盘到 messages.jsonl → 标记注入日志 committed，
+                        // 崩溃后重放不会再注入同一条。
+                        self.mark_injections_committed(&committed_ids);
                     }
                 }
                 // Another lap: re-enter TurnEngine.

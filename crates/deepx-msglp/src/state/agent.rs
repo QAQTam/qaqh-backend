@@ -9,6 +9,18 @@ use deepx_message::{ToolExecReport, ToolExecRequest};
 use deepx_workspace::runtime;
 use std::path::Path;
 
+/// 极限模式默认档位（PLAN-TOOL-MODES.md D2 档位 A）：
+/// bash/pwsh 独立 shell + 文件三件套（write/edit/read）+ 搜索两件套（glob/grep）。
+pub const MINIMAL_TOOLS: &[&str] = &[
+    "bash",
+    "pwsh",
+    "write",
+    "edit_file_v2",
+    "read_file",
+    "glob",
+    "grep",
+];
+
 /// Hash snapshot of the cache-key-relevant prefix components.
 /// Compared across turns to detect and explain prompt-cache misses.
 #[derive(Debug, Clone, Default)]
@@ -327,6 +339,23 @@ impl AgentState {
         agent.ephemeral = ephemeral;
         agent.tool_defs = runtime::all_tools(); // full set — LLM cache friendly
         agent
+    }
+
+    /// 应用工具模式（PLAN-TOOL-MODES.md 4.4）：standard=全量 / minimal=固定档位 /
+    /// custom=自定义表；随后刷新 `tool_defs`（模型侧工具清单源头过滤）。
+    /// 幂等：standard（含空串/未知值）回退全量，可无条件调用。
+    pub fn apply_tool_mode(&mut self, tool_mode: &str, custom_tools: &[String]) {
+        let allowed: Vec<String> = match tool_mode {
+            "minimal" => MINIMAL_TOOLS.iter().map(|s| s.to_string()).collect(),
+            "custom" => custom_tools.to_vec(),
+            _ => Vec::new(),
+        };
+        runtime::set_allowed_tools(allowed);
+        self.tool_defs = runtime::all_tools();
+        log::info!(
+            "[TOOL MODE] applied {tool_mode} ({} tools visible)",
+            self.tool_defs.len()
+        );
     }
 
     /// Consume any pending cache diagnostics set by build_context().
@@ -851,6 +880,55 @@ mod tests {
             serde_json::to_value(agent.build_context()).unwrap()
         );
         deepx_workspace::set_workspace(".");
+    }
+
+    // ── 工具模式（PLAN-TOOL-MODES.md 4.4）──
+
+    #[test]
+    fn apply_tool_mode_filters_and_restores_tool_defs() {
+        let _guard = SKILL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // TOOL_MANAGER 是进程级 OnceLock：重复 init 会被忽略，manager 始终可用。
+        deepx_workspace::runtime::init_tools(
+            "tool-mode-test",
+            &[deepx_subagent::register],
+            vec![],
+        );
+        let mut agent = AgentState::new(deepx_config::Config::default());
+
+        // minimal → 固定档位（MINIMAL_TOOLS 7 个）
+        agent.apply_tool_mode("minimal", &[]);
+        let names: Vec<&str> = agent
+            .tool_defs
+            .iter()
+            .map(|d| d.function.name.as_str())
+            .collect();
+        assert_eq!(names.len(), MINIMAL_TOOLS.len(), "got: {names:?}");
+        for t in MINIMAL_TOOLS {
+            assert!(names.contains(t), "missing {t} in {names:?}");
+        }
+
+        // custom → 自定义表（精确集合）
+        agent.apply_tool_mode("custom", &["bash".to_string(), "grep".to_string()]);
+        let names2: Vec<&str> = agent
+            .tool_defs
+            .iter()
+            .map(|d| d.function.name.as_str())
+            .collect();
+        assert_eq!(names2, vec!["bash", "grep"], "got: {names2:?}");
+
+        // standard → 全量恢复（> 固定档位）
+        agent.apply_tool_mode("standard", &[]);
+        assert!(
+            agent.tool_defs.len() > MINIMAL_TOOLS.len(),
+            "standard should expose all tools, got {}",
+            agent.tool_defs.len()
+        );
+
+        // 未知 tool_mode → 回退全量（幂等安全）
+        agent.apply_tool_mode("", &[]);
+        assert!(agent.tool_defs.len() > MINIMAL_TOOLS.len());
     }
 }
 

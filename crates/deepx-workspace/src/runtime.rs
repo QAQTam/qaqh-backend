@@ -105,6 +105,12 @@ pub fn set_mode(mode: u8) {
     AGENT_MODE.store(mode, Ordering::SeqCst);
 }
 
+/// 运行时重设工具白名单（工具模式 Standard/Minimal/Custom 的入口）。
+/// 空列表 = 全量（标准模式）；未知名自动剔除并 warn（复用 apply_init 语义）。
+pub fn set_allowed_tools(tools: Vec<String>) {
+    with_manager(|manager| manager.set_allowed(tools));
+}
+
 pub(crate) fn is_plan_mode() -> bool {
     AGENT_MODE.load(Ordering::SeqCst) == 1
 }

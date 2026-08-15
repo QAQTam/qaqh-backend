@@ -503,3 +503,85 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
     lp.run();
     drv.join().unwrap();
 }
+
+#[test]
+fn startup_replays_persisted_injection_into_next_model_request() {
+    let _test_lock = SESSION_TEST_LOCK.lock().unwrap();
+    let mock = MockServer::single_response(text_round("done"));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    deepx_workspace::set_workspace(&ws.to_string_lossy());
+
+    SESSION_INIT
+        .call_once(|| deepx_session::SessionManager::init(deepx_types::platform::data_dir()));
+
+    // 模拟 daemon 崩溃前已 ACK、但 worker 未落盘的注入：journal 有
+    // enqueued、无 committed。worker 启动重放后必须进入模型请求，
+    // 且标记 committed（不重复重放）。
+    let seed = format!("replay-test-{}", std::process::id());
+    let seed_for_drv = seed.clone();
+    deepx_session::SessionManager::global()
+        .append_injection_enqueued(
+            &seed,
+            "cmd-replay-1",
+            "[SUBAGENT 'explore' COMPLETED]\n\n调研结论：X 是 Y",
+        )
+        .expect("enqueue injection");
+
+    let mut agent = AgentState::init("test");
+    agent.ephemeral = false;
+    agent.session.seed = seed.clone();
+    agent.config.base_url = mock.base_url.clone();
+    agent.config.api_key = "sk-test".into();
+    agent.config.model = "test-model".into();
+    agent.config.provider_id.clear();
+    agent.config.endpoint.clear();
+    agent.config.compliance_enabled = false;
+
+    let (ir, mut iw) = os_pipe::pipe().unwrap();
+    let (oread, owrite) = os_pipe::pipe().unwrap();
+    let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
+    let rx = spawn_event_reader(oread);
+
+    let drv = thread::spawn(move || {
+        // 重放完成时发 SubagentStatus 收敛事件（不触发回合）。
+        expect(&rx, Duration::from_secs(10), |e| {
+            matches!(
+                e,
+                RingingEvent::Control(ControlEvent::SubagentStatus {
+                    name,
+                    state,
+                    ..
+                }) if name == "explore" && state == "COMPLETED"
+            )
+        });
+        // 用户消息 → 模型请求必须携带重放的注入。
+        send_cmd(&mut iw, &seed_for_drv, cmd_user_input("继续"));
+        expect(&rx, Duration::from_secs(10), |e| {
+            matches!(
+                e,
+                RingingEvent::Conversation(ConversationEvent::TurnCompleted { .. })
+            )
+        });
+        send_cmd(&mut iw, &seed_for_drv, cmd_session_shutdown());
+    });
+    lp.run();
+    drv.join().unwrap();
+
+    // 注入进入模型请求（且只出现一次）。
+    let bodies = mock.bodies.lock().expect("lock");
+    let first = bodies.first().expect("at least one gate request");
+    assert!(
+        first.contains("[SUBAGENT 'explore' COMPLETED]"),
+        "replayed injection must appear in the model request"
+    );
+    // journal 已标记 committed → 重启不会重复重放。
+    assert!(
+        deepx_session::SessionManager::global()
+            .read_pending_injections(&seed)
+            .is_empty(),
+        "replayed injection must be marked committed"
+    );
+}

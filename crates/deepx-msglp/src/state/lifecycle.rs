@@ -127,6 +127,11 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 agent.skills.restore(&agent.session.skills.clone());
                 // Hot-load latest tool schema (order-stable: new tools appended at end)
                 agent.tool_defs = deepx_workspace::runtime::all_tools();
+                // 应用持久化的工具模式（standard/minimal/custom，幂等）。
+                // 在 tool_defs 刷新之后执行：apply_tool_mode 内部再刷一次（带 allowed 过滤）。
+                let tool_mode = agent.session.tool_mode.clone();
+                let custom_tools = agent.session.custom_tools.clone();
+                agent.apply_tool_mode(&tool_mode, &custom_tools);
                 log::info!(
                     "deepx-agent: restored session {} ({} msgs, {} tokens)",
                     agent.session.seed,

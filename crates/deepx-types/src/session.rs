@@ -80,6 +80,13 @@ pub struct SessionMeta {
     /// Persisted so PLAN/CODE mode survives agent restart within the same session.
     #[serde(default)]
     pub mode: u8,
+    /// 工具模式：standard | minimal | custom（PLAN-TOOL-MODES.md）。
+    /// 空串 = standard（旧 session 零迁移兼容）；custom 时 `custom_tools` 生效。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool_mode: String,
+    /// 创造模式的自定义工具白名单（仅 tool_mode == "custom" 时生效）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_tools: Vec<String>,
     /// 归档标记：标签 × 归档后置 true（会话停止、不出现在标签条，左侧
     /// 列表归档组可见可恢复）。旧 meta.json 缺失该字段 = 未归档。
     #[serde(default)]
@@ -141,6 +148,8 @@ impl Default for SessionMeta {
             last_summary: String::new(),
             compact_skip: 0,
             mode: 0,
+            tool_mode: String::new(),
+            custom_tools: Vec::new(),
             archived: false,
             ephemeral: false,
             skills: SkillSessionStateV2::default(),
@@ -239,6 +248,36 @@ mod tests {
         assert_eq!(meta.skills.version, 2);
         assert!(meta.skills.entries.is_empty());
         assert_eq!(meta.cache_reported_requests, 0);
+    }
+
+    #[test]
+    fn legacy_session_metadata_defaults_tool_mode_to_standard() {
+        // 旧 meta.json 无 tool_mode/custom_tools → 零迁移兼容（standard）。
+        let meta: SessionMeta = serde_json::from_str(
+            r#"{
+            "seed":"s","created_at":0,"updated_at":0,"model":"m",
+            "message_count":0,"turn_count":0,"last_summary":"","compact_skip":0,"mode":1
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(meta.tool_mode, "");
+        assert!(meta.custom_tools.is_empty());
+    }
+
+    #[test]
+    fn tool_mode_round_trips_through_json() {
+        let mut meta = SessionMeta::default();
+        meta.tool_mode = "custom".to_string();
+        meta.custom_tools = vec!["bash".to_string(), "edit_file_v2".to_string()];
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tool_mode, "custom");
+        assert_eq!(back.custom_tools, vec!["bash", "edit_file_v2"]);
+        // standard 时空 custom_tools 不落盘（skip_serializing_if）
+        let mut meta2 = SessionMeta::default();
+        meta2.tool_mode = "minimal".to_string();
+        let json2 = serde_json::to_string(&meta2).unwrap();
+        assert!(!json2.contains("custom_tools"));
     }
 
     #[test]

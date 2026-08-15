@@ -740,15 +740,17 @@ fn default_daemon_path() -> std::path::PathBuf {
     crate::discovery::daemon_executable()
 }
 
-/// Spawn a detached process (Windows: `CREATE_NEW_PROCESS_GROUP` + no console).
+/// Spawn a detached process (Windows: `CREATE_NEW_PROCESS_GROUP` +
+/// `CREATE_NO_WINDOW` so the console-subsystem daemon gets no visible window).
 fn spawn_detached(executable: &std::path::Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let _ = std::process::Command::new(executable)
             .arg("run")
-            .creation_flags(CREATE_NEW_PROCESS_GROUP)
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

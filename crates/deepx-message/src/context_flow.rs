@@ -180,6 +180,9 @@ pub trait ContextSource: Send + Sync {
 pub struct PendingIngest {
     pub source_id: &'static str,
     pub msg: Message,
+    /// 注入命令的 command_id（daemon 注入日志去重键）。drain 后由调用方
+    /// 标记 journal committed；None 表示非注入来源（无 journal 语义）。
+    pub command_id: Option<String>,
 }
 
 /// One diagnostic entry per ingest attempt. `ContextFlow::trace` keeps the
@@ -259,7 +262,17 @@ impl ContextFlow {
     /// message sits in the pending queue until `drain_turn_boundary` commits
     /// it at the next lap boundary — no mid-round mutation, no dropped
     /// command (non-injection commands must be handled by the caller).
-    pub fn submit(&mut self, source_id: &'static str, msg: Message) -> Result<(), FlowError> {
+    ///
+    /// `command_id` is the durable-queue key: it is returned by
+    /// [`Self::drain_turn_boundary`] once the message is committed to the
+    /// store, so the caller can mark the injection journal entry as
+    /// committed. `None` skips journal bookkeeping.
+    pub fn submit(
+        &mut self,
+        source_id: &'static str,
+        msg: Message,
+        command_id: Option<String>,
+    ) -> Result<(), FlowError> {
         let src = self
             .sources
             .get(source_id)
@@ -269,7 +282,8 @@ impl ContextFlow {
             return Err(FlowError::TimingMismatch(source_id));
         }
         self.trace_push(source_id, src.role().as_str(), src.sink().as_str(), "pending");
-        self.pending.push_back(PendingIngest { source_id, msg });
+        self.pending
+            .push_back(PendingIngest { source_id, msg, command_id });
         Ok(())
     }
 
@@ -277,18 +291,29 @@ impl ContextFlow {
         self.pending.len()
     }
 
-    /// Commit all pending injections at a lap boundary. Returns the number
-    /// of messages drained. Flushes the store meta afterwards.
-    pub fn drain_turn_boundary(&mut self, store: &mut MessageStore, model: &str, effort: &str) -> usize {
+    /// Commit all pending injections at a lap boundary. Returns the number of
+    /// messages drained plus the command_ids of the committed injections (in
+    /// submit order) so the caller can mark the durable injection journal.
+    /// Flushes the store meta afterwards.
+    pub fn drain_turn_boundary(
+        &mut self,
+        store: &mut MessageStore,
+        model: &str,
+        effort: &str,
+    ) -> (usize, Vec<String>) {
         let pending = std::mem::take(&mut self.pending);
         let n = pending.len();
+        let mut command_ids = Vec::new();
         for p in pending {
             let _ = self.ingest(store, p.source_id, p.msg);
+            if let Some(command_id) = p.command_id {
+                command_ids.push(command_id);
+            }
         }
         if n > 0 {
             store.flush_meta(model, effort);
         }
-        n
+        (n, command_ids)
     }
 
     /// The single door into the message store. Routes the message by the
@@ -415,7 +440,10 @@ fn role_sink_compatible(role: FlowRole, sink: Sink) -> bool {
         Sink::Turn => matches!(role, FlowRole::User | FlowRole::System | FlowRole::Developer),
         Sink::Step => role == FlowRole::Assistant,
         Sink::ToolResult => role == FlowRole::Tool,
-        Sink::Trailing => matches!(role, FlowRole::System | FlowRole::Developer),
+        Sink::Trailing => matches!(
+            role,
+            FlowRole::System | FlowRole::Developer | FlowRole::User
+        ),
         Sink::Annotation => true,
     }
 }
@@ -578,10 +606,12 @@ pub mod builtin {
     /// Subagent report injection (`[SUBAGENT …]` via `as_system=true`).
     /// TurnBoundary timing: committed at the next lap boundary so the next
     /// model request sees it without interrupting the running round.
+    /// User role (was Developer): chat 协议下 developer 降级为中段 system
+    /// 感知弱化，user 是两种协议的对话流主体；name 标记区分真实用户输入。
     pub fn subagent_source() -> Arc<dyn ContextSource> {
         base(
             SUBAGENT,
-            FlowRole::Developer,
+            FlowRole::User,
             Sink::Trailing,
             Timing::TurnBoundary,
             Visibility {
@@ -704,15 +734,25 @@ mod tests {
     fn turn_boundary_submit_drains_at_boundary_in_order() {
         let (mut flow, _) = flow_with(&[builtin::SUBAGENT]);
         let mut store = MessageStore::new_ephemeral("seed-x");
-        flow.submit(builtin::SUBAGENT, Message::developer("[SUBAGENT one]\nok"))
-            .unwrap();
-        flow.submit(builtin::SUBAGENT, Message::developer("[SUBAGENT two]\nok"))
-            .unwrap();
+        flow.submit(
+            builtin::SUBAGENT,
+            Message::developer("[SUBAGENT one]\nok"),
+            Some("cmd-1".into()),
+        )
+        .unwrap();
+        flow.submit(
+            builtin::SUBAGENT,
+            Message::developer("[SUBAGENT two]\nok"),
+            Some("cmd-2".into()),
+        )
+        .unwrap();
         assert_eq!(flow.pending_len(), 2);
         // Nothing committed before the boundary.
         assert!(store.trailing_messages().is_empty());
-        let drained = flow.drain_turn_boundary(&mut store, "m", "e");
+        let (drained, command_ids) = flow.drain_turn_boundary(&mut store, "m", "e");
         assert_eq!(drained, 2);
+        // command_id 按 submit 顺序透传（journal committed 标记用）。
+        assert_eq!(command_ids, vec!["cmd-1".to_string(), "cmd-2".to_string()]);
         assert_eq!(flow.pending_len(), 0);
         assert_eq!(store.trailing_messages().len(), 2);
         assert!(flow
@@ -725,7 +765,7 @@ mod tests {
     fn immediate_source_rejects_submit() {
         let (mut flow, _) = flow_with(&[builtin::USER]);
         let err = flow
-            .submit(builtin::USER, Message::user("hi"))
+            .submit(builtin::USER, Message::user("hi"), None)
             .unwrap_err();
         assert!(matches!(err, FlowError::TimingMismatch(builtin::USER)));
     }
@@ -777,8 +817,12 @@ mod tests {
     fn developer_ingest_lands_in_trailing_via_subagent_source() {
         let (mut flow, _) = flow_with(&[builtin::SUBAGENT]);
         let mut store = MessageStore::new_ephemeral("seed-x");
-        flow.submit(builtin::SUBAGENT, Message::developer("[SUBAGENT 'x' COMPLETED]\nok"))
-            .unwrap();
+        flow.submit(
+            builtin::SUBAGENT,
+            Message::developer("[SUBAGENT 'x' COMPLETED]\nok"),
+            None,
+        )
+        .unwrap();
         flow.drain_turn_boundary(&mut store, "m", "e");
         let msgs = store.trailing_messages();
         assert_eq!(msgs.len(), 1);
@@ -812,8 +856,12 @@ mod tests {
     fn developer_injection_survives_store_roundtrip_as_trailing() {
         let (mut flow, _) = flow_with(&[builtin::SUBAGENT]);
         let mut store = MessageStore::new_ephemeral("seed-x");
-        flow.submit(builtin::SUBAGENT, Message::developer("[SUBAGENT 'x' COMPLETED]\nok"))
-            .unwrap();
+        flow.submit(
+            builtin::SUBAGENT,
+            Message::developer("[SUBAGENT 'x' COMPLETED]\nok"),
+            None,
+        )
+        .unwrap();
         flow.drain_turn_boundary(&mut store, "m", "e");
         let persisted = store.to_vec();
         let (restored, repairs) = MessageStore::from_messages("seed-x", &persisted, 0);
@@ -840,8 +888,12 @@ mod tests {
                 content: vec![ContentBlock::text("hi there")],
             },
         );
-        flow.submit(builtin::SUBAGENT, Message::developer("[SUBAGENT 'x' COMPLETED]\nok"))
-            .unwrap();
+        flow.submit(
+            builtin::SUBAGENT,
+            Message::developer("[SUBAGENT 'x' COMPLETED]\nok"),
+            None,
+        )
+        .unwrap();
         flow.drain_turn_boundary(&mut store, "m", "e");
         assert_eq!(store.trailing_messages().len(), 1);
 

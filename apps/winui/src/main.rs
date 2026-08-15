@@ -83,7 +83,7 @@ fn diagram_zoom_component(_: &(), cx: &mut RenderCx) -> Element {
 }
 
 fn diff_drawer_component(_: &(), cx: &mut RenderCx) -> Element {
-    diff_drawer::diff_drawer_overlay(cx).into()
+    diff_drawer::diff_drawer_overlay(cx, bridge::Bridge::shared()).into()
 }
 
 fn app(cx: &mut RenderCx) -> Element {

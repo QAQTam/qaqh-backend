@@ -287,6 +287,32 @@ impl DeepxService {
                     mode: parse_conversation_mode(&pstr(params, "mode")?)?,
                 }),
             ),
+            "session.set_tool_mode" => {
+                let seed = seed()?;
+                let tool_mode = pstr(params, "tool_mode")?;
+                if !matches!(tool_mode.as_str(), "standard" | "minimal" | "custom") {
+                    return Err(format!(
+                        "invalid tool_mode '{tool_mode}' (expected standard | minimal | custom)"
+                    ));
+                }
+                let custom_tools = pstrings(params, "custom_tools");
+                if tool_mode == "custom" && custom_tools.is_empty() {
+                    return Err(
+                        "custom tool mode requires at least one tool in custom_tools".to_string(),
+                    );
+                }
+                // 先持久化（meta.json，重启存活），再通知 worker 应用
+                // （set_allowed_tools + tool_defs 刷新 = 模型侧源头过滤）。
+                deepx_session::SessionManager::global()
+                    .persist_tool_mode(&seed, &tool_mode, &custom_tools);
+                self.send_ringing_cmd(
+                    seed,
+                    RingingCommand::Control(ControlCommand::SetToolMode {
+                        tool_mode,
+                        custom_tools,
+                    }),
+                )
+            }
             "session.cancel" => self.send_ringing_cmd(
                 seed()?,
                 RingingCommand::Conversation(ConversationCommand::ConversationCancel {

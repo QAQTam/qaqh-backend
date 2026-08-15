@@ -1,7 +1,8 @@
 //! edit_file_v2 — 差分实现的第二代编辑工具。
 //!
-//! 定位（见 docs/nextdev/PLAN-EDIT-FILE-V2.md）：**只实现 v1 没有的部分**，
-//! v1（edit_file）保留行号定位、replace_all、regex、每 op 独立事务与诊断体系。
+//! 定位（见 docs/nextdev/PLAN-EDIT-FILE-V2.md）：**只实现 v1 没有的部分**。
+//! v1（edit_file：行号定位、replace_all、regex、每 op 独立事务与诊断体系）
+//! 已下线删除——v2 是唯一编辑入口。
 //!
 //! v2 的能力面（对齐 edit-tool-design-spec.md）：
 //!
@@ -31,17 +32,19 @@ use crate::{ToolCallCtx, ToolHandler, ToolManager, ToolPlacement, ToolResult, To
 // 配置常量
 // ─────────────────────────────────────────────────────────────
 
-/// Tier3 相似度采纳阈值。保守起步值 0.90（spec 建议 0.85）；
-/// 灰度期收集真实误改案例后再回调。
-const T3_THRESHOLD: f32 = 0.90;
-/// Tier3 胜出边际：最高分必须显著超过次高分才自动采纳。
-/// 保守起步值 0.15（spec 建议 0.10）。
-const T3_MARGIN: f32 = 0.15;
+/// Tier3 相似度采纳阈值（spec 建议 0.85；0.90 过度保守 → 拒绝多 → 模型重试多）。
+const T3_THRESHOLD: f32 = 0.85;
+/// Tier3 胜出边际：最高分必须显著超过次高分才自动采纳（spec 建议 0.10）。
+const T3_MARGIN: f32 = 0.10;
 /// 单次调用 hunk 数上限。
 const MAX_HUNKS: usize = 64;
 /// HashMismatch 时回传内容的截断字节数。
 const CONTENT_CAP: usize = 64 * 1024;
-/// 失败候选列表条数上限。
+
+/// 读路径（空 hunks）预算，与 read_file 对齐。
+const READ_MAX_LINES: usize = 400;
+const READ_MAX_CHARS: usize = 24_000;
+const READ_MAX_CONTEXT: usize = 100;/// 失败候选列表条数上限。
 const CANDIDATE_MAX: usize = 3;
 /// 候选 snippet 展示长度（字符）。
 const SNIPPET_MAX: usize = 120;
@@ -53,26 +56,44 @@ const SNIPPET_MAX: usize = 120;
 #[derive(Debug, Clone, PartialEq)]
 enum Hunk {
     /// 替换；old 为空字符串 = 纯插入（context_before/after 至少一侧非空）。
+    /// `replace_all=true` 时替换 old 的全部**精确**匹配位置（仅 Tier1 生效，
+    /// 不降级模糊匹配——模糊应用于多位置风险不可控）。
     Replace {
         old: String,
         new: String,
         context_before: String,
         context_after: String,
+        replace_all: bool,
     },
+    /// 整文件覆盖（等价 write 的 content 语义）：不要求 `old`，恒成功；
+    /// **独占**——必须单独调用，与其它 hunk 混用报 OVERWRITE_EXCLUSIVE。
+    Overwrite { new: String },
     InsertAfter { anchor: String, new: String },
     InsertBefore { anchor: String, new: String },
     PrependFile { new: String },
     AppendFile { new: String },
+    /// 行内替换（sed `s///` 语义）：anchor 定位行窗口后，**仅在窗口内**做子串/
+    /// 正则替换——不跨行、不改行结构。`replace_all=false` 只替换第一处（按行序）；
+    /// `regex=true` 时 `old` 为正则（regex crate 语法，大小写敏感）。
+    ReplaceInline {
+        anchor: String,
+        old: String,
+        new: String,
+        replace_all: bool,
+        regex: bool,
+    },
 }
 
 impl Hunk {
     fn kind_name(&self) -> &'static str {
         match self {
             Hunk::Replace { .. } => "replace",
+            Hunk::Overwrite { .. } => "overwrite",
             Hunk::InsertAfter { .. } => "insert_after",
             Hunk::InsertBefore { .. } => "insert_before",
             Hunk::PrependFile { .. } => "prepend_file",
             Hunk::AppendFile { .. } => "append_file",
+            Hunk::ReplaceInline { .. } => "replace_inline",
         }
     }
 
@@ -109,12 +130,25 @@ impl Hunk {
                     .get("context_after")
                     .and_then(|x| x.as_str())
                     .unwrap_or("");
+                let replace_all = v
+                    .get("replace_all")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
                 Ok(Hunk::Replace {
                     old: norm(old, notes),
                     new: norm(new, notes),
                     context_before: norm(context_before, notes),
                     context_after: norm(context_after, notes),
+                    replace_all,
                 })
+            }
+            "overwrite" => {
+                let new = v
+                    .get("new")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "overwrite hunk requires 'new'".to_string())?;
+                // 整文件语义：忽略可能误传的 old/context（write 语义不看旧内容）。
+                Ok(Hunk::Overwrite { new: norm(new, notes) })
             }
             "insert_after" | "insert_before" => {
                 let anchor = v
@@ -145,8 +179,42 @@ impl Hunk {
                     Ok(Hunk::AppendFile { new })
                 }
             }
+            "replace_inline" => {
+                let anchor = v
+                    .get("anchor")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| "replace_inline hunk requires non-empty 'anchor'".to_string())?;
+                let old = v
+                    .get("old")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| "replace_inline hunk requires non-empty 'old'".to_string())?;
+                if old.contains('\n') {
+                    return Err(
+                        "replace_inline 'old' must be a single-line substring (use 'replace' for line-level edits)"
+                            .to_string(),
+                    );
+                }
+                let new = v
+                    .get("new")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "replace_inline hunk requires 'new'".to_string())?;
+                let replace_all = v
+                    .get("replace_all")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
+                let regex = v.get("regex").and_then(|x| x.as_bool()).unwrap_or(false);
+                Ok(Hunk::ReplaceInline {
+                    anchor: norm(anchor, notes),
+                    old: norm(old, notes),
+                    new: norm(new, notes),
+                    replace_all,
+                    regex,
+                })
+            }
             other => Err(format!(
-                "unknown hunk kind '{other}' (expected replace / insert_after / insert_before / prepend_file / append_file)"
+                "unknown hunk kind '{other}' (expected replace / overwrite / insert_after / insert_before / prepend_file / append_file / replace_inline)"
             )),
         }
     }
@@ -160,37 +228,56 @@ struct FileView<'a> {
     content: &'a str,
     /// 每行内容（不含 '\n'）。文件以 '\n' 结尾时含一个尾空行。
     lines: Vec<&'a str>,
-    /// 每行行首 char index；len = lines.len() + 1，末项 = content.len()。
-    line_starts: Vec<usize>,
+    /// 每行行首**字节**偏移；len = lines.len() + 1，末项 = content.len()（str 切片用）。
+    byte_starts: Vec<usize>,
+    /// 每行行首 **char** index；len = lines.len() + 1，末项 = 总字符数（ropey 操作用）。
+    ///
+    /// ⚠ 二者不可混用：`char_indices()` 返回的是字节偏移，此前误当 char 索引存入，
+    /// 中文文件（字节数 > 字符数）下 ropey remove/insert 越界 panic、区间错位。
+    char_starts: Vec<usize>,
 }
 
 impl<'a> FileView<'a> {
     fn new(content: &'a str) -> Self {
         let mut lines = Vec::new();
-        let mut line_starts = Vec::new();
-        let mut start = 0usize;
+        let mut byte_starts = Vec::new();
+        let mut char_starts = Vec::new();
+        let mut byte_start = 0usize;
+        let mut char_start = 0usize;
+        let mut char_count = 0usize;
         for (i, ch) in content.char_indices() {
             if ch == '\n' {
-                lines.push(&content[start..i]);
-                line_starts.push(start);
-                start = i + 1;
+                lines.push(&content[byte_start..i]);
+                byte_starts.push(byte_start);
+                char_starts.push(char_start);
+                byte_start = i + 1;
+                char_start = char_count + 1;
             }
+            char_count += 1;
         }
-        if start <= content.len() {
-            lines.push(&content[start..]);
-            line_starts.push(start);
+        if byte_start <= content.len() {
+            lines.push(&content[byte_start..]);
+            byte_starts.push(byte_start);
+            char_starts.push(char_start);
         }
-        line_starts.push(content.len());
+        byte_starts.push(content.len());
+        char_starts.push(char_count);
         FileView {
             content,
             lines,
-            line_starts,
+            byte_starts,
+            char_starts,
         }
     }
 
-    /// 行窗口 [s, s+win) 的 char 区间。
+    /// 行窗口 [s, s+win) 的 **char** 区间（ropey remove/insert 用）。
     fn char_range(&self, s: usize, win: usize) -> Range<usize> {
-        self.line_starts[s]..self.line_starts[s + win]
+        self.char_starts[s]..self.char_starts[s + win]
+    }
+
+    /// 总字符数。
+    fn char_len(&self) -> usize {
+        self.char_starts[self.char_starts.len() - 1]
     }
 }
 
@@ -242,6 +329,8 @@ enum LocateError {
         detail: String,
     },
     Underspecified,
+    /// replace_inline 的 `regex=true` 时正则编译失败。
+    InvalidRegex(String),
 }
 
 /// Tier1：逐行全等匹配。返回全部命中位置。
@@ -706,18 +795,55 @@ fn locate_replace(
     })
 }
 
-fn locate_hunk(view: &FileView, hunk: &Hunk) -> Result<Located, LocateError> {
+/// replace_all：Tier1 精确匹配的**全部**位置（一个 hunk → 多个操作）。
+/// 不降级 Tier2/3——模糊匹配应用于多个位置风险不可控。零命中 → NoMatch
+/// （附 Tier3 候选供参考）。
+fn locate_replace_all(view: &FileView, old: &str) -> Result<Vec<Located>, LocateError> {
+    let pat = pattern_lines(old);
+    if pat.is_empty() {
+        return Err(LocateError::Underspecified);
+    }
+    let cands = tier1(view, &pat);
+    if cands.is_empty() {
+        return Err(LocateError::NoMatch {
+            candidates: tier3_candidates(view, &pat, &[], &[]),
+            detail: "replace_all: no exact match found — re-check 'old' against the file (see candidates below)"
+                .into(),
+        });
+    }
+    Ok(cands
+        .into_iter()
+        .map(|s| located(view, s, pat.len(), 1, 1.0, "exact (replace_all)"))
+        .collect())
+}
+
+fn locate_hunk(view: &FileView, hunk: &Hunk) -> Result<Vec<Located>, LocateError> {
     match hunk {
+        Hunk::Replace {
+            old,
+            replace_all: true,
+            ..
+        } => locate_replace_all(view, old),
         Hunk::Replace {
             old,
             context_before,
             context_after,
             ..
-        } => locate_replace(view, old, context_before, context_after),
+        } => locate_replace(view, old, context_before, context_after).map(|l| vec![l]),
+        // 整文件区间；空文件（创建路径）自动退化为零长度区间。
+        Hunk::Overwrite { .. } => Ok(vec![Located {
+            start_char: 0,
+            end_char: view.content.len(),
+            start_line: 0,
+            win_lines: 0,
+            tier: 1,
+            score: 1.0,
+            note: "overwrite".to_string(),
+        }]),
         Hunk::InsertAfter { anchor, .. } | Hunk::InsertBefore { anchor, .. } => {
-            locate_anchor(view, anchor)
+            locate_anchor(view, anchor).map(|l| vec![l])
         }
-        Hunk::PrependFile { .. } => Ok(Located {
+        Hunk::PrependFile { .. } => Ok(vec![Located {
             start_char: 0,
             end_char: 0,
             start_line: 0,
@@ -725,8 +851,8 @@ fn locate_hunk(view: &FileView, hunk: &Hunk) -> Result<Located, LocateError> {
             tier: 1,
             score: 1.0,
             note: "prepend".to_string(),
-        }),
-        Hunk::AppendFile { .. } => Ok(Located {
+        }]),
+        Hunk::AppendFile { .. } => Ok(vec![Located {
             start_char: view.content.len(),
             end_char: view.content.len(),
             start_line: 0,
@@ -734,7 +860,39 @@ fn locate_hunk(view: &FileView, hunk: &Hunk) -> Result<Located, LocateError> {
             tier: 1,
             score: 1.0,
             note: "append".to_string(),
-        }),
+        }]),
+        Hunk::ReplaceInline {
+            anchor,
+            old,
+            replace_all,
+            regex,
+            ..
+        } => {
+            let loc = locate_anchor(view, anchor)?;
+            // 窗口内验证可命中：replace_inline 的 NO_MATCH 语义限定在 anchor 窗口内。
+            let win_lines = loc.win_lines.max(1);
+            let win = &view.lines[loc.start_line..loc.start_line + win_lines];
+            let hit = if *regex {
+                match regex::Regex::new(old) {
+                    Ok(re) => win.iter().any(|l| re.is_match(l)),
+                    Err(e) => return Err(LocateError::InvalidRegex(e.to_string())),
+                }
+            } else {
+                win.iter().any(|l| l.contains(old.as_str()))
+            };
+            if !hit {
+                let _ = replace_all; // 命中计数在 resolve 里标注
+                return Err(LocateError::NoMatch {
+                    candidates: Vec::new(),
+                    detail: format!(
+                        "replace_inline: 'old' not found within the anchor window (L{}-L{}); the anchor located the window but the substring/regex does not occur in it",
+                        loc.start_line + 1,
+                        loc.start_line + win_lines
+                    ),
+                });
+            }
+            Ok(vec![loc])
+        }
     }
 }
 
@@ -762,12 +920,15 @@ fn replace_range(view: &FileView, loc: &Located, want_trailing_nl: bool) -> Rang
     if loc.win_lines == 0 {
         return loc.start_char..loc.end_char;
     }
-    let start = view.line_starts[loc.start_line];
-    let end = view.line_starts[loc.start_line + loc.win_lines];
+    let start = view.char_starts[loc.start_line];
+    let end = view.char_starts[loc.start_line + loc.win_lines];
     if want_trailing_nl || end <= start {
         return start..end;
     }
-    let trimmed = if view.content.as_bytes().get(end.wrapping_sub(1)) == Some(&b'\n') {
+    // 窗口最后一行是否以 '\n' 结尾：用字节索引检查（end 的字节位置前一个字节）。
+    // `end - 1` 是 char 索引（'\n' 为单字符，安全）。
+    let end_byte = view.byte_starts[loc.start_line + loc.win_lines];
+    let trimmed = if view.content.as_bytes().get(end_byte.wrapping_sub(1)) == Some(&b'\n') {
         end - 1
     } else {
         end
@@ -815,6 +976,81 @@ fn reindent(new: &str, base: &str) -> String {
         .join("\n")
 }
 
+/// sed `s///` 语义：窗口内行内替换。不跨行（逐行处理）、不改行结构；
+/// `replace_all=false` 只替换第一处（按行序）。regex=true 时 old 为正则。
+/// 窗口末尾无换行时（文件尾）保持无换行。
+fn inline_replace(
+    window: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+    regex: bool,
+) -> Result<String, String> {
+    if regex {
+        let re = regex::Regex::new(old).map_err(|e| e.to_string())?;
+        let mut out = String::with_capacity(window.len() + new.len());
+        let mut done = !replace_all;
+        for line in window.split_inclusive('\n') {
+            if done {
+                out.push_str(line);
+                continue;
+            }
+            let (body, nl) = if line.ends_with('\n') {
+                (&line[..line.len() - 1], "\n")
+            } else {
+                (line, "")
+            };
+            if replace_all {
+                out.push_str(&re.replace_all(body, new));
+            } else {
+                match re.find(body) {
+                    Some(m) => {
+                        let mut replaced = String::with_capacity(body.len() + new.len());
+                        replaced.push_str(&body[..m.start()]);
+                        replaced.push_str(new);
+                        replaced.push_str(&body[m.end()..]);
+                        out.push_str(&replaced);
+                        done = true;
+                    }
+                    None => out.push_str(body),
+                }
+            }
+            out.push_str(nl);
+        }
+        Ok(out)
+    } else {
+        let mut out = String::with_capacity(window.len() + new.len());
+        let mut done = !replace_all;
+        for line in window.split_inclusive('\n') {
+            if done {
+                out.push_str(line);
+                continue;
+            }
+            let (body, nl) = if line.ends_with('\n') {
+                (&line[..line.len() - 1], "\n")
+            } else {
+                (line, "")
+            };
+            if replace_all {
+                out.push_str(&body.replace(old, new));
+            } else {
+                match body.find(old) {
+                    Some(pos) => {
+                        let mut replaced = String::with_capacity(body.len() + new.len());
+                        replaced.push_str(&body[..pos]);
+                        replaced.push_str(new);
+                        replaced.push_str(&body[pos + old.len()..]);
+                        out.push_str(&replaced);
+                        done = true;
+                    }
+                    None => out.push_str(body),
+                }
+            }
+            out.push_str(nl);
+        }
+        Ok(out)
+    }
+}
 fn resolve(view: &FileView, hunk: &Hunk, loc: &Located) -> ResolvedOp {
     match hunk {
         Hunk::Replace { old, new, .. } => {
@@ -831,10 +1067,15 @@ fn resolve(view: &FileView, hunk: &Hunk, loc: &Located) -> ResolvedOp {
             };
             ResolvedOp::Replace { range, new }
         }
+        Hunk::Overwrite { new } => ResolvedOp::Replace {
+            // 无缩进补偿：new 是全文，Tier1 恒命中。
+            range: 0..view.content.len(),
+            new: new.clone(),
+        },
         Hunk::InsertAfter { new, .. } => {
-            let pos = view.line_starts[loc.start_line + loc.win_lines];
+            let pos = view.char_starts[loc.start_line + loc.win_lines];
             // 锚点窗口是文件尾且无尾随换行：先补换行，避免新内容粘在最后一行上。
-            let text = if pos == view.content.len() && !view.content.ends_with('\n') {
+            let text = if pos == view.char_len() && !view.content.ends_with('\n') {
                 format!("\n{new}")
             } else {
                 new.clone()
@@ -842,7 +1083,7 @@ fn resolve(view: &FileView, hunk: &Hunk, loc: &Located) -> ResolvedOp {
             ResolvedOp::Insert { pos, text }
         }
         Hunk::InsertBefore { new, .. } => ResolvedOp::Insert {
-            pos: view.line_starts[loc.start_line],
+            pos: view.char_starts[loc.start_line],
             text: new.clone(),
         },
         Hunk::PrependFile { new } => ResolvedOp::Insert {
@@ -856,9 +1097,24 @@ fn resolve(view: &FileView, hunk: &Hunk, loc: &Located) -> ResolvedOp {
                 new.clone()
             };
             ResolvedOp::Insert {
-                pos: view.content.len(),
+                pos: view.char_len(),
                 text,
             }
+        }
+        Hunk::ReplaceInline {
+            old,
+            new,
+            replace_all,
+            regex,
+            ..
+        } => {
+            // 窗口 = anchor 命中行区间（含行间换行，不含文件尾的尾空行行号）。
+            let start = view.char_starts[loc.start_line];
+            let end = view.char_starts[loc.start_line + loc.win_lines.max(1)];
+            let window = &view.content[start..end];
+            let replaced = inline_replace(window, old, new, *replace_all, *regex)
+                .expect("locate_hunk verified the window contains a match; regex already compiled");
+            ResolvedOp::Replace { range: start..end, new: replaced }
         }
     }
 }
@@ -961,15 +1217,43 @@ enum Mode {
 /// strict：任一 hunk 失败 → 整体拒绝（edited = None）；
 /// partial：成功 hunk 应用（edited = Some + code = 首个失败码），报告含全部详情。
 fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> FileOutcome {
+    // overwrite 是整文件独占语义：单个调用里只能有它自己。
+    let overwrite_count = hunks
+        .iter()
+        .filter(|h| matches!(h, Hunk::Overwrite { .. }))
+        .count();
+    if overwrite_count > 1 || (overwrite_count == 1 && hunks.len() > 1) {
+        return FileOutcome {
+            edited: None,
+            new_hash: None,
+            diff: String::new(),
+            reports: Vec::new(),
+            code: Some("OVERWRITE_EXCLUSIVE".to_string()),
+            message: Some(
+                "overwrite replaces the WHOLE file and must be the only hunk in the call; use one overwrite alone, or prepend_file/append_file/replace hunks for incremental edits"
+                    .to_string(),
+            ),
+            notes,
+        };
+    }
     let view = FileView::new(content);
     let mut reports: Vec<HunkReport> = Vec::with_capacity(hunks.len());
-    let mut located: Vec<Option<Located>> = Vec::with_capacity(hunks.len());
+    let mut located: Vec<Vec<Located>> = Vec::with_capacity(hunks.len());
     let mut first_code: Option<String> = None;
 
     for (i, hunk) in hunks.iter().enumerate() {
         match locate_hunk(&view, hunk) {
-            Ok(loc) => {
-                let line_range = (loc.win_lines > 0).then(|| (loc.start_line + 1, loc.start_line + loc.win_lines));
+            Ok(locs) => {
+                // replace_all 一个 hunk 可产出多个位置；报告仍按 hunk 一条，
+                // 位置/分数取首个，note 标注命中数量。
+                let loc = &locs[0];
+                let line_range =
+                    (loc.win_lines > 0).then(|| (loc.start_line + 1, loc.start_line + loc.win_lines));
+                let note = if locs.len() > 1 {
+                    format!("{} location(s) replaced", locs.len())
+                } else {
+                    loc.note.clone()
+                };
                 reports.push(HunkReport {
                     index: i,
                     kind: hunk.kind_name().to_string(),
@@ -977,12 +1261,12 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                     tier: Some(loc.tier),
                     score: Some(loc.score),
                     line_range,
-                    note: Some(loc.note.clone()),
+                    note: Some(note),
                     code: None,
                     detail: None,
                     candidates: None,
                 });
-                located.push(Some(loc));
+                located.push(locs);
             }
             Err(e) => {
                 let (code, detail, candidates) = match e {
@@ -996,6 +1280,11 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                         "UNDERSPECIFIED".to_string(),
                         "old/anchor and contexts are all empty; use insert_after / insert_before / prepend_file / append_file instead"
                             .to_string(),
+                        None,
+                    ),
+                    LocateError::InvalidRegex(e) => (
+                        "INVALID_REGEX".to_string(),
+                        format!("replace_inline: invalid regex: {e}"),
                         None,
                     ),
                 };
@@ -1014,7 +1303,7 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                     detail: Some(detail),
                     candidates,
                 });
-                located.push(None);
+                located.push(Vec::new());
             }
         }
     }
@@ -1040,8 +1329,8 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
             Mode::Partial => {
                 // 只应用定位成功的 hunk（仍做重叠检测与单快照倒序应用）。
                 let mut ops: Vec<(usize, ResolvedOp)> = Vec::with_capacity(hunks.len());
-                for (i, (hunk, loc)) in hunks.iter().zip(located.iter()).enumerate() {
-                    if let Some(loc) = loc {
+                for (i, (hunk, locs)) in hunks.iter().zip(located.iter()).enumerate() {
+                    for loc in locs {
                         ops.push((i, resolve(&view, hunk, loc)));
                     }
                 }
@@ -1087,8 +1376,10 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
     }
 
     let mut ops: Vec<(usize, ResolvedOp)> = Vec::with_capacity(hunks.len());
-    for (i, (hunk, loc)) in hunks.iter().zip(located.iter()).enumerate() {
-        ops.push((i, resolve(&view, hunk, loc.as_ref().unwrap())));
+    for (i, (hunk, locs)) in hunks.iter().zip(located.iter()).enumerate() {
+        for loc in locs {
+            ops.push((i, resolve(&view, hunk, loc)));
+        }
     }
     if let Err((a, b)) = check_overlap(&ops) {
         return FileOutcome {
@@ -1257,21 +1548,384 @@ fn truncate_content(content: &str) -> String {
 
 fn hint_for(code: &str) -> Option<&'static str> {
     match code {
-        "NO_MATCH" => Some("Refine 'old'/context from the candidates, or re-locate with rg; line-number edits are served by edit_file."),
+        "NO_MATCH" => Some("Refine 'old'/context from the candidates, or re-locate with rg."),
         "AMBIGUOUS_MATCH" => Some("Add context_before/context_after to disambiguate the repeated occurrence."),
         "OVERLAPPING_HUNKS" => Some("Split or merge hunks so their resolved ranges do not overlap."),
         "UNDERSPECIFIED" => Some("Provide context, or use insert_after / insert_before / prepend_file / append_file."),
-        "HASH_MISMATCH" => Some("Re-read the file with read_file and retry with the fresh hash."),
-        "FILE_ALREADY_EXISTS" => Some("The file already exists; drop expected_hash to edit it, or choose a new path to create."),
+        "OVERWRITE_EXCLUSIVE" => Some("overwrite replaces the whole file — send it as the only hunk in the call."),
+        "HASH_MISMATCH" => Some("Re-read the file with read_file and retry with the fresh hash (or omit expected_hash to edit without verification)."),
+        "INVALID_REGEX" => Some("replace_inline: fix the regex (regex crate syntax) and retry."),
         _ => None,
     }
 }
 
 // ─────────────────────────────────────────────────────────────
+// 读路径（空 hunks）：整文件 / 行号范围 / 锚定读
+// ─────────────────────────────────────────────────────────────
+
+/// 行号范围读（1-based，与 read_file 同语义）：grep `path:line:` 输出直连。
+fn read_range(
+    content: &str,
+    total_lines: usize,
+    raw_path: &str,
+    hash: &str,
+    start: Option<usize>,
+    end: Option<usize>,
+    fail: &dyn Fn(&str, String, bool, Option<&str>) -> ToolResult,
+) -> ToolResult {
+    let first = start.unwrap_or(1).saturating_sub(1);
+    if first > total_lines || end.is_some_and(|e| e > total_lines) {
+        return ToolResult::error_data(
+            "LINE_OUT_OF_RANGE",
+            format!("edit_file_v2: requested lines are outside '{raw_path}' ({total_lines} total lines)"),
+            false,
+            Some("Use the total_lines value and retry.").map(str::to_string),
+            json!({
+                "timeis": crate::now_utc8(),
+                "status": "error",
+                "code": "LINE_OUT_OF_RANGE",
+                "path": raw_path,
+                "message": format!("requested lines are outside '{raw_path}' ({total_lines} total lines)"),
+                "total_lines": total_lines,
+                "hash": hash,
+            }),
+        );
+    }
+    let end_0 = end.unwrap_or(total_lines).min(total_lines);
+    let view = FileView::new(content);
+    let body_chars: usize = view.lines[first..end_0]
+        .iter()
+        .map(|l| l.chars().count() + 8)
+        .sum();
+    if body_chars > READ_MAX_CHARS {
+        return fail(
+            "RANGE_TOO_LARGE",
+            "edit_file_v2: requested range exceeds the model output budget".into(),
+            false,
+            Some("Split the range into smaller contiguous reads."),
+        );
+    }
+    let body = view.lines[first..end_0]
+        .iter()
+        .enumerate()
+        .map(|(off, line)| format!("L{}: {line}", first + off + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ToolResult::ok_data(
+        json!({
+            "status": "ok",
+            "read_only": true,
+            "path": raw_path,
+            "start_line": first + 1,
+            "end_line": end_0,
+            "total_lines": total_lines,
+            "hash": hash,
+            "truncated": false,
+        }),
+        body,
+    )
+}
+
+/// 锚定读：复用 hunk 的四层定位引擎——读时的 anchor 命中 = 改时的 hunk 定位，
+/// 读到的上下文就是将要编辑的上下文。模糊/未命中返回候选（与 hunk 同款）。
+fn read_anchored(
+    content: &str,
+    total_lines: usize,
+    raw_path: &str,
+    hash: &str,
+    anchor: &str,
+    ctx_before: usize,
+    ctx_after: usize,
+    fail: &dyn Fn(&str, String, bool, Option<&str>) -> ToolResult,
+) -> ToolResult {
+    let view = FileView::new(content);
+    let loc = match locate_anchor(&view, anchor) {
+        Ok(l) => l,
+        Err(LocateError::Ambiguous { candidates, detail }) => {
+            return ToolResult::error_data(
+                "ANCHOR_AMBIGUOUS",
+                render_read_candidates(raw_path, "ANCHOR_AMBIGUOUS", &detail, &candidates),
+                true,
+                Some("Add context_before/context_after to narrow the window, or read by line range (start_line/end_line).").map(str::to_string),
+                json!({
+                    "timeis": crate::now_utc8(),
+                    "status": "error",
+                    "code": "ANCHOR_AMBIGUOUS",
+                    "path": raw_path,
+                    "message": detail,
+                    "candidates": candidates.iter().map(candidate_json).collect::<Vec<_>>(),
+                    "hash": hash,
+                }),
+            );
+        }
+        Err(LocateError::NoMatch { candidates, detail }) => {
+            return ToolResult::error_data(
+                "NO_MATCH",
+                render_read_candidates(raw_path, "NO_MATCH", &detail, &candidates),
+                true,
+                Some("Refine the anchor from the candidates, or locate with grep first.").map(str::to_string),
+                json!({
+                    "timeis": crate::now_utc8(),
+                    "status": "error",
+                    "code": "NO_MATCH",
+                    "path": raw_path,
+                    "message": detail,
+                    "candidates": candidates.iter().map(candidate_json).collect::<Vec<_>>(),
+                    "hash": hash,
+                }),
+            );
+        }
+        Err(LocateError::Underspecified) => {
+            return fail(
+                "UNDERSPECIFIED",
+                "edit_file_v2: anchor is empty (underspecified read)".into(),
+                false,
+                Some("Provide a non-empty anchor, or use start_line/end_line."),
+            );
+        }
+    };
+    let s = loc.start_line;
+    let w = loc.win_lines.max(1);
+    let before = ctx_before.min(s);
+    let after = ctx_after.min(total_lines.saturating_sub(s + w));
+    let first = s - before;
+    let end_0 = (s + w + after).min(total_lines);
+    let body_chars: usize = view.lines[first..end_0]
+        .iter()
+        .map(|l| l.chars().count() + 8)
+        .sum();
+    if body_chars > READ_MAX_CHARS {
+        return fail(
+            "RANGE_TOO_LARGE",
+            "edit_file_v2: anchored window exceeds the model output budget".into(),
+            false,
+            Some("Reduce context_before/context_after."),
+        );
+    }
+    let body = view.lines[first..end_0]
+        .iter()
+        .enumerate()
+        .map(|(off, line)| format!("L{}: {line}", first + off + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ToolResult::ok_data(
+        json!({
+            "status": "ok",
+            "read_only": true,
+            "path": raw_path,
+            "anchor_line": s + 1,
+            "anchor_lines": w,
+            "start_line": first + 1,
+            "end_line": end_0,
+            "total_lines": total_lines,
+            "tier": loc.tier,
+            "score": loc.score,
+            "note": loc.note,
+            "hash": hash,
+            "truncated": false,
+        }),
+        body,
+    )
+}
+
+fn render_read_candidates(path: &str, code: &str, detail: &str, cands: &[Candidate]) -> String {
+    let mut out = format!("[ERROR] edit_file_v2 {path}\n  {code}: {detail}\n");
+    for (i, c) in cands.iter().enumerate() {
+        out.push_str(&format!(
+            "    candidate #{} L{}-L{} score {:.2} tier{}\n",
+            i + 1,
+            c.line_range.0,
+            c.line_range.1,
+            c.score,
+            c.tier
+        ));
+        if !c.diff.is_empty() {
+            out.push_str(&c.diff);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn candidate_json(c: &Candidate) -> serde_json::Value {
+    json!({
+        "line_range": [c.line_range.0, c.line_range.1],
+        "snippet": c.snippet,
+        "score": c.score,
+        "tier": c.tier,
+        "diff": c.diff,
+    })
+}
+
+/// 读路径入口（hunks 缺失/空）：整文件 / start_line..end_line / anchor 三种形态。
+fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult {
+    let read_fail = |code: &str, message: String, retryable: bool, hint: Option<&str>| {
+        ToolResult::error_data(
+            code,
+            message.clone(),
+            retryable,
+            hint.map(str::to_string),
+            json!({
+                "timeis": crate::now_utc8(),
+                "status": "error",
+                "code": code,
+                "message": message,
+            }),
+        )
+    };
+    let fail = &read_fail;
+
+    let start = args.get("start_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let end = args.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let anchor = args
+        .get("anchor")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let has_context = args.get("context_before").is_some() || args.get("context_after").is_some();
+    let ctx_before = args
+        .get("context_before")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(10);
+    let ctx_after = args
+        .get("context_after")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(10);
+
+    let has_range = start.is_some() || end.is_some();
+    if has_range && (anchor.is_some() || has_context) {
+        return fail(
+            "PARSE_ERROR",
+            "edit_file_v2: start_line/end_line and anchor are mutually exclusive".into(),
+            false,
+            None,
+        );
+    }
+    if anchor.is_none() && has_context {
+        return fail(
+            "PARSE_ERROR",
+            "edit_file_v2: context_before/context_after require 'anchor'".into(),
+            false,
+            None,
+        );
+    }
+    if start == Some(0) || end == Some(0) {
+        return fail(
+            "PARSE_ERROR",
+            "edit_file_v2: read line numbers start at 1".into(),
+            false,
+            None,
+        );
+    }
+    if let (Some(s), Some(e)) = (start, end) {
+        if e < s {
+            return fail(
+                "PARSE_ERROR",
+                "edit_file_v2: end_line must be >= start_line".into(),
+                false,
+                None,
+            );
+        }
+        if e - s + 1 > READ_MAX_LINES {
+            return fail(
+                "RANGE_TOO_LARGE",
+                format!("edit_file_v2: requested range exceeds {READ_MAX_LINES} lines"),
+                false,
+                Some("Use smaller contiguous ranges."),
+            );
+        }
+    }
+    if anchor.is_some() && (ctx_before > READ_MAX_CONTEXT || ctx_after > READ_MAX_CONTEXT) {
+        return fail(
+            "PARSE_ERROR",
+            format!("edit_file_v2: context window per side exceeds {READ_MAX_CONTEXT} lines"),
+            false,
+            None,
+        );
+    }
+
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return fail(
+                "FILE_NOT_FOUND",
+                format!("edit_file_v2: {raw_path}: file not found (read mode; creation requires explicit hunks)"),
+                false,
+                Some("Provide prepend_file / append_file / overwrite hunks to create the file"),
+            );
+        }
+        Err(e) => {
+            return fail(
+                "READ_FAILED",
+                format!("edit_file_v2: cannot read {raw_path}: {e}"),
+                false,
+                None,
+            );
+        }
+    };
+    let raw = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return fail(
+                "NOT_UTF8_TEXT",
+                format!("edit_file_v2: {raw_path} is not valid UTF-8 text (treated as binary)"),
+                false,
+                None,
+            );
+        }
+    };
+    let (content, _was_crlf) = normalize_newlines(&raw);
+    let hash = content_hash(&content);
+    let total_lines = content.lines().count();
+
+    if !has_range && anchor.is_none() {
+        // 整文件读（现状语义：CONTENT_CAP 截断，hash 仍为全文件）
+        let truncated = content.len() > CONTENT_CAP;
+        let shown = truncate_content(&content);
+        let text = if truncated {
+            format!("{shown}\n(read-only: {total_lines} lines, truncated)\n")
+        } else {
+            content
+        };
+        return ToolResult::ok_data(
+            json!({
+                "status": "ok",
+                "read_only": true,
+                "path": raw_path,
+                "hash": hash,
+                "line_count": total_lines,
+                "truncated": truncated,
+                // 注意：内容走 model_text（compact_data 会删 data 里的
+                // content 键），data 只放元数据——与 read_file 同构。
+            }),
+            text,
+        );
+    }
+
+    if has_range {
+        return read_range(&content, total_lines, raw_path, &hash, start, end, fail);
+    }
+    read_anchored(
+        &content,
+        total_lines,
+        raw_path,
+        &hash,
+        anchor.unwrap(),
+        ctx_before,
+        ctx_after,
+        fail,
+    )
+}
+// ─────────────────────────────────────────────────────────────
 // 执行入口
 // ─────────────────────────────────────────────────────────────
 
-fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
+pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let fail = |code: &str, message: String, retryable: bool, hint: Option<&str>| {
         ToolResult::error_data(
             code,
@@ -1301,6 +1955,16 @@ fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
         .map(str::to_string);
 
     let mut notes: Vec<String> = Vec::new();
+    // ── 读路径（二元组场景：edit 兼读）──
+    // hunks 缺失/空 = 无编辑意图 → 退化为读：返回 content + hash + line_count
+    // （对齐 read_file 结构，hash 可直接作 expected_hash 续接编辑，闭环在同一
+    // 工具内完成）。文件必须存在——创建需要显式 hunks，防"读"误当"建"。
+    // 不写盘、不 record、无 diff；权限层按空 hunks 动态分类为 Read（permission.rs）。
+    if args.get("hunks").and_then(|v| v.as_array()).is_none_or(|a| a.is_empty()) {
+        // 读路径：整文件 / 行号范围（grep 直连）/ 锚定读（复用定位引擎）。
+        // 不写盘、不 record、无 diff；权限层按空 hunks 动态分类为 Read（permission.rs）。
+        return read_path(&path, raw_path, args);
+    }
     let hunks = match args.get("hunks").and_then(|v| v.as_array()) {
         Some(arr) if !arr.is_empty() => arr,
         _ => {
@@ -1350,10 +2014,12 @@ fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
     };
 
     // ── 读文件 ──
+    let mut file_was_missing = false;
     let raw = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && expected_hash.is_none() => {
-            // 创建新文件路径：空内容进入正常管线（仅 prepend/append 可定位）。
+            // 创建新文件路径：空内容进入正常管线（仅 prepend/append/overwrite 可定位）。
+            file_was_missing = true;
             Vec::new()
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1416,17 +2082,10 @@ fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
             }
         }
         None => {
-            // 创建路径：文件必须不存在（含空文件——存在即拒绝"创建"意图）。
-            if path_exists(&path) {
-                return fail(
-                    "FILE_ALREADY_EXISTS",
-                    format!(
-                        "edit_file_v2: {raw_path} already exists; expected_hash is None (create-only path). Provide the current hash to edit it."
-                    ),
-                    true,
-                    hint_for("FILE_ALREADY_EXISTS"),
-                );
-            }
+            // 无 hash：直接编辑。v2 全部是内容定位（无行号盲定位），
+            // 命中即安全——与 v1 的内容定位语义一致。模型从 read 拿不到
+            // hash（hash 只在 data 元数据里，模型正文里没有），门禁只会堵死。
+            // 文件不存在 → 创建路径（读文件分支已处理 NotFound）。
         }
     }
 
@@ -1445,15 +2104,56 @@ fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
                 "message": outcome.message,
                 "hunks": outcome.reports.iter().map(|r| hunk_report_json(r)).collect::<Vec<_>>(),
             });
+            // 文件不存在 + 内容定位失败 → 提示创建路径（否则模型会反复重试 replace）。
+            let hint = if file_was_missing && code == "NO_MATCH" {
+                Some("file does not exist — create it with prepend_file / append_file (or overwrite) hunks".to_string())
+            } else {
+                hint_for(code).map(str::to_string)
+            };
             ToolResult::error_data(
                 code,
                 text,
                 true,
-                hint_for(code).map(str::to_string),
+                hint,
                 data,
             )
         }
         Some(ref edited) => {
+            if dry_run {
+                // 只定位+计算，不写盘；暂存参数供 confirm_apply 内存直提
+                // （模型无需重发 hunks）。expected_hash 注入 dry-run 读到的
+                // LF 视图 hash：重放时 hash gate 拦截期间的外部改动。
+                let new_hash = outcome.new_hash.as_deref().unwrap_or_default();
+                let mut pending_args = args.clone();
+                if let Some(obj) = pending_args.as_object_mut() {
+                    obj.remove("dry_run");
+                    obj.insert("expected_hash".into(), json!(content_hash(&content)));
+                }
+                let pending_id = crate::pending::store("edit_file_v2", &pending_args);
+                let text = render_text(raw_path, &outcome);
+                let applied = outcome.reports.iter().filter(|r| r.status == "ok").count();
+                let total = outcome.reports.len();
+                let status = if outcome.code.is_some() { "partial" } else { "ok" };
+                let mut data = json!({
+                    "timeis": crate::now_utc8(),
+                    "status": status,
+                    "dry_run": true,
+                    "path": raw_path,
+                    "pending_id": pending_id,
+                    "new_hash": new_hash,
+                    "applied_hunks": applied,
+                    "total_hunks": total,
+                    "hunks": outcome.reports.iter().map(|r| hunk_report_json(r)).collect::<Vec<_>>(),
+                });
+                if let Some(code) = &outcome.code {
+                    data["code"] = json!(code);
+                }
+                let mut result = ToolResult::ok_data(data, text);
+                result.summary.push_str(&format!(
+                    "pending_id={pending_id} — confirm with confirm_apply {{\"pending_id\":\"{pending_id}\",\"action\":\"apply\"}}\n"
+                ));
+                return result;
+            }
             let write_content = if was_crlf {
                 edited.replace('\n', "\r\n")
             } else {
@@ -1467,6 +2167,8 @@ fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
                     None,
                 );
             }
+            // 台账：对齐 write 工具（自动区分 created/edited）。
+            crate::file_state::record_write(&path, &write_content);
             let new_hash = outcome.new_hash.as_deref().unwrap_or_default();
             let text = render_text(raw_path, &outcome);
             let applied = outcome.reports.iter().filter(|r| r.status == "ok").count();
@@ -1494,9 +2196,7 @@ fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
     }
 }
 
-fn path_exists(path: &str) -> bool {
-    std::path::Path::new(path).exists()
-}
+
 
 fn hunk_report_json(r: &HunkReport) -> Value {
     let mut v = json!({
@@ -1546,19 +2246,24 @@ pub fn register(mgr: &mut ToolManager) {
         ToolHandler {
             key: "edit_file_v2".to_string(),
             description: concat!(
-                "Structured hunk editor (v2, complements edit_file). Kind-tagged hunks: ",
-                "replace (old/new/context_before/context_after), insert_after / insert_before (anchor/new), ",
+                "Structured hunk editor (v2, the ONLY file editor). Kind-tagged hunks: ",
+                "replace (old/new/context_before/context_after), overwrite (new, whole-file replacement), insert_after / insert_before (anchor/new), replace_inline (anchor + old/new substring or regex replace, sed s/// semantics, window-limited), ",
                 "prepend_file / append_file (new). Four-tier matching: exact → indent-shape → similarity scoring ",
                 "with margin (auto-applies only when the best candidate clearly wins) → top-3 candidates on failure. ",
+                "overwrite replaces the ENTIRE file (equivalent to write) and must be the only hunk in the call. ",
+                "Keep 'old' SHORT: use the smallest unique 1-5 line fragment (whitespace/indent differences are auto-tolerated; ",
+                "a whole function body is more likely to mismatch). ",
+                "replace_all=true on a replace hunk substitutes EVERY exact occurrence of 'old' (Tier-1 exact only). ",
                 "All hunks are located on ONE unchanged snapshot and applied all-or-nothing; overlapping hunks are rejected. ",
                 "Newline rule: the replaced range includes the trailing newline ONLY if 'old' ends with '\\n' — ",
                 "normally give both old and new WITHOUT the trailing newline (it stays in place); ",
                 "end 'old' with '\\n' only when you want to delete/replace the line break itself. ",
-                "No line numbers, no replace_all, no regex — use edit_file for those. ",
-                "expected_hash (from read_file) guards stale content; on mismatch the current content is returned. ",
+                "expected_hash (optional; from read_file data, if your provider exposes it) guards stale content; omit it to edit without verification — the content match itself is the safety net. ",
                 "On success returns new_hash to chain into the next call without re-reading. ",
+                "On failure, candidates come back with line ranges — refine 'old'/context from them, or re-read the file first if the view may be stale. ",
                 "mode 'partial' applies successful hunks and reports failures in detail, so you only re-send the failed ones "
-                ,"(with expected_hash = returned new_hash) instead of the whole batch; mode 'strict' (default) is all-or-nothing."
+                ,"(with expected_hash = returned new_hash) instead of the whole batch; mode 'strict' (default) is all-or-nothing. "
+                ,"dry_run=true locates and computes without writing and returns a pending_id — ask the user for confirmation, then commit via confirm_apply without re-sending the hunks. Omit hunks (or send []) to READ the file: read-only result with content + hash + line_count — the hash chains straight into expected_hash for the next edit. Read mode also supports grep-driven precision reads: start_line/end_line (1-based; line ranges connect straight to grep `path:line:` output; each line prefixed L<number>:) and anchor + context_before/context_after (anchored read reusing the SAME four-tier locator as hunks — the anchor you read with is the anchor you edit with; ambiguous anchors return candidates). All read modes return the full-file hash for expected_hash chaining."
             ),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1566,20 +2271,51 @@ pub fn register(mgr: &mut ToolManager) {
                     "path": {"type": "string", "description": "Target file path"},
                     "expected_hash": {
                         "type": "string",
-                        "description": "Optional; hash returned by read_file. Omit only when creating a new file."
+                        "description": "Optional; hash from read_file's data. Omit to edit without verification (content match itself is the safety net). Mismatch rejects with current content returned."
                     },
                     "hunks": {
                         "type": "array",
-                        "description": "Edit hunks. Each hunk: {\"kind\":\"replace\",\"old\":…,\"new\":…,\"context_before\":…,\"context_after\":…} | {\"kind\":\"insert_after\"|\"insert_before\",\"anchor\":…,\"new\":…} | {\"kind\":\"prepend_file\"|\"append_file\",\"new\":…}. Empty 'old' with contexts = pure insert."
+                        "description": "Edit hunks. Each hunk: {\"kind\":\"replace\",\"old\":…,\"new\":…,\"context_before\":…,\"context_after\":…,\"replace_all\":false} | {\"kind\":\"overwrite\",\"new\":…} (whole-file replacement; must be the only hunk) | {\"kind\":\"insert_after\"|\"insert_before\",\"anchor\":…,\"new\":…} | {\"kind\":\"prepend_file\"|\"append_file\",\"new\":…} | {\"kind\":\"replace_inline\",\"anchor\":…,"old\":…,"new\":…,"replace_all\":false,"regex\":false} (sed s/// semantics: substring/regex replace ONLY inside the anchor's located window, never across lines; replace_all=false replaces the first occurrence only; regex uses regex-crate syntax, case-sensitive). Omit hunks or send [] to READ the file (read-only: content + hash + line_count, aligned with read_file; creation requires explicit hunks). Empty 'old' with contexts = pure insert. replace_all=true substitutes every exact occurrence of 'old' (Tier-1 exact only)."
                     },
                     "mode": {
                         "type": "string",
                         "enum": ["strict", "partial"],
                         "default": "strict",
                         "description": "strict = all-or-nothing; partial = successful hunks are applied and written, failed hunks are reported in detail — retry only the failed hunks with expected_hash = returned new_hash."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Locate + compute every hunk but write NOTHING. On success returns a pending_id; confirm with confirm_apply to commit without re-sending the hunks."
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Read mode only (omit hunks): first line, 1-based — connects straight to grep line numbers."
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Read mode only: last line, 1-based, inclusive; omit to read to EOF."
+                    },
+                    "anchor": {
+                        "type": "string",
+                        "description": "Read mode only: content anchor, located with the same four-tier engine as hunks; returns the surrounding window (context_before/context_after)."
+                    },
+                    "context_before": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 10,
+                        "description": "Read mode only: lines of context before the anchor match."
+                    },
+                    "context_after": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 10,
+                        "description": "Read mode only: lines of context after the anchor match."
                     }
                 },
-                "required": ["path", "hunks"],
+                "required": ["path"],
                 "additionalProperties": false
             }),
             handler: handle_edit_file_v2,
@@ -1605,6 +2341,17 @@ mod tests {
             new: new.to_string(),
             context_before: String::new(),
             context_after: String::new(),
+            replace_all: false,
+        }
+    }
+
+    fn rp_all(old: &str, new: &str) -> Hunk {
+        Hunk::Replace {
+            old: old.to_string(),
+            new: new.to_string(),
+            context_before: String::new(),
+            context_after: String::new(),
+            replace_all: true,
         }
     }
 
@@ -1614,6 +2361,7 @@ mod tests {
             new: new.to_string(),
             context_before: before.to_string(),
             context_after: after.to_string(),
+            replace_all: false,
         }
     }
 
@@ -1627,6 +2375,38 @@ mod tests {
 
     fn err_code(o: &FileOutcome) -> &str {
         o.code.as_deref().unwrap_or("")
+    }
+
+    // 0. replace_all：全部精确匹配位置一次替换
+    #[test]
+    fn replace_all_substitutes_every_exact_occurrence() {
+        let out = edit("a\nx\nb\nx\nc\n", &[rp_all("x", "X")]);
+        assert_eq!(out.edited.as_deref(), Some("a\nX\nb\nX\nc\n"));
+        assert_eq!(out.reports.len(), 1);
+        assert_eq!(out.reports[0].tier, Some(1));
+        assert_eq!(
+            out.reports[0].note.as_deref(),
+            Some("2 location(s) replaced")
+        );
+    }
+
+    // 0b. replace_all：零精确命中 → NO_MATCH，不降级模糊匹配（多位置风险不可控）
+    #[test]
+    fn replace_all_without_exact_match_rejects() {
+        // old 与文件内容有缩进差异 → Tier2 可单点命中，但 replace_all 拒绝降级。
+        let out = edit("a\n    x\nb\n", &[rp_all("x", "X")]);
+        assert_eq!(err_code(&out), "NO_MATCH");
+        assert!(out.edited.is_none());
+    }
+
+    // 0c. replace_all：与其它 hunk 共存（区间互不重叠）
+    #[test]
+    fn replace_all_coexists_with_other_hunks() {
+        let out = edit(
+            "a\nx\nb\nx\nc\n",
+            &[rp_all("x", "X"), rp("b", "B")],
+        );
+        assert_eq!(out.edited.as_deref(), Some("a\nX\nB\nX\nc\n"));
     }
 
     // 1. 精确匹配唯一命中
@@ -1869,19 +2649,18 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
     }
 
-    // 12. expected_hash=None 但文件已存在 → FileAlreadyExists
+    // 12. 无 hash 编辑已有文件 → 直接编辑（内容定位命中即安全）
     #[test]
-    fn create_path_rejects_existing_file() {
+    fn edit_existing_file_without_hash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "x\n").unwrap();
         let result = exec_edit_file_v2(&json!({
             "path": path.to_string_lossy(),
-            "hunks": [{"kind": "prepend_file", "new": "y\n"}],
+            "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
         }));
-        assert!(!result.is_success());
-        assert_eq!(result.data["code"], "FILE_ALREADY_EXISTS");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\n");
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "y\n");
     }
 
     // 12b. 创建新文件成功
@@ -2117,4 +2896,794 @@ mod tests {
         assert!(!result.is_success());
         assert_eq!(result.data["code"], "PARSE_ERROR");
     }
-}
+
+    // ── 多字节（中文）回归：FileView 字节/字符索引混淆曾导致 ropey 越界
+    //    panic 与区间错位（char_indices 返回字节偏移被误当 char 索引）。
+    // ────────────────────────────────────────────────────────────────
+
+    // 中文行 Tier1 精确替换：多字节行命中 + 区间正确（修复前会 panic/错位）。
+    #[test]
+    fn multibyte_exact_replace() {
+        let content = "fn main() {\n    // 处理用户输入\n    let x = 1;\n}\n";
+        let out = edit(content, &[rp("    // 处理用户输入", "    // 处理用户请求")]);
+        assert_eq!(
+            out.edited.as_deref(),
+            Some("fn main() {\n    // 处理用户请求\n    let x = 1;\n}\n")
+        );
+        assert_eq!(out.reports[0].tier, Some(1));
+    }
+
+    // 中文文件多 hunk 倒序应用：两处中文替换 + 一处 ASCII 替换，倒序区间都正确。
+    #[test]
+    fn multibyte_multi_hunk_reverse_apply() {
+        let content = "// 配置说明\nlet a = 1;\n// 环境变量\nlet b = 2;\n";
+        let out = edit(
+            content,
+            &[
+                rp("// 配置说明", "// 配置文档"),
+                rp("let b = 2;", "let b = 3;"),
+                rp("// 环境变量", "// 环境参数"),
+            ],
+        );
+        assert_eq!(
+            out.edited.as_deref(),
+            Some("// 配置文档\nlet a = 1;\n// 环境参数\nlet b = 3;\n")
+        );
+        assert_eq!(err_code(&out), "");
+    }
+
+    // 中文锚点 InsertAfter：插入位置按 char 索引定位，中文行后插入正确。
+    // （语义：new 自带换行，与 ASCII 用例 15 一致。）
+    #[test]
+    fn multibyte_insert_after_anchor() {
+        let content = "// 头部注释\nbody();\n";
+        let out = edit(
+            content,
+            &[Hunk::InsertAfter {
+                anchor: "// 头部注释".to_string(),
+                new: "// 追加注释\n".to_string(),
+            }],
+        );
+        assert_eq!(
+            out.edited.as_deref(),
+            Some("// 头部注释\n// 追加注释\nbody();\n")
+        );
+    }
+
+    // 中文文件无尾换行 AppendFile：自动补换行（new 给纯内容，不带前导 \n）。
+    #[test]
+    fn multibyte_append_no_trailing_newline() {
+        let content = "// 中文内容";
+        let out = edit(
+            content,
+            &[Hunk::AppendFile {
+                new: "// 追加行".to_string(),
+            }],
+        );
+        assert_eq!(out.edited.as_deref(), Some("// 中文内容\n// 追加行"));
+    }
+
+    // 中文 + 尾换行语义：old 带 \n 的整段替换（删除尾行时区间含 \n）。
+    #[test]
+    fn multibyte_replace_with_trailing_newline() {
+        let content = "第一行\n第二行\n第三行\n";
+        let out = edit(content, &[rp("第二行\n", "第二行（改）\n")]);
+        assert_eq!(
+            out.edited.as_deref(),
+            Some("第一行\n第二行（改）\n第三行\n")
+        );
+    }
+
+    // ── overwrite（D10）──
+
+    // O1. 整文件覆盖：new 全文替换，Tier1 恒命中
+    #[test]
+    fn overwrite_replaces_whole_file() {
+        let out = edit("a\nb\nc\n", &[Hunk::Overwrite { new: "x\ny\n".into() }]);
+        assert_eq!(out.edited.as_deref(), Some("x\ny\n"));
+        assert_eq!(out.reports[0].tier, Some(1));
+        assert_eq!(out.reports[0].kind, "overwrite");
+        assert_eq!(out.reports[0].status, "ok");
+    }
+
+    // O2. 空内容（创建路径）上 overwrite = 创建
+    #[test]
+    fn overwrite_on_empty_content_creates() {
+        let out = edit("", &[Hunk::Overwrite { new: "x\n".into() }]);
+        assert_eq!(out.edited.as_deref(), Some("x\n"));
+    }
+
+    // O3. overwrite 与其他 hunk 混用 → OVERWRITE_EXCLUSIVE（独占语义）
+    #[test]
+    fn overwrite_mixed_with_other_hunks_rejected() {
+        let out = edit(
+            "a\n",
+            &[rp("a", "b"), Hunk::Overwrite { new: "x\n".into() }],
+        );
+        assert_eq!(err_code(&out), "OVERWRITE_EXCLUSIVE");
+        assert!(out.edited.is_none());
+        assert_eq!(out.reports.len(), 0);
+    }
+
+    // O4. 两个 overwrite → OVERWRITE_EXCLUSIVE
+    #[test]
+    fn two_overwrites_rejected() {
+        let out = edit(
+            "a\n",
+            &[
+                Hunk::Overwrite { new: "x\n".into() },
+                Hunk::Overwrite { new: "y\n".into() },
+            ],
+        );
+        assert_eq!(err_code(&out), "OVERWRITE_EXCLUSIVE");
+        assert!(out.edited.is_none());
+    }
+
+    // O5. parse：overwrite 只要 new；误传的 old 被忽略（整文件语义不看旧内容）
+    #[test]
+    fn overwrite_parse_ignores_old() {
+        let mut notes = Vec::new();
+        let h = Hunk::parse(
+            &json!({"kind": "overwrite", "new": "x\ny\n", "old": "irrelevant"}),
+            &mut notes,
+        );
+        assert_eq!(h, Ok(Hunk::Overwrite { new: "x\ny\n".into() }));
+        // 缺 new → 报错
+        let h2 = Hunk::parse(&json!({"kind": "overwrite"}), &mut notes);
+        assert!(h2.is_err());
+        // unknown kind 消息包含 overwrite
+        let h3 = Hunk::parse(&json!({"kind": "nope", "new": "x"}), &mut notes);
+        assert!(h3
+            .unwrap_err()
+            .contains("expected replace / overwrite / insert_after"));
+    }
+
+    // O6. exec 层：overwrite 创建新文件
+    #[test]
+    fn overwrite_creates_new_file_via_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.txt");
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{"kind": "overwrite", "new": "hello\nworld\n"}],
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\nworld\n");
+        // 台账已记录（创建）
+        assert!(crate::file_state::last_hash(&path.to_string_lossy()).is_some());
+    }
+
+    // O7. exec 层：overwrite 覆盖已有文件
+    #[test]
+    fn overwrite_replaces_existing_file_via_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "old content\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{"kind": "overwrite", "new": "brand new\n"}],
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "brand new\n");
+    }
+
+    // O8. overwrite + expected_hash：错值拒绝（防覆盖竞争写），对值通过
+    #[test]
+    fn overwrite_with_expected_hash_guards_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\nb\n").unwrap();
+        let bad = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "expected_hash": "deadbeef",
+            "hunks": [{"kind": "overwrite", "new": "x\n"}],
+        }));
+        assert!(!bad.is_success());
+        assert_eq!(bad.data["code"], "HASH_MISMATCH");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
+
+        let good = content_hash("a\nb\n");
+        let ok = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "expected_hash": good,
+            "hunks": [{"kind": "overwrite", "new": "x\n"}],
+        }));
+        assert!(ok.is_success(), "model text: {}", ok.model.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\n");
+    }
+
+    // O9. 不存在文件上误用 replace → NO_MATCH + 创建提示（hint 含 does not exist）
+    #[test]
+    fn replace_on_missing_file_hints_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ghost.txt");
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "NO_MATCH");
+        let hint = result
+            .error
+            .as_ref()
+            .and_then(|e| e.hint.as_deref())
+            .unwrap_or("");
+        assert!(
+            hint.contains("does not exist"),
+            "hint should guide creation, got: {hint}"
+        );
+        assert!(!path.exists());
+    }
+
+    // O10. exec 层混用 → OVERWRITE_EXCLUSIVE 透传
+    #[test]
+    fn overwrite_mixed_rejected_via_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [
+                {"kind": "replace", "old": "a", "new": "b"},
+                {"kind": "overwrite", "new": "x\n"}
+            ],
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "OVERWRITE_EXCLUSIVE");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\n");
+    }
+
+    // ── 读路径（空 hunks = 读，二元组场景）──
+
+    // R1. 空 hunks 读已有文件：read_only + content + hash + line_count，不写盘
+    #[test]
+    fn empty_hunks_reads_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [],
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert_eq!(result.data["read_only"], true);
+        // 内容在 model_text（对齐 read_file：data 只放元数据）
+        assert!(result.model_text().contains("a\nb\nc\n"));
+        assert_eq!(result.data["line_count"], 3);
+        assert_eq!(result.data["hash"], content_hash("a\nb\nc\n"));
+        assert_eq!(result.data["truncated"], false);
+        // 不写盘（mtime 不变）
+        let mtime_after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after);
+    }
+
+    // R2. 省略 hunks 字段同样走读路径
+    #[test]
+    fn missing_hunks_reads_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "hello\n").unwrap();
+        let result = exec_edit_file_v2(&json!({ "path": path.to_string_lossy() }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert_eq!(result.data["read_only"], true);
+        assert_eq!(result.data["hash"], content_hash("hello\n"));
+    }
+
+    // R3. 空 hunks 读不存在的文件 → FILE_NOT_FOUND，且不创建
+    #[test]
+    fn empty_hunks_on_missing_file_reports_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ghost.txt");
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [],
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "FILE_NOT_FOUND");
+        assert!(!path.exists());
+    }
+
+    // R4. 读→编辑闭环：读的 hash 直接作 expected_hash 编辑成功
+    #[test]
+    fn read_hash_chains_into_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let read = exec_edit_file_v2(&json!({ "path": path.to_string_lossy(), "hunks": [] }));
+        assert!(read.is_success());
+        let h = read.data["hash"].as_str().unwrap().to_string();
+        let edit = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "expected_hash": h,
+            "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
+        }));
+        assert!(edit.is_success(), "model text: {}", edit.model.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "y\n");
+    }
+
+    // ── 读路径扩展：行号范围读（grep 直连）──
+
+    // R5. 范围读：L 前缀行 + 元数据，hash 为全文件 hash
+    #[test]
+    fn range_read_returns_prefixed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "start_line": 2,
+            "end_line": 4,
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert!(result.model_text().contains("L2: b\nL3: c\nL4: d"));
+        assert_eq!(result.data["start_line"], 2);
+        assert_eq!(result.data["end_line"], 4);
+        assert_eq!(result.data["total_lines"], 5);
+        assert_eq!(result.data["hash"], content_hash("a\nb\nc\nd\ne\n"));
+        assert_eq!(result.data["truncated"], false);
+    }
+
+    // R6. 只给 start_line：读到文件尾
+    #[test]
+    fn range_read_start_only_reads_to_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "start_line": 4,
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert!(result.model_text().contains("L4: d\nL5: e"));
+        assert_eq!(result.data["end_line"], 5);
+    }
+
+    // R7. 越界 → LINE_OUT_OF_RANGE（带 total_lines + hash）
+    #[test]
+    fn range_read_out_of_range_reports_total_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "start_line": 6,
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "LINE_OUT_OF_RANGE");
+        assert_eq!(result.data["total_lines"], 3);
+        assert_eq!(result.data["hash"], content_hash("a\nb\nc\n"));
+    }
+
+    // R8. end < start → PARSE_ERROR
+    #[test]
+    fn range_read_inverted_bounds_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "start_line": 4,
+            "end_line": 2,
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "PARSE_ERROR");
+    }
+
+    // R9. 行号从 1 开始
+    #[test]
+    fn range_read_zero_line_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "start_line": 0,
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "PARSE_ERROR");
+    }
+
+    // R10. 行数超上限 → RANGE_TOO_LARGE
+    #[test]
+    fn range_read_too_many_lines_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "x\n".repeat(450)).unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "start_line": 1,
+            "end_line": 450,
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "RANGE_TOO_LARGE");
+    }
+
+    // R11. 字符预算超限 → RANGE_TOO_LARGE
+    #[test]
+    fn range_read_exceeding_char_budget_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        let line = "y".repeat(100);
+        let content = (0..300).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+        std::fs::write(&path, content).unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "start_line": 1,
+            "end_line": 300,
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "RANGE_TOO_LARGE");
+    }
+
+    // ── 读路径扩展：锚定读（复用定位引擎）──
+
+    // R12. 锚定读基本：唯一命中 → 窗口 + anchor_line + tier + 全文件 hash
+    #[test]
+    fn anchored_read_locates_unique_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(
+            &path,
+            "line one\nfn foo(a: i32) -> i32 {\n    a + 1\n}\nline five\n",
+        )
+        .unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "anchor": "fn foo(a: i32) -> i32 {",
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert!(result.model_text().contains("L2: fn foo(a: i32) -> i32 {"));
+        assert_eq!(result.data["anchor_line"], 2);
+        assert_eq!(result.data["anchor_lines"], 1);
+        assert_eq!(result.data["tier"], 1);
+        assert_eq!(result.data["start_line"], 1);
+        assert_eq!(result.data["end_line"], 5);
+        assert_eq!(result.data["total_lines"], 5);
+        assert_eq!(
+            result.data["hash"],
+            content_hash("line one\nfn foo(a: i32) -> i32 {\n    a + 1\n}\nline five\n")
+        );
+    }
+
+    // R13. 锚定读上下文窗口：context_before/context_after 控制展示范围
+    #[test]
+    fn anchored_read_context_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(
+            &path,
+            "line one\nfn foo(a: i32) -> i32 {\n    a + 1\n}\nline five\n",
+        )
+        .unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "anchor": "fn foo(a: i32) -> i32 {",
+            "context_before": 1,
+            "context_after": 1,
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert_eq!(
+            result.model_text(),
+            "L1: line one\nL2: fn foo(a: i32) -> i32 {\nL3:     a + 1"
+        );
+        assert_eq!(result.data["start_line"], 1);
+        assert_eq!(result.data["end_line"], 3);
+    }
+
+    // R14. 模糊锚 → ANCHOR_AMBIGUOUS + 候选（读阶段消歧，改阶段不再失败）
+    #[test]
+    fn anchored_read_ambiguous_returns_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "dup\ndup\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "anchor": "dup",
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "ANCHOR_AMBIGUOUS");
+        let cands = result.data["candidates"].as_array().unwrap();
+        assert!(!cands.is_empty());
+        assert!(result
+            .error
+            .as_ref()
+            .and_then(|e| e.hint.as_deref())
+            .is_some_and(|h| h.contains("context_before")));
+    }
+
+    // R15. 未命中 → NO_MATCH + 候选
+    #[test]
+    fn anchored_read_no_match_returns_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "anchor": "zzz_nope",
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "NO_MATCH");
+    }
+
+    // R16. 参数互斥与依赖校验
+    #[test]
+    fn read_mode_parameter_conflicts_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\n").unwrap();
+        // start_line 与 anchor 互斥
+        let r1 = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "start_line": 1,
+            "anchor": "a",
+        }));
+        assert!(!r1.is_success());
+        assert_eq!(r1.data["code"], "PARSE_ERROR");
+        // context 必须配 anchor
+        let r2 = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "context_before": 3,
+        }));
+        assert!(!r2.is_success());
+        assert_eq!(r2.data["code"], "PARSE_ERROR");
+        // context 窗口超上限
+        let r3 = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "anchor": "a",
+            "context_after": 200,
+        }));
+        assert!(!r3.is_success());
+        assert_eq!(r3.data["code"], "PARSE_ERROR");
+    }
+
+    // R17. 范围读的 hash 链进编辑（grep → 读 → 改 闭环）
+    #[test]
+    fn range_read_hash_chains_into_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let read = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "start_line": 2,
+            "end_line": 2,
+        }));
+        assert!(read.is_success());
+        let h = read.data["hash"].as_str().unwrap().to_string();
+        let edit = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "expected_hash": h,
+            "hunks": [{"kind": "replace", "old": "b", "new": "B"}],
+        }));
+        assert!(edit.is_success(), "model text: {}", edit.model.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nB\nc\n");
+    }
+
+    // R18. 锚定读的 hash 链进编辑（锚定读 → 同锚编辑 闭环）
+    #[test]
+    fn anchored_read_hash_chains_into_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "pre\ntarget\npost\n").unwrap();
+        let read = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "anchor": "target",
+            "context_before": 1,
+            "context_after": 1,
+        }));
+        assert!(read.is_success());
+        let h = read.data["hash"].as_str().unwrap().to_string();
+        let edit = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "expected_hash": h,
+            "hunks": [{"kind": "insert_after", "anchor": "target", "new": "inserted\n"}],
+        }));
+        assert!(edit.is_success(), "model text: {}", edit.model.text);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "pre\ntarget\ninserted\npost\n"
+        );
+    }
+
+    // ── replace_inline（sed `s///` 语义）──
+
+    // R19. 基本：anchor 窗口内子串替换第一处，窗口外不受影响
+    #[test]
+    fn replace_inline_replaces_first_occurrence_in_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(&path, "fn main() {\n    let x = input.clone();\n    input\n}\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{
+                "kind": "replace_inline",
+                "anchor": "let x = input.clone();",
+                "old": "input",
+                "new": "payload",
+            }],
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn main() {\n    let x = payload.clone();\n    input\n}\n"
+        );
+    }
+
+    // R20. replace_all：窗口内全部替换（仍不跨窗口）
+    #[test]
+    fn replace_inline_replace_all_in_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(&path, "fn f() {\n    let a = alpha + alpha;\n    alpha\n}\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{
+                "kind": "replace_inline",
+                "anchor": "let a = alpha + alpha;",
+                "old": "alpha",
+                "new": "beta",
+                "replace_all": true,
+            }],
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn f() {\n    let a = beta + beta;\n    alpha\n}\n"
+        );
+    }
+
+    // R21. 超长行场景（backend_prompt.md 案例）：整行锚 + 行内子串替换
+    #[test]
+    fn replace_inline_on_long_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        let long_line = format!("start {} end", "y".repeat(200));
+        std::fs::write(&path, format!("a\n{long_line}\nb\n")).unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{
+                "kind": "replace_inline",
+                "anchor": long_line,
+                "old": "yyy",
+                "new": "ZZZ",
+            }],
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, format!("a\nstart {} end\nb\n", "ZZZ".to_string() + &"y".repeat(197)));
+    }
+
+    // R22. 窗口内无 old → NO_MATCH
+    #[test]
+    fn replace_inline_missing_in_window_reports_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(&path, "fn foo() {\n    bar()\n}\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{
+                "kind": "replace_inline",
+                "anchor": "fn foo() {",
+                "old": "baz",
+                "new": "qux",
+            }],
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "NO_MATCH");
+        // 事务：文件未被修改
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn foo() {\n    bar()\n}\n");
+    }
+
+    // R23. regex 替换 + 捕获组引用
+    #[test]
+    fn replace_inline_regex_with_captures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(&path, "fn f() {\n    let _a = 1;\n}\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{
+                "kind": "replace_inline",
+                "anchor": "let _a = 1;",
+                "old": r"let (\w+) = (\d+)",
+                "new": "let $2 = $1",
+                "regex": true,
+            }],
+        }));
+        assert!(result.is_success(), "model text: {}", result.model.text);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn f() {\n    let 1 = _a;\n}\n"
+        );
+    }
+
+    // R24. 非法正则 → INVALID_REGEX
+    #[test]
+    fn replace_inline_invalid_regex_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(&path, "fn f() {\n    x\n}\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{
+                "kind": "replace_inline",
+                "anchor": "x",
+                "old": "(",
+                "new": "y",
+                "regex": true,
+            }],
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "INVALID_REGEX");
+    }
+
+    // R25. 模糊锚 → AMBIGUOUS_MATCH（与 replace/insert 同款消歧）
+    #[test]
+    fn replace_inline_ambiguous_anchor_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "dup\ndup\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [{
+                "kind": "replace_inline",
+                "anchor": "dup",
+                "old": "dup",
+                "new": "DUP",
+            }],
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "AMBIGUOUS_MATCH");
+    }
+
+    // R26. 多 hunk 混用：replace_inline + replace 同批事务，失败整体拒绝
+    #[test]
+    fn replace_inline_mixed_with_replace_is_transactional() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(&path, "fn f() {\n    let a = alpha;\n    beta\n}\n").unwrap();
+        let result = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "hunks": [
+                {
+                    "kind": "replace_inline",
+                    "anchor": "let a = alpha;",
+                    "old": "alpha",
+                    "new": "gamma",
+                },
+                {"kind": "replace", "old": "zzz_nope", "new": "x"},
+            ],
+        }));
+        assert!(!result.is_success());
+        assert_eq!(result.data["code"], "NO_MATCH");
+        // 整体拒绝：零改动
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn f() {\n    let a = alpha;\n    beta\n}\n"
+        );
+    }
+
+    // R27. replace_inline 走 hash 链：读 → 改，返回 new_hash
+    #[test]
+    fn replace_inline_hash_chains() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(&path, "fn f() {\n    let x = input;\n}\n").unwrap();
+        let read = exec_edit_file_v2(&json!({ "path": path.to_string_lossy() }));
+        assert!(read.is_success());
+        let h = read.data["hash"].as_str().unwrap().to_string();
+        let edit = exec_edit_file_v2(&json!({
+            "path": path.to_string_lossy(),
+            "expected_hash": h,
+            "hunks": [{
+                "kind": "replace_inline",
+                "anchor": "let x = input;",
+                "old": "input",
+                "new": "payload",
+            }],
+        }));
+        assert!(edit.is_success(), "model text: {}", edit.model.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn f() {\n    let x = payload;\n}\n");
+        assert!(edit.data.get("new_hash").is_some());
+    }
+}}

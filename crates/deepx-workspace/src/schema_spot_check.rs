@@ -47,8 +47,8 @@ mod schema_spot_check {
 
         // 文件修改工具选择指引
         for (tool, needle) in [
-            ("edit_file", "string mode"),
-            ("write", "use edit_file for targeted changes"),
+            ("edit_file_v2", "replace_all"),
+            ("write", "use edit_file_v2 for targeted changes"),
         ] {
             let desc = by_name(tool).function.description.as_str();
             assert!(desc.contains(needle), "{tool} missing guidance: {needle}");

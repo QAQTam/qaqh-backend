@@ -837,6 +837,20 @@ fn subagent_state_from_tag(state: &str) -> Option<SubagentState> {
     }
 }
 
+/// 从 `spawn_subagent` 工具返回（`json_ok`）中解析子代理 seed。
+/// 形状探测：JSON 对象同时含 `process_id`（数字）与 `seed`（字符串）
+/// 才认——普通工具结果的文本不满足该形状，安全忽略。
+fn parse_spawn_seed(model_text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(model_text).ok()?;
+    let has_pid = value.get("process_id").is_some_and(|v| v.is_number());
+    let seed = value.get("seed").and_then(|v| v.as_str())?;
+    if has_pid && !seed.is_empty() {
+        Some(seed.to_string())
+    } else {
+        None
+    }
+}
+
 /// 会话元数据文件路径（`<data>/sessions/{seed}/meta.json`）。上下文构成
 /// 快照（context_stats）已并入 meta.json（原独立 context_stats.json 退役）。
 /// 数据根对齐 deepx_types::platform::data_dir：`DEEPX_DATA_DIR` 覆盖，
@@ -941,6 +955,10 @@ pub struct SubagentItem {
     pub call_id: String,
     /// 子代理名称（ToolCallPrepared.args_so_far 解析；失败回退短哈希）。
     pub name: String,
+    /// 子代理 Ringing seed（spawn 工具返回解析；空 = 尚未解析/未知）。
+    /// 面板按需拉取子代理 timeline 的数据源。
+    #[serde(default)]
+    pub seed: String,
     pub state: SubagentState,
     /// 启动时刻（epoch ms；ToolStarted）。
     pub started_at: u64,
@@ -1093,6 +1111,13 @@ pub struct BridgeCore {
     /// 权威 turns 历史，resume 旧对话的数据源；chat_view 泵消费 restore）。
     /// seed 标记防竞态：快速切会话时旧快照晚到不会被灌进新会话。
     chat_timeline: Mutex<Option<(String, TimelineSnapshot)>>,
+    /// 子代理面板数据：最近一次拉取的子代理 timeline 快照
+    /// （`(sub_seed, TimelineSnapshot)`）。`spawn_fetch_subagent_timeline`
+    /// 异步拉取后写入，面板轮询 `subagent_timeline_peek` 消费渲染；
+    /// 面板关闭即 `consume` 清空——数据不驻留渲染内存。
+    subagent_timeline: Mutex<Option<(String, TimelineSnapshot)>>,
+    /// 子代理 timeline 拉取在途标记（seed 集合）：500ms 轮询防重入。
+    subagent_timeline_fetching: Mutex<std::collections::HashSet<String>>,
     /// 分页元数据：seed → 服务端是否还有更早回合（快照缓存时同步更新）。
     /// ChatView 上滚到窗口顶部且 `expand_window` 已全量放行时据此翻页。
     timeline_has_more: Mutex<std::collections::HashMap<String, bool>>,
@@ -1489,6 +1514,7 @@ impl BridgeCore {
             call_id: call_id.to_string(),
             // 解析失败回退短哈希：保证胶囊有可读标识。
             name: format!("sub-{}", call_id.chars().take(6).collect::<String>()),
+            seed: String::new(),
             state: SubagentState::Working,
             started_at: now,
             finished_at: 0,
@@ -1522,6 +1548,27 @@ impl BridgeCore {
                     changed = true;
                 }
             }
+        }
+        drop(map);
+        if changed {
+            self.composer_rev.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 记录 spawn_subagent 返回的子代理 seed（按 call_id 关联 tracker 条目）。
+    /// 供子代理面板按需拉取 timeline；条目不存在（重连丢失）则忽略。
+    fn record_subagent_seed(&self, seed: &str, call_id: &str, sub_seed: &str) {
+        let mut map = self
+            .subagent_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        if let Some(per_seed) = map.get_mut(seed)
+            && let Some(item) = per_seed.get_mut(call_id)
+            && item.seed.is_empty()
+        {
+            item.seed = sub_seed.to_string();
+            changed = true;
         }
         drop(map);
         if changed {
@@ -1695,6 +1742,73 @@ impl BridgeCore {
             .get(seed)
             .copied()
             .unwrap_or(false)
+    }
+
+    /// 子代理面板：异步拉取子代理 timeline 快照（尾部页）。
+    /// 先 attach 子 seed（daemon `owns_seed` 校验要求）再拉；在途防重入
+    /// （500ms 轮询抖动只发一次）。结果写 `subagent_timeline` 缓存，
+    /// 面板轮询 peek 渲染；子代理已 close（worker 退出）时 attach/拉取
+    /// 失败仅记日志——面板显示最后一次成功快照。
+    pub fn spawn_fetch_subagent_timeline(&self, seed: &str) {
+        let seed = seed.to_string();
+        {
+            let mut fetching = self
+                .subagent_timeline_fetching
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !fetching.insert(seed.clone()) {
+                return; // 已在途
+            }
+        }
+        let core = self.self_arc();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("subagent_timeline {seed}: connect failed: {err}"));
+                    core.subagent_timeline_fetching
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&seed);
+                    return;
+                }
+            };
+            // attach 幂等：已 attach 直接成功；失败（子代理已 close）不阻断拉取。
+            if let Err(err) = client.attach(&seed).await {
+                log_diag(&format!("subagent_timeline {seed}: attach failed: {err}"));
+            }
+            match client.fetch_timeline_page(&seed, None, None).await {
+                Ok(page) => {
+                    let turns = page.snapshot.turns.len();
+                    *core
+                        .subagent_timeline
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some((seed.clone(), page.snapshot));
+                    log_diag(&format!("subagent_timeline {seed}: {turns} turns"));
+                }
+                Err(err) => log_diag(&format!("subagent_timeline {seed}: failed: {err}")),
+            }
+            core.subagent_timeline_fetching
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&seed);
+        });
+    }
+
+    /// 子代理面板轮询读：最近一次拉取的 `(sub_seed, snapshot)`。
+    pub fn subagent_timeline_peek(&self) -> Option<(String, TimelineSnapshot)> {
+        self.subagent_timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 面板关闭时消费清空——子代理数据移出渲染内存（开面板才拉，关面板即释放）。
+    pub fn subagent_timeline_consume(&self) {
+        *self
+            .subagent_timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// 翻页加载更早回合：`fetch_timeline_page(seed, before_turn)`（纯读，
@@ -3696,12 +3810,21 @@ impl BridgeCore {
                             self.upsert_subagent(&batch.seed, tool_call_id, None);
                         }
                     }
-                    deepx_client::ToolEvent::ToolFinished { .. } => {
+                    deepx_client::ToolEvent::ToolFinished {
+                        tool_call_id,
+                        result,
+                        ..
+                    } => {
                         // 工具完成 → 回到生成（后续 thinking/answering delta 会覆盖）。
                         self.set_composer_phase(&batch.seed, WorkPhase::Thinking);
                         // spawn_subagent 的 Finished 仅确认 spawn 成功，子代理仍在
                         // 后台运行：不销毁 tracker 条目，终态由 [SUBAGENT ...]
                         // 注入 tag 收敛（ToolFinished ≠ 子代理完成）。
+                        // 解析 spawn 返回的 seed 存入 tracker：子代理面板的数据源
+                        // （形状探测：json_ok 含 process_id + seed 字段才认）。
+                        if let Some(seed) = parse_spawn_seed(&result.model.text) {
+                            self.record_subagent_seed(&batch.seed, &tool_call_id, &seed);
+                        }
                     }
                     _ => {}
                 }
@@ -4181,6 +4304,8 @@ impl Bridge {
                     timeline_events: Mutex::new(TimelineEventQueues::default()),
                     timeline_rev: AtomicU64::new(0),
                     chat_timeline: Mutex::new(None),
+                    subagent_timeline: Mutex::new(None),
+                    subagent_timeline_fetching: Mutex::new(HashSet::new()),
                     timeline_has_more: Mutex::new(std::collections::HashMap::new()),
                     chat_prepend: Mutex::new(std::collections::VecDeque::new()),
                     timeline_fetching: Mutex::new(std::collections::HashSet::new()),
@@ -4663,6 +4788,8 @@ mod tests {
             timeline_events: Mutex::new(TimelineEventQueues::default()),
             timeline_rev: AtomicU64::new(0),
             chat_timeline: Mutex::new(None),
+            subagent_timeline: Mutex::new(None),
+            subagent_timeline_fetching: Mutex::new(HashSet::new()),
             timeline_has_more: Mutex::new(std::collections::HashMap::new()),
             chat_prepend: Mutex::new(std::collections::VecDeque::new()),
             timeline_fetching: Mutex::new(std::collections::HashSet::new()),
