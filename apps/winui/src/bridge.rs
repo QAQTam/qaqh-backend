@@ -926,6 +926,19 @@ pub struct ComposerState {
     pub status_zone: String,
     /// 并行子代理胶囊（工作状态区第二行；空 = 不渲染，行为与现状一致）。
     pub subagents: Vec<SubagentItem>,
+    /// 工具模式：standard | minimal | custom（PLAN-TOOL-MODES.md；空 = standard）。
+    /// 与 `mode`（plan/code AGENT_MODE）正交：本字段管 allowed 工具集。
+    pub tool_mode: String,
+    /// 创造模式的自定义工具白名单（仅 custom 生效；空 = 未配置）。
+    pub tool_mode_custom_tools: Vec<String>,
+}
+
+/// 工具模式本地缓存（standard/minimal/custom + custom_tools）。
+/// 与 `composer_mode` 同款乐观更新；初始/外部变化经 meta.json 同步。
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ToolModeState {
+    mode: String,
+    custom_tools: Vec<String>,
 }
 
 /// 子代理运行状态（工作状态区胶囊数据源）。
@@ -1078,6 +1091,10 @@ pub struct BridgeCore {
     composer_activity: Mutex<HashMap<String, ComposerActivity>>,
     /// 直连模式的 mode 本地缓存（Web 单例语义：会话共享，默认 "plan"）。
     composer_mode: Mutex<String>,
+    /// 直连模式的工具模式本地缓存（standard/minimal/custom + custom_tools）。
+    /// 乐观更新 + `sync_tool_mode_from_meta` 从 meta.json 回填（外部变化/
+    /// 会话切换 250ms 轮询内可见；首帧即正确初始值）。
+    composer_tool_mode: Mutex<ToolModeState>,
     /// 直连模式的发送反馈（submitError / sendAck），按 seed 隔离。
     /// 上传或 ACK 可能在切换会话后才返回，不能污染新会话草稿。
     composer_feedback: Mutex<HashMap<String, ComposerFeedback>>,
@@ -1418,7 +1435,82 @@ impl BridgeCore {
         (stats, rev)
     }
 
-    /// 应用 daemon control 事件到交互队列状态机；活动会话快照变化时递增 rev。
+    /// 从 `sessions/{seed}/meta.json` 同步工具模式到本地缓存（变化时 bump
+    /// composer_rev）。调用点：`composer_snapshot` 开头——poll_rev 每次都会
+    /// 调 snapshot 取 rev，因此外部变化（daemon persist 后、会话切换）在
+    /// 250ms 轮询内可见；首帧即读到正确初始值。同步读小文件，开销同
+    /// `context_stats_snapshot`。
+    fn sync_tool_mode_from_meta(&self) {
+        let seed = self.active_seed();
+        if seed.is_empty() {
+            return;
+        }
+        let path = crate::bridge::context_stats_path(&seed);
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(meta) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return;
+        };
+        let mode = meta
+            .get("tool_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let custom_tools = meta
+            .get("custom_tools")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut cur = self
+            .composer_tool_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if cur.mode != mode || cur.custom_tools != custom_tools {
+            *cur = ToolModeState {
+                mode,
+                custom_tools,
+            };
+            self.composer_rev.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 从 `sessions/{seed}/meta.json` 同步 AGENT_MODE（0=Normal/2=Code →
+    /// "code"，1=Plan → "plan"）。后端会话恢复时按 saved_mode 设置进程级
+    /// AGENT_MODE（engine_session.rs）；前端若无此同步会在会话切换/重启后
+    /// 停留默认值，导致「规划/执行」显示与后端实际拦截不一致。
+    /// 与 `sync_tool_mode_from_meta` 同款：composer_snapshot 开头调用。
+    fn sync_mode_from_meta(&self) {
+        let seed = self.active_seed();
+        if seed.is_empty() {
+            return;
+        }
+        let path = crate::bridge::context_stats_path(&seed);
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(meta) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return;
+        };
+        let mode = meta.get("mode").and_then(|v| v.as_u64()).unwrap_or(0);
+        // Normal(0) 与 Code(2) 后端行为等价（均不拦截 PLAN_BLOCKED）；UI
+        // 二态统一映射为 "code"（显示「执行」），Plan(1) → "plan"（「规划」）。
+        let ui_mode = if mode == 1 { "plan" } else { "code" };
+        let mut cur = self
+            .composer_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if *cur != ui_mode {
+            *cur = ui_mode.to_string();
+            self.composer_rev.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 应用 daemon control 事件到交互队列状态机
     /// 幂等：SSE 重连续传重放事件经 PartialEq 比对不产生多余 rev。
     /// 注意：机器按**事件 seed** 更新（后台会话交互保持挂起），缓存只投影
     /// **active_seed** 的机器，后台会话不会覆盖当前 UI。
@@ -1612,6 +1704,9 @@ impl BridgeCore {
     }
 
     pub fn composer_snapshot(&self) -> (ComposerState, u64) {
+        // meta.json 工具模式 + AGENT_MODE 回填（外部变化/会话切换 250ms 内可见）。
+        self.sync_tool_mode_from_meta();
+        self.sync_mode_from_meta();
         let rev = self.composer_rev.load(Ordering::Relaxed);
         let active = self.active_seed();
         let now = unix_ms();
@@ -1657,6 +1752,13 @@ impl BridgeCore {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let tool_mode = self
+            .composer_tool_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        state.tool_mode = tool_mode.mode;
+        state.tool_mode_custom_tools = tool_mode.custom_tools;
         state.permission_level = self
             .settings
             .lock()
@@ -3275,6 +3377,47 @@ impl BridgeCore {
         self.spawn_conversation_command(ConversationCommand::ConversationSetMode { mode });
     }
 
+    /// 工具模式切换：乐观更新本地缓存 + daemon `session.set_tool_mode`
+    /// action（daemon 侧 persist meta.json + Control 频道下发 worker 应用
+    /// set_allowed_tools + tool_defs 刷新）。失败只记日志（同 set_permission）。
+    pub fn spawn_set_tool_mode(&self, tool_mode: &str, custom_tools: Vec<String>) {
+        let seed = self.active_seed();
+        if seed.is_empty() {
+            log_diag("set_tool_mode: no active session, skipped");
+            return;
+        }
+        *self
+            .composer_tool_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ToolModeState {
+            mode: tool_mode.to_string(),
+            custom_tools: custom_tools.clone(),
+        };
+        self.composer_rev.fetch_add(1, Ordering::Relaxed);
+        let core = self.self_arc();
+        let tool_mode_owned = tool_mode.to_string();
+        let _ = deepx_client::runtime_handle().spawn(async move {
+            let client = match core.ensure_client().await {
+                Ok(client) => client,
+                Err(err) => {
+                    log_diag(&format!("set_tool_mode: connect failed: {err}"));
+                    return;
+                }
+            };
+            match client
+                .action(ActionRequest::SessionSetToolMode {
+                    seed,
+                    tool_mode: tool_mode_owned.clone(),
+                    custom_tools,
+                })
+                .await
+            {
+                Ok(_) => log_diag(&format!("set_tool_mode {tool_mode_owned}: ok")),
+                Err(err) => log_diag(&format!("set_tool_mode {tool_mode_owned}: failed: {err}")),
+            }
+        });
+    }
+
     /// 按 turn_id 撤销（聊天右键「撤回此消息」）：删除该 turn 及其后全部
     /// 回合（daemon `truncate_before_turn` 语义）。命令 + 状态轮询 +
     /// timeline 重拉；turn_id 来自消息本身，不依赖 last_turn_ids 缓存。
@@ -4297,7 +4440,8 @@ impl Bridge {
                     subagent_tracker: Mutex::new(HashMap::new()),
                     composer_rev: AtomicU64::new(0),
                     composer_activity: Mutex::new(HashMap::new()),
-                    composer_mode: Mutex::new("plan".to_string()),
+                    composer_mode: Mutex::new("code".to_string()),
+                    composer_tool_mode: Mutex::new(ToolModeState::default()),
                     composer_feedback: Mutex::new(HashMap::new()),
                     // Canonical conversation events are queued for the native
                     // ChatView; no renderer projection participates here.
@@ -4444,6 +4588,12 @@ impl Bridge {
     /// 会话工作模式切换（命令 + 本地 mode 缓存）。
     pub fn spawn_set_mode(&self, mode: &str) {
         self.core.spawn_set_mode(mode);
+    }
+
+    /// 工具模式切换（standard/minimal/custom，PLAN-TOOL-MODES.md）。
+    /// 转发 BridgeCore：乐观更新本地缓存 + daemon `session.set_tool_mode`。
+    pub fn spawn_set_tool_mode(&self, tool_mode: &str, custom_tools: Vec<String>) {
+        self.core.spawn_set_tool_mode(tool_mode, custom_tools);
     }
 
     /// 桌面通知开关（转 BridgeCore；写本地偏好 + 惰性初始化通知器）。
@@ -4783,7 +4933,8 @@ mod tests {
             subagent_tracker: Mutex::new(HashMap::new()),
             composer_rev: AtomicU64::new(0),
             composer_activity: Mutex::new(HashMap::new()),
-            composer_mode: Mutex::new("plan".to_string()),
+            composer_mode: Mutex::new("code".to_string()),
+            composer_tool_mode: Mutex::new(ToolModeState::default()),
             composer_feedback: Mutex::new(HashMap::new()),
             timeline_events: Mutex::new(TimelineEventQueues::default()),
             timeline_rev: AtomicU64::new(0),
@@ -5443,7 +5594,8 @@ mod tests {
         assert_eq!(s.context_limit, 200_000);
         assert_eq!(s.seed, "seed1");
         // UI-local state owns mode and send feedback; config owns permission.
-        assert_eq!(s.mode, "plan");
+        // 默认与后端 AGENT_MODE=0（Normal，不拦截 PLAN_BLOCKED）对齐 → 显示「执行」。
+        assert_eq!(s.mode, "code");
         // 权限未配置（settings 缓存空）→ 0（"加载中"），不再误报 L1（2026-08 修复）。
         assert_eq!(s.permission_level, 0);
         assert_eq!(s.queue_count, 0);
