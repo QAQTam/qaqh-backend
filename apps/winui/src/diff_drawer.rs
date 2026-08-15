@@ -15,17 +15,30 @@
 //! （常驻 + 尺寸/阴影修复）→ **V7 覆盖层**：V6 系列的遮罩残留竞态与模板
 //! 钳制均为 ContentDialog 架构固有，弃用后不再存在。
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use deepx_client::{TimelineBlockKind, TimelineTurn};
 use markdown_winui::{DiffFile, diff_file_view};
 use windows_reactor::*;
 
-/// 弹层数据：按文件的 diff 列表（工具块 ToolBody::Diff 消费后的视图数据）。
+use crate::bridge::Bridge;
+
+/// 弹层数据：Diff 文件列表（工具块 ToolBody::Diff 消费后的视图数据）
+/// 或子代理运行记录（面板按需拉取 timeline 渲染，关闭即释放）。
 #[derive(Clone, PartialEq)]
-pub struct DiffDrawerRequest {
-    pub turn_id: String,
-    pub files: Vec<DrawerFile>,
+pub enum DrawerRequest {
+    /// 文件 diff 浏览（原 DiffDrawerRequest 语义）。
+    Diff {
+        turn_id: String,
+        files: Vec<DrawerFile>,
+    },
+    /// 子代理运行记录：`seed` = 子代理 Ringing seed（timeline 数据源），
+    /// `name` = 子代理名（头部显示）。
+    Subagent {
+        seed: String,
+        name: String,
+    },
 }
 
 /// 单文件条目：路径 + 统计 + 状态 + 已解析 diff（渲染用）。
@@ -41,11 +54,11 @@ pub struct DrawerFile {
 }
 
 /// 静态槽（写端组件 / 读端覆盖层分离）。
-pub static DIFF_DRAWER: Mutex<Option<DiffDrawerRequest>> = Mutex::new(None);
+pub static DRAWER_SLOT: Mutex<Option<DrawerRequest>> = Mutex::new(None);
 
-/// 写端：打开弹层（chat_view 总结行调用；overlay 轮询消费）。
-pub fn open_diff_drawer(req: DiffDrawerRequest) {
-    if let Ok(mut slot) = DIFF_DRAWER.lock() {
+/// 写端：打开弹层（chat_view 总结行 / 子代理胶囊调用；overlay 轮询消费）。
+pub fn open_diff_drawer(req: DrawerRequest) {
+    if let Ok(mut slot) = DRAWER_SLOT.lock() {
         *slot = Some(req);
     }
 }
@@ -63,17 +76,28 @@ const FILE_LIST_WIDTH: f64 = 280.0;
 /// 轮询间隔：仅作「请求出现」检测（无动画帧驱动，80ms 足够轻）。
 const POLL_INTERVAL: Duration = Duration::from_millis(80);
 
+/// 子代理面板刷新间隔：按行刷新即可（无 token 级实时需求），
+/// 500ms 轮询拉最新快照重建行视图，成本可忽略。
+const SUBAGENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 /// 遮罩不透明度（与 diagram_zoom 同款）。
 const SCRIM_ALPHA: u8 = 140;
 
 /// 读端覆盖层：轮询静态槽 → 全屏 grid + 半透明遮罩 + 居中面板。
 ///
 /// 无请求/未打开时返回空 grid（无背景 → 不参与命中测试，点击穿透）。
-pub fn diff_drawer_overlay(cx: &mut RenderCx) -> Element {
-    let (req, set_req) = cx.use_state::<Option<DiffDrawerRequest>>(None);
+/// `bridge` 供子代理面板按需拉取 timeline（开面板才拉，关面板即释放）。
+pub fn diff_drawer_overlay(cx: &mut RenderCx, bridge: Arc<Bridge>) -> Element {
+    let (req, set_req) = cx.use_state::<Option<DrawerRequest>>(None);
     let (open, set_open) = cx.use_state::<bool>(false);
     let (selected, set_selected) = cx.use_state::<usize>(0);
+    // 子代理面板数据：最近一次拉取的回合行（渲染用；关闭即清空）。
+    let (sub_turns, set_sub_turns) = cx.use_state::<Vec<TimelineTurn>>(Vec::new());
     let timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    // 子代理刷新轮询（500ms）：面板打开期间拉取最新快照按行刷新。
+    let sub_timer = cx.use_ref::<Option<DispatcherTimer>>(None);
+    // 当前面板的目标子代理 seed（timer 回调读取；关闭即清）。
+    let active_sub_seed = cx.use_ref::<Option<String>>(None);
     let win = cx.use_inner_size();
 
     cx.use_effect((), {
@@ -85,7 +109,7 @@ pub fn diff_drawer_overlay(cx: &mut RenderCx) -> Element {
                 return;
             }
             if let Ok(t) = DispatcherTimer::new(POLL_INTERVAL, move || {
-                if let Ok(slot) = DIFF_DRAWER.lock()
+                if let Ok(slot) = DRAWER_SLOT.lock()
                     && let Some(slot_req) = slot.as_ref()
                 {
                     let slot_req = slot_req.clone();
@@ -95,6 +119,53 @@ pub fn diff_drawer_overlay(cx: &mut RenderCx) -> Element {
                 }
             }) {
                 *timer.borrow_mut() = Some(t);
+            }
+        }
+    });
+
+    // 子代理面板数据流：打开 Subagent 时启动轮询（立即拉一次 + 每 500ms 刷新），
+    // 换 Diff/关闭时停止并清空缓存（数据移出渲染内存）。
+    cx.use_effect((req.clone(), open), {
+        let bridge = bridge.clone();
+        let set_sub_turns = set_sub_turns.clone();
+        let sub_timer = sub_timer.clone();
+        let active_sub_seed = active_sub_seed.clone();
+        let req = req.clone();
+        move || {
+            let is_subagent = matches!(&req, Some(DrawerRequest::Subagent { .. }));
+            if is_subagent && open {
+                if let Some(DrawerRequest::Subagent { seed, .. }) = &req {
+                    bridge.core().spawn_fetch_subagent_timeline(seed);
+                    *active_sub_seed.borrow_mut() = Some(seed.clone());
+                }
+                if sub_timer.borrow().is_none() {
+                    if let Ok(t) = DispatcherTimer::new(SUBAGENT_POLL_INTERVAL, {
+                        let bridge = bridge.clone();
+                        let set_sub_turns = set_sub_turns.clone();
+                        let active_sub_seed = active_sub_seed.clone();
+                        move || {
+                            // 只消费目标子代理的快照（seed 匹配防串台）。
+                            if let Some((cached_seed, snap)) = bridge.core().subagent_timeline_peek()
+                                && active_sub_seed.borrow().as_deref() == Some(cached_seed.as_str())
+                            {
+                                set_sub_turns.call(snap.turns.clone());
+                            }
+                            if let Some(seed) = active_sub_seed.borrow().clone() {
+                                bridge.core().spawn_fetch_subagent_timeline(&seed);
+                            }
+                        }
+                    }) {
+                        *sub_timer.borrow_mut() = Some(t);
+                    }
+                }
+            } else {
+                // 关闭 / 切换到 Diff：停止轮询 + 清空缓存与渲染数据。
+                if let Some(t) = sub_timer.borrow_mut().take() {
+                    let _ = t.stop();
+                }
+                *active_sub_seed.borrow_mut() = None;
+                bridge.core().subagent_timeline_consume();
+                set_sub_turns.call(Vec::new());
             }
         }
     });
@@ -110,11 +181,22 @@ pub fn diff_drawer_overlay(cx: &mut RenderCx) -> Element {
     // `move |_: ()|`；Esc 处再包装成零参数闭包供 KeyboardAccelerator 使用。
     let on_close: Callback<()> = Callback::new({
         let set_open = set_open.clone();
+        let bridge = bridge.clone();
+        let set_sub_turns = set_sub_turns.clone();
+        let sub_timer = sub_timer.clone();
+        let active_sub_seed = active_sub_seed.clone();
         move |_: ()| {
             set_open.call(false);
-            if let Ok(mut slot) = DIFF_DRAWER.lock() {
+            if let Ok(mut slot) = DRAWER_SLOT.lock() {
                 *slot = None;
             }
+            // 子代理数据随关闭释放（停轮询 + 清缓存 + 清渲染行）。
+            if let Some(t) = sub_timer.borrow_mut().take() {
+                let _ = t.stop();
+            }
+            *active_sub_seed.borrow_mut() = None;
+            bridge.core().subagent_timeline_consume();
+            set_sub_turns.call(Vec::new());
         }
     });
 
@@ -126,18 +208,33 @@ pub fn diff_drawer_overlay(cx: &mut RenderCx) -> Element {
         return grid(()).into();
     }
 
-    let content = memo(
-        drawer_content,
-        DrawerContentProps {
-            turn_id: req.turn_id.clone(),
-            files: req.files.clone(),
-            selected,
-            drawer_w,
-            drawer_h,
-            on_select: set_selected.clone(),
-            on_close: on_close.clone(),
-        },
-    );
+    let content: Element = match &req {
+        DrawerRequest::Diff { turn_id, files } => memo(
+            drawer_content,
+            DrawerContentProps {
+                turn_id: turn_id.clone(),
+                files: files.clone(),
+                selected,
+                drawer_w,
+                drawer_h,
+                on_select: set_selected.clone(),
+                on_close: on_close.clone(),
+            },
+        )
+        .into(),
+        DrawerRequest::Subagent { seed, name } => memo(
+            subagent_content,
+            SubagentContentProps {
+                seed: seed.clone(),
+                name: name.clone(),
+                turns: sub_turns.clone(),
+                drawer_w,
+                drawer_h,
+                on_close: on_close.clone(),
+            },
+        )
+        .into(),
+    };
 
     let esc = KeyboardAccelerator::new(
         VirtualKey::Escape,
@@ -319,6 +416,123 @@ fn drawer_content(props: &DrawerContentProps, _cx: &mut RenderCx) -> Element {
         .grid_row(2),
     ))
     .rows([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+    .width(props.drawer_w)
+    .height(props.drawer_h)
+    .into()
+}
+
+// ── 子代理运行记录面板 ───────────────────────────────────────────
+
+/// 子代理内容 memo props（PartialEq 忽略回调字段，同 DrawerContentProps 约定）。
+#[derive(Clone)]
+struct SubagentContentProps {
+    seed: String,
+    name: String,
+    turns: Vec<TimelineTurn>,
+    drawer_w: f64,
+    drawer_h: f64,
+    on_close: Callback<()>,
+}
+
+impl PartialEq for SubagentContentProps {
+    fn eq(&self, other: &Self) -> bool {
+        self.seed == other.seed
+            && self.name == other.name
+            && self.turns == other.turns
+            && self.drawer_w == other.drawer_w
+            && self.drawer_h == other.drawer_h
+    }
+}
+
+/// 子代理面板内容：头部（名称 + 状态 + ✕）+ 滚动区（回合行视图）。
+/// 行视图按 turn 渲染：任务行（user_text）→ 各 round 的文本/思考/工具行。
+/// 按行渲染即可（子代理无需 token 级实时），数据随面板关闭释放。
+fn subagent_content(props: &SubagentContentProps, _cx: &mut RenderCx) -> Element {
+    let rows: Vec<Element> = props
+        .turns
+        .iter()
+        .flat_map(|turn| {
+            let mut rows: Vec<Element> = Vec::new();
+            // 任务行：turn 的 user_text（首行截断）。
+            let task = turn.user_text.lines().next().unwrap_or("").trim();
+            let task_label = if task.is_empty() {
+                format!("回合 {}", turn.turn_id)
+            } else {
+                format!("任务: {task}")
+            };
+            rows.push(
+                text_block(task_label)
+                    .font_size(12.0)
+                    .semibold()
+                    .wrap()
+                    .foreground(ThemeRef::PrimaryText)
+                    .padding(Thickness::xy(4.0, 6.0))
+                    .with_key(format!("subagent-turn-{}", turn.turn_id))
+                    .into(),
+            );
+            for round in &turn.rounds {
+                for block in &round.blocks {
+                    let line = block.text.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let (prefix, fg) = match block.kind {
+                        TimelineBlockKind::Reasoning => ("思考", ThemeRef::SecondaryText),
+                        TimelineBlockKind::Tool => ("工具", ThemeRef::AccentText),
+                        _ => ("", ThemeRef::PrimaryText),
+                    };
+                    // 行截断：单行最长 ~800 字符（细节不值得滚动）。
+                    let mut text = line.replace('\n', " ");
+                    if text.chars().count() > 800 {
+                        let cut: String = text.chars().take(800).collect();
+                        text = format!("{cut}…");
+                    }
+                    let label = if prefix.is_empty() {
+                        text
+                    } else {
+                        format!("[{prefix}] {text}")
+                    };
+                    rows.push(
+                        text_block(label)
+                            .font_size(11.5)
+                            .wrap()
+                            .foreground(fg)
+                            .padding(Thickness::xy(4.0, 2.0))
+                            .with_key(format!("subagent-block-{}-{}", turn.turn_id, block.block_id))
+                            .into(),
+                    );
+                }
+            }
+            rows
+        })
+        .collect();
+
+    let status = if props.turns.is_empty() {
+        "等待子代理事件…".to_string()
+    } else if props.turns.last().map(|t| t.sealed).unwrap_or(false) {
+        "已完成".to_string()
+    } else {
+        "运行中…".to_string()
+    };
+
+    grid((
+        hstack((
+            text_block(format!("子代理 · {}", props.name)).font_size(14.0).semibold(),
+            text_block(format!("{status} · {}", props.seed))
+                .font_size(12.0)
+                .foreground(ThemeRef::SecondaryText),
+            button("✕ 关闭")
+                .on_click(props.on_close.clone())
+                .horizontal_alignment(HorizontalAlignment::Right),
+        ))
+        .spacing(12.0)
+        .padding(Thickness::xy(16.0, 12.0))
+        .grid_row(0),
+        border(scroll_viewer(vstack(rows).spacing(2.0).padding(Thickness::xy(12.0, 8.0))))
+            .background(ThemeRef::LayerFill)
+            .grid_row(1),
+    ))
+    .rows([GridLength::Auto, GridLength::STAR])
     .width(props.drawer_w)
     .height(props.drawer_h)
     .into()

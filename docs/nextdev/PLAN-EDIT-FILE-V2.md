@@ -67,8 +67,7 @@
 ```jsonc
 {
   "path": "src/foo.rs",
-  "expected_hash": "sha256:9f86d0…",   // 可选；read_file 返回的 hash 原样回传；
-                                          // 为 None 时仅允许"创建新文件"路径
+  "expected_hash": "sha256:9f86d0…",   // 可选；有→校验，无→直接编辑（见 10d）
   "hunks": [
     {
       "kind": "replace",
@@ -173,7 +172,7 @@ SequenceMatcher 语义，为何不用 from_lines 见 10b 第 1 条）。取最�
 | 错误 | 触发 | 附带信息 |
 |---|---|---|
 | `FileNotFound` | 路径不存在 | — |
-| `FileAlreadyExists` | expected_hash=null 但文件已存在 | — |
+| ~~`FileAlreadyExists`~~ | ~~expected_hash=null 但文件已存在~~ | 已移除（见 10d） |
 | `NotUtf8Text` | 非 UTF-8（视为二进制） | — |
 | `HashMismatch` | expected_hash 与当前 LF 视图 hash 不符 | `current_hash` + `current_content`（**截断 64 KB** + 尾部行号提示，防撑爆响应） |
 | `NoMatch` | 四层全miss | `hunk_index` + `candidates`（Top3） |
@@ -196,7 +195,8 @@ v2 的自我纠错路径是候选列表（candidates）本身。需要诊断细�
 换算法要同步改 read/write/账本/前端，迁移成本远超收益；sha256 对源码文件量级不构成
 瓶颈（spec 自己也把 blake3 列为优化项而非正确性项）。v2 不接 file_state 账本——
 无行号定位后账本失去存在的必要（那是 v1 为行号盲定位做的防漂移），v2 的并发保护
-就是 spec 原样的显式 `expected_hash` 乐观锁：
+`expected_hash` 为**可选乐观锁**（见 10d：模型实践中拿不到 read 的 hash，
+门禁降级为可选校验）：
 
 - 写入前重读文件、算 LF 视图 hash，与 `expected_hash` 不一致 → 拒绝并返回
   `current_hash` + `current_content`（模型不需要再单独调一次 read）。
@@ -277,7 +277,7 @@ spec 第 9 节 14 用例全量覆盖（编号对齐），外加 v2 独有回归�
 | 9 | 无结尾换行 AppendFile 沿用原约定 | 边界 |
 | 10 | CRLF 混入 → 归一化 + notes | 归一化 |
 | 11 | expected_hash 失配 → 拒绝 + current_content | hash gate |
-| 12 | expected_hash=null 但文件已存在 → FileAlreadyExists | 创建路径 |
+| 12 | 无 hash 编辑已有文件 → 直接编辑成功 | hash 门禁（10d） |
 | 13 | 非 UTF-8 → NotUtf8Text | 二进制 |
 | 14 | old 空 + context 全空 → Underspecified | 校验 |
 | 15 | InsertAfter/InsertBefore 锚点命中与多锚点歧义 | 插入 hunk |
@@ -327,6 +327,25 @@ spec 第 9 节 14 用例全量覆盖（编号对齐），外加 v2 独有回归�
 **测试**：34 用例（新增 partial 应用/全失败/重叠拒绝/执行链续接、诊断三类分支、
 候选 diff 内容断言、未知 mode 拒绝）。
 
+## 10d. hash 门禁降级为可选校验（2026-08-14，响应"read 不回 hash"）
+
+**事实查证**：read_file 的 `data` 元数据里有 `hash` 字段，但模型可见的正文
+（L<number> 行内容）里没有——模型实践中拿不到 hash（`project_for_model` 虽含
+`data`，但 hash 藏在元数据里，模型注意力不在那里；且部分 provider adapter 只透传
+正文）。v2 原门禁"无 hash 禁止编辑已有文件"（FILE_ALREADY_EXISTS）因此把编辑
+已有文件的路径完全堵死。
+
+**改动**：
+- `expected_hash` 降级为**可选加强**：有 → 校验（失配 → HASH_MISMATCH +
+  current_content）；无 → **直接编辑**。
+- 删除 FILE_ALREADY_EXISTS 错误码与门禁逻辑。
+- 安全论证与 v1 内容定位一致：v2 全部是内容定位（无行号盲定位），**命中即安全**
+  ——匹配到才改，模型对目标的描述本身就是校验；hash 是额外的并发乐观锁，
+  有则用，无则不阻塞。多 subagent 并发静默覆盖的风险变为：仅当两个 agent 都
+  不传 hash 且编辑同一区域时存在（v1 同样的暴露面）。
+- 治本项（可选，未做）：让 read 的模型可见正文附带 hash 行；改 read 影响面大，
+  暂缓。
+
 ## 10b. 实现阶段发现的新差异（2026-08-14 补录）
 
 按规格 10.4 约定，实现中以下假设与 crate 实际行为不符，已以编译/测试结果为准修正：
@@ -359,3 +378,49 @@ spec 第 9 节 14 用例全量覆盖（编号对齐），外加 v2 独有回归�
 3. **current_content 截断**：64 KB 是否合适（配置项 or 固定）？
 4. **工具键名**：`edit_file_v2` 定稿？还是更描述性的键（如 `structured_edit`）？
 5. **多文件**：v2 是否保留 files 批量入口（差分精神 → 不保留；若模型反馈不便再补）？
+
+---
+
+## 12. 读路径扩展：行号范围读 + 锚定读（2026-08-15）
+
+**背景**：edit 兼读（空 hunks = 读）落地后，工作流从 `read+edit`（read 全文件 → edit 定位）
+升级为 `glob+grep+edit`（grep 定位 → edit 精准读 → edit 同锚改）。读路径需要两种与 grep
+直连的形态。
+
+### 12a. 行号范围读（start_line / end_line）
+- 1-based 闭区间，语义与 read_file 完全对齐：0 → PARSE_ERROR；end < start → PARSE_ERROR；
+  start/end 越界 → LINE_OUT_OF_RANGE（data 带 total_lines + hash）；行数 > 400 → RANGE_TOO_LARGE；
+  展示字符超 24K → RANGE_TOO_LARGE。
+- 展示每行带 `L<number>:` 前缀（与 grep `path:line:` 输出、read_file 展示同格式）。
+- 只给 start_line → 读到文件尾；hash 仍为**全文件** hash（expected_hash 契约不变，片段读
+  不引入"片段 hash"概念）。
+- 与整文件读（无前缀）并存：整文件读是旧 read 语义（模型要全文），范围读是 grep 衔接
+  语义（行号对齐）。schema 的 description 已注明差异。
+
+### 12b. 锚定读（anchor + context_before / context_after）
+- **复用 hunk 的四层定位引擎（locate_anchor）**：读时的 anchor 命中 = 改时的 hunk 定位，
+  读到的上下文就是将要编辑的上下文——读改一致性最大化。
+- 窗口 = anchor 命中行 ± context_before/context_after（默认各 10，上限 100/侧），clamp 到
+  文件边界；meta 返回 anchor_line / anchor_lines / tier / score / note。
+- 模糊锚（多处命中）→ ANCHOR_AMBIGUOUS + 候选列表（candidate_json 与 hunk 候选同构），
+  模型加 context 消歧或改用行号范围读——**读阶段解决歧义，改阶段不再失败**。
+- 未命中 → NO_MATCH + 候选；空 anchor → UNDERSPECIFIED。
+- 参数互斥：start_line/end_line 与 anchor/context 二选一（PARSE_ERROR）；context 必须配 anchor。
+
+### 12c. 协作协议（glob + grep + edit 闭环）
+
+```
+grep {path:line} → edit 读 {start_line/end_line 或 anchor} → edit 改 {同一 anchor/old + expected_hash}
+```
+
+- 行号来源是 grep（不是模型数行号）；anchor 读改复用（不是先读全文再翻译成 hunk）。
+- 权限：permission.rs 按"空 hunks"分类 Read——范围/锚定读均不触发写确认（注释已更新）。
+
+### 12d. 变更清单
+
+- file_edit_v2.rs：read_path / read_range / read_anchored / render_read_candidates /
+  candidate_json；常量 READ_MAX_LINES=400 / READ_MAX_CHARS=24K / READ_MAX_CONTEXT=100；
+  schema（5 个新参数 + required 收窄为 ["path"]）；description 更新。
+- permission.rs：注释更新（读形态三态）。
+- backend_prompt.md：TOOL DIRECTORY / 详解段 / 执行闭环（read+edit → grep+edit）三处教学更新。
+- 测试：R5-R18（+14），workspace 258/258 全绿。

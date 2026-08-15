@@ -1145,6 +1145,7 @@ fn work_status_component(props: &WorkStatusProps, cx: &mut RenderCx) -> Element 
 }
 
 /// 单个子代理胶囊：状态图标 + 名称 + 耗时 mm:ss；done 降透明。
+/// 点击打开子代理运行记录面板（seed 可用时；拉 timeline 按行渲染）。
 fn subagent_pill(item: &SubagentItem, now: u64) -> Element {
     let glyph: Element = match item.state {
         SubagentState::Working => ProgressRing::indeterminate()
@@ -1158,7 +1159,7 @@ fn subagent_pill(item: &SubagentItem, now: u64) -> Element {
         SubagentState::Lost => text_block("⚠").font_size(tokens::TYPE_CAPTION).into(),
     };
     let label = format!("{} · {}", item.name, fmt_elapsed(item, now));
-    border(
+    let pill = border(
         hstack((glyph, text_block(&label).font_size(tokens::TYPE_CAPTION)))
             .spacing(tokens::SPACE_1)
             .padding(Thickness {
@@ -1170,7 +1171,21 @@ fn subagent_pill(item: &SubagentItem, now: u64) -> Element {
     )
     .corner_radius(10.0)
     .background(ThemeRef::CardBackground)
-    .with_key(format!("subagent-pill-{}", item.call_id))
+    .with_key(format!("subagent-pill-{}", item.call_id));
+    // 有 seed 才可点开记录面板（seed 未解析时保持纯展示）。
+    if item.seed.is_empty() {
+        return pill.into();
+    }
+    pill.on_tapped({
+        let name = item.name.clone();
+        let seed = item.seed.clone();
+        move || {
+            crate::diff_drawer::open_diff_drawer(crate::diff_drawer::DrawerRequest::Subagent {
+                seed: seed.clone(),
+                name: name.clone(),
+            })
+        }
+    })
     .into()
 }
 

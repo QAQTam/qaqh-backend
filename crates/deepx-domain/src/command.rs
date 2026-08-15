@@ -63,6 +63,15 @@ pub enum ControlCommand {
     SessionShutdown,
     /// 重载配置（provider、model、permission 等）。
     AgentReloadConfig,
+    /// 切换工具模式（standard/minimal/custom，PLAN-TOOL-MODES.md）。
+    /// meta 持久化由 daemon 侧完成（persist_tool_mode），worker 只应用：
+    /// set_allowed_tools + 刷新 tool_defs（模型侧工具清单源头过滤）。
+    SetToolMode {
+        #[serde(default)]
+        tool_mode: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        custom_tools: Vec<String>,
+    },
     /// 提交 ask_user 交互的答案（对应 InteractionRequested）。
     InteractionAskRespond {
         interaction_id: String,

@@ -144,10 +144,11 @@ mod tests {
     }
 
     #[test]
-    fn prompt_teaches_edit_file() {
+    fn prompt_teaches_edit_file_v2() {
         let prompt = full_system_prompt();
         assert!(prompt.contains("[FILE EDITING]"));
-        assert!(prompt.contains("edit_file"));
+        assert!(prompt.contains("edit_file_v2"));
+        assert!(!prompt.contains("`edit_file`"), "v1 edit_file must not be taught");
     }
 
     #[test]

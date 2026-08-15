@@ -38,67 +38,25 @@ pub(crate) fn compute(
             files_deleted: 1,
             file: file_path.map(String::from),
         }),
-        ("edit_file", _) => {
-            // 统一 edit_file：单文件（顶层字段或 ops）与多文件（files）都统计。
+        ("edit_file_v2", _) => {
+            // v2：单文件 path + hunks（内容锚定：`old` 删除行数、`new` 新增行数）。
             let mut added = 0usize;
             let mut removed = 0usize;
-            let mut files_created = 0usize;
-            let count_one = |v: &serde_json::Value, added: &mut usize, removed: &mut usize| {
-                if let Some(ops) = v.get("ops").and_then(|x| x.as_array()) {
-                    for op in ops {
-                        *added += op
-                            .get("new_lines")
-                            .and_then(|x| x.as_array())
-                            .map(Vec::len)
-                            .unwrap_or_else(|| {
-                                op.get("new_string")
-                                    .and_then(|s| s.as_str())
-                                    .map_or(0, |s| s.lines().count())
-                            });
-                        *removed += op
-                            .get("old_lines")
-                            .and_then(|x| x.as_array())
-                            .map(Vec::len)
-                            .unwrap_or_else(|| {
-                                op.get("old_string")
-                                    .and_then(|s| s.as_str())
-                                    .map_or(0, |s| s.lines().count())
-                            });
+            if let Some(hunks) = args.get("hunks").and_then(|x| x.as_array()) {
+                for h in hunks {
+                    if let Some(new) = h.get("new").and_then(|x| x.as_str()) {
+                        added += new.lines().count();
                     }
-                } else {
-                    *added += v
-                        .get("new_lines")
-                        .and_then(|x| x.as_array())
-                        .map(Vec::len)
-                        .unwrap_or_else(|| {
-                            v.get("new_string")
-                                .and_then(|s| s.as_str())
-                                .map_or(0, |s| s.lines().count())
-                        });
-                    *removed += v
-                        .get("old_lines")
-                        .and_then(|x| x.as_array())
-                        .map(Vec::len)
-                        .unwrap_or_else(|| {
-                            v.get("old_string")
-                                .and_then(|s| s.as_str())
-                                .map_or(0, |s| s.lines().count())
-                        });
+                    if let Some(old) = h.get("old").and_then(|x| x.as_str()) {
+                        removed += old.lines().count();
+                    }
                 }
-            };
-            if let Some(files) = args.get("files").and_then(|x| x.as_array()) {
-                for f in files {
-                    files_created += 1;
-                    count_one(f, &mut added, &mut removed);
-                }
-            } else {
-                count_one(args, &mut added, &mut removed);
             }
             Some(deepx_proto::CodeDeltaRecord {
                 timestamp: now,
                 lines_added: added,
                 lines_removed: removed,
-                files_created,
+                files_created: 1,
                 files_deleted: 0,
                 file: file_path.map(String::from),
             })

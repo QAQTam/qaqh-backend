@@ -32,6 +32,8 @@ chrono = { version = "0.4", features = ["clock"] }
 git2 = { version = "0.21", features = ["vendored-libgit2"] }
 globset = "0.4.20"
 ignore = "0.4.33"
+grep-regex = "0.1"
+grep-searcher = "0.1"
 
 
 [target.'cfg(windows)'.dependencies]

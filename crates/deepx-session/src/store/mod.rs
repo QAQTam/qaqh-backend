@@ -74,45 +74,6 @@ pub fn append_messages(session_dir: &Path, messages: &[Message]) -> Result<(), S
     Ok(())
 }
 
-/// Read all messages from `messages.jsonl`.
-/// Returns empty vec if the file doesn't exist.
-/// Deduplicates by msg_id: if the same msg_id appears more than once
-/// (from a prior bug where from_messages re-persisted, fixed in v0.4.1),
-/// only the first occurrence is kept.
-pub fn read_messages(session_dir: &Path) -> Result<Vec<Message>, String> {
-    let path = session_dir.join("messages.jsonl");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let file = fs::File::open(&path).map_err(|e| format!("open messages.jsonl: {e}"))?;
-    let reader = BufReader::new(file);
-    let mut msgs = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
-    let mut dup_count = 0u32;
-    for (i, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| format!("read line {i}: {e}"))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let msg: Message =
-            serde_json::from_str(&line).map_err(|e| format!("parse line {i}: {e}"))?;
-        // Skip duplicate msg_ids (prior bug: from_messages re-persisted).
-        if let Some(mid) = msg.msg_id {
-            if !seen_ids.insert(mid) {
-                dup_count += 1;
-                continue;
-            }
-        }
-        msgs.push(msg);
-    }
-    if dup_count > 0 {
-        log::warn!(
-            "[read_messages] skipped {dup_count} duplicate messages (msg_id collision) — will rewrite cleanly on next save_full"
-        );
-    }
-    Ok(msgs)
-}
-
 /// Rewrite the entire messages.jsonl with the given messages.
 /// Used after undo or compact.
 pub fn rewrite_messages(session_dir: &Path, messages: &[Message]) -> Result<(), String> {
@@ -129,19 +90,6 @@ pub fn rewrite_messages(session_dir: &Path, messages: &[Message]) -> Result<(), 
     }
     fs::rename(&tmp, &dst).map_err(|e| format!("rename: {e}"))?;
     Ok(())
-}
-
-/// Truncate messages.jsonl to the first `keep_lines` lines.
-/// Returns the truncated messages.
-pub fn truncate_messages(session_dir: &Path, keep_lines: usize) -> Result<Vec<Message>, String> {
-    let path = session_dir.join("messages.jsonl");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let all = read_messages(session_dir)?;
-    let truncated: Vec<Message> = all.into_iter().take(keep_lines).collect();
-    rewrite_messages(session_dir, &truncated)?;
-    Ok(truncated)
 }
 
 /// Count lines in messages.jsonl (fast, reads line-by-line without parsing JSON).

@@ -222,7 +222,16 @@ impl InputEngine {
     /// skill activation and todo/goal mode switches do not apply to injected
     /// data. Callers must keep the `[SUBAGENT ...]` tag in `text` so the model
     /// can distinguish injected content from system instructions.
-    pub fn handle_system_input(&self, ctx: &mut RingContext, text: &str) -> Outcome {
+    ///
+    /// `command_id` is the durable injection-journal key: once the message is
+    /// committed to the store (drain below), the journal entry is marked
+    /// committed so a crash/replay cannot re-inject it.
+    pub fn handle_system_input(
+        &self,
+        ctx: &mut RingContext,
+        text: &str,
+        command_id: Option<&str>,
+    ) -> Outcome {
         log::info!(
             "[INPUT] handle_system_input called, text_len={}",
             text.len()
@@ -246,17 +255,27 @@ impl InputEngine {
         let turn_id = ctx.agent.msg.allocate_turn_id();
         // 统一管道：submit → drain（idle 时立即落盘 trailing developer）
         // ——与回合中的 lap 边界消费同一代码路径，不再分叉。
-        if let Err(e) = ctx
-            .flow
-            .submit(deepx_message::builtin::SUBAGENT, deepx_types::Message::developer(text))
-        {
+        if let Err(e) = ctx.flow.submit(
+            deepx_message::builtin::SUBAGENT,
+            deepx_types::Message::developer(text),
+            command_id.map(String::from),
+        ) {
             log::error!("[INPUT] ContextFlow submit failed for system injection: {e}");
         }
         {
             let model = ctx.agent.config.model.clone();
             let effort = ctx.agent.config.reasoning_effort.clone();
-            ctx.flow
+            let (_, committed_ids) = ctx
+                .flow
                 .drain_turn_boundary(&mut ctx.agent.msg, &model, &effort);
+            // 已落盘到 messages.jsonl → 标记注入日志 committed（幂等）。
+            for cid in &committed_ids {
+                if let Err(e) = deepx_session::SessionManager::global()
+                    .append_injection_committed(&ctx.agent.session.seed, cid)
+                {
+                    log::warn!("[INPUT] mark injection committed failed for {cid}: {e}");
+                }
+            }
         }
         ctx.agent
             .msg

@@ -15,6 +15,24 @@ use deepx_types::{Message, SessionMeta};
 
 use crate::store;
 
+/// 注入日志文件名（每 session 一个，append-only JSONL）。
+pub const INJECTION_JOURNAL_FILE: &str = "injections.jsonl";
+
+/// `injections.jsonl` 的单一事件行。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum InjectionJournalEntry {
+    /// 注入命令已持久化入队（daemon ACK 前写入）。
+    Enqueued {
+        command_id: String,
+        text: String,
+    },
+    /// 注入已提交到 messages.jsonl（worker 落盘后写入）。
+    Committed {
+        command_id: String,
+    },
+}
+
 static INSTANCE: OnceLock<SessionManager> = OnceLock::new();
 
 /// The LLM-facing view after a compact operation.  Raw messages remain in the
@@ -216,6 +234,18 @@ impl SessionManager {
         let dir = self.session_path_dir(seed);
         let mut meta = self.load_meta(seed).unwrap_or_default();
         meta.mode = mode;
+        let _ = store::write_meta(&dir, &meta);
+    }
+
+    /// Persist tool mode (standard/minimal/custom) to meta.json without
+    /// rewriting messages — survives agent restart (PLAN-TOOL-MODES.md 4.3).
+    pub fn persist_tool_mode(&self, seed: &str, tool_mode: &str, custom_tools: &[String]) {
+        let lock = self.session_lock(seed);
+        let _guard = lock.lock().unwrap();
+        let dir = self.session_path_dir(seed);
+        let mut meta = self.load_meta(seed).unwrap_or_default();
+        meta.tool_mode = tool_mode.to_string();
+        meta.custom_tools = custom_tools.to_vec();
         let _ = store::write_meta(&dir, &meta);
     }
 
@@ -532,16 +562,92 @@ impl SessionManager {
         store::upsert_index(&self.sessions_dir, &meta);
     }
 
-    /// Truncate messages.jsonl to `keep_lines` lines.
-    /// Returns the truncated messages.
-    pub fn truncate_messages(&self, seed: &str, keep_lines: usize) -> Result<Vec<Message>, String> {
+    // ── Injection journal（持久化注入队列）──
+    //
+    // `injections.jsonl` 是外部注入命令（subagent 报告等 as_system 消息）的
+    // 持久化队列，append-only，每行一个事件：
+    //   {"event":"enqueued",  "command_id":"…", "text":"…"}
+    //   {"event":"committed", "command_id":"…"}
+    //
+    // 写入方：daemon 在 ACK 前写 enqueued（accepted = 已持久化入队，而非仅已
+    // 转发）；agent worker 在注入落盘到 messages.jsonl 后写 committed。进程
+    // 崩溃后，worker 启动时重放无 committed 标记的 enqueued 行——配合
+    // store 的文本幂等（push_trailing_system），实现至少一次 + 幂等 = 恰好一次。
+
+    /// 持久化一条注入命令入队。失败时调用方必须拒绝该命令（不 ACK）。
+    pub fn append_injection_enqueued(
+        &self,
+        seed: &str,
+        command_id: &str,
+        text: &str,
+    ) -> Result<(), String> {
+        let entry = InjectionJournalEntry::Enqueued {
+            command_id: command_id.to_string(),
+            text: text.to_string(),
+        };
+        self.append_injection_line(seed, &entry)
+    }
+
+    /// 标记一条注入命令已提交（已落盘到 messages.jsonl）。幂等：重复标记无害。
+    pub fn append_injection_committed(&self, seed: &str, command_id: &str) -> Result<(), String> {
+        let entry = InjectionJournalEntry::Committed {
+            command_id: command_id.to_string(),
+        };
+        self.append_injection_line(seed, &entry)
+    }
+
+    /// 读取未提交（无 committed 标记）的注入，按入队顺序返回 (command_id, text)。
+    /// 供 worker 启动时重放。文件不存在返回空；坏行跳过并告警。
+    pub fn read_pending_injections(&self, seed: &str) -> Vec<(String, String)> {
+        let path = self.session_path_dir(seed).join(INJECTION_JOURNAL_FILE);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let mut committed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut enqueued: Vec<(String, String)> = Vec::new();
+        for (index, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<InjectionJournalEntry>(line) {
+                Ok(InjectionJournalEntry::Enqueued { command_id, text }) => {
+                    enqueued.push((command_id, text));
+                }
+                Ok(InjectionJournalEntry::Committed { command_id }) => {
+                    committed.insert(command_id);
+                }
+                Err(e) => log::warn!(
+                    "[journal] skip bad line {} of {}: {e}",
+                    index + 1,
+                    path.display()
+                ),
+            }
+        }
+        enqueued
+            .into_iter()
+            .filter(|(command_id, _)| !committed.contains(command_id))
+            .collect()
+    }
+
+    fn append_injection_line(&self, seed: &str, entry: &InjectionJournalEntry) -> Result<(), String> {
+        use std::io::Write;
         let lock = self.session_lock(seed);
         let _guard = lock.lock().unwrap();
-        let dir = self
-            .session_dir(seed)
-            .ok_or_else(|| format!("Session not found: {seed}"))?;
-        let truncated = store::truncate_messages(&dir, keep_lines)?;
-        Ok(truncated)
+        let dir = self.session_path_dir(seed);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("create session dir {}: {e}", dir.display()))?;
+        let path = dir.join(INJECTION_JOURNAL_FILE);
+        let line = serde_json::to_string(entry).map_err(|e| format!("serialize journal entry: {e}"))?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        // 单次 write 追加整行：跨进程（daemon ↔ worker）并发追加在
+        // Windows FILE_APPEND_DATA / POSIX O_APPEND 下是原子的，行不会交错。
+        writeln!(file, "{line}").map_err(|e| format!("append {}: {e}", path.display()))?;
+        file.flush()
+            .map_err(|e| format!("flush {}: {e}", path.display()))
     }
 
     // ── Active session ──
@@ -674,6 +780,87 @@ impl SessionManager {
                 format!("{}..", &s[..end])
             })
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod injection_journal_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    static TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn manager() -> (PathBuf, SessionManager) {
+        let root = std::env::temp_dir().join(format!(
+            "deepx-session-journal-{}-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos(),
+        ));
+        let sessions_dir = root.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create test sessions");
+        let manager = SessionManager {
+            sessions_dir,
+            active_path: root.join(".active_session"),
+            session_locks: Mutex::new(HashMap::new()),
+        };
+        (root, manager)
+    }
+
+    #[test]
+    fn injection_journal_roundtrip_and_commit_marking() {
+        let (root, manager) = manager();
+        let seed = "journal-seed";
+
+        // 初始：无待重放注入。
+        assert!(manager.read_pending_injections(seed).is_empty());
+
+        // daemon 侧：ACK 前持久化入队（按到达顺序）。
+        manager
+            .append_injection_enqueued(seed, "cmd-a", "[SUBAGENT 'a' COMPLETED]\n\nA")
+            .expect("enqueue a");
+        manager
+            .append_injection_enqueued(seed, "cmd-b", "[SUBAGENT 'b' COMPLETED]\n\nB")
+            .expect("enqueue b");
+        let pending = manager.read_pending_injections(seed);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(
+            pending[0],
+            ("cmd-a".to_string(), "[SUBAGENT 'a' COMPLETED]\n\nA".to_string())
+        );
+        assert_eq!(
+            pending[1],
+            ("cmd-b".to_string(), "[SUBAGENT 'b' COMPLETED]\n\nB".to_string())
+        );
+
+        // worker 侧：落盘后标记 committed；重复标记幂等。
+        manager
+            .append_injection_committed(seed, "cmd-a")
+            .expect("commit a");
+        manager
+            .append_injection_committed(seed, "cmd-a")
+            .expect("commit a again (idempotent)");
+        let pending = manager.read_pending_injections(seed);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "cmd-b");
+
+        // 全部 committed → 无待重放。
+        manager
+            .append_injection_committed(seed, "cmd-b")
+            .expect("commit b");
+        assert!(manager.read_pending_injections(seed).is_empty());
+
+        std::fs::remove_dir_all(&root).expect("remove test directory");
+    }
+
+    #[test]
+    fn injection_journal_missing_file_is_empty() {
+        let (root, manager) = manager();
+        assert!(manager.read_pending_injections("no-such-seed").is_empty());
+        std::fs::remove_dir_all(&root).expect("remove test directory");
     }
 }
 

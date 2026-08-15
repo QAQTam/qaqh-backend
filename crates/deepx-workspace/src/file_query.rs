@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(result.model_text(), "L2: two\nL3: three");
         assert_eq!(result.data["files"][0]["start_line"], 2);
         assert_eq!(result.data["files"][0]["end_line"], 3);
-        // 防呆闭环：响应必须带 hash（LF 视图 content_hash），供 edit_file 的 expected_hash 校验
+        // 防呆闭环：响应必须带 hash（LF 视图 content_hash），供 edit_file_v2 的 expected_hash 校验
         let hash = result.data["files"][0]["hash"]
             .as_str()
             .expect("read_file must return hash");

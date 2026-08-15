@@ -28,6 +28,65 @@ pub enum ResumeReason {
     PermissionResolved,
 }
 
+/// 传输层请求快照 dump（诊断工具）：`DEEPX_REQUEST_LOG=1` 时，每次 gate
+/// 请求构建后把**真实传输的消息列表**写入 `<data>/sessions/<seed>/request-log.jsonl`
+/// （每请求一行 JSON），与 `messages.jsonl`（store 理论落盘）对比，二分定位
+/// "落盘 ≠ 传输"分叉点（例如 trailing 注入已持久化但模型请求未携带）。
+/// 默认关闭，无任何正常路径开销。
+fn dump_request_log(
+    seed: &str,
+    rev: u64,
+    turns: usize,
+    trailing: usize,
+    messages: &[deepx_types::Message],
+) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| {
+        std::env::var("DEEPX_REQUEST_LOG")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    }) {
+        return;
+    }
+    if seed.is_empty() {
+        return;
+    }
+    let dir = deepx_types::platform::data_dir().join("sessions").join(seed);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("request-log.jsonl"))
+    else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let rec = serde_json::json!({
+        "ts": now,
+        "rev": rev,
+        "turns": turns,
+        "trailing": trailing,
+        "n": messages.len(),
+        "messages": messages.iter().map(|m| {
+            let text = m.content.iter()
+                .filter_map(|b| match b {
+                    deepx_types::ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            serde_json::json!({ "role": m.role, "text": text })
+        }).collect::<Vec<_>>(),
+    });
+    use std::io::Write;
+    let _ = writeln!(f, "{rec}");
+}
+
 /// TurnEngine manages a single LLM turn lifecycle.
 pub struct TurnEngine {
     /// If Some, a turn is suspended waiting for permission or ask_user.
@@ -1143,6 +1202,14 @@ impl TurnEngine {
             // replacement reading. Only sessions without API usage fall back to
             // the calibrated local upper bound.
             let mut messages = ctx.agent.build_context();
+            // 传输快照 dump（诊断）：对比 messages.jsonl 定位"落盘 ≠ 传输"分叉。
+            dump_request_log(
+                &ctx.agent.session.seed,
+                ctx.agent.msg.context_revision(),
+                ctx.agent.msg.turn_count(),
+                ctx.agent.msg.trailing_messages().len(),
+                &messages,
+            );
             let mut request_estimate = ctx
                 .agent
                 .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));

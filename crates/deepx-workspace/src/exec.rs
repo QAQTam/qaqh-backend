@@ -869,6 +869,55 @@ fn normalize_command_rg(command: &str) -> String {
 }
 
 pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
+    handle_run_with_shell(ctx, None)
+}
+
+/// bash 独立工具：固定 Shell::Bash（Windows 解析 git-for-windows/MSYS2，避开 WSL wrapper）。
+pub(super) fn handle_run_bash(ctx: ToolCallCtx) -> ToolResult {
+    handle_run_with_shell(ctx, Some(Shell::Bash))
+}
+
+/// pwsh 独立工具：固定 Shell::PowerShell（pwsh7 → powershell.exe 降级链）。
+pub(super) fn handle_run_pwsh(ctx: ToolCallCtx) -> ToolResult {
+    handle_run_with_shell(ctx, Some(Shell::PowerShell))
+}
+
+/// 独立 shell 工具的软检测：注册不拒绝，调用时解析路径不可用才报错。
+/// 先触发探测缓存（Windows git-bash 标准路径解析、pwsh 降级链），再判可用性。
+fn shell_available(shell: Shell) -> bool {
+    let _ = Shell::detect();
+    let _ = Shell::from_name("bash");
+    let path = shell.path();
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        p.is_file()
+    } else {
+        executable_on_path(path)
+    }
+}
+
+/// 本机可用 shell 清单（软检测报错的引导信息）。
+fn available_shells() -> String {
+    let mut list = Vec::new();
+    for (name, shell) in [
+        ("bash", Shell::Bash),
+        ("pwsh", Shell::PowerShell),
+        ("cmd", Shell::Cmd),
+    ] {
+        if shell_available(shell) {
+            list.push(name);
+        }
+    }
+    if list.is_empty() {
+        "none detected".to_string()
+    } else {
+        list.join(", ")
+    }
+}
+
+/// 共享执行引擎。`fixed` = 独立 shell 工具（bash/pwsh）固定包装 shell；
+/// None = exec 通用入口（`shell` 参数或平台默认检测）。
+fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> ToolResult {
     // ── Resolve argv ──
     // Two modes: `command` (auto-wrapped in platform shell) or `argv` (direct exec).
     let argv: Vec<String> = if let Some(command) = ctx.get_str("command") {
@@ -885,19 +934,31 @@ pub(super) fn handle_run(ctx: ToolCallCtx) -> ToolResult {
         // 字面 `n`），输出被污染。在此把 command 字符串中的紧贴组合改写为
         // rg 正确写法（递归默认开启，行号用 -n）。
         let command = normalize_command_rg(command);
-        // Explicit shell override (exec `shell` param) or platform default.
-        let shell = match ctx.args.get("shell").and_then(|v| v.as_str()) {
-            Some(name) if !name.is_empty() => match Shell::from_name(name) {
-                Some(shell) => shell,
-                None => {
+        // 固定 shell（bash/pwsh 独立工具）或 exec 的 `shell` 参数/平台默认。
+        let shell = match fixed {
+            Some(shell) => {
+                if !shell_available(shell) {
                     return ToolResult::error(crate::json_err(
-                        "UNKNOWN_SHELL",
-                        format!("unknown shell '{name}'"),
-                        "Use one of: bash, zsh, sh, pwsh, cmd. The default is auto-detected (bash on Windows).",
+                        "SHELL_NOT_FOUND",
+                        format!("{} not found on this machine", shell.path()),
+                        &format!("available shells: {}", available_shells()),
                     ));
                 }
+                shell
+            }
+            None => match ctx.args.get("shell").and_then(|v| v.as_str()) {
+                Some(name) if !name.is_empty() => match Shell::from_name(name) {
+                    Some(shell) => shell,
+                    None => {
+                        return ToolResult::error(crate::json_err(
+                            "UNKNOWN_SHELL",
+                            format!("unknown shell '{name}'"),
+                            "Use one of: bash, zsh, sh, pwsh, cmd. The default is auto-detected (bash on Windows).",
+                        ));
+                    }
+                },
+                _ => Shell::detect(),
             },
-            _ => Shell::detect(),
         };
         shell.derive_exec_args(&command)
     } else {
@@ -1034,30 +1095,88 @@ fn strip_ansi(s: &str) -> String {
 use crate::{ToolHandler, ToolPlacement, ToolRisk};
 use std::time::Duration;
 
+/// exec / bash / pwsh 共享的 input schema 模板。
+/// `with_shell` 控制是否暴露 `shell` 参数（仅 exec 通用入口）。
+fn exec_schema(with_shell: bool) -> serde_json::Value {
+    let mut props = serde_json::Map::new();
+    props.insert(
+        "argv".into(),
+        serde_json::json!({ "type": "array", "items": {"type": "string"}, "description": "命令数组：argv[0]=可执行文件，argv[1..]=参数；无 shell" }),
+    );
+    props.insert(
+        "command".into(),
+        serde_json::json!({ "type": "string", "description": "shell 命令字符串（bash -c / pwsh -Command / cmd /c 包装），用于管道/重定向/一行脚本" }),
+    );
+    if with_shell {
+        props.insert(
+            "shell".into(),
+            serde_json::json!({ "type": "string", "enum": ["bash", "zsh", "sh", "pwsh", "cmd"], "description": "command 的包装 shell（默认：Windows pwsh、Unix bash）；POSIX 语法选 bash。argv 模式忽略" }),
+        );
+    }
+    props.insert(
+        "cwd".into(),
+        serde_json::json!({"type": "string", "description": "工作目录（默认 workspace 根；相对路径基于 workspace 解析）"}),
+    );
+    props.insert(
+        "env".into(),
+        serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}, "description": "子进程环境变量（可选）；同名覆盖"}),
+    );
+    props.insert(
+        "timeout_secs".into(),
+        serde_json::json!({"type": "integer", "description": "超时秒数（1-3600，默认 30）"}),
+    );
+    props.insert(
+        "background_after_secs".into(),
+        serde_json::json!({"type": "integer", "description": "快速移交窗口：子进程运行超过该秒数即返回 backgrounded + process_id（用于长驻服务，随后用 process action=check/wait/kill 接管）"}),
+    );
+    props.insert(
+        "max_output_tokens".into(),
+        serde_json::json!({ "type": "integer", "description": "输出截断上限（默认 10000，范围 100-50000）" }),
+    );
+    serde_json::json!({
+        "type": "object",
+        "properties": props,
+        "required": [],
+        "additionalProperties": false,
+        "oneOf": [
+            {"required": ["argv"]},
+            {"required": ["command"]}
+        ]
+    })
+}
+
+/// 独立 shell 工具注册（bash / pwsh）：共享 exec 引擎 + 固定 Shell，
+/// schema 无 `shell` 参数；description 注入本机解析路径（软检测）。
+fn register_shell_tool(mgr: &mut crate::ToolManager, key: &str, shell: Shell, handler: fn(crate::ToolCallCtx) -> crate::ToolResult) {
+    // 触发探测缓存，让 description 里的解析路径真实（Windows git-bash / pwsh 降级链）。
+    let _ = Shell::detect();
+    let _ = Shell::from_name("bash");
+    let resolved = shell.path();
+    let description = format!(
+        "执行命令，固定使用 {key}（{resolved}；本机探测结果，可能随环境变化）。两种模式：(1) argv=[程序, 参数…] 直接执行（无 shell）；(2) command={key} 命令字符串（管道/重定向/一行脚本）。返回 {{status, exit_code, output, wall_time_seconds, timed_out}}；超时移交时返回 backgrounded + process_id。该 shell 不可用时调用报错并列出可用 shell。",
+    );
+    // ToolHandler.description 是 &'static str：注册仅进程启动一次，leak 即静态。
+    let description: &'static str = Box::leak(description.into_boxed_str());
+    mgr.register_with_placement(
+        ToolHandler {
+            key: key.to_string(),
+            description,
+            input_schema: exec_schema(false),
+            handler,
+            risk: ToolRisk::Destructive,
+            category: crate::permission::ToolCategory::Exec,
+            default_timeout: Duration::from_secs(30),
+        },
+        ToolPlacement::Workspace,
+    );
+}
+
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(
         ToolHandler {
             key: "exec".to_string(),
             description: "执行命令。两种模式：(1) argv=[程序, 参数…] 直接执行（无 shell）；(2) command=shell 字符串（自动包装到平台 shell，支持管道/重定向/一行脚本）。返回 {status, exit_code, output, wall_time_seconds, timed_out}；超时移交时返回 backgrounded + process_id。",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "argv": { "type": "array", "items": {"type": "string"}, "description": "命令数组：argv[0]=可执行文件，argv[1..]=参数；无 shell" },
-                    "command": { "type": "string", "description": "shell 命令字符串（bash -c / pwsh -Command / cmd /c 包装），用于管道/重定向/一行脚本" },
-                    "shell": { "type": "string", "enum": ["bash", "zsh", "sh", "pwsh", "cmd"], "description": "command 的包装 shell（默认：Windows pwsh、Unix bash）；POSIX 语法选 bash。argv 模式忽略" },
-                    "cwd": {"type": "string", "description": "工作目录（默认 workspace 根；相对路径基于 workspace 解析）"},
-                    "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "子进程环境变量（可选）；同名覆盖"},
-                    "timeout_secs": {"type": "integer", "description": "超时秒数（1-3600，默认 30）"},
-                    "background_after_secs": {"type": "integer", "description": "快速移交窗口：子进程运行超过该秒数即返回 backgrounded + process_id（用于长驻服务，随后用 process action=check/wait/kill 接管）"},
-                    "max_output_tokens": { "type": "integer", "description": "输出截断上限（默认 10000，范围 100-50000）" }
-                },
-                "required": [],
-                "additionalProperties": false,
-                "oneOf": [
-                    {"required": ["argv"]},
-                    {"required": ["command"]}
-                ]
-            }),
+            input_schema: exec_schema(true),
             handler: handle_run,
             risk: ToolRisk::Destructive,
             category: crate::permission::ToolCategory::Exec,
@@ -1065,6 +1184,9 @@ pub fn register(mgr: &mut crate::ToolManager) {
         },
         ToolPlacement::Workspace,
     );
+    // 独立 shell 工具（工具模式白名单可直接引用）。
+    register_shell_tool(mgr, "bash", Shell::Bash, handle_run_bash);
+    register_shell_tool(mgr, "pwsh", Shell::PowerShell, handle_run_pwsh);
 }
 
 #[cfg(test)]
@@ -1591,5 +1713,100 @@ mod tests {
         );
         let after = crate::process_registry::ProcessRegistry::get_info(pid).expect("still tracked");
         assert_eq!(after["status"], "killed");
+    }
+
+    // ── 独立 shell 工具（4.2：bash / pwsh）──
+
+    fn make_ctx(name: &str, args: serde_json::Value) -> crate::ToolCallCtx {
+        crate::ToolCallCtx {
+            id: "exec-test".into(),
+            name: name.into(),
+            action: String::new(),
+            args,
+            tx_progress: None,
+            timeout_secs: Some(30),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            skill_effects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    #[test]
+    fn shell_tools_registered_without_shell_param() {
+        let mut mgr = crate::ToolManager::new();
+        register_shell_tool(&mut mgr, "bash", Shell::Bash, handle_run_bash);
+        register_shell_tool(&mut mgr, "pwsh", Shell::PowerShell, handle_run_pwsh);
+        let defs = mgr.all_defs();
+        assert_eq!(defs.len(), 2);
+        for d in &defs {
+            let props = d.function.parameters.get("properties").unwrap();
+            assert!(
+                props.get("shell").is_none(),
+                "{} must NOT expose a shell param (tool name is the shell)",
+                d.function.name
+            );
+            assert!(props.get("command").is_some());
+            assert!(props.get("argv").is_some());
+        }
+        let bash_desc = &defs
+            .iter()
+            .find(|d| d.function.name == "bash")
+            .unwrap()
+            .function
+            .description;
+        assert!(bash_desc.contains("bash"), "desc: {bash_desc}");
+        let pwsh_desc = &defs
+            .iter()
+            .find(|d| d.function.name == "pwsh")
+            .unwrap()
+            .function
+            .description;
+        assert!(pwsh_desc.contains("pwsh"), "desc: {pwsh_desc}");
+    }
+
+    #[test]
+    fn bash_tool_executes_command_through_fixed_shell() {
+        if !shell_available(Shell::Bash) {
+            eprintln!("skipping: bash not available on this machine");
+            return;
+        }
+        // cwd 显式传当前目录：并行测试会污染 CURRENT_WORKSPACE（可能指向已删除
+        // 的 tempdir），不传则 spawn 带无效 cwd → os error 267。
+        let ctx = make_ctx(
+            "bash",
+            serde_json::json!({ "command": "echo shell-tool-ok", "cwd": std::env::current_dir().unwrap() }),
+        );
+        let r = handle_run_bash(ctx);
+        assert!(r.is_success(), "model text: {}", r.model_text());
+        assert!(r.model_text().contains("shell-tool-ok"));
+    }
+
+    #[test]
+    fn pwsh_tool_executes_command_through_fixed_shell() {
+        if !shell_available(Shell::PowerShell) {
+            eprintln!("skipping: powershell not available on this machine");
+            return;
+        }
+        let ctx = make_ctx(
+            "pwsh",
+            serde_json::json!({ "command": "Write-Output shell-tool-ok", "cwd": std::env::current_dir().unwrap() }),
+        );
+        let r = handle_run_pwsh(ctx);
+        assert!(r.is_success(), "model text: {}", r.model_text());
+        assert!(r.model_text().contains("shell-tool-ok"));
+    }
+
+    #[test]
+    fn bash_tool_argv_mode_still_direct_exec() {
+        // argv 模式与 shell 无关：bash 工具也能直跑程序（无包装）。
+        #[cfg(windows)]
+        let argv = serde_json::json!(["cmd", "/c", "echo", "shell-tool-ok"]);
+        #[cfg(not(windows))]
+        let argv = serde_json::json!(["echo", "shell-tool-ok"]);
+        let ctx = make_ctx(
+            "bash",
+            serde_json::json!({ "argv": argv, "cwd": std::env::current_dir().unwrap() }),
+        );
+        let r = handle_run_bash(ctx);
+        assert!(r.is_success(), "model text: {}", r.model_text());
     }
 }

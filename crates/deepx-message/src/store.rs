@@ -163,7 +163,7 @@ fn finalize_tool_result(tool_name: &str, result: &str) -> String {
 }
 
 fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
-    if matches!(tool_name, "edit_file" | "write") {
+    if matches!(tool_name, "edit_file_v2" | "write") {
         return fold_file_mutation_result(tool_name, result);
     }
 
@@ -210,14 +210,21 @@ fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
 /// Preserve a small, verifiable edit receipt instead of only reporting that a
 /// write succeeded. Tools now return summary-only receipts (no diff body), so
 /// the fold keeps the first line plus a deterministic verify instruction.
+///
+/// 失败结果（`[ERROR]`/`[PARTIAL]` 开头，含 NO_MATCH 候选/详情）**原样透传**：
+/// 模型必须看到失败原因与候选才能修正重试——折叠会剪断反馈闭环
+/// （曾导致 edit_file_v2 失败时模型只能盲猜重试）。成功（`[OK]`）折叠收据。
 fn fold_file_mutation_result(tool_name: &str, result: &str) -> String {
+    if result.starts_with("[ERROR]") || result.starts_with("[PARTIAL]") {
+        return result.to_string();
+    }
     let first = result
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
     let cap = first.floor_char_boundary(first.len().min(600));
     let action = match tool_name {
-        "edit_file" => "edit",
+        "edit_file_v2" => "edit",
         "write" => "write",
         _ => "change",
     };
@@ -323,10 +330,14 @@ impl Turn {
 pub struct MessageStore {
     seed: String,
     system_messages: Vec<Message>,
-    /// Trailing system messages appended after the last turn (persisted).
-    /// Used for one-shot activation-set injection: written once when the
-    /// active set changes, then left in place forever so the request prefix
-    /// stays byte-stable across rounds.
+    /// Trailing injections (persisted): subagent reports, skills envelopes.
+    /// Written exactly once at arrival; never re-injected, never removed
+    /// (undo=Keep, compact=Preserved). Serialized into the model context in
+    /// WRITE order together with turns (see [`Self::flat_in_write_order`]), so
+    /// an injection keeps the "latest message" position it had when it was
+    /// written — later turns and steps append AFTER it, and it becomes normal
+    /// history instead of being re-presented as a fresh user message on every
+    /// request.
     trailing_messages: Vec<Message>,
     turns: Vec<Turn>,
     cancelled: bool,
@@ -421,21 +432,6 @@ impl MessageStore {
         self.context_revision
     }
 
-    pub fn switch_seed(&mut self, new_seed: &str) {
-        self.seed = new_seed.to_string();
-        self.system_messages.clear();
-        self.trailing_messages.clear();
-        self.turns.clear();
-        self.cancelled = false;
-        self.compact_skip = 0;
-        self.has_compact_context = false;
-        self.next_msg_id = 1;
-        self.next_turn_seq = 1;
-        self.context_revision = self.context_revision.saturating_add(1);
-        self.replaying = false;
-        self.pending_save.clear();
-    }
-
     pub fn cancel(&mut self) {
         self.cancelled = true;
     }
@@ -446,17 +442,24 @@ impl MessageStore {
 
     /// Assign msg_id and buffer for batched persistence.
     /// Flushed to disk via [`flush_meta`].
-    /// No-op in ephemeral mode.
-    fn save_msg(&mut self, msg: &Message) {
+    /// No-op in ephemeral mode (returns None).
+    ///
+    /// Returns the assigned write-order id so callers can stamp the in-memory
+    /// message: `msg_id` doubles as the store's write sequence, which
+    /// [`Self::flat_in_write_order`] uses to merge turns and trailing
+    /// injections in arrival order.
+    fn save_msg(&mut self, msg: &Message) -> Option<u64> {
         if self.ephemeral {
-            return;
+            return None;
         }
         let mut m = msg.clone();
         m.msg_id = Some(self.next_msg_id);
         self.next_msg_id += 1;
+        let id = m.msg_id;
         if !self.replaying {
             self.pending_save.push(m);
         }
+        id
     }
 
     /// Write buffered messages to JSONL, then update meta.json + index.
@@ -514,9 +517,13 @@ impl MessageStore {
         {
             return Effect::None;
         }
-        self.system_messages.push(msg.clone());
+        let mut msg = msg;
+        let id = self.save_msg(&msg);
+        if let Some(id) = id {
+            msg.msg_id = Some(id);
+        }
+        self.system_messages.push(msg);
         self.context_revision = self.context_revision.saturating_add(1);
-        self.save_msg(&msg);
         Effect::None
     }
 
@@ -541,18 +548,17 @@ impl MessageStore {
         }
     }
 
-    /// Append a trailing system message after the last turn, once.
+    /// Append a trailing injection, once.
     ///
     /// Idempotent: an identical message is skipped, so repeated sync calls on
     /// an unchanged activation set never duplicate. The message is persisted
-    /// (save_msg) and stays in place for the rest of the session — never
-    /// re-injected, never removed — keeping the request prefix byte-stable.
+    /// (save_msg, which also assigns the write-order msg_id) and stays in
+    /// place for the rest of the session — never re-injected, never removed —
+    /// keeping the request prefix byte-stable. Context serialization merges
+    /// trailing injections with turns in write order
+    /// ([`Self::flat_in_write_order`]), so this message lands at the position
+    /// where it was written and later turns/steps append after it.
     pub fn push_trailing_system(&mut self, msg: Message) -> bool {
-        debug_assert!(
-            msg.role == "system" || msg.role == "developer",
-            "push_trailing_system requires role=system|developer, got {}",
-            msg.role
-        );
         let new_text = msg
             .content
             .iter()
@@ -561,6 +567,15 @@ impl MessageStore {
                 _ => None,
             })
             .unwrap_or("");
+        debug_assert!(
+            msg.role == "system"
+                || msg.role == "developer"
+                || (msg.role == "user" && msg.name.as_deref() == Some("subagent"))
+                || (msg.role == "user" && new_text.starts_with("[SUBAGENT ")),
+            "push_trailing_system requires role=system|developer|user(subagent), got role={} name={:?}",
+            msg.role,
+            msg.name
+        );
         if !new_text.is_empty()
             && self.trailing_messages.iter().any(|m| {
                 m.content.iter().any(|b| match b {
@@ -571,9 +586,13 @@ impl MessageStore {
         {
             return false;
         }
-        self.trailing_messages.push(msg.clone());
+        let mut msg = msg;
+        let id = self.save_msg(&msg);
+        if let Some(id) = id {
+            msg.msg_id = Some(id);
+        }
+        self.trailing_messages.push(msg);
         self.context_revision = self.context_revision.saturating_add(1);
-        self.save_msg(&msg);
         true
     }
 
@@ -593,10 +612,13 @@ impl MessageStore {
                 }
             }
         }
-        let msg = Message::user(text);
-        self.turns.push(Turn::new(msg.clone()));
+        let mut msg = Message::user(text);
+        let id = self.save_msg(&msg);
+        if let Some(id) = id {
+            msg.msg_id = Some(id);
+        }
+        self.turns.push(Turn::new(msg));
         self.context_revision = self.context_revision.saturating_add(1);
-        self.save_msg(&msg);
         Effect::None
     }
 
@@ -616,10 +638,13 @@ impl MessageStore {
                 }
             }
         }
-        let msg = Message::system(text);
-        self.turns.push(Turn::new(msg.clone()));
+        let mut msg = Message::system(text);
+        let id = self.save_msg(&msg);
+        if let Some(id) = id {
+            msg.msg_id = Some(id);
+        }
+        self.turns.push(Turn::new(msg));
         self.context_revision = self.context_revision.saturating_add(1);
-        self.save_msg(&msg);
         Effect::None
     }
 
@@ -640,18 +665,15 @@ impl MessageStore {
             "push_assistant requires role=assistant"
         );
 
-        let turn = match self.turns.last_mut() {
-            Some(t) => t,
-            None => {
-                log::error!(
-                    "push_assistant: no turn exists — assistant response without user input. Dropping."
-                );
-                return Effect::None;
-            }
-        };
+        if self.turns.is_empty() {
+            log::error!(
+                "push_assistant: no turn exists — assistant response without user input. Dropping."
+            );
+            return Effect::None;
+        }
 
         if !self.replaying {
-            if let Some(step) = turn.steps.last_mut() {
+            if let Some(step) = self.turns.last_mut().and_then(|t| t.steps.last_mut()) {
                 auto_complete_unfulfilled(
                     step,
                     "[AUTO] Tool was not executed before next assistant response.",
@@ -659,11 +681,15 @@ impl MessageStore {
             }
         }
 
-        let step = Step::new(msg.clone());
+        let mut msg = msg;
+        let id = self.save_msg(&msg);
+        if let Some(id) = id {
+            msg.msg_id = Some(id);
+        }
+        let step = Step::new(msg);
         let has_tools = step.has_tool_use();
-        turn.steps.push(step);
+        self.turns.last_mut().expect("checked above").steps.push(step);
         self.context_revision = self.context_revision.saturating_add(1);
-        self.save_msg(&msg);
 
         if has_tools {
             Effect::None
@@ -758,7 +784,19 @@ impl MessageStore {
             if let Some(step) = turn.find_step_for_mut(tool_call_id) {
                 if !step.tool_result_has_id(tool_call_id) {
                     step.tool_results.push(tool_msg.clone());
-                    self.save_msg(&tool_msg);
+                    // push 之后不再使用 step/turn（NLL 释放借用），再保存。
+                    let id = self.save_msg(&tool_msg);
+                    if let Some(id) = id {
+                        // 新借用回写：最后压入的 tool_result 即本条消息。
+                        for t in self.turns.iter_mut().rev() {
+                            if let Some(s) = t.find_step_for_mut(tool_call_id) {
+                                if let Some(tr) = s.tool_results.last_mut() {
+                                    tr.msg_id = Some(id);
+                                }
+                                break;
+                            }
+                        }
+                    }
                     return true;
                 }
                 return false;
@@ -772,7 +810,17 @@ impl MessageStore {
                         tool_call_id
                     );
                     step.tool_results.push(tool_msg.clone());
-                    self.save_msg(&tool_msg);
+                    let id = self.save_msg(&tool_msg);
+                    if let Some(id) = id {
+                        for t in self.turns.iter_mut().rev() {
+                            if let Some(s) = t.find_step_for_mut(tool_call_id) {
+                                if let Some(tr) = s.tool_results.last_mut() {
+                                    tr.msg_id = Some(id);
+                                }
+                                break;
+                            }
+                        }
+                    }
                     return true;
                 }
                 log::error!(
@@ -813,9 +861,22 @@ impl MessageStore {
 
         for turn in self.turns.iter_mut().rev() {
             if let Some(step) = turn.find_step_for_mut(tool_call_id) {
+                // 保留被替换消息的 msg_id：它是写入顺序键（trailing 合并依赖），
+                // 替换后消息必须留在原时间位置。
+                let old_id = step
+                    .tool_results
+                    .iter()
+                    .find(|tr| {
+                        tr.content.iter().any(|b| {
+                            matches!(b, deepx_types::ContentBlock::ToolResult { tool_use_id, .. }
+                                if tool_use_id == tool_call_id)
+                        })
+                    })
+                    .and_then(|tr| tr.msg_id);
                 step.tool_results.retain(|tr| !tr.content.iter().any(|b| matches!(b, deepx_types::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == tool_call_id)));
-                step.tool_results
-                    .push(Message::tool(tool_call_id, &final_result, success));
+                let mut replacement = Message::tool(tool_call_id, &final_result, success);
+                replacement.msg_id = old_id;
+                step.tool_results.push(replacement);
                 self.context_revision = self.context_revision.saturating_add(1);
                 return;
             }
@@ -826,40 +887,76 @@ impl MessageStore {
         );
     }
 
+    /// Flatten turns (optionally skipping the first `skip_turns`) and trailing
+    /// injections into a single message stream ordered by WRITE time.
+    ///
+    /// `msg_id` is assigned monotonically by [`Self::save_msg`] at write time
+    /// to every persisted message (user turns, assistant steps, tool results,
+    /// trailing injections), so id order == arrival order. `turns` and
+    /// `trailing_messages` are each internally id-ascending; sorting the merged
+    /// list by id reproduces the exact arrival order — a subagent report that
+    /// landed mid-turn sits between that turn's earlier and later steps, and
+    /// once the model acknowledges it the report is followed by the ack, i.e.
+    /// it becomes history instead of re-reading as a fresh user message on
+    /// every request.
+    ///
+    /// Fallback: if any message lacks a msg_id (ephemeral stores), emit turns
+    /// first then trailing — the legacy order. This keeps ephemeral/subagent
+    /// workers (which never persist ids) byte-compatible with the old layout.
+    fn flat_in_write_order(&self, skip_turns: usize) -> Vec<Message> {
+        let mut items: Vec<(Option<u64>, Message)> = Vec::new();
+        for turn in self.turns.iter().skip(skip_turns) {
+            items.push((turn.user.msg_id, turn.user.clone()));
+            for step in &turn.steps {
+                items.push((step.assistant.msg_id, step.assistant.clone()));
+                for tr in &step.tool_results {
+                    items.push((tr.msg_id, tr.clone()));
+                }
+            }
+        }
+        for m in &self.trailing_messages {
+            items.push((m.msg_id, m.clone()));
+        }
+        if items.iter().all(|(id, _)| id.is_some()) {
+            // Stable sort; msg_ids are unique per session, so this is a total
+            // order. O(n log n) on a few hundred messages is negligible next
+            // to the provider round-trip it serves.
+            items.sort_by_key(|(id, _)| id.unwrap_or(u64::MAX));
+        }
+        items.into_iter().map(|(_, m)| m).collect()
+    }
+
     pub fn build_context_for_gate(&self, annotations: &[String]) -> Vec<Message> {
         let mut full: Vec<Message> = {
             let mut v = Vec::new();
             v.extend(self.system_messages.clone());
-            for turn in self.turns.iter().skip(self.compact_skip) {
-                v.push(turn.user.clone());
-                for step in &turn.steps {
-                    v.push(step.assistant.clone());
-                    // Tool results were finalized exactly once at storage time
-                    // (finalize_tool_result in push_tool_result_inner /
-                    // replace_tool_result). Passing them through verbatim makes
-                    // every request byte-identical for the same stored message —
-                    // the provider prefix cache never breaks on a tool message,
-                    // regardless of step position or turn boundary.
-                    v.extend(step.tool_results.clone());
-                }
-            }
-            // Trailing injections (activation-set envelopes) sit right after
-            // the last stored message — the "latest message" position the
-            // model saw when they were written. New turns append after them,
-            // so their position in history never moves.
-            v.extend(self.trailing_messages.clone());
+            // Turns + trailing injections merged in WRITE order (msg_id): a
+            // subagent report that landed mid-turn keeps that position — the
+            // model's acknowledgement of it is written after the report, so it
+            // serializes after it and the report becomes history. (Previously
+            // trailing was pinned after ALL turns: every request ended with
+            // the report as the last message, which the model re-read as a
+            // freshly-arrived user message on each round.)
+            v.extend(self.flat_in_write_order(self.compact_skip));
             v
         };
 
         if !annotations.is_empty() {
             let ann_text = annotations.join("\n");
-            // Inject into the FIRST user message: its position is fixed for the
-            // lifetime of the context, so the [Environment] block never moves
-            // between user messages. (Injecting into the last user message made
-            // turn-1's message render differently once turn 2 arrived, breaking
-            // the whole prefix cache at the first user message — cache hits
-            // collapsed to the system prefix only.)
-            if let Some(first_user) = full.iter_mut().find(|m| m.role == "user") {
+            // Inject into the FIRST real user message: its position is fixed for
+            // the lifetime of the context, so the [Environment] block never
+            // moves between user messages. (Injecting into the last user message
+            // made turn-1's message render differently once turn 2 arrived,
+            // breaking the whole prefix cache at the first user message — cache
+            // hits collapsed to the system prefix only.) In write-order
+            // serialization a trailing subagent report could theoretically
+            // precede the first user turn (injection into an auto-created
+            // session), so skip name="subagent" messages — annotations belong
+            // to the human user's message, not to an injected report.
+            if let Some(first_user) = full
+                .iter_mut()
+                .find(|m| m.role == "user" && m.name.as_deref() != Some("subagent"))
+            {
                 let existing = first_user.content.iter_mut().find_map(|b| {
                     if let deepx_types::ContentBlock::Text { text } = b {
                         Some(text)
@@ -1072,18 +1169,11 @@ impl MessageStore {
 
     pub fn to_vec(&self) -> Vec<Message> {
         let mut v: Vec<Message> = self.system_messages.clone();
-        for turn in &self.turns {
-            v.push(turn.user.clone());
-            for step in &turn.steps {
-                v.push(step.assistant.clone());
-                v.extend(step.tool_results.clone());
-            }
-        }
-        // Trailing injections are part of the authoritative message stream:
-        // they persist via save_msg on write AND must survive full-snapshot
-        // round-trips (snapshot_full → save_full → from_messages), otherwise
-        // a daemon restart loses skills/subagent injections.
-        v.extend(self.trailing_messages.clone());
+        // Write-order merge (same as gate context): full-snapshot round-trips
+        // (snapshot_full → save_full → from_messages) and compact checkpoints
+        // preserve the interleaved position of trailing injections instead of
+        // flattening them to the tail.
+        v.extend(self.flat_in_write_order(0));
         v
     }
 
@@ -1166,7 +1256,16 @@ impl MessageStore {
                             }
                         })
                         .unwrap_or_default();
-                    store.push_user(&text);
+                    // 子代理注入（user 角色 + [SUBAGENT 前缀）：恢复为 trailing，
+                    // 不当作真实用户 turn（不建回合、不触发 timeline）。经
+                    // push_trailing_system 回放以分配写入顺序 msg_id（replaying
+                    // 期间 save_msg 不落盘），使 to_vec/build_context 的写入顺序
+                    // 合并能恢复注入的原始时间位置。
+                    if text.starts_with("[SUBAGENT ") {
+                        store.push_trailing_system(msgs[i].clone());
+                    } else {
+                        store.push_user(&text);
+                    }
                     i += 1;
                 }
                 "assistant" => {
@@ -1217,7 +1316,8 @@ impl MessageStore {
                         || text.starts_with("<skill_context_envelope")
                         || text.starts_with("[SUBAGENT ")
                     {
-                        store.trailing_messages.push(msgs[i].clone());
+                        // 同上：经 push_trailing_system 回放，分配写入顺序 id。
+                        store.push_trailing_system(msgs[i].clone());
                     }
                     i += 1;
                 }
@@ -1376,7 +1476,11 @@ impl MessageStore {
         // summary and, after a manual compact, the user will send a fresh
         // message to resume work.
         let compact_text = format!("[Compacted {} turns]\n{}", skip, summary.trim(),);
-        let compact_turn = Turn::new(Message::user(&compact_text));
+        // 摘要占据被压缩的最早 turn 的写入位置：与 trailing 注入按 msg_id 合并时，
+        // 摘要保持最前，其后是按写入顺序的注入与保留 turn。
+        let first_compacted_id = self.turns[0].user.msg_id;
+        let mut compact_turn = Turn::new(Message::user(&compact_text));
+        compact_turn.user.msg_id = first_compacted_id;
 
         // Physically remove compacted turns, keep only the most recent `keep`.
         let kept = self.turns.split_off(skip);
@@ -1685,17 +1789,18 @@ mod tests {
             .any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT 'explore' COMPLETED]"))));
 
         // from_messages replay restores the [SUBAGENT ...] injection as a
-        // TRAILING system message（wire 合法位置），而非 mid-stream turn
-        // （function_call_output 之后固化的非法位置曾导致 provider 丢弃）。
+        // TRAILING message（wire 合法位置），而非 mid-stream turn
+        // （function_call_output 之后固化的非法位置曾导致 provider 丢弃），
+        // 且保持其写入顺序位置（位于两个真实 turn 之间）。
         let (restored, repairs) = MessageStore::from_messages("test", &vec, 0);
         assert!(repairs.is_empty(), "replay should not report repairs: {repairs:?}");
         let restored_vec = restored.to_vec();
         let restored_roles: Vec<&str> = restored_vec.iter().map(|m| m.role.as_str()).collect();
-        // to_vec 是权威快照：trailing 注入必须出现在末尾，否则 daemon 重启
-        // 全量快照路径会丢注入（此前 to_vec 不含 trailing）。
+        // to_vec 是权威快照：trailing 注入必须保持写入顺序位置（此前 to_vec
+        // 把 trailing 一律钉在末尾，重启全量快照会丢失注入的原始时间位置）。
         assert_eq!(
             restored_roles,
-            vec!["user", "assistant", "user", "assistant", "system"]
+            vec!["user", "assistant", "system", "user", "assistant"]
         );
         let trailing = restored.trailing_messages();
         assert_eq!(trailing.len(), 1, "subagent injection must restore as trailing");
@@ -1703,6 +1808,161 @@ mod tests {
             .content
             .iter()
             .any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT 'explore' COMPLETED]"))));
+    }
+
+    #[test]
+    fn write_order_merge_interleaves_injection_into_history() {
+        // 复现线上症状的回归测试：子代理报告在回合中途落盘后，必须进入历史
+        // （位于其 ack 之前、后续用户消息之前），而不是永远钉在请求末尾被
+        // 模型当作"新发的 user 消息"。
+        let mut store = MessageStore::new("seed");
+        store.push_user("帮我调研 X");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("好的，我来调研")],
+        });
+
+        // 子代理报告在回合中途到达 → trailing 注入（user 角色 + name=subagent）。
+        let mut inject = Message::user("[SUBAGENT 'explore' COMPLETED]\n\n调研结果：X 是 Y");
+        inject.name = Some("subagent".into());
+        assert!(store.push_trailing_system(inject));
+
+        // 模型对报告的确认成为同一 turn 的后续 step。
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("收到报告，已纳入调研")],
+        });
+        // 用户随后发送新消息。
+        store.push_user("继续");
+
+        let ctx = store.build_context_for_gate(&[]);
+        let texts: Vec<String> = ctx
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .find_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "帮我调研 X",
+                "好的，我来调研",
+                "[SUBAGENT 'explore' COMPLETED]\n\n调研结果：X 是 Y",
+                "收到报告，已纳入调研",
+                "继续",
+            ],
+            "注入必须按写入顺序位于其 ack 与后续用户消息之前"
+        );
+        let report = ctx
+            .iter()
+            .find(|m| {
+                m.content.iter().any(|b| {
+                    matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT "))
+                })
+            })
+            .unwrap();
+        assert_eq!(report.role, "user");
+        assert_eq!(report.name.as_deref(), Some("subagent"));
+        // 最后一条不是报告——模型不再把它当作最新消息。
+        assert!(!texts.last().unwrap().starts_with("[SUBAGENT "));
+    }
+
+    #[test]
+    fn write_order_merge_survives_full_snapshot_roundtrip() {
+        let mut store = MessageStore::new("seed");
+        store.push_user("第一轮");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("第一轮回答")],
+        });
+        let mut inject = Message::user("[SUBAGENT 'x' COMPLETED]\n\n中途报告");
+        inject.name = Some("subagent".into());
+        store.push_trailing_system(inject);
+        store.push_user("第二轮");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("第二轮回答")],
+        });
+
+        // 全量快照（undo/compact/重启）往返后，注入的写入位置必须保持不变。
+        let snapshot = store.to_vec();
+        let (restored, repairs) = MessageStore::from_messages("seed", &snapshot, 0);
+        assert!(repairs.is_empty(), "replay should not report repairs: {repairs:?}");
+        let restored_vec = restored.to_vec();
+        let roles: Vec<&str> = restored_vec.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "user", "user", "assistant"]);
+        // 报告位于第一轮与第二轮之间。
+        let report_idx = restored_vec
+            .iter()
+            .position(|m| {
+                m.content.iter().any(|b| {
+                    matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT "))
+                })
+            })
+            .unwrap();
+        assert_eq!(report_idx, 2);
+        assert_eq!(restored_vec[report_idx].name.as_deref(), Some("subagent"));
+        // gate 上下文与快照同序。
+        let ctx = restored.build_context_for_gate(&[]);
+        assert_eq!(ctx.len(), restored_vec.len());
+    }
+
+    #[test]
+    fn compact_summary_keeps_write_position_before_trailing() {
+        let mut store = MessageStore::new("seed");
+        store.push_user("第一轮");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("第一轮回答")],
+        });
+        let mut inject = Message::user("[SUBAGENT 'x' COMPLETED]\n\n报告");
+        inject.name = Some("subagent".into());
+        store.push_trailing_system(inject);
+        store.push_user("第二轮");
+        store.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![ContentBlock::text("第二轮回答")],
+        });
+
+        store.apply_compact("前一轮摘要", 1);
+        let ctx = store.build_context_for_gate(&[]);
+        let texts: Vec<String> = ctx
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .find_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        // 摘要占据被压缩 turn 的写入位置（最前）；报告按其写入顺序位于
+        // 摘要与保留 turn 之间——模型仍按时间线阅读注入。
+        assert!(texts[0].starts_with("[Compacted 1 turns]"));
+        let report_idx = texts.iter().position(|t| t.starts_with("[SUBAGENT ")).unwrap();
+        assert_eq!(report_idx, 1);
+        assert_eq!(texts[report_idx + 1], "第二轮");
+        assert_eq!(texts[report_idx + 2], "第二轮回答");
     }
 
     #[test]
@@ -1751,11 +2011,11 @@ mod tests {
         // 绝不携带 diff 正文。
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("edit a file");
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
         let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
         store.push_tool_result_direct_with_diff(
             "edit-1",
-            "[OK] edit_file\n  src/a.rs: 1/1 op(s) applied at L2 (+1 -1)",
+            "[OK] edit_file_v2\n  src/a.rs: 1/1 hunk(s) applied at L2 (+1 -1)",
             true,
             Some(diff.to_string()),
         );
@@ -1764,7 +2024,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let (tc_id, _name, content, success, got_diff) = &results[0];
         assert_eq!(tc_id, "edit-1");
-        assert!(content.starts_with("[OK] edit_file"));
+        assert!(content.starts_with("[OK] edit_file_v2"));
         assert!(*success);
         assert_eq!(got_diff.as_deref(), Some(diff));
 
@@ -1831,7 +2091,7 @@ mod tests {
     fn historical_edit_keeps_verification_receipt_not_full_diff() {
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("make edit");
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
         store.push_tool_result_direct(
             "edit-1",
             "[OK] src/lib.rs:42 +3 -2 | edit\n\n@@ -42,2 +42,3 @@\n-full diff body",
@@ -1873,7 +2133,7 @@ mod tests {
         let active_render = context_result(&active_ctx, "web-1");
 
         // New step arrives → the web result is now historical.
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
         store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
 
         let context = store.build_context_for_gate(&[]);
@@ -1918,6 +2178,47 @@ mod tests {
             first, second,
             "stored truncation must be stable across renders"
         );
+    }
+
+    #[test]
+    fn edit_failure_result_passes_through_uncut() {
+        // 失败结果（NO_MATCH 候选/详情）不折叠：模型必须看到失败原因与候选才能
+        // 修正重试——折叠会剪断反馈闭环（曾导致 edit_file_v2 失败时模型只能盲猜
+        // 重试 → TTL 过期 → 缓存失效螺旋）。
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("edit file");
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
+        store.push_tool_result_direct(
+            "edit-1",
+            "[ERROR] NO_MATCH\n  detail: old matches nothing near expected context\n  candidates: [L12, L40]",
+            true,
+        );
+
+        let projected = context_result(&store.build_context_for_gate(&[]), "edit-1");
+        assert!(projected.contains("NO_MATCH"));
+        assert!(
+            projected.contains("candidates"),
+            "failure candidates must survive: {projected}"
+        );
+        assert!(!projected.contains("[edit diff folded"));
+    }
+
+    #[test]
+    fn edit_partial_failure_passes_through_uncut() {
+        // partial 模式同样透传：失败 hunk 的详情（含候选）不能被折叠。
+        let mut store = MessageStore::new_ephemeral("test");
+        store.push_user("edit file");
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
+        store.push_tool_result_direct(
+            "edit-1",
+            "[PARTIAL] 1 hunk(s) applied, 1 failed — re-send ONLY the failed hunks\n  hunk 1: NO_MATCH detail with candidates",
+            true,
+        );
+
+        let projected = context_result(&store.build_context_for_gate(&[]), "edit-1");
+        assert!(projected.contains("NO_MATCH"));
+        assert!(projected.contains("hunk 1"));
+        assert!(!projected.contains("[edit diff folded"));
     }
 
     #[test]
@@ -2235,5 +2536,40 @@ mod tests {
         store.ensure_next_turn_seq(31);
 
         assert_eq!(store.allocate_turn_id(), "t31");
+    }
+
+    #[test]
+    fn from_messages_restores_user_subagent_injection_as_trailing() {
+        // user 角色 + name="subagent" + [SUBAGENT 前缀：注入消息回放时
+        // 恢复为 trailing，不得当作真实用户 turn（不建回合）。
+        let mut inject =
+            Message::user("[SUBAGENT 'replay_test_x' COMPLETED]\n\nREPLAY-TEST-OK-X");
+        inject.name = Some("subagent".into());
+        let messages = vec![
+            Message::system("base instructions"),
+            Message::user("real user message"),
+            inject,
+        ];
+        let (store, _) = MessageStore::from_messages("test", &messages, 0);
+
+        // 只有一条真实用户 turn；注入在 trailing。
+        assert_eq!(store.turn_count(), 1);
+        assert_eq!(store.trailing_messages.len(), 1);
+        let text = store.trailing_messages[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                deepx_types::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        assert!(text.contains("replay_test_x"));
+
+        // gate context：system + 真实 user + 注入 user（trailing 在 turns 之后）。
+        let ctx = store.build_context_for_gate(&[]);
+        let roles: Vec<&str> = ctx.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["system", "user", "user"]);
+        let last = ctx.last().unwrap();
+        assert_eq!(last.name.as_deref(), Some("subagent"));
     }
 }

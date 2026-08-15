@@ -1,12 +1,14 @@
-//! Mutation tools: write, delete（统一编辑入口见 file_edit.rs 的 edit_file）。
+//! Mutation tools: write, delete（统一编辑入口见 file_edit_v2.rs 的 edit_file_v2）。
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::file_shared::{
-    atomic_write, diff_stats_between, normalize_newlines, unified_diff, verify_expected_hash,
+    atomic_write, content_hash, diff_stats_between, normalize_newlines, unified_diff,
+    verify_expected_hash,
 };
 use crate::{JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler, handler_from_string};
+use serde_json::json;
 
 // ── Shared helpers ──
 
@@ -100,20 +102,37 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> ToolResult {
     let diff = unified_diff(&old_norm, &new_norm, &path);
     let diff_text = (!diff.trim().is_empty()).then(|| diff.trim_end().to_string());
 
-    // dry_run: 只预览 diff（与 edit_file 的 dry_run 语义一致），不写盘。
+    // dry_run: 只预览 diff（与 edit_file_v2 的 dry_run 语义一致），不写盘。
+    // 通过 → 暂存参数供 confirm_apply 内存直提（模型无需重发 content）。
     if dry_run {
+        let mut pending_args = args.clone();
+        if let Some(obj) = pending_args.as_object_mut() {
+            obj.remove("dry_run");
+            // 注入 dry-run 时读到的磁盘 hash：重放时校验文件未被外部改动。
+            obj.insert("expected_hash".into(), json!(content_hash(&normalized_old)));
+        }
+        let pending_id = crate::pending::store("write", &pending_args);
+        let hint = format!(
+            "\npending_id={pending_id} — confirm with confirm_apply {{\"pending_id\":\"{pending_id}\",\"action\":\"apply\"}}"
+        );
         if diff.is_empty() {
-            return ToolResult::ok(format!(
-                "[DRY RUN] {path} — {} bytes, {line_count} lines (no changes would be made)",
-                content.len()
-            ));
+            return ToolResult::ok_data(
+                json!({"status": "ok", "dry_run": true, "pending_id": pending_id}),
+                format!(
+                    "[DRY RUN] {path} — {} bytes, {line_count} lines (no changes would be made){hint}",
+                    content.len()
+                ),
+            );
         }
         let (added, removed, first_line) = diff_stats_between(&old_norm, &new_norm);
-        return ToolResult::ok(format!(
-            "{}\n\n{}",
-            format_write_result("DRY RUN", &path, added, removed, first_line, "write"),
-            diff.trim_end()
-        ));
+        return ToolResult::ok_data(
+            json!({"status": "ok", "dry_run": true, "pending_id": pending_id}),
+            format!(
+                "{}\n\n{}{hint}",
+                format_write_result("DRY RUN", &path, added, removed, first_line, "write"),
+                diff.trim_end()
+            ),
+        );
     }
 
     if append {
@@ -337,7 +356,7 @@ handler_from_string!(handle_delete_file, exec_delete_file);
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(ToolHandler {
         key: "write".to_string(),
-        description: "Create, overwrite, or append to a file. Success returns a summary line only (path:first_line +N -M), no diff echo — set dry_run=true to preview the full diff without writing. Use for whole-file creation/overwrite/append; use edit_file for targeted changes.",
+        description: "Create, overwrite, or append to a file. Success returns a summary line only (path:first_line +N -M), no diff echo — set dry_run=true to preview the full diff without writing. Use for whole-file creation/overwrite/append; use edit_file_v2 for targeted changes.",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"If true, append to file instead of overwriting","default":false},"dry_run":{"type":"boolean","description":"Preview only (with full diff), do not write","default":false},"expected_hash":{"type":"string","description":"Optional. When omitted, the tool auto-verifies against its own last-known state (from read/edit/write) and rejects overwrites of externally-modified files — no need to pass the hash back"}},"required":["path","content"],"additionalProperties":false}),
         handler: handle_write_file,
         risk: ToolRisk::Write,

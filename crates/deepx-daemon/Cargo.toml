@@ -11,6 +11,7 @@ deepx-proto = { path = "../deepx-proto" }
 deepx-domain = { path = "../deepx-domain" }
 deepx-ringing = { path = "../deepx-ringing" }
 deepx-runtime = { path = "../deepx-runtime" }
+deepx-session = { path = "../deepx-session" }
 deepx-types = { path = "../deepx-types" }
 log = "0.4"
 rand = "0.10"

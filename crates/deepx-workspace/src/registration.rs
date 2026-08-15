@@ -8,8 +8,10 @@ use super::image_query;
 use super::web;
 
 use super::apply_patch;
-use super::file_edit;
+use super::confirm_apply;
+use super::copy_range;
 use super::file_edit_v2;
+use super::grep_tool;
 use super::file_mutate;
 use super::file_query;
 use super::file_glob;
@@ -33,12 +35,16 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     web::register(&mut mgr);
 
     // ── 文件操作 ──
-    file_edit::register(&mut mgr);
     file_edit_v2::register(&mut mgr);
     file_mutate::register(&mut mgr);
     file_query::register(&mut mgr);
     file_glob::register(&mut mgr);
     apply_patch::register(&mut mgr);
+    copy_range::register(&mut mgr);
+    grep_tool::register(&mut mgr);
+
+    // ── dry-run 确认（内存直提）──
+    confirm_apply::register(&mut mgr);
 
     // ── Todo（直接、会话内状态工具）──
     todo::register(&mut mgr);
@@ -79,13 +85,17 @@ mod tests {
             vec![
                 "apply_patch",
                 "ask",
+                "bash",
+                "confirm_apply",
+                "copy_range",
                 "delete",
-                "edit_file",
                 "edit_file_v2",
                 "exec",
                 "glob",
+                "grep",
                 "image",
                 "process",
+                "pwsh",
                 "read_file",
                 "skills",
                 "todo",
