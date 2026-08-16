@@ -78,6 +78,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 | QAQ-Harness #5 | `49f6d97` | compact-context 损坏或 archive 边界越界时 fail-closed，禁止回退全量历史。修 BUG-007。 |
 | QAQ-Harness #6 | `da31082` | `qaqh_config::Config::update` 受锁单写口；daemon 六个 config 写路径收敛；统一 `AgentReloadConfig` 广播。修后端 BUG-008/部分 BUG-001。 |
 | qaqh-winui-app #1 | 前端 main | `bridge.rs` 6429 行拆成 `bridge/` 模块；BUG-004 viewport 恢复移除，恢复会话强制贴底。已 review 并合并。 |
+| QAQ-Harness #8 | `eb8ceac` | SMJ 编辑日志基础版：`journal` 模块 + workspace 工具 + CLI；接入 write/edit/apply_patch/delete/copy_range/web_fetch；支持 query/replay/export patches。 |
 
 ### 新增的关键 API / 模块
 
@@ -96,7 +97,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 
 ---
 
-## 2.1 本轮待合并 PR（SMJ 编辑日志基础版）
+## 2.1 本轮已合并 PR（SMJ 编辑日志基础版）
 
 - 分支建议：`refactor/knife2-smj-editing-log`
 - 内容：
@@ -108,7 +109,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - `cargo check --workspace`
   - `cargo test -p qaqh-workspace`
   - `cargo test -p qaqh-msglp --test permission_lifecycle`
-- 状态：待 push / 待开 PR
+- 状态：已合并（PR #8）
 
 ## 2.2 下一步（刀 2 剩余 / 刀 1）
 
