@@ -82,7 +82,7 @@ mod tests {
         assert_eq!(windows_to_mnt(r"F:\QAQ-Harness"), Some("/mnt/f/QAQ-Harness".into()));
         assert_eq!(
             windows_to_mnt(r"D:\project\QAQ-Harness\crates\foo"),
-            Some("/mnt/d/project/../DeepX/foo".into())
+            Some("/mnt/d/project/QAQ-Harness/crates/foo".into())
         );
     }
 

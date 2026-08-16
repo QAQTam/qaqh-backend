@@ -894,7 +894,7 @@ mod tests {
         assert_eq!(to_wsl_path(r"F:\QAQ-Harness").as_deref(), Some("/mnt/f/QAQ-Harness"));
         assert_eq!(
             to_wsl_path(r"F:\QAQ-Harness\crates\qaqh-workspace").as_deref(),
-            Some("/mnt/f/../DeepX/qaqh-workspace")
+            Some("/mnt/f/QAQ-Harness/crates/qaqh-workspace")
         );
         assert_eq!(
             to_wsl_path(r"\\?\C:\Users\qa\QAQ-Harness").as_deref(),
