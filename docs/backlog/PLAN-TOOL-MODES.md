@@ -9,7 +9,7 @@
 - **三模式 = 三张 allowed 工具表**，复用现成 allowlist 链路（`init_tools` → `manager.allowed` → `filtered_defs` 源头过滤 → `prepare_req` 执行层拦截），只补一个**运行时** `set_allowed_tools` 入口。主代理现状是全量（"all tools, no allowlist"），subagent 已用同一机制——本计划把 allowed 从"subagent 专用"提升为"会话级可配置"。
 - **模式定义**：
   - 标准（Standard）= 全工具（`allowed = None`，现状行为）；
-  - 极限（Minimal）= **档位化**（见 D2）：A（7 工具）/ B（6 工具，考验 AI 推荐）/ C（二元组 `bash + edit_file_v2`，前置 = edit 支持 overwrite，见 D10）；
+- 极限（Minimal）= **档位化**（见 D2）：A（8 工具）/ B（6 工具）/ C（4 工具），均含 `confirm_apply` 保证 edit/write 的 dry_run→确认→落盘闭环；
   - 创造（Custom）= 用户勾选（预设基底 + 增删，见 D6）。
 - **bash/pwsh 独立工具**：复用 exec 引擎（`exec.rs` 的 `Shell` 抽象已齐），各自注册为固定 shell 的工具；`exec` 保留作通用入口（argv 无 shell 直跑 + command 默认 shell 包装 + `shell` 参数兼容）。
 - **软检测，拒绝"缺工具即拒启动"**：注册照常进行；调用时解析失败才报错，错误信息列出本机可用 shell（反模式对照：有的 agent 检测不到 git-for-windows 直接不允许启动）。
@@ -35,7 +35,7 @@
 | # | 事项 | 建议 | 截止 |
 |---|---|---|---|
 | D1 | 模式粒度 | **per-session 持久化**（session 元数据 `tool_mode`），session 切换/恢复时应用；输入面板只是入口 | 定稿 |
-| D2 | 极限模式工具集 | **档位化**：A = `[bash, pwsh, write, edit_file_v2, read_file, glob, grep]`（7 个；`read_file` 为建议补充：`edit_file_v2` 的 `expected_hash` 来自 `read_file`，教学链路 read→edit→verify，缺它则 hash 校验 UX 全退化）；B = `[bash, write, edit_file_v2, read_file, grep, glob]`（6 个/五元组+write，**考验 AI 的推荐档**——每项能力有专用工具，模型 token 花在推理而非 shell 拼写）；C = `[bash, edit_file_v2]`（二元组，压力测试档，前置 = D10 的 overwrite） | 定稿 |
+| D2 | 极限模式工具集 | **档位化**：A = `[bash, pwsh, write, edit, read, glob, grep, confirm_apply]`（8 个，默认；`read` 为建议补充：`edit` 的 `expected_hash` 来自 `read`，教学链路 read→edit→verify，缺它则 hash 校验 UX 全退化）；B = `[bash, edit, glob, grep, read, confirm_apply]`（6 个，**简化档**——测试模型在极小工具集下的能力，模型 token 花在推理而非 shell 拼写）；C = `[bash, edit, glob, confirm_apply]`（4 个，压力测试档）。**每档含 `confirm_apply`**：edit/write 支持 dry_run→pending_id→confirm 确认闭环，缺它则模型被 dry_run 协议引导却无法落盘（其他模型尤甚）。`tool_mode` 编码：`minimal` = A、`minimal:b` = B、`minimal:c` = C | 定稿 |
 | D3 | shell 工具形态 | `bash`/`pwsh` 独立工具 + `exec` 保留通用入口；**cmd 不独立**（Windows 专属、语义弱，需要时 `exec shell="cmd"`） | 定稿 |
 | D4 | 检测策略 | **软检测**：注册不拒绝；调用时解析失败报错 + 列出可用 shell；`pwsh` 工具 pwsh7→powershell.exe 降级链 | 定稿 |
 | D5 | 描述注入 | 注册时探测一次写入 description（复用 `DETECTED_*_PATH` 缓存）；探测结果稳定则 tool schema 稳定，prompt cache 影响最小 | 实施时 |
@@ -66,7 +66,7 @@
 
 ### 4.3 session 元数据（deepx-session）
 
-- session meta 新增字段：`tool_mode: String`（`"standard" | "minimal" | "custom"`）+ `custom_tools: Vec<String>`（仅 custom 用）；serde default 兼容旧 session（缺失 = standard）；
+- session meta 新增字段：`tool_mode: String`（`"standard" | "minimal" | "minimal:b" | "minimal:c" | "custom"`）+ `custom_tools: Vec<String>`（仅 custom 用）；serde default 兼容旧 session（缺失 = standard）；
 - 持久化走 `SessionManager`（`persist_mode` L231 同款：`persist_tool_mode(seed, mode, custom_tools)`）；
 - 恢复点：`engine_session.rs` L56 附近（`set_mode(saved_mode)` 同处）应用 `tool_mode`。
 
@@ -79,7 +79,7 @@
 
 ### 4.5 UI
 
-- 输入面板：模式选择器（标准 / 极限 / 创造），切换即时生效 + 持久化（D9 确认控件形态）；**✅ 已落地（2026-08-15）**：composer footer `composer-tool-mode` ComboBox 三选一 → `session.set_tool_mode`（乐观更新 + meta.json 回填）；
+- 输入面板：模式选择器（标准 / 极限·8 / 极限·6 / 极限·4 / 创造），切换即时生效 + 持久化（D9 确认控件形态）；**✅ 已落地（2026-08-15）**：composer footer `composer-tool-mode` ComboBox 五选一 → `session.set_tool_mode`（乐观更新 + meta.json 回填）；标签数字与后端档位工具数保持一致；
 - 创造模式：勾选器（预设基底 = 标准或极限 + 增删；`skills` 取消时警告）——**🔲 待做**（当前 MVP：预设基底 = 全量注册工具，切换即生效）；
 - session 列表/会话头显示当前模式徽标（复用 `session_rev` 刷新机制，见 PLAN-SESSION-EDIT-LEASE.md 4.3 同款）——**🔲 待做**。
 
@@ -103,7 +103,7 @@
 - workspace：`set_allowed_tools` 空=全量 / 已知过滤 / 未知名 warn 丢弃；切 allowed 后 `filtered_defs` 随之变化；`prepare_req` 拦截非白名单（复用现有 subagent 拦截测试改参）；
 - workspace：`bash`/`pwsh` 注册后 schema 无 `shell` 参数、description 含探测路径；Windows 上 `bash` 工具解析到 git-bash 路径（避开 System32/WSL）；不可用 shell 调用报错含可用替代列表；
 - msglp：session 恢复应用 `tool_mode`（standard/minimal/custom 三态）+ `tool_defs` 刷新；custom 持久化 `custom_tools` 往返；
-- 集成：minimal 模式下 `agent.tool_defs` 只含 7 工具；模型侧看不到被禁工具（源头）；plan 模式叠加 PLAN_BLOCKED 仍拦截 write 类；
+- 集成：minimal 模式下 `agent.tool_defs` 只含 7 工具；minimal:b 只含 5 工具、minimal:c 只含 3 工具；模型侧看不到被禁工具（源头）；plan 模式叠加 PLAN_BLOCKED 仍拦截 write 类；
 - 兼容：旧 session 无 `tool_mode` 字段 → 默认 standard，不 panic。
 - edit_file_v2：overwrite 创建/覆盖/带 hash 防竞争；prepend/append 创建新文件（Tier1 必中）；误用 replace 于不存在文件 → NO_MATCH + 创建提示；file_state 台账记录对齐 write。
 
@@ -113,3 +113,25 @@
 - 2026-08-15：修订一——极限模式档位化（A/B/C）；新增 D10（edit overwrite，档位 C 前置）；现状补 edit_file_v2 创建路径实证（L1425-1428/L773-790/L1560）；实施细节补 4.7。
 - 2026-08-15：**实施**——D10 overwrite（file_edit_v2.rs：Overwrite hunk/独占检查/创建提示/record_write，workspace 239 tests）；4.1 set_allowed_tools（manager.rs set_allowed + runtime 入口）；4.2 bash/pwsh 独立工具（exec.rs handle_run_with_shell + register_shell_tool + 软检测 + 描述注入）；4.3 SessionMeta.tool_mode/custom_tools + persist_tool_mode；4.4 ControlCommand::SetToolMode + AgentState::apply_tool_mode + lifecycle 恢复接入；前端接口 `session.set_tool_mode`（daemon service.rs，persist + Control 频道应用）；测试：types 2 + msglp 1。UI（4.5）与档位 B/C 切换 UI 待做。
 - 2026-08-15：**实施——前端接线**：`deepx-client` `ActionRequest::SessionSetToolMode`（`session.set_tool_mode`，含测试）；`bridge.rs` `ComposerState.tool_mode/tool_mode_custom_tools` + `composer_tool_mode` 缓存 + `sync_tool_mode_from_meta`（meta.json 回填，250ms 轮询可见）+ `spawn_set_tool_mode`；`composer_bar.rs` footer 三选一 ComboBox（`composer-tool-mode`，防程序化同步误触发同 permission）。创造模式精细勾选/模式徽标待做。
+- 2026-08-15：**实施——档位 B/C + 工具名缩写**：`read_file`→`read`、`edit_file_v2`→`edit`（注册 key + 全仓库引用 + config 存量迁移 `file/read_file→read`、`edit_file_v2→edit`）；极限模式新增五元组 `minimal:b`（bash/edit/glob/grep/read）与三元组 `minimal:c`（bash/edit/glob），daemon 校验 + `apply_tool_mode` + composer 五选一落地；修复 daemon 进程未 `init_tools` 导致 `skills.list_tools` 空列表、`apply_tool_mode` 未同步 `session.tool_mode`、`save_full` 覆盖 `tool_mode` 三个缺陷（含回归测试）。
+- 2026-08-15：**修订二——档位补 confirm_apply**：edit/write 的 dry_run→pending_id→confirm_apply 确认闭环要求 confirm_apply 必须在档位内，否则模型被 dry_run 协议引导却无法落盘（其他模型尤甚）。A/B/C 三档统一补 `confirm_apply`（8/6/4 工具）；前端 ComboBox 标签同步为极限·8/极限·6/极限·4；edit 描述弱化 dry_run（直接调用即落盘，dry_run 仅预览确认用）。
+
+- 2026-08-16：**修复——极简模式重启后被切回标准（tool_mode 锁死）**。
+  - 根因：WinUI 冷启动首帧 `composer_bar` 的 tool_mode ComboBox 用空态渲染
+    `SelectedIndex=0`，而 reactor 先绑 `SelectionChanged` 后应用
+    `SelectedIndex`（首挂载 -1→0 必触发）；回调守卫 `next != rendered_tm`
+    对空态失效（`"standard" != ""` 成立）→ 自动 `spawn_set_tool_mode("standard")`
+    → daemon 把 meta.json 覆盖为 standard。permission_picker 曾有同型
+    Bug#2 并已用 `rendered_pl==0` 闭合，tool_mode 没搬该防护。
+  - 锁死修复：空态 = 未初始化 → 渲染 -1（无选中）+ 回调 `rendered_tm.is_empty()`
+    一律跳过（CK-UI-GUARD）；`spawn_set_tool_mode` 白名单 + 幂等 + connect/action
+    失败立即以 meta.json 权威回填（CK-UI-SEND）；`persist_tool_mode` 返回
+    Result、写盘失败上抛 400、空串规范化为 standard（CK-PERSIST）；
+    `apply_tool_mode` 未知值保持现状不回退全量（CK-APPLY）。
+  - 检查点链：CK-UI-GUARD（前端渲染）→ CK-UI-SEND（前端发送）→ daemon
+    service 值域校验 → CK-PERSIST（meta.json 落盘）→ Control SetToolMode →
+    CK-APPLY（worker 应用）。任一环失败均可从日志定位；meta.json 始终是
+    `sync_tool_mode_from_meta` 的唯一权威，前端重启 250ms 内回填。
+  - 测试：deepx-session 8 passed；deepx-msglp lib 47 passed（新增 CK-APPLY
+    未知值不覆盖断言 + 统一测试注册表修复 minimal:dsh flaky）；deepx-runtime
+    104 passed；deepx-winui `cargo check` 通过。

@@ -1265,14 +1265,14 @@ mod tests {
             name: None,
             content: vec![ContentBlock::ToolUse {
                 id: "tc_1".into(),
-                name: "read_file".into(),
+                name: "read".into(),
                 input: serde_json::json!({"path": "/x.txt"}),
             }],
         }];
         let (input, _instructions) = convert_messages_to_input(&msgs, &test_compat());
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["call_id"], "tc_1");
-        assert_eq!(input[0]["name"], "read_file");
+        assert_eq!(input[0]["name"], "read");
         assert_eq!(input[0]["status"], "completed");
         assert!(input[0]["arguments"].as_str().unwrap().contains("path"));
     }
@@ -1371,7 +1371,7 @@ mod tests {
                 },
                 ContentBlock::ToolUse {
                     id: "tc_r".into(),
-                    name: "read_file".into(),
+                    name: "read".into(),
                     input: serde_json::json!({"path": "/x.txt"}),
                 },
             ],
@@ -1907,7 +1907,7 @@ mod tests {
                     "type": "function_call",
                     "id": "fc_1",
                     "call_id": "call_1",
-                    "name": "read_file",
+                    "name": "read",
                     "arguments": "{\"path\": \"/x.txt\"}",
                     "status": "completed"
                 }
@@ -1927,7 +1927,7 @@ mod tests {
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["call_id"], "call_1");
-        assert_eq!(input[0]["name"], "read_file");
+        assert_eq!(input[0]["name"], "read");
         assert_eq!(input[0]["status"], "completed");
         assert!(input[0]["arguments"].as_str().unwrap().contains("x.txt"));
     }
@@ -1967,7 +1967,7 @@ mod tests {
             "type": "function_call",
             "id": "fc_1",
             "call_id": "call_1",
-            "name": "read_file",
+            "name": "read",
             "arguments": "{\"path\":\"README.md\"}",
             "status": "completed"
         });

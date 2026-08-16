@@ -26,6 +26,7 @@ pub mod git;
 pub mod image_query;
 pub mod runtime;
 mod safety;
+pub mod tool_side_fold;
 pub mod skill;
 mod web;
 
@@ -204,7 +205,7 @@ pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>>
 
 /// Tools blocked in PLAN mode. 分类与 handler 声明的 category 对应
 /// （Read 类不入表；Write/Exec/Net 按语义列名）。
-pub const PLAN_BLOCKED: &[&str] = &["edit_file_v2", "exec", "process", "todo"];
+pub const PLAN_BLOCKED: &[&str] = &["edit", "exec", "process", "todo"];
 
 pub fn set_workspace(path: &str) {
     let mut ws = CURRENT_WORKSPACE.write().unwrap_or_else(|e| e.into_inner());

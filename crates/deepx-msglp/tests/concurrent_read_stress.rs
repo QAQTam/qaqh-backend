@@ -106,7 +106,7 @@ fn ten_parallel_reads_same_file() {
                 &seed,
                 RingingCommand::Tool(ToolCommand::ToolInvoke {
                     tool_call_id: format!("tc_{i}"),
-                    name: "read_file".into(),
+                    name: "read".into(),
                     action: String::new(),
                     args: serde_json::json!({
                         "path": file_path.to_string_lossy(),

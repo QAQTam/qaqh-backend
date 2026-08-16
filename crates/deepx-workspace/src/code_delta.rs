@@ -38,7 +38,7 @@ pub(crate) fn compute(
             files_deleted: 1,
             file: file_path.map(String::from),
         }),
-        ("edit_file_v2", _) => {
+        ("edit", _) => {
             // v2：单文件 path + hunks（内容锚定：`old` 删除行数、`new` 新增行数）。
             let mut added = 0usize;
             let mut removed = 0usize;

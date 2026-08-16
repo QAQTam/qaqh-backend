@@ -988,10 +988,16 @@ fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> ToolResult {
             "Provide at least one element.",
         ));
     }
+    // 默认 token 上限跟随折叠策略：StandardPolicy=10K；NoFoldPolicy（极限模式）
+    // = 不截断（u32::MAX，模型显式传 max_output_tokens 时以模型参数为准）。
+    let policy_default = crate::tool_side_fold::policy()
+        .exec_max_output_tokens()
+        .unwrap_or(u32::MAX);
     let max_output_tokens = ctx
         .get_u64("max_output_tokens")
         .filter(|&n| n >= 100 && n <= 50000)
-        .unwrap_or(10000) as u32;
+        .map(|n| n as u32)
+        .unwrap_or(policy_default);
     let timeout_secs = ctx
         .get_u64("timeout_secs")
         .filter(|&n| n > 0 && n <= 3600)
@@ -1047,10 +1053,17 @@ fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> ToolResult {
         Some(_) => false,
         None => !result.timed_out && !result.cancelled,
     };
+    let json = result.to_json();
     if success {
-        ToolResult::ok(result.to_json())
+        // 极限模式（NoFoldPolicy）：exec/bash/pwsh 输出完全透传，
+        // 连 deepx-types 的 24K 字符硬顶也放开（仍保留 read_stream 字节保护）。
+        if crate::tool_side_fold::policy().exec_max_output_tokens().is_none() {
+            ToolResult::ok_with_limit(json, None)
+        } else {
+            ToolResult::ok(json)
+        }
     } else {
-        ToolResult::error(result.to_json())
+        ToolResult::error(json)
     }
 }
 

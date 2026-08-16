@@ -221,14 +221,37 @@ impl SessionManager {
 
     /// Persist tool mode (standard/minimal/custom) to meta.json without
     /// rewriting messages — survives agent restart (PLAN-TOOL-MODES.md 4.3).
-    pub fn persist_tool_mode(&self, seed: &str, tool_mode: &str, custom_tools: &[String]) {
+    ///
+    /// 锁死检查点（CK-PERSIST）：写盘/索引失败不再静默吞掉，而是向上返回，
+    /// 让 `session.set_tool_mode` action 返回 400 —— 前端据此回滚乐观值，
+    /// 避免「UI 显示极简、meta.json 其实没写进去，重启后回到标准」。
+    /// 空串统一规范化为 "standard"（旧会话零迁移语义显式落盘）。
+    pub fn persist_tool_mode(
+        &self,
+        seed: &str,
+        tool_mode: &str,
+        custom_tools: &[String],
+    ) -> Result<(), String> {
         let lock = self.session_lock(seed);
         let _guard = lock.lock().unwrap();
         let dir = self.session_path_dir(seed);
+        let _ = std::fs::create_dir_all(&dir);
         let mut meta = self.load_meta(seed).unwrap_or_default();
-        meta.tool_mode = tool_mode.to_string();
+        let normalized = if tool_mode.is_empty() {
+            "standard"
+        } else {
+            tool_mode
+        };
+        meta.tool_mode = normalized.to_string();
         meta.custom_tools = custom_tools.to_vec();
-        let _ = store::write_meta(&dir, &meta);
+        meta.updated_at = Self::now_epoch();
+        store::write_meta(&dir, &meta)?;
+        store::upsert_index(&self.sessions_dir, &meta);
+        log::info!(
+            "[TOOL MODE] persisted {normalized} for {seed} ({} custom tools)",
+            custom_tools.len()
+        );
+        Ok(())
     }
 
     pub fn persist_skills(&self, seed: &str, skills: deepx_types::SkillSessionStateV2) {
@@ -479,6 +502,11 @@ impl SessionManager {
             compact_skip,
             mode: existing.mode,
             skills: existing.skills,
+            // 工具模式持久化：save_full（undo/compact 的 snapshot_full 路径）
+            // 是全量重写 meta，必须保留 tool_mode/custom_tools，否则极限/
+            // 创造模式会在一次 compact/undo 后被覆盖回 standard。
+            tool_mode: existing.tool_mode.clone(),
+            custom_tools: existing.custom_tools.clone(),
             // 保留既有标题（save_messages 全量重写 meta；title 冻结语义
             // 不能在保存时被 Default 清空——早期缺陷，2026-08 修复）。
             title: existing.title.clone(),
@@ -743,6 +771,33 @@ mod skill_persistence_tests {
         let meta = manager.load_meta("seed").expect("metadata");
         assert_eq!(meta.seed, "seed");
         assert_eq!(meta.skills, state());
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn save_full_preserves_tool_mode() {
+        let (root, manager) = manager();
+
+        // 先建会话再写模式（CK-PERSIST：持久化失败必须可观测，这里 expect）。
+        manager.persist_new_session("seed");
+        // minimal：save_full（undo/compact 的 snapshot_full 路径）不得把
+        // tool_mode 覆盖回 standard（PLAN-TOOL-MODES.md 4.3 回归）。
+        manager
+            .persist_tool_mode("seed", "minimal", &[])
+            .expect("persist minimal");
+        manager.save_full("seed", &[Message::user("hello")], "model", None, 0, 1);
+        let meta = manager.load_meta("seed").expect("metadata");
+        assert_eq!(meta.tool_mode, "minimal");
+
+        // custom：custom_tools 同样必须保留。
+        manager
+            .persist_tool_mode("seed", "custom", &["bash".into(), "grep".into()])
+            .expect("persist custom");
+        manager.save_full("seed", &[Message::user("hello again")], "model", None, 0, 2);
+        let meta = manager.load_meta("seed").expect("metadata");
+        assert_eq!(meta.tool_mode, "custom");
+        assert_eq!(meta.custom_tools, vec!["bash", "grep"]);
+
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 

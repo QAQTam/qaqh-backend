@@ -22,7 +22,7 @@ thread_local! {
 
 static TOOL_MANAGER: OnceLock<Mutex<crate::ToolManager>> = OnceLock::new();
 
-/// Agent operating mode: 0=Normal, 1=Plan, 2=Code.
+/// Agent operating mode: 0=Code(默认), 1=Plan, 2=Code(旧编码兼容).
 static AGENT_MODE: AtomicU8 = AtomicU8::new(0);
 
 pub fn set_context(session: &str, permission_level: u8) {

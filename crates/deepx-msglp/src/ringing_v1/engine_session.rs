@@ -50,8 +50,8 @@ impl SessionEngine {
                 agent.config.permission_level,
             );
 
-            // Restore persisted agent mode（0=Normal 也重置：避免进程内已切
-            // plan/code 后恢复 normal 会话仍停留在旧模式——前后端显示/拦截一致）。
+            // Restore persisted agent mode（0=Code 也重置：避免进程内已切
+            // plan/code 后恢复默认会话仍停留在旧模式——前后端显示/拦截一致）。
             let saved_mode = agent.session.mode;
             deepx_workspace::runtime::set_mode(saved_mode);
 

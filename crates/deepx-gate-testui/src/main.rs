@@ -33,7 +33,7 @@ fn make_dsml_delta() -> serde_json::Value {
     let content = concat!(
         "I'll read that file for you.\n\n",
         "<|DSML|tool_calls>\n",
-        "<|DSML|invoke name=\"read_file\">\n",
+        "<|DSML|invoke name=\"read\">\n",
         "<|DSML|parameter name=\"path\" string=\"true\">/tmp/data.txt\n",
         "</|DSML|parameter>\n",
         "</|DSML|invoke>\n",
@@ -71,7 +71,7 @@ fn scenarios() -> HashMap<&'static str, Vec<SseEvent>> {
         "Tool call",
         vec![
             SseEvent::Data(json!({"choices":[{"index":0,"delta":{"content":"Let me search for that file."}}]})),
-            SseEvent::Data(json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]})),
+            SseEvent::Data(json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":""}}]}}]})),
             SseEvent::Data(json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]})),
             SseEvent::Data(json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"test.txt\"}"}}]}}]})),
             SseEvent::Data(json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":15,"completion_tokens":25,"total_tokens":40}})),
@@ -573,7 +573,7 @@ fn handle_chat(
     let tools = vec![ToolDef {
         call_type: "function".into(),
         function: ToolFunction {
-            name: "read_file".into(),
+            name: "read".into(),
             description: "Read the contents of a file".into(),
             parameters: json!({
                 "type": "object",

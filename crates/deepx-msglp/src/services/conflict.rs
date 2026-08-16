@@ -18,7 +18,7 @@ pub(crate) fn file_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec
     };
 
     match action {
-        "patch" | "write" | "edit_file" | "edit_file_v2" | "edit_diff" | "delete" => {
+        "patch" | "write" | "edit_file" | "edit" | "edit_diff" | "delete" => {
             collect_paths(args, &mut paths);
         }
         "move" | "copy" => {
@@ -155,7 +155,7 @@ mod tests {
         let pending = vec![
             tool("todo-1", "todo", ""),
             tool("todo-2", "todo", ""),
-            tool("read-1", "read_file", ""),
+            tool("read-1", "read", ""),
             tool("todo-3", "todo", ""),
         ];
 

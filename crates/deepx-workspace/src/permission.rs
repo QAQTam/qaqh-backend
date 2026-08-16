@@ -19,7 +19,7 @@ pub enum ToolCategory {
     /// No side effects: read, search, skills, image, ask, process(check/wait),
     /// and read-only git queries.
     Read,
-    /// Mutates files or session state: edit_file_v2, task, and write-oriented git
+    /// Mutates files or session state: edit, task, and write-oriented git
     /// operations.
     Write,
     /// Executes arbitrary code or controls a running process: exec, process(kill/write).
@@ -136,7 +136,7 @@ impl PermissionLevel {
 pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if tool_name == "read_file" {
+    if tool_name == "read" {
         if let Some(requests) = args.get("requests").and_then(|value| value.as_array()) {
             paths.extend(requests.iter().filter_map(|request| {
                 request
@@ -313,9 +313,9 @@ pub fn needs_permission(
         return PermissionDecision::AutoApprove;
     }
 
-    // `process` / `edit_file_v2` 按调用形态细分（per-action 授权颗粒度的扩展点）：
+    // `process` / `edit` 按调用形态细分（per-action 授权颗粒度的扩展点）：
     // - process: check/wait 只读、kill/write 控制进程；
-    // - edit_file_v2: hunks 缺失/空 = 读路径（Read，不触发写确认；整文件 /
+    // - edit: hunks 缺失/空 = 读路径（Read，不触发写确认；整文件 /
     //   行号范围 / 锚定读三种形态均只读），非空 = 编辑/创建（Write）。未来对
     //   read/edit/create/overwrite 各自粒度授权时，在本 match 内扩展。
     let category = match tool_name {
@@ -324,7 +324,7 @@ pub fn needs_permission(
             Some("write" | "kill") => ToolCategory::Exec,
             _ => ToolCategory::Write,
         },
-        "edit_file_v2" => {
+        "edit" => {
             let has_hunks = args
                 .get("hunks")
                 .and_then(|v| v.as_array())
@@ -569,12 +569,12 @@ mod tests {
     }
 
     #[test]
-    fn edit_file_v2_empty_hunks_classified_as_read() {
+    fn edit_empty_hunks_classified_as_read() {
         // 空 hunks = 读路径 → 动态分类 Read（handler 声明仍为 Write，由
         // admit() 按调用形态覆盖）→ ReadFree 下自动放行。
         let read = needs_permission(
             PermissionLevel::ReadFree,
-            "edit_file_v2",
+            "edit",
             &serde_json::json!({"path": "a.txt", "hunks": []}),
             Path::new("."),
             &HashSet::new(),
@@ -588,7 +588,7 @@ mod tests {
         // 非空 hunks = 编辑 → Write → ReadFree 下需确认。
         let edit = needs_permission(
             PermissionLevel::ReadFree,
-            "edit_file_v2",
+            "edit",
             &serde_json::json!({"path": "a.txt", "hunks": [{"kind": "replace", "old": "a", "new": "b"}]}),
             Path::new("."),
             &HashSet::new(),

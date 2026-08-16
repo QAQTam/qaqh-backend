@@ -12,6 +12,7 @@ deepx-message = { path = "../deepx-message" }
 deepx-skills = { path = "../deepx-skills" }
 deepx-workspace = { path = "../deepx-workspace" }
 deepx-subagent = { path = "../deepx-subagent" }
+dsh-minimal-mode = { path = "../../dsh-minimal-mode" }
 deepx-proto = { path = "../deepx-proto" }
 deepx-domain = { path = "../deepx-domain" }
 deepx-ringing = { path = "../deepx-ringing" }

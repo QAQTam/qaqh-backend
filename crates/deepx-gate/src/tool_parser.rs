@@ -38,7 +38,7 @@ pub fn parse_xml_tool_calls(content: &str, tool_names: &[String]) -> (String, Ve
         tool_names.iter().map(|n| (n.clone(), n.clone())).collect();
     for (alias, name) in &[
         ("read", "file"),
-        ("read_file", "file"),
+        ("read", "file"),
         ("write", "file"),
         ("edit_file", "file"),
     ] {
@@ -476,13 +476,13 @@ mod tests {
 
     #[test]
     fn test_parse_invoke_inside_tool_calls() {
-        let content = "<tool_calls>\n<invoke name=\"read_file\">\n<parameter name=\"end_line\" string=\"false\">450</parameter>\n<parameter name=\"path\" string=\"true\">D:\\project\\DeepX\\foo.rs</parameter>\n<parameter name=\"start_line\" string=\"false\">300</parameter>\n</invoke>\n</tool_calls>";
+        let content = "<tool_calls>\n<invoke name=\"read\">\n<parameter name=\"end_line\" string=\"false\">450</parameter>\n<parameter name=\"path\" string=\"true\">D:\\project\\DeepX\\foo.rs</parameter>\n<parameter name=\"start_line\" string=\"false\">300</parameter>\n</invoke>\n</tool_calls>";
 
-        let tool_names: Vec<String> = vec!["read_file".into(), "exec".into()];
+        let tool_names: Vec<String> = vec!["read".into(), "exec".into()];
         let (_cleaned, tcs) = parse_xml_tool_calls(content, &tool_names);
 
         assert_eq!(tcs.len(), 1);
-        assert_eq!(tcs[0].function.name, "read_file");
+        assert_eq!(tcs[0].function.name, "read");
         let args: serde_json::Value = serde_json::from_str(&tcs[0].function.arguments).unwrap();
         assert_eq!(args["end_line"], 450);
         assert_eq!(args["path"], "D:\\project\\DeepX\\foo.rs");
@@ -491,17 +491,17 @@ mod tests {
 
     #[test]
     fn test_parse_invoke_detection() {
-        let content = "<tool_calls>\n<invoke name=\"read_file\">\n<parameter name=\"path\" string=\"true\">test.rs</parameter>\n</invoke>\n</tool_calls>";
+        let content = "<tool_calls>\n<invoke name=\"read\">\n<parameter name=\"path\" string=\"true\">test.rs</parameter>\n</invoke>\n</tool_calls>";
         assert!(content.contains("<invoke "));
         assert!(content.contains("<tool_calls>"));
     }
 
     #[test]
     fn test_fenced_code_blocks_ignored() {
-        let raw = "Here is an example:\n```xml\n<tool_calls>\n<invoke name=\"read_file\">\n<parameter name=\"path\" string=\"true\">test.rs</parameter>\n</invoke>\n</tool_calls>\n```\n\nBut this one is real:\n<invoke name=\"read_file\">\n<parameter name=\"path\" string=\"true\">real.rs</parameter>\n</invoke>";
+        let raw = "Here is an example:\n```xml\n<tool_calls>\n<invoke name=\"read\">\n<parameter name=\"path\" string=\"true\">test.rs</parameter>\n</invoke>\n</tool_calls>\n```\n\nBut this one is real:\n<invoke name=\"read\">\n<parameter name=\"path\" string=\"true\">real.rs</parameter>\n</invoke>";
         let content = strip_fenced_code(raw);
 
-        let tool_names: Vec<String> = vec!["read_file".into()];
+        let tool_names: Vec<String> = vec!["read".into()];
         let (_cleaned, tcs) = parse_xml_tool_calls(&content, &tool_names);
 
         // Should only extract the REAL one (outside fence), not the example
@@ -518,13 +518,13 @@ mod tests {
 
     #[test]
     fn test_dsml_fenced_code_blocks_ignored() {
-        let raw = "Example:\n```\n<\u{ff5c}DSML\u{ff5c}tool_calls>\n<\u{ff5c}DSML\u{ff5c}invoke name=\"read_file\">\n<\u{ff5c}DSML\u{ff5c}parameter name=\"path\" string=\"true\">test.rs</\u{ff5c}DSML\u{ff5c}parameter>\n</\u{ff5c}DSML\u{ff5c}invoke>\n</\u{ff5c}DSML\u{ff5c}tool_calls>\n```\n\nReal call:\n<\u{ff5c}DSML\u{ff5c}tool_calls>\n<\u{ff5c}DSML\u{ff5c}invoke name=\"read_file\">\n<\u{ff5c}DSML\u{ff5c}parameter name=\"path\" string=\"true\">real.rs</\u{ff5c}DSML\u{ff5c}parameter>\n</\u{ff5c}DSML\u{ff5c}invoke>\n</\u{ff5c}DSML\u{ff5c}tool_calls>";
+        let raw = "Example:\n```\n<\u{ff5c}DSML\u{ff5c}tool_calls>\n<\u{ff5c}DSML\u{ff5c}invoke name=\"read\">\n<\u{ff5c}DSML\u{ff5c}parameter name=\"path\" string=\"true\">test.rs</\u{ff5c}DSML\u{ff5c}parameter>\n</\u{ff5c}DSML\u{ff5c}invoke>\n</\u{ff5c}DSML\u{ff5c}tool_calls>\n```\n\nReal call:\n<\u{ff5c}DSML\u{ff5c}tool_calls>\n<\u{ff5c}DSML\u{ff5c}invoke name=\"read\">\n<\u{ff5c}DSML\u{ff5c}parameter name=\"path\" string=\"true\">real.rs</\u{ff5c}DSML\u{ff5c}parameter>\n</\u{ff5c}DSML\u{ff5c}invoke>\n</\u{ff5c}DSML\u{ff5c}tool_calls>";
         let content = strip_fenced_code(raw);
 
         let tool_defs: Vec<ToolDef> = vec![ToolDef {
             call_type: "function".into(),
             function: ToolFunction {
-                name: "read_file".into(),
+                name: "read".into(),
                 description: "Read file".into(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -556,14 +556,14 @@ mod tests {
         assert!(!has_dsml(""));
         assert!(!has_dsml("dsml only"));
         assert!(!has_dsml("use <|DSML|invoke name=\"read\">"));
-        assert!(!has_dsml("DSML invoke read_file"));
+        assert!(!has_dsml("DSML invoke read"));
         assert!(!has_dsml("dsml parameter path"));
         assert!(!has_dsml("just invoke tool_calls parameter"));
     }
 
     #[test]
     fn test_halfwidth_dsml_parsing() {
-        let content = "I'll read the file.\n\n<|DSML|tool_calls>\n<|DSML|invoke name=\"read_file\">\n<|DSML|parameter name=\"path\" string=\"true\">/tmp/test.txt\n</|DSML|parameter>\n<|DSML|parameter name=\"start_line\" string=\"false\">1\n</|DSML|parameter>\n</|DSML|invoke>\n</|DSML|tool_calls>";
+        let content = "I'll read the file.\n\n<|DSML|tool_calls>\n<|DSML|invoke name=\"read\">\n<|DSML|parameter name=\"path\" string=\"true\">/tmp/test.txt\n</|DSML|parameter>\n<|DSML|parameter name=\"start_line\" string=\"false\">1\n</|DSML|parameter>\n</|DSML|invoke>\n</|DSML|tool_calls>";
 
         assert!(
             has_dsml(content),
@@ -573,7 +573,7 @@ mod tests {
         let tool_defs: Vec<ToolDef> = vec![ToolDef {
             call_type: "function".into(),
             function: ToolFunction {
-                name: "read_file".into(),
+                name: "read".into(),
                 description: "Read file".into(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -593,7 +593,7 @@ mod tests {
             tcs.len(),
             tcs
         );
-        assert_eq!(tcs[0].function.name, "read_file");
+        assert_eq!(tcs[0].function.name, "read");
         let args: serde_json::Value = serde_json::from_str(&tcs[0].function.arguments).unwrap();
         assert_eq!(args["path"], "/tmp/test.txt");
         assert_eq!(args["start_line"], 1);

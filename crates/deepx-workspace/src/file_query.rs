@@ -3,9 +3,9 @@
 use super::file_shared::{content_hash, is_binary_read_error};
 use crate::{ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
 
-// ------ exec_read_file (from file_read.rs) ------
+// ------ exec_read (from file_read.rs) ------
 
-pub(super) fn exec_read_file(args: &serde_json::Value) -> ToolResult {
+pub(super) fn exec_read(args: &serde_json::Value) -> ToolResult {
     let requests = args
         .get("requests")
         .and_then(|value| value.as_array())
@@ -279,7 +279,7 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
     (ToolResult::ok_data(meta.clone(), body), meta)
 }
 
-handler!(handle_read_file, exec_read_file);
+handler!(handle_read, exec_read);
 
 
 
@@ -287,25 +287,30 @@ handler!(handle_read_file, exec_read_file);
 
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(ToolHandler {
-        key: "read_file".to_string(),
+        key: "read".to_string(),
         description: "Read up to eight files as precise contiguous ranges. Every returned line has a stable L<number> prefix, and each file includes its hash, total line count, and a directly executable continuation when the model budget is insufficient. Directories are rejected with IS_DIRECTORY; list directory contents with exec (e.g. argv [\"rg\", \"--files\"]).",
         input_schema: serde_json::json!({
             "type":"object",
             "properties": {
                 "requests": {
                     "type":"array", "maxItems":8,
+                    "description":"Batch of up to 8 files/requests; each item mirrors the single-file fields below.",
                     "items": {"type":"object", "properties": {
-                        "path":{"type":"string"}, "start_line":{"type":"integer","minimum":1},
-                        "end_line":{"type":"integer","minimum":1}, "if_hash":{"type":"string"}
+                        "path":{"type":"string","description":"File path (relative to workspace root, or absolute)"},
+                        "start_line":{"type":"integer","minimum":1,"description":"First line to read, 1-based, inclusive"},
+                        "end_line":{"type":"integer","minimum":1,"description":"Last line to read, 1-based, inclusive; omit to read to EOF"},
+                        "if_hash":{"type":"string","description":"Expected content hash from a prior read; returns NOT_MODIFIED when unchanged, guarding against silent drift"}
                     }, "required":["path"], "additionalProperties":false}
                 },
-                "path":{"type":"string"}, "start_line":{"type":"integer","minimum":1},
-                "end_line":{"type":"integer","minimum":1}, "if_hash":{"type":"string"}
+                "path":{"type":"string","description":"File path (relative to workspace root, or absolute)"},
+                "start_line":{"type":"integer","minimum":1,"description":"First line to read, 1-based, inclusive"},
+                "end_line":{"type":"integer","minimum":1,"description":"Last line to read, 1-based, inclusive; omit to read to EOF"},
+                "if_hash":{"type":"string","description":"Expected content hash from a prior read; returns NOT_MODIFIED when unchanged, guarding against silent drift"}
             },
             "oneOf":[{"required":["requests"]},{"required":["path"]}],
             "additionalProperties":false
         }),
-        handler: handle_read_file,
+        handler: handle_read,
         risk: ToolRisk::ReadOnly,
         category: crate::permission::ToolCategory::Read,
         default_timeout: std::time::Duration::from_secs(15),
@@ -325,7 +330,7 @@ mod tests {
         std::fs::write(dir.path().join("b.md"), "# hi\n").unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
 
-        let result = exec_read_file(&serde_json::json!({
+        let result = exec_read(&serde_json::json!({
             "path": dir.path().to_string_lossy(),
         }));
 
@@ -338,7 +343,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("x.txt"), "one\ntwo\nthree\n").unwrap();
 
-        let result = exec_read_file(&serde_json::json!({
+        let result = exec_read(&serde_json::json!({
             "path": dir.path().join("x.txt").to_string_lossy(),
             "start_line": 2,
             "end_line": 3,
@@ -352,10 +357,10 @@ mod tests {
         assert_eq!(result.model_text(), "L2: two\nL3: three");
         assert_eq!(result.data["files"][0]["start_line"], 2);
         assert_eq!(result.data["files"][0]["end_line"], 3);
-        // 防呆闭环：响应必须带 hash（LF 视图 content_hash），供 edit_file_v2 的 expected_hash 校验
+        // 防呆闭环：响应必须带 hash（LF 视图 content_hash），供 edit 的 expected_hash 校验
         let hash = result.data["files"][0]["hash"]
             .as_str()
-            .expect("read_file must return hash");
+            .expect("read must return hash");
         assert_eq!(hash, crate::file_shared::content_hash("one\ntwo\nthree\n"));
     }
 }
@@ -366,7 +371,7 @@ mod tests {
         std::fs::write(dir.path().join("x.txt"), "one\ntwo\n").unwrap();
 
         // 0-based 混用（LSP 习惯）：0 视为 1，不再拒绝。
-        let result = exec_read_file(&serde_json::json!({
+        let result = exec_read(&serde_json::json!({
             "path": dir.path().join("x.txt").to_string_lossy(),
             "start_line": 0,
             "end_line": 1,
@@ -382,7 +387,7 @@ mod tests {
         std::fs::write(dir.path().join("x.txt"), "one\ntwo\nthree\nfour\n").unwrap();
 
         // end 越界（行号漂移常见场景）：截断到文件尾 + truncated 标记，不拒绝。
-        let result = exec_read_file(&serde_json::json!({
+        let result = exec_read(&serde_json::json!({
             "path": dir.path().join("x.txt").to_string_lossy(),
             "start_line": 2,
             "end_line": 99,
@@ -405,7 +410,7 @@ mod tests {
         std::fs::write(dir.path().join("x.txt"), "one\ntwo\n").unwrap();
 
         // start 越界 = 行号概念失效：仍硬拒绝（data 带 total_lines 可立即重试）。
-        let result = exec_read_file(&serde_json::json!({
+        let result = exec_read(&serde_json::json!({
             "path": dir.path().join("x.txt").to_string_lossy(),
             "start_line": 10,
         }));
@@ -421,16 +426,16 @@ mod tests {
         let path = p.to_string_lossy().to_string();
 
         // 基线 read（清空偏移链）
-        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        let r1 = exec_read(&serde_json::json!({ "path": path }));
         assert!(r1.is_success());
 
-        // 账本 edit：在 L2 处插入两行（模拟 edit_file_v2 的 record_edit_with_shifts）
+        // 账本 edit：在 L2 处插入两行（模拟 edit 的 record_edit_with_shifts）
         let new_content = "one\nINS1\nINS2\ntwo\nthree\n";
         crate::file_state::record_edit_with_shifts(&path, new_content, &[(2, 2)]);
         std::fs::write(&p, new_content).unwrap();
 
         // 模型仍用旧行号 L3（= 现在的 L5 three）盲定位 → 自动修正 + 透明回传
-        let r2 = exec_read_file(&serde_json::json!({
+        let r2 = exec_read(&serde_json::json!({
             "path": path,
             "start_line": 3,
             "end_line": 3,
@@ -450,12 +455,12 @@ mod tests {
         std::fs::write(&p, "one\ntwo\nthree\n").unwrap();
         let path = p.to_string_lossy().to_string();
 
-        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        let r1 = exec_read(&serde_json::json!({ "path": path }));
         assert!(r1.is_success());
 
         // 外部直接改（不经账本）：偏移链为空 → 无法解释 → 不修正（hash 兜底）
         std::fs::write(&p, "one\nEXT\nthree\n").unwrap();
-        let r2 = exec_read_file(&serde_json::json!({
+        let r2 = exec_read(&serde_json::json!({
             "path": path,
             "start_line": 3,
             "end_line": 3,
@@ -472,14 +477,14 @@ mod tests {
         std::fs::write(&p, "one\ntwo\n").unwrap();
         let path = p.to_string_lossy().to_string();
 
-        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        let r1 = exec_read(&serde_json::json!({ "path": path }));
         assert!(r1.is_success());
         crate::file_state::record_edit_with_shifts(&path, "one\ntwo\n", &[(1, 3)]);
         // write 全覆盖：行号全失效 → 清链
         crate::file_state::record_write(&path, "a\nb\nc\nd\n");
         std::fs::write(&p, "a\nb\nc\nd\n").unwrap();
 
-        let r2 = exec_read_file(&serde_json::json!({
+        let r2 = exec_read(&serde_json::json!({
             "path": path,
             "start_line": 3,
             "end_line": 3,
@@ -492,18 +497,18 @@ mod tests {
 
     #[test]
     fn end_to_end_edit_then_stale_read_is_corrected() {
-        // 真实工具链路：read（基线）→ edit_file_v2（落账本偏移）→ 旧行号 read（自动修正）。
+        // 真实工具链路：read（基线）→ edit（落账本偏移）→ 旧行号 read（自动修正）。
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("e2e.txt");
         std::fs::write(&p, "a\nb\nc\nd\ne\n").unwrap();
         let path = p.to_string_lossy().to_string();
 
-        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        let r1 = exec_read(&serde_json::json!({ "path": path }));
         assert!(r1.is_success());
         let h1 = r1.data["files"][0]["hash"].as_str().unwrap().to_string();
 
         // 真实 edit 工具：L3 的 c 后插入两行（+2 偏移）
-        let e = crate::file_edit_v2::exec_edit_file_v2(&serde_json::json!({
+        let e = crate::file_edit_v2::exec_edit(&serde_json::json!({
             "path": path,
             "expected_hash": h1,
             "hunks": [{"kind": "insert_after", "anchor": "c", "new": "C1\nC2\n"}],
@@ -511,7 +516,7 @@ mod tests {
         assert!(e.is_success(), "edit: {}", e.model_text());
 
         // 模型仍用旧行号 L5（现在 = L7 e）→ 自动修正 + 透明回传
-        let r2 = exec_read_file(&serde_json::json!({
+        let r2 = exec_read(&serde_json::json!({
             "path": path,
             "start_line": 5,
             "end_line": 5,
@@ -531,10 +536,10 @@ mod tests {
         let p = dir.path().join("p.txt");
         std::fs::write(&p, "a\nb\nc\nd\n").unwrap();
         let path = p.to_string_lossy().to_string();
-        let r1 = exec_read_file(&serde_json::json!({ "path": path }));
+        let r1 = exec_read(&serde_json::json!({ "path": path }));
         assert!(r1.is_success());
 
-        let e = crate::file_edit_v2::exec_edit_file_v2(&serde_json::json!({
+        let e = crate::file_edit_v2::exec_edit(&serde_json::json!({
             "path": path,
             "mode": "partial",
             "hunks": [
@@ -546,7 +551,7 @@ mod tests {
         assert_eq!(e.data["status"], "partial");
 
         // 旧 L4 d → 新 L5 d（仅成功 hunk 的偏移生效）
-        let r2 = exec_read_file(&serde_json::json!({
+        let r2 = exec_read(&serde_json::json!({
             "path": path,
             "start_line": 4,
             "end_line": 4,

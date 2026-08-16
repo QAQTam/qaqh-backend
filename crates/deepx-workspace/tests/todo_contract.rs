@@ -39,22 +39,31 @@ fn public_schema_exposes_one_todo_tool_with_no_alias_and_no_goal_entrypoint() {
         .expect("action-specific schema branches");
     assert_eq!(
         branches.len(),
-        8,
-        "only anchored insert variants are public"
+        10,
+        "anchored insert variants + three set shapes are public"
     );
-    let set_branch = branches
+    let set_branches: Vec<_> = branches
         .iter()
-        .find(|branch| branch["title"] == "Set task state")
-        .expect("set branch");
+        .filter(|branch| {
+            branch["properties"]["action"]["const"] == "set"
+        })
+        .collect();
+    assert_eq!(set_branches.len(), 3, "set must expose single/batch/parallel shapes");
+    let set_branch = set_branches
+        .iter()
+        .find(|branch| branch["title"].as_str().is_some_and(|t| t.starts_with("Set task state (single)")))
+        .expect("single set branch");
     assert_eq!(
         set_branch["required"],
         serde_json::json!(["action", "id", "status"])
     );
     // The oneOf branch no longer carries `not` anti-constraints (schema
     // simplification): required + action.const are the sole discriminator.
+    // Batch/parallel shapes are discriminated by their own required fields
+    // (ids / updates), so no cross-branch `not` is needed.
     assert!(
-        set_branch.get("not").is_none(),
-        "set branch must not carry redundant not anti-constraints"
+        set_branches.iter().all(|branch| branch.get("not").is_none()),
+        "set branches must not carry redundant not anti-constraints"
     );
     let insert_branches: Vec<_> = branches
         .iter()
