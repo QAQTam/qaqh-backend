@@ -1,4 +1,4 @@
-# DeepX Monorepo — 后端统一构建系统
+# QAQ-Harness Monorepo — 后端统一构建系统
 # 用法: just [recipe]
 #
 # 项目结构:
@@ -6,8 +6,8 @@
 #   dsh-minimal-mode/ 极简模式工具（bash_v2 + str_replace_editor）
 #
 # 说明：Windows 桌面层（WinUI3 壳 / installer / updater）已拆分为独立仓库
-# F:\deepx-winui-app；本仓库只保留跨平台后端核心与公共 SDK。
-# 前端打包用 ../deepx-winui-app/justfile。
+# F:\qaqh-winui-app；本仓库只保留跨平台后端核心与公共 SDK。
+# 前端打包用 ../qaqh-winui-app/justfile。
 
 set windows-shell := ["pwsh.exe", "-NoLogo", "-Command"]
 
@@ -19,13 +19,13 @@ default:
 
 # 编译 daemon（后端核心，release）
 build-daemon:
-    cargo build --release -p deepx-daemon -p deepx-workspace
+    cargo build --release -p qaqh-daemon -p qaqh-workspace
 
 # ── 开发 ────────────────────────────────────────────
 
 # 启动 daemon（dev profile）
 dev:
-    cargo run -p deepx-daemon -- run
+    cargo run -p qaqh-daemon -- run
 
 # ── 检查 & 测试 ─────────────────────────────────────
 
@@ -58,8 +58,8 @@ clippy:
 [windows]
 status:
     @Write-Output "=== Rust binaries ==="
-    @if (Test-Path 'target/release/deepx-daemon.exe') { '  ✓ deepx-daemon.exe' } else { '  ✗ deepx-daemon.exe' }
-    @if (Test-Path 'target/release/deepx-workspace.exe') { '  ✓ deepx-workspace.exe' } else { '  ✗ deepx-workspace.exe' }
+    @if (Test-Path 'target/release/qaqh-daemon.exe') { '  ✓ qaqh-daemon.exe' } else { '  ✗ qaqh-daemon.exe' }
+    @if (Test-Path 'target/release/qaqh-workspace.exe') { '  ✓ qaqh-workspace.exe' } else { '  ✗ qaqh-workspace.exe' }
 
 # 清理
 clean:

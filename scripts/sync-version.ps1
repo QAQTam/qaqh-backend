@@ -2,7 +2,7 @@
 param(
     [string]$VersionFile = "version.txt",
     [string]$CargoToml   = "Cargo.toml",
-    [string]$LockJson    = "deepx-backend.lock.json",
+    [string]$LockJson    = "qaqh-backend.lock.json",
     [string]$RootPkgJson = "package.json"
 )
 
@@ -14,7 +14,7 @@ $cargo = Get-Content $CargoToml -Raw
 $cargo = $cargo -replace '(?<=\[workspace\.package\][\s\S]*?version\s*=\s*)".*?"', "`"$v`""
 Set-Content $CargoToml -Value $cargo -NoNewline
 
-# deepx-backend.lock.json（版本锁：installer/updater/prepare-daemon 消费）
+# qaqh-backend.lock.json（版本锁：installer/updater/prepare-daemon 消费）
 $lock = Get-Content $LockJson -Raw | ConvertFrom-Json
 $lock.version = $v
 $lock.release_manifest_url = $lock.release_manifest_url -replace '/download/v[^/]+/', "/download/v$v/"
@@ -36,4 +36,4 @@ if (Test-Path $RootPkgJson) {
     $rp | ConvertTo-Json -Depth 4 | Set-Content $RootPkgJson -NoNewline
 }
 
-Write-Host "Done — $v synced to Cargo.toml, deepx-backend.lock.json (including release URL), and root package.json"
+Write-Host "Done — $v synced to Cargo.toml, qaqh-backend.lock.json (including release URL), and root package.json"
