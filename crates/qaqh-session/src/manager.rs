@@ -137,14 +137,39 @@ impl SessionManager {
     /// Load the immutable archive plus the latest compact context, if one
     /// exists.  Callers must use `active_messages` for the model loop and
     /// retain `archive_messages` for replay/pagination.
+    ///
+    /// Fail-closed compact semantics (BUG-007): if a compact checkpoint file
+    /// exists but cannot be parsed or points past the archive, this returns
+    /// `None` instead of silently degrading to the full pre-compact archive.
+    /// Compacted history must never become reversible just because the
+    /// checkpoint was damaged.
     pub fn load_for_resume(
         &self,
         seed: &str,
     ) -> Option<(SessionMeta, Vec<Message>, Option<CompactContext>)> {
         let (meta, archive_messages) = self.load(seed)?;
-        let selected = self
-            .read_compact_context(seed)
-            .filter(|context| context.archive_message_count <= archive_messages.len());
+        let selected = match self.read_compact_context_checked(seed) {
+            Ok(None) => None,
+            Ok(Some(context)) if context.archive_message_count <= archive_messages.len() => {
+                Some(context)
+            }
+            Ok(Some(context)) => {
+                log::error!(
+                    "SessionManager: compact context for {seed} points past archive \
+                     (archive_message_count={}, archive_len={}) — refusing full-history fallback",
+                    context.archive_message_count,
+                    archive_messages.len()
+                );
+                return None;
+            }
+            Err(error) => {
+                log::error!(
+                    "SessionManager: compact context for {seed} is unreadable \
+                     ({error}) — refusing full-history fallback"
+                );
+                return None;
+            }
+        };
         Some((meta, archive_messages, selected))
     }
 
@@ -645,7 +670,23 @@ impl SessionManager {
     }
 
     fn read_compact_context(&self, seed: &str) -> Option<CompactContext> {
-        serde_json::from_str(&std::fs::read_to_string(self.compact_context_path(seed)).ok()?).ok()
+        self.read_compact_context_checked(seed).ok().flatten()
+    }
+
+    /// Like [`Self::read_compact_context`], but distinguishes “no checkpoint
+    /// file” from “checkpoint exists and is damaged”. `load_for_resume` uses
+    /// this distinction to fail closed instead of falling back to the full
+    /// pre-compact archive.
+    fn read_compact_context_checked(&self, seed: &str) -> Result<Option<CompactContext>, String> {
+        let path = self.compact_context_path(seed);
+        let body = match std::fs::read_to_string(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("read {}: {error}", path.display())),
+        };
+        serde_json::from_str(&body)
+            .map(Some)
+            .map_err(|error| format!("parse {}: {error}", path.display()))
     }
 
     fn write_compact_context(&self, seed: &str, context: &CompactContext) -> Result<(), String> {
@@ -860,6 +901,56 @@ mod skill_persistence_tests {
         assert_eq!(
             manager.load("multi-compact").expect("archive").1.len(),
             archive.len()
+        );
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn corrupt_compact_context_refuses_full_archive_fallback() {
+        let (root, manager) = manager();
+        let archive = vec![Message::user("one"), Message::user("two")];
+        manager.save_full("corrupt-compact", &archive, "model", None, 0, 2);
+        std::fs::write(
+            manager.compact_context_path("corrupt-compact"),
+            b"{not-json",
+        )
+        .expect("write corrupt compact context");
+
+        assert!(
+            manager.load_for_resume("corrupt-compact").is_none(),
+            "damaged compact context must never fall back to the full archive"
+        );
+        // The immutable archive itself is untouched; recovery tooling can still
+        // inspect it deliberately.
+        assert_eq!(
+            manager.load("corrupt-compact").expect("archive").1.len(),
+            archive.len()
+        );
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn compact_context_past_archive_refuses_full_archive_fallback() {
+        let (root, manager) = manager();
+        let archive = vec![Message::user("one"), Message::user("two")];
+        manager.save_full("past-archive", &archive, "model", None, 0, 2);
+        let damaged = CompactContext {
+            version: 1,
+            checkpoint_id: "damaged-checkpoint".into(),
+            parent_checkpoint_id: None,
+            created_at: SessionManager::now_epoch(),
+            archive_message_count: archive.len() + 1,
+            messages: vec![Message::user("summary")],
+        };
+        std::fs::write(
+            manager.compact_context_path("past-archive"),
+            serde_json::to_vec_pretty(&damaged).expect("serialize damaged compact context"),
+        )
+        .expect("write damaged compact context");
+
+        assert!(
+            manager.load_for_resume("past-archive").is_none(),
+            "archive_message_count past the archive must fail closed"
         );
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
