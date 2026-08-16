@@ -114,7 +114,7 @@ fn main() {
             .send_command(
                 Some(&seed),
                 RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
-                    text: "请执行一次文件编辑（edit 工具）：在 apps/winui/src/diff_drawer.rs 的顶部模块文档注释里追加一行：//! V4 链路验证 #2：总结行修复后的真实 edit 工具事件。只做这一个改动，不要改其他文件。".to_string(),
+                    text: "请执行一次文件编辑（edit 工具）：在 ../deepx-winui-app/apps/winui/src/diff_drawer.rs 的顶部模块文档注释里追加一行：//! V4 链路验证 #2：总结行修复后的真实 edit 工具事件。只做这一个改动，不要改其他文件。".to_string(),
                     images: vec![],
                     attachments: None,
                     as_system: false,

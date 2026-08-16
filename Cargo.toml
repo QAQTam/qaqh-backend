@@ -16,15 +16,10 @@ members = [
     "crates/deepx-session",
     "crates/deepx-subagent",
     "crates/deepx-client",
-    "crates/deepx-lsp",    "crates/deepx-gate-testui",
+    "crates/deepx-lsp",
+    "crates/deepx-gate-testui",
     "crates/deepx-update",
-    "crates/markdown-core",
-    "crates/markdown-winui",
-    "crates/deepx-fluent",
-    "crates/deepx-app-notifications",
-    "apps/installer",
-    "apps/updater",
-    "apps/winui",
+    "dsh-minimal-mode",
 ]
 
 [workspace.package]
