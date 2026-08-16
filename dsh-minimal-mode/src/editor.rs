@@ -5,12 +5,12 @@
 //! All model-facing returns (including error messages) are reproduced
 //! verbatim from the minimal-mode extraction.
 
-use deepx_types::ToolResult;
-use deepx_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolPlacement, ToolRisk};
+use qaqh_types::ToolResult;
+use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolPlacement, ToolRisk};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use deepx_workspace::permission::ToolCategory;
+use qaqh_workspace::permission::ToolCategory;
 
 const TRUNCATED_MESSAGE: &str = "<response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with `grep -n` in order to find the line numbers of what you are looking for.</NOTE>";
 
@@ -543,7 +543,7 @@ fn input_schema() -> serde_json::Value {
     })
 }
 
-/// Register the `str_replace_editor` tool on a DeepX ToolManager.
+/// Register the `str_replace_editor` tool on a QAQ-Harness ToolManager.
 pub fn register(mgr: &mut ToolManager) {
     let description: &'static str = DEFAULT_DESCRIPTION;
     mgr.register_with_placement(

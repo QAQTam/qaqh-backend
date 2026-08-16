@@ -1,15 +1,15 @@
 //! `bash_v2` — faithful replication of the deepseek-harness minimal-mode
 //! persistent `bash` tool.
 //!
-//! Registered as `bash_v2` (isolated from the existing non-persistent DeepX
+//! Registered as `bash_v2` (isolated from the existing non-persistent QAQ-Harness
 //! `bash` tool). Model-facing returns are reproduced verbatim from the
 //! minimal-mode extraction, including markers, exit-code suffixes, timeout /
 //! truncation / reset messages.
 
 use crate::pty::{PtySession, read_page, retained_text};
-use deepx_types::ToolResult;
-use deepx_workspace::permission::ToolCategory;
-use deepx_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolPlacement, ToolRisk};
+use qaqh_types::ToolResult;
+use qaqh_workspace::permission::ToolCategory;
+use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolPlacement, ToolRisk};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -347,10 +347,10 @@ fn execute_command(owner: &str, command: &str, cwd: &str) -> Result<String, Stri
 }
 
 fn owner_key() -> String {
-    if let Some(ctx) = deepx_workspace::runtime::context() {
+    if let Some(ctx) = qaqh_workspace::runtime::context() {
         return ctx.active_session;
     }
-    if let Ok(guard) = deepx_workspace::CURRENT_SESSION.lock() {
+    if let Ok(guard) = qaqh_workspace::CURRENT_SESSION.lock() {
         if let Some(s) = guard.clone() {
             return s;
         }
@@ -359,7 +359,7 @@ fn owner_key() -> String {
 }
 
 fn shell_cwd() -> String {
-    let ws = deepx_workspace::CURRENT_WORKSPACE
+    let ws = qaqh_workspace::CURRENT_WORKSPACE
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if ws.trim().is_empty() || ws.trim() == "." {

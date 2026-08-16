@@ -525,268 +525,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deepx-client"
-version = "1.0.0-rc.6"
-dependencies = [
- "bytes",
- "deepx-domain",
- "deepx-ringing",
- "futures-util",
- "log",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.19",
- "tokio",
- "uuid",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "deepx-config"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-types",
- "log",
- "serde",
- "serde_json",
- "toml",
- "ureq",
- "windows",
-]
-
-[[package]]
-name = "deepx-daemon"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-config",
- "deepx-domain",
- "deepx-proto",
- "deepx-ringing",
- "deepx-runtime",
- "deepx-session",
- "deepx-types",
- "log",
- "rand 0.10.2",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "deepx-domain"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "deepx-gate"
-version = "1.0.0-rc.6"
-dependencies = [
- "anyhow",
- "deepx-types",
- "eventsource-stream",
- "futures",
- "log",
- "reqwest 0.13.4",
- "serde",
- "serde_json",
- "tiny_http",
- "tokio",
- "unicode-normalization",
-]
-
-[[package]]
-name = "deepx-gate-testui"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-gate",
- "deepx-types",
- "serde_json",
- "tiny_http",
-]
-
-[[package]]
-name = "deepx-lsp"
-version = "1.0.0-rc.6"
-dependencies = [
- "log",
- "lsp-server",
- "lsp-types",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "deepx-message"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-session",
- "deepx-types",
- "log",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "deepx-msglp"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-config",
- "deepx-domain",
- "deepx-gate",
- "deepx-message",
- "deepx-proto",
- "deepx-ringing",
- "deepx-session",
- "deepx-skills",
- "deepx-subagent",
- "deepx-types",
- "deepx-workspace",
- "dsh-minimal-mode",
- "log",
- "os_pipe",
- "serde_json",
- "tempfile",
- "tiny_http",
- "windows",
-]
-
-[[package]]
-name = "deepx-proto"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "deepx-ringing"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-domain",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "deepx-runtime"
-version = "1.0.0-rc.6"
-dependencies = [
- "chrono",
- "deepx-config",
- "deepx-domain",
- "deepx-msglp",
- "deepx-proto",
- "deepx-ringing",
- "deepx-session",
- "deepx-types",
- "deepx-workspace",
- "log",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "ureq",
-]
-
-[[package]]
-name = "deepx-session"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-types",
- "hex",
- "log",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "toml",
-]
-
-[[package]]
-name = "deepx-skills"
-version = "1.0.0-rc.6"
-dependencies = [
- "serde",
- "serde_yaml",
- "tempfile",
-]
-
-[[package]]
-name = "deepx-subagent"
-version = "1.0.0-rc.6"
-dependencies = [
- "deepx-client",
- "deepx-config",
- "deepx-workspace",
- "log",
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "deepx-types"
-version = "1.0.0-rc.6"
-dependencies = [
- "serde",
- "serde_json",
- "tokenizers",
- "toml",
-]
-
-[[package]]
-name = "deepx-update"
-version = "1.0.0-rc.6"
-dependencies = [
- "hex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "zip",
-]
-
-[[package]]
-name = "deepx-workspace"
-version = "1.0.0-rc.6"
-dependencies = [
- "chrono",
- "deepx-config",
- "deepx-proto",
- "deepx-session",
- "deepx-skills",
- "deepx-types",
- "git2",
- "globset",
- "grep-regex",
- "grep-searcher",
- "hex",
- "html2text",
- "ignore",
- "image",
- "log",
- "regex",
- "ropey",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "similar",
- "strsim",
- "tempfile",
- "tiny_http",
- "unicode-normalization",
- "ureq",
- "windows",
-]
-
-[[package]]
 name = "deflate64"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -882,10 +620,10 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 name = "dsh-minimal-mode"
 version = "1.0.0-rc.6"
 dependencies = [
- "deepx-types",
- "deepx-workspace",
  "log",
  "portable-pty",
+ "qaqh-types",
+ "qaqh-workspace",
  "serde",
  "serde_json",
  "tempfile",
@@ -2198,6 +1936,268 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qaqh-client"
+version = "1.0.0-rc.6"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "log",
+ "qaqh-domain",
+ "qaqh-ringing",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "qaqh-config"
+version = "1.0.0-rc.6"
+dependencies = [
+ "log",
+ "qaqh-types",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+ "windows",
+]
+
+[[package]]
+name = "qaqh-daemon"
+version = "1.0.0-rc.6"
+dependencies = [
+ "log",
+ "qaqh-config",
+ "qaqh-domain",
+ "qaqh-proto",
+ "qaqh-ringing",
+ "qaqh-runtime",
+ "qaqh-session",
+ "qaqh-types",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "qaqh-domain"
+version = "1.0.0-rc.6"
+dependencies = [
+ "qaqh-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qaqh-gate"
+version = "1.0.0-rc.6"
+dependencies = [
+ "anyhow",
+ "eventsource-stream",
+ "futures",
+ "log",
+ "qaqh-types",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tiny_http",
+ "tokio",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "qaqh-gate-testui"
+version = "1.0.0-rc.6"
+dependencies = [
+ "qaqh-gate",
+ "qaqh-types",
+ "serde_json",
+ "tiny_http",
+]
+
+[[package]]
+name = "qaqh-lsp"
+version = "1.0.0-rc.6"
+dependencies = [
+ "log",
+ "lsp-server",
+ "lsp-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "qaqh-message"
+version = "1.0.0-rc.6"
+dependencies = [
+ "log",
+ "qaqh-session",
+ "qaqh-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qaqh-msglp"
+version = "1.0.0-rc.6"
+dependencies = [
+ "dsh-minimal-mode",
+ "log",
+ "os_pipe",
+ "qaqh-config",
+ "qaqh-domain",
+ "qaqh-gate",
+ "qaqh-message",
+ "qaqh-proto",
+ "qaqh-ringing",
+ "qaqh-session",
+ "qaqh-skills",
+ "qaqh-subagent",
+ "qaqh-types",
+ "qaqh-workspace",
+ "serde_json",
+ "tempfile",
+ "tiny_http",
+ "windows",
+]
+
+[[package]]
+name = "qaqh-proto"
+version = "1.0.0-rc.6"
+dependencies = [
+ "qaqh-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qaqh-ringing"
+version = "1.0.0-rc.6"
+dependencies = [
+ "qaqh-domain",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qaqh-runtime"
+version = "1.0.0-rc.6"
+dependencies = [
+ "chrono",
+ "log",
+ "qaqh-config",
+ "qaqh-domain",
+ "qaqh-msglp",
+ "qaqh-proto",
+ "qaqh-ringing",
+ "qaqh-session",
+ "qaqh-types",
+ "qaqh-workspace",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
+name = "qaqh-session"
+version = "1.0.0-rc.6"
+dependencies = [
+ "hex",
+ "log",
+ "qaqh-types",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "toml",
+]
+
+[[package]]
+name = "qaqh-skills"
+version = "1.0.0-rc.6"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "tempfile",
+]
+
+[[package]]
+name = "qaqh-subagent"
+version = "1.0.0-rc.6"
+dependencies = [
+ "log",
+ "qaqh-client",
+ "qaqh-config",
+ "qaqh-workspace",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "qaqh-types"
+version = "1.0.0-rc.6"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "toml",
+]
+
+[[package]]
+name = "qaqh-update"
+version = "1.0.0-rc.6"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "zip",
+]
+
+[[package]]
+name = "qaqh-workspace"
+version = "1.0.0-rc.6"
+dependencies = [
+ "chrono",
+ "git2",
+ "globset",
+ "grep-regex",
+ "grep-searcher",
+ "hex",
+ "html2text",
+ "ignore",
+ "image",
+ "log",
+ "qaqh-config",
+ "qaqh-proto",
+ "qaqh-session",
+ "qaqh-skills",
+ "qaqh-types",
+ "regex",
+ "ropey",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "similar",
+ "strsim",
+ "tempfile",
+ "tiny_http",
+ "unicode-normalization",
+ "ureq",
+ "windows",
+]
 
 [[package]]
 name = "quick-error"

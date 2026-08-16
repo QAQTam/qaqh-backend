@@ -1,14 +1,14 @@
 //! Integration tests: register `bash_v2` and `str_replace_editor` through the
-//! DeepX ToolManager and assert the model-facing returns match minimal-mode
+//! QAQ-Harness ToolManager and assert the model-facing returns match minimal-mode
 //! verbatim.
 
-use deepx_workspace::runtime;
+use qaqh_workspace::runtime;
 use serde_json::json;
 
 const SESSION: &str = "dsh-minimal-mode-test";
 
 fn run_tool(name: &str, args: serde_json::Value) -> String {
-    let result = deepx_workspace::execution::execute_with_context(
+    let result = qaqh_workspace::execution::execute_with_context(
         name,
         "",
         &args.to_string(),
@@ -169,7 +169,7 @@ fn str_replace_editor_cjk_view_line_numbers() {
 #[test]
 fn schemas_match_minimal_mode() {
     setup();
-    let defs: Vec<deepx_types::ToolDef> = runtime::all_tools();
+    let defs: Vec<qaqh_types::ToolDef> = runtime::all_tools();
     let def = |name: &str| defs.iter().find(|d| d.function.name == name).unwrap();
 
     // bash schema (minimal-mode-extraction README §4.2)
