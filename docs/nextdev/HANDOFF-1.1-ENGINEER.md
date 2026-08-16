@@ -2,7 +2,7 @@
 
 > 日期：2026-08-17
 > 交接范围：后端主仓库 `QAQTam/QAQ-Harness` + 前端仓库 `QAQTam/qaqh-winui-app`
-> 当前主线：`origin/main = 8faace3`（截至 SMJ #8 合并后；刀 1 step 1 见 2.2）
+> 当前主线：`origin/main = 2dc02d1`（刀 1 step 1 #10 已合并，无 open PR）
 
 ---
 
@@ -10,7 +10,7 @@
 
 1. 后端 repo 已从 `deepx-*` 更名为 `qaqh-*`；WinUI 前端在独立仓库 `qaqh-winui-app`。
 2. 必读三份文档：`REFACTOR-ROADMAP.md`、`bugfix-1.1-nextdev.md`、`EXPLORE-REFACTOR-1.1.md`。
-3. 本阶段已完成并合并后端 PR #3/#4/#5/#6/#8（#7 为交接文档）和 1 个前端 PR（qaqh-winui-app#1）。
+3. 本阶段已完成并合并后端 PR #3/#4/#5/#6/#8/#10（#7 为交接文档）和 1 个前端 PR（qaqh-winui-app#1）。
 4. SMJ 编辑日志已完成；刀 1 已开始分步落地：本轮 step 1 把子代理 worker 从 `Command::new(current_exe)` 子进程改为 daemon 内 Loop actor，主 agent 进程化与逐 actor 隔离仍待后续 step。
 5. 后端所有测试在 Arch Linux 可跑；WinUI 只能在 Windows 编译，当前前端仓库无 CI。
 6. 写代码前必须使用 `git worktree`，不要直接在 `main` 上改。
@@ -79,7 +79,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 | QAQ-Harness #6 | `da31082` | `qaqh_config::Config::update` 受锁单写口；daemon 六个 config 写路径收敛；统一 `AgentReloadConfig` 广播。修后端 BUG-008/部分 BUG-001。 |
 | qaqh-winui-app #1 | 前端 main | `bridge.rs` 6429 行拆成 `bridge/` 模块；BUG-004 viewport 恢复移除，恢复会话强制贴底。已 review 并合并。 |
 | QAQ-Harness #8 | `eb8ceac` | SMJ 编辑日志基础版：`journal` 模块 + workspace 工具 + CLI；接入 write/edit/apply_patch/delete/copy_range/web_fetch；支持 query/replay/export patches。 |
-| QAQ-Harness #10 |（本 PR） | 刀 1 step 1：`LoopChannels` / `Loop::from_channels` 通道化 loop；`AgentRegistry::spawn_subagent` 不再 `Command::new(current_exe)`，改为 daemon 内 Ringing Loop actor + 直接 Hub 发布；actor 私有 ToolManager；新增回归测试。 |
+| QAQ-Harness #10 | `2dc02d1` | 刀 1 step 1：`LoopChannels` / `Loop::from_channels` 通道化 loop；`AgentRegistry::spawn_subagent` 不再 `Command::new(current_exe)`，改为 daemon 内 Ringing Loop actor + 直接 Hub 发布；actor 私有 ToolManager；新增回归测试。 |
 
 ### 新增的关键 API / 模块
 
@@ -116,7 +116,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - `cargo test -p qaqh-msglp --test permission_lifecycle`
 - 状态：已合并（PR #8）
 
-## 2.2 本轮 PR（刀 1 step 1：子代理 in-process actor）
+## 2.2 已合并 PR（刀 1 step 1：子代理 in-process actor）
 
 - 分支建议：`refactor/knife1-subagent-inprocess-step1`
 - 内容：
@@ -132,6 +132,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - `cargo test -p qaqh-runtime`
   - `cargo test -p qaqh-msglp`
   - 新增 `qaqh-msglp/tests/inprocess_loop.rs` 与 `qaqh-runtime/tests/subagent_inprocess.rs`
+- 状态：已合并（PR #10）
 
 ## 2.3 下一步（刀 1 step 2 / 刀 2 剩余）
 
@@ -173,7 +174,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - 基础版已落地：`journal` 工具 + CLI + `write/edit/apply_patch/delete/copy_range/web_fetch` 接入。
 - 后续仅随刀 2 事件日志统一，不再单独排期。
 
-### P1：刀 1 子代理 in-process（step 1 本 PR，剩余继续分步）
+### P1：刀 1 子代理 in-process（step 1 已合并 #10，剩余继续分步）
 
 - 修 BUG-002/011
 - step 1 已落地：
