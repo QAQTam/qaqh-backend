@@ -37,6 +37,18 @@ pub struct ClientHandlers {
     pub on_timeline_snapshot: std::sync::Arc<dyn Fn(TimelinePage) + Send + Sync>,
 }
 
+/// 远端 daemon 的直连目标（临时跨端模式）。
+///
+/// 与本地模式互斥：设置后跳过 `daemon.json` discovery、pid 判活和本地
+/// spawn，直接用 `base_url + token` 走 Ringing V1。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEndpoint {
+    /// `http://<ip>:<port>` 或 `https://...`（不带尾随斜杠）。
+    pub base_url: String,
+    /// daemon `--server` 模式下的 Bearer token。
+    pub token: String,
+}
+
 pub struct ClientOptions {
     pub handlers: ClientHandlers,
     /// Spawn `qaqh-daemon run` when no discovery file exists yet.
@@ -46,6 +58,8 @@ pub struct ClientOptions {
     pub daemon_path: Option<std::path::PathBuf>,
     /// Maximum time to wait for the daemon to publish discovery.
     pub start_timeout: std::time::Duration,
+    /// 远端直连目标；`Some` 时忽略本地 discovery / spawn。
+    pub remote: Option<RemoteEndpoint>,
 }
 
 impl Default for ClientHandlers {
@@ -68,6 +82,7 @@ impl Default for ClientOptions {
             launch_daemon_if_missing: false,
             daemon_path: None,
             start_timeout: std::time::Duration::from_secs(8),
+            remote: None,
         }
     }
 }
@@ -116,39 +131,49 @@ impl Client {
 
     /// Async variant for callers that already own a runtime.
     pub async fn connect_async(options: ClientOptions) -> Result<Client> {
-        // 只接受"pid 存活"的 discovery：残留的 daemon.json（daemon 被强杀
-        // 后遗留）会导致直连死端口（connection refused），此前仅检查文件
-        // 存在与否。pid 已死的 discovery 视为缺失，走拉起路径（新 daemon
-        // 启动时经单实例锁清理 stale lock/discovery 自愈）。
-        let (discovery, launched) = match read_discovery()
-            .ok()
-            .filter(|d| crate::discovery::process_is_running(d.pid))
-        {
-            Some(d) => (d, false),
-            None => {
-                if options.launch_daemon_if_missing {
-                    log::info!("[qaqh-client] no live daemon discovery; launching daemon");
-                    (
-                        wait_for_daemon(options.daemon_path.as_deref(), options.start_timeout)
-                            .await?,
-                        true,
-                    )
-                } else {
-                    return Err(ClientError::Discovery(
-                        "no live daemon discovery (daemon.json missing or stale)".into(),
-                    ));
+        // 远端直连：跳过本地 discovery / pid 判活 / spawn，直接用端点 + token。
+        let (base_url, token) = match options.remote.clone() {
+            Some(remote) => {
+                let base_url = remote.base_url.trim_end_matches('/').to_string();
+                if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+                    return Err(ClientError::Discovery(format!(
+                        "remote base_url must start with http:// or https://: {base_url}"
+                    )));
                 }
+                (base_url, remote.token)
+            }
+            None => {
+                // 只接受"pid 存活"的 discovery：残留的 daemon.json（daemon 被强杀
+                // 后遗留）会导致直连死端口（connection refused），此前仅检查文件
+                // 存在与否。pid 已死的 discovery 视为缺失，走拉起路径（新 daemon
+                // 启动时经单实例锁清理 stale lock/discovery 自愈）。
+                let discovery = match read_discovery()
+                    .ok()
+                    .filter(|d| crate::discovery::process_is_running(d.pid))
+                {
+                    Some(d) => d,
+                    None => {
+                        if options.launch_daemon_if_missing {
+                            log::info!("[qaqh-client] no live daemon discovery; launching daemon");
+                            wait_for_daemon(options.daemon_path.as_deref(), options.start_timeout)
+                                .await?
+                        } else {
+                            return Err(ClientError::Discovery(
+                                "no live daemon discovery (daemon.json missing or stale)".into(),
+                            ));
+                        }
+                    }
+                };
+                (discovery.base_url()?, discovery.token)
             }
         };
-        let _ = launched;
 
-        let base_url = discovery.base_url()?;
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()?;
         let session = Arc::new(RingingSession::new(
             base_url.clone(),
-            discovery.token.clone(),
+            token.clone(),
             http.clone(),
         ));
 
@@ -166,7 +191,7 @@ impl Client {
         let client = Client {
             inner: Arc::new(ClientInner {
                 base_url: base_url.clone(),
-                token: discovery.token.clone(),
+                token: token.clone(),
                 http: http.clone(),
                 session: session.clone(),
                 handlers: options.handlers.clone(),
@@ -188,7 +213,7 @@ impl Client {
         for channel in CHANNELS {
             let stream = ChannelStream::new(
                 format!("{base_url}/ringing/v1/events/{}", channel.as_str()),
-                discovery.token.clone(),
+                token.clone(),
                 channel,
                 http.clone(),
                 StreamHandlers {

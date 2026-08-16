@@ -16,20 +16,36 @@ pub enum QueryRequest {
     WorkspaceList,
     SkillsListTools,
     WorkspaceDiagnose,
+    /// 列出 daemon 侧目录内容（远端文件选择器数据源）。
+    FsList {
+        path: String,
+    },
+    /// 读取 daemon 侧文件内容（文本预览，最多 `max_bytes`）。
+    FsRead {
+        path: String,
+        max_bytes: Option<u64>,
+    },
 }
 
 impl QueryRequest {
     pub(crate) fn into_parts(self) -> (&'static str, Value) {
-        let name = match self {
-            Self::SessionList => "session.list",
-            Self::SessionActivity => "session.activity",
-            Self::ConfigLoad => "config.load",
-            Self::WorkspaceStatus => "workspace.status",
-            Self::WorkspaceList => "workspace.list",
-            Self::SkillsListTools => "skills.list_tools",
-            Self::WorkspaceDiagnose => "workspace.diagnose",
-        };
-        (name, json!({}))
+        match self {
+            Self::SessionList => ("session.list", json!({})),
+            Self::SessionActivity => ("session.activity", json!({})),
+            Self::ConfigLoad => ("config.load", json!({})),
+            Self::WorkspaceStatus => ("workspace.status", json!({})),
+            Self::WorkspaceList => ("workspace.list", json!({})),
+            Self::SkillsListTools => ("skills.list_tools", json!({})),
+            Self::WorkspaceDiagnose => ("workspace.diagnose", json!({})),
+            Self::FsList { path } => ("fs.list", json!({ "path": path })),
+            Self::FsRead { path, max_bytes } => {
+                let mut params = json!({ "path": path });
+                if let Some(max_bytes) = max_bytes {
+                    params["max_bytes"] = json!(max_bytes);
+                }
+                ("fs.read", params)
+            }
+        }
     }
 }
 

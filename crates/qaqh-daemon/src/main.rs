@@ -17,6 +17,22 @@ fn main() {
         }
         Some("status") => status(),
         Some("stop") => stop(),
+        Some("server") => {
+            // 临时跨端模式：headless 监听局域网地址，供远端壳直连。
+            qaqh_runtime::cache_system_path();
+            let config = match server::ServerNetworkConfig::parse(&args[1..]) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("qaqh-daemon: {error}");
+                    std::process::exit(2);
+                }
+            };
+            let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(error) = runtime.block_on(server::run_with(config)) {
+                eprintln!("qaqh-daemon: {error}");
+                std::process::exit(1);
+            }
+        }
         Some("run") | None => {
             // Preserve the complete interactive PATH for workers, but defer
             // prompt-only OS/tool probing to each worker process.
@@ -28,7 +44,9 @@ fn main() {
             }
         }
         Some(command) => {
-            eprintln!("unknown command: {command}; expected run, status, stop, or agent");
+            eprintln!(
+                "unknown command: {command}; expected run, server, status, stop, or agent"
+            );
             std::process::exit(2);
         }
     }

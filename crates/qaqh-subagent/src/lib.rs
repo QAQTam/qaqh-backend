@@ -372,6 +372,7 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
         launch_daemon_if_missing: false,
         daemon_path: None,
         start_timeout: Duration::from_secs(8),
+        remote: None,
     }) {
         Ok(c) => c,
         Err(e) => {

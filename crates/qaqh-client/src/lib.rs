@@ -12,15 +12,19 @@ pub mod client;
 pub mod discovery;
 pub mod endpoint;
 pub mod error;
+pub mod remote_path;
 pub mod session;
 pub mod sse;
 pub mod timeline;
 pub mod types;
 
-pub use client::{Client, ClientHandlers, ClientOptions, StopStatus, runtime_handle};
+pub use client::{
+    Client, ClientHandlers, ClientOptions, RemoteEndpoint, StopStatus, runtime_handle,
+};
 pub use discovery::{DaemonDiscovery, ensure_daemon_running, read_discovery};
 pub use endpoint::{ActionRequest, QueryRequest};
 pub use error::{ClientError, Result};
+pub use remote_path::{display_host, display_path, remote_path_from_display};
 pub use session::{RingingSession, SessionState};
 pub use timeline::TimelineStream;
 pub use types::ResetRequired;
