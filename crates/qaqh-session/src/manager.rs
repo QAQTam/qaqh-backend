@@ -78,6 +78,13 @@ impl SessionManager {
             .expect("SessionManager not initialized — call init() first")
     }
 
+    /// Non-panicking accessor for optional recovery paths (e.g. timeline
+    /// rebuild in contexts where the daemon may not have initialized the
+    /// session store yet).
+    pub fn try_global() -> Option<&'static Self> {
+        INSTANCE.get()
+    }
+
     // ── Session listing ──
 
     /// List all sessions sorted by updated_at descending.

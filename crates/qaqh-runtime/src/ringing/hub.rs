@@ -542,6 +542,32 @@ impl RingingHub {
             }
         };
         let Some(persisted) = persisted else {
+            // BUG-006：timeline 目录缺失/记录损坏时，它必须能从
+            // messages.jsonl / compact-context 重建，否则 timeline 就不是
+            // “可重建投影”，而会变成第二份事实源。重建结果与 conversation
+            // snapshot 同一基线（compact 优先），并同步写回 timeline 文件。
+            if let Some((snapshot, journal)) =
+                super::timeline_rebuild::rebuild_timeline_snapshot(seed)
+            {
+                {
+                    let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                    if !appender.contains(seed) {
+                        appender.restore(seed.to_string(), snapshot.clone(), journal.clone());
+                    }
+                }
+                let store = self
+                    .timeline_store
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some(store) = store.as_ref()
+                    && let Err(error) = store.persist(seed, &snapshot, journal)
+                {
+                    log::warn!("[timeline] rebuild persist failed for {seed}: {error}");
+                }
+                log::info!(
+                    "[ringing] rebuilt timeline {seed} from persisted messages (BUG-006 fallback)"
+                );
+            }
             return;
         };
         {
