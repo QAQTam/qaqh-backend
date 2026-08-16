@@ -17,4 +17,5 @@ pub mod projection;
 pub mod query;
 pub mod router;
 pub mod sequencer;
+pub(crate) mod timeline_rebuild;
 pub mod tool_progress;
