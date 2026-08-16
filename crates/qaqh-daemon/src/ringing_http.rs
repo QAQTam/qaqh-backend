@@ -1576,11 +1576,24 @@ async fn handle_command(
     // SessionCreate/Resume are registry operations. They select the worker
     // instance for the whole connection and are not ordinary worker commands.
     match &env.command {
-        qaqh_ringing::RingingCommand::Control(ControlCommand::SessionCreate { cwd, .. }) => {
-            let params = match cwd {
-                Some(cwd) => serde_json::json!({ "cwd": cwd }),
-                None => serde_json::json!({}),
-            };
+        qaqh_ringing::RingingCommand::Control(ControlCommand::SessionCreate {
+            cwd,
+            tool_mode,
+            custom_tools,
+            ..
+        }) => {
+            // 透传给 session.new：cwd 归属 + 工具模式预置（先落盘后 spawn）。
+            let mut params = serde_json::Map::new();
+            if let Some(cwd) = cwd {
+                params.insert("cwd".into(), serde_json::json!(cwd));
+            }
+            if let Some(tool_mode) = tool_mode {
+                params.insert("tool_mode".into(), serde_json::json!(tool_mode));
+                if !custom_tools.is_empty() {
+                    params.insert("custom_tools".into(), serde_json::json!(custom_tools));
+                }
+            }
+            let params = serde_json::Value::Object(params);
             let created_seed = match service.handle("session.new", &params) {
                 Ok(value) => value,
                 Err(error) => {

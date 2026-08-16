@@ -84,6 +84,8 @@ fn main() {
                     RingingCommand::Control(ControlCommand::SessionCreate {
                         close_current: false,
                         cwd: None,
+                        tool_mode: None,
+                        custom_tools: Vec::new(),
                     }),
                     CommandOptions::default(),
                 )

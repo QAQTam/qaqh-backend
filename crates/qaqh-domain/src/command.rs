@@ -48,6 +48,13 @@ pub enum ControlCommand {
         /// 落 SessionMeta.cwd 并触发 workspace 自动归属（None = 未分组）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// 可选工具模式预置（TUI/CLI 壳创建即锁定）：daemon 透传给
+        /// `session.new`，先落盘再 spawn，worker 首轮即应用。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_mode: Option<String>,
+        /// tool_mode == "custom" 时的自定义工具白名单。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        custom_tools: Vec<String>,
     },
     /// 恢复已保存会话。accepted 后由三个频道分别完成 snapshot/cursor 恢复。
     SessionResume { seed: String },

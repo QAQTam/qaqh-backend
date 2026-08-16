@@ -1063,7 +1063,16 @@ impl Loop {
                 ControlCommand::SessionCreate {
                     close_current,
                     cwd: _,
+                    tool_mode,
+                    custom_tools,
                 } => {
+                    // 可选工具模式预置在 create 前应用，保证新会话的
+                    // system prompt 与工具集首轮就位（daemon 路径已先落盘）。
+                    if let Some(tool_mode) = tool_mode {
+                        self.session
+                            .agent
+                            .apply_tool_mode(&tool_mode, &custom_tools);
+                    }
                     if close_current {
                         self.prepare_session_switch();
                     } else {

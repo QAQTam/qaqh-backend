@@ -10,13 +10,6 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryRequest {
     SessionList,
-    /// 创建新会话（可选 cwd + tool_mode 预置，先落盘后 spawn；
-    /// TUI/CLI 壳用它一次性锁定 minimal:dsh 等工具模式）。
-    SessionNew {
-        cwd: Option<String>,
-        tool_mode: Option<String>,
-        custom_tools: Vec<String>,
-    },
     SessionActivity,
     ConfigLoad,
     WorkspaceStatus,
@@ -27,9 +20,8 @@ pub enum QueryRequest {
 
 impl QueryRequest {
     pub(crate) fn into_parts(self) -> (&'static str, Value) {
-        let name = match &self {
+        let name = match self {
             Self::SessionList => "session.list",
-            Self::SessionNew { .. } => "session.new",
             Self::SessionActivity => "session.activity",
             Self::ConfigLoad => "config.load",
             Self::WorkspaceStatus => "workspace.status",
@@ -37,27 +29,7 @@ impl QueryRequest {
             Self::SkillsListTools => "skills.list_tools",
             Self::WorkspaceDiagnose => "workspace.diagnose",
         };
-        let params = match self {
-            Self::SessionNew {
-                cwd,
-                tool_mode,
-                custom_tools,
-            } => {
-                let mut obj = serde_json::Map::new();
-                if let Some(cwd) = cwd {
-                    obj.insert("cwd".into(), json!(cwd));
-                }
-                if let Some(tool_mode) = tool_mode {
-                    obj.insert("tool_mode".into(), json!(tool_mode));
-                }
-                if !custom_tools.is_empty() {
-                    obj.insert("custom_tools".into(), json!(custom_tools));
-                }
-                Value::Object(obj)
-            }
-            _ => json!({}),
-        };
-        (name, params)
+        (name, json!({}))
     }
 }
 
@@ -253,20 +225,6 @@ mod tests {
         .into_parts();
         assert_eq!(name, "workspace.set");
         assert_eq!(params["seed"], "s1");
-    }
-
-    #[test]
-    fn session_new_carries_cwd_and_tool_mode() {
-        let (name, params) = QueryRequest::SessionNew {
-            cwd: Some("/tmp/tui-cwd".into()),
-            tool_mode: Some("minimal:dsh".into()),
-            custom_tools: Vec::new(),
-        }
-        .into_parts();
-        assert_eq!(name, "session.new");
-        assert_eq!(params["cwd"], "/tmp/tui-cwd");
-        assert_eq!(params["tool_mode"], "minimal:dsh");
-        assert!(params.get("custom_tools").is_none());
     }
 
     #[test]
