@@ -51,6 +51,8 @@ pub mod serve;
 pub mod audit;
 pub mod auth;
 
+pub mod journal;
+
 pub use backend::{
     BackendRequest, HttpToolExecutionBackend, LocalToolExecutionBackend, ToolExecutionBackend,
     ToolPlacement, install_workspace_backend, use_local_workspace_backend,

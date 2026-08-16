@@ -5,6 +5,7 @@
 use super::ToolManager;
 use super::exec;
 use super::image_query;
+use super::journal;
 use super::web;
 
 use super::apply_patch;
@@ -55,6 +56,8 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     // ── 多模态图像理解 ──
     image_query::register(&mut mgr);
 
+    journal::register(&mut mgr);
+
     // ── 进程巡查 ──
     process_inspect::register(&mut mgr);
 
@@ -94,6 +97,7 @@ mod tests {
                 "glob",
                 "grep",
                 "image",
+                "journal",
                 "process",
                 "pwsh",
                 "read",

@@ -49,7 +49,8 @@ fn write_error(path: &str, error: &std::io::Error) -> String {
 // ── exec_write_file (from file_write.rs) ──
 
 pub(super) fn exec_write_file(args: &serde_json::Value) -> ToolResult {
-    let path = crate::resolve_workspace_path(&args.s("path"));
+    let raw_path = args.s("path");
+    let path = crate::resolve_workspace_path(&raw_path);
     let content = args.s("content");
     let append = args.opt_bool("append").unwrap_or(false);
     let dry_run = args.opt_bool("dry_run").unwrap_or(false);
@@ -155,6 +156,16 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> ToolResult {
                     None => content.clone(),
                 };
                 crate::file_state::record_write(&path, &full);
+                crate::journal::record_change(
+                    &crate::journal::active_session(),
+                    "",
+                    "write",
+                    &raw_path,
+                    "append",
+                    old_content.as_deref(),
+                    Some(&full),
+                    "ok",
+                );
                 let text = if let Some(ref old) = old_content {
                     let old_line_count = old.lines().count();
                     let first_line = if old_line_count == 0 {
@@ -184,6 +195,16 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> ToolResult {
         match atomic_write(&path, &content) {
             Ok(_) => {
                 crate::file_state::record_write(&path, &content);
+                crate::journal::record_change(
+                    &crate::journal::active_session(),
+                    "",
+                    "write",
+                    &raw_path,
+                    "overwrite",
+                    old_content.as_deref(),
+                    Some(&content),
+                    "ok",
+                );
                 let text = if let Some(ref old) = old_content {
                     // Overwrite：用 similar ops() 直接算统计（+N -M / 首个变更行），
                     // 正文默认不回传（diff 走展示平面，不占模型上下文）。
@@ -230,7 +251,8 @@ fn trash_dir() -> std::path::PathBuf {
 }
 
 pub(super) fn exec_delete_file(args: &serde_json::Value) -> String {
-    let path = crate::resolve_workspace_path(&args.s("path"));
+    let raw_path = args.s("path");
+    let path = crate::resolve_workspace_path(&raw_path);
     let p = std::path::Path::new(&path);
     if !p.exists() {
         return serde_json::json!({
@@ -290,9 +312,21 @@ pub(super) fn exec_delete_file(args: &serde_json::Value) -> String {
         let _ = std::fs::create_dir_all(parent);
     }
 
+    let journal_before = std::fs::read_to_string(&path).ok();
+
     match std::fs::rename(p, &trash_path) {
         Ok(_) => {
             crate::file_state::record_delete(&path);
+            crate::journal::record_change(
+                &crate::journal::active_session(),
+                "",
+                "delete",
+                &raw_path,
+                "delete",
+                journal_before.as_deref(),
+                None,
+                "ok",
+            );
             serde_json::json!({
             "timeis": crate::now_utc8(),
             "status": "ok",
@@ -326,6 +360,16 @@ pub(super) fn exec_delete_file(args: &serde_json::Value) -> String {
                 match std::fs::remove_file(p) {
                     Ok(_) => {
                         crate::file_state::record_delete(&path);
+                        crate::journal::record_change(
+                            &crate::journal::active_session(),
+                            "",
+                            "delete",
+                            &raw_path,
+                            "delete",
+                            journal_before.as_deref(),
+                            None,
+                            "ok",
+                        );
                         serde_json::json!({
                         "timeis": crate::now_utc8(),
                         "status": "ok",

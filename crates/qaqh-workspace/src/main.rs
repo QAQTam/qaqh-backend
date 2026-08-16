@@ -29,6 +29,10 @@ fn main() {
     }
 
     let tool = &args[1];
+    if tool == "journal" {
+        std::process::exit(qaqh_workspace::journal::cli_main(&args[2..]));
+    }
+
     if tool == "list" {
         let defs = qaqh_workspace::runtime::all_tools();
         println!("Available tools:");

@@ -96,6 +96,27 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 
 ---
 
+## 2.1 本轮待合并 PR（SMJ 编辑日志基础版）
+
+- 分支建议：`refactor/knife2-smj-editing-log`
+- 内容：
+  - 新增 `qaqh-workspace::journal`：`steps.jsonl` + `blobs/<sha256>`
+  - 接入 `write` / `edit` / `apply_patch` / `delete` / `copy_range` / `web_fetch(output=...)`
+  - 新增 `journal` workspace 工具与 `qaqh-workspace journal query|replay|export` CLI
+  - `journal export --format patches` 可导出 unified diff 补丁集
+- 验证：
+  - `cargo check --workspace`
+  - `cargo test -p qaqh-workspace`
+  - `cargo test -p qaqh-msglp --test permission_lifecycle`
+- 状态：待 push / 待开 PR
+
+## 2.2 下一步（刀 2 剩余 / 刀 1）
+
+- 刀 2 剩余：把 timeline / messages / compact / ringing journal 四套持久化收敛为一条事件溯源日志；
+  SMJ 编辑日志已作为前置小步落地，可作为同一事件流的 workspace 侧事实日志。
+- 刀 1：子代理 in-process 化，移除 `spawn_subagent` 的 `Command::new(current_exe)` 与三层连接。
+- 刀 7：统一注入插槽（InjectionBus），对 loop 动刀，收敛 subagent / skills / MCP / 系统 / 用户注入路径。
+
 ## 3. 当前 Bug 状态表
 
 | Bug | 状态 | 说明 |
@@ -124,7 +145,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - 删除 `apps/winui/src/bridge/types.rs` 本地 `TOOL_MODE_VALUES`
 - 给前端仓库接 Windows CI；当前 #1 这种 6.7k 行移动无 CI 保障
 
-### P1：SMJ 编辑日志（推荐后端下一步）
+### P1：SMJ 编辑日志（基础版已落地）
 
 - 依据：`docs/nextdev/SESSION-JOURNAL-PLAN.md`
 - 目标：所有 workspace 写路径收口后追加 `journal/steps.jsonl` + content-addressed blobs
@@ -220,6 +241,6 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - `docs/nextdev/REFACTOR-ROADMAP.md` — 重构方向、七刀、判据
 - `docs/nextdev/bugfix-1.1-nextdev.md` — BUG-001~013 档案
 - `docs/nextdev/EXPLORE-REFACTOR-1.1.md` — 文档↔qaqh-* 仓库映射、keep/remove/merge
-- `docs/nextdev/SESSION-JOURNAL-PLAN.md` — SMJ 编辑日志设计草案
+- `docs/nextdev/SESSION-JOURNAL-PLAN.md` — SMJ 编辑日志（基础版已落地）
 - `docs/nextdev/legal/` — 用户协议/隐私政策，保留不动
 - `docs/backlog/` — 旧计划归档，按需回溯

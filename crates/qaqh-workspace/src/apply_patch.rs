@@ -95,6 +95,23 @@ fn exec_engine_patch(ws: &str, patch: &str, dry_run: bool) -> ToolResult {
                     if let Some(new) = &d.new {
                         crate::file_state::record_write(&d.path, new);
                     }
+                    let op = if d.old.is_none() {
+                        "add"
+                    } else if d.new.is_none() {
+                        "delete"
+                    } else {
+                        "update"
+                    };
+                    crate::journal::record_change(
+                        &crate::journal::active_session(),
+                        "",
+                        "apply_patch",
+                        &d.path,
+                        op,
+                        d.old.as_deref(),
+                        d.new.as_deref(),
+                        "ok",
+                    );
                 }
             }
             let n = outcome.affected.added.len()
