@@ -176,7 +176,13 @@
 - **根因**：`deepx_config::Config` 是纯值对象，只有全量 `load()` / `save()`，没有全局缓存/单例、没有按字段 patch 的统一 API。调用方遍布 service、msglp agent、subagent、workspace、conversation_snapshot、daemon server；service 的 `config.save` 又手工逐字段 update，`config.set_permission_level` 独立写，加上 WinUI 本地偏好文件，形成多写入口。
 - **证据**：`crates/deepx-config/src/config.rs:283,560`；`crates/deepx-runtime/src/service.rs:464-495,785-870`；`crates/deepx-msglp/src/state/agent.rs:312-331`；`crates/deepx-subagent/src/lib.rs:333`；`crates/deepx-workspace/src/permission.rs:440`；`apps/winui/src/bridge.rs:1214-1220,2384-2426,3040-3160`；`apps/winui/src/settings_view.rs:854-861`。
 - **影响面**：设置一致性、多前端、重启漂移、权限/主题/语言。
-- **状态**：open（与 BUG-001 同根，侧重后端 config crate 缺少统一 API）
+- **状态**：fixed（2026-08-16 后端侧）
+
+  - `qaqh_config::Config::update(FnOnce(&mut Config) -> Result<(), String>)` 成为受锁单写口；
+  - daemon 的 `config.save` / `config.set_permission_level` / `profile.apply` / `profile.save_current` / `profile.delete` / `workspace.set_mode` 全部改走该口；
+  - 写成功后统一经 `notify_config_changed` 广播 `AgentReloadConfig`；
+  - 回归：`qaqh-config` update 事务测试 + `qaqh-runtime` 多 action 不丢字段测试。
+  - 前端 `ui-preferences.json` / 本地 theme 路径仍在 BUG-001 中跟踪（WinUI 仓库侧）。
 
 ### BUG-009 msglp 插件化 loop 名存实亡：文档宣称 Engine trait 可插拔，实际已退化为硬编码 dispatch，注入跨 crate
 

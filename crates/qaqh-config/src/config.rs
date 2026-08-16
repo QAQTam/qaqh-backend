@@ -1,9 +1,10 @@
+use crate::secrets::{CONFIG_MARKER, SecretSlot, SecretStore};
 use qaqh_types::{
     ConfigStore, PersistentConfig, PersistentMultimodalConfig, PersistentSubagentConfig,
     PersistentWorkspaceConfig,
 };
-use crate::secrets::{CONFIG_MARKER, SecretSlot, SecretStore};
 use std::collections::HashMap; // still used by profiles
+use std::sync::{Mutex, OnceLock};
 
 /// Subagent default configuration.
 ///
@@ -279,16 +280,51 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Serializes all process-local config read-modify-write cycles.
+    ///
+    /// `ConfigStore` already uses atomic rename for corruption safety, but
+    /// concurrent daemon actions (config.save + set_permission_level + profile
+    /// actions) used to perform independent load→mutate→save transactions and
+    /// could overwrite each other. Every public load/save/update now goes
+    /// through this lock.
+    fn config_io_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     /// Load config from disk (TOML primary store).
     pub fn load() -> Result<Self, String> {
+        let _guard = Self::config_io_lock()
+            .lock()
+            .map_err(|_| "config lock poisoned".to_string())?;
+        Self::load_unlocked()
+    }
+
+    fn load_unlocked() -> Result<Self, String> {
         let store = ConfigStore::default_location();
         Self::load_from_paths_with(store, SecretStore::default_location())
     }
 
-    fn load_from_paths_with(
-        store: ConfigStore,
-        secrets: SecretStore,
-    ) -> Result<Self, String> {
+    /// The single config write port (BUG-008 / roadmap 刀6).
+    ///
+    /// Loads the current config, applies `mutate`, and persists it in one
+    /// locked transaction. If `mutate` returns `Err`, nothing is written and
+    /// the error is propagated. Daemon actions must mutate config exclusively
+    /// through this method instead of `load()` + direct field writes + `save()`.
+    pub fn update<F>(mutate: F) -> Result<Self, String>
+    where
+        F: FnOnce(&mut Self) -> Result<(), String>,
+    {
+        let _guard = Self::config_io_lock()
+            .lock()
+            .map_err(|_| "config lock poisoned".to_string())?;
+        let mut config = Self::load_unlocked()?;
+        mutate(&mut config)?;
+        config.save_unlocked()?;
+        Ok(config)
+    }
+
+    fn load_from_paths_with(store: ConfigStore, secrets: SecretStore) -> Result<Self, String> {
         let mut cfg = Self::default();
 
         let pc = store.load();
@@ -558,6 +594,13 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<(), String> {
+        let _guard = Self::config_io_lock()
+            .lock()
+            .map_err(|_| "config lock poisoned".to_string())?;
+        self.save_unlocked()
+    }
+
+    fn save_unlocked(&self) -> Result<(), String> {
         self.save_with(
             &ConfigStore::default_location(),
             &SecretStore::default_location(),
@@ -703,6 +746,8 @@ impl Config {
         Ok(())
     }
 
+    /// Pure profile switch. Persistence is the caller's responsibility via
+    /// [`Config::update`] — profile methods must not create another write port.
     pub fn apply_profile(&mut self, name: &str) -> Option<String> {
         let profile = self.profiles.get(name)?.clone();
         self.model = profile.model;
@@ -721,7 +766,6 @@ impl Config {
             }
         }
         self.active_profile = name.to_string();
-        let _ = self.save();
         Some(name.to_string())
     }
 
@@ -738,19 +782,13 @@ impl Config {
             },
         );
         self.active_profile = name.to_string();
-        let _ = self.save();
     }
 
     pub fn delete_profile(&mut self, name: &str) -> bool {
         if name == "default" {
             return false;
         }
-        if self.profiles.remove(name).is_some() {
-            let _ = self.save();
-            true
-        } else {
-            false
-        }
+        self.profiles.remove(name).is_some()
     }
 
     pub fn is_ready(&self) -> bool {
