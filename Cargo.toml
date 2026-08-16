@@ -20,6 +20,7 @@ members = [
     "crates/qaqh-gate-testui",
     "crates/qaqh-update",
     "dsh-minimal-mode",
+    "apps/tui",
 ]
 
 [workspace.package]
