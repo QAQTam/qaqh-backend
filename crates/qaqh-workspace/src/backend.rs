@@ -442,6 +442,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)] // Windows 盘符/cmd 语义；Linux 无对应环境
     fn process_kill_preempts_long_running_task_in_serve() {
         // 用户场景：长任务（如 cargo test 跑数分钟）期间必须能 kill 抢占。
         // 修复前：process kill 走串行 worker，排队到长任务结束（数分钟）。

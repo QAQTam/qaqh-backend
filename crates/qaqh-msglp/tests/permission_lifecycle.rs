@@ -734,8 +734,18 @@ fn llm_approval_forwards_exec_via_http_backend() {
     let calls = tool_round(&[("http-exec", "exec", marker_exec_args(&marker))]);
 
     // 起真实 serve 进程（本地，模拟 WSL 模式的 Http backend 执行路径）。
-    let serve_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/qaqh-workspace.exe");
+    // 平台适配：Windows 产物带 .exe；CARGO_TARGET_DIR 覆盖时跟随覆盖目录。
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target")
+        });
+    let exe_name = if cfg!(windows) {
+        "qaqh-workspace.exe"
+    } else {
+        "qaqh-workspace"
+    };
+    let serve_bin = target_dir.join("debug").join(exe_name);
     assert!(serve_bin.exists(), "serve binary missing: {}", serve_bin.display());
     let mut serve = std::process::Command::new(&serve_bin)
         .args(["serve", "--host", "127.0.0.1", "--port", "18991", "--token", "testtoken"])

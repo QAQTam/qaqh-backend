@@ -277,6 +277,12 @@ mod tests {
             "line1\nline2\n"
         );
 
+        // 并行测试可能覆盖 CURRENT_WORKSPACE（Linux 调度差异放大竞争）：
+        // confirm 重放前重新钉住本测试的 workspace。
+        crate::CURRENT_WORKSPACE
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone_from(&ws);
         let out = run_confirm(&pending_id, "apply");
         assert_eq!(out["status"], "ok", "confirm patch failed: {out}");
         assert_eq!(
