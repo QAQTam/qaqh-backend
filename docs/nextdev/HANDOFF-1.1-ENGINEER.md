@@ -2,7 +2,7 @@
 
 > 日期：2026-08-17
 > 交接范围：后端主仓库 `QAQTam/QAQ-Harness` + 前端仓库 `QAQTam/qaqh-winui-app`
-> 当前主线：`origin/main = 2dc02d1`（刀 1 step 1 #10 已合并，无 open PR）
+> 当前主线：`origin/main = 00e027d`（后端无 open PR；前端见 8.4，`qaqh-winui-app#10` 为当前唯一 open PR）
 
 ---
 
@@ -10,9 +10,9 @@
 
 1. 后端 repo 已从 `deepx-*` 更名为 `qaqh-*`；WinUI 前端在独立仓库 `qaqh-winui-app`。
 2. 必读三份文档：`REFACTOR-ROADMAP.md`、`bugfix-1.1-nextdev.md`、`EXPLORE-REFACTOR-1.1.md`。
-3. 本阶段已完成并合并后端 PR #3/#4/#5/#6/#8/#10（#7 为交接文档）和 1 个前端 PR（qaqh-winui-app#1）。
+3. 本阶段后端 PR #3/#4/#5/#6/#8/#10 及 handoff docs #7/#11/#12 已合并；前端 #1–#9 已合并，#10（data-root 迁移 + 通知打包修复）open 且 CI 绿。
 4. SMJ 编辑日志已完成；刀 1 已开始分步落地：本轮 step 1 把子代理 worker 从 `Command::new(current_exe)` 子进程改为 daemon 内 Loop actor，主 agent 进程化与逐 actor 隔离仍待后续 step。
-5. 后端所有测试在 Arch Linux 可跑；WinUI 只能在 Windows 编译，当前前端仓库无 CI。
+5. 后端所有测试在 Arch Linux 可跑；WinUI 只能在 Windows 编译，前端已于 #7 接入 Windows CI（`cargo check/test -p qaqh-winui`）。
 6. 写代码前必须使用 `git worktree`，不要直接在 `main` 上改。
 
 ---
@@ -69,7 +69,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 
 ## 2. 本阶段已完成的工作
 
-所有 PR 均已 squash merge。
+下表中除 `qaqh-winui-app #10` 为 open 外，其余 PR 均已 squash merge。
 
 | PR | Commit | 内容 |
 |---|---|---|
@@ -78,6 +78,12 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 | QAQ-Harness #5 | `49f6d97` | compact-context 损坏或 archive 边界越界时 fail-closed，禁止回退全量历史。修 BUG-007。 |
 | QAQ-Harness #6 | `da31082` | `qaqh_config::Config::update` 受锁单写口；daemon 六个 config 写路径收敛；统一 `AgentReloadConfig` 广播。修后端 BUG-008/部分 BUG-001。 |
 | qaqh-winui-app #1 | 前端 main | `bridge.rs` 6429 行拆成 `bridge/` 模块；BUG-004 viewport 恢复移除，恢复会话强制贴底。已 review 并合并。 |
+| qaqh-winui-app #2–#5 | 前端 main | `round_renderer` / `chat_view` / `settings_view` / `composer_bar` 拆成模块目录。已合并。 |
+| qaqh-winui-app #6 | `05601cd` | 前端消费 `qaqh_types::tool_mode` 单契约，移除本地 `TOOL_MODE_VALUES`（BUG-013 前端跟进）。已合并。 |
+| qaqh-winui-app #7 | `ef396b1` | 新增 Windows CI workflow（`cargo check/test -p qaqh-winui`）。已合并。 |
+| qaqh-winui-app #8 | `3c0c8e8` | tool-mode ComboBox 映射集中化并覆盖 BUG-014 持久化 guard。已合并。 |
+| qaqh-winui-app #9 | `252b522` | 清理 WebView/renderer 残留注释。已合并。 |
+| qaqh-winui-app #10 | `b5a4535` | **open（CI 绿）**：legacy `DeepX` data-root marker 迁移、通知 Insights 资源 DLL 打包补齐、版本锁改读后端仓库。 |
 | QAQ-Harness #8 | `eb8ceac` | SMJ 编辑日志基础版：`journal` 模块 + workspace 工具 + CLI；接入 write/edit/apply_patch/delete/copy_range/web_fetch；支持 query/replay/export patches。 |
 | QAQ-Harness #10 | `2dc02d1` | 刀 1 step 1：`LoopChannels` / `Loop::from_channels` 通道化 loop；`AgentRegistry::spawn_subagent` 不再 `Command::new(current_exe)`，改为 daemon 内 Ringing Loop actor + 直接 Hub 发布；actor 私有 ToolManager；新增回归测试。 |
 
@@ -158,17 +164,18 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 | BUG-010 | open | 大文件/crate 碎片化仍待刀 4/5/10 |
 | BUG-011 | **部分修复（#10）** | 子代理进程/三层连接成本已消除；多写、同步持久化、手写 HTTP 仍待刀 2/3 |
 | BUG-012 | fixed | `session.set_tool_mode` 白名单已放行 |
-| BUG-013 | **fixed（后端）** | `qaqh_types::tool_mode` 单契约；前端需跟进消费 |
+| BUG-013 | **fixed** | `qaqh_types::tool_mode` 单契约；前端 #6 已消费并移除本地 `TOOL_MODE_VALUES` |
 
 ---
 
 ## 4. 下一步工作建议
 
-### P0：前端跟进（交给前端工程师）
+### P0：前端跟进（交给前端工程师）— 主体已完成
 
-- `qaqh-winui-app` 增加 `qaqh-types` 依赖，消费 `qaqh_types::tool_mode`
-- 删除 `apps/winui/src/bridge/types.rs` 本地 `TOOL_MODE_VALUES`
-- 给前端仓库接 Windows CI；当前 #1 这种 6.7k 行移动无 CI 保障
+- ✅ `qaqh-winui-app` 已增加 `qaqh-types` 依赖，消费 `qaqh_types::tool_mode`（#6）
+- ✅ 本地 `TOOL_MODE_VALUES` 已删除/收敛（#6/#8）
+- ✅ Windows CI 已接入（#7）
+- 剩余：跟进 #10 合入，以及 issue #9 前端侧配置迁移（theme/notifications）
 
 ### P1：SMJ 编辑日志 ✅ 已合并（#8）
 
@@ -225,7 +232,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
    提示；如果不需要，接手者应决定提交或删除。
 7. **`docs/nextdev/bugfix-1.1-nextdev.md` 是档案 + 现状混合**：旧条目保留
    `deepx-*` 路径；新增状态在文末“落地增量”区。不要大改旧记录，追加即可。
-8. **GitHub 无 CI**：目前所有 PR 均无 checks；合并前必须本地跑测试。
+8. **后端 GitHub 无 CI**：后端 PR 均无 checks，合并前必须本地跑测试；前端 #7 起已有 Windows CI。
 9. **刀 1 step 1 的 actor 是串行的**：`qaqh-workspace` 全局 workspace/session/sandbox/tool-manager 尚未逐 actor 化，daemon 内多个子代理 actor 由 `SUBAGENT_ACTOR_SERIAL` 排队执行。不要把“N 个子代理并发”当作已达成。
 
 ---
@@ -273,7 +280,8 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - `shutdown_all` 先广播关闭再 join，覆盖多个排队 actor 的关闭路径。
   - 新增 `qaqh-msglp/tests/inprocess_loop.rs`、`qaqh-runtime/tests/subagent_inprocess.rs`。
 - QAQ-Harness #11（`27c4967`）：把 #10 标记为已合并并同步 handoff 主线。
-- 清理：删除 PR 分支与 worktree；当前 `origin/main = 27c4967`，无 open PR。
+- QAQ-Harness #12（`00e027d`）：记录第二轮工作并确认前端 issue #9。
+- 清理：删除 PR 分支与 worktree；当前 `origin/main = 00e027d`，后端无 open PR。
 - 验证：`cargo check --workspace`、`cargo test -p qaqh-runtime`、`cargo test -p qaqh-msglp`、`cargo test -p qaqh-workspace --lib` 全部通过（workspace 测试存在既有并行全局态 flaky，单测重跑通过）。
 
 ### 8.2 下一轮工作（按建议优先级）
@@ -301,3 +309,30 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - **后端确认**：已通过 `gh issue list/view` 核实该 issue 是当前 backend 唯一 open issue，并已在 issue 下留确认评论。
 
 ---
+
+## 9. 本轮工程师工作补充（2026-08-17 第三轮）
+
+### 9.1 仓库与前端状态快照
+
+- 后端 `QAQ-Harness`：`main = origin/main = 00e027d`，工作区仅 `AGENT.md` untracked；后端无 open PR，唯一 open issue 为 #9。
+- 前端 `qaqh-winui-app` 已 clone 到 `/home/qaqtamsy/桌面/project/qa-frontend/qaqh-winui-app`：
+  - `main = origin/main = 252b522`，工作区 clean。
+  - PR #1–#9 已合并；#10 open（head `fix/winui-data-root-marker-and-notify-package` @ `b5a4535`，WinUI CI 绿）。
+  - 无 open issue。
+
+### 9.2 前端 #10 与后端相关点
+
+- 新增 `bridge::migrate_legacy_data_root_marker()`：把旧 `product: "DeepX"` 的 `.deepx-data-root.json` 原位改写为 `QAQ-Harness`；仅在 `canonicalRoot/ownerHome/rootId` 全部与当前用户数据根吻合时改写，任何不吻合都 fail-closed。
+- 在任何 `connect_client` / daemon spawn 之前调用，解决旧品牌 marker 导致 daemon 拒绝启动 → 首屏会话/工作区/config 全挂的问题。
+- `assemble-winui.ps1` 按 `Microsoft.WindowsAppRuntime.dll` SHA-256 从 windows-reactor-setup 缓存匹配并补齐 `Microsoft.WindowsAppRuntime.Insights.Resource.dll`（修通知 `Register` 0x8007007E）。
+- `collect-payload-winui.ps1` / justfile 增加 `-BackendRoot ../QAQ-Harness`，版本锁改从后端仓库读取。
+
+### 9.3 旧 commit 回归关注（DeepX → QAQ-Harness 重命名）
+
+- 根因 commit：`658ece8 chore: rename deepx -> QAQ-Harness` 将 data-root marker 的 `product` 从 `DeepX` 改为 `QAQ-Harness`，但没有迁移已落盘旧 marker；后端 `ensure_data_root` 又严格校验 `product == "QAQ-Harness"`，因此旧用户会被锁在数据根外。
+- 当前前端 #10 在壳侧自行镜像了后端私有公式：`normalized_path_text`、`data_root_id`（FNV-1a 64）和 `DataRootMarker` 字段。契约一旦漂移会重新复现此漏洞。
+- 后端 `ensure_data_root` 本身仍不接受 legacy `DeepX` marker；CLI/第三方直连 daemon 的路径没有迁移保护。
+- 联查建议（待用户确认后实施）：
+  1. 后端 `qaqh_types::platform` 增加权威的 legacy-marker 迁移逻辑，并让 daemon 启动路径自带迁移；旧 marker 仅在 canonicalRoot/ownerHome/rootId 全吻合时改写，异主/损坏 marker fail-closed 不越权。
+  2. 前端 #10 改为调用后端公开 API（或至少由后端共享权威公式/测试向量），避免两边各维护一份 FNV-1a/路径归一实现。
+  3. 前后端各补同一组回归测试：legacy DeepX marker 可迁移；QAQ-Harness marker 幂等不动；陌生产品/异主/损坏 marker 拒绝且文件不变。
