@@ -150,6 +150,8 @@ fn cmd_session_create() -> RingingCommand {
     RingingCommand::Control(ControlCommand::SessionCreate {
         close_current: false,
         cwd: None,
+        tool_mode: None,
+        custom_tools: Vec::new(),
     })
 }
 

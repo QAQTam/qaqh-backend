@@ -76,6 +76,8 @@ fn ten_parallel_reads_same_file() {
             RingingCommand::Control(ControlCommand::SessionCreate {
                 close_current: false,
                 cwd: None,
+                tool_mode: None,
+                custom_tools: Vec::new(),
             }),
         );
 

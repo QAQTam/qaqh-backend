@@ -13,10 +13,11 @@ use std::time::Duration;
 use qaqh_client::endpoint::{ActionRequest, QueryRequest};
 use qaqh_client::error::Result as ClientResult;
 use qaqh_client::types::{
-    CommandOptions, RingingCommand, RingingCommandAck, TimelineEntry, TimelinePage, TimelineStatus,
+    CommandOptions, EventBatch, RingingCommand, RingingCommandAck, TimelineEntry, TimelinePage,
+    TimelineStatus,
 };
 use qaqh_client::{Client, ClientHandlers, ClientOptions};
-use qaqh_domain::ConversationCommand;
+use qaqh_domain::{ControlCommand, ConversationCommand, SessionState};
 use tokio::sync::mpsc;
 
 /// The only tool mode this shell supports. `minimal:dsh` = the two-tool
@@ -28,6 +29,9 @@ pub enum UiEvent {
     TimelineEntry(String, TimelineEntry),
     TimelineStatus(TimelineStatus),
     TimelineSnapshot(TimelinePage),
+    /// Control-channel batch (session lifecycle; used to resolve the seed of
+    /// a freshly created session).
+    ControlBatch(EventBatch),
 }
 
 /// One row of the `session.list` payload relevant to the selector.
@@ -57,6 +61,7 @@ impl QaqhBridge {
         let entry_tx = tx.clone();
         let status_tx = tx.clone();
         let snapshot_tx = tx.clone();
+        let batch_tx = tx.clone();
         let handlers = ClientHandlers {
             on_timeline_entry: Arc::new(move |seed, entry| {
                 let _ = entry_tx.send(UiEvent::TimelineEntry(seed, entry));
@@ -66,6 +71,9 @@ impl QaqhBridge {
             }),
             on_timeline_snapshot: Arc::new(move |page| {
                 let _ = snapshot_tx.send(UiEvent::TimelineSnapshot(page));
+            }),
+            on_batch: Arc::new(move |batch| {
+                let _ = batch_tx.send(UiEvent::ControlBatch(batch));
             }),
             ..ClientHandlers::default()
         };
@@ -113,22 +121,42 @@ impl QaqhBridge {
         Ok(items)
     }
 
-    /// Create a fresh session pre-locked to `minimal:dsh`. The daemon
-    /// persists the tool mode before spawning the worker, so the minimal
-    /// system prompt is active from the very first turn.
-    pub async fn start_session(&self, cwd: Option<String>) -> ClientResult<String> {
-        let value = self
-            .client
-            .query(QueryRequest::SessionNew {
-                cwd,
-                tool_mode: Some(LOCKED_TOOL_MODE.to_string()),
-                custom_tools: Vec::new(),
-            })
-            .await?;
-        value
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| qaqh_client::error::ClientError::Protocol("session.new: no seed".into()))
+    /// Create a fresh session via the Ringing control envelope, pre-locked
+    /// to `minimal:dsh`. The daemon persists the tool mode before spawning
+    /// the worker, so the minimal system prompt is active from turn one.
+    /// The new seed arrives on the control channel (`ControlBatch` event);
+    /// use [`Self::created_seed`] to extract it.
+    pub async fn create_session(&self, cwd: Option<String>) -> ClientResult<RingingCommandAck> {
+        self.client
+            .send_command(
+                None,
+                RingingCommand::Control(ControlCommand::SessionCreate {
+                    close_current: false,
+                    cwd,
+                    tool_mode: Some(LOCKED_TOOL_MODE.to_string()),
+                    custom_tools: Vec::new(),
+                }),
+                CommandOptions::default(),
+            )
+            .await
+    }
+
+    /// Extract the seed of a just-created session from a control batch.
+    pub fn created_seed(batch: &EventBatch) -> Option<String> {
+        use qaqh_client::types::{Channel, RingingEvent};
+        if batch.channel != Channel::Control {
+            return None;
+        }
+        for envelope in &batch.envelopes {
+            if let RingingEvent::Control(qaqh_domain::ControlEvent::SessionStateChanged {
+                state: SessionState::Created,
+                ..
+            }) = &envelope.event
+            {
+                return Some(envelope.seed.clone());
+            }
+        }
+        None
     }
 
     /// Attach a seed to this client lease (`session_resume`).

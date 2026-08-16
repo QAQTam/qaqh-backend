@@ -115,13 +115,38 @@ impl App {
     // ── Startup flows ──────────────────────────────────────────────────
 
     async fn begin_new_session(&mut self) -> Result<(), String> {
-        let cwd = std::env::current_dir().ok().map(|path| path.to_string_lossy().into_owned());
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
         self.notice = "creating session (minimal:dsh)…".to_string();
-        let seed = self
-            .bridge
-            .start_session(cwd)
+        self.bridge
+            .create_session(cwd)
             .await
-            .map_err(|error| format!("session.new: {error}"))?;
+            .map_err(|error| format!("session.create: {error}"))?;
+
+        // The new seed is broadcast on the control channel as
+        // SessionStateChanged(Created); wait for it (bounded).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let seed = loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err("timed out waiting for created session seed".into());
+            }
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, self.bridge.rx.recv()).await {
+                Ok(Some(UiEvent::ControlBatch(batch))) => {
+                    if let Some(seed) = QaqhBridge::created_seed(&batch) {
+                        break seed;
+                    }
+                }
+                Ok(Some(UiEvent::TimelineStatus(status))) => {
+                    self.timeline_status = status_text(&status);
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => return Err("bridge channel closed while creating session".into()),
+                Err(_) => {}
+            }
+        };
+
         self.notice = format!("attaching {seed}…");
         self.bridge
             .attach(&seed)
@@ -204,25 +229,17 @@ impl App {
                 }
             }
             UiEvent::TimelineStatus(status) => {
-                self.timeline_status = match status {
-                    qaqh_client::types::TimelineStatus::Connecting { seed } => {
-                        format!("connecting {seed}")
-                    }
-                    qaqh_client::types::TimelineStatus::Open { cursor, .. } => {
-                        format!("live (cursor {cursor})")
-                    }
-                    qaqh_client::types::TimelineStatus::Reconnecting {
-                        retry_ms, cursor, ..
-                    } => format!("reconnecting (retry {retry_ms}ms, cursor {cursor})"),
-                    qaqh_client::types::TimelineStatus::Closed { reason, .. } => {
-                        format!("closed: {reason}")
-                    }
-                };
+                self.timeline_status = status_text(&status);
             }
             UiEvent::TimelineSnapshot(page) => {
                 if self.seed.as_deref() == Some(page.seed.as_str()) {
                     self.transcript.apply_snapshot(&page);
                 }
+            }
+            UiEvent::ControlBatch(_batch) => {
+                // Session lifecycle events: the selector screen is rebuilt on
+                // demand; creation-time seed resolution happens in
+                // `begin_new_session` before this dispatcher runs.
             }
         }
     }
@@ -387,6 +404,21 @@ impl App {
         if self.input_cursor < chars.len() {
             chars.remove(self.input_cursor);
             self.input = chars.into_iter().collect();
+        }
+    }
+}
+
+fn status_text(status: &qaqh_client::types::TimelineStatus) -> String {
+    match status {
+        qaqh_client::types::TimelineStatus::Connecting { seed } => format!("connecting {seed}"),
+        qaqh_client::types::TimelineStatus::Open { cursor, .. } => {
+            format!("live (cursor {cursor})")
+        }
+        qaqh_client::types::TimelineStatus::Reconnecting {
+            retry_ms, cursor, ..
+        } => format!("reconnecting (retry {retry_ms}ms, cursor {cursor})"),
+        qaqh_client::types::TimelineStatus::Closed { reason, .. } => {
+            format!("closed: {reason}")
         }
     }
 }

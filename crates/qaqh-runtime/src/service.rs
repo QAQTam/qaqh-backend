@@ -1299,7 +1299,6 @@ fn plan_action(seed: &str, item_id: &str, action: &str, comment: &str) -> Result
 
 #[allow(dead_code)]
 #[cfg(test)]
-#[cfg(test)]
 mod tool_mode_tests {
     use super::{optional_tool_mode, validate_tool_mode};
 
@@ -1345,6 +1344,8 @@ mod tool_mode_tests {
         assert!(validate_tool_mode("turbo").is_err());
     }
 }
+
+#[cfg(test)]
 mod control_scope_tests {
     use super::DeepxService;
 
