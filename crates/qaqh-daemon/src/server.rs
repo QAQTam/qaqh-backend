@@ -24,15 +24,97 @@ fn daemon_channel() -> String {
     })
 }
 
+/// `qaqh-daemon server` 的网络配置（临时跨端模式，不做任何安全加固）。
+#[derive(Debug, Clone)]
+pub struct ServerNetworkConfig {
+    /// 监听 IP；`0.0.0.0` = 局域网可访问。
+    pub bind_ip: std::net::IpAddr,
+    /// 固定端口（远端客户端需要可预测的地址）。
+    pub port: u16,
+    /// Bearer token；缺省时随机生成并打印到 stderr。
+    pub token: Option<String>,
+}
+
+impl Default for ServerNetworkConfig {
+    fn default() -> Self {
+        Self {
+            bind_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            port: 0,
+            token: None,
+        }
+    }
+}
+
+impl ServerNetworkConfig {
+    /// `server --bind <ip> --port <port> --token <token>`；token 也接受
+    /// `QAQH_SERVER_TOKEN` 环境变量（避免出现在进程命令行里）。
+    pub fn parse(args: &[String]) -> Result<Self, String> {
+        let mut config = Self {
+            bind_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port: 64413,
+            token: std::env::var("QAQH_SERVER_TOKEN").ok().filter(|v| !v.is_empty()),
+        };
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--bind" => {
+                    index += 1;
+                    let value = args.get(index).ok_or("--bind requires a value")?;
+                    config.bind_ip = value
+                        .parse()
+                        .map_err(|_| format!("invalid --bind ip: {value}"))?;
+                }
+                "--port" => {
+                    index += 1;
+                    let value = args.get(index).ok_or("--port requires a value")?;
+                    config.port = value.parse().map_err(|_| format!("invalid --port: {value}"))?;
+                }
+                "--token" => {
+                    index += 1;
+                    let value = args.get(index).ok_or("--token requires a value")?;
+                    config.token = Some(value.clone());
+                }
+                other => return Err(format!("unknown server flag: {other}")),
+            }
+            index += 1;
+        }
+        Ok(config)
+    }
+}
+
+/// 尽力猜测本机局域网 IP：UDP connect 不真正发包，只让内核选出口网卡。
+/// 连的是 TEST-NET 保留地址，不会产生网络流量。
+fn guess_lan_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    socket.local_addr().ok().map(|addr| addr.ip())
+}
+
 pub async fn run() -> Result<(), String> {
+    run_with(ServerNetworkConfig::default()).await
+}
+
+pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     let data_root = qaqh_types::platform::ensure_data_root().map_err(stringify)?;
     let _lock = acquire_single_instance()?;
-    let token = random_hex();
+    let token = config.token.clone().unwrap_or_else(random_hex);
+    if config.token.is_none() && !config.bind_ip.is_loopback() {
+        // 临时跨端模式：没显式给 key 时把生成值打出来，方便手动填写。
+        eprintln!("[qaqh-daemon] generated server token: {token}");
+    }
     let epoch = random_hex();
-    let listener = TcpListener::bind("127.0.0.1:0").await.map_err(stringify)?;
+    let listener = TcpListener::bind((config.bind_ip, config.port))
+        .await
+        .map_err(stringify)?;
     let address = listener.local_addr().map_err(stringify)?;
+    // 0.0.0.0 不可被远端直连：discovery 与 display_host 换成可路由的局域网 IP。
+    let advertise_ip = if config.bind_ip.is_unspecified() {
+        guess_lan_ip().unwrap_or(config.bind_ip)
+    } else {
+        config.bind_ip
+    };
     let discovery = DaemonDiscovery {
-        endpoint: format!("ws://{address}/control/v1"),
+        endpoint: format!("ws://{advertise_ip}:{}/control/v1", address.port()),
         token: token.clone(),
         pid: std::process::id(),
         server_epoch: epoch.clone(),
@@ -46,6 +128,12 @@ pub async fn run() -> Result<(), String> {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
     };
+    if !config.bind_ip.is_loopback() {
+        log::warn!(
+            "[qaqh-daemon] lan server mode on {advertise_ip}:{} — temporary build, no transport security",
+            address.port()
+        );
+    }
     let hub = Arc::new(RingingHub::with_persistence(
         epoch.clone(),
         data_root.join("ringing"),

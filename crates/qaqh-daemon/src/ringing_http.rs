@@ -2080,6 +2080,8 @@ fn query_method(name: &str) -> Option<&'static str> {
         "session/get_activity" | "session.get_activity" => Some("session.get_activity"),
         "workspace/get" | "workspace.get" => Some("workspace.get"),
         "workspace/status" | "workspace.status" => Some("workspace.status"),
+        "fs/list" | "fs.list" => Some("fs.list"),
+        "fs/read" | "fs.read" => Some("fs.read"),
         "config/load" | "config.load" => Some("config.load"),
         "skills/list_tools" | "skills.list_tools" => Some("skills.list_tools"),
         "todo/status" | "todo.status" => Some("todo.status"),

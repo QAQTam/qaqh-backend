@@ -20,6 +20,8 @@ pub fn query(service: &DeepxService, method: &str, params: &Value) -> Result<Val
         | "workspace.get"
         | "workspace.status"
         | "workspace.list"
+        | "fs.list"
+        | "fs.read"
         | "config.load"
         | "skills.list_tools"
         | "todo.status"

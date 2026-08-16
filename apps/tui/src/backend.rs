@@ -16,7 +16,7 @@ use qaqh_client::types::{
     CommandOptions, EventBatch, RingingCommand, RingingCommandAck, TimelineEntry, TimelinePage,
     TimelineStatus,
 };
-use qaqh_client::{Client, ClientHandlers, ClientOptions};
+use qaqh_client::{Client, ClientHandlers, ClientOptions, RemoteEndpoint};
 use qaqh_domain::{ControlCommand, ConversationCommand, SessionState};
 use tokio::sync::mpsc;
 
@@ -78,11 +78,22 @@ impl QaqhBridge {
             ..ClientHandlers::default()
         };
 
+        // 临时跨端模式：QAQH_REMOTE_URL=http://ip:port + QAQH_REMOTE_TOKEN
+        // 同时设置时直连远端 daemon，跳过本地 discovery/spawn。
+        let remote = std::env::var("QAQH_REMOTE_URL")
+            .ok()
+            .filter(|url| !url.is_empty())
+            .map(|base_url| RemoteEndpoint {
+                base_url,
+                token: std::env::var("QAQH_REMOTE_TOKEN").unwrap_or_default(),
+            });
+        let launch_local = remote.is_none();
         let client = Client::connect_async(ClientOptions {
             handlers,
-            launch_daemon_if_missing: true,
+            launch_daemon_if_missing: launch_local,
             daemon_path: None,
             start_timeout: Duration::from_secs(30),
+            remote,
         })
         .await?;
 

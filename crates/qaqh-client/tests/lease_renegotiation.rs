@@ -183,6 +183,7 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
         launch_daemon_if_missing: false,
         daemon_path: None,
         start_timeout: Duration::from_secs(8),
+        remote: None,
     })
     .await
     .expect("client connect to isolated daemon");
