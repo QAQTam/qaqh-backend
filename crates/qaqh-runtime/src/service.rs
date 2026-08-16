@@ -247,6 +247,9 @@ impl DeepxService {
                 Ok(serde_json::to_value(self.registry()?.activities()).map_err(err)?)
             }
             "session.new" => {
+                // 可选工具模式预置（TUI/CLI 壳在 create 时一次性锁定）。
+                // 先于任何落盘校验：非法值必须整体拒绝，不得留下孤儿 meta。
+                let preset = optional_tool_mode(params)?;
                 let seed = qaqh_session::SessionManager::generate_seed();
                 qaqh_session::SessionManager::global().clear_active();
                 // 可选 cwd（前端在 workspace 上下文新建时传入）→ 记录 + 自动归属。
@@ -256,10 +259,9 @@ impl DeepxService {
                     .map(str::to_string);
                 qaqh_session::SessionManager::global()
                     .persist_new_session_with_cwd(&seed, cwd.as_deref());
-                // 可选工具模式预置（TUI/CLI 壳在 create 时一次性锁定）。
                 // 先于 spawn 落盘：worker 的 init_session 从 meta 恢复并应用，
                 // 保证 minimal:dsh 的极简 system prompt 首轮就生效。
-                if let Some((tool_mode, custom_tools)) = optional_tool_mode(params)? {
+                if let Some((tool_mode, custom_tools)) = preset {
                     qaqh_session::SessionManager::global()
                         .persist_tool_mode(&seed, &tool_mode, &custom_tools)
                         .map_err(|error| format!("persist tool_mode failed: {error}"))?;
