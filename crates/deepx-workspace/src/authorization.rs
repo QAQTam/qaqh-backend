@@ -403,7 +403,7 @@ mod tests {
         assert!(matches!(admission, Admission::Authorized(_)), "expected authorized");
         // workspace 内读：同样自动。
         let admission = invoke(
-            "read_file",
+            "read",
             serde_json::json!({ "path": ws.join("notes.md") }),
             &ws,
             crate::permission::ToolCategory::Read,

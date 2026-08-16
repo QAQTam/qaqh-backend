@@ -34,6 +34,11 @@ impl DeepxService {
     pub fn init() -> Self {
         let _config = deepx_config::Config::load().unwrap_or_default();
         deepx_session::SessionManager::init(deepx_types::platform::data_dir());
+        // daemon 进程的工具注册表（供 `skills.list_tools` 等查询；worker 各自
+        // 独立 init_tools，本进程只提供注册表快照，不参与工具执行）。
+        // 不带 subagent 注册器：设置页勾选的是子代理可用工具，spawn_subagent
+        // 本身不属于子代理工具集。
+        deepx_workspace::runtime::init_tools("daemon", &[], vec![]);
         Self {
             registry: Arc::new(Mutex::new(AgentRegistry::new())),
             hub: std::sync::OnceLock::new(),
@@ -290,7 +295,10 @@ impl DeepxService {
             "session.set_tool_mode" => {
                 let seed = seed()?;
                 let tool_mode = pstr(params, "tool_mode")?;
-                if !matches!(tool_mode.as_str(), "standard" | "minimal" | "custom") {
+                if !matches!(
+                    tool_mode.as_str(),
+                    "standard" | "minimal" | "minimal:b" | "minimal:c" | "minimal:dsh" | "custom"
+                ) {
                     return Err(format!(
                         "invalid tool_mode '{tool_mode}' (expected standard | minimal | custom)"
                     ));
@@ -303,8 +311,11 @@ impl DeepxService {
                 }
                 // 先持久化（meta.json，重启存活），再通知 worker 应用
                 // （set_allowed_tools + tool_defs 刷新 = 模型侧源头过滤）。
+                // CK-PERSIST：持久化失败 → 400 返回前端，前端回滚乐观值；
+                // 不允许「应用成功但没落盘」的假切换（重启即丢）。
                 deepx_session::SessionManager::global()
-                    .persist_tool_mode(&seed, &tool_mode, &custom_tools);
+                    .persist_tool_mode(&seed, &tool_mode, &custom_tools)
+                    .map_err(|error| format!("persist tool_mode failed: {error}"))?;
                 self.send_ringing_cmd(
                     seed,
                     RingingCommand::Control(ControlCommand::SetToolMode {
@@ -1278,11 +1289,11 @@ fn command_id() -> String {
 
 fn parse_conversation_mode(mode: &str) -> Result<ConversationMode, String> {
     match mode {
-        "normal" | "" => Ok(ConversationMode::Normal),
         "plan" => Ok(ConversationMode::Plan),
-        "code" => Ok(ConversationMode::Code),
+        // 默认 = Code；旧值 "normal" 兼容解析为 Code（wire/旧配置）。
+        "code" | "" | "normal" => Ok(ConversationMode::Code),
         other => Err(format!(
-            "invalid conversation mode '{other}' (supported: normal | plan | code)"
+            "invalid conversation mode '{other}' (supported: plan | code)"
         )),
     }
 }

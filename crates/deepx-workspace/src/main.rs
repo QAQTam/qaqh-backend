@@ -3,7 +3,7 @@
 //! Usage:
 //!   deepx-workspace <tool_name> [json_args]
 //!   deepx-workspace explore
-//!   deepx-workspace read_file '{"path":"src/main.rs","start_line":1,"end_line":50}'
+//!   deepx-workspace read '{"path":"src/main.rs","start_line":1,"end_line":50}'
 //!   deepx-workspace list
 //!   deepx-workspace serve [--host 127.0.0.1] [--port 0] --token <secret>
 

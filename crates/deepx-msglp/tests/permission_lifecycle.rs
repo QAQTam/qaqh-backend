@@ -471,7 +471,7 @@ fn llm_approval_resumes_original_turn_once() {
         1,
         temp.path(),
         vec![
-            tool_round(&[("llm-read", "read_file", json!({"path": path}))]),
+            tool_round(&[("llm-read", "read", json!({"path": path}))]),
             final_round("finished"),
         ],
         2,
@@ -516,7 +516,7 @@ fn llm_rejection_resumes_with_original_failure() {
         1,
         temp.path(),
         vec![
-            tool_round(&[("llm-denied", "read_file", json!({"path": path}))]),
+            tool_round(&[("llm-denied", "read", json!({"path": path}))]),
             final_round("handled denial"),
         ],
         2,
@@ -551,8 +551,8 @@ fn llm_multiple_pending_waits_for_every_response() {
         temp.path(),
         vec![
             tool_round(&[
-                ("llm-first", "read_file", json!({"path": first})),
-                ("llm-second", "read_file", json!({"path": second})),
+                ("llm-first", "read", json!({"path": first})),
+                ("llm-second", "read", json!({"path": second})),
             ]),
             final_round("both finished"),
         ],
@@ -649,7 +649,7 @@ fn llm_mixed_auto_and_pending_emits_one_unified_result() {
         temp.path(),
         vec![
             tool_round(&[
-                ("llm-auto", "read_file", json!({"path": input})),
+                ("llm-auto", "read", json!({"path": input})),
                 (
                     "llm-pending",
                     "write",

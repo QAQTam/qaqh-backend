@@ -46,7 +46,7 @@ impl Default for SubagentConfig {
             api_key: String::new(),
             max_tokens: 4096,
             timeout_secs: 120,
-            default_tools: vec!["read_file".into(), "exec".into()],
+            default_tools: vec!["read".into(), "exec".into()],
         }
     }
 }
@@ -425,12 +425,17 @@ impl Config {
                     cfg.subagent.timeout_secs = ts;
                 }
                 if let Some(ref tools) = s.default_tools {
-                    // 存量迁移：工具改名后（file→read_file）旧配置持久化的
+                    // 存量迁移：工具改名后（file→read、read_file→read、
+                    // edit_file_v2→edit）旧配置持久化的
                     // 默认白名单仍指向旧名；加载时归一化为当前正式词汇表，
                     // 否则 apply_init 会静默剔除旧名，子代理丢失读文件能力。
                     cfg.subagent.default_tools = tools
                         .iter()
-                        .map(|t| if t == "file" { "read_file" } else { t })
+                        .map(|t| match t.as_str() {
+                            "file" | "read_file" => "read",
+                            "edit_file_v2" => "edit",
+                            _ => t,
+                        })
                         .map(String::from)
                         .collect();
                 }

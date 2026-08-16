@@ -2161,6 +2161,22 @@ async fn handle_query_post(
     }
 }
 
+/// 判断某个 action 名是否允许走 HTTP action 端点。
+/// Agent/session 生命周期与对话命令必须走 Ringing command 信封；这里只放行
+/// 少数有明确 service 实现的辅助 action。`session.set_tool_mode` 是工具模式
+/// 切换入口（前端 ComboBox → bridge → client.action → daemon），因此单独放行。
+fn is_allowed_action(method: &str) -> bool {
+    method.starts_with("git.")
+        || method.starts_with("workspace.")
+        || method.starts_with("config.")
+        || method.starts_with("skills.")
+        || method.starts_with("stats.")
+        || method.starts_with("plan.")
+        || method.starts_with("todo.")
+        || method.starts_with("subagent.")
+        || method == "session.set_tool_mode"
+}
+
 async fn handle_action(
     stream: &mut TcpStream,
     name: &str,
@@ -2203,14 +2219,7 @@ async fn handle_action(
     }
     // Agent/session lifecycle and conversation commands must use Ringing command
     // envelopes; generic actions are limited to auxiliary typed services.
-    let allowed = method.starts_with("git.")
-        || method.starts_with("workspace.")
-        || method.starts_with("config.")
-        || method.starts_with("skills.")
-        || method.starts_with("stats.")
-        || method.starts_with("plan.")
-        || method.starts_with("todo.")
-        || method.starts_with("subagent.");
+    let allowed = is_allowed_action(&method);
     if !allowed {
         return write_response(
             stream,
@@ -2551,6 +2560,15 @@ mod tests {
         inst.expiry = Instant::now() - Duration::from_secs(1);
         assert!(!store.is_active("ci-1"));
         assert!(!store.renew("cs-1"));
+    }
+
+    #[test]
+    fn action_whitelist_allows_session_set_tool_mode() {
+        assert!(is_allowed_action("session.set_tool_mode"));
+        assert!(is_allowed_action("config.save"));
+        assert!(is_allowed_action("subagent.spawn"));
+        assert!(!is_allowed_action("session.new"));
+        assert!(!is_allowed_action("conversation.send_message"));
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! - 源范围 `[start_anchor, end_anchor]` 含两端行；`end_anchor` 缺省 = 单行。
 //! - 目标插入：`insert_after`/`insert_before`（锚行）/ `append`（文件尾）/
 //!   `prepend`（文件头）。
-//! - LF 规范视图匹配（与 read_file 一致）；插入行使用目标文件的行尾风格
+//! - LF 规范视图匹配（与 read 一致）；插入行使用目标文件的行尾风格
 //!   （CRLF 文件插入 CRLF），未改动行保持原字节。
 //! - 同文件拷贝：插入点落在被拷贝区间内 → 拒绝（区间随插入位移会乱）。
 
@@ -297,7 +297,7 @@ fn exec_copy_range(args: &serde_json::Value) -> ToolResult {
         mode,
     ) {
         Ok(r) => {
-            // 账本同步：目标已写盘，登记最新内容供 edit_file_v2 防漂移。
+            // 账本同步：目标已写盘，登记最新内容供 edit 防漂移。
             if let Ok(content) = std::fs::read_to_string(&tgt) {
                 crate::file_state::record_write(&target_path, &content);
             }

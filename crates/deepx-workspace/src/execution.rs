@@ -96,7 +96,7 @@ pub fn execute_authorized(
     };
 
     // Phase 2: execute without holding the manager lock.
-    let tool_result = crate::backend::execute(
+    let mut tool_result = crate::backend::execute(
         prepared.placement,
         session_id,
         authorized_workspace,
@@ -104,6 +104,9 @@ pub fn execute_authorized(
         prepared.handler_fn,
         prepared.ctx.clone(),
     );
+    // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
+    // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
+    crate::tool_side_fold::apply(&name, &mut tool_result);
     let skill_effects = if name == "skills" && tool_result.is_success() {
         prepared.ctx.take_skill_effects()
     } else {
@@ -400,7 +403,7 @@ mod tests {
         assert!(resource.skill_effects.is_empty());
 
         let generic_read = execute_with_context(
-            "read_file",
+            "read",
             "",
             &serde_json::json!({"path": skill_dir.join("SKILL.md")}).to_string(),
             "generic-skill-read",

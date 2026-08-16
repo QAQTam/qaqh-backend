@@ -1318,7 +1318,6 @@ impl Loop {
                 }
                 ConversationCommand::ConversationSetMode { mode } => {
                     let mode = match mode {
-                        deepx_domain::ConversationMode::Normal => "normal",
                         deepx_domain::ConversationMode::Plan => "plan",
                         deepx_domain::ConversationMode::Code => "code",
                     };

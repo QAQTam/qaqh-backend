@@ -93,7 +93,7 @@ impl ToolManager {
     /// 与 `apply_init` 共享 known 过滤语义；**不**改 session（区别于 apply_init）。
     pub fn set_allowed(&mut self, allowed_tools: Vec<String>) {
         // 防御：剔除不在注册表中的工具名。工具冻结期间改名/删除后（如
-        // read→read_file、edit→edit_file_v2、web→web_fetch、search 移除），
+        // read_file→read、edit_file_v2→edit、web→web_fetch、search 移除），
         // 旧配置的 allowlist 会指向不存在的工具——保留则执行期报
         // "Unknown tool"，剔除则按当前正式词汇表生效。全部无效时回退
         // 到"全部工具"（空 allowlist 语义），宁全开不瘫痪。
@@ -274,14 +274,14 @@ impl ToolManager {
         let files_affected = extract_files_affected(&prepared.name, &prepared.audit_args);
         if success {
             match prepared.name.as_str() {
-                "read_file" | "skills" => {
+                "read" | "skills" => {
                     for f in &files_affected {
                         if !self.files_read.contains(f) {
                             self.files_read.push(f.clone());
                         }
                     }
                 }
-                "edit_file_v2" | "todo" => {
+                "edit" | "todo" => {
                     for f in &files_affected {
                         if !self.files_written.contains(f) {
                             self.files_written.push(f.clone());
@@ -459,19 +459,19 @@ mod tests {
     #[test]
     fn apply_init_filters_unknown_renamed_tool_names() {
         let mut mgr = ToolManager::new();
-        mgr.register(handler("read_file"));
+        mgr.register(handler("read"));
         mgr.register(handler("exec"));
         // 冻结期间改名/删除的旧名（read/edit/web/search）必须被剔除。
         mgr.apply_init(
             vec![
-                "read_file".to_string(),
+                "read".to_string(),
                 "edit".to_string(),
                 "read".to_string(),
                 "exec".to_string(),
             ],
             "s1",
         );
-        assert_eq!(names(&mgr), vec!["exec", "read_file"]);
+        assert_eq!(names(&mgr), vec!["exec", "read"]);
     }
 
     #[test]
@@ -498,14 +498,14 @@ mod tests {
     fn set_allowed_restricts_and_restores() {
         let mut mgr = ToolManager::new();
         mgr.register(handler("exec"));
-        mgr.register(handler("read_file"));
+        mgr.register(handler("read"));
         mgr.register(handler("write"));
         // 切到极限白名单
-        mgr.set_allowed(vec!["exec".to_string(), "read_file".to_string()]);
-        assert_eq!(names(&mgr), vec!["exec", "read_file"]);
+        mgr.set_allowed(vec!["exec".to_string(), "read".to_string()]);
+        assert_eq!(names(&mgr), vec!["exec", "read"]);
         // 切回全量（标准模式）
         mgr.set_allowed(vec![]);
-        assert_eq!(names(&mgr), vec!["exec", "read_file", "write"]);
+        assert_eq!(names(&mgr), vec!["exec", "read", "write"]);
     }
 
     #[test]
@@ -536,8 +536,8 @@ mod tests {
     fn set_allowed_gates_prepare_req() {
         let mut mgr = ToolManager::new();
         mgr.register(handler("exec"));
-        mgr.register(handler("read_file"));
-        mgr.set_allowed(vec!["read_file".to_string()]);
+        mgr.register(handler("read"));
+        mgr.set_allowed(vec!["read".to_string()]);
         // 白名单外工具在执行层被拦截（纵深防御）
         let err = mgr.prepare_req(
             "c1".to_string(),
@@ -550,8 +550,8 @@ mod tests {
         assert!(err.is_err());
         let ok = mgr.prepare_req(
             "c2".to_string(),
-            "read_file",
-            "read_file",
+            "read",
+            "read",
             serde_json::json!({"path": "x"}),
             None,
             None,

@@ -1,6 +1,6 @@
 //! dry-run 参数暂存注册表：`confirm_apply` 的内存直提基础。
 //!
-//! 写工具（edit_file_v2 / apply_patch / write）以 `dry_run=true` 通过验证后，
+//! 写工具（edit / apply_patch / write）以 `dry_run=true` 通过验证后，
 //! 把**重放用参数**（不含 dry_run）存进这里并返回 `pending_id`；模型确认后
 //! 调 `confirm_apply { pending_id }` —— 引擎从注册表取出参数重放执行路径，
 //! **模型不需要重新输出 patch / hunks / 内容**（消除二次输出）。
@@ -68,10 +68,10 @@ mod tests {
 
     #[test]
     fn store_take_roundtrip() {
-        let id = store("edit_file_v2", &serde_json::json!({"path": "a.rs"}));
+        let id = store("edit", &serde_json::json!({"path": "a.rs"}));
         assert!(id.starts_with('p'));
         let p = take(&id).expect("pending exists");
-        assert_eq!(p.tool_name, "edit_file_v2");
+        assert_eq!(p.tool_name, "edit");
         assert_eq!(p.args["path"], "a.rs");
         // 一次性：再取为空
         assert!(take(&id).is_none());

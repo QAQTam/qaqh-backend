@@ -1,4 +1,4 @@
-//! edit_file_v2 — 差分实现的第二代编辑工具。
+//! edit — 差分实现的第二代编辑工具。
 //!
 //! 定位（见 docs/nextdev/PLAN-EDIT-FILE-V2.md）：**只实现 v1 没有的部分**。
 //! v1（edit_file：行号定位、replace_all、regex、每 op 独立事务与诊断体系）
@@ -14,7 +14,7 @@
 //! - 单快照两阶段全事务：全部 hunk 在同一份未修改快照上定位，任一失败整体拒绝；
 //!   区间重叠 → OVERLAPPING_HUNKS；应用按位置倒序走 ropey remove/insert。
 //! - 显式 `expected_hash` 乐观锁；失配返回 current_hash + current_content（截断）。
-//! - 成功返回 new_hash（sha256，与 read_file 协议一致），可续接下一次调用。
+//! - 成功返回 new_hash（sha256，与 read 协议一致），可续接下一次调用。
 //!
 //! 复用（基础设施白名单，非 v1 能力）：`file_shared::{content_hash,
 //! normalize_newlines, atomic_write, unified_diff}`。CRLF 契约与 v1 相同：
@@ -41,7 +41,7 @@ const MAX_HUNKS: usize = 64;
 /// HashMismatch 时回传内容的截断字节数。
 const CONTENT_CAP: usize = 64 * 1024;
 
-/// 读路径（空 hunks）预算，与 read_file 对齐。
+/// 读路径（空 hunks）预算，与 read 对齐。
 const READ_MAX_LINES: usize = 400;
 const READ_MAX_CHARS: usize = 24_000;
 const READ_MAX_CONTEXT: usize = 100;/// 失败候选列表条数上限。
@@ -1657,7 +1657,7 @@ fn render_text(path: &str, outcome: &FileOutcome) -> String {
                 .map(|h| &h[..h.len().min(8)])
                 .unwrap_or("");
             out.push_str(&format!(
-                "[OK] edit_file_v2 {path}\n  {n}/{n} hunks applied (new_hash {hash8})\n"
+                "[OK] edit {path}\n  {n}/{n} hunks applied (new_hash {hash8})\n"
             ));
             for r in &outcome.reports {
                 out.push_str(&format!("  {}\n", hunk_ok_line(r)));
@@ -1673,7 +1673,7 @@ fn render_text(path: &str, outcome: &FileOutcome) -> String {
                 .map(|h| &h[..h.len().min(8)])
                 .unwrap_or("");
             out.push_str(&format!(
-                "[PARTIAL] edit_file_v2 {path}\n  applied {applied}/{total} hunks (new_hash {hash8})\n"
+                "[PARTIAL] edit {path}\n  applied {applied}/{total} hunks (new_hash {hash8})\n"
             ));
             for r in &outcome.reports {
                 if r.status == "ok" {
@@ -1694,7 +1694,7 @@ fn render_text(path: &str, outcome: &FileOutcome) -> String {
         (None, Some(code)) => {
             // [ERROR] 零改动 + 全部失败详情
             out.push_str(&format!(
-                "[ERROR] edit_file_v2 {path}\n  no changes written ({code})\n"
+                "[ERROR] edit {path}\n  no changes written ({code})\n"
             ));
             if let Some(m) = &outcome.message {
                 out.push_str(&format!("  {m}\n"));
@@ -1711,7 +1711,7 @@ fn render_text(path: &str, outcome: &FileOutcome) -> String {
             }
         }
         (None, None) => {
-            out.push_str(&format!("[ERROR] edit_file_v2 {path}\n  internal: no result\n"));
+            out.push_str(&format!("[ERROR] edit {path}\n  internal: no result\n"));
         }
     }
     for n in &outcome.notes {
@@ -1785,7 +1785,7 @@ fn hint_for(code: &str) -> Option<&'static str> {
         "OVERLAPPING_HUNKS" => Some("Split or merge hunks so their resolved ranges do not overlap."),
         "UNDERSPECIFIED" => Some("Provide context, or use insert_after / insert_before / prepend_file / append_file."),
         "OVERWRITE_EXCLUSIVE" => Some("overwrite replaces the whole file — send it as the only hunk in the call."),
-        "HASH_MISMATCH" => Some("Re-read the file with read_file and retry with the fresh hash (or omit expected_hash to edit without verification)."),
+        "HASH_MISMATCH" => Some("Re-read the file with read and retry with the fresh hash (or omit expected_hash to edit without verification)."),
         "INVALID_REGEX" => Some("replace_inline: fix the regex (regex crate syntax) and retry."),
         _ => None,
     }
@@ -1795,7 +1795,7 @@ fn hint_for(code: &str) -> Option<&'static str> {
 // 读路径（空 hunks）：整文件 / 行号范围 / 锚定读
 // ─────────────────────────────────────────────────────────────
 
-/// 行号范围读（1-based，与 read_file 同语义）：grep `path:line:` 输出直连。
+/// 行号范围读（1-based，与 read 同语义）：grep `path:line:` 输出直连。
 fn read_range(
     content: &str,
     total_lines: usize,
@@ -1809,7 +1809,7 @@ fn read_range(
     if first > total_lines || end.is_some_and(|e| e > total_lines) {
         return ToolResult::error_data(
             "LINE_OUT_OF_RANGE",
-            format!("edit_file_v2: requested lines are outside '{raw_path}' ({total_lines} total lines)"),
+            format!("edit: requested lines are outside '{raw_path}' ({total_lines} total lines)"),
             false,
             Some("Use the total_lines value and retry.").map(str::to_string),
             json!({
@@ -1832,7 +1832,7 @@ fn read_range(
     if body_chars > READ_MAX_CHARS {
         return fail(
             "RANGE_TOO_LARGE",
-            "edit_file_v2: requested range exceeds the model output budget".into(),
+            "edit: requested range exceeds the model output budget".into(),
             false,
             Some("Split the range into smaller contiguous reads."),
         );
@@ -1910,7 +1910,7 @@ fn read_anchored(
         Err(LocateError::Underspecified) => {
             return fail(
                 "UNDERSPECIFIED",
-                "edit_file_v2: anchor is empty (underspecified read)".into(),
+                "edit: anchor is empty (underspecified read)".into(),
                 false,
                 Some("Provide a non-empty anchor, or use start_line/end_line."),
             );
@@ -1931,7 +1931,7 @@ fn read_anchored(
     if body_chars > READ_MAX_CHARS {
         return fail(
             "RANGE_TOO_LARGE",
-            "edit_file_v2: anchored window exceeds the model output budget".into(),
+            "edit: anchored window exceeds the model output budget".into(),
             false,
             Some("Reduce context_before/context_after."),
         );
@@ -1963,7 +1963,7 @@ fn read_anchored(
 }
 
 fn render_read_candidates(path: &str, code: &str, detail: &str, cands: &[Candidate]) -> String {
-    let mut out = format!("[ERROR] edit_file_v2 {path}\n  {code}: {detail}\n");
+    let mut out = format!("[ERROR] edit {path}\n  {code}: {detail}\n");
     for (i, c) in cands.iter().enumerate() {
         out.push_str(&format!(
             "    candidate #{} L{}-L{} score {:.2} tier{}\n",
@@ -2031,7 +2031,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
     if has_range && (anchor.is_some() || has_context) {
         return fail(
             "PARSE_ERROR",
-            "edit_file_v2: start_line/end_line and anchor are mutually exclusive".into(),
+            "edit: start_line/end_line and anchor are mutually exclusive".into(),
             false,
             None,
         );
@@ -2039,7 +2039,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
     if anchor.is_none() && has_context {
         return fail(
             "PARSE_ERROR",
-            "edit_file_v2: context_before/context_after require 'anchor'".into(),
+            "edit: context_before/context_after require 'anchor'".into(),
             false,
             None,
         );
@@ -2047,7 +2047,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
     if start == Some(0) || end == Some(0) {
         return fail(
             "PARSE_ERROR",
-            "edit_file_v2: read line numbers start at 1".into(),
+            "edit: read line numbers start at 1".into(),
             false,
             None,
         );
@@ -2056,7 +2056,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
         if e < s {
             return fail(
                 "PARSE_ERROR",
-                "edit_file_v2: end_line must be >= start_line".into(),
+                "edit: end_line must be >= start_line".into(),
                 false,
                 None,
             );
@@ -2064,7 +2064,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
         if e - s + 1 > READ_MAX_LINES {
             return fail(
                 "RANGE_TOO_LARGE",
-                format!("edit_file_v2: requested range exceeds {READ_MAX_LINES} lines"),
+                format!("edit: requested range exceeds {READ_MAX_LINES} lines"),
                 false,
                 Some("Use smaller contiguous ranges."),
             );
@@ -2073,7 +2073,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
     if anchor.is_some() && (ctx_before > READ_MAX_CONTEXT || ctx_after > READ_MAX_CONTEXT) {
         return fail(
             "PARSE_ERROR",
-            format!("edit_file_v2: context window per side exceeds {READ_MAX_CONTEXT} lines"),
+            format!("edit: context window per side exceeds {READ_MAX_CONTEXT} lines"),
             false,
             None,
         );
@@ -2084,7 +2084,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return fail(
                 "FILE_NOT_FOUND",
-                format!("edit_file_v2: {raw_path}: file not found (read mode; creation requires explicit hunks)"),
+                format!("edit: {raw_path}: file not found (read mode; creation requires explicit hunks)"),
                 false,
                 Some("Provide prepend_file / append_file / overwrite hunks to create the file"),
             );
@@ -2092,7 +2092,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
         Err(e) => {
             return fail(
                 "READ_FAILED",
-                format!("edit_file_v2: cannot read {raw_path}: {e}"),
+                format!("edit: cannot read {raw_path}: {e}"),
                 false,
                 None,
             );
@@ -2103,7 +2103,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
         Err(_) => {
             return fail(
                 "NOT_UTF8_TEXT",
-                format!("edit_file_v2: {raw_path} is not valid UTF-8 text (treated as binary)"),
+                format!("edit: {raw_path} is not valid UTF-8 text (treated as binary)"),
                 false,
                 None,
             );
@@ -2131,7 +2131,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
                 "line_count": total_lines,
                 "truncated": truncated,
                 // 注意：内容走 model_text（compact_data 会删 data 里的
-                // content 键），data 只放元数据——与 read_file 同构。
+                // content 键），data 只放元数据——与 read 同构。
             }),
             text,
         );
@@ -2155,7 +2155,7 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
 // 执行入口
 // ─────────────────────────────────────────────────────────────
 
-pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
+pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
     let dry_run = args
         .get("dry_run")
         .and_then(|v| v.as_bool())
@@ -2178,7 +2178,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
     let raw_path = match args.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
         Some(p) => p,
         None => {
-            return fail("PARSE_ERROR", "edit_file_v2: missing 'path'".into(), false, None);
+            return fail("PARSE_ERROR", "edit: missing 'path'".into(), false, None);
         }
     };
     let path = crate::resolve_workspace_path(raw_path);
@@ -2191,7 +2191,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
     let mut notes: Vec<String> = Vec::new();
     // ── 读路径（二元组场景：edit 兼读）──
     // hunks 缺失/空 = 无编辑意图 → 退化为读：返回 content + hash + line_count
-    // （对齐 read_file 结构，hash 可直接作 expected_hash 续接编辑，闭环在同一
+    // （对齐 read 结构，hash 可直接作 expected_hash 续接编辑，闭环在同一
     // 工具内完成）。文件必须存在——创建需要显式 hunks，防"读"误当"建"。
     // 不写盘、不 record、无 diff；权限层按空 hunks 动态分类为 Read（permission.rs）。
     if args.get("hunks").and_then(|v| v.as_array()).is_none_or(|a| a.is_empty()) {
@@ -2204,7 +2204,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
         _ => {
             return fail(
                 "PARSE_ERROR",
-                "edit_file_v2: missing non-empty 'hunks' array".into(),
+                "edit: missing non-empty 'hunks' array".into(),
                 false,
                 None,
             );
@@ -2213,7 +2213,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
     if hunks.len() > MAX_HUNKS {
         return fail(
             "PARSE_ERROR",
-            format!("edit_file_v2: too many hunks ({} > {MAX_HUNKS})", hunks.len()),
+            format!("edit: too many hunks ({} > {MAX_HUNKS})", hunks.len()),
             false,
             None,
         );
@@ -2225,7 +2225,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
             Err(e) => {
                 return fail(
                     "PARSE_ERROR",
-                    format!("edit_file_v2: hunks[{i}]: {e}"),
+                    format!("edit: hunks[{i}]: {e}"),
                     false,
                     None,
                 );
@@ -2240,7 +2240,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
         other => {
             return fail(
                 "PARSE_ERROR",
-                format!("edit_file_v2: unknown mode '{other}' (expected 'strict' or 'partial')"),
+                format!("edit: unknown mode '{other}' (expected 'strict' or 'partial')"),
                 false,
                 None,
             );
@@ -2259,7 +2259,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return fail(
                 "FILE_NOT_FOUND",
-                format!("edit_file_v2: {raw_path}: file not found (expected_hash provided but nothing to verify against)"),
+                format!("edit: {raw_path}: file not found (expected_hash provided but nothing to verify against)"),
                 false,
                 None,
             );
@@ -2267,7 +2267,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
         Err(e) => {
             return fail(
                 "READ_FAILED",
-                format!("edit_file_v2: cannot read {raw_path}: {e}"),
+                format!("edit: cannot read {raw_path}: {e}"),
                 false,
                 None,
             );
@@ -2278,13 +2278,13 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
         Err(_) => {
             return fail(
                 "NOT_UTF8_TEXT",
-                format!("edit_file_v2: {raw_path} is not valid UTF-8 text (treated as binary)"),
+                format!("edit: {raw_path} is not valid UTF-8 text (treated as binary)"),
                 false,
                 None,
             );
         }
     };
-    // LF 规范视图（与 read_file 的展示/hash 同视图）
+    // LF 规范视图（与 read 的展示/hash 同视图）
     let (content, was_crlf) = normalize_newlines(&raw);
 
     // ── hash gate ──
@@ -2294,7 +2294,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
             if &current != h {
                 let cc = truncate_content(&content);
                 let text = format!(
-                    "[ERROR] edit_file_v2 {raw_path}\n  HASH_MISMATCH: content changed since the referenced read\n  current_hash: {current}\n  current content:\n{cc}\n"
+                    "[ERROR] edit {raw_path}\n  HASH_MISMATCH: content changed since the referenced read\n  current_hash: {current}\n  current content:\n{cc}\n"
                 );
                 let data = json!({
                     "timeis": crate::now_utc8(),
@@ -2363,7 +2363,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
                     obj.remove("dry_run");
                     obj.insert("expected_hash".into(), json!(content_hash(&content)));
                 }
-                let pending_id = crate::pending::store("edit_file_v2", &pending_args);
+                let pending_id = crate::pending::store("edit", &pending_args);
                 let text = render_text(raw_path, &outcome);
                 let applied = outcome.reports.iter().filter(|r| r.status == "ok").count();
                 let total = outcome.reports.len();
@@ -2396,7 +2396,7 @@ pub(super) fn exec_edit_file_v2(args: &serde_json::Value) -> ToolResult {
             if let Err(e) = atomic_write(&path, &write_content) {
                 return fail(
                     "WRITE_FAILED",
-                    format!("edit_file_v2: atomic write failed for {raw_path}: {e} — the file on disk was NOT modified"),
+                    format!("edit: atomic write failed for {raw_path}: {e} — the file on disk was NOT modified"),
                     false,
                     None,
                 );
@@ -2484,16 +2484,16 @@ fn hunk_report_json(r: &HunkReport) -> Value {
     v
 }
 
-fn handle_edit_file_v2(ctx: ToolCallCtx) -> ToolResult {
-    exec_edit_file_v2(&ctx.args)
+fn handle_edit(ctx: ToolCallCtx) -> ToolResult {
+    exec_edit(&ctx.args)
 }
 
 pub fn register(mgr: &mut ToolManager) {
     mgr.register_with_placement(
         ToolHandler {
-            key: "edit_file_v2".to_string(),
+            key: "edit".to_string(),
             description: concat!(
-                "Structured hunk editor (v2, the ONLY file editor). Kind-tagged hunks: ",
+                "Structured hunk editor — the ONLY file editor. Kind-tagged hunks: ",
                 "replace (old/new/context_before/context_after), overwrite (new, whole-file replacement), insert_after / insert_before (anchor/new), replace_inline (anchor + old/new substring or regex replace, sed s/// semantics, window-limited), ",
                 "prepend_file / append_file (new). Four-tier matching: exact → indent-shape → similarity scoring ",
                 "with margin (auto-applies only when the best candidate clearly wins) → top-3 candidates on failure. ",
@@ -2505,12 +2505,12 @@ pub fn register(mgr: &mut ToolManager) {
                 "Newline rule: the replaced range includes the trailing newline ONLY if 'old' ends with '\\n' — ",
                 "normally give both old and new WITHOUT the trailing newline (it stays in place); ",
                 "end 'old' with '\\n' only when you want to delete/replace the line break itself. ",
-                "expected_hash (optional; from read_file data, if your provider exposes it) guards stale content; omit it to edit without verification — the content match itself is the safety net. ",
+                "expected_hash (optional; from read data, if your provider exposes it) guards stale content; omit it to edit without verification — the content match itself is the safety net. ",
                 "On success returns new_hash to chain into the next call without re-reading. ",
                 "On failure, candidates come back with line ranges — refine 'old'/context from them, or re-read the file first if the view may be stale. ",
                 "mode 'partial' applies successful hunks and reports failures in detail, so you only re-send the failed ones "
                 ,"(with expected_hash = returned new_hash) instead of the whole batch; mode 'strict' (default) is all-or-nothing. "
-                ,"dry_run=true locates and computes without writing and returns a pending_id — ask the user for confirmation, then commit via confirm_apply without re-sending the hunks. Omit hunks (or send []) to READ the file: read-only result with content + hash + line_count — the hash chains straight into expected_hash for the next edit. Read mode also supports grep-driven precision reads: start_line/end_line (1-based; line ranges connect straight to grep `path:line:` output; each line prefixed L<number>:) and anchor + context_before/context_after (anchored read reusing the SAME four-tier locator as hunks — the anchor you read with is the anchor you edit with; ambiguous anchors return candidates). All read modes return the full-file hash for expected_hash chaining."
+                ,"dry_run=true (only when confirm_apply is available) locates and computes without writing and returns a pending_id — ask the user for confirmation, then commit via confirm_apply without re-sending the hunks. Otherwise call edit directly WITHOUT dry_run to write immediately. Omit hunks (or send []) to READ the file: read-only result with content + hash + line_count — the hash chains straight into expected_hash for the next edit. Read mode also supports grep-driven precision reads: start_line/end_line (1-based; line ranges connect straight to grep `path:line:` output; each line prefixed L<number>:) and anchor + context_before/context_after (anchored read reusing the SAME four-tier locator as hunks — the anchor you read with is the anchor you edit with; ambiguous anchors return candidates). All read modes return the full-file hash for expected_hash chaining."
             ),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -2518,11 +2518,11 @@ pub fn register(mgr: &mut ToolManager) {
                     "path": {"type": "string", "description": "Target file path"},
                     "expected_hash": {
                         "type": "string",
-                        "description": "Optional; hash from read_file's data. Omit to edit without verification (content match itself is the safety net). Mismatch rejects with current content returned."
+                        "description": "Optional; hash from read's data. Omit to edit without verification (content match itself is the safety net). Mismatch rejects with current content returned."
                     },
                     "hunks": {
                         "type": "array",
-                        "description": "Edit hunks. Each hunk: {\"kind\":\"replace\",\"old\":…,\"new\":…,\"context_before\":…,\"context_after\":…,\"replace_all\":false} | {\"kind\":\"overwrite\",\"new\":…} (whole-file replacement; must be the only hunk) | {\"kind\":\"insert_after\"|\"insert_before\",\"anchor\":…,\"new\":…} | {\"kind\":\"prepend_file\"|\"append_file\",\"new\":…} | {\"kind\":\"replace_inline\",\"anchor\":…,\"old\":…,\"new\":…,\"replace_all\":false,\"regex\":false} (sed s/// semantics: substring/regex replace ONLY inside the anchor's located window, never across lines; replace_all=false replaces the first occurrence only; regex uses regex-crate syntax, case-sensitive). Omit hunks or send [] to READ the file (read-only: content + hash + line_count, aligned with read_file; creation requires explicit hunks). Empty 'old' with contexts = pure insert. replace_all=true substitutes every exact occurrence of 'old' (Tier-1 exact only)."
+                        "description": "Edit hunks. Each hunk: {\"kind\":\"replace\",\"old\":…,\"new\":…,\"context_before\":…,\"context_after\":…,\"replace_all\":false} | {\"kind\":\"overwrite\",\"new\":…} (whole-file replacement; must be the only hunk) | {\"kind\":\"insert_after\"|\"insert_before\",\"anchor\":…,\"new\":…} | {\"kind\":\"prepend_file\"|\"append_file\",\"new\":…} | {\"kind\":\"replace_inline\",\"anchor\":…,\"old\":…,\"new\":…,\"replace_all\":false,\"regex\":false} (sed s/// semantics: substring/regex replace ONLY inside the anchor's located window, never across lines; replace_all=false replaces the first occurrence only; regex uses regex-crate syntax, case-sensitive). Omit hunks or send [] to READ the file (read-only: content + hash + line_count, aligned with read; creation requires explicit hunks). Empty 'old' with contexts = pure insert. replace_all=true substitutes every exact occurrence of 'old' (Tier-1 exact only)."
                     },
                     "mode": {
                         "type": "string",
@@ -2533,7 +2533,7 @@ pub fn register(mgr: &mut ToolManager) {
                     "dry_run": {
                         "type": "boolean",
                         "default": false,
-                        "description": "Locate + compute every hunk but write NOTHING. On success returns a pending_id; confirm with confirm_apply to commit without re-sending the hunks."
+                        "description": "Preview only (write NOTHING, returns pending_id). Only use when confirm_apply is available; otherwise call without dry_run to write immediately."
                     },
                     "start_line": {
                         "type": "integer",
@@ -2562,10 +2562,40 @@ pub fn register(mgr: &mut ToolManager) {
                         "description": "Read mode only: lines of context after the anchor match."
                     }
                 },
+                // 读/编辑模式互斥：编辑 = hunks 非空且不带读模式字段；
+                // 读 = 省略 hunks 或传 []。执行层不校验 schema（仅注入模型），
+                // oneOf 是给模型/providers 的结构化提示。
+                "oneOf": [
+                    {
+                        "title": "Edit mode (hunks non-empty)",
+                        "required": ["hunks"],
+                        "properties": {
+                            "hunks": {"minItems": 1}
+                        },
+                        "not": {
+                            "anyOf": [
+                                {"required": ["start_line"]},
+                                {"required": ["end_line"]},
+                                {"required": ["anchor"]},
+                                {"required": ["context_before"]},
+                                {"required": ["context_after"]}
+                            ]
+                        }
+                    },
+                    {
+                        "title": "Read mode (omit hunks or send [])",
+                        "not": {
+                            "required": ["hunks"],
+                            "properties": {
+                                "hunks": {"minItems": 1}
+                            }
+                        }
+                    }
+                ],
                 "required": ["path"],
                 "additionalProperties": false
             }),
-            handler: handle_edit_file_v2,
+            handler: handle_edit,
             risk: ToolRisk::Write,
             category: crate::permission::ToolCategory::Write,
             default_timeout: std::time::Duration::from_secs(60),
@@ -2890,7 +2920,7 @@ mod tests {
         let path = dir.path().join("crlf.txt");
         std::fs::write(&path, "a\r\nb\r\n").unwrap();
         let hash = content_hash("a\nb\n"); // LF 视图 hash
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": hash,
             "hunks": [{"kind": "replace", "old": "b", "new": "c"}],
@@ -2905,7 +2935,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": "deadbeef",
             "hunks": [{"kind": "replace", "old": "a", "new": "A"}],
@@ -2922,7 +2952,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "x\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
         }));
@@ -2935,7 +2965,7 @@ mod tests {
     fn create_new_file_with_prepend() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt");
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{"kind": "prepend_file", "new": "hello\n"}],
         }));
@@ -2949,7 +2979,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bin.dat");
         std::fs::write(&path, [0xffu8, 0xfe, 0x00, 0x01]).unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": "whatever",
             "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
@@ -2964,7 +2994,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
-        let r1 = exec_edit_file_v2(&json!({
+        let r1 = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": content_hash("a\nb\n"),
             "hunks": [{"kind": "replace", "old": "a", "new": "A"}],
@@ -2972,7 +3002,7 @@ mod tests {
         assert!(r1.is_success(), "model text: {}", r1.model.text);
         let new_hash = r1.data["new_hash"].as_str().unwrap().to_string();
         assert!(!new_hash.is_empty());
-        let r2 = exec_edit_file_v2(&json!({
+        let r2 = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": new_hash,
             "hunks": [{"kind": "replace", "old": "b", "new": "B"}],
@@ -3118,7 +3148,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\nc\n").unwrap();
-        let r1 = exec_edit_file_v2(&json!({
+        let r1 = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": content_hash("a\nb\nc\n"),
             "mode": "partial",
@@ -3133,7 +3163,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\nb\nC\n");
         let new_hash = r1.data["new_hash"].as_str().unwrap().to_string();
         // 只重发失败的 hunk
-        let r2 = exec_edit_file_v2(&json!({
+        let r2 = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": new_hash,
             "hunks": [{"kind": "replace", "old": "zzz", "new": "Z"}],
@@ -3142,7 +3172,7 @@ mod tests {
         // 文件未被第二次调用改动
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\nb\nC\n");
         // 修正后成功
-        let r3 = exec_edit_file_v2(&json!({
+        let r3 = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": new_hash,
             "hunks": [{"kind": "insert_after", "anchor": "b", "new": "b2\n"}],
@@ -3157,7 +3187,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "mode": "magic",
             "hunks": [{"kind": "replace", "old": "a", "new": "b"}],
@@ -3313,7 +3343,7 @@ mod tests {
     fn overwrite_creates_new_file_via_exec() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt");
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{"kind": "overwrite", "new": "hello\nworld\n"}],
         }));
@@ -3329,7 +3359,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "old content\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{"kind": "overwrite", "new": "brand new\n"}],
         }));
@@ -3343,7 +3373,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
-        let bad = exec_edit_file_v2(&json!({
+        let bad = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": "deadbeef",
             "hunks": [{"kind": "overwrite", "new": "x\n"}],
@@ -3353,7 +3383,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
 
         let good = content_hash("a\nb\n");
-        let ok = exec_edit_file_v2(&json!({
+        let ok = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": good,
             "hunks": [{"kind": "overwrite", "new": "x\n"}],
@@ -3367,7 +3397,7 @@ mod tests {
     fn replace_on_missing_file_hints_creation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ghost.txt");
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
         }));
@@ -3391,7 +3421,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [
                 {"kind": "replace", "old": "a", "new": "b"},
@@ -3412,13 +3442,13 @@ mod tests {
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\nc\n").unwrap();
         let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [],
         }));
         assert!(result.is_success(), "model text: {}", result.model.text);
         assert_eq!(result.data["read_only"], true);
-        // 内容在 model_text（对齐 read_file：data 只放元数据）
+        // 内容在 model_text（对齐 read：data 只放元数据）
         assert!(result.model_text().contains("a\nb\nc\n"));
         assert_eq!(result.data["line_count"], 3);
         assert_eq!(result.data["hash"], content_hash("a\nb\nc\n"));
@@ -3434,7 +3464,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "hello\n").unwrap();
-        let result = exec_edit_file_v2(&json!({ "path": path.to_string_lossy() }));
+        let result = exec_edit(&json!({ "path": path.to_string_lossy() }));
         assert!(result.is_success(), "model text: {}", result.model.text);
         assert_eq!(result.data["read_only"], true);
         assert_eq!(result.data["hash"], content_hash("hello\n"));
@@ -3445,7 +3475,7 @@ mod tests {
     fn empty_hunks_on_missing_file_reports_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ghost.txt");
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [],
         }));
@@ -3460,10 +3490,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "x\n").unwrap();
-        let read = exec_edit_file_v2(&json!({ "path": path.to_string_lossy(), "hunks": [] }));
+        let read = exec_edit(&json!({ "path": path.to_string_lossy(), "hunks": [] }));
         assert!(read.is_success());
         let h = read.data["hash"].as_str().unwrap().to_string();
-        let edit = exec_edit_file_v2(&json!({
+        let edit = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": h,
             "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
@@ -3480,7 +3510,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "start_line": 2,
             "end_line": 4,
@@ -3500,7 +3530,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "start_line": 4,
         }));
@@ -3515,7 +3545,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\nc\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "start_line": 6,
         }));
@@ -3531,7 +3561,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\nc\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "start_line": 4,
             "end_line": 2,
@@ -3546,7 +3576,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "start_line": 0,
         }));
@@ -3560,7 +3590,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "x\n".repeat(450)).unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "start_line": 1,
             "end_line": 450,
@@ -3577,7 +3607,7 @@ mod tests {
         let line = "y".repeat(100);
         let content = (0..300).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
         std::fs::write(&path, content).unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "start_line": 1,
             "end_line": 300,
@@ -3598,7 +3628,7 @@ mod tests {
             "line one\nfn foo(a: i32) -> i32 {\n    a + 1\n}\nline five\n",
         )
         .unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "anchor": "fn foo(a: i32) -> i32 {",
         }));
@@ -3626,7 +3656,7 @@ mod tests {
             "line one\nfn foo(a: i32) -> i32 {\n    a + 1\n}\nline five\n",
         )
         .unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "anchor": "fn foo(a: i32) -> i32 {",
             "context_before": 1,
@@ -3647,7 +3677,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "dup\ndup\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "anchor": "dup",
         }));
@@ -3668,7 +3698,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "alpha\nbeta\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "anchor": "zzz_nope",
         }));
@@ -3683,7 +3713,7 @@ mod tests {
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\n").unwrap();
         // start_line 与 anchor 互斥
-        let r1 = exec_edit_file_v2(&json!({
+        let r1 = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "start_line": 1,
             "anchor": "a",
@@ -3691,14 +3721,14 @@ mod tests {
         assert!(!r1.is_success());
         assert_eq!(r1.data["code"], "PARSE_ERROR");
         // context 必须配 anchor
-        let r2 = exec_edit_file_v2(&json!({
+        let r2 = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "context_before": 3,
         }));
         assert!(!r2.is_success());
         assert_eq!(r2.data["code"], "PARSE_ERROR");
         // context 窗口超上限
-        let r3 = exec_edit_file_v2(&json!({
+        let r3 = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "anchor": "a",
             "context_after": 200,
@@ -3713,14 +3743,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "a\nb\nc\n").unwrap();
-        let read = exec_edit_file_v2(&json!({
+        let read = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "start_line": 2,
             "end_line": 2,
         }));
         assert!(read.is_success());
         let h = read.data["hash"].as_str().unwrap().to_string();
-        let edit = exec_edit_file_v2(&json!({
+        let edit = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": h,
             "hunks": [{"kind": "replace", "old": "b", "new": "B"}],
@@ -3735,7 +3765,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "pre\ntarget\npost\n").unwrap();
-        let read = exec_edit_file_v2(&json!({
+        let read = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "anchor": "target",
             "context_before": 1,
@@ -3743,7 +3773,7 @@ mod tests {
         }));
         assert!(read.is_success());
         let h = read.data["hash"].as_str().unwrap().to_string();
-        let edit = exec_edit_file_v2(&json!({
+        let edit = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": h,
             "hunks": [{"kind": "insert_after", "anchor": "target", "new": "inserted\n"}],
@@ -3763,7 +3793,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "fn main() {\n    let x = input.clone();\n    input\n}\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{
                 "kind": "replace_inline",
@@ -3785,7 +3815,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "fn f() {\n    let a = alpha + alpha;\n    alpha\n}\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{
                 "kind": "replace_inline",
@@ -3809,7 +3839,7 @@ mod tests {
         let path = dir.path().join("f.txt");
         let long_line = format!("start {} end", "y".repeat(200));
         std::fs::write(&path, format!("a\n{long_line}\nb\n")).unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{
                 "kind": "replace_inline",
@@ -3829,7 +3859,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "fn foo() {\n    bar()\n}\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{
                 "kind": "replace_inline",
@@ -3850,7 +3880,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "fn f() {\n    let _a = 1;\n}\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{
                 "kind": "replace_inline",
@@ -3873,7 +3903,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "fn f() {\n    x\n}\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{
                 "kind": "replace_inline",
@@ -3893,7 +3923,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "dup\ndup\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{
                 "kind": "replace_inline",
@@ -3912,7 +3942,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "fn f() {\n    let a = alpha;\n    beta\n}\n").unwrap();
-        let result = exec_edit_file_v2(&json!({
+        let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [
                 {
@@ -3939,10 +3969,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "fn f() {\n    let x = input;\n}\n").unwrap();
-        let read = exec_edit_file_v2(&json!({ "path": path.to_string_lossy() }));
+        let read = exec_edit(&json!({ "path": path.to_string_lossy() }));
         assert!(read.is_success());
         let h = read.data["hash"].as_str().unwrap().to_string();
-        let edit = exec_edit_file_v2(&json!({
+        let edit = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "expected_hash": h,
             "hunks": [{
@@ -4070,7 +4100,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("h.txt");
         std::fs::write(&path, "a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nx\nm\n").unwrap();
-        let r = exec_edit_file_v2(&json!({
+        let r = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{"kind": "replace", "old": "x", "new": "X", "hint_line": 14}],
         }));
@@ -4097,7 +4127,7 @@ mod tests {
             "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\nx\n",
         )
         .unwrap();
-        let r = exec_edit_file_v2(&json!({
+        let r = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{"kind": "replace", "old": "x", "new": "X", "hint_line": 0}],
         }));
@@ -4111,4 +4141,3 @@ mod tests {
         assert_eq!(r.data["hunks"][0]["actual_line"], 2);
     }
 }
-

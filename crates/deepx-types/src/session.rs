@@ -76,7 +76,7 @@ pub struct SessionMeta {
     /// Number of earliest turns compacted (skipped in LLM context).
     #[serde(default)]
     pub compact_skip: usize,
-    /// Agent operating mode: 0=Normal, 1=Plan, 2=Code.
+    /// Agent operating mode: 0=Code(默认), 1=Plan, 2=Code(旧编码兼容).
     /// Persisted so PLAN/CODE mode survives agent restart within the same session.
     #[serde(default)]
     pub mode: u8,
@@ -268,11 +268,11 @@ mod tests {
     fn tool_mode_round_trips_through_json() {
         let mut meta = SessionMeta::default();
         meta.tool_mode = "custom".to_string();
-        meta.custom_tools = vec!["bash".to_string(), "edit_file_v2".to_string()];
+        meta.custom_tools = vec!["bash".to_string(), "edit".to_string()];
         let json = serde_json::to_string(&meta).unwrap();
         let back: SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tool_mode, "custom");
-        assert_eq!(back.custom_tools, vec!["bash", "edit_file_v2"]);
+        assert_eq!(back.custom_tools, vec!["bash", "edit"]);
         // standard 时空 custom_tools 不落盘（skip_serializing_if）
         let mut meta2 = SessionMeta::default();
         meta2.tool_mode = "minimal".to_string();

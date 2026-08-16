@@ -8,7 +8,7 @@
 //! Codex 一致）；失败前先 `dry_run=true` 可预检全部 hunk。路径相对 workspace
 //! 根解析，`..` 逃逸/外部绝对路径被拒绝。
 //!
-//! 与 `edit_file_v2` 分工：edit_file_v2 是结构化精确定位（内容锚定、严格拒绝歧义），
+//! 与 `edit` 分工：edit 是结构化精确定位（内容锚定、严格拒绝歧义），
 //! 适合模型逐步编辑；apply_patch 适合批量补丁合入（模型输出 patch → 校验 → 合入），
 //! 失败时整个 patch 需修正重发。
 
@@ -90,7 +90,7 @@ fn exec_engine_patch(ws: &str, patch: &str, dry_run: bool) -> ToolResult {
                     (None, None) => {}
                 }
                 // 账本同步：引擎直接写盘，touched 文件的最新内容登记进
-                // file_state，否则后续 edit_file_v2 盲定位防漂移会误报。
+                // file_state，否则后续 edit 盲定位防漂移会误报。
                 if !dry_run {
                     if let Some(new) = &d.new {
                         crate::file_state::record_write(&d.path, new);
@@ -178,7 +178,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             "NO line numbers: matching is content-based with 4 tiers (exact → trailing-whitespace-insensitive → trimmed → Unicode-normalised typographic punctuation). ",
             "Hunks apply in order; when one fails, files already written stay, so re-send a corrected FULL patch for a clean result (or dry_run=true first to pre-check every hunk). ",
             "Example:\n```\n*** Begin Patch\n*** Update File: src/a.rs\n@@ fn main\n-let old = 1;\n+let old = 2;\n*** End Patch\n```\n",
-            "For structured single-file edits use edit_file_v2."
+            "For structured single-file edits use edit."
         ),
         input_schema: serde_json::json!({
             "type": "object",

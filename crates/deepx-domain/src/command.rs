@@ -26,11 +26,12 @@ pub struct AskAnswer {
 }
 
 /// 会话工作模式（legacy `SetMode` 语义）。
+/// 只有 Plan / Code 两个有效模式；`Code` 是默认值（旧值 `normal` 兼容反序列化）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationMode {
-    Normal,
     Plan,
+    #[serde(rename = "code", alias = "normal")]
     Code,
 }
 

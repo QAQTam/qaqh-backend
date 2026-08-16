@@ -408,14 +408,20 @@ impl ToolEngine {
         let pending_todo_activation = None;
 
         for tool in tools {
+            // 极简模式：模型面 `bash` → 内部 `bash_v2`（持久化 PTY）。
+            // 让权限准入 / prepare_req / handler 全部走内部 key，原生 bash 不参与。
+            let effective_name = crate::state::agent::AgentState::normalize_tool_name_for_mode(
+                &ctx.agent.session.tool_mode,
+                &tool.name,
+            );
             let inv = deepx_workspace::authorization::ToolInvocation {
                 session_id: ctx.agent.session.seed.clone(),
                 call_id: tool.id.clone(),
-                tool_name: tool.name.clone(),
+                tool_name: effective_name.clone(),
                 action: String::new(),
                 args: tool.args.clone(),
                 // 与单工具路径一致：handler 声明为权威，未注册回退 Write。
-                category: deepx_workspace::runtime::lookup_category(&tool.name)
+                category: deepx_workspace::runtime::lookup_category(&effective_name)
                     .unwrap_or(deepx_workspace::permission::ToolCategory::Write),
             };
             match deepx_workspace::authorization::admit(
@@ -869,7 +875,10 @@ impl ToolEngine {
         let buf = tails.entry(key).or_default();
         buf.push_str(&event.chunk);
         if buf.len() > TAIL_MAX {
-            buf.drain(..buf.len() - TAIL_MAX);
+            // 字节偏移可能落在多字节 UTF-8 字符中间，必须先用 floor_char_boundary
+            // 对齐到字符边界，否则 String::drain 会 panic（is_char_boundary(end)）。
+            let cut = buf.floor_char_boundary(buf.len() - TAIL_MAX);
+            buf.drain(..cut);
         }
         let seq_end = event.seq + event.chunk.len() as u64;
         let tail_len = buf.len() as u64;

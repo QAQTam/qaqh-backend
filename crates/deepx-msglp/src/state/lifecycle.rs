@@ -176,12 +176,7 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
         agent.config.context_limit as usize,
     );
     agent.msg.push_system(deepx_types::Message::system(
-        &deepx_config::prompt::full_system_prompt_with_env(
-            deepx_config::prompt::OS_INFO
-                .get()
-                .map(|s| s.as_str())
-                .unwrap_or(""),
-        ),
+        &deepx_config::prompt::system_prompt_for_mode(&agent.session.tool_mode),
     ));
     agent
         .msg
@@ -212,12 +207,7 @@ pub fn create_session(agent: &mut AgentState) {
         agent.config.context_limit as usize,
     );
     agent.msg.push_system(deepx_types::Message::system(
-        &deepx_config::prompt::full_system_prompt_with_env(
-            deepx_config::prompt::OS_INFO
-                .get()
-                .map(|s| s.as_str())
-                .unwrap_or(""),
-        ),
+        &deepx_config::prompt::system_prompt_for_mode(&agent.session.tool_mode),
     ));
     agent
         .msg
@@ -245,13 +235,17 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
         std::path::Path::new(&workspace),
         agent.config.context_limit as usize,
     );
+    // 应用持久化的工具模式（PLAN-TOOL-MODES.md 4.3/4.4）：preset-seed 新建路径
+    // 此前不读 meta.json，导致会话级 tool_mode 丢失、工具回退全量。
+    // 这里与 resume 路径（init_session L120-134）对齐，从 meta 恢复并 apply。
+    // 提前到 push_system 之前，让系统提示能读到 tool_mode（minimal:dsh → 极简 prompt）。
+    if let Some(meta) = SessionManager::global().load_meta(&agent.session.seed) {
+        if !meta.tool_mode.is_empty() {
+            agent.apply_tool_mode(&meta.tool_mode, &meta.custom_tools);
+        }
+    }
     agent.msg.push_system(deepx_types::Message::system(
-        &deepx_config::prompt::full_system_prompt_with_env(
-            deepx_config::prompt::OS_INFO
-                .get()
-                .map(|s| s.as_str())
-                .unwrap_or(""),
-        ),
+        &deepx_config::prompt::system_prompt_for_mode(&agent.session.tool_mode),
     ));
     agent
         .msg

@@ -9,17 +9,27 @@ use deepx_message::{ToolExecReport, ToolExecRequest};
 use deepx_workspace::runtime;
 use std::path::Path;
 
-/// 极限模式默认档位（PLAN-TOOL-MODES.md D2 档位 A）：
-/// bash/pwsh 独立 shell + 文件三件套（write/edit/read）+ 搜索两件套（glob/grep）。
+/// 极限模式档位 A（PLAN-TOOL-MODES.md D2 档位 A）：
+/// bash/pwsh 独立 shell + 文件四件套（write/edit/read）+ 搜索两件套（glob/grep）
+/// + confirm_apply（edit/write 的 dry_run 确认闭环）。
 pub const MINIMAL_TOOLS: &[&str] = &[
-    "bash",
-    "pwsh",
-    "write",
-    "edit_file_v2",
-    "read_file",
-    "glob",
-    "grep",
+    "bash", "pwsh", "write", "edit", "read", "glob", "grep", "confirm_apply",
 ];
+
+/// 极限模式档位 B：bash + edit/glob/grep/read + confirm_apply——简化档，
+/// 用于测试模型在极小工具集下的能力（tool_mode = "minimal:b"）。
+/// confirm_apply 保证 edit 的 dry_run→确认→落盘流程闭环。
+pub const MINIMAL_TOOLS_B: &[&str] = &["bash", "edit", "glob", "grep", "read", "confirm_apply"];
+
+/// 极限模式档位 C：bash + edit/glob + confirm_apply——最小压力测试档
+/// （tool_mode = "minimal:c"）。confirm_apply 保证 edit 可完成确认落盘。
+pub const MINIMAL_TOOLS_C: &[&str] = &["bash", "edit", "glob", "confirm_apply"];
+
+/// 极简模式（minimal:dsh）——完全对齐 deepseek-harness minimal preset：
+/// 模型面只见 `bash` 与 `str_replace_editor`（bash_v2 投影为 bash）。
+/// 白名单用内部注册 key（bash_v2），模型面由 apply_tool_mode 投影成 bash，
+/// 执行面由 normalize_tool_name_for_mode 把 bash 路由回 bash_v2。
+pub const MINIMAL_DSH_TOOLS: &[&str] = &["bash_v2", "str_replace_editor"];
 
 /// Hash snapshot of the cache-key-relevant prefix components.
 /// Compared across turns to detect and explain prompt-cache misses.
@@ -30,8 +40,8 @@ struct PrefixShape {
     /// FNV-1a hash of every rendered message (system included), in order.
     /// A mismatch at index i (with i < previous length) means an EXISTING
     /// message changed — a prefix-cache break that the three component
-    /// hashes cannot see (e.g. annotation injection into a user message, or
-    /// position-dependent tool-result folding). Appends (new rounds/turns)
+    /// hashes cannot see (e.g. annotation injection into a user message, or a
+    /// tool result mutated after storage). Appends (new rounds/turns)
     /// leave all earlier hashes equal and are not reported.
     msg_hashes: Vec<u64>,
 }
@@ -312,7 +322,11 @@ impl AgentState {
                 Config::default()
             }
         };
-        runtime::init_tools(caller, &[deepx_subagent::register], vec![]);
+        runtime::init_tools(
+            caller,
+            &[deepx_subagent::register, dsh_minimal_mode::register],
+            vec![],
+        );
         let mut agent = Self::new(config);
         agent.tool_defs = runtime::all_tools(); // all tools, no allowlist
         agent
@@ -334,7 +348,11 @@ impl AgentState {
                 allowed_tools.push(required.to_string());
             }
         }
-        runtime::init_tools("subagent", &[deepx_subagent::register], allowed_tools);
+        runtime::init_tools(
+            "subagent",
+            &[deepx_subagent::register, dsh_minimal_mode::register],
+            allowed_tools,
+        );
         let mut agent = Self::new(config);
         agent.ephemeral = ephemeral;
         agent.tool_defs = runtime::all_tools(); // full set — LLM cache friendly
@@ -343,19 +361,73 @@ impl AgentState {
 
     /// 应用工具模式（PLAN-TOOL-MODES.md 4.4）：standard=全量 / minimal=固定档位 /
     /// custom=自定义表；随后刷新 `tool_defs`（模型侧工具清单源头过滤）。
-    /// 幂等：standard（含空串/未知值）回退全量，可无条件调用。
+    /// 幂等：standard（含空串=旧会话零迁移）回退全量，可无条件调用。
+    /// 锁死检查点（CK-APPLY）：未知值绝不静默回退全量——那会把 minimal 系列
+    /// 持久化值在恢复/应用时切回 standard；保持现状 + 告警。
     pub fn apply_tool_mode(&mut self, tool_mode: &str, custom_tools: &[String]) {
         let allowed: Vec<String> = match tool_mode {
             "minimal" => MINIMAL_TOOLS.iter().map(|s| s.to_string()).collect(),
+            "minimal:b" => MINIMAL_TOOLS_B.iter().map(|s| s.to_string()).collect(),
+            "minimal:c" => MINIMAL_TOOLS_C.iter().map(|s| s.to_string()).collect(),
+            "minimal:dsh" => MINIMAL_DSH_TOOLS.iter().map(|s| s.to_string()).collect(),
             "custom" => custom_tools.to_vec(),
-            _ => Vec::new(),
+            "standard" | "" => Vec::new(),
+            unknown => {
+                log::warn!(
+                    "[TOOL MODE] unknown tool_mode '{unknown}' — keeping current mode '{}' (no fallback to standard)",
+                    self.session.tool_mode
+                );
+                return;
+            }
         };
         runtime::set_allowed_tools(allowed);
         self.tool_defs = runtime::all_tools();
+        // 极简模式：模型面工具名投影 bash_v2 → bash（minimal 的规范工具名）。
+        // 执行面由 normalize_tool_name_for_mode 把 bash 路由回 bash_v2。
+        if tool_mode == "minimal:dsh" {
+            for def in &mut self.tool_defs {
+                if def.function.name == "bash_v2" {
+                    def.function.name = "bash".to_string();
+                }
+            }
+        }
+        // 同步内存态会话元数据：daemon 已 persist meta.json，但 worker 内存
+        // 若不同步，session 恢复（lifecycle.rs）会用旧值（standard）重新应用，
+        // 导致极限/创造模式在恢复后退回全量工具。
+        self.session.tool_mode = tool_mode.to_string();
+        self.session.custom_tools = custom_tools.to_vec();
+        // 极限模式（minimal 系列）联动折叠策略：完全不折叠任何工具结果
+        // （含 exec/bash 内部 token 截断），上下文大小由模型自己控制；
+        // 其它模式恢复标准折叠。
+        if tool_mode.starts_with("minimal") {
+            deepx_workspace::tool_side_fold::set_policy(std::sync::Arc::new(
+                deepx_workspace::tool_side_fold::NoFoldPolicy,
+            ));
+        } else {
+            deepx_workspace::tool_side_fold::set_policy(std::sync::Arc::new(
+                deepx_workspace::tool_side_fold::StandardPolicy,
+            ));
+        }
         log::info!(
-            "[TOOL MODE] applied {tool_mode} ({} tools visible)",
-            self.tool_defs.len()
+            "[TOOL MODE] applied {tool_mode} ({} tools visible, fold={})",
+            self.tool_defs.len(),
+            if tool_mode.starts_with("minimal") {
+                "no-fold"
+            } else {
+                "standard"
+            }
         );
+    }
+
+    /// 极简模式（minimal:dsh）：模型面工具名 → 内部注册 key。
+    /// 模型在极简模式看到的是 `bash`（minimal 规范名），但实际执行要路由回
+    /// 持久化 PTY 的 `bash_v2` handler；非极简模式原样返回。
+    pub fn normalize_tool_name_for_mode(tool_mode: &str, name: &str) -> String {
+        if tool_mode == "minimal:dsh" && name == "bash" {
+            "bash_v2".to_string()
+        } else {
+            name.to_string()
+        }
     }
 
     /// Consume any pending cache diagnostics set by build_context().
@@ -413,7 +485,7 @@ impl AgentState {
         // event so the frontend can surface the reason.  The message-level
         // hashes catch breaks the two components cannot see — e.g. the
         // [Environment] annotation moving between user messages, or a tool
-        // result whose fold state depends on step position.
+        // result changed after storage.
         {
             let cur = PrefixShape::capture(&context, &self.tool_defs);
             if !self.prev_prefix.system_hash.is_empty() {
@@ -461,6 +533,11 @@ impl AgentState {
     /// message lands at the "latest message" position and is never re-injected
     /// or removed afterwards — the request prefix stays byte-stable.
     pub fn sync_skill_injection(&mut self, flow: &mut deepx_message::ContextFlow) {
+        // 极简模式（minimal:dsh）：完全对齐 deepseek-harness minimal preset——
+        // 不注入任何 skills envelope（minimal 无 skills / runtime context）。
+        if self.session.tool_mode == "minimal:dsh" {
+            return;
+        }
         let epoch = self.skills.context_epoch();
         if epoch == self.last_injected_epoch {
             return;
@@ -658,7 +735,7 @@ mod tests {
             name: None,
             content: vec![deepx_types::ContentBlock::ToolUse {
                 id: "read-1".into(),
-                name: "read_file".into(),
+                name: "read".into(),
                 input: serde_json::json!({}),
             }],
         });
@@ -890,15 +967,21 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         // TOOL_MANAGER 是进程级 OnceLock：重复 init 会被忽略，manager 始终可用。
+        // 注册表必须与 AgentState::init 一致（subagent + dsh_minimal_mode）：
+        // 本测试若先于 tool_schema 测试运行，缺 dsh registrar 会固化注册表，
+        // 使 minimal:dsh 的 bash_v2/str_replace_editor 被当作未知名剔除并回退
+        // 全量（flaky）。统一注册器后无论测试顺序如何断言都稳定。
         deepx_workspace::runtime::init_tools(
             "tool-mode-test",
-            &[deepx_subagent::register],
+            &[deepx_subagent::register, dsh_minimal_mode::register],
             vec![],
         );
         let mut agent = AgentState::new(deepx_config::Config::default());
 
-        // minimal → 固定档位（MINIMAL_TOOLS 7 个）
+        // minimal → 固定档位（MINIMAL_TOOLS 8 个）
         agent.apply_tool_mode("minimal", &[]);
+        assert_eq!(agent.session.tool_mode, "minimal");
+        assert!(agent.session.custom_tools.is_empty());
         let names: Vec<&str> = agent
             .tool_defs
             .iter()
@@ -909,8 +992,36 @@ mod tests {
             assert!(names.contains(t), "missing {t} in {names:?}");
         }
 
+        // minimal:b → 六元组（bash/edit/glob/grep/read/confirm_apply，6 个）
+        agent.apply_tool_mode("minimal:b", &[]);
+        assert_eq!(agent.session.tool_mode, "minimal:b");
+        let names_b: Vec<&str> = agent
+            .tool_defs
+            .iter()
+            .map(|d| d.function.name.as_str())
+            .collect();
+        assert_eq!(names_b.len(), MINIMAL_TOOLS_B.len(), "got: {names_b:?}");
+        for t in MINIMAL_TOOLS_B {
+            assert!(names_b.contains(t), "missing {t} in {names_b:?}");
+        }
+
+        // minimal:c → 四元组（bash/edit/glob/confirm_apply，4 个）
+        agent.apply_tool_mode("minimal:c", &[]);
+        assert_eq!(agent.session.tool_mode, "minimal:c");
+        let names_c: Vec<&str> = agent
+            .tool_defs
+            .iter()
+            .map(|d| d.function.name.as_str())
+            .collect();
+        assert_eq!(names_c.len(), MINIMAL_TOOLS_C.len(), "got: {names_c:?}");
+        for t in MINIMAL_TOOLS_C {
+            assert!(names_c.contains(t), "missing {t} in {names_c:?}");
+        }
+
         // custom → 自定义表（精确集合）
         agent.apply_tool_mode("custom", &["bash".to_string(), "grep".to_string()]);
+        assert_eq!(agent.session.tool_mode, "custom");
+        assert_eq!(agent.session.custom_tools, vec!["bash", "grep"]);
         let names2: Vec<&str> = agent
             .tool_defs
             .iter()
@@ -920,15 +1031,154 @@ mod tests {
 
         // standard → 全量恢复（> 固定档位）
         agent.apply_tool_mode("standard", &[]);
+        assert_eq!(agent.session.tool_mode, "standard");
+        assert!(agent.session.custom_tools.is_empty());
         assert!(
             agent.tool_defs.len() > MINIMAL_TOOLS.len(),
             "standard should expose all tools, got {}",
             agent.tool_defs.len()
         );
 
-        // 未知 tool_mode → 回退全量（幂等安全）
+        // 空串 = 旧会话零迁移 → 全量（standard）
         agent.apply_tool_mode("", &[]);
         assert!(agent.tool_defs.len() > MINIMAL_TOOLS.len());
+
+        // 锁死检查点（CK-APPLY）：未知值不得覆盖当前模式——保持 minimal:c，
+        // 而不是回退 standard。否则未来新增档位/损坏值会在恢复/应用时
+        // 把用户锁定的极简/极限模式切回标准。
+        agent.apply_tool_mode("minimal:c", &[]);
+        let names_before: Vec<String> = agent
+            .tool_defs
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        agent.apply_tool_mode("future:xyz", &[]);
+        assert_eq!(agent.session.tool_mode, "minimal:c");
+        let names_after: Vec<String> = agent
+            .tool_defs
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        assert_eq!(names_before, names_after, "unknown mode must not reset toolset");
+    }
+
+    /// 验证回传给模型的工具 schema（`agent.tool_defs`，engine_turn.rs L1285
+    /// `tools = Some(ctx.agent.tool_defs.clone())`）在极限档位下是**精确等于**
+    /// 档位集合——不是「全量放送 + 执行层黑名单」。档位外的任何工具绝不能
+    /// 出现在回传 schema 里。附带打印每个档位实际发出的 tool 名便于观测。
+    #[test]
+    fn tool_schema_sent_to_api_is_exactly_mode_tools_not_full_plus_blocklist() {
+        let _guard = SKILL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // TOOL_MANAGER 是进程级 OnceLock：重复 init 会被忽略，manager 始终可用。
+        deepx_workspace::runtime::init_tools(
+            "tool-schema-test",
+            &[deepx_subagent::register, dsh_minimal_mode::register],
+            vec![],
+        );
+        let mut agent = AgentState::new(deepx_config::Config::default());
+        // 先以 standard 填充全量工具清单（AgentState 初始 tool_defs 为空 Vec）。
+        agent.apply_tool_mode("standard", &[]);
+
+        // 全量注册（standard）作为“不应外泄”的参照全集。
+        // 收集为拥有型 String，避免在循环里 apply_tool_mode 可变借用 agent 时冲突。
+        let all_names: Vec<String> = agent
+            .tool_defs
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        assert!(
+            all_names.len() > MINIMAL_TOOLS_C.len(),
+            "prereq: full set should exceed minimal:c, got {}",
+            all_names.len()
+        );
+
+        for (mode, expected) in [
+            ("minimal", MINIMAL_TOOLS),
+            ("minimal:b", MINIMAL_TOOLS_B),
+            ("minimal:c", MINIMAL_TOOLS_C),
+        ] {
+            agent.apply_tool_mode(mode, &[]);
+            let names: Vec<&str> = agent
+                .tool_defs
+                .iter()
+                .map(|d| d.function.name.as_str())
+                .collect();
+            // 打印回传 API 的 tool schema（工具名清单，便于人工核对）。
+            eprintln!(
+                "[tool_schema:{mode}] {} tools -> {:?}",
+                names.len(),
+                names
+            );
+            // 精确相等：不多（非全量放送）也不少（非黑名单式全量+执行层拦截）。
+            let expected_set: std::collections::BTreeSet<&str> =
+                expected.iter().copied().collect();
+            let got_set: std::collections::BTreeSet<&str> =
+                names.iter().copied().collect();
+            assert_eq!(
+                got_set, expected_set,
+                "mode {mode}: tool_defs must be exactly the allowlist, got {names:?}"
+            );
+            // 显式双重确认：全量集里凡不在档位的工具，绝不允许泄漏进回传 schema。
+            for t in &all_names {
+                if !expected_set.contains(t.as_str()) {
+                    assert!(
+                        !names.iter().any(|n| *n == t.as_str()),
+                        "mode {mode}: tool '{t}' outside the allowlist leaked into API schema ({names:?})"
+                    );
+                }
+            }
+        }
+
+        // minimal:dsh → 极简 preset：bash（bash_v2 投影）+ str_replace_editor。
+        agent.apply_tool_mode("minimal:dsh", &[]);
+        let names_dsh: Vec<&str> = agent
+            .tool_defs
+            .iter()
+            .map(|d| d.function.name.as_str())
+            .collect();
+        eprintln!(
+            "[tool_schema:minimal:dsh] {} tools -> {:?}",
+            names_dsh.len(),
+            names_dsh
+        );
+        let dsh_expected: std::collections::BTreeSet<&str> =
+            ["bash", "str_replace_editor"].into_iter().collect();
+        let dsh_got: std::collections::BTreeSet<&str> =
+            names_dsh.iter().copied().collect();
+        assert_eq!(
+            dsh_got, dsh_expected,
+            "minimal:dsh must project bash_v2->bash, got {names_dsh:?}"
+        );
+        // 内部 bash_v2 绝不能泄漏到模型面。
+        assert!(
+            !names_dsh.contains(&"bash_v2"),
+            "minimal:dsh leaked internal bash_v2: {names_dsh:?}"
+        );
+    }
+
+    /// 极简模式的执行面别名：模型面 `bash` → 内部 `bash_v2`。
+    #[test]
+    fn minimal_dsh_normalizes_bash_to_bash_v2() {
+        assert_eq!(
+            AgentState::normalize_tool_name_for_mode("minimal:dsh", "bash"),
+            "bash_v2"
+        );
+        assert_eq!(
+            AgentState::normalize_tool_name_for_mode("minimal:dsh", "str_replace_editor"),
+            "str_replace_editor"
+        );
+        // 非极简模式不转换。
+        assert_eq!(
+            AgentState::normalize_tool_name_for_mode("minimal", "bash"),
+            "bash"
+        );
+        assert_eq!(
+            AgentState::normalize_tool_name_for_mode("standard", "bash"),
+            "bash"
+        );
+        assert_eq!(AgentState::normalize_tool_name_for_mode("", "bash"), "bash");
     }
 }
 

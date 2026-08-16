@@ -353,12 +353,12 @@ fn system_injection_lands_inside_running_turn() {
     std::fs::write(&probe_file, "probe content").unwrap();
     deepx_workspace::set_workspace(&ws.to_string_lossy());
 
-    // 第一轮 gate：调用 read_file（真实工具执行）→ lap 边界；
+    // 第一轮 gate：调用 read（真实工具执行）→ lap 边界；
     // 第二轮 gate：最终文本回答。
     let mock = MockServer::multi_response(vec![
         tool_round(
             "call_probe",
-            "read_file",
+            "read",
             &json!({"path": probe_file.to_string_lossy()}).to_string(),
         ),
         text_round("done after tool"),

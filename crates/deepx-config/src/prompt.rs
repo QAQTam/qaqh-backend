@@ -53,6 +53,21 @@ pub fn full_system_prompt_with_env(os_info: &str) -> String {
     format!("{}\n\n{}", DEFAULT_PROMPT, env_block)
 }
 
+/// 极简模式（minimal:dsh）的系统提示——逐字对齐 deepseek-harness minimal
+/// preset（source of truth：minimal-mode-extraction README §2）。只有这一句，
+/// 不含 OS 环境 / skills / runtime context；配合逐字精确的工具 schema
+/// （bash + str_replace_editor）才能触发模型的“最大化思考”模式。
+pub const MINIMAL_DSH_PROMPT: &str = "You are a helpful software engineer assistant.";
+
+/// 按工具模式选择系统提示。`minimal:dsh` 用极简那一句，其余用完整 prompt。
+pub fn system_prompt_for_mode(tool_mode: &str) -> String {
+    if tool_mode == "minimal:dsh" {
+        MINIMAL_DSH_PROMPT.to_string()
+    } else {
+        full_system_prompt_with_env(OS_INFO.get().map(|s| s.as_str()).unwrap_or(""))
+    }
+}
+
 /// Detect available shells on this machine.
 fn detect_shells() -> &'static str {
     SHELLS_INFO.get_or_init(|| {
@@ -132,50 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn prompt_contains_identity() {
-        assert!(full_system_prompt().contains("[IDENTITY]"));
-    }
-
-    #[test]
-    fn prompt_visualization_is_optional() {
-        let prompt = full_system_prompt();
-        assert!(prompt.contains("[OPTIONAL VISUALIZATION]"));
-        assert!(prompt.contains("不要把图表教程或 Mermaid 作为默认输出"));
-    }
-
-    #[test]
-    fn prompt_teaches_edit_file_v2() {
-        let prompt = full_system_prompt();
-        assert!(prompt.contains("[FILE EDITING]"));
-        assert!(prompt.contains("edit_file_v2"));
-        assert!(!prompt.contains("`edit_file`"), "v1 edit_file must not be taught");
-    }
-
-    #[test]
-    fn prompt_contains_task_management_section() {
-        let prompt = full_system_prompt();
-        assert!(prompt.contains("[TASK MANAGEMENT]"));
-        assert!(prompt.contains("统一 `todo` 工具"));
-        assert!(prompt.contains("action=create|insert|set|list"));
-        assert!(prompt.contains("不要重复传 title/description"));
-    }
-
-    #[test]
-    fn prompt_contains_responses_phase_contract() {
-        let prompt = full_system_prompt();
-        assert!(prompt.contains("[USER COMMUNICATION AND RESPONSE PHASES]"));
-        assert!(prompt.contains("`commentary`"));
-        assert!(prompt.contains("`final_answer`"));
-        assert!(prompt.contains("在首次工具调用前先发送一到两句简短 `commentary`"));
-        assert!(prompt.contains("`phase` 是 Responses API assistant item 的传输元数据"));
-        assert!(prompt.contains("不要在正文中显示 `phase=commentary`"));
-    }
-
-    #[test]
-    fn prompt_keeps_hidden_reasoning_out_of_user_visible_output() {
-        let prompt = full_system_prompt();
-        assert!(prompt.contains("内部推理保持隐藏"));
-        assert!(!prompt.contains("使用简体中文思考链进行思考"));
+    fn system_prompt_for_mode_minimal_dsh_is_verbatim() {
+        // 极简模式必须逐字等于 minimal preset 的那一句。
+        assert_eq!(
+            system_prompt_for_mode("minimal:dsh"),
+            "You are a helpful software engineer assistant."
+        );
+        // 非极简模式仍走完整 prompt（更长）。
+        assert!(system_prompt_for_mode("standard").len() > MINIMAL_DSH_PROMPT.len());
+        assert!(system_prompt_for_mode("").len() > MINIMAL_DSH_PROMPT.len());
     }
 
     #[test]

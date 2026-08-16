@@ -1,6 +1,6 @@
 //! `confirm_apply`：dry-run 后的内存直提。
 //!
-//! 写工具（edit_file_v2 / apply_patch / write）以 `dry_run=true` 通过验证时
+//! 写工具（edit / apply_patch / write）以 `dry_run=true` 通过验证时
 //! 返回 `pending_id`（参数已暂存在 `pending` 注册表）。模型向用户确认后调
 //! 本工具：**从注册表取出参数重放执行路径**——模型不需要重新输出 patch /
 //! hunks / content（消除二次输出）。
@@ -25,7 +25,7 @@ fn exec_confirm_apply(args: &serde_json::Value) -> ToolResult {
                 "timeis": crate::now_utc8(),
                 "status": "error",
                 "code": "MISSING_PENDING_ID",
-                "message": "confirm_apply requires 'pending_id' (returned by a dry_run of edit_file_v2 / apply_patch / write)",
+                "message": "confirm_apply requires 'pending_id' (returned by a dry_run of edit / apply_patch / write)",
             })
             .to_string());
         }
@@ -45,7 +45,7 @@ fn exec_confirm_apply(args: &serde_json::Value) -> ToolResult {
 
     match action {
         "apply" => match p.tool_name.as_str() {
-            "edit_file_v2" => crate::file_edit_v2::exec_edit_file_v2(&p.args),
+            "edit" => crate::file_edit_v2::exec_edit(&p.args),
             "write" => crate::file_mutate::exec_write_file(&p.args),
             "apply_patch" => crate::apply_patch::exec_apply_patch(&p.args),
             other => crate::ToolResult::error(serde_json::json!({
@@ -83,7 +83,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             key: "confirm_apply".to_string(),
             description: concat!(
                 "Commit or discard a pending dry-run. ",
-                "edit_file_v2 / apply_patch / write called with dry_run=true return a pending_id when the dry-run passes. ",
+                "edit / apply_patch / write called with dry_run=true return a pending_id when the dry-run passes. ",
                 "After asking the user for confirmation, call confirm_apply with that pending_id and action=\"apply\" to commit ",
                 "— the engine replays the stored parameters, so you do NOT re-send the hunks/patch/content. ",
                 "action=\"discard\" drops the pending without writing. ",
@@ -93,7 +93,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "pending_id": {"type": "string", "description": "pending_id returned by a dry_run of edit_file_v2 / apply_patch / write"},
+                    "pending_id": {"type": "string", "description": "pending_id returned by a dry_run of edit / apply_patch / write"},
                     "action": {"type": "string", "enum": ["apply", "discard"], "default": "apply", "description": "apply = commit the pending change; discard = drop it"}
                 },
                 "required": ["pending_id"],
@@ -154,7 +154,7 @@ mod tests {
         // 用绝对路径：resolve_workspace_path 对绝对路径直接返回，
         // 避免并行测试踩踏全局 CURRENT_WORKSPACE。
         let ws = dir.path().to_string_lossy().to_string();
-        let result = crate::file_edit_v2::exec_edit_file_v2(&serde_json::json!({
+        let result = crate::file_edit_v2::exec_edit(&serde_json::json!({
             "path": format!("{}/f.txt", ws.replace('\\', "/")),
             "dry_run": true,
             "hunks": [{"kind": "replace", "old": old, "new": new}],

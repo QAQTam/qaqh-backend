@@ -83,8 +83,8 @@ fn base_url_preset_only_when_empty() {
     assert_eq!(cfg.max_tokens, 324000);
     assert_eq!(
         cfg.subagent.default_tools,
-        vec!["read_file".to_string(), "exec".to_string()],
-        "存量配置的旧工具名 file 必须迁移为 read_file"
+        vec!["read".to_string(), "exec".to_string()],
+        "存量配置的旧工具名 file 必须迁移为 read"
     );
 
     // 2) apply_profile 不得破坏自定义 base_url（此前会强制预设并落盘）
@@ -164,7 +164,7 @@ default_tools = ["file", "exec"]
     assert_eq!(cfg.subagent.base_url, CUSTOM_URL);
     assert_eq!(
         cfg.subagent.default_tools,
-        vec!["read_file".to_string(), "exec".to_string()],
-        "存量配置的旧工具名 file 必须迁移为 read_file"
+        vec!["read".to_string(), "exec".to_string()],
+        "存量配置的旧工具名 file 必须迁移为 read"
     );
 }

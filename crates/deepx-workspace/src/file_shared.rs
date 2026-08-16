@@ -26,7 +26,7 @@ pub(super) fn verify_expected_hash(
         "timeis": crate::now_utc8(), "status": "error", "code": "STALE_FILE", "path": path,
         "message": "File content changed since the referenced read",
         "expected_hash": expected, "actual_hash": actual,
-        "hint": "Use read_file to obtain current content and hash, then retry the edit."
+        "hint": "Use read to obtain current content and hash, then retry the edit."
     })
     .to_string())
 }

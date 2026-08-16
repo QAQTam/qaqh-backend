@@ -175,8 +175,8 @@ fn reasoning_then_text() {
 #[test]
 fn native_tool_call() {
     let scenario = vec![
-        SseChunk::tool_call(0, "call_abc", "read_file", r#"{"path":"#),
-        SseChunk::tool_call(0, "call_abc", "read_file", r#""test.txt"}"#),
+        SseChunk::tool_call(0, "call_abc", "read", r#"{"path":"#),
+        SseChunk::tool_call(0, "call_abc", "read", r#""test.txt"}"#),
         SseChunk::finish("tool_calls", None),
         SseChunk::done(),
     ];
@@ -191,7 +191,7 @@ fn native_tool_call() {
         "should have tool call progress events"
     );
     assert_eq!(tool_events[0].0, 0, "index should be 0");
-    assert_eq!(tool_events[0].2, "read_file");
+    assert_eq!(tool_events[0].2, "read");
 
     let done_msg = events.iter().find_map(event_done).unwrap();
     let tool_blocks: Vec<&ContentBlock> = done_msg
@@ -202,7 +202,7 @@ fn native_tool_call() {
     assert_eq!(tool_blocks.len(), 1, "should have 1 ToolUse block");
     if let ContentBlock::ToolUse { id, name, input } = &tool_blocks[0] {
         assert_eq!(id, "call_abc");
-        assert_eq!(name, "read_file");
+        assert_eq!(name, "read");
         assert_eq!(input["path"], "test.txt");
     }
 }
@@ -449,7 +449,7 @@ fn messages_are_sent_correctly() {
 #[test]
 fn tools_are_sent_in_request() {
     let scenario = vec![
-        SseChunk::tool_call(0, "tc_1", "read_file", r#"{"path": "foo.txt"}"#),
+        SseChunk::tool_call(0, "tc_1", "read", r#"{"path": "foo.txt"}"#),
         SseChunk::finish("tool_calls", None),
         SseChunk::done(),
     ];
@@ -459,7 +459,7 @@ fn tools_are_sent_in_request() {
     let tools = vec![ToolDef {
         call_type: "function".into(),
         function: ToolFunction {
-            name: "read_file".into(),
+            name: "read".into(),
             description: "Read a file".into(),
             parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
         },
@@ -469,7 +469,7 @@ fn tools_are_sent_in_request() {
     let req_json = mock.last_request_json().expect("should have request body");
     let tools_sent = req_json["tools"].as_array().expect("should have tools");
     assert_eq!(tools_sent.len(), 1);
-    assert_eq!(tools_sent[0]["function"]["name"], "read_file");
+    assert_eq!(tools_sent[0]["function"]["name"], "read");
 }
 
 #[test]
@@ -493,7 +493,7 @@ fn openrouter_tool_history_uses_strict_compatible_shape() {
                 },
                 ContentBlock::ToolUse {
                     id: "call_1".into(),
-                    name: "read_file".into(),
+                    name: "read".into(),
                     input: json!({"path": "config.toml"}),
                 },
             ],
@@ -503,7 +503,7 @@ fn openrouter_tool_history_uses_strict_compatible_shape() {
     let tools = vec![ToolDef {
         call_type: "function".into(),
         function: ToolFunction {
-            name: "read_file".into(),
+            name: "read".into(),
             description: "Read a file".into(),
             parameters: json!({"type": "object"}),
         },
@@ -538,7 +538,7 @@ fn default_provider_tool_history_is_unchanged() {
             name: None,
             content: vec![ContentBlock::ToolUse {
                 id: "call_1".into(),
-                name: "read_file".into(),
+                name: "read".into(),
                 input: json!({"path": "config.toml"}),
             }],
         },
@@ -813,7 +813,7 @@ fn dsml_tool_call_in_content() {
     let text = r#"Let me read that file.
 
 <|DSML|tool_calls>
-<|DSML|invoke name="read_file">
+<|DSML|invoke name="read">
 <|DSML|parameter name="path" string="true">/tmp/test.txt
 </|DSML|parameter>
 </|DSML|invoke>
@@ -851,7 +851,7 @@ fn dsml_tool_call_in_content() {
         tool_blocks[0],
         &ContentBlock::ToolUse {
             id: "dsml_tc_0".into(),
-            name: "read_file".into(),
+            name: "read".into(),
             input: json!({"path": "/tmp/test.txt"}),
         }
     );
@@ -1002,7 +1002,7 @@ fn responses_chat_stream_with_tool_calls() {
             "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc1\",\"output_index\":1,\"delta\":\"/x.txt\\\"}\"}\n\n".into()
         ),
         mock_server::SseChunk::Raw(
-            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc1\",\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/x.txt\\\"}\",\"status\":\"completed\"}}\n\n".into()
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc1\",\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"/x.txt\\\"}\",\"status\":\"completed\"}}\n\n".into()
         ),
         mock_server::SseChunk::Raw(
             "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\",\"model\":\"test-model\",\"usage\":{\"input_tokens\":5,\"output_tokens\":10,\"total_tokens\":15}}}\n\n".into()
@@ -1041,7 +1041,7 @@ fn responses_chat_stream_with_tool_calls() {
         })
         .collect();
     assert!(!tool_events.is_empty(), "should have tool call events");
-    assert_eq!(tool_events[0].0, "read_file");
+    assert_eq!(tool_events[0].0, "read");
     assert_eq!(tool_events[0].1, "{\"path\":\"/x.txt\"}");
 }
 

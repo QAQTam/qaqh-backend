@@ -85,7 +85,16 @@ pub struct ToolResult {
 
 impl ToolResult {
     pub fn ok(text: impl Into<String>) -> Self {
-        Self::text(ToolStatus::Ok, text.into())
+        Self::ok_with_limit(text.into(), Some(TOOL_MODEL_MAX_CHARS))
+    }
+
+    /// Create a success result with an explicit model-text cap.
+    ///
+    /// `limit = None` disables the model projection cap entirely (used by
+    /// no-fold / extreme modes where the model itself controls context);
+    /// `Some(n)` bounds the projected text to `n` characters like [`Self::ok`].
+    pub fn ok_with_limit(text: String, limit: Option<usize>) -> Self {
+        Self::text_with_limit(ToolStatus::Ok, text, limit)
     }
 
     pub fn partial(text: impl Into<String>) -> Self {
@@ -159,8 +168,14 @@ impl ToolResult {
     }
 
     pub fn text(status: ToolStatus, text: String) -> Self {
-        let text = text;
-        let model_text = bounded_text(&text, TOOL_MODEL_MAX_CHARS);
+        Self::text_with_limit(status, text, Some(TOOL_MODEL_MAX_CHARS))
+    }
+
+    fn text_with_limit(status: ToolStatus, text: String, model_limit: Option<usize>) -> Self {
+        let model_text = match model_limit {
+            Some(limit) => bounded_text(&text, limit),
+            None => (text.clone(), false),
+        };
         Self {
             status,
             summary: bounded_text(&text, TOOL_SUMMARY_MAX_CHARS).0,
@@ -219,9 +234,9 @@ impl ToolResult {
         if self.status.is_success() && self.error.is_some() {
             return Err("successful result must not include error");
         }
-        if self.model.text.chars().count() > TOOL_MODEL_MAX_CHARS {
-            return Err("model text exceeds the default model budget");
-        }
+        // Model-text budget is policy-driven (ToolResult::ok_with_limit):
+        // no-fold / extreme modes intentionally allow results beyond the
+        // default TOOL_MODEL_MAX_CHARS, so no hard check is applied here.
         Ok(())
     }
 
@@ -295,5 +310,20 @@ mod tests {
         assert_eq!(result.data["path"], "a.rs");
         assert!(result.data.get("stdout").is_none());
         assert!(result.data.get("output").is_none());
+    }
+
+    #[test]
+    fn ok_with_limit_none_preserves_full_text_and_validates() {
+        // 极限模式（no-fold）：模型自己控制上下文，结果完整透传。
+        let body = "x".repeat(TOOL_MODEL_MAX_CHARS * 4);
+        let result = ToolResult::ok_with_limit(body.clone(), None);
+        assert_eq!(result.model.text, body);
+        assert!(!result.model.truncated);
+        result.validate().unwrap();
+
+        // Some(limit) 仍按预算截断（与 ok() 一致）。
+        let capped = ToolResult::ok_with_limit(body, Some(100));
+        assert_eq!(capped.model.text.chars().count(), 100);
+        assert!(capped.model.truncated);
     }
 }

@@ -2,238 +2,12 @@ use crate::effect::{Effect, PendingTool, ToolExecRequest, ToolExecutorFn};
 use deepx_session::SessionManager;
 use deepx_types::{Message, ToolDef};
 
-/// Truncate tool result for LLM context. Tools return full output for the user,
-/// but long results are trimmed at STORAGE time so the stored message is the
-/// final form — the same bytes are rendered on every subsequent request,
-/// keeping KV-cache prefixes stable across rounds and turns.
-///
-/// - JSON results: truncates only the `content` field, preserves metadata.
-/// - Truncation markers tell the model how to retrieve the omitted portion.
-/// - Line-oriented tools snap to a preceding newline; others cut at a UTF-8 boundary.
-fn is_line_oriented_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "read_file" | "diff") || tool_name.starts_with("file")
-}
-
-/// Tools whose result carries content the model must consume to continue:
-/// folding their *active* (last-step) result forces a redundant second call
-/// (re-fetching a URL, re-running an image query, re-listing todos, …).
-/// Receipt-style tools (edit_file/write/delete/todo_create/…) stay folded even
-/// on the last step — the model already knows what it changed.
-fn is_content_bearing_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "web_fetch"
-            | "image_query"
-            | "diff"
-            | "todo_list"
-            | "memory"
-            | "process_check"
-            | "process_wait"
-            | "ask_user"
-    )
-}
-
-fn truncation_hint(tool_name: &str) -> &'static str {
-    match tool_name {
-        "read_file" => {
-            "Call read_file again with the same path and a later start_line/end_line range."
-        }
-        "exec" => "Call exec again with narrower argv or a filtering command.",
-        "web_fetch" => "Call web_fetch again with a narrower URL or query.",
-        _ => "Call this tool again with narrower arguments to retrieve the omitted portion.",
-    }
-}
-
-fn truncation_marker(tool_name: &str, total_chars: usize) -> String {
-    format!(
-        "[truncated: {total_chars} total chars. {}]",
-        truncation_hint(tool_name)
-    )
-}
-
-fn truncate_tool_result(tool_name: &str, result: &str) -> String {
-    truncate_tool_result_with_limit(tool_name, result, 4000)
-}
-
-/// Same as `truncate_tool_result` with an explicit character cap.
-fn truncate_tool_result_with_limit(tool_name: &str, result: &str, limit: usize) -> String {
-    // ── JSON-aware truncation ──
-    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(result) {
-        if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-            if content.len() > limit {
-                let cut = if is_line_oriented_tool(tool_name) {
-                    let head = &content[..content.floor_char_boundary(limit)];
-                    head.rfind('\n').map(|n| n + 1).unwrap_or(head.len())
-                } else {
-                    content.floor_char_boundary(limit)
-                };
-                let truncated = format!(
-                    "{}...\n{}",
-                    &content[..cut],
-                    truncation_marker(tool_name, content.len())
-                );
-                v.as_object_mut()
-                    .unwrap()
-                    .insert("content".into(), serde_json::Value::String(truncated));
-                v.as_object_mut()
-                    .unwrap()
-                    .insert("truncated".into(), serde_json::Value::Bool(true));
-            }
-            return v.to_string();
-        }
-        // No content field — return as-is
-        return result.to_string();
-    }
-
-    // ── Plain string truncation (legacy) ──
-    let limit: Option<usize> = if is_line_oriented_tool(tool_name) {
-        Some(4000)
-    } else if tool_name.starts_with("web") {
-        Some(4000)
-    } else if tool_name.starts_with("exec") {
-        Some(4000)
-    } else if tool_name.starts_with("todo") || tool_name.starts_with("plan") {
-        Some(4000)
-    } else if tool_name.starts_with("git") || tool_name.starts_with("process") {
-        Some(4000)
-    } else {
-        None
-    };
-    let Some(limit) = limit else {
-        return result.to_string();
-    };
-    if result.len() <= limit {
-        return result.to_string();
-    }
-
-    let cut = if is_line_oriented_tool(tool_name) {
-        // Snap to previous newline so code lines stay intact.
-        let head = &result[..result.floor_char_boundary(limit)];
-        head.rfind('\n').map(|n| n + 1).unwrap_or(head.len())
-    } else {
-        result.floor_char_boundary(limit)
-    };
-
-    let mut out = result[..cut].to_string();
-    out.push_str(&format!(
-        "\n... {}",
-        truncation_marker(tool_name, result.len())
-    ));
-    out
-}
-
-/// Fold a completed-turn tool result into a compact status summary.
-/// Deterministic: same input → same output, preserving KV-cache prefix stability.
-///
-/// - `skills` remains complete because its activation instructions are active
-///   context. High-volume read/search results are converted into a stable
-///   retrieval reference once they are no longer in the active step.
-/// - JSON results: preserve metadata, replace content with a fold marker.
-/// - Plain results: keep only the first non-empty line (status + key metadata).
-/// Character cap for content-bearing tool results (web content, image
-/// analysis, diffs, …). Generous enough that the model can consume the head
-/// without re-calling the tool; applied ONCE at storage time so the message
-/// is byte-identical on every later request.
-const CONTENT_BEARING_CHAR_LIMIT: usize = 16_000;
-
-/// Finalize a tool result exactly once, at storage time.
-///
-/// The rendered message must be identical on every subsequent request: any
-/// position-dependent folding performed at build time (active vs historical
-/// step) changes the bytes of the same stored message between rounds and
-/// breaks the provider prefix cache at that position. The rule here is a
-/// pure function of (tool_name, result):
-/// - skills / read_file — pass through (active instructions / self-limited)
-/// - content-bearing    — truncate with a generous head cap
-/// - exec               — truncate (4000 cap, unchanged behavior)
-/// - everything else    — fold to a deterministic receipt
-fn finalize_tool_result(tool_name: &str, result: &str) -> String {
-    // glob 与 read_file 同理由透传：工具自身以 max_results 熔断（self-limited），
-    // 且产物就是文件清单——折叠成首行会让模型拿不到清单、被迫换 exec 绕行。
-    if tool_name == "skills" || tool_name == "read_file" || tool_name == "glob" {
-        return result.to_string();
-    }
-    if is_content_bearing_tool(tool_name) {
-        return truncate_tool_result_with_limit(tool_name, result, CONTENT_BEARING_CHAR_LIMIT);
-    }
-    if tool_name.starts_with("exec") {
-        return truncate_tool_result_with_limit(tool_name, result, 4000);
-    }
-    fold_completed_tool_result(tool_name, result)
-}
-
-fn fold_completed_tool_result(tool_name: &str, result: &str) -> String {
-    if matches!(tool_name, "edit_file_v2" | "write") {
-        return fold_file_mutation_result(tool_name, result);
-    }
-
-    // ── JSON-aware folding ──
-    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(result) {
-        let hint = if tool_name.starts_with("web") {
-            "[web content folded; call web_fetch again with the same url to re-fetch, or read the saved file if the result led with [saved to ...]]"
-        } else if tool_name.starts_with("exec") {
-            "[stdout folded]"
-        } else if tool_name.starts_with("file") {
-            "[output folded]"
-        } else {
-            "[details folded]"
-        };
-        if v.get("content").is_some() {
-            v.as_object_mut().unwrap().insert(
-                "content".into(),
-                serde_json::Value::String(hint.to_string()),
-            );
-        }
-        return v.to_string();
-    }
-
-    // ── Plain string folding (legacy) ──
-    let hint = if tool_name.starts_with("web") {
-        " [web content folded; call web_fetch again with the same url to re-fetch, or read the saved file if the result led with [saved to ...]]"
-    } else if tool_name.starts_with("exec") {
-        " [stdout folded]"
-    } else if tool_name.starts_with("file") {
-        " [output folded]"
-    } else {
-        " [details folded]"
-    };
-
-    // Keep first non-empty line — it always carries [OK]/[ERROR]/[PARTIAL] + metadata.
-    let first = result.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    if first.is_empty() {
-        return hint[1..].to_string(); // strip leading space
-    }
-    let cap = first.floor_char_boundary(first.len().min(400));
-    format!("{}{}", &first[..cap], hint)
-}
-
-/// Preserve a small, verifiable edit receipt instead of only reporting that a
-/// write succeeded. Tools now return summary-only receipts (no diff body), so
-/// the fold keeps the first line plus a deterministic verify instruction.
-///
-/// 失败结果（`[ERROR]`/`[PARTIAL]` 开头，含 NO_MATCH 候选/详情）**原样透传**：
-/// 模型必须看到失败原因与候选才能修正重试——折叠会剪断反馈闭环
-/// （曾导致 edit_file_v2 失败时模型只能盲猜重试）。成功（`[OK]`）折叠收据。
-fn fold_file_mutation_result(tool_name: &str, result: &str) -> String {
-    if result.starts_with("[ERROR]") || result.starts_with("[PARTIAL]") {
-        return result.to_string();
-    }
-    let first = result
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("");
-    let cap = first.floor_char_boundary(first.len().min(600));
-    let action = match tool_name {
-        "edit_file_v2" => "edit",
-        "write" => "write",
-        _ => "change",
-    };
-    format!(
-        "{}\n[{} diff folded; verify the affected range with read_file before making dependent changes]",
-        &first[..cap],
-        action
-    )
-}
+/// Tool results are finalized exactly once, at storage time — but the shaping
+/// itself (truncation / folding) now happens at the TOOL side
+/// (`deepx-workspace::tool_side_fold`) before results reach this store. The
+/// stored message therefore IS the final form: the same bytes are rendered on
+/// every subsequent request, keeping KV-cache prefixes stable across rounds
+/// and turns.
 
 #[derive(Debug, Clone)]
 pub struct Step {
@@ -750,28 +524,9 @@ impl MessageStore {
         success: bool,
         diff: Option<String>,
     ) -> bool {
-        // Look up tool name from any step that owns this tool_call_id.
-        // Look up the tool name so the result can be finalized once at
-        // storage time — the stored bytes are the final rendered form.
-        let tool_name: Option<String> = self.turns.iter().rev().find_map(|turn| {
-            turn.steps.iter().rev().find_map(|step| {
-                step.assistant.content.iter().find_map(|b| {
-                    if let deepx_types::ContentBlock::ToolUse { id, name, .. } = b {
-                        if id == tool_call_id {
-                            Some(name.clone())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-            })
-        });
-        let final_result = match tool_name.as_deref() {
-            Some(name) => finalize_tool_result(name, result),
-            None => result.to_string(),
-        };
+        // 工具结果已在工具侧定型（deepx-workspace::tool_side_fold）：
+        // 存储的就是最终形态，message 层不再改写。
+        let final_result = result.to_string();
         let mut tool_msg = Message::tool(tool_call_id, &final_result, success);
         // 展示平面 diff 附着在结构化 ToolResult 上（project_for_model 不携带，
         // 模型上下文不受影响）；供 last_step_tool_results → timeline 消费。
@@ -841,26 +596,8 @@ impl MessageStore {
     }
 
     pub fn replace_tool_result(&mut self, tool_call_id: &str, result: &str, success: bool) {
-        // Same finalization for the replace path: stored bytes are final.
-        let tool_name: Option<String> = self.turns.iter().rev().find_map(|turn| {
-            turn.steps.iter().rev().find_map(|step| {
-                step.assistant.content.iter().find_map(|b| {
-                    if let deepx_types::ContentBlock::ToolUse { id, name, .. } = b {
-                        if id == tool_call_id {
-                            Some(name.clone())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-            })
-        });
-        let final_result = match tool_name.as_deref() {
-            Some(name) => finalize_tool_result(name, result),
-            None => result.to_string(),
-        };
+        // Same as push path: stored bytes are final (tool side already shaped).
+        let final_result = result.to_string();
 
         for turn in self.turns.iter_mut().rev() {
             if let Some(step) = turn.find_step_for_mut(tool_call_id) {
@@ -1588,7 +1325,6 @@ impl MessageStore {
             if i < self.compact_skip {
                 continue;
             }
-            let is_last_turn = i == self.turns.len() - 1;
             for m in [&turn.user] {
                 for b in &m.content {
                     match b {
@@ -1626,8 +1362,7 @@ impl MessageStore {
                     }
                 }
             }
-            for (si, step) in turn.steps.iter().enumerate() {
-                let is_last_step_of_last_turn = is_last_turn && si == turn.steps.len() - 1;
+            for step in turn.steps.iter() {
                 for b in &step.assistant.content {
                     match b {
                         deepx_types::ContentBlock::Text { text } => {
@@ -1648,42 +1383,13 @@ impl MessageStore {
                 for tr in &step.tool_results {
                     for b in &tr.content {
                         if let deepx_types::ContentBlock::ToolResult {
-                            tool_use_id,
+                            tool_use_id: _,
                             result,
                         } = b
                         {
-                            // Match tool name by id
-                            let tool_name = step
-                                .assistant
-                                .content
-                                .iter()
-                                .find_map(|blk| {
-                                    if let deepx_types::ContentBlock::ToolUse { id, name, .. } = blk
-                                    {
-                                        if id == tool_use_id {
-                                            Some(name.as_str())
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or("");
-
-                            let effective = if is_last_step_of_last_turn {
-                                let keep_full = tool_name == "read_file"
-                                    || tool_name == "skills"
-                                    || tool_name.starts_with("exec");
-                                if keep_full {
-                                    truncate_tool_result(tool_name, &result.model.text)
-                                } else {
-                                    fold_completed_tool_result(tool_name, &result.model.text)
-                                }
-                            } else {
-                                fold_completed_tool_result(tool_name, &result.model.text)
-                            };
-                            tool_results += deepx_types::count_tokens(&effective) as u64;
+                            // 存储字节即最终形态：工具侧折叠已定型，直接按实际
+                            // 文本统计（不再按位置模拟折叠）。
+                            tool_results += deepx_types::count_tokens(&result.model.text) as u64;
                         }
                     }
                 }
@@ -2078,12 +1784,12 @@ mod tests {
     }
 
     #[test]
-    fn current_step_projects_each_result_using_its_own_tool_name() {
+    fn current_step_projects_each_result_verbatim() {
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("inspect files");
         store.push_assistant(assistant_with_tools(&[
             ("write-1", "write"),
-            ("read-1", "read_file"),
+            ("read-1", "read"),
             ("exec-1", "exec"),
         ]));
         store.push_tool_result_direct("write-1", "WRITE_RESULT", true);
@@ -2092,10 +1798,7 @@ mod tests {
 
         let context = store.build_context_for_gate(&[]);
 
-        assert_eq!(
-            context_result(&context, "write-1"),
-            "WRITE_RESULT\n[write diff folded; verify the affected range with read_file before making dependent changes]"
-        );
+        assert_eq!(context_result(&context, "write-1"), "WRITE_RESULT");
         assert_eq!(context_result(&context, "read-1"), "READ_RESULT");
         assert_eq!(context_result(&context, "exec-1"), "EXEC_RESULT");
     }
@@ -2107,11 +1810,11 @@ mod tests {
         // 绝不携带 diff 正文。
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("edit a file");
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
         let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
         store.push_tool_result_direct_with_diff(
             "edit-1",
-            "[OK] edit_file_v2\n  src/a.rs: 1/1 hunk(s) applied at L2 (+1 -1)",
+            "[OK] edit\n  src/a.rs: 1/1 hunk(s) applied at L2 (+1 -1)",
             true,
             Some(diff.to_string()),
         );
@@ -2120,24 +1823,27 @@ mod tests {
         assert_eq!(results.len(), 1);
         let (tc_id, _name, content, success, got_diff) = &results[0];
         assert_eq!(tc_id, "edit-1");
-        assert!(content.starts_with("[OK] edit_file_v2"));
+        assert!(content.starts_with("[OK] edit"));
         assert!(*success);
         assert_eq!(got_diff.as_deref(), Some(diff));
 
-        // 模型投影保持精简：折叠摘要行存在，diff 正文缺席。
+        // 模型投影保持精简：diff 正文缺席（展示平面单独携带）。
         let context = store.build_context_for_gate(&[]);
         let projected = context_result(&context, "edit-1");
-        assert!(projected.contains("[edit diff folded"));
+        assert_eq!(
+            projected,
+            "[OK] edit\n  src/a.rs: 1/1 hunk(s) applied at L2 (+1 -1)"
+        );
         assert!(!projected.contains("+++ b/"), "diff leaked to model: {projected}");
     }
 
     #[test]
-    fn completed_step_projects_each_result_using_its_own_tool_name() {
+    fn completed_step_projects_each_result_verbatim() {
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("first turn");
         store.push_assistant(assistant_with_tools(&[
             ("write-1", "write"),
-            ("read-1", "read_file"),
+            ("read-1", "read"),
         ]));
         store.push_tool_result_direct("write-1", "WRITE_RESULT", true);
         store.push_tool_result_direct("read-1", "READ_RESULT", true);
@@ -2145,10 +1851,7 @@ mod tests {
 
         let context = store.build_context_for_gate(&[]);
 
-        assert_eq!(
-            context_result(&context, "write-1"),
-            "WRITE_RESULT\n[write diff folded; verify the affected range with read_file before making dependent changes]"
-        );
+        assert_eq!(context_result(&context, "write-1"), "WRITE_RESULT");
         assert_eq!(context_result(&context, "read-1"), "READ_RESULT");
     }
 
@@ -2156,7 +1859,7 @@ mod tests {
     fn historical_read_preserves_full_content() {
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("inspect file");
-        store.push_assistant(assistant_with_tools(&[("read-1", "read_file")]));
+        store.push_assistant(assistant_with_tools(&[("read-1", "read")]));
         store.push_tool_result_direct(
             "read-1",
             &serde_json::json!({
@@ -2172,31 +1875,28 @@ mod tests {
         );
         store.push_user("continue");
 
-        let folded: serde_json::Value = serde_json::from_str(&context_result(
+        let stored: serde_json::Value = serde_json::from_str(&context_result(
             &store.build_context_for_gate(&[]),
             "read-1",
         ))
-        .expect("folded read remains valid JSON");
-        assert_eq!(folded["path"], "src/lib.rs");
-        assert_eq!(folded["start_line"], 40);
-        assert!(!folded["content"].as_str().unwrap().contains("folded"));
-        assert!(folded.to_string().contains("lengthy source body"));
+        .expect("stored read remains valid JSON");
+        assert_eq!(stored["path"], "src/lib.rs");
+        assert_eq!(stored["start_line"], 40);
+        assert!(!stored["content"].as_str().unwrap().contains("folded"));
+        assert!(stored.to_string().contains("lengthy source body"));
     }
 
     #[test]
-    fn historical_edit_keeps_verification_receipt_not_full_diff() {
+    fn historical_edit_result_passes_through_verbatim() {
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("make edit");
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
-        store.push_tool_result_direct(
-            "edit-1",
-            "[OK] src/lib.rs:42 +3 -2 | edit\n\n@@ -42,2 +42,3 @@\n-full diff body",
-            true,
-        );
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
+        let body = "[OK] src/lib.rs:42 +3 -2 | edit\n\n@@ -42,2 +42,3 @@\n-full diff body";
+        store.push_tool_result_direct("edit-1", body, true);
 
         assert_eq!(
             context_result(&store.build_context_for_gate(&[]), "edit-1"),
-            "[OK] src/lib.rs:42 +3 -2 | edit\n[edit diff folded; verify the affected range with read_file before making dependent changes]"
+            body
         );
     }
 
@@ -2216,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn content_bearing_tool_never_changes_after_storage() {
+    fn tool_result_never_changes_after_storage() {
         // Storage-time finalization: the SAME bytes are rendered whether the
         // step is active or historical. A later step must not change the
         // earlier result (that used to fold it, breaking the prefix cache at
@@ -2229,7 +1929,7 @@ mod tests {
         let active_render = context_result(&active_ctx, "web-1");
 
         // New step arrives → the web result is now historical.
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
         store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
 
         let context = store.build_context_for_gate(&[]);
@@ -2238,52 +1938,40 @@ mod tests {
             active_render,
             "historical web result must render identically to the active-step render"
         );
-        // The edit receipt stays folded too — edit is receipt-style even on
-        // the active step.
-        assert_eq!(
-            context_result(&context, "edit-1"),
-            "OK_RECEIPT\n[edit diff folded; verify the affected range with read_file before making dependent changes]"
-        );
+        // 工具结果在工具侧定型，存储字节即最终形态——无论活动/历史渲染一致。
+        assert_eq!(context_result(&context, "edit-1"), "OK_RECEIPT");
     }
 
     #[test]
-    fn long_content_bearing_result_truncated_at_storage() {
-        // A long web_fetch result is bounded at storage time; the truncated
-        // form (with marker) is then rendered verbatim forever.
-        let body = "paragraph\n".repeat(4_000); // ~36K chars > 16K cap
+    fn long_tool_result_passes_through_at_storage() {
+        // message 侧不再截断：工具侧（tool_side_fold）在回传前已定型，
+        // 存储层原样保存，后续渲染逐字节一致。
+        // 20K > 旧 message 侧 16K 上限，但 < deepx-types 24K 硬顶——
+        // 若 message 侧截断仍存在，此断言会失败。
+        let body = "paragraph\n".repeat(2_000); // ~20K chars
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("fetch page");
         store.push_assistant(assistant_with_tools(&[("web-1", "web_fetch")]));
         store.push_tool_result_direct("web-1", &body, true);
 
         let first = context_result(&store.build_context_for_gate(&[]), "web-1");
-        assert!(
-            first.len() < body.len(),
-            "result must be capped at storage time"
-        );
-        assert!(
-            first.contains("[truncated:"),
-            "truncation marker expected, got: {first}"
-        );
+        assert_eq!(first, body, "store must pass the result through verbatim");
 
         // Same bytes on every later render (historical position included).
         store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file")]));
         store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
         let second = context_result(&store.build_context_for_gate(&[]), "web-1");
-        assert_eq!(
-            first, second,
-            "stored truncation must be stable across renders"
-        );
+        assert_eq!(first, second, "stored result must be stable across renders");
     }
 
     #[test]
     fn edit_failure_result_passes_through_uncut() {
         // 失败结果（NO_MATCH 候选/详情）不折叠：模型必须看到失败原因与候选才能
-        // 修正重试——折叠会剪断反馈闭环（曾导致 edit_file_v2 失败时模型只能盲猜
+        // 修正重试——折叠会剪断反馈闭环（曾导致 edit 失败时模型只能盲猜
         // 重试 → TTL 过期 → 缓存失效螺旋）。
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("edit file");
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
         store.push_tool_result_direct(
             "edit-1",
             "[ERROR] NO_MATCH\n  detail: old matches nothing near expected context\n  candidates: [L12, L40]",
@@ -2304,7 +1992,7 @@ mod tests {
         // partial 模式同样透传：失败 hunk 的详情（含候选）不能被折叠。
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("edit file");
-        store.push_assistant(assistant_with_tools(&[("edit-1", "edit_file_v2")]));
+        store.push_assistant(assistant_with_tools(&[("edit-1", "edit")]));
         store.push_tool_result_direct(
             "edit-1",
             "[PARTIAL] 1 hunk(s) applied, 1 failed — re-send ONLY the failed hunks\n  hunk 1: NO_MATCH detail with candidates",
@@ -2392,9 +2080,8 @@ mod tests {
     }
 
     #[test]
-    fn receipt_tool_stays_folded_even_on_active_step() {
-        // write/edit are receipt-style: even the active step shows the
-        // verification receipt, not the full body — the model knows the change.
+    fn tool_result_stays_verbatim_even_on_active_step() {
+        // write/edit 的结果在工具侧定型：活动步骤也原样渲染，不再折叠。
         let mut store = MessageStore::new_ephemeral("test");
         store.push_user("write file");
         store.push_assistant(assistant_with_tools(&[("write-1", "write")]));
@@ -2402,7 +2089,7 @@ mod tests {
 
         assert_eq!(
             context_result(&store.build_context_for_gate(&[]), "write-1"),
-            "WRITE_RESULT\n[write diff folded; verify the affected range with read_file before making dependent changes]"
+            "WRITE_RESULT"
         );
     }
 
@@ -2431,7 +2118,7 @@ mod tests {
     #[test]
     fn glob_listing_remains_complete_across_steps_and_turns() {
         // glob 的产物就是文件清单：折叠成首行会让模型拿不到清单、
-        // 被迫换 exec rg 绕行。与 read_file/skills 同理由透传
+        // 被迫换 exec rg 绕行。与 read/skills 同理由透传
         // （工具自身 max_results 熔断 = self-limited）。
         let listing = "crates/deepx-config/src/config.rs\ncrates/deepx-config/src/lib.rs\ncrates/deepx-config/src/prompt.rs\ncrates/deepx-config/src/registry.rs\n";
         let mut store = MessageStore::new_ephemeral("test");
@@ -2488,33 +2175,6 @@ mod tests {
                 .any(|block| matches!(block, ContentBlock::Text { text } if text == skill))
         }));
         assert_eq!(repairs.len(), 2);
-    }
-
-    #[test]
-    fn truncated_read_result_explicitly_instructs_follow_up_range() {
-        let content = "line\n".repeat(1_100);
-        let raw = serde_json::json!({"content": content}).to_string();
-
-        let truncated: serde_json::Value =
-            serde_json::from_str(&truncate_tool_result("read_file", &raw))
-                .expect("valid JSON result");
-        let content = truncated["content"].as_str().expect("content string");
-
-        assert!(truncated["truncated"].as_bool().unwrap_or(false));
-        assert!(content.contains(
-            "Call read_file again with the same path and a later start_line/end_line range."
-        ));
-    }
-
-    #[test]
-    fn plain_read_result_is_truncated_at_line_boundary_with_follow_up_hint() {
-        let result = "line\n".repeat(1_100);
-        let truncated = truncate_tool_result("read_file", &result);
-
-        assert!(truncated.len() < result.len());
-        assert!(truncated.contains(
-            "Call read_file again with the same path and a later start_line/end_line range."
-        ));
     }
 
     #[test]

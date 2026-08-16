@@ -1,4 +1,4 @@
-//! Mutation tools: write, delete（统一编辑入口见 file_edit_v2.rs 的 edit_file_v2）。
+//! Mutation tools: write, delete（统一编辑入口见 file_edit_v2.rs 的 edit）。
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -83,7 +83,7 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> ToolResult {
                         "timeis": crate::now_utc8(), "status": "error", "code": "STALE_FILE", "path": path,
                         "message": "File was modified outside the tool since the last read/edit",
                         "expected_hash": known, "actual_hash": disk_lf_hash,
-                        "hint": "Use read_file to refresh the tool's view of the file, then retry the write."
+                        "hint": "Use read to refresh the tool's view of the file, then retry the write."
                     })
                     .to_string(),
                 );
@@ -102,7 +102,7 @@ pub(super) fn exec_write_file(args: &serde_json::Value) -> ToolResult {
     let diff = unified_diff(&old_norm, &new_norm, &path);
     let diff_text = (!diff.trim().is_empty()).then(|| diff.trim_end().to_string());
 
-    // dry_run: 只预览 diff（与 edit_file_v2 的 dry_run 语义一致），不写盘。
+    // dry_run: 只预览 diff（与 edit 的 dry_run 语义一致），不写盘。
     // 通过 → 暂存参数供 confirm_apply 内存直提（模型无需重发 content）。
     if dry_run {
         let mut pending_args = args.clone();
@@ -256,7 +256,7 @@ pub(super) fn exec_delete_file(args: &serde_json::Value) -> String {
                     "timeis": crate::now_utc8(), "status": "error", "code": "STALE_FILE", "path": path,
                     "message": "File was modified outside the tool since the last read/edit",
                     "expected_hash": known, "actual_hash": disk_lf_hash,
-                    "hint": "Use read_file to refresh the tool's view of the file, then retry the delete."
+                    "hint": "Use read to refresh the tool's view of the file, then retry the delete."
                 }).to_string();
             }
         }
@@ -356,7 +356,7 @@ handler_from_string!(handle_delete_file, exec_delete_file);
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(ToolHandler {
         key: "write".to_string(),
-        description: "Create, overwrite, or append to a file. Success returns a summary line only (path:first_line +N -M), no diff echo — set dry_run=true to preview the full diff without writing. Use for whole-file creation/overwrite/append; use edit_file_v2 for targeted changes.",
+        description: "Create, overwrite, or append to a file. Success returns a summary line only (path:first_line +N -M), no diff echo — set dry_run=true to preview the full diff without writing. Use for whole-file creation/overwrite/append; use edit for targeted changes.",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"If true, append to file instead of overwriting","default":false},"dry_run":{"type":"boolean","description":"Preview only (with full diff), do not write","default":false},"expected_hash":{"type":"string","description":"Optional. When omitted, the tool auto-verifies against its own last-known state (from read/edit/write) and rejects overwrites of externally-modified files — no need to pass the hash back"}},"required":["path","content"],"additionalProperties":false}),
         handler: handle_write_file,
         risk: ToolRisk::Write,

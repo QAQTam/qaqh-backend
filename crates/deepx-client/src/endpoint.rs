@@ -207,7 +207,7 @@ mod tests {
         let (name, params) = ActionRequest::SessionSetToolMode {
             seed: "s1".into(),
             tool_mode: "minimal".into(),
-            custom_tools: vec!["bash".into(), "edit_file_v2".into()],
+            custom_tools: vec!["bash".into(), "edit".into()],
         }
         .into_parts();
         assert_eq!(name, "session.set_tool_mode");
