@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::subagent_actor::SubagentSpawnSpec;
 use crate::{RingingHub, SessionActivityTracker};
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
@@ -97,14 +99,38 @@ fn background_command(program: &str) -> Command {
     command
 }
 
+/// How an agent worker is attached to this daemon process.
+enum AgentTransport {
+    /// Legacy/current process worker (`qaqh agent --seed …`) over piped stdio.
+    Process {
+        stdin: Arc<Mutex<Box<dyn Write + Send>>>,
+        child: Arc<Mutex<Option<Child>>>,
+    },
+    /// Knife-1 in-process worker: the Ringing Loop runs on a daemon thread and
+    /// communicates through the same WorkerCommand/WriterEvent channel types as
+    /// the pipe boundary.
+    InProcess {
+        cmd_tx: SyncSender<qaqh_msglp::ringing_v1::types::WorkerCommand>,
+        cancel: qaqh_msglp::ringing_v1::types::CancelToken,
+    },
+}
+
+enum AgentKind {
+    Session,
+    Subagent(SubagentSpawnSpec),
+}
+
 pub struct AgentInstance {
     seed: String,
-    stdin: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Arc<Mutex<Option<Child>>>,
-    /// stdout 消费线程（registry 侧读取 worker 事件行）。daemon 关闭时
-    /// 必须 join：worker 进程退出 ≠ 尾部 intent（含 seal_turn）已消费——
-    /// 管道里的最后几行仍由本线程读取并 publish（见 shutdown）。
+    transport: AgentTransport,
+    kind: AgentKind,
+    /// Event consumer thread (stdout reader for process workers, event channel
+    /// reader for in-process actors). daemon 关闭时必须 join：worker 退出 ≠
+    /// 尾部 intent（含 seal_turn）已消费——管道/通道里的最后几个事件仍由
+    /// 本线程读取并 publish（见 shutdown）。
     reader: Option<std::thread::JoinHandle<()>>,
+    /// In-process loop thread. `None` for process workers.
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 pub struct AgentRegistry {
@@ -194,11 +220,15 @@ impl AgentRegistry {
         self.spawn_with(seed, Some(seed), &[])
     }
 
-    /// Spawn an isolated subagent worker (`qaqh agent --seed … --ephemeral
-    /// --tools […] [--model] [--base-url] [--max-tokens]`). The worker runs
-    /// the same Ringing worker protocol on its own stdin/stdout pipe; the
-    /// caller (parent agent via `subagent.spawn` action) then attaches the
-    /// seed and drives it with ordinary Ringing commands/events.
+    /// Spawn an isolated subagent worker **inside the daemon process**.
+    ///
+    /// Knife-1 step 1 removes `Command::new(current_exe)` and the child-process
+    /// leg of the subagent path.
+    ///
+    /// The subagent is a normal Ringing V1
+    /// [`qaqh_msglp::ringing_v1::loop_core::Loop`] running on a daemon thread;
+    /// its command/event channels are the same typed envelopes as the pipe wire,
+    /// so the daemon publishes events and commands unchanged.
     pub fn spawn_subagent(
         &mut self,
         seed: &str,
@@ -210,24 +240,90 @@ impl AgentRegistry {
         if self.instances.contains_key(seed) {
             return Err(format!("agent already running for {seed}"));
         }
-        let mut extra: Vec<String> = vec!["--ephemeral".to_string()];
-        let tools_json =
-            serde_json::to_string(tools).map_err(|e| format!("serialize tools: {e}"))?;
-        extra.push("--tools".to_string());
-        extra.push(tools_json);
-        if let Some(model) = model {
-            extra.push("--model".to_string());
-            extra.push(model.to_string());
+        let persist = std::env::var("QAQH_SUBAGENT_PERSIST").is_ok_and(|value| {
+            matches!(value.as_str(), "1" | "true" | "on")
+        });
+        let ephemeral = !persist;
+        self.spawn_subagent_inprocess(
+            seed,
+            SubagentSpawnSpec {
+                tools: tools.to_vec(),
+                model: model.map(str::to_string),
+                base_url: base_url.map(str::to_string),
+                max_tokens,
+                ephemeral,
+            },
+        )
+    }
+
+    fn spawn_subagent_inprocess(
+        &mut self,
+        seed: &str,
+        spec: SubagentSpawnSpec,
+    ) -> Result<(), String> {
+        if self.instances.contains_key(seed) {
+            return Err(format!("agent already running for {seed}"));
         }
-        if let Some(base_url) = base_url {
-            extra.push("--base-url".to_string());
-            extra.push(base_url.to_string());
-        }
-        if let Some(max_tokens) = max_tokens {
-            extra.push("--max-tokens".to_string());
-            extra.push(max_tokens.to_string());
-        }
-        self.spawn_with(seed, Some(seed), &extra)
+        self.last_spawn
+            .insert(seed.to_string(), std::time::Instant::now());
+        let (generation, _) = self.activity.begin(seed);
+
+        let channels = qaqh_msglp::ringing_v1::loop_core::LoopChannels::new();
+        let qaqh_msglp::ringing_v1::loop_core::LoopChannels {
+            cmd_tx,
+            cmd_rx,
+            event_tx,
+            event_rx,
+            cancel,
+            writer_dead,
+        } = channels;
+        let cancel_for_sender = cancel.clone();
+
+        let event_seed = seed.to_string();
+        let activity = self.activity.clone();
+        let hub = self.hub.clone();
+        let reader = std::thread::spawn(move || {
+            crate::subagent_actor::run_inprocess_event_reader(event_rx, event_seed, generation, activity, hub);
+        });
+
+        let actor_seed = seed.to_string();
+        let actor_spec = spec.clone();
+        let tools_len = spec.tools.len();
+        let workspace_mode = self.workspace_mode.clone();
+        let workspace_env = self.workspace_env.clone();
+        let thread = std::thread::Builder::new()
+            .name(format!("qaqh-subagent-{actor_seed}"))
+            .spawn(move || {
+                crate::subagent_actor::run_subagent_actor(
+                    actor_seed,
+                    actor_spec,
+                    cmd_rx,
+                    event_tx,
+                    cancel,
+                    writer_dead,
+                    workspace_mode,
+                    workspace_env,
+                );
+            })
+            .map_err(|e| format!("spawn in-process subagent {seed}: {e}"))?;
+
+        self.instances.insert(
+            seed.to_string(),
+            AgentInstance {
+                seed: seed.to_string(),
+                transport: AgentTransport::InProcess {
+                    cmd_tx,
+                    cancel: cancel_for_sender,
+                },
+                kind: AgentKind::Subagent(spec),
+                reader: Some(reader),
+                thread: Some(thread),
+            },
+        );
+        log::info!(
+            "[subagent] spawned in-process actor seed={seed} tools={tools_len} (no child process)"
+        );
+        Ok(())
     }
 
     fn spawn(&mut self, seed: &str, new_seed: Option<&str>) -> Result<(), String> {
@@ -422,9 +518,13 @@ impl AgentRegistry {
             seed.to_string(),
             AgentInstance {
                 seed: seed.to_string(),
-                stdin: Arc::new(Mutex::new(Box::new(stdin))),
-                child,
+                transport: AgentTransport::Process {
+                    stdin: Arc::new(Mutex::new(Box::new(stdin))),
+                    child,
+                },
+                kind: AgentKind::Session,
                 reader: Some(reader),
+                thread: None,
             },
         );
         Ok(())
@@ -437,22 +537,49 @@ impl AgentRegistry {
         env: &qaqh_ringing::RingingWorkerCommandEnvelope,
     ) -> Result<(), String> {
         self.get_or_spawn(seed)?;
-        let json = serde_json::to_string(env).map_err(|e| format!("serialize: {e}"))?;
         let write = |instance: &AgentInstance| -> Result<(), String> {
-            let mut stdin = instance
-                .stdin
-                .lock()
-                .map_err(|e| format!("agent stdin lock: {e}"))?;
-            writeln!(*stdin, "{json}").map_err(|e| format!("agent write: {e}"))?;
-            stdin.flush().map_err(|e| format!("agent flush: {e}"))
+            match &instance.transport {
+                AgentTransport::Process { stdin, .. } => {
+                    let json = serde_json::to_string(env).map_err(|e| format!("serialize: {e}"))?;
+                    let mut stdin = stdin.lock().map_err(|e| format!("agent stdin lock: {e}"))?;
+                    writeln!(*stdin, "{json}").map_err(|e| format!("agent write: {e}"))?;
+                    stdin.flush().map_err(|e| format!("agent flush: {e}"))
+                }
+                AgentTransport::InProcess { cmd_tx, cancel } => {
+                    // Mirror the pipe reader: interrupt frames set the cancel
+                    // token before they enter the command queue so long-running
+                    // gate/tool work observes the abort immediately.
+                    if qaqh_msglp::ringing_v1::loop_core::ringing_command_is_interrupt(env) {
+                        cancel.set();
+                        qaqh_workspace::CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    let cmd = qaqh_msglp::ringing_v1::types::WorkerCommand {
+                        frame: qaqh_msglp::ringing_v1::wire::WorkerCommandFrame::Ringing(
+                            env.clone(),
+                        ),
+                        causation: Some(env.command_id.clone()),
+                    };
+                    cmd_tx
+                        .send(cmd)
+                        .map_err(|e| format!("agent command channel send: {e}"))
+                }
+            }
         };
         if write(self.instances.get(seed).expect("spawned instance")).is_ok() {
             return Ok(());
         }
+        let kind = self
+            .instances
+            .get(seed)
+            .map(AgentInstance::kind_name)
+            .unwrap_or(AgentKind::Session);
         if let Some(dead) = self.instances.remove(seed) {
             dead.shutdown();
         }
-        self.get_or_spawn(seed)?;
+        match kind {
+            AgentKind::Session => self.get_or_spawn(seed)?,
+            AgentKind::Subagent(spec) => self.spawn_subagent_inprocess(seed, spec)?,
+        }
         write(self.instances.get(seed).expect("respawned instance"))
     }
 
@@ -485,8 +612,20 @@ impl AgentRegistry {
 
     pub fn shutdown_all(&mut self) {
         self.shutting_down = true;
-        for (_, instance) in self.instances.drain() {
-            instance.shutdown();
+        let mut instances: Vec<AgentInstance> = self
+            .instances
+            .drain()
+            .map(|(_, instance)| instance)
+            .collect();
+        // Signal every worker before waiting on any of them. In-process actors
+        // are serialized behind SUBAGENT_ACTOR_SERIAL; joining them one-by-one
+        // could otherwise deadlock when a queued actor is joined before the
+        // actor currently holding the serialization lock has been signalled.
+        for instance in &mut instances {
+            instance.signal_shutdown();
+        }
+        for mut instance in instances {
+            instance.finish_shutdown();
         }
     }
 
@@ -497,20 +636,16 @@ impl AgentRegistry {
         if self.shutting_down {
             return;
         }
-        let dead: Vec<String> = self
+        let dead: Vec<(String, AgentKind)> = self
             .instances
             .iter()
             .filter_map(|(seed, instance)| {
-                let exited = instance
-                    .child
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_mut()
-                    .is_some_and(|child| child.try_wait().ok().flatten().is_some());
-                exited.then(|| seed.clone())
+                instance
+                    .is_dead()
+                    .then(|| (seed.clone(), instance.kind_name()))
             })
             .collect();
-        for seed in dead {
+        for (seed, kind) in dead {
             // 退避：同一 seed 最近 1 秒内刚 spawn 过（例如刚拉起又立刻崩溃）
             // 则跳过本轮，避免无意义的重启风暴。
             if self
@@ -524,8 +659,12 @@ impl AgentRegistry {
             if let Some(instance) = self.instances.remove(&seed) {
                 instance.shutdown();
             }
-            log::warn!("[AGENT:{seed}] worker process died; respawning");
-            if let Err(error) = self.spawn(&seed, None) {
+            log::warn!("[AGENT:{seed}] in-process/process worker died; respawning");
+            let spawned = match kind {
+                AgentKind::Session => self.spawn(&seed, None),
+                AgentKind::Subagent(spec) => self.spawn_subagent_inprocess(&seed, spec),
+            };
+            if let Err(error) = spawned {
                 log::error!("[AGENT:{seed}] respawn failed: {error}");
             } else if let Some(hub) = self.hub.as_ref() {
                 // 与 get_or_spawn 一致：新 worker 接管前，把 timeline 中任何
@@ -596,20 +735,58 @@ impl AgentRegistry {
 }
 
 impl AgentInstance {
-    fn shutdown(mut self) {
+    fn is_dead(&self) -> bool {
+        match &self.transport {
+            AgentTransport::Process { child, .. } => child
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+                .is_some_and(|child| child.try_wait().ok().flatten().is_some()),
+            AgentTransport::InProcess { .. } => self
+                .thread
+                .as_ref()
+                .is_some_and(std::thread::JoinHandle::is_finished),
+        }
+    }
+
+    fn kind_name(&self) -> AgentKind {
+        match &self.kind {
+            AgentKind::Session => AgentKind::Session,
+            AgentKind::Subagent(spec) => AgentKind::Subagent(spec.clone()),
+        }
+    }
+
+    fn signal_shutdown(&mut self) {
         // 优雅关闭：agent 侧只识别 Ringing 帧（legacy Ui2Agent 已拆除）。
         let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
             self.seed.clone(),
             "daemon-shutdown",
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionShutdown),
         );
-        if let Ok(json) = serde_json::to_string(&env)
-            && let Ok(mut stdin) = self.stdin.lock()
-        {
-            let _ = writeln!(*stdin, "{json}");
-            let _ = stdin.flush();
+        match &self.transport {
+            AgentTransport::Process { stdin, .. } => {
+                if let Ok(json) = serde_json::to_string(&env)
+                    && let Ok(mut stdin) = stdin.lock()
+                {
+                    let _ = writeln!(*stdin, "{json}");
+                    let _ = stdin.flush();
+                }
+            }
+            AgentTransport::InProcess { cmd_tx, cancel } => {
+                cancel.set();
+                qaqh_workspace::CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+                let cmd = qaqh_msglp::ringing_v1::types::WorkerCommand {
+                    frame: qaqh_msglp::ringing_v1::wire::WorkerCommandFrame::Ringing(env),
+                    causation: Some("daemon-shutdown".into()),
+                };
+                let _ = cmd_tx.send(cmd);
+            }
         }
-        if let Ok(mut child) = self.child.lock()
+    }
+
+    fn finish_shutdown(&mut self) {
+        if let AgentTransport::Process { child, .. } = &self.transport
+            && let Ok(mut child) = child.lock()
             && let Some(mut child) = child.take()
         {
             let started = std::time::Instant::now();
@@ -627,25 +804,27 @@ impl AgentInstance {
                 }
             }
         }
-        // 进程退出后 stdout 已 EOF，join 消费线程把管道尾部排空：worker 的
-        // 最后几个 intent（含 seal_turn——terminal intent 同步落盘）必须被
-        // 读取并 publish 后才算收尾完成；否则退出后 flush 缺该 seal，重启
-        // 时被孤儿收尾误标 daemon_restart_interrupted（每次安装更新的
-        // 必现根因）。线程在 EOF 后自然退出，join 通常毫秒级返回。
+
+        // In-process actor: join the loop thread first so it drops `event_tx`;
+        // the event reader then drains the channel tail and publishes the last
+        // intents (含 seal_turn——terminal intent 同步落盘). Process workers
+        // follow the same order below via child exit → stdout EOF → reader join.
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
         log::info!("stopped agent {}", self.seed);
     }
+
+    fn shutdown(mut self) {
+        self.signal_shutdown();
+        self.finish_shutdown();
+    }
 }
 
-/// ToolFinished 大内容外置（PLAN 大内容外置）：summary 超过 10 MiB 时
-/// 存入 ContentStore（会话所有权 + TTL），事件替换为 tail（256 KiB）+
-/// `output_ref`。Ringing 与 legacy 客户端都只收到 tail，完整内容经
-/// `GET /ringing/v1/content/{id}?seed=` 按需读取。
-///
-/// 非 ToolFinished 事件和未超阈值的 ToolFinished 事件原样返回。
-fn externalize_large_content(
+pub(crate) fn externalize_large_content(
     hub: &RingingHub,
     seed: &str,
     event: qaqh_domain::DomainEvent,

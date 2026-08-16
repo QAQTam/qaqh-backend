@@ -4,6 +4,7 @@ mod logger;
 mod registry;
 pub mod ringing;
 mod service;
+mod subagent_actor;
 pub mod timeline;
 mod timeline_store;
 mod worker;

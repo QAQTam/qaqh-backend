@@ -104,33 +104,16 @@ pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
     } else {
         qaqh_msglp::state::agent::AgentState::init("daemon")
     };
-    // Subagent 模式：把设置页的 cfg.subagent.*（模型 / base-url / **独立 API Key** /
-    // max-tokens）应用到请求字段。此前子代理独立 Key 从未生效——worker 一直用
-    // 主代理 key 请求 provider。随后 CLI 覆盖（daemon `subagent.spawn` 注入）优先。
+    // Subagent 模式：设置页 cfg.subagent.*（模型 / base-url / **独立 API Key** /
+    // max-tokens）作为默认值；CLI 覆盖（daemon `subagent.spawn` 注入）优先。
+    // 该组合逻辑与 in-process actor 共用，避免两条 subagent 启动路径漂移。
     if is_subagent {
-        let sub = agent.config.subagent.clone();
-        if !sub.model.is_empty() && model_override.is_none() {
-            agent.config.model = sub.model;
-        }
-        if !sub.base_url.is_empty() && base_url_override.is_none() {
-            agent.config.base_url = sub.base_url;
-        }
-        if !sub.api_key.is_empty() {
-            agent.config.api_key = sub.api_key;
-        }
-        if sub.max_tokens > 0 && max_tokens_override.is_none() {
-            agent.config.max_tokens = sub.max_tokens;
-        }
-    }
-    // CLI 覆盖优先于 cfg.subagent 默认值（daemon `subagent.spawn` 按调用方参数注入）。
-    if let Some(model) = model_override {
-        agent.config.model = model;
-    }
-    if let Some(base_url) = base_url_override {
-        agent.config.base_url = base_url;
-    }
-    if let Some(max_tokens) = max_tokens_override {
-        agent.config.max_tokens = max_tokens;
+        crate::subagent_actor::apply_subagent_config(
+            &mut agent,
+            model_override.as_deref(),
+            base_url_override.as_deref(),
+            max_tokens_override,
+        );
     }
     if let Some(seed) = resume_seed {
         agent.session.resume_seed = Some(seed);

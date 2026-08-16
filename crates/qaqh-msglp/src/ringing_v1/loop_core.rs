@@ -63,7 +63,9 @@ use super::paced_emitter::PacedEmitter;
 use super::types::*;
 use crate::state::agent::AgentState;
 
-fn ringing_command_is_interrupt(env: &qaqh_ringing::RingingWorkerCommandEnvelope) -> bool {
+pub fn ringing_command_is_interrupt(
+    env: &qaqh_ringing::RingingWorkerCommandEnvelope,
+) -> bool {
     matches!(
         &env.command,
         qaqh_ringing::RingingCommand::Control(
@@ -138,6 +140,48 @@ mod parse_subagent_status_tag_tests {
 // ═══════════════════════════════════════════════════════
 // Loop — the dispatcher
 // ═══════════════════════════════════════════════════════
+
+/// Pre-created in-process worker channel ends.
+///
+/// `Loop::new_ipc` uses these internally; an in-process host (daemon actor,
+/// tests) can create them before the loop, keep the producer/consumer sides,
+/// and construct the loop later with [`Loop::from_channels`].
+pub struct LoopChannels {
+    pub cmd_tx: mpsc::SyncSender<WorkerCommand>,
+    pub cmd_rx: mpsc::Receiver<WorkerCommand>,
+    pub event_tx: mpsc::SyncSender<WriterEvent>,
+    pub event_rx: mpsc::Receiver<WriterEvent>,
+    pub cancel: CancelToken,
+    pub writer_dead: Arc<AtomicBool>,
+}
+
+impl Default for LoopChannels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoopChannels {
+    /// Create the bounded channels used by a Ringing V1 loop.
+    pub fn new() -> Self {
+        // std 的 sync_channel 在构造时预分配 (capacity + 1) 个 slot 的环形缓冲，
+        // 每个 slot 是 size_of::<WriterEvent>() = 512 字节（枚举按最大变体对齐）。
+        // 旧值 655360 × 512B ≈ 320MB —— 每个 worker 进程启动即常驻，这正是
+        // 单 session 内存 300MB+ 的根因。writer 线程逐事件即时写 stdout，突发
+        // 事件由 PacedEmitter 以 ≤50ms 节流合并，16384 个 slot（8MB）在保留
+        // 背压语义的同时把固定开销降到合理范围。
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel::<WorkerCommand>(4096);
+        let (event_tx, event_rx) = mpsc::sync_channel::<WriterEvent>(16384);
+        Self {
+            cmd_tx,
+            cmd_rx,
+            event_tx,
+            event_rx,
+            cancel: CancelToken::new(),
+            writer_dead: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 pub struct Loop {
     // ── Process-level I/O ──
@@ -215,28 +259,10 @@ impl Loop {
         input: impl BufRead + Send + 'static,
         output: impl Write + Send + 'static,
     ) -> Self {
-        // resume 模式下 `--resume-seed` 只写入 resume_seed 字段，seed 此时
-        // 仍为空；用 resume_seed 兜底，避免 PacedEmitter 以空 seed 构造
-        // （Ringing 事件信封会被 daemon 按 seed 过滤丢弃）。init_session
-        // 完成后还会经 sync_emitter_seed 再次同步权威值。
-        let seed = if !agent.session.seed.is_empty() {
-            agent.session.seed.clone()
-        } else {
-            agent.session.resume_seed.clone().unwrap_or_default()
-        };
-        let cancel = CancelToken::new();
-        let cancel_for_reader = cancel.clone();
-
-        let (cmd_tx, cmd_rx) = mpsc::sync_channel::<super::types::WorkerCommand>(4096);
-        // std 的 sync_channel 在构造时预分配 (capacity + 1) 个 slot 的环形缓冲，
-        // 每个 slot 是 size_of::<WriterEvent>() = 512 字节（枚举按最大变体对齐）。
-        // 旧值 655360 × 512B ≈ 320MB —— 每个 worker 进程启动即常驻，这正是
-        // 单 session 内存 300MB+ 的根因。writer 线程逐事件即时写 stdout，突发
-        // 事件由 PacedEmitter 以 ≤50ms 节流合并，16384 个 slot（8MB）在保留
-        // 背压语义的同时把固定开销降到合理范围。
-        let (event_tx, event_rx) = mpsc::sync_channel::<super::types::WriterEvent>(16384);
-        let writer_dead = Arc::new(AtomicBool::new(false));
-        let writer_dead_for_thread = writer_dead.clone();
+        let channels = LoopChannels::new();
+        let cancel_for_reader = channels.cancel.clone();
+        let cmd_tx = channels.cmd_tx.clone();
+        let writer_dead_for_thread = channels.writer_dead.clone();
 
         // ── Reader thread: stdin → cmd_tx ──
         // Processes JSON-LP frames in a loop. Interrupt-type commands
@@ -293,7 +319,7 @@ impl Loop {
                 // up each line without buffering delay.
                 let mut writer = output;
                 loop {
-                    match event_rx.recv() {
+                    match channels.event_rx.recv() {
                         Ok(super::types::WriterEvent::Ringing(env)) => {
                             if super::wire::write_ringing_event_frame(&mut writer, &env).is_err() {
                                 break;
@@ -318,6 +344,36 @@ impl Loop {
             log::info!("[AGENT] writer thread exiting");
         });
 
+        Self::from_channels(
+            agent,
+            channels.cmd_rx,
+            channels.event_tx,
+            channels.cancel,
+            channels.writer_dead,
+        )
+    }
+
+    /// Construct a Loop from pre-created in-process channel ends.
+    ///
+    /// The caller owns the producer side (`cmd_tx`) and consumer side
+    /// (`event_rx`) from [`LoopChannels`]. This is the same loop as
+    /// `new_ipc`; only the process boundary is replaced by channels.
+    pub fn from_channels(
+        agent: AgentState,
+        cmd_rx: mpsc::Receiver<WorkerCommand>,
+        event_tx: mpsc::SyncSender<WriterEvent>,
+        cancel: CancelToken,
+        writer_dead: Arc<AtomicBool>,
+    ) -> Self {
+        // resume 模式下 `--resume-seed` 只写入 resume_seed 字段，seed 此时
+        // 仍为空；用 resume_seed 兜底，避免 PacedEmitter 以空 seed 构造
+        // （Ringing 事件信封会被 daemon 按 seed 过滤丢弃）。init_session
+        // 完成后还会经 sync_emitter_seed 再次同步权威值。
+        let seed = if !agent.session.seed.is_empty() {
+            agent.session.seed.clone()
+        } else {
+            agent.session.resume_seed.clone().unwrap_or_default()
+        };
         let paced_emitter =
             PacedEmitter::new(seed, event_tx.clone(), writer_dead.clone(), cancel.arc());
 

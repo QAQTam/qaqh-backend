@@ -428,7 +428,7 @@ impl DeepxService {
                     name: pstr(params, "name")?,
                 }),
             ),
-            "skills.list_tools" => Ok(json!(qaqh_workspace::runtime::all_tool_names())),
+            "skills.list_tools" => Ok(json!(qaqh_workspace::runtime::process_all_tool_names())),
             "workspace.get" => Ok(json!(workspace(&seed()?))),
             "workspace.set" => {
                 let seed = seed()?;

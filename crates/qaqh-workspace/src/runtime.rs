@@ -3,7 +3,7 @@
 use qaqh_types::ToolDef;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 
 /// Unified runtime security context used for session binding and admission.
 #[derive(Clone)]
@@ -21,6 +21,13 @@ thread_local! {
 }
 
 static TOOL_MANAGER: OnceLock<Mutex<crate::ToolManager>> = OnceLock::new();
+
+/// Optional in-process actor manager. When installed it shadows the process
+/// manager for every `with_manager` caller, including tool threads spawned by
+/// an actor turn. This is the first knife-1 isolation step: callers must
+/// serialize actor lifecycles until per-actor workspace/context state lands.
+static ACTOR_TOOL_MANAGER: LazyLock<RwLock<Option<Arc<Mutex<crate::ToolManager>>>>> =
+    LazyLock::new(|| RwLock::new(None));
 
 /// Agent operating mode: 0=Code(默认), 1=Plan, 2=Code(旧编码兼容).
 static AGENT_MODE: AtomicU8 = AtomicU8::new(0);
@@ -129,19 +136,60 @@ pub fn init_tools(
     log::info!("qaqh: tool manager inited ({} tools)", all_tools().len());
 }
 
+/// Install a private manager for one in-process actor.
+///
+/// Unlike [`init_tools`], this does not mutate the daemon/worker process
+/// manager. The caller is responsible for clearing it with
+/// [`clear_actor_tool_manager`] when the actor exits and for serializing
+/// actors that share process-global workspace state.
+pub fn install_actor_tool_manager(manager: crate::ToolManager) {
+    let mut slot = ACTOR_TOOL_MANAGER
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = Some(Arc::new(Mutex::new(manager)));
+    crate::file_cache::clear();
+    crate::file_state::clear();
+    log::info!("qaqh: in-process actor tool manager installed");
+}
+
+/// Remove the in-process actor manager, falling back to the process manager.
+pub fn clear_actor_tool_manager() {
+    let mut slot = ACTOR_TOOL_MANAGER
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = None;
+    crate::file_cache::clear();
+    crate::file_state::clear();
+    log::info!("qaqh: in-process actor tool manager cleared");
+}
+
 pub(crate) fn with_manager<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut crate::ToolManager) -> R,
 {
+    if let Some(actor_mgr) = ACTOR_TOOL_MANAGER
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        let mut guard = lock_manager(&actor_mgr);
+        return Some(f(&mut guard));
+    }
     let mgr = TOOL_MANAGER.get()?;
-    let mut guard = match mgr.lock() {
-        Ok(g) => g,
+    let mut guard = lock_manager(mgr);
+    Some(f(&mut guard))
+}
+
+fn lock_manager(
+    manager: &Mutex<crate::ToolManager>,
+) -> std::sync::MutexGuard<'_, crate::ToolManager> {
+    match manager.lock() {
+        Ok(guard) => guard,
         Err(poisoned) => {
             log::warn!("[TOOLS] ToolManager Mutex poisoned — recovering with into_inner()");
             poisoned.into_inner()
         }
-    };
-    Some(f(&mut guard))
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +238,22 @@ pub fn all_tool_names() -> Vec<String> {
             .collect()
     })
     .unwrap_or_default()
+}
+
+/// Tool names from the **process** manager, ignoring any installed actor
+/// manager. Used by daemon-side snapshots (e.g. `skills.list_tools`) that must
+/// stay stable while an in-process subagent actor temporarily shadows the
+/// manager for its own tool execution.
+pub fn process_all_tool_names() -> Vec<String> {
+    let Some(manager) = TOOL_MANAGER.get() else {
+        return Vec::new();
+    };
+    let guard = lock_manager(manager);
+    guard
+        .all_defs()
+        .iter()
+        .map(|definition| definition.function.name.clone())
+        .collect()
 }
 
 pub fn global_stats() -> crate::ToolStats {

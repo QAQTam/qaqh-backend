@@ -54,6 +54,12 @@ crate：碎片 → **core 单体 + 公共 client SDK + 薄前端壳**。
 - **风险**：并发隔离变弱 → 靠 workspace 边界 + 权限级别守住（安全本就不靠进程隔离）。
 - **判据**：`spawn_subagent` 不再 `Command::new(exe)`；无三层连接；单进程可跑主 + N 子。
 
+**已落地 step 1（2026-08-17）**：
+- `LoopChannels` / `Loop::from_channels` 把 Ringing loop 从 OS pipe 抽象为进程内 channel；
+- `AgentRegistry::spawn_subagent` 改为 daemon 线程内 Ringing Loop actor，事件直接进 `RingingHub`；
+- 子代理 actor 使用私有 ToolManager，`process kill/check` 与关闭路径兼容。
+- 明确边界：`qaqh-workspace` 仍为进程级全局状态，因此 actor 由 `SUBAGENT_ACTOR_SERIAL` 串行；主 agent 仍是独立 worker 进程。step 2 继续做逐 actor 上下文、主 loop 入 daemon、`qaqh-subagent` 宿主直连。
+
 ### 刀 2：持久化收敛为“一条日志 + 投影”
 - **目标**：单一权威数据源，其余全为投影。
 - **砍**：`timeline` / `messages.jsonl` / `compact-context` / `ringing journal` 四写 → **一条 append-only 事件溯源日志**；timeline、消息、compact 均为可重建投影。

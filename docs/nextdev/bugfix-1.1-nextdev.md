@@ -256,3 +256,21 @@
   `init` / `init_subagent` / 测试不再各自手写注册器列表；新增工具包在
   生产侧只登记一次。
 - 详细 keep/remove/merge 与后续刀序见 `EXPLORE-REFACTOR-1.1.md`。
+
+## 落地增量（2026-08-17 刀 1 step 1）
+
+- **BUG-002 部分修复**：`AgentRegistry::spawn_subagent` 不再执行
+  `Command::new(current_exe) ... agent --seed --ephemeral`；子代理改为
+  daemon 进程内的 Ringing `Loop` actor（`LoopChannels` / `Loop::from_channels`
+  承载 command/event），事件直接发布到 `RingingHub`。`close` /
+  `shutdown_all` / 崩溃重生路径均兼容新 transport，并有
+  `qaqh-runtime/tests/subagent_inprocess.rs` 回归。
+- **BUG-011 部分修复（子代理进程成本与三层连接这一段）**：子代理不再有
+  独立进程初始化与 stdin/stdout 管道。主 agent 仍为 worker 进程，
+  `qaqh-subagent` 仍经 daemon action + SSE 收发，因此三层中的
+  “父 worker → daemon → actor”仍保留一层 HTTP/SSE 边界；刀 1 step 2
+  继续移除。
+- **已知边界**：`qaqh-workspace` 的 workspace/session/sandbox/tool-manager
+  仍是进程级全局状态，in-process 子代理 actor 当前由
+  `SUBAGENT_ACTOR_SERIAL` 串行执行。放开并发前必须先做逐 actor 上下文
+  （见 `REFACTOR-ROADMAP.md` 刀 1 落地说明）。
