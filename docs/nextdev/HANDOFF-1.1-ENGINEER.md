@@ -2,7 +2,7 @@
 
 > 日期：2026-08-17
 > 交接范围：后端主仓库 `QAQTam/QAQ-Harness` + 前端仓库 `QAQTam/qaqh-winui-app`
-> 当前主线：`origin/main = 00e027d`（后端无 open PR；前端见 8.4，`qaqh-winui-app#10` 为当前唯一 open PR）
+> 当前主线：以后端 `origin/main` HEAD 为准；截至本轮检查：后端无 open PR，前端唯一 open PR 为 `qaqh-winui-app#10`。
 
 ---
 
@@ -314,7 +314,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 
 ### 9.1 仓库与前端状态快照
 
-- 后端 `QAQ-Harness`：`main = origin/main = 00e027d`，工作区仅 `AGENT.md` untracked；后端无 open PR，唯一 open issue 为 #9。
+- 后端 `QAQ-Harness`：`main` 与 `origin/main` 同步；#13 合入后 main = `2dbfe11`；#14 仅修正本文件基线表述。工作区仅 `AGENT.md` untracked；后端无 open PR，唯一 open issue 为 #9。
 - 前端 `qaqh-winui-app` 已 clone 到 `/home/qaqtamsy/桌面/project/qa-frontend/qaqh-winui-app`：
   - `main = origin/main = 252b522`，工作区 clean。
   - PR #1–#9 已合并；#10 open（head `fix/winui-data-root-marker-and-notify-package` @ `b5a4535`，WinUI CI 绿）。
