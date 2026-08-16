@@ -60,8 +60,9 @@ pub fn full_system_prompt_with_env(os_info: &str) -> String {
 pub const MINIMAL_DSH_PROMPT: &str = "You are a helpful software engineer assistant.";
 
 /// 按工具模式选择系统提示。`minimal:dsh` 用极简那一句，其余用完整 prompt。
+/// 模式判定使用 qaqh-types 的单一工具模式契约（BUG-013）。
 pub fn system_prompt_for_mode(tool_mode: &str) -> String {
-    if tool_mode == "minimal:dsh" {
+    if qaqh_types::is_minimal_dsh(tool_mode) {
         MINIMAL_DSH_PROMPT.to_string()
     } else {
         full_system_prompt_with_env(OS_INFO.get().map(|s| s.as_str()).unwrap_or(""))

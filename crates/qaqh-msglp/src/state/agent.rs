@@ -6,30 +6,25 @@ use super::token_calibration::{
     RequestTokenEstimate, SessionTokenCalibrator, prepared_request_metrics,
 };
 use qaqh_message::{ToolExecReport, ToolExecRequest};
+use qaqh_workspace::registration::ToolRegistrar;
 use qaqh_workspace::runtime;
 use std::path::Path;
 
-/// 极限模式档位 A（PLAN-TOOL-MODES.md D2 档位 A）：
-/// bash/pwsh 独立 shell + 文件四件套（write/edit/read）+ 搜索两件套（glob/grep）
-/// + confirm_apply（edit/write 的 dry_run 确认闭环）。
-pub const MINIMAL_TOOLS: &[&str] = &[
-    "bash", "pwsh", "write", "edit", "read", "glob", "grep", "confirm_apply",
-];
+// 工具模式档位、白名单、模型面投影的唯一契约已收敛到 qaqh-types。
+// 这里的 re-export 仅为保持旧调用点（尤其是本模块测试）可读；新增档位
+// 只允许改 `qaqh_types::tool_mode`，不再维护本文件里的硬编码表。
+pub use qaqh_types::tool_mode::{
+    MINIMAL_DSH_MODEL_TOOLS, MINIMAL_DSH_TOOLS, MINIMAL_TOOLS, MINIMAL_TOOLS_B,
+    MINIMAL_TOOLS_C,
+};
 
-/// 极限模式档位 B：bash + edit/glob/grep/read + confirm_apply——简化档，
-/// 用于测试模型在极小工具集下的能力（tool_mode = "minimal:b"）。
-/// confirm_apply 保证 edit 的 dry_run→确认→落盘流程闭环。
-pub const MINIMAL_TOOLS_B: &[&str] = &["bash", "edit", "glob", "grep", "read", "confirm_apply"];
-
-/// 极限模式档位 C：bash + edit/glob + confirm_apply——最小压力测试档
-/// （tool_mode = "minimal:c"）。confirm_apply 保证 edit 可完成确认落盘。
-pub const MINIMAL_TOOLS_C: &[&str] = &["bash", "edit", "glob", "confirm_apply"];
-
-/// 极简模式（minimal:dsh）——完全对齐 deepseek-harness minimal preset：
-/// 模型面只见 `bash` 与 `str_replace_editor`（bash_v2 投影为 bash）。
-/// 白名单用内部注册 key（bash_v2），模型面由 apply_tool_mode 投影成 bash，
-/// 执行面由 normalize_tool_name_for_mode 把 bash 路由回 bash_v2。
-pub const MINIMAL_DSH_TOOLS: &[&str] = &["bash_v2", "str_replace_editor"];
+/// Agent 工具包注册器聚合点（REFACTOR-ROADMAP 刀 6B-①）。
+///
+/// 新增工具包只需在这里登记一次；`init` / `init_subagent` / 测试都从这
+/// 一个数组取注册器，不再各自手写列表。
+fn agent_tool_registrars() -> [ToolRegistrar; 2] {
+    [qaqh_subagent::register, dsh_minimal_mode::register]
+}
 
 /// Hash snapshot of the cache-key-relevant prefix components.
 /// Compared across turns to detect and explain prompt-cache misses.
@@ -322,11 +317,7 @@ impl AgentState {
                 Config::default()
             }
         };
-        runtime::init_tools(
-            caller,
-            &[qaqh_subagent::register, dsh_minimal_mode::register],
-            vec![],
-        );
+        runtime::init_tools(caller, &agent_tool_registrars(), vec![]);
         let mut agent = Self::new(config);
         agent.tool_defs = runtime::all_tools(); // all tools, no allowlist
         agent
@@ -348,11 +339,7 @@ impl AgentState {
                 allowed_tools.push(required.to_string());
             }
         }
-        runtime::init_tools(
-            "subagent",
-            &[qaqh_subagent::register, dsh_minimal_mode::register],
-            allowed_tools,
-        );
+        runtime::init_tools("subagent", &agent_tool_registrars(), allowed_tools);
         let mut agent = Self::new(config);
         agent.ephemeral = ephemeral;
         agent.tool_defs = runtime::all_tools(); // full set — LLM cache friendly
@@ -366,29 +353,28 @@ impl AgentState {
     /// 持久化值在恢复/应用时切回 standard；保持现状 + 告警。
     pub fn apply_tool_mode(&mut self, tool_mode: &str, custom_tools: &[String]) {
         let allowed: Vec<String> = match tool_mode {
-            "minimal" => MINIMAL_TOOLS.iter().map(|s| s.to_string()).collect(),
-            "minimal:b" => MINIMAL_TOOLS_B.iter().map(|s| s.to_string()).collect(),
-            "minimal:c" => MINIMAL_TOOLS_C.iter().map(|s| s.to_string()).collect(),
-            "minimal:dsh" => MINIMAL_DSH_TOOLS.iter().map(|s| s.to_string()).collect(),
-            "custom" => custom_tools.to_vec(),
-            "standard" | "" => Vec::new(),
-            unknown => {
-                log::warn!(
-                    "[TOOL MODE] unknown tool_mode '{unknown}' — keeping current mode '{}' (no fallback to standard)",
-                    self.session.tool_mode
-                );
-                return;
+            qaqh_types::CUSTOM => custom_tools.to_vec(),
+            qaqh_types::STANDARD | "" => Vec::new(),
+            mode => {
+                let Some(preset) = qaqh_types::preset_tools(mode) else {
+                    log::warn!(
+                        "[TOOL MODE] unknown tool_mode '{mode}' — keeping current mode '{}' (no fallback to standard)",
+                        self.session.tool_mode
+                    );
+                    return;
+                };
+                preset.iter().map(|tool| (*tool).to_string()).collect()
             }
         };
         runtime::set_allowed_tools(allowed);
         self.tool_defs = runtime::all_tools();
         // 极简模式：模型面工具名投影 bash_v2 → bash（minimal 的规范工具名）。
-        // 执行面由 normalize_tool_name_for_mode 把 bash 路由回 bash_v2。
-        if tool_mode == "minimal:dsh" {
-            for def in &mut self.tool_defs {
-                if def.function.name == "bash_v2" {
-                    def.function.name = "bash".to_string();
-                }
+        // 执行面由 internal_tool_name 把 bash 路由回 bash_v2。投影规则同样
+        // 只存在于 qaqh-types 契约，新增档位无需再改此循环。
+        for def in &mut self.tool_defs {
+            let model_name = qaqh_types::model_tool_name(tool_mode, &def.function.name);
+            if model_name != def.function.name {
+                def.function.name = model_name.to_string();
             }
         }
         // 同步内存态会话元数据：daemon 已 persist meta.json，但 worker 内存
@@ -399,7 +385,7 @@ impl AgentState {
         // 极限模式（minimal 系列）联动折叠策略：完全不折叠任何工具结果
         // （含 exec/bash 内部 token 截断），上下文大小由模型自己控制；
         // 其它模式恢复标准折叠。
-        if tool_mode.starts_with("minimal") {
+        if qaqh_types::is_minimal_family(tool_mode) {
             qaqh_workspace::tool_side_fold::set_policy(std::sync::Arc::new(
                 qaqh_workspace::tool_side_fold::NoFoldPolicy,
             ));
@@ -411,7 +397,7 @@ impl AgentState {
         log::info!(
             "[TOOL MODE] applied {tool_mode} ({} tools visible, fold={})",
             self.tool_defs.len(),
-            if tool_mode.starts_with("minimal") {
+            if qaqh_types::is_minimal_family(tool_mode) {
                 "no-fold"
             } else {
                 "standard"
@@ -423,11 +409,7 @@ impl AgentState {
     /// 模型在极简模式看到的是 `bash`（minimal 规范名），但实际执行要路由回
     /// 持久化 PTY 的 `bash_v2` handler；非极简模式原样返回。
     pub fn normalize_tool_name_for_mode(tool_mode: &str, name: &str) -> String {
-        if tool_mode == "minimal:dsh" && name == "bash" {
-            "bash_v2".to_string()
-        } else {
-            name.to_string()
-        }
+        qaqh_types::internal_tool_name(tool_mode, name).to_string()
     }
 
     /// Consume any pending cache diagnostics set by build_context().
@@ -535,7 +517,7 @@ impl AgentState {
     pub fn sync_skill_injection(&mut self, flow: &mut qaqh_message::ContextFlow) {
         // 极简模式（minimal:dsh）：完全对齐 deepseek-harness minimal preset——
         // 不注入任何 skills envelope（minimal 无 skills / runtime context）。
-        if self.session.tool_mode == "minimal:dsh" {
+        if qaqh_types::is_minimal_dsh(&self.session.tool_mode) {
             return;
         }
         let epoch = self.skills.context_epoch();
@@ -971,11 +953,7 @@ mod tests {
         // 本测试若先于 tool_schema 测试运行，缺 dsh registrar 会固化注册表，
         // 使 minimal:dsh 的 bash_v2/str_replace_editor 被当作未知名剔除并回退
         // 全量（flaky）。统一注册器后无论测试顺序如何断言都稳定。
-        qaqh_workspace::runtime::init_tools(
-            "tool-mode-test",
-            &[qaqh_subagent::register, dsh_minimal_mode::register],
-            vec![],
-        );
+        qaqh_workspace::runtime::init_tools("tool-mode-test", &agent_tool_registrars(), vec![]);
         let mut agent = AgentState::new(qaqh_config::Config::default());
 
         // minimal → 固定档位（MINIMAL_TOOLS 8 个）
@@ -1072,11 +1050,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         // TOOL_MANAGER 是进程级 OnceLock：重复 init 会被忽略，manager 始终可用。
-        qaqh_workspace::runtime::init_tools(
-            "tool-schema-test",
-            &[qaqh_subagent::register, dsh_minimal_mode::register],
-            vec![],
-        );
+        qaqh_workspace::runtime::init_tools("tool-schema-test", &agent_tool_registrars(), vec![]);
         let mut agent = AgentState::new(qaqh_config::Config::default());
         // 先以 standard 填充全量工具清单（AgentState 初始 tool_defs 为空 Vec）。
         agent.apply_tool_mode("standard", &[]);

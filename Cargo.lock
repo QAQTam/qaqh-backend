@@ -2627,6 +2627,7 @@ version = "1.0.0-rc.6"
 dependencies = [
  "qaqh-client",
  "qaqh-domain",
+ "qaqh-types",
  "ratatui",
  "serde_json",
  "textwrap",
