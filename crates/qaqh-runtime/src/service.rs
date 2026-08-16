@@ -1345,7 +1345,6 @@ mod tool_mode_tests {
         assert!(validate_tool_mode("turbo").is_err());
     }
 }
-
 mod control_scope_tests {
     use super::DeepxService;
 
