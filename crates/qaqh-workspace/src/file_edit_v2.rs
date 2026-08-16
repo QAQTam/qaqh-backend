@@ -2408,6 +2408,16 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
             } else {
                 crate::file_state::record_edit_with_shifts(&path, &write_content, &outcome.shifts);
             }
+            crate::journal::record_change(
+                &crate::journal::active_session(),
+                "",
+                "edit",
+                raw_path,
+                if outcome.shifts.is_empty() { "overwrite" } else { "replace" },
+                if file_was_missing { None } else { Some(&raw) },
+                Some(&write_content),
+                "ok",
+            );
             let new_hash = outcome.new_hash.as_deref().unwrap_or_default();
             let text = render_text(raw_path, &outcome);
             let applied = outcome.reports.iter().filter(|r| r.status == "ok").count();

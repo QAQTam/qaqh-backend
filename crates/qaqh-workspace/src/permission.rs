@@ -174,6 +174,16 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
             paths.push(PathBuf::from(t));
         }
     }
+    // journal: replay target/out may write outside the workspace; keep it
+    // authorization-bounded like other write tools.
+    if tool_name == "journal" {
+        if let Some(f) = args.get("file").and_then(|v| v.as_str()) {
+            paths.push(PathBuf::from(f));
+        }
+        if let Some(o) = args.get("out").and_then(|v| v.as_str()) {
+            paths.push(PathBuf::from(o));
+        }
+    }
     // exec: extract cwd
     if tool_name == "exec" {
         if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {

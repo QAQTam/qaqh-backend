@@ -1,6 +1,6 @@
 # Session 修改日志（SMJ）设计 —— 事故复盘与恢复机制
 
-> 状态：设计草案（2026-08-16）
+> 状态：基础版已落地（2026-08-17）
 > 背景：前端仓库误删事故。未提交修改仅存在于被删仓库工作树，git 历史、
 > reflog、远端 dangling 对象均不可恢复；最终靠主仓库落后快照 + 其它 agent
 > 的 session 记录（messages.jsonl 中的工具调用参数）找回大部分改动。
@@ -130,3 +130,16 @@ journal export --session <id> [--format patches]     # 导出可再应用的补�
 - journal 与 audit 的关系：合并为同一事件流，还是 audit 作为 journal 投影；
 - 多机/多 home 场景（WSL 与 Windows 共享 ~/.deepx）的 journal 归属；
 - 与刀 2 事件溯源日志的最终统一格式。
+
+---
+
+## 落地记录（2026-08-17）
+
+- 新增 `qaqh-workspace::journal` 模块：`steps.jsonl` + `blobs/<sha256>`，支持
+  `record_change` / `query` / `replay_file` / `replay_to_path` / CLI。
+- 接入写路径：`write` / `edit` / `apply_patch` / `delete` / `copy_range` /
+  `web_fetch(output=...)`，成功落盘后追加步进，失败不阻塞工具结果。
+- 新增 workspace 工具 `journal`（action=query/export/replay），并支持
+  `qaqh-workspace journal query|replay|export` CLI。
+- `journal export --format patches` 可导出 unified diff 补丁集。
+- 基础验收：`cargo test -p qaqh-workspace` 全绿；replay 可恢复小文件内容。

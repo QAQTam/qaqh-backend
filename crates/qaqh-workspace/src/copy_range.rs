@@ -97,6 +97,7 @@ fn not_found_error(kind: &str, anchor: &str) -> String {
 fn run_copy_range(
     src: &std::path::Path,
     tgt: &std::path::Path,
+    target_display: &str,
     start_anchor: &str,
     end_anchor: Option<&str>,
     target_anchor: Option<&str>,
@@ -219,7 +220,7 @@ fn run_copy_range(
     if !out.is_empty() && !out.ends_with('\n') {
         out.push_str(eol);
     }
-    std::fs::write(tgt, out).map_err(|e| {
+    std::fs::write(tgt, &out).map_err(|e| {
         serde_json::json!({
             "timeis": crate::now_utc8(),
             "status": "error",
@@ -228,6 +229,17 @@ fn run_copy_range(
         })
         .to_string()
     })?;
+
+    crate::journal::record_change(
+        &crate::journal::active_session(),
+        "",
+        "copy_range",
+        target_display,
+        mode.name(),
+        Some(&tgt_content),
+        Some(&out),
+        "ok",
+    );
 
     Ok(RangeResult {
         copied,
@@ -291,6 +303,7 @@ fn exec_copy_range(args: &serde_json::Value) -> ToolResult {
     match run_copy_range(
         &src,
         &tgt,
+        &target_path,
         &source_start,
         source_end.as_deref(),
         target_anchor.as_deref(),

@@ -96,7 +96,18 @@ fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
     };
     if let Some(out) = args.get("output").and_then(|v| v.as_str()) {
         let target = crate::resolve_workspace_path(out);
+        let before = std::fs::read_to_string(&target).ok();
         let _ = std::fs::write(&target, &readable);
+        crate::journal::record_change(
+            &crate::journal::active_session(),
+            "",
+            "web_fetch",
+            out,
+            "overwrite",
+            before.as_deref(),
+            Some(&readable),
+            "ok",
+        );
         // Lead with a save marker: plain-text folding keeps the first line,
         // so a folded historical result still tells the model where the
         // content lives — it can `read` the file instead of re-fetching.
