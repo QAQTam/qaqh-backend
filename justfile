@@ -27,6 +27,19 @@ build-daemon:
 dev:
     cargo run -p qaqh-daemon -- run
 
+# ── 局域网 Web ───────────────────────────────────────
+
+# 一键启动局域网 Web 服务（Windows）：构建检查 + daemon server 模式 +
+# apps/web 产物托管，自动打印局域网访问地址与 token
+[windows]
+daemon-web port="64413":
+    pwsh -NoProfile -File scripts/daemon-web.ps1 -Port {{port}}
+
+# 一键启动局域网 Web 服务（Linux/macOS）
+[unix]
+daemon-web port="64413":
+    bash scripts/daemon-web.sh {{port}}
+
 # ── 检查 & 测试 ─────────────────────────────────────
 
 # Rust workspace 检查

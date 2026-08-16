@@ -358,8 +358,16 @@ async fn handle_connection(
     }
 
     // M3：legacy `/control/v1` WS 数据协议已拆除；此处只剩生命周期与
-    // Ringing HTTP/SSE 分流。未知请求直接拒绝。
-    Err("unsupported control protocol endpoint (legacy WS removed in M3)".into())
+    // Ringing HTTP/SSE 分流。未知请求返回 404 而非直接断连——
+    // 浏览器对缺失资源（favicon 等）期望 HTTP 响应，断连表现为
+    // ERR_CONNECTION_RESET 刷屏控制台。
+    use tokio::io::AsyncWriteExt;
+    let _ = stream
+        .write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found",
+        )
+        .await;
+    Ok(())
 }
 
 pub fn random_hex() -> String {

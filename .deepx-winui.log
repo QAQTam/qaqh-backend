@@ -1,0 +1,47 @@
+[POLL:header] timer started
+[POLL:header_lang] timer started
+connect_client: connecting...
+[POLL:overlay] timer started
+[interaction_overlay] interaction key -> :
+timer created
+refresh_workspaces: workspace.list failed: HTTP 404: /ringing/v1/queries/workspace.list
+refresh_sessions: 1 sessions
+refresh_sessions: 1 sessions
+refresh_sessions: 1 sessions
+config_load: settings snapshot cached
+backend connected; splash dismissed
+[POLL:header] rev 0 -> 3
+[POLL:header_lang] rev 0 -> 1
+desktop notifications: init failed: direct: Register: Error { code: HRESULT(0x8007007E), message: "Unable to load resource dll. Microsoft.WindowsAppRuntime.Insights.Resource.dll" }; bootstrap: Bootstrap.dll 未找到
+[POLL:header] rev 3 -> 4
+app exit: all windows closed (normal path)
+[POLL:header] timer started
+[POLL:header_lang] timer started
+connect_client: connecting...
+[POLL:overlay] timer started
+[interaction_overlay] interaction key -> :
+timer created
+refresh_sessions: 1 sessions
+refresh_workspaces: workspace.list failed: HTTP 404: /ringing/v1/queries/workspace.list
+refresh_sessions: 1 sessions
+refresh_sessions: 1 sessions
+config_load: settings snapshot cached
+backend connected; splash dismissed
+[POLL:header_lang] rev 0 -> 1
+[POLL:header] rev 0 -> 3
+desktop notifications: init failed: direct: Register: Error { code: HRESULT(0x8007007E), message: "Unable to load resource dll. Microsoft.WindowsAppRuntime.Insights.Resource.dll" }; bootstrap: Bootstrap.dll 未找到
+health: all ringing channels stalled, rebuilding client
+health: rebuilding client (daemon stall detected)
+health: closed stale client
+connect_client: connecting...
+health: reconnected with fresh session
+health: rebuild complete
+refresh_sessions: 1 sessions
+[POLL:header] rev 3 -> 5
+health: all ringing channels stalled, rebuilding client
+health: rebuilding client (daemon stall detected)
+health: closed stale client
+connect_client: connecting...
+[POLL:header] rev 5 -> 6
+connect_client connect failed: reqwest error: error sending request for url (http://198.18.0.1:64413/ringing/v1/clients/open)
+health: reconnect failed: reqwest error: error sending request for url (http://198.18.0.1:64413/ringing/v1/clients/open)

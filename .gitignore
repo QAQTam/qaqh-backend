@@ -1,5 +1,8 @@
 target/
 dist/
+# web 前端（apps/web）
+apps/web/node_modules/
+apps/web/dist/
 crates/deepx-tauri/src-tauri/binaries/
 **/*.rs.bk
 *.swp
