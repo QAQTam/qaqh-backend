@@ -154,7 +154,7 @@ mod tests {
     fn windows_path_to_uri() {
         assert_eq!(
             path_to_uri(Path::new(r"F:\QAQ-Harness\crates\a b.rs")),
-            "file:///F:/../DeepX/a%20b.rs"
+            "file:///F:/QAQ-Harness/crates/a%20b.rs"
         );
         assert_eq!(
             path_to_uri(Path::new(r"F:\QAQ-Harness\a#b?c%.rs")),
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn uri_to_windows_path() {
         assert_eq!(
-            uri_to_path("file:///F:/../DeepX/a%20b.rs").unwrap(),
+            uri_to_path("file:///F:/QAQ-Harness/crates/a%20b.rs").unwrap(),
             PathBuf::from(r"F:\QAQ-Harness\crates\a b.rs")
         );
         assert_eq!(
