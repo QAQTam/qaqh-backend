@@ -1,8 +1,9 @@
 //! ringing_v1/ — production Ringing V1 architecture loop (primary).
 //!
-//! This loop replaces the old monolithic `Loop` with a pluggable Engine model.
-//! Each Engine implements the [`Engine`] trait; the Loop dispatches Ringing commands
-//! commands by iterating engines in a try-handle chain.
+//! This loop replaces the old monolithic `Loop` with a fixed set of engine
+//! modules. There is deliberately no `Engine` trait: `loop_core` dispatches
+//! Ringing commands directly to the engine module that owns the state machine
+//! (D6: honest modularity, not a fake plugin boundary).
 //!
 //! ## Module map
 //!
@@ -32,10 +33,13 @@
 //!
 //! ## Extension
 //!
-//! To add a new feature:
-//! 1. Create a new struct implementing `Engine`
-//! 2. Add `Box::new(YourEngine::new())` to the engines vec in `Loop::new_ipc()`
-//! 3. Done — no changes to `Loop::dispatch()` needed
+//! To add a new command/feature:
+//! 1. Add the command to `qaqh-domain` / `qaqh-ringing` if it crosses the wire.
+//! 2. Add a new `engine_*.rs` module or extend the owning engine module.
+//! 3. Route it explicitly in `loop_core::dispatch_ringing_one`.
+//!
+//! Injection must go through the InjectionBus (roadmap 刀7), not through a
+//! new per-feature path.
 
 pub mod engine_compact;
 pub mod engine_goal;

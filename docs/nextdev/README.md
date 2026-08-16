@@ -10,6 +10,7 @@
 | [REFACTOR-ROADMAP.md](./REFACTOR-ROADMAP.md) | **架构重构路线图**：七刀 + 三阶段（砍架构→统一语义→谈创新）；多前端决策；文件级清单 | ✅ 现行（方向已定稿 2026-08-16） |
 | [bugfix-1.1-nextdev.md](./bugfix-1.1-nextdev.md) | **Bugfix 档案**：BUG-001~013，现象/根因/证据 | ✅ 现行（持续追加） |
 | [SESSION-JOURNAL-PLAN.md](./SESSION-JOURNAL-PLAN.md) | **Session 修改日志设计**：误删事故复盘 + 编辑步进日志方案 | 🟡 设计草案（2026-08-16） |
+| [EXPLORE-REFACTOR-1.1.md](./EXPLORE-REFACTOR-1.1.md) | **探索落地校准**：文档↔qaqh-* 仓库映射、keep/remove/merge、刀序 | ✅ 现行（随 PR 更新） |
 
 ## 法律与合规（保留）
 

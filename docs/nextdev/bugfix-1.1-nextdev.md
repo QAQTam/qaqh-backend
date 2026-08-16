@@ -232,3 +232,21 @@
 ## 调查环境记录（非产品代码 bug）
 
 - 大输出会导致 bash 工具或 workspace 卡死/超时：调查时对 `grep -rn` 等大输出命令需强制 `head`/`-l`/`--max-files` 限制，或拆分为单目录/单文件小范围执行，否则会拖垮工具会话。记录于此，后续调查遵守该约束。
+
+
+
+## 落地增量（2026-08-16 第二轮）
+
+
+
+- **BUG-013 状态更新为 fixed（后端侧）**：新增 `qaqh_types::tool_mode` 单契约
+  （模式名、档位表、`bash_v2↔bash` 投影）；`qaqh-msglp`、`qaqh-runtime`、
+  `qaqh-config`、`apps/tui` 全部改为消费该契约，不再各自硬编码。后续新增
+  档位只改 `qaqh_types::tool_mode`（生产侧一处），前端仓库只消费该契约。
+- **BUG-009 部分落地（文档层）**：删除 `ringing_v1/mod.rs` 与 `lib.rs` 中
+  “pluggable Engine / engines vec” 的虚假扩展指引，明确固定引擎模块 +
+  `dispatch_ringing_one` 显式路由（D6）。实质统一注入仍待刀 7。
+- **刀 6B-① 落地**：`AgentState` 新增 `agent_tool_registrars()` 聚合器，
+  `init` / `init_subagent` / 测试不再各自手写注册器列表；新增工具包在
+  生产侧只登记一次。
+- 详细 keep/remove/merge 与后续刀序见 `EXPLORE-REFACTOR-1.1.md`。

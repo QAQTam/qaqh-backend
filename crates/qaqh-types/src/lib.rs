@@ -13,6 +13,7 @@ pub mod provider;
 pub mod session;
 pub mod state;
 pub mod tool_def;
+pub mod tool_mode;
 pub mod tool_result;
 
 // Unified arg parsing (shared across dsx-agent, dsx-tools)
@@ -35,6 +36,11 @@ pub use provider::{CacheTokenField, EndpointSpec, ProviderSpec, ThinkingParamMod
 pub use session::{SessionMeta, SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2};
 pub use state::DebugLevel;
 pub use tool_def::{ToolDef, ToolFunction};
+pub use tool_mode::{
+    CUSTOM, KNOWN_MODES, MINIMAL, MINIMAL_B, MINIMAL_C, MINIMAL_DSH, MINIMAL_DSH_MODEL_TOOLS,
+    MINIMAL_DSH_TOOLS, MINIMAL_PREFIX, MINIMAL_TOOLS, MINIMAL_TOOLS_B, MINIMAL_TOOLS_C, STANDARD,
+    internal_tool_name, is_known, is_minimal_dsh, is_minimal_family, model_tool_name, preset_tools,
+};
 pub use tool_result::{
     ContentRef, TOOL_MODEL_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, ToolContinuation, ToolError,
     ToolModelPayload, ToolResult, ToolStatus,

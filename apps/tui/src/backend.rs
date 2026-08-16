@@ -20,9 +20,9 @@ use qaqh_client::{Client, ClientHandlers, ClientOptions, RemoteEndpoint};
 use qaqh_domain::{ControlCommand, ConversationCommand, SessionState};
 use tokio::sync::mpsc;
 
-/// The only tool mode this shell supports. `minimal:dsh` = the two-tool
-/// minimal preset (bash + str_replace_editor, model-facing projection).
-pub const LOCKED_TOOL_MODE: &str = "minimal:dsh";
+/// The only tool mode this shell supports. The mode name and preset contract
+/// come from `qaqh_types::tool_mode`; the TUI never redefines the table.
+pub const LOCKED_TOOL_MODE: &str = qaqh_types::MINIMAL_DSH;
 
 /// Events forwarded from client background tasks to the UI loop.
 pub enum UiEvent {

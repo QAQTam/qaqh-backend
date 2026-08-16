@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 qaqh-client = { path = "../../crates/qaqh-client" }
 qaqh-domain = { path = "../../crates/qaqh-domain" }
+qaqh-types = { path = "../../crates/qaqh-types" }
 ratatui = "0.30"
 serde_json = "1"
 textwrap = { version = "0.16", features = ["unicode-width"] }

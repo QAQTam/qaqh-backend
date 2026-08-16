@@ -4,7 +4,7 @@
 //! It reads Ringing worker command envelopes (`RingingWorkerCommandEnvelope`) via an mpsc channel fed by a background I/O
 //! thread, and writes Ringing worker event envelopes via a channel consumed by a background
 //! writer thread. It drives the full user-input → gate → tools → response
-//! pipeline through a set of pluggable `Engine` implementations.
+//! pipeline through a fixed set of engine modules dispatched by [`ringing_v1::loop_core`].
 //!
 //! ## Architecture
 //!
@@ -13,20 +13,20 @@
 //!  ├─ I/O: cmd_rx, event_tx
 //!  ├─ Signal: cancel, phase, pending, writer_dead
 //!  ├─ Session: SessionBundle { agent, stats, turn, tool }
-//!  └─ Stateless engines: session_eng, input, compact, misc
+//!  └─ Fixed engine modules: session, input, turn, tool, compact, misc
 //! ```
 //!
 //! ## Module layout
 //!
 //! | Layer     | Path        | Role                                    |
 //! |-----------|-------------|-----------------------------------------|
-//! | Ringing V1 loop | `ringing_v1/`     | Stateless engines dispatched in chain   |
+//! | Ringing V1 loop | `ringing_v1/`     | Fixed engine modules dispatched explicitly |
 //! | State     | `state/`    | AgentState, sessions, skills            |
 //! | Services  | `services/` | Conflict detection, dashboard         |
 //! | Utilities | `util/`     | Calendar, token logging, display fmt    |
 //!
-//! Ringing V1 引擎链：`ringing_v1/engine_*.rs`（M3 后无独立 Engine trait，
-//! 命令经 `dispatch_ringing_one` 直接路由到各引擎方法）。
+//! Ringing V1 引擎模块：`ringing_v1/engine_*.rs`（固定模块集合，无独立
+//! `Engine` trait；命令经 `dispatch_ringing_one` 直接路由到各引擎方法）。
 
 pub mod ringing_v1;
 mod services;

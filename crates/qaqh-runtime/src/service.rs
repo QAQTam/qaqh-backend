@@ -1090,15 +1090,14 @@ fn optional_tool_mode(params: &Value) -> Result<Option<(String, Vec<String>)>, S
 }
 
 /// 工具模式白名单校验（session.new 预置与 session.set_tool_mode 共用）。
+/// 白名单由 `qaqh_types::tool_mode::KNOWN_MODES` 单一契约提供（BUG-013）。
 fn validate_tool_mode(tool_mode: &str) -> Result<(), String> {
-    if matches!(
-        tool_mode,
-        "standard" | "minimal" | "minimal:b" | "minimal:c" | "minimal:dsh" | "custom"
-    ) {
+    if qaqh_types::is_known(tool_mode) {
         Ok(())
     } else {
         Err(format!(
-            "invalid tool_mode '{tool_mode}' (expected standard | minimal | custom)"
+            "invalid tool_mode '{tool_mode}' (expected {})",
+            qaqh_types::KNOWN_MODES.join(" | ")
         ))
     }
 }fn err(error: impl std::fmt::Display) -> String {
@@ -1440,7 +1439,7 @@ mod tool_mode_tests {
 
     #[test]
     fn validate_tool_mode_accepts_all_known_presets() {
-        for mode in ["standard", "minimal", "minimal:b", "minimal:c", "minimal:dsh", "custom"] {
+        for mode in qaqh_types::KNOWN_MODES {
             assert!(validate_tool_mode(mode).is_ok(), "{mode}");
         }
         assert!(validate_tool_mode("turbo").is_err());
