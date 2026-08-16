@@ -151,10 +151,11 @@ impl DeepxService {
                         }
                     ));
                 }
-                let mut config =
-                    qaqh_config::Config::load().map_err(|e| format!("load config: {e}"))?;
-                config.workspace.mode = mode.clone();
-                config.save().map_err(|e| format!("save config: {e}"))?;
+                qaqh_config::Config::update(|config| {
+                    config.workspace.mode = mode.clone();
+                    Ok(())
+                })
+                .map_err(|e| format!("save config: {e}"))?;
                 log::info!("[workspace] mode switched to {mode} (restart required)");
                 Ok(json!({
                     "mode": mode,
@@ -484,11 +485,9 @@ impl DeepxService {
                 self.save_config(params)?;
                 Ok(Value::Null)
             }
-            // 权限等级（L1-L4）：前端独立通道（不参与 config.save 全量提交）。
-            // 此前 daemon 从未实现该 action —— 前端能选但配置永远是默认 4
-            // (Unrestricted)，agent 永远不会受限。这里补上：校验 → 写
-            // config.toml → 广播 AgentReloadConfig 让所有活跃 worker
-            // （含子代理，子代理继承同一全局权限）重载。
+            // 权限等级（L1-L4）：与 config.save 共用 Config::update 单写口；
+            // 校验 → 写 config.toml → 广播 AgentReloadConfig 让所有活跃
+            // worker（含子代理，子代理继承同一全局权限）重载。
             "config.set_permission_level" => {
                 let level = params
                     .get("level")
@@ -497,43 +496,41 @@ impl DeepxService {
                 if !(1..=4).contains(&level) {
                     return Err(format!("invalid permission level {level} (must be 1-4)"));
                 }
-                let mut cfg = qaqh_config::Config::load().unwrap_or_default();
-                cfg.permission_level = level as u8;
-                cfg.save().map_err(|e| format!("save config: {e}"))?;
-                let failed = self.registry()?.broadcast_ringing(
-                    &RingingCommand::Control(ControlCommand::AgentReloadConfig),
-                );
-                if !failed.is_empty() {
-                    log::warn!(
-                        "[config] permission reload broadcast failed for: {}",
-                        failed.join("; ")
-                    );
-                }
+                self.update_config_and_reload(|cfg| {
+                    cfg.permission_level = level as u8;
+                    Ok(())
+                })?;
                 log::info!("[config] permission level set to {level}");
                 Ok(json!({ "permission_level": level }))
             }
             "profile.apply" => {
                 let name = pstr(params, "name")?;
-                let mut cfg = qaqh_config::Config::load().map_err(err)?;
-                if cfg.apply_profile(&name).is_none() {
-                    return Err(format!("profile '{name}' not found"));
-                }
+                self.update_config_and_reload(|cfg| {
+                    if cfg.apply_profile(&name).is_none() {
+                        return Err(format!("profile '{name}' not found"));
+                    }
+                    Ok(())
+                })?;
                 Ok(Value::Null)
             }
             "profile.save_current" => {
                 let name = pstr(params, "name")?;
-                let mut cfg = qaqh_config::Config::load().map_err(err)?;
-                cfg.save_profile(&name);
+                self.update_config_and_reload(|cfg| {
+                    cfg.save_profile(&name);
+                    Ok(())
+                })?;
                 Ok(Value::Null)
             }
             "profile.delete" => {
                 let name = pstr(params, "name")?;
-                let mut cfg = qaqh_config::Config::load().map_err(err)?;
-                if !cfg.delete_profile(&name) {
-                    return Err(format!(
-                        "profile '{name}' cannot be deleted (not found or default)"
-                    ));
-                }
+                self.update_config_and_reload(|cfg| {
+                    if !cfg.delete_profile(&name) {
+                        return Err(format!(
+                            "profile '{name}' cannot be deleted (not found or default)"
+                        ));
+                    }
+                    Ok(())
+                })?;
                 Ok(Value::Null)
             }
             "todo.status" => parse_json_string(qaqh_workspace::todo::todo_status_json(&seed()?)?),
@@ -801,147 +798,176 @@ impl DeepxService {
             .collect()
     }
 
+    /// 配置写后广播（所有 config.* / profile.* 写路径共用）。
+    fn notify_config_changed(&self) {
+        let failed = match self.registry() {
+            Ok(mut registry) => registry
+                .broadcast_ringing(&RingingCommand::Control(ControlCommand::AgentReloadConfig)),
+            Err(error) => {
+                log::warn!("[config] registry unavailable for reload broadcast: {error}");
+                return;
+            }
+        };
+        if !failed.is_empty() {
+            log::warn!(
+                "[config] reload broadcast failed for: {}",
+                failed.join("; ")
+            );
+        }
+    }
+
+    /// 单写口：`Config::update` 成功后广播 reload（BUG-001/008）。
+    fn update_config_and_reload<F>(&self, mutate: F) -> Result<qaqh_config::Config, String>
+    where
+        F: FnOnce(&mut qaqh_config::Config) -> Result<(), String>,
+    {
+        let config = qaqh_config::Config::update(mutate)?;
+        self.notify_config_changed();
+        Ok(config)
+    }
+
     fn save_config(&self, params: &Value) -> Result<(), String> {
         // Never log config.save payloads: they may contain provider credentials.
         log::info!("[config.save] saving configuration");
-        let mut cfg = qaqh_config::Config::load().unwrap_or_default();
-        // 审计 P0-1：apiKey 空串 = 显式删除凭据（update_string 忽略空串，
-        // 这里单独处理；"****" 是 load_config 的掩码占位符，跳过保持现值）。
-        if let Some(value) = value2(params, "api_key", "apiKey").and_then(Value::as_str) {
-            if value != "****" {
-                cfg.api_key = value.to_string();
+        self.update_config_and_reload(|cfg| {
+            // 审计 P0-1：apiKey 空串 = 显式删除凭据（update_string 忽略空串，
+            // 这里单独处理；"****" 是 load_config 的掩码占位符，跳过保持现值）。
+            if let Some(value) = value2(params, "api_key", "apiKey").and_then(Value::as_str) {
+                if value != "****" {
+                    cfg.api_key = value.to_string();
+                }
             }
-        }
-        update_string(&mut cfg.model, params, "model", "model");
-        update_string(&mut cfg.base_url, params, "base_url", "baseUrl");
-        update_string(&mut cfg.provider_id, params, "provider_id", "providerId");
-        update_string(&mut cfg.endpoint, params, "endpoint", "endpoint");
-        update_string(
-            &mut cfg.reasoning_effort,
-            params,
-            "reasoning_effort",
-            "reasoningEffort",
-        );
-        update_u32(&mut cfg.max_tokens, params, "max_tokens", "maxTokens");
-        update_u32(
-            &mut cfg.context_limit,
-            params,
-            "context_limit",
-            "contextLimit",
-        );
-        if let Some(lang) = value2(params, "lang", "lang")
-            .and_then(Value::as_str)
-            .filter(|v| !v.is_empty())
-        {
-            cfg.lang = Some(lang.to_string());
-        }
-        // ── UI 字体（空字符串 = 恢复系统默认；掩码守卫同 update_string）──
-        if let Some(value) = value2(params, "font_family", "fontFamily").and_then(Value::as_str) {
-            if value != "****" {
-                cfg.font_family = value.to_string();
+            update_string(&mut cfg.model, params, "model", "model");
+            update_string(&mut cfg.base_url, params, "base_url", "baseUrl");
+            update_string(&mut cfg.provider_id, params, "provider_id", "providerId");
+            update_string(&mut cfg.endpoint, params, "endpoint", "endpoint");
+            update_string(
+                &mut cfg.reasoning_effort,
+                params,
+                "reasoning_effort",
+                "reasoningEffort",
+            );
+            update_u32(&mut cfg.max_tokens, params, "max_tokens", "maxTokens");
+            update_u32(
+                &mut cfg.context_limit,
+                params,
+                "context_limit",
+                "contextLimit",
+            );
+            if let Some(lang) = value2(params, "lang", "lang")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+            {
+                cfg.lang = Some(lang.to_string());
             }
-        }
-        update_string(
-            &mut cfg.subagent.model,
-            params,
-            "subagent_model",
-            "subagentModel",
-        );
-        update_string(
-            &mut cfg.subagent.base_url,
-            params,
-            "subagent_base_url",
-            "subagentBaseUrl",
-        );
-        update_string(
-            &mut cfg.subagent.api_key,
-            params,
-            "subagent_api_key",
-            "subagentApiKey",
-        );
-        update_u32(
-            &mut cfg.subagent.max_tokens,
-            params,
-            "subagent_max_tokens",
-            "subagentMaxTokens",
-        );
-        if let Some(value) = value2(params, "subagent_timeout_secs", "subagentTimeoutSecs")
-            .and_then(Value::as_u64)
-            .filter(|v| *v > 0)
-        {
-            cfg.subagent.timeout_secs = value;
-        }
-        // 允许空数组保存：配置语义中 `default_tools = []` 表示"全部工具可用"，
-        // 用户在前端取消所有勾选时应能表达该状态（此前空数组被过滤、无法保存）。
-        if let Some(values) = value2(params, "subagent_default_tools", "subagentDefaultTools")
-            .and_then(Value::as_array)
-        {
-            cfg.subagent.default_tools = values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect();
-        }
-        if let Some(path) =
-            value2(params, "tokenizer_path", "tokenizerPath").and_then(Value::as_str)
-        {
-            cfg.tokenizer_path = (!path.is_empty()).then(|| path.to_string());
-        }
-        // ── Multimodal (vision) config ──
-        if let Some(enabled) =
-            value2(params, "multimodal_enabled", "multimodalEnabled").and_then(Value::as_bool)
-        {
-            cfg.multimodal.enabled = enabled;
-        }
-        update_string(
-            &mut cfg.multimodal.provider_type,
-            params,
-            "multimodal_provider_type",
-            "multimodalProviderType",
-        );
-        update_string(
-            &mut cfg.multimodal.provider_id,
-            params,
-            "multimodal_provider_id",
-            "multimodalProviderId",
-        );
-        update_string(
-            &mut cfg.multimodal.api_key,
-            params,
-            "multimodal_api_key",
-            "multimodalApiKey",
-        );
-        update_string(
-            &mut cfg.multimodal.base_url,
-            params,
-            "multimodal_base_url",
-            "multimodalBaseUrl",
-        );
-        update_string(
-            &mut cfg.multimodal.model,
-            params,
-            "multimodal_model",
-            "multimodalModel",
-        );
-        update_u32(
-            &mut cfg.multimodal.max_tokens,
-            params,
-            "multimodal_max_tokens",
-            "multimodalMaxTokens",
-        );
-        if let Some(threshold) =
-            value2(params, "auto_compact_threshold", "autoCompactThreshold").and_then(Value::as_f64)
-        {
-            cfg.auto_compact_threshold = threshold;
-        }
-        if let Some(enabled) =
-            value2(params, "compliance_enabled", "complianceEnabled").and_then(Value::as_bool)
-        {
-            cfg.compliance_enabled = enabled;
-        }
-        cfg.save()?;
-        self.registry()?
-            .send_ringing_all(RingingCommand::Control(ControlCommand::AgentReloadConfig));
+            // ── UI 字体（空字符串 = 恢复系统默认；掩码守卫同 update_string）──
+            if let Some(value) = value2(params, "font_family", "fontFamily").and_then(Value::as_str)
+            {
+                if value != "****" {
+                    cfg.font_family = value.to_string();
+                }
+            }
+            update_string(
+                &mut cfg.subagent.model,
+                params,
+                "subagent_model",
+                "subagentModel",
+            );
+            update_string(
+                &mut cfg.subagent.base_url,
+                params,
+                "subagent_base_url",
+                "subagentBaseUrl",
+            );
+            update_string(
+                &mut cfg.subagent.api_key,
+                params,
+                "subagent_api_key",
+                "subagentApiKey",
+            );
+            update_u32(
+                &mut cfg.subagent.max_tokens,
+                params,
+                "subagent_max_tokens",
+                "subagentMaxTokens",
+            );
+            if let Some(value) = value2(params, "subagent_timeout_secs", "subagentTimeoutSecs")
+                .and_then(Value::as_u64)
+                .filter(|v| *v > 0)
+            {
+                cfg.subagent.timeout_secs = value;
+            }
+            // 允许空数组保存：配置语义中 `default_tools = []` 表示"全部工具可用"，
+            // 用户在前端取消所有勾选时应能表达该状态（此前空数组被过滤、无法保存）。
+            if let Some(values) = value2(params, "subagent_default_tools", "subagentDefaultTools")
+                .and_then(Value::as_array)
+            {
+                cfg.subagent.default_tools = values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+            }
+            if let Some(path) =
+                value2(params, "tokenizer_path", "tokenizerPath").and_then(Value::as_str)
+            {
+                cfg.tokenizer_path = (!path.is_empty()).then(|| path.to_string());
+            }
+            // ── Multimodal (vision) config ──
+            if let Some(enabled) =
+                value2(params, "multimodal_enabled", "multimodalEnabled").and_then(Value::as_bool)
+            {
+                cfg.multimodal.enabled = enabled;
+            }
+            update_string(
+                &mut cfg.multimodal.provider_type,
+                params,
+                "multimodal_provider_type",
+                "multimodalProviderType",
+            );
+            update_string(
+                &mut cfg.multimodal.provider_id,
+                params,
+                "multimodal_provider_id",
+                "multimodalProviderId",
+            );
+            update_string(
+                &mut cfg.multimodal.api_key,
+                params,
+                "multimodal_api_key",
+                "multimodalApiKey",
+            );
+            update_string(
+                &mut cfg.multimodal.base_url,
+                params,
+                "multimodal_base_url",
+                "multimodalBaseUrl",
+            );
+            update_string(
+                &mut cfg.multimodal.model,
+                params,
+                "multimodal_model",
+                "multimodalModel",
+            );
+            update_u32(
+                &mut cfg.multimodal.max_tokens,
+                params,
+                "multimodal_max_tokens",
+                "multimodalMaxTokens",
+            );
+            if let Some(threshold) =
+                value2(params, "auto_compact_threshold", "autoCompactThreshold")
+                    .and_then(Value::as_f64)
+            {
+                cfg.auto_compact_threshold = threshold;
+            }
+            if let Some(enabled) =
+                value2(params, "compliance_enabled", "complianceEnabled").and_then(Value::as_bool)
+            {
+                cfg.compliance_enabled = enabled;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 }

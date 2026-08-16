@@ -87,11 +87,17 @@ fn base_url_preset_only_when_empty() {
         "存量配置的旧工具名 file 必须迁移为 read"
     );
 
-    // 2) apply_profile 不得破坏自定义 base_url（此前会强制预设并落盘）
+    // 2) apply_profile 不得破坏自定义 base_url（此前会强制预设并落盘）。
+    // 单写口：profile 切换必须经 Config::update 持久化。
     let root = setup("apply");
     write_config(&root, USER_CONFIG);
-    let mut cfg = qaqh_config::Config::load().expect("load ok");
-    cfg.apply_profile("default");
+    let saved = qaqh_config::Config::update(|cfg| {
+        cfg.apply_profile("default")
+            .map(|_| ())
+            .ok_or_else(|| "profile default missing".to_string())
+    })
+    .expect("update ok");
+    assert_eq!(saved.base_url, CUSTOM_URL);
     let reloaded = qaqh_config::Config::load().expect("reload ok");
     assert_eq!(
         reloaded.base_url, CUSTOM_URL,
@@ -167,4 +173,27 @@ default_tools = ["file", "exec"]
         vec!["read".to_string(), "exec".to_string()],
         "存量配置的旧工具名 file 必须迁移为 read"
     );
+
+    // 7) Config::update 是受锁单写口：局部修改不会丢其它字段。
+    let root = setup("update");
+    write_config(&root, USER_CONFIG);
+    let saved = qaqh_config::Config::update(|cfg| {
+        cfg.max_tokens = 123456;
+        Ok(())
+    })
+    .expect("update ok");
+    assert_eq!(saved.max_tokens, 123456);
+    let reloaded = qaqh_config::Config::load().expect("reload ok");
+    assert_eq!(reloaded.max_tokens, 123456);
+    assert_eq!(reloaded.base_url, CUSTOM_URL, "unrelated fields must survive update");
+    assert_eq!(reloaded.permission_level, 4);
+
+    // 8) update 的 mutator 返回 Err 时不得写盘（事务语义）。
+    let root = setup("update-err");
+    write_config(&root, USER_CONFIG);
+    let err = qaqh_config::Config::update(|_| Err("reject mutation".to_string()))
+        .expect_err("mutation error must propagate");
+    assert_eq!(err, "reject mutation");
+    let unchanged = qaqh_config::Config::load().expect("reload ok");
+    assert_eq!(unchanged.max_tokens, 324000, "failed update must not write");
 }
