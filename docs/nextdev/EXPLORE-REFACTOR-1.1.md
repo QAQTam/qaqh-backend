@@ -26,17 +26,17 @@
 
 | Bug | 根因一句话 | 当前状态 |
 |---|---|---|
-| 001 | 设置 4 条写路径，无单写口；Web 时代状态归属注释残留 | 部分缓解：WinUI 拆仓消掉 `ui-preferences.json`/本地 theme 路径；`config.save` 与 `config.set_permission_level` 仍在 `service.rs` 各写各的 |
-| 002 | 子代理 = 完整 `qaqh agent --seed` 子进程 + 三层连接 | open，`registry.rs spawn_subagent` 仍是 `Command::new(current_exe)` |
+| 001 | 设置 4 条写路径，无单写口；Web 时代状态归属注释残留 | 后端 fixed：daemon 六个 config 写路径收敛到 `Config::update`；WinUI 本地 `ui-preferences.json`/theme 仍在 `qaqh-winui-app` |
+| 002 | 子代理 = 完整 `qaqh agent --seed` 子进程 + 三层连接 | 部分 fixed（刀1 step1）：`spawn_subagent` 改 daemon 内 Loop actor；主 loop 入 daemon 与宿主直连待 step2 |
 | 003 | vsync 泵全量 clone + 无 generation 互斥 | fixed（修复在已拆出的 WinUI 仓库） |
-| 004 | 单槽 timeline 无 active 守卫 + offset 恢复语义 | open；产品决策为“恢复即贴底”，守卫部分需 WinUI 仓库配合 |
+| 004 | 单槽 timeline 无 active 守卫 + offset 恢复语义 | fixed（qaqh-winui-app #1）：viewport 恢复移除、恢复即贴底；active guard/resume generation 已在 WinUI 仓库修复 |
 | 005 | timeline / messages.jsonl / compact-context / journal 四套持久化互不收敛 | open |
-| 006 | `handle_timeline_snapshot` 无 messages→timeline 回退重建 | open |
-| 007 | compact 损坏/缺失时 `unwrap_or(archive)` 回退全量，compact 可逆 | open |
-| 008 | `Config` 只有 load/save 值对象，无全局缓存与 patch API | open |
+| 006 | `handle_timeline_snapshot` 无 messages→timeline 回退重建 | fixed：#4 `timeline_rebuild` 缺失/损坏时从消息重建并写回 |
+| 007 | compact 损坏/缺失时 `unwrap_or(archive)` 回退全量，compact 可逆 | fixed：#5 损坏/越界 fail-closed，不再回退 archive |
+| 008 | `Config` 只有 load/save 值对象，无全局缓存与 patch API | fixed（后端）：#6 `Config::update` 单写口 + daemon 六写路径收敛 |
 | 009 | 注释宣称 Engine trait 可插拔，实际 `dispatch_ringing_one` 硬编码 | 本 PR 清理误导注释，实质重构入刀 7 |
 | 010 | crate 碎片化 + 大文件（ringing_http/hub/engine_turn/store） | open |
-| 011 | 子进程成本 + 多份双写 + std Mutex 内同步 I/O + 手写 HTTP | open |
+| 011 | 子进程成本 + 多份双写 + std Mutex 内同步 I/O + 手写 HTTP | 部分 fixed（刀1 step1）：子代理子进程/三层连接消除；双写/同步 I/O/手写 HTTP 仍待刀 2/3 |
 | 012 | HTTP action 白名单漏放 `session.set_tool_mode` | fixed，`is_allowed_action` 已含 |
 | 013 | 档位表 7 处硬编码（4 文件） | 本 PR 收敛为 `qaqh_types::tool_mode` 单契约 |
 
@@ -64,7 +64,7 @@
 
 | 删除对象 | 位置 | 对应 |
 |---|---|---|
-| 子代理进程模型 | `qaqh-runtime/src/registry.rs spawn_subagent`、`qaqh-subagent` 的 daemon/SSE 回连 | BUG-002/011 刀1 |
+| 子代理进程模型 | `qaqh-runtime/src/registry.rs spawn_subagent`（step1 已删进程路径；`qaqh-subagent` 的 daemon/SSE 回连与主 worker 进程待 step2） | BUG-002/011 刀1 |
 | timeline / messages / compact / journal 四写 | `timeline_store.rs`、`hub.persist_timeline_sync`、`manager.save_append`、`journal_store.rs` 多主逻辑 | BUG-005/006/007 刀2 |
 | 手写 HTTP 解析/序列化主体 | `qaqh-daemon/src/ringing_http.rs`（约 110KB） | BUG-010/011 刀3 |
 | 假 Engine 插件注释与 `engines vec` 指引 | `qaqh-msglp/src/ringing_v1/mod.rs`、`lib.rs` | BUG-009（本 PR 已清理） |
@@ -94,11 +94,11 @@
 
 ## 6. 落地顺序（相对当前仓库）
 
-1. **刀 6/6B 的纯契约部分**（低风险）：tool-mode 单契约、注册聚合器、假插件注释清理。← 本次 PR。
-2. **刀 2**（数据地基）：先做 SMJ 编辑日志（`SESSION-JOURNAL-PLAN.md`），再做一条日志 + 投影；每步先写迁移与重建测试。
-3. **刀 1**：subagent in-process actor；删除 `Command::new(current_exe)` 与 client 回连。
+1. **刀 6/6B 的纯契约部分**（低风险）：tool-mode 单契约、注册聚合器、假插件注释清理。← #3 已落地。
+2. **刀 2**（数据地基）：SMJ 编辑日志已落地（#8）；timeline 重建（#4）与 compact fail-closed（#5）已落地；四套持久化收敛为一条日志仍待做，先写迁移与重建测试。
+3. **刀 1**：subagent in-process actor step 1 已落地（`spawn_subagent` 不再 `Command::new(current_exe)`）；step 2 继续主 loop 入 daemon、逐 actor 上下文、`qaqh-subagent` 宿主直连。
 4. **刀 3**：ringing_http 换 axum（或先按端点拆模块），行为测试全量兜底。
-5. **刀 6 剩余**：`qaqh-config` 增加 `ConfigStore::update(impl FnOnce(&mut Config))` 式单写口，所有 action 与 worker 改走该口。
+5. **刀 6 剩余**：`Config::update` 单写口已落地；剩余为 `qaqh-subagent`/TUI 等外围调用点与 WinUI 本地偏好路径。
 6. **刀 7**：InjectionBus 统一 subagent/skills/MCP/系统/用户注入。
 7. **刀 4/5/8**：crate 边界合并、多前端协议版本化、鉴权模型拍板。
 

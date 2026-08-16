@@ -22,7 +22,7 @@ pub use qaqh_types::tool_mode::{
 ///
 /// 新增工具包只需在这里登记一次；`init` / `init_subagent` / 测试都从这
 /// 一个数组取注册器，不再各自手写列表。
-fn agent_tool_registrars() -> [ToolRegistrar; 2] {
+pub fn agent_tool_registrars() -> [ToolRegistrar; 2] {
     [qaqh_subagent::register, dsh_minimal_mode::register]
 }
 

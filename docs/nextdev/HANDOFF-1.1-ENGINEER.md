@@ -1,8 +1,8 @@
 # QAQ-Harness 1.1 工程师交接文档
 
-> 日期：2026-08-16
+> 日期：2026-08-17
 > 交接范围：后端主仓库 `QAQTam/QAQ-Harness` + 前端仓库 `QAQTam/qaqh-winui-app`
-> 当前主线：`origin/main = da31082`（所有本阶段 PR 均已合并，无 open PR）
+> 当前主线：`origin/main = 8faace3`（截至 SMJ #8 合并后；刀 1 step 1 见 2.2）
 
 ---
 
@@ -10,8 +10,8 @@
 
 1. 后端 repo 已从 `deepx-*` 更名为 `qaqh-*`；WinUI 前端在独立仓库 `qaqh-winui-app`。
 2. 必读三份文档：`REFACTOR-ROADMAP.md`、`bugfix-1.1-nextdev.md`、`EXPLORE-REFACTOR-1.1.md`。
-3. 本阶段已完成并合并 4 个后端 PR（#3/#4/#5/#6）和 1 个前端 PR（qaqh-winui-app#1）。
-4. 下一步推荐：先做 **SMJ 编辑日志**（低风险），再做 **刀 1 子代理 in-process**（高价值/高风险）。
+3. 本阶段已完成并合并后端 PR #3/#4/#5/#6/#8（#7 为交接文档）和 1 个前端 PR（qaqh-winui-app#1）。
+4. SMJ 编辑日志已完成；刀 1 已开始分步落地：本轮 step 1 把子代理 worker 从 `Command::new(current_exe)` 子进程改为 daemon 内 Loop actor，主 agent 进程化与逐 actor 隔离仍待后续 step。
 5. 后端所有测试在 Arch Linux 可跑；WinUI 只能在 Windows 编译，当前前端仓库无 CI。
 6. 写代码前必须使用 `git worktree`，不要直接在 `main` 上改。
 
@@ -79,6 +79,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 | QAQ-Harness #6 | `da31082` | `qaqh_config::Config::update` 受锁单写口；daemon 六个 config 写路径收敛；统一 `AgentReloadConfig` 广播。修后端 BUG-008/部分 BUG-001。 |
 | qaqh-winui-app #1 | 前端 main | `bridge.rs` 6429 行拆成 `bridge/` 模块；BUG-004 viewport 恢复移除，恢复会话强制贴底。已 review 并合并。 |
 | QAQ-Harness #8 | `eb8ceac` | SMJ 编辑日志基础版：`journal` 模块 + workspace 工具 + CLI；接入 write/edit/apply_patch/delete/copy_range/web_fetch；支持 query/replay/export patches。 |
+| QAQ-Harness #10 |（本 PR） | 刀 1 step 1：`LoopChannels` / `Loop::from_channels` 通道化 loop；`AgentRegistry::spawn_subagent` 不再 `Command::new(current_exe)`，改为 daemon 内 Ringing Loop actor + 直接 Hub 发布；actor 私有 ToolManager；新增回归测试。 |
 
 ### 新增的关键 API / 模块
 
@@ -94,6 +95,10 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - `qaqh_runtime::ringing::timeline_rebuild`
   - `rebuild_timeline_snapshot(seed)`
   - `timeline_snapshot_from_turns(seed, &turns)`
+- `qaqh_msglp::ringing_v1::loop_core::LoopChannels` + `Loop::from_channels`
+  - Ringing loop 与 OS pipe 解耦；同一 loop 可跑在 in-process channel actor 上
+- `qaqh_workspace::runtime::install_actor_tool_manager` / `clear_actor_tool_manager`
+  - in-process actor 临时私有 ToolManager，不污染 daemon `skills.list_tools` 快照
 
 ---
 
@@ -111,11 +116,28 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - `cargo test -p qaqh-msglp --test permission_lifecycle`
 - 状态：已合并（PR #8）
 
-## 2.2 下一步（刀 2 剩余 / 刀 1）
+## 2.2 本轮 PR（刀 1 step 1：子代理 in-process actor）
+
+- 分支建议：`refactor/knife1-subagent-inprocess-step1`
+- 内容：
+  - `LoopChannels` / `Loop::from_channels`：loop 的 command/event 边界从 OS pipe 抽象为 typed channel，`new_ipc` 复用同一实现
+  - `AgentRegistry::spawn_subagent` 不再启动 `qaqh agent --seed` 子进程，改为在 daemon 线程内运行子代理 `Loop`
+  - 子代理事件经 channel reader 直接 `RingingHub` publish；`send_ringing` / `close` / `shutdown_all` 全路径兼容新 transport
+  - `qaqh_workspace::runtime` 增加 actor-private ToolManager（daemon 快照保持稳定）
+- 边界（step 1 刻意收敛）：
+  - `qaqh-workspace` 仍是进程级全局状态，因此多个 in-process 子代理 actor 经 `SUBAGENT_ACTOR_SERIAL` 串行运行；主 agent 仍为原 worker 进程
+  - `qaqh-subagent` 工具仍经 daemon action + SSE 收发；HTTP 三层已减为“父 worker → daemon → actor”一层边界
+- 验证：
+  - `cargo check --workspace`
+  - `cargo test -p qaqh-runtime`
+  - `cargo test -p qaqh-msglp`
+  - 新增 `qaqh-msglp/tests/inprocess_loop.rs` 与 `qaqh-runtime/tests/subagent_inprocess.rs`
+
+## 2.3 下一步（刀 1 step 2 / 刀 2 剩余）
 
 - 刀 2 剩余：把 timeline / messages / compact / ringing journal 四套持久化收敛为一条事件溯源日志；
   SMJ 编辑日志已作为前置小步落地，可作为同一事件流的 workspace 侧事实日志。
-- 刀 1：子代理 in-process 化，移除 `spawn_subagent` 的 `Command::new(current_exe)` 与三层连接。
+- 刀 1 step 2：主 agent loop 移入 daemon、`spawn_with` 的 `Command::new(current_exe)` 退役；qaqh-workspace 逐 actor 上下文；`qaqh-subagent` 直连宿主，去掉剩余 HTTP/SSE 回连。
 - 刀 7：统一注入插槽（InjectionBus），对 loop 动刀，收敛 subagent / skills / MCP / 系统 / 用户注入路径。
 
 ## 3. 当前 Bug 状态表
@@ -123,7 +145,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 | Bug | 状态 | 说明 |
 |---|---|---|
 | BUG-001 | **部分修复** | 后端 config 写路径已收敛（#6）；WinUI 本地 `ui-preferences.json` / 本地 theme 仍在前端仓库 |
-| BUG-002 | open | 子代理仍是完整 `qaqh agent --seed` 子进程 + 三层连接 |
+| BUG-002 | **部分修复（#10）** | 子代理不再启动 `qaqh agent --seed` 子进程；主 loop 进 daemon、逐 actor workspace 隔离与 `qaqh-subagent` 直连宿主仍待 step 2 |
 | BUG-003 | fixed | WinUI vsync/队列/resume generation 修复已在前端仓库 main |
 | BUG-004 | fixed | 前端 #1 移除 viewport 恢复，恢复=贴底；active guard/resume generation 此前已修 |
 | BUG-005 | open | timeline / messages / compact / journal 四套持久化仍并存 |
@@ -132,7 +154,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 | BUG-008 | **fixed（后端）** | `Config::update` 单写口 |
 | BUG-009 | **部分修复** | 误导性 Engine 插件文档已清理；实质注入统一待刀 7 |
 | BUG-010 | open | 大文件/crate 碎片化仍待刀 4/5/10 |
-| BUG-011 | open | 与 BUG-002 同源：进程成本、多写、同步持久化、手写 HTTP |
+| BUG-011 | **部分修复（#10）** | 子代理进程/三层连接成本已消除；多写、同步持久化、手写 HTTP 仍待刀 2/3 |
 | BUG-012 | fixed | `session.set_tool_mode` 白名单已放行 |
 | BUG-013 | **fixed（后端）** | `qaqh_types::tool_mode` 单契约；前端需跟进消费 |
 
@@ -146,34 +168,22 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - 删除 `apps/winui/src/bridge/types.rs` 本地 `TOOL_MODE_VALUES`
 - 给前端仓库接 Windows CI；当前 #1 这种 6.7k 行移动无 CI 保障
 
-### P1：SMJ 编辑日志（基础版已落地）
+### P1：SMJ 编辑日志 ✅ 已合并（#8）
 
-- 依据：`docs/nextdev/SESSION-JOURNAL-PLAN.md`
-- 目标：所有 workspace 写路径收口后追加 `journal/steps.jsonl` + content-addressed blobs
-- 入口：
-  - `crates/qaqh-workspace/src/file_edit_v2.rs`
-  - `crates/qaqh-workspace/src/apply_patch.rs`
-  - `crates/qaqh-workspace/src/file_mutate.rs`
-  - 其它写/删除路径按 `SESSION-JOURNAL-PLAN.md §3.3`
-- 判据：
-  1. 模拟误删仓库后可 `journal replay` 恢复
-  2. 恢复内容字节一致
-  3. 模型能通过工具查询/恢复
-- 风险：低；append-only，不碰协议/前端
+- 基础版已落地：`journal` 工具 + CLI + `write/edit/apply_patch/delete/copy_range/web_fetch` 接入。
+- 后续仅随刀 2 事件日志统一，不再单独排期。
 
-### P1：刀 1 子代理 in-process（高价值，建议分多步）
+### P1：刀 1 子代理 in-process（step 1 本 PR，剩余继续分步）
 
 - 修 BUG-002/011
-- 关键文件：
-  - `crates/qaqh-runtime/src/registry.rs`（`spawn_subagent` 仍在 `Command::new(current_exe)`）
-  - `crates/qaqh-runtime/src/worker.rs`
-  - `crates/qaqh-msglp/src/ringing_v1/loop_core.rs`
-  - `crates/qaqh-subagent/src/lib.rs`
-- 目标：
-  - `spawn_subagent` 不再创建进程
-  - 主 loop + N 子代理 actor 在同一 daemon 进程
-  - 保持 workspace 边界 + 权限级别作为隔离
-- 风险：高，需要保留 Ringing worker wire 语义或先抽 actor trait
+- step 1 已落地：
+  - `AgentRegistry::spawn_subagent` 不再创建进程
+  - 子代理 Ringing Loop 在 daemon 线程内运行，事件直发 Hub
+- step 2 待办（风险仍是高）：
+  - `qaqh-workspace` 全局状态改为逐 actor 上下文，放开 `SUBAGENT_ACTOR_SERIAL`
+  - 主 agent loop 移入 daemon，删除 `spawn_with` 的 `Command::new(current_exe)` 路径
+  - `qaqh-subagent` 工具从 daemon HTTP/SSE 回连改为宿主直连 actor 句柄
+  - `crates/qaqh-runtime/src/worker.rs` 随之退役
 
 ### P2：刀 3 传输现代化
 
@@ -214,6 +224,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 7. **`docs/nextdev/bugfix-1.1-nextdev.md` 是档案 + 现状混合**：旧条目保留
    `deepx-*` 路径；新增状态在文末“落地增量”区。不要大改旧记录，追加即可。
 8. **GitHub 无 CI**：目前所有 PR 均无 checks；合并前必须本地跑测试。
+9. **刀 1 step 1 的 actor 是串行的**：`qaqh-workspace` 全局 workspace/session/sandbox/tool-manager 尚未逐 actor 化，daemon 内多个子代理 actor 由 `SUBAGENT_ACTOR_SERIAL` 排队执行。不要把“N 个子代理并发”当作已达成。
 
 ---
 
