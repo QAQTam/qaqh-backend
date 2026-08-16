@@ -33,6 +33,21 @@ if (Test-Path $lock) {
     Remove-Item $lock -Force
 }
 
+# ── Windows 防火墙放行（局域网访问必需）─────────────────────────────────────
+$ruleName = "QAQ-Harness daemon LAN ($daemon)"
+$existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+if (-not $existing) {
+    try {
+        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow `
+            -Protocol TCP -Program $daemon -ErrorAction Stop | Out-Null
+        Write-Host "已添加防火墙入站规则: $ruleName" -ForegroundColor Green
+    } catch {
+        Write-Host "警告: 无法自动添加防火墙规则（需要管理员权限）。" -ForegroundColor Yellow
+        Write-Host "  若局域网其他设备无法访问，请以管理员身份运行:" -ForegroundColor Yellow
+        Write-Host "    New-NetFirewallRule -DisplayName '$ruleName' -Direction Inbound -Action Allow -Protocol TCP -Program '$daemon'" -ForegroundColor Yellow
+    }
+}
+
 # ── 局域网 IP ─────────────────────────────────────────────────────────────
 # 优先取默认路由网卡（真实局域网 IP），避免选中虚拟网卡（WSL/VM）
 $ip = $null
@@ -65,8 +80,9 @@ Write-Host ''
 Write-Host '══════════════════════════════════════════════════' -ForegroundColor Cyan
 Write-Host '  QAQ-Harness · 局域网 Web' -ForegroundColor Cyan
 Write-Host "  访问地址 : http://$ip`:$Port/debug/" -ForegroundColor Green
+Write-Host "  本机直连 : http://localhost:$Port/debug/" -ForegroundColor Green
 Write-Host "  token    : $token" -ForegroundColor Yellow
-Write-Host '  按 Ctrl+C 停止' -ForegroundColor DarkGray
+Write-Host '  按 Ctrl+C 停止（关闭此终端也会停止服务）' -ForegroundColor DarkGray
 Write-Host '══════════════════════════════════════════════════' -ForegroundColor Cyan
 Write-Host ''
 

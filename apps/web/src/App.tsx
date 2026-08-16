@@ -51,6 +51,7 @@ export function App() {
 
   const connect = useCallback(
     async (token: string) => {
+      store.lastToken = token;
       store.setConn({ state: 'connecting' });
       const client = new RingingClient(location.origin, token, {
         onEvent: (channel, env) => {
@@ -253,7 +254,7 @@ export function App() {
       : store.conn.state === 'connecting'
         ? '连接中…'
         : store.conn.state === 'error'
-          ? `连接错误: ${store.conn.message}`
+          ? '连接失败'
           : '未连接';
 
   return (
@@ -262,6 +263,25 @@ export function App() {
         <TokenGate onToken={storeToken} />
       ) : (
         <>
+          {store.conn.state === 'error' && (
+            <div className="conn-error-banner">
+              <div>
+                <strong>连接失败：</strong>
+                {store.conn.message}
+                <div className="conn-error-hint">
+                  请确认 daemon 已启动（Linux 上：检查 <code>ufw status</code> 是否放行端口），
+                  且浏览器与 daemon 网络可达。
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  if (store.lastToken) void connect(store.lastToken);
+                }}
+              >
+                重试
+              </button>
+            </div>
+          )}
           <Sidebar
             sessions={store.sessions}
             currentSeed={store.currentSeed}
