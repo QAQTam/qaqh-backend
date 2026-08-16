@@ -256,6 +256,14 @@ impl DeepxService {
                     .map(str::to_string);
                 qaqh_session::SessionManager::global()
                     .persist_new_session_with_cwd(&seed, cwd.as_deref());
+                // 可选工具模式预置（TUI/CLI 壳在 create 时一次性锁定）。
+                // 先于 spawn 落盘：worker 的 init_session 从 meta 恢复并应用，
+                // 保证 minimal:dsh 的极简 system prompt 首轮就生效。
+                if let Some((tool_mode, custom_tools)) = optional_tool_mode(params)? {
+                    qaqh_session::SessionManager::global()
+                        .persist_tool_mode(&seed, &tool_mode, &custom_tools)
+                        .map_err(|error| format!("persist tool_mode failed: {error}"))?;
+                }
                 self.registry()?.spawn_new(&seed)?;
                 Ok(json!(seed))
             }
@@ -295,14 +303,7 @@ impl DeepxService {
             "session.set_tool_mode" => {
                 let seed = seed()?;
                 let tool_mode = pstr(params, "tool_mode")?;
-                if !matches!(
-                    tool_mode.as_str(),
-                    "standard" | "minimal" | "minimal:b" | "minimal:c" | "minimal:dsh" | "custom"
-                ) {
-                    return Err(format!(
-                        "invalid tool_mode '{tool_mode}' (expected standard | minimal | custom)"
-                    ));
-                }
+                validate_tool_mode(&tool_mode)?;
                 let custom_tools = pstrings(params, "custom_tools");
                 if tool_mode == "custom" && custom_tools.is_empty() {
                     return Err(
@@ -967,7 +968,38 @@ fn pstrings(params: &Value, key: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
-fn err(error: impl std::fmt::Display) -> String {
+
+/// 可选工具模式预置：缺省 = None（保持旧行为）；显式空串 = standard 零迁移。
+/// 供 create 路径（session.new）在 spawn 前落盘使用。
+fn optional_tool_mode(params: &Value) -> Result<Option<(String, Vec<String>)>, String> {
+    let Some(tool_mode) = params.get("tool_mode").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    // 显式空串 = 未指定（与 SessionMeta.tool_mode 的空串零迁移语义一致）。
+    if tool_mode.is_empty() {
+        return Ok(None);
+    }
+    validate_tool_mode(tool_mode)?;
+    let custom_tools = pstrings(params, "custom_tools");
+    if tool_mode == "custom" && custom_tools.is_empty() {
+        return Err("custom tool mode requires at least one tool in custom_tools".to_string());
+    }
+    Ok(Some((tool_mode.to_string(), custom_tools)))
+}
+
+/// 工具模式白名单校验（session.new 预置与 session.set_tool_mode 共用）。
+fn validate_tool_mode(tool_mode: &str) -> Result<(), String> {
+    if matches!(
+        tool_mode,
+        "standard" | "minimal" | "minimal:b" | "minimal:c" | "minimal:dsh" | "custom"
+    ) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid tool_mode '{tool_mode}' (expected standard | minimal | custom)"
+        ))
+    }
+}fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 fn parse_json_string(value: String) -> Result<Value, String> {
@@ -1267,6 +1299,53 @@ fn plan_action(seed: &str, item_id: &str, action: &str, comment: &str) -> Result
 
 #[allow(dead_code)]
 #[cfg(test)]
+#[cfg(test)]
+mod tool_mode_tests {
+    use super::{optional_tool_mode, validate_tool_mode};
+
+    #[test]
+    fn optional_tool_mode_defaults_to_none() {
+        assert_eq!(optional_tool_mode(&serde_json::json!({})).unwrap(), None);
+    }
+
+    #[test]
+    fn optional_tool_mode_parses_minimal_dsh() {
+        let (mode, tools) = optional_tool_mode(&serde_json::json!({
+            "tool_mode": "minimal:dsh",
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(mode, "minimal:dsh");
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn optional_tool_mode_rejects_unknown_values() {
+        assert!(optional_tool_mode(&serde_json::json!({ "tool_mode": "turbo" })).is_err());
+    }
+
+    #[test]
+    fn optional_tool_mode_custom_requires_tools() {
+        assert!(optional_tool_mode(&serde_json::json!({ "tool_mode": "custom" })).is_err());
+        let (mode, tools) = optional_tool_mode(&serde_json::json!({
+            "tool_mode": "custom",
+            "custom_tools": ["bash"],
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(mode, "custom");
+        assert_eq!(tools, vec!["bash"]);
+    }
+
+    #[test]
+    fn validate_tool_mode_accepts_all_known_presets() {
+        for mode in ["standard", "minimal", "minimal:b", "minimal:c", "minimal:dsh", "custom"] {
+            assert!(validate_tool_mode(mode).is_ok(), "{mode}");
+        }
+        assert!(validate_tool_mode("turbo").is_err());
+    }
+}
+
 mod control_scope_tests {
     use super::DeepxService;
 

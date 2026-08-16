@@ -1,0 +1,24 @@
+[package]
+name = "qaqh-tui"
+version.workspace = true
+edition.workspace = true
+description = "Temporary ratatui shell for QAQ-Harness — locked to minimal:dsh tool mode"
+license = "MIT"
+
+[[bin]]
+name = "qaqh-tui"
+path = "src/main.rs"
+
+[dependencies]
+qaqh-client = { path = "../../crates/qaqh-client" }
+qaqh-domain = { path = "../../crates/qaqh-domain" }
+ratatui = "0.30"
+serde_json = "1"
+textwrap = { version = "0.16", features = ["unicode-width"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# TUI 渲染路径大量处理变长字符串与交互恢复；不继承 workspace 的
+# unwrap_used/string_slice deny（交互样板代码会被边界检查淹没）。
+[lints.clippy]
+unwrap_used = "allow"
+string_slice = "allow"
