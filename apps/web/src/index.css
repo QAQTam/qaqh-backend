@@ -1117,6 +1117,50 @@ body {
   }
 }
 
+/* ── 连接失败横幅 ─────────────────────────────────────────────────────────── */
+
+.conn-error-banner {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: rgba(192, 57, 43, 0.1);
+  border: 1px solid var(--red);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 10px 18px;
+  font-size: 13px;
+  max-width: 640px;
+  backdrop-filter: blur(6px);
+}
+.conn-error-banner code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-input);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.conn-error-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-top: 3px;
+}
+.conn-error-banner button {
+  flex-shrink: 0;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 7px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 /* ── 滚动条 ──────────────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar {

@@ -81,6 +81,7 @@ export class RingingClient {
           Authorization: `Bearer ${this.token}`,
         },
         body: JSON.stringify(req),
+        signal: AbortSignal.timeout(10_000),
       });
       if (!resp.ok) {
         const text = await resp.text().catch(() => '');
@@ -146,6 +147,7 @@ export class RingingClient {
     const resp = await fetch(`${this.base}${BASE}/leases/renew`, {
       method: 'POST',
       headers: this.authHeaders(sid),
+      signal: AbortSignal.timeout(5_000),
     });
     if (!resp.ok) throw new Error(`renew failed: HTTP ${resp.status}`);
   }

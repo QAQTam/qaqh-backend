@@ -94,6 +94,7 @@ class AppStore {
   turnOrder: string[] = [];
   config = { show: false };
   tokenMissing = false;
+  lastToken = '';
 
   getVersion = (): number => {
     return this.version;
