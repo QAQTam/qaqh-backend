@@ -91,7 +91,12 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     std::fs::create_dir_all(&temp_home).expect("create isolated home");
 
     // This integration test binary owns an isolated process home.
-    unsafe { std::env::set_var("USERPROFILE", &temp_home) };
+    // Linux 上 todo 数据目录解析优先 HOME：两个变量都必须钉住，
+    // 否则会读进真实用户 home 的历史 todo（并行测试全局态污染）。
+    unsafe {
+        std::env::set_var("USERPROFILE", &temp_home);
+        std::env::set_var("HOME", &temp_home);
+    }
     qaqh_workspace::runtime::init_tools("todo-contract", &[], vec![]);
     qaqh_workspace::runtime::set_context("todo-contract", 1);
 

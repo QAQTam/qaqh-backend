@@ -151,6 +151,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)] // Windows 盘符路径语义；Linux 下无盘符概念
     fn windows_path_to_uri() {
         assert_eq!(
             path_to_uri(Path::new(r"F:\QAQ-Harness\crates\a b.rs")),
@@ -167,6 +168,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)] // Windows 盘符路径语义；Linux 下无盘符概念
     fn verbatim_prefix_is_stripped() {
         assert_eq!(
             path_to_uri(Path::new(r"\\?\F:\QAQ-Harness\x.rs")),
@@ -175,6 +177,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)] // Windows 盘符路径语义；Linux 下无盘符概念
     fn uri_to_windows_path() {
         assert_eq!(
             uri_to_path("file:///F:/QAQ-Harness/crates/a%20b.rs").unwrap(),
@@ -187,6 +190,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)] // Windows 盘符路径语义；Linux 下无盘符概念
     fn drive_letter_as_authority() {
         assert_eq!(
             uri_to_path("file://F:/QAQ-Harness/x.rs").unwrap(),
@@ -195,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)] // Windows 盘符路径语义；Linux 下无盘符概念
     fn localhost_authority_ignored() {
         assert_eq!(
             uri_to_path("file://localhost/F:/QAQ-Harness/x.rs").unwrap(),
@@ -203,6 +208,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)] // Windows 盘符路径语义；Linux 下无盘符概念
     fn roundtrip_preserves_path() {
         for p in [
             r"F:\QAQ-Harness\crates\a b.rs",

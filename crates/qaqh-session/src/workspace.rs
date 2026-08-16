@@ -285,6 +285,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)] // Windows 盘符/cmd 语义；Linux 无对应环境
     fn cwd_belongs_matches_self_and_children() {
         assert!(cwd_belongs(r"C:\proj\a", r"C:\proj\a"));
         assert!(cwd_belongs(r"C:\proj\a\src", r"C:\proj\a"));
