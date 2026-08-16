@@ -139,13 +139,14 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - 刀 2 剩余：把 timeline / messages / compact / ringing journal 四套持久化收敛为一条事件溯源日志；
   SMJ 编辑日志已作为前置小步落地，可作为同一事件流的 workspace 侧事实日志。
 - 刀 1 step 2：主 agent loop 移入 daemon、`spawn_with` 的 `Command::new(current_exe)` 退役；qaqh-workspace 逐 actor 上下文；`qaqh-subagent` 直连宿主，去掉剩余 HTTP/SSE 回连。
+- 前端团队已向 backend 提交 issue #9（BUG-001 残留：`theme` + `notifications_enabled` 进入 daemon config）。已确认并登记，建议排在刀 1 step 2 之前（纯 config schema，低风险）。
 - 刀 7：统一注入插槽（InjectionBus），对 loop 动刀，收敛 subagent / skills / MCP / 系统 / 用户注入路径。
 
 ## 3. 当前 Bug 状态表
 
 | Bug | 状态 | 说明 |
 |---|---|---|
-| BUG-001 | **部分修复** | 后端 config 写路径已收敛（#6）；WinUI 本地 `ui-preferences.json` / 本地 theme 仍在前端仓库 |
+| BUG-001 | **部分修复** | 后端 config 写路径已收敛（#6）；WinUI 本地 `ui-preferences.json` / 本地 theme 仍在前端仓库；前端已提交 issue #9 申请 daemon config 扩展 |
 | BUG-002 | **部分修复（#10）** | 子代理不再启动 `qaqh agent --seed` 子进程；主 loop 进 daemon、逐 actor workspace 隔离与 `qaqh-subagent` 直连宿主仍待 step 2 |
 | BUG-003 | fixed | WinUI vsync/队列/resume generation 修复已在前端仓库 main |
 | BUG-004 | fixed | 前端 #1 移除 viewport 恢复，恢复=贴底；active guard/resume generation 此前已修 |
@@ -257,3 +258,46 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - `docs/nextdev/SESSION-JOURNAL-PLAN.md` — SMJ 编辑日志（基础版已落地）
 - `docs/nextdev/legal/` — 用户协议/隐私政策，保留不动
 - `docs/backlog/` — 旧计划归档，按需回溯
+
+---
+
+## 8. 本轮工程师工作补充（2026-08-17 第二轮）
+
+### 8.1 本轮已完成
+
+- QAQ-Harness #10（`2dc02d1`）：刀 1 step 1 子代理 in-process actor。
+  - `spawn_subagent` 不再 `Command::new(current_exe)`。
+  - `LoopChannels` / `Loop::from_channels` 通道化 loop；`new_ipc` 复用同一实现。
+  - daemon 线程内运行子代理 Ringing `Loop`，事件直发 `RingingHub`。
+  - actor 私有 ToolManager；daemon `skills.list_tools` 使用 `process_all_tool_names()` 保持稳定快照。
+  - `shutdown_all` 先广播关闭再 join，覆盖多个排队 actor 的关闭路径。
+  - 新增 `qaqh-msglp/tests/inprocess_loop.rs`、`qaqh-runtime/tests/subagent_inprocess.rs`。
+- QAQ-Harness #11（`27c4967`）：把 #10 标记为已合并并同步 handoff 主线。
+- 清理：删除 PR 分支与 worktree；当前 `origin/main = 27c4967`，无 open PR。
+- 验证：`cargo check --workspace`、`cargo test -p qaqh-runtime`、`cargo test -p qaqh-msglp`、`cargo test -p qaqh-workspace --lib` 全部通过（workspace 测试存在既有并行全局态 flaky，单测重跑通过）。
+
+### 8.2 下一轮工作（按建议优先级）
+
+1. **backend issue #9**（低风险 config schema）：见 8.3，建议下一位直接实现并回链 issue。
+2. **刀 1 step 2**：`qaqh-workspace` 逐 actor 上下文；主 agent loop 入 daemon；`qaqh-subagent` 宿主直连；`worker.rs` 退役。
+3. **刀 2 剩余**：timeline / messages / compact / ringing journal 收敛为一条事件日志。
+4. **P0 前端跟进**：`qaqh-winui-app` 消费 `qaqh_types::tool_mode`，移除本地 `TOOL_MODE_VALUES`，补 Windows CI。
+5. **刀 3 / 刀 7**：HTTP 传输现代化；InjectionBus。
+
+### 8.3 前端团队提交给 backend 的 issue（已确认）
+
+- **Issue**：`QAQ-Harness#9 feat(config): add theme + notifications_enabled to PersistentConfig for BUG-001 frontend residue`
+- **状态**：OPEN（已由后端本轮确认，待实现）。
+- **请求**：
+  - `Config` / `PersistentConfig` 增加 `theme: Option<String>`（`system | light | dark | dark-gray`；空 = 跟随系统）。
+  - `Config` 增加 `notifications_enabled: Option<bool>`（缺省 = 开启）。
+  - `config.save` 接受 camelCase wire 字段 `theme` / `notificationsEnabled`；`config.load` 返回这两个字段。
+  - 旧 `config.toml` 缺字段保持现状兼容。
+- **前端侧配套计划**（issue 中已声明）：
+  - `settings_view` 主题写入改走 daemon `config.save`。
+  - 通知开关改为 daemon config，移除/迁移 `ui-preferences.json`。
+  - 清理 `SettingsProjection` Web 时代残留。
+- **验收**：后端 `config.save/load` 接受并返回两字段；旧配置可加载；前端不再写 `ui-preferences.json`。
+- **后端确认**：已通过 `gh issue list/view` 核实该 issue 是当前 backend 唯一 open issue，并已在 issue 下留确认评论。
+
+---
