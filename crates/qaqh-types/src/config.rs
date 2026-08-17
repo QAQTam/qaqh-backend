@@ -38,6 +38,16 @@ pub struct PersistentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
 
+    /// UI 主题偏好：`system` | `light` | `dark` | `dark-gray`；`None`/空 = 跟随系统。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+
+    /// 桌面通知开关。`None` = 开启（缺省）。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notifications_enabled: Option<bool>,
+
     // ── Subagent defaults ──
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<PersistentSubagentConfig>,
