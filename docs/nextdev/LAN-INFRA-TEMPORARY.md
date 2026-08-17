@@ -1,23 +1,28 @@
 # 临时本地 Git 基础设施方案（GitHub 故障应急）
 
 > 建立：2026-08-18（GitHub 持续异常约 4h+）
-> 状态：**当前有效（应急）**；GitHub 恢复后按文末【退役清单】停用。
+> 状态：~~当前有效（应急）~~ → **已收敛为 Gitea 唯一远端**
 > 本文是唯一详细文档；HANDOFF 只放指向，不重复维护具体步骤。
+
+> **【2026-08-18 后续变更】**：裸仓库 `~/git/qaqh-backend.git` **已删除**，`sshd-lan`(2222) **已停用**。
+> 现在 **Gitea 是唯一 Git 远端**：Linux `origin` 与 Windows 均走
+> `http://60.0.0.32:3000/qaq/QAQ-Harness.git`，`git push/pull` 体验与 GitHub 一致。
+> 下文除 **Gitea 通道**外，SSH 裸仓库 / git:// 均视为**历史/已退役**，仅作排障参考。
 
 ---
 
 ## 0. 一句话结论
 
-本机 `60.0.0.32` 提供两条已验收的本地 Git 通道，供 Windows（`60.0.0.65`）团队在 GitHub 不可用期间 push / clone：
+本机 `60.0.0.32` 以 **Gitea 为唯一已验收的 Git 通道**，供 Linux / Windows（`60.0.0.65`）在 GitHub 不可用期间 push / clone：
 
 | 通道 | 地址 | 状态 |
 |---|---|---|
-| SSH（用户级 sshd） | `ssh://qaqtamsy@60.0.0.32:2222/home/qaqtamsy/git/qaqh-backend.git` | ✅ 已验证 push（公钥） |
-| Gitea（systemd 用户服务） | `http://60.0.0.32:3000/` | ✅ 已验证 clone + push |
-| ~~git:// daemon~~（已弃用） | ~~`git://60.0.0.32:9418/qaqh-backend.git`~~ | ⛔ receive-pack 对 Windows push 卡死，已停用 |
+| ~~SSH（用户级 sshd）~~ | ~~`ssh://qaqtamsy@60.0.0.32:2222/...`~~ | 已退役（裸仓库已删，sshd-lan 已停用） |
+| **Gitea（唯一远端）** | `http://60.0.0.32:3000/qaq/QAQ-Harness.git` | ✅ 已验证 clone + push；Linux `origin` 即它 |
+| ~~git:// daemon~~（已弃用） | ~~`git://60.0.0.32:9418/...`~~ | ⛔ receive-pack 对 Windows push 卡死，已停用 |
 
-裸仓库：`/home/qaqtamsy/git/qaqh-backend.git`
-（refs 基线：`main = c78bb35`，`refactor/nextdev-tool-mode-single-contract = 7c3b0b3`）
+~~裸仓库：`/home/qaqtamsy/git/qaqh-backend.git`（已删除）~~
+（历史基线已迁入 Gitea：`main = 86812b9`，另含 `docs/t17`、`refactor/nextdev-tool-mode-single-contract`）
 
 ---
 
@@ -32,7 +37,7 @@
 
 ---
 
-## 2. 通道一：SSH 直推裸仓库（端口 2222）
+## 2. ~~通道一：SSH 直推裸仓库（端口 2222）~~（**已退役**）
 
 ### 部署要点（用户级，无需 root）
 
@@ -87,7 +92,7 @@ git clone ssh://qaqtamsy@60.0.0.32:2222/home/qaqtamsy/git/qaqh-backend.git
 
 ---
 
-## 3. 通道二：Gitea（HTTP，端口 3000）
+## 3. 当前唯一通道：Gitea（HTTP，端口 3000）
 
 ### 部署要点（用户级，无需 root）
 
@@ -175,9 +180,9 @@ git push gitea <分支>
 
 | 项 | 值 |
 |---|---|
-| 裸仓库 | `/home/qaqtamsy/git/qaqh-backend.git`（`main=c78bb35`, WIP=`7c3b0b3`）|
-| sshd | `0.0.0.0:2222`，systemd 用户服务 `sshd-lan.service`，公钥登录，已验证 Windows push |
-| Gitea | `*:3000`，systemd 用户服务 `gitea.service`，已 E2E 验证 |
-| 开机自启 | `Linger=yes`；`gitea` 与 `sshd-lan` 均 `enabled`，关机重启后不登录也自动拉起 |
-| ~~git-daemon~~ | 已停（9418 不再监听） |
-| Windows 机 | `60.0.0.65`，公钥 `win-qaqh` 已授权 |
+| 主远端 | **Gitea** `http://60.0.0.32:3000/qaq/QAQ-Harness.git`（Linux + Windows 统一）|
+| Linux origin | `http://60.0.0.32:3000/qaq/QAQ-Harness.git`（main 已跟踪 origin，`git push` 即 Gitea）|
+| Gitea 分支 | `main=86812b9`、`docs/t17-frontend-bug-inventory=da20293`、`refactor/nextdev-tool-mode-single-contract=7c3b0b3` |
+| ~~裸仓库~~ | ~~`/home/qaqtamsy/git/qaqh-backend.git`~~ **已删除** |
+| ~~sshd-lan~~ | ~~2222~~ **已停用/取消自启**；~~git-daemon 9418~~ 已停 |
+| 开机自启 | `Linger=yes`；仅 `gitea.service` `enabled`，关机重启后不登录也自动拉起 |
