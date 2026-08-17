@@ -2,7 +2,17 @@
 
 > 日期：2026-08-18
 > 交接范围：后端主仓库 `QAQTam/QAQ-Harness` + 前端仓库 `QAQTam/qaqh-winui-app`
-> 当前主线：以后端 `origin/main` HEAD 为准；截至本轮检查：后端 HEAD = `fd77452`（#16/#17/#19/#21 已合并），open PR 为 #20（docs T17），open issues 为 #9、#15、#18；前端最新 `origin/main` 已含 #10/#13，open issues 为 #11、#12。
+> 当前远端：**本机 Gitea**（`http://60.0.0.32:3000/qaq/QAQ-Harness.git`，Linux/Windows 的 `origin` 均指向它）。
+> 当前实际代码基线（Gitea `origin` 实测）：后端 `main = 4fd9628`，`docs/t17-frontend-bug-inventory = da20293`，
+> `refactor/nextdev-tool-mode-single-contract = cbd10ca`。
+> 历史 GitHub 状态（断连前）：后端 HEAD=`fd77452`、open PR #20、open issues #9/#15/#18；前端 #10/#13 已合并、#11/#12 open。
+
+> **⚠️ 编号变动提醒（接手先读）**
+> 本文中所有 **GitHub issue / PR / review 评论 / BUG 编号** 均来自原 GitHub 仓库。
+> 因 GitHub 故障，仓库已部分重放/迁入 Gitea（`docs: add GitHub->Gitea replay mapping`），这些编号
+> **可能在重放/迁移后变动、不连续，或与 Gitea 上的实际对象不一致**。
+> **接手时不要以编号为准——一律以代码 & 仓库实际状态为准**，核对 `git log`、`cargo check`、Gitea 上的
+> 分支/PR/issue 实际内容后再继续。
 
 ---
 
@@ -10,7 +20,7 @@
 
 1. 后端 repo 已从 `deepx-*` 更名为 `qaqh-*`；WinUI 前端在独立仓库 `qaqh-winui-app`。
 2. 必读三份文档：`REFACTOR-ROADMAP.md`、`bugfix-1.1-nextdev.md`、`EXPLORE-REFACTOR-1.1.md`。
-3. 本阶段后端 PR #3/#4/#5/#6/#8/#10/#16/#17/#19/#21 及 handoff docs #7/#11/#12/#13/#14 已合并；前端 #1–#10、#13 已合并。后端当前 open issues：#9（config theme/notifications 前端仍待闭环）、#15（同轮 text↔tool 块重复回放，排期刀 1 step 2）、#18（Windows WIP review，当前 `7c3b0b3` 已确认干净合并+编译通过）；后端 open PR：#20（docs T17）。前端 open issues：#11/#12（data-root 迁移共享权威契约消费）。
+3. 本阶段后端 PR #3/#4/#5/#6/#8/#10/#16/#17/#19/#21 及 handoff docs #7/#11/#12/#13/#14 已合并；前端 #1–#10、#13 已合并。后端当前 open issues：#9（config theme/notifications 前端仍待闭环）、#15（同轮 text↔tool 块重复回放，排期刀 1 step 2）、#18（Windows WIP review，基线上 `7c3b0b3` 已确认干净合并+编译通过；实际 tip 已到 `cbd10ca`）；后端 open PR：#20（docs T17）。前端 open issues：#11/#12（data-root 迁移共享权威契约消费）。
 4. SMJ 编辑日志已完成；刀 1 已开始分步落地：本轮 step 1 把子代理 worker 从 `Command::new(current_exe)` 子进程改为 daemon 内 Loop actor，主 agent 进程化与逐 actor 隔离仍待后续 step。
 5. 后端所有测试在 Arch Linux 可跑；WinUI 只能在 Windows 编译，前端已于 #7 接入 Windows CI（`cargo check/test -p qaqh-winui`）。
 6. 写代码前必须使用 `git worktree`，不要直接在 `main` 上改。
@@ -389,11 +399,10 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 ### 10.2 Windows WIP 分支（issue #18）状态
 
 - Windows 侧分支 `refactor/nextdev-tool-mode-single-contract` 已多次 rebase：
-  - 最新 tip：`7c3b0b3`（基于 `fd77452`，落后 0）
-  - `git merge-tree --write-tree`：**无冲突**
-  - `cargo check --workspace`：**pass**
-- 结论：可以走 PR 评审合入；但 WIP 仍是 70 文件大改动，建议拆成小提交。
-- 当前后端 open PR：#20（docs T17，前端 bug inventory 追加）。
+  - 截至 2026-08-18 实际 tip：**`cbd10ca`**（基线上 `7c3b0b3` 之后 Windows 新增 `docs: add GitHub->Gitea replay mapping`）
+  - 基线核对（`7c3b0b3` 时）：`git merge-tree --write-tree` **无冲突**、`cargo check --workspace` **pass**
+- 结论：可以走 PR 评审合入；但 WIP 仍是约 70 文件大改动，建议拆成小提交。
+- 当前后端 open PR：#20（docs T17，前端 bug inventory 追加）——编号来自 GitHub，可能变动（见顶部提醒）。
 
 ### 10.3 临时本地 Git 基础设施（GitHub 故障应急）
 
@@ -401,7 +410,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 > **[LAN-INFRA-TEMPORARY.md](./LAN-INFRA-TEMPORARY.md)**（唯一详细文档，此处不再重复）。
 >
 > 状态速览：**Gitea** = `http://60.0.0.32:3000/qaq/QAQ-Harness.git`（Linux `origin` 即它，Windows 同）
-> 含 `main=86812b9`、`docs/t17`、`refactor/nextdev-tool-mode-single-contract`。
+> 含 `main=4fd9628`、`docs/t17=da20293`、`refactor/nextdev-tool-mode-single-contract=cbd10ca`。
 > 已退役：`git://`(9418)、SSH 裸仓库(2222)/`~/git/qaqh-backend.git`（裸仓库已删）。
 
 ### 10.4 下一轮工作（按原计划）
