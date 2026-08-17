@@ -1,8 +1,8 @@
 # QAQ-Harness 1.1 工程师交接文档
 
-> 日期：2026-08-17
+> 日期：2026-08-18
 > 交接范围：后端主仓库 `QAQTam/QAQ-Harness` + 前端仓库 `QAQTam/qaqh-winui-app`
-> 当前主线：以后端 `origin/main` HEAD 为准；截至本轮检查：后端无 open PR，open issues 为 #9 与 #15（#15 已复核并排期到刀 1 step 2 / loop 协议改造）；前端无 open PR（#10 已合并），open issue 为 `qaqh-winui-app#11`。
+> 当前主线：以后端 `origin/main` HEAD 为准；截至本轮检查：后端 HEAD = `fd77452`（#16/#17/#19/#21 已合并），open PR 为 #20（docs T17），open issues 为 #9、#15、#18；前端最新 `origin/main` 已含 #10/#13，open issues 为 #11、#12。
 
 ---
 
@@ -10,7 +10,7 @@
 
 1. 后端 repo 已从 `deepx-*` 更名为 `qaqh-*`；WinUI 前端在独立仓库 `qaqh-winui-app`。
 2. 必读三份文档：`REFACTOR-ROADMAP.md`、`bugfix-1.1-nextdev.md`、`EXPLORE-REFACTOR-1.1.md`。
-3. 本阶段后端 PR #3/#4/#5/#6/#8/#10 及 handoff docs #7/#11/#12 已合并；前端 #1–#10 已合并。后端当前 open issues：#9（config theme/notifications）与 #15（同轮 text↔tool 块重复回放，已排期到刀 1 step 2 / loop 协议改造）；前端当前 open issue：#11（data-root 迁移共享权威契约）。
+3. 本阶段后端 PR #3/#4/#5/#6/#8/#10/#16/#17/#19/#21 及 handoff docs #7/#11/#12/#13/#14 已合并；前端 #1–#10、#13 已合并。后端当前 open issues：#9（config theme/notifications 前端仍待闭环）、#15（同轮 text↔tool 块重复回放，排期刀 1 step 2）、#18（Windows WIP review，当前 `7c3b0b3` 已确认干净合并+编译通过）；后端 open PR：#20（docs T17）。前端 open issues：#11/#12（data-root 迁移共享权威契约消费）。
 4. SMJ 编辑日志已完成；刀 1 已开始分步落地：本轮 step 1 把子代理 worker 从 `Command::new(current_exe)` 子进程改为 daemon 内 Loop actor，主 agent 进程化与逐 actor 隔离仍待后续 step。
 5. 后端所有测试在 Arch Linux 可跑；WinUI 只能在 Windows 编译，前端已于 #7 接入 Windows CI（`cargo check/test -p qaqh-winui`）。
 6. 写代码前必须使用 `git worktree`，不要直接在 `main` 上改。
@@ -69,7 +69,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 
 ## 2. 本阶段已完成的工作
 
-下表中除 `qaqh-winui-app #10` 为 open 外，其余 PR 均已 squash merge。
+下表中除特殊注明外，其余 PR 均已 squash merge。
 
 | PR | Commit | 内容 |
 |---|---|---|
@@ -83,7 +83,12 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 | qaqh-winui-app #7 | `ef396b1` | 新增 Windows CI workflow（`cargo check/test -p qaqh-winui`）。已合并。 |
 | qaqh-winui-app #8 | `3c0c8e8` | tool-mode ComboBox 映射集中化并覆盖 BUG-014 持久化 guard。已合并。 |
 | qaqh-winui-app #9 | `252b522` | 清理 WebView/renderer 残留注释。已合并。 |
-| qaqh-winui-app #10 | `b5a4535` | **open（CI 绿）**：legacy `DeepX` data-root marker 迁移、通知 Insights 资源 DLL 打包补齐、版本锁改读后端仓库。 |
+| qaqh-winui-app #10 | `1799528` | legacy `DeepX` data-root marker 迁移、通知 Insights 资源 DLL 打包补齐、版本锁改读后端仓库。已合并。 |
+| qaqh-winui-app #13 | `1f094eb` | `main.rs` 多 timer 收敛为单一 50ms UI pump（T15）。已合并。 |
+| QAQ-Harness #16 | `4319ed2` | config theme/notifications + `qaqh_types::platform` 权威 data-root 迁移 API（issue #9 / qaqh-winui-app#11 后端部分）。已合并。 |
+| QAQ-Harness #17 | `d0fce1e` | 刀 1 step 2a：主 session loop 改为 daemon in-process actor，移除 `Command::new(current_exe)` / `AgentTransport::Process`。已合并。 |
+| QAQ-Harness #19 | `8623efb` | 刀 1 step 2b：退役 `worker.rs` / `logger.rs` / `qaqh agent` CLI 入口。已合并。 |
+| QAQ-Harness #21 | `fd77452` | 刀 1 step 2c：`qaqh-workspace` 增加 actor 级 workspace/session/cancel 上下文。已合并。 |
 | QAQ-Harness #8 | `eb8ceac` | SMJ 编辑日志基础版：`journal` 模块 + workspace 工具 + CLI；接入 write/edit/apply_patch/delete/copy_range/web_fetch；支持 query/replay/export patches。 |
 | QAQ-Harness #10 | `2dc02d1` | 刀 1 step 1：`LoopChannels` / `Loop::from_channels` 通道化 loop；`AgentRegistry::spawn_subagent` 不再 `Command::new(current_exe)`，改为 daemon 内 Ringing Loop actor + 直接 Hub 发布；actor 私有 ToolManager；新增回归测试。 |
 
@@ -105,6 +110,10 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - Ringing loop 与 OS pipe 解耦；同一 loop 可跑在 in-process channel actor 上
 - `qaqh_workspace::runtime::install_actor_tool_manager` / `clear_actor_tool_manager`
   - in-process actor 临时私有 ToolManager，不污染 daemon `skills.list_tools` 快照
+- `qaqh_types::platform::migrate_legacy_data_root_marker` / `migrate_legacy_data_root_marker_at`
+  - 安全迁移旧 `DeepX` data-root marker；`ensure_data_root` 启动路径自带迁移
+- `qaqh_workspace::set_actor_context` / `clear_actor_context` / `current_workspace` / `current_session` / `set_cancel` / `is_cancel`
+  - thread-local actor 上下文；`set_workspace` / `set_current_session` 在 actor 内写 thread-local
 
 ---
 
@@ -140,20 +149,23 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - 新增 `qaqh-msglp/tests/inprocess_loop.rs` 与 `qaqh-runtime/tests/subagent_inprocess.rs`
 - 状态：已合并（PR #10）
 
-## 2.3 下一步（刀 1 step 2 / 刀 2 剩余）
+## 2.3 下一步（刀 1 step 2 剩余 / 刀 2 / 刀 7）
 
+- 刀 1 step 2：主/session 已全部 in-process（#17）、worker/`qaqh agent` 已退役（#19）、actor workspace/session/cancel 上下文已落地（#21）。
+- 剩余 step 2：
+  - 把 `ACTOR_TOOL_MANAGER` / `RUNTIME_CTX` 也 actor 化，随后移除 `ACTOR_SERIAL`，放开主 agent + N 子代理并发。
+  - `qaqh-subagent` 从 daemon HTTP/SSE 回连改为宿主直连 actor 句柄。
 - 刀 2 剩余：把 timeline / messages / compact / ringing journal 四套持久化收敛为一条事件溯源日志；
   SMJ 编辑日志已作为前置小步落地，可作为同一事件流的 workspace 侧事实日志。
-- 刀 1 step 2：主 agent loop 移入 daemon、`spawn_with` 的 `Command::new(current_exe)` 退役；qaqh-workspace 逐 actor 上下文；`qaqh-subagent` 直连宿主，去掉剩余 HTTP/SSE 回连。
-- 前端团队已向 backend 提交 issue #9（BUG-001 残留：`theme` + `notifications_enabled` 进入 daemon config）。已确认并登记，建议排在刀 1 step 2 之前（纯 config schema，低风险）。
 - 刀 7：统一注入插槽（InjectionBus），对 loop 动刀，收敛 subagent / skills / MCP / 系统 / 用户注入路径。
+- 前端团队 issue #9：后端部分已由 #16 合入；前端仍待消费 theme/notifications 契约。
 
 ## 3. 当前 Bug 状态表
 
 | Bug | 状态 | 说明 |
 |---|---|---|
-| BUG-001 | **部分修复** | 后端 config 写路径已收敛（#6）；WinUI 本地 `ui-preferences.json` / 本地 theme 仍在前端仓库；前端已提交 issue #9 申请 daemon config 扩展 |
-| BUG-002 | **部分修复（#10）** | 子代理不再启动 `qaqh agent --seed` 子进程；主 loop 进 daemon、逐 actor workspace 隔离与 `qaqh-subagent` 直连宿主仍待 step 2 |
+| BUG-001 | **部分修复** | 后端 config 写路径已收敛（#6/#16）；WinUI 本地 `ui-preferences.json` / 本地 theme 仍在前端仓库；前端仍待消费 theme/notifications 契约（issue #9） |
+| BUG-002 | **部分修复（#10/#17/#19/#21）** | 子代理不再启动进程；主 loop 已 in-process、worker 已退役、actor workspace/session/cancel 已上下文隔离；剩余 ToolManager/RuntimeContext actor 化 + `qaqh-subagent` 宿主直连 |
 | BUG-003 | fixed | WinUI vsync/队列/resume generation 修复已在前端仓库 main |
 | BUG-004 | fixed | 前端 #1 移除 viewport 恢复，恢复=贴底；active guard/resume generation 此前已修 |
 | BUG-005 | open | timeline / messages / compact / journal 四套持久化仍并存 |
@@ -162,9 +174,11 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 | BUG-008 | **fixed（后端）** | `Config::update` 单写口 |
 | BUG-009 | **部分修复** | 误导性 Engine 插件文档已清理；实质注入统一待刀 7 |
 | BUG-010 | open | 大文件/crate 碎片化仍待刀 4/5/10 |
-| BUG-011 | **部分修复（#10）** | 子代理进程/三层连接成本已消除；多写、同步持久化、手写 HTTP 仍待刀 2/3 |
+| BUG-011 | **部分修复（#10/#17/#19/#21）** | 子代理进程/三层连接成本已消除；多写、同步持久化、手写 HTTP 仍待刀 2/3 |
 | BUG-012 | fixed | `session.set_tool_mode` 白名单已放行 |
 | BUG-013 | **fixed** | `qaqh_types::tool_mode` 单契约；前端 #6 已消费并移除本地 `TOOL_MODE_VALUES` |
+| BUG-014 | fixed | 前端 tool-mode ComboBox 空态误写；前端 #8 修复 |
+| BUG-015 | open | 同轮 text↔tool 块重复回放（= issue #15），已排期刀 1 step 2 / loop 改造 |
 
 ---
 
@@ -175,24 +189,24 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - ✅ `qaqh-winui-app` 已增加 `qaqh-types` 依赖，消费 `qaqh_types::tool_mode`（#6）
 - ✅ 本地 `TOOL_MODE_VALUES` 已删除/收敛（#6/#8）
 - ✅ Windows CI 已接入（#7）
-- 剩余：跟进 #10 合入，以及 issue #9 前端侧配置迁移（theme/notifications）
+- ✅ 前端 #10 / #13 已合入
+- 剩余：issue #12 消费后端 `migrate_legacy_data_root_marker()` 并删除私有公式副本；issue #9 前端侧配置迁移（theme/notifications）
 
 ### P1：SMJ 编辑日志 ✅ 已合并（#8）
 
 - 基础版已落地：`journal` 工具 + CLI + `write/edit/apply_patch/delete/copy_range/web_fetch` 接入。
 - 后续仅随刀 2 事件日志统一，不再单独排期。
 
-### P1：刀 1 子代理 in-process（step 1 已合并 #10，剩余继续分步）
+### P1：刀 1 子代理 in-process（step 1/2a/2b/2c 已合并，剩余继续）
 
-- 修 BUG-002/011
-- step 1 已落地：
-  - `AgentRegistry::spawn_subagent` 不再创建进程
-  - 子代理 Ringing Loop 在 daemon 线程内运行，事件直发 Hub
-- step 2 待办（风险仍是高）：
-  - `qaqh-workspace` 全局状态改为逐 actor 上下文，放开 `SUBAGENT_ACTOR_SERIAL`
-  - 主 agent loop 移入 daemon，删除 `spawn_with` 的 `Command::new(current_exe)` 路径
+- 已完成：
+  - #10 step 1：子代理不再创建进程
+  - #17 step 2a：主 session loop 改为 daemon in-process actor
+  - #19 step 2b：退役 `worker.rs` / `logger.rs` / `qaqh agent` CLI
+  - #21 step 2c：`qaqh-workspace` actor 级 workspace/session/cancel 上下文
+- step 2 剩余（风险仍高）：
+  - 把 `ACTOR_TOOL_MANAGER` / `RUNTIME_CTX` actor 化，随后移除 `ACTOR_SERIAL` 并发锁
   - `qaqh-subagent` 工具从 daemon HTTP/SSE 回连改为宿主直连 actor 句柄
-  - `crates/qaqh-runtime/src/worker.rs` 随之退役
 
 ### P2：刀 3 传输现代化
 
@@ -228,8 +242,9 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 5. **主历史包含 `f` 提交**：`60b69ba`（apps/web 连接失败横幅、daemon-web.ps1
    防火墙规则）已进入 `origin/main` 历史，是 PR #3 的父提交。接手时不要
    以为它未提交或丢失。
-6. **`AGENT.md` 仍 untracked**：位于主仓库根目录，内容是 codegraph CLI 使用
-   提示；如果不需要，接手者应决定提交或删除。
+6. **`AGENT.md` 已提交**：位于主仓库根目录，内容是 codegraph CLI 使用提示。
+7. **临时 LAN git daemon（应急）**：本机 `~/git/qaqh-backend.git` + `git://60.0.0.32:9418`
+   （`--enable=receive-pack`，无鉴权）。GitHub 恢复后可停用；如有新的 Windows WIP 可先推到此通道。
 7. **`docs/nextdev/bugfix-1.1-nextdev.md` 是档案 + 现状混合**：旧条目保留
    `deepx-*` 路径；新增状态在文末“落地增量”区。不要大改旧记录，追加即可。
 8. **后端 GitHub 无 CI**：后端 PR 均无 checks，合并前必须本地跑测试；前端 #7 起已有 Windows CI。
@@ -357,3 +372,47 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - 前端新增 open issue **#11**：要求 data-root 迁移不要复制后端私有公式，改为共享权威契约（对应本文件 9.3 的联查建议）。
 - 本地前端工作树 `main` 仍停在 `252b522`，落后 `origin/main` 1 个提交；需要 `git pull` 或 `git merge --ff-only origin/main` 同步。
 - 后端本地 `main` 当前领先 `origin/main` 1 个提交（本文档的 handoff 同步提交 `eb31a7b`），尚未 push。
+
+---
+
+## 10. 本轮工程师工作补充（2026-08-18 第五轮）
+
+### 10.1 本轮已完成
+
+- **QAQ-Harness #16**（`4319ed2`）：config theme/notifications + `qaqh_types::platform` 权威 data-root 迁移。已合并。
+- **QAQ-Harness #17**（`d0fce1e`）：刀 1 step 2a，主 session in-process actor，移除 process worker。已合并。
+- **QAQ-Harness #19**（`8623efb`）：刀 1 step 2b，退役 `worker.rs` / `logger.rs` / `qaqh agent` CLI。已合并。
+- **QAQ-Harness #21**（`fd77452`）：刀 1 step 2c，`qaqh-workspace` actor 级 workspace/session/cancel 上下文。已合并。
+- **前端 #10/#13**：data-root marker 迁移、main.rs timer 收敛（T15）已合入前端。
+- **前端 issue #12**：已创建，要求消费后端 `migrate_legacy_data_root_marker()` 并删除私有公式副本。
+
+### 10.2 Windows WIP 分支（issue #18）状态
+
+- Windows 侧分支 `refactor/nextdev-tool-mode-single-contract` 已多次 rebase：
+  - 最新 tip：`7c3b0b3`（基于 `fd77452`，落后 0）
+  - `git merge-tree --write-tree`：**无冲突**
+  - `cargo check --workspace`：**pass**
+- 结论：可以走 PR 评审合入；但 WIP 仍是 70 文件大改动，建议拆成小提交。
+- 当前后端 open PR：#20（docs T17，前端 bug inventory 追加）。
+
+### 10.3 临时 LAN git daemon（应急通道）
+
+- 裸仓库：`~/git/qaqh-backend.git`
+- 地址：`git://60.0.0.32:9418/qaqh-backend.git`
+- 已启用 `receive-pack`（支持 push）
+- 已同步：
+  - `main` = `fd77452`
+  - `refactor/nextdev-tool-mode-single-contract` = `7c3b0b3`
+- 说明：无鉴权、仅限局域网临时使用；GitHub 恢复后可停用。
+
+### 10.4 下一轮工作（按原计划）
+
+1. 继续完成刀 1 Step 2 剩余：
+   - `ACTOR_TOOL_MANAGER` / `RUNTIME_CTX` actor 化
+   - 移除 `ACTOR_SERIAL`，放开主 agent + N 子代理并发
+   - `qaqh-subagent` 宿主直连（去掉 daemon HTTP/SSE 回连）
+2. 完成后开刀 7：InjectionBus / loop 重构。
+3. 穿插：
+   - 前端 issue #11/#12：消费后端 data-root 迁移 API
+   - 后端 issue #9：前端仍待闭环 theme/notifications 契约
+   - 后端 PR #20：docs T17 可 review / 合入
