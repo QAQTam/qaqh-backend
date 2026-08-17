@@ -23,7 +23,7 @@
 use std::ops::Range;
 
 use ropey::Rope;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::file_shared::{atomic_write, content_hash, normalize_newlines, unified_diff};
 use crate::{ToolCallCtx, ToolHandler, ToolManager, ToolPlacement, ToolResult, ToolRisk};
@@ -44,7 +44,8 @@ const CONTENT_CAP: usize = 64 * 1024;
 /// 读路径（空 hunks）预算，与 read 对齐。
 const READ_MAX_LINES: usize = 400;
 const READ_MAX_CHARS: usize = 24_000;
-const READ_MAX_CONTEXT: usize = 100;/// 失败候选列表条数上限。
+const READ_MAX_CONTEXT: usize = 100;
+/// 失败候选列表条数上限。
 const CANDIDATE_MAX: usize = 3;
 /// 候选 snippet 展示长度（字符）。
 const SNIPPET_MAX: usize = 120;
@@ -71,7 +72,9 @@ enum Hunk {
     },
     /// 整文件覆盖（等价 write 的 content 语义）：不要求 `old`，恒成功；
     /// **独占**——必须单独调用，与其它 hunk 混用报 OVERWRITE_EXCLUSIVE。
-    Overwrite { new: String },
+    Overwrite {
+        new: String,
+    },
     InsertAfter {
         anchor: String,
         new: String,
@@ -82,8 +85,12 @@ enum Hunk {
         new: String,
         hint_line: Option<usize>,
     },
-    PrependFile { new: String },
-    AppendFile { new: String },
+    PrependFile {
+        new: String,
+    },
+    AppendFile {
+        new: String,
+    },
     /// 行内替换（sed `s///` 语义）：anchor 定位行窗口后，**仅在窗口内**做子串/
     /// 正则替换——不跨行、不改行结构。`replace_all=false` 只替换第一处（按行序）；
     /// `regex=true` 时 `old` 为正则（regex crate 语法，大小写敏感）。
@@ -162,7 +169,9 @@ impl Hunk {
                     .and_then(|x| x.as_str())
                     .ok_or_else(|| "overwrite hunk requires 'new'".to_string())?;
                 // 整文件语义：忽略可能误传的 old/context（write 语义不看旧内容）。
-                Ok(Hunk::Overwrite { new: norm(new, notes) })
+                Ok(Hunk::Overwrite {
+                    new: norm(new, notes),
+                })
             }
             "insert_after" | "insert_before" => {
                 let anchor = v
@@ -420,7 +429,8 @@ fn context_filter(
     after: &[&str],
 ) -> Vec<usize> {
     let fl = &view.lines;
-    cands.iter()
+    cands
+        .iter()
         .copied()
         .filter(|&s| {
             let b_ok = before.is_empty()
@@ -516,12 +526,7 @@ fn no_match_detail(probe: &Tier3Probe) -> String {
 /// 权重：old 0.6，context_before 0.2，context_after 0.2；缺失的 context
 /// 不占权重（总权重归一化，score 恒在 0~1）。
 /// 窗口行数容差：pattern 行数 −2..=+2（≥1）。
-fn tier3_probe(
-    view: &FileView,
-    pat: &[&str],
-    before: &[&str],
-    after: &[&str],
-) -> Tier3Probe {
+fn tier3_probe(view: &FileView, pat: &[&str], before: &[&str], after: &[&str]) -> Tier3Probe {
     let fl = &view.lines;
     let p = pat.len();
     if p == 0 || p > fl.len() + 2 {
@@ -587,7 +592,12 @@ fn tier3_probe(
 }
 
 /// Tier3 全窗口候选（不判 margin），Top3。
-fn tier3_candidates(view: &FileView, pat: &[&str], before: &[&str], after: &[&str]) -> Vec<Candidate> {
+fn tier3_candidates(
+    view: &FileView,
+    pat: &[&str],
+    before: &[&str],
+    after: &[&str],
+) -> Vec<Candidate> {
     let fl = &view.lines;
     let p = pat.len();
     if p == 0 || p > fl.len() + 2 {
@@ -676,7 +686,14 @@ fn locate_anchor(view: &FileView, anchor: &str) -> Result<Located, LocateError> 
     }
     let probe = tier3_probe(view, &pat, &[], &[]);
     if let Some((s, w, score)) = probe.hit {
-        return Ok(located(view, s, w, 3, score, &format!("similarity {score:.2}")));
+        return Ok(located(
+            view,
+            s,
+            w,
+            3,
+            score,
+            &format!("similarity {score:.2}"),
+        ));
     }
     Err(LocateError::NoMatch {
         candidates: tier3_candidates(view, &pat, &[], &[]),
@@ -772,7 +789,14 @@ fn locate_replace(
         }
         let filtered = context_filter(view, &cands, pat.len(), &b, &a);
         if filtered.len() == 1 {
-            return Ok(located(view, filtered[0], pat.len(), 1, 1.0, "exact (context)"));
+            return Ok(located(
+                view,
+                filtered[0],
+                pat.len(),
+                1,
+                1.0,
+                "exact (context)",
+            ));
         }
         return Err(LocateError::Ambiguous {
             candidates: make_candidates(view, &cands, pat.len(), 1, 1.0, &pat),
@@ -1035,10 +1059,7 @@ fn locate_with_hint(view: &FileView, hunk: &Hunk) -> Option<Result<Located, Loca
             }
         }
         Hunk::ReplaceInline {
-            anchor,
-            old,
-            regex,
-            ..
+            anchor, old, regex, ..
         } => {
             let pat = pattern_lines(anchor);
             let cands = tier1_in_window(view, &pat, lo, hi);
@@ -1304,7 +1325,10 @@ fn resolve(view: &FileView, hunk: &Hunk, loc: &Located) -> ResolvedOp {
             let window = &view.content[start..end];
             let replaced = inline_replace(window, old, new, *replace_all, *regex)
                 .expect("locate_hunk verified the window contains a match; regex already compiled");
-            ResolvedOp::Replace { range: start..end, new: replaced }
+            ResolvedOp::Replace {
+                range: start..end,
+                new: replaced,
+            }
         }
     }
 }
@@ -1471,8 +1495,8 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
                 // replace_all 一个 hunk 可产出多个位置；报告仍按 hunk 一条，
                 // 位置/分数取首个，note 标注命中数量。
                 let loc = &locs[0];
-                let line_range =
-                    (loc.win_lines > 0).then(|| (loc.start_line + 1, loc.start_line + loc.win_lines));
+                let line_range = (loc.win_lines > 0)
+                    .then(|| (loc.start_line + 1, loc.start_line + loc.win_lines));
                 let note = if locs.len() > 1 {
                     format!("{} location(s) replaced", locs.len())
                 } else {
@@ -1643,8 +1667,6 @@ fn run_edit(content: &str, hunks: &[Hunk], notes: Vec<String>, mode: Mode) -> Fi
 // 渲染
 // ─────────────────────────────────────────────────────────────
 
-
-
 fn render_text(path: &str, outcome: &FileOutcome) -> String {
     let mut out = String::new();
     match (&outcome.edited, &outcome.code) {
@@ -1733,10 +1755,7 @@ fn hunk_ok_line(r: &HunkReport) -> String {
         .map(|s| format!(" score {s:.2}"))
         .unwrap_or_default();
     let note = r.note.as_deref().unwrap_or("");
-    format!(
-        "hunk{} {}: {loc} {tier}{score} {note}",
-        r.index, r.kind
-    )
+    format!("hunk{} {}: {loc} {tier}{score} {note}", r.index, r.kind)
 }
 
 /// 单个失败 hunk 的详细渲染：错误码 + 为什么失败 + 候选与 -/+ 对照 + 下一步。
@@ -1781,11 +1800,21 @@ fn truncate_content(content: &str) -> String {
 fn hint_for(code: &str) -> Option<&'static str> {
     match code {
         "NO_MATCH" => Some("Refine 'old'/context from the candidates, or re-locate with rg."),
-        "AMBIGUOUS_MATCH" => Some("Add context_before/context_after to disambiguate the repeated occurrence."),
-        "OVERLAPPING_HUNKS" => Some("Split or merge hunks so their resolved ranges do not overlap."),
-        "UNDERSPECIFIED" => Some("Provide context, or use insert_after / insert_before / prepend_file / append_file."),
-        "OVERWRITE_EXCLUSIVE" => Some("overwrite replaces the whole file — send it as the only hunk in the call."),
-        "HASH_MISMATCH" => Some("Re-read the file with read and retry with the fresh hash (or omit expected_hash to edit without verification)."),
+        "AMBIGUOUS_MATCH" => {
+            Some("Add context_before/context_after to disambiguate the repeated occurrence.")
+        }
+        "OVERLAPPING_HUNKS" => {
+            Some("Split or merge hunks so their resolved ranges do not overlap.")
+        }
+        "UNDERSPECIFIED" => Some(
+            "Provide context, or use insert_after / insert_before / prepend_file / append_file.",
+        ),
+        "OVERWRITE_EXCLUSIVE" => {
+            Some("overwrite replaces the whole file — send it as the only hunk in the call.")
+        }
+        "HASH_MISMATCH" => Some(
+            "Re-read the file with read and retry with the fresh hash (or omit expected_hash to edit without verification).",
+        ),
         "INVALID_REGEX" => Some("replace_inline: fix the regex (regex crate syntax) and retry."),
         _ => None,
     }
@@ -1895,7 +1924,8 @@ fn read_anchored(
                 "NO_MATCH",
                 render_read_candidates(raw_path, "NO_MATCH", &detail, &candidates),
                 true,
-                Some("Refine the anchor from the candidates, or locate with grep first.").map(str::to_string),
+                Some("Refine the anchor from the candidates, or locate with grep first.")
+                    .map(str::to_string),
                 json!({
                     "timeis": crate::now_utc8(),
                     "status": "error",
@@ -2009,8 +2039,14 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
     };
     let fail = &read_fail;
 
-    let start = args.get("start_line").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let end = args.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let start = args
+        .get("start_line")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let end = args
+        .get("end_line")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
     let anchor = args
         .get("anchor")
         .and_then(|v| v.as_str())
@@ -2084,7 +2120,9 @@ fn read_path(path: &str, raw_path: &str, args: &serde_json::Value) -> ToolResult
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return fail(
                 "FILE_NOT_FOUND",
-                format!("edit: {raw_path}: file not found (read mode; creation requires explicit hunks)"),
+                format!(
+                    "edit: {raw_path}: file not found (read mode; creation requires explicit hunks)"
+                ),
                 false,
                 Some("Provide prepend_file / append_file / overwrite hunks to create the file"),
             );
@@ -2175,7 +2213,11 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
         )
     };
 
-    let raw_path = match args.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    let raw_path = match args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(p) => p,
         None => {
             return fail("PARSE_ERROR", "edit: missing 'path'".into(), false, None);
@@ -2194,7 +2236,11 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
     // （对齐 read 结构，hash 可直接作 expected_hash 续接编辑，闭环在同一
     // 工具内完成）。文件必须存在——创建需要显式 hunks，防"读"误当"建"。
     // 不写盘、不 record、无 diff；权限层按空 hunks 动态分类为 Read（permission.rs）。
-    if args.get("hunks").and_then(|v| v.as_array()).is_none_or(|a| a.is_empty()) {
+    if args
+        .get("hunks")
+        .and_then(|v| v.as_array())
+        .is_none_or(|a| a.is_empty())
+    {
         // 读路径：整文件 / 行号范围（grep 直连）/ 锚定读（复用定位引擎）。
         // 不写盘、不 record、无 diff；权限层按空 hunks 动态分类为 Read（permission.rs）。
         return read_path(&path, raw_path, args);
@@ -2223,18 +2269,17 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
         match Hunk::parse(h, &mut notes) {
             Ok(hunk) => parsed.push(hunk),
             Err(e) => {
-                return fail(
-                    "PARSE_ERROR",
-                    format!("edit: hunks[{i}]: {e}"),
-                    false,
-                    None,
-                );
+                return fail("PARSE_ERROR", format!("edit: hunks[{i}]: {e}"), false, None);
             }
         }
     }
 
     // ── 应用语义（参数校验先于任何 IO）──
-    let mode = match args.get("mode").and_then(|v| v.as_str()).unwrap_or("strict") {
+    let mode = match args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("strict")
+    {
         "strict" => Mode::Strict,
         "partial" => Mode::Partial,
         other => {
@@ -2259,7 +2304,9 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return fail(
                 "FILE_NOT_FOUND",
-                format!("edit: {raw_path}: file not found (expected_hash provided but nothing to verify against)"),
+                format!(
+                    "edit: {raw_path}: file not found (expected_hash provided but nothing to verify against)"
+                ),
                 false,
                 None,
             );
@@ -2344,13 +2391,7 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
             } else {
                 hint_for(code).map(str::to_string)
             };
-            ToolResult::error_data(
-                code,
-                text,
-                true,
-                hint,
-                data,
-            )
+            ToolResult::error_data(code, text, true, hint, data)
         }
         Some(ref edited) => {
             if dry_run {
@@ -2367,7 +2408,11 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
                 let text = render_text(raw_path, &outcome);
                 let applied = outcome.reports.iter().filter(|r| r.status == "ok").count();
                 let total = outcome.reports.len();
-                let status = if outcome.code.is_some() { "partial" } else { "ok" };
+                let status = if outcome.code.is_some() {
+                    "partial"
+                } else {
+                    "ok"
+                };
                 let mut data = json!({
                     "timeis": crate::now_utc8(),
                     "status": status,
@@ -2396,7 +2441,9 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
             if let Err(e) = atomic_write(&path, &write_content) {
                 return fail(
                     "WRITE_FAILED",
-                    format!("edit: atomic write failed for {raw_path}: {e} — the file on disk was NOT modified"),
+                    format!(
+                        "edit: atomic write failed for {raw_path}: {e} — the file on disk was NOT modified"
+                    ),
                     false,
                     None,
                 );
@@ -2422,7 +2469,11 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
             let text = render_text(raw_path, &outcome);
             let applied = outcome.reports.iter().filter(|r| r.status == "ok").count();
             let total = outcome.reports.len();
-            let status = if outcome.code.is_some() { "partial" } else { "ok" };
+            let status = if outcome.code.is_some() {
+                "partial"
+            } else {
+                "ok"
+            };
             let mut data = json!({
                 "timeis": crate::now_utc8(),
                 "status": status,
@@ -2444,8 +2495,6 @@ pub(super) fn exec_edit(args: &serde_json::Value) -> ToolResult {
         }
     }
 }
-
-
 
 fn hunk_report_json(r: &HunkReport) -> Value {
     let mut v = json!({
@@ -2480,16 +2529,18 @@ fn hunk_report_json(r: &HunkReport) -> Value {
         v["detail"] = json!(d);
     }
     if let Some(cands) = &r.candidates {
-        v["candidates"] = json!(cands
-            .iter()
-            .map(|c| json!({
-                "line_range": [c.line_range.0, c.line_range.1],
-                "snippet": c.snippet,
-                "score": c.score,
-                "tier": c.tier,
-                "diff": c.diff,
-            }))
-            .collect::<Vec<_>>());
+        v["candidates"] = json!(
+            cands
+                .iter()
+                .map(|c| json!({
+                    "line_range": [c.line_range.0, c.line_range.1],
+                    "snippet": c.snippet,
+                    "score": c.score,
+                    "tier": c.tier,
+                    "diff": c.diff,
+                }))
+                .collect::<Vec<_>>()
+        );
     }
     v
 }
@@ -2703,10 +2754,7 @@ mod tests {
     // 0c. replace_all：与其它 hunk 共存（区间互不重叠）
     #[test]
     fn replace_all_coexists_with_other_hunks() {
-        let out = edit(
-            "a\nx\nb\nx\nc\n",
-            &[rp_all("x", "X"), rp("b", "B")],
-        );
+        let out = edit("a\nx\nb\nx\nc\n", &[rp_all("x", "X"), rp("b", "B")]);
         assert_eq!(out.edited.as_deref(), Some("a\nX\nB\nX\nc\n"));
     }
 
@@ -2768,7 +2816,9 @@ mod tests {
         );
         assert_eq!(
             out.edited.as_deref(),
-            Some("fn a() {\n    return Ok(());\n}\nfn b() {\n    return Err(());\n}\nfn c() {\n    return Ok(());\n}\n")
+            Some(
+                "fn a() {\n    return Ok(());\n}\nfn b() {\n    return Err(());\n}\nfn c() {\n    return Ok(());\n}\n"
+            )
         );
         // 行带缩进 → 精确不命中，Tier2 形状命中（3 处）→ context_before 消歧
         assert_eq!(out.reports[0].tier, Some(2));
@@ -2809,9 +2859,19 @@ mod tests {
     // 8. 空文件 PrependFile / AppendFile
     #[test]
     fn empty_file_prepend_and_append() {
-        let out = edit("", &[Hunk::PrependFile { new: "hello\n".into() }]);
+        let out = edit(
+            "",
+            &[Hunk::PrependFile {
+                new: "hello\n".into(),
+            }],
+        );
         assert_eq!(out.edited.as_deref(), Some("hello\n"));
-        let out = edit("", &[Hunk::AppendFile { new: "world\n".into() }]);
+        let out = edit(
+            "",
+            &[Hunk::AppendFile {
+                new: "world\n".into(),
+            }],
+        );
         assert_eq!(out.edited.as_deref(), Some("world\n"));
     }
 
@@ -2849,10 +2909,7 @@ mod tests {
     // 纯插入：context_before 定位
     #[test]
     fn pure_insert_with_context_before() {
-        let out = edit(
-            "a\nb\nc\n",
-            &[rp_ctx("", "X\n", "b", "")],
-        );
+        let out = edit("a\nb\nc\n", &[rp_ctx("", "X\n", "b", "")]);
         assert_eq!(out.edited.as_deref(), Some("a\nb\nX\nc\n"));
     }
 
@@ -2952,7 +3009,12 @@ mod tests {
         }));
         assert!(!result.is_success());
         assert_eq!(result.data["code"], "HASH_MISMATCH");
-        assert!(result.data["current_content"].as_str().unwrap().contains("a\nb\n"));
+        assert!(
+            result.data["current_content"]
+                .as_str()
+                .unwrap()
+                .contains("a\nb\n")
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
     }
 
@@ -3024,10 +3086,7 @@ mod tests {
     // 18. 多 hunk 失败时报告全部失败详情
     #[test]
     fn all_hunk_failures_reported_at_once() {
-        let out = edit(
-            "a\nb\nc\n",
-            &[rp("a", "A"), rp("zzz", "Z"), rp("", "P")],
-        );
+        let out = edit("a\nb\nc\n", &[rp("a", "A"), rp("zzz", "Z"), rp("", "P")]);
         assert!(out.edited.is_none());
         assert_eq!(out.reports.len(), 3);
         assert_eq!(out.reports[0].status, "ok");
@@ -3043,8 +3102,6 @@ mod tests {
         let err = Hunk::parse(&json!({"kind": "magic", "new": "x"}), &mut notes).unwrap_err();
         assert!(err.contains("unknown hunk kind"));
     }
-
-
 
     // 20. 三 hunk 倒序应用（文件头/中/尾）
     #[test]
@@ -3079,10 +3136,7 @@ mod tests {
     // 21. partial 模式：成功 hunk 应用、失败 hunk 只报告
     #[test]
     fn partial_mode_applies_successful_hunks() {
-        let out = edit_partial(
-            "a\nb\nc\n",
-            &[rp("a", "A"), rp("zzz", "Z"), rp("c", "C")],
-        );
+        let out = edit_partial("a\nb\nc\n", &[rp("a", "A"), rp("zzz", "Z"), rp("c", "C")]);
         // 成功两处已应用，失败一处报错；code 为第一个失败码
         assert_eq!(out.edited.as_deref(), Some("A\nb\nC\n"));
         assert_eq!(out.reports.len(), 3);
@@ -3094,7 +3148,10 @@ mod tests {
         // 渲染文本含续接指引
         let text = render_text("f.txt", &out);
         assert!(text.contains("[PARTIAL]"), "text: {text}");
-        assert!(text.contains("re-send ONLY the failed hunks"), "text: {text}");
+        assert!(
+            text.contains("re-send ONLY the failed hunks"),
+            "text: {text}"
+        );
     }
 
     // 22. partial 模式：全部失败 → 零改动（不写空结果）
@@ -3127,18 +3184,27 @@ mod tests {
     // 24. NO_MATCH 诊断：候选带 -/+ 对照
     #[test]
     fn no_match_candidates_carry_pattern_diff() {
-        let out = edit("let alpha_value = 1;\nlet alpho_value = 1;\n", &[rp("let alphu_value = 1;", "let x = 1;")]);
+        let out = edit(
+            "let alpha_value = 1;\nlet alpho_value = 1;\n",
+            &[rp("let alphu_value = 1;", "let x = 1;")],
+        );
         let cands = out.reports[0].candidates.as_ref().unwrap();
         assert!(!cands.is_empty());
         let diff = &cands[0].diff;
         assert!(diff.contains("- let alphu_value = 1;"), "diff: {diff}");
-        assert!(diff.contains("+ let alpha_value = 1;") || diff.contains("+ let alpho_value = 1;"), "diff: {diff}");
+        assert!(
+            diff.contains("+ let alpha_value = 1;") || diff.contains("+ let alpho_value = 1;"),
+            "diff: {diff}"
+        );
     }
 
     // 25. NO_MATCH 诊断：margin 不足时说明原因
     #[test]
     fn no_match_detail_explains_margin_shortfall() {
-        let out = edit("let alpha_value = 1;\nlet alpho_value = 1;\n", &[rp("let alphu_value = 1;", "let x = 1;")]);
+        let out = edit(
+            "let alpha_value = 1;\nlet alpho_value = 1;\n",
+            &[rp("let alphu_value = 1;", "let x = 1;")],
+        );
         let detail = out.reports[0].detail.as_deref().unwrap_or("");
         assert!(detail.contains("margin"), "detail: {detail}");
         assert!(detail.contains("context_before"), "detail: {detail}");
@@ -3149,7 +3215,10 @@ mod tests {
     fn no_match_detail_explains_total_mismatch() {
         let out = edit("a\nb\nc\n", &[rp("zzzz", "x")]);
         let detail = out.reports[0].detail.as_deref().unwrap_or("");
-        assert!(detail.contains("no window had any similarity"), "detail: {detail}");
+        assert!(
+            detail.contains("no window had any similarity"),
+            "detail: {detail}"
+        );
     }
 
     // 27. partial 执行链：partial 落盘后 new_hash 续接只重发失败 hunk
@@ -3178,7 +3247,11 @@ mod tests {
             "expected_hash": new_hash,
             "hunks": [{"kind": "replace", "old": "zzz", "new": "Z"}],
         }));
-        assert!(!r2.is_success(), "expected NO_MATCH, model text: {}", r2.model.text);
+        assert!(
+            !r2.is_success(),
+            "expected NO_MATCH, model text: {}",
+            r2.model.text
+        );
         // 文件未被第二次调用改动
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\nb\nC\n");
         // 修正后成功
@@ -3289,7 +3362,12 @@ mod tests {
     // O1. 整文件覆盖：new 全文替换，Tier1 恒命中
     #[test]
     fn overwrite_replaces_whole_file() {
-        let out = edit("a\nb\nc\n", &[Hunk::Overwrite { new: "x\ny\n".into() }]);
+        let out = edit(
+            "a\nb\nc\n",
+            &[Hunk::Overwrite {
+                new: "x\ny\n".into(),
+            }],
+        );
         assert_eq!(out.edited.as_deref(), Some("x\ny\n"));
         assert_eq!(out.reports[0].tier, Some(1));
         assert_eq!(out.reports[0].kind, "overwrite");
@@ -3337,15 +3415,21 @@ mod tests {
             &json!({"kind": "overwrite", "new": "x\ny\n", "old": "irrelevant"}),
             &mut notes,
         );
-        assert_eq!(h, Ok(Hunk::Overwrite { new: "x\ny\n".into() }));
+        assert_eq!(
+            h,
+            Ok(Hunk::Overwrite {
+                new: "x\ny\n".into()
+            })
+        );
         // 缺 new → 报错
         let h2 = Hunk::parse(&json!({"kind": "overwrite"}), &mut notes);
         assert!(h2.is_err());
         // unknown kind 消息包含 overwrite
         let h3 = Hunk::parse(&json!({"kind": "nope", "new": "x"}), &mut notes);
-        assert!(h3
-            .unwrap_err()
-            .contains("expected replace / overwrite / insert_after"));
+        assert!(
+            h3.unwrap_err()
+                .contains("expected replace / overwrite / insert_after")
+        );
     }
 
     // O6. exec 层：overwrite 创建新文件
@@ -3615,7 +3699,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         let line = "y".repeat(100);
-        let content = (0..300).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+        let content = (0..300)
+            .map(|_| line.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(&path, content).unwrap();
         let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
@@ -3695,11 +3782,13 @@ mod tests {
         assert_eq!(result.data["code"], "ANCHOR_AMBIGUOUS");
         let cands = result.data["candidates"].as_array().unwrap();
         assert!(!cands.is_empty());
-        assert!(result
-            .error
-            .as_ref()
-            .and_then(|e| e.hint.as_deref())
-            .is_some_and(|h| h.contains("context_before")));
+        assert!(
+            result
+                .error
+                .as_ref()
+                .and_then(|e| e.hint.as_deref())
+                .is_some_and(|h| h.contains("context_before"))
+        );
     }
 
     // R15. 未命中 → NO_MATCH + 候选
@@ -3802,7 +3891,11 @@ mod tests {
     fn replace_inline_replaces_first_occurrence_in_window() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
-        std::fs::write(&path, "fn main() {\n    let x = input.clone();\n    input\n}\n").unwrap();
+        std::fs::write(
+            &path,
+            "fn main() {\n    let x = input.clone();\n    input\n}\n",
+        )
+        .unwrap();
         let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{
@@ -3824,7 +3917,11 @@ mod tests {
     fn replace_inline_replace_all_in_window() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
-        std::fs::write(&path, "fn f() {\n    let a = alpha + alpha;\n    alpha\n}\n").unwrap();
+        std::fs::write(
+            &path,
+            "fn f() {\n    let a = alpha + alpha;\n    alpha\n}\n",
+        )
+        .unwrap();
         let result = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{
@@ -3860,7 +3957,10 @@ mod tests {
         }));
         assert!(result.is_success(), "model text: {}", result.model.text);
         let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, format!("a\nstart {} end\nb\n", "ZZZ".to_string() + &"y".repeat(197)));
+        assert_eq!(
+            content,
+            format!("a\nstart {} end\nb\n", "ZZZ".to_string() + &"y".repeat(197))
+        );
     }
 
     // R22. 窗口内无 old → NO_MATCH
@@ -3881,7 +3981,10 @@ mod tests {
         assert!(!result.is_success());
         assert_eq!(result.data["code"], "NO_MATCH");
         // 事务：文件未被修改
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn foo() {\n    bar()\n}\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn foo() {\n    bar()\n}\n"
+        );
     }
 
     // R23. regex 替换 + 捕获组引用
@@ -3993,7 +4096,10 @@ mod tests {
             }],
         }));
         assert!(edit.is_success(), "model text: {}", edit.model.text);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn f() {\n    let x = payload;\n}\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn f() {\n    let x = payload;\n}\n"
+        );
         assert!(edit.data.get("new_hash").is_some());
     }
 
@@ -4058,7 +4164,8 @@ mod tests {
     fn hint_line_miss_keeps_original_error() {
         // hint 偏太远（窗口内无 x）→ 保留原 Ambiguous（不误改）。
         // x 位于 L2 与 L25；hint=13 的窗口 [3,23) 不含任何 x。
-        let content = "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nt\nu\nv\nw\nx\ny\n";
+        let content =
+            "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nt\nu\nv\nw\nx\ny\n";
         let out = edit(content, &[rp_hint("x", "X", 13)]);
         assert!(out.edited.is_none());
         assert_eq!(err_code(&out), "AMBIGUOUS_MATCH");
@@ -4100,7 +4207,10 @@ mod tests {
         let out = edit(content, &[rp_hint("x", "X", 0)]);
         assert!(out.edited.is_some());
         // 替换的是 0-based 1（L2）的 x。
-        assert_eq!(out.edited.as_deref(), Some(content.replacen("x", "X", 1).as_str()));
+        assert_eq!(
+            out.edited.as_deref(),
+            Some(content.replacen("x", "X", 1).as_str())
+        );
         assert_eq!(out.reports[0].line_range, Some((2, 2)));
         assert_eq!(out.reports[0].used_hint, Some(1));
     }
@@ -4132,11 +4242,7 @@ mod tests {
         // 第一个 → 消歧成功，used_hint 回传归一化后的 1。
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("h0.txt");
-        std::fs::write(
-            &path,
-            "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\nx\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\nx\n").unwrap();
         let r = exec_edit(&json!({
             "path": path.to_string_lossy(),
             "hunks": [{"kind": "replace", "old": "x", "new": "X", "hint_line": 0}],

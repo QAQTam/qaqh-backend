@@ -38,9 +38,16 @@ fn main() {
         eprintln!("qaqh-tui: --start and --resume are mutually exclusive");
         std::process::exit(2);
     }
-    let mode = if start { StartMode::Start } else { StartMode::Resume };
+    let mode = if start {
+        StartMode::Start
+    } else {
+        StartMode::Resume
+    };
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("qaqh-tui: tokio runtime failed: {error}");

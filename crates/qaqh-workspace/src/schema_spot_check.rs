@@ -73,7 +73,10 @@ mod schema_spot_check {
 
         // edit：描述不得残留历史版本号/旧名（schema 更新不及时的回归保护）
         let edit_desc = by_name("edit").function.description.as_str();
-        assert!(!edit_desc.contains("v2"), "edit description must not mention v2");
+        assert!(
+            !edit_desc.contains("v2"),
+            "edit description must not mention v2"
+        );
         assert!(
             !edit_desc.contains("edit_file_v2"),
             "edit description must not mention legacy name"

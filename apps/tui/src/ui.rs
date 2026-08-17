@@ -43,7 +43,11 @@ fn draw_select(frame: &mut Frame, app: &mut App) {
         " sessions ({} ) — ↑/↓ or j/k · Enter open · Esc / Ctrl+C quit",
         app.items.len()
     ))
-    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(header, chunks[0]);
 
     let items: Vec<ListItem> = app
@@ -62,7 +66,10 @@ fn draw_select(frame: &mut Frame, app: &mut App) {
                 "{marker} {seed:<10} {mode:<12} {turn:>3}t  {summary}",
                 turn = item.turn_count
             );
-            ListItem::new(TLine::from(Span::styled(text, list_item_style(item.tool_mode.as_str()))))
+            ListItem::new(TLine::from(Span::styled(
+                text,
+                list_item_style(item.tool_mode.as_str()),
+            )))
         })
         .collect();
 
@@ -116,11 +123,7 @@ fn draw_chat(frame: &mut Frame, app: &mut App) {
     let total = wrapped.len();
     app.scroll = app.scroll.min(total.saturating_sub(view_height));
     let start = total.saturating_sub(view_height + app.scroll);
-    let visible: Vec<TLine> = wrapped
-        .into_iter()
-        .skip(start)
-        .take(view_height)
-        .collect();
+    let visible: Vec<TLine> = wrapped.into_iter().skip(start).take(view_height).collect();
 
     let transcript = Paragraph::new(visible)
         .block(
@@ -144,10 +147,7 @@ fn draw_chat(frame: &mut Frame, app: &mut App) {
     // ── Footer: help + notice ─────────────────────────────────────────
     let help = " Enter send · Esc clear/quit · Ctrl+C cancel/quit · ↑↓ scroll · End=bottom ";
     let notice = if app.notice.is_empty() {
-        format!(
-            "{help} │ {} rows",
-            app.transcript.lines.len()
-        )
+        format!("{help} │ {} rows", app.transcript.lines.len())
     } else {
         format!("{help} │ {}", app.notice)
     };
@@ -157,7 +157,9 @@ fn draw_chat(frame: &mut Frame, app: &mut App) {
 
 fn role_style(role: Role) -> Style {
     match role {
-        Role::User => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        Role::User => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
         Role::Assistant => Style::default().fg(Color::White),
         Role::Tool => Style::default().fg(Color::DarkGray),
         Role::Notice => Style::default().fg(Color::Yellow),
@@ -195,7 +197,9 @@ fn wrap_lines(lines: &[crate::transcript::Line], width: usize) -> Vec<TLine<'sta
 fn input_spans(text: &str, cursor: usize) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = vec![Span::styled(
         "❯ ",
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
     )];
     let chars: Vec<char> = text.chars().collect();
     let at = cursor.min(chars.len());

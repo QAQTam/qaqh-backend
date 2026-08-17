@@ -72,9 +72,7 @@ impl Args {
             }
             let value = iter
                 .next()
-                .ok_or_else(|| {
-                    qaqh_update::UpdateError(format!("missing value for {key}"))
-                })?
+                .ok_or_else(|| qaqh_update::UpdateError(format!("missing value for {key}")))?
                 .clone();
             pairs.push((key[2..].to_string(), value));
         }
@@ -175,9 +173,7 @@ fn update_catalog(
 
     // 合并 components（目标构建的组件信息推进 catalog）。
     for (name, component) in &delta.components {
-        catalog
-            .components
-            .insert(name.clone(), component.clone());
+        catalog.components.insert(name.clone(), component.clone());
     }
 
     // 构造 artifact 条目（对齐 make-update-source.ps1 语义）。
@@ -202,7 +198,7 @@ fn update_catalog(
         Some(other) => {
             return Err(qaqh_update::UpdateError(format!(
                 "invalid --restart-policy '{other}'"
-            )))
+            )));
         }
         None => match kind {
             ArtifactKind::Backend => RestartPolicy::Daemon,
@@ -228,7 +224,10 @@ fn update_catalog(
         requires,
         restart_policy: policy,
         payload: ArtifactPayload {
-            path: format!("bundles/{}", zip_path.unwrap().file_name().unwrap().to_string_lossy()),
+            path: format!(
+                "bundles/{}",
+                zip_path.unwrap().file_name().unwrap().to_string_lossy()
+            ),
             size,
             sha256,
         },
@@ -248,7 +247,10 @@ fn cmd_baseline_publish(raw: &[String]) -> Result<()> {
     let out_root = PathBuf::from(args.require("out")?);
 
     let manifest = read_manifest_file(&bundle_root.join("bundle.json"))?;
-    let destination = out_root.join("baselines").join(&version).join("manifest.json");
+    let destination = out_root
+        .join("baselines")
+        .join(&version)
+        .join("manifest.json");
     fs::create_dir_all(destination.parent().unwrap())?;
     fs::write(&destination, serde_json::to_vec_pretty(&manifest)?)?;
     println!(
@@ -263,9 +265,8 @@ fn cmd_baseline_publish(raw: &[String]) -> Result<()> {
 // ── helpers ──────────────────────────────────────────────
 
 fn read_manifest_file(path: &Path) -> Result<BundleManifest> {
-    let bytes = fs::read(path).map_err(|error| {
-        qaqh_update::UpdateError(format!("read {}: {error}", path.display()))
-    })?;
+    let bytes = fs::read(path)
+        .map_err(|error| qaqh_update::UpdateError(format!("read {}: {error}", path.display())))?;
     parse_bundle_manifest(&bytes)
 }
 
@@ -303,15 +304,11 @@ fn file_digest(path: &Path) -> Result<(u64, String)> {
 /// 递归压缩目录到 zip（bundle.json 在 zip 根，files/ 保持相对布局）。
 fn zip_dir(src: &Path, destination: &Path) -> Result<()> {
     let file = fs::File::create(destination).map_err(|error| {
-        qaqh_update::UpdateError(format!(
-            "create zip '{}': {error}",
-            destination.display()
-        ))
+        qaqh_update::UpdateError(format!("create zip '{}': {error}", destination.display()))
     })?;
     let mut archive = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default().compression_method(
-        zip::CompressionMethod::Deflated,
-    );
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
     add_dir_to_zip(&mut archive, src, "", &options, destination)?;
     archive
         .finish()

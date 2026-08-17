@@ -446,10 +446,7 @@ mod tests {
     fn strip_prompt_strips_trailing_prompt() {
         assert_eq!(strip_prompt("out\n"), "out");
         assert_eq!(strip_prompt("out"), "out");
-        assert_eq!(
-            strip_prompt(&format!("out\n{SHELL_PROMPT}")),
-            "out"
-        );
+        assert_eq!(strip_prompt(&format!("out\n{SHELL_PROMPT}")), "out");
     }
 
     #[test]
@@ -479,7 +476,10 @@ mod tests {
             incomplete: false,
             exit_code: Some(2),
         };
-        assert_eq!(render_captured(&out, DEFAULT_MAX_OUTPUT_CHARS), "boom\n[exit code: 2]");
+        assert_eq!(
+            render_captured(&out, DEFAULT_MAX_OUTPUT_CHARS),
+            "boom\n[exit code: 2]"
+        );
     }
 
     #[test]
@@ -527,7 +527,11 @@ mod tests {
         let msg = format!(
             "Your command timed out after {secs} seconds or experienced an OOM error. Below is partial output:\n{rendered}\n{SHELL_RESET_MESSAGE}"
         );
-        assert!(msg.starts_with("Your command timed out after 300 seconds or experienced an OOM error."));
+        assert!(
+            msg.starts_with(
+                "Your command timed out after 300 seconds or experienced an OOM error."
+            )
+        );
         assert!(msg.ends_with(SHELL_RESET_MESSAGE));
     }
 }

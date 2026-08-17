@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use qaqh_domain::{
-    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent, TimelineIntent, TimelineRound, TimelineSnapshot, TimelineTool,
-    TimelineToolState, TimelineTurn, TimelineTurnState,
+    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
+    TimelineIntent, TimelineRound, TimelineSnapshot, TimelineTool, TimelineToolState, TimelineTurn,
+    TimelineTurnState,
 };
 
 /// A live Ringing V1 timeline delivery record. `entry.timeline_seq` is the sole SSE cursor for
@@ -340,7 +341,10 @@ impl TimelineAppender {
             timeline,
             turn_id.to_string(),
             Some(round_num),
-            TimelineEvent::BlockCheckpoint { block_id: block_id.to_string(), text },
+            TimelineEvent::BlockCheckpoint {
+                block_id: block_id.to_string(),
+                text,
+            },
         ))
     }
 

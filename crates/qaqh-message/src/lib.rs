@@ -8,8 +8,9 @@ pub mod effect;
 pub mod store;
 
 pub use context_flow::{
-    builtin, CompactBehavior, ContextFlow, ContextSource, FlowError, FlowRole, IngestReceipt,
+    CompactBehavior, ContextFlow, ContextSource, FlowError, FlowRole, IngestReceipt,
     IngestTraceEntry, LifecyclePolicy, PendingIngest, Sink, Timing, UndoBehavior, Visibility,
+    builtin,
 };
 pub use effect::{Effect, PendingTool, ToolExecReport, ToolExecRequest, ToolExecutorFn};
 pub use store::{MessageStore, Turn};

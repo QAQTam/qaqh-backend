@@ -3,12 +3,12 @@
 
 use std::path::Path;
 
-use crate::apply_patch_engine::seek_sequence::seek_sequence;
-use crate::apply_patch_engine::text_file::Replacement;
-use crate::apply_patch_engine::text_file::SourceFile;
 use crate::apply_patch_engine::EngineError;
 use crate::apply_patch_engine::UpdateFileChunk;
 use crate::apply_patch_engine::UpdateMode;
+use crate::apply_patch_engine::seek_sequence::seek_sequence;
+use crate::apply_patch_engine::text_file::Replacement;
+use crate::apply_patch_engine::text_file::SourceFile;
 
 pub struct AppliedPatch {
     pub original_contents: String,

@@ -739,18 +739,28 @@ fn llm_approval_forwards_exec_via_http_backend() {
     // 平台适配：Windows 产物带 .exe；CARGO_TARGET_DIR 覆盖时跟随覆盖目录。
     let target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target")
-        });
+        .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
     let exe_name = if cfg!(windows) {
         "qaqh-workspace.exe"
     } else {
         "qaqh-workspace"
     };
     let serve_bin = target_dir.join("debug").join(exe_name);
-    assert!(serve_bin.exists(), "serve binary missing: {}", serve_bin.display());
+    assert!(
+        serve_bin.exists(),
+        "serve binary missing: {}",
+        serve_bin.display()
+    );
     let mut serve = std::process::Command::new(&serve_bin)
-        .args(["serve", "--host", "127.0.0.1", "--port", "18991", "--token", "testtoken"])
+        .args([
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18991",
+            "--token",
+            "testtoken",
+        ])
         // serve 的 token 来源 env(QAQH_WORKSPACE_TOKEN) 优先于 --token；测试进程
         // 环境可能残留 daemon 注入的值，显式钉住 testtoken 保证与 Http backend 一致。
         .env("QAQH_WORKSPACE_TOKEN", "testtoken")

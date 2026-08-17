@@ -335,7 +335,10 @@ fn handle_subagent(mut request: tiny_http::Request) {
                 return;
             }
             let id = crate::process_registry::ProcessRegistry::register(parsed.name.trim());
-            log::info!("[serve] subagent registered id={id} name={}", parsed.name.trim());
+            log::info!(
+                "[serve] subagent registered id={id} name={}",
+                parsed.name.trim()
+            );
             serde_json::json!({ "ok": true, "id": id })
         }
         "update" => {
@@ -487,7 +490,10 @@ mod tests {
 
     #[test]
     fn request_timeout_prefers_args() {
-        assert_eq!(request_timeout(&req(serde_json::json!({ "timeout_secs": 120 }))), 120);
+        assert_eq!(
+            request_timeout(&req(serde_json::json!({ "timeout_secs": 120 }))),
+            120
+        );
     }
 
     #[test]
@@ -501,9 +507,18 @@ mod tests {
     fn request_timeout_defaults_and_clamps() {
         assert_eq!(request_timeout(&req(serde_json::json!({}))), 30);
         // 超范围参数被忽略，回退默认。
-        assert_eq!(request_timeout(&req(serde_json::json!({ "timeout_secs": 0 }))), 30);
-        assert_eq!(request_timeout(&req(serde_json::json!({ "timeout_secs": 99999 }))), 30);
+        assert_eq!(
+            request_timeout(&req(serde_json::json!({ "timeout_secs": 0 }))),
+            30
+        );
+        assert_eq!(
+            request_timeout(&req(serde_json::json!({ "timeout_secs": 99999 }))),
+            30
+        );
         // 非数字参数被忽略。
-        assert_eq!(request_timeout(&req(serde_json::json!({ "timeout_secs": "fast" }))), 30);
+        assert_eq!(
+            request_timeout(&req(serde_json::json!({ "timeout_secs": "fast" }))),
+            30
+        );
     }
 }

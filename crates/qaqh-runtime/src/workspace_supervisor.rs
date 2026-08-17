@@ -892,7 +892,10 @@ mod tests {
     #[test]
     #[cfg(windows)] // Windows 盘符/cmd 语义；Linux 无对应环境
     fn wsl_path_conversion_maps_drive_and_segments() {
-        assert_eq!(to_wsl_path(r"F:\QAQ-Harness").as_deref(), Some("/mnt/f/QAQ-Harness"));
+        assert_eq!(
+            to_wsl_path(r"F:\QAQ-Harness").as_deref(),
+            Some("/mnt/f/QAQ-Harness")
+        );
         assert_eq!(
             to_wsl_path(r"F:\QAQ-Harness\crates\qaqh-workspace").as_deref(),
             Some("/mnt/f/QAQ-Harness/crates/qaqh-workspace")

@@ -6,12 +6,12 @@
 
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::time::MissedTickBehavior;
 
-use crate::backend::{QaqhBridge, SessionItem, UiEvent, LOCKED_TOOL_MODE};
+use crate::backend::{LOCKED_TOOL_MODE, QaqhBridge, SessionItem, UiEvent};
 use crate::transcript::Transcript;
 use crate::ui;
 
@@ -167,8 +167,8 @@ impl App {
         self.items = items;
         self.screen = Screen::Select;
         if self.items.is_empty() {
-            self.notice = "no sessions yet — press Enter to create one (or restart with --start)"
-                .to_string();
+            self.notice =
+                "no sessions yet — press Enter to create one (or restart with --start)".to_string();
         } else {
             self.notice.clear();
         }
@@ -324,8 +324,8 @@ impl App {
                     return;
                 }
                 if self.running {
-                    self.notice = "turn running — Ctrl+C cancels before sending another message"
-                        .to_string();
+                    self.notice =
+                        "turn running — Ctrl+C cancels before sending another message".to_string();
                     return;
                 }
                 let Some(seed) = self.seed.clone() else {
