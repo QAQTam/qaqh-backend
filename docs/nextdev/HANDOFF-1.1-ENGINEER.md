@@ -243,8 +243,8 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
    防火墙规则）已进入 `origin/main` 历史，是 PR #3 的父提交。接手时不要
    以为它未提交或丢失。
 6. **`AGENT.md` 已提交**：位于主仓库根目录，内容是 codegraph CLI 使用提示。
-7. **临时 LAN git daemon（应急）**：本机 `~/git/qaqh-backend.git` + `git://60.0.0.32:9418`
-   （`--enable=receive-pack`，无鉴权）。GitHub 恢复后可停用；如有新的 Windows WIP 可先推到此通道。
+7. **临时本地 Git 通道（应急）**：SSH 裸仓库 + Gitea，见 **[LAN-INFRA-TEMPORARY.md](./LAN-INFRA-TEMPORARY.md)**。
+   （旧 `git://` 9418 已停用——receive-pack 对 Windows push 会卡死。）
 7. **`docs/nextdev/bugfix-1.1-nextdev.md` 是档案 + 现状混合**：旧条目保留
    `deepx-*` 路径；新增状态在文末“落地增量”区。不要大改旧记录，追加即可。
 8. **后端 GitHub 无 CI**：后端 PR 均无 checks，合并前必须本地跑测试；前端 #7 起已有 Windows CI。
@@ -395,15 +395,14 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - 结论：可以走 PR 评审合入；但 WIP 仍是 70 文件大改动，建议拆成小提交。
 - 当前后端 open PR：#20（docs T17，前端 bug inventory 追加）。
 
-### 10.3 临时 LAN git daemon（应急通道）
+### 10.3 临时本地 Git 基础设施（GitHub 故障应急）
 
-- 裸仓库：`~/git/qaqh-backend.git`
-- 地址：`git://60.0.0.32:9418/qaqh-backend.git`
-- 已启用 `receive-pack`（支持 push）
-- 已同步：
-  - `main` = `fd77452`
-  - `refactor/nextdev-tool-mode-single-contract` = `7c3b0b3`
-- 说明：无鉴权、仅限局域网临时使用；GitHub 恢复后可停用。
+> GitHub 崩溃期间的临时通道已从 git:// 升级为 **SSH 裸仓库 + Gitea**，细节统一见：
+> **[LAN-INFRA-TEMPORARY.md](./LAN-INFRA-TEMPORARY.md)**（唯一详细文档，此处不再重复）。
+>
+> 状态速览：`ssh://qaqtamsy@60.0.0.32:2222/...`（已验证 Windows push）+ `http://60.0.0.32:3000/`（Gitea，已验证）
+> 裸仓库 `~/git/qaqh-backend.git`：`main = c78bb35`，`refactor/nextdev-tool-mode-single-contract = 7c3b0b3`
+> 旧 `git://` daemon（9418）已停用（receive-pack 对 Windows push 卡死）。
 
 ### 10.4 下一轮工作（按原计划）
 
