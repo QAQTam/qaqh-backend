@@ -108,7 +108,7 @@ pub fn run_agent_worker(args: &[String]) -> Result<(), String> {
     // max-tokens）作为默认值；CLI 覆盖（daemon `subagent.spawn` 注入）优先。
     // 该组合逻辑与 in-process actor 共用，避免两条 subagent 启动路径漂移。
     if is_subagent {
-        crate::subagent_actor::apply_subagent_config(
+        crate::actor::apply_subagent_config(
             &mut agent,
             model_override.as_deref(),
             base_url_override.as_deref(),

@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
-use crate::subagent_actor::SubagentSpawnSpec;
+use crate::actor::SubagentSpawnSpec;
 use crate::{RingingHub, SessionActivityTracker};
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
@@ -101,11 +100,6 @@ fn background_command(program: &str) -> Command {
 
 /// How an agent worker is attached to this daemon process.
 enum AgentTransport {
-    /// Legacy/current process worker (`qaqh agent --seed …`) over piped stdio.
-    Process {
-        stdin: Arc<Mutex<Box<dyn Write + Send>>>,
-        child: Arc<Mutex<Option<Child>>>,
-    },
     /// Knife-1 in-process worker: the Ringing Loop runs on a daemon thread and
     /// communicates through the same WorkerCommand/WriterEvent channel types as
     /// the pipe boundary.
@@ -283,7 +277,7 @@ impl AgentRegistry {
         let activity = self.activity.clone();
         let hub = self.hub.clone();
         let reader = std::thread::spawn(move || {
-            crate::subagent_actor::run_inprocess_event_reader(event_rx, event_seed, generation, activity, hub);
+            crate::actor::run_inprocess_event_reader(event_rx, event_seed, generation, activity, hub);
         });
 
         let actor_seed = seed.to_string();
@@ -294,7 +288,7 @@ impl AgentRegistry {
         let thread = std::thread::Builder::new()
             .name(format!("qaqh-subagent-{actor_seed}"))
             .spawn(move || {
-                crate::subagent_actor::run_subagent_actor(
+                crate::actor::run_subagent_actor(
                     actor_seed,
                     actor_spec,
                     cmd_rx,
@@ -336,197 +330,102 @@ impl AgentRegistry {
         new_seed: Option<&str>,
         extra_args: &[String],
     ) -> Result<(), String> {
+        self.spawn_session_inprocess(seed, new_seed, extra_args)
+    }
+
+    fn spawn_session_inprocess(
+        &mut self,
+        seed: &str,
+        new_seed: Option<&str>,
+        _extra_args: &[String],
+    ) -> Result<(), String> {
+        if self.instances.contains_key(seed) {
+            return Err(format!("agent already running for {seed}"));
+        }
         self.last_spawn
             .insert(seed.to_string(), std::time::Instant::now());
         let (generation, _) = self.activity.begin(seed);
-        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-        let mut command = Command::new(exe);
-        command.arg("agent");
-        if let Some(seed) = new_seed {
-            command.arg("--seed").arg(seed);
-        } else {
-            command.arg("--resume-seed").arg(seed);
-        }
-        for arg in extra_args {
-            command.arg(arg);
-        }
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(path) = SYSTEM_PATH.get() {
-            command.env("PATH", path);
-        }
-        if let Some((endpoint, token)) = &self.workspace_env {
-            command.env("QAQH_WORKSPACE_URL", endpoint);
-            command.env("QAQH_WORKSPACE_TOKEN", token);
-        }
-        // 工具执行后端模式：local → 进程内；wsl → 远程 HTTP 到 WSL2 serve。
-        command.env("QAQH_WORKSPACE_MODE", &self.workspace_mode);
-        // Resume worker：timeline 是 turn 账本的权威源。meta.turn_count 只在
-        // turn 完成时持久化（compact 也会缩小消息视图），daemon 重启后它可能
-        // 远小于 timeline 已记录的 turn 数——worker 按它恢复分配器就会复用
-        // 已 sealed 的 turn id，timeline 侧所有 intent 被拒，transcript 空白。
-        // 把 timeline 最大 turn 序号注入环境变量，worker 恢复计数以它为下限。
-        // （hub.timeline_snapshot 顺带触发懒加载 + 孤儿收尾，spawn 前完成。）
-        if new_seed.is_none()
-            && let Some(hub) = self.hub.as_ref()
-            && let Some(snapshot) = hub.timeline_snapshot(seed)
-        {
-            let max_seq = snapshot
-                .turns
-                .iter()
-                .filter_map(|turn| turn.turn_id.strip_prefix('t'))
-                .filter_map(|seq| seq.parse::<u64>().ok())
-                .max()
-                .unwrap_or(0);
-            if max_seq > 0 {
-                command.env("QAQH_TIMELINE_TURN_COUNT", max_seq.to_string());
-            }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("spawn agent for {seed}: {e}"))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "agent stdin unavailable".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "agent stdout unavailable".to_string())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "agent stderr unavailable".to_string())?;
-        let child = Arc::new(Mutex::new(Some(child)));
 
-        let debug_seed = seed.to_string();
-        std::thread::spawn(move || {
-            // F4: panic 防护——reader 线程若在解析/分发中 panic，整条 stderr
-            // 流会静默消失且无法被 respawn 检测到（进程还活着）。catch_unwind
-            // 至少把现场记录到日志。
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    log::warn!(
-                        "[AGENT:{}] {line}",
-                        &debug_seed[..debug_seed.floor_char_boundary(debug_seed.len().min(8))]
-                    );
-                }
-            }));
-            log::info!(
-                "[AGENT:{}] stderr reader exited",
-                &debug_seed[..debug_seed.floor_char_boundary(debug_seed.len().min(8))]
-            );
-        });
+        let channels = qaqh_msglp::ringing_v1::loop_core::LoopChannels::new();
+        let qaqh_msglp::ringing_v1::loop_core::LoopChannels {
+            cmd_tx,
+            cmd_rx,
+            event_tx,
+            event_rx,
+            cancel,
+            writer_dead,
+        } = channels;
+        let cancel_for_sender = cancel.clone();
 
         let event_seed = seed.to_string();
         let activity = self.activity.clone();
         let hub = self.hub.clone();
         let reader = std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    // wire 判别：M3 后仅 Ringing 线格式（legacy Agent2Ui 帧已拆除）。
-                    match qaqh_msglp::ringing_v1::wire::read_worker_event_line(&line) {
-                        Ok(()) => {
-                            if let Some(hub) = &hub {
-                                // Ringing V1 timeline intent is a native producer path.
-                                if let Ok(env) = serde_json::from_str::<
-                                    qaqh_ringing::RingingTimelineIntentEnvelope,
-                                >(&line)
-                                {
-                                    if let Err(error) = hub.publish_timeline(&env.seed, env.intent)
-                                    {
-                                        // A rejected intent silently starves the frontend
-                                        // transcript (the Ringing conversation store keeps
-                                        // delivering, so the session-list title still
-                                        // refreshes while the main pane stays blank).
-                                        // Surface it at error level with the full error so
-                                        // restart-related turn_id collisions are diagnosable.
-                                        log::error!(
-                                            "[timeline] rejected intent for {}: {error}",
-                                            env.seed
-                                        );
-                                    }
-                                    continue;
-                                }
-                                match serde_json::from_str::<
-                                    qaqh_ringing::RingingWorkerEventEnvelope,
-                                >(&line)
-                                {
-                                    Ok(env) => {
-                                        let domain: qaqh_domain::DomainEvent = env.event.into();
-                                        // Ringing 是唯一的 native consumer；大内容在进入
-                                        // Ringing channel 前外置。
-                                        let domain =
-                                            externalize_large_content(&hub, &env.seed, domain);
-                                        let _ = hub.publish_with_causation(
-                                            &env.seed,
-                                            domain.clone(),
-                                            env.causation_id.as_deref(),
-                                        );
-                                        // Activity tracker 生产接线：领域事件驱动
-                                        // Working→Idle / →WaitingUser 迁移（此前
-                                        // observe 只在测试中调用，daemon 侧活动状态
-                                        // 在回合结束后永远停留在 Working）。
-                                        if let Some(observe) =
-                                            crate::activity::domain_activity_observe(&domain)
-                                            && let Some(activity) =
-                                                activity.observe(&event_seed, generation, &observe)
-                                        {
-                                            crate::activity::publish_activity(
-                                                Some(hub.as_ref()),
-                                                &activity,
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::warn!("invalid ringing worker envelope: {e}")
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("invalid agent event for {event_seed}: {e}");
-                        }
-                    }
-                }
-            }));
-            if let Err(panic) = result {
-                log::error!(
-                    "[AGENT:{}] stdout reader panicked: {:?}",
-                    &event_seed[..event_seed.floor_char_boundary(event_seed.len().min(8))],
-                    panic
-                );
-            }
-            if let Some(update) = activity.disconnect(&event_seed, generation) {
-                crate::activity::publish_activity(hub.as_deref(), &update);
-            }
+            crate::actor::run_inprocess_event_reader(event_rx, event_seed, generation, activity, hub);
         });
+
+        // Resume worker: timeline is the authoritative turn ledger. The meta
+        // turn_count can lag the timeline after a daemon restart, so the actor
+        // must start its turn allocator above any timeline turn already sealed.
+        let timeline_turn_count = if new_seed.is_none() {
+            if let Some(hub) = self.hub.as_ref()
+                && let Some(snapshot) = hub.timeline_snapshot(seed)
+            {
+                snapshot
+                    .turns
+                    .iter()
+                    .filter_map(|turn| turn.turn_id.strip_prefix('t'))
+                    .filter_map(|seq| seq.parse::<u64>().ok())
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let actor_seed = seed.to_string();
+        let resume_seed = if new_seed.is_none() {
+            Some(seed.to_string())
+        } else {
+            None
+        };
+        let new_seed_owned = new_seed.map(str::to_string);
+        let workspace_mode = self.workspace_mode.clone();
+        let workspace_env = self.workspace_env.clone();
+        let thread = std::thread::Builder::new()
+            .name(format!("qaqh-session-{actor_seed}"))
+            .spawn(move || {
+                crate::actor::run_session_actor(
+                    actor_seed,
+                    resume_seed,
+                    new_seed_owned,
+                    timeline_turn_count,
+                    cmd_rx,
+                    event_tx,
+                    cancel,
+                    writer_dead,
+                    workspace_mode,
+                    workspace_env,
+                );
+            })
+            .map_err(|e| format!("spawn in-process session {seed}: {e}"))?;
 
         self.instances.insert(
             seed.to_string(),
             AgentInstance {
                 seed: seed.to_string(),
-                transport: AgentTransport::Process {
-                    stdin: Arc::new(Mutex::new(Box::new(stdin))),
-                    child,
+                transport: AgentTransport::InProcess {
+                    cmd_tx,
+                    cancel: cancel_for_sender,
                 },
                 kind: AgentKind::Session,
                 reader: Some(reader),
-                thread: None,
+                thread: Some(thread),
             },
         );
+        log::info!("[session] spawned in-process actor seed={seed} (no child process)");
         Ok(())
     }
 
@@ -539,12 +438,6 @@ impl AgentRegistry {
         self.get_or_spawn(seed)?;
         let write = |instance: &AgentInstance| -> Result<(), String> {
             match &instance.transport {
-                AgentTransport::Process { stdin, .. } => {
-                    let json = serde_json::to_string(env).map_err(|e| format!("serialize: {e}"))?;
-                    let mut stdin = stdin.lock().map_err(|e| format!("agent stdin lock: {e}"))?;
-                    writeln!(*stdin, "{json}").map_err(|e| format!("agent write: {e}"))?;
-                    stdin.flush().map_err(|e| format!("agent flush: {e}"))
-                }
                 AgentTransport::InProcess { cmd_tx, cancel } => {
                     // Mirror the pipe reader: interrupt frames set the cancel
                     // token before they enter the command queue so long-running
@@ -618,9 +511,9 @@ impl AgentRegistry {
             .map(|(_, instance)| instance)
             .collect();
         // Signal every worker before waiting on any of them. In-process actors
-        // are serialized behind SUBAGENT_ACTOR_SERIAL; joining them one-by-one
-        // could otherwise deadlock when a queued actor is joined before the
-        // actor currently holding the serialization lock has been signalled.
+        // are serialized behind ACTOR_SERIAL; joining them one-by-one could
+        // otherwise deadlock when a queued actor is joined before the actor
+        // currently holding the serialization lock has been signalled.
         for instance in &mut instances {
             instance.signal_shutdown();
         }
@@ -659,7 +552,7 @@ impl AgentRegistry {
             if let Some(instance) = self.instances.remove(&seed) {
                 instance.shutdown();
             }
-            log::warn!("[AGENT:{seed}] in-process/process worker died; respawning");
+            log::warn!("[AGENT:{seed}] in-process worker died; respawning");
             let spawned = match kind {
                 AgentKind::Session => self.spawn(&seed, None),
                 AgentKind::Subagent(spec) => self.spawn_subagent_inprocess(&seed, spec),
@@ -737,11 +630,6 @@ impl AgentRegistry {
 impl AgentInstance {
     fn is_dead(&self) -> bool {
         match &self.transport {
-            AgentTransport::Process { child, .. } => child
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_mut()
-                .is_some_and(|child| child.try_wait().ok().flatten().is_some()),
             AgentTransport::InProcess { .. } => self
                 .thread
                 .as_ref()
@@ -764,14 +652,6 @@ impl AgentInstance {
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionShutdown),
         );
         match &self.transport {
-            AgentTransport::Process { stdin, .. } => {
-                if let Ok(json) = serde_json::to_string(&env)
-                    && let Ok(mut stdin) = stdin.lock()
-                {
-                    let _ = writeln!(*stdin, "{json}");
-                    let _ = stdin.flush();
-                }
-            }
             AgentTransport::InProcess { cmd_tx, cancel } => {
                 cancel.set();
                 qaqh_workspace::CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -785,30 +665,9 @@ impl AgentInstance {
     }
 
     fn finish_shutdown(&mut self) {
-        if let AgentTransport::Process { child, .. } = &self.transport
-            && let Ok(mut child) = child.lock()
-            && let Some(mut child) = child.take()
-        {
-            let started = std::time::Instant::now();
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) if started.elapsed() < std::time::Duration::from_secs(5) => {
-                        std::thread::sleep(std::time::Duration::from_millis(50))
-                    }
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break;
-                    }
-                }
-            }
-        }
-
-        // In-process actor: join the loop thread first so it drops `event_tx`;
-        // the event reader then drains the channel tail and publishes the last
-        // intents (含 seal_turn——terminal intent 同步落盘). Process workers
-        // follow the same order below via child exit → stdout EOF → reader join.
+        // Join the loop thread first so it drops `event_tx`; the event reader
+        // then drains the channel tail and publishes the last intents
+        // (含 seal_turn——terminal intent 同步落盘).
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
