@@ -2,6 +2,7 @@
 
 use crate::authorization::{Admission, AuthorizedToolCall, ToolInvocation, admit};
 use std::collections::HashSet;
+#[cfg(test)]
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -59,7 +60,7 @@ pub fn execute_authorized(
         category: _,
     } = invocation;
 
-    if crate::CANCEL.load(Ordering::SeqCst) {
+    if crate::is_cancel() {
         return failure(&name, crate::ToolError::Cancelled);
     }
 

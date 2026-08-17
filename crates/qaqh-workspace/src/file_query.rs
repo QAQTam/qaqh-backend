@@ -61,10 +61,7 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
             serde_json::json!({}),
         );
     }
-    let workspace = crate::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
+    let workspace = crate::current_workspace();
     if let Some(skill) = qaqh_skills::managed_skill_for_path(
         std::path::Path::new(&workspace),
         std::path::Path::new(&path),

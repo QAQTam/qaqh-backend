@@ -113,11 +113,7 @@ fn now_epoch_secs() -> u64 {
 
 /// Current active session seed, if any.
 pub fn active_session() -> String {
-    crate::CURRENT_SESSION
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-        .unwrap_or_default()
+    crate::current_session().unwrap_or_default()
 }
 
 /// Read all steps from disk. Corrupt/partial trailing lines are skipped.

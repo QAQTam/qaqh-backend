@@ -1177,7 +1177,7 @@ impl TurnEngine {
         loop {
             // ── Interrupt check ──
             if ctx.cancel.is_set()
-                || qaqh_workspace::CANCEL.load(std::sync::atomic::Ordering::SeqCst)
+                || qaqh_workspace::is_cancel()
             {
                 ctx.emitter
                     .emit_timeline(qaqh_domain::TimelineIntent::TurnSealed {

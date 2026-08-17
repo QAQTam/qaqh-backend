@@ -8,10 +8,7 @@ use std::path::Path;
 use crate::{JsonArgs, ToolHandler, ToolResult, ToolRisk};
 
 fn current_workspace() -> String {
-    crate::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone()
+    crate::current_workspace()
 }
 
 pub(crate) fn load_activation(

@@ -85,7 +85,7 @@ struct GitFileMeta {
 }
 
 fn git_file_meta(file_path: &str) -> Option<GitFileMeta> {
-    let seed = crate::CURRENT_SESSION.lock().ok()?.clone()?;
+    let seed = crate::current_session()?;
     // 无 SessionManager 环境（serve 进程）用只读版；meta.cwd 优先，
     // 旧 workspace.txt 兜底（存量，不迁移）。
     let workspace = qaqh_session::workspace::session_workspace_from_disk(&seed)?;

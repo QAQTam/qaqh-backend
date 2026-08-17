@@ -250,10 +250,7 @@ fn run_copy_range(
 }
 
 fn workspace_root() -> String {
-    let ws = crate::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let ws = crate::current_workspace();
     if ws.is_empty() { ".".to_string() } else { ws }
 }
 

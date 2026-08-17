@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use crate::{CANCEL, SafetyVerdict, ToolHandler, ToolPlacement};
+use crate::{SafetyVerdict, ToolHandler, ToolPlacement};
 
 // ── Execution metadata ──
 
@@ -333,7 +333,7 @@ impl ToolManager {
                 }
             }
             None => {
-                CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::set_cancel(true);
                 for flag in self.inflight_tasks.values() {
                     flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -373,21 +373,19 @@ fn is_path_in_workspace(ctx: &crate::ToolCallCtx) -> bool {
         if path.is_empty() || path == "." {
             return true;
         }
-        let ws = crate::CURRENT_WORKSPACE
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        if ws.is_empty() || *ws == "." {
+        let ws = crate::current_workspace();
+        if ws.is_empty() || ws == "." {
             return true;
         }
         let abs_path = if std::path::Path::new(path).is_absolute() {
             path.to_string()
         } else {
-            std::path::Path::new(&*ws)
+            std::path::Path::new(&ws)
                 .join(path)
                 .to_string_lossy()
                 .to_string()
         };
-        abs_path.starts_with(&*ws)
+        abs_path.starts_with(&ws)
     } else {
         // No path arg — assume workspace operation (e.g. task, skills, ask)
         true

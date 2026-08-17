@@ -199,10 +199,7 @@ pub(crate) fn register_test_handler(handler: crate::ToolHandler) {
 
 /// Return the canonical workspace root used for authorization and execution.
 pub(crate) fn active_workspace_root() -> PathBuf {
-    let workspace = crate::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
+    let workspace = crate::current_workspace();
     let root = if workspace.is_empty() || workspace == "." {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     } else {

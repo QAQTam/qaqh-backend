@@ -6,7 +6,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::CURRENT_WORKSPACE;
 
 /// Return the `.deepx/` directory for the current workspace.
 ///
@@ -17,9 +16,9 @@ use crate::CURRENT_WORKSPACE;
 /// The fallback is intentionally NOT `home_dir()/.deepx/` to avoid
 /// conflating workspace artifacts with global config/sessions data.
 pub fn qaqh_dir() -> PathBuf {
-    let ws = CURRENT_WORKSPACE.read().unwrap_or_else(|e| e.into_inner());
-    if !ws.is_empty() && *ws != "." {
-        Path::new(&*ws).join(".deepx")
+    let ws = crate::current_workspace();
+    if !ws.is_empty() && ws != "." {
+        Path::new(&ws).join(".deepx")
     } else {
         qaqh_types::platform::data_dir().join("workspace")
     }
