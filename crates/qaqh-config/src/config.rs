@@ -194,6 +194,10 @@ pub struct Config {
     pub lang: Option<String>,
     /// UI font family（WinUI 壳全局字体；空 = 跟随系统默认）。
     pub font_family: String,
+    /// UI 主题偏好：`system` | `light` | `dark` | `dark-gray`；`None`/空 = 跟随系统。
+    pub theme: Option<String>,
+    /// 桌面通知开关。`None` = 开启（缺省）。
+    pub notifications_enabled: Option<bool>,
     /// Default configuration for sub-agent spawning.
     pub subagent: SubagentConfig,
     /// Whether the content filter is active.
@@ -265,6 +269,8 @@ impl Default for Config {
             active_profile: "default".into(),
             lang: None,
             font_family: String::new(),
+            theme: None,
+            notifications_enabled: None,
             subagent: SubagentConfig::default(),
             compliance_enabled: true,
             compliance_extra_keywords: Vec::new(),
@@ -426,6 +432,15 @@ impl Config {
                 && !f.is_empty()
             {
                 cfg.font_family = f.clone();
+            }
+            // ── UI 主题（空/缺失 = 跟随系统）──
+            match pc.theme.as_deref() {
+                Some(theme) if !theme.is_empty() => cfg.theme = Some(theme.to_string()),
+                _ => cfg.theme = None,
+            }
+            // ── 桌面通知（缺失 = 开启）──
+            if let Some(enabled) = pc.notifications_enabled {
+                cfg.notifications_enabled = Some(enabled);
             }
             // ── Subagent defaults ──
             if let Some(ref mut s) = pc.subagent {
@@ -665,6 +680,8 @@ impl Config {
             } else {
                 Some(self.font_family.clone())
             },
+            theme: self.theme.clone(),
+            notifications_enabled: self.notifications_enabled,
             subagent: Some(PersistentSubagentConfig {
                 model: if self.subagent.model.is_empty() {
                     None

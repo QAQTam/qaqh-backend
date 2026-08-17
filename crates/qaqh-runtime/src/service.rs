@@ -867,6 +867,16 @@ impl DeepxService {
                     cfg.font_family = value.to_string();
                 }
             }
+            // ── UI 主题（空值/null = 跟随系统）──
+            if let Some(value) = value2(params, "theme", "theme").and_then(Value::as_str) {
+                cfg.theme = if value.is_empty() { None } else { Some(value.to_string()) };
+            }
+            // ── 桌面通知（缺省 = 开启）──
+            if let Some(enabled) =
+                value2(params, "notifications_enabled", "notificationsEnabled").and_then(Value::as_bool)
+            {
+                cfg.notifications_enabled = Some(enabled);
+            }
             update_string(
                 &mut cfg.subagent.model,
                 params,
@@ -1277,7 +1287,7 @@ fn load_config() -> Result<Value, String> {
     // profile 名称列表（前端 profile 管理 UI 用；不含敏感字段）。
     let profile_names: Vec<String> = cfg.profiles.keys().cloned().collect();
     Ok(
-        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"font_family":cfg.font_family,"active_profile":cfg.active_profile,"profiles":profile_names,"compliance_enabled":cfg.compliance_enabled,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"workspace":{"mode":cfg.workspace.mode},"tokenizer_path":cfg.tokenizer_path}),
+        json!({"api_key":if cfg.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.api_key.is_empty(),"model":cfg.model,"base_url":cfg.base_url,"provider_id":cfg.provider_id,"endpoint":cfg.endpoint,"max_tokens":cfg.max_tokens,"context_limit":cfg.context_limit,"reasoning_effort":cfg.reasoning_effort,"auto_compact_threshold":cfg.auto_compact_threshold,"permission_level":cfg.permission_level,"lang":cfg.lang,"font_family":cfg.font_family,"theme":cfg.theme,"notifications_enabled":cfg.notifications_enabled.unwrap_or(true),"active_profile":cfg.active_profile,"profiles":profile_names,"compliance_enabled":cfg.compliance_enabled,"providers":providers,"subagent":{"model":cfg.subagent.model,"base_url":cfg.subagent.base_url,"api_key":if cfg.subagent.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.subagent.api_key.is_empty(),"max_tokens":cfg.subagent.max_tokens,"timeout_secs":cfg.subagent.timeout_secs,"default_tools":cfg.subagent.default_tools},"multimodal":{"enabled":cfg.multimodal.enabled,"provider_type":cfg.multimodal.provider_type,"provider_id":cfg.multimodal.provider_id,"api_key":if cfg.multimodal.api_key.is_empty(){""}else{"****"},"api_key_set":!cfg.multimodal.api_key.is_empty(),"base_url":cfg.multimodal.base_url,"model":cfg.multimodal.model,"max_tokens":cfg.multimodal.max_tokens},"workspace":{"mode":cfg.workspace.mode},"tokenizer_path":cfg.tokenizer_path}),
     )
 }
 
