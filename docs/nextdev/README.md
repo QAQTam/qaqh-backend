@@ -12,6 +12,7 @@
 | [SESSION-JOURNAL-PLAN.md](./SESSION-JOURNAL-PLAN.md) | **Session 修改日志设计**：误删事故复盘 + 编辑步进日志方案 | ✅ 基础版已落地（2026-08-17） |
 | [EXPLORE-REFACTOR-1.1.md](./EXPLORE-REFACTOR-1.1.md) | **探索落地校准**：文档↔qaqh-* 仓库映射、keep/remove/merge、刀序 | ✅ 现行（随 PR 更新） |
 | [HANDOFF-1.1-ENGINEER.md](./HANDOFF-1.1-ENGINEER.md) | **工程师交接文档**：已完成工作、Bug 状态、下一步、已知坑 | ✅ 现行（2026-08-18，刀 1 step 2c / 待刀 7） |
+| [LAN-INFRA-TEMPORARY.md](./LAN-INFRA-TEMPORARY.md) | **临时本地 Git 基础设施**（GitHub 故障应急）：SSH 裸仓库 + Gitea 部署/管理/退役 | ✅ 现行（应急，2026-08-18） |
 
 ## 法律与合规（保留）
 
