@@ -444,7 +444,7 @@ impl AgentRegistry {
                     // gate/tool work observes the abort immediately.
                     if qaqh_msglp::ringing_v1::loop_core::ringing_command_is_interrupt(env) {
                         cancel.set();
-                        qaqh_workspace::CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+                        qaqh_workspace::set_cancel(true);
                     }
                     let cmd = qaqh_msglp::ringing_v1::types::WorkerCommand {
                         frame: qaqh_msglp::ringing_v1::wire::WorkerCommandFrame::Ringing(
@@ -654,7 +654,7 @@ impl AgentInstance {
         match &self.transport {
             AgentTransport::InProcess { cmd_tx, cancel } => {
                 cancel.set();
-                qaqh_workspace::CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+                qaqh_workspace::set_cancel(true);
                 let cmd = qaqh_msglp::ringing_v1::types::WorkerCommand {
                     frame: qaqh_msglp::ringing_v1::wire::WorkerCommandFrame::Ringing(env),
                     causation: Some("daemon-shutdown".into()),

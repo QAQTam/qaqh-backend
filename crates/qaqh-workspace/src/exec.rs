@@ -701,7 +701,7 @@ fn direct_exec(
             }
             None => {
                 if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-                    || crate::CANCEL.load(std::sync::atomic::Ordering::SeqCst)
+                    || crate::is_cancel()
                 {
                     // 取消 = 杀进程树（含后代），��止管道泄漏
                     crate::process_registry::ProcessRegistry::kill(proc_id);
@@ -1018,11 +1018,11 @@ fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> ToolResult {
             if resolved.is_empty() { cwd } else { resolved }
         })
         .or_else(|| {
-            let ws = crate::CURRENT_WORKSPACE.read().ok()?;
-            if ws.is_empty() || *ws == "." {
+            let ws = crate::current_workspace();
+            if ws.is_empty() || ws == "." {
                 None
             } else {
-                Some(ws.clone())
+                Some(ws)
             }
         });
     let cwd_ref: Option<&str> = cwd.as_deref();

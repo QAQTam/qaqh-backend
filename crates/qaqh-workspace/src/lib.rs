@@ -17,17 +17,17 @@ mod code_delta;
 pub mod execution;
 pub mod file_cache;
 pub mod file_edit_v2;
+pub mod file_glob;
 pub mod file_mutate;
 pub mod file_query;
-pub mod file_glob;
 pub mod file_shared;
 pub mod file_state;
 pub mod git;
 pub mod image_query;
 pub mod runtime;
 mod safety;
-pub mod tool_side_fold;
 pub mod skill;
+pub mod tool_side_fold;
 mod web;
 
 pub mod ask_user;
@@ -36,10 +36,10 @@ pub mod plan;
 
 pub mod todo;
 
-pub mod workspace;
-pub mod wsl_path;
 pub mod process_inspect;
 pub mod process_registry;
+pub mod workspace;
+pub mod wsl_path;
 
 pub mod registration;
 
@@ -171,6 +171,7 @@ impl JsonArgs for serde_json::Value {
     }
 }
 
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, RwLock};
 use std::time::Duration;
@@ -193,11 +194,83 @@ pub static CANCEL: AtomicBool = AtomicBool::new(false);
 pub static CURRENT_SESSION: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn set_current_session(seed: &str) {
+    if ACTOR_SESSION.with(|slot| slot.borrow().is_some()) {
+        ACTOR_SESSION.with(|slot| *slot.borrow_mut() = Some(seed.to_string()));
+        return;
+    }
     let mut guard = CURRENT_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(seed.to_string());
 }
 
 pub static CURRENT_WORKSPACE: RwLock<String> = RwLock::new(String::new());
+
+thread_local! {
+    static ACTOR_WORKSPACE: RefCell<Option<String>> = const { RefCell::new(None) };
+    static ACTOR_SESSION: RefCell<Option<String>> = const { RefCell::new(None) };
+    static ACTOR_CANCEL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Enter an actor-scoped workspace/session context.
+///
+/// In-process session and subagent actors call this before running their Loop
+/// so workspace/session/cancel state is isolated per actor thread. Once set,
+/// `set_workspace` / `set_current_session` write to the thread-local slot;
+/// reads prefer the thread-local slot and fall back to the process-wide globals.
+pub fn set_actor_context(workspace: &str, session: &str) {
+    ACTOR_WORKSPACE.with(|slot| *slot.borrow_mut() = Some(workspace.to_string()));
+    ACTOR_SESSION.with(|slot| *slot.borrow_mut() = Some(session.to_string()));
+    ACTOR_CANCEL.with(|slot| slot.set(false));
+}
+
+/// Leave actor-scoped state and restore process-wide behavior.
+pub fn clear_actor_context() {
+    ACTOR_WORKSPACE.with(|slot| *slot.borrow_mut() = None);
+    ACTOR_SESSION.with(|slot| *slot.borrow_mut() = None);
+    ACTOR_CANCEL.with(|slot| slot.set(false));
+}
+
+/// Returns the current session seed, preferring actor-local state.
+pub fn current_session() -> Option<String> {
+    let local = ACTOR_SESSION.with(|slot| slot.borrow().clone());
+    if local.is_some() {
+        return local;
+    }
+    CURRENT_SESSION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Returns the current workspace root, preferring actor-local state.
+pub fn current_workspace() -> String {
+    let local = ACTOR_WORKSPACE.with(|slot| slot.borrow().clone());
+    if let Some(workspace) = local {
+        return workspace;
+    }
+    CURRENT_WORKSPACE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Set the actor-local or process-wide cancel flag.
+pub fn set_cancel(value: bool) {
+    if ACTOR_SESSION.with(|slot| slot.borrow().is_some()) {
+        ACTOR_CANCEL.with(|slot| slot.set(value));
+    } else {
+        CANCEL.store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Read the effective cancel flag (actor-local if present).
+pub fn is_cancel() -> bool {
+    let local = ACTOR_CANCEL.with(|slot| slot.get());
+    if ACTOR_SESSION.with(|slot| slot.borrow().is_some()) {
+        local
+    } else {
+        CANCEL.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 /// Unit tests mutate process-wide runtime state. Keep those mutations
 /// deterministic even when the Rust test harness runs modules in parallel.
@@ -210,6 +283,10 @@ pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>>
 pub const PLAN_BLOCKED: &[&str] = &["edit", "exec", "process", "todo"];
 
 pub fn set_workspace(path: &str) {
+    if ACTOR_SESSION.with(|slot| slot.borrow().is_some()) {
+        ACTOR_WORKSPACE.with(|slot| *slot.borrow_mut() = Some(path.to_string()));
+        return;
+    }
     let mut ws = CURRENT_WORKSPACE.write().unwrap_or_else(|e| e.into_inner());
     *ws = path.to_string();
 }
@@ -229,11 +306,11 @@ pub fn resolve_workspace_path(path: &str) -> String {
     if p.is_absolute() {
         return path;
     }
-    let ws = CURRENT_WORKSPACE.read().unwrap_or_else(|e| e.into_inner());
-    if ws.is_empty() || *ws == "." {
+    let ws = current_workspace();
+    if ws.is_empty() || ws == "." {
         return path.to_string();
     }
-    let joined = Path::new(&*ws).join(p);
+    let joined = Path::new(&ws).join(p);
     // Normalise: strip redundant . components via iterator (e.g. D:\foo\./bar → D:\foo\bar)
     let normalized: std::path::PathBuf = joined.components().collect();
     normalized.to_string_lossy().to_string()
@@ -255,7 +332,7 @@ pub fn display_path(abs_path: &str) -> String {
     let normalized: std::path::PathBuf = std::path::Path::new(abs_path).components().collect();
     let norm_str = normalized.to_string_lossy();
 
-    let ws = CURRENT_WORKSPACE.read().unwrap_or_else(|e| e.into_inner());
+    let ws = current_workspace();
     let ws = ws.trim_end_matches(['/', '\\']);
 
     if !ws.is_empty() && ws != "." {
@@ -567,3 +644,29 @@ impl ToolHandler {
 
 #[cfg(test)]
 mod schema_spot_check;
+
+#[cfg(test)]
+mod actor_context_tests {
+    use super::*;
+
+    #[test]
+    fn actor_context_isolates_workspace_and_session_on_current_thread() {
+        // Enter actor context and verify thread-local takes precedence.
+        set_actor_context("/tmp/actor-ws", "actor-seed");
+        assert_eq!(current_workspace(), "/tmp/actor-ws");
+        assert_eq!(current_session().as_deref(), Some("actor-seed"));
+
+        set_workspace("/tmp/actor-ws-2");
+        set_current_session("actor-seed-2");
+        assert_eq!(current_workspace(), "/tmp/actor-ws-2");
+        assert_eq!(current_session().as_deref(), Some("actor-seed-2"));
+
+        set_cancel(true);
+        assert!(is_cancel());
+
+        clear_actor_context();
+        assert_ne!(current_workspace(), "/tmp/actor-ws-2");
+        assert_ne!(current_session().as_deref(), Some("actor-seed-2"));
+        assert!(!is_cancel());
+    }
+}

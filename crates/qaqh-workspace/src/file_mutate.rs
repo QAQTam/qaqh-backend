@@ -289,10 +289,7 @@ pub(super) fn exec_delete_file(args: &serde_json::Value) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let ws = crate::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let ws = crate::current_workspace();
     let project_root = if !ws.is_empty() && ws != "." {
         Path::new(&ws)
     } else {

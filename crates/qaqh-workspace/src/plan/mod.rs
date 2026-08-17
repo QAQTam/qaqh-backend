@@ -20,10 +20,7 @@ fn plan_path() -> std::path::PathBuf {
     let new_path = dir.join("PLAN.md");
 
     if !new_path.exists() {
-        let ws = crate::CURRENT_WORKSPACE
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let ws = crate::current_workspace();
         if !ws.is_empty() && ws != "." {
             let old_path = Path::new(&ws).join("PLAN.md");
             if old_path.exists() {

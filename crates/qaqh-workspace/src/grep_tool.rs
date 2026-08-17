@@ -212,10 +212,7 @@ fn exec_grep(args: &serde_json::Value) -> ToolResult {
     };
 
     // ── workspace 边界 + 搜索根 ───────────────────────────────────
-    let ws = crate::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let ws = crate::current_workspace();
     let ws = if ws.is_empty() { ".".to_string() } else { ws };
     let ws_path = std::path::Path::new(&ws);
     let strip_verbatim = |p: &std::path::Path| -> std::path::PathBuf {

@@ -278,7 +278,7 @@ impl Loop {
                             let causation = env.command_id.clone();
                             if ringing_command_is_interrupt(&env) {
                                 cancel_for_reader.set();
-                                qaqh_workspace::CANCEL.store(true, Ordering::SeqCst);
+                                qaqh_workspace::set_cancel(true);
                             }
                             if cmd_tx
                                 .send(super::types::WorkerCommand {
@@ -436,7 +436,7 @@ impl Loop {
             self.reset_all_engines();
             self.phase = LoopPhase::Idle;
             self.cancel.clear();
-            qaqh_workspace::CANCEL.store(false, Ordering::SeqCst);
+            qaqh_workspace::set_cancel(false);
 
             // panic 恢复：Ringing 侧以 OperationFailed 暴露（legacy Error/Done 已拆除）。
             self.paced_emitter
@@ -500,7 +500,7 @@ impl Loop {
         self.session.flush();
         self.reset_all_engines();
         self.cancel.clear();
-        qaqh_workspace::CANCEL.store(false, Ordering::SeqCst);
+        qaqh_workspace::set_cancel(false);
     }
 
     /// 将会话 seed 同步到 PacedEmitter（Ringing 事件信封路由键）。
@@ -1350,7 +1350,7 @@ impl Loop {
                 }
                 ConversationCommand::ConversationCancel { turn_id } => {
                     self.cancel.set();
-                    qaqh_workspace::CANCEL.store(true, Ordering::SeqCst);
+                    qaqh_workspace::set_cancel(true);
                     self.reset_all_engines();
                     self.paced_emitter.emit_domain(DomainEvent::Conversation(
                         qaqh_domain::ConversationEvent::ConversationCancelled { turn_id },

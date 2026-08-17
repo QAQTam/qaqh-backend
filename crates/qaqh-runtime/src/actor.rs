@@ -146,6 +146,8 @@ pub(crate) fn run_actor(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+        qaqh_workspace::set_actor_context("", &seed);
+
         if workspace_mode.eq_ignore_ascii_case("wsl") {
             if let Some((endpoint, token)) = workspace_env.as_ref()
                 && !endpoint.is_empty()
@@ -253,6 +255,7 @@ pub(crate) fn run_actor(
         unsafe {
             std::env::remove_var("QAQH_TIMELINE_TURN_COUNT");
         }
+        qaqh_workspace::clear_actor_context();
         cleanup_actor_state(is_subagent);
         log::info!("[ACTOR] in-process agent {seed} exited");
     }));
@@ -262,6 +265,7 @@ pub(crate) fn run_actor(
         unsafe {
             std::env::remove_var("QAQH_TIMELINE_TURN_COUNT");
         }
+        qaqh_workspace::clear_actor_context();
         cleanup_actor_state(is_subagent);
         log::error!("[ACTOR] in-process agent {} panicked: {:?}", seed, panic);
     }
@@ -326,5 +330,5 @@ fn cleanup_actor_state(is_subagent: bool) {
     if is_subagent {
         qaqh_workspace::authorization::set_subagent_sandbox(false);
     }
-    qaqh_workspace::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+    qaqh_workspace::set_cancel(false);
 }

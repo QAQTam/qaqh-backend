@@ -80,7 +80,7 @@ impl InputEngine {
         // and injected into the FIRST user message. They must NOT be reset
         // here — a per-turn rebuild would move the [Environment] block to the
         // newest user message and break the prefix cache at turn-1's message.
-        qaqh_workspace::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+        qaqh_workspace::set_cancel(false);
 
         qaqh_workspace::runtime::set_context(
             &ctx.agent.session.seed,
@@ -245,7 +245,7 @@ impl InputEngine {
         }
 
         ctx.cancel.clear();
-        qaqh_workspace::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+        qaqh_workspace::set_cancel(false);
         qaqh_workspace::runtime::set_context(
             &ctx.agent.session.seed,
             ctx.agent.config.permission_level,
