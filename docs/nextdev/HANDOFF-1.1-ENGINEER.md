@@ -2,7 +2,7 @@
 
 > 日期：2026-08-17
 > 交接范围：后端主仓库 `QAQTam/QAQ-Harness` + 前端仓库 `QAQTam/qaqh-winui-app`
-> 当前主线：以后端 `origin/main` HEAD 为准；截至本轮检查：后端无 open PR，前端唯一 open PR 为 `qaqh-winui-app#10`。
+> 当前主线：以后端 `origin/main` HEAD 为准；截至本轮检查：后端无 open PR，open issues 为 #9 与 #15（#15 已复核并排期到刀 1 step 2 / loop 协议改造）；前端无 open PR（#10 已合并），open issue 为 `qaqh-winui-app#11`。
 
 ---
 
@@ -10,7 +10,7 @@
 
 1. 后端 repo 已从 `deepx-*` 更名为 `qaqh-*`；WinUI 前端在独立仓库 `qaqh-winui-app`。
 2. 必读三份文档：`REFACTOR-ROADMAP.md`、`bugfix-1.1-nextdev.md`、`EXPLORE-REFACTOR-1.1.md`。
-3. 本阶段后端 PR #3/#4/#5/#6/#8/#10 及 handoff docs #7/#11/#12 已合并；前端 #1–#9 已合并，#10（data-root 迁移 + 通知打包修复）open 且 CI 绿。
+3. 本阶段后端 PR #3/#4/#5/#6/#8/#10 及 handoff docs #7/#11/#12 已合并；前端 #1–#10 已合并。后端当前 open issues：#9（config theme/notifications）与 #15（同轮 text↔tool 块重复回放，已排期到刀 1 step 2 / loop 协议改造）；前端当前 open issue：#11（data-root 迁移共享权威契约）。
 4. SMJ 编辑日志已完成；刀 1 已开始分步落地：本轮 step 1 把子代理 worker 从 `Command::new(current_exe)` 子进程改为 daemon 内 Loop actor，主 agent 进程化与逐 actor 隔离仍待后续 step。
 5. 后端所有测试在 Arch Linux 可跑；WinUI 只能在 Windows 编译，前端已于 #7 接入 Windows CI（`cargo check/test -p qaqh-winui`）。
 6. 写代码前必须使用 `git worktree`，不要直接在 `main` 上改。
@@ -306,7 +306,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - 通知开关改为 daemon config，移除/迁移 `ui-preferences.json`。
   - 清理 `SettingsProjection` Web 时代残留。
 - **验收**：后端 `config.save/load` 接受并返回两字段；旧配置可加载；前端不再写 `ui-preferences.json`。
-- **后端确认**：已通过 `gh issue list/view` 核实该 issue 是当前 backend 唯一 open issue，并已在 issue 下留确认评论。
+- **后端确认**：已通过 `gh issue list/view` 核实该 issue 是当时 backend 唯一 open issue，并已在 issue 下留确认评论（此后新增 #15）。
 
 ---
 
@@ -314,11 +314,11 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 
 ### 9.1 仓库与前端状态快照
 
-- 后端 `QAQ-Harness`：`main` 与 `origin/main` 同步；#13 合入后 main = `2dbfe11`；#14 仅修正本文件基线表述。工作区仅 `AGENT.md` untracked；后端无 open PR，唯一 open issue 为 #9。
+- 后端 `QAQ-Harness`：`main` 与 `origin/main` 同步；#13 合入后 main = `2dbfe11`；#14 仅修正本文件基线表述。工作区仅 `AGENT.md` untracked；后端无 open PR，open issues 为 #9 与 #15（#15 详见 9.4）。
 - 前端 `qaqh-winui-app` 已 clone 到 `/home/qaqtamsy/桌面/project/qa-frontend/qaqh-winui-app`：
-  - `main = origin/main = 252b522`，工作区 clean。
-  - PR #1–#9 已合并；#10 open（head `fix/winui-data-root-marker-and-notify-package` @ `b5a4535`，WinUI CI 绿）。
-  - 无 open issue。
+  - 本地 `main` 为 `252b522`，落后 `origin/main` 1 个提交；`origin/main = 1799528`（#10 已合并）。
+  - PR #1–#10 已合并；当前无 open PR。
+  - open issue 为 #11（data-root 迁移不要复制后端私有公式，需共享权威契约）。
 
 ### 9.2 前端 #10 与后端相关点
 
@@ -336,3 +336,24 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   1. 后端 `qaqh_types::platform` 增加权威的 legacy-marker 迁移逻辑，并让 daemon 启动路径自带迁移；旧 marker 仅在 canonicalRoot/ownerHome/rootId 全吻合时改写，异主/损坏 marker fail-closed 不越权。
   2. 前端 #10 改为调用后端公开 API（或至少由后端共享权威公式/测试向量），避免两边各维护一份 FNV-1a/路径归一实现。
   3. 前后端各补同一组回归测试：legacy DeepX marker 可迁移；QAQ-Harness marker 幂等不动；陌生产品/异主/损坏 marker 拒绝且文件不变。
+
+### 9.4 第四轮检查：新增 issue #15（timeline 块重复回放）
+
+- **Issue**：`QAQ-Harness#15 bug(runtime/timeline): 同轮 text↔tool 交替时同一逻辑块反复重开并携带整轮前缀，ChatView 错误回放 N 次`
+- **状态**：OPEN；后端已复核，根因在 `qaqh-msglp/src/ringing_v1/engine_turn.rs` 的 `ensure_stream_block` / `maybe_emit_block_checkpoint`：整轮累计 `content`/`reasoning` 被当作每个新 segment 的 checkpoint 全量写入，导致同轮 text↔tool 交替时产生多个前缀超集块。
+- **排期**：按 issue 评论，**不单独修复**，推迟到刀 1 step 2 / loop 协议改造时一并处理；本 issue 保留 OPEN 作为 loop 改造回归清单。
+- **验收清单**（沿用 issue 建议）：
+  - 单轮 `reasoning→tool→text→tool→text` 只生成 1 个 reasoning + 1 个 text 稳定块；或确需分段时，每段 checkpoint 只写本段增量，不携带整轮前缀。
+  - 同轮 text↔tool 切换不得无限重开 block_id 或放大 replaceable/journal/timeline 数据。
+  - 补后端回归测试覆盖交替流式块。
+- **当前验证**：`cargo check --workspace` 通过；`cargo test -p qaqh-runtime` 与 `cargo test -p qaqh-msglp` 通过；`qaqh-workspace --lib` 存在已知并行全局态 flaky（`confirm_apply::apply_patch_dry_run_then_confirm` 单独串行重跑通过）。
+
+
+### 9.5 远端状态刷新（前端 #10 已合并 / #11 open）
+
+- `git fetch origin --prune` 后确认：
+  - 后端 `QAQ-Harness` 远端 `origin/main` 仍为 `b49c7e6`；无 open PR；open issues 为 #9、#15。
+  - 前端 `qaqh-winui-app` 远端 `origin/main` 已前进到 `1799528`（`fix(winui): port data-root marker migration and notify packaging fixes (#10)`），因此 #10 已合并；远端 open PR 列表为空。
+  - 前端新增 open issue **#11**：要求 data-root 迁移不要复制后端私有公式，改为共享权威契约（对应本文件 9.3 的联查建议）。
+- 本地前端工作树 `main` 仍停在 `252b522`，落后 `origin/main` 1 个提交；需要 `git pull` 或 `git merge --ff-only origin/main` 同步。
+- 后端本地 `main` 当前领先 `origin/main` 1 个提交（本文档的 handoff 同步提交 `eb31a7b`），尚未 push。
