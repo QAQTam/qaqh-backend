@@ -27,9 +27,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use qaqh_client::{
-    ActionRequest, Client, ClientError, ClientHandlers, ClientOptions, CommandOptions, ControlEvent,
-    ConversationEvent, EventBatch, RingingCommand, RingingCommandAck, RingingCommandAckStatus,
-    RingingEvent,
+    ActionRequest, Client, ClientError, ClientHandlers, ClientOptions, CommandOptions,
+    ControlEvent, ConversationEvent, EventBatch, RingingCommand, RingingCommandAck,
+    RingingCommandAckStatus, RingingEvent,
 };
 use qaqh_workspace::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
 
@@ -114,12 +114,22 @@ mod tests {
         for key in expected {
             assert!(properties.contains_key(key), "missing {key}");
         }
-        for legacy in ["system_prompt", "tools", "model", "base_url", "max_tokens", "name", "task"] {
-            assert!(!properties.contains_key(legacy), "{legacy} must not be exposed");
+        for legacy in [
+            "system_prompt",
+            "tools",
+            "model",
+            "base_url",
+            "max_tokens",
+            "name",
+            "task",
+        ] {
+            assert!(
+                !properties.contains_key(legacy),
+                "{legacy} must not be exposed"
+            );
         }
         assert_eq!(
-            handler.input_schema["required"][0],
-            "task_description",
+            handler.input_schema["required"][0], "task_description",
             "task_description must be the only required param"
         );
     }
@@ -136,7 +146,9 @@ mod tests {
         // 有 context：必须包裹在 <main_subagent_message> 内，防止子代理把
         // 传入内容误判为自身 user 消息而直接修改项目。
         let with_ctx = build_subagent_task("review the diff", "repo at F:\\proj\nbranch main");
-        assert!(with_ctx.contains("<main_subagent_message>\nrepo at F:\\proj\nbranch main\n</main_subagent_message>"));
+        assert!(with_ctx.contains(
+            "<main_subagent_message>\nrepo at F:\\proj\nbranch main\n</main_subagent_message>"
+        ));
         assert!(with_ctx.contains("[TASK]\nreview the diff"));
         // 身份提示在前，任务在后。
         assert!(with_ctx.find("[SYSTEM]").unwrap() < with_ctx.find("[TASK]").unwrap());
@@ -173,7 +185,10 @@ fn build_subagent_task(task_description: &str, context: &str) -> String {
 /// 子代理进程记录的实际存放位置。
 enum RegistryRef {
     /// serve 进程注册表（process 工具可见）。
-    Remote { client: ServeRegistryClient, id: u32 },
+    Remote {
+        client: ServeRegistryClient,
+        id: u32,
+    },
     /// 本地（worker 进程）注册表——serve 不可达时的降级路径。
     Local { id: u32 },
 }
@@ -197,13 +212,15 @@ impl RegistryRef {
                         .map(|s| s == "killed")
                 })
                 .unwrap_or(false),
-            RegistryRef::Local { id } => qaqh_workspace::process_registry::ProcessRegistry::get_info(*id)
-                .and_then(|info| {
-                    info.get("status")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s == "killed")
-                })
-                .unwrap_or(false),
+            RegistryRef::Local { id } => {
+                qaqh_workspace::process_registry::ProcessRegistry::get_info(*id)
+                    .and_then(|info| {
+                        info.get("status")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s == "killed")
+                    })
+                    .unwrap_or(false)
+            }
         }
     }
 
@@ -214,7 +231,10 @@ impl RegistryRef {
                 let _ = client.post("update", *id, "", answer, exit_code);
             }
             RegistryRef::Local { id } => {
-                qaqh_workspace::process_registry::ProcessRegistry::set_answer(*id, answer.to_string());
+                qaqh_workspace::process_registry::ProcessRegistry::set_answer(
+                    *id,
+                    answer.to_string(),
+                );
                 qaqh_workspace::process_registry::ProcessRegistry::mark_exited(*id, exit_code);
             }
         }
@@ -286,7 +306,10 @@ fn register_subagent_process(name: &str) -> RegistryRef {
         {
             Some(id) => {
                 log::info!("[SUBAGENT] '{name}' registered in serve registry id={id}");
-                return RegistryRef::Remote { client, id: id as u32 };
+                return RegistryRef::Remote {
+                    client,
+                    id: id as u32,
+                };
             }
             None => {
                 log::warn!(
@@ -449,14 +472,13 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
             "Check daemon lease state.",
         ));
     }
-    let send = RingingCommand::Conversation(
-        qaqh_client::ConversationCommand::ConversationSendMessage {
+    let send =
+        RingingCommand::Conversation(qaqh_client::ConversationCommand::ConversationSendMessage {
             text: task_text,
             images: vec![],
             attachments: None,
             as_system: false,
-        },
-    );
+        });
     // 任务发送 ACK 校验：Rejected 意味着子 worker 未收到任务，立即失败，
     // 不要让 collect 空等 timeout。
     let send_ack = rt_block_on(client.send_command(Some(&seed), send, CommandOptions::default()));
@@ -592,8 +614,7 @@ fn collect_subagent_result(
                                 if let Ok(bytes) =
                                     rt_block_on(client.download_content(seed, &reference))
                                 {
-                                    final_answer =
-                                        String::from_utf8_lossy(&bytes).to_string();
+                                    final_answer = String::from_utf8_lossy(&bytes).to_string();
                                 }
                             }
                             if is_final && !final_answer.is_empty() {
@@ -605,27 +626,23 @@ fn collect_subagent_result(
                             did_finish = true;
                         }
                         RingingEvent::Conversation(ConversationEvent::TurnFailed {
-                            error,
-                            ..
+                            error, ..
                         }) => {
                             log::warn!("[SUBAGENT] '{name}' turn failed: {error:?}");
                             final_answer = format!("[SUBAGENT '{name}' ERROR] {error:?}");
                             exit_code = 1;
                             did_finish = true;
                         }
-                        RingingEvent::Conversation(
-                            ConversationEvent::ConversationCancelled { .. },
-                        ) => {
+                        RingingEvent::Conversation(ConversationEvent::ConversationCancelled {
+                            ..
+                        }) => {
                             log::info!("[SUBAGENT] '{name}' conversation cancelled");
                             final_answer = format!("[SUBAGENT '{name}' CANCELLED]");
                             did_cancel = true;
                         }
                         // 控制面失败（compact 拒绝注入、lease 拒绝等）：此前被
                         // 静默忽略导致"等到超时"。至少记入日志便于归因。
-                        RingingEvent::Control(ControlEvent::OperationFailed {
-                            error,
-                            ..
-                        }) => {
+                        RingingEvent::Control(ControlEvent::OperationFailed { error, .. }) => {
                             log::warn!(
                                 "[SUBAGENT] '{name}' operation failed: code={:?} message={:?}",
                                 error.code,
@@ -660,8 +677,7 @@ fn collect_subagent_result(
                             );
                         }
                     }
-                    final_answer =
-                        format!("[SUBAGENT '{name}' TIMEOUT after {timeout_secs}s]");
+                    final_answer = format!("[SUBAGENT '{name}' TIMEOUT after {timeout_secs}s]");
                     exit_code = 1;
                     did_finish = true;
                 }
@@ -737,7 +753,9 @@ fn collect_subagent_result(
             }
             last_rejected = Some(format!(
                 "{:?}",
-                result.map(|a| (a.status, a.code)).map_err(|e| e.to_string())
+                result
+                    .map(|a| (a.status, a.code))
+                    .map_err(|e| e.to_string())
             ));
             log::warn!(
                 "[SUBAGENT] '{name}' inject attempt {} not accepted: {:?}",
@@ -746,10 +764,7 @@ fn collect_subagent_result(
             );
         }
         if accepted {
-            log::info!(
-                "[SUBAGENT] '{name}' inject accepted ({} bytes)",
-                answer_len
-            );
+            log::info!("[SUBAGENT] '{name}' inject accepted ({} bytes)", answer_len);
         } else {
             log::error!(
                 "[SUBAGENT] '{name}' inject FAILED after {INJECT_ATTEMPTS} attempts: {:?}",

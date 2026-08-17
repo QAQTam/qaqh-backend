@@ -1132,10 +1132,12 @@ impl RingingHub {
                 // 活交互在表 → 收尾跳过（修复「ask 发布后 1ms 被 bootstrap 秒杀」）。
                 match &envelope.event {
                     RingingEvent::Control(ControlEvent::InteractionRequested {
-                        interaction_id, ..
+                        interaction_id,
+                        ..
                     })
                     | RingingEvent::Control(ControlEvent::PlanReviewRequested {
-                        interaction_id, ..
+                        interaction_id,
+                        ..
                     }) => {
                         self.live_interactions
                             .lock()
@@ -1143,10 +1145,12 @@ impl RingingHub {
                             .insert(seed.to_string(), interaction_id.clone());
                     }
                     RingingEvent::Control(ControlEvent::InteractionResolved {
-                        interaction_id, ..
+                        interaction_id,
+                        ..
                     })
                     | RingingEvent::Control(ControlEvent::PlanReviewResolved {
-                        interaction_id, ..
+                        interaction_id,
+                        ..
                     }) => {
                         let mut live = self
                             .live_interactions
@@ -2521,10 +2525,7 @@ mod tests {
         );
         // worker 死亡/重启收尾路径（force=true）：无视守卫，强制收尾。
         assert!(hub.seal_orphan_channel_state("s", true));
-        assert!(hub
-            .snapshot(RingingChannel::Control, "s")
-            .state["pending_interaction"]
-            .is_null());
+        assert!(hub.snapshot(RingingChannel::Control, "s").state["pending_interaction"].is_null());
         // 收尾后活表清空：后续 bootstrap 路径不再保护（幂等）。
         assert!(!hub.seal_orphan_channel_state("s", false));
     }

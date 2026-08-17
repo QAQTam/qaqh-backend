@@ -375,8 +375,7 @@ impl CompactEngine {
             "thinking_blocks": thinking_blocks, "tool_call_blocks": tool_call_blocks,
         });
         // 统一数据源：上下文统计并入 meta.json（原 context_stats.json 退役）。
-        qaqh_session::SessionManager::global()
-            .set_context_stats(&ctx.agent.session.seed, &stats);
+        qaqh_session::SessionManager::global().set_context_stats(&ctx.agent.session.seed, &stats);
 
         // Ringing 双发：CompactFinished（成功终态）
         ctx.emitter
@@ -532,10 +531,7 @@ fn compactable_head_user_count(head: &[&qaqh_types::Message]) -> usize {
         .count()
 }
 
-fn serialize_messages(
-    head: &[&qaqh_types::Message],
-    kept: &[&qaqh_types::Message],
-) -> Vec<String> {
+fn serialize_messages(head: &[&qaqh_types::Message], kept: &[&qaqh_types::Message]) -> Vec<String> {
     let mut out = Vec::new();
     for m in head {
         let role = &m.role;

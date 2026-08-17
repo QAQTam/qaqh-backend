@@ -52,7 +52,9 @@ impl ServerNetworkConfig {
         let mut config = Self {
             bind_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             port: 64413,
-            token: std::env::var("QAQH_SERVER_TOKEN").ok().filter(|v| !v.is_empty()),
+            token: std::env::var("QAQH_SERVER_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty()),
         };
         let mut index = 0;
         while index < args.len() {
@@ -67,7 +69,9 @@ impl ServerNetworkConfig {
                 "--port" => {
                     index += 1;
                     let value = args.get(index).ok_or("--port requires a value")?;
-                    config.port = value.parse().map_err(|_| format!("invalid --port: {value}"))?;
+                    config.port = value
+                        .parse()
+                        .map_err(|_| format!("invalid --port: {value}"))?;
                 }
                 "--token" => {
                     index += 1;
@@ -86,7 +90,9 @@ impl ServerNetworkConfig {
 /// 连的是 TEST-NET 保留地址，不会产生网络流量。
 fn guess_lan_ip() -> Option<std::net::IpAddr> {
     let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    socket.connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    socket
+        .connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9))
+        .ok()?;
     socket.local_addr().ok().map(|addr| addr.ip())
 }
 

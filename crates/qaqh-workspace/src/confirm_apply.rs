@@ -30,7 +30,10 @@ fn exec_confirm_apply(args: &serde_json::Value) -> ToolResult {
             .to_string());
         }
     };
-    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("apply");
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("apply");
 
     let Some(p) = crate::pending::take(pending_id) else {
         return crate::ToolResult::error(serde_json::json!({
@@ -48,24 +51,28 @@ fn exec_confirm_apply(args: &serde_json::Value) -> ToolResult {
             "edit" => crate::file_edit_v2::exec_edit(&p.args),
             "write" => crate::file_mutate::exec_write_file(&p.args),
             "apply_patch" => crate::apply_patch::exec_apply_patch(&p.args),
-            other => crate::ToolResult::error(serde_json::json!({
+            other => crate::ToolResult::error(
+                serde_json::json!({
+                    "timeis": crate::now_utc8(),
+                    "status": "error",
+                    "code": "UNKNOWN_PENDING_TOOL",
+                    "message": format!("pending {pending_id} holds unknown tool '{other}'"),
+                })
+                .to_string(),
+            ),
+        },
+        "discard" => crate::ToolResult::ok(format!(
+            "[OK] confirm_apply — pending {pending_id} discarded, no changes written\n"
+        )),
+        other => crate::ToolResult::error(
+            serde_json::json!({
                 "timeis": crate::now_utc8(),
                 "status": "error",
-                "code": "UNKNOWN_PENDING_TOOL",
-                "message": format!("pending {pending_id} holds unknown tool '{other}'"),
+                "code": "INVALID_ACTION",
+                "message": format!("invalid action {other:?} — use \"apply\" or \"discard\""),
             })
-            .to_string()),
-        },
-        "discard" => {
-            crate::ToolResult::ok(format!("[OK] confirm_apply — pending {pending_id} discarded, no changes written\n"))
-        }
-        other => crate::ToolResult::error(serde_json::json!({
-            "timeis": crate::now_utc8(),
-            "status": "error",
-            "code": "INVALID_ACTION",
-            "message": format!("invalid action {other:?} — use \"apply\" or \"discard\""),
-        })
-        .to_string()),
+            .to_string(),
+        ),
     }
 }
 
@@ -130,12 +137,12 @@ mod tests {
             let raw = result.model_text();
             let mut v = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_default();
             if v.get("code").is_none() {
-                v["status"] = serde_json::json!(if matches!(result.status, crate::ToolStatus::Ok)
-                {
-                    "ok"
-                } else {
-                    "error"
-                });
+                v["status"] =
+                    serde_json::json!(if matches!(result.status, crate::ToolStatus::Ok) {
+                        "ok"
+                    } else {
+                        "error"
+                    });
                 v["raw"] = serde_json::json!(raw);
             }
             v

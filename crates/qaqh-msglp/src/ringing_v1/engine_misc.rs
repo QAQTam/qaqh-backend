@@ -67,8 +67,7 @@ impl MiscEngine {
             "messages": 0,
         });
         // 统一数据源：上下文统计并入 meta.json（原 context_stats.json 退役）。
-        qaqh_session::SessionManager::global()
-            .set_context_stats(&agent.session.seed, &stats);
+        qaqh_session::SessionManager::global().set_context_stats(&agent.session.seed, &stats);
 
         // Ringing 双发：DashboardUpdated（replaceable 覆盖）
         emitter.emit_domain(qaqh_domain::DomainEvent::Control(
@@ -102,5 +101,4 @@ impl MiscEngine {
         }
         log::info!("[MISC] mode set to {mode_str} (internal={m})");
     }
-
 }

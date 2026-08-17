@@ -157,13 +157,11 @@ fn handle_skills(ctx: crate::ToolCallCtx) -> ToolResult {
         "list" if !has_name && !has_path => handle_skills_list(ctx),
         "resource" if has_name && has_path => handle_skill_resource(ctx),
         "validate" if has_name && !has_path => handle_skill_validate(ctx),
-        "activate" | "list" | "resource" | "validate" => {
-            ToolResult::error(crate::json_err(
-                "INVALID_ARGUMENTS",
-                format!("arguments do not match skills action '{action}'"),
-                "activate and validate require name; list accepts only action; resource requires name and path.",
-            ))
-        }
+        "activate" | "list" | "resource" | "validate" => ToolResult::error(crate::json_err(
+            "INVALID_ARGUMENTS",
+            format!("arguments do not match skills action '{action}'"),
+            "activate and validate require name; list accepts only action; resource requires name and path.",
+        )),
         _ => ToolResult::error(crate::json_err(
             "INVALID_ACTION",
             "skills action must be activate, list, resource, or validate",

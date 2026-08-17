@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use crate::{
-    sha256_reader, Artifact, ArtifactKind, BundleFile, BundleManifest, Catalog, InstalledState,
-    Result, UpdateAction, UpdateError, UpdateMode, UpdatePlan,
+    Artifact, ArtifactKind, BundleFile, BundleManifest, Catalog, InstalledState, Result,
+    UpdateAction, UpdateError, UpdateMode, UpdatePlan, sha256_reader,
 };
 
 /// 文件级增量规划（基线累积模型，docs/winui-update-design.md §4）。
@@ -372,7 +372,9 @@ mod tests {
     // ── plan_delta（文件级增量）──────────────────────────────────
 
     fn file_sha(content: &[u8]) -> String {
-        crate::sha256_reader(std::io::Cursor::new(content)).unwrap().1
+        crate::sha256_reader(std::io::Cursor::new(content))
+            .unwrap()
+            .1
     }
 
     fn delta_file(source: &str, target: &str, content: &[u8]) -> BundleFile {
@@ -385,10 +387,8 @@ mod tests {
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "qaqh-update-delta-{}-{tag}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("qaqh-update-delta-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -418,7 +418,10 @@ mod tests {
         let delta = build_delta_manifest(&target, &changed);
         assert_eq!(delta.kind, "runtime");
         assert_eq!(delta.build_id, "runtime-new");
-        assert!(!delta.requires_full_install, "delta must not require full install");
+        assert!(
+            !delta.requires_full_install,
+            "delta must not require full install"
+        );
         assert_eq!(delta.files.len(), 1);
         assert_eq!(delta.files[0].target, "b.txt");
         assert!(delta.components.contains_key("runtime"));
@@ -438,7 +441,15 @@ mod tests {
         delta_artifact.baseline = Some("1.1.0".into());
         c.upsert_artifact(delta_artifact.clone());
         assert_eq!(c.artifacts.len(), base_count + 1);
-        assert_eq!(c.artifacts.iter().find(|a| a.id == "runtime").unwrap().baseline.as_deref(), Some("1.1.0"));
+        assert_eq!(
+            c.artifacts
+                .iter()
+                .find(|a| a.id == "runtime")
+                .unwrap()
+                .baseline
+                .as_deref(),
+            Some("1.1.0")
+        );
     }
 
     #[test]

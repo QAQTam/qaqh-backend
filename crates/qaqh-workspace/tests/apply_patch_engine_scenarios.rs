@@ -15,8 +15,8 @@ use tempfile::tempdir;
 
 #[test]
 fn apply_patch_engine_scenarios() {
-    let scenarios_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/apply_patch_scenarios");
+    let scenarios_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/apply_patch_scenarios");
     let mut ran = 0usize;
     for entry in fs::read_dir(&scenarios_dir).expect("scenarios dir") {
         let entry = entry.unwrap();
@@ -59,7 +59,8 @@ fn run_scenario(dir: &Path) {
     let expected_snapshot = snapshot_dir(&dir.join("expected"));
     let actual_snapshot = snapshot_dir(tmp.path());
     assert_eq!(
-        actual_snapshot, expected_snapshot,
+        actual_snapshot,
+        expected_snapshot,
         "{name}: final filesystem state mismatch (input dir: {})",
         input_dir.display()
     );
@@ -79,11 +80,7 @@ fn snapshot_dir(root: &Path) -> BTreeMap<PathBuf, Entry> {
     entries
 }
 
-fn snapshot_dir_recursive(
-    base: &Path,
-    dir: &Path,
-    entries: &mut BTreeMap<PathBuf, Entry>,
-) {
+fn snapshot_dir_recursive(base: &Path, dir: &Path, entries: &mut BTreeMap<PathBuf, Entry>) {
     for entry in fs::read_dir(dir).expect("read_dir") {
         let entry = entry.unwrap();
         let rel = entry.path().strip_prefix(base).unwrap().to_path_buf();

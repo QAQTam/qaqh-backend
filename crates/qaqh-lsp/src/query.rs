@@ -21,7 +21,10 @@ use crate::uri::path_to_uri;
 /// Convert an absolute filesystem path to an `lsp_types::Uri`.
 pub fn uri_of(path: &Path) -> Result<Uri, LspError> {
     let s = path_to_uri(path);
-    Uri::from_str(&s).map_err(|e| LspError::BadUri { uri: s, reason: e.to_string() })
+    Uri::from_str(&s).map_err(|e| LspError::BadUri {
+        uri: s,
+        reason: e.to_string(),
+    })
 }
 
 /// Build an LSP 0-based `Position` from a 1-based line/column pair (the
@@ -36,7 +39,12 @@ pub fn position_1based(line: u32, column: u32) -> Position {
 impl LspClient {
     /// Open a document (`textDocument/didOpen`, full content sync). Returns
     /// the document URI for subsequent queries.
-    pub fn open_document(&mut self, path: &Path, language_id: &str, text: &str) -> Result<Uri, LspError> {
+    pub fn open_document(
+        &mut self,
+        path: &Path,
+        language_id: &str,
+        text: &str,
+    ) -> Result<Uri, LspError> {
         let uri = uri_of(path)?;
         let version = self.doc_version;
         self.doc_version += 1;

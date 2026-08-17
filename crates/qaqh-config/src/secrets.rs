@@ -119,11 +119,9 @@ impl SecretStore {
                 .map_err(|e| format!("secrets create_dir_all failed: {e}"))?;
         }
         let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &content)
-            .map_err(|e| format!("secrets write failed: {e}"))?;
+        std::fs::write(&tmp, &content).map_err(|e| format!("secrets write failed: {e}"))?;
         restrict_permissions(&tmp);
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| format!("secrets rename failed: {e}"))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| format!("secrets rename failed: {e}"))?;
         restrict_permissions(&self.path);
         Ok(())
     }
@@ -132,7 +130,7 @@ impl SecretStore {
 #[cfg(windows)]
 fn encrypt(plain: &[u8]) -> Result<String, String> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData};
 
     // CRYPTPROTECT_UI_FORBIDDEN: never show a prompt; CurrentUser scope.
     const CRYPTPROTECT_UI_FORBIDDEN: u32 = 0x1;
@@ -153,8 +151,7 @@ fn encrypt(plain: &[u8]) -> Result<String, String> {
             &mut out_blob,
         )
         .map_err(|e| format!("CryptProtectData failed: {e}"))?;
-        let bytes =
-            std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
+        let bytes = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
         let _ = LocalFree(HLOCAL(out_blob.pbData as *mut _));
         Ok(format!("dpapi:{}", base64_encode(&bytes)))
     }
@@ -163,7 +160,7 @@ fn encrypt(plain: &[u8]) -> Result<String, String> {
 #[cfg(windows)]
 fn decrypt(raw: &str) -> Result<String, String> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
 
     let b64 = raw
         .strip_prefix("dpapi:")
@@ -177,8 +174,7 @@ fn decrypt(raw: &str) -> Result<String, String> {
     unsafe {
         CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob)
             .map_err(|e| format!("CryptUnprotectData failed: {e}"))?;
-        let bytes =
-            std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
+        let bytes = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
         let _ = LocalFree(HLOCAL(out_blob.pbData as *mut _));
         String::from_utf8(bytes).map_err(|_| "decrypted secret is not utf-8".to_string())
     }
@@ -274,7 +270,11 @@ mod tests {
             b"sk-1234567890-abcdefghijklmnopqrstuvwxyz",
         ] {
             let encoded = base64_encode(sample);
-            assert_eq!(base64_decode(&encoded).unwrap(), sample, "sample: {sample:?}");
+            assert_eq!(
+                base64_decode(&encoded).unwrap(),
+                sample,
+                "sample: {sample:?}"
+            );
         }
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
@@ -285,7 +285,10 @@ mod tests {
         let secret = "sk-test-secret-value";
         let encoded = encrypt(secret.as_bytes()).expect("encrypt");
         #[cfg(windows)]
-        assert!(encoded.starts_with("dpapi:"), "windows secrets are dpapi blobs");
+        assert!(
+            encoded.starts_with("dpapi:"),
+            "windows secrets are dpapi blobs"
+        );
         assert_eq!(decrypt(&encoded).expect("decrypt"), secret);
     }
 
@@ -305,7 +308,9 @@ mod tests {
         assert_eq!(store.load(SecretSlot::Main).as_deref(), Some("sk-main"));
         assert_eq!(store.load(SecretSlot::Subagent).as_deref(), Some("sk-sub"));
         // 多槽位共存：重写 main 不丢 sub
-        store.set(SecretSlot::Main, "sk-main-2").expect("re-set main");
+        store
+            .set(SecretSlot::Main, "sk-main-2")
+            .expect("re-set main");
         assert_eq!(store.load(SecretSlot::Subagent).as_deref(), Some("sk-sub"));
         assert_eq!(store.load(SecretSlot::Main).as_deref(), Some("sk-main-2"));
 

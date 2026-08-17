@@ -52,7 +52,10 @@ impl Transcript {
                 }
             }
             if turn.state != TimelineTurnState::Completed {
-                self.push(Role::Notice, turn_state_line(turn.state, turn.failure.as_ref()));
+                self.push(
+                    Role::Notice,
+                    turn_state_line(turn.state, turn.failure.as_ref()),
+                );
             }
         }
     }
@@ -64,7 +67,9 @@ impl Transcript {
                 self.push(Role::User, format!("❯ {user_text}"));
             }
             TimelineEvent::BlockOpened { block } => self.open_block(block),
-            TimelineEvent::TextDelta { block_id, delta, .. } => self.append_to(block_id, delta),
+            TimelineEvent::TextDelta {
+                block_id, delta, ..
+            } => self.append_to(block_id, delta),
             TimelineEvent::BlockCheckpoint { block_id, text } => self.replace(block_id, text),
             TimelineEvent::ToolUpdated { block_id, tool } => {
                 self.replace(block_id, &tool_line(tool));
@@ -117,7 +122,8 @@ impl Transcript {
             line.role = role;
             line.text = text;
         } else {
-            self.block_line.insert(block_id.to_string(), self.lines.len());
+            self.block_line
+                .insert(block_id.to_string(), self.lines.len());
             self.push(role, text);
         }
     }

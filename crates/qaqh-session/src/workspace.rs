@@ -71,11 +71,7 @@ fn normalize_path(p: &str) -> String {
     while s.ends_with('\\') {
         s.pop();
     }
-    if cfg!(windows) {
-        s.to_lowercase()
-    } else {
-        s
-    }
+    if cfg!(windows) { s.to_lowercase() } else { s }
 }
 
 /// cwd 是否位于 workspace 路径内（相等或为其子目录，D7 匹配规则）。
@@ -121,16 +117,16 @@ impl WorkspaceStore {
             .map_err(|e| format!("serialize workspaces: {e}"))?;
         {
             use std::io::Write;
-            let mut f = std::fs::File::create(&tmp)
-                .map_err(|e| format!("create workspaces tmp: {e}"))?;
+            let mut f =
+                std::fs::File::create(&tmp).map_err(|e| format!("create workspaces tmp: {e}"))?;
             f.write_all(json.as_bytes())
                 .map_err(|e| format!("write workspaces tmp: {e}"))?;
-            f.flush().map_err(|e| format!("flush workspaces tmp: {e}"))?;
+            f.flush()
+                .map_err(|e| format!("flush workspaces tmp: {e}"))?;
             f.sync_all()
                 .map_err(|e| format!("sync workspaces tmp: {e}"))?;
         }
-        std::fs::rename(&tmp, &self.file)
-            .map_err(|e| format!("rename workspaces: {e}"))
+        std::fs::rename(&tmp, &self.file).map_err(|e| format!("rename workspaces: {e}"))
     }
 
     fn save(&self, items: &[WorkspaceMeta]) {
@@ -181,7 +177,11 @@ impl WorkspaceStore {
                 .cwd
                 .as_deref()
                 .is_some_and(|cwd| cwd_belongs(cwd, &canonical_str));
-            if belongs && !items.iter().any(|w| w.session_ids.iter().any(|s| s == &meta.seed)) {
+            if belongs
+                && !items
+                    .iter()
+                    .any(|w| w.session_ids.iter().any(|s| s == &meta.seed))
+            {
                 session_ids.push(meta.seed.clone());
             }
         }
@@ -244,7 +244,9 @@ impl WorkspaceStore {
     pub fn move_session(&self, seed: &str, to_ws_id: &str) -> Result<(), String> {
         let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !items.iter().any(|w| w.id == to_ws_id) {
-            return Err(format!("workspace.move_session: unknown workspace {to_ws_id}"));
+            return Err(format!(
+                "workspace.move_session: unknown workspace {to_ws_id}"
+            ));
         }
         for w in items.iter_mut() {
             w.session_ids.retain(|s| s != seed);
@@ -311,8 +313,12 @@ mod tests {
         let _ = std::fs::create_dir_all(dir.join("b"));
         WorkspaceStore::init(dir.clone());
         let store = WorkspaceStore::global();
-        let ws_a = store.create(dir.join("a").to_str().expect("path"), &[]).expect("create a");
-        let ws_b = store.create(dir.join("b").to_str().expect("path"), &[]).expect("create b");
+        let ws_a = store
+            .create(dir.join("a").to_str().expect("path"), &[])
+            .expect("create a");
+        let ws_b = store
+            .create(dir.join("b").to_str().expect("path"), &[])
+            .expect("create b");
         assert_eq!(store.list().len(), 2);
 
         store.attach_by_cwd("s1", dir.join("a").to_str().expect("path"));
@@ -321,7 +327,13 @@ mod tests {
         store.move_session("s1", &ws_b.id).expect("move");
         assert_eq!(store.workspace_of("s1").as_deref(), Some(ws_b.id.as_str()));
         let list = store.list();
-        assert!(list.iter().find(|w| w.id == ws_a.id).expect("a").session_ids.is_empty());
+        assert!(
+            list.iter()
+                .find(|w| w.id == ws_a.id)
+                .expect("a")
+                .session_ids
+                .is_empty()
+        );
 
         store.remove_session("s1");
         assert_eq!(store.workspace_of("s1"), None);

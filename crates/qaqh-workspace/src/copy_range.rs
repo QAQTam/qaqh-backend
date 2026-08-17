@@ -124,7 +124,11 @@ fn run_copy_range(
         return Err(not_found_error("SOURCE_START_NOT_FOUND", start_anchor));
     }
     if start_hits.len() > 1 {
-        return Err(ambiguous_error("SOURCE_START_AMBIGUOUS", start_anchor, &start_hits));
+        return Err(ambiguous_error(
+            "SOURCE_START_AMBIGUOUS",
+            start_anchor,
+            &start_hits,
+        ));
     }
     let start_idx = start_hits[0];
 
@@ -260,40 +264,54 @@ fn exec_copy_range(args: &serde_json::Value) -> ToolResult {
     let (Some(source_path), Some(source_start), Some(target_path)) =
         (get("source_path"), get("source_start"), get("target_path"))
     else {
-        return crate::ToolResult::error(serde_json::json!({
-            "timeis": crate::now_utc8(),
-            "status": "error",
-            "code": "MISSING_ARGUMENT",
-            "message": "copy_range requires 'source_path', 'source_start' and 'target_path'",
-        }).to_string());
+        return crate::ToolResult::error(
+            serde_json::json!({
+                "timeis": crate::now_utc8(),
+                "status": "error",
+                "code": "MISSING_ARGUMENT",
+                "message": "copy_range requires 'source_path', 'source_start' and 'target_path'",
+            })
+            .to_string(),
+        );
     };
     let source_end = get("source_end");
     let target_anchor = get("target_anchor");
-    let mode = match Mode::parse(args.get("mode").and_then(|x| x.as_str()).unwrap_or("append")) {
+    let mode = match Mode::parse(
+        args.get("mode")
+            .and_then(|x| x.as_str())
+            .unwrap_or("append"),
+    ) {
         Some(m) => m,
         None => {
-            return crate::ToolResult::error(serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "error",
-                "code": "INVALID_MODE",
-                "message": format!("invalid mode — use one of: {}", MODES.join(" | ")),
-            })
-            .to_string());
+            return crate::ToolResult::error(
+                serde_json::json!({
+                    "timeis": crate::now_utc8(),
+                    "status": "error",
+                    "code": "INVALID_MODE",
+                    "message": format!("invalid mode — use one of: {}", MODES.join(" | ")),
+                })
+                .to_string(),
+            );
         }
     };
 
     let ws = std::path::PathBuf::from(workspace_root());
-    let src = crate::apply_patch_engine::resolve_workspace_path(&ws, std::path::Path::new(&source_path));
-    let tgt = crate::apply_patch_engine::resolve_workspace_path(&ws, std::path::Path::new(&target_path));
+    let src =
+        crate::apply_patch_engine::resolve_workspace_path(&ws, std::path::Path::new(&source_path));
+    let tgt =
+        crate::apply_patch_engine::resolve_workspace_path(&ws, std::path::Path::new(&target_path));
     let (src, tgt) = match (src, tgt) {
         (Ok(s), Ok(t)) => (s, t),
         (Err(e), _) | (_, Err(e)) => {
-            return crate::ToolResult::error(serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "error",
-                "code": "PATH_OUTSIDE_WORKSPACE",
-                "message": e.to_string(),
-            }).to_string());
+            return crate::ToolResult::error(
+                serde_json::json!({
+                    "timeis": crate::now_utc8(),
+                    "status": "error",
+                    "code": "PATH_OUTSIDE_WORKSPACE",
+                    "message": e.to_string(),
+                })
+                .to_string(),
+            );
         }
     };
 
@@ -326,7 +344,9 @@ fn exec_copy_range(args: &serde_json::Value) -> ToolResult {
             if let Some(anchor) = &target_anchor {
                 text = format!(
                     "[OK] copy_range — {n} line(s) L{}-L{} copied: {source_path} → {target_path} ({} {anchor:?})\n",
-                    r.range.0, r.range.1, r.mode.name(),
+                    r.range.0,
+                    r.range.1,
+                    r.mode.name(),
                 );
             }
             let data = serde_json::json!({
@@ -447,11 +467,22 @@ mod tests {
     #[test]
     fn copies_range_to_append() {
         let (dir, ws) = setup(&[
-            ("src.rs", "fn a() {}\nfn target() {\n    body\n}\nfn c() {}\n"),
+            (
+                "src.rs",
+                "fn a() {}\nfn target() {\n    body\n}\nfn c() {}\n",
+            ),
             ("dst.rs", "// header\n"),
         ]);
-        let out = run(&ws, "src.rs", "fn target() {", Some("}"), "dst.rs", None, "append")
-            .unwrap();
+        let out = run(
+            &ws,
+            "src.rs",
+            "fn target() {",
+            Some("}"),
+            "dst.rs",
+            None,
+            "append",
+        )
+        .unwrap();
         assert!(out.starts_with("[OK] copy_range"));
         assert!(out.contains("3 line(s)"));
         assert_eq!(
@@ -466,7 +497,16 @@ mod tests {
             ("src.rs", "keep\nfn marker() {}\nkeep2\n"),
             ("dst.rs", "a\nb\n"),
         ]);
-        run(&ws, "src.rs", "fn marker() {}", None, "dst.rs", None, "append").unwrap();
+        run(
+            &ws,
+            "src.rs",
+            "fn marker() {}",
+            None,
+            "dst.rs",
+            None,
+            "append",
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("dst.rs")).unwrap(),
             "a\nb\nfn marker() {}\n"
@@ -497,10 +537,7 @@ mod tests {
 
     #[test]
     fn insert_before_anchor() {
-        let (dir, ws) = setup(&[
-            ("src.rs", "X1\nX2\n"),
-            ("dst.rs", "a\nb\nc\n"),
-        ]);
+        let (dir, ws) = setup(&[("src.rs", "X1\nX2\n"), ("dst.rs", "a\nb\nc\n")]);
         run(
             &ws,
             "src.rs",
@@ -519,10 +556,7 @@ mod tests {
 
     #[test]
     fn prepend_to_file() {
-        let (dir, ws) = setup(&[
-            ("src.rs", "HEADER\n"),
-            ("dst.rs", "body\n"),
-        ]);
+        let (dir, ws) = setup(&[("src.rs", "HEADER\n"), ("dst.rs", "body\n")]);
         run(&ws, "src.rs", "HEADER", None, "dst.rs", None, "prepend").unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("dst.rs")).unwrap(),
@@ -532,10 +566,7 @@ mod tests {
 
     #[test]
     fn ambiguous_source_start_rejected_with_candidates() {
-        let (dir, ws) = setup(&[
-            ("src.rs", "dup\nx\ndup\ny\n"),
-            ("dst.rs", "out\n"),
-        ]);
+        let (dir, ws) = setup(&[("src.rs", "dup\nx\ndup\ny\n"), ("dst.rs", "out\n")]);
         let err = run(&ws, "src.rs", "dup", None, "dst.rs", None, "append").unwrap_err();
         assert!(err.contains("SOURCE_START_AMBIGUOUS"), "got: {err}");
         assert!(err.contains("L1"), "candidates expected, got: {err}");
@@ -544,10 +575,7 @@ mod tests {
 
     #[test]
     fn end_anchor_missing_rejected() {
-        let (dir, ws) = setup(&[
-            ("src.rs", "start\nbody\n"),
-            ("dst.rs", "out\n"),
-        ]);
+        let (dir, ws) = setup(&[("src.rs", "start\nbody\n"), ("dst.rs", "out\n")]);
         let err = run(
             &ws,
             "src.rs",
@@ -564,15 +592,32 @@ mod tests {
     #[test]
     fn same_file_insert_inside_range_rejected() {
         let (dir, ws) = setup(&[("f.rs", "a\nb\nc\nd\n")]);
-        let err = run(&ws, "f.rs", "b", Some("c"), "f.rs", Some("b"), "insert_after")
-            .unwrap_err();
+        let err = run(
+            &ws,
+            "f.rs",
+            "b",
+            Some("c"),
+            "f.rs",
+            Some("b"),
+            "insert_after",
+        )
+        .unwrap_err();
         assert!(err.contains("INSERT_INSIDE_RANGE"), "got: {err}");
     }
 
     #[test]
     fn same_file_insert_after_range_allowed() {
         let (dir, ws) = setup(&[("f.rs", "a\nb\nc\nd\n")]);
-        run(&ws, "f.rs", "b", Some("c"), "f.rs", Some("d"), "insert_before").unwrap();
+        run(
+            &ws,
+            "f.rs",
+            "b",
+            Some("c"),
+            "f.rs",
+            Some("d"),
+            "insert_before",
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("f.rs")).unwrap(),
             "a\nb\nc\nb\nc\nd\n"
@@ -581,10 +626,7 @@ mod tests {
 
     #[test]
     fn crlf_target_uses_crlf_for_inserted_lines() {
-        let (dir, ws) = setup(&[
-            ("src.rs", "s1\ns2\n"),
-            ("dst.rs", "h1\r\nh2\r\n"),
-        ]);
+        let (dir, ws) = setup(&[("src.rs", "s1\ns2\n"), ("dst.rs", "h1\r\nh2\r\n")]);
         run(&ws, "src.rs", "s1", Some("s2"), "dst.rs", None, "append").unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("dst.rs")).unwrap(),
@@ -594,10 +636,7 @@ mod tests {
 
     #[test]
     fn missing_anchor_when_mode_requires_it() {
-        let (dir, ws) = setup(&[
-            ("src.rs", "s\n"),
-            ("dst.rs", "t\n"),
-        ]);
+        let (dir, ws) = setup(&[("src.rs", "s\n"), ("dst.rs", "t\n")]);
         let err = run(&ws, "src.rs", "s", None, "dst.rs", None, "insert_after").unwrap_err();
         assert!(err.contains("MISSING_TARGET_ANCHOR"), "got: {err}");
     }

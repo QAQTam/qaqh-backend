@@ -281,9 +281,17 @@ impl ContextFlow {
         if src.timing() != Timing::TurnBoundary {
             return Err(FlowError::TimingMismatch(source_id));
         }
-        self.trace_push(source_id, src.role().as_str(), src.sink().as_str(), "pending");
-        self.pending
-            .push_back(PendingIngest { source_id, msg, command_id });
+        self.trace_push(
+            source_id,
+            src.role().as_str(),
+            src.sink().as_str(),
+            "pending",
+        );
+        self.pending.push_back(PendingIngest {
+            source_id,
+            msg,
+            command_id,
+        });
         Ok(())
     }
 
@@ -377,9 +385,17 @@ impl ContextFlow {
             Sink::ToolResult => {
                 let mut any = false;
                 for block in &msg.content {
-                    if let ContentBlock::ToolResult { tool_use_id, result } = block {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        result,
+                    } = block
+                    {
                         let projected = result.project_for_model().to_string();
-                        store.push_tool_result_direct(tool_use_id, &projected, result.status.is_success());
+                        store.push_tool_result_direct(
+                            tool_use_id,
+                            &projected,
+                            result.status.is_success(),
+                        );
                         any = true;
                     }
                 }
@@ -411,7 +427,13 @@ impl ContextFlow {
         &self.trace
     }
 
-    fn trace_push(&mut self, source: &'static str, role: &'static str, sink: &'static str, outcome: &'static str) {
+    fn trace_push(
+        &mut self,
+        source: &'static str,
+        role: &'static str,
+        sink: &'static str,
+        outcome: &'static str,
+    ) {
         if self.trace.len() >= TRACE_CAP {
             self.trace.pop_front();
         }
@@ -437,7 +459,10 @@ impl Default for ContextFlow {
 
 fn role_sink_compatible(role: FlowRole, sink: Sink) -> bool {
     match sink {
-        Sink::Turn => matches!(role, FlowRole::User | FlowRole::System | FlowRole::Developer),
+        Sink::Turn => matches!(
+            role,
+            FlowRole::User | FlowRole::System | FlowRole::Developer
+        ),
         Sink::Step => role == FlowRole::Assistant,
         Sink::ToolResult => role == FlowRole::Tool,
         Sink::Trailing => matches!(
@@ -755,10 +780,11 @@ mod tests {
         assert_eq!(command_ids, vec!["cmd-1".to_string(), "cmd-2".to_string()]);
         assert_eq!(flow.pending_len(), 0);
         assert_eq!(store.trailing_messages().len(), 2);
-        assert!(flow
-            .trace()
-            .iter()
-            .any(|t| t.outcome == "stored" && t.sink == "trailing"));
+        assert!(
+            flow.trace()
+                .iter()
+                .any(|t| t.outcome == "stored" && t.sink == "trailing")
+        );
     }
 
     #[test]
@@ -900,7 +926,11 @@ mod tests {
         // undo（truncate_before_turn 删除整个 user turn）不动 trailing。
         let removed = store.truncate_before_turn("t1");
         assert!(removed);
-        assert_eq!(store.trailing_messages().len(), 1, "undo must keep trailing injections");
+        assert_eq!(
+            store.trailing_messages().len(),
+            1,
+            "undo must keep trailing injections"
+        );
 
         // compact（apply_compact 替换 turns 为摘要）不动 trailing。
         store.apply_compact("[COMPACT SUMMARY]", 0);
@@ -910,8 +940,9 @@ mod tests {
             "compact must preserve trailing injections"
         );
         let ctx = store.build_context_for_gate(&[]);
-        assert!(ctx
-            .iter()
-            .any(|m| m.role == "developer" && extract_text(m).starts_with("[SUBAGENT ")));
+        assert!(
+            ctx.iter()
+                .any(|m| m.role == "developer" && extract_text(m).starts_with("[SUBAGENT "))
+        );
     }
 }

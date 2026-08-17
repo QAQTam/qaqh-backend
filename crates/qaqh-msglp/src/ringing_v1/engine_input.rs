@@ -167,9 +167,11 @@ impl InputEngine {
 
         log::info!("[INPUT] pushing user message via ContextFlow (source={source_id})");
         let turn_id = ctx.agent.msg.allocate_turn_id();
-        let receipt = ctx
-            .flow
-            .ingest(&mut ctx.agent.msg, source_id, qaqh_types::Message::user(&text));
+        let receipt = ctx.flow.ingest(
+            &mut ctx.agent.msg,
+            source_id,
+            qaqh_types::Message::user(&text),
+        );
         if !receipt.stored {
             log::warn!(
                 "[INPUT] ContextFlow refused user message (source={source_id}): trace={:?}",

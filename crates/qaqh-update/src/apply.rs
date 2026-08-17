@@ -309,7 +309,10 @@ mod tests {
         assert_eq!(fs::read(target.join("b.txt")).unwrap(), b"new");
         assert_eq!(fs::read(target.join("b.txt.previous")).unwrap(), b"old");
         assert_eq!(fs::read(target.join("a.txt")).unwrap(), b"same");
-        assert_eq!(fs::read(target.join("QAQ-Harness.exe")).unwrap(), b"launcher");
+        assert_eq!(
+            fs::read(target.join("QAQ-Harness.exe")).unwrap(),
+            b"launcher"
+        );
         // state 推进：runtime current=new，previous=old。
         let state = load_installed_state(&target.join("install-state.json"), &installation_id)
             .unwrap()
@@ -360,7 +363,9 @@ mod tests {
         archive
             .write_all(&serde_json::to_vec(&manifest).unwrap())
             .unwrap();
-        archive.start_file("files/b.txt", SimpleFileOptions::default()).unwrap();
+        archive
+            .start_file("files/b.txt", SimpleFileOptions::default())
+            .unwrap();
         archive.write_all(payload).unwrap();
         archive.finish().unwrap();
     }

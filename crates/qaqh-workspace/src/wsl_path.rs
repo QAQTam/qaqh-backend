@@ -79,7 +79,10 @@ mod tests {
 
     #[test]
     fn converts_drive_backslash() {
-        assert_eq!(windows_to_mnt(r"F:\QAQ-Harness"), Some("/mnt/f/QAQ-Harness".into()));
+        assert_eq!(
+            windows_to_mnt(r"F:\QAQ-Harness"),
+            Some("/mnt/f/QAQ-Harness".into())
+        );
         assert_eq!(
             windows_to_mnt(r"D:\project\QAQ-Harness\crates\foo"),
             Some("/mnt/d/project/QAQ-Harness/crates/foo".into())
@@ -89,13 +92,22 @@ mod tests {
     #[test]
     fn converts_forward_slash_and_spaces() {
         assert_eq!(windows_to_mnt("F:/a b/c"), Some("/mnt/f/a b/c".into()));
-        assert_eq!(windows_to_mnt(r"F:\中文 路径\x"), Some("/mnt/f/中文 路径/x".into()));
+        assert_eq!(
+            windows_to_mnt(r"F:\中文 路径\x"),
+            Some("/mnt/f/中文 路径/x".into())
+        );
     }
 
     #[test]
     fn converts_verbatim_prefix() {
-        assert_eq!(windows_to_mnt(r"\\?\F:\QAQ-Harness"), Some("/mnt/f/QAQ-Harness".into()));
-        assert_eq!(windows_to_mnt(r"//?/F:/QAQ-Harness"), Some("/mnt/f/QAQ-Harness".into()));
+        assert_eq!(
+            windows_to_mnt(r"\\?\F:\QAQ-Harness"),
+            Some("/mnt/f/QAQ-Harness".into())
+        );
+        assert_eq!(
+            windows_to_mnt(r"//?/F:/QAQ-Harness"),
+            Some("/mnt/f/QAQ-Harness".into())
+        );
     }
 
     #[test]
@@ -120,6 +132,9 @@ mod tests {
     #[test]
     fn keeps_dotdot_components() {
         // 保留 `..`，由下游文件系统正常解析（/mnt 支持）。
-        assert_eq!(windows_to_mnt(r"F:\QAQ-Harness\..\foo"), Some("/mnt/f/QAQ-Harness/../foo".into()));
+        assert_eq!(
+            windows_to_mnt(r"F:\QAQ-Harness\..\foo"),
+            Some("/mnt/f/QAQ-Harness/../foo".into())
+        );
     }
 }

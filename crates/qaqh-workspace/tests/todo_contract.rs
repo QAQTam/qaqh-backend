@@ -44,14 +44,20 @@ fn public_schema_exposes_one_todo_tool_with_no_alias_and_no_goal_entrypoint() {
     );
     let set_branches: Vec<_> = branches
         .iter()
-        .filter(|branch| {
-            branch["properties"]["action"]["const"] == "set"
-        })
+        .filter(|branch| branch["properties"]["action"]["const"] == "set")
         .collect();
-    assert_eq!(set_branches.len(), 3, "set must expose single/batch/parallel shapes");
+    assert_eq!(
+        set_branches.len(),
+        3,
+        "set must expose single/batch/parallel shapes"
+    );
     let set_branch = set_branches
         .iter()
-        .find(|branch| branch["title"].as_str().is_some_and(|t| t.starts_with("Set task state (single)")))
+        .find(|branch| {
+            branch["title"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("Set task state (single)"))
+        })
         .expect("single set branch");
     assert_eq!(
         set_branch["required"],
@@ -62,7 +68,9 @@ fn public_schema_exposes_one_todo_tool_with_no_alias_and_no_goal_entrypoint() {
     // Batch/parallel shapes are discriminated by their own required fields
     // (ids / updates), so no cross-branch `not` is needed.
     assert!(
-        set_branches.iter().all(|branch| branch.get("not").is_none()),
+        set_branches
+            .iter()
+            .all(|branch| branch.get("not").is_none()),
         "set branches must not carry redundant not anti-constraints"
     );
     let insert_branches: Vec<_> = branches

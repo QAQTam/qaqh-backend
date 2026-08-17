@@ -113,11 +113,7 @@ impl ToolManager {
                 }
             );
         }
-        self.allowed = if known.is_empty() {
-            None
-        } else {
-            Some(known)
-        };
+        self.allowed = if known.is_empty() { None } else { Some(known) };
     }
 
     pub fn apply_init(&mut self, allowed_tools: Vec<String>, session_seed: &str) {

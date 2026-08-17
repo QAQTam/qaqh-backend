@@ -287,9 +287,9 @@ impl PendingCommandStore {
             return;
         };
         let terminal = match &envelope.event {
-            RingingEvent::Control(qaqh_domain::ControlEvent::OperationFailed {
-                error, ..
-            }) => Some((RingingCommandState::Failed, Some(error.code.clone()))),
+            RingingEvent::Control(qaqh_domain::ControlEvent::OperationFailed { error, .. }) => {
+                Some((RingingCommandState::Failed, Some(error.code.clone())))
+            }
             RingingEvent::Control(
                 qaqh_domain::ControlEvent::InteractionResolved { .. }
                 | qaqh_domain::ControlEvent::PlanReviewResolved { .. }

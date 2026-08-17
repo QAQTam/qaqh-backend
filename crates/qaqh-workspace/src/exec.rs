@@ -1057,7 +1057,10 @@ fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> ToolResult {
     if success {
         // 极限模式（NoFoldPolicy）：exec/bash/pwsh 输出完全透传，
         // 连 qaqh-types 的 24K 字符硬顶也放开（仍保留 read_stream 字节保护）。
-        if crate::tool_side_fold::policy().exec_max_output_tokens().is_none() {
+        if crate::tool_side_fold::policy()
+            .exec_max_output_tokens()
+            .is_none()
+        {
             ToolResult::ok_with_limit(json, None)
         } else {
             ToolResult::ok(json)
@@ -1160,7 +1163,12 @@ fn exec_schema(with_shell: bool) -> serde_json::Value {
 
 /// 独立 shell 工具注册（bash / pwsh）：共享 exec 引擎 + 固定 Shell，
 /// schema 无 `shell` 参数；description 注入本机解析路径（软检测）。
-fn register_shell_tool(mgr: &mut crate::ToolManager, key: &str, shell: Shell, handler: fn(crate::ToolCallCtx) -> crate::ToolResult) {
+fn register_shell_tool(
+    mgr: &mut crate::ToolManager,
+    key: &str,
+    shell: Shell,
+    handler: fn(crate::ToolCallCtx) -> crate::ToolResult,
+) {
     // 触发探测缓存，让 description 里的解析路径真实（Windows git-bash / pwsh 降级链）。
     let _ = Shell::detect();
     let _ = Shell::from_name("bash");
@@ -1251,7 +1259,10 @@ mod tests {
     #[test]
     fn rg_habit_fix_command_mode() {
         // 简单形态
-        assert_eq!(normalize_command_rg("rg -rn \"pat\" | head"), "rg -n \"pat\" | head");
+        assert_eq!(
+            normalize_command_rg("rg -rn \"pat\" | head"),
+            "rg -n \"pat\" | head"
+        );
         // 组合变体
         assert_eq!(normalize_command_rg("rg -rni foo"), "rg -ni foo");
         // 管道后的第二个 rg、Windows 可执行名
@@ -1262,7 +1273,10 @@ mod tests {
         assert_eq!(normalize_command_rg("RG.EXE -rn foo"), "RG.EXE -n foo");
         // 合法用法不受影响
         assert_eq!(normalize_command_rg("rg -r x pat"), "rg -r x pat");
-        assert_eq!(normalize_command_rg("rg --replace x pat"), "rg --replace x pat");
+        assert_eq!(
+            normalize_command_rg("rg --replace x pat"),
+            "rg --replace x pat"
+        );
         assert_eq!(normalize_command_rg("grep -rn foo"), "grep -rn foo");
         // 无 rg 调用原样
         assert_eq!(normalize_command_rg("cargo test"), "cargo test");
