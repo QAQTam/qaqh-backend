@@ -1,13 +1,11 @@
 mod activity;
 mod lease;
-mod logger;
 mod registry;
 pub mod ringing;
 mod service;
 mod actor;
 pub mod timeline;
 mod timeline_store;
-mod worker;
 
 pub use activity::SessionActivityTracker;
 pub use lease::{LeaseDecision, LeaseManager};
@@ -15,7 +13,6 @@ pub use registry::{AgentRegistry, cache_system_path, detect_os_info};
 pub use ringing::hub::RingingHub;
 pub use service::DeepxService;
 pub use timeline::{TimelineAppender, TimelineError, TimelineLiveEntry};
-pub use worker::run_agent_worker;
 pub mod workspace_supervisor;
 pub use service::WorkspaceRuntimeState;
 pub use workspace_supervisor::{WorkspaceMode, WorkspaceSupervisor};

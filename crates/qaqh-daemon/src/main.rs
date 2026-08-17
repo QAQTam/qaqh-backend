@@ -7,14 +7,6 @@ use std::io::{Read, Write};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("agent") => {
-            qaqh_runtime::cache_system_path();
-            qaqh_runtime::detect_os_info();
-            if let Err(error) = qaqh_runtime::run_agent_worker(&args[1..]) {
-                eprintln!("agent failed: {error}");
-                std::process::exit(1);
-            }
-        }
         Some("status") => status(),
         Some("stop") => stop(),
         Some("server") => {
@@ -45,7 +37,7 @@ fn main() {
         }
         Some(command) => {
             eprintln!(
-                "unknown command: {command}; expected run, server, status, stop, or agent"
+                "unknown command: {command}; expected run, server, status, or stop"
             );
             std::process::exit(2);
         }
