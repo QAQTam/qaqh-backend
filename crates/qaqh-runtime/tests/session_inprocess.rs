@@ -14,9 +14,12 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 fn session_spawns_inprocess_and_receives_created_event() {
     let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
     let root = std::env::temp_dir().join(format!(
-        "qaqh-session-inprocess-test-{}-{:?}",
+        "qaqh-session-inprocess-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
     ));
     let data = root.join("data");
     std::fs::create_dir_all(&data).expect("test setup must not fail");
