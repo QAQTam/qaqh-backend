@@ -1,4 +1,4 @@
-//! Knife-1 step-2 收尾 regression：`DeepxService` 提供进程内 `SubagentHost`。
+//! Knife-1 step-2 收尾 regression：`QaqhService` 提供进程内 `SubagentHost`。
 //!
 //! `spawn_subagent` 工具此后经宿主句柄直达 daemon 进程内的
 //! AgentRegistry + RingingHub，不再建立 daemon HTTP/SSE 回连。本测试用无模型
@@ -9,13 +9,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qaqh_domain::{ControlEvent, DomainEvent, RingingChannel, SessionState};
-use qaqh_runtime::{DeepxService, RingingHub};
+use qaqh_runtime::{QaqhService, RingingHub};
 use qaqh_subagent::SubagentHost;
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
-fn deepx_service_host_spawn_subscribe_send_close() {
+fn qaqh_service_host_spawn_subscribe_send_close() {
     let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-direct-test-{}-{}",
@@ -35,7 +35,7 @@ fn deepx_service_host_spawn_subscribe_send_close() {
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
 
     // ── 阶段 1：未 attach hub，宿主能力优雅降级（不 panic / 不阻塞）。──
-    let service = DeepxService::init();
+    let service = QaqhService::init();
     let host: &dyn SubagentHost = &service;
     let nohub_rx = host.subscribe("no-hub-seed");
     assert!(

@@ -44,7 +44,7 @@ pub(super) fn atomic_write(path: &str, content: &str) -> std::io::Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let temporary = parent.join(format!(".{name}.deepx-{}-{nonce}.tmp", std::process::id()));
+    let temporary = parent.join(format!(".{name}.qaqh-{}-{nonce}.tmp", std::process::id()));
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
             .create_new(true)

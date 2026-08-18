@@ -90,7 +90,7 @@ pub fn write_installed_state(path: &Path, state: &InstalledState) -> Result<()> 
         .ok_or_else(|| UpdateError(format!("state path has no parent: {}", path.display())))?;
     fs::create_dir_all(parent)?;
     let bytes = serde_json::to_vec_pretty(state)?;
-    let temp = parent.join(".install-state.json.deepx-new");
+    let temp = parent.join(".install-state.json.qaqh-new");
     fs::write(&temp, bytes)?;
     if path.exists() {
         retry_io(|| fs::remove_file(path))?;
