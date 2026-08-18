@@ -9,10 +9,10 @@ use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
 use qaqh_domain::{ControlCommand, ControlEvent, SessionState};
-use qaqh_msglp::ringing_v1::loop_core::{Loop, LoopChannels};
-use qaqh_msglp::ringing_v1::types::{WorkerCommand, WriterEvent};
-use qaqh_msglp::ringing_v1::wire::WorkerCommandFrame;
-use qaqh_msglp::state::agent::AgentState;
+use qaqh_msgloop::ringing_v1::loop_core::{Loop, LoopChannels};
+use qaqh_msgloop::ringing_v1::types::{WorkerCommand, WriterEvent};
+use qaqh_msgloop::ringing_v1::wire::WorkerCommandFrame;
+use qaqh_msgloop::state::agent::AgentState;
 use qaqh_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
 
 static SESSION_INIT: Once = Once::new();
@@ -101,7 +101,7 @@ fn inprocess_channels_run_the_same_session_lifecycle_as_pipes() {
         // Interrupt frames still set the shared cancel token before the command
         // enters the queue; SessionShutdown is the loop's normal exit signal.
         assert!(matches!(
-            qaqh_msglp::ringing_v1::loop_core::ringing_command_is_interrupt(
+            qaqh_msgloop::ringing_v1::loop_core::ringing_command_is_interrupt(
                 &RingingWorkerCommandEnvelope::new(
                     &seed,
                     "inproc-shutdown",

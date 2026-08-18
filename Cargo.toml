@@ -5,7 +5,7 @@ members = [
     "crates/qaqh-config",
     "crates/qaqh-domain",
     "crates/qaqh-skills",
-    "crates/qaqh-msglp",
+    "crates/qaqh-msgloop",
     "crates/qaqh-message",
     "crates/qaqh-types",
     "crates/qaqh-proto",

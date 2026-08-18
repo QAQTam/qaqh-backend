@@ -1,5 +1,5 @@
 [package]
-name = "qaqh-msglp"
+name = "qaqh-msgloop"
 version.workspace = true
 edition.workspace = true
 description = "QAQ-Harness minimal message loop driver"

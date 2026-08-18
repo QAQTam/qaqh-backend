@@ -7,7 +7,7 @@ description = "GUI-independent QAQ-Harness daemon application runtime"
 [dependencies]
 qaqh-config = { path = "../qaqh-config" }
 qaqh-domain = { path = "../qaqh-domain" }
-qaqh-msglp = { path = "../qaqh-msglp" }
+qaqh-msgloop = { path = "../qaqh-msgloop" }
 qaqh-proto = { path = "../qaqh-proto" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-session = { path = "../qaqh-session" }
@@ -24,7 +24,7 @@ tokio = { version = "1", features = ["sync", "time"] }
 
 [features]
 default = ["memory"]
-memory = ["qaqh-msglp/memory"]
+memory = ["qaqh-msgloop/memory"]
 
 [lints]
 workspace = true

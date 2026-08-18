@@ -41,11 +41,11 @@
 ```bash
 # 后端主仓库
 cargo check --workspace
-cargo test -p qaqh-config -p qaqh-runtime -p qaqh-session -p qaqh-msglp
+cargo test -p qaqh-config -p qaqh-runtime -p qaqh-session -p qaqh-msgloop
 
 # 个别测试依赖 qaqh-workspace 二进制
 cargo build -p qaqh-workspace --bin qaqh-workspace
-cargo test -p qaqh-msglp --test permission_lifecycle
+cargo test -p qaqh-msgloop --test permission_lifecycle
 
 # codegraph（AGENT.md 要求）
 export PATH="/home/qaqtamsy/.local/bin:$PATH"
@@ -116,7 +116,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - `qaqh_runtime::ringing::timeline_rebuild`
   - `rebuild_timeline_snapshot(seed)`
   - `timeline_snapshot_from_turns(seed, &turns)`
-- `qaqh_msglp::ringing_v1::loop_core::LoopChannels` + `Loop::from_channels`
+- `qaqh_msgloop::ringing_v1::loop_core::LoopChannels` + `Loop::from_channels`
   - Ringing loop 与 OS pipe 解耦；同一 loop 可跑在 in-process channel actor 上
 - `qaqh_workspace::runtime::install_actor_tool_manager` / `clear_actor_tool_manager`
   - in-process actor 临时私有 ToolManager，不污染 daemon `skills.list_tools` 快照
@@ -138,7 +138,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - 验证：
   - `cargo check --workspace`
   - `cargo test -p qaqh-workspace`
-  - `cargo test -p qaqh-msglp --test permission_lifecycle`
+  - `cargo test -p qaqh-msgloop --test permission_lifecycle`
 - 状态：已合并（PR #8）
 
 ## 2.2 已合并 PR（刀 1 step 1：子代理 in-process actor）
@@ -155,8 +155,8 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - 验证：
   - `cargo check --workspace`
   - `cargo test -p qaqh-runtime`
-  - `cargo test -p qaqh-msglp`
-  - 新增 `qaqh-msglp/tests/inprocess_loop.rs` 与 `qaqh-runtime/tests/subagent_inprocess.rs`
+  - `cargo test -p qaqh-msgloop`
+  - 新增 `qaqh-msgloop/tests/inprocess_loop.rs` 与 `qaqh-runtime/tests/subagent_inprocess.rs`
 - 状态：已合并（PR #10）
 
 ## 2.3 下一步（刀 7 收尾 / 刀 2 / 刀 3）
@@ -302,11 +302,11 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - daemon 线程内运行子代理 Ringing `Loop`，事件直发 `RingingHub`。
   - actor 私有 ToolManager；daemon `skills.list_tools` 使用 `process_all_tool_names()` 保持稳定快照。
   - `shutdown_all` 先广播关闭再 join，覆盖多个排队 actor 的关闭路径。
-  - 新增 `qaqh-msglp/tests/inprocess_loop.rs`、`qaqh-runtime/tests/subagent_inprocess.rs`。
+  - 新增 `qaqh-msgloop/tests/inprocess_loop.rs`、`qaqh-runtime/tests/subagent_inprocess.rs`。
 - QAQ-Harness #11（`27c4967`）：把 #10 标记为已合并并同步 handoff 主线。
 - QAQ-Harness #12（`00e027d`）：记录第二轮工作并确认前端 issue #9。
 - 清理：删除 PR 分支与 worktree；当前 `origin/main = 00e027d`，后端无 open PR。
-- 验证：`cargo check --workspace`、`cargo test -p qaqh-runtime`、`cargo test -p qaqh-msglp`、`cargo test -p qaqh-workspace --lib` 全部通过（workspace 测试存在既有并行全局态 flaky，单测重跑通过）。
+- 验证：`cargo check --workspace`、`cargo test -p qaqh-runtime`、`cargo test -p qaqh-msgloop`、`cargo test -p qaqh-workspace --lib` 全部通过（workspace 测试存在既有并行全局态 flaky，单测重跑通过）。
 
 ### 8.2 下一轮工作（按建议优先级）
 
@@ -364,13 +364,13 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 ### 9.4 第四轮检查：新增 issue #15（timeline 块重复回放）
 
 - **Issue**：`QAQ-Harness#15 bug(runtime/timeline): 同轮 text↔tool 交替时同一逻辑块反复重开并携带整轮前缀，ChatView 错误回放 N 次`
-- **状态**：OPEN；后端已复核，根因在 `qaqh-msglp/src/ringing_v1/engine_turn.rs` 的 `ensure_stream_block` / `maybe_emit_block_checkpoint`：整轮累计 `content`/`reasoning` 被当作每个新 segment 的 checkpoint 全量写入，导致同轮 text↔tool 交替时产生多个前缀超集块。
+- **状态**：OPEN；后端已复核，根因在 `qaqh-msgloop/src/ringing_v1/engine_turn.rs` 的 `ensure_stream_block` / `maybe_emit_block_checkpoint`：整轮累计 `content`/`reasoning` 被当作每个新 segment 的 checkpoint 全量写入，导致同轮 text↔tool 交替时产生多个前缀超集块。
 - **排期**：按 issue 评论，**不单独修复**，推迟到刀 1 step 2 / loop 协议改造时一并处理；本 issue 保留 OPEN 作为 loop 改造回归清单。
 - **验收清单**（沿用 issue 建议）：
   - 单轮 `reasoning→tool→text→tool→text` 只生成 1 个 reasoning + 1 个 text 稳定块；或确需分段时，每段 checkpoint 只写本段增量，不携带整轮前缀。
   - 同轮 text↔tool 切换不得无限重开 block_id 或放大 replaceable/journal/timeline 数据。
   - 补后端回归测试覆盖交替流式块。
-- **当前验证**：`cargo check --workspace` 通过；`cargo test -p qaqh-runtime` 与 `cargo test -p qaqh-msglp` 通过；`qaqh-workspace --lib` 存在已知并行全局态 flaky（`confirm_apply::apply_patch_dry_run_then_confirm` 单独串行重跑通过）。
+- **当前验证**：`cargo check --workspace` 通过；`cargo test -p qaqh-runtime` 与 `cargo test -p qaqh-msgloop` 通过；`qaqh-workspace --lib` 存在已知并行全局态 flaky（`confirm_apply::apply_patch_dry_run_then_confirm` 单独串行重跑通过）。
 
 
 ### 9.5 远端状态刷新（前端 #10 已合并 / #11 open）
@@ -430,7 +430,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - **工具执行在独立 OS 线程上跑**（`engine_turn.rs` / `engine_tool.rs` spawn 的 worker），不会继承 actor 线程的 thread-local —— 因此新增 **`ActorToolScope`**：actor 在 spawn 前 `capture()`，worker 线程内 `install()`（RAII guard 恢复），五处 spawn 点均已接入。并发 actor 各用自己的工具范围，互不污染 `skills.list_tools` 快照。
 - **移除 `ACTOR_SERIAL`**：`actor.rs:34` 进程级串行锁删除；主 agent + N 子代理可在 daemon 内并发运行。
 - **`QAQH_TIMELINE_TURN_COUNT` env 桥移除**：改为 `AgentState.timeline_turn_count` 字段（`actor.rs` 写、`lifecycle.rs` 读），并发 actor 各自携带，不再共享进程环境变量（消除并发下 set_var/remove_var 竞争）。
-- 回归测试：`qaqh-runtime/tests/subagent_inprocess.rs` 新增“第二个子代理在第一个仍运行时就发出 Created”并发断言；`qaqh-msglp` permission_lifecycle（8/8）、session_lifecycle、ask_user_lifecycle、concurrent_read_stress 全过；`qaqh-workspace` 并发读测试改为每个执行线程自带 context。
+- 回归测试：`qaqh-runtime/tests/subagent_inprocess.rs` 新增“第二个子代理在第一个仍运行时就发出 Created”并发断言；`qaqh-msgloop` permission_lifecycle（8/8）、session_lifecycle、ask_user_lifecycle、concurrent_read_stress 全过；`qaqh-workspace` 并发读测试改为每个执行线程自带 context。
 - 尚未做：`qaqh-subagent` 宿主直连（仍经 daemon HTTP/SSE 回连），留作 step 2 最后一项 —— 已由宿主直连 PR 完成（见 11.1）。
 
 ---
@@ -457,7 +457,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 - 测试：`crates/qaqh-runtime/tests/host_direct.rs`（spawn/subscribe/send/close 无模型
   确定性路径 + 无 hub 优雅降级），`cargo test -p qaqh-runtime` 全量 pass。
 - 验证：`cargo check --workspace`、`cargo test -p qaqh-subagent`、`cargo test -p qaqh-runtime`、
-  `cargo test -p qaqh-msglp`、`cargo test -p qaqh-workspace --lib -- --test-threads=1`（308 全过）均 pass。
+  `cargo test -p qaqh-msgloop`、`cargo test -p qaqh-workspace --lib -- --test-threads=1`（308 全过）均 pass。
 
 ### 11.2 BUG-002 状态更新
 
@@ -487,7 +487,7 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   compact 中 → Deferred 入队（删除 dispatch compact-defer 特判）、turn 运行中 → 总线、
   idle → 占号后立即开 turn；`queue/claim/clear/drain_subagent_*` 收敛为通用实现；
   compact 完成由 `dispatch_injections_after_compact` 派发。验证：
-  `cargo check --workspace`、`cargo test -p qaqh-msglp`（78）、`qaqh-runtime` 全过。
+  `cargo check --workspace`、`cargo test -p qaqh-msgloop`（78）、`qaqh-runtime` 全过。
   已知小缺口：compact 路径派发未带 causation 作用域（待补）。
 - **工作区/分支清理**：三个已完成 PR 的 worktree 与 9 个远端分支已删；
   GitHub remote 残留跟踪引用已清（后续统一走本地 gitea）。

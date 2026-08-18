@@ -2525,7 +2525,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qaqh-msglp"
+name = "qaqh-msgloop"
 version = "1.0.0-rc.6"
 dependencies = [
  "dsh-minimal-mode",
@@ -2574,7 +2574,7 @@ dependencies = [
  "log",
  "qaqh-config",
  "qaqh-domain",
- "qaqh-msglp",
+ "qaqh-msgloop",
  "qaqh-proto",
  "qaqh-ringing",
  "qaqh-session",
