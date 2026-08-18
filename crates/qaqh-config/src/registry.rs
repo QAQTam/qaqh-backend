@@ -339,6 +339,87 @@ fn deepseek_web() -> ProviderSpec {
     }
 }
 
+/// OpenCode Go（订阅）：https://opencode.ai/zen/go/v1
+///
+/// 端点与参数语义以本家 opencode 客户端为准（模型目录
+/// `https://models.opencode.ai/api.json`，provider id `opencode-go`）：
+/// - 默认协议 `@ai-sdk/openai-compatible`（chat/completions）：kimi / deepseek /
+///   glm / mimo / qwen / hy3 全走该通道；流式推理内容字段 `reasoning_content`
+///   （api.json 各模型 `interleaved.field = "reasoning_content"`）。
+/// - **推理开关**：本家对 opencode-go **不发** `thinking`/`enable_thinking`/
+///   `chat_template_args`（那些只发给 zai/zhipuai、dashscope、baseten 等特定
+///   provider）——推理默认开启，只发 OpenAI 标准 `reasoning_effort`。
+///   故 `supports_thinking: false`、`supports_reasoning_effort: true`。
+/// - 协议覆盖（api.json `model.provider.npm`）：
+///   - `grok-4.5` / `gpt-5.6-luna` → `@ai-sdk/openai`（Responses API）→ 独立
+///     `responses` 端点；
+///   - `minimax-m3` / `minimax-m2.7` → `@ai-sdk/anthropic`（messages 协议，
+///     QAQ-Harness 未实现 anthropic 通道）→ 暂不提供。
+/// - 额外参数（仅 gpt-5.x + opencode 前缀 provider）：`promptCacheKey`（会话
+///   ID）、`include: ["reasoning.encrypted_content"]`、`reasoningSummary: "auto"`
+///   —— 前两者 QAQ-Harness 无对应概念，不发送；`include` 由
+///   `responses_send_include: true` 等价覆盖。
+/// - usage 缓存字段未验证（网关不保证 OpenAI 标准 usage）→ `CacheTokenField::None`。
+fn opencode_go() -> ProviderSpec {
+    ProviderSpec {
+        id: "opencode-go".into(),
+        display: "OpenCode Go (订阅)".into(),
+        endpoints: vec![
+            EndpointSpec {
+                id: "openai".into(),
+                display: "OpenAI-compatible".into(),
+                protocol: "openai".into(),
+                base_url: "https://opencode.ai/zen/go/v1".into(),
+                default_model: "deepseek-v4-flash".into(),
+                models: vec![
+                    "kimi-k3".into(),
+                    "kimi-k2.7-code".into(),
+                    "kimi-k2.6".into(),
+                    "deepseek-v4-pro".into(),
+                    "deepseek-v4-flash".into(),
+                    "glm-5.3".into(),
+                    "glm-5.2".into(),
+                    "glm-5.1".into(),
+                    "mimo-v2.5".into(),
+                    "mimo-v2.5-pro".into(),
+                    "qwen3.8-max".into(),
+                    "qwen3.7-max".into(),
+                    "qwen3.7-plus".into(),
+                    "qwen3.6-plus".into(),
+                    "hy3".into(),
+                ],
+                models_url: Some("https://opencode.ai/zen/go/v1".into()),
+                cache_field: CacheTokenField::None,
+                has_balance: false,
+                supports_thinking: false,
+                supports_reasoning_effort: true,
+                ..Default::default()
+            },
+            // Grok 4.5 / GPT-5.6 Luna：本家走 Responses API（@ai-sdk/openai）。
+            // effort 档位上限取 "high"：grok-4.5 仅 low/medium/high（超档 400），
+            // gpt-5.6-luna 的 xhigh/max 待网关验证后放开。
+            EndpointSpec {
+                id: "responses".into(),
+                display: "Responses API (Grok 4.5 / GPT-5.6 Luna)".into(),
+                protocol: "responses".into(),
+                base_url: "https://opencode.ai/zen/go/v1".into(),
+                default_model: "grok-4.5".into(),
+                models: vec!["grok-4.5".into(), "gpt-5.6-luna".into()],
+                models_url: Some("https://opencode.ai/zen/go/v1".into()),
+                responses_path: Some("/responses".into()),
+                cache_field: CacheTokenField::None,
+                has_balance: false,
+                supports_thinking: false,
+                supports_reasoning_effort: true,
+                supports_reasoning_content: false,
+                responses_effort_max: "high".into(),
+                beta: true,
+                ..Default::default()
+            },
+        ],
+    }
+}
+
 fn providers() -> Vec<ProviderSpec> {
     vec![
         deepseek(),
@@ -351,6 +432,7 @@ fn providers() -> Vec<ProviderSpec> {
         openai(),
         openrouter(),
         deepseek_web(),
+        opencode_go(),
     ]
 }
 
@@ -408,6 +490,7 @@ pub fn fetch_models(provider_id: &str, endpoint_id: &str, api_key: &str) -> Vec<
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .user_agent(qaqh_types::QAQH_USER_AGENT)
         .build()
         .into();
 
@@ -609,5 +692,45 @@ mod tests {
         assert_eq!(endpoint.responses_effort_max, "high");
         assert!(!endpoint.supports_reasoning_content);
         assert_eq!(protocol_for("mimo", "openai"), "openai");
+    }
+
+    #[test]
+    fn opencode_go_chat_endpoint_exists() {
+        let endpoint = find_endpoint("opencode-go", "openai").expect("opencode-go endpoint");
+        assert_eq!(endpoint.protocol, "openai");
+        assert_eq!(endpoint.base_url, "https://opencode.ai/zen/go/v1");
+        assert_eq!(endpoint.default_model, "deepseek-v4-flash");
+        assert_eq!(endpoint.models.len(), 15, "official Go model list (chat channel)");
+        assert!(endpoint.models.contains(&"deepseek-v4-flash".to_string()));
+        assert!(endpoint.models.contains(&"kimi-k3".to_string()));
+        assert!(!endpoint.models.contains(&"grok-4.5".to_string()));
+        assert!(!endpoint.models.contains(&"minimax-m3".to_string()));
+        // 本家不发 thinking 参数（推理默认开），只发 reasoning_effort。
+        assert!(!endpoint.supports_thinking);
+        assert!(endpoint.supports_reasoning_effort);
+        assert!(matches!(endpoint.cache_field, CacheTokenField::None));
+        assert!(!endpoint.has_balance);
+        assert_eq!(
+            models_url_for("opencode-go", "openai").as_deref(),
+            Some("https://opencode.ai/zen/go/v1/models")
+        );
+    }
+
+    #[test]
+    fn opencode_go_responses_endpoint_exists() {
+        let endpoint = find_endpoint("opencode-go", "responses").expect("opencode-go Responses");
+        assert_eq!(endpoint.protocol, "responses");
+        assert_eq!(endpoint.base_url, "https://opencode.ai/zen/go/v1");
+        assert_eq!(endpoint.responses_path.as_deref(), Some("/responses"));
+        assert_eq!(endpoint.models, vec!["grok-4.5".to_string(), "gpt-5.6-luna".to_string()]);
+        assert_eq!(endpoint.default_model, "grok-4.5");
+        assert!(endpoint.beta);
+        assert!(!endpoint.supports_thinking);
+        assert!(endpoint.supports_reasoning_effort);
+        // grok-4.5 最高档 high（超档 400）；luna 的 xhigh/max 待验证后放开。
+        assert_eq!(endpoint.responses_effort_max, "high");
+        assert!(!endpoint.supports_reasoning_content);
+        // minimax 走 anthropic messages 协议（未实现）→ 不进任何端点。
+        assert!(!endpoint.models.contains(&"minimax-m3".to_string()));
     }
 }

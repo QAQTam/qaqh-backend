@@ -51,7 +51,10 @@ fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
     }
     let resp = match http_agent(timeout_secs)
         .get(&url)
-        .header("User-Agent", "Mozilla/5.0 (compatible; QAQ-Harness/0.7)")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+        )
         .call()
     {
         Ok(r) => r,
