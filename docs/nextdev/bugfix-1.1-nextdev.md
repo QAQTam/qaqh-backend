@@ -328,8 +328,11 @@
 - **状态**：fixed（2026-08-18，PR #25，后端 Issue #15 已关闭）
   - timeline checkpoint 从"整轮累计前缀"改为"当前 stream block 局部文本"
     （`maybe_emit_block_checkpoint` → `emit_stream_block_checkpoint`）；
-  - 注意：该修复无专门回归测试，后续 loop 改造时应补
-    "text↔tool 交替只产生 1 个 reasoning + 1 个 text 块"断言。
+  - 回归测试随修复同提交（`7fc2e40` 即含
+    `checkpoints_keep_round_text_but_replace_each_stream_block_locally` /
+    `assert_block_scope_after_tool`，断言每个 stream block 的 checkpoint
+    只携带块内局部文本而非整轮前缀）；run_lap 级"text↔tool 交替只产生
+    1 个 reasoning + 1 个 text 块"断言留待 S2 run_lap 拆分时补。
 
 ## 前端相关落地增量（2026-08-18，qaqh-winui-app）
 
