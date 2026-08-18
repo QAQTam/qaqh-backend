@@ -13,6 +13,8 @@ use qaqh_domain::{
     TimelineTurnState,
 };
 
+use crate::timeline_store::TimelineJournalOp;
+
 /// A live Ringing V1 timeline delivery record. `entry.timeline_seq` is the sole SSE cursor for
 /// this seed; no per-channel sequence is exposed to a transcript consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -777,6 +779,169 @@ fn block_mut<'a>(
         .ok_or_else(|| TimelineError::MissingBlock(block_id.to_string()))
 }
 
+/// 从 append-only timeline journal 纯重放重建 `TimelineSnapshot`（刀 2 阶段 1）。
+///
+/// - 存在 `Snapshot` 基点（一次性历史迁移/未来压缩）时：`turns` 以基点为权威，
+///   其 watermark 之后的 `Append` 增量应用；watermark 及之前的 `Append` 已被
+///   物化进基点快照，只保留不再重放（避免折叠条目的 TextDelta 二次叠加）。
+/// - 无基点（原生 append-only 流）：全量重放 `Append` 重建 turns。
+///
+/// 返回 `(snapshot, journal)`：`journal` 是与 appender 内存 journal 等价的全部
+/// 条目序列——`restore` 从它重建 `next_fragment`（fragment 校验）与 replay tail。
+/// 重放是**宽容**的：未知 turn/block 的增量条目直接跳过（对应磁盘损坏行），
+/// 绝不 panic、绝不因单条坏记录丢弃整条 timeline。
+pub fn materialize_timeline_from_journal(
+    ops: &[TimelineJournalOp],
+) -> Option<(TimelineSnapshot, Vec<TimelineEntry>)> {
+    let mut base: Option<(TimelineSnapshot, u64)> = None;
+    for op in ops {
+        if let TimelineJournalOp::Snapshot { snapshot } = op {
+            base = Some((snapshot.clone(), snapshot.watermark));
+        }
+    }
+    let base_watermark = base.as_ref().map(|(_, watermark)| *watermark).unwrap_or(0);
+    let mut turns: BTreeMap<String, TimelineTurn> = match &base {
+        Some((snapshot, _)) => snapshot
+            .turns
+            .iter()
+            .map(|turn| (turn.turn_id.clone(), turn.clone()))
+            .collect(),
+        None => BTreeMap::new(),
+    };
+    let mut journal: Vec<TimelineEntry> = Vec::new();
+    for op in ops {
+        if let TimelineJournalOp::Append { entry } = op {
+            // watermark 及之前的条目折叠在基点快照内；只回放其后的增量。
+            if base.is_none() || entry.timeline_seq > base_watermark {
+                apply_journal_entry(&mut turns, entry);
+            }
+            journal.push(entry.clone());
+        }
+    }
+    let mut snapshot_turns: Vec<TimelineTurn> = turns.into_values().collect();
+    if snapshot_turns.is_empty() && journal.is_empty() && base_watermark == 0 {
+        return None;
+    }
+    // 与 `TimelineAppender::snapshot` 保持同一排序键（字节级一致）。
+    snapshot_turns.sort_by_key(|turn| (turn.created_seq, turn_num(&turn.turn_id)));
+    let watermark = journal
+        .last()
+        .map_or(base_watermark, |entry| entry.timeline_seq);
+    Some((
+        TimelineSnapshot {
+            watermark,
+            turns: snapshot_turns,
+        },
+        journal,
+    ))
+}
+
+/// 把一条已分配 seq 的 `TimelineEntry` 直接物化为 `turns` 状态（幂等重放）。
+/// 语义与 `TimelineAppender` 各 writer 方法完全一致：按 entry 记录逐项应用。
+fn apply_journal_entry(turns: &mut BTreeMap<String, TimelineTurn>, entry: &TimelineEntry) {
+    match &entry.event {
+        TimelineEvent::TurnOpened { user_text } => {
+            // 同 id 重开 = 原地重置（与 live `open_turn` 的 reopen 分支一致）。
+            let turn = TimelineTurn {
+                turn_id: entry.turn_id.clone(),
+                created_seq: entry.timeline_seq,
+                user_text: user_text.clone(),
+                sealed: false,
+                state: TimelineTurnState::Running,
+                failure: None,
+                rounds: Vec::new(),
+            };
+            turns.insert(entry.turn_id.clone(), turn);
+        }
+        TimelineEvent::BlockOpened { block } => {
+            let Some(round_num) = entry.round_num else { return };
+            let Some(turn) = turns.get_mut(&entry.turn_id) else { return };
+            if turn.sealed {
+                return;
+            }
+            let round = match turn.rounds.iter().position(|r| r.round_num == round_num) {
+                Some(index) => &mut turn.rounds[index],
+                None => {
+                    turn.rounds.push(TimelineRound {
+                        round_num,
+                        sealed: false,
+                        is_final: false,
+                        blocks: Vec::new(),
+                    });
+                    let index = turn.rounds.len() - 1;
+                    &mut turn.rounds[index]
+                }
+            };
+            if !round.blocks.iter().any(|b| b.block_id == block.block_id) {
+                round.blocks.push(block.clone());
+            }
+        }
+        TimelineEvent::TextDelta { block_id, delta, .. } => {
+            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
+            {
+                block.text.push_str(delta);
+            }
+        }
+        TimelineEvent::BlockCheckpoint { block_id, text } => {
+            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
+            {
+                block.text = text.clone();
+            }
+        }
+        TimelineEvent::ToolUpdated { block_id, tool } => {
+            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
+            {
+                block.tool = Some(tool.clone());
+            }
+        }
+        TimelineEvent::ToolProgress { block_id, chunk } => {
+            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
+                && let Some(tool) = block.tool.as_mut()
+            {
+                tool.progress.push_str(chunk);
+            }
+        }
+        TimelineEvent::BlockSealed { block_id } => {
+            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
+            {
+                block.state = TimelineBlockState::Sealed;
+            }
+        }
+        TimelineEvent::RoundSealed { is_final } => {
+            let Some(turn) = turns.get_mut(&entry.turn_id) else {
+                return;
+            };
+            let Some(round_num) = entry.round_num else {
+                return;
+            };
+            if let Some(round) = turn.rounds.iter_mut().find(|r| r.round_num == round_num) {
+                round.sealed = true;
+                round.is_final = *is_final;
+            }
+        }
+        TimelineEvent::TurnSealed { state, failure } => {
+            if let Some(turn) = turns.get_mut(&entry.turn_id) {
+                turn.sealed = true;
+                turn.state = *state;
+                turn.failure = failure.clone();
+            }
+        }
+    }
+}
+
+/// 重放时按 (turn, round, block) 定位可变 block（宽松：任一缺失直接 None）。
+fn block_mut_replay<'a>(
+    turns: &'a mut BTreeMap<String, TimelineTurn>,
+    turn_id: &str,
+    round_num: Option<u32>,
+    block_id: &str,
+) -> Option<&'a mut TimelineBlock> {
+    let turn = turns.get_mut(turn_id)?;
+    let round_num = round_num?;
+    let round = turn.rounds.iter_mut().find(|r| r.round_num == round_num)?;
+    round.blocks.iter_mut().find(|b| b.block_id == block_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,5 +1372,137 @@ mod tests {
             appender.checkpoint_block("s", "t", 0, "ghost", "nope"),
             Err(TimelineError::MissingBlock(_))
         ));
+    }
+
+    #[test]
+    fn journal_rebuild_equals_native_snapshot_roundtrip() {
+        // 验收 #2：原生写入路径产生的 timeline 与 journal 重放路径一致（往返）。
+        let mut appender = TimelineAppender::new();
+        // t1：完整完成的 turn（reasoning 流式 + checkpoint + tool + answer）。
+        appender.open_turn("s", "t1", "q1").unwrap();
+        appender
+            .open_block("s", "t1", 0, "reasoning", TimelineBlockKind::Reasoning, None)
+            .unwrap();
+        appender
+            .append_text("s", "t1", 0, "reasoning", 0, "think")
+            .unwrap();
+        appender
+            .checkpoint_block("s", "t1", 0, "reasoning", "think deeply")
+            .unwrap();
+        appender
+            .append_text("s", "t1", 0, "reasoning", 1, "!")
+            .unwrap();
+        appender.seal_block("s", "t1", 0, "reasoning").unwrap();
+        appender
+            .open_block("s", "t1", 0, "tool", TimelineBlockKind::Tool, Some(tool()))
+            .unwrap();
+        appender
+            .append_tool_progress("s", "t1", 0, "tool", "running...\n".to_string())
+            .unwrap();
+        appender
+            .update_tool(
+                "s",
+                "t1",
+                0,
+                "tool",
+                TimelineToolState::Succeeded,
+                Some("done".into()),
+            )
+            .unwrap();
+        appender.seal_block("s", "t1", 0, "tool").unwrap();
+        appender
+            .open_block("s", "t1", 0, "answer", TimelineBlockKind::Text, None)
+            .unwrap();
+        appender
+            .append_text("s", "t1", 0, "answer", 0, "ok")
+            .unwrap();
+        appender.seal_block("s", "t1", 0, "answer").unwrap();
+        appender.seal_round("s", "t1", 0, true).unwrap();
+        appender
+            .seal_turn_with_state(
+                "s",
+                "t1",
+                TimelineTurnState::Completed,
+                Some(TimelineFailure {
+                    code: "ok".into(),
+                    message: "done".into(),
+                }),
+            )
+            .unwrap();
+        // t2：仍 running 的 turn（reopen 语义也在 `TurnOpened` 内保留了 reset）。
+        appender.open_turn("s", "t2", "q2").unwrap();
+        appender
+            .open_block("s", "t2", 0, "note", TimelineBlockKind::Text, None)
+            .unwrap();
+        appender
+            .append_text("s", "t2", 0, "note", 0, "in")
+            .unwrap();
+
+        let native = appender.snapshot("s").unwrap();
+        let entries = appender.replay_since("s", 0);
+        let ops: Vec<TimelineJournalOp> = entries
+            .iter()
+            .map(|entry| TimelineJournalOp::Append {
+                entry: entry.clone(),
+            })
+            .collect();
+        let (rebuilt, journal) =
+            materialize_timeline_from_journal(&ops).expect("full replay must succeed");
+        assert_eq!(rebuilt, native, "journal full replay == native snapshot");
+        assert_eq!(journal, entries, "journal stream preserved verbatim");
+        assert_eq!(rebuilt.watermark, native.watermark);
+    }
+
+    #[test]
+    fn journal_base_snapshot_with_folded_tail_is_not_double_applied() {
+        // 迁移文件形状：`Snapshot` 基点（完整物化，watermark 折叠了此前的全部
+        // delta）+ `Append` 尾部条目。折叠条目不得二次叠加文本；watermark 之后
+        // 的真实新条目必须正常增量应用。
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t1", "q").unwrap();
+        appender
+            .open_block("s", "t1", 0, "answer", TimelineBlockKind::Text, None)
+            .unwrap();
+        appender
+            .append_text("s", "t1", 0, "answer", 0, "hel")
+            .unwrap();
+        appender
+            .append_text("s", "t1", 0, "answer", 1, "lo")
+            .unwrap();
+
+        // 迁移快照点：快照完整，尾部条目（seq ≤ watermark）全部折叠。
+        let native = appender.snapshot("s").unwrap();
+        let tail = appender.replay_since("s", 0);
+        let mut ops: Vec<TimelineJournalOp> = vec![TimelineJournalOp::Snapshot {
+            snapshot: native.clone(),
+        }];
+        ops.extend(
+            tail.iter()
+                .map(|entry| TimelineJournalOp::Append {
+                    entry: entry.clone(),
+                }),
+        );
+        let (rebuilt, _) = materialize_timeline_from_journal(&ops).unwrap();
+        assert_eq!(
+            rebuilt.turns[0].rounds[0].blocks[0].text,
+            "hello",
+            "folded deltas must not double-append"
+        );
+        assert_eq!(rebuilt, native);
+
+        // 迁移后真实续写（seq > watermark）：text 增量正常追加。
+        appender
+            .append_text("s", "t1", 0, "answer", 2, "!")
+            .unwrap();
+        let after = appender.snapshot("s").unwrap();
+        ops.extend(
+            appender
+                .replay_since("s", native.watermark)
+                .into_iter()
+                .map(|entry| TimelineJournalOp::Append { entry }),
+        );
+        let (rebuilt2, _) = materialize_timeline_from_journal(&ops).unwrap();
+        assert_eq!(rebuilt2.turns[0].rounds[0].blocks[0].text, "hello!");
+        assert_eq!(rebuilt2, after, "rebuilt == live beyond the base point");
     }
 }
