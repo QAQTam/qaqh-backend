@@ -291,6 +291,146 @@ pub fn chat_stream_openai(
     }
 }
 
+/// `QAQH_SSE_TRACE=<path>`：将 gate 派生的每个流式事件按到达序追加写入文件
+/// （`<seq>\t<类型>\t<长度>`），用于核对 reasoning/content/tool 在链路的忠实
+/// 流转与先后顺序（诊断思考链/正文交错问题）。不设该变量时零开销。
+struct SseTrace {
+    file: Option<std::fs::File>,
+    seq: u64,
+}
+
+impl SseTrace {
+    fn from_env() -> Self {
+        let file = std::env::var_os("QAQH_SSE_TRACE").and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        });
+        Self { file, seq: 0 }
+    }
+
+    fn record(&mut self, event: &StreamEvent) {
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        use std::io::Write;
+        let tag = match event {
+            StreamEvent::ReasoningDelta(d) => format!("reasoning\t{}", d.chars().count()),
+            StreamEvent::ContentDelta(d) => format!("content\t{}", d.chars().count()),
+            StreamEvent::ToolCallProgress { .. } => "tool_call_progress".to_string(),
+            StreamEvent::Done { .. } => "done".to_string(),
+            StreamEvent::UsageUpdate(_) => "usage".to_string(),
+            StreamEvent::WebSearchStatus(_) => "web_search_status".to_string(),
+            _ => "other".to_string(),
+        };
+        let _ = writeln!(file, "{}\t{}", self.seq, tag);
+        self.seq += 1;
+    }
+}
+
+/// 解析单个 SSE chunk 的 `delta` 对象，按模型输出意图派生流式事件。
+///
+/// **字段处理顺序（顺序即语义）**：
+/// 1. `reasoning_content`/`reasoning`/`thinking`/`analysis_content` 在前；
+/// 2. `content`（含 inline think 标签切分 + DSML 工具检测）其次；
+/// 3. 原生 `tool_calls` 最后。
+///
+/// 同一 chunk 可能**同时携带 `reasoning_content`（思考尾部）与 `content`
+/// （正文开头）两个字段**——模型输出顺序是 reasoning 在前、content 在后
+/// （journal `server_ts` 同毫秒拆分的两条 `round_delta` 即证据）。若先发
+/// content 会把正文插到思考链中间，造成前端"思考链与正文错排"。
+fn emit_delta_fields(
+    delta: &serde_json::Value,
+    text_buf: &mut String,
+    reasoning_buf: &mut String,
+    tool_acc: &mut HashMap<usize, (String, String, String)>,
+    dsml_buf: &mut String,
+    dsml_seen: &mut HashSet<String>,
+    inline_thinking: &mut bool,
+    traced: &mut dyn FnMut(StreamEvent),
+) {
+    // 1. Reasoning content 先于 content（同一 chunk 双字段时的正确顺序）。
+    if let Some(rc) = reasoning_delta(delta) {
+        let r = rc.to_string();
+        reasoning_buf.push_str(&r);
+        traced(StreamEvent::ReasoningDelta(r));
+    }
+
+    // 2. Text content（含 inline thinking 切分与 DSML 工具检测）。
+    if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
+        for (is_reasoning, t) in split_inline_thinking(text, inline_thinking) {
+            if is_reasoning {
+                reasoning_buf.push_str(&t);
+                traced(StreamEvent::ReasoningDelta(t));
+            } else {
+                text_buf.push_str(&t);
+                traced(StreamEvent::ContentDelta(t.clone()));
+
+                // DSML tool call detection in content stream
+                dsml_buf.push_str(&t);
+                let mut search_from = 0usize;
+                while let Some(start) = dsml_buf[search_from..].find("<｜DSML｜invoke name=\"") {
+                    let abs_start = search_from + start;
+                    let after_tag = abs_start + "<｜DSML｜invoke name=\"".len();
+                    if let Some(rest) = dsml_buf.get(after_tag..) {
+                        if let Some(quote_end) = rest.find('"') {
+                            let name = rest[..quote_end].to_string();
+                            if dsml_seen.insert(name.clone()) {
+                                let idx = dsml_seen.len() - 1;
+                                traced(StreamEvent::ToolCallProgress {
+                                    index: idx,
+                                    id: format!("dsml_tc_{}", idx),
+                                    name,
+                                    args_so_far: String::new(),
+                                });
+                            }
+                            search_from = after_tag + quote_end + 1;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // 3. Tool calls (native OpenAI format)
+    if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+        for tc in tcs {
+            let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let entry = tool_acc.entry(idx).or_insert_with(|| {
+                let tid = tc
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tname = tc
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (tid, tname, String::new())
+            });
+            if let Some(args) = tc
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|v| v.as_str())
+            {
+                entry.2.push_str(args);
+                traced(StreamEvent::ToolCallProgress {
+                    index: idx,
+                    id: entry.0.clone(),
+                    name: entry.1.clone(),
+                    args_so_far: entry.2.clone(),
+                });
+            }
+        }
+    }
+}
+
 fn stream_sse(
     resp: reqwest::Response,
     provider: &ProviderConfig,
@@ -311,6 +451,13 @@ fn stream_sse(
     let mut stop_reason: Option<String> = None;
     let mut inline_thinking = false;
 
+    let mut trace = SseTrace::from_env();
+    let mut callback = on_event;
+    let mut traced = move |event: StreamEvent| {
+        trace.record(&event);
+        callback(event);
+    };
+
     loop {
         // Check cancel before each read attempt
         if is_cancelled(cancel) {
@@ -323,7 +470,7 @@ fn stream_sse(
             Ok(Some(Ok(ev))) => ev,
             Ok(Some(Err(e))) => {
                 let msg = format!("SSE read error: {e}");
-                on_event(StreamEvent::Error(msg.clone()));
+                traced(StreamEvent::Error(msg.clone()));
                 return Err(anyhow::anyhow!("{}", msg));
             }
             Ok(None) => break,         // EOF
@@ -362,87 +509,16 @@ fn stream_sse(
                 }
 
                 if let Some(delta) = choice.get("delta") {
-                    // Text content
-                    if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
-                        for (is_reasoning, t) in split_inline_thinking(text, &mut inline_thinking) {
-                            if is_reasoning {
-                                reasoning_buf.push_str(&t);
-                                on_event(StreamEvent::ReasoningDelta(t));
-                            } else {
-                                text_buf.push_str(&t);
-                                on_event(StreamEvent::ContentDelta(t.clone()));
-
-                                // DSML tool call detection in content stream
-                                dsml_buf.push_str(&t);
-                                let mut search_from = 0usize;
-                                while let Some(start) =
-                                    dsml_buf[search_from..].find("<｜DSML｜invoke name=\"")
-                                {
-                                    let abs_start = search_from + start;
-                                    let after_tag = abs_start + "<｜DSML｜invoke name=\"".len();
-                                    if let Some(rest) = dsml_buf.get(after_tag..) {
-                                        if let Some(quote_end) = rest.find('"') {
-                                            let name = rest[..quote_end].to_string();
-                                            if dsml_seen.insert(name.clone()) {
-                                                let idx = dsml_seen.len() - 1;
-                                                on_event(StreamEvent::ToolCallProgress {
-                                                    index: idx,
-                                                    id: format!("dsml_tc_{}", idx),
-                                                    name,
-                                                    args_so_far: String::new(),
-                                                });
-                                            }
-                                            search_from = after_tag + quote_end + 1;
-                                            continue;
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    // Reasoning content
-                    if let Some(rc) = reasoning_delta(delta) {
-                        let r = rc.to_string();
-                        reasoning_buf.push_str(&r);
-                        on_event(StreamEvent::ReasoningDelta(r));
-                    }
-
-                    // Tool calls (native OpenAI format)
-                    if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
-                        for tc in tcs {
-                            let idx =
-                                tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                            let entry = tool_acc.entry(idx).or_insert_with(|| {
-                                let tid = tc
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let tname = tc
-                                    .get("function")
-                                    .and_then(|f| f.get("name"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                (tid, tname, String::new())
-                            });
-                            if let Some(args) = tc
-                                .get("function")
-                                .and_then(|f| f.get("arguments"))
-                                .and_then(|v| v.as_str())
-                            {
-                                entry.2.push_str(args);
-                                on_event(StreamEvent::ToolCallProgress {
-                                    index: idx,
-                                    id: entry.0.clone(),
-                                    name: entry.1.clone(),
-                                    args_so_far: entry.2.clone(),
-                                });
-                            }
-                        }
-                    }
+                    emit_delta_fields(
+                        delta,
+                        &mut text_buf,
+                        &mut reasoning_buf,
+                        &mut tool_acc,
+                        &mut dsml_buf,
+                        &mut dsml_seen,
+                        &mut inline_thinking,
+                        &mut traced,
+                    );
                 }
             }
         }
@@ -498,7 +574,7 @@ fn stream_sse(
                 cache_usage_reported: Some(cache_usage_reported),
             };
             usage_info = Some(usage.clone());
-            on_event(StreamEvent::UsageUpdate(usage));
+            traced(StreamEvent::UsageUpdate(usage));
         }
     }
 
@@ -556,7 +632,7 @@ fn stream_sse(
         content: blocks,
     };
 
-    on_event(StreamEvent::Done {
+    traced(StreamEvent::Done {
         raw_message,
         usage: usage_info,
         stop_reason,
@@ -950,6 +1026,59 @@ mod skill_envelope_tests {
                 .collect::<Vec<_>>(),
             vec!["system", "system", "user"]
         );
+    }
+
+    #[test]
+    fn dual_field_chunk_emits_reasoning_before_content() {
+        // 同一 SSE chunk 的 delta 同时携带 reasoning_content（思考尾部）与
+        // content（正文开头）时，必须按模型输出意图先 reasoning 后 content。
+        // 反向（先 content）会把正文插到思考链中间——journal server_ts 同毫秒
+        // 拆分的两条 round_delta 即该场景的证据（BUG：思考链与正文错排）。
+        let mut delta = serde_json::Map::new();
+        delta.insert(
+            "reasoning_content".into(),
+            serde_json::Value::String("engineer assistant.".into()),
+        );
+        delta.insert(
+            "content".into(),
+            serde_json::Value::String("你好！我是 Dee".into()),
+        );
+        let delta = serde_json::Value::Object(delta);
+
+        let mut text_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut tool_acc = HashMap::new();
+        let mut dsml_buf = String::new();
+        let mut dsml_seen = HashSet::new();
+        let mut inline_thinking = false;
+        let mut events = Vec::new();
+        let mut traced = |ev: StreamEvent| events.push(ev);
+
+        emit_delta_fields(
+            &delta,
+            &mut text_buf,
+            &mut reasoning_buf,
+            &mut tool_acc,
+            &mut dsml_buf,
+            &mut dsml_seen,
+            &mut inline_thinking,
+            &mut traced,
+        );
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|ev| match ev {
+                    StreamEvent::ReasoningDelta(_) => "reasoning",
+                    StreamEvent::ContentDelta(_) => "content",
+                    _ => "other",
+                })
+                .collect::<Vec<_>>(),
+            vec!["reasoning", "content"],
+            "dual-field chunk must emit reasoning before content"
+        );
+        assert_eq!(reasoning_buf, "engineer assistant.");
+        assert_eq!(text_buf, "你好！我是 Dee");
     }
 
     #[test]
