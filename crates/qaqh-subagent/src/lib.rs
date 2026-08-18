@@ -4,7 +4,7 @@
 //!
 //! 1. `spawn_subagent` runs the subagent as an in-process actor on a daemon
 //!    thread. When the daemon installs an in-process [`SubagentHost`]
-//!    (Knife-1 step-2: `DeepxService` via `qaqh_subagent::install_host`), the
+//!    (Knife-1 step-2: `QaqhService` via `qaqh_subagent::install_host`), the
 //!    tool drives the actor directly through the host handle — no daemon
 //!    HTTP/SSE loopback. Without a host (tests / non-daemon embedding) it
 //!    falls back to the legacy `subagent.spawn` action over HTTP/SSE.

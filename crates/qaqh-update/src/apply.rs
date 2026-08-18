@@ -116,7 +116,7 @@ fn install_file(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| UpdateError(format!("invalid target file name: {}", target.display())))?;
-    let temporary = parent.join(format!(".{file_name}.deepx-new-{}", std::process::id()));
+    let temporary = parent.join(format!(".{file_name}.qaqh-new-{}", std::process::id()));
     if temporary.exists() {
         retry_io(|| fs::remove_file(&temporary))?;
     }

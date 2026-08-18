@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use qaqh_proto::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
-use qaqh_runtime::DeepxService;
+use qaqh_runtime::QaqhService;
 use qaqh_runtime::RingingHub;
 use qaqh_runtime::{WorkspaceMode, WorkspaceSupervisor};
 use tokio::net::{TcpListener, TcpStream};
@@ -144,7 +144,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         epoch.clone(),
         data_root.join("ringing"),
     ));
-    let service = DeepxService::init();
+    let service = QaqhService::init();
     service.attach_ringing(hub.clone());
     // 宿主直连：`spawn_subagent` 工具此后经进程内宿主句柄运行，不再回连
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
@@ -294,7 +294,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
 async fn handle_connection(
     mut stream: TcpStream,
     token: String,
-    service: DeepxService,
+    service: QaqhService,
     shutdown: watch::Sender<bool>,
     hub: Arc<RingingHub>,
     ringing_leases: Arc<Mutex<crate::ringing_http::RingingLeaseStore>>,

@@ -162,7 +162,7 @@ fn write_data_root_marker(canonical_root: &Path, owner_home: &Path) -> io::Resul
 
 fn write_data_root_marker_at(canonical_root: &Path, marker: &DataRootMarker) -> io::Result<()> {
     let marker_path = canonical_root.join(DATA_ROOT_MARKER);
-    let temporary = canonical_root.join(".deepx-data-root.json.deepx-new");
+    let temporary = canonical_root.join(".deepx-data-root.json.qaqh-new");
     fs::write(
         &temporary,
         serde_json::to_vec_pretty(marker).map_err(invalid_data)?,
