@@ -142,7 +142,16 @@ fn next_command_id() -> u64 {
 }
 
 fn send_cmd(w: &mut os_pipe::PipeWriter, seed: &str, command: RingingCommand) {
-    let env = RingingWorkerCommandEnvelope::new(seed, format!("c{}", next_command_id()), command);
+    send_cmd_with_id(w, seed, &format!("c{}", next_command_id()), command);
+}
+
+fn send_cmd_with_id(
+    w: &mut os_pipe::PipeWriter,
+    seed: &str,
+    command_id: &str,
+    command: RingingCommand,
+) {
+    let env = RingingWorkerCommandEnvelope::new(seed, command_id, command);
     writeln!(w, "{}", serde_json::to_string(&env).unwrap()).unwrap();
     w.flush().unwrap();
 }
@@ -375,6 +384,7 @@ fn system_injection_lands_inside_running_turn() {
     agent.config.provider_id.clear();
     agent.config.endpoint.clear();
     agent.config.compliance_enabled = false;
+    agent.config.permission_level = 4;
 
     let (ir, mut iw) = os_pipe::pipe().unwrap();
     let (oread, owrite) = os_pipe::pipe().unwrap();
@@ -406,10 +416,24 @@ fn system_injection_lands_inside_running_turn() {
 
         // ── 关键时序：第一轮 gate 进行中注入到达 → cmd_rx 排队 →
         //    工具执行完的 lap 边界被 drain_pending_injections 吸收 ──
-        send_cmd(
+        send_cmd_with_id(
             &mut iw,
             &seed,
+            "subagent-probe-1",
             cmd_system_inject("[SUBAGENT 'probe' COMPLETED]\n\nprobe answer"),
+        );
+        // Same command_id with different text must be ignored by the bus.
+        send_cmd_with_id(
+            &mut iw,
+            &seed,
+            "subagent-probe-1",
+            cmd_system_inject("[SUBAGENT 'probe' COMPLETED]\n\nduplicate answer"),
+        );
+        send_cmd_with_id(
+            &mut iw,
+            &seed,
+            "subagent-probe-2",
+            cmd_system_inject("[SUBAGENT 'probe-2' COMPLETED]\n\nsecond answer"),
         );
 
         // 回合正常完成（注入不应产生第二个 TurnStarted；若开新回合，
@@ -435,6 +459,22 @@ fn system_injection_lands_inside_running_turn() {
         assert!(
             bodies[1].contains("probe answer"),
             "injected report must be visible in the next gate request; got: {}",
+            bodies[1]
+        );
+        assert!(
+            !bodies[1].contains("duplicate answer"),
+            "duplicate command_id must not submit a second report; got: {}",
+            bodies[1]
+        );
+        let first = bodies[1]
+            .find("probe answer")
+            .expect("first injected report");
+        let second = bodies[1]
+            .find("second answer")
+            .expect("second injected report");
+        assert!(
+            first < second,
+            "subagent reports must remain FIFO; got: {}",
             bodies[1]
         );
 
