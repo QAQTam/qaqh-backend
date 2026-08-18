@@ -831,7 +831,13 @@ impl TurnEngine {
                     .spawn({
                         let auth = admitted.auth;
                         let id = call_id.clone();
+                        // Tool workers run on spawned threads: reinstall the
+                        // actor thread's per-actor tool scope (context /
+                        // manager / mode / sandbox) so concurrent actors each
+                        // execute under their own tool state.
+                        let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
                         move || {
+                            let _scope = actor_scope.install();
                             let result =
                                 qaqh_workspace::execution::execute_authorized(*auth, Some(tx));
                             (
@@ -920,9 +926,13 @@ impl TurnEngine {
                 ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
             );
             let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
+            // Tool workers run on spawned threads: carry the actor's per-actor
+            // tool scope with them so concurrent actors stay isolated.
+            let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
             let handle = std::thread::Builder::new()
                 .stack_size(4 * 1024 * 1024)
                 .spawn(move || {
+                    let _scope = actor_scope.install();
                     let result = qaqh_workspace::execution::execute_authorized(
                         *admitted.auth,
                         Some(progress_tx),
@@ -1959,7 +1969,10 @@ impl TurnEngine {
                                     .spawn({
                                         let auth = admitted.auth;
                                         let cid = call_id.clone();
+                                        let actor_scope =
+                                            qaqh_workspace::runtime::ActorToolScope::capture();
                                         move || {
+                                            let _scope = actor_scope.install();
                                             let result =
                                                 qaqh_workspace::execution::execute_authorized(
                                                     *auth,
@@ -2055,7 +2068,10 @@ impl TurnEngine {
                                 .stack_size(4 * 1024 * 1024)
                                 .spawn({
                                     let auth = admitted.auth;
+                                    let actor_scope =
+                                        qaqh_workspace::runtime::ActorToolScope::capture();
                                     move || {
+                                        let _scope = actor_scope.install();
                                         let result = qaqh_workspace::execution::execute_authorized(
                                             *auth,
                                             Some(progress_tx),

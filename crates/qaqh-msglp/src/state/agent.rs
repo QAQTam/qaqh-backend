@@ -122,6 +122,10 @@ pub struct AgentState {
     pub turn_count: u32,
     /// If true, skip all disk persistence (subagent disposable mode).
     pub ephemeral: bool,
+    /// Timeline turn-count floor injected by the daemon on session resume.
+    /// Replaces the `QAQH_TIMELINE_TURN_COUNT` process-environment bridge so
+    /// concurrent in-process actors each carry their own value.
+    pub timeline_turn_count: u64,
     pub skills: SkillContextManager,
     /// Frozen [Environment] annotation. Generated once on the FIRST
     /// build_context() of the session and reused forever — never reset per
@@ -176,6 +180,7 @@ impl AgentState {
             dsml_compat_count: 0,
             turn_count: 0,
             ephemeral: false,
+            timeline_turn_count: 0,
             skills: SkillContextManager::new(Path::new("."), effective_input_tokens),
             frozen_annotation: None,
             prev_prefix: PrefixShape::default(),

@@ -90,10 +90,10 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 // is rejected — the frontend transcript stays blank while the
                 // session list title still refreshes.
                 let restored_turns = msg.turn_count() as u64;
-                let timeline_turns = std::env::var("QAQH_TIMELINE_TURN_COUNT")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(0);
+                // Timeline floor is carried per-agent (daemon injects it via
+                // `AgentState.timeline_turn_count`), not a process env var, so
+                // concurrent in-process actors each see their own value.
+                let timeline_turns = agent.timeline_turn_count;
                 let authority_turn_count = restored_turns
                     .max(agent.session.turn_count as u64)
                     .max(timeline_turns);
