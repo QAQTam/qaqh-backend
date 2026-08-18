@@ -511,9 +511,9 @@ impl AgentRegistry {
             .map(|(_, instance)| instance)
             .collect();
         // Signal every worker before waiting on any of them. In-process actors
-        // are serialized behind ACTOR_SERIAL; joining them one-by-one could
-        // otherwise deadlock when a queued actor is joined before the actor
-        // currently holding the serialization lock has been signalled.
+        // run concurrently (per-actor thread-local state); signal all before
+        // joining any, so a busy actor is not left waiting on its channel while
+        // shut down.
         for instance in &mut instances {
             instance.signal_shutdown();
         }
