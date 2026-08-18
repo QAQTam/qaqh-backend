@@ -1,8 +1,9 @@
-//! The first-stage injection bus.
+//! Unified injection bus (knife-7 stage 1).
 //!
-//! This slice intentionally supports only Subagent reports. The bus owns the
-//! busy-turn queue and command-id idempotency; `ContextFlow` remains the
-//! message persistence boundary.
+//! Every non-user message injection (subagent reports today; system/MCP in
+//! the future) flows through `Loop::inject()` and is queued here. The bus
+//! owns the busy-turn queue and command-id idempotency; `ContextFlow`
+//! remains the message persistence boundary.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -11,15 +12,38 @@ use qaqh_types::{ContentBlock, Message};
 /// Stable source id used by the existing ContextFlow registration.
 pub const SUBAGENT_SOURCE: &str = "subagent";
 
-/// A Subagent report waiting to be handed to ContextFlow.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubagentInjection {
-    pub session_id: String,
-    pub command_id: String,
-    pub text: String,
+/// Injection priority. `Deferred` marks injections queued while a compact is
+/// running; they are dispatched as turns once the compact finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectionPriority {
+    Normal,
+    Deferred,
 }
 
-impl SubagentInjection {
+/// Injection semantics. Only `NextTurn` exists this round; `Interrupt` /
+/// `Inline` are reserved for future sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectionSemantics {
+    NextTurn,
+}
+
+/// A non-user message injection waiting to be handed to ContextFlow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Injection {
+    pub session_id: String,
+    pub command_id: String,
+    /// Source id (`SUBAGENT_SOURCE` today; future "system"/"mcp").
+    pub source: &'static str,
+    /// Role used for the persisted message shape (`Message::ROLE_USER`).
+    pub role: &'static str,
+    pub text: String,
+    pub priority: InjectionPriority,
+    pub semantics: InjectionSemantics,
+}
+
+impl Injection {
+    /// Convenience constructor matching the pre-unification subagent shape:
+    /// source=SUBAGENT_SOURCE, role=user, priority=Normal, semantics=NextTurn.
     pub fn new(
         session_id: impl Into<String>,
         command_id: impl Into<String>,
@@ -28,22 +52,28 @@ impl SubagentInjection {
         Self {
             session_id: session_id.into(),
             command_id: command_id.into(),
+            source: SUBAGENT_SOURCE,
+            role: Message::ROLE_USER,
             text: text.into(),
+            priority: InjectionPriority::Normal,
+            semantics: InjectionSemantics::NextTurn,
         }
     }
 
-    /// Preserve the established storage shape: `user` + `name=subagent`.
+    /// Preserve the established storage shape: `user` + `name=subagent`
+    /// (the `name` follows `self.source`, so a new source only needs to
+    /// declare itself — the message shape for subagent stays identical).
     pub fn message(&self) -> Message {
         Message {
             msg_id: None,
-            role: Message::ROLE_USER.into(),
-            name: Some(SUBAGENT_SOURCE.into()),
+            role: self.role.into(),
+            name: Some(self.source.into()),
             content: vec![ContentBlock::text(&self.text)],
         }
     }
 }
 
-/// Result of attempting to enqueue a Subagent report.
+/// Result of attempting to enqueue an injection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueResult {
     Queued,
@@ -51,11 +81,11 @@ pub enum EnqueueResult {
     StaleSession,
 }
 
-/// FIFO queue and session-local idempotency set for Subagent reports.
+/// FIFO queue and session-local idempotency set for injections.
 #[derive(Debug, Default)]
 pub struct InjectionBus {
     active_session: Option<String>,
-    pending: VecDeque<SubagentInjection>,
+    pending: VecDeque<Injection>,
     seen_command_ids: HashSet<String>,
 }
 
@@ -85,7 +115,7 @@ impl InjectionBus {
         self.seen_command_ids.clear();
     }
 
-    pub fn enqueue(&mut self, injection: SubagentInjection) -> EnqueueResult {
+    pub fn enqueue(&mut self, injection: Injection) -> EnqueueResult {
         if injection.session_id.is_empty() {
             return EnqueueResult::StaleSession;
         }
@@ -104,7 +134,7 @@ impl InjectionBus {
 
     /// Take pending records in submission order. Seen command ids stay marked
     /// so a replay after the boundary cannot submit a second message.
-    pub fn drain(&mut self) -> Vec<SubagentInjection> {
+    pub fn drain(&mut self) -> Vec<Injection> {
         self.pending.drain(..).collect()
     }
 
@@ -117,8 +147,8 @@ impl InjectionBus {
 mod tests {
     use super::*;
 
-    fn injection(session_id: &str, command_id: &str, text: &str) -> SubagentInjection {
-        SubagentInjection::new(session_id, command_id, text)
+    fn injection(session_id: &str, command_id: &str, text: &str) -> Injection {
+        Injection::new(session_id, command_id, text)
     }
 
     #[test]
@@ -181,5 +211,39 @@ mod tests {
             EnqueueResult::Queued
         );
         assert_eq!(bus.drain()[0].session_id, "session-b");
+    }
+
+    #[test]
+    fn mixes_sources_fifo_and_dedupes_command_ids_across_sources() {
+        let mut bus = InjectionBus::new();
+        bus.switch_session("session-a");
+
+        let sys = Injection {
+            source: "system",
+            ..injection("session-a", "cmd-1", "system report")
+        };
+        let sub = injection("session-a", "cmd-1", "subagent replay");
+        let mcp = Injection {
+            source: "mcp",
+            ..injection("session-a", "cmd-2", "mcp report")
+        };
+
+        assert_eq!(bus.enqueue(sys), EnqueueResult::Queued);
+        assert_eq!(
+            bus.enqueue(sub),
+            EnqueueResult::DuplicateCommandId,
+            "command_id dedupe must be source-independent"
+        );
+        assert_eq!(bus.enqueue(mcp), EnqueueResult::Queued);
+
+        let drained = bus.drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].text, "system report");
+        assert_eq!(drained[1].text, "mcp report");
+        // message() 的 name 跟随 source；subagent 的既有形状不变。
+        assert_eq!(drained[0].message().name.as_deref(), Some("system"));
+        assert_eq!(drained[1].message().name.as_deref(), Some("mcp"));
+        assert_eq!(drained[0].priority, InjectionPriority::Normal);
+        assert_eq!(drained[0].semantics, InjectionSemantics::NextTurn);
     }
 }
