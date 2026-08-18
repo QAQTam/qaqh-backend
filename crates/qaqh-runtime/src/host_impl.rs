@@ -4,7 +4,7 @@
 //! （PR #17/#19/#21），`spawn_subagent` 工具 handler 也在 daemon 进程内
 //! 执行——此前它经 daemon HTTP/SSE 回连自己，属于多余的进程内回环。
 //!
-//! 本模块让 `DeepxService` 直接实现 [`qaqh_subagent::SubagentHost`]：
+//! 本模块让 `QaqhService` 直接实现 [`qaqh_subagent::SubagentHost`]：
 //! 工具 handler 通过该宿主句柄直达进程内 `AgentRegistry` + `RingingHub`，
 //! 不再建立 HTTP/SSE 连接。事件订阅直接走 hub 进程内 broadcast。
 
@@ -15,9 +15,9 @@ use qaqh_domain::RingingChannel;
 use qaqh_ringing::{RingingEventEnvelope, RingingWorkerCommandEnvelope};
 use qaqh_subagent::{ContentRef, EventBatch, SubagentHost};
 
-use super::DeepxService;
+use super::QaqhService;
 
-impl SubagentHost for DeepxService {
+impl SubagentHost for QaqhService {
     fn spawn_subagent(
         &self,
         tools: &[String],

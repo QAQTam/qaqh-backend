@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use qaqh_runtime::DeepxService;
+use qaqh_runtime::QaqhService;
 use serde_json::json;
 
 fn temp_root() -> PathBuf {
@@ -22,7 +22,7 @@ fn daemon_config_actions_share_one_write_port() {
     // ConfigStore::default_location during the test and reset by process exit.
     unsafe { std::env::set_var("QAQH_DATA_DIR", &root) };
 
-    let service = DeepxService::init();
+    let service = QaqhService::init();
 
     service
         .handle(

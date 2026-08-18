@@ -1,7 +1,7 @@
 # dsh-minimal-mode
 
 Faithful Rust replication of the deepseek-harness **minimal-mode** tool set, dropped
-into the DeepX workspace as an isolated crate.
+into the QAQ-Harness workspace as an isolated crate.
 
 Source of truth: `F:\deepseek-harness-winui\minimal-mode-extraction`
 (itself an exact copy of `packages/shell/tool-bash-persistent`,
@@ -35,21 +35,21 @@ Source of truth: `F:\deepseek-harness-winui\minimal-mode-extraction`
    directory listing exclusions (hidden, `node_modules`, `__pycache__`), and the
    `FS_*` error messages.
 
-3. **No conflict with existing DeepX** — DeepX already ships a non-persistent
+3. **No conflict with existing QAQ-Harness** — QAQ-Harness already ships a non-persistent
    `bash` tool (pipe-based, JSON envelope). This crate registers the persistent
-   shell under **`bash_v2`** and adds `str_replace_editor` (which DeepX does not
+   shell under **`bash_v2`** and adds `str_replace_editor` (which QAQ-Harness does not
    have). A future tool whitelist can re-map `bash_v2` to the canonical `bash`.
 
 ## Integration
 
 - New workspace member crate (added to root `Cargo.toml` members).
 - `dsh_minimal_mode::register` implements
-  `deepx_workspace::registration::ToolRegistrar` and registers both tools onto a
+  `qaqh_workspace::registration::ToolRegistrar` and registers both tools onto a
   `ToolManager`.
 - Wired into the agent tool runtime in
-  `crates/deepx-msglp/src/state/agent.rs` (`AgentState::init` and
+  `crates/qaqh-msglp/src/state/agent.rs` (`AgentState::init` and
   `init_subagent`) so the tools execute in-process via
-  `deepx_workspace::execution::execute_with_context`.
+  `qaqh_workspace::execution::execute_with_context`.
 
 ## Files
 

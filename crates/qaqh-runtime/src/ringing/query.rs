@@ -1,15 +1,15 @@
 //! Ringing 只读查询（`POST /ringing/v1/queries/{name}`）。
 //!
 //! 实现 session.list / session.meta / session.activity 三个只读 RPC 的
-//! 中立 JSON 形状，复用 legacy `DeepxService::handle` 语义（查询只读，
+//! 中立 JSON 形状，复用 legacy `QaqhService::handle` 语义（查询只读，
 //! 不伪装成 Command/Event）。
 
 use serde_json::{Value, json};
 
-use crate::DeepxService;
+use crate::QaqhService;
 
 /// 查询分发：仅允许只读方法；未知方法返回 Err（HTTP 404）。
-pub fn query(service: &DeepxService, method: &str, params: &Value) -> Result<Value, String> {
+pub fn query(service: &QaqhService, method: &str, params: &Value) -> Result<Value, String> {
     match method {
         "daemon.version"
         | "session.list"
@@ -65,10 +65,10 @@ mod tests {
 
     // SessionManager 是全局单例，同一测试进程只能 init 一次；
     // 用 OnceLock 共享一个 service 实例（并行测试也不会重复初始化）。
-    static SERVICE: std::sync::OnceLock<DeepxService> = std::sync::OnceLock::new();
+    static SERVICE: std::sync::OnceLock<QaqhService> = std::sync::OnceLock::new();
 
-    fn service() -> &'static DeepxService {
-        SERVICE.get_or_init(DeepxService::init)
+    fn service() -> &'static QaqhService {
+        SERVICE.get_or_init(QaqhService::init)
     }
 
     #[test]

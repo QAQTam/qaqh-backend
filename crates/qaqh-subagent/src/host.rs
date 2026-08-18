@@ -9,7 +9,7 @@
 //! `EventBatch` 等），不引用 qaqh-runtime 任何类型，保证依赖方向
 //! `runtime → msglp → subagent` 不回环。
 //!
-//! 安装：daemon 装配（`DeepxService::init`）时调用 [`install_host`]；工具
+//! 安装：daemon 装配（`QaqhService::init`）时调用 [`install_host`]；工具
 //! handler 通过 [`host`] 探测。宿主不可用时（如单元测试 / 非 daemon 进程）
 //! 回退旧 HTTP/SSE 路径，保持行为兼容。
 
@@ -22,7 +22,7 @@ use qaqh_client::RingingCommand;
 pub use qaqh_client::{ContentRef, EventBatch};
 
 /// 进程内子代理宿主演进接口。所有方法都是同步阻塞语义（与工具 worker
-/// 线程的 std 线程模型匹配），由 qaqh-runtime 的 `DeepxService` 提供实现。
+/// 线程的 std 线程模型匹配），由 qaqh-runtime 的 `QaqhService` 提供实现。
 pub trait SubagentHost: Send + Sync {
     /// 生成新 seed 并在宿主进程内注册一个 in-process 子代理 actor。
     ///

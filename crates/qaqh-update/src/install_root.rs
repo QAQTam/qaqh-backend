@@ -33,7 +33,7 @@ pub fn write_install_root_marker(root: &Path) -> Result<()> {
         canonical_root,
     };
     let marker_path = canonical.join(INSTALL_ROOT_MARKER);
-    let temporary = canonical.join(".deepx-install-root.json.deepx-new");
+    let temporary = canonical.join(".deepx-install-root.json.qaqh-new");
     fs::write(&temporary, serde_json::to_vec_pretty(&marker)?)?;
     if marker_path.exists() {
         fs::remove_file(&marker_path)?;
