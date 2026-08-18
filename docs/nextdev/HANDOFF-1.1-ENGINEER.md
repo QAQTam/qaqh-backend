@@ -20,8 +20,8 @@
 
 1. 后端 repo 已从 `deepx-*` 更名为 `qaqh-*`；WinUI 前端在独立仓库 `qaqh-winui-app`。
 2. 必读三份文档：`REFACTOR-ROADMAP.md`、`bugfix-1.1-nextdev.md`、`EXPLORE-REFACTOR-1.1.md`。
-3. 本阶段后端 PR #3/#4/#5/#6/#8/#10/#16/#17/#19/#21 及 handoff docs #7/#11/#12/#13/#14 已合并；前端 #1–#10、#13 已合并。后端当前 open issues：#9（config theme/notifications 前端仍待闭环）、#15（同轮 text↔tool 块重复回放，排期刀 1 step 2）、#18（Windows WIP review，基线上 `7c3b0b3` 已确认干净合并+编译通过；实际 tip 已到 `cbd10ca`）；后端 open PR：#20（docs T17）。前端 open issues：#11/#12（data-root 迁移共享权威契约消费）。
-4. SMJ 编辑日志已完成；刀 1 已开始分步落地：本轮 step 1 把子代理 worker 从 `Command::new(current_exe)` 子进程改为 daemon 内 Loop actor，主 agent 进程化与逐 actor 隔离仍待后续 step。
+3. 本阶段后端 PR #3/#4/#5/#6/#8/#10/#16/#17/#19/#21/#25/#26/#27/#28/#29 及 handoff docs #7/#11/#12/#13/#14 已合并；前端 #1–#10、#13 已合并。后端当前 open issues：#9（config theme/notifications 契约定稿，阻塞前端 T12 写路径收敛）；#15 已关闭（PR #25）。后端 open PR：#30（刀 7 第一阶段：统一注入插槽，draft）。前端 open issues：#11/#12（data-root 迁移共享权威契约消费）。
+4. SMJ 编辑日志已完成；刀 1 已全部完成（step 1 子代理 in-process + step 2 主 loop in-process、逐 actor 状态、宿主直连）；刀 7 第一阶段（`Loop::inject()` + InjectionBus 泛化）已落地待 merge（PR #30）；刀 2（持久化收敛）由 Linux 团队推进。
 5. 后端所有测试在 Arch Linux 可跑；WinUI 只能在 Windows 编译，前端已于 #7 接入 Windows CI（`cargo check/test -p qaqh-winui`）。
 6. 写代码前必须使用 `git worktree`，不要直接在 `main` 上改。
 
@@ -159,36 +159,35 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
   - 新增 `qaqh-msglp/tests/inprocess_loop.rs` 与 `qaqh-runtime/tests/subagent_inprocess.rs`
 - 状态：已合并（PR #10）
 
-## 2.3 下一步（刀 1 step 2 剩余 / 刀 2 / 刀 7）
+## 2.3 下一步（刀 7 收尾 / 刀 2 / 刀 3）
 
-- 刀 1 step 2：主/session 已全部 in-process（#17）、worker/`qaqh agent` 已退役（#19）、actor workspace/session/cancel 上下文已落地（#21）。
-- 剩余 step 2：
-  - 把 `ACTOR_TOOL_MANAGER` / `RUNTIME_CTX` 也 actor 化，随后移除 `ACTOR_SERIAL`，放开主 agent + N 子代理并发。
-  - `qaqh-subagent` 从 daemon HTTP/SSE 回连改为宿主直连 actor 句柄。
-- 刀 2 剩余：把 timeline / messages / compact / ringing journal 四套持久化收敛为一条事件溯源日志；
-  SMJ 编辑日志已作为前置小步落地，可作为同一事件流的 workspace 侧事实日志。
-- 刀 7：统一注入插槽（InjectionBus），对 loop 动刀，收敛 subagent / skills / MCP / 系统 / 用户注入路径。
-- 前端团队 issue #9：后端部分已由 #16 合入；前端仍待消费 theme/notifications 契约。
+- 刀 1 已**全部完成**：主/session 已全部 in-process（#17）、worker/`qaqh agent` 已退役（#19）、actor workspace/session/cancel 上下文已落地（#21）、逐 actor 工具状态 + 移除 `ACTOR_SERIAL`（#27）、`qaqh-subagent` 宿主直连（#28）。
+- 刀 7 第一阶段已落地（PR #30，draft）：`Loop::inject()` 统一注入入口 + InjectionBus 泛化（subagent 已迁移）。**剩余（刀 7 第二阶段）**：`Preempt` + `Interrupt/Inline` 调度语义、用户插队问话与 skills 迁移进 `loop.inject()`、MCP 接入判据验证；compact 路径补 causation 作用域。
+- 刀 2（持久化收敛为一条事件溯源日志）：**由 Linux 团队推进中**（BUG-005）；timeline 重建（BUG-006）、compact fail-closed（BUG-007）单点修复已各自落地（PR #4/#5），最终收敛仍在刀 2。
+- 刀 3：`ringing_http.rs`（108KB）axum 现代化——后端待办（BUG-011 剩余项）。
+- 刀 10 / BUG-010：`engine_turn.rs`（2447 行）/ `loop_core.rs`（1838 行）/ `service.rs`（~1500 行）巨型文件拆分。
+- 前端团队 issue #9：后端部分已由 #16 合入；**theme/notifications API 契约定稿仍待后端**（阻塞前端 BUG-001/T12 写路径收敛）。
+- 前端 issue #11：data-root 权威契约共享（后端 §9.3 联查建议）。
 
 ## 3. 当前 Bug 状态表
 
 | Bug | 状态 | 说明 |
 |---|---|---|
 | BUG-001 | **部分修复** | 后端 config 写路径已收敛（#6/#16）；WinUI 本地 `ui-preferences.json` / 本地 theme 仍在前端仓库；前端仍待消费 theme/notifications 契约（issue #9） |
-| BUG-002 | **部分修复（#10/#17/#19/#21）** | 子代理不再启动进程；主 loop 已 in-process、worker 已退役、actor workspace/session/cancel 已上下文隔离；剩余 ToolManager/RuntimeContext actor 化 + `qaqh-subagent` 宿主直连 |
+| BUG-002 | **fixed** | 子代理不再启动进程；主 loop in-process、worker 退役、actor 上下文隔离（#10/#17/#19/#21）、逐 actor 工具状态 + 移除 ACTOR_SERIAL（#27）、宿主直连（#28） |
 | BUG-003 | fixed | WinUI vsync/队列/resume generation 修复已在前端仓库 main |
 | BUG-004 | fixed | 前端 #1 移除 viewport 恢复，恢复=贴底；active guard/resume generation 此前已修 |
 | BUG-005 | open | timeline / messages / compact / journal 四套持久化仍并存 |
 | BUG-006 | **fixed** | timeline 丢失或损坏时从消息重建 |
 | BUG-007 | **fixed** | compact 损坏/越界 fail-closed |
 | BUG-008 | **fixed（后端）** | `Config::update` 单写口 |
-| BUG-009 | **部分修复** | 误导性 Engine 插件文档已清理；实质注入统一待刀 7 |
+| BUG-009 | **部分修复（刀 7 阶段 1）** | 误导性 Engine 插件文档已清理（#3）；`Loop::inject()` + InjectionBus 泛化已落地（PR #30）；Preempt/Interrupt 语义 + 用户插队/skills 迁移 + MCP 判据待刀 7 阶段 2 |
 | BUG-010 | open | 大文件/crate 碎片化仍待刀 4/5/10 |
-| BUG-011 | **部分修复（#10/#17/#19/#21）** | 子代理进程/三层连接成本已消除；多写、同步持久化、手写 HTTP 仍待刀 2/3 |
+| BUG-011 | **部分修复（#10/#17/#19/#21/#27/#28）** | 子代理进程/三层连接成本已消除；多写、同步持久化、手写 HTTP 仍待刀 2（Linux 团队）/ 刀 3 |
 | BUG-012 | fixed | `session.set_tool_mode` 白名单已放行 |
 | BUG-013 | **fixed** | `qaqh_types::tool_mode` 单契约；前端 #6 已消费并移除本地 `TOOL_MODE_VALUES` |
 | BUG-014 | fixed | 前端 tool-mode ComboBox 空态误写；前端 #8 修复 |
-| BUG-015 | open | 同轮 text↔tool 块重复回放（= issue #15），已排期刀 1 step 2 / loop 改造 |
+| BUG-015 | **fixed** | 同轮 text↔tool 块重复回放——PR #25（stream-block 局部文本），后端 Issue #15 已关闭 |
 
 ---
 
@@ -470,3 +469,38 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 
 - 刀 1（子代理 in-process 化，daemon 吃掉 agent）**达成判据**：
   `spawn_subagent` 不再 `Command::new(exe)`、无三层连接、单进程可跑主 + N 子代理。
+
+---
+
+## 12. 本轮工程师工作补充（2026-08-18 第七轮，Windows 团队）
+
+### 12.1 本轮已完成
+
+- **命名清扫（PR #29，merged）**：`DeepxService` → `QaqhService`（类型/impl/测试/注释）；
+  临时文件后缀 `.deepx-new`/`.deepx-tmp` → `.qaqh-*`；README / dsh-minimal-mode 活跃文档
+  deepx-* 表述 → qaqh-*（crate 树补 qaqh-lsp）。`.deepx` 数据根/迁移路径、归档文档、
+  产品品牌词（DeepX.exe / 法律文档）有意保留。
+- **Issue #15 关闭**：PR #25（timeline checkpoint 按 stream block 局部文本）已合并在 main，
+  issue #15 已关闭。注意：该修复无专门回归测试（HANDOFF §9.4 的 4 号建议仍待补）。
+- **刀 7 第一阶段（PR #30，draft）**：统一注入插槽——`SubagentInjection` 泛化为
+  `Injection`（source/role/priority/semantics）；新增 `Loop::inject()` 单一入口：
+  compact 中 → Deferred 入队（删除 dispatch compact-defer 特判）、turn 运行中 → 总线、
+  idle → 占号后立即开 turn；`queue/claim/clear/drain_subagent_*` 收敛为通用实现；
+  compact 完成由 `dispatch_injections_after_compact` 派发。验证：
+  `cargo check --workspace`、`cargo test -p qaqh-msglp`（78）、`qaqh-runtime` 全过。
+  已知小缺口：compact 路径派发未带 causation 作用域（待补）。
+- **工作区/分支清理**：三个已完成 PR 的 worktree 与 9 个远端分支已删；
+  GitHub remote 残留跟踪引用已清（后续统一走本地 gitea）。
+- **文档清账（本轮）**：bugfix 档案 BUG-002/006/007/009/013/015 状态按实际落地修订；
+  HANDOFF §0/§2.3/§3 同步；nextdev 索引更新。
+
+### 12.2 下一步（承接 §2.3）
+
+- 刀 7 第二阶段：`Preempt` + `Interrupt/Inline` 调度语义、用户插队问话 + skills 迁入
+  `loop.inject()`、MCP 判据、compact 路径 causation 修复。
+- 刀 3：`ringing_http.rs`（108KB）axum 现代化（BUG-011 剩余后端项）。
+- 刀 10 / BUG-010：`engine_turn.rs`（2447 行）/ `loop_core.rs`（1838 行）/ `service.rs`
+  （~1500 行）巨型文件拆分。
+- Issue #9 契约定稿（theme/notifications）解锁前端 T12；§9.3 联查建议（data-root 权威
+  契约共享）解锁前端 issue #11。
+- 刀 2（持久化收敛）：Linux 团队推进中，后端此侧不重复开工。

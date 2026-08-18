@@ -40,7 +40,12 @@
 - **根因**：`spawn_subagent` 每次 `Command::new(exe)` 起新进程（`registry.rs:202-231`），子进程完整走 worker 初始化：logger、`SessionManager::init`（打开 meta 存储）、`AgentState::init_subagent`（config 全量加载 + LLM + 工具注册表）、三频道 Ringing stdin/stdout 协议；父 agent 又作为 client 经 daemon attach 子 seed + SSE 流（`deepx-subagent/src/lib.rs:5-14`）。链路 = 父 worker → daemon → 子 worker 进程 → 父 worker 再 attach，三层连接 + daemon 中转。
 - **证据**：`crates/deepx-runtime/src/registry.rs:197-330`；`crates/deepx-runtime/src/worker.rs:1-140`；`crates/deepx-subagent/src/lib.rs:1-77`；`crates/deepx-runtime/src/service.rs:590`。
 - **影响面**：性能（启动延迟/内存）、并发子代理场景、发布体验。
-- **状态**：open
+- **状态**：fixed（2026-08-18，PR #10/#17/#19/#21/#27/#28 全链路落地）
+  - 子代理不再启动进程（#10）；主 loop 入 daemon 线程 in-process（#17/#19）；
+  - actor workspace/session/cancel 上下文隔离（#21）；`ACTOR_TOOL_MANAGER`/`RUNTIME_CTX`
+    逐 actor 化 + 移除 `ACTOR_SERIAL`，主 agent + N 子代理并发（#27）；
+  - `qaqh-subagent` 宿主直连 actor 句柄，去掉 daemon HTTP/SSE 回连（#28）。
+  - 结论：子代理 = 完整进程 + 三层连接 的成本已全部消除。
 
 ### BUG-003 快速切换会话标签页导致程序卡死（已修复）
 
@@ -160,7 +165,9 @@
 - **根因**：`handle_timeline_snapshot` 直接返回 `hub.timeline_snapshot(seed)`，无 timeline 记录时只返回空快照，不存在从 `SessionManager` 的 messages.jsonl/compact-context 重建 `TimelineAppender` 的路径。Conversation bootstrap 虽从 messages.jsonl 构建，但前端 transcript 以 timeline 为准，因此 timeline 缺失 = 前端无消息。
 - **证据**：`crates/deepx-daemon/src/ringing_http.rs:1923-1948`；`crates/deepx-runtime/src/ringing/hub.rs:509-580`；`crates/deepx-runtime/src/ringing/conversation_snapshot.rs:11-20`；`docs/nextdev/TIMELINE-MIGRATION-ROADMAP.md` 第 1 节。
 - **影响面**：会话恢复、数据丢失感知、undo/compact 后前端一致性。
-- **状态**：open
+- **状态**：fixed（2026-08-16，PR #4）——timeline 缺失/损坏时从 messages.jsonl 重建
+  （`TimelineAppender` 重建路径 + `qaqh-runtime/tests/timeline_rebuild.rs` 回归；
+  修复与刀 2 的"单日志 + 投影"方向一致，仍由刀 2 最终收敛四套持久化）。
 
 ### BUG-007 compact-context 被篡改/损坏后回退到压缩前全量消息（compact 可逆/泄漏）
 
@@ -168,7 +175,8 @@
 - **根因**：`SessionManager::load_for_resume` 读取 compact-context.json 时，任何解析失败、字段缺失、或 `archive_message_count > archive_messages.len()` 都会得到 `None`；调用方随即 `unwrap_or(archive_messages)` 使用 messages.jsonl 全量原始消息。compact 上下文只是“可选覆盖”，不是“必须存在的权威”，损坏即退化为未压缩历史。
 - **证据**：`crates/deepx-session/src/manager.rs:133-142,617-619`；`crates/deepx-msglp/src/state/lifecycle.rs:27-53`；`crates/deepx-runtime/src/ringing/conversation_snapshot.rs:12-19`。
 - **影响面**：数据安全/隐私、compact 语义、上下文注入、恢复一致性。
-- **状态**：open
+- **状态**：fixed（2026-08-16，PR #5）——compact-context 损坏/越界 fail-closed
+  （拒绝回退到全量历史，回归：`qaqh-session` compact fail-closed 测试）。
 
 ### BUG-008 config 层无统一读写接口：后端多处直接 Config::load/save 各改各的
 
@@ -190,7 +198,11 @@
 - **根因**：`ringing_v1/mod.rs` 仍写着 “pluggable Engine model / add Box::new(YourEngine) to engines vec”，但代码中已无 `trait Engine`，lib.rs 自述 “M3 后无独立 Engine trait，命令经 dispatch_ringing_one 直接路由到各引擎方法”。引擎以 `engine_*.rs` 硬编码文件存在，靠 `Outcome` 枚举在 loop_core 中手工 dispatch；注入路径同时穿越 ContextFlow、MessageStore、SessionManager、RingingHub，无法按插件边界替换。
 - **证据**：`crates/deepx-msglp/src/lib.rs:28-29`；`crates/deepx-msglp/src/ringing_v1/mod.rs:1-38`；`crates/deepx-msglp/src/ringing_v1/engine_input.rs:229-315`；`crates/deepx-msglp/src/ringing_v1/loop_core.rs`（dispatch）。
 - **影响面**：可维护性、扩展性、注入/事件链路修改成本、跨 crate 耦合。
-- **状态**：open
+- **状态**：部分修复（2026-08-18，刀 7 第一阶段）
+  - 文档误导已清理（PR #3）；`Loop::inject()` 统一注入入口 + InjectionBus 泛化
+    （多 source / priority / semantics）已落地（PR #30）；
+  - 剩余：`Preempt`+`Interrupt/Inline` 调度语义、用户插队问话与 skills 迁移进
+    `loop.inject()`、MCP 接入判据验证（刀 7 第二阶段）。
 
 ### BUG-010 后端组件碎片化/职责分散：ringing_http/hub/engine 大文件 + deepx-client 遗留 crate
 
@@ -233,7 +245,8 @@
   合计 7 处生产代码；另有 msglp 两个工具模式测试（`apply_tool_mode_filters_and_restores_tool_defs`、`tool_schema_sent_to_api_is_exactly_mode_tools_not_full_plus_blocklist`）各需补新档位。`deepx-workspace` 的 allowlist 机制（`set_allowed`/`filtered_defs`/`prepare_req`）本身通用，无需改动。
 - **证据**：同上所列文件:行；本次修复 A（前端按钮自锁）与 B（preset-seed 不应用 tool_mode）后，新增档位仍需触碰这 7 处。
 - **影响面**：可维护性、扩展性；新增档位易漏改导致工具模式切换前后端不同步（与 BUG-001“多写/多源”同味）；档位扩展成本高。
-- **状态**：open（重构方向：集中“模式名 → 工具集 + UI 标签”为单一契约；并重构工具注入 / agents loop，目标“一次只改一处 / 最多跑一次”，2026-08-16 记录）
+- **状态**：fixed（2026-08-16 后端侧，`qaqh_types::tool_mode` 单一契约落地；前端
+  已消费该契约，见落地增量第二轮与 BUG-014）——新增/修改档位生产侧只改一处契约。
 
 ## 调查环境记录（非产品代码 bug）
 
@@ -312,9 +325,11 @@
   `2de680b`（segment 化 block_id）→ `5ad7e55`（BlockCheckpoint 整轮完整值）→
   `c18e07b`（timeline 块级 checkpoint 双发落地）。
 - **影响面**：前端回放正确性、带宽 / I/O、thinking 链被复制 N 次、单文件膨胀。
-- **状态**：open（后端 Issue #15，2026-08-17 提；backend HANDOFF 已排期到刀 1 step 2 /
-  loop 协议改造一并处理）。修复方向建议：按块维护文本 / 同轮复用稳定 `block_id` /
-  checkpoint 只带增量 + 回归测试。
+- **状态**：fixed（2026-08-18，PR #25，后端 Issue #15 已关闭）
+  - timeline checkpoint 从"整轮累计前缀"改为"当前 stream block 局部文本"
+    （`maybe_emit_block_checkpoint` → `emit_stream_block_checkpoint`）；
+  - 注意：该修复无专门回归测试，后续 loop 改造时应补
+    "text↔tool 交替只产生 1 个 reasoning + 1 个 text 块"断言。
 
 ## 前端相关落地增量（2026-08-18，qaqh-winui-app）
 
@@ -332,3 +347,28 @@
   迁移（fail-closed）、Notifications Insights.Resource.dll 打包补齐、collect-payload
   `-BackendRoot`；前端 issue #11 要求改为后端共享权威契约而非前端镜像私有公式
   （backend HANDOFF §9.3 联查建议）。
+
+## 后端落地增量（2026-08-18 第三轮，Windows 团队）
+
+- **BUG-002 收尾（fixed）**：PR #27（`ACTOR_TOOL_MANAGER`/`RUNTIME_CTX` 逐 actor
+  thread-local、移除 `ACTOR_SERIAL`、`QAQH_TIMELINE_TURN_COUNT` env 桥改
+  `AgentState.timeline_turn_count` 字段）+ PR #28（`qaqh_subagent::SubagentHost`
+  宿主直连，`DeepxService` 实现 spawn/send_ringing/subscribe/download/close 全进程内
+  直达，HTTP/SSE 回连降级保留）。回归：`subagent_inprocess.rs` 并发断言、
+  `host_direct.rs` 宿主直连测试。Windows 测试临时目录 `SystemTime` Debug 格式含 `:`
+  非法字符问题随行修复（host_direct / subagent_inprocess / session_inprocess）。
+- **BUG-015 收尾（fixed）**：PR #25 修复已在 main；后端 Issue #15 已关闭
+  （2026-08-18）。
+- **BUG-009 刀 7 第一阶段（PR #30，draft→待 merge）**：`SubagentInjection` 泛化为
+  `Injection`（source/role/priority/semantics）；新增 `Loop::inject()` 统一入口
+  （compact 中 → Deferred 入队；turn 运行中 → 总线；idle → 占号后立即
+  `handle_system_input` 开 turn）；删除 dispatch 的 compact-defer 特判；
+  `queue/claim/clear/drain_subagent_*` 收敛为通用实现；compact 完成后
+  `dispatch_injections_after_compact` 逐条派发。已知小缺口：compact 路径派发
+  未带 causation 作用域（待补）。
+- **命名清扫（PR #29）**：`DeepxService` → `QaqhService`；临时文件后缀
+  `.deepx-new` → `.qaqh-new`；README / dsh-minimal-mode 活跃文档 deepx-* 表述 →
+  qaqh-*（`.deepx` 数据根/迁移路径与归档文档有意保留）。
+- **清账说明**：BUG-002/006/007/009/013/015 状态已按实际落地修订；刀 2
+  （BUG-005/006/007 的持久化收敛）由 Linux 团队推进中，本档案状态为
+  "fixed 的单点修复 + 刀 2 收敛中"。
