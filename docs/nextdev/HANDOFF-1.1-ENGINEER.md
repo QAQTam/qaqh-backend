@@ -424,3 +424,40 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
    - 前端 issue #11/#12：消费后端 data-root 迁移 API
    - 后端 issue #9：前端仍待闭环 theme/notifications 契约
    - 后端 PR #20：docs T17 可 review / 合入
+
+---
+
+## 11. 本轮工程师工作补充（2026-08-18 第六轮）
+
+### 11.1 本轮已完成（刀 1 step 2 收尾：qaqh-subagent 宿主直连）
+
+- **PR 刀 1 step 2 收尾**：`qaqh-subagent` 从 daemon HTTP/SSE 回连改为**宿主直连 actor 句柄**。至此刀 1 step 2 全部完成：
+  - 主 session loop 已 in-process（#17）；worker.rs / `qaqh agent` CLI 已退役（#19）；
+  - actor workspace/session/cancel 上下文已落地（#21）；
+  - `ACTOR_TOOL_MANAGER` / `RUNTIME_CTX` actor 化 + 移除 `ACTOR_SERIAL`（PR #27）；
+  - **本轮**：`qaqh-subagent` 宿主直连（PR #XX）。
+- 新增 `qaqh_subagent::SubagentHost` trait（进程内同步接口，只依赖 wire 类型，
+  无 runtime 依赖回环）；`qaqh-runtime` 的 `DeepxService` 实现该 trait
+  （`host_impl.rs`：spawn/send_ringing/subscribe/download_content/close 全进程内直达
+  `AgentRegistry` + `RingingHub` + `SessionManager`）。
+- `spawn_subagent` handler 双路径：宿主已安装（daemon 正常装配）→ 进程内直连，
+  **不再 `Client::connect` 回环**；未安装（单元测试 / 非 daemon 嵌入）→ 回退旧
+  HTTP/SSE 路径，行为兼容。
+- 事件收集复用同一 `collect_subagent_result`，抽象为 `SubagentTransport`
+  （Host/Http 双实现），宿主路径事件经 hub 进程内 broadcast 订阅 + 按 seed 过滤。
+- daemon 装配（`server.rs`）`service.attach_ringing` 后 `qaqh_subagent::install_host(...)`。
+- 测试：`crates/qaqh-runtime/tests/host_direct.rs`（spawn/subscribe/send/close 无模型
+  确定性路径 + 无 hub 优雅降级），`cargo test -p qaqh-runtime` 全量 pass。
+- 验证：`cargo check --workspace`、`cargo test -p qaqh-subagent`、`cargo test -p qaqh-runtime`、
+  `cargo test -p qaqh-msglp`、`cargo test -p qaqh-workspace --lib -- --test-threads=1`（308 全过）均 pass。
+
+### 11.2 BUG-002 状态更新
+
+- BUG-002（子代理 = 完整进程 + 三层连接）→ **基本 fixed**：子代理不再启动进程、
+  主 loop in-process、worker 退役、actor 上下文隔离、宿主直连去掉 HTTP/SSE 回连。
+  残余：`qaqh-subagent` 保留 HTTP/SSE 降级路径（非 daemon 嵌入式场景仍需）。
+
+### 11.3 刀 1 全部完成
+
+- 刀 1（子代理 in-process 化，daemon 吃掉 agent）**达成判据**：
+  `spawn_subagent` 不再 `Command::new(exe)`、无三层连接、单进程可跑主 + N 子代理。

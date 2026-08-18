@@ -25,8 +25,8 @@ pub struct WorkspaceRuntimeState {
 
 #[derive(Clone)]
 pub struct DeepxService {
-    registry: Arc<Mutex<AgentRegistry>>,
-    hub: std::sync::OnceLock<Arc<RingingHub>>,
+    pub(crate) registry: Arc<Mutex<AgentRegistry>>,
+    pub(crate) hub: std::sync::OnceLock<Arc<RingingHub>>,
     workspace_state: Arc<Mutex<WorkspaceRuntimeState>>,
 }
 
@@ -654,7 +654,7 @@ impl DeepxService {
             })
     }
 
-    fn registry(&self) -> Result<std::sync::MutexGuard<'_, AgentRegistry>, String> {
+    pub(crate) fn registry(&self) -> Result<std::sync::MutexGuard<'_, AgentRegistry>, String> {
         self.registry
             .lock()
             .map_err(|e| format!("registry lock: {e}"))
