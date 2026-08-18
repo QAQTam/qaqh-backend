@@ -4,6 +4,7 @@ mod registry;
 pub mod ringing;
 mod service;
 mod actor;
+mod host_impl;
 pub mod timeline;
 mod timeline_store;
 
