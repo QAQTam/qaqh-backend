@@ -1,9 +1,10 @@
 //! In-process agent actor runner (Knife-1).
 //!
 //! Both main session loops and subagent loops run on daemon threads using the
-//! typed `WorkerCommand` / `WriterEvent` channels. Until qaqh-workspace globals
-//! become per-actor state, all actors share one process-wide serialization
-//! mutex.
+//! typed `WorkerCommand` / `WriterEvent` channels. Each actor owns its thread
+//! and its per-actor workspace state (`qaqh-workspace` thread-locals), so
+//! session and subagent actors can run concurrently without a process-wide
+//! serialization lock.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender};
@@ -30,8 +31,6 @@ pub(crate) enum ActorKind {
     },
     Subagent(SubagentSpawnSpec),
 }
-
-pub(crate) static ACTOR_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Apply subagent config defaults (`cfg.subagent.*`) and explicit overrides.
 ///
@@ -140,12 +139,8 @@ pub(crate) fn run_actor(
 ) {
     let is_subagent = matches!(&kind, ActorKind::Subagent(_));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Step-1/2a isolation boundary: serialize all in-process actors until
-        // qaqh-workspace globals become per-actor state.
-        let _serial = ACTOR_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
+        // Per-actor state is thread-local in qaqh-workspace, so actors no
+        // longer need a process-wide serialization lock to run concurrently.
         qaqh_workspace::set_actor_context("", &seed);
 
         if workspace_mode.eq_ignore_ascii_case("wsl") {
@@ -219,21 +214,9 @@ pub(crate) fn run_actor(
                     agent.session.seed = new.clone();
                     agent.session.created_at = qaqh_session::SessionManager::now_epoch();
                 }
-                if timeline_turn_count > 0 {
-                    // Temporary bridge until lifecycle accepts this value as a
-                    // parameter instead of reading the process environment.
-                    // Actors are serialized today, so this cannot race yet.
-                    unsafe {
-                        std::env::set_var(
-                            "QAQH_TIMELINE_TURN_COUNT",
-                            timeline_turn_count.to_string(),
-                        );
-                    }
-                } else {
-                    unsafe {
-                        std::env::remove_var("QAQH_TIMELINE_TURN_COUNT");
-                    }
-                }
+                // Carry the timeline turn-count floor per-agent instead of via
+                // a process env var, so concurrent actors each see their own.
+                agent.timeline_turn_count = timeline_turn_count;
                 log::info!(
                     "[SESSION-ACTOR] starting in-process session seed={} resume={:?} new={:?}",
                     seed,
@@ -252,9 +235,6 @@ pub(crate) fn run_actor(
         );
         loop_.run();
 
-        unsafe {
-            std::env::remove_var("QAQH_TIMELINE_TURN_COUNT");
-        }
         qaqh_workspace::clear_actor_context();
         cleanup_actor_state(is_subagent);
         log::info!("[ACTOR] in-process agent {seed} exited");
@@ -262,9 +242,6 @@ pub(crate) fn run_actor(
 
     if let Err(panic) = result {
         // Failure must not leak actor tooling/sandbox state to the daemon.
-        unsafe {
-            std::env::remove_var("QAQH_TIMELINE_TURN_COUNT");
-        }
         qaqh_workspace::clear_actor_context();
         cleanup_actor_state(is_subagent);
         log::error!("[ACTOR] in-process agent {} panicked: {:?}", seed, panic);

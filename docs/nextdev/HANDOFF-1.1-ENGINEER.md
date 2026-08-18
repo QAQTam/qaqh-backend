@@ -416,14 +416,23 @@ git worktree remove /home/qaqtamsy/桌面/project/qa-worktrees/QAQ-Harness-<suff
 ### 10.4 下一轮工作（按原计划）
 
 1. 继续完成刀 1 Step 2 剩余：
-   - `ACTOR_TOOL_MANAGER` / `RUNTIME_CTX` actor 化
-   - 移除 `ACTOR_SERIAL`，放开主 agent + N 子代理并发
-   - `qaqh-subagent` 宿主直连（去掉 daemon HTTP/SSE 回连）
+   - `ACTOR_TOOL_MANAGER` / `RUNTIME_CTX` actor 化 ✅（见 10.5）
+   - 移除 `ACTOR_SERIAL`，放开主 agent + N 子代理并发 ✅（见 10.5）
+   - `qaqh-subagent` 宿主直连（去掉 daemon HTTP/SSE 回连）——**仍待做**
 2. 完成后开刀 7：InjectionBus / loop 重构。
 3. 穿插：
    - 前端 issue #11/#12：消费后端 data-root 迁移 API
    - 后端 issue #9：前端仍待闭环 theme/notifications 契约
    - 后端 PR #20：docs T17 可 review / 合入
+
+### 10.5 刀 1 step 2：逐 actor 状态 + 移除并发锁（2026-08-18 落地）
+
+- **`RUNTIME_CTX` / `ACTOR_TOOL_MANAGER` / `AGENT_MODE` / `SUBAGENT_SANDBOX`**：从进程级 `static` 改为 **thread-local**（`qaqh-workspace/src/runtime.rs`、`authorization.rs`）。每个 in-process actor 在自己的 daemon 线程上持有自己的上下文 / ToolManager / plan 模式 / 沙箱标志。
+- **工具执行在独立 OS 线程上跑**（`engine_turn.rs` / `engine_tool.rs` spawn 的 worker），不会继承 actor 线程的 thread-local —— 因此新增 **`ActorToolScope`**：actor 在 spawn 前 `capture()`，worker 线程内 `install()`（RAII guard 恢复），五处 spawn 点均已接入。并发 actor 各用自己的工具范围，互不污染 `skills.list_tools` 快照。
+- **移除 `ACTOR_SERIAL`**：`actor.rs:34` 进程级串行锁删除；主 agent + N 子代理可在 daemon 内并发运行。
+- **`QAQH_TIMELINE_TURN_COUNT` env 桥移除**：改为 `AgentState.timeline_turn_count` 字段（`actor.rs` 写、`lifecycle.rs` 读），并发 actor 各自携带，不再共享进程环境变量（消除并发下 set_var/remove_var 竞争）。
+- 回归测试：`qaqh-runtime/tests/subagent_inprocess.rs` 新增“第二个子代理在第一个仍运行时就发出 Created”并发断言；`qaqh-msglp` permission_lifecycle（8/8）、session_lifecycle、ask_user_lifecycle、concurrent_read_stress 全过；`qaqh-workspace` 并发读测试改为每个执行线程自带 context。
+- 尚未做：`qaqh-subagent` 宿主直连（仍经 daemon HTTP/SSE 回连），留作 step 2 最后一项 —— 已由宿主直连 PR 完成（见 11.1）。
 
 ---
 

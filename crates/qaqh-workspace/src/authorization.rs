@@ -2,30 +2,34 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// 子代理沙箱标志：worker 进程内全局（`run_agent_worker` subagent 分支设置）。
-///
-/// 沙箱语义（方案 B）：子代理**没有用户审批通道**——
-/// - 文件级操作（Read/Write）且全部路径在 workspace 内 → 自动批准
-///   （等价 Level 3 的 workspace 内语义，子代理可以正常干活）；
-/// - 其余（Exec / Net / 跨 workspace 路径）→ **自动拒绝**（返回
-///   `PermissionDenied` 失败，不产生 `ToolPermissionRequested` 弹窗事件，
-///   不挂起回合）。
-///
-/// 同时解决"卡死"（L1-L3 下子代理审批无人响应）与"越狱"（子代理
-/// 跨 workspace / exec / 网络访问）两个问题。
-static SUBAGENT_SANDBOX: AtomicBool = AtomicBool::new(false);
-
-/// 启用/关闭子代理沙箱（仅 worker 进程内调用）。
-pub fn set_subagent_sandbox(on: bool) {
-    SUBAGENT_SANDBOX.store(on, Ordering::SeqCst);
+// 子代理沙箱标志（per-actor）：`run_actor` subagent 分支在 actor 线程上设置。
+//
+// 沙箱语义（方案 B）：子代理**没有用户审批通道**——
+// - 文件级操作（Read/Write）且全部路径在 workspace 内 → 自动批准
+//   （等价 Level 3 的 workspace 内语义，子代理可以正常干活）；
+// - 其余（Exec / Net / 跨 workspace 路径）→ **自动拒绝**（返回
+//   `PermissionDenied` 失败，不产生 `ToolPermissionRequested` 弹窗事件，
+//   不挂起回合）。
+//
+// 同时解决"卡死"（L1-L3 下子代理审批无人响应）与"越狱"（子代理
+// 跨 workspace / exec / 网络访问）两个问题。
+//
+// thread-local：主代理与子代理并发时，子代理的沙箱不会误伤主代理的
+// 工具准入（`admit` 只在同一 actor 线程上执行）。
+thread_local! {
+    static SUBAGENT_SANDBOX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// 当前进程是否处于子代理沙箱模式。
+/// 启用/关闭子代理沙箱（仅 actor 线程内调用）。
+pub fn set_subagent_sandbox(on: bool) {
+    SUBAGENT_SANDBOX.with(|slot| slot.set(on));
+}
+
+/// 当前线程是否处于子代理沙箱模式。
 pub fn is_subagent_sandbox() -> bool {
-    SUBAGENT_SANDBOX.load(Ordering::SeqCst)
+    SUBAGENT_SANDBOX.with(|slot| slot.get())
 }
 
 /// Identity of a single tool invocation destined for a handler.

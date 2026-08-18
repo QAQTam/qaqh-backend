@@ -12,19 +12,21 @@ fn ten_parallel_reads() {
 
     // Init tool manager
     qaqh_workspace::runtime::init_tools("test", &[], vec![]);
-    // Set permission context so the compat wrapper can pass admission
-    qaqh_workspace::runtime::set_context("test", 4);
 
     let file_path_str = file_path.to_string_lossy().to_string();
     let args = serde_json::json!({"path": file_path_str}).to_string();
 
     let (done_tx, done_rx) = mpsc::channel();
 
+    // Knife-1 step 2: runtime context is per-actor (thread-local), so each
+    // executing thread provides its own context. The concurrent tool manager
+    // reads over the shared process manager remain the point of this test.
     let mut handles = Vec::new();
     for i in 0..10 {
         let args = args.clone();
         let done_tx = done_tx.clone();
         handles.push(std::thread::spawn(move || {
+            qaqh_workspace::runtime::set_context("test", 4);
             let result = qaqh_workspace::execution::execute_with_context(
                 "read",
                 "",
