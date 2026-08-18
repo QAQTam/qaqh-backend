@@ -259,7 +259,7 @@
 
 
 - **BUG-013 状态更新为 fixed（后端侧）**：新增 `qaqh_types::tool_mode` 单契约
-  （模式名、档位表、`bash_v2↔bash` 投影）；`qaqh-msglp`、`qaqh-runtime`、
+  （模式名、档位表、`bash_v2↔bash` 投影）；`qaqh-msgloop`、`qaqh-runtime`、
   `qaqh-config`、`apps/tui` 全部改为消费该契约，不再各自硬编码。后续新增
   档位只改 `qaqh_types::tool_mode`（生产侧一处），前端仓库只消费该契约。
 - **BUG-009 部分落地（文档层）**：删除 `ringing_v1/mod.rs` 与 `lib.rs` 中
@@ -315,13 +315,13 @@
 - **现象**：单个 round 内流式种类在 `text/answering ↔ tool`（或 `thinking ↔ tool`）间
   交替 ≥2 次时，同一逻辑块反复新开 `block_id` 并携带整轮前缀文本，ChatView 回放 N 次；
   t5r27 实测 11 个 text 块、单文件 ~10KB。
-- **根因**：`crates/qaqh-msglp/src/ringing_v1/engine_turn.rs`：
+- **根因**：`crates/qaqh-msgloop/src/ringing_v1/engine_turn.rs`：
   1. `ensure_stream_block`（L715）在 `text→tool→text` 时 seal 旧块并新开
      `round-{r}:{label}:{segment}`；
   2. `maybe_emit_block_checkpoint`（L100）把**整轮累计 `content` / `reasoning`** 当作
      块 checkpoint 全量写入 → 每个新 text 块都含前一整段前缀副本 → 前端按 `block_id`
      全部渲染 = 回放 N 次。
-- **证据**：`crates/qaqh-msglp/src/ringing_v1/engine_turn.rs:100,715`；定位 commit：
+- **证据**：`crates/qaqh-msgloop/src/ringing_v1/engine_turn.rs:100,715`；定位 commit：
   `2de680b`（segment 化 block_id）→ `5ad7e55`（BlockCheckpoint 整轮完整值）→
   `c18e07b`（timeline 块级 checkpoint 双发落地）。
 - **影响面**：前端回放正确性、带宽 / I/O、thinking 链被复制 N 次、单文件膨胀。

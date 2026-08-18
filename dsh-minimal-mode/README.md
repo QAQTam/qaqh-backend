@@ -47,7 +47,7 @@ Source of truth: `F:\deepseek-harness-winui\minimal-mode-extraction`
   `qaqh_workspace::registration::ToolRegistrar` and registers both tools onto a
   `ToolManager`.
 - Wired into the agent tool runtime in
-  `crates/qaqh-msglp/src/state/agent.rs` (`AgentState::init` and
+  `crates/qaqh-msgloop/src/state/agent.rs` (`AgentState::init` and
   `init_subagent`) so the tools execute in-process via
   `qaqh_workspace::execution::execute_with_context`.
 

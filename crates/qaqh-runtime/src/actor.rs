@@ -37,7 +37,7 @@ pub(crate) enum ActorKind {
 /// Shared by the legacy process worker and the in-process actor so the two
 /// paths cannot drift. Explicit overrides win over settings defaults.
 pub(crate) fn apply_subagent_config(
-    agent: &mut qaqh_msglp::state::agent::AgentState,
+    agent: &mut qaqh_msgloop::state::agent::AgentState,
     model: Option<&str>,
     base_url: Option<&str>,
     max_tokens: Option<u32>,
@@ -72,7 +72,7 @@ fn short_seed(seed: &str) -> String {
 
 /// Channel-side Ringing event consumer for an in-process actor.
 pub(crate) fn run_inprocess_event_reader(
-    event_rx: Receiver<qaqh_msglp::ringing_v1::types::WriterEvent>,
+    event_rx: Receiver<qaqh_msgloop::ringing_v1::types::WriterEvent>,
     seed: String,
     generation: u64,
     activity: SessionActivityTracker,
@@ -100,18 +100,18 @@ fn publish_worker_event(
     activity: &SessionActivityTracker,
     seed: &str,
     generation: u64,
-    event: qaqh_msglp::ringing_v1::types::WriterEvent,
+    event: qaqh_msgloop::ringing_v1::types::WriterEvent,
 ) {
     let Some(hub) = hub else {
         return;
     };
     match event {
-        qaqh_msglp::ringing_v1::types::WriterEvent::Timeline(env) => {
+        qaqh_msgloop::ringing_v1::types::WriterEvent::Timeline(env) => {
             if let Err(error) = hub.publish_timeline(&env.seed, env.intent) {
                 log::error!("[timeline] rejected intent for {}: {error}", env.seed);
             }
         }
-        qaqh_msglp::ringing_v1::types::WriterEvent::Ringing(env) => {
+        qaqh_msgloop::ringing_v1::types::WriterEvent::Ringing(env) => {
             let domain: qaqh_domain::DomainEvent = env.event.into();
             let domain = crate::registry::externalize_large_content(hub, &env.seed, domain);
             let _ =
@@ -130,9 +130,9 @@ fn publish_worker_event(
 pub(crate) fn run_actor(
     seed: String,
     kind: ActorKind,
-    cmd_rx: Receiver<qaqh_msglp::ringing_v1::types::WorkerCommand>,
-    event_tx: SyncSender<qaqh_msglp::ringing_v1::types::WriterEvent>,
-    cancel: qaqh_msglp::ringing_v1::types::CancelToken,
+    cmd_rx: Receiver<qaqh_msgloop::ringing_v1::types::WorkerCommand>,
+    event_tx: SyncSender<qaqh_msgloop::ringing_v1::types::WriterEvent>,
+    cancel: qaqh_msgloop::ringing_v1::types::CancelToken,
     writer_dead: Arc<std::sync::atomic::AtomicBool>,
     workspace_mode: String,
     workspace_env: Option<(String, String)>,
@@ -160,14 +160,14 @@ pub(crate) fn run_actor(
             qaqh_workspace::authorization::set_subagent_sandbox(true);
         }
 
-        let mut agent = qaqh_msglp::state::agent::AgentState::new(
+        let mut agent = qaqh_msgloop::state::agent::AgentState::new(
             qaqh_config::Config::load().unwrap_or_default(),
         );
 
         // Both session actors and subagent actors use an actor-private
         // ToolManager so daemon-side `skills.list_tools` stays stable while a
         // loop is running.
-        let registrars = qaqh_msglp::state::agent::agent_tool_registrars();
+        let registrars = qaqh_msgloop::state::agent::agent_tool_registrars();
         let mut manager = qaqh_workspace::registration::build_tool_manager(&registrars);
         let allowed_tools: Vec<String> = match &kind {
             ActorKind::Subagent(spec) => {
@@ -226,7 +226,7 @@ pub(crate) fn run_actor(
             }
         }
 
-        let mut loop_ = qaqh_msglp::ringing_v1::loop_core::Loop::from_channels(
+        let mut loop_ = qaqh_msgloop::ringing_v1::loop_core::Loop::from_channels(
             agent,
             cmd_rx,
             event_tx,
@@ -253,9 +253,9 @@ pub(crate) fn run_actor(
 pub(crate) fn run_subagent_actor(
     seed: String,
     spec: SubagentSpawnSpec,
-    cmd_rx: Receiver<qaqh_msglp::ringing_v1::types::WorkerCommand>,
-    event_tx: SyncSender<qaqh_msglp::ringing_v1::types::WriterEvent>,
-    cancel: qaqh_msglp::ringing_v1::types::CancelToken,
+    cmd_rx: Receiver<qaqh_msgloop::ringing_v1::types::WorkerCommand>,
+    event_tx: SyncSender<qaqh_msgloop::ringing_v1::types::WriterEvent>,
+    cancel: qaqh_msgloop::ringing_v1::types::CancelToken,
     writer_dead: Arc<std::sync::atomic::AtomicBool>,
     workspace_mode: String,
     workspace_env: Option<(String, String)>,
@@ -279,9 +279,9 @@ pub(crate) fn run_session_actor(
     resume_seed: Option<String>,
     new_seed: Option<String>,
     timeline_turn_count: u64,
-    cmd_rx: Receiver<qaqh_msglp::ringing_v1::types::WorkerCommand>,
-    event_tx: SyncSender<qaqh_msglp::ringing_v1::types::WriterEvent>,
-    cancel: qaqh_msglp::ringing_v1::types::CancelToken,
+    cmd_rx: Receiver<qaqh_msgloop::ringing_v1::types::WorkerCommand>,
+    event_tx: SyncSender<qaqh_msgloop::ringing_v1::types::WriterEvent>,
+    cancel: qaqh_msgloop::ringing_v1::types::CancelToken,
     writer_dead: Arc<std::sync::atomic::AtomicBool>,
     workspace_mode: String,
     workspace_env: Option<(String, String)>,
