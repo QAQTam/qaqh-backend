@@ -24,13 +24,13 @@ pub struct WorkspaceRuntimeState {
 }
 
 #[derive(Clone)]
-pub struct DeepxService {
+pub struct QaqhService {
     pub(crate) registry: Arc<Mutex<AgentRegistry>>,
     pub(crate) hub: std::sync::OnceLock<Arc<RingingHub>>,
     workspace_state: Arc<Mutex<WorkspaceRuntimeState>>,
 }
 
-impl DeepxService {
+impl QaqhService {
     pub fn init() -> Self {
         let _config = qaqh_config::Config::load().unwrap_or_default();
         qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
@@ -1484,14 +1484,14 @@ mod tool_mode_tests {
 
 #[cfg(test)]
 mod control_scope_tests {
-    use super::DeepxService;
+    use super::QaqhService;
 
     #[test]
     fn global_activity_snapshot_does_not_require_a_session_lease() {
-        assert!(!DeepxService::session_scoped("session.activity"));
-        assert!(!DeepxService::session_scoped("session.list"));
-        assert!(DeepxService::session_scoped("session.get_activity"));
-        assert!(DeepxService::session_scoped("session.send_message"));
+        assert!(!QaqhService::session_scoped("session.activity"));
+        assert!(!QaqhService::session_scoped("session.list"));
+        assert!(QaqhService::session_scoped("session.get_activity"));
+        assert!(QaqhService::session_scoped("session.send_message"));
     }
 }
 

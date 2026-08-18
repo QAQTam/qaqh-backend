@@ -32,7 +32,7 @@ use qaqh_ringing::{
     RingingEventEnvelope, RingingResetRequired, RingingSessionBootstrap,
 };
 use qaqh_runtime::ringing::query;
-use qaqh_runtime::{DeepxService, RingingHub};
+use qaqh_runtime::{QaqhService, RingingHub};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -618,7 +618,7 @@ pub async fn handle_ringing_http(
     token: &str,
     hub: Arc<RingingHub>,
     leases: Arc<Mutex<RingingLeaseStore>>,
-    service: DeepxService,
+    service: QaqhService,
     pending: Arc<Mutex<PendingCommandStore>>,
 ) -> Result<(), String> {
     // server 仅用 TcpStream::peek 做协议分流；peek 不消费 socket 数据，且其
@@ -1175,7 +1175,7 @@ async fn handle_command(
     body: &[u8],
     client_session_id: Option<&str>,
     leases: &Arc<Mutex<RingingLeaseStore>>,
-    service: &DeepxService,
+    service: &QaqhService,
     hub: &Arc<RingingHub>,
     pending: &Arc<Mutex<PendingCommandStore>>,
 ) -> Result<(), String> {
@@ -2103,7 +2103,7 @@ async fn handle_query_post(
     body: &[u8],
     session_id: Option<&str>,
     leases: &Arc<Mutex<RingingLeaseStore>>,
-    service: &DeepxService,
+    service: &QaqhService,
 ) -> Result<(), String> {
     let Some(method) = query_method(name) else {
         return write_response(
@@ -2198,7 +2198,7 @@ async fn handle_action(
     body: &[u8],
     session_id: Option<&str>,
     leases: &Arc<Mutex<RingingLeaseStore>>,
-    service: &DeepxService,
+    service: &QaqhService,
     pending: &Arc<Mutex<PendingCommandStore>>,
 ) -> Result<(), String> {
     let method = name.trim_matches('/').replace('/', ".");
