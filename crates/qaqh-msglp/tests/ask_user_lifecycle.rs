@@ -434,8 +434,7 @@ fn run_case_with_delay(
                 let _ = env; // 命令方向帧不应出现在 stdout；忽略
                 continue;
             }
-            if let Ok(env) =
-                serde_json::from_str::<qaqh_ringing::RingingWorkerEventEnvelope>(&line)
+            if let Ok(env) = serde_json::from_str::<qaqh_ringing::RingingWorkerEventEnvelope>(&line)
             {
                 if event_tx.send(env.event).is_err() {
                     break;

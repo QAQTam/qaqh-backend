@@ -275,8 +275,7 @@ pub fn admit(
                 // 子代理沙箱：无审批通道，不产生弹窗事件。
                 let file_ops = matches!(
                     category,
-                    crate::permission::ToolCategory::Read
-                        | crate::permission::ToolCategory::Write
+                    crate::permission::ToolCategory::Read | crate::permission::ToolCategory::Write
                 );
                 if file_ops && crate::permission::all_within_workspace(&paths, &workspace_root) {
                     // workspace 内文件操作：自动批准（等价 Level 3 语义）。
@@ -400,7 +399,10 @@ mod tests {
             &ws,
             crate::permission::ToolCategory::Write,
         );
-        assert!(matches!(admission, Admission::Authorized(_)), "expected authorized");
+        assert!(
+            matches!(admission, Admission::Authorized(_)),
+            "expected authorized"
+        );
         // workspace 内读：同样自动。
         let admission = invoke(
             "read",
@@ -408,7 +410,10 @@ mod tests {
             &ws,
             crate::permission::ToolCategory::Read,
         );
-        assert!(matches!(admission, Admission::Authorized(_)), "expected authorized");
+        assert!(
+            matches!(admission, Admission::Authorized(_)),
+            "expected authorized"
+        );
     }
 
     #[test]

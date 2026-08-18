@@ -153,7 +153,10 @@ fn clean_title(raw: &str) -> String {
     let chars: Vec<char> = out.chars().collect();
     if chars.len() >= 2 {
         let (head, tail) = (chars[0], chars[chars.len() - 1]);
-        if matches!((head, tail), ('"', '"') | ('\'', '\'') | ('“', '”') | ('「', '」')) {
+        if matches!(
+            (head, tail),
+            ('"', '"') | ('\'', '\'') | ('“', '”') | ('「', '」')
+        ) {
             out = chars[1..chars.len() - 1].iter().collect();
         }
     }
@@ -232,8 +235,14 @@ mod tests {
 
     #[test]
     fn truncate_strips_markdown_and_folds_whitespace() {
-        assert_eq!(truncate_title("## 帮我修复权限掉L1的问题"), "帮我修复权限掉L1的问题");
-        assert_eq!(truncate_title("- 运行 cargo test\n- 看看结果"), "运行 cargo test 看看结果");
+        assert_eq!(
+            truncate_title("## 帮我修复权限掉L1的问题"),
+            "帮我修复权限掉L1的问题"
+        );
+        assert_eq!(
+            truncate_title("- 运行 cargo test\n- 看看结果"),
+            "运行 cargo test 看看结果"
+        );
         assert_eq!(
             truncate_title("这是一个超过二十个字符的非常长的用户需求描述文本内容"),
             "这是一个超过二十个字符的非常长的用户需求"

@@ -64,18 +64,8 @@ impl ToolResultFoldPolicy for StandardPolicy {
         match tool_name {
             // 透传白名单：清单 / 收据 / 激活说明——模型必须看到全文
             // （read/edit 更名后再随工具优化，此处同样透传）
-            "apply_patch"
-            | "ask"
-            | "confirm_apply"
-            | "copy_range"
-            | "delete"
-            | "edit"
-            | "glob"
-            | "grep"
-            | "read"
-            | "skills"
-            | "todo"
-            | "write" => None,
+            "apply_patch" | "ask" | "confirm_apply" | "copy_range" | "delete" | "edit" | "glob"
+            | "grep" | "read" | "skills" | "todo" | "write" => None,
             // 命令输出
             "bash" | "exec" | "pwsh" => Some(EXEC_CHAR_LIMIT),
             // 大内容
@@ -119,7 +109,10 @@ pub fn set_policy(policy: Arc<dyn ToolResultFoldPolicy>) {
 
 /// 读取当前全局折叠策略。
 pub fn policy() -> Arc<dyn ToolResultFoldPolicy> {
-    CURRENT_POLICY.read().unwrap_or_else(|e| e.into_inner()).clone()
+    CURRENT_POLICY
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// 对工具结果应用当前策略。仅在成功/后台结果上截断；错误/部分结果原样透传。
@@ -278,12 +271,8 @@ mod tests {
         // 失败/部分结果不截断：模型需要完整错误原因、候选与详情。
         let error = "[ERROR] NO_MATCH\n  detail: old matches nothing\n  candidates: [L12, L40]\n"
             .repeat(200); // ~19K chars < qaqh-types 24K 硬顶
-        let mut result = ToolResult::error_with(
-            "NO_MATCH",
-            error.clone(),
-            true,
-            Some("refine old".into()),
-        );
+        let mut result =
+            ToolResult::error_with("NO_MATCH", error.clone(), true, Some("refine old".into()));
         apply("exec", &mut result);
         assert_eq!(result.model.text, error);
 

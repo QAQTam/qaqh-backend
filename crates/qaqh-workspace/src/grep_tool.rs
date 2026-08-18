@@ -187,12 +187,22 @@ fn exec_grep(args: &serde_json::Value) -> ToolResult {
         .partition(|g| g.starts_with('!'));
     let pos_matchers: Vec<globset::GlobMatcher> = pos_globs
         .iter()
-        .filter_map(|g| globset::GlobBuilder::new(g).literal_separator(true).build().ok())
+        .filter_map(|g| {
+            globset::GlobBuilder::new(g)
+                .literal_separator(true)
+                .build()
+                .ok()
+        })
         .map(|g| g.compile_matcher())
         .collect();
     let neg_matchers: Vec<globset::GlobMatcher> = neg_globs
         .iter()
-        .filter_map(|g| globset::GlobBuilder::new(&g[1..]).literal_separator(true).build().ok())
+        .filter_map(|g| {
+            globset::GlobBuilder::new(&g[1..])
+                .literal_separator(true)
+                .build()
+                .ok()
+        })
         .map(|g| g.compile_matcher())
         .collect();
     let glob_filter = |rel: &str| -> bool {
@@ -222,7 +232,9 @@ fn exec_grep(args: &serde_json::Value) -> ToolResult {
     };
     // canonicalize 在 Windows 返回 verbatim 前缀路径；剥掉后供边界检查与
     // strip_prefix 共用（walker 产出的路径不带该前缀）。
-    let ws_abs = ws_path.canonicalize().unwrap_or_else(|_| ws_path.to_path_buf());
+    let ws_abs = ws_path
+        .canonicalize()
+        .unwrap_or_else(|_| ws_path.to_path_buf());
     let ws_abs = strip_verbatim(&ws_abs);
 
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
@@ -412,7 +424,9 @@ mod tests {
         // CURRENT_WORKSPACE 的其他模块测试（backend/workspace/authorization 等）
         // 互斥——缺了它全量并行跑时会搜到真实仓库。
         let _guard = WS_LOCK.lock().unwrap();
-        let _serial = crate::TEST_RUNTIME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::CURRENT_WORKSPACE
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -423,12 +437,12 @@ mod tests {
             let raw = result.model_text();
             let mut v = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_default();
             if v.get("code").is_none() {
-                v["status"] = serde_json::json!(if matches!(result.status, crate::ToolStatus::Ok)
-                {
-                    "ok"
-                } else {
-                    "error"
-                });
+                v["status"] =
+                    serde_json::json!(if matches!(result.status, crate::ToolStatus::Ok) {
+                        "ok"
+                    } else {
+                        "error"
+                    });
                 v["raw"] = serde_json::json!(raw);
             }
             v
@@ -457,19 +471,27 @@ mod tests {
         let (_dir, ws) = setup(&[("f.txt", "Hello\nworld\n")]);
         let out = run(&ws, serde_json::json!({ "pattern": "hello" }));
         assert_eq!(out["count"], 1, "got: {out}");
-        let out2 = run(&ws, serde_json::json!({ "pattern": "hello", "case_sensitive": true }));
+        let out2 = run(
+            &ws,
+            serde_json::json!({ "pattern": "hello", "case_sensitive": true }),
+        );
         assert_eq!(out2["count"], 0, "got: {out2}");
     }
 
     #[test]
     fn glob_filters_files() {
-        let (_dir, ws) = setup(&[
-            ("src/a.rs", "target\n"),
-            ("src/a.md", "target\n"),
-        ]);
-        let out = run(&ws, serde_json::json!({ "pattern": "target", "glob": ["*.rs"] }));
+        let (_dir, ws) = setup(&[("src/a.rs", "target\n"), ("src/a.md", "target\n")]);
+        let out = run(
+            &ws,
+            serde_json::json!({ "pattern": "target", "glob": ["*.rs"] }),
+        );
         assert_eq!(out["count"], 1, "got: {out}");
-        assert!(out["matches"][0]["path"].as_str().unwrap().ends_with("a.rs"));
+        assert!(
+            out["matches"][0]["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("a.rs")
+        );
     }
 
     #[test]
@@ -482,7 +504,10 @@ mod tests {
             .map(|(n, c)| (n.as_str(), c.as_str()))
             .collect();
         let (_dir, ws) = setup(&file_refs);
-        let out = run(&ws, serde_json::json!({ "pattern": "hit", "max_results": 5 }));
+        let out = run(
+            &ws,
+            serde_json::json!({ "pattern": "hit", "max_results": 5 }),
+        );
         assert_eq!(out["count"], 5);
         assert_eq!(out["truncated"], true);
     }
@@ -500,7 +525,12 @@ mod tests {
         let (_dir, ws) = setup(&[("f.txt", "abc\n")]);
         let out = run(&ws, serde_json::json!({ "pattern": "(" }));
         assert_eq!(out["status"], "error", "got: {out}");
-        assert!(out["raw"].as_str().is_some_and(|s| s.contains("invalid regex")), "got: {out}");
+        assert!(
+            out["raw"]
+                .as_str()
+                .is_some_and(|s| s.contains("invalid regex")),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -522,7 +552,10 @@ mod tests {
             serde_json::json!({ "pattern": "abc", "paths": ["../../.."] }),
         );
         assert_eq!(out["status"], "error", "got: {out}");
-        assert!(out["raw"].as_str().is_some_and(|s| s.contains("workspace")), "got: {out}");
+        assert!(
+            out["raw"].as_str().is_some_and(|s| s.contains("workspace")),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -534,6 +567,11 @@ mod tests {
         ]);
         let out = run(&ws, serde_json::json!({ "pattern": "needle" }));
         assert_eq!(out["count"], 1, "got: {out}");
-        assert!(out["matches"][0]["path"].as_str().unwrap().contains("keep.txt"));
+        assert!(
+            out["matches"][0]["path"]
+                .as_str()
+                .unwrap()
+                .contains("keep.txt")
+        );
     }
 }

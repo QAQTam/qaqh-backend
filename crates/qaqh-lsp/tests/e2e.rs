@@ -12,8 +12,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use qaqh_lsp::lsp_types::{DocumentSymbolResponse, GotoDefinitionResponse, HoverContents, Location, MarkedString};
-use qaqh_lsp::{position_1based, uri_of, LspClient, ServerConfig};
+use qaqh_lsp::lsp_types::{
+    DocumentSymbolResponse, GotoDefinitionResponse, HoverContents, Location, MarkedString,
+};
+use qaqh_lsp::{LspClient, ServerConfig, position_1based, uri_of};
 
 /// Workspace root: `crates/qaqh-lsp/../..`.
 fn workspace_root() -> PathBuf {
@@ -72,7 +74,10 @@ fn rust_analyzer_smoke() {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    assert!(saw_diagnostics, "rust-analyzer should publish diagnostics after didOpen");
+    assert!(
+        saw_diagnostics,
+        "rust-analyzer should publish diagnostics after didOpen"
+    );
 
     // documentSymbol: expect a hierarchical list containing `path_to_uri`.
     let symbols = client.document_symbols(&uri).expect("documentSymbol");
@@ -106,18 +111,29 @@ fn rust_analyzer_smoke() {
             .collect::<Vec<_>>()
             .join("\n"),
     };
-    assert!(!hover_text.trim().is_empty(), "hover contents should be non-empty");
+    assert!(
+        !hover_text.trim().is_empty(),
+        "hover contents should be non-empty"
+    );
 
-    let definition = client.definition(&uri, line, 8).expect("definition request");
+    let definition = client
+        .definition(&uri, line, 8)
+        .expect("definition request");
     let location = match definition {
         GotoDefinitionResponse::Scalar(loc) => loc,
         GotoDefinitionResponse::Array(mut locs) => locs.remove(0),
         GotoDefinitionResponse::Link(mut links) => {
             let link = links.remove(0);
-            Location { uri: link.target_uri, range: link.target_range }
+            Location {
+                uri: link.target_uri,
+                range: link.target_range,
+            }
         }
     };
-    assert_eq!(location.uri, uri, "definition should point inside the same file");
+    assert_eq!(
+        location.uri, uri,
+        "definition should point inside the same file"
+    );
 
     client.shutdown().expect("graceful shutdown");
 }

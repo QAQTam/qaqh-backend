@@ -26,7 +26,6 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-
 use qaqh_domain::{AskMode, AskQuestion};
 use qaqh_types::UsageInfo;
 
@@ -356,7 +355,6 @@ pub struct RingContext<'a> {
     /// [`ContextFlow::ingest`](qaqh_message::ContextFlow::ingest) — the
     /// single door to the message store.
     pub flow: &'a mut qaqh_message::ContextFlow,
-
 }
 
 // ═══════════════════════════════════════════════════════
@@ -401,8 +399,6 @@ impl StatsCollector {
         }
     }
 }
-
-
 
 // ═══════════════════════════════════════════════════════
 // SessionBundle — session-scoped state

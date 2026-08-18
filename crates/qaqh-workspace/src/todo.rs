@@ -313,20 +313,22 @@ fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
             continue;
         }
         if let Some((start, end)) = segment.split_once('-') {
-            let start = parse_todo_id(Some(&Value::String(start.trim().to_string()))).ok_or_else(|| {
-                json_err(
-                    "INVALID_INPUT",
-                    &format!("invalid id range '{segment}'"),
-                    "Use T<n> or a numeric range like T1-T3.",
-                )
-            })?;
-            let end = parse_todo_id(Some(&Value::String(end.trim().to_string()))).ok_or_else(|| {
-                json_err(
-                    "INVALID_INPUT",
-                    &format!("invalid id range '{segment}'"),
-                    "Use T<n> or a numeric range like T1-T3.",
-                )
-            })?;
+            let start =
+                parse_todo_id(Some(&Value::String(start.trim().to_string()))).ok_or_else(|| {
+                    json_err(
+                        "INVALID_INPUT",
+                        &format!("invalid id range '{segment}'"),
+                        "Use T<n> or a numeric range like T1-T3.",
+                    )
+                })?;
+            let end =
+                parse_todo_id(Some(&Value::String(end.trim().to_string()))).ok_or_else(|| {
+                    json_err(
+                        "INVALID_INPUT",
+                        &format!("invalid id range '{segment}'"),
+                        "Use T<n> or a numeric range like T1-T3.",
+                    )
+                })?;
             let (start_n, end_n) = (todo_id_number(&start), todo_id_number(&end));
             let (Some(start_n), Some(end_n)) = (start_n, end_n) else {
                 return Err(json_err(
@@ -580,24 +582,53 @@ fn exec_todo_set(args: &Value) -> Result<String, String> {
         evidence: Option<String>,
     }
 
-    let pending: Vec<PendingSet> = if let Some(updates) = args.get("updates").and_then(Value::as_array) {
-        if updates.is_empty() {
-            return Err(json_err(
-                "INVALID_INPUT",
-                "updates must not be empty",
-                "Provide at least one {id, status} entry.",
-            ));
-        }
-        let mut list = Vec::new();
-        for update in updates {
-            let id = parse_todo_id(update.get("id")).ok_or_else(|| {
-                json_err(
+    let pending: Vec<PendingSet> =
+        if let Some(updates) = args.get("updates").and_then(Value::as_array) {
+            if updates.is_empty() {
+                return Err(json_err(
                     "INVALID_INPUT",
-                    "updates[].id missing or invalid",
-                    "Provide the assigned ID, e.g. T1.",
-                )
-            })?;
-            let requested = update.get("status").and_then(Value::as_str).unwrap_or_default();
+                    "updates must not be empty",
+                    "Provide at least one {id, status} entry.",
+                ));
+            }
+            let mut list = Vec::new();
+            for update in updates {
+                let id = parse_todo_id(update.get("id")).ok_or_else(|| {
+                    json_err(
+                        "INVALID_INPUT",
+                        "updates[].id missing or invalid",
+                        "Provide the assigned ID, e.g. T1.",
+                    )
+                })?;
+                let requested = update
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let status = parse_status(requested).ok_or_else(|| {
+                    json_err(
+                        "INVALID_INPUT",
+                        &format!("unknown status: {requested}"),
+                        "Use idle, in_progress, completed, or cancelled.",
+                    )
+                })?;
+                let evidence = update
+                    .get("evidence")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                list.push(PendingSet {
+                    id,
+                    status,
+                    evidence,
+                });
+            }
+            list
+        } else if let Some(ids) = args.get("ids") {
+            let requested = args
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let status = parse_status(requested).ok_or_else(|| {
                 json_err(
                     "INVALID_INPUT",
@@ -605,68 +636,68 @@ fn exec_todo_set(args: &Value) -> Result<String, String> {
                     "Use idle, in_progress, completed, or cancelled.",
                 )
             })?;
-            let evidence = update
+            let mut list = Vec::new();
+            for expr in ids.as_array().ok_or_else(|| {
+                json_err(
+                    "INVALID_INPUT",
+                    "ids must be an array of strings",
+                    "Use ids: [\"T1\", \"T1-T3\"]",
+                )
+            })? {
+                let expr = expr.as_str().ok_or_else(|| {
+                    json_err(
+                        "INVALID_INPUT",
+                        "ids entries must be strings",
+                        "Use ids: [\"T1\", \"T1-T3\"]",
+                    )
+                })?;
+                for id in expand_todo_ids(expr)? {
+                    list.push(PendingSet {
+                        id,
+                        status: status.clone(),
+                        evidence: None,
+                    });
+                }
+            }
+            list
+        } else {
+            let id = parse_todo_id(args.get("id")).ok_or_else(|| {
+                json_err(
+                    "INVALID_INPUT",
+                    "missing or invalid id",
+                    "Provide the assigned ID, e.g. T1.",
+                )
+            })?;
+            let requested = args
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let status = parse_status(requested).ok_or_else(|| {
+                json_err(
+                    "INVALID_INPUT",
+                    &format!("unknown status: {requested}"),
+                    "Use idle, in_progress, completed, or cancelled.",
+                )
+            })?;
+            let evidence = args
                 .get("evidence")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
-            list.push(PendingSet { id, status, evidence });
-        }
-        list
-    } else if let Some(ids) = args.get("ids") {
-        let requested = args.get("status").and_then(Value::as_str).unwrap_or_default();
-        let status = parse_status(requested).ok_or_else(|| {
-            json_err(
-                "INVALID_INPUT",
-                &format!("unknown status: {requested}"),
-                "Use idle, in_progress, completed, or cancelled.",
-            )
-        })?;
-        let mut list = Vec::new();
-        for expr in ids
-            .as_array()
-            .ok_or_else(|| json_err("INVALID_INPUT", "ids must be an array of strings", "Use ids: [\"T1\", \"T1-T3\"]"))?
-        {
-            let expr = expr.as_str().ok_or_else(|| {
-                json_err("INVALID_INPUT", "ids entries must be strings", "Use ids: [\"T1\", \"T1-T3\"]")
-            })?;
-            for id in expand_todo_ids(expr)? {
-                list.push(PendingSet { id, status: status.clone(), evidence: None });
+            if args.get("evidence").is_some() && evidence.is_none() {
+                return Err(json_err(
+                    "INVALID_INPUT",
+                    "evidence must be a non-empty string when provided",
+                    "Omit evidence unless there is a concrete result summary.",
+                ));
             }
-        }
-        list
-    } else {
-        let id = parse_todo_id(args.get("id")).ok_or_else(|| {
-            json_err(
-                "INVALID_INPUT",
-                "missing or invalid id",
-                "Provide the assigned ID, e.g. T1.",
-            )
-        })?;
-        let requested = args.get("status").and_then(Value::as_str).unwrap_or_default();
-        let status = parse_status(requested).ok_or_else(|| {
-            json_err(
-                "INVALID_INPUT",
-                &format!("unknown status: {requested}"),
-                "Use idle, in_progress, completed, or cancelled.",
-            )
-        })?;
-        let evidence = args
-            .get("evidence")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        if args.get("evidence").is_some() && evidence.is_none() {
-            return Err(json_err(
-                "INVALID_INPUT",
-                "evidence must be a non-empty string when provided",
-                "Omit evidence unless there is a concrete result summary.",
-            ));
-        }
-        vec![PendingSet { id, status, evidence }]
-    };
+            vec![PendingSet {
+                id,
+                status,
+                evidence,
+            }]
+        };
 
     // 宽松应用：未知 ID 记入 not_found，不中断其余更新。
     let mut updated: Vec<serde_json::Value> = Vec::new();
@@ -802,12 +833,24 @@ fn handle_todo(ctx: ToolCallCtx) -> ToolResult {
     let result = match action {
         "create" => reject_fields(
             &ctx.args,
-            &["id", "status", "evidence", "after_id", "before_id", "ids", "updates"],
+            &[
+                "id",
+                "status",
+                "evidence",
+                "after_id",
+                "before_id",
+                "ids",
+                "updates",
+            ],
             action,
         )
         .and_then(|_| exec_todo_create(&ctx.args, false)),
-        "insert" => reject_fields(&ctx.args, &["id", "status", "evidence", "ids", "updates"], action)
-            .and_then(|_| exec_todo_create(&ctx.args, true)),
+        "insert" => reject_fields(
+            &ctx.args,
+            &["id", "status", "evidence", "ids", "updates"],
+            action,
+        )
+        .and_then(|_| exec_todo_create(&ctx.args, true)),
         "set" => reject_fields(
             &ctx.args,
             &["title", "description", "items", "after_id", "before_id"],

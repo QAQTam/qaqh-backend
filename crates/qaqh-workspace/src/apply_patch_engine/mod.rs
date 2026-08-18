@@ -23,7 +23,7 @@ mod text_file;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub use file_update::{derive_new_contents_from_chunks, AppliedPatch};
+pub use file_update::{AppliedPatch, derive_new_contents_from_chunks};
 pub use parser::{Hunk, ParseError, UpdateFileChunk, parse_patch};
 pub use streaming_parser::StreamingPatchParser;
 
@@ -41,11 +41,16 @@ pub enum UpdateMode {
 #[derive(Debug)]
 pub enum EngineError {
     Parse(ParseError),
-    Io { context: String, source: std::io::Error },
+    Io {
+        context: String,
+        source: std::io::Error,
+    },
     Compute(String),
     EmptyPatch,
     /// A patch path resolved outside the workspace root (or failed to resolve).
-    PathOutsideWorkspace { path: String },
+    PathOutsideWorkspace {
+        path: String,
+    },
 }
 
 impl fmt::Display for EngineError {
@@ -126,7 +131,9 @@ pub(crate) fn resolve_workspace_path(cwd: &Path, path: &Path) -> Result<PathBuf,
     } else {
         match joined.parent() {
             Some(parent) if parent.exists() => {
-                let canon_parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+                let canon_parent = parent
+                    .canonicalize()
+                    .unwrap_or_else(|_| parent.to_path_buf());
                 canon_parent.join(joined.file_name().unwrap_or_default())
             }
             _ => joined.clone(),
@@ -175,10 +182,7 @@ pub fn apply_patch_engine(
             Hunk::DeleteFile { .. } => {
                 let old = std::fs::read_to_string(&resolved).ok();
                 let meta = std::fs::metadata(&resolved).map_err(|e| EngineError::Io {
-                    context: format!(
-                        "Failed to delete file {}",
-                        resolved.to_string_lossy()
-                    ),
+                    context: format!("Failed to delete file {}", resolved.to_string_lossy()),
                     source: e,
                 })?;
                 if meta.is_dir() {
@@ -210,16 +214,15 @@ pub fn apply_patch_engine(
                 chunks,
             } => {
                 let resolved = resolve_workspace_path(cwd, src_path)?;
-                let applied =
-                    derive_new_contents_from_chunks(&resolved, chunks, mode).map_err(|e| {
-                        match e {
-                            EngineError::Compute(msg) => EngineError::Compute(format!(
-                                "Failed to update file {}: {msg}",
-                                resolved.to_string_lossy()
-                            )),
-                            other => other,
-                        }
-                    })?;
+                let applied = derive_new_contents_from_chunks(&resolved, chunks, mode).map_err(
+                    |e| match e {
+                        EngineError::Compute(msg) => EngineError::Compute(format!(
+                            "Failed to update file {}: {msg}",
+                            resolved.to_string_lossy()
+                        )),
+                        other => other,
+                    },
+                )?;
                 if let Some(dest) = move_path {
                     let dest_resolved = resolve_workspace_path(cwd, dest)?;
                     write_file_with_missing_parent_retry(
@@ -246,16 +249,16 @@ pub fn apply_patch_engine(
                         });
                     }
                     std::fs::remove_file(&resolved).map_err(|e| EngineError::Io {
-                        context: format!("Failed to remove original {}", resolved.to_string_lossy()),
+                        context: format!(
+                            "Failed to remove original {}",
+                            resolved.to_string_lossy()
+                        ),
                         source: e,
                     })?;
                 } else {
                     std::fs::write(&resolved, applied.new_contents.as_bytes()).map_err(|e| {
                         EngineError::Io {
-                            context: format!(
-                                "Failed to write file {}",
-                                resolved.to_string_lossy()
-                            ),
+                            context: format!("Failed to write file {}", resolved.to_string_lossy()),
                             source: e,
                         }
                     })?;
@@ -332,18 +335,15 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
             Hunk::UpdateFile { chunks, .. } => {
                 // Full compute (read + match + rebuild) — same failure surface
                 // as a real apply, minus the write.
-                let applied = derive_new_contents_from_chunks(
-                    &resolved,
-                    chunks,
-                    UpdateMode::default(),
-                )
-                .map_err(|e| match e {
-                    EngineError::Compute(msg) => EngineError::Compute(format!(
-                        "Failed to update file {}: {msg}",
-                        resolved.to_string_lossy()
-                    )),
-                    other => other,
-                })?;
+                let applied =
+                    derive_new_contents_from_chunks(&resolved, chunks, UpdateMode::default())
+                        .map_err(|e| match e {
+                            EngineError::Compute(msg) => EngineError::Compute(format!(
+                                "Failed to update file {}: {msg}",
+                                resolved.to_string_lossy()
+                            )),
+                            other => other,
+                        })?;
                 outcome.affected.modified.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,

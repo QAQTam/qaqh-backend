@@ -9,8 +9,8 @@
 //! Second optional arg is the file to preview with `fs.read`.
 
 use qaqh_client::{
-    Client, ClientHandlers, ClientOptions, QueryRequest, RemoteEndpoint,
-    display_path, remote_path_from_display,
+    Client, ClientHandlers, ClientOptions, QueryRequest, RemoteEndpoint, display_path,
+    remote_path_from_display,
 };
 
 #[tokio::main]
@@ -22,7 +22,10 @@ async fn main() {
 
     let client = Client::connect_async(ClientOptions {
         handlers: ClientHandlers::default(),
-        remote: Some(RemoteEndpoint { base_url: base_url.clone(), token }),
+        remote: Some(RemoteEndpoint {
+            base_url: base_url.clone(),
+            token,
+        }),
         ..Default::default()
     })
     .await

@@ -19,8 +19,9 @@ pub use qaqh_domain::{
 };
 pub use qaqh_ringing::{
     ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse, RingingCommand,
-    RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus, RingingEvent,
-    RingingEventBatch as EventBatch, RingingEventEnvelope, RingingResetRequired as ResetRequired,
+    RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,
+    RingingEvent, RingingEventBatch as EventBatch, RingingEventEnvelope,
+    RingingResetRequired as ResetRequired,
 };
 
 /// Stable channel order used to start the three independent SSE streams.

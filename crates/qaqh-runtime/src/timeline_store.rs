@@ -137,8 +137,7 @@ mod tests {
 
     #[test]
     fn persists_and_loads_a_native_timeline_without_channel_envelopes() {
-        let root =
-            std::env::temp_dir().join(format!("qaqh-timeline-store-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("qaqh-timeline-store-{}", std::process::id()));
         let store = TimelineStore::new(&root).unwrap();
         store
             .persist(

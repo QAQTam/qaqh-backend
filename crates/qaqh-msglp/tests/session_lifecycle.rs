@@ -127,7 +127,8 @@ fn tool_round(tool_id: &str, name: &str, args: &str) -> Vec<String> {
     vec![
         json!({"choices":[{"index":0,"delta":{"tool_calls":[
             {"index":0,"id":tool_id,"type":"function","function":{"name":name,"arguments":args}}
-        ]}}]}).to_string(),
+        ]}}]})
+        .to_string(),
         json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}).to_string(),
         "[DONE]".into(),
     ]
@@ -223,8 +224,7 @@ fn create_session_emits_session_state() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    SESSION_INIT
-        .call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
 
     let mut agent = AgentState::init("test");
     agent.ephemeral = true;
@@ -265,8 +265,7 @@ fn send_message_triggers_turn_lifecycle() {
     std::fs::create_dir(&ws).unwrap();
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
 
-    SESSION_INIT
-        .call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
 
     let mut agent = AgentState::init("test");
     agent.ephemeral = true;
@@ -366,8 +365,7 @@ fn system_injection_lands_inside_running_turn() {
         text_round("done after tool"),
     ]);
 
-    SESSION_INIT
-        .call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
 
     let mut agent = AgentState::init("test");
     agent.ephemeral = true;
@@ -454,8 +452,7 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    SESSION_INIT
-        .call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    SESSION_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
 
     let mut agent = AgentState::init("test");
     agent.ephemeral = true;
@@ -505,4 +502,3 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
     lp.run();
     drv.join().unwrap();
 }
-

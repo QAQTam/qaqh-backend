@@ -80,8 +80,10 @@ fn percent_decode(s: &str) -> Result<Vec<u8>, UriError> {
                 if i + 2 >= bytes.len() {
                     return Err(UriError::InvalidPercent(s.to_owned()));
                 }
-                let hi = hex_val(bytes[i + 1]).ok_or_else(|| UriError::InvalidPercent(s.to_owned()))?;
-                let lo = hex_val(bytes[i + 2]).ok_or_else(|| UriError::InvalidPercent(s.to_owned()))?;
+                let hi =
+                    hex_val(bytes[i + 1]).ok_or_else(|| UriError::InvalidPercent(s.to_owned()))?;
+                let lo =
+                    hex_val(bytes[i + 2]).ok_or_else(|| UriError::InvalidPercent(s.to_owned()))?;
                 out.push((hi << 4) | lo);
                 i += 3;
             }
@@ -216,7 +218,10 @@ mod tests {
             r"F:\测试\文件.rs",
             r"F:\QAQ-Harness",
         ] {
-            assert_eq!(uri_to_path(&path_to_uri(Path::new(p))).unwrap(), PathBuf::from(p));
+            assert_eq!(
+                uri_to_path(&path_to_uri(Path::new(p))).unwrap(),
+                PathBuf::from(p)
+            );
         }
     }
 

@@ -14,8 +14,7 @@ use std::path::Path;
 // 这里的 re-export 仅为保持旧调用点（尤其是本模块测试）可读；新增档位
 // 只允许改 `qaqh_types::tool_mode`，不再维护本文件里的硬编码表。
 pub use qaqh_types::tool_mode::{
-    MINIMAL_DSH_MODEL_TOOLS, MINIMAL_DSH_TOOLS, MINIMAL_TOOLS, MINIMAL_TOOLS_B,
-    MINIMAL_TOOLS_C,
+    MINIMAL_DSH_MODEL_TOOLS, MINIMAL_DSH_TOOLS, MINIMAL_TOOLS, MINIMAL_TOOLS_B, MINIMAL_TOOLS_C,
 };
 
 /// Agent 工具包注册器聚合点（REFACTOR-ROADMAP 刀 6B-①）。
@@ -66,10 +65,7 @@ fn message_hash(message: &qaqh_types::Message) -> u64 {
 }
 
 impl PrefixShape {
-    fn capture(
-        context: &[qaqh_types::Message],
-        tool_defs: &[qaqh_types::ToolDef],
-    ) -> Self {
+    fn capture(context: &[qaqh_types::Message], tool_defs: &[qaqh_types::ToolDef]) -> Self {
         let sys_text: String = context
             .iter()
             .take_while(|m| m.role == "system")
@@ -753,9 +749,9 @@ mod tests {
         // Simulate session creation: the catalog is persisted as a system
         // message right after the base prompt.
         agent.skills.set_workspace(temp.path());
-        agent
-            .msg
-            .push_system(qaqh_types::Message::system(agent.skills.initial_catalog_text()));
+        agent.msg.push_system(qaqh_types::Message::system(
+            agent.skills.initial_catalog_text(),
+        ));
 
         // Catalog is persisted as a system message (session creation), so the
         // context carries it without any transient slot injection.
@@ -799,7 +795,10 @@ mod tests {
         // the rebuilt context is byte-identical (prefix cache stable).
         agent.sync_skill_injection(&mut flow);
         assert_eq!(agent.msg.trailing_messages().len(), 1);
-        eprintln!("DBG roles: {:?}", context.iter().map(|m| m.role.as_str()).collect::<Vec<_>>());
+        eprintln!(
+            "DBG roles: {:?}",
+            context.iter().map(|m| m.role.as_str()).collect::<Vec<_>>()
+        );
         eprintln!("DBG last: {:?}", context.last().map(|m| m.content.clone()));
         assert_eq!(
             serde_json::to_value(&context).unwrap(),
@@ -1037,7 +1036,10 @@ mod tests {
             .iter()
             .map(|d| d.function.name.clone())
             .collect();
-        assert_eq!(names_before, names_after, "unknown mode must not reset toolset");
+        assert_eq!(
+            names_before, names_after,
+            "unknown mode must not reset toolset"
+        );
     }
 
     /// 验证回传给模型的工具 schema（`agent.tool_defs`，engine_turn.rs L1285
@@ -1080,16 +1082,10 @@ mod tests {
                 .map(|d| d.function.name.as_str())
                 .collect();
             // 打印回传 API 的 tool schema（工具名清单，便于人工核对）。
-            eprintln!(
-                "[tool_schema:{mode}] {} tools -> {:?}",
-                names.len(),
-                names
-            );
+            eprintln!("[tool_schema:{mode}] {} tools -> {:?}", names.len(), names);
             // 精确相等：不多（非全量放送）也不少（非黑名单式全量+执行层拦截）。
-            let expected_set: std::collections::BTreeSet<&str> =
-                expected.iter().copied().collect();
-            let got_set: std::collections::BTreeSet<&str> =
-                names.iter().copied().collect();
+            let expected_set: std::collections::BTreeSet<&str> = expected.iter().copied().collect();
+            let got_set: std::collections::BTreeSet<&str> = names.iter().copied().collect();
             assert_eq!(
                 got_set, expected_set,
                 "mode {mode}: tool_defs must be exactly the allowlist, got {names:?}"
@@ -1119,8 +1115,7 @@ mod tests {
         );
         let dsh_expected: std::collections::BTreeSet<&str> =
             ["bash", "str_replace_editor"].into_iter().collect();
-        let dsh_got: std::collections::BTreeSet<&str> =
-            names_dsh.iter().copied().collect();
+        let dsh_got: std::collections::BTreeSet<&str> = names_dsh.iter().copied().collect();
         assert_eq!(
             dsh_got, dsh_expected,
             "minimal:dsh must project bash_v2->bash, got {names_dsh:?}"

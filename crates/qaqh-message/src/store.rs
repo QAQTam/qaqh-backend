@@ -465,7 +465,11 @@ impl MessageStore {
         }
         let step = Step::new(msg);
         let has_tools = step.has_tool_use();
-        self.turns.last_mut().expect("checked above").steps.push(step);
+        self.turns
+            .last_mut()
+            .expect("checked above")
+            .steps
+            .push(step);
         self.context_revision = self.context_revision.saturating_add(1);
 
         if has_tools {
@@ -1078,9 +1082,7 @@ impl MessageStore {
                                 .iter()
                                 .find_map(|b| {
                                     if let qaqh_types::ContentBlock::ToolUse {
-                                        id: tid,
-                                        name,
-                                        ..
+                                        id: tid, name, ..
                                     } = b
                                     {
                                         if tid == id { Some(name.clone()) } else { None }
@@ -1174,11 +1176,14 @@ impl MessageStore {
         };
         // 活跃 turns 数组起点的全局序号：无 compact 时 = 1；物理 compact 后
         // turns[0] 是合成摘要（占一个数组位），起点 = 被压缩 turn 数 + 1。
-        let (first_seq, summary_offset) =
-            match self.turns.first().and_then(|t| Self::compacted_turn_count(&t.user)) {
-                Some(skip) => (skip + 1, 1),
-                None => (1, 0),
-            };
+        let (first_seq, summary_offset) = match self
+            .turns
+            .first()
+            .and_then(|t| Self::compacted_turn_count(&t.user))
+        {
+            Some(skip) => (skip + 1, 1),
+            None => (1, 0),
+        };
         if seq < first_seq {
             // 撤回已被压缩的 turn：清空全部（含摘要——它正是这些 turn 的替身）。
             self.turns.clear();
@@ -1234,7 +1239,8 @@ impl MessageStore {
 
         // 折叠压缩区 trailing 注入：文本已进摘要输入，随旧 turn 一起丢弃，
         // 不再"复活"到摘要之后/活跃 turn 之前（双重表示）。
-        self.trailing_messages.retain(|m| m.msg_id.map_or(true, |id| id >= first_kept_id));
+        self.trailing_messages
+            .retain(|m| m.msg_id.map_or(true, |id| id >= first_kept_id));
 
         // Physically remove compacted turns, keep only the most recent `keep`.
         let kept = self.turns.split_off(skip);
@@ -1505,7 +1511,10 @@ mod tests {
         // to_vec: mid-stream system message keeps its role and position.
         let vec = store.to_vec();
         let roles: Vec<&str> = vec.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["user", "assistant", "system", "user", "assistant"]);
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "system", "user", "assistant"]
+        );
         assert!(vec[2]
             .content
             .iter()
@@ -1516,7 +1525,10 @@ mod tests {
         // （function_call_output 之后固化的非法位置曾导致 provider 丢弃），
         // 且保持其写入顺序位置（位于两个真实 turn 之间）。
         let (restored, repairs) = MessageStore::from_messages("test", &vec, 0);
-        assert!(repairs.is_empty(), "replay should not report repairs: {repairs:?}");
+        assert!(
+            repairs.is_empty(),
+            "replay should not report repairs: {repairs:?}"
+        );
         let restored_vec = restored.to_vec();
         let restored_roles: Vec<&str> = restored_vec.iter().map(|m| m.role.as_str()).collect();
         // to_vec 是权威快照：trailing 注入必须保持写入顺序位置（此前 to_vec
@@ -1526,7 +1538,11 @@ mod tests {
             vec!["user", "assistant", "system", "user", "assistant"]
         );
         let trailing = restored.trailing_messages();
-        assert_eq!(trailing.len(), 1, "subagent injection must restore as trailing");
+        assert_eq!(
+            trailing.len(),
+            1,
+            "subagent injection must restore as trailing"
+        );
         assert!(trailing[0]
             .content
             .iter()
@@ -1589,9 +1605,9 @@ mod tests {
         let report = ctx
             .iter()
             .find(|m| {
-                m.content.iter().any(|b| {
-                    matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT "))
-                })
+                m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT ")),
+                )
             })
             .unwrap();
         assert_eq!(report.role, "user");
@@ -1624,17 +1640,23 @@ mod tests {
         // 全量快照（undo/compact/重启）往返后，注入的写入位置必须保持不变。
         let snapshot = store.to_vec();
         let (restored, repairs) = MessageStore::from_messages("seed", &snapshot, 0);
-        assert!(repairs.is_empty(), "replay should not report repairs: {repairs:?}");
+        assert!(
+            repairs.is_empty(),
+            "replay should not report repairs: {repairs:?}"
+        );
         let restored_vec = restored.to_vec();
         let roles: Vec<&str> = restored_vec.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["user", "assistant", "user", "user", "assistant"]);
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "user", "assistant"]
+        );
         // 报告位于第一轮与第二轮之间。
         let report_idx = restored_vec
             .iter()
             .position(|m| {
-                m.content.iter().any(|b| {
-                    matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT "))
-                })
+                m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT ")),
+                )
             })
             .unwrap();
         assert_eq!(report_idx, 2);
@@ -1757,14 +1779,17 @@ mod tests {
                 .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
         };
         let has_injection = |m: &Message| {
-            m.content.iter().any(|b| {
-                matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT "))
-            })
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[SUBAGENT ")))
         };
         let result_idx = flat.iter().position(has_tool_result).unwrap();
         let inject_idx = flat.iter().position(has_injection).unwrap();
         // 注入排在 tool_result 之后（而非夹在 assistant 与其 tool_result 之间）。
-        assert!(inject_idx > result_idx, "injection must not split toolcall/result");
+        assert!(
+            inject_idx > result_idx,
+            "injection must not split toolcall/result"
+        );
     }
 
     #[test]
@@ -1834,7 +1859,10 @@ mod tests {
             projected,
             "[OK] edit\n  src/a.rs: 1/1 hunk(s) applied at L2 (+1 -1)"
         );
-        assert!(!projected.contains("+++ b/"), "diff leaked to model: {projected}");
+        assert!(
+            !projected.contains("+++ b/"),
+            "diff leaked to model: {projected}"
+        );
     }
 
     #[test]
@@ -2016,8 +2044,9 @@ mod tests {
         store.push_tool_result_direct("edit-1", "OK_RECEIPT", true);
         store.push_user("second turn");
 
-        let context = store
-            .build_context_for_gate(&[String::from("<workspace_path>F:\\QAQ-Harness</workspace_path>")]);
+        let context = store.build_context_for_gate(&[String::from(
+            "<workspace_path>F:\\QAQ-Harness</workspace_path>",
+        )]);
         let users: Vec<String> = context
             .iter()
             .filter(|m| m.role == "user")
@@ -2298,8 +2327,7 @@ mod tests {
     fn from_messages_restores_user_subagent_injection_as_trailing() {
         // user 角色 + name="subagent" + [SUBAGENT 前缀：注入消息回放时
         // 恢复为 trailing，不得当作真实用户 turn（不建回合）。
-        let mut inject =
-            Message::user("[SUBAGENT 'replay_test_x' COMPLETED]\n\nREPLAY-TEST-OK-X");
+        let mut inject = Message::user("[SUBAGENT 'replay_test_x' COMPLETED]\n\nREPLAY-TEST-OK-X");
         inject.name = Some("subagent".into());
         let messages = vec![
             Message::system("base instructions"),

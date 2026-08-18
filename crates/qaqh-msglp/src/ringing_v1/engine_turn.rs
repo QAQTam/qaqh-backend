@@ -1703,9 +1703,11 @@ impl TurnEngine {
             }
             let mut assistant_msg = util::build_assistant_message(&content, &reasoning, &parsed);
             assistant_msg.content.extend(response_output_items);
-            let receipt = ctx
-                .flow
-                .ingest(&mut ctx.agent.msg, qaqh_message::builtin::MODEL, assistant_msg.clone());
+            let receipt = ctx.flow.ingest(
+                &mut ctx.agent.msg,
+                qaqh_message::builtin::MODEL,
+                assistant_msg.clone(),
+            );
             // model 源（Sink::Step）的 store 层决策透传：TurnComplete 结束回合，
             // None 表示可能有工具待执行。
             let effect = receipt.effect.unwrap_or(Effect::None);
@@ -1937,14 +1939,12 @@ impl TurnEngine {
                                             code_delta,
                                             skill_effects,
                                         )) => {
-                                            ctx.agent
-                                                .msg
-                                                .push_tool_result_direct_with_diff(
-                                                    &call_id,
-                                                    &content,
-                                                    success,
-                                                    _canonical_result.diff.clone(),
-                                                );
+                                            ctx.agent.msg.push_tool_result_direct_with_diff(
+                                                &call_id,
+                                                &content,
+                                                success,
+                                                _canonical_result.diff.clone(),
+                                            );
                                             ordered_skill_effects
                                                 .push((call_id.clone(), skill_effects));
                                             if let Some(ref delta) = code_delta {
@@ -2020,14 +2020,12 @@ impl TurnEngine {
                                     code_delta,
                                     skill_effects,
                                 )) => {
-                                    ctx.agent
-                                        .msg
-                                        .push_tool_result_direct_with_diff(
-                                            &call_id,
-                                            &content,
-                                            success,
-                                            _canonical_result.diff.clone(),
-                                        );
+                                    ctx.agent.msg.push_tool_result_direct_with_diff(
+                                        &call_id,
+                                        &content,
+                                        success,
+                                        _canonical_result.diff.clone(),
+                                    );
                                     ordered_skill_effects.push((call_id.clone(), skill_effects));
                                     if let Some(ref delta) = code_delta {
                                         ctx.stats.push_delta(delta.clone());
@@ -2257,7 +2255,15 @@ impl TurnEngine {
                 .take(120)
                 .collect();
             ToolEngine::emit_timeline_tool_result(
-                ctx, turn_id, round_num, tc_id, name, &args, content, *success, diff.clone(),
+                ctx,
+                turn_id,
+                round_num,
+                tc_id,
+                name,
+                &args,
+                content,
+                *success,
+                diff.clone(),
             );
             // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
             ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(

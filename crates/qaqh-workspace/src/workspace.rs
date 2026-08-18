@@ -72,7 +72,11 @@ pub fn set_current_session(seed: &str) {
 /// `sessions/{seed}/workspace.txt` 由读取侧惰性迁移（零停机）。
 pub fn load_session_workspace(seed: &str) {
     let workspace = qaqh_session::workspace::session_workspace_cwd(seed).unwrap_or_default();
-    set_process_workspace(if workspace.is_empty() { "." } else { &workspace });
+    set_process_workspace(if workspace.is_empty() {
+        "."
+    } else {
+        &workspace
+    });
 }
 
 /// Update tool path resolution and the process working directory together.

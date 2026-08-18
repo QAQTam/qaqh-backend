@@ -40,7 +40,11 @@ pub enum LspError {
     #[error("timeout waiting for `{method}` response after {secs}s")]
     Timeout { method: String, secs: u64 },
     #[error("server error for `{method}`: {message} (code {code})")]
-    ServerError { method: String, code: i32, message: String },
+    ServerError {
+        method: String,
+        code: i32,
+        message: String,
+    },
     #[error("language server exited unexpectedly: {status:?}")]
     ServerExited { status: Option<ExitStatus> },
     #[error("connection closed by server while waiting for `{method}`")]
@@ -130,7 +134,12 @@ impl LspClient {
         let writer = Arc::new(Mutex::new(BufWriter::new(stdin)));
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let notifications: NotificationQueue = Arc::new(Mutex::new(VecDeque::new()));
-        spawn_reader(stdout, writer.clone(), pending.clone(), notifications.clone());
+        spawn_reader(
+            stdout,
+            writer.clone(),
+            pending.clone(),
+            notifications.clone(),
+        );
 
         let mut client = Self {
             child,
@@ -145,8 +154,10 @@ impl LspClient {
         };
 
         let uri_str = path_to_uri(&config.root);
-        let root_uri = Uri::from_str(&uri_str)
-            .map_err(|e| LspError::BadUri { uri: uri_str, reason: e.to_string() })?;
+        let root_uri = Uri::from_str(&uri_str).map_err(|e| LspError::BadUri {
+            uri: uri_str,
+            reason: e.to_string(),
+        })?;
         let params = InitializeParams {
             process_id: Some(std::process::id()),
             #[allow(deprecated)]
@@ -166,7 +177,8 @@ impl LspClient {
             }]),
             ..Default::default()
         };
-        let result: InitializeResult = client.request("initialize", serde_json::to_value(params)?)?;
+        let result: InitializeResult =
+            client.request("initialize", serde_json::to_value(params)?)?;
         client.server_capabilities = result.capabilities;
         client.notify("initialized", serde_json::json!({}))?;
         Ok(client)
@@ -187,7 +199,11 @@ impl LspClient {
     /// The response is deserialized into `R`; server error responses and
     /// timeouts are reported as `LspError` variants. The pending entry is
     /// always cleaned up, including on timeout.
-    pub fn request<R: DeserializeOwned>(&mut self, method: &str, params: Value) -> Result<R, LspError> {
+    pub fn request<R: DeserializeOwned>(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<R, LspError> {
         let id = RequestId::from(self.next_id);
         self.next_id += 1;
         let (tx, rx): (Sender<Result<Value, ResponseError>>, _) = mpsc::channel();
@@ -217,11 +233,16 @@ impl LspClient {
             }),
             Err(RecvTimeoutError::Timeout) => {
                 drop_pending(&self.pending, &id);
-                Err(LspError::Timeout { method: method.to_owned(), secs: self.timeout.as_secs() })
+                Err(LspError::Timeout {
+                    method: method.to_owned(),
+                    secs: self.timeout.as_secs(),
+                })
             }
             Err(RecvTimeoutError::Disconnected) => {
                 drop_pending(&self.pending, &id);
-                Err(LspError::Closed { method: method.to_owned() })
+                Err(LspError::Closed {
+                    method: method.to_owned(),
+                })
             }
         }
     }

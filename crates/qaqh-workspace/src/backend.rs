@@ -210,7 +210,8 @@ fn is_connect_failure(error: &ureq::Error) -> bool {
         ),
         _ => false,
     }
-}fn workspace_exec_failed(detail: &str) -> ToolResult {
+}
+fn workspace_exec_failed(detail: &str) -> ToolResult {
     ToolResult::error(
         serde_json::json!({
             "timeis": crate::now_utc8(),
@@ -335,7 +336,8 @@ mod tests {
             "peer disconnected"
         ))));
         assert!(!is_connect_failure(&ureq::Error::StatusCode(500)));
-    }    fn serve_bin_path() -> std::path::PathBuf {
+    }
+    fn serve_bin_path() -> std::path::PathBuf {
         // 测试运行于 target/<profile>/deps/qaqh_workspace-<hash>.exe；
         // serve 二进制在 target/<profile>/qaqh-workspace(.exe)。
         let mut exe = std::env::current_exe().expect("test exe path");

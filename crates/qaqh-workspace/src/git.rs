@@ -106,8 +106,8 @@ pub fn switch_branch(workspace: &str, branch: &str, stash: bool) -> Result<Strin
     let mut stashed = false;
 
     if stash && has_changes {
-        let sig =
-            git2::Signature::now("QAQ-Harness", "qaqh@local").map_err(|e| format!("signature: {e}"))?;
+        let sig = git2::Signature::now("QAQ-Harness", "qaqh@local")
+            .map_err(|e| format!("signature: {e}"))?;
         repo.stash_save(&sig, "qaqh-auto-stash", None)
             .map_err(|e| format!("stash: {e}"))?;
         stashed = true;
@@ -224,7 +224,8 @@ mod tests {
             .expect("stage fixture");
         let tree_id = index.write_tree().expect("write tree");
         let tree = repo.find_tree(tree_id).expect("find tree");
-        let signature = git2::Signature::now("QAQ-Harness Test", "qaqh-test@local").expect("signature");
+        let signature =
+            git2::Signature::now("QAQ-Harness Test", "qaqh-test@local").expect("signature");
         let commit_id = repo
             .commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
             .expect("initial commit");
