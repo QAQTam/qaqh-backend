@@ -34,8 +34,10 @@ use super::journal_store::{JournalOp, JournalStore};
 use super::projection::SnapshotProjector;
 use super::router::{ChannelRouter, replaceable_key_for, terminal_replaceable_keys};
 use super::sequencer::Sequencer;
-use crate::timeline_store::TimelineStore;
-use crate::{TimelineAppender, TimelineError, TimelineLiveEntry};
+use crate::timeline_store::{PersistedTimeline, TimelineJournalOp, TimelineStore};
+use crate::{
+    TimelineAppender, TimelineError, TimelineLiveEntry, materialize_timeline_from_journal,
+};
 
 /// journal jsonl 超过该物理大小时，compact 后触发整文件重写（丢弃已折叠的
 /// RoundDelta）。append-only 日志若不重写，磁盘与装载成本永久累积。
@@ -301,10 +303,21 @@ impl RingingHub {
                         // terminal persistence. Taking the store lock first
                         // prevents an older async snapshot from overwriting a
                         // newer terminal checkpoint.
-                        let store = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
-                        let Some(store) = store.as_ref() else {
+                        let mut store = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+                        let Some(store) = store.as_mut() else {
                             continue;
                         };
+                        // 先追加 timeline journal 尾部（journal ≥ cache 不变量），
+                        // 再写缓存文件。journal 追加失败时跳过缓存写入（fail-closed）：
+                        // 否则崩溃重启后 journal 重放会丢失仅存在于缓存的尾部条目。
+                        if let Err(error) =
+                            append_timeline_journal_tail_locked(store, &timeline, &seed)
+                        {
+                            log::error!(
+                                "[timeline] journal append failed for {seed}: {error}; skipping cache persist (fail-closed)"
+                            );
+                            continue;
+                        }
                         let Some((snapshot, journal)) = ({
                             let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
                             timeline.snapshot(&seed).map(|snapshot| {
@@ -483,21 +496,33 @@ impl RingingHub {
     /// 快照。内存态（TimelineAppender）在首次访问该 seed 时由
     /// `ensure_timeline_loaded` 从磁盘按需恢复。
     fn load_timeline_persisted(&self) {
-        let seeds = {
+        let mut seeds = HashSet::new();
+        {
             let guard = self
                 .timeline_store
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
-                Some(store) => store.list_seeds().unwrap_or_default(),
+                Some(store) => {
+                    // 缓存文件 + timeline journal 的并集：journal 为阶段 1 的权威
+                    // 来源，缓存缺失（被删/损坏）时仍需能从 journal 懒加载。
+                    match store.list_seeds() {
+                        Ok(cache_seeds) => seeds.extend(cache_seeds),
+                        Err(error) => log::warn!("[timeline] cache index failed: {error}"),
+                    }
+                    match store.list_journal_seeds() {
+                        Ok(journal_seeds) => seeds.extend(journal_seeds),
+                        Err(error) => log::warn!("[timeline] journal index failed: {error}"),
+                    }
+                }
                 None => return,
             }
-        };
+        }
         let total = seeds.len();
         *self
             .disk_timeline_seeds
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = seeds.into_iter().collect();
+            .unwrap_or_else(|e| e.into_inner()) = seeds;
         log::info!("[ringing] lazy timeline index ready: {total} persisted timelines on disk");
     }
 
@@ -531,79 +556,170 @@ impl RingingHub {
         {
             return;
         }
-        let persisted = {
-            let store = self
+        // 阶段 1：timeline journal 为权威来源；老 `{seed}.json` 降级为缓存与
+        // 兼容回退（无 journal 的旧历史在首载时一次性迁移回填）。
+        let (journal_ops, persisted_cache) = {
+            let mut store = self
                 .timeline_store
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            match store.as_ref() {
-                Some(store) => store.load_seed(seed),
+            match store.as_mut() {
+                Some(store) => (
+                    store.read_journal(seed).unwrap_or_default(),
+                    store.load_seed(seed),
+                ),
                 None => return,
             }
         };
-        let Some(persisted) = persisted else {
-            // BUG-006：timeline 目录缺失/记录损坏时，它必须能从
-            // messages.jsonl / compact-context 重建，否则 timeline 就不是
-            // “可重建投影”，而会变成第二份事实源。重建结果与 conversation
-            // snapshot 同一基线（compact 优先），并同步写回 timeline 文件。
-            if let Some((snapshot, journal)) =
-                super::timeline_rebuild::rebuild_timeline_snapshot(seed)
+
+        let mut cache_missing = persisted_cache.is_none();
+        if !journal_ops.is_empty() {
+            // 快路径：缓存与 journal 对齐（watermark == journal 最大 seq，二者描述
+            // 同一状态）→ 直接 restore 缓存，免去对超大历史的全量重放。
+            let journal_last = journal_ops
+                .iter()
+                .filter_map(|op| match op {
+                    TimelineJournalOp::Snapshot { snapshot } => Some(snapshot.watermark),
+                    TimelineJournalOp::Append { entry } => Some(entry.timeline_seq),
+                })
+                .max()
+                .unwrap_or(0);
+            if let Some(persisted) = &persisted_cache
+                && persisted.snapshot.watermark == journal_last
             {
                 {
                     let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
                     if !appender.contains(seed) {
-                        appender.restore(seed.to_string(), snapshot.clone(), journal.clone());
+                        appender.restore(
+                            persisted.seed.clone(),
+                            persisted.snapshot.clone(),
+                            persisted.journal.clone(),
+                        );
                     }
                 }
-                let store = self
-                    .timeline_store
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if let Some(store) = store.as_ref()
-                    && let Err(error) = store.persist(seed, &snapshot, journal)
-                {
-                    log::warn!("[timeline] rebuild persist failed for {seed}: {error}");
+                log::info!("[ringing] lazily loaded timeline {seed} from cache (journal aligned)");
+            } else {
+                // journal 权威：纯重放重建（与原生写一致，前端快照形状逐字不变）。
+                match materialize_timeline_from_journal(&journal_ops) {
+                    Some((snapshot, journal)) => {
+                        {
+                            let mut appender =
+                                self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                            if !appender.contains(seed) {
+                                appender
+                                    .restore(seed.to_string(), snapshot.clone(), journal.clone());
+                            }
+                        }
+                        // 缓存缺失或滞后于 journal → 收尾后补写缓存（保前端快照路径）。
+                        cache_missing = true;
+                        log::info!("[ringing] lazily rebuilt timeline {seed} from journal");
+                    }
+                    None => {
+                        // 有 journal 记录但不可重放（防御分支）→ 回退缓存载荷。
+                        if let Some(persisted) = persisted_cache {
+                            let mut appender =
+                                self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                            appender.restore(
+                                persisted.seed.clone(),
+                                persisted.snapshot.clone(),
+                                persisted.journal.clone(),
+                            );
+                        } else {
+                            self.rebuild_timeline_from_messages(seed);
+                            return;
+                        }
+                    }
                 }
-                log::info!(
-                    "[ringing] rebuilt timeline {seed} from persisted messages (BUG-006 fallback)"
-                );
             }
-            return;
-        };
-        {
-            let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            appender.restore(
-                persisted.seed.clone(),
-                persisted.snapshot.clone(),
-                persisted.journal.clone(),
-            );
-        }
-        // 上次运行遗留的孤儿 running turn 在此收尾（见
-        // seal_orphan_running_turns）。persistence worker 尚未启动，
-        // 有变更时需同步写回，保证重启后快照已收敛。
-        if self.seal_orphan_running_turns(seed) {
-            let (snapshot, journal) = {
-                let appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-                match appender.snapshot(seed) {
-                    Some(snapshot) => {
-                        let journal = appender.replay_since(seed, 0);
-                        let journal = Self::prune_sealed_timeline_journal(&snapshot, journal);
-                        (snapshot, journal)
-                    }
-                    None => (persisted.snapshot, Vec::new()),
+        } else if let Some(persisted) = persisted_cache {
+            // 无 journal 的旧历史：兼容 restore + 一次性迁移（回填 journal）。
+            {
+                let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                if !appender.contains(seed) {
+                    appender.restore(
+                        persisted.seed.clone(),
+                        persisted.snapshot.clone(),
+                        persisted.journal.clone(),
+                    );
                 }
-            };
-            let store = self
+            }
+            self.backfill_timeline_journal_from_persisted(&persisted);
+        } else {
+            // 两者皆无 → BUG-006：从 messages/compact 可重建投影。
+            self.rebuild_timeline_from_messages(seed);
+            return;
+        }
+
+        // 上次运行遗留的孤儿 running turn 在此收尾（见 seal_orphan_running_turns）。
+        // 有变更、或缓存缺失/滞后时同步落盘（journal 权威：先追 journal 再写缓存）。
+        if self.seal_orphan_running_turns(seed) || cache_missing {
+            self.persist_timeline_sync(seed);
+        }
+        log::info!("[ringing] lazily loaded timeline {seed}");
+    }
+
+    /// BUG-006：timeline 目录缺失/记录损坏时，它必须能从 messages.jsonl /
+    /// compact-context 重建，否则 timeline 就不是"可重建投影"，而会变成第二份
+    /// 事实源。重建结果与 conversation snapshot 同一基线（compact 优先），
+    /// 并同步写回 timeline 缓存 + timeline journal（保证下次也 journal 权威）。
+    fn rebuild_timeline_from_messages(&self, seed: &str) {
+        if let Some((snapshot, journal)) = super::timeline_rebuild::rebuild_timeline_snapshot(seed)
+        {
+            {
+                let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                if !appender.contains(seed) {
+                    appender.restore(seed.to_string(), snapshot.clone(), journal.clone());
+                }
+            }
+            let mut store = self
                 .timeline_store
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(store) = store.as_ref()
-                && let Err(error) = store.persist(seed, &snapshot, journal)
-            {
-                log::warn!("[timeline] orphan seal persist failed for {seed}: {error}");
+            if let Some(store) = store.as_mut() {
+                if let Err(error) =
+                    append_timeline_journal_tail_locked(store, &self.timeline, seed)
+                {
+                    log::error!(
+                        "[timeline] journal append failed for {seed}: {error}; skipping rebuild persist (fail-closed)"
+                    );
+                    return;
+                }
+                if let Err(error) = store.persist(seed, &snapshot, journal) {
+                    log::warn!("[timeline] rebuild persist failed for {seed}: {error}");
+                }
             }
+            log::info!(
+                "[ringing] rebuilt timeline {seed} from persisted messages (BUG-006 fallback)"
+            );
         }
-        log::info!("[ringing] lazily loaded timeline {seed}");
+    }
+
+    /// 一次性历史迁移：把旧 `PersistedTimeline`（snapshot + replay tail）转写为
+    /// timeline journal（`Snapshot` 基点 + `Append` 尾部）。幂等：目标文件已
+    /// 存在则跳过。
+    fn backfill_timeline_journal_from_persisted(&self, persisted: &PersistedTimeline) {
+        let mut ops: Vec<TimelineJournalOp> =
+            Vec::with_capacity(persisted.journal.len().saturating_add(1));
+        ops.push(TimelineJournalOp::Snapshot {
+            snapshot: persisted.snapshot.clone(),
+        });
+        for entry in &persisted.journal {
+            ops.push(TimelineJournalOp::Append {
+                entry: entry.clone(),
+            });
+        }
+        let mut store = self
+            .timeline_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = store.as_mut()
+            && let Err(error) = store.backfill_journal(&persisted.seed, &ops)
+        {
+            log::warn!(
+                "[timeline] journal backfill failed for {}: {error}",
+                persisted.seed
+            );
+        }
     }
 
     /// 收尾孤儿 running turn。daemon 重启或 worker 重新 spawn 后，timeline 中
@@ -915,13 +1031,22 @@ impl RingingHub {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(seed);
         }
-        let store_guard = self
+        let mut store_guard = self
             .timeline_store
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let Some(store) = store_guard.as_ref() else {
+        let Some(store) = store_guard.as_mut() else {
             return;
         };
+        // 先追加 timeline journal 尾部（journal ≥ cache 不变量），再写缓存。
+        // journal 追加失败时跳过缓存写入（fail-closed），避免缓存比 journal 新
+        // 导致崩溃重启后 journal 重放丢失尾部条目。
+        if let Err(error) = append_timeline_journal_tail_locked(store, &self.timeline, seed) {
+            log::error!(
+                "[timeline] journal append failed for {seed}: {error}; skipping cache persist (fail-closed)"
+            );
+            return;
+        }
         let Some((snapshot, journal)) = (|| {
             let timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
             timeline.snapshot(seed).map(|snapshot| {
@@ -1470,6 +1595,32 @@ impl RingingHub {
             log::warn!("[ringing] replaceable slot cleanup failed: {error}");
         }
     }
+}
+
+/// 在 `timeline_store` 锁内追加该 seed 的 timeline journal 尾部（权威日志）。
+///
+/// 调用方必须已持有 `timeline_store` 锁（传入 `&mut Option<TimelineStore>`），
+/// 从而与缓存文件的读写保持同一临界区：任何"追加 journal"与"写缓存"都不会
+/// 交错，保证 journal ≥ cache 的不变量（崩溃后 journal 永不落后于缓存）。
+/// 锁顺序（store → timeline）与 `persist_timeline_sync` / checkpoint 线程一致。
+///
+/// 返回 `Err` 表示 journal 追加失败（磁盘满/权限等）：调用方必须**跳过缓存
+/// 写入**（fail-closed）——否则缓存会比 journal 新，崩溃重启后 journal 重放
+/// 会丢失仅存在于缓存的尾部条目。
+fn append_timeline_journal_tail_locked(
+    store: &mut TimelineStore,
+    timeline: &Arc<Mutex<TimelineAppender>>,
+    seed: &str,
+) -> std::io::Result<()> {
+    let watermark = store.journal_watermark(seed);
+    let entries = {
+        let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
+        timeline.replay_since(seed, watermark)
+    };
+    if !entries.is_empty() {
+        store.append_journal(seed, &entries)?;
+    }
+    Ok(())
 }
 
 impl Drop for RingingHub {
@@ -2210,6 +2361,121 @@ mod tests {
             qaqh_domain::TimelineBlockState::Sealed
         );
         assert_eq!(hub.timeline_replay_since("s", 1).len(), 5);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn timeline_recovers_identical_snapshot_from_journal_after_cache_deleted() {
+        // 验收 #1：删除 `ringing-timeline/{seed}.json` 缓存文件后，同名 seed 仍
+        // 能从 timeline journal 重建出**逐字相同**的快照（前端 transcript 无变化）。
+        let root = temp_root("timeline-journal-authoritative");
+        let native = {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            hub.publish_timeline(
+                "s",
+                qaqh_domain::TimelineIntent::TurnOpened {
+                    turn_id: "t".into(),
+                    user_text: "question".into(),
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                qaqh_domain::TimelineIntent::BlockOpened {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    block_id: "text".into(),
+                    kind: qaqh_domain::TimelineBlockKind::Text,
+                    tool: None,
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                qaqh_domain::TimelineIntent::TextDelta {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    block_id: "text".into(),
+                    delta: "hello".into(),
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                qaqh_domain::TimelineIntent::BlockSealed {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    block_id: "text".into(),
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                qaqh_domain::TimelineIntent::RoundSealed {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    is_final: true,
+                },
+            )
+            .unwrap();
+            hub.publish_timeline(
+                "s",
+                qaqh_domain::TimelineIntent::TurnSealed {
+                    turn_id: "t".into(),
+                    state: qaqh_domain::TimelineTurnState::Completed,
+                    failure: None,
+                },
+            )
+            .unwrap();
+            hub.flush_timeline_persistence();
+            let snapshot = hub.timeline_snapshot("s").unwrap();
+            drop(hub);
+            snapshot
+        };
+        // 删除缓存文件（保留 timeline journal 权威日志）。
+        let cache = root.join("ringing-timeline").join("s.json");
+        assert!(cache.exists(), "cache file expected before deletion");
+        std::fs::remove_file(&cache).expect("delete cache file");
+        // 重启：仅剩 journal → 必须从日志重建出逐字相同的快照（且自动回写缓存）。
+        let hub = RingingHub::with_persistence("epoch-2", &root);
+        let restored = hub.timeline_snapshot("s").unwrap();
+        assert_eq!(restored, native, "journal rebuild == native snapshot");
+        assert!(cache.exists(), "cache must be rewritten after journal rebuild");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_only_legacy_seed_is_backfilled_into_journal_on_first_load() {
+        // 验收 #3：旧历史（仅 `ringing-timeline/{seed}.json`，无 timeline journal）
+        // 在首次装载时一次性迁移回填 journal（Snapshot 基点），幂等可重跑。
+        let root = temp_root("timeline-legacy-backfill");
+        TimelineStore::new(&root)
+            .unwrap()
+            .persist(
+                "s",
+                &TimelineSnapshot {
+                    watermark: 0,
+                    turns: vec![],
+                },
+                vec![],
+            )
+            .unwrap();
+        {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            let snapshot = hub.timeline_snapshot("s").unwrap();
+            assert_eq!(snapshot.watermark, 0, "legacy cache restored");
+        }
+        let ops = TimelineStore::new(&root)
+            .unwrap()
+            .read_journal("s")
+            .unwrap();
+        assert_eq!(ops.len(), 1, "backfilled Snapshot op expected");
+        assert!(matches!(ops[0], TimelineJournalOp::Snapshot { .. }));
+        // 幂等：再次启动不会重复追加。
+        TimelineStore::new(&root)
+            .unwrap()
+            .read_journal("s")
+            .unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
