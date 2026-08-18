@@ -59,7 +59,9 @@ use super::engine_input::InputEngine;
 use super::engine_misc::MiscEngine;
 use super::engine_session::SessionEngine;
 use super::engine_tool::PermissionDisposition;
-use super::injection::{EnqueueResult, InjectionBus, SubagentInjection};
+use super::injection::{
+    EnqueueResult, Injection, InjectionBus, InjectionPriority, InjectionSemantics, SUBAGENT_SOURCE,
+};
 use super::paced_emitter::PacedEmitter;
 use super::types::*;
 use crate::state::agent::AgentState;
@@ -235,7 +237,7 @@ pub struct Loop {
     /// Registered with the built-in sources at construction; new sources
     /// (ACP/MCP loops) register here without touching the dispatcher.
     flow: qaqh_message::ContextFlow,
-    /// Busy-turn Subagent reports waiting for the next lap boundary.
+    /// Busy-turn injections waiting for the next lap boundary.
     injection_bus: InjectionBus,
     /// Pending compact result (set when compact is running in background).
     pending_compact_rx: Option<mpsc::Receiver<CompactMeta>>,
@@ -497,7 +499,7 @@ impl Loop {
     /// An unanswered ask/tool round must never be persisted into, or resumed
     /// against, the next session.
     fn prepare_session_switch(&mut self) {
-        self.clear_pending_subagent_injections();
+        self.clear_injections();
         self.session.agent.reset_compaction_coordination();
         if self.session.turn.is_suspended() {
             self.session.agent.msg.remove_last_step_if_incomplete();
@@ -543,7 +545,7 @@ impl Loop {
     /// 夹在 assistant(toolcall) 与其 tool_result 之间。注入以 user +
     /// name=subagent 角色落盘（chat/responses 两协议的对话流主体，可见性
     /// 保证）。
-    fn is_subagent_injection(cmd: &super::types::WorkerCommand) -> bool {
+    fn is_injection_command(cmd: &super::types::WorkerCommand) -> bool {
         matches!(
             &cmd.frame,
             super::wire::WorkerCommandFrame::Ringing(env)
@@ -559,40 +561,54 @@ impl Loop {
         )
     }
 
-    /// Drop all pending Subagent work when the active session is replaced.
+    /// Drop all pending injections when the active session is replaced.
     /// Compact's legacy deferred queue is filtered here as well; otherwise a
     /// report accepted before the switch could be dispatched into the new
     /// session after compact finishes.
-    fn clear_pending_subagent_injections(&mut self) {
+    fn clear_injections(&mut self) {
         self.injection_bus.clear();
         let before = self.deferred_ringing.len();
         self.deferred_ringing
-            .retain(|cmd| !Self::is_subagent_injection(cmd));
+            .retain(|cmd| !Self::is_injection_command(cmd));
         let dropped = before.saturating_sub(self.deferred_ringing.len());
         if dropped > 0 {
-            log::info!(
-                "[INJECT] dropped {dropped} deferred subagent injection(s) on session switch"
-            );
+            log::info!("[INJECT] dropped {dropped} deferred injection(s) on session switch");
         }
     }
 
-    fn subagent_session_matches(&self, command_session_id: &str) -> bool {
+    fn injection_session_matches(&self, command_session_id: &str) -> bool {
         let current_session_id = &self.session.agent.session.seed;
         current_session_id.is_empty()
             || command_session_id.is_empty()
             || command_session_id == current_session_id
     }
 
-    fn queue_subagent_injection(
-        &mut self,
-        command_session_id: &str,
-        command_id: &str,
-        text: &str,
-    ) {
-        if !self.subagent_session_matches(command_session_id) {
+    /// Emit the subagent terminal-state tag event after a successful enqueue.
+    /// Only `SUBAGENT_SOURCE` injections carry the tag contract; future
+    /// sources may reuse this hook with their own event vocabulary.
+    fn emit_subagent_status(&self, session_id: &str, source: &str, text: &str) {
+        if source != SUBAGENT_SOURCE {
+            return;
+        }
+        if let Some((name, state)) = parse_subagent_status_tag(text) {
+            self.paced_emitter
+                .emit_domain(qaqh_domain::DomainEvent::Control(
+                    qaqh_domain::ControlEvent::SubagentStatus {
+                        seed: session_id.to_string(),
+                        name,
+                        state,
+                    },
+                ));
+        }
+    }
+
+    /// 吸收注入到总线（busy 路径）：session 作用域校验 + command_id 幂等。
+    /// 入队成功后立即发射 subagent 状态标签事件（保持现有时机）。
+    fn absorb_injection(&mut self, mut injection: Injection) {
+        if !self.injection_session_matches(&injection.session_id) {
             log::warn!(
-                "[INJECT] rejected subagent injection for stale session (command={}, current={})",
-                command_session_id,
+                "[INJECT] rejected injection for stale session (command={}, current={})",
+                injection.session_id,
                 self.session.agent.session.seed
             );
             return;
@@ -600,46 +616,40 @@ impl Loop {
         let session_id = self.session.agent.session.seed.clone();
         if session_id.is_empty() {
             log::warn!(
-                "[INJECT] rejected subagent injection without an active session (command_id={command_id})"
+                "[INJECT] rejected injection without an active session (command_id={})",
+                injection.command_id
             );
             return;
         }
+        let text_len = injection.text.len();
+        let command_id = injection.command_id.clone();
+        let text = injection.text.clone();
+        let source = injection.source;
+        // 总线以当前 session 为作用域（command 携带的 session 仅用于陈旧性校验）。
+        injection.session_id = session_id.clone();
         self.injection_bus.switch_session(&session_id);
-        match self.injection_bus.enqueue(SubagentInjection::new(
-            session_id.clone(),
-            command_id,
-            text,
-        )) {
+        match self.injection_bus.enqueue(injection) {
             EnqueueResult::Queued => {
                 log::info!(
-                    "[INJECT] subagent report queued via InjectionBus (seed={}, text_len={}, pending={})",
+                    "[INJECT] injection queued via InjectionBus (seed={}, text_len={}, pending={})",
                     session_id,
-                    text.len(),
+                    text_len,
                     self.injection_bus.pending_len()
                 );
                 // Absorbed injections do not create a turn of their own, so
                 // keep the existing lightweight tracker convergence signal.
-                if let Some((name, state)) = parse_subagent_status_tag(text) {
-                    self.paced_emitter
-                        .emit_domain(qaqh_domain::DomainEvent::Control(
-                            qaqh_domain::ControlEvent::SubagentStatus {
-                                seed: session_id,
-                                name,
-                                state,
-                            },
-                        ));
-                }
+                self.emit_subagent_status(&session_id, source, &text);
             }
             EnqueueResult::DuplicateCommandId => {
                 log::info!(
-                    "[INJECT] duplicate subagent command ignored (seed={}, command_id={})",
+                    "[INJECT] duplicate injection command ignored (seed={}, command_id={})",
                     session_id,
                     command_id
                 );
             }
             EnqueueResult::StaleSession => {
                 log::warn!(
-                    "[INJECT] rejected subagent injection for stale/empty session (seed={}, command_id={})",
+                    "[INJECT] rejected injection for stale/empty session (seed={}, command_id={})",
                     session_id,
                     command_id
                 );
@@ -649,45 +659,91 @@ impl Loop {
 
     /// Keep the idle path's existing immediate turn semantics while using the
     /// bus to claim the command id exactly once for this session.
-    fn claim_idle_subagent_injection(
-        &mut self,
-        command_session_id: &str,
-        command_id: &str,
-        text: &str,
-    ) -> bool {
+    fn claim_injection(&mut self, injection: &Injection, command_id: &str) -> bool {
         if self.session.agent.session.seed.is_empty() {
             return true;
         }
-        if !self.subagent_session_matches(command_session_id) {
+        if !self.injection_session_matches(&injection.session_id) {
             log::warn!(
-                "[INJECT] ignored idle subagent injection for stale session (command={}, current={})",
-                command_session_id,
+                "[INJECT] ignored idle injection for stale session (command={}, current={})",
+                injection.session_id,
                 self.session.agent.session.seed
             );
             return false;
         }
         let session_id = self.session.agent.session.seed.clone();
         self.injection_bus.switch_session(&session_id);
-        match self.injection_bus.enqueue(SubagentInjection::new(
-            session_id,
-            command_id,
-            text,
-        )) {
+        let mut claimed = injection.clone();
+        claimed.session_id = session_id.clone();
+        match self.injection_bus.enqueue(claimed) {
             EnqueueResult::Queued => {
+                self.emit_subagent_status(&session_id, injection.source, &injection.text);
                 let _ = self.injection_bus.drain();
                 true
             }
             EnqueueResult::DuplicateCommandId => {
-                log::info!("[INJECT] duplicate idle subagent command ignored: {command_id}");
+                log::info!("[INJECT] duplicate idle injection command ignored: {command_id}");
                 false
             }
             EnqueueResult::StaleSession => false,
         }
     }
 
+    /// 统一注入入口（刀 7 第一阶段）：所有非用户命令的消息注入
+    /// （subagent 报告，未来 system/MCP）都经此进入 Loop。
+    ///
+    /// 时机决策：
+    /// - compact 进行中 → 入总线（priority 记为 Deferred），compact 完成后
+    ///   idle 再逐条开新 turn（`dispatch_injections_after_compact`）；
+    /// - turn 运行中（phase != Idle）→ 入总线，lap 边界由 `drain_injections`
+    ///   落盘进当前 turn；
+    /// - idle → 占 command_id 后立即经 `handle_system_input` 开新 turn。
+    ///
+    /// 会话作用域校验（stale/空 session → 拒绝 + 日志）与 command_id 幂等
+    /// 均由总线承担。返回 Some(outcome) 表示已开 turn（由调用方
+    /// apply_outcome），None 表示入队等待或被拒绝。
+    pub fn inject(&mut self, injection: Injection) -> Option<Outcome> {
+        let command_id = injection.command_id.clone();
+        let text = injection.text.clone();
+
+        if self.session.agent.manual_compact_running() {
+            let mut deferred = injection;
+            deferred.priority = InjectionPriority::Deferred;
+            self.absorb_injection(deferred);
+            return None;
+        }
+
+        match self.phase {
+            LoopPhase::Idle => {
+                if !self.claim_injection(&injection, &command_id) {
+                    return None;
+                }
+                let mut ctx = RingContext {
+                    agent: &mut self.session.agent,
+                    emitter: &self.paced_emitter,
+                    cancel: &self.cancel,
+                    phase: &mut self.phase,
+                    pending: &mut self.pending,
+                    writer_dead: &self.writer_dead,
+                    stats: &mut self.session.stats,
+                    flow: &mut self.flow,
+                };
+                let outcome = self
+                    .input
+                    .handle_system_input(&mut ctx, &text, Some(command_id.as_str()));
+                drop(ctx);
+                Some(outcome)
+            }
+            _ => {
+                self.absorb_injection(injection);
+                None
+            }
+        }
+    }
+
     /// Hand bus records to ContextFlow only at a lap boundary. ContextFlow
     /// remains responsible for the actual store write and write ordering.
-    fn drain_subagent_injections(&mut self) {
+    fn drain_injections(&mut self) {
         let session_id = self.session.agent.session.seed.clone();
         self.injection_bus.switch_session(&session_id);
         let records = self.injection_bus.drain();
@@ -699,7 +755,7 @@ impl Loop {
         for record in records {
             if record.session_id != session_id {
                 log::warn!(
-                    "[INJECT] skipped subagent record from stale session (record={}, current={})",
+                    "[INJECT] skipped injection from stale session (record={}, current={})",
                     record.session_id,
                     session_id
                 );
@@ -737,15 +793,24 @@ impl Loop {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             let super::wire::WorkerCommandFrame::Ringing(env) = cmd.frame;
             match &env.command {
-                // ── 见缝插针注入：as_system 消息（子代理报告等）──────────
-                // 统一收敛到 InjectionBus；lap 边界再由
-                // drain_subagent_injections 交给 ContextFlow。
+                // ── 注入命令：as_system 消息（子代理报告等）──────────
+                // 统一走 Loop::inject()（turn 运行中 → 入总线，lap 边界
+                // 再由 drain_injections 交给 ContextFlow）。
                 RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
                     text,
                     as_system: true,
                     ..
                 }) => {
-                    self.queue_subagent_injection(&env.seed, &env.command_id, text);
+                    let injection = Injection {
+                        session_id: env.seed.clone(),
+                        command_id: env.command_id.clone(),
+                        source: SUBAGENT_SOURCE,
+                        role: qaqh_types::Message::ROLE_USER,
+                        text: text.clone(),
+                        priority: InjectionPriority::Normal,
+                        semantics: InjectionSemantics::NextTurn,
+                    };
+                    let _ = self.inject(injection);
                 }
                 // ── 其它命令（用户消息/非注入）：绝不丢弃 ────────────────
                 // daemon 侧已 ACK（accepted），静默丢弃会让调用方永久悬挂。
@@ -991,6 +1056,7 @@ impl Loop {
                     turns_removed: Some(0),
                 },
             ));
+        self.dispatch_injections_after_compact();
     }
 
     /// Check if a background compact has completed and apply the result.
@@ -1009,17 +1075,22 @@ impl Loop {
                             meta.compact_id
                         );
                     }
-                    let mut ctx = RingContext {
-                        agent: &mut self.session.agent,
-                        emitter: &self.paced_emitter,
-                        cancel: &self.cancel,
-                        phase: &mut self.phase,
-                        pending: &mut self.pending,
-                        writer_dead: &self.writer_dead,
-                        stats: &mut self.session.stats,
-                        flow: &mut self.flow,
-                    };
-                    self.compact.apply_result(&mut ctx, &meta);
+                    {
+                        let mut ctx = RingContext {
+                            agent: &mut self.session.agent,
+                            emitter: &self.paced_emitter,
+                            cancel: &self.cancel,
+                            phase: &mut self.phase,
+                            pending: &mut self.pending,
+                            writer_dead: &self.writer_dead,
+                            stats: &mut self.session.stats,
+                            flow: &mut self.flow,
+                        };
+                        self.compact.apply_result(&mut ctx, &meta);
+                    }
+                    // compact 完成且回到 idle：把 compact 期间入队的注入
+                    // 逐条开新 turn（替代旧 compact-defer 特判的派发点）。
+                    self.dispatch_injections_after_compact();
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     // Worker thread died without sending result.
@@ -1040,6 +1111,52 @@ impl Loop {
                     // Still running — check again next loop iteration.
                 }
             }
+        }
+    }
+
+    /// Compact 完成且 Loop 回到 idle 时，把 compact 期间入队（Deferred）的
+    /// 注入逐条经 handle_system_input 开新 turn 派发（替代旧的
+    /// compact-defer 特判：dispatch_ringing_one 不再推 deferred_ringing）。
+    ///
+    /// turn 仍运行中 / writer 已死时不动总线——turn 中的注入由下一个 lap
+    /// 边界 `drain_injections` 落盘进当前回合（见缝插针语义不变），
+    /// writer 死亡则进程即将退出。
+    fn dispatch_injections_after_compact(&mut self) {
+        if self.writer_dead.load(Ordering::SeqCst)
+            || self.phase != LoopPhase::Idle
+            || self.injection_bus.pending_len() == 0
+        {
+            return;
+        }
+        let session_id = self.session.agent.session.seed.clone();
+        self.injection_bus.switch_session(&session_id);
+        let records = self.injection_bus.drain();
+        for record in records {
+            if record.session_id != session_id {
+                log::warn!(
+                    "[INJECT] skipped injection from stale session (record={}, current={})",
+                    record.session_id,
+                    session_id
+                );
+                continue;
+            }
+            let text = record.text;
+            let command_id = record.command_id;
+            let mut ctx = RingContext {
+                agent: &mut self.session.agent,
+                emitter: &self.paced_emitter,
+                cancel: &self.cancel,
+                phase: &mut self.phase,
+                pending: &mut self.pending,
+                writer_dead: &self.writer_dead,
+                stats: &mut self.session.stats,
+                flow: &mut self.flow,
+            };
+            let outcome = self
+                .input
+                .handle_system_input(&mut ctx, &text, Some(command_id.as_str()));
+            drop(ctx);
+            self.apply_outcome(outcome);
         }
     }
 
@@ -1244,29 +1361,6 @@ impl Loop {
         let command_id = env.command_id.clone();
         let command_session_id = env.seed.clone();
 
-        // compact 进行中收到 as_system 注入（子代理报告等）：不拒绝、不丢弃——
-        // 延迟到 compact 完成后 dispatch（与其它 deferred 命令同队列）。否则子
-        // 代理结果在紧凑窗口到达会被下方 ConversationSendMessage 分支以
-        // OperationFailed(compact_in_progress) 拒绝，而 collector 只看 daemon
-        // 的 Accepted ACK、无从感知该拒绝 → 结果真实丢失（不回传主代理）。
-        if self.session.agent.manual_compact_running()
-            && matches!(
-                &env.command,
-                RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
-                    as_system: true,
-                    ..
-                })
-            )
-        {
-            log::info!("[AGENT] deferring subagent injection while compact running");
-            self.deferred_ringing
-                .push_back(super::types::WorkerCommand {
-                    frame: super::wire::WorkerCommandFrame::Ringing(env),
-                    causation: Some(command_id),
-                });
-            return;
-        }
-
         match env.command {
             RingingCommand::Control(command) => match command {
                 ControlCommand::SessionCreate {
@@ -1285,7 +1379,7 @@ impl Loop {
                     if close_current {
                         self.prepare_session_switch();
                     } else {
-                        self.clear_pending_subagent_injections();
+                        self.clear_injections();
                         self.finish_pending_compact(qaqh_domain::CompactStatus::Cancelled);
                         self.session.agent.reset_compaction_coordination();
                     }
@@ -1467,6 +1561,25 @@ impl Loop {
                     attachments: _,
                     as_system,
                 } => {
+                    if as_system {
+                        // 统一注入入口：时序决策（compact 进行中 / turn 运行
+                        // 中 / idle）全部由 inject() 负责；compact 窗口不拒绝
+                        // 不丢弃（入 Deferred 队列，compact 完成后开新 turn），
+                        // SubagentStatus 标签事件由 inject() 在入队成功后发射。
+                        let injection = Injection {
+                            session_id: command_session_id,
+                            command_id: command_id.clone(),
+                            source: SUBAGENT_SOURCE,
+                            role: qaqh_types::Message::ROLE_USER,
+                            text,
+                            priority: InjectionPriority::Normal,
+                            semantics: InjectionSemantics::NextTurn,
+                        };
+                        if let Some(outcome) = self.inject(injection) {
+                            self.apply_outcome(outcome);
+                        }
+                        return;
+                    }
                     if self.session.agent.manual_compact_running() {
                         self.emit_operation_failed(
                             &command_id,
@@ -1476,17 +1589,8 @@ impl Loop {
                         );
                         return;
                     }
-                    if as_system
-                        && !self.claim_idle_subagent_injection(
-                            &command_session_id,
-                            &command_id,
-                            &text,
-                        )
-                    {
-                        return;
-                    }
                     // images 已是 domain ImageBlock（Ringing 命令直接携带）。
-                    // as_system=true 时走系统注入通道（跳过用户输入专属处理）。
+                    // as_system=true 已在上方走注入通道；这里只处理用户输入。
                     let mut ctx = RingContext {
                         agent: &mut self.session.agent,
                         emitter: &self.paced_emitter,
@@ -1497,17 +1601,12 @@ impl Loop {
                         stats: &mut self.session.stats,
                         flow: &mut self.flow,
                     };
-                    let outcome = if as_system {
-                        self.input
-                            .handle_system_input(&mut ctx, &text, Some(command_id.as_str()))
-                    } else {
-                        self.input.handle_user_input(
-                            &mut ctx,
-                            qaqh_message::builtin::USER,
-                            &text,
-                            images,
-                        )
-                    };
+                    let outcome = self.input.handle_user_input(
+                        &mut ctx,
+                        qaqh_message::builtin::USER,
+                        &text,
+                        images,
+                    );
                     drop(ctx);
                     self.apply_outcome(outcome);
                 }
@@ -1766,7 +1865,7 @@ impl Loop {
                 // 再由 ContextFlow 在 lap 边界落盘，使下一轮 LLM 请求立即可见。
                 // 非注入命令移入 deferred 队列兜底。
                 self.drain_pending_injections();
-                self.drain_subagent_injections();
+                self.drain_injections();
                 // Another lap: re-enter TurnEngine.
                 let mut ctx = RingContext {
                     agent: &mut self.session.agent,
