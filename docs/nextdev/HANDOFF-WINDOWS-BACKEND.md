@@ -20,19 +20,16 @@
 
 | 名称 | URL | 用途 | 状态 |
 |---|---|---|---|
-| `win-gitea`（推荐 origin）| `http://localhost:3000/qaqtam/QAQ-Harness.git` | **主源：开发/评审/推送** | ✅ 在用 |
-| `github` | `https://github.com/QAQTam/QAQ-Harness.git` | 上游 / 定时推送目标 | ✅ 在用 |
-| `origin`（若仍指 Linux）| `http://60.0.0.32:3000/qaq/QAQ-Harness.git` | 旧 Linux Gitea | ⛔ 已退役，建议改指 `win-gitea` |
-| `lan-ssh` | `ssh://qaqtamsy@60.0.0.32:2222/.../qaqh-backend.git` | 旧 SSH 备份 | ⛔ 已退役 |
-| `qaqh-backend` | `git://60.0.0.32/qaqh-backend.git` | 旧只读镜像 | ⛔ 已退役（9418 只读勿 push）|
+| `origin` | `http://localhost:3000/qaqtam/QAQ-Harness.git` | **唯一 remote：主源（开发 / 评审 / 推送）** | ✅ 在用 |
 
-> 建议：`git remote set-url origin http://localhost:3000/qaqtam/QAQ-Harness.git`
+> - **本仓库只保留这一个 remote**。`github`、Linux `qaq`、`lan-ssh`、`qaqh-backend` 均已删除，杜绝误推 GitHub 导致分叉。
+> - GitHub 仅作为 **Windows Gitea 侧的定时推送目标**（配置在 Gitea 里，不占本地 remote）。
 
 ---
 
 ## 2. 当前分支 / 基线
 
-- `main`：GitHub `c78bb35` == Windows Gitea `c78bb35`（迁移副本一致）；本次修订把 Linux 侧那 3 个 LAN infra 文档提交并入 `main` 并推送到 Windows Gitea（其定时推送会继续同步到 GitHub）。
+- `main`：Windows Gitea `7f6cf00` == 本地 `main`（与 `origin` 对齐）。基线以 GitHub `c78bb35` 出发，并入 Linux 侧那 3 个 LAN infra 文档提交 + 本交接文档；GitHub 由 Windows Gitea 定时推送同步至 `7f6cf00`。
 - `refactor/nextdev-tool-mode-single-contract`：
   - GitHub / Windows Gitea：`7c3b0b3`（WIP 占位）
   - 本地：`10eb649` = `7c3b0b3` + `docs/ReplayMapping.md` + 本交接文档（旧版）
@@ -72,7 +69,7 @@
 - [ ] 在 **Windows Gitea** 上为 `refactor/nextdev-tool-mode-single-contract` 开 PR 供后端 review（对 main）
 - [ ] 确认/调整 Windows Gitea 定时推送间隔与目标
 - [ ] 把快照目录从 `/tmp` 转存到稳定位置
-- [ ] 清理本地已退役 remote：`lan-ssh`、`qaqh-backend`、指向 Linux 的 `origin`（或直接改指 `win-gitea`）
+- [x] 清理本地 remote：已收敛为仅 `origin`（Windows Gitea）；`github` / `lan-ssh` / `qaqh-backend` / Linux `origin` 均已删除
 - [ ] Linux Gitea 服务 / 9418 daemon 正式下线（数据先按上面归档）
 
 ---
@@ -80,17 +77,12 @@
 ## 7. 常用命令
 
 ```bash
-# 主源（Windows Gitea）
-git fetch win-gitea
-git push win-gitea main
-git push win-gitea refactor/nextdev-tool-mode-single-contract
+# 唯一 remote：origin（Windows 本机 Gitea）
+git fetch origin
+git push origin main
+git push origin refactor/nextdev-tool-mode-single-contract
 
-# 定时推送目标（GitHub）——正常由 Windows Gitea 定时推送完成，人工一般不用动
-git fetch github
-git push github main
-
-# 本地 origin 改指主源
-git remote set-url origin http://localhost:3000/qaqtam/QAQ-Harness.git
+# GitHub 由 Windows Gitea 定时推送自动同步（本地不需要也禁止配 github remote，防止误推）
 
 # 观测
 #   http://localhost:3000/qaqtam/QAQ-Harness
