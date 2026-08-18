@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use qaqh_types::{ContentBlock, Message, ToolDef};
 
+use super::sse::SseDecoder;
 use super::types::{
     EFFORT_LADDER, ProviderConfig, ResponsesCompat, StreamEvent, normalize_reasoning_effort,
     safe_provider_error_body,
@@ -876,11 +877,8 @@ fn parse_responses_sse(
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
+    let mut decoder = SseDecoder::new();
     let mut stream = resp.bytes_stream();
-    // 字节级累积缓冲：TCP/HTTP chunk 可能把一个 UTF-8 多字节字符切成两半，
-    // 绝不能逐 chunk 做 lossy 解码（会产生 U+FFFD 替换符并永久污染文本）。
-    // 只在拿到完整的 `\n` 结尾行之后，才对该行做严格 UTF-8 解码。
-    let mut buf: Vec<u8> = Vec::new();
 
     let mut state = ResponsesParseState {
         compat: compat.clone(),
@@ -890,6 +888,13 @@ fn parse_responses_sse(
     loop {
         if is_cancelled(cancel) {
             return Err(anyhow::anyhow!("cancelled by user"));
+        }
+
+        // 先消费缓冲中已完整的帧。
+        match feed_responses_sse(&mut decoder, &mut state, on_event) {
+            Ok(SseProgress::Continue) => {}
+            Ok(SseProgress::Done) => return Ok(()),
+            Err(message) => return Err(anyhow::anyhow!("{}", message)),
         }
 
         let chunk = match block_on(async {
@@ -907,18 +912,14 @@ fn parse_responses_sse(
             futures::future::Either::Right(_) => continue,
         };
 
-        buf.extend_from_slice(&chunk);
-        match feed_responses_sse(&mut buf, &mut state, on_event) {
-            Ok(SseProgress::Continue) => {}
-            Ok(SseProgress::Done) => return Ok(()),
-            Err(message) => return Err(anyhow::anyhow!("{}", message)),
-        }
+        decoder.push(&chunk);
     }
 
-    // 流结束：处理缓冲区中最后一条没有换行结尾的行（补一个换行触发消费）。
-    if !buf.is_empty() {
-        buf.push(b'\n');
-        match feed_responses_sse(&mut buf, &mut state, on_event) {
+    // 流结束：处理缓冲区中最后一条没有换行结尾的行（补行尾+空行触发消费，
+    // 与帧解析的"空行定界事件"语义一致）。
+    if decoder.has_pending() {
+        decoder.push(b"\n\n");
+        match feed_responses_sse(&mut decoder, &mut state, on_event) {
             Ok(SseProgress::Continue | SseProgress::Done) => {}
             Err(message) => return Err(anyhow::anyhow!("{}", message)),
         }
@@ -937,56 +938,17 @@ enum SseProgress {
     Done,
 }
 
-/// 把新到达的字节追加进缓冲，并消费所有已完整的行。
+/// 消费 [`SseDecoder`] 中所有已完整的帧，逐帧解析并派生事件。
 ///
-/// 关键约束（UTF-8 真实性）：
-/// - 只在字节层面按 `\n` 切分；`\n` (0x0A) 不可能出现在 UTF-8 多字节序列内部，
-///   因此完整行天然对齐字符边界；
-/// - 整行用 `str::from_utf8` 严格解码；非法行跳过并告警，**绝不 lossy 注入替换符**；
-/// - `event:` / `data:` 配对在行解码之后进行。
+/// 帧的行解码/UTF-8 边界/事件聚合由 [`SseDecoder`] 负责；本函数只做
+/// JSON 解析与协议语义分发，便于独立测试。
 fn feed_responses_sse(
-    buf: &mut Vec<u8>,
+    decoder: &mut SseDecoder,
     state: &mut ResponsesParseState,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> Result<SseProgress, String> {
-    loop {
-        let Some(line_end) = buf.iter().position(|&b| b == b'\n') else {
-            return Ok(SseProgress::Continue);
-        };
-        let line_bytes: Vec<u8> = buf.drain(..=line_end).collect();
-        let line = match std::str::from_utf8(&line_bytes[..line_bytes.len() - 1]) {
-            Ok(line) => line.trim(),
-            Err(e) => {
-                log::warn!("[GATE] responses SSE line is not valid UTF-8, skipping: {e}");
-                continue;
-            }
-        };
-
-        if line.is_empty() || line.starts_with(':') {
-            continue;
-        }
-
-        // Handle SSE "event:" + "data:" pairs
-        let data_str: String = if let Some(_rest) = line.strip_prefix("event: ") {
-            let Some(next_end) = buf.iter().position(|&b| b == b'\n') else {
-                return Ok(SseProgress::Continue);
-            };
-            let next_bytes: Vec<u8> = buf.drain(..=next_end).collect();
-            let next_line = match std::str::from_utf8(&next_bytes[..next_bytes.len() - 1]) {
-                Ok(next) => next.trim(),
-                Err(e) => {
-                    log::warn!("[GATE] responses SSE data line is not valid UTF-8, skipping: {e}");
-                    continue;
-                }
-            };
-            // Strip "data: " prefix from the next line
-            match next_line.strip_prefix("data: ") {
-                Some(payload) => payload.trim().to_string(),
-                None => next_line.to_string(),
-            }
-        } else if let Some(payload) = line.strip_prefix("data: ") {
-            payload.trim().to_string()
-        } else {
+    while let Some(frame) = decoder.next_frame() {
+        let Ok(data_str) = frame else {
             continue;
         };
 
@@ -1014,6 +976,8 @@ fn feed_responses_sse(
             EventAction::Failed(message) => return Err(message),
         }
     }
+
+    Ok(SseProgress::Continue)
 }
 
 #[cfg(test)]
@@ -1026,21 +990,21 @@ mod tests {
     #[test]
     fn sse_utf8_char_split_across_chunks_is_not_corrupted() {
         let mut state = ResponsesParseState::default();
-        let mut buf: Vec<u8> = Vec::new();
+        let mut decoder = SseDecoder::new();
         let mut events: Vec<StreamEvent> = Vec::new();
 
         // "中" = E4 B8 AD，故意把字节切到两个网络 chunk 里。
         let chunk1 = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\xe4\xb8";
         let chunk2 = b"\xad\"}\n\n";
 
-        buf.extend_from_slice(chunk1);
-        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        decoder.push(chunk1);
+        let progress = feed_responses_sse(&mut decoder, &mut state, &mut |e| events.push(e)).unwrap();
         assert_eq!(progress, SseProgress::Continue);
         assert!(events.is_empty(), "半行不得提前派发");
         assert_eq!(state.accumulated_text, "");
 
-        buf.extend_from_slice(chunk2);
-        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        decoder.push(chunk2);
+        let progress = feed_responses_sse(&mut decoder, &mut state, &mut |e| events.push(e)).unwrap();
         assert_eq!(progress, SseProgress::Continue);
         assert_eq!(state.accumulated_text, "中");
         assert!(matches!(
@@ -1052,15 +1016,15 @@ mod tests {
     #[test]
     fn sse_emoji_split_across_chunks_is_not_corrupted() {
         let mut state = ResponsesParseState::default();
-        let mut buf: Vec<u8> = Vec::new();
+        let mut decoder = SseDecoder::new();
         let mut events: Vec<StreamEvent> = Vec::new();
 
         // "👍" = F0 9F 91 8D，切成 2+2 与 3+1 两种边界都要还原。
         let chunk1 = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\xf0\x9f";
         let chunk2 = b"\x91\x8d\"}\n\n";
-        buf.extend_from_slice(chunk1);
-        buf.extend_from_slice(chunk2);
-        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        decoder.push(chunk1);
+        decoder.push(chunk2);
+        let progress = feed_responses_sse(&mut decoder, &mut state, &mut |e| events.push(e)).unwrap();
         assert_eq!(progress, SseProgress::Continue);
         assert_eq!(state.accumulated_text, "👍");
         assert!(matches!(
@@ -1072,15 +1036,15 @@ mod tests {
     #[test]
     fn sse_utf8_split_in_tool_arguments_is_not_corrupted() {
         let mut state = ResponsesParseState::default();
-        let mut buf: Vec<u8> = Vec::new();
+        let mut decoder = SseDecoder::new();
         let mut events: Vec<StreamEvent> = Vec::new();
 
         // 工具参数 JSON 里的中文字段值被 TCP 切断。
         let chunk1 = b"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"i1\",\"delta\":\"{\\\"path\\\":\\\"\xe8\xaf\xbe";
         let chunk2 = b"\xe9\xa2\x98\\\"}\"}\n\n";
-        buf.extend_from_slice(chunk1);
-        buf.extend_from_slice(chunk2);
-        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        decoder.push(chunk1);
+        decoder.push(chunk2);
+        let progress = feed_responses_sse(&mut decoder, &mut state, &mut |e| events.push(e)).unwrap();
         assert_eq!(progress, SseProgress::Continue);
         assert_eq!(state.tool_calls.len(), 1);
         assert_eq!(
@@ -1090,12 +1054,12 @@ mod tests {
         assert!(events.is_empty(), "arguments.delta 只累积，不派发 preview");
 
         // output_item.done 携带完整参数并派发 ToolCallProgress。
-        buf.extend_from_slice(
+        decoder.push(
             b"event: response.output_item.done\n\
               data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\
               \"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"\xe8\xaf\xbe\xe9\xa2\x98\\\"}\",\"call_id\":\"call_1\"}}\n\n",
         );
-        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        let progress = feed_responses_sse(&mut decoder, &mut state, &mut |e| events.push(e)).unwrap();
         assert_eq!(progress, SseProgress::Continue);
         assert!(matches!(
             events.as_slice(),
@@ -1106,16 +1070,16 @@ mod tests {
     #[test]
     fn empty_deltas_are_not_carried_into_context_or_tools() {
         let mut state = ResponsesParseState::default();
-        let mut buf: Vec<u8> = Vec::new();
+        let mut decoder = SseDecoder::new();
         let mut events: Vec<StreamEvent> = Vec::new();
 
         // 空 delta 不得进入累积文本、推理文本或工具参数，也不得派发事件。
-        buf.extend_from_slice(
+        decoder.push(
             b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\"}\n\n\
               data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"\"}\n\n\
               data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"i1\",\"delta\":\"\"}\n\n",
         );
-        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        let progress = feed_responses_sse(&mut decoder, &mut state, &mut |e| events.push(e)).unwrap();
         assert_eq!(progress, SseProgress::Continue);
         assert_eq!(state.accumulated_text, "");
         assert_eq!(state.reasoning_text, "");
@@ -1126,26 +1090,26 @@ mod tests {
     #[test]
     fn sse_final_line_is_consumed_and_done_without_terminal_is_rejected() {
         let mut state = ResponsesParseState::default();
-        let mut buf: Vec<u8> = Vec::new();
+        let mut decoder = SseDecoder::new();
         let mut events: Vec<StreamEvent> = Vec::new();
 
         // 最后一个事件没有结尾换行：EOF 时必须补 \n 消费，不能丢内容。
-        buf.extend_from_slice(
+        decoder.push(
             b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
               data: {\"type\":\"response.output_text.delta\",\"delta\":\"tail\"}",
         );
-        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        let progress = feed_responses_sse(&mut decoder, &mut state, &mut |e| events.push(e)).unwrap();
         assert_eq!(progress, SseProgress::Continue);
         assert_eq!(state.accumulated_text, "ok");
-        assert!(!buf.is_empty(), "无换行尾巴应保留在缓冲里由 EOF 路径消费");
+        assert!(decoder.has_pending(), "无换行尾巴应保留在缓冲里由 EOF 路径消费");
 
-        buf.push(b'\n');
-        let progress = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e)).unwrap();
+        decoder.push(b"\n\n");
+        let progress = feed_responses_sse(&mut decoder, &mut state, &mut |e| events.push(e)).unwrap();
         assert_eq!(progress, SseProgress::Continue);
         assert_eq!(state.accumulated_text, "oktail");
 
-        buf.extend_from_slice(b"data: [DONE]\n\n");
-        let error = feed_responses_sse(&mut buf, &mut state, &mut |e| events.push(e))
+        decoder.push(b"data: [DONE]\n\n");
+        let error = feed_responses_sse(&mut decoder, &mut state, &mut |e| events.push(e))
             .expect_err("[DONE] without a Responses terminal event must fail");
         assert!(error.contains("before response.completed"));
     }

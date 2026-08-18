@@ -6,7 +6,8 @@ use futures_util::StreamExt;
 use tokio::sync::watch;
 
 use crate::error::{ClientError, Result};
-use crate::types::{Channel, ChannelStatus, SseFrame, parse_sse_frame};
+use crate::sse_decoder::SseDecoder;
+use crate::types::{Channel, ChannelStatus, SseFrame};
 
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const RETRY_BASE_MS: u64 = 1_000;
@@ -117,7 +118,7 @@ impl ChannelStream {
         });
 
         let mut stream = response.bytes_stream();
-        let mut buffer: Vec<u8> = Vec::new();
+        let mut decoder = SseDecoder::new();
         let idle = tokio::time::sleep(SSE_IDLE_TIMEOUT);
         tokio::pin!(idle);
 
@@ -133,8 +134,8 @@ impl ChannelStream {
                     match chunk {
                         Some(Ok(bytes)) => {
                             idle.as_mut().reset(tokio::time::Instant::now() + SSE_IDLE_TIMEOUT);
-                            buffer.extend_from_slice(&bytes);
-                            self.drain_frames(&mut buffer, &server_epoch)?;
+                            decoder.push(&bytes);
+                            self.drain_frames(&mut decoder, &server_epoch)?;
                         }
                         Some(Err(err)) => {
                             return Err(ClientError::Transport(format!("SSE read: {err}")));
@@ -148,24 +149,19 @@ impl ChannelStream {
         }
     }
 
-    /// Split the byte buffer on blank-line frame boundaries and dispatch frames.
-    fn drain_frames(&mut self, buffer: &mut Vec<u8>, server_epoch: &str) -> Result<()> {
-        loop {
-            let Some(sep) = find_frame_end(buffer) else {
-                return Ok(());
+    /// 消费解码器中所有已完整的帧并分发。
+    fn drain_frames(&mut self, decoder: &mut SseDecoder, server_epoch: &str) -> Result<()> {
+        while let Some(frame) = decoder.next_frame() {
+            let frame = match frame {
+                Ok(frame) => frame,
+                Err(()) => continue,
             };
-            // `split_off(sep)` keeps [sep..] as `tail` (starts with "\n\n");
-            // `buffer` now holds exactly the frame text.
-            let tail = buffer.split_off(sep);
-            let text = String::from_utf8_lossy(buffer).into_owned();
-            buffer.clear();
-            buffer.extend_from_slice(&tail[2..]);
-            let frame = parse_sse_frame(&text);
             if frame.data.trim().is_empty() {
-                continue; // keepalive comment frames
+                continue; // keepalive/空 data 帧
             }
             self.dispatch(frame, server_epoch)?;
         }
+        Ok(())
     }
 
     fn dispatch(&mut self, frame: SseFrame, server_epoch: &str) -> Result<()> {
@@ -197,9 +193,4 @@ impl ChannelStream {
         (self.handlers.on_batch)(batch);
         Ok(())
     }
-}
-
-/// Find the byte offset of the first blank line (`\n\n`) in the buffer.
-fn find_frame_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(2).position(|w| w == b"\n\n")
 }

@@ -15,6 +15,7 @@ pub mod error;
 pub mod remote_path;
 pub mod session;
 pub mod sse;
+mod sse_decoder;
 pub mod timeline;
 pub mod types;
 

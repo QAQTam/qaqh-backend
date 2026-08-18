@@ -11,6 +11,7 @@ use std::time::Duration;
 use qaqh_types::{CacheTokenField, ThinkingParamMode};
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
+use super::sse::SseDecoder;
 use super::types::{
     ProviderConfig, StreamEvent, normalize_reasoning_effort, safe_provider_error_body,
 };
@@ -431,6 +432,133 @@ fn emit_delta_fields(
     }
 }
 
+/// 单个 SSE 帧的处理结果。
+enum FrameAction {
+    /// 继续消费流。
+    Continue,
+    /// 收到 `[DONE]` 终止标记：停止读取。
+    Done,
+}
+
+/// 处理一帧 chat completions SSE 数据（`data:` payload）。
+///
+/// 由 [`stream_sse`] 调用；帧行解码与聚合由共享的 [`SseDecoder`] 完成，
+/// 本函数只负责 JSON 解析与事件派生，便于独立测试。
+#[allow(clippy::too_many_arguments)]
+fn handle_chat_frame(
+    data_str: &str,
+    provider: &ProviderConfig,
+    text_buf: &mut String,
+    reasoning_buf: &mut String,
+    tool_acc: &mut HashMap<usize, (String, String, String)>,
+    dsml_buf: &mut String,
+    dsml_seen: &mut HashSet<String>,
+    usage_info: &mut Option<UsageInfo>,
+    stop_reason: &mut Option<String>,
+    inline_thinking: &mut bool,
+    traced: &mut dyn FnMut(StreamEvent),
+) -> anyhow::Result<FrameAction> {
+    if data_str.is_empty() {
+        return Ok(FrameAction::Continue);
+    }
+    // `[DONE]` 是 chat completions 官方流终止标记：立即结束读取。
+    // 此前此处 `continue` 会在 [DONE] 后继续读——若连接随后被服务器
+    // RST（资源紧张/代理超时），events.next() 返回 Err → 已完整输出
+    // 的作答被误判为 TurnFailed（"完成作答后返回错误"的根因）。
+    if data_str == "[DONE]" {
+        return Ok(FrameAction::Done);
+    }
+
+    let ev: serde_json::Value = match serde_json::from_str(data_str) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("OpenAI SSE: deserialize fail: {} — data: {}", e, data_str);
+            return Ok(FrameAction::Continue);
+        }
+    };
+
+    // Parse choices
+    if let Some(choices) = ev.get("choices").and_then(|c| c.as_array()) {
+        if let Some(choice) = choices.first() {
+            let finish = choice.get("finish_reason").and_then(|v| v.as_str());
+            if let Some(fr) = finish {
+                if !fr.is_empty() && fr != "null" {
+                    *stop_reason = Some(fr.to_string());
+                }
+            }
+
+            if let Some(delta) = choice.get("delta") {
+                emit_delta_fields(
+                    delta,
+                    text_buf,
+                    reasoning_buf,
+                    tool_acc,
+                    dsml_buf,
+                    dsml_seen,
+                    inline_thinking,
+                    traced,
+                );
+            }
+        }
+    }
+
+    // Usage info (may appear in any chunk).
+    // When stream_options.include_usage=true the field is present on
+    // every chunk but is null for all intermediate chunks; only the final
+    // chunk before [DONE] carries actual token counts.  Skip null to avoid
+    // emitting zero-value UsageUpdate events that cause the info panel to
+    // flicker between 0 and real values.
+    if let Some(u) = ev.get("usage").filter(|v| !v.is_null()) {
+        let pt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let ct = u
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let (hit, miss, cache_usage_reported) = match provider.cache_field {
+            CacheTokenField::PromptCacheHitTokens => {
+                let hit_value = u.get("prompt_cache_hit_tokens");
+                let miss_value = u.get("prompt_cache_miss_tokens");
+                (
+                    hit_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    miss_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    hit_value.is_some() || miss_value.is_some(),
+                )
+            }
+            CacheTokenField::PromptDetailsCached => {
+                let cached_value = u
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"));
+                let cached = cached_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                (cached, pt.saturating_sub(cached), cached_value.is_some())
+            }
+            CacheTokenField::UsageCachedTokens => {
+                let cached_value = u.get("cached_tokens");
+                let cached = cached_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                (cached, pt.saturating_sub(cached), cached_value.is_some())
+            }
+            CacheTokenField::None => (0, 0, false),
+        };
+        let rt = u
+            .get("completion_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let usage = UsageInfo {
+            prompt_tokens: pt,
+            completion_tokens: ct,
+            total_tokens: pt + ct,
+            prompt_cache_hit_tokens: hit,
+            prompt_cache_miss_tokens: miss,
+            reasoning_tokens: rt,
+            cache_usage_reported: Some(cache_usage_reported),
+        };
+        *usage_info = Some(usage.clone());
+        traced(StreamEvent::UsageUpdate(usage));
+    }
+
+    Ok(FrameAction::Continue)
+}
+
 fn stream_sse(
     resp: reqwest::Response,
     provider: &ProviderConfig,
@@ -438,9 +566,8 @@ fn stream_sse(
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
-    use eventsource_stream::EventStream;
-    let stream = resp.bytes_stream();
-    let mut events = EventStream::new(stream);
+    let mut decoder = SseDecoder::new();
+    let mut stream = resp.bytes_stream();
 
     let mut text_buf = String::new();
     let mut reasoning_buf = String::new();
@@ -452,22 +579,50 @@ fn stream_sse(
     let mut inline_thinking = false;
 
     let mut trace = SseTrace::from_env();
-    let mut callback = on_event;
+    let callback = on_event;
     let mut traced = move |event: StreamEvent| {
         trace.record(&event);
         callback(event);
     };
 
+    let mut done_reached = false;
     loop {
         // Check cancel before each read attempt
         if is_cancelled(cancel) {
             return Err(anyhow::anyhow!("cancelled by user"));
         }
 
-        let event = match block_on(async {
-            tokio::time::timeout(SSE_POLL_INTERVAL, events.next()).await
+        // 先消费缓冲中已完整的帧。
+        while let Some(frame) = decoder.next_frame() {
+            let Ok(data_str) = frame else {
+                continue;
+            };
+            match handle_chat_frame(
+                &data_str,
+                provider,
+                &mut text_buf,
+                &mut reasoning_buf,
+                &mut tool_acc,
+                &mut dsml_buf,
+                &mut dsml_seen,
+                &mut usage_info,
+                &mut stop_reason,
+                &mut inline_thinking,
+                &mut traced,
+            ) {
+                Ok(FrameAction::Continue) => {}
+                Ok(FrameAction::Done) => done_reached = true,
+                Err(e) => return Err(e),
+            }
+        }
+        if done_reached {
+            break;
+        }
+
+        let chunk = match block_on(async {
+            tokio::time::timeout(SSE_POLL_INTERVAL, stream.next()).await
         }) {
-            Ok(Some(Ok(ev))) => ev,
+            Ok(Some(Ok(chunk))) => chunk,
             Ok(Some(Err(e))) => {
                 let msg = format!("SSE read error: {e}");
                 traced(StreamEvent::Error(msg.clone()));
@@ -476,105 +631,34 @@ fn stream_sse(
             Ok(None) => break,         // EOF
             Err(_elapsed) => continue, // timeout → check cancel, retry
         };
+        decoder.push(&chunk);
+    }
 
-        // eventsource-stream appends \n after each data line per SSE spec.
-        let data_str = event.data.trim_end().to_string();
-        if data_str.is_empty() {
-            continue;
-        }
-        // `[DONE]` 是 chat completions 官方流终止标记：立即结束读取。
-        // 此前此处 `continue` 会在 [DONE] 后继续读——若连接随后被服务器
-        // RST（资源紧张/代理超时），events.next() 返回 Err → 已完整输出
-        // 的作答被误判为 TurnFailed（"完成作答后返回错误"的根因）。
-        if data_str == "[DONE]" {
-            break;
-        }
-
-        let ev: serde_json::Value = match serde_json::from_str(&data_str) {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("OpenAI SSE: deserialize fail: {} — data: {}", e, data_str);
+    // EOF 残帧：处理未以空行收尾的聚合（补行尾+空行触发消费，与帧解析的
+    // "空行定界事件"语义一致；等价于 eventsource-stream 的 EOF flush）。
+    if !done_reached && decoder.has_pending() {
+        decoder.push(b"\n\n");
+        while let Some(frame) = decoder.next_frame() {
+            let Ok(data_str) = frame else {
                 continue;
-            }
-        };
-
-        // Parse choices
-        if let Some(choices) = ev.get("choices").and_then(|c| c.as_array()) {
-            if let Some(choice) = choices.first() {
-                let finish = choice.get("finish_reason").and_then(|v| v.as_str());
-                if let Some(fr) = finish {
-                    if !fr.is_empty() && fr != "null" {
-                        stop_reason = Some(fr.to_string());
-                    }
-                }
-
-                if let Some(delta) = choice.get("delta") {
-                    emit_delta_fields(
-                        delta,
-                        &mut text_buf,
-                        &mut reasoning_buf,
-                        &mut tool_acc,
-                        &mut dsml_buf,
-                        &mut dsml_seen,
-                        &mut inline_thinking,
-                        &mut traced,
-                    );
-                }
-            }
-        }
-
-        // Usage info (may appear in any chunk).
-        // When stream_options.include_usage=true the field is present on
-        // every chunk but is null for all intermediate chunks; only the final
-        // chunk before [DONE] carries actual token counts.  Skip null to avoid
-        // emitting zero-value UsageUpdate events that cause the info panel to
-        // flicker between 0 and real values.
-        if let Some(u) = ev.get("usage").filter(|v| !v.is_null()) {
-            let pt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let ct = u
-                .get("completion_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            let (hit, miss, cache_usage_reported) = match provider.cache_field {
-                CacheTokenField::PromptCacheHitTokens => {
-                    let hit_value = u.get("prompt_cache_hit_tokens");
-                    let miss_value = u.get("prompt_cache_miss_tokens");
-                    (
-                        hit_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                        miss_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                        hit_value.is_some() || miss_value.is_some(),
-                    )
-                }
-                CacheTokenField::PromptDetailsCached => {
-                    let cached_value = u
-                        .get("prompt_tokens_details")
-                        .and_then(|d| d.get("cached_tokens"));
-                    let cached = cached_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    (cached, pt.saturating_sub(cached), cached_value.is_some())
-                }
-                CacheTokenField::UsageCachedTokens => {
-                    let cached_value = u.get("cached_tokens");
-                    let cached = cached_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    (cached, pt.saturating_sub(cached), cached_value.is_some())
-                }
-                CacheTokenField::None => (0, 0, false),
             };
-            let rt = u
-                .get("completion_tokens_details")
-                .and_then(|d| d.get("reasoning_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            let usage = UsageInfo {
-                prompt_tokens: pt,
-                completion_tokens: ct,
-                total_tokens: pt + ct,
-                prompt_cache_hit_tokens: hit,
-                prompt_cache_miss_tokens: miss,
-                reasoning_tokens: rt,
-                cache_usage_reported: Some(cache_usage_reported),
-            };
-            usage_info = Some(usage.clone());
-            traced(StreamEvent::UsageUpdate(usage));
+            match handle_chat_frame(
+                &data_str,
+                provider,
+                &mut text_buf,
+                &mut reasoning_buf,
+                &mut tool_acc,
+                &mut dsml_buf,
+                &mut dsml_seen,
+                &mut usage_info,
+                &mut stop_reason,
+                &mut inline_thinking,
+                &mut traced,
+            ) {
+                Ok(FrameAction::Continue) => {}
+                Ok(FrameAction::Done) => {}
+                Err(e) => return Err(e),
+            }
         }
     }
 

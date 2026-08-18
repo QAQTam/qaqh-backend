@@ -12,6 +12,7 @@
 | [SESSION-JOURNAL-PLAN.md](./SESSION-JOURNAL-PLAN.md) | **Session 修改日志设计**：误删事故复盘 + 编辑步进日志方案 | ✅ 基础版已落地（2026-08-17） |
 | [EXPLORE-REFACTOR-1.1.md](./EXPLORE-REFACTOR-1.1.md) | **探索落地校准**：文档↔qaqh-* 仓库映射、keep/remove/merge、刀序 | ✅ 现行（随 PR 更新） |
 | [LOOP-REWRITE-PLAN.md](./LOOP-REWRITE-PLAN.md) | **loop 重写计划**：msgloop 职责去留盘点、目标形态、分阶段执行路径（刀 7 阶段 2 + 刀 10 前置） | ✅ 设计稿（2026-08-18） |
+| [SSE-PARSING-STANDARD.md](./SSE-PARSING-STANDARD.md) | **SSE 解析标准**：全链路唯一解析模式（SseDecoder：O(n) 游标 + 严格 UTF-8 + 空行定界）及禁止回退清单 | ✅ 现行（2026-08-19 定稿） |
 | [HANDOFF-1.1-ENGINEER.md](./HANDOFF-1.1-ENGINEER.md) | **工程师交接文档**：已完成工作、Bug 状态、下一步、已知坑 | ✅ 现行（2026-08-18，刀 1 完成 / 刀 7 阶段 1 落地） |
 | [LAN-INFRA-TEMPORARY.md](./LAN-INFRA-TEMPORARY.md) | **临时本地 Git 基础设施**（GitHub 故障应急）：SSH 裸仓库 + Gitea 部署/管理/退役 | ✅ 现行（应急，2026-08-18） |
 
