@@ -146,6 +146,9 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     ));
     let service = DeepxService::init();
     service.attach_ringing(hub.clone());
+    // 宿主直连：`spawn_subagent` 工具此后经进程内宿主句柄运行，不再回连
+    // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
+    qaqh_subagent::install_host(Arc::new(service.clone()));
     // 工具套件运行环境：config `[workspace] mode`（local 默认 / wsl 可选）。
     // 拉起失败不阻塞 daemon——worker 回退进程内工具执行。
     let workspace_mode = qaqh_config::Config::load()

@@ -11,6 +11,7 @@ qaqh-msglp = { path = "../qaqh-msglp" }
 qaqh-proto = { path = "../qaqh-proto" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-session = { path = "../qaqh-session" }
+qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-workspace = { path = "../qaqh-workspace" }
 qaqh-types = { path = "../qaqh-types" }
 log = "0.4"
