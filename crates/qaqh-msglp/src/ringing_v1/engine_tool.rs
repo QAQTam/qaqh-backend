@@ -674,9 +674,13 @@ impl ToolEngine {
         // Spawn tool thread
         let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
         let tool_id = id.to_string();
+        // Tool workers run on spawned threads: carry the actor's per-actor tool
+        // scope so concurrent actors stay isolated.
+        let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
         let handle = std::thread::Builder::new()
             .stack_size(4 * 1024 * 1024)
             .spawn(move || {
+                let _scope = actor_scope.install();
                 let result =
                     qaqh_workspace::execution::execute_authorized(authorized, Some(progress_tx));
                 (

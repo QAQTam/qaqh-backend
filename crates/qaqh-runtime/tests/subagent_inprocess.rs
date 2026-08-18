@@ -14,9 +14,12 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
     let root = std::env::temp_dir().join(format!(
-        "qaqh-subagent-inprocess-test-{}-{:?}",
+        "qaqh-subagent-inprocess-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
     ));
     let data = root.join("data");
     std::fs::create_dir_all(&data).expect("test setup must not fail");
@@ -72,24 +75,64 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
         }
     }
 
+    // The process-level snapshot must stay stable and must NOT pick up the
+    // actor's private manager (which is now thread-local per actor): the daemon
+    // `skills.list_tools` view reflects only the daemon's own registrar set, so
+    // a running subagent actor cannot leak its tool set into the daemon.
     assert_eq!(
         qaqh_workspace::runtime::process_all_tool_names(),
         process_tools,
         "daemon process tool snapshot must be stable while an actor is running"
     );
-    let actor_tool_names = qaqh_workspace::runtime::all_tool_names();
     assert!(
-        actor_tool_names.iter().any(|name| name == "spawn_subagent"),
-        "actor manager must include qaqh-subagent registrar: {actor_tool_names:?}"
+        !qaqh_workspace::runtime::process_all_tool_names()
+            .iter()
+            .any(|name| name == "spawn_subagent"),
+        "actor-private tools (spawn_subagent) must not leak into the daemon snapshot"
     );
 
-    // A second actor queues behind SUBAGENT_ACTOR_SERIAL. shutdown_all must
-    // signal every instance before joining any of them, or this test hangs.
-    let queued_seed = format!("sub-queued-{}", std::process::id());
+    // Knife-1 step 2: a second subagent must run concurrently (per-actor
+    // thread-local state), not queue behind a process-wide serialization lock.
+    // shutdown_all must signal every instance before joining any of them, or
+    // this test hangs.
+    let queued_seed = format!("sub-concurrent-{}", std::process::id());
     registry
         .spawn_subagent(&queued_seed, &[], None, None, None)
-        .expect("spawn queued in-process subagent");
+        .expect("spawn concurrent in-process subagent");
     assert!(registry.is_running(&queued_seed));
+    // Both actors alive at once proves concurrency (previously the second
+    // actor blocked on SUBAGENT_ACTOR_SERIAL until the first exited).
+    assert!(
+        registry.is_running(&seed) && registry.is_running(&queued_seed),
+        "concurrent subagents must both be running"
+    );
+
+    // The flush-stop race the old serialized path needed is gone: a subagent
+    // spawned while another is mid-turn must still emit its own Created event
+    // promptly. Under `ACTOR_SERIAL` this recv would time out because the
+    // second actor's thread blocked behind the first actor's loop.
+    let second_deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_second_created = false;
+    while Instant::now() < second_deadline {
+        match event_rx.recv_timeout(second_deadline.saturating_duration_since(Instant::now())) {
+            Ok(envelope) if envelope.seed == queued_seed => match envelope.event {
+                RingingEvent::Control(ControlEvent::SessionStateChanged {
+                    state: SessionState::Created,
+                    ..
+                }) => {
+                    saw_second_created = true;
+                    break;
+                }
+                _ => continue,
+            },
+            Ok(_) => continue,
+            Err(error) => panic!("second actor emitted no Created event: {error}"),
+        }
+    }
+    assert!(
+        saw_second_created,
+        "second subagent must reach Created while the first is still running (concurrency)"
+    );
 
     registry.shutdown_all();
     assert!(!registry.is_running(&seed));
