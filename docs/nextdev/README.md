@@ -8,10 +8,10 @@
 | 文档 | 内容 | 状态 |
 |---|---|---|
 | [REFACTOR-ROADMAP.md](./REFACTOR-ROADMAP.md) | **架构重构路线图**：七刀 + 三阶段（砍架构→统一语义→谈创新）；多前端决策；文件级清单 | ✅ 现行（方向已定稿 2026-08-16） |
-| [bugfix-1.1-nextdev.md](./bugfix-1.1-nextdev.md) | **Bugfix 档案**：BUG-001~013，现象/根因/证据 | ✅ 现行（持续追加） |
+| [bugfix-1.1-nextdev.md](./bugfix-1.1-nextdev.md) | **Bugfix 档案**：BUG-001~015，现象/根因/证据 | ✅ 现行（持续追加，2026-08-18 已清账） |
 | [SESSION-JOURNAL-PLAN.md](./SESSION-JOURNAL-PLAN.md) | **Session 修改日志设计**：误删事故复盘 + 编辑步进日志方案 | ✅ 基础版已落地（2026-08-17） |
 | [EXPLORE-REFACTOR-1.1.md](./EXPLORE-REFACTOR-1.1.md) | **探索落地校准**：文档↔qaqh-* 仓库映射、keep/remove/merge、刀序 | ✅ 现行（随 PR 更新） |
-| [HANDOFF-1.1-ENGINEER.md](./HANDOFF-1.1-ENGINEER.md) | **工程师交接文档**：已完成工作、Bug 状态、下一步、已知坑 | ✅ 现行（2026-08-18，刀 1 step 2c / 待刀 7） |
+| [HANDOFF-1.1-ENGINEER.md](./HANDOFF-1.1-ENGINEER.md) | **工程师交接文档**：已完成工作、Bug 状态、下一步、已知坑 | ✅ 现行（2026-08-18，刀 1 完成 / 刀 7 阶段 1 落地） |
 | [LAN-INFRA-TEMPORARY.md](./LAN-INFRA-TEMPORARY.md) | **临时本地 Git 基础设施**（GitHub 故障应急）：SSH 裸仓库 + Gitea 部署/管理/退役 | ✅ 现行（应急，2026-08-18） |
 
 ## 法律与合规（保留）
