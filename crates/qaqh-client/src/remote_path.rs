@@ -40,7 +40,10 @@ pub fn remote_path_from_display(input: &str) -> Option<String> {
     }
     if let Some(rest) = trimmed.strip_prefix("//") {
         // `//ip/home/...` → 取第一段斜杠之后的部分；`//ip` 后没有路径则视为根。
-        let body = rest.split_once('/').map(|(_, body)| body).unwrap_or_default();
+        let body = rest
+            .split_once('/')
+            .map(|(_, body)| body)
+            .unwrap_or_default();
         if body.is_empty() {
             return Some("/".to_string());
         }
@@ -108,7 +111,10 @@ mod tests {
 
     #[test]
     fn from_display_passes_through_daemon_paths() {
-        assert_eq!(remote_path_from_display("/home/alice"), Some("/home/alice".into()));
+        assert_eq!(
+            remote_path_from_display("/home/alice"),
+            Some("/home/alice".into())
+        );
         assert_eq!(remote_path_from_display("C:\\work"), Some("C:/work".into()));
         assert_eq!(remote_path_from_display("rel/path"), None);
     }
@@ -117,9 +123,6 @@ mod tests {
     fn drive_letter_display_round_trips() {
         let shown = display_path("10.0.0.2", "C:/work");
         assert_eq!(shown, "//10.0.0.2/C:/work");
-        assert_eq!(
-            remote_path_from_display(&shown),
-            Some("C:/work".into())
-        );
+        assert_eq!(remote_path_from_display(&shown), Some("C:/work".into()));
     }
 }

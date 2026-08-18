@@ -128,7 +128,10 @@ fn ledger_hash(content: &str) -> String {
 pub fn record_read(path: &str, content: &str, line_count: usize) {
     crate::file_cache::store(path, content, line_count);
     insert(path, "read", line_count, Some(ledger_hash(content)));
-    shifts_map().lock().unwrap_or_else(|e| e.into_inner()).remove(path);
+    shifts_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(path);
 }
 
 /// Record a file write (create/overwrite/append). 全覆盖语义：行号全失效，
@@ -148,7 +151,10 @@ pub fn record_write(path: &str, content: &str) {
         content.lines().count(),
         Some(ledger_hash(content)),
     );
-    shifts_map().lock().unwrap_or_else(|e| e.into_inner()).remove(path);
+    shifts_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(path);
 }
 
 /// Record a file edit with per-hunk line shifts (账本行号修正的数据源)。
@@ -194,7 +200,10 @@ pub fn correct_line(path: &str, line: usize) -> Option<(usize, i64)> {
 
 /// grep 输出的是实时行号：清空偏移链，防止后续 read 用 grep 行号时被误修正。
 pub fn record_grep(path: &str) {
-    shifts_map().lock().unwrap_or_else(|e| e.into_inner()).remove(path);
+    shifts_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(path);
 }
 
 /// Record a file edit.

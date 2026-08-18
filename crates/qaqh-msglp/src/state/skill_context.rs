@@ -228,9 +228,9 @@ impl SkillContextManager {
     /// True when at least one skill is activated with a loaded body.
     /// Used by the injection gate: an empty active set injects nothing.
     pub fn has_active(&self) -> bool {
-        self.entries.values().any(|entry| {
-            entry.state == SkillRuntimeState::Active && entry.activation.is_some()
-        })
+        self.entries
+            .values()
+            .any(|entry| entry.state == SkillRuntimeState::Active && entry.activation.is_some())
     }
 
     pub fn operation_revision(&self) -> u64 {

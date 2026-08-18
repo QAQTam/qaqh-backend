@@ -63,7 +63,7 @@ pub(super) fn exec_apply_patch(args: &serde_json::Value) -> ToolResult {
 /// 内容匹配引擎：无行号、四级匹配、按序应用（任一 hunk 失败即停，已写入
 /// 的文件保留——与上游 Codex 一致；失败前先 `dry_run=true` 预检全部 hunk）。
 fn exec_engine_patch(ws: &str, patch: &str, dry_run: bool) -> ToolResult {
-    use crate::apply_patch_engine::{apply_patch_engine, dry_run_patch_engine, EngineError};
+    use crate::apply_patch_engine::{EngineError, apply_patch_engine, dry_run_patch_engine};
 
     let outcome = if dry_run {
         dry_run_patch_engine(patch, std::path::Path::new(ws))
@@ -158,19 +158,25 @@ fn exec_engine_patch(ws: &str, patch: &str, dry_run: bool) -> ToolResult {
                     "EMPTY_PATCH",
                     "The patch parsed to zero hunks; at least one '*** Add File: / *** Delete File: / *** Update File:' section is required.",
                 ),
-                EngineError::Io { .. } => ("IO_ERROR", "A filesystem operation failed (read/write/remove)."),
+                EngineError::Io { .. } => (
+                    "IO_ERROR",
+                    "A filesystem operation failed (read/write/remove).",
+                ),
                 EngineError::PathOutsideWorkspace { .. } => (
                     "PATH_OUTSIDE_WORKSPACE",
                     "Every patch path must resolve inside the workspace root; '..' escapes and absolute paths outside the workspace are rejected.",
                 ),
             };
-            crate::ToolResult::error(serde_json::json!({
-                "timeis": crate::now_utc8(),
-                "status": "error",
-                "code": code,
-                "message": e.to_string(),
-                "hint": hint,
-            }).to_string())
+            crate::ToolResult::error(
+                serde_json::json!({
+                    "timeis": crate::now_utc8(),
+                    "status": "error",
+                    "code": code,
+                    "message": e.to_string(),
+                    "hint": hint,
+                })
+                .to_string(),
+            )
         }
     }
 }
@@ -239,7 +245,8 @@ mod tests {
         index.write().expect("write index");
         let tree_id = index.write_tree().expect("write tree");
         let tree = repo.find_tree(tree_id).expect("find tree");
-        let signature = git2::Signature::now("QAQ-Harness Test", "qaqh-test@local").expect("signature");
+        let signature =
+            git2::Signature::now("QAQ-Harness Test", "qaqh-test@local").expect("signature");
         repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
             .expect("initial commit");
         let ws = dir.path().to_str().unwrap().to_string();
@@ -339,5 +346,4 @@ mod tests {
             "line1\nline2\n"
         );
     }
-
 }

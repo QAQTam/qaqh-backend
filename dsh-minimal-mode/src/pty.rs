@@ -1,7 +1,7 @@
 //! Line-based scrollback buffer and a portable-pty backed persistent shell
 //! session, mirroring the minimal-mode terminal seam used by the bash tool.
 
-use portable_pty::{native_pty_system, CommandBuilder, Child, PtySize};
+use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

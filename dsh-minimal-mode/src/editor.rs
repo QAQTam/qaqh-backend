@@ -68,9 +68,7 @@ fn match_offsets(content: &str, search: &str) -> Vec<usize> {
 fn line_numbers_at(content: &str, offsets: &[usize]) -> Vec<usize> {
     offsets
         .iter()
-        .map(|&offset| {
-            content[..offset].chars().filter(|&c| c == '\n').count() + 1
-        })
+        .map(|&offset| content[..offset].chars().filter(|&c| c == '\n').count() + 1)
         .collect()
 }
 
@@ -149,10 +147,7 @@ fn display_path(path: &Path) -> String {
 }
 
 /// `statExisting`: returns the info or the exact minimal-mode error message.
-fn stat_existing(
-    path: &Path,
-    command: &str,
-) -> Result<FsInfo, String> {
+fn stat_existing(path: &Path, command: &str) -> Result<FsInfo, String> {
     let info = match stat(path) {
         Some(info) => info,
         None => {
@@ -172,13 +167,8 @@ fn stat_existing(
 }
 
 fn read_text(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|e| {
-        format!(
-            "cannot read \"{}\": {}",
-            display_path(path),
-            e
-        )
-    })
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read \"{}\": {}", display_path(path), e))
 }
 
 /// Atomic write: write to a temp sibling then rename over the target.
@@ -203,9 +193,7 @@ fn write_file_atomic(path: &Path, content: &str) -> Result<(), String> {
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    result.map_err(|e| {
-        format!("cannot write \"{}\": {}", display_path(path), e)
-    })
+    result.map_err(|e| format!("cannot write \"{}\": {}", display_path(path), e))
 }
 
 fn format_file_view(
@@ -251,10 +239,7 @@ fn format_file_view(
         if final_line != -1 && final_line < initial_line {
             return Err(format!(
                 "Invalid `view_range`: [{}, {}]. Its second element `{}` should be larger or equal than its first `{}`",
-                range[0],
-                range[1],
-                final_line,
-                initial_line
+                range[0], range[1], final_line, initial_line
             ));
         }
         lines = if final_line == -1 {
@@ -262,9 +247,7 @@ fn format_file_view(
         } else {
             all_lines[(initial_line - 1) as usize..final_line as usize].to_vec()
         };
-        prompt.push_str(&format!(
-            " with view_range=[{initial_line}, {final_line}]"
-        ));
+        prompt.push_str(&format!(" with view_range=[{initial_line}, {final_line}]"));
     }
     let numbered = lines
         .iter()
@@ -280,21 +263,19 @@ fn format_file_view(
 
 fn list_directory(path: &Path, max_output_chars: usize) -> Result<String, String> {
     fn visit(path: &Path, depth: usize) -> Result<Vec<String>, String> {
-        let entries = std::fs::read_dir(path).map_err(|e| {
-            format!("cannot list \"{}\": {}", display_path(path), e)
-        })?;
+        let entries = std::fs::read_dir(path)
+            .map_err(|e| format!("cannot list \"{}\": {}", display_path(path), e))?;
         let mut rows = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|e| {
-                format!("cannot list \"{}\": {}", display_path(path), e)
-            })?;
+            let entry =
+                entry.map_err(|e| format!("cannot list \"{}\": {}", display_path(path), e))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') || name == "node_modules" || name == "__pycache__" {
                 continue;
             }
-            let file_type = entry.file_type().map_err(|e| {
-                format!("cannot list \"{}\": {}", display_path(path), e)
-            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|e| format!("cannot list \"{}\": {}", display_path(path), e))?;
             let t = if file_type.is_dir() {
                 'd'
             } else if file_type.is_file() {
@@ -347,7 +328,12 @@ fn view_path(
         ));
     }
     let content = read_text(&target)?;
-    format_file_view(&display_path(&target), &content, max_output_chars, view_range)
+    format_file_view(
+        &display_path(&target),
+        &content,
+        max_output_chars,
+        view_range,
+    )
 }
 
 fn create_file(path: &str, file_text: Option<&str>) -> Result<String, String> {
@@ -428,9 +414,8 @@ fn insert_in_file(
     insert_line: Option<i64>,
     new_str: Option<&str>,
 ) -> Result<String, String> {
-    let insert_line = insert_line.ok_or_else(|| {
-        "Parameter `insert_line` is required for command: insert".to_string()
-    })?;
+    let insert_line = insert_line
+        .ok_or_else(|| "Parameter `insert_line` is required for command: insert".to_string())?;
     let value = required_for_command(new_str, "new_str", "insert", true)?;
     let target = resolve_target(path)?;
     let info = stat_existing(&target, "insert")?;
@@ -469,15 +454,15 @@ fn insert_in_file(
 fn parse_view_range(args: &serde_json::Value) -> Option<Vec<i64>> {
     args.get("view_range")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_i64())
-                .collect::<Vec<i64>>()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect::<Vec<i64>>())
 }
 
 fn handle(ctx: ToolCallCtx) -> ToolResult {
-    let command = ctx.args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let command = ctx
+        .args
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let path = ctx.args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let file_text = ctx.args.get("file_text").and_then(|v| v.as_str());
     let new_str = ctx.args.get("new_str").and_then(|v| v.as_str());
@@ -495,12 +480,7 @@ fn handle(ctx: ToolCallCtx) -> ToolResult {
 
     match result {
         Ok(text) => ToolResult::ok_with_limit(text, None),
-        Err(message) => ToolResult::error_with(
-            "TOOL_ERROR",
-            message,
-            false,
-            None,
-        ),
+        Err(message) => ToolResult::error_with("TOOL_ERROR", message, false, None),
     }
 }
 
@@ -601,7 +581,10 @@ mod tests {
         std::fs::write(&path, "l1\n").unwrap();
         let abs = display_path(&path);
         let err = view_path(&abs, Some(&[0, 2]), DEFAULT_MAX_OUTPUT_CHARS).unwrap_err();
-        assert!(err.contains("should be within the range of lines of the file: [1, 2]"), "{err}");
+        assert!(
+            err.contains("should be within the range of lines of the file: [1, 2]"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -623,7 +606,9 @@ mod tests {
         let err = create_file(&abs, Some("content")).unwrap_err();
         assert_eq!(
             err,
-            format!("File already exists at: {abs}. Cannot overwrite files using command `create`.")
+            format!(
+                "File already exists at: {abs}. Cannot overwrite files using command `create`."
+            )
         );
     }
 
@@ -634,10 +619,7 @@ mod tests {
         std::fs::write(&path, "foo\nbar\n").unwrap();
         let abs = display_path(&path);
         let out = replace_in_file(&abs, Some("bar"), Some("baz")).unwrap();
-        assert_eq!(
-            out,
-            format!("The file {abs} has been edited successfully.")
-        );
+        assert_eq!(out, format!("The file {abs} has been edited successfully."));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "foo\nbaz\n");
     }
 
@@ -678,10 +660,7 @@ mod tests {
         std::fs::write(&path, "l1\nl2\n").unwrap();
         let abs = display_path(&path);
         let out = insert_in_file(&abs, Some(1), Some("mid")).unwrap();
-        assert_eq!(
-            out,
-            format!("The file {abs} has been edited successfully.")
-        );
+        assert_eq!(out, format!("The file {abs} has been edited successfully."));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "l1\nmid\nl2\n");
     }
 
@@ -725,7 +704,11 @@ mod tests {
         // the hidden / excluded entries.
         let body = out.split_once('\n').map(|(_, b)| b).unwrap_or(&out);
         assert!(!body.contains(".hidden"));
-        assert!(!body.lines().any(|l| l.contains("node_modules") && l.contains('\t')));
+        assert!(
+            !body
+                .lines()
+                .any(|l| l.contains("node_modules") && l.contains('\t'))
+        );
         assert!(body.contains("src"));
         assert!(body.contains("a.rs"));
     }

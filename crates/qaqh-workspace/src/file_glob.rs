@@ -28,7 +28,9 @@ fn exec_glob(args: &serde_json::Value) -> ToolResult {
         return ToolResult::error("glob: pattern is required (e.g. \"src/**/*.rs\")");
     }
     let root = crate::resolve_workspace_path(
-        args.get("path").and_then(|v| v.as_str()).unwrap_or_default(),
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
     );
     let root = if root.is_empty() { "." } else { root.as_str() };
     let max_results = args
@@ -173,11 +175,7 @@ mod tests {
     }
 
     fn lines(result: &ToolResult) -> Vec<String> {
-        result
-            .model_text()
-            .lines()
-            .map(String::from)
-            .collect()
+        result.model_text().lines().map(String::from).collect()
     }
 
     #[test]
@@ -203,8 +201,14 @@ mod tests {
         assert!(result.is_success(), "{}", result.model_text());
         let list = lines(&result);
         assert!(list.contains(&"src/a.rs".to_string()));
-        assert!(!list.contains(&"src/.hidden.rs".to_string()), "hidden must be skipped");
-        assert!(!list.contains(&"src/data.txt".to_string()), "gitignored must be skipped");
+        assert!(
+            !list.contains(&"src/.hidden.rs".to_string()),
+            "hidden must be skipped"
+        );
+        assert!(
+            !list.contains(&"src/data.txt".to_string()),
+            "gitignored must be skipped"
+        );
     }
 
     #[test]
@@ -222,7 +226,10 @@ mod tests {
     #[test]
     fn glob_invalid_pattern_and_empty_match() {
         let dir = fixture();
-        let bad = run(dir.path(), serde_json::json!({ "pattern": "src/[unclosed" }));
+        let bad = run(
+            dir.path(),
+            serde_json::json!({ "pattern": "src/[unclosed" }),
+        );
         assert!(!bad.is_success(), "invalid glob must error");
         let none = run(dir.path(), serde_json::json!({ "pattern": "*.toml" }));
         assert!(none.is_success());
@@ -232,7 +239,7 @@ mod tests {
     #[test]
     fn glob_is_read_only_under_permission_engine() {
         // 权限引擎必须把 glob（handler 声明 Read）视为只读：Level 2 自动批准。
-        use crate::permission::{needs_permission, PermissionDecision, PermissionLevel};
+        use crate::permission::{PermissionDecision, PermissionLevel, needs_permission};
         let ws = std::env::temp_dir().join("qaqh-glob-perm");
         let decision = needs_permission(
             PermissionLevel::ReadFree,
@@ -248,7 +255,10 @@ mod tests {
     #[test]
     fn glob_respects_max_results() {
         let dir = fixture();
-        let result = run(dir.path(), serde_json::json!({ "pattern": "**/*", "max_results": 2 }));
+        let result = run(
+            dir.path(),
+            serde_json::json!({ "pattern": "**/*", "max_results": 2 }),
+        );
         assert!(result.is_success(), "{}", result.model_text());
         // 文本截断标记 + 恰好 2 行路径（其余为截断提示）。
         assert!(result.model_text().contains("truncated"));

@@ -582,15 +582,14 @@ impl Loop {
                                 log::info!(
                                     "[INJECT] subagent status emitted (name={name}, state={state}) for absorbed injection"
                                 );
-                                self.paced_emitter.emit_domain(
-                                    qaqh_domain::DomainEvent::Control(
+                                self.paced_emitter
+                                    .emit_domain(qaqh_domain::DomainEvent::Control(
                                         qaqh_domain::ControlEvent::SubagentStatus {
                                             seed: self.session.agent.session.seed.clone(),
                                             name,
                                             state,
                                         },
-                                    ),
-                                );
+                                    ));
                             }
                         }
                         Err(e) => {
@@ -865,7 +864,6 @@ impl Loop {
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
                         flow: &mut self.flow,
-
                     };
                     self.compact.apply_result(&mut ctx, &meta);
                 }
@@ -951,7 +949,6 @@ impl Loop {
                 writer_dead: &self.writer_dead,
                 stats: &mut self.session.stats,
                 flow: &mut self.flow,
-
             };
             self.compact.build_prompt_and_meta(&mut ctx)
         };
@@ -1107,10 +1104,11 @@ impl Loop {
             )
         {
             log::info!("[AGENT] deferring subagent injection while compact running");
-            self.deferred_ringing.push_back(super::types::WorkerCommand {
-                frame: super::wire::WorkerCommandFrame::Ringing(env),
-                causation: Some(command_id),
-            });
+            self.deferred_ringing
+                .push_back(super::types::WorkerCommand {
+                    frame: super::wire::WorkerCommandFrame::Ringing(env),
+                    causation: Some(command_id),
+                });
             return;
         }
 
@@ -1249,7 +1247,6 @@ impl Loop {
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
                         flow: &mut self.flow,
-
                     };
                     let outcome = self.session.turn.handle_ask_response(
                         &mut ctx,
@@ -1270,7 +1267,6 @@ impl Loop {
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
                         flow: &mut self.flow,
-
                     };
                     let outcome = self.session.turn.handle_ask_dismiss(
                         &mut ctx,
@@ -1295,7 +1291,6 @@ impl Loop {
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
                         flow: &mut self.flow,
-
                     };
                     let outcome = self.session.turn.handle_plan_response(
                         &mut ctx,
@@ -1336,14 +1331,17 @@ impl Loop {
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
                         flow: &mut self.flow,
-
                     };
                     let outcome = if as_system {
                         self.input
                             .handle_system_input(&mut ctx, &text, Some(command_id.as_str()))
                     } else {
-                        self.input
-                            .handle_user_input(&mut ctx, qaqh_message::builtin::USER, &text, images)
+                        self.input.handle_user_input(
+                            &mut ctx,
+                            qaqh_message::builtin::USER,
+                            &text,
+                            images,
+                        )
                     };
                     drop(ctx);
                     self.apply_outcome(outcome);
@@ -1421,7 +1419,6 @@ impl Loop {
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
                         flow: &mut self.flow,
-
                     };
                     self.session.tool.handle_ui_tool_call(
                         &mut ctx,
@@ -1446,7 +1443,6 @@ impl Loop {
                         writer_dead: &self.writer_dead,
                         stats: &mut self.session.stats,
                         flow: &mut self.flow,
-
                     };
                     match self.session.tool.handle_permission_response(
                         &mut ctx,
@@ -1507,8 +1503,6 @@ impl Loop {
                             usage,
                         },
                     ));
-
-
 
                 // Goal mode auto-advance: if the LLM completed a step
                 // (via todo(action=set, status=completed)), inject the next step.

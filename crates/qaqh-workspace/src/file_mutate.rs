@@ -7,7 +7,9 @@ use super::file_shared::{
     atomic_write, content_hash, diff_stats_between, normalize_newlines, unified_diff,
     verify_expected_hash,
 };
-use crate::{JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler, handler_from_string};
+use crate::{
+    JsonArgs, ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler, handler_from_string,
+};
 use serde_json::json;
 
 // ── Shared helpers ──

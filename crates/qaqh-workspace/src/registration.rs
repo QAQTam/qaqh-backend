@@ -12,10 +12,10 @@ use super::apply_patch;
 use super::confirm_apply;
 use super::copy_range;
 use super::file_edit_v2;
-use super::grep_tool;
+use super::file_glob;
 use super::file_mutate;
 use super::file_query;
-use super::file_glob;
+use super::grep_tool;
 
 use super::ask_user;
 use super::process_inspect;

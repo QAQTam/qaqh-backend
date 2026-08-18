@@ -1,5 +1,3 @@
-> 归档说明：本映射对应 **Linux Gitea 重放**（已退役）。正式工作以 **Windows Gitea（qaqtam）** 为准——那里是 GitHub 原生迁移，Issue/PR 编号与 GitHub 一致，无需映射。
-
 # GitHub -> Gitea report mapping
 
 | GitHub # | type | Gitea # |

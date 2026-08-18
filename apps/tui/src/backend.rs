@@ -122,8 +122,14 @@ impl QaqhBridge {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string(),
-                    archived: entry.get("archived").and_then(|v| v.as_bool()).unwrap_or(false),
-                    running: entry.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
+                    archived: entry
+                        .get("archived")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    running: entry
+                        .get("running")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                 })
             })
             .collect();

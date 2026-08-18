@@ -20,11 +20,7 @@ fn run_tool(name: &str, args: serde_json::Value) -> String {
 
 fn setup() {
     // TOOL_MANAGER is a process-global OnceLock: a single init per test binary.
-    runtime::init_tools(
-        SESSION,
-        &[dsh_minimal_mode::register],
-        vec![],
-    );
+    runtime::init_tools(SESSION, &[dsh_minimal_mode::register], vec![]);
     runtime::set_context(SESSION, 4);
 }
 
@@ -78,10 +74,7 @@ fn str_replace_editor_lifecycle_verbatim() {
         "str_replace_editor",
         json!({ "command": "create", "path": abs, "file_text": "alpha\nbeta\n" }),
     );
-    assert_eq!(
-        created,
-        format!("New file created successfully at: {abs}")
-    );
+    assert_eq!(created, format!("New file created successfully at: {abs}"));
 
     let replaced = run_tool(
         "str_replace_editor",
@@ -91,10 +84,7 @@ fn str_replace_editor_lifecycle_verbatim() {
         replaced,
         format!("The file {abs} has been edited successfully.")
     );
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        "alpha\ngamma\n"
-    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
 
     let inserted = run_tool(
         "str_replace_editor",
@@ -163,7 +153,10 @@ fn str_replace_editor_cjk_view_line_numbers() {
         )
     );
     // 无替换字符（没有被字节切片切坏的多字节）。
-    assert!(!out.contains('\u{FFFD}'), "replacement char leaked: {out:?}");
+    assert!(
+        !out.contains('\u{FFFD}'),
+        "replacement char leaked: {out:?}"
+    );
 }
 
 #[test]
@@ -272,7 +265,10 @@ fn bash_v2_nonzero_exit_code_verbatim() {
     let out = run_tool("bash_v2", json!({ "command": "sh -c 'exit 3'" }));
     assert!(out.contains("[exit code: 3]"), "got: {out:?}");
     // marker 绝不能泄漏到模型面。
-    assert!(!out.contains("__DSH_PERSISTENT_BASH_"), "marker leaked: {out:?}");
+    assert!(
+        !out.contains("__DSH_PERSISTENT_BASH_"),
+        "marker leaked: {out:?}"
+    );
 }
 
 #[test]
@@ -283,7 +279,10 @@ fn bash_v2_success_output_verbatim_no_marker() {
     assert_eq!(out.trim_end(), "hello dsh", "got: {out:?}");
     // 成功（exit 0）不追加 `[exit code: 0]`，也不泄漏 marker。
     assert!(!out.contains("[exit code:"), "got: {out:?}");
-    assert!(!out.contains("__DSH_PERSISTENT_BASH_"), "marker leaked: {out:?}");
+    assert!(
+        !out.contains("__DSH_PERSISTENT_BASH_"),
+        "marker leaked: {out:?}"
+    );
 }
 
 #[test]
@@ -309,7 +308,10 @@ fn bash_v2_cjk_output_verbatim() {
         json!({ "command": "printf '你好世界\\n中文测试\\n'" }),
     );
     assert_eq!(out.trim_end(), "你好世界\n中文测试", "got: {out:?}");
-    assert!(!out.contains('\u{FFFD}'), "replacement char leaked: {out:?}");
+    assert!(
+        !out.contains('\u{FFFD}'),
+        "replacement char leaked: {out:?}"
+    );
 }
 
 // 说明：PTY 的 shell-exit（`exit 0`）与 reset 路径在 CI/本机测试环境下
