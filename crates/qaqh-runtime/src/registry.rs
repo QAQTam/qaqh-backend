@@ -104,8 +104,8 @@ enum AgentTransport {
     /// communicates through the same WorkerCommand/WriterEvent channel types as
     /// the pipe boundary.
     InProcess {
-        cmd_tx: SyncSender<qaqh_msglp::ringing_v1::types::WorkerCommand>,
-        cancel: qaqh_msglp::ringing_v1::types::CancelToken,
+        cmd_tx: SyncSender<qaqh_msgloop::ringing_v1::types::WorkerCommand>,
+        cancel: qaqh_msgloop::ringing_v1::types::CancelToken,
     },
 }
 
@@ -220,7 +220,7 @@ impl AgentRegistry {
     /// leg of the subagent path.
     ///
     /// The subagent is a normal Ringing V1
-    /// [`qaqh_msglp::ringing_v1::loop_core::Loop`] running on a daemon thread;
+    /// [`qaqh_msgloop::ringing_v1::loop_core::Loop`] running on a daemon thread;
     /// its command/event channels are the same typed envelopes as the pipe wire,
     /// so the daemon publishes events and commands unchanged.
     pub fn spawn_subagent(
@@ -262,8 +262,8 @@ impl AgentRegistry {
             .insert(seed.to_string(), std::time::Instant::now());
         let (generation, _) = self.activity.begin(seed);
 
-        let channels = qaqh_msglp::ringing_v1::loop_core::LoopChannels::new();
-        let qaqh_msglp::ringing_v1::loop_core::LoopChannels {
+        let channels = qaqh_msgloop::ringing_v1::loop_core::LoopChannels::new();
+        let qaqh_msgloop::ringing_v1::loop_core::LoopChannels {
             cmd_tx,
             cmd_rx,
             event_tx,
@@ -346,8 +346,8 @@ impl AgentRegistry {
             .insert(seed.to_string(), std::time::Instant::now());
         let (generation, _) = self.activity.begin(seed);
 
-        let channels = qaqh_msglp::ringing_v1::loop_core::LoopChannels::new();
-        let qaqh_msglp::ringing_v1::loop_core::LoopChannels {
+        let channels = qaqh_msgloop::ringing_v1::loop_core::LoopChannels::new();
+        let qaqh_msgloop::ringing_v1::loop_core::LoopChannels {
             cmd_tx,
             cmd_rx,
             event_tx,
@@ -442,12 +442,12 @@ impl AgentRegistry {
                     // Mirror the pipe reader: interrupt frames set the cancel
                     // token before they enter the command queue so long-running
                     // gate/tool work observes the abort immediately.
-                    if qaqh_msglp::ringing_v1::loop_core::ringing_command_is_interrupt(env) {
+                    if qaqh_msgloop::ringing_v1::loop_core::ringing_command_is_interrupt(env) {
                         cancel.set();
                         qaqh_workspace::set_cancel(true);
                     }
-                    let cmd = qaqh_msglp::ringing_v1::types::WorkerCommand {
-                        frame: qaqh_msglp::ringing_v1::wire::WorkerCommandFrame::Ringing(
+                    let cmd = qaqh_msgloop::ringing_v1::types::WorkerCommand {
+                        frame: qaqh_msgloop::ringing_v1::wire::WorkerCommandFrame::Ringing(
                             env.clone(),
                         ),
                         causation: Some(env.command_id.clone()),
@@ -655,8 +655,8 @@ impl AgentInstance {
             AgentTransport::InProcess { cmd_tx, cancel } => {
                 cancel.set();
                 qaqh_workspace::set_cancel(true);
-                let cmd = qaqh_msglp::ringing_v1::types::WorkerCommand {
-                    frame: qaqh_msglp::ringing_v1::wire::WorkerCommandFrame::Ringing(env),
+                let cmd = qaqh_msgloop::ringing_v1::types::WorkerCommand {
+                    frame: qaqh_msgloop::ringing_v1::wire::WorkerCommandFrame::Ringing(env),
                     causation: Some("daemon-shutdown".into()),
                 };
                 let _ = cmd_tx.send(cmd);

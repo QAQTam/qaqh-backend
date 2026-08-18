@@ -48,7 +48,7 @@
 |---|---|
 | **Ringing V1 契约**（`qaqh-domain` + `qaqh-ringing` + HTTP/SSE 语义） | D5：对外协议是资产，保留 ack/batch/SSE/lease/cursor |
 | **`qaqh-client` SDK** | D4：所有外部前端唯一连接入口；TUI/Web/WinUI 共用 |
-| **`qaqh-msglp` loop 本体** | 编排层边界正确：数据流主干、状态、注入、admit、事件发射 |
+| **`qaqh-msgloop` loop 本体** | 编排层边界正确：数据流主干、状态、注入、admit、事件发射 |
 | **`qaqh-workspace` 工具库** | 业务价值最重的工具执行层，in-process 为主；只拆大文件，不拆 crate |
 | **`qaqh-types`** | 跨 crate 基础契约；本次起承载 tool-mode 等单契约表 |
 | **`qaqh-gate`** | 模型网关独立正确，OpenAI/Responses 适配继续保留 |
@@ -67,9 +67,9 @@
 | 子代理进程模型 | `qaqh-runtime/src/registry.rs spawn_subagent`（step1 已删进程路径；`qaqh-subagent` 的 daemon/SSE 回连与主 worker 进程待 step2） | BUG-002/011 刀1 |
 | timeline / messages / compact / journal 四写 | `timeline_store.rs`、`hub.persist_timeline_sync`、`manager.save_append`、`journal_store.rs` 多主逻辑 | BUG-005/006/007 刀2 |
 | 手写 HTTP 解析/序列化主体 | `qaqh-daemon/src/ringing_http.rs`（约 110KB） | BUG-010/011 刀3 |
-| 假 Engine 插件注释与 `engines vec` 指引 | `qaqh-msglp/src/ringing_v1/mod.rs`、`lib.rs` | BUG-009（本 PR 已清理） |
-| 直接 `Config::load() -> mutate -> save()` 写口 | `qaqh-runtime/src/service.rs` 各 action、`qaqh-msglp/state/agent.rs` 等调用点 | BUG-001/008 刀6 |
-| 工具档位硬编码表 | `qaqh-msglp/state/agent.rs`、`qaqh-runtime/service.rs`、TUI 字面量 | BUG-013（本 PR 已收敛） |
+| 假 Engine 插件注释与 `engines vec` 指引 | `qaqh-msgloop/src/ringing_v1/mod.rs`、`lib.rs` | BUG-009（本 PR 已清理） |
+| 直接 `Config::load() -> mutate -> save()` 写口 | `qaqh-runtime/src/service.rs` 各 action、`qaqh-msgloop/state/agent.rs` 等调用点 | BUG-001/008 刀6 |
+| 工具档位硬编码表 | `qaqh-msgloop/state/agent.rs`、`qaqh-runtime/service.rs`、TUI 字面量 | BUG-013（本 PR 已收敛） |
 | Web 时代残留命名/注释（文档层） | 两个 nextdev 文档里的 `deepx-*`/`apps/winui` 旧路径 | D9 追认 |
 
 ---

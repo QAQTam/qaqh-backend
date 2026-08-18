@@ -15,8 +15,8 @@ use qaqh_domain::{
     ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, SessionState,
     ToolCommand, ToolEvent,
 };
-use qaqh_msglp::ringing_v1::loop_core::Loop;
-use qaqh_msglp::state::agent::AgentState;
+use qaqh_msgloop::ringing_v1::loop_core::Loop;
+use qaqh_msgloop::state::agent::AgentState;
 use qaqh_ringing::{
     RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
 };

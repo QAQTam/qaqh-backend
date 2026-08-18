@@ -46,7 +46,7 @@ QAQ-Harness/
 ├── crates/                # Rust 后端 workspace（18 crates）
 │   ├── qaqh-daemon       #   守护进程：HTTP/SSE 服务、discovery、debug 静态服务
 │   ├── qaqh-runtime      #   无 GUI 依赖的应用运行时（服务、workspace 监管、重建）
-│   ├── qaqh-msglp        #   Agent 消息循环（worker 侧）
+│   ├── qaqh-msgloop        #   Agent 消息循环（worker 侧）
 │   ├── qaqh-gate         #   模型访问与流式响应（含 gate-testui 调试页）
 │   ├── qaqh-ringing      #   Ringing 线上协议（envelope/ack/batch/snapshot/worker frame）
 │   ├── qaqh-domain       #   Ringing 领域层（DomainCommand/DomainEvent）
