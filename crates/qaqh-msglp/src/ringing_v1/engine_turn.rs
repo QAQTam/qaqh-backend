@@ -94,16 +94,17 @@ pub struct TurnEngine {
 }
 
 impl TurnEngine {
-    /// A1：按 delta 次数 / 时间窗发射 `block_checkpoint`（该 round 当前完整文本）。
-    /// Ringing 双发：同一完整值同时作为 timeline 块级 checkpoint（replaceable
-    /// 覆盖，乱序/丢 delta 自愈；`convergence-plan` §10.2 方向）。
+    /// A1：按 delta 次数 / 时间窗发射 `block_checkpoint`。
+    /// Conversation 使用该 round 当前完整文本，timeline 使用当前 stream
+    /// block 的局部完整文本；两者都保留 replaceable 覆盖语义。
     fn maybe_emit_block_checkpoint(
-        ctx: &mut RingContext,
+        emitter: &dyn Emitter,
         turn_id: &str,
         round_num: u32,
         block_id: &str,
         kind: qaqh_domain::RoundDeltaKind,
-        text: &str,
+        round_text: &str,
+        block_text: &str,
         tokens_since_checkpoint: &mut u32,
         last_checkpoint_at: &mut std::time::Instant,
     ) {
@@ -115,23 +116,69 @@ impl TurnEngine {
         }
         *tokens_since_checkpoint = 0;
         *last_checkpoint_at = std::time::Instant::now();
-        ctx.emitter
-            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                qaqh_domain::ConversationEvent::BlockCheckpoint {
-                    turn_id: turn_id.to_string(),
-                    round_num,
-                    kind,
-                    text: text.to_string(),
-                    char_count: text.chars().count() as u32,
-                },
-            ));
-        ctx.emitter
-            .emit_timeline(qaqh_domain::TimelineIntent::BlockCheckpoint {
+        emitter.emit_domain(qaqh_domain::DomainEvent::Conversation(
+            qaqh_domain::ConversationEvent::BlockCheckpoint {
                 turn_id: turn_id.to_string(),
                 round_num,
-                block_id: block_id.to_string(),
-                text: text.to_string(),
-            });
+                kind,
+                text: round_text.to_string(),
+                char_count: round_text.chars().count() as u32,
+            },
+        ));
+        emitter.emit_timeline(qaqh_domain::TimelineIntent::BlockCheckpoint {
+            turn_id: turn_id.to_string(),
+            round_num,
+            block_id: block_id.to_string(),
+            text: block_text.to_string(),
+        });
+    }
+
+    fn append_stream_block_delta(
+        block_id: &str,
+        delta: &str,
+        stream_block_id: &mut Option<String>,
+        stream_block_text: &mut String,
+    ) {
+        if stream_block_id.as_deref() != Some(block_id) {
+            *stream_block_id = Some(block_id.to_string());
+            stream_block_text.clear();
+        }
+        stream_block_text.push_str(delta);
+    }
+
+    fn reset_stream_block_checkpoint(
+        stream_block_id: &mut Option<String>,
+        stream_block_text: &mut String,
+    ) {
+        *stream_block_id = None;
+        stream_block_text.clear();
+    }
+
+    fn emit_stream_block_checkpoint(
+        emitter: &dyn Emitter,
+        turn_id: &str,
+        round_num: u32,
+        block_id: &str,
+        kind: qaqh_domain::RoundDeltaKind,
+        round_text: &str,
+        delta: &str,
+        stream_block_id: &mut Option<String>,
+        stream_block_text: &mut String,
+        tokens_since_checkpoint: &mut u32,
+        last_checkpoint_at: &mut std::time::Instant,
+    ) {
+        Self::append_stream_block_delta(block_id, delta, stream_block_id, stream_block_text);
+        Self::maybe_emit_block_checkpoint(
+            emitter,
+            turn_id,
+            round_num,
+            block_id,
+            kind,
+            round_text,
+            stream_block_text,
+            tokens_since_checkpoint,
+            last_checkpoint_at,
+        );
     }
 
     pub fn new() -> Self {
@@ -1296,6 +1343,8 @@ impl TurnEngine {
             let mut last_emitted_usage_total: u32 = 0;
             let mut tool_calls_raw = serde_json::Value::Null;
             let mut active_stream_block: Option<(qaqh_domain::TimelineBlockKind, String)> = None;
+            let mut stream_block_id: Option<String> = None;
+            let mut stream_block_text = String::new();
             let mut timeline_segment = 0u32;
             let mut timeline_tools_open = HashSet::new();
             let mut had_error = false;
@@ -1352,17 +1401,20 @@ impl TurnEngine {
                                     turn_id: turn_id.clone(),
                                     round_num,
                                     kind: qaqh_domain::RoundDeltaKind::Answering,
-                                    delta: d,
+                                    delta: d.clone(),
                                 },
                             ));
-                        // A1：周期完整值（replaceable 覆盖，乱序/丢 delta 自愈）。
-                        Self::maybe_emit_block_checkpoint(
-                            ctx,
+                        // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
+                        Self::emit_stream_block_checkpoint(
+                            ctx.emitter,
                             &turn_id,
                             round_num,
                             &block_id,
                             qaqh_domain::RoundDeltaKind::Answering,
                             &content,
+                            &d,
+                            &mut stream_block_id,
+                            &mut stream_block_text,
                             &mut checkpoint_tokens,
                             &mut last_checkpoint_at,
                         );
@@ -1393,17 +1445,20 @@ impl TurnEngine {
                                     turn_id: turn_id.clone(),
                                     round_num,
                                     kind: qaqh_domain::RoundDeltaKind::Thinking,
-                                    delta: r,
+                                    delta: r.clone(),
                                 },
                             ));
-                        // A1：周期完整值（replaceable 覆盖，乱序/丢 delta 自愈）。
-                        Self::maybe_emit_block_checkpoint(
-                            ctx,
+                        // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
+                        Self::emit_stream_block_checkpoint(
+                            ctx.emitter,
                             &turn_id,
                             round_num,
                             &block_id,
                             qaqh_domain::RoundDeltaKind::Thinking,
                             &reasoning,
+                            &r,
+                            &mut stream_block_id,
+                            &mut stream_block_text,
                             &mut checkpoint_tokens,
                             &mut last_checkpoint_at,
                         );
@@ -1480,6 +1535,10 @@ impl TurnEngine {
                             &turn_id,
                             round_num,
                             &mut active_stream_block,
+                        );
+                        Self::reset_stream_block_checkpoint(
+                            &mut stream_block_id,
+                            &mut stream_block_text,
                         );
                         if timeline_tools_open.insert(id.clone()) {
                             ctx.emitter
@@ -2341,5 +2400,136 @@ impl TurnEngine {
         self.suspended
             .take()
             .map(|state| (state.turn_id, state.usage))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordingEmitter {
+        conversation: RefCell<Vec<(qaqh_domain::RoundDeltaKind, String)>>,
+        timeline: RefCell<Vec<(String, String)>>,
+    }
+
+    impl crate::ringing_v1::types::Emitter for RecordingEmitter {
+        fn emit_domain(&self, event: qaqh_domain::DomainEvent) {
+            if let qaqh_domain::DomainEvent::Conversation(
+                qaqh_domain::ConversationEvent::BlockCheckpoint { kind, text, .. },
+            ) = event
+            {
+                self.conversation.borrow_mut().push((kind, text));
+            }
+        }
+
+        fn emit_timeline(&self, intent: qaqh_domain::TimelineIntent) {
+            if let qaqh_domain::TimelineIntent::BlockCheckpoint { block_id, text, .. } = intent {
+                self.timeline.borrow_mut().push((block_id, text));
+            }
+        }
+    }
+
+    fn assert_block_scope_after_tool(
+        kind: qaqh_domain::RoundDeltaKind,
+        first_block_id: &str,
+        second_block_id: &str,
+        first_delta: &str,
+        second_delta: &str,
+    ) {
+        let emitter = RecordingEmitter::default();
+        let mut stream_block_id = None;
+        let mut stream_block_text = String::new();
+        let mut checkpoint_tokens = super::CHECKPOINT_TOKEN_INTERVAL - 1;
+        let mut last_checkpoint_at = std::time::Instant::now();
+
+        let first_round = first_delta.to_string();
+        super::TurnEngine::emit_stream_block_checkpoint(
+            &emitter,
+            "turn-1",
+            0,
+            first_block_id,
+            kind,
+            &first_round,
+            first_delta,
+            &mut stream_block_id,
+            &mut stream_block_text,
+            &mut checkpoint_tokens,
+            &mut last_checkpoint_at,
+        );
+
+        // The tool block seals the first stream block before the next one opens.
+        super::TurnEngine::reset_stream_block_checkpoint(
+            &mut stream_block_id,
+            &mut stream_block_text,
+        );
+
+        checkpoint_tokens = super::CHECKPOINT_TOKEN_INTERVAL - 1;
+        let second_round = format!("{first_delta}{second_delta}");
+        super::TurnEngine::emit_stream_block_checkpoint(
+            &emitter,
+            "turn-1",
+            0,
+            second_block_id,
+            kind,
+            &second_round,
+            second_delta,
+            &mut stream_block_id,
+            &mut stream_block_text,
+            &mut checkpoint_tokens,
+            &mut last_checkpoint_at,
+        );
+
+        checkpoint_tokens = super::CHECKPOINT_TOKEN_INTERVAL - 1;
+        let final_round = format!("{second_round}-tail");
+        super::TurnEngine::emit_stream_block_checkpoint(
+            &emitter,
+            "turn-1",
+            0,
+            second_block_id,
+            kind,
+            &final_round,
+            "-tail",
+            &mut stream_block_id,
+            &mut stream_block_text,
+            &mut checkpoint_tokens,
+            &mut last_checkpoint_at,
+        );
+
+        assert_eq!(
+            emitter.conversation.into_inner(),
+            vec![
+                (kind, first_round),
+                (kind, second_round),
+                (kind, final_round),
+            ]
+        );
+
+        assert_eq!(
+            emitter.timeline.into_inner(),
+            vec![
+                (first_block_id.to_string(), first_delta.to_string()),
+                (second_block_id.to_string(), second_delta.to_string()),
+                (second_block_id.to_string(), format!("{second_delta}-tail")),
+            ]
+        );
+    }
+
+    #[test]
+    fn checkpoints_keep_round_text_but_replace_each_stream_block_locally() {
+        assert_block_scope_after_tool(
+            qaqh_domain::RoundDeltaKind::Answering,
+            "round-0:text:0",
+            "round-0:text:1",
+            "answer-before-tool",
+            "answer-after-tool",
+        );
+        assert_block_scope_after_tool(
+            qaqh_domain::RoundDeltaKind::Thinking,
+            "round-0:reasoning:0",
+            "round-0:reasoning:1",
+            "reasoning-before-tool",
+            "reasoning-after-tool",
+        );
     }
 }
