@@ -274,3 +274,61 @@
   仍是进程级全局状态，in-process 子代理 actor 当前由
   `SUBAGENT_ACTOR_SERIAL` 串行执行。放开并发前必须先做逐 actor 上下文
   （见 `REFACTOR-ROADMAP.md` 刀 1 落地说明）。
+
+## 前端 bug 追加（2026-08-18，qaqh-winui-app）
+
+> 范围：前端仓库 `QAQTam/qaqh-winui-app`（apps/winui 原生壳 + markdown-winui + fluent）
+> 观察 / 修复的问题，统一归入本档案的 BUG-NNN 全局编号。现象 / 根因 / 证据仍按
+> 文首模板记录；backend HANDOFF 已登记的 issue #9 / #11 / #15 在此挂账。
+
+### BUG-014 工具模式 ComboBox 空态被程序化 SelectionChanged 误写成 standard 并持久化（已修复）
+
+- **现象**：极简（或其它非标准）工具模式会话冷启动 / 重启后 ComboBox 被切回“标准”；
+  tool_mode 未初始化（meta 未回填 / 无会话）时，WinUI 对 `selected_index(-1)` 的
+  normalize（-1→0 / Items 装载）触发程序化 `SelectionChanged`，旧代码把空态映射为
+  `standard` 并发 `session.set_tool_mode` 请求并持久化。
+- **根因**：index→mode 映射在“渲染显示”与“用户选择”两条路径各写一份（重复实现），
+  空态路径缺少“未初始化一律跳过”守卫；index→mode 对 -1 直接落到 `standard`。
+- **证据**：`apps/winui/src/composer_bar/view.rs:608-640`（空态渲染 -1 + CK-UI-GUARD：
+  `rendered_tm.is_empty()` 时任何 `SelectionChanged` 一律跳过）；`apps/winui/src/composer_bar/mod.rs:99`
+  `tool_mode_from_index` + 测试 L235-255（known modes roundtrip / -1、99 回退 standard）。
+- **影响面**：工具模式持久化正确性、多档位一致性（与 BUG-013 `qaqh_types::tool_mode`
+  单一契约配套）。
+- **状态**：fixed（2026-08-16，前端 PR #8）——提取单一映射 `tool_mode_from_index` +
+  空态守卫 + 3 个单元测试；前端同时已消费 `qaqh_types::tool_mode` 单一契约（PR #6）。
+
+### BUG-015 同轮 text↔tool 交替时 timeline 块级 checkpoint 重复回放（思考链复制 N 次）
+
+- **现象**：单个 round 内流式种类在 `text/answering ↔ tool`（或 `thinking ↔ tool`）间
+  交替 ≥2 次时，同一逻辑块反复新开 `block_id` 并携带整轮前缀文本，ChatView 回放 N 次；
+  t5r27 实测 11 个 text 块、单文件 ~10KB。
+- **根因**：`crates/qaqh-msglp/src/ringing_v1/engine_turn.rs`：
+  1. `ensure_stream_block`（L715）在 `text→tool→text` 时 seal 旧块并新开
+     `round-{r}:{label}:{segment}`；
+  2. `maybe_emit_block_checkpoint`（L100）把**整轮累计 `content` / `reasoning`** 当作
+     块 checkpoint 全量写入 → 每个新 text 块都含前一整段前缀副本 → 前端按 `block_id`
+     全部渲染 = 回放 N 次。
+- **证据**：`crates/qaqh-msglp/src/ringing_v1/engine_turn.rs:100,715`；定位 commit：
+  `2de680b`（segment 化 block_id）→ `5ad7e55`（BlockCheckpoint 整轮完整值）→
+  `c18e07b`（timeline 块级 checkpoint 双发落地）。
+- **影响面**：前端回放正确性、带宽 / I/O、thinking 链被复制 N 次、单文件膨胀。
+- **状态**：open（后端 Issue #15，2026-08-17 提；backend HANDOFF 已排期到刀 1 step 2 /
+  loop 协议改造一并处理）。修复方向建议：按块维护文本 / 同轮复用稳定 `block_id` /
+  checkpoint 只带增量 + 回归测试。
+
+## 前端相关落地增量（2026-08-18，qaqh-winui-app）
+
+- **BUG-014 已修复（前端 PR #8）**；`qaqh_types::tool_mode` 单一契约消费（PR #6，
+  对齐本档案 BUG-013 fixed / backend PR #3）。
+- **多 timer 轮询收敛（对应上方前端残留审计 ② / BUG-003 放大因素）**：
+  `apps/winui/src/main.rs` 5 个 DispatcherTimer（50ms pump / 250ms view /
+  250ms splash / 500ms 字体 / 500ms OOBE）收敛为单一 50ms UI 泵 + 250/500ms
+  时间门控（前端 PR #13）。组件侧 `shell::poll_rev` 的 500ms 轮询器未一并收敛
+  （属刀 5 范围）。
+- **BUG-001 状态（前端侧）**：T12 前端设置写路径收敛阻塞在后端 Issue #9
+  （config 归属 / `theme` / `notificationsEnabled` API 契约）；重构前需先把该
+  契约定死（backend HANDOFF §8.3；`REFACTOR-ROADMAP.md` 刀 6）。
+- **data-root marker 迁移 + 打包（前端 PR #10）**：DeepX → QAQ-Harness 数据根 marker
+  迁移（fail-closed）、Notifications Insights.Resource.dll 打包补齐、collect-payload
+  `-BackendRoot`；前端 issue #11 要求改为后端共享权威契约而非前端镜像私有公式
+  （backend HANDOFF §9.3 联查建议）。
