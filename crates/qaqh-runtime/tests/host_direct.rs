@@ -18,9 +18,12 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 fn deepx_service_host_spawn_subscribe_send_close() {
     let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
     let root = std::env::temp_dir().join(format!(
-        "qaqh-host-direct-test-{}-{:?}",
+        "qaqh-host-direct-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
     ));
     let data = root.join("data");
     std::fs::create_dir_all(&data).expect("test setup must not fail");
