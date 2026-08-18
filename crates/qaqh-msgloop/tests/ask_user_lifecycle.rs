@@ -17,8 +17,8 @@ use qaqh_domain::{
     AskAnswer, AskMode, AskQuestion, AskResolution, ControlCommand, ControlEvent,
     ConversationCommand, ConversationEvent, DomainEvent, SessionState, ToolCommand, ToolEvent,
 };
-use qaqh_msglp::ringing_v1::loop_core::Loop;
-use qaqh_msglp::state::agent::AgentState;
+use qaqh_msgloop::ringing_v1::loop_core::Loop;
+use qaqh_msgloop::state::agent::AgentState;
 use qaqh_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
 use serde_json::{Value, json};
 use tiny_http::{Header, Response, Server};

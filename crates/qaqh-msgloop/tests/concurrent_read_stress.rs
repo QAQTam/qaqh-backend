@@ -9,8 +9,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use qaqh_domain::{ControlCommand, ControlEvent, ConversationEvent, SessionState, ToolCommand};
-use qaqh_msglp::ringing_v1::loop_core::Loop;
-use qaqh_msglp::state::agent::AgentState;
+use qaqh_msgloop::ringing_v1::loop_core::Loop;
+use qaqh_msgloop::state::agent::AgentState;
 use qaqh_ringing::{
     RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
 };

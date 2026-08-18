@@ -1,4 +1,4 @@
-//! qaqh-msglp: message-loop driver for the agent child process.
+//! qaqh-msgloop: message-loop driver for the agent child process.
 //!
 //! The primary production Loop is [`ringing_v1::loop_core::Loop`] (Ringing V1 architecture).
 //! It reads Ringing worker command envelopes (`RingingWorkerCommandEnvelope`) via an mpsc channel fed by a background I/O

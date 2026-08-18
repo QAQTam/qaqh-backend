@@ -7,7 +7,7 @@
 //!
 //! 本 trait 只依赖 `qaqh_client` 已 re-export 的 wire 类型（`RingingCommand`、
 //! `EventBatch` 等），不引用 qaqh-runtime 任何类型，保证依赖方向
-//! `runtime → msglp → subagent` 不回环。
+//! `runtime → msgloop → subagent` 不回环。
 //!
 //! 安装：daemon 装配（`QaqhService::init`）时调用 [`install_host`]；工具
 //! handler 通过 [`host`] 探测。宿主不可用时（如单元测试 / 非 daemon 进程）
