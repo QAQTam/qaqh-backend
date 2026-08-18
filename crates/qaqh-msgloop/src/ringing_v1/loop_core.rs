@@ -1,41 +1,44 @@
-//! Loop core — thin event dispatcher with panic recovery.
+//! Loop core — worker 进程内的单会话事件驱动循环（Ringing V1 架构）。
 //!
 //! # Architecture
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────┐
-//! │  Loop (process-level)                            │
-//! │  ├─ I/O: cmd_rx, event_tx                        │
-//! │  ├─ Signal: cancel, phase, pending, writer_dead  │
-//! │  ├─ Session: session (SessionBundle)             │
-//! │  │   ├─ agent: AgentState                        │
-//! │  │   ├─ stats: StatsCollector                    │
-//! │  │   ├─ turn: TurnEngine                         │
-//! │  │   └─ tool: ToolEngine                         │
-//! │  └─ Stateless engines: session_eng, input,       │
-//! │     compact, misc                                │
-//! └──────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────┐
+//! │  Loop（worker 进程，单会话）                          │
+//! │  ├─ I/O: cmd_rx（reader 线程 stdin → JSON-LP）       │
+//! │  │        event_tx（writer 线程 → stdout，2ms 批量）  │
+//! │  ├─ Signal: cancel, phase, pending, writer_dead      │
+//! │  ├─ Session: session (SessionBundle)                 │
+//! │  │   ├─ agent: AgentState                            │
+//! │  │   ├─ stats: StatsCollector                        │
+//! │  │   ├─ turn: TurnEngine                             │
+//! │  │   └─ tool: ToolEngine                             │
+//! │  ├─ Stateless engines: session_eng, input, compact,  │
+//! │  │   goal, misc                                      │
+//! │  ├─ flow: ContextFlow（消息落盘/注入融合）            │
+//! │  ├─ injection_bus: 注入总线（idle 直派 / busy 入队）  │
+//! │  └─ paced_emitter: 事件节拍 + causation 作用域        │
+//! └──────────────────────────────────────────────────────┘
 //! ```
 //!
-//! `SessionBundle` is the unit of session isolation. Session-level engines
-//! (TurnEngine, ToolEngine) and state (AgentState, StatsCollector) are
-//! grouped together. On session switch, the entire bundle is flushed and
-//! replaced. Process-level state (I/O channels, cancel token) is unaffected.
+//! Loop 是**单会话**的：一次进程只承载一个 `SessionBundle`（会话隔离的
+//! 单位）。会话切换时整包落盘并替换。进程级状态（I/O 通道、cancel token）
+//! 不受影响。命令经 `dispatch_ringing_one` 直接路由到各引擎方法（无独立
+//! `Engine` trait）；中断类命令由 reader 线程直接置 cancel 以便立即生效。
 //!
 //! # Panic recovery
 //!
-//! Every dispatch is wrapped in `safe_dispatch()`. If an engine panics:
-//! 1. All engines are reset to clean state via `reset_all_engines()`
-//! 2. Cancel token is cleared
-//! 3. An `Agent2Ui::Error` is emitted to the frontend
-//! 4. The Loop continues processing commands
+//! 每次派发都包在 `safe_dispatch()` 里。若引擎 panic：
+//! 1. 所有引擎重置到干净 idle 状态
+//! 2. cancel token 清空
+//! 3. 向 daemon 发射 `ControlEvent::OperationFailed`（legacy Agent2Ui 已拆除）
+//! 4. Loop 继续处理后续命令
 //!
-//! # Extensibility
+//! # 新增命令
 //!
-//! To add a new command handler:
-//! 1. Implement `Engine` trait on your struct
-//! 2. Add it to `try_handle_via_engines()` or the fallback match
-//! 3. Add `reset()` support
+//! 1. 若命令跨 wire：在 `qaqh-domain` / `qaqh-ringing` 增加对应变体
+//! 2. 在 `dispatch_ringing_one` 路由到对应引擎方法
+//! 3. 需要复位语义的在 `reset_all_engines()` 中登记
 //!
 //! # Ring flow
 //!
@@ -217,8 +220,8 @@ pub struct Loop {
     ready_emitted: bool,
 
     // ── Session-scoped state (flushed/swapped on session change) ──
-    /// The active session's data and engines.
-    /// In a multi-session future, this becomes `HashMap<seed, SessionBundle>`.
+    /// The active session's data and engines. Loop 单会话：进程只承载一个
+    /// bundle，切换时整包落盘并替换。
     session: SessionBundle,
 
     // ── Session-agnostic engines (process lifetime, no session state) ──
@@ -422,8 +425,7 @@ impl Loop {
     /// 1. All engines are reset to clean idle state
     /// 2. Cancel token is cleared
     /// 3. Phase is reset to Idle
-    /// 4. An `Agent2Ui::Error` is emitted to the frontend
-    /// 5. An `Agent2Ui::Done` is emitted (so the frontend knows it can continue)
+    /// 4. A `ControlEvent::OperationFailed` is emitted to the daemon
     ///
     /// The Loop continues processing commands after recovery.
     fn safe_dispatch<F>(&mut self, f: F)
@@ -728,6 +730,10 @@ impl Loop {
                     stats: &mut self.session.stats,
                     flow: &mut self.flow,
                 };
+                // 进入该注入命令的 causation 作用域：开 turn 期间发射的事件
+                // 必须归属到注入者的 command_id（与 dispatch_deferred_ringing /
+                // 其它单命令派发路径一致）。
+                let _scope = self.paced_emitter.enter_causation(Some(command_id.as_str()));
                 let outcome = self
                     .input
                     .handle_system_input(&mut ctx, &text, Some(command_id.as_str()));
@@ -1152,6 +1158,9 @@ impl Loop {
                 stats: &mut self.session.stats,
                 flow: &mut self.flow,
             };
+            // 与 `inject()` idle 路径一致：注入开 turn 期间的事件归属到
+            // 注入者的 command_id（causation 作用域）。
+            let _scope = self.paced_emitter.enter_causation(Some(command_id.as_str()));
             let outcome = self
                 .input
                 .handle_system_input(&mut ctx, &text, Some(command_id.as_str()));

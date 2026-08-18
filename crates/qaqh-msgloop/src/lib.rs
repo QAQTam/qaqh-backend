@@ -9,11 +9,13 @@
 //! ## Architecture
 //!
 //! ```text
-//! Loop (process-level)
-//!  ├─ I/O: cmd_rx, event_tx
+//! Loop（worker 进程，单会话）
+//!  ├─ I/O: cmd_rx, event_tx（stdin/stdout JSON-LP 双线程）
 //!  ├─ Signal: cancel, phase, pending, writer_dead
 //!  ├─ Session: SessionBundle { agent, stats, turn, tool }
-//!  └─ Fixed engine modules: session, input, turn, tool, compact, misc
+//!  ├─ Stateless engines: session, input, compact, goal, misc
+//!  ├─ flow: ContextFlow
+//!  └─ injection_bus + paced_emitter
 //! ```
 //!
 //! ## Module layout
@@ -31,4 +33,4 @@
 pub mod ringing_v1;
 mod services;
 pub mod state;
-pub mod util; // Ringing V1 architecture Loop (primary)
+pub mod util;

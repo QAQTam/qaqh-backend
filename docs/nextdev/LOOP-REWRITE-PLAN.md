@@ -126,6 +126,8 @@ crates/qaqh-msgloop/src/
 
 ## 5. 已知技术债（重写时顺带处理）
 
-- `loop_core.rs` / `lib.rs` 顶部架构图仍写 "process-level Loop / SessionBundle" —— 文档脱节，随 S0 更新
-- compact 完成路径的注入派发未带 causation 作用域（PR #30 已知缺口）
-- BUG-015 修复（PR #25）无专门回归测试 —— S2 run_lap 拆分时补 "text↔tool 交替单块"断言
+- `loop_core.rs` / `lib.rs` 顶部架构图仍写 "process-level Loop / SessionBundle" —— 文档脱节，随 S0 更新（2026-08-19 已更新为"单会话 worker 循环"）
+- compact 完成路径的注入派发未带 causation 作用域（PR #30 已知缺口）—— 2026-08-19 已修（`inject()` idle 路径 + `dispatch_injections_after_compact` 均进入 causation 作用域）
+- BUG-015 单元级回归测试已随 PR #25（`7fc2e40`）同提交
+  （`checkpoints_keep_round_text_but_replace_each_stream_block_locally`）；
+  run_lap 级"text↔tool 交替单块"断言留待 S2 run_lap 拆分时补
