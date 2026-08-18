@@ -59,6 +59,7 @@ use super::engine_input::InputEngine;
 use super::engine_misc::MiscEngine;
 use super::engine_session::SessionEngine;
 use super::engine_tool::PermissionDisposition;
+use super::injection::{EnqueueResult, InjectionBus, SubagentInjection};
 use super::paced_emitter::PacedEmitter;
 use super::types::*;
 use crate::state::agent::AgentState;
@@ -234,6 +235,8 @@ pub struct Loop {
     /// Registered with the built-in sources at construction; new sources
     /// (ACP/MCP loops) register here without touching the dispatcher.
     flow: qaqh_message::ContextFlow,
+    /// Busy-turn Subagent reports waiting for the next lap boundary.
+    injection_bus: InjectionBus,
     /// Pending compact result (set when compact is running in background).
     pending_compact_rx: Option<mpsc::Receiver<CompactMeta>>,
     pending_compact_id: Option<String>,
@@ -397,6 +400,7 @@ impl Loop {
             goal: GoalEngine::new(),
             misc: MiscEngine::new(),
             flow,
+            injection_bus: InjectionBus::new(),
             pending_compact_rx: None,
             pending_compact_id: None,
             pending_compact_causation: None,
@@ -493,6 +497,7 @@ impl Loop {
     /// An unanswered ask/tool round must never be persisted into, or resumed
     /// against, the next session.
     fn prepare_session_switch(&mut self) {
+        self.clear_pending_subagent_injections();
         self.session.agent.reset_compaction_coordination();
         if self.session.turn.is_suspended() {
             self.session.agent.msg.remove_last_step_if_incomplete();
@@ -510,6 +515,7 @@ impl Loop {
     fn sync_emitter_seed(&mut self) {
         let seed = self.session.agent.session.seed.clone();
         self.paced_emitter.set_seed(&seed);
+        self.injection_bus.switch_session(&seed);
     }
 
     /// Extract a human-readable message from a panic payload.
@@ -528,81 +534,229 @@ impl Loop {
     // ═══════════════════════════════════════════════════
 
     /// 见缝插针注入消费者（回合 lap 边界调用）：从 cmd_rx 吸收排队的
-    /// `as_system` 注入（子代理报告等），经 ContextFlow 挂起 pending，由
-    /// 调用方随后 drain_turn_boundary 在 lap 边界落盘 trailing。
+    /// `as_system` 注入（子代理报告等）到 InjectionBus，由调用方随后在
+    /// lap 边界交给 ContextFlow 落盘 trailing。
     ///
     /// 时机保证（PLAN-FIX-INJECTION-CACHE ②）：只在工具回合完成后的
     /// lap 边界被调用——此时本轮 tool_call 与其 tool_result 均已提交
     /// （工具执行是同步阻塞的），注入取号必然排在本轮全部结果之后，绝不
-    /// 夹在 assistant(toolcall) 与其 tool_result 之间。注入以 user + name=
-    /// subagent 角色落盘（chat/responses 两协议的对话流主体，可见性保证）。
+    /// 夹在 assistant(toolcall) 与其 tool_result 之间。注入以 user +
+    /// name=subagent 角色落盘（chat/responses 两协议的对话流主体，可见性
+    /// 保证）。
+    fn is_subagent_injection(cmd: &super::types::WorkerCommand) -> bool {
+        matches!(
+            &cmd.frame,
+            super::wire::WorkerCommandFrame::Ringing(env)
+                if matches!(
+                    &env.command,
+                    qaqh_ringing::RingingCommand::Conversation(
+                        qaqh_domain::ConversationCommand::ConversationSendMessage {
+                            as_system: true,
+                            ..
+                        }
+                    )
+                )
+        )
+    }
+
+    /// Drop all pending Subagent work when the active session is replaced.
+    /// Compact's legacy deferred queue is filtered here as well; otherwise a
+    /// report accepted before the switch could be dispatched into the new
+    /// session after compact finishes.
+    fn clear_pending_subagent_injections(&mut self) {
+        self.injection_bus.clear();
+        let before = self.deferred_ringing.len();
+        self.deferred_ringing
+            .retain(|cmd| !Self::is_subagent_injection(cmd));
+        let dropped = before.saturating_sub(self.deferred_ringing.len());
+        if dropped > 0 {
+            log::info!(
+                "[INJECT] dropped {dropped} deferred subagent injection(s) on session switch"
+            );
+        }
+    }
+
+    fn subagent_session_matches(&self, command_session_id: &str) -> bool {
+        let current_session_id = &self.session.agent.session.seed;
+        current_session_id.is_empty()
+            || command_session_id.is_empty()
+            || command_session_id == current_session_id
+    }
+
+    fn queue_subagent_injection(
+        &mut self,
+        command_session_id: &str,
+        command_id: &str,
+        text: &str,
+    ) {
+        if !self.subagent_session_matches(command_session_id) {
+            log::warn!(
+                "[INJECT] rejected subagent injection for stale session (command={}, current={})",
+                command_session_id,
+                self.session.agent.session.seed
+            );
+            return;
+        }
+        let session_id = self.session.agent.session.seed.clone();
+        if session_id.is_empty() {
+            log::warn!(
+                "[INJECT] rejected subagent injection without an active session (command_id={command_id})"
+            );
+            return;
+        }
+        self.injection_bus.switch_session(&session_id);
+        match self.injection_bus.enqueue(SubagentInjection::new(
+            session_id.clone(),
+            command_id,
+            text,
+        )) {
+            EnqueueResult::Queued => {
+                log::info!(
+                    "[INJECT] subagent report queued via InjectionBus (seed={}, text_len={}, pending={})",
+                    session_id,
+                    text.len(),
+                    self.injection_bus.pending_len()
+                );
+                // Absorbed injections do not create a turn of their own, so
+                // keep the existing lightweight tracker convergence signal.
+                if let Some((name, state)) = parse_subagent_status_tag(text) {
+                    self.paced_emitter
+                        .emit_domain(qaqh_domain::DomainEvent::Control(
+                            qaqh_domain::ControlEvent::SubagentStatus {
+                                seed: session_id,
+                                name,
+                                state,
+                            },
+                        ));
+                }
+            }
+            EnqueueResult::DuplicateCommandId => {
+                log::info!(
+                    "[INJECT] duplicate subagent command ignored (seed={}, command_id={})",
+                    session_id,
+                    command_id
+                );
+            }
+            EnqueueResult::StaleSession => {
+                log::warn!(
+                    "[INJECT] rejected subagent injection for stale/empty session (seed={}, command_id={})",
+                    session_id,
+                    command_id
+                );
+            }
+        }
+    }
+
+    /// Keep the idle path's existing immediate turn semantics while using the
+    /// bus to claim the command id exactly once for this session.
+    fn claim_idle_subagent_injection(
+        &mut self,
+        command_session_id: &str,
+        command_id: &str,
+        text: &str,
+    ) -> bool {
+        if self.session.agent.session.seed.is_empty() {
+            return true;
+        }
+        if !self.subagent_session_matches(command_session_id) {
+            log::warn!(
+                "[INJECT] ignored idle subagent injection for stale session (command={}, current={})",
+                command_session_id,
+                self.session.agent.session.seed
+            );
+            return false;
+        }
+        let session_id = self.session.agent.session.seed.clone();
+        self.injection_bus.switch_session(&session_id);
+        match self.injection_bus.enqueue(SubagentInjection::new(
+            session_id,
+            command_id,
+            text,
+        )) {
+            EnqueueResult::Queued => {
+                let _ = self.injection_bus.drain();
+                true
+            }
+            EnqueueResult::DuplicateCommandId => {
+                log::info!("[INJECT] duplicate idle subagent command ignored: {command_id}");
+                false
+            }
+            EnqueueResult::StaleSession => false,
+        }
+    }
+
+    /// Hand bus records to ContextFlow only at a lap boundary. ContextFlow
+    /// remains responsible for the actual store write and write ordering.
+    fn drain_subagent_injections(&mut self) {
+        let session_id = self.session.agent.session.seed.clone();
+        self.injection_bus.switch_session(&session_id);
+        let records = self.injection_bus.drain();
+        if records.is_empty() {
+            return;
+        }
+
+        let mut submitted = 0;
+        for record in records {
+            if record.session_id != session_id {
+                log::warn!(
+                    "[INJECT] skipped subagent record from stale session (record={}, current={})",
+                    record.session_id,
+                    session_id
+                );
+                continue;
+            }
+            let message = record.message();
+            let command_id = record.command_id;
+            match self
+                .flow
+                .submit(qaqh_message::builtin::SUBAGENT, message, Some(command_id))
+            {
+                Ok(()) => submitted += 1,
+                Err(e) => log::error!("[INJECT] ContextFlow submit failed: {e}"),
+            }
+        }
+        if submitted == 0 {
+            return;
+        }
+
+        let model = self.session.agent.config.model.clone();
+        let effort = self.session.agent.config.reasoning_effort.clone();
+        let (drained, _) =
+            self.flow
+                .drain_turn_boundary(&mut self.session.agent.msg, &model, &effort);
+        if drained > 0 {
+            log::info!("[INJECT] lap boundary drained {drained} injection(s) via ContextFlow");
+        }
+    }
+
     pub fn drain_pending_injections(&mut self) {
         use qaqh_domain::ConversationCommand;
         use qaqh_ringing::RingingCommand;
+        self.injection_bus
+            .switch_session(&self.session.agent.session.seed);
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            let super::wire::WorkerCommandFrame::Ringing(ref env) = cmd.frame;
+            let super::wire::WorkerCommandFrame::Ringing(env) = cmd.frame;
             match &env.command {
                 // ── 见缝插针注入：as_system 消息（子代理报告等）──────────
-                // 统一收敛到 ContextFlow：submit 挂起 pending，lap 边界由
-                // drain_turn_boundary 落盘（trailing developer 消息）——
-                // 注入按 role 注入（developer），与 skills envelope 同通道、
-                // 同生命周期语义（Preserved）。不再有 turn/trailing 双路径。
+                // 统一收敛到 InjectionBus；lap 边界再由
+                // drain_subagent_injections 交给 ContextFlow。
                 RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
                     text,
                     as_system: true,
                     ..
                 }) => {
-                    // 子代理注入改走 user 角色（见缝插针 trailing 语义不变）：
-                    // chat 协议下 developer 会降级为中段 system 导致感知弱化，
-                    // user 是 chat/responses 两种协议的对话流主体，可见性有保证；
-                    // name 标记供回放/前端识别（不当作真实用户输入）。
-                    let msg = qaqh_types::Message {
-                        msg_id: None,
-                        role: qaqh_types::Message::ROLE_USER.into(),
-                        name: Some("subagent".into()),
-                        content: vec![qaqh_types::ContentBlock::text(text)],
-                    };
-                    match self.flow.submit(
-                        qaqh_message::builtin::SUBAGENT,
-                        msg,
-                        Some(env.command_id.clone()),
-                    ) {
-                        Ok(()) => {
-                            log::info!(
-                                "[INJECT] subagent report queued via ContextFlow (seed={}, text_len={}, pending={})",
-                                self.session.agent.session.seed,
-                                text.len(),
-                                self.flow.pending_len()
-                            );
-                            // 吸收路径无独立注入回合 → 前端 tracker 收不到
-                            // TurnStarted 标签，终态收敛缺失（幽灵 Lost）。
-                            // 补发轻量控制面事件：不进回合状态机、不进模型
-                            // 上下文，仅作为前端子代理状态区的收敛信号。
-                            if let Some((name, state)) = parse_subagent_status_tag(text) {
-                                log::info!(
-                                    "[INJECT] subagent status emitted (name={name}, state={state}) for absorbed injection"
-                                );
-                                self.paced_emitter
-                                    .emit_domain(qaqh_domain::DomainEvent::Control(
-                                        qaqh_domain::ControlEvent::SubagentStatus {
-                                            seed: self.session.agent.session.seed.clone(),
-                                            name,
-                                            state,
-                                        },
-                                    ));
-                            }
-                        }
-                        Err(e) => {
-                            log::error!("[INJECT] ContextFlow submit failed: {e}");
-                        }
-                    }
+                    self.queue_subagent_injection(&env.seed, &env.command_id, text);
                 }
                 // ── 其它命令（用户消息/非注入）：绝不丢弃 ────────────────
                 // daemon 侧已 ACK（accepted），静默丢弃会让调用方永久悬挂。
                 // 放入 deferred_ringing，主循环 idle 时按 FIFO 派发（复用
                 // 既有 session 切换保留队列，语义一致）。
                 _ => {
-                    self.deferred_ringing.push_back(cmd);
+                    self.deferred_ringing
+                        .push_back(super::types::WorkerCommand {
+                            frame: super::wire::WorkerCommandFrame::Ringing(env),
+                            causation: cmd.causation,
+                        });
                 }
             }
         }
@@ -1088,6 +1242,7 @@ impl Loop {
         self.ready_emitted = false;
         let expected_revision = env.expected_revision.unwrap_or_default();
         let command_id = env.command_id.clone();
+        let command_session_id = env.seed.clone();
 
         // compact 进行中收到 as_system 注入（子代理报告等）：不拒绝、不丢弃——
         // 延迟到 compact 完成后 dispatch（与其它 deferred 命令同队列）。否则子
@@ -1130,6 +1285,7 @@ impl Loop {
                     if close_current {
                         self.prepare_session_switch();
                     } else {
+                        self.clear_pending_subagent_injections();
                         self.finish_pending_compact(qaqh_domain::CompactStatus::Cancelled);
                         self.session.agent.reset_compaction_coordination();
                     }
@@ -1318,6 +1474,15 @@ impl Loop {
                             "compact_in_progress",
                             "Context compaction is running; wait for it to finish before sending a new message",
                         );
+                        return;
+                    }
+                    if as_system
+                        && !self.claim_idle_subagent_injection(
+                            &command_session_id,
+                            &command_id,
+                            &text,
+                        )
+                    {
                         return;
                     }
                     // images 已是 domain ImageBlock（Ringing 命令直接携带）。
@@ -1597,25 +1762,11 @@ impl Loop {
                 usage,
             } => {
                 // 见缝插针注入：工具调用回合结束 → 下一轮 gate 前，消费
-                // cmd_rx 中排队的 as_system 注入（子代理报告等）——submit 进
-                // ContextFlow pending，lap 边界统一落盘（trailing developer），
-                // 使下一轮 LLM 请求立即可见。非注入命令移入 deferred 队列兜底。
+                // cmd_rx 中排队的 as_system 注入（子代理报告等）进入总线，
+                // 再由 ContextFlow 在 lap 边界落盘，使下一轮 LLM 请求立即可见。
+                // 非注入命令移入 deferred 队列兜底。
                 self.drain_pending_injections();
-                {
-                    let model = self.session.agent.config.model.clone();
-                    let effort = self.session.agent.config.reasoning_effort.clone();
-                    let drained = self
-                        .flow
-                        .drain_turn_boundary(&mut self.session.agent.msg, &model, &effort)
-                        .0;
-                    if drained > 0 {
-                        log::info!(
-                            "[INJECT] lap boundary drained {drained} injection(s) via ContextFlow"
-                        );
-                        // 注入落盘到 messages.jsonl 即成 history；注入日志已退役
-                        // （PLAN B1），无需 committed 标记。
-                    }
-                }
+                self.drain_subagent_injections();
                 // Another lap: re-enter TurnEngine.
                 let mut ctx = RingContext {
                     agent: &mut self.session.agent,
