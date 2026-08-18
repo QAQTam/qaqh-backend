@@ -308,8 +308,16 @@ impl RingingHub {
                             continue;
                         };
                         // 先追加 timeline journal 尾部（journal ≥ cache 不变量），
-                        // 再写缓存文件。
-                        append_timeline_journal_tail_locked(store, &timeline, &seed);
+                        // 再写缓存文件。journal 追加失败时跳过缓存写入（fail-closed）：
+                        // 否则崩溃重启后 journal 重放会丢失仅存在于缓存的尾部条目。
+                        if let Err(error) =
+                            append_timeline_journal_tail_locked(store, &timeline, &seed)
+                        {
+                            log::error!(
+                                "[timeline] journal append failed for {seed}: {error}; skipping cache persist (fail-closed)"
+                            );
+                            continue;
+                        }
                         let Some((snapshot, journal)) = ({
                             let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
                             timeline.snapshot(&seed).map(|snapshot| {
@@ -668,7 +676,14 @@ impl RingingHub {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if let Some(store) = store.as_mut() {
-                append_timeline_journal_tail_locked(store, &self.timeline, seed);
+                if let Err(error) =
+                    append_timeline_journal_tail_locked(store, &self.timeline, seed)
+                {
+                    log::error!(
+                        "[timeline] journal append failed for {seed}: {error}; skipping rebuild persist (fail-closed)"
+                    );
+                    return;
+                }
                 if let Err(error) = store.persist(seed, &snapshot, journal) {
                     log::warn!("[timeline] rebuild persist failed for {seed}: {error}");
                 }
@@ -1024,7 +1039,14 @@ impl RingingHub {
             return;
         };
         // 先追加 timeline journal 尾部（journal ≥ cache 不变量），再写缓存。
-        append_timeline_journal_tail_locked(store, &self.timeline, seed);
+        // journal 追加失败时跳过缓存写入（fail-closed），避免缓存比 journal 新
+        // 导致崩溃重启后 journal 重放丢失尾部条目。
+        if let Err(error) = append_timeline_journal_tail_locked(store, &self.timeline, seed) {
+            log::error!(
+                "[timeline] journal append failed for {seed}: {error}; skipping cache persist (fail-closed)"
+            );
+            return;
+        }
         let Some((snapshot, journal)) = (|| {
             let timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
             timeline.snapshot(seed).map(|snapshot| {
@@ -1581,21 +1603,24 @@ impl RingingHub {
 /// 从而与缓存文件的读写保持同一临界区：任何"追加 journal"与"写缓存"都不会
 /// 交错，保证 journal ≥ cache 的不变量（崩溃后 journal 永不落后于缓存）。
 /// 锁顺序（store → timeline）与 `persist_timeline_sync` / checkpoint 线程一致。
+///
+/// 返回 `Err` 表示 journal 追加失败（磁盘满/权限等）：调用方必须**跳过缓存
+/// 写入**（fail-closed）——否则缓存会比 journal 新，崩溃重启后 journal 重放
+/// 会丢失仅存在于缓存的尾部条目。
 fn append_timeline_journal_tail_locked(
     store: &mut TimelineStore,
     timeline: &Arc<Mutex<TimelineAppender>>,
     seed: &str,
-) {
+) -> std::io::Result<()> {
     let watermark = store.journal_watermark(seed);
     let entries = {
         let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
         timeline.replay_since(seed, watermark)
     };
     if !entries.is_empty() {
-        if let Err(error) = store.append_journal(seed, &entries) {
-            log::warn!("[timeline] journal append failed for {seed}: {error}");
-        }
+        store.append_journal(seed, &entries)?;
     }
+    Ok(())
 }
 
 impl Drop for RingingHub {

@@ -809,8 +809,21 @@ pub fn materialize_timeline_from_journal(
         None => BTreeMap::new(),
     };
     let mut journal: Vec<TimelineEntry> = Vec::new();
+    // seq 单调守卫：append 半途失败（部分行已落盘）后重试会从旧 watermark
+    // 重新追加，文件里留下重复条目——而 `TextDelta`/`ToolProgress` 重放不是
+    // 幂等的（push_str 会双写）。seq 必须严格递增，重复/乱序条目直接跳过。
+    let mut last_seq = 0u64;
     for op in ops {
         if let TimelineJournalOp::Append { entry } = op {
+            if entry.timeline_seq <= last_seq {
+                log::warn!(
+                    "[timeline] skipping non-monotonic journal entry seq={} (last={})",
+                    entry.timeline_seq,
+                    last_seq
+                );
+                continue;
+            }
+            last_seq = entry.timeline_seq;
             // watermark 及之前的条目折叠在基点快照内；只回放其后的增量。
             if base.is_none() || entry.timeline_seq > base_watermark {
                 apply_journal_entry(&mut turns, entry);
@@ -1504,5 +1517,41 @@ mod tests {
         let (rebuilt2, _) = materialize_timeline_from_journal(&ops).unwrap();
         assert_eq!(rebuilt2.turns[0].rounds[0].blocks[0].text, "hello!");
         assert_eq!(rebuilt2, after, "rebuilt == live beyond the base point");
+    }
+
+    #[test]
+    fn journal_duplicate_append_entries_are_not_double_applied() {
+        // append 半途失败（部分行已落盘）后重试会从旧 watermark 重新追加，
+        // 文件里出现重复条目。`TextDelta` 重放非幂等（push_str），必须靠
+        // seq 单调守卫跳过重复条目，否则文本会双写。
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t1", "q").unwrap();
+        appender
+            .open_block("s", "t1", 0, "answer", TimelineBlockKind::Text, None)
+            .unwrap();
+        appender
+            .append_text("s", "t1", 0, "answer", 0, "hello")
+            .unwrap();
+        let entries = appender.replay_since("s", 0);
+        // 模拟：第一次追加写入了全部条目，但 watermark 未更新；重试把同一批
+        // 条目又追加了一遍（文件里出现两份）。
+        let mut ops: Vec<TimelineJournalOp> = entries
+            .iter()
+            .map(|entry| TimelineJournalOp::Append {
+                entry: entry.clone(),
+            })
+            .collect();
+        ops.extend(
+            entries
+                .iter()
+                .map(|entry| TimelineJournalOp::Append {
+                    entry: entry.clone(),
+                }),
+        );
+        let (rebuilt, journal) = materialize_timeline_from_journal(&ops).unwrap();
+        let text = &rebuilt.turns[0].rounds[0].blocks[0].text;
+        assert_eq!(text, "hello", "duplicate deltas must not double-append");
+        assert_eq!(journal.len(), entries.len(), "duplicates dropped from replay tail");
+        assert_eq!(rebuilt.watermark, entries.last().unwrap().timeline_seq);
     }
 }
