@@ -6,6 +6,25 @@ use serde::{Deserialize, Serialize};
 
 pub const DATA_ROOT_MARKER: &str = ".deepx-data-root.json";
 
+/// 对外产品版本号（User-Agent 使用）：不带 rc/预发布后缀，正式发布时手工 bump。
+/// 与 cargo 包版本（`CARGO_PKG_VERSION`，如 `1.0.0-rc.6`）解耦——UA 里暴露的是
+/// 面向服务的稳定版本标识，而非内部打包版本。
+macro_rules! qaqh_ua_version {
+    () => {
+        "1.0.0"
+    };
+}
+
+/// 对外产品版本号（与 `QAQH_USER_AGENT` 同源，见上）。
+pub const QAQH_UA_VERSION: &str = qaqh_ua_version!();
+
+/// 统一产品 User-Agent：`qaqharness/1.0.0/`。
+///
+/// 用于所有对外 API 请求（gate chat/responses、provider 模型目录拉取），
+/// 便于服务端识别客户端与版本。
+/// 网页抓取（`qaqh-workspace::web`）是独立的浏览器伪装 UA，不使用本常量。
+pub const QAQH_USER_AGENT: &str = concat!("qaqharness/", qaqh_ua_version!(), "/");
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DataRootMarker {

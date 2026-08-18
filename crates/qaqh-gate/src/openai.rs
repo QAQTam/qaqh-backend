@@ -109,6 +109,7 @@ static GLOBAL_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| 
         .tcp_keepalive(Some(Duration::from_secs(60)))
         .pool_idle_timeout(Duration::from_secs(120))
         .timeout(Duration::from_secs(30 * 60))
+        .user_agent(qaqh_types::QAQH_USER_AGENT)
         .build()
         .expect("failed to build reqwest client")
 });

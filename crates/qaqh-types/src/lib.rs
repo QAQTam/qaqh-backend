@@ -53,3 +53,6 @@ pub use arg::{
 
 // ── Shared utilities ──
 pub use token::{TokenBreakdown, count_tokens, init_tokenizer};
+
+// ── Product identity ──
+pub use platform::{QAQH_UA_VERSION, QAQH_USER_AGENT};

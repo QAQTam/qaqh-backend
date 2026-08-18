@@ -50,6 +50,7 @@ fn sleep_with_cancel(delay: Duration, cancel: Option<&Arc<AtomicBool>>) -> bool 
 static GLOBAL_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
     Client::builder()
         .connect_timeout(Duration::from_secs(30))
+        .user_agent(qaqh_types::QAQH_USER_AGENT)
         .build()
         .expect("failed to create qaqh-gate responses reqwest client")
 });
