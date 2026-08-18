@@ -14,6 +14,7 @@ mod openai;
 mod responses;
 #[cfg(test)]
 mod rt_test;
+mod sse;
 pub mod tool_parser;
 mod types;
 
