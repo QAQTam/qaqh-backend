@@ -830,11 +830,16 @@ impl QaqhService {
         // Never log config.save payloads: they may contain provider credentials.
         log::info!("[config.save] saving configuration");
         self.update_config_and_reload(|cfg| {
-            // 审计 P0-1：apiKey 空串 = 显式删除凭据（update_string 忽略空串，
-            // 这里单独处理；"****" 是 load_config 的掩码占位符，跳过保持现值）。
+            // 审计 P0-1：apiKey 处理（2026-08 修复 Bug 根因 1）：
+            // - "****" = 掩码占位符，保持现值（与 Web isMasked 一致）；
+            // - 空串 = 保持现值（与 update_string 语义一致，防前端误发空导致误删）；
+            //   显式删除需走专用接口/手动清文件，避免“任意保存都清密钥”的幽灵重置。
+            //   此前 winui 前端在未编辑密钥时仍发送 ""，被误判为删除。
             if let Some(value) = value2(params, "api_key", "apiKey").and_then(Value::as_str) {
-                if value != "****" {
+                if value != "****" && !value.is_empty() {
                     cfg.api_key = value.to_string();
+                } else if value.is_empty() {
+                    log::info!("[config.save] apiKey empty -> keep existing (skip delete)");
                 }
             }
             update_string(&mut cfg.model, params, "model", "model");

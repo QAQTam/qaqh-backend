@@ -375,3 +375,79 @@
 - **清账说明**：BUG-002/006/007/009/013/015 状态已按实际落地修订；刀 2
   （BUG-005/006/007 的持久化收敛）由 Linux 团队推进中，本档案状态为
   "fixed 的单点修复 + 刀 2 收敛中"。
+
+### BUG-016 设置页程序化同步写回 + 空串密钥"幽灵删除"：意外 model/endpoint 触发三重重置
+
+- **现象**：在预设 provider 中输入意外的新 model/endpoint 后，任意一次保存会①清空已配置的
+  apiKey、②model 被重置为 grok-4.5、③context 被调回 10000、reasoning_effort 被调回 low；
+  OOBE 首次引导重入时同源复现。
+- **根因**（四层叠加，均为既有计划未覆盖的隐性契约）：
+  1. **根因 0（最深，生命周期）**：设置页组件卸载即失草稿，重挂载时草稿为
+     `SettingsSnapshot::default()`（全空/0）；`spawn_config_load(false)` 缓存命中即跳过、
+     `last_rev` 初始化为当前 rev → 轮询永不刷新 → 页面显示默认值。
+  2. **根因 1 → apiKey 被清**：daemon `config.load` 对已配置 key 返回掩码 `"****"`；前端
+     `parse_config_load` 将其解析为空串；旧 `on_save` 无条件发送 `"apiKey": d.api_key`；后端
+     旧逻辑把空串当显式删除 → 任何未编辑密钥的保存即删除 DPAPI blob（不可恢复）。
+  3. **根因 2 → model 被重置为 grok**：endpoint/provider ComboBox 渲染期程序化
+     `SelectionChanged` 无条件写回 `d.model = ep.default_model`，覆盖用户自定义 model。
+  4. **根因 3 → context 10000 / effort low**：草稿 `context_limit=0` → NumberBox 下限 10000
+     钳值回发并写回；`reasoning_effort=""` → `normalize_effort("")=low` → 下拉框回写。
+- **证据**：前端 `qaqh-winui-app`：`apps/winui/src/settings_view/view.rs`（旧 on_save 全字段
+  发送，HEAD:129）、`settings_view/sections/basic.rs`（endpoint `on_selection_changed` 无条件
+  重置 model，HEAD:104-106；context NumberBox 钳值写回）、`shell_store.rs:746-750`
+  （掩码→空串解析）、`settings_view/sections/advanced.rs`、`oobe_view.rs`；后端 `QAQ-Harness`：
+  `crates/qaqh-runtime/src/service.rs:829-844`（旧"空串=删除"语义，本次改为空串/掩码=保持）、
+  `crates/qaqh-config/src/secrets.rs`（DPAPI 加密、`CONFIG_MARKER="set"`）。
+- **影响面**：密钥数据安全（误删不可恢复）、模型/上下文配置正确性、OOBE 与设置页同源、
+  多前端协议契约（apiKey 空串语义需前端与所有 shell 统一，防各端各自发明删除/保持）。
+- **状态**：fixed（2026-08-19，前端 + 后端协同，两仓库均为未提交 WIP）
+  - 前端：draft 以当前快照/投影初始化 + `spawn_config_load(true)` 强制刷新（根因 0）；
+    apiKey/subagentApiKey/multimodalApiKey 仅非空且非掩码才发送（view.rs/oobe_view.rs）；
+    全部会写草稿的控件加"渲染值守卫"（basic/advanced/oobe，与 BUG-014 同族 CK-UI-GUARD，
+    含 `move |v: f64|` 注解修复团队 WIP 的 6 处 E0282 编译错误）；NumberBox 守卫统一改为
+    "渲染值钳到合法区间后比较"（修掉 0→10000/16 的越界钳值回写）。
+  - 后端：`service.rs` apiKey 空串/掩码=保持现值（删除需走专用接口）。
+  - 回归：`crates/qaqh-runtime/tests/config_save_api_key_preserve.rs`（空/掩码保留原密钥、
+    新 key 可替换）；前端 `cargo check -p qaqh-winui` 通过。
+- **遗留缺口**：①无 UI 清除密钥入口（契约变更副作用，需专用删除接口/显式哨兵值）；
+     ②`config.save` 的 model/endpoint 无 provider registry 校验（本 bug 触发源，未规划）；
+     ③程序化同步写回守卫仍逐控件手工维护，建议刀 5 做框架级"rendered 基线"统一比对；
+     ④设置页 `settings_view/mod.rs` 文档注释仍写"首次 spawn_config_load(false)"，与现实现不符；
+     ⑤apiKey 掩码常量 `"****"` 三处硬编码（view.rs/oobe_view.rs/shell_store.rs），建议提为共享常量。
+
+### BUG-017 工具模式 ComboBox 空态守卫误吞用户点击：新会话选极限模式"实际未生效"（回归）
+
+- **现象**：重构后（BUG-014 修复 PR #8 起）新会话/未设过工具模式的会话上，点击"极限·8/极限·6/
+  极限·4/极简/创造"看起来选中、日志打 `tool_mode: uninitialized sync event ignored`，但
+  `session.set_tool_mode` 从未发出，后端仍为 standard；重启/切换会话后回到未选中。
+- **根因**：`apps/winui/src/composer_bar/view.rs` 的 BUG-014 空态守卫把"渲染值空 = 未初始化"
+  等同于"程序化同步事件"，对**真实用户点击**也一视同仁地丢弃：
+  1. 新会话 `meta.json` 的 `tool_mode` 恒为空（`persist_new_session_with_cwd` 用
+     `SessionMeta::default()`，`qaqh-session/manager.rs:392-401`；前端建会话不带 preset，
+     `core_lifecycle.rs:85`）→ 缓存 `composer_tool_mode` 恒为 `("", [])`。
+  2. `poll_rev` 只启动定时器、不立即同步（`shell/mod.rs:35-50`），首帧渲染 `selected_index(-1)`；
+     `sync_tool_mode_from_meta` 读到空值不 bump rev → `state.tool_mode` 永远为空。
+  3. 空态下任何 `SelectionChanged`（含用户点击）都命中 `rendered_tm.is_empty() -> return`，
+     请求从不发出；无重渲染回写，ComboBox 视觉停在所选档位 → 表现"选中了但没生效"。
+  - 对比：BUG-014 的场景是"冷启动程序化 -1→0 误写 standard"，本守卫修掉它的同时把
+    正常用户选择一并堵死（把"同步事件"与"用户点击"两个信号混为一谈）。
+- **证据**：前端 `qaqh-winui-app`：`apps/winui/src/composer_bar/view.rs:614-636`（旧守卫，
+  本次改为 `tool_mode_change_is_user` + 空态渲染 standard(0)）、`mod.rs:99-108`（index↔mode
+  映射）、`bridge/core_interaction.rs:41-75`（`sync_tool_mode_from_meta`，空值不 bump rev）、
+  `bridge/core_lifecycle.rs:65-85`（`spawn_new_session` 不带 tool_mode preset）、
+  `shell/mod.rs:25-53`（`poll_rev` 无首帧同步）；后端 `qaqh-session/src/manager.rs:380-406`
+  （新会话 meta.tool_mode 为空）。
+- **影响面**：工具模式功能（新会话/未切换过模式的会话上完全失效）、与 BUG-013/014 的档位
+  契约配套、多前端（TUI/Web 若复用同款守卫将同病）。
+- **状态**：fixed（2026-08-19，前端）
+  - 提取纯函数 `tool_mode_change_is_user(rendered_tm, index)`（`composer_bar/mod.rs`）统一判定：
+    非空渲染值仅放行"新值 != 渲染值"（跳过同值同步事件）；空渲染值仅放行 `index != 0`
+    （index 0 是挂载/会话切换的同步事件；空态下点"标准"不产生 SelectionChanged，故
+    index 1..=5 必为用户点击）。
+  - 空态改渲染 `selected_index(tool_mode_index(&tm))`（=0/standard）而非 -1，消除 -1 规范化
+    噪音，同时仍不漏 BUG-014 的"冷启动误写 standard"（index 0 同步事件被跳过）。
+  - 回归：新增 2 个单测（`empty_rendered_mode_accepts_user_clicks_but_skips_sync`、
+    `non_empty_rendered_mode_skips_same_value_sync`）；`cargo test -p qaqh-winui --bins` 78 全绿。
+  - 遗留：次要竞态——非空会话切换档位后 250ms 轮询窗口内 `sync_tool_mode_from_meta` 可能读到
+    未落盘的旧 meta 短暂回弹（闪烁后收敛）；如需彻底消除，给 `spawn_set_tool_mode` 加在途标志，
+    在途期间跳过 meta 覆盖（本修复未包含，纯观感问题）。
