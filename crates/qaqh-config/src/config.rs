@@ -624,7 +624,9 @@ impl Config {
 
     fn save_with(&self, store: &ConfigStore, secrets: &SecretStore) -> Result<(), String> {
         // 审计 P0-1：凭据先入 secret store；失败则中止保存（config.toml 永不
-        // 出现明文）。空值 = 显式删除凭据（service 层空串删除语义）。
+        // 出现明文）。cfg.api_key 为空时删除对应 secret 槽位——2026-08 起
+        // config.save 不再把空串当"删除"（空串/掩码 = 保持现值，防前端误发空
+        // 清密钥），此处仅在配置本身被清空（如未来显式删除接口）时收尾删除。
         if self.api_key.is_empty() {
             let _ = secrets.delete(SecretSlot::Main);
         } else {
