@@ -25,14 +25,16 @@ pub const QAQH_UA_VERSION: &str = qaqh_ua_version!();
 /// 网页抓取（`qaqh-workspace::web`）是独立的浏览器伪装 UA，不使用本常量。
 pub const QAQH_USER_AGENT: &str = concat!("qaqharness/", qaqh_ua_version!(), "/");
 
-#[derive(Debug, Deserialize, Serialize)]
+/// data-root marker（`<data>/.deepx-data-root.json`）— 权威契约来自后端 `qaqh_types::platform`。
+/// 前端禁止自建 FNV 公式；统一通过 `normalized_path_text` / `data_root_id` / `DataRootMarker` 复用。
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DataRootMarker {
-    format_version: u32,
-    product: String,
-    canonical_root: String,
-    owner_home: String,
-    root_id: String,
+pub struct DataRootMarker {
+    pub format_version: u32,
+    pub product: String,
+    pub canonical_root: String,
+    pub owner_home: String,
+    pub root_id: String,
 }
 
 /// Cross-platform home directory.
@@ -318,7 +320,7 @@ fn reject_link(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn normalized_path_text(path: &Path) -> String {
+pub fn normalized_path_text(path: &Path) -> String {
     let value = path.to_string_lossy().replace('\\', "/");
     let value = if let Some(rest) = value.strip_prefix("//?/UNC/") {
         format!("//{rest}")
@@ -335,7 +337,7 @@ fn normalized_path_text(path: &Path) -> String {
     }
 }
 
-fn data_root_id(canonical_root: &str, owner_home: &str) -> String {
+pub fn data_root_id(canonical_root: &str, owner_home: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in canonical_root.bytes().chain([0]).chain(owner_home.bytes()) {
         hash ^= u64::from(byte);
