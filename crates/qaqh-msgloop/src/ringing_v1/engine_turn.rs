@@ -572,7 +572,6 @@ impl TurnEngine {
         Outcome::TurnAborted {
             turn_id: saved.turn_id,
             usage: saved.usage,
-            consume_queued_interrupt: false,
         }
     }
 
@@ -695,7 +694,6 @@ impl TurnEngine {
         Outcome::TurnAborted {
             turn_id,
             usage,
-            consume_queued_interrupt: true,
         }
     }
 

@@ -5,7 +5,6 @@
 
 use super::types::*;
 use crate::state::lifecycle;
-use crate::util;
 
 /// Number of recent turns sent on session restore.
 const INITIAL_LOAD_COUNT: usize = 20;
@@ -55,19 +54,13 @@ impl SessionEngine {
             let saved_mode = agent.session.mode;
             qaqh_workspace::runtime::set_mode(saved_mode);
 
-            // Build initial turn batch and emit
-            let total = agent.msg.turn_count() as u32;
-            let start = total.saturating_sub(INITIAL_LOAD_COUNT as u32) as usize;
-            let recent =
-                util::build_turns_from_context(agent, Some(start), Some(INITIAL_LOAD_COUNT));
-            let has_more = start > 0;
-
             // SessionRestored is emitted by the caller (Loop::dispatch)
             // since it needs access to the emitter.
+            let loaded = INITIAL_LOAD_COUNT.min(agent.msg.turn_count() as usize);
             log::info!(
                 "[SESSION] restored, {} turns (has_more={})",
-                recent.len(),
-                has_more
+                loaded,
+                agent.msg.turn_count() as usize > INITIAL_LOAD_COUNT
             );
             true
         } else {
