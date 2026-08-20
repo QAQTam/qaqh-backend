@@ -14,7 +14,7 @@ use super::engine_tool::ToolEngine;
 use super::types::*;
 use crate::ringing_v1::turn_lap::gate::{
     GateRequestResult, abort_running_turn, gate_request, provider_for,
-    seal_active_stream_block, seal_timeline_terminal_round,
+    seal_timeline_terminal_round,
 };
 use crate::services::conflict;
 use crate::services::dashboard;
@@ -1205,76 +1205,24 @@ impl TurnEngine {
                 round_num
             );
 
-            // ── Parse + push assistant message ──
-            let parsed = util::parse_tool_calls_from_response(
+            // ── Parse + push assistant message (turn_lap::parse) ──
+            let crate::ringing_v1::turn_lap::parse::ParseOutput {
+                parsed,
+                assistant_msg,
+                effect,
+            } = crate::ringing_v1::turn_lap::parse::parse_and_ingest(
+                ctx,
+                &turn_id,
+                round_num,
                 &content,
                 &reasoning,
                 &tool_calls_raw,
-                &ctx.agent,
+                response_output_items,
+                &mut active_stream_block,
+                &mut timeline_tools_open,
             );
-            // Structured/non-streamed tool calls can arrive without a prior
-            // ToolCallProgress event. Open their native blocks here so every
-            // later lifecycle patch has one stable target.
-            for tool_call in &parsed {
-                if timeline_tools_open.insert(tool_call.id.clone()) {
-                    let args_json = tool_call.function.arguments.clone();
-                    ctx.emitter
-                        .emit_timeline(qaqh_domain::TimelineIntent::BlockOpened {
-                            turn_id: turn_id.clone(),
-                            round_num,
-                            block_id: format!("tool:{}", tool_call.id),
-                            kind: qaqh_domain::TimelineBlockKind::Tool,
-                            tool: Some(qaqh_domain::TimelineTool {
-                                tool_call_id: tool_call.id.clone(),
-                                name: tool_call.function.name.clone(),
-                                state: qaqh_domain::TimelineToolState::Prepared,
-                                summary: None,
-                                args_json: Some(args_json),
-                                output: None,
-                                diff: None,
-                                progress: String::new(),
-                                failure: None,
-                                permission: None,
-                            }),
-                        });
-                }
-            }
-            let mut assistant_msg = util::build_assistant_message(&content, &reasoning, &parsed);
-            assistant_msg.content.extend(response_output_items);
-            let receipt = ctx.flow.ingest(
-                &mut ctx.agent.msg,
-                qaqh_message::builtin::MODEL,
-                assistant_msg.clone(),
-            );
-            // model 源（Sink::Step）的 store 层决策透传：TurnComplete 结束回合，
-            // None 表示可能有工具待执行。
-            let effect = receipt.effect.unwrap_or(Effect::None);
-            ctx.agent
-                .msg
-                .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-
-            util::emit_round_complete_via_emitter(
-                ctx.emitter,
-                &turn_id,
-                round_num,
-                &assistant_msg,
-                &content,
-                &reasoning,
-                &parsed,
-            );
-
-            // Native transcript sealing is independent from the legacy
-            // RoundComplete projection. A Markdown consumer only sees these
-            // blocks as final after the explicit seal.
-            seal_active_stream_block(ctx, &turn_id, round_num, &mut active_stream_block);
-            if parsed.is_empty() {
-                ctx.emitter
-                    .emit_timeline(qaqh_domain::TimelineIntent::RoundSealed {
-                        turn_id: turn_id.clone(),
-                        round_num,
-                        is_final: true,
-                    });
-            }
+            // parsed/assistant_msg preserved for future admit/backfill; currently only `effect` drives control flow
+            let _ = (&parsed, &assistant_msg);
 
             match effect {
                 Effect::None => {
