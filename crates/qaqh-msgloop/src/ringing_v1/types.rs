@@ -104,19 +104,13 @@ pub enum LoopPhase {
 /// the current operation yields (TurnComplete / YieldToUser / Error).
 #[derive(Debug, Default)]
 pub struct PendingState {
-    /// Session seed to resume after current operation finishes.
-    pub session: Option<String>,
-    /// Create a new session as soon as possible.
-    pub new_session: bool,
     /// Exit the main loop.
     pub shutdown: bool,
-    /// Reload config from disk.
-    pub reload_config: bool,
 }
 
 impl PendingState {
     pub fn is_empty(&self) -> bool {
-        self.session.is_none() && !self.new_session && !self.shutdown && !self.reload_config
+        !self.shutdown
     }
     pub fn clear(&mut self) {
         *self = PendingState::default();
@@ -151,9 +145,6 @@ pub enum Outcome {
     TurnAborted {
         turn_id: String,
         usage: Option<UsageInfo>,
-        /// The reader already queued the interrupt command that caused this
-        /// outcome; Loop must consume it without emitting a second terminal.
-        consume_queued_interrupt: bool,
     },
 
     /// A running turn ended because the provider or gate failed. This is a

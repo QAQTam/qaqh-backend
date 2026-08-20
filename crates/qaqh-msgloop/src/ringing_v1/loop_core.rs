@@ -208,9 +208,6 @@ pub struct Loop {
     deferred_ringing: VecDeque<super::types::WorkerCommand>,
     /// Set to true when the writer thread exits (stdout pipe broken).
     writer_dead: Arc<AtomicBool>,
-    /// A running turn already emitted its terminal transaction, but the
-    /// reader-thread interrupt frame still needs to be drained.
-    terminal_for_queued_interrupt: bool,
     /// Whether a `Ready` event has already been emitted for the current
     /// idle period. Prevents the 1 Hz `Ready` storm that flooded the
     /// daemon's Critical lane (each Ready is EventLane::Critical and was
@@ -392,7 +389,6 @@ impl Loop {
             pending: PendingState::default(),
             deferred_ringing: VecDeque::new(),
             writer_dead,
-            terminal_for_queued_interrupt: false,
             ready_emitted: false,
             session: SessionBundle::new(agent),
             session_eng: SessionEngine::new(),
@@ -995,31 +991,6 @@ impl Loop {
             }
         }
 
-        // ── Process deferred session switch ──
-        if let Some(seed) = self.pending.session.take() {
-            self.prepare_session_switch();
-            if self
-                .session_eng
-                .resume(&mut self.session.agent, &seed, &self.cancel)
-            {
-                self.sync_emitter_seed();
-                // legacy SessionRestored 已退役：Ringing 恢复由 daemon bootstrap 快照承担。
-            }
-        }
-        if self.pending.new_session {
-            self.pending.new_session = false;
-            self.prepare_session_switch();
-            self.session_eng
-                .create(&mut self.session.agent, &self.cancel);
-            self.sync_emitter_seed();
-            self.misc
-                .emit_dashboard(&self.session.agent, &self.paced_emitter);
-        }
-        if self.pending.reload_config {
-            self.pending.reload_config = false;
-            self.session_eng
-                .reload_config(&mut self.session.agent, &self.cancel);
-        }
         self.dispatch_deferred_ringing();
     }
 
@@ -1811,15 +1782,10 @@ impl Loop {
 
                 self.phase = LoopPhase::Idle;
             }
-            Outcome::TurnAborted {
-                turn_id,
-                usage,
-                consume_queued_interrupt,
-            } => {
+            Outcome::TurnAborted { turn_id, usage } => {
                 self.session.agent.skills.abort_user_turn();
                 self.session.flush();
                 self.reset_all_engines();
-                self.terminal_for_queued_interrupt = consume_queued_interrupt;
                 self.paced_emitter
                     .emit_domain(qaqh_domain::DomainEvent::Conversation(
                         qaqh_domain::ConversationEvent::TurnCompleted {
