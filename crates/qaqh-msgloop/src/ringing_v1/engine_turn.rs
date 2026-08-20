@@ -22,6 +22,28 @@ const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 /// A3：`usage_updated` 节流窗口（流式期间 ~1s 一条；终值由 lap 结束补发）。
 const USAGE_EMIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// 一次 gate 请求的聚合结果（knife-7 S2：从 run_lap 收敛出的贯穿状态）。
+///
+/// `content`/`reasoning`/`tool_calls_raw`/`response_output_items` 供 parse 消费；
+/// `active_stream_block`/`timeline_tools_open` 供后续 seal 消费；
+/// `had_error`/`done_seen`/`gate_error`/`request_error` 供错误归一；
+/// `current_request_usage` 供 token calibration；`last_usage` 回传给调用方。
+struct GateRequestResult {
+    content: String,
+    reasoning: String,
+    tool_calls_raw: serde_json::Value,
+    response_output_items: Vec<qaqh_types::ContentBlock>,
+    active_stream_block: Option<(qaqh_domain::TimelineBlockKind, String)>,
+    timeline_tools_open: HashSet<String>,
+    had_error: bool,
+    done_seen: bool,
+    gate_error: Option<String>,
+    current_request_usage: Option<UsageInfo>,
+    request_error: Option<String>,
+    last_usage: Option<UsageInfo>,
+}
+
+
 /// Why the turn is being resumed.
 pub enum ResumeReason {
     /// User answered permission dialogs — all approvals resolved.
@@ -1168,13 +1190,354 @@ impl TurnEngine {
         }
     }
 
+    /// Run one gate lap: stream one model request and aggregate streamed
+    /// state into a [`GateRequestResult`] (knife-7 S2; extracted from run_lap).
+    ///
+    /// Extracted verbatim — behavior identical. Error normalisation, token
+    /// calibration and parse stay in `run_lap`, consuming this result.
+    fn gate_request(
+        ctx: &mut RingContext,
+        provider: &qaqh_gate::ProviderConfig,
+        messages: Vec<qaqh_types::Message>,
+        tools: Option<Vec<qaqh_types::ToolDef>>,
+        turn_id: &str,
+        round_num: u32,
+        mut last_usage: Option<UsageInfo>,
+    ) -> GateRequestResult {
+            let mut content = String::new();
+            let mut reasoning = String::new();
+            // Opaque Responses output items are persisted for protocol replay
+            // only. They never enter timeline/UI projections.
+            let mut response_output_items: Vec<qaqh_types::ContentBlock> = Vec::new();
+            // A1：block_checkpoint 节流（delta 次数 + 时间窗，先到为准）。
+            let mut checkpoint_tokens: u32 = 0;
+            let mut last_checkpoint_at = std::time::Instant::now();
+            // A3：usage 节流状态（最后发射时刻 + 已发 total，终值补发依据）。
+            let mut last_usage_emit_at: Option<std::time::Instant> = None;
+            let mut last_emitted_usage_total: u32 = 0;
+            let mut tool_calls_raw = serde_json::Value::Null;
+            let mut active_stream_block: Option<(qaqh_domain::TimelineBlockKind, String)> = None;
+            let mut stream_block_id: Option<String> = None;
+            let mut stream_block_text = String::new();
+            let mut timeline_segment = 0u32;
+            let mut timeline_tools_open = HashSet::new();
+            let mut had_error = false;
+            // 已收到 Done（内容完整流式输出）标记：gate 尾部错误不再否定完成。
+            let mut done_seen = false;
+            let mut gate_error = None;
+            let mut current_request_usage: Option<UsageInfo> = None;
+
+            *ctx.phase = LoopPhase::GateRunning;
+            let cancel_arc = ctx.cancel.arc();
+
+            // ── SSE Gate Request ──
+            log::info!(
+                "[TURN] run_lap turn_id={} round_num={} calling chat_stream",
+                turn_id,
+                round_num
+            );
+            let result = qaqh_gate::chat_stream(
+                &provider,
+                messages,
+                tools,
+                ctx.agent.config.max_tokens,
+                Some(ctx.agent.config.reasoning_effort.clone()),
+                Some(ctx.agent.session.seed.clone()),
+                Some(&cancel_arc),
+                &mut |event| match event {
+                    qaqh_gate::StreamEvent::ContentDelta(d) => {
+                        if ctx.cancel.is_set() {
+                            return;
+                        }
+                        content.push_str(&d);
+                        let block_id = Self::ensure_stream_block(
+                            ctx,
+                            &turn_id,
+                            round_num,
+                            &mut active_stream_block,
+                            &mut timeline_segment,
+                            qaqh_domain::TimelineBlockKind::Text,
+                        );
+                        ctx.emitter
+                            .emit_timeline(qaqh_domain::TimelineIntent::TextDelta {
+                                turn_id: turn_id.to_string(),
+                                round_num,
+                                block_id: block_id.clone(),
+                                delta: d.clone(),
+                            });
+                        ctx.emitter
+                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
+                                qaqh_domain::ConversationEvent::RoundDelta {
+                                    turn_id: turn_id.to_string(),
+                                    round_num,
+                                    kind: qaqh_domain::RoundDeltaKind::Answering,
+                                    delta: d.clone(),
+                                },
+                            ));
+                        // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
+                        Self::emit_stream_block_checkpoint(
+                            ctx.emitter,
+                            &turn_id,
+                            round_num,
+                            &block_id,
+                            qaqh_domain::RoundDeltaKind::Answering,
+                            &content,
+                            &d,
+                            &mut stream_block_id,
+                            &mut stream_block_text,
+                            &mut checkpoint_tokens,
+                            &mut last_checkpoint_at,
+                        );
+                    }
+                    qaqh_gate::StreamEvent::ReasoningDelta(r) => {
+                        if ctx.cancel.is_set() {
+                            return;
+                        }
+                        reasoning.push_str(&r);
+                        let block_id = Self::ensure_stream_block(
+                            ctx,
+                            &turn_id,
+                            round_num,
+                            &mut active_stream_block,
+                            &mut timeline_segment,
+                            qaqh_domain::TimelineBlockKind::Reasoning,
+                        );
+                        ctx.emitter
+                            .emit_timeline(qaqh_domain::TimelineIntent::TextDelta {
+                                turn_id: turn_id.to_string(),
+                                round_num,
+                                block_id: block_id.clone(),
+                                delta: r.clone(),
+                            });
+                        ctx.emitter
+                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
+                                qaqh_domain::ConversationEvent::RoundDelta {
+                                    turn_id: turn_id.to_string(),
+                                    round_num,
+                                    kind: qaqh_domain::RoundDeltaKind::Thinking,
+                                    delta: r.clone(),
+                                },
+                            ));
+                        // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
+                        Self::emit_stream_block_checkpoint(
+                            ctx.emitter,
+                            &turn_id,
+                            round_num,
+                            &block_id,
+                            qaqh_domain::RoundDeltaKind::Thinking,
+                            &reasoning,
+                            &r,
+                            &mut stream_block_id,
+                            &mut stream_block_text,
+                            &mut checkpoint_tokens,
+                            &mut last_checkpoint_at,
+                        );
+                    }
+                    qaqh_gate::StreamEvent::Done {
+                        raw_message, usage, ..
+                    } => {
+                        done_seen = true;
+                        if let Some(ref u) = usage {
+                            ctx.agent.session.record_usage(u);
+                            if !ctx.agent.ephemeral {
+                                qaqh_session::SessionManager::global().persist_usage(
+                                    &ctx.agent.session.seed,
+                                    ctx.agent.session.usage_totals.clone(),
+                                    ctx.agent.session.last_usage.clone(),
+                                    ctx.agent.session.usage_requests,
+                                    ctx.agent.session.cache_reported_requests,
+                                );
+                            }
+                            util::record_token_usage(u, &ctx.agent.config.model);
+                            last_usage = usage.clone();
+                            current_request_usage = usage.clone();
+                        }
+                        // A3：终值必发——节流窗口可能吞掉最后一条流式值，此处补发
+                        // 请求权威终值（replaceable 覆盖；与 done 前的 record_usage 一致）。
+                        if let Some(final_usage) = current_request_usage.clone() {
+                            if final_usage.total_tokens != last_emitted_usage_total {
+                                last_emitted_usage_total = final_usage.total_tokens;
+                                ctx.emitter
+                                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
+                                        qaqh_domain::ConversationEvent::UsageUpdated {
+                                            turn_id: turn_id.to_string(),
+                                            round_num,
+                                            usage: final_usage.clone(),
+                                            context_limit: ctx.agent.config.context_limit,
+                                            model: ctx.agent.config.model.clone(),
+                                        },
+                                    ));
+                            }
+                        }
+                        content.clear();
+                        reasoning.clear();
+                        let mut blocks: Vec<serde_json::Value> = Vec::new();
+                        for block in &raw_message.content {
+                            match block {
+                                qaqh_types::ContentBlock::Text { text } => content.push_str(text),
+                                qaqh_types::ContentBlock::Reasoning { reasoning: r } => {
+                                    reasoning.push_str(r)
+                                }
+                                qaqh_types::ContentBlock::ToolUse { id, name, input } => {
+                                    blocks.push(serde_json::json!({
+                                        "id": id, "name": name, "arguments": input.to_string(),
+                                    }));
+                                }
+                                qaqh_types::ContentBlock::ResponseOutputItem { .. } => {
+                                    response_output_items.push(block.clone());
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !blocks.is_empty() {
+                            tool_calls_raw = serde_json::Value::Array(blocks);
+                        }
+                    }
+                    qaqh_gate::StreamEvent::ToolCallProgress {
+                        index: _,
+                        id,
+                        name,
+                        args_so_far,
+                    } => {
+                        let block_id = format!("tool:{id}");
+                        Self::seal_active_stream_block(
+                            ctx,
+                            &turn_id,
+                            round_num,
+                            &mut active_stream_block,
+                        );
+                        Self::reset_stream_block_checkpoint(
+                            &mut stream_block_id,
+                            &mut stream_block_text,
+                        );
+                        if timeline_tools_open.insert(id.clone()) {
+                            ctx.emitter
+                                .emit_timeline(qaqh_domain::TimelineIntent::BlockOpened {
+                                    turn_id: turn_id.to_string(),
+                                    round_num,
+                                    block_id: block_id.clone(),
+                                    kind: qaqh_domain::TimelineBlockKind::Tool,
+                                    tool: Some(qaqh_domain::TimelineTool {
+                                        tool_call_id: id.clone(),
+                                        name: name.clone(),
+                                        state: qaqh_domain::TimelineToolState::Prepared,
+                                        summary: None,
+                                        args_json: Some(args_so_far.clone()),
+                                        output: None,
+                                        diff: None,
+                                        progress: String::new(),
+                                        failure: None,
+                                        permission: None,
+                                    }),
+                                });
+                        }
+                        // Ringing 双发：ToolCallPrepared（replaceable 预览，可被 ToolStarted 覆盖）
+                        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
+                            qaqh_domain::ToolEvent::ToolCallPrepared {
+                                tool_call_id: id.clone(),
+                                turn_id: turn_id.to_string(),
+                                round_num,
+                                name: name.clone(),
+                                args_so_far: args_so_far.clone(),
+                            },
+                        ));
+                    }
+                    qaqh_gate::StreamEvent::WebSearchStatus(status) => {
+                        // Server-side search progress (Responses API built-in
+                        // tool). Transient status line; RoundComplete blocks
+                        // replace it on arrival.
+                        // Ringing 双发：ProviderToolStatus（replaceable，按 call_id 合并）
+                        let provider_state = match status.as_str() {
+                            "completed" | "done" => qaqh_domain::ProviderToolState::Completed,
+                            "searching" | "running" | "in_progress" => {
+                                qaqh_domain::ProviderToolState::Searching
+                            }
+                            _ => qaqh_domain::ProviderToolState::InProgress,
+                        };
+                        ctx.emitter
+                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
+                                qaqh_domain::ConversationEvent::ProviderToolStatus {
+                                    turn_id: turn_id.to_string(),
+                                    round_num,
+                                    call_id: format!("ws-{turn_id}-{round_num}"),
+                                    tool_kind: "web_search".into(),
+                                    state: provider_state,
+                                },
+                            ));
+                    }
+                    qaqh_gate::StreamEvent::UsageUpdate(u) => {
+                        last_usage = Some(u.clone());
+                        current_request_usage = Some(u.clone());
+                        ctx.agent.session.tokens =
+                            ctx.agent.session.tokens.max(u.total_tokens as u64);
+                        // A3：节流 ~1s（replaceable 覆盖显示）；终值由 Done 分支补发。
+                        let due = last_usage_emit_at
+                            .map_or(true, |at| at.elapsed() >= USAGE_EMIT_INTERVAL);
+                        if due {
+                            last_usage_emit_at = Some(std::time::Instant::now());
+                            last_emitted_usage_total = u.total_tokens;
+                            ctx.emitter
+                                .emit_domain(qaqh_domain::DomainEvent::Conversation(
+                                    qaqh_domain::ConversationEvent::UsageUpdated {
+                                        turn_id: turn_id.to_string(),
+                                        round_num,
+                                        usage: u.clone(),
+                                        context_limit: ctx.agent.config.context_limit,
+                                        model: ctx.agent.config.model.clone(),
+                                    },
+                                ));
+                        }
+                    }
+                    qaqh_gate::StreamEvent::Retrying {
+                        attempt,
+                        max_retries,
+                        delay_secs,
+                        error,
+                    } => {
+                        // Ringing 双发：ProviderRetrying（重试可见性）
+                        ctx.emitter
+                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
+                                qaqh_domain::ConversationEvent::ProviderRetrying {
+                                    turn_id: turn_id.to_string(),
+                                    round_num,
+                                    attempt,
+                                    max_retries,
+                                    delay_secs,
+                                    error_message: error,
+                                },
+                            ));
+                    }
+                    qaqh_gate::StreamEvent::Error(msg) => {
+                        log::error!(
+                            "[TURN] gate error turn_id={turn_id} round_num={round_num}: {msg}"
+                        );
+                        gate_error = Some(msg);
+                        had_error = true;
+                    }
+                },
+            );
+    GateRequestResult {
+        content,
+        reasoning,
+        tool_calls_raw,
+        response_output_items,
+        active_stream_block,
+        timeline_tools_open,
+        had_error,
+        done_seen,
+        gate_error,
+        current_request_usage,
+        request_error: result.err().map(|e| e.to_string()),
+        last_usage,
+    }
+}
     fn run_lap(
         &mut self,
         ctx: &mut RingContext,
         tool: &mut ToolEngine,
         turn_id: String,
         round_num: u32,
-        mut last_usage: Option<UsageInfo>,
+        last_usage: Option<UsageInfo>,
     ) -> Outcome {
         log::info!("[TURN] run_lap turn_id={} round_num={}", turn_id, round_num);
         // Rebuild provider from current config（gate_lap 准备逻辑，见 turn_lap::gate）
@@ -1288,323 +1651,34 @@ impl TurnEngine {
                 let _ = (hash, reasons);
             }
 
-            let tools = Some(ctx.agent.tool_defs.clone());
-            let mut content = String::new();
-            let mut reasoning = String::new();
-            // Opaque Responses output items are persisted for protocol replay
-            // only. They never enter timeline/UI projections.
-            let mut response_output_items: Vec<qaqh_types::ContentBlock> = Vec::new();
-            // A1：block_checkpoint 节流（delta 次数 + 时间窗，先到为准）。
-            let mut checkpoint_tokens: u32 = 0;
-            let mut last_checkpoint_at = std::time::Instant::now();
-            // A3：usage 节流状态（最后发射时刻 + 已发 total，终值补发依据）。
-            let mut last_usage_emit_at: Option<std::time::Instant> = None;
-            let mut last_emitted_usage_total: u32 = 0;
-            let mut tool_calls_raw = serde_json::Value::Null;
-            let mut active_stream_block: Option<(qaqh_domain::TimelineBlockKind, String)> = None;
-            let mut stream_block_id: Option<String> = None;
-            let mut stream_block_text = String::new();
-            let mut timeline_segment = 0u32;
-            let mut timeline_tools_open = HashSet::new();
-            let mut had_error = false;
-            // 已收到 Done（内容完整流式输出）标记：gate 尾部错误不再否定完成。
-            let mut done_seen = false;
-            let mut gate_error = None;
-            let mut current_request_usage: Option<UsageInfo> = None;
             let request_fingerprint = ctx.agent.token_calibration_fingerprint();
             let request_key = ctx
                 .agent
                 .prepared_request_key(&messages, Some(&ctx.agent.tool_defs));
 
-            *ctx.phase = LoopPhase::GateRunning;
-            let cancel_arc = ctx.cancel.arc();
-
-            // ── SSE Gate Request ──
-            log::info!(
-                "[TURN] run_lap turn_id={} round_num={} calling chat_stream",
-                turn_id,
-                round_num
-            );
-            let result = qaqh_gate::chat_stream(
+            let GateRequestResult {
+                content,
+                reasoning,
+                tool_calls_raw,
+                response_output_items,
+                mut active_stream_block,
+                mut timeline_tools_open,
+                had_error,
+                done_seen,
+                gate_error,
+                current_request_usage,
+                request_error,
+                last_usage,
+            } = Self::gate_request(
+                ctx,
                 &provider,
                 messages,
-                tools,
-                ctx.agent.config.max_tokens,
-                Some(ctx.agent.config.reasoning_effort.clone()),
-                Some(ctx.agent.session.seed.clone()),
-                Some(&cancel_arc),
-                &mut |event| match event {
-                    qaqh_gate::StreamEvent::ContentDelta(d) => {
-                        if ctx.cancel.is_set() {
-                            return;
-                        }
-                        content.push_str(&d);
-                        let block_id = Self::ensure_stream_block(
-                            ctx,
-                            &turn_id,
-                            round_num,
-                            &mut active_stream_block,
-                            &mut timeline_segment,
-                            qaqh_domain::TimelineBlockKind::Text,
-                        );
-                        ctx.emitter
-                            .emit_timeline(qaqh_domain::TimelineIntent::TextDelta {
-                                turn_id: turn_id.clone(),
-                                round_num,
-                                block_id: block_id.clone(),
-                                delta: d.clone(),
-                            });
-                        ctx.emitter
-                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                qaqh_domain::ConversationEvent::RoundDelta {
-                                    turn_id: turn_id.clone(),
-                                    round_num,
-                                    kind: qaqh_domain::RoundDeltaKind::Answering,
-                                    delta: d.clone(),
-                                },
-                            ));
-                        // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
-                        Self::emit_stream_block_checkpoint(
-                            ctx.emitter,
-                            &turn_id,
-                            round_num,
-                            &block_id,
-                            qaqh_domain::RoundDeltaKind::Answering,
-                            &content,
-                            &d,
-                            &mut stream_block_id,
-                            &mut stream_block_text,
-                            &mut checkpoint_tokens,
-                            &mut last_checkpoint_at,
-                        );
-                    }
-                    qaqh_gate::StreamEvent::ReasoningDelta(r) => {
-                        if ctx.cancel.is_set() {
-                            return;
-                        }
-                        reasoning.push_str(&r);
-                        let block_id = Self::ensure_stream_block(
-                            ctx,
-                            &turn_id,
-                            round_num,
-                            &mut active_stream_block,
-                            &mut timeline_segment,
-                            qaqh_domain::TimelineBlockKind::Reasoning,
-                        );
-                        ctx.emitter
-                            .emit_timeline(qaqh_domain::TimelineIntent::TextDelta {
-                                turn_id: turn_id.clone(),
-                                round_num,
-                                block_id: block_id.clone(),
-                                delta: r.clone(),
-                            });
-                        ctx.emitter
-                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                qaqh_domain::ConversationEvent::RoundDelta {
-                                    turn_id: turn_id.clone(),
-                                    round_num,
-                                    kind: qaqh_domain::RoundDeltaKind::Thinking,
-                                    delta: r.clone(),
-                                },
-                            ));
-                        // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
-                        Self::emit_stream_block_checkpoint(
-                            ctx.emitter,
-                            &turn_id,
-                            round_num,
-                            &block_id,
-                            qaqh_domain::RoundDeltaKind::Thinking,
-                            &reasoning,
-                            &r,
-                            &mut stream_block_id,
-                            &mut stream_block_text,
-                            &mut checkpoint_tokens,
-                            &mut last_checkpoint_at,
-                        );
-                    }
-                    qaqh_gate::StreamEvent::Done {
-                        raw_message, usage, ..
-                    } => {
-                        done_seen = true;
-                        if let Some(ref u) = usage {
-                            ctx.agent.session.record_usage(u);
-                            if !ctx.agent.ephemeral {
-                                qaqh_session::SessionManager::global().persist_usage(
-                                    &ctx.agent.session.seed,
-                                    ctx.agent.session.usage_totals.clone(),
-                                    ctx.agent.session.last_usage.clone(),
-                                    ctx.agent.session.usage_requests,
-                                    ctx.agent.session.cache_reported_requests,
-                                );
-                            }
-                            util::record_token_usage(u, &ctx.agent.config.model);
-                            last_usage = usage.clone();
-                            current_request_usage = usage.clone();
-                        }
-                        // A3：终值必发——节流窗口可能吞掉最后一条流式值，此处补发
-                        // 请求权威终值（replaceable 覆盖；与 done 前的 record_usage 一致）。
-                        if let Some(final_usage) = current_request_usage.clone() {
-                            if final_usage.total_tokens != last_emitted_usage_total {
-                                last_emitted_usage_total = final_usage.total_tokens;
-                                ctx.emitter
-                                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                        qaqh_domain::ConversationEvent::UsageUpdated {
-                                            turn_id: turn_id.clone(),
-                                            round_num,
-                                            usage: final_usage.clone(),
-                                            context_limit: ctx.agent.config.context_limit,
-                                            model: ctx.agent.config.model.clone(),
-                                        },
-                                    ));
-                            }
-                        }
-                        content.clear();
-                        reasoning.clear();
-                        let mut blocks: Vec<serde_json::Value> = Vec::new();
-                        for block in &raw_message.content {
-                            match block {
-                                qaqh_types::ContentBlock::Text { text } => content.push_str(text),
-                                qaqh_types::ContentBlock::Reasoning { reasoning: r } => {
-                                    reasoning.push_str(r)
-                                }
-                                qaqh_types::ContentBlock::ToolUse { id, name, input } => {
-                                    blocks.push(serde_json::json!({
-                                        "id": id, "name": name, "arguments": input.to_string(),
-                                    }));
-                                }
-                                qaqh_types::ContentBlock::ResponseOutputItem { .. } => {
-                                    response_output_items.push(block.clone());
-                                }
-                                _ => {}
-                            }
-                        }
-                        if !blocks.is_empty() {
-                            tool_calls_raw = serde_json::Value::Array(blocks);
-                        }
-                    }
-                    qaqh_gate::StreamEvent::ToolCallProgress {
-                        index: _,
-                        id,
-                        name,
-                        args_so_far,
-                    } => {
-                        let block_id = format!("tool:{id}");
-                        Self::seal_active_stream_block(
-                            ctx,
-                            &turn_id,
-                            round_num,
-                            &mut active_stream_block,
-                        );
-                        Self::reset_stream_block_checkpoint(
-                            &mut stream_block_id,
-                            &mut stream_block_text,
-                        );
-                        if timeline_tools_open.insert(id.clone()) {
-                            ctx.emitter
-                                .emit_timeline(qaqh_domain::TimelineIntent::BlockOpened {
-                                    turn_id: turn_id.clone(),
-                                    round_num,
-                                    block_id: block_id.clone(),
-                                    kind: qaqh_domain::TimelineBlockKind::Tool,
-                                    tool: Some(qaqh_domain::TimelineTool {
-                                        tool_call_id: id.clone(),
-                                        name: name.clone(),
-                                        state: qaqh_domain::TimelineToolState::Prepared,
-                                        summary: None,
-                                        args_json: Some(args_so_far.clone()),
-                                        output: None,
-                                        diff: None,
-                                        progress: String::new(),
-                                        failure: None,
-                                        permission: None,
-                                    }),
-                                });
-                        }
-                        // Ringing 双发：ToolCallPrepared（replaceable 预览，可被 ToolStarted 覆盖）
-                        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                            qaqh_domain::ToolEvent::ToolCallPrepared {
-                                tool_call_id: id.clone(),
-                                turn_id: turn_id.clone(),
-                                round_num,
-                                name: name.clone(),
-                                args_so_far: args_so_far.clone(),
-                            },
-                        ));
-                    }
-                    qaqh_gate::StreamEvent::WebSearchStatus(status) => {
-                        // Server-side search progress (Responses API built-in
-                        // tool). Transient status line; RoundComplete blocks
-                        // replace it on arrival.
-                        // Ringing 双发：ProviderToolStatus（replaceable，按 call_id 合并）
-                        let provider_state = match status.as_str() {
-                            "completed" | "done" => qaqh_domain::ProviderToolState::Completed,
-                            "searching" | "running" | "in_progress" => {
-                                qaqh_domain::ProviderToolState::Searching
-                            }
-                            _ => qaqh_domain::ProviderToolState::InProgress,
-                        };
-                        ctx.emitter
-                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                qaqh_domain::ConversationEvent::ProviderToolStatus {
-                                    turn_id: turn_id.clone(),
-                                    round_num,
-                                    call_id: format!("ws-{turn_id}-{round_num}"),
-                                    tool_kind: "web_search".into(),
-                                    state: provider_state,
-                                },
-                            ));
-                    }
-                    qaqh_gate::StreamEvent::UsageUpdate(u) => {
-                        last_usage = Some(u.clone());
-                        current_request_usage = Some(u.clone());
-                        ctx.agent.session.tokens =
-                            ctx.agent.session.tokens.max(u.total_tokens as u64);
-                        // A3：节流 ~1s（replaceable 覆盖显示）；终值由 Done 分支补发。
-                        let due = last_usage_emit_at
-                            .map_or(true, |at| at.elapsed() >= USAGE_EMIT_INTERVAL);
-                        if due {
-                            last_usage_emit_at = Some(std::time::Instant::now());
-                            last_emitted_usage_total = u.total_tokens;
-                            ctx.emitter
-                                .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                    qaqh_domain::ConversationEvent::UsageUpdated {
-                                        turn_id: turn_id.clone(),
-                                        round_num,
-                                        usage: u.clone(),
-                                        context_limit: ctx.agent.config.context_limit,
-                                        model: ctx.agent.config.model.clone(),
-                                    },
-                                ));
-                        }
-                    }
-                    qaqh_gate::StreamEvent::Retrying {
-                        attempt,
-                        max_retries,
-                        delay_secs,
-                        error,
-                    } => {
-                        // Ringing 双发：ProviderRetrying（重试可见性）
-                        ctx.emitter
-                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                qaqh_domain::ConversationEvent::ProviderRetrying {
-                                    turn_id: turn_id.clone(),
-                                    round_num,
-                                    attempt,
-                                    max_retries,
-                                    delay_secs,
-                                    error_message: error,
-                                },
-                            ));
-                    }
-                    qaqh_gate::StreamEvent::Error(msg) => {
-                        log::error!(
-                            "[TURN] gate error turn_id={turn_id} round_num={round_num}: {msg}"
-                        );
-                        gate_error = Some(msg);
-                        had_error = true;
-                    }
-                },
+                Some(ctx.agent.tool_defs.clone()),
+                &turn_id,
+                round_num,
+                last_usage,
             );
+
 
             if ctx.cancel.is_set() {
                 Self::seal_timeline_terminal_round(
@@ -1619,7 +1693,7 @@ impl TurnEngine {
                 return Self::abort_running_turn(ctx, turn_id, last_usage);
             }
 
-            if (had_error || result.is_err()) && !done_seen {
+            if (had_error || request_error.is_some()) && !done_seen {
                 log::info!(
                     "[TURN] run_lap turn_id={} round_num={} gate error or had_error={}",
                     turn_id,
@@ -1630,7 +1704,7 @@ impl TurnEngine {
                     .msg
                     .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
                 let message = gate_error
-                    .or_else(|| result.err().map(|error| error.to_string()))
+                    .or_else(|| request_error.clone())
                     .unwrap_or_else(|| "Model request failed".into());
                 Self::seal_timeline_terminal_round(
                     ctx,
@@ -1650,7 +1724,7 @@ impl TurnEngine {
                     message,
                 };
             }
-            if done_seen && (had_error || result.is_err()) {
+            if done_seen && (had_error || request_error.is_some()) {
                 // 内容已完整流式输出后才报错（[DONE] 后断连/杂散错误）：
                 // 不否定已完成的作答——"作答完成却 TurnFailed"会造成前端
                 // 状态残留（markdown 不集中渲染、下一条消息带上一条）。
@@ -1660,7 +1734,7 @@ impl TurnEngine {
                     round_num,
                     gate_error
                         .clone()
-                        .or_else(|| result.as_ref().err().map(|e| e.to_string()))
+                        .or(request_error.clone())
                         .unwrap_or_default()
                 );
             }
