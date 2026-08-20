@@ -90,7 +90,6 @@ pub enum LoopPhase {
     /// Tools are executing (parallel or serial).
     ToolsRunning,
     /// Goal mode active: autonomous plan execution in progress.
-    /// The GoalEngine drives turn scheduling and compact refresh.
     GoalActive,
 }
 
