@@ -4,7 +4,7 @@
 //! Receives: RingContext + ToolEngine (for tool execution).
 //! Returns: Outcome (ContinueTurn, YieldToUser, TurnComplete, Error).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use qaqh_domain::AskAnswer;
 use qaqh_message::Effect;
@@ -12,36 +12,12 @@ use qaqh_types::UsageInfo;
 
 use super::engine_tool::ToolEngine;
 use super::types::*;
-use crate::services::conflict;
-use crate::services::dashboard;
-use crate::util;
-
-/// A1：`block_checkpoint` 发射间隔（delta 次数或时长，先到为准）。
-const CHECKPOINT_TOKEN_INTERVAL: u32 = 64;
-const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-/// A3：`usage_updated` 节流窗口（流式期间 ~1s 一条；终值由 lap 结束补发）。
-const USAGE_EMIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// 一次 gate 请求的聚合结果（knife-7 S2：从 run_lap 收敛出的贯穿状态）。
-///
-/// `content`/`reasoning`/`tool_calls_raw`/`response_output_items` 供 parse 消费；
-/// `active_stream_block`/`timeline_tools_open` 供后续 seal 消费；
-/// `had_error`/`done_seen`/`gate_error`/`request_error` 供错误归一；
-/// `current_request_usage` 供 token calibration；`last_usage` 回传给调用方。
-struct GateRequestResult {
-    content: String,
-    reasoning: String,
-    tool_calls_raw: serde_json::Value,
-    response_output_items: Vec<qaqh_types::ContentBlock>,
-    active_stream_block: Option<(qaqh_domain::TimelineBlockKind, String)>,
-    timeline_tools_open: HashSet<String>,
-    had_error: bool,
-    done_seen: bool,
-    gate_error: Option<String>,
-    current_request_usage: Option<UsageInfo>,
-    request_error: Option<String>,
-    last_usage: Option<UsageInfo>,
-}
+use crate::ringing_v1::turn_lap::admit as turn_admit;
+use crate::ringing_v1::turn_lap::backfill as turn_backfill;
+use crate::ringing_v1::turn_lap::gate::{
+    GateRequestResult, abort_running_turn, gate_request, provider_for,
+    seal_timeline_terminal_round,
+};
 
 
 /// Why the turn is being resumed.
@@ -116,92 +92,7 @@ pub struct TurnEngine {
 }
 
 impl TurnEngine {
-    /// A1：按 delta 次数 / 时间窗发射 `block_checkpoint`。
-    /// Conversation 使用该 round 当前完整文本，timeline 使用当前 stream
-    /// block 的局部完整文本；两者都保留 replaceable 覆盖语义。
-    fn maybe_emit_block_checkpoint(
-        emitter: &dyn Emitter,
-        turn_id: &str,
-        round_num: u32,
-        block_id: &str,
-        kind: qaqh_domain::RoundDeltaKind,
-        round_text: &str,
-        block_text: &str,
-        tokens_since_checkpoint: &mut u32,
-        last_checkpoint_at: &mut std::time::Instant,
-    ) {
-        *tokens_since_checkpoint += 1;
-        if *tokens_since_checkpoint < CHECKPOINT_TOKEN_INTERVAL
-            && last_checkpoint_at.elapsed() < CHECKPOINT_INTERVAL
-        {
-            return;
-        }
-        *tokens_since_checkpoint = 0;
-        *last_checkpoint_at = std::time::Instant::now();
-        emitter.emit_domain(qaqh_domain::DomainEvent::Conversation(
-            qaqh_domain::ConversationEvent::BlockCheckpoint {
-                turn_id: turn_id.to_string(),
-                round_num,
-                kind,
-                text: round_text.to_string(),
-                char_count: round_text.chars().count() as u32,
-            },
-        ));
-        emitter.emit_timeline(qaqh_domain::TimelineIntent::BlockCheckpoint {
-            turn_id: turn_id.to_string(),
-            round_num,
-            block_id: block_id.to_string(),
-            text: block_text.to_string(),
-        });
-    }
-
-    fn append_stream_block_delta(
-        block_id: &str,
-        delta: &str,
-        stream_block_id: &mut Option<String>,
-        stream_block_text: &mut String,
-    ) {
-        if stream_block_id.as_deref() != Some(block_id) {
-            *stream_block_id = Some(block_id.to_string());
-            stream_block_text.clear();
-        }
-        stream_block_text.push_str(delta);
-    }
-
-    fn reset_stream_block_checkpoint(
-        stream_block_id: &mut Option<String>,
-        stream_block_text: &mut String,
-    ) {
-        *stream_block_id = None;
-        stream_block_text.clear();
-    }
-
-    fn emit_stream_block_checkpoint(
-        emitter: &dyn Emitter,
-        turn_id: &str,
-        round_num: u32,
-        block_id: &str,
-        kind: qaqh_domain::RoundDeltaKind,
-        round_text: &str,
-        delta: &str,
-        stream_block_id: &mut Option<String>,
-        stream_block_text: &mut String,
-        tokens_since_checkpoint: &mut u32,
-        last_checkpoint_at: &mut std::time::Instant,
-    ) {
-        Self::append_stream_block_delta(block_id, delta, stream_block_id, stream_block_text);
-        Self::maybe_emit_block_checkpoint(
-            emitter,
-            turn_id,
-            round_num,
-            block_id,
-            kind,
-            round_text,
-            stream_block_text,
-            tokens_since_checkpoint,
-            last_checkpoint_at,
-        );
-    }
+    // ── gate stream helpers moved to turn_lap::gate (A2 step3) ──
 
     pub fn new() -> Self {
         Self { suspended: None }
@@ -298,7 +189,7 @@ impl TurnEngine {
 
         let mut saved = self.suspended.take().expect("permission suspension exists");
         let deferred_authorized = std::mem::take(&mut saved.deferred_authorized);
-        if !Self::execute_admitted_batch(
+        if !turn_admit::execute_admitted_batch(
             ctx,
             tool,
             deferred_authorized,
@@ -308,7 +199,7 @@ impl TurnEngine {
             saved.round_num,
         ) {
             let tool_ids = saved.tool_call_order.iter().cloned().collect();
-            Self::seal_timeline_terminal_round(
+            seal_timeline_terminal_round(
                 ctx,
                 &saved.turn_id,
                 saved.round_num,
@@ -317,7 +208,7 @@ impl TurnEngine {
                 qaqh_domain::TimelineTurnState::Cancelled,
                 None,
             );
-            return Self::abort_running_turn(ctx, saved.turn_id, saved.usage);
+            return abort_running_turn(ctx, saved.turn_id, saved.usage);
         }
 
         if !saved.pending_plans.is_empty() {
@@ -570,7 +461,7 @@ impl TurnEngine {
 
         let saved = self.suspended.take().expect("active ask suspension exists");
         let tool_ids = saved.tool_call_order.iter().cloned().collect();
-        Self::seal_timeline_terminal_round(
+        seal_timeline_terminal_round(
             ctx,
             &saved.turn_id,
             saved.round_num,
@@ -617,6 +508,7 @@ impl TurnEngine {
     }
 
     /// 构造结构化领域错误（error_id = 时间戳，dedupe 可选）。
+    #[allow(dead_code)]
     fn domain_failure(
         code: &str,
         message: String,
@@ -636,6 +528,7 @@ impl TurnEngine {
     }
 
     /// OperationFailed 的 occurrence_id（时间戳）。
+    #[allow(dead_code)]
     fn occurrence_id() -> String {
         format!(
             "occ-{}",
@@ -704,333 +597,7 @@ impl TurnEngine {
 
     // ── Internal lap execution ──
 
-    fn abort_running_turn(
-        ctx: &mut RingContext,
-        turn_id: String,
-        usage: Option<UsageInfo>,
-    ) -> Outcome {
-        ctx.agent.msg.remove_last_step_if_incomplete();
-        ctx.agent
-            .msg
-            .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-        Outcome::TurnAborted {
-            turn_id,
-            usage,
-        }
-    }
-
-    fn seal_timeline_terminal_round(
-        ctx: &mut RingContext,
-        turn_id: &str,
-        round_num: u32,
-        active_stream_block: Option<&(qaqh_domain::TimelineBlockKind, String)>,
-        tool_ids: &HashSet<String>,
-        state: qaqh_domain::TimelineTurnState,
-        failure: Option<qaqh_domain::TimelineFailure>,
-    ) {
-        if let Some((_, block_id)) = active_stream_block {
-            ctx.emitter
-                .emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
-                    turn_id: turn_id.to_string(),
-                    round_num,
-                    block_id: block_id.clone(),
-                });
-        }
-        for tool_id in tool_ids {
-            ctx.emitter
-                .emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
-                    turn_id: turn_id.to_string(),
-                    round_num,
-                    block_id: format!("tool:{tool_id}"),
-                });
-        }
-        ctx.emitter
-            .emit_timeline(qaqh_domain::TimelineIntent::RoundSealed {
-                turn_id: turn_id.to_string(),
-                round_num,
-                is_final: true,
-            });
-        ctx.emitter
-            .emit_timeline(qaqh_domain::TimelineIntent::TurnSealed {
-                turn_id: turn_id.to_string(),
-                state,
-                failure,
-            });
-        // 标题生成挂点：仅 Completed 终态触发（取消/失败不生成）；幂等由
-        // engine_title 内部冻结守卫保证（首 turn 后一次）。
-        if state == qaqh_domain::TimelineTurnState::Completed {
-            super::engine_title::maybe_generate_title(ctx);
-        }
-    }
-
-    fn seal_active_stream_block(
-        ctx: &mut RingContext,
-        turn_id: &str,
-        round_num: u32,
-        active: &mut Option<(qaqh_domain::TimelineBlockKind, String)>,
-    ) {
-        if let Some((_, block_id)) = active.take() {
-            ctx.emitter
-                .emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
-                    turn_id: turn_id.to_string(),
-                    round_num,
-                    block_id,
-                });
-        }
-    }
-
-    fn ensure_stream_block(
-        ctx: &mut RingContext,
-        turn_id: &str,
-        round_num: u32,
-        active: &mut Option<(qaqh_domain::TimelineBlockKind, String)>,
-        segment: &mut u32,
-        kind: qaqh_domain::TimelineBlockKind,
-    ) -> String {
-        if let Some((active_kind, block_id)) = active {
-            if *active_kind == kind {
-                return block_id.clone();
-            }
-        }
-        Self::seal_active_stream_block(ctx, turn_id, round_num, active);
-        let label = match kind {
-            qaqh_domain::TimelineBlockKind::Reasoning => "reasoning",
-            qaqh_domain::TimelineBlockKind::Text => "text",
-            _ => "stream",
-        };
-        let block_id = format!("round-{round_num}:{label}:{}", *segment);
-        *segment = (*segment).saturating_add(1);
-        ctx.emitter
-            .emit_timeline(qaqh_domain::TimelineIntent::BlockOpened {
-                turn_id: turn_id.to_string(),
-                round_num,
-                block_id: block_id.clone(),
-                kind,
-                tool: None,
-            });
-        *active = Some((kind, block_id.clone()));
-        block_id
-    }
-
-    fn execute_admitted_batch(
-        ctx: &mut RingContext,
-        tool: &ToolEngine,
-        mut admitted: Vec<AdmittedTool>,
-        tool_call_order: &[String],
-        serial_call_ids: &HashSet<String>,
-        turn_id: &str,
-        round_num: u32,
-    ) -> bool {
-        const MAX_PARALLEL_TOOL_WORKERS: usize = 4;
-        admitted.sort_by_key(|item| {
-            tool_call_order
-                .iter()
-                .position(|id| id == &item.call_id)
-                .unwrap_or(usize::MAX)
-        });
-        let mut ordered_skill_effects = Vec::new();
-        let (mut parallel, serial): (Vec<_>, Vec<_>) = admitted
-            .into_iter()
-            .partition(|item| !serial_call_ids.contains(&item.call_id));
-
-        while !parallel.is_empty() {
-            let batch_len = parallel.len().min(MAX_PARALLEL_TOOL_WORKERS);
-            let batch: Vec<_> = parallel.drain(..batch_len).collect();
-            let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-            let mut handles = Vec::new();
-            for admitted in batch {
-                let tx = progress_tx.clone();
-                let call_id = admitted.call_id.clone();
-                let tool_name = admitted.auth.tool_name().to_string();
-                let tool_args = admitted.auth.args().clone();
-                ToolEngine::emit_timeline_tool_running(
-                    ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
-                );
-                let handle = std::thread::Builder::new()
-                    .stack_size(4 * 1024 * 1024)
-                    .spawn({
-                        let auth = admitted.auth;
-                        let id = call_id.clone();
-                        // Tool workers run on spawned threads: reinstall the
-                        // actor thread's per-actor tool scope (context /
-                        // manager / mode / sandbox) so concurrent actors each
-                        // execute under their own tool state.
-                        let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
-                        move || {
-                            let _scope = actor_scope.install();
-                            let result =
-                                qaqh_workspace::execution::execute_authorized(*auth, Some(tx));
-                            (
-                                id,
-                                result.content,
-                                result.success,
-                                result.result,
-                                result.code_delta,
-                                result.skill_effects,
-                            )
-                        }
-                    })
-                    .expect("tool thread spawn");
-                handles.push((call_id, tool_name, handle));
-            }
-            drop(progress_tx);
-            tool.drain_progress_external(ctx, progress_rx, turn_id, round_num);
-
-            let cancelled = ctx.cancel.is_set();
-            for (call_id, tool_name, handle) in handles {
-                if cancelled {
-                    let _ = handle.join();
-                    continue;
-                }
-                match handle.join() {
-                    Ok((_id, content, success, _canonical_result, code_delta, skill_effects)) => {
-                        ctx.agent
-                            .msg
-                            .push_tool_result_direct(&call_id, &content, success);
-                        ordered_skill_effects.push((call_id.clone(), skill_effects));
-                        if let Some(ref delta) = code_delta {
-                            ctx.stats.push_delta(delta.clone());
-                            // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
-                            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                                qaqh_domain::ToolEvent::CodeChanged {
-                                    tool_call_id: call_id.clone(),
-                                    turn_id: turn_id.to_string(),
-                                    round_num,
-                                    lines_added: delta.lines_added,
-                                    lines_removed: delta.lines_removed,
-                                    files_created: delta.files_created,
-                                    files_deleted: delta.files_deleted,
-                                    file: delta.file.clone(),
-                                },
-                            ));
-                        }
-                        // Instant refresh for todo tools
-                        if matches!(tool_name.as_str(), "todo") {
-                            // Ringing 双发：DashboardUpdated（replaceable 覆盖）
-                            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                                qaqh_domain::ControlEvent::DashboardUpdated {
-                                    hp_connected: true,
-                                    session_seed: ctx.agent.session.seed.clone(),
-                                    tool_calls_total: 0,
-                                    tool_failures: 0,
-                                    current_phase: "single".into(),
-                                    streaming: false,
-                                },
-                            ));
-                            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                                qaqh_domain::ControlEvent::DashboardSnapshot {
-                                    snapshot: dashboard::build_snapshot(
-                                        ctx.agent.session.seed.clone(),
-                                    ),
-                                },
-                            ));
-                        }
-                    }
-                    Err(_) => ctx.agent.msg.push_tool_result_direct(
-                        &call_id,
-                        "[ERROR] tool thread panicked",
-                        false,
-                    ),
-                }
-            }
-        }
-
-        for admitted in serial {
-            if ctx.cancel.is_set() {
-                return false;
-            }
-            let call_id = admitted.call_id;
-            let tool_name = admitted.auth.tool_name().to_string();
-            let tool_args = admitted.auth.args().clone();
-            ToolEngine::emit_timeline_tool_running(
-                ctx, turn_id, round_num, &call_id, &tool_name, &tool_args,
-            );
-            let (progress_tx, progress_rx) = qaqh_workspace::bounded_exec_progress_channel();
-            // Tool workers run on spawned threads: carry the actor's per-actor
-            // tool scope with them so concurrent actors stay isolated.
-            let actor_scope = qaqh_workspace::runtime::ActorToolScope::capture();
-            let handle = std::thread::Builder::new()
-                .stack_size(4 * 1024 * 1024)
-                .spawn(move || {
-                    let _scope = actor_scope.install();
-                    let result = qaqh_workspace::execution::execute_authorized(
-                        *admitted.auth,
-                        Some(progress_tx),
-                    );
-                    (
-                        result.content,
-                        result.success,
-                        result.result,
-                        result.code_delta,
-                        result.skill_effects,
-                    )
-                })
-                .expect("tool thread spawn");
-            tool.drain_progress_external(ctx, progress_rx, turn_id, round_num);
-            match handle.join() {
-                Ok((content, success, _canonical_result, code_delta, skill_effects)) => {
-                    ctx.agent
-                        .msg
-                        .push_tool_result_direct(&call_id, &content, success);
-                    ordered_skill_effects.push((call_id.clone(), skill_effects));
-                    if let Some(ref delta) = code_delta {
-                        ctx.stats.push_delta(delta.clone());
-                        // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
-                        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                            qaqh_domain::ToolEvent::CodeChanged {
-                                tool_call_id: call_id.clone(),
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                lines_added: delta.lines_added,
-                                lines_removed: delta.lines_removed,
-                                files_created: delta.files_created,
-                                files_deleted: delta.files_deleted,
-                                file: delta.file.clone(),
-                            },
-                        ));
-                    }
-                    // Instant refresh for todo tools
-                    if matches!(tool_name.as_str(), "todo") {
-                        // Ringing 双发：DashboardUpdated（replaceable 覆盖）
-                        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                            qaqh_domain::ControlEvent::DashboardUpdated {
-                                hp_connected: true,
-                                session_seed: ctx.agent.session.seed.clone(),
-                                tool_calls_total: 0,
-                                tool_failures: 0,
-                                current_phase: "single".into(),
-                                streaming: false,
-                            },
-                        ));
-                        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                            qaqh_domain::ControlEvent::DashboardSnapshot {
-                                snapshot: dashboard::build_snapshot(ctx.agent.session.seed.clone()),
-                            },
-                        ));
-                    }
-                }
-                Err(_) => ctx.agent.msg.push_tool_result_direct(
-                    &call_id,
-                    "[ERROR] tool thread panicked",
-                    false,
-                ),
-            }
-        }
-
-        if ctx.cancel.is_set() {
-            return false;
-        }
-        ordered_skill_effects.sort_by_key(|(call_id, _)| {
-            tool_call_order
-                .iter()
-                .position(|id| id == call_id)
-                .unwrap_or(usize::MAX)
-        });
-        for (_, effects) in ordered_skill_effects {
-            ctx.agent.apply_tool_effects(effects, ctx.flow);
-        }
-        true
-    }
+    // ── terminal/stream helpers moved to turn_lap::gate ──
 
     fn emit_compact_failure(ctx: &RingContext, message: String) {
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
@@ -1190,347 +757,7 @@ impl TurnEngine {
         }
     }
 
-    /// Run one gate lap: stream one model request and aggregate streamed
-    /// state into a [`GateRequestResult`] (knife-7 S2; extracted from run_lap).
-    ///
-    /// Extracted verbatim — behavior identical. Error normalisation, token
-    /// calibration and parse stay in `run_lap`, consuming this result.
-    fn gate_request(
-        ctx: &mut RingContext,
-        provider: &qaqh_gate::ProviderConfig,
-        messages: Vec<qaqh_types::Message>,
-        tools: Option<Vec<qaqh_types::ToolDef>>,
-        turn_id: &str,
-        round_num: u32,
-        mut last_usage: Option<UsageInfo>,
-    ) -> GateRequestResult {
-            let mut content = String::new();
-            let mut reasoning = String::new();
-            // Opaque Responses output items are persisted for protocol replay
-            // only. They never enter timeline/UI projections.
-            let mut response_output_items: Vec<qaqh_types::ContentBlock> = Vec::new();
-            // A1：block_checkpoint 节流（delta 次数 + 时间窗，先到为准）。
-            let mut checkpoint_tokens: u32 = 0;
-            let mut last_checkpoint_at = std::time::Instant::now();
-            // A3：usage 节流状态（最后发射时刻 + 已发 total，终值补发依据）。
-            let mut last_usage_emit_at: Option<std::time::Instant> = None;
-            let mut last_emitted_usage_total: u32 = 0;
-            let mut tool_calls_raw = serde_json::Value::Null;
-            let mut active_stream_block: Option<(qaqh_domain::TimelineBlockKind, String)> = None;
-            let mut stream_block_id: Option<String> = None;
-            let mut stream_block_text = String::new();
-            let mut timeline_segment = 0u32;
-            let mut timeline_tools_open = HashSet::new();
-            let mut had_error = false;
-            // 已收到 Done（内容完整流式输出）标记：gate 尾部错误不再否定完成。
-            let mut done_seen = false;
-            let mut gate_error = None;
-            let mut current_request_usage: Option<UsageInfo> = None;
-
-            *ctx.phase = LoopPhase::GateRunning;
-            let cancel_arc = ctx.cancel.arc();
-
-            // ── SSE Gate Request ──
-            log::info!(
-                "[TURN] run_lap turn_id={} round_num={} calling chat_stream",
-                turn_id,
-                round_num
-            );
-            let result = qaqh_gate::chat_stream(
-                &provider,
-                messages,
-                tools,
-                ctx.agent.config.max_tokens,
-                Some(ctx.agent.config.reasoning_effort.clone()),
-                Some(ctx.agent.session.seed.clone()),
-                Some(&cancel_arc),
-                &mut |event| match event {
-                    qaqh_gate::StreamEvent::ContentDelta(d) => {
-                        if ctx.cancel.is_set() {
-                            return;
-                        }
-                        content.push_str(&d);
-                        let block_id = Self::ensure_stream_block(
-                            ctx,
-                            &turn_id,
-                            round_num,
-                            &mut active_stream_block,
-                            &mut timeline_segment,
-                            qaqh_domain::TimelineBlockKind::Text,
-                        );
-                        ctx.emitter
-                            .emit_timeline(qaqh_domain::TimelineIntent::TextDelta {
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                block_id: block_id.clone(),
-                                delta: d.clone(),
-                            });
-                        ctx.emitter
-                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                qaqh_domain::ConversationEvent::RoundDelta {
-                                    turn_id: turn_id.to_string(),
-                                    round_num,
-                                    kind: qaqh_domain::RoundDeltaKind::Answering,
-                                    delta: d.clone(),
-                                },
-                            ));
-                        // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
-                        Self::emit_stream_block_checkpoint(
-                            ctx.emitter,
-                            &turn_id,
-                            round_num,
-                            &block_id,
-                            qaqh_domain::RoundDeltaKind::Answering,
-                            &content,
-                            &d,
-                            &mut stream_block_id,
-                            &mut stream_block_text,
-                            &mut checkpoint_tokens,
-                            &mut last_checkpoint_at,
-                        );
-                    }
-                    qaqh_gate::StreamEvent::ReasoningDelta(r) => {
-                        if ctx.cancel.is_set() {
-                            return;
-                        }
-                        reasoning.push_str(&r);
-                        let block_id = Self::ensure_stream_block(
-                            ctx,
-                            &turn_id,
-                            round_num,
-                            &mut active_stream_block,
-                            &mut timeline_segment,
-                            qaqh_domain::TimelineBlockKind::Reasoning,
-                        );
-                        ctx.emitter
-                            .emit_timeline(qaqh_domain::TimelineIntent::TextDelta {
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                block_id: block_id.clone(),
-                                delta: r.clone(),
-                            });
-                        ctx.emitter
-                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                qaqh_domain::ConversationEvent::RoundDelta {
-                                    turn_id: turn_id.to_string(),
-                                    round_num,
-                                    kind: qaqh_domain::RoundDeltaKind::Thinking,
-                                    delta: r.clone(),
-                                },
-                            ));
-                        // A1：Conversation 发整轮值，timeline 发当前 block 局部值。
-                        Self::emit_stream_block_checkpoint(
-                            ctx.emitter,
-                            &turn_id,
-                            round_num,
-                            &block_id,
-                            qaqh_domain::RoundDeltaKind::Thinking,
-                            &reasoning,
-                            &r,
-                            &mut stream_block_id,
-                            &mut stream_block_text,
-                            &mut checkpoint_tokens,
-                            &mut last_checkpoint_at,
-                        );
-                    }
-                    qaqh_gate::StreamEvent::Done {
-                        raw_message, usage, ..
-                    } => {
-                        done_seen = true;
-                        if let Some(ref u) = usage {
-                            ctx.agent.session.record_usage(u);
-                            if !ctx.agent.ephemeral {
-                                qaqh_session::SessionManager::global().persist_usage(
-                                    &ctx.agent.session.seed,
-                                    ctx.agent.session.usage_totals.clone(),
-                                    ctx.agent.session.last_usage.clone(),
-                                    ctx.agent.session.usage_requests,
-                                    ctx.agent.session.cache_reported_requests,
-                                );
-                            }
-                            util::record_token_usage(u, &ctx.agent.config.model);
-                            last_usage = usage.clone();
-                            current_request_usage = usage.clone();
-                        }
-                        // A3：终值必发——节流窗口可能吞掉最后一条流式值，此处补发
-                        // 请求权威终值（replaceable 覆盖；与 done 前的 record_usage 一致）。
-                        if let Some(final_usage) = current_request_usage.clone() {
-                            if final_usage.total_tokens != last_emitted_usage_total {
-                                last_emitted_usage_total = final_usage.total_tokens;
-                                ctx.emitter
-                                    .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                        qaqh_domain::ConversationEvent::UsageUpdated {
-                                            turn_id: turn_id.to_string(),
-                                            round_num,
-                                            usage: final_usage.clone(),
-                                            context_limit: ctx.agent.config.context_limit,
-                                            model: ctx.agent.config.model.clone(),
-                                        },
-                                    ));
-                            }
-                        }
-                        content.clear();
-                        reasoning.clear();
-                        let mut blocks: Vec<serde_json::Value> = Vec::new();
-                        for block in &raw_message.content {
-                            match block {
-                                qaqh_types::ContentBlock::Text { text } => content.push_str(text),
-                                qaqh_types::ContentBlock::Reasoning { reasoning: r } => {
-                                    reasoning.push_str(r)
-                                }
-                                qaqh_types::ContentBlock::ToolUse { id, name, input } => {
-                                    blocks.push(serde_json::json!({
-                                        "id": id, "name": name, "arguments": input.to_string(),
-                                    }));
-                                }
-                                qaqh_types::ContentBlock::ResponseOutputItem { .. } => {
-                                    response_output_items.push(block.clone());
-                                }
-                                _ => {}
-                            }
-                        }
-                        if !blocks.is_empty() {
-                            tool_calls_raw = serde_json::Value::Array(blocks);
-                        }
-                    }
-                    qaqh_gate::StreamEvent::ToolCallProgress {
-                        index: _,
-                        id,
-                        name,
-                        args_so_far,
-                    } => {
-                        let block_id = format!("tool:{id}");
-                        Self::seal_active_stream_block(
-                            ctx,
-                            &turn_id,
-                            round_num,
-                            &mut active_stream_block,
-                        );
-                        Self::reset_stream_block_checkpoint(
-                            &mut stream_block_id,
-                            &mut stream_block_text,
-                        );
-                        if timeline_tools_open.insert(id.clone()) {
-                            ctx.emitter
-                                .emit_timeline(qaqh_domain::TimelineIntent::BlockOpened {
-                                    turn_id: turn_id.to_string(),
-                                    round_num,
-                                    block_id: block_id.clone(),
-                                    kind: qaqh_domain::TimelineBlockKind::Tool,
-                                    tool: Some(qaqh_domain::TimelineTool {
-                                        tool_call_id: id.clone(),
-                                        name: name.clone(),
-                                        state: qaqh_domain::TimelineToolState::Prepared,
-                                        summary: None,
-                                        args_json: Some(args_so_far.clone()),
-                                        output: None,
-                                        diff: None,
-                                        progress: String::new(),
-                                        failure: None,
-                                        permission: None,
-                                    }),
-                                });
-                        }
-                        // Ringing 双发：ToolCallPrepared（replaceable 预览，可被 ToolStarted 覆盖）
-                        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                            qaqh_domain::ToolEvent::ToolCallPrepared {
-                                tool_call_id: id.clone(),
-                                turn_id: turn_id.to_string(),
-                                round_num,
-                                name: name.clone(),
-                                args_so_far: args_so_far.clone(),
-                            },
-                        ));
-                    }
-                    qaqh_gate::StreamEvent::WebSearchStatus(status) => {
-                        // Server-side search progress (Responses API built-in
-                        // tool). Transient status line; RoundComplete blocks
-                        // replace it on arrival.
-                        // Ringing 双发：ProviderToolStatus（replaceable，按 call_id 合并）
-                        let provider_state = match status.as_str() {
-                            "completed" | "done" => qaqh_domain::ProviderToolState::Completed,
-                            "searching" | "running" | "in_progress" => {
-                                qaqh_domain::ProviderToolState::Searching
-                            }
-                            _ => qaqh_domain::ProviderToolState::InProgress,
-                        };
-                        ctx.emitter
-                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                qaqh_domain::ConversationEvent::ProviderToolStatus {
-                                    turn_id: turn_id.to_string(),
-                                    round_num,
-                                    call_id: format!("ws-{turn_id}-{round_num}"),
-                                    tool_kind: "web_search".into(),
-                                    state: provider_state,
-                                },
-                            ));
-                    }
-                    qaqh_gate::StreamEvent::UsageUpdate(u) => {
-                        last_usage = Some(u.clone());
-                        current_request_usage = Some(u.clone());
-                        ctx.agent.session.tokens =
-                            ctx.agent.session.tokens.max(u.total_tokens as u64);
-                        // A3：节流 ~1s（replaceable 覆盖显示）；终值由 Done 分支补发。
-                        let due = last_usage_emit_at
-                            .map_or(true, |at| at.elapsed() >= USAGE_EMIT_INTERVAL);
-                        if due {
-                            last_usage_emit_at = Some(std::time::Instant::now());
-                            last_emitted_usage_total = u.total_tokens;
-                            ctx.emitter
-                                .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                    qaqh_domain::ConversationEvent::UsageUpdated {
-                                        turn_id: turn_id.to_string(),
-                                        round_num,
-                                        usage: u.clone(),
-                                        context_limit: ctx.agent.config.context_limit,
-                                        model: ctx.agent.config.model.clone(),
-                                    },
-                                ));
-                        }
-                    }
-                    qaqh_gate::StreamEvent::Retrying {
-                        attempt,
-                        max_retries,
-                        delay_secs,
-                        error,
-                    } => {
-                        // Ringing 双发：ProviderRetrying（重试可见性）
-                        ctx.emitter
-                            .emit_domain(qaqh_domain::DomainEvent::Conversation(
-                                qaqh_domain::ConversationEvent::ProviderRetrying {
-                                    turn_id: turn_id.to_string(),
-                                    round_num,
-                                    attempt,
-                                    max_retries,
-                                    delay_secs,
-                                    error_message: error,
-                                },
-                            ));
-                    }
-                    qaqh_gate::StreamEvent::Error(msg) => {
-                        log::error!(
-                            "[TURN] gate error turn_id={turn_id} round_num={round_num}: {msg}"
-                        );
-                        gate_error = Some(msg);
-                        had_error = true;
-                    }
-                },
-            );
-    GateRequestResult {
-        content,
-        reasoning,
-        tool_calls_raw,
-        response_output_items,
-        active_stream_block,
-        timeline_tools_open,
-        had_error,
-        done_seen,
-        gate_error,
-        current_request_usage,
-        request_error: result.err().map(|e| e.to_string()),
-        last_usage,
-    }
-}
+    // ── gate_request moved to turn_lap::gate (A2 step3) ──
     fn run_lap(
         &mut self,
         ctx: &mut RingContext,
@@ -1541,7 +768,7 @@ impl TurnEngine {
     ) -> Outcome {
         log::info!("[TURN] run_lap turn_id={} round_num={}", turn_id, round_num);
         // Rebuild provider from current config（gate_lap 准备逻辑，见 turn_lap::gate）
-        let provider = super::turn_lap::gate::provider_for(ctx);
+        let provider = provider_for(ctx);
 
         loop {
             // ── Interrupt check ──
@@ -1554,7 +781,7 @@ impl TurnEngine {
                         state: qaqh_domain::TimelineTurnState::Cancelled,
                         failure: None,
                     });
-                return Self::abort_running_turn(ctx, turn_id, last_usage);
+                return abort_running_turn(ctx, turn_id, last_usage);
             }
             if !ctx.pending.is_empty() {
                 ctx.agent.msg.remove_last_step_if_incomplete();
@@ -1669,7 +896,7 @@ impl TurnEngine {
                 current_request_usage,
                 request_error,
                 last_usage,
-            } = Self::gate_request(
+            } = gate_request(
                 ctx,
                 &provider,
                 messages,
@@ -1681,7 +908,7 @@ impl TurnEngine {
 
 
             if ctx.cancel.is_set() {
-                Self::seal_timeline_terminal_round(
+                seal_timeline_terminal_round(
                     ctx,
                     &turn_id,
                     round_num,
@@ -1690,7 +917,7 @@ impl TurnEngine {
                     qaqh_domain::TimelineTurnState::Cancelled,
                     None,
                 );
-                return Self::abort_running_turn(ctx, turn_id, last_usage);
+                return abort_running_turn(ctx, turn_id, last_usage);
             }
 
             if (had_error || request_error.is_some()) && !done_seen {
@@ -1706,7 +933,7 @@ impl TurnEngine {
                 let message = gate_error
                     .or_else(|| request_error.clone())
                     .unwrap_or_else(|| "Model request failed".into());
-                Self::seal_timeline_terminal_round(
+                seal_timeline_terminal_round(
                     ctx,
                     &turn_id,
                     round_num,
@@ -1759,574 +986,50 @@ impl TurnEngine {
                 round_num
             );
 
-            // ── Parse + push assistant message ──
-            let parsed = util::parse_tool_calls_from_response(
+            // ── Parse + push assistant message (turn_lap::parse) ──
+            let crate::ringing_v1::turn_lap::parse::ParseOutput {
+                parsed,
+                assistant_msg,
+                effect,
+            } = crate::ringing_v1::turn_lap::parse::parse_and_ingest(
+                ctx,
+                &turn_id,
+                round_num,
                 &content,
                 &reasoning,
                 &tool_calls_raw,
-                &ctx.agent,
+                response_output_items,
+                &mut active_stream_block,
+                &mut timeline_tools_open,
             );
-            // Structured/non-streamed tool calls can arrive without a prior
-            // ToolCallProgress event. Open their native blocks here so every
-            // later lifecycle patch has one stable target.
-            for tool_call in &parsed {
-                if timeline_tools_open.insert(tool_call.id.clone()) {
-                    let args_json = tool_call.function.arguments.clone();
-                    ctx.emitter
-                        .emit_timeline(qaqh_domain::TimelineIntent::BlockOpened {
-                            turn_id: turn_id.clone(),
-                            round_num,
-                            block_id: format!("tool:{}", tool_call.id),
-                            kind: qaqh_domain::TimelineBlockKind::Tool,
-                            tool: Some(qaqh_domain::TimelineTool {
-                                tool_call_id: tool_call.id.clone(),
-                                name: tool_call.function.name.clone(),
-                                state: qaqh_domain::TimelineToolState::Prepared,
-                                summary: None,
-                                args_json: Some(args_json),
-                                output: None,
-                                diff: None,
-                                progress: String::new(),
-                                failure: None,
-                                permission: None,
-                            }),
-                        });
-                }
-            }
-            let mut assistant_msg = util::build_assistant_message(&content, &reasoning, &parsed);
-            assistant_msg.content.extend(response_output_items);
-            let receipt = ctx.flow.ingest(
-                &mut ctx.agent.msg,
-                qaqh_message::builtin::MODEL,
-                assistant_msg.clone(),
-            );
-            // model 源（Sink::Step）的 store 层决策透传：TurnComplete 结束回合，
-            // None 表示可能有工具待执行。
-            let effect = receipt.effect.unwrap_or(Effect::None);
-            ctx.agent
-                .msg
-                .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-
-            util::emit_round_complete_via_emitter(
-                ctx.emitter,
-                &turn_id,
-                round_num,
-                &assistant_msg,
-                &content,
-                &reasoning,
-                &parsed,
-            );
-
-            // Native transcript sealing is independent from the legacy
-            // RoundComplete projection. A Markdown consumer only sees these
-            // blocks as final after the explicit seal.
-            Self::seal_active_stream_block(ctx, &turn_id, round_num, &mut active_stream_block);
-            if parsed.is_empty() {
-                ctx.emitter
-                    .emit_timeline(qaqh_domain::TimelineIntent::RoundSealed {
-                        turn_id: turn_id.clone(),
-                        round_num,
-                        is_final: true,
-                    });
-            }
+            // parsed/assistant_msg preserved for future admit/backfill; currently only `effect` drives control flow
+            let _ = (&parsed, &assistant_msg);
 
             match effect {
                 Effect::None => {
-                    // ── Execute tools ──
-                    *ctx.phase = LoopPhase::ToolsRunning;
-
-                    let mut pending = ctx.agent.msg.get_last_step_pending();
-                    if !pending.is_empty() {
-                        // Duplicate tool-call ID check
-                        let mut seen = HashSet::new();
-                        if pending.iter().any(|t| !seen.insert(t.id.clone())) {
-                            ctx.agent.msg.remove_last_step_if_incomplete();
-                            // Ringing 双发：OperationFailed（结构化错误）
-                            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                                qaqh_domain::ControlEvent::OperationFailed {
-                                    occurrence_id: Self::occurrence_id(),
-                                    scope: qaqh_domain::ErrorScope::Tool,
-                                    error: Self::domain_failure(
-                                        "duplicate_tool_call",
-                                        "Duplicate tool-call ID from model".into(),
-                                        Some("duplicate_tool_call"),
-                                    ),
-                                    operation_id: None,
-                                },
-                            ));
-                            return Outcome::Handled;
-                        }
-
-                        // A model response must not create unbounded work. Rejected
-                        // calls still receive a result so the next round can recover.
-                        const MAX_TOOL_CALLS_PER_ROUND: usize = 16;
-                        if pending.len() > MAX_TOOL_CALLS_PER_ROUND {
-                            let rejected = pending.split_off(MAX_TOOL_CALLS_PER_ROUND);
-                            for call in rejected {
-                                ctx.agent.msg.push_tool_result_direct(
-                                    &call.id,
-                                    "[ERROR] Tool-call limit exceeded for this round (max 16). Retry the remaining calls in a later round.",
-                                    false,
-                                );
-                            }
-                        }
-
-                        // Admit the complete model batch before executing any member.
-                        let tool_call_order = pending
-                            .iter()
-                            .map(|call| call.id.clone())
-                            .collect::<Vec<_>>();
-                        log::info!(
-                            "[TURN] run_lap turn_id={} round_num={} admit_batch {} pending tools",
-                            turn_id,
-                            round_num,
-                            pending.len()
-                        );
-                        const MAX_PARALLEL_TOOL_WORKERS: usize = 4;
-                        let (_serial_groups, serial_after) =
-                            conflict::resolve_write_conflicts(&pending);
-                        let serial_call_ids: HashSet<String> = serial_after
-                            .iter()
-                            .map(|index| pending[*index].id.clone())
-                            .collect();
-                        let admission = tool.admit_batch(ctx, &pending, &turn_id, round_num);
-                        if !admission.pending_permission_ids.is_empty()
-                            || !admission.pending_plans.is_empty()
-                            || admission.pending_todo_activation.is_some()
-                        {
-                            let reason = if !admission.pending_permission_ids.is_empty() {
-                                YieldReason::PermissionPending
-                            } else if admission.pending_todo_activation.is_some() {
-                                YieldReason::PlanReview // same UI interaction, review_type distinguishes
-                            } else {
-                                YieldReason::PlanReview
-                            };
-                            // Capture plan info before moving into TurnState
-                            let plan_submitted = if reason == YieldReason::PlanReview {
-                                if let Some(ref todo_act) = admission.pending_todo_activation {
-                                    Some((
-                                        todo_act.call_id.clone(),
-                                        String::new(),
-                                        "todo_activation".to_string(),
-                                        Some(todo_act.items.clone()),
-                                    ))
-                                } else {
-                                    admission.pending_plans.front().map(|plan| {
-                                        (
-                                            plan.call_id.clone(),
-                                            plan.content.clone(),
-                                            "plan".to_string(),
-                                            None,
-                                        )
-                                    })
-                                }
-                            } else {
-                                None
-                            };
-                            self.suspended = Some(TurnState {
-                                session_id: ctx.agent.session.seed.clone(),
-                                turn_id: turn_id.clone(),
-                                round_num,
-                                pending_permission_ids: admission.pending_permission_ids,
-                                deferred_authorized: admission.authorized,
-                                tool_call_order,
-                                serial_call_ids,
-                                pending_asks: admission.pending_asks,
-                                pending_plans: admission.pending_plans,
-                                pending_todo_activation: admission.pending_todo_activation,
-                                usage: last_usage.clone(),
-                                reason,
-                            });
-                            if let Some((call_id, plan_content, review_type, todo_items)) =
-                                plan_submitted
-                            {
-                                // Ringing 双发：PlanReviewRequested（plan 评审请求）
-                                ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                                    qaqh_domain::ControlEvent::PlanReviewRequested {
-                                        interaction_id: call_id.clone(),
-                                        turn_id: turn_id.clone(),
-                                        plan_content,
-                                        review_type,
-                                        todo_items: todo_items.map(|items| {
-                                            items
-                                                .into_iter()
-                                                .map(|t| qaqh_domain::TodoItem {
-                                                    id: t.id,
-                                                    title: t.title,
-                                                    description: t.description,
-                                                    complexity: t.complexity,
-                                                })
-                                                .collect()
-                                        }),
-                                    },
-                                ));
-                            }
-                            return Outcome::YieldToUser { turn_id, reason };
-                        }
-                        let mut ordered_skill_effects = Vec::new();
-                        let (mut parallel_authorized, serial_authorized): (Vec<_>, Vec<_>) =
-                            admission
-                                .authorized
-                                .into_iter()
-                                .partition(|admitted| !serial_call_ids.contains(&admitted.call_id));
-
-                        // Execute independent tools in bounded parallel batches.
-                        while !parallel_authorized.is_empty() {
-                            let batch_len =
-                                parallel_authorized.len().min(MAX_PARALLEL_TOOL_WORKERS);
-                            let batch: Vec<_> = parallel_authorized.drain(..batch_len).collect();
-                            let (progress_tx, progress_rx) =
-                                qaqh_workspace::bounded_exec_progress_channel();
-                            let mut handles: Vec<(String, std::thread::JoinHandle<_>)> = Vec::new();
-
-                            for admitted in batch {
-                                let tx = progress_tx.clone();
-                                let call_id = admitted.call_id.clone();
-                                let tool_name = admitted.auth.tool_name().to_string();
-                                let tool_args = admitted.auth.args().clone();
-                                ToolEngine::emit_timeline_tool_running(
-                                    ctx, &turn_id, round_num, &call_id, &tool_name, &tool_args,
-                                );
-                                let handle = std::thread::Builder::new()
-                                    .stack_size(4 * 1024 * 1024)
-                                    .spawn({
-                                        let auth = admitted.auth;
-                                        let cid = call_id.clone();
-                                        let actor_scope =
-                                            qaqh_workspace::runtime::ActorToolScope::capture();
-                                        move || {
-                                            let _scope = actor_scope.install();
-                                            let result =
-                                                qaqh_workspace::execution::execute_authorized(
-                                                    *auth,
-                                                    Some(tx),
-                                                );
-                                            (
-                                                cid,
-                                                result.content,
-                                                result.success,
-                                                result.result,
-                                                result.code_delta,
-                                                result.skill_effects,
-                                            )
-                                        }
-                                    })
-                                    .expect("tool thread spawn");
-                                handles.push((call_id, handle));
-                            }
-                            drop(progress_tx);
-
-                            // Drain progress
-                            tool.drain_progress_external(ctx, progress_rx, &turn_id, round_num);
-
-                            // Collect results
-                            let cancelled = ctx.cancel.is_set();
-                            for (call_id, h) in handles {
-                                if cancelled {
-                                    let _ = h.join(); // reap
-                                } else {
-                                    match h.join() {
-                                        Ok((
-                                            _cid,
-                                            content,
-                                            success,
-                                            _canonical_result,
-                                            code_delta,
-                                            skill_effects,
-                                        )) => {
-                                            ctx.agent.msg.push_tool_result_direct_with_diff(
-                                                &call_id,
-                                                &content,
-                                                success,
-                                                _canonical_result.diff.clone(),
-                                            );
-                                            ordered_skill_effects
-                                                .push((call_id.clone(), skill_effects));
-                                            if let Some(ref delta) = code_delta {
-                                                ctx.stats.push_delta(delta.clone());
-                                                // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
-                                                ctx.emitter.emit_domain(
-                                                    qaqh_domain::DomainEvent::Tool(
-                                                        qaqh_domain::ToolEvent::CodeChanged {
-                                                            tool_call_id: call_id.clone(),
-                                                            turn_id: turn_id.clone(),
-                                                            round_num,
-                                                            lines_added: delta.lines_added,
-                                                            lines_removed: delta.lines_removed,
-                                                            files_created: delta.files_created,
-                                                            files_deleted: delta.files_deleted,
-                                                            file: delta.file.clone(),
-                                                        },
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                        Err(_) => {
-                                            ctx.agent.msg.push_tool_result_direct(
-                                                &call_id,
-                                                "[ERROR] tool thread panicked",
-                                                false,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Execute later same-file writers exactly once, after the
-                        // first writer from their conflict group has completed.
-                        for admitted in serial_authorized {
-                            if ctx.cancel.is_set() {
-                                break;
-                            }
-                            let call_id = admitted.call_id;
-                            let tool_name = admitted.auth.tool_name().to_string();
-                            let tool_args = admitted.auth.args().clone();
-                            ToolEngine::emit_timeline_tool_running(
-                                ctx, &turn_id, round_num, &call_id, &tool_name, &tool_args,
-                            );
-                            let (progress_tx, progress_rx) =
-                                qaqh_workspace::bounded_exec_progress_channel();
-                            let handle = std::thread::Builder::new()
-                                .stack_size(4 * 1024 * 1024)
-                                .spawn({
-                                    let auth = admitted.auth;
-                                    let actor_scope =
-                                        qaqh_workspace::runtime::ActorToolScope::capture();
-                                    move || {
-                                        let _scope = actor_scope.install();
-                                        let result = qaqh_workspace::execution::execute_authorized(
-                                            *auth,
-                                            Some(progress_tx),
-                                        );
-                                        (
-                                            result.content,
-                                            result.success,
-                                            result.result,
-                                            result.code_delta,
-                                            result.skill_effects,
-                                        )
-                                    }
-                                })
-                                .expect("tool thread spawn");
-                            tool.drain_progress_external(ctx, progress_rx, &turn_id, round_num);
-                            match handle.join() {
-                                Ok((
-                                    content,
-                                    success,
-                                    _canonical_result,
-                                    code_delta,
-                                    skill_effects,
-                                )) => {
-                                    ctx.agent.msg.push_tool_result_direct_with_diff(
-                                        &call_id,
-                                        &content,
-                                        success,
-                                        _canonical_result.diff.clone(),
-                                    );
-                                    ordered_skill_effects.push((call_id.clone(), skill_effects));
-                                    if let Some(ref delta) = code_delta {
-                                        ctx.stats.push_delta(delta.clone());
-                                        // Ringing 双发：CodeChanged（与 engine_tool 同载荷）
-                                        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                                            qaqh_domain::ToolEvent::CodeChanged {
-                                                tool_call_id: call_id.clone(),
-                                                turn_id: turn_id.clone(),
-                                                round_num,
-                                                lines_added: delta.lines_added,
-                                                lines_removed: delta.lines_removed,
-                                                files_created: delta.files_created,
-                                                files_deleted: delta.files_deleted,
-                                                file: delta.file.clone(),
-                                            },
-                                        ));
-                                    }
-                                }
-                                Err(_) => ctx.agent.msg.push_tool_result_direct(
-                                    &call_id,
-                                    "[ERROR] tool thread panicked",
-                                    false,
-                                ),
-                            }
-                        }
-
-                        if ctx.cancel.is_set() {
-                            Self::seal_timeline_terminal_round(
-                                ctx,
-                                &turn_id,
-                                round_num,
-                                active_stream_block.as_ref(),
-                                &timeline_tools_open,
-                                qaqh_domain::TimelineTurnState::Cancelled,
-                                None,
-                            );
-                            return Self::abort_running_turn(ctx, turn_id, last_usage);
-                        }
-                        ordered_skill_effects.sort_by_key(|(call_id, _)| {
-                            tool_call_order
-                                .iter()
-                                .position(|id| id == call_id)
-                                .unwrap_or(usize::MAX)
-                        });
-                        for (_, effects) in ordered_skill_effects {
-                            ctx.agent.apply_tool_effects(effects, ctx.flow);
-                        }
-
-                        // Suspend before the next gate lap while any approval,
-                        // ask_user call, or plan review from this assistant round
-                        // is unresolved.
-                        if !admission.pending_permission_ids.is_empty()
-                            || !admission.pending_asks.is_empty()
-                            || !admission.pending_plans.is_empty()
-                            || admission.pending_todo_activation.is_some()
-                        {
-                            let reason = if !admission.pending_permission_ids.is_empty() {
-                                YieldReason::PermissionPending
-                            } else if admission.pending_todo_activation.is_some() {
-                                YieldReason::PlanReview
-                            } else if !admission.pending_plans.is_empty() {
-                                YieldReason::PlanReview
-                            } else {
-                                YieldReason::AskUser
-                            };
-                            // Capture plan info before moving into TurnState
-                            let plan_submitted = if reason == YieldReason::PlanReview {
-                                if let Some(ref todo_act) = admission.pending_todo_activation {
-                                    Some((
-                                        todo_act.call_id.clone(),
-                                        String::new(),
-                                        "todo_activation".to_string(),
-                                        Some(todo_act.items.clone()),
-                                    ))
-                                } else {
-                                    admission.pending_plans.front().map(|plan| {
-                                        (
-                                            plan.call_id.clone(),
-                                            plan.content.clone(),
-                                            "plan".to_string(),
-                                            None,
-                                        )
-                                    })
-                                }
-                            } else {
-                                None
-                            };
-                            self.suspended = Some(TurnState {
-                                session_id: ctx.agent.session.seed.clone(),
-                                turn_id: turn_id.clone(),
-                                round_num,
-                                pending_permission_ids: admission.pending_permission_ids,
-                                deferred_authorized: Vec::new(),
-                                tool_call_order,
-                                serial_call_ids,
-                                pending_asks: admission.pending_asks,
-                                pending_plans: admission.pending_plans,
-                                pending_todo_activation: None,
-                                usage: last_usage.clone(),
-                                reason,
-                            });
-                            if reason == YieldReason::AskUser {
-                                Self::emit_active_ask(
-                                    ctx,
-                                    self.suspended.as_ref().expect("suspended ask state"),
-                                );
-                            }
-                            if let Some((call_id, plan_content, review_type, todo_items)) =
-                                plan_submitted
-                            {
-                                // Ringing 双发：PlanReviewRequested（plan 评审请求）
-                                ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                                    qaqh_domain::ControlEvent::PlanReviewRequested {
-                                        interaction_id: call_id.clone(),
-                                        turn_id: turn_id.clone(),
-                                        plan_content,
-                                        review_type,
-                                        todo_items: todo_items.map(|items| {
-                                            items
-                                                .into_iter()
-                                                .map(|t| qaqh_domain::TodoItem {
-                                                    id: t.id,
-                                                    title: t.title,
-                                                    description: t.description,
-                                                    complexity: t.complexity,
-                                                })
-                                                .collect()
-                                        }),
-                                    },
-                                ));
-                            }
-                            return Outcome::YieldToUser { turn_id, reason };
-                        }
+                    // ── Admit/dispatch 段已迁入 turn_lap::admit (knife-7 A2 step5) ──
+                    if let Some(outcome) = turn_admit::admit_and_dispatch(
+                        ctx,
+                        tool,
+                        &turn_id,
+                        round_num,
+                        last_usage.clone(),
+                        &active_stream_block,
+                        &timeline_tools_open,
+                        &mut self.suspended,
+                    ) {
+                        return outcome;
                     }
 
-                    // All tools from this round are now resolved.
-                    self.emit_completed_tool_round(ctx, &turn_id, round_num);
-
-                    if let Err(error) = ctx.agent.skills.complete_model_lap() {
-                        // Ringing 双发：OperationFailed（skill lap 失败）
-                        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                            qaqh_domain::ControlEvent::OperationFailed {
-                                occurrence_id: Self::occurrence_id(),
-                                scope: qaqh_domain::ErrorScope::Tool,
-                                error: Self::domain_failure("skill_lap", error, Some("skill_lap")),
-                                operation_id: None,
-                            },
-                        ));
-                    }
-                    // Host-forced activation (second ignored lap) changes the
-                    // active set: materialize the envelope at the latest
-                    // message position before the next model reply.
-                    ctx.agent.sync_skill_injection(ctx.flow);
-
-                    // Another lap: tools executed, back to Gate
-                    return Outcome::ContinueTurn {
-                        turn_id,
-                        round_num: round_num + 1,
-                        usage: last_usage,
-                    };
+                    // All tools from this round are now resolved → backfill/skills/ContinueTurn (knife-7 A2 step6)
+                    return turn_backfill::handle_tools_done(ctx, turn_id, round_num, last_usage);
                 }
                 Effect::TurnComplete => {}
                 _ => {}
             }
 
-            ctx.agent
-                .msg
-                .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-            let forced = match ctx.agent.skills.complete_model_lap() {
-                Ok(forced) => forced,
-                Err(error) => {
-                    // Ringing 双发：OperationFailed（skill lap 失败）
-                    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                        qaqh_domain::ControlEvent::OperationFailed {
-                            occurrence_id: Self::occurrence_id(),
-                            scope: qaqh_domain::ErrorScope::Tool,
-                            error: Self::domain_failure("skill_lap", error, Some("skill_lap")),
-                            operation_id: None,
-                        },
-                    ));
-                    Vec::new()
-                }
-            };
-            if ctx.agent.skills.has_requested() || !forced.is_empty() {
-                // Host-forced activation changed the active set: materialize
-                // the envelope before the next model lap.
-                ctx.agent.sync_skill_injection(ctx.flow);
-                return Outcome::ContinueTurn {
-                    turn_id,
-                    round_num: round_num + 1,
-                    usage: last_usage,
-                };
-            }
-            ctx.emitter
-                .emit_timeline(qaqh_domain::TimelineIntent::TurnSealed {
-                    turn_id: turn_id.clone(),
-                    state: qaqh_domain::TimelineTurnState::Completed,
-                    failure: None,
-                });
-            return Outcome::TurnComplete {
-                turn_id,
-                usage: last_usage,
-            };
+            // TurnComplete / fall-through → backfill/skills/ContinueTurn (knife-7 A2 step6)
+            return turn_backfill::handle_turn_complete(ctx, turn_id, round_num, last_usage);
         }
     }
 
@@ -2336,98 +1039,9 @@ impl TurnEngine {
         turn_id: &str,
         round_num: u32,
     ) -> Vec<(String, String, String, bool, Option<String>)> {
-        let results = ctx.agent.msg.last_step_tool_results();
-        let ts = util::chrono_local_datetime();
-        for (tc_id, name, content, success, diff) in &results {
-            let args = ctx
-                .agent
-                .msg
-                .tool_call_args(tc_id)
-                .map(|a| a.to_string())
-                .unwrap_or_default();
-            let summary: String = content
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(120)
-                .collect();
-            ToolEngine::emit_timeline_tool_result(
-                ctx,
-                turn_id,
-                round_num,
-                tc_id,
-                name,
-                &args,
-                content,
-                *success,
-                diff.clone(),
-            );
-            // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                qaqh_domain::ToolEvent::AuditRecorded {
-                    tool_name: name.clone(),
-                    result_summary: summary.clone(),
-                    success: *success,
-                    time: ts.clone(),
-                    args_ref: None,
-                },
-            ));
-            // Ringing 终态：ToolFinished（legacy 汇总 ToolResults 退役后的替代——
-            // 批量执行路径每个工具单独发终态，与 UI 主动调用路径一致）。发射
-            // 时机在 round 交互全部裁决之后（ask/plan/permission 收口处），
-            // 保证事件顺序为"裁决先、终态后"，前端/测试按序消费。
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                qaqh_domain::ToolEvent::ToolFinished {
-                    tool_call_id: tc_id.clone(),
-                    turn_id: turn_id.to_string(),
-                    round_num,
-                    result: if *success {
-                        qaqh_types::ToolResult::ok(content.clone())
-                    } else {
-                        qaqh_types::ToolResult::error(content.clone())
-                    },
-                },
-            ));
-        }
-
-        for (tool_call_id, _, _, _, _) in &results {
-            ctx.emitter
-                .emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
-                    turn_id: turn_id.to_string(),
-                    round_num,
-                    block_id: format!("tool:{tool_call_id}"),
-                });
-        }
-        ctx.emitter
-            .emit_timeline(qaqh_domain::TimelineIntent::RoundSealed {
-                turn_id: turn_id.to_string(),
-                round_num,
-                is_final: false,
-            });
-        // Refresh status bar tasks after every tool round
-        if !results.is_empty() {
-            // Ringing 双发：DashboardUpdated（replaceable 覆盖）
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                qaqh_domain::ControlEvent::DashboardUpdated {
-                    hp_connected: true,
-                    session_seed: ctx.agent.session.seed.clone(),
-                    tool_calls_total: 0,
-                    tool_failures: 0,
-                    current_phase: "single".into(),
-                    streaming: false,
-                },
-            ));
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                qaqh_domain::ControlEvent::DashboardSnapshot {
-                    snapshot: dashboard::build_snapshot(ctx.agent.session.seed.clone()),
-                },
-            ));
-        }
-        ctx.agent
-            .msg
-            .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-        results
+        // Delegates to turn_lap::backfill (knife-7 A2 step6) — keeps handle_* sites thin
+        // while sharing one verbatim implementation.
+        turn_backfill::emit_completed_tool_round(ctx, turn_id, round_num)
     }
 
     /// Reset all turn state (called on Cancel / new session).
@@ -2476,14 +1090,17 @@ mod tests {
         first_delta: &str,
         second_delta: &str,
     ) {
+        use crate::ringing_v1::turn_lap::gate::{
+            CHECKPOINT_TOKEN_INTERVAL, emit_stream_block_checkpoint, reset_stream_block_checkpoint,
+        };
         let emitter = RecordingEmitter::default();
         let mut stream_block_id = None;
         let mut stream_block_text = String::new();
-        let mut checkpoint_tokens = super::CHECKPOINT_TOKEN_INTERVAL - 1;
+        let mut checkpoint_tokens = CHECKPOINT_TOKEN_INTERVAL - 1;
         let mut last_checkpoint_at = std::time::Instant::now();
 
         let first_round = first_delta.to_string();
-        super::TurnEngine::emit_stream_block_checkpoint(
+        emit_stream_block_checkpoint(
             &emitter,
             "turn-1",
             0,
@@ -2498,14 +1115,14 @@ mod tests {
         );
 
         // The tool block seals the first stream block before the next one opens.
-        super::TurnEngine::reset_stream_block_checkpoint(
+        reset_stream_block_checkpoint(
             &mut stream_block_id,
             &mut stream_block_text,
         );
 
-        checkpoint_tokens = super::CHECKPOINT_TOKEN_INTERVAL - 1;
+        checkpoint_tokens = CHECKPOINT_TOKEN_INTERVAL - 1;
         let second_round = format!("{first_delta}{second_delta}");
-        super::TurnEngine::emit_stream_block_checkpoint(
+        emit_stream_block_checkpoint(
             &emitter,
             "turn-1",
             0,
@@ -2519,9 +1136,9 @@ mod tests {
             &mut last_checkpoint_at,
         );
 
-        checkpoint_tokens = super::CHECKPOINT_TOKEN_INTERVAL - 1;
+        checkpoint_tokens = CHECKPOINT_TOKEN_INTERVAL - 1;
         let final_round = format!("{second_round}-tail");
-        super::TurnEngine::emit_stream_block_checkpoint(
+        emit_stream_block_checkpoint(
             &emitter,
             "turn-1",
             0,
