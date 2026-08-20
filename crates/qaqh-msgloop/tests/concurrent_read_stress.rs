@@ -4,12 +4,13 @@
 //!
 //! M3：走 Ringing ToolInvoke 命令（legacy Ui2Agent::ToolCall 已拆除）。
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use qaqh_domain::{ControlCommand, ControlEvent, ConversationEvent, SessionState, ToolCommand};
-use qaqh_msgloop::ringing_v1::loop_core::Loop;
 use qaqh_msgloop::state::agent::AgentState;
 use qaqh_ringing::{
     RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
@@ -35,7 +36,7 @@ fn ten_parallel_reads_same_file() {
     let (input_reader, mut input_writer) = os_pipe::pipe().unwrap();
     let (output_reader, output_writer) = os_pipe::pipe().unwrap();
 
-    let mut loop_ = Loop::new_ipc(agent, BufReader::new(input_reader), output_writer);
+    let mut loop_ = common::spawn_pipe_loop(agent, BufReader::new(input_reader), output_writer);
 
     // ── Spawn a thread that feeds commands and collects events ──
     let event_rx = event_rx_to_test;

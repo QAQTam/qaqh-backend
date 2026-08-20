@@ -9,6 +9,8 @@
 //!   create session → send text → verify TurnStarted / RoundDelta / terminal
 //! * ringing_send_is_not_dropped_during_a_session_switch
 
+mod common;
+
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -19,7 +21,6 @@ use std::time::{Duration, Instant};
 use qaqh_domain::{
     ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, SessionState,
 };
-use qaqh_msgloop::ringing_v1::loop_core::Loop;
 use qaqh_msgloop::state::agent::AgentState;
 use qaqh_ringing::{
     RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
@@ -240,7 +241,7 @@ fn create_session_emits_session_state() {
 
     let (ir, mut iw) = os_pipe::pipe().unwrap();
     let (oread, owrite) = os_pipe::pipe().unwrap();
-    let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
+    let mut lp = common::spawn_pipe_loop(agent, BufReader::new(ir), owrite);
     let rx = spawn_event_reader(oread);
 
     let drv = thread::spawn(move || {
@@ -287,7 +288,7 @@ fn send_message_triggers_turn_lifecycle() {
 
     let (ir, mut iw) = os_pipe::pipe().unwrap();
     let (oread, owrite) = os_pipe::pipe().unwrap();
-    let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
+    let mut lp = common::spawn_pipe_loop(agent, BufReader::new(ir), owrite);
     let rx = spawn_event_reader(oread);
 
     let drv = thread::spawn(move || {
@@ -388,7 +389,7 @@ fn system_injection_lands_inside_running_turn() {
 
     let (ir, mut iw) = os_pipe::pipe().unwrap();
     let (oread, owrite) = os_pipe::pipe().unwrap();
-    let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
+    let mut lp = common::spawn_pipe_loop(agent, BufReader::new(ir), owrite);
     let rx = spawn_event_reader(oread);
 
     let drv = thread::spawn(move || {
@@ -505,7 +506,7 @@ fn ringing_send_is_not_dropped_during_a_session_switch() {
 
     let (ir, mut iw) = os_pipe::pipe().unwrap();
     let (oread, owrite) = os_pipe::pipe().unwrap();
-    let mut lp = Loop::new_ipc(agent, BufReader::new(ir), owrite);
+    let mut lp = common::spawn_pipe_loop(agent, BufReader::new(ir), owrite);
     let rx = spawn_event_reader(oread);
 
     let drv = thread::spawn(move || {
