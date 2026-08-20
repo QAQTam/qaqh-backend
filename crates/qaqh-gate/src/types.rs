@@ -75,6 +75,9 @@ pub struct ProviderConfig {
     /// Configured from `EndpointSpec` (registry) so new providers only need a
     /// config change, never gate code.
     pub responses_compat: ResponsesCompat,
+    /// Prompt cache key for prefix KV reuse (opencode `promptCacheKey`).
+    /// `None` = not sent. For opencode/muse this is `session.seed`.
+    pub prompt_cache_key: Option<String>,
 }
 
 /// Responses API provider capability differences.
@@ -167,6 +170,7 @@ impl ProviderConfig {
             stateful: false,
             supports_tail_system: true,
             responses_compat: ResponsesCompat::default(),
+            prompt_cache_key: None,
         }
     }
 
@@ -197,6 +201,7 @@ impl ProviderConfig {
             stateful: false,
             supports_tail_system: true,
             responses_compat: ResponsesCompat::default(),
+            prompt_cache_key: None,
         }
     }
 

@@ -297,6 +297,133 @@ fn convert_user_content(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
     parts
 }
 
+fn sanitize_openai_schema(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    const TYPES: &[&str] = &["string", "number", "boolean", "integer", "object", "array", "null"];
+    const COMPOSITION_KEYS: &[&str] = &["anyOf", "oneOf", "allOf"];
+    match value {
+        Value::Bool(_) => return serde_json::json!({"type": "string"}),
+        Value::Array(arr) => return Value::Array(arr.iter().map(sanitize_openai_schema).collect()),
+        Value::Object(map) => {
+            let mut result = serde_json::Map::new();
+            if let Some(Value::String(s)) = map.get("$ref") {
+                result.insert("$ref".into(), Value::String(s.clone()));
+            }
+            if let Some(Value::String(s)) = map.get("description") {
+                result.insert("description".into(), Value::String(s.clone()));
+            }
+            if map.contains_key("const") {
+                if let Some(v) = map.get("const") {
+                    result.insert("enum".into(), Value::Array(vec![sanitize_openai_schema(v)]));
+                }
+            } else if let Some(Value::Array(arr)) = map.get("enum") {
+                result.insert("enum".into(), Value::Array(arr.clone()));
+            }
+            if let Some(Value::Object(props)) = map.get("properties") {
+                let mut new_props = serde_json::Map::new();
+                for (k, v) in props {
+                    new_props.insert(k.clone(), sanitize_openai_schema(v));
+                }
+                result.insert("properties".into(), Value::Object(new_props));
+            }
+            if let Some(Value::Array(req)) = map.get("required") {
+                let filtered: Vec<Value> = req.iter().filter(|v| v.is_string()).cloned().collect();
+                result.insert("required".into(), Value::Array(filtered));
+            }
+            if map.contains_key("items") {
+                if let Some(v) = map.get("items") {
+                    result.insert("items".into(), sanitize_openai_schema(v));
+                }
+            }
+            if map.contains_key("additionalProperties") {
+                if let Some(v) = map.get("additionalProperties") {
+                    let sanitized = if v.is_boolean() { v.clone() } else { sanitize_openai_schema(v) };
+                    result.insert("additionalProperties".into(), sanitized);
+                }
+            }
+            for key in COMPOSITION_KEYS {
+                if let Some(Value::Array(arr)) = map.get(*key) {
+                    let sanitized: Vec<Value> = arr.iter().map(sanitize_openai_schema).collect();
+                    result.insert((*key).into(), Value::Array(sanitized));
+                }
+            }
+            for key in ["$defs", "definitions"] {
+                if let Some(Value::Object(obj)) = map.get(key) {
+                    let mut new_defs = serde_json::Map::new();
+                    for (k, v) in obj {
+                        new_defs.insert(k.clone(), sanitize_openai_schema(v));
+                    }
+                    result.insert(key.into(), Value::Object(new_defs));
+                }
+            }
+            let mut schema_types: Vec<String> = Vec::new();
+            if let Some(t) = map.get("type") {
+                match t {
+                    Value::String(s) => {
+                        if TYPES.contains(&s.as_str()) {
+                            schema_types.push(s.clone());
+                        }
+                    }
+                    Value::Array(arr) => {
+                        for v in arr {
+                            if let Value::String(s) = v {
+                                if TYPES.contains(&s.as_str()) {
+                                    schema_types.push(s.clone());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if schema_types.is_empty()
+                && (result.contains_key("$ref")
+                    || COMPOSITION_KEYS.iter().any(|k| result.contains_key(*k)))
+            {
+                return Value::Object(result);
+            }
+            let inferred: Vec<String> = if !schema_types.is_empty() {
+                schema_types.clone()
+            } else if ["properties", "required", "additionalProperties"]
+                .iter()
+                .any(|k| map.contains_key(*k))
+            {
+                vec!["object".into()]
+            } else if ["items", "prefixItems"].iter().any(|k| map.contains_key(*k)) {
+                vec!["array".into()]
+            } else if result.contains_key("enum") || map.contains_key("format") {
+                vec!["string".into()]
+            } else if ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"]
+                .iter()
+                .any(|k| map.contains_key(*k))
+            {
+                vec!["number".into()]
+            } else {
+                vec![]
+            };
+            if inferred.is_empty() {
+                return Value::Object(serde_json::Map::new());
+            }
+            if inferred.len() == 1 {
+                result.insert("type".into(), Value::String(inferred[0].clone()));
+            } else {
+                result.insert(
+                    "type".into(),
+                    Value::Array(inferred.iter().map(|s| Value::String(s.clone())).collect()),
+                );
+            }
+            if inferred.contains(&"object".to_string()) && !result.contains_key("properties") {
+                result.insert("properties".into(), Value::Object(serde_json::Map::new()));
+            }
+            if inferred.contains(&"array".to_string()) && !result.contains_key("items") {
+                result.insert("items".into(), serde_json::json!({"type": "string"}));
+            }
+            return Value::Object(result);
+        }
+        _ => return value.clone(),
+    }
+}
+
 fn convert_tools(
     tools: Option<Vec<ToolDef>>,
     compat: &ResponsesCompat,
@@ -305,11 +432,13 @@ fn convert_tools(
     if let Some(tds) = tools {
         for td in tds {
             let name = provider_function_name(&td.function.name, compat);
+            let sanitized_params = sanitize_openai_schema(&td.function.parameters);
             items.push(serde_json::json!({
                 "type": "function",
                 "name": name,
                 "description": td.function.description,
-                "parameters": td.function.parameters,
+                "parameters": sanitized_params,
+                "strict": false
             }));
         }
     }
@@ -365,6 +494,10 @@ fn clamp_effort(effort: Option<String>, max: &str) -> String {
     EFFORT_LADDER[idx].to_string()
 }
 
+fn is_muse_model(model: &str) -> bool {
+    model.contains("muse-spark")
+}
+
 // ── Public API ──
 
 pub fn chat_stream_responses(
@@ -399,10 +532,16 @@ pub fn chat_stream_responses(
         body_map.insert("tools".into(), serde_json::Value::Array(t.clone()));
     }
 
+    let is_muse = is_muse_model(model);
+    let max_effort = if is_muse { "xhigh" } else { compat.effort_max.as_str() };
+    let mut eff = clamp_effort(effort.clone(), max_effort);
+    if is_muse && effort.is_none() && eff == "medium" {
+        eff = "low".into();
+    }
     body_map.insert(
         "reasoning".into(),
         serde_json::json!({
-            "effort": clamp_effort(effort, &compat.effort_max),
+            "effort": eff,
             "summary": "auto",
         }),
     );
@@ -414,6 +553,9 @@ pub fn chat_stream_responses(
             "include".into(),
             serde_json::json!(["reasoning.encrypted_content"]),
         );
+    }
+    if let Some(ref pk) = provider.prompt_cache_key {
+        body_map.insert("prompt_cache_key".into(), serde_json::json!(pk));
     }
     if compat.supports_user {
         if let Some(ref uid) = user_id {
@@ -521,13 +663,22 @@ pub fn chat_sync_responses(
             serde_json::json!(["reasoning.encrypted_content"]),
         );
     }
+    let is_muse = is_muse_model(model);
+    let max_effort = if is_muse { "xhigh" } else { compat.effort_max.as_str() };
+    let mut eff = clamp_effort(None, max_effort);
+    if is_muse && eff == "medium" {
+        eff = "low".into();
+    }
     body_map.insert(
         "reasoning".into(),
         serde_json::json!({
-            "effort": clamp_effort(None, &compat.effort_max),
+            "effort": eff,
             "summary": "auto",
         }),
     );
+    if let Some(ref pk) = provider.prompt_cache_key {
+        body_map.insert("prompt_cache_key".into(), serde_json::json!(pk));
+    }
 
     let body = serde_json::Value::Object(body_map);
     let url = build_responses_url(&provider.base_url, provider.responses_path.as_deref());

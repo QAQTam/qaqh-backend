@@ -413,6 +413,8 @@ fn opencode_go() -> ProviderSpec {
                 supports_reasoning_effort: true,
                 supports_reasoning_content: false,
                 responses_effort_max: "high".into(),
+                responses_web_search: false,
+                responses_echo_web_search_call: false,
                 beta: true,
                 ..Default::default()
             },
