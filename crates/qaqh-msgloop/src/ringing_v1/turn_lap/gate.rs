@@ -113,6 +113,20 @@ pub(crate) fn emit_stream_block_checkpoint(
     last_checkpoint_at: &mut Instant,
 ) {
     append_stream_block_delta(block_id, delta, stream_block_id, stream_block_text);
+    // BUG-015 run_lap 级不变量：block 文本必须为 round 文本的局部后缀，而非整轮重复前缀。
+    debug_assert!(
+        stream_block_text.len() <= round_text.len()
+            && round_text.ends_with(stream_block_text.as_str()),
+        "BUG-015: block checkpoint must be local suffix: block {} len {} round len {}",
+        block_id,
+        stream_block_text.len(),
+        round_text.len()
+    );
+    debug_assert!(
+        block_id.starts_with(&format!("round-{round_num}:")),
+        "block_id must be round-scoped: {}",
+        block_id
+    );
     maybe_emit_block_checkpoint(
         emitter,
         turn_id,
@@ -124,6 +138,43 @@ pub(crate) fn emit_stream_block_checkpoint(
         tokens_since_checkpoint,
         last_checkpoint_at,
     );
+}
+
+/// Run-lap 级 BUG-015 不变量断言（debug only）：验证一次 gate 结果的块级隔离。
+pub(crate) fn debug_assert_gate_invariants(result: &GateRequestResult, round_num: u32) {
+    if cfg!(not(debug_assertions)) {
+        return;
+    }
+    if let Some((_, block_id)) = &result.active_stream_block {
+        debug_assert!(
+            block_id.starts_with(&format!("round-{round_num}:")),
+            "active_stream_block not round-scoped: {}",
+            block_id
+        );
+        debug_assert!(
+            !block_id.starts_with("tool:"),
+            "active stream block must not be a tool block: {}",
+            block_id
+        );
+    }
+    if let Some(arr) = result.tool_calls_raw.as_array() {
+        let parsed_ids: std::collections::HashSet<&str> =
+            arr.iter().filter_map(|v| v.get("id").and_then(|x| x.as_str())).collect();
+        for id in &result.timeline_tools_open {
+            debug_assert!(
+                parsed_ids.contains(id.as_str()) || result.done_seen,
+                "timeline_tools_open {} not in parsed tool_calls_raw {:?}",
+                id,
+                parsed_ids
+            );
+        }
+    }
+    if result.done_seen {
+        debug_assert!(
+            !result.content.contains('\u{0}'),
+            "content contains null after Done reconciliation"
+        );
+    }
 }
 
 // ── terminal / timeline 辅助（也被 run_lap / handle_* 复用） ──
@@ -558,7 +609,7 @@ pub(crate) fn gate_request(
             }
         },
     );
-    GateRequestResult {
+    let out = GateRequestResult {
         content,
         reasoning,
         tool_calls_raw,
@@ -571,7 +622,9 @@ pub(crate) fn gate_request(
         current_request_usage,
         request_error: result.err().map(|e| e.to_string()),
         last_usage,
-    }
+    };
+    debug_assert_gate_invariants(&out, round_num);
+    out
 }
 
 // ── provider 构建（已落地，保持不变） ──
