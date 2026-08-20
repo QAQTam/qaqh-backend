@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use qaqh_domain::{ControlCommand, ControlEvent, SessionState};
 use qaqh_msgloop::ringing_v1::loop_core::{Loop, LoopChannels};
 use qaqh_msgloop::ringing_v1::types::{WorkerCommand, WriterEvent};
-use qaqh_msgloop::ringing_v1::wire::WorkerCommandFrame;
 use qaqh_msgloop::state::agent::AgentState;
 use qaqh_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
 
@@ -22,7 +21,7 @@ fn send_cmd(cmd_tx: &mpsc::SyncSender<WorkerCommand>, seed: &str, command: Ringi
     let env = RingingWorkerCommandEnvelope::new(seed, "inproc-cmd", command);
     cmd_tx
         .send(WorkerCommand {
-            frame: WorkerCommandFrame::Ringing(env),
+            frame: env,
             causation: Some("inproc-cmd".into()),
         })
         .expect("test channel/thread must not fail");
