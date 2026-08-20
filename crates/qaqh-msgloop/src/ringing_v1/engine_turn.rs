@@ -1203,6 +1203,14 @@ impl TurnEngine {
                     echo_reasoning_content: endpoint.responses_echo_reasoning_content,
                 };
             }
+            // Muse Spark 专项：物理前缀缓存 + 关明文回放 + 放宽档位至 xhigh
+            if p.model.contains("muse-spark") {
+                p.prompt_cache_key = Some(ctx.agent.session.seed.clone());
+                p.responses_compat.echo_reasoning_content = false;
+                p.responses_compat.effort_max = "xhigh".into();
+                p.responses_compat.web_search = false;
+                p.responses_compat.echo_web_search_call = false;
+            }
             p
         } else {
             let mut p = qaqh_gate::ProviderConfig::openai(
