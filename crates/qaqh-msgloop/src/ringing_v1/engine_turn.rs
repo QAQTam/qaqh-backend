@@ -758,6 +758,92 @@ impl TurnEngine {
     }
 
     // ── gate_request moved to turn_lap::gate (A2 step3) ──
+
+    /// 构造本轮 gate 的传输快照并执行 auto-compact 预检（A2 step7 瘦身）。
+    ///
+    /// 覆盖原 `run_lap` 中“Build and measure”整段（verbatim 搬运）：
+    /// `build_context` → `dump_request_log` → `estimate_prepared_request`
+    /// → `auto_compact` 阈值判定与执行（含重建与重估计）→ `take_cache_diagnostics`
+    /// → `token_calibration_fingerprint`/`prepared_request_key`。
+    /// 返回 `(messages, request_estimate, fingerprint, key)` 供 `gate_request` 与
+    /// 事后 `observe_prepared_request` 消费。
+    fn prepare_gate_snapshot(
+        ctx: &mut RingContext,
+    ) -> (
+        Vec<qaqh_types::Message>,
+        crate::state::token_calibration::RequestTokenEstimate,
+        String,
+        String,
+    ) {
+        let mut messages = ctx.agent.build_context();
+        dump_request_log(
+            &ctx.agent.session.seed,
+            ctx.agent.msg.context_revision(),
+            ctx.agent.msg.turn_count(),
+            ctx.agent.msg.trailing_messages().len(),
+            &messages,
+        );
+        let mut request_estimate = ctx
+            .agent
+            .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
+        let threshold = ctx.agent.config.auto_compact_threshold;
+        if threshold > 0.0 {
+            let limit = ctx.agent.config.context_limit as u64;
+            let api_context_tokens = request_estimate.api_context_tokens;
+            let decision_tokens = ctx.agent.auto_compact_decision_tokens(&request_estimate);
+            if decision_tokens as f64 > limit as f64 * threshold {
+                if !ctx.agent.auto_compact_allowed() {
+                    log::debug!(
+                        "[TURN] auto-compact skipped for unchanged failed candidate at revision {}",
+                        ctx.agent.msg.context_revision()
+                    );
+                } else {
+                    log::info!(
+                        "[TURN] auto-compact preflight: source={}, decision={}, raw={}, predicted={}, upper={}/{limit} tokens ({} samples, {:.0}% threshold)",
+                        if api_context_tokens.is_some() { "api" } else { "estimate" },
+                        decision_tokens,
+                        request_estimate.raw_tokens,
+                        request_estimate.predicted_tokens,
+                        request_estimate.upper_bound_tokens,
+                        request_estimate.sample_count,
+                        threshold * 100.0
+                    );
+                    let compacted = Self::run_auto_compact(ctx);
+                    ctx.agent.record_auto_compact_result(compacted);
+                    if compacted {
+                        messages = ctx.agent.build_context();
+                        request_estimate = ctx
+                            .agent
+                            .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
+                        let post_compact_tokens = request_estimate
+                            .api_context_tokens
+                            .unwrap_or(request_estimate.upper_bound_tokens);
+                        if post_compact_tokens as f64 > limit as f64 * threshold {
+                            log::warn!(
+                                "[TURN] post-compact preflight remains above threshold: source={}, decision={}/{limit}, upper={}",
+                                if request_estimate.api_context_tokens.is_some() {
+                                    "api"
+                                } else {
+                                    "estimate"
+                                },
+                                post_compact_tokens,
+                                request_estimate.upper_bound_tokens
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((hash, reasons)) = ctx.agent.take_cache_diagnostics() {
+            let _ = (hash, reasons);
+        }
+        let request_fingerprint = ctx.agent.token_calibration_fingerprint();
+        let request_key = ctx
+            .agent
+            .prepared_request_key(&messages, Some(&ctx.agent.tool_defs));
+        (messages, request_estimate, request_fingerprint, request_key)
+    }
+
     fn run_lap(
         &mut self,
         ctx: &mut RingContext,
@@ -791,97 +877,9 @@ impl TurnEngine {
                 return Outcome::Handled;
             }
 
-            // ── Build and measure the exact request snapshot for this gate lap ──
-            // The API's prompt/input token count is authoritative. An exact
-            // prepared messages + tools reading wins; otherwise the last API
-            // context remains the trigger source until this request returns a
-            // replacement reading. Only sessions without API usage fall back to
-            // the calibrated local upper bound.
-            let mut messages = ctx.agent.build_context();
-            // 传输快照 dump（诊断）：对比 messages.jsonl 定位"落盘 ≠ 传输"分叉。
-            dump_request_log(
-                &ctx.agent.session.seed,
-                ctx.agent.msg.context_revision(),
-                ctx.agent.msg.turn_count(),
-                ctx.agent.msg.trailing_messages().len(),
-                &messages,
-            );
-            let mut request_estimate = ctx
-                .agent
-                .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
-            let threshold = ctx.agent.config.auto_compact_threshold;
-            if threshold > 0.0 {
-                let limit = ctx.agent.config.context_limit as u64;
-                // Provider-returned prompt/input tokens are the primary source
-                // for the current session context. Exact-shape readings win;
-                // otherwise retain the last API reading until this changed
-                // request is sent and returns its replacement usage.
-                let api_context_tokens = request_estimate.api_context_tokens;
-                let decision_tokens = ctx.agent.auto_compact_decision_tokens(&request_estimate);
-                if decision_tokens as f64 > limit as f64 * threshold {
-                    if !ctx.agent.auto_compact_allowed() {
-                        log::debug!(
-                            "[TURN] auto-compact skipped for unchanged failed candidate at revision {}",
-                            ctx.agent.msg.context_revision()
-                        );
-                    } else {
-                        log::info!(
-                            "[TURN] auto-compact preflight: source={}, decision={}, raw={}, predicted={}, upper={}/{limit} tokens ({} samples, {:.0}% threshold)",
-                            if api_context_tokens.is_some() {
-                                "api"
-                            } else {
-                                "estimate"
-                            },
-                            decision_tokens,
-                            request_estimate.raw_tokens,
-                            request_estimate.predicted_tokens,
-                            request_estimate.upper_bound_tokens,
-                            request_estimate.sample_count,
-                            threshold * 100.0
-                        );
-                        let compacted = Self::run_auto_compact(ctx);
-                        ctx.agent.record_auto_compact_result(compacted);
-                        if compacted {
-                            messages = ctx.agent.build_context();
-                            request_estimate = ctx
-                                .agent
-                                .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
-                            // The compacted shape may already have an exact API
-                            // observation from an earlier identical request; use
-                            // it when available, otherwise keep the local upper
-                            // bound until the request below returns fresh usage.
-                            let post_compact_tokens = request_estimate
-                                .api_context_tokens
-                                .unwrap_or(request_estimate.upper_bound_tokens);
-                            if post_compact_tokens as f64 > limit as f64 * threshold {
-                                // One compact attempt per gate boundary. Remaining
-                                // pressure may be non-compactable system/tool overhead.
-                                log::warn!(
-                                    "[TURN] post-compact preflight remains above threshold: source={}, decision={}/{limit}, upper={}",
-                                    if request_estimate.api_context_tokens.is_some() {
-                                        "api"
-                                    } else {
-                                        "estimate"
-                                    },
-                                    post_compact_tokens,
-                                    request_estimate.upper_bound_tokens
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ── Emit pending cache diagnostic ──
-            if let Some((hash, reasons)) = ctx.agent.take_cache_diagnostics() {
-                // legacy CacheDiagnostics 退役：Ringing 无对应事件（§4.2 登记：诊断事件退役）
-                let _ = (hash, reasons);
-            }
-
-            let request_fingerprint = ctx.agent.token_calibration_fingerprint();
-            let request_key = ctx
-                .agent
-                .prepared_request_key(&messages, Some(&ctx.agent.tool_defs));
+            // ── 传输快照 + 估计 + auto-compact 预检（已抽至 prepare_gate_snapshot） ──
+            let (messages, request_estimate, request_fingerprint, request_key) =
+                Self::prepare_gate_snapshot(ctx);
 
             let GateRequestResult {
                 content,
@@ -1002,7 +1000,14 @@ impl TurnEngine {
                 &mut active_stream_block,
                 &mut timeline_tools_open,
             );
-            // parsed/assistant_msg preserved for future admit/backfill; currently only `effect` drives control flow
+            // BUG-015 run_lap 级断言：parse 后的块级隔离在 parse::debug_assert 已验证；
+            // 此处额外确保 lap 级“text↔tool 交替不重复回放” — timeline_tools_open 与 parsed 必须一致
+            debug_assert!(
+                timeline_tools_open.len() >= parsed.len(),
+                "BUG-015 lap: timeline_tools_open {} < parsed {}",
+                timeline_tools_open.len(),
+                parsed.len()
+            );
             let _ = (&parsed, &assistant_msg);
 
             match effect {
