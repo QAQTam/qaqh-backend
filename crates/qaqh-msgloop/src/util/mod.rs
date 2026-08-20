@@ -134,17 +134,6 @@ pub(crate) fn format_tool_args_display(name: &str, input: &serde_json::Value) ->
     }
 }
 
-/// Build TurnData for IPC. If `start` is provided, only turns from that
-/// index (0-based) onward are built — avoids cloning full tool results
-/// for hundreds of old turns when only the tail is needed (resume / load-more).
-pub(crate) fn build_turns_from_context(
-    agent: &AgentState,
-    start: Option<usize>,
-    max_count: Option<usize>,
-) -> Vec<qaqh_proto::TurnData> {
-    build_turns(agent.msg.turns(), start, max_count)
-}
-
 /// Build the same UI turn projection directly from persisted messages.
 ///
 /// The daemon uses this before an Agent worker exists, so a cold attach can
