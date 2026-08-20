@@ -447,9 +447,7 @@ impl AgentRegistry {
                         qaqh_workspace::set_cancel(true);
                     }
                     let cmd = qaqh_msgloop::ringing_v1::types::WorkerCommand {
-                        frame: qaqh_msgloop::ringing_v1::wire::WorkerCommandFrame::Ringing(
-                            env.clone(),
-                        ),
+                        frame: env.clone(),
                         causation: Some(env.command_id.clone()),
                     };
                     cmd_tx
@@ -656,7 +654,7 @@ impl AgentInstance {
                 cancel.set();
                 qaqh_workspace::set_cancel(true);
                 let cmd = qaqh_msgloop::ringing_v1::types::WorkerCommand {
-                    frame: qaqh_msgloop::ringing_v1::wire::WorkerCommandFrame::Ringing(env),
+                    frame: env,
                     causation: Some("daemon-shutdown".into()),
                 };
                 let _ = cmd_tx.send(cmd);

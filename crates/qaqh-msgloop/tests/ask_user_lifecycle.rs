@@ -6,6 +6,8 @@
 //! M3：输入/输出全部走 Ringing worker 线格式（`wire: "Ringing_domain_v1"`），
 //! legacy `Ui2Agent`/`Agent2Ui` 已完全拆除。
 
+mod common;
+
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,9 +17,8 @@ use std::time::{Duration, Instant};
 
 use qaqh_domain::{
     AskAnswer, AskMode, AskQuestion, AskResolution, ControlCommand, ControlEvent,
-    ConversationCommand, ConversationEvent, DomainEvent, SessionState, ToolCommand, ToolEvent,
+    ConversationCommand, ConversationEvent, SessionState, ToolCommand, ToolEvent,
 };
-use qaqh_msgloop::ringing_v1::loop_core::Loop;
 use qaqh_msgloop::state::agent::AgentState;
 use qaqh_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
 use serde_json::{Value, json};
@@ -426,7 +427,7 @@ fn run_case_with_delay(
 
     let (input_reader, mut input_writer) = os_pipe::pipe().unwrap();
     let (output_reader, output_writer) = os_pipe::pipe().unwrap();
-    let mut agent_loop = Loop::new_ipc(agent, BufReader::new(input_reader), output_writer);
+    let mut agent_loop = common::spawn_pipe_loop(agent, BufReader::new(input_reader), output_writer);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(output_reader).lines().map_while(Result::ok) {
