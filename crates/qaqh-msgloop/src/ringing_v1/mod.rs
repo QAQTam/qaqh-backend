@@ -42,7 +42,6 @@
 //! new per-feature path.
 
 pub mod engine_compact;
-pub mod engine_goal;
 pub mod engine_input;
 pub mod engine_misc;
 pub mod engine_session;

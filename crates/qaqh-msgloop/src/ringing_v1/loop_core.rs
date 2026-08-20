@@ -14,7 +14,7 @@
 //! │  │   ├─ turn: TurnEngine                             │
 //! │  │   └─ tool: ToolEngine                             │
 //! │  ├─ Stateless engines: session_eng, input, compact,  │
-//! │  │   goal, misc                                      │
+//! │  │   misc                                             │
 //! │  ├─ flow: ContextFlow（消息落盘/注入融合）            │
 //! │  ├─ injection_bus: 注入总线（idle 直派 / busy 入队）  │
 //! │  └─ paced_emitter: 事件节拍 + causation 作用域        │
@@ -57,7 +57,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use super::engine_compact::{CompactEngine, CompactMeta};
-use super::engine_goal::GoalEngine;
 use super::engine_input::InputEngine;
 use super::engine_misc::MiscEngine;
 use super::engine_session::SessionEngine;
@@ -231,8 +230,6 @@ pub struct Loop {
     input: InputEngine,
     /// Context compaction: summarize old conversation turns.
     compact: CompactEngine,
-    /// Goal mode: autonomous plan execution with compact-aware scheduling.
-    goal: GoalEngine,
     /// Miscellaneous: undo, dashboard, mode.
     misc: MiscEngine,
     /// Unified context-ingestion pipeline — the single door into the message
@@ -382,8 +379,7 @@ impl Loop {
         } else {
             agent.session.resume_seed.clone().unwrap_or_default()
         };
-        let paced_emitter =
-            PacedEmitter::new(seed, event_tx.clone(), writer_dead.clone(), cancel.arc());
+        let paced_emitter = PacedEmitter::new(seed, event_tx.clone(), writer_dead.clone());
 
         let mut flow = qaqh_message::ContextFlow::new();
         qaqh_message::builtin::register_all(&mut flow);
@@ -402,7 +398,6 @@ impl Loop {
             session_eng: SessionEngine::new(),
             input: InputEngine::new(),
             compact: CompactEngine::new(),
-            goal: GoalEngine::new(),
             misc: MiscEngine::new(),
             flow,
             injection_bus: InjectionBus::new(),
@@ -490,7 +485,6 @@ impl Loop {
         self.session.stats = StatsCollector::new();
 
         // Session-agnostic engines：无状态（M3 后无 Engine trait reset）
-        self.goal = GoalEngine::new();
         self.misc.reset();
         self.finish_pending_compact(qaqh_domain::CompactStatus::Cancelled);
 
