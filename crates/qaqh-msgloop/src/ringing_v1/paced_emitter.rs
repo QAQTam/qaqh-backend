@@ -19,8 +19,6 @@ pub struct PacedEmitter {
     seed: Arc<Mutex<String>>,
     tx: mpsc::SyncSender<WriterEvent>,
     writer_dead: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    cancelled: Arc<AtomicBool>,
     causation: Arc<Mutex<Option<String>>>,
 }
 
@@ -29,13 +27,11 @@ impl PacedEmitter {
         seed: impl Into<String>,
         tx: mpsc::SyncSender<WriterEvent>,
         writer_dead: Arc<AtomicBool>,
-        cancelled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             seed: Arc::new(Mutex::new(seed.into())),
             tx,
             writer_dead,
-            cancelled,
             causation: Arc::new(Mutex::new(None)),
         }
     }
