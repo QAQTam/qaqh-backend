@@ -110,6 +110,36 @@ pub(crate) fn parse_and_ingest(
             });
     }
 
+    // BUG-015 run_lap 级断言：parse 后 timeline_tools_open 必须与 parsed 去重一致，且 seal 已完成
+    debug_assert!(
+        timeline_tools_open.len() >= parsed.len(),
+        "BUG-015: timeline_tools_open {} < parsed {}",
+        timeline_tools_open.len(),
+        parsed.len()
+    );
+    for tc in &parsed {
+        debug_assert!(
+            timeline_tools_open.contains(&tc.id),
+            "BUG-015: parsed tool {} not in timeline_tools_open",
+            tc.id
+        );
+    }
+    if let Some((kind, block_id)) = active_stream_block.as_ref() {
+        debug_assert!(
+            matches!(
+                kind,
+                qaqh_domain::TimelineBlockKind::Text | qaqh_domain::TimelineBlockKind::Reasoning
+            ),
+            "active_stream_block must be text/reasoning, got {:?}",
+            kind
+        );
+        debug_assert!(
+            block_id.starts_with(&format!("round-{round_num}:")),
+            "active_stream_block not round-scoped: {}",
+            block_id
+        );
+    }
+
     ParseOutput {
         parsed,
         assistant_msg,
