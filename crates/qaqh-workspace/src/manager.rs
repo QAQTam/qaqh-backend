@@ -61,6 +61,12 @@ pub(crate) struct PreparedCall {
     pub(crate) audit_args: serde_json::Value,
 }
 
+impl Default for ToolManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolManager {
     pub fn new() -> Self {
         Self {
@@ -149,8 +155,8 @@ impl ToolManager {
         timeout_secs: Option<u64>,
         progress_tx: Option<crate::ExecProgressSender>,
     ) -> Result<PreparedCall, ToolExecReport> {
-        if let Some(ref allowed) = self.allowed {
-            if !allowed.contains(&name.to_string()) {
+        if let Some(ref allowed) = self.allowed
+            && !allowed.contains(&name.to_string()) {
                 let msg = format!(
                     "[ERROR] Tool '{}' is not in the allowed list for this subagent. Allowed tools: [{}]",
                     name,
@@ -169,7 +175,6 @@ impl ToolManager {
                     },
                 });
             }
-        }
 
         let (handler, placement) = match self.handlers.get(name) {
             Some(handler) => (
@@ -193,7 +198,7 @@ impl ToolManager {
             }
         };
 
-        let timeout_secs = timeout_secs.unwrap_or_else(|| handler.default_timeout.as_secs());
+        let timeout_secs = timeout_secs.unwrap_or(handler.default_timeout.as_secs());
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let skill_effects = Arc::new(Mutex::new(Vec::new()));
         let ctx = crate::ToolCallCtx {
@@ -312,13 +317,6 @@ impl ToolManager {
             files_read: self.files_read.clone(),
             files_written: self.files_written.clone(),
         }
-    }
-
-    pub fn reset_stats(&mut self) {
-        self.stats_total = 0;
-        self.stats_failures = 0;
-        self.files_read.clear();
-        self.files_written.clear();
     }
 
     pub fn cancel_tool(&mut self, id: Option<&str>) {

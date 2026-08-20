@@ -163,7 +163,7 @@ pub(super) fn exec_ask_user(args: &serde_json::Value) -> ToolResult {
         )),
         Err(error) => ToolResult::error(crate::json_err(
             error.code,
-            &format!("ask: {}", error.message),
+            format!("ask: {}", error.message),
             "Fix the ask arguments and retry.",
         )),
     }

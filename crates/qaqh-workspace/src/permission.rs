@@ -136,8 +136,8 @@ impl PermissionLevel {
 pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if tool_name == "read" {
-        if let Some(requests) = args.get("requests").and_then(|value| value.as_array()) {
+    if tool_name == "read"
+        && let Some(requests) = args.get("requests").and_then(|value| value.as_array()) {
             paths.extend(requests.iter().filter_map(|request| {
                 request
                     .get("path")
@@ -145,7 +145,6 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
                     .map(PathBuf::from)
             }));
         }
-    }
     // Direct path argument
     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
         paths.push(PathBuf::from(p));
@@ -185,11 +184,10 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
         }
     }
     // exec: extract cwd
-    if tool_name == "exec" {
-        if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
+    if tool_name == "exec"
+        && let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
             paths.push(PathBuf::from(cwd));
         }
-    }
 
     paths.into_iter().map(resolve_target_path).collect()
 }

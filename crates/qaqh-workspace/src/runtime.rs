@@ -242,17 +242,6 @@ pub fn lookup_category(name: &str) -> Option<crate::permission::ToolCategory> {
     with_manager(|manager| manager.lookup(name).map(|handler| handler.category)).flatten()
 }
 
-pub fn all_tool_names() -> Vec<String> {
-    with_manager(|manager| {
-        manager
-            .all_defs()
-            .iter()
-            .map(|definition| definition.function.name.clone())
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
 /// Tool names from the **process** manager, ignoring any installed actor
 /// manager. Used by daemon-side snapshots (e.g. `skills.list_tools`) that must
 /// stay stable while an in-process subagent actor temporarily shadows the

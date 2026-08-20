@@ -71,7 +71,7 @@ impl Shell {
                     }
                     // No git bash available — plain `bash` (may be WSL wrapper,
                     // but the model explicitly asked for bash).
-                    return Some(Shell::Bash);
+                    Some(Shell::Bash)
                 }
                 #[cfg(not(windows))]
                 {
@@ -941,7 +941,7 @@ fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> ToolResult {
                     return ToolResult::error(crate::json_err(
                         "SHELL_NOT_FOUND",
                         format!("{} not found on this machine", shell.path()),
-                        &format!("available shells: {}", available_shells()),
+                        format!("available shells: {}", available_shells()),
                     ));
                 }
                 shell
@@ -995,7 +995,7 @@ fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> ToolResult {
         .unwrap_or(u32::MAX);
     let max_output_tokens = ctx
         .get_u64("max_output_tokens")
-        .filter(|&n| n >= 100 && n <= 50000)
+        .filter(|&n| (100..=50000).contains(&n))
         .map(|n| n as u32)
         .unwrap_or(policy_default);
     let timeout_secs = ctx
@@ -1083,7 +1083,7 @@ fn strip_ansi(s: &str) -> String {
         }
         match chars.next() {
             Some('[') => {
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if ('@'..='~').contains(&next) {
                         break;
                     }

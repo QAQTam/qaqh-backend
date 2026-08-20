@@ -48,8 +48,8 @@ pub(super) fn exec_read(args: &serde_json::Value) -> ToolResult {
 }
 
 fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
-    const MAX_LINES: usize = 400;
-    const MAX_MODEL_CHARS: usize = 24_000;
+    const MAX_LINES: usize = crate::file_shared::READ_MAX_LINES;
+    const MAX_MODEL_CHARS: usize = crate::file_shared::READ_MAX_CHARS;
     let path = crate::resolve_workspace_path(
         args.get("path")
             .and_then(|value| value.as_str())
@@ -168,19 +168,17 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
     // meta 透明回传（corrected/original_lines/line_offset）。
     let mut corrected: Option<(usize, usize)> = None;
     let mut offset: Option<i64> = None;
-    if let (Some(s), Some(e)) = (start, end) {
-        if let (Some((s2, ds)), Some((e2, de))) = (
+    if let (Some(s), Some(e)) = (start, end)
+        && let (Some((s2, ds)), Some((e2, de))) = (
             crate::file_state::correct_line(&path, s),
             crate::file_state::correct_line(&path, e),
-        ) {
-            if (s2 != s || e2 != e) && ds == de {
+        )
+            && (s2 != s || e2 != e) && ds == de {
                 corrected = Some((s, e));
                 offset = Some(ds);
                 start = Some(s2);
                 end = Some(e2);
             }
-        }
-    }
 
     let explicit = start.is_some() || end.is_some();
     let first = start.unwrap_or(1).saturating_sub(1);

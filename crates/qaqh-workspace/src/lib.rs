@@ -16,6 +16,7 @@ pub mod backend;
 mod code_delta;
 pub mod execution;
 pub mod file_cache;
+pub mod edit;
 pub mod file_edit_v2;
 pub mod file_glob;
 pub mod file_mutate;
@@ -32,8 +33,6 @@ mod web;
 
 pub mod ask_user;
 
-pub mod plan;
-
 pub mod todo;
 
 pub mod process_inspect;
@@ -49,7 +48,6 @@ pub mod permission;
 pub mod serve;
 
 pub mod audit;
-pub mod auth;
 
 pub mod journal;
 
@@ -604,13 +602,6 @@ pub fn parse_arg_or(args: &str, key: &str, default: &str) -> String {
 
 pub fn parse_opt(args: &str, key: &str) -> Option<String> {
     qaqh_types::arg::parse_arg(args, key)
-}
-
-pub fn parse_opt_bool(args: &str, key: &str) -> Option<bool> {
-    let v: serde_json::Value = serde_json::from_str(args).ok()?;
-    let val = v.get(key)?;
-    val.as_bool()
-        .or_else(|| val.as_str().and_then(|s| s.parse::<bool>().ok()))
 }
 
 // ── ToolHandler ──

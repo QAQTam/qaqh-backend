@@ -35,7 +35,7 @@ pub(super) fn handle_web_fetch(ctx: ToolCallCtx) -> ToolResult {
             ToolResult::ok(payload)
         }
     } else {
-        ToolResult::error(&crate::json_err(
+        ToolResult::error(crate::json_err(
             "MISSING_URL",
             "web_fetch: 'url' (starting with http) is required; web search is handled by the model's built-in web_search tool",
             "Pass a URL to fetch, or rely on the model's server-side web_search.",
@@ -58,7 +58,7 @@ fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
         .call()
     {
         Ok(r) => r,
-        Err(e) => return crate::json_err("FETCH_ERROR", &format!("{e}"), ""),
+        Err(e) => return crate::json_err("FETCH_ERROR", format!("{e}"), ""),
     };
     if resp
         .body()
@@ -67,7 +67,7 @@ fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
     {
         return crate::json_err(
             "RESPONSE_TOO_LARGE",
-            &format!("Response exceeds the {} byte limit", MAX_WEB_BODY_BYTES),
+            format!("Response exceeds the {} byte limit", MAX_WEB_BODY_BYTES),
             "Fetch a narrower URL or use a source with a paginated API.",
         );
     }

@@ -116,15 +116,6 @@ impl ProcessRegistry {
         })
     }
 
-    /// Attach a PTY stdin writer to an entry (for interactive processes).
-    pub fn attach_writer(id: u32, writer: Box<dyn std::io::Write + Send>) {
-        Self::with(|r| {
-            if let Some(entry) = r.entries.get(&id) {
-                *entry.pty_writer.lock().unwrap() = Some(writer);
-            }
-        });
-    }
-
     /// Write text to a process's PTY stdin. Returns true if the write succeeded.
     pub fn write_to(id: u32, text: &str) -> Result<usize, String> {
         let writer_arc = Self::with(|r| {
@@ -225,11 +216,10 @@ impl ProcessRegistry {
                     "output_size": output.len(),
                 }),
             };
-            if let Some(ans) = answer {
-                if let serde_json::Value::Object(ref mut map) = info {
+            if let Some(ans) = answer
+                && let serde_json::Value::Object(ref mut map) = info {
                     map.insert("answer".to_string(), serde_json::json!(ans));
                 }
-            }
             Some(info)
         })
     }
@@ -293,12 +283,4 @@ impl ProcessRegistry {
         }
     }
 
-    /// Clear accumulated output for a process (used before write_stdin to capture fresh delta).
-    pub fn clear_output(id: u32) {
-        Self::with(|r| {
-            if let Some(entry) = r.entries.get(&id) {
-                entry.output.lock().unwrap().clear();
-            }
-        });
-    }
 }
