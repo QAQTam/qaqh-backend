@@ -1537,7 +1537,7 @@ impl TurnEngine {
         tool: &mut ToolEngine,
         turn_id: String,
         round_num: u32,
-        mut last_usage: Option<UsageInfo>,
+        last_usage: Option<UsageInfo>,
     ) -> Outcome {
         log::info!("[TURN] run_lap turn_id={} round_num={}", turn_id, round_num);
         // Rebuild provider from current config（gate_lap 准备逻辑，见 turn_lap::gate）
