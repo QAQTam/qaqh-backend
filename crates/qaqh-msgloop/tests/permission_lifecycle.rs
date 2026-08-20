@@ -4,6 +4,8 @@
 //!
 //! M3：输入/输出全部走 Ringing worker 线格式（`wire: "Ringing_domain_v1"`）。
 
+mod common;
+
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,12 +17,11 @@ use qaqh_domain::{
     ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, SessionState,
     ToolCommand, ToolEvent,
 };
-use qaqh_msgloop::ringing_v1::loop_core::Loop;
 use qaqh_msgloop::state::agent::AgentState;
 use qaqh_ringing::{
     RingingCommand, RingingEvent, RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tiny_http::{Header, Response, Server};
 
 static SESSION_INIT: Once = Once::new();
@@ -346,7 +347,7 @@ fn run_case(
 
     let (input_reader, mut input_writer) = os_pipe::pipe().unwrap();
     let (output_reader, output_writer) = os_pipe::pipe().unwrap();
-    let mut agent_loop = Loop::new_ipc(agent, BufReader::new(input_reader), output_writer);
+    let mut agent_loop = common::spawn_pipe_loop(agent, BufReader::new(input_reader), output_writer);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(output_reader).lines().map_while(Result::ok) {

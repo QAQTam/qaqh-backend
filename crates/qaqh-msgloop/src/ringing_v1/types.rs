@@ -299,7 +299,7 @@ pub enum WriterEvent {
 /// causation 进入原生领域执行路径。
 #[derive(Debug, Clone)]
 pub struct WorkerCommand {
-    pub frame: super::wire::WorkerCommandFrame,
+    pub frame: qaqh_ringing::worker::RingingWorkerCommandEnvelope,
     pub causation: Option<String>,
 }
 

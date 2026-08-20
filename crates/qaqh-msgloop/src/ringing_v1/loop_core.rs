@@ -51,7 +51,6 @@
 //! ```
 
 use std::collections::VecDeque;
-use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -148,9 +147,9 @@ mod parse_subagent_status_tag_tests {
 
 /// Pre-created in-process worker channel ends.
 ///
-/// `Loop::new_ipc` uses these internally; an in-process host (daemon actor,
-/// tests) can create them before the loop, keep the producer/consumer sides,
-/// and construct the loop later with [`Loop::from_channels`].
+/// An in-process host (daemon actor, tests) can create them before the loop,
+/// keep the producer/consumer sides, and construct the loop later with
+/// [`Loop::from_channels`].
 pub struct LoopChannels {
     pub cmd_tx: mpsc::SyncSender<WorkerCommand>,
     pub cmd_rx: mpsc::Receiver<WorkerCommand>,
@@ -246,120 +245,10 @@ pub struct Loop {
 }
 
 impl Loop {
-    /// Create a Loop backed by real stdin/stdout via background I/O threads.
-    ///
-    /// Spawns:
-    /// - **Reader thread**: reads JSON-LP from `input`, dispatches Ringing commands
-    ///   to `cmd_rx`. Sets CancelToken on interrupt-type commands (Cancel,
-    ///   ResumeSession, NewSession, Shutdown).
-    /// - **Writer thread**: receives Ringing events from `event_tx`, writes
-    ///   JSON-LP to `output`. Flushes every 2ms. Sets `writer_dead` on exit.
-    ///
-    /// Both threads use `catch_unwind` to log panics rather than silently dying.
-    pub fn new_ipc(
-        agent: AgentState,
-        input: impl BufRead + Send + 'static,
-        output: impl Write + Send + 'static,
-    ) -> Self {
-        let channels = LoopChannels::new();
-        let cancel_for_reader = channels.cancel.clone();
-        let cmd_tx = channels.cmd_tx.clone();
-        let writer_dead_for_thread = channels.writer_dead.clone();
-
-        // ── Reader thread: stdin → cmd_tx ──
-        // Processes JSON-LP frames in a loop. Interrupt-type commands
-        // set the cancel token directly so that in-progress turns see
-        // the cancellation immediately (before the main loop processes
-        // the channel).
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut reader = std::io::BufReader::new(input);
-                loop {
-                    match super::wire::read_worker_command_frame(&mut reader) {
-                        Ok(Some(super::wire::WorkerCommandFrame::Ringing(env))) => {
-                            let causation = env.command_id.clone();
-                            if ringing_command_is_interrupt(&env) {
-                                cancel_for_reader.set();
-                                qaqh_workspace::set_cancel(true);
-                            }
-                            if cmd_tx
-                                .send(super::types::WorkerCommand {
-                                    frame: super::wire::WorkerCommandFrame::Ringing(env),
-                                    causation: Some(causation),
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Ok(None) | Err(_) => {
-                            log::warn!("[AGENT] reader thread: stdin EOF — exiting");
-                            break;
-                        }
-                    }
-                }
-            }));
-            if let Err(e) = result {
-                let msg = Self::panic_msg_from_err(e);
-                log::error!("[AGENT] reader thread panicked: {}", msg);
-                eprintln!("[qaqh AGENT] reader thread panicked: {}", msg);
-            }
-            log::info!("[AGENT] reader thread exiting");
-        });
-
-        // ── Writer thread: event_rx → stdout ──
-        // Batches events and flushes every 2ms. Uses BufWriter for
-        // efficient I/O. Sets writer_dead on any write error so the
-        // main loop can exit gracefully. 支持 legacy 与 Ringing 双格式，
-        // 但同一帧只承载一种协议（不嵌套）。
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Zero-buffer writer: block on recv(), write + flush each
-                // event immediately.  No timeout, no drain batches — every
-                // Agent2Ui event reaches stdout as fast as the OS pipe can
-                // deliver it. The downstream daemon worker reader picks
-                // up each line without buffering delay.
-                let mut writer = output;
-                loop {
-                    match channels.event_rx.recv() {
-                        Ok(super::types::WriterEvent::Ringing(env)) => {
-                            if super::wire::write_ringing_event_frame(&mut writer, &env).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(super::types::WriterEvent::Timeline(env)) => {
-                            if super::wire::write_timeline_intent_frame(&mut writer, &env).is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            }));
-            if let Err(e) = result {
-                let msg = Self::panic_msg_from_err(e);
-                log::error!("[AGENT] writer thread panicked: {}", msg);
-                eprintln!("[qaqh AGENT] writer thread panicked: {}", msg);
-            }
-            writer_dead_for_thread.store(true, Ordering::SeqCst);
-            log::info!("[AGENT] writer thread exiting");
-        });
-
-        Self::from_channels(
-            agent,
-            channels.cmd_rx,
-            channels.event_tx,
-            channels.cancel,
-            channels.writer_dead,
-        )
-    }
-
     /// Construct a Loop from pre-created in-process channel ends.
     ///
     /// The caller owns the producer side (`cmd_tx`) and consumer side
-    /// (`event_rx`) from [`LoopChannels`]. This is the same loop as
-    /// `new_ipc`; only the process boundary is replaced by channels.
+    /// (`event_rx`) from [`LoopChannels`].
     pub fn from_channels(
         agent: AgentState,
         cmd_rx: mpsc::Receiver<WorkerCommand>,
@@ -540,7 +429,7 @@ impl Loop {
     fn is_injection_command(cmd: &super::types::WorkerCommand) -> bool {
         matches!(
             &cmd.frame,
-            super::wire::WorkerCommandFrame::Ringing(env)
+            env
                 if matches!(
                     &env.command,
                     qaqh_ringing::RingingCommand::Conversation(
@@ -787,7 +676,7 @@ impl Loop {
         self.injection_bus
             .switch_session(&self.session.agent.session.seed);
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            let super::wire::WorkerCommandFrame::Ringing(env) = cmd.frame;
+            let env = cmd.frame;
             match &env.command {
                 // ── 注入命令：as_system 消息（子代理报告等）──────────
                 // 统一走 Loop::inject()（turn 运行中 → 入总线，lap 边界
@@ -815,7 +704,7 @@ impl Loop {
                 _ => {
                     self.deferred_ringing
                         .push_back(super::types::WorkerCommand {
-                            frame: super::wire::WorkerCommandFrame::Ringing(env),
+                            frame: env,
                             causation: cmd.causation,
                         });
                 }
@@ -877,8 +766,8 @@ impl Loop {
             let cmd = match self.cmd_rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(f) => {
                     log::info!(
-                        "[AGENT] received worker command frame: {:?}",
-                        std::mem::discriminant(&f.frame)
+                        "[AGENT] received worker command frame: seed={} cmd={}",
+                        f.frame.seed, f.frame.command_id
                     );
                     f
                 }
@@ -895,7 +784,7 @@ impl Loop {
             let causation = cmd.causation.clone();
             self.safe_dispatch(|this| {
                 let _scope = this.paced_emitter.enter_causation(causation.as_deref());
-                let super::wire::WorkerCommandFrame::Ringing(env) = cmd.frame;
+                let env = cmd.frame;
                 this.dispatch_ringing_one(env);
             });
         }
@@ -977,7 +866,7 @@ impl Loop {
     fn drain_pending(&mut self) {
         self.dispatch_deferred_ringing();
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            let super::wire::WorkerCommandFrame::Ringing(env) = cmd.frame;
+            let env = cmd.frame;
             if self.pending.is_empty() {
                 let causation = cmd.causation.clone();
                 let _scope = self.paced_emitter.enter_causation(causation.as_deref());
@@ -985,7 +874,7 @@ impl Loop {
             } else {
                 self.deferred_ringing
                     .push_back(super::types::WorkerCommand {
-                        frame: super::wire::WorkerCommandFrame::Ringing(env),
+                        frame: env,
                         causation: cmd.causation,
                     });
             }
@@ -1002,7 +891,7 @@ impl Loop {
             let Some(cmd) = self.deferred_ringing.pop_front() else {
                 break;
             };
-            let super::wire::WorkerCommandFrame::Ringing(env) = cmd.frame;
+            let env = cmd.frame;
             let _scope = self.paced_emitter.enter_causation(cmd.causation.as_deref());
             self.dispatch_ringing_one(env);
         }

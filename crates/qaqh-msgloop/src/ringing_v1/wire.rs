@@ -7,19 +7,12 @@
 //! - 缺失/未知 `wire` 值：拒绝并报 `InvalidData`，绝不猜测
 //!   （legacy 无 `wire` 帧已在 M3 完全拆除）。
 
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 
 use qaqh_ringing::worker::{
     RingingTimelineIntentEnvelope, RingingWorkerCommandEnvelope, WIRE_RINGING_DOMAIN_V1,
     WIRE_RINGING_TIMELINE_INTENT_V1,
 };
-
-/// stdin 方向的可判别命令帧。
-#[derive(Debug, Clone)]
-pub enum WorkerCommandFrame {
-    /// Ringing `RingingWorkerCommandEnvelope`（`wire: "Ringing_domain_v1"`）。
-    Ringing(RingingWorkerCommandEnvelope),
-}
 
 /// 读取一行并判别帧类型。空行返回 `Ok(None)`。
 ///
@@ -30,7 +23,7 @@ pub enum WorkerCommandFrame {
 /// 4. 其它 `wire` 值 → `InvalidData`（禁止猜测）。
 pub fn read_worker_command_frame<R: BufRead>(
     r: &mut R,
-) -> std::io::Result<Option<WorkerCommandFrame>> {
+) -> std::io::Result<Option<RingingWorkerCommandEnvelope>> {
     let mut line = String::new();
     let n = r.read_line(&mut line)?;
     if n == 0 || line.trim().is_empty() {
@@ -46,35 +39,13 @@ pub fn read_worker_command_frame<R: BufRead>(
         Some(w) if w == WIRE_RINGING_DOMAIN_V1 => {
             let frame = serde_json::from_value::<RingingWorkerCommandEnvelope>(value)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            Ok(Some(WorkerCommandFrame::Ringing(frame)))
+            Ok(Some(frame))
         }
         Some(other) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("unknown worker wire tag: {other}"),
         )),
     }
-}
-
-/// 写入 Ringing 事件帧（切流后使用；携带 `wire` 判别字段）。
-pub fn write_ringing_event_frame<W: Write>(
-    w: &mut W,
-    env: &qaqh_ringing::RingingWorkerEventEnvelope,
-) -> std::io::Result<()> {
-    let json = serde_json::to_string(env)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    writeln!(w, "{json}")?;
-    w.flush()
-}
-
-/// Writes a native Ringing V1 timeline intent frame.
-pub fn write_timeline_intent_frame<W: Write>(
-    w: &mut W,
-    env: &RingingTimelineIntentEnvelope,
-) -> std::io::Result<()> {
-    let json = serde_json::to_string(env)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    writeln!(w, "{json}")?;
-    w.flush()
 }
 
 /// 校验 worker stdout 行（daemon 侧使用）：仅接受 Ringing / timeline 事件。
@@ -128,12 +99,8 @@ mod tests {
         let frame = read_worker_command_frame(&mut reader)
             .expect("read")
             .expect("frame");
-        match frame {
-            WorkerCommandFrame::Ringing(parsed) => {
-                assert_eq!(parsed.command_id, "cmd-1");
-                assert_eq!(parsed.seed, "s1");
-            }
-        }
+        assert_eq!(frame.command_id, "cmd-1");
+        assert_eq!(frame.seed, "s1");
     }
 
     #[test]
@@ -190,25 +157,6 @@ mod tests {
         let err =
             read_worker_event_line(r#"{"wire":"nope","type":"ready"}"#).expect_err("must reject");
         assert!(err.contains("unknown worker wire tag"));
-    }
-
-    #[test]
-    fn event_frame_writers_round_trip() {
-        let mut buf = Vec::new();
-        let env = qaqh_ringing::RingingWorkerEventEnvelope::new(
-            "s",
-            "e",
-            qaqh_ringing::RingingEvent::Tool(qaqh_domain::ToolEvent::ToolStarted {
-                tool_call_id: "c".into(),
-                turn_id: "t".into(),
-                round_num: 0,
-                name: "exec".into(),
-            }),
-        );
-        write_ringing_event_frame(&mut buf, &env).expect("ringing write");
-        let text = String::from_utf8_lossy(&buf);
-        assert!(text.contains("\"wire\":\"Ringing_domain_v1\""));
-        assert!(text.contains("\"direction\":\"event\""));
     }
 
     #[test]
