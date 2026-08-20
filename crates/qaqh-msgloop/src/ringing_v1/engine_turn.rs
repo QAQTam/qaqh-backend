@@ -13,12 +13,11 @@ use qaqh_types::UsageInfo;
 use super::engine_tool::ToolEngine;
 use super::types::*;
 use crate::ringing_v1::turn_lap::admit as turn_admit;
+use crate::ringing_v1::turn_lap::backfill as turn_backfill;
 use crate::ringing_v1::turn_lap::gate::{
     GateRequestResult, abort_running_turn, gate_request, provider_for,
     seal_timeline_terminal_round,
 };
-use crate::services::dashboard;
-use crate::util;
 
 
 /// Why the turn is being resumed.
@@ -509,6 +508,7 @@ impl TurnEngine {
     }
 
     /// 构造结构化领域错误（error_id = 时间戳，dedupe 可选）。
+    #[allow(dead_code)]
     fn domain_failure(
         code: &str,
         message: String,
@@ -528,6 +528,7 @@ impl TurnEngine {
     }
 
     /// OperationFailed 的 occurrence_id（时间戳）。
+    #[allow(dead_code)]
     fn occurrence_id() -> String {
         format!(
             "occ-{}",
@@ -1020,74 +1021,15 @@ impl TurnEngine {
                         return outcome;
                     }
 
-                    // All tools from this round are now resolved.
-                    self.emit_completed_tool_round(ctx, &turn_id, round_num);
-
-                    if let Err(error) = ctx.agent.skills.complete_model_lap() {
-                        // Ringing 双发：OperationFailed（skill lap 失败）
-                        ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                            qaqh_domain::ControlEvent::OperationFailed {
-                                occurrence_id: Self::occurrence_id(),
-                                scope: qaqh_domain::ErrorScope::Tool,
-                                error: Self::domain_failure("skill_lap", error, Some("skill_lap")),
-                                operation_id: None,
-                            },
-                        ));
-                    }
-                    // Host-forced activation (second ignored lap) changes the
-                    // active set: materialize the envelope at the latest
-                    // message position before the next model reply.
-                    ctx.agent.sync_skill_injection(ctx.flow);
-
-                    // Another lap: tools executed, back to Gate
-                    return Outcome::ContinueTurn {
-                        turn_id,
-                        round_num: round_num + 1,
-                        usage: last_usage,
-                    };
+                    // All tools from this round are now resolved → backfill/skills/ContinueTurn (knife-7 A2 step6)
+                    return turn_backfill::handle_tools_done(ctx, turn_id, round_num, last_usage);
                 }
                 Effect::TurnComplete => {}
                 _ => {}
             }
 
-            ctx.agent
-                .msg
-                .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-            let forced = match ctx.agent.skills.complete_model_lap() {
-                Ok(forced) => forced,
-                Err(error) => {
-                    // Ringing 双发：OperationFailed（skill lap 失败）
-                    ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                        qaqh_domain::ControlEvent::OperationFailed {
-                            occurrence_id: Self::occurrence_id(),
-                            scope: qaqh_domain::ErrorScope::Tool,
-                            error: Self::domain_failure("skill_lap", error, Some("skill_lap")),
-                            operation_id: None,
-                        },
-                    ));
-                    Vec::new()
-                }
-            };
-            if ctx.agent.skills.has_requested() || !forced.is_empty() {
-                // Host-forced activation changed the active set: materialize
-                // the envelope before the next model lap.
-                ctx.agent.sync_skill_injection(ctx.flow);
-                return Outcome::ContinueTurn {
-                    turn_id,
-                    round_num: round_num + 1,
-                    usage: last_usage,
-                };
-            }
-            ctx.emitter
-                .emit_timeline(qaqh_domain::TimelineIntent::TurnSealed {
-                    turn_id: turn_id.clone(),
-                    state: qaqh_domain::TimelineTurnState::Completed,
-                    failure: None,
-                });
-            return Outcome::TurnComplete {
-                turn_id,
-                usage: last_usage,
-            };
+            // TurnComplete / fall-through → backfill/skills/ContinueTurn (knife-7 A2 step6)
+            return turn_backfill::handle_turn_complete(ctx, turn_id, round_num, last_usage);
         }
     }
 
@@ -1097,98 +1039,9 @@ impl TurnEngine {
         turn_id: &str,
         round_num: u32,
     ) -> Vec<(String, String, String, bool, Option<String>)> {
-        let results = ctx.agent.msg.last_step_tool_results();
-        let ts = util::chrono_local_datetime();
-        for (tc_id, name, content, success, diff) in &results {
-            let args = ctx
-                .agent
-                .msg
-                .tool_call_args(tc_id)
-                .map(|a| a.to_string())
-                .unwrap_or_default();
-            let summary: String = content
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(120)
-                .collect();
-            ToolEngine::emit_timeline_tool_result(
-                ctx,
-                turn_id,
-                round_num,
-                tc_id,
-                name,
-                &args,
-                content,
-                *success,
-                diff.clone(),
-            );
-            // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                qaqh_domain::ToolEvent::AuditRecorded {
-                    tool_name: name.clone(),
-                    result_summary: summary.clone(),
-                    success: *success,
-                    time: ts.clone(),
-                    args_ref: None,
-                },
-            ));
-            // Ringing 终态：ToolFinished（legacy 汇总 ToolResults 退役后的替代——
-            // 批量执行路径每个工具单独发终态，与 UI 主动调用路径一致）。发射
-            // 时机在 round 交互全部裁决之后（ask/plan/permission 收口处），
-            // 保证事件顺序为"裁决先、终态后"，前端/测试按序消费。
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
-                qaqh_domain::ToolEvent::ToolFinished {
-                    tool_call_id: tc_id.clone(),
-                    turn_id: turn_id.to_string(),
-                    round_num,
-                    result: if *success {
-                        qaqh_types::ToolResult::ok(content.clone())
-                    } else {
-                        qaqh_types::ToolResult::error(content.clone())
-                    },
-                },
-            ));
-        }
-
-        for (tool_call_id, _, _, _, _) in &results {
-            ctx.emitter
-                .emit_timeline(qaqh_domain::TimelineIntent::BlockSealed {
-                    turn_id: turn_id.to_string(),
-                    round_num,
-                    block_id: format!("tool:{tool_call_id}"),
-                });
-        }
-        ctx.emitter
-            .emit_timeline(qaqh_domain::TimelineIntent::RoundSealed {
-                turn_id: turn_id.to_string(),
-                round_num,
-                is_final: false,
-            });
-        // Refresh status bar tasks after every tool round
-        if !results.is_empty() {
-            // Ringing 双发：DashboardUpdated（replaceable 覆盖）
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                qaqh_domain::ControlEvent::DashboardUpdated {
-                    hp_connected: true,
-                    session_seed: ctx.agent.session.seed.clone(),
-                    tool_calls_total: 0,
-                    tool_failures: 0,
-                    current_phase: "single".into(),
-                    streaming: false,
-                },
-            ));
-            ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Control(
-                qaqh_domain::ControlEvent::DashboardSnapshot {
-                    snapshot: dashboard::build_snapshot(ctx.agent.session.seed.clone()),
-                },
-            ));
-        }
-        ctx.agent
-            .msg
-            .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-        results
+        // Delegates to turn_lap::backfill (knife-7 A2 step6) — keeps handle_* sites thin
+        // while sharing one verbatim implementation.
+        turn_backfill::emit_completed_tool_round(ctx, turn_id, round_num)
     }
 
     /// Reset all turn state (called on Cancel / new session).
