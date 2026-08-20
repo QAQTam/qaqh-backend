@@ -76,33 +76,24 @@ pub fn peek_image(seed: &str, index: usize) -> Option<(String, String)> {
 
 /// Remove a specific image from the registry after successful processing.
 pub fn consume_image(seed: &str, index: usize) {
-    if let Ok(mut reg) = IMAGE_REGISTRY.lock() {
-        if let Some(entries) = reg.get_mut(seed) {
-            if index < entries.len() {
+    if let Ok(mut reg) = IMAGE_REGISTRY.lock()
+        && let Some(entries) = reg.get_mut(seed)
+            && index < entries.len() {
                 entries.remove(index);
                 if entries.is_empty() {
                     reg.remove(seed);
                 }
             }
-        }
-    }
-}
-
-/// Remove all images for a session (cleanup).
-pub fn clear_images(seed: &str) {
-    if let Ok(mut reg) = IMAGE_REGISTRY.lock() {
-        reg.remove(seed);
-    }
 }
 
 // ── Backend selector ──────────────────────────────────────────────────
 
 fn select_backend(provider_type: &str) -> Box<dyn MultimodalBackend> {
     match provider_type {
-        "ollama" => Box::new(ollama::OllamaBackend::default()),
-        "lmstudio" => Box::new(lmstudio::LmStudioBackend::default()),
-        "openai_compat" => Box::new(openai_compat::OpenAiCompatBackend::default()),
-        _ => Box::new(mimo::MiMoBackend::default()), // "mimo" or empty → default
+        "ollama" => Box::new(ollama::OllamaBackend),
+        "lmstudio" => Box::new(lmstudio::LmStudioBackend),
+        "openai_compat" => Box::new(openai_compat::OpenAiCompatBackend),
+        _ => Box::new(mimo::MiMoBackend), // "mimo" or empty → default
     }
 }
 
@@ -148,7 +139,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
             match peek_image(&seed, idx) {
                 Some((mime, data)) => (data, mime, Some(seed), Some(idx)),
                 None => {
-                    return ToolResult::error(&format!(
+                    return ToolResult::error(format!(
                         "image: image_index {idx} not found in session '{seed}'. \
                          Images may have been uploaded in a different turn. \
                          Try re-uploading the image."
@@ -170,7 +161,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     // ── 2. Load config ──
     let cfg = match qaqh_config::Config::load() {
         Ok(c) => c,
-        Err(e) => return ToolResult::error(&format!("image: failed to load config: {e}")),
+        Err(e) => return ToolResult::error(format!("image: failed to load config: {e}")),
     };
 
     if !cfg.multimodal.enabled {
@@ -208,7 +199,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     // ── 5. Validate size ──
     let max_b64 = backend.max_image_bytes().saturating_mul(4) / 3;
     if image_data.len() > max_b64 {
-        return ToolResult::error(&format!(
+        return ToolResult::error(format!(
             "image: base64 data too large ({} bytes, max ~{} bytes for this backend)",
             image_data.len(),
             max_b64
@@ -236,7 +227,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     let resp = match req.send_json(&body) {
         Ok(r) => r,
         Err(e) => {
-            return ToolResult::error(&format!("image: API request failed: {e}"));
+            return ToolResult::error(format!("image: API request failed: {e}"));
         }
     };
 
@@ -245,7 +236,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
     let body_bytes = match resp.into_body().read_to_vec() {
         Ok(b) => b,
         Err(e) => {
-            return ToolResult::error(&format!("image: failed to read response body: {e}"));
+            return ToolResult::error(format!("image: failed to read response body: {e}"));
         }
     };
 
@@ -261,7 +252,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
                     .map(|s| s.to_string())
             })
             .unwrap_or_else(|| body_str[..body_str.len().min(500)].to_string());
-        return ToolResult::error(&format!(
+        return ToolResult::error(format!(
             "image: API returned HTTP {}: {err_msg}",
             status.as_u16(),
         ));
@@ -272,7 +263,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
         Ok(j) => j,
         Err(e) => {
             let body_str = String::from_utf8_lossy(&body_bytes);
-            return ToolResult::error(&format!(
+            return ToolResult::error(format!(
                 "image: failed to parse JSON response: {e}. Body: {}",
                 &body_str[..body_str.len().min(500)]
             ));
@@ -288,7 +279,7 @@ pub(super) fn handle_image_query(ctx: ToolCallCtx) -> ToolResult {
                 .and_then(|e| e.get("message"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("[No content in response]");
-            return ToolResult::error(&format!("image: {err_msg}"));
+            return ToolResult::error(format!("image: {err_msg}"));
         }
     };
 

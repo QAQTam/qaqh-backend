@@ -176,7 +176,7 @@ fn handle_write(ctx: ToolCallCtx) -> ToolResult {
         )),
         Err(e) => process_error(
             "WRITE_FAILED",
-            &format!("process write: {e}"),
+            format!("process write: {e}"),
             "Check that the process is still running.",
         ),
     }

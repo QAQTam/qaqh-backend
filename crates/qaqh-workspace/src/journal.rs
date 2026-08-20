@@ -55,11 +55,10 @@ static JOURNAL_IO: Mutex<()> = Mutex::new(());
 
 /// Root directory for the SMJ.
 pub fn journal_root() -> PathBuf {
-    if let Ok(dir) = std::env::var("QAQH_JOURNAL_DIR") {
-        if !dir.is_empty() {
+    if let Ok(dir) = std::env::var("QAQH_JOURNAL_DIR")
+        && !dir.is_empty() {
             return PathBuf::from(dir);
         }
-    }
     qaqh_types::platform::data_dir().join("journal")
 }
 
@@ -245,11 +244,10 @@ pub fn replay_file(file: &str, at_seq: Option<u64>) -> Result<Option<String>, St
 
     let mut current: Option<String> = None;
     for step in steps {
-        if let Some(limit) = at_seq {
-            if step.seq > limit {
+        if let Some(limit) = at_seq
+            && step.seq > limit {
                 break;
             }
-        }
         match &step.after_sha {
             Some(hash) => {
                 let content = read_blob(hash).map_err(|error| {

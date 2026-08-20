@@ -24,43 +24,6 @@ pub fn qaqh_dir() -> PathBuf {
     }
 }
 
-/// Like [`qaqh_dir`] but ensures the directory (and its `trash/` subdir)
-/// exist on disk. Returns the path on success.
-pub fn ensure_qaqh_dir() -> std::io::Result<PathBuf> {
-    let dir = qaqh_dir();
-    std::fs::create_dir_all(dir.join("trash"))?;
-
-    // Auto-add .deepx/ to .gitignore if workspace is a git repo
-    auto_gitignore(&dir);
-
-    Ok(dir)
-}
-
-/// Append `.deepx/` to workspace `.gitignore` if missing.
-fn auto_gitignore(qaqh_dir: &Path) {
-    let ws = qaqh_dir.parent().unwrap_or(Path::new("."));
-    if !ws.join(".git").exists() {
-        return;
-    }
-
-    let gitignore_path = ws.join(".gitignore");
-    let current = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
-
-    if !current
-        .lines()
-        .any(|l| l.trim() == ".deepx/" || l.trim() == ".deepx")
-    {
-        let new_content = if current.is_empty() || current.ends_with('\n') {
-            format!("{current}.deepx/\n")
-        } else {
-            format!("{current}\n.deepx/\n")
-        };
-        if std::fs::write(&gitignore_path, new_content).is_ok() {
-            log::info!("workspace: added .deepx/ to {}", gitignore_path.display());
-        }
-    }
-}
-
 /// Bind the global session identifier used by tools and code-delta tracking.
 pub fn set_current_session(seed: &str) {
     crate::set_current_session(seed);

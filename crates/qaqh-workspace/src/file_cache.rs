@@ -38,7 +38,7 @@ pub fn check(path: &str, content: &str) -> Option<String> {
             .get_or_init(|| Mutex::new(None))
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let is_consecutive = lr.as_ref().map_or(false, |p| p == path);
+        let is_consecutive = lr.as_ref().is_some_and(|p| p == path);
         *lr = Some(path.to_string());
         if is_consecutive {
             log::info!("[CACHE] file_read consecutive: {} — passing through", path);

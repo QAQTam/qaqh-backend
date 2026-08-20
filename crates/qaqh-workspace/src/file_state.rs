@@ -223,33 +223,6 @@ pub fn record_delete(path: &str) {
     insert(path, "deleted", 0, None);
 }
 
-/// Record a file move (both source and dest).
-pub fn record_move(source: &str, dest: &str) {
-    crate::file_cache::invalidate(source);
-    crate::file_cache::invalidate(dest);
-    let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
-    s.remove(source);
-    s.insert(
-        dest.to_string(),
-        FileEntry {
-            op: "moved",
-            line_count: 0,
-            hash: None,
-            order: next_order(),
-        },
-    );
-    // moved 也进跨进程同步队列
-    pending()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(StateEntry {
-            path: dest.to_string(),
-            op: "moved".to_string(),
-            line_count: 0,
-            hash: None,
-        });
-}
-
 /// 工具侧账本：该路径最近一次被工具看到时的 LF 视图 hash。
 /// `None` = 本会话中工具从未见过该文件（尚无校验基线）。
 pub fn last_hash(path: &str) -> Option<String> {

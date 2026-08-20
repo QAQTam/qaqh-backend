@@ -199,7 +199,7 @@ pub fn todo_cancel_json(seed: &str, id: &str) -> Result<String, String> {
         .ok_or_else(|| {
             json_err(
                 "NOT_FOUND",
-                &format!("todo {id} not found"),
+                format!("todo {id} not found"),
                 "Use todo(action=\"list\") to see all IDs.",
             )
         })?;
@@ -317,7 +317,7 @@ fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
                 parse_todo_id(Some(&Value::String(start.trim().to_string()))).ok_or_else(|| {
                     json_err(
                         "INVALID_INPUT",
-                        &format!("invalid id range '{segment}'"),
+                        format!("invalid id range '{segment}'"),
                         "Use T<n> or a numeric range like T1-T3.",
                     )
                 })?;
@@ -325,7 +325,7 @@ fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
                 parse_todo_id(Some(&Value::String(end.trim().to_string()))).ok_or_else(|| {
                     json_err(
                         "INVALID_INPUT",
-                        &format!("invalid id range '{segment}'"),
+                        format!("invalid id range '{segment}'"),
                         "Use T<n> or a numeric range like T1-T3.",
                     )
                 })?;
@@ -333,14 +333,14 @@ fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
             let (Some(start_n), Some(end_n)) = (start_n, end_n) else {
                 return Err(json_err(
                     "INVALID_INPUT",
-                    &format!("invalid id range '{segment}'"),
+                    format!("invalid id range '{segment}'"),
                     "Range endpoints must be T<number>.",
                 ));
             };
             if start_n > end_n {
                 return Err(json_err(
                     "INVALID_INPUT",
-                    &format!("id range '{segment}' has start > end"),
+                    format!("id range '{segment}' has start > end"),
                     "Use ascending ranges like T1-T3.",
                 ));
             }
@@ -351,7 +351,7 @@ fn expand_todo_ids(expr: &str) -> Result<Vec<String>, String> {
             let id = parse_todo_id(Some(&Value::String(segment.to_string()))).ok_or_else(|| {
                 json_err(
                     "INVALID_INPUT",
-                    &format!("invalid id '{segment}'"),
+                    format!("invalid id '{segment}'"),
                     "Use T<n> or a numeric range like T1-T3.",
                 )
             })?;
@@ -398,7 +398,7 @@ fn parse_new_todo(value: &Value, label: &str) -> Result<NewTodo, String> {
     if title.is_empty() || title.chars().count() > 100 {
         return Err(json_err(
             "INVALID_INPUT",
-            &format!("{label}.title must be 1-100 chars"),
+            format!("{label}.title must be 1-100 chars"),
             "Use a short imperative title, e.g. 'Add login API'.",
         ));
     }
@@ -411,7 +411,7 @@ fn parse_new_todo(value: &Value, label: &str) -> Result<NewTodo, String> {
     if description.chars().count() > 200 {
         return Err(json_err(
             "INVALID_INPUT",
-            &format!("{label}.description max 200 chars"),
+            format!("{label}.description max 200 chars"),
             "",
         ));
     }
@@ -430,7 +430,7 @@ fn parse_create_items(args: &Value) -> Result<Vec<NewTodo>, String> {
         if items.len() > MAX_CREATE_ITEMS {
             return Err(json_err(
                 "INVALID_INPUT",
-                &format!("items max {MAX_CREATE_ITEMS} entries per call"),
+                format!("items max {MAX_CREATE_ITEMS} entries per call"),
                 "Split the plan into multiple create calls.",
             ));
         }
@@ -484,7 +484,7 @@ fn insertion_index(store: &TodoStore, args: &Value) -> Result<usize, String> {
             .ok_or_else(|| {
                 json_err(
                     "NOT_FOUND",
-                    &format!("todo {id} not found"),
+                    format!("todo {id} not found"),
                     "Use todo(action=\"list\") to inspect IDs.",
                 )
             });
@@ -498,7 +498,7 @@ fn insertion_index(store: &TodoStore, args: &Value) -> Result<usize, String> {
             .ok_or_else(|| {
                 json_err(
                     "NOT_FOUND",
-                    &format!("todo {id} not found"),
+                    format!("todo {id} not found"),
                     "Use todo(action=\"list\") to inspect IDs.",
                 )
             });
@@ -607,7 +607,7 @@ fn exec_todo_set(args: &Value) -> Result<String, String> {
                 let status = parse_status(requested).ok_or_else(|| {
                     json_err(
                         "INVALID_INPUT",
-                        &format!("unknown status: {requested}"),
+                        format!("unknown status: {requested}"),
                         "Use idle, in_progress, completed, or cancelled.",
                     )
                 })?;
@@ -632,7 +632,7 @@ fn exec_todo_set(args: &Value) -> Result<String, String> {
             let status = parse_status(requested).ok_or_else(|| {
                 json_err(
                     "INVALID_INPUT",
-                    &format!("unknown status: {requested}"),
+                    format!("unknown status: {requested}"),
                     "Use idle, in_progress, completed, or cancelled.",
                 )
             })?;
@@ -675,7 +675,7 @@ fn exec_todo_set(args: &Value) -> Result<String, String> {
             let status = parse_status(requested).ok_or_else(|| {
                 json_err(
                     "INVALID_INPUT",
-                    &format!("unknown status: {requested}"),
+                    format!("unknown status: {requested}"),
                     "Use idle, in_progress, completed, or cancelled.",
                 )
             })?;
@@ -724,7 +724,7 @@ fn exec_todo_set(args: &Value) -> Result<String, String> {
     if updated.is_empty() {
         return Err(json_err(
             "NOT_FOUND",
-            &format!("no matching todos: {}", not_found.join(", ")),
+            format!("no matching todos: {}", not_found.join(", ")),
             "Use todo(action=\"list\") to inspect IDs.",
         ));
     }
@@ -771,7 +771,7 @@ fn exec_todo_list(args: &Value) -> Result<String, String> {
             parse_status(value).ok_or_else(|| {
                 json_err(
                     "INVALID_INPUT",
-                    &format!("unknown status: {value}"),
+                    format!("unknown status: {value}"),
                     "Use idle, in_progress, completed, or cancelled.",
                 )
             })
@@ -818,7 +818,7 @@ fn reject_fields(args: &Value, fields: &[&str], action: &str) -> Result<(), Stri
     } else {
         Err(json_err(
             "INVALID_INPUT",
-            &format!("action={action} does not accept: {}", present.join(", ")),
+            format!("action={action} does not accept: {}", present.join(", ")),
             "Follow the action-specific Todo V2 schema.",
         ))
     }

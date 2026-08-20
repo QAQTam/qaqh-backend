@@ -65,27 +65,6 @@ pub fn hash_args(args: &serde_json::Value) -> String {
     hex::encode(hash)
 }
 
-/// Lightweight exec audit — logs a command execution with just its SHA-256 hash.
-/// Called at the entry of `exec_command` to capture every shell invocation.
-pub fn maybe_log_exec(command: &str) {
-    let hash = {
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(command.as_bytes());
-        hex::encode(hasher.finalize())
-    };
-    let entry = AuditEntry {
-        ts: chrono::Utc::now().to_rfc3339(),
-        user: "agent".into(),
-        tool: "exec".into(),
-        action: "run".into(),
-        args_hash: hash,
-        result: "pending".into(),
-        elapsed_ms: 0,
-        files: Vec::new(),
-    };
-    append_audit(&entry);
-}
-
 /// Escape a string for CSV: wrap in quotes if it contains comma, quote, or newline.
 fn csv_escape(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {
