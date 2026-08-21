@@ -20,10 +20,10 @@ members = [
     "crates/qaqh-gate-testui",
     "crates/qaqh-update",
     "dsh-minimal-mode",
-    "apps/tui",
 ]
 
-$11.0.0-rc.7"
+[workspace.package]
+version = "0.0.0-alpha0"
 edition = "2024"
 license = "MIT"
 

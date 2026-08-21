@@ -14,12 +14,23 @@ $v = (Get-Content $VersionFile -Raw).Trim()
 if (-not $v) { throw "version.txt is empty" }
 
 # Cargo.toml: 替换 [workspace.package] 下的 version
+# 注意：反向引用必须写成 ${1}/${2}（带花括号）。若写成 "$1"+$v 且版本号以
+# 数字开头，会拼出 "$11..."，被 .NET 解析为不存在的第 11 个捕获组并按字面量
+# 输出，导致整段匹配（含 [workspace.package] 段头）被吞掉。
 $cargo = Get-Content $CargoToml -Raw
+$pattern = '(?ms)(\[workspace\.package\][^\[]*?version\s*=\s*")[^"]*(")'
+if (-not [regex]::IsMatch($cargo, $pattern)) {
+    throw "Cargo.toml 中未找到 [workspace.package] 的 version 条目"
+}
 $cargo = [regex]::Replace(
     $cargo,
-    '(?ms)(\[workspace\.package\][^\[]*?version\s*=\s*")[^"]*(")',
-    ('$1' + $v + '$2')
+    $pattern,
+    ('${1}' + $v + '${2}')
 )
+if (($cargo -notmatch '\[workspace\.package\]') -or
+    ($cargo -notmatch ('version\s*=\s*' + [regex]::Escape('"' + $v + '"')))) {
+    throw "Cargo.toml 版本写入后自检失败（期望 $v），已中止"
+}
 Set-Content $CargoToml -Value $cargo -NoNewline
 
 # 根 package.json
