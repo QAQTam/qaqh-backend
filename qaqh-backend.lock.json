@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "repository": "QAQTam/QAQ-Harness",
-  "version": "1.0.0-rc.6",
-  "protocol_version": 1,
-  "git_commit": "ff0785967532ab6b3867c5e8c66f2bb5bfd250a6",
-  "release_manifest_url": "https://github.com/QAQTam/QAQ-Harness/releases/download/v1.0.0-rc.6/qaqh-release.json"
-}
