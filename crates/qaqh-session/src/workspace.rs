@@ -159,6 +159,14 @@ impl WorkspaceStore {
             return Err(format!("workspace.create: not a directory: {path}"));
         }
         let canonical_str = canonical_cwd(Path::new(path));
+        // 去重：同一 canonical 路径不重复创建，直接返回已存在项（避免
+        // 顶部/左侧两入口重复点导致多条同路径工作区，左侧筛选失焦）。
+        {
+            let items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = items.iter().find(|w| normalize_path(&w.path) == normalize_path(&canonical_str)) {
+                return Ok(existing.clone());
+            }
+        }
         let title = Path::new(path)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

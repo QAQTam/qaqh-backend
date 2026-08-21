@@ -343,6 +343,15 @@ impl SessionManager {
         if index {
             store::upsert_index(&self.sessions_dir, &meta);
         }
+        // 组织工作区自动归属（与 persist_new_session_with_cwd:404 同逻辑）：
+        // 顶部 `workspace.set` 选目录后，左侧 `session.list.workspace_id` 需
+        // 立即反映分组，否则左侧恒显未分组（两套工作区不通根因）。
+        // `index=false` 为子代理临时会话，不进组织归属。
+        if index {
+            if let Some(cwd) = meta.cwd.as_deref() {
+                crate::workspace::WorkspaceStore::global().attach_by_cwd(seed, cwd);
+            }
+        }
     }
 
     /// 该 seed 是否为临时会话（子代理）：meta 存在且标记 ephemeral。
