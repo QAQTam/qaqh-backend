@@ -1,5 +1,0 @@
-line one
-line TWO modified
-line three
-line four
-extra appended line
