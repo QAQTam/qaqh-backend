@@ -20,10 +20,10 @@ use std::sync::atomic::AtomicBool;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sse::SseDecoder;
-use super::transport::{MAX_RETRIES, SSE_POLL_INTERVAL};
+use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
 use super::transport::{
-    SseTrace, backoff_delay, block_on, filter_stateful_messages, http_error_description,
-    is_cancelled, is_retryable, normalize_skill_envelope, sleep_with_cancel,
+    Attempt, SseTrace, block_on, filter_stateful_messages, http_error_description,
+    is_cancelled, is_retryable, normalize_skill_envelope, parse_retry_after, run_with_retry,
 };
 use super::types::{EmptyStreamEof, ProviderConfig, StreamEvent, safe_provider_error_body};
 
@@ -528,10 +528,13 @@ fn handle_anthropic_frame(
     }
 }
 
-fn stream_sse_anthropic(
+/// T8: anthropic 流式 SSE 主循环（外层由 `run_with_retry` 传入统一策略）。
+fn stream_sse_anthropic_with_policy(
     resp: reqwest::Response,
+    provider: &ProviderConfig,
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
+    policy: &RetryPolicy,
 ) -> anyhow::Result<()> {
     let mut decoder = SseDecoder::new();
     let mut stream = resp.bytes_stream();
@@ -549,6 +552,11 @@ fn stream_sse_anthropic(
         unsafe { (*callback)(event) };
     };
     let mut done_reached = false;
+    // 流中途抢救标记（语义同 chat 路径）：读错误/空闲超时且已有产出时置位，
+    // 走下方 partial-output 组装（stop_reason=None → runtime 续写接管）。
+    let mut stream_interrupted = false;
+    // 空闲看门狗：最后一次收到字节的时刻（对齐 codex stream_idle_timeout）。
+    let mut last_rx = std::time::Instant::now();
     loop {
         if is_cancelled(cancel) {
             return Err(anyhow::anyhow!("cancelled by user"));
@@ -578,14 +586,55 @@ fn stream_sse_anthropic(
         let chunk = match block_on(async {
             tokio::time::timeout(SSE_POLL_INTERVAL, stream.next()).await
         }) {
-            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Ok(chunk))) => {
+                last_rx = std::time::Instant::now();
+                chunk
+            }
             Ok(Some(Err(e))) => {
+                // 分类同 chat 路径：零产出并入 EmptyStreamEof 重试；
+                // 有产出且非 stateful → 收口续写；stateful → 判死。
+                if reasoning_buf.is_empty() && text_buf.is_empty() && tool_states.is_empty() {
+                    log::warn!("Anthropic SSE read error (no content, will retry): {e}");
+                    return Err(anyhow::Error::new(EmptyStreamEof));
+                }
+                if !provider.stateful {
+                    log::warn!(
+                        "Anthropic SSE interrupted mid-stream, keeping partial output: {e}"
+                    );
+                    stream_interrupted = true;
+                    break;
+                }
                 let msg = format!("SSE read error: {e}");
                 traced(StreamEvent::Error(msg.clone()));
                 return Err(anyhow::anyhow!("{}", msg));
             }
             Ok(None) => break,
-            Err(_elapsed) => continue,
+            Err(_elapsed) => {
+                if last_rx.elapsed() >= policy.idle_timeout {
+                    if reasoning_buf.is_empty() && text_buf.is_empty() && tool_states.is_empty() {
+                        log::warn!(
+                            "Anthropic SSE idle {}s (no content, will retry)",
+                            policy.idle_timeout.as_secs()
+                        );
+                        return Err(anyhow::Error::new(EmptyStreamEof));
+                    }
+                    if !provider.stateful {
+                        log::warn!(
+                            "Anthropic SSE idle {}s mid-stream, keeping partial output",
+                            policy.idle_timeout.as_secs()
+                        );
+                        stream_interrupted = true;
+                        break;
+                    }
+                    let msg = format!(
+                        "SSE idle timeout after {}s",
+                        policy.idle_timeout.as_secs()
+                    );
+                    traced(StreamEvent::Error(msg.clone()));
+                    return Err(anyhow::anyhow!("{}", msg));
+                }
+                continue;
+            }
         };
         decoder.push(&chunk);
     }
@@ -595,7 +644,8 @@ fn stream_sse_anthropic(
             let Ok(data_str) = frame else {
                 continue;
             };
-            let _ = handle_anthropic_frame(
+            // interrupted 时残帧是已送达的尾部数据，冲刷中的帧错误只记日志不判死。
+            if let Err(e) = handle_anthropic_frame(
                 &data_str,
                 &mut text_buf,
                 &mut reasoning_buf,
@@ -604,7 +654,13 @@ fn stream_sse_anthropic(
                 &mut prompt_tokens_acc,
                 &mut stop_reason,
                 &mut traced,
-            );
+            ) {
+                if stream_interrupted {
+                    log::warn!("Anthropic SSE: trailing frame error after interrupt ignored: {e}");
+                } else {
+                    return Err(e);
+                }
+            }
         }
     }
     if !done_reached && stop_reason.is_none() {
@@ -753,13 +809,10 @@ pub fn chat_stream_anthropic(
     let body = serde_json::Value::Object(body_map);
     let url = build_anthropic_url(&provider.base_url, provider.anthropic_path.as_deref());
 
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        if is_cancelled(cancel) {
-            return Err(anyhow::anyhow!("cancelled by user"));
-        }
-        match block_on(async {
+    // T8: 统一重试执行器（同 chat 路径）；闭包只做"一次尝试"并分类。
+    let policy = RetryPolicy::from_spec(provider.retry.as_ref());
+    run_with_retry(&policy, cancel, on_event, |_attempt, on_event| {
+        let resp = match block_on(async {
             let mut req = provider
                 .apply_opencode_headers(crate::shared_http_client().post(&url))
                 .header("Content-Type", "application/json")
@@ -778,74 +831,56 @@ pub fn chat_stream_anthropic(
             }
             req.json(&body).send().await
         }) {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                if (200..300).contains(&status) {
-                    match stream_sse_anthropic(resp, cancel, on_event) {
-                        Ok(()) => return Ok(()),
-                        Err(e) if e.downcast_ref::<EmptyStreamEof>().is_some() => {
-                            if attempt >= MAX_RETRIES {
-                                let msg = "upstream closed stream before any content".to_string();
-                                on_event(StreamEvent::Error(msg.clone()));
-                                return Err(anyhow::anyhow!("{}", msg));
-                            }
-                            let delay = backoff_delay(attempt);
-                            on_event(StreamEvent::Retrying {
-                                attempt,
-                                max_retries: MAX_RETRIES,
-                                delay_secs: delay.as_secs(),
-                                error: "stream closed early (no content)".into(),
-                            });
-                            if sleep_with_cancel(delay, cancel) {
-                                return Err(anyhow::anyhow!("cancelled by user"));
-                            }
-                            continue;
-                        }
-                        Err(e) => return Err(e),
+            Ok(resp) => resp,
+            Err(e) => {
+                return Attempt::Retry {
+                    retry_after: None,
+                    reason: format!("{e}"),
+                    final_error: format!("HTTP transport error: {e}"),
+                };
+            }
+        };
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            return match stream_sse_anthropic_with_policy(resp, provider, cancel, on_event, &policy)
+            {
+                Ok(()) => Attempt::Ok(()),
+                Err(e) if e.downcast_ref::<EmptyStreamEof>().is_some() => {
+                    let cause = e.to_string();
+                    Attempt::Retry {
+                        retry_after: None,
+                        reason: if cause.is_empty() {
+                            "stream closed early (no content)".into()
+                        } else {
+                            cause
+                        },
+                        final_error: "upstream closed stream before any content".into(),
                     }
                 }
-                let text = block_on(resp.text()).unwrap_or_default();
-                let code_desc = http_error_description(status);
-                if attempt >= MAX_RETRIES || !is_retryable(status) {
-                    let msg = format!("Anthropic API HTTP {} ({})", status, code_desc);
-                    let detail = if status == 401 {
-                        "authentication failed".into()
-                    } else {
-                        safe_provider_error_body(&text, &provider.api_key)
-                    };
-                    on_event(StreamEvent::Error(format!("{}: {}", msg, detail)));
-                    return Err(anyhow::anyhow!("{}", msg));
-                }
-                let delay = backoff_delay(attempt);
-                on_event(StreamEvent::Retrying {
-                    attempt,
-                    max_retries: MAX_RETRIES,
-                    delay_secs: delay.as_secs(),
-                    error: format!("HTTP {} ({})", status, code_desc),
-                });
-                if sleep_with_cancel(delay, cancel) {
-                    return Err(anyhow::anyhow!("cancelled by user"));
-                }
-            }
-            Err(e) => {
-                if attempt >= MAX_RETRIES {
-                    let msg = format!("HTTP transport error: {e}");
-                    on_event(StreamEvent::Error(msg.clone()));
-                    return Err(anyhow::anyhow!("{}", msg));
-                }
-                let delay = backoff_delay(attempt);
-                on_event(StreamEvent::Retrying {
-                    attempt,
-                    max_retries: MAX_RETRIES,
-                    delay_secs: delay.as_secs(),
-                    error: format!("{e}"),
-                });
-                if sleep_with_cancel(delay, cancel) {
-                    return Err(anyhow::anyhow!("cancelled by user"));
-                }
-            }
+                Err(e) => Attempt::Fatal(e),
+            };
         }
-    }
+        let retry_after = parse_retry_after(resp.headers());
+        let text = block_on(resp.text()).unwrap_or_default();
+        let code_desc = http_error_description(status);
+        if !is_retryable(status) {
+            let msg = format!("Anthropic API HTTP {} ({})", status, code_desc);
+            let detail = if status == 401 {
+                "authentication failed".into()
+            } else {
+                safe_provider_error_body(&text, &provider.api_key)
+            };
+            on_event(StreamEvent::Error(format!("{}: {}", msg, detail)));
+            return Attempt::Fatal(anyhow::anyhow!("{}", msg));
+        }
+        let msg = format!("Anthropic API HTTP {} ({})", status, code_desc);
+        let detail = safe_provider_error_body(&text, &provider.api_key);
+        Attempt::Retry {
+            retry_after,
+            reason: format!("HTTP {} ({})", status, code_desc),
+            final_error: format!("{}: {}", msg, detail),
+        }
+    })
 }
 
 pub fn chat_sync_anthropic(
@@ -878,47 +913,85 @@ pub fn chat_sync_anthropic(
         body["system"] = serde_json::json!(sys);
     }
     let url = build_anthropic_url(&provider.base_url, provider.anthropic_path.as_deref());
-    let resp = block_on(
-        provider
-            .apply_opencode_headers(crate::shared_http_client().post(&url))
-            .header("Content-Type", "application/json")
-            .header("x-api-key", &provider.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Authorization", format!("Bearer {}", provider.api_key))
-            .json(&body)
-            .send(),
-    )
-    .map_err(|e| format!("compact request failed: {e}"))?;
-    if !resp.status().is_success() {
+    // T8: sync 路径（compact/title）补轻量重试——仅传输错误 + 可重试 HTTP。
+    let policy = RetryPolicy::from_spec(provider.retry.as_ref());
+    let mut on_event = |_e: StreamEvent| {};
+    run_with_retry(&policy, None, &mut on_event, |attempt, _on_event| {
+        let resp = match block_on(
+            provider
+                .apply_opencode_headers(crate::shared_http_client().post(&url))
+                .header("Content-Type", "application/json")
+                .header("x-api-key", &provider.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("Authorization", format!("Bearer {}", provider.api_key))
+                .json(&body)
+                .send(),
+        ) {
+            Ok(resp) => resp,
+            Err(e) => {
+                log::warn!("Anthropic sync attempt {attempt} transport error, will retry: {e}");
+                return Attempt::Retry {
+                    retry_after: None,
+                    reason: format!("sync transport error: {e}"),
+                    final_error: format!("compact request failed: {e}"),
+                };
+            }
+        };
         let status = resp.status().as_u16();
-        let text = block_on(resp.text()).unwrap_or_default();
-        return Err(format!(
-            "anthropic HTTP {}: {}",
-            status,
-            safe_provider_error_body(&text, &provider.api_key)
-        ));
-    }
-    let json: serde_json::Value =
-        block_on(resp.json()).map_err(|e| format!("compact parse failed: {e}"))?;
-    // Anthropic non-stream: `content: [{type:"text",text:"..."}]`
-    if let Some(arr) = json.get("content").and_then(|v| v.as_array()) {
-        let mut out = String::new();
-        for block in arr {
-            if block.get("type").and_then(|v| v.as_str()) == Some("text")
-                && let Some(t) = block.get("text").and_then(|v| v.as_str())
-            {
-                out.push_str(t);
+        if !(200..300).contains(&status) {
+            // headers 需在 text() 前抓取
+            let retry_after = parse_retry_after(resp.headers());
+            let text = block_on(resp.text()).unwrap_or_default();
+            if status != 401 && is_retryable(status) {
+                log::warn!(
+                    "Anthropic sync attempt {attempt} HTTP {status} retryable, will retry"
+                );
+                return Attempt::Retry {
+                    retry_after,
+                    reason: format!("sync HTTP {} ({})", status, http_error_description(status)),
+                    final_error: format!(
+                        "compact request failed: HTTP {} ({}) {}",
+                        status,
+                        http_error_description(status),
+                        safe_provider_error_body(&text, &provider.api_key)
+                    ),
+                };
+            }
+            return Attempt::Fatal(anyhow::anyhow!(
+                "anthropic HTTP {}: {}",
+                status,
+                safe_provider_error_body(&text, &provider.api_key)
+            ));
+        }
+        let json: serde_json::Value = match block_on(resp.json()) {
+            Ok(j) => j,
+            Err(e) => {
+                return Attempt::Fatal(anyhow::anyhow!("compact parse failed: {e}"));
+            }
+        };
+        // Anthropic non-stream: `content: [{type:"text",text:"..."}]`
+        if let Some(arr) = json.get("content").and_then(|v| v.as_array()) {
+            let mut out = String::new();
+            for block in arr {
+                if block.get("type").and_then(|v| v.as_str()) == Some("text")
+                    && let Some(t) = block.get("text").and_then(|v| v.as_str())
+                {
+                    out.push_str(t);
+                }
+            }
+            if !out.is_empty() {
+                return Attempt::Ok(out);
             }
         }
-        if !out.is_empty() {
-            return Ok(out);
+        // Fallback: direct string field
+        match json.get("content").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => Attempt::Ok(s.to_string()),
+            _ => Attempt::Fatal(anyhow::anyhow!(
+                "compact: no content in anthropic response: {json}"
+            )),
         }
-    }
-    // Fallback: direct string field
-    json.get("content")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("compact: no content in anthropic response: {}", json))
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

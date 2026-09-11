@@ -10,10 +10,11 @@ use qaqh_types::{CacheTokenField, ThinkingParamMode};
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sse::SseDecoder;
-use super::transport::{MAX_RETRIES, SSE_POLL_INTERVAL};
+use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
 use super::transport::{
-    SseTrace, backoff_delay, block_on, filter_stateful_messages, http_error_description,
-    is_cancelled, is_retryable, normalize_skill_envelope, sleep_with_cancel,
+    Attempt, SseTrace, STREAM_IDLE_TIMEOUT, block_on, filter_stateful_messages,
+    http_error_description, is_cancelled, is_retryable, normalize_skill_envelope,
+    parse_retry_after, run_with_retry,
 };
 use super::types::{
     EmptyStreamEof, ProviderConfig, StreamEvent, clamp_effort_to_allowlist,
@@ -163,20 +164,12 @@ pub fn chat_stream_openai(
     let body = serde_json::Value::Object(body_map);
     let url = build_chat_url(&provider.base_url, provider.chat_path.as_deref());
 
-    let mut attempt = 0u32;
-    // Reuse the module-level client for connection pooling. Cancellation
-    // responsiveness is handled by the polling timeout in stream_sse, not by
-    // a client-level read timeout.
-
-    loop {
-        attempt += 1;
-
-        // Check cancel before sending the request
-        if is_cancelled(cancel) {
-            return Err(anyhow::anyhow!("cancelled by user"));
-        }
-
-        match block_on(async {
+    // T8: 统一重试执行器——计数/取消检查/退避计算（retry-after 优先）/Retrying
+    // 事件/可取消睡眠全部集中在 transport::run_with_retry；本闭包只做
+    // "一次尝试"并按结果分类。策略缺省即现行全局常量（T9 起可按端点注入）。
+    let policy = RetryPolicy::from_spec(provider.retry.as_ref());
+    run_with_retry(&policy, cancel, on_event, |_attempt, on_event| {
+        let resp = match block_on(async {
             provider
                 .apply_opencode_headers(crate::shared_http_client().post(&url))
                 .header("Authorization", format!("Bearer {}", provider.api_key))
@@ -185,81 +178,62 @@ pub fn chat_stream_openai(
                 .send()
                 .await
         }) {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                if (200..300).contains(&status) {
-                    match stream_sse(resp, provider, user_id.as_deref(), cancel, on_event) {
-                        Ok(()) => return Ok(()),
-                        // Upstream closed the stream before [DONE] with zero
-                        // content — treat like a transport error and retry the
-                        // whole request (mirrors opencode's stream-level retry).
-                        Err(e) if e.downcast_ref::<EmptyStreamEof>().is_some() => {
-                            if attempt >= MAX_RETRIES {
-                                let msg = "upstream closed stream before any content".to_string();
-                                on_event(StreamEvent::Error(msg.clone()));
-                                return Err(anyhow::anyhow!("{}", msg));
-                            }
-                            let delay = backoff_delay(attempt);
-                            on_event(StreamEvent::Retrying {
-                                attempt,
-                                max_retries: MAX_RETRIES,
-                                delay_secs: delay.as_secs(),
-                                error: "stream closed early (no content)".into(),
-                            });
-                            if sleep_with_cancel(delay, cancel) {
-                                return Err(anyhow::anyhow!("cancelled by user"));
-                            }
-                            continue;
-                        }
-                        Err(e) => return Err(e),
+            Ok(resp) => resp,
+            // Transport / timeout / connection errors
+            Err(e) => {
+                return Attempt::Retry {
+                    retry_after: None,
+                    reason: format!("{e}"),
+                    final_error: format!("HTTP transport error: {e}"),
+                };
+            }
+        };
+
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            return match stream_sse(resp, provider, user_id.as_deref(), cancel, on_event) {
+                Ok(()) => Attempt::Ok(()),
+                // Upstream closed the stream before [DONE] with zero
+                // content (early EOF, mid-stream read error, or idle
+                // timeout) — treat like a transport error and retry the
+                // whole request (mirrors opencode's stream-level retry).
+                Err(e) if e.downcast_ref::<EmptyStreamEof>().is_some() => {
+                    let cause = e.to_string();
+                    Attempt::Retry {
+                        retry_after: None,
+                        reason: if cause.is_empty() {
+                            "stream closed early (no content)".into()
+                        } else {
+                            cause
+                        },
+                        final_error: "upstream closed stream before any content".into(),
                     }
                 }
-                // HTTP error — read body for details
-                let text = block_on(resp.text()).unwrap_or_default();
-                let code_desc = http_error_description(status);
-                if attempt >= MAX_RETRIES || !is_retryable(status) {
-                    let msg = format!("OpenAI API HTTP {} ({})", status, code_desc);
-                    let detail = if status == 401 {
-                        "authentication failed".into()
-                    } else {
-                        safe_provider_error_body(&text, &provider.api_key)
-                    };
-                    on_event(StreamEvent::Error(format!("{}: {}", msg, detail)));
-                    return Err(anyhow::anyhow!("{}", msg));
-                }
-
-                let delay = backoff_delay(attempt);
-                on_event(StreamEvent::Retrying {
-                    attempt,
-                    max_retries: MAX_RETRIES,
-                    delay_secs: delay.as_secs(),
-                    error: format!("HTTP {} ({})", status, code_desc),
-                });
-                if sleep_with_cancel(delay, cancel) {
-                    return Err(anyhow::anyhow!("cancelled by user"));
-                }
-            }
-            Err(e) => {
-                // Transport / timeout / connection errors
-                if attempt >= MAX_RETRIES {
-                    let msg = format!("HTTP transport error: {e}");
-                    on_event(StreamEvent::Error(msg.clone()));
-                    return Err(anyhow::anyhow!("{}", msg));
-                }
-
-                let delay = backoff_delay(attempt);
-                on_event(StreamEvent::Retrying {
-                    attempt,
-                    max_retries: MAX_RETRIES,
-                    delay_secs: delay.as_secs(),
-                    error: format!("{e}"),
-                });
-                if sleep_with_cancel(delay, cancel) {
-                    return Err(anyhow::anyhow!("cancelled by user"));
-                }
-            }
+                Err(e) => Attempt::Fatal(e),
+            };
         }
-    }
+        // HTTP error — read body for details（headers 需在 text() 前抓取）
+        let retry_after = parse_retry_after(resp.headers());
+        let text = block_on(resp.text()).unwrap_or_default();
+        let code_desc = http_error_description(status);
+        if !is_retryable(status) {
+            let msg = format!("OpenAI API HTTP {} ({})", status, code_desc);
+            let detail = if status == 401 {
+                "authentication failed".into()
+            } else {
+                safe_provider_error_body(&text, &provider.api_key)
+            };
+            on_event(StreamEvent::Error(format!("{}: {}", msg, detail)));
+            return Attempt::Fatal(anyhow::anyhow!("{}", msg));
+        }
+        let msg = format!("OpenAI API HTTP {} ({})", status, code_desc);
+        let detail = safe_provider_error_body(&text, &provider.api_key);
+        Attempt::Retry {
+            retry_after,
+            reason: format!("HTTP {} ({})", status, code_desc),
+            final_error: format!("{}: {}", msg, detail),
+        }
+    })
 }
 
 /// 解析单个 SSE chunk 的 `delta` 对象，按模型输出意图派生流式事件。
@@ -519,6 +493,11 @@ fn stream_sse(
     };
 
     let mut done_reached = false;
+    // 流中途抢救标记：读错误/空闲超时且已有产出时置位——跳出读取循环后
+    // 走下方 partial-output 组装，残帧冲刷错误不再判死（见下方 flush 守卫）。
+    let mut stream_interrupted = false;
+    // 空闲看门狗：最后一次收到字节的时刻（对齐 codex stream_idle_timeout）。
+    let mut last_rx = std::time::Instant::now();
     loop {
         // Check cancel before each read attempt
         if is_cancelled(cancel) {
@@ -555,20 +534,69 @@ fn stream_sse(
         let chunk = match block_on(async {
             tokio::time::timeout(SSE_POLL_INTERVAL, stream.next()).await
         }) {
-            Ok(Some(Ok(chunk))) => chunk,
-            Ok(Some(Err(e))) => {
-                let msg = format!("SSE read error: {e}");
-                traced(StreamEvent::Error(msg.clone()));
-                return Err(anyhow::anyhow!("{}", msg));
+            Ok(Some(Ok(chunk))) => {
+                last_rx = std::time::Instant::now();
+                chunk
             }
-            Ok(None) => break,         // EOF
-            Err(_elapsed) => continue, // timeout → check cancel, retry
+            Ok(Some(Err(e))) => {
+                // 中途读错误 = 远端排流/网络中断（对齐 codex ApiError::Stream：
+                // 一律可重试）。按产出状态分类，而非一律判死：
+                // - 零产出 → 并入 EmptyStreamEof 哨兵，外层整请求重试；
+                //   详情只入日志（重试成功则用户无感知）。
+                // - 有产出（stateful=false）→ 已流出的增量不可重来，
+                //   按"上游排流"收口：stop_reason 留 None，runtime 的
+                //   带词重启机制自动续写（对齐 opencode 静默损流处理）。
+                // - 有产出（stateful=true）→ 服务端会话状态未知，盲续写
+                //   会错位；维持判死（现状）。
+                if text_buf.is_empty() && reasoning_buf.is_empty() && tool_acc.is_empty() {
+                    log::warn!("OpenAI SSE read error (no content, will retry): {e}");
+                    return Err(anyhow::Error::new(EmptyStreamEof));
+                }
+                if provider.stateful {
+                    let msg = format!("SSE read error: {e}");
+                    traced(StreamEvent::Error(msg.clone()));
+                    return Err(anyhow::anyhow!("{}", msg));
+                }
+                log::warn!("OpenAI SSE interrupted mid-stream, keeping partial output: {e}");
+                stream_interrupted = true;
+                break;
+            }
+            Ok(None) => break, // EOF
+            Err(_elapsed) => {
+                // 50ms 轮询超时：先检查空闲看门狗，再继续轮询。
+                if last_rx.elapsed() >= STREAM_IDLE_TIMEOUT {
+                    if text_buf.is_empty() && reasoning_buf.is_empty() && tool_acc.is_empty() {
+                        log::warn!(
+                            "OpenAI SSE idle {}s (no content, will retry)",
+                            STREAM_IDLE_TIMEOUT.as_secs()
+                        );
+                        return Err(anyhow::Error::new(EmptyStreamEof));
+                    }
+                    if provider.stateful {
+                        let msg = format!(
+                            "SSE idle timeout after {}s",
+                            STREAM_IDLE_TIMEOUT.as_secs()
+                        );
+                        traced(StreamEvent::Error(msg.clone()));
+                        return Err(anyhow::anyhow!("{}", msg));
+                    }
+                    log::warn!(
+                        "OpenAI SSE idle {}s mid-stream, keeping partial output",
+                        STREAM_IDLE_TIMEOUT.as_secs()
+                    );
+                    stream_interrupted = true;
+                    break;
+                }
+                continue;
+            }
         };
         decoder.push(&chunk);
     }
 
     // EOF 残帧：处理未以空行收尾的聚合（补行尾+空行触发消费，与帧解析的
     // "空行定界事件"语义一致；等价于 eventsource-stream 的 EOF flush）。
+    // stream_interrupted 时残帧是已送达的尾部数据，照常冲刷；冲刷中的帧错误
+    // 只记日志不判死（整个流已处于抢救路径）。
     if !done_reached && decoder.has_pending() {
         decoder.push(b"\n\n");
         while let Some(frame) = decoder.next_frame() {
@@ -590,6 +618,9 @@ fn stream_sse(
             ) {
                 Ok(FrameAction::Continue) => {}
                 Ok(FrameAction::Done) => {}
+                Err(e) if stream_interrupted => {
+                    log::warn!("OpenAI SSE: trailing frame error after interrupt ignored: {e}");
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -880,23 +911,75 @@ pub fn chat_sync_openai(
         body["thinking"] = thinking;
     }
 
-    let resp = block_on(
-        provider
-            .apply_opencode_headers(crate::shared_http_client().post(&url))
-            .header("Authorization", format!("Bearer {}", provider.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send(),
-    )
-    .map_err(|e| format!("compact request failed: {e}"))?;
-
-    let json: serde_json::Value =
-        block_on(resp.json()).map_err(|e| format!("compact parse failed: {e}"))?;
-
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "compact: no content in response".to_string())
+    // T8: sync 路径（compact/title）补轻量重试——原来零重试，上游瞬时
+    // 429/5xx 或传输抖动即失败；仅重试传输错误 + 可重试 HTTP 状态。
+    // sync 无 StreamEvent 回调，重试事件不对外广播，只记日志。
+    let policy = RetryPolicy::from_spec(provider.retry.as_ref());
+    let mut on_event = |_e: StreamEvent| {};
+    run_with_retry(&policy, None, &mut on_event, |attempt, _on_event| {
+        let resp = match block_on(
+            provider
+                .apply_opencode_headers(crate::shared_http_client().post(&url))
+                .header("Authorization", format!("Bearer {}", provider.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send(),
+        ) {
+            Ok(resp) => resp,
+            Err(e) => {
+                log::warn!("OpenAI sync attempt {attempt} transport error, will retry: {e}");
+                return Attempt::Retry {
+                    retry_after: None,
+                    reason: format!("sync transport error: {e}"),
+                    final_error: format!("compact request failed: {e}"),
+                };
+            }
+        };
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            // headers 需在 text() 前抓取
+            let retry_after = parse_retry_after(resp.headers());
+            let text = block_on(resp.text()).unwrap_or_default();
+            if status != 401 && is_retryable(status) {
+                log::warn!(
+                    "OpenAI sync attempt {attempt} HTTP {status} retryable, will retry"
+                );
+                return Attempt::Retry {
+                    retry_after,
+                    reason: format!("sync HTTP {} ({})", status, http_error_description(status)),
+                    final_error: format!(
+                        "compact request failed: HTTP {} ({}) {}",
+                        status,
+                        http_error_description(status),
+                        safe_provider_error_body(&text, &provider.api_key)
+                    ),
+                };
+            }
+            let detail = if status == 401 {
+                "authentication failed".into()
+            } else {
+                safe_provider_error_body(&text, &provider.api_key)
+            };
+            return Attempt::Fatal(anyhow::anyhow!(
+                "compact request failed: HTTP {} ({}) {}",
+                status,
+                http_error_description(status),
+                detail
+            ));
+        }
+        let json: serde_json::Value = match block_on(resp.json()) {
+            Ok(j) => j,
+            Err(e) => {
+                // 解析失败属于不可恢复响应（非传输层瞬时态），不重试。
+                return Attempt::Fatal(anyhow::anyhow!("compact parse failed: {e}"));
+            }
+        };
+        match json["choices"][0]["message"]["content"].as_str() {
+            Some(s) => Attempt::Ok(s.to_string()),
+            None => Attempt::Fatal(anyhow::anyhow!("compact: no content in response")),
+        }
+    })
+    .map_err(|e| e.to_string())
 }
 
 // ── URL builder ──

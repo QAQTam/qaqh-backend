@@ -10,8 +10,11 @@ use std::sync::atomic::AtomicBool;
 use qaqh_types::{ContentBlock, Message, ToolDef};
 
 use super::sse::SseDecoder;
-use super::transport::{MAX_RETRIES, SSE_POLL_INTERVAL};
-use super::transport::{backoff_delay, block_on, is_cancelled, sleep_with_cancel};
+use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
+use super::transport::{
+    Attempt, SseTrace, block_on, http_error_description, is_cancelled, is_retryable,
+    parse_retry_after, run_with_retry,
+};
 use super::types::{
     EFFORT_LADDER, EmptyStreamEof, ProviderConfig, ResponsesCompat, StreamEvent,
     normalize_reasoning_effort, safe_provider_error_body,
@@ -606,14 +609,10 @@ pub fn chat_stream_responses(
     let body = serde_json::Value::Object(body_map);
     let url = build_responses_url(&provider.base_url, provider.responses_path.as_deref());
 
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        if is_cancelled(cancel) {
-            return Err(anyhow::anyhow!("cancelled by user"));
-        }
-
-        match block_on(async {
+    // T8: 统一重试执行器（同 chat/anthropic 路径）；闭包只做"一次尝试"并分类。
+    let policy = RetryPolicy::from_spec(provider.retry.as_ref());
+    run_with_retry(&policy, cancel, on_event, |_attempt, on_event| {
+        let resp = match block_on(async {
             provider
                 .apply_opencode_headers(crate::shared_http_client().post(&url))
                 .header("Authorization", format!("Bearer {}", provider.api_key))
@@ -622,77 +621,65 @@ pub fn chat_stream_responses(
                 .send()
                 .await
         }) {
-            Ok(resp) => {
-                if !resp.status().is_success() {
-                    let status = resp.status().as_u16();
-                    let err_body = block_on(async { resp.text().await }).unwrap_or_default();
-                    if status == 401 {
-                        // Some providers echo the API key tail in auth errors
-                        // (e.g. DeepSeek: "Your api key: ****test is invalid").
-                        // Never surface credential material in error output.
-                        return Err(anyhow::anyhow!("HTTP 401 (authentication failed)"));
-                    }
-                    if (status == 429 || status == 500 || status == 502 || status == 503)
-                        && attempt < MAX_RETRIES
-                    {
-                        let delay = backoff_delay(attempt);
-                        on_event(StreamEvent::Retrying {
-                            attempt,
-                            max_retries: MAX_RETRIES,
-                            delay_secs: delay.as_secs(),
-                            error: format!("HTTP {} (retryable)", status),
-                        });
-                        if sleep_with_cancel(delay, cancel) {
-                            return Err(anyhow::anyhow!("cancelled by user"));
-                        }
-                        continue;
-                    }
-                    let msg = safe_provider_error_body(&err_body, &provider.api_key);
-                    return Err(anyhow::anyhow!("HTTP {}: {}", status, msg));
-                }
-                match parse_responses_sse(resp, compat, cancel, on_event) {
-                    Ok(()) => return Ok(()),
-                    // Upstream closed the stream before any content — retry
-                    // the whole request (mirrors opencode's stream retry).
-                    Err(e) if e.downcast_ref::<EmptyStreamEof>().is_some() => {
-                        if attempt >= MAX_RETRIES {
-                            let msg = "upstream closed stream before any content".to_string();
-                            on_event(StreamEvent::Error(msg.clone()));
-                            return Err(anyhow::anyhow!("{}", msg));
-                        }
-                        let delay = backoff_delay(attempt);
-                        on_event(StreamEvent::Retrying {
-                            attempt,
-                            max_retries: MAX_RETRIES,
-                            delay_secs: delay.as_secs(),
-                            error: "stream closed early (no content)".into(),
-                        });
-                        if sleep_with_cancel(delay, cancel) {
-                            return Err(anyhow::anyhow!("cancelled by user"));
-                        }
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
+            Ok(resp) => resp,
             Err(e) => {
-                if attempt < MAX_RETRIES {
-                    let delay = backoff_delay(attempt);
-                    on_event(StreamEvent::Retrying {
-                        attempt,
-                        max_retries: MAX_RETRIES,
-                        delay_secs: delay.as_secs(),
-                        error: format!("transport error: {e}"),
-                    });
-                    if sleep_with_cancel(delay, cancel) {
-                        return Err(anyhow::anyhow!("cancelled by user"));
-                    }
-                    continue;
-                }
-                return Err(anyhow::anyhow!("Request failed: {}", e));
+                return Attempt::Retry {
+                    retry_after: None,
+                    reason: format!("transport error: {e}"),
+                    final_error: format!("Request failed: {e}"),
+                };
             }
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            // headers 需在 text() 消费 response 前抓取（同 chat）。
+            let retry_after = parse_retry_after(resp.headers());
+            let err_body = block_on(async { resp.text().await }).unwrap_or_default();
+            if status == 401 {
+                // Some providers echo the API key tail in auth errors
+                // (e.g. DeepSeek: "Your api key: ****test is invalid").
+                // Never surface credential material in error output.
+                return Attempt::Fatal(anyhow::anyhow!("HTTP 401 (authentication failed)"));
+            }
+            if !is_retryable(status) {
+                let msg = format!("HTTP {}", status);
+                on_event(StreamEvent::Error(format!(
+                    "Responses API HTTP {} ({})",
+                    status,
+                    http_error_description(status)
+                )));
+                let detail = safe_provider_error_body(&err_body, &provider.api_key);
+                return Attempt::Fatal(anyhow::anyhow!("{}: {}", msg, detail));
+            }
+            let msg = format!("HTTP {}", status);
+            let detail = safe_provider_error_body(&err_body, &provider.api_key);
+            return Attempt::Retry {
+                retry_after,
+                reason: format!("HTTP {} ({})", status, http_error_description(status)),
+                final_error: format!("{}: {}", msg, detail),
+            };
         }
-    }
+
+        match parse_responses_sse(resp, compat, cancel, on_event, &policy) {
+            Ok(()) => Attempt::Ok(()),
+            // Upstream closed the stream before any content — retry
+            // the whole request (mirrors opencode's stream retry).
+            Err(e) if e.downcast_ref::<EmptyStreamEof>().is_some() => {
+                let cause = e.to_string();
+                Attempt::Retry {
+                    retry_after: None,
+                    reason: if cause.is_empty() {
+                        "stream closed early (no content)".into()
+                    } else {
+                        cause
+                    },
+                    final_error: "upstream closed stream before any content".into(),
+                }
+            }
+            Err(e) => Attempt::Fatal(e),
+        }
+    })
 }
 
 /// Synchronous non-streaming call via Responses API.
@@ -750,49 +737,93 @@ pub fn chat_sync_responses(
     let body = serde_json::Value::Object(body_map);
     let url = build_responses_url(&provider.base_url, provider.responses_path.as_deref());
 
-    let resp = block_on(async {
-        provider
-            .apply_opencode_headers(crate::shared_http_client().post(&url))
-            .header("Authorization", format!("Bearer {}", provider.api_key))
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_string(&body).unwrap_or_default())
-            .send()
-            .await
-    })
-    .map_err(|e| format!("Request failed: {}", e))?;
+    // T8: sync 路径（compact/title）补轻量重试——仅传输错误 + 可重试 HTTP。
+    let policy = RetryPolicy::from_spec(provider.retry.as_ref());
+    let mut on_event = |_e: StreamEvent| {};
+    run_with_retry(&policy, None, &mut on_event, |attempt, _on_event| {
+        let resp = match block_on(async {
+            provider
+                .apply_opencode_headers(crate::shared_http_client().post(&url))
+                .header("Authorization", format!("Bearer {}", provider.api_key))
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_string(&body).unwrap_or_default())
+                .send()
+                .await
+        }) {
+            Ok(resp) => resp,
+            Err(e) => {
+                log::warn!("Responses sync attempt {attempt} transport error, will retry: {e}");
+                return Attempt::Retry {
+                    retry_after: None,
+                    reason: format!("sync transport error: {e}"),
+                    final_error: format!("Request failed: {e}"),
+                };
+            }
+        };
 
-    let status = resp.status().as_u16();
-    let text = block_on(async { resp.text().await }).map_err(|e| format!("Read error: {}", e))?;
+        let status = resp.status().as_u16();
+        let text = match block_on(async { resp.text().await }) {
+            Ok(t) => t,
+            Err(e) => {
+                // 响应体读取失败属传输态异常，可重试。
+                log::warn!("Responses sync attempt {attempt} read error, will retry: {e}");
+                return Attempt::Retry {
+                    retry_after: None,
+                    reason: format!("sync read error: {e}"),
+                    final_error: format!("Read error: {e}"),
+                };
+            }
+        };
 
-    if !(200..300).contains(&status) {
-        if status == 401 {
-            // Never surface credential material echoed by the provider.
-            return Err("HTTP 401 (authentication failed)".into());
+        if !(200..300).contains(&status) {
+            if status == 401 {
+                // Never surface credential material echoed by the provider.
+                return Attempt::Fatal(anyhow::anyhow!("HTTP 401 (authentication failed)"));
+            }
+            if is_retryable(status) {
+                log::warn!(
+                    "Responses sync attempt {attempt} HTTP {status} retryable, will retry"
+                );
+                return Attempt::Retry {
+                    retry_after: None,
+                    reason: format!("sync HTTP {} ({})", status, http_error_description(status)),
+                    final_error: format!(
+                        "HTTP {}: {}",
+                        status,
+                        safe_provider_error_body(&text, &provider.api_key)
+                    ),
+                };
+            }
+            let msg = safe_provider_error_body(&text, &provider.api_key);
+            return Attempt::Fatal(anyhow::anyhow!("HTTP {}: {}", status, msg));
         }
-        let msg = safe_provider_error_body(&text, &provider.api_key);
-        return Err(format!("HTTP {}: {}", status, msg));
-    }
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("JSON parse: {}", e))?;
+        let parsed: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                return Attempt::Fatal(anyhow::anyhow!("JSON parse: {e}"));
+            }
+        };
 
-    let mut result = String::new();
-    if let Some(output) = parsed.get("output").and_then(|o| o.as_array()) {
-        for item in output {
-            if item.get("type").is_some_and(|t| t == "message")
-                && let Some(content) = item.get("content").and_then(|c| c.as_array())
-            {
-                for part in content {
-                    if part.get("type").is_some_and(|t| t == "output_text")
-                        && let Some(t) = part.get("text").and_then(|t| t.as_str())
-                    {
-                        result.push_str(t);
+        let mut result = String::new();
+        if let Some(output) = parsed.get("output").and_then(|o| o.as_array()) {
+            for item in output {
+                if item.get("type").is_some_and(|t| t == "message")
+                    && let Some(content) = item.get("content").and_then(|c| c.as_array())
+                {
+                    for part in content {
+                        if part.get("type").is_some_and(|t| t == "output_text")
+                            && let Some(t) = part.get("text").and_then(|t| t.as_str())
+                        {
+                            result.push_str(t);
+                        }
                     }
                 }
             }
         }
-    }
-    Ok(result)
+        Attempt::Ok(result)
+    })
+    .map_err(|e| e.to_string())
 }
 
 // ── SSE parsing ──
@@ -1108,6 +1139,7 @@ fn parse_responses_sse(
     compat: &ResponsesCompat,
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
+    policy: &RetryPolicy,
 ) -> anyhow::Result<()> {
     let mut decoder = SseDecoder::new();
     let mut stream = resp.bytes_stream();
@@ -1117,15 +1149,31 @@ fn parse_responses_sse(
         ..Default::default()
     };
 
+    let mut trace = SseTrace::from_env();
+    let callback = on_event;
+    let mut traced = move |event: StreamEvent| {
+        trace.record(&event);
+        callback(event);
+    };
+
+    let mut done_reached = false;
+    // 流中途抢救标记：读错误/空闲超时且已有产出时置位——EOF 残帧冲刷错误
+    // 不再判死，最终以 Done{stop_reason:None} 收口（上层带词重启续写）。
+    let mut stream_interrupted = false;
+    // 空闲看门狗：最后一次收到字节的时刻（对齐 codex stream_idle_timeout）。
+    let mut last_rx = std::time::Instant::now();
     loop {
         if is_cancelled(cancel) {
             return Err(anyhow::anyhow!("cancelled by user"));
         }
 
         // 先消费缓冲中已完整的帧。
-        match feed_responses_sse(&mut decoder, &mut state, on_event) {
+        match feed_responses_sse(&mut decoder, &mut state, &mut traced) {
             Ok(SseProgress::Continue) => {}
-            Ok(SseProgress::Done) => return Ok(()),
+            Ok(SseProgress::Done) => {
+                done_reached = true;
+                break;
+            }
             Err(message) => return Err(anyhow::anyhow!("{}", message)),
         }
 
@@ -1136,30 +1184,85 @@ fn parse_responses_sse(
             )
             .await
         }) {
-            futures::future::Either::Left((Some(Ok(bytes)), _)) => bytes,
+            futures::future::Either::Left((Some(Ok(bytes)), _)) => {
+                last_rx = std::time::Instant::now();
+                bytes
+            }
             futures::future::Either::Left((Some(Err(e)), _)) => {
-                return Err(anyhow::anyhow!("Stream error: {}", e));
+                // 中途读错误 = 远端排流/网络中断（对齐 chat stream_sse 分类，
+                // 而非一律判死）：
+                // - 零产出 → EmptyStreamEof 哨兵，外层整请求重试；
+                // - 有产出 → 已流出的增量不可重来，按"上游排流"抢救收口：
+                //   Done{stop_reason:None}，上层续写机制自动带词重启。
+                let empty = state.accumulated_text.is_empty()
+                    && state.reasoning_text.is_empty()
+                    && state.tool_uses.is_empty()
+                    && state.web_search_calls.is_empty();
+                if empty {
+                    log::warn!("Responses SSE read error (no content, will retry): {e}");
+                    return Err(anyhow::Error::new(EmptyStreamEof));
+                }
+                log::warn!(
+                    "Responses SSE interrupted mid-stream, keeping partial output: {e}"
+                );
+                stream_interrupted = true;
+                break;
             }
             futures::future::Either::Left((None, _)) => break,
-            futures::future::Either::Right(_) => continue,
+            futures::future::Either::Right(_) => {
+                // 50ms 轮询超时：先检查空闲看门狗，再继续轮询。
+                if last_rx.elapsed() >= policy.idle_timeout {
+                    let empty = state.accumulated_text.is_empty()
+                        && state.reasoning_text.is_empty()
+                        && state.tool_uses.is_empty()
+                        && state.web_search_calls.is_empty();
+                    if empty {
+                        log::warn!(
+                            "Responses SSE idle {}s (no content, will retry)",
+                            policy.idle_timeout.as_secs()
+                        );
+                        return Err(anyhow::Error::new(EmptyStreamEof));
+                    }
+                    log::warn!(
+                        "Responses SSE idle {}s mid-stream, keeping partial output",
+                        policy.idle_timeout.as_secs()
+                    );
+                    stream_interrupted = true;
+                    break;
+                }
+                continue;
+            }
         };
 
         decoder.push(&chunk);
     }
 
-    // 流结束：处理缓冲区中最后一条没有换行结尾的行（补行尾+空行触发消费，
-    // 与帧解析的"空行定界事件"语义一致）。
-    if decoder.has_pending() {
+    // EOF 残帧：冲刷未以空行收尾的聚合（与帧解析的"空行定界事件"语义一致）。
+    // stream_interrupted 时残帧是已送达的尾部数据，照常冲刷；冲刷中的错误
+    // 只记日志不判死（整个流已处于抢救路径）。
+    if !done_reached && decoder.has_pending() {
         decoder.push(b"\n\n");
-        match feed_responses_sse(&mut decoder, &mut state, on_event) {
-            Ok(SseProgress::Continue | SseProgress::Done) => {}
+        match feed_responses_sse(&mut decoder, &mut state, &mut traced) {
+            Ok(SseProgress::Continue) => {}
+            // Done 已在 feed 内发射，直接成功返回。
+            Ok(SseProgress::Done) => return Ok(()),
+            Err(message) if stream_interrupted => {
+                log::warn!(
+                    "Responses SSE: trailing frame error after interrupt ignored: {message}"
+                );
+            }
             Err(message) => return Err(anyhow::anyhow!("{}", message)),
         }
     }
 
+    if done_reached {
+        return Ok(());
+    }
+
     // 上游繁忙时可能不发错误码而是直接终止 HTTP 流（无 response.completed/
-    // incomplete/failed 终止事件）。零产出 → 哨兵错误并入重试；有部分产出
-    // → 保持显式错误（增量已流出，交由上层按 stop_reason 缺失续写）。
+    // incomplete/failed 终止事件）。零产出 → 哨兵错误并入外层重试；有部分
+    // 产出 → 照常组装增量（不可重来），以 Done{stop_reason:None} 收口，
+    // 由上层按 stop_reason 缺失识别"不完整回合"并续写（对齐 chat 协议）。
     let produced_something = !state.accumulated_text.is_empty()
         || !state.reasoning_text.is_empty()
         || !state.tool_uses.is_empty()
@@ -1167,10 +1270,11 @@ fn parse_responses_sse(
     if !produced_something {
         return Err(anyhow::Error::new(EmptyStreamEof));
     }
-
-    Err(anyhow::anyhow!(
-        "Responses stream closed before response.completed, response.incomplete, or response.failed"
-    ))
+    log::warn!(
+        "Responses: upstream closed stream before response.completed/incomplete/failed — partial output kept (stop_reason absent)"
+    );
+    emit_done(&mut state, None, &mut traced);
+    Ok(())
 }
 
 /// SSE 处理进展：`Done` 表示已收到 Responses terminal 事件。

@@ -187,71 +187,9 @@ fn clean_title(raw: &str) -> String {
     folded.chars().take(LLM_MAX_CHARS).collect()
 }
 
-/// 从 agent 配置构建 ProviderConfig（与 engine_turn/engine_compact 同构）。
+/// 兼容包装：转发至全 runtime 唯一的 ProviderConfig 构造器（T6 收敛）。
 fn build_provider(ctx: &RingContext) -> qaqh_gate::ProviderConfig {
-    let ep = ctx.agent.endpoint_spec.clone();
-    let is_responses = ep.as_ref().map(|e| e.protocol.as_str()) == Some("responses");
-    let is_anthropic = ep.as_ref().map(|e| e.protocol.as_str()) == Some("anthropic");
-    if is_anthropic {
-        let mut p = qaqh_gate::ProviderConfig::anthropic(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.anthropic_path.clone()),
-        );
-        if let Some(endpoint) = ep.as_ref() {
-            p.supports_thinking = endpoint.supports_thinking;
-            p.supports_reasoning_effort = endpoint.supports_reasoning_effort;
-            p.supports_reasoning_content = endpoint.supports_reasoning_content;
-        }
-        return p.with_opencode_headers(&ctx.agent.session.seed, "title");
-    }
-    if is_responses {
-        let mut p = qaqh_gate::ProviderConfig::responses(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.responses_path.clone()),
-        );
-        if let Some(endpoint) = ep.as_ref() {
-            p.responses_compat = qaqh_gate::ResponsesCompat {
-                web_search: endpoint.responses_web_search,
-                echo_web_search_call: endpoint.responses_echo_web_search_call,
-                send_include: endpoint.responses_send_include,
-                effort_max: endpoint.responses_effort_max.clone(),
-                supports_user: endpoint.responses_supports_user,
-                search_function_alias: endpoint.responses_search_function_alias.clone(),
-                echo_reasoning_content: endpoint.responses_echo_reasoning_content,
-            };
-        }
-        p.with_opencode_headers(&ctx.agent.session.seed, "title")
-    } else {
-        let mut p = qaqh_gate::ProviderConfig::openai(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.user_id_mode.clone()),
-            ep.as_ref().and_then(|e| e.chat_path.clone()),
-            ep.as_ref()
-                .map(|e| e.thinking_mode.clone())
-                .unwrap_or_default(),
-            ep.as_ref()
-                .map(|e| e.cache_field.clone())
-                .unwrap_or_default(),
-            ep.as_ref().map(|e| e.supports_thinking).unwrap_or(false),
-            ep.as_ref().and_then(|e| e.do_sample),
-        )
-        .with_stateful(ep.as_ref().map(|e| e.stateful).unwrap_or(false))
-        .with_stream_usage(ep.as_ref().map(|e| e.include_stream_usage).unwrap_or(false));
-        if let Some(endpoint) = ep.as_ref() {
-            p.supports_reasoning_effort = endpoint.supports_reasoning_effort;
-            p.effort_allowlist = endpoint.effort_allowlist.clone();
-            p.tool_call_content_null = endpoint.tool_call_content_null;
-            p.supports_reasoning_content = endpoint.supports_reasoning_content;
-            p.require_provider_parameters = endpoint.require_provider_parameters;
-        }
-        p.with_opencode_headers(&ctx.agent.session.seed, "title")
-    }
+    super::turn_lap::gate::provider_for(ctx, "title")
 }
 
 #[cfg(test)]

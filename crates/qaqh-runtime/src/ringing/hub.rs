@@ -179,7 +179,7 @@ impl SeedChannelState {
 }
 
 /// Ringing daemon 运行时聚合。
-#[derive(Debug)]
+/// Debug 已移除：TimelineAppender 现含不可 Debug 的 offload 回调字段。
 pub struct RingingHub {
     pub(super) epoch: String,
     pub(super) sequencer: Sequencer,
@@ -881,6 +881,32 @@ impl RingingHub {
         }
     }
 
+    /// 按 block 折叠落盘副本中被后续覆盖的 BlockCheckpoint。
+    ///
+    /// checkpoint 的物化语义是整块覆盖：快照恢复时每 block 只有最新一条生效。
+    /// 旧 checkpoint 在落盘副本中纯属冗余——流式长块每 256ms 产出一条全量
+    /// checkpoint（64 token 节流），7.8MB 块累计冗余可达 100 GB 级。
+    /// 内存 journal 不折叠（回放 seq 连续性契约，见 handoff 设计定稿）；
+    /// 仅折叠持久化副本：恢复后缺失的旧 seq 由 recover_gap 重基线（Phase 0
+    /// 已接受的代价）。被折叠条目不扣 journal_bytes——那是内存态预算。
+    pub(super) fn prune_superseded_checkpoints(journal: Vec<TimelineEntry>) -> Vec<TimelineEntry> {
+        let mut newest_per_block: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        let mut keep = vec![true; journal.len()];
+        for (index, entry) in journal.iter().enumerate().rev() {
+            if let qaqh_domain::TimelineEvent::BlockCheckpoint { block_id, .. } = &entry.event
+                && !newest_per_block.insert(block_id.as_str())
+            {
+                keep[index] = false;
+            }
+        }
+        journal
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(entry, keep)| keep.then_some(entry))
+            .collect()
+    }
+
     /// 过滤已 seal turn 的 timeline journal 条目。已 seal turn 的 TextDelta/
     /// ToolProgress 已被快照全量覆盖，且 seal 后不会再有新 delta（append_text
     /// 拒绝已 seal block），因此持久化时丢弃这些条目不会破坏恢复：restore 的
@@ -903,6 +929,11 @@ impl RingingHub {
             .into_iter()
             .filter(|entry| !sealed.contains(entry.turn_id.as_str()))
             .collect()
+    }
+
+    #[cfg(test)]
+    fn fold_checkpoints_for_test(entries: Vec<TimelineEntry>) -> Vec<TimelineEntry> {
+        Self::prune_superseded_checkpoints(entries)
     }
 
     fn persist_checkpoint(
@@ -1509,6 +1540,51 @@ mod tests {
     }
 
     #[test]
+    fn fold_checkpoints_keeps_only_the_newest_per_block() {
+        // 落盘副本折叠契约：同一 block 的旧 checkpoint 全部丢弃，只留最新
+        // 一条；非 checkpoint 条目与其它 block 的条目不受影响；顺序保持。
+        use qaqh_domain::TimelineEvent;
+        let mk = |seq: u64, turn: &str, block: &str, text: &str| TimelineEntry {
+            timeline_seq: seq,
+            turn_id: turn.into(),
+            round_num: Some(0),
+            event: TimelineEvent::BlockCheckpoint {
+                block_id: block.into(),
+                text: text.into(),
+            },
+        };
+        let delta = |seq: u64| TimelineEntry {
+            timeline_seq: seq,
+            turn_id: "t".into(),
+            round_num: Some(0),
+            event: TimelineEvent::TextDelta {
+                block_id: "b".into(),
+                fragment_seq: seq,
+                delta: "d".into(),
+            },
+        };
+        let entries = vec![
+            mk(1, "t", "b", "v1"),
+            delta(2),
+            mk(3, "t", "b", "v2"),
+            mk(4, "t", "c", "c1"),
+            mk(5, "t", "b", "v3-final"),
+            delta(6),
+            mk(7, "t", "c", "c2-final"),
+        ];
+        let folded = RingingHub::fold_checkpoints_for_test(entries);
+        let seqs: Vec<u64> = folded.iter().map(|e| e.timeline_seq).collect();
+        assert_eq!(seqs, vec![2, 5, 6, 7], "only newest checkpoint per block survives");
+        assert!(
+            folded
+                .iter()
+                .all(|e| !matches!(&e.event,
+                    TimelineEvent::BlockCheckpoint { block_id, text }
+                        if block_id == "b" && text == "v1"))
+        );
+    }
+
+    #[test]
     fn native_timeline_intents_bypass_the_ringing_v1_channel_sequencer() {
         let hub = RingingHub::new("epoch");
         let opened = hub
@@ -1569,12 +1645,32 @@ mod tests {
             },
         )
         .unwrap();
+        // BlockSealed 已降级为异步 checkpoint（终端事件写放大收口）。
+        // TurnSealed 保持同步落盘：publish 返回即 load_seed 可见。
+        hub.publish_timeline(
+            "s",
+            TimelineIntent::RoundSealed {
+                turn_id: "t".into(),
+                round_num: 0,
+                is_final: true,
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            "s",
+            TimelineIntent::TurnSealed {
+                turn_id: "t".into(),
+                state: qaqh_domain::TimelineTurnState::Completed,
+                failure: None,
+            },
+        )
+        .unwrap();
 
         let persisted = TimelineStore::new(&root)
             .unwrap()
             .load_seed("s")
-            .expect("terminal snapshot persisted synchronously");
-        assert_eq!(persisted.snapshot.watermark, 4);
+            .expect("turn-sealed snapshot persisted synchronously");
+        assert_eq!(persisted.snapshot.watermark, 6);
         assert_eq!(
             persisted.snapshot.turns[0].rounds[0].blocks[0].text,
             "hello"
@@ -1582,6 +1678,11 @@ mod tests {
         assert_eq!(
             persisted.snapshot.turns[0].rounds[0].blocks[0].state,
             qaqh_domain::TimelineBlockState::Sealed
+        );
+        assert!(persisted.snapshot.turns[0].sealed);
+        assert!(
+            persisted.journal.is_empty(),
+            "sealed turn leaves no replay tail on disk"
         );
         drop(hub);
         let _ = std::fs::remove_dir_all(root);
@@ -1676,7 +1777,12 @@ mod tests {
             snapshot.turns[0].rounds[0].blocks[0].state,
             qaqh_domain::TimelineBlockState::Sealed
         );
-        assert_eq!(hub.timeline_replay_since("s", 1).len(), 5);
+        // seal 裁剪语义：turn seal 后回放尾清空（TurnSealed 条目自身也被
+        // 裁剪）；重连客户端由快照 watermark 重基线（recover_gap 契约）。
+        assert!(
+            hub.timeline_replay_since("s", 1).is_empty(),
+            "sealed turn must leave an empty replay tail"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -5,598 +5,238 @@
 //!   User selects (provider_id, endpoint_id) → protocol + base_url auto-fill.
 //!   Model list is fetched from endpoint's /models URL at runtime.
 //!
+//! T9 TOML 优先：内置能力基线来自 `assets/providers.toml`（include_str! 版本化，
+//! 由 example `export_providers` 生成），用户覆盖按优先级合并：
+//!   override 文件（`providers.override.toml`）> config.toml `[providers]` 段
+//!   （兼容旧路径）> assets baseline。
+//! 覆盖面是稀疏 patch（全 Option），只改声明了的字段；`remove` 可隐藏端点。
+//! 对外查找 API（find_provider/find_endpoint/image_tool_enabled…）不变。
+//!
 //! Backward compat: old provider_id "deepseek-openai"/"deepseek-anthropic" are
 //! auto-migrated to provider_id="deepseek" + endpoint="openai".
 
-use qaqh_types::{CacheTokenField, EndpointSpec, ProviderSpec, ThinkingParamMode, UserSendMode};
+use qaqh_types::{
+    EndpointPatch, EndpointPatchRef, EndpointSpec, ProviderPatch, ProviderSpec,
+    ProvidersFile, ProvidersOverrideFile,
+};
 
-fn deepseek() -> ProviderSpec {
-    ProviderSpec {
-        id: "deepseek".into(),
-        display: "DeepSeek".into(),
-        endpoints: vec![
-            EndpointSpec {
-                id: "openai".into(),
-                display: "OpenAI-compatible".into(),
-                protocol: "openai".into(),
-                base_url: "https://api.deepseek.com".into(),
-                default_model: String::new(),
-                models: vec![],
-                models_url: Some("https://api.deepseek.com".into()),
-                user_id_mode: Some(UserSendMode::Body),
-                include_stream_usage: true,
-                // 视觉：仅 deepseek-v4-flash-vision-exp 支持图片（chat_completions
-                // 使用 image_url data URL，见 https://api-docs.deepseek.com/zh-cn/guides/vision/）。
-                // 端点开图 + 模型白名单由 read_image 工具消费（all_tools 过滤 / 执行期拒绝）。
-                supports_image_tool: true,
-                image_models: Some(vec!["deepseek-v4-flash-vision-exp".into()]),
-                // chat_path: None → "/chat/completions" (default)
-                // thinking_mode: OpenAi (default)
-                // cache_field: PromptCacheHitTokens (default)
-                ..Default::default()
-            },
-            // DeepSeek Responses API (Beta): 目前仅支持 deepseek-v4-flash。
-            // 模型列表静态锁定，避免 /models 探测在 Beta 阶段引入不稳定模型。
-            // 视觉模型 deepseek-v4-flash-vision-exp 同端点支持 input_image（见 guides/vision#responses-api）。
-            EndpointSpec {
-                id: "responses".into(),
-                display: "Responses API".into(),
-                protocol: "responses".into(),
-                base_url: "https://api.deepseek.com".into(),
-                default_model: "deepseek-v4-flash".into(),
-                models: vec![
-                    "deepseek-v4-flash".into(),
-                    "deepseek-v4-flash-vision-exp".into(),
-                ],
-                responses_path: Some("/responses".into()),
-                supports_thinking: false,
-                supports_reasoning_effort: true,
-                supports_reasoning_content: false,
-                supports_image_tool: true,
-                image_models: Some(vec!["deepseek-v4-flash-vision-exp".into()]),
-                // DeepSeek silently ignores `include` (no encrypted reasoning),
-                // so skip it; and its effort ladder extends to "max".
-                responses_send_include: false,
-                responses_effort_max: "max".into(),
-                // DeepSeek rejects a request that combines its built-in
-                // web_search with a custom function literally named `search`.
-                // Alias only at the provider boundary; QAQ-Harness keeps `search`
-                // canonical in execution, events, and persisted history.
-                responses_search_function_alias: Some("qaqh_search".into()),
-                // Reasoning echo is the default (responses_echo_reasoning_content
-                // defaults to true): DeepSeek's thinking mode requires assistant
-                // reasoning_text to be passed back whenever the input continues a
-                // tool loop (ends with function_call_output), otherwise HTTP 400.
-                beta: true,
-                ..Default::default()
-            },
-        ],
+/// assets/providers.toml 的字节快照（编译期嵌入）。
+const BASELINE_TOML: &str = include_str!("../../../assets/providers.toml");
+
+fn builtin_providers() -> Vec<ProviderSpec> {
+    // T9: 内置基线已迁至 assets/providers.toml（include_str! 随 crate 版本化，
+    // 由 example `export_providers` 生成）；原 13 个手工构造函数删除，避免双源漂移。
+    parse_providers_toml(BASELINE_TOML).unwrap_or_else(|e| {
+        // 编译期由 tests::baseline_toml_roundtrip 保证；运行期解析失败只能是
+        // 构建产物损坏，panic 是合理处置（配置源不可信）。
+        panic!("assets/providers.toml baseline parse failed: {e}")
+    })
+}
+
+fn parse_providers_toml(raw: &str) -> Result<Vec<ProviderSpec>, String> {
+    let file: ProvidersFile = toml::from_str(raw).map_err(|e| format!("TOML parse: {e}"))?;
+    Ok(file.providers)
+}
+
+// ── 用户覆盖合并（T9） ──
+
+/// 全局合并结果缓存：进程内只读盘一次（override + config.toml 段），
+/// 后续查找全部走内存表。`invalidate_merged()` 失效后下次查找重建
+/// （config 单写口提交/文件热重载时触发）。
+static MERGED: std::sync::RwLock<Option<std::sync::Arc<Vec<ProviderSpec>>>> =
+    std::sync::RwLock::new(None);
+
+/// 失效合并缓存（T9 热重载挂钩）。
+pub fn invalidate_merged() {
+    *MERGED.write().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// 校验覆盖面声明的 base_url：必须可解析且 scheme ∈ {https,http}；
+/// `http` 仅允许 localhost/127.0.0.1（设计文档 §7 风险项）。
+fn validate_override_base_url(url: &str) -> Result<(), String> {
+    if url.is_empty() {
+        return Ok(());
+    }
+    // 轻量校验，不引入 url crate：按 `scheme://rest` 切分。
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Err(format!("base_url 缺少 scheme: {url}"));
+    };
+    match scheme {
+        "https" => {}
+        "http" => {
+            let host = rest.split(['/', ':']).next().unwrap_or("");
+            if host != "localhost" && host != "127.0.0.1" {
+                return Err(format!(
+                    "base_url http 仅允许 localhost/127.0.0.1（生产端点必须 https）: {url}"
+                ));
+            }
+        }
+        _ => return Err(format!("base_url scheme 必须是 https/http: {url}")),
+    }
+    Ok(())
+}
+
+/// 把一个 ProviderPatch 合入基线表：按 id 定位，缺失时在尾部新建 provider。
+fn apply_provider_patch(baseline: &mut Vec<ProviderSpec>, patch: &ProviderPatch) {
+    let Some(patch_id) = patch.id.clone().filter(|s| !s.is_empty()) else {
+        log::warn!("[registry] override provider 缺少 id，忽略");
+        return;
+    };
+    let entry = match baseline.iter_mut().find(|p| p.id == patch_id) {
+        Some(p) => p,
+        None => {
+            baseline.push(ProviderSpec {
+                id: patch_id,
+                display: patch.display.clone().unwrap_or_default(),
+                endpoints: Vec::new(),
+            });
+            baseline.last_mut().expect("just pushed")
+        }
+    };
+    if let Some(d) = &patch.display {
+        entry.display = d.clone();
+    }
+    for ep_ref in &patch.endpoints {
+        apply_endpoint_patch(entry, ep_ref);
+    }
+    for remove_id in &patch.remove {
+        entry.endpoints.retain(|e| &e.id != remove_id);
     }
 }
 
-fn qwen() -> ProviderSpec {
-    ProviderSpec {
-        id: "qwen".into(),
-        display: "Qwen (阿里百炼)".into(),
-        endpoints: vec![
-            EndpointSpec {
-                id: "openai".into(),
-                display: "OpenAI-compatible".into(),
-                protocol: "openai".into(),
-                base_url: "https://dashscope.aliyuncs.com".into(),
-                default_model: String::new(),
-                models: vec![],
-                models_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
-                chat_path: Some("/compatible-mode/v1/chat/completions".into()),
-                thinking_mode: ThinkingParamMode::QwenEnableThinking,
-                cache_field: CacheTokenField::PromptDetailsCached,
-                has_balance: false,
+fn apply_endpoint_patch(provider: &mut ProviderSpec, ep_ref: &EndpointPatchRef) {
+    let patch: &EndpointPatch = &ep_ref.patch;
+    // 先校验 base_url（若有声明）。
+    if let Some(url) = &patch.base_url
+        && let Err(e) = validate_override_base_url(url)
+    {
+        log::warn!(
+            "[registry] override {}/{} base_url 被拒绝: {e}",
+            provider.id,
+            ep_ref.id
+        );
+        return;
+    }
+    match provider.endpoints.iter_mut().find(|e| e.id == ep_ref.id) {
+        Some(ep) => patch.apply_to(ep),
+        None => {
+            // 新增端点：从 Default 出发，仅叠加声明字段（id/protocol/base_url
+            // 是新增端点的最小必需集，缺 protocol 默认 openai）。
+            let mut ep = EndpointSpec {
+                id: ep_ref.id.clone(),
                 ..Default::default()
-            },
-            // Qwen Responses API (bridge): dashscope exposes the Responses
-            // protocol at the OpenAI-compatible prefix. Known differences are
-            // tracked in docs/responses-api-support.md (R1: reasoning events
-            // use `response.reasoning_summary_text.delta`; R3: effort ladder
-            // unverified). Beta until those are confirmed.
-            EndpointSpec {
-                id: "responses".into(),
-                display: "Responses API".into(),
-                protocol: "responses".into(),
-                base_url: "https://dashscope.aliyuncs.com".into(),
-                default_model: String::new(),
-                models: vec![],
-                models_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
-                responses_path: Some("/compatible-mode/v1/responses".into()),
-                thinking_mode: ThinkingParamMode::QwenEnableThinking,
-                cache_field: CacheTokenField::PromptDetailsCached,
-                supports_thinking: false,
-                supports_reasoning_effort: true,
-                supports_reasoning_content: false,
-                has_balance: false,
-                beta: true,
-                ..Default::default()
-            },
-        ],
+            };
+            patch.apply_to(&mut ep);
+            if ep.base_url.is_empty() {
+                log::warn!(
+                    "[registry] override 新增端点 {}/{} 缺少 base_url，忽略",
+                    provider.id,
+                    ep_ref.id
+                );
+                return;
+            }
+            provider.endpoints.push(ep);
+        }
     }
 }
 
-fn glm() -> ProviderSpec {
-    ProviderSpec {
-        id: "glm".into(),
-        display: "GLM (智谱AI)".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "OpenAI-compatible".into(),
-            protocol: "openai".into(),
-            base_url: "https://open.bigmodel.cn".into(),
-            default_model: String::new(),
-            models: vec![],
-            models_url: Some("https://open.bigmodel.cn/api/paas/v4".into()),
-            chat_path: Some("/api/paas/v4/chat/completions".into()),
-            cache_field: CacheTokenField::PromptDetailsCached,
-            do_sample: Some(false),
-            has_balance: false,
-            // 端点异构：glm-5.3/5.2/4.7 等文本模型不收图，仅 glm-5.3-flash
-            // 与 4.x V 系列是视觉模型 → 端点开图 + 模型白名单（openrouter 同款）。
-            // 注意不用 `glm-4v*` 通配：GLM-4V-Flash 官方明确不支持 Base64
-            // 编码，而 harness 只发 base64（无图床 URL），放行必然 400。
-            supports_image_tool: true,
-            image_models: Some(vec![
-                "glm-5.3-flash".into(),
-                "glm-5v*".into(),
-                "glm-4.6v*".into(),
-                "glm-4.5v*".into(),
-                "glm-4v-plus*".into(),
-            ]),
-            ..Default::default()
-        }],
+/// 执行一次完整合并：baseline + 逐 patch（按声明顺序叠加）。
+fn merged_providers() -> std::sync::Arc<Vec<ProviderSpec>> {
+    // 快路径：读锁命中缓存。
+    if let Some(hit) = MERGED
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .cloned()
+    {
+        return hit;
+}
+    // 慢路径：重建 + 写回（并发下重复重建无害，最终一致）。
+    let mut baseline = builtin_providers();
+    for raw in user_override_tomls() {
+        match parse_override_toml(&raw) {
+            Ok(patches) => {
+                for patch in &patches {
+                    apply_provider_patch(&mut baseline, patch);
+                }
+            }
+            Err(e) => {
+                // 用户覆盖面解析失败只降级告警，不 panic（baseline 仍可用）。
+                log::warn!("[registry] 用户 provider 覆盖解析失败（已忽略该文件）: {e}");
+            }
+        }
+    }
+    let arc = std::sync::Arc::new(baseline);
+    *MERGED.write().unwrap_or_else(|e| e.into_inner()) = Some(arc.clone());
+    arc
+}
+
+/// 用户覆盖 TOML 原文列表，按优先级从低到高：config.toml `[providers]` 段、
+/// override 文件。均可能不存在（返回空）。
+fn user_override_tomls() -> Vec<String> {
+    let mut out = Vec::new();
+    // ① config.toml 的 [providers] / [[providers]] 段（兼容旧路径）。
+    let config_path = qaqh_types::platform::config_path();
+    if let Ok(text) = std::fs::read_to_string(&config_path)
+        && let Some(seg) = extract_providers_section(&text)
+    {
+        out.push(seg);
+    }
+    // ② override 文件（同目录 providers.override.toml）。
+    let override_path = config_path.with_file_name("providers.override.toml");
+    if let Ok(text) = std::fs::read_to_string(&override_path) {
+        out.push(text);
+    }
+    out
+}
+
+/// 从 config.toml 原文中提取 `[providers]`（含其子表）段落原文。
+/// 没有该段则返回 None。段落以行首 `[providers` 开始，下一个非子表的
+/// 顶级表头结束。文本级近似：段落内字符串值含换行/顶级表头形态的极端
+/// 输入不被支持（provider 配置段不含此类值，可接受）。
+fn extract_providers_section(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("[providers]") || trimmed.starts_with("[[providers]]") {
+            inside = true;
+        } else if inside
+            && trimmed.starts_with('[')
+            && !trimmed.starts_with("[providers.")
+            && !trimmed.starts_with("[[providers.")
+        {
+            inside = false;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
-/// ZCode — 智谱编码套餐（走 Anthropic 原生协议）
-///
-/// 对接 `https://open.bigmodel.cn/api/anthropic/v1/messages` 的标准
-/// Anthropic Messages 规范（`openAIToAnthropic` 映射已验证：system 顶层、
-/// messages/shadow、tools input_schema 直通，
-/// `glm-5.3-flash` 直通 200）。
-/// 反代网关 `zcode2harness` 之前因 harness 缺少 anthropic 支持而临时做
-/// OpenAI→Anthropic 转换；此原生端点让 harness 直连上游或直连反代，原
-/// 转换器可退役，仅保留鉴权与 `X-ZCode-*` 头透传。
-fn zcode() -> ProviderSpec {
-    ProviderSpec {
-        id: "zcode".into(),
-        display: "ZCode (智谱)".into(),
-        endpoints: vec![EndpointSpec {
-            id: "anthropic".into(),
-            display: "Anthropic Messages".into(),
-            protocol: "anthropic".into(),
-            base_url: "https://open.bigmodel.cn".into(),
-            default_model: "glm-5.3-flash".into(),
-            models: vec![],
-            models_url: Some("https://open.bigmodel.cn/api/paas/v4".into()),
-            anthropic_path: Some("/api/anthropic/v1/messages".into()),
-            cache_field: CacheTokenField::PromptDetailsCached,
-            // ZCode GLM-5.3 系列经 Anthropic 透传（复刻上游宿主 effort 透传语义）
-            // `output_config:{effort:low|high|max}+thinking:{budget_tokens}`，harness 已有一整套
-            // low/medium/high/xhigh/max ↔ 1024/2048/4096/8192/16384 预算，透传后 GLM 按强度回 thinking_delta
-            supports_thinking: true,
-            thinking_budget_large: true,
-            supports_reasoning_effort: true,
-            effort_allowlist: Some(vec![
-                "low".into(),
-                "medium".into(),
-                "high".into(),
-                "xhigh".into(),
-                "max".into(),
-            ]),
-            supports_reasoning_content: true,
-            supports_image_tool: true,
-            has_balance: false,
-            ..Default::default()
-        }],
+/// 解析用户覆盖面：`[[providers]]` 平铺数组形态（patch 内带 id）。
+fn parse_override_toml(raw: &str) -> Result<Vec<ProviderPatch>, String> {
+    let file: ProvidersOverrideFile =
+        toml::from_str(raw).map_err(|e| format!("TOML parse: {e}"))?;
+    let mut patches = Vec::new();
+    for p in file.providers {
+        if p.id.as_deref().unwrap_or("").is_empty() {
+            log::warn!("[registry] override [[providers]] 缺少 id，忽略该条");
+            continue;
+        }
+        patches.push(p);
     }
-}
-
-fn kimi() -> ProviderSpec {
-    ProviderSpec {
-        id: "kimi".into(),
-        display: "Kimi (月之暗面)".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "OpenAI-compatible".into(),
-            protocol: "openai".into(),
-            base_url: "https://api.moonshot.cn/v1".into(),
-            default_model: String::new(),
-            models: vec![],
-            models_url: Some("https://api.moonshot.cn/v1".into()),
-            balance_path: Some("/users/me/balance".into()),
-            cache_field: CacheTokenField::UsageCachedTokens,
-            ..Default::default()
-        }],
-    }
-}
-
-fn mimo() -> ProviderSpec {
-    ProviderSpec {
-        id: "mimo".into(),
-        display: "MiMo (小米)".into(),
-        endpoints: vec![
-            EndpointSpec {
-                id: "openai".into(),
-                display: "OpenAI-compatible".into(),
-                protocol: "openai".into(),
-                base_url: "https://api.xiaomimimo.com/v1".into(),
-                default_model: String::new(),
-                models: vec![],
-                models_url: Some("https://api.xiaomimimo.com/v1".into()),
-                cache_field: CacheTokenField::None,
-                has_balance: false,
-                ..Default::default()
-            },
-            // MiMo Responses API (bridge): https://mimo.mi.com/docs/zh-CN/api/chat/responses
-            // Uses the standard OpenAI item format and reasoning_text events.
-            // Constraint: previous_response_id / background / context_management
-            // are NOT supported (rejected); the gate never sends them.
-            EndpointSpec {
-                id: "responses".into(),
-                display: "Responses API".into(),
-                protocol: "responses".into(),
-                base_url: "https://api.xiaomimimo.com/v1".into(),
-                default_model: String::new(),
-                models: vec![],
-                models_url: Some("https://api.xiaomimimo.com/v1".into()),
-                responses_path: Some("/responses".into()),
-                cache_field: CacheTokenField::None,
-                supports_thinking: false,
-                supports_reasoning_effort: true,
-                supports_reasoning_content: false,
-                responses_effort_max: "high".into(),
-                has_balance: false,
-                beta: true,
-                ..Default::default()
-            },
-        ],
-    }
-}
-
-fn minimax() -> ProviderSpec {
-    ProviderSpec {
-        id: "minimax".into(),
-        display: "MiniMax (稀宇)".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "OpenAI-compatible".into(),
-            protocol: "openai".into(),
-            base_url: "https://api.minimaxi.com/v1".into(),
-            default_model: String::new(),
-            models: vec![],
-            models_url: Some("https://api.minimaxi.com/v1".into()),
-            thinking_mode: ThinkingParamMode::MiniMaxAdaptive,
-            cache_field: CacheTokenField::None,
-            has_balance: false,
-            ..Default::default()
-        }],
-    }
-}
-
-fn doubao() -> ProviderSpec {
-    ProviderSpec {
-        id: "doubao".into(),
-        display: "Doubao (火山方舟)".into(),
-        endpoints: vec![
-            EndpointSpec {
-                id: "openai".into(),
-                display: "OpenAI-compatible".into(),
-                protocol: "openai".into(),
-                base_url: "https://ark.cn-beijing.volces.com".into(),
-                default_model: String::new(),
-                models: vec![],
-                models_url: Some("https://ark.cn-beijing.volces.com/api/v3".into()),
-                chat_path: Some("/api/v3/chat/completions".into()),
-                ..Default::default()
-            },
-            // Doubao Responses API (bridge): 火山方舟 exposes the Responses
-            // protocol at /api/v3/responses. Uses the standard OpenAI item
-            // format. Known differences are tracked in
-            // docs/responses-api-support.md (R2: thinking embedding and
-            // thinking params unverified). Beta until confirmed.
-            EndpointSpec {
-                id: "responses".into(),
-                display: "Responses API".into(),
-                protocol: "responses".into(),
-                base_url: "https://ark.cn-beijing.volces.com".into(),
-                default_model: String::new(),
-                models: vec![],
-                models_url: Some("https://ark.cn-beijing.volces.com/api/v3".into()),
-                responses_path: Some("/api/v3/responses".into()),
-                supports_thinking: false,
-                supports_reasoning_effort: true,
-                supports_reasoning_content: false,
-                has_balance: false,
-                beta: true,
-                ..Default::default()
-            },
-        ],
-    }
-}
-
-fn openai() -> ProviderSpec {
-    ProviderSpec {
-        id: "openai".into(),
-        display: "OpenAI".into(),
-        endpoints: vec![
-            EndpointSpec {
-                id: "openai".into(),
-                display: "Chat Completions".into(),
-                protocol: "openai".into(),
-                base_url: "https://api.openai.com/v1".into(),
-                default_model: String::new(),
-                models: vec![],
-                models_url: Some("https://api.openai.com/v1".into()),
-                ..Default::default()
-            },
-            EndpointSpec {
-                id: "responses".into(),
-                display: "Responses API".into(),
-                protocol: "responses".into(),
-                base_url: "https://api.openai.com/v1".into(),
-                default_model: String::new(),
-                models: vec![],
-                models_url: Some("https://api.openai.com/v1".into()),
-                supports_thinking: false,
-                supports_reasoning_effort: true,
-                supports_reasoning_content: false,
-                ..Default::default()
-            },
-        ],
-    }
-}
-
-/// OpenRouter exposes a normalized OpenAI Chat Completions endpoint, but can
-/// route one request to many vendor backends. Keep its request surface strict:
-/// free and non-reasoning models must not receive vendor-specific thinking or
-/// reasoning-history fields, and tool calls require providers that advertise
-/// support for every supplied parameter.
-fn openrouter() -> ProviderSpec {
-    ProviderSpec {
-        id: "openrouter".into(),
-        display: "OpenRouter".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "OpenAI-compatible (text)".into(),
-            protocol: "openai".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            default_model: String::new(),
-            models: vec![],
-            // Limit the picker to text-only models that declare native tool
-            // support (image input is currently gated per-endpoint via
-            // `supports_image_tool`, not discovered from this list).
-            models_url: Some(
-                "https://openrouter.ai/api/v1/models?output_modalities=text&supported_parameters=tools&sort=pricing-low-to-high"
-                    .into(),
-            ),
-            has_balance: false,
-            // OpenRouter 接受 OpenAI `reasoning_effort` 简写(ChatRequest 规范
-            // 字段);router 侧按模型 supported_efforts 归一,配合下方稀疏
-            // allowlist 由 gate 钳制到合法档位,避免 off-domain 值被静默忽略。
-            supports_thinking: false,
-            supports_reasoning_effort: true,
-            effort_allowlist: Some(vec!["max".into(), "high".into(), "low".into()]),
-            // 路由器模型异构:端点级开图 + 模型级 allowlist(精确或 `*` 前缀)。
-            // 种子清单覆盖主流视觉族 + 当前目标模型;长尾由 /models 元数据的
-            // input_modalities 动态补充(后续工作)。
-            supports_image_tool: true,
-            image_models: Some(vec![
-                "stealth/ox-alpha".into(),
-                "google/gemini*".into(),
-                "openai/gpt-4o*".into(),
-                "openai/gpt-5*".into(),
-                "anthropic/claude-*".into(),
-                "x-ai/grok-*".into(),
-                "meta-llama/llama-4*".into(),
-                "qwen/qwen*vl*".into(),
-                "mistralai/pixtral*".into(),
-            ]),
-            tool_call_content_null: true,
-            supports_reasoning_content: false,
-            require_provider_parameters: true,
-            ..Default::default()
-        }],
-    }
-}
-
-fn deepseek_web() -> ProviderSpec {
-    ProviderSpec {
-        id: "deepseek-web".into(),
-        display: "DeepSeek Web (CDP Proxy)".into(),
-        endpoints: vec![EndpointSpec {
-            id: "cdp".into(),
-            display: "CDP Proxy (localhost:8080)".into(),
-            protocol: "openai".into(),
-            base_url: "http://localhost:8080/v1".into(),
-            default_model: "deepseek-v4-pro".into(),
-            models: vec!["deepseek-v4-flash".into(), "deepseek-v4-pro".into()],
-            models_url: Some("http://localhost:8080/v1".into()),
-            user_id_mode: Some(UserSendMode::Body),
-            has_balance: false,
-            supports_thinking: true,
-            stateful: true,
-            ..Default::default()
-        }],
-    }
-}
-
-/// WorkBuddy（腾讯编码助手桌面端账号）via 自家反代 workbuddy-proxy。
-///
-/// 反代把 WorkBuddy 桌面端/CLI 账号凭证转成 OpenAI 兼容 API
-/// （仓库 D:\project\workbuddy-proxy，默认 http://127.0.0.1:8787/v1）。
-/// 上游协议与参数语义全部实测（2026-09，详见反代仓库 src/adapt.ts 头注）：
-/// - 上游拒绝非流式，反代已强制 stream:true 并在本地聚合，harness 照常发流式；
-/// - 上游 SSE 首帧带 `: heartbeat` 注释帧（harness SseDecoder 已正确跳过）；
-///   finish_reason/usage 形态已由反代规范化为 OpenAI 标准；
-/// - **推理开关**：上游不收 `thinking`/`enable_thinking`；推理档位走 OpenAI
-///   标准 `reasoning_effort`（minimal..max，模型元数据
-///   `reasoning.supportedEfforts` 声明支持档，反代负责回填/降级，harness
-///   只需透传）→ `supports_thinking: false`、`supports_reasoning_effort: true`、
-///   无 effort 白名单（反代按模型 supportedEfforts 精确转译，比端点级
-///   静态白名单更准）；
-/// - **max_tokens**：反代按模型 `maxOutputTokens` 回填/鍳制，harness 的
-///   max_tokens 配置直接透传即可；
-/// - **思考内容**：流式 `delta.reasoning_content`（hy3/glm-5.3 实测），
-///   反代提供 `keep_reasoning` 开关（默认开）→ `supports_reasoning_content: true`；
-/// - **缓存字段**：usage 同时带 `prompt_cache_hit_tokens`（顶层）与
-///   `cached_tokens`/`prompt_tokens_details.cached_tokens`（details）等多套
-///   别名，顶层 hit/miss 语义与 DeepSeek 相同 → `PromptCacheHitTokens`；
-/// - 流式 usage：上游在 finish 帧总带 usage（反代已规范化），无需
-///   stream_options.include_usage（上游不认识该字段）→ `include_stream_usage: false`；
-/// - 鉴权：反代默认不鉴权（仅本机），api_key 留空即可；反代开启 api_key 时填该值；
-/// - 余额：无 balance 接口；模型列表：反代 /v1/models 可用，静态表作兑底
-///   （与反代 staticModels() 对齐）。
-fn workbuddy() -> ProviderSpec {
-    ProviderSpec {
-        id: "workbuddy".into(),
-        display: "WorkBuddy (反代)".into(),
-        endpoints: vec![EndpointSpec {
-            id: "openai".into(),
-            display: "OpenAI-compatible (workbuddy-proxy)".into(),
-            protocol: "openai".into(),
-            base_url: "http://127.0.0.1:8787/v1".into(),
-            default_model: "glm-5.2".into(),
-            models: vec![
-                // 与 workbuddy-proxy staticModels() 及 /v1/models 动态表对齐
-                "auto".into(),
-                "hy4-preview".into(),
-                "hy3".into(),
-                "hy3-x".into(),
-                "deepseek-v4.1-flash".into(),
-                "glm-5.3".into(),
-                "glm-5.3-flash".into(),
-                "glm-5.2".into(),
-                "glm-5.1".into(),
-                "glm-5v-turbo".into(),
-                "kimi-k3-1".into(),
-                "kimi-k2.7".into(),
-                "kimi-k2.6".into(),
-                "minimax-m3".into(),
-                "deepseek-v4-pro".into(),
-            ],
-            models_url: Some("http://127.0.0.1:8787/v1".into()),
-            has_balance: false,
-            supports_thinking: false,
-            supports_reasoning_effort: true,
-            // 反代按模型 supportedEfforts 精确转译（translateOrFallback），
-            // 端点级白名单反而会吞掉“未声明→透传”的正确语义。
-            effort_allowlist: None,
-            supports_reasoning_content: true,
-            include_stream_usage: false,
-            cache_field: CacheTokenField::PromptCacheHitTokens,
-            supports_image_tool: false,
-            ..Default::default()
-        }],
-    }
-}
-
-/// OpenCode Go（订阅）：https://opencode.ai/zen/go/v1
-///
-/// 端点与参数语义以本家 opencode 客户端为准（模型目录
-/// `https://models.opencode.ai/api.json`，provider id `opencode-go`）：
-/// - 默认协议 `@ai-sdk/openai-compatible`（chat/completions）：kimi / deepseek /
-///   glm / mimo / qwen / hy3 全走该通道；流式推理内容字段 `reasoning_content`
-///   （api.json 各模型 `interleaved.field = "reasoning_content"`）。
-/// - **推理开关**：本家对 opencode-go **不发** `thinking`/`enable_thinking`/
-///   `chat_template_args`（那些只发给 zai/zhipuai、dashscope、baseten 等特定
-///   provider）——推理默认开启，只发 OpenAI 标准 `reasoning_effort`。
-///   故 `supports_thinking: false`、`supports_reasoning_effort: true`。
-/// - 协议覆盖（api.json `model.provider.npm`）：
-///   - `grok-4.5` / `gpt-5.6-luna` → `@ai-sdk/openai`（Responses API）→ 独立
-///     `responses` 端点；
-///   - `minimax-m3` / `minimax-m2.7` → `@ai-sdk/anthropic`（messages 协议，
-///     QAQ-Harness 未实现 anthropic 通道）→ 暂不提供。
-/// - 额外参数（仅 gpt-5.x + opencode 前缀 provider）：`promptCacheKey`（会话
-///   ID）、`include: ["reasoning.encrypted_content"]`、`reasoningSummary: "auto"`
-///   —— 前两者 QAQ-Harness 无对应概念，不发送；`include` 由
-///   `responses_send_include: true` 等价覆盖。
-/// - usage 缓存字段未验证（网关不保证 OpenAI 标准 usage）→ `CacheTokenField::None`。
-fn opencode_go() -> ProviderSpec {
-    ProviderSpec {
-        id: "opencode-go".into(),
-        display: "OpenCode Go (订阅)".into(),
-        endpoints: vec![
-            EndpointSpec {
-                id: "openai".into(),
-                display: "OpenAI-compatible".into(),
-                protocol: "openai".into(),
-                base_url: "https://opencode.ai/zen/go/v1".into(),
-                default_model: "deepseek-v4-flash".into(),
-                models: vec![
-                    "kimi-k3".into(),
-                    "kimi-k2.7-code".into(),
-                    "kimi-k2.6".into(),
-                    "deepseek-v4-pro".into(),
-                    "deepseek-v4-flash".into(),
-                    "glm-5.3".into(),
-                    "glm-5.2".into(),
-                    "glm-5.1".into(),
-                    "mimo-v2.5".into(),
-                    "mimo-v2.5-pro".into(),
-                    "qwen3.8-max".into(),
-                    "qwen3.7-max".into(),
-                    "qwen3.7-plus".into(),
-                    "qwen3.6-plus".into(),
-                    "hy3".into(),
-                ],
-                models_url: Some("https://opencode.ai/zen/go/v1".into()),
-                cache_field: CacheTokenField::None,
-                has_balance: false,
-                supports_thinking: false,
-                supports_reasoning_effort: true,
-                supports_image_tool: true,
-                ..Default::default()
-            },
-            // Grok 4.5 / GPT-5.6 Luna：本家走 Responses API（@ai-sdk/openai）。
-            // effort 档位上限取 "high"：grok-4.5 仅 low/medium/high（超档 400），
-            // gpt-5.6-luna 的 xhigh/max 待网关验证后放开。
-            EndpointSpec {
-                id: "responses".into(),
-                display: "Responses API (Grok 4.5 / GPT-5.6 Luna)".into(),
-                protocol: "responses".into(),
-                base_url: "https://opencode.ai/zen/go/v1".into(),
-                default_model: "grok-4.5".into(),
-                models: vec!["grok-4.5".into(), "gpt-5.6-luna".into()],
-                models_url: Some("https://opencode.ai/zen/go/v1".into()),
-                responses_path: Some("/responses".into()),
-                cache_field: CacheTokenField::None,
-                has_balance: false,
-                supports_thinking: false,
-                supports_reasoning_effort: true,
-                supports_reasoning_content: false,
-                responses_effort_max: "high".into(),
-                responses_web_search: false,
-                responses_echo_web_search_call: false,
-                supports_image_tool: true,
-                beta: true,
-                ..Default::default()
-            },
-        ],
-    }
+    Ok(patches)
 }
 
 fn providers() -> Vec<ProviderSpec> {
-    vec![
-        deepseek(),
-        qwen(),
-        glm(),
-        kimi(),
-        mimo(),
-        minimax(),
-        doubao(),
-        openai(),
-        openrouter(),
-        zcode(),
-        workbuddy(),
-        deepseek_web(),
-        opencode_go(),
-    ]
+    (*merged_providers()).clone()
 }
 
 // ── Lookup ──
@@ -712,6 +352,158 @@ pub fn resolve_for_config(cfg: &crate::Config) -> Option<EndpointSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qaqh_types::CacheTokenField;
+
+    // ── T9: baseline round-trip / merge / override ──
+
+    #[test]
+    fn baseline_toml_roundtrip() {
+        let baseline = builtin_providers();
+        assert_eq!(baseline.len(), 13, "baseline 应有 13 个 provider");
+        // 再序列化回 TOML 再解析，确认无信息丢失。
+        let doc = ProvidersFile {
+            providers: baseline.clone(),
+        };
+        let text = toml::to_string_pretty(&doc).expect("serialize");
+        let reparsed = parse_providers_toml(&text).expect("reparse");
+        assert_eq!(reparsed.len(), baseline.len());
+        for (a, b) in baseline.iter().zip(reparsed.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.endpoints.len(), b.endpoints.len(), "provider {}", a.id);
+            for (ea, eb) in a.endpoints.iter().zip(b.endpoints.iter()) {
+                assert_eq!(ea.id, eb.id);
+                assert_eq!(ea.base_url, eb.base_url);
+                assert_eq!(ea.supports_thinking, eb.supports_thinking);
+                assert_eq!(ea.retry, eb.retry);
+            }
+        }
+    }
+
+    #[test]
+    fn override_patch_updates_existing_endpoint() {
+        let mut baseline = builtin_providers();
+        let patch: ProviderPatch = toml::from_str(
+            r#"
+            id = "deepseek"
+            [[endpoints]]
+            id = "openai"
+            supports_thinking = false
+            stateful = true
+            retry = { max_retries = 8, base_delay_secs = 2, max_delay_secs = 60, idle_timeout_secs = 600 }
+            "#,
+        )
+        .expect("parse patch");
+        apply_provider_patch(&mut baseline, &patch);
+        let ep = baseline
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .and_then(|p| p.endpoints.iter().find(|e| e.id == "openai"))
+            .expect("endpoint");
+        assert!(!ep.supports_thinking);
+        assert!(ep.stateful);
+        let retry = ep.retry.as_ref().expect("retry spec");
+        assert_eq!(retry.max_retries, 8);
+        assert_eq!(retry.base_delay_secs, 2);
+        // 未声明字段保持 baseline 值。
+        assert!(ep.include_stream_usage, "未声明字段不应被覆盖");
+    }
+
+    #[test]
+    fn override_new_provider_and_endpoint() {
+        let mut baseline = builtin_providers();
+        let patch: ProviderPatch = toml::from_str(
+            r#"
+            id = "my-proxy"
+            display = "本地代理"
+            [[endpoints]]
+            id = "openai"
+            protocol = "openai"
+            base_url = "http://127.0.0.1:8787/v1"
+            "#,
+        )
+        .expect("parse patch");
+        apply_provider_patch(&mut baseline, &patch);
+        let p = baseline.iter().find(|p| p.id == "my-proxy").expect("new provider");
+        assert_eq!(p.endpoints.len(), 1);
+        assert_eq!(p.endpoints[0].base_url, "http://127.0.0.1:8787/v1");
+        assert_eq!(p.endpoints[0].protocol, "openai");
+    }
+
+    #[test]
+    fn override_rejects_non_local_http_base_url() {
+        let mut baseline = builtin_providers();
+        let before = baseline
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .and_then(|p| p.endpoints.iter().find(|e| e.id == "openai"))
+            .map(|e| e.base_url.clone())
+            .expect("endpoint");
+        let patch: ProviderPatch = toml::from_str(
+            r#"
+            id = "deepseek"
+            [[endpoints]]
+            id = "openai"
+            base_url = "http://evil.example.com"
+            "#,
+        )
+        .expect("parse patch");
+        apply_provider_patch(&mut baseline, &patch);
+        let after = baseline
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .and_then(|p| p.endpoints.iter().find(|e| e.id == "openai"))
+            .map(|e| e.base_url.clone())
+            .expect("endpoint");
+        assert_eq!(before, after, "不安全 http 覆盖应被拒绝");
+    }
+
+    #[test]
+    fn override_remove_endpoint() {
+        let mut baseline = builtin_providers();
+        let patch: ProviderPatch = toml::from_str(
+            r#"
+            id = "deepseek"
+            remove = ["responses"]
+            "#,
+        )
+        .expect("parse patch");
+        apply_provider_patch(&mut baseline, &patch);
+        let p = baseline.iter().find(|p| p.id == "deepseek").expect("provider");
+        assert!(!p.endpoints.iter().any(|e| e.id == "responses"));
+        assert!(p.endpoints.iter().any(|e| e.id == "openai"));
+    }
+
+    #[test]
+    fn extract_providers_section_finds_segment() {
+        let text = r#"
+[profile.default]
+model = "x"
+
+[[providers]]
+id = "deepseek"
+[[providers.endpoints]]
+id = "openai"
+base_url = "https://api.deepseek.com"
+
+[mcp]
+foo = 1
+"#;
+        let seg = extract_providers_section(text).expect("segment");
+        assert!(seg.contains("[[providers]]"));
+        assert!(seg.contains("base_url"));
+        assert!(!seg.contains("[mcp]"));
+        assert!(!seg.contains("[profile"));
+    }
+
+    #[test]
+    fn parse_override_rejects_missing_id() {
+        let raw = r#"
+[[providers]]
+display = "no id"
+"#;
+        let patches = parse_override_toml(raw).expect("parse ok");
+        assert!(patches.is_empty(), "缺 id 的 patch 应被过滤");
+    }
 
     #[test]
     fn openrouter_text_endpoint_has_router_safe_capabilities() {

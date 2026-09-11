@@ -31,6 +31,30 @@
 /// 8192 条 ≈ 1.6 MB/seed，120 个活跃 seed 也在 200 MB 内。
 pub const MAX_TIMELINE_JOURNAL_ENTRIES: usize = 8192;
 
+/// timeline 内存回放尾的字节硬上限（payload 估算）。
+///
+/// 条数上限按 ~200 B/条估算，但 BlockCheckpoint 携带**全量块文本**（实测
+/// 单条可达 ~10 KB+），条数上限挡不住单条膨胀（长 reasoning 块场景）。
+/// 字节上限直接约束内存窗口的真实占用：checkpoint 密集流下 8192 条
+/// 可达 ~79 MB，256 MB 上限既给活跃回放留足余量，又把最坏情形钉死。
+pub const MAX_TIMELINE_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 测试用字节上限覆写（OnceLock 一次性；仅测试模块设置，模式同
+/// hub.rs 的 JOURNAL_REWRITE_THRESHOLD_OVERRIDE）。
+static JOURNAL_BYTE_LIMIT_OVERRIDE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// 生效中的回放尾字节上限（生产为 [`MAX_TIMELINE_JOURNAL_BYTES`]）。
+pub fn journal_byte_limit() -> u64 {
+    *JOURNAL_BYTE_LIMIT_OVERRIDE
+        .get()
+        .unwrap_or(&MAX_TIMELINE_JOURNAL_BYTES)
+}
+
+#[cfg(test)]
+pub(crate) fn set_journal_byte_limit_for_test(limit: u64) {
+    let _ = JOURNAL_BYTE_LIMIT_OVERRIDE.set(limit);
+}
+
 /// 某个 timeline 事件是否允许进入持久层（timeline 快照物化）。
 ///
 /// 快照物化由 `TimelineAppender::snapshot` 统一处理（turns 全文即物化），

@@ -212,6 +212,9 @@ pub struct ProviderConfig {
     /// OpenCode gateway management headers (`x-opencode-*` + UA override).
     /// `None` = send nothing (all non-opencode providers).
     pub opencode_headers: Option<OpencodeHeaders>,
+    /// Per-endpoint retry policy override (T9/T10, from `EndpointSpec.retry`).
+    /// `None` = gate built-in defaults (5 / 1s / 30s / 300s).
+    pub retry: Option<qaqh_types::RetrySpec>,
 }
 
 /// Responses API provider capability differences.
@@ -310,6 +313,7 @@ impl ProviderConfig {
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
             opencode_headers: None,
+            retry: None,
         }
     }
 
@@ -345,6 +349,7 @@ impl ProviderConfig {
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
             opencode_headers: None,
+            retry: None,
         }
     }
 
@@ -385,6 +390,7 @@ impl ProviderConfig {
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
             opencode_headers: None,
+            retry: None,
         }
     }
 
@@ -397,6 +403,12 @@ impl ProviderConfig {
         if self.base_url.contains("opencode.ai/zen") {
             self.opencode_headers = Some(OpencodeHeaders::derive(session_seed, request_tag));
         }
+        self
+    }
+
+    /// T10: 附加端点级重试策略（来自 `EndpointSpec.retry`）。
+    pub fn with_retry(mut self, retry: Option<qaqh_types::RetrySpec>) -> Self {
+        self.retry = retry;
         self
     }
 

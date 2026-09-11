@@ -48,6 +48,9 @@ pub fn latest() -> Option<Arc<Config>> {
 /// 保证「磁盘已落盘 → 内存广播」顺序（消费者永远读到已持久化状态）。
 pub(crate) fn publish(cfg: Arc<Config>) {
     *latest_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(cfg.clone());
+    // T9: config.toml 可能携带 [providers] 覆盖段——单写口提交后失效
+    // registry 合并缓存，下次查找重建（override > config.toml > assets）。
+    crate::registry::invalidate_merged();
     // 零接收者时 send 失败无妨：latest() 镜像已兜底。
     let _ = channel().send(Some(cfg));
 }
