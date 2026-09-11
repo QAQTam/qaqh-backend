@@ -27,11 +27,20 @@ fn exec_glob(args: &serde_json::Value) -> ToolResult {
     if pattern.is_empty() {
         return ToolResult::error("glob: pattern is required (e.g. \"src/**/*.rs\")");
     }
-    let root = crate::resolve_workspace_path(
-        args.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default(),
-    );
+    // Path resolution parity with grep (grep_tool.rs): explicit path →
+    // workspace resolution; empty → current workspace root; no workspace →
+    // process cwd ("."). Previously the empty case bypassed the workspace
+    // entirely, so daemon-hosted sessions searched the daemon's start
+    // directory instead of the session workspace.
+    let raw_path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let root = if raw_path.is_empty() {
+        crate::current_workspace()
+    } else {
+        crate::resolve_workspace_path(raw_path)
+    };
     let root = if root.is_empty() { "." } else { root.as_str() };
     let max_results = args
         .get("max_results")
@@ -215,6 +224,33 @@ mod tests {
         let list = lines(&result);
         assert!(list.contains(&"crates/qaqh-a/src/lib.rs".to_string()));
         assert!(!list.contains(&"README.md".to_string()));
+    }
+
+    /// Empty `path` must anchor to the current workspace (grep parity), not
+    /// the process cwd. Serializes on TEST_RUNTIME_SERIAL because it writes
+    /// the global CURRENT_WORKSPACE.
+    #[test]
+    fn glob_empty_path_anchors_to_current_workspace() {
+        let _guard = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = fixture();
+        crate::set_workspace(&dir.path().to_string_lossy());
+
+        // No `path` argument at all → search the workspace root, not cwd.
+        let result = exec_glob(&serde_json::json!({ "pattern": "src/a.rs" }));
+        assert!(result.is_success(), "{}", result.model_text());
+        assert!(
+            lines(&result).contains(&"src/a.rs".to_string()),
+            "empty path must search the session workspace"
+        );
+
+        // Explicit relative path still resolves against the workspace;
+        // results are printed relative to the search root.
+        let rel = exec_glob(&serde_json::json!({ "pattern": "a.rs", "path": "src" }));
+        assert!(lines(&rel).contains(&"a.rs".to_string()));
+
+        crate::set_workspace("");
     }
 
     #[test]

@@ -258,6 +258,14 @@ pub fn clear_actor_context() {
     ACTOR_CANCEL.with(|slot| slot.set(false));
 }
 
+/// True when the calling thread runs inside an actor context (multi-actor
+/// daemon). Callers that would otherwise touch process-global resources
+/// (e.g. `std::env::set_current_dir`) must skip those mutations here —
+/// process cwd is shared across all concurrent actors in the daemon.
+pub fn is_actor_context() -> bool {
+    ACTOR_SESSION.with(|slot| slot.borrow().is_some())
+}
+
 /// Returns the current session seed, preferring actor-local state.
 pub fn current_session() -> Option<String> {
     let local = ACTOR_SESSION.with(|slot| slot.borrow().clone());

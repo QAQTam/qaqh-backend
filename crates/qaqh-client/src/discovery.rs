@@ -206,7 +206,7 @@ pub fn process_is_running(pid: u32) -> bool {
         )
     };
     if handle.is_null() {
-        false
+        return false;
     }
     let exit_code = unsafe {
         let mut code: u32 = 0;

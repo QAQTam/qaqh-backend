@@ -17,6 +17,7 @@ pub mod lease_store;
 pub mod orphan_seal;
 pub mod outbox;
 pub mod pending_store;
+pub mod persistence_policy;
 pub mod projection;
 pub mod router;
 pub mod sequencer;

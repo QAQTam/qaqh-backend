@@ -426,6 +426,76 @@ fn deepseek_web() -> ProviderSpec {
     }
 }
 
+/// WorkBuddy（腾讯编码助手桌面端账号）via 自家反代 workbuddy-proxy。
+///
+/// 反代把 WorkBuddy 桌面端/CLI 账号凭证转成 OpenAI 兼容 API
+/// （仓库 D:\project\workbuddy-proxy，默认 http://127.0.0.1:8787/v1）。
+/// 上游协议与参数语义全部实测（2026-09，详见反代仓库 src/adapt.ts 头注）：
+/// - 上游拒绝非流式，反代已强制 stream:true 并在本地聚合，harness 照常发流式；
+/// - 上游 SSE 首帧带 `: heartbeat` 注释帧（harness SseDecoder 已正确跳过）；
+///   finish_reason/usage 形态已由反代规范化为 OpenAI 标准；
+/// - **推理开关**：上游不收 `thinking`/`enable_thinking`；推理档位走 OpenAI
+///   标准 `reasoning_effort`（minimal..max，模型元数据
+///   `reasoning.supportedEfforts` 声明支持档，反代负责回填/降级，harness
+///   只需透传）→ `supports_thinking: false`、`supports_reasoning_effort: true`、
+///   无 effort 白名单（反代按模型 supportedEfforts 精确转译，比端点级
+///   静态白名单更准）；
+/// - **max_tokens**：反代按模型 `maxOutputTokens` 回填/鍳制，harness 的
+///   max_tokens 配置直接透传即可；
+/// - **思考内容**：流式 `delta.reasoning_content`（hy3/glm-5.3 实测），
+///   反代提供 `keep_reasoning` 开关（默认开）→ `supports_reasoning_content: true`；
+/// - **缓存字段**：usage 同时带 `prompt_cache_hit_tokens`（顶层）与
+///   `cached_tokens`/`prompt_tokens_details.cached_tokens`（details）等多套
+///   别名，顶层 hit/miss 语义与 DeepSeek 相同 → `PromptCacheHitTokens`；
+/// - 流式 usage：上游在 finish 帧总带 usage（反代已规范化），无需
+///   stream_options.include_usage（上游不认识该字段）→ `include_stream_usage: false`；
+/// - 鉴权：反代默认不鉴权（仅本机），api_key 留空即可；反代开启 api_key 时填该值；
+/// - 余额：无 balance 接口；模型列表：反代 /v1/models 可用，静态表作兑底
+///   （与反代 staticModels() 对齐）。
+fn workbuddy() -> ProviderSpec {
+    ProviderSpec {
+        id: "workbuddy".into(),
+        display: "WorkBuddy (反代)".into(),
+        endpoints: vec![EndpointSpec {
+            id: "openai".into(),
+            display: "OpenAI-compatible (workbuddy-proxy)".into(),
+            protocol: "openai".into(),
+            base_url: "http://127.0.0.1:8787/v1".into(),
+            default_model: "glm-5.2".into(),
+            models: vec![
+                // 与 workbuddy-proxy staticModels() 及 /v1/models 动态表对齐
+                "auto".into(),
+                "hy4-preview".into(),
+                "hy3".into(),
+                "hy3-x".into(),
+                "deepseek-v4.1-flash".into(),
+                "glm-5.3".into(),
+                "glm-5.3-flash".into(),
+                "glm-5.2".into(),
+                "glm-5.1".into(),
+                "glm-5v-turbo".into(),
+                "kimi-k3-1".into(),
+                "kimi-k2.7".into(),
+                "kimi-k2.6".into(),
+                "minimax-m3".into(),
+                "deepseek-v4-pro".into(),
+            ],
+            models_url: Some("http://127.0.0.1:8787/v1".into()),
+            has_balance: false,
+            supports_thinking: false,
+            supports_reasoning_effort: true,
+            // 反代按模型 supportedEfforts 精确转译（translateOrFallback），
+            // 端点级白名单反而会吞掉“未声明→透传”的正确语义。
+            effort_allowlist: None,
+            supports_reasoning_content: true,
+            include_stream_usage: false,
+            cache_field: CacheTokenField::PromptCacheHitTokens,
+            supports_image_tool: false,
+            ..Default::default()
+        }],
+    }
+}
+
 /// OpenCode Go（订阅）：https://opencode.ai/zen/go/v1
 ///
 /// 端点与参数语义以本家 opencode 客户端为准（模型目录
@@ -523,6 +593,7 @@ fn providers() -> Vec<ProviderSpec> {
         openai(),
         openrouter(),
         zcode(),
+        workbuddy(),
         deepseek_web(),
         opencode_go(),
     ]
@@ -949,5 +1020,35 @@ mod tests {
         assert!(!endpoint.supports_reasoning_content);
         // minimax 走 anthropic messages 协议（未实现）→ 不进任何端点。
         assert!(!endpoint.models.contains(&"minimax-m3".to_string()));
+    }
+
+    #[test]
+    fn workbuddy_proxy_endpoint_exists() {
+        let endpoint = find_endpoint("workbuddy", "openai").expect("workbuddy endpoint");
+        assert_eq!(endpoint.protocol, "openai");
+        assert_eq!(endpoint.base_url, "http://127.0.0.1:8787/v1");
+        assert_eq!(endpoint.default_model, "glm-5.2");
+        // 静态表与反代 /v1/models 动态表（及 staticModels() 兑底）对齐。
+        assert_eq!(endpoint.models.len(), 15);
+        assert!(endpoint.models.contains(&"glm-5.2".to_string()));
+        assert!(endpoint.models.contains(&"hy3".to_string()));
+        assert!(endpoint.models.contains(&"kimi-k3-1".to_string()));
+        // 上游不收 thinking/enable_thinking；只透传 reasoning_effort，
+        // 降级交给反代（按模型 supportedEfforts 转译）→ 端点无白名单。
+        assert!(!endpoint.supports_thinking);
+        assert!(endpoint.supports_reasoning_effort);
+        assert!(endpoint.effort_allowlist.is_none());
+        // 思考内容：流式 delta.reasoning_content（反代 keep_reasoning 默认开）。
+        assert!(endpoint.supports_reasoning_content);
+        // 上游在 finish 帧总带 usage，不发 stream_options.include_usage。
+        assert!(!endpoint.include_stream_usage);
+        // usage 顶层 prompt_cache_hit_tokens/miss 与 DeepSeek 同形。
+        assert!(matches!(endpoint.cache_field, CacheTokenField::PromptCacheHitTokens));
+        assert!(!endpoint.has_balance);
+        // models_url 显式含 /models 路径时直接返回，不重复追加。
+        assert_eq!(
+            models_url_for("workbuddy", "openai").as_deref(),
+            Some("http://127.0.0.1:8787/v1/models")
+        );
     }
 }

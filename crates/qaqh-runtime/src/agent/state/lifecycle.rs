@@ -204,6 +204,16 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                     .clone();
                 agent.skills.set_workspace(std::path::Path::new(&workspace));
                 agent.skills.restore(&agent.session.skills.clone());
+                // P0 cache fix: reuse the persisted frozen [Environment]
+                // annotation so the resumed context is byte-identical to the
+                // pre-restart prefix (new <today> date / empty file_state
+                // ledger must NOT be regenerated). None (legacy meta or first
+                // build_context never ran) → regenerate as before.
+                agent.restore_frozen_annotation(agent.session.frozen_annotation.clone());
+                // P2 fix: align the injection watermark with the restored
+                // epoch, otherwise the first sync_skill_injection after resume
+                // re-appends a duplicate envelope (epoch > 0 but watermark 0).
+                agent.align_skill_injection_watermark();
                 // Hot-load latest tool schema (order-stable: new tools appended at end)
                 agent.tool_defs = qaqh_workspace::runtime::all_tools();
                 // 应用持久化的工具模式（standard/minimal/custom，幂等）。

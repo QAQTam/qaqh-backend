@@ -299,7 +299,9 @@ async fn http_url_required() {
     assert!(
         matches!(
             error.kind,
-            qaqh_mcp::McpErrorKind::ConnectFailed | qaqh_mcp::McpErrorKind::Timeout
+            qaqh_mcp::McpErrorKind::ConnectFailed
+                | qaqh_mcp::McpErrorKind::Timeout
+                | qaqh_mcp::McpErrorKind::ConnectTimeout
         ),
         "连接期失败（非启动期拒绝）：{error}"
     );
