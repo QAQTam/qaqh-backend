@@ -206,65 +206,11 @@ pub(crate) fn build_prompt_and_meta(
         )
     };
 
-    let ep = ctx.agent.endpoint_spec.clone();
-    let is_responses = ep.as_ref().map(|e| e.protocol.as_str()) == Some("responses");
-    let is_anthropic = ep.as_ref().map(|e| e.protocol.as_str()) == Some("anthropic");
-    let provider = if is_anthropic {
-        let mut p = qaqh_gate::ProviderConfig::anthropic(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.anthropic_path.clone()),
-        );
-        if let Some(endpoint) = ep.as_ref() {
-            p.supports_thinking = endpoint.supports_thinking;
-            p.supports_reasoning_effort = endpoint.supports_reasoning_effort;
-            p.supports_reasoning_content = endpoint.supports_reasoning_content;
-        }
-        p.with_opencode_headers(&ctx.agent.session.seed, "compact")
-    } else if is_responses {
-        let mut p = qaqh_gate::ProviderConfig::responses(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.responses_path.clone()),
-        );
-        if let Some(endpoint) = ep.as_ref() {
-            p.responses_compat = qaqh_gate::ResponsesCompat {
-                web_search: endpoint.responses_web_search,
-                echo_web_search_call: endpoint.responses_echo_web_search_call,
-                send_include: endpoint.responses_send_include,
-                effort_max: endpoint.responses_effort_max.clone(),
-                supports_user: endpoint.responses_supports_user,
-                search_function_alias: endpoint.responses_search_function_alias.clone(),
-                echo_reasoning_content: endpoint.responses_echo_reasoning_content,
-            };
-        }
-        p.with_opencode_headers(&ctx.agent.session.seed, "compact")
-    } else {
-        let mut p = qaqh_gate::ProviderConfig::openai(
-            &ctx.agent.config.base_url,
-            &ctx.agent.config.api_key,
-            &ctx.agent.config.model,
-            ep.as_ref().and_then(|e| e.user_id_mode.clone()),
-            ep.as_ref().and_then(|e| e.chat_path.clone()),
-            ep.as_ref()
-                .map(|e| e.thinking_mode.clone())
-                .unwrap_or_default(),
-            ep.as_ref()
-                .map(|e| e.cache_field.clone())
-                .unwrap_or_default(),
-            ep.as_ref().map(|e| e.supports_thinking).unwrap_or(false),
-            ep.as_ref().and_then(|e| e.do_sample),
-        );
-        if let Some(endpoint) = ep.as_ref() {
-            p.supports_reasoning_effort = endpoint.supports_reasoning_effort;
-            p.tool_call_content_null = endpoint.tool_call_content_null;
-            p.supports_reasoning_content = endpoint.supports_reasoning_content;
-            p.require_provider_parameters = endpoint.require_provider_parameters;
-        }
-        p.with_opencode_headers(&ctx.agent.session.seed, "compact")
-    };
+    // T6: 唯一构造器（turn_lap::gate::provider_for），与主 turn 完全同构；
+    // 历史镜像缺 thinking_budget_large / effort_allowlist / stateful /
+    // stream_usage / muse-spark 专项，均在唯一构造器内补齐。
+    let provider =
+        super::turn_lap::gate::provider_for(ctx, "compact");
     Some((
         prompt,
         kept_user_count,

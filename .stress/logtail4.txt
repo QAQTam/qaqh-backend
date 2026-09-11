@@ -1,0 +1,7 @@
+[1789130548] INFO  qaqh_runtime::timeline_store: [timeline] audit rotated for 75dc1917: 2097180 bytes -> 1048554 bytes
+[1789130560] INFO  qaqh_runtime::ringing::hub: [ringing] journal rewritten for 75dc1917: 8135940 bytes -> 8192 entries
+[1789130564] WARN  qaqh_gate::chat_completions_api: OpenAI SSE interrupted mid-stream, keeping partial output: error decoding response body
+[1789130564] WARN  qaqh_gate::chat_completions_api: OpenAI SSE: upstream closed stream without [DONE]/finish_reason — partial output kept (stop_reason absent)
+[1789130564] INFO  qaqh_runtime::agent::engine_turn: [TURN] run_lap turn_id=t2 round_num=0 gate succeeded, parsing response
+[1789130564] WARN  qaqh_runtime::agent::engine_turn: [TURN] run_lap turn_id=t2 round_num=0 stream incomplete 3x — giving up, accepting partial output
+[1789130564] INFO  qaqh_runtime::ringing::hub: [ringing] journal rewritten for 75dc1917: 12489729 bytes -> 1 entries

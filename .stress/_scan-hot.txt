@@ -1,0 +1,51 @@
+### offload_turn_blocks call sites
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\timeline.rs:631:                offload_turn_blocks(turn);
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\timeline.rs:784:fn offload_turn_blocks(turn: &mut TimelineTurn) {
+
+### sidecar / 侧车
+
+### drain(0.. in message store
+D:\project\QAQ-Harness\crates\qaqh-message\src\store.rs:440:    /// - `turns.drain(0..n)`锛宍compact_skip` 褰掗浂锛堝墿浣?turn 鍏ㄩ儴娲昏穬锛夛紱
+D:\project\QAQ-Harness\crates\qaqh-message\src\store.rs:463:        self.turns.drain(0..n);
+
+### shrink_to_fit
+
+### request body build in chat_completions_api
+48:                    result.push((*in_thinking, rest[..index].to_string()));
+54:                result.push((*in_thinking, rest.to_string()));
+201:                    let cause = e.to_string();
+263:        let r = rc.to_string();
+287:                        let name = rest[..quote_end].to_string();
+315:                    .to_string();
+321:                    .to_string();
+395:            *stop_reason = Some(fr.to_string());
+663:                    tc.function.arguments.to_string(),
+978:            Some(s) => Attempt::Ok(s.to_string()),
+982:    .map_err(|e| e.to_string())
+990:            return path.to_string();
+997:        base.to_string()
+1114:                key.to_string(),
+1115:                serde_json::Value::String("hidden".to_string()),
+93:                serde_json::json!({
+106:    body_map.insert("model".into(), serde_json::json!(model));
+108:    body_map.insert("stream".into(), serde_json::json!(true));
+112:            serde_json::json!({"include_usage": true}),
+118:                body_map.insert("thinking".into(), serde_json::json!({"type": "enabled"}));
+121:                body_map.insert("enable_thinking".into(), serde_json::json!(true));
+124:                body_map.insert("thinking".into(), serde_json::json!({"type": "adaptive"}));
+125:                body_map.insert("reasoning_split".into(), serde_json::json!(true));
+129:    body_map.insert("max_tokens".into(), serde_json::json!(max_tokens));
+144:        body_map.insert("reasoning_effort".into(), serde_json::json!(e));
+147:        body_map.insert("do_sample".into(), serde_json::json!(sample));
+154:                serde_json::json!({"require_parameters": true}),
+161:        body_map.insert("user_id".into(), serde_json::json!(uid));
+725:        out.push(serde_json::json!({"role": "system", "content": sys}));
+739:                    let mut obj = serde_json::json!({"role": "system", "content": tb});
+
+### reqwest .json( / .body(
+D:\project\QAQ-Harness\crates\qaqh-gate\src\chat_completions_api.rs:177:                .json(&body)
+D:\project\QAQ-Harness\crates\qaqh-gate\src\chat_completions_api.rs:925:                .json(&body)
+D:\project\QAQ-Harness\crates\qaqh-gate\src\chat_completions_api.rs:970:        let json: serde_json::Value = match block_on(resp.json()) {
+D:\project\QAQ-Harness\crates\qaqh-gate\src\message_api.rs:832:            req.json(&body).send().await
+D:\project\QAQ-Harness\crates\qaqh-gate\src\message_api.rs:927:                .json(&body)
+D:\project\QAQ-Harness\crates\qaqh-gate\src\message_api.rs:966:        let json: serde_json::Value = match block_on(resp.json()) {

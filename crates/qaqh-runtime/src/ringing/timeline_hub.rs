@@ -77,11 +77,18 @@ impl RingingHub {
                                 let journal = timeline.replay_since(&seed, 0);
                                 let journal =
                                     Self::prune_sealed_timeline_journal(&snapshot, journal);
+                                let journal = Self::prune_superseded_checkpoints(journal);
                                 (snapshot, journal)
                             })
                         }) else {
                             continue;
                         };
+                        // offload 壳补齐（异步窗口；磁盘文件始终完整）。
+                        let snapshot = rehydrate_offloaded_turns(
+                            &timeline_store,
+                            &seed,
+                            snapshot,
+                        );
                         if let Err(error) = store.persist(&seed, &snapshot, journal) {
                             log::warn!("[timeline] persist failed for {seed}: {error}");
                         }
@@ -288,17 +295,18 @@ impl RingingHub {
         // P1: 懒加载——publish 前确保该 seed 历史 timeline 已 restore，
         // 否则新条目会与磁盘快照断链（replay tail 丢失历史）。
         self.ensure_timeline_loaded(seed);
-        // Terminal intents (block/round/turn sealed) are the recovery boundary
-        // for a restarting client: persisting them synchronously shrinks the
-        // window in which a crash can lose the transcript tail from "the whole
-        // turn" to "the current open blocks". Everything else keeps the
-        // coalesced async checkpoint to stay off the streaming hot path.
-        let terminal = Self::timeline_intent_is_terminal(&intent);
+        // Terminal intents are the recovery boundary for a restarting client.
+        // TurnSealed 保持同步落盘（turn 级边界，一个 turn 一次，成本可控）；
+        // BlockSealed/RoundSealed 降级为 1s 合并窗口异步 checkpoint：长上下文
+        // 会话每 turn 可产生几十个 round（实测 79 个），每次同步全量重写快照
+        // 使终端事件成为主要写放大源，而 crash 窗口差异只有毫秒级（合并窗口
+        // 本身就是周期性 crash checkpoint）。
+        let is_turn_sealed = matches!(intent, TimelineIntent::TurnSealed { .. });
         let entry = {
             let mut timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
             timeline.apply_intent(seed, intent)?
         };
-        if terminal {
+        if is_turn_sealed {
             self.persist_timeline_sync(seed);
         } else {
             self.request_timeline_persistence(seed);
@@ -341,6 +349,7 @@ impl RingingHub {
             timeline.snapshot(seed).map(|snapshot| {
                 let journal = timeline.replay_since(seed, 0);
                 let journal = Self::prune_sealed_timeline_journal(&snapshot, journal);
+                let journal = Self::prune_superseded_checkpoints(journal);
                 (snapshot, journal)
             })
         })() else {
@@ -353,11 +362,95 @@ impl RingingHub {
             drop(timeline);
             store.append_audit(seed, &audit_entries);
         }
+        // offload 壳补齐：内存中已卸载的 sealed turn 在落盘前恢复全文，
+        // 保证快照文件始终是「无侧车也能独立恢复」的完整权威。
+        let snapshot = self.rehydrate_offloaded_turns(seed, snapshot);
         if let Err(error) = store.persist(seed, &snapshot, journal) {
             log::warn!("[timeline] sync persist failed for {seed}: {error}");
         }
     }
 
+    /// 启用 turn-seal 卸载：seal 后该 turn 的 reasoning/text 全文移出内存，
+    /// 经 offload 侧车（`ringing-offload/{seed}.jsonl`）持久化；落盘快照时
+    /// 由 rehydrate 补齐。见 `timeline_store::append_offloaded_turn`。
+    pub fn enable_turn_offload(&self, seed: &str) {
+        let store = self.timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(store) = store.as_ref() else {
+            return;
+        };
+        let store_seed = seed.to_string();
+        let append_store = std::sync::Arc::new(());
+        let _ = append_store;
+        // 捕获 store 的方法引用：store 在 Arc<Mutex<Option<TimelineStore>>> 里，
+        // 回调里再锁。为避免回调内死锁（persist_timeline_sync 持 store 锁时
+        // seal 路径不会再触发），offload 回调只做 append（append-only 文件，
+        // 不需要 store 可变状态），因此回调内短暂拿锁即可。
+        let timeline = self.timeline.clone();
+        let timeline_store = self.timeline_store.clone();
+        let offload: crate::timeline::OffloadFn = std::sync::Arc::new(
+            move |seed: &str, turn: &qaqh_domain::TimelineTurn| {
+                let store_guard = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(store) = store_guard.as_ref() {
+                    store.append_offloaded_turn(seed, turn);
+                }
+                drop(store_guard);
+                let _ = &timeline;
+                let _ = &store_seed;
+            },
+        );
+        drop(store);
+        self.timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_offload(seed, Some(offload));
+    }
+
+    /// 用 offload 侧车补齐快照中已卸载（壳化）的 turn 文本。
+    /// 侧车缺失/损坏时保留壳（快照仍可恢复，全文降级为预览）。
+    fn rehydrate_offloaded_turns(
+        &self,
+        seed: &str,
+        snapshot: TimelineSnapshot,
+    ) -> TimelineSnapshot {
+        rehydrate_offloaded_turns(&self.timeline_store, seed, snapshot)
+    }
+}
+
+/// 自由函数版本：供异步 persist 线程使用（不借用 &self）。
+fn rehydrate_offloaded_turns(
+    timeline_store: &std::sync::Arc<
+        std::sync::Mutex<Option<crate::timeline_store::TimelineStore>>,
+    >,
+    seed: &str,
+    mut snapshot: TimelineSnapshot,
+) -> TimelineSnapshot {
+    let store = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(store) = store.as_ref() else {
+        return snapshot;
+    };
+        for turn in &mut snapshot.turns {
+            // 壳判定（启发式）：sealed turn 的任一 block 文本/进度 ≤ 512 字符
+            // 预览上限且侧车有更新版本，则补齐（侧车没有时保持现状，无害）。
+            if turn.sealed
+                && turn.rounds.iter().any(|round| {
+                    round.blocks.iter().any(|block| {
+                        block.text.chars().count() <= 512
+                            || block
+                                .tool
+                                .as_ref()
+                                .is_some_and(|tool| tool.progress.chars().count() <= 512)
+                    })
+                })
+            {
+                if let Some(full) = store.load_offloaded_turn(seed, &turn.turn_id) {
+                    *turn = full;
+                }
+            }
+        }
+        snapshot
+}
+
+impl RingingHub {
     /// 同步落盘所有待写 seed（daemon 优雅关闭收尾；Drop 只 join 异步线程，
     /// 而 Arc 引用可能仍在 tokio task 中存活，必须显式 flush）。
     pub fn flush_timeline_persistence(&self) {
@@ -404,15 +497,10 @@ impl RingingHub {
         self.timeline_live.subscribe()
     }
 
-    /// Terminal intents seal a block/round/turn — the client's recovery
-    /// boundary. They are persisted synchronously so a crash between the seal
-    /// and the next async checkpoint cannot drop a completed unit of work.
+    /// TurnSealed 是 turn 级恢复边界，同步落盘（见 publish_timeline 注释）。
+    /// BlockSealed/RoundSealed 已降级为异步 checkpoint，不再视作同步终端。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn timeline_intent_is_terminal(intent: &TimelineIntent) -> bool {
-        matches!(
-            intent,
-            TimelineIntent::BlockSealed { .. }
-                | TimelineIntent::RoundSealed { .. }
-                | TimelineIntent::TurnSealed { .. }
-        )
+        matches!(intent, TimelineIntent::TurnSealed { .. })
     }
 }

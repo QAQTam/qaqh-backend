@@ -393,12 +393,13 @@ mod tests {
             timeline_snapshot_from_turns("seed", &[turn_with_blocks()]).expect("snapshot rebuilt");
         assert_eq!(snapshot.turns.len(), 1);
         assert!(snapshot.watermark > 0);
-        assert_eq!(journal.len() as u64, snapshot.watermark);
-        assert_eq!(journal.first().expect("opened").timeline_seq, 1);
-        assert_eq!(
-            journal.last().expect("sealed").timeline_seq,
-            snapshot.watermark
+        // seal 即时裁剪语义：重建的历史 turn 已 seal，回放尾为空；
+        // watermark 由快照独立持有，条目数断言不再适用。
+        assert!(
+            journal.is_empty(),
+            "rebuilt sealed turns leave an empty replay tail"
         );
+        assert!(snapshot.watermark >= 12, "watermark counts all rebuilt entries");
 
         let rebuilt = &snapshot.turns[0];
         assert_eq!(rebuilt.turn_id, "t1");

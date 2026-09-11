@@ -115,19 +115,31 @@ impl fmt::Display for TimelineError {
 
 impl std::error::Error for TimelineError {}
 
-#[derive(Debug, Default)]
+/// turn seal 卸载回调：(seed, turn) 由调用方持久化完整文本。
+pub type OffloadFn = std::sync::Arc<dyn Fn(&str, &TimelineTurn) + Send + Sync>;
+
+#[derive(Default)]
 struct SeedTimeline {
     next_seq: u64,
     turns: BTreeMap<String, TimelineTurn>,
     journal: Vec<TimelineEntry>,
     next_fragment: HashMap<(String, u32, String), u64>,
+    /// journal 内滞留的 payload 字节数（text_delta/checkpoint/进度 chunk）。
+    /// 驱逐时从头部扣减，O(1) 维护。
+    journal_bytes: u64,
+    /// True = 已 seal turn 的 blocks 文本被卸载出内存（壳模式），由
+    /// `offload` 回调在持久化时补齐快照全文。见 `set_offload`。
+    offload_enabled: bool,
+    /// 卸载回调（set_offload 注入；Default 的 None = 不卸载）。
+    #[allow(clippy::type_complexity)]
+    offload: Option<OffloadFn>,
 }
 
 /// The only component allowed to allocate timeline sequences.
 ///
 /// A future transport actor owns this mutably; keeping its API on `&mut self`
 /// makes accidental concurrent producers impossible without an explicit queue.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct TimelineAppender {
     seeds: HashMap<String, SeedTimeline>,
 }
@@ -598,12 +610,43 @@ impl TimelineAppender {
         turn.sealed = true;
         turn.state = state;
         turn.failure = failure.clone();
-        Ok(next_entry(
+        let entry = next_entry(
             timeline,
             turn_id.to_string(),
             None,
             TimelineEvent::TurnSealed { state, failure },
-        ))
+        );
+        // seal 即时裁剪：sealed turn 的条目在快照内已物化，回放不再需要
+        // （与 persist 侧 prune_sealed_timeline_journal 语义一致）。不裁剪则
+        // journal 随会话累积（实测单会话 7.3 万条 / 25 MB）。
+        prune_turn_journal(timeline, turn_id);
+        // turn-seal 卸载：先回调持久化完整文本，再把 blocks 清成壳。
+        // 回调在持有 timeline 锁的状态下执行 append-only 追加（O(文本)
+        // 一次写，无每秒重写），不做任何可锁 store 状态访问，无死锁面。
+        if let Some(offload) = timeline.offload.clone() {
+            if let Some(turn) = timeline.turns.get(turn_id) {
+                offload(seed, turn);
+            }
+            if let Some(turn) = timeline.turns.get_mut(turn_id) {
+                offload_turn_blocks(turn);
+            }
+        }
+        Ok(entry)
+    }
+
+    /// 开启 turn-seal 卸载：seal 后该 turn 的 blocks 文本移出内存，
+    /// `offload` 回调负责持久化完整文本（offload 侧车）。reasoning 链路
+    /// 常驻内存是长会话内存增长的主因之一；文本的持久权威由侧车承担，
+    /// 内存只保留壳（turn 元数据 + 首块预览）。
+    pub fn set_offload(
+        &mut self,
+        seed: &str,
+        offload: Option<OffloadFn>,
+    ) {
+        if let Some(timeline) = self.seeds.get_mut(seed) {
+            timeline.offload_enabled = offload.is_some();
+            timeline.offload = offload;
+        }
     }
 
     pub fn replay_since(&self, seed: &str, watermark: u64) -> Vec<TimelineEntry> {
@@ -644,6 +687,7 @@ impl TimelineAppender {
         journal: Vec<TimelineEntry>,
     ) {
         let mut next_fragment = HashMap::new();
+        let mut journal_bytes = 0u64;
         for entry in &journal {
             if let TimelineEvent::TextDelta {
                 block_id,
@@ -657,6 +701,7 @@ impl TimelineAppender {
                     fragment_seq.saturating_add(1),
                 );
             }
+            journal_bytes += journal_entry_payload_bytes(&entry.event);
         }
         self.seeds.insert(
             seed,
@@ -669,6 +714,9 @@ impl TimelineAppender {
                     .collect(),
                 journal,
                 next_fragment,
+                journal_bytes,
+                offload_enabled: false,
+                offload: None,
             },
         );
     }
@@ -700,8 +748,69 @@ fn next_entry(
         round_num,
         event,
     };
+    timeline.journal_bytes += journal_entry_payload_bytes(&entry.event);
     timeline.journal.push(entry.clone());
+    enforce_journal_budget(timeline);
     entry
+}
+
+/// journal 条目的 payload 字节数（内存预算估算；结构事件为 0）。
+fn journal_entry_payload_bytes(event: &TimelineEvent) -> u64 {
+    match event {
+        TimelineEvent::TextDelta { delta, .. } => delta.len() as u64,
+        TimelineEvent::BlockCheckpoint { text, .. } => text.len() as u64,
+        TimelineEvent::ToolProgress { chunk, .. } => chunk.len() as u64,
+        _ => 0,
+    }
+}
+
+/// 双限（条数 + 字节）头部驱逐：保序移除最老条目直至两项都回到界内。
+fn enforce_journal_budget(timeline: &mut SeedTimeline) {
+    let entry_limit = crate::ringing::persistence_policy::MAX_TIMELINE_JOURNAL_ENTRIES;
+    let byte_limit = crate::ringing::persistence_policy::journal_byte_limit();
+    while timeline.journal.len() > entry_limit || timeline.journal_bytes > byte_limit {
+        let Some(oldest) = timeline.journal.first() else {
+            break;
+        };
+        timeline.journal_bytes = timeline
+            .journal_bytes
+            .saturating_sub(journal_entry_payload_bytes(&oldest.event));
+        timeline.journal.remove(0);
+    }
+}
+
+/// 把 turn 卸载成壳：清空各 block 文本/进度，保留身份与元数据。
+/// 首块保留 512 字符预览，前端列表仍可显示摘要；全文从侧车恢复。
+fn offload_turn_blocks(turn: &mut TimelineTurn) {
+    for round in &mut turn.rounds {
+        for block in &mut round.blocks {
+            if block.text.chars().count() > 512 {
+                let preview: String = block.text.chars().take(512).collect();
+                block.text = preview;
+            }
+            if let Some(tool) = &mut block.tool {
+                if tool.progress.chars().count() > 512 {
+                    let preview: String = tool.progress.chars().take(512).collect();
+                    tool.progress = preview;
+                }
+                tool.output = None;
+                tool.diff = None;
+            }
+        }
+    }
+}
+
+/// 移除某 turn 的全部 journal 条目（seal 即时裁剪）。
+fn prune_turn_journal(timeline: &mut SeedTimeline, turn_id: &str) {
+    timeline.journal.retain(|entry| {
+        let keep = entry.turn_id != turn_id;
+        if !keep {
+            timeline.journal_bytes = timeline
+                .journal_bytes
+                .saturating_sub(journal_entry_payload_bytes(&entry.event));
+        }
+        keep
+    });
 }
 
 fn existing_round_mut<'a>(
@@ -932,6 +1041,13 @@ mod tests {
             .unwrap();
         appender.seal_block("s", "t", 0, "answer").unwrap();
         appender.seal_round("s", "t", 0, true).unwrap();
+        // seal 裁剪语义：TurnSealed 会清空该 turn 的回放尾，seq 连续性
+        // 必须在 seal 前断言；watermark 含 TurnSealed 占用的下一序号。
+        let last_seq_before_seal = appender
+            .replay_since("s", 0)
+            .last()
+            .expect("journal holds entries while the turn is active")
+            .timeline_seq;
         appender.seal_turn("s", "t").unwrap();
 
         let snapshot = appender.snapshot("s").unwrap();
@@ -953,10 +1069,7 @@ mod tests {
             blocks[1].tool.as_ref().unwrap().state,
             TimelineToolState::Succeeded
         );
-        assert_eq!(
-            appender.replay_since("s", 0).last().unwrap().timeline_seq,
-            snapshot.watermark
-        );
+        assert_eq!(snapshot.watermark, last_seq_before_seal + 1);
     }
 
     #[test]
@@ -1228,7 +1341,6 @@ mod tests {
             .unwrap();
         appender.seal_block("s", "t1", 0, "reasoning").unwrap();
         appender.seal_round("s", "t1", 0, true).unwrap();
-        appender.seal_turn("s", "t1").unwrap();
 
         let all = appender.replay_since("s", 0);
         assert!(!all.is_empty(), "journal must hold the written entries");
@@ -1250,5 +1362,130 @@ mod tests {
         );
         // 水位到底 = 无条目可回放（客户端已对齐，不产生 gap）。
         assert!(appender.replay_since("s", watermark).is_empty());
+
+        // seal 后回放尾清空（seal 即时裁剪契约，详见 sealed_turn 测试）。
+        appender.seal_turn("s", "t1").unwrap();
+        assert!(appender.replay_since("s", 0).is_empty());
+    }
+
+    #[test]
+    fn sealed_turn_journal_is_pruned_immediately() {
+        // Phase 4 seal 即时裁剪：turn seal 后其全部条目必须立即离开内存
+        // journal（快照已物化）；后续 turn 的条目照常进入回放窗口。
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t1", "q1").unwrap();
+        appender
+            .open_block("s", "t1", 0, "r", TimelineBlockKind::Reasoning, None)
+            .unwrap();
+        appender
+            .append_text("s", "t1", 0, "r", 0, "long reasoning text")
+            .unwrap();
+        appender.seal_block("s", "t1", 0, "r").unwrap();
+        appender.seal_round("s", "t1", 0, false).unwrap();
+        assert!(!appender.replay_since("s", 0).is_empty());
+
+        appender.seal_turn("s", "t1").unwrap();
+        assert!(
+            appender.replay_since("s", 0).is_empty(),
+            "sealed turn entries must leave the replay tail immediately"
+        );
+        let snapshot = appender.snapshot("s").unwrap();
+        assert_eq!(snapshot.turns.len(), 1, "snapshot keeps the materialized turn");
+        assert!(snapshot.turns[0].sealed);
+        assert_eq!(
+            snapshot.turns[0].rounds[0].blocks[0].text,
+            "long reasoning text"
+        );
+
+        appender.open_turn("s", "t2", "q2").unwrap();
+        assert_eq!(appender.replay_since("s", 0).len(), 1);
+    }
+
+    #[test]
+    fn journal_enforcement_bounds_entries_and_bytes() {
+        // 双限驱逐：字节越界后最老 delta 被驱逐，且被驱逐区间是连续前缀。
+        // 测试覆写为 512 KB（生产 256 MB 无法在单测内写满）。
+        crate::ringing::persistence_policy::set_journal_byte_limit_for_test(512 * 1024);
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t1", "long stream").unwrap();
+        appender
+            .open_block("s", "t1", 0, "r", TimelineBlockKind::Reasoning, None)
+            .unwrap();
+        // 600 条 x 1 KB = 600 KB payload > 512 KB 测试字节界。
+        let chunk = "x".repeat(1024);
+        for seq in 0..600u64 {
+            appender
+                .append_text("s", "t1", 0, "r", seq, chunk.clone())
+                .unwrap();
+        }
+        let tail = appender.replay_since("s", 0);
+        assert!(
+            tail.len() < 600,
+            "byte budget must evict old deltas, got {} entries",
+            tail.len()
+        );
+        let fragment_seqs: Vec<u64> = tail
+            .iter()
+            .filter_map(|e| match &e.event {
+                TimelineEvent::TextDelta { fragment_seq, .. } => Some(*fragment_seq),
+                _ => None,
+            })
+            .collect();
+        // 窗口必须覆盖最新 delta，且保留区连续。
+        assert!(
+            fragment_seqs.contains(&599),
+            "newest delta must survive eviction, got tail len {}",
+            tail.len()
+        );
+        let min_kept = *fragment_seqs.iter().min().unwrap();
+        let expected: Vec<u64> = (min_kept..600).collect();
+        assert_eq!(fragment_seqs, expected, "retained window must be contiguous");
+
+        // 条数上限分支：微小 delta 推过 8192 条后同样头部驱逐。
+        let mut many = TimelineAppender::new();
+        many.open_turn("s2", "t1", "many deltas").unwrap();
+        many.open_block("s2", "t1", 0, "r", TimelineBlockKind::Reasoning, None)
+            .unwrap();
+        for seq in 0..8500u64 {
+            many.append_text("s2", "t1", 0, "r", seq, "x".to_string())
+                .unwrap();
+        }
+        let bounded = many.replay_since("s2", 0);
+        assert!(
+            bounded.len() <= 8192,
+            "entry budget must bound the replay tail, got {}",
+            bounded.len()
+        );
+        let last_seq = bounded.last().unwrap().timeline_seq;
+        // 最新条目仍在窗口内 → watermark 与其 seq 一致；
+        // watermark 与窗口头部的差值 = 被驱逐的前缀长度。
+        assert_eq!(
+            many.snapshot("s2").unwrap().watermark,
+            last_seq,
+            "newest allocated entry must remain in the bounded tail"
+        );
+    }
+
+    #[test]
+    fn restore_rebuilds_journal_byte_budget() {
+        // restore 后字节预算必须与 journal 实际 payload 一致。
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t1", "q").unwrap();
+        appender
+            .open_block("s", "t1", 0, "r", TimelineBlockKind::Reasoning, None)
+            .unwrap();
+        appender.append_text("s", "t1", 0, "r", 0, "payload-123").unwrap();
+        let journal = appender.replay_since("s", 0);
+        let snapshot = appender.snapshot("s").unwrap();
+
+        let mut restored = TimelineAppender::new();
+        restored.restore("s".into(), snapshot, journal);
+        let expected: u64 = restored
+            .replay_since("s", 0)
+            .iter()
+            .map(|e| journal_entry_payload_bytes(&e.event))
+            .sum();
+        let seed = restored.seeds.get("s").unwrap();
+        assert_eq!(seed.journal_bytes, expected);
     }
 }

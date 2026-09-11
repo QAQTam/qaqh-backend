@@ -1,0 +1,59 @@
+/// Uses a lock file with exponential backoff. Returns a guard that
+/// removes the lock on drop.
+struct IndexLock {
+    lock_path: std::path::PathBuf,
+}
+impl IndexLock {
+    fn acquire(sessions_dir: &Path) -> Self {
+        let lock_path = sessions_dir.join(".index.lock");
+        let mut backoff = std::time::Duration::from_millis(1);
+        let max_backoff = std::time::Duration::from_millis(200);
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_) => return IndexLock { lock_path },
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+                Err(_) => {
+                    // Can't acquire lock — proceed without it (better than hanging)
+                    log::warn!("[IndexLock] cannot create lock file, proceeding unlocked");
+                    return IndexLock {
+                        lock_path: std::path::PathBuf::new(),
+                    };
+                }
+            }
+        }
+    }
+}
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        if !self.lock_path.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.lock_path);
+        }
+    }
+}
+
+/// Upsert a single session meta into the index (avoids full rewrite).
+pub fn upsert_index(sessions_dir: &Path, meta: &SessionMeta) {
+    let _lock = IndexLock::acquire(sessions_dir);
+    let mut index = read_index(sessions_dir);
+    if let Some(existing) = index.iter_mut().find(|m| m.seed == meta.seed) {
+        *existing = meta.clone();
+    } else {
+        index.push(meta.clone());
+    }
+    write_index(sessions_dir, &index);
+}
+
+/// Remove a session from the index.
+pub fn remove_from_index(sessions_dir: &Path, seed: &str) {
+    let _lock = IndexLock::acquire(sessions_dir);
+    let mut index = read_index(sessions_dir);
+    index.retain(|m| m.seed != seed);
+    write_index(sessions_dir, &index);
+}
