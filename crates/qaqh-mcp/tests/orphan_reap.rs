@@ -100,11 +100,18 @@ fn wait_pid_lines(tag: &str, expect: usize) -> Vec<u32> {
 
 /// 僵尸感知的存活判定：`Z` = 已死未收尸（父进程尚未 wait）——组杀语义下
 /// 视为“已退出”，否则短暂退出的进程会让 /proc 探测误报存活。
+#[cfg(unix)] // pid_state 依赖 /proc；Windows 无孤儿回收测试（见下方 cfg 分支）
 fn pid_alive(pid: u32) -> bool {
     match pid_state(pid) {
         Some(state) => state != "Z",
         None => false,
     }
+}
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    // Windows 上无 /proc：本测试的孤儿回收断言本身也是 unix-only，
+    // 该辅助函数保持可编译即可（不会被 Windows-only 断言调用）。
+    true
 }
 
 /// /proc/<pid>/stat 的 state 字段（R/S/Z/T…）；None = 进程不存在。

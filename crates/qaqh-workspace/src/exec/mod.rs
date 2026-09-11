@@ -23,7 +23,7 @@ pub(crate) use handler::{
     shell_available,
 };
 #[cfg(test)]
-pub(crate) use pipe::{PipePumpCtx, Readiness, drain_pipe_to_registry};
+pub(crate) use pipe::{PipePumpCtx, Readiness, decode_windows_oem, drain_pipe_to_registry};
 #[cfg(test)]
 pub(crate) use shell::{Shell, base64_decode, executable_in_dirs, ps_encode};
 #[cfg(test)]

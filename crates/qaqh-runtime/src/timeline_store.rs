@@ -1,56 +1,55 @@
-//! Durable Ringing V1 timeline state. One atomically replaced record per session contains
-//! the materialized recovery snapshot and its replay tail.
+//! Durable Ringing V1 timeline state. One atomically replaced record per session
+//! holds the materialized recovery snapshot.
+//!
+//! 2026-09-10：移除 `timeline-journal/{seed}.jsonl` append-only 权威日志。
+//!
+//! 移除理由（实测）：`BlockCheckpoint` 携带该块的**全量文本**，写入 append-only
+//! 日志后形成 O(n²) 膨胀——单个会话落盘 829 MB（1,170,412 行），其中 99.2% 的
+//! checkpoint 文本是重复旧内容；加载时 `ensure_timeline_loaded` 会在持锁期间
+//! 把整个文件反序列化成 `Vec<TimelineJournalOp>`，常驻约 1.2 GB（1.48× 文件），
+//! 且因 `lazy_load` 串行锁，多 session 场景下相互阻塞、前端渲染卡顿。
+//!
+//! 该日志原本承担的三项职责改由更合适的载体承担：
+//!   - transcript 读侧：`ringing-timeline/{seed}.json`（本模块持久化的快照）
+//!   - 断线重连回放尾：`TimelineAppender` 内存 journal（进程内有界）
+//!   - 崩溃恢复：`timeline_rebuild`（从 messages.jsonl / compact-context 重建）
+//!
+//! 代价（已确认可接受）：daemon 崩溃后，客户端重连时无法回放**上一次进程**的
+//! 中间帧，只能从快照 watermark 重新基线化。客户端 `recover_gap` 会自动完成
+//! 这一步（`qaqh-client`），表现为一次额外的快照拉取。
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::io::Write as _;
 use std::path::PathBuf;
 
-use qaqh_domain::{TimelineEntry, TimelineSnapshot};
+use qaqh_domain::{TimelineEntry, TimelineEvent, TimelineSnapshot};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedTimeline {
     pub seed: String,
     pub snapshot: TimelineSnapshot,
+    /// 活跃 turn 的重连回放尾。已 seal turn 的条目在 `snapshot` 内物化，不会出现
+    /// 在此。保留该字段以兼容既有缓存文件（旧格式含尾部长度的条目）。
+    #[serde(default)]
     pub journal: Vec<TimelineEntry>,
 }
 
-/// 磁盘 timeline 日志操作（append-only，刀 2 阶段 1 起为 timeline 的权威来源）。
-///
-/// 同一文件内按序追加：每次 persist 只追加 `watermark` 之后的新条目，因此
-/// 从该流可**无损重放**出与 `TimelineAppender` 内存态完全一致的快照（前端
-/// 看到的 transcript 形状不变）。与三频道 `JournalStore` 的 rewrite/compact
-/// 有界语义隔离——timeline 日志从不物理删除行。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-#[allow(clippy::large_enum_variant)] // 装箱改造属结构塑形，另立项
-pub enum TimelineJournalOp {
-    /// 恢复基点：完整物化快照（一次性历史迁移/未来压缩时写）。其 watermark
-    /// 表示 `snapshot.turns` 已包含的最大 timeline_seq；其后只需追加该 seq
-    /// 之后的增量条目。
-    Snapshot { snapshot: TimelineSnapshot },
-    /// 一条已分配 seq 的 timeline 记录（每次 persist 追加大于 watermark 的尾部）。
-    ///
-    /// `ts`：落盘时刻（epoch 毫秒，`append_journal` 写入时注入；backfill 与
-    /// 旧行反序列化为 None）。冻结事故（2026-09-02，session 692d1605）中
-    /// journal 无时间戳，67 分钟空窗只能靠 audit/daemon 日志旁证定位——
-    /// 此字段让"事件何时落盘"可直接审计。
-    Append {
-        entry: TimelineEntry,
-        #[serde(default)]
-        ts: Option<u64>,
-    },
-}
-
-/// Timeline 持久化：`ringing-timeline/{seed}.json` 缓存 + `timeline-journal/{seed}.jsonl` 权威日志。
+/// Timeline 持久化：`ringing-timeline/{seed}.json`（原子替换的物化快照）+
+/// `timeline-audit/{seed}.jsonl`（轻量审计）。
 #[derive(Debug)]
 pub struct TimelineStore {
     root: PathBuf,
-    journal_root: PathBuf,
-    /// 每个 seed 的 timeline journal 文件已追加到的最大 seq（懒计算缓存，防重复 append）。
-    journal_watermarks: HashMap<String, u64>,
+    audit_root: PathBuf,
+    /// 每个 seed 已审计到的最大 seq（懒计算，防重复追加）。
+    audit_watermarks: HashMap<String, u64>,
 }
+
+/// 审计文件体积上限。超过时保留尾部一半（滚动），使磁盘占用恒定。
+///
+/// 审计仅用于**近期事故定位**（冻结断层），不需要全量历史；单行约 60 B，
+/// 2 MiB ≈ 3.4 万条 ≈ 数十分钟重负载流式，足以覆盖一次事故窗口。
+pub(crate) const AUDIT_ROTATE_BYTES: u64 = 2 * 1024 * 1024;
 
 impl TimelineStore {
     pub fn new(root: impl Into<PathBuf>) -> std::io::Result<Self> {
@@ -64,12 +63,12 @@ impl TimelineStore {
             std::fs::rename(&legacy, &root)?;
         }
         std::fs::create_dir_all(&root)?;
-        let journal_root = parent.join("timeline-journal");
-        std::fs::create_dir_all(&journal_root)?;
+        let audit_root = parent.join("timeline-audit");
+        std::fs::create_dir_all(&audit_root)?;
         Ok(Self {
             root,
-            journal_root,
-            journal_watermarks: HashMap::new(),
+            audit_root,
+            audit_watermarks: HashMap::new(),
         })
     }
 
@@ -96,8 +95,8 @@ impl TimelineStore {
 
     /// 全量装载（仅测试用；生产走 `list_seeds` + `load_seed` 懒加载）。
     #[cfg(test)]
-    pub fn load(&self) -> std::io::Result<HashMap<String, PersistedTimeline>> {
-        let mut timelines = HashMap::new();
+    pub fn load(&self) -> std::io::Result<std::collections::HashMap<String, PersistedTimeline>> {
+        let mut timelines = std::collections::HashMap::new();
         for entry in std::fs::read_dir(&self.root)? {
             let path = entry?.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
@@ -152,167 +151,139 @@ impl TimelineStore {
         self.root.join(format!("{}.json", sanitize_seed(seed)))
     }
 
-    /// 追加 timeline journal 尾部。按当前 `journal_watermark` 去重：只追加 seq 大于
-    /// watermark 的条目（hub 已用 `replay_since(seed, watermark)` 过滤，此处再防御
-    /// 一次，防止因调用方状态滞后把已落盘条目重复写入）。追加后更新该 seed 的
-    /// watermark，使 `persist_timeline_sync` 与异步 checkpoint 线程不会重复写。
-    pub fn append_journal(&mut self, seed: &str, entries: &[TimelineEntry]) -> std::io::Result<()> {
+    fn audit_path_for(&self, seed: &str) -> PathBuf {
+        self.audit_root.join(format!("{}.jsonl", sanitize_seed(seed)))
+    }
+
+    /// 追加轻量审计行（`seq` + `ts` + 事件类型，**不含正文**）。
+    ///
+    /// 这是 timeline-journal 移除后保留的唯一审计能力：每行约 60 B，用
+    /// “事件何时产生/落盘”定位冻结断层，而不携带内容（内容在快照与
+    /// messages.jsonl 中已有唯一权威）。
+    ///
+    /// - 懒计算 watermark：只追加 seq 大于上次审计值的条目（与旧 journal
+    ///   `journal_watermark` 同语义），避免重复行。
+    /// - 超过 [`AUDIT_ROTATE_BYTES`] 时保留尾部一半后重写，使磁盘占用恒定。
+    /// - 任何 I/O 失败仅记录日志，**绝不**影响事件路径（审计是旁路）。
+    pub fn append_audit(&mut self, seed: &str, entries: &[TimelineEntry]) {
         if entries.is_empty() {
-            return Ok(());
+            return;
         }
-        let watermark = self.journal_watermark(seed);
-        let new: Vec<&TimelineEntry> = entries
-            .iter()
-            .filter(|entry| entry.timeline_seq > watermark)
-            .collect();
+        let watermark = self.audit_watermark(seed);
+        let new: Vec<&TimelineEntry> = {
+            let mut fresh: Vec<&TimelineEntry> = entries
+                .iter()
+                .filter(|entry| entry.timeline_seq > watermark)
+                .collect();
+            fresh.sort_by_key(|entry| entry.timeline_seq);
+            fresh
+        };
         if new.is_empty() {
-            return Ok(());
+            return;
         }
-        let path = self.journal_path_for(seed);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let path = self.audit_path_for(seed);
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            log::warn!("[timeline] audit dir create failed for {seed}: {error}");
+            return;
         }
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)?;
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                log::warn!("[timeline] audit open failed for {seed}: {error}");
+                return;
+            }
+        };
         for entry in &new {
-            write_journal_line(
-                &mut file,
-                &TimelineJournalOp::Append {
-                    entry: (*entry).clone(),
-                    // 落盘时刻在写入层注入：内存态与快照不受影响，仅审计用途
-                    ts: Some(epoch_millis()),
-                },
-            )?;
+            let line = serde_json::json!({
+                "seq": entry.timeline_seq,
+                "ts": epoch_millis(),
+                "type": event_kind(&entry.event),
+                "turn": entry.turn_id,
+            });
+            if let Err(error) = writeln!(file, "{line}") {
+                log::warn!("[timeline] audit write failed for {seed}: {error}");
+                return;
+            }
         }
-        file.flush()?;
+        if let Err(error) = file.flush() {
+            log::warn!("[timeline] audit flush failed for {seed}: {error}");
+            return;
+        }
         let max = new
             .iter()
             .map(|entry| entry.timeline_seq)
             .max()
             .unwrap_or(watermark);
-        self.journal_watermarks.insert(seed.to_string(), max);
-        Ok(())
+        self.audit_watermarks.insert(seed.to_string(), max);
+        drop(file);
+        self.rotate_audit_if_needed(seed, &path);
     }
 
-    /// 该 seed 的 timeline journal 当前最大 seq（无文件则为 0）。懒计算并缓存。
-    pub fn journal_watermark(&mut self, seed: &str) -> u64 {
-        if let Some(&watermark) = self.journal_watermarks.get(seed) {
+    /// 该 seed 已审计到的最大 seq（无文件则为 0）。懒计算并缓存。
+    fn audit_watermark(&mut self, seed: &str) -> u64 {
+        if let Some(&watermark) = self.audit_watermarks.get(seed) {
             return watermark;
         }
-        let watermark = self.journal_max_seq(seed);
-        self.journal_watermarks.insert(seed.to_string(), watermark);
+        let watermark = self.audit_max_seq(seed);
+        self.audit_watermarks.insert(seed.to_string(), watermark);
         watermark
     }
 
-    /// 一次性历史迁移：把旧 `PersistedTimeline` 转成 `Snapshot` 基点 + `Append`
-    /// 尾部写入 timeline journal。幂等：目标文件已存在则跳过（不重复追加）。
-    pub fn backfill_journal(
-        &mut self,
-        seed: &str,
-        ops: &[TimelineJournalOp],
-    ) -> std::io::Result<()> {
-        let path = self.journal_path_for(seed);
-        if path.exists() {
-            return Ok(());
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = std::fs::File::create(&path)?;
-        for op in ops {
-            write_journal_line(&mut file, op)?;
-        }
-        file.flush()?;
-        let max = ops
-            .iter()
-            .map(|op| match op {
-                TimelineJournalOp::Snapshot { snapshot } => snapshot.watermark,
-                TimelineJournalOp::Append { entry, .. } => entry.timeline_seq,
-            })
-            .max()
-            .unwrap_or(0);
-        self.journal_watermarks.insert(seed.to_string(), max);
-        Ok(())
-    }
-
-    /// 读取该 seed 的 timeline journal ops（损坏行跳过并记录，不整体失败）。
-    pub fn read_journal(&self, seed: &str) -> std::io::Result<Vec<TimelineJournalOp>> {
-        let path = self.journal_path_for(seed);
-        if !path.is_file() {
-            return Ok(Vec::new());
-        }
-        Ok(read_journal_ops(&path))
-    }
-
-    /// timeline journal 磁盘上的 seed 清单（懒加载索引；不读取文件内容）。
-    pub fn list_journal_seeds(&self) -> std::io::Result<Vec<String>> {
-        let mut seeds = Vec::new();
-        for entry in std::fs::read_dir(&self.journal_root)? {
-            let path = entry?.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+    /// 扫描审计文件取最大 seq。只解析 `seq` 字段；损坏行跳过。
+    fn audit_max_seq(&self, seed: &str) -> u64 {
+        let path = self.audit_path_for(seed);
+        let Ok(file) = std::fs::File::open(&path) else {
+            return 0;
+        };
+        let mut max = 0u64;
+        for line in std::io::BufRead::lines(std::io::BufReader::new(file)) {
+            let Ok(line) = line else { break };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
                 continue;
-            }
-            if let Some(seed) = path.file_stem().and_then(|s| s.to_str())
-                && !seed.is_empty()
-            {
-                seeds.push(seed.to_string());
+            };
+            if let Some(seq) = value.get("seq").and_then(serde_json::Value::as_u64) {
+                max = max.max(seq);
             }
         }
-        Ok(seeds)
+        max
     }
 
-    fn journal_max_seq(&self, seed: &str) -> u64 {
-        read_journal_ops(&self.journal_path_for(seed))
-            .into_iter()
-            .map(|op| match op {
-                TimelineJournalOp::Snapshot { snapshot } => snapshot.watermark,
-                TimelineJournalOp::Append { entry, .. } => entry.timeline_seq,
-            })
-            .max()
-            .unwrap_or(0)
-    }
-
-    fn journal_path_for(&self, seed: &str) -> PathBuf {
-        self.journal_root
-            .join(format!("{}.jsonl", sanitize_seed(seed)))
-    }
-}
-
-fn epoch_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn write_journal_line(file: &mut std::fs::File, op: &TimelineJournalOp) -> std::io::Result<()> {
-    let mut line = serde_json::to_vec(op).map_err(io_error)?;
-    line.push(b'\n');
-    file.write_all(&line)
-}
-
-fn read_journal_ops(path: &Path) -> Vec<TimelineJournalOp> {
-    let mut ops = Vec::new();
-    let Ok(file) = std::fs::File::open(path) else {
-        return ops;
-    };
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { break };
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    /// 审计文件超过上限时保留尾部一半（原子替换），使磁盘占用恒定。
+    fn rotate_audit_if_needed(&self, seed: &str, path: &std::path::Path) {
+        let size = match std::fs::metadata(path) {
+            Ok(meta) => meta.len(),
+            Err(_) => return,
+        };
+        if size <= AUDIT_ROTATE_BYTES {
+            return;
         }
-        match serde_json::from_str::<TimelineJournalOp>(line) {
-            Ok(op) => ops.push(op),
-            Err(error) => log::warn!(
-                "[timeline] skip corrupt journal line in {}: {error}",
-                path.display()
-            ),
+        let Ok(body) = std::fs::read(path) else {
+            return;
+        };
+        // 从字节中点起找下一条完整行，保证切的永远是行边界。
+        let mid = body.len() / 2;
+        let keep_from = body[mid..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map(|offset| mid + offset + 1)
+            .unwrap_or(body.len());
+        let tmp = path.with_extension("jsonl.tmp");
+        if std::fs::write(&tmp, &body[keep_from..]).is_err() {
+            return;
+        }
+        if std::fs::rename(&tmp, path).is_ok() {
+            log::info!(
+                "[timeline] audit rotated for {seed}: {size} bytes -> {} bytes",
+                body.len() - keep_from
+            );
         }
     }
-    ops
 }
 
 fn sanitize_seed(seed: &str) -> String {
@@ -331,12 +302,34 @@ fn io_error(error: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
 }
 
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 事件类型名（审计用；稳定字符串，不随枚举重构漂移）。
+fn event_kind(event: &TimelineEvent) -> &'static str {
+    match event {
+        TimelineEvent::TurnOpened { .. } => "turn_opened",
+        TimelineEvent::TurnSealed { .. } => "turn_sealed",
+        TimelineEvent::BlockOpened { .. } => "block_opened",
+        TimelineEvent::BlockSealed { .. } => "block_sealed",
+        TimelineEvent::TextDelta { .. } => "text_delta",
+        TimelineEvent::BlockCheckpoint { .. } => "block_checkpoint",
+        TimelineEvent::ToolUpdated { .. } => "tool_updated",
+        TimelineEvent::ToolProgress { .. } => "tool_progress",
+        TimelineEvent::RoundSealed { .. } => "round_sealed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn persists_and_loads_a_native_timeline_without_channel_envelopes() {
+    fn load_returns_every_persisted_seed() {
         let root = std::env::temp_dir().join(format!("qaqh-timeline-store-{}", std::process::id()));
         let store = TimelineStore::new(&root).unwrap();
         store
@@ -384,115 +377,134 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn temp_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "qaqh-timeline-store-{}-{}",
-            label,
+    #[test]
+    fn removed_journal_leaves_no_file_on_disk() {
+        // 回归守卫：持久化只产生 `ringing-timeline/{seed}.json`，
+        // 不得再生成 `timeline-journal/` 目录或其下的 jsonl。
+        let root = std::env::temp_dir().join(format!(
+            "qaqh-timeline-store-no-journal-{}",
             std::process::id()
-        ))
-    }
-
-    fn native_entries() -> (TimelineSnapshot, Vec<TimelineEntry>) {
-        let mut appender = crate::TimelineAppender::new();
-        appender.open_turn("s", "t", "question").unwrap();
-        appender
-            .open_block(
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = TimelineStore::new(&root).unwrap();
+        store
+            .persist(
                 "s",
-                "t",
-                0,
-                "answer",
-                qaqh_domain::TimelineBlockKind::Text,
-                None,
+                &TimelineSnapshot {
+                    watermark: 3,
+                    turns: vec![],
+                },
+                vec![],
             )
             .unwrap();
-        appender
-            .append_text("s", "t", 0, "answer", 0, "hel")
-            .unwrap();
-        appender
-            .append_text("s", "t", 0, "answer", 1, "lo")
-            .unwrap();
-        let snapshot = appender.snapshot("s").unwrap();
-        let entries = appender.replay_since("s", 0);
-        (snapshot, entries)
+        assert!(!root.join("timeline-journal").exists());
+        assert!(root.join("ringing-timeline").join("s.json").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn audit_entries() -> Vec<TimelineEntry> {
+        use qaqh_domain::{TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEvent};
+        vec![
+            TimelineEntry {
+                timeline_seq: 1,
+                turn_id: "t1".into(),
+                round_num: None,
+                event: TimelineEvent::TurnOpened {
+                    user_text: "secret content must not be persisted here".into(),
+                },
+            },
+            TimelineEntry {
+                timeline_seq: 2,
+                turn_id: "t1".into(),
+                round_num: Some(0),
+                event: TimelineEvent::BlockOpened {
+                    block: TimelineBlock {
+                        block_id: "b".into(),
+                        block_order: 0,
+                        kind: TimelineBlockKind::Text,
+                        state: TimelineBlockState::Open,
+                        text: String::new(),
+                        tool: None,
+                    },
+                },
+            },
+        ]
     }
 
     #[test]
-    fn timeline_journal_appends_and_reloads_in_order() {
-        let root = temp_root("journal-order");
-        let (_, entries) = native_entries();
-        {
-            let mut store = TimelineStore::new(&root).unwrap();
-            store.append_journal("s", &entries[..2]).unwrap();
-            store.append_journal("s", &entries[2..]).unwrap();
-            assert_eq!(store.journal_watermark("s"), 4, "watermark tracks max seq");
-            // 重复调用（同一 watermark）不重复追加。
-            store.append_journal("s", &entries).unwrap();
-            assert_eq!(store.journal_watermark("s"), 4);
-        }
-        let loaded = TimelineStore::new(&root).unwrap();
-        let ops = loaded.read_journal("s").unwrap();
-        // 冻结事故 P0：append_journal 写入的每行必须携带落盘时间戳。
+    fn audit_records_seq_ts_and_kind_without_message_content() {
+        // 审计契约（timeline-journal 移除后的唯一替代）：
+        //   1. 每条记 seq + ts + type + turn；
+        //   2. **不写正文**（内容在快照 / messages.jsonl 已有唯一权威）；
+        //   3. 水位去重：重复调用不得产生重复行。
+        let root = std::env::temp_dir().join(format!(
+            "qaqh-timeline-audit-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut store = TimelineStore::new(&root).unwrap();
+        let entries = audit_entries();
+        store.append_audit("s", &entries);
+        // 重复追加（同一批）——水位去重，不产生新行。
+        store.append_audit("s", &entries);
+
+        let path = root.join("timeline-audit").join("s.jsonl");
+        assert!(path.is_file(), "audit file expected");
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "watermark must dedupe repeated appends");
+
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["seq"], 1);
+        assert_eq!(first["type"], "turn_opened");
+        assert_eq!(first["turn"], "t1");
+        assert!(first["ts"].as_u64().unwrap_or(0) > 0, "ts must be present");
+
+        // 正文绝不落入审计文件。
         assert!(
-            ops.iter()
-                .all(|op| matches!(op, TimelineJournalOp::Append { ts: Some(_), .. })),
-            "every appended journal line must carry a wall-clock ts"
+            !body.contains("secret content"),
+            "audit must never carry message content"
         );
-        let appends: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                TimelineJournalOp::Append { entry, .. } => Some(entry.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            appends, entries,
-            "journal reload preserves order and no duplicates"
-        );
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn timeline_journal_backfill_is_idempotent() {
-        let root = temp_root("backfill-idempotent");
-        let (snapshot, entries) = native_entries();
-        let ops: Vec<TimelineJournalOp> = std::iter::once(TimelineJournalOp::Snapshot { snapshot })
-            .chain(
-                entries
-                    .into_iter()
-                    .map(|entry| TimelineJournalOp::Append { entry, ts: None }),
-            )
-            .collect();
-        {
-            let mut store = TimelineStore::new(&root).unwrap();
-            store.backfill_journal("s", &ops).unwrap();
-            store.backfill_journal("s", &ops).unwrap(); // 幂等：文件已存在跳过
-        }
-        let loaded = TimelineStore::new(&root).unwrap();
-        let reloaded = loaded.read_journal("s").unwrap();
-        assert_eq!(reloaded.len(), ops.len(), "backfill must not duplicate");
+    fn audit_rotation_keeps_recent_rows_within_bound() {
+        // 滚动上界：超过 AUDIT_ROTATE_BYTES 后只保留尾部，磁盘占用恒定。
+        use qaqh_domain::TimelineEvent;
+        let root = std::env::temp_dir().join(format!(
+            "qaqh-timeline-audit-rotate-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn deleting_cache_file_still_rebuilds_from_journal() {
-        // 验收 #1：删除 `ringing-timeline/{seed}.json` 后，同名 seed 仍能从
-        // timeline journal 无损重放重建出逐字相同的快照（前端可见无变化）。
-        let root = temp_root("cache-delete-rebuild");
-        let (snapshot, entries) = native_entries();
-        {
-            let mut store = TimelineStore::new(&root).unwrap();
-            store.persist("s", &snapshot, entries.clone()).unwrap();
-            store.append_journal("s", &entries).unwrap();
+        let mut store = TimelineStore::new(&root).unwrap();
+        // 每行 ~60 B；写入足够多使其越过 2 MiB 上限。
+        let total = AUDIT_ROTATE_BYTES / 60 + 2000;
+        for seq in 1..=total {
+            store.append_audit(
+                "s",
+                &[TimelineEntry {
+                    timeline_seq: seq,
+                    turn_id: "t".into(),
+                    round_num: None,
+                    event: TimelineEvent::TurnSealed {
+                        state: qaqh_domain::TimelineTurnState::Completed,
+                        failure: None,
+                    },
+                }],
+            );
         }
-        std::fs::remove_file(root.join("ringing-timeline").join("s.json"))
-            .expect("remove cache file");
-        let loaded = TimelineStore::new(&root).unwrap();
-        let ops = loaded.read_journal("s").unwrap();
-        assert!(!ops.is_empty(), "journal must survive cache deletion");
-        let (rebuilt, journal) =
-            crate::timeline::materialize_timeline_from_journal(&ops).expect("rebuild");
-        assert_eq!(rebuilt, snapshot, "journal rebuild == native snapshot");
-        assert_eq!(journal.len(), entries.len());
-        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("timeline-audit").join("s.jsonl");
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            size <= AUDIT_ROTATE_BYTES,
+            "audit must stay bounded, got {size} bytes"
+        );
+        // 尾部仍是合法行，且包含最新 seq。
+        let body = std::fs::read_to_string(&path).unwrap();
+        let last = body.lines().rev().find(|l| !l.trim().is_empty()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(last).unwrap();
+        assert_eq!(parsed["seq"], total, "newest row must survive rotation");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -171,6 +171,11 @@ impl SessionManager {
     /// exists but cannot be parsed or points past the archive, this returns
     /// `None`. Compacted history must never become reversible just because
     /// the checkpoint was damaged.
+    ///
+    /// Phase 2 note: this path reads the **full** archive (the model loop
+    /// needs complete history). Projection-only consumers (timeline rebuild)
+    /// should use [`Self::load_recent_for_projection`] instead — bounded tail
+    /// read, no full-file cost.
     pub fn load_for_resume(
         &self,
         seed: &str,
@@ -204,6 +209,42 @@ impl SessionManager {
             }
         };
         Some((meta, archive_messages, selected))
+    }
+
+    /// Phase 2（有界恢复）：只读**最近 `recent` 条**消息做投影重建。
+    ///
+    /// 与 [`Self::load_for_resume`] 的语义边界：
+    /// - 模型循环需要完整历史（compact context 优先）——那是 `load_for_resume`；
+    /// - timeline 重建（BUG-006 降级路径）只需要前端 transcript 恢复窗口
+    ///   （最近若干轮）。这里用反向扫描（`store::bounded_read`）只触碰
+    ///   文件尾部，GB 级归档的重建从 O(文件) 降到 O(尾部)。
+    ///
+    /// 消息选择规则与 `load_for_resume` 同构：compact context 存在且完好
+    /// 时优先（它是权威视图），否则用归档尾部。返回 `None` 表示磁盘上
+    /// 无该会话（区别于“有会话但尾部为空”——那返回空 Vec）。
+    ///
+    /// WAL fold：与 `load_for_resume` 相同先折 WAL（幂等），保证尾部读到
+    /// 已落盘的最新消息。
+    pub fn load_recent_for_projection(
+        &self,
+        seed: &str,
+        recent: usize,
+    ) -> Option<Vec<Message>> {
+        self.replay_message_wal(seed);
+        if self.session_dir(seed).is_none() {
+            return None;
+        }
+        // compact context 完好时优先（与 BUG-007 的 fail-closed 语义一致：
+        // 损坏的 compact 在 load_for_resume 是整段拒绝；投影路径取归档尾部
+        // ——投影是可重建派生物，不该因 compact 损坏而整体失败）。
+        if let Ok(Some(context)) = self.read_compact_context_checked(seed) {
+            return Some(context.messages);
+        }
+        let dir = self.session_path_dir(seed);
+        Some(crate::store::bounded_read::read_messages_tail(
+            &dir.join("messages.jsonl"),
+            recent,
+        ))
     }
 
     /// The single `PersistOp` → store mapping (PR-1-6 / Z5). The runtime's
@@ -476,6 +517,23 @@ impl SessionManager {
             }
             meta.updated_at = now;
             meta.skills = skills;
+            let _ = store::write_meta(dir, meta);
+            store::upsert_index(&self.sessions_dir, meta);
+        });
+    }
+
+    /// Persist the frozen [Environment] annotation (P0 cache fix). Written
+    /// once per session by the agent loop, replayed into `AgentState` on
+    /// resume so the first user message keeps its byte-identical prefix.
+    pub fn persist_frozen_annotation(&self, seed: &str, annotation: &str) {
+        self.with_meta_locked(seed, true, |dir, meta| {
+            let now = Self::now_epoch();
+            meta.seed = seed.to_string();
+            if meta.created_at == 0 {
+                meta.created_at = now;
+            }
+            meta.updated_at = now;
+            meta.frozen_annotation = Some(annotation.to_string());
             let _ = store::write_meta(dir, meta);
             store::upsert_index(&self.sessions_dir, meta);
         });
@@ -1142,6 +1200,70 @@ mod skill_persistence_tests {
             "archive_message_count past the archive must fail closed"
         );
         std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn recent_projection_reads_bounded_tail() {
+        // Phase 2 契约：投影重建路径只读尾部窗口。
+        // 1. 尾部窗口内含最近 N 条（正向序）；
+        // 2. compact context 完好时优先于归档尾部（与 resume 同构）；
+        // 3. 损坏的 compact 不阻断投影（归档尾部兑底，区别于 resume 的整段拒绝）。
+        let (root, manager) = manager();
+        let archive: Vec<Message> = (1..=50)
+            .map(|index| Message::user(&format!("msg-{index}")))
+            .collect();
+        manager.save_full("bounded-tail", &archive, "model", None, 0, 25);
+
+        let recent = manager
+            .load_recent_for_projection("bounded-tail", 10)
+            .expect("session exists");
+        assert_eq!(recent.len(), 10, "tail window must be bounded");
+        assert_eq!(
+            recent.last().and_then(|m| text_of(m)),
+            Some("msg-50".to_string()),
+            "tail must keep the newest message"
+        );
+        assert_eq!(
+            recent.first().and_then(|m| text_of(m)),
+            Some("msg-41".to_string()),
+            "tail window must be the newest contiguous slice"
+        );
+
+        // compact context 优先：投影应看到 active 视图而非归档尾部。
+        manager.save_compact_context(
+            "bounded-tail",
+            &[Message::user("[Compacted]\nsummary"), Message::user("msg-50")],
+        );
+        let with_compact = manager
+            .load_recent_for_projection("bounded-tail", 5)
+            .expect("session exists");
+        assert_eq!(with_compact.len(), 2, "compact context wins over archive tail");
+
+        // 损坏的 compact：投影降级到归档尾部（fail-open），不整段拒绝。
+        std::fs::write(
+            manager.compact_context_path("bounded-tail"),
+            b"{not-json",
+        )
+        .expect("corrupt compact context");
+        let degraded = manager
+            .load_recent_for_projection("bounded-tail", 5)
+            .expect("session exists");
+        assert_eq!(
+            degraded.last().and_then(|m| text_of(m)),
+            Some("msg-50".to_string()),
+            "corrupt compact must degrade to archive tail, not fail"
+        );
+
+        // 磁盘上无此会话 → None（区别于空尾部）。
+        assert!(manager.load_recent_for_projection("ghost", 5).is_none());
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    fn text_of(message: &Message) -> Option<String> {
+        message.content.iter().find_map(|block| match block {
+            qaqh_types::ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
     }
 }
 

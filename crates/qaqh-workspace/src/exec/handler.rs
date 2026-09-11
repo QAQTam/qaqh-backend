@@ -235,6 +235,10 @@ pub(crate) fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> T
     // Fall back to workspace root when the caller doesn't supply cwd.
     // A relative cwd resolves against the workspace root (or the process
     // directory when no workspace is set) — same semantics as file tools.
+    // IMPORTANT: never let a resolved cwd be relative. The child process
+    // inherits the daemon's process cwd, which is a shared, drifting
+    // resource in the multi-actor daemon; anchor every fallback to the
+    // session workspace so execution always matches authorization.
     let cwd: Option<String> = ctx
         .get_str("cwd")
         .map(String::from)
@@ -243,6 +247,9 @@ pub(crate) fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> T
             if resolved.is_empty() { cwd } else { resolved }
         })
         .or_else(|| {
+            // Actor 工作区兜底：缺省 cwd = 会话工作区。仅当无工作区
+            // （独立 serve/CLI 进程）时才保持 None → 子进程继承进程 cwd，
+            // 此时进程 cwd 与工作区语义一致（serve.rs/main.rs 启动时已对齐）。
             let ws = crate::current_workspace();
             if ws.is_empty() || ws == "." {
                 None

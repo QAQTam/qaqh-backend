@@ -98,6 +98,16 @@ pub struct SessionMeta {
     pub ephemeral: bool,
     #[serde(default)]
     pub skills: SkillSessionStateV2,
+    /// Frozen [Environment] annotation for the first user message (P0 cache
+    /// fix). Generated once on the FIRST build_context() and reused for the
+    /// lifetime of the session — persisting it keeps the provider prefix cache
+    /// intact across daemon restarts / cross-day resumes: without persistence
+    /// the annotation is regenerated on resume with a new <today> date and an
+    /// empty file_state ledger, breaking the prefix at the first user message.
+    /// 旧 meta.json 缺失该字段 = None = 恢复后首次 build_context 重新生成
+    /// （即修复前的行为，零迁移兼容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_annotation: Option<String>,
     /// Provider-confirmed usage accumulated across model requests in this session.
     #[serde(default)]
     pub usage_totals: crate::UsageInfo,
@@ -271,6 +281,33 @@ mod tests {
         assert_eq!(meta.usage_totals.cache_usage_reported, Some(true));
         assert_eq!(meta.usage_totals.prompt_cache_hit_tokens, 0);
         assert_eq!(meta.usage_totals.prompt_cache_miss_tokens, 100);
+    }
+
+    #[test]
+    fn frozen_annotation_round_trips_and_legacy_meta_defaults_to_none() {
+        // 旧 meta.json 无 frozen_annotation → None（零迁移，恢复后重新生成）。
+        let legacy: SessionMeta = serde_json::from_str(
+            r#"{
+            "seed":"s","created_at":0,"updated_at":0,"model":"m","message_count":0
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.frozen_annotation, None);
+
+        // 有值时 round-trip 保真；None 时不落盘（skip_serializing_if）。
+        let meta = SessionMeta {
+            frozen_annotation: Some(
+                "<workspace_path>F:\\proj</workspace_path>\n<today>2026-09-10</today>".into(),
+            ),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("frozen_annotation"));
+        let back: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.frozen_annotation, meta.frozen_annotation);
+
+        let none_json = serde_json::to_string(&SessionMeta::default()).unwrap();
+        assert!(!none_json.contains("frozen_annotation"));
     }
 
     #[test]

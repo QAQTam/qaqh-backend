@@ -400,8 +400,18 @@ fn exec_journal(args: &serde_json::Value) -> crate::ToolResult {
                 }
             };
             let at_seq = args.get("at").and_then(|v| v.as_u64());
-            let out = args.get("out").and_then(|v| v.as_str());
-            match replay_to_path(file, at_seq, out.map(std::path::Path::new)) {
+            // Resolve `out` against the workspace root BEFORE handing it to the
+            // writer. The permission layer binds the authorization resource via
+            // resolve_target_path (workspace-anchored); without the same
+            // resolution here the evaluated path and the actual write path
+            // diverge whenever the workspace root differs from the process cwd.
+            let out_owned: Option<std::path::PathBuf> = args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .map(crate::resolve_workspace_path)
+                .map(std::path::PathBuf::from);
+            let out = out_owned.as_deref();
+            match replay_to_path(file, at_seq, out) {
                 Ok(Some(content)) => {
                     let data = serde_json::json!({
                         "timeis": crate::now_utc8(),
@@ -701,6 +711,50 @@ mod tests {
                 replay_file("a.txt", Some(2)).expect("replay"),
                 Some("hello world\n".to_string())
             );
+        });
+    }
+
+    /// Tool-entry `out` must resolve against the workspace root BEFORE the
+    /// write, matching the permission layer's resolve_target_path anchoring.
+    /// Serializes on TEST_RUNTIME_SERIAL (writes global CURRENT_WORKSPACE).
+    #[test]
+    fn journal_replay_out_resolves_against_workspace() {
+        let _guard = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        with_temp_journal(|| {
+            let ws = tempfile::tempdir().expect("ws tempdir");
+            crate::set_workspace(&ws.path().to_string_lossy());
+            record_change(
+                "s1",
+                "c1",
+                "write",
+                "a.txt",
+                "overwrite",
+                None,
+                Some("restored bytes\n"),
+                "ok",
+            );
+
+            // Relative `out` lands inside the workspace, NOT the process cwd.
+            let out_dir = ws.path().join("restored");
+            std::fs::create_dir_all(&out_dir).expect("mkdir out");
+            let args = serde_json::json!({
+                "action": "replay",
+                "file": "a.txt",
+                "out": "restored",
+            });
+            let result = exec_journal(&args);
+            assert!(
+                result.is_success(),
+                "replay failed: {}",
+                result.model_text()
+            );
+            let written = std::fs::read_to_string(out_dir.join("a.txt"))
+                .expect("out must be workspace-anchored");
+            assert_eq!(written, "restored bytes\n");
+
+            crate::set_workspace("");
         });
     }
 

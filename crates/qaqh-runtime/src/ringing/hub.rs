@@ -188,8 +188,12 @@ pub struct RingingHub {
     pub(super) disk_seeds: Mutex<HashMap<RingingChannel, HashSet<String>>>,
     /// 磁盘 timeline seed 清单（懒加载索引；`ensure_timeline_loaded` 按需恢复）。
     pub(super) disk_timeline_seeds: Mutex<HashSet<String>>,
-    /// 懒加载串行化：防止并发首访同一 seed 时双重重放。
-    pub(super) lazy_load: Mutex<()>,
+    /// 懒加载串行化（per-seed）：防止并发首访**同一** seed 时双重重放/恢复。
+    /// Phase 1（2026-09-11）：全局 `Mutex<()>` → 锁表。原全局锁下 session A
+    /// 的 journal 重放（28 秒级）会阻塞 B~Z 的 timeline 快照装载，是多
+    /// session 前端卡顿的直接根因（A2）。锁表条目只增不减：每条约 80 字节，
+    /// 10 万 seed 也就 ~8 MB，真正的冷热驱逐留给 Phase 5 的 LRU 预算。
+    pub(super) lazy_loads: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// 大内容外置存储（会话所有权 + TTL）。
     pub(super) content_store: Mutex<ContentStore>,
     /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
@@ -263,7 +267,7 @@ impl RingingHub {
             sequencer: Sequencer::new(),
             disk_seeds: Mutex::new(HashMap::new()),
             disk_timeline_seeds: Mutex::new(HashSet::new()),
-            lazy_load: Mutex::new(()),
+            lazy_loads: Mutex::new(HashMap::new()),
             content_store: Mutex::new(ContentStore::new()),
             channels: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
@@ -296,17 +300,30 @@ impl RingingHub {
         log::info!("[ringing] lazy journal index ready: {total} persisted seeds on disk");
     }
 
+    /// 懒加载串行化锁（per-seed）：同一 seed 的首访重放/恢复互斥，不同 seed
+    /// 并行。锁表插入在锁外——`entry().or_insert_with` 的短暂 map 锁只与
+    /// 其他锁表访问竞争，不与任何装载 I/O 竞争。
+    pub(super) fn lazy_load_lock(&self, seed: &str) -> Arc<Mutex<()>> {
+        self.lazy_loads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(seed.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     /// 懒加载：确保 (channel, seed) 的持久化历史已重放入内存。
     ///
     /// - 已在内存或磁盘无记录：零成本返回；
     /// - 磁盘有记录：读取该 seed 的 ops → 重放重建 state → 精确恢复序号 →
     ///   超大文件顺手压缩（P0 收敛，不依赖 RoundCompleted）→ 插入 channels。
-    ///   全程持有 `lazy_load` 串行锁，避免并发首访双重重放。
+    ///   全程持有该 seed 的 per-seed 串行锁，避免并发首访双重重放。
     ///
     /// - Err：磁盘加载失败（fail-closed，R3）——调用方不得以全新空状态
     ///   继续发布/回放，否则重启后序号永久冲突。
     fn ensure_seed_loaded(&self, channel: RingingChannel, seed: &str) -> Result<(), String> {
-        let _serial = self.lazy_load.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = self.lazy_load_lock(seed);
+        let _serial = lock.lock().unwrap_or_else(|e| e.into_inner());
         let loaded = {
             let guard = self.channel_state(channel);
             guard
@@ -394,7 +411,7 @@ impl RingingHub {
     /// 使 journal、投影与 SSE 客户端全部收敛。幂等：无孤儿时返回 false。
     ///
     /// 调用方必须在 `ensure_seed_loaded` 完成之后调用（本函数内部 publish 会
-    /// 再次调用 `ensure_seed_loaded`，重入 lazy_load 锁会死锁）。
+    /// 再次调用 `ensure_seed_loaded`，重入同 seed 的 lazy_load 锁会死锁）。
     /// B9/H3：registry 在 spawn 成功/worker 关闭时维护活表。
     pub fn mark_worker_live(&self, seed: &str) {
         self.live_workers
@@ -956,7 +973,6 @@ fn unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timeline_store::TimelineJournalOp;
     use qaqh_domain::{
         CompactStatus, ConversationEvent, TimelineIntent, TimelineSnapshot, ToolEvent,
     };
@@ -1665,10 +1681,14 @@ mod tests {
     }
 
     #[test]
-    fn timeline_recovers_identical_snapshot_from_journal_after_cache_deleted() {
-        // 验收 #1：删除 `ringing-timeline/{seed}.json` 缓存文件后，同名 seed 仍
-        // 能从 timeline journal 重建出**逐字相同**的快照（前端 transcript 无变化）。
-        let root = temp_root("timeline-journal-authoritative");
+    fn snapshot_survives_restart_and_deleted_snapshot_degrades_to_empty() {
+        // timeline-journal 移除后的恢复契约：
+        //   1. 快照文件存在 → 重启后 restore 出逐字相同的 snapshot；
+        //   2. 快照文件被删 → 不再有任何本地日志可回放，恢复为空快照
+        //      （无 sessions 注入时 `rebuild_timeline_from_messages` 无源可依）。
+        // 第 2 条是移除 journal 的**已知代价**：进程崩溃后中间帧不再可回放，
+        // 客户端由 `recover_gap` 重新基线化（见 `crate::timeline_store` 模块文档）。
+        let root = temp_root("timeline-snapshot-authoritative");
         let native = {
             let hub = RingingHub::with_persistence("epoch-1", &root);
             hub.publish_timeline(
@@ -1732,26 +1752,39 @@ mod tests {
             drop(hub);
             snapshot
         };
-        // 删除缓存文件（保留 timeline journal 权威日志）。
+
+        // 1) 快照存在 → 重启后逐字一致。
         let cache = root.join("ringing-timeline").join("s.json");
-        assert!(cache.exists(), "cache file expected before deletion");
-        std::fs::remove_file(&cache).expect("delete cache file");
-        // 重启：仅剩 journal → 必须从日志重建出逐字相同的快照（且自动回写缓存）。
-        let hub = RingingHub::with_persistence("epoch-2", &root);
-        let restored = hub.timeline_snapshot("s").unwrap();
-        assert_eq!(restored, native, "journal rebuild == native snapshot");
+        assert!(cache.is_file(), "snapshot file expected after publish");
+        {
+            let hub = RingingHub::with_persistence("epoch-2", &root);
+            assert_eq!(
+                hub.timeline_snapshot("s").unwrap(),
+                native,
+                "snapshot must round-trip across restart"
+            );
+        }
+
+        // 2) 快照删除且无 sessions → 空快照（诚实降级，不虚构历史）。
+        std::fs::remove_file(&cache).expect("delete snapshot file");
+        let hub = RingingHub::with_persistence("epoch-3", &root);
         assert!(
-            cache.exists(),
-            "cache must be rewritten after journal rebuild"
+            hub.timeline_snapshot("s").is_none(),
+            "without a snapshot and without messages there is nothing to recover"
+        );
+        assert!(
+            !root.join("timeline-journal").exists(),
+            "recovery must not resurrect the removed journal directory"
         );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn cache_only_legacy_seed_is_backfilled_into_journal_on_first_load() {
-        // 验收 #3：旧历史（仅 `ringing-timeline/{seed}.json`，无 timeline journal）
-        // 在首次装载时一次性迁移回填 journal（Snapshot 基点），幂等可重跑。
-        let root = temp_root("timeline-legacy-backfill");
+    fn cache_only_seed_is_restored_on_first_load_without_a_journal() {
+        // timeline-journal 移除后：`ringing-timeline/{seed}.json` 是恢复的唯一
+        // 权威。仅有快照文件（无任何 jsonl）的 seed 必须能直接 restore，
+        // 且装载过程不得再在磁盘上生成 `timeline-journal/` 目录。
+        let root = temp_root("timeline-cache-only");
         TimelineStore::new(&root)
             .unwrap()
             .persist(
@@ -1766,19 +1799,12 @@ mod tests {
         {
             let hub = RingingHub::with_persistence("epoch-1", &root);
             let snapshot = hub.timeline_snapshot("s").unwrap();
-            assert_eq!(snapshot.watermark, 0, "legacy cache restored");
+            assert_eq!(snapshot.watermark, 0, "cache snapshot restored verbatim");
         }
-        let ops = TimelineStore::new(&root)
-            .unwrap()
-            .read_journal("s")
-            .unwrap();
-        assert_eq!(ops.len(), 1, "backfilled Snapshot op expected");
-        assert!(matches!(ops[0], TimelineJournalOp::Snapshot { .. }));
-        // 幂等：再次启动不会重复追加。
-        TimelineStore::new(&root)
-            .unwrap()
-            .read_journal("s")
-            .unwrap();
+        assert!(
+            !root.join("timeline-journal").exists(),
+            "loading a seed must not resurrect the removed journal directory"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2144,5 +2170,85 @@ mod tests {
         // 其他 seed 的常驻状态不受影响。
         hub.publish("s2", round_delta(2));
         assert!(holds_seed(&hub, "s2"));
+    }
+
+    #[test]
+    fn per_seed_lazy_loads_do_not_block_each_other() {
+        // Phase 1 回归：懒加载锁必须 per-seed。持有 seed A 的锁时，seed B
+        // 的锁必须立即可取（原全局 `Mutex<()>` 下 B 会阻塞到 A 释放——
+        // 多 session 前端卡顿的直接根因 A2）。
+        let hub = RingingHub::new("epoch-per-seed");
+        let lock_a = hub.lazy_load_lock("seed-a");
+        let guard_a = lock_a.lock().unwrap_or_else(|e| e.into_inner());
+        // 不同 seed 的锁必须在 guard_a 持有期间立即可取：后台线程 200ms
+        // 内必须完成获取-释放（全局锁下必然超时失败）。
+        {
+            let lock_b = hub.lazy_load_lock("seed-b");
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _guard_b = lock_b.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_millis(200)).is_ok(),
+                "seed-b lock must not be blocked by seed-a"
+            );
+        }
+        // 同 seed 的锁必须互斥：guard_a 未释放时 try_lock 失败。
+        let lock_a2 = hub.lazy_load_lock("seed-a");
+        assert!(
+            lock_a2.try_lock().is_err(),
+            "same-seed lock must be mutually exclusive"
+        );
+        drop(guard_a);
+        // 释放后同 seed 可再取，且锁表返回同一把锁（同 seed 幂等）。
+        assert!(
+            lock_a2.try_lock().is_ok(),
+            "lock must be re-acquirable after release"
+        );
+        let lock_a3 = hub.lazy_load_lock("seed-a");
+        assert!(
+            Arc::ptr_eq(&lock_a, &lock_a3),
+            "same seed must map to the same lock instance"
+        );
+    }
+
+    #[test]
+    fn concurrent_first_access_of_same_seed_loads_exactly_once() {
+        // Phase 1 回归：并发首访同一 seed 时，per-seed 锁保证只有一个线程
+        // 执行装载，其余等待后命中已装载状态直接返回（不双重重放）。
+        let root = temp_root("per-seed-race");
+        {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            for i in 1..=5 {
+                let _ = hub.publish("raced", round_delta(i));
+            }
+        }
+        let hub = Arc::new(RingingHub::with_persistence("epoch-2", &root));
+        let mut joins = Vec::new();
+        for _ in 0..8 {
+            let hub = Arc::clone(&hub);
+            joins.push(std::thread::spawn(move || {
+                // 直接走生产入口：replay_since 内部调 ensure_seed_loaded
+                //（自拿 per-seed 锁、double-check 后装载）。并发首访时唯一
+                // 线程执行装载，其余等待后命中已装载状态。
+                let _ = hub.replay_since(RingingChannel::Conversation, "raced", 0);
+            }));
+        }
+        for join in joins {
+            join.join().expect("worker thread must not panic");
+        }
+        // 装载幂等性验证：历史必须完好（5 条，无重复重放叠加），且序号
+        // 水位精确恢复——双重装载会叠加事件/扰乱 next_seq。
+        let replayed = hub
+            .replay_since(RingingChannel::Conversation, "raced", 0)
+            .expect("replay after race");
+        assert_eq!(replayed.len(), 5, "history must be intact after the race");
+        assert_eq!(
+            hub.last_stream_seq(RingingChannel::Conversation, "raced"),
+            5,
+            "sequence watermark must be exact after concurrent first access"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
