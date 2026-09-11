@@ -1,0 +1,10 @@
+### MessageStore clone call sites
+D:\project\QAQ-Harness\crates\qaqh-config\tests\lsp_config.rs:225:    let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load ok");
+D:\project\QAQ-Harness\crates\qaqh-config\src\config.rs:1380:        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+D:\project\QAQ-Harness\crates\qaqh-config\src\config.rs:1424:        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+D:\project\QAQ-Harness\crates\qaqh-config\src\config.rs:1455:        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+D:\project\QAQ-Harness\crates\qaqh-mcp\src\manager.rs:327:                let secrets = self.secret_store.clone();
+D:\project\QAQ-Harness\crates\qaqh-lsp\src\manager.rs:213:                    self.secret_store.clone(),
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\timeline_hub.rs:389:        let timeline_store = self.timeline_store.clone();
+
+### .clone() near MessageStore / snapshot_message_store

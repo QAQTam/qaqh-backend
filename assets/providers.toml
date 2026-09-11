@@ -1,0 +1,674 @@
+# QAQ-Harness 内置 provider/endpoint 能力基线（T9）。
+# 本文件由 registry.rs 内置表导出生成（example export_providers）；运行时按
+# override > config.toml > assets 优先级合并。
+# 字段缺省 = OpenAI 纯协议语义（见 docs/gateway-core-toml-design.md §3）。
+
+[[providers]]
+id = "deepseek"
+display = "DeepSeek"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible"
+protocol = "openai"
+base_url = "https://api.deepseek.com"
+default_model = ""
+models = []
+models_url = "https://api.deepseek.com"
+user_id_mode = "Body"
+thinking_mode = "OpenAi"
+cache_field = "PromptCacheHitTokens"
+include_stream_usage = true
+has_balance = true
+supports_thinking = true
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+image_models = ["deepseek-v4-flash-vision-exp"]
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = true
+
+[[providers.endpoints]]
+id = "responses"
+display = "Responses API"
+protocol = "responses"
+base_url = "https://api.deepseek.com"
+default_model = "deepseek-v4-flash"
+models = [
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp",
+]
+responses_path = "/responses"
+thinking_mode = "OpenAi"
+cache_field = "PromptCacheHitTokens"
+include_stream_usage = false
+has_balance = true
+supports_thinking = false
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = false
+require_provider_parameters = false
+image_models = ["deepseek-v4-flash-vision-exp"]
+stateful = false
+beta = true
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = false
+responses_effort_max = "max"
+responses_supports_user = true
+responses_search_function_alias = "qaqh_search"
+responses_echo_reasoning_content = true
+supports_image_tool = true
+
+[[providers]]
+id = "qwen"
+display = "Qwen (阿里百炼)"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible"
+protocol = "openai"
+base_url = "https://dashscope.aliyuncs.com"
+default_model = ""
+models = []
+models_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+chat_path = "/compatible-mode/v1/chat/completions"
+thinking_mode = "QwenEnableThinking"
+cache_field = "PromptDetailsCached"
+include_stream_usage = false
+has_balance = false
+supports_thinking = true
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers.endpoints]]
+id = "responses"
+display = "Responses API"
+protocol = "responses"
+base_url = "https://dashscope.aliyuncs.com"
+default_model = ""
+models = []
+models_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+responses_path = "/compatible-mode/v1/responses"
+thinking_mode = "QwenEnableThinking"
+cache_field = "PromptDetailsCached"
+include_stream_usage = false
+has_balance = false
+supports_thinking = false
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = false
+require_provider_parameters = false
+stateful = false
+beta = true
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers]]
+id = "glm"
+display = "GLM (智谱AI)"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible"
+protocol = "openai"
+base_url = "https://open.bigmodel.cn"
+default_model = ""
+models = []
+models_url = "https://open.bigmodel.cn/api/paas/v4"
+chat_path = "/api/paas/v4/chat/completions"
+thinking_mode = "OpenAi"
+cache_field = "PromptDetailsCached"
+include_stream_usage = false
+has_balance = false
+supports_thinking = true
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+image_models = [
+    "glm-5.3-flash",
+    "glm-5v*",
+    "glm-4.6v*",
+    "glm-4.5v*",
+    "glm-4v-plus*",
+]
+stateful = false
+beta = false
+do_sample = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = true
+
+[[providers]]
+id = "kimi"
+display = "Kimi (月之暗面)"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible"
+protocol = "openai"
+base_url = "https://api.moonshot.cn/v1"
+default_model = ""
+models = []
+models_url = "https://api.moonshot.cn/v1"
+balance_path = "/users/me/balance"
+thinking_mode = "OpenAi"
+cache_field = "UsageCachedTokens"
+include_stream_usage = false
+has_balance = true
+supports_thinking = true
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers]]
+id = "mimo"
+display = "MiMo (小米)"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible"
+protocol = "openai"
+base_url = "https://api.xiaomimimo.com/v1"
+default_model = ""
+models = []
+models_url = "https://api.xiaomimimo.com/v1"
+thinking_mode = "OpenAi"
+cache_field = "None"
+include_stream_usage = false
+has_balance = false
+supports_thinking = true
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers.endpoints]]
+id = "responses"
+display = "Responses API"
+protocol = "responses"
+base_url = "https://api.xiaomimimo.com/v1"
+default_model = ""
+models = []
+models_url = "https://api.xiaomimimo.com/v1"
+responses_path = "/responses"
+thinking_mode = "OpenAi"
+cache_field = "None"
+include_stream_usage = false
+has_balance = false
+supports_thinking = false
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = false
+require_provider_parameters = false
+stateful = false
+beta = true
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers]]
+id = "minimax"
+display = "MiniMax (稀宇)"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible"
+protocol = "openai"
+base_url = "https://api.minimaxi.com/v1"
+default_model = ""
+models = []
+models_url = "https://api.minimaxi.com/v1"
+thinking_mode = "MiniMaxAdaptive"
+cache_field = "None"
+include_stream_usage = false
+has_balance = false
+supports_thinking = true
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers]]
+id = "doubao"
+display = "Doubao (火山方舟)"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible"
+protocol = "openai"
+base_url = "https://ark.cn-beijing.volces.com"
+default_model = ""
+models = []
+models_url = "https://ark.cn-beijing.volces.com/api/v3"
+chat_path = "/api/v3/chat/completions"
+thinking_mode = "OpenAi"
+cache_field = "PromptCacheHitTokens"
+include_stream_usage = false
+has_balance = true
+supports_thinking = true
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers.endpoints]]
+id = "responses"
+display = "Responses API"
+protocol = "responses"
+base_url = "https://ark.cn-beijing.volces.com"
+default_model = ""
+models = []
+models_url = "https://ark.cn-beijing.volces.com/api/v3"
+responses_path = "/api/v3/responses"
+thinking_mode = "OpenAi"
+cache_field = "PromptCacheHitTokens"
+include_stream_usage = false
+has_balance = false
+supports_thinking = false
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = false
+require_provider_parameters = false
+stateful = false
+beta = true
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers]]
+id = "openai"
+display = "OpenAI"
+
+[[providers.endpoints]]
+id = "openai"
+display = "Chat Completions"
+protocol = "openai"
+base_url = "https://api.openai.com/v1"
+default_model = ""
+models = []
+models_url = "https://api.openai.com/v1"
+thinking_mode = "OpenAi"
+cache_field = "PromptCacheHitTokens"
+include_stream_usage = false
+has_balance = true
+supports_thinking = true
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers.endpoints]]
+id = "responses"
+display = "Responses API"
+protocol = "responses"
+base_url = "https://api.openai.com/v1"
+default_model = ""
+models = []
+models_url = "https://api.openai.com/v1"
+thinking_mode = "OpenAi"
+cache_field = "PromptCacheHitTokens"
+include_stream_usage = false
+has_balance = true
+supports_thinking = false
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = false
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers]]
+id = "openrouter"
+display = "OpenRouter"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible (text)"
+protocol = "openai"
+base_url = "https://openrouter.ai/api/v1"
+default_model = ""
+models = []
+models_url = "https://openrouter.ai/api/v1/models?output_modalities=text&supported_parameters=tools&sort=pricing-low-to-high"
+thinking_mode = "OpenAi"
+cache_field = "PromptCacheHitTokens"
+include_stream_usage = false
+has_balance = false
+supports_thinking = false
+thinking_budget_large = false
+supports_reasoning_effort = true
+effort_allowlist = [
+    "max",
+    "high",
+    "low",
+]
+tool_call_content_null = true
+supports_reasoning_content = false
+require_provider_parameters = true
+image_models = [
+    "stealth/ox-alpha",
+    "google/gemini*",
+    "openai/gpt-4o*",
+    "openai/gpt-5*",
+    "anthropic/claude-*",
+    "x-ai/grok-*",
+    "meta-llama/llama-4*",
+    "qwen/qwen*vl*",
+    "mistralai/pixtral*",
+]
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = true
+
+[[providers]]
+id = "zcode"
+display = "ZCode (智谱)"
+
+[[providers.endpoints]]
+id = "anthropic"
+display = "Anthropic Messages"
+protocol = "anthropic"
+base_url = "https://open.bigmodel.cn"
+default_model = "glm-5.3-flash"
+models = []
+models_url = "https://open.bigmodel.cn/api/paas/v4"
+anthropic_path = "/api/anthropic/v1/messages"
+thinking_mode = "OpenAi"
+cache_field = "PromptDetailsCached"
+include_stream_usage = false
+has_balance = false
+supports_thinking = true
+thinking_budget_large = true
+supports_reasoning_effort = true
+effort_allowlist = [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+]
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = true
+
+[[providers]]
+id = "workbuddy"
+display = "WorkBuddy (反代)"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible (workbuddy-proxy)"
+protocol = "openai"
+base_url = "http://127.0.0.1:8787/v1"
+default_model = "glm-5.2"
+models = [
+    "auto",
+    "hy4-preview",
+    "hy3",
+    "hy3-x",
+    "deepseek-v4.1-flash",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "glm-5.1",
+    "glm-5v-turbo",
+    "kimi-k3-1",
+    "kimi-k2.7",
+    "kimi-k2.6",
+    "minimax-m3",
+    "deepseek-v4-pro",
+]
+models_url = "http://127.0.0.1:8787/v1"
+thinking_mode = "OpenAi"
+cache_field = "PromptCacheHitTokens"
+include_stream_usage = false
+has_balance = false
+supports_thinking = false
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers]]
+id = "deepseek-web"
+display = "DeepSeek Web (CDP Proxy)"
+
+[[providers.endpoints]]
+id = "cdp"
+display = "CDP Proxy (localhost:8080)"
+protocol = "openai"
+base_url = "http://localhost:8080/v1"
+default_model = "deepseek-v4-pro"
+models = [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+]
+models_url = "http://localhost:8080/v1"
+user_id_mode = "Body"
+thinking_mode = "OpenAi"
+cache_field = "PromptCacheHitTokens"
+include_stream_usage = false
+has_balance = false
+supports_thinking = true
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = true
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = false
+
+[[providers]]
+id = "opencode-go"
+display = "OpenCode Go (订阅)"
+
+[[providers.endpoints]]
+id = "openai"
+display = "OpenAI-compatible"
+protocol = "openai"
+base_url = "https://opencode.ai/zen/go/v1"
+default_model = "deepseek-v4-flash"
+models = [
+    "kimi-k3",
+    "kimi-k2.7-code",
+    "kimi-k2.6",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "glm-5.3",
+    "glm-5.2",
+    "glm-5.1",
+    "mimo-v2.5",
+    "mimo-v2.5-pro",
+    "qwen3.8-max",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-plus",
+    "hy3",
+]
+models_url = "https://opencode.ai/zen/go/v1"
+thinking_mode = "OpenAi"
+cache_field = "None"
+include_stream_usage = false
+has_balance = false
+supports_thinking = false
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = true
+require_provider_parameters = false
+stateful = false
+beta = false
+responses_web_search = true
+responses_echo_web_search_call = true
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = true
+
+[[providers.endpoints]]
+id = "responses"
+display = "Responses API (Grok 4.5 / GPT-5.6 Luna)"
+protocol = "responses"
+base_url = "https://opencode.ai/zen/go/v1"
+default_model = "grok-4.5"
+models = [
+    "grok-4.5",
+    "gpt-5.6-luna",
+]
+models_url = "https://opencode.ai/zen/go/v1"
+responses_path = "/responses"
+thinking_mode = "OpenAi"
+cache_field = "None"
+include_stream_usage = false
+has_balance = false
+supports_thinking = false
+thinking_budget_large = false
+supports_reasoning_effort = true
+tool_call_content_null = false
+supports_reasoning_content = false
+require_provider_parameters = false
+stateful = false
+beta = true
+responses_web_search = false
+responses_echo_web_search_call = false
+responses_send_include = true
+responses_effort_max = "high"
+responses_supports_user = true
+responses_echo_reasoning_content = true
+supports_image_tool = true

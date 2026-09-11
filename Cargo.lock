@@ -1930,6 +1930,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "futures",
+ "httpdate",
  "log",
  "qaqh-types",
  "reqwest",

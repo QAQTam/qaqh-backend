@@ -1143,12 +1143,11 @@ impl TurnEngine {
             // 繁忙端点可能不发错误码而是直接终止 HTTP 流：此时 Done 仍会
             // 发出，但 stop_reason 缺失。半截内容已照常落盘（增量早已流出
             // 给前端），下一轮请求将其作为历史回传并注入续写提示。
-            // Responses 协议正常完成时 stop_reason=Some("stop")（responses_api 已对齐
-            // chat 的 finish_reason 语义），只有显式 None 才是截断；旧版若仍发
-            // None 则按 provider 特判避免对 Responses 的每次成功误判续写（导致 4x）。
-            let is_responses = provider.kind == qaqh_gate::ProviderKind::Responses;
+            // Responses 协议已对齐 chat 语义（成功恒 Some("stop")，
+            // 截断/掐流收口 stop_reason=None），摘除 is_responses 排除，
+            // 三协议统一按 stop_reason 缺失识别"不完整回合"并续写。
             let incomplete_stream =
-                !had_error && request_error.is_none() && stop_reason.is_none() && !is_responses;
+                !had_error && request_error.is_none() && stop_reason.is_none();
             if incomplete_stream {
                 if self.continuation_count >= MAX_STREAM_CONTINUATIONS {
                     log::warn!(

@@ -1,0 +1,52 @@
+### A. journal byte/entry caps
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\timeline.rs:770:    let byte_limit = crate::ringing::persistence_policy::journal_byte_limit();
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\timeline.rs:1408:        crate::ringing::persistence_policy::set_journal_byte_limit_for_test(512 * 1024);
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\persistence_policy.rs:47:pub fn journal_byte_limit() -> u64 {
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\persistence_policy.rs:54:pub(crate) fn set_journal_byte_limit_for_test(limit: u64) {
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\persistence_policy.rs:40:pub const MAX_TIMELINE_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\persistence_policy.rs:46:/// 鐢熸晥涓殑鍥炴斁灏惧瓧鑺備笂闄愶紙鐢熶骇涓?[`MAX_TIMELINE_JOURNAL_BYTES`]锛夈€?D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\persistence_policy.rs:50:        .unwrap_or(&MAX_TIMELINE_JOURNAL_BYTES)
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\timeline.rs:769:    let entry_limit = crate::ringing::persistence_policy::MAX_TIMELINE_JOURNAL_ENTRIES;
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\persistence_policy.rs:23://! 灞傦細瓒呰繃 [`MAX_TIMELINE_JOURNAL_ENTRIES`] 浠庡ご閮ㄩ┍閫愭渶鑰佹潯鐩紝turn seal
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\persistence_policy.rs:32:pub const MAX_TIMELINE_JOURNAL_ENTRIES: usize = 8192;
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\persistence_policy.rs:80:/// 涓昏鍐呭鈥斺€斾繚鐣欙紙鍙?[`MAX_TIMELINE_JOURNAL_ENTRIES`] 绾︽潫锛夛紝
+
+### B. externalization + output_ref
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\registry.rs:737:pub(crate) fn externalize_large_content(
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\registry.rs:839:        let out = externalize_large_content(&hub, "s1", tool_finished(big.clone()));
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\registry.rs:863:        let out = externalize_large_content(&hub, "s1", tool_finished("small".into()));
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\registry.rs:883:        let out = externalize_large_content(&hub, "s1", ev);
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\actor.rs:62:            let domain = crate::registry::externalize_large_content(hub, &env.seed, domain);
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:110:    // 鑳藉崟鐙敼鍐欏叾涓竴涓€岃鍙﹀涓や釜澶辩湡锛堝疄渚嬶細`externalize_large_content`
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\content_store.rs:17:/// `registry::externalize_large_content`锛屽湪鏍囧噯妯″紡涓嬫ā鍨嬫枃鏈凡琚?
+D:\project\QAQ-Harness\crates\qaqh-domain\src\timeline.rs:106:    /// 鈿?杩欎笉鏄?瀹屾暣杈撳嚭"锛屼篃**涓嶆槸**闈?`output_ref` 琛ラ綈鐨勶細鏍囧噯妯″紡涓嬫ā鍨?
+D:\project\QAQ-Harness\crates\qaqh-domain\src\event.rs:362:    /// 涓€杞?API 璋冪敤瀹屾垚鐨勬潈濞佺粓鎬併€傛鏂囧ぇ鏃剁粡 `output_ref` 澶栫疆銆?
+D:\project\QAQ-Harness\crates\qaqh-domain\src\event.rs:371:        output_ref: Option<ContentRef>,
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:128:    output_ref: Option<ContentRef>,
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:235:            output_ref: None,
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:292:    /// 澶ц緭鍑哄缃紩鐢紙閫氬父瑙?[`Self::output_ref`] 瀛楁璇存槑锛氭瀬灏戜骇鐢燂級銆?
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:293:    pub fn output_ref(&self) -> Option<&ContentRef> {
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:294:        self.output_ref.as_ref()
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:313:    /// `truncated` 涓?`output_ref` 涓嶅湪鏈柟娉曡亴璐ｅ唴锛屼繚鎸佷笉鍙樸€?
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:341:        self.output_ref = Some(reference);
+D:\project\QAQ-Harness\crates\qaqh-subagent\src\lib.rs:622:                            output_ref,
+D:\project\QAQ-Harness\crates\qaqh-subagent\src\lib.rs:632:                            } else if let Some(reference) = output_ref
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\registry.rs:846:                let rf = result.output_ref().expect("output_ref set").clone();
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\registry.rs:869:                assert!(result.output_ref().is_none());
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\hub.rs:1288:                    output_ref: None,
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\hub.rs:2052:                output_ref: None,
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\agent\engine_tool.rs:621:                    output_ref: None,
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\router.rs:480:            output_ref: None,
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\agent\util\mod.rs:272:            output_ref: None,
+
+### C. TOOL_MODEL_MAX_CHARS
+D:\project\QAQ-Harness\crates\qaqh-domain\src\timeline.rs:107:    /// 鏂囨湰鍏堣 `TOOL_MODEL_MAX_CHARS`锛?4K 瀛楃锛夊皝椤讹紝鑰屽唴瀹瑰缃殑闃堝€兼槸
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\registry.rs:822:        let result = if summary.len() > qaqh_types::TOOL_MODEL_MAX_CHARS {
+D:\project\QAQ-Harness\crates\qaqh-runtime\src\ringing\content_store.rs:18:/// `TOOL_MODEL_MAX_CHARS`锛?4K 瀛楃锛屼笂闄愮害 96 KiB锛夊皝椤讹紝姘歌繙澶熶笉鍒?10 MiB锛?
+D:\project\QAQ-Harness\crates\qaqh-types\src\lib.rs:49:    ContentRef, TOOL_MODEL_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, ToolContinuation, ToolError,
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:15:pub const TOOL_MODEL_MAX_CHARS: usize = 24_000;
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:124:    /// 妯″瀷鏂囨湰宸茶 [`TOOL_MODEL_MAX_CHARS`] 灏侀《锛堚墹 绾?96 KiB锛夛紝姘歌繙鍒颁笉浜?
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:133:        Self::ok_with_limit(text.into(), Some(TOOL_MODEL_MAX_CHARS))
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:216:        Self::text_with_limit(status, text, Some(TOOL_MODEL_MAX_CHARS))
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:356:        // default TOOL_MODEL_MAX_CHARS, so no hard check is applied here.
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:453:        let result = ToolResult::ok("鐣?.repeat(TOOL_MODEL_MAX_CHARS + 100));
+D:\project\QAQ-Harness\crates\qaqh-types\src\tool_result.rs:474:        let body = "x".repeat(TOOL_MODEL_MAX_CHARS * 4);

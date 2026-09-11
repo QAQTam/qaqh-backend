@@ -5,7 +5,7 @@
 mod common;
 use common::mock_server::{self, MockServer, SseChunk};
 
-use qaqh_gate::{ProviderConfig, StreamEvent};
+use qaqh_gate::{ProviderConfig, RetryPolicy, StreamEvent};
 use qaqh_types::{ContentBlock, Message, ToolDef, ToolFunction, ToolResult};
 use serde_json::json;
 use std::sync::Arc;
@@ -869,6 +869,89 @@ fn make_responses_provider(mock: &MockServer) -> ProviderConfig {
     )
 }
 
+/// T10 贯通：端点级 RetrySpec（TOML → EndpointSpec.retry → ProviderConfig.retry
+/// → RetryPolicy）真实生效——第一次请求 429，重试后成功。
+#[test]
+fn endpoint_retry_spec_drives_actual_retry_behavior() {
+    let mock = MockServer::new_sequential(vec![
+        vec![mock_server::SseChunk::error(429, "rate limited")],
+        vec![
+            mock_server::SseChunk::text("after retry"),
+            mock_server::SseChunk::finish("stop", None),
+            mock_server::SseChunk::done(),
+        ],
+    ]);
+    let provider = ProviderConfig::openai(
+        &mock.base_url(),
+        "sk-test-key",
+        "test-model",
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+        false,
+        None,
+    )
+    // 模拟 TOML override 声明的 retry（基数为 0 秒，测试不等真实退避）。
+    .with_retry(Some(qaqh_types::RetrySpec {
+        max_retries: 5,
+        base_delay_secs: 0,
+        max_delay_secs: 0,
+        idle_timeout_secs: 0,
+    }));
+    assert!(provider.retry.is_some(), "retry spec must be carried");
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let result = qaqh_gate::chat_stream(
+        &provider,
+        vec![Message::user("hi")],
+        None,
+        4096,
+        None,
+        None,
+        None,
+        &mut |ev| events.push(ev),
+    );
+    assert!(result.is_ok(), "retry after 429 should succeed: {result:?}");
+    assert_eq!(
+        mock.request_count.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "should have made exactly 2 requests (initial + 1 retry)"
+    );
+    let done = events
+        .iter()
+        .any(|ev| matches!(ev, StreamEvent::Done { .. }));
+    assert!(done);
+}
+
+/// T10 贯通：`RetryPolicy::from_spec` 的零值回退语义。
+#[test]
+fn retry_policy_from_spec_falls_back_to_defaults_on_zero_fields() {
+    use std::time::Duration;
+    let none = RetryPolicy::from_spec(None);
+    assert_eq!(none, RetryPolicy::default());
+    let zeros = RetryPolicy::from_spec(Some(&qaqh_types::RetrySpec {
+        max_retries: 0,
+        base_delay_secs: 0,
+        max_delay_secs: 0,
+        idle_timeout_secs: 0,
+    }));
+    assert_eq!(zeros.max_retries, 5);
+    assert_eq!(zeros.base_delay, Duration::from_secs(1));
+    assert_eq!(zeros.max_delay, Duration::from_secs(30));
+    assert_eq!(zeros.idle_timeout, Duration::from_secs(300));
+    let custom = RetryPolicy::from_spec(Some(&qaqh_types::RetrySpec {
+        max_retries: 8,
+        base_delay_secs: 2,
+        max_delay_secs: 60,
+        idle_timeout_secs: 600,
+    }));
+    assert_eq!(custom.max_retries, 8);
+    assert_eq!(custom.base_delay, Duration::from_secs(2));
+    assert_eq!(custom.max_delay, Duration::from_secs(60));
+    assert_eq!(custom.idle_timeout, Duration::from_secs(600));
+}
+
 /// Build a Responses-format SSE stream with text, reasoning, and completion.
 fn responses_sse_scenario() -> Vec<mock_server::SseChunk> {
     vec![
@@ -958,7 +1041,7 @@ fn responses_chat_stream_basic_text() {
 }
 
 #[test]
-fn responses_stream_without_terminal_event_is_rejected() {
+fn responses_stream_without_terminal_event_keeps_partial_output_with_stop_reason_none() {
     let mock = MockServer::new(vec![mock_server::SseChunk::Raw(
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"delta\":\"partial\"}\n\n".into(),
     )]);
@@ -976,17 +1059,25 @@ fn responses_stream_without_terminal_event_is_rejected() {
         &mut |event| events.push(event),
     );
 
-    let error = result.expect_err("truncated Responses streams must not be accepted");
-    assert!(
-        error
-            .to_string()
-            .contains("closed before response.completed")
+    // T7 新契约：截断流不再判死。部分产出已流出不可重来 → Ok 收口，
+    // Done{stop_reason:None} 交由上层续写机制带词重启（对齐 chat 协议）。
+    result.expect("truncated stream with partial output must be salvaged, not rejected");
+    let done = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Done { stop_reason, .. } => Some(stop_reason.clone()),
+            _ => None,
+        })
+        .expect("salvaged truncated stream must still emit Done");
+    assert_eq!(
+        done, None,
+        "stop_reason must be absent so runtime triggers continuation"
     );
     assert!(
-        !events
+        events
             .iter()
-            .any(|event| matches!(event, StreamEvent::Done { .. })),
-        "a truncated stream must not persist a partial assistant response"
+            .any(|event| matches!(event, StreamEvent::ContentDelta(t) if t == "partial")),
+        "partial output must be preserved"
     );
 }
 

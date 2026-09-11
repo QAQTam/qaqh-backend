@@ -19,6 +19,7 @@ pub mod tool_parser;
 mod transport;
 mod types;
 
+pub use transport::RetryPolicy;
 pub use types::{ProviderConfig, ProviderKind, ResponsesCompat, StreamEvent};
 
 use qaqh_types::{Message, ToolDef};

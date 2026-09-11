@@ -701,18 +701,21 @@ pub(crate) fn gate_request(
     out
 }
 
-// ── provider 构建（已落地，保持不变） ──
+// ── provider 构建（唯一构造器） ──
 
-/// 依当前 config / endpoint 重建 provider（Responses 或 OpenAI 形态）。
+/// 全 runtime 唯一的 `ProviderConfig` 构造器：依当前 config / endpoint 重建 provider（Responses / Anthropic / OpenAI 形态）。
 ///
-/// 从 `run_lap` 原样抽出的 provider 构建逻辑；`ep`/`is_responses` 仅在
-/// 此处使用，迁移后 `run_lap` 不再持有它们。
+/// 全 runtime 唯一的 `ProviderConfig` 构造器。engine_compact / engine_title
+/// 不再自建镜像，统一经由本函数，避免多处镜像漂移（T6）。
 /// `request_tag` feeds the OpenCode gateway management headers (`msg_…`
-/// request id): pass the turn id for normal rounds.
+/// request id): pass the turn id for normal rounds; "compact" / "title" for
+/// the background LLM calls.
 pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::ProviderConfig {
     let ep = ctx.agent.endpoint_spec.clone();
     let is_responses = ep.as_ref().map(|e| e.protocol.as_str()) == Some("responses");
     let is_anthropic = ep.as_ref().map(|e| e.protocol.as_str()) == Some("anthropic");
+    // T9/T10: 端点级重试策略随 EndpointSpec 一起传递（None = gate 内置缺省）。
+    let retry = ep.as_ref().and_then(|e| e.retry.clone());
     if is_anthropic {
         let mut p = qaqh_gate::ProviderConfig::anthropic(
             &ctx.agent.config.base_url,
@@ -726,7 +729,8 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
             p.supports_reasoning_content = endpoint.supports_reasoning_content;
             p.thinking_budget_large = endpoint.thinking_budget_large;
         }
-        return p.with_opencode_headers(&ctx.agent.session.seed, request_tag);
+        return p.with_opencode_headers(&ctx.agent.session.seed, request_tag)
+            .with_retry(retry.clone());
     }
     if is_responses {
         let mut p = qaqh_gate::ProviderConfig::responses(
@@ -756,6 +760,7 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
             p.responses_compat.echo_web_search_call = false;
         }
         p.with_opencode_headers(&ctx.agent.session.seed, request_tag)
+            .with_retry(retry.clone())
     } else {
         let mut p = qaqh_gate::ProviderConfig::openai(
             &ctx.agent.config.base_url,
@@ -769,9 +774,11 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
             ep.as_ref()
                 .map(|e| e.cache_field.clone())
                 .unwrap_or_default(),
-            ep.as_ref().map(|e| e.supports_thinking).unwrap_or(true),
+            ep.as_ref().map(|e| e.supports_thinking).unwrap_or(false),
             ep.as_ref().and_then(|e| e.do_sample),
         )
+        // 缺省归一为 false：与 compact/title 镜像一致；None（端点配置错误）
+        // 时欠配置端不发 thinking 参数，保守方向。
         .with_stateful(ep.as_ref().map(|e| e.stateful).unwrap_or(false))
         .with_stream_usage(ep.as_ref().map(|e| e.include_stream_usage).unwrap_or(false));
         if let Some(endpoint) = ep.as_ref() {
@@ -782,6 +789,7 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
             p.require_provider_parameters = endpoint.require_provider_parameters;
         }
         p.with_opencode_headers(&ctx.agent.session.seed, request_tag)
+            .with_retry(retry.clone())
     }
 }
 
