@@ -250,10 +250,22 @@ mod tests {
         }
     }
 
+    /// 测试用临时文件路径：Url::from_file_path 要求平台绝对路径
+    /// （Windows 上必须带盘符，"/tmp/a.rs" 会 panic），所以按平台取
+    /// std::env::temp_dir() 下的真实绝对路径，断言只校验行号/计数格式。
+    fn fixture_path(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn display_is_one_based() {
-        let rendered = render_location(&loc("/tmp/a.rs", 0, 4));
-        assert_eq!(rendered, "/tmp/a.rs:1:5", "内部 0-based → 模型面 1-based");
+        let path = fixture_path("qaqh-lsp-a.rs");
+        let rendered = render_location(&loc(&path, 0, 4));
+        assert!(rendered.ends_with(":1:5"), "{rendered}");
+        assert!(rendered.contains("qaqh-lsp-a.rs"), "{rendered}");
     }
 
     #[test]
@@ -266,11 +278,12 @@ mod tests {
 
     #[test]
     fn goto_scalar_renders_count_header() {
+        let path = fixture_path("qaqh-lsp-b.rs");
         let out = render_goto_result(Some(lsp_types::GotoDefinitionResponse::Scalar(loc(
-            "/tmp/a.rs", 9, 0,
+            &path, 9, 0,
         ))));
         assert!(out.starts_with("resultCount=1 fileCount=1\n"), "{out}");
-        assert!(out.contains("/tmp/a.rs:10:1"), "{out}");
+        assert!(out.contains(":10:1"), "{out}");
     }
 
     #[test]

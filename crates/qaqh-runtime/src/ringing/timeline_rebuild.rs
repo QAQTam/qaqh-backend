@@ -11,18 +11,30 @@ use qaqh_domain::{
 };
 use qaqh_session::SessionManager;
 
+/// 重建只覆盖前端 transcript 恢复窗口（最近 N 轮），而非全历史。与
+/// `handle_timeline_snapshot` 的分页语义对齐：客户端翻旧页会触发新的
+/// 快照拉取，不需要重建时物化全量。
+const REBUILD_RECENT_TURNS: usize = 40;
+
 /// 从持久化 session 消息重建 timeline 快照 + replay journal。
+///
+/// Phase 2（有界恢复）：本函数是 timeline 文件缺失/损坏时的降级路径，
+/// 只服务于前端 transcript 恢复窗口，因此改走 **尾部有界读取**
+/// （`load_recent_for_projection` + 反向扫描）：GB 级归档的重建从
+/// O(文件) 降到 O(尾部)，不再全量 `read_to_string` + 全量反序列化。
+/// 模型循环的完整历史装载（`load_for_resume`）不受影响。
 pub fn rebuild_timeline_snapshot(
     sessions: Option<&SessionManager>,
     seed: &str,
 ) -> Option<(TimelineSnapshot, Vec<qaqh_domain::TimelineEntry>)> {
     let manager = sessions?;
-    let (_, archive_messages, compact_context) = manager.load_for_resume(seed)?;
-    let messages = compact_context
-        .as_ref()
-        .map(|context| context.messages.as_slice())
-        .unwrap_or(archive_messages.as_slice());
-    let (_, turns) = super::projection::project_turns_from_messages(seed, messages, None, None);
+    // 200 条消息 ≈ 多轮对话（含工具往返），足够投影出 ~40 turn 窗口。
+    let messages = manager.load_recent_for_projection(seed, 200)?;
+    if messages.is_empty() {
+        return None;
+    }
+    let (_, turns) =
+        super::projection::project_recent_turns_from_messages(seed, &messages, REBUILD_RECENT_TURNS);
     timeline_snapshot_from_turns(seed, &turns)
 }
 

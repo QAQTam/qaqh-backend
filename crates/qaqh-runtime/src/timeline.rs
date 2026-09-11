@@ -13,7 +13,6 @@ use qaqh_domain::{
     TimelineTurnState,
 };
 
-use crate::timeline_store::TimelineJournalOp;
 
 /// A live Ringing V1 timeline delivery record. `entry.timeline_seq` is the sole SSE cursor for
 /// this seed; no per-channel sequence is exposed to a transcript consumer.
@@ -778,187 +777,9 @@ fn block_mut<'a>(
         .ok_or_else(|| TimelineError::MissingBlock(block_id.to_string()))
 }
 
-/// 从 append-only timeline journal 纯重放重建 `TimelineSnapshot`（刀 2 阶段 1）。
-///
-/// - 存在 `Snapshot` 基点（一次性历史迁移/未来压缩）时：`turns` 以基点为权威，
-///   其 watermark 之后的 `Append` 增量应用；watermark 及之前的 `Append` 已被
-///   物化进基点快照，只保留不再重放（避免折叠条目的 TextDelta 二次叠加）。
-/// - 无基点（原生 append-only 流）：全量重放 `Append` 重建 turns。
-///
-/// 返回 `(snapshot, journal)`：`journal` 是与 appender 内存 journal 等价的全部
-/// 条目序列——`restore` 从它重建 `next_fragment`（fragment 校验）与 replay tail。
-/// 重放是**宽容**的：未知 turn/block 的增量条目直接跳过（对应磁盘损坏行），
-/// 绝不 panic、绝不因单条坏记录丢弃整条 timeline。
-pub fn materialize_timeline_from_journal(
-    ops: &[TimelineJournalOp],
-) -> Option<(TimelineSnapshot, Vec<TimelineEntry>)> {
-    let mut base: Option<(TimelineSnapshot, u64)> = None;
-    for op in ops {
-        if let TimelineJournalOp::Snapshot { snapshot } = op {
-            base = Some((snapshot.clone(), snapshot.watermark));
-        }
-    }
-    let base_watermark = base.as_ref().map(|(_, watermark)| *watermark).unwrap_or(0);
-    let mut turns: BTreeMap<String, TimelineTurn> = match &base {
-        Some((snapshot, _)) => snapshot
-            .turns
-            .iter()
-            .map(|turn| (turn.turn_id.clone(), turn.clone()))
-            .collect(),
-        None => BTreeMap::new(),
-    };
-    let mut journal: Vec<TimelineEntry> = Vec::new();
-    // seq 单调守卫：append 半途失败（部分行已落盘）后重试会从旧 watermark
-    // 重新追加，文件里留下重复条目——而 `TextDelta`/`ToolProgress` 重放不是
-    // 幂等的（push_str 会双写）。seq 必须严格递增，重复/乱序条目直接跳过。
-    let mut last_seq = 0u64;
-    for op in ops {
-        if let TimelineJournalOp::Append { entry, .. } = op {
-            if entry.timeline_seq <= last_seq {
-                log::warn!(
-                    "[timeline] skipping non-monotonic journal entry seq={} (last={})",
-                    entry.timeline_seq,
-                    last_seq
-                );
-                continue;
-            }
-            last_seq = entry.timeline_seq;
-            // watermark 及之前的条目折叠在基点快照内；只回放其后的增量。
-            if base.is_none() || entry.timeline_seq > base_watermark {
-                apply_journal_entry(&mut turns, entry);
-            }
-            journal.push(entry.clone());
-        }
-    }
-    let mut snapshot_turns: Vec<TimelineTurn> = turns.into_values().collect();
-    if snapshot_turns.is_empty() && journal.is_empty() && base_watermark == 0 {
-        return None;
-    }
-    // 与 `TimelineAppender::snapshot` 保持同一排序键（字节级一致）。
-    snapshot_turns.sort_by_key(|turn| (turn.created_seq, turn_num(&turn.turn_id)));
-    let watermark = journal
-        .last()
-        .map_or(base_watermark, |entry| entry.timeline_seq);
-    Some((
-        TimelineSnapshot {
-            watermark,
-            turns: snapshot_turns,
-        },
-        journal,
-    ))
-}
-
-/// 把一条已分配 seq 的 `TimelineEntry` 直接物化为 `turns` 状态（幂等重放）。
-/// 语义与 `TimelineAppender` 各 writer 方法完全一致：按 entry 记录逐项应用。
-fn apply_journal_entry(turns: &mut BTreeMap<String, TimelineTurn>, entry: &TimelineEntry) {
-    match &entry.event {
-        TimelineEvent::TurnOpened { user_text } => {
-            // 同 id 重开 = 原地重置（与 live `open_turn` 的 reopen 分支一致）。
-            let turn = TimelineTurn {
-                turn_id: entry.turn_id.clone(),
-                created_seq: entry.timeline_seq,
-                user_text: user_text.clone(),
-                sealed: false,
-                state: TimelineTurnState::Running,
-                failure: None,
-                rounds: Vec::new(),
-            };
-            turns.insert(entry.turn_id.clone(), turn);
-        }
-        TimelineEvent::BlockOpened { block } => {
-            let Some(round_num) = entry.round_num else {
-                return;
-            };
-            let Some(turn) = turns.get_mut(&entry.turn_id) else {
-                return;
-            };
-            if turn.sealed {
-                return;
-            }
-            let round = match turn.rounds.iter().position(|r| r.round_num == round_num) {
-                Some(index) => &mut turn.rounds[index],
-                None => {
-                    turn.rounds.push(TimelineRound {
-                        round_num,
-                        sealed: false,
-                        is_final: false,
-                        blocks: Vec::new(),
-                    });
-                    let index = turn.rounds.len() - 1;
-                    &mut turn.rounds[index]
-                }
-            };
-            if !round.blocks.iter().any(|b| b.block_id == block.block_id) {
-                round.blocks.push(block.clone());
-            }
-        }
-        TimelineEvent::TextDelta {
-            block_id, delta, ..
-        } => {
-            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
-            {
-                block.text.push_str(delta);
-            }
-        }
-        TimelineEvent::BlockCheckpoint { block_id, text } => {
-            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
-            {
-                block.text = text.clone();
-            }
-        }
-        TimelineEvent::ToolUpdated { block_id, tool } => {
-            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
-            {
-                block.tool = Some(tool.clone());
-            }
-        }
-        TimelineEvent::ToolProgress { block_id, chunk } => {
-            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
-                && let Some(tool) = block.tool.as_mut()
-            {
-                tool.progress.push_str(chunk);
-            }
-        }
-        TimelineEvent::BlockSealed { block_id } => {
-            if let Some(block) = block_mut_replay(turns, &entry.turn_id, entry.round_num, block_id)
-            {
-                block.state = TimelineBlockState::Sealed;
-            }
-        }
-        TimelineEvent::RoundSealed { is_final } => {
-            let Some(turn) = turns.get_mut(&entry.turn_id) else {
-                return;
-            };
-            let Some(round_num) = entry.round_num else {
-                return;
-            };
-            if let Some(round) = turn.rounds.iter_mut().find(|r| r.round_num == round_num) {
-                round.sealed = true;
-                round.is_final = *is_final;
-            }
-        }
-        TimelineEvent::TurnSealed { state, failure } => {
-            if let Some(turn) = turns.get_mut(&entry.turn_id) {
-                turn.sealed = true;
-                turn.state = *state;
-                turn.failure = failure.clone();
-            }
-        }
-    }
-}
-
-/// 重放时按 (turn, round, block) 定位可变 block（宽松：任一缺失直接 None）。
-fn block_mut_replay<'a>(
-    turns: &'a mut BTreeMap<String, TimelineTurn>,
-    turn_id: &str,
-    round_num: Option<u32>,
-    block_id: &str,
-) -> Option<&'a mut TimelineBlock> {
-    let turn = turns.get_mut(turn_id)?;
-    let round_num = round_num?;
-    let round = turn.rounds.iter_mut().find(|r| r.round_num == round_num)?;
-    round.blocks.iter_mut().find(|b| b.block_id == block_id)
-}
+// `materialize_timeline_from_journal` / `apply_journal_entry` / `block_mut_replay`
+// 已随 timeline-journal 一并移除（2026-09-10）。重建投影现由
+// `ringing::timeline_rebuild` 从 messages.jsonl / compact-context 完成。
 
 #[cfg(test)]
 mod tests {
@@ -1393,175 +1214,41 @@ mod tests {
     }
 
     #[test]
-    fn journal_rebuild_equals_native_snapshot_roundtrip() {
-        // 验收 #2：原生写入路径产生的 timeline 与 journal 重放路径一致（往返）。
+    fn replay_tail_covers_every_entry_above_the_watermark() {
+        // 断线重连回放尾的契约（进程内 journal）：`replay_since(watermark)` 必须
+        // 逐条覆盖 watermark 之后的全部条目，且 seq 严格单调、无缺无重。
+        // timeline-journal 移除后，replay 只依赖内存 journal，本测试守住该语义。
         let mut appender = TimelineAppender::new();
-        // t1：完整完成的 turn（reasoning 流式 + checkpoint + tool + answer）。
         appender.open_turn("s", "t1", "q1").unwrap();
         appender
-            .open_block(
-                "s",
-                "t1",
-                0,
-                "reasoning",
-                TimelineBlockKind::Reasoning,
-                None,
-            )
+            .open_block("s", "t1", 0, "reasoning", TimelineBlockKind::Reasoning, None)
             .unwrap();
         appender
             .append_text("s", "t1", 0, "reasoning", 0, "think")
             .unwrap();
-        appender
-            .checkpoint_block("s", "t1", 0, "reasoning", "think deeply")
-            .unwrap();
-        appender
-            .append_text("s", "t1", 0, "reasoning", 1, "!")
-            .unwrap();
         appender.seal_block("s", "t1", 0, "reasoning").unwrap();
-        appender
-            .open_block("s", "t1", 0, "tool", TimelineBlockKind::Tool, Some(tool()))
-            .unwrap();
-        appender
-            .append_tool_progress("s", "t1", 0, "tool", "running...\n".to_string())
-            .unwrap();
-        appender
-            .update_tool(
-                "s",
-                "t1",
-                0,
-                "tool",
-                TimelineToolState::Succeeded,
-                Some("done".into()),
-            )
-            .unwrap();
-        appender.seal_block("s", "t1", 0, "tool").unwrap();
-        appender
-            .open_block("s", "t1", 0, "answer", TimelineBlockKind::Text, None)
-            .unwrap();
-        appender
-            .append_text("s", "t1", 0, "answer", 0, "ok")
-            .unwrap();
-        appender.seal_block("s", "t1", 0, "answer").unwrap();
         appender.seal_round("s", "t1", 0, true).unwrap();
-        appender
-            .seal_turn_with_state(
-                "s",
-                "t1",
-                TimelineTurnState::Completed,
-                Some(TimelineFailure {
-                    code: "ok".into(),
-                    message: "done".into(),
-                }),
-            )
-            .unwrap();
-        // t2：仍 running 的 turn（reopen 语义也在 `TurnOpened` 内保留了 reset）。
-        appender.open_turn("s", "t2", "q2").unwrap();
-        appender
-            .open_block("s", "t2", 0, "note", TimelineBlockKind::Text, None)
-            .unwrap();
-        appender.append_text("s", "t2", 0, "note", 0, "in").unwrap();
+        appender.seal_turn("s", "t1").unwrap();
 
-        let native = appender.snapshot("s").unwrap();
-        let entries = appender.replay_since("s", 0);
-        let ops: Vec<TimelineJournalOp> = entries
-            .iter()
-            .map(|entry| TimelineJournalOp::Append {
-                entry: entry.clone(),
-                ts: None,
-            })
-            .collect();
-        let (rebuilt, journal) =
-            materialize_timeline_from_journal(&ops).expect("full replay must succeed");
-        assert_eq!(rebuilt, native, "journal full replay == native snapshot");
-        assert_eq!(journal, entries, "journal stream preserved verbatim");
-        assert_eq!(rebuilt.watermark, native.watermark);
-    }
-
-    #[test]
-    fn journal_base_snapshot_with_folded_tail_is_not_double_applied() {
-        // 迁移文件形状：`Snapshot` 基点（完整物化，watermark 折叠了此前的全部
-        // delta）+ `Append` 尾部条目。折叠条目不得二次叠加文本；watermark 之后
-        // 的真实新条目必须正常增量应用。
-        let mut appender = TimelineAppender::new();
-        appender.open_turn("s", "t1", "q").unwrap();
-        appender
-            .open_block("s", "t1", 0, "answer", TimelineBlockKind::Text, None)
-            .unwrap();
-        appender
-            .append_text("s", "t1", 0, "answer", 0, "hel")
-            .unwrap();
-        appender
-            .append_text("s", "t1", 0, "answer", 1, "lo")
-            .unwrap();
-
-        // 迁移快照点：快照完整，尾部条目（seq ≤ watermark）全部折叠。
-        let native = appender.snapshot("s").unwrap();
-        let tail = appender.replay_since("s", 0);
-        let mut ops: Vec<TimelineJournalOp> = vec![TimelineJournalOp::Snapshot {
-            snapshot: native.clone(),
-        }];
-        ops.extend(tail.iter().map(|entry| TimelineJournalOp::Append {
-            entry: entry.clone(),
-            ts: None,
-        }));
-        let (rebuilt, _) = materialize_timeline_from_journal(&ops).unwrap();
+        let all = appender.replay_since("s", 0);
+        assert!(!all.is_empty(), "journal must hold the written entries");
+        let watermark = appender.snapshot("s").unwrap().watermark;
         assert_eq!(
-            rebuilt.turns[0].rounds[0].blocks[0].text, "hello",
-            "folded deltas must not double-append"
+            watermark,
+            all.last().unwrap().timeline_seq,
+            "snapshot watermark equals the newest entry"
         );
-        assert_eq!(rebuilt, native);
 
-        // 迁移后真实续写（seq > watermark）：text 增量正常追加。
-        appender
-            .append_text("s", "t1", 0, "answer", 2, "!")
-            .unwrap();
-        let after = appender.snapshot("s").unwrap();
-        ops.extend(
-            appender
-                .replay_since("s", native.watermark)
-                .into_iter()
-                .map(|entry| TimelineJournalOp::Append { entry, ts: None }),
+        // 从任意水位切片：尾部必须恰好是 cut 之后的严格后缀。
+        let mid = all.len() / 2;
+        let cut = all[mid].timeline_seq;
+        let tail = appender.replay_since("s", cut);
+        assert_eq!(tail, all[mid + 1..], "tail is exactly the suffix above cut");
+        assert!(
+            tail.windows(2).all(|w| w[0].timeline_seq < w[1].timeline_seq),
+            "replay tail must be strictly monotonic"
         );
-        let (rebuilt2, _) = materialize_timeline_from_journal(&ops).unwrap();
-        assert_eq!(rebuilt2.turns[0].rounds[0].blocks[0].text, "hello!");
-        assert_eq!(rebuilt2, after, "rebuilt == live beyond the base point");
-    }
-
-    #[test]
-    fn journal_duplicate_append_entries_are_not_double_applied() {
-        // append 半途失败（部分行已落盘）后重试会从旧 watermark 重新追加，
-        // 文件里出现重复条目。`TextDelta` 重放非幂等（push_str），必须靠
-        // seq 单调守卫跳过重复条目，否则文本会双写。
-        let mut appender = TimelineAppender::new();
-        appender.open_turn("s", "t1", "q").unwrap();
-        appender
-            .open_block("s", "t1", 0, "answer", TimelineBlockKind::Text, None)
-            .unwrap();
-        appender
-            .append_text("s", "t1", 0, "answer", 0, "hello")
-            .unwrap();
-        let entries = appender.replay_since("s", 0);
-        // 模拟：第一次追加写入了全部条目，但 watermark 未更新；重试把同一批
-        // 条目又追加了一遍（文件里出现两份）。
-        let mut ops: Vec<TimelineJournalOp> = entries
-            .iter()
-            .map(|entry| TimelineJournalOp::Append {
-                entry: entry.clone(),
-                ts: None,
-            })
-            .collect();
-        ops.extend(entries.iter().map(|entry| TimelineJournalOp::Append {
-            entry: entry.clone(),
-            ts: None,
-        }));
-        let (rebuilt, journal) = materialize_timeline_from_journal(&ops).unwrap();
-        let text = &rebuilt.turns[0].rounds[0].blocks[0].text;
-        assert_eq!(text, "hello", "duplicate deltas must not double-append");
-        assert_eq!(
-            journal.len(),
-            entries.len(),
-            "duplicates dropped from replay tail"
-        );
-        assert_eq!(rebuilt.watermark, entries.last().unwrap().timeline_seq);
+        // 水位到底 = 无条目可回放（客户端已对齐，不产生 gap）。
+        assert!(appender.replay_since("s", watermark).is_empty());
     }
 }

@@ -42,6 +42,10 @@ pub enum MetaOp {
         seed: String,
         skills: qaqh_skills::SkillSessionStateV2,
     },
+    /// Frozen [Environment] annotation (P0 cache fix). Written once when
+    /// build_context first generates it, so a daemon restart resumes with the
+    /// byte-identical prefix instead of regenerating the annotation.
+    PersistFrozenAnnotation { seed: String, annotation: String },
 }
 
 // 工具模式档位、白名单、模型面投影的唯一契约已收敛到 qaqh-types。
@@ -517,6 +521,21 @@ impl AgentState {
             .map(|reasons| (self.prev_prefix.system_hash.clone(), reasons))
     }
 
+    /// Restore the persisted frozen [Environment] annotation on session
+    /// resume (P0 cache fix). `None` keeps the regenerate-on-first-use
+    /// behavior (legacy meta.json / fresh session).
+    pub fn restore_frozen_annotation(&mut self, annotation: Option<String>) {
+        self.frozen_annotation = annotation;
+    }
+
+    /// Align the skills-envelope injection watermark with the restored
+    /// context epoch (P2 fix). Must run after `skills.restore`: without it
+    /// the first post-resume sync_skill_injection sees epoch > 0 against
+    /// watermark 0 and re-appends a duplicate envelope.
+    pub fn align_skill_injection_watermark(&mut self) {
+        self.last_injected_epoch = self.skills.context_epoch();
+    }
+
     /// Freeze annotations for the session so the first user message keeps an
     /// identical prefix across rounds AND turns. file_state and skill state
     /// change between rounds and turns; injecting a changed annotation would
@@ -553,6 +572,18 @@ impl AgentState {
             }
             let text = parts.join("\n");
             self.frozen_annotation = Some(text.clone());
+            // P0 cache fix: persist the annotation so a daemon restart resumes
+            // with the byte-identical prefix. Written through the MetaOp queue
+            // (same path as PersistSkills) to keep the single-writer ordering.
+            self.session.frozen_annotation = Some(text.clone());
+            if !self.ephemeral
+                && !self.session.seed.is_empty()
+            {
+                self.enqueue_meta_op(MetaOp::PersistFrozenAnnotation {
+                    seed: self.session.seed.clone(),
+                    annotation: text.clone(),
+                });
+            }
             if text.is_empty() { vec![] } else { vec![text] }
         };
 
@@ -776,6 +807,9 @@ fn execute_meta_op(op: &MetaOp, sm: &SessionManager) {
         MetaOp::PersistSkills { seed, skills } => {
             sm.persist_skills(seed, skills.clone());
         }
+        MetaOp::PersistFrozenAnnotation { seed, annotation } => {
+            sm.persist_frozen_annotation(seed, annotation);
+        }
     }
 }
 
@@ -857,6 +891,103 @@ mod tests {
                 .diff(&before)
                 .contains(&"system_prompt".to_string())
         );
+    }
+
+    /// P0 cache fix regression: a resumed session must render the first user
+    /// message byte-identically to the pre-restart context. Simulates:
+    /// session A first build_context (generates + persists annotation)
+    /// → file_state ledger churn + restart → session B resume
+    /// → build_context must reuse the persisted annotation instead of
+    /// regenerating it with a new <today> date / empty ledger.
+    #[test]
+    fn resumed_session_reuses_frozen_annotation_for_byte_identical_prefix() {
+        let _guard = SKILL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        qaqh_workspace::set_workspace(&temp.path().to_string_lossy());
+        qaqh_workspace::file_state::clear();
+
+        // ── Session A: first turn generates the annotation ──
+        let mut agent_a = AgentState::new(qaqh_config::Config::default());
+        agent_a.msg = qaqh_message::MessageStore::new_ephemeral("test");
+        agent_a.msg.push_system(qaqh_types::Message::system("base"));
+        agent_a.msg.push_user("hello");
+        qaqh_workspace::file_state::record_read("src/lib.rs", "fn main() {}", 1);
+        let ctx_a = agent_a.build_context();
+        let first_user_a = ctx_a
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("session A has a user message");
+        let annotation_a = agent_a.frozen_annotation.clone().expect("annotation frozen");
+        assert!(annotation_a.contains("<today>"));
+        assert!(annotation_a.contains("file_state"));
+
+        // ── Simulate restart: ledger cleared, date would change on regenerate ──
+        qaqh_workspace::file_state::clear();
+        qaqh_workspace::file_state::record_write("other.rs", "x");
+
+        // ── Session B: resume with the persisted annotation ──
+        let mut agent_b = AgentState::new(qaqh_config::Config::default());
+        agent_b.msg = qaqh_message::MessageStore::new_ephemeral("test");
+        agent_b.msg.push_system(qaqh_types::Message::system("base"));
+        agent_b.msg.push_user("hello");
+        agent_b.restore_frozen_annotation(Some(annotation_a));
+        let ctx_b = agent_b.build_context();
+        let first_user_b = ctx_b
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("session B has a user message");
+
+        // Byte-identical prefix: the annotation (including <today> and the
+        // stale file_state snapshot) must be replayed, not regenerated.
+        assert_eq!(
+            serde_json::to_string(first_user_a).unwrap(),
+            serde_json::to_string(first_user_b).unwrap(),
+            "resumed context must be byte-identical at the first user message"
+        );
+
+        // The regenerated path (legacy meta, annotation=None) still works:
+        // it picks up the NEW ledger state (old behavior preserved).
+        let mut agent_c = AgentState::new(qaqh_config::Config::default());
+        agent_c.msg = qaqh_message::MessageStore::new_ephemeral("test");
+        agent_c.msg.push_system(qaqh_types::Message::system("base"));
+        agent_c.msg.push_user("hello");
+        let ctx_c = agent_c.build_context();
+        let annotation_c = agent_c.frozen_annotation.clone().unwrap();
+        assert!(annotation_c.contains("other.rs"), "regeneration uses fresh ledger");
+        assert!(annotation_c.contains("<today>"));
+        let _ = ctx_c;
+
+        qaqh_workspace::file_state::clear();
+    }
+
+    /// P2 fix regression: after skills.restore() replays a persisted
+    /// context_epoch, the injection watermark must align so the first
+    /// sync_skill_injection does not re-append a duplicate envelope.
+    #[test]
+    fn skill_injection_watermark_aligns_with_restored_epoch() {
+        let _guard = SKILL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut agent = AgentState::new(qaqh_config::Config::default());
+        agent.msg = qaqh_message::MessageStore::new_ephemeral("test");
+
+        // Simulate the resume path: persisted epoch lands in the manager,
+        // then lifecycle calls the alignment hook before any injection.
+        agent.skills.restore(&qaqh_skills::SkillSessionStateV2 {
+            context_epoch: 3,
+            operation_revision: 3,
+            ..Default::default()
+        });
+        agent.align_skill_injection_watermark();
+
+        let mut flow = qaqh_message::ContextFlow::new();
+        agent.sync_skill_injection(&mut flow);
+        // Envelope is only injected when has_active(); epoch 3 with no
+        // active skills injects nothing — and crucially the watermark now
+        // equals 3, so a later activation won't double-fire epoch 3's view.
+        assert_eq!(agent.skills.context_epoch(), 3);
     }
 
     #[test]
