@@ -427,12 +427,12 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
     }
     let task_text = build_subagent_task(&task, &context);
 
-    // 子代理继承主代理的工作区：CURRENT_WORKSPACE 为空/`.` 时不传，宿主侧
-    // 同样跳过继承（子 actor 退化为 daemon cwd）。
-    let parent_workspace = qaqh_workspace::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    // 子代理继承主代理的工作区（BUG-2026-09-12-06）：必须读 TLS 优先的
+    // current_workspace 而非进程全局 CURRENT_WORKSPACE——本 handler 运行在
+    // 派生工具线程上，daemon 的进程全局恒空，旧读法使继承永远失效
+    // （子代理 meta.cwd = None，相对路径全部锚到 daemon 进程 cwd）。为空/
+    // `.` 时不传，宿主侧同样跳过继承。
+    let parent_workspace = qaqh_workspace::current_workspace();
     let workspace = if parent_workspace.is_empty() || parent_workspace == "." {
         None
     } else {

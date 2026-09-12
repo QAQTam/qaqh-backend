@@ -198,10 +198,10 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
 
                 qaqh_workspace::workspace::set_current_session(&agent.session.seed);
                 load_session_workspace(agent);
-                let workspace = qaqh_workspace::CURRENT_WORKSPACE
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone();
+                // BUG-2026-09-12-05：读 TLS 优先的 current_workspace 而非进程
+                // 全局——多 actor daemon 中全局恒空，skills 工作区会锚到
+                // daemon 进程 cwd。
+                let workspace = qaqh_workspace::current_workspace();
                 agent.skills.set_workspace(std::path::Path::new(&workspace));
                 agent.skills.restore(&agent.session.skills.clone());
                 // P0 cache fix: reuse the persisted frozen [Environment]
@@ -289,10 +289,8 @@ pub fn create_session(agent: &mut AgentState) {
     enable_message_wal(agent);
     qaqh_workspace::workspace::set_current_session(&agent.session.seed);
     load_session_workspace(agent);
-    let workspace = qaqh_workspace::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
+    // BUG-2026-09-12-05：同 resume/new 路径，改读 TLS 优先快照。
+    let workspace = qaqh_workspace::current_workspace();
     agent.skills = qaqh_skills::SkillContextManager::new(
         std::path::Path::new(&workspace),
         agent.config.context_limit as usize,
@@ -319,10 +317,8 @@ pub fn create_session_with_seed(agent: &mut AgentState) {
     enable_message_wal(agent);
     qaqh_workspace::workspace::set_current_session(&agent.session.seed);
     load_session_workspace(agent);
-    let workspace = qaqh_workspace::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
+    // BUG-2026-09-12-05：同 resume/new 路径，改读 TLS 优先快照。
+    let workspace = qaqh_workspace::current_workspace();
     agent.skills = qaqh_skills::SkillContextManager::new(
         std::path::Path::new(&workspace),
         agent.config.context_limit as usize,
