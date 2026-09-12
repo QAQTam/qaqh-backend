@@ -1,8 +1,0 @@
-total=33637422 (32.08MB)  snapshot=32.08MB (100.0%)  journal=0.00MB (0.0%)
-watermark=559085 turns=2 journal_entries=0
-sealed=2 open=0
-journal kinds: {}
-payload bytes: {}
-snapshot text=30.17MB progress=0.00MB
-blocks with >1 checkpoint in journal: NONE (folded OK)
-max live block checkpoint text = 0 chars
