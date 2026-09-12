@@ -53,8 +53,8 @@ pub(crate) use auth::{
 pub(crate) use command::{handle_command, handle_command_status, handle_open, handle_renew};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use debug_control::{
-    activity, handle_debug, handle_debug_bridge, handle_debug_index, handle_stop,
-    handle_stop_if_idle, health, loopback_guard, not_found,
+    activity, debug_headers, handle_debug, handle_debug_bridge, handle_debug_index, handle_stop,
+    handle_stop_if_idle, health, host_guard, loopback_guard, not_found,
 };
 pub(crate) use service_api::handle_service;
 pub(crate) use sse::{handle_events, handle_timeline_events};
@@ -139,7 +139,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/debug/", get(handle_debug_index))
         .route("/debug/{*path}", get(handle_debug))
         .fallback(not_found)
+        // 回环边界（对 /debug 前缀生效）：对端 IP + Host 白名单双检，
+        // 再由 debug_headers 给响应补 CORP/nosniff。中心层顺序：外→内为
+        // debug_headers → loopback_guard → host_guard。
+        .layer(axum::middleware::from_fn(host_guard))
         .layer(axum::middleware::from_fn(loopback_guard))
+        .layer(axum::middleware::from_fn(debug_headers))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(ConcurrencyLimitLayer::new(MAX_CONNECTIONS))
         .layer(TraceLayer::new_for_http())
@@ -263,5 +268,40 @@ mod pure_tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn loopback_host_allowlist_accepts_local_forms_only() {
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:51325",
+            "localhost",
+            "LOCALHOST:51325",
+            " 127.0.0.1:1 ",
+            "[::1]",
+            "[::1]:51325",
+            "::1",
+        ] {
+            assert!(
+                debug_control::loopback_host_allowed(host),
+                "must allow {host:?}"
+            );
+        }
+        for host in [
+            "",
+            " ",
+            "evil.example",
+            "evil.example:51325",
+            "192.168.1.50:51325",
+            "127.0.0.1.evil.example",
+            "[::1",
+            "[::1]evil",
+            "[::2]:51325",
+        ] {
+            assert!(
+                !debug_control::loopback_host_allowed(host),
+                "must reject {host:?}"
+            );
+        }
     }
 }

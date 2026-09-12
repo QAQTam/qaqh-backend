@@ -355,6 +355,7 @@ mod axum_tests {
         let app = build_router(test_state());
         let req = Request::builder()
             .uri("/debug/__qaqh_bridge__.js")
+            .header("host", "127.0.0.1")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -375,6 +376,7 @@ mod axum_tests {
         // safe_join should reject traversal; we hit /debug/../outside
         let req = Request::builder()
             .uri("/debug/../outside")
+            .header("host", "127.0.0.1")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -388,6 +390,7 @@ mod axum_tests {
         let app = build_router(test_state());
         let req = Request::builder()
             .uri("/debug/missing_file_xyz.txt")
+            .header("host", "127.0.0.1")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -460,6 +463,7 @@ mod axum_tests {
         let app = build_router(test_state());
         let mut req = Request::builder()
             .uri("/debug/__qaqh_bridge__.js")
+            .header("host", "127.0.0.1")
             .body(Body::empty())
             .unwrap();
         req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
@@ -468,5 +472,103 @@ mod axum_tests {
         )));
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// `/debug` 的 Host 白名单：伪造 Host（DNS rebinding 形态）必须 421。
+    #[tokio::test]
+    async fn debug_bridge_rejects_foreign_host() {
+        use axum::extract::ConnectInfo;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let app = build_router(test_state());
+        let mut req = Request::builder()
+            .uri("/debug/__qaqh_bridge__.js")
+            .header("host", "evil.example")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        )));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    /// 缺 Host 一律拒绝（fail-closed；hyper 的 HTTP/1.1 服务端恒会补 Host）。
+    #[tokio::test]
+    async fn debug_bridge_rejects_missing_host() {
+        use axum::extract::ConnectInfo;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let app = build_router(test_state());
+        let mut req = Request::builder()
+            .uri("/debug/__qaqh_bridge__.js")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        )));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    /// 回环 Host 的白名单形态：localhost / IPv4 / IPv6 字面量（均可带端口）。
+    #[tokio::test]
+    async fn debug_bridge_allows_loopback_host_forms() {
+        use axum::extract::ConnectInfo;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        for host in ["127.0.0.1:51325", "localhost:51325", "[::1]:51325"] {
+            let app = build_router(test_state());
+            let mut req = Request::builder()
+                .uri("/debug/__qaqh_bridge__.js")
+                .header("host", host)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                12345,
+            )));
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "host {host} must be allowed");
+        }
+    }
+
+    /// 跨源 no-cors 子资源加载必须在浏览器侧被拒：`<script src>` 拿不到 token。
+    #[tokio::test]
+    async fn debug_bridge_sets_corp_and_nosniff() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .uri("/debug/__qaqh_bridge__.js")
+            .header("host", "127.0.0.1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("cross-origin-resource-policy")
+                .expect("CORP header"),
+            "same-origin"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-content-type-options")
+                .expect("nosniff header"),
+            "nosniff"
+        );
+    }
+
+    /// Host 守卫只作用于 `/debug` 前缀：LAN 模式远端壳（自定义 Host）不受影响。
+    #[tokio::test]
+    async fn foreign_host_does_not_block_command_api() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/control/v1/stop-if-idle")
+            .header("host", "192.168.1.50:51325")
+            .header("authorization", "Bearer test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
     }
 }

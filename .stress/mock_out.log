@@ -1,7 +1,0 @@
-[stress-mock] payload=1566B x5000 = 7830000 chars (~1957500 tokens), rate=40 chars/s
-[stress-mock] listening on http://127.0.0.1:18899
-[stress-mock] request: model=t stream=false
-[stress-mock] request: model=stress-model stream=true
-[stress-mock] request: model=stress-model stream=true
-[stress-mock] request: model=stress-model stream=true
-[stress-mock] request: model=stress-model stream=true

@@ -134,25 +134,25 @@ pub fn read_messages_tail(path: &Path, max_messages: usize) -> Vec<qaqh_types::M
     let (mut lines, truncated) = match read_last_lines(path, overread) {
         Ok(result) => result,
         Err(error) => {
-            log::warn!("[bounded-read] tail read failed for {}: {error}", path.display());
+            log::warn!(
+                "[bounded-read] tail read failed for {}: {error}",
+                path.display()
+            );
             return Vec::new();
         }
     };
-    loop {
-        parse_tail_into(&mut lines, &mut messages, max_messages);
-        if messages.len() >= max_messages || !truncated {
-            break;
-        }
+    // never_loop 修正（2026-09-12）：原 `loop` 的三条出边全是 break，实际等价于
+    // 「最多补读一轮」。展开为顺序结构，行为逐字不变，同时解开 `just clippy` 门禁。
+    parse_tail_into(&mut lines, &mut messages, max_messages);
+    if messages.len() < max_messages && truncated {
         // 损坏行比例过高：扩窗重读一次（64× 上限，防病态文件无限循环）。
-        let overread = overread.saturating_mul(2).min(max_messages.saturating_mul(64));
-        match read_last_lines(path, overread) {
-            Ok((more, _)) => {
-                lines = more;
-                // 二次仍不足即接受现状（前端拿到部分历史优于无历史）。
-                parse_tail_into(&mut lines, &mut messages, max_messages);
-                break;
-            }
-            Err(_) => break,
+        let overread = overread
+            .saturating_mul(2)
+            .min(max_messages.saturating_mul(64));
+        if let Ok((more, _)) = read_last_lines(path, overread) {
+            lines = more;
+            // 二次仍不足即接受现状（前端拿到部分历史优于无历史）。
+            parse_tail_into(&mut lines, &mut messages, max_messages);
         }
     }
     // parse_tail_into 从最新往回收集（倒序）；恢复正向时间序。
