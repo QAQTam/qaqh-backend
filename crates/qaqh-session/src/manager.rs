@@ -799,6 +799,28 @@ impl SessionManager {
             if new_messages.is_empty() {
                 return;
             }
+            // BUG-2026-09-12-07（首消息双写）：归档追加是盲写，无法区分
+            // "live drain 送达的批次"与 "WAL replay 已写入的同一批消息"，
+            // 两个入口交错时同一 msg_id 会落盘两行。msg_id 会话单调，
+            // 在此按归档尾部实际最大 msg_id 过滤，使 append 对已落盘
+            // 消息幂等（与 replay_message_wal 的去重判据一致）；无 id
+            // 的消息保持原样写入（向后兼容旧调用方）。
+            let archived_max = store::max_msg_id(dir);
+            let fresh: Vec<Message> = new_messages
+                .iter()
+                .filter(|m| match m.msg_id {
+                    Some(id) => id > archived_max,
+                    None => true,
+                })
+                .cloned()
+                .collect();
+            if fresh.is_empty() {
+                log::warn!(
+                    "[session] save_append: all {} message(s) already archived (max msg_id {archived_max}) — deduped",
+                    new_messages.len()
+                );
+                return;
+            }
             if meta.created_at == 0 {
                 meta.created_at = now;
             }
@@ -807,13 +829,13 @@ impl SessionManager {
             meta.updated_at = now;
             meta.model = model.to_string();
             meta.effort = effort.map(String::from);
-            meta.message_count = meta.message_count.saturating_add(new_messages.len());
+            meta.message_count = meta.message_count.saturating_add(fresh.len());
             meta.turn_count = turn_count;
             meta.last_summary = last_summary;
             meta.compact_skip = compact_skip;
 
-            // Append messages
-            if let Err(e) = store::append_messages(dir, new_messages) {
+            // Append messages（仅写入过滤后的新消息）
+            if let Err(e) = store::append_messages(dir, &fresh) {
                 log::error!("SessionManager: append_messages failed: {e}");
                 return;
             }
@@ -1378,6 +1400,69 @@ mod wal_recovery_tests {
             2,
             "msg_id dedupe must converge instead of double-applying"
         );
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    /// BUG-2026-09-12-07（首消息双写）：live drain 与 WAL replay 交错时，
+    /// replay 已把 msg_id=1/2 写入归档，live drain 的同一批消息再次到达
+    /// save_append —— 必须被幂等过滤，不得追加重复行。
+    #[test]
+    fn save_append_is_idempotent_against_already_archived_msg_ids() {
+        let (root, manager) = manager();
+        let seed = "append-dedupe";
+        let dir = root.join("sessions").join(seed);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        // 模拟 replay 先写入了 system(1) + user(2)。
+        manager.apply_persist_op(&append_op(
+            seed,
+            vec![
+                {
+                    let mut m = user_msg(1, "system text");
+                    m.role = "system".into();
+                    m
+                },
+                user_msg(2, "first user"),
+            ],
+        ));
+        // live drain 的同一批消息（相同 msg_id、相同字节）随后到达。
+        manager.save_append(
+            seed,
+            &[
+                {
+                    let mut m = user_msg(1, "system text");
+                    m.role = "system".into();
+                    m
+                },
+                user_msg(2, "first user"),
+            ],
+            "m",
+            None,
+            0,
+            1,
+        );
+
+        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        assert_eq!(
+            messages.len(),
+            2,
+            "double-delivered messages must not be appended twice"
+        );
+        // 混合批次：一条重复 + 一条全新 → 只追加全新的那条。
+        manager.save_append(
+            seed,
+            &[user_msg(2, "first user"), user_msg(3, "second user")],
+            "m",
+            None,
+            2,
+            2,
+        );
+        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        assert_eq!(
+            messages.len(),
+            3,
+            "only the genuinely new message must be appended"
+        );
+        assert_eq!(messages[2].msg_id, Some(3));
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 

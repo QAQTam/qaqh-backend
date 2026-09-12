@@ -377,11 +377,14 @@ fn trusted_snapshot() -> HashSet<PathBuf> {
 
 /// Resolve the effective workspace root the way the loop's engines did
 /// (empty/"." falls back to the process cwd).
+///
+/// BUG-2026-09-12-05：读 TLS 优先的 `current_workspace()` 而非进程全局——
+/// admit 发生在 actor 线程（或恢复了 actor scope 的线程），进程全局在多
+/// actor daemon 中恒空，直接读全局会把授权基准锚到 daemon 进程 cwd，与
+/// 执行线程按会话工作区解析的资源错位（RESOURCE_MISMATCH /
+/// WORKSPACE_MISMATCH 拒工具通道）。
 fn effective_workspace_root() -> PathBuf {
-    let ws = crate::CURRENT_WORKSPACE
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
+    let ws = crate::current_workspace();
     if ws.is_empty() || ws == "." {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     } else {
