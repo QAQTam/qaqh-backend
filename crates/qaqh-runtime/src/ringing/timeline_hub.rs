@@ -17,6 +17,10 @@ use super::hub::RingingHub;
 use super::hub::{TIMELINE_PERSIST_INTERVAL, TimelinePersistence};
 use crate::{TimelineError, TimelineLiveEntry};
 
+/// 落后判定的尾部读取窗口（条数）。与 `timeline_rebuild` 的投影窗口同量级：
+/// 只用于「快照最后一回合是否仍是归档最后一回合」的同一性确认，不物化历史。
+const RECONCILE_TAIL_MESSAGES: usize = 200;
+
 impl RingingHub {
     /// Move timeline checkpoint I/O off the producer/writer hot path.
     ///
@@ -84,11 +88,9 @@ impl RingingHub {
                             continue;
                         };
                         // offload 壳补齐（异步窗口；磁盘文件始终完整）。
-                        let snapshot = rehydrate_offloaded_turns(
-                            &timeline_store,
-                            &seed,
-                            snapshot,
-                        );
+                        // `store` 已在本轮持锁（:59）：此处只能借用，绝不能再取锁；
+                        // std::sync::Mutex 同线程重入 = 永久死锁（2026-09-12 冻结事故）。
+                        let snapshot = rehydrate_offloaded_turns(store, &seed, snapshot);
                         if let Err(error) = store.persist(&seed, &snapshot, journal) {
                             log::warn!("[timeline] persist failed for {seed}: {error}");
                         }
@@ -169,12 +171,10 @@ impl RingingHub {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
-                Some(store) => {
-                    match store.list_seeds() {
-                        Ok(cache_seeds) => seeds.extend(cache_seeds),
-                        Err(error) => log::warn!("[timeline] cache index failed: {error}"),
-                    }
-                }
+                Some(store) => match store.list_seeds() {
+                    Ok(cache_seeds) => seeds.extend(cache_seeds),
+                    Err(error) => log::warn!("[timeline] cache index failed: {error}"),
+                },
                 None => return,
             }
         }
@@ -232,6 +232,31 @@ impl RingingHub {
 
         match persisted_cache {
             Some(persisted) => {
+                // 快照可能落后于写侧事实：timeline 是**可重建投影**，
+                // `messages.jsonl` 才是历史真源（BUG-006 语义）。持久化中断
+                // （崩溃/冻结窗口）会把快照冻结在某一刻，此后每次启动都会把
+                // 它当作权威装载，前端于是只看到那一刻之前的回合（实测：重启
+                // 后只剩第一条 user 消息，其余回合永久不可见）。因此落后判定
+                // 必须在装载**之前**做——先装载再重建会被 `contains` 幂等门
+                // 挡掉，出现"内存旧、磁盘新"的分叉。
+                if self.persisted_timeline_is_behind(seed, &persisted.snapshot) {
+                    log::warn!(
+                        "[ringing] timeline {seed} is behind persisted messages ({} turns in \
+                         snapshot) — rebuilding projection before restore",
+                        persisted.snapshot.turns.len()
+                    );
+                    if self.rebuild_timeline_from_messages(seed) {
+                        if self.seal_orphan_running_turns(seed) {
+                            self.persist_timeline_sync(seed);
+                        }
+                        log::info!("[ringing] lazily loaded timeline {seed} (rebuilt)");
+                        return;
+                    }
+                    log::warn!(
+                        "[ringing] timeline rebuild unavailable for {seed}; keeping persisted \
+                         snapshot"
+                    );
+                }
                 let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
                 if !appender.contains(seed) {
                     appender.restore(
@@ -243,7 +268,7 @@ impl RingingHub {
             }
             None => {
                 // 无快照 → BUG-006：从 messages.jsonl / compact-context 重建投影。
-                self.rebuild_timeline_from_messages(seed);
+                let _ = self.rebuild_timeline_from_messages(seed);
                 return;
             }
         }
@@ -256,33 +281,76 @@ impl RingingHub {
         log::info!("[ringing] lazily loaded timeline {seed}");
     }
 
-    /// BUG-006：timeline 目录缺失/记录损坏时，它必须能从 messages.jsonl /
+    /// 持久化快照是否落后于写侧事实（`messages.jsonl`）。
+    ///
+    /// 两级判定，廉价在前：
+    /// 1. **数量门**：快照回合数不得少于会话已完成回合数（`meta.turn_count`）
+    ///    减一——运行中回合可能已开而 meta 尚未更新。不触发即直接判新鲜，
+    ///    不产生任何额外 I/O（只读一个小 meta 文件）。
+    /// 2. **同一性确认**：仅当数量门判定落后时才读归档尾部，比较"归档最后一回合
+    ///    = 快照最后一回合"。重建窗口（`timeline_rebuild::REBUILD_RECENT_TURNS`）
+    ///    本身会让长会话的快照天然少于 `turn_count`，用"尾部一致"排除这种正常态，
+    ///    否则每次装载都会重建 → 自激写盘。
+    ///
+    /// 只比尾部 → 幂等：重建后的快照尾部必与归档一致，不会反复重建。
+    /// 无法判定（无 sessions、无 meta、归档投影不出回合）一律返回 false，
+    /// 保持"宁可少动"的保守姿态。
+    fn persisted_timeline_is_behind(&self, seed: &str, snapshot: &TimelineSnapshot) -> bool {
+        let Some(sessions) = self.sessions.as_deref() else {
+            return false;
+        };
+        let Some(meta) = sessions.load_meta(seed) else {
+            return false;
+        };
+        if snapshot.turns.len() + 1 >= meta.turn_count {
+            return false;
+        }
+        let Some(messages) = sessions.load_recent_for_projection(seed, RECONCILE_TAIL_MESSAGES)
+        else {
+            return false;
+        };
+        let (_, archive_turns) =
+            super::projection::project_recent_turns_from_messages(seed, &messages, 1);
+        let Some(last_archive) = archive_turns.last() else {
+            return false;
+        };
+        match snapshot.turns.last() {
+            // 尾回合不同一：快照停在了更早的输入上（冻结窗口 / 回合丢失）。
+            Some(last_snapshot) => last_snapshot.user_text != last_archive.user_text,
+            // 归档有回合而快照没有任何回合：时序上必然落后。
+            None => true,
+        }
+    }
+
+    /// BUG-006：timeline 目录缺失/记录损坏/记录落后时，它必须能从 messages.jsonl /
     /// compact-context 重建，否则 timeline 就不是"可重建投影"，而会变成第二份
     /// 事实源。重建结果与 conversation snapshot 同一基线（compact 优先），
     /// 并同步写回 timeline 缓存 + timeline journal（保证下次也 journal 权威）。
-    pub(super) fn rebuild_timeline_from_messages(&self, seed: &str) {
-        if let Some((snapshot, journal)) =
+    ///
+    /// 返回 `true` = 已用重建结果接管该 seed 的 timeline（调用方无需再装载旧快照）。
+    pub(super) fn rebuild_timeline_from_messages(&self, seed: &str) -> bool {
+        let Some((snapshot, journal)) =
             super::timeline_rebuild::rebuild_timeline_snapshot(self.sessions.as_deref(), seed)
+        else {
+            return false;
+        };
         {
-            {
-                let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-                if !appender.contains(seed) {
-                    appender.restore(seed.to_string(), snapshot.clone(), journal.clone());
-                }
+            let mut appender = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            if !appender.contains(seed) {
+                appender.restore(seed.to_string(), snapshot.clone(), journal.clone());
             }
-            let mut store = self
-                .timeline_store
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(store) = store.as_mut()
-                && let Err(error) = store.persist(seed, &snapshot, journal)
-            {
-                log::warn!("[timeline] rebuild persist failed for {seed}: {error}");
-            }
-            log::info!(
-                "[ringing] rebuilt timeline {seed} from persisted messages (BUG-006 fallback)"
-            );
         }
+        let mut store = self
+            .timeline_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = store.as_mut()
+            && let Err(error) = store.persist(seed, &snapshot, journal)
+        {
+            log::warn!("[timeline] rebuild persist failed for {seed}: {error}");
+        }
+        log::info!("[ringing] rebuilt timeline {seed} from persisted messages (BUG-006 fallback)");
+        true
     }
 
     /// 接收原生 Ringing V1 timeline producer intent。此路径不接受 Agent2Ui 或 RingingEvent，
@@ -364,7 +432,8 @@ impl RingingHub {
         }
         // offload 壳补齐：内存中已卸载的 sealed turn 在落盘前恢复全文，
         // 保证快照文件始终是「无侧车也能独立恢复」的完整权威。
-        let snapshot = self.rehydrate_offloaded_turns(seed, snapshot);
+        // store_guard 已持锁：只能借用，不得再次 lock（同线程重入 = 死锁）。
+        let snapshot = rehydrate_offloaded_turns(store, seed, snapshot);
         if let Err(error) = store.persist(seed, &snapshot, journal) {
             log::warn!("[timeline] sync persist failed for {seed}: {error}");
         }
@@ -374,7 +443,10 @@ impl RingingHub {
     /// 经 offload 侧车（`ringing-offload/{seed}.jsonl`）持久化；落盘快照时
     /// 由 rehydrate 补齐。见 `timeline_store::append_offloaded_turn`。
     pub fn enable_turn_offload(&self, seed: &str) {
-        let store = self.timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+        let store = self
+            .timeline_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let Some(store) = store.as_ref() else {
             return;
         };
@@ -387,8 +459,8 @@ impl RingingHub {
         // 不需要 store 可变状态），因此回调内短暂拿锁即可。
         let timeline = self.timeline.clone();
         let timeline_store = self.timeline_store.clone();
-        let offload: crate::timeline::OffloadFn = std::sync::Arc::new(
-            move |seed: &str, turn: &qaqh_domain::TimelineTurn| {
+        let offload: crate::timeline::OffloadFn =
+            std::sync::Arc::new(move |seed: &str, turn: &qaqh_domain::TimelineTurn| {
                 let store_guard = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(store) = store_guard.as_ref() {
                     store.append_offloaded_turn(seed, turn);
@@ -396,58 +468,46 @@ impl RingingHub {
                 drop(store_guard);
                 let _ = &timeline;
                 let _ = &store_seed;
-            },
-        );
+            });
         drop(store);
         self.timeline
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .set_offload(seed, Some(offload));
     }
-
-    /// 用 offload 侧车补齐快照中已卸载（壳化）的 turn 文本。
-    /// 侧车缺失/损坏时保留壳（快照仍可恢复，全文降级为预览）。
-    fn rehydrate_offloaded_turns(
-        &self,
-        seed: &str,
-        snapshot: TimelineSnapshot,
-    ) -> TimelineSnapshot {
-        rehydrate_offloaded_turns(&self.timeline_store, seed, snapshot)
-    }
 }
 
-/// 自由函数版本：供异步 persist 线程使用（不借用 &self）。
+/// 用 offload 侧车补齐快照中已卸载（壳化）的 turn 文本。
+/// 侧车缺失/损坏时保留壳（快照仍可恢复，全文降级为预览）。
+///
+/// 入参是**已持锁**的 store 引用：本函数内禁止任何 `lock()`。同步路径
+/// （`persist_timeline_sync`）与异步 worker 均在持有 `timeline_store` 守卫的
+/// 临界区内调用它；一旦在此再次取锁，同一线程立即死锁（2026-09-12 冻结事故根因）。
 fn rehydrate_offloaded_turns(
-    timeline_store: &std::sync::Arc<
-        std::sync::Mutex<Option<crate::timeline_store::TimelineStore>>,
-    >,
+    store: &crate::timeline_store::TimelineStore,
     seed: &str,
     mut snapshot: TimelineSnapshot,
 ) -> TimelineSnapshot {
-    let store = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(store) = store.as_ref() else {
-        return snapshot;
-    };
-        for turn in &mut snapshot.turns {
-            // 壳判定（启发式）：sealed turn 的任一 block 文本/进度 ≤ 512 字符
-            // 预览上限且侧车有更新版本，则补齐（侧车没有时保持现状，无害）。
-            if turn.sealed
-                && turn.rounds.iter().any(|round| {
-                    round.blocks.iter().any(|block| {
-                        block.text.chars().count() <= 512
-                            || block
-                                .tool
-                                .as_ref()
-                                .is_some_and(|tool| tool.progress.chars().count() <= 512)
-                    })
+    for turn in &mut snapshot.turns {
+        // 壳判定（启发式）：sealed turn 的任一 block 文本/进度 ≤ 512 字符
+        // 预览上限且侧车有更新版本，则补齐（侧车没有时保持现状，无害）。
+        if turn.sealed
+            && turn.rounds.iter().any(|round| {
+                round.blocks.iter().any(|block| {
+                    block.text.chars().count() <= 512
+                        || block
+                            .tool
+                            .as_ref()
+                            .is_some_and(|tool| tool.progress.chars().count() <= 512)
                 })
-            {
-                if let Some(full) = store.load_offloaded_turn(seed, &turn.turn_id) {
-                    *turn = full;
-                }
+            })
+        {
+            if let Some(full) = store.load_offloaded_turn(seed, &turn.turn_id) {
+                *turn = full;
             }
         }
-        snapshot
+    }
+    snapshot
 }
 
 impl RingingHub {

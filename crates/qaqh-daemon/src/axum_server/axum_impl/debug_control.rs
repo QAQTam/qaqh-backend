@@ -275,6 +275,82 @@ pub(crate) async fn loopback_guard(
     next.run(req).await
 }
 
+/// `/debug` 托管面的 Host 白名单判定。
+///
+/// 回环守卫只看得见对端 IP，看不见浏览器带来的 `Host`：DNS rebinding 下攻击者页面会带着
+/// 自己的域名访问 `127.0.0.1:<port>`，对端 IP 仍是回环，仅凭 IP 无法识别。因此 `/debug`
+/// 必须额外要求 Host 为回环名字（浏览器发起的 rebinding 恒带 Host，缺 Host 一律 fail-closed）。
+pub(crate) fn loopback_host_allowed(host: &str) -> bool {
+    let host = host.trim();
+    if host.is_empty() {
+        return false;
+    }
+    // 裸 IPv6 回环（非规范 Host 写法，宽容接受）
+    if host == "::1" {
+        return true;
+    }
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        // IPv6 字面量：`[::1]:51325` / `[::1]`；括号后只允许空串或端口
+        match rest.split_once(']') {
+            Some((addr, tail)) if tail.is_empty() || tail.starts_with(':') => addr,
+            _ => return false,
+        }
+    } else {
+        // 名称/IPv4 可选带端口：`127.0.0.1:51325`、`localhost:51325`
+        host.split_once(':').map_or(host, |(name, _)| name)
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1"
+}
+
+/// `/debug` 的 Host 白名单守卫（与 `loopback_guard` 同层；两者共同构成回环边界）。
+pub(crate) async fn host_guard(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if req.uri().path().starts_with("/debug") {
+        let host = req
+            .headers()
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        if !loopback_host_allowed(host) {
+            return (
+                StatusCode::MISDIRECTED_REQUEST,
+                [
+                    (header::CONTENT_TYPE, "text/plain"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                "webUI hosting requires a loopback Host header",
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// `/debug` 响应加固：跨源 no-cors 子资源加载（`<script src=...>`）必须在浏览器侧被拒，
+/// 否则任意网页都能把桥脚本执行进自己的 realm 并读走 `window.__QAQH_DEBUG__.token`。
+/// 与 `host_guard` 互为补充：一个堵「跨源读取」，一个堵「rebinding 同源」。
+pub(crate) async fn debug_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let is_debug = req.uri().path().starts_with("/debug");
+    let mut response = next.run(req).await;
+    if is_debug {
+        let headers = response.headers_mut();
+        headers.insert(
+            header::HeaderName::from_static("cross-origin-resource-policy"),
+            axum::http::HeaderValue::from_static("same-origin"),
+        );
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        );
+    }
+    response
+}
+
 pub(crate) async fn handle_stop(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !is_authorized(&headers, &state.token) {
         return unauthorized();
