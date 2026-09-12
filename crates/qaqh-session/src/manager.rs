@@ -33,7 +33,7 @@ fn read_messages_without_deduplication(path: &std::path::Path) -> Result<Vec<Mes
     let content = std::fs::read_to_string(path)
         .map_err(|error| format!("read {}: {error}", path.display()))?;
     let total = content.lines().count();
-    content
+    let messages = content
         .lines()
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
@@ -62,8 +62,26 @@ fn read_messages_without_deduplication(path: &std::path::Path) -> Result<Vec<Mes
                 })
         })
         // 过滤被容忍的 torn tail 行。
-        .collect::<Result<Vec<Option<Message>>, String>>()
-        .map(|messages| messages.into_iter().flatten().collect())
+        .collect::<Result<Vec<Option<Message>>, String>>()?;
+    // BUG-2026-09-12-07 读侧自愈（补落盘 2026-09-12 晚，此前 dry_run 未确认
+    // 导致 0c89b51 缺失本补丁）：msg_id 会话内唯一是持久层契约，但历史双写
+    // /畸形数据可能破坏它。读取时按 msg_id keep-first 去重（与 replay 的
+    // msg_id 判据一致），让 resume/快照投影只看到干净视图；存量脏档在下次
+    // SaveFull 重写时物理自愈。乱序但唯一的 id 不重排；无 id 消息不受影响。
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut deduped = Vec::with_capacity(messages.len());
+    for message in messages.into_iter().flatten() {
+        match message.msg_id {
+            Some(id) if !seen.insert(id) => {
+                log::warn!(
+                    "[session] deduplicated repeated msg_id {id} at {} (keep-first)",
+                    path.display()
+                );
+            }
+            _ => deduped.push(message),
+        }
+    }
+    Ok(deduped)
 }
 
 #[derive(Debug)]
@@ -1463,6 +1481,44 @@ mod wal_recovery_tests {
             "only the genuinely new message must be appended"
         );
         assert_eq!(messages[2].msg_id, Some(3));
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    /// BUG-2026-09-12-07 读侧自愈回归（补落盘）：归档里的重复 msg_id 行
+    /// 在读取时被 keep-first 去重，resume 只见干净视图。
+    #[test]
+    fn read_side_dedupes_repeated_msg_ids_keep_first() {
+        let (root, manager) = manager();
+        let seed = "read-dedupe";
+        let dir = root.join("sessions").join(seed);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        manager.apply_persist_op(&append_op(
+            seed,
+            vec![user_msg(1, "first user"), user_msg(2, "second user")],
+        ));
+        // 模拟历史双写：归档尾部追加重复行（同 msg_id 同字节）。
+        let archived_path = dir.join("messages.jsonl");
+        let archived = std::fs::read_to_string(&archived_path).expect("read archive");
+        let first_two: Vec<&str> = archived.lines().take(2).collect();
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&archived_path)
+                .expect("open archive for duplicate append");
+            for line in &first_two {
+                writeln!(file, "{line}").expect("append duplicate line");
+            }
+        }
+
+        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+        assert_eq!(
+            messages.len(),
+            2,
+            "repeated msg_id lines must be dropped on read (keep-first)"
+        );
+        assert_eq!(messages[0].msg_id, Some(1));
+        assert_eq!(messages[1].msg_id, Some(2));
         std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
