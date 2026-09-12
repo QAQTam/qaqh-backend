@@ -258,6 +258,32 @@ pub fn clear_actor_context() {
     ACTOR_CANCEL.with(|slot| slot.set(false));
 }
 
+/// Push a workspace value onto THIS thread's actor-workspace slot, returning
+/// the previous value (None when the thread had none).
+///
+/// Tool execution runs on spawned OS threads which never inherit the actor
+/// thread's `ACTOR_WORKSPACE` thread-local (see `ActorToolScope`); the
+/// capture/install pair uses this accessor to carry the session workspace
+/// across the thread boundary (BUG-2026-09-12-05: without it,
+/// `current_workspace()` on a tool thread falls back to the process global —
+/// always empty in the daemon — and every relative path resolves against the
+/// daemon cwd instead of the session workspace). Must be paired with
+/// [`pop_thread_workspace`] from the guard's Drop.
+pub fn push_thread_workspace(workspace: Option<String>) -> Option<String> {
+    ACTOR_WORKSPACE.with(|slot| {
+        let previous = slot.borrow().clone();
+        *slot.borrow_mut() = workspace;
+        previous
+    })
+}
+
+/// Restore the previous actor-workspace slot value captured by
+/// [`push_thread_workspace`]. The TLS slot exists on every thread, so this is
+/// safe on spawned tool threads as well.
+pub fn pop_thread_workspace(previous: Option<String>) {
+    ACTOR_WORKSPACE.with(|slot| *slot.borrow_mut() = previous);
+}
+
 /// True when the calling thread runs inside an actor context (multi-actor
 /// daemon). Callers that would otherwise touch process-global resources
 /// (e.g. `std::env::set_current_dir`) must skip those mutations here —

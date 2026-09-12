@@ -165,6 +165,11 @@ pub struct ActorToolScope {
     manager: Option<Arc<Mutex<crate::ToolManager>>>,
     mode: u8,
     sandbox: bool,
+    /// 会话工作区快照（BUG-2026-09-12-05）：派生工具线程不继承 actor 线程
+    /// 的 ACTOR_WORKSPACE thread-local，不搬运则 grep/glob/read 相对路径与
+    /// exec 缺省 cwd 全部锚定到 daemon 进程 cwd。capture 在 actor 线程上取
+    /// `current_workspace()` 快照，install 时经 push/pop 写入工具线程。
+    workspace: Option<String>,
     /// 工具结果折叠策略（Standard / NoFold）。随工具模式按会话切换，因此必须
     /// 跟着 actor 走——留在进程级 static 会让一个会话的 minimal 模式关掉其它
     /// 会话的命令输出截断。
@@ -180,6 +185,7 @@ impl ActorToolScope {
             mode: AGENT_MODE.with(|slot| slot.get()),
             sandbox: crate::authorization::is_subagent_sandbox(),
             policy: Some(crate::tool_side_fold::policy()),
+            workspace: Some(crate::current_workspace()),
         }
     }
 
@@ -191,16 +197,24 @@ impl ActorToolScope {
         ACTOR_TOOL_MANAGER.with(|slot| *slot.borrow_mut() = self.manager.clone());
         AGENT_MODE.with(|slot| slot.set(self.mode));
         crate::authorization::set_subagent_sandbox(self.sandbox);
+        // 会话工作区跨线程搬运（BUG-2026-09-12-05）：push 返回被覆盖的旧值，
+        // Drop 时经 pop 恢复，保证 guard 语义与其它 thread-local 对称。
+        let previous_workspace = crate::push_thread_workspace(self.workspace.clone());
         if let Some(policy) = &self.policy {
             crate::tool_side_fold::set_thread_policy(policy.clone());
         }
-        ActorToolScopeGuard { previous }
+        ActorToolScopeGuard {
+            previous,
+            previous_workspace: Some(previous_workspace),
+        }
     }
 }
 
 /// Restores the pre-install thread-local state on drop.
 pub struct ActorToolScopeGuard {
     previous: ActorToolScope,
+    /// install 时被覆盖的本线程旧 workspace 值（push 的返回值），Drop 恢复。
+    previous_workspace: Option<Option<String>>,
 }
 
 impl Drop for ActorToolScopeGuard {
@@ -209,6 +223,9 @@ impl Drop for ActorToolScopeGuard {
         ACTOR_TOOL_MANAGER.with(|slot| *slot.borrow_mut() = self.previous.manager.clone());
         AGENT_MODE.with(|slot| slot.set(self.previous.mode));
         crate::authorization::set_subagent_sandbox(self.previous.sandbox);
+        if let Some(previous_workspace) = self.previous_workspace.take() {
+            crate::pop_thread_workspace(previous_workspace);
+        }
         if let Some(policy) = &self.previous.policy {
             crate::tool_side_fold::set_thread_policy(policy.clone());
         }

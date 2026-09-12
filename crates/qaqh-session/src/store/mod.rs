@@ -95,6 +95,24 @@ pub fn rewrite_messages(session_dir: &Path, messages: &[Message]) -> Result<(), 
     Ok(())
 }
 
+/// Max persisted `msg_id` in messages.jsonl (0 when the archive is empty
+/// or the messages carry no ids). Scans the file once without materializing
+/// messages (BUG-2026-09-12-07: used by `save_append` to make appends
+/// idempotent against WAL replay double-writes).
+pub fn max_msg_id(session_dir: &Path) -> u64 {
+    let path = session_dir.join("messages.jsonl");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return 0;
+    };
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Message>(line).ok())
+        .filter_map(|message| message.msg_id)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Count lines in messages.jsonl (fast, reads line-by-line without parsing JSON).
 pub fn count_message_lines(session_dir: &Path) -> Result<usize, String> {
     let path = session_dir.join("messages.jsonl");
