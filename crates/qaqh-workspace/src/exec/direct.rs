@@ -112,7 +112,7 @@ pub(crate) fn direct_exec(
             p,
             byte_cap,
             stdout_ctx,
-            |_stream: &mut std::process::ChildStdout| Ok(Readiness::Ready),
+            |_stream: &mut std::process::ChildStdout| Ok(Readiness::Ready(None)),
             stdout_done_tx,
         );
         #[cfg(windows)]
@@ -124,7 +124,7 @@ pub(crate) fn direct_exec(
                 use std::os::windows::io::AsRawHandle;
                 Ok(match pipe_available_bytes(stream.as_raw_handle()) {
                     Some(0) => Readiness::Empty,
-                    Some(_) => Readiness::Ready,
+                    Some(n) => Readiness::Ready(Some(n as usize)),
                     None => Readiness::Closed,
                 })
             },
@@ -141,7 +141,7 @@ pub(crate) fn direct_exec(
             p,
             byte_cap,
             stderr_ctx,
-            |_stream: &mut std::process::ChildStderr| Ok(Readiness::Ready),
+            |_stream: &mut std::process::ChildStderr| Ok(Readiness::Ready(None)),
             stderr_done_tx,
         );
         #[cfg(windows)]
@@ -153,7 +153,7 @@ pub(crate) fn direct_exec(
                 use std::os::windows::io::AsRawHandle;
                 Ok(match pipe_available_bytes(stream.as_raw_handle()) {
                     Some(0) => Readiness::Empty,
-                    Some(_) => Readiness::Ready,
+                    Some(n) => Readiness::Ready(Some(n as usize)),
                     None => Readiness::Closed,
                 })
             },

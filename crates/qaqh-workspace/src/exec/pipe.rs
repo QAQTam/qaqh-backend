@@ -19,11 +19,15 @@ pub(crate) struct PipePumpCtx {
 /// Empty/Closed 仅在 windows 探测路径构造（unix 走 read→WouldBlock）。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) enum Readiness {
-    /// 有数据可读（或非阻塞 fd 的 read 即将返回数据/自身报告 Empty）。
-    Ready,
+    /// 有数据可读。`Some(n)` = 平台报告的可用字节数（Windows
+    /// `PeekNamedPipe`）——读线程据此一次读空管道，避免 8 KiB/次的
+    /// 碎片化读写把大输出拖成 50ms×N 轮；`None` = 无可用量信息
+    /// （unix 非阻塞 read 自身探路），退回定长读。
+    Ready(Option<usize>),
     /// 管道当前为空（Windows PeekNamedPipe 为 0；unix 走 read→WouldBlock）。
     Empty,
-    /// 管道异常关闭（如 Windows 探测失败）——按读端关闭处理，不得阻塞。
+    /// 写端已关闭——**不代表数据已读完**：管道内可能仍有已缓冲字节，
+    /// 读线程必须继续 read 排空，`Ok(0)` 才是真 EOF。
     Closed,
 }
 
@@ -54,20 +58,66 @@ pub(crate) fn drain_pipe_to_registry<S: std::io::Read>(
     let mut capped = false;
     let mut saw_eof = false;
     let mut exit_seen: Option<std::time::Instant> = None;
+    // 单次 read 的字节数：`Ready(Some(n))` 带上 Peek 报告的可用量，
+    // 一次就把管道读空（否则 64 KiB 缓冲要 8 次 read + 8 次 50ms 轮询）。
+    // `Readiness::Ready`（unix 路径）无可用量信息，退回定长 8 KiB。
+    // 上限 64 KiB：一次 read 的临时缓冲不至于过大，同时避免单次占据过久。
+    const MAX_READ_CHUNK: usize = 64 * 1024;
+    let mut want = buf.len();
     loop {
+        // ── 顺序至关重要：先按 readiness 定本次读取量，**再**做退出判定 ──
+        // 反过来的话，只要子进程已退出且 settle 预算到期，就会在"管道里还有
+        // 没读出来的数据"时直接 break（实测：72,973 字节的 `Out-String` 输出
+        // 恒定少 8,193 字节）。settle 的职责只是"孙进程持有写端时读线程必须
+        // 确定性退出"，不是"子进程一退出就停止排空"。
+        let mut empty_and_settled = false;
         match readiness(stream) {
-            Ok(Readiness::Ready) => {}
-            Ok(Readiness::Empty) => {
-                if child_settled(&mut exit_seen, ctx) {
-                    break;
-                }
-                std::thread::sleep(READER_POLL_TICK);
-                continue;
+            Ok(Readiness::Ready(available)) => {
+                // Windows Peek 报告的可用量：一次读空管道，避免 8 KiB/次的
+                // 碎片化读写。None（unix 路径）退回定长读。
+                want = available
+                    .map(|n| n.max(1).min(MAX_READ_CHUNK))
+                    .unwrap_or(buf.len());
             }
-            Ok(Readiness::Closed) => break,
+            Ok(Readiness::Empty) => {
+                // 瞬时无数据。**不等于** stdout 已结束：子进程可能正处于写入
+                // 间隙。只有"子进程已死 + settle 预算到期"才允许放弃。
+                empty_and_settled = child_settled(&mut exit_seen, ctx);
+            }
+            Ok(Readiness::Closed) => {
+                // 写端已关闭（Windows `PeekNamedPipe` 失败）**不等于"数据读完了"**：
+                // 关闭瞬间管道里仍可能有已缓冲的字节。此处直接 break 会静默丢弃
+                // 整段输出（实测：阻塞读总量 72,876 字节，旧实现只取到 13,315；
+                // 极端情形 0 字节 + `truncated=true` 假警报）。改为**尽力排空**：
+                // 继续 read，拿到数据就继续、`Ok(0)` 才算真 EOF。
+                //
+                // 阻塞安全性：`PeekNamedPipe` 失败当且仅当**写端全部关闭**
+                // （ERROR_BROKEN_PIPE）或句柄异常。写端全关时 read 只会返回缓冲
+                // 数据或 EOF，不会无限阻塞；孙进程仍持写端的情形 Peek 报 0
+                // （走 Empty），不会进这里。
+                //
+                // 仍然加一道门：子进程**仍在运行**时不在本分支做阻塞 read
+                // （保守，避免任何"Peek 瞬时失败 + 孙进程持写端"的挂起窗口
+                // 重新引入读线程驻留）。`is_running` 为假时排空是安全的——这与
+                // settle 预算的意图（孙进程持写端 → 只再排空 300ms）一致。
+                if crate::process_registry::ProcessRegistry::is_running(ctx.registry_id) {
+                    if child_settled(&mut exit_seen, ctx) {
+                        break;
+                    }
+                    std::thread::sleep(READER_POLL_TICK);
+                    continue;
+                }
+                want = buf.len();
+            }
             Err(_) => break,
         }
-        match stream.read(&mut buf) {
+        if empty_and_settled {
+            break;
+        }
+        // 先定下本次读取的字节数，避免 `&mut buf[..]` 的借用与后续对 `want` 的
+        // 比较交叠（NLL 下 `want` 的读取会被判为与 buf 的可变借用冲突）。
+        let cap_now = want.min(buf.len());
+        match stream.read(&mut buf[..cap_now]) {
             Ok(0) => {
                 saw_eof = true;
                 break;
@@ -89,6 +139,9 @@ pub(crate) fn drain_pipe_to_registry<S: std::io::Read>(
                 if retained < n {
                     capped = true;
                 }
+                // 读到数据即说明还在排空：立刻再读一轮（不睡 50ms）。这是
+                // "突发大输出一次排空"的快路径；`Ok(0)` 才是终点。
+                continue;
             }
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
@@ -101,9 +154,6 @@ pub(crate) fn drain_pipe_to_registry<S: std::io::Read>(
                 continue;
             }
             Err(_) => break,
-        }
-        if child_settled(&mut exit_seen, ctx) {
-            break;
         }
     }
     if !pending_utf8.is_empty() {
