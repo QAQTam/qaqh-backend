@@ -20,11 +20,12 @@ use std::sync::atomic::AtomicBool;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sse::SseDecoder;
-use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
 use super::transport::{
-    Attempt, SseTrace, block_on, filter_stateful_messages, http_error_description,
+    Attempt, SseTrace, StatefulFilter, block_on, filter_stateful_messages, http_error_description,
     is_cancelled, is_retryable, normalize_skill_envelope, parse_retry_after, run_with_retry,
+    stateful_noop_done_event, stateful_noop_sync_error,
 };
+use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
 use super::types::{EmptyStreamEof, ProviderConfig, StreamEvent, safe_provider_error_body};
 
 fn build_anthropic_url(base_url: &str, anthropic_path: Option<&str>) -> String {
@@ -605,9 +606,7 @@ fn stream_sse_anthropic_with_policy(
                     return Err(anyhow::Error::new(EmptyStreamEof));
                 }
                 if !provider.stateful {
-                    log::warn!(
-                        "Anthropic SSE interrupted mid-stream, keeping partial output: {e}"
-                    );
+                    log::warn!("Anthropic SSE interrupted mid-stream, keeping partial output: {e}");
                     stream_interrupted = true;
                     break;
                 }
@@ -633,10 +632,7 @@ fn stream_sse_anthropic_with_policy(
                         stream_interrupted = true;
                         break;
                     }
-                    let msg = format!(
-                        "SSE idle timeout after {}s",
-                        policy.idle_timeout.as_secs()
-                    );
+                    let msg = format!("SSE idle timeout after {}s", policy.idle_timeout.as_secs());
                     traced(StreamEvent::Error(msg.clone()));
                     return Err(anyhow::anyhow!("{}", msg));
                 }
@@ -751,7 +747,20 @@ pub fn chat_stream_anthropic(
 ) -> anyhow::Result<()> {
     let messages = normalize_skill_envelope(provider, messages).map_err(anyhow::Error::msg)?;
     let (messages, image_index_base) = if provider.stateful {
-        filter_stateful_messages(messages)
+        match filter_stateful_messages(messages) {
+            StatefulFilter::Incremental {
+                messages,
+                dropped_images,
+            } => (messages, dropped_images),
+            // BUG-2026-09-13-12：增量全灭 → 零 HTTP 请求 no-op 成功。
+            StatefulFilter::Empty => {
+                log::info!(
+                    "stateful increment empty (tail assistant) — skipping anthropic request as no-op"
+                );
+                on_event(stateful_noop_done_event());
+                return Ok(());
+            }
+        }
     } else {
         (messages, 0)
     };
@@ -898,7 +907,17 @@ pub fn chat_sync_anthropic(
 ) -> Result<String, String> {
     let messages = normalize_skill_envelope(provider, messages)?;
     let (messages, image_index_base) = if provider.stateful {
-        filter_stateful_messages(messages)
+        match filter_stateful_messages(messages) {
+            StatefulFilter::Incremental {
+                messages,
+                dropped_images,
+            } => (messages, dropped_images),
+            // BUG-2026-09-13-12：sync 无流式收口，返回可重试错误而非空数组 400。
+            StatefulFilter::Empty => {
+                log::warn!("stateful increment empty (tail assistant) — anthropic sync skipped");
+                return Err(stateful_noop_sync_error());
+            }
+        }
     } else {
         (messages, 0)
     };
@@ -950,9 +969,7 @@ pub fn chat_sync_anthropic(
             let retry_after = parse_retry_after(resp.headers(), &policy);
             let text = block_on(resp.text()).unwrap_or_default();
             if status != 401 && is_retryable(status) {
-                log::warn!(
-                    "Anthropic sync attempt {attempt} HTTP {status} retryable, will retry"
-                );
+                log::warn!("Anthropic sync attempt {attempt} HTTP {status} retryable, will retry");
                 return Attempt::Retry {
                     retry_after,
                     reason: format!("sync HTTP {} ({})", status, http_error_description(status)),
