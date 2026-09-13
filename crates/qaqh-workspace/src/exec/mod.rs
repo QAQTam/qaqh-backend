@@ -16,7 +16,7 @@ pub mod truncate;
 pub use register::register;
 
 #[cfg(test)]
-pub(crate) use direct::direct_exec;
+pub(crate) use direct::{direct_exec, reader_eof_warning};
 #[cfg(test)]
 pub(crate) use handler::{
     detect_background_derivation, handle_run_exec, normalize_command_rg, normalize_rg_argv,
