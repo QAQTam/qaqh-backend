@@ -1287,3 +1287,141 @@ fn tool_result_image_ref_is_lowered_to_data_uri() {
     unsafe { std::env::remove_var("QAQH_DATA_DIR") };
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ── Anthropic Messages API tests (BUG-2026-09-13-27) ─────────────────
+
+fn make_anthropic_provider(mock: &MockServer) -> ProviderConfig {
+    ProviderConfig::anthropic(
+        &mock.base_url(),
+        "sk-test-key",
+        "test-model",
+        Some("/v1/messages".to_string()),
+    )
+}
+
+/// 最小 Anthropic SSE 场景：一个 text 块 + message_delta + message_stop。
+fn anthropic_sse_scenario() -> Vec<mock_server::SseChunk> {
+    vec![
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"test-model\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw(
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n".into(),
+        ),
+        mock_server::SseChunk::Raw("data: {\"type\":\"message_stop\"}\n\n".into()),
+        mock_server::SseChunk::done(),
+    ]
+}
+
+/// BUG-2026-09-13-27：user 消息的所有内容块都被转换逻辑忽略
+/// （空 Text 被过滤、`_ => {}` 丢弃其他变体）时，旧实现兜底产出
+/// `{"type":"text","text":""}`，Anthropic 及严格端点会以 400 拒绝且不可重试。
+#[test]
+fn anthropic_user_message_with_only_ignored_blocks_is_not_sent_as_empty_text() {
+    let mock = MockServer::new(anthropic_sse_scenario());
+    let provider = make_anthropic_provider(&mock);
+
+    // 该 user 消息零可转换块：空 text + 无角色承载能力的 ResponseOutputItem。
+    let messages = vec![
+        Message {
+            msg_id: None,
+            role: "user".to_string(),
+            name: None,
+            content: vec![
+                ContentBlock::text(""),
+                ContentBlock::ResponseOutputItem {
+                    item: json!({"type": "message"}),
+                },
+            ],
+        },
+        Message::user("hello"),
+    ];
+
+    let _events = collect_events(&provider, messages, None);
+
+    let body = mock
+        .last_request_body
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("request body captured");
+    let sent: serde_json::Value = serde_json::from_str(&body).expect("valid request json");
+    let msgs = sent["messages"].as_array().expect("messages array");
+
+    for m in msgs {
+        for block in m["content"].as_array().expect("content array") {
+            assert_ne!(
+                block["text"].as_str(),
+                Some(""),
+                "empty text block must never reach the Anthropic endpoint: {body}"
+            );
+        }
+    }
+    // 全忽略的 user 消息应被丢弃，而不是产出空 text 兜底块。
+    let user_texts: Vec<&str> = msgs
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+        .filter_map(|b| b["text"].as_str().map(|s| s.to_string()))
+        .map(|s| Box::leak(s.into_boxed_str()) as &str)
+        .collect();
+    assert_eq!(
+        user_texts,
+        vec!["hello"],
+        "ignored-only user message must be dropped: {body}"
+    );
+}
+
+/// 反例保护：user 消息里只要还有块能产出 wire 内容（这里是图片占位符），
+/// 该消息必须保留（不能被整条丢弃）。
+#[test]
+fn anthropic_user_message_with_image_placeholder_is_kept() {
+    let mock = MockServer::new(anthropic_sse_scenario());
+    let provider = make_anthropic_provider(&mock);
+
+    let messages = vec![Message {
+        msg_id: None,
+        role: "user".to_string(),
+        name: None,
+        content: vec![
+            ContentBlock::text(""),
+            ContentBlock::image("image/png", "aGVsbG8="),
+        ],
+    }];
+
+    let _events = collect_events(&provider, messages, None);
+
+    let body = mock
+        .last_request_body
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("request body captured");
+    let sent: serde_json::Value = serde_json::from_str(&body).expect("valid request json");
+    let msgs = sent["messages"].as_array().expect("messages array");
+    assert_eq!(
+        msgs.len(),
+        1,
+        "user message with image must be kept: {body}"
+    );
+    let texts: Vec<&str> = msgs[0]["content"]
+        .as_array()
+        .expect("content array")
+        .iter()
+        .filter_map(|b| b["text"].as_str())
+        .collect();
+    assert_eq!(texts.len(), 1, "image placeholder text expected: {body}");
+    assert!(
+        texts[0].contains("read_image"),
+        "placeholder must keep read_image hint: {body}"
+    );
+}
