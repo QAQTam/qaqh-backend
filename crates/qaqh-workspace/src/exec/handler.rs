@@ -3,7 +3,7 @@
 use crate::{ToolCallCtx, ToolResult};
 
 use super::direct::direct_exec;
-use super::shell::{Shell, executable_on_path};
+use super::shell::Shell;
 
 // ── Tool handler ──
 
@@ -62,17 +62,11 @@ pub(crate) fn handle_run_exec(ctx: ToolCallCtx) -> ToolResult {
     handle_run_with_shell(ctx, None)
 }
 /// shell 可用性软检测：注册不拒绝，调用时解析路径不可用才报错。
-/// shell 可用性软检测：注册不拒绝，调用时解析路径不可用才报错。
+/// 探测口径委托给 [`Shell::available`]——按候选集探测，与派生 argv 同源；
+/// 旧实现只查 `path()` 一个名字，在「只有 sh/dash 的精简镜像」或
+/// 「git-bash 尚未解析」时会把明明能跑的命令判成 SHELL_NOT_FOUND。
 pub(crate) fn shell_available(shell: Shell) -> bool {
-    let _ = Shell::detect();
-    let _ = Shell::from_name("bash");
-    let path = shell.path();
-    let p = std::path::Path::new(path);
-    if p.is_absolute() {
-        p.is_file()
-    } else {
-        executable_on_path(path)
-    }
+    shell.available()
 }
 
 /// 本机可用 shell 清单（软检测报错的引导信息）。
@@ -143,7 +137,8 @@ pub(crate) fn handle_run_with_shell(ctx: ToolCallCtx, fixed: Option<Shell>) -> T
             },
         };
         // `args: string[]` 透传（模板与数据分离，避免在脚本字符串内拼接引号）：
-        // - PowerShell 7.6 LTS：-CommandWithArgs 把额外参数原样填入 $args；
+        // - PowerShell 7.6 LTS：-CommandWithArgs 把额外参数原样填入 $args
+        //   （只绑 $args，不产生 $arg0/$argN——脚本用 $args[0]/$args.Count 取样）；
         // - POSIX（bash/zsh/sh）：`sh -c 'script' _ arg...`，参数进 $1/$2/$@（$0 固定占位 `_`）。
         let extra_args: Option<Vec<String>> = ctx
             .args
@@ -344,7 +339,7 @@ pub(crate) fn exec_schema(with_shell: bool) -> serde_json::Value {
     );
     props.insert(
         "args".into(),
-        serde_json::json!({ "type": "array", "items": {"type": "string"}, "description": "Extra args for command: bash/zsh/sh fills $1/$2/$@ ($0 is placeholder `_`); pwsh fills $args (-CommandWithArgs). cmd does not support args." }),
+        serde_json::json!({ "type": "array", "items": {"type": "string"}, "description": "Extra args for command: bash/zsh/sh fills $1/$2/$@ ($0 is placeholder `_`); pwsh fills $args (-CommandWithArgs; read as $args[0]/$args.Count, $argN does not exist). cmd does not support args." }),
     );
     if with_shell {
         props.insert(

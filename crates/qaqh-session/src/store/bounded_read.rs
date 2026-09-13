@@ -234,7 +234,7 @@ mod tests {
         // 解析层负责跳过），但本测试锁定行为：不 panic、不丢完整行。
         assert!(lines.contains(&"valid-1".to_string()));
         assert!(lines.contains(&"valid-2".to_string()));
-        assert_eq!(truncated, false);
+        assert!(!truncated);
         let _ = std::fs::remove_file(&path);
     }
 

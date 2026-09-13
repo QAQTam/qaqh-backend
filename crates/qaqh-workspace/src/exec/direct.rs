@@ -246,6 +246,29 @@ pub(crate) fn direct_exec(
     let join_deadline = std::time::Instant::now() + SEAL_JOIN_BUDGET;
     let (stdout_eof, stdout_capped) = wait_reader_done(&stdout_done_rx, join_deadline);
     let (stderr_eof, stderr_capped) = wait_reader_done(&stderr_done_rx, join_deadline);
+    // O-2（issue #35）：读线程未走 `Ok(0)` 必须先落 warning 再谈截断标记。
+    // 判据本身不动（保守提示），但要留下证据链——否则线上只有 `truncated:true`，
+    // BUG-2026-09-12-EXEC-01 定位时被迫从结果字段反推（多绕一圈）。
+    let hard_trunc = !stdout_eof || !stderr_eof || stdout_capped || stderr_capped;
+    let captured_len = crate::process_registry::ProcessRegistry::captured_full(proc_id)
+        .map(|(out, err)| out.len() + err.len())
+        .unwrap_or(0);
+    if !stdout_eof || !stderr_eof {
+        log::warn!(
+            "{}",
+            reader_eof_warning(
+                proc_id,
+                &display_name,
+                stdout_eof,
+                stderr_eof,
+                stdout_capped,
+                stderr_capped,
+                captured_len,
+                exit_code,
+                cancelled,
+            )
+        );
+    }
     let (stdout_out, stderr_out) = crate::process_registry::ProcessRegistry::captured_full(proc_id)
         .unwrap_or_else(|| {
             // 防御性：seal 紧跟退出执行，条目惰性驱逐（10 分钟终态门槛）
@@ -264,9 +287,8 @@ pub(crate) fn direct_exec(
         }
     }
     combined.push_str(&stdout_out);
-    // truncated 口径：字节预算耗尽（任一流）或读线程未以 EOF 收尾
-    // （settle 放弃 = 孙进程可能继续产出，保守提示输出可能不完整）。
-    let hard_trunc = !stdout_eof || !stderr_eof || stdout_capped || stderr_capped;
+    // truncated 口径（见上方 hard_trunc）：字节预算耗尽（任一流）或读线程未以
+    // EOF 收尾（settle 放弃 = 孙进程可能继续产出，保守提示输出可能不完整）。
     let cleaned = strip_ansi(&combined);
     let total_tokens = qaqh_types::token::count_tokens(&cleaned);
     let (output_str, truncated) = if total_tokens > max_output_tokens || hard_trunc {
@@ -307,4 +329,45 @@ impl ExecOutput {
         serde_json::to_string(self)
             .unwrap_or_else(|_| r#"{"status":"error","output":"serialization failed"}"#.into())
     }
+}
+
+/// O-2（issue #35）：读线程未走到 EOF 时的 warning 正文。
+///
+/// 判据（`!stdout_eof || !stderr_eof`）的定义与"哪些退出路径会让
+/// `saw_eof=false`"见 [`super::pipe::drain_pipe_to_registry`] 的文档；
+/// 那里是实现，这里只是渲染证据。
+///
+/// 单列为纯函数（而非内联 `log::warn!`）有两点理由：字段可被单测直接
+/// 断言（无需日志捕获装置），以及"缺哪些证据"一眼可见——定位一次线上
+/// 截断需要的 (proc_id, cmd, 两路 eof, 两路 capped, 已捕获字节,
+/// exit_code, cancelled) 必须一个不少。
+///
+/// `truncated` 与 `direct_exec` 的 `hard_trunc` 同判据：warn 里自报的
+/// 结果状态与返回给调用方的 `ExecOutput.truncated` 必须一致。
+#[allow(clippy::too_many_arguments)] // 逐字段透出诊断证据，收拢成结构体只会更晦涩
+pub(crate) fn reader_eof_warning(
+    proc_id: u32,
+    command: &str,
+    stdout_eof: bool,
+    stderr_eof: bool,
+    stdout_capped: bool,
+    stderr_capped: bool,
+    captured_bytes: usize,
+    exit_code: Option<i32>,
+    cancelled: bool,
+) -> String {
+    let truncated = !stdout_eof || !stderr_eof || stdout_capped || stderr_capped;
+    // exit_code 用 `{}` 而非 `{:?}`：日志正文出现 `Some(0)` 反而难 grep。
+    let exit_code = exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "[exec] WARN reader did not reach EOF — proc_id={proc_id}, cmd={command}, \
+         stdout_eof={stdout_eof}, stderr_eof={stderr_eof}, \
+         stdout_capped={stdout_capped}, stderr_capped={stderr_capped}, \
+         captured_bytes={captured_bytes}, exit_code={exit_code}, \
+         cancelled={cancelled} — settle gave up on a still-open pipe \
+         (grandchild holding the write end?); output may be incomplete \
+         (truncated={truncated})"
+    )
 }

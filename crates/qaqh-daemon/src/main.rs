@@ -80,6 +80,7 @@ fn main() {
             // probing runs once here at daemon startup (populates prompt.rs
             // OS_INFO/TOOLS_INFO for {{OS}}/{{TOOLS}} in the system prompt).
             qaqh_runtime::cache_system_path();
+            qaqh_runtime::detect_shell();
             qaqh_runtime::detect_os_info();
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
             let result = runtime.block_on(server::run());
