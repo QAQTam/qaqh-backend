@@ -112,6 +112,34 @@ impl SessionManager {
             .expect("SessionManager already initialized");
     }
 
+    /// 构造一个不与全局单例耦合的实例（测试/嵌入用：PR-3-1 注入化的
+    /// 显式入口，测试不再靠重建字段字面量绕过封装）。
+    ///
+    /// 依赖 workspace 账户的子路径（`delete` / `set_cwd`）需要
+    /// [`Self::init_for_test`] 先初始化进程级 store；纯文件路径不依赖。
+    #[doc(hidden)]
+    pub fn new_for_test(sessions_dir: PathBuf, active_path: PathBuf) -> Self {
+        Self {
+            sessions_dir,
+            active_path,
+            session_locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 进程级依赖初始化（workspace 账户 / 会话目录），供测试与嵌入方在
+    /// 自建实例前调用一次；重复调用是 no-op（`OnceLock` 语义）。
+    #[doc(hidden)]
+    pub fn init_for_test(data_dir: PathBuf) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        let sessions_dir = data_dir.join("sessions");
+        let _ = std::fs::create_dir_all(&sessions_dir);
+        // 进程级单例：并发/多次调用只初始化一次（同进程测试共享）。
+        ONCE.call_once(|| {
+            let _ = std::fs::create_dir_all(&data_dir);
+            crate::grouping::WorkspaceStore::init(data_dir)
+        });
+    }
+
     /// Access the global instance.
     ///
     /// PR-3-1 注入化：仅 daemon `main` 装配点与 §10.3 白名单测试可调用；
@@ -160,6 +188,11 @@ impl SessionManager {
 
     /// Delete a session: removes the session directory and its index entry.
     pub fn delete(&self, seed: &str) -> Result<(), String> {
+        let dir = self.session_path_dir(seed);
+        // 水位缓存按**目录路径**键控（不依赖目录是否存在），所以失效必须
+        // 先于删除、且不因目录查询失败而跳过——否则同 seed 重建会读到旧
+        // 水位，把新会话的低 msg_id 首批全部误判为已归档。
+        store::invalidate_watermark(&dir);
         let dir = self
             .session_dir(seed)
             .ok_or_else(|| format!("Session not found: {seed}"))?;
@@ -694,6 +727,11 @@ impl SessionManager {
                 log::error!("SessionManager: save_one failed: {e}");
                 return;
             }
+            // save_one 绕过 save_append：不推进水位的话，其 msg_id 会被
+            // 后续 append 的去重判据当成「未落盘」而重复写入。
+            if let Some(id) = msg.msg_id {
+                store::note_watermark(dir, id);
+            }
             if let Err(e) = store::write_meta(dir, meta) {
                 log::error!("SessionManager: save_one metadata write failed: {e}");
                 return;
@@ -797,6 +835,9 @@ impl SessionManager {
             log::error!("SessionManager: rewrite_messages failed: {e}");
             return;
         }
+        // 全量重写会把 msg_id 重基到新序列（undo/compact）：水位必须重算，
+        // 否则旧高水位会把重写后的低 id 全部误判为「已归档」而丢弃。
+        store::invalidate_watermark(&dir);
         if let Err(e) = store::write_meta(&dir, &meta) {
             log::error!("SessionManager: write_meta failed: {e}");
             return;
@@ -826,7 +867,7 @@ impl SessionManager {
             // 在此按归档尾部实际最大 msg_id 过滤，使 append 对已落盘
             // 消息幂等（与 replay_message_wal 的去重判据一致）；无 id
             // 的消息保持原样写入（向后兼容旧调用方）。
-            let archived_max = store::max_msg_id(dir);
+            let archived_max = store::watermark_msg_id(dir);
             let fresh: Vec<Message> = new_messages
                 .iter()
                 .filter(|m| match m.msg_id {
@@ -860,6 +901,8 @@ impl SessionManager {
                 log::error!("SessionManager: append_messages failed: {e}");
                 return;
             }
+            // 落盘成功后才推进水位：失败批次不得让判据超前（否则丢消息）。
+            store::note_watermark(dir, Self::batch_max_msg_id(&fresh).max(archived_max));
 
             if let Err(e) = store::write_meta(dir, meta) {
                 log::error!("SessionManager: write_meta failed: {e}");
@@ -1013,6 +1056,15 @@ impl SessionManager {
         } else {
             None
         }
+    }
+
+    /// 一批消息的最大 `msg_id`（无 id 消息不参与）。
+    fn batch_max_msg_id(messages: &[Message]) -> u64 {
+        messages
+            .iter()
+            .filter_map(|message| message.msg_id)
+            .max()
+            .unwrap_or(0)
     }
 
     fn extract_summary(messages: &[Message]) -> String {
