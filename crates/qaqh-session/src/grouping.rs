@@ -190,17 +190,19 @@ impl WorkspaceStore {
             return Err(format!("workspace.create: not a directory: {path}"));
         }
         let canonical_str = canonical_cwd(Path::new(path));
-        // 去重：同一 canonical 路径不重复创建，直接返回已存在项（避免
-        // 顶部/左侧两入口重复点导致多条同路径工作区，左侧筛选失焦）。
+
+        // 查重与注册必须在同一临界区内完成（BUG-2026-09-13-26）：历史实现
+        // 先在锁外查重「先无锁查重、后加锁 register」，两线程可同时通过查重
+        // → 同路径重复注册，左侧筛选失焦。generate_id 的计数器只防 id 碰撞，
+        // 不防重复注册，故此处以 `inner` 单锁覆盖「查重 → 分配 order → push」。
+        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = items
+            .iter()
+            .find(|w| normalize_path(&w.path) == normalize_path(&canonical_str))
         {
-            let items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(existing) = items
-                .iter()
-                .find(|w| normalize_path(&w.path) == normalize_path(&canonical_str))
-            {
-                return Ok(existing.clone());
-            }
+            return Ok(existing.clone());
         }
+
         let title = Path::new(path)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -208,7 +210,6 @@ impl WorkspaceStore {
             .unwrap_or_else(|| path.to_string());
         let id = generate_id(&canonical_str);
 
-        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let order = *self.next_order.lock().unwrap_or_else(|e| e.into_inner());
         *self.next_order.lock().unwrap_or_else(|e| e.into_inner()) = order + 1;
 
@@ -328,6 +329,30 @@ impl WorkspaceStore {
 mod tests {
     use super::*;
 
+    /// 进程级单例测试装置（BUG-2026-09-13-26）。
+    ///
+    /// `INSTANCE` 是 `OnceLock`，全进程只能 `init` 一次——新增一个用例再调
+    /// `init` 会 panic（`WorkspaceStore already initialized`），并让后续用例
+    /// 随机红。故此处统一初始化一次到固定目录；每个用例开头调
+    /// [`reset_store`] 清空注册表，保持用例间隔离（`RUST_TEST_THREADS=1`，
+    /// 见 `.cargo/config.toml`）。
+    fn fixture_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("qaqh-ws-fixture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir fixture");
+        dir
+    }
+
+    fn reset_store() -> &'static WorkspaceStore {
+        let dir = fixture_dir();
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| WorkspaceStore::init(dir));
+        let store = WorkspaceStore::global();
+        let mut items = store.inner.lock().unwrap_or_else(|e| e.into_inner());
+        items.clear();
+        *store.next_order.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+        store
+    }
+
     #[test]
     #[cfg(windows)] // Windows 盘符/cmd 语义；Linux 无对应环境
     fn cwd_belongs_matches_self_and_children() {
@@ -347,14 +372,57 @@ mod tests {
         assert_ne!(a, b); // 时间戳前缀保证不同
     }
 
+    /// 回归（BUG-2026-09-13-26）：并发 create 同一路径必须只注册一条。
+    /// 修复前存在 TOCTOU——查重在锁外（L196-203）、push 在另一次加锁（L211），
+    /// 多线程可在两次加锁之间同时通过查重 → 重复注册同路径 workspace。
+    #[test]
+    fn concurrent_create_same_path_registers_once() {
+        let store = reset_store();
+        let dup = fixture_dir().join("dup");
+        std::fs::create_dir_all(&dup).expect("mkdir dup");
+        let path = dup.to_str().expect("path").to_string();
+
+        const THREADS: usize = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.create(&path, &[]).expect("create").id
+            }));
+        }
+        let ids: Vec<String> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+
+        let listed: Vec<WorkspaceMeta> = store
+            .list()
+            .into_iter()
+            .filter(|w| normalize_path(&w.path) == normalize_path(&path))
+            .collect();
+        assert_eq!(
+            listed.len(),
+            1,
+            "并发 create 同路径应只注册一条，实际 {} 条: {:?}",
+            listed.len(),
+            listed.iter().map(|w| w.id.clone()).collect::<Vec<_>>()
+        );
+        assert!(
+            ids.iter().all(|id| id == &listed[0].id),
+            "所有并发调用应返回同一 workspace id: {:?} vs {:?}",
+            ids,
+            listed[0].id
+        );
+
+        let _ = std::fs::remove_dir_all(&dup);
+    }
+
     #[test]
     fn move_session_migrates_account() {
-        let dir = std::env::temp_dir().join(format!("dsh-ws-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let store = reset_store();
+        let dir = fixture_dir().join("move");
         let _ = std::fs::create_dir_all(dir.join("a"));
         let _ = std::fs::create_dir_all(dir.join("b"));
-        WorkspaceStore::init(dir.clone());
-        let store = WorkspaceStore::global();
         let ws_a = store
             .create(dir.join("a").to_str().expect("path"), &[])
             .expect("create a");
