@@ -88,11 +88,11 @@ impl TimelineStore {
     pub fn append_offloaded_turn(&self, seed: &str, turn: &qaqh_domain::TimelineTurn) {
         use std::io::Write;
         let path = self.offload_path_for(seed);
-        if let Some(parent) = path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                log::warn!("[timeline] offload dir create failed for {seed}: {error}");
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            log::warn!("[timeline] offload dir create failed for {seed}: {error}");
+            return;
         }
         let line = match serde_json::to_string(turn) {
             Ok(line) => line,
@@ -112,9 +112,7 @@ impl TimelineStore {
                 return;
             }
         };
-        if let Err(error) = writeln!(file, "{line}")
-            .and_then(|_| file.flush())
-        {
+        if let Err(error) = writeln!(file, "{line}").and_then(|_| file.flush()) {
             log::warn!("[timeline] offload append failed for {seed}: {error}");
         }
     }
@@ -221,7 +219,8 @@ impl TimelineStore {
     }
 
     fn audit_path_for(&self, seed: &str) -> PathBuf {
-        self.audit_root.join(format!("{}.jsonl", sanitize_seed(seed)))
+        self.audit_root
+            .join(format!("{}.jsonl", sanitize_seed(seed)))
     }
 
     /// 追加轻量审计行（`seq` + `ts` + 事件类型，**不含正文**）。
@@ -506,10 +505,7 @@ mod tests {
         //   1. 每条记 seq + ts + type + turn；
         //   2. **不写正文**（内容在快照 / messages.jsonl 已有唯一权威）；
         //   3. 水位去重：重复调用不得产生重复行。
-        let root = std::env::temp_dir().join(format!(
-            "qaqh-timeline-audit-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("qaqh-timeline-audit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut store = TimelineStore::new(&root).unwrap();
         let entries = audit_entries();
@@ -541,10 +537,8 @@ mod tests {
     fn audit_rotation_keeps_recent_rows_within_bound() {
         // 滚动上界：超过 AUDIT_ROTATE_BYTES 后只保留尾部，磁盘占用恒定。
         use qaqh_domain::TimelineEvent;
-        let root = std::env::temp_dir().join(format!(
-            "qaqh-timeline-audit-rotate-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("qaqh-timeline-audit-rotate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut store = TimelineStore::new(&root).unwrap();
         // 每行 ~60 B；写入足够多使其越过 2 MiB 上限。
