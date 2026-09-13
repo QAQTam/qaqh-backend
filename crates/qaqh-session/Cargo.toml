@@ -18,6 +18,8 @@ sha2 = "0.11"
 hex = "0.4"
 
 [dev-dependencies]
+# Test-only: deterministic WAL read-fault injection (BUG-2026-09-13-06).
+qaqh-message = { path = "../qaqh-message", features = ["test-harness"] }
 tempfile = "3"
 
 [lints.clippy]
