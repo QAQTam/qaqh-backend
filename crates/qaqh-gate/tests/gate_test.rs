@@ -1425,3 +1425,81 @@ fn anthropic_user_message_with_image_placeholder_is_kept() {
         "placeholder must keep read_image hint: {body}"
     );
 }
+
+// ── BUG-2026-09-13-20: responses sync 空内容必须 Fatal ────────────────
+
+/// 仅 reasoning 输出：`output` 里只有 reasoning item，没有 output_text。
+fn reasoning_only_responses_body() -> serde_json::Value {
+    json!({
+        "id": "resp_1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{ "type": "summary_text", "text": "Let me think..." }]
+            }
+        ],
+        "usage": { "input_tokens": 10, "output_tokens": 5, "total_tokens": 15 }
+    })
+}
+
+/// 回归：空内容曾返回 `Ok("")` —— compact/标题流程静默成功，污染压缩后上下文。
+/// 对齐 chat_completions_api / message_api 的 Fatal("no content") 语义。
+#[test]
+fn responses_sync_empty_content_is_fatal() {
+    let mock = MockServer::new(vec![SseChunk::json_body(reasoning_only_responses_body())]);
+    let provider = make_responses_provider(&mock);
+
+    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("summarize")], 1024);
+
+    let err = out.expect_err("empty content must be an error, not Ok(\"\")");
+    assert!(
+        err.contains("no content"),
+        "error must mirror the sibling adapters' wording, got: {err}"
+    );
+    assert_eq!(mock.request_count.load(Ordering::SeqCst), 1);
+}
+
+/// 反例保护：非空 output_text 仍必须正常返回文本。
+#[test]
+fn responses_sync_non_empty_content_still_succeeds() {
+    let body = json!({
+        "id": "resp_2",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "Summary: ok" }]
+            }
+        ]
+    });
+    let mock = MockServer::new(vec![SseChunk::json_body(body)]);
+    let provider = make_responses_provider(&mock);
+
+    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("summarize")], 1024);
+
+    assert_eq!(out.expect("non-empty content must succeed"), "Summary: ok");
+}
+
+/// 反例保护：`output_text` 里显式空串同样视为无内容 → Fatal。
+#[test]
+fn responses_sync_whitespace_free_empty_output_text_is_fatal() {
+    let body = json!({
+        "id": "resp_3",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "" }]
+        }]
+    });
+    let mock = MockServer::new(vec![SseChunk::json_body(body)]);
+    let provider = make_responses_provider(&mock);
+
+    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("summarize")], 1024);
+
+    let err = out.expect_err("empty output_text must be an error");
+    assert!(err.contains("no content"), "got: {err}");
+}

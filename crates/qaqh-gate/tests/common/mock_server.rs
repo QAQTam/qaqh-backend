@@ -18,6 +18,10 @@ pub enum SseChunk {
     #[allow(dead_code)]
     Delay(Duration),
     HttpError(u16, serde_json::Value),
+    /// A complete application/json body (non-streaming responses, e.g. the
+    /// sync/compact path). Mutually exclusive with SSE chunks: it must be the
+    /// only element of the scenario.
+    JsonBody(serde_json::Value),
 }
 
 impl SseChunk {
@@ -71,6 +75,11 @@ impl SseChunk {
     pub fn error(status: u16, message: &str) -> Self {
         SseChunk::HttpError(status, json!({"error": {"message": message}}))
     }
+
+    /// A plain `application/json` body, for the non-streaming sync path.
+    pub fn json_body(body: serde_json::Value) -> Self {
+        SseChunk::JsonBody(body)
+    }
 }
 
 /// Standard usage info JSON.
@@ -122,6 +131,7 @@ pub struct MockServer {
 fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk]) {
     let mut sse = String::new();
     let mut error_response: Option<(u16, String)> = None;
+    let mut json_response: Option<String> = None;
 
     for chunk in scenario {
         match chunk {
@@ -141,10 +151,21 @@ fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk]) {
                 error_response = Some((*status, body_val.to_string()));
                 break;
             }
+            SseChunk::JsonBody(val) => {
+                json_response = Some(val.to_string());
+                break;
+            }
         }
     }
 
-    if let Some((status, body)) = error_response {
+    if let Some(body) = json_response {
+        let resp = Response::from_string(body).with_header(
+            "Content-Type: application/json"
+                .parse::<Header>()
+                .expect("valid header"),
+        );
+        let _ = req.respond(resp);
+    } else if let Some((status, body)) = error_response {
         let status_code = StatusCode(status);
         let resp = Response::from_string(body).with_status_code(status_code);
         let _ = req.respond(resp);

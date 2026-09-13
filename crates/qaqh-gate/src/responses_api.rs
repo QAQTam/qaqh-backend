@@ -821,6 +821,12 @@ pub fn chat_sync_responses(
                 }
             }
         }
+        // BUG-2026-09-13-20: 模型只输出 reasoning/工具调用时 result 为空。
+        // 另两协议（chat_completions_api、message_api）均 Fatal("no content")，
+        // 此处若返回 Ok("") 则 compact/标题流程把空摘要当成功，污染压缩后上下文。
+        if result.is_empty() {
+            return Attempt::Fatal(anyhow::anyhow!("compact: no content in responses response"));
+        }
         Attempt::Ok(result)
     })
     .map_err(|e| e.to_string())
