@@ -397,7 +397,40 @@ impl SessionManager {
     /// replay runs. Per-op application still takes the per-seed lock.
     fn replay_message_wal(&self, seed: &str) {
         let dir = self.session_path_dir(seed);
-        let ops = qaqh_message::wal::read_ops(&dir);
+        let mut reader = match qaqh_message::wal::open_reader(&dir) {
+            Ok(Some(reader)) => reader,
+            Ok(None) => return,
+            Err(error) => {
+                // Fail-closed: an unreadable WAL is NOT an empty WAL. Applying
+                // nothing (and, above all, not checkpointing) keeps the ops
+                // replayable once the fault clears; a fresh WAL is never
+                // installed over unread ops.
+                log::error!(
+                    "SessionManager: cannot open WAL for {seed} ({error}) — skipping replay, \
+                     log kept for the next attempt"
+                );
+                return;
+            }
+        };
+        let mut ops = Vec::new();
+        loop {
+            match reader.next_op() {
+                Ok(Some(op)) => ops.push(op),
+                Ok(None) => break,
+                Err(error) => {
+                    // Mid-stream IO error (disk EIO / sharing violation): the
+                    // valid prefix is applied below, then the function returns
+                    // *before* the checkpoint. Truncating here would destroy the
+                    // ops the fault hid — this is the bug the issue reports.
+                    log::error!(
+                        "SessionManager: WAL read for {seed} failed after {} op(s) ({error}) — \
+                         applying the valid prefix and keeping the log",
+                        reader.prefix_len()
+                    );
+                    break;
+                }
+            }
+        }
         if ops.is_empty() {
             return;
         }
@@ -451,7 +484,16 @@ impl SessionManager {
                 other => self.apply_persist_op(&other),
             }
         }
-        qaqh_message::wal::checkpoint_file(&dir);
+        if reader.has_failed() {
+            // Evidence is already quarantined by the reader (`wal.unreadable-*`);
+            // the unread ops stay in place for the next recovery attempt.
+            return;
+        }
+        // Clean read: the ops were applied, so truncate the log. A failure here
+        // only costs a redundant (idempotent) replay next time.
+        if let Err(error) = qaqh_message::wal::checkpoint_file(&dir) {
+            log::error!("SessionManager: WAL checkpoint for {seed} failed: {error}");
+        }
     }
 
     /// Persist a new checkpoint without rewriting the raw history archive.
@@ -1740,6 +1782,65 @@ mod wal_recovery_tests {
             writer.log_op(op).expect("log op");
         }
         writer.sync().expect("sync wal");
+    }
+
+    /// BUG-2026-09-13-06 的调用方回归：read_ops 把中途 IO 错误当 EOF 时，
+    /// replay_message_wal 会把截断的 op 集写回归档，随后 checkpoint 把尚未读到的
+    /// 有效 op 永久删除。修复后必须：应用已读到的有效前缀，并且 **不** checkpoint。
+    #[test]
+    fn io_fault_during_wal_replay_never_checkpoints_the_log() {
+        let (root, manager) = manager();
+        let seed = "wal-io-fault";
+        let dir = root.join("sessions").join(seed);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        manager.save_full(seed, &[user_msg(1, "archived")], "m", None, 0, 1);
+        // 前两条 op 可读，第三条处在 IO 故障之后。
+        write_wal(
+            &dir,
+            &[
+                append_op(seed, vec![user_msg(2, "readable-a")]),
+                append_op(seed, vec![user_msg(3, "readable-b")]),
+                append_op(seed, vec![user_msg(4, "behind-the-fault")]),
+            ],
+        );
+        // 故障点设在第 2 条 op 之后：前两条可读，第三条不可读。
+        let fault_at = qaqh_message::wal_fault::prefix_bytes(
+            2,
+            &append_op(seed, vec![user_msg(2, "readable-a")]),
+        );
+        let _armed = qaqh_message::wal_fault::arm(qaqh_message::wal_fault::FaultPlan {
+            pass: 2,
+            skip_bytes: fault_at,
+            kind: std::io::ErrorKind::Other,
+        });
+
+        let (_, messages, _) = manager.load_for_resume(seed).expect("resume");
+
+        // 1) 可读前缀已应用（fail-open 的“应用”部分保留）。
+        assert_eq!(
+            messages.len(),
+            3,
+            "the readable prefix must still be applied: {messages:#?}"
+        );
+        // 2) 未读到的 op 必须仍在磁盘上（没有被 checkpoint 掉）。
+        let wal = std::fs::read_to_string(dir.join("messages.wal")).expect("wal readable");
+        assert!(
+            wal.contains("behind-the-fault"),
+            "the op behind the fault must survive on disk: {wal}"
+        );
+        // 3) 证据被隔离保留（wal.unreadable-*），而不是删除。
+        let quarantined = std::fs::read_dir(&dir)
+            .expect("readdir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("wal.unreadable-")
+            })
+            .count();
+        assert_eq!(quarantined, 1, "the faulting log must be kept as evidence");
+        std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
