@@ -51,3 +51,11 @@ $:
             role: reviewer
             systemPrompt: 你是资深 Rust 代码审查员，重点检查正确性、锁顺序、panic 路径、回归测试覆盖；输出简洁中文意见，阻断问题与建议分列。
             userPrompt: 审查本次 PR 的代码变更；若无阻断性问题请明确说明可合并。
+
+  # wave3 收割：程序化触发 NPC（可信 scope = repo-code:rw），替代评论区勾选「替我上班」
+  api_trigger_wm:
+    - docker:
+        image: ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:npc-ubuntu26-rust1981
+      stages:
+        - name: npc go
+          type: npc:go
