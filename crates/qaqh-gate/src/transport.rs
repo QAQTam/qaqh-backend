@@ -57,7 +57,11 @@ pub(crate) fn sleep_with_cancel(delay: Duration, cancel: Option<&Arc<AtomicBool>
         if is_cancelled(cancel) {
             return true;
         }
-        let remaining = delay - start.elapsed();
+        // `while` 守卫与本次减法之间 elapsed 可能已越过 delay（纳秒级竞争窗口，
+        // 毫秒轮询每迭代都有一次机会）。Duration 的 `Sub` 是无条件 panic（debug
+        // 与 release 皆然，见 BUG-2026-09-13-21）→ 用 checked_sub 饱和到 ZERO：
+        // 剩余时间为 0 时立即进入下一轮守卫并正常退出。
+        let remaining = delay.checked_sub(start.elapsed()).unwrap_or(Duration::ZERO);
         std::thread::sleep(remaining.min(Duration::from_millis(100)));
     }
     false
@@ -546,5 +550,51 @@ mod tests {
         };
         let policy = RetryPolicy::from_spec(Some(&spec));
         assert_eq!(policy.max_retries, 32);
+    }
+
+    // ---- BUG-2026-09-13-21：Duration 减法下溢防护回归 ----
+
+    /// 复刻竞争窗口：`while start.elapsed() < delay` 守卫与 `delay - elapsed`
+    /// 是两次独立采样，守卫通过后 elapsed 越过 delay 时旧的裸减法会 panic
+    /// （`overflow when subtracting durations`）。用「两次采样」测试模型直接
+    /// 命中该结构：守卫采样恰好通过，减法采样被推过 delay。
+    #[test]
+    fn sleep_with_cancel_tolerates_elapsed_past_delay() {
+        fn guard_passes(guard_sample: Duration, delay: Duration) -> bool {
+            guard_sample < delay
+        }
+        fn remaining_checked(sub_sample: Duration, delay: Duration) -> Duration {
+            delay.checked_sub(sub_sample).unwrap_or(Duration::ZERO)
+        }
+
+        let delay = Duration::from_millis(1);
+        let guard_sample = Duration::from_micros(999);
+        // 守卫通过（第一次采样）
+        assert!(guard_passes(guard_sample, delay));
+        // 竞争夺取：减法用的第二次采样已越过 delay
+        let sub_sample = Duration::from_millis(2);
+        // 修复前 `delay - sub_sample` 在此 panic，修复后饱和为 ZERO
+        assert_eq!(remaining_checked(sub_sample, delay), Duration::ZERO);
+
+        // 端到端：真实函数在 delay 极小、必然越界的场景下不 panic 且正常返回
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert!(!sleep_with_cancel(Duration::from_nanos(1), Some(&cancel)));
+    }
+
+    /// 过期 / 零值 delay 防御：不 panic，且不误报取消。
+    #[test]
+    fn sleep_with_cancel_tolerates_expired_delay() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert!(!sleep_with_cancel(Duration::ZERO, Some(&cancel)));
+        assert!(!sleep_with_cancel(Duration::ZERO, None));
+    }
+
+    /// 高频防抖：极小 delay 反复调用，暴露任何残留的窗口下溢。
+    #[test]
+    fn sleep_with_cancel_repeatedly_does_not_panic() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        for _ in 0..64 {
+            assert!(!sleep_with_cancel(Duration::from_nanos(1), Some(&cancel)));
+        }
     }
 }
