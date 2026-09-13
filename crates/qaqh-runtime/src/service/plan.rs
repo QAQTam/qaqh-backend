@@ -8,9 +8,14 @@ use super::common::err;
 
 use super::fs_git::qaqh_dir;
 
+/// `stats.token_usage.days` 是 IPC 直传参数，同时决定条目数与循环数：
+/// 未封顶时 `days = u32::MAX` 会产出约 43 亿条目（daemon 线程 OOM + 挂死）。
+/// 366 天覆盖一年窗口，超出即钳制（与 config 侧默认窗口同量级）。
+pub(crate) const MAX_TOKEN_STATS_DAYS: u32 = 366;
+
 pub(crate) fn token_stats(days: u32) -> Result<Value, String> {
     use std::collections::BTreeMap;
-    let days = days.max(1);
+    let days = days.clamp(1, MAX_TOKEN_STATS_DAYS);
     let cutoff = days_before_today(days);
     let mut daily: BTreeMap<String, Value> = BTreeMap::new();
     if let Ok(file) =
@@ -138,5 +143,12 @@ pub(crate) fn plan_action(
     if !found {
         return Err(format!("plan item {item_id} not found"));
     }
+    // `lines()` 丢弃了末尾换行；回写时补回，避免每次裁决都静默改写文件尾
+    //（计划文件由模型/前端共同读写，尾部形态必须稳定）。
+    let output = if content.ends_with('\n') && !output.ends_with('\n') {
+        format!("{output}\n")
+    } else {
+        output
+    };
     std::fs::write(path, output).map_err(err)
 }
