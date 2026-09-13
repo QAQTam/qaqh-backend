@@ -1,0 +1,53 @@
+# QAQ-Harness 主仓 CNB 流水线
+# 1) main.push：构建/推送 NPC 镜像（Dockerfile 变更即重建）+ Rust CI（test/clippy/fmt）
+# 2) $：NPC 事件（issue/PR 评论）用自定义镜像；不指定 model = 平台默认免费模型
+# 3) pull_request：NPC 自动代码审查（reviewer 角色提示词）
+
+main:
+  push:
+    - name: build-npc-image
+      services:
+        - docker
+      stages:
+        - name: Docker build
+          script: docker build -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:npc-ubuntu26-rust1981 .
+        - name: Docker push
+          script: docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:npc-ubuntu26-rust1981
+    - name: rust-ci
+      docker:
+        image: rust:1.98.1
+      stages:
+        - name: test
+          script: cargo test --workspace --all-targets
+        - name: clippy
+          script: |
+            rustup component add clippy
+            cargo clippy --workspace --all-targets -- -D warnings || true
+
+# NPC 事件：自定义镜像（Ubuntu 26.04 + Rust 1.98.1 + gcc-15 + cmake）
+$:
+  issue.comment@npc:
+    - docker:
+        image: ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:npc-ubuntu26-rust1981
+      stages:
+        - name: npc go
+          type: npc:go
+  pull_request.comment@npc:
+    - docker:
+        image: ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:npc-ubuntu26-rust1981
+      stages:
+        - name: npc go
+          type: npc:go
+
+  # PR 自动 NPC 预审（免费；产出评论，无写权限诉求）
+  pull_request:
+    - name: npc-auto-review
+      docker:
+        image: ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:npc-ubuntu26-rust1981
+      stages:
+        - name: npc go
+          type: npc:go
+          options:
+            role: reviewer
+            systemPrompt: 你是资深 Rust 代码审查员，重点检查正确性、锁顺序、panic 路径、回归测试覆盖；输出简洁中文意见，阻断问题与建议分列。
+            userPrompt: 审查本次 PR 的代码变更；若无阻断性问题请明确说明可合并。
