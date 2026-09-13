@@ -1,10 +1,10 @@
-//! todo::parse — ID 分配与参数解析（alloc_id/expand_ids/parse_create/insertion_index）。
+//! todo::parse — ID 分配与参数解析（alloc_id/expand_ids/parse_write_items）。
 
 use serde_json::Value;
 
 use crate::json_err_string;
 
-use super::model::TodoStore;
+use super::model::{TodoStatus, TodoStore};
 
 // ═══════════════════════════════════════════════════════
 // ID generation
@@ -124,16 +124,16 @@ pub(crate) fn todo_id_number(id: &str) -> Option<u32> {
 }
 
 /// A single model-authored task description before its permanent ID is assigned.
+/// 仅剩 HTTP/CLI service 面（`exec_todo_create`）与测试使用；模型工具
+/// `todo_write` 走 [`ParsedWriteItem`]（全量覆写，status 必填）。
 #[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct NewTodo {
     pub(crate) title: String,
     pub(crate) description: String,
 }
 
-/// One mutation can create at most this many tasks. Keeping creation in one
-/// transaction prevents parallel tool calls from racing the T{n} allocator.
-pub(crate) const MAX_CREATE_ITEMS: usize = 20;
-
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_new_todo(value: &Value, label: &str) -> Result<NewTodo, String> {
     let title = value
         .get("title")
@@ -164,31 +164,104 @@ pub(crate) fn parse_new_todo(value: &Value, label: &str) -> Result<NewTodo, Stri
     Ok(NewTodo { title, description })
 }
 
-pub(crate) fn parse_create_items(args: &Value) -> Result<Vec<NewTodo>, String> {
-    if let Some(items) = args.get("items").and_then(Value::as_array) {
-        if items.is_empty() {
-            return Err(json_err_string(
-                "INVALID_INPUT",
-                "items must not be empty",
-                "Provide at least one {title, description?} item.",
-            ));
-        }
-        if items.len() > MAX_CREATE_ITEMS {
-            return Err(json_err_string(
-                "INVALID_INPUT",
-                format!("items max {MAX_CREATE_ITEMS} entries per call"),
-                "Split the plan into multiple create calls.",
-            ));
-        }
-        return items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| parse_new_todo(item, &format!("items[{index}]")))
-            .collect();
-    }
-    Ok(vec![parse_new_todo(args, "todo")?])
+/// One fully-specified item of a full-replace `todo_write` call (v4).
+/// `id: None` = assign a fresh `T<n>`; `Some(id)` = re-reference an existing ID.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedWriteItem {
+    pub(crate) id: Option<String>,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) status: TodoStatus,
+    pub(crate) evidence: Option<String>,
 }
 
+/// One mutation can carry at most this many items. Keeping a rewrite in one
+/// transaction prevents parallel tool calls from racing the T{n} allocator.
+pub(crate) const MAX_WRITE_ITEMS: usize = 20;
+
+fn parse_status_field(value: Option<&Value>, label: &str) -> Result<TodoStatus, String> {
+    let raw = value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    super::actions::parse_status(raw).ok_or_else(|| {
+        json_err_string(
+            "INVALID_INPUT",
+            format!("{label}.status must be one of idle|in_progress|completed|cancelled"),
+            "Status is required on every item (full-replace semantics).",
+        )
+    })
+}
+
+pub(crate) fn parse_write_items(args: &Value) -> Result<Vec<ParsedWriteItem>, String> {
+    let items = args
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            json_err_string(
+                "INVALID_INPUT",
+                "todo_write requires items",
+                "Provide the full list: [{title, status, id?, description?, evidence?}].",
+            )
+        })?;
+    if items.len() > MAX_WRITE_ITEMS {
+        return Err(json_err_string(
+            "INVALID_INPUT",
+            format!("items max {MAX_WRITE_ITEMS} entries per call"),
+            "Reduce the plan to its essential steps.",
+        ));
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let label = format!("items[{index}]");
+            let title = item
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if title.is_empty() || title.chars().count() > 100 {
+                return Err(json_err_string(
+                    "INVALID_INPUT",
+                    format!("{label}.title must be 1-100 chars"),
+                    "Use a short imperative title, e.g. 'Add login API'.",
+                ));
+            }
+            let description = item
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if description.chars().count() > 200 {
+                return Err(json_err_string(
+                    "INVALID_INPUT",
+                    format!("{label}.description max 200 chars"),
+                    "",
+                ));
+            }
+            let status = parse_status_field(item.get("status"), &label)?;
+            let evidence = item
+                .get("evidence")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let id = parse_todo_id(item.get("id"));
+            Ok(ParsedWriteItem {
+                id,
+                title,
+                description,
+                status,
+                evidence,
+            })
+        })
+        .collect()
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn insertion_index(store: &TodoStore, args: &Value) -> Result<usize, String> {
     let before_raw = args.get("before_id");
     let after_raw = args.get("after_id");

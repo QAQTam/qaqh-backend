@@ -5,7 +5,10 @@ use serde_json::Value;
 use crate::{json_err_string, json_ok};
 
 use super::model::{TODO_LOCK, TodoItem, TodoStatus};
-use super::parse::{alloc_id, expand_todo_ids, insertion_index, parse_create_items, parse_todo_id};
+use super::parse::{
+    alloc_id, expand_todo_ids, insertion_index, parse_new_todo, parse_todo_id, parse_write_items,
+    NewTodo,
+};
 use super::store::{
     count_status, normalize_current_id, read_store, read_store_for, status_name, todo_item_json,
     write_store, write_store_for,
@@ -15,6 +18,7 @@ use super::store::{
 // Todo V2 operations
 // ═══════════════════════════════════════════════════════
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn exec_todo_create(args: &Value, positioned: bool) -> Result<String, String> {
     let _guard = TODO_LOCK
         .lock()
@@ -32,7 +36,15 @@ pub(crate) fn exec_todo_create(args: &Value, positioned: bool) -> Result<String,
     } else {
         store.items.len()
     };
-    let pending = parse_create_items(args)?;
+    let pending: Vec<NewTodo> = if let Some(items) = args.get("items").and_then(Value::as_array) {
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| parse_new_todo(item, &format!("items[{index}]")))
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        vec![parse_new_todo(args, "todo")?]
+    };
 
     // IDs are permanent monotonically assigned identities. Inserting a subtask
     // changes display order only; existing IDs are never renumbered.
@@ -108,35 +120,81 @@ pub(crate) fn parse_edit_field(
     Ok(Some(text))
 }
 
-/// todo_write：追加条目（分配新 ID）；`items: []` 显式清空（items 缺省报错，
-/// 防误清空）。追加语义（owner 拍板 2026-09-08）：多次 write 累积，不做整批
-/// 替换；修改既有条目走 todo_update（cancel 后重写）。ID 高水位单调不复用。
+/// todo_write：全量覆写（v4，Codex update_plan 语义 + QAQ id/evidence 增强）。
+/// `items` 即完整清单：整体替换 store，status 为每条必填字段（写即状态——
+/// 模型对 in_progress 的显式告知发生在这里）。条目可携带既有 `id` 原样
+/// 引用（前端 dashboard / 审计不破），缺省则按 next_id 高水位新分配。
+/// 结构变化（增删改排序）与状态变化（翻转 in_progress/completed）共用本
+/// 工具；单条纯状态流转的轻量通道是 todo_update。
 pub(crate) fn exec_todo_write(args: &Value) -> Result<String, String> {
-    let items = args.get("items").and_then(Value::as_array).ok_or_else(|| {
-        json_err_string(
-            "INVALID_INPUT",
-            "todo_write requires items",
-            "Provide items: [{title, description?}]. Pass an empty array to clear the list.",
-        )
-    })?;
-    if items.is_empty() {
-        let _guard = TODO_LOCK
-            .lock()
-            .map_err(|_| "todo lock poisoned".to_string())?;
-        let mut store = read_store()?;
-        let cleared = store.items.len();
-        store.items.clear();
-        store.current_id = None;
-        // 清空 = 全新清单：ID 序列重置（下次 write 从 T1 起）。会话内工具的
-        // 旧 ID 引用随对话 compact 消失，混淆窗口可忽略（owner 拍板语义）。
-        store.next_id = 1;
-        write_store(&store)?;
-        return Ok(json_ok(serde_json::json!({
-            "cleared": cleared,
-            "message": format!("Todo list cleared ({cleared} items removed)."),
-        })));
+    let _guard = TODO_LOCK
+        .lock()
+        .map_err(|_| "todo lock poisoned".to_string())?;
+    let mut store = read_store()?;
+    let incoming = parse_write_items(args)?;
+
+    // ID 解析三态：显式引用（必须已存在）→ 原样保留；缺省 → next_id 高水位
+    // 新分配。显式引用未知 ID 是硬错误（覆写语义下引用不存在的 ID 只能是
+    // 模型幻觉，放行会静默产生永久孤儿号）；同一次覆写内重复引用也拒绝。
+    let mut next_items: Vec<TodoItem> = Vec::with_capacity(incoming.len());
+    let mut assigned: Vec<String> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (index, parsed) in incoming.into_iter().enumerate() {
+        let id = match parsed.id {
+            Some(id) => {
+                if !seen_ids.insert(id.clone()) {
+                    return Err(json_err_string(
+                        "INVALID_INPUT",
+                        format!("items[{index}] duplicates id {id}"),
+                        "Each id may appear at most once per write.",
+                    ));
+                }
+                if store.items.iter().any(|item| item.id == id) {
+                    id
+                } else {
+                    return Err(json_err_string(
+                        "NOT_FOUND",
+                        format!("items[{index}] references unknown id {id}"),
+                        "Omit \"id\" to assign a new one, or use todo_list to inspect existing IDs.",
+                    ));
+                }
+            }
+            None => {
+                let id = alloc_id(&mut store);
+                assigned.push(id.clone());
+                id
+            }
+        };
+        next_items.push(TodoItem {
+            id,
+            title: parsed.title,
+            description: parsed.description,
+            status: parsed.status,
+            evidence: parsed.evidence,
+        });
     }
-    exec_todo_create(args, false)
+
+    let replaced = store.items.len();
+    store.items = next_items;
+    normalize_current_id(&mut store);
+    write_store(&store)?;
+
+    let current = store
+        .items
+        .iter()
+        .find(|item| item.status == TodoStatus::InProgress)
+        .map(|item| item.id.clone());
+    Ok(json_ok(serde_json::json!({
+        "replaced": replaced,
+        "total": store.items.len(),
+        "assigned": assigned,
+        "current_id": current,
+        "message": format!(
+            "Plan updated: {} item(s) ({} new).",
+            store.items.len(),
+            assigned.len()
+        ),
+    })))
 }
 
 pub(crate) fn exec_todo_set(args: &Value) -> Result<String, String> {

@@ -1,13 +1,14 @@
-//! todo::split — todo 工具三件套（owner 拍板的混合制形态，2026-09-08）。
+//! todo::split — todo 工具三件套（v4 全量覆写形态，2026-09-12）。
 //!
-//! `todo_write`（追加条目 / 空清空）+ `todo_update`（单条状态）+ `todo_list`
-//! （只读查看）。ID 体系保留（分配式、单调永不复用）；**无 insert**（回填
-//! 漏项 = 直接追加；显示顺序精修不设工具）；修改条目文字 = cancel 旧条 +
-//! write 新条。对标：Claude TodoWrite / Codex update_plan 的简化方向 +
-//! QAQH 自有的 ID 与 evidence 语义。
+//! `todo_write`（全量覆写：items 即完整清单，每条带必填 status）+
+//! `todo_update`（单条状态/证据轻量通道）+ `todo_list`（只读查看）。
+//! ID 体系保留（分配式、单调不复用；条目可显式引用既有 id）。对齐
+//! Codex update_plan 的覆写语义 + prompt 合同（exactly-one-in-progress），
+//! 保留 QAQH 自有的 ID 与 evidence 语义。
 //!
-//! 底层契约（`exec_todo_create(positioned)` / `todo_set_for` / `todo_list_for`）
-//! 保留全量能力：HTTP service 面与 CLI 直访不受工具形态约束。
+//! 底层契约（`exec_todo_create(positioned)` / `todo_set_for` /
+//! `todo_list_for`）保留全量能力：HTTP service 面与 CLI 直访不受工具形态
+//! 约束。
 
 use std::time::Duration;
 
@@ -49,7 +50,8 @@ pub(crate) fn reject_fields(args: &Value, fields: &[&str], tool: &str) -> Result
 }
 
 pub fn handle_write(ctx: ToolCallCtx) -> ToolResult {
-    // items-only：其余字段（含单条 title 便利形态）一律拒绝——一个形态。
+    // items-only：顶层便利字段（单条形态）与定位插入残留一律拒绝。
+    // 条目内的 id/status/evidence/description 是 v4 全量覆写的合法字段。
     let result = reject_fields(
         &ctx.args,
         &[
@@ -121,17 +123,21 @@ fn todo_write_schema() -> Value {
             "items": {
                 "type": "array",
                 "maxItems": 20,
-                "description": "Tasks to append (new IDs assigned, monotonic). An EMPTY array CLEARS the list.",
+                "description": "The FULL task list — replaces the previous list entirely. Each item needs title + status; include every prior item you want to keep.",
                 "items": {
                     "type": "object",
                     "properties": {
+                        "id": {"type": ["string", "integer"], "description": "Existing T<n> to keep/update this task; omit to assign a new one."},
                         "title": {"type": "string", "description": "Task title (1-100 chars)."},
-                        "description": {"type": "string", "description": "Optional context (<=200 chars)."}
+                        "status": {"type": "string", "enum": ["idle", "in_progress", "completed", "cancelled"], "description": "Exactly one item should be in_progress while working."},
+                        "description": {"type": "string", "description": "Optional context (<=200 chars)."},
+                        "evidence": {"type": "string", "description": "Completion evidence (for completed items)."}
                     },
-                    "required": ["title"],
+                    "required": ["title", "status"],
                     "additionalProperties": false
                 }
-            }
+            },
+            "explanation": {"type": "string", "description": "Optional one-liner on why the plan changed."}
         },
         "required": ["items"],
         "additionalProperties": false
@@ -179,7 +185,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     let tools: [SplitTool; 3] = [
         (
             "todo_write",
-            "Append session tasks (T-IDs auto-assigned, monotonic, never reused; plan-mode blocked). An empty items array CLEARS the list. To revise a task: cancel it via todo_update, then write the corrected one.",
+            "Replace the whole task list (full-replace). Each item needs title + status; re-include every item you keep, with its id to preserve it. Exactly one in_progress while working. New items omit id.",
             todo_write_schema(),
             handle_write,
             ToolRisk::Write,
