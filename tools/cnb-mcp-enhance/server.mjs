@@ -3,7 +3,7 @@
  * cnb-mcp-enhance — CNB MCP 官方服务器（@cnbcool/mcp-server）的 QAQ-Harness 增强层。
  *
  * 两个模式：
- *   1. MCP stdio server（默认）：提供 5 个官方缺失的工具
+ *   1. MCP stdio server（默认）：提供 6 个官方缺失的工具
  *   2. --watch 独立监视器：命令行直接跑，输出 wave 全景快照
  *
  * 零 npm 依赖：MCP stdio 用原生 JSON-RPC over stdio 实现（协议核心极小），
@@ -220,6 +220,105 @@ async function buildTail(repo, sn, tailLines = 40) {
   return { sn, build_status: data?.status, tails };
 }
 
+// ── pulls：合并队列 ──
+const getPull = (repo, number) => api(`${repoPath(repo)}/-/pulls/${number}`);
+const listPullCommentsAll = (repo, number) =>
+  api(`${repoPath(repo)}/-/pulls/${number}/comments?page_size=100`);
+const mergePull = (repo, number, body) =>
+  api(`${repoPath(repo)}/-/pulls/${number}/merge`, { method: "PUT", body });
+
+/** 拉 PR 的预检结论：最新一条含「预检完成」的评论里的【可合并】/【需修改】。
+ *  判别器用「预检完成」——派发评论含「预检（只读」但不含「预检完成」。 */
+async function precheckVerdict(repo, prNumber) {
+  try {
+    const r = await listPullCommentsAll(repo, prNumber);
+    const arr = r?.data ?? r ?? [];
+    const list = Array.isArray(arr) ? arr : [];
+    const sorted = [...list].sort((a, b) =>
+      String(a.created_at || "").localeCompare(String(b.created_at || "")));
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      const body = sorted[i]?.body || "";
+      if (!body.includes("预检完成")) continue;
+      const v = body.match(/【(可合并|需修改)】/);
+      return { verdict: v ? v[1] : "格式异常", at: sorted[i].created_at };
+    }
+    return { verdict: null };
+  } catch (e) {
+    return { verdict: null, error: String(e.message).slice(0, 120) };
+  }
+}
+
+/** 合并队列：逐个串行（前一合并会改变后续 PR 的 merge-base）。
+ *  预检【可合并】→ squash merge → 解析标题 Closes #N → 关单（state+state_reason 双参数）。
+ *  预检非【可合并】且未 ignore_verdict → 跳过不合并。 */
+async function mergeQueue(repo, prs, { ignore_verdict = false, close_issues = true, dry_run = false } = {}) {
+  const results = [];
+  for (const n of prs) {
+    const item = { pr: n };
+    try {
+      const p = await getPull(repo, n);
+      const d = p?.data ?? p;
+      item.title = d?.title;
+      item.state = d?.state;
+      if (item.state && item.state !== "open") {
+        item.skipped = `state=${item.state}`;
+        results.push(item);
+        continue;
+      }
+      const v = await precheckVerdict(repo, n);
+      item.verdict = v.verdict;
+      if (v.verdict !== "可合并" && !ignore_verdict) {
+        item.skipped = v.verdict ? `precheck=${v.verdict}` : "precheck=无结果";
+        results.push(item);
+        continue;
+      }
+      if (dry_run) {
+        item.would_merge = true;
+        item.would_close = close_issues
+          ? [...String(item.title || "").matchAll(/Closes #(\d+)/gi)].map((m) => +m[1])
+          : [];
+        results.push(item);
+        continue;
+      }
+      const mr = await mergePull(repo, n, {
+        merge_style: "squash",
+        ...(item.title ? { commit_title: item.title } : {}),
+      });
+      const s = JSON.stringify(mr);
+      // 判定认 merged:true 子串（CLI YAML 假象教训：不要按引号格式匹配）
+      item.merged = mr?.merged === true || mr?.data?.merged === true || s.includes('"merged":true');
+      if (close_issues && item.title) {
+        item.closed_issues = [];
+        for (const m of [...String(item.title).matchAll(/Closes #(\d+)/gi)]) {
+          const inum = +m[1];
+          try {
+            await api(`${repoPath(repo)}/-/issues/${inum}`, {
+              method: "PATCH",
+              body: { state: "closed", state_reason: "completed" },
+            });
+            item.closed_issues.push(inum);
+          } catch (e) {
+            (item.close_errors ??= []).push({ issue: inum, error: String(e.message).slice(0, 120) });
+          }
+        }
+      }
+    } catch (e) {
+      item.error = String(e.message).slice(0, 200);
+    }
+    results.push(item);
+  }
+  const summary = results.reduce((a, r) => {
+    const k = r.error ? "error"
+      : r.skipped ? "skipped"
+      : r.merged ? "merged"
+      : r.would_merge ? "dry_run_ok"
+      : "unknown";
+    a[k] = (a[k] || 0) + 1;
+    return a;
+  }, {});
+  return { repo, at: new Date().toISOString(), summary, results };
+}
+
 // ─────────────────────────── MCP stdio 协议 ───────────────────────────
 
 const TOOLS = [
@@ -292,6 +391,21 @@ const TOOLS = [
       required: ["number"],
     },
   },
+  {
+    name: "cnb_merge_queue",
+    description: "批量 squash 合并队列：串行逐个 PR——预检结论【可合并】才放行 → squash merge → 解析标题 Closes #N 自动关单（双参数）。预检非【可合并】默认跳过。dry_run=true 只预演不合并。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string" },
+        prs: { type: "array", items: { type: "number" }, description: "PR 编号列表，按合并顺序（串行执行）" },
+        ignore_verdict: { type: "boolean", description: "忽略预检结论强制合并（默认 false）" },
+        close_issues: { type: "boolean", description: "合并后自动关标题 Closes #N 的 issue（默认 true）" },
+        dry_run: { type: "boolean", description: "只检查预检结论与预演，不真正合并" },
+      },
+      required: ["prs"],
+    },
+  },
 ];
 
 async function callTool(name, args) {
@@ -322,6 +436,12 @@ async function callTool(name, args) {
         body: { state: "closed", state_reason: "completed" },
       });
     }
+    case "cnb_merge_queue":
+      return await mergeQueue(repo, args.prs, {
+        ignore_verdict: args.ignore_verdict === true,
+        close_issues: args.close_issues !== false,
+        dry_run: args.dry_run === true,
+      });
     default:
       throw new Error(`unknown tool: ${name}`);
   }
