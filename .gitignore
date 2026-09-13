@@ -29,3 +29,6 @@ crates/*/bindings/
 # 记忆随仓库走：重置/换机后 clone 即自动恢复（handover 见 docs/handover-2026-09-09.md）
 .workbuddy/*
 !.workbuddy/memory/
+
+# QAQ-Harness 自身运行时的会话状态（todo/journal/trash 等），不入库
+.qaqh/
