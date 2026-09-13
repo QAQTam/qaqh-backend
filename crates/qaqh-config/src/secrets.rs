@@ -15,7 +15,10 @@
 //! configured keys. Decryption failure never falls back to reading an old
 //! plaintext value.
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Which credential slot a secret belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,23 +103,34 @@ impl SecretStore {
     }
 
     /// Encrypt and store a plaintext value for a slot (idempotent).
+    ///
+    /// 读-改-写是一个**跨进程**事务：全程持 `secrets.toml.lock`（BUG-11），
+    /// 否则 daemon 与 CLI 的并发 `read → mutate → write` 会互相覆盖丢密钥。
     pub fn set(&self, slot: SecretSlot, plaintext: &str) -> Result<(), String> {
         let encoded = encrypt(plaintext.as_bytes())?;
-        let mut doc = self.read_doc();
-        let mut table = match doc.get(slot.key()).cloned() {
-            Some(toml::Value::Table(t)) => t,
-            _ => toml::map::Map::new(),
-        };
-        table.insert("api_key".to_owned(), toml::Value::String(encoded));
-        doc.insert(slot.key().to_owned(), toml::Value::Table(table));
-        self.write_doc(&doc)
+        self.transaction(|doc| {
+            let mut table = match doc.get(slot.key()).cloned() {
+                Some(toml::Value::Table(t)) => t,
+                _ => toml::map::Map::new(),
+            };
+            table.insert("api_key".to_owned(), toml::Value::String(encoded));
+            doc.insert(slot.key().to_owned(), toml::Value::Table(table));
+            Ok(true)
+        })
+        .map(|_| ())
     }
 
     /// Remove a slot's secret.
     pub fn delete(&self, slot: SecretSlot) -> Result<(), String> {
-        let mut doc = self.read_doc();
-        doc.remove(slot.key());
-        self.write_doc(&doc)
+        // 未配置时删除是幂等 no-op：`transaction` 的 `Ok(false)` 同时兜住
+        // 并发写（BUG-11：另一进程刚在槽位写入密钥）。
+        self.transaction(|doc| {
+            if doc.remove(slot.key()).is_some() {
+                return Ok(true);
+            }
+            Ok(false)
+        })
+        .map(|_| ())
     }
 
     // ── MCP 通用命名 secret（设计 §6/E-4：`[secrets.mcp]` map 段）──
@@ -185,38 +199,69 @@ impl SecretStore {
     }
 
     /// Encrypt and store a named MCP secret (idempotent).
+    ///
+    /// 与 [`Self::set`] 同为跨进程事务（BUG-11）：CLI 的 `mcp import --exec`
+    /// 与 daemon 的 webUI 保存并发时，任何一方都不得丢掉对方的键。
     pub fn set_mcp(&self, name: &str, plaintext: &str) -> Result<(), String> {
         validate_mcp_secret_name(name)?;
         let encoded = encrypt(plaintext.as_bytes())?;
-        let mut doc = self.read_doc();
-        let mut secrets = match doc.get("secrets").cloned() {
-            Some(toml::Value::Table(t)) => t,
-            _ => toml::map::Map::new(),
-        };
-        let mut mcp = match secrets.get("mcp").cloned() {
-            Some(toml::Value::Table(t)) => t,
-            _ => toml::map::Map::new(),
-        };
-        mcp.insert(name.to_owned(), toml::Value::String(encoded));
-        secrets.insert("mcp".to_owned(), toml::Value::Table(mcp));
-        doc.insert("secrets".to_owned(), toml::Value::Table(secrets));
-        self.write_doc(&doc)
+        self.transaction(|doc| {
+            let mut secrets = match doc.get("secrets").cloned() {
+                Some(toml::Value::Table(t)) => t,
+                _ => toml::map::Map::new(),
+            };
+            let mut mcp = match secrets.get("mcp").cloned() {
+                Some(toml::Value::Table(t)) => t,
+                _ => toml::map::Map::new(),
+            };
+            mcp.insert(name.to_owned(), toml::Value::String(encoded));
+            secrets.insert("mcp".to_owned(), toml::Value::Table(mcp));
+            doc.insert("secrets".to_owned(), toml::Value::Table(secrets));
+            Ok(true)
+        })
+        .map(|_| ())
     }
 
     /// Remove a named MCP secret.
+    ///
+    /// 删除同为跨进程事务；段不存在时直接返回 Ok（幂等，不产生空写）。
     pub fn delete_mcp(&self, name: &str) -> Result<(), String> {
         validate_mcp_secret_name(name)?;
-        let mut doc = self.read_doc();
-        let Some(toml::Value::Table(mut secrets)) = doc.get("secrets").cloned() else {
-            return Ok(()); // 段不存在 = 已删除
-        };
-        let Some(toml::Value::Table(mut mcp)) = secrets.get("mcp").cloned() else {
+        let first = self.transaction(|doc| {
+            let Some(toml::Value::Table(mut secrets)) = doc.get("secrets").cloned() else {
+                return Ok(false); // 段不存在 = 已删除
+            };
+            let Some(toml::Value::Table(mut mcp)) = secrets.get("mcp").cloned() else {
+                return Ok(false);
+            };
+            mcp.remove(name);
+            secrets.insert("mcp".to_owned(), toml::Value::Table(mcp));
+            doc.insert("secrets".to_owned(), toml::Value::Table(secrets));
+            Ok(true)
+        })?;
+        if first {
             return Ok(());
-        };
-        mcp.remove(name);
-        secrets.insert("mcp".to_owned(), toml::Value::Table(mcp));
-        doc.insert("secrets".to_owned(), toml::Value::Table(secrets));
-        self.write_doc(&doc)
+        }
+        // 首次读到的文档里没有 `[secrets.mcp]`——但并发写者可能刚好在同一
+        // 瞬间提交了 `[secrets.mcp]`；锁内复查一次，避免"已删除"假象下留下
+        // 对方刚提交的键。稳态下（无并发）第二次事务同样命中 false 即返回。
+        // 该复查不改变对外语义：原实现"段不存在直接 Ok"同样不保证与并发
+        // 写入的 happens-after 顺序。
+        self.transaction(|doc| {
+            let Some(toml::Value::Table(mut secrets)) = doc.get("secrets").cloned() else {
+                return Ok(false);
+            };
+            let Some(toml::Value::Table(mut mcp)) = secrets.get("mcp").cloned() else {
+                return Ok(false);
+            };
+            if mcp.remove(name).is_some() {
+                secrets.insert("mcp".to_owned(), toml::Value::Table(mcp));
+                doc.insert("secrets".to_owned(), toml::Value::Table(secrets));
+                return Ok(true);
+            }
+            Ok(false)
+        })
+        .map(|_| ())
     }
 
     fn read_doc(&self) -> toml::map::Map<String, toml::Value> {
@@ -226,6 +271,88 @@ impl SecretStore {
         toml::from_str(&data).unwrap_or_default()
     }
 
+    // ── 跨进程并发安全（BUG-2026-09-13-11）──
+    //
+    // 缺陷：中间文件名**固定**为 `secrets.toml.tmp`，且 read-modify-write
+    // 的互斥只有进程内的 `config_io_lock`（config.rs 的 `Mutex`）——daemon
+    // （webUI 保存）与 CLI（`qaqh-daemon mcp import --exec`）并发时：
+    //
+    //   A 写 tmp ──► B 用同名的自己那份文档覆盖 tmp ──► A rename 成功
+    //   ──► B rename ENOENT，且落地文档只有 A 的键 → B 的密钥静默丢失。
+    //
+    // 修复（Codex `secrets/src/local.rs:295` 同款）：
+    //   ① tmp 名带 pid + 单调 nonce，跨进程互不覆盖；
+    //   ② 写完 `sync_all` 再 rename（与会话/工作区原子写一致）；
+    //   ③ 整个 read-modify-write 持 `secrets.toml.lock` 跨进程 OS 文件锁
+    //      （`std::fs::File::lock`：Windows `LockFileEx` / Unix `flock`）
+    //      → 并发事务串行化，不再丢更新。
+
+    /// 跨进程 read-modify-write 事务：持 `secrets.toml.lock` 独占锁，
+    /// `mutate` 返回 `Ok(false)` 表示"无变更"（跳过写盘，保证幂等删除不产生
+    /// 空写与多余的 rename）。
+    fn transaction<F>(&self, mutate: F) -> Result<bool, String>
+    where
+        F: FnOnce(&mut toml::map::Map<String, toml::Value>) -> Result<bool, String>,
+    {
+        let _guard = self.lock_exclusive()?;
+        let mut doc = self.read_doc();
+        if !mutate(&mut doc)? {
+            return Ok(false);
+        }
+        self.write_doc(&doc)?;
+        Ok(true)
+    }
+
+    /// 取跨进程独占锁。锁文件独立于被替换的 `secrets.toml`（rename 会换 inode，
+    /// 锁在目标文件上不可靠）；锁随 `_guard` 释放，进程退出（含崩溃）由内核
+    /// 兜底释放，因此无需 pid 判活与 stale 锁接管。
+    fn lock_exclusive(&self) -> Result<File, String> {
+        let lock_path = self.lock_path();
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("secrets create_dir_all failed: {e}"))?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| format!("secrets open lock {:?} failed: {e}", lock_path))?;
+        // 锁文件无内容，0600（Unix）；Windows ACL 同步收紧。
+        restrict_permissions(&lock_path);
+        file.lock()
+            .map_err(|e| format!("secrets lock {:?} failed: {e}", lock_path))?;
+        Ok(file)
+    }
+
+    /// 锁文件路径：`secrets.toml` → `secrets.toml.lock`。
+    fn lock_path(&self) -> PathBuf {
+        sibling_path(&self.path, "secrets.toml", ".lock")
+    }
+
+    /// 中间文件路径：与目标同目录（rename 必须同卷）+ 带 pid 与单调 nonce
+    /// （参照 `qaqh-workspace::file_shared::atomic_write`），并发写者互不覆盖。
+    fn next_temp_path(&self) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nonce = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        sibling_path(
+            &self.path,
+            "secrets.toml",
+            &format!(".tmp-{}-{stamp}-{nonce}", std::process::id()),
+        )
+    }
+
+    /// 本轮 tmp 名（供回归测试断言"逐次唯一 + 带 pid"；不做 IO）。
+    #[doc(hidden)]
+    pub fn temp_path_for_test(&self) -> PathBuf {
+        self.next_temp_path()
+    }
+
     fn write_doc(&self, doc: &toml::map::Map<String, toml::Value>) -> Result<(), String> {
         let content = toml::to_string_pretty(doc)
             .map_err(|e| format!("secrets serialization failed: {e}"))?;
@@ -233,13 +360,79 @@ impl SecretStore {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("secrets create_dir_all failed: {e}"))?;
         }
-        let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &content).map_err(|e| format!("secrets write failed: {e}"))?;
-        restrict_permissions(&tmp);
-        std::fs::rename(&tmp, &self.path).map_err(|e| format!("secrets rename failed: {e}"))?;
+        let tmp = self.next_temp_path();
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp)
+                .map_err(|e| format!("secrets write failed: {e}"))?;
+            restrict_permissions(&tmp);
+            file.write_all(content.as_bytes())
+                .map_err(|e| format!("secrets write failed: {e}"))?;
+            file.flush()
+                .map_err(|e| format!("secrets flush failed: {e}"))?;
+            // 落盘后再 rename：崩溃不会留下"重命名成功但内容未持久化"的空壳。
+            file.sync_all()
+                .map_err(|e| format!("secrets sync failed: {e}"))?;
+            drop(file);
+            replace_file(&tmp, &self.path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result?;
         restrict_permissions(&self.path);
         Ok(())
     }
+}
+
+/// 由目标路径推同目录姊妹路径（`secrets.toml` → `secrets.toml{suffix}`）。
+///
+/// 注意：`PathBuf::with_extension` 在此不可用——它把 `secrets.toml` 的"扩展名"
+/// （`toml`）**整段替换**，且无法表达多段后缀；这里显式拼到完整文件名之后，
+/// 保证 `secrets.toml` 前缀恒在、且与目标同目录（rename 必须同卷）。
+fn sibling_path(path: &Path, fallback: &str, suffix: &str) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| fallback.to_owned());
+    path.with_file_name(format!("{name}{suffix}"))
+}
+
+/// 原子替换目标文件：同目录 rename（POSIX 原子；Windows 上 `rename` 不能
+/// 覆盖已存在目标，故走 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`）。
+#[cfg(not(windows))]
+fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
+    std::fs::rename(source, target).map_err(|e| format!("secrets rename failed: {e}"))
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    let source: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let target: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR::from_raw(source.as_ptr()),
+            PCWSTR::from_raw(target.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|e| format!("secrets rename failed: {e}"))
 }
 
 #[cfg(windows)]
