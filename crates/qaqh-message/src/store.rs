@@ -180,6 +180,10 @@ pub struct MessageStore {
     /// `flush_meta` and the host-side drain loses nothing. `None` for
     /// ephemeral stores and clones (background compaction snapshots).
     wal: Option<crate::wal::WalWriter>,
+    /// 最近一次 flush_meta 的 (model, effort)——BUG-2026-09-13-04 防御分支
+    /// 发 SaveFull 时复用，避免把 meta.model 回写为空串。克隆店（后台压缩
+    /// 快照）继承该值。
+    last_flush_model: (String, Option<String>),
 }
 
 impl std::fmt::Debug for MessageStore {
@@ -215,6 +219,7 @@ impl Clone for MessageStore {
             pending_persist: Vec::new(),
             ephemeral: self.ephemeral,
             wal: None,
+            last_flush_model: self.last_flush_model.clone(),
         }
     }
 }
@@ -240,6 +245,7 @@ impl MessageStore {
             pending_persist: Vec::new(),
             ephemeral: false,
             wal: None,
+            last_flush_model: (String::new(), None),
         }
     }
 
@@ -300,6 +306,9 @@ impl MessageStore {
         if self.seed.is_empty() || self.ephemeral {
             return;
         }
+        // BUG-2026-09-13-04：记住最近一次 flush 的身份字段，供后续防御性
+        // SaveFull 重写复用（避免把 meta.model 回写为空串）。
+        self.last_flush_model = (model.to_string(), Some(effort.to_string()));
         let turn_count = self.turns.len();
         let mut ops: Vec<PersistOp> = Vec::new();
         if !self.pending_save.is_empty() {
@@ -678,6 +687,12 @@ impl MessageStore {
     }
 
     /// Add an image block to the last user message (the most recent turn's user message).
+    ///
+    /// BUG-2026-09-13-04：图片块只改内存 turn 的话，ingest 时 save_msg 克隆
+    /// 进 pending_save 的纯文本副本会在 flush 后落盘——归档 JSONL 的用户
+    /// 消息永远无图片块，重启后图片索引永久丢失。同步修补 pending_save
+    /// 中同 msg_id 的克隆；若该消息已随先前 flush 落盘（生产路径不可达，
+    /// 此处仅防御），发 SaveFull 全量重写补齐并告警。
     pub fn push_image_to_last_user(&mut self, mime_type: &str, data: &str) {
         // A-2 L0：图片字节外置磁盘（内容寻址，见 qaqh_types::image_store），
         // 消息内只留 ImageRef 索引——daemon 常驻内存不再随图片数线性膨胀。
@@ -697,8 +712,39 @@ impl MessageStore {
             }
         };
         if let Some(turn) = self.turns.last_mut() {
-            turn.user.content.push(block);
+            turn.user.content.push(block.clone());
             self.context_revision = self.context_revision.saturating_add(1);
+            // BUG-2026-09-13-04：把图片块同步进 pending_save 的同 msg_id 克
+            // 隆，flush 落盘的归档消息才带图片。
+            if !self.ephemeral
+                && !self.replaying
+                && let Some(msg_id) = turn.user.msg_id
+                && let Some(pending) = self
+                    .pending_save
+                    .iter_mut()
+                    .find(|m| m.msg_id == Some(msg_id))
+            {
+                pending.content.push(block);
+            } else if !self.ephemeral && !self.replaying {
+                // 已 flush 落盘（防御分支）：发 SaveFull 全量重写补齐。
+                log::warn!(
+                    "[store] push_image_to_last_user: user msg already flushed; queuing SaveFull rewrite"
+                );
+                self.pending_persist.push(PersistOp::SaveFull {
+                    seed: self.seed.clone(),
+                    messages: self.to_vec(),
+                    model: self.last_flush_model.0.clone(),
+                    effort: self.last_flush_model.1.clone(),
+                    compact_skip: self.persisted_compact_skip(),
+                    turn_count: self.turns.len(),
+                });
+            }
+        } else {
+            // BUG-2026-09-13-25 同族可见性：无 user turn（ingest 被拒 /
+            // replaying）时图片既不入 store 也不报错——至少留诊断。
+            log::warn!(
+                "[store] push_image_to_last_user: no user turn to attach image (dropped)"
+            );
         }
     }
 
@@ -2778,5 +2824,82 @@ mod tests {
         assert_eq!(roles, vec!["system", "user", "user"]);
         let last = ctx.last().unwrap();
         assert_eq!(last.name.as_deref(), Some("subagent"));
+    }
+
+    // ── BUG-2026-09-13-04 回归：用户图片必须随消息落盘 ──
+
+    #[test]
+    fn push_image_reaches_persisted_append_op() {
+        let prev = std::env::var("QAQH_DATA_DIR").ok();
+        let tmp = std::env::temp_dir().join(format!("qaqh-store-img4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
+
+        let b64 = "aGVsbG8gaW1hZ2U=";
+        let mut store = MessageStore::new("persist-seed");
+        store.push_user("look at this");
+        store.push_image_to_last_user("image/png", b64);
+        store.flush_meta("test-model", "high");
+
+        // 内存视图：图片块在场。
+        let turn = store.turns.last().expect("turn");
+        assert!(matches!(
+            turn.user.content[1],
+            ContentBlock::ImageRef { .. }
+        ));
+
+        // 持久化视图：Append op 里的同 msg_id 消息也必须带图片块。
+        let ops = store.take_persist_ops();
+        let append = ops
+            .iter()
+            .find_map(|op| match op {
+                PersistOp::Append { messages, .. } => Some(messages),
+                _ => None,
+            })
+            .expect("Append op must be queued");
+        let persisted_user = append
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message in append batch");
+        assert!(
+            matches!(
+                persisted_user.content[1],
+                ContentBlock::ImageRef { .. }
+            ),
+            "persisted user message must carry the image block, got {persisted_user:?}"
+        );
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("QAQH_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("QAQH_DATA_DIR") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 防御分支：已 flush 落盘后 push 图 → SaveFull 重写补齐（model 沿用
+    /// 最近一次 flush，不得为空）。
+    #[test]
+    fn push_image_after_flush_queues_savefull_with_cached_model() {
+        let mut store = MessageStore::new("late-image-seed");
+        store.push_user("hello");
+        store.flush_meta("orig-model", "mid");
+        let _ = store.take_persist_ops();
+
+        store.push_image_to_last_user("image/png", "aGVsbG8=");
+        let ops = store.take_persist_ops();
+        match ops.last().expect("SaveFull op") {
+            PersistOp::SaveFull { model, messages, .. } => {
+                assert_eq!(model, "orig-model");
+                let user = messages
+                    .iter()
+                    .find(|m| m.role == "user")
+                    .expect("user in snapshot");
+                assert!(
+                    matches!(user.content[1], ContentBlock::ImageRef { .. }),
+                    "snapshot must carry the image block"
+                );
+            }
+            other => panic!("expected SaveFull, got {other:?}"),
+        }
     }
 }
