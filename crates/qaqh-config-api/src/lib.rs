@@ -184,8 +184,8 @@ pub struct LspServerDto {
 /// 序列化时跳过 None，保证 wire 上永不出现 `"field": null`。
 ///
 /// 刻意**不含**：providers/profiles 名录（服务端派生）、active_profile
-/// （切换走 `profile.apply`）、permission_level（走 `set_permission_level`
-/// 单写口）、api_key_set（服务端派生）。
+/// （切换走 `profile.apply`）、api_key_set（服务端派生）。
+/// `permissionLevel` 在 patch 中受 1..=4 值域校验（BUG-2026-09-13-15）。
 ///
 /// 特例语义冻结：`apiKey`/`subagentApiKey` 沿用既有守卫——`"****"` 或空串 =
 /// 保持现值（显式删除须专用接口）；其余字符串字段 Some(空串) = 显式置空。
@@ -229,6 +229,14 @@ pub struct ConfigPatch {
         alias = "notifications_enabled"
     )]
     pub notifications_enabled: Option<bool>,
+    /// 权限档位（1=MaxLockdown … 4=Unrestricted）。
+    ///
+    /// BUG-2026-09-13-15：历史上该字段刻意缺席写模型，只有
+    /// `config.set_permission_level` 单写口；但写口校验缺失时非法档位仍能从
+    /// `config.save` 的裸 `permissionLevel` 载荷漏进配置。现在并入 patch 并在
+    /// [`Self::validate`] 中做值域校验（非法即拒绝，不落成 Level 4）。
+    #[serde(skip_serializing_if = "Option::is_none", alias = "permission_level")]
+    pub permission_level: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none", alias = "tokenizer_path")]
     pub tokenizer_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,6 +290,13 @@ impl ConfigPatch {
         {
             return Err(format!(
                 "reasoningEffort 仅允许 low|medium|high|xhigh|max，收到 {e}"
+            ));
+        }
+        if let Some(level) = self.permission_level
+            && !(1..=4).contains(&level)
+        {
+            return Err(format!(
+                "permissionLevel 仅允许 1..=4（1=MaxLockdown, 2=ReadFree, 3=WorkspaceFree, 4=Unrestricted），收到 {level}"
             ));
         }
         if let Some(sub) = &self.subagent {

@@ -856,8 +856,21 @@ impl Config {
             // serde 忽略；残留的 secrets.toml multimodal 槽位不再读取。
 
             // ── Permission ──
+            // BUG-2026-09-13-15：`permission_level` 是裸 u8，手写 config.toml
+            // 的笔误（0 / 5..=255）曾一路带进运行时并被静默当作 Level 4
+            // （Unrestricted，免审批）——越界值必须收敛到最严档（fail-closed），
+            // 绝不能反向放大权限。仅打日志，不中断启动（用户配置不应让 daemon
+            // 起不来；降级方向安全）。
             if let Some(pl) = pc.permission_level {
-                cfg.permission_level = pl;
+                if (1..=4).contains(&pl) {
+                    cfg.permission_level = pl;
+                } else {
+                    log::warn!(
+                        "[config] invalid permission_level {pl} in config.toml (must be 1-4); \
+falling back to 1 (MaxLockdown)"
+                    );
+                    cfg.permission_level = 1;
+                }
             }
 
             // ── Tokenizer ──

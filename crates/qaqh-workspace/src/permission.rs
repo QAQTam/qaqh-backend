@@ -105,13 +105,38 @@ pub enum PermissionLevel {
 }
 
 impl PermissionLevel {
+    /// Lenient scalar parser: legal levels (1..=4) map to themselves; **any**
+    /// other value conservatively degrades to [`Self::MaxLockdown`].
+    ///
+    /// BUG-2026-09-13-15: this used to fall through to `Self::Unrestricted`,
+    /// i.e. a typo in `config.toml` (`permission_level = 0`) silently granted
+    /// every tool call a free pass — a fail-open that *amplified* privilege.
+    /// The fallback is now the most restrictive level (fail-closed), matching
+    /// the project's "degrade explicitly, toward fail-closed" rule.
+    ///
+    /// Callers that must distinguish "invalid" from "explicitly MaxLockdown"
+    /// should use [`Self::try_from_u8`].
     pub fn from_u8(v: u8) -> Self {
+        Self::try_from_u8(v).unwrap_or(Self::MaxLockdown)
+    }
+
+    /// Strict scalar parser: rejects anything outside the documented `1..=4`
+    /// range so configuration write/load ports can fail fast or normalize.
+    pub fn try_from_u8(v: u8) -> Result<Self, String> {
         match v {
-            1 => Self::MaxLockdown,
-            2 => Self::ReadFree,
-            3 => Self::WorkspaceFree,
-            _ => Self::Unrestricted,
+            1 => Ok(Self::MaxLockdown),
+            2 => Ok(Self::ReadFree),
+            3 => Ok(Self::WorkspaceFree),
+            4 => Ok(Self::Unrestricted),
+            other => Err(format!(
+                "invalid permission level {other} (must be 1-4: 1=MaxLockdown, 2=ReadFree, 3=WorkspaceFree, 4=Unrestricted)"
+            )),
         }
+    }
+
+    /// Whether `v` is a documented permission level (`1..=4`).
+    pub fn is_valid_u8(v: u8) -> bool {
+        (1..=4).contains(&v)
     }
 
     pub fn to_u8(self) -> u8 {
@@ -622,6 +647,34 @@ mod tests {
             workspace,
             link.join("new.txt"),
         )
+    }
+
+    #[test]
+    fn from_u8_is_exhaustively_fail_closed() {
+        // BUG-2026-09-13-15：全值域逐一断言——任何非法档位都不得解析为
+        // Unrestricted（免审批），必须保守降级 MaxLockdown。
+        for raw in 0u8..=255 {
+            let level = PermissionLevel::from_u8(raw);
+            match raw {
+                1 | 2 | 3 | 4 => {
+                    assert_eq!(level.to_u8(), raw, "legal level {raw} must map to itself");
+                    assert!(PermissionLevel::is_valid_u8(raw));
+                    assert_eq!(PermissionLevel::try_from_u8(raw), Ok(level));
+                }
+                invalid => {
+                    assert_eq!(
+                        level,
+                        PermissionLevel::MaxLockdown,
+                        "illegal level {invalid} must degrade to MaxLockdown, not fail open"
+                    );
+                    assert!(!PermissionLevel::is_valid_u8(invalid));
+                    assert!(
+                        PermissionLevel::try_from_u8(invalid).is_err(),
+                        "illegal level {invalid} must be rejected by the strict parser"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

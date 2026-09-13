@@ -161,6 +161,10 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     if let Some(v) = patch.compliance_enabled {
         cfg.compliance_enabled = v;
     }
+    if let Some(v) = patch.permission_level {
+        // validate() 已保证 1..=4（BUG-2026-09-13-15）。
+        cfg.permission_level = u8::try_from(v).unwrap_or(1);
+    }
     if let Some(v) = &patch.lang {
         cfg.lang = if v.is_empty() { None } else { Some(v.clone()) };
     }
