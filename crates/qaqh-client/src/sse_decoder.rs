@@ -23,10 +23,14 @@
 //! - 注释行（`:` 开头）不产出帧（keepalive 帧被自然丢弃）；
 //! - 多 `data:` 行聚合为单帧（SSE 规范以单个 `\n` 连接）；
 //! - 流结束（EOF）不冲刷残帧——上层对无终帧的流直接报
-//!   `SSE stream ended`（与旧实现一致）。
+//!   `SSE stream ended`（与旧实现一致）；
+//! - 流首 UTF-8 BOM 剥离一次（BUG-2026-09-13-17，中间层注入场景）。
 
 use crate::error::Result as ClientResult;
 use crate::types::SseFrame;
+
+/// UTF-8 BOM（U+FEFF）字节序列。
+const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
 /// 游标式 SSE 帧解码器。`push` 追加字节，`next_frame` 逐帧产出。
 #[derive(Debug, Default)]
@@ -36,6 +40,11 @@ pub(crate) struct SseDecoder {
     consumed: usize,
     /// 当前累积的帧（id/event/data 字段）。
     pending: Option<SseFrame>,
+    /// 流首 BOM（`\u{FEFF}`，字节 EF BB BF）是否已处理。
+    ///
+    /// BUG-2026-09-13-17：中间层注入 BOM 与首字段同行时 `\u{feff}id:` 前缀失配
+    /// → id 丢失，首帧游标（`cursor_from_sse_id`）无法推进。
+    bom_checked: bool,
 }
 
 impl SseDecoder {
@@ -44,6 +53,7 @@ impl SseDecoder {
             buf: Vec::new(),
             consumed: 0,
             pending: None,
+            bom_checked: false,
         }
     }
 
@@ -58,6 +68,21 @@ impl SseDecoder {
 
     /// 取下一完整帧。`None` = 暂无完整帧，需等更多数据。
     pub(crate) fn next_frame(&mut self) -> Option<Result<SseFrame, ()>> {
+        // 流首 BOM 剥离：BOM 三字节可能跨 chunk 到达，未到齐时原样保留等下一块
+        // （此时缓冲必为空，不会破坏正常行切分）。
+        if !self.bom_checked {
+            let avail = &self.buf[self.consumed..];
+            let n = BOM.iter().zip(avail).take_while(|(b, a)| b == a).count();
+            if n == BOM.len() {
+                self.consumed += BOM.len();
+                self.bom_checked = true;
+            } else if avail.len() < BOM.len() {
+                return None;
+            } else {
+                self.bom_checked = true;
+            }
+        }
+
         loop {
             let rel = self.buf[self.consumed..].iter().position(|&b| b == b'\n')?;
             let end = self.consumed + rel;
@@ -212,5 +237,48 @@ mod tests {
         d.push(b"data: {\"a\":1}\r\n\r\n");
         let frame = d.next_frame().expect("frame").expect("utf-8");
         assert_eq!(frame.data, "{\"a\":1}");
+    }
+
+    #[test]
+    fn leading_bom_is_stripped_and_first_frame_cursor_survives() {
+        // BUG-2026-09-13-17：BOM 与首字段同行时 `\u{feff}id:` 前缀失配 → id 丢失，
+        // 首帧游标无法推进（cursor_from_sse_id 返回 None）。
+        let mut d = SseDecoder::new();
+        d.push(
+            "\u{feff}id: epoch-1:conversation:7\nevent: turn_started\ndata: {\"x\":1}\n\n"
+                .as_bytes(),
+        );
+        let frame = d.next_frame().expect("frame").expect("utf-8");
+        assert_eq!(
+            fields(frame),
+            (
+                "epoch-1:conversation:7".into(),
+                "turn_started".into(),
+                "{\"x\":1}".into()
+            )
+        );
+        assert!(d.next_frame().is_none());
+    }
+
+    #[test]
+    fn leading_bom_does_not_break_frame_payload() {
+        let mut d = SseDecoder::new();
+        d.push("\u{feff}data: {\"a\":1}\n\n".as_bytes());
+        let frame = d.next_frame().expect("frame").expect("utf-8");
+        assert_eq!(frame.data, "{\"a\":1}");
+        assert!(frame.id.is_empty());
+        assert!(d.next_frame().is_none());
+    }
+
+    #[test]
+    fn bom_split_across_chunks_is_handled() {
+        let mut d = SseDecoder::new();
+        d.push(b"\xef\xbb");
+        assert!(d.next_frame().is_none());
+        d.push(b"\xbfid: epoch-1:tool:3\ndata: {}\n\n");
+        let frame = d.next_frame().expect("frame").expect("utf-8");
+        assert_eq!(frame.id, "epoch-1:tool:3");
+        assert_eq!(frame.data, "{}");
+        assert!(d.next_frame().is_none());
     }
 }

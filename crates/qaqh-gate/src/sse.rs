@@ -21,7 +21,11 @@
 //! - `event:`/`id:`/`retry:` 行忽略（事件类型在 data 的 JSON 内）；
 //! - 无空行分隔时（`event: X\ndata: A\nevent: Y\ndata: B`）`event:` 行触发
 //!   前一事件冲刷，保证事件正确分离；
-//! - 多 `data:` 行聚合为单事件（SSE 规范以单个 `\n` 连接）。
+//! - 多 `data:` 行聚合为单事件（SSE 规范以单个 `\n` 连接）；
+//! - 流首 UTF-8 BOM 剥离一次（BUG-2026-09-13-17，中间层注入场景）。
+
+/// UTF-8 BOM（U+FEFF）字节序列。
+const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
 #[derive(Debug, Default)]
 pub(crate) struct SseDecoder {
@@ -30,6 +34,11 @@ pub(crate) struct SseDecoder {
     consumed: usize,
     /// 当前事件的聚合 data payload。
     pending: Option<String>,
+    /// 流首 BOM（`\u{FEFF}`，字节 EF BB BF）是否已处理。
+    ///
+    /// BUG-2026-09-13-17：中间层（代理/网关）可能在流首注入 UTF-8 BOM 且与首
+    /// 字段同行，`\u{feff}data:` 此前不匹配任何分支而被静默忽略 → 首事件丢失。
+    bom_checked: bool,
 }
 
 impl SseDecoder {
@@ -38,6 +47,7 @@ impl SseDecoder {
             buf: Vec::new(),
             consumed: 0,
             pending: None,
+            bom_checked: false,
         }
     }
 
@@ -52,6 +62,21 @@ impl SseDecoder {
 
     /// 取下一完整帧（聚合的 data payload）。`None` = 暂无完整帧，需等更多数据。
     pub(crate) fn next_frame(&mut self) -> Option<Result<String, ()>> {
+        // 流首 BOM 剥离：BOM 三字节可能跨 chunk 到达，未到齐时原样保留等下一块
+        // （此时缓冲必为空，不会破坏正常行切分）。
+        if !self.bom_checked {
+            let avail = &self.buf[self.consumed..];
+            let n = BOM.iter().zip(avail).take_while(|(b, a)| b == a).count();
+            if n == BOM.len() {
+                self.consumed += BOM.len();
+                self.bom_checked = true;
+            } else if avail.len() < BOM.len() {
+                return None;
+            } else {
+                self.bom_checked = true;
+            }
+        }
+
         loop {
             let rel = self.buf[self.consumed..].iter().position(|&b| b == b'\n')?;
             let end = self.consumed + rel;
@@ -163,6 +188,35 @@ mod tests {
         let mut d = SseDecoder::new();
         d.push(b": keepalive\nretry: 100\nid: 1\ndata: {\"ok\":true}\n\n");
         assert_eq!(d.next_frame(), Some(Ok("{\"ok\":true}".into())));
+        assert_eq!(d.next_frame(), None);
+    }
+
+    #[test]
+    fn leading_bom_is_stripped_and_first_event_is_not_dropped() {
+        // BUG-2026-09-13-17：中间层（代理/网关）在流首注入 UTF-8 BOM 且与首字段同行时，
+        // 首行此前不匹配任何分支而被静默忽略 → 首事件丢失。
+        let mut d = SseDecoder::new();
+        d.push("\u{feff}data: {\"a\":1}\n\n".as_bytes());
+        assert_eq!(d.next_frame(), Some(Ok("{\"a\":1}".into())));
+        assert_eq!(d.next_frame(), None);
+    }
+
+    #[test]
+    fn leading_bom_before_event_line_does_not_break_flush() {
+        let mut d = SseDecoder::new();
+        d.push("\u{feff}event: response.done\ndata: {\"b\":2}\n\n".as_bytes());
+        assert_eq!(d.next_frame(), Some(Ok("{\"b\":2}".into())));
+        assert_eq!(d.next_frame(), None);
+    }
+
+    #[test]
+    fn bom_split_across_chunks_is_handled() {
+        let mut d = SseDecoder::new();
+        // BOM 三个字节跨两个 chunk 到达。
+        d.push(b"\xef\xbb");
+        assert_eq!(d.next_frame(), None);
+        d.push(b"\xbfdata: {\"c\":3}\n\n");
+        assert_eq!(d.next_frame(), Some(Ok("{\"c\":3}".into())));
         assert_eq!(d.next_frame(), None);
     }
 }
