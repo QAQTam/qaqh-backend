@@ -123,7 +123,14 @@ fn convert_messages_to_anthropic(
                     }
                 }
                 if content_parts.is_empty() {
-                    content_parts.push(serde_json::json!({"type":"text","text":""}));
+                    // BUG-2026-09-13-27：所有块都被过滤/忽略的 user 消息（空 text、
+                    // 无可承载变体）不能兜底成 `{"type":"text","text":""}` ——
+                    // Anthropic 及严格端点会以 400 拒绝且不可重试，整个回合 Fatal。
+                    // 改为丢弃该消息：它本来就零信息量，后续轮次的正式 user 消息仍在。
+                    log::warn!(
+                        "anthropic: dropping user message with no convertible content block"
+                    );
+                    continue;
                 }
                 raw.push(serde_json::json!({"role":"user","content": content_parts}));
             }
