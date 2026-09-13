@@ -36,16 +36,30 @@ pub(crate) enum Readiness {
 /// 职责：把子进程输出解码后逐 chunk 推给 progress 通道（流式 UX），同时
 /// 写入注册表（tail 视图 + full 捕获——seal 以 `captured_full` 为权威）。
 ///
-/// 退出条件（任一，读线程永不无限阻塞）：
-/// - EOF（`Ok(0)`）——正常路径，子进程退出即达，零额外等待；
-/// - 读错误（WouldBlock/Interrupted 除外）；
-/// - 字节预算（`max_bytes`）耗尽——超限数据就地丢弃（与旧实现一致），
-///   但不再 sink 排空到 EOF：旧实现在此同样可被孙进程卡死；
-/// - **settle 到期**：子进程终态（`is_running == false`）后继续排空
-///   `READER_SETTLE_BUDGET`，到期即退出——孙进程持有管道写端时读线程
-///   必须确定性退出、释放 progress sender（阶段 1 的 1.3 遗留驻留治愈）。
+/// **退出条件（以实现为准；旧版本文档写"settle 到期即退出…绝不等待
+/// EOF"，与 30a011b 后的语义相反，已作废）**：
+/// - EOF（`Ok(0)`）——**正常出口，也是唯一"数据读完"的判据**。子进程
+///   退出即达，零额外等待；
+/// - 读错误（`WouldBlock`/`Interrupted` 除外）；
+/// - **settle 到期（兜底，非主出口）**：只在"放弃了"的两种形态生效——
+///   ① `Empty`（探测无数据）且子进程终态、`READER_SETTLE_BUDGET` 已过；
+///   ② `Closed`（写端全关）且子进程**仍存活**、`READER_SETTLE_BUDGET`
+///   已过。读到任何数据都不会打断排空（快路径 `continue`，不睡轮询周期），
+///   所以**只要子进程退出后管道仍有数据、且读得动，就一定能读到 `Ok(0)`**。
+///   兜底的意义是：孙进程持有写端时读线程必须确定性退出并释放 progress
+///   sender（阶段 1 的 1.3 遗留驻留治愈），"静默丢"降级为"有界丢"。
 ///
-/// 返回 (saw_eof, capped)，seal 据此判定 truncated。
+/// 三个容易反着记的点：
+/// - **`Empty` / `Closed` 都不等于"数据读完"**：`Closed`（Windows
+///   `PeekNamedPipe` 失败）在每次正常收尾都会发生，而缓冲可能仍是满的；
+/// - **字节预算耗尽不停止排空**：超限 chunk 就地丢弃（`capped=true`），
+///   但仍要读到 `Ok(0)`——只丢不读会让管道填满、反压卡住写端；
+/// - **settle 计时不会因"读到数据"而重置**：它按 `exit_seen` 起算，读得
+///   动就不会走到判据点，无需重置。
+///
+/// 返回 `(saw_eof, capped)`。`saw_eof=false` 只来自上面两条放弃路径
+/// （settle 兜底、读错误），**没有第三条**；seal 据此判定 `truncated`，
+/// 并由 [`super::direct::reader_eof_warning`] 落 warning 证据链。
 pub(crate) fn drain_pipe_to_registry<S: std::io::Read>(
     stream: &mut S,
     max_bytes: usize,
@@ -258,6 +272,10 @@ pub(crate) fn pipe_available_bytes(handle: std::os::windows::io::RawHandle) -> O
 /// seal 侧有界 join：等待读线程退出信号 (saw_eof, capped)。
 /// 超时或读线程意外消失（panic → 信道 Disconnected）一律按 (false, false)
 /// 处理 → truncated 保守提示；数据本身以 captured_full 为权威，不受影响。
+///
+/// 注意"(false, false) 兜底"是 **seal 侧**的第三类 `saw_eof=false` 来源，
+/// 与读线程内部的两条放弃路径（settle 兜底、读错误）无关：此时读线程可能
+/// 只是没赶上 `SEAL_JOIN_BUDGET`，数据仍在后台继续 append 到注册表。
 pub(crate) fn wait_reader_done(
     rx: &std::sync::mpsc::Receiver<(bool, bool)>,
     deadline: std::time::Instant,
@@ -432,10 +450,12 @@ pub(crate) fn send_progress(
 ///
 /// - `READER_POLL_TICK`：管道空的轮询粒度（unix 非阻塞 WouldBlock /
 ///   Windows PeekNamedPipe 为 0 时的重试间隔）。
-/// - `READER_SETTLE_BUDGET`：观察到子进程终态后，读线程继续排空在途
-///   输出的预算；到期即退出（丢弃后续 chunk，与 drain_bounded 语义对齐），
-///   **绝不等待 EOF**——孙进程持有管道写端时读线程必须确定性退出，
-///   不再持有 progress sender（阶段 1 的 1.3 遗留驻留问题就此治愈）。
+/// - `READER_SETTLE_BUDGET`：兜底预算。语义是"**放弃**的判据"，不是
+///   "读完的判据"：正常路径读到 `Ok(0)` 即出口，一分钱也不多等；只有
+///   "终态 + 探测空"或"存活 + 写端全关 + 探测空"持续满这个预算，读线程
+///   才放弃排空（丢弃后续 chunk）并释放 progress sender（阶段 1 的 1.3
+///   遗留驻留治愈）。故它是**下界而非上界**：读得动就继续读到 EOF，
+///   排空时长不受此值约束，只有"放弃"这一动作落在该预算内。
 /// - `SEAL_JOIN_BUDGET`：seal 侧对两个读线程退出信号的有界 join 预算，
 ///   需覆盖"主循环观察到退出（≤50ms）+ settle（300ms）+ 调度余量"。
 pub(crate) const READER_POLL_TICK: std::time::Duration = std::time::Duration::from_millis(50);
