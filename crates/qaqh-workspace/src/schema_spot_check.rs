@@ -36,13 +36,21 @@ mod schema_spot_check {
             "web_fetch.url not required"
         );
 
-        // Todo v3（write/update/list 混合制）：
-        // write = items-only + 空数组清空语义。
+        // Todo v4（全量覆写形态）：
+        // write = items-only + 条目内 status 必填（写即状态）。
         let tw = params("todo_write");
         assert!(tw["items"].is_object(), "todo_write.items missing");
         assert!(
             tw["items"]["maxItems"].is_number(),
             "todo_write.items.maxItems missing"
+        );
+        let tw_item = &tw["items"]["items"];
+        assert!(
+            tw_item["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("status")),
+            "todo_write items[].status must be required (write-as-state)"
         );
         // update = 单一形态（无 ids/updates，required [id, status]）。
         let tu = params("todo_update");

@@ -7,7 +7,7 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
         .map(|definition| definition.function.name.as_str())
         .collect();
 
-    // Todo v3（owner 拍板混合制）：todo_write / todo_update / todo_list 三件套。
+    // Todo v4（全量覆写形态）：todo_write / todo_update / todo_list 三件套。
     let todo_tools = ["todo_write", "todo_update", "todo_list"];
     for expected in todo_tools {
         assert!(
@@ -25,7 +25,7 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
     assert_eq!(
         todo_prefixed.len(),
         3,
-        "exactly the three v3 todo tools must be exposed, got {todo_prefixed:?}"
+        "exactly the three v4 todo tools must be exposed, got {todo_prefixed:?}"
     );
     // 旧聚合工具 todo 与更早的别名 task 都不得再暴露。
     assert!(
@@ -61,6 +61,26 @@ fn public_schema_exposes_todo_write_update_list_with_no_legacy_names() {
     assert_eq!(
         write.function.parameters["properties"]["items"]["maxItems"],
         json!(20)
+    );
+    // v4：条目内 status 必填（写即状态——in_progress 显式告知载体）；
+    // id/evidence/description 可选（QAQ 增强字段保留）。
+    let write_item = &write.function.parameters["properties"]["items"]["items"];
+    assert_eq!(write_item["required"], json!(["title", "status"]));
+    assert_eq!(
+        write_item["properties"]["status"]["enum"],
+        json!(["idle", "in_progress", "completed", "cancelled"])
+    );
+    assert!(write_item["properties"]["id"].is_object());
+    assert!(write_item["properties"]["evidence"].is_object());
+    // v4：explanation 顶层可选（中改计划的理由，对齐 Codex update_plan）。
+    assert!(
+        write.function.parameters["properties"]["explanation"].is_object(),
+        "todo_write.explanation missing"
+    );
+    // v4 回归守卫：工具描述必须声明全量覆写语义（防 append 语义回潮）。
+    assert!(
+        write.function.description.contains("full-replace"),
+        "todo_write description must advertise full-replace semantics"
     );
 
     let update = find("todo_update");
@@ -124,10 +144,10 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         "todo_write",
         "",
         &serde_json::json!({"items": [
-            {"title": "Working", "description": "item 0"},
-            {"title": "Done", "description": "item 1"},
-            {"title": "Cancelled", "description": "item 2"},
-            {"title": "Waiting", "description": "item 3"}
+            {"title": "Working", "description": "item 0", "status": "idle"},
+            {"title": "Done", "description": "item 1", "status": "idle"},
+            {"title": "Cancelled", "description": "item 2", "status": "idle"},
+            {"title": "Waiting", "description": "item 3", "status": "idle"}
         ]})
         .to_string(),
         "todo-create",
