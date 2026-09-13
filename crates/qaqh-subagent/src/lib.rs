@@ -151,6 +151,66 @@ mod tests {
         // 身份提示在前，任务在后。
         assert!(with_ctx.find("[SYSTEM]").unwrap() < with_ctx.find("[TASK]").unwrap());
     }
+
+    // ── kill 路径回归（PR #57 reviewer 阻断 ③）────────────────────────
+    //
+    // 阻断背景：subagent 的登记路径只 `register` + `mark_exited`，**从不**
+    // `attach_child` → 其进程条目没有 os_pid。`collect_subagent_result`
+    // 每个轮询周期只看 `RegistryRef::killed()`（即 `status == "killed"`）。
+    // 若墓碑 kill 之后状态仍停留在 `exited`，子代理永远收不到 kill 请求。
+
+    /// 墓碑路径：条目已按终态时间驱逐 → `process kill` 命中墓碑 → 状态必须
+    /// 收敛为 `killed`，`RegistryRef::killed()` 必须看到 true。
+    #[test]
+    fn registry_ref_killed_sees_tombstone_kill() {
+        use qaqh_workspace::process_registry::{KillOutcome, ProcessRegistry};
+
+        let id = ProcessRegistry::register("subagent-tombstone-kill");
+        let registry_ref = RegistryRef::Local { id };
+
+        // subagent 形态：登记后直接进终态，无 os_pid。
+        ProcessRegistry::mark_exited(id, 0);
+        assert!(!registry_ref.killed(), "终态为 exited 时不得视为被 kill");
+
+        // 把条目熬成墓碑（终态 >600s 后下一次 register 触发惰性驱逐）。
+        ProcessRegistry::age_registration_for_test(id, 3600);
+        let _trigger = ProcessRegistry::register("subagent-tombstone-trigger");
+        let info = ProcessRegistry::get_info(id).expect("条目必须已降级为墓碑");
+        assert_eq!(info["evicted"], true, "前置条件：条目已驱逐: {info}");
+
+        // 墓碑 kill：无 os_pid，故如实报 NoOsPid，但状态仍须收敛为 killed
+        // （id 有效、终态确定，子代理据此停止轮询）。
+        assert_eq!(
+            ProcessRegistry::kill(id),
+            KillOutcome::NoOsPid,
+            "无 os_pid 的墓碑不得谎报清理成功"
+        );
+        let after = ProcessRegistry::get_info(id).expect("墓碑仍可查询");
+        assert_eq!(
+            after["status"], "killed",
+            "墓碑 kill 后状态必须为 killed: {after}"
+        );
+        assert!(
+            registry_ref.killed(),
+            "RegistryRef::killed() 必须覆盖墓碑路径（否则子代理无法感知 kill）"
+        );
+    }
+
+    /// 对照：在册条目的 kill 路径同样被 `RegistryRef::killed()` 看见。
+    #[test]
+    fn registry_ref_killed_sees_in_place_kill() {
+        use qaqh_workspace::process_registry::{KillOutcome, ProcessRegistry};
+
+        let id = ProcessRegistry::register("subagent-in-place-kill");
+        let registry_ref = RegistryRef::Local { id };
+        assert!(!registry_ref.killed(), "运行中不得视为被 kill");
+
+        assert_eq!(ProcessRegistry::kill(id), KillOutcome::Killed);
+        assert!(
+            registry_ref.killed(),
+            "在册条目 kill 后 RegistryRef::killed() 必须为 true"
+        );
+    }
 }
 
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文

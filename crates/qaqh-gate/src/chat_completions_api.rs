@@ -213,7 +213,7 @@ pub fn chat_stream_openai(
             };
         }
         // HTTP error — read body for details（headers 需在 text() 前抓取）
-        let retry_after = parse_retry_after(resp.headers());
+        let retry_after = parse_retry_after(resp.headers(), &policy);
         let text = block_on(resp.text()).unwrap_or_default();
         let code_desc = http_error_description(status);
         if !is_retryable(status) {
@@ -938,7 +938,7 @@ pub fn chat_sync_openai(
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             // headers 需在 text() 前抓取
-            let retry_after = parse_retry_after(resp.headers());
+            let retry_after = parse_retry_after(resp.headers(), &policy);
             let text = block_on(resp.text()).unwrap_or_default();
             if status != 401 && is_retryable(status) {
                 log::warn!(

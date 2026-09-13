@@ -92,7 +92,8 @@ impl ChannelStream {
         retry_ms: &mut u64,
     ) -> Result<()> {
         (self.handlers.on_status)(ChannelStatus::Connecting);
-        let Some((server_epoch, client_session_id)) = self.session_ctx.borrow_and_update().clone() else {
+        let Some((server_epoch, client_session_id)) = self.session_ctx.borrow_and_update().clone()
+        else {
             return Err(ClientError::Negotiation("session not open".into()));
         };
 
@@ -214,5 +215,91 @@ impl ChannelStream {
             crate::types::envelope_to_batch(self.channel, envelope, server_epoch.to_string());
         (self.handlers.on_batch)(batch);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! SSE 终止帧归一（BUG-2026-09-12-11 遗留 / issue #35）。
+    //!
+    //! daemon 侧因 live 广播 `Lagged` 发出的 `ringing.stream_terminated`
+    //! 必须被**归一为 `Transport` 错误**（走退避重连），而不是被当成坏信封
+    //! 落成 `Protocol`——后者会让客户端在实现不变的情况下永远重连不上。
+
+    use super::*;
+    use crate::types::Channel;
+
+    fn stream() -> ChannelStream {
+        let (_tx, rx) = watch::channel(Some(("epoch-1".into(), "cs-1".into())));
+        ChannelStream::new(
+            "http://127.0.0.1:1/ringing/v1/events/conversation".into(),
+            "t".into(),
+            Channel::Conversation,
+            reqwest::Client::new(),
+            StreamHandlers {
+                on_batch: std::sync::Arc::new(|_| {}),
+                on_status: std::sync::Arc::new(|_| {}),
+                on_reset: None,
+            },
+            rx,
+        )
+    }
+
+    fn frame(event_type: &str, data: &str) -> SseFrame {
+        SseFrame {
+            id: String::new(),
+            event_type: event_type.into(),
+            data: data.into(),
+        }
+    }
+
+    /// daemon Lagged 终止帧 → Transport（可重连），不是 Protocol。
+    #[test]
+    fn lagged_termination_frame_normalizes_to_transport() {
+        let mut s = stream();
+        let err = s
+            .dispatch(
+                frame(
+                    "ringing.stream_terminated",
+                    r#"{"code":"lagged","channel":"conversation","skipped":7,"message":"overflow"}"#,
+                ),
+                "epoch-1",
+            )
+            .expect_err("termination frame must end the stream");
+        assert!(
+            matches!(err, ClientError::Transport(_)),
+            "must normalize to Transport: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("lagged"),
+            "message must carry the server code: {msg}"
+        );
+    }
+
+    /// 载荷缺 `code` 时退化为 unknown，仍按 Transport 处理（不得 panic）。
+    #[test]
+    fn termination_frame_without_code_still_transport() {
+        let mut s = stream();
+        let err = s
+            .dispatch(frame("ringing.stream_terminated", "{}"), "epoch-1")
+            .expect_err("termination frame must end the stream");
+        assert!(matches!(err, ClientError::Transport(_)), "{err:?}");
+        assert!(err.to_string().contains("unknown"), "{err}");
+    }
+
+    /// 对照：终止帧分支**先于**信封解析——即便 data 不是合法信封也不得
+    /// 落成 Protocol("bad envelope")。
+    #[test]
+    fn termination_frame_is_not_misparsed_as_bad_envelope() {
+        let mut s = stream();
+        let err = s
+            .dispatch(
+                frame("ringing.stream_terminated", "not json at all\n"),
+                "epoch-1",
+            )
+            .expect_err("must error");
+        assert!(matches!(err, ClientError::Transport(_)), "{err:?}");
+        assert!(!err.to_string().contains("bad envelope"), "{err}");
     }
 }

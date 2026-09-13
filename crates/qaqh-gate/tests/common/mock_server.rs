@@ -18,6 +18,8 @@ pub enum SseChunk {
     #[allow(dead_code)]
     Delay(Duration),
     HttpError(u16, serde_json::Value),
+    /// HTTP error with extra response headers（`retry-after` 封顶回归用）。
+    HttpErrorWithHeaders(u16, serde_json::Value, ScenarioHeaders),
     /// A complete application/json body (non-streaming responses, e.g. the
     /// sync/compact path). Mutually exclusive with SSE chunks: it must be the
     /// only element of the scenario.
@@ -76,6 +78,12 @@ impl SseChunk {
         SseChunk::HttpError(status, json!({"error": {"message": message}}))
     }
 
+    /// HTTP error carrying extra response headers（BUG-2026-09-13-22：注入超大
+    /// `retry-after` 以断言封顶行为）。
+    pub fn error_with_headers(status: u16, message: &str, headers: ScenarioHeaders) -> Self {
+        SseChunk::HttpErrorWithHeaders(status, json!({"error": {"message": message}}), headers)
+    }
+
     /// A plain `application/json` body, for the non-streaming sync path.
     pub fn json_body(body: serde_json::Value) -> Self {
         SseChunk::JsonBody(body)
@@ -109,11 +117,16 @@ pub fn usage_with_cache(
 
 // ── MockServer ───────────────────────────────────────────────────────
 
+/// 附加到该场景所有响应的额外响应头（如 `retry-after`）。
+pub type ScenarioHeaders = Vec<(&'static str, String)>;
+
 enum ScenarioSource {
     /// Same scenario for every request.
     Fixed(Vec<SseChunk>),
     /// Rotating scenarios, one per request.
     Sequential(Vec<Vec<SseChunk>>),
+    /// Fixed scenario + extra response headers.
+    FixedWithHeaders(Vec<SseChunk>, ScenarioHeaders),
 }
 
 /// A tiny HTTP server that responds to POST `/chat/completions` with
@@ -128,7 +141,8 @@ pub struct MockServer {
     pub last_request_body: Arc<Mutex<Option<String>>>,
 }
 
-fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk]) {
+fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk], base_headers: &ScenarioHeaders) {
+    let mut extra_headers = base_headers.clone();
     let mut sse = String::new();
     let mut error_response: Option<(u16, String)> = None;
     let mut json_response: Option<String> = None;
@@ -151,6 +165,11 @@ fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk]) {
                 error_response = Some((*status, body_val.to_string()));
                 break;
             }
+            SseChunk::HttpErrorWithHeaders(status, body_val, headers) => {
+                error_response = Some((*status, body_val.to_string()));
+                extra_headers.extend(headers.iter().cloned());
+                break;
+            }
             SseChunk::JsonBody(val) => {
                 json_response = Some(val.to_string());
                 break;
@@ -158,23 +177,33 @@ fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk]) {
         }
     }
 
+    let headers: Vec<Header> = extra_headers
+        .iter()
+        .map(|(name, value)| {
+            Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("valid extra header")
+        })
+        .collect();
+
     if let Some(body) = json_response {
-        let resp = Response::from_string(body).with_header(
-            "Content-Type: application/json"
-                .parse::<Header>()
-                .expect("valid header"),
-        );
+        let mut resp = Response::from_string(body)
+            .with_header("Content-Type: application/json".parse::<Header>().expect("valid header"));
+        for h in headers {
+            resp = resp.with_header(h);
+        }
         let _ = req.respond(resp);
     } else if let Some((status, body)) = error_response {
         let status_code = StatusCode(status);
-        let resp = Response::from_string(body).with_status_code(status_code);
+        let mut resp = Response::from_string(body).with_status_code(status_code);
+        for h in headers {
+            resp = resp.with_header(h);
+        }
         let _ = req.respond(resp);
     } else if !sse.is_empty() {
-        let resp = Response::from_string(sse).with_header(
-            "Content-Type: text/event-stream"
-                .parse::<Header>()
-                .expect("valid header"),
-        );
+        let mut resp = Response::from_string(sse)
+            .with_header("Content-Type: text/event-stream".parse::<Header>().expect("valid header"));
+        for h in headers {
+            resp = resp.with_header(h);
+        }
         let _ = req.respond(resp);
     }
 }
@@ -207,58 +236,49 @@ fn run_server(
         *last_body.lock().expect("body lock") = Some(body);
         request_count.fetch_add(1, Ordering::SeqCst);
 
-        // Get the scenario for this request
-        let scenario = {
+        // Get the scenario (+ extra response headers) for this request
+        let (scenario, headers) = {
             let mut src = source.lock().expect("source lock");
             match &mut *src {
-                ScenarioSource::Fixed(s) => s.clone(),
+                ScenarioSource::Fixed(s) => (s.clone(), ScenarioHeaders::new()),
                 ScenarioSource::Sequential(list) => {
                     let idx = seq_index % list.len();
                     seq_index += 1;
-                    list[idx].clone()
+                    (list[idx].clone(), ScenarioHeaders::new())
                 }
+                ScenarioSource::FixedWithHeaders(s, headers) => (s.clone(), headers.clone()),
             }
         };
 
-        serve_scenario(req, &scenario);
+        serve_scenario(req, &scenario, &headers);
     }
 }
 
 impl MockServer {
     /// Serve the same scenario for every request.
     pub fn new(scenario: Vec<SseChunk>) -> Self {
-        let server = Server::http("127.0.0.1:0").expect("failed to bind mock server");
-        let port = server.server_addr().to_ip().expect("server addr").port();
-        let stop = Arc::new(Mutex::new(false));
-        let request_count = Arc::new(AtomicUsize::new(0));
-        let last_body = Arc::new(Mutex::new(None));
-        let source = Arc::new(Mutex::new(ScenarioSource::Fixed(scenario)));
-
-        let handle = {
-            let stop = stop.clone();
-            let rc = request_count.clone();
-            let lb = last_body.clone();
-            let src = source.clone();
-            thread::spawn(|| run_server(server, src, stop, rc, lb))
-        };
-
-        MockServer {
-            port,
-            handle: Some(handle),
-            stop,
-            request_count,
-            last_request_body: last_body,
-        }
+        Self::spawn(ScenarioSource::Fixed(scenario))
     }
 
     /// Serve scenarios in rotation, one per request.
     pub fn new_sequential(scenarios: Vec<Vec<SseChunk>>) -> Self {
+        Self::spawn(ScenarioSource::Sequential(scenarios))
+    }
+
+    /// Serve the same scenario for every request, with extra response headers
+    /// (BUG-2026-09-13-22 回归：注入超大 `retry-after` 供封顶断言)。
+    #[allow(dead_code)] // 供后续带自定义头的用例复用（当前仅 HttpErrorWithHeaders 路径使用）
+    pub fn new_with_headers(scenario: Vec<SseChunk>, headers: ScenarioHeaders) -> Self {
+        Self::spawn(ScenarioSource::FixedWithHeaders(scenario, headers))
+    }
+
+    fn spawn(source: ScenarioSource) -> Self {
         let server = Server::http("127.0.0.1:0").expect("failed to bind mock server");
         let port = server.server_addr().to_ip().expect("server addr").port();
         let stop = Arc::new(Mutex::new(false));
         let request_count = Arc::new(AtomicUsize::new(0));
         let last_body = Arc::new(Mutex::new(None));
-        let source = Arc::new(Mutex::new(ScenarioSource::Sequential(scenarios)));
+        let source = Arc::new(Mutex::new(source));
 
         let handle = {
             let stop = stop.clone();
