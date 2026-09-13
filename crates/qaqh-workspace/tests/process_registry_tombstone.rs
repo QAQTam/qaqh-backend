@@ -322,6 +322,7 @@ fn in_place_kill_and_tombstone_kill_agree_on_status() {
 
 /// 为何需要运行时探测：本测试依赖 `setsid(1)` 建新会话/新进程组。容器或精简
 /// 镜像可能没有该二进制。若无 `setsid` 必须 **skip**，绝不能 panic（阻断④）。
+#[cfg(unix)]
 fn spawn_detached_sleep_group() -> Option<SleepGroup> {
     let probe = std::process::Command::new("setsid")
         .arg("--help")
@@ -369,6 +370,7 @@ fn spawn_detached_sleep_group() -> Option<SleepGroup> {
 }
 
 /// 真实孤儿进程组句柄（setsid sleep），`Drop` 兜底回收避免测试泄漏。
+#[cfg(unix)]
 struct SleepGroup {
     child: std::process::Child,
     pid: u32,
@@ -376,6 +378,7 @@ struct SleepGroup {
     pgid: u32,
 }
 
+#[cfg(unix)]
 impl SleepGroup {
     fn is_alive(&self) -> bool {
         // kill(pid, 0) == 0 → 进程仍存在；EPERM 亦说明存在（非本测试场景）。
@@ -388,6 +391,7 @@ impl SleepGroup {
     }
 }
 
+#[cfg(unix)]
 impl Drop for SleepGroup {
     fn drop(&mut self) {
         let _ = self.child.kill();
