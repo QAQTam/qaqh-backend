@@ -49,6 +49,8 @@ async function rawApi(path, { method = "GET", body } = {}) {
       "User-Agent": UA,
     },
     body: body ? JSON.stringify(body) : undefined,
+    // 30s 连接+响应超时：挂死的 API 调用不应拖垮整个队列（AbortSignal.timeout 内置）
+    signal: AbortSignal.timeout(30_000),
   });
   const text = await res.text();
   let json;
