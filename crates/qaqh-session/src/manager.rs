@@ -767,28 +767,31 @@ impl SessionManager {
         let existing = self.load_meta(seed).unwrap_or_default();
         let last_summary = Self::extract_summary(messages);
 
-        let meta = SessionMeta {
-            seed: seed.to_string(),
-            created_at,
-            updated_at: now,
-            model: model.to_string(),
-            effort: effort.map(String::from),
-            message_count: messages.len(),
-            turn_count,
-            last_summary,
-            compact_skip,
-            mode: existing.mode,
-            skills: existing.skills,
-            // 工具模式持久化：save_full（undo/compact 的 snapshot_full 路径）
-            // 是全量重写 meta，必须保留 tool_mode/custom_tools，否则极限/
-            // 创造模式会在一次 compact/undo 后被覆盖回 standard。
-            tool_mode: existing.tool_mode.clone(),
-            custom_tools: existing.custom_tools.clone(),
-            // 保留既有标题（save_messages 全量重写 meta；title 冻结语义
-            // 不能在保存时被 Default 清空——早期缺陷，2026-08 修复）。
-            title: existing.title.clone(),
-            ..Default::default()
-        };
+        // BUG-2026-09-13-05：整条继承既有 meta，再覆写本次调用真正拥有的字
+        // 段。此前 `..Default::default()` 只保留 mode/skills/tool_mode/
+        // custom_tools/title 五项，cwd/frozen_annotation/usage_*/archived/
+        // ephemeral/context_stats 七项在每次 undo/compact 全量重写时被冲掉：
+        // resume 后 cwd 退回 `"."`（load_session_workspace 读 meta.cwd）、
+        // frozen_annotation 丢失导致首条 [Environment] 注解重生成（日期变
+        // 化击穿 provider 前缀缓存）、归档/临时标记丢失。新增持久化字段
+        // 默认自动继承，不再依赖维护者记得在这里补一行。
+        let mut meta = existing.clone();
+        meta.seed = seed.to_string();
+        meta.created_at = created_at;
+        meta.updated_at = now;
+        meta.model = model.to_string();
+        meta.effort = effort.map(String::from);
+        meta.message_count = messages.len();
+        meta.turn_count = turn_count;
+        meta.last_summary = last_summary;
+        meta.compact_skip = compact_skip;
+        // 保留字段保持既有注释语义：tool_mode/custom_tools（工具模式不随
+        // compact/undo 丢失）、title（冻结语义）。
+        meta.mode = existing.mode;
+        meta.skills = existing.skills.clone();
+        meta.tool_mode = existing.tool_mode.clone();
+        meta.custom_tools = existing.custom_tools.clone();
+        meta.title = existing.title.clone();
 
         if let Err(e) = store::rewrite_messages(&dir, messages) {
             log::error!("SessionManager: rewrite_messages failed: {e}");
@@ -1548,5 +1551,94 @@ mod wal_recovery_tests {
             "ops before the torn tail must survive the crash"
         );
         std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+}
+
+#[cfg(test)]
+mod save_full_meta_preservation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    static TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn manager() -> (PathBuf, SessionManager) {
+        let root = std::env::temp_dir().join(format!(
+            "qaqh-session-savefull-{}-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos(),
+        ));
+        let sessions_dir = root.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create test sessions");
+        let manager = SessionManager {
+            sessions_dir,
+            active_path: root.join(".active_session"),
+            session_locks: Mutex::new(HashMap::new()),
+        };
+        (root, manager)
+    }
+
+    /// BUG-2026-09-13-05 回归：save_full（undo/compact 全量重写）必须保留
+    /// 全部持久化字段——不只 mode/tool_mode/title，还包括 cwd、
+    /// frozen_annotation、usage_*、archived、ephemeral、context_stats。
+    #[test]
+    fn save_full_preserves_all_persisted_meta_fields() {
+        let (_root, manager) = manager();
+        let seed = "savefull-meta-seed";
+        let dir = manager.session_path_dir(seed);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // 先落一份字段齐全的既有 meta（模拟真实会话的持久化状态）。
+        let existing = SessionMeta {
+            seed: seed.into(),
+            created_at: 1000,
+            updated_at: 2000,
+            model: "test-model".into(),
+            title: Some("kept-title".into()),
+            mode: 1,
+            tool_mode: "custom".into(),
+            custom_tools: vec!["edit".into()],
+            cwd: Some("D:/project/demo".into()),
+            frozen_annotation: Some("<Environment>frozen</Environment>".into()),
+            archived: true,
+            ephemeral: true,
+            context_stats: Some(serde_json::json!({"k": "v"})),
+            usage_totals: qaqh_types::UsageInfo {
+                prompt_cache_hit_tokens: 111,
+                ..Default::default()
+            },
+            usage_requests: 3,
+            cache_reported_requests: 2,
+            last_usage: Some(qaqh_types::UsageInfo::default()),
+            ..Default::default()
+        };
+        store::write_meta(&dir, &existing).expect("write existing meta");
+
+        // 模拟 undo/compact 路径：save_full 全量重写。
+        let messages = vec![qaqh_types::Message::user("hello")];
+        manager.save_full(seed, &messages, "new-model", Some("high"), 0, 1);
+
+        let saved = manager.load_meta(seed).expect("reload meta");
+        // 覆写字段按本次调用更新。
+        assert_eq!(saved.model, "new-model");
+        assert_eq!(saved.effort.as_deref(), Some("high"));
+        assert_eq!(saved.message_count, 1);
+        assert_eq!(saved.turn_count, 1);
+        // 保留字段一个都不能丢。
+        assert_eq!(saved.cwd.as_deref(), Some("D:/project/demo"));
+        assert_eq!(saved.frozen_annotation.as_deref(), Some("<Environment>frozen</Environment>"));
+        assert!(saved.archived, "archived must survive save_full");
+        assert!(saved.ephemeral, "ephemeral must survive save_full");
+        assert_eq!(saved.context_stats.as_ref().unwrap()["k"], "v");
+        assert_eq!(saved.usage_totals.prompt_cache_hit_tokens, 111);
+        assert_eq!(saved.usage_requests, 3);
+        assert_eq!(saved.cache_reported_requests, 2);
+        assert!(saved.last_usage.is_some());
+        assert_eq!(saved.mode, 1);
+        assert_eq!(saved.tool_mode, "custom");
+        assert_eq!(saved.title.as_deref(), Some("kept-title"));
     }
 }
