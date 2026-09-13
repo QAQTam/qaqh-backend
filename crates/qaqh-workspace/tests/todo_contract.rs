@@ -239,3 +239,36 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
 
     std::fs::remove_dir_all(&temp_home).expect("remove isolated home");
 }
+
+/// web_fetch 的 `output` 是真实写目标（web.rs 里无条件 `fs::write`），
+/// 必须与 journal 的 `out` 同款进授权资源；否则审批清单看不到写目标，
+/// `all_within_workspace` / trust folder 边界对 web_fetch 全部失明。
+#[test]
+fn web_fetch_output_enters_authorization_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().canonicalize().unwrap();
+    let out = workspace.join("notes").join("page.md");
+
+    let _guard = qaqh_workspace::push_thread_workspace(Some(
+        workspace.to_string_lossy().into_owned(),
+    ));
+    let paths = qaqh_workspace::permission::extract_target_paths(
+        "web_fetch",
+        &serde_json::json!({"url": "https://example.com", "output": "notes/page.md"}),
+    );
+    // 无 output 参数的 web_fetch（只读正文）不得凭空产生写目标。
+    let read_only = qaqh_workspace::permission::extract_target_paths(
+        "web_fetch",
+        &serde_json::json!({"url": "https://example.com"}),
+    );
+    qaqh_workspace::pop_thread_workspace(None);
+
+    assert!(
+        read_only.is_empty(),
+        "web_fetch without `output` must declare no path: {read_only:?}"
+    );
+    assert!(
+        paths.contains(&out),
+        "web_fetch output missing from authorization resources: {paths:?}"
+    );
+}

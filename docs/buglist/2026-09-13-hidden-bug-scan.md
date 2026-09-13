@@ -211,3 +211,62 @@
 - qaqh-workspace 各工具 handler 细节（exec 进程树 / glob / grep / web）
 - qaqh-mcp / qaqh-lsp bridge 全文（子进程生命周期仅抽查）
 - qaqh-runtime/src/service.* / host_impl / workspace_supervisor
+
+## 附录 D：盲区复扫（#39）— engine_* / workspace handler / mcp+lsp bridge / service
+
+> 范围即附录 C 的四个盲区；编号续本报告（-28 起）。状态：⬜ 待修 / ✅ 已修。
+> 交付：PR `fix: 隐藏扫描补盲区——engine_*/workspace handler/mcp+lsp bridge/service（Closes #39）`。
+
+### 复扫结论（4 项真实缺陷，4 项误报）
+
+| ID | 级别 | 位置 | 一句话 | 状态 |
+|---|---|---|---|---|
+| BUG-2026-09-13-28 | P1 | `qaqh-runtime/src/service/plan.rs:11` | `stats.token_usage.days` 直取 IPC 参数无上限：20 万条目起步，`u32::MAX` 直接 OOM/挂死 daemon 线程 | ✅ 已修 |
+| BUG-2026-09-13-29 | P2 | `qaqh-workspace/src/permission.rs:174` | `web_fetch.output` 是真实写目标却不进授权资源 → 审批清单看不到、workspace 边界与 trust folder 判定全部失明 | ✅ 已修 |
+| BUG-2026-09-13-30 | P2 | `qaqh-mcp/src/connection.rs:498` | `prompts/get` 无 `begin_call`/`timeout`/`handle_crash`：idle 回收可撕掉在飞连接、挂死 server 钉住锁、断连后 status 停在 Connected | ✅ 已修 |
+| BUG-2026-09-13-31 | P1 | `qaqh-runtime/src/agent/turn_lap/admit.rs:156,216` | 取消路径丢弃已执行工具结果且不做步收尾 → store 留 open tool_use，下轮模型重发同一工具（副作用重复） | ✅ 已修 |
+
+### BUG-2026-09-13-28 ✅ P1 token_stats 窗口无界
+- **位置**：`crates/qaqh-runtime/src/service/plan.rs:11`（`let days = days.max(1)`），入口 `service.rs:551`（`pu64(params,"days") as u32`）
+- **机制**：`days` 同时决定 `daily` 条目数与 `for offset in (0..days)` 循环数；IPC 侧无校验。
+- **后果**：`{"days": 200000}` → 20 万条目（~24MB）单次响应；`days = u32::MAX` → 约 43 亿次迭代，daemon 工作线程内存耗尽（OOM）+ 长时间占用 → 该线程上的所有会话失去响应。
+- **修法**：`days.clamp(1, MAX_TOKEN_STATS_DAYS = 366)`。
+- **验证**：`token_stats_clamps_the_requested_day_window`（红：`got 200000 entries`）。
+
+### BUG-2026-09-13-29 ✅ P2 web_fetch output 不做授权资源
+- **位置**：`crates/qaqh-workspace/src/web.rs:96-112` 无条件 `fs::write(resolve_workspace_path(out))`；`crates/qaqh-workspace/src/permission.rs:174` `extract_target_paths` 从不提取 `output`
+- **机制**：授权资源清单（审批面板展示 + `all_within_workspace` / trust folder 判定）只看到 `path`/`paths`/`source`/`dest`/`copy_range`/`journal{file,out}`/`exec.cwd`/`apply_patch`。`web_fetch` 的 `output` 不在其中 → 写目标对审批与边界判定 **完全不可见**。
+- **对照**：同文件 L217-223 `journal` 的 `out` 有同款提取，注释白纸黑字「keep it authorization-bounded like other write tools」；`web_fetch` 属漏改。
+- **修法**：按 `journal` 同款提取 `output`（无 `output` 时仍不产生任何路径——只读抓取不受影响）。
+- **验证**：`web_fetch_output_enters_authorization_resources`（红：`output missing from authorization resources: []`），并断言无 `output` 时路径集为空。
+
+### BUG-2026-09-13-30 ✅ P2 prompts/get 三条保障齐缺
+- **位置**：`crates/qaqh-mcp/src/connection.rs:498` `get_prompt`；调用方 `crates/qaqh-mcp/src/resources.rs:581`
+- **机制**：`tools/call`（`connection.rs:756`）与 `resources/read`（`connection.rs:812`）三条保障齐备：`begin_call()` 占 inflight、`tokio::time::timeout` 硬顶释放 service 锁、`TransportClosed/TransportSend` → `handle_crash()`。`get_prompt` 三条全缺：
+  1. 不占 inflight → idle watchdog 可在 `prompts/get` 在飞时回收连接（违反本文件头注的 E-2 锁模型契约）；
+  2. 无调用级超时 → 挂死的 server 永久钉住 `service` tokio 锁（同连接后续 RPC 全部排队）；
+  3. 不复用 crash 处置 → 断连后 `status` 停在 Connected，与崩溃事实不符。
+- **修法**：签名加 `timeout: Duration` 并对齐两兄弟路径（`Timeout` / `ServerCrashed` 已在 `hint_for` 映射表中，无需扩表）。
+- **验证**：`get_prompt_holds_the_inflight_guard`（红：`observed inflight = 0`）+ `get_prompt_times_out_and_frees_the_service_lock`。
+
+### BUG-2026-09-13-31 ✅ P1 取消路径丢弃工具结果
+- **位置**：`crates/qaqh-runtime/src/agent/turn_lap/admit.rs:156-161`（并行批 `let _ = handle.join(); continue;`）、`:216-218`（串行 `return false`）
+- **触发**：权限挂起（YieldToUser）→ 用户批准 → deferred 批执行中取消（`handle_permission_resolved` → `execute_admitted_batch`）。
+- **机制**：工具线程副作用已发生（outbox 已记录），但结果不回填，且不做 `remove_last_step_if_incomplete` / `flush_meta` 收尾 → store 留 open tool_use；下一轮模型看到未回填的 tool_use 会重发同一调用 → **工具重复执行**（副作用不可逆时即数据损坏）。
+- **对照**：同文件 `admit_and_dispatch` 的取消路径有完整收尾（L729-745 调 `abort_running_turn`，内部即 `remove_last_step_if_incomplete` + `flush_meta`）。
+- **修法**：抽 `finish_cancelled_batch`，并行/串行两处取消分支调用，与 `abort_running_turn` 同款收尾。
+- **验证**：`incomplete_step_is_removed_so_no_open_tool_use_survives`（锁住收尾原语：取消后 store 不留 open tool_use）。
+
+### 误报（逐条证据，跳过）
+
+1. **LSP `did_open` 版本号跨 didClose 递增**（`crates/qaqh-lsp/src/tool.rs:460-480`）：LSP 规范只要求版本「随内容变更递增」，didClose 后重新 didOpen 用递增版本不违规；重复 open 前先补发 didClose 已是幂等处置。
+2. **LSP `did_open` 失败时 `opened` 记账不更新**（同上）：`opened` 仅在 didOpen 成功后 `insert`。失败的 open 不记账意味着下次调用重发 didClose（no-op）+ didOpen，最终态自愈，无持久损坏。
+3. **LSP `ensure_watchdog` 缺 `is_finished()` 重拉判据**（`connection.rs:477`）：LSP watchdog 在 `!connected || inflight != 0` 时走 `continue`（**不 return**），任务不会自行退出，因此无需 mcp 那条重拉判据（mcp watchdog 会 `return`）。仅多一次 `idle_tick` 空转，非缺陷。
+4. **LSP `conns` 按 (server, root) 只增不减**（`manager.rs:200-217`）：连接对象本身按 `idle_shutdown_secs` 回收，条目不摘除；root 取会话 cwd，长驻 daemon 多项目场景缓慢增长。属资源治理而非行为缺陷，修复形态涉及路由键生命周期重新设计 —— **建议另立项**，不混入本 PR。
+
+### 未发现缺陷的区域
+
+- ① `engine_*` / `loop_dispatch_*` 全文（engine_turn / engine_tool / engine_compact / engine_input / engine_session / engine_title / engine_misc / 3× loop_dispatch 逐文件读完）：未发现新的可复现缺陷。
+- ② workspace 各工具 handler：`exec/*`（direct/pipe/handler/shell/truncate）、`glob`、`grep`、`file_*`、`edit/*`、`apply_patch*`、`todo/*`、`copy_range`、`process_*` 复查无新增；唯一命中即 -29（`web`）。
+- ③ mcp/lsp bridge：`bridge.rs`、`projection.rs`、`adapter.rs`、`resources.rs`、`manager.rs`、`connection.rs`、lsp `tool.rs`/`manager.rs`/`connection.rs` 逐文件复查，唯一命中即 -30。
+- ④ `service.*` / `host_impl` / `workspace_supervisor`：命中 -28 / -31；`host_impl.rs`、`workspace_supervisor.rs` 未发现新的可复现缺陷（20ms/500ms 轮询为有界既有设计）。

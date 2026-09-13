@@ -72,7 +72,7 @@ pub mod bridge_for_tests {
     use crate::McpManager;
 
     #[doc(hidden)]
-    pub use crate::bridge::{dispatch_with, projection_batch_with};
+    pub use crate::bridge::{dispatch_with, get_prompt_blocking, projection_batch_with};
     #[doc(hidden)]
     pub use crate::resources::{aggregate_dispatch_with, resource_env_block_with};
 
