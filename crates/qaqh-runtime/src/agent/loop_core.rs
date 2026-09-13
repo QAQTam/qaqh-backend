@@ -470,6 +470,11 @@ impl Loop {
 
         // ── Cleanup ──
         qaqh_workspace::runtime::shutdown_tools();
+        // 工具 outbox 的 fsync 已批量化（BUG-2026-09-12-14）：退出前必须把本会话
+        // 尚未落盘的记录同步到磁盘，否则 worker 退出后紧接着的重启会丢掉窗口内
+        // 的「已执行」事实，重新变成「未执行，可重试」——正是 outbox 要消除的语义。
+        // 位置：工具线程均已 join（drain_bounded 之后），故不会与在途追加竞争。
+        crate::agent::tool_outbox::flush(&self.session.agent.session.seed);
         self.session.flush();
         // Final drain: SessionBundle::flush enqueues a flush_meta op; the old
         // synchronous path wrote it before exiting (PR-1-6).
