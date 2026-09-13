@@ -9,37 +9,37 @@
  * 零 npm 依赖：MCP stdio 用原生 JSON-RPC over stdio 实现（协议核心极小），
  * HTTP 直接 fetch（Node >= 18 内置）。
  *
+ * 认证（三层恢复链，见 auth.mjs）：
+ *   1. ~/.cnb/token 的 access_token（与 cnb CLI 共享登录态）
+ *   2. 过期自动 refresh_token 续期
+ *   3. 都失败 → MCP elicitation 弹授权卡片（verification URL + user_code）→ 用户浏览器确认 → 自动重试原请求
+ *
  * 环境变量：
- *   CNB_TOKEN   — 访问令牌（必填）
+ *   CNB_TOKEN   — 可选；不设则用 ~/.cnb/token
  *   CNB_REPO    — 默认仓库（如 QAQ-Harness/qaqh-backend）
- *   API_BASE    — 默认 https://api.cnb.cool
+ *   CNB_API_ENDPOINT — 默认 https://api.cnb.cool
  */
-import { Readable, Writable } from "node:stream";
 import { createInterface } from "node:readline";
+import { getValidToken, tryRefresh, deviceAuth } from "./auth.mjs";
 
-const API_BASE = process.env.API_BASE || "https://api.cnb.cool";
-let TOKEN = process.env.CNB_TOKEN || "";
-let tokenLoadedAt = 0;
-async function loadToken() {
-  // env 优先；否则读 cnb CLI 的 token 文件（CLI 会自动 refresh，每次请求重读拿最新）
-  if (process.env.CNB_TOKEN) return process.env.CNB_TOKEN;
-  if (Date.now() - tokenLoadedAt < 60_000 && TOKEN) return TOKEN;
-  try {
-    const { readFile } = await import("node:fs/promises");
-    const os = await import("node:os");
-    const raw = JSON.parse(await readFile(`${os.homedir()}/.cnb/token`, "utf-8"));
-    TOKEN = raw.access_token || TOKEN;
-    tokenLoadedAt = Date.now();
-  } catch { /* 保持现有 TOKEN */ }
-  return TOKEN;
-}
+const API_BASE = process.env.CNB_API_ENDPOINT || "https://api.cnb.cool";
 const DEFAULT_REPO = process.env.CNB_REPO || "QAQ-Harness/qaqh-backend";
 const UA = "qaqh-cnb-mcp-enhance/0.1";
 
 // ─────────────────────────── CNB HTTP API 封装 ───────────────────────────
 
-async function api(path, { method = "GET", body } = {}) {
-  const token = await loadToken();
+// 401 恢复时的钩子：MCP 层把它接到 elicitation（弹授权卡）；--watch 模式打印到控制台
+let authHooks = { onAuthorizationRequired: null, onPoll: null };
+export function setAuthHooks(h) { authHooks = { ...authHooks, ...h }; }
+
+/** 单次带 token 的请求（不处理 401） */
+async function rawApi(path, { method = "GET", body } = {}) {
+  const token = await getValidToken();
+  if (!token) {
+    const err = new Error("CNB API 401: no valid token (run device auth)");
+    err.status = 401;
+    throw err;
+  }
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: {
@@ -60,6 +60,25 @@ async function api(path, { method = "GET", body } = {}) {
     throw err;
   }
   return json;
+}
+
+/** 带认证恢复链的请求：401 → refresh → 仍 401 → 设备授权（弹卡）→ 重试 */
+async function api(path, { method = "GET", body } = {}) {
+  try {
+    return await rawApi(path, { method, body });
+  } catch (e) {
+    if (e.status !== 401) throw e;
+    try {
+      const fresh = await tryRefresh();
+      if (fresh) return await rawApi(path, { method, body });
+    } catch { /* fallthrough */ }
+    const r = await deviceAuth({
+      onCode: (info) => authHooks.onAuthorizationRequired?.(info),
+      onPoll: (info) => authHooks.onPoll?.(info),
+    });
+    if (!r.ok) throw new Error(`CNB authorization failed: ${r.reason}`);
+    return await rawApi(path, { method, body });
+  }
 }
 
 const enc = encodeURIComponent;
@@ -315,6 +334,49 @@ function jsonRpcError(id, code, message) {
   return JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } });
 }
 
+function jsonRpcNotification(method, params) {
+  return JSON.stringify({ jsonrpc: "2.0", method, params });
+}
+
+/**
+ * MCP elicitation 授权流：
+ *   1. deviceAuth 发起（拿到 verification URL + user_code）
+ *   2. elicitation/create 弹卡片：message 带可点击 URL 和 user_code，用户在浏览器确认后点“确认”
+ *      （设备授权流本身在后台轮询，确认即成功；elicitation 的响应只是「我已打开/看到了」）
+ *   3. 若客户端不支持 elicitation，降级为 stdout 打印链接（用户手动打开）并继续轮询
+ */
+async function authorizeViaElicitation(rpcId) {
+  return new Promise((resolve) => {
+    let settled = false;
+    deviceAuth({
+      onCode: ({ verification_url, user_code, expires_in }) => {
+        // 先尝试 MCP elicitation（ElicitationCreateRequest）
+        process.stdout.write(JSON.stringify({
+          jsonrpc: "2.0", id: `elicit-${rpcId}`,
+          method: "elicitation/create",
+          params: {
+            message: `CNB 授权请求：请在浏览器中打开下方链接并确认授权（user_code: ${user_code}，${Math.round(expires_in / 60)} 分钟内有效）\n${verification_url}`,
+            requestedSchema: {
+              type: "object",
+              properties: { confirm: { type: "boolean", title: "我已在浏览器完成授权" } },
+              required: ["confirm"],
+            },
+          },
+        }) + "\n");
+      },
+      onPoll: ({ attempt }) => {
+        if (attempt % 12 === 0) process.stdout.write(JSON.stringify(jsonRpcNotification("notifications/message", {
+          level: "info", data: `等待浏览器授权中… (${attempt} 次轮询)`,
+        })) + "\n");
+      },
+    }).then((r) => {
+      if (!settled) { settled = true; resolve(r); }
+    }).catch((e) => {
+      if (!settled) { settled = true; resolve({ ok: false, reason: String(e.message).slice(0, 200) }); }
+    });
+  });
+}
+
 async function handleRpc(msg) {
   const { id, method, params } = msg;
   if (method === "initialize") {
@@ -338,6 +400,30 @@ async function handleRpc(msg) {
         isError: false,
       });
     } catch (e) {
+      // 401 → 弹授权卡（MCP elicitation），用户确认后自动重试原调用
+      if (e.status === 401) {
+        const retry = await authorizeViaElicitation(id);
+        if (retry.ok) {
+          try {
+            const result = await callTool(name, args || {});
+            return jsonRpc(id, {
+              content: [{ type: "text", text: JSON.stringify(result, null, 2) }, {
+                type: "text", text: "(authorized via device flow, request retried)",
+              }],
+              isError: false,
+            });
+          } catch (e2) {
+            return jsonRpc(id, {
+              content: [{ type: "text", text: `authorized but call still failed: ${e2.message}` }],
+              isError: true,
+            });
+          }
+        }
+        return jsonRpc(id, {
+          content: [{ type: "text", text: `授权未完成（${retry.reason}）。请重新发起调用再次触发授权，或手动执行: cnb login` }],
+          isError: true,
+        });
+      }
       return jsonRpc(id, {
         content: [{ type: "text", text: `ERROR: ${e.message}` }],
         isError: true,

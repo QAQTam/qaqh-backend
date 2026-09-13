@@ -66,6 +66,24 @@ node tools/cnb-mcp-enhance/server.mjs --watch --builds cnb-90o-xxx,cnb-69o-xxx
 - token 从 `CNB_TOKEN` env 读，不落盘；日志不回显 token
 - 与官方 server 一致：只操作 `CNB_REPO` 默认仓库，跨仓需显式传参
 
+## 认证（授权流）
+
+三层恢复链（`auth.mjs`），token 失效时无需人工干预：
+
+```
+请求 401 ──► refresh_token 续期 ──失败──► 设备授权流（RFC 8628）
+                │                              │
+                └── 成功重试原请求              └── 弹授权卡（MCP elicitation）
+                                                   │ 用户浏览器确认
+                                                   ▼
+                                             写回 ~/.cnb/token → 自动重试原请求
+```
+
+- token 文件 `~/.cnb/token` 与 cnb CLI **共享**（CLI refresh 后 server 每次请求重读，反之亦然）
+- 设备授权端点在**主站域名** `https://cnb.cool/oauth2/*`（不是 api.cnb.cool——swagger 里没有，唯一权威来源是 `cnb login --debug`）
+- MCP 客户端支持 elicitation 时弹交互卡片；不支持时降级为通知消息 + 手动打开链接
+- `--watch` 模式下同样自动走授权流，授权 URL 直接打印到控制台
+
 ## 为什么不 fork 官方仓补工具
 
 官方仓由 CNB 团队维护（swagger 生成，API 全、更新快），fork 后要跟着上游同步。
