@@ -648,9 +648,10 @@ fn exec_tool_full_lifecycle_smoke_foreground_handoff_kill() {
     assert_eq!(info["status"], "running");
 
     // ④ kill 整树 + 终态收敛（killpg 组杀：bash 与 sleep 同组）
-    assert!(
+    assert_eq!(
         crate::process_registry::ProcessRegistry::kill(pid),
-        "kill 应成功"
+        crate::process_registry::KillOutcome::Killed,
+        "在册进程 kill 应成功"
     );
     let after = crate::process_registry::ProcessRegistry::get_info(pid).expect("仍被跟踪");
     assert_eq!(after["status"], "killed");
@@ -831,9 +832,10 @@ fn backgrounded_process_check_sees_running_then_kill_tree() {
         "running"
     );
     // 注册表 kill = 进程树终止
-    assert!(
+    assert_eq!(
         crate::process_registry::ProcessRegistry::kill(pid),
-        "kill 应成功"
+        crate::process_registry::KillOutcome::Killed,
+        "在册进程 kill 应成功"
     );
     let after = crate::process_registry::ProcessRegistry::get_info(pid).expect("still tracked");
     assert_eq!(after["status"], "killed");
@@ -919,9 +921,10 @@ fn backgrounded_status_refreshes_when_child_exits_while_grandchild_holds_pipe() 
     );
 
     // 清理：kill 进程树（孙进程仍活着），验证整树终止
-    assert!(
+    assert_eq!(
         crate::process_registry::ProcessRegistry::kill(pid),
-        "kill 应成功"
+        crate::process_registry::KillOutcome::Killed,
+        "在册进程 kill 应成功"
     );
     let after = crate::process_registry::ProcessRegistry::get_info(pid).expect("still tracked");
     assert_eq!(after["status"], "killed");
