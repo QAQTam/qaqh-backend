@@ -95,6 +95,28 @@ impl Loop {
             ConversationCommand::ConversationCancel { turn_id } => {
                 self.cancel.set();
                 qaqh_workspace::set_cancel(true);
+                // BUG-2026-09-13-08：取消不得留下「有 tool_use 无 tool_result」
+                // 的孤儿 step —— 下轮模型会重发同一 tool_use，已执行过的工具
+                // 被重复执行（挂起→批准→取消正是触发窗口）。
+                //
+                // 已在执行的批由 `execute_admitted_batch` 的取消收割路径回填
+                // 真实结果（副作用已发生）；这里只兜底给「永远不会有结果」的
+                // tool_use 补取消终态，再丢弃/保留 step 交给既有收尾。
+                let sealed = self.session.agent.msg.seal_pending_tools_as_cancelled();
+                eprintln!(
+                    "DBG cancel-seal sealed={sealed} pending_save_after={}",
+                    self.session.agent.msg.last_step_tool_results().len()
+                );
+                if sealed > 0 {
+                    log::info!(
+                        "[CANCEL] sealed {sealed} pending tool_use(s) as cancelled                          before dropping the incomplete step"
+                    );
+                }
+                self.session.agent.msg.remove_last_step_if_incomplete();
+                self.session.agent.msg.flush_meta(
+                    &self.session.agent.config.model,
+                    &self.session.agent.config.reasoning_effort,
+                );
                 self.reset_all_engines();
                 self.paced_emitter.emit_domain(DomainEvent::Conversation(
                     qaqh_domain::ConversationEvent::ConversationCancelled { turn_id },

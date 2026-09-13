@@ -64,6 +64,10 @@ pub(crate) mod spawn;
 pub mod state;
 pub mod tool_outbox;
 pub(crate) mod turn_lap;
+
+/// 回归测试入口：批执行/取消收割路径（BUG-2026-09-13-08 回归）。
+/// 生产代码只经 `turn_lap` 内部调用，这里仅重导出最小面。
+pub mod turn_lap_test_api;
 pub mod types;
 pub mod util;
 

@@ -47,6 +47,12 @@ use crate::agent::state::agent::AgentState;
 #[derive(Clone)]
 pub struct CancelToken {
     pub(crate) inner: Arc<AtomicBool>,
+    /// 可选的取消判定钩子（测试用）：置位后 `is_set()` 完全由钩子裁决。
+    ///
+    /// 生产路径恒为 `None`，`is_set()` 退化为读 `inner`——零行为变化。
+    /// 测试用它把取消点钉在**批执行中途**（先生成批、后在收割窗口置位）。
+    #[allow(clippy::type_complexity)]
+    query: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl Default for CancelToken {
@@ -59,6 +65,17 @@ impl CancelToken {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(AtomicBool::new(false)),
+            query: None,
+        }
+    }
+
+    /// 测试专用：用自定义判定钩子替换取消判定（生产路径不用）。
+    ///
+    /// 钩子返回 true 即视为「取消已到达」，用于精确控制取消时点。
+    pub fn with_query_hook(hook: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        Self {
+            inner: Arc::new(AtomicBool::new(false)),
+            query: Some(hook),
         }
     }
     /// Signal cancellation. Non-blocking.
@@ -71,6 +88,9 @@ impl CancelToken {
     }
     /// Check if cancellation has been requested.
     pub fn is_set(&self) -> bool {
+        if let Some(hook) = &self.query {
+            return hook();
+        }
         self.inner.load(std::sync::atomic::Ordering::SeqCst)
     }
     /// Clone the inner Arc for passing to threads / Gate layer.
