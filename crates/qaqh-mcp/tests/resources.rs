@@ -112,11 +112,11 @@ impl ServerHandler for ResourceServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, rmcp::ErrorData> {
-        Ok(ListPromptsResult::with_all_items(vec![Prompt::new(
-            "greet",
-            Some("greet someone by name"),
-            Some(vec![]),
-        )]))
+        Ok(ListPromptsResult::with_all_items(vec![
+            Prompt::new("greet", Some("greet someone by name"), Some(vec![])),
+            Prompt::new("slow_prompt", Some("slow prompt (inflight guard)"), None),
+            Prompt::new("hang", Some("never answers (timeout probe)"), None),
+        ]))
     }
 
     async fn get_prompt(
@@ -124,6 +124,23 @@ impl ServerHandler for ResourceServer {
         request: GetPromptRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResponse, rmcp::ErrorData> {
+        match request.name.as_str() {
+            // 慢提示靶：inflight 守卫用例（结果未到才可观察在飞窗口）。
+            "slow_prompt" => {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                return Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+                    Role::User,
+                    "slow prompt done",
+                )])
+                .into());
+            }
+            // 挂死提示靶：timeout 硬顶用例（永不返回）。
+            "hang" => {
+                std::future::pending::<()>().await;
+                unreachable!();
+            }
+            _ => {}
+        }
         let who = request
             .arguments
             .as_ref()
@@ -598,8 +615,9 @@ async fn prompts_cached_after_connect_and_listable() {
 
     let conn = manager.connection("alpha").unwrap();
     let prompts = conn.cached_prompts().expect("prompts cached");
-    assert_eq!(prompts.len(), 1);
-    assert_eq!(prompts[0].name, "greet");
+    // fixture 声明 3 个 prompt：greet + slow_prompt/hang（#39 盲区复扫靶子）。
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts.iter().any(|prompt| prompt.name == "greet"));
 
     let result = aggregate(
         &manager,
@@ -646,4 +664,77 @@ async fn read_prompt_requires_name() {
         json!({ "action": "read_prompt", "server": "alpha" }),
     );
     assert!(!result.is_success(), "missing name must error");
+}
+
+// ── 盲区复扫 #39：prompts/get 必须与 tools/call、resources/read 同款保障 ──
+
+/// `get_prompt` 在飞期间必须占用 inflight 守卫：
+/// ① idle watchdog 不得回收正在服务 RPC 的连接（本文件头注锁模型契约）；
+/// ② 挂死 server 由调用方 timeout 硬顶，不得永久钉住 service 锁；
+/// ③ transport 断连 → handle_crash 标记（status 不再停在 Connected）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_prompt_holds_the_inflight_guard() {
+    let manager = make_manager_named(Some("alpha"));
+    let conn = manager.get_or_connect("alpha").await.expect("connect");
+    conn.arm_idle_reclaim_for_tests(Duration::ZERO);
+
+    // fixture 的 slow_prompt 睡 3s：在飞窗口内 inflight 必须 > 0。
+    let (tx, rx) = std::sync::mpsc::channel();
+    let conn_task = Arc::clone(&conn);
+    std::thread::spawn(move || {
+        let outcome = qaqh_mcp::bridge_for_tests::get_prompt_blocking(
+            &conn_task,
+            "slow_prompt",
+            None,
+            Duration::from_secs(5),
+        );
+        let _ = tx.send(outcome.is_ok());
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut observed: u64 = 0;
+    while Instant::now() < deadline {
+        if let qaqh_mcp::ConnStatus::Connected { inflight } = conn.status() {
+            observed = observed.max(inflight);
+            if inflight > 0 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        observed > 0,
+        "prompts/get must hold the in-flight guard (E-2: inflight blocks idle reclaim); \
+         observed inflight = {observed}"
+    );
+    // 守卫归还后连接仍在（未被 idle watchdog 撕掉）。
+    let _ = rx.recv_timeout(Duration::from_secs(10));
+    assert!(
+        matches!(conn.status(), qaqh_mcp::ConnStatus::Connected { .. }),
+        "connection must survive a prompt call: {:?}",
+        conn.status()
+    );
+}
+
+/// 挂死 server 的 `prompts/get` 必须被超时硬顶并释放 service 锁
+/// （对齐 `call_tool` / `read_resource`：`MCP_TIMEOUT`，非永久挂起）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_prompt_times_out_and_frees_the_service_lock() {
+    let manager = make_manager_named(Some("alpha"));
+    let conn = manager.get_or_connect("alpha").await.expect("connect");
+    let timeout = Duration::from_millis(250);
+
+    let started = Instant::now();
+    let result = qaqh_mcp::bridge_for_tests::get_prompt_blocking(&conn, "hang", None, timeout);
+    let elapsed = started.elapsed();
+    let error = result.expect_err("hung prompt must not succeed");
+    assert_eq!(error.kind.code(), "MCP_TIMEOUT", "{error:?}");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "timeout must release the call well before the server finishes: {elapsed:?}"
+    );
+
+    // service 锁已释放：下一次 RPC 不被钉住。
+    let ok = qaqh_mcp::bridge_for_tests::get_prompt_blocking(&conn, "greet", None, timeout);
+    assert!(ok.is_ok(), "service lock must be free after timeout: {ok:?}");
 }

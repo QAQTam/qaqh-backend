@@ -364,6 +364,44 @@ pub fn take_projection_batch() -> Option<Vec<(String, DynamicTool)>> {
     projection_batch_with(&manager_slot())
 }
 
+/// `get_prompt` 的可测形态：阻塞桥（与 `dispatch` 同款 250ms 轮询/超时/取消）。
+/// 仅经 [`crate::bridge_for_tests`] 垫片暴露（doc(hidden)，非公共 API 契约）。
+#[doc(hidden)]
+pub fn get_prompt_blocking(
+    conn: &Arc<crate::connection::ServerConnection>,
+    name: &str,
+    arguments: Option<rmcp::model::JsonObject>,
+    timeout: Duration,
+) -> Result<rmcp::model::GetPromptResult, McpError> {
+    let (tx, rx): (Sender<Result<rmcp::model::GetPromptResult, McpError>>, _) =
+        std::sync::mpsc::channel();
+    let conn_task = Arc::clone(conn);
+    let prompt_name = name.to_owned();
+    runtime_handle().spawn(async move {
+        let _ = tx.send(conn_task.get_prompt(&prompt_name, arguments, timeout).await);
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match rx.recv_timeout(POLL_INTERVAL) {
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    return Err(McpError::new(
+                        McpErrorKind::Timeout,
+                        format!("prompts/get {name:?} exceeded the caller budget"),
+                    ));
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(McpError::new(
+                    McpErrorKind::Protocol,
+                    format!("bridge worker for prompts/get {name:?} terminated without a response"),
+                ));
+            }
+        }
+    }
+}
+
 /// [`take_projection_batch`] 的可测形态：manager 显式注入。
 /// 仅经 [`crate::bridge_for_tests`] 垫片暴露（doc(hidden)，非公共 API 契约）。
 #[doc(hidden)]
