@@ -201,6 +201,13 @@ pub struct Loop {
     /// Idle-unload liveness signal shared with the daemon registry. The Loop
     /// is the producer (busy/activity/suspend), the registry is the consumer.
     pub(super) liveness: std::sync::Arc<super::liveness::WorkerLiveness>,
+
+    /// Test-only panic injection seam: when set, dispatching a command whose
+    /// `command_id` matches panics **on the dispatching thread** (same thread
+    /// and stack as a real engine panic). `cfg(test)`-gated, so it never
+    /// enters a production binary and is unreachable from the wire.
+    #[cfg(test)]
+    pub(super) panic_on_command_id: Option<String>,
 }
 
 impl Loop {
@@ -246,6 +253,8 @@ impl Loop {
             pending_compact_causation: None,
             paced_emitter,
             liveness,
+            #[cfg(test)]
+            panic_on_command_id: None,
         }
     }
 
@@ -456,15 +465,7 @@ impl Loop {
             };
 
             // ── Dispatch with panic safety ──
-            let causation = cmd.causation.clone();
-            self.safe_dispatch(|this| {
-                let _scope = this.paced_emitter.enter_causation(causation.as_deref());
-                let env = cmd.frame;
-                this.dispatch_ringing_one(env);
-                // PR-1-6: flush queued persistence ops after the command's
-                // dispatch completes (write order = enqueue order, Z5).
-                this.session.agent.drain_persist_ops();
-            });
+            self.dispatch_frame(cmd);
         }
 
         // ── Cleanup ──
@@ -535,6 +536,36 @@ impl Loop {
     }
 
     // ═══════════════════════════════════════════════════
+    // The single guarded dispatch entry point
+    // ═══════════════════════════════════════════════════
+
+    /// The **only** dispatch entry point: causation scope + `safe_dispatch`
+    /// guard (catch_unwind + liveness bookkeeping) + per-command
+    /// `drain_persist_ops`.
+    ///
+    /// BUG-2026-09-13-07: `drain_pending` (the first frame of every main-loop
+    /// iteration, i.e. the unprotected path for the head-of-queue command
+    /// during idle) and the `dispatch_deferred_ringing` loop body used to call
+    /// `dispatch_ringing_one` bare. An engine panic there escaped `run()`
+    /// (process death: the dequeued command plus every un-flushed PersistOp
+    /// was lost) and skipped the liveness `busy` flag, so
+    /// `unload_idle_sessions` could reap a working worker. Per the
+    /// `liveness.rs` contract the flag must span the whole dispatch.
+    ///
+    /// Every dispatcher must route through here; never call
+    /// `dispatch_ringing_one` directly.
+    fn dispatch_frame(&mut self, cmd: super::types::WorkerCommand) {
+        let causation = cmd.causation;
+        self.safe_dispatch(|this| {
+            let _scope = this.paced_emitter.enter_causation(causation.as_deref());
+            this.dispatch_ringing_one(cmd.frame);
+            // PR-1-6: flush queued persistence ops after the command's
+            // dispatch completes (write order = enqueue order, Z5).
+            this.session.agent.drain_persist_ops();
+        });
+    }
+
+    // ═══════════════════════════════════════════════════
     // Pending queue drain
     // ═══════════════════════════════════════════════════
 
@@ -547,17 +578,11 @@ impl Loop {
     fn drain_pending(&mut self) {
         self.dispatch_deferred_ringing();
         while let Ok(cmd) = self.cmd_rx.try_recv() {
-            let env = cmd.frame;
             if self.pending.is_empty() {
-                let causation = cmd.causation.clone();
-                let _scope = self.paced_emitter.enter_causation(causation.as_deref());
-                self.dispatch_ringing_one(env);
+                // 空闲期队首命令：与 run() 阻塞分支同一守卫路径。
+                self.dispatch_frame(cmd);
             } else {
-                self.deferred_ringing
-                    .push_back(super::types::WorkerCommand {
-                        frame: env,
-                        causation: cmd.causation,
-                    });
+                self.deferred_ringing.push_back(cmd);
             }
         }
 
@@ -572,11 +597,7 @@ impl Loop {
             let Some(cmd) = self.deferred_ringing.pop_front() else {
                 break;
             };
-            let env = cmd.frame;
-            let _scope = self.paced_emitter.enter_causation(cmd.causation.as_deref());
-            self.dispatch_ringing_one(env);
-            // PR-1-6: per-command drain, same as the safe_dispatch path.
-            self.session.agent.drain_persist_ops();
+            self.dispatch_frame(cmd);
         }
     }
 
@@ -590,6 +611,12 @@ impl Loop {
         self.ready_emitted = false;
         let expected_revision = env.expected_revision.unwrap_or_default();
         let command_id = env.command_id.clone();
+
+        #[cfg(test)]
+        if self.panic_on_command_id.as_deref() == Some(command_id.as_str()) {
+            panic!("injected engine panic for command {command_id}");
+        }
+
         let command_session_id = env.seed.clone();
 
         match env.command {
@@ -640,5 +667,213 @@ mod parse_subagent_status_tag_tests {
             parse_subagent_status_tag("some text\n[SUBAGENT 'x' COMPLETED]"),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod drain_dispatch_safety_tests {
+    //! BUG-2026-09-13-07 回归：主循环空闲期的 `drain_pending` 直派与
+    //! `dispatch_deferred_ringing` 循环体必须走 `dispatch_frame`
+    //! （safe_dispatch 守卫 + liveness 记账 + drain_persist_ops）。
+    //!
+    //! 未修复代码上三例全红（见 PR 红→绿证据）。
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{Loop, LoopChannels};
+    use crate::agent::liveness::WorkerLiveness;
+    use crate::agent::state::agent::{AgentState, MetaOp};
+    use crate::agent::types::{CancelToken, WorkerCommand};
+
+    /// 在测试线程上构造 Loop：事件端由调用方持有 `event_rx`，加一个把事件
+    /// 丢弃的 writer 线程，避免 SyncSender 背压阻塞被测派发路径。
+    fn test_loop(
+        liveness: Arc<WorkerLiveness>,
+    ) -> (Loop, std::sync::mpsc::SyncSender<WorkerCommand>) {
+        let channels = LoopChannels::new();
+        let cmd_tx = channels.cmd_tx.clone();
+
+        let event_rx = channels.event_rx;
+        std::thread::spawn(move || {
+            // 排空 event channel，防止满队列让 paced_emitter 阻塞。
+            for _ in event_rx {}
+        });
+
+        let mut agent = AgentState::new(qaqh_config::Config::default());
+        agent.ephemeral = true;
+        // 无 session manager：persist ops 留在内存队列，但
+        // `drain_persist_ops` 仍会 take 走队列 —— 正是本测试的观察点。
+        agent.session_manager = None;
+
+        let lp = Loop::from_channels(
+            agent,
+            channels.cmd_rx,
+            channels.event_tx,
+            CancelToken::new(),
+            channels.writer_dead,
+            liveness,
+        );
+        (lp, cmd_tx)
+    }
+
+    fn cmd(command_id: &str, command: qaqh_domain::ControlCommand) -> WorkerCommand {
+        WorkerCommand {
+            frame: qaqh_ringing::RingingWorkerCommandEnvelope::new(
+                "test-seed",
+                command_id,
+                qaqh_ringing::RingingCommand::Control(command),
+            ),
+            causation: Some(command_id.to_string()),
+        }
+    }
+
+    /// ① panic 不逃逸 ② liveness 不失效：`drain_pending` 直派路径注入 panic，
+    /// run() 必须正常返回（进程存活），且派发期间 liveness.busy 置位、
+    /// 结束后回落（期间 registry 不可 unload）。
+    #[test]
+    fn drain_pending_panic_does_not_escape_and_liveness_is_accounted() {
+        let liveness = Arc::new(WorkerLiveness::new());
+        let (mut lp, cmd_tx) = test_loop(liveness.clone());
+
+        // 注入 seam：命中 command_id 即 panic（与真实引擎 panic 同线程同栈）。
+        lp.panic_on_command_id = Some("boom".into());
+
+        // 峰值观察：safe_dispatch 期间 busy 应被置位。
+        // 由于 panic 在同一线程同步发生，用 run() 前后 + 事后断言覆盖。
+        cmd_tx
+            .send(cmd("boom", qaqh_domain::ControlCommand::SessionShutdown))
+            .expect("test channel must not fail");
+        // 触发 shutdown 的真正命令（panic 那条不产生 shutdown 副作用）。
+        cmd_tx
+            .send(cmd("bye", qaqh_domain::ControlCommand::SessionShutdown))
+            .expect("test channel must not fail");
+        drop(cmd_tx);
+
+        // 未修复：panic 从 drain_pending 逃逸 → run() 直接 unwind，本测试 panic。
+        // 修复后：panic 被 safe_dispatch 收容，run() 正常返回。
+        lp.run();
+
+        assert!(
+            liveness.unloadable(),
+            "派发结束后 liveness 必须回落（busy=false / suspend=false）"
+        );
+    }
+
+    /// ② 细化：deferred 派发期间 busy 必须置位 —— 由测试命令内联观察。
+    /// 未修复代码上此例失败（busy 从未置位 → 派发中仍可被 unload）。
+    #[test]
+    fn liveness_busy_is_set_while_dispatching_deferred_command() {
+        let liveness = Arc::new(WorkerLiveness::new());
+        let (mut lp, _cmd_tx) = test_loop(liveness.clone());
+
+        // `safe_dispatch` 是本路径的 busy 窗口持有者；在 deferred 队列上跑一条
+        // 命令，并在派发**内部**读取 unloadable 快照。
+        let snapshot = Arc::new(AtomicUsize::new(usize::MAX));
+        let snap = snapshot.clone();
+        let live = liveness.clone();
+        lp.session.agent.enqueue_meta_op(MetaOp::PersistMode {
+            seed: "test-seed".into(),
+            mode: 1,
+        });
+        lp.safe_dispatch(move |this| {
+            snap.store(live.unloadable() as usize, Ordering::SeqCst);
+            this.session.agent.drain_persist_ops();
+        });
+
+        assert_eq!(
+            snapshot.load(Ordering::SeqCst),
+            0,
+            "派发进行中 worker 不可 unload（busy 已置位）"
+        );
+        assert!(liveness.unloadable(), "派发结束后必须可 unload");
+    }
+
+    /// ③ panic 路径也必须 flush 在飞的 persist ops（旧代码 drain_pending
+    /// 首分支完全缺 drain_persist_ops）。
+    #[test]
+    fn drain_path_flushes_pending_persist_ops_on_panic() {
+        let liveness = Arc::new(WorkerLiveness::new());
+        let (mut lp, cmd_tx) = test_loop(liveness.clone());
+
+        // 先入队一条 MetaOp，模拟 panic 前已产生的持久化工作。
+        lp.session.agent.enqueue_meta_op(MetaOp::PersistMode {
+            seed: "test-seed".into(),
+            mode: 1,
+        });
+        assert_eq!(lp.session.agent.pending_meta_ops.len(), 1);
+
+        lp.panic_on_command_id = Some("boom".into());
+        cmd_tx
+            .send(cmd("boom", qaqh_domain::ControlCommand::SessionShutdown))
+            .expect("test channel must not fail");
+        cmd_tx
+            .send(cmd("bye", qaqh_domain::ControlCommand::SessionShutdown))
+            .expect("test channel must not fail");
+        drop(cmd_tx);
+        lp.run();
+
+        assert!(
+            lp.session.agent.pending_meta_ops.is_empty(),
+            "panic 路径上在飞的 persist ops 必须被 flush 取空"
+        );
+    }
+
+    /// deferred 队列（会话切换期间积压）的 panic 同样不得逃逸，且队列排空。
+    #[test]
+    fn deferred_ringing_panic_is_contained_and_queue_drains() {
+        let liveness = Arc::new(WorkerLiveness::new());
+        let (mut lp, _cmd_tx) = test_loop(liveness.clone());
+
+        // 构造积压：直接往 deferred 队列塞命令，模拟已 ack 的 Ringing 命令
+        // 在会话切换期间堆积。用非中断命令（SessionShutdown 会置 pending，
+        // 令 drain 循环提前停下，不是本用例的观察对象）。
+        lp.deferred_ringing
+            .push_back(cmd("ok", qaqh_domain::ControlCommand::SkillsReload));
+        lp.panic_on_command_id = Some("boom".into());
+        lp.deferred_ringing
+            .push_back(cmd("boom", qaqh_domain::ControlCommand::SkillsReload));
+
+        // 直接驱动 drain 路径（run 会阻塞在 recv_timeout）。
+        lp.drain_pending();
+
+        assert!(
+            lp.deferred_ringing.is_empty(),
+            "deferred 队列必须被排空（panic 不得中断 drain）"
+        );
+        assert!(liveness.unloadable(), "派发结束后 liveness 必须回落");
+    }
+
+    /// 兜底：`safe_dispatch` 自身的 busy 窗口断言（防止 future 回归把它挪走）。
+    #[test]
+    fn safe_dispatch_marks_busy_during_and_clears_after() {
+        let liveness = Arc::new(WorkerLiveness::new());
+        let (mut lp, _cmd_tx) = test_loop(liveness.clone());
+
+        let snapshot = Arc::new(AtomicUsize::new(usize::MAX));
+        let snap = snapshot.clone();
+        let live = liveness.clone();
+        lp.safe_dispatch(move |_this| {
+            snap.store(live.unloadable() as usize, Ordering::SeqCst);
+        });
+
+        assert_eq!(
+            snapshot.load(Ordering::SeqCst),
+            0,
+            "safe_dispatch 内部不可 unload（busy 置位）"
+        );
+        assert!(liveness.unloadable(), "safe_dispatch 结束后恢复可 unload");
+    }
+
+    /// panic payload 必须被 safe_dispatch 消化（不二次 panic / 不留残余 busy）。
+    #[test]
+    fn safe_dispatch_contains_panic_and_restores_liveness() {
+        let liveness = Arc::new(WorkerLiveness::new());
+        let (mut lp, _cmd_tx) = test_loop(liveness.clone());
+
+        lp.safe_dispatch(|_this| panic!("simulated engine panic"));
+
+        assert!(liveness.unloadable(), "panic 恢复后必须可 unload");
+        assert_eq!(lp.phase, super::LoopPhase::Idle, "panic 后相位复位 Idle");
     }
 }
