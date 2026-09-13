@@ -358,9 +358,11 @@ fn handle_subagent(mut request: tiny_http::Request) {
             }
         }
         "kill" => {
-            let ok = crate::process_registry::ProcessRegistry::kill(parsed.id);
-            log::info!("[serve] subagent kill id={} ok={ok}", parsed.id);
-            serde_json::json!({ "ok": ok })
+            let outcome = crate::process_registry::ProcessRegistry::kill(parsed.id);
+            log::info!("[serve] subagent kill id={} outcome={outcome:?}", parsed.id);
+            // ok 仅表示「确实做了清理（或无需清理的在册终止）」；
+            // NoOsPid / NotFound 一律 ok=false，子代理据此知道 kill 未生效。
+            serde_json::json!({ "ok": outcome.cleaned(), "outcome": format!("{outcome:?}") })
         }
         other => {
             let _ = request.respond(text_response(
