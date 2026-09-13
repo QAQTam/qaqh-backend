@@ -152,6 +152,12 @@ pub fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) -> bool 
                 enable_message_wal(agent);
                 // L3：工具 outbox 对账——已执行但结果丢失的工具，修正 [RESTORE]
                 // 占位符语义（"未执行" → "已执行、结果未持久化"）。
+                //
+                // 对账前先把上一轮 worker 的批量化 fsync 落定（BUG-2026-09-12-14
+                // 之后 fsync 交由后台 flusher 合并）：worker 退出路径已 flush，但
+                // 进程在同一会话重开 worker 时，读到未 fsync 的记录仍可能来自
+                // OS 页缓存；显式 flush 把「恢复读到的事实」钉在盘上。
+                crate::agent::tool_outbox::flush(&agent.session.seed);
                 crate::agent::tool_outbox::reconcile_store(&mut agent.msg, &agent.session.seed);
                 // 重建 read_image 图片注册表：registry 是内存态，daemon 重启
                 // 后会丢失；但上传图片本就以 ContentBlock::Image 持久化在
