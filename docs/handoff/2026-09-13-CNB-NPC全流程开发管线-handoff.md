@@ -121,6 +121,31 @@ NPC push 后重走 §4.4。不要新开分支，保持 PR 关联。
 
 ## 7. 收割 wave3 的操作序列（下次开工直接照做）
 
+**推荐：直接用 MCP 监视器**（`tools/cnb-mcp-enhance/`，已入库 a4fe80b）——
+官方 [`@cnbcool/mcp-server`](https://cnb.cool/cnb/tools/cnb-mcp-server) 覆盖 50+ 工具（issues/pulls/build CRUD），
+本仓增强层补齐 NPC 编排缺口（npc.workMode 触发、npc-observability、wave 聚合监视）：
+
+```powershell
+# 独立监视器（不经 MCP 客户端也能用）：一次看全部 issue 的构建/评论/PR 状态
+$env:CNB_REPO="QAQ-Harness/qaqh-backend"; node tools/cnb-mcp-enhance/server.mjs --watch --issues 6,7,8,10,12,13
+
+# MCP 客户端注册（.mcp.json）两 server 并存：
+# "cnb":         npx -y -p @cnbcool/mcp-server cnb-mcp-stdio   （官方全量）
+# "cnb-enhance": node tools/cnb-mcp-enhance/server.mjs          （dispatch/observations/watch/close 5 工具）
+```
+
+关键 API 事实（调试时勿踩）：
+- CNB_TOKEN 8h 过期，cnb CLI 自动 refresh 并回写 `~/.cnb/token`（JSON 的 access_token 字段）——server 已实现每次请求重读；
+- CNB API 缺 `Accept: application/json` 头返 406；
+- stage 详情路径是 `/-/build/logs/stage/{sn}/{pipelineId}/{stageId}`；
+- 关单必须 `state=closed` + `state_reason=completed` 同时传。
+
+**程序化 NPC 派发（等价 UI 勾「替我上班」）**：`api_trigger_wm` 流水线（.cnb.yml 已定义）——
+不传 npc 字段的 api_trigger 拿「可信事件 scope」（repo-code:rw），npc:go 从 env `WAVE3_TASK` 读任务提示词。
+CLI 也可直接 `build start-build --npc-name CodeBuddy --npc-workMode`（仅 CodeBuddy 身份）。
+
+原生 CLI 收割序列（MCP 不可用时的退路）：
+
 ```powershell
 # 1. 看新 PR
 node <cli> pulls list-pulls --repo QAQ-Harness/qaqh-backend --state open
