@@ -62,7 +62,7 @@ pub mod paced_emitter;
 pub mod prompt;
 pub(crate) mod spawn;
 pub mod state;
-pub(crate) mod tool_outbox;
+pub mod tool_outbox;
 pub(crate) mod turn_lap;
 pub mod types;
 pub mod util;
