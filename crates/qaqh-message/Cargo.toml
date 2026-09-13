@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 description = "QAQ-Harness message store with state-machine lifecycle"
 
+[features]
+# Test-only: deterministic WAL read-fault injection for downstream tests.
+test-harness = []
+
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
 serde = { version = "1", features = ["derive"] }
