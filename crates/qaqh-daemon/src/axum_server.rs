@@ -8,6 +8,329 @@ pub use axum_impl::{AppState, build_router};
 #[cfg(test)]
 use axum_impl as apis;
 
+/// 进程级 SessionManager 初始化守卫。
+///
+/// `SessionManager::init` 内部是 `OnceLock::set().expect(...)`——同一测试
+/// 二进制的多个用例共享进程，谁先谁后不确定，裸调 `init` 必然 `already
+/// initialized` panic。所有测试模块统一走这里，只初始化一次。
+#[cfg(test)]
+fn init_session_manager() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+}
+
+#[cfg(test)]
+mod sse_tests {
+    //! SSE 终止帧路径回归（BUG-2026-09-12-11 遗留 / issue #35）。
+    //!
+    //! 覆盖真实 handler 路径（`build_router` →
+    //! `/ringing/v1/events/{channel}` 与
+    //! `/ringing/v1/sessions/{seed}/timeline/events`）：
+    //! 慢消费者 `Lagged` → `ringing.stream_terminated` 终止帧 → 关流，
+    //! 且终止后新订阅仍能正常收流。
+    //!
+    //! **慢消费者装置（确定性，不靠"真的慢"）**
+    //!
+    //! tokio broadcast 的语义是：
+    //!  - 在 Sender 已有积压历史之后才 `subscribe()` 的 receiver **看不到
+    //!    历史**（首次 `recv()` 得到 `Empty`）——因此必须让 handler 的
+    //!    receiver **先于**溢出存在；
+    //!  - 一个已存在的 receiver 若一直不排空，其下一次 `recv()` 在环溢出后
+    //!    必然返回 `Lagged(超出 capacity 的条数)`，且环内**零保留**
+    //!    （本仓库 tokio 1.x 实测：`cap=4, sent=5 → Lagged(1)`）。
+    //!
+    //! 于是顺序固定为：**先起 SSE（handler 建立订阅）→ 再用
+    //! `RingingHub::overflow_channel_live` / `publish_timeline` 灌
+    //! `capacity + 1` 条 → handler 的 `recv()` 立即 `Lagged`**。
+    //!
+    //! 依赖测试窗口内 live 容量恒为 `LIVE_BROADCAST_CAPACITY`（1024），
+    //! 由 `RingingHub::live_capacity` 取用，避免与实现漂移。
+
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::time::Duration;
+    use tokio_stream::StreamExt as _;
+    use tower::util::ServiceExt;
+
+    const TOKEN: &str = "test-token";
+    const SESSION: &str = "cs-lag";
+    const SEED: &str = "seed-live";
+
+    fn test_state_with_hub(hub: std::sync::Arc<qaqh_runtime::RingingHub>) -> AppState {
+        let leases = std::sync::Arc::new(std::sync::Mutex::new(
+            qaqh_runtime::ringing::RingingLeaseStore::new(),
+        ));
+        {
+            let mut g = leases.lock().unwrap();
+            g.open(SESSION.into(), "ci-lag".into());
+            g.attach_seed(SESSION, SEED);
+        }
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(
+            qaqh_runtime::ringing::PendingCommandStore::new(),
+        ));
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        // 与 `axum_tests::test_state` 同源：SessionManager 是进程级单例
+        // （`init` 用 `OnceLock::set`，重复调用会 panic）——测试二进制的多个
+        // 用例共享同一进程，这里用与 `axum_tests::test_state` 相同的
+        // `OnceLock::get_or_init` 形态保证只初始化一次。
+        super::init_session_manager();
+        AppState {
+            hub,
+            leases,
+            pending,
+            service: qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
+                .clone(),
+            token: TOKEN.into(),
+            epoch: "lag-epoch".into(),
+            shutdown,
+        }
+    }
+
+    /// 打开一条真实 channel SSE：返回 (状态, 事件流)。
+    async fn open_channel_sse(
+        app: Router,
+    ) -> (
+        StatusCode,
+        std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
+        >,
+    ) {
+        let req = Request::builder()
+            .uri("/ringing/v1/events/conversation")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("x-qaqh-client-session-id", SESSION)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let stream = axum::body::Body::into_data_stream(resp.into_body());
+        (status, Box::pin(stream))
+    }
+
+    /// 从 SSE 字节流里取下一个 `event:`/`data:` 帧（超时返回 `None`）。
+    async fn next_sse_frame(
+        stream: &mut std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
+        >,
+        timeout: Duration,
+    ) -> Option<(String, String)> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut buf = Vec::<u8>::new();
+        loop {
+            if let Some(frame) = split_frame(&buf) {
+                return Some(frame);
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(Some(Ok(chunk))) => buf.extend_from_slice(&chunk),
+                Ok(Some(Err(_))) | Ok(None) => return split_frame(&buf),
+                Err(_) => return split_frame(&buf),
+            }
+        }
+    }
+
+    /// 打开 timeline SSE：返回 (状态, 事件流)。
+    async fn open_timeline_sse(
+        app: Router,
+    ) -> (
+        StatusCode,
+        std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
+        >,
+    ) {
+        let req = Request::builder()
+            .uri(format!("/ringing/v1/sessions/{SEED}/timeline/events"))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("x-qaqh-client-session-id", SESSION)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let stream = axum::body::Body::into_data_stream(resp.into_body());
+        (status, Box::pin(stream))
+    }
+
+    /// 取完整帧（以空行分隔），返回 (event, data)。
+    fn split_frame(buf: &[u8]) -> Option<(String, String)> {
+        let text = String::from_utf8_lossy(buf);
+        let block = text.split("\n\n").next()?;
+        if !text.contains("\n\n") && !text.ends_with('\n') {
+            return None;
+        }
+        let mut event = String::new();
+        let mut data = String::new();
+        for line in block.lines() {
+            if let Some(v) = line.strip_prefix("event:") {
+                event = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(v.trim());
+            }
+        }
+        if event.is_empty() && data.is_empty() {
+            None
+        } else {
+            Some((event, data))
+        }
+    }
+
+    /// ① channel 流：慢消费者 → `ringing.stream_terminated` → 关流。
+    ///
+    /// 装置（确定性，不靠"真的慢"）：tokio broadcast 的语义是——
+    ///  - 在 Sender **有积压历史之后**才 subscribe 的 receiver，看不到历史
+    ///    （本测试与 tokio 实测一致：late subscriber 得到 `Empty`）；
+    ///  - 而在灌满之前就存在的 receiver，若一直不排空，其**下一次** `recv()`
+    ///    必然 `Lagged(capacity 之外的条数)`（环零保留）。
+    ///
+    /// 因此这里必须让 receiver **先于**溢出存在：handler 的
+    /// `hub.subscribe(channel)` 只发生在请求进来之后，所以顺序是
+    /// ① 起 handler 建立订阅 → ② 用 `channel_live_sender` 直接灌
+    /// `capacity + 1` 条，把 handler 那个 receiver 挤出环 → ③ handler 的
+    /// `recv()` 返回 `Lagged`，走终止帧分支。
+    #[tokio::test]
+    async fn channel_stream_lagged_sends_termination_frame_then_closes() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let state = test_state_with_hub(hub.clone());
+        let app = build_router(state);
+        let (status, mut stream) = open_channel_sse(app).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // handler 的 receiver 已存在（`subscribe()` 在进入 SSE 流前完成）。
+        let capacity =
+            qaqh_runtime::RingingHub::live_capacity(qaqh_domain::RingingChannel::Conversation);
+        hub.overflow_channel_live(
+            qaqh_domain::RingingChannel::Conversation,
+            SEED,
+            1,
+            capacity as u64 + 1,
+        );
+
+        let (event, data) = next_sse_frame(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("termination frame must arrive");
+        assert_eq!(event, "ringing.stream_terminated");
+        let v: serde_json::Value = serde_json::from_str(&data).expect("valid json payload");
+        assert_eq!(v["code"], "lagged");
+        assert_eq!(v["channel"], "conversation");
+        assert!(
+            v["skipped"].as_u64().unwrap_or(0) > 0,
+            "payload must carry the skipped count: {data}"
+        );
+
+        // 终止帧是**最后一帧**：发完即关流，不再有任何数据帧。
+        let tail = next_sse_frame(&mut stream, Duration::from_millis(300)).await;
+        assert!(
+            tail.is_none(),
+            "no frame may follow the termination frame: {tail:?}"
+        );
+    }
+
+    /// ② 终止后新订阅仍能正常收流（重连重定基不被破坏）。
+    ///
+    /// 客户端收到终止帧后的既定动作是**带 Last-Event-ID 重连**（新 SSE，
+    /// 新 receiver）。这里断言终止帧没有把 hub 打坏：终止之后起的第二条
+    /// SSE 依然能收到 live 事件。
+    #[tokio::test]
+    async fn a_new_subscription_still_receives_after_termination() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        let capacity =
+            qaqh_runtime::RingingHub::live_capacity(qaqh_domain::RingingChannel::Conversation);
+
+        // 第一条流：被挤爆 → 终止帧。
+        let state = test_state_with_hub(hub.clone());
+        let (_, mut first) = open_channel_sse(build_router(state)).await;
+        hub.overflow_channel_live(
+            qaqh_domain::RingingChannel::Conversation,
+            SEED,
+            1,
+            capacity as u64 + 1,
+        );
+        let (event, _) = next_sse_frame(&mut first, Duration::from_secs(5))
+            .await
+            .expect("first stream must terminate");
+        assert_eq!(event, "ringing.stream_terminated");
+
+        // 第二条流：新订阅，必须还能收到 live 事件。
+        let state = test_state_with_hub(hub.clone());
+        let (_, mut second) = open_channel_sse(build_router(state)).await;
+        hub.overflow_channel_live(qaqh_domain::RingingChannel::Conversation, SEED, 10_000, 1);
+        let (event, data) = next_sse_frame(&mut second, Duration::from_secs(5))
+            .await
+            .expect("a fresh subscription must still receive live events");
+        assert_ne!(
+            event, "ringing.stream_terminated",
+            "a fresh stream must not be terminated by the previous overflow: {data}"
+        );
+        assert_eq!(event, "conversation_cancelled");
+    }
+
+    /// ③ timeline 流：慢消费者 → `ringing.stream_terminated`(seed) → 关流。
+    ///
+    /// 与 ① 同一装置，只是把订阅点换成 `subscribe_timeline`、溢出源换成
+    /// 生产入口 `hub.publish_timeline`（每次发布都会 `timeline_live.send`）。
+    #[tokio::test]
+    async fn timeline_stream_lagged_sends_termination_frame_then_closes() {
+        let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::new("lag-epoch"));
+        // 先立一个"记数"订阅，确保 timeline_live 广播在 handler 订阅前已存在
+        // 且已有消费者（tokio：无消费者的 Sender 会丢弃历史）。
+        let _recorder = hub.subscribe_timeline();
+
+        let state = test_state_with_hub(hub.clone());
+        let (status, mut stream) = open_timeline_sse(build_router(state)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // handler 的 timeline receiver 已存在 → 灌满环并把 handler 挤出。
+        let capacity =
+            qaqh_runtime::RingingHub::live_capacity(qaqh_domain::RingingChannel::Conversation);
+        for i in 0..capacity + 1 {
+            hub.publish_timeline(
+                SEED,
+                qaqh_domain::TimelineIntent::TurnOpened {
+                    turn_id: format!("t{i}"),
+                    user_text: format!("q{i}"),
+                },
+            )
+            .expect("publish timeline intent");
+        }
+
+        let mut terminated = None;
+        // 满环下 handler 的首个 `recv()` 即 Lagged（实测 0 帧先行），但按契约
+        // 扫描到终止帧即可，不依赖"零帧"这一实现细节。
+        for _ in 0..capacity + 8 {
+            match next_sse_frame(&mut stream, Duration::from_secs(5)).await {
+                Some((event, data)) if event == "ringing.stream_terminated" => {
+                    terminated = Some(data);
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        let data = terminated.expect("timeline termination frame must arrive");
+        let v: serde_json::Value = serde_json::from_str(&data).expect("valid json payload");
+        assert_eq!(v["code"], "lagged");
+        assert_eq!(v["seed"], SEED);
+        assert!(
+            v["skipped"].as_u64().unwrap_or(0) > 0,
+            "payload must carry the skipped count: {data}"
+        );
+
+        // 终止帧之后不再有数据帧。
+        let tail = next_sse_frame(&mut stream, Duration::from_millis(300)).await;
+        assert!(
+            tail.is_none(),
+            "no frame may follow the timeline termination frame: {tail:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod axum_tests {
     use super::*;
@@ -32,11 +355,16 @@ mod axum_tests {
         ));
         let service = TEST_SERVICE
             .get_or_init(|| {
-                qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
+                super::init_session_manager();
                 qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
             })
             .clone();
         let (shutdown, _) = tokio::sync::watch::channel(false);
+        // 与 `axum_tests::test_state` 同源：SessionManager 是进程级单例
+        // （`init` 用 `OnceLock::set`，重复调用会 panic）——测试二进制的多个
+        // 用例共享同一进程，这里用与 `axum_tests::test_state` 相同的
+        // `OnceLock::get_or_init` 形态保证只初始化一次。
+        super::init_session_manager();
         AppState {
             hub,
             leases,
