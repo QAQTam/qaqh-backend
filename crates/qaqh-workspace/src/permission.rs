@@ -271,9 +271,16 @@ pub fn patch_target_paths(patch: &str) -> Vec<String> {
 pub(crate) fn resolve_target_path(path: PathBuf) -> PathBuf {
     // WSL serve 侧：worker 下发的 Windows 绝对路径转 /mnt，使授权资源路径与
     // workspace_root（同样已被归一化为 /mnt）一致，避免被误判为跨 workspace。
-    let path = PathBuf::from(crate::wsl_path::platform_workspace_path(
-        path.to_string_lossy().as_ref(),
-    ));
+    //
+    // 注意：`wsl_path` 是纯字符串逻辑，必须走 `&str`。**只在路径可无损表示为
+    // UTF-8 时**才经此转换——非 UTF-8 路径若先 `to_string_lossy()` 会把非法字节
+    // 折叠成 `U+FFFD`，使 `sh\xFFared` 与 `sh\u{FFFD}ared` 变成同一路径而误判
+    // 相等（越权 AutoApprove）。非 UTF-8 路径原样保留字节参与后续比较。
+    // Windows 下发的路径恒为 UTF-8（盘符 + 路径体），故此处不会漏转换。
+    let path = match path.to_str() {
+        Some(utf8) => PathBuf::from(crate::wsl_path::platform_workspace_path(utf8)),
+        None => path,
+    };
     let absolute = if path.is_absolute() {
         path
     } else {
@@ -328,17 +335,68 @@ pub(crate) fn normalize_lexically(path: &Path) -> PathBuf {
     normalized
 }
 
+/// 路径比较键：在 `OsStr` 的**原始字节**上比较，不做有损转换。
+///
+/// - Windows 文件系统大小写不敏感，仅在 `cfg!(windows)` 时折叠 ASCII 大小写；
+///   其余平台（Linux/macOS、WSL `/mnt/*`）大小写敏感，原样保留字节——
+///   否则 `Shared/` 与 `shared/` 这两个**不同目录**会被判为同一目录，
+///   导致越权 `AutoApprove`。
+/// - 不用 `to_string_lossy()`：非法字节会被统一替换为 `U+FFFD`，使
+///   `sh\xFFared` 与 `sh\u{FFFD}ared` 折叠成同一键继而误判相等。
+///   非 UTF-8 路径保留原字节参与比较，不折叠、不替换。
+fn path_comparison_key(path: &Path) -> Vec<u8> {
+    let bytes = path.as_os_str().as_encoded_bytes().to_vec();
+    if cfg!(windows) {
+        bytes.to_ascii_lowercase()
+    } else {
+        bytes
+    }
+}
+
+/// 去掉路径尾部的分隔符（`/` 与 `\`），并把空串归一为「无键」。
+///
+/// 空信任目录（`""`、`"/"`）若参与匹配会变成空前缀，把所有绝对路径都判为
+/// 子树成员（`path_within_dir("/etc/x", "")` == true），是 fail-open，必须拦掉。
+fn trimmed_key(path: &Path) -> Option<Vec<u8>> {
+    let mut key = path_comparison_key(path);
+    while key.len() > 1 && matches!(key.last(), Some(b'/' | b'\\')) {
+        key.pop();
+    }
+    if key.is_empty() || key == b"/" || key == b"\\" {
+        return None;
+    }
+    Some(key)
+}
+
+/// Whether `path` lies inside `dir` (or is `dir` itself), on **path component**
+/// boundaries.
+///
+/// Component-wise comparison matters: a raw string `starts_with` would treat
+/// `D:\shared-other` as inside `D:\shared` and auto-approve a write the user
+/// never trusted.
+///
+/// Fail-closed：任何一侧无法得到非空比较键（空/纯分隔符目录）时返回 `false`，
+/// 即「不算命中信任目录」，维持弹审批，而非放行。
+fn path_within_dir(path: &Path, dir: &Path) -> bool {
+    let Some(dir_key) = trimmed_key(dir) else {
+        return false;
+    };
+    let Some(key) = trimmed_key(path) else {
+        return false;
+    };
+    if key == dir_key {
+        return true;
+    }
+    key.strip_prefix(dir_key.as_slice())
+        .is_some_and(|rest| rest.first().is_some_and(|b| matches!(b, b'/' | b'\\')))
+}
+
 /// Check if ALL target paths are inside the workspace root.
 pub(crate) fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool {
     if paths.is_empty() {
         return true;
     } // tools without paths (e.g. ask) are considered safe
     paths.iter().all(|p| p.starts_with(workspace))
-}
-
-/// Find the first path (if any) that is outside the workspace.
-fn first_outside_workspace<'a>(paths: &'a [PathBuf], workspace: &Path) -> Option<&'a PathBuf> {
-    paths.iter().find(|p| !p.starts_with(workspace))
 }
 
 // ──────────────────────────────────────
@@ -483,15 +541,32 @@ pub fn needs_permission(
             return PermissionDecision::AutoApprove;
         }
 
-        // Cross-workspace: check trusted folders
-        if let Some(outside) = first_outside_workspace(&paths, &workspace_root) {
-            let dir: &Path = outside.parent().unwrap_or(outside);
-            if trusted_dirs
-                .iter()
-                .any(|trusted| resolve_target_path(trusted.clone()) == dir)
-            {
-                return PermissionDecision::AutoApprove;
-            }
+        // Cross-workspace: check trusted folders.
+        //
+        // BUG-2026-09-13-14：旧实现取 `outside.parent()` 后与信任目录做**精确
+        // 相等**比较。信任 `D:\shared` 后写 `D:\shared\sub\new.rs`（`sub` 新建）
+        // 的父目录是 `D:\shared\sub` ≠ 信任目录 → 每次重新弹审批，与
+        // "one-time trust" 语义相反；且两侧比较对大小写敏感（Windows 文件系统
+        // 大小写不敏感，`D:\Shared` 与 `d:\shared` 是同一目录）。
+        // 现在改为「信任目录的子树（含自身）」按分量级前缀比较。
+        //
+        // 同时收敛既有的「只看首个在外路径」fail-open：多路径调用（如 copy
+        // 的 source/dest）中只要有一个路径落在信任目录之外，就必须整体弹审批，
+        // 否则未信任路径会被同批次里已信任的那条连带放行。
+        let trusted_keys: Vec<PathBuf> = trusted_dirs
+            .iter()
+            .map(|trusted| resolve_target_path(trusted.clone()))
+            .collect();
+        let all_trusted = paths
+            .iter()
+            .filter(|path| !path.starts_with(&workspace_root))
+            .all(|outside| {
+                trusted_keys
+                    .iter()
+                    .any(|trusted| path_within_dir(outside, trusted))
+            });
+        if all_trusted {
+            return PermissionDecision::AutoApprove;
         }
     }
 
