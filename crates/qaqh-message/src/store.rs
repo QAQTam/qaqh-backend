@@ -693,7 +693,16 @@ impl MessageStore {
     /// 消息永远无图片块，重启后图片索引永久丢失。同步修补 pending_save
     /// 中同 msg_id 的克隆；若该消息已随先前 flush 落盘（生产路径不可达，
     /// 此处仅防御），发 SaveFull 全量重写补齐并告警。
-    pub fn push_image_to_last_user(&mut self, mime_type: &str, data: &str) {
+    ///
+    /// BUG-2026-09-13-25：无 user turn（ingest 被拒 / replaying 回放）时
+    /// 图片无处可挂。此前静默跳过——既不入 store 也无任何错误通道，带图
+    /// 输入无声消失。现在返回 `bool`（`true` = 已挂到当前 user turn），
+    /// 并由调用方决定是否上报；缺 turn 时另留 error 级诊断，与
+    /// [`Self::push_assistant`] 的 "no turn exists" 路径对齐。
+    ///
+    /// 注意：返回 `false` 时图片字节可能已按内容寻址落盘（`store_image_b64`
+    /// 成功），但没有任何消息引用它——存储侧仍需调用方给出用户可见的拒绝。
+    pub fn push_image_to_last_user(&mut self, mime_type: &str, data: &str) -> bool {
         // A-2 L0：图片字节外置磁盘（内容寻址，见 qaqh_types::image_store），
         // 消息内只留 ImageRef 索引——daemon 常驻内存不再随图片数线性膨胀。
         // 落盘失败（IO 异常）回退 inline Image：宁可内存膨胀也不丢用户图。
@@ -740,12 +749,17 @@ impl MessageStore {
                 });
             }
         } else {
-            // BUG-2026-09-13-25 同族可见性：无 user turn（ingest 被拒 /
-            // replaying）时图片既不入 store 也不报错——至少留诊断。
-            log::warn!(
-                "[store] push_image_to_last_user: no user turn to attach image (dropped)"
+            // BUG-2026-09-13-25：无 user turn（ingest 被拒 / replaying）→
+            // 图片无处可挂，且不会有任何持久化记录。error 级（与
+            // push_assistant 的 "no turn exists" 对齐）而非 warn：这是
+            // 用户数据丢失，调用方必须把它当作失败上报。
+            log::error!(
+                "[store] push_image_to_last_user: no user turn to attach image (dropped, mime={mime_type}, bytes={})",
+                data.len()
             );
+            return false;
         }
+        true
     }
 
     pub fn push_assistant(&mut self, msg: Message) -> bool {
@@ -2862,12 +2876,55 @@ mod tests {
             .find(|m| m.role == "user")
             .expect("user message in append batch");
         assert!(
-            matches!(
-                persisted_user.content[1],
-                ContentBlock::ImageRef { .. }
-            ),
+            matches!(persisted_user.content[1], ContentBlock::ImageRef { .. }),
             "persisted user message must carry the image block, got {persisted_user:?}"
         );
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("QAQH_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("QAQH_DATA_DIR") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── BUG-2026-09-13-25 回归：push_image_to_last_user 必须给出丢失通道 ──
+
+    /// 无 user turn（ingest 被拒 / replaying）时不得静默丢图：返回 false
+    /// 让调用方上报，且图片块绝不落进任何 turn。
+    #[test]
+    fn push_image_without_user_turn_reports_drop() {
+        let mut store = MessageStore::new_ephemeral("no-turn-seed");
+        assert!(store.turns.is_empty(), "precondition: no turn yet");
+
+        let attached = store.push_image_to_last_user("image/png", "aGVsbG8=");
+
+        assert!(
+            !attached,
+            "no user turn → push_image_to_last_user must report the drop (return false)"
+        );
+        assert!(
+            store.turns.is_empty(),
+            "no turn may be fabricated just to host the image"
+        );
+    }
+
+    /// 正常路径：有 user turn 时返回 true，图片块真的挂上去了。
+    #[test]
+    fn push_image_with_user_turn_reports_attach() {
+        let prev = std::env::var("QAQH_DATA_DIR").ok();
+        let tmp = std::env::temp_dir().join(format!("qaqh-store-img25-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe { std::env::set_var("QAQH_DATA_DIR", &tmp) };
+
+        let mut store = MessageStore::new_ephemeral("has-turn-seed");
+        store.push_user("look at this");
+        assert!(store.push_image_to_last_user("image/png", "aGVsbG8="));
+
+        let turn = store.turns.last().expect("turn");
+        assert!(matches!(
+            turn.user.content[1],
+            ContentBlock::ImageRef { .. } | ContentBlock::Image { .. }
+        ));
 
         match prev {
             Some(v) => unsafe { std::env::set_var("QAQH_DATA_DIR", v) },
@@ -2888,7 +2945,9 @@ mod tests {
         store.push_image_to_last_user("image/png", "aGVsbG8=");
         let ops = store.take_persist_ops();
         match ops.last().expect("SaveFull op") {
-            PersistOp::SaveFull { model, messages, .. } => {
+            PersistOp::SaveFull {
+                model, messages, ..
+            } => {
                 assert_eq!(model, "orig-model");
                 let user = messages
                     .iter()

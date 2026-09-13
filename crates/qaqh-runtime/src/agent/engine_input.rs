@@ -180,10 +180,24 @@ impl InputEngine {
 
         // Add image blocks to the user message and register them in the
         // read_image registry so the model can look them up by index.
+        // BUG-2026-09-13-25：ingest 被拒（无 user turn）时 push 会失败——
+        // 此前无声吞掉，用户带图输入消失且无任何可观测信号。现在显式
+        // 上报（warn + 带上 source/trace），并跳过 read_image 注册，避免
+        // 模型拿到指向"没有消息引用"的图片的索引。
         for img in &images {
-            ctx.agent
+            if !ctx
+                .agent
                 .msg
-                .push_image_to_last_user(&img.mime_type, &img.data);
+                .push_image_to_last_user(&img.mime_type, &img.data)
+            {
+                log::warn!(
+                    "[INPUT] user image dropped: no user turn to attach it (source={source_id}, mime={}, bytes={}); trace={:?}",
+                    img.mime_type,
+                    img.data.len(),
+                    ctx.flow.trace().back()
+                );
+                continue;
+            }
             qaqh_workspace::read_image::store_image(
                 &ctx.agent.session.seed,
                 &img.mime_type,
