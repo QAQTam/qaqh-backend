@@ -1,7 +1,9 @@
 # QAQ-Harness 主仓 CNB 流水线
-# 1) main.push：构建/推送 NPC 镜像（Dockerfile 变更即重建）+ Rust CI（test/clippy/fmt）
+# 1) main.push：构建/推送 NPC 镜像（Dockerfile 变更即重建）。※ rust-ci 已下线（2026-09-13）——
+#    云端 cargo test/clippy 按量计费（NPC 免费但构建测试烧钱），验证一律拉回本地执行。
+#    需要时恢复：stages 内跑 cargo test --workspace --all-targets + clippy -D warnings
 # 2) $：NPC 事件（issue/PR 评论）用自定义镜像；不指定 model = 平台默认免费模型
-# 3) pull_request：NPC 自动代码审查（reviewer 角色提示词）
+# 3) pull_request：NPC 自动代码审查（静态审读 diff，不跑构建）
 
 main:
   push:
@@ -13,16 +15,7 @@ main:
           script: docker build -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:npc-ubuntu26-rust1981 .
         - name: Docker push
           script: docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:npc-ubuntu26-rust1981
-    - name: rust-ci
-      docker:
-        image: rust:1.98.1
-      stages:
-        - name: test
-          script: cargo test --workspace --all-targets
-        - name: clippy
-          script: |
-            rustup component add clippy
-            cargo clippy --workspace --all-targets -- -D warnings
+    # rust-ci 已移除（2026-09-13）：cargo test/clippy 在云端按量计费，改由本地执行（见文件头注释）
 
 # NPC 事件：自定义镜像（Ubuntu 26.04 + Rust 1.98.1 + gcc-15 + cmake）
 $:
@@ -61,10 +54,13 @@ $:
           type: npc:go
           options:
             systemPrompt: |
-              你是 QAQ-Harness 后端仓库（Rust workspace）的资深工程师，负责落地修复并交付 PR。
-              铁律：动手前读完相关 issue 评论与源码；回归测试先行（红→绿）；
-              cargo test --workspace 全绿（exec::tests 两个既存失败 O-3 除外）
-              + cargo clippy --workspace --all-targets -- -D warnings 无告警；
-              从最新 main 切分支 fix/bug-YYYY-MM-DD-NN-<简述>；PR 正文含改动点/回归清单/验证摘要；
-              只改相关代码；完成后在对应 issue 评论 PR 链接与一句话摘要。
+              你是 QAQ-Harness 后端仓库（Rust workspace）的资深工程师，负责生成修复代码并交付 PR。
+              铁律：
+              1. 成本纪律：云端**只生成代码，不跑 cargo build/test/clippy**——构建与验证在用户本地
+                 Windows 执行，不要声称跑过云端未执行的验证。
+              2. 回归测试写进 PR（先写测试再写实现），红→绿验证留待本地；Windows-only 行为标注「待本地验证」。
+              3. 动手前读完相关 issue 评论与源码；交付前用 git diff 自查改动范围，只改相关代码。
+              4. 从最新 main 切分支 fix/bug-YYYY-MM-DD-NN-<简述>；PR 正文含改动点/回归清单/
+                 **本地验证清单**（受影响 crate + 测试名，供本地执行）。
+              5. 完成后在对应 issue 评论 PR 链接与一句话摘要。
             userPrompt: ${WAVE3_TASK}
