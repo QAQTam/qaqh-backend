@@ -130,6 +130,23 @@ fn shell_derive_args_are_shell_specific() {
     assert_eq!(cmd[2], "dir");
 }
 
+/// `-CommandWithArgs` 的绑定契约（O-3 结论）：只填 `$args`，**不产生
+/// `$arg0`/`$argN`**（实测 pwsh 7.4.6：`Test-Path variable:arg0` → False）。
+/// 任何用 `$argN` 取样参数的脚本/期望都是测试期望错误，参数字节链路完好。
+#[test]
+fn command_with_args_contract_is_dollar_args_only() {
+    let args = vec!["中文测试".to_string()];
+    let argv = Shell::PowerShell.derive_exec_args_with("Write-Output $args[0]", Some(&args));
+    // 派生：脚本 + 参数原样尾随，中间无 `-Command` 之类的再包装。
+    let script_at = argv
+        .iter()
+        .position(|token| token == "Write-Output $args[0]")
+        .expect("script token");
+    assert_eq!(argv[script_at + 1..], args[..]);
+    assert_eq!(argv.len(), script_at + 2);
+    assert_eq!(argv[script_at - 1], "-CommandWithArgs");
+}
+
 #[test]
 fn pwsh_command_with_args_uses_command_with_args() {
     let args = vec![
@@ -165,6 +182,46 @@ fn pwsh_command_with_args_uses_command_with_args() {
 }
 
 #[test]
+fn shell_availability_probe_matches_the_derived_shell() {
+    // 回归（O-3 根因）：shell_available 必须报告「实际会被派生的壳」，
+    // 而不是「固定名字恰好在 PATH 上」。
+    // 旧实现：path() 对 Bash 在非 Windows 恒返回 "bash"（git-bash 缓存
+    // 未初始化时 Windows 侧同理），而探测按该名字查 PATH——在只有
+    // sh/dash 的精简镜像里，`shell: "bash"` 被判 SHELL_NOT_FOUND，
+    // 而 detect() 明明可用 sh 正常执行命令（探测与实际派生不一致）。
+    for shell in [Shell::Bash, Shell::Zsh, Shell::Sh] {
+        let argv0 = shell
+            .derive_exec_args("echo probe")
+            .into_iter()
+            .next()
+            .expect("derive must yield argv[0]");
+        assert_eq!(
+            shell_available(shell),
+            executable_on_path(&argv0),
+            "可用性探测必须与派生 argv[0] 一致：{shell:?} 派生 {argv0} path={} avail={} onpath={}",
+            shell.path(),
+            shell_available(shell),
+            executable_on_path(&argv0)
+        );
+    }
+    // 探测口径不得随「本进程是否曾解析过某个壳」漂移：同一环境内重复
+    // 探测必须幂等（旧实现依赖 DETECTED_BASH_PATH 缓存，测试执行顺序
+    // 会改变结果——隐藏的时序脆弱）。
+    for shell in [Shell::Bash, Shell::Zsh, Shell::Sh] {
+        let first = shell_available(shell);
+        assert_eq!(first, shell_available(shell), "{shell:?} 探测必须幂等");
+    }
+    // 默认壳（平台自动检测）必须自洽：可用且能真正起壳。
+    let detected = Shell::detect();
+    assert!(
+        shell_available(detected),
+        "detect() 选中的壳 {:?} 必须可用（path={}）",
+        detected,
+        detected.path()
+    );
+}
+
+#[test]
 fn posix_shell_args_become_positional_params() {
     // POSIX `sh -c 'script' name arg...`：name 占 $0，args 进 $1/$@。
     // Harness 固定 $0 为 `_`，模型只用 $1 起。
@@ -183,12 +240,39 @@ fn posix_shell_args_become_positional_params() {
     assert!(!empty.contains(&"_".to_string()));
 }
 
+/// 缺壳时的显式跳过（假绿防御，O-3 结论 §三-1）。
+///
+/// 旧写法 `eprintln!("skipping") + return` 让「没测」被渲染成「通过」——
+/// 容器里没有 pwsh 时 6 个 pwsh 用例全部 `ok`，潜伏 6 天。此宏统一：
+/// - 始终 `eprintln!`（日志里可 grep `SKIPPED:`）；
+/// - 置 `QAQH_REQUIRE_SHELL=1` 时**硬失败**（CI 装了壳就该真跑）。
+macro_rules! skip_without_shell {
+    ($shell:expr, $label:expr) => {{
+        if !shell_available($shell) {
+            let required = std::env::var("QAQH_REQUIRE_SHELL").is_ok_and(|v| v == "1");
+            assert!(
+                !required,
+                "SKIPPED-BUT-REQUIRED: {} 不可用，而 QAQH_REQUIRE_SHELL=1 要求真跑",
+                $label
+            );
+            eprintln!(
+                "SKIPPED: {} 不可用（未执行，勿当通过）；设 QAQH_REQUIRE_SHELL=1 可强制失败",
+                $label
+            );
+            return;
+        }
+    }};
+}
+
+/// 有 pwsh 就真跑：`-CommandWithArgs` 跨平台行为一致，跳过门不应按
+/// `cfg!(windows)` 豁免（Windows 上无 pwsh 才是硬失败）。
+fn pwsh_regression_runner_ready() -> bool {
+    shell_available(Shell::PowerShell)
+}
+
 #[test]
 fn exec_with_bash_shell_and_args_executes_via_positional_params() {
-    if !shell_available(Shell::Bash) {
-        eprintln!("skipping: bash not available on this machine");
-        return;
-    }
+    skip_without_shell!(Shell::Bash, "bash");
     let ctx = make_ctx(
         "exec",
         serde_json::json!({ "command": "echo \"$1\"; echo \"$2\"", "shell": "bash", "args": ["hello world", "a\"b"], "cwd": std::env::current_dir().unwrap() }),
@@ -222,10 +306,10 @@ fn cmd_tool_with_args_rejected() {
 
 #[test]
 fn pwsh_tool_with_args_executes_via_command_with_args() {
-    if !shell_available(Shell::PowerShell) {
-        eprintln!("skipping: powershell not available on this machine");
-        return;
+    if !pwsh_regression_runner_ready() {
+        skip_without_shell!(Shell::PowerShell, "pwsh");
     }
+    assert!(shell_available(Shell::PowerShell));
     let ctx = make_ctx(
         "exec",
         serde_json::json!({ "command": "$args | % { \"arg: $_\" }", "shell": "pwsh", "args": ["hello world", "a\"b"], "cwd": std::env::current_dir().unwrap() }),
@@ -241,10 +325,10 @@ fn pwsh_tool_with_args_executes_via_command_with_args() {
 
 #[test]
 fn pwsh_tool_with_chinese_args_via_command_with_args() {
-    if !shell_available(Shell::PowerShell) {
-        eprintln!("skipping: powershell not available on this machine");
-        return;
+    if !pwsh_regression_runner_ready() {
+        skip_without_shell!(Shell::PowerShell, "pwsh");
     }
+    assert!(shell_available(Shell::PowerShell));
     let ctx = make_ctx(
         "exec",
         serde_json::json!({ "command": "Write-Output $args[0]", "shell": "pwsh", "args": ["中文测试"], "cwd": std::env::current_dir().unwrap() }),
@@ -714,10 +798,7 @@ fn wait_for_returns_promptly_on_per_call_cancel() {
 #[cfg(not(windows))]
 #[test]
 fn exec_tool_full_lifecycle_smoke_foreground_handoff_kill() {
-    if !shell_available(Shell::Bash) {
-        eprintln!("skipping: bash not available");
-        return;
-    }
+    skip_without_shell!(Shell::Bash, "bash");
     let cwd = std::env::current_dir().unwrap();
     // ① 前台：echo 经完整 tool 层（spawn → poll → seal → 汇聚）
     let ctx = make_ctx(
@@ -777,10 +858,7 @@ fn background_derivation_detection_boundaries() {
 #[cfg(not(windows))]
 #[test]
 fn exec_tool_appends_background_derivation_hint() {
-    if !shell_available(Shell::Bash) {
-        eprintln!("skipping: bash not available");
-        return;
-    }
+    skip_without_shell!(Shell::Bash, "bash");
     let ctx = make_ctx(
         "exec",
         serde_json::json!({
@@ -1078,10 +1156,7 @@ fn exec_registered_alone_with_shell_param() {
 
 #[test]
 fn exec_tool_executes_command_through_default_shell() {
-    if !shell_available(Shell::Bash) {
-        eprintln!("skipping: bash not available on this machine");
-        return;
-    }
+    skip_without_shell!(Shell::Bash, "bash");
     // cwd 显式传当前目录：并行测试会污染 CURRENT_WORKSPACE（可能指向已删除
     // 的 tempdir），不传则 spawn 带无效 cwd → os error 267。
     let ctx = make_ctx(
@@ -1095,10 +1170,7 @@ fn exec_tool_executes_command_through_default_shell() {
 
 #[test]
 fn pwsh_tool_executes_command_through_fixed_shell() {
-    if !shell_available(Shell::PowerShell) {
-        eprintln!("skipping: powershell not available on this machine");
-        return;
-    }
+    skip_without_shell!(Shell::PowerShell, "pwsh");
     let ctx = make_ctx(
         "exec",
         serde_json::json!({ "command": "Write-Output shell-tool-ok", "shell": "pwsh", "cwd": std::env::current_dir().unwrap() }),

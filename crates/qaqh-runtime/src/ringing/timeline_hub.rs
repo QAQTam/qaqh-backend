@@ -447,9 +447,9 @@ impl RingingHub {
             .timeline_store
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let Some(store) = store.as_ref() else {
+        if store.is_none() {
             return;
-        };
+        }
         let store_seed = seed.to_string();
         let append_store = std::sync::Arc::new(());
         let _ = append_store;
@@ -469,7 +469,6 @@ impl RingingHub {
                 let _ = &timeline;
                 let _ = &store_seed;
             });
-        drop(store);
         self.timeline
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -501,10 +500,9 @@ fn rehydrate_offloaded_turns(
                             .is_some_and(|tool| tool.progress.chars().count() <= 512)
                 })
             })
+            && let Some(full) = store.load_offloaded_turn(seed, &turn.turn_id)
         {
-            if let Some(full) = store.load_offloaded_turn(seed, &turn.turn_id) {
-                *turn = full;
-            }
+            *turn = full;
         }
     }
     snapshot
@@ -558,12 +556,5 @@ impl RingingHub {
     /// and snapshot watermark; a lagged receiver must reconnect and replay.
     pub fn subscribe_timeline(&self) -> broadcast::Receiver<TimelineLiveEntry> {
         self.timeline_live.subscribe()
-    }
-
-    /// TurnSealed 是 turn 级恢复边界，同步落盘（见 publish_timeline 注释）。
-    /// BlockSealed/RoundSealed 已降级为异步 checkpoint，不再视作同步终端。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn timeline_intent_is_terminal(intent: &TimelineIntent) -> bool {
-        matches!(intent, TimelineIntent::TurnSealed { .. })
     }
 }

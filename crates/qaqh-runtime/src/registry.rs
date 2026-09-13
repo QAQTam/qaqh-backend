@@ -49,6 +49,12 @@ pub fn cache_system_path() {
     }
 }
 
+/// 启动期壳探测（exec 的可用性口径与实际派生同源）。幂等，可重复调用。
+pub fn detect_shell() {
+    let shell = qaqh_workspace::bootstrap_exec_shell();
+    log::info!("[runtime] exec shell bootstrap: {shell}");
+}
+
 pub fn detect_os_info() {
     #[cfg(target_os = "windows")]
     let info = background_command("cmd")

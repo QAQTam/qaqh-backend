@@ -15,7 +15,6 @@ use qaqh_types::{Message, SessionMeta};
 
 pub mod bounded_read;
 
-
 // ── Meta ──
 
 /// Write session metadata to `meta.json` atomically (write to temp, rename).
@@ -311,12 +310,12 @@ pub fn count_message_lines(session_dir: &Path) -> Result<usize, String> {
 ///
 /// 兼容：首次读取若无 `index.jsonl` 但有旧 `index.json`，一次性迁移
 /// （生成 jsonl 后删除旧文件，格式破坏性变更已获 owner 批准）。
-
+//
 /// 单行操作（wire: 每行一个 JSON 对象）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum IndexOp {
-    Upsert { meta: SessionMeta },
+    Upsert { meta: Box<SessionMeta> },
     Remove { seed: String },
 }
 
@@ -353,7 +352,7 @@ fn read_merged_index(sessions_dir: &Path) -> Vec<SessionMeta> {
         lines += 1;
         match serde_json::from_str::<IndexOp>(trimmed) {
             Ok(IndexOp::Upsert { meta }) => {
-                by_seed.insert(meta.seed.clone(), meta);
+                by_seed.insert(meta.seed.clone(), *meta);
             }
             Ok(IndexOp::Remove { seed }) => {
                 by_seed.remove(&seed);
@@ -388,7 +387,9 @@ fn rewrite_index_log<'a>(sessions_dir: &Path, metas: impl Iterator<Item = &'a Se
     let dst = index_log_path(sessions_dir);
     let mut body = String::new();
     for meta in metas {
-        let op = IndexOp::Upsert { meta: meta.clone() };
+        let op = IndexOp::Upsert {
+            meta: Box::new(meta.clone()),
+        };
         if let Ok(line) = serde_json::to_string(&op) {
             body.push_str(&line);
             body.push('\n');
@@ -428,13 +429,23 @@ fn append_index_op(sessions_dir: &Path, op: &IndexOp) {
 /// Upsert a single session meta into the index：O(1) append，无全量重写。
 /// 同 seed 后行胜（读侧归并语义），启动后首次列表读取超阈值时自动 compact。
 pub fn upsert_index(sessions_dir: &Path, meta: &SessionMeta) {
-    append_index_op(sessions_dir, &IndexOp::Upsert { meta: meta.clone() });
+    append_index_op(
+        sessions_dir,
+        &IndexOp::Upsert {
+            meta: Box::new(meta.clone()),
+        },
+    );
 }
 
 /// Remove a session from the index：追加 tombstone，读侧归并时丢弃。
 /// tombstone 随下次 compact 消失，日志不会无界增长。
 pub fn remove_from_index(sessions_dir: &Path, seed: &str) {
-    append_index_op(sessions_dir, &IndexOp::Remove { seed: seed.to_string() });
+    append_index_op(
+        sessions_dir,
+        &IndexOp::Remove {
+            seed: seed.to_string(),
+        },
+    );
 }
 
 #[cfg(test)]
@@ -456,10 +467,11 @@ mod tests {
     }
 
     fn meta(seed: &str, updated: u64) -> SessionMeta {
-        let mut meta = SessionMeta::default();
-        meta.seed = seed.to_string();
-        meta.updated_at = updated;
-        meta
+        SessionMeta {
+            seed: seed.to_string(),
+            updated_at: updated,
+            ..SessionMeta::default()
+        }
     }
 
     #[test]
@@ -490,7 +502,11 @@ mod tests {
         upsert_index(&dir, &meta("a", 3)); // 同 seed 后行胜
         assert_eq!(read_index(&dir).len(), 2);
         assert_eq!(
-            read_index(&dir).iter().find(|m| m.seed == "a").unwrap().updated_at,
+            read_index(&dir)
+                .iter()
+                .find(|m| m.seed == "a")
+                .unwrap()
+                .updated_at,
             3
         );
         remove_from_index(&dir, "a");

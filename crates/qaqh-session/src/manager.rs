@@ -276,15 +276,9 @@ impl SessionManager {
     ///
     /// WAL fold：与 `load_for_resume` 相同先折 WAL（幂等），保证尾部读到
     /// 已落盘的最新消息。
-    pub fn load_recent_for_projection(
-        &self,
-        seed: &str,
-        recent: usize,
-    ) -> Option<Vec<Message>> {
+    pub fn load_recent_for_projection(&self, seed: &str, recent: usize) -> Option<Vec<Message>> {
         self.replay_message_wal(seed);
-        if self.session_dir(seed).is_none() {
-            return None;
-        }
+        self.session_dir(seed)?;
         // compact context 完好时优先（与 BUG-007 的 fail-closed 语义一致：
         // 损坏的 compact 在 load_for_resume 是整段拒绝；投影路径取归档尾部
         // ——投影是可重建派生物，不该因 compact 损坏而整体失败）。
@@ -1314,12 +1308,12 @@ mod skill_persistence_tests {
             .expect("session exists");
         assert_eq!(recent.len(), 10, "tail window must be bounded");
         assert_eq!(
-            recent.last().and_then(|m| text_of(m)),
+            recent.last().and_then(text_of),
             Some("msg-50".to_string()),
             "tail must keep the newest message"
         );
         assert_eq!(
-            recent.first().and_then(|m| text_of(m)),
+            recent.first().and_then(text_of),
             Some("msg-41".to_string()),
             "tail window must be the newest contiguous slice"
         );
@@ -1327,24 +1321,28 @@ mod skill_persistence_tests {
         // compact context 优先：投影应看到 active 视图而非归档尾部。
         manager.save_compact_context(
             "bounded-tail",
-            &[Message::user("[Compacted]\nsummary"), Message::user("msg-50")],
+            &[
+                Message::user("[Compacted]\nsummary"),
+                Message::user("msg-50"),
+            ],
         );
         let with_compact = manager
             .load_recent_for_projection("bounded-tail", 5)
             .expect("session exists");
-        assert_eq!(with_compact.len(), 2, "compact context wins over archive tail");
+        assert_eq!(
+            with_compact.len(),
+            2,
+            "compact context wins over archive tail"
+        );
 
         // 损坏的 compact：投影降级到归档尾部（fail-open），不整段拒绝。
-        std::fs::write(
-            manager.compact_context_path("bounded-tail"),
-            b"{not-json",
-        )
-        .expect("corrupt compact context");
+        std::fs::write(manager.compact_context_path("bounded-tail"), b"{not-json")
+            .expect("corrupt compact context");
         let degraded = manager
             .load_recent_for_projection("bounded-tail", 5)
             .expect("session exists");
         assert_eq!(
-            degraded.last().and_then(|m| text_of(m)),
+            degraded.last().and_then(text_of),
             Some("msg-50".to_string()),
             "corrupt compact must degrade to archive tail, not fail"
         );
@@ -1681,7 +1679,10 @@ mod save_full_meta_preservation_tests {
         assert_eq!(saved.turn_count, 1);
         // 保留字段一个都不能丢。
         assert_eq!(saved.cwd.as_deref(), Some("D:/project/demo"));
-        assert_eq!(saved.frozen_annotation.as_deref(), Some("<Environment>frozen</Environment>"));
+        assert_eq!(
+            saved.frozen_annotation.as_deref(),
+            Some("<Environment>frozen</Environment>")
+        );
         assert!(saved.archived, "archived must survive save_full");
         assert!(saved.ephemeral, "ephemeral must survive save_full");
         assert_eq!(saved.context_stats.as_ref().unwrap()["k"], "v");

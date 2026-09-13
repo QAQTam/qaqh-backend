@@ -90,7 +90,7 @@ pub(crate) fn drain_pipe_to_registry<S: std::io::Read>(
                 // Windows Peek 报告的可用量：一次读空管道，避免 8 KiB/次的
                 // 碎片化读写。None（unix 路径）退回定长读。
                 want = available
-                    .map(|n| n.max(1).min(MAX_READ_CHUNK))
+                    .map(|n| n.clamp(1, MAX_READ_CHUNK))
                     .unwrap_or(buf.len());
             }
             Ok(Readiness::Empty) => {

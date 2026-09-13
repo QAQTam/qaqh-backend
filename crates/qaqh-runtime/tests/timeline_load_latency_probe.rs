@@ -17,7 +17,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use qaqh_domain::{ConversationEvent, DomainEvent, RoundDeltaKind, TimelineIntent, TimelineTurnState};
+use qaqh_domain::{
+    ConversationEvent, DomainEvent, RoundDeltaKind, TimelineIntent, TimelineTurnState,
+};
 use qaqh_runtime::RingingHub;
 use qaqh_session::SessionManager;
 
@@ -26,10 +28,8 @@ fn shared_root() -> PathBuf {
     use std::sync::OnceLock;
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
-        let root = std::env::temp_dir().join(format!(
-            "qaqh-timeline-load-probe-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("qaqh-timeline-load-probe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create temp root");
         SessionManager::init(root.clone());
@@ -43,12 +43,9 @@ fn ms(duration: Duration) -> f64 {
 }
 
 fn snapshot_bytes(root: &std::path::Path, seed: &str) -> u64 {
-    std::fs::metadata(
-        root.join("ringing-timeline")
-            .join(format!("{seed}.json")),
-    )
-    .map(|meta| meta.len())
-    .unwrap_or(0)
+    std::fs::metadata(root.join("ringing-timeline").join(format!("{seed}.json")))
+        .map(|meta| meta.len())
+        .unwrap_or(0)
 }
 
 /// 按生产形状灌入一个「长回合」：块文本随 checkpoint 累积增长
@@ -125,7 +122,10 @@ fn hot_path_latency_under_fast_streaming() {
     let journal_path = root
         .join("journal")
         .join("conversation")
-        .join(format!("{seed}.jsonl"));    let before = std::fs::metadata(&journal_path).map(|m| m.len()).unwrap_or(0);
+        .join(format!("{seed}.jsonl"));
+    let before = std::fs::metadata(&journal_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     let t0 = Instant::now();
     for _ in 0..DELTAS {
         let t = Instant::now();
@@ -147,7 +147,9 @@ fn hot_path_latency_under_fast_streaming() {
         }
     }
     let sink_total = t0.elapsed();
-    let after = std::fs::metadata(&journal_path).map(|m| m.len()).unwrap_or(0);
+    let after = std::fs::metadata(&journal_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     println!(
         "[B] {DELTAS} 次 RoundDelta（4 KiB）合计 {:.1}ms，平均 {:.3}ms/次，\
          最慢 {:.1}ms，>20ms 的 {over_20ms} 次",
@@ -234,7 +236,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
     for index in 1..=TURNS {
         let turn_id = format!("t{index}");
         hub.publish_timeline(
-            &seed,
+            seed,
             TimelineIntent::TurnOpened {
                 turn_id: turn_id.clone(),
                 user_text: format!("probe turn {index}"),
@@ -242,7 +244,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
         )
         .expect("turn opened");
         hub.publish_timeline(
-            &seed,
+            seed,
             TimelineIntent::BlockOpened {
                 turn_id: turn_id.clone(),
                 round_num: 0,
@@ -257,7 +259,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
         for _ in 0..CHECKPOINTS {
             text.push_str(&chunk);
             hub.publish_timeline(
-                &seed,
+                seed,
                 TimelineIntent::BlockCheckpoint {
                     turn_id: turn_id.clone(),
                     round_num: 0,
@@ -268,7 +270,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
             .expect("checkpoint");
         }
         hub.publish_timeline(
-            &seed,
+            seed,
             TimelineIntent::BlockSealed {
                 turn_id: turn_id.clone(),
                 round_num: 0,
@@ -277,7 +279,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
         )
         .expect("block sealed");
         hub.publish_timeline(
-            &seed,
+            seed,
             TimelineIntent::RoundSealed {
                 turn_id: turn_id.clone(),
                 round_num: 0,
@@ -285,10 +287,10 @@ fn production_scale_snapshot_persist_and_cold_load() {
             },
         )
         .expect("round sealed");
-        let before = snapshot_bytes(&root, &seed);
+        let before = snapshot_bytes(&root, seed);
         let t0 = Instant::now();
         hub.publish_timeline(
-            &seed,
+            seed,
             TimelineIntent::TurnSealed {
                 turn_id: turn_id.clone(),
                 state: TimelineTurnState::Completed,
@@ -297,7 +299,7 @@ fn production_scale_snapshot_persist_and_cold_load() {
         )
         .expect("turn sealed");
         last_seal = t0.elapsed();
-        let after = snapshot_bytes(&root, &seed);
+        let after = snapshot_bytes(&root, seed);
         println!(
             "[E] turn {turn_id} seal：同步落盘 {:.1}ms，快照 {:.2} MiB → {:.2} MiB",
             ms(last_seal),
@@ -305,12 +307,12 @@ fn production_scale_snapshot_persist_and_cold_load() {
             after as f64 / 1048576.0
         );
     }
-    let size = snapshot_bytes(&root, &seed);
+    let size = snapshot_bytes(&root, seed);
 
     drop(hub);
     let hub2 = RingingHub::with_persistence("probe-epoch-4", &root);
     let t0 = Instant::now();
-    let snapshot = hub2.timeline_snapshot(&seed);
+    let snapshot = hub2.timeline_snapshot(seed);
     let cold_load = t0.elapsed();
     let turns = snapshot.as_ref().map(|s| s.turns.len()).unwrap_or(0);
     println!(
