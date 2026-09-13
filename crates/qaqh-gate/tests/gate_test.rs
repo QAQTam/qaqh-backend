@@ -1566,3 +1566,165 @@ fn responses_sync_whitespace_free_empty_output_text_is_fatal() {
     let err = out.expect_err("empty output_text must be an error");
     assert!(err.contains("no content"), "got: {err}");
 }
+
+// ── Stateful 过滤全灭（BUG-2026-09-13-12） ───────────────────────────
+//
+// stateful provider 且最后一条消息是 assistant 时，`filter_stateful_messages`
+// 的增量切片必为空（`start == len`）。旧代码的唯一兜底守卫
+// `last.role != "assistant"` 恒假（死分支），于是三协议都发出
+// `"messages": []`，上游 400 且不可重试 → 整回合 Fatal。
+// 修复后：过滤全灭 = 本次调用语义上就是 no-op（远端已持有该 assistant），
+// 流式路径零 HTTP 请求地成功收口，sync 路径返回可诊断的可重试错误。
+
+fn make_stateful_provider(mock: &MockServer) -> ProviderConfig {
+    make_provider(mock).with_stateful(true)
+}
+
+fn make_stateful_anthropic_provider(mock: &MockServer) -> ProviderConfig {
+    make_anthropic_provider(mock).with_stateful(true)
+}
+
+/// stateful + 尾 assistant：增量全灭。
+fn stateful_tail_assistant_messages() -> Vec<Message> {
+    vec![
+        Message::system("base"),
+        Message::user("hi"),
+        Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::text("done")],
+        },
+    ]
+}
+
+/// chat 流式：不得发出空 messages 请求；应零请求 no-op 成功 + Done 事件。
+#[test]
+fn stateful_filter_all_dropped_is_noop_success() {
+    let mock = MockServer::new(vec![SseChunk::text("must not be requested")]);
+    let provider = make_stateful_provider(&mock);
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let result = qaqh_gate::chat_stream(
+        &provider,
+        stateful_tail_assistant_messages(),
+        None,
+        4096,
+        None,
+        None,
+        None,
+        &mut |ev| events.push(ev),
+    );
+
+    assert!(
+        result.is_ok(),
+        "过滤全灭必须是 no-op 成功，而不是错误: {result:?}"
+    );
+    assert_eq!(
+        mock.request_count.load(Ordering::SeqCst),
+        0,
+        "不得向 stateful 端点发出空 messages 请求"
+    );
+    let done = events
+        .iter()
+        .find_map(event_done)
+        .expect("no-op 成功也必须发 Done 收口");
+    assert!(done.content.is_empty(), "no-op Done 不应携带内容");
+    assert!(
+        !events.iter().any(|ev| matches!(ev, StreamEvent::Error(_))),
+        "no-op 成功不得发 Error 事件"
+    );
+}
+
+/// chat sync：不得发出空 messages 请求；应返回带稳定诊断码的错误
+/// （调用方 compact 按既有 `retryable: true` 上报，而非静默发空数组）。
+#[test]
+fn stateful_filter_all_dropped_sync_reports_diagnostic_error() {
+    let mock = MockServer::new(vec![SseChunk::json_body(json!({
+        "choices": [{ "message": { "content": "must not be requested" } }]
+    }))]);
+    let provider = make_stateful_provider(&mock);
+
+    let err = qaqh_gate::chat_sync(&provider, stateful_tail_assistant_messages(), 1024)
+        .expect_err("过滤全灭的 sync 调用必须显式报错，而不是发空数组");
+
+    assert!(
+        err.contains("STATEFUL_INCREMENT_EMPTY"),
+        "错误必须可诊断（STATEFUL_INCREMENT_EMPTY），got: {err}"
+    );
+    assert_eq!(
+        mock.request_count.load(Ordering::SeqCst),
+        0,
+        "不得向 stateful 端点发出空 messages 请求"
+    );
+}
+
+/// Anthropic 流式 + sync：同一语义（no-op Done / 零请求）。
+#[test]
+fn stateful_filter_all_dropped_anthropic_is_noop() {
+    let mock = MockServer::new(anthropic_sse_scenario());
+    let provider = make_stateful_anthropic_provider(&mock);
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let result = qaqh_gate::chat_stream(
+        &provider,
+        stateful_tail_assistant_messages(),
+        None,
+        4096,
+        None,
+        None,
+        None,
+        &mut |ev| events.push(ev),
+    );
+
+    assert!(result.is_ok(), "过滤全灭必须是 no-op 成功: {result:?}");
+    assert_eq!(
+        mock.request_count.load(Ordering::SeqCst),
+        0,
+        "不得向 stateful 端点发出空 messages 请求"
+    );
+    assert!(events.iter().any(|ev| event_done(ev).is_some()));
+
+    let sync_err = qaqh_gate::chat_sync(&provider, stateful_tail_assistant_messages(), 1024)
+        .expect_err("sync 必须报可重试错误而不是发空数组");
+    assert!(
+        sync_err.contains("STATEFUL_INCREMENT_EMPTY"),
+        "got: {sync_err}"
+    );
+    assert_eq!(mock.request_count.load(Ordering::SeqCst), 0);
+}
+
+/// 非全灭路径不受影响：尾 tool 结果 + 前置 assistant → 仍发增量。
+#[test]
+fn stateful_filter_partial_drop_still_sends_increment() {
+    let mock = MockServer::new(vec![
+        SseChunk::text("ok"),
+        SseChunk::finish("stop", None),
+        SseChunk::done(),
+    ]);
+    let provider = make_stateful_provider(&mock);
+
+    let messages = vec![
+        Message::system("base"),
+        Message::user("hi"),
+        Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read".into(),
+                input: json!({"path": "a.rs"}),
+            }],
+        },
+        Message::tool("call_1", "ok body", true),
+    ];
+
+    let events = collect_events(&provider, messages, None);
+    assert_eq!(mock.request_count.load(Ordering::SeqCst), 1);
+    let request = mock.last_request_json().expect("request body");
+    let arr = request["messages"].as_array().expect("messages array");
+    assert_eq!(arr.len(), 1, "尾部 tool 结果仍应作为增量发出");
+    let texts: Vec<&str> = events.iter().filter_map(event_text).collect();
+    assert_eq!(texts, vec!["ok"]);
+}
