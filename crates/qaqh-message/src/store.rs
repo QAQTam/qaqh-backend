@@ -762,7 +762,7 @@ impl MessageStore {
         true
     }
 
-    pub fn push_assistant(&mut self, msg: Message) -> bool {
+    pub fn push_assistant(&mut self, mut msg: Message) -> bool {
         debug_assert_eq!(
             msg.role, "assistant",
             "push_assistant requires role=assistant"
@@ -784,7 +784,14 @@ impl MessageStore {
             );
         }
 
-        let mut msg = msg;
+        // BUG-2026-09-13-13 / #13：**持久化前清洗**悬挂 ToolUse。
+        //
+        // 中断流的抢救路径会把没拿到 id/name 的调用一起交进来（`input` 亦可能
+        // 为 `Null`）。它不可执行，存进 `messages.jsonl` 之后每次 reload 都会
+        // 在回放面复现成幽灵工具卡（且部分端点会因 `arguments:"null"` 报 400）。
+        // 这里丢弃该块而不是整条 assistant 消息——正文/思考是中断前的真实产物，
+        // 丢了就是丢历史。判据与回放过滤共用 `is_hanging_tool_use()`。
+        msg.content.retain(|b| !b.is_hanging_tool_use());
         let id = self.save_msg(&msg);
         if let Some(id) = id {
             msg.msg_id = Some(id);
@@ -2960,5 +2967,78 @@ mod tests {
             }
             other => panic!("expected SaveFull, got {other:?}"),
         }
+    }
+
+    /// #13：中断流抢救路径落盘的悬挂 ToolUse（`id:""` / `name:""`）在
+    /// **持久化前**就被清洗掉——写侧治本，历史归档里不会再出现悬空工具。
+    #[test]
+    fn hanging_tool_use_is_dropped_before_persist() {
+        let mut store = MessageStore::new("hanging-tool-seed");
+        store.push_user("interrupted turn");
+        let assistant = Message {
+            msg_id: None,
+            role: "assistant".to_string(),
+            name: None,
+            content: vec![
+                ContentBlock::text("partial answer"),
+                ContentBlock::ToolUse {
+                    id: String::new(),
+                    name: String::new(),
+                    input: serde_json::Value::Null,
+                },
+            ],
+        };
+        let _ = store.push_assistant(assistant);
+        store.flush_meta("test-model", "mid");
+        let persisted: Vec<Message> = store
+            .take_persist_ops()
+            .iter()
+            .flat_map(|op| match op {
+                PersistOp::SaveFull { messages, .. } => messages.clone(),
+                PersistOp::Append { messages, .. } => messages.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(!persisted.is_empty(), "an assistant step must be persisted");
+        assert!(
+            !persisted.iter().any(|m| m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. }))),
+            "hanging tool_use must be cleansed before persistence: {persisted:?}"
+        );
+        // 正文不受影响：只丢悬挂工具块，不丢整条 assistant 消息。
+        assert!(persisted.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == "partial answer"))
+        }));
+        // 无工具调用 → 回合可正常收尾，不产生孤儿 step。
+        assert!(store.turns().last().expect("turn").steps[0].all_tools_satisfied());
+    }
+
+    /// 反例对照：完整 tool_use（有 id 有 name）照常落盘，清洗不误伤。
+    #[test]
+    fn well_formed_tool_use_survives_persistence() {
+        let mut store = MessageStore::new("good-tool-seed");
+        store.push_user("go");
+        let _ = store.push_assistant(assistant_with_tools(&[("call-1", "read")]));
+        store.flush_meta("test-model", "mid");
+        let persisted: Vec<Message> = store
+            .take_persist_ops()
+            .iter()
+            .flat_map(|op| match op {
+                PersistOp::SaveFull { messages, .. } => messages.clone(),
+                PersistOp::Append { messages, .. } => messages.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(
+            persisted.iter().any(|m| m.content.iter().any(|b| matches!(
+                b,
+                ContentBlock::ToolUse { id, name, .. } if id == "call-1" && name == "read"
+            ))),
+            "well-formed tool_use must survive: {persisted:?}"
+        );
     }
 }

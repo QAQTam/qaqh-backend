@@ -106,6 +106,23 @@ impl ContentBlock {
             bytes_len,
         }
     }
+
+    /// 是否是**不可执行**的 tool_use（BUG-2026-09-13-13 / #13）。
+    ///
+    /// 流中断（读错误 / 空闲超时）的抢救路径、或 provider 漏发
+    /// `content_block_start` 时，会落下一个没有调用 id 或没有工具名的
+    /// `ToolUse`（`input` 可能是 `null`）。它既无法执行（执行层按 name/id
+    /// 查表必失败），也不该出现在任何回放面上（前端会渲染出永远 running
+    /// 的幽灵工具卡，序列化成 `arguments:"null"` 还会被部分端点 400）。
+    ///
+    /// 与 `responses_api.rs` 的既有防护判据一致：**缺 id 或 name 即不可执行**。
+    /// 该判据是写侧清洗与回放过滤共用的唯一真源。
+    pub fn is_hanging_tool_use(&self) -> bool {
+        matches!(
+            self,
+            ContentBlock::ToolUse { id, name, .. } if id.is_empty() || name.is_empty()
+        )
+    }
 }
 
 // ── Messages ──

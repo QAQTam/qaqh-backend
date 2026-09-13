@@ -378,6 +378,12 @@ mod tests {
 ///
 /// The daemon uses this before an Agent worker exists, so a cold attach can
 /// return a canonical transcript without depending on a later live event.
+///
+/// **回放过滤（BUG-2026-09-13-13 / #13）**：中断流遗留的悬挂 `ToolUse`
+/// （缺 id 或 name，见 [`qaqh_types::ContentBlock::is_hanging_tool_use`]）
+/// 不投影。写侧已在持久化前清洗新历史（`MessageStore::push_assistant`），
+/// 这里额外过滤是为了**既有归档**：已落盘的旧会话不会因写侧修复而自愈，
+/// 必须让每次 reload 的投影面也看不见它们。
 pub fn build_turns_from_messages(
     seed: &str,
     messages: &[qaqh_types::Message],
@@ -455,7 +461,7 @@ fn build_turns(
                 .iter()
                 .filter_map(|b| {
                     if let ContentBlock::ToolUse { id, name, input } = b {
-                        Some(qaqh_domain::ToolCallDef {
+                        (!b.is_hanging_tool_use()).then(|| qaqh_domain::ToolCallDef {
                             id: id.clone(),
                             name: name.clone(),
                             args_display: name.clone(),
@@ -482,6 +488,11 @@ fn build_turns(
                         })
                     }
                     ContentBlock::ToolUse { id, name, input } => {
+                        // 悬挂 ToolUse 不进回放面（见模块文档）：前端会把它渲染成
+                        // 永远 running 的幽灵卡，且不可执行。
+                        if b.is_hanging_tool_use() {
+                            return None;
+                        }
                         Some(qaqh_domain::RoundBlock::Tool {
                             card: qaqh_domain::ToolCallDef {
                                 id: id.clone(),
@@ -577,5 +588,67 @@ mod persisted_projection_tests {
         assert_eq!(turns[0].turn_id, "t2");
         assert_eq!(turns[0].user_text, "second");
         assert_eq!(turns[0].rounds[0].answer.as_deref(), Some("answer two"));
+    }
+
+    /// #13：中断流抢救路径落盘的悬挂 ToolUse（`id:""` / `name:""` / `input:null`）
+    /// 必须被回放投影过滤——它不可执行，投影出去只会变成前端幽灵工具卡。
+    #[test]
+    fn hanging_tool_use_never_enters_the_projection() {
+        let hanging = Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![
+                ContentBlock::text("partial answer"),
+                ContentBlock::ToolUse {
+                    id: String::new(),
+                    name: String::new(),
+                    input: serde_json::Value::Null,
+                },
+            ],
+        };
+        let messages = vec![Message::user("interrupted"), hanging];
+        let (_, turns) = project_recent_turns_from_messages("seed", &messages, 1);
+        let round = &turns[0].rounds[0];
+        assert!(
+            round.tool_calls.is_empty(),
+            "hanging tool_use must not surface as a tool_call: {:?}",
+            round.tool_calls
+        );
+        assert!(
+            !round
+                .blocks
+                .iter()
+                .any(|b| matches!(b, qaqh_domain::RoundBlock::Tool { .. })),
+            "hanging tool_use must not surface as a tool block: {:?}",
+            round.blocks
+        );
+        // 同一回合里的正文不受影响（只丢悬挂工具，不丢回答）。
+        assert_eq!(round.answer.as_deref(), Some("partial answer"));
+    }
+
+    /// 反例对照：完整的 tool_use ↔ tool_result 对仍必须投影出来。
+    #[test]
+    fn well_formed_tool_use_still_projects() {
+        let assistant = Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({ "path": "/tmp/a" }),
+            }],
+        };
+        let messages = vec![
+            Message::user("go"),
+            assistant,
+            Message::tool("call-1", "ok", true),
+        ];
+        let (_, turns) = project_recent_turns_from_messages("seed", &messages, 1);
+        let round = &turns[0].rounds[0];
+        assert_eq!(round.tool_calls.len(), 1);
+        assert_eq!(round.tool_calls[0].name, "read");
+        assert_eq!(round.tool_results.len(), 1);
     }
 }
