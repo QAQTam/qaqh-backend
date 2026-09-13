@@ -534,6 +534,103 @@ fn exec_forwards_stdout_to_the_progress_channel_before_returning() {
     }));
 }
 
+/// O-2 判据回归：读线程未走 `Ok(0)`（settle 兜底放弃 / 读错误）时
+/// `saw_eof == false`，`direct_exec` 必须据此落 warning——这是"静默丢"
+/// 降级为"有界丢 + 有日志"的可观测性契约。
+#[test]
+fn reader_settle_gives_up_without_eof_for_a_live_stream() {
+    let proc_id = crate::process_registry::ProcessRegistry::register("no-eof-test");
+    // 终态且永不返回数据：WouldBlock 路径立刻 settle 计时 → 预算内放弃。
+    crate::process_registry::ProcessRegistry::mark_exited(proc_id, 0);
+    struct BlockingStream;
+    impl std::io::Read for BlockingStream {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+        }
+    }
+    let ctx = PipePumpCtx {
+        progress_tx: None,
+        tool_call_id: "no-eof".to_string(),
+        output_stream: ExecOutputStream::Stdout,
+        progress_seq: Arc::new(AtomicU64::new(0)),
+        registry_id: proc_id,
+    };
+    let start = std::time::Instant::now();
+    let (saw_eof, capped) = drain_pipe_to_registry(
+        &mut BlockingStream,
+        1024,
+        &ctx,
+        &mut |_s: &mut BlockingStream| Ok(Readiness::Empty),
+    );
+    assert!(
+        !saw_eof,
+        "未读到 Ok(0) 就必须报 saw_eof=false（truncated 保守提示的来源）"
+    );
+    assert!(!capped);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "settle 兜底必须在有界预算内返回，实测 {:?}",
+        start.elapsed()
+    );
+}
+
+/// O-2 日志契约：缺 EOF 的 warn 正文必须是**自足的证据链**——
+/// 定位一次线上截断所需的字段一个都不能少。
+#[test]
+fn missing_eof_warning_carries_the_diagnostic_evidence() {
+    let warning = reader_eof_warning(7, "rg ...", false, true, false, true, 42, Some(0), false);
+    for needle in [
+        "proc_id=7",
+        "cmd=rg ...",
+        "stdout_eof=false",
+        "stderr_eof=true",
+        "stdout_capped=false",
+        "stderr_capped=true",
+        "captured_bytes=42",
+        "exit_code=0",
+        "cancelled=false",
+        "truncated=true",
+    ] {
+        assert!(warning.contains(needle), "warn 正文缺 {needle}: {warning}");
+    }
+    assert!(
+        warning.contains("WARN") || warning.contains("not reached EOF"),
+        "warn 正文需能自证是缺 EOF 路径: {warning}"
+    );
+}
+
+/// O-1 回归：`READER_SETTLE_BUDGET` 的语义是"兜底"——读线程放弃排空只在
+/// 两种放弃路径发生。字节预算耗尽（`capped`）**不在**其中：超限 chunk 就地
+/// 丢弃后仍要继续读到 `Ok(0)`（若此处退出，写端会因管道满而反压卡死）。
+#[test]
+fn byte_cap_exhaustion_keeps_draining_until_eof() {
+    let proc_id = crate::process_registry::ProcessRegistry::register("cap-drain-test");
+    let mut input = vec![b'x'; 1024];
+    input.extend(std::iter::repeat_n(b'y', 512));
+    let mut stream = std::io::Cursor::new(input);
+    let ctx = PipePumpCtx {
+        progress_tx: None,
+        tool_call_id: "cap-drain".to_string(),
+        output_stream: ExecOutputStream::Stdout,
+        progress_seq: Arc::new(AtomicU64::new(0)),
+        registry_id: proc_id,
+    };
+    let (saw_eof, capped) =
+        drain_pipe_to_registry(&mut stream, 1024, &ctx, &mut |_s: &mut std::io::Cursor<
+            Vec<u8>,
+        >| {
+            Ok(Readiness::Ready(None))
+        });
+    assert!(capped, "超出预算的字节必须置 capped");
+    assert!(
+        saw_eof,
+        "预算耗尽只丢数据不停止排空：既有语义是继续读到 Ok(0)"
+    );
+    let (full_out, _) = crate::process_registry::ProcessRegistry::captured_full(proc_id)
+        .expect("registry entry must exist");
+    assert_eq!(full_out.len(), 1024, "超限部分丢弃，预算内的字节全保留");
+}
+
 #[test]
 fn pipe_reader_keeps_split_utf8_characters_intact_for_the_ui() {
     let (tx, rx) = crate::bounded_exec_progress_channel();
