@@ -101,7 +101,9 @@ impl RetryPolicy {
         let mut policy = Self::default();
         if let Some(spec) = spec {
             if spec.max_retries > 0 {
-                policy.max_retries = spec.max_retries;
+                // BUG-2026-09-13-02：无上限的 max_retries 会放大退避溢出面；
+                // 32 次已是荒谬级的重试预算，超出按上限截断。
+                policy.max_retries = spec.max_retries.min(32);
             }
             if spec.base_delay_secs > 0 {
                 policy.base_delay = Duration::from_secs(spec.base_delay_secs);
@@ -120,7 +122,12 @@ impl RetryPolicy {
     /// `base_delay * 2^(attempt-1)`，±10% jitter，封顶 `max_delay`。
     pub fn delay_for(&self, attempt: u32) -> Duration {
         let base_ms = self.base_delay.as_millis() as u64;
-        let mult = 2u64.pow(attempt.saturating_sub(1));
+        // BUG-2026-09-13-02：attempt 无上限时 2u64.pow 会溢出——debug panic /
+        // release 回绕为 0（退避塌缩 → 重试风暴）。checked_pow 饱和到 u64::MAX，
+        // 下游 saturating_mul + min(max_delay) 正确封顶。
+        let mult = 2u64
+            .checked_pow(attempt.saturating_sub(1))
+            .unwrap_or(u64::MAX);
         let jittered = jitter_ms(base_ms.saturating_mul(mult));
         Duration::from_millis(jittered.min(self.max_delay.as_millis() as u64))
     }
@@ -510,5 +517,34 @@ mod tests {
         // 封顶：8s 基数被 max_delay=5s 截断（含 jitter 上界）。
         let d3 = policy.delay_for(4);
         assert!(d3 <= Duration::from_millis(5500));
+    }
+
+    // BUG-2026-09-13-02 回归：attempt 极大时不得 panic（debug）也不得塌缩到
+    // 0（release 回绕），必须被 max_delay 正确封顶。
+    #[test]
+    fn delay_for_overflow_attempt_saturates_instead_of_panic_or_collapse() {
+        let policy = RetryPolicy {
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+            ..Default::default()
+        };
+        // 2^64 起全部溢出（首爆点 attempt=65）；u64::pow 在 debug 下 panic、
+        // release 下回绕——修复后此处必须返回封顶值。
+        let d65 = policy.delay_for(65);
+        assert!(d65 <= Duration::from_secs(30));
+        assert!(d65 >= Duration::from_secs(27));
+        let d = policy.delay_for(66);
+        assert!(d <= Duration::from_secs(30));
+        assert!(d >= Duration::from_secs(27));
+    }
+
+    #[test]
+    fn from_spec_caps_max_retries() {
+        let spec = qaqh_types::RetrySpec {
+            max_retries: 9999,
+            ..Default::default()
+        };
+        let policy = RetryPolicy::from_spec(Some(&spec));
+        assert_eq!(policy.max_retries, 32);
     }
 }
