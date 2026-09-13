@@ -318,8 +318,11 @@ fn exec_copy_range(args: &serde_json::Value) -> ToolResult {
     ) {
         Ok(r) => {
             // 账本同步：目标已写盘，登记最新内容供 edit 防漂移。
+            // 键必须是 resolve_workspace_path 后的绝对路径——read/edit 都按
+            // 绝对路径记账，用原始参数路径会让同一文件出现两套键，
+            // STALE_FILE 校验便看不到本次写入（BUG-2026-09-13-16）。
             if let Ok(content) = std::fs::read_to_string(&tgt) {
-                crate::file_state::record_write(&target_path, &content);
+                crate::file_state::record_write(&tgt.to_string_lossy(), &content);
             }
             let n = r.copied.len();
             let mut text = format!(
@@ -616,6 +619,128 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("dst.rs")).unwrap(),
             "h1\r\nh2\r\ns1\r\ns2\r\n"
+        );
+    }
+
+    #[test]
+    fn copy_range_ledger_key_matches_resolved_absolute_path() {
+        // BUG-2026-09-13-16 回归：copy_range 必须用 resolve_workspace_path 后的
+        // 绝对路径记账（与 read/edit/write 同一套账本键），否则 STALE_FILE
+        // 校验看不到 copy_range 的写。
+        let (dir, ws) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);
+        let raw_src = "src.rs";
+        let raw_tgt = "dst.rs";
+        run(&ws, raw_src, "copied", None, raw_tgt, None, "append").unwrap();
+
+        let expected_key = crate::resolve_workspace_path(raw_tgt);
+        assert!(
+            std::path::Path::new(&expected_key).is_absolute(),
+            "resolve_workspace_path must yield an absolute key, got {expected_key}"
+        );
+        let wrote = std::fs::read_to_string(dir.path().join(raw_tgt)).unwrap();
+        let expected_hash =
+            crate::file_shared::content_hash(&crate::file_shared::normalize_newlines(&wrote).0);
+        assert_eq!(
+            crate::file_state::last_hash(&expected_key),
+            Some(expected_hash.clone()),
+            "ledger key must be the resolved absolute path"
+        );
+        // 相对路径原样记账 = 缺陷形态：同一文件两套键
+        assert_eq!(
+            crate::file_state::last_hash(raw_tgt),
+            None,
+            "raw relative path must NOT be used as the ledger key"
+        );
+    }
+
+    #[test]
+    fn stale_file_check_sees_copy_range_write() {
+        // 缺陷前的行为：copy_range 用相对路径记账 → 绝对路径键无账本记录 →
+        // 后续 write 的 STALE_FILE 校验被绕过（写方沿用编辑前的指纹也能通过）。
+        let (dir, ws) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);
+        let raw_src = "src.rs";
+        let raw_tgt = "dst.rs";
+        let abs_tgt = dir
+            .path()
+            .join(raw_tgt)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        // 全程用绝对路径（resolve_workspace_path 对绝对路径直接返回），
+        // 不依赖全局 CURRENT_WORKSPACE，可与其它并行测试共存。
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::CURRENT_WORKSPACE
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone_from(&ws.to_string_lossy().to_string());
+
+        // 先 read 一次，让账本持有「copy 之前」的基线指纹（键 = 绝对路径）。
+        let read_result = crate::file_query::exec_read(&serde_json::json!({"path": abs_tgt}));
+        assert!(
+            read_result.is_success(),
+            "read failed: {}",
+            read_result.model_text()
+        );
+        let baseline =
+            crate::file_shared::content_hash(&crate::file_shared::normalize_newlines("head\n").0);
+        assert_eq!(
+            crate::file_state::last_hash(&abs_tgt),
+            Some(baseline.clone()),
+            "read establishes the ledger baseline on the absolute key"
+        );
+        // copy_range 的目标路径用相对形态：缺陷正是「相对路径与绝对路径两套键」，
+        // 绝对参数路径在 resolve 后与账本键同形，无法暴露该缺陷。
+        crate::CURRENT_WORKSPACE
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone_from(&ws.to_string_lossy().to_string());
+
+        // copy_range 追加一行（写工具改动了文件）。
+        let result = exec_copy_range(&serde_json::json!({
+            "source_path": raw_src,
+            "source_start": "copied",
+            "target_path": raw_tgt,
+            "mode": "append",
+        }));
+        assert!(
+            result.is_success(),
+            "copy_range failed: {}",
+            result.model_text()
+        );
+        let after_copy = std::fs::read_to_string(dir.path().join(raw_tgt)).unwrap();
+        assert_eq!(after_copy.replace("\r\n", "\n"), "head\ncopied\n");
+
+        // 修复重点：copy_range 的写必须落到账本的绝对路径键上（与 read/edit
+        // 同键），否则下面这条「copy 后的真实指纹」断言会拿到 copy 前的旧值。
+        let disk_lf = crate::file_shared::normalize_newlines(&after_copy).0;
+        assert_eq!(
+            crate::file_state::last_hash(&abs_tgt),
+            Some(crate::file_shared::content_hash(&disk_lf)),
+            "copy_range must refresh the ledger so STALE_FILE sees its write"
+        );
+        assert_ne!(
+            crate::file_state::last_hash(&abs_tgt),
+            Some(baseline.clone()),
+            "ledger key still holds the pre-copy fingerprint"
+        );
+
+        // 端到端复核：copy_range 之后的 write 校验应看到 copy_range 的写，
+        // 传入 copy_range 之前的指纹必须被判定为 STALE_FILE。
+        let stale = crate::file_mutate::exec_write_file(&serde_json::json!({
+            "path": abs_tgt,
+            "content": "clobbered\n",
+            "expected_hash": baseline.clone(),
+        }));
+        assert!(
+            !stale.is_success(),
+            "write with the pre-copy fingerprint must be rejected as STALE_FILE"
+        );
+        assert!(
+            stale.model_text().contains("STALE_FILE"),
+            "expected STALE_FILE, got: {}",
+            stale.model_text()
         );
     }
 

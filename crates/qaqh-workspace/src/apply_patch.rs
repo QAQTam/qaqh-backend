@@ -90,7 +90,9 @@ fn exec_engine_patch(ws: &str, patch: &str, dry_run: bool) -> ToolResult {
                 // file_state，否则后续 edit 盲定位防漂移会误报。
                 if !dry_run {
                     if let Some(new) = &d.new {
-                        crate::file_state::record_write(&d.path, new);
+                        // 账本键用解析后的绝对路径（与 read/edit/write 同键），
+                        // 否则同一文件会有两套键，STALE_FILE 校验看不到本写入。
+                        crate::file_state::record_write(&d.resolved_path, new);
                     }
                     let op = if d.old.is_none() {
                         "add"
