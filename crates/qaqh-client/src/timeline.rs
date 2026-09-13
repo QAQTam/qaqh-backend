@@ -97,7 +97,7 @@ impl TimelineStream {
     ) {
         let mut retry_ms = RETRY_BASE_MS;
         while !*stop.borrow() && !*session_stop.borrow() {
-            match self.connect_once(&mut stop, &mut session_stop).await {
+            match self.connect_once(&mut stop, &mut session_stop, &mut retry_ms).await {
                 Ok(()) => {
                     // Clean stream end (stop signal): exit.
                     if *stop.borrow() || *session_stop.borrow() {
@@ -155,6 +155,7 @@ impl TimelineStream {
         &mut self,
         stop: &mut watch::Receiver<bool>,
         session_stop: &mut watch::Receiver<bool>,
+        retry_ms: &mut u64,
     ) -> Result<()> {
         self.set_status(TimelineStatus::Connecting {
             seed: self.seed.clone(),
@@ -213,6 +214,8 @@ impl TimelineStream {
                 path,
             });
         }
+        // BUG-2026-09-12-10：连接成功即复位退避（与频道流同款修复）。
+        *retry_ms = RETRY_BASE_MS;
         self.set_status(TimelineStatus::Open {
             seed: self.seed.clone(),
             server_epoch: state.server_epoch.clone(),
@@ -223,9 +226,20 @@ impl TimelineStream {
         let mut decoder = SseDecoder::new();
         let idle = tokio::time::sleep(SSE_IDLE_TIMEOUT);
         tokio::pin!(idle);
+        // BUG-2026-09-12-10：租约重新协商后本连接携带的旧 cs 已失效（服务端
+        // 按 cs 过滤/活跃性检查）——主动断开，重连时走 epoch 变更的 re-baseline。
+        let mut ctx = self.session.session_ctx_rx();
 
         loop {
             tokio::select! {
+                changed = ctx.changed() => {
+                    if changed.is_err() {
+                        return Ok(()); // session dropped: nothing to reconnect against
+                    }
+                    return Err(ClientError::Negotiation(
+                        "lease re-negotiated; re-baselining timeline".into(),
+                    ));
+                }
                 _ = stop.changed() => {
                     return Ok(()); // stopped: exit loop cleanly
                 }
@@ -262,6 +276,16 @@ impl TimelineStream {
     }
 
     fn dispatch(&mut self, frame: SseFrame, server_epoch: &str) -> Result<()> {
+        // BUG-2026-09-12-11：服务端 Lagged 终止帧（与频道流同协议）。
+        if frame.event_type == "ringing.stream_terminated" {
+            let code = serde_json::from_str::<serde_json::Value>(frame.data.trim())
+                .ok()
+                .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string))
+                .unwrap_or_else(|| "unknown".into());
+            return Err(ClientError::Transport(format!(
+                "server terminated timeline stream ({code}); reconnecting"
+            )));
+        }
         let parsed: TimelineSseFrame = serde_json::from_str(frame.data.trim())
             .map_err(|e| ClientError::Protocol(format!("bad timeline frame: {e}")))?;
         if parsed.schema != qaqh_ringing::RINGING_SCHEMA

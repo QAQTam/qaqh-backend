@@ -117,6 +117,10 @@ pub(super) struct SeedChannelState {
     projection: SnapshotProjector,
     last_stream_seq: u64,
     replaceable_since_checkpoint: HashMap<super::router::ReplaceableKey, u32>,
+    /// BUG-2026-09-12-08：重写已投递写线程（pending 清零前不重复投递）。
+    rewrite_inflight: bool,
+    /// 写队列满丢过条目：需要一次重写把内存 journal 与磁盘对账。
+    needs_rewrite: bool,
 }
 
 #[derive(Debug)]
@@ -134,6 +138,8 @@ impl SeedChannelState {
             projection: SnapshotProjector::new(),
             last_stream_seq: 0,
             replaceable_since_checkpoint: HashMap::new(),
+            rewrite_inflight: false,
+            needs_rewrite: false,
         }
     }
 
@@ -209,7 +215,13 @@ pub struct RingingHub {
     /// force=false 孤儿收尾在 worker 存活时整体跳过，防止误杀活 turn。
     pub(super) live_workers: Mutex<std::collections::HashSet<String>>,
     /// 持久化 journal（None = 非持久模式；I/O 失败只记录日志，不阻塞事件路径）。
-    pub(super) journal_store: Mutex<Option<JournalStore>>,
+    /// `Arc`：与 journal 写线程共享（BUG-2026-09-12-08：I/O 在 `channels` 锁外执行）。
+    pub(super) journal_store: Arc<Mutex<Option<JournalStore>>>,
+    /// journal 写线程投递端（None = 非持久模式）。发布路径只做 `try_send`，
+    /// 序列化/写盘/重写全部由写线程在 `channels` 锁外完成。
+    pub(super) journal_writer: Option<mpsc::SyncSender<JournalWriteOp>>,
+    /// 写线程 join 句柄：`Drop` 时排空队列并 join（保证「hub 释放 = 已落盘」）。
+    pub(super) journal_writer_join: Option<JoinHandle<()>>,
     /// Ringing V1 timeline transcript 的唯一 writer。它与三频道 Ringing v1 完全隔离，
     /// 不依赖 legacy 事件投影。
     pub(super) timeline: Arc<Mutex<TimelineAppender>>,
@@ -219,6 +231,135 @@ pub struct RingingHub {
     /// 会话存储句柄（PR-3-1 注入化；conversation snapshot / timeline 重建的
     /// 持久化读侧）。None = 测试或未装配（对应旧 `try_global()` 为空语义）。
     pub(super) sessions: Option<Arc<SessionManager>>,
+}
+
+/// journal 写队列容量（BUG-2026-09-12-08）：写线程消费 ~10k ops/s，队列仅在
+/// 持续过载时才会填满；填满时丢弃并标记该 seed 重写收敛（内存 journal 才是
+/// 权威，重写会把丢掉的条目补回磁盘）。
+const JOURNAL_WRITE_QUEUE_CAPACITY: usize = 4096;
+
+/// 交给 journal 写线程的写操作（锁外 I/O，BUG-2026-09-12-08）。
+#[allow(clippy::large_enum_variant)] // 与 JournalOp 同口径：装箱另立项
+pub(super) enum JournalWriteOp {
+    Append {
+        channel: RingingChannel,
+        seed: String,
+        envelope: RingingEventEnvelope,
+    },
+    Checkpoint {
+        channel: RingingChannel,
+        seed: String,
+        identity: String,
+        stream_seq: u64,
+    },
+    Compact {
+        channel: RingingChannel,
+        seed: String,
+        turn_id: String,
+        round_num: u32,
+    },
+    Replaceable {
+        channel: RingingChannel,
+        seed: String,
+        identity: String,
+        envelope: RingingEventEnvelope,
+    },
+    RemoveReplaceable {
+        channel: RingingChannel,
+        seed: String,
+        identity: String,
+    },
+    /// 整文件重写：`envelopes`/`checkpoints` 为投递时点的内存 journal 快照
+    /// （克隆在 `channels` 锁内完成，stat/序列化/写盘全部在锁外）。
+    Rewrite {
+        channel: RingingChannel,
+        seed: String,
+        envelopes: Vec<RingingEventEnvelope>,
+        checkpoints: Vec<(String, u64)>,
+    },
+    /// 排空同步点（测试/关闭）：此前投递的写操作全部处理后回执。
+    Flush { ack: mpsc::Sender<()> },
+}
+
+/// journal 写线程主循环：串行消费写操作（FIFO 保证 per-key 写序与投递序一致）。
+fn journal_writer_loop(rx: mpsc::Receiver<JournalWriteOp>, store: Arc<Mutex<Option<JournalStore>>>) {
+    while let Ok(op) = rx.recv() {
+        let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(store) = guard.as_mut() else { continue };
+        match op {
+            JournalWriteOp::Append {
+                channel,
+                seed,
+                envelope,
+            } => {
+                if let Err(error) = store.append(channel, &seed, &envelope) {
+                    log::warn!("[ringing] journal append failed: {error}");
+                }
+            }
+            JournalWriteOp::Checkpoint {
+                channel,
+                seed,
+                identity,
+                stream_seq,
+            } => {
+                if let Err(error) = store.checkpoint(channel, &seed, &identity, stream_seq) {
+                    log::warn!("[ringing] journal checkpoint persist failed: {error}");
+                }
+            }
+            JournalWriteOp::Compact {
+                channel,
+                seed,
+                turn_id,
+                round_num,
+            } => {
+                if let Err(error) = store.compact(channel, &seed, &turn_id, round_num) {
+                    log::warn!("[ringing] journal compact persist failed: {error}");
+                }
+            }
+            JournalWriteOp::Replaceable {
+                channel,
+                seed,
+                identity,
+                envelope,
+            } => {
+                if let Err(error) = store.replaceable(channel, &seed, &identity, &envelope) {
+                    log::warn!("[ringing] replaceable slot persist failed: {error}");
+                }
+            }
+            JournalWriteOp::RemoveReplaceable {
+                channel,
+                seed,
+                identity,
+            } => {
+                if let Err(error) = store.remove_replaceable(channel, &seed, &identity) {
+                    log::warn!("[ringing] replaceable slot cleanup failed: {error}");
+                }
+            }
+            JournalWriteOp::Rewrite {
+                channel,
+                seed,
+                envelopes,
+                checkpoints,
+            } => match store.file_size(channel, &seed) {
+                Ok(size) if size >= journal_rewrite_threshold() => {
+                    match store.rewrite(channel, &seed, &envelopes, &checkpoints) {
+                        Ok(()) => log::info!(
+                            "[ringing] journal rewritten for {seed}: {size} bytes -> {} entries",
+                            envelopes.len()
+                        ),
+                        Err(error) => {
+                            log::warn!("[ringing] journal rewrite failed for {seed}: {error}")
+                        }
+                    }
+                }
+                // 文件已小于阈值（可能已被更晚的重写收敛）：跳过。
+                _ => {}
+            },
+            JournalWriteOp::Flush { ack } => {
+                let _ = ack.send(());
+            }
+        }
+    }
 }
 
 impl RingingHub {
@@ -262,6 +403,29 @@ impl RingingHub {
             None => None,
         };
         let (timeline_live, _) = broadcast::channel(1024);
+        // BUG-2026-09-12-08：journal 写线程。持久化开启时投递端与写线程成对
+        // 存在；非持久模式两者皆无（发布路径零开销跳过）。
+        let journal_store = Arc::new(Mutex::new(journal_store));
+        let (journal_writer, journal_writer_join) = if journal_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            let (tx, rx) = mpsc::sync_channel::<JournalWriteOp>(JOURNAL_WRITE_QUEUE_CAPACITY);
+            let store = Arc::clone(&journal_store);
+            match std::thread::Builder::new()
+                .name("ringing-journal-writer".into())
+                .spawn(move || journal_writer_loop(rx, store))
+            {
+                Ok(join) => (Some(tx), Some(join)),
+                Err(error) => {
+                    log::error!("[ringing] journal writer thread spawn failed: {error}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
         Self {
             epoch,
             sequencer: Sequencer::new(),
@@ -273,7 +437,9 @@ impl RingingHub {
             live: Mutex::new(HashMap::new()),
             live_interactions: Mutex::new(HashMap::new()),
             live_workers: Mutex::new(std::collections::HashSet::new()),
-            journal_store: Mutex::new(journal_store),
+            journal_store,
+            journal_writer,
+            journal_writer_join,
             timeline: Arc::new(Mutex::new(TimelineAppender::new())),
             timeline_live,
             timeline_store: Arc::new(Mutex::new(timeline_store)),
@@ -342,6 +508,9 @@ impl RingingHub {
         if !on_disk {
             return Ok(());
         }
+        // BUG-2026-09-12-08：先排空写队列再读盘——异步写线程的在途条目必须
+        // 先落盘，否则本次重放会漏掉它们（forget→reload 场景）。
+        self.flush_journal_persistence();
         // 读磁盘（短暂持有 journal_store 锁；读完即释放，不与 channel_state 嵌套）。
         let ops = {
             // R3：读盘失败必须 fail-closed 上报，禁止静默降级为全新状态——
@@ -384,8 +553,8 @@ impl RingingHub {
         }
         self.sequencer
             .seed(channel, seed, max_stream, max_channel, max_session);
-        // 超大历史文件加载即压缩（force：绕过 pending 门控，按物理大小检查）。
-        self.rewrite_if_oversized(channel, seed, &state, true);
+        // 超大历史文件加载即压缩（冷路径：同步执行，不走写队列）。
+        self.rewrite_oversized_now(channel, seed, &state);
         self.channel_state(channel)
             .entry(channel)
             .or_default()
@@ -569,7 +738,7 @@ impl RingingHub {
                 match st.journal.append(&envelope) {
                     AppendOutcome::Duplicate => return PublishOutcome::Duplicate,
                     AppendOutcome::Appended => {
-                        self.persist_append(channel, seed, &envelope);
+                        self.persist_append(channel, seed, st, &envelope);
                         // RoundCompleted 是该 round 的权威终态（携带完整 thinking/answer），
                         // 折叠该 round 的增量可控制 journal 用量，且回放安全：
                         // 客户端要么已有增量（随后被快照覆盖），要么直接拿到全量快照。
@@ -581,18 +750,18 @@ impl RingingHub {
                         {
                             let removed = st.journal.compact_round_deltas(turn_id, *round_num);
                             if removed > 0 {
-                                self.persist_compact(channel, seed, turn_id, *round_num);
+                                self.persist_compact(channel, seed, st, turn_id, *round_num);
                             }
                         }
                         // P0: 磁盘收敛检查脱离 RoundCompleted 依赖——轮次未完成
                         // 时 delta 持续 append 也必须有兜底重写（pending 门控）。
-                        self.rewrite_if_oversized(channel, seed, st, false);
+                        self.schedule_rewrite_if_oversized(channel, seed, st);
                     }
                 }
                 for key in terminal_replaceable_keys(&envelope.event) {
                     st.router.flush_replaceable(&key);
                     st.replaceable_since_checkpoint.remove(&key);
-                    self.persist_remove_replaceable(channel, seed, &format!("{key:?}"));
+                    self.persist_remove_replaceable(channel, seed, st, &format!("{key:?}"));
                 }
                 // 活交互登记：当前进程发布的 InteractionRequested/PlanReviewRequested
                 // 进入内存表，resolved 时移除。daemon 重启后表为空 → journal 重放的
@@ -641,19 +810,28 @@ impl RingingHub {
                 match st.router.route(envelope.clone()) {
                     super::router::RouteOutcome::Routed { .. } => {
                         if let Some(key) = replaceable_key_for(&envelope.event) {
-                            let count = st
-                                .replaceable_since_checkpoint
-                                .entry(key.clone())
-                                .or_default();
-                            *count = count.saturating_add(1);
-                            if *count == 1 || *count >= 64 {
+                            // 先结束计数器借用，再投递写操作（persist 需要 &mut st）。
+                            let should_persist = {
+                                let count = st
+                                    .replaceable_since_checkpoint
+                                    .entry(key.clone())
+                                    .or_default();
+                                *count = count.saturating_add(1);
+                                if *count == 1 || *count >= 64 {
+                                    *count = 0;
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if should_persist {
                                 self.persist_replaceable(
                                     channel,
                                     seed,
+                                    st,
                                     &format!("{key:?}"),
                                     &envelope,
                                 );
-                                *count = 0;
                             }
                         }
                         self.fanout(channel, &envelope);
@@ -800,7 +978,7 @@ impl RingingHub {
         let st = self.seed_state(&mut guard, channel, seed);
         st.last_stream_seq = st.last_stream_seq.max(stream_seq);
         st.journal.checkpoint_replaceable(identity, stream_seq);
-        self.persist_checkpoint(channel, seed, identity, stream_seq);
+        self.persist_checkpoint(channel, seed, st, identity, stream_seq);
     }
 
     pub fn last_stream_seq(&self, channel: RingingChannel, seed: &str) -> u64 {
@@ -815,47 +993,132 @@ impl RingingHub {
     }
 
     // ── 持久化钩子：I/O 失败只记录日志，绝不阻塞事件路径 ──
+    //
+    // BUG-2026-09-12-08：全部写操作经 journal 写线程在 `channels` 锁外执行；
+    // 发布路径只投递（try_send），不再持锁写盘。
 
-    fn persist_append(&self, channel: RingingChannel, seed: &str, envelope: &RingingEventEnvelope) {
-        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(store) = guard.as_mut()
-            && let Err(error) = store.append(channel, seed, envelope)
-        {
-            log::warn!("[ringing] journal append failed: {error}");
+    /// 投递写操作给 journal 写线程。队列满时丢弃并标记该 seed 需要重写收敛
+    /// ——内存 journal 才是权威，重写会把丢掉的条目补回磁盘。
+    fn enqueue_journal(&self, st: &mut SeedChannelState, op: JournalWriteOp) {
+        let Some(writer) = self.journal_writer.as_ref() else { return };
+        if writer.try_send(op).is_err() {
+            st.needs_rewrite = true;
+            log::warn!(
+                "[ringing] journal write queue full; dropped write (reconcile rewrite scheduled)"
+            );
         }
     }
 
-    fn persist_compact(&self, channel: RingingChannel, seed: &str, turn_id: &str, round_num: u32) {
-        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(store) = guard.as_mut()
-            && let Err(error) = store.compact(channel, seed, turn_id, round_num)
-        {
-            log::warn!("[ringing] journal compact persist failed: {error}");
+    /// 排空 journal 写队列（测试断言 / 关闭 / 调试路径同步点）：返回时此前
+    /// 投递的所有写操作都已处理。
+    pub fn flush_journal_persistence(&self) {
+        let Some(writer) = self.journal_writer.as_ref() else { return };
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if writer.send(JournalWriteOp::Flush { ack: ack_tx }).is_err() {
+            return; // 写线程已退出
+        }
+        if ack_rx.recv_timeout(Duration::from_secs(10)).is_err() {
+            log::warn!("[ringing] journal flush timed out");
         }
     }
 
-    /// 检查 jsonl 物理大小，超过阈值则按内存存活事件整文件重写（磁盘收敛）。
-    ///
-    /// P0 修复：触发不再依赖 `RoundCompleted` 折叠（`removed > 0`）。轮次未
-    /// 完成/卡死时 `RoundDelta` 会持续 append，若只在折叠后检查，文件将无界
-    /// 增长（实测 82MB 全 append 无 compact）。现在每次 reliable append 后
-    /// 都经 `pending_bytes` 内存计数门控：阈值内零 I/O，超阈值才 stat + 重写。
-    /// 重写以内存有界 journal（≤8192 条）为权威，可把超大文件收敛到窗口大小。
-    ///
-    /// `force`：跳过 pending 门控，直接按物理大小检查（懒加载 seed 时用——
-    /// 刚加载的 state 没有 pending 计数，但历史文件可能已超大）。
-    fn rewrite_if_oversized(
+    fn persist_append(
         &self,
         channel: RingingChannel,
         seed: &str,
-        st: &SeedChannelState,
-        force: bool,
+        st: &mut SeedChannelState,
+        envelope: &RingingEventEnvelope,
     ) {
-        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
+        self.enqueue_journal(
+            st,
+            JournalWriteOp::Append {
+                channel,
+                seed: seed.to_string(),
+                envelope: envelope.clone(),
+            },
+        );
+    }
+
+    fn persist_compact(
+        &self,
+        channel: RingingChannel,
+        seed: &str,
+        st: &mut SeedChannelState,
+        turn_id: &str,
+        round_num: u32,
+    ) {
+        self.enqueue_journal(
+            st,
+            JournalWriteOp::Compact {
+                channel,
+                seed: seed.to_string(),
+                turn_id: turn_id.to_string(),
+                round_num,
+            },
+        );
+    }
+
+    /// 热路径门控（持 `channels` 锁期间调用，BUG-2026-09-12-08）：只做内存级
+    /// 判定与数据快照，实际 stat/序列化/写盘全部交给 journal 写线程在锁外完成。
+    ///
+    /// P0 语义保留：触发不再依赖 `RoundCompleted` 折叠（`removed > 0`）。轮次
+    /// 未完成/卡死时 `RoundDelta` 会持续 append，若只在折叠后检查，文件将无界
+    /// 增长（实测 82MB 全 append 无 compact）。现在每次 reliable append 后都经
+    /// `pending_bytes` 计数门控（try_lock：写线程正忙则本次跳过，下次再查）。
+    /// 重写以内存有界 journal（≤8192 条）为权威，可把超大文件收敛到窗口大小。
+    fn schedule_rewrite_if_oversized(
+        &self,
+        channel: RingingChannel,
+        seed: &str,
+        st: &mut SeedChannelState,
+    ) {
+        let Some(writer) = self.journal_writer.as_ref() else { return };
+        // try_lock：写线程正在执行 I/O 时跳过检查（非阻塞，绝不让写线程的
+        // 耗时反过来卡住发布路径）；下次 append 会再查。
+        let Ok(mut guard) = self.journal_store.try_lock() else { return };
         let Some(store) = guard.as_mut() else { return };
-        if !force && store.pending_bytes(channel, seed) < journal_rewrite_threshold() {
+        let pending = store.pending_bytes(channel, seed);
+        if st.rewrite_inflight {
+            // 写线程完成重写后会把 pending 清零；据此解除在途标志。
+            if pending < journal_rewrite_threshold() {
+                st.rewrite_inflight = false;
+            }
             return;
         }
+        if !st.needs_rewrite && pending < journal_rewrite_threshold() {
+            return;
+        }
+        drop(guard);
+        let envelopes: Vec<_> = st.journal.entries().cloned().collect();
+        let checkpoints: Vec<(String, u64)> = st
+            .journal
+            .checkpoints()
+            .iter()
+            .map(|(key, seq)| (key.clone(), *seq))
+            .collect();
+        match writer.try_send(JournalWriteOp::Rewrite {
+            channel,
+            seed: seed.to_string(),
+            envelopes,
+            checkpoints,
+        }) {
+            Ok(()) => {
+                st.rewrite_inflight = true;
+                st.needs_rewrite = false;
+            }
+            Err(_) => {
+                // 队列满：保留 needs_rewrite，下次 append 重试。
+                st.needs_rewrite = true;
+                log::warn!("[ringing] journal rewrite deferred for {seed}: write queue full");
+            }
+        }
+    }
+
+    /// 冷路径（懒加载首访）：同步执行收敛重写——此时该 seed 尚无并发发布者，
+    /// 且写线程队列中不存在本 seed 的待写条目（调用方先 flush 队列）。
+    fn rewrite_oversized_now(&self, channel: RingingChannel, seed: &str, st: &SeedChannelState) {
+        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(store) = guard.as_mut() else { return };
         let size = match store.file_size(channel, seed) {
             Ok(size) => size,
             Err(_) => return,
@@ -940,44 +1203,97 @@ impl RingingHub {
         &self,
         channel: RingingChannel,
         seed: &str,
+        st: &mut SeedChannelState,
         identity: &str,
         stream_seq: u64,
     ) {
-        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(store) = guard.as_mut()
-            && let Err(error) = store.checkpoint(channel, seed, identity, stream_seq)
-        {
-            log::warn!("[ringing] journal checkpoint persist failed: {error}");
-        }
+        self.enqueue_journal(
+            st,
+            JournalWriteOp::Checkpoint {
+                channel,
+                seed: seed.to_string(),
+                identity: identity.to_string(),
+                stream_seq,
+            },
+        );
     }
 
     fn persist_replaceable(
         &self,
         channel: RingingChannel,
         seed: &str,
+        st: &mut SeedChannelState,
         identity: &str,
         envelope: &RingingEventEnvelope,
     ) {
-        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(store) = guard.as_mut()
-            && let Err(error) = store.replaceable(channel, seed, identity, envelope)
-        {
-            log::warn!("[ringing] replaceable slot persist failed: {error}");
-        }
+        self.enqueue_journal(
+            st,
+            JournalWriteOp::Replaceable {
+                channel,
+                seed: seed.to_string(),
+                identity: identity.to_string(),
+                envelope: envelope.clone(),
+            },
+        );
     }
 
-    fn persist_remove_replaceable(&self, channel: RingingChannel, seed: &str, identity: &str) {
-        let mut guard = self.journal_store.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(store) = guard.as_mut()
-            && let Err(error) = store.remove_replaceable(channel, seed, identity)
-        {
-            log::warn!("[ringing] replaceable slot cleanup failed: {error}");
-        }
+    fn persist_remove_replaceable(
+        &self,
+        channel: RingingChannel,
+        seed: &str,
+        st: &mut SeedChannelState,
+        identity: &str,
+    ) {
+        self.enqueue_journal(
+            st,
+            JournalWriteOp::RemoveReplaceable {
+                channel,
+                seed: seed.to_string(),
+                identity: identity.to_string(),
+            },
+        );
     }
 }
 
 impl Drop for RingingHub {
     fn drop(&mut self) {
+        // BUG-2026-09-12-08：先排空 journal 写队列（drop 投递端 → 写线程处理完
+        // 队列中剩余写操作后自然退出 → join）。保证「hub 释放 ⇒ 此前投递的写
+        // 操作已落盘」——既有测试的「drop 后读文件 / 重启重放」语义依赖此保证。
+        // 必须置于 timeline 分支 early-return 之前。
+        //
+        // 对账收尾：队列满时被丢弃的写条目由 `needs_rewrite` 标记；这里在排空
+        // 前补投一次重写（阻塞投递——此时独占 hub，允许等待队列腾位）。
+        if let Some(writer) = self.journal_writer.as_ref() {
+            let channels = self
+                .channels
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner());
+            for (channel, seeds) in channels.iter() {
+                for (seed, st) in seeds {
+                    if !st.needs_rewrite {
+                        continue;
+                    }
+                    let envelopes: Vec<_> = st.journal.entries().cloned().collect();
+                    let checkpoints: Vec<(String, u64)> = st
+                        .journal
+                        .checkpoints()
+                        .iter()
+                        .map(|(key, seq)| (key.clone(), *seq))
+                        .collect();
+                    let _ = writer.send(JournalWriteOp::Rewrite {
+                        channel: *channel,
+                        seed: seed.clone(),
+                        envelopes,
+                        checkpoints,
+                    });
+                }
+            }
+        }
+        self.journal_writer.take();
+        if let Some(join) = self.journal_writer_join.take() {
+            let _ = join.join();
+        }
         let persistence = self
             .timeline_persistence
             .get_mut()
@@ -1165,9 +1481,15 @@ mod tests {
         {
             let hub = RingingHub::with_persistence("epoch-1", &root);
             // 9000 个 reliable delta 超过内存窗口（8192），触发淘汰。
+            // 分批排空写队列：异步写线程（BUG-2026-09-12-08）下紧循环会填满
+            // 队列并让重写调度点漂移；分批后「重写发生在窗口内」是确定性行为。
             for i in 0..9000 {
                 let _ = hub.publish("s", round_delta(i));
+                if i % 1000 == 999 {
+                    hub.flush_journal_persistence();
+                }
             }
+            hub.flush_journal_persistence();
         }
         let path = root.join("journal").join("conversation").join("s.jsonl");
         let before_lines = std::fs::read_to_string(&path).unwrap().lines().count();

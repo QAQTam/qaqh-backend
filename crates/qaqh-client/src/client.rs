@@ -5,6 +5,7 @@
 //! background; the shell receives events through callbacks (which must marshal
 //! to the UI thread themselves) and calls the async methods for commands.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -21,7 +22,7 @@ use crate::sse::{ChannelStream, StreamHandlers};
 use crate::timeline::TimelineStream;
 use crate::types::{
     CHANNELS, Channel, ChannelStatus, CommandOptions, ContentRef, EventBatch, RingingCommand,
-    RingingCommandAck, TimelineEntry, TimelinePage, TimelineStatus,
+    RingingCommandAck, RingingCommandAckStatus, TimelineEntry, TimelinePage, TimelineStatus,
 };
 
 /// Callbacks delivered on the client's background tasks.
@@ -111,6 +112,10 @@ struct ClientInner {
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Active per-session timeline stream (activated on demand).
     timeline: Mutex<Option<TimelineHandle>>,
+    /// Seeds this client has attached (BUG-2026-09-12-10): replayed after a
+    /// lease re-negotiation so seed-scoped reads do not 401 with the new
+    /// client_session_id.
+    attached_seeds: Mutex<HashSet<String>>,
 }
 
 /// Bookkeeping for the currently activated timeline stream.
@@ -198,6 +203,7 @@ impl Client {
                 stop_tx,
                 tasks,
                 timeline: Mutex::new(None),
+                attached_seeds: Mutex::new(HashSet::new()),
             }),
         };
 
@@ -208,6 +214,43 @@ impl Client {
             tokio::spawn(async move { session.run_renewal(stop).await })
         };
         client.push_task(renewal).await;
+
+        // BUG-2026-09-12-10：租约重新协商（renewal 失败 → open() 换新 lease）后，
+        // daemon 侧 seed 归属随旧 client_session_id 一并消失且不迁移——必须为
+        // 「已 attach 的 seed」重放 attach，否则 timeline/bootstrap/service 等
+        // seed 域读路径会持续 401 lease_required（「切会话被拒」的主因之一）。
+        let replay = {
+            let client = client.clone();
+            let mut ctx = ctx_rx.clone();
+            let mut stop = stop_rx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        changed = ctx.changed() => {
+                            if changed.is_err() {
+                                return; // session dropped: client is going away
+                            }
+                        }
+                        _ = stop.changed() => return,
+                    }
+                    let seeds: Vec<String> = {
+                        let guard = client.inner.attached_seeds.lock().await;
+                        guard.iter().cloned().collect()
+                    };
+                    for seed in seeds {
+                        match client.attach(&seed).await {
+                            Ok(_) => log::info!(
+                                "[qaqh-client] re-attached {seed} after lease re-negotiation"
+                            ),
+                            Err(err) => log::warn!(
+                                "[qaqh-client] re-attach {seed} failed: {err}; will retry on next re-negotiation"
+                            ),
+                        }
+                    }
+                }
+            })
+        };
+        client.push_task(replay).await;
 
         // Three SSE channels.
         for channel in CHANNELS {
@@ -425,14 +468,24 @@ impl Client {
     /// is carried both in the envelope and in the command body (validate
     /// requires a non-empty envelope seed for every command except create).
     pub async fn attach(&self, seed: &str) -> Result<RingingCommandAck> {
-        self.send_command(
-            Some(seed),
-            RingingCommand::Control(ControlCommand::SessionResume {
-                seed: seed.to_string(),
-            }),
-            CommandOptions::default(),
-        )
-        .await
+        let ack = self
+            .send_command(
+                Some(seed),
+                RingingCommand::Control(ControlCommand::SessionResume {
+                    seed: seed.to_string(),
+                }),
+                CommandOptions::default(),
+            )
+            .await?;
+        if ack.status == RingingCommandAckStatus::Accepted {
+            // BUG-2026-09-12-10：记录归属，供租约重新协商后重放 attach。
+            self.inner
+                .attached_seeds
+                .lock()
+                .await
+                .insert(seed.to_string());
+        }
+        Ok(ack)
     }
 
     /// Activate the native timeline for one session (mirrors Electron

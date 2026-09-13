@@ -511,8 +511,9 @@ fn rehydrate_offloaded_turns(
 }
 
 impl RingingHub {
-    /// 同步落盘所有待写 seed（daemon 优雅关闭收尾；Drop 只 join 异步线程，
-    /// 而 Arc 引用可能仍在 tokio task 中存活，必须显式 flush）。
+    /// 同步落盘所有待写 seed + 排空 journal 写队列（daemon 优雅关闭收尾；
+    /// Drop 只 join 异步线程，而 Arc 引用可能仍在 tokio task 中存活，必须
+    /// 显式 flush）。
     pub fn flush_timeline_persistence(&self) {
         let seeds: Vec<String> = self
             .timeline_persistence
@@ -531,6 +532,8 @@ impl RingingHub {
         for seed in seeds {
             self.persist_timeline_sync(&seed);
         }
+        // BUG-2026-09-12-08：journal 写队列一并排空（关闭/调试同步点共用）。
+        self.flush_journal_persistence();
     }
 
     /// Ringing V1 bootstrap 的权威 transcript 快照。

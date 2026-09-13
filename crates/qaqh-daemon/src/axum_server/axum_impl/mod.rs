@@ -12,8 +12,9 @@ use std::time::Duration;
 use axum::{
     Router,
     body::Bytes,
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::Next,
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -106,6 +107,20 @@ impl IntoResponse for JsonResponse {
     }
 }
 
+/// BUG-2026-09-12-11（O-7）：daemon 此前没有任何 HTTP 状态码记录——TraceLayer
+/// 走 tracing 且无 subscriber，4xx 全部无声。本中间件把每个非 2xx 响应写入
+/// qaqh-daemon.log（方法/路径/状态），让「切会话被拒」这类事故可直接定案。
+async fn log_http_errors(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let response = next.run(req).await;
+    let status = response.status();
+    if status.is_client_error() || status.is_server_error() {
+        log::warn!("[http] {method} {path} -> {status}");
+    }
+    response
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -148,6 +163,8 @@ pub fn build_router(state: AppState) -> Router {
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(ConcurrencyLimitLayer::new(MAX_CONNECTIONS))
         .layer(TraceLayer::new_for_http())
+        // 最外层：观察所有出口状态（含各 guard 的 401/403 与限流拒绝）。
+        .layer(axum::middleware::from_fn(log_http_errors))
         .with_state(state)
 }
 

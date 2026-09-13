@@ -415,20 +415,30 @@ pub(crate) async fn handle_command(
                     );
                 }
             };
-            if let Some(seed) = created.as_str() {
-                state
+            let created_seed = created
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| created.get("seed").and_then(|v| v.as_str()).map(str::to_string));
+            if let Some(seed) = created_seed {
+                // BUG-2026-09-12-10：attach 失败（lease 已死）必须显式 401，
+                // 而不是静默 ack 200 让前端进入「无归属」状态。
+                let attached = state
                     .leases
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .attach_seed(&session_id, seed);
-                publish_session_created(&state.hub, seed, &env.command_id);
-            } else if let Some(seed) = created.get("seed").and_then(|v| v.as_str()) {
-                state
-                    .leases
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .attach_seed(&session_id, seed);
-                publish_session_created(&state.hub, seed, &env.command_id);
+                    .attach_seed(&session_id, &seed);
+                if !attached {
+                    state
+                        .pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .rollback(&env.command_id);
+                    return ack_response(
+                        StatusCode::UNAUTHORIZED,
+                        reject_ack(env.command_id, "lease_required", "lease is not active".into()),
+                    );
+                }
+                publish_session_created(&state.hub, &seed, &env.command_id);
             }
             state
                 .pending
@@ -438,6 +448,25 @@ pub(crate) async fn handle_command(
             return ack_response(StatusCode::OK, accept_ack(env.command_id, None));
         }
         qaqh_ringing::RingingCommand::Control(ControlCommand::SessionResume { seed }) => {
+            // BUG-2026-09-12-10：attach 必须先于（较慢的）worker 拉起副作用。
+            // 前端切会话后会并行 fetch bootstrap/timeline，若 attach 晚于
+            // service.handle 完成，这些请求会撞进「尚未 attach」的窗口拿 401。
+            let attached = state
+                .leases
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .attach_seed(&session_id, seed);
+            if !attached {
+                state
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .rollback(&env.command_id);
+                return ack_response(
+                    StatusCode::UNAUTHORIZED,
+                    reject_ack(env.command_id, "lease_required", "lease is not active".into()),
+                );
+            }
             if let Err(e) = state
                 .service
                 .handle("session.resume", &serde_json::json!({"seed": seed}))
@@ -452,11 +481,6 @@ pub(crate) async fn handle_command(
                     reject_ack(env.command_id, "dispatch_failed", e.to_string()),
                 );
             }
-            state
-                .leases
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .attach_seed(&session_id, seed);
             state
                 .pending
                 .lock()
@@ -482,11 +506,22 @@ pub(crate) async fn handle_command(
                     ),
                 );
             }
-            state
+            let attached = state
                 .leases
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .attach_seed(&session_id, seed);
+            if !attached {
+                state
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .rollback(&env.command_id);
+                return ack_response(
+                    StatusCode::UNAUTHORIZED,
+                    reject_ack(env.command_id, "lease_required", "lease is not active".into()),
+                );
+            }
             state
                 .pending
                 .lock()

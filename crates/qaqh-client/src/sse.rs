@@ -60,7 +60,7 @@ impl ChannelStream {
     pub async fn run(&mut self, mut stop: watch::Receiver<bool>) {
         let mut retry_ms = RETRY_BASE_MS;
         while !*stop.borrow() {
-            match self.connect_once(&mut stop).await {
+            match self.connect_once(&mut stop, &mut retry_ms).await {
                 Ok(()) => {
                     // Clean stream end: reconnect without backoff reset (mirrors TS).
                 }
@@ -86,9 +86,13 @@ impl ChannelStream {
         }
     }
 
-    async fn connect_once(&mut self, stop: &mut watch::Receiver<bool>) -> Result<()> {
+    async fn connect_once(
+        &mut self,
+        stop: &mut watch::Receiver<bool>,
+        retry_ms: &mut u64,
+    ) -> Result<()> {
         (self.handlers.on_status)(ChannelStatus::Connecting);
-        let Some((server_epoch, client_session_id)) = self.session_ctx.borrow().clone() else {
+        let Some((server_epoch, client_session_id)) = self.session_ctx.borrow_and_update().clone() else {
             return Err(ClientError::Negotiation("session not open".into()));
         };
 
@@ -112,6 +116,9 @@ impl ChannelStream {
                 path: self.url.clone(),
             });
         }
+        // BUG-2026-09-12-10：连接成功即复位退避——此前 retry_ms 只增不减，
+        // 一次抖动后会永久固定在上限（30s），流在长时间窗口内不再补帧。
+        *retry_ms = RETRY_BASE_MS;
         (self.handlers.on_status)(ChannelStatus::Open {
             server_epoch: server_epoch.clone(),
             cursor: self.cursor,
@@ -121,9 +128,21 @@ impl ChannelStream {
         let mut decoder = SseDecoder::new();
         let idle = tokio::time::sleep(SSE_IDLE_TIMEOUT);
         tokio::pin!(idle);
+        // BUG-2026-09-12-10：监听租约重新协商——旧 cs 的连接会被服务端静默
+        // 跳过所有事件（伪健康黑障，状态仍报 Open），必须主动断开并用新 cs
+        // 重建过滤，而不是等某个事件才可能被踢。
+        let mut ctx = self.session_ctx.clone();
 
         loop {
             tokio::select! {
+                changed = ctx.changed() => {
+                    if changed.is_err() {
+                        return Ok(()); // session dropped: nothing to reconnect against
+                    }
+                    return Err(ClientError::Negotiation(
+                        "lease re-negotiated; reconnecting with new session".into(),
+                    ));
+                }
                 _ = stop.changed() => {
                     return Ok(()); // stopped: exit loop cleanly
                 }
@@ -157,6 +176,17 @@ impl ChannelStream {
     }
 
     fn dispatch(&mut self, frame: SseFrame, server_epoch: &str) -> Result<()> {
+        // BUG-2026-09-12-11：服务端因事件缓冲溢出（Lagged）而终止流时发送的
+        // 终止帧——归一为传输错误，走退避重连（而不是被当成坏信封）。
+        if frame.event_type == "ringing.stream_terminated" {
+            let code = serde_json::from_str::<serde_json::Value>(frame.data.trim())
+                .ok()
+                .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string))
+                .unwrap_or_else(|| "unknown".into());
+            return Err(ClientError::Transport(format!(
+                "server terminated stream ({code}); reconnecting"
+            )));
+        }
         if frame.event_type == "ringing.reset_required" {
             let reset: crate::types::ResetRequired = serde_json::from_str(frame.data.trim())
                 .map_err(|e| ClientError::Protocol(format!("bad reset_required: {e}")))?;
