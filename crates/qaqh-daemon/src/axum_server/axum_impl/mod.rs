@@ -169,7 +169,7 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 #[cfg(test)]
-mod pure_tests {
+pub(crate) mod pure_tests {
     use super::*;
     #[test]
     fn channel_parsing() {
@@ -210,7 +210,7 @@ mod pure_tests {
             0
         );
     }
-    fn paged_turns(n: usize) -> Vec<qaqh_domain::TimelineTurn> {
+    pub(crate) fn paged_turns(n: usize) -> Vec<qaqh_domain::TimelineTurn> {
         (1..=n)
             .map(|i| qaqh_domain::TimelineTurn {
                 turn_id: format!("t{i}"),

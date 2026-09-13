@@ -6,6 +6,9 @@ mod axum_impl;
 pub use axum_impl::{AppState, build_router};
 
 #[cfg(test)]
+use axum_impl as apis;
+
+#[cfg(test)]
 mod axum_tests {
     use super::*;
     use axum::{
@@ -570,5 +573,57 @@ mod axum_tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_ne!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+    /// BUG-2026-09-13-18：`limit=0` 时 handler 曾把 0 直通给 `paginate_turns`，
+    /// `end == start` → 空页，但 `start > 0` 仍报 `has_more=true`，按 has_more
+    /// 驱动的客户端翻页永远拿不到行、也永远停不下来。修复要求 limit 经
+    /// `max(1)` 钳制后仍返回有界页。
+    #[tokio::test]
+    async fn timeline_limit_zero_returns_bounded_page() {
+        let state = test_state();
+        state
+            .leases
+            .lock()
+            .unwrap()
+            .open("cs-1".into(), "ci-1".into());
+        state.leases.lock().unwrap().attach_seed("cs-1", "seed-1");
+        for i in 1..=3 {
+            state
+                .hub
+                .publish_timeline(
+                    "seed-1",
+                    qaqh_domain::TimelineIntent::TurnOpened {
+                        turn_id: format!("t{i}"),
+                        user_text: format!("q{i}"),
+                    },
+                )
+                .expect("seed a timeline turn");
+        }
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri("/ringing/v1/sessions/seed-1/timeline?limit=0")
+            .header("authorization", "Bearer test-token")
+            .header("x-qaqh-client-session-id", "cs-1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let turns = page["snapshot"]["turns"].as_array().expect("turns array");
+        // limit=0 必须被钳到 1（而非返回空页 + has_more=true 的死循环）。
+        assert_eq!(turns.len(), 1, "limit=0 must degrade to a bounded page");
+        assert_eq!(page["total_turns"], serde_json::json!(3));
+    }
+
+    /// 纯函数契约：`limit=0` 不得产出「空页 + has_more」的翻页死锁。
+    #[test]
+    fn timeline_pagination_zero_limit_is_bounded() {
+        let (page, has_more) = apis::paginate_turns(apis::pure_tests::paged_turns(40), None, 0);
+        assert_eq!(page.len(), 1, "limit=0 must be clamped to 1");
+        assert_eq!(page.first().unwrap().turn_id, "t40");
+        assert!(has_more);
     }
 }

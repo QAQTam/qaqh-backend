@@ -10,6 +10,11 @@ pub(crate) fn paginate_turns(
     if turns.is_empty() {
         return (turns, false);
     }
+    // BUG-2026-09-13-18：limit 是客户端可控的查询参数（`?limit=0`）。0 会让
+    // `end == start` 产出空页，但 `start > 0` 仍报 `has_more=true`——按
+    // has_more 驱动的翻页客户端于是每次都拿到零行却永不终止。此处把下限
+    // 钳到 1，保证「has_more=true ⇒ 本页非空」，翻页单调收敛。
+    let limit = limit.max(1);
     let (start, end) = match before_turn {
         Some(id) => {
             let idx = turns
