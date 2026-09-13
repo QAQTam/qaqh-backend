@@ -20,7 +20,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use qaqh_client::{Channel, ChannelStatus, Client, ClientHandlers, ClientOptions};
+use qaqh_client::{
+    Channel, ChannelStatus, Client, ClientHandlers, ClientOptions, CommandOptions, ControlCommand,
+    QueryRequest, RingingCommand, RingingCommandAckStatus,
+};
 
 // ── isolated test home ───────────────────────────────────────────────────
 
@@ -124,6 +127,27 @@ impl Drop for TestDaemon {
     }
 }
 
+/// Poll until a seed-scoped timeline read succeeds (BUG-2026-09-12-10: the
+/// client must replay `attach` after every lease re-negotiation) or `within`
+/// elapses. A 401 here means the replay is broken.
+async fn assert_timeline_readable(client: &Client, seed: &str, within: Duration) {
+    let deadline = Instant::now() + within;
+    loop {
+        match client.fetch_timeline_page(seed, None, None).await {
+            Ok(_) => return,
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    panic!(
+                        "timeline fetch for {seed} kept failing after lease re-negotiation \
+                         (attach replay broken?): {err:?}"
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
 // ── test ─────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
@@ -186,6 +210,54 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
     .await
     .expect("client connect to isolated daemon");
 
+    // BUG-2026-09-12-10 回归：创建会话并 attach——租约重新协商后客户端必须
+    // 重放 attach，否则新 client_session_id 没有 seed 归属，timeline 等读路径
+    // 会持续 401 lease_required（「切会话被拒」的主因之一）。
+    let create_ack = client
+        .send_command(
+            None,
+            RingingCommand::Control(ControlCommand::SessionCreate {
+                close_current: false,
+                cwd: None,
+                tool_mode: None,
+                custom_tools: Vec::new(),
+            }),
+            CommandOptions::default(),
+        )
+        .await
+        .expect("session_create");
+    assert_eq!(
+        create_ack.status,
+        RingingCommandAckStatus::Accepted,
+        "session_create must be accepted"
+    );
+    let seed = {
+        let mut found: Option<String> = None;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let sessions = client
+                .query(QueryRequest::SessionList)
+                .await
+                .expect("session.list");
+            let arr = sessions
+                .as_array()
+                .or_else(|| sessions.get("sessions").and_then(|s| s.as_array()));
+            if let Some(seed) = arr
+                .and_then(|a| a.first())
+                .and_then(|s| s.get("seed"))
+                .and_then(|s| s.as_str())
+            {
+                found = Some(seed.to_string());
+                break;
+            }
+        }
+        found.expect("created session seed appears in session.list")
+    };
+    client
+        .attach(&seed)
+        .await
+        .expect("attach created session");
+
     // Phase 1: wait for the initial Open on all three channels.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -203,8 +275,9 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
 
     // Phase 2: with TTL (3s) < renewal interval (5s), the lease keeps
     // expiring. Renewal fails -> the client must re-open and re-broadcast the
-    // session; streams must come back to Open instead of pinning the dead
-    // session (the reconnect-death loop this test guards against).
+    // session; streams proactively reconnect on that re-negotiation and must
+    // come back to Open instead of pinning the dead session (the
+    // reconnect-death loop this test guards against).
     tokio::time::sleep(Duration::from_secs(45)).await;
 
     let open = open_counts.lock().unwrap().clone();
@@ -222,6 +295,11 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
         "streams never recovered after lease expiry: open={open:?} reconnects={reconnects:?}"
     );
 
+    // BUG-2026-09-12-10：重新协商已发生（上面断言过）——此刻读取 seed 的
+    // timeline 必须成功（客户端已重放 attach）。旧行为：cs2 无归属 → 持续
+    // 401，本轮询会超时失败。
+    assert_timeline_readable(&client, &seed, Duration::from_secs(20)).await;
+
     // Phase 3: sanity — after another window the streams are still cycling
     // Open (self-healing continues; not permanently stuck in Reconnecting).
     tokio::time::sleep(Duration::from_secs(20)).await;
@@ -230,6 +308,9 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
         open.iter().any(|&c| c >= 3),
         "self-healing stopped after initial recovery: open={open:?}"
     );
+
+    // 归属重放必须持续有效（窗口内至少一次重新协商已经/正在发生）。
+    assert_timeline_readable(&client, &seed, Duration::from_secs(15)).await;
 
     client.close();
     drop(daemon);

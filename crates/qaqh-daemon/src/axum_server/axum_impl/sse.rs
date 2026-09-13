@@ -167,7 +167,26 @@ pub(crate) async fn handle_events(
                         break;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // BUG-2026-09-12-11：此前直接 break——不记日志、不发终止帧，
+                    // 客户端只看到「干净结束」无从定案。现在两条都补上。
+                    log::warn!(
+                        "[sse] {channel} stream lagged: {skipped} events skipped; terminating for client re-baseline"
+                    );
+                    let ev = Event::default()
+                        .event("ringing.stream_terminated")
+                        .data(
+                            serde_json::json!({
+                                "code": "lagged",
+                                "channel": channel.as_str(),
+                                "skipped": skipped,
+                                "message": "server event buffer overflow; reconnect to re-baseline",
+                            })
+                            .to_string(),
+                        );
+                    let _ = tx.send(Ok(ev)).await;
+                    break;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -254,7 +273,25 @@ pub(crate) async fn handle_timeline_events(
                         break;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // BUG-2026-09-12-11：同 handle_events，补日志与终止帧。
+                    log::warn!(
+                        "[sse] timeline {seed_clone} stream lagged: {skipped} entries skipped; terminating for client re-baseline"
+                    );
+                    let ev = Event::default()
+                        .event("ringing.stream_terminated")
+                        .data(
+                            serde_json::json!({
+                                "code": "lagged",
+                                "seed": seed_clone.as_str(),
+                                "skipped": skipped,
+                                "message": "server event buffer overflow; reconnect to re-baseline",
+                            })
+                            .to_string(),
+                        );
+                    let _ = tx.send(Ok(ev)).await;
+                    break;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
