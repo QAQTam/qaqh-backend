@@ -37,6 +37,10 @@ use super::sequencer::Sequencer;
 use crate::timeline_store::TimelineStore;
 use crate::{TimelineAppender, TimelineLiveEntry};
 
+/// 三频道 live broadcast 与 timeline live broadcast 的环形缓冲容量。
+/// 溢出即 `Lagged`——由 daemon SSE 侧发终止帧让客户端重连重定基。
+pub(super) const LIVE_BROADCAST_CAPACITY: usize = 1024;
+
 /// journal jsonl 超过该物理大小时，compact 后触发整文件重写（丢弃已折叠的
 /// RoundDelta）。append-only 日志若不重写，磁盘与装载成本永久累积。
 pub(super) const JOURNAL_REWRITE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
@@ -529,7 +533,7 @@ impl RingingHub {
             },
             None => None,
         };
-        let (timeline_live, _) = broadcast::channel(1024);
+        let (timeline_live, _) = broadcast::channel(LIVE_BROADCAST_CAPACITY);
         // BUG-2026-09-12-08：journal 写线程。持久化开启时投递端与写线程成对
         // 存在；非持久模式两者皆无（发布路径零开销跳过）。
         let journal_store = Arc::new(Mutex::new(journal_store));
@@ -995,7 +999,7 @@ impl RingingHub {
     pub fn subscribe(&self, channel: RingingChannel) -> broadcast::Receiver<RingingEventEnvelope> {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         live.entry(channel)
-            .or_insert_with(|| broadcast::channel(1024).0)
+            .or_insert_with(|| broadcast::channel(LIVE_BROADCAST_CAPACITY).0)
             .subscribe()
     }
 
@@ -3103,5 +3107,46 @@ mod lock_sharding_tests {
         let mut sorted = seqs.clone();
         sorted.sort_unstable();
         assert_eq!(seqs, sorted, "channel replay must be stream_seq ordered");
+    }
+}
+
+/// 慢消费者装置（issue #35）。
+///
+/// 刻意**不加** `#[cfg(test)]`：跨 crate 测试（qaqh-daemon 的 SSE 测试）
+/// 构建的是依赖的普通 profile，`cfg(test)` 项在那里不可见。本 impl 只使用
+/// 已公开的 `subscribe` / `fanout` 与广播容量语义，**不新增生产行为**
+/// （唯一的生产侧改动是容量常量 `LIVE_BROADCAST_CAPACITY` 的提取）。
+impl RingingHub {
+    /// 三频道 live 广播共用的容量（装置用；与 `subscribe` 同源）。
+    pub fn live_capacity(channel: RingingChannel) -> usize {
+        let _ = channel;
+        LIVE_BROADCAST_CAPACITY
+    }
+
+    /// 向频道 live 广播灌 `count` 条（装置用；走生产 `fanout`）。
+    ///
+    /// 用途：SSE handler 的 receiver 必须先于溢出存在，否则 tokio broadcast
+    /// 不会向迟到的订阅者回放历史（其 `recv()` 直接拿到 `Empty`），也就
+    /// 触发不了 `Lagged` 分支。先建流、再调本函数，即可确定性触发。
+    pub fn overflow_channel_live(
+        &self,
+        channel: RingingChannel,
+        seed: &str,
+        first_seq: u64,
+        count: u64,
+    ) {
+        for seq in first_seq..first_seq + count {
+            let env = RingingEventEnvelope::new(
+                seed,
+                seq,
+                seq,
+                seq,
+                format!("lag-{seq}"),
+                RingingEvent::Conversation(ConversationEvent::ConversationCancelled {
+                    turn_id: None,
+                }),
+            );
+            self.fanout(channel, &env);
+        }
     }
 }

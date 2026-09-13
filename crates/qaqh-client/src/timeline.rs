@@ -97,7 +97,10 @@ impl TimelineStream {
     ) {
         let mut retry_ms = RETRY_BASE_MS;
         while !*stop.borrow() && !*session_stop.borrow() {
-            match self.connect_once(&mut stop, &mut session_stop, &mut retry_ms).await {
+            match self
+                .connect_once(&mut stop, &mut session_stop, &mut retry_ms)
+                .await
+            {
                 Ok(()) => {
                     // Clean stream end (stop signal): exit.
                     if *stop.borrow() || *session_stop.borrow() {
@@ -349,5 +352,91 @@ impl TimelineStream {
         self.cursor = page.snapshot.watermark;
         (self.on_snapshot)(page);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Timeline SSE 终止帧归一（BUG-2026-09-12-11 遗留 / issue #35）。
+    //!
+    //! 与频道流同协议：daemon 的 `ringing.stream_terminated`（Lagged）在
+    //! timeline 流上同样归一为 `Transport`，绝不能落成
+    //! `Protocol("invalid Ringing V1 timeline SSE frame")`。
+
+    use super::*;
+    use std::sync::Arc;
+
+    fn stream() -> TimelineStream {
+        TimelineStream::new(
+            "http://127.0.0.1:1".into(),
+            "t".into(),
+            "seed-1".into(),
+            reqwest::Client::new(),
+            Arc::new(RingingSession::new(
+                "http://127.0.0.1:1".into(),
+                "t".into(),
+                reqwest::Client::new(),
+            )),
+            Arc::new(|_, _| {}),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            0,
+            None,
+        )
+    }
+
+    fn frame(event_type: &str, data: &str) -> SseFrame {
+        SseFrame {
+            id: String::new(),
+            event_type: event_type.into(),
+            data: data.into(),
+        }
+    }
+
+    /// 终止帧 → Transport（可重连）。
+    #[test]
+    fn lagged_termination_frame_normalizes_to_transport() {
+        let mut s = stream();
+        let err = s
+            .dispatch(
+                frame(
+                    "ringing.stream_terminated",
+                    r#"{"code":"lagged","seed":"seed-1","skipped":9}"#,
+                ),
+                "epoch-1",
+            )
+            .expect_err("termination frame must end the timeline stream");
+        assert!(
+            matches!(err, ClientError::Transport(_)),
+            "must normalize to Transport: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("lagged"),
+            "message must carry the server code: {err}"
+        );
+    }
+
+    /// 终止帧分支先于 timeline 帧解析：畸形载荷也不能落成 Protocol。
+    #[test]
+    fn termination_frame_is_not_misparsed_as_protocol() {
+        let mut s = stream();
+        let err = s
+            .dispatch(frame("ringing.stream_terminated", "not-json"), "epoch-1")
+            .expect_err("must error");
+        assert!(matches!(err, ClientError::Transport(_)), "{err:?}");
+        assert!(!err.to_string().contains("timeline SSE frame"), "{err}");
+    }
+
+    /// 对照：非终止帧的畸形载荷仍按 Protocol 处理（不误伤原有语义）。
+    #[test]
+    fn malformed_timeline_frame_stays_protocol() {
+        let mut s = stream();
+        let err = s
+            .dispatch(frame("timeline.entry", "not-json"), "epoch-1")
+            .expect_err("must error");
+        assert!(
+            matches!(err, ClientError::Protocol(_)),
+            "malformed timeline frame must stay Protocol: {err:?}"
+        );
     }
 }
