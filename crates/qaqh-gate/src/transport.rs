@@ -281,15 +281,39 @@ pub(crate) fn http_error_description(status: u16) -> &'static str {
     }
 }
 
-pub(crate) fn filter_stateful_messages(messages: Vec<Message>) -> (Vec<Message>, usize) {
+/// stateful 增量过滤结果。
+///
+/// BUG-2026-09-13-12：尾消息就是 assistant 时增量切片必为空（`start == len`），
+/// 旧实现唯一的兜底守卫 `last.role != "assistant"` 因此恒假（死分支），
+/// 三协议会构造出 `"messages": []` 发给上游 → 400 不可重试 → 回合 Fatal。
+/// 语义上，远端会话已持有那条 assistant 响应，增量里没有任何新内容可发，
+/// 本次调用就是 no-op——必须显式建模，而不是发空数组。
+#[derive(Debug, Clone)]
+pub(crate) enum StatefulFilter {
+    /// 有增量可发（含「无 assistant 尾 → 全量首请求」）。`dropped_images`
+    /// 是被丢弃前缀中的图片数，作为会话级图片编号基准。
+    Incremental {
+        messages: Vec<Message>,
+        dropped_images: usize,
+    },
+    /// 增量全灭：远端已持有全部上下文，本次调用应为 no-op。
+    Empty,
+}
+
+/// 过滤 stateful 请求的增量消息，并在增量为空时显式返回 [`StatefulFilter::Empty`]。
+pub(crate) fn filter_stateful_messages(messages: Vec<Message>) -> StatefulFilter {
     if messages.is_empty() {
-        return (messages, 0);
+        // 历史为空：没有可发内容，同样按 no-op 处理（而非发空数组）。
+        return StatefulFilter::Empty;
     }
     let last_asst_idx = messages.iter().rposition(|m| m.role == "assistant");
     let start = last_asst_idx.map(|i| i + 1).unwrap_or(0);
     let is_first = start == 0;
     if is_first {
-        return (messages, 0);
+        return StatefulFilter::Incremental {
+            messages,
+            dropped_images: 0,
+        };
     }
     let dropped_images = messages[..start]
         .iter()
@@ -301,17 +325,37 @@ pub(crate) fn filter_stateful_messages(messages: Vec<Message>) -> (Vec<Message>,
             )
         })
         .count();
-    let mut out: Vec<Message> = Vec::new();
-    for msg in &messages[start..] {
-        out.push(msg.clone());
+    if start == messages.len() {
+        // 尾消息即 assistant：增量全灭（旧死分支所在）。
+        return StatefulFilter::Empty;
     }
-    if out.is_empty()
-        && let Some(last) = messages.last()
-        && last.role != "assistant"
-    {
-        out.push(last.clone());
+    StatefulFilter::Incremental {
+        messages: messages[start..].to_vec(),
+        dropped_images,
     }
-    (out, dropped_images)
+}
+
+/// 增量全灭时流式路径的 no-op 收口：发一个空 assistant 的 Done，
+/// 让 runtime 正常完成本回合（而不是把 400 当 Fatal）。零 HTTP 请求。
+pub(crate) fn stateful_noop_done_event() -> StreamEvent {
+    StreamEvent::Done {
+        raw_message: Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: Vec::new(),
+        },
+        usage: None,
+        // 非掐流：`Some` 让 runtime 的"不完整回合续写"判定放行。
+        stop_reason: Some("stop".into()),
+    }
+}
+
+/// 增量全灭时 sync 路径（compact/title）的错误文本：带稳定诊断码
+/// `STATEFUL_INCREMENT_EMPTY`，调用方（compact）据此按既有 `retryable: true`
+/// 上报 OperationFailed——而不是把上游的空数组 400 当不可重试 Fatal。
+pub(crate) fn stateful_noop_sync_error() -> String {
+    "STATEFUL_INCREMENT_EMPTY: stateful provider 增量无新消息（远端已持有该 assistant），本次调用跳过；请重建会话或改用非 stateful 端点".to_string()
 }
 
 pub(crate) fn normalize_skill_envelope(
@@ -582,12 +626,12 @@ mod tests {
         let mut on_event = silent_events();
         let result: anyhow::Result<()> =
             run_with_retry(&policy, Some(&cancel), &mut on_event, |_, _| {
-            Attempt::Retry {
-                retry_after: None,
-                reason: "x".into(),
-                final_error: "x".into(),
-            }
-        });
+                Attempt::Retry {
+                    retry_after: None,
+                    reason: "x".into(),
+                    final_error: "x".into(),
+                }
+            });
         // 已取消状态下首次进入循环即退出。
         assert!(result.unwrap_err().to_string().contains("cancelled"));
     }

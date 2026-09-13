@@ -10,12 +10,12 @@ use qaqh_types::{CacheTokenField, ThinkingParamMode};
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sse::SseDecoder;
-use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
 use super::transport::{
-    Attempt, SseTrace, STREAM_IDLE_TIMEOUT, block_on, filter_stateful_messages,
+    Attempt, STREAM_IDLE_TIMEOUT, SseTrace, StatefulFilter, block_on, filter_stateful_messages,
     http_error_description, is_cancelled, is_retryable, normalize_skill_envelope,
-    parse_retry_after, run_with_retry,
+    parse_retry_after, run_with_retry, stateful_noop_done_event, stateful_noop_sync_error,
 };
+use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
 use super::types::{
     EmptyStreamEof, ProviderConfig, StreamEvent, clamp_effort_to_allowlist,
     normalize_reasoning_effort, safe_provider_error_body,
@@ -80,7 +80,20 @@ pub fn chat_stream_openai(
     let messages = normalize_skill_envelope(provider, messages).map_err(anyhow::Error::msg)?;
     // Stateful 模式：只发增量消息（最后一条 user + 其后的 tool 结果）
     let (messages, image_index_base) = if provider.stateful {
-        filter_stateful_messages(messages)
+        match filter_stateful_messages(messages) {
+            StatefulFilter::Incremental {
+                messages,
+                dropped_images,
+            } => (messages, dropped_images),
+            // BUG-2026-09-13-12：增量全灭（尾 assistant）→ 不发空数组，
+            // 零 HTTP 请求 no-op 成功。远端会话已持有该 assistant 响应，
+            // 语义上本次调用无新内容可发；Done 让 runtime 正常收口本回合。
+            StatefulFilter::Empty => {
+                log::info!("stateful increment empty (tail assistant) — skipping request as no-op");
+                on_event(stateful_noop_done_event());
+                return Ok(());
+            }
+        }
     } else {
         (messages, 0)
     };
@@ -573,10 +586,8 @@ fn stream_sse(
                         return Err(anyhow::Error::new(EmptyStreamEof));
                     }
                     if provider.stateful {
-                        let msg = format!(
-                            "SSE idle timeout after {}s",
-                            STREAM_IDLE_TIMEOUT.as_secs()
-                        );
+                        let msg =
+                            format!("SSE idle timeout after {}s", STREAM_IDLE_TIMEOUT.as_secs());
                         traced(StreamEvent::Error(msg.clone()));
                         return Err(anyhow::anyhow!("{}", msg));
                     }
@@ -889,7 +900,18 @@ pub fn chat_sync_openai(
 ) -> Result<String, String> {
     let messages = normalize_skill_envelope(provider, messages)?;
     let (messages, image_index_base) = if provider.stateful {
-        filter_stateful_messages(messages)
+        match filter_stateful_messages(messages) {
+            StatefulFilter::Incremental {
+                messages,
+                dropped_images,
+            } => (messages, dropped_images),
+            // BUG-2026-09-13-12：sync（compact/title）无流式收口可用，
+            // 返回带稳定诊断码的可重试语义错误，而不是发空数组换 400 Fatal。
+            StatefulFilter::Empty => {
+                log::warn!("stateful increment empty (tail assistant) — sync call skipped");
+                return Err(stateful_noop_sync_error());
+            }
+        }
     } else {
         (messages, 0)
     };
@@ -941,9 +963,7 @@ pub fn chat_sync_openai(
             let retry_after = parse_retry_after(resp.headers(), &policy);
             let text = block_on(resp.text()).unwrap_or_default();
             if status != 401 && is_retryable(status) {
-                log::warn!(
-                    "OpenAI sync attempt {attempt} HTTP {status} retryable, will retry"
-                );
+                log::warn!("OpenAI sync attempt {attempt} HTTP {status} retryable, will retry");
                 return Attempt::Retry {
                     retry_after,
                     reason: format!("sync HTTP {} ({})", status, http_error_description(status)),
@@ -1039,13 +1059,96 @@ mod skill_envelope_tests {
         fresh.content.push(ContentBlock::image("image/png", "Zm9v"));
         let messages = vec![old, assistant, fresh];
 
-        let (filtered, dropped) = filter_stateful_messages(messages);
+        let (filtered, dropped) = match filter_stateful_messages(messages) {
+            StatefulFilter::Incremental {
+                messages,
+                dropped_images,
+            } => (messages, dropped_images),
+            StatefulFilter::Empty => panic!("tail user message must yield an increment"),
+        };
         assert_eq!(dropped, 1, "dropped prefix holds exactly one image");
         // 以丢弃数为基准续编，增量消息中的图仍是会话级 #1。
         let out = convert_messages(&provider, filtered, None, dropped);
         assert_eq!(out.len(), 1, "incremental request sends only the tail");
         let text = out[0]["content"].as_str().unwrap_or_default();
         assert!(text.contains("[Image #1:"), "got: {text}");
+    }
+
+    /// 解包增量结果（非全灭场景的断言便利函数）。
+    fn expect_increment(filtered: StatefulFilter) -> Vec<Message> {
+        match filtered {
+            StatefulFilter::Incremental { messages, .. } => messages,
+            StatefulFilter::Empty => panic!("expected an incremental slice, got Empty"),
+        }
+    }
+
+    /// BUG-2026-09-13-12：显式锁定过滤后的三种分类，原先恒假的兜底
+    /// 死分支（`last.role != "assistant"`）再无生存空间。
+    #[test]
+    fn stateful_tail_assistant_filters_to_empty_not_blank_request() {
+        let asst = |text: &str| Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::text(text)],
+        };
+
+        // ① 尾消息即 assistant → Empty（不得回退成全量，更不得发空数组）。
+        let tail_assistant = vec![Message::system("base"), Message::user("hi"), asst("done")];
+        assert!(matches!(
+            filter_stateful_messages(tail_assistant),
+            StatefulFilter::Empty
+        ));
+
+        // ② 无 assistant 尾 → 全量首请求（增量语义，非 Empty）。
+        let first_request = vec![Message::system("base"), Message::user("hi")];
+        let full = expect_increment(filter_stateful_messages(first_request.clone()));
+        assert_eq!(full.len(), first_request.len());
+
+        // ③ assistant 之后还有消息 → 只发尾部增量。
+        let tail_user = vec![
+            Message::system("base"),
+            Message::user("old"),
+            asst("done"),
+            Message::user("next"),
+        ];
+        let increment = expect_increment(filter_stateful_messages(tail_user));
+        assert_eq!(
+            increment
+                .iter()
+                .map(|message| message.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user"]
+        );
+
+        // ④ 空历史 → Empty（同样不许发空数组）。
+        assert!(matches!(
+            filter_stateful_messages(Vec::new()),
+            StatefulFilter::Empty
+        ));
+    }
+
+    /// no-op 收口事件必须是完整 Done（非掐流）：stop_reason 缺失会让
+    /// runtime 判为"上游掐流"并触发一次必为空的续写。
+    #[test]
+    fn stateful_noop_done_event_is_terminal_and_empty() {
+        match stateful_noop_done_event() {
+            StreamEvent::Done {
+                raw_message,
+                usage,
+                stop_reason,
+            } => {
+                assert_eq!(raw_message.role, "assistant");
+                assert!(raw_message.content.is_empty());
+                assert!(usage.is_none());
+                assert_eq!(stop_reason.as_deref(), Some("stop"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        assert!(
+            stateful_noop_sync_error().starts_with("STATEFUL_INCREMENT_EMPTY"),
+            "sync 错误需带稳定诊断码，便于调用方与用户定位"
+        );
     }
 
     #[test]
@@ -1056,7 +1159,7 @@ mod skill_envelope_tests {
             Message::user("hi"),
             Message::system("envelope"),
         ];
-        let (filtered, _dropped_images) = filter_stateful_messages(messages.clone());
+        let filtered = expect_increment(filter_stateful_messages(messages.clone()));
         assert_eq!(filtered.len(), messages.len());
     }
 
@@ -1074,7 +1177,7 @@ mod skill_envelope_tests {
             Message::user("next"),
             Message::system("<skill_context_envelope />"),
         ];
-        let (filtered, _dropped_images) = filter_stateful_messages(messages);
+        let filtered = expect_increment(filter_stateful_messages(messages));
         assert_eq!(
             filtered
                 .iter()
