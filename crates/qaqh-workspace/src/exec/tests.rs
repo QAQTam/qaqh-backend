@@ -483,7 +483,7 @@ fn pipe_reader_forwards_retained_chunks_with_the_call_id() {
         drain_pipe_to_registry(&mut stream, 1024, &ctx, &mut |_s: &mut std::io::Cursor<
             Vec<u8>,
         >| {
-            Ok(Readiness::Ready)
+            Ok(Readiness::Ready(None))
         });
 
     let chunks: Vec<_> = rx.try_iter().collect();
@@ -552,7 +552,7 @@ fn pipe_reader_keeps_split_utf8_characters_intact_for_the_ui() {
         &mut stream,
         16 * 1024,
         &ctx,
-        &mut |_s: &mut std::io::Cursor<Vec<u8>>| Ok(Readiness::Ready),
+        &mut |_s: &mut std::io::Cursor<Vec<u8>>| Ok(Readiness::Ready(None)),
     );
     assert!(saw_eof);
     assert!(!capped);
