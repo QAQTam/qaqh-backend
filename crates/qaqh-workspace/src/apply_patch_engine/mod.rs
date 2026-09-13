@@ -124,6 +124,15 @@ pub(crate) fn resolve_workspace_path(cwd: &Path, path: &Path) -> Result<PathBuf,
     } else {
         cwd.join(path)
     };
+    // BUG-2026-09-13-01：入口先词法消解 `..`（对齐 Codex PathUri：词法消解且
+    // clamp 在锚点内）。此前依赖 exists()/canonicalize 的折叠巧合拦截逃逸；
+    // 当父链无法解析时 `_ => joined.clone()` 兜底会放行含未消解 `..` 的路径，
+    // 落盘时 OS 再解析就可能越过 workspace 边界。归一化后兜底分支结构上
+    // 不可能携带 `..`，前缀比较（组件感知）也不会被字面 `..` 干扰。
+    let joined = {
+        use crate::permission::normalize_lexically;
+        normalize_lexically(&joined)
+    };
     // Canonicalize the parent so `..` escapes are caught; the file itself may
     // not exist yet (Add), so canonicalize the deepest existing ancestor.
     let abs = if joined.exists() {

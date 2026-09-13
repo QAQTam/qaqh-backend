@@ -116,3 +116,64 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
         }
     }
 }
+
+// ── BUG-2026-09-13-01 回归：apply_patch 工作区逃逸（词法消解 `..` + 边界拦截）──
+#[cfg(test)]
+mod escape_probes {
+    use qaqh_workspace::apply_patch_engine::{UpdateMode, apply_patch_engine};
+    use tempfile::tempdir;
+
+    fn patch_add(path: &str) -> String {
+        format!(
+            "*** Begin Patch\n*** Add File: {path}\n+evil\n*** End Patch"
+        )
+    }
+
+    /// 形态 A：深度未超过路径深度的 `..`——必须落盘在消解后的 workspace 内
+    /// 路径（evil.txt），且不得创建幻影中间目录、不得越界。
+    #[test]
+    fn dotdot_within_depth_resolves_inside_workspace() {
+        let tmp = tempdir().unwrap();
+        let outside = tmp
+            .path()
+            .parent()
+            .unwrap()
+            .join("qaqh-escape-probe-a.txt");
+        let _ = std::fs::remove_file(&outside);
+        let result = apply_patch_engine(
+            &patch_add("a/b/../../evil.txt"),
+            tmp.path(),
+            UpdateMode::PreserveLineEndings,
+        );
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert!(
+            tmp.path().join("evil.txt").exists(),
+            "file must land at the lexically resolved in-workspace path"
+        );
+        assert!(!tmp.path().join("a").exists(), "no phantom intermediate dirs");
+        assert!(!outside.exists(), "must not escape the workspace");
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    /// 形态 B：`..` 深度超过路径深度——必须 Err（PathOutsideWorkspace），
+    /// 无论目标外部文件是否已存在，且外部不得产生文件。
+    #[test]
+    fn dotdot_beyond_depth_rejected() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        for rel in [
+            "a/../../../../evil.txt",
+            "a/../../../../../../../../qaqh-escape-probe-b2.txt",
+        ] {
+            let result = apply_patch_engine(
+                &patch_add(rel),
+                &root,
+                UpdateMode::PreserveLineEndings,
+            );
+            assert!(result.is_err(), "`{rel}` must be rejected, got {result:?}");
+        }
+        // 外部落点取证：tempdir 兄弟目录不应出现 evil.txt
+        let sibling = root.parent().unwrap().join("evil.txt");
+        assert!(!sibling.exists());
+    }
+}
