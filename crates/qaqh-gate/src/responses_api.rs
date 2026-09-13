@@ -634,7 +634,7 @@ pub fn chat_stream_responses(
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             // headers 需在 text() 消费 response 前抓取（同 chat）。
-            let retry_after = parse_retry_after(resp.headers());
+            let retry_after = parse_retry_after(resp.headers(), &policy);
             let err_body = block_on(async { resp.text().await }).unwrap_or_default();
             if status == 401 {
                 // Some providers echo the API key tail in auth errors
