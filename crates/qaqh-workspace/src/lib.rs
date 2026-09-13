@@ -56,6 +56,9 @@ pub use backend::{
     BackendRequest, HttpToolExecutionBackend, LocalToolExecutionBackend, ToolExecutionBackend,
     ToolPlacement, install_workspace_backend, use_local_workspace_backend,
 };
+// 壳探测引导：daemon 启动期调用一次（与 cache_system_path/detect_os_info 同批），
+// 把「探测到的壳」钉进进程状态，保证 exec 的可用性探测与实际派生同源。
+pub use exec::{bootstrap as bootstrap_exec_shell, register_shell as register_exec_shell};
 pub use manager::{
     DYNAMIC_DESCRIPTION_LIMIT, DynamicTool, MCP_DYNAMIC_PREFIX, ToolExecMeta, ToolExecReport,
     ToolManager, ToolStats, build_dynamic_tool,

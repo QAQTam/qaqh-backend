@@ -215,9 +215,40 @@ fn jitter_ms(base_ms: u64) -> u64 {
     ((base_ms as f64) * factor) as u64
 }
 
+/// retry-after 头的信任上限：`max_delay`（默认 30s）的 5 倍。
+///
+/// BUG-2026-09-13-22：该头此前被无上限信任，`retry-after: 999999` 会让回合
+/// 挂起数小时（本地退避有 `max_delay` 封顶，服务端头路径没有）。封顶取
+/// 5×`max_delay` 而非直接取 `max_delay`：既尊重服务端比本地退避更长的窗口，
+/// 又保证回合不会被无限挂起（上游 codex 同样未封顶，挂 TODO(anp)）。
+pub(crate) fn retry_after_cap(policy: &RetryPolicy) -> Duration {
+    policy.max_delay.saturating_mul(5)
+}
+
 /// 解析上游限流头（opencode retry.ts 同款）：`retry-after-ms`（毫秒）优先，
 /// 其次 `retry-after`（秒或 HTTP-date）。`None` = 无可用头，退回指数退避。
-pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+///
+/// 已封顶（BUG-2026-09-13-22）：解析结果超过 [`retry_after_cap`] 时按上限
+/// 处理并落 `warn` 日志，回合不再被无限挂起。
+pub(crate) fn parse_retry_after(
+    headers: &reqwest::header::HeaderMap,
+    policy: &RetryPolicy,
+) -> Option<Duration> {
+    let parsed = parse_retry_after_raw(headers)?;
+    let cap = retry_after_cap(policy);
+    if parsed > cap {
+        log::warn!(
+            "retry-after 头 {}s 超过信任上限 {}s，按上限钳制（回合不再被无限挂起）",
+            parsed.as_secs(),
+            cap.as_secs()
+        );
+        return Some(cap);
+    }
+    Some(parsed)
+}
+
+/// 未封顶的原始解析（仅由 [`parse_retry_after`] 调用，保留头值的完整语义）。
+fn parse_retry_after_raw(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     if let Some(v) = headers.get("retry-after-ms")
         && let Ok(s) = v.to_str()
         && let Ok(ms) = s.trim().parse::<u64>()
@@ -382,14 +413,14 @@ mod tests {
         let mut h = reqwest::header::HeaderMap::new();
         h.insert("retry-after-ms", "250".parse().unwrap());
         h.insert("retry-after", "999".parse().unwrap());
-        assert_eq!(parse_retry_after(&h), Some(Duration::from_millis(250)));
+        assert_eq!(parse_retry_after_raw(&h), Some(Duration::from_millis(250)));
     }
 
     #[test]
     fn parse_retry_after_seconds_header() {
         let mut h = reqwest::header::HeaderMap::new();
         h.insert("retry-after", "7".parse().unwrap());
-        assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(7)));
+        assert_eq!(parse_retry_after_raw(&h), Some(Duration::from_secs(7)));
     }
 
     #[test]
@@ -399,20 +430,74 @@ mod tests {
         let future_http = httpdate::fmt_http_date(future);
         let mut h = reqwest::header::HeaderMap::new();
         h.insert("retry-after", future_http.parse().unwrap());
-        let d = parse_retry_after(&h).expect("future date should parse");
+        let d = parse_retry_after_raw(&h).expect("future date should parse");
         assert!(d > Duration::from_secs(3500) && d <= Duration::from_secs(3600));
 
         // 过去时间：立即重试（0）
         let past = std::time::SystemTime::now() - Duration::from_secs(3600);
         let mut h2 = reqwest::header::HeaderMap::new();
         h2.insert("retry-after", httpdate::fmt_http_date(past).parse().unwrap());
-        assert_eq!(parse_retry_after(&h2), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after_raw(&h2), Some(Duration::ZERO));
+    }
+
+    // ── BUG-2026-09-13-22：retry-after 头封顶回归 ──
+
+    #[test]
+    fn parse_retry_after_caps_huge_seconds() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("retry-after", "999999".parse().unwrap());
+        // 缺省策略：上限 = 5 × max_delay(30s) = 150s，绝不透传 999999s。
+        assert_eq!(
+            parse_retry_after(&h, &RetryPolicy::default()),
+            Some(Duration::from_secs(150))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_caps_huge_ms_header_under_policy() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("retry-after-ms", "999999000".parse().unwrap());
+        let policy = RetryPolicy {
+            max_delay: Duration::from_secs(10),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_retry_after(&h, &policy),
+            Some(Duration::from_secs(50)),
+            "上限应随 max_delay 缩放（5×）"
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_caps_huge_http_date() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            "retry-after",
+            httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(86_400))
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            parse_retry_after(&h, &RetryPolicy::default()),
+            Some(Duration::from_secs(150))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_below_cap_is_untouched() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("retry-after", "7".parse().unwrap());
+        assert_eq!(
+            parse_retry_after(&h, &RetryPolicy::default()),
+            Some(Duration::from_secs(7))
+        );
     }
 
     #[test]
     fn parse_retry_after_missing_header_returns_none() {
         let h = reqwest::header::HeaderMap::new();
-        assert_eq!(parse_retry_after(&h), None);
+        assert_eq!(parse_retry_after_raw(&h), None);
+        assert_eq!(parse_retry_after(&h, &RetryPolicy::default()), None);
     }
 
     // ── run_with_retry ──

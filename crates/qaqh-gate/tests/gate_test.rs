@@ -924,6 +924,69 @@ fn endpoint_retry_spec_drives_actual_retry_behavior() {
     assert!(done);
 }
 
+/// BUG-2026-09-13-22 回归：服务端 `retry-after: 999999` 不得把回合挂起数小时。
+/// 端到端（mock 注入头）验证：钳制值 = 5 × max_delay，且测试用 1s 级 max_delay
+/// 让封顶在可观测时间内落地（未封顶时本用例会睡 999999s，永不返回）。
+#[test]
+fn huge_retry_after_header_is_capped_end_to_end() {
+    use std::time::{Duration, Instant};
+
+    let mock = MockServer::new_sequential(vec![
+        vec![mock_server::SseChunk::error_with_headers(
+            429,
+            "rate limited",
+            vec![("retry-after", "999999".to_string())],
+        )],
+        vec![
+            mock_server::SseChunk::text("after capped retry"),
+            mock_server::SseChunk::finish("stop", None),
+            mock_server::SseChunk::done(),
+        ],
+    ]);
+    // max_delay = 1s → cap = 5s（未封顶则为 999999s）。
+    let provider = make_provider(&mock).with_retry(Some(qaqh_types::RetrySpec {
+        max_retries: 5,
+        base_delay_secs: 1,
+        max_delay_secs: 1,
+        idle_timeout_secs: 0,
+    }));
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let start = Instant::now();
+    let result = qaqh_gate::chat_stream(
+        &provider,
+        vec![Message::user("hi")],
+        None,
+        4096,
+        None,
+        None,
+        None,
+        &mut |ev| events.push(ev),
+    );
+    let elapsed = start.elapsed();
+
+    assert!(result.is_ok(), "should recover via capped retry: {result:?}");
+    let retry_delay = events.iter().find_map(|ev| match ev {
+        StreamEvent::Retrying { delay_secs, .. } => Some(*delay_secs),
+        _ => None,
+    });
+    assert_eq!(
+        retry_delay,
+        Some(5),
+        "Retrying 事件应携带封顶后的 5×max_delay(=5s)，实际 events={events:?}"
+    );
+    assert_eq!(
+        mock.request_count.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "应重试一次后成功"
+    );
+    // 未封顶时会睡 999999s；封顶后应约 5s 完成（留 2s 余量）。
+    assert!(
+        elapsed < Duration::from_secs(7),
+        "回合被挂起过久：{elapsed:?}（封顶未生效？）"
+    );
+}
+
 /// T10 贯通：`RetryPolicy::from_spec` 的零值回退语义。
 #[test]
 fn retry_policy_from_spec_falls_back_to_defaults_on_zero_fields() {

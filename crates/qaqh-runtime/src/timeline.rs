@@ -4,7 +4,7 @@
 //! same records it returns to transport. It intentionally does not depend on
 //! `Agent2Ui` or the legacy Ringing conversation/tool projections.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 
 use qaqh_domain::{
@@ -122,7 +122,10 @@ pub type OffloadFn = std::sync::Arc<dyn Fn(&str, &TimelineTurn) + Send + Sync>;
 struct SeedTimeline {
     next_seq: u64,
     turns: BTreeMap<String, TimelineTurn>,
-    journal: Vec<TimelineEntry>,
+    /// 回放尾：只在尾部追加、只在头部驱逐，故用 `VecDeque` 使两端均摊 O(1)
+    /// （BUG-2026-09-12-13：曾用 `Vec::remove(0)`，越过 8192 条上限后每条新
+    /// 事件 memmove 整个 journal）。
+    journal: VecDeque<TimelineEntry>,
     next_fragment: HashMap<(String, u32, String), u64>,
     /// journal 内滞留的 payload 字节数（text_delta/checkpoint/进度 chunk）。
     /// 驱逐时从头部扣减，O(1) 维护。
@@ -686,6 +689,7 @@ impl TimelineAppender {
         snapshot: TimelineSnapshot,
         journal: Vec<TimelineEntry>,
     ) {
+        let journal: VecDeque<TimelineEntry> = journal.into_iter().collect();
         let mut next_fragment = HashMap::new();
         let mut journal_bytes = 0u64;
         for entry in &journal {
@@ -749,7 +753,7 @@ fn next_entry(
         event,
     };
     timeline.journal_bytes += journal_entry_payload_bytes(&entry.event);
-    timeline.journal.push(entry.clone());
+    timeline.journal.push_back(entry.clone());
     enforce_journal_budget(timeline);
     entry
 }
@@ -765,17 +769,19 @@ fn journal_entry_payload_bytes(event: &TimelineEvent) -> u64 {
 }
 
 /// 双限（条数 + 字节）头部驱逐：保序移除最老条目直至两项都回到界内。
+///
+/// 两端均摊 O(1)（`pop_front`），与 journal 的 FIFO 语义一致——`Vec::remove(0)`
+/// 会让每条越过上限的事件 memmove 整个窗口，实测 52–83× 阶跃且全程持锁。
 fn enforce_journal_budget(timeline: &mut SeedTimeline) {
     let entry_limit = crate::ringing::persistence_policy::MAX_TIMELINE_JOURNAL_ENTRIES;
     let byte_limit = crate::ringing::persistence_policy::journal_byte_limit();
     while timeline.journal.len() > entry_limit || timeline.journal_bytes > byte_limit {
-        let Some(oldest) = timeline.journal.first() else {
+        let Some(oldest) = timeline.journal.pop_front() else {
             break;
         };
         timeline.journal_bytes = timeline
             .journal_bytes
             .saturating_sub(journal_entry_payload_bytes(&oldest.event));
-        timeline.journal.remove(0);
     }
 }
 
@@ -1487,5 +1493,74 @@ mod tests {
             .sum();
         let seed = restored.seeds.get("s").unwrap();
         assert_eq!(seed.journal_bytes, expected);
+    }
+
+    /// 8192 条上限之上的摊还成本必须与上限之内同阶（O(1)），且驱逐只丢最老前缀。
+    ///
+    /// BUG-2026-09-12-13：`enforce_journal_budget` 用 `Vec::remove(0)` 头部驱逐，
+    /// 每条新事件 memmove 整个 journal；报告实测 2.21 µs → 115.88 µs（16000 条）
+    /// /182.83 µs（32768 条），52–83× 阶跃，且全程持全局 timeline 锁。修法是
+    /// `VecDeque::pop_front()`（摊还 O(1)）。
+    ///
+    /// 阈值是**同机比值**而非绝对时长（无绝对耗时阈值，机器无关）：越界窗口的
+    /// 平均每事件耗时不得超过上限内窗口的 2.5×——O(1) 驱逐下该比值恒 ≈1，O(n)
+    /// memmove 下随 CAP 线性放大。修复前本机实测 ratio **7.1**（debug，38.2 vs
+    /// 1.3 µs/event）；修复后 **0.24–0.96**（示例 1.30 vs 1.36 µs/event，越界侧
+    /// 甚至更快，因 int 编码后少一条移除）。2.5× 两侧仍各有 ≥2× 余量。
+    #[test]
+    fn journal_eviction_is_amortized_constant_time_past_the_entry_cap() {
+        const CAP: u64 = 8192;
+        const WINDOW: u64 = 2048;
+        const BUDGET_RATIO: f64 = 2.5;
+
+        // 单条 payload 64 B：~0.5 MB 总量，远离 256 MB 字节上限，
+        // 保证越界驱逐**只**由条数上限触发（否则测的不是这条路径）。
+        let chunk = "x".repeat(64);
+        let mut appender = TimelineAppender::new();
+        appender
+            .open_turn("perf", "t1", "high frequency deltas")
+            .unwrap();
+        appender
+            .open_block("perf", "t1", 0, "r", TimelineBlockKind::Reasoning, None)
+            .unwrap();
+
+        // 窗口 A：上限之内写 CAP 条（无驱逐）。
+        let inside_start = std::time::Instant::now();
+        for seq in 0..CAP {
+            appender
+                .append_text("perf", "t1", 0, "r", seq, chunk.clone())
+                .unwrap();
+        }
+        let inside = inside_start.elapsed();
+
+        // 窗口 B：越过上限，每条驱逐一条最老条目。
+        let over_start = std::time::Instant::now();
+        for seq in CAP..(CAP + WINDOW) {
+            appender
+                .append_text("perf", "t1", 0, "r", seq, chunk.clone())
+                .unwrap();
+        }
+        let over = over_start.elapsed();
+
+        let tail = appender.replay_since("perf", 0);
+        assert_eq!(
+            tail.len() as u64,
+            CAP,
+            "replay tail must stay pinned at the entry cap while evicting"
+        );
+        assert_eq!(
+            tail.last().map(|entry| entry.timeline_seq),
+            Some(CAP + WINDOW + 2),
+            "newest delta must survive eviction"
+        );
+        let inside = inside.as_secs_f64().max(1e-9);
+        assert!(
+            over.as_secs_f64() <= inside * BUDGET_RATIO,
+            "eviction past the cap must stay O(1): {:.3} µs/event over the whole \
+             {CAP}-entry run vs {:.3} µs/event while evicting (ratio {:.2} > {BUDGET_RATIO})",
+            inside * 1e6 / CAP as f64,
+            over.as_secs_f64() * 1e6 / WINDOW as f64,
+            over.as_secs_f64() / inside,
+        );
     }
 }

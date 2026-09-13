@@ -2,6 +2,20 @@
 
 use std::sync::OnceLock;
 
+/// 启动期壳探测（daemon `main` 调一次，与 `cache_system_path`/`detect_os_info`
+/// 同批）：显式注册的路径优先，其后由 [`Shell::detect`] 选平台默认壳并
+/// 把可运行候选解析钉进 `path()`。返回钉住的可执行名（无可用壳时返回
+/// 名义名，调用方无需分支）。
+pub fn bootstrap() -> String {
+    Shell::detect().path().to_string()
+}
+
+/// 显式钉住壳路径（embedder/测试用；`bootstrap()` 之外的第二入口）。
+/// 传空串 = no-op。钉住的路径在 `Shell::path()` 中优先级最高。
+pub fn register_shell(path: &str) {
+    Shell::register_shell(path);
+}
+
 // ── Platform shell detection ──
 // Adapted from codex-rs/shell-command/src/shell_detect.rs & core/src/shell.rs.
 // Stripped to the minimum needed: pick the right shell, derive argv.
@@ -20,8 +34,21 @@ pub(crate) enum Shell {
 pub(crate) static DETECTED_SHELL: OnceLock<Shell> = OnceLock::new();
 /// Full path to bash on Windows — avoids the WSL wrapper at System32\\bash.exe.
 pub(crate) static DETECTED_BASH_PATH: OnceLock<String> = OnceLock::new();
+/// 启动期显式注册的壳路径（`Shell::register_shell`）。
+pub(crate) static REGISTERED_SHELL_PATH: OnceLock<String> = OnceLock::new();
 /// Full path to PowerShell on Windows（pwsh 7 优先，powershell.exe 兜底）。
-pub(crate) static DETECTED_PWSH_PATH: OnceLock<String> = OnceLock::new();
+static DETECTED_PWSH_PATH: OnceLock<String> = OnceLock::new();
+/// 各壳解析出的可运行候选名缓存（`Some(None)` = 候选集全不可用）。
+/// 必须按壳分槽：Bash/Zsh/Sh 共用同一候选集，但「谁命中了」对每个壳
+/// 是独立事实（容器里只有 `sh` 时，Bash/Zsh 都该落到 `sh`，而不是让
+/// 先探测的一方污染另一方）。
+static RESOLVED_SHELL_NAME: [OnceLock<Option<String>>; 5] = [
+    OnceLock::new(),
+    OnceLock::new(),
+    OnceLock::new(),
+    OnceLock::new(),
+    OnceLock::new(),
+];
 
 impl Shell {
     /// Auto-detect the best available shell on this platform.
@@ -70,6 +97,37 @@ impl Shell {
         }
     }
 
+    /// 启动期把「探测到的壳」钉进进程状态：注册的路径或名字在后续所有
+    /// 派生中优先（Windows git-bash 绝对路径即由此进入 `path()`）。
+    pub(crate) fn register_shell(path: &str) {
+        if !path.is_empty() {
+            let _ = REGISTERED_SHELL_PATH.set(path.to_string());
+        }
+    }
+
+    /// 已解析的候选名（进程内一次性；`None` = 候选集全不可用）。
+    /// 与 `available()` 共用同一份口径，保证探测与派生同源。
+    fn resolved_shell_name(&self) -> Option<&'static str> {
+        let slot = match self {
+            Shell::Bash => 0,
+            Shell::Zsh => 1,
+            Shell::Sh => 2,
+            Shell::PowerShell => 3,
+            Shell::Cmd => 4,
+        };
+        let cache = &RESOLVED_SHELL_NAME[slot];
+        if let Some(shell) = cache.get() {
+            return shell.as_deref();
+        }
+        let resolved = self
+            .executable_candidates()
+            .iter()
+            .copied()
+            .find(|candidate| executable_on_path(candidate));
+        let _ = cache.set(resolved.map(str::to_string));
+        cache.get().and_then(Option::as_deref)
+    }
+
     pub(crate) fn detect_uncached() -> Self {
         #[cfg(windows)]
         {
@@ -112,20 +170,57 @@ impl Shell {
     }
 
     /// Path to the shell executable.
+    /// 优先级：显式注册（启动期探测结果）> Windows git-bash 绝对路径 >
+    /// 候选集解析出的可运行名（`resolved_shell_name`）> 名义名。
+    /// 候选解析是「探测与派生同源」的关键：精简镜像只有 `sh`/`dash` 时，
+    /// `Shell::Bash` 会派生 `sh` 而不是必然失败的 `bash`——于是显式
+    /// `shell: "bash"` 与平台自动检测落在同一支壳上（同一 POSIX 语义），
+    /// 探测口径与实际 argv 不再漂移。
     pub(crate) fn path(&self) -> &str {
+        let registered = REGISTERED_SHELL_PATH.get();
+        let resolved = self.resolved_shell_name();
         match self {
-            Shell::Bash => DETECTED_BASH_PATH
-                .get()
+            Shell::Bash => registered
+                .or_else(|| DETECTED_BASH_PATH.get())
                 .map(String::as_str)
+                .or(resolved)
                 .unwrap_or("bash"),
-            Shell::Zsh => "zsh",
-            Shell::Sh => "sh",
-            Shell::PowerShell => DETECTED_PWSH_PATH
-                .get()
+            Shell::Zsh => resolved.unwrap_or("zsh"),
+            Shell::Sh => resolved.unwrap_or("sh"),
+            Shell::PowerShell => registered
+                .or_else(|| DETECTED_PWSH_PATH.get())
                 .map(String::as_str)
+                .or(resolved)
                 .unwrap_or("pwsh"),
-            Shell::Cmd => "cmd",
+            Shell::Cmd => resolved.unwrap_or("cmd"),
         }
+    }
+
+    /// 候选可执行名集（探测与实际派生必须同源）。
+    /// `path()` 非绝对路径时只是「初始候选」，真实可用性可能落在同族别名上：
+    /// 精简镜像只有 `sh`/`dash`、Windows 侧 git-bash 尚未解析、pwsh 7 缺失时
+    /// 落 `powershell.exe`。探测只认 `path()` 一个名字会误报 SHELL_NOT_FOUND，
+    /// 而派生实际上能跑起来（O-3 的「探测 ≠ 派生」缺口）。
+    pub(crate) fn executable_candidates(&self) -> &'static [&'static str] {
+        match self {
+            // `sh` 是 POSIX 兜底：bash/zsh 缺失时同一脚本仍能被 POSIX 壳执行。
+            Shell::Bash | Shell::Zsh | Shell::Sh => &["bash", "zsh", "sh", "dash"],
+            // pwsh 7 优先；缺 pwsh 时 Windows 自带 powershell.exe 兜底。
+            Shell::PowerShell => &["pwsh", "powershell"],
+            Shell::Cmd => &["cmd"],
+        }
+    }
+
+    /// shell 可用性软检测：`path()` 已是绝对路径（Windows 探到的 git-bash）时
+    /// 只看它；否则按候选集探测——与 `derive_exec_args_with` 最终派生的
+    /// 可执行名同源，杜绝「探测到的壳」与「实际跑的壳」不一致。
+    pub(crate) fn available(&self) -> bool {
+        let path = self.path();
+        let p = std::path::Path::new(path);
+        if p.is_absolute() {
+            return p.is_file();
+        }
+        executable_on_path(path)
     }
 
     /// Build the argv that runs `command` through this shell.
@@ -133,6 +228,9 @@ impl Shell {
     /// Win32 命令行解析中的转义地狱；stdout/stderr 仍通过管道捕获，编码不影响输出。
     /// 当 `args` 非空且为 PowerShell 时，自动走 `-CommandWithArgs`（7.6 LTS 主流），
     /// 把 `args` 原样作为 CommandParameters 填入 `$args`，避免在脚本内拼接引号。
+    /// **绑定契约：只填 `$args`（`$args[0]` 起 / `$args.Count`），不产生
+    /// `$arg0`/`$argN`**——`pwsh -h` 原文为 "populates the `$args` built-in
+    /// variable"；脚本里写 `$argN` 恒为 `$null`（与参数是否中文无关）。
     /// 当 `args` 非空且为 POSIX shell（bash/zsh/sh）时，透传为位置参数
     /// `[sh, -c, command, _, args...]`（`$0` 占位 `_`，`args` 进 `$1/$2/$@`），
     /// 与 pwsh 侧对称：模板与数据分离，避免在脚本字符串内拼接引号。

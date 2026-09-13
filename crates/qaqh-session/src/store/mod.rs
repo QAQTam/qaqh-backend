@@ -15,7 +15,6 @@ use qaqh_types::{Message, SessionMeta};
 
 pub mod bounded_read;
 
-
 // ── Meta ──
 
 /// Write session metadata to `meta.json` atomically (write to temp, rename).
@@ -99,8 +98,16 @@ pub fn rewrite_messages(session_dir: &Path, messages: &[Message]) -> Result<(), 
 /// or the messages carry no ids). Scans the file once without materializing
 /// messages (BUG-2026-09-12-07: used by `save_append` to make appends
 /// idempotent against WAL replay double-writes).
+///
+/// 这是**权威判据**（每次真读盘）。热路径请用 [`watermark_msg_id`]：
+/// 后者是同一量的增量视图，语义等价但 amortized O(批次)。
 pub fn max_msg_id(session_dir: &Path) -> u64 {
+    max_msg_id_full_scan(session_dir)
+}
+
+fn max_msg_id_full_scan(session_dir: &Path) -> u64 {
     let path = session_dir.join("messages.jsonl");
+    note_full_scan(session_dir);
     let Ok(content) = fs::read_to_string(&path) else {
         return 0;
     };
@@ -111,6 +118,169 @@ pub fn max_msg_id(session_dir: &Path) -> u64 {
         .filter_map(|message| message.msg_id)
         .max()
         .unwrap_or(0)
+}
+
+// ── msg_id 水位（BUG-2026-09-13-32，性能族）──
+
+/// 归档身份判据：`(字节长度, 修改时间)` 变化即作废水位缓存。
+///
+/// 不变量：写入路径上所有调用方**先落盘、后推进水位**（`note_watermark`
+/// 只在 append_messages 返回 Ok 之后调用），因此「身份与缓存建立时不一致」
+/// 只可能来自外部 writer / save_full 重写 / 目录重建。这类情况下本轮走
+/// 全量扫描并把新水位记入缓存（harness：判据不失效时才要求零扫描）。
+type ArchiveIdentity = (u64, Option<std::time::SystemTime>);
+
+struct WatermarkEntry {
+    identity: ArchiveIdentity,
+    max_msg_id: u64,
+}
+
+fn watermarks() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, WatermarkEntry>>
+{
+    static WATERMARKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, WatermarkEntry>>,
+    > = std::sync::OnceLock::new();
+    WATERMARKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 归档当前身份（不存在视为 `(0, None)`）。
+fn archive_identity(path: &Path) -> ArchiveIdentity {
+    match fs::metadata(path) {
+        Ok(meta) => (meta.len(), meta.modified().ok()),
+        Err(_) => (0, None),
+    }
+}
+
+/// 归档内最大 `msg_id` 的**增量水位**。
+///
+/// 缓存命中（身份未变）→ 只看一次 `stat`，不再读归档。身份变化（外部
+/// writer、save_full 重写、会话重建）→ 重建：优先反向尾读（O(尾部)），
+/// 尾窗无 id 才回落全量扫描（旧归档尾部可能全是无 id 消息）。
+///
+/// 与 [`max_msg_id`] 语义等价：两者都返回归档内最大 `msg_id`（无则 0）。
+pub fn watermark_msg_id(session_dir: &Path) -> u64 {
+    let path = session_dir.join("messages.jsonl");
+    let identity = archive_identity(&path);
+    if let Some(entry) = watermarks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_dir)
+        && entry.identity == identity
+    {
+        return entry.max_msg_id;
+    }
+    let rebuilt = rebuild_watermark(&path, identity);
+    let max_msg_id = rebuilt.max_msg_id;
+    watermarks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session_dir.to_path_buf(), rebuilt);
+    max_msg_id
+}
+
+/// 尾读窗口（行数）：`read_last_lines` 以 64 KiB 块反向读，凑够即停。
+const TAIL_WINDOW_LINES: usize = 4096;
+
+/// 重建水位（不做缓存读写）。
+fn rebuild_watermark(path: &Path, identity: ArchiveIdentity) -> WatermarkEntry {
+    if identity.0 == 0 {
+        return WatermarkEntry {
+            identity,
+            max_msg_id: 0,
+        };
+    }
+    // 只有「窗口内一条带 id 的消息都没有且头部还有未读内容」（旧归档 /
+    // 全无 id 消息）才回落全量扫描——与修复前同阶，但每个归档只付一次。
+    let (lines, truncated) =
+        bounded_read::read_last_lines(path, TAIL_WINDOW_LINES).unwrap_or_default();
+    let mut tail_max = 0u64;
+    for line in &lines {
+        if let Ok(message) = serde_json::from_str::<Message>(line)
+            && let Some(id) = message.msg_id
+        {
+            tail_max = tail_max.max(id);
+        }
+    }
+    let max_msg_id = if tail_max > 0 || !truncated {
+        tail_max
+    } else {
+        max_msg_id_full_scan(path.parent().unwrap_or(path))
+    };
+    WatermarkEntry {
+        identity,
+        max_msg_id,
+    }
+}
+
+/// 归档被改写后强制重建水位（`save_full` 全量重写、`delete` 目录销毁）。
+/// 缓存按目录路径键控，与目录是否存在无关。
+pub fn invalidate_watermark(session_dir: &Path) {
+    watermarks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session_dir);
+}
+
+/// 清空全部水位缓存（测试隔离用）。
+#[doc(hidden)]
+pub fn reset_watermarks() {
+    watermarks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// 全量扫描计数器（测试用规模判据：缓存命中路径必须不递增）。
+#[doc(hidden)]
+pub fn reset_scan_counter() {
+    scans()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// 指定会话目录的累计全量扫描次数（测试用）。
+#[doc(hidden)]
+pub fn scan_count(session_dir: &Path) -> usize {
+    scans()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_dir)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[doc(hidden)]
+pub fn note_full_scan(session_dir: &Path) {
+    *scans()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(session_dir.to_path_buf())
+        .or_insert(0) += 1;
+}
+
+fn scans() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>> {
+    static SCANS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+    > = std::sync::OnceLock::new();
+    SCANS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 落盘成功后推进水位（只增不减；写入路径的唯一入口）。
+///
+/// 身份取当前文件的 `(len, mtime)`：写路径结束于此，所以这一步同时把
+/// 缓存标记为「与盘面一致」。水位低于既有缓存值时不回退（msg_id 会话
+/// 单调；save_full 的重基走 [`invalidate_watermark`]）。
+pub fn note_watermark(session_dir: &Path, max_msg_id: u64) {
+    let path = session_dir.join("messages.jsonl");
+    let identity = archive_identity(&path);
+    let mut cache = watermarks().lock().unwrap_or_else(|e| e.into_inner());
+    let entry = cache.entry(session_dir.to_path_buf()).or_insert(WatermarkEntry {
+        identity,
+        max_msg_id,
+    });
+    entry.max_msg_id = entry.max_msg_id.max(max_msg_id);
+    entry.identity = identity;
 }
 
 /// Count lines in messages.jsonl (fast, reads line-by-line without parsing JSON).
@@ -140,12 +310,12 @@ pub fn count_message_lines(session_dir: &Path) -> Result<usize, String> {
 ///
 /// 兼容：首次读取若无 `index.jsonl` 但有旧 `index.json`，一次性迁移
 /// （生成 jsonl 后删除旧文件，格式破坏性变更已获 owner 批准）。
-
+//
 /// 单行操作（wire: 每行一个 JSON 对象）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum IndexOp {
-    Upsert { meta: SessionMeta },
+    Upsert { meta: Box<SessionMeta> },
     Remove { seed: String },
 }
 
@@ -182,7 +352,7 @@ fn read_merged_index(sessions_dir: &Path) -> Vec<SessionMeta> {
         lines += 1;
         match serde_json::from_str::<IndexOp>(trimmed) {
             Ok(IndexOp::Upsert { meta }) => {
-                by_seed.insert(meta.seed.clone(), meta);
+                by_seed.insert(meta.seed.clone(), *meta);
             }
             Ok(IndexOp::Remove { seed }) => {
                 by_seed.remove(&seed);
@@ -217,7 +387,9 @@ fn rewrite_index_log<'a>(sessions_dir: &Path, metas: impl Iterator<Item = &'a Se
     let dst = index_log_path(sessions_dir);
     let mut body = String::new();
     for meta in metas {
-        let op = IndexOp::Upsert { meta: meta.clone() };
+        let op = IndexOp::Upsert {
+            meta: Box::new(meta.clone()),
+        };
         if let Ok(line) = serde_json::to_string(&op) {
             body.push_str(&line);
             body.push('\n');
@@ -257,13 +429,23 @@ fn append_index_op(sessions_dir: &Path, op: &IndexOp) {
 /// Upsert a single session meta into the index：O(1) append，无全量重写。
 /// 同 seed 后行胜（读侧归并语义），启动后首次列表读取超阈值时自动 compact。
 pub fn upsert_index(sessions_dir: &Path, meta: &SessionMeta) {
-    append_index_op(sessions_dir, &IndexOp::Upsert { meta: meta.clone() });
+    append_index_op(
+        sessions_dir,
+        &IndexOp::Upsert {
+            meta: Box::new(meta.clone()),
+        },
+    );
 }
 
 /// Remove a session from the index：追加 tombstone，读侧归并时丢弃。
 /// tombstone 随下次 compact 消失，日志不会无界增长。
 pub fn remove_from_index(sessions_dir: &Path, seed: &str) {
-    append_index_op(sessions_dir, &IndexOp::Remove { seed: seed.to_string() });
+    append_index_op(
+        sessions_dir,
+        &IndexOp::Remove {
+            seed: seed.to_string(),
+        },
+    );
 }
 
 #[cfg(test)]
@@ -285,10 +467,11 @@ mod tests {
     }
 
     fn meta(seed: &str, updated: u64) -> SessionMeta {
-        let mut meta = SessionMeta::default();
-        meta.seed = seed.to_string();
-        meta.updated_at = updated;
-        meta
+        SessionMeta {
+            seed: seed.to_string(),
+            updated_at: updated,
+            ..SessionMeta::default()
+        }
     }
 
     #[test]
@@ -319,7 +502,11 @@ mod tests {
         upsert_index(&dir, &meta("a", 3)); // 同 seed 后行胜
         assert_eq!(read_index(&dir).len(), 2);
         assert_eq!(
-            read_index(&dir).iter().find(|m| m.seed == "a").unwrap().updated_at,
+            read_index(&dir)
+                .iter()
+                .find(|m| m.seed == "a")
+                .unwrap()
+                .updated_at,
             3
         );
         remove_from_index(&dir, "a");

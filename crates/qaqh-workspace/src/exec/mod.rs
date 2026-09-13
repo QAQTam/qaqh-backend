@@ -14,9 +14,10 @@ pub mod shell;
 pub mod truncate;
 
 pub use register::register;
+pub use shell::{bootstrap, register_shell};
 
 #[cfg(test)]
-pub(crate) use direct::direct_exec;
+pub(crate) use direct::{direct_exec, reader_eof_warning};
 #[cfg(test)]
 pub(crate) use handler::{
     detect_background_derivation, handle_run_exec, normalize_command_rg, normalize_rg_argv,
@@ -31,7 +32,7 @@ pub(crate) use pipe::{PipePumpCtx, Readiness, drain_pipe_to_registry};
 #[cfg(all(test, windows))]
 pub(crate) use pipe::decode_windows_oem;
 #[cfg(test)]
-pub(crate) use shell::{Shell, base64_decode, executable_in_dirs, ps_encode};
+pub(crate) use shell::{Shell, base64_decode, executable_in_dirs, executable_on_path, ps_encode};
 #[cfg(test)]
 pub(crate) use truncate::token_truncate;
 
