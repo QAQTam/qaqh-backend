@@ -318,11 +318,13 @@ fn exec_copy_range(args: &serde_json::Value) -> ToolResult {
     ) {
         Ok(r) => {
             // 账本同步：目标已写盘，登记最新内容供 edit 防漂移。
-            // 键必须是 resolve_workspace_path 后的绝对路径——read/edit 都按
-            // 绝对路径记账，用原始参数路径会让同一文件出现两套键，
-            // STALE_FILE 校验便看不到本次写入（BUG-2026-09-13-16）。
+            // 键形态必须与 read/write 的账本键完全一致：lib::resolve_workspace_path
+            // （不 canonicalize、无 \\?\ verbatim 前缀）。apply_patch_engine 版本在
+            // Windows 上返回 canonicalize 结果，带 \\?\ 前缀，会导致同一文件出现
+            // 两套键、STALE_FILE 校验看不到本次写入（BUG-2026-09-13-16 跟进）。
+            let ledger_key = crate::resolve_workspace_path(&target_path);
             if let Ok(content) = std::fs::read_to_string(&tgt) {
-                crate::file_state::record_write(&tgt.to_string_lossy(), &content);
+                crate::file_state::record_write(&ledger_key, &content);
             }
             let n = r.copied.len();
             let mut text = format!(
@@ -624,18 +626,24 @@ mod tests {
 
     #[test]
     fn copy_range_ledger_key_matches_resolved_absolute_path() {
-        // BUG-2026-09-13-16 回归：copy_range 必须用 resolve_workspace_path 后的
-        // 绝对路径记账（与 read/edit/write 同一套账本键），否则 STALE_FILE
-        // 校验看不到 copy_range 的写。
+        // BUG-2026-09-13-16 回归：copy_range 必须用与 read/write 同形的账本键
+        // （lib::resolve_workspace_path，无 \\?\ verbatim 前缀），否则
+        // STALE_FILE 校验看不到 copy_range 的写。
         let (dir, ws) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);
         let raw_src = "src.rs";
         let raw_tgt = "dst.rs";
         run(&ws, raw_src, "copied", None, raw_tgt, None, "append").unwrap();
 
+        // 键形态 = lib::resolve_workspace_path(CURRENT_WORKSPACE + 相对路径)，
+        // 与 read（file_query）/write（file_mutate）记账键同源同形。
         let expected_key = crate::resolve_workspace_path(raw_tgt);
         assert!(
             std::path::Path::new(&expected_key).is_absolute(),
             "resolve_workspace_path must yield an absolute key, got {expected_key}"
+        );
+        assert!(
+            !expected_key.contains(r"\\\\?\\"),
+            "ledger key must not carry a verbatim \\\\?\\ prefix: {expected_key}"
         );
         let wrote = std::fs::read_to_string(dir.path().join(raw_tgt)).unwrap();
         let expected_hash =
@@ -660,11 +668,13 @@ mod tests {
         let (dir, ws) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);
         let raw_src = "src.rs";
         let raw_tgt = "dst.rs";
-        let abs_tgt = dir
-            .path()
+        // 键形态与 read/write 同源：lib::resolve_workspace_path 产出的形态
+        // （CURRENT_WORKSPACE + 相对路径，Windows 分隔符不强制转斜杠——
+        // lib 版本用 Path::join，键里是反斜杠）。
+        let abs_tgt = std::path::Path::new(ws.to_string_lossy().as_ref())
             .join(raw_tgt)
             .to_string_lossy()
-            .replace('\\', "/");
+            .to_string();
 
         // 全程用绝对路径（resolve_workspace_path 对绝对路径直接返回），
         // 不依赖全局 CURRENT_WORKSPACE，可与其它并行测试共存。
