@@ -23,7 +23,13 @@ pub(crate) use handler::{
     shell_available,
 };
 #[cfg(test)]
-pub(crate) use pipe::{PipePumpCtx, Readiness, decode_windows_oem, drain_pipe_to_registry};
+pub(crate) use pipe::{PipePumpCtx, Readiness, drain_pipe_to_registry};
+// `decode_windows_oem` 本体带 `#[cfg(windows)]`：非 Windows 目标下重导出会
+// 编译失败（unresolved import），重导出条件必须与定义一致。
+// 注：这是 Linux 上跑 `cargo test/clippy -p qaqh-workspace` 的前置修复，
+// 与账本键缺陷无关，已在 PR 正文说明。
+#[cfg(all(test, windows))]
+pub(crate) use pipe::decode_windows_oem;
 #[cfg(test)]
 pub(crate) use shell::{Shell, base64_decode, executable_in_dirs, ps_encode};
 #[cfg(test)]
