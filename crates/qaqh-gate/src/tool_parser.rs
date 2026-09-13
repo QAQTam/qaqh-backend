@@ -161,10 +161,33 @@ fn parse_invoke_block(s: &str) -> Option<(String, String, &str)> {
     let mut rem = body;
     while let Some(p) = rem.find(param_tag) {
         let after_p = &rem[p + param_tag.len()..];
-        let param_name = extract_attr_value(after_p, "name")?.trim().to_string();
         let str_attr = extract_attr_value(after_p, "string").unwrap_or_default();
-        let Some(gt) = after_p.find('>') else { break };
-        let content_start = &after_p[gt + 1..];
+        // `extract_attr_value` scans past `>` when the quote is unclosed, so the
+        // parameter name must come from the open tag only — otherwise it swallows
+        // the following markup (BUG-2026-09-13-19).
+        let open_tag_end = match after_p.find('>') {
+            Some(gt) => gt,
+            None => break,
+        };
+        let open_tag = &after_p[..open_tag_end];
+        let Some(param_name) = extract_attr_value(open_tag, "name") else {
+            // Malformed <parameter …> (missing `name=`): skip this parameter
+            // instead of discarding the whole invoke.
+            let Some(close) = after_p.find(param_close) else {
+                break;
+            };
+            rem = &after_p[close + param_close.len()..];
+            continue;
+        };
+        let param_name = param_name.trim().to_string();
+        if param_name.is_empty() {
+            let Some(close) = after_p.find(param_close) else {
+                break;
+            };
+            rem = &after_p[close + param_close.len()..];
+            continue;
+        }
+        let content_start = &after_p[open_tag_end + 1..];
         let Some(close) = content_start.find(param_close) else {
             break;
         };
@@ -631,4 +654,83 @@ mod tests {
         assert_eq!(args["command"], "ls");
         assert!(!cleaned.contains("DSML"));
     }
+    /// BUG-2026-09-13-19 回归（XML/invoke 路径）·
+    /// 单个畸形 `<parameter>` 不得污染整个 invoke 的参数表。
+    ///
+    /// 现场：模型写成 `<parameter name="path>src/main.rs</parameter>`
+    /// （属性引号未闭合）。`extract_attr_value` 的 `find('"')` 会一路捞到
+    /// 后续 markup 里的引号，把 `path>src/main.rs</parameter>\n<parameter name=`
+    /// 当成参数名塞进 args，后续正常参数被吞进这个假参数里——
+    /// 工具收到一个不存在的键，真实参数全部失踪。
+    #[test]
+    fn test_unclosed_attr_quote_does_not_corrupt_args() {
+        let content = "<tool_calls>\n<invoke name=\"read\">\n<parameter name=\"path>src/main.rs</parameter>\n<parameter name=\"start_line\" string=\"false\">7</parameter>\n</invoke>\n</tool_calls>";
+
+        let tool_names: Vec<String> = vec!["read".into()];
+        let (cleaned, tcs) = parse_xml_tool_calls(content, &tool_names);
+
+        assert_eq!(
+            tcs.len(),
+            1,
+            "invoke must survive a parameter with an unclosed attribute quote, got {}: {:?}",
+            tcs.len(),
+            tcs
+        );
+        assert_eq!(tcs[0].function.name, "read");
+        let args: serde_json::Value = serde_json::from_str(&tcs[0].function.arguments).unwrap();
+        assert!(
+            !args.as_object().unwrap().keys().any(|k| k.contains("parameter")),
+            "parameter name must not swallow following markup: {args}"
+        );
+        assert_eq!(
+            args["start_line"], 7,
+            "well-formed parameter after the malformed one must survive: {args}"
+        );
+        assert!(
+            !cleaned.contains("</invoke>"),
+            "invoke block must be consumed, not leaked into content: {cleaned:?}"
+        );
+    }
+
+    /// BUG-2026-09-13-19 回归：缺 `name` 属性的畸形 parameter 必须整条跳过，
+    /// 不得把后面正常参数的 `name=` 抢过来（那会把畸形参数当成正常参数入库）。
+    #[test]
+    fn test_malformed_parameter_does_not_steal_neighbour_name() {
+        let content = "<tool_calls>\n<invoke name=\"read\">\n<parameter foo=\"x\">boom</parameter>\n<parameter name=\"path\" string=\"true\">src/main.rs</parameter>\n</invoke>\n</tool_calls>";
+
+        let tool_names: Vec<String> = vec!["read".into()];
+        let (cleaned, tcs) = parse_xml_tool_calls(content, &tool_names);
+
+        assert_eq!(tcs.len(), 1, "malformed parameter must not drop the invoke");
+        assert_eq!(tcs[0].function.name, "read");
+        let args: serde_json::Value = serde_json::from_str(&tcs[0].function.arguments).unwrap();
+        assert_eq!(
+            args["path"], "src/main.rs",
+            "well-formed parameter after the malformed one must survive: {args}"
+        );
+        assert_eq!(
+            args.as_object().unwrap().len(),
+            1,
+            "malformed parameter must be skipped, not merged into a neighbour: {args}"
+        );
+        assert!(
+            !cleaned.contains("</invoke>"),
+            "invoke block must be consumed, not leaked into content: {cleaned:?}"
+        );
+    }
+
+    /// BUG-2026-09-13-19 回归：畸形 parameter 之后的正常参数仍应被解析。
+    #[test]
+    fn test_parameters_after_unclosed_quote_still_parsed() {
+        let content = "<tool_calls><invoke name=\"exec\"><parameter name=\"command\" string=\"true\">cargo test</parameter><parameter name=\"timeout\" string=\"false\">30</parameter></invoke></tool_calls>";
+
+        let tool_names: Vec<String> = vec!["exec".into()];
+        let (_cleaned, tcs) = parse_xml_tool_calls(content, &tool_names);
+
+        assert_eq!(tcs.len(), 1, "invoke must survive");
+        let args: serde_json::Value = serde_json::from_str(&tcs[0].function.arguments).unwrap();
+        assert_eq!(args["command"], "cargo test");
+        assert_eq!(args["timeout"], 30);
+    }
+
 }
