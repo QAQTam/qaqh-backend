@@ -578,9 +578,9 @@ fn read_prompt(
                 return;
             }
         };
-        let fetched = tokio::time::timeout(timeout, conn.get_prompt(&prompt_name, arguments)).await;
-        let _ = tx.send(match fetched {
-            Ok(Ok(result)) => {
+        // #39：超时/断连硬顶与错误映射在连接层（与 call_tool/read_resource 同款）。
+        let _ = tx.send(match conn.get_prompt(&prompt_name, arguments, timeout).await {
+            Ok(result) => {
                 let mut lines = Vec::new();
                 for message in &result.messages {
                     let role = match message.role {
@@ -599,15 +599,9 @@ fn read_prompt(
                 }
                 ToolResult::ok(lines.join("\n"))
             }
-            Ok(Err(error)) => error_result(
-                McpErrorKind::Protocol,
-                format!("prompts/get {prompt_label:?} failed: {error}"),
-            ),
-            Err(_) => error_result(
-                McpErrorKind::Timeout,
-                format!(
-                    "prompts/get {prompt_label:?} timed out after {timeout_secs}s on server {server:?}"
-                ),
+            Err(error) => error_result(
+                error.kind,
+                format!("prompts/get {prompt_label:?} failed on server {server:?}: {error}"),
             ),
         });
     });

@@ -212,6 +212,13 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
             paths.push(PathBuf::from(t));
         }
     }
+    // web_fetch: `output` 是 web.rs 里唯一且无条件的 `fs::write` 目标；
+    // 不提等于审批清单看不到写目标，workspace 边界/trust folder 判定失明。
+    if tool_name == "web_fetch"
+        && let Some(o) = args.get("output").and_then(|v| v.as_str())
+    {
+        paths.push(PathBuf::from(o));
+    }
     // journal: replay target/out may write outside the workspace; keep it
     // authorization-bounded like other write tools.
     if tool_name == "journal" {

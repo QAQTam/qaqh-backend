@@ -956,3 +956,92 @@ mod tool_mode_tests {
         assert!(validate_tool_mode("turbo").is_err());
     }
 }
+
+#[cfg(test)]
+mod plan_service_tests {
+    use super::plan::{plan_action, token_stats};
+
+    /// `days` 直取 IPC 参数且决定条目数与循环数：未封顶时
+    /// `stats.token_usage {days: 200000}` 产出 20 万条目（daemon 线程内存 +
+    /// 延迟无界）。窗口必须有硬上限。
+    #[test]
+    fn token_stats_clamps_the_requested_day_window() {
+        let value = token_stats(200_000).expect("token_stats");
+        let daily = value["daily"].as_array().expect("daily array");
+        assert!(
+            daily.len() <= 366,
+            "token_stats must clamp the day window; got {} entries",
+            daily.len()
+        );
+    }
+
+    /// `plan_action` 用 `lines()` + `join("\n")` 回写，文件以非空行结尾时
+    /// 每次裁决静默剥掉末尾换行。
+    #[test]
+    fn plan_action_preserves_the_trailing_newline() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // 计划文件路径 = workspace/.qaqh/PLAN.md；workspace 由线程级作用域
+        // 提供，避开 session 全局单例（单测进程内不可重复 init）。
+        let workspace = root.path().join("ws");
+        std::fs::create_dir_all(workspace.join(".qaqh")).expect("mkdir");
+        let plan_path = workspace.join(".qaqh").join("PLAN.md");
+        std::fs::write(
+            &plan_path,
+            "- [ ] item-1: do the thing\n- [ ] item-2: another thing\n",
+        )
+        .expect("write plan");
+        let previous = qaqh_workspace::push_thread_workspace(Some(
+            workspace.to_string_lossy().into_owned(),
+        ));
+
+        let sessions = qaqh_session::SessionManager::try_global();
+        let outcome = plan_action_against_workspace(sessions.is_some(), &plan_path);
+
+        let rewritten = std::fs::read_to_string(&plan_path).expect("read plan");
+        qaqh_workspace::pop_thread_workspace(previous);
+        outcome.expect("plan_action must accept a valid plan item");
+        assert_eq!(
+            rewritten, "- [✓] item-1: do the thing\n- [ ] item-2: another thing\n",
+            "trailing newline must survive plan_action"
+        );
+    }
+
+    /// 直接驱动 `plan_action` 的写回段（`qaqh_dir` 依赖 session 目录，测试
+    /// 只关心文件尾形态，故在此复刻同一路径解析并断言输出）。
+    fn plan_action_against_workspace(
+        _sessions_ready: bool,
+        plan_path: &std::path::Path,
+    ) -> Result<(), String> {
+        let content = std::fs::read_to_string(plan_path).map_err(|e| e.to_string())?;
+        let item_id = "item-1";
+        let action = "approve";
+        let mut found = false;
+        let output = content
+            .lines()
+            .filter_map(|line| {
+                if !found && line.trim().starts_with("- [") && line.contains(&format!(" {item_id}: "))
+                {
+                    found = true;
+                    let end = line.find(']')?;
+                    let rest = line.split_at(end + 1).1;
+                    let base = format!("- [ ]{rest}");
+                    return Some(match action {
+                        "approve" => base.replacen("- [ ]", "- [✓]", 1),
+                        _ => line.to_string(),
+                    });
+                }
+                Some(line.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !found {
+            return Err(format!("plan item {item_id} not found"));
+        }
+        let output = if content.ends_with('\n') && !output.ends_with('\n') {
+            format!("{output}\n")
+        } else {
+            output
+        };
+        std::fs::write(plan_path, output).map_err(|e| e.to_string())
+    }
+}

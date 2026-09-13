@@ -156,6 +156,8 @@ pub(crate) fn execute_admitted_batch(
         let cancelled = ctx.cancel.is_set();
         for (call_id, tool_name, handle) in handles {
             if cancelled {
+                // 取消：丢弃结果，但必须做收尾——否则已执行的工具在 store
+                // 留下 open tool_use，下一轮模型重发导致重复执行（#39）。
                 let _ = handle.join();
                 continue;
             }
@@ -214,6 +216,8 @@ pub(crate) fn execute_admitted_batch(
 
     for admitted in serial {
         if ctx.cancel.is_set() {
+            // 同上：取消路径不得静默丢弃已收集的 skill_effects 与未回填步。
+            finish_cancelled_batch(ctx);
             return false;
         }
         let call_id = admitted.call_id;
@@ -310,6 +314,7 @@ pub(crate) fn execute_admitted_batch(
     }
 
     if ctx.cancel.is_set() {
+        finish_cancelled_batch(ctx);
         return false;
     }
     ordered_skill_effects.sort_by_key(|(call_id, _)| {
@@ -322,6 +327,16 @@ pub(crate) fn execute_admitted_batch(
         ctx.agent.apply_tool_effects(effects, ctx.flow);
     }
     true
+}
+
+/// 取消收尾：把「已执行但未回填结果」的最后一步整步摘除（store 不留 open
+/// tool_use，防下轮模型重发同一 tool_use → 工具重复执行），并 flush meta。
+/// 与 [`crate::agent::turn_lap::gate::abort_running_turn`] 同款收尾。
+fn finish_cancelled_batch(ctx: &mut RingContext) {
+    ctx.agent.msg.remove_last_step_if_incomplete();
+    ctx.agent
+        .msg
+        .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
 }
 
 // ── Admit/dispatch for run_lap's !turn_completed first batch ──

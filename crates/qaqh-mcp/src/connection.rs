@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -153,7 +153,8 @@ pub struct ServerConnection {
     name: String,
     server_cfg: McpServerConfig,
     /// idle 回收阈值（秒；来自 `[mcp].idle_shutdown_secs`，0 = 常驻）。
-    idle_secs: u64,
+    /// 原子仅为测试垫片可压缩窗口（生产只在构造时写一次）。
+    idle_secs: AtomicU64,
     settings: LifecycleSettings,
     /// manager 共享的 `shutting_down` 闸。
     gate: Arc<AtomicBool>,
@@ -183,7 +184,7 @@ impl ServerConnection {
         Self {
             name: name.into(),
             server_cfg,
-            idle_secs,
+            idle_secs: AtomicU64::new(idle_secs),
             settings,
             gate,
             dirty,
@@ -489,31 +490,67 @@ impl ServerConnection {
 
     /// P2-3：代理 `prompts/get`（name + arguments → 渲染结果）。仅在已连接
     /// 时可用；server 不支持 → method-not-found 错误上抛。
+    ///
+    /// 与 [`Self::call_tool`] / [`Self::read_resource`] 同款保障（#39 盲区
+    /// 复扫对齐）：`begin_call` 占 inflight（防 idle 回收竞态）、`timeout`
+    /// 硬顶释放 service 锁、断连 → [`Self::handle_crash`] +
+    /// `MCP_SERVER_CRASHED`（status 不再停在 Connected）。
     pub async fn get_prompt(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         arguments: Option<rmcp::model::JsonObject>,
+        timeout: Duration,
     ) -> Result<rmcp::model::GetPromptResult, McpError> {
+        let _guard = self.begin_call()?;
         let service = {
             let state = self.lock_state();
-            state.service.clone()
-        };
-        let Some(service) = service else {
-            return Err(McpError::new(
-                McpErrorKind::NotFound,
-                format!("server {} is not connected", self.name),
-            ));
+            state.service.clone().ok_or_else(|| {
+                McpError::new(
+                    McpErrorKind::ConnectFailed,
+                    format!("server {}: service dropped before prompts/get", self.name),
+                )
+            })?
         };
         let mut params = rmcp::model::GetPromptRequestParams::new(name);
         params.arguments = arguments;
-        let fetch = service.lock().await.get_prompt(params).await;
-        match fetch {
-            Ok(result) => Ok(result),
-            Err(error) => Err(McpError::new(
+        let attempt = tokio::time::timeout(timeout, async {
+            service.lock().await.get_prompt(params).await
+        })
+        .await;
+        match attempt {
+            Err(_elapsed) => Err(McpError::new(
+                McpErrorKind::Timeout,
+                format!(
+                    "server {}: prompts/get {name:?} timed out after {timeout:?} — server may still be processing",
+                    self.name
+                ),
+            )),
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(ServiceError::TransportClosed | ServiceError::TransportSend(_))) => {
+                let detail = format!("transport closed during prompts/get {name:?}");
+                self.handle_crash(&detail);
+                Err(McpError::new(
+                    McpErrorKind::ServerCrashed,
+                    format!("server {}: {detail}", self.name),
+                ))
+            }
+            Ok(Err(other)) => Err(McpError::new(
                 McpErrorKind::Protocol,
-                format!("prompts/get {name:?} failed: {error}"),
+                format!("server {}: prompts/get {name:?} failed: {other}", self.name),
             )),
         }
+    }
+
+    /// 测试垫片：把 idle 回收窗口压到 `idle`，用于断言在飞调用不被回收。
+    #[doc(hidden)]
+    pub fn arm_idle_reclaim_for_tests(self: &Arc<Self>, idle: Duration) {
+        {
+            let mut state = self.lock_state();
+            state.idle_since = Some(Instant::now() - idle);
+        }
+        self.idle_secs
+            .store(idle.as_secs().max(1), Ordering::Relaxed);
+        self.ensure_watchdog();
     }
 
     /// 当前工具缓存（只读快照；投影层 [`crate::bridge::take_projection_batch`] 消费）。
@@ -595,7 +632,7 @@ impl ServerConnection {
     /// idle watchdog：`inflight == 0` 连续 `idle_shutdown_secs` → 优雅关闭
     /// （E-2 语义；否决"无调用即计时"）。`idle_secs == 0`（常驻）不启动。
     fn ensure_watchdog(self: &Arc<Self>) {
-        if self.idle_secs == 0 {
+        if self.idle_secs.load(Ordering::Relaxed) == 0 {
             return;
         }
         let mut slot = self
@@ -614,7 +651,7 @@ impl ServerConnection {
     fn spawn_watchdog_task(self: &Arc<Self>) -> JoinHandle<()> {
         let weak = Arc::downgrade(self);
         let tick = self.settings.idle_tick;
-        let idle = Duration::from_secs(self.idle_secs);
+        let idle = Duration::from_secs(self.idle_secs.load(Ordering::Relaxed));
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tick).await;
