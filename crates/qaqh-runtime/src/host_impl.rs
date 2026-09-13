@@ -26,7 +26,9 @@ impl SubagentHost for QaqhService {
         max_tokens: Option<u32>,
         workspace: Option<&str>,
     ) -> Result<String, String> {
-        let seed = qaqh_session::SessionManager::generate_seed();
+        // BUG-2026-09-13-24：与 service.rs `subagent.spawn` 同一命名空间，
+        // 分配时必须跳过已被占用的 seed（与主会话/其它子代理碰撞会写穿目录）。
+        let seed = self.sessions.generate_unique_session_seed();
         if let Some(workspace) = workspace.filter(|w| !w.is_empty() && *w != ".") {
             // 子代理继承主代理工作区（写入 meta.cwd，与 daemon `subagent.spawn` action 一致）。
             self.sessions.set_cwd(&seed, workspace, false);

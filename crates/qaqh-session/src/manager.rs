@@ -17,6 +17,31 @@ use crate::store;
 
 static INSTANCE: OnceLock<Arc<SessionManager>> = OnceLock::new();
 
+/// 测试专用 seed 候选源（生产恒为 `None`）。见
+/// [`SessionManager::allocate_seed`] 的碰撞回归说明。
+type SeedSource = Option<fn() -> String>;
+static SEED_SOURCE: OnceLock<Mutex<SeedSource>> = OnceLock::new();
+
+/// 从一个可注入候选源里取第一个「未占用」的 seed。
+///
+/// 这是 `try_generate_unique_seed` 的可注入版本：候选序列由 `source` 决定，
+/// 碰撞检查仍是同一份 `is_taken`——因此测试可以通过固定候选序列
+/// （如 [已占用, 已占用, 空闲]）**确定性复现碰撞重试**。
+fn generate_from_source(
+    mut source: impl FnMut() -> String,
+    mut is_taken: impl FnMut(&str) -> bool,
+) -> String {
+    for _ in 0..SessionManager::SEED_ALLOCATION_ATTEMPTS {
+        let candidate = source();
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+        log::warn!("[session] injected seed candidate {candidate} collided — retrying");
+    }
+    log::error!("[session] injected seed source produced only collisions — falling back to random");
+    SessionManager::generate_seed()
+}
+
 /// The LLM-facing view after a compact operation.  Raw messages remain in the
 /// normal session archive; this is deliberately a separate, replaceable view.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -89,6 +114,12 @@ pub struct SessionManager {
     sessions_dir: PathBuf,
     active_path: PathBuf,
     session_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// 本进程已占用的 seed（BUG-2026-09-13-24）。
+    ///
+    /// 磁盘目录与索引只能表达「其它进程/历史是否用过这个 id」，无法表达
+    /// 「本进程刚分配、目录已建但调用方尚未确认接受」的中间态——没有它
+    /// 就会出现「分配器认为空闲、保险丝认为被占」的自相矛盾。
+    claimed_seeds: Mutex<std::collections::HashSet<String>>,
 }
 
 impl SessionManager {
@@ -101,6 +132,7 @@ impl SessionManager {
         let mgr = Self {
             active_path: data_dir.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
+            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
             sessions_dir,
         };
         // Migrate old TOML sessions on first startup of v0.4.0
@@ -662,8 +694,75 @@ impl SessionManager {
     /// This prevents the race where the frontend receives a seed from
     /// `session.new` but the session directory isn't created until the
     /// agent writes it asynchronously during boot.
+    ///
+    /// ⚠ BUG-2026-09-13-24：本方法**无条件覆盖**既有 meta（created_at/cwd
+    /// 等）。调用方必须先确认 seed 未被占用（[`Self::is_seed_taken`]/
+    /// [`Self::allocate_seed`]），否则会把新会话写进旧会话目录。
     pub fn persist_new_session(&self, seed: &str) {
         self.persist_new_session_with_cwd(seed, None);
+    }
+
+    /// 仅当 `seed` 未被占用时创建新会话目录 + 初始 meta。
+    ///
+    /// 与 [`Self::persist_new_session_with_cwd`] 的差异：占用即返回 `false`
+    /// 并且**一个字节都不写**（不覆盖既有 meta、不追加 messages.jsonl）。
+    /// 检查与落盘在 per-seed 锁内串行，并可选的 `claimed` 钩子在同一把锁
+    /// 内二次校验（供调用方维护进程内占用集，见 `QaqhService`）。
+    pub fn persist_new_session_if_absent(&self, seed: &str, cwd: Option<&str>) -> bool {
+        self.persist_new_session_if_absent_with(seed, cwd, |_| true)
+    }
+
+    /// [`Self::persist_new_session_if_absent`] 的可注入版本：`claimed` 在
+    /// 锁内、落盘前被调用，返回 `false` 视为「已被占用」，本次创建放弃。
+    pub fn persist_new_session_if_absent_with(
+        &self,
+        seed: &str,
+        cwd: Option<&str>,
+        claimed: impl FnOnce(&str) -> bool,
+    ) -> bool {
+        if seed.is_empty() {
+            log::error!("SessionManager: refusing to create a session with an empty seed");
+            return false;
+        }
+        let lock = self.session_lock(seed);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.session_dir(seed).is_some() {
+            log::warn!(
+                "[session] create_session: seed {seed} already has a session directory — refusing to overwrite"
+            );
+            return false;
+        }
+        if !claimed(seed) {
+            log::warn!(
+                "[session] create_session: seed {seed} already claimed elsewhere — refusing to overwrite"
+            );
+            return false;
+        }
+        let dir = self.session_path_dir(seed);
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            log::error!("SessionManager: create session dir {seed} failed: {error}");
+            return false;
+        }
+        let now = Self::now_epoch();
+        let mut meta = store::read_meta(&dir).unwrap_or_default();
+        meta.seed = seed.to_string();
+        meta.created_at = now;
+        meta.updated_at = now;
+        meta.cwd = cwd.map(|c| crate::grouping::canonical_cwd(std::path::Path::new(c)));
+        if !dir.join("messages.jsonl").exists()
+            && let Err(error) = store::append_messages(&dir, &[])
+        {
+            log::error!("SessionManager: append_messages(initial) failed: {error}");
+        }
+        if let Err(error) = store::write_meta(&dir, &meta) {
+            log::error!("SessionManager: write_meta(initial) failed: {error}");
+            return false;
+        }
+        store::upsert_index(&self.sessions_dir, &meta);
+        if let Some(cwd) = meta.cwd.as_deref() {
+            crate::grouping::WorkspaceStore::global().attach_by_cwd(seed, cwd);
+        }
+        true
     }
 
     /// 同上，但记录创建时工作目录（workspace 归属基础）：
@@ -933,20 +1032,242 @@ impl SessionManager {
 
     // ── Helpers ──
 
+    /// Maximum seed-allocation attempts before the counter fallback kicks in.
+    /// 2^32 的 id 空间下连续 64 次随机命中同一批既有 seed 是病态事件，但
+    /// 一旦发生必须收敛而不是无限重试。
+    const SEED_ALLOCATION_ATTEMPTS: usize = 64;
+
+    /// 顺序回退最多扫描的候选数（有界，避免 id 空间接近占满时退化为
+    /// 2^32 次查询的病态阻塞）。
+    const SEED_SEQUENTIAL_SCAN_LIMIT: usize = 4096;
+
     /// Generate a new session seed (8 hex chars from hashed time + PID).
+    ///
+    /// BUG-2026-09-13-24：这是**无碰撞检查**的原语（32 位截断哈希），
+    /// 碰撞会命中既有会话目录，从而写穿旧会话的 meta/messages。新会话
+    /// 分配一律走 [`Self::generate_unique_seed`] / [`Self::allocate_seed`]。
     pub fn generate_seed() -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        std::time::SystemTime::now()
+        let mut h = Self::seed_hasher(&Self::seed_nonce());
+        Self::seed_from_hasher(&mut h)
+    }
+
+    /// 每次调用都不同的 64 位 nonce：时间戳纳秒数 + 进程 id + 进程内
+    /// 单调计数器。
+    ///
+    /// 原实现只哈希 (nanos, pid)：Windows 的 `SystemTime` 时钟粒度可达
+    /// 毫秒级，同一 tick 内连续两次调用会得到**逐位相同**的哈希——碰撞
+    /// 不再是概率事件而是必然事件（同 tick 内的 `session.new` 会直接
+    /// 复用上一个 seed）。计数器使同 tick 内也不可能重复。
+    fn seed_nonce() -> u128 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let sequence = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+        let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()
-            .hash(&mut h);
+            .as_nanos();
+        // 计数器折叠纳秒低位：纳秒低位本就在同 tick 内原地踏步。
+        (nanos & !0xffff) | (sequence & 0xffff)
+    }
+
+    fn seed_hasher(nonce: &u128) -> std::collections::hash_map::DefaultHasher {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        nonce.hash(&mut h);
         std::process::id().hash(&mut h);
+        let _ = h.finish();
+        h
+    }
+
+    /// 把 hasher 状态折叠成 8 位十六进制 seed（32 位 id 空间，形态不变）。
+    fn seed_from_hasher(h: &mut std::collections::hash_map::DefaultHasher) -> String {
+        use std::hash::Hasher;
+        let h = std::mem::replace(h, Self::seed_hasher(&0));
         let v = h.finish();
         let mixed = (v as u32) ^ ((v >> 32) as u32);
         format!("{:08x}", mixed)
+    }
+
+    /// 在给定 id 空间内重试生成 seed，直到 `is_taken` 为 false。
+    ///
+    /// id 空间耗尽时（随机候选 64 次 + 顺序候选 4096 次全部被占）返回随机
+    /// 兜底值。**新会话分配必须走 [`Self::try_generate_unique_seed`] /
+    /// [`Self::allocate_unique_session_seed`]**（显式失败），本便捷入口仅供
+    /// 不落盘的调用方（子代理 ephemeral seed）使用。
+    pub fn generate_unique_seed(is_taken: impl FnMut(&str) -> bool) -> String {
+        Self::try_generate_unique_seed(is_taken, Self::SEED_SEQUENTIAL_SCAN_LIMIT)
+            .unwrap_or_else(Self::generate_seed)
+    }
+
+    /// 带显式失败的 seed 分配：先重试 64 次随机候选，再在 `scan_limit` 个
+    /// 顺序候选内回退。
+    ///
+    /// 顺序回退必须**有界**：2^32 空间接近占满时，无界扫描会退化成数亿次
+    /// 磁盘/索引查询，把"生成 seed"变成分钟级阻塞。返回 `None` 表示该上限
+    /// 内无可用候选，调用方必须显式报错，**绝不能**把碰撞候选当成功返回。
+    pub fn try_generate_unique_seed(
+        mut is_taken: impl FnMut(&str) -> bool,
+        scan_limit: usize,
+    ) -> Option<String> {
+        for _ in 0..Self::SEED_ALLOCATION_ATTEMPTS {
+            let candidate = Self::generate_seed();
+            if !is_taken(&candidate) {
+                return Some(candidate);
+            }
+            log::warn!("[session] seed candidate {candidate} collided — retrying");
+        }
+        // 病态回退：随机空间连续不可用时逐号递增，但有界收敛。
+        for offset in 0..scan_limit as u64 {
+            let candidate = format!("{:08x}", offset as u32);
+            if !is_taken(&candidate) {
+                log::warn!(
+                    "[session] seed allocation fell back to sequential candidate {candidate} \
+                     after {} random collisions",
+                    Self::SEED_ALLOCATION_ATTEMPTS
+                );
+                return Some(candidate);
+            }
+        }
+        log::error!(
+            "[session] seed id space exhausted: {} random candidates and {scan_limit} sequential \
+             candidates are all taken",
+            Self::SEED_ALLOCATION_ATTEMPTS
+        );
+        None
+    }
+
+    /// 失败即 `Err` 的分配入口：调用方（`session.new`）必须把 id 空间耗尽
+    /// 变成显式错误，而不是悄悄复用别人的目录。
+    pub fn allocate_unique_session_seed(&self) -> Result<String, String> {
+        Self::try_generate_unique_seed(
+            |candidate| self.is_seed_taken(candidate),
+            Self::SEED_SEQUENTIAL_SCAN_LIMIT,
+        )
+        .ok_or_else(|| {
+            "session seed space exhausted: no unused seed available — refusing to reuse an existing session"
+                .to_string()
+        })
+    }
+
+    /// 尝试把 `seed` 登记为本进程占用。返回 `false` 表示已被本进程占用。
+    pub fn claim_seed(&self, seed: &str) -> bool {
+        self.claimed_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(seed.to_string())
+    }
+
+    /// 释放本进程占用登记（会话删除/分配失败回滚）。
+    pub fn release_seed_claim(&self, seed: &str) {
+        self.claimed_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(seed);
+    }
+
+    /// 该 seed 是否已被占用：
+    /// **本进程占用登记** ∪ **磁盘会话目录** ∪ **索引条目**。
+    ///
+    /// 目录检查覆盖「刚 persist 但 meta 尚未可读」的窗口；索引检查覆盖
+    /// 「目录已删、索引尚未 compact」的幽灵 seed——复用幽灵 id 会让新会话
+    /// 继承旧索引条目的身份。
+    pub fn is_seed_taken(&self, seed: &str) -> bool {
+        if seed.is_empty() {
+            return true;
+        }
+        self.claimed_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(seed)
+            || self.session_dir(seed).is_some()
+            || store::read_index(&self.sessions_dir)
+                .iter()
+                .any(|m| m.seed == seed)
+    }
+
+    /// Generate a session seed that does not collide with any existing
+    /// session directory, index entry, or in-process claim
+    /// (BUG-2026-09-13-24).
+    pub fn generate_unique_session_seed(&self) -> String {
+        Self::generate_unique_seed(|candidate| self.is_seed_taken(candidate))
+    }
+
+    /// **原子**分配一个新会话 seed、登记占用并落盘初始 meta。
+    ///
+    /// 碰撞检查、占用登记与落盘收在同一个 per-seed 锁内：并发的
+    /// `session.new` 不可能拿到同一个 seed，也不可能在选中后才发现目录
+    /// 已被别人写入（这正是旧 `persist_new_session` 的写穿路径——它无条件
+    /// 覆盖既有 meta 的 created_at/cwd）。
+    ///
+    /// 返回 `(seed, 是否为全新会话)`。`created == false` 表示 seed 空间耗尽
+    /// 或落盘失败，此时不会覆盖既有会话，调用方应显式报错而不是继续 spawn。
+    ///
+    /// **重试语义（返工修复）**：候选选择发生在 per-seed 锁**之外**，因此
+    /// 两个并发分配器可能在都还没登记占用时选中**同一个候选**（Windows
+    /// 毫秒级时钟粒度下同 tick 连续调用会得到逐位相同的候选）。此时
+    /// `persist_new_session_if_absent_with` 会让其中一个落败。旧实现把落败
+    /// 当终局返回 `(seed, false)` → `session.new` 直接报错，明明 id 空间还
+    /// 空着却创建不出会话。现在落败即**换候选重试**，只有候选空间真的耗尽
+    /// （或落盘 IO 连续失败）才返回失败。
+    pub fn allocate_seed(&self, cwd: Option<&str>) -> (String, bool) {
+        // 重试上限：候选源可注入（测试用），注入源与真实随机源共用同一套
+        // 「生成 → 锁内校验 → 落盘」流程，因此碰撞回归可以在 CI 上
+        // **确定性复现**，而不是靠 2^32 分之一的随机概率。
+        for _ in 0..Self::SEED_ALLOCATION_ATTEMPTS {
+            // 候选源可注入（测试用）：默认 = 真实随机 + 碰撞重试。
+            let seed = match Self::seed_source() {
+                Some(source) => {
+                    generate_from_source(source, |candidate| self.is_seed_taken(candidate))
+                }
+                None => match self.allocate_unique_session_seed() {
+                    Ok(seed) => seed,
+                    Err(error) => {
+                        log::error!("[session] allocate_seed: {error}");
+                        return (String::new(), false);
+                    }
+                },
+            };
+            let created = self.persist_new_session_if_absent_with(&seed, cwd, |candidate| {
+                self.claim_seed(candidate)
+            });
+            if created {
+                return (seed, true);
+            }
+            // 落败：候选可能在「选中 → 落盘」之间被别人抢走（并发同候选），
+            // 或者磁盘上本就有该目录（幽灵/残留）。释放占用登记后换候选重试，
+            // 而不是把失败直接抛给调用方。
+            self.release_seed_claim(&seed);
+            log::warn!(
+                "[session] allocate_seed: candidate {seed} lost the claim race — retrying with a fresh candidate"
+            );
+        }
+        log::error!(
+            "[session] allocate_seed: exhausted {} candidates — refusing to reuse an existing session",
+            Self::SEED_ALLOCATION_ATTEMPTS
+        );
+        (String::new(), false)
+    }
+
+    /// 测试专用：把 seed 候选源固定为闭包（每次调用产出一个候选）。
+    ///
+    /// 生产代码从不设置，默认 `None` = 真实随机源。用 `#[doc(hidden)]`
+    /// 暴露给集成测试（跨 crate 的 `#[cfg(test)]` 不可见），命名带
+    /// `_for_test` 后缀以免被误用为生产 API。
+    #[doc(hidden)]
+    pub fn set_seed_source_for_test(source: Option<fn() -> String>) {
+        *SEED_SOURCE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = source;
+    }
+
+    fn seed_source() -> Option<fn() -> String> {
+        SEED_SOURCE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .copied()
     }
 
     /// Current UNIX epoch.
@@ -1039,7 +1360,8 @@ impl SessionManager {
         Ok((meta, messages))
     }
 
-    fn session_path_dir(&self, seed: &str) -> PathBuf {
+    /// 会话目录路径（测试/诊断用）：`sessions/{seed}`，不要求目录存在。
+    pub fn session_path_dir(&self, seed: &str) -> PathBuf {
         self.sessions_dir.join(seed)
     }
 
@@ -1113,6 +1435,7 @@ mod skill_persistence_tests {
             sessions_dir,
             active_path: root.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
+            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
         };
         (root, manager)
     }
@@ -1384,6 +1707,7 @@ mod wal_recovery_tests {
             sessions_dir,
             active_path: root.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
+            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
         };
         (root, manager)
     }
@@ -1605,6 +1929,358 @@ mod wal_recovery_tests {
 }
 
 #[cfg(test)]
+mod seed_collision_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    static TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn manager() -> (PathBuf, SessionManager) {
+        let root = std::env::temp_dir().join(format!(
+            "qaqh-session-seed-{}-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos(),
+        ));
+        let sessions_dir = root.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create test sessions");
+        let manager = SessionManager {
+            sessions_dir,
+            active_path: root.join(".active_session"),
+            session_locks: Mutex::new(HashMap::new()),
+            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
+        };
+        // `attach_by_cwd` 需要 WorkspaceStore（进程内单例：其它用例可能
+        // 已初始化过 → 忽略重复初始化）。
+        let _ = std::panic::catch_unwind(|| {
+            crate::grouping::WorkspaceStore::init(root.clone());
+        });
+        (root, manager)
+    }
+
+    /// BUG-2026-09-13-24 核心回归：分配器在候选 seed 已被占用时必须换一个
+    /// 候选，而不是把新会话写进旧会话目录（旧实现无条件覆盖既有 meta）。
+    #[test]
+    fn unique_seed_allocation_retries_on_collision() {
+        let (root, manager) = manager();
+
+        // 预置一个「已存在」的会话，模拟碰撞目标。
+        manager.persist_new_session("deadbeef");
+        let existing_dir = manager.session_path_dir("deadbeef");
+        store::write_meta(
+            &existing_dir,
+            &SessionMeta {
+                seed: "deadbeef".into(),
+                created_at: 1234,
+                cwd: Some("D:/old-project".into()),
+                ..Default::default()
+            },
+        )
+        .expect("write old meta");
+        std::fs::write(
+            existing_dir.join("messages.jsonl"),
+            "{\"role\":\"user\",\"content\":[],\"msg_id\":1}\n",
+        )
+        .expect("write old messages");
+
+        // 闭包对 "deadbeef" 恒判「已占用」：分配器必须重试到别的候选，
+        // 并且绝不返回被占用的那个。
+        let mut attempts = 0usize;
+        let chosen = SessionManager::generate_unique_seed(|candidate| {
+            attempts += 1;
+            candidate == "deadbeef" || manager.is_seed_taken(candidate)
+        });
+        assert_ne!(
+            chosen, "deadbeef",
+            "allocator must skip colliding candidates"
+        );
+        assert!(!manager.is_seed_taken(&chosen));
+        assert!(attempts >= 1, "collision probe must run at least once");
+
+        // 顺序回退路径：只放行 8 位十六进制号 "00000003"，随机候选必然
+        // 全部碰撞（32 位空间里随机命中该值的概率可忽略）→ 有界回退必须
+        // 选到它，而不是无界扫描或放弃碰撞检查。
+        let sequential =
+            SessionManager::try_generate_unique_seed(|candidate| candidate != "00000003", 16);
+        assert_eq!(
+            sequential.as_deref(),
+            Some("00000003"),
+            "bounded sequential fallback must pick the next free id"
+        );
+
+        // 极端病态：整个候选空间都判「已占用」时必须**显式失败**（返回
+        // None），而不是无限扫描或把碰撞候选当成功值返回。
+        assert!(
+            SessionManager::try_generate_unique_seed(|_| true, 16).is_none(),
+            "an exhausted id space must fail explicitly, not loop forever"
+        );
+
+        // 旧会话目录与旧 meta 必须逐字节不变（未被写穿）。
+        let old_meta = manager.load_meta("deadbeef").expect("old meta");
+        assert_eq!(old_meta.created_at, 1234);
+        assert_eq!(old_meta.cwd.as_deref(), Some("D:/old-project"));
+        assert_eq!(
+            std::fs::read_to_string(existing_dir.join("messages.jsonl")).expect("old messages"),
+            "{\"role\":\"user\",\"content\":[],\"msg_id\":1}\n"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    /// 占用即拒绝：`persist_new_session_if_absent` 对既有 seed 不写一个字节。
+    #[test]
+    fn create_session_refuses_to_overwrite_existing_seed() {
+        let (root, manager) = manager();
+
+        manager.persist_new_session("occupied");
+        let dir = manager.session_path_dir("occupied");
+        store::write_meta(
+            &dir,
+            &SessionMeta {
+                seed: "occupied".into(),
+                created_at: 777,
+                cwd: Some("D:/kept".into()),
+                ..Default::default()
+            },
+        )
+        .expect("write existing meta");
+        std::fs::write(dir.join("messages.jsonl"), "existing-line\n").expect("write messages");
+
+        assert!(
+            !manager.persist_new_session_if_absent("occupied", Some("D:/new-cwd")),
+            "existing seed must be rejected"
+        );
+        let meta = manager.load_meta("occupied").expect("meta survives");
+        assert_eq!(meta.created_at, 777, "created_at must not be rewritten");
+        assert_eq!(meta.cwd.as_deref(), Some("D:/kept"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("messages.jsonl")).expect("messages survive"),
+            "existing-line\n"
+        );
+
+        // 全新 seed 正常创建（带占用钩子时占用登记同样生效）。
+        assert!(
+            manager.persist_new_session_if_absent_with("fresh-seed", None, |seed| {
+                manager.claim_seed(seed)
+            })
+        );
+        assert!(manager.is_seed_taken("fresh-seed"));
+        assert!(
+            !manager.persist_new_session_if_absent_with("fresh-seed-2", None, |_| false),
+            "caller-side claim rejection must abort creation"
+        );
+        assert!(
+            !manager.is_seed_taken("fresh-seed-2"),
+            "rejected seed must not be materialized nor claimed"
+        );
+        assert_eq!(
+            manager.load_meta("fresh-seed").expect("fresh meta").seed,
+            "fresh-seed"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    /// **确定性**碰撞回归（BUG-2026-09-13-24）：通过注入候选源强制
+    /// `allocate_seed` 的第一个候选就是已占用的 sentinel seed。
+    ///
+    /// 未修复的实现（`generate_seed` 无碰撞检查 + `persist_new_session`
+    /// 无条件覆盖）在此输入下必然把新会话写进 sentinel 目录 —— 本测试
+    /// 会在断言 `chosen != sentinel` / sentinel meta 未变处失败。
+    #[test]
+    fn allocate_seed_retries_injected_collision_and_preserves_sentinel() {
+        let (root, manager) = manager();
+
+        let sentinel = "c0ffee01";
+        manager.persist_new_session(sentinel);
+        let sentinel_dir = manager.session_path_dir(sentinel);
+        store::write_meta(
+            &sentinel_dir,
+            &SessionMeta {
+                seed: sentinel.into(),
+                created_at: 4242,
+                cwd: Some("D:/sentinel-project".into()),
+                ..Default::default()
+            },
+        )
+        .expect("sentinel meta");
+        std::fs::write(sentinel_dir.join("messages.jsonl"), "sentinel\n").expect("sentinel msgs");
+        let meta_before = std::fs::read_to_string(sentinel_dir.join("meta.json")).expect("meta");
+        let msgs_before =
+            std::fs::read_to_string(sentinel_dir.join("messages.jsonl")).expect("msgs");
+
+        // 注入：候选源第一次返回 sentinel（必碰撞），之后返回真实随机 seed。
+        static COLLIDE_ONCE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(true);
+        COLLIDE_ONCE.store(true, std::sync::atomic::Ordering::SeqCst);
+        fn injected() -> String {
+            if COLLIDE_ONCE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return "c0ffee01".to_string();
+            }
+            SessionManager::generate_seed()
+        }
+        SessionManager::set_seed_source_for_test(Some(injected));
+
+        let (chosen, created) = manager.allocate_seed(Some("D:/new-project"));
+        SessionManager::set_seed_source_for_test(None);
+
+        assert!(
+            created,
+            "allocation must succeed after retrying the collision"
+        );
+        assert_ne!(
+            chosen, sentinel,
+            "allocator must retry a colliding candidate instead of reusing it"
+        );
+        assert_eq!(
+            manager.load_meta(&chosen).expect("new meta").cwd.as_deref(),
+            Some("D:/new-project"),
+            "the allocated session must own its own cwd"
+        );
+
+        // sentinel 会话逐字节未变。
+        assert_eq!(
+            std::fs::read_to_string(sentinel_dir.join("meta.json")).expect("meta"),
+            meta_before,
+            "a colliding candidate must never overwrite the existing session meta"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sentinel_dir.join("messages.jsonl")).expect("msgs"),
+            msgs_before,
+            "a colliding candidate must never touch the existing session messages"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    /// 并发回归（BUG-2026-09-13-24 返工）：**真实生产路径**（无注入源）
+    /// 上并发 `allocate_seed` 不得出现「两个线程都通过碰撞检查 → 一个落
+    /// 盘失败 → `session.new` 直接报错」的窗口。
+    ///
+    /// 复现手法：把候选生成钉死为同一个值（等价于 Windows 毫秒时钟粒度
+    /// 下同 tick 连续调用），并发调用 `allocate_seed`。修复前必现
+    /// 「胜者 1 个 + 败者返回 `("", false)` 或空 seed 错误」；修复后
+    /// 败者必须**重试到新候选**并成功创建自己的会话。
+    #[test]
+    fn concurrent_allocate_seed_never_fails_on_a_repeated_candidate() {
+        let (root, manager) = manager();
+        let manager = std::sync::Arc::new(manager);
+
+        // RAII：无论成功/panic 都必须解除注入源——它是进程级单例，
+        // 残留会让同进程其它用例吃到固定候选（与集成测试同一类串扰）。
+        struct SeedSourceGuard;
+        impl Drop for SeedSourceGuard {
+            fn drop(&mut self) {
+                SessionManager::set_seed_source_for_test(None);
+            }
+        }
+        let _guard = SeedSourceGuard;
+
+        // 与生产一致的候选重复来源：注入源每次返回同一个候选值，
+        // 但 `generate_from_source` 的重试上限把它耗尽后回退随机值——
+        // 因此这里并发调用的窗口正是「选中候选 → 落盘」之间。
+        fn repeated() -> String {
+            "baadf00d".to_string()
+        }
+        SessionManager::set_seed_source_for_test(Some(repeated));
+
+        let threads = 4;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(threads));
+        let mut handles = Vec::new();
+        for _ in 0..threads {
+            let manager = manager.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                manager.allocate_seed(Some("D:/concurrent"))
+            }));
+        }
+        let results: Vec<(String, bool)> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("join allocation thread"))
+            .collect();
+
+        let created: Vec<&(String, bool)> =
+            results.iter().filter(|(_, created)| *created).collect();
+        assert!(
+            !created.is_empty(),
+            "at least one allocation must succeed: {results:?}"
+        );
+        for (seed, ok) in &results {
+            if *ok {
+                assert!(!seed.is_empty(), "created allocation must carry a seed");
+                let meta = manager.load_meta(seed).expect("created seed has meta");
+                assert_eq!(meta.seed, *seed, "created meta must be self-owned");
+            }
+        }
+        // 关键断言：失败者只能是「显式放弃（seed 为空 + false）」，
+        // 且必须**仍然存在可用候选**时不得整体失败——
+        // 修复前的表现是败者拿到 seed 但 created=false（调用方报错）。
+        for (seed, ok) in &results {
+            if !*ok {
+                assert!(
+                    seed.is_empty(),
+                    "a losing allocator must not report a seed it did not create: {seed}"
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    /// `allocate_seed` 端到端：分配结果一定未被占用，且落盘时确实创建了
+    /// 新会话（而不是复用/写穿既有目录）。
+    #[test]
+    fn allocate_seed_never_returns_an_occupied_seed() {
+        let (root, manager) = manager();
+
+        // 先占用一批 seed。
+        for seed in ["aaaaaaaa", "bbbbbbbb", "cccccccc"] {
+            manager.persist_new_session(seed);
+        }
+        // 索引登记但磁盘无目录的幽灵 seed（目录已删、索引尚未 compact）——
+        // 复用该 seed 会让新会话继承旧索引条目的身份，故也必须视为已占用。
+        store::upsert_index(
+            &manager.sessions_dir,
+            &SessionMeta {
+                seed: "dddddddd".into(),
+                created_at: 5,
+                ..Default::default()
+            },
+        );
+
+        let mut allocated: Vec<String> = Vec::new();
+        for _ in 0..32 {
+            let (seed, created) = manager.allocate_seed(None);
+            assert!(
+                created,
+                "allocation must succeed in a nearly empty id space"
+            );
+            assert!(
+                !allocated.contains(&seed),
+                "allocated seeds must be unique within the process"
+            );
+            assert!(
+                manager.session_dir(&seed).is_some(),
+                "allocated seed must be materialized on disk"
+            );
+            assert!(
+                manager.is_seed_taken(&seed),
+                "an allocated seed must be claimed (never re-handed out)"
+            );
+            allocated.push(seed);
+        }
+        // 幽灵 seed（索引有、目录无）同样不能再被分配。
+        assert!(!allocated.iter().any(|seed| seed == "dddddddd"));
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+}
+
+#[cfg(test)]
 mod save_full_meta_preservation_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -1627,6 +2303,7 @@ mod save_full_meta_preservation_tests {
             sessions_dir,
             active_path: root.join(".active_session"),
             session_locks: Mutex::new(HashMap::new()),
+            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
         };
         (root, manager)
     }
