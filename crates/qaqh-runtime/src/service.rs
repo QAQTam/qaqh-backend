@@ -355,15 +355,26 @@ impl QaqhService {
                 // 可选工具模式预置（TUI/CLI 壳在 create 时一次性锁定）。
                 // 先于任何落盘校验：非法值必须整体拒绝，不得留下孤儿 meta。
                 let preset = optional_tool_mode(params)?;
-                let seed = qaqh_session::SessionManager::generate_seed();
-                self.sessions.clear_active();
                 // 可选 cwd（前端在 workspace 上下文新建时传入）→ 记录 + 自动归属。
                 let cwd = params
                     .get("cwd")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
-                self.sessions
-                    .persist_new_session_with_cwd(&seed, cwd.as_deref());
+                // BUG-2026-09-13-24：seed 分配必须**先查碰撞再落盘**，且
+                // 分配与落盘之间的窗口不得让并发 session.new 撞进同一目录。
+                // `allocate_seed` 把「生成唯一 seed + 登记占用 + 建目录/meta」
+                // 收在同一个 per-seed 锁内：既有旧实现是
+                // `generate_seed()`（无碰撞检查）+ `persist_new_session_with_cwd`
+                // （无条件覆盖旧 meta）——碰撞即静默写穿旧会话目录
+                // （created_at/cwd 被覆盖、msg_id 去重丢新消息）。
+                let (seed, created) = self.sessions.allocate_seed(cwd.as_deref());
+                if !created {
+                    return Err(format!(
+                        "session.new: failed to claim a fresh seed {seed} \
+                         (id space exhausted, or the session directory could not be created)"
+                    ));
+                }
+                self.sessions.clear_active();
                 // 先于 spawn 落盘：worker 的 init_session 从 meta 恢复并应用，
                 // 保证 minimal:dsh 的极简 system prompt 首轮就生效。
                 if let Some((tool_mode, custom_tools)) = preset {
@@ -603,7 +614,10 @@ impl QaqhService {
                     .map(str::trim)
                     .filter(|w| !w.is_empty() && *w != ".")
                     .map(String::from);
-                let seed = qaqh_session::SessionManager::generate_seed();
+                // BUG-2026-09-13-24：子代理 seed 同样不得撞进既有会话目录
+                // （持久化子代理与主会话共享 sessions/ 命名空间）。碰撞时换
+                // seed，而不是复用旧目录。
+                let seed = self.sessions.generate_unique_session_seed();
                 if let Some(workspace) = &workspace {
                     // 子代理继承主代理的 workspace：写入 meta.cwd（统一数据源），
                     // 子 worker 启动时 `load_session_workspace` 读到，从而正确解析
