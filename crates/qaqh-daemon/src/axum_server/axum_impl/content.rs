@@ -1,6 +1,7 @@
 //! axum_impl::content — see parent module docs.
 
 use super::*;
+use axum::http::HeaderValue;
 
 pub(crate) async fn handle_content_get(
     State(state): State<AppState>,
@@ -35,14 +36,31 @@ pub(crate) async fn handle_content_get(
             .into_response();
     }
     match state.hub.get_content(&seed, &content_id) {
-        Some(entry) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, entry.media_type)],
-            entry.bytes,
-        )
-            .into_response(),
+        Some(entry) => {
+            // BUG-2026-09-13-03 双保险：历史上可能已入库非法 media_type（注入
+            // 面修复前），直接拼响应头会让 axum TryInto<HeaderValue> 失败 →
+            // panic（存储型 DoS）。出站前校验，非法回退 octet-stream。
+            let content_type = if is_valid_media_type(&entry.media_type) {
+                HeaderValue::from_str(&entry.media_type)
+                    .unwrap_or(HeaderValue::from_static("application/octet-stream"))
+            } else {
+                HeaderValue::from_static("application/octet-stream")
+            };
+            (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], entry.bytes).into_response()
+        }
         None => (StatusCode::NOT_FOUND, "content not found or expired").into_response(),
     }
+}
+
+/// BUG-2026-09-13-03：media_type 会直接拼进 GET 响应头（content.rs:40），
+/// 合法性必须在此收口：非空、≤255 字节、全部为含空格的可打印 ASCII
+/// （0x20..=0x7E，空格覆盖参数形态如 `; charset=utf-8`）。CRLF / 控制
+/// 字符 / 非 ASCII 一律拒绝——HeaderValue 构造必然失败（panic）的值不
+/// 允许入库。
+pub(crate) fn is_valid_media_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
 
 pub(crate) async fn handle_content_upload(
@@ -113,6 +131,11 @@ pub(crate) async fn handle_content_upload(
         return (StatusCode::BAD_REQUEST, "missing file part").into_response();
     };
     let media_type = media_type.unwrap_or_else(|| "application/octet-stream".into());
+    // BUG-2026-09-13-03：注入面必须在入库前拒绝——含 CRLF 的 media_type 一旦
+    // 入库，此后每次 GET 该 content 都会让 axum handler panic（存储型 DoS）。
+    if !is_valid_media_type(&media_type) {
+        return (StatusCode::BAD_REQUEST, "invalid media_type").into_response();
+    }
     let owns = state
         .leases
         .lock()
@@ -142,4 +165,29 @@ pub(crate) async fn handle_content_upload(
         serde_json::to_vec(&resp).unwrap_or_default(),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── BUG-2026-09-13-03 回归 ──
+
+    #[test]
+    fn valid_media_types_pass() {
+        assert!(is_valid_media_type("text/plain"));
+        assert!(is_valid_media_type("image/png"));
+        assert!(is_valid_media_type(
+            "application/vnd.qaqh.attachment+v1; charset=utf-8"
+        ));
+    }
+
+    #[test]
+    fn crlf_and_control_chars_rejected() {
+        assert!(!is_valid_media_type("text/plain\r\nX-Evil: 1"));
+        assert!(!is_valid_media_type("text/plain\nX-Evil: 1"));
+        assert!(!is_valid_media_type("text\u{0}/plain"));
+        assert!(!is_valid_media_type("中文/类型"));
+        assert!(!is_valid_media_type(""));
+    }
 }
