@@ -3,9 +3,9 @@
 //! Enables timeout → inspect → wait/kill flow instead of blind termination.
 //! Thread-safe: all access through Mutex, with static convenience methods.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Status of a tracked process.
 #[derive(Debug, Clone, PartialEq)]
@@ -13,6 +13,47 @@ pub enum ProcStatus {
     Running,
     Exited(i32),
     Killed,
+}
+
+/// [`ProcessRegistry::kill`] 的结果。
+///
+/// 用枚举而非 `bool`：`bool` 无法把「真的清理了 os 进程（组）」与「条目/墓碑
+/// 存在但**没有 os_pid 可清理**」区分开，调用方（process kill 回复、subagent
+/// serve 端点）会据此谎报「已杀」——PR #57 reviewer 阻断 ②。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillOutcome {
+    /// 在册条目被终止（含无 os_pid 的条目：无孤儿可清，状态收敛即完成）。
+    Killed,
+    /// 条目已驱逐，命中墓碑且按其 os_pid 执行了清理。
+    TombstoneCleaned,
+    /// 条目/墓碑存在，但从未持有 os_pid（如 subagent 登记路径）——
+    /// 没有可清理的残留孤儿，调用方须如实告知而不是报「已杀」。
+    NoOsPid,
+    /// id 从未登记过，或其墓碑已被容量淘汰。
+    NotFound,
+}
+
+impl KillOutcome {
+    /// 是否真的执行了（或无需执行）终止清理——`false` 只在 [`KillOutcome::NoOsPid`]。
+    pub fn cleaned(self) -> bool {
+        !matches!(self, KillOutcome::NoOsPid)
+    }
+
+    /// 对外文案（process kill 工具回复用），如实描述实际发生了什么。
+    pub fn content(self, id: u32) -> String {
+        match self {
+            KillOutcome::Killed => format!("Process {id} killed."),
+            KillOutcome::TombstoneCleaned => {
+                format!(
+                    "Process {id} entry was evicted; its orphan descendants were cleaned by os_pid."
+                )
+            }
+            KillOutcome::NoOsPid => {
+                format!("Process {id} has no os_pid to clean up; nothing to kill.")
+            }
+            KillOutcome::NotFound => format!("process.kill: process {id} not found"),
+        }
+    }
 }
 
 /// 字节预算内取尾部，起点前移到 char boundary（子进程输出是任意 UTF-8，
@@ -74,7 +115,12 @@ pub struct ProcEntry {
     pub id: u32,
     pub name: String,
     pub status: Arc<Mutex<ProcStatus>>,
-    pub started: Instant,
+    /// 进入终态（Exited/Killed）的时刻，`Running` 期间为 `None`。
+    /// 惰性驱逐按此计时（BUG-2026-09-13-23：原实现按 `started` 计时，
+    /// 长跑后刚结束的条目会被立即驱逐）。
+    terminal_at: Arc<Mutex<Option<Instant>>>,
+    /// 注册（spawn 受理）时刻；仅用于展示 elapsed 与测试回拨。
+    pub started_at: Instant,
     pub output: Arc<Mutex<String>>,
     pub stderr: Arc<Mutex<String>>,
     /// 完整捕获（seal 权威数据源，见 `FullCapture`）。
@@ -92,12 +138,67 @@ pub struct ProcEntry {
     pty_writer: Arc<Mutex<Option<Box<dyn std::io::Write + Send>>>>,
 }
 
+/// 终态条目在注册表内的存活时长（惰性驱逐门槛）。
+///
+/// BUG-2026-09-13-23：原实现按 `started` 计时，长跑进程一进入终态就被立刻
+/// 驱逐，os_pid 随之丢失 → 孤儿孙进程无法清理。现按**终态时间**计时。
+const EVICT_AFTER_TERMINAL: Duration = Duration::from_secs(600);
+
+/// 墓碑表容量上限。
+///
+/// 墓碑只是「条目已驱逐，但 id 仍可解释」的短命窗口，不是第二个只进不出的
+/// 注册表：无上限会把「注册表单调增长」原样搬到 `tombstones`。超限按驱逐
+/// 时间 FIFO 淘汰最旧的墓碑。
+///
+/// 淘汰即**销毁 os_pid**（见 [`ProcessRegistry::remember_tombstone`]）：被淘汰
+/// 的墓碑之后只能报 `NotFound`，绝不再按 pid 清理——pid 可能已被 OS 复用为
+/// 别的进程组 id，`killpg` 会误杀活进程组。
+pub const TOMBSTONE_CAPACITY: usize = 256;
+
+/// 终态条目的墓碑（驱逐时由 os_pid 快照降级而来）。
+///
+/// 驱逐只释放内存中的输出快照与句柄，`os_pid` 与终态结果留下墓碑：
+/// - `kill` 命中墓碑仍按 os_pid 尽力清理残留后代（原验收标准）；
+/// - `get_info` 对墓碑返回 `"evicted": true` 与终态/exit code，
+///   使 `process check` 能区分「已结束」与「id 无效」。
+pub struct Tombstone {
+    pub id: u32,
+    pub name: String,
+    /// 驱逐时的终态（`Exited(code)` / `Killed`）；`Running` 不可能被驱逐。
+    pub status: ProcStatus,
+    pub exit_code: Option<i32>,
+    pub os_pid: Option<u32>,
+    pub started_at: Instant,
+    pub evicted_at: Instant,
+}
+
+impl Tombstone {
+    /// 墓碑 kill 命中后收敛状态：状态置 `Killed`，原 exit code 保留到
+    /// `exit_code`，并**销毁 os_pid**（清理只做一次；留下 stale pid 只会
+    /// 在后续 kill 中重复 `killpg` 一个可能已被复用的 pid）。
+    ///
+    /// 状态一致性是关键：subagent 的 `RegistryRef::killed()` 只看
+    /// `status == "killed"`，墓碑 kill 若不置 `Killed`，子代理永远读不到
+    /// kill 请求（PR #57 reviewer 阻断 ③）。
+    fn mark_killed(&mut self) {
+        if let ProcStatus::Exited(code) = self.status {
+            self.exit_code = Some(code);
+        }
+        self.status = ProcStatus::Killed;
+        self.os_pid = None;
+    }
+}
+
 /// Global process registry.
 static REGISTRY: std::sync::LazyLock<Mutex<ProcessRegistry>> =
     std::sync::LazyLock::new(|| Mutex::new(ProcessRegistry::new()));
 
 pub struct ProcessRegistry {
     entries: HashMap<u32, ProcEntry>,
+    /// 已驱逐条目的墓碑，**按驱逐时间有序**（`push_back`），受
+    /// [`TOMBSTONE_CAPACITY`] 约束：超限时 `pop_front` 淘汰最旧者。
+    /// id 不复用，故一个 id 至多一条。
+    tombstones: VecDeque<Tombstone>,
     next_id: u32,
 }
 
@@ -105,12 +206,93 @@ impl ProcessRegistry {
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            tombstones: VecDeque::new(),
             next_id: 1,
         }
     }
 
     fn with<R>(f: impl FnOnce(&mut ProcessRegistry) -> R) -> R {
         f(&mut REGISTRY.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// 惰性驱逐已进入终态超过 [`EVICT_AFTER_TERMINAL`] 的条目。
+    ///
+    /// 驱逐前把 `os_pid` 与终态结果降级为墓碑（见 [`Tombstone`]）：输出快照
+    /// 与 Child 句柄释放，但按 os_pid 清理孤儿的路径与「已结束 vs id 无效」
+    /// 的区分能力保留（BUG-2026-09-13-23）。
+    fn evict_stale_entries(&mut self, now: Instant) {
+        let mut stale: Vec<(u32, Tombstone)> = Vec::new();
+        for (id, e) in &self.entries {
+            let status = e.status.lock().unwrap_or_else(|er| er.into_inner()).clone();
+            if matches!(status, ProcStatus::Running) {
+                continue;
+            }
+            // 单次加锁读终态时刻；缺失（不应发生）则补记为当下，下一轮再驱逐。
+            let terminal_at = {
+                let mut guard = e.terminal_at.lock().unwrap_or_else(|er| er.into_inner());
+                match *guard {
+                    Some(t) => t,
+                    None => {
+                        *guard = Some(now);
+                        continue;
+                    }
+                }
+            };
+            if now.saturating_duration_since(terminal_at) <= EVICT_AFTER_TERMINAL {
+                continue;
+            }
+            let exit_code = *e.last_exit_code.lock().unwrap_or_else(|er| er.into_inner());
+            stale.push((
+                *id,
+                Tombstone {
+                    id: *id,
+                    name: e.name.clone(),
+                    status,
+                    exit_code,
+                    os_pid: *e.os_pid.lock().unwrap_or_else(|er| er.into_inner()),
+                    started_at: e.started_at,
+                    evicted_at: now,
+                },
+            ));
+        }
+        for (id, tombstone) in stale {
+            if let Some(e) = self.entries.remove(&id) {
+                *e.child.lock().unwrap_or_else(|er| er.into_inner()) = None;
+            }
+            log::debug!(
+                "[registry] evicted terminal process {id} ({}), os_pid={:?} kept as tombstone",
+                tombstone.name,
+                tombstone.os_pid
+            );
+            self.remember_tombstone(tombstone);
+        }
+    }
+
+    /// 记入墓碑并施加容量上限（FIFO 淘汰最旧者）。
+    ///
+    /// 淘汰即销毁 `os_pid` 所承载的清理能力：被淘汰的 id 之后只报
+    /// [`KillOutcome::NotFound`]，**绝不**再按该 pid 做 `killpg`——驱逐出的
+    /// pid 可能已被 OS 复用（PR #57 reviewer 阻断 ①）。
+    fn remember_tombstone(&mut self, tombstone: Tombstone) {
+        self.tombstones.push_back(tombstone);
+        while self.tombstones.len() > TOMBSTONE_CAPACITY {
+            if let Some(dropped) = self.tombstones.pop_front() {
+                log::debug!(
+                    "[registry] tombstone {} dropped (capacity {}), os_pid={:?} cleanup info discarded",
+                    dropped.id,
+                    TOMBSTONE_CAPACITY,
+                    dropped.os_pid
+                );
+            }
+        }
+    }
+
+    fn tombstone(&self, id: u32) -> Option<&Tombstone> {
+        self.tombstones.iter().find(|t| t.id == id)
+    }
+
+    fn tombstone_mut(&mut self, id: u32) -> Option<&mut Tombstone> {
+        self.tombstones.iter_mut().find(|t| t.id == id)
     }
 
     // ── Static convenience methods ──
@@ -120,24 +302,11 @@ impl ProcessRegistry {
         Self::with(|r| {
             // W6：注册表只进不出会随长会话单调涨；注册前惰性驱逐
             // 终态超过 10 分钟的条目（输出快照随之释放）。
-            let now = std::time::Instant::now();
-            let stale: Vec<u32> = r
-                .entries
-                .iter()
-                .filter(|(_, e)| {
-                    let terminal = !matches!(
-                        *e.status.lock().unwrap_or_else(|er| er.into_inner()),
-                        ProcStatus::Running
-                    );
-                    terminal && now.duration_since(e.started).as_secs() > 600
-                })
-                .map(|(id, _)| *id)
-                .collect();
-            for id in stale {
-                if let Some(e) = r.entries.remove(&id) {
-                    *e.child.lock().unwrap_or_else(|er| er.into_inner()) = None;
-                }
-            }
+            //
+            // BUG-2026-09-13-23：门槛按**终态时间**（`terminal_at`）而非
+            // 注册时间（`started`）计时——长跑后刚结束的进程其 os_pid 仍有
+            // 清理价值，按 started 计时会被立刻驱逐。
+            r.evict_stale_entries(std::time::Instant::now());
             let id = r.next_id;
             r.next_id = r.next_id.saturating_add(1);
             if r.next_id == u32::MAX {
@@ -151,7 +320,8 @@ impl ProcessRegistry {
                     status: Arc::new(Mutex::new(ProcStatus::Running)),
                     full_output: Arc::new(Mutex::new(FullCapture::default())),
                     full_stderr: Arc::new(Mutex::new(FullCapture::default())),
-                    started: Instant::now(),
+                    terminal_at: Arc::new(Mutex::new(None)),
+                    started_at: Instant::now(),
                     output: Arc::new(Mutex::new(String::new())),
                     stderr: Arc::new(Mutex::new(String::new())),
                     answer: Arc::new(Mutex::new(None)),
@@ -205,6 +375,8 @@ impl ProcessRegistry {
                         .unwrap_or_else(|e| e.into_inner()) = Some(code);
                     *entry.status.lock().unwrap_or_else(|e| e.into_inner()) =
                         ProcStatus::Exited(code);
+                    *entry.terminal_at.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(Instant::now());
                     Some(code)
                 }
                 None => None,
@@ -308,6 +480,7 @@ impl ProcessRegistry {
             if let Some(entry) = r.entries.get(&id) {
                 *entry.status.lock().unwrap_or_else(|e| e.into_inner()) = ProcStatus::Exited(code);
                 *entry.child.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *entry.terminal_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
             }
         });
     }
@@ -361,9 +534,16 @@ impl ProcessRegistry {
     }
 
     /// Get info for a process as JSON.
+    ///
+    /// 已驱逐（墓碑）条目不返回 `None`：以 `"evicted": true` + 驱逐前的终态/
+    /// exit code 作答，使 `process check` 能区分「已结束」与「id 无效」
+    /// （BUG-2026-09-13-23）。
     pub fn get_info(id: u32) -> Option<serde_json::Value> {
         Self::with(|r| {
-            let entry = r.entries.get(&id)?;
+            let Some(entry) = r.entries.get(&id) else {
+                let tombstone = r.tombstone(id)?;
+                return Some(Self::tombstone_info(tombstone));
+            };
             let status = entry
                 .status
                 .lock()
@@ -384,7 +564,7 @@ impl ProcessRegistry {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
-            let elapsed = entry.started.elapsed().as_secs();
+            let elapsed = entry.started_at.elapsed().as_secs();
 
             let mut info = match status {
                 ProcStatus::Exited(c) => serde_json::json!({
@@ -419,16 +599,94 @@ impl ProcessRegistry {
         })
     }
 
+    /// 墓碑的对外视图（与 `get_info` 的字段形状保持一致，另加 `evicted`）。
+    fn tombstone_info(tombstone: &Tombstone) -> serde_json::Value {
+        let (status, exit_code) = match tombstone.status {
+            ProcStatus::Exited(code) => ("exited", Some(code)),
+            ProcStatus::Killed => ("killed", tombstone.exit_code),
+            ProcStatus::Running => ("running", None),
+        };
+        serde_json::json!({
+            "id": tombstone.id,
+            "name": tombstone.name,
+            "status": status,
+            "exit_code": exit_code,
+            "evicted": true,
+            "elapsed_secs": tombstone.started_at.elapsed().as_secs(),
+            "evicted_secs_ago": tombstone.evicted_at.elapsed().as_secs(),
+            "content": format!(
+                "process {}: {status} (entry evicted; os_pid cleanup info retained)",
+                tombstone.id
+            ),
+        })
+    }
+
+    /// 按 os_pid 清理一个进程（组）：Windows `taskkill /T /F` 杀整棵树，
+    /// Unix `killpg` 杀整组（spawn 侧 `process_group(0)`，见 W4/H6）。
+    ///
+    /// 调用方须自行确认 pid 仍然可信（在册条目 / 未被淘汰的墓碑）：
+    /// 已淘汰墓碑的 pid 可能已被 OS 复用，此处不做校验。
+    fn cleanup_by_pid(pid: u32) {
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            let _ = Command::new("taskkill")
+                .args(["/pid", &pid.to_string(), "/T", "/F"])
+                .status();
+        }
+        #[cfg(not(windows))]
+        {
+            unsafe {
+                libc::killpg(pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+
+    /// 墓碑命中路径：条目已被驱逐，但 os_pid 快照仍在表内 → 按 pid 尽力清树
+    /// （BUG-2026-09-13-23 的验收标准）。
+    ///
+    /// - 有 os_pid：清理 + 墓碑状态收敛为 `Killed`（同时销毁 os_pid，避免
+    ///   对同一（可能已被复用的）pid 重复清理）→ [`KillOutcome::TombstoneCleaned`]。
+    /// - 无 os_pid（subagent 登记路径从无 `attach_child`）：**不做任何 OS 操作**，
+    ///   返回 [`KillOutcome::NoOsPid`]——调用方不得据此回复「已杀」。
+    ///
+    /// 两条路径都**收敛状态为 `Killed`**：kill 请求在注册表层面已被受理，
+    /// 状态一致性是 subagent `RegistryRef::killed()`（只看 `status == "killed"`）
+    /// 能否感知 kill 的前提；「有没有真清理到 OS 进程」由返回值区分。
+    fn kill_tombstoned(tombstone: &mut Tombstone) -> KillOutcome {
+        let pid = tombstone.os_pid;
+        tombstone.mark_killed();
+        match pid {
+            Some(pid) => {
+                Self::cleanup_by_pid(pid);
+                KillOutcome::TombstoneCleaned
+            }
+            None => KillOutcome::NoOsPid,
+        }
+    }
+
     /// Kill a process by id（Windows：杀整棵进程树，防止后代进程泄漏管道）。
-    /// W4 语义：对仍运行的进程执行整树终止并置 Killed；对已退出
-    /// （Exited）的条目，仍按 os_pid 尽力清理残留后代（backgrounded
-    /// 移交场景），状态同样收敛为 Killed，但原 exit code 保存在
-    /// `last_exit_code` 并经 get_info 暴露——信息不再丢失。
-    /// 条目不存在返回 false。
-    pub fn kill(id: u32) -> bool {
+    ///
+    /// W4 语义：对仍运行的进程执行整树终止并置 Killed；对已退出（Exited）的
+    /// 条目，仍按 os_pid 尽力清理残留后代（backgrounded 移交场景），状态同样
+    /// 收敛为 Killed，但原 exit code 保存在 `last_exit_code` 并经 get_info
+    /// 暴露——信息不再丢失。
+    ///
+    /// 返回 [`KillOutcome`] 而非 `bool`：调用方必须能区分「真的清理了 os 进程」
+    /// 与「有 id 但无 os_pid 可清理」（PR #57 reviewer 阻断 ②）。
+    pub fn kill(id: u32) -> KillOutcome {
         Self::with(|r| {
+            if !r.entries.contains_key(&id) {
+                return match r.tombstone_mut(id) {
+                    Some(tombstone) => Self::kill_tombstoned(tombstone),
+                    // id 从未登记，或墓碑已被容量淘汰（os_pid 已销毁）：
+                    // 不再按 pid 清理，避免误杀复用该 pid 的活进程组。
+                    None => KillOutcome::NotFound,
+                };
+            }
+            // 上面已确认在册，故此处必然命中（同一把锁内无并发修改）。
             let Some(entry) = r.entries.get(&id) else {
-                return false;
+                return KillOutcome::NotFound;
             };
             let mut child_opt = entry.child.lock().unwrap_or_else(|e| e.into_inner());
             match child_opt.take() {
@@ -479,8 +737,68 @@ impl ProcessRegistry {
                     .unwrap_or_else(|e| e.into_inner()) = Some(code);
             }
             *entry.status.lock().unwrap_or_else(|e| e.into_inner()) = ProcStatus::Killed;
-            true
+            *entry.terminal_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            KillOutcome::Killed
         })
+    }
+
+    // ── 测试专用钩子（回归夹具用；生产代码不得调用） ──
+    //
+    // 集成测试（tests/process_registry_tombstone.rs）需要在无真实子进程的
+    // 前提下构造"久前注册、已进终态"的条目，故这些钩子必须为 pub 并随库
+    // 一起编译；命名以 `_for_test` 结尾并 `#[doc(hidden)]`，不进入文档面。
+
+    /// 测试钩子：墓碑表容量上限（阻断①回归用）。
+    #[doc(hidden)]
+    pub fn tombstone_capacity_for_test() -> usize {
+        TOMBSTONE_CAPACITY
+    }
+
+    /// 测试钩子：当前墓碑条数（阻断①回归用）。
+    #[doc(hidden)]
+    pub fn tombstone_count_for_test() -> usize {
+        Self::with(|r| r.tombstones.len())
+    }
+
+    /// 测试钩子：直接写入 os_pid 快照（无需真实子进程）。
+    #[doc(hidden)]
+    pub fn attach_os_pid_for_test(id: u32, os_pid: u32) {
+        Self::with(|r| {
+            if let Some(entry) = r.entries.get(&id) {
+                *entry.os_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(os_pid);
+            }
+        });
+    }
+
+    /// 测试钩子：把注册时刻与（若有）终态时刻一并回拨 `secs` 秒——
+    /// 模拟"很久以前注册、也已进入终态很久"的陈旧条目。
+    #[doc(hidden)]
+    pub fn age_registration_for_test(id: u32, secs: u64) {
+        Self::with(|r| {
+            if let Some(entry) = r.entries.get_mut(&id) {
+                let Some(back) = Instant::now().checked_sub(Duration::from_secs(secs)) else {
+                    return;
+                };
+                entry.started_at = back;
+                let mut terminal = entry.terminal_at.lock().unwrap_or_else(|e| e.into_inner());
+                if terminal.is_some() {
+                    *terminal = Some(back);
+                }
+            }
+        });
+    }
+
+    /// 测试钩子：仅回拨注册时刻（恒保留当前终态时刻）——用于锁定"长跑后
+    /// 刚结束的条目不得按 started 计时被驱逐"。
+    #[doc(hidden)]
+    pub fn age_started_only_for_test(id: u32, secs: u64) {
+        Self::with(|r| {
+            if let Some(entry) = r.entries.get_mut(&id)
+                && let Some(back) = Instant::now().checked_sub(Duration::from_secs(secs))
+            {
+                entry.started_at = back;
+            }
+        });
     }
 
     /// Wait for a process to exit (polling up to timeout_secs).
