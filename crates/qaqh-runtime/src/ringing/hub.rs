@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -184,6 +184,104 @@ impl SeedChannelState {
     }
 }
 
+/// `(channel, seed)` → `SeedChannelState` 的分片槽。
+///
+/// 用 `Arc<Mutex<_>>` 而非直接 `Mutex<_>` 的原因：`forget_seed` 需要在**不持
+/// 分片表锁**的前提下把某个 seed 的槽从表里摘掉（否则摘除期间其他 seed 的
+/// publish 会被串行化），同时保证「摘除瞬间已在途的持槽者」继续操作同一实例；
+/// 摘除后槽由在途者自然释放，期间的并发 publish 会在表里重新 insert 一个
+/// 新槽（与 `forget_seed` 的既有竞态语义一致：调用方保证已 join worker）。
+type SeedChannelSlot = Arc<Mutex<SeedChannelState>>;
+
+/// 一个频道的全部 seed 分片（BUG-2026-09-13-33）。
+///
+/// `seeds` 的 `RwLock` 只在**登记/摘除分片槽**时短暂写入，读路径（publish /
+/// replay / snapshot）取读锁拿到 `Arc<SeedChannelSlot>` 后立刻释放，真正的
+/// 事件提交与投影只在 per-(channel, seed) 槽锁内进行——这正是 BUG-08 收尾
+/// 要消除的「跨会话内存态共享单锁」。
+#[derive(Debug, Default)]
+pub(super) struct ChannelShards {
+    seeds: RwLock<HashMap<String, SeedChannelSlot>>,
+}
+
+impl ChannelShards {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.seeds
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+
+    fn contains(&self, seed: &str) -> bool {
+        self.seeds
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(seed)
+    }
+
+    /// 取（必要时登记）该 seed 的槽。
+    ///
+    /// 同 seed ⇒ 同一个 `Arc` ⇒ 同一把锁：这是「全局 (channel, seed) 互斥」
+    /// 的保证点。登记是一次短写锁 + 一次 `SeedChannelState::new`，不含任何
+    /// I/O；并发首访同一 seed 时可能重复构造 state，最终只保留一个（未被保留
+    /// 的那个在 `insert` 后即被丢弃，不会有第二个线程继续写它）。
+    fn slot(&self, channel: RingingChannel, seed: &str) -> SeedChannelSlot {
+        if let Some(slot) = self
+            .seeds
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(seed)
+        {
+            return Arc::clone(slot);
+        }
+        let mut seeded = self.seeds.write().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            seeded
+                .entry(seed.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(SeedChannelState::new(channel)))),
+        )
+    }
+
+    /// 只读查找：不登记（回放/快照等只读路径不得因查询而建条目）。
+    fn slot_if_present(&self, seed: &str) -> Option<SeedChannelSlot> {
+        self.seeds
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(seed)
+            .map(Arc::clone)
+    }
+
+    /// 登记一个**已构造好**的 state（懒加载重放路径用，避免重放两遍）。
+    fn slot_with(&self, seed: &str, state: SeedChannelState) -> SeedChannelSlot {
+        let mut seeded = self.seeds.write().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            seeded
+                .entry(seed.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(state))),
+        )
+    }
+
+    /// 摘除某 seed 的槽（`forget_seed` 用）；返回是否摘除成功。
+    fn remove(&self, seed: &str) -> bool {
+        self.seeds
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(seed)
+            .is_some()
+    }
+
+    /// 该频道下已登记的 seed（回放/快照遍历用）。
+    fn seed_keys(&self) -> Vec<String> {
+        self.seeds
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+}
+
 /// Ringing daemon 运行时聚合。
 /// Debug 已移除：TimelineAppender 现含不可 Debug 的 offload 回调字段。
 pub struct RingingHub {
@@ -203,7 +301,31 @@ pub struct RingingHub {
     /// 大内容外置存储（会话所有权 + TTL）。
     pub(super) content_store: Mutex<ContentStore>,
     /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
-    pub(super) channels: Mutex<HashMap<RingingChannel, HashMap<String, SeedChannelState>>>,
+    ///
+    /// BUG-2026-09-13-33（BUG-08 收尾）：全局单锁 → 两级分片锁表。
+    /// 顶层锁只保护「频道登记 / 频道枚举」，临界区是 map 操作，**绝不含 I/O、
+    /// 投影或事件提交**；热路径取到 `Arc<SeedChannelSlot>` 后立即释放顶层锁，
+    /// 只在 per-(channel, seed) 槽锁内提交。跨会话不再互相串行。
+    ///
+    /// # 锁序（禁止成环）
+    ///
+    /// `channels`(顶层) → `ChannelShards.seeds`(读写锁) → 槽锁(per-(channel,seed))
+    /// → 叶子锁(`live` / `live_interactions` / `content_store`)。
+    ///
+    /// 1. 顶层锁**从不**在持有其他 hub 锁时获取（`channel_shards` 先取顶层、
+    ///    后取 `seeds`，且中途不回调其他锁）；取到分片后即释放顶层锁。
+    /// 2. `seeds` 读/写锁的临界区只做 map 操作，绝不持锁进入槽锁或叶子锁。
+    /// 3. 多把槽锁**从不**同时持有：`replay_channel_since` / `forget_seed` 逐
+    ///    seed 取放，单个 seed 处理完立即 drop 槽锁。
+    /// 4. `journal_store`（含写线程）：只在**不持槽锁**的路径上取
+    ///    （`schedule_rewrite_if_oversized` 用 `try_lock`，懒加载读盘在槽锁外），
+    ///    因此不参与本环。
+    /// 5. 与既有 per-seed 装载锁 `lazy_loads` 并存为**单向序**：
+    ///    `lazy_loads`(per-seed) → `channels`/`seeds`/槽锁（先装载、后提交）。
+    ///    反向无路径（槽锁内不做任何 `lazy_load_lock`），故无环；
+    ///    且 `lazy_loads` 与槽锁槽表无嵌套（`Drop` 先摘槽表快照，再逐个取
+    ///    槽锁，两者从不重叠持有）。
+    pub(super) channels: Mutex<HashMap<RingingChannel, Arc<ChannelShards>>>,
     /// 每频道实时推送通道（SSE 消费；可靠性由 journal/cursor 保证）。
     pub(super) live: Mutex<HashMap<RingingChannel, broadcast::Sender<RingingEventEnvelope>>>,
     /// 当前进程生命周期内发布且未 resolved 的活交互（seed → interaction_id）。
@@ -282,10 +404,15 @@ pub(super) enum JournalWriteOp {
 }
 
 /// journal 写线程主循环：串行消费写操作（FIFO 保证 per-key 写序与投递序一致）。
-fn journal_writer_loop(rx: mpsc::Receiver<JournalWriteOp>, store: Arc<Mutex<Option<JournalStore>>>) {
+fn journal_writer_loop(
+    rx: mpsc::Receiver<JournalWriteOp>,
+    store: Arc<Mutex<Option<JournalStore>>>,
+) {
     while let Ok(op) = rx.recv() {
         let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(store) = guard.as_mut() else { continue };
+        let Some(store) = guard.as_mut() else {
+            continue;
+        };
         match op {
             JournalWriteOp::Append {
                 channel,
@@ -490,12 +617,9 @@ impl RingingHub {
     fn ensure_seed_loaded(&self, channel: RingingChannel, seed: &str) -> Result<(), String> {
         let lock = self.lazy_load_lock(seed);
         let _serial = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let loaded = {
-            let guard = self.channel_state(channel);
-            guard
-                .get(&channel)
-                .is_some_and(|seeds| seeds.contains_key(seed))
-        };
+        let loaded = self
+            .channel_shards(channel)
+            .is_some_and(|shards| shards.contains(seed));
         if loaded {
             return Ok(());
         }
@@ -535,10 +659,8 @@ impl RingingHub {
         };
         if ops.is_empty() {
             // 清单存在但无任何可重放操作（空/损坏）：插入空 state 防反复扫描。
-            self.channel_state(channel)
-                .entry(channel)
-                .or_default()
-                .insert(seed.to_string(), SeedChannelState::new(channel));
+            self.shards_for(channel)
+                .slot_with(seed, SeedChannelState::new(channel));
             return Ok(());
         }
         let state = SeedChannelState::with_ops(channel, seed, &ops);
@@ -555,10 +677,7 @@ impl RingingHub {
             .seed(channel, seed, max_stream, max_channel, max_session);
         // 超大历史文件加载即压缩（冷路径：同步执行，不走写队列）。
         self.rewrite_oversized_now(channel, seed, &state);
-        self.channel_state(channel)
-            .entry(channel)
-            .or_default()
-            .insert(seed.to_string(), state);
+        self.shards_for(channel).slot_with(seed, state);
         log::info!(
             "[ringing] lazily loaded {seed} on {}: {} ops",
             channel.as_str(),
@@ -605,10 +724,19 @@ impl RingingHub {
     /// lazy-load 把刚丢弃的状态原样重建回来；且调用方必须已 join worker，
     /// 避免存活 worker 继续写回脏状态。
     pub fn forget_seed(&self, seed: &str) {
-        if let Ok(mut channels) = self.channels.lock() {
-            for per_seed in channels.values_mut() {
-                per_seed.remove(seed);
-            }
+        // 锁序：先取 `channels` 顶层锁取出分片快照，**释放后再**逐个摘除
+        // 槽表条目——顶层锁与槽表锁永不重叠持有（见 `channels` 字段锁序注释）。
+        // 摘除不在槽锁内进行：已在途的持槽者继续操作同一实例，摘除后由它自然
+        // 释放；这保持既有语义（调用方保证已 join worker，无新发布者）。
+        let shards: Vec<Arc<ChannelShards>> = self
+            .channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        for shard in shards {
+            shard.remove(seed);
         }
         if let Ok(mut live) = self.live_interactions.lock() {
             live.remove(seed);
@@ -647,24 +775,40 @@ impl RingingHub {
             .get(seed, content_id)
     }
 
+    /// 顶层锁的 `MutexGuard`（只在测试断言里用；生产路径一律走
+    /// `channel_shards` / `shards_for`，取到 `Arc` 后立刻释放顶层锁）。
+    ///
+    /// 锁序：`channels`(顶层) → `ChannelShards.seeds`(读写锁) → 槽锁 → 叶子锁，
+    /// 详见 `channels` 字段文档。本函数返回的 guard **不得**跨越槽锁获取。
+    #[cfg(test)]
     fn channel_state(
         &self,
-        _channel: RingingChannel,
-    ) -> std::sync::MutexGuard<'_, HashMap<RingingChannel, HashMap<String, SeedChannelState>>> {
+    ) -> std::sync::MutexGuard<'_, HashMap<RingingChannel, Arc<ChannelShards>>> {
         self.channels.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn seed_state<'a>(
-        &self,
-        guard: &'a mut HashMap<RingingChannel, HashMap<String, SeedChannelState>>,
-        channel: RingingChannel,
-        seed: &str,
-    ) -> &'a mut SeedChannelState {
-        guard
-            .entry(channel)
-            .or_default()
-            .entry(seed.to_string())
-            .or_insert_with(|| SeedChannelState::new(channel))
+    /// 已登记频道的分片集（None = 该频道尚无任何 seed）。
+    pub(super) fn channel_shards(&self, channel: RingingChannel) -> Option<Arc<ChannelShards>> {
+        self.channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&channel)
+            .cloned()
+    }
+
+    /// 取（必要时登记）频道分片集。登记只做一次 map insert。
+    fn shards_for(&self, channel: RingingChannel) -> Arc<ChannelShards> {
+        let mut guard = self.channels.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            guard
+                .entry(channel)
+                .or_insert_with(|| Arc::new(ChannelShards::default())),
+        )
+    }
+
+    /// 该 (channel, seed) 的分片槽（不存在则登记空 state）。
+    fn seed_slot(&self, channel: RingingChannel, seed: &str) -> Arc<Mutex<SeedChannelState>> {
+        self.shards_for(channel).slot(channel, seed)
     }
 
     /// 发布领域事件（worker 事件入口调用）。
@@ -689,10 +833,14 @@ impl RingingHub {
         }
         let delivery = event.delivery();
 
-        // R1：取号移入 channels 临界区内（guard 之后），保证取号序 == 提交序。
-        // 懒加载必须在持锁外完成（内部会再取 channels 锁，std Mutex 不可重入）。
-        let mut guard = self.channel_state(channel);
-        let st = self.seed_state(&mut guard, channel, seed);
+        // R1：取号与本 seed 槽锁内提交构成同一临界区，保证取号序 == 提交序。
+        // 懒加载必须在取槽锁前完成（内部会取分片表锁，std Mutex 不可重入）。
+        //
+        // BUG-2026-09-13-33：临界区从「全局 channels 锁」收窄为
+        // per-(channel, seed) 槽锁——不同会话/频道不再互相串行。
+        let slot = self.seed_slot(channel, seed);
+        let mut st = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let st = &mut *st;
 
         let (stream_seq, channel_seq, session_seq) = self.sequencer.next(channel, seed);
         if !is_safe_integer(stream_seq)
@@ -871,13 +1019,13 @@ impl RingingHub {
             .map_err(|_| CursorExpired {
                 earliest_available_seq: 0,
             })?;
-        let guard = self.channel_state(channel);
-        let st = guard
-            .get(&channel)
-            .and_then(|seeds| seeds.get(seed))
+        let slot = self
+            .channel_shards(channel)
+            .and_then(|shards| shards.slot_if_present(seed))
             .ok_or(CursorExpired {
                 earliest_available_seq: 0,
             })?;
+        let st = slot.lock().unwrap_or_else(|e| e.into_inner());
         st.journal.replay_since(after_stream_seq).map(|mut events| {
             // 追加当前 replaceable 值（慢消费者恢复增量）；R4：合并后按
             // stream_seq 排序，对齐频道级回放的全局顺序保证。
@@ -911,12 +1059,17 @@ impl RingingHub {
         after_stream_seq: u64,
         skip_reliable: bool,
     ) -> ChannelReplay {
-        let guard = self.channel_state(channel);
-        let mut replay = ChannelReplay::default();
-        let Some(seeds) = guard.get(&channel) else {
-            return replay;
+        let Some(shards) = self.channel_shards(channel) else {
+            return ChannelReplay::default();
         };
-        for (seed, st) in seeds {
+        let mut replay = ChannelReplay::default();
+        // 逐 seed 取/放槽锁：任何时候最多持有一把槽锁，杜绝多槽锁交叉死锁
+        //（锁序注释第 3 条）。
+        for seed in shards.seed_keys() {
+            let Some(slot) = shards.slot_if_present(&seed) else {
+                continue;
+            };
+            let st = slot.lock().unwrap_or_else(|e| e.into_inner());
             if !skip_reliable {
                 match st.journal.replay_since(after_stream_seq) {
                     Ok(mut events) => replay.events.append(&mut events),
@@ -947,11 +1100,10 @@ impl RingingHub {
     pub fn snapshot(&self, channel: RingingChannel, seed: &str) -> RingingChannelSnapshot {
         // R3：只读路径加载失败时降级为空快照/零水位，不阻断读取。
         let _ = self.ensure_seed_loaded(channel, seed);
-        let guard = self.channel_state(channel);
-        guard
-            .get(&channel)
-            .and_then(|seeds| seeds.get(seed))
-            .map(|st| {
+        self.channel_shards(channel)
+            .and_then(|shards| shards.slot_if_present(seed))
+            .map(|slot| {
+                let st = slot.lock().unwrap_or_else(|e| e.into_inner());
                 st.projection
                     .snapshot_for(channel, seed, st.last_stream_seq)
             })
@@ -974,8 +1126,9 @@ impl RingingHub {
     pub fn checkpoint(&self, channel: RingingChannel, seed: &str, identity: &str, stream_seq: u64) {
         // R3：只读路径加载失败时降级为空快照/零水位，不阻断读取。
         let _ = self.ensure_seed_loaded(channel, seed);
-        let mut guard = self.channel_state(channel);
-        let st = self.seed_state(&mut guard, channel, seed);
+        let slot = self.seed_slot(channel, seed);
+        let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let st = &mut *guard;
         st.last_stream_seq = st.last_stream_seq.max(stream_seq);
         st.journal.checkpoint_replaceable(identity, stream_seq);
         self.persist_checkpoint(channel, seed, st, identity, stream_seq);
@@ -984,11 +1137,13 @@ impl RingingHub {
     pub fn last_stream_seq(&self, channel: RingingChannel, seed: &str) -> u64 {
         // R3：只读路径加载失败时降级为空快照/零水位，不阻断读取。
         let _ = self.ensure_seed_loaded(channel, seed);
-        let guard = self.channel_state(channel);
-        guard
-            .get(&channel)
-            .and_then(|seeds| seeds.get(seed))
-            .map(|s| s.last_stream_seq)
+        self.channel_shards(channel)
+            .and_then(|shards| shards.slot_if_present(seed))
+            .map(|slot| {
+                slot.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .last_stream_seq
+            })
             .unwrap_or(0)
     }
 
@@ -1000,7 +1155,9 @@ impl RingingHub {
     /// 投递写操作给 journal 写线程。队列满时丢弃并标记该 seed 需要重写收敛
     /// ——内存 journal 才是权威，重写会把丢掉的条目补回磁盘。
     fn enqueue_journal(&self, st: &mut SeedChannelState, op: JournalWriteOp) {
-        let Some(writer) = self.journal_writer.as_ref() else { return };
+        let Some(writer) = self.journal_writer.as_ref() else {
+            return;
+        };
         if writer.try_send(op).is_err() {
             st.needs_rewrite = true;
             log::warn!(
@@ -1012,7 +1169,9 @@ impl RingingHub {
     /// 排空 journal 写队列（测试断言 / 关闭 / 调试路径同步点）：返回时此前
     /// 投递的所有写操作都已处理。
     pub fn flush_journal_persistence(&self) {
-        let Some(writer) = self.journal_writer.as_ref() else { return };
+        let Some(writer) = self.journal_writer.as_ref() else {
+            return;
+        };
         let (ack_tx, ack_rx) = mpsc::channel();
         if writer.send(JournalWriteOp::Flush { ack: ack_tx }).is_err() {
             return; // 写线程已退出
@@ -1072,10 +1231,14 @@ impl RingingHub {
         seed: &str,
         st: &mut SeedChannelState,
     ) {
-        let Some(writer) = self.journal_writer.as_ref() else { return };
+        let Some(writer) = self.journal_writer.as_ref() else {
+            return;
+        };
         // try_lock：写线程正在执行 I/O 时跳过检查（非阻塞，绝不让写线程的
         // 耗时反过来卡住发布路径）；下次 append 会再查。
-        let Ok(mut guard) = self.journal_store.try_lock() else { return };
+        let Ok(mut guard) = self.journal_store.try_lock() else {
+            return;
+        };
         let Some(store) = guard.as_mut() else { return };
         let pending = store.pending_bytes(channel, seed);
         if st.rewrite_inflight {
@@ -1265,29 +1428,40 @@ impl Drop for RingingHub {
         // 对账收尾：队列满时被丢弃的写条目由 `needs_rewrite` 标记；这里在排空
         // 前补投一次重写（阻塞投递——此时独占 hub，允许等待队列腾位）。
         if let Some(writer) = self.journal_writer.as_ref() {
-            let channels = self
+            // 锁序：先摘出槽表快照（拓扑序摘取，释放注册表相关锁），再逐个取
+            // 槽锁——`channels` 顶层锁 / 槽表锁与槽锁**从不重叠持有**。
+            let mut pending: Vec<(RingingChannel, String, SeedChannelSlot)> = Vec::new();
+            for (channel, shards) in self
                 .channels
                 .get_mut()
-                .unwrap_or_else(|e| e.into_inner());
-            for (channel, seeds) in channels.iter() {
-                for (seed, st) in seeds {
-                    if !st.needs_rewrite {
-                        continue;
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+            {
+                for seed in shards.seed_keys() {
+                    if let Some(slot) = shards.slot_if_present(&seed) {
+                        pending.push((*channel, seed, slot));
                     }
-                    let envelopes: Vec<_> = st.journal.entries().cloned().collect();
-                    let checkpoints: Vec<(String, u64)> = st
-                        .journal
-                        .checkpoints()
-                        .iter()
-                        .map(|(key, seq)| (key.clone(), *seq))
-                        .collect();
-                    let _ = writer.send(JournalWriteOp::Rewrite {
-                        channel: *channel,
-                        seed: seed.clone(),
-                        envelopes,
-                        checkpoints,
-                    });
                 }
+            }
+            for (channel, seed, slot) in pending {
+                let st = slot.lock().unwrap_or_else(|e| e.into_inner());
+                if !st.needs_rewrite {
+                    continue;
+                }
+                let envelopes: Vec<_> = st.journal.entries().cloned().collect();
+                let checkpoints: Vec<(String, u64)> = st
+                    .journal
+                    .checkpoints()
+                    .iter()
+                    .map(|(key, seq)| (key.clone(), *seq))
+                    .collect();
+                drop(st);
+                let _ = writer.send(JournalWriteOp::Rewrite {
+                    channel,
+                    seed,
+                    envelopes,
+                    checkpoints,
+                });
             }
         }
         self.journal_writer.take();
@@ -1390,13 +1564,10 @@ mod tests {
         // 重启：懒加载模式下启动不重放任何历史。
         let hub = RingingHub::with_persistence("epoch-2", &root);
         {
-            let guard = hub.channel_state(RingingChannel::Conversation);
-            assert!(
-                guard
-                    .get(&RingingChannel::Conversation)
-                    .is_none_or(|seeds| seeds.is_empty()),
-                "cold start must not load any seed"
-            );
+            let empty = hub
+                .channel_shards(RingingChannel::Conversation)
+                .is_none_or(|shards| shards.is_empty());
+            assert!(empty, "cold start must not load any seed");
         }
         // 首次访问 seed a → 历史按需恢复。
         let replayed_a = hub
@@ -1409,12 +1580,10 @@ mod tests {
         );
         // seed b 未被访问 → 仍不在内存。
         {
-            let guard = hub.channel_state(RingingChannel::Conversation);
             assert!(
-                !guard
-                    .get(&RingingChannel::Conversation)
-                    .unwrap()
-                    .contains_key("b"),
+                !hub.channel_shards(RingingChannel::Conversation)
+                    .expect("channel registered by seed a access")
+                    .contains("b"),
                 "seed b must remain unloaded until accessed"
             );
         }
@@ -1500,13 +1669,10 @@ mod tests {
         // 重启：启动不加载；首次访问触发懒加载 + force rewrite（窗口收敛）。
         let hub = RingingHub::with_persistence("epoch-2", &root);
         {
-            let guard = hub.channel_state(RingingChannel::Conversation);
-            assert!(
-                guard
-                    .get(&RingingChannel::Conversation)
-                    .is_none_or(|seeds| seeds.is_empty()),
-                "cold start must not load any seed"
-            );
+            let empty = hub
+                .channel_shards(RingingChannel::Conversation)
+                .is_none_or(|shards| shards.is_empty());
+            assert!(empty, "cold start must not load any seed");
         }
         // replay_since(0) 因窗口淘汰返回 CursorExpired（正确语义），
         // 但 ensure 已完成加载并执行收敛重写。
@@ -1516,11 +1682,9 @@ mod tests {
             "cursor 0 must be expired after window eviction"
         );
         {
-            let guard = hub.channel_state(RingingChannel::Conversation);
             assert!(
-                guard
-                    .get(&RingingChannel::Conversation)
-                    .is_some_and(|seeds| seeds.contains_key("s")),
+                hub.channel_shards(RingingChannel::Conversation)
+                    .is_some_and(|shards| shards.contains("s")),
                 "lazy load must materialize the seed"
             );
         }
@@ -1823,11 +1987,8 @@ mod tests {
     fn checkpoint_records_sparse_progress() {
         let hub = RingingHub::new("epoch-1");
         hub.checkpoint(RingingChannel::Tool, "s", "tool:c1", 7);
-        let guard = hub.channels.lock().unwrap_or_else(|e| e.into_inner());
-        let st = guard
-            .get(&RingingChannel::Tool)
-            .and_then(|seeds| seeds.get("s"))
-            .expect("channel+seed exists");
+        let slot = hub.seed_slot(RingingChannel::Tool, "s");
+        let st = slot.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(st.journal.checkpoints().get("tool:c1"), Some(&7));
     }
 
@@ -1896,14 +2057,14 @@ mod tests {
         ];
         let folded = RingingHub::fold_checkpoints_for_test(entries);
         let seqs: Vec<u64> = folded.iter().map(|e| e.timeline_seq).collect();
-        assert_eq!(seqs, vec![2, 5, 6, 7], "only newest checkpoint per block survives");
-        assert!(
-            folded
-                .iter()
-                .all(|e| !matches!(&e.event,
-                    TimelineEvent::BlockCheckpoint { block_id, text }
-                        if block_id == "b" && text == "v1"))
+        assert_eq!(
+            seqs,
+            vec![2, 5, 6, 7],
+            "only newest checkpoint per block survives"
         );
+        assert!(folded.iter().all(|e| !matches!(&e.event,
+                    TimelineEvent::BlockCheckpoint { block_id, text }
+                        if block_id == "b" && text == "v1")));
     }
 
     #[test]
@@ -2565,11 +2726,9 @@ mod tests {
         let content_id = hub.put_content("s1", "text/plain", b"hello".to_vec(), false);
         assert!(hub.get_content("s1", &content_id).is_some());
         let holds_seed = |hub: &RingingHub, seed: &str| {
-            hub.channels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+            hub.channel_state()
                 .values()
-                .any(|per_seed| per_seed.contains_key(seed))
+                .any(|shards| shards.contains(seed))
         };
         assert!(holds_seed(&hub, "s1"));
 
@@ -2618,7 +2777,8 @@ mod tests {
                 let _ = tx.send(());
             });
             assert!(
-                rx.recv_timeout(std::time::Duration::from_millis(200)).is_ok(),
+                rx.recv_timeout(std::time::Duration::from_millis(200))
+                    .is_ok(),
                 "seed-b lock must not be blocked by seed-a"
             );
         }
@@ -2678,5 +2838,270 @@ mod tests {
             "sequence watermark must be exact after concurrent first access"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod lock_sharding_tests {
+    //! BUG-08 收尾（issue #33）回归：跨 (channel, seed) 的内存态必须互不串行。
+    //!
+    //! 未修复时 `channels: Mutex<HashMap<Channel, HashMap<Seed, State>>>` 是
+    //! **单一全局锁**——任一 (channel, seed) 的 publish/checkpoint 持锁期间，
+    //! 其他频道/会话的 publish 全部阻塞。下述测试在旧代码上红（超时失败），
+    //! 在新代码上绿。
+
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::{Duration, Instant};
+
+    fn round_delta(seq: u64) -> DomainEvent {
+        DomainEvent::Conversation(ConversationEvent::RoundDelta {
+            turn_id: "t1".into(),
+            round_num: 1,
+            kind: qaqh_domain::RoundDeltaKind::Answering,
+            delta: format!("delta-{seq}"),
+        })
+    }
+
+    /// 取某 (channel, seed) 的分片槽（测试断言用；生产路径不暴露）。
+    fn slot(hub: &RingingHub, channel: RingingChannel, seed: &str) -> Arc<Mutex<SeedChannelState>> {
+        hub.seed_slot(channel, seed)
+    }
+
+    /// 红→绿 1：持有 (Conversation, seed-a) 的分片锁时，其他 (channel, seed)
+    /// 的写入必须立即可完成。
+    ///
+    /// 写法：后台线程写「新的 seed-b」——未修复时它必须先取**全局 channels
+    /// 锁**才能登记/取号/提交，而该锁正被主线程持有，于是阻塞到超时；分片后
+    /// seed-b 走另一个槽，完全不受影响。
+    #[test]
+    fn per_seed_channel_state_locks_do_not_block_each_other() {
+        let hub = Arc::new(RingingHub::new("epoch-shard"));
+        hub.publish("seed-a", round_delta(1));
+
+        let held = slot(&hub, RingingChannel::Conversation, "seed-a");
+        let guard = held.lock().unwrap_or_else(|e| e.into_inner());
+
+        let (tx, rx) = mpsc::channel();
+        let hub_b = Arc::clone(&hub);
+        std::thread::spawn(move || {
+            // 另一个 seed、另一个频道：写「新 seed」会走登记路径，未修复时
+            // 必然要取全局锁 → 阻塞。
+            hub_b.publish("seed-b", round_delta(2));
+            hub_b.publish(
+                "seed-b",
+                DomainEvent::Control(ControlEvent::InteractionRequested {
+                    interaction_id: "i-b".into(),
+                    turn_id: "t1".into(),
+                    mode: qaqh_domain::AskMode::Single,
+                    questions: vec![],
+                }),
+            );
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_ok(),
+            "other (channel, seed) writes must not be serialized by seed-a's shard lock"
+        );
+        drop(guard);
+    }
+
+    /// 红→绿 1b：持有 (Conversation, seed-a) 的槽锁时，**其他频道**的读
+    /// （`last_stream_seq`）必须立即可完成。未修复时读也要取全局锁 → 阻塞。
+    #[test]
+    fn other_channel_reads_are_not_blocked_by_a_held_seed_shard() {
+        let hub = Arc::new(RingingHub::new("epoch-shard-read"));
+        hub.publish("seed-a", round_delta(1));
+        hub.publish(
+            "seed-a",
+            DomainEvent::Control(ControlEvent::InteractionRequested {
+                interaction_id: "i-a".into(),
+                turn_id: "t1".into(),
+                mode: qaqh_domain::AskMode::Single,
+                questions: vec![],
+            }),
+        );
+        let held = slot(&hub, RingingChannel::Conversation, "seed-a");
+        let guard = held.lock().unwrap_or_else(|e| e.into_inner());
+
+        let (tx, rx) = mpsc::channel();
+        let hub_b = Arc::clone(&hub);
+        std::thread::spawn(move || {
+            let seq = hub_b.last_stream_seq(RingingChannel::Control, "seed-a");
+            let _ = tx.send(seq);
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(500)),
+            Ok(1),
+            "Control-channel read must not be serialized behind the Conversation shard lock"
+        );
+        drop(guard);
+    }
+
+    /// 红→绿 2：8 个不同 seed 并发发布必须**不退化**（旧全局锁下 8 会话吞吐
+    /// 被压成 ~0.4x——issue 记录的 448k→276k / 0.49x 就是这一现象）。
+    ///
+    /// 采用「吞吐比值」判据而非结构断言：分片是性能属性，结构断言（比较
+    /// `Arc` 指针）无法区分「锁表存在」与「锁真的不共享」。为避免 CI 抖动
+    /// 造成假红，取各侧 min-of-3 与 0.9x 余量。
+    #[test]
+    fn concurrent_publish_across_seeds_does_not_degrade() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 400;
+
+        let concurrent_ops = |_attempt: usize| {
+            let hub = Arc::new(RingingHub::new("epoch-scale"));
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let mut joins = Vec::new();
+            for index in 0..THREADS {
+                let hub = Arc::clone(&hub);
+                let barrier = Arc::clone(&barrier);
+                joins.push(std::thread::spawn(move || {
+                    let seed = format!("scale-{index}");
+                    barrier.wait();
+                    for i in 0..PER_THREAD {
+                        hub.publish(&seed, round_delta(i as u64));
+                    }
+                }));
+            }
+            let start = Instant::now();
+            for join in joins {
+                join.join().expect("publish thread must not panic");
+            }
+            (THREADS * PER_THREAD) as f64 / start.elapsed().as_secs_f64()
+        };
+        let serial_ops = || {
+            let hub = RingingHub::new("epoch-serial");
+            let start = Instant::now();
+            for index in 0..THREADS {
+                let seed = format!("scale-{index}");
+                for i in 0..PER_THREAD {
+                    hub.publish(&seed, round_delta(i as u64));
+                }
+            }
+            (THREADS * PER_THREAD) as f64 / start.elapsed().as_secs_f64()
+        };
+
+        // min-of-3：取各侧最好成绩，避开其他测试的瞬时干扰。
+        let mut concurrent = f64::MIN;
+        for attempt in 0..3 {
+            concurrent = concurrent.max(concurrent_ops(attempt));
+        }
+        let mut serial = f64::MIN;
+        for _ in 0..3 {
+            serial = serial.max(serial_ops());
+        }
+        eprintln!(
+            "[lockbench] 1 thread: {serial:.0} ev/s | {THREADS} threads: {concurrent:.0} ev/s | scaling {:.2}x",
+            concurrent / serial.max(1e-9)
+        );
+        // 旧全局锁实测 0.41~0.49x；分片后 2.4x+。0.9x 留足机器抖动余量，
+        // 仍能显著区分「锁共享」与「锁分片」。
+        assert!(
+            concurrent > serial * 0.9,
+            "8-thread publish must not degrade vs 1-thread baseline \
+             (concurrent={concurrent:.0}/s serial={serial:.0}/s); \
+             a regression here means the shared channels lock is back"
+        );
+    }
+
+    /// Sequencer 的 per-seed 序号表必须分片，且**实例私有**：
+    /// 两个 `Sequencer` 的序号空间互不影响（不能是进程级 static 表）。
+    #[test]
+    fn sequencer_shards_are_per_instance() {
+        let a = Sequencer::new();
+        let b = Sequencer::new();
+        assert_eq!(a.next(RingingChannel::Conversation, "s"), (1, 1, 1));
+        assert_eq!(
+            b.next(RingingChannel::Conversation, "s"),
+            (1, 1, 1),
+            "a fresh Sequencer must start its own sequence space"
+        );
+    }
+
+    /// 不变量 1：分片后序号仍按 (channel, seed) 唯一且稠密；stream_seq 按频道
+    /// 全局唯一（协议不变量，不得因分片破坏）。
+    #[test]
+    fn sharded_sequences_stay_unique_and_dense() {
+        let hub = Arc::new(RingingHub::new("epoch-inv"));
+        let seeds: Vec<String> = (0..4).map(|i| format!("inv-{i}")).collect();
+        let mut joins = Vec::new();
+        for seed in &seeds {
+            let hub = Arc::clone(&hub);
+            let seed = seed.clone();
+            joins.push(std::thread::spawn(move || {
+                for i in 0..50 {
+                    hub.publish(&seed, round_delta(i));
+                }
+            }));
+        }
+        for join in joins {
+            join.join().expect("thread must not panic");
+        }
+
+        let mut stream_seqs = Vec::new();
+        for seed in &seeds {
+            let replay = hub
+                .replay_since(RingingChannel::Conversation, seed, 0)
+                .expect("replay");
+            let mut channel_seqs: Vec<u64> = replay.iter().map(|e| e.channel_seq).collect();
+            assert_eq!(channel_seqs.len(), 50, "each seed keeps its own history");
+            channel_seqs.sort_unstable();
+            channel_seqs.dedup();
+            assert_eq!(channel_seqs.len(), 50, "channel_seq must be dense per seed");
+            assert_eq!(channel_seqs.first(), Some(&1));
+            assert_eq!(channel_seqs.last(), Some(&50));
+            stream_seqs.extend(replay.iter().map(|e| e.stream_seq));
+        }
+        stream_seqs.sort_unstable();
+        let before = stream_seqs.len();
+        stream_seqs.dedup();
+        assert_eq!(
+            stream_seqs.len(),
+            before,
+            "stream_seq must stay globally unique within the channel"
+        );
+    }
+
+    /// 不变量 2：`forget_seed` 与并发发布不得 panic，且遗忘后该 seed 常驻态
+    /// 不再出现在任何分片。
+    #[test]
+    fn forget_seed_races_with_publishers_without_panic() {
+        let hub = Arc::new(RingingHub::new("epoch-forget-race"));
+        let stop = Arc::new(AtomicUsize::new(0));
+        let mut joins = Vec::new();
+        for index in 0..4 {
+            let hub = Arc::clone(&hub);
+            let stop = Arc::clone(&stop);
+            joins.push(std::thread::spawn(move || {
+                let seed = format!("race-{index}");
+                while stop.load(Ordering::Relaxed) == 0 {
+                    hub.publish(&seed, round_delta(1));
+                }
+            }));
+        }
+        for _ in 0..20 {
+            hub.forget_seed("race-0");
+            std::thread::yield_now();
+        }
+        stop.store(1, Ordering::Relaxed);
+        for join in joins {
+            join.join().expect("publisher must not panic");
+        }
+    }
+
+    /// 不变量 3：跨频道 replay 仍按 stream_seq 合并排序（分片不得打乱回放序）。
+    #[test]
+    fn channel_replay_still_merges_across_seeds_in_stream_order() {
+        let hub = RingingHub::new("epoch-replay-order");
+        hub.publish("a", round_delta(1));
+        hub.publish("b", round_delta(2));
+        hub.publish("a", round_delta(3));
+        let replay = hub.replay_channel_since(RingingChannel::Conversation, 0, false);
+        let seqs: Vec<u64> = replay.events.iter().map(|e| e.stream_seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(seqs, sorted, "channel replay must be stream_seq ordered");
     }
 }
