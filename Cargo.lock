@@ -1872,6 +1872,7 @@ dependencies = [
  "log",
  "qaqh-config-api",
  "qaqh-types",
+ "qaqh-workspace",
  "serde",
  "serde_json",
  "tempfile",
