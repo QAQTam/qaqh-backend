@@ -104,6 +104,9 @@ impl AffectedPaths {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileDelta {
     pub path: String,
+    /// 解析后的绝对路径（`resolve_workspace_path` 结果）：工具侧账本
+    /// （file_state）的唯一键。`path` 保留补丁书写形态仅用于展示。
+    pub resolved_path: String,
     pub old: Option<String>,
     pub new: Option<String>,
 }
@@ -184,6 +187,7 @@ pub fn apply_patch_engine(
                 outcome.affected.added.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,
+                    resolved_path: resolved.to_string_lossy().to_string(),
                     old: None,
                     new: Some(contents.clone()),
                 });
@@ -213,6 +217,7 @@ pub fn apply_patch_engine(
                 outcome.affected.deleted.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,
+                    resolved_path: resolved.to_string_lossy().to_string(),
                     old,
                     new: None,
                 });
@@ -275,6 +280,7 @@ pub fn apply_patch_engine(
                 outcome.affected.modified.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,
+                    resolved_path: resolved.to_string_lossy().to_string(),
                     old: Some(applied.original_contents),
                     new: Some(applied.new_contents),
                 });
@@ -312,6 +318,7 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
                 outcome.affected.added.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,
+                    resolved_path: resolved.to_string_lossy().to_string(),
                     old: None,
                     new: Some(contents.clone()),
                 });
@@ -337,6 +344,7 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
                 outcome.affected.deleted.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,
+                    resolved_path: resolved.to_string_lossy().to_string(),
                     old,
                     new: None,
                 });
@@ -356,6 +364,7 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
                 outcome.affected.modified.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,
+                    resolved_path: resolved.to_string_lossy().to_string(),
                     old: Some(applied.original_contents),
                     new: Some(applied.new_contents),
                 });
