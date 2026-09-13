@@ -9,6 +9,10 @@ use qaqh_types::{Message, ToolDef};
 /// it to recognize (and refine) these placeholders.
 pub const SYNTHETIC_RESTORE_PREFIX: &str = "[RESTORE] Tool \"";
 
+/// 取消路径为未执行 tool_use 补的终态文案（与
+/// `engine_turn`/`admit` 的取消收割保持同一措辞，模型侧可识别）。
+pub const CANCELLED_TOOL_RESULT: &str = "[CANCELLED] Tool was not executed (user interrupted).";
+
 /// Tool results are finalized exactly once, at storage time — but the shaping
 /// itself (truncation / folding) now happens at the TOOL side
 /// (`qaqh-workspace::tool_side_fold`) before results reach this store. The
@@ -1410,6 +1414,39 @@ impl MessageStore {
     /// Restore the turn allocator against the immutable archive.
     pub fn ensure_next_turn_seq(&mut self, next: u64) {
         self.next_turn_seq = self.next_turn_seq.max(next.max(1));
+    }
+
+    /// 给最后一个 step 里**尚无结果**的 tool_use 补取消终态，返回补了几条。
+    ///
+    /// BUG-2026-09-13-08：取消路径上「有 tool_use 无 tool_result」的孤儿会
+    /// 让下轮模型重发同一 tool_use —— 已执行过的工具因此被重复执行。取消时
+    /// 先给确定不会有结果的项封终态，已执行项的真实结果才不会被
+    /// `remove_last_step_if_incomplete` 连带丢弃。
+    ///
+    /// 复用 `auto_complete_unfulfilled` 的既有文案与去重语义（只补缺失项，
+    /// 不覆盖已有结果）。
+    pub fn seal_pending_tools_as_cancelled(&mut self) -> usize {
+        let Some(step) = self.turns.last_mut().and_then(|turn| turn.steps.last_mut()) else {
+            return 0;
+        };
+        let missing = step
+            .assistant_tool_ids()
+            .into_iter()
+            .filter(|id| !step.tool_result_has_id(id))
+            .count();
+        auto_complete_unfulfilled(step, CANCELLED_TOOL_RESULT);
+        missing
+    }
+
+    /// 最后一个 step 是否已为 `tool_call_id` 记录结果。
+    ///
+    /// 取消收尾用：只有确认「这个 tool_use 还没有结果」才补取消终态，
+    /// 不会覆盖已执行的 canonical 结果。
+    pub fn step_has_tool_result(&self, tool_call_id: &str) -> bool {
+        self.turns
+            .last()
+            .and_then(|turn| turn.steps.last())
+            .is_some_and(|step| step.tool_result_has_id(tool_call_id))
     }
 
     pub fn remove_last_step_if_incomplete(&mut self) -> bool {

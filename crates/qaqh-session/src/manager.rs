@@ -155,6 +155,7 @@ impl SessionManager {
             sessions_dir,
             active_path,
             session_locks: Mutex::new(HashMap::new()),
+            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
