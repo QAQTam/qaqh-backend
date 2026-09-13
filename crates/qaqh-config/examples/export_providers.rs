@@ -41,11 +41,11 @@ fn main() {
         let sa = toml::to_string_pretty(&Doc {
             providers: std::slice::from_ref(a),
         })
-        .unwrap();
+        .expect("serialize provider");
         let sb = toml::to_string_pretty(&Doc {
             providers: std::slice::from_ref(b),
         })
-        .unwrap();
+        .expect("serialize provider");
         assert_eq!(sa, sb, "round-trip mismatch for provider {}", a.id);
     }
     println!(
