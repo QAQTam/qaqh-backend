@@ -4,7 +4,10 @@
 //! These let the LLM inspect long-running exec/subagent processes that
 //! hit their timeout, instead of blindly retrying or killing.
 
-use crate::{ToolCallCtx, ToolPlacement, ToolResult, ToolRisk, process_registry::ProcessRegistry};
+use crate::{
+    ToolCallCtx, ToolPlacement, ToolResult, ToolRisk,
+    process_registry::{KillOutcome, ProcessRegistry},
+};
 
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_with_placement(crate::ToolHandler {
@@ -144,16 +147,31 @@ fn handle_kill(ctx: ToolCallCtx) -> ToolResult {
         Err(result) => return result,
     };
 
-    if ProcessRegistry::kill(id) {
-        process_ok(crate::json_ok(
-            serde_json::json!({"content": format!("Process {id} killed.")}),
-        ))
-    } else {
-        process_error(
+    kill_result(id, ProcessRegistry::kill(id))
+}
+
+/// `process kill` 的回复构造（与注册表解耦，便于锁定「如实作答」语义）。
+///
+/// PR #57 reviewer 阻断 ②：`os_pid == None` 的墓碑曾返回 true，于是这里回
+/// 「Process N killed.」而实际没清理任何残留孤儿。现在 `NoOsPid` 走
+/// `NO_OS_PID` 错误码，文案明确「无可清理的 os_pid」。
+fn kill_result(id: u32, outcome: KillOutcome) -> ToolResult {
+    match outcome {
+        // 成功：如实描述实际发生了什么（在册终止 / 墓碑 os_pid 清理）。
+        KillOutcome::Killed | KillOutcome::TombstoneCleaned => process_ok(crate::json_ok(
+            serde_json::json!({"content": outcome.content(id)}),
+        )),
+        // 无 os_pid 可清理：不得谎报「已杀」。
+        KillOutcome::NoOsPid => process_error(
+            "NO_OS_PID",
+            outcome.content(id),
+            "This process has no os_pid (never attached a child); there is nothing to clean up.",
+        ),
+        KillOutcome::NotFound => process_error(
             "NOT_FOUND",
             format!("process.kill: process {id} not found or already exited"),
             "Check the process ID.",
-        )
+        ),
     }
 }
 
@@ -182,5 +200,50 @@ fn handle_write(ctx: ToolCallCtx) -> ToolResult {
             format!("process write: {e}"),
             "Check that the process is still running.",
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ToolResult` 无 `Display`：按线上 JSON 形状渲染，断言回复文本。
+    fn render(result: &ToolResult) -> String {
+        serde_json::to_string(result).expect("ToolResult must serialize")
+    }
+
+    /// 阻断②：`process kill` 的回复必须如实——有 os_pid 才说 killed，
+    /// 无 os_pid 必须报 `NO_OS_PID` 且文案点明「无 os_pid 可清理」。
+    #[test]
+    fn kill_reply_is_honest_about_missing_os_pid() {
+        for id in [1u32, 42] {
+            let killed = render(&kill_result(id, KillOutcome::Killed));
+            assert!(
+                killed.contains(&format!("Process {id} killed.")),
+                "在册终止必须明确报 killed: {killed}"
+            );
+
+            let cleaned = render(&kill_result(id, KillOutcome::TombstoneCleaned));
+            assert!(
+                cleaned.contains("evicted"),
+                "墓碑清理须说明条目已驱逐: {cleaned}"
+            );
+
+            let text = render(&kill_result(id, KillOutcome::NoOsPid));
+            assert!(
+                !text.contains(&format!("Process {id} killed.")),
+                "无 os_pid 时不得谎报 killed: {text}"
+            );
+            assert!(
+                text.contains("NO_OS_PID") && text.contains("no os_pid to clean up"),
+                "无 os_pid 必须报 NO_OS_PID 且文案明确「无 os_pid 可清理」: {text}"
+            );
+
+            let missing = render(&kill_result(id, KillOutcome::NotFound));
+            assert!(
+                missing.contains("NOT_FOUND"),
+                "未登记 id 必须报 NOT_FOUND: {missing}"
+            );
+        }
     }
 }
