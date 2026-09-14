@@ -267,7 +267,10 @@ impl ServerConnection {
                 self.arm_cooldown();
                 Err(LspError::new(
                     LspErrorKind::ConnectTimeout,
-                    format!("lsp server {}: connect timed out after {timeout:?}", self.server),
+                    format!(
+                        "lsp server {}: connect timed out after {timeout:?}",
+                        self.server
+                    ),
                 ))
             }
             Ok(Err(error)) => {
@@ -280,8 +283,7 @@ impl ServerConnection {
 
     /// 单次连接全流程：解析 secret → spawn → mainloop → initialize → 索引门。
     async fn connect_once(self: Arc<Self>) -> Result<(), LspError> {
-        let resolved =
-            adapter::resolve_server_secrets(&self.server_cfg, &self.secret_store)?;
+        let resolved = adapter::resolve_server_secrets(&self.server_cfg, &self.secret_store)?;
         let wrap = adapter::build_stdio_command(&resolved, &self.root);
         log::info!(
             "[lsp] server {}: spawning stdio transport (command={:?}, root={})",
@@ -353,7 +355,10 @@ impl ServerConnection {
         let root_uri = Url::from_file_path(&self.root).map_err(|_| {
             LspError::new(
                 LspErrorKind::ConnectFailed,
-                format!("lsp server {}: root {:?} is not a valid file path", self.server, self.root),
+                format!(
+                    "lsp server {}: root {:?} is not a valid file path",
+                    self.server, self.root
+                ),
             )
         })?;
         let init = socket
@@ -380,12 +385,17 @@ impl ServerConnection {
                     format!("lsp server {}: initialize failed: {e}", self.server),
                 )
             })?;
-        log::info!("[lsp] server {} initialized: {:?}", self.server, init.capabilities);
+        log::info!(
+            "[lsp] server {} initialized: {:?}",
+            self.server,
+            init.capabilities
+        );
         socket.notify::<lsp_types::notification::Initialized>(InitializedParams {})?;
 
         // 索引门：等 RA 系 End token；超时放行（非 RA server 无此 token）。
         // 等待上限取 startup 超时的剩余量，最多 60s——initialize 已耗一部分。
-        let gate_wait = Duration::from_secs(60.min(self.server_cfg.startup_timeout_secs.clamp(1, 600)));
+        let gate_wait =
+            Duration::from_secs(60.min(self.server_cfg.startup_timeout_secs.clamp(1, 600)));
         match tokio::time::timeout(gate_wait, indexed_rx).await {
             Ok(Ok(())) => log::info!("[lsp] server {}: index gate passed", self.server),
             _ => log::info!(
@@ -437,9 +447,7 @@ impl ServerConnection {
     }
 
     /// 会话句柄快照（请求路径用；None = 未连接）。
-    pub(crate) fn session_snapshot(
-        &self,
-    ) -> Option<Arc<tokio::sync::Mutex<ServerSession>>> {
+    pub(crate) fn session_snapshot(&self) -> Option<Arc<tokio::sync::Mutex<ServerSession>>> {
         self.lock_state().session.clone()
     }
 
@@ -453,7 +461,10 @@ impl ServerConnection {
             state.idle_since = None;
         }
         self.sweep_group();
-        log::warn!("[lsp] server {} marked crashed; next call will reconnect", self.server);
+        log::warn!(
+            "[lsp] server {} marked crashed; next call will reconnect",
+            self.server
+        );
     }
 
     /// 组杀兜底清扫（Unix；mcp sweep_group 同款）。
@@ -500,9 +511,9 @@ impl ServerConnection {
                     !state.connected
                         || state.inflight != 0
                         || state.session.is_none()
-                        || state.idle_since.is_none_or(|since| {
-                            since.elapsed() < Duration::from_secs(idle_secs)
-                        })
+                        || state
+                            .idle_since
+                            .is_none_or(|since| since.elapsed() < Duration::from_secs(idle_secs))
                 };
                 if should_drop {
                     continue;
@@ -527,7 +538,10 @@ impl ServerConnection {
             let mut guard = session.lock().await;
             // 先发 shutdown+exit（best-effort），再停 loop。
             let socket = guard.socket.clone();
-            socket.request::<lsp_types::request::Shutdown>(()).await.ok();
+            socket
+                .request::<lsp_types::request::Shutdown>(())
+                .await
+                .ok();
             socket.notify::<lsp_types::notification::Exit>(()).ok();
             socket.emit(StopLoop).ok();
             guard._driver.abort();

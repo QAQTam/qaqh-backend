@@ -166,7 +166,10 @@ struct ShardedChannelStream {
     channel: RingingChannel,
     session_id: String,
     leases: Arc<Mutex<RingingLeaseStore>>,
-    receivers: Vec<(String, tokio::sync::broadcast::Receiver<qaqh_ringing::RingingEventEnvelope>)>,
+    receivers: Vec<(
+        String,
+        tokio::sync::broadcast::Receiver<qaqh_ringing::RingingEventEnvelope>,
+    )>,
     /// 已订阅的 seed 集合（增量对账用）。
     subscribed: HashSet<String>,
     /// 每个分片「已取出但尚未交付」的事件（跨分片按 stream_seq 归并）。
@@ -212,10 +215,7 @@ impl ShardedChannelStream {
         self.receivers.retain(|(seed, _)| owned.contains(seed));
         self.pending.retain(|seed, _| owned.contains(seed));
         self.subscribed.retain(|seed| owned.contains(seed));
-        let added: Vec<String> = owned
-            .difference(&self.subscribed)
-            .cloned()
-            .collect();
+        let added: Vec<String> = owned.difference(&self.subscribed).cloned().collect();
         for seed in added {
             self.receivers
                 .push((seed.clone(), hub.subscribe(self.channel, &seed)));
@@ -348,10 +348,8 @@ impl ShardedChannelStream {
 }
 
 /// 分片合并流的单个结果。
-type ShardEvent = Result<
-    qaqh_ringing::RingingEventEnvelope,
-    tokio::sync::broadcast::error::RecvError,
->;
+type ShardEvent =
+    Result<qaqh_ringing::RingingEventEnvelope, tokio::sync::broadcast::error::RecvError>;
 
 // ---- SSE handlers (P2) ----
 pub(crate) async fn handle_events(
@@ -455,17 +453,15 @@ pub(crate) async fn handle_events(
                     log::warn!(
                         "[sse] {channel} stream lagged: {skipped} events skipped; terminating for client re-baseline"
                     );
-                    let ev = Event::default()
-                        .event("ringing.stream_terminated")
-                        .data(
-                            serde_json::json!({
-                                "code": "lagged",
-                                "channel": channel.as_str(),
-                                "skipped": skipped,
-                                "message": "server event buffer overflow; reconnect to re-baseline",
-                            })
-                            .to_string(),
-                        );
+                    let ev = Event::default().event("ringing.stream_terminated").data(
+                        serde_json::json!({
+                            "code": "lagged",
+                            "channel": channel.as_str(),
+                            "skipped": skipped,
+                            "message": "server event buffer overflow; reconnect to re-baseline",
+                        })
+                        .to_string(),
+                    );
                     let _ = tx.send(Ok(ev)).await;
                     break;
                 }
@@ -567,17 +563,15 @@ pub(crate) async fn handle_timeline_events(
                     log::warn!(
                         "[sse] timeline {seed_clone} stream lagged: {skipped} entries skipped; terminating for client re-baseline"
                     );
-                    let ev = Event::default()
-                        .event("ringing.stream_terminated")
-                        .data(
-                            serde_json::json!({
-                                "code": "lagged",
-                                "seed": seed_clone.as_str(),
-                                "skipped": skipped,
-                                "message": "server event buffer overflow; reconnect to re-baseline",
-                            })
-                            .to_string(),
-                        );
+                    let ev = Event::default().event("ringing.stream_terminated").data(
+                        serde_json::json!({
+                            "code": "lagged",
+                            "seed": seed_clone.as_str(),
+                            "skipped": skipped,
+                            "message": "server event buffer overflow; reconnect to re-baseline",
+                        })
+                        .to_string(),
+                    );
                     let _ = tx.send(Ok(ev)).await;
                     break;
                 }
@@ -639,7 +633,14 @@ mod tests {
         let replayed = HashSet::new();
 
         assert!(
-            should_deliver_timeline_live(&live("seed-a", 1), "cs-1", "seed-a", after, &replayed, &leases),
+            should_deliver_timeline_live(
+                &live("seed-a", 1),
+                "cs-1",
+                "seed-a",
+                after,
+                &replayed,
+                &leases
+            ),
             "吊销前同 seed 事件应投递"
         );
 
@@ -650,19 +651,40 @@ mod tests {
             "precondition: lease 仍活跃——旧逻辑正是因此放行"
         );
         assert!(
-            !should_deliver_timeline_live(&live("seed-a", 2), "cs-1", "seed-a", after, &replayed, &leases),
+            !should_deliver_timeline_live(
+                &live("seed-a", 2),
+                "cs-1",
+                "seed-a",
+                after,
+                &replayed,
+                &leases
+            ),
             "吊销后同连接后续事件必须立即截断"
         );
         // 窗口外/已回放的事件同样不得因早退而绕过复查
         assert!(
-            !should_deliver_timeline_live(&live("seed-a", 0), "cs-1", "seed-a", after, &replayed, &leases),
+            !should_deliver_timeline_live(
+                &live("seed-a", 0),
+                "cs-1",
+                "seed-a",
+                after,
+                &replayed,
+                &leases
+            ),
             "吊销后窗口外事件也不得投递"
         );
 
         // 重新 attach 后恢复投递
         leases.lock().unwrap().attach_seed("cs-1", "seed-a");
         assert!(
-            should_deliver_timeline_live(&live("seed-a", 3), "cs-1", "seed-a", after, &replayed, &leases),
+            should_deliver_timeline_live(
+                &live("seed-a", 3),
+                "cs-1",
+                "seed-a",
+                after,
+                &replayed,
+                &leases
+            ),
             "重新 attach 后恢复投递"
         );
     }
@@ -687,11 +709,25 @@ mod tests {
         // 重新协商：同 instance 换新 cs → 旧 cs 归属被清除。
         leases.lock().unwrap().open("cs-2".into(), "ci-1".into());
         assert!(
-            !should_deliver_timeline_live(&live("seed-a", 2), "cs-1", "seed-a", after, &replayed, &leases),
+            !should_deliver_timeline_live(
+                &live("seed-a", 2),
+                "cs-1",
+                "seed-a",
+                after,
+                &replayed,
+                &leases
+            ),
             "重新协商后旧 cs 必须被截断（僵尸身份）"
         );
         assert!(
-            !should_deliver_timeline_live(&live("seed-a", 3), "cs-2", "seed-a", after, &replayed, &leases),
+            !should_deliver_timeline_live(
+                &live("seed-a", 3),
+                "cs-2",
+                "seed-a",
+                after,
+                &replayed,
+                &leases
+            ),
             "新 cs 未 attach 不投递"
         );
         leases.lock().unwrap().attach_seed("cs-2", "seed-a");
@@ -762,22 +798,36 @@ mod tests {
             g.attach_seed("cs-1", "s-a");
             g.attach_seed("cs-1", "s-b");
         }
-        let mut rx = ShardedChannelStream::new(
-            &hub,
-            RingingChannel::Tool,
-            "cs-1".into(),
-            leases.clone(),
-        );
+        let mut rx =
+            ShardedChannelStream::new(&hub, RingingChannel::Tool, "cs-1".into(), leases.clone());
         // 发布顺序：a1, b2, a3 —— 合并流应原样送达（每条各出现一次）。
-        hub.publish("s-a", DomainEvent::Tool(ToolEvent::ToolStarted {
-            tool_call_id: "call-a1".into(), turn_id: "t".into(), round_num: 0, name: "exec".into(),
-        }));
-        hub.publish("s-b", DomainEvent::Tool(ToolEvent::ToolStarted {
-            tool_call_id: "call-b2".into(), turn_id: "t".into(), round_num: 0, name: "exec".into(),
-        }));
-        hub.publish("s-a", DomainEvent::Tool(ToolEvent::ToolStarted {
-            tool_call_id: "call-a3".into(), turn_id: "t".into(), round_num: 0, name: "exec".into(),
-        }));
+        hub.publish(
+            "s-a",
+            DomainEvent::Tool(ToolEvent::ToolStarted {
+                tool_call_id: "call-a1".into(),
+                turn_id: "t".into(),
+                round_num: 0,
+                name: "exec".into(),
+            }),
+        );
+        hub.publish(
+            "s-b",
+            DomainEvent::Tool(ToolEvent::ToolStarted {
+                tool_call_id: "call-b2".into(),
+                turn_id: "t".into(),
+                round_num: 0,
+                name: "exec".into(),
+            }),
+        );
+        hub.publish(
+            "s-a",
+            DomainEvent::Tool(ToolEvent::ToolStarted {
+                tool_call_id: "call-a3".into(),
+                turn_id: "t".into(),
+                round_num: 0,
+                name: "exec".into(),
+            }),
+        );
 
         let mut seen = Vec::new();
         for _ in 0..3 {
@@ -811,28 +861,27 @@ mod tests {
             // s-idle 永不发布：其分片永远为空。
             g.attach_seed("cs-1", "s-idle");
         }
-        let mut rx = ShardedChannelStream::new(
-            &hub,
-            RingingChannel::Tool,
-            "cs-1".into(),
-            leases.clone(),
-        );
+        let mut rx =
+            ShardedChannelStream::new(&hub, RingingChannel::Tool, "cs-1".into(), leases.clone());
         for i in 1..=5u64 {
-            hub.publish("s-a", DomainEvent::Tool(ToolEvent::ToolStarted {
-                tool_call_id: format!("call-{i}"), turn_id: "t".into(), round_num: 0, name: "exec".into(),
-            }));
+            hub.publish(
+                "s-a",
+                DomainEvent::Tool(ToolEvent::ToolStarted {
+                    tool_call_id: format!("call-{i}"),
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    name: "exec".into(),
+                }),
+            );
         }
         // 必须在不依赖闲置分片的情况下按序交付全部 5 条。
         let mut got = Vec::new();
         for _ in 0..5 {
-            let env = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                rx.recv(&hub),
-            )
-            .await
-            .expect("闲置分片不得让合并流饿死")
-            .expect("shard event")
-            .expect("ok");
+            let env = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv(&hub))
+                .await
+                .expect("闲置分片不得让合并流饿死")
+                .expect("shard event")
+                .expect("ok");
             got.push(env.stream_seq);
         }
         assert_eq!(got, vec![1, 2, 3, 4, 5], "必须严格升序交付");
@@ -848,22 +897,30 @@ mod tests {
             g.open("cs-1".into(), "ci-1".into());
             g.attach_seed("cs-1", "s-a");
         }
-        let mut rx = ShardedChannelStream::new(
-            &hub,
-            RingingChannel::Tool,
-            "cs-1".into(),
-            leases.clone(),
-        );
+        let mut rx =
+            ShardedChannelStream::new(&hub, RingingChannel::Tool, "cs-1".into(), leases.clone());
         // 他人的风暴。
         for seq in 1..=512u64 {
-            hub.publish("s-b", DomainEvent::Tool(ToolEvent::ToolStarted {
-                tool_call_id: format!("call-{seq}"), turn_id: "t".into(), round_num: 0, name: "exec".into(),
-            }));
+            hub.publish(
+                "s-b",
+                DomainEvent::Tool(ToolEvent::ToolStarted {
+                    tool_call_id: format!("call-{seq}"),
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    name: "exec".into(),
+                }),
+            );
         }
         // 本连接自己的事件必须照常收到。
-        hub.publish("s-a", DomainEvent::Tool(ToolEvent::ToolStarted {
-            tool_call_id: "mine".into(), turn_id: "t".into(), round_num: 0, name: "exec".into(),
-        }));
+        hub.publish(
+            "s-a",
+            DomainEvent::Tool(ToolEvent::ToolStarted {
+                tool_call_id: "mine".into(),
+                turn_id: "t".into(),
+                round_num: 0,
+                name: "exec".into(),
+            }),
+        );
         let env = rx.recv(&hub).await.expect("own event").expect("ok");
         assert_eq!(env.seed, "s-a", "他人风暴不得进入本连接的分片流");
     }
@@ -903,12 +960,8 @@ mod tests {
         let hub = Arc::new(RingingHub::new("sse-shard-noseed"));
         let leases = Arc::new(Mutex::new(RingingLeaseStore::new()));
         leases.lock().unwrap().open("cs-1".into(), "ci-1".into());
-        let mut rx = ShardedChannelStream::new(
-            &hub,
-            RingingChannel::Tool,
-            "cs-1".into(),
-            leases.clone(),
-        );
+        let mut rx =
+            ShardedChannelStream::new(&hub, RingingChannel::Tool, "cs-1".into(), leases.clone());
         // 后置 attach（模拟 SessionNew/SessionResume 到达）。
         let attach_leases = leases.clone();
         tokio::spawn(async move {
@@ -919,9 +972,15 @@ mod tests {
         let publish_hub = hub.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            publish_hub.publish("s-late", DomainEvent::Tool(ToolEvent::ToolStarted {
-                tool_call_id: "late".into(), turn_id: "t".into(), round_num: 0, name: "exec".into(),
-            }));
+            publish_hub.publish(
+                "s-late",
+                DomainEvent::Tool(ToolEvent::ToolStarted {
+                    tool_call_id: "late".into(),
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    name: "exec".into(),
+                }),
+            );
         });
         let env = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv(&hub))
             .await
@@ -943,21 +1002,29 @@ mod tests {
             g.attach_seed("cs-1", "s-quiet");
             g.attach_seed("cs-1", "s-storm");
         }
-        let mut rx = ShardedChannelStream::new(
-            &hub,
-            RingingChannel::Tool,
-            "cs-1".into(),
-            leases.clone(),
-        );
+        let mut rx =
+            ShardedChannelStream::new(&hub, RingingChannel::Tool, "cs-1".into(), leases.clone());
         // s-quiet 先发一条（seq 较小，落在它的分片里，未被取走）。
-        hub.publish("s-quiet", DomainEvent::Tool(ToolEvent::ToolStarted {
-            tool_call_id: "quiet-1".into(), turn_id: "t".into(), round_num: 0, name: "exec".into(),
-        }));
+        hub.publish(
+            "s-quiet",
+            DomainEvent::Tool(ToolEvent::ToolStarted {
+                tool_call_id: "quiet-1".into(),
+                turn_id: "t".into(),
+                round_num: 0,
+                name: "exec".into(),
+            }),
+        );
         // s-storm 灌满自己的分片 → 其分片 Lagged。
         for i in 0..4096u64 {
-            hub.publish("s-storm", DomainEvent::Tool(ToolEvent::ToolStarted {
-                tool_call_id: format!("storm-{i}"), turn_id: "t".into(), round_num: 0, name: "exec".into(),
-            }));
+            hub.publish(
+                "s-storm",
+                DomainEvent::Tool(ToolEvent::ToolStarted {
+                    tool_call_id: format!("storm-{i}"),
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    name: "exec".into(),
+                }),
+            );
         }
         // 首个 recv：s-storm 溢出，但 s-quiet 的 seq=1 更小且水位已覆盖 → 必须先交付它。
         let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv(&hub))
@@ -965,7 +1032,10 @@ mod tests {
             .expect("must not hang")
             .expect("shard event");
         match first {
-            Ok(env) => assert_eq!(env.seed, "s-quiet", "更小序号的 pending 事件不得被溢出顺带丢弃"),
+            Ok(env) => assert_eq!(
+                env.seed, "s-quiet",
+                "更小序号的 pending 事件不得被溢出顺带丢弃"
+            ),
             Err(_) => panic!("旧实现会先返回 Lagged，把 s-quiet 的 seq=1 丢掉"),
         }
         // 之后才应上报溢出（供调用方发终止帧 + 客户端 re-baseline）。

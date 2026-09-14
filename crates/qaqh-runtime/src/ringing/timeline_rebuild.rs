@@ -33,8 +33,11 @@ pub fn rebuild_timeline_snapshot(
     if messages.is_empty() {
         return None;
     }
-    let (_, turns) =
-        super::projection::project_recent_turns_from_messages(seed, &messages, REBUILD_RECENT_TURNS);
+    let (_, turns) = super::projection::project_recent_turns_from_messages(
+        seed,
+        &messages,
+        REBUILD_RECENT_TURNS,
+    );
     timeline_snapshot_from_turns(seed, &turns)
 }
 
@@ -399,7 +402,10 @@ mod tests {
             journal.is_empty(),
             "rebuilt sealed turns leave an empty replay tail"
         );
-        assert!(snapshot.watermark >= 12, "watermark counts all rebuilt entries");
+        assert!(
+            snapshot.watermark >= 12,
+            "watermark counts all rebuilt entries"
+        );
 
         let rebuilt = &snapshot.turns[0];
         assert_eq!(rebuilt.turn_id, "t1");

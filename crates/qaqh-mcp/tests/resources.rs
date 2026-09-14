@@ -736,5 +736,8 @@ async fn get_prompt_times_out_and_frees_the_service_lock() {
 
     // service 锁已释放：下一次 RPC 不被钉住。
     let ok = qaqh_mcp::bridge_for_tests::get_prompt_blocking(&conn, "greet", None, timeout);
-    assert!(ok.is_ok(), "service lock must be free after timeout: {ok:?}");
+    assert!(
+        ok.is_ok(),
+        "service lock must be free after timeout: {ok:?}"
+    );
 }
