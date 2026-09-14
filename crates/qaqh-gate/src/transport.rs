@@ -480,7 +480,10 @@ mod tests {
         // 过去时间：立即重试（0）
         let past = std::time::SystemTime::now() - Duration::from_secs(3600);
         let mut h2 = reqwest::header::HeaderMap::new();
-        h2.insert("retry-after", httpdate::fmt_http_date(past).parse().unwrap());
+        h2.insert(
+            "retry-after",
+            httpdate::fmt_http_date(past).parse().unwrap(),
+        );
         assert_eq!(parse_retry_after_raw(&h2), Some(Duration::ZERO));
     }
 

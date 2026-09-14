@@ -124,9 +124,7 @@ mod escape_probes {
     use tempfile::tempdir;
 
     fn patch_add(path: &str) -> String {
-        format!(
-            "*** Begin Patch\n*** Add File: {path}\n+evil\n*** End Patch"
-        )
+        format!("*** Begin Patch\n*** Add File: {path}\n+evil\n*** End Patch")
     }
 
     /// 形态 A：深度未超过路径深度的 `..`——必须落盘在消解后的 workspace 内
@@ -134,11 +132,7 @@ mod escape_probes {
     #[test]
     fn dotdot_within_depth_resolves_inside_workspace() {
         let tmp = tempdir().unwrap();
-        let outside = tmp
-            .path()
-            .parent()
-            .unwrap()
-            .join("qaqh-escape-probe-a.txt");
+        let outside = tmp.path().parent().unwrap().join("qaqh-escape-probe-a.txt");
         let _ = std::fs::remove_file(&outside);
         let result = apply_patch_engine(
             &patch_add("a/b/../../evil.txt"),
@@ -150,7 +144,10 @@ mod escape_probes {
             tmp.path().join("evil.txt").exists(),
             "file must land at the lexically resolved in-workspace path"
         );
-        assert!(!tmp.path().join("a").exists(), "no phantom intermediate dirs");
+        assert!(
+            !tmp.path().join("a").exists(),
+            "no phantom intermediate dirs"
+        );
         assert!(!outside.exists(), "must not escape the workspace");
         let _ = std::fs::remove_file(&outside);
     }
@@ -165,11 +162,8 @@ mod escape_probes {
             "a/../../../../evil.txt",
             "a/../../../../../../../../qaqh-escape-probe-b2.txt",
         ] {
-            let result = apply_patch_engine(
-                &patch_add(rel),
-                &root,
-                UpdateMode::PreserveLineEndings,
-            );
+            let result =
+                apply_patch_engine(&patch_add(rel), &root, UpdateMode::PreserveLineEndings);
             assert!(result.is_err(), "`{rel}` must be rejected, got {result:?}");
         }
         // 外部落点取证：tempdir 兄弟目录不应出现 evil.txt

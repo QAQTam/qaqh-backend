@@ -965,7 +965,10 @@ fn huge_retry_after_header_is_capped_end_to_end() {
     );
     let elapsed = start.elapsed();
 
-    assert!(result.is_ok(), "should recover via capped retry: {result:?}");
+    assert!(
+        result.is_ok(),
+        "should recover via capped retry: {result:?}"
+    );
     let retry_delay = events.iter().find_map(|ev| match ev {
         StreamEvent::Retrying { delay_secs, .. } => Some(*delay_secs),
         _ => None,

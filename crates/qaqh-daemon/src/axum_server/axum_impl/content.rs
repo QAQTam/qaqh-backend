@@ -46,7 +46,12 @@ pub(crate) async fn handle_content_get(
             } else {
                 HeaderValue::from_static("application/octet-stream")
             };
-            (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], entry.bytes).into_response()
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, content_type)],
+                entry.bytes,
+            )
+                .into_response()
         }
         None => (StatusCode::NOT_FOUND, "content not found or expired").into_response(),
     }
@@ -58,9 +63,7 @@ pub(crate) async fn handle_content_get(
 /// 字符 / 非 ASCII 一律拒绝——HeaderValue 构造必然失败（panic）的值不
 /// 允许入库。
 pub(crate) fn is_valid_media_type(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 255
-        && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
+    !value.is_empty() && value.len() <= 255 && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
 
 pub(crate) async fn handle_content_upload(

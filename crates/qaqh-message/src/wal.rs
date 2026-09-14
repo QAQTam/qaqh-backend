@@ -696,8 +696,8 @@ impl ByteSource for WalSource {
 /// recovery path with a deterministic read fault.
 #[cfg(any(test, feature = "test-harness"))]
 pub(crate) mod fault_harness {
-    pub use super::io_fault_tests::{FaultArm, arm, prefix_bytes};
     pub use super::FaultPlan;
+    pub use super::io_fault_tests::{FaultArm, arm, prefix_bytes};
 }
 
 /// File opened by the probe in [`OpenFile::at`], handed to [`WalReader`].
@@ -871,7 +871,6 @@ mod io_fault_tests {
     use crate::effect::PersistOp;
     use std::cell::RefCell;
 
-
     // Fault plan for the *current thread*.
     //
     // Thread-local, not global: the plan is read on the same thread that armed
@@ -910,7 +909,6 @@ mod io_fault_tests {
         });
         Ok(source)
     }
-
 
     #[cfg(test)]
     const FAULT_MESSAGE: &str = "injected WAL read fault";
@@ -1074,7 +1072,10 @@ mod io_fault_tests {
             true,
             "a torn tail does not refuse the checkpoint (the prefix was replayed)"
         );
-        assert!(read_ops(dir.path()).is_empty(), "the prefix was checkpointed");
+        assert!(
+            read_ops(dir.path()).is_empty(),
+            "the prefix was checkpointed"
+        );
         assert_eq!(
             quarantine_files(dir.path(), "wal.corrupt-").len(),
             1,

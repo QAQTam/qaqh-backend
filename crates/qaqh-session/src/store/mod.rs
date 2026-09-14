@@ -135,8 +135,8 @@ struct WatermarkEntry {
     max_msg_id: u64,
 }
 
-fn watermarks() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, WatermarkEntry>>
-{
+fn watermarks()
+-> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, WatermarkEntry>> {
     static WATERMARKS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, WatermarkEntry>>,
     > = std::sync::OnceLock::new();
@@ -233,10 +233,7 @@ pub fn reset_watermarks() {
 /// 全量扫描计数器（测试用规模判据：缓存命中路径必须不递增）。
 #[doc(hidden)]
 pub fn reset_scan_counter() {
-    scans()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    scans().lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// 指定会话目录的累计全量扫描次数（测试用）。
@@ -275,10 +272,12 @@ pub fn note_watermark(session_dir: &Path, max_msg_id: u64) {
     let path = session_dir.join("messages.jsonl");
     let identity = archive_identity(&path);
     let mut cache = watermarks().lock().unwrap_or_else(|e| e.into_inner());
-    let entry = cache.entry(session_dir.to_path_buf()).or_insert(WatermarkEntry {
-        identity,
-        max_msg_id,
-    });
+    let entry = cache
+        .entry(session_dir.to_path_buf())
+        .or_insert(WatermarkEntry {
+            identity,
+            max_msg_id,
+        });
     entry.max_msg_id = entry.max_msg_id.max(max_msg_id);
     entry.identity = identity;
 }

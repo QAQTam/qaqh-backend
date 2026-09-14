@@ -679,7 +679,11 @@ mod tests {
         assert_eq!(tcs[0].function.name, "read");
         let args: serde_json::Value = serde_json::from_str(&tcs[0].function.arguments).unwrap();
         assert!(
-            !args.as_object().unwrap().keys().any(|k| k.contains("parameter")),
+            !args
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|k| k.contains("parameter")),
             "parameter name must not swallow following markup: {args}"
         );
         assert_eq!(
@@ -732,5 +736,4 @@ mod tests {
         assert_eq!(args["command"], "cargo test");
         assert_eq!(args["timeout"], 30);
     }
-
 }

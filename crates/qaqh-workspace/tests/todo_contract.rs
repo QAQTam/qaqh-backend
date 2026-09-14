@@ -249,9 +249,8 @@ fn web_fetch_output_enters_authorization_resources() {
     let workspace = dir.path().canonicalize().unwrap();
     let out = workspace.join("notes").join("page.md");
 
-    let _guard = qaqh_workspace::push_thread_workspace(Some(
-        workspace.to_string_lossy().into_owned(),
-    ));
+    let _guard =
+        qaqh_workspace::push_thread_workspace(Some(workspace.to_string_lossy().into_owned()));
     let paths = qaqh_workspace::permission::extract_target_paths(
         "web_fetch",
         &serde_json::json!({"url": "https://example.com", "output": "notes/page.md"}),

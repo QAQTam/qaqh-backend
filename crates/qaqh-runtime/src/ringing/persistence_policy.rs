@@ -176,7 +176,9 @@ mod tests {
                     permission: None,
                 },
             },
-            TimelineEvent::BlockSealed { block_id: "b".into() },
+            TimelineEvent::BlockSealed {
+                block_id: "b".into(),
+            },
             TimelineEvent::RoundSealed { is_final: false },
             TimelineEvent::TurnSealed {
                 state: qaqh_domain::TimelineTurnState::Completed,

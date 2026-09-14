@@ -136,11 +136,17 @@ pub fn aggregate_dispatch_with(
     let Some(action) = args.get("action").and_then(|v| v.as_str()) else {
         return error_result(
             LspErrorKind::Protocol,
-            format!("missing required parameter `action` ({})", ACTIONS.join(" | ")),
+            format!(
+                "missing required parameter `action` ({})",
+                ACTIONS.join(" | ")
+            ),
         );
     };
     if cancel.load(Ordering::Relaxed) {
-        return error_result(LspErrorKind::Cancelled, "cancelled before LSP dispatch".to_owned());
+        return error_result(
+            LspErrorKind::Cancelled,
+            "cancelled before LSP dispatch".to_owned(),
+        );
     }
     // timeout 链：ctx.hint → server default → 缺省 30s（mcp 60s；LSP 请求更轻）。
     let timeout = std::time::Duration::from_secs(timeout_hint.unwrap_or(DEFAULT_TIMEOUT_SECS));
@@ -152,7 +158,10 @@ pub fn aggregate_dispatch_with(
         "workspaceSymbol" => workspace_symbol(manager, args, cancel, timeout, root),
         other => error_result(
             LspErrorKind::Protocol,
-            format!("unknown action {other:?} (expected {})", ACTIONS.join(" | ")),
+            format!(
+                "unknown action {other:?} (expected {})",
+                ACTIONS.join(" | ")
+            ),
         ),
     }
 }
@@ -269,10 +278,7 @@ async fn run_position_action(req: PositionRequest<'_>) -> ToolResult {
     let text = match std::fs::read_to_string(&abs) {
         Ok(t) => t,
         Err(e) => {
-            return error_result(
-                LspErrorKind::Protocol,
-                format!("read {abs:?} failed: {e}"),
-            );
+            return error_result(LspErrorKind::Protocol, format!("read {abs:?} failed: {e}"));
         }
     };
     let uri = match Url::from_file_path(&abs) {
@@ -285,7 +291,10 @@ async fn run_position_action(req: PositionRequest<'_>) -> ToolResult {
         }
     };
     if cancelled(req.cancel) {
-        return error_result(LspErrorKind::Cancelled, "cancelled before didOpen".to_owned());
+        return error_result(
+            LspErrorKind::Cancelled,
+            "cancelled before didOpen".to_owned(),
+        );
     }
     if let Err(e) = did_open_file(&conn, &uri, &text, req.server).await {
         return error_result(e.kind, e.message);
@@ -379,7 +388,10 @@ fn workspace_symbol(
     root: &str,
 ) -> ToolResult {
     let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
-        return error_result(LspErrorKind::Protocol, "workspaceSymbol requires `query`".to_owned());
+        return error_result(
+            LspErrorKind::Protocol,
+            "workspaceSymbol requires `query`".to_owned(),
+        );
     };
     // 路由：显式 server 优先；否则首个已配置 server（workspace 级搜索无文件轴）。
     let server = match args.get("server").and_then(|v| v.as_str()) {
@@ -461,21 +473,23 @@ async fn did_open_file(
     if guard.opened.contains_key(&key) {
         guard
             .socket
-            .notify::<lsp_types::notification::DidCloseTextDocument>(DidCloseTextDocumentParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-            })?;
+            .notify::<lsp_types::notification::DidCloseTextDocument>(
+                DidCloseTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                },
+            )?;
     }
     let language_id = language_id_for(uri);
-    guard.socket.notify::<lsp_types::notification::DidOpenTextDocument>(
-        DidOpenTextDocumentParams {
+    guard
+        .socket
+        .notify::<lsp_types::notification::DidOpenTextDocument>(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
                 uri: uri.clone(),
                 language_id,
                 version,
                 text: text.to_owned(),
             },
-        },
-    )?;
+        })?;
     guard.opened.insert(key, version);
     Ok(())
 }
@@ -587,7 +601,13 @@ mod tests {
 
     #[test]
     fn actions_cover_m1_five_ops() {
-        for op in ["definition", "references", "hover", "documentSymbol", "workspaceSymbol"] {
+        for op in [
+            "definition",
+            "references",
+            "hover",
+            "documentSymbol",
+            "workspaceSymbol",
+        ] {
             assert!(ACTIONS.contains(&op), "M1 操作 {op} 必须在列");
         }
         assert!(!ACTIONS.contains(&"implementation"), "M2 操作不得提前");
@@ -649,7 +669,11 @@ mod tests {
             None,
             "/tmp",
         );
-        assert!(out.model_text().contains("LSP_NOT_FOUND"), "{}", out.model_text());
+        assert!(
+            out.model_text().contains("LSP_NOT_FOUND"),
+            "{}",
+            out.model_text()
+        );
     }
 
     #[test]

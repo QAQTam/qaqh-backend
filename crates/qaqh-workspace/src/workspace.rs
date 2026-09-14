@@ -109,10 +109,7 @@ mod tests {
         );
 
         // Inside actor context: data layer updates, process cwd untouched.
-        crate::set_actor_context(
-            &ws.path().to_string_lossy(),
-            "actor-cwd-test-seed",
-        );
+        crate::set_actor_context(&ws.path().to_string_lossy(), "actor-cwd-test-seed");
         let other = tempfile::tempdir().unwrap();
         set_process_workspace(&other.path().to_string_lossy());
         assert_eq!(

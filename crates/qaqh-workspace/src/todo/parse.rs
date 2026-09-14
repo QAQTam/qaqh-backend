@@ -194,16 +194,13 @@ fn parse_status_field(value: Option<&Value>, label: &str) -> Result<TodoStatus, 
 }
 
 pub(crate) fn parse_write_items(args: &Value) -> Result<Vec<ParsedWriteItem>, String> {
-    let items = args
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            json_err_string(
-                "INVALID_INPUT",
-                "todo_write requires items",
-                "Provide the full list: [{title, status, id?, description?, evidence?}].",
-            )
-        })?;
+    let items = args.get("items").and_then(Value::as_array).ok_or_else(|| {
+        json_err_string(
+            "INVALID_INPUT",
+            "todo_write requires items",
+            "Provide the full list: [{title, status, id?, description?, evidence?}].",
+        )
+    })?;
     if items.len() > MAX_WRITE_ITEMS {
         return Err(json_err_string(
             "INVALID_INPUT",

@@ -185,8 +185,11 @@ fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk], base_headers: 
         .collect();
 
     if let Some(body) = json_response {
-        let mut resp = Response::from_string(body)
-            .with_header("Content-Type: application/json".parse::<Header>().expect("valid header"));
+        let mut resp = Response::from_string(body).with_header(
+            "Content-Type: application/json"
+                .parse::<Header>()
+                .expect("valid header"),
+        );
         for h in headers {
             resp = resp.with_header(h);
         }
@@ -199,8 +202,11 @@ fn serve_scenario(req: tiny_http::Request, scenario: &[SseChunk], base_headers: 
         }
         let _ = req.respond(resp);
     } else if !sse.is_empty() {
-        let mut resp = Response::from_string(sse)
-            .with_header("Content-Type: text/event-stream".parse::<Header>().expect("valid header"));
+        let mut resp = Response::from_string(sse).with_header(
+            "Content-Type: text/event-stream"
+                .parse::<Header>()
+                .expect("valid header"),
+        );
         for h in headers {
             resp = resp.with_header(h);
         }

@@ -10,11 +10,11 @@ use std::sync::atomic::AtomicBool;
 use qaqh_types::{ContentBlock, Message, ToolDef};
 
 use super::sse::SseDecoder;
-use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
 use super::transport::{
     Attempt, SseTrace, block_on, http_error_description, is_cancelled, is_retryable,
     parse_retry_after, run_with_retry,
 };
+use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
 use super::types::{
     EFFORT_LADDER, EmptyStreamEof, ProviderConfig, ResponsesCompat, StreamEvent,
     normalize_reasoning_effort, safe_provider_error_body,
@@ -781,9 +781,7 @@ pub fn chat_sync_responses(
                 return Attempt::Fatal(anyhow::anyhow!("HTTP 401 (authentication failed)"));
             }
             if is_retryable(status) {
-                log::warn!(
-                    "Responses sync attempt {attempt} HTTP {status} retryable, will retry"
-                );
+                log::warn!("Responses sync attempt {attempt} HTTP {status} retryable, will retry");
                 return Attempt::Retry {
                     retry_after: None,
                     reason: format!("sync HTTP {} ({})", status, http_error_description(status)),
@@ -1208,9 +1206,7 @@ fn parse_responses_sse(
                     log::warn!("Responses SSE read error (no content, will retry): {e}");
                     return Err(anyhow::Error::new(EmptyStreamEof));
                 }
-                log::warn!(
-                    "Responses SSE interrupted mid-stream, keeping partial output: {e}"
-                );
+                log::warn!("Responses SSE interrupted mid-stream, keeping partial output: {e}");
                 stream_interrupted = true;
                 break;
             }

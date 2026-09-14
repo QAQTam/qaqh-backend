@@ -393,7 +393,10 @@ mod tests {
                 store.create(&path, &[]).expect("create").id
             }));
         }
-        let ids: Vec<String> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+        let ids: Vec<String> = handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect();
 
         let listed: Vec<WorkspaceMeta> = store
             .list()

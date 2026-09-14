@@ -230,7 +230,10 @@ pub fn scan_opencode(path: &Path) -> Vec<ExternalServer> {
             if entry.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
                 return None;
             }
-            let server_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("local");
+            let server_type = entry
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("local");
             if server_type == "remote" {
                 let url = entry.get("url").and_then(|v| v.as_str())?.to_owned();
                 Some(ExternalServer {

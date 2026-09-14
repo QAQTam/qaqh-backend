@@ -13,7 +13,6 @@ use qaqh_domain::{
     TimelineTurnState,
 };
 
-
 /// A live Ringing V1 timeline delivery record. `entry.timeline_seq` is the sole SSE cursor for
 /// this seed; no per-channel sequence is exposed to a transcript consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -661,11 +660,7 @@ impl TimelineAppender {
     /// `offload` 回调负责持久化完整文本（offload 侧车）。reasoning 链路
     /// 常驻内存是长会话内存增长的主因之一；文本的持久权威由侧车承担，
     /// 内存只保留壳（turn 元数据 + 首块预览）。
-    pub fn set_offload(
-        &mut self,
-        seed: &str,
-        offload: Option<OffloadFn>,
-    ) {
+    pub fn set_offload(&mut self, seed: &str, offload: Option<OffloadFn>) {
         if let Some(timeline) = self.seeds.get_mut(seed) {
             timeline.offload_enabled = offload.is_some();
             timeline.offload = offload;
@@ -1366,7 +1361,14 @@ mod tests {
         let mut appender = TimelineAppender::new();
         appender.open_turn("s", "t1", "q1").unwrap();
         appender
-            .open_block("s", "t1", 0, "reasoning", TimelineBlockKind::Reasoning, None)
+            .open_block(
+                "s",
+                "t1",
+                0,
+                "reasoning",
+                TimelineBlockKind::Reasoning,
+                None,
+            )
             .unwrap();
         appender
             .append_text("s", "t1", 0, "reasoning", 0, "think")
@@ -1389,7 +1391,8 @@ mod tests {
         let tail = appender.replay_since("s", cut);
         assert_eq!(tail, all[mid + 1..], "tail is exactly the suffix above cut");
         assert!(
-            tail.windows(2).all(|w| w[0].timeline_seq < w[1].timeline_seq),
+            tail.windows(2)
+                .all(|w| w[0].timeline_seq < w[1].timeline_seq),
             "replay tail must be strictly monotonic"
         );
         // 水位到底 = 无条目可回放（客户端已对齐，不产生 gap）。
@@ -1422,7 +1425,11 @@ mod tests {
             "sealed turn entries must leave the replay tail immediately"
         );
         let snapshot = appender.snapshot("s").unwrap();
-        assert_eq!(snapshot.turns.len(), 1, "snapshot keeps the materialized turn");
+        assert_eq!(
+            snapshot.turns.len(),
+            1,
+            "snapshot keeps the materialized turn"
+        );
         assert!(snapshot.turns[0].sealed);
         assert_eq!(
             snapshot.turns[0].rounds[0].blocks[0].text,
@@ -1471,7 +1478,10 @@ mod tests {
         );
         let min_kept = *fragment_seqs.iter().min().unwrap();
         let expected: Vec<u64> = (min_kept..600).collect();
-        assert_eq!(fragment_seqs, expected, "retained window must be contiguous");
+        assert_eq!(
+            fragment_seqs, expected,
+            "retained window must be contiguous"
+        );
 
         // 条数上限分支：微小 delta 推过 8192 条后同样头部驱逐。
         let mut many = TimelineAppender::new();
@@ -1506,7 +1516,9 @@ mod tests {
         appender
             .open_block("s", "t1", 0, "r", TimelineBlockKind::Reasoning, None)
             .unwrap();
-        appender.append_text("s", "t1", 0, "r", 0, "payload-123").unwrap();
+        appender
+            .append_text("s", "t1", 0, "r", 0, "payload-123")
+            .unwrap();
         let journal = appender.replay_since("s", 0);
         let snapshot = appender.snapshot("s").unwrap();
 

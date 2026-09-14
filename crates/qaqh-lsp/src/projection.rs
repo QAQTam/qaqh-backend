@@ -116,9 +116,7 @@ fn render_marked_string(marked: &lsp_types::MarkedString) -> String {
 }
 
 /// documentSymbol 结果 → 缩进树行式（`kind name [selection path:line]`）。
-pub fn render_document_symbols(
-    result: Option<lsp_types::DocumentSymbolResponse>,
-) -> String {
+pub fn render_document_symbols(result: Option<lsp_types::DocumentSymbolResponse>) -> String {
     let Some(result) = result else {
         return "no document symbols".to_owned();
     };
@@ -168,9 +166,7 @@ fn render_symbol_tree(symbols: &[lsp_types::DocumentSymbol], depth: usize, out: 
 /// 双形态：Flat（`SymbolInformation[]`，location 必含 range）与 Nested
 /// （`WorkspaceSymbol[]`，location 可能是无 range 的 `WorkspaceLocation`——
 /// 此时只渲染 uri，不带行列）。
-pub fn render_workspace_symbols(
-    symbols: Option<lsp_types::WorkspaceSymbolResponse>,
-) -> String {
+pub fn render_workspace_symbols(symbols: Option<lsp_types::WorkspaceSymbolResponse>) -> String {
     let Some(symbols) = symbols else {
         return "no workspace symbols".to_owned();
     };
@@ -228,10 +224,8 @@ pub fn render_workspace_symbols(
 
 /// 计数头行 + 行式 + 2KB 截断（Claude 计数位 + mcp 截断同款）。
 fn render_counted_lines(lines: &[String]) -> String {
-    let files: std::collections::BTreeSet<&str> = lines
-        .iter()
-        .filter_map(|l| l.split(':').next())
-        .collect();
+    let files: std::collections::BTreeSet<&str> =
+        lines.iter().filter_map(|l| l.split(':').next()).collect();
     let header = format!("resultCount={} fileCount={}", lines.len(), files.len());
     truncate_result(&format!("{header}\n{}", lines.join("\n")))
 }

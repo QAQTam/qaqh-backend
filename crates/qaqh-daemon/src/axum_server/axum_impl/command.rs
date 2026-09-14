@@ -415,10 +415,12 @@ pub(crate) async fn handle_command(
                     );
                 }
             };
-            let created_seed = created
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| created.get("seed").and_then(|v| v.as_str()).map(str::to_string));
+            let created_seed = created.as_str().map(str::to_string).or_else(|| {
+                created
+                    .get("seed")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
             if let Some(seed) = created_seed {
                 // BUG-2026-09-12-10：attach 失败（lease 已死）必须显式 401，
                 // 而不是静默 ack 200 让前端进入「无归属」状态。
@@ -435,7 +437,11 @@ pub(crate) async fn handle_command(
                         .rollback(&env.command_id);
                     return ack_response(
                         StatusCode::UNAUTHORIZED,
-                        reject_ack(env.command_id, "lease_required", "lease is not active".into()),
+                        reject_ack(
+                            env.command_id,
+                            "lease_required",
+                            "lease is not active".into(),
+                        ),
                     );
                 }
                 publish_session_created(&state.hub, &seed, &env.command_id);
@@ -464,7 +470,11 @@ pub(crate) async fn handle_command(
                     .rollback(&env.command_id);
                 return ack_response(
                     StatusCode::UNAUTHORIZED,
-                    reject_ack(env.command_id, "lease_required", "lease is not active".into()),
+                    reject_ack(
+                        env.command_id,
+                        "lease_required",
+                        "lease is not active".into(),
+                    ),
                 );
             }
             if let Err(e) = state
@@ -519,7 +529,11 @@ pub(crate) async fn handle_command(
                     .rollback(&env.command_id);
                 return ack_response(
                     StatusCode::UNAUTHORIZED,
-                    reject_ack(env.command_id, "lease_required", "lease is not active".into()),
+                    reject_ack(
+                        env.command_id,
+                        "lease_required",
+                        "lease is not active".into(),
+                    ),
                 );
             }
             state

@@ -1146,8 +1146,7 @@ impl TurnEngine {
             // Responses 协议已对齐 chat 语义（成功恒 Some("stop")，
             // 截断/掐流收口 stop_reason=None），摘除 is_responses 排除，
             // 三协议统一按 stop_reason 缺失识别"不完整回合"并续写。
-            let incomplete_stream =
-                !had_error && request_error.is_none() && stop_reason.is_none();
+            let incomplete_stream = !had_error && request_error.is_none() && stop_reason.is_none();
             if incomplete_stream {
                 if self.continuation_count >= MAX_STREAM_CONTINUATIONS {
                     log::warn!(

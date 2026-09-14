@@ -121,8 +121,9 @@ fn resolve_map(
 ) -> Result<BTreeMap<String, String>, LspError> {
     let mut out = BTreeMap::new();
     for (key, value) in map {
-        let resolved = interpolate(value, secrets)
-            .map_err(|e| LspError::new(LspErrorKind::ConnectFailed, format!("{label}[{key}]: {e}")))?;
+        let resolved = interpolate(value, secrets).map_err(|e| {
+            LspError::new(LspErrorKind::ConnectFailed, format!("{label}[{key}]: {e}"))
+        })?;
         out.insert(key.clone(), resolved);
     }
     Ok(out)
