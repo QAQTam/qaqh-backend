@@ -84,6 +84,7 @@ fn missing_or_corrupt_timeline_is_rebuilt_from_persisted_messages() {
     let turn = &snapshot.turns[0];
     assert_eq!(turn.user_text, "question");
     assert!(turn.sealed);
+    assert!(turn.offloaded);
     assert_eq!(turn.state, TimelineTurnState::Completed);
     assert_eq!(turn.rounds.len(), 1);
     let round = &turn.rounds[0];
@@ -92,11 +93,21 @@ fn missing_or_corrupt_timeline_is_rebuilt_from_persisted_messages() {
     assert_eq!(round.blocks.len(), 3);
     assert_eq!(round.blocks[0].kind, TimelineBlockKind::Reasoning);
     assert_eq!(round.blocks[0].text, "thinking");
-    assert_eq!(
-        round.blocks[1].tool.as_ref().expect("tool block").state,
-        TimelineToolState::Succeeded
-    );
+    let tool = round.blocks[1].tool.as_ref().expect("tool block");
+    assert_eq!(tool.state, TimelineToolState::Succeeded);
+    assert!(tool.output.is_none());
     assert_eq!(round.blocks[2].text, "answer");
+
+    let page = hub.rehydrate_timeline_page(seed, snapshot.turns.clone());
+    assert_eq!(
+        page[0].rounds[0].blocks[1]
+            .tool
+            .as_ref()
+            .expect("restored tool block")
+            .output
+            .as_deref(),
+        Some("line one\nline two")
+    );
 
     // 第二次读取走的是刚写回的 timeline 文件，结果必须一致。
     let second = hub

@@ -296,7 +296,6 @@ impl ChannelShards {
 }
 
 /// Ringing daemon 运行时聚合。
-/// Debug 已移除：TimelineAppender 现含不可 Debug 的 offload 回调字段。
 pub struct RingingHub {
     pub(super) epoch: String,
     pub(super) sequencer: Sequencer,
@@ -1659,6 +1658,103 @@ mod tests {
         })
     }
 
+    fn publish_open_tool_turn(hub: &RingingHub, seed: &str, turn_id: &str, progress: &str) {
+        hub.publish_timeline(
+            seed,
+            TimelineIntent::TurnOpened {
+                turn_id: turn_id.into(),
+                user_text: format!("question-{turn_id}"),
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            seed,
+            TimelineIntent::BlockOpened {
+                turn_id: turn_id.into(),
+                round_num: 0,
+                block_id: "tool".into(),
+                kind: qaqh_domain::TimelineBlockKind::Tool,
+                tool: Some(qaqh_domain::TimelineTool {
+                    tool_call_id: format!("call-{turn_id}"),
+                    name: "exec".into(),
+                    state: qaqh_domain::TimelineToolState::Running,
+                    summary: None,
+                    args_json: None,
+                    output: None,
+                    diff: None,
+                    progress: String::new(),
+                    progress_truncated: false,
+                    failure: None,
+                    permission: None,
+                }),
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            seed,
+            TimelineIntent::ToolProgress {
+                turn_id: turn_id.into(),
+                round_num: 0,
+                block_id: "tool".into(),
+                chunk: progress.into(),
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            seed,
+            TimelineIntent::ToolUpdated {
+                turn_id: turn_id.into(),
+                round_num: 0,
+                block_id: "tool".into(),
+                tool: qaqh_domain::TimelineTool {
+                    tool_call_id: format!("call-{turn_id}"),
+                    name: "exec".into(),
+                    state: qaqh_domain::TimelineToolState::Succeeded,
+                    summary: Some(format!("summary-{turn_id}")),
+                    args_json: None,
+                    output: Some(format!("full-output-{turn_id}")),
+                    diff: Some(format!("diff-{turn_id}")),
+                    progress: progress.into(),
+                    progress_truncated: false,
+                    failure: None,
+                    permission: None,
+                },
+            },
+        )
+        .unwrap();
+    }
+
+    fn publish_tool_turn(hub: &RingingHub, seed: &str, turn_id: &str, progress: &str) {
+        publish_open_tool_turn(hub, seed, turn_id, progress);
+        hub.publish_timeline(
+            seed,
+            TimelineIntent::BlockSealed {
+                turn_id: turn_id.into(),
+                round_num: 0,
+                block_id: "tool".into(),
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            seed,
+            TimelineIntent::RoundSealed {
+                turn_id: turn_id.into(),
+                round_num: 0,
+                is_final: true,
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            seed,
+            TimelineIntent::TurnSealed {
+                turn_id: turn_id.into(),
+                state: qaqh_domain::TimelineTurnState::Completed,
+                failure: None,
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn lazy_load_defers_history_until_first_access() {
         let root = temp_root("lazy");
@@ -2373,6 +2469,267 @@ mod tests {
             persisted.journal.is_empty(),
             "sealed turn leaves no replay tail on disk"
         );
+        drop(hub);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sealed_tool_turn_is_offloaded_but_paginated_read_restores_full_text() {
+        let root = temp_root("timeline-offload-page");
+        let hub = RingingHub::with_persistence("epoch", &root);
+        // Keep this below the reducer cap so the assertion verifies the full
+        // sidecar round-trip rather than the intentionally lossy progress tail.
+        let progress = "p".repeat(8 * 1024);
+        publish_tool_turn(&hub, "s", "t1", &progress);
+
+        // The resident snapshot is bounded: output/diff are gone and progress
+        // is only the preview shell.
+        let resident = hub.timeline_snapshot("s").expect("resident snapshot");
+        let shell = resident.turns[0].rounds[0].blocks[0]
+            .tool
+            .as_ref()
+            .expect("tool");
+        assert!(resident.turns[0].offloaded);
+        assert!(shell.output.is_none());
+        assert!(shell.diff.is_none());
+        assert!(shell.progress.len() <= 512);
+        assert!(shell.progress_truncated);
+
+        // Reading one page rehydrates only the returned value. It must not
+        // mutate the resident shell.
+        let page = hub.rehydrate_timeline_page("s", resident.turns.clone());
+        let full = page[0].rounds[0].blocks[0].tool.as_ref().unwrap();
+        assert!(!page[0].offloaded);
+        assert_eq!(full.output.as_deref(), Some("full-output-t1"));
+        assert_eq!(full.diff.as_deref(), Some("diff-t1"));
+        assert_eq!(full.progress, progress);
+        assert!(
+            hub.timeline_snapshot("s").unwrap().turns[0].offloaded,
+            "rehydration must remain response-local"
+        );
+
+        // The on-disk snapshot is independently complete even while memory is
+        // shelled.
+        hub.flush_timeline_persistence();
+        let persisted = TimelineStore::new(&root)
+            .unwrap()
+            .load_seed("s")
+            .expect("persisted snapshot");
+        let persisted_tool = persisted.snapshot.turns[0].rounds[0].blocks[0]
+            .tool
+            .as_ref()
+            .unwrap();
+        assert_eq!(persisted_tool.output.as_deref(), Some("full-output-t1"));
+        assert_eq!(persisted_tool.progress, progress);
+
+        drop(hub);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn offload_page_keeps_shell_when_sidecar_is_missing_or_stale() {
+        let root = temp_root("timeline-offload-degrade");
+        let hub = RingingHub::with_persistence("epoch", &root);
+        publish_tool_turn(&hub, "missing", "t1", "complete-progress");
+        let missing = hub.timeline_snapshot("missing").unwrap();
+        assert!(missing.turns[0].offloaded);
+
+        // Missing sidecar row: bounded shell is preferable to inventing data.
+        std::fs::remove_file(root.join("ringing-offload").join("missing.jsonl")).unwrap();
+        let page = hub.rehydrate_timeline_page("missing", missing.turns.clone());
+        assert!(page[0].offloaded);
+        assert!(
+            page[0].rounds[0].blocks[0]
+                .tool
+                .as_ref()
+                .unwrap()
+                .output
+                .is_none()
+        );
+
+        // Reopen the same turn id, then append an older generation as the
+        // latest sidecar row. Neither page reads nor full persistence may let
+        // that row replace the current generation.
+        publish_tool_turn(&hub, "stale", "t1", "first-generation");
+        let first = hub.timeline_snapshot("stale").unwrap();
+        assert!(first.turns[0].offloaded);
+        let first_created_seq = first.turns[0].created_seq;
+        hub.publish_timeline(
+            "stale",
+            TimelineIntent::TurnOpened {
+                turn_id: "t1".into(),
+                user_text: "second".into(),
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            "stale",
+            TimelineIntent::BlockOpened {
+                turn_id: "t1".into(),
+                round_num: 0,
+                block_id: "tool".into(),
+                kind: qaqh_domain::TimelineBlockKind::Tool,
+                tool: Some(qaqh_domain::TimelineTool {
+                    tool_call_id: "call-t1".into(),
+                    name: "exec".into(),
+                    state: qaqh_domain::TimelineToolState::Running,
+                    summary: None,
+                    args_json: None,
+                    output: None,
+                    diff: None,
+                    progress: String::new(),
+                    progress_truncated: false,
+                    failure: None,
+                    permission: None,
+                }),
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            "stale",
+            TimelineIntent::BlockSealed {
+                turn_id: "t1".into(),
+                round_num: 0,
+                block_id: "tool".into(),
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            "stale",
+            TimelineIntent::RoundSealed {
+                turn_id: "t1".into(),
+                round_num: 0,
+                is_final: true,
+            },
+        )
+        .unwrap();
+        hub.publish_timeline(
+            "stale",
+            TimelineIntent::TurnSealed {
+                turn_id: "t1".into(),
+                state: qaqh_domain::TimelineTurnState::Completed,
+                failure: None,
+            },
+        )
+        .unwrap();
+        // Establish the second generation as the latest sidecar row before
+        // appending the stale row used by this test.
+        hub.flush_timeline_persistence();
+
+        let mut stale_full = first.turns[0].clone();
+        stale_full.created_seq = first_created_seq;
+        stale_full.offloaded = false;
+        let stale_tool = stale_full.rounds[0].blocks[0].tool.as_mut().unwrap();
+        stale_tool.output = Some("stale-output".into());
+        stale_tool.diff = Some("stale-diff".into());
+        stale_tool.progress = "stale-progress".into();
+        hub.timeline_store
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .append_offloaded_turn("stale", &stale_full)
+            .unwrap();
+
+        let current = hub.timeline_snapshot("stale").unwrap();
+        assert!(current.turns[0].offloaded);
+        assert_ne!(current.turns[0].created_seq, first_created_seq);
+        let page = hub.rehydrate_timeline_page("stale", current.turns.clone());
+        assert!(page[0].offloaded);
+        assert_eq!(page[0].user_text, "second");
+        assert!(
+            page[0].rounds[0].blocks[0]
+                .tool
+                .as_ref()
+                .unwrap()
+                .output
+                .is_none()
+        );
+        hub.flush_timeline_persistence();
+        let persisted = TimelineStore::new(&root)
+            .unwrap()
+            .load_seed("stale")
+            .unwrap()
+            .snapshot;
+        assert_eq!(persisted.turns[0].user_text, "second");
+        assert!(
+            persisted.turns[0].rounds[0].blocks[0]
+                .tool
+                .as_ref()
+                .unwrap()
+                .output
+                .is_none()
+        );
+
+        drop(hub);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn offload_write_failure_keeps_full_turn_resident() {
+        let root = temp_root("timeline-offload-write-failure");
+        let offload_dir = root.join("ringing-offload");
+        std::fs::create_dir_all(&offload_dir).unwrap();
+        std::fs::create_dir(offload_dir.join("s.jsonl")).unwrap();
+
+        let hub = RingingHub::with_persistence("epoch", &root);
+        publish_tool_turn(&hub, "s", "t1", "must-stay-resident");
+        let snapshot = hub.timeline_snapshot("s").unwrap();
+        assert!(!snapshot.turns[0].offloaded);
+        let tool = snapshot.turns[0].rounds[0].blocks[0].tool.as_ref().unwrap();
+        assert_eq!(tool.output.as_deref(), Some("full-output-t1"));
+        assert_eq!(tool.progress, "must-stay-resident");
+
+        drop(hub);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn offloaded_turn_survives_restart_and_restores_on_page_read() {
+        let root = temp_root("timeline-offload-restart");
+        {
+            let hub = RingingHub::with_persistence("epoch-1", &root);
+            publish_tool_turn(&hub, "s", "t1", "restart-progress");
+            hub.flush_timeline_persistence();
+        }
+
+        let hub = RingingHub::with_persistence("epoch-2", &root);
+        let resident = hub.timeline_snapshot("s").unwrap();
+        assert!(resident.turns[0].offloaded);
+        let page = hub.rehydrate_timeline_page("s", resident.turns.clone());
+        let tool = page[0].rounds[0].blocks[0].tool.as_ref().unwrap();
+        assert_eq!(tool.progress, "restart-progress");
+        assert_eq!(tool.output.as_deref(), Some("full-output-t1"));
+
+        drop(hub);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn orphan_seal_offloads_tool_text_and_page_read_restores_it() {
+        let root = temp_root("timeline-orphan-offload");
+        let hub = RingingHub::with_persistence("epoch", &root);
+        let progress = "orphan-progress".repeat(64);
+        publish_open_tool_turn(&hub, "s", "t1", &progress);
+
+        assert!(hub.seal_orphan_running_turns("s"));
+        let resident = hub.timeline_snapshot("s").unwrap();
+        let turn = &resident.turns[0];
+        assert!(turn.sealed);
+        assert_eq!(turn.state, qaqh_domain::TimelineTurnState::Cancelled);
+        assert!(turn.offloaded);
+        let tool = turn.rounds[0].blocks[0].tool.as_ref().unwrap();
+        assert!(tool.output.is_none());
+        assert!(tool.diff.is_none());
+        assert!(tool.progress.len() <= 512);
+        assert!(tool.progress_truncated);
+
+        let page = hub.rehydrate_timeline_page("s", resident.turns.clone());
+        let restored = page[0].rounds[0].blocks[0].tool.as_ref().unwrap();
+        assert_eq!(restored.output.as_deref(), Some("full-output-t1"));
+        assert_eq!(restored.diff.as_deref(), Some("diff-t1"));
+        assert_eq!(restored.progress, progress);
+
         drop(hub);
         let _ = std::fs::remove_dir_all(root);
     }

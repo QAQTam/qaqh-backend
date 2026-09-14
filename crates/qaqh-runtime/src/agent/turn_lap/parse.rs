@@ -68,6 +68,7 @@ pub(crate) fn parse_and_ingest(
                         output: None,
                         diff: None,
                         progress: String::new(),
+                        progress_truncated: false,
                         failure: None,
                         permission: None,
                     }),

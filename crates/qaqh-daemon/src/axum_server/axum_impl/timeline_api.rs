@@ -117,6 +117,9 @@ pub(crate) async fn handle_timeline_snapshot(
         q.before_turn.as_deref(),
         q.limit.unwrap_or(TIMELINE_PAGE_LIMIT).min(200),
     );
+    // Page before rehydration: the resident snapshot keeps only bounded
+    // shells, while the response restores full text for this page only.
+    let page = state.hub.rehydrate_timeline_page(&seed, page);
     let body = serde_json::json!({
         "schema": "qaqh.Ringing",
         "version": 1,

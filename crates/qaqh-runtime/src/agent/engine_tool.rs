@@ -28,11 +28,12 @@ fn timeline_tool(
         tool_call_id: tool_call_id.to_string(),
         name: name.to_string(),
         state,
-        summary: output.clone(),
+        summary: output.as_deref().map(crate::timeline::tool_summary),
         args_json,
         output,
         diff,
         progress: String::new(),
+        progress_truncated: false,
         failure,
         permission: None,
     }
@@ -219,6 +220,7 @@ impl ToolEngine {
                             output: None,
                             diff: None,
                             progress: String::new(),
+                            progress_truncated: false,
                             failure: None,
                             permission: Some(permission),
                         }),
@@ -463,6 +465,7 @@ impl ToolEngine {
                                 output: None,
                                 diff: None,
                                 progress: String::new(),
+                                progress_truncated: false,
                                 failure: None,
                                 permission: Some(qaqh_domain::TimelineToolPermission {
                                     reason: challenge.reason().to_string(),
@@ -783,9 +786,9 @@ impl ToolEngine {
         });
     }
 
-    /// A2：渲染尾部协议——每 (tool_call_id, stream) 只保留最后 4KB 尾部，
-    /// 事件携带完整尾部（`seq_start` = 尾部覆盖的起始位置，`chunk` = 尾部全文），
-    /// 前端**替换**而非拼接；不连续/丢 chunk 由下一次尾部自愈。
+    /// Progress chunks are forwarded as they arrive. The transcript writer
+    /// owns the bounded tail and records truncation in `TimelineTool`; this
+    /// layer must not claim replace semantics that the wire protocol lacks.
     fn emit_progress_tail(
         ctx: &mut RingContext,
         turn_id: &str,
