@@ -305,6 +305,7 @@ pub struct RingingHub {
     /// 大内容外置存储（会话所有权 + TTL）。
     pub(super) content_store: Mutex<ContentStore>,
     /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
+    /// channel → (seed → state)。router/journal/projection 均 per (seed, channel)。
     ///
     /// BUG-2026-09-13-33（BUG-08 收尾）：全局单锁 → 两级分片锁表。
     /// 顶层锁只保护「频道登记 / 频道枚举」，临界区是 map 操作，**绝不含 I/O、
@@ -330,8 +331,32 @@ pub struct RingingHub {
     ///    且 `lazy_loads` 与槽锁槽表无嵌套（`Drop` 先摘槽表快照，再逐个取
     ///    槽锁，两者从不重叠持有）。
     pub(super) channels: Mutex<HashMap<RingingChannel, Arc<ChannelShards>>>,
-    /// 每频道实时推送通道（SSE 消费；可靠性由 journal/cursor 保证）。
-    pub(super) live: Mutex<HashMap<RingingChannel, broadcast::Sender<RingingEventEnvelope>>>,
+    /// 实时推送分片通道（SSE 消费；可靠性由 journal/cursor 保证）。
+    ///
+    /// BUG-2026-09-12-12（issue #31）：原先按**频道**单环——任一会话灌满
+    /// 1024 容量的环就把同频道**所有**连接（含空闲会话）推向 `Lagged`，
+    /// 即「一个会话变快 = 全体连接断流」。现在按 `(channel, seed)` 分片：
+    /// 风暴只填自己的分片，旁观会话的分片水位不受影响。
+    ///
+    /// 键为 `(channel, seed)`；值为该分片的发送端（订阅者数 = 环的接收端数）。
+    pub(super) live: Mutex<HashMap<(RingingChannel, String), broadcast::Sender<RingingEventEnvelope>>>,
+    /// 频道级聚合视图（多 seed 消费者：命令回执观察者、测试桥接）。
+    ///
+    /// 懒创建：没有聚合订阅者时不存在该环，`fanout` 也跳过（零开销）。
+    /// 聚合视图的语义与分片前的「频道单环」逐事件一致——同一批事件、
+    /// 同一发布顺序，只是**订阅者自身选择**不隔离（它本来就要看全部会话）。
+    pub(super) live_channels: Mutex<HashMap<RingingChannel, broadcast::Sender<RingingEventEnvelope>>>,
+    /// 每频道的**发布水位**：已 fanout 的最大 `stream_seq`。
+    ///
+    /// BUG-2026-09-12-12：分片后跨分片合并必须按 `stream_seq` 升序交付
+    /// （客户端的 `Last-Event-ID` 游标单调递增，较大序号先到会把较小序号
+    /// 永久挡在游标之外）。水位让合并**可判定**：
+    ///
+    /// - `fanout` 在 `live` 锁内「先 send 到分片、再抬水位」；
+    /// - 合并方在 `live` 锁内读水位 W：凡 `stream_seq <= W` 的事件都已落在
+    ///   某分片里，因此**空分片不可能再产出 `<= W` 的序号**，无需等待即可
+    ///   取当前 pending 的最小值交付——严格升序且无饥饿。
+    pub(super) live_watermark: Mutex<HashMap<RingingChannel, u64>>,
     /// 当前进程生命周期内发布且未 resolved 的活交互（seed → interaction_id）。
     /// journal 重放的幽灵交互不在此表：daemon 重启后表为空，bootstrap 孤儿
     /// 收尾据此区分「等待用户响应的活交互」（保护，不 seal）与「daemon 重启
@@ -566,6 +591,8 @@ impl RingingHub {
             content_store: Mutex::new(ContentStore::new()),
             channels: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            live_channels: Mutex::new(HashMap::new()),
+            live_watermark: Mutex::new(HashMap::new()),
             live_interactions: Mutex::new(HashMap::new()),
             live_workers: Mutex::new(std::collections::HashSet::new()),
             journal_store,
@@ -741,6 +768,12 @@ impl RingingHub {
             .collect();
         for shard in shards {
             shard.remove(seed);
+        }
+        // BUG-2026-09-12-12：连同该 seed 的实时分片环一并丢弃，避免会话关闭
+        // 后分片表随历史会话数无限增长（订阅者持有的 Receiver 仍可读完已缓冲
+        // 事件，`broadcast` 只在所有接收端释放后才真正回收）。
+        if let Ok(mut live) = self.live.lock() {
+            live.retain(|(_, shard_seed), _| shard_seed != seed);
         }
         if let Ok(mut live) = self.live_interactions.lock() {
             live.remove(seed);
@@ -995,20 +1028,86 @@ impl RingingHub {
         }
     }
 
-    /// 订阅某频道的实时事件流（SSE 用）。reliable 可靠性由 cursor/journal 承担。
-    pub fn subscribe(&self, channel: RingingChannel) -> broadcast::Receiver<RingingEventEnvelope> {
+    /// 订阅**某频道某会话**的实时事件流（SSE 用）。reliable 可靠性由
+    /// cursor/journal 承担。
+    ///
+    /// BUG-2026-09-12-12（issue #31）：按 `(channel, seed)` 分片订阅。SSE
+    /// 连接本就只消费自己 lease 覆盖的 seed，按分片订阅后其它会话的风暴
+    /// 不再把本连接推向 `Lagged`（验收标准 1）。
+    pub fn subscribe(
+        &self,
+        channel: RingingChannel,
+        seed: &str,
+    ) -> broadcast::Receiver<RingingEventEnvelope> {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-        live.entry(channel)
+        live.entry((channel, seed.to_string()))
+            .or_insert_with(|| broadcast::channel(LIVE_BROADCAST_CAPACITY).0)
+            .subscribe()
+    }
+
+    /// 订阅**频道级聚合**实时事件流（跨 seed 的多会话消费者）。
+    ///
+    /// 语义与分片前的频道单环完全一致：收到该频道全部 seed 的事件，
+    /// 顺序 = 发布顺序。使用者是那些「本来就要看所有会话」的观察者
+    /// （命令回执折叠、测试桥接），它们不承担扇出隔离义务。
+    pub fn subscribe_channel(
+        &self,
+        channel: RingingChannel,
+    ) -> broadcast::Receiver<RingingEventEnvelope> {
+        let mut channels = self
+            .live_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        channels
+            .entry(channel)
             .or_insert_with(|| broadcast::channel(LIVE_BROADCAST_CAPACITY).0)
             .subscribe()
     }
 
     /// publish 末尾：把信封推入实时通道（失败=无消费者，忽略）。
+    ///
+    /// 目标分片按 `(channel, seed)` 定位；频道级聚合环仅在存在订阅者
+    /// （`live_channels` 有该频道条目）时额外投递。
+    ///
+    /// 顺序不变式（BUG-2026-09-12-12）：在 `live` 锁内**先投递分片、再抬
+    /// 水位**。合并方在同一把锁内读水位，因此「水位已覆盖的序号一定已在
+    /// 分片里」；反之若先抬水位再投递，合并方可能读到水位却看不到事件。
     fn fanout(&self, channel: RingingChannel, envelope: &RingingEventEnvelope) {
-        let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(tx) = live.get(&channel) {
+        {
+            let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(tx) = live.get(&(channel, envelope.seed.clone())) {
+                let _ = tx.send(envelope.clone());
+            }
+            // 即使该 seed 此刻无订阅者（分片不存在），水位也要抬：水位表达的
+            // 是「发布序已推进到哪」，与是否有人订阅无关——否则后续新订阅的
+            // 空分片会显得「可能有更小序号」而拖住合并。
+            let mut watermark = self
+                .live_watermark
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let slot = watermark.entry(channel).or_insert(0);
+            *slot = (*slot).max(envelope.stream_seq);
+        }
+        let aggregate = {
+            let channels = self
+                .live_channels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            channels.get(&channel).cloned()
+        };
+        if let Some(tx) = aggregate {
             let _ = tx.send(envelope.clone());
         }
+    }
+
+    /// 读该频道的发布水位（见 `live_watermark` 文档）。
+    pub fn live_watermark(&self, channel: RingingChannel) -> u64 {
+        self.live_watermark
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&channel)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// 从 cursor 回放（SSE 重连用）。cursor 超出窗口 → `CursorExpired`。
@@ -1996,10 +2095,100 @@ mod tests {
         assert_eq!(st.journal.checkpoints().get("tool:c1"), Some(&7));
     }
 
+    /// BUG-2026-09-12-12（issue #31）回归 1：单会话风暴不得把**其它会话**的连接
+    /// 推向 Lagged。
+    ///
+    /// 修复前：`live` 按频道单环（1024），任一会话灌满就把同频道所有连接（含
+    /// 空闲会话）推向 Lagged；修复后：按 (channel, seed) 分片，风暴只填自己的
+    /// 分片，旁观者分片水位不受影响。
+    #[test]
+    fn session_storm_does_not_lag_other_seeds() {
+        let hub = RingingHub::new("epoch-shard");
+        // 两个会话各自订阅（分片后 seed 作用域）。
+        let mut storm_rx = hub.subscribe(RingingChannel::Conversation, "storm");
+        let mut idle_rx = hub.subscribe(RingingChannel::Conversation, "idle");
+
+        // 风暴会话发布远超分片容量的 replaceable 事件，且不排空自身。
+        for i in 1..=4096u64 {
+            let _ = hub.publish("storm", round_delta(i));
+        }
+        // storm 自己应当 Lagged（该会话确实被压垮）。
+        let mut storm_lagged = false;
+        loop {
+            match storm_rx.try_recv() {
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                    storm_lagged = true;
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        assert!(storm_lagged, "风暴会话自身应被压垮（Lagged）");
+
+        // 旁观会话发布一条，必须原样收到——不能因为别人的风暴而 Lagged。
+        let _ = hub.publish("idle", round_delta(1));
+        let received = idle_rx.try_recv().expect("旁观会话不应 Lagged，必须收到自己的事件");
+        assert_eq!(received.seed, "idle");
+    }
+
+    /// BUG-2026-09-12-12（issue #31）回归 2：分片后单会话订阅者收到的**内容与
+    /// 顺序**与修复前（频道级流 + seed 过滤）逐字节一致。
+    #[test]
+    fn sharded_broadcast_preserves_order_and_content_per_seed() {
+        let hub = RingingHub::new("epoch-order");
+        let mut rx = hub.subscribe(RingingChannel::Conversation, "s-a");
+
+        // 交错发布两个会话，只有 s-a 的事件应落在 s-a 的流里，且相对顺序不变。
+        let mut expected = Vec::new();
+        for i in 1..=8u64 {
+            let other = hub.publish("s-b", round_delta(i));
+            assert!(matches!(other, PublishOutcome::Published { .. }));
+            let mine = hub.publish("s-a", round_delta(i));
+            match mine {
+                PublishOutcome::Published { envelope } => expected.push(envelope),
+                other => panic!("s-a publish failed: {other:?}"),
+            }
+        }
+
+        let mut got = Vec::new();
+        while let Ok(env) = rx.try_recv() {
+            got.push(env);
+        }
+        assert_eq!(got.len(), expected.len(), "s-a 只应收到自己的事件");
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert_eq!(g.seed, "s-a");
+            assert_eq!(g.event_id, e.event_id, "事件内容/标识必须一致");
+            assert_eq!(g.stream_seq, e.stream_seq, "顺序必须一致");
+        }
+        // stream_seq 单调递增（频道内全局序在 seed 内部投影仍是递增子序列）。
+        assert!(
+            got.windows(2).all(|w| w[0].stream_seq < w[1].stream_seq),
+            "分片流内顺序必须单调递增"
+        );
+    }
+
+    /// BUG-2026-09-12-12（issue #31）回归 3：跨会话频道级聚合视图仍能看到全部
+    /// seed 的事件（多 seed 消费者语义不变：如命令回执观察者）。
+    #[test]
+    fn channel_aggregate_subscription_still_sees_every_seed() {
+        let hub = RingingHub::new("epoch-all");
+        let mut rx = hub.subscribe_channel(RingingChannel::Conversation);
+        let _ = hub.publish("s-a", round_delta(1));
+        let _ = hub.publish("s-b", round_delta(2));
+
+        let mut seeds = HashSet::new();
+        for _ in 0..2 {
+            let env = rx.try_recv().expect("频道聚合视图应收到两个 seed 的事件");
+            seeds.insert(env.seed);
+        }
+        assert!(seeds.contains("s-a") && seeds.contains("s-b"), "got {seeds:?}");
+    }
+
     #[test]
     fn live_broadcast_delivers_published_envelopes() {
         let hub = RingingHub::new("epoch-1");
-        let mut rx = hub.subscribe(RingingChannel::Conversation);
+        let mut rx = hub.subscribe(RingingChannel::Conversation, "s");
         hub.publish(
             "s",
             DomainEvent::Conversation(ConversationEvent::ConversationCancelled { turn_id: None }),
@@ -2761,6 +2950,36 @@ mod tests {
         // 其他 seed 的常驻状态不受影响。
         hub.publish("s2", round_delta(2));
         assert!(holds_seed(&hub, "s2"));
+    }
+
+    /// BUG-2026-09-12-12（issue #31）：分片环必须随会话关闭回收，否则
+    /// 「每历史会话一个环」会让内存随会话数单调增长。
+    #[test]
+    fn forget_seed_drops_live_shard_ring() {
+        let hub = RingingHub::new("forget-shard");
+        let _rx_a = hub.subscribe(RingingChannel::Conversation, "s1");
+        let _rx_b = hub.subscribe(RingingChannel::Conversation, "s2");
+        let shard_seeds = |hub: &RingingHub| -> HashSet<(RingingChannel, String)> {
+            hub.live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert!(shard_seeds(&hub).contains(&(RingingChannel::Conversation, "s1".into())));
+
+        hub.forget_seed("s1");
+
+        let seeds = shard_seeds(&hub);
+        assert!(
+            !seeds.contains(&(RingingChannel::Conversation, "s1".into())),
+            "关闭会话的分片环必须回收"
+        );
+        assert!(
+            seeds.contains(&(RingingChannel::Conversation, "s2".into())),
+            "其他会话的分片环不受影响"
+        );
     }
 
     #[test]

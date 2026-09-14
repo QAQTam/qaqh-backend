@@ -40,7 +40,7 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
 
     let seed = format!("sub-inproc-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-inprocess-test"));
-    let mut control_rx = hub.subscribe(qaqh_domain::RingingChannel::Control);
+    let mut control_rx = hub.subscribe_channel(qaqh_domain::RingingChannel::Control);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         while let Ok(envelope) = control_rx.blocking_recv() {
