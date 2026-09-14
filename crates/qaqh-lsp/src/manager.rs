@@ -230,7 +230,10 @@ impl LspManager {
             return None;
         }
         // 去掉查询串/行号污染：只取扩展名中的字母数字前缀。
-        let ext: String = ext.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let ext: String = ext
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
         if ext.is_empty() {
             return None;
         }
@@ -265,7 +268,9 @@ impl LspManager {
                 let conns: Vec<Arc<ServerConnection>> = self
                     .lock_conns()
                     .iter()
-                    .filter(|(k, _)| k.as_str() == name.as_str() || k.starts_with(&format!("{name}\0")))
+                    .filter(|(k, _)| {
+                        k.as_str() == name.as_str() || k.starts_with(&format!("{name}\0"))
+                    })
                     .map(|(_, v)| Arc::clone(v))
                     .collect();
                 let state = if conns.is_empty() {
@@ -345,7 +350,10 @@ mod tests {
             manager.server_for_extension("src/main.rs"),
             Some("rust".to_owned())
         );
-        assert_eq!(manager.server_for_extension("SRC/MAIN.RS"), Some("rust".to_owned()));
+        assert_eq!(
+            manager.server_for_extension("SRC/MAIN.RS"),
+            Some("rust".to_owned())
+        );
         assert_eq!(manager.server_for_extension("Makefile"), None);
         assert_eq!(manager.server_for_extension("noext"), None);
     }

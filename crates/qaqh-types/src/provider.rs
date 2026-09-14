@@ -348,39 +348,105 @@ pub struct EndpointPatch {
 impl EndpointPatch {
     /// 把非 None 字段写入 `spec`（原地覆盖）。
     pub fn apply_to(&self, spec: &mut EndpointSpec) {
-        if let Some(v) = &self.display { spec.display = v.clone(); }
-        if let Some(v) = &self.protocol { spec.protocol = v.clone(); }
-        if let Some(v) = &self.base_url { spec.base_url = v.clone(); }
-        if let Some(v) = &self.default_model { spec.default_model = v.clone(); }
-        if let Some(v) = &self.models_url { spec.models_url = Some(v.clone()); }
-        if let Some(v) = &self.chat_path { spec.chat_path = Some(v.clone()); }
-        if let Some(v) = &self.responses_path { spec.responses_path = Some(v.clone()); }
-        if let Some(v) = &self.anthropic_path { spec.anthropic_path = Some(v.clone()); }
-        if let Some(v) = &self.balance_path { spec.balance_path = Some(v.clone()); }
-        if let Some(v) = &self.thinking_mode { spec.thinking_mode = v.clone(); }
-        if let Some(v) = &self.cache_field { spec.cache_field = v.clone(); }
-        if let Some(v) = self.include_stream_usage { spec.include_stream_usage = v; }
-        if let Some(v) = self.has_balance { spec.has_balance = v; }
-        if let Some(v) = self.supports_thinking { spec.supports_thinking = v; }
-        if let Some(v) = self.thinking_budget_large { spec.thinking_budget_large = v; }
-        if let Some(v) = self.supports_reasoning_effort { spec.supports_reasoning_effort = v; }
-        if let Some(v) = &self.effort_allowlist { spec.effort_allowlist = Some(v.clone()); }
-        if let Some(v) = self.tool_call_content_null { spec.tool_call_content_null = v; }
-        if let Some(v) = self.supports_reasoning_content { spec.supports_reasoning_content = v; }
-        if let Some(v) = self.require_provider_parameters { spec.require_provider_parameters = v; }
-        if let Some(v) = &self.image_models { spec.image_models = Some(v.clone()); }
-        if let Some(v) = self.stateful { spec.stateful = v; }
-        if let Some(v) = self.beta { spec.beta = v; }
-        if let Some(v) = self.do_sample { spec.do_sample = Some(v); }
-        if let Some(v) = self.responses_web_search { spec.responses_web_search = v; }
-        if let Some(v) = self.responses_echo_web_search_call { spec.responses_echo_web_search_call = v; }
-        if let Some(v) = self.responses_send_include { spec.responses_send_include = v; }
-        if let Some(v) = &self.responses_effort_max { spec.responses_effort_max = v.clone(); }
-        if let Some(v) = self.responses_supports_user { spec.responses_supports_user = v; }
-        if let Some(v) = &self.responses_search_function_alias { spec.responses_search_function_alias = Some(v.clone()); }
-        if let Some(v) = self.responses_echo_reasoning_content { spec.responses_echo_reasoning_content = v; }
-        if let Some(v) = self.supports_image_tool { spec.supports_image_tool = v; }
-        if let Some(v) = &self.retry { spec.retry = Some(v.clone()); }
+        if let Some(v) = &self.display {
+            spec.display = v.clone();
+        }
+        if let Some(v) = &self.protocol {
+            spec.protocol = v.clone();
+        }
+        if let Some(v) = &self.base_url {
+            spec.base_url = v.clone();
+        }
+        if let Some(v) = &self.default_model {
+            spec.default_model = v.clone();
+        }
+        if let Some(v) = &self.models_url {
+            spec.models_url = Some(v.clone());
+        }
+        if let Some(v) = &self.chat_path {
+            spec.chat_path = Some(v.clone());
+        }
+        if let Some(v) = &self.responses_path {
+            spec.responses_path = Some(v.clone());
+        }
+        if let Some(v) = &self.anthropic_path {
+            spec.anthropic_path = Some(v.clone());
+        }
+        if let Some(v) = &self.balance_path {
+            spec.balance_path = Some(v.clone());
+        }
+        if let Some(v) = &self.thinking_mode {
+            spec.thinking_mode = v.clone();
+        }
+        if let Some(v) = &self.cache_field {
+            spec.cache_field = v.clone();
+        }
+        if let Some(v) = self.include_stream_usage {
+            spec.include_stream_usage = v;
+        }
+        if let Some(v) = self.has_balance {
+            spec.has_balance = v;
+        }
+        if let Some(v) = self.supports_thinking {
+            spec.supports_thinking = v;
+        }
+        if let Some(v) = self.thinking_budget_large {
+            spec.thinking_budget_large = v;
+        }
+        if let Some(v) = self.supports_reasoning_effort {
+            spec.supports_reasoning_effort = v;
+        }
+        if let Some(v) = &self.effort_allowlist {
+            spec.effort_allowlist = Some(v.clone());
+        }
+        if let Some(v) = self.tool_call_content_null {
+            spec.tool_call_content_null = v;
+        }
+        if let Some(v) = self.supports_reasoning_content {
+            spec.supports_reasoning_content = v;
+        }
+        if let Some(v) = self.require_provider_parameters {
+            spec.require_provider_parameters = v;
+        }
+        if let Some(v) = &self.image_models {
+            spec.image_models = Some(v.clone());
+        }
+        if let Some(v) = self.stateful {
+            spec.stateful = v;
+        }
+        if let Some(v) = self.beta {
+            spec.beta = v;
+        }
+        if let Some(v) = self.do_sample {
+            spec.do_sample = Some(v);
+        }
+        if let Some(v) = self.responses_web_search {
+            spec.responses_web_search = v;
+        }
+        if let Some(v) = self.responses_echo_web_search_call {
+            spec.responses_echo_web_search_call = v;
+        }
+        if let Some(v) = self.responses_send_include {
+            spec.responses_send_include = v;
+        }
+        if let Some(v) = &self.responses_effort_max {
+            spec.responses_effort_max = v.clone();
+        }
+        if let Some(v) = self.responses_supports_user {
+            spec.responses_supports_user = v;
+        }
+        if let Some(v) = &self.responses_search_function_alias {
+            spec.responses_search_function_alias = Some(v.clone());
+        }
+        if let Some(v) = self.responses_echo_reasoning_content {
+            spec.responses_echo_reasoning_content = v;
+        }
+        if let Some(v) = self.supports_image_tool {
+            spec.supports_image_tool = v;
+        }
+        if let Some(v) = &self.retry {
+            spec.retry = Some(v.clone());
+        }
     }
 }
 

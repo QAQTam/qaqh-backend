@@ -167,7 +167,10 @@ fn scan_opencode_parses_local_and_remote() {
     let codegraph = servers.iter().find(|s| s.name == "codegraph").unwrap();
     assert_eq!(codegraph.command, "codegraph");
     assert_eq!(codegraph.args, vec!["serve", "--mcp"]);
-    assert_eq!(codegraph.env.get("CG_PORT").map(String::as_str), Some("17313"));
+    assert_eq!(
+        codegraph.env.get("CG_PORT").map(String::as_str),
+        Some("17313")
+    );
 }
 
 #[test]
@@ -184,12 +187,19 @@ fn merge_external_merges_opencode_source() {
     let claude = write_claude(dir.path());
     let opencode = write_opencode(dir.path());
     let mut cfg = base_cfg(true);
-    let paths = UserPaths { codex, claude, opencode };
+    let paths = UserPaths {
+        codex,
+        claude,
+        opencode,
+    };
     let report = merge_external(&mut cfg, &paths).expect("import_external=true → Some");
     let names: Vec<&str> = cfg.servers.keys().map(String::as_str).collect();
     assert!(names.contains(&"ext-opencode-context7"), "{names:?}");
     assert!(names.contains(&"ext-opencode-codegraph"), "{names:?}");
-    assert!(!names.iter().any(|n| n.contains("off")), "enabled:false 不合并：{names:?}");
+    assert!(
+        !names.iter().any(|n| n.contains("off")),
+        "enabled:false 不合并：{names:?}"
+    );
     assert!(
         report.merged.iter().any(|n| n == "ext-opencode-codegraph"),
         "报告含 opencode 条目：{report:?}"
@@ -217,7 +227,8 @@ fn merge_external_prefixes_and_avoids_collisions() {
         cfg.servers.get("local").unwrap().clone(),
     );
 
-    let report = merge_external(&mut cfg, &user_paths(codex, claude)).expect("import_external=true → Some");
+    let report =
+        merge_external(&mut cfg, &user_paths(codex, claude)).expect("import_external=true → Some");
     let names: Vec<&str> = cfg.servers.keys().map(String::as_str).collect();
     assert!(names.contains(&"ext-codex-filesystem"), "{names:?}");
     assert!(names.contains(&"ext-claude-deepwiki"), "{names:?}");

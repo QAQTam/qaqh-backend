@@ -348,13 +348,15 @@ pub struct RingingHub {
     /// 风暴只填自己的分片，旁观会话的分片水位不受影响。
     ///
     /// 键为 `(channel, seed)`；值为该分片的发送端（订阅者数 = 环的接收端数）。
-    pub(super) live: Mutex<HashMap<(RingingChannel, String), broadcast::Sender<RingingEventEnvelope>>>,
+    pub(super) live:
+        Mutex<HashMap<(RingingChannel, String), broadcast::Sender<RingingEventEnvelope>>>,
     /// 频道级聚合视图（多 seed 消费者：命令回执观察者、测试桥接）。
     ///
     /// 懒创建：没有聚合订阅者时不存在该环，`fanout` 也跳过（零开销）。
     /// 聚合视图的语义与分片前的「频道单环」逐事件一致——同一批事件、
     /// 同一发布顺序，只是**订阅者自身选择**不隔离（它本来就要看全部会话）。
-    pub(super) live_channels: Mutex<HashMap<RingingChannel, broadcast::Sender<RingingEventEnvelope>>>,
+    pub(super) live_channels:
+        Mutex<HashMap<RingingChannel, broadcast::Sender<RingingEventEnvelope>>>,
     /// 每频道的**发布水位**：已 fanout 的最大 `stream_seq`。
     ///
     /// BUG-2026-09-12-12：分片后跨分片合并必须按 `stream_seq` 升序交付
@@ -1063,10 +1065,7 @@ impl RingingHub {
         &self,
         channel: RingingChannel,
     ) -> broadcast::Receiver<RingingEventEnvelope> {
-        let mut channels = self
-            .live_channels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut channels = self.live_channels.lock().unwrap_or_else(|e| e.into_inner());
         channels
             .entry(channel)
             .or_insert_with(|| broadcast::channel(LIVE_BROADCAST_CAPACITY).0)
@@ -1098,10 +1097,7 @@ impl RingingHub {
             *slot = (*slot).max(envelope.stream_seq);
         }
         let aggregate = {
-            let channels = self
-                .live_channels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let channels = self.live_channels.lock().unwrap_or_else(|e| e.into_inner());
             channels.get(&channel).cloned()
         };
         if let Some(tx) = aggregate {
@@ -2137,7 +2133,9 @@ mod tests {
 
         // 旁观会话发布一条，必须原样收到——不能因为别人的风暴而 Lagged。
         let _ = hub.publish("idle", round_delta(1));
-        let received = idle_rx.try_recv().expect("旁观会话不应 Lagged，必须收到自己的事件");
+        let received = idle_rx
+            .try_recv()
+            .expect("旁观会话不应 Lagged，必须收到自己的事件");
         assert_eq!(received.seed, "idle");
     }
 
@@ -2191,7 +2189,10 @@ mod tests {
             let env = rx.try_recv().expect("频道聚合视图应收到两个 seed 的事件");
             seeds.insert(env.seed);
         }
-        assert!(seeds.contains("s-a") && seeds.contains("s-b"), "got {seeds:?}");
+        assert!(
+            seeds.contains("s-a") && seeds.contains("s-b"),
+            "got {seeds:?}"
+        );
     }
 
     #[test]
@@ -2260,14 +2261,14 @@ mod tests {
         ];
         let folded = RingingHub::fold_checkpoints_for_test(entries);
         let seqs: Vec<u64> = folded.iter().map(|e| e.timeline_seq).collect();
-        assert_eq!(seqs, vec![2, 5, 6, 7], "only newest checkpoint per block survives");
-        assert!(
-            folded
-                .iter()
-                .all(|e| !matches!(&e.event,
-                    TimelineEvent::BlockCheckpoint { block_id, text, .. }
-                        if block_id == "b" && text == "v1"))
+        assert_eq!(
+            seqs,
+            vec![2, 5, 6, 7],
+            "only newest checkpoint per block survives"
         );
+        assert!(folded.iter().all(|e| !matches!(&e.event,
+                    TimelineEvent::BlockCheckpoint { block_id, text, .. }
+                        if block_id == "b" && text == "v1")));
     }
 
     #[test]

@@ -56,11 +56,7 @@ fn max_msg_id_matches_full_scan() {
     let batch: Vec<Message> = (1..=200).map(|i| id_msg(i, "x")).collect();
     store::append_messages(&dir, &batch).expect("append");
 
-    assert_eq!(
-        store::max_msg_id(&dir),
-        200,
-        "全量扫描必须仍是唯一权威判据"
-    );
+    assert_eq!(store::max_msg_id(&dir), 200, "全量扫描必须仍是唯一权威判据");
     assert_eq!(
         store::watermark_msg_id(&dir),
         200,
@@ -237,4 +233,3 @@ fn torn_tail_line_does_not_lower_watermark() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
-

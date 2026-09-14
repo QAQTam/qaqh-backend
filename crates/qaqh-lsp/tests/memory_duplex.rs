@@ -17,10 +17,10 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use async_lsp::router::Router;
-use futures::AsyncReadExt;
-use async_lsp::server::LifecycleLayer;
 use async_lsp::LanguageClient;
+use async_lsp::router::Router;
+use async_lsp::server::LifecycleLayer;
+use futures::AsyncReadExt;
 use lsp_types::{
     DocumentSymbolResponse, GotoDefinitionResponse, Location, Position, Range, SymbolInformation,
     SymbolKind, Url, WorkspaceSymbolResponse,
@@ -76,10 +76,13 @@ fn mock_router(state: MockState) -> Router<MockState> {
             let pos = params.text_document_position_params.position;
             let _client = st.client.clone();
             async move {
-            Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                uri,
-                range: Range { start: pos, end: pos },
-            })))
+                Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri,
+                    range: Range {
+                        start: pos,
+                        end: pos,
+                    },
+                })))
             }
         })
         .request::<lsp_types::request::References, _>(|st, params| {
@@ -87,55 +90,71 @@ fn mock_router(state: MockState) -> Router<MockState> {
             let pos = params.text_document_position.position;
             let _client = st.client.clone();
             async move {
-            Ok(Some(vec![
-                Location { uri: uri.clone(), range: Range { start: pos, end: pos } },
-                Location { uri, range: Range { start: pos, end: pos } },
-            ]))
+                Ok(Some(vec![
+                    Location {
+                        uri: uri.clone(),
+                        range: Range {
+                            start: pos,
+                            end: pos,
+                        },
+                    },
+                    Location {
+                        uri,
+                        range: Range {
+                            start: pos,
+                            end: pos,
+                        },
+                    },
+                ]))
             }
         })
         .request::<lsp_types::request::DocumentSymbolRequest, _>(|st, params| {
             let uri = params.text_document.uri;
             let _client = st.client.clone();
             async move {
-            Ok(Some(DocumentSymbolResponse::Flat(vec![SymbolInformation {
-                name: "mock_fn".to_owned(),
-                kind: SymbolKind::FUNCTION,
-                tags: None,
-                #[allow(deprecated)]
-                deprecated: None,
-                location: Location {
-                    uri,
-                    range: Range {
-                        start: Position::new(3, 0),
-                        end: Position::new(5, 1),
+                Ok(Some(DocumentSymbolResponse::Flat(vec![
+                    SymbolInformation {
+                        name: "mock_fn".to_owned(),
+                        kind: SymbolKind::FUNCTION,
+                        tags: None,
+                        #[allow(deprecated)]
+                        deprecated: None,
+                        location: Location {
+                            uri,
+                            range: Range {
+                                start: Position::new(3, 0),
+                                end: Position::new(5, 1),
+                            },
+                        },
+                        container_name: None,
                     },
-                },
-                container_name: None,
-            }])))
+                ])))
             }
         })
         .request::<lsp_types::request::WorkspaceSymbolRequest, _>(|st, params| {
             let _client = st.client.clone();
             let query = params.query.clone();
             async move {
-            if query.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(WorkspaceSymbolResponse::Flat(vec![SymbolInformation {
-                name: format!("ws_{query}"),
-                kind: SymbolKind::CLASS,
-                tags: None,
-                #[allow(deprecated)]
-                deprecated: None,
-                location: Location {
-                    uri: Url::parse("file:///tmp/ws.rs").unwrap(),
-                    range: Range {
-                        start: Position::new(0, 0),
-                        end: Position::new(0, 5),
+                if query.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(WorkspaceSymbolResponse::Flat(vec![
+                    SymbolInformation {
+                        name: format!("ws_{query}"),
+                        kind: SymbolKind::CLASS,
+                        tags: None,
+                        #[allow(deprecated)]
+                        deprecated: None,
+                        location: Location {
+                            uri: Url::parse("file:///tmp/ws.rs").unwrap(),
+                            range: Range {
+                                start: Position::new(0, 0),
+                                end: Position::new(0, 5),
+                            },
+                        },
+                        container_name: Some("crate".to_owned()),
                     },
-                },
-                container_name: Some("crate".to_owned()),
-            }])))
+                ])))
             }
         });
     router
@@ -158,12 +177,11 @@ async fn mock_socket() -> (
     tokio::task::JoinHandle<()>,
 ) {
     use tokio_util::compat::TokioAsyncReadCompatExt;
-    let (server_main, _client_socket) =
-        async_lsp::MainLoop::new_server(|client| {
-            ServiceBuilder::new()
-                .layer(LifecycleLayer::default())
-                .service(mock_router(MockState { client }))
-        });
+    let (server_main, _client_socket) = async_lsp::MainLoop::new_server(|client| {
+        ServiceBuilder::new()
+            .layer(LifecycleLayer::default())
+            .service(mock_router(MockState { client }))
+    });
     let (client_main, mut server_socket) = async_lsp::MainLoop::new_client(|_server| {
         ServiceBuilder::new().service(Router::new(MockClient))
     });
@@ -268,7 +286,9 @@ async fn definition_and_references_render_one_based() {
             },
             work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
             partial_result_params: lsp_types::PartialResultParams::default(),
-            context: lsp_types::ReferenceContext { include_declaration: true },
+            context: lsp_types::ReferenceContext {
+                include_declaration: true,
+            },
         })
         .await
         .unwrap();
@@ -326,7 +346,11 @@ fn unknown_server_reports_not_found() {
         Some(5),
         "/tmp",
     );
-    assert!(out.model_text().contains("LSP_NOT_FOUND"), "{}", out.model_text());
+    assert!(
+        out.model_text().contains("LSP_NOT_FOUND"),
+        "{}",
+        out.model_text()
+    );
 }
 
 #[test]
@@ -368,7 +392,11 @@ fn cancel_before_request_reports_cancelled() {
         Some(5),
         "/tmp",
     );
-    assert!(out.model_text().contains("LSP_CANCELLED"), "{}", out.model_text());
+    assert!(
+        out.model_text().contains("LSP_CANCELLED"),
+        "{}",
+        out.model_text()
+    );
 }
 
 #[test]

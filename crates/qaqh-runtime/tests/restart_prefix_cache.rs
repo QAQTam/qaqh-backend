@@ -33,10 +33,8 @@ use qaqh_types::message::{ContentBlock, Message};
 static SERIAL: Mutex<()> = Mutex::new(());
 
 fn temp_root() -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "qaqh-restart-prefix-cache-{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("qaqh-restart-prefix-cache-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("create temp data root");
     root
@@ -182,14 +180,12 @@ fn prefix_cache_consistency_across_restarts() {
         assert_eq!(before, after_restart, "resume must not mutate the prefix");
 
         agent.msg.push_user("second turn question");
-        agent
-            .msg
-            .push_assistant(Message {
-                msg_id: None,
-                role: "assistant".into(),
-                name: None,
-                content: vec![ContentBlock::text("answered turn 2")],
-            });
+        agent.msg.push_assistant(Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::text("answered turn 2")],
+        });
         agent.build_context();
         agent
             .msg

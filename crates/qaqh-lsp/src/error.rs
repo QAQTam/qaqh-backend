@@ -59,20 +59,16 @@ impl From<async_lsp::Error> for LspError {
     /// - 其余 → Protocol。
     fn from(e: async_lsp::Error) -> Self {
         match &e {
-            async_lsp::Error::ServiceStopped
-            | async_lsp::Error::Eof
-            | async_lsp::Error::Io(_) => LspError::new(
-                LspErrorKind::ServerCrashed,
-                format!("lsp connection lost: {e}"),
-            ),
-            async_lsp::Error::Response(resp) => LspError::new(
-                LspErrorKind::Protocol,
-                format!("lsp server error: {resp}"),
-            ),
-            _ => LspError::new(
-                LspErrorKind::Protocol,
-                format!("lsp protocol error: {e}"),
-            ),
+            async_lsp::Error::ServiceStopped | async_lsp::Error::Eof | async_lsp::Error::Io(_) => {
+                LspError::new(
+                    LspErrorKind::ServerCrashed,
+                    format!("lsp connection lost: {e}"),
+                )
+            }
+            async_lsp::Error::Response(resp) => {
+                LspError::new(LspErrorKind::Protocol, format!("lsp server error: {resp}"))
+            }
+            _ => LspError::new(LspErrorKind::Protocol, format!("lsp protocol error: {e}")),
         }
     }
 }

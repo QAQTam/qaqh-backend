@@ -66,7 +66,8 @@ extensions = ["rs", ".TOML", "rs"]
 startup_timeout_secs = 45
 default_timeout_secs = 20
 "#;
-    let cfg = load_toml_with_secrets("parse", toml_text, &[("ra_log", "info")]).expect("load 应成功");
+    let cfg =
+        load_toml_with_secrets("parse", toml_text, &[("ra_log", "info")]).expect("load 应成功");
     assert!(cfg.lsp.enabled);
     assert_eq!(cfg.lsp.idle_shutdown_secs, 60);
     assert_eq!(cfg.lsp.servers.len(), 1);
@@ -187,7 +188,11 @@ fn persistent_roundtrip_keeps_lsp_section() {
     let lsp = loaded.lsp.expect("lsp 段应保留");
     assert_eq!(lsp.enabled, Some(true));
     assert_eq!(lsp.idle_shutdown_secs, Some(60));
-    let rust = lsp.servers.expect("servers 应保留").remove("rust").expect("rust 保留");
+    let rust = lsp
+        .servers
+        .expect("servers 应保留")
+        .remove("rust")
+        .expect("rust 保留");
     assert_eq!(rust.command.as_deref(), Some("rust-analyzer"));
 
     let _ = std::fs::remove_dir_all(&dir);

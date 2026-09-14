@@ -16,8 +16,8 @@
 //! auto-migrated to provider_id="deepseek" + endpoint="openai".
 
 use qaqh_types::{
-    EndpointPatch, EndpointPatchRef, EndpointSpec, ProviderPatch, ProviderSpec,
-    ProvidersFile, ProvidersOverrideFile,
+    EndpointPatch, EndpointPatchRef, EndpointSpec, ProviderPatch, ProviderSpec, ProvidersFile,
+    ProvidersOverrideFile,
 };
 
 /// assets/providers.toml 的字节快照（编译期嵌入）。
@@ -150,7 +150,7 @@ fn merged_providers() -> std::sync::Arc<Vec<ProviderSpec>> {
         .cloned()
     {
         return hit;
-}
+    }
     // 慢路径：重建 + 写回（并发下重复重建无害，最终一致）。
     let mut baseline = builtin_providers();
     for raw in user_override_tomls() {
@@ -213,11 +213,7 @@ fn extract_providers_section(text: &str) -> Option<String> {
             out.push('\n');
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// 解析用户覆盖面：`[[providers]]` 平铺数组形态（patch 内带 id）。
@@ -423,7 +419,10 @@ mod tests {
         )
         .expect("parse patch");
         apply_provider_patch(&mut baseline, &patch);
-        let p = baseline.iter().find(|p| p.id == "my-proxy").expect("new provider");
+        let p = baseline
+            .iter()
+            .find(|p| p.id == "my-proxy")
+            .expect("new provider");
         assert_eq!(p.endpoints.len(), 1);
         assert_eq!(p.endpoints[0].base_url, "http://127.0.0.1:8787/v1");
         assert_eq!(p.endpoints[0].protocol, "openai");
@@ -468,7 +467,10 @@ mod tests {
         )
         .expect("parse patch");
         apply_provider_patch(&mut baseline, &patch);
-        let p = baseline.iter().find(|p| p.id == "deepseek").expect("provider");
+        let p = baseline
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .expect("provider");
         assert!(!p.endpoints.iter().any(|e| e.id == "responses"));
         assert!(p.endpoints.iter().any(|e| e.id == "openai"));
     }
@@ -835,7 +837,10 @@ display = "no id"
         // 上游在 finish 帧总带 usage，不发 stream_options.include_usage。
         assert!(!endpoint.include_stream_usage);
         // usage 顶层 prompt_cache_hit_tokens/miss 与 DeepSeek 同形。
-        assert!(matches!(endpoint.cache_field, CacheTokenField::PromptCacheHitTokens));
+        assert!(matches!(
+            endpoint.cache_field,
+            CacheTokenField::PromptCacheHitTokens
+        ));
         assert!(!endpoint.has_balance);
         // models_url 显式含 /models 路径时直接返回，不重复追加。
         assert_eq!(
