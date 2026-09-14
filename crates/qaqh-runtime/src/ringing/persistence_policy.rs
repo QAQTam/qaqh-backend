@@ -121,6 +121,7 @@ mod tests {
             TimelineEvent::ToolProgress {
                 block_id: "b".into(),
                 chunk: "x".into(),
+                truncated: false,
             },
         ];
         for event in &transient {
@@ -172,6 +173,7 @@ mod tests {
                     output: None,
                     diff: None,
                     progress: String::new(),
+                    progress_truncated: false,
                     failure: None,
                     permission: None,
                 },

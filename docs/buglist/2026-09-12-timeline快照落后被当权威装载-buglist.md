@@ -5,10 +5,12 @@
 >
 > 姊妹文件：[`2026-09-12-timeline死锁与debug桥token泄露-buglist.md`](./2026-09-12-timeline死锁与debug桥token泄露-buglist.md)
 > （本条目是那条 P0 死锁的**下游后果**：死锁已修，但它冻伤的快照仍在毒害恢复路径。）
+>
+> 2026-09-15 状态回填：修复已随 `4e03a88` 合入当前 `main`，下文“工作区”表述保留为修复时记录。
 
 | ID | 严重度 | 状态 | 类型 | 位置 | 影响（一句话） | 报告 |
 |---|---|---|---|---|---|---|
-| BUG-2026-09-12-04 | P1 | fixed（工作区，待提交） | 功能阻塞 / 数据可见性 | `crates/qaqh-runtime/src/ringing/timeline_hub.rs:242-268`（装载路径）、`:298-320`（新增落后判定）、`:331`（重建返回 bool） | **合法但落后**的 `ringing-timeline/{seed}.json` 被当权威 restore 且永不修复：daemon 每次重启、TUI 每次断线重连 re-baseline 后，会话 transcript 只剩第一条 user 消息（实测 4 回合只剩 1 回合），其余回合永久不可见 | [`docs/report/2026-09-12-timeline快照落后被当权威装载-report.md`](../report/2026-09-12-timeline快照落后被当权威装载-report.md) |
+| BUG-2026-09-12-04 | P1 | ✅ fixed @4e03a88 | 功能阻塞 / 数据可见性 | `crates/qaqh-runtime/src/ringing/timeline_hub.rs:242-268`（装载路径）、`:298-320`（新增落后判定）、`:331`（重建返回 bool） | **合法但落后**的 `ringing-timeline/{seed}.json` 被当权威 restore 且永不修复：daemon 每次重启、TUI 每次断线重连 re-baseline 后，会话 transcript 只剩第一条 user 消息（实测 4 回合只剩 1 回合），其余回合永久不可见 | [`docs/report/2026-09-12-timeline快照落后被当权威装载-report.md`](../report/2026-09-12-timeline快照落后被当权威装载-report.md) |
 
 ## 详细状态
 

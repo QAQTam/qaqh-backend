@@ -588,6 +588,7 @@ pub(crate) fn gate_request(
                                 output: None,
                                 diff: None,
                                 progress: String::new(),
+                                progress_truncated: false,
                                 failure: None,
                                 permission: None,
                             }),

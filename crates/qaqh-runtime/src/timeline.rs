@@ -114,8 +114,37 @@ impl fmt::Display for TimelineError {
 
 impl std::error::Error for TimelineError {}
 
-/// turn seal 卸载回调：(seed, turn) 由调用方持久化完整文本。
-pub type OffloadFn = std::sync::Arc<dyn Fn(&str, &TimelineTurn) + Send + Sync>;
+/// Build the bounded one-line summary shown for a tool result.
+pub(crate) fn tool_summary(output: &str) -> String {
+    output
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(qaqh_types::TOOL_SUMMARY_MAX_CHARS)
+        .collect()
+}
+
+/// Tool progress is a display tail, not a second copy of the complete tool
+/// output. Keep enough context for the live card while bounding the snapshot.
+pub(crate) const TOOL_PROGRESS_MAX_BYTES: usize = 16 * 1024;
+
+/// A single progress event is bounded independently from the retained tail.
+/// This keeps one SSE frame (and its replay/journal copy) small even when the
+/// upstream process emits a multi-megabyte line in one read.
+pub(crate) const TOOL_PROGRESS_CHUNK_MAX_BYTES: usize = 8 * 1024;
+
+fn retain_utf8_tail(value: &mut String, max_bytes: usize) -> bool {
+    if value.len() <= max_bytes {
+        return false;
+    }
+    let mut start = value.len() - max_bytes;
+    while !value.is_char_boundary(start) {
+        start += 1;
+    }
+    value.drain(..start);
+    true
+}
 
 #[derive(Default)]
 struct SeedTimeline {
@@ -129,12 +158,8 @@ struct SeedTimeline {
     /// journal 内滞留的 payload 字节数（text_delta/checkpoint/进度 chunk）。
     /// 驱逐时从头部扣减，O(1) 维护。
     journal_bytes: u64,
-    /// True = 已 seal turn 的 blocks 文本被卸载出内存（壳模式），由
-    /// `offload` 回调在持久化时补齐快照全文。见 `set_offload`。
+    /// True = 已 seal turn 的 blocks 文本在写入侧车成功后被卸载出内存。
     offload_enabled: bool,
-    /// 卸载回调（set_offload 注入；Default 的 None = 不卸载）。
-    #[allow(clippy::type_complexity)]
-    offload: Option<OffloadFn>,
 }
 
 /// The only component allowed to allocate timeline sequences.
@@ -189,9 +214,11 @@ impl TimelineAppender {
                     let turn = timeline.turns.get_mut(&turn_id).expect("checked above");
                     turn.user_text = user_text;
                     turn.sealed = false;
+                    turn.offloaded = false;
                     turn.state = TimelineTurnState::Running;
                     turn.failure = None;
                     turn.rounds.clear();
+                    turn.created_seq = timeline.next_seq.saturating_add(1);
                     turn.user_text.clone()
                 };
                 // Fragment counters are keyed by (turn, round, block) and the
@@ -223,6 +250,7 @@ impl TimelineAppender {
                 created_seq,
                 user_text: user_text.clone(),
                 sealed: false,
+                offloaded: false,
                 state: TimelineTurnState::Running,
                 failure: None,
                 rounds: vec![],
@@ -440,6 +468,11 @@ impl TimelineAppender {
         }
         if next_tool.progress.is_empty() {
             next_tool.progress = tool.progress.clone();
+            next_tool.progress_truncated = tool.progress_truncated;
+        } else if retain_utf8_tail(&mut next_tool.progress, TOOL_PROGRESS_MAX_BYTES) {
+            next_tool.progress_truncated = true;
+        } else {
+            next_tool.progress_truncated |= tool.progress_truncated;
         }
         if next_tool.permission.is_none() {
             next_tool.permission = tool.permission.clone();
@@ -465,7 +498,7 @@ impl TimelineAppender {
         turn_id: &str,
         round_num: u32,
         block_id: &str,
-        chunk: String,
+        mut chunk: String,
     ) -> Result<TimelineEntry, TimelineError> {
         let timeline = self.timeline_mut(seed)?;
         let round = existing_round_mut(timeline, turn_id, round_num)?;
@@ -476,7 +509,11 @@ impl TimelineAppender {
         let Some(tool) = block.tool.as_mut() else {
             return Err(TimelineError::InvalidBlockKind(block_id.to_string()));
         };
+        let chunk_truncated = retain_utf8_tail(&mut chunk, TOOL_PROGRESS_CHUNK_MAX_BYTES);
         tool.progress.push_str(&chunk);
+        let buffer_truncated = retain_utf8_tail(&mut tool.progress, TOOL_PROGRESS_MAX_BYTES);
+        let truncated = chunk_truncated || buffer_truncated;
+        tool.progress_truncated |= truncated;
         Ok(next_entry(
             timeline,
             turn_id.to_string(),
@@ -484,6 +521,7 @@ impl TimelineAppender {
             TimelineEvent::ToolProgress {
                 block_id: block_id.to_string(),
                 chunk,
+                truncated,
             },
         ))
     }
@@ -642,29 +680,61 @@ impl TimelineAppender {
         // （与 persist 侧 prune_sealed_timeline_journal 语义一致）。不裁剪则
         // journal 随会话累积（实测单会话 7.3 万条 / 25 MB）。
         prune_turn_journal(timeline, turn_id);
-        // turn-seal 卸载：先回调持久化完整文本，再把 blocks 清成壳。
-        // 回调在持有 timeline 锁的状态下执行 append-only 追加（O(文本)
-        // 一次写，无每秒重写），不做任何可锁 store 状态访问，无死锁面。
-        if let Some(offload) = timeline.offload.clone() {
-            if let Some(turn) = timeline.turns.get(turn_id) {
-                offload(seed, turn);
-            }
-            if let Some(turn) = timeline.turns.get_mut(turn_id) {
-                offload_turn_blocks(turn);
-            }
-        }
         Ok(entry)
     }
 
-    /// 开启 turn-seal 卸载：seal 后该 turn 的 blocks 文本移出内存，
-    /// `offload` 回调负责持久化完整文本（offload 侧车）。reasoning 链路
-    /// 常驻内存是长会话内存增长的主因之一；文本的持久权威由侧车承担，
-    /// 内存只保留壳（turn 元数据 + 首块预览）。
-    pub fn set_offload(&mut self, seed: &str, offload: Option<OffloadFn>) {
-        if let Some(timeline) = self.seeds.get_mut(seed) {
-            timeline.offload_enabled = offload.is_some();
-            timeline.offload = offload;
+    /// 开启 turn-seal 卸载。实际写盘由 hub 在 timeline/store 两把锁之外完成，
+    /// 成功后才调用 `mark_offloaded_if_current` 把内存对象壳化。
+    pub fn enable_offload(&mut self, seed: &str) {
+        self.seeds
+            .entry(seed.to_string())
+            .or_default()
+            .offload_enabled = true;
+    }
+
+    /// 已 seal、尚未卸载的 turn id 快照，用于加载后渐进回填侧车。
+    pub fn sealed_turn_ids(&self, seed: &str) -> Vec<String> {
+        self.seeds.get(seed).map_or_else(Vec::new, |timeline| {
+            timeline
+                .turns
+                .values()
+                .filter(|turn| turn.sealed && !turn.offloaded)
+                .map(|turn| turn.turn_id.clone())
+                .collect()
+        })
+    }
+
+    /// 返回可写入侧车的完整 turn 快照。调用方必须在释放 timeline 锁后写盘，
+    /// 再以 `created_seq` 做代际校验，避免 reopen 后旧写入误壳化新 turn。
+    pub fn offload_candidate(&self, seed: &str, turn_id: &str) -> Option<TimelineTurn> {
+        let timeline = self.seeds.get(seed)?;
+        if !timeline.offload_enabled {
+            return None;
         }
+        let turn = timeline.turns.get(turn_id)?;
+        (turn.sealed && !turn.offloaded).then(|| turn.clone())
+    }
+
+    /// 侧车写入成功后壳化。若 turn 已 reopen 或已被新一代 seal 替换，
+    /// `created_seq` 不匹配，旧写入不得影响当前内存状态。
+    pub fn mark_offloaded_if_current(
+        &mut self,
+        seed: &str,
+        turn_id: &str,
+        created_seq: u64,
+    ) -> bool {
+        let Some(timeline) = self.seeds.get_mut(seed) else {
+            return false;
+        };
+        let Some(turn) = timeline.turns.get_mut(turn_id) else {
+            return false;
+        };
+        if !turn.sealed || turn.offloaded || turn.created_seq != created_seq {
+            return false;
+        }
+        offload_turn_blocks(turn);
+        turn.offloaded = true;
+        true
     }
 
     pub fn replay_since(&self, seed: &str, watermark: u64) -> Vec<TimelineEntry> {
@@ -735,7 +805,6 @@ impl TimelineAppender {
                 next_fragment,
                 journal_bytes,
                 offload_enabled: false,
-                offload: None,
             },
         );
     }
@@ -778,6 +847,13 @@ fn journal_entry_payload_bytes(event: &TimelineEvent) -> u64 {
     match event {
         TimelineEvent::TextDelta { delta, .. } => delta.len() as u64,
         TimelineEvent::BlockCheckpoint { text, .. } => text.len() as u64,
+        TimelineEvent::ToolUpdated { tool, .. } => {
+            let optional_bytes = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+            (optional_bytes(&tool.summary)
+                + optional_bytes(&tool.output)
+                + optional_bytes(&tool.diff)
+                + tool.progress.len()) as u64
+        }
         TimelineEvent::ToolProgress { chunk, .. } => chunk.len() as u64,
         _ => 0,
     }
@@ -813,6 +889,7 @@ fn offload_turn_blocks(turn: &mut TimelineTurn) {
                 if tool.progress.chars().count() > 512 {
                     let preview: String = tool.progress.chars().take(512).collect();
                     tool.progress = preview;
+                    tool.progress_truncated = true;
                 }
                 tool.output = None;
                 tool.diff = None;
@@ -926,6 +1003,7 @@ mod tests {
             output: None,
             diff: None,
             progress: String::new(),
+            progress_truncated: false,
             failure: None,
             permission: None,
         }
@@ -1149,6 +1227,102 @@ mod tests {
         assert_eq!(tool.progress, "executing\\n");
         assert_eq!(tool.output.as_deref(), Some("done"));
         assert_eq!(tool.state, TimelineToolState::Succeeded);
+    }
+
+    #[test]
+    fn tool_progress_is_bounded_per_chunk_and_in_the_snapshot() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t", "question").unwrap();
+        appender
+            .open_block("s", "t", 0, "tool", TimelineBlockKind::Tool, Some(tool()))
+            .unwrap();
+
+        let chunk = format!("{}{}", "a".repeat(TOOL_PROGRESS_CHUNK_MAX_BYTES), "tail");
+        let event = appender
+            .append_tool_progress("s", "t", 0, "tool", chunk)
+            .unwrap();
+        assert!(matches!(
+            event.event,
+            TimelineEvent::ToolProgress {
+                ref chunk,
+                truncated: true,
+                ..
+            } if chunk.len() == TOOL_PROGRESS_CHUNK_MAX_BYTES
+                && chunk.ends_with("tail")
+        ));
+
+        for _ in 0..3 {
+            appender
+                .append_tool_progress(
+                    "s",
+                    "t",
+                    0,
+                    "tool",
+                    "x".repeat(TOOL_PROGRESS_CHUNK_MAX_BYTES),
+                )
+                .unwrap();
+        }
+        let snapshot = appender.snapshot("s").unwrap();
+        let tool = &snapshot.turns[0].rounds[0].blocks[0].tool.as_ref().unwrap();
+        assert_eq!(tool.progress.len(), TOOL_PROGRESS_MAX_BYTES);
+        assert!(tool.progress_truncated);
+    }
+
+    #[test]
+    fn tool_progress_truncation_survives_terminal_tool_replacement() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t", "question").unwrap();
+        appender
+            .open_block("s", "t", 0, "tool", TimelineBlockKind::Tool, Some(tool()))
+            .unwrap();
+        appender
+            .append_tool_progress(
+                "s",
+                "t",
+                0,
+                "tool",
+                "x".repeat(TOOL_PROGRESS_CHUNK_MAX_BYTES + 1),
+            )
+            .unwrap();
+
+        let mut final_tool = tool();
+        final_tool.state = TimelineToolState::Succeeded;
+        final_tool.output = Some("done".into());
+        appender
+            .replace_tool("s", "t", 0, "tool", final_tool)
+            .unwrap();
+
+        let snapshot = appender.snapshot("s").unwrap();
+        let tool = &snapshot.turns[0].rounds[0].blocks[0].tool.as_ref().unwrap();
+        assert!(tool.progress.ends_with('x'));
+        assert_eq!(tool.progress.len(), TOOL_PROGRESS_CHUNK_MAX_BYTES);
+        assert!(tool.progress_truncated);
+    }
+
+    #[test]
+    fn stale_offload_generation_does_not_shell_a_reopened_turn() {
+        let mut appender = TimelineAppender::new();
+        appender.enable_offload("s");
+        appender.open_turn("s", "t", "first").unwrap();
+        appender.seal_turn("s", "t").unwrap();
+        let old = appender.offload_candidate("s", "t").unwrap();
+
+        appender.open_turn("s", "t", "second").unwrap();
+        assert!(!appender.mark_offloaded_if_current("s", "t", old.created_seq));
+        let turn = &appender.snapshot("s").unwrap().turns[0];
+        assert!(!turn.offloaded);
+        assert!(!turn.sealed);
+        assert_eq!(turn.user_text, "second");
+    }
+
+    #[test]
+    fn tool_summary_uses_the_first_line_and_is_utf8_bounded() {
+        assert_eq!(tool_summary("first line\nsecond line"), "first line");
+
+        let long = "界".repeat(qaqh_types::TOOL_SUMMARY_MAX_CHARS + 1);
+        let summary = tool_summary(&long);
+        assert_eq!(summary.chars().count(), qaqh_types::TOOL_SUMMARY_MAX_CHARS);
+        assert_ne!(summary, long);
     }
 
     #[test]
@@ -1519,18 +1693,33 @@ mod tests {
         appender
             .append_text("s", "t1", 0, "r", 0, "payload-123")
             .unwrap();
+        appender
+            .open_block("s", "t1", 0, "tool", TimelineBlockKind::Tool, Some(tool()))
+            .unwrap();
+        appender
+            .append_tool_progress("s", "t1", 0, "tool", "progress".into())
+            .unwrap();
+        let mut final_tool = tool();
+        final_tool.summary = Some("summary".into());
+        final_tool.output = Some("output".into());
+        final_tool.diff = Some("diff".into());
+        appender
+            .replace_tool("s", "t1", 0, "tool", final_tool)
+            .unwrap();
         let journal = appender.replay_since("s", 0);
         let snapshot = appender.snapshot("s").unwrap();
 
         let mut restored = TimelineAppender::new();
         restored.restore("s".into(), snapshot, journal);
-        let expected: u64 = restored
-            .replay_since("s", 0)
-            .iter()
-            .map(|e| journal_entry_payload_bytes(&e.event))
-            .sum();
+        let expected = "payload-123".len()
+            + "progress".len()
+            + "summary".len()
+            + "output".len()
+            + "diff".len()
+            + "progress".len();
+        assert!(expected > 0);
         let seed = restored.seeds.get("s").unwrap();
-        assert_eq!(seed.journal_bytes, expected);
+        assert_eq!(seed.journal_bytes, expected as u64);
     }
 
     /// 8192 条上限之上的摊还成本必须与上限之内同阶（O(1)），且驱逐只丢最老前缀。

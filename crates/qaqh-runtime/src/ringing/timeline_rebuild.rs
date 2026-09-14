@@ -319,16 +319,7 @@ fn rebuild_tool(
             .filter(|output| !output.is_empty())
             .unwrap_or_else(|| "tool result missing in archived messages".into()),
     });
-    let summary = result.map(|result| {
-        result
-            .output
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(120)
-            .collect()
-    });
+    let summary = result.map(|result| crate::timeline::tool_summary(&result.output));
     TimelineTool {
         tool_call_id: card.id.clone(),
         name: card.name.clone(),
@@ -338,6 +329,7 @@ fn rebuild_tool(
         output: result.map(|result| result.output.clone()),
         diff: None,
         progress: String::new(),
+        progress_truncated: false,
         failure,
         permission: None,
     }

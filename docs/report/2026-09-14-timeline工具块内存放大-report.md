@@ -9,17 +9,42 @@
 | 触发方式 | 用户提问「分析当前 Windows 进程有一个 50M 的 tui，确认它内部渲染了什么东西导致内存占用比其它四个都更高」——先做进程级内存取证，再回溯到写入该数据的源码 |
 | 执行者 | QAQ-Harness Agent（读内存 + 读磁盘 + 读源码；未改任何代码） |
 | 结论 | 五个 TUI 进程中 PID 20436（会话 `0e1057bc`，cwd `D:\bun-agent`）内存最高（WS 63–71 MB，其余 12–45 MB）；其承载的 timeline 快照 10.06 MB 为全场最大，放大来自三处源码缺陷：`summary` 克隆 `output`（100% 重复）、`tool.progress` 无界累积（单块 4.18 MB）、seal 期卸载开关 `enable_turn_offload` 是死代码从未启用 |
+| 2026-09-15 修复状态 | F-1～F-4 均 `fixed（工作区，待提交）`；O-2 已随 `qaqh-tui-app@59541dd` 修复；O-1/O-3/O-4 作为残余优化继续跟踪 |
 
 ## 1. 结论摘要
 
 | ID | 严重度 | 状态 | 类型 | 位置 | 影响（一句话） |
 |---|---|---|---|---|---|
-| F-1 | P2 | open | 冗余存储 / 契约违反 | `crates/qaqh-runtime/src/agent/engine_tool.rs:31` | `TimelineTool.summary` 直接克隆 `output`，实测 17 个会话 **100%** 逐字节重复（单会话最多 0.81 MB）；且绕过 `TOOL_SUMMARY_MAX_CHARS=512` 契约（实测 8083 字符），而消费端只取 48 字符 |
-| F-2 | P1 | open（详情见 `docs/report/2026-09-12-exec与process工具设计评审-report.md` §D-6） | 无界累积 / 内存放大 | `crates/qaqh-runtime/src/timeline.rs:460` | `append_tool_progress` 无条件 `push_str` 无上限：单条 `findstr /s` 命令把 3.5 MB sourcemap 单行灌进 `tool.progress`（实测 4,177,593 字符），随快照物化 + 全量落盘 |
-| F-3 | P1 | open（已在 `docs/buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md:23` 登记为遗留） | 死代码 / 治本手段未接线 | `crates/qaqh-runtime/src/ringing/timeline_hub.rs:445-476` | `enable_turn_offload` 全仓无调用者 → `offload_turn_blocks`（`timeline.rs:788-807`，本可把 progress 截到 512 字符并清空 output/diff）永不执行；实测 375 个 sealed tool block 中 **152 个仍携带完整 progress（4.83 MB）** |
-| F-4 | P2 | open | 内存预算记账漏算 | `crates/qaqh-runtime/src/timeline.rs:762-769` | `journal_entry_payload_bytes` 对 `ToolUpdated` 返回 0，但它携带整个 `TimelineTool`（summary+output+diff+progress）；最重的一类事件不进 `MAX_TIMELINE_JOURNAL_BYTES`（256 MB）预算，字节上限形同虚设 |
+| F-1 | P2 | fixed（工作区，待提交） | 冗余存储 / 契约违反 | `crates/qaqh-runtime/src/agent/engine_tool.rs:31` | `TimelineTool.summary` 直接克隆 `output`，实测 17 个会话 **100%** 逐字节重复（单会话最多 0.81 MB）；且绕过 `TOOL_SUMMARY_MAX_CHARS=512` 契约（实测 8083 字符），而消费端只取 48 字符 |
+| F-2 | P1 | fixed（工作区，待提交） | 无界累积 / 内存放大 | `crates/qaqh-runtime/src/timeline.rs:460` | `append_tool_progress` 无条件 `push_str` 无上限：单条 `findstr /s` 命令把 3.5 MB sourcemap 单行灌进 `tool.progress`（实测 4,177,593 字符），随快照物化 + 全量落盘 |
+| F-3 | P1 | fixed（工作区，待提交） | 死代码 / 治本手段未接线 | `crates/qaqh-runtime/src/ringing/timeline_hub.rs:445-476` | `enable_turn_offload` 全仓无调用者 → `offload_turn_blocks`（`timeline.rs:788-807`，本可把 progress 截到 512 字符并清空 output/diff）永不执行；实测 375 个 sealed tool block 中 **152 个仍携带完整 progress（4.83 MB）** |
+| F-4 | P2 | fixed（工作区，待提交） | 内存预算记账漏算 | `crates/qaqh-runtime/src/timeline.rs:762-769` | `journal_entry_payload_bytes` 对 `ToolUpdated` 返回 0，但它携带整个 `TimelineTool`（summary+output+diff+progress）；最重的一类事件不进 `MAX_TIMELINE_JOURNAL_BYTES`（256 MB）预算，字节上限形同虚设 |
 
 > **与既有记录的关系**：F-2 的机制已由 exec 评审报告以 E2 记录（§D-6.2），本报告的增量是 **E1 实测**（真实进程内存 + 磁盘快照）与缺失的 buglist 条目；F-3 已在两条 buglist 中登记为「遗留」，本报告的增量是**量化证据**（152 块 / 4.83 MB）。**F-1 与 F-4 为新增**，经全 `docs/` 检索确认无重复记录。
+
+### 2026-09-15 实施与验证
+
+本节是后续实施记录，不替换上面的原始只读分析：
+
+- F-1：`summary` 改为首行、UTF-8 安全、最多 `TOOL_SUMMARY_MAX_CHARS` 字符。
+- F-2：progress 单帧最多 8 KiB，常驻尾部最多 16 KiB；`truncated` / `progress_truncated` 已进入协议和 TUI 状态；TUI 非 bash progress 同样有界。
+- F-3：turn offload 已接入加载/重建与 seal 路径；sidecar 使用显式 `offloaded` 标记、`created_seq` 代际校验和 turn offset 索引；分页读取只恢复当前页全文，不把全文回灌常驻内存。
+- F-4：journal 字节预算按 `ToolUpdated` 的 summary/output/diff/progress 实际内容记账。
+
+已执行验证：
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --workspace` | 通过 |
+| `cargo clippy --workspace --all-targets --all-features` | 通过（仅既有 warning） |
+| `cargo test -p qaqh-runtime --test timeline_checkpoint_cost` | 7/7 |
+| `cargo test -p qaqh-runtime --test timeline_persist_deadlock_repro --test timeline_rebuild` | 4/4 |
+| `cargo fmt --all -- --check` / `git diff --check` | 通过 |
+| TUI `cargo test` / clippy | 160/160；零 warning |
+| TUI cached re-render 100 次 | 3.42 s（阈值 5 s） |
+| `TurnSealed` 发布耗时 | 约 63 ms → 约 0.01 ms |
+
+残余风险：O-1 的冗余 clone 未清理；O-3 已通过 offset 索引消除逐次全文件扫描，但尚未做长期大文件压力评估；O-4 的全量 snapshot clone 仍存在，不过同步落盘热路径已异步化。TUI 清单中的 T-01/T-02/T-03/T-05 与本批 O-2 无关，继续由 TUI 仓库跟踪。
 
 ## 2. 分析方法与证据链
 
@@ -425,9 +450,9 @@ rg -n 'ToolUpdated' crates/qaqh-runtime/src/timeline.rs   # 期望 L762 匹配�
 | # | 位置 | 观察 | 级别 | 证据 |
 |---|---|---|---|---|
 | O-1 | `crates/qaqh-runtime/src/timeline.rs:386` | `update_tool` 的 `summary.or_else(\|\| tool.summary.clone())`：`tool.summary` 为 `None` 时克隆出 `None`，该 clone 恒为多余 | P3 | E2 |
-| O-2 | `D:\project\qaqh-tui-app\src\app\timeline_model.rs:455-463` | reducer 对 bash 族走 `apply_bash_progress`（截 8 KB，L13-14 `MAX_PROGRESS_LEN`/`PROGRESS_TAIL_KEEP`），`else` 分支对**非** bash 工具是裸 `push_str`；`ToolCard::from`（L179-191）亦只对 bash 族归一 → 非 bash 工具的前端 progress 同样无界 | P2 | E2 |
-| O-3 | `crates/qaqh-runtime/src/timeline_store.rs:121-140` | `load_offloaded_turn` 每次调用都 `read_to_string` 整个侧车 + 逐行 `serde_json::from_str`；而 `rehydrate_offloaded_turns` 在**每次 persist** 时对每个 turn 调用 → O(turns × 文件大小)。当前因 offload 未启用而未暴露，启用后需一并优化 | P2 | E2 |
-| O-4 | `crates/qaqh-runtime/src/timeline.rs:666-681` | `snapshot()` 每次全量 `clone` 整个 turns 树；配合 `TurnSealed` 同步全量重写快照（`BUG-2026-09-12-09`），10 MB 级快照的每次落盘都是全量深拷贝 | P2 | E2 |
+| O-2 | `D:\project\qaqh-tui-app\src\app\timeline_model.rs:455-463` | reducer 对 bash 族走 `apply_bash_progress`（截 8 KB，L13-14 `MAX_PROGRESS_LEN`/`PROGRESS_TAIL_KEEP`），`else` 分支对**非** bash 工具是裸 `push_str`；`ToolCard::from`（L179-191）亦只对 bash 族归一 → 非 bash 工具的前端 progress 同样无界。**状态：fixed @`59541dd`** | P2 | E2 |
+| O-3 | `crates/qaqh-runtime/src/timeline_store.rs:121-140` | 原实现每次读取整个 sidecar；**状态：open（已缓解，待压力验证）**。现首次扫描建立 `turn_id → offset` 索引，后续 seek 单行，分页读取保持局部恢复 | P2 | E2 |
+| O-4 | `crates/qaqh-runtime/src/timeline.rs:666-681` | `snapshot()` 仍全量 `clone` turns 树；**状态：open（残余）**。同步落盘热路径已异步化，但 10 MB 级快照的深拷贝与 checkpoint 成本仍需架构级优化 | P2 | E2 |
 
 ## 5. 不确定性与未验证假设
 
@@ -444,6 +469,8 @@ rg -n 'ToolUpdated' crates/qaqh-runtime/src/timeline.rs   # 期望 L762 匹配�
 5. **未验证 daemon 侧内存归因。** 取证期间 daemon（PID 14464）WS 达 545 MB，远超任一 TUI，但本次任务范围是 TUI 对比，**未对 daemon 做归因**。
 
 6. **未跑测试套件。** 本次为只读分析，未执行 `cargo test` / `bun test`，故"修复后如何验证"的验收命令**均为建议，未实跑**。
+
+> 2026-09-15 更新：上述“未跑测试套件”仅描述 2026-09-14 的原始只读分析阶段。实施后的测试与静态检查结果已记录在 §1 的“2026-09-15 实施与验证”，F-1～F-4 的验收命令均已实际执行并通过。
 
 ## 6. 产物与复现物清单
 
@@ -463,17 +490,26 @@ rg -n 'ToolUpdated' crates/qaqh-runtime/src/timeline.rs   # 期望 L762 匹配�
 
 ## 7. 后续工作与建议排期
 
-| 优先级 | 工作 | 关联 | 责任面 | 依赖 |
-|---|---|---|---|---|
-| P1 | 启用 `enable_turn_offload` 并收紧 `rehydrate` 壳判定（按 block 粒度或显式 shell 标记） | F-3 | runtime/ringing | **前置**：清 `drop(store)` 告警 + ABBA 锁序（2026-09-12 死锁报告 §3.6） |
-| P1 | `tool.progress` 有界（ring + `progress_truncated`）+ 删除/实现 `engine_tool.rs:786-788` 的 4 KB 尾化描述 | F-2 | runtime/agent | 无；按 exec 评审报告 R-3 处方（单帧 8 KiB + 每调用 10000 帧 + UI 有界预览） |
-| P2 | `summary` 不再克隆 `output`，与 `timeline_rebuild.rs:319-328` 共用同一函数 | F-1 | runtime/agent | 无（独立小修，收益确定） |
-| P2 | `journal_entry_payload_bytes` 补 `ToolUpdated` 匹配臂；`restore_rebuilds_journal_byte_budget` 改独立口径 | F-4 | runtime/timeline | 无（独立小修） |
-| P2 | TUI 侧非 bash 工具 progress 也归一/有界 | O-2 | tui-app | 无 |
-| P3 | 清理 O-1 冗余 clone；评估 O-3/O-4 的 IO 与深拷贝成本 | O-1..O-4 | runtime | 建议随 offload 启用同批 |
-| — | （本次未做）用 UMDH 对 PID 20436 做两次堆快照差分，确证常驻 vs 瞬时占比 | §5.1 | 分析 | 需 Windows SDK / Debugging Tools |
+### 7.1 已完成（工作区，待提交）
 
-> 排期建议：F-1 与 F-4 是"改动最小、收益确定、无依赖"的两项，可立即合入；F-2 与 F-3 触及 exec 输出契约与持久化锁序，建议按既有 exec 评审报告的 R-3 / 死锁报告 §3.6 顺序推进，不与小修混批。
+| 优先级 | 工作 | 关联 | 验证 |
+|---|---|---|---|
+| P1 | 启用 `enable_turn_offload`；显式 `offloaded`、`created_seq` 代际校验、分页局部恢复 | F-3 | workspace tests / deadlock repro / rebuild |
+| P1 | `tool.progress` 有界（单帧 8 KiB + 常驻 16 KiB）；删除不存在的 4 KB 替换协议描述 | F-2 | workspace tests / clippy |
+| P2 | `summary` 不再克隆 `output`，与 `timeline_rebuild.rs` 共用 `tool_summary` | F-1 | workspace tests |
+| P2 | `journal_entry_payload_bytes` 补 `ToolUpdated`；测试改独立口径 | F-4 | workspace tests |
+| P2 | TUI 侧非 bash 工具 progress 也归一/有界 | O-2 | TUI 160/160 + cached re-render |
+
+### 7.2 待办（残余优化）
+
+| 优先级 | 工作 | 关联 | 状态/备注 |
+|---|---|---|---|
+| P2 | sidecar 长期大文件压力评估，确认 offset 索引内存与恢复延迟 | O-3 | 已由全文件扫描优化为首次索引 + seek 单行；长期压力未测 |
+| P2 | 设计 snapshot 增量或共享表示，避免大 turns 树全量深拷贝 | O-4 | 同步落盘热路径已异步化，全量 clone 仍存在 |
+| P3 | 清理 `update_tool` 中恒为多余的 clone | O-1 | 纯代码质量 |
+| — | 用 UMDH 对 PID 20436 做两次堆快照差分，确证常驻 vs 瞬时占比 | §5.1 | 需 Windows SDK / Debugging Tools；不阻塞本批 |
+
+> 当前没有未修复的 F-1～F-4。残余项均为性能/代码质量优化，可按 P2/P3 独立排期；TUI T-01/T-02/T-03/T-05 与本批 O-2 无关，继续由 TUI 清单跟踪。
 
 ## 附录 A：环境快照
 

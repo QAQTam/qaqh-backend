@@ -18,8 +18,8 @@
 //! 中间帧，只能从快照 watermark 重新基线化。客户端 `recover_gap` 会自动完成
 //! 这一步（`qaqh-client`），表现为一次额外的快照拉取。
 
-use std::collections::HashMap;
-use std::io::Write as _;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead as _, BufReader, Seek as _, SeekFrom, Write as _};
 use std::path::PathBuf;
 
 use qaqh_domain::{TimelineEntry, TimelineEvent, TimelineSnapshot};
@@ -43,6 +43,15 @@ pub struct TimelineStore {
     audit_root: PathBuf,
     /// 每个 seed 已审计到的最大 seq（懒计算，防重复追加）。
     audit_watermarks: HashMap<String, u64>,
+    /// seed → (turn_id → sidecar byte offset)。首次读取时扫描一次；后续
+    /// 读取直接 seek 到最新一行，避免每次恢复都全文件扫描。
+    offload_offsets: HashMap<String, HashMap<String, u64>>,
+    /// 已建立 sidecar offset 索引的 seed（空文件也要记录，防止 append
+    /// 创建部分索引后误以为历史行已扫描）。
+    offload_indexed: HashSet<String>,
+    /// 已落盘快照 watermark。异步 checkpoint 与同步终态写并发时，旧快照
+    /// 可能在拿到 store 锁后晚于新快照到达；该水位拒绝这种回退写。
+    persisted_watermarks: HashMap<String, u64>,
 }
 
 /// 审计文件体积上限。超过时保留尾部一半（滚动），使磁盘占用恒定。
@@ -69,6 +78,9 @@ impl TimelineStore {
             root,
             audit_root,
             audit_watermarks: HashMap::new(),
+            offload_offsets: HashMap::new(),
+            offload_indexed: HashSet::new(),
+            persisted_watermarks: HashMap::new(),
         })
     }
 
@@ -84,67 +96,96 @@ impl TimelineStore {
     }
 
     /// turn seal 卸载：把完整 turn 文本追加进侧车。
-    /// I/O 失败仅记日志——卸载是内存优化，绝不阻塞事件路径。
-    pub fn append_offloaded_turn(&self, seed: &str, turn: &qaqh_domain::TimelineTurn) {
-        use std::io::Write;
+    pub fn append_offloaded_turn(
+        &mut self,
+        seed: &str,
+        turn: &qaqh_domain::TimelineTurn,
+    ) -> std::io::Result<()> {
+        self.ensure_offload_index(seed);
         let path = self.offload_path_for(seed);
-        if let Some(parent) = path.parent()
-            && let Err(error) = std::fs::create_dir_all(parent)
-        {
-            log::warn!("[timeline] offload dir create failed for {seed}: {error}");
-            return;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        let line = match serde_json::to_string(turn) {
-            Ok(line) => line,
-            Err(error) => {
-                log::warn!("[timeline] offload serialize failed for {seed}: {error}");
-                return;
-            }
-        };
-        let file = std::fs::OpenOptions::new()
+        let line = serde_json::to_string(turn).map_err(io_error)?;
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path);
-        let mut file = match file {
-            Ok(file) => file,
-            Err(error) => {
-                log::warn!("[timeline] offload open failed for {seed}: {error}");
-                return;
-            }
-        };
-        if let Err(error) = writeln!(file, "{line}").and_then(|_| file.flush()) {
-            log::warn!("[timeline] offload append failed for {seed}: {error}");
-        }
+            .open(&path)?;
+        let offset = file.metadata()?.len();
+        writeln!(file, "{line}")?;
+        file.flush()?;
+        self.offload_offsets
+            .entry(seed.to_string())
+            .or_default()
+            .insert(turn.turn_id.clone(), offset);
+        Ok(())
     }
 
     /// 读取某 turn 的最新完整文本（侧车同 turn_id 后行胜）。
     pub fn load_offloaded_turn(
-        &self,
+        &mut self,
         seed: &str,
         turn_id: &str,
     ) -> Option<qaqh_domain::TimelineTurn> {
+        self.ensure_offload_index(seed);
+        let offset = *self.offload_offsets.get(seed)?.get(turn_id)?;
         let path = self.offload_path_for(seed);
-        let body = std::fs::read_to_string(path).ok()?;
-        let mut latest: Option<qaqh_domain::TimelineTurn> = None;
-        for line in body.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Ok(turn) = serde_json::from_str::<qaqh_domain::TimelineTurn>(line)
-                && turn.turn_id == turn_id
-            {
-                latest = Some(turn);
+        let mut file = std::fs::File::open(path).ok()?;
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut line = String::new();
+        BufReader::new(file).read_line(&mut line).ok()?;
+        serde_json::from_str(&line).ok()
+    }
+
+    /// 首次读取 sidecar 时建立 `turn_id → 最新行 offset` 索引。损坏行跳过；
+    /// 同 turn 的后续行覆盖前值，保持后行胜语义。
+    fn ensure_offload_index(&mut self, seed: &str) {
+        if self.offload_indexed.contains(seed) {
+            return;
+        }
+        let mut offsets = HashMap::new();
+        let path = self.offload_path_for(seed);
+        if let Ok(mut file) = std::fs::File::open(path) {
+            let mut offset = 0u64;
+            let mut reader = BufReader::new(&mut file);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let Ok(read) = reader.read_until(b'\n', &mut line) else {
+                    break;
+                };
+                if read == 0 {
+                    break;
+                }
+                let line_offset = offset;
+                offset = offset.saturating_add(read as u64);
+                if line.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                if let Ok(turn) = serde_json::from_slice::<qaqh_domain::TimelineTurn>(&line) {
+                    offsets.insert(turn.turn_id, line_offset);
+                }
             }
         }
-        latest
+        self.offload_offsets.insert(seed.to_string(), offsets);
+        self.offload_indexed.insert(seed.to_string());
     }
 
     pub fn persist(
-        &self,
+        &mut self,
         seed: &str,
         snapshot: &TimelineSnapshot,
         journal: Vec<TimelineEntry>,
     ) -> std::io::Result<()> {
+        if let Some(&watermark) = self.persisted_watermarks.get(seed) {
+            if watermark > snapshot.watermark {
+                return Ok(());
+            }
+        } else if let Some(existing) = self.load_seed(seed)
+            && existing.snapshot.watermark > snapshot.watermark
+        {
+            return Ok(());
+        }
         let path = self.path_for(seed);
         let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_vec(&PersistedTimeline {
@@ -157,7 +198,10 @@ impl TimelineStore {
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
-        std::fs::rename(tmp, path)
+        std::fs::rename(tmp, path)?;
+        self.persisted_watermarks
+            .insert(seed.to_string(), snapshot.watermark);
+        Ok(())
     }
 
     /// 全量装载（仅测试用；生产走 `list_seeds` + `load_seed` 懒加载）。
@@ -395,11 +439,52 @@ fn event_kind(event: &TimelineEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qaqh_domain::{
+        TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineTool, TimelineToolState,
+        TimelineTurn, TimelineTurnState,
+    };
+
+    fn test_turn(turn_id: &str, progress: &str) -> TimelineTurn {
+        TimelineTurn {
+            turn_id: turn_id.into(),
+            created_seq: 1,
+            user_text: "question".into(),
+            sealed: true,
+            offloaded: false,
+            state: TimelineTurnState::Completed,
+            failure: None,
+            rounds: vec![qaqh_domain::TimelineRound {
+                round_num: 0,
+                sealed: true,
+                is_final: true,
+                blocks: vec![TimelineBlock {
+                    block_id: "tool".into(),
+                    block_order: 0,
+                    kind: TimelineBlockKind::Tool,
+                    state: TimelineBlockState::Sealed,
+                    text: String::new(),
+                    tool: Some(TimelineTool {
+                        tool_call_id: "call-1".into(),
+                        name: "exec".into(),
+                        state: TimelineToolState::Succeeded,
+                        summary: None,
+                        args_json: None,
+                        output: Some("done".into()),
+                        diff: None,
+                        progress: progress.into(),
+                        progress_truncated: false,
+                        failure: None,
+                        permission: None,
+                    }),
+                }],
+            }],
+        }
+    }
 
     #[test]
     fn load_returns_every_persisted_seed() {
         let root = std::env::temp_dir().join(format!("qaqh-timeline-store-{}", std::process::id()));
-        let store = TimelineStore::new(&root).unwrap();
+        let mut store = TimelineStore::new(&root).unwrap();
         store
             .persist(
                 "seed",
@@ -412,6 +497,88 @@ mod tests {
             .unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded["seed"].snapshot.watermark, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn offload_sidecar_uses_latest_row_and_survives_reopen() {
+        let root = std::env::temp_dir().join(format!(
+            "qaqh-timeline-offload-latest-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        {
+            let mut store = TimelineStore::new(&root).unwrap();
+            store
+                .append_offloaded_turn("s", &test_turn("t", "old"))
+                .unwrap();
+            store
+                .append_offloaded_turn("s", &test_turn("t", "new"))
+                .unwrap();
+        }
+
+        let mut reopened = TimelineStore::new(&root).unwrap();
+        let loaded = reopened.load_offloaded_turn("s", "t").unwrap();
+        let progress = &loaded.rounds[0].blocks[0].tool.as_ref().unwrap().progress;
+        assert_eq!(progress, "new");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn offload_sidecar_reports_write_failures() {
+        let root = std::env::temp_dir().join(format!(
+            "qaqh-timeline-offload-error-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut store = TimelineStore::new(&root).unwrap();
+        let offload_dir = root.join("ringing-offload");
+        std::fs::create_dir_all(&offload_dir).unwrap();
+        std::fs::create_dir(offload_dir.join("s.jsonl")).unwrap();
+
+        assert!(
+            store
+                .append_offloaded_turn("s", &test_turn("t", "progress"))
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_watermark_rejects_a_stale_snapshot() {
+        let root =
+            std::env::temp_dir().join(format!("qaqh-timeline-watermark-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut store = TimelineStore::new(&root).unwrap();
+        store
+            .persist(
+                "s",
+                &TimelineSnapshot {
+                    watermark: 10,
+                    turns: vec![test_turn("t", "new")],
+                },
+                vec![],
+            )
+            .unwrap();
+        store
+            .persist(
+                "s",
+                &TimelineSnapshot {
+                    watermark: 5,
+                    turns: vec![test_turn("t", "old")],
+                },
+                vec![],
+            )
+            .unwrap();
+
+        let persisted = store.load_seed("s").unwrap();
+        assert_eq!(persisted.snapshot.watermark, 10);
+        let progress = &persisted.snapshot.turns[0].rounds[0].blocks[0]
+            .tool
+            .as_ref()
+            .unwrap()
+            .progress;
+        assert_eq!(progress, "new");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -454,7 +621,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let store = TimelineStore::new(&root).unwrap();
+        let mut store = TimelineStore::new(&root).unwrap();
         store
             .persist(
                 "s",

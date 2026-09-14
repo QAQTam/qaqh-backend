@@ -72,6 +72,8 @@ impl RingingHub {
                 ),
             }
         }
+        drop(appender);
+        self.offload_all_sealed_turns(seed);
         changed
     }
 

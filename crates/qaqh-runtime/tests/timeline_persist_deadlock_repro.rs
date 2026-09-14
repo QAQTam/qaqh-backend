@@ -12,13 +12,15 @@
 //! Symptom was a frozen session (the writer thread never published the sealed
 //! turn) plus a wedged store mutex (bootstrap/restart recovery blocked behind it).
 //!
-//! Fix: `rehydrate_offloaded_turns` now takes `&TimelineStore` — the caller passes
-//! the borrow it already holds — so re-entrancy is impossible by construction.
+//! Fix: `rehydrate_offloaded_turns` now takes the caller-held `&mut TimelineStore`
+//! borrow, so re-entrancy is impossible by construction.
 //! Keep this file as the regression guard: both tests below must pass.
 
 use std::time::Duration;
 
-use qaqh_domain::{TimelineIntent, TimelineTurnState};
+use qaqh_domain::{
+    TimelineBlockKind, TimelineIntent, TimelineTool, TimelineToolState, TimelineTurnState,
+};
 use qaqh_runtime::RingingHub;
 
 fn temp_root(tag: &str) -> std::path::PathBuf {
@@ -40,6 +42,60 @@ fn open_turn(hub: &RingingHub, seed: &str) {
         },
     )
     .expect("turn opened");
+}
+
+fn open_large_progress_tool(hub: &RingingHub, seed: &str) {
+    hub.publish_timeline(
+        seed,
+        TimelineIntent::BlockOpened {
+            turn_id: "t1".into(),
+            round_num: 0,
+            block_id: "tool".into(),
+            kind: TimelineBlockKind::Tool,
+            tool: Some(TimelineTool {
+                tool_call_id: "call-1".into(),
+                name: "exec".into(),
+                state: TimelineToolState::Running,
+                summary: None,
+                args_json: None,
+                output: None,
+                diff: None,
+                progress: String::new(),
+                progress_truncated: false,
+                failure: None,
+                permission: None,
+            }),
+        },
+    )
+    .expect("tool block opened");
+    hub.publish_timeline(
+        seed,
+        TimelineIntent::ToolProgress {
+            turn_id: "t1".into(),
+            round_num: 0,
+            block_id: "tool".into(),
+            chunk: "x".repeat(2 * 1024 * 1024),
+        },
+    )
+    .expect("large progress accepted");
+    hub.publish_timeline(
+        seed,
+        TimelineIntent::BlockSealed {
+            turn_id: "t1".into(),
+            round_num: 0,
+            block_id: "tool".into(),
+        },
+    )
+    .expect("tool block sealed");
+    hub.publish_timeline(
+        seed,
+        TimelineIntent::RoundSealed {
+            turn_id: "t1".into(),
+            round_num: 0,
+            is_final: true,
+        },
+    )
+    .expect("round sealed");
 }
 
 /// Sync path: `TurnSealed` persists synchronously on the caller thread.
@@ -71,6 +127,49 @@ fn turn_sealed_sync_persist_returns() {
          (`persist_timeline_sync` -> `rehydrate_offloaded_turns`)"
     );
     std::mem::forget(hub); // Drop would join the (possibly stuck) persist worker
+}
+
+#[test]
+fn turn_sealed_with_large_tool_progress_returns_and_flushes() {
+    let root = temp_root("sync-large-progress");
+    let hub = RingingHub::with_persistence("epoch-deadlock-large-progress", &root);
+    open_turn(&hub, "seed-large-progress");
+    open_large_progress_tool(&hub, "seed-large-progress");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let caller_hub = std::sync::Arc::new(hub);
+    let worker_hub = std::sync::Arc::clone(&caller_hub);
+    std::thread::spawn(move || {
+        let result = worker_hub.publish_timeline(
+            "seed-large-progress",
+            TimelineIntent::TurnSealed {
+                turn_id: "t1".into(),
+                state: TimelineTurnState::Completed,
+                failure: None,
+            },
+        );
+        if result.is_ok() {
+            worker_hub.flush_timeline_persistence();
+        }
+        let _ = tx.send(result.map(|_| ()));
+    });
+
+    assert!(
+        rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "TurnSealed with large tool progress never returned or flushed within 10s"
+    );
+    caller_hub.flush_timeline_persistence();
+    let snapshot = caller_hub
+        .timeline_snapshot("seed-large-progress")
+        .expect("sealed snapshot");
+    let tool = snapshot.turns[0].rounds[0].blocks[0]
+        .tool
+        .as_ref()
+        .expect("tool block");
+    assert!(snapshot.turns[0].offloaded, "sealed turn must be offloaded");
+    assert!(tool.progress.len() <= 512);
+    assert!(tool.progress_truncated);
+    std::mem::forget(caller_hub);
 }
 
 /// Async path: the coalesced checkpoint worker must write
