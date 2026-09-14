@@ -435,6 +435,18 @@ pub fn flush(seed: &str) {
     flush_in(&qaqh_types::platform::sessions_dir().join(seed));
 }
 
+/// 已执行（outbox 有记录）的 call_id 集合。
+///
+/// 取消收割用它区分「工具真的跑了、只是结果没等到」与「从未执行」——
+/// 前者必须等回填真实结果，后者才补取消终态（BUG-2026-09-13-08）。
+pub fn executed_call_ids(seed: &str) -> std::collections::HashSet<String> {
+    let dir = qaqh_types::platform::sessions_dir().join(seed);
+    read_records(&dir)
+        .into_iter()
+        .map(|record| record.call_id)
+        .collect()
+}
+
 /// Read all records; a torn/corrupt tail stops the scan (logged, never
 /// silently dropped on disk — the file is only ever rewritten by
 /// [`retain_only`]).
