@@ -158,7 +158,9 @@ fn replay_filter_lease_lock_hold_time() {
             g.attach_seed(&cs, &format!("seed-{i}"));
         }
     }
-    let seeds: Vec<String> = (0..REPLAY).map(|i| format!("seed-{}", i % LEASES)).collect();
+    let seeds: Vec<String> = (0..REPLAY)
+        .map(|i| format!("seed-{}", i % LEASES))
+        .collect();
 
     // 修复前：锁内逐事件 owns_seed。
     let t0 = Instant::now();

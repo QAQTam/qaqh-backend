@@ -579,31 +579,33 @@ fn read_prompt(
             }
         };
         // #39：超时/断连硬顶与错误映射在连接层（与 call_tool/read_resource 同款）。
-        let _ = tx.send(match conn.get_prompt(&prompt_name, arguments, timeout).await {
-            Ok(result) => {
-                let mut lines = Vec::new();
-                for message in &result.messages {
-                    let role = match message.role {
-                        rmcp::model::Role::User => "user",
-                        rmcp::model::Role::Assistant => "assistant",
-                    };
-                    let text = message
-                        .content
-                        .as_text()
-                        .map(|text| text.text.clone())
-                        .unwrap_or_else(|| "[non-text content]".to_owned());
-                    lines.push(format!("{role}: {text}"));
+        let _ = tx.send(
+            match conn.get_prompt(&prompt_name, arguments, timeout).await {
+                Ok(result) => {
+                    let mut lines = Vec::new();
+                    for message in &result.messages {
+                        let role = match message.role {
+                            rmcp::model::Role::User => "user",
+                            rmcp::model::Role::Assistant => "assistant",
+                        };
+                        let text = message
+                            .content
+                            .as_text()
+                            .map(|text| text.text.clone())
+                            .unwrap_or_else(|| "[non-text content]".to_owned());
+                        lines.push(format!("{role}: {text}"));
+                    }
+                    if let Some(description) = &result.description {
+                        lines.insert(0, format!("# {description}"));
+                    }
+                    ToolResult::ok(lines.join("\n"))
                 }
-                if let Some(description) = &result.description {
-                    lines.insert(0, format!("# {description}"));
-                }
-                ToolResult::ok(lines.join("\n"))
-            }
-            Err(error) => error_result(
-                error.kind,
-                format!("prompts/get {prompt_label:?} failed on server {server:?}: {error}"),
-            ),
-        });
+                Err(error) => error_result(
+                    error.kind,
+                    format!("prompts/get {prompt_label:?} failed on server {server:?}: {error}"),
+                ),
+            },
+        );
     });
     let deadline = Instant::now() + timeout + Duration::from_secs(5);
     loop {

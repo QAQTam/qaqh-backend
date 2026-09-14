@@ -253,10 +253,7 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
         }
         found.expect("created session seed appears in session.list")
     };
-    client
-        .attach(&seed)
-        .await
-        .expect("attach created session");
+    client.attach(&seed).await.expect("attach created session");
 
     // Phase 1: wait for the initial Open on all three channels.
     let deadline = Instant::now() + Duration::from_secs(20);

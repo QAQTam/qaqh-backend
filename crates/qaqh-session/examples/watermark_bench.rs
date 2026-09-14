@@ -38,7 +38,10 @@ fn main() {
     std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
     println!("sessions_dir = {}", sessions_dir.display());
-    println!("{:<12} {:>12} {:>12} {:>9}", "archive", "A full-scan", "B watermark", "speedup");
+    println!(
+        "{:<12} {:>12} {:>12} {:>9}",
+        "archive", "A full-scan", "B watermark", "speedup"
+    );
 
     for (label, target) in SIZES {
         let seed = format!("bench-{target}");

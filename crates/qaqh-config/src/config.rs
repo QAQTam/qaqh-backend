@@ -367,7 +367,9 @@ pub(crate) fn map_lsp_config(
         validate_server_name(&name)?;
         let command = ps.command.unwrap_or_default();
         if command.trim().is_empty() {
-            return Err(format!("[lsp] server {name:?}: 缺少 command（stdio 需要启动命令）"));
+            return Err(format!(
+                "[lsp] server {name:?}: 缺少 command（stdio 需要启动命令）"
+            ));
         }
         let mut extensions = Vec::new();
         for ext in ps.extensions.unwrap_or_default() {

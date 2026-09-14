@@ -6,8 +6,8 @@ use crate::{json_err_string, json_ok};
 
 use super::model::{TODO_LOCK, TodoItem, TodoStatus};
 use super::parse::{
-    alloc_id, expand_todo_ids, insertion_index, parse_new_todo, parse_todo_id, parse_write_items,
-    NewTodo,
+    NewTodo, alloc_id, expand_todo_ids, insertion_index, parse_new_todo, parse_todo_id,
+    parse_write_items,
 };
 use super::store::{
     count_status, normalize_current_id, read_store, read_store_for, status_name, todo_item_json,

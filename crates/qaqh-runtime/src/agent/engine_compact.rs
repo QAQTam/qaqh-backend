@@ -209,8 +209,7 @@ pub(crate) fn build_prompt_and_meta(
     // T6: 唯一构造器（turn_lap::gate::provider_for），与主 turn 完全同构；
     // 历史镜像缺 thinking_budget_large / effort_allowlist / stateful /
     // stream_usage / muse-spark 专项，均在唯一构造器内补齐。
-    let provider =
-        super::turn_lap::gate::provider_for(ctx, "compact");
+    let provider = super::turn_lap::gate::provider_for(ctx, "compact");
     Some((
         prompt,
         kept_user_count,

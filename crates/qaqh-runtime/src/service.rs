@@ -38,8 +38,7 @@ impl QaqhService {
         // 注意 enabled 总闸不变：外部合并的 server 也受 [mcp].enabled 管辖。
         {
             let paths = qaqh_config::mcp_import::default_user_paths();
-            if let Some(report) = qaqh_config::mcp_import::merge_external(&mut config.mcp, &paths)
-            {
+            if let Some(report) = qaqh_config::mcp_import::merge_external(&mut config.mcp, &paths) {
                 if !report.merged.is_empty() {
                     log::info!("[mcp] external config merged: {:?}", report.merged);
                 }
@@ -990,9 +989,8 @@ mod plan_service_tests {
             "- [ ] item-1: do the thing\n- [ ] item-2: another thing\n",
         )
         .expect("write plan");
-        let previous = qaqh_workspace::push_thread_workspace(Some(
-            workspace.to_string_lossy().into_owned(),
-        ));
+        let previous =
+            qaqh_workspace::push_thread_workspace(Some(workspace.to_string_lossy().into_owned()));
 
         let sessions = qaqh_session::SessionManager::try_global();
         let outcome = plan_action_against_workspace(sessions.is_some(), &plan_path);
@@ -1019,7 +1017,9 @@ mod plan_service_tests {
         let output = content
             .lines()
             .filter_map(|line| {
-                if !found && line.trim().starts_with("- [") && line.contains(&format!(" {item_id}: "))
+                if !found
+                    && line.trim().starts_with("- [")
+                    && line.contains(&format!(" {item_id}: "))
                 {
                     found = true;
                     let end = line.find(']')?;

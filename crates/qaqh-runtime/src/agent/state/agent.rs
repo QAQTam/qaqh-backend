@@ -576,9 +576,7 @@ impl AgentState {
             // with the byte-identical prefix. Written through the MetaOp queue
             // (same path as PersistSkills) to keep the single-writer ordering.
             self.session.frozen_annotation = Some(text.clone());
-            if !self.ephemeral
-                && !self.session.seed.is_empty()
-            {
+            if !self.ephemeral && !self.session.seed.is_empty() {
                 self.enqueue_meta_op(MetaOp::PersistFrozenAnnotation {
                     seed: self.session.seed.clone(),
                     annotation: text.clone(),
@@ -919,7 +917,10 @@ mod tests {
             .iter()
             .find(|m| m.role == "user")
             .expect("session A has a user message");
-        let annotation_a = agent_a.frozen_annotation.clone().expect("annotation frozen");
+        let annotation_a = agent_a
+            .frozen_annotation
+            .clone()
+            .expect("annotation frozen");
         assert!(annotation_a.contains("<today>"));
         assert!(annotation_a.contains("file_state"));
 
@@ -955,7 +956,10 @@ mod tests {
         agent_c.msg.push_user("hello");
         let ctx_c = agent_c.build_context();
         let annotation_c = agent_c.frozen_annotation.clone().unwrap();
-        assert!(annotation_c.contains("other.rs"), "regeneration uses fresh ledger");
+        assert!(
+            annotation_c.contains("other.rs"),
+            "regeneration uses fresh ledger"
+        );
         assert!(annotation_c.contains("<today>"));
         let _ = ctx_c;
 
