@@ -218,7 +218,9 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         qaqh_domain::RingingChannel::Conversation,
         qaqh_domain::RingingChannel::Tool,
     ] {
-        let mut receiver = hub.subscribe(channel);
+        // 命令回执折叠需要**全部** seed 的终态事件 → 频道级聚合订阅
+        // （BUG-2026-09-12-12：实时流已按 (channel, seed) 分片）。
+        let mut receiver = hub.subscribe_channel(channel);
         let receipts = pending_commands.clone();
         tokio::spawn(async move {
             loop {

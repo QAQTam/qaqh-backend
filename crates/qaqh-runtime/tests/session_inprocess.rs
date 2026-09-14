@@ -84,7 +84,7 @@ fn session_spawns_inprocess_and_receives_created_event() {
 
     let seed = format!("session-inproc-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("session-inprocess-test"));
-    let mut control_rx = hub.subscribe(qaqh_domain::RingingChannel::Control);
+    let mut control_rx = hub.subscribe_channel(qaqh_domain::RingingChannel::Control);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         while let Ok(envelope) = control_rx.blocking_recv() {
@@ -249,7 +249,7 @@ fn idle_unload_then_respawn_preserves_history() {
 
     let seed = format!("session-idle-unload-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("idle-unload-test"));
-    let mut control_rx = hub.subscribe(qaqh_domain::RingingChannel::Control);
+    let mut control_rx = hub.subscribe_channel(qaqh_domain::RingingChannel::Control);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         while let Ok(envelope) = control_rx.blocking_recv() {

@@ -85,6 +85,21 @@ impl RingingLeaseStore {
         }
     }
 
+    /// 该会话当前已 attach 的 seed 归属快照（BUG-2026-09-12-12 / issue #31）。
+    ///
+    /// 用途：SSE 回放过滤原先在一次全局租约锁内逐事件调 `owns_seed`，
+    /// 持锁时间随回放事件数线性增长（实测 62–247 ms）。调用方改为在**一次**
+    /// 短临界区内取本快照，之后锁外过滤，与事件数解耦。
+    ///
+    /// 活跃性由调用方在同临界区内用 `is_active_session` 判定（跳过活跃检查
+    /// 会让过期/重新协商后的僵尸身份仍能读到归属——见 BUG-2026-09-12-10）。
+    pub fn owned_seeds(&self, client_session_id: &str) -> HashSet<String> {
+        self.seed_leases
+            .get(client_session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn owns_seed(&mut self, client_session_id: &str, seed: &str) -> bool {
         // BUG-2026-09-12-10：不再在热路径上做 expire() 全表扫描（每次还分配
         // 一个 HashSet）；过期即失效改由 is_active_session 惰性判定，GC 交给
