@@ -325,12 +325,22 @@ impl TimelineAppender {
         ))
     }
 
-    /// Applies a replaceable full-value overwrite for one reasoning/text
-    /// block. Self-healing for lost/reordered streamed deltas: the producer
-    /// emits the complete accumulated text on a timer/token window, and a
-    /// consumer replaces instead of appending. `next_fragment` accounting is
-    /// intentionally left untouched so subsequent `TextDelta`s still validate
-    /// against the monotonic counter (their text appends after the overwrite).
+    /// Applies a text-block synchronization for one reasoning/text block.
+    ///
+    /// The event carries the **increment** since the previous checkpoint
+    /// (`arg`) whenever the delivered stream can account for it, so the
+    /// payload — and therefore the SSE frame, the journal entry and the
+    /// snapshot write amplification — stays proportional to what the block
+    /// actually grew by, not to the total block length. When the block text
+    /// cannot be derived from what the transport delivered (lost/reordered
+    /// `TextDelta`s, or a non-appending rewrite) the event falls back to a
+    /// full-value overwrite (`text`), which is self-healing; the next
+    /// checkpoint returns to the incremental form.
+    ///
+    /// The in-memory projection always materializes the full text, so the
+    /// snapshot/recovery semantics are unchanged. `next_fragment` accounting
+    /// is intentionally left untouched so subsequent `TextDelta`s still
+    /// validate against the monotonic counter.
     pub fn checkpoint_block(
         &mut self,
         seed: &str,
@@ -352,14 +362,24 @@ impl TimelineAppender {
             return Err(TimelineError::InvalidBlockKind(block_id.to_string()));
         }
         let text = text.into();
-        block.text = text.clone();
+        // 增量推导：`block.text` 就是"上一个已交付事件之后客户端持有的文本"
+        // （每个 delta / checkpoint 都同时更新它与传输层），因此差值天然是
+        // 本帧需要补的余量。文本不是 `block.text` 的追加式延伸时（丢/乱序
+        // delta 后的整流、非追加改写），降级为一次性全量覆盖（`text`），
+        // 消费侧 replace 语义自愈。
+        let (arg, overwrite) = match text.strip_prefix(block.text.as_str()) {
+            Some(arg) => (Some(arg.to_string()), String::new()),
+            None => (None, text.clone()),
+        };
+        block.text = text;
         Ok(next_entry(
             timeline,
             turn_id.to_string(),
             Some(round_num),
             TimelineEvent::BlockCheckpoint {
                 block_id: block_id.to_string(),
-                text,
+                arg,
+                text: overwrite,
             },
         ))
     }
@@ -1245,7 +1265,7 @@ mod tests {
         appender
             .append_text("s", "t", 0, "answer", 0, "hel")
             .unwrap();
-        // Replaceable full value: simulates self-healing after a lost delta.
+        // 追加式整流：只发余量（`arg`），不发全量文本。
         let checkpoint = appender
             .checkpoint_block("s", "t", 0, "answer", "hello wor")
             .unwrap();
@@ -1253,8 +1273,11 @@ mod tests {
             checkpoint.event,
             TimelineEvent::BlockCheckpoint {
                 ref block_id,
+                ref arg,
                 ref text,
-            } if block_id == "answer" && text == "hello wor"
+            } if block_id == "answer"
+                && arg.as_deref() == Some("lo wor")
+                && text.is_empty()
         ));
         // fragment accounting is untouched: next delta validates against 1.
         appender
@@ -1290,10 +1313,13 @@ mod tests {
             .into_iter()
             .map(|intent| appender.apply_intent("s", intent).unwrap())
             .collect();
+        // 空块上的首次整流 = 从空串追加，`arg` 即全文（自愈语义不变）。
         assert!(matches!(
             &entries[2].event,
-            TimelineEvent::BlockCheckpoint { block_id, text }
-                if block_id == "reasoning" && text == "full thinking"
+            TimelineEvent::BlockCheckpoint { block_id, arg, text }
+                if block_id == "reasoning"
+                    && arg.as_deref() == Some("full thinking")
+                    && text.is_empty()
         ));
         assert_eq!(
             appender.snapshot("s").unwrap().turns[0].rounds[0].blocks[0].text,

@@ -130,7 +130,16 @@ pub(super) struct SeedChannelState {
 #[derive(Debug)]
 pub(super) struct TimelinePersistence {
     pub(super) wake: mpsc::Sender<()>,
+    /// 结构事件（BlockSealed/RoundSealed/BlockCheckpoint…）→ 1s 合并窗口。
     pub(super) pending_seeds: Arc<Mutex<HashSet<String>>>,
+    /// 回合边界（TurnSealed）→ 优先排空，且立即唤醒 worker。
+    ///
+    /// 与 `pending_seeds` 由**同一个 worker 线程**处理、terminal 每轮先 drain，
+    /// 所以"更晚的写永远更新"：worker 每次落盘都取当前内存态，软窗口不可能
+    /// 让旧快照盖过 terminal 边界。崩溃窗口从 0 变为毫秒级（与既有
+    /// BlockSealed/RoundSealed 异步窗口同量级），显式同步边界
+    /// （`flush_timeline_persistence` / `Drop` / 优雅关闭）仍是 fail-closed。
+    pub(super) terminal_seeds: Arc<Mutex<HashSet<String>>>,
     pub(super) join: Option<JoinHandle<()>>,
 }
 
@@ -2226,6 +2235,7 @@ mod tests {
             round_num: Some(0),
             event: TimelineEvent::BlockCheckpoint {
                 block_id: block.into(),
+                arg: None,
                 text: text.into(),
             },
         };
@@ -2250,14 +2260,14 @@ mod tests {
         ];
         let folded = RingingHub::fold_checkpoints_for_test(entries);
         let seqs: Vec<u64> = folded.iter().map(|e| e.timeline_seq).collect();
-        assert_eq!(
-            seqs,
-            vec![2, 5, 6, 7],
-            "only newest checkpoint per block survives"
+        assert_eq!(seqs, vec![2, 5, 6, 7], "only newest checkpoint per block survives");
+        assert!(
+            folded
+                .iter()
+                .all(|e| !matches!(&e.event,
+                    TimelineEvent::BlockCheckpoint { block_id, text, .. }
+                        if block_id == "b" && text == "v1"))
         );
-        assert!(folded.iter().all(|e| !matches!(&e.event,
-                    TimelineEvent::BlockCheckpoint { block_id, text }
-                        if block_id == "b" && text == "v1")));
     }
 
     #[test]
@@ -2280,8 +2290,8 @@ mod tests {
     }
 
     #[test]
-    fn terminal_timeline_intent_is_persisted_before_publish_returns() {
-        let root = temp_root("timeline-terminal-sync");
+    fn terminal_timeline_intent_is_persisted_at_the_async_boundary() {
+        let root = temp_root("timeline-terminal-async");
         let hub = RingingHub::with_persistence("epoch", &root);
         hub.publish_timeline(
             "s",
@@ -2321,8 +2331,8 @@ mod tests {
             },
         )
         .unwrap();
-        // BlockSealed 已降级为异步 checkpoint（终端事件写放大收口）。
-        // TurnSealed 保持同步落盘：publish 返回即 load_seed 可见。
+        // BlockSealed / TurnSealed 都走异步持久化（issue #28：发布会话线程不再
+        // 同步全量重写快照）。TurnSealed 进 terminal 优先队列，立即唤醒 worker。
         hub.publish_timeline(
             "s",
             TimelineIntent::RoundSealed {
@@ -2342,10 +2352,12 @@ mod tests {
         )
         .unwrap();
 
+        // fail-closed：显式同步边界返回即落盘（崩溃一致性由它兜底）。
+        hub.flush_timeline_persistence();
         let persisted = TimelineStore::new(&root)
             .unwrap()
             .load_seed("s")
-            .expect("turn-sealed snapshot persisted synchronously");
+            .expect("turn-sealed snapshot persisted at the explicit sync boundary");
         assert_eq!(persisted.snapshot.watermark, 6);
         assert_eq!(
             persisted.snapshot.turns[0].rounds[0].blocks[0].text,

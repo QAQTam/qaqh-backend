@@ -10,8 +10,10 @@
 //!
 //! | 事件 | 持久层 | 说明 |
 //! |---|---|---|
-//! | TurnOpened / BlockOpened / BlockSealed / RoundSealed / TurnSealed | ✅ timeline 快照（turns 全文） | 恢复边界（terminal intents 同步落盘） |
-//! | BlockCheckpoint / ToolUpdated | ✅ timeline 快照 | 全文覆盖语义，物化进 turns |
+//! | TurnOpened / BlockOpened / BlockSealed / RoundSealed | ✅ timeline 快照（turns 全文） | 结构边界；1s 合并窗口异步 checkpoint |
+//! | TurnSealed | ✅ timeline 快照 | 回合恢复边界；terminal 优先队列立即落盘（非发布会话线程同步） |
+//! | BlockCheckpoint | ❌ 不触发快照重写 | 增量载荷（`arg`），文本可由 `TextDelta`/块投影重建 |
+//! | ToolUpdated | ✅ timeline 快照 | 覆盖语义，物化进 turns |
 //! | TextDelta / ToolProgress | ❌ 不落盘 | 只进内存投影 + SSE 实时流 + 回放尾（有界）；崩溃后由快照 watermark 重基线 |
 //! | 三频道 Reliable（TurnStarted/Finished、ToolPrepared/Finished、Interaction*） | ✅ 三频道 journal | 投影恢复权威 |
 //! | 三频道 Replaceable（RoundDelta / BlockCheckpoint / Usage / …） | ⚠️ 折叠落盘 | 同 identity 只保留最新值（64 次一 checkpoint），RoundCompleted 时整轮 compact |
@@ -33,10 +35,13 @@ pub const MAX_TIMELINE_JOURNAL_ENTRIES: usize = 8192;
 
 /// timeline 内存回放尾的字节硬上限（payload 估算）。
 ///
-/// 条数上限按 ~200 B/条估算，但 BlockCheckpoint 携带**全量块文本**（实测
-/// 单条可达 ~10 KB+），条数上限挡不住单条膨胀（长 reasoning 块场景）。
-/// 字节上限直接约束内存窗口的真实占用：checkpoint 密集流下 8192 条
-/// 可达 ~79 MB，256 MB 上限既给活跃回放留足余量，又把最坏情形钉死。
+/// 条数上限按 ~200 B/条估算，但单条 payload 仍可能很大（长 reasoning 块
+/// 的 TextDelta / ToolProgress 块），条数上限挡不住单条膨胀。字节上限直接
+/// 约束内存窗口的真实占用：密集流下 8192 条可达 ~79 MB，256 MB 上限既给
+/// 活跃回放留足余量，又把最坏情形钉死。
+///
+/// BlockCheckpoint 已改为**增量载荷**（只带上次之后的余量），不再是内存窗
+/// 口的单条膨胀源；全量覆盖仅出现在丢帧后的降级路径。
 pub const MAX_TIMELINE_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
 
 /// 测试用字节上限覆写（OnceLock 一次性；仅测试模块设置，模式同
@@ -65,13 +70,15 @@ pub fn is_snapshot_persisted(event: &qaqh_domain::TimelineEvent) -> bool {
         event,
         TimelineEvent::TurnOpened { .. }
             | TimelineEvent::BlockOpened { .. }
-            | TimelineEvent::BlockCheckpoint { .. }
             | TimelineEvent::ToolUpdated { .. }
             | TimelineEvent::BlockSealed { .. }
             | TimelineEvent::RoundSealed { .. }
             | TimelineEvent::TurnSealed { .. }
     )
-    // TextDelta / ToolProgress：瞬态。物化由 checkpoint/terminal 事件承担。
+    // BlockCheckpoint：不触发快照重写。它只是"把已有块文本整流一遍"，而块文本
+    // 早已由 TextDelta 累积在内存投影里 / 由 StructureEvent + 快照物化承载；
+    // 把它算作持久化事件会让高频 checkpoint 直接变成快照写放大（issue #28）。
+    // TextDelta / ToolProgress：瞬态，同上。
 }
 
 /// 某个 timeline 事件是否值得占用回放尾预算。
@@ -126,16 +133,34 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_is_not_a_snapshot_rewrite_trigger() {
+        // 回归守卫（issue #28）：高频 checkpoint 不得再触发快照全量重写。
+        let increment = TimelineEvent::BlockCheckpoint {
+            block_id: "b".into(),
+            arg: Some("tail".into()),
+            text: String::new(),
+        };
+        let overwrite = TimelineEvent::BlockCheckpoint {
+            block_id: "b".into(),
+            arg: None,
+            text: "full".into(),
+        };
+        for event in [&increment, &overwrite] {
+            assert!(
+                !is_snapshot_persisted(event),
+                "{event:?} must not trigger a snapshot rewrite"
+            );
+            assert!(occupies_replay_tail(event));
+        }
+    }
+
+    #[test]
     fn structural_events_are_snapshot_persisted() {
         let persisted = [
             TimelineEvent::TurnOpened {
                 user_text: "hi".into(),
             },
             TimelineEvent::BlockOpened { block: block() },
-            TimelineEvent::BlockCheckpoint {
-                block_id: "b".into(),
-                text: "full".into(),
-            },
             TimelineEvent::ToolUpdated {
                 block_id: "b".into(),
                 tool: qaqh_domain::TimelineTool {

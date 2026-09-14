@@ -163,7 +163,7 @@ fn hot_path_latency_under_fast_streaming() {
         (after - before) as f64 / DELTAS as f64
     );
 
-    // ── C. TurnSealed：同步全量落盘（在发布会话线程上） ────────────────────
+    // ── C. TurnSealed：入队（issue #28 后不再同步全量落盘） ─────────────────
     hub.publish_timeline(
         seed,
         TimelineIntent::BlockSealed {
@@ -192,11 +192,16 @@ fn hot_path_latency_under_fast_streaming() {
         },
     )
     .expect("turn sealed");
-    let sync_persist = t0.elapsed();
+    let seal_publish = t0.elapsed();
+    // 显式同步边界（flush）才付全量重写成本，且不在发布会话线程上。
+    let t0 = Instant::now();
+    hub.flush_timeline_persistence();
+    let flush_cost = t0.elapsed();
     let size = snapshot_bytes(&root, seed);
     println!(
-        "[C] TurnSealed 同步落盘 {:.1}ms（快照 {:.2} MiB）",
-        ms(sync_persist),
+        "[C] TurnSealed 发布 {:.2}ms（入队），flush 落盘 {:.1}ms（快照 {:.2} MiB）",
+        ms(seal_publish),
+        ms(flush_cost),
         size as f64 / 1048576.0
     );
 
@@ -287,7 +292,6 @@ fn production_scale_snapshot_persist_and_cold_load() {
             },
         )
         .expect("round sealed");
-        let before = snapshot_bytes(&root, seed);
         let t0 = Instant::now();
         hub.publish_timeline(
             seed,
@@ -299,11 +303,12 @@ fn production_scale_snapshot_persist_and_cold_load() {
         )
         .expect("turn sealed");
         last_seal = t0.elapsed();
+        // 显式同步边界（= 崩溃一致性 fail-closed 点），不在发布会话线程上。
+        hub.flush_timeline_persistence();
         let after = snapshot_bytes(&root, seed);
         println!(
-            "[E] turn {turn_id} seal：同步落盘 {:.1}ms，快照 {:.2} MiB → {:.2} MiB",
+            "[E] turn {turn_id} seal：发布 {:.2}ms（快照 {:.2} MiB）",
             ms(last_seal),
-            before as f64 / 1048576.0,
             after as f64 / 1048576.0
         );
     }

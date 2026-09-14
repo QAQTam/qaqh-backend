@@ -192,12 +192,21 @@ pub enum TimelineEvent {
         fragment_seq: u64,
         delta: String,
     },
-    /// Periodic **full value** of a reasoning/text block (replaceable,
-    /// overwrite semantics). Self-heals lost/reordered text deltas: the next
-    /// checkpoint replaces the accumulated text in full, while `fragment_seq`
-    /// accounting keeps validating subsequent incremental deltas.
+    /// Periodic text-block synchronization, carried as an **increment**.
+    ///
+    /// `arg` is the text appended to the block since the previous checkpoint
+    /// (empty when nothing changed); `text` is the full overwrite and is only
+    /// used when the increment cannot be derived from delivered events — a
+    /// client that lost `TextDelta` frames, or a block whose text moved
+    /// sideways instead of growing. Consumers append `arg`, or replace with
+    /// `text` when present, so a stream of checkpoints alone rebuilds the
+    /// block. Writers re-baseline after an overwrite, so the next checkpoint
+    /// returns to the incremental form.
     BlockCheckpoint {
         block_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arg: Option<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         text: String,
     },
     ToolUpdated {

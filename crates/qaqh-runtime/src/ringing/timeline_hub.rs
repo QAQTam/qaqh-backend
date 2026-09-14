@@ -43,18 +43,33 @@ impl RingingHub {
 
         let (wake, rx) = mpsc::channel::<()>();
         let pending_seeds = Arc::new(Mutex::new(HashSet::<String>::new()));
+        let terminal_seeds = Arc::new(Mutex::new(HashSet::<String>::new()));
         let pending_for_worker = Arc::clone(&pending_seeds);
+        let terminal_for_worker = Arc::clone(&terminal_seeds);
         let timeline = Arc::clone(&self.timeline);
         let timeline_store = Arc::clone(&self.timeline_store);
         let join = match std::thread::Builder::new()
             .name("qaqh-timeline-persist".into())
             .spawn(move || {
                 let persist_pending = || {
-                    let seeds: Vec<String> = {
+                    // 回合边界（TurnSealed）优先：每轮先把 terminal 集合排空，
+                    // 再处理 1s 窗口内的结构事件。两者共用本线程 → 串行、FIFO，
+                    // 且每次落盘都取"当前"内存态，后写永远更新。
+                    let mut seeds: Vec<String> = {
+                        let mut terminal = terminal_for_worker
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        terminal.drain().collect()
+                    };
+                    {
                         let mut pending =
                             pending_for_worker.lock().unwrap_or_else(|e| e.into_inner());
-                        pending.drain().collect()
-                    };
+                        for seed in pending.drain() {
+                            if !seeds.contains(&seed) {
+                                seeds.push(seed);
+                            }
+                        }
+                    }
                     for seed in seeds {
                         // Serialize snapshot selection and file replacement with
                         // terminal persistence. Taking the store lock first
@@ -98,6 +113,9 @@ impl RingingHub {
                 };
 
                 while rx.recv().is_ok() {
+                    // 立即处理一轮：terminal（TurnSealed）的唤醒必须马上落盘，
+                    // 不能等 1s 窗口——那是回合恢复边界。
+                    persist_pending();
                     // Fixed window rather than a quiet-period debounce: a long,
                     // uninterrupted model stream still receives periodic crash
                     // checkpoints without rewriting at disk speed.
@@ -138,6 +156,7 @@ impl RingingHub {
             .unwrap_or_else(|e| e.into_inner()) = Some(TimelinePersistence {
             wake,
             pending_seeds,
+            terminal_seeds,
             join: Some(join),
         });
     }
@@ -158,6 +177,27 @@ impl RingingHub {
         if should_wake {
             let _ = persistence.wake.send(());
         }
+    }
+
+    /// 回合边界（TurnSealed）入队：写进 terminal 集合并**立即唤醒** worker。
+    ///
+    /// 语义从"发布会话线程同步全量重写"变为"优先于 1s 软窗口的毫秒级异步
+    /// 落盘"；顺序由单一 worker 线程 + 每次取当前内存态保证——terminal 之后
+    /// 到达的写不会丢失，软窗口也不会让旧快照盖过它。
+    pub(super) fn request_timeline_terminal_persistence(&self, seed: &str) {
+        let persistence = self
+            .timeline_persistence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(persistence) = persistence.as_ref() else {
+            return;
+        };
+        persistence
+            .terminal_seeds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(seed.to_string());
+        let _ = persistence.wake.send(());
     }
 
     /// 启动装载（懒加载模式）：只扫描磁盘 timeline seed 清单，不 restore 任何
@@ -363,19 +403,18 @@ impl RingingHub {
         // P1: 懒加载——publish 前确保该 seed 历史 timeline 已 restore，
         // 否则新条目会与磁盘快照断链（replay tail 丢失历史）。
         self.ensure_timeline_loaded(seed);
-        // Terminal intents are the recovery boundary for a restarting client.
-        // TurnSealed 保持同步落盘（turn 级边界，一个 turn 一次，成本可控）；
-        // BlockSealed/RoundSealed 降级为 1s 合并窗口异步 checkpoint：长上下文
-        // 会话每 turn 可产生几十个 round（实测 79 个），每次同步全量重写快照
-        // 使终端事件成为主要写放大源，而 crash 窗口差异只有毫秒级（合并窗口
-        // 本身就是周期性 crash checkpoint）。
+        // TurnSealed 是回合恢复边界，但**不再在发布会话线程上同步全量重写
+        // 快照**（生产 17 MiB 快照实测 60 ms+，直接冻结发布方）。它改为进
+        // terminal 优先队列：同一持久化 worker 立即排空，落盘仍取当前内存态。
+        // 显式同步边界（flush_timeline_persistence / Drop / 优雅关闭）保持
+        // fail-closed；崩溃窗口 ≈ 毫秒级，与既有异步 checkpoint 同量级。
         let is_turn_sealed = matches!(intent, TimelineIntent::TurnSealed { .. });
         let entry = {
             let mut timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
             timeline.apply_intent(seed, intent)?
         };
         if is_turn_sealed {
-            self.persist_timeline_sync(seed);
+            self.request_timeline_terminal_persistence(seed);
         } else {
             self.request_timeline_persistence(seed);
         }
@@ -399,6 +438,11 @@ impl RingingHub {
         {
             persistence
                 .pending_seeds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(seed);
+            persistence
+                .terminal_seeds
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(seed);
@@ -519,12 +563,23 @@ impl RingingHub {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|persistence| {
-                persistence
+                let mut seeds: Vec<String> = persistence
+                    .terminal_seeds
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .drain()
+                    .collect();
+                for seed in persistence
                     .pending_seeds
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .drain()
-                    .collect()
+                {
+                    if !seeds.contains(&seed) {
+                        seeds.push(seed);
+                    }
+                }
+                seeds
             })
             .unwrap_or_default();
         for seed in seeds {
