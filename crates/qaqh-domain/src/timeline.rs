@@ -116,6 +116,9 @@ pub struct TimelineTool {
     pub diff: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub progress: String,
+    /// True once the writer discarded an older prefix of `progress`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub progress_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<TimelineFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +161,10 @@ pub struct TimelineTurn {
     pub created_seq: u64,
     pub user_text: String,
     pub sealed: bool,
+    /// True when `rounds` contains only the bounded preview shell and the
+    /// complete turn is stored in the timeline offload sidecar.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub offloaded: bool,
     pub state: TimelineTurnState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<TimelineFailure>,
@@ -218,6 +225,8 @@ pub enum TimelineEvent {
     ToolProgress {
         block_id: String,
         chunk: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
     },
     BlockSealed {
         block_id: String,

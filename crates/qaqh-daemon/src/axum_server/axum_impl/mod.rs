@@ -217,6 +217,7 @@ pub(crate) mod pure_tests {
                 created_seq: i as u64,
                 user_text: format!("q{i}"),
                 sealed: true,
+                offloaded: false,
                 state: qaqh_domain::TimelineTurnState::Completed,
                 failure: None,
                 rounds: vec![],

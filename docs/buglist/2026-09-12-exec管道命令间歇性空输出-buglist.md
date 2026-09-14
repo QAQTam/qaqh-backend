@@ -1,6 +1,6 @@
 # BUG-2026-09-12-EXEC-01 — exec 管道命令间歇性空输出（output="" + truncated=true）
 
-> ## 索引与状态（2026-09-13 补，定案）
+> ## 索引与状态（2026-09-13 补，定案；2026-09-15 状态回填）
 >
 > **详情已定案，请读报告**：[`docs/report/2026-09-12-exec输出静默截断与引入点考证-report.md`](../report/2026-09-12-exec输出静默截断与引入点考证-report.md)
 > 本文件上文（症状 / 已实锤观测 / 嫌疑链 / 排除项 / 复现路径 / 建议修复方向）与下文（§A–§H 复核进度）**保留为当时快照，不回改**。
@@ -9,10 +9,10 @@
 >
 > | ID | 严重度 | 状态 | 类型 | 位置 | 影响（一句话） |
 > |---|---|---|---|---|---|
-> | BUG-2026-09-12-EXEC-01a | P1 | fixed（工作区，待提交） | 数据完整性 / 静默截断 | `crates/qaqh-workspace/src/exec/pipe.rs:100-113` | `Readiness::Closed` 被当作"数据读完"：写端关闭时缓冲可能非空，旧实现直接 break → 已写入数据蒸发。`big-text` 200,002→13,313 字节；`Out-String` 228,842→13,315 |
-> | BUG-2026-09-12-EXEC-01b | P1 | fixed（工作区，待提交） | 数据完整性 / 恒定丢块 | `crates/qaqh-workspace/src/exec/pipe.rs:67-119` | 退出判定顺序错误：`Ready/Empty` 后**无条件** `child_settled`，可在管道仍有数据时中止排空 → `Out-String` 输出**恒定少 8,193 字节** |
-> | BUG-2026-09-12-EXEC-01c | P2 | fixed（工作区，待提交） | 可观测性 / 假阳性 | `crates/qaqh-workspace/src/exec/direct.rs:269-276` | `saw_eof=false` → `hard_trunc=true` → **`truncated` 在 Windows 上恒为 true**（连 7 字节输出也是），字段失去鉴别力。故用户报告里的 `truncated:true` **不构成独立证据** |
-> | BUG-2026-09-12-EXEC-01d | P2 | fixed（工作区，待提交） | 性能 / 碎片化读写 | `crates/qaqh-workspace/src/exec/direct.rs:126-128`、`:155-157` | `PeekNamedPipe` 报的可用字节数被丢弃（`Some(_) => Ready`），固定 8 KiB 分块 + 50ms 空转 → 65,546 字节缓冲需 9 个周期，是"13.3KB 平台期"的直接机制 |
+> | BUG-2026-09-12-EXEC-01a | P1 | ✅ fixed @30a011b | 数据完整性 / 静默截断 | `crates/qaqh-workspace/src/exec/pipe.rs:100-113` | `Readiness::Closed` 被当作"数据读完"：写端关闭时缓冲可能非空，旧实现直接 break → 已写入数据蒸发。`big-text` 200,002→13,313 字节；`Out-String` 228,842→13,315 |
+> | BUG-2026-09-12-EXEC-01b | P1 | ✅ fixed @30a011b | 数据完整性 / 恒定丢块 | `crates/qaqh-workspace/src/exec/pipe.rs:67-119` | 退出判定顺序错误：`Ready/Empty` 后**无条件** `child_settled`，可在管道仍有数据时中止排空 → `Out-String` 输出**恒定少 8,193 字节** |
+> | BUG-2026-09-12-EXEC-01c | P2 | ✅ fixed @30a011b | 可观测性 / 假阳性 | `crates/qaqh-workspace/src/exec/direct.rs:269-276` | `saw_eof=false` → `hard_trunc=true` → **`truncated` 在 Windows 上恒为 true**（连 7 字节输出也是），字段失去鉴别力。故用户报告里的 `truncated:true` **不构成独立证据** |
+> | BUG-2026-09-12-EXEC-01d | P2 | ✅ fixed @30a011b | 性能 / 碎片化读写 | `crates/qaqh-workspace/src/exec/direct.rs:126-128`、`:155-157` | `PeekNamedPipe` 报的可用字节数被丢弃（`Some(_) => Ready`），固定 8 KiB 分块 + 50ms 空转 → 65,546 字节缓冲需 9 个周期，是"13.3KB 平台期"的直接机制 |
 >
 > **对本文件既有结论的修正**（详见报告 §4.3）：
 > 1. **「嫌疑 2：child_settled 提前判终态」被证伪**——逐迭代追踪 `settle_break` 恒为 0，settle 预算放大到 5,000ms 亦无变化；所有读者线程都死在 `Closed` 分支。
@@ -21,7 +21,7 @@
 > 4. §B「需 daemon 特有因素」不成立——crate 内探针在无负载下 **12/12 确定性复现**。
 > 5. §D H1a（spawn 期 stdio 接线异常）：失败样本**全部 `exit_code=0`**，若写端 spawn 期即失效，子进程写 stdout 通常给出非零退出码。建议维持"待观察"，优先级低于 H3。
 >
-> **改动面**：`exec/pipe.rs` + `exec/direct.rs` + `exec/tests.rs`（2 行调用点适配）= 3 文件 +69 −19，**未提交**。
+> **改动面**：`exec/pipe.rs` + `exec/direct.rs` + `exec/tests.rs`（2 行调用点适配）= 3 文件 +69 −19，已随 `30a011b` 合入。
 
 
 ## 症状（QAQ-Harness harness 自身工具缺陷）
