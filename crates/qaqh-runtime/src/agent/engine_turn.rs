@@ -733,7 +733,7 @@ impl TurnEngine {
             _ => {}
         };
 
-        let msgs = vec![qaqh_types::Message::user(&prompt)];
+        let msgs = super::engine_compact::compact_request_messages(&prompt);
         let result = qaqh_gate::chat_stream(
             &provider,
             msgs,
