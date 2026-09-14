@@ -69,7 +69,10 @@ impl SubagentHost for QaqhService {
             RingingChannel::Conversation,
             RingingChannel::Tool,
         ] {
-            let mut hub_rx = hub.subscribe(channel);
+            // BUG-2026-09-12-12：按 (channel, seed) 分片订阅——桥接只需本
+            // seed 的事件，分片订阅既省掉每事件的 seed 过滤，也不再被其它
+            // 会话的风暴推向 Lagged。
+            let mut hub_rx = hub.subscribe(channel, &seed_own);
             let tx = tx.clone();
             let seed = seed_own.clone();
             let epoch = epoch.clone();
