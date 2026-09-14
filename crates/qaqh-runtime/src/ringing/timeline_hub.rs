@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 
 use super::hub::RingingHub;
 use super::hub::{TIMELINE_PERSIST_INTERVAL, TimelinePersistence};
-use crate::{TimelineError, TimelineLiveEntry};
+use crate::{TimelineAppender, TimelineError, TimelineLiveEntry};
 
 /// 落后判定的尾部读取窗口（条数）。与 `timeline_rebuild` 的投影窗口同量级：
 /// 只用于「快照最后一回合是否仍是归档最后一回合」的同一性确认，不物化历史。
@@ -71,40 +71,36 @@ impl RingingHub {
                         }
                     }
                     for seed in seeds {
-                        // Serialize snapshot selection and file replacement with
-                        // terminal persistence. Taking the store lock first
-                        // prevents an older async snapshot from overwriting a
-                        // newer terminal checkpoint.
-                        let mut store = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
-                        let Some(store) = store.as_mut() else {
+                        // Seal 卸载必须先于快照：先把完整 turn 写入 sidecar，
+                        // 再让内存进入壳模式，最后由 rehydrate 生成完整落盘快照。
+                        // 整个流程运行在持久化 worker 上，不阻塞发布线程。
+                        offload_all_sealed_turns_from(&timeline, &timeline_store, &seed);
+                        // 锁序：先在 timeline 锁内取一份自洽快照，释放后再取
+                        // store 锁。两条持久化路径都不允许嵌套持有两把锁。
+                        let Some((snapshot, journal, audit_entries)) = ({
+                            let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
+                            timeline.snapshot(&seed).map(|snapshot| {
+                                let journal = timeline.replay_since(&seed, 0);
+                                let audit_entries = journal.clone();
+                                let journal =
+                                    Self::prune_sealed_timeline_journal(&snapshot, journal);
+                                let journal = Self::prune_superseded_checkpoints(journal);
+                                (snapshot, journal, audit_entries)
+                            })
+                        }) else {
                             continue;
                         };
                         // 快照是唯一持久化产物（journal 已移除）：直接选取当前
                         // 内存态并原子替换写盘。已 seal turn 的条目不再进
                         // replay tail（见 `prune_sealed_timeline_journal`）。
-                        //
-                        // 顺带在本 checkpoint 窗口追加轻量审计行（seq/ts/type）：
-                        // 借助已有的 1s 合并窗口，不落到流式热路径上。
-                        let audit_entries = {
-                            let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
-                            timeline.replay_since(&seed, 0)
-                        };
-                        store.append_audit(&seed, &audit_entries);
-                        let Some((snapshot, journal)) = ({
-                            let timeline = timeline.lock().unwrap_or_else(|e| e.into_inner());
-                            timeline.snapshot(&seed).map(|snapshot| {
-                                let journal = timeline.replay_since(&seed, 0);
-                                let journal =
-                                    Self::prune_sealed_timeline_journal(&snapshot, journal);
-                                let journal = Self::prune_superseded_checkpoints(journal);
-                                (snapshot, journal)
-                            })
-                        }) else {
+                        let mut store = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+                        let Some(store) = store.as_mut() else {
                             continue;
                         };
+                        // 顺带在本 checkpoint 窗口追加轻量审计行（seq/ts/type）：
+                        // 借助已有的 1s 合并窗口，不落到流式热路径上。
+                        store.append_audit(&seed, &audit_entries);
                         // offload 壳补齐（异步窗口；磁盘文件始终完整）。
-                        // `store` 已在本轮持锁（:59）：此处只能借用，绝不能再取锁；
-                        // std::sync::Mutex 同线程重入 = 永久死锁（2026-09-12 冻结事故）。
                         let snapshot = rehydrate_offloaded_turns(store, &seed, snapshot);
                         if let Err(error) = store.persist(&seed, &snapshot, journal) {
                             log::warn!("[timeline] persist failed for {seed}: {error}");
@@ -247,6 +243,7 @@ impl RingingHub {
             .unwrap_or_else(|e| e.into_inner())
             .contains(seed)
         {
+            self.offload_all_sealed_turns(seed);
             return;
         }
         if !self
@@ -255,6 +252,7 @@ impl RingingHub {
             .unwrap_or_else(|e| e.into_inner())
             .contains(seed)
         {
+            self.enable_turn_offload(seed);
             return;
         }
         // 快照即权威（2026-09-10 起）：不再有 append-only 日志需要重放，
@@ -286,6 +284,7 @@ impl RingingHub {
                         persisted.snapshot.turns.len()
                     );
                     if self.rebuild_timeline_from_messages(seed) {
+                        self.enable_turn_offload(seed);
                         if self.seal_orphan_running_turns(seed) {
                             self.persist_timeline_sync(seed);
                         }
@@ -305,14 +304,19 @@ impl RingingHub {
                         persisted.journal.clone(),
                     );
                 }
+                appender.enable_offload(seed);
+                drop(appender);
             }
             None => {
                 // 无快照 → BUG-006：从 messages.jsonl / compact-context 重建投影。
-                let _ = self.rebuild_timeline_from_messages(seed);
+                if self.rebuild_timeline_from_messages(seed) {
+                    self.enable_turn_offload(seed);
+                }
                 return;
             }
         }
 
+        self.offload_all_sealed_turns(seed);
         // 上次运行遗留的孤儿 running turn 在此收尾（见 seal_orphan_running_turns）。
         // 有变更时同步落盘快照，使下次启动可直接 restore。
         if self.seal_orphan_running_turns(seed) {
@@ -379,16 +383,20 @@ impl RingingHub {
             if !appender.contains(seed) {
                 appender.restore(seed.to_string(), snapshot.clone(), journal.clone());
             }
+            appender.enable_offload(seed);
         }
-        let mut store = self
-            .timeline_store
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(store) = store.as_mut()
-            && let Err(error) = store.persist(seed, &snapshot, journal)
         {
-            log::warn!("[timeline] rebuild persist failed for {seed}: {error}");
+            let mut store = self
+                .timeline_store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(store) = store.as_mut()
+                && let Err(error) = store.persist(seed, &snapshot, journal)
+            {
+                log::warn!("[timeline] rebuild persist failed for {seed}: {error}");
+            }
         }
+        self.offload_all_sealed_turns(seed);
         log::info!("[ringing] rebuilt timeline {seed} from persisted messages (BUG-006 fallback)");
         true
     }
@@ -447,6 +455,23 @@ impl RingingHub {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(seed);
         }
+        // 显式同步边界仍是 fail-closed：先把完整 turn 写进 sidecar，再生成
+        // 完整快照。这里是关闭/恢复路径，不在发布热路径上。
+        self.offload_all_sealed_turns(seed);
+        // 先在 timeline 锁内克隆自洽状态，释放后再取 store 锁。这样 seal
+        // 路径的 sidecar I/O、持久化 worker 与同步写盘都不会嵌套两把锁。
+        let Some((snapshot, journal, audit_entries)) = ({
+            let timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            timeline.snapshot(seed).map(|snapshot| {
+                let journal = timeline.replay_since(seed, 0);
+                let audit_entries = journal.clone();
+                let journal = Self::prune_sealed_timeline_journal(&snapshot, journal);
+                let journal = Self::prune_superseded_checkpoints(journal);
+                (snapshot, journal, audit_entries)
+            })
+        }) else {
+            return;
+        };
         let mut store_guard = self
             .timeline_store
             .lock()
@@ -454,99 +479,119 @@ impl RingingHub {
         let Some(store) = store_guard.as_mut() else {
             return;
         };
-        // IIFE：条件块中部复用 `?` 提前返回（clippy redundant_closure_call 豁免）
-        #[allow(clippy::redundant_closure_call)]
-        let Some((snapshot, journal)) = (|| {
-            let timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            timeline.snapshot(seed).map(|snapshot| {
-                let journal = timeline.replay_since(seed, 0);
-                let journal = Self::prune_sealed_timeline_journal(&snapshot, journal);
-                let journal = Self::prune_superseded_checkpoints(journal);
-                (snapshot, journal)
-            })
-        })() else {
-            return;
-        };
         // 轻量审计（seq/ts/type）：与 terminal 幂等，水位去重后只追加新条目。
-        {
-            let timeline = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            let audit_entries = timeline.replay_since(seed, 0);
-            drop(timeline);
-            store.append_audit(seed, &audit_entries);
-        }
+        store.append_audit(seed, &audit_entries);
         // offload 壳补齐：内存中已卸载的 sealed turn 在落盘前恢复全文，
         // 保证快照文件始终是「无侧车也能独立恢复」的完整权威。
-        // store_guard 已持锁：只能借用，不得再次 lock（同线程重入 = 死锁）。
         let snapshot = rehydrate_offloaded_turns(store, seed, snapshot);
         if let Err(error) = store.persist(seed, &snapshot, journal) {
             log::warn!("[timeline] sync persist failed for {seed}: {error}");
         }
     }
 
-    /// 启用 turn-seal 卸载：seal 后该 turn 的 reasoning/text 全文移出内存，
-    /// 经 offload 侧车（`ringing-offload/{seed}.jsonl`）持久化；落盘快照时
-    /// 由 rehydrate 补齐。见 `timeline_store::append_offloaded_turn`。
+    /// 启用 turn-seal 卸载。幂等；只打开开关，实际 sidecar I/O 在 seal
+    /// 调用返回后由 `offload_sealed_turns` 在两把锁之外执行。
     pub fn enable_turn_offload(&self, seed: &str) {
-        let store = self
+        if self
             .timeline_store
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if store.is_none() {
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
             return;
         }
-        let store_seed = seed.to_string();
-        let append_store = std::sync::Arc::new(());
-        let _ = append_store;
-        // 捕获 store 的方法引用：store 在 Arc<Mutex<Option<TimelineStore>>> 里，
-        // 回调里再锁。为避免回调内死锁（persist_timeline_sync 持 store 锁时
-        // seal 路径不会再触发），offload 回调只做 append（append-only 文件，
-        // 不需要 store 可变状态），因此回调内短暂拿锁即可。
-        let timeline = self.timeline.clone();
-        let timeline_store = self.timeline_store.clone();
-        let offload: crate::timeline::OffloadFn =
-            std::sync::Arc::new(move |seed: &str, turn: &qaqh_domain::TimelineTurn| {
-                let store_guard = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(store) = store_guard.as_ref() {
-                    store.append_offloaded_turn(seed, turn);
-                }
-                drop(store_guard);
-                let _ = &timeline;
-                let _ = &store_seed;
-            });
         self.timeline
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .set_offload(seed, Some(offload));
+            .enable_offload(seed);
+    }
+
+    /// 把该 seed 当前所有已 seal、尚未卸载的 turn 写入 sidecar 并壳化。
+    /// 枚举与写盘分阶段取锁，确保 timeline/store 两把锁永不嵌套。
+    pub(super) fn offload_all_sealed_turns(&self, seed: &str) {
+        self.enable_turn_offload(seed);
+        offload_all_sealed_turns_from(&self.timeline, &self.timeline_store, seed);
+    }
+}
+
+/// Persist sealed turns and then replace their resident bodies with shells.
+///
+/// The helper is shared by the persistence worker and explicit synchronous
+/// flush paths. It never holds the timeline and store locks at the same time,
+/// and the generation check prevents a delayed write from shelling a reopened
+/// turn.
+fn offload_all_sealed_turns_from(
+    timeline: &Mutex<TimelineAppender>,
+    timeline_store: &Mutex<Option<crate::timeline_store::TimelineStore>>,
+    seed: &str,
+) {
+    let turn_ids = timeline
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .sealed_turn_ids(seed);
+    offload_sealed_turns_from(timeline, timeline_store, seed, &turn_ids);
+}
+
+fn offload_sealed_turns_from(
+    timeline: &Mutex<TimelineAppender>,
+    timeline_store: &Mutex<Option<crate::timeline_store::TimelineStore>>,
+    seed: &str,
+    turn_ids: &[String],
+) {
+    for turn_id in turn_ids {
+        let Some(candidate) = timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .offload_candidate(seed, turn_id)
+        else {
+            continue;
+        };
+        let write_result = {
+            let mut store_guard = timeline_store.lock().unwrap_or_else(|e| e.into_inner());
+            match store_guard.as_mut() {
+                Some(store) => store.append_offloaded_turn(seed, &candidate),
+                None => return,
+            }
+        };
+        if let Err(error) = write_result {
+            log::warn!(
+                "[timeline] offload append failed for {seed}/{}: {error}",
+                candidate.turn_id
+            );
+            continue;
+        }
+        timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_offloaded_if_current(seed, turn_id, candidate.created_seq);
     }
 }
 
 /// 用 offload 侧车补齐快照中已卸载（壳化）的 turn 文本。
 /// 侧车缺失/损坏时保留壳（快照仍可恢复，全文降级为预览）。
-///
-/// 入参是**已持锁**的 store 引用：本函数内禁止任何 `lock()`。同步路径
-/// （`persist_timeline_sync`）与异步 worker 均在持有 `timeline_store` 守卫的
-/// 临界区内调用它；一旦在此再次取锁，同一线程立即死锁（2026-09-12 冻结事故根因）。
 fn rehydrate_offloaded_turns(
-    store: &crate::timeline_store::TimelineStore,
+    store: &mut crate::timeline_store::TimelineStore,
     seed: &str,
     mut snapshot: TimelineSnapshot,
 ) -> TimelineSnapshot {
     for turn in &mut snapshot.turns {
-        // 壳判定（启发式）：sealed turn 的任一 block 文本/进度 ≤ 512 字符
-        // 预览上限且侧车有更新版本，则补齐（侧车没有时保持现状，无害）。
-        if turn.sealed
-            && turn.rounds.iter().any(|round| {
-                round.blocks.iter().any(|block| {
-                    block.text.chars().count() <= 512
-                        || block
-                            .tool
-                            .as_ref()
-                            .is_some_and(|tool| tool.progress.chars().count() <= 512)
-                })
-            })
-            && let Some(full) = store.load_offloaded_turn(seed, &turn.turn_id)
-        {
+        // 显式标记判定；侧车缺失/损坏时保留壳（全文降级为预览）。
+        if !turn.offloaded {
+            continue;
+        }
+        if let Some(full) = store.load_offloaded_turn(seed, &turn.turn_id) {
+            if full.created_seq != turn.created_seq {
+                log::warn!(
+                    "[timeline] ignoring stale offload row while persisting {seed}/{}: \
+                     expected generation {}, got {}",
+                    turn.turn_id,
+                    turn.created_seq,
+                    full.created_seq
+                );
+                continue;
+            }
             *turn = full;
+            turn.offloaded = false;
         }
     }
     snapshot
@@ -596,6 +641,53 @@ impl RingingHub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .snapshot(seed)
+    }
+
+    /// Restore full turn bodies for one already-paginated timeline page.
+    ///
+    /// `timeline_snapshot` intentionally returns the bounded in-memory shell:
+    /// restoring every offloaded turn there would defeat the memory bound.
+    /// The HTTP read path pages first, then calls this method for at most one
+    /// page. The restored turns are returned by value and never written back
+    /// into the resident timeline.
+    pub fn rehydrate_timeline_page(
+        &self,
+        seed: &str,
+        mut turns: Vec<qaqh_domain::TimelineTurn>,
+    ) -> Vec<qaqh_domain::TimelineTurn> {
+        if !turns.iter().any(|turn| turn.offloaded) {
+            return turns;
+        }
+        let mut store = self
+            .timeline_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(store) = store.as_mut() else {
+            return turns;
+        };
+        for turn in &mut turns {
+            if !turn.offloaded {
+                continue;
+            }
+            let Some(full) = store.load_offloaded_turn(seed, &turn.turn_id) else {
+                // Keep the bounded shell when the sidecar is missing/corrupt.
+                continue;
+            };
+            // A reopen can reuse a turn id. Only the current generation may
+            // replace the shell; a stale sidecar row must not leak old text.
+            if full.created_seq != turn.created_seq {
+                log::warn!(
+                    "[timeline] ignoring stale offload row for {seed}/{}: expected generation {}, got {}",
+                    turn.turn_id,
+                    turn.created_seq,
+                    full.created_seq
+                );
+                continue;
+            }
+            *turn = full;
+            turn.offloaded = false;
+        }
+        turns
     }
 
     /// Ringing V1 reconnect tail。调用方用 snapshot watermark 作为 after 参数。
