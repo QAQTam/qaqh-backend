@@ -182,11 +182,22 @@ pub(crate) fn build_prompt_and_meta(
         )
     };
 
+    // ── 长程导航锚点（file_state + todo）──
+    //
+    // 为什么必须在这里补：`<file_state>` 只在**会话首次** `build_context` 时
+    // 冻结进 `frozen_annotation`（agent.rs `build_context` 文档），而压缩会把
+    // 携带该注解的**首条 user 消息连同旧 turn 一起折叠掉**。折叠后 file_state
+    // 不再出现在任何存活消息里，模型从此丢失「改过哪些文件」的事实。
+    // todo 同理：它是独立于消息历史的会话级状态，压缩不会动它，但也不会
+    // 把它带进摘要。两者都是「长程工作不迷失方向」的锚点，在此显式补上。
+    let anchors = build_navigation_anchors(ctx);
+
     let prompt = if let Some(ref prev) = previous_summary {
         format!(
             "[COMPACT — UPDATE MODE]\n\n\
                  {SUMMARY_PREFIX}\n\n\
                  <previous-summary>\n{prev}\n</previous-summary>\n\n\
+                 {anchors}\n\
                  --- HISTORY (newer context to merge) ---\n\
                  {}\n\
                  --- END HISTORY ---\n\n\
@@ -197,6 +208,7 @@ pub(crate) fn build_prompt_and_meta(
         format!(
             "[COMPACT]\n\n\
                  Create a new checklist summary from the conversation history.\n\n\
+                 {anchors}\n\
                  --- HISTORY ---\n\
                  {}\n\
                  --- END HISTORY ---\n\n\
@@ -358,6 +370,65 @@ pub(crate) fn apply_result(ctx: &mut RingContext, meta: &CompactMeta) {
     ));
 }
 
+/// 长程导航锚点：把压缩后**会丢失**的会话级事实补回摘要输入。
+///
+/// 两块内容都来自压缩之外的实时数据源，而不是消息历史：
+/// - `<file_state>`：`qaqh_workspace::file_state::summary()`（最近 20 个被触碰
+///   的文件 + 行数 + 操作）。压缩会折叠携带冻结注解的首条 user 消息，
+///   该块从此不再出现在任何存活消息里。
+/// - todo：`load_todo_for(seed)` 的会话级计划（含 Goal 模式当前步骤）。
+///
+/// 两者都非致命：读失败（无会话/无 todo.json）时静默跳过，不阻断压缩。
+/// 无内容时返回空串，调用方模板中的占位会退化为一个空行。
+fn build_navigation_anchors(ctx: &RingContext) -> String {
+    build_navigation_anchors_for(&ctx.agent.session.seed)
+}
+
+/// 锚点构造主体（与 `RingContext` 解耦，便于单测直接调用）。
+fn build_navigation_anchors_for(seed: &str) -> String {
+    let mut out = String::new();
+
+    let files = qaqh_workspace::file_state::summary();
+    if !files.is_empty() {
+        out.push_str(
+            "Current file state (files touched this session; use these paths and \
+             line counts instead of re-reading):\n",
+        );
+        out.push_str(&files);
+        out.push('\n');
+    }
+
+    if !seed.is_empty()
+        && let Ok(store) = qaqh_workspace::todo::load_todo_for(seed)
+        && !store.items.is_empty()
+    {
+        let current = store.current_id.as_deref();
+        out.push_str("Task checklist (session-scoped; preserve this in the summary):\n");
+        if store.mode == qaqh_workspace::todo::TodoMode::Goal {
+            out.push_str("  mode: goal (autonomous execution)\n");
+        }
+        for item in &store.items {
+            let mark = match item.status {
+                qaqh_workspace::todo::TodoStatus::Completed => "x",
+                qaqh_workspace::todo::TodoStatus::InProgress => ">",
+                qaqh_workspace::todo::TodoStatus::Cancelled => "-",
+                qaqh_workspace::todo::TodoStatus::Pending => " ",
+            };
+            let cursor = if Some(item.id.as_str()) == current {
+                "  <- current"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "  [{}] T{}: {}{}\n",
+                mark, item.id, item.title, cursor
+            ));
+        }
+    }
+
+    out
+}
+
 fn estimate_message_tokens(message: &qaqh_types::Message) -> usize {
     let serialized = serde_json::to_string(message).unwrap_or_default();
     qaqh_types::count_tokens(&serialized) as usize
@@ -366,6 +437,31 @@ fn estimate_message_tokens(message: &qaqh_types::Message) -> usize {
 // ═══════════════════════════════════════════════════════
 // Background worker — runs in a separate thread
 // ═══════════════════════════════════════════════════════
+
+/// 压缩请求的 system 占位（方案 B）。
+///
+/// 上游渠道校验要求**首条消息是 system prompt**（实测 qaqh 压缩请求因首条为
+/// `user` 被 `code=11128 "first message is not system prompt"` 拒绝，HTTP 400）。
+/// 同仓另两条旁路调用都自带 system（标题生成 `engine_title.rs`、正常轮次
+/// `build_context_for_gate` 前置 `system_messages`），仅压缩路径漏了。
+///
+/// 这里**只放一句角色定位**，不动原有 prompt 的任何措辞与位置（HISTORY 与
+/// `COMPACT_PROMPT` 仍全在 user 消息里）——把指令搬进 system 会改变模型行为，
+/// 不属本次修复范围。
+const COMPACT_SYSTEM: &str =
+    "You are a context-compaction assistant. Summarize the conversation history below.";
+
+/// 压缩请求的消息体唯一构造器（manual / auto-compact 共用）。
+///
+/// 首条必须是 system：上游渠道硬校验（见 `COMPACT_SYSTEM` 文档）。此前两条
+/// 压缩入口各自内联 `vec![Message::user(&prompt)]`，因此同一缺陷存在两份；
+/// 收敛到此处后不会再次漂移。
+pub(crate) fn compact_request_messages(prompt: &str) -> Vec<qaqh_types::Message> {
+    vec![
+        qaqh_types::Message::system(COMPACT_SYSTEM),
+        qaqh_types::Message::user(prompt),
+    ]
+}
 
 /// Run the LLM compaction call in a background thread.
 /// Uses streaming so the user can see the model output in real-time
@@ -383,7 +479,8 @@ pub(crate) fn run_compact_worker(
     event_tx: std::sync::mpsc::SyncSender<crate::agent::types::WriterEvent>,
     causation_id: Option<String>,
 ) -> CompactMeta {
-    let msgs_vec = vec![qaqh_types::Message::user(&prompt)];
+    // 首条必须是 system：上游渠道硬校验（见 `COMPACT_SYSTEM` 文档）。
+    let msgs_vec = compact_request_messages(&prompt);
     let mut summary = String::new();
     let mut progress_seq = 0u64;
 
@@ -560,8 +657,8 @@ fn serialize_messages(head: &[&qaqh_types::Message], kept: &[&qaqh_types::Messag
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_history_head, compactable_head_user_count, estimate_message_tokens,
-        serialize_messages,
+        build_navigation_anchors_for, compact_history_head, compactable_head_user_count,
+        estimate_message_tokens, serialize_messages,
     };
 
     #[test]
@@ -610,5 +707,60 @@ mod tests {
         let message = qaqh_types::Message::user(&"上下文压缩".repeat(100));
 
         assert!(estimate_message_tokens(&message) > 300);
+    }
+
+    /// 回归（上游 `code=11128 "first message is not system prompt"`）：
+    /// 压缩请求的**首条必须是 system**。
+    ///
+    /// 实测背景：qaqh 压缩请求曾只发一条 `user`，被上游渠道校验以 HTTP 400
+    /// 拒绝（`data/fault-bodies/…-seq2394`）；同仓标题生成与正常轮次都自带
+    /// system，仅压缩路径漏了。两条压缩入口（manual / auto）现共用
+    /// [`compact_request_messages`]，本用例锁住该契约。
+    #[test]
+    fn compact_request_starts_with_a_system_message() {
+        let msgs = super::compact_request_messages("[COMPACT]\n\n--- HISTORY ---\n...");
+
+        assert_eq!(msgs.len(), 2, "system 占位 + 原 prompt 的 user 消息");
+        assert_eq!(
+            msgs[0].role, "system",
+            "上游要求首条为 system，否则 11128 拒绝"
+        );
+        assert_eq!(msgs[1].role, "user");
+        // 原有 prompt 措辞与位置不变（方案 B：零扰动）。
+        let user_text = msgs[1]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                qaqh_types::ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("user prompt text");
+        assert!(user_text.starts_with("[COMPACT]"));
+        assert!(user_text.contains("--- HISTORY ---"));
+    }
+
+    /// 回归：压缩后 file_state 锚点必须出现在摘要输入里。
+    ///
+    /// `<file_state>` 只在会话首次 `build_context` 时冻结进首条 user 消息，
+    /// 而压缩会把那条消息连同旧 turn 一起折叠——不在此补回，模型就再也
+    /// 看不到「改过哪些文件」。
+    ///
+    /// 注：todo 需 `sessions/{seed}/todo.json`（依赖 RUNTIME_CTX 会话目录），
+    /// 不在单测里伪造；该分支读失败即静默跳过，不影响本用例。
+    #[test]
+    fn navigation_anchors_include_file_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        qaqh_workspace::set_workspace(&temp.path().to_string_lossy());
+        qaqh_workspace::file_state::clear();
+        qaqh_workspace::file_state::record_read("src/lib.rs", "fn main() {}\n", 3);
+
+        let anchors = build_navigation_anchors_for("");
+        assert!(
+            anchors.contains("<file_state>"),
+            "file_state 必须进锚点，got: {anchors}"
+        );
+        assert!(anchors.contains("src/lib.rs"), "got: {anchors}");
+
+        qaqh_workspace::file_state::clear();
     }
 }
