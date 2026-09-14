@@ -1,15 +1,25 @@
-# handoff：main 编译回归修复 + PR #76 收口（2026-09-14）
+# handoff：main 编译回归修复 + 远端工单/PR 全量收口（2026-09-14）
 
 > 交接对象：下一个接手 qaqh-backend 开发循环的 agent 或人。
 > 关联：流程手册 [`2026-09-13-CNB-NPC全流程开发管线-handoff.md`](./2026-09-13-CNB-NPC全流程开发管线-handoff.md)、
 > 主报告 [`docs/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md`](../report/)
 
+## 0. 最终状态（2026-09-14 18:25）
+
+- **`main = cf2ceb8`**，干净 worktree 实测 `cargo check --workspace --all-targets` **无 error**。
+- **open issue = 0，open PR = 0**（远端工单与合并请求已全部清空）。
+- `cargo fmt --all --check` → **0 diff**。
+- 本地遗留：未推送分支若干（见 §5）+ 两个**早前会话**留下的未跟踪文档
+  （`docs/buglist|report/2026-09-14-timeline工具块内存放大-*`，记录 4 个**仍 open** 的
+  timeline 内存缺陷 BUG-2026-09-14-01..04，**不在本次范围，未动**）。
+
+本次共合并 6 个 PR：#79 / #80 / #76（#31）/ #78（#28）/ #81（handoff）/ #82（#38 fmt）。
+
 ## 1. 一句话交接
 
 **`origin/main` 曾是坏的（自身编译不过），这是所有 PR 阻塞的总根。**
-已修复并合入：`278e7ed` + `932cb04`（tool_outbox 回归）→ `fe4da88`（PR#76 收口）。
-现在 `main = fe4da88`，`cargo check --workspace --all-targets` 在干净 worktree 实测无 error。
-issue #31 已 closed。**剩余 1 个 open PR：#78（#28），仍 `code_conflict`。**
+已修复并合入：`278e7ed` + `932cb04`（tool_outbox 回归）→ `fe4da88`（PR#76 / #31）
+→ `33e6261`（PR#78 / #28）→ `cf2ceb8`（fmt / #38）。
 
 ## 2. 根因（本次最大发现）
 
@@ -44,6 +54,13 @@ issue #31 已 closed。**剩余 1 个 open PR：#78（#28），仍 `code_conflic
 | PR#79 `278e7ed` | 恢复 #30 的 `tool_outbox` 分片写入器 |
 | PR#80 `932cb04` | 补回 #8 的 `executed_call_ids`（main 至此恢复可构建） |
 | PR#76 `fe4da88` | rebase 到修好的 main，正确解 `hub.rs`/`sse.rs` 冲突（**合并双方**：main 的 `Arc<ChannelShards>` 两级锁表 + #76 的 `live` 分片 / `live_channels` / `live_watermark` / `subscribe(channel,seed)` / `subscribe_channel`）；修 reviewer 两项阻断；采纳建议 4 |
+| PR#78 `33e6261` | #28 的 rebase 收口：三处冲突（`hub.rs` 取 PR 侧的 `..` 通配；`timeline_hub.rs` **取 main 侧删除死函数 `timeline_intent_is_terminal`**；probe 取 PR 侧语义并修 `&seed` 类型错）；补 reviewer 建议 B 的竞态用例 |
+| PR#82 `cf2ceb8` | `cargo fmt --all` 收口 127 处既有格式差异（47 文件，纯格式） |
+
+**关单**：批量关闭 10 个「PR 已合但 issue 未关」的工单（#6/#7/#8/#10/#11/#12/#13/#24/#30/#39）——
+每条修复提交都以 `git merge-base --is-ancestor <sha> origin/main` **逐条验证**后才关；
+另关闭 #31、#28、#38。**#38 未直接关**：先实测 `cargo fmt --all --check` 确有 127 处未收口，
+做完才关（不把「有单就关」当流程）。
 
 **reviewer 两项阻断**（reviewer 已附实测复现，非静态推测，均在 `sse.rs::ShardedChannelStream::recv`）：
 
@@ -76,27 +93,44 @@ issue #31 已 closed。**剩余 1 个 open PR：#78（#28），仍 `code_conflic
    （main 的 timeline 测试 + PR 的 shard 测试）也必须都留。
 5. **`git checkout` 会因未提交改动中止**，切分支前先 `git status`。
 
-## 5. 当前快照（2026-09-14 17:55）
+## 5. 当前快照（2026-09-14 18:25）
 
-- `main = fe4da88`（origin 同步），本地工作区干净。
-- open PR：**#78**（`perf/bug-2026-09-13-28-block-checkpoint-v2`，Closes #28），
-  `blocked_on: code_conflict`，需按 §3 同样的方式 rebase + 解冲突。
-- open issue：12 个（#6 #7 #8 #10 #11 #12 #13 #24 #28 #30 #31 #39 中 #31 已关）——
-  其中 **#6/#7/#8/#10/#12/#13/#30/#39 的 PR 早已 merged，issue 却仍 open**：
-  CNB squash **不会**自动关单，需手动
-  `issues update-issue --number N --state closed --state-reason completed`。
-  建议下一轮直接批量关掉这批「PR 已合但单未关」的。
-- 本地未推送的分支：`wip/bug-2026-09-14-read-image`（`eeed218`，含 read_image
-  并行/图片降级修复 BUG-2026-09-14-01/02/04 + 本地循环改动）、
-  `fix/main-tool-outbox-compile`、`fix/main-tool-outbox-executed-ids`、`pr76-rebase`。
+- `main = cf2ceb8`（origin 同步），本地工作区干净（仅两个早前会话遗留的未跟踪文档，见 §0）。
+- **open PR = 0；open issue = 0**（两个列表均已清空）。
+- 本地未推送的分支（可清理，均已合并或已废弃）：
+  - `wip/bug-2026-09-14-read-image`（`eeed218`，含 read_image 并行/图片降级修复
+    BUG-2026-09-14-01/02/04 + 本地循环改动）——**待定去向**，见 §6.1；
+  - `fix/main-tool-outbox-compile`、`fix/main-tool-outbox-executed-ids`、
+    `pr76-rebase`、`pr78-rebase`、`chore/fmt-2026-09-14`——均已 squash 合入，可删。
 - 遗留 stash：`stash@{0}`（multi-timeline + image_models，早前会话遗留）。
 
 ## 6. 下一步（建议顺序）
 
-1. 批量关掉「PR 已合但单未关」的 issue（§5 清单）。
-2. 收口 **PR#78（#28）**：rebase 到 `fe4da88` → 解 `hub.rs` tests 模块 hunk 重叠
-   （PR#76 已合，重叠面已缩小）→ 本地 `cargo test -p qaqh-runtime` + clippy →
-   squash merge → 关 #28。
-3. 决定 `wip/bug-2026-09-14-read-image` 的去向（提 PR 或并入后续批次）。
-4. 把 `wip/bug-2026-09-14-read-image` 里 `loop_core.rs`/`lifecycle.rs` 的
-   `flush` → `flush_seed` 改名**丢弃**（那是 §2.2 提到的错误产物，正确名字是 `flush`）。
+### 6.1 待决：`wip/bug-2026-09-14-read-image`
+
+该分支含 **read_image 并行/图片降级**的真实修复（BUG-2026-09-14-01/02/04，见
+`docs/buglist/2026-09-14-read_image并行与图片降级-buglist.md`），但混入了两处**错误产物**：
+`loop_core.rs:477` / `state/lifecycle.rs:160` 的 `flush` → `flush_seed` 改名
+（`flush_seed` 在任何版本都不存在；正确名字是 `flush`）。
+
+→ 若要提 PR：**先丢弃那两处改名**，只保留 gate/message 的图片修复。
+
+### 6.2 下一批候选工单（未建档，来自早前会话的未跟踪文档）
+
+`docs/buglist/2026-09-14-timeline工具块内存放大-buglist.md` 记录了 4 个**仍 open** 的
+timeline 内存缺陷（均已带 `file:line` 与实测数据）：
+
+| ID | 级别 | 一句话 |
+|---|---|---|
+| BUG-2026-09-14-01 | P2 | `TimelineTool.summary` 直接 clone `output`（实测 100% 重复，绕过 512 字符契约） |
+| BUG-2026-09-14-02 | P1 | `append_tool_progress` 无上限（实测单块 4,177,593 字符） |
+| BUG-2026-09-14-03 | P1 | `enable_turn_offload` 是死代码（治本开关从未接线） |
+| BUG-2026-09-14-04 | P2 | `journal_entry_payload_bytes` 漏算 `ToolUpdated`（预算形同虚设） |
+
+建议按该文档 §「修复优先级」推进（-01/-04 改动最小可立即做）。
+
+### 6.3 流程提醒
+
+- 派发/收割前先确认 **main 可构建**（本次教训：main 坏了会把所有 PR 一起阻塞）。
+- CNB squash **不会**自动关单：合并后必须
+  `issues update-issue --number N --state closed --state-reason completed`。
