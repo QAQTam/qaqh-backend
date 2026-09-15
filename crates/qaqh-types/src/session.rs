@@ -208,11 +208,228 @@ impl SessionMeta {
         self.usage_requests = 0;
         self.cache_reported_requests = 0;
     }
+
+    /// 会话列表/tab 的**展示标题**（前端契约 **G2** 定死的口径）：
+    /// `title` → `cwd` 尾段 → `seed`。
+    ///
+    /// **`last_summary` 不参与**：它是「最后一条 assistant 回复首行」的预览
+    /// （每轮 `save_append` 覆盖一次），拿它当标题会让列表标题随对话漂移成
+    /// 「模型最近说了什么的开头」。TUI 已踩过这个坑并把结论写在代码里，
+    /// 这里把它提成三端共用的口径——winui / web 不该各自再判一次。
+    pub fn display_title(&self) -> String {
+        if let Some(title) = self.title.as_deref().filter(|s| !s.is_empty()) {
+            return title.to_owned();
+        }
+        if let Some(cwd) = self.cwd.as_deref().filter(|s| !s.is_empty()) {
+            // 去掉尾部分隔符后取最后一段（两种分隔符都吃：cwd 可能是 Windows 路径）。
+            // 用 `rsplit_once` 而非按字节下标切——后者在 UTF-8 边界上会 panic
+            // （本 crate 的 clippy 配置 `-D clippy::string-slice`）。
+            let trimmed = cwd.trim_end_matches(['/', '\\']);
+            return match trimmed.rsplit_once(['/', '\\']) {
+                Some((_, tail)) => tail.to_owned(),
+                None => trimmed.to_owned(),
+            };
+        }
+        self.seed.clone()
+    }
+}
+
+/// `session.list` 的条目 = [`SessionMeta`] + daemon 运行期附加字段（前端契约 **G2**）。
+///
+/// 此前这个形状只活在 `qaqh-runtime` 的 `serde_json::Value` 拼装里
+/// （`to_value(&meta)` 之后再 `value["running"] = …`），三端前端只能各自手解。
+/// TUI 为此维护了 128 行手抄，而 `created_at` / `turn_count` / `message_count` /
+/// `tool_mode` 这几个键**它一个都没解**（`grep` 逐个为 0）——漏了没人发现，
+/// 因为手抄的失败模式是**静默的**：漏字段不报错，只让某个功能永远显示缺省值。
+///
+/// **加法式**：`session.list` 回包仍是同一个 JSON 对象（[`SessionMeta`] 的键经
+/// `flatten` 平铺，外加 `running` / `workspace_id`），wire 未变。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionListEntry {
+    /// 持久化元数据。`flatten` 让它在 wire 上与下面两个运行期字段**同层**
+    /// （历史形状如此，不能改成嵌套）。
+    #[serde(flatten)]
+    pub meta: SessionMeta,
+    /// 该会话当前是否有 worker 在跑——daemon registry 的**实时**查询结果，
+    /// 不落盘，故不属于 [`SessionMeta`]。
+    #[serde(default)]
+    pub running: bool,
+    /// 所属 workspace id；`null` = 未分组。
+    /// 只有 `session.list` 带此键，`session.meta`（单条）不带。
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 每个可序列化字段都非缺省的 meta——用于 wire 契约锁。
+    fn fully_populated_meta() -> SessionMeta {
+        SessionMeta {
+            seed: "0123abcd".into(),
+            created_at: 1,
+            updated_at: 2,
+            model: "m1".into(),
+            effort: Some("high".into()),
+            message_count: 3,
+            turn_count: 4,
+            last_summary: "最后一条回复首行".into(),
+            compact_skip: 5,
+            mode: 1,
+            tool_mode: "custom".into(),
+            custom_tools: vec!["bash".into()],
+            archived: true,
+            ephemeral: true,
+            skills: SkillSessionStateV2::default(),
+            frozen_annotation: Some("<today>2026-09-15</today>".into()),
+            usage_totals: crate::UsageInfo::default(),
+            last_usage: Some(crate::UsageInfo::default()),
+            usage_requests: 6,
+            cache_reported_requests: 7,
+            title: Some("Bun 引导 daemon".into()),
+            cwd: Some("F:\\code\\qaqh".into()),
+            context_stats: Some(serde_json::json!({ "tokens": 1 })),
+            resume_seed: Some("skip-me".into()),
+            tokens: 8,
+            from_resume: true,
+        }
+    }
+
+    /// **G2 回归闸（产出方契约）**：`session.list` 的条目形状。
+    ///
+    /// 这份键表是**手工维护的 wire 契约**——不是从类型推导出来的（那样就成了
+    /// 同义反复）。`SessionMeta` 增删字段必须同步改这里，这正是目的：让每一次
+    /// 形状变更都显式过一次评审，而不是悄悄漂走。
+    #[test]
+    fn session_list_entry_wire_keys_are_locked() {
+        let entry = SessionListEntry {
+            meta: fully_populated_meta(),
+            running: true,
+            workspace_id: Some("w1".into()),
+        };
+        let wire = serde_json::to_value(&entry).expect("serialize");
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .expect("条目必须是对象（flatten 不得改成嵌套）")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+
+        let mut expected = vec![
+            // ── SessionMeta 的持久化字段（全量，含手抄时代漏掉的那些）──
+            "archived",
+            "cache_reported_requests",
+            "compact_skip",
+            "context_stats",
+            "created_at",
+            "custom_tools",
+            "cwd",
+            "effort",
+            "ephemeral",
+            "frozen_annotation",
+            "last_summary",
+            "last_usage",
+            "message_count",
+            "mode",
+            "model",
+            "seed",
+            "skills",
+            "title",
+            "tool_mode",
+            "turn_count",
+            "updated_at",
+            "usage_requests",
+            "usage_totals",
+            // ── 运行期附加字段 ──
+            "running",
+            "workspace_id",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "session.list 条目的 wire 键集合变了");
+
+        // 运行期字段**不落 wire**：`#[serde(skip)]` 掉了就必须一直是掉的。
+        for runtime_only in ["resume_seed", "tokens", "from_resume"] {
+            assert!(
+                !wire.as_object().unwrap().contains_key(runtime_only),
+                "{runtime_only} 是运行期字段，不得出现在 session.list 里"
+            );
+        }
+    }
+
+    /// **G2 回归闸（消费方需求）**：类型化后逐字段可达，且往返无损。
+    ///
+    /// 断言刻意贴着「前端真正要用的那几个」写——TUI 手抄件当年只解出这一小撮，
+    /// 其余全部漏掉；这份测试保证漏掉的那些**在类型上够得着**（而不是逼前端
+    /// 回头去 `value.get("…")`）。
+    #[test]
+    fn session_list_entry_recovers_fields_the_hand_parse_dropped() {
+        let entry = SessionListEntry {
+            meta: fully_populated_meta(),
+            running: true,
+            workspace_id: Some("w1".into()),
+        };
+        let wire = serde_json::to_value(&entry).expect("serialize");
+        let back: SessionListEntry = serde_json::from_value(wire.clone()).expect("deserialize");
+
+        // 手抄时代一个都没解的字段（grep 逐个为 0）。
+        assert_eq!(back.meta.created_at, 1);
+        assert_eq!(back.meta.turn_count, 4);
+        assert_eq!(back.meta.message_count, 3);
+        assert_eq!(back.meta.last_summary, "最后一条回复首行");
+        assert_eq!(back.meta.tool_mode, "custom");
+        // 连带的其余持久化字段同样够得着。
+        assert_eq!(back.meta.compact_skip, 5);
+        assert_eq!(back.meta.custom_tools, vec!["bash".to_string()]);
+        assert_eq!(back.meta.usage_requests, 6);
+        assert_eq!(back.meta.cache_reported_requests, 7);
+
+        // 运行期字段是**类型上的字段**，不再靠 `value["running"]`。
+        assert!(back.running);
+        assert_eq!(back.workspace_id.as_deref(), Some("w1"));
+
+        // 往返无损（flatten 下 Option/skip_serializing_if 语义不得变）。
+        assert_eq!(serde_json::to_value(&back).unwrap(), wire);
+
+        // 未分组会话（无 workspace）仍须带键——历史形状是 `null`，不是缺键。
+        let entry = SessionListEntry {
+            meta: fully_populated_meta(),
+            running: true,
+            workspace_id: None,
+        };
+        let wire = serde_json::to_value(&entry).unwrap();
+        assert!(
+            wire.as_object().unwrap().contains_key("workspace_id")
+                && wire["workspace_id"].is_null(),
+            "未分组必须是 `null`（历史形状如此），不是缺键"
+        );
+    }
+
+    /// 展示标题口径（G2 一并定死，三端共用）。
+    #[test]
+    fn display_title_prefers_title_then_cwd_tail_then_seed() {
+        let mut meta = SessionMeta {
+            seed: "0123abcd".into(),
+            title: Some("Bun 引导 daemon".into()),
+            cwd: Some("/home/me/proj".into()),
+            last_summary: "修复 SSE 解码".into(),
+            ..Default::default()
+        };
+        assert_eq!(meta.display_title(), "Bun 引导 daemon");
+
+        // title 缺失 → cwd 尾段（Windows 分隔符同样吃）。
+        meta.title = Some(String::new());
+        assert_eq!(meta.display_title(), "proj");
+        meta.cwd = Some("F:\\code\\qaqh\\".into());
+        assert_eq!(meta.display_title(), "qaqh");
+        meta.cwd = Some("qaqh".into());
+        assert_eq!(meta.display_title(), "qaqh");
+
+        // 都没有 → seed。**last_summary 全程不参与**。
+        meta.cwd = None;
+        assert_eq!(meta.display_title(), "0123abcd");
+    }
 
     #[test]
     fn legacy_session_metadata_defaults_to_empty_skill_state_v2() {
