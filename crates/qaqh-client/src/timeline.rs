@@ -56,6 +56,8 @@ pub struct TimelineStream {
     on_status: Arc<dyn Fn(TimelineStatus) + Send + Sync>,
     /// Forwarded on gap recovery: the fresh snapshot becomes the new baseline.
     on_snapshot: Arc<dyn Fn(TimelinePage) + Send + Sync>,
+    /// 见 `crate::ClientHandlers::on_liveness`。
+    on_liveness: Arc<dyn Fn() + Send + Sync>,
     /// Optional sink for `Client::timeline_status_for()` (also fed on exit).
     status_tx: Option<watch::Sender<Option<TimelineStatus>>>,
     /// Cursor of the last accepted entry (starts at the snapshot watermark).
@@ -77,6 +79,7 @@ impl TimelineStream {
         on_entry: Arc<dyn Fn(String, TimelineEntry) + Send + Sync>,
         on_status: Arc<dyn Fn(TimelineStatus) + Send + Sync>,
         on_snapshot: Arc<dyn Fn(TimelinePage) + Send + Sync>,
+        on_liveness: Arc<dyn Fn() + Send + Sync>,
         initial_cursor: u64,
         status_tx: Option<watch::Sender<Option<TimelineStatus>>>,
     ) -> Self {
@@ -87,6 +90,7 @@ impl TimelineStream {
             on_entry,
             on_status,
             on_snapshot,
+            on_liveness,
             status_tx,
             cursor: initial_cursor,
             last_epoch: None,
@@ -272,6 +276,10 @@ impl TimelineStream {
                     match chunk {
                         Some(Ok(bytes)) => {
                             idle.as_mut().reset(tokio::time::Instant::now() + SSE_IDLE_TIMEOUT);
+                            // 收到字节 = daemon 还活着。**必须在解码之前报**：
+                            // keepalive 是注释行，解码器会直接丢掉它（见
+                            // `sse_decoder.rs`），而它恰恰是空闲期唯一的存活证据。
+                            (self.on_liveness)();
                             decoder.push(&bytes);
                             self.drain_frames(&mut decoder, &state.server_epoch)?;
                         }
@@ -395,6 +403,7 @@ mod tests {
             Arc::new(|_, _| {}),
             Arc::new(|_| {}),
             Arc::new(|_| {}),
+            Arc::new(|| {}),
             0,
             None,
         )

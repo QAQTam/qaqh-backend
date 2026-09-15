@@ -50,7 +50,7 @@ web:
 [windows]
 web:
     #!/usr/bin/env pwsh
-    $file = if ($env:QAQH_DATA_DIR) { Join-Path $env:QAQH_DATA_DIR "daemon.json" } else { Join-Path $env:USERPROFILE ".deepx\daemon.json" }
+    $file = if ($env:QAQH_DATA_DIR) { Join-Path $env:QAQH_DATA_DIR "daemon.json" } else { Join-Path $env:USERPROFILE ".qaqh\daemon.json" }
     if (-not (Test-Path $file)) { Write-Error "daemon.json 不存在：先启动 daemon（just dev）"; exit 1 }
     $d = Get-Content $file -Raw | ConvertFrom-Json
     $url = ($d.endpoint -replace '^ws://', 'http://') -replace '/control/v1$', ''

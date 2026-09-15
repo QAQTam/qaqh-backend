@@ -20,6 +20,8 @@ pub struct StreamHandlers {
     pub on_batch: std::sync::Arc<dyn Fn(crate::types::EventBatch) + Send + Sync>,
     pub on_status: std::sync::Arc<dyn Fn(ChannelStatus) + Send + Sync>,
     pub on_reset: Option<std::sync::Arc<dyn Fn(crate::types::ResetRequired) + Send + Sync>>,
+    /// 见 `crate::ClientHandlers::on_liveness`：收到字节即报活（含被丢弃的 keepalive）。
+    pub on_liveness: std::sync::Arc<dyn Fn() + Send + Sync>,
 }
 
 /// One SSE channel with independent cursor, reconnect backoff and idle timeout.
@@ -173,6 +175,10 @@ impl ChannelStream {
                     match chunk {
                         Some(Ok(bytes)) => {
                             idle.as_mut().reset(tokio::time::Instant::now() + SSE_IDLE_TIMEOUT);
+                            // 收到字节 = daemon 还活着。**必须在解码之前报**：
+                            // keepalive 是注释行，解码器会直接丢掉它（见
+                            // `sse_decoder.rs`），而它恰恰是空闲期唯一的存活证据。
+                            (self.handlers.on_liveness)();
                             decoder.push(&bytes);
                             self.drain_frames(&mut decoder, &server_epoch)?;
                         }
@@ -273,6 +279,7 @@ mod tests {
                 on_batch: std::sync::Arc::new(|_| {}),
                 on_status: std::sync::Arc::new(|_| {}),
                 on_reset: None,
+                on_liveness: std::sync::Arc::new(|| {}),
             },
             Arc::new(RingingSession::new(
                 "http://127.0.0.1:1".into(),

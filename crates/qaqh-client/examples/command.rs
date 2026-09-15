@@ -19,6 +19,7 @@ use qaqh_client::{
 
 fn main() {
     let handlers = ClientHandlers {
+        on_liveness: std::sync::Arc::new(|| {}),
         on_batch: Arc::new(|batch: EventBatch| {
             println!(
                 "[event] batch channel={} seq={}..{} envelopes={}",

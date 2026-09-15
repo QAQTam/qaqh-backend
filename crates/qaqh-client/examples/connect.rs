@@ -17,6 +17,7 @@ fn main() {
         let start = std::time::Instant::now();
         let client = Client::connect_async(ClientOptions {
             handlers: ClientHandlers {
+                on_liveness: std::sync::Arc::new(|| {}),
                 on_batch: std::sync::Arc::new(|batch| {
                     println!(
                         "[batch] {} seed={} seq={}..{} envelopes={}",

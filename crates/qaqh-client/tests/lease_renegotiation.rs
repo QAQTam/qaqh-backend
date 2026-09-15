@@ -207,6 +207,7 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
     let reconnect_counts: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(vec![0, 0, 0]));
 
     let handlers = ClientHandlers {
+        on_liveness: std::sync::Arc::new(|| {}),
         on_batch: Arc::new(|_| {}),
         on_status: {
             let open_counts = open_counts.clone();
@@ -424,6 +425,7 @@ async fn activating_one_timeline_does_not_stop_another() {
 
     let statuses: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let handlers = ClientHandlers {
+        on_liveness: std::sync::Arc::new(|| {}),
         on_batch: Arc::new(|_| {}),
         on_status: Arc::new(|_, _| {}),
         on_reset: None,
