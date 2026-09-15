@@ -88,7 +88,9 @@ impl RingingSessionBootstrap {
     /// 漂移通常表现为**字段变缺省**而非 `Err`。这不是「静默失败」，而是刻意的
     /// 前向兼容——漂移由 `qaqh-runtime` 的产出方往返测试兜住（直接拿真实快照断言
     /// 字段非缺省），不靠运行期报错。`Err` 只在 `state` 根本不是对象等病态情形出现。
-    pub fn conversation_state(&self) -> Result<qaqh_domain::state::ConversationState, serde_json::Error> {
+    pub fn conversation_state(
+        &self,
+    ) -> Result<qaqh_domain::state::ConversationState, serde_json::Error> {
         serde_json::from_value(self.conversation.state.clone())
     }
 

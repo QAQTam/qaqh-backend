@@ -3120,7 +3120,7 @@ mod tests {
     /// `activeTurn`）→ 对应断言红。
     #[test]
     fn typed_state_views_recover_every_producer_field() {
-        use qaqh_domain::state::{ConversationState, ControlState, InteractionKind, ToolState};
+        use qaqh_domain::state::{ControlState, ConversationState, InteractionKind, ToolState};
         let hub = RingingHub::new("epoch-typed");
 
         hub.publish(
@@ -3207,7 +3207,9 @@ mod tests {
             hub.snapshot(RingingChannel::Tool, "s"),
         );
 
-        let conv: ConversationState = boot.conversation_state().expect("conversation state 可解析");
+        let conv: ConversationState = boot
+            .conversation_state()
+            .expect("conversation state 可解析");
         assert_eq!(
             conv.active_turn.as_deref(),
             Some("t1"),

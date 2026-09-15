@@ -27,9 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    ActivityState, AgentLifecycleState, DashboardSnapshot, SessionState, TurnData,
-};
+use crate::{ActivityState, AgentLifecycleState, DashboardSnapshot, SessionState, TurnData};
 
 #[cfg(feature = "ts")]
 use ts_rs::TS;
