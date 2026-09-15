@@ -715,6 +715,18 @@ pub(crate) fn provider_for(ctx: &RingContext, request_tag: &str) -> qaqh_gate::P
     let ep = ctx.agent.endpoint_spec.clone();
     let is_responses = ep.as_ref().map(|e| e.protocol.as_str()) == Some("responses");
     let is_anthropic = ep.as_ref().map(|e| e.protocol.as_str()) == Some("anthropic");
+    // responses 协议没有增量语义：端点上声明 stateful 不会生效（不读 provider.stateful）。
+    // 显式提示一次，避免"配置里写了 stateful 却静默按无状态全量发送"。
+    if is_responses && ep.as_ref().is_some_and(|e| e.stateful) {
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!(
+                "[gate] endpoint {}/{} declares stateful=true, but the responses protocol has no incremental mode — sending full input",
+                ctx.agent.config.provider_id,
+                ctx.agent.config.endpoint
+            );
+        }
+    }
     // T9/T10: 端点级重试策略随 EndpointSpec 一起传递（None = gate 内置缺省）。
     let retry = ep.as_ref().and_then(|e| e.retry.clone());
     if is_anthropic {
