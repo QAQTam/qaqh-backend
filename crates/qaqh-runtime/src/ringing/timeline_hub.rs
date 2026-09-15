@@ -327,6 +327,19 @@ impl RingingHub {
 
     /// 持久化快照是否落后于写侧事实（`messages.jsonl`）。
     ///
+    /// 该 seed 会话持久化的**真实回合总数**，与 timeline 物化窗口无关。
+    ///
+    /// T-08：重建路径（[`super::timeline_rebuild::rebuild_timeline_snapshot`]）只
+    /// 物化最近 [`super::timeline_rebuild::REBUILD_RECENT_TURNS`] 轮，若分页响应
+    /// 把「物化窗口大小」当总数上报，客户端会以为历史就这么多，于是既不提示
+    /// 被裁剪、也无从知道更早的回合存在。
+    ///
+    /// 取不到（无 sessions / 无 meta）返回 `None`，调用方按**不可判定**保守处理
+    /// ——宁可报 `false`，也不要谎报「还有更多」。
+    pub fn persisted_turn_count(&self, seed: &str) -> Option<usize> {
+        Some(self.sessions.as_deref()?.load_meta(seed)?.turn_count)
+    }
+
     /// 两级判定，廉价在前：
     /// 1. **数量门**：快照回合数不得少于会话已完成回合数（`meta.turn_count`）
     ///    减一——运行中回合可能已开而 meta 尚未更新。不触发即直接判新鲜，
