@@ -69,9 +69,11 @@ winui 与 web 将各写一份，且**没有任何机制阻止三份漂移**—�
 `tool_calls`、`tool_results` ——**与 `qaqh_domain::RoundData` 逐字段同构**，
 故 `Vec<TurnData>` 可直接反序列化（已核 `RoundData` 的 `serde(default)` 覆盖）。
 
-**这条本身就是一个论据**：TUI 已上线的手解至今**没解** `active_turn`、`last_round`、
-`compact_status`、`compact_id`、`cancelled`、`last_finished` 六个字段——**手抄必然漏**，
-而且漏了没人会发现。G1 的类型化必须**从产出侧全量审计**，不能照抄任何现有消费侧实现。
+**这条本身就是一个论据**：TUI 已上线的手解至今**没有一个字段的读取点**是
+`active_turn` / `last_round` / `compact_status` / `compact_id` / `last_finished`，
+以及快照里的 `cancelled`（`grep -rn '"<字段名>" src/` 逐个为 0；`"cancelled"` 另有
+9 处命中，但全部是 todo 状态串、子代理状态与 exec 回执字段，与快照无关）。
+即**手抄必然漏，而且漏了没人会发现**。G1 的类型化必须**从产出侧全量审计**，不能照抄任何现有消费侧实现。
 
 **前置工作（实现类型前的第一步）**：枚举三段 `state` 的**全部写入方**——
 `projection.rs` 的事件折叠、`conversation_snapshot.rs` 的初始快照、`hub.rs` 的快照
