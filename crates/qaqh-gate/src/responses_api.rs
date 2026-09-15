@@ -11,8 +11,8 @@ use qaqh_types::{ContentBlock, Message, ToolDef};
 
 use super::sse::SseDecoder;
 use super::transport::{
-    Attempt, SseTrace, block_on, http_error_description, is_cancelled, is_retryable,
-    parse_retry_after, run_with_retry,
+    Attempt, SseTrace, block_on, empty_request_sync_error, http_error_description, is_cancelled,
+    is_retryable, parse_retry_after, run_with_retry, stateful_noop_done_event,
 };
 use super::transport::{RetryPolicy, SSE_POLL_INTERVAL};
 use super::types::{
@@ -552,6 +552,13 @@ pub fn chat_stream_responses(
 ) -> anyhow::Result<()> {
     let compat = &provider.responses_compat;
     let (input_items, instructions) = convert_messages_to_input(&messages, compat);
+    // 空输入保护：`input: []` 会被上游判 400 且不可重试 → 整个回合 Fatal。
+    // 与 chat/anthropic 的空 messages 短路同一语义：本地收口，零 HTTP 请求。
+    if input_items.is_empty() {
+        log::warn!("responses: input 为空（无任何可投影消息），本地短路，不发请求");
+        on_event(stateful_noop_done_event());
+        return Ok(());
+    }
     let responses_tools = convert_tools(tools, compat);
 
     let mut body_map = serde_json::Map::new();
@@ -691,6 +698,11 @@ pub fn chat_sync_responses(
 ) -> Result<String, String> {
     let compat = &provider.responses_compat;
     let (input_items, instructions) = convert_messages_to_input(&messages, compat);
+    // 同流式路径的空输入保护（sync 无流式收口 → 返回可诊断错误而非换上游 400）。
+    if input_items.is_empty() {
+        log::warn!("responses: input 为空（无任何可投影消息），sync 短路，不发请求");
+        return Err(empty_request_sync_error());
+    }
     let responses_tools = convert_tools(None, compat);
 
     let mut body_map = serde_json::Map::new();
