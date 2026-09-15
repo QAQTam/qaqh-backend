@@ -41,7 +41,9 @@ pub use provider::{
     CacheTokenField, EndpointPatch, EndpointPatchRef, EndpointSpec, ProviderPatch, ProviderSpec,
     ProvidersFile, ProvidersOverrideFile, RetrySpec, ThinkingParamMode, UserSendMode,
 };
-pub use session::{SessionMeta, SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2};
+pub use session::{
+    SessionListEntry, SessionMeta, SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2,
+};
 pub use state::DebugLevel;
 pub use tool_def::{ToolDef, ToolFunction};
 pub use tool_result::{

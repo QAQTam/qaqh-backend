@@ -336,16 +336,22 @@ impl QaqhService {
                     .map(|s| s.to_string());
                 Ok(crate::workspace_supervisor::install_wsl(repo_root.as_deref()).map_err(err)?)
             }
-            "session.list" => Ok(Value::Array(self.list_sessions())),
+            "session.list" => Ok(serde_json::to_value(self.list_sessions()).map_err(err)?),
             "session.meta" => {
                 let seed = seed()?;
                 let manager = &self.sessions;
                 let Some(meta) = manager.load_meta(&seed) else {
                     return Ok(Value::Null);
                 };
-                let mut value = serde_json::to_value(&meta).map_err(err)?;
-                value["running"] = json!(self.registry()?.is_running(&meta.seed));
-                Ok(value)
+                // 单条与 `session.list` 的条目**同一个形状**（G2）：同样的
+                // `SessionMeta` + 运行期字段。此前这里也是手拼 `value["running"]`，
+                // 且不带 `workspace_id`——同一个形状两处各拼一次，正是漂移的温床。
+                let entry = qaqh_types::SessionListEntry {
+                    running: self.registry()?.is_running(&meta.seed),
+                    workspace_id: qaqh_session::WorkspaceStore::global().workspace_of(&meta.seed),
+                    meta,
+                };
+                Ok(serde_json::to_value(entry).map_err(err)?)
             }
             "session.activity" => {
                 Ok(serde_json::to_value(self.registry()?.activities()).map_err(err)?)
@@ -710,7 +716,17 @@ impl QaqhService {
         Ok(Value::Null)
     }
 
-    fn list_sessions(&self) -> Vec<Value> {
+    /// `session.list` 的条目（前端契约 **G2**）。
+    ///
+    /// 返回**类型化**条目而非 `Value`：形状由 `qaqh_types::SessionListEntry` 承载，
+    /// 序列化只发生在 dispatch 边界。此前这里是 `to_value(&meta)` 之后再
+    /// `value["running"] = …` 手工拼键——手拼的形状没有任何类型承载，三端前端
+    /// 只能各自手解（TUI 那份手抄漏了 5 个键而无人察觉）。
+    ///
+    /// 返回类型化值后，**新增字段的唯一途径是改类型**：想在回包里塞个临时键，
+    /// 必须先拆掉类型才行。形状锁在 `qaqh-types` 的
+    /// `session_list_entry_wire_keys_are_locked`。
+    fn list_sessions(&self) -> Vec<qaqh_types::SessionListEntry> {
         let manager = &self.sessions;
         let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         let workspaces = qaqh_session::WorkspaceStore::global();
@@ -718,13 +734,13 @@ impl QaqhService {
             .list()
             .into_iter()
             .map(|meta| {
-                let mut value = serde_json::to_value(&meta).unwrap_or_default();
-                value["running"] = json!(registry.is_running(&meta.seed));
-                value["workspace_id"] = workspaces
-                    .workspace_of(&meta.seed)
-                    .map(Value::String)
-                    .unwrap_or(Value::Null);
-                value
+                let running = registry.is_running(&meta.seed);
+                let workspace_id = workspaces.workspace_of(&meta.seed);
+                qaqh_types::SessionListEntry {
+                    meta,
+                    running,
+                    workspace_id,
+                }
             })
             .collect()
     }
