@@ -458,8 +458,7 @@ fn handle_journal(ctx: crate::ToolCallCtx) -> crate::ToolResult {
 
 /// Register the `journal` workspace tool.
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(
-        crate::ToolHandler {
+    mgr.register(crate::ToolHandler {
             key: "journal".to_string(),
             description: "Query/replay session journal (SMJ): query list, export dump, replay restore.",
             input_schema: serde_json::json!({
@@ -479,9 +478,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             risk: crate::ToolRisk::Write,
             category: crate::permission::ToolCategory::Write,
             default_timeout: std::time::Duration::from_secs(30),
-        },
-        crate::ToolPlacement::Workspace,
-    );
+        });
 }
 
 /// CLI entry: `qaqh-workspace journal query|replay|export ...`

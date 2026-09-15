@@ -234,7 +234,7 @@ fn read_image_file(path: &str) -> Result<(Vec<u8>, String), String> {
 // ── Registration ──────────────────────────────────────────────────────
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(ToolHandler {
+    mgr.register(ToolHandler {
         key: "read_image".to_string(),
         description: "Load image into visual context (by image_index or file path). Auto downscale if oversized.",
         input_schema: serde_json::json!({
@@ -259,7 +259,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::ReadOnly,
         category: crate::permission::ToolCategory::Read,
         default_timeout: std::time::Duration::from_secs(30),
-    }, crate::ToolPlacement::Workspace);
+    });
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

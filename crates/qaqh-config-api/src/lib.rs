@@ -65,7 +65,6 @@ pub struct ConfigDto {
     pub compliance_enabled: bool,
     pub providers: Vec<ProviderDto>,
     pub subagent: SubagentDto,
-    pub workspace: WorkspaceDto,
     /// MCP 客户端配置（Phase 1 只读；写模型随 workspace 隔离权限重构另立）。
     pub mcp: McpDto,
     /// LSP 客户端配置（M1 只读；写模型另立）。
@@ -116,12 +115,6 @@ pub struct SubagentDto {
     /// 空数组 = 全部工具可用（配置语义，非缺省）。
     #[serde(alias = "default_tools")]
     pub default_tools: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct WorkspaceDto {
-    pub mode: String,
 }
 
 /// MCP 客户端配置读模型（docs/mcp-client-design.md §6）。
@@ -397,7 +390,6 @@ mod tests {
                 "timeout_secs": 120,
                 "default_tools": ["read"]
             },
-            "workspace": { "mode": "local" },
             "tokenizer_path": null
         });
         let dto: ConfigDto = serde_json::from_value(payload).expect("live shape parse");

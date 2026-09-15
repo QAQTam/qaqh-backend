@@ -19,7 +19,7 @@ use lsp_types::{
 };
 
 use qaqh_types::{ToolDef, ToolFunction, ToolResult};
-use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolPlacement, ToolRisk};
+use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolRisk};
 
 use crate::bridge::DEFAULT_TIMEOUT_SECS;
 use crate::connection::ServerConnection;
@@ -86,7 +86,6 @@ pub fn aggregate_entry(timeout: std::time::Duration) -> (String, DynamicTool) {
     let entry = DynamicTool {
         def,
         handler_fn: aggregate_dispatch,
-        placement: ToolPlacement::HostOnly,
         category: qaqh_workspace::ToolCategory::Read,
         // mcp `mcp` 同款：risk 恒 Administrative，真实风险由 category 裁决。
         risk: ToolRisk::Administrative,

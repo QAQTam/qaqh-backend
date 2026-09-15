@@ -5,12 +5,12 @@
 //! hit their timeout, instead of blindly retrying or killing.
 
 use crate::{
-    ToolCallCtx, ToolPlacement, ToolResult, ToolRisk,
+    ToolCallCtx, ToolResult, ToolRisk,
     process_registry::{KillOutcome, ProcessRegistry},
 };
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(crate::ToolHandler {
+    mgr.register(crate::ToolHandler {
         key: "process".into(),
         description: "Control backgrounded process: check/wait/write/kill.",
         input_schema: serde_json::json!({
@@ -43,7 +43,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::Administrative,
         category: crate::permission::ToolCategory::Exec,
         default_timeout: std::time::Duration::from_secs(180),
-    }, ToolPlacement::Workspace);
+    });
 }
 
 fn handle_process(ctx: ToolCallCtx) -> ToolResult {

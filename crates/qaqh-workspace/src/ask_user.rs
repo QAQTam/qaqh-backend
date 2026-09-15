@@ -172,7 +172,7 @@ pub(super) fn exec_ask_user(args: &serde_json::Value) -> ToolResult {
 handler!(handle_ask_user, exec_ask_user);
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(ToolHandler {
+    mgr.register(ToolHandler {
         key: "ask".to_string(),
         description: "Ask user questions (Ringing interaction).",
         input_schema: serde_json::json!({
@@ -217,9 +217,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::ReadOnly,
         category: crate::permission::ToolCategory::Read,
         default_timeout: std::time::Duration::ZERO,
-    },
-    crate::ToolPlacement::Workspace,
-);
+    });
 }
 
 #[cfg(test)]

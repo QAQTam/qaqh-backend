@@ -171,7 +171,7 @@ fn handle_skills(ctx: crate::ToolCallCtx) -> ToolResult {
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(ToolHandler {
+    mgr.register(ToolHandler {
         key: "skills".to_string(),
         description: "Skills: activate/list/resource/validate. activate injects envelope as trailing system message.",
         input_schema: serde_json::json!({
@@ -221,7 +221,5 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::ReadOnly,
         category: crate::permission::ToolCategory::Read,
         default_timeout: std::time::Duration::from_secs(15),
-    },
-    crate::ToolPlacement::Workspace,
-);
+    });
 }

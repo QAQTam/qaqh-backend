@@ -1,6 +1,6 @@
 //! WorkspaceStore — 会话工作区注册表（组织语义）。
 //!
-//! 与「运行环境 workspace」（`workspace.set` local/wsl/remote）解耦：本模块只负责
+//! 与「会话运行目录」（`workspace.set`）解耦：本模块只负责
 //! 把会话按目录归类，持久化到 `{data_dir}/workspaces.json`。
 //!
 //! 设计对齐 deepseek-harness `packages/workspace/workspace/src/types.ts`：

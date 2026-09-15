@@ -183,7 +183,7 @@ fn handle_apply_patch(ctx: crate::ToolCallCtx) -> ToolResult {
 // ─────────────────────────────────────────────────────────────
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(ToolHandler {
+    mgr.register(ToolHandler {
         key: "apply_patch".to_string(),
         description: "Apply Codex-format patch (*** Begin Patch). Content-matched hunks; use dry_run to preview.",
         input_schema: serde_json::json!({
@@ -199,9 +199,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::Write,
         category: crate::permission::ToolCategory::Write,
         default_timeout: std::time::Duration::from_secs(60),
-    },
-    crate::ToolPlacement::Workspace,
-);
+    });
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@
 //! 缺省平台自动检测）。pwsh 特判收敛在 [`Shell`] 枚举内（路径降级链 +
 //! -EncodedCommand/-CommandWithArgs），注册层不分支。
 
-use crate::{ToolHandler, ToolPlacement, ToolRisk};
+use crate::{ToolHandler, ToolRisk};
 use std::time::Duration;
 
 use super::handler::{exec_schema, handle_run_exec};
@@ -21,16 +21,13 @@ pub fn register(mgr: &mut crate::ToolManager) {
             .to_string()
             .into_boxed_str(),
     );
-    mgr.register_with_placement(
-        ToolHandler {
-            key: "exec".to_string(),
-            description,
-            input_schema: exec_schema(true),
-            handler: handle_run_exec,
-            risk: ToolRisk::Destructive,
-            category: crate::permission::ToolCategory::Exec,
-            default_timeout: Duration::from_secs(30),
-        },
-        ToolPlacement::Workspace,
-    );
+    mgr.register(ToolHandler {
+        key: "exec".to_string(),
+        description,
+        input_schema: exec_schema(true),
+        handler: handle_run_exec,
+        risk: ToolRisk::Destructive,
+        category: crate::permission::ToolCategory::Exec,
+        default_timeout: Duration::from_secs(30),
+    });
 }
