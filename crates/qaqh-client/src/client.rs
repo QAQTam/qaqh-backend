@@ -161,7 +161,7 @@ impl Client {
                 // 锁清理 stale lock/discovery 自愈）。
                 let discovery = match read_discovery()
                     .ok()
-                    .filter(|d| crate::discovery::discovery_is_live(d))
+                    .filter(crate::discovery::discovery_is_live)
                 {
                     Some(d) => d,
                     None => {
@@ -832,7 +832,7 @@ async fn wait_for_daemon(
     // 持有者活着即意味着有实例正在初始化，直接轮询等待其发布即可。
     let live = read_discovery()
         .ok()
-        .filter(|d| crate::discovery::discovery_is_live(d));
+        .filter(crate::discovery::discovery_is_live);
     if live.is_none() && !crate::discovery::lock_holder_alive() {
         // 唯一 spawn 出口（内含脱离 shell 进程组的保护，见该函数文档）。
         crate::discovery::spawn_daemon_process(executable.as_ref())?;
