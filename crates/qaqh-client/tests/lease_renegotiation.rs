@@ -25,6 +25,25 @@ use qaqh_client::{
     QueryRequest, RingingCommand, RingingCommandAckStatus,
 };
 
+// ── 进程级环境变量的互斥 ─────────────────────────────────────────────────
+
+/// 本文件的两个测试都会设置**进程级**的 `QAQH_DATA_DIR`（各自隔离的 data root），
+/// 而 cargo 默认**并行**跑同一文件里的测试。不加互斥，两边的客户端会互相把
+/// 对方的 `daemon.json` 读进来 —— 指向另一个 daemon 的端口/token，表现为
+/// 随机失败。加锁后并行度设置不再影响正确性。
+///
+/// （原文件只有一个测试时不存在这个问题；新增第二个测试时必须补上。）
+///
+/// 用 **async** 互斥锁而非 `std::sync::Mutex`：环境变量必须在整个测试期间保持
+/// 稳定（客户端全程要按它解析 discovery），所以锁会被持有**跨 await**——`std`
+/// 锁那样做是 clippy 的 `await_holding_lock` 违规，在 multi_thread 运行时上
+/// 也是真实的死锁风险。
+static ENV_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn lock_env() -> tokio::sync::MutexGuard<'static, ()> {
+    ENV_GUARD.lock().await
+}
+
 // ── isolated test home ───────────────────────────────────────────────────
 
 /// Create a private `home\.qaqh` data root (Windows-validated layout:
@@ -48,21 +67,33 @@ fn cleanup_isolated_home(base: &PathBuf) {
     let _ = std::fs::remove_dir_all(base);
 }
 
+/// 平台对应的 daemon 可执行文件名。
+///
+/// 原先两处查找都硬编码 `qaqh-daemon.exe`，于是本测试在 Linux/macOS 上**永远**
+/// 找不到二进制、必然 panic —— 「需要编译好的 daemon」这条说明掩盖了「在非
+/// Windows 上根本跑不起来」。修好后本测试才真的可用。
+fn daemon_exe_name() -> &'static str {
+    if cfg!(windows) {
+        "qaqh-daemon.exe"
+    } else {
+        "qaqh-daemon"
+    }
+}
+
 fn find_daemon_binary() -> PathBuf {
     let test_exe = std::env::current_exe().expect("current_exe in test");
     let test_dir = test_exe.parent().expect("exe parent dir");
+    let exe = daemon_exe_name();
 
     // target/debug/deps/ → target/debug/  (or release)
-    let rel = test_dir.join("../qaqh-daemon.exe");
+    let rel = test_dir.join("../").join(exe);
     if rel.exists() {
         return rel.canonicalize().unwrap_or(rel);
     }
 
     if let Ok(dir) = std::env::var("CARGO_BUILD_TARGET_DIR") {
         for profile in &["debug", "release"] {
-            let c = std::path::PathBuf::from(&dir)
-                .join(profile)
-                .join("qaqh-daemon.exe");
+            let c = std::path::PathBuf::from(&dir).join(profile).join(exe);
             if c.exists() {
                 return c;
             }
@@ -153,12 +184,15 @@ async fn assert_timeline_readable(client: &Client, seed: &str, within: Duration)
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires compiled daemon binary; run with -- --ignored"]
 async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
+    // 先拿环境锁：本测试的客户端靠 QAQH_DATA_DIR 找 discovery，不能被同文件的
+    // 另一个测试改道。
+    let _env = lock_env().await;
     let home = make_isolated_home();
     let data = home.join(".qaqh");
 
     // Point this process's client at the same isolated data root (must be set
     // before any discovery read; the daemon child gets it via env too).
-    // SAFETY: single-threaded test setup, no other env reads in flight.
+    // SAFETY: 已持 ENV_GUARD，本进程内无其它并发读写。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
@@ -374,9 +408,11 @@ async fn create_attached_session(client: &Client) -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires compiled daemon binary; run with -- --ignored"]
 async fn activating_one_timeline_does_not_stop_another() {
+    // 见 ENV_GUARD：同文件的另一个测试也用这个进程级变量。
+    let _env = lock_env().await;
     let home = make_isolated_home();
     let data = home.join(".qaqh");
-    // SAFETY: 测试启动阶段设置，此后本进程不再并发读写该变量。
+    // SAFETY: 已持 ENV_GUARD，本进程内无其它并发读写。
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
