@@ -35,7 +35,8 @@ pub use qaqh_ringing::{
     RingingResetRequired as ResetRequired, RingingSessionBootstrap, is_safe_integer,
 };
 pub use qaqh_types::{
-    ToolContinuation, ToolError, ToolImage, ToolModelPayload, ToolResult, ToolStatus, UsageInfo,
+    SessionListEntry, SessionMeta, ToolContinuation, ToolError, ToolImage, ToolModelPayload,
+    ToolResult, ToolStatus, UsageInfo,
 };
 
 /// Stable channel order used to start the three independent SSE streams.
