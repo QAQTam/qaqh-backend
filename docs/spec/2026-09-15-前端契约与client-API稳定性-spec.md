@@ -15,7 +15,9 @@
 `qaqh-client` 已经**足够承载一个完整前端**（TUI 已 100% 走它，见 §3）。
 
 - **G1 已落地**：三频道快照 `state` 已有权威类型，三端不必再手解。
-- **G2 仍未做**：`session.list` 的条目仍是裸 `Value`（TUI 那份手解还在）。
+- **G2 已落地**：`session.list` 的条目已有权威类型 `qaqh_types::SessionListEntry`，
+  产出侧（`qaqh-runtime`）直接返回类型化条目，**手拼键的那一步没有了**。
+- 两个缺口都只剩**一个**动作要继续推：G3 的流程（缺方法按补丁提）。
 
 ## 1. 冻结面（**可以依赖**；破坏它 = 破坏已发布客户端）
 
@@ -96,19 +98,43 @@ winui 与 web 将各写一份，且**没有任何机制阻止三份漂移**—�
 `qaqh-ringing` 已有 `ts` feature（ts-rs），定义好后 **web 端可自动生成 TS 类型**，
 winui 直接吃 Rust 类型——一次投入覆盖三端。
 
-### G2 —— `session.list` 的条目形状无类型
+### ~~G2~~ —— `session.list` 的条目形状无类型 ✅ **已落地**（2026-09-15）
 
-`Client::query(QueryRequest::SessionList)` 返回 `Value`（裸数组）。TUI 为此维护
-`protocol/session_meta.rs`（128 行）手解，且其中 5 个字段（`created_at`/`turn_count`/
-`message_count`/`last_summary`/`tool_mode`）**全仓零读取**——即这份手抄里已有死字段。
+> **结论**：`qaqh_types::SessionListEntry`（`#[serde(flatten)] SessionMeta` +
+> `running` + `workspace_id`）已定义；产出侧 `qaqh-runtime::service::list_sessions`
+> 改为**返回类型化条目**（序列化只发生在 dispatch 边界），`session.meta` 单条走同一
+> 形状；`qaqh-client` 已再导出 `SessionListEntry` / `SessionMeta`。
+> `SessionMeta::display_title()` 把「title → cwd 尾段 → seed，**`last_summary` 不参与**」
+> 的口径钉在类型上，三端共用。
+> **加法式**——wire 键集合未变（手解的删除是唯一消费侧变化）；TUI 已删除其 128 行
+> 手解（TUI `7fb9616`），`protocol/` 204 → **79 行**（只剩 `mod.rs`）。
+> 回归锁 `qaqh-types` 的 `session_list_entry_wire_keys_are_locked`（**手工维护**的
+> wire 键表——增删 `SessionMeta` 字段必须显式过一次）与
+> `session_list_entry_recovers_fields_the_hand_parse_dropped`；
+> **破坏验证**：给 `tool_mode` 加 `#[serde(skip)]` → 恰好那两条红。
+> 真机验证：TUI 新增 `scripts/e2e-session-list.sh`（隔离 data root + 手工 meta.json
+> 覆盖三级回退），断言首页真的渲染出 title / cwd 尾段 / seed 且 `last_summary` 不参与。
+>
+> 下面保留的是缺口记录与**产出方审计结论**（定类型的前置，仍有参考价值）。
 
-**实测条目形状**：`seed`、`title`、`cwd`、`model`、`archived`、`ephemeral`、`running`、
-`mode`（0=Code, 1=Plan）、`updated_at`，以及 `created_at`/`turn_count`/`message_count`/
-`last_summary`/`tool_mode`（TUI 未用，他端可能要用）。
+**产出方审计（唯一的写入方）**：`qaqh-runtime/src/service.rs` 的 `list_sessions()`
+——`to_value(&SessionMeta)` 之后再手拼 `running`（registry 实时查询）与
+`workspace_id`（`WorkspaceStore::workspace_of`）。即条目 = **`SessionMeta` 的每个
+可序列化字段 + 2 个运行期字段**；`session.meta`（单条）是同一形状减去
+`workspace_id`。**没有其它写入方**（`grep -rn '"session.list"'` 只有这一处）。
 
-**建议**：与 G1 同批，加 `SessionMeta` 类型。顺带定死
-**`title` 优先于 `last_summary` 作展示标题**——后者是「最后一条 assistant 回复首行」
-的预览（每轮覆盖），当标题用会让列表标题随对话漂移（TUI 已踩过并写明）。
+**实测条目形状**：`SessionMeta` 的持久化字段（`seed`/`created_at`/`updated_at`/
+`model`/`effort`/`message_count`/`turn_count`/`last_summary`/`compact_skip`/`mode`/
+`tool_mode`/`custom_tools`/`archived`/`ephemeral`/`skills`/`frozen_annotation`/
+`usage_totals`/`last_usage`/`usage_requests`/`cache_reported_requests`/`title`/`cwd`/
+`context_stats`）+ `running` + `workspace_id`；`resume_seed`/`tokens`/`from_resume`
+带 `#[serde(skip)]`，**不落 wire**。
+
+**手抄漏了什么**（实测，非推测）：TUI 那份 128 行只解出 `seed`/`title`/`cwd`/`model`/
+`mode`/`archived`/`ephemeral`/`running`/`updated_at` 九个；`created_at`、`turn_count`、
+`message_count`、`tool_mode`、`custom_tools`、`compact_skip`、`usage_*` 等**一个都没解**
+（`grep -rn '"<键名>"' src/` 逐个为 0）。**注意口径**：不是「解了没人读」，而是
+**从来没解过**——手抄的失败模式是静默的，漏字段不报错，只让某功能永远显示缺省值。
 
 ### G3 —— 服务面是封闭枚举，无逃生口
 
@@ -131,7 +157,7 @@ TUI 在 2026-09-15 完成 T-01 三阶段迁移后：
 
 | 面 | 结果 |
 |---|---|
-| `protocol/`（协议镜像） | **2481 → 405 行**，且剩余内容全是 TUI 自有视图，**无任何 wire 镜像** |
+| `protocol/`（协议镜像） | **2481 → 79 行**（G1 后 204、G2 后只剩 `mod.rs`），**无任何 wire 镜像、无任何手解视图** |
 | `transport/`（自建 HTTP/SSE） | **整个目录删除** |
 | 服务面 | 8 处 `.service(` 全部换成 `Client::query`/`action`，**零命中** |
 | 公开 API 使用面 | `Client` 的 19 个公开方法覆盖了连接、命令、服务、timeline、内容上下行、daemon 生命周期 |
@@ -170,10 +196,8 @@ TUI 在 2026-09-15 完成 T-01 三阶段迁移后：
 
 ## 6. 建议推进顺序
 
-1. **G2**（`session.list` 条目类型化）：G1 已落地，照同一套做法推——先在**产出侧**
-   审计 `session.list` 的构造点（`qaqh-runtime` 侧），再定 `SessionMeta` 类型，
-   同样加法式加访问器。TUI 现存的 `protocol/session_meta.rs`（128 行）届时删除。
-2. G3 的**流程**先立起来（缺方法按补丁提），实现上维持封闭枚举。
+1. ~~**G2**（`session.list` 条目类型化）~~ ✅ **已落地（2026-09-15）**，见 §2。
+2. **G3 的流程**（缺方法按补丁提），实现上维持封闭枚举。
 3. `BUG-2026-09-15-05`（深翻页）：让 `truncated_before` 那部分历史真正可读。做完后
    `truncated_before` 会自然收敛为 `false`，前端提示随之消失——**不要提前为它加特判**。
 
@@ -193,8 +217,25 @@ cargo test -p qaqh-client detached_spawn_lands_in_its_own_process_group
 # 分页元数据契约（T-08）
 cargo test -p qaqh-daemon window_metadata
 
+# G2：session.list 条目的 wire 形状锁（手工维护的键表）+ 消费侧可达性
+cargo test -p qaqh-types session::tests::session_list_entry
+cargo test -p qaqh-types session::tests::display_title
+# 生产边界：条目必须能被权威类型吃下，且类型化往返不改 wire
+cargo test -p qaqh-runtime session_list
+
+# G2 真机：首页真的渲染出 title / cwd 尾段 / seed（隔离 data root）
+cd ~/Projects/qaqh-tui-app && bash scripts/e2e-session-list.sh   # RESULT: PASS
+
 # 若你在写前端：确认没有自造镜像
 rg "serde_json::Value" <你的壳层>   # 每命中一处都要问：这是不是 G1/G2 该补的？
+# G1/G2 之后 TUI 的这类命中 = 23 处，逐类核过，**没有一处是协议解析**：
+#   - 17 处 render_transcript.rs + 2 处 subagent.rs：工具调用的 `arguments` / 回执
+#     —— 那是**任意 JSON**（工具自己定义的形状），Value 是正确类型，不是镜像。
+#   - 1 处 settings_ops.rs：`to_value(&draft)`，草稿本身已是 `ConfigPatch`（typed）。
+#   - 3 处 app/mod.rs:73-77：`session.activity` / `config.load` / `config.save` 三个
+#     回包仍是裸 Value（G1/G2 的同类缺口，下一批候选；`config.load` 已在消费点转
+#     `ConfigDto`，`session.activity` 仍在 `item.get("seed")` 手取）。
+# 即协议解析面已归零——`wc -l src/protocol/*.rs` = 79（仅 mod.rs）。
 ```
 
 ## 附：本文的两处 Dangling 引用已一并处理
