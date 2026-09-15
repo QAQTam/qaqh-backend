@@ -13,55 +13,43 @@
 //! 映射纪律：引擎侧 [`crate`] 与 `qaqh_config::Config` 的互转**不用**
 //! `..Default::default()` 兜底——穷举字面量让"新增字段未同步映射"变成编译错误。
 //!
-//! 兼容策略：**写路径只发 camelCase**；读路径额外接受历史 snake_case 别名
-//! （`alias`）——新前端对旧 daemon、新 daemon 对旧前端均不炸（PLAN §4）。
+//! 兼容策略（2026-09-15 改）：**不做向前兼容**。读路径的 snake_case `alias`、读模型
+//! 的 struct 级 `#[serde(default)]` 均已删除——前后端共进退，不存在「另一个版本的
+//! 对方」。删 `default` 不只是减重：留着它会让「旧形状」**静默**变成「一份全默认的
+//! 配置」（实测：未知键被忽略 + 缺字段走 default ⇒ 解析成功但值全错），比失败更糟。
+//! 详见 `docs/spec/2026-09-15-前端契约与client-API稳定性-spec.md` §0b。
+//!
+//! **注意** [`ConfigPatch`] / [`SubagentPatch`] 的 struct 级 `default` **不在此列**：
+//! 那是 K3 合并补丁的语义（字段缺失 = 不动），不是兼容。
 
 use serde::{Deserialize, Serialize};
-
-/// 桌面通知缺省 = 开启（daemon 契约；字段缺失时的读侧兜底）。
-fn default_notifications_enabled() -> bool {
-    true
-}
 
 /// 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
 /// TUI/web）从这里取值；`serde(default)` 保证旧 daemon 缺字段时向前兼容。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigDto {
     pub model: String,
-    #[serde(alias = "base_url")]
     pub base_url: String,
-    #[serde(alias = "provider_id")]
     pub provider_id: String,
     pub endpoint: String,
-    #[serde(alias = "max_tokens")]
     pub max_tokens: u64,
-    #[serde(alias = "context_limit")]
     pub context_limit: u64,
-    #[serde(alias = "reasoning_effort")]
     pub reasoning_effort: String,
-    #[serde(alias = "auto_compact_threshold")]
     pub auto_compact_threshold: f64,
-    #[serde(alias = "permission_level")]
     pub permission_level: u8,
     /// 密钥永不出 daemon：空串 = 未配置、`"****"` = 已配置（掩码）。
-    #[serde(alias = "api_key")]
     pub api_key: String,
     pub lang: Option<String>,
-    #[serde(alias = "font_family")]
     pub font_family: String,
     /// None/空 = 跟随系统。
     pub theme: Option<String>,
-    #[serde(
-        default = "default_notifications_enabled",
-        alias = "notifications_enabled"
-    )]
+    /// 语义缺省（开）由**产出侧**决定：`qaqh-config/src/dto.rs::to_dto` 里
+    /// `unwrap_or(true)`。读侧不再兜底——见 `dto_rejects_a_partial_payload`。
     pub notifications_enabled: bool,
-    #[serde(alias = "active_profile")]
     pub active_profile: String,
     /// profile 名列表（管理 UI 用；不含敏感字段）。
     pub profiles: Vec<String>,
-    #[serde(alias = "compliance_enabled")]
     pub compliance_enabled: bool,
     pub providers: Vec<ProviderDto>,
     pub subagent: SubagentDto,
@@ -69,13 +57,12 @@ pub struct ConfigDto {
     pub mcp: McpDto,
     /// LSP 客户端配置（M1 只读；写模型另立）。
     pub lsp: LspDto,
-    #[serde(alias = "tokenizer_path")]
     pub tokenizer_path: Option<String>,
 }
 
 /// provider 目录项（endpoint 预设树）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderDto {
     pub id: String,
     pub display: String,
@@ -83,14 +70,12 @@ pub struct ProviderDto {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct EndpointDto {
     pub id: String,
     pub display: String,
     pub protocol: String,
-    #[serde(alias = "base_url")]
     pub base_url: String,
-    #[serde(alias = "default_model")]
     pub default_model: String,
     pub models: Vec<String>,
     pub stateful: bool,
@@ -99,27 +84,21 @@ pub struct EndpointDto {
 
 /// 子代理配置段（读模型）。api_key 语义同顶层：空串/"****" 掩码。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct SubagentDto {
     pub model: String,
-    #[serde(alias = "base_url")]
     pub base_url: String,
-    #[serde(alias = "api_key")]
     pub api_key: String,
-    #[serde(alias = "api_key_set")]
     pub api_key_set: bool,
-    #[serde(alias = "max_tokens")]
     pub max_tokens: u64,
-    #[serde(alias = "timeout_secs")]
     pub timeout_secs: u64,
     /// 空数组 = 全部工具可用（配置语义，非缺省）。
-    #[serde(alias = "default_tools")]
     pub default_tools: Vec<String>,
 }
 
 /// MCP 客户端配置读模型（docs/mcp-client-design.md §6）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct McpDto {
     pub enabled: bool,
     pub idle_shutdown_secs: u64,
@@ -129,7 +108,7 @@ pub struct McpDto {
 
 /// 单个 MCP server 读模型。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct McpServerDto {
     pub name: String,
     /// "stdio" | "http"
@@ -151,7 +130,7 @@ pub struct McpServerDto {
 
 /// LSP 客户端配置读模型（docs/lsp-client-design.md §6）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct LspDto {
     pub enabled: bool,
     pub idle_shutdown_secs: u64,
@@ -161,7 +140,7 @@ pub struct LspDto {
 
 /// 单个 LSP server 读模型。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct LspServerDto {
     pub name: String,
     pub command: String,
@@ -186,41 +165,35 @@ pub struct LspServerDto {
 #[serde(rename_all = "camelCase", default)]
 pub struct ConfigPatch {
     /// 主密钥：仅用户显式输入新值时 Some；掩码 `"****"`/空串 = 保持现值。
-    #[serde(skip_serializing_if = "Option::is_none", alias = "api_key")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "base_url")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "provider_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "max_tokens")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "context_limit")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub context_limit: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "reasoning_effort")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        alias = "auto_compact_threshold"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     /// 值域 `[0,1]`；`0` = 关闭自动压缩。
     pub auto_compact_threshold: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "compliance_enabled")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compliance_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "font_family")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
     /// None = 不动；Some("") = 跟随系统。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        alias = "notifications_enabled"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub notifications_enabled: Option<bool>,
     /// 权限档位（1=MaxLockdown … 4=Unrestricted）。
     ///
@@ -228,9 +201,9 @@ pub struct ConfigPatch {
     /// `config.set_permission_level` 单写口；但写口校验缺失时非法档位仍能从
     /// `config.save` 的裸 `permissionLevel` 载荷漏进配置。现在并入 patch 并在
     /// [`Self::validate`] 中做值域校验（非法即拒绝，不落成 Level 4）。
-    #[serde(skip_serializing_if = "Option::is_none", alias = "permission_level")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_level: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "tokenizer_path")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tokenizer_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentPatch>,
@@ -242,13 +215,13 @@ pub struct ConfigPatch {
 pub struct SubagentPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "base_url")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "api_key")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "max_tokens")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "timeout_secs")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     /// 允许空数组（= 全部工具可用）。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -336,37 +309,47 @@ mod tests {
 
     /// 读路径向前兼容：旧 daemon 缺字段 → serde(default) 兜底不报错。
     #[test]
-    fn dto_tolerates_missing_fields() {
-        let dto: ConfigDto =
-            serde_json::from_value(json!({ "model": "m1" })).expect("tolerant parse");
-        assert_eq!(dto.model, "m1");
-        assert_eq!(dto.auto_compact_threshold, 0.0);
-        assert!(dto.profiles.is_empty());
+    /// 缺字段**必须失败**（原先这条叫 `dto_tolerates_missing_fields`，断言的
+    /// 是相反的行为）。按 spec §0b：读模型不接受残缺载荷——因为 struct 级
+    /// `#[serde(default)]` 会让「旧形状」**静默**变成「一份全默认的配置」，
+    /// 设置页会显示一堆空值而不是报错。失败比错值好。
+    #[test]
+    fn dto_rejects_a_partial_payload() {
+        let err = serde_json::from_value::<ConfigDto>(json!({ "model": "m" }))
+            .expect_err("缺字段必须失败");
+        assert!(err.to_string().contains("missing field"), "{err}");
     }
 
-    /// 活体 fixture：2026-08-25 对运行中 daemon lease 探测的真实响应形状
-    /// （截选关键字段）必须能无损解析进 ConfigDto——C2 切换时零惊吓。
+    /// 完整读模型 fixture：**当前** wire 形状（K2 camelCase）必须无损解析进
+    /// `ConfigDto`。
+    ///
+    /// 历史：本 fixture 原为 2026-08-25 对运行中 daemon 的实拍（snake_case），
+    /// 靠 `alias` 与 struct 级 `#[serde(default)]` 才解析得动。按兼容政策
+    /// （spec §0b）这两样都已删除，故 fixture 改写为当前契约形状。
+    ///
+    /// **顺手补了 `mcp`/`lsp`**：原先它俩根本不在 fixture 里，靠 struct 级 default
+    /// 顶成缺省——也就是说这条测试此前**没有真的在验「完整形状」**。补上后它才
+    /// 名副其实：字段缺一个就红。
     #[test]
-    fn dto_parses_live_daemon_response_shape() {
+    fn dto_parses_the_full_wire_shape() {
         let payload = json!({
-            "api_key": "****",
-            "api_key_set": true,
             "model": "ox-alpha-free",
-            "base_url": "https://opencode.ai/zen/go/v1",
-            "provider_id": "opencode-go",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+            "providerId": "opencode-go",
             "endpoint": "openai",
-            "max_tokens": 96000,
-            "context_limit": 1000000,
-            "reasoning_effort": "max",
-            "auto_compact_threshold": 0.95,
-            "permission_level": 4,
+            "maxTokens": 96000,
+            "contextLimit": 1000000,
+            "reasoningEffort": "max",
+            "autoCompactThreshold": 0.95,
+            "permissionLevel": 4,
+            "apiKey": "****",
             "lang": null,
-            "font_family": "",
+            "fontFamily": "",
             "theme": null,
-            "notifications_enabled": true,
-            "active_profile": "default",
+            "notificationsEnabled": true,
+            "activeProfile": "default",
             "profiles": ["default"],
-            "compliance_enabled": false,
+            "complianceEnabled": false,
             "providers": [{
                 "id": "opencode-go",
                 "display": "OpenCode",
@@ -374,8 +357,8 @@ mod tests {
                     "id": "openai",
                     "display": "OpenAI",
                     "protocol": "openai",
-                    "base_url": "https://opencode.ai/zen/go/v1",
-                    "default_model": "",
+                    "baseUrl": "https://opencode.ai/zen/go/v1",
+                    "defaultModel": "",
                     "models": ["ox-alpha-free"],
                     "stateful": false,
                     "beta": false
@@ -383,21 +366,25 @@ mod tests {
             }],
             "subagent": {
                 "model": "",
-                "base_url": "",
-                "api_key": "",
-                "api_key_set": false,
-                "max_tokens": 4096,
-                "timeout_secs": 120,
-                "default_tools": ["read"]
+                "baseUrl": "",
+                "apiKey": "",
+                "apiKeySet": false,
+                "maxTokens": 4096,
+                "timeoutSecs": 120,
+                "defaultTools": ["read"]
             },
-            "tokenizer_path": null
+            "mcp": { "enabled": false, "idleShutdownSecs": 300, "servers": [] },
+            "lsp": { "enabled": false, "idleShutdownSecs": 600, "servers": [] },
+            "tokenizerPath": null
         });
-        let dto: ConfigDto = serde_json::from_value(payload).expect("live shape parse");
+        let dto: ConfigDto = serde_json::from_value(payload).expect("完整 wire 形状必须可解析");
         assert_eq!(dto.context_limit, 1_000_000);
         assert_eq!(dto.reasoning_effort, "max");
         assert!((dto.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(dto.api_key, "****");
         assert_eq!(dto.subagent.timeout_secs, 120);
+        assert_eq!(dto.subagent.default_tools, vec!["read".to_string()]);
+        assert!(!dto.mcp.enabled && !dto.lsp.enabled);
     }
 
     /// K3：空 Patch 序列化为 `{}`——wire 上不发 null、不发未改动字段。
@@ -432,14 +419,16 @@ mod tests {
         let back: ConfigPatch = serde_json::from_value(v).expect("deserialize");
         assert_eq!(back, patch);
 
-        // 读宽容：历史 snake 键同样能进 Patch（新旧版本共存期双向兼容）。
+        // 历史 snake 键**不再**被接受（`alias` 已按 spec §0b 删除）。未知键被
+        // serde 静默忽略，而 Patch 的每字段都是 Option——所以结果是「什么都没改」，
+        // 不是报错。这正是 Patch 语义（缺失=不动）下的正确结果，不是漏洞。
         let legacy: ConfigPatch = serde_json::from_value(json!({
             "context_limit": 500_000,
             "subagent": { "timeout_secs": 60 }
         }))
-        .expect("legacy snake parse");
-        assert_eq!(legacy.context_limit, Some(500_000));
-        assert_eq!(legacy.subagent.expect("subagent").timeout_secs, Some(60));
+        .expect("未知键不报错");
+        assert_eq!(legacy.context_limit, None, "snake_case 键已不再生效");
+        assert_eq!(legacy.subagent.expect("subagent").timeout_secs, None);
     }
 
     #[test]
