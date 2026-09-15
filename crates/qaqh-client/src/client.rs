@@ -5,7 +5,7 @@
 //! background; the shell receives events through callbacks (which must marshal
 //! to the UI thread themselves) and calls the async methods for commands.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -103,15 +103,21 @@ pub struct Client {
 }
 
 struct ClientInner {
-    base_url: String,
-    token: String,
     http: reqwest::Client,
+    /// 端点与 Bearer token 的唯一权威来源——**不要**在这里另存一份：
+    /// daemon 重启会换掉两者，而 [`RingingSession::refresh_discovery`] 只能
+    /// 更新 session 持有的那份，副本会静默变陈旧。
     session: Arc<RingingSession>,
     handlers: ClientHandlers,
     stop_tx: watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// Active per-session timeline stream (activated on demand).
-    timeline: Mutex<Option<TimelineHandle>>,
+    /// Active per-session timeline streams, keyed by seed (activated on demand).
+    ///
+    /// Keyed rather than single-slot: shells that keep more than one session
+    /// live at once (multiple tabs, subagent sessions) need several concurrent
+    /// timeline streams. A single slot would silently stop another session's
+    /// stream mid-turn.
+    timeline: Mutex<HashMap<String, TimelineHandle>>,
     /// Seeds this client has attached (BUG-2026-09-12-10): replayed after a
     /// lease re-negotiation so seed-scoped reads do not 401 with the new
     /// client_session_id.
@@ -181,6 +187,9 @@ impl Client {
             token.clone(),
             http.clone(),
         ));
+        // 远端直连模式不得从本机 `daemon.json` 刷新凭据（会覆盖成另一台机器
+        // 的记录）；只有本地发现模式才允许 daemon 重启后的自愈。
+        session.set_local_discovery(options.remote.is_none());
 
         // Open negotiation (single lease; SSE streams and commands share it).
         session.open().await?;
@@ -195,14 +204,12 @@ impl Client {
         let tasks = Mutex::new(Vec::new());
         let client = Client {
             inner: Arc::new(ClientInner {
-                base_url: base_url.clone(),
-                token: token.clone(),
                 http: http.clone(),
                 session: session.clone(),
                 handlers: options.handlers.clone(),
                 stop_tx,
                 tasks,
-                timeline: Mutex::new(None),
+                timeline: Mutex::new(HashMap::new()),
                 attached_seeds: Mutex::new(HashSet::new()),
             }),
         };
@@ -255,8 +262,6 @@ impl Client {
         // Three SSE channels.
         for channel in CHANNELS {
             let stream = ChannelStream::new(
-                format!("{base_url}/ringing/v1/events/{}", channel.as_str()),
-                token.clone(),
                 channel,
                 http.clone(),
                 StreamHandlers {
@@ -267,7 +272,7 @@ impl Client {
                     },
                     on_reset: options.handlers.on_reset.clone(),
                 },
-                ctx_rx.clone(),
+                session.clone(),
             );
             let stop = stop_rx.clone();
             let task = tokio::spawn(async move {
@@ -284,9 +289,26 @@ impl Client {
         self.inner.tasks.lock().await.push(task);
     }
 
+    /// 当前端点与 Bearer token。每次请求现取——daemon 重启后 session 会
+    /// 换上新发现记录，任何缓存的副本都会变陈旧。
+    fn credentials(&self) -> crate::session::Credentials {
+        self.inner.session.credentials()
+    }
+
     /// Current negotiated session state.
     pub async fn session_state(&self) -> Option<SessionState> {
         self.inner.session.state().await
+    }
+
+    /// 订阅 `(server_epoch, client_session_id)`。
+    ///
+    /// 壳层据此感知**会话被重新协商**：续租失败后 client 会重新 open 换新
+    /// lease，`server_epoch`（daemon 重启）与 `client_session_id`（同 daemon 内
+    /// 重新协商）都可能变。想要在变化时刷新自己的派生状态（会话作用域的缓存、
+    /// 服务面凭据、UI 的「daemon 已重启」提示）就得订阅它——`Client` 不会替
+    /// 壳层决定这些副作用。
+    pub fn session_ctx_rx(&self) -> watch::Receiver<Option<(String, String)>> {
+        self.inner.session.session_ctx_rx()
     }
 
     /// Submit a canonical Ringing command with the shared lease identity.
@@ -328,8 +350,8 @@ impl Client {
         let response = self
             .inner
             .http
-            .post(format!("{}{path}", self.inner.base_url))
-            .bearer_auth(&self.inner.token)
+            .post(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", session_id)
             .json(&payload)
             .send()
@@ -356,8 +378,8 @@ impl Client {
         let response = self
             .inner
             .http
-            .get(format!("{}{path}", self.inner.base_url))
-            .bearer_auth(&self.inner.token)
+            .get(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", session_id)
             .send()
             .await?;
@@ -378,8 +400,8 @@ impl Client {
         let response = self
             .inner
             .http
-            .post(format!("{}{path}", self.inner.base_url))
-            .bearer_auth(&self.inner.token)
+            .post(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", session_id)
             .json(&params)
             .send()
@@ -400,8 +422,8 @@ impl Client {
         let response = self
             .inner
             .http
-            .get(format!("{}{path}", self.inner.base_url))
-            .bearer_auth(&self.inner.token)
+            .get(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", session_id)
             .send()
             .await?;
@@ -447,8 +469,8 @@ impl Client {
         let response = self
             .inner
             .http
-            .post(format!("{}{path}", self.inner.base_url))
-            .bearer_auth(&self.inner.token)
+            .post(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", session_id)
             .json(&params)
             .send()
@@ -528,8 +550,8 @@ impl Client {
         let mut request = self
             .inner
             .http
-            .get(format!("{}{path}", self.inner.base_url))
-            .bearer_auth(&self.inner.token)
+            .get(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", &state.client_session_id);
         if let Some(before_turn) = before_turn {
             request = request.query(&[("before_turn", before_turn)]);
@@ -551,29 +573,34 @@ impl Client {
 
     /// Activate the native timeline for one session (mirrors Electron
     /// `ringingManager.activateTimeline`): fetch the authoritative snapshot
-    /// (tail page), replace any previous timeline stream with a new one
+    /// (tail page), replace that seed's previous timeline stream with a new one
     /// seeded at the snapshot watermark, and return the snapshot. The seed
     /// must have been attached first (`backend.attach` / `session_resume`),
     /// otherwise the daemon rejects the request with 401.
+    ///
+    /// Streams are **keyed by seed**, so activating one session never disturbs
+    /// another's. Shells that keep several sessions live at once (tabs,
+    /// subagent sessions, nested subagents) can therefore hold as many
+    /// concurrent timelines as they track; a shell that shows one transcript at
+    /// a time simply calls this for the newly focused seed and
+    /// [`Self::deactivate_timeline`] for the one it left.
     pub async fn activate_timeline(&self, seed: &str) -> Result<TimelinePage> {
         let page = self.get_timeline_page(seed, None, None).await?;
         let watermark = page.snapshot.watermark;
 
-        // Replace any previous timeline stream (one transcript at a time).
+        // Replace this seed's previous stream only.
         let mut guard = self.inner.timeline.lock().await;
-        if let Some(prev) = guard.take() {
+        if let Some(prev) = guard.remove(seed) {
             let _ = prev.stop_tx.send(true);
             let _ = prev.status.send_replace(Some(TimelineStatus::Closed {
                 seed: seed.to_string(),
-                reason: "session changed".into(),
+                reason: "re-activated".into(),
             }));
         }
         let (stop_tx, stop_rx) = watch::channel(false);
         let (status_tx, _status_rx) = watch::channel(None);
         let seed_owned = seed.to_string();
         let mut stream = TimelineStream::new(
-            self.inner.base_url.clone(),
-            self.inner.token.clone(),
             seed_owned.clone(),
             self.inner.http.clone(),
             self.inner.session.clone(),
@@ -593,10 +620,13 @@ impl Client {
             }));
         });
         self.push_task(task).await;
-        *guard = Some(TimelineHandle {
-            stop_tx,
-            status: status_tx,
-        });
+        guard.insert(
+            seed.to_string(),
+            TimelineHandle {
+                stop_tx,
+                status: status_tx,
+            },
+        );
         drop(guard);
 
         // Mirror Electron: the activate response is both returned to the
@@ -606,12 +636,28 @@ impl Client {
         Ok(page)
     }
 
-    /// Current timeline connection status (`None` when never activated).
-    pub async fn timeline_status(&self) -> Option<TimelineStatus> {
+    /// Stop the timeline stream for one seed (no-op when not active). The other
+    /// seeds' streams are untouched.
+    pub async fn deactivate_timeline(&self, seed: &str) {
+        let handle = self.inner.timeline.lock().await.remove(seed);
+        if let Some(handle) = handle {
+            let _ = handle.stop_tx.send(true);
+            let _ = handle.status.send_replace(Some(TimelineStatus::Closed {
+                seed: seed.to_string(),
+                reason: "deactivated".into(),
+            }));
+        }
+    }
+
+    /// Timeline connection status for one seed (`None` when never activated).
+    pub async fn timeline_status_for(&self, seed: &str) -> Option<TimelineStatus> {
         let guard = self.inner.timeline.lock().await;
-        guard
-            .as_ref()
-            .and_then(|handle| handle.status.borrow().clone())
+        guard.get(seed).and_then(|h| h.status.borrow().clone())
+    }
+
+    /// Seeds with an active timeline stream, in unspecified order.
+    pub async fn active_timelines(&self) -> Vec<String> {
+        self.inner.timeline.lock().await.keys().cloned().collect()
     }
 
     /// Current client session id for request headers.
@@ -632,9 +678,9 @@ impl Client {
         let response = self
             .inner
             .http
-            .get(format!("{}{path}", self.inner.base_url))
+            .get(format!("{}{path}", self.credentials().base_url))
             .query(&[("seed", seed)])
-            .bearer_auth(&self.inner.token)
+            .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", session_id)
             .send()
             .await?;
@@ -693,8 +739,11 @@ impl Client {
         let response = self
             .inner
             .http
-            .post(format!("{}/ringing/v1/content", self.inner.base_url))
-            .bearer_auth(&self.inner.token)
+            .post(format!(
+                "{}/ringing/v1/content",
+                self.credentials().base_url
+            ))
+            .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", session_id)
             .header(
                 "Content-Type",
@@ -722,8 +771,8 @@ impl Client {
         let response = self
             .inner
             .http
-            .post(format!("{}{path}", self.inner.base_url))
-            .bearer_auth(&self.inner.token)
+            .post(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
             .send()
             .await?;
         match response.status().as_u16() {

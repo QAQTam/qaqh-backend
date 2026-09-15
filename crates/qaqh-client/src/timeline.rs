@@ -2,8 +2,9 @@
 //!
 //! Mirrors the Ringing V1 timeline semantics (the original Electron reference
 //! implementation `apps/desktop/electron/timelineClient.ts` was removed): one
-//! transcript, one SSE stream, one monotonically increasing cursor
-//! (`{epoch}:timeline:{seq}`).
+//! SSE stream per session, one monotonically increasing cursor
+//! (`{epoch}:timeline:{seq}`). Streams are keyed by seed, so a shell may hold
+//! several at once (tabs, subagent sessions).
 //! Gap recovery re-fetches the authoritative snapshot and advances the
 //! cursor to its watermark so `Last-Event-ID` never stalls.
 
@@ -22,21 +23,40 @@ const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const RETRY_BASE_MS: u64 = 1_000;
 const RETRY_MAX_MS: u64 = 30_000;
 
+/// 观测到 daemon 当前 epoch：更新记录，并回答「是否需要回快照重新定基」。
+///
+/// - 从未连过（`None`）：cursor 本来就取自刚拉到的快照 watermark，已对齐，
+///   不需要再定基；
+/// - epoch 未变：cursor 属于同一个 seq 序列，续传即可；
+/// - epoch 变了（daemon 重启 / 租约重协商）：旧 cursor 属于**另一个** seq
+///   序列，必须回权威快照重定基——否则会带着旧位置连进 `Protocol` error
+///   重连死循环。
+///
+/// 抽成纯函数是为了可回归测试：真正的定基路径需要一个活着的 daemon。
+fn observe_epoch(last_epoch: &mut Option<String>, server_epoch: &str) -> bool {
+    if last_epoch.as_deref() == Some(server_epoch) {
+        return false;
+    }
+    let had_previous = last_epoch.is_some();
+    *last_epoch = Some(server_epoch.to_string());
+    had_previous
+}
+
 /// One per-session timeline stream with independent cursor, reconnect backoff
 /// and gap recovery. Created by `Client::activate_timeline` and run as a
 /// background task; callbacks fire on the tokio side.
 pub struct TimelineStream {
-    base_url: String,
-    token: String,
     seed: String,
     http: reqwest::Client,
-    /// Read on every connect: (server_epoch, client_session_id).
+    /// Read on every connect: endpoint + Bearer token + (server_epoch,
+    /// client_session_id). A daemon restart swaps the endpoint and token, so
+    /// neither may be baked in at construction.
     session: Arc<RingingSession>,
     on_entry: Arc<dyn Fn(String, TimelineEntry) + Send + Sync>,
     on_status: Arc<dyn Fn(TimelineStatus) + Send + Sync>,
     /// Forwarded on gap recovery: the fresh snapshot becomes the new baseline.
     on_snapshot: Arc<dyn Fn(TimelinePage) + Send + Sync>,
-    /// Optional sink for `Client::timeline_status()` (also fed on exit).
+    /// Optional sink for `Client::timeline_status_for()` (also fed on exit).
     status_tx: Option<watch::Sender<Option<TimelineStatus>>>,
     /// Cursor of the last accepted entry (starts at the snapshot watermark).
     cursor: u64,
@@ -51,8 +71,6 @@ pub struct TimelineStream {
 impl TimelineStream {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        base_url: String,
-        token: String,
         seed: String,
         http: reqwest::Client,
         session: Arc<RingingSession>,
@@ -63,8 +81,6 @@ impl TimelineStream {
         status_tx: Option<watch::Sender<Option<TimelineStatus>>>,
     ) -> Self {
         Self {
-            base_url,
-            token,
             seed,
             http,
             session,
@@ -79,7 +95,7 @@ impl TimelineStream {
 
     fn set_status(&self, status: TimelineStatus) {
         // `send_replace` updates the value even without receivers: the
-        // `timeline_status()` query reads the sender-side value, and the
+        // `timeline_status_for()` query reads the sender-side value, and the
         // receiver may be dropped as soon as `activate_timeline` returns.
         if let Some(tx) = &self.status_tx {
             let _ = tx.send_replace(Some(status.clone()));
@@ -172,10 +188,9 @@ impl TimelineStream {
         // Lease re-negotiation swapped the epoch: re-baseline against the
         // authoritative snapshot so the reconnect cursor stays covered, then
         // forward the snapshot so listeners rebuild the transcript.
-        if self.last_epoch.as_deref() != Some(state.server_epoch.as_str()) {
-            let epoch_changed = self.last_epoch.is_some();
-            self.last_epoch = Some(state.server_epoch.clone());
-            if epoch_changed {
+        {
+            let needs_rebaseline = observe_epoch(&mut self.last_epoch, &state.server_epoch);
+            if needs_rebaseline {
                 match self.recover_gap().await {
                     Ok(()) => log::info!(
                         "[qaqh-client] timeline {} re-baselined after session re-negotiation (cursor {})",
@@ -197,10 +212,11 @@ impl TimelineStream {
         }
 
         let path = format!("/ringing/v1/sessions/{}/timeline/events", self.seed);
+        let creds = self.session.credentials();
         let mut request = self
             .http
-            .get(format!("{}{path}", self.base_url))
-            .bearer_auth(&self.token)
+            .get(format!("{}{path}", creds.base_url))
+            .bearer_auth(&creds.token)
             .header("X-QAQH-Client-Session-Id", &state.client_session_id)
             .header("Accept", "text/event-stream");
         if self.cursor > 0 {
@@ -333,10 +349,11 @@ impl TimelineStream {
             .await
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
         let path = format!("/ringing/v1/sessions/{}/timeline", self.seed);
+        let creds = self.session.credentials();
         let response = self
             .http
-            .get(format!("{}{path}", self.base_url))
-            .bearer_auth(&self.token)
+            .get(format!("{}{path}", creds.base_url))
+            .bearer_auth(&creds.token)
             .header("X-QAQH-Client-Session-Id", &state.client_session_id)
             .send()
             .await?;
@@ -368,8 +385,6 @@ mod tests {
 
     fn stream() -> TimelineStream {
         TimelineStream::new(
-            "http://127.0.0.1:1".into(),
-            "t".into(),
             "seed-1".into(),
             reqwest::Client::new(),
             Arc::new(RingingSession::new(
@@ -425,6 +440,34 @@ mod tests {
             .expect_err("must error");
         assert!(matches!(err, ClientError::Transport(_)), "{err:?}");
         assert!(!err.to_string().contains("timeline SSE frame"), "{err}");
+    }
+
+    /// **epoch 变化必须触发重新定基**（另一个 seq 序列，旧 cursor 不可用）。
+    #[test]
+    fn epoch_change_requires_rebaseline() {
+        let mut last = Some("ep-1".to_string());
+        assert!(
+            observe_epoch(&mut last, "ep-2"),
+            "epoch 变化必须回快照重定基，否则带旧 cursor 连进 Protocol 死循环"
+        );
+        assert_eq!(last.as_deref(), Some("ep-2"), "记录必须跟进到新 epoch");
+    }
+
+    /// 同 epoch 内重连：cursor 仍属于同一序列，**不得**重定基（否则每次抖动
+    /// 都要重拉整页快照并重摆整条 transcript）。
+    #[test]
+    fn same_epoch_does_not_rebaseline() {
+        let mut last = Some("ep-1".to_string());
+        assert!(!observe_epoch(&mut last, "ep-1"));
+        assert_eq!(last.as_deref(), Some("ep-1"));
+    }
+
+    /// 首次连接不算「变化」：cursor 取自刚拉到的快照 watermark，本就对齐。
+    #[test]
+    fn first_connect_does_not_rebaseline() {
+        let mut last: Option<String> = None;
+        assert!(!observe_epoch(&mut last, "ep-1"), "首连不得多拉一次快照");
+        assert_eq!(last.as_deref(), Some("ep-1"));
     }
 
     /// 对照：非终止帧的畸形载荷仍按 Protocol 处理（不误伤原有语义）。

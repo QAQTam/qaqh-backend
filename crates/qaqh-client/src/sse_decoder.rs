@@ -196,6 +196,12 @@ mod tests {
         let mut d = SseDecoder::new();
         d.push(b"data: \xff\xfe broken\n\n");
         assert!(d.next_frame().is_none());
+
+        // 跳过而非 lossy 解码（保护中文/emoji 不被替换成 U+FFFD），且解码器
+        // 必须**继续**工作：畸形行不得让后续帧一起丢失。
+        d.push(b"data: fine\n\n");
+        let frame = d.next_frame().expect("frame").expect("utf-8");
+        assert_eq!(frame.data, "fine");
     }
 
     #[test]
@@ -250,14 +256,43 @@ mod tests {
         );
         let frame = d.next_frame().expect("frame").expect("utf-8");
         assert_eq!(
-            fields(frame),
+            fields(frame.clone()),
             (
                 "epoch-1:conversation:7".into(),
                 "turn_started".into(),
                 "{\"x\":1}".into()
             )
         );
+        // 测试名承诺的那半句：id 存活**必须**同时意味着游标可推进。若 BOM 只
+        // 吃掉了前缀的一部分（id 变成 `onversation:7` 之类），上面三条字段
+        // 断言未必红，游标解析一定红。
+        assert_eq!(
+            crate::types::cursor_from_sse_id(&frame.id, crate::types::Channel::Conversation),
+            Some(7)
+        );
         assert!(d.next_frame().is_none());
+    }
+
+    /// BOM 只在**流首**剥离一次。流中段出现的 U+FEFF 是数据、不是编码标记：
+    /// 它必须留在行内（于是该行 `id:` 前缀失配、id 被丢弃），而**不能**被
+    /// 当成流首 BOM 吃掉——否则每次重连都会重新判定，一段以 U+FEFF 开头的
+    /// 正文会被静默篡改。
+    #[test]
+    fn bom_is_stripped_only_at_stream_start() {
+        let mut d = SseDecoder::new();
+        // 先来一个正常帧，关闭 `bom_checked` 窗口。
+        d.push(b"data: first\n\n");
+        assert_eq!(d.next_frame().expect("frame").expect("utf-8").data, "first");
+
+        // 流中段的 U+FEFF：id 前缀失配 → id 丢；data 不受影响。
+        d.push("\u{feff}id: epoch-1:tool:9\ndata: mid\n\n".as_bytes());
+        let frame = d.next_frame().expect("frame").expect("utf-8");
+        assert_ne!(
+            frame.id, "epoch-1:tool:9",
+            "流中段 BOM 不得被当作流首 BOM 剥离：{}",
+            frame.id
+        );
+        assert_eq!(frame.data, "mid", "载荷不受影响");
     }
 
     #[test]

@@ -1,11 +1,13 @@
 //! SSE stream reader: frame parsing, cursor tracking, idle timeout, reconnect.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use tokio::sync::watch;
 
 use crate::error::{ClientError, Result};
+use crate::session::RingingSession;
 use crate::sse_decoder::SseDecoder;
 use crate::types::{Channel, ChannelStatus, SseFrame};
 
@@ -22,36 +24,45 @@ pub struct StreamHandlers {
 
 /// One SSE channel with independent cursor, reconnect backoff and idle timeout.
 /// Cursor/epoch come from the shared session so `Last-Event-ID` stays coherent.
+///
+/// Endpoint and Bearer token are read from the session on **every** connect:
+/// a daemon restart changes both (random port, random token), so baking them in
+/// at construction would leave the stream retrying a dead endpoint forever.
 pub struct ChannelStream {
-    url: String,
-    token: String,
     channel: Channel,
     http: reqwest::Client,
     handlers: StreamHandlers,
+    session: Arc<RingingSession>,
     /// (server_epoch, client_session_id) — read on each connect. `None` until
     /// the session is negotiated; updated by lease re-negotiation.
     session_ctx: watch::Receiver<Option<(String, String)>>,
     /// Cursor of the last accepted frame (per channel).
     cursor: u64,
+    /// Epoch of the last successful connect. A daemon restart swaps the epoch,
+    /// and frame ids are `{epoch}:{channel}:{seq}` on a **fresh** sequence — so
+    /// carrying the old cursor across an epoch change makes the stream resume
+    /// at a position the new epoch never had (silent black-out: the daemon
+    /// replays nothing, the client still reports `Open`). Zero it instead,
+    /// mirroring [`crate::timeline::TimelineStream`].
+    last_epoch: Option<String>,
 }
 
 impl ChannelStream {
     pub fn new(
-        url: String,
-        token: String,
         channel: Channel,
         http: reqwest::Client,
         handlers: StreamHandlers,
-        session_ctx: watch::Receiver<Option<(String, String)>>,
+        session: Arc<RingingSession>,
     ) -> Self {
+        let session_ctx = session.session_ctx_rx();
         Self {
-            url,
-            token,
             channel,
             http,
             handlers,
+            session,
             session_ctx,
             cursor: 0,
+            last_epoch: None,
         }
     }
 
@@ -97,10 +108,18 @@ impl ChannelStream {
             return Err(ClientError::Negotiation("session not open".into()));
         };
 
+        // 每次连接都取当前凭据：daemon 重启换了端口/token 时，正在重连的
+        // 流必须用新值，否则永远打不到活着的 daemon。
+        let creds = self.session.credentials();
+        let path = format!("/ringing/v1/events/{}", self.channel.as_str());
+        let url = format!("{}{path}", creds.base_url);
+
+        Self::reconcile_epoch(&mut self.last_epoch, &mut self.cursor, &server_epoch);
+
         let mut request = self
             .http
-            .get(&self.url)
-            .bearer_auth(&self.token)
+            .get(&url)
+            .bearer_auth(&creds.token)
             .header("X-QAQH-Client-Session-Id", &client_session_id)
             .header("Accept", "text/event-stream");
         if self.cursor > 0 {
@@ -114,7 +133,7 @@ impl ChannelStream {
         if !response.status().is_success() {
             return Err(ClientError::Http {
                 status: response.status().as_u16(),
-                path: self.url.clone(),
+                path,
             });
         }
         // BUG-2026-09-12-10：连接成功即复位退避——此前 retry_ms 只增不减，
@@ -166,6 +185,23 @@ impl ChannelStream {
                     }
                 }
             }
+        }
+    }
+
+    /// epoch 变化（daemon 重启，或租约重协商换了 epoch）→ 旧 cursor 语义失效，
+    /// 必须归零后再续传。
+    ///
+    /// 帧 id 是 `{epoch}:{channel}:{seq}`，两个 epoch 的 seq 是**各自独立**的
+    /// 序列。带着旧 cursor 去新 epoch 续传，等于停在一个新 epoch 从未有过的
+    /// 位置：daemon 既不补帧也不报错，客户端状态却仍是 `Open`——伪健康黑障
+    /// （T-04 / D-3 的不变式）。
+    ///
+    /// 抽成纯函数是为了可回归测试：真正的 `connect_once` 需要一个活着的 daemon
+    /// 才能走到这一步。
+    fn reconcile_epoch(last_epoch: &mut Option<String>, cursor: &mut u64, server_epoch: &str) {
+        if last_epoch.as_deref() != Some(server_epoch) {
+            *cursor = 0;
+            *last_epoch = Some(server_epoch.to_string());
         }
     }
 
@@ -230,10 +266,7 @@ mod tests {
     use crate::types::Channel;
 
     fn stream() -> ChannelStream {
-        let (_tx, rx) = watch::channel(Some(("epoch-1".into(), "cs-1".into())));
         ChannelStream::new(
-            "http://127.0.0.1:1/ringing/v1/events/conversation".into(),
-            "t".into(),
             Channel::Conversation,
             reqwest::Client::new(),
             StreamHandlers {
@@ -241,7 +274,11 @@ mod tests {
                 on_status: std::sync::Arc::new(|_| {}),
                 on_reset: None,
             },
-            rx,
+            Arc::new(RingingSession::new(
+                "http://127.0.0.1:1".into(),
+                "t".into(),
+                reqwest::Client::new(),
+            )),
         )
     }
 
@@ -286,6 +323,61 @@ mod tests {
             .expect_err("termination frame must end the stream");
         assert!(matches!(err, ClientError::Transport(_)), "{err:?}");
         assert!(err.to_string().contains("unknown"), "{err}");
+    }
+
+    /// **epoch 变化必须归零 cursor**（T-04 / D-3 不变式在频道流上的落点）。
+    ///
+    /// 此前 `ChannelStream` 根本不比较 epoch：daemon 重启后带着旧 cursor 去新
+    /// epoch 续传，停在一个该 epoch 从未有过的位置，daemon 不补帧也不报错，
+    /// 客户端状态仍报 `Open`——伪健康黑障。`TimelineStream` 早已这么做
+    /// （`timeline.rs` 的 re-baseline），频道流是漏掉的一半。
+    #[test]
+    fn epoch_change_resets_cursor() {
+        let mut last = Some("ep-1".to_string());
+        let mut cursor = 42;
+        ChannelStream::reconcile_epoch(&mut last, &mut cursor, "ep-2");
+        assert_eq!(cursor, 0, "epoch 变化后旧 cursor 语义失效，必须归零");
+        assert_eq!(last.as_deref(), Some("ep-2"));
+    }
+
+    /// 同 epoch 内重连（网络抖动、空闲判死）**必须保留** cursor——否则每次
+    /// 抖动都从 0 重放整条频道，越抖越慢。
+    #[test]
+    fn same_epoch_keeps_cursor() {
+        let mut last = Some("ep-1".to_string());
+        let mut cursor = 42;
+        ChannelStream::reconcile_epoch(&mut last, &mut cursor, "ep-1");
+        assert_eq!(cursor, 42, "同 epoch 内重连不得丢弃续传位置");
+    }
+
+    /// 首次连接：cursor 本就是 0，记为「已见 ep-1」。之后再遇到 ep-1 不重置。
+    #[test]
+    fn first_connect_records_epoch_without_side_effects() {
+        let mut last: Option<String> = None;
+        let mut cursor = 0;
+        ChannelStream::reconcile_epoch(&mut last, &mut cursor, "ep-1");
+        assert_eq!(cursor, 0);
+        assert_eq!(last.as_deref(), Some("ep-1"));
+
+        let mut cursor = 7;
+        ChannelStream::reconcile_epoch(&mut last, &mut cursor, "ep-1");
+        assert_eq!(cursor, 7, "已见过的 epoch 不得反复归零");
+    }
+
+    /// 终止帧不得推进 cursor：服务端缓冲溢出后 cursor 可能已跨过丢弃区间，
+    /// 推进它会让下一次 `Last-Event-ID` 停在一个未覆盖的位置。
+    #[test]
+    fn termination_frame_does_not_advance_cursor() {
+        let mut s = stream();
+        s.cursor = 42;
+        let _ = s.dispatch(
+            frame(
+                "ringing.stream_terminated",
+                r#"{"code":"lagged","channel":"conversation","skipped":7}"#,
+            ),
+            "epoch-1",
+        );
+        assert_eq!(s.cursor, 42, "终止帧不得推进 cursor");
     }
 
     /// 对照：终止帧分支**先于**信封解析——即便 data 不是合法信封也不得
