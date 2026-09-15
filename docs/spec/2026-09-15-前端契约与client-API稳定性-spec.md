@@ -12,9 +12,10 @@
 
 ## 0. 一句话现状
 
-`qaqh-client` 已经**足够承载一个完整前端**（TUI 已 100% 走它，见 §3），但有两处
-**关键 payload 仍是无类型裸 JSON**（§2 G1/G2），任何前端拿到都得手解——这是当前
-最该补的 API 缺口。
+`qaqh-client` 已经**足够承载一个完整前端**（TUI 已 100% 走它，见 §3）。
+
+- **G1 已落地**：三频道快照 `state` 已有权威类型，三端不必再手解。
+- **G2 仍未做**：`session.list` 的条目仍是裸 `Value`（TUI 那份手解还在）。
 
 ## 1. 冻结面（**可以依赖**；破坏它 = 破坏已发布客户端）
 
@@ -31,7 +32,17 @@
 
 ## 2. 已知缺口（**会让前端自造轮子**，附证据与建议）
 
-### G1 —— 频道快照的 `state` 是无类型裸 JSON（**最高优先**）
+### ~~G1~~ —— 频道快照的 `state` 是无类型裸 JSON ✅ **已落地**（2026-09-15）
+
+> **结论**：`qaqh-domain::state`（`ConversationState` / `ControlState` / `ToolState`
+> + 4 个载荷类型）已定义，`RingingSessionBootstrap` 提供
+> `{conversation,control,tool}_state()` 访问器，`qaqh-client` 已再导出。
+> **加法式**——`state: Value` 这个 wire 字段**未动**，故无破坏面；
+> TUI 已删除其 206 行手解（TUI `88ebef4`），`protocol/` 405 → 204 行。
+> 回归锁 `qaqh-runtime` 的 `typed_state_views_recover_every_producer_field`
+> 把「产出方审计」变成可执行断言；`ts` feature 覆盖新类型，web 端可直接生成 TS。
+>
+> 下面保留的是缺口记录与**产出方审计结论**（定类型的前置，仍有参考价值）。
 
 ```rust
 // crates/qaqh-ringing/src/snapshot.rs:26
@@ -159,9 +170,9 @@ TUI 在 2026-09-15 完成 T-01 三阶段迁移后：
 
 ## 6. 建议推进顺序
 
-1. **G1 + G2 一起做**（类型化 `state` 与 `SessionMeta`）。这是三端共享的最大收益，
-   且能顺手给 web 端生成 TS 类型。**在此之前的自造解析都是临时债**——请让各端把
-   手解逻辑集中在一处，便于届时替换。
+1. **G2**（`session.list` 条目类型化）：G1 已落地，照同一套做法推——先在**产出侧**
+   审计 `session.list` 的构造点（`qaqh-runtime` 侧），再定 `SessionMeta` 类型，
+   同样加法式加访问器。TUI 现存的 `protocol/session_meta.rs`（128 行）届时删除。
 2. G3 的**流程**先立起来（缺方法按补丁提），实现上维持封闭枚举。
 3. `BUG-2026-09-15-05`（深翻页）：让 `truncated_before` 那部分历史真正可读。做完后
    `truncated_before` 会自然收敛为 `false`，前端提示随之消失——**不要提前为它加特判**。
