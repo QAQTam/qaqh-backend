@@ -19,17 +19,24 @@ const REBUILD_RECENT_TURNS: usize = 40;
 /// 从持久化 session 消息重建 timeline 快照 + replay journal。
 ///
 /// Phase 2（有界恢复）：本函数是 timeline 文件缺失/损坏时的降级路径，
-/// 只服务于前端 transcript 恢复窗口，因此改走 **尾部有界读取**
-/// （`load_recent_for_projection` + 反向扫描）：GB 级归档的重建从
-/// O(文件) 降到 O(尾部)，不再全量 `read_to_string` + 全量反序列化。
-/// 模型循环的完整历史装载（`load_for_resume`）不受影响。
+/// 只服务于前端 transcript 恢复窗口，因此改走 **尾部有界读取**（反向扫描）：
+/// GB 级归档的重建从 O(文件) 降到 O(尾部)，不再全量 `read_to_string` +
+/// 全量反序列化。模型循环的完整历史装载（`load_for_resume`）不受影响。
+///
+/// **读的是归档，不是 compact 视图**（`load_archive_tail`）：timeline 是**人类
+/// transcript**，而 compact 视图是**模型可见面**——后者刻意 shadow 掉被替换的区间，
+/// 拿它当 transcript 的来源会把用户已经看过的对话抹掉。deepseek-harness 把这条写成
+/// 了设计条款（`surface.ts`：「the model-visible surface … is the wrong source for a
+/// human transcript」），codex 与 grok-build 同款（后者干脆把 `chat_history.jsonl`
+/// 与 append-only 的 `updates.jsonl` 分成两个文件）。改用归档还顺带修掉一个可见缺陷：
+/// `[Compacted N turns]` 摘要此前会被当成一个真实回合显示给用户。
 pub fn rebuild_timeline_snapshot(
     sessions: Option<&SessionManager>,
     seed: &str,
 ) -> Option<(TimelineSnapshot, Vec<qaqh_domain::TimelineEntry>)> {
     let manager = sessions?;
     // 200 条消息 ≈ 多轮对话（含工具往返），足够投影出 ~40 turn 窗口。
-    let messages = manager.load_recent_for_projection(seed, 200)?;
+    let messages = manager.load_archive_tail(seed, 200)?;
     if messages.is_empty() {
         return None;
     }
@@ -38,7 +45,11 @@ pub fn rebuild_timeline_snapshot(
         &messages,
         REBUILD_RECENT_TURNS,
     );
-    timeline_snapshot_from_turns(seed, &turns)
+    // 这个窗口是会话的**最后** N 轮，故全局基址 = 真实回合总数 - 窗口大小。
+    // `meta.turn_count` 是权威的真实回合数（timeline_api 的 total_turns 同源）。
+    let total = manager.load_meta(seed)?.turn_count;
+    let base = total.saturating_sub(turns.len());
+    timeline_snapshot_from_turns(seed, &turns, base)
 }
 
 /// 把已经投影好的 `TurnData` 序列重放进 [`TimelineAppender`]，得到与原生
@@ -47,9 +58,21 @@ pub fn rebuild_timeline_snapshot(
 /// 重放使用 `BlockCheckpoint` 写入整段文本（不做逐 token delta），因此重建
 /// 结果的每个 block 都是最终全文且 sealed；turn 终态统一标记为 `Completed`
 /// （messages.jsonl 不持久化 turn 终态，这是恢复时的可接受降级）。
+/// `base_index` = 这批 `TurnData` 里**第一个回合在会话内的全局序号**（0-based）。
+/// turn_id 由它派生：`t{base_index + i + 1}`。
+///
+/// **为什么 id 必须全局化**：`projection::build_turns` 合成的 id 是「**已加载消息池**
+/// 内的下标」（`projection.rs:554`），而池的大小取决于本次读了多少归档尾部——
+/// 同一个回合在「重建只读 200 条消息」时叫 `t1`、在「深翻页读 2000 条」时叫 `t161`。
+/// 客户端是**按 turn_id 拼页**的（`prepend_older` 用边界回合的 id 去重），
+/// 池内下标会让相邻两页对不上：轻则重复一条，重则错位拼到别的回合上。
+/// 派生自全局序号后，任何读取窗口对同一回合都给出同一个 id。
+///
+/// 传入的 `turn.turn_id` 因此被**忽略**：它携带的信息量为零（永远是池内下标）。
 pub fn timeline_snapshot_from_turns(
     seed: &str,
     turns: &[qaqh_domain::TurnData],
+    base_index: usize,
 ) -> Option<(TimelineSnapshot, Vec<qaqh_domain::TimelineEntry>)> {
     if turns.is_empty() {
         return None;
@@ -57,11 +80,7 @@ pub fn timeline_snapshot_from_turns(
 
     let mut appender = crate::timeline::TimelineAppender::new();
     for (turn_index, turn) in turns.iter().enumerate() {
-        let turn_id = if turn.turn_id.is_empty() {
-            format!("t{}", turn_index + 1)
-        } else {
-            turn.turn_id.clone()
-        };
+        let turn_id = format!("t{}", base_index + turn_index + 1);
         if let Err(error) = appender.apply_intent(
             seed,
             TimelineIntent::TurnOpened {
@@ -384,8 +403,8 @@ mod tests {
 
     #[test]
     fn rebuild_preserves_round_blocks_and_tool_terminal_state() {
-        let (snapshot, journal) =
-            timeline_snapshot_from_turns("seed", &[turn_with_blocks()]).expect("snapshot rebuilt");
+        let (snapshot, journal) = timeline_snapshot_from_turns("seed", &[turn_with_blocks()], 0)
+            .expect("snapshot rebuilt");
         assert_eq!(snapshot.turns.len(), 1);
         assert!(snapshot.watermark > 0);
         // seal 即时裁剪语义：重建的历史 turn 已 seal，回放尾为空；
@@ -459,7 +478,7 @@ mod tests {
         }];
 
         let (snapshot, _) =
-            timeline_snapshot_from_turns("seed", &[turn]).expect("snapshot rebuilt");
+            timeline_snapshot_from_turns("seed", &[turn], 0).expect("snapshot rebuilt");
         let tool = snapshot.turns[0].rounds[0].blocks[0]
             .tool
             .as_ref()
@@ -495,7 +514,7 @@ mod tests {
         }];
 
         let (snapshot, _) =
-            timeline_snapshot_from_turns("seed", &[turn]).expect("snapshot rebuilt");
+            timeline_snapshot_from_turns("seed", &[turn], 0).expect("snapshot rebuilt");
         let tool = snapshot.turns[0].rounds[0].blocks[0]
             .tool
             .as_ref()
@@ -523,7 +542,7 @@ mod tests {
             }],
         };
         let (snapshot, _) =
-            timeline_snapshot_from_turns("seed", &[turn]).expect("snapshot rebuilt");
+            timeline_snapshot_from_turns("seed", &[turn], 0).expect("snapshot rebuilt");
         let blocks = &snapshot.turns[0].rounds[0].blocks;
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, "thinking");
@@ -532,6 +551,6 @@ mod tests {
 
     #[test]
     fn rebuild_returns_none_for_empty_history() {
-        assert!(timeline_snapshot_from_turns("seed", &[]).is_none());
+        assert!(timeline_snapshot_from_turns("seed", &[], 0).is_none());
     }
 }

@@ -153,6 +153,18 @@ pub struct TimelineRound {
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct TimelineTurn {
     pub turn_id: String,
+    /// 会话内的**全局回合序号**（0-based，从最旧回合数起）——分页游标用它。
+    ///
+    /// **为什么不能用 `turn_id` 当游标**：`turn_id` 由 worker 的计数器生成，会复用
+    /// （`TimelineAppender::open_turn` 明确容忍并原地 reopen，注释里记着实测的
+    /// `t14` 重启重号）；归档投影侧的 id 又只是「已加载消息池内的下标」
+    /// （`projection::build_turns`）。两者都不是稳定游标。
+    ///
+    /// `Option` 而非裸 `u64`：**缺省**与「真的排第 0」必须可区分——实时路径追加的
+    /// 回合不带序号（它不参与历史分页），消费侧据此判断能否拿它当游标。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<u32>"))]
+    pub turn_index: Option<u64>,
     /// seq of the TurnOpened entry that created this turn — the authoritative
     /// time order across snapshots. `0` means unknown (legacy persisted data);
     /// consumers fall back to the turn_id numeric suffix in that case.

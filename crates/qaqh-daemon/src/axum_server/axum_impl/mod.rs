@@ -61,8 +61,6 @@ pub(crate) use service_api::handle_service;
 pub(crate) use sse::{handle_events, handle_timeline_events};
 #[cfg(test)]
 pub(crate) use sse::{parse_sse_cursor, parse_timeline_cursor};
-#[cfg(test)]
-pub(crate) use timeline_api::paginate_turns;
 pub(crate) use timeline_api::{handle_bootstrap, handle_timeline_snapshot};
 
 const RENEW_TTL_MS: u64 = 30_000;
@@ -91,7 +89,13 @@ pub struct AppState {
 
 #[derive(Deserialize)]
 pub struct TimelineQuery {
-    pub before_turn: Option<String>,
+    /// **排他**游标：返回全局序号 **小于** 它的那一页。`None` = 最新一页。
+    ///
+    /// 从 `before_turn`（turn_id）改来（BUG-2026-09-15-05）：turn_id 由 worker 的
+    /// 计数器生成、会复用（`TimelineAppender::open_turn` 明确容忍并原地 reopen），
+    /// 归档投影侧的 id 又只是「已加载消息池内的下标」——两者都当不了稳定游标。
+    /// 按 spec §0b 的兼容政策，直接替换而非并存。
+    pub before_index: Option<usize>,
     pub limit: Option<usize>,
 }
 
@@ -209,54 +213,6 @@ pub(crate) mod pure_tests {
             parse_timeline_cursor("epoch-1:timeline:42:extra", "epoch-1"),
             0
         );
-    }
-    pub(crate) fn paged_turns(n: usize) -> Vec<qaqh_domain::TimelineTurn> {
-        (1..=n)
-            .map(|i| qaqh_domain::TimelineTurn {
-                turn_id: format!("t{i}"),
-                created_seq: i as u64,
-                user_text: format!("q{i}"),
-                sealed: true,
-                offloaded: false,
-                state: qaqh_domain::TimelineTurnState::Completed,
-                failure: None,
-                rounds: vec![],
-            })
-            .collect()
-    }
-    #[test]
-    fn timeline_pagination_first_page_is_tail_window() {
-        let (page, has_more) = paginate_turns(paged_turns(40), None, 30);
-        assert_eq!(page.len(), 30);
-        assert_eq!(page.first().unwrap().turn_id, "t11");
-        assert_eq!(page.last().unwrap().turn_id, "t40");
-        assert!(has_more);
-    }
-    #[test]
-    fn timeline_pagination_short_session_has_no_more() {
-        let (page, has_more) = paginate_turns(paged_turns(10), None, 30);
-        assert_eq!(page.len(), 10);
-        assert!(!has_more);
-    }
-    #[test]
-    fn timeline_pagination_before_turn_fetches_earlier_page() {
-        let (page, has_more) = paginate_turns(paged_turns(40), Some("t11"), 10);
-        assert_eq!(page.len(), 10);
-        assert_eq!(page.first().unwrap().turn_id, "t1");
-        assert_eq!(page.last().unwrap().turn_id, "t10");
-        assert!(!has_more);
-    }
-    #[test]
-    fn timeline_pagination_before_turn_mid_page_and_unknown_fallback() {
-        let (page, has_more) = paginate_turns(paged_turns(40), Some("t21"), 10);
-        assert_eq!(page.first().unwrap().turn_id, "t11");
-        assert_eq!(page.last().unwrap().turn_id, "t20");
-        assert!(has_more);
-        let (page, _) = paginate_turns(paged_turns(40), Some("t-unknown"), 10);
-        assert_eq!(page.last().unwrap().turn_id, "t40");
-        let (page, has_more) = paginate_turns(vec![], Some("t1"), 10);
-        assert!(page.is_empty());
-        assert!(!has_more);
     }
     #[test]
     fn session_close_seed_resolution_prefers_command_seed() {

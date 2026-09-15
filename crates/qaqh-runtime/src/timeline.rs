@@ -247,6 +247,10 @@ impl TimelineAppender {
             turn_id.clone(),
             TimelineTurn {
                 turn_id: turn_id.clone(),
+                // 实时路径不产生全局序号：分页游标只服务历史（常驻窗口与归档页），
+                // 而实时追加的回合总是最新的那条，没有「更旧的一页」需要它。
+                // 消费侧据此判断能否拿它当游标（见 `TimelineTurn::turn_index`）。
+                turn_index: None,
                 created_seq,
                 user_text: user_text.clone(),
                 sealed: false,

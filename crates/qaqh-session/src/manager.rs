@@ -325,6 +325,35 @@ impl SessionManager {
         ))
     }
 
+    /// 归档尾部读取：**只看 append-only 的 `messages.jsonl`，无视 compact context**。
+    ///
+    /// 与 [`Self::load_recent_for_projection`] 的唯一差别就是去掉 compact 分支——
+    /// 而这不是细节，是两个**不同读者**的分野（业界三家 harness 同款取舍：
+    /// codex 的 `HistoryReplacement` 只换模型面、grok-build 把 `chat_history.jsonl`
+    /// 与 append-only 的 `updates.jsonl` 分成两个文件、deepseek-harness 的
+    /// `surface.ts` 直接写「the model-visible surface … is the wrong source for a
+    /// human transcript」）：
+    ///
+    /// - **模型**读 compact 视图（摘要 + 保留段）——`load_recent_for_projection`；
+    /// - **人类 transcript**（timeline）读归档——本函数。
+    ///
+    /// 混用会同时坏两件事：压缩摘要 `[Compacted N turns]` 会被 `from_messages`
+    /// 当成一个真实回合显示给用户（`store.rs` 的 `push_user` 分支），而且
+    /// `meta.turn_count`（真实持久化回合数）与投影出的回合数对不上，
+    /// 全局回合序号就无从算起。
+    ///
+    /// 语义边界与 `load_recent_for_projection` 相同：`None` = 磁盘上无该会话
+    /// （区别于「有会话但尾部为空」——那返回空 Vec）。WAL 同样先折（幂等）。
+    pub fn load_archive_tail(&self, seed: &str, recent: usize) -> Option<Vec<Message>> {
+        self.replay_message_wal(seed);
+        self.session_dir(seed)?;
+        let dir = self.session_path_dir(seed);
+        Some(crate::store::bounded_read::read_messages_tail(
+            &dir.join("messages.jsonl"),
+            recent,
+        ))
+    }
+
     /// The single `PersistOp` → store mapping (PR-1-6 / Z5). The runtime's
     /// drain loop and the WAL recovery path both funnel through this method,
     /// so the mapping exists exactly once and replayed ops take byte-identical
