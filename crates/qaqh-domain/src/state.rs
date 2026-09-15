@@ -108,15 +108,17 @@ pub struct PendingInteraction {
 }
 
 /// 挂起交互的类别。
+///
+/// **没有未知取值兜底臂**（`#[serde(other)] Unknown` 已于 2026-09-15 按兼容政策删除，
+/// 见 `docs/spec/2026-09-15-前端契约与client-API稳定性-spec.md` §0b）：daemon 新增
+/// 类别时旧客户端会**解析失败**而不是安静地变成 `Unknown`。这是刻意的——静默降级会
+/// 让 UI 显示一个**错的**状态，而失败至少是响亮的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum InteractionKind {
     Ask,
     Plan,
-    /// 前向兼容：daemon 新增类别时旧客户端仍能解析（不因未知取值丢掉整个字段）。
-    #[serde(other)]
-    Unknown,
 }
 
 /// 最近一次操作失败标记（`OperationFailed` 置位，`OperationCompleted` 清空）。
