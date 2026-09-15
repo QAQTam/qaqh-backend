@@ -11,7 +11,7 @@
 
 | ID | 状态 | 项 |
 |---|---|---|
-| BUG-2026-09-15-05 | `open` | 长会话（回合数 > `REBUILD_RECENT_TURNS`=40）在 timeline 被重建后，**归档里的更早回合没有任何接口能取到**：分页只在已物化的 snapshot 内翻。T-08 之后这一状态**可见**了（`truncated_before`），但仍然**不可达** |
+| BUG-2026-09-15-05 | `fixed @a9531ce`（TUI `084a489`） | 长会话（回合数 > `REBUILD_RECENT_TURNS`=40）在 timeline 被重建后，**归档里的更早回合没有任何接口能取到**：分页只在已物化的 snapshot 内翻。T-08 之后这一状态**可见**了（`truncated_before`），但仍然**不可达** |
 
 ## 事实与证据
 
@@ -32,7 +32,42 @@
 - timeline 文件缺失/损坏/落后（`persisted_timeline_is_behind`）→ 重建；
 - 长会话（> 40 轮）本就常见。
 
-## 建议
+## 处置（闭环，2026-09-15）
+
+三处改动（详见 `a9531ce` 的提交信息）：
+
+1. **transcript 改读归档，不读 compact 视图**（新增 `SessionManager::load_archive_tail`）。
+   timeline 是**人类 transcript**，compact 视图是**模型可见面**——后者刻意 shadow 掉被
+   替换的区间。业界三家同款取舍：codex 的 `HistoryReplacement` 只换模型面、grok-build
+   把 `chat_history.jsonl`（模型，整体重写）与 `updates.jsonl`（UI/replay，append-only）
+   分成两个文件、deepseek-harness 的 `surface.ts` 直接写「the model-visible surface …
+   is the wrong source for a human transcript」。顺带修掉「`[Compacted N turns]` 摘要
+   在 UI 上变成一条用户消息」这个可见缺陷。
+
+2. **游标改全局回合序号**（`TimelineTurn.turn_index` + `before_index`，替换
+   `before_turn`）。上面「坑 1」的建议是「必须显式验证」——**验证结论是根本不能对齐**：
+   worker 的计数器会复用（`TimelineAppender::open_turn` 的 reopen 注释里记着实测的
+   `t14` 重启重号），而归档投影的 id 又只是「已加载消息池内的下标」——池大小取决于这次
+   读了多少归档，同一回合在不同池里就是不同的 `t{n}`。故改为**全局派生**
+   （`t{base + i + 1}`），任何读取窗口对同一回合都给同一个 id。
+
+3. **有界取数**：需要的回合数可精确算出（`total - start`），据此按需加倍读归档尾部，
+   触顶（4000 条消息）时如实报 `truncated_before` 并**停止宣称「还能翻」**——否则客户端
+   会永远请求同一个空页（BUG-2026-09-13-18 那一族）。**不**建偏移索引：与
+   `bounded_read` 模块文档「拒绝持久化字节偏移索引」的既有决策一致。
+
+**与建议的一处偏离**：建议说「实现后 `truncated_before` 应自然收敛为 `false`」——
+**未照做，且不必做**。它的定义（窗口未覆盖到开头）保持不变即可：前端把
+`has_more` 与它渲染成互斥分支（`if has_more … else if truncated_before`），而
+`has_more` 的语义已升级为「还有更旧的**且可达**」，于是那条警告自然不再出现。
+反过来改 `truncated_before` 的定义要动 `window_metadata` 的四条契约测试，收益为零。
+
+**回归锁**：新增 `tests/timeline_deep_paging.rs`（60 轮会话重建后逐页翻到第 1 轮，
+并断言 id 是全局派生而非池内下标 `t1..t40`）；既有 `timeline_stale_restore.rs`
+（窗口化但尾部一致不得触发重建）、`timeline_rebuild.rs`（offload/rehydrate）、
+`window_metadata` 4 条、BUG-2026-09-13-18 的 HTTP e2e 全部保持绿。
+
+## 原始建议（留档）
 
 给分页加一条**读穿归档**的回退：当 `before_turn` 落在物化窗口开头之前，或
 `truncated_before` 为真且请求方向已到窗口首，则直接向 `messages.jsonl` /
