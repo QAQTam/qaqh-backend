@@ -468,6 +468,20 @@ mod tests {
             ..Default::default()
         };
         assert!(disabled.validate().is_ok());
+        // permissionLevel 值域 1..=4（BUG-2026-09-13-15：非法档位曾能从
+        // config.save 的裸载荷漏进配置、落成 Level 4）。
+        let bad_level = ConfigPatch {
+            permission_level: Some(5),
+            ..Default::default()
+        };
+        assert!(bad_level.validate().is_err(), "档位 5 必须被拒");
+        for level in 1..=4u64 {
+            let ok_level = ConfigPatch {
+                permission_level: Some(level),
+                ..Default::default()
+            };
+            assert!(ok_level.validate().is_ok(), "档位 {level} 应合法");
+        }
         let good = ConfigPatch {
             auto_compact_threshold: Some(0.95),
             reasoning_effort: Some("max".into()),
