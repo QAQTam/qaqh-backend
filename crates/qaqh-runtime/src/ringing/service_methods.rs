@@ -150,6 +150,27 @@ mod tests {
         assert!(result.is_array());
     }
 
+    /// **G2 回归闸（产出边界）**：`session.list` 的条目必须能被权威类型吃下，
+    /// 且类型化后再序列化与原 wire **逐键相同**（不多键、不少键）。
+    ///
+    /// 注意覆盖面：本机数据目录为空时这个循环退化为空——条目形状本身由
+    /// `qaqh-types::session::tests::session_list_entry_wire_keys_are_locked`
+    /// 锁住（那份不依赖任何数据）。这里补的是「产出方真的发的是那个形状」。
+    #[test]
+    fn session_list_entries_are_typed_at_the_boundary() {
+        let wire = dispatch(service(), "session.list", &serde_json::json!({})).expect("list");
+        let entries: Vec<qaqh_types::SessionListEntry> =
+            serde_json::from_value(wire.clone()).expect("G2：条目必须能被权威类型解析");
+        assert_eq!(entries.len(), wire.as_array().unwrap().len());
+        for (typed, raw) in entries.iter().zip(wire.as_array().unwrap()) {
+            assert_eq!(
+                &serde_json::to_value(typed).expect("serialize"),
+                raw,
+                "类型化往返改了 wire 形状"
+            );
+        }
+    }
+
     #[test]
     fn read_methods_carry_read_kind() {
         let info = lookup("session.list").expect("listed");
