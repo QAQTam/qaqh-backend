@@ -834,8 +834,8 @@ async fn wait_for_daemon(
         .ok()
         .filter(|d| crate::discovery::discovery_is_live(d));
     if live.is_none() && !crate::discovery::lock_holder_alive() {
-        log::info!("[qaqh-client] spawning daemon: {}", executable.display());
-        spawn_detached(executable.as_ref())?;
+        // 唯一 spawn 出口（内含脱离 shell 进程组的保护，见该函数文档）。
+        crate::discovery::spawn_daemon_process(executable.as_ref())?;
     }
     drop(guard);
 
@@ -867,31 +867,3 @@ fn default_daemon_path() -> std::path::PathBuf {
     crate::discovery::daemon_executable()
 }
 
-/// Spawn a detached process (Windows: `CREATE_NEW_PROCESS_GROUP` +
-/// `CREATE_NO_WINDOW` so the console-subsystem daemon gets no visible window).
-fn spawn_detached(executable: &std::path::Path) -> Result<()> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new(executable)
-            .arg("run")
-            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = std::process::Command::new(executable)
-            .arg("run")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        Ok(())
-    }
-}
