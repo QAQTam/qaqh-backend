@@ -522,20 +522,27 @@ impl Client {
     /// 的页（上滚翻页）；`limit` 覆盖默认页大小。响应含分页元数据
     /// `has_more` / `total_turns`。与 [`Self::activate_timeline`] 不同：
     /// 纯读，**不重建** timeline SSE 流。
+    ///
+    /// `before_index` = **排他**游标（返回全局序号小于它的那一页），`None` = 最新一页。
+    /// 取下一页的游标是**本页最旧那个回合**的 `TimelineTurn::turn_index`。
+    ///
+    /// 原先是 `before_turn`（turn_id）作游标，已按 spec §0b 的兼容政策**替换**
+    /// （BUG-2026-09-15-05）：turn_id 由 worker 计数器生成、会复用，归档投影侧的 id
+    /// 又只是消息池内下标——两者都当不了稳定游标。
     pub async fn fetch_timeline_page(
         &self,
         seed: &str,
-        before_turn: Option<&str>,
+        before_index: Option<u64>,
         limit: Option<u32>,
     ) -> Result<TimelinePage> {
-        self.get_timeline_page(seed, before_turn, limit).await
+        self.get_timeline_page(seed, before_index, limit).await
     }
 
     /// GET `/ringing/v1/sessions/{seed}/timeline` + typed protocol validation.
     async fn get_timeline_page(
         &self,
         seed: &str,
-        before_turn: Option<&str>,
+        before_index: Option<u64>,
         limit: Option<u32>,
     ) -> Result<TimelinePage> {
         if seed.is_empty() {
@@ -554,8 +561,8 @@ impl Client {
             .get(format!("{}{path}", self.credentials().base_url))
             .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", &state.client_session_id);
-        if let Some(before_turn) = before_turn {
-            request = request.query(&[("before_turn", before_turn)]);
+        if let Some(before_index) = before_index {
+            request = request.query(&[("before_index", before_index)]);
         }
         if let Some(limit) = limit {
             request = request.query(&[("limit", limit)]);
