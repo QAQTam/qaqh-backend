@@ -312,3 +312,163 @@ async fn lease_expiry_triggers_renegotiation_and_streams_recover() {
     client.close();
     drop(daemon);
 }
+
+/// `session.list` 当前的 seed 集合。
+async fn session_seeds(client: &Client) -> Vec<String> {
+    let sessions = client
+        .query(QueryRequest::SessionList)
+        .await
+        .expect("session.list");
+    sessions
+        .as_array()
+        .or_else(|| sessions.get("sessions").and_then(|s| s.as_array()))
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.get("seed").and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 创建一个会话并返回其 seed——靠「列表里新出现的那一个」识别，不能取
+/// `last()`（第二次调用时会拿到上一个会话）。
+async fn create_attached_session(client: &Client) -> String {
+    let before = session_seeds(client).await;
+    let ack = client
+        .send_command(
+            None,
+            RingingCommand::Control(ControlCommand::SessionCreate {
+                close_current: false,
+                cwd: None,
+                tool_mode: None,
+                custom_tools: Vec::new(),
+            }),
+            CommandOptions::default(),
+        )
+        .await
+        .expect("session_create");
+    assert_eq!(ack.status, RingingCommandAckStatus::Accepted);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let now = session_seeds(client).await;
+        if let Some(seed) = now.iter().find(|s| !before.contains(s)) {
+            let seed = seed.clone();
+            client.attach(&seed).await.expect("attach");
+            return seed;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "created session never appeared in session.list"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// **多 seed timeline 并行**：激活第二个会话的 timeline 不得停掉第一个。
+///
+/// 旧实现是单槽（`Mutex<Option<TimelineHandle>>`），`activate_timeline` 会
+/// 无条件停掉上一条流。对一次只显示一个 transcript 的壳（WinUI）这是可接受
+/// 的取舍，但对同时跟踪多个会话的壳（TUI 的多标签 + 子代理）是数据丢失：
+/// 父会话的流被停掉后，后续事件不再到达，该会话的子代理**永远发现不了**。
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires compiled daemon binary; run with -- --ignored"]
+async fn activating_one_timeline_does_not_stop_another() {
+    let home = make_isolated_home();
+    let data = home.join(".qaqh");
+    // SAFETY: 测试启动阶段设置，此后本进程不再并发读写该变量。
+    unsafe {
+        std::env::set_var("QAQH_DATA_DIR", &data);
+    }
+
+    let daemon = TestDaemon {
+        child: Some(spawn_isolated_daemon(&home)),
+        home: home.clone(),
+    };
+
+    let statuses: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let handlers = ClientHandlers {
+        on_batch: Arc::new(|_| {}),
+        on_status: Arc::new(|_, _| {}),
+        on_reset: None,
+        on_timeline_entry: Arc::new(|_, _| {}),
+        on_timeline_status: {
+            let statuses = statuses.clone();
+            Arc::new(move |status| {
+                let (seed, kind) = match &status {
+                    qaqh_client::TimelineStatus::Connecting { seed } => (seed, "connecting"),
+                    qaqh_client::TimelineStatus::Open { seed, .. } => (seed, "open"),
+                    qaqh_client::TimelineStatus::Reconnecting { seed, .. } => {
+                        (seed, "reconnecting")
+                    }
+                    qaqh_client::TimelineStatus::Closed { seed, .. } => (seed, "closed"),
+                };
+                statuses
+                    .lock()
+                    .unwrap()
+                    .push((seed.clone(), kind.to_string()));
+            })
+        },
+        on_timeline_snapshot: Arc::new(|_| {}),
+    };
+
+    let client = Client::connect_async(ClientOptions {
+        handlers,
+        launch_daemon_if_missing: false,
+        daemon_path: None,
+        start_timeout: Duration::from_secs(8),
+        remote: None,
+    })
+    .await
+    .expect("client connect to isolated daemon");
+
+    let seed_a = create_attached_session(&client).await;
+    let seed_b = create_attached_session(&client).await;
+    assert_ne!(seed_a, seed_b, "must have two distinct sessions");
+
+    client
+        .activate_timeline(&seed_a)
+        .await
+        .expect("activate timeline A");
+    client
+        .activate_timeline(&seed_b)
+        .await
+        .expect("activate timeline B");
+
+    // 两条流必须同时存在——这正是旧单槽实现失败的地方。
+    let mut active = client.active_timelines().await;
+    active.sort();
+    let mut expected = vec![seed_a.clone(), seed_b.clone()];
+    expected.sort();
+    assert_eq!(
+        active, expected,
+        "activating B must not evict A (single-slot regression)"
+    );
+
+    // A 不得被停掉：既不能出现 Closed 状态，查询到的状态也不得是 Closed。
+    let closed_a = statuses
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(s, k)| s == &seed_a && k == "closed");
+    assert!(
+        !closed_a,
+        "seed A's timeline was closed by activating seed B: {:?}",
+        statuses.lock().unwrap()
+    );
+
+    // 显式停用只影响目标 seed。
+    client.deactivate_timeline(&seed_a).await;
+    assert_eq!(client.active_timelines().await, vec![seed_b.clone()]);
+    assert!(
+        client.timeline_status_for(&seed_a).await.is_none(),
+        "deactivated seed must have no timeline handle"
+    );
+    assert!(
+        client.timeline_status_for(&seed_b).await.is_some(),
+        "deactivating A must leave B's timeline alone"
+    );
+
+    client.close();
+    drop(daemon);
+}

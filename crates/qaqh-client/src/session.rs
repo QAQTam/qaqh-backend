@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, watch};
 
+use crate::discovery::DiscoveryExt;
 use crate::error::{ClientError, Result};
 
 use crate::types::{OpenRequest, OpenResponse};
@@ -18,10 +19,29 @@ pub struct SessionState {
     pub renew_interval_ms: u64,
 }
 
+/// 当前 daemon 端点与 Bearer token。
+///
+/// 二者在 daemon 每次启动时都会变（端口 0 → OS 临时端口，token 随机，
+/// 见 `qaqh-daemon/src/server.rs`），因此**不能**在构造时烘死。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Credentials {
+    pub base_url: String,
+    pub token: String,
+}
+
 /// Ringing V1 session: open + background lease renewal.
 pub struct RingingSession {
-    base_url: String,
-    token: String,
+    /// 可热更新：daemon 重启会换端口与随机 token，靠 [`Self::refresh_discovery`]
+    /// 原地换值。旧的不可变实现只会拿着死端点/旧 token 永久重试，客户端再也
+    /// 回不去（TUI 侧 BUG-2026-09-14-01 的同款根因）。
+    credentials: std::sync::RwLock<Credentials>,
+    /// 是否允许从本地 `daemon.json` 刷新凭据。
+    ///
+    /// **默认关闭**，由 [`crate::Client::connect_async`] 仅在「本地发现模式」
+    /// 下显式打开。默认关闭是安全默认值：任何直接构造 `RingingSession` 并指向
+    /// 明确端点（远端直连、测试里的回环 mock）的调用方，都不会被本机恰好存在
+    /// 的 `daemon.json` 悄悄改道到另一个 daemon。
+    local_discovery: std::sync::atomic::AtomicBool,
     http: reqwest::Client,
     state: Arc<Mutex<Option<SessionState>>>,
     /// Consecutive renewal failures; `>= 2` marks the lease unhealthy.
@@ -51,8 +71,11 @@ impl RingingSession {
     pub fn new(base_url: String, token: String, http: reqwest::Client) -> Self {
         let (session_ctx, _) = watch::channel(None);
         Self {
-            base_url,
-            token,
+            credentials: std::sync::RwLock::new(Credentials {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                token,
+            }),
+            local_discovery: std::sync::atomic::AtomicBool::new(false),
             http,
             state: Arc::new(Mutex::new(None)),
             renew_failures: Arc::new(Mutex::new(0)),
@@ -64,13 +87,58 @@ impl RingingSession {
         uuid::Uuid::new_v4().to_string()
     }
 
+    /// 当前凭据快照。**拷贝出锁**——调用方常在 `await` 前使用，持有
+    /// `RwLockReadGuard` 会让 future 变成 `!Send`。
+    pub(crate) fn credentials(&self) -> Credentials {
+        let guard = self.credentials.read().expect("credentials lock");
+        Credentials {
+            base_url: guard.base_url.clone(),
+            token: guard.token.clone(),
+        }
+    }
+
+    /// 重读 `daemon.json` 并**原地换值**（daemon 重启换端口/token 的唯一自愈
+    /// 路径）。返回是否真的变了。
+    ///
+    /// 只接受 pid 存活的记录：daemon 被强杀后遗留的 `daemon.json` 会把客户端
+    /// 引向死端口（与 [`crate::discovery::read_discovery`] 的调用方同判据）。
+    ///
+    /// 调用方在「连接/续租失败」时调用它，而不是周期性轮询——稳态下不产生
+    /// 任何文件 IO。
+    pub fn refresh_discovery(&self) -> bool {
+        if !self
+            .local_discovery
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        let Some(d) = crate::discovery::read_discovery()
+            .ok()
+            .filter(|d| crate::discovery::process_is_running(d.pid))
+        else {
+            return false;
+        };
+        let Ok(base_url) = d.base_url() else {
+            return false;
+        };
+        let base_url = base_url.trim_end_matches('/').to_string();
+        let mut guard = self.credentials.write().expect("credentials lock");
+        if guard.base_url == base_url && guard.token == d.token {
+            return false;
+        }
+        guard.base_url = base_url;
+        guard.token = d.token;
+        true
+    }
+
     /// `POST /ringing/v1/clients/open` — capability negotiation.
     pub async fn open(&self) -> Result<SessionState> {
         let client_instance_id = self.client_instance_id();
+        let creds = self.credentials();
         let response = self
             .http
-            .post(format!("{}/ringing/v1/clients/open", self.base_url))
-            .bearer_auth(&self.token)
+            .post(format!("{}/ringing/v1/clients/open", creds.base_url))
+            .bearer_auth(&creds.token)
             // 请求级超时（不作用于 SSE 长连接）：daemon 冷启动/重启窗口内
             // discovery 已发布但 HTTP 尚未 accept 时，TCP 连接会成功（backlog
             // 排队）而响应迟迟不来——无超时会让 open 永久挂起，进而卡死桥的
@@ -124,6 +192,13 @@ impl RingingSession {
         self.session_ctx.subscribe()
     }
 
+    /// 是否允许 [`Self::refresh_discovery`] 从本地 `daemon.json` 取凭据。
+    /// 远端直连（`ClientOptions::remote`）必须置 `false`。
+    pub fn set_local_discovery(&self, local: bool) {
+        self.local_discovery
+            .store(local, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Adopt a session opened elsewhere (e.g. by a control client in the same process).
     pub async fn adopt(&self, state: SessionState) {
         *self.state.lock().await = Some(state.clone());
@@ -168,6 +243,15 @@ impl RingingSession {
                         *self.renew_failures.lock().await = 0;
                         continue;
                     }
+                    // 续租失败 = daemon 可能已经不在了。daemon 重启会同时换掉
+                    // 端口与随机 token（`server.rs:119`），拿旧值重试是**永远
+                    // 不会成功**的——先重读 daemon.json 原地换值，后续的重试/
+                    // 重协商才可能命中新 daemon（BUG-2026-09-14-01 同类根因）。
+                    if self.refresh_discovery() {
+                        log::info!(
+                            "[qaqh-client] adopted a new daemon discovery record after renewal failure"
+                        );
+                    }
                     let failures = {
                         let mut f = self.renew_failures.lock().await;
                         *f += 1;
@@ -179,6 +263,12 @@ impl RingingSession {
                     // 达到阈值：跳过注定失败的 renew，直接重新协商 lease。
                     // open 带超时（OPEN_TIMEOUT_SECS），失败时保持 failures
                     // 计数，下个 interval 重试 open。
+                    //
+                    // open 前再刷一次：daemon 重启换端口时 renew 只会得到连接
+                    // 失败（而不是 401），上面的刷新判据同样适用；这里再做一次
+                    // 是为了覆盖「失败计数已攒够、但换端口发生在上一次刷新之后」
+                    // 的窗口。
+                    self.refresh_discovery();
                     match self.open().await {
                         Ok(new_state) => {
                             log::warn!(
@@ -209,10 +299,11 @@ impl RingingSession {
         let Some(state) = self.state.lock().await.clone() else {
             return Err(ClientError::Negotiation("no session to renew".into()));
         };
+        let creds = self.credentials();
         let response = self
             .http
-            .post(format!("{}/ringing/v1/leases/renew", self.base_url))
-            .bearer_auth(&self.token)
+            .post(format!("{}/ringing/v1/leases/renew", creds.base_url))
+            .bearer_auth(&creds.token)
             .header("X-QAQH-Client-Session-Id", &state.client_session_id)
             // 请求级超时：daemon TCP 可达但 HTTP 不 accept（冷启动/重启/挂起
             // 窗口）时 renew 会排队不响应——无超时则本 future 永久挂起，
@@ -261,5 +352,92 @@ impl RingingSession {
     #[doc(hidden)]
     pub async fn renew_failures_for_test(&self) -> u32 {
         *self.renew_failures.lock().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 凭据热更新（daemon 重启自愈）回归。
+    //!
+    //! daemon 每次启动都换端口与随机 token，构造时烘死的凭据永远打不到新
+    //! daemon——`refresh_discovery` 是唯一的自愈路径，它的**安全默认值**与
+    //! 「真的换值」两侧都要锁住。
+
+    use super::*;
+
+    fn session(base_url: &str, token: &str) -> RingingSession {
+        RingingSession::new(base_url.into(), token.into(), reqwest::Client::new())
+    }
+
+    /// 默认**不得**采纳本机 `daemon.json`。
+    ///
+    /// 锁的是一个真实踩过的坑：`refresh_discovery` 最初默认开启，于是「指向
+    /// 回环 mock 的会话」在续租失败后被本机恰好在跑的 daemon 悄悄改道——mock
+    /// 收到的失败被真实 daemon 的成功 open 清零，回归测试随即失灵。
+    #[test]
+    fn refresh_discovery_is_off_by_default() {
+        let s = session("http://127.0.0.1:1", "t");
+        assert!(
+            !s.refresh_discovery(),
+            "默认不得从本机 daemon.json 取凭据（会把明确指向 mock/远端直连的会话改道）"
+        );
+        assert_eq!(s.credentials().base_url, "http://127.0.0.1:1");
+        assert_eq!(s.credentials().token, "t");
+    }
+
+    /// 尾随斜杠归一化：否则会拼出 `http://host:port//ringing/v1/...`。
+    #[test]
+    fn constructor_normalizes_trailing_slash() {
+        assert_eq!(
+            session("http://127.0.0.1:9/", "t").credentials().base_url,
+            "http://127.0.0.1:9"
+        );
+    }
+
+    /// 开启后：重读 `daemon.json` 原地换值；值未变时如实报告「未变化」
+    /// （调用方靠它区分「换到新 daemon」与「本来就在正确的 daemon 上」）。
+    #[test]
+    fn refresh_discovery_adopts_a_changed_record() {
+        let dir = std::env::temp_dir().join(format!("qaqh-refresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create data dir");
+        // pid 必填且必须「存活」——record 的 pid 判活是这条路径的准入条件。
+        let record = serde_json::json!({
+            "endpoint": "http://127.0.0.1:5555",
+            "token": "new-token",
+            "pid": std::process::id(),
+            "server_epoch": "ep-new",
+            "protocol_version": 1,
+        });
+        std::fs::write(
+            dir.join("daemon.json"),
+            serde_json::to_vec(&record).expect("encode"),
+        )
+        .expect("write daemon.json");
+
+        // 环境变量是进程级的：本模块只有这一个测试读 discovery，且先存后还。
+        let previous = std::env::var_os("QAQH_DATA_DIR");
+        // SAFETY: 单测进程内没有其他线程读这个变量（唯一读它的代码路径
+        // `refresh_discovery` 只在下面的断言里被调用），且测试结束即还原。
+        unsafe { std::env::set_var("QAQH_DATA_DIR", &dir) };
+
+        let s = session("http://127.0.0.1:1", "old-token");
+        s.set_local_discovery(true);
+
+        assert!(
+            s.refresh_discovery(),
+            "daemon.json 变了（端口与 token 都不同）必须报告变化"
+        );
+        assert_eq!(s.credentials().base_url, "http://127.0.0.1:5555");
+        assert_eq!(s.credentials().token, "new-token");
+        assert!(
+            !s.refresh_discovery(),
+            "第二次不应再报告变化（否则调用方会反复当成「换到新 daemon」）"
+        );
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var("QAQH_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("QAQH_DATA_DIR") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
