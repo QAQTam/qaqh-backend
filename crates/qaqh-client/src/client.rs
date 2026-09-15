@@ -866,4 +866,3 @@ async fn wait_for_daemon(
 fn default_daemon_path() -> std::path::PathBuf {
     crate::discovery::daemon_executable()
 }
-
