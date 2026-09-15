@@ -19,7 +19,72 @@
   产出侧（`qaqh-runtime`）直接返回类型化条目，**手拼键的那一步没有了**。
 - 两个缺口都只剩**一个**动作要继续推：G3 的流程（缺方法按补丁提）。
 
-## 1. 冻结面（**可以依赖**；破坏它 = 破坏已发布客户端）
+## 0b. 兼容政策（2026-09-15 定案；与本文其余部分冲突时**以本节为准**）
+
+| 项 | 结论 |
+|---|---|
+| 总则 | **本项目不做向前兼容。** 前端与 daemon **共进退**：同一批次构建、同时升级 |
+| 破坏性改动 | **直接删数据根**，不做迁移——Linux `$XDG_CONFIG_HOME/qaqh`（默认 `~/.config/qaqh`）、Windows `~/.qaqh`，或 `QAQH_DATA_DIR` 指定的目录（`qaqh-types/src/platform.rs:56`） |
+| 未知枚举取值 | **不静默降级**。解析失败比变成 `Unknown` 更诚实——后者会让 UI 安静地显示一个**错的**状态 |
+| 新客户端 / 旧 daemon | 不支持，不测 |
+
+这条政策**推翻**了本文早期几处「为旧版本留一手」的写法。判据：既然升级是整批做的，
+任何「另一个版本的对方」都不存在，兼容臂只会把**真正的形状错误**掩盖成默认值。
+
+### 0b.1 由此**不再新增**的兼容臂
+
+`#[serde(other)]` 之类的未知取值兜底；为旧键名保留的 `alias`；snake_case ↔ camelCase
+双形状并存；为「旧 daemon 无此字段」而加的 `#[serde(default)]`。
+
+### 0b.2 现存兼容臂清单（**分级**，不是一句「删掉」）
+
+**A 级 —— wire 上的版本偏斜兼容。按本政策是死重量。**
+
+| 位置 | 自述理由 |
+|---|---|
+| `qaqh-domain/src/state.rs:117` `InteractionKind::Unknown` + `#[serde(other)]` | 「daemon 新增类别时旧客户端仍能解析（不因未知取值丢掉整个字段）」 |
+| `qaqh-client/src/types.rs:107` `TimelinePage.truncated_before` 的 `#[serde(default)]` | 「旧 daemon 无此字段时按未截断处理」 |
+| TUI `src/protocol/mod.rs` 的 `config_contract_exposes_fields_tui_needs` 第 3 条断言 | 「旧 daemon 的 snake_case 形状仍须可解析」 |
+
+全仓 `#[serde(other)]` **只有一处**（上表第一行）：`grep -rn "serde(other)" --include=*.rs crates/` 实测。
+
+**B 级 —— 陈旧磁盘文件兼容。判据不同，看那次破坏性改动有没有真的删数据根。**
+
+| 位置 | 说明 |
+|---|---|
+| `qaqh-client/src/discovery.rs` 的 `ws://` → `http://` 无损转换（带 2 条回归锁） | 读的可能是**上一个版本留下的 `daemon.json`**。若那次改动按政策执行了「删数据根」，这个文件根本不存在，臂即死重量；若没有（比如只换了个二进制而不清库），它仍然救场 |
+
+**C 级 —— 持久化结构上新增字段的 `#[serde(default)]`。保留。见 0b.3。**
+
+> 定级时的一次自我纠正：`qaqh-types/src/tool_result.rs:101`（`diff` 的
+> `#[serde(default)]`，注释自述「缺失时默认 None（向后兼容）」）**最初被我列进 A 级，
+> 核实后改判 C 级**——`ContentBlock::ToolResult { result: ToolResult }` 是会落盘的
+> （`qaqh-types/src/message.rs:33`，随 `Message` 进会话 JSONL），所以缺这个字段的是
+> **磁盘上早先写下的消息**，不是另一个版本的对方。注释里那句「向后兼容」是**用词不准**，
+> 不是判据。
+
+### 0b.3 为什么 C 级不跟着删
+
+C 级至少两处：`SessionMeta` 一族（下述），以及 `ToolResult.diff`（`tool_result.rs:101`）
+——后者会随消息进会话 JSONL（`qaqh-types/src/message.rs:33`）。
+
+`SessionMeta` 上有一批 `#[serde(default)]`，注释写的是「旧 meta.json 缺失该字段 = 零迁移兼容」
+（`archived` / `tool_mode` / `custom_tools` / `skills` / `frozen_annotation` / `cwd` …）。
+
+**它们不是版本偏斜兼容，删之前先看清代价**：`meta.json` 只在会话被再次打开时重写，
+否则一直躺在磁盘上。于是「给 `SessionMeta` 加一个新字段」这个**非破坏性**动作，
+在没有 `default` 时会让**所有历史会话从列表里静默消失**——不是报错，是消失
+（一整个会话文件解析失败即被 `store::read_meta` 丢弃）。
+
+按「任何 schema 变更就删数据根」执行的话它们确实可以删。区别在于：那条规矩必须是你
+**主动**执行的，而不是让一次普通加字段被动触发。故保留，直到明确决定「schema 一变就清库」。
+
+**`skip_serializing_if` 与兼容无关**（只是写紧凑），不要跟着一起删。
+
+## 1. 冻结面（**同一批次内**可以依赖；改它 = 改所有壳层）
+
+> **与 0b 的关系**：本表说的是「这些形状是契约、别自己抄一份」，**不是**「跨版本可依赖」。
+> 表里 B 级那条（`daemon.json` 兼容解析）按 0b.2 另算。
 
 | 面 | 内容 | 位置 |
 |---|---|---|
@@ -197,16 +262,24 @@ TUI 在 2026-09-15 完成 T-01 三阶段迁移后：
 ## 6. 建议推进顺序
 
 1. ~~**G2**（`session.list` 条目类型化）~~ ✅ **已落地（2026-09-15）**，见 §2。
+   ~~顺带收口 `session.activity`~~ ✅ 同批落地（TUI 侧协议手解面至此归零）。
 2. **G3 的流程**（缺方法按补丁提），实现上维持封闭枚举。
-3. `BUG-2026-09-15-05`（深翻页）：让 `truncated_before` 那部分历史真正可读。做完后
+3. **按 §0b 清理 A 级兼容臂**（3 处，逐个确认无其它调用方）。B 级先不动——它读的是
+   磁盘上的遗留文件，判据是「那次改动有没有真的删数据根」，不该顺手删。
+4. `BUG-2026-09-15-05`（深翻页）：让 `truncated_before` 那部分历史真正可读。做完后
    `truncated_before` 会自然收敛为 `false`，前端提示随之消失——**不要提前为它加特判**。
+   （按 §0b，第 3 步若先做，`truncated_before` 的 `#[serde(default)]` 会一并消失；
+   届时深翻页只需管「字段存在但为 false」。）
 
 ## 7. 验证命令
 
 ```bash
 cd ~/Projects/qaqh-backend
 
-# 冻结面锚点（破坏任一即破坏已发布客户端）
+# 兼容臂清单（§0b.2）——全仓 `#[serde(other)]` 应只有这一处
+rg -n "serde\(other\)" --include=*.rs crates/
+
+# 冻结面锚点（同一批次内的契约；非跨版本承诺，见 §0b）
 cargo test -p qaqh-client discovery::tests::base_url_accepts_legacy_ws_and_new_http_forms
 cargo test -p qaqh-client discovery::tests::legacy_discovery_json_roundtrip_preserves_fields
 
