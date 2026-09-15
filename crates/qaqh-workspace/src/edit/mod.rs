@@ -22,7 +22,7 @@
 //! LF 规范视图上匹配与算 hash，写回按 was_crlf 还原。
 
 use crate::file_shared::{content_hash, normalize_newlines};
-use crate::{ToolHandler, ToolManager, ToolPlacement, ToolResult, ToolRisk};
+use crate::{ToolHandler, ToolManager, ToolResult, ToolRisk};
 
 // ─────────────────────────────────────────────────────────────
 // 配置常量

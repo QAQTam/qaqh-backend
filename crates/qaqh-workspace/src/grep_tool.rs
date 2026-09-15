@@ -362,8 +362,7 @@ handler!(handle_grep, exec_grep);
 // ── Registration ──
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(
-        ToolHandler {
+    mgr.register(ToolHandler {
             key: "grep".to_string(),
             description: "Search file contents (ripgrep, regex). Returns path:line:content; use glob to filter files; max_results capped.",
             input_schema: serde_json::json!({
@@ -384,9 +383,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             risk: ToolRisk::ReadOnly,
             category: crate::permission::ToolCategory::Read,
             default_timeout: std::time::Duration::from_secs(60),
-        },
-        crate::ToolPlacement::Workspace,
-    );
+        });
 }
 
 // ── Tests ──

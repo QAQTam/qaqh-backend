@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use qaqh_config::config::{McpServerConfig, McpTransportKind};
 use qaqh_workspace::permission::ToolCategory;
-use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolPlacement, ToolResult, build_dynamic_tool};
+use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolResult, build_dynamic_tool};
 
 /// server 的 `tools/list` 结果 → 可注册的动态工具批次。
 ///
@@ -54,7 +54,6 @@ pub fn project_tools(
             &description,
             schema,
             dispatcher,
-            ToolPlacement::HostOnly,
             category,
             timeout,
         );

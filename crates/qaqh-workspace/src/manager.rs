@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{SafetyVerdict, ToolHandler, ToolPlacement, ToolRisk};
+use crate::{SafetyVerdict, ToolHandler, ToolRisk};
 
 // ── Execution metadata ──
 
@@ -41,7 +41,6 @@ pub struct ToolStats {
 
 pub struct ToolManager {
     pub(crate) handlers: BTreeMap<String, ToolHandler>,
-    placements: BTreeMap<String, ToolPlacement>,
     allowed: Option<Vec<String>>,
     /// PR-M2-2：set_allowed 的原始输入（未过 known 过滤）——动态层重建后
     /// 重应用用（观察项 ①：MCP refresh 换名后 custom 名单仍生效）。
@@ -101,7 +100,6 @@ pub fn build_dynamic_tool(
     description: &str,
     schema: serde_json::Value,
     handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
-    placement: ToolPlacement,
     category: crate::permission::ToolCategory,
     default_timeout: Duration,
 ) -> (String, DynamicTool) {
@@ -119,7 +117,6 @@ pub fn build_dynamic_tool(
         DynamicTool {
             def,
             handler_fn,
-            placement,
             category,
             risk: ToolRisk::Administrative,
             default_timeout,
@@ -139,7 +136,6 @@ pub struct DynamicTool {
     pub def: qaqh_types::ToolDef,
     /// 路由 fn（MCP 全体工具指向同一个 dispatcher，E-5）。
     pub handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
-    pub placement: ToolPlacement,
     /// 能力类别（S3：stdio=Exec / http=Net）——权限决策单一事实源。
     pub category: crate::permission::ToolCategory,
     /// 安全档位：MCP 调用不属本地安全模型（副作用在 server 进程内），
@@ -156,7 +152,6 @@ pub struct DynamicTool {
 pub(crate) struct PreparedCall {
     pub(crate) id: String,
     pub(crate) name: String,
-    pub(crate) placement: ToolPlacement,
     pub(crate) handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
     pub(crate) ctx: crate::ToolCallCtx,
     pub(crate) audit_args: serde_json::Value,
@@ -172,7 +167,6 @@ impl ToolManager {
     pub fn new() -> Self {
         Self {
             handlers: BTreeMap::new(),
-            placements: BTreeMap::new(),
             allowed: None,
             allowed_raw: None,
             dynamic: BTreeMap::new(),
@@ -185,13 +179,8 @@ impl ToolManager {
     }
 
     pub fn register(&mut self, handler: ToolHandler) {
-        self.register_with_placement(handler, ToolPlacement::HostOnly);
-    }
-
-    pub fn register_with_placement(&mut self, handler: ToolHandler, placement: ToolPlacement) {
         let key = handler.key.clone();
-        self.handlers.insert(key.clone(), handler);
-        self.placements.insert(key, placement);
+        self.handlers.insert(key, handler);
     }
 
     /// 注册动态工具（MCP 投影入口；仅回合边界由 actor 调用——无并发写面）。
@@ -333,27 +322,24 @@ impl ToolManager {
             });
         }
 
-        // 内置/动态统一路由视图：PreparedCall 只需要 fn 指针 + 超时 + risk
-        // + placement；ToolHandler 的 'static description 不参与执行路径。
+        // 内置/动态统一路由视图：PreparedCall 只需要 fn 指针 + 超时 + risk；
+        // ToolHandler 的 'static description 不参与执行路径。
         struct ResolvedRoute {
             handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
             default_timeout: Duration,
             risk: ToolRisk,
-            placement: ToolPlacement,
         }
         let route = match self.handlers.get(name) {
             Some(handler) => ResolvedRoute {
                 handler_fn: handler.handler,
                 default_timeout: handler.default_timeout,
                 risk: handler.risk.clone(),
-                placement: self.placements.get(name).copied().unwrap_or_default(),
             },
             None => match self.dynamic.get(name) {
                 Some(tool) => ResolvedRoute {
                     handler_fn: tool.handler_fn,
                     default_timeout: tool.default_timeout,
                     risk: tool.risk.clone(),
-                    placement: tool.placement,
                 },
                 None => {
                     let msg = format!("[ERROR] Unknown tool: {}", name);
@@ -373,7 +359,6 @@ impl ToolManager {
             },
         };
 
-        let placement = route.placement;
         let timeout_secs = timeout_secs.unwrap_or(route.default_timeout.as_secs());
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let skill_effects = Arc::new(Mutex::new(Vec::new()));
@@ -424,7 +409,6 @@ impl ToolManager {
         Ok(PreparedCall {
             id,
             name: name.to_string(),
-            placement,
             handler_fn: route.handler_fn,
             ctx,
             audit_args,
@@ -743,7 +727,6 @@ mod tests {
             "dynamic test tool",
             serde_json::json!({ "type": "object" }),
             marker_fn,
-            ToolPlacement::HostOnly,
             crate::permission::ToolCategory::Exec,
             std::time::Duration::from_secs(30),
         );

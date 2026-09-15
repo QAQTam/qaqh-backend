@@ -74,7 +74,7 @@ fn publish_worker_event(
 /// Shared actor body for main session loops and subagent loops.
 ///
 /// Process-level concerns only: per-actor workspace thread-locals, backend
-/// selection, panic isolation and cleanup. Agent construction and the loop
+/// isolation, panic isolation and cleanup. Agent construction and the loop
 /// itself live behind [`crate::agent::spawn_agent`] (PR-2-3).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_actor(
@@ -85,27 +85,12 @@ pub(crate) fn run_actor(
     cancel: crate::agent::types::CancelToken,
     writer_dead: Arc<std::sync::atomic::AtomicBool>,
     liveness: std::sync::Arc<crate::agent::liveness::WorkerLiveness>,
-    workspace_mode: String,
-    workspace_env: Option<(String, String)>,
 ) {
     let is_subagent = matches!(&kind, ActorKind::Subagent(_));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Per-actor state is thread-local in qaqh-workspace, so actors no
         // longer need a process-wide serialization lock to run concurrently.
         qaqh_workspace::set_actor_context("", &seed);
-
-        if workspace_mode.eq_ignore_ascii_case("wsl") {
-            if let Some((endpoint, token)) = workspace_env.as_ref()
-                && !endpoint.is_empty()
-                && !token.is_empty()
-            {
-                qaqh_workspace::install_workspace_backend(Arc::new(
-                    qaqh_workspace::HttpToolExecutionBackend::new(endpoint.clone(), token.clone()),
-                ));
-            }
-        } else {
-            qaqh_workspace::use_local_workspace_backend();
-        }
 
         if is_subagent {
             qaqh_workspace::authorization::set_subagent_sandbox(true);
@@ -136,8 +121,6 @@ pub(crate) fn run_subagent_actor(
     cancel: crate::agent::types::CancelToken,
     writer_dead: Arc<std::sync::atomic::AtomicBool>,
     liveness: std::sync::Arc<crate::agent::liveness::WorkerLiveness>,
-    workspace_mode: String,
-    workspace_env: Option<(String, String)>,
 ) {
     run_actor(
         seed,
@@ -147,8 +130,6 @@ pub(crate) fn run_subagent_actor(
         cancel,
         writer_dead,
         liveness,
-        workspace_mode,
-        workspace_env,
     );
 }
 
@@ -164,8 +145,6 @@ pub(crate) fn run_session_actor(
     cancel: crate::agent::types::CancelToken,
     writer_dead: Arc<std::sync::atomic::AtomicBool>,
     liveness: std::sync::Arc<crate::agent::liveness::WorkerLiveness>,
-    workspace_mode: String,
-    workspace_env: Option<(String, String)>,
 ) {
     run_actor(
         seed,
@@ -179,8 +158,6 @@ pub(crate) fn run_session_actor(
         cancel,
         writer_dead,
         liveness,
-        workspace_mode,
-        workspace_env,
     );
 }
 

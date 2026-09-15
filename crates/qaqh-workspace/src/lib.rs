@@ -14,7 +14,6 @@ pub mod apply_patch;
 pub mod apply_patch_engine;
 
 pub mod authorization;
-pub mod backend;
 mod code_delta;
 pub mod edit;
 pub mod execution;
@@ -39,23 +38,16 @@ pub mod todo;
 pub mod process_inspect;
 pub mod process_registry;
 pub mod workspace;
-pub mod wsl_path;
 
 pub mod registration;
 
 pub mod manager;
 /// Permission engine: tool categories, levels, trusted folders.
 pub mod permission;
-pub mod serve;
 
 pub mod audit;
 
 pub mod journal;
-
-pub use backend::{
-    BackendRequest, HttpToolExecutionBackend, LocalToolExecutionBackend, ToolExecutionBackend,
-    ToolPlacement, install_workspace_backend, use_local_workspace_backend,
-};
 // 壳探测引导：daemon 启动期调用一次（与 cache_system_path/detect_os_info 同批），
 // 把「探测到的壳」钉进进程状态，保证 exec 的可用性探测与实际派生同源。
 pub use exec::{bootstrap as bootstrap_exec_shell, register_shell as register_exec_shell};
@@ -434,11 +426,9 @@ pub fn resolve_workspace_path(path: &str) -> String {
     if path.is_empty() {
         return path.to_string();
     }
-    // WSL serve 侧：把 worker 下发的 Windows 绝对路径（`F:\...`）归一化为 /mnt。
-    let path = crate::wsl_path::platform_workspace_path(path);
-    let p = Path::new(&path);
+    let p = Path::new(path);
     if p.is_absolute() {
-        return path;
+        return path.to_string();
     }
     let ws = current_workspace();
     if ws.is_empty() || ws == "." {

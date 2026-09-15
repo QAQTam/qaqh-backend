@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use qaqh_config::config::McpServerConfig;
 use qaqh_types::{ToolDef, ToolFunction, ToolResult};
-use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolPlacement, ToolRisk};
+use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolRisk};
 
 use crate::bridge::{DEFAULT_TIMEOUT_SECS, error_result};
 use crate::error::{McpError, McpErrorKind};
@@ -85,7 +85,6 @@ pub fn aggregate_entry(timeout: Duration) -> (String, DynamicTool) {
     let entry = DynamicTool {
         def,
         handler_fn: aggregate_dispatch,
-        placement: ToolPlacement::HostOnly,
         category: qaqh_workspace::ToolCategory::Read,
         // 与 per-server 工具同构（§5.5）：risk 恒 Administrative（无条件
         // Allow 的档位字段），真实风险由 category=Read 驱动的权限层裁决。
