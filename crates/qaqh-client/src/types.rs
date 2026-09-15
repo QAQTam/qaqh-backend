@@ -182,6 +182,29 @@ mod tests {
         batch.validate().expect("canonical batch");
     }
 
+    /// 帧 id 是游标推进的**唯一**依据（`{epoch}:{channel}:{seq}`）——解析放宽
+    /// 一个字符，客户端就会按错误的位置续传。逐条锁住形状。
+    #[test]
+    fn cursor_from_sse_id_accepts_only_the_exact_shape() {
+        let ch = Channel::Conversation;
+        assert_eq!(cursor_from_sse_id("epoch-1:conversation:7", ch), Some(7));
+        assert_eq!(cursor_from_sse_id("epoch-1:conversation:0", ch), Some(0));
+
+        // 频道不匹配：把 tool 的帧当 conversation 的续传位置，会直接跳过一段。
+        assert_eq!(cursor_from_sse_id("epoch-1:tool:7", ch), None);
+        // 段数不对（多一段 = 帧 id 形状变了，不能猜）。
+        assert_eq!(cursor_from_sse_id("epoch-1:conversation:7:9", ch), None);
+        // 少段。
+        assert_eq!(cursor_from_sse_id("epoch-1:conversation", ch), None);
+        assert_eq!(cursor_from_sse_id("epoch-1", ch), None);
+        assert_eq!(cursor_from_sse_id("", ch), None);
+        // 空 epoch：daemon 尚未协商，此时没有可续传的位置。
+        assert_eq!(cursor_from_sse_id(":conversation:7", ch), None);
+        // seq 非数字 / 空。
+        assert_eq!(cursor_from_sse_id("epoch-1:conversation:abc", ch), None);
+        assert_eq!(cursor_from_sse_id("epoch-1:conversation:", ch), None);
+    }
+
     #[test]
     fn timeline_page_validates_version_and_seed() {
         let page = TimelinePage {

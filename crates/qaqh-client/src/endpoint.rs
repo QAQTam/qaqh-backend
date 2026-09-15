@@ -13,10 +13,8 @@ pub enum QueryRequest {
     SessionList,
     SessionActivity,
     ConfigLoad,
-    WorkspaceStatus,
     WorkspaceList,
     SkillsListTools,
-    WorkspaceDiagnose,
     /// 列出 daemon 侧目录内容（远端文件选择器数据源）。
     FsList {
         path: String,
@@ -26,6 +24,15 @@ pub enum QueryRequest {
         path: String,
         max_bytes: Option<u64>,
     },
+    /// 会话仪表盘：任务清单 + 最近改动（daemon `session.dashboard`）。
+    /// 与 [`Self::TodoStatus`] 是同一数据源的两个视图。
+    SessionDashboard {
+        seed: String,
+    },
+    /// 会话待办状态（daemon `todo.status`）。
+    TodoStatus {
+        seed: String,
+    },
 }
 
 impl QueryRequest {
@@ -34,10 +41,8 @@ impl QueryRequest {
             Self::SessionList => ("session.list", json!({})),
             Self::SessionActivity => ("session.activity", json!({})),
             Self::ConfigLoad => ("config.load", json!({})),
-            Self::WorkspaceStatus => ("workspace.status", json!({})),
             Self::WorkspaceList => ("workspace.list", json!({})),
             Self::SkillsListTools => ("skills.list_tools", json!({})),
-            Self::WorkspaceDiagnose => ("workspace.diagnose", json!({})),
             Self::FsList { path } => ("fs.list", json!({ "path": path })),
             Self::FsRead { path, max_bytes } => {
                 let mut params = json!({ "path": path });
@@ -46,6 +51,8 @@ impl QueryRequest {
                 }
                 ("fs.read", params)
             }
+            Self::SessionDashboard { seed } => ("session.dashboard", json!({ "seed": seed })),
+            Self::TodoStatus { seed } => ("todo.status", json!({ "seed": seed })),
         }
     }
 }
@@ -81,10 +88,6 @@ pub enum ActionRequest {
         seed: String,
         path: String,
     },
-    WorkspaceSetMode {
-        mode: String,
-    },
-    WorkspaceInstallWsl,
     /// 注册一个目录为 UI 工作区（组织语义；daemon `workspace.create`）。
     WorkspaceCreate {
         path: String,
@@ -165,8 +168,6 @@ impl ActionRequest {
             Self::WorkspaceSet { seed, path } => {
                 ("workspace.set", json!({ "seed": seed, "path": path }))
             }
-            Self::WorkspaceSetMode { mode } => ("workspace.set_mode", json!({ "mode": mode })),
-            Self::WorkspaceInstallWsl => ("workspace.install_wsl", json!({})),
             Self::WorkspaceCreate { path } => ("workspace.create", json!({ "path": path })),
             Self::WorkspaceRename { id, title } => {
                 ("workspace.rename", json!({ "id": id, "title": title }))
@@ -249,5 +250,47 @@ mod tests {
         let (name, params) = QueryRequest::SessionList.into_parts();
         assert_eq!(name, "session.list");
         assert_eq!(params, json!({}));
+    }
+
+    /// `session.dashboard` / `todo.status` 是 seed 域只读方法（服务端早已实现，
+    /// 此前客户端封闭枚举缺这两个变体 → TUI 只能自建 `service(method, params)`
+    /// 泛型逃生口）。
+    #[test]
+    fn session_scoped_queries_carry_seed() {
+        let (name, params) = QueryRequest::SessionDashboard { seed: "s1".into() }.into_parts();
+        assert_eq!(name, "session.dashboard");
+        assert_eq!(params, json!({ "seed": "s1" }));
+
+        let (name, params) = QueryRequest::TodoStatus { seed: "s2".into() }.into_parts();
+        assert_eq!(name, "todo.status");
+        assert_eq!(params, json!({ "seed": "s2" }));
+    }
+
+    /// 路由不得重复：`into_parts` 的 match 是逐个手写的，复制粘贴极易让两个
+    /// 变体落到同一个方法名上（此时其中一个方法永远发不出去，且不报错）。
+    #[test]
+    fn query_routes_are_pairwise_distinct() {
+        let routes: Vec<&'static str> = vec![
+            QueryRequest::SessionList.into_parts().0,
+            QueryRequest::SessionActivity.into_parts().0,
+            QueryRequest::ConfigLoad.into_parts().0,
+            QueryRequest::WorkspaceList.into_parts().0,
+            QueryRequest::SkillsListTools.into_parts().0,
+            QueryRequest::FsList { path: "/".into() }.into_parts().0,
+            QueryRequest::FsRead {
+                path: "/".into(),
+                max_bytes: None,
+            }
+            .into_parts()
+            .0,
+            QueryRequest::SessionDashboard { seed: "s".into() }
+                .into_parts()
+                .0,
+            QueryRequest::TodoStatus { seed: "s".into() }.into_parts().0,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for route in &routes {
+            assert!(seen.insert(*route), "重复的 query 路由: {route}");
+        }
     }
 }
