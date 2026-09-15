@@ -36,6 +36,18 @@ pub struct ClientHandlers {
     pub on_timeline_status: std::sync::Arc<dyn Fn(TimelineStatus) + Send + Sync>,
     /// Fresh timeline snapshot pushed on gap recovery.
     pub on_timeline_snapshot: std::sync::Arc<dyn Fn(TimelinePage) + Send + Sync>,
+    /// **存活信号：从 socket 收到了字节**（每次读到一个 chunk 调一次）。
+    ///
+    /// 与其它回调的区别是它**不针对内容**——包括被解码器丢掉的 SSE 注释行
+    /// （也就是 daemon 每 15s 一次的 keepalive，见 `qaqh-daemon` 的
+    /// `KeepAlive::new().interval(15s)`）。keepalive 的意义本就是「我还活着」，
+    /// 但这个信号此前**没有任何出口**：壳层只能看见 `on_status`，而后者只在
+    /// **连接建立**时发一次。
+    ///
+    /// 缺了它，「前端与 daemon 失联了吗」这个问题就只能靠「连接建立了多久」来猜，
+    /// 而那与「daemon 还在不在」无关——TUI 曾因此在**每个**活过 15 秒的连接上
+    /// 误报失联（而且因为 keepalive 让空闲重连永不发生，它永不自愈）。
+    pub on_liveness: std::sync::Arc<dyn Fn() + Send + Sync>,
 }
 
 /// 远端 daemon 的直连目标（临时跨端模式）。
@@ -72,6 +84,7 @@ impl Default for ClientHandlers {
             on_timeline_entry: std::sync::Arc::new(|_, _| {}),
             on_timeline_status: std::sync::Arc::new(|_| {}),
             on_timeline_snapshot: std::sync::Arc::new(|_| {}),
+            on_liveness: std::sync::Arc::new(|| {}),
         }
     }
 }
@@ -272,6 +285,7 @@ impl Client {
                         std::sync::Arc::new(move |status| cb(channel, status))
                     },
                     on_reset: options.handlers.on_reset.clone(),
+                    on_liveness: options.handlers.on_liveness.clone(),
                 },
                 session.clone(),
             );
@@ -615,6 +629,7 @@ impl Client {
             self.inner.handlers.on_timeline_entry.clone(),
             self.inner.handlers.on_timeline_status.clone(),
             self.inner.handlers.on_timeline_snapshot.clone(),
+            self.inner.handlers.on_liveness.clone(),
             watermark,
             Some(status_tx.clone()),
         );
