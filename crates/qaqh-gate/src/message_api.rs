@@ -166,6 +166,17 @@ fn convert_messages_to_anthropic(
             }
             "tool" => {
                 // Each harness `tool` message → Anthropic `user` with `tool_result` block(s).
+                //
+                // 去重：工具图（read_image）在存储层是「内联 result.images + 兄弟
+                // ImageRef」双份——qaqh-message/src/store.rs:874 外置落盘后没有剥离
+                // 原字节。二者是同一份字节，投影时必须只发一份，否则同一张图在请求
+                // 里出现两次（线上实测：16 张工具图 → 32 个 image 块）。
+                let ref_count = msg
+                    .content
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::ImageRef { .. }))
+                    .count();
+                let mut skip_inline = ref_count;
                 let mut tr_parts: Vec<serde_json::Value> = Vec::new();
                 for block in &msg.content {
                     match block {
@@ -182,6 +193,11 @@ fn convert_messages_to_anthropic(
                                 "is_error": is_error
                             }));
                             for img in &result.images {
+                                if skip_inline > 0 {
+                                    // 已有等价的外置引用，跳过内联副本
+                                    skip_inline -= 1;
+                                    continue;
+                                }
                                 tr_parts.push(serde_json::json!({
                                     "type": "image",
                                     "source": {"type":"base64","media_type": img.mime_type, "data": img.data}
@@ -189,6 +205,10 @@ fn convert_messages_to_anthropic(
                             }
                         }
                         ContentBlock::Image { mime_type, data } => {
+                            if skip_inline > 0 {
+                                skip_inline -= 1;
+                                continue;
+                            }
                             tr_parts.push(serde_json::json!({
                                 "type": "image",
                                 "source": {"type":"base64","media_type": mime_type, "data": data}
@@ -275,6 +295,26 @@ fn convert_messages_to_anthropic(
         merged.remove(0);
     }
 
+    // tool_result 必须**连续且位于 user 消息内容开头**：严格端点（实测 opencode zen
+    // 的 anthropic 兼容层）会以 400 拒绝 [tool_result, image, tool_result, image]
+    // 这种交错形态。同一 assistant 的多个 tool_result 被上面的同角色合并进
+    // 同一条 user 消息后，会呈现「tr/img 交替」——这里做一次稳定分区纠正为先
+    // 全部 tool_result、再其它块（图片）。实测：[tr,tr,img,img] → 200。
+    for msg in merged.iter_mut() {
+        let Some(blocks) = msg.get_mut("content").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        let is_tr = |b: &serde_json::Value| {
+            b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+        };
+        if !blocks.iter().any(is_tr) {
+            continue;
+        }
+        let (trs, rest): (Vec<_>, Vec<_>) = blocks.drain(..).partition(is_tr);
+        blocks.extend(trs);
+        blocks.extend(rest);
+    }
+
     let system = if system_parts.is_empty() {
         None
     } else {
@@ -342,11 +382,14 @@ fn handle_anthropic_frame(
             if let Some(msg) = ev.get("message")
                 && let Some(usage) = msg.get("usage")
             {
-                let pt = usage
+                // Anthropic 语义：`input_tokens` **不含**缓存读写部分，全量输入 =
+                // input + cache_read + cache_creation。只取 input_tokens 会把上下文
+                // 用量报成"未命中缓存的零头"（实测本会话 481 vs 真实 413k）：前端用量条
+                // ≈0%、token 校准样本被严重低估、自动压缩几乎永不触发。
+                let uncached = usage
                     .get("input_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
-                *prompt_tokens_acc = pt;
                 // Anthropic 2024 prompt caching: ZCode bun 已透传
                 // cache_read_input_tokens / cache_creation_input_tokens
                 // （Anthropic usage 解析惯例），
@@ -359,8 +402,11 @@ fn handle_anthropic_frame(
                     .get("cache_creation_input_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
-                // created 不计入 hit，单算写入；兼容 bun 将两者或计入 cache_read 的旧逻辑
+                let pt = uncached.saturating_add(cached).saturating_add(created);
+                *prompt_tokens_acc = pt;
+                // created 不计入 hit，单算写入（miss 侧）。
                 let hit = cached;
+                let miss = uncached.saturating_add(created);
                 let reported = cached != 0
                     || created != 0
                     || usage.get("cache_read_input_tokens").is_some()
@@ -371,7 +417,7 @@ fn handle_anthropic_frame(
                         completion_tokens: 0,
                         total_tokens: pt,
                         prompt_cache_hit_tokens: hit,
-                        prompt_cache_miss_tokens: pt.saturating_sub(hit),
+                        prompt_cache_miss_tokens: miss,
                         reasoning_tokens: 0,
                         cache_usage_reported: Some(reported),
                     };
@@ -1022,6 +1068,164 @@ pub fn chat_sync_anthropic(
 mod tests {
     use super::*;
     use qaqh_types::ContentBlock;
+
+    /// 双 read_image（一个 assistant 消息两个 tool_call，各带一张真图）在
+    /// Anthropic 路径下的形态：图片跟 tool_result 同属一条 user 消息，且同一
+    /// assistant 的全部 tool_result 会被「同角色合并」成**一条** user 消息
+    /// ⇒ 不存在 chat-completions 那条「合成 user 插在 tool 消息之间」的缺陷。
+    #[test]
+    fn parallel_tool_result_images_merge_into_one_user_turn() {
+        let tool_msg = |id: &str, b64: &str| Message {
+            msg_id: None,
+            role: "tool".into(),
+            name: None,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: id.into(),
+                    result: qaqh_types::ToolResult::ok("image attached"),
+                },
+                ContentBlock::image("image/png", b64),
+            ],
+        };
+        let msgs = vec![
+            Message::user("look at both"),
+            Message {
+                msg_id: None,
+                role: "assistant".into(),
+                name: None,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "read_image".into(),
+                        input: serde_json::json!({"path": "a.png"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "toolu_2".into(),
+                        name: "read_image".into(),
+                        input: serde_json::json!({"path": "b.png"}),
+                    },
+                ],
+            },
+            tool_msg("toolu_1", "Zm9v"),
+            tool_msg("toolu_2", "YmFy"),
+        ];
+        let (_system, api) = convert_messages_to_anthropic(msgs, 0);
+        let roles: Vec<&str> = api
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(roles, vec!["user", "assistant", "user"], "{api:#?}");
+        let blocks = api[2]["content"].as_array().expect("content array");
+        let kinds: Vec<&str> = blocks
+            .iter()
+            .map(|b| b["type"].as_str().unwrap_or(""))
+            .collect();
+        // 实测（opencode zen anthropic 兼容层）：[tool_result, image, tool_result, image]
+        // 这种交错形态 → HTTP 400；必须先全部 tool_result、再图片。
+        assert_eq!(
+            kinds,
+            vec!["tool_result", "tool_result", "image", "image"],
+            "tool_result 必须连续且在 user 消息开头：{api:#?}"
+        );
+        // 图片必须是真 base64 图片块，不是占位文本；且与各自 tool_result 的配对不丢。
+        assert_eq!(blocks[2]["source"]["data"], "Zm9v");
+        assert_eq!(blocks[3]["source"]["data"], "YmFy");
+        assert_eq!(blocks[0]["tool_use_id"], "toolu_1");
+        assert_eq!(blocks[1]["tool_use_id"], "toolu_2");
+    }
+
+    /// 回归 BUG-2026-09-16-03：工具图（read_image）在存储层是「内联 `result.images`
+    /// + 兄弟 `ImageRef`」双份（`qaqh-message/src/store.rs:874` 外置落盘后未剥离原
+    /// 字节）。投影时必须只发一份——线上实测曾把 16 张工具图发成 32 个 image 块。
+    #[test]
+    fn tool_image_inline_and_ref_are_projected_once() {
+        let b64 = "Zm9vYmFy";
+        let sha =
+            qaqh_types::image_store::store_image_b64(b64, "image/png").expect("store image b64");
+        let result = qaqh_types::ToolResult::ok("image attached").with_image("image/png", b64);
+        let msgs = vec![
+            Message::user("look"),
+            Message {
+                msg_id: None,
+                role: "assistant".into(),
+                name: None,
+                content: vec![ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "read_image".into(),
+                    input: serde_json::json!({"path": "a.png"}),
+                }],
+            },
+            Message {
+                msg_id: None,
+                role: "tool".into(),
+                name: None,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "toolu_1".into(),
+                        result,
+                    },
+                    ContentBlock::ImageRef {
+                        sha256: sha,
+                        mime_type: "image/png".into(),
+                        bytes_len: b64.len(),
+                    },
+                ],
+            },
+        ];
+        let (_system, api) = convert_messages_to_anthropic(msgs, 0);
+        let blocks = api[2]["content"].as_array().expect("content array");
+        let images: Vec<&serde_json::Value> =
+            blocks.iter().filter(|b| b["type"] == "image").collect();
+        assert_eq!(images.len(), 1, "同一张图只应投影一次：{api:#?}");
+        assert_eq!(images[0]["source"]["data"], b64);
+        assert_eq!(blocks[0]["type"], "tool_result", "tool_result 必须仍在前：{api:#?}");
+    }
+
+    /// 回归 BUG-2026-09-16-02：Anthropic 的 `input_tokens` **不含**缓存读写部分，
+    /// 全量输入 = input + cache_read + cache_creation。只取 `input_tokens` 会把
+    /// 上下文用量报成零头（实测 481 vs 真实 413k）→ 前端用量条≈0%、校准样本被
+    /// 低估、自动压缩几乎永不触发。
+    #[test]
+    fn anthropic_usage_counts_cached_input_tokens() {
+        let mut usage: Option<UsageInfo> = None;
+        let (mut text, mut reasoning) = (String::new(), String::new());
+        let mut tools = std::collections::HashMap::new();
+        let mut pt_acc = 0u32;
+        let mut stop = None;
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let frame = serde_json::json!({
+            "type": "message_start",
+            "message": {"usage": {
+                "input_tokens": 481,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 50,
+                "cache_read_input_tokens": 413_000
+            }}
+        })
+        .to_string();
+        handle_anthropic_frame(
+            &frame,
+            &mut text,
+            &mut reasoning,
+            &mut tools,
+            &mut usage,
+            &mut pt_acc,
+            &mut stop,
+            &mut |e| events.push(e),
+        )
+        .expect("frame ok");
+        let u = usage.expect("usage parsed");
+        assert_eq!(u.prompt_tokens, 481 + 413_000 + 50, "全量输入须含缓存读/写");
+        assert_eq!(u.prompt_cache_hit_tokens, 413_000);
+        assert_eq!(
+            u.prompt_cache_miss_tokens,
+            481 + 50,
+            "miss = 未命中读取 + 缓存写入"
+        );
+        assert_eq!(u.total_tokens, u.prompt_tokens);
+        assert_eq!(pt_acc, u.prompt_tokens, "message_delta 用的是同一累计值");
+        assert!(matches!(events.first(), Some(StreamEvent::UsageUpdate(_))));
+    }
 
     #[test]
     fn system_is_top_level_not_message() {
