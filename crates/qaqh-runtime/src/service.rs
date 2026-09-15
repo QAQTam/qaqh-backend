@@ -7,24 +7,10 @@ use serde_json::{Value, json};
 
 use crate::{AgentRegistry, RingingHub};
 
-/// workspace serve 当前运行状态（daemon 内存态，供前端展示诊断依据）。
-#[derive(Debug, Clone, Default)]
-pub struct WorkspaceRuntimeState {
-    /// 配置的模式（config.toml [workspace] mode）。
-    pub configured_mode: String,
-    /// 实际运行模式（WSL 降级后为 local）。
-    pub active_mode: String,
-    /// serve endpoint（空 = 未启用）。
-    pub endpoint: String,
-    /// 每次 workspace 守护重启后单调递增；不含任何凭据。
-    pub generation: u64,
-}
-
 #[derive(Clone)]
 pub struct QaqhService {
     pub(crate) registry: Arc<Mutex<AgentRegistry>>,
     pub(crate) hub: std::sync::OnceLock<Arc<RingingHub>>,
-    workspace_state: Arc<Mutex<WorkspaceRuntimeState>>,
     /// 会话存储句柄（PR-3-1 注入化：daemon main 装配点 init 后注入，
     /// service 内不再触达会话单例的全局访问器）。
     pub(crate) sessions: Arc<qaqh_session::SessionManager>,
@@ -85,7 +71,6 @@ impl QaqhService {
         Self {
             registry: Arc::new(Mutex::new(AgentRegistry::new(sessions.clone()))),
             hub: std::sync::OnceLock::new(),
-            workspace_state: Arc::new(Mutex::new(WorkspaceRuntimeState::default())),
             sessions,
         }
     }
@@ -224,48 +209,6 @@ impl QaqhService {
         let seed = || pstr(params, "seed");
         match method {
             "daemon.version" => Ok(json!(env!("CARGO_PKG_VERSION"))),
-            "workspace.set_mode" => {
-                let mode = pstr(params, "mode")?;
-                let supported = if cfg!(target_os = "windows") {
-                    matches!(mode.as_str(), "local" | "wsl")
-                } else {
-                    // Linux 原生系统：工具本来就在 Linux 环境，无 WSL 选项。
-                    mode == "local"
-                };
-                if !supported {
-                    return Err(format!(
-                        "invalid workspace mode '{mode}' (supported: {})",
-                        if cfg!(target_os = "windows") {
-                            "local | wsl"
-                        } else {
-                            "local"
-                        }
-                    ));
-                }
-                qaqh_config::Config::update(|config| {
-                    config.workspace.mode = mode.clone();
-                    Ok(())
-                })
-                .map_err(|e| format!("save config: {e}"))?;
-                log::info!("[workspace] mode switched to {mode} (restart required)");
-                Ok(json!({
-                    "mode": mode,
-                    "restart_required": true,
-                }))
-            }
-            "workspace.status" => {
-                let state = self
-                    .workspace_state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                Ok(json!({
-                    "configured_mode": state.configured_mode,
-                    "active_mode": state.active_mode,
-                    "endpoint": state.endpoint,
-                    "generation": state.generation,
-                }))
-            }
             // ── UI 工作区注册表（组织语义，与运行环境 workspace 解耦）──
             "workspace.list" => {
                 let ws = qaqh_session::WorkspaceStore::global();
@@ -327,14 +270,6 @@ impl QaqhService {
                 let seed = pstr(params, "seed")?;
                 qaqh_session::WorkspaceStore::global().remove_session(&seed);
                 Ok(Value::Null)
-            }
-            "workspace.diagnose" => Ok(crate::workspace_supervisor::diagnose_wsl().map_err(err)?),
-            "workspace.install_wsl" => {
-                let repo_root = params
-                    .get("repo_root")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                Ok(crate::workspace_supervisor::install_wsl(repo_root.as_deref()).map_err(err)?)
             }
             "session.list" => Ok(serde_json::to_value(self.list_sessions()).map_err(err)?),
             "session.meta" => {
@@ -693,22 +628,6 @@ impl QaqhService {
             .map_err(|e| format!("registry lock: {e}"))
     }
 
-    /// 注入 workspace serve 连接信息与运行模式（worker spawn 时写入 env）。
-    /// `mode` ∈ {"local", "wsl"}：local 工具执行保持进程内，wsl 才启用远程 HTTP。
-    pub fn attach_workspace(&self, endpoint: String, token: String, mode: &str) {
-        if let Ok(mut registry) = self.registry() {
-            registry.attach_workspace(endpoint, token, mode);
-        }
-    }
-
-    /// 记录 workspace serve 实际运行状态（server.rs 启动 supervisor 后调用）。
-    pub fn attach_workspace_state(&self, state: WorkspaceRuntimeState) {
-        *self
-            .workspace_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = state;
-    }
-
     /// 构造 Ringing worker 命令信封并转发给 agent（legacy Ui2Agent 帧已拆除）。
     fn send_ringing_cmd(&self, seed: String, command: RingingCommand) -> Result<Value, String> {
         let env = RingingWorkerCommandEnvelope::new(seed.clone(), command_id(), command);
@@ -974,7 +893,7 @@ mod tool_mode_tests {
 
 #[cfg(test)]
 mod plan_service_tests {
-    use super::plan::{plan_action, token_stats};
+    use super::plan::token_stats;
 
     /// `days` 直取 IPC 参数且决定条目数与循环数：未封顶时
     /// `stats.token_usage {days: 200000}` 产出 20 万条目（daemon 线程内存 +

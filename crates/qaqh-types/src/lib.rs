@@ -31,8 +31,7 @@ pub mod token;
 pub use api_types::UsageInfo;
 pub use config::{
     ConfigStore, PersistentConfig, PersistentLspConfig, PersistentLspServerConfig,
-    PersistentMcpConfig, PersistentMcpServerConfig, PersistentSubagentConfig,
-    PersistentWorkspaceConfig, ProfileConfig,
+    PersistentMcpConfig, PersistentMcpServerConfig, PersistentSubagentConfig, ProfileConfig,
 };
 pub use discovery::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 pub use image_store::sha256_hex;

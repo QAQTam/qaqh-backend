@@ -122,13 +122,11 @@ fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(ToolHandler { key: "web_fetch".to_string(),
+    mgr.register(ToolHandler { key: "web_fetch".to_string(),
         description: "Fetch URL (http). Plain HTTP; web_search is server-side built-in.",
         input_schema: serde_json::json!({"type":"object","properties":{"url":{"type":"string","description":"URL"},"output":{"type":"string","description":"Save to file (optional)"}},"required":["url"],"additionalProperties":false}),
         handler: handle_web_fetch, risk: ToolRisk::ReadOnly,
         category: crate::permission::ToolCategory::Net,
         default_timeout: std::time::Duration::from_secs(30),
-    },
-    crate::ToolPlacement::Workspace,
-);
+    });
 }

@@ -18,7 +18,7 @@ default:
 
 # 编译 daemon（后端核心，release）
 build-daemon:
-    cargo build --release -p qaqh-daemon -p qaqh-workspace
+    cargo build --release -p qaqh-daemon
 
 # ── 开发 ────────────────────────────────────────────
 
@@ -89,7 +89,6 @@ clippy:
 status:
     @Write-Output "=== Rust binaries ==="
     @if (Test-Path 'target/release/qaqh-daemon.exe') { '  ✓ qaqh-daemon.exe' } else { '  ✗ qaqh-daemon.exe' }
-    @if (Test-Path 'target/release/qaqh-workspace.exe') { '  ✓ qaqh-workspace.exe' } else { '  ✗ qaqh-workspace.exe' }
 
 # 清理
 clean:

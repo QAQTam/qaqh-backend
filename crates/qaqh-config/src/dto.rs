@@ -16,7 +16,7 @@
 use crate::config::Config;
 use qaqh_config_api::{
     ConfigDto, ConfigPatch, EndpointDto, LspDto, LspServerDto, McpDto, McpServerDto, ProviderDto,
-    SubagentDto, WorkspaceDto,
+    SubagentDto,
 };
 
 /// 引擎配置 → 读模型。api_key 按契约掩码：非空一律 `"****"`（明文永不出 daemon）。
@@ -69,9 +69,6 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
             max_tokens: u64::from(cfg.subagent.max_tokens),
             timeout_secs: cfg.subagent.timeout_secs,
             default_tools: cfg.subagent.default_tools.clone(),
-        },
-        workspace: WorkspaceDto {
-            mode: cfg.workspace.mode.clone(),
         },
         mcp: McpDto {
             enabled: cfg.mcp.enabled,

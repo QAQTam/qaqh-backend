@@ -209,17 +209,14 @@ pub fn register(mgr: &mut crate::ToolManager) {
         ),
     ];
     for (key, description, input_schema, handler, risk, category) in tools {
-        mgr.register_with_placement(
-            ToolHandler {
-                key: key.to_string(),
-                description,
-                input_schema,
-                handler,
-                risk,
-                category,
-                default_timeout: Duration::from_secs(15),
-            },
-            crate::ToolPlacement::Workspace,
-        );
+        mgr.register(ToolHandler {
+            key: key.to_string(),
+            description,
+            input_schema,
+            handler,
+            risk,
+            category,
+            default_timeout: Duration::from_secs(15),
+        });
     }
 }

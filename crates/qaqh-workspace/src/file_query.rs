@@ -281,7 +281,7 @@ handler!(handle_read, exec_read);
 // ------ Registration ------
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(ToolHandler {
+    mgr.register(ToolHandler {
         key: "read".to_string(),
         description: "Read files (L-prefixed lines, hash+line_count). Up to 8 files; dirs -> IS_DIRECTORY.",
         input_schema: serde_json::json!({
@@ -309,9 +309,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::ReadOnly,
         category: crate::permission::ToolCategory::Read,
         default_timeout: std::time::Duration::from_secs(15),
-    },
-    crate::ToolPlacement::Workspace,
-);
+    });
 }
 
 #[cfg(test)]

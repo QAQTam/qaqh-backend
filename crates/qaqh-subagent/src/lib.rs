@@ -74,145 +74,6 @@ pub fn register(mgr: &mut ToolManager) {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn spawn_subagent_schema_never_accepts_api_keys() {
-        let mut manager = ToolManager::new();
-        register(&mut manager);
-
-        let handler = manager
-            .lookup("spawn_subagent")
-            .expect("spawn_subagent should be registered");
-        let properties = handler.input_schema["properties"]
-            .as_object()
-            .expect("tool properties should be an object");
-
-        assert!(!properties.contains_key("api_key"));
-        assert!(!handler.input_schema.to_string().contains("--api-key"));
-    }
-
-    #[test]
-    fn spawn_subagent_schema_exposes_only_the_llm_facing_params() {
-        let mut manager = ToolManager::new();
-        register(&mut manager);
-        let handler = manager
-            .lookup("spawn_subagent")
-            .expect("spawn_subagent should be registered");
-        let properties = handler.input_schema["properties"]
-            .as_object()
-            .expect("tool properties should be an object");
-
-        // 模型面只有 4 个参数；system_prompt / tools / model / base_url /
-        // max_tokens 不再暴露（由设置页配置或内置身份提示提供）。
-        let expected: Vec<&str> = vec!["task_description", "agent_name", "context", "timeout_secs"];
-        assert_eq!(properties.len(), expected.len());
-        for key in expected {
-            assert!(properties.contains_key(key), "missing {key}");
-        }
-        for legacy in [
-            "system_prompt",
-            "tools",
-            "model",
-            "base_url",
-            "max_tokens",
-            "name",
-            "task",
-        ] {
-            assert!(
-                !properties.contains_key(legacy),
-                "{legacy} must not be exposed"
-            );
-        }
-        assert_eq!(
-            handler.input_schema["required"][0], "task_description",
-            "task_description must be the only required param"
-        );
-    }
-
-    #[test]
-    fn task_builder_injects_identity_and_wraps_context() {
-        // 无 context：身份提示 + 任务，无 context 段。
-        let bare = build_subagent_task("do the thing", "");
-        assert!(bare.contains("[SYSTEM]"));
-        assert!(bare.contains(SUBAGENT_IDENTITY_PROMPT));
-        assert!(bare.contains("[TASK]\ndo the thing"));
-        assert!(!bare.contains("[CONTEXT]"));
-
-        // 有 context：必须包裹在 <main_subagent_message> 内，防止子代理把
-        // 传入内容误判为自身 user 消息而直接修改项目。
-        let with_ctx = build_subagent_task("review the diff", "repo at F:\\proj\nbranch main");
-        assert!(with_ctx.contains(
-            "<main_subagent_message>\nrepo at F:\\proj\nbranch main\n</main_subagent_message>"
-        ));
-        assert!(with_ctx.contains("[TASK]\nreview the diff"));
-        // 身份提示在前，任务在后。
-        assert!(with_ctx.find("[SYSTEM]").unwrap() < with_ctx.find("[TASK]").unwrap());
-    }
-
-    // ── kill 路径回归（PR #57 reviewer 阻断 ③）────────────────────────
-    //
-    // 阻断背景：subagent 的登记路径只 `register` + `mark_exited`，**从不**
-    // `attach_child` → 其进程条目没有 os_pid。`collect_subagent_result`
-    // 每个轮询周期只看 `RegistryRef::killed()`（即 `status == "killed"`）。
-    // 若墓碑 kill 之后状态仍停留在 `exited`，子代理永远收不到 kill 请求。
-
-    /// 墓碑路径：条目已按终态时间驱逐 → `process kill` 命中墓碑 → 状态必须
-    /// 收敛为 `killed`，`RegistryRef::killed()` 必须看到 true。
-    #[test]
-    fn registry_ref_killed_sees_tombstone_kill() {
-        use qaqh_workspace::process_registry::{KillOutcome, ProcessRegistry};
-
-        let id = ProcessRegistry::register("subagent-tombstone-kill");
-        let registry_ref = RegistryRef::Local { id };
-
-        // subagent 形态：登记后直接进终态，无 os_pid。
-        ProcessRegistry::mark_exited(id, 0);
-        assert!(!registry_ref.killed(), "终态为 exited 时不得视为被 kill");
-
-        // 把条目熬成墓碑（终态 >600s 后下一次 register 触发惰性驱逐）。
-        ProcessRegistry::age_registration_for_test(id, 3600);
-        let _trigger = ProcessRegistry::register("subagent-tombstone-trigger");
-        let info = ProcessRegistry::get_info(id).expect("条目必须已降级为墓碑");
-        assert_eq!(info["evicted"], true, "前置条件：条目已驱逐: {info}");
-
-        // 墓碑 kill：无 os_pid，故如实报 NoOsPid，但状态仍须收敛为 killed
-        // （id 有效、终态确定，子代理据此停止轮询）。
-        assert_eq!(
-            ProcessRegistry::kill(id),
-            KillOutcome::NoOsPid,
-            "无 os_pid 的墓碑不得谎报清理成功"
-        );
-        let after = ProcessRegistry::get_info(id).expect("墓碑仍可查询");
-        assert_eq!(
-            after["status"], "killed",
-            "墓碑 kill 后状态必须为 killed: {after}"
-        );
-        assert!(
-            registry_ref.killed(),
-            "RegistryRef::killed() 必须覆盖墓碑路径（否则子代理无法感知 kill）"
-        );
-    }
-
-    /// 对照：在册条目的 kill 路径同样被 `RegistryRef::killed()` 看见。
-    #[test]
-    fn registry_ref_killed_sees_in_place_kill() {
-        use qaqh_workspace::process_registry::{KillOutcome, ProcessRegistry};
-
-        let id = ProcessRegistry::register("subagent-in-place-kill");
-        let registry_ref = RegistryRef::Local { id };
-        assert!(!registry_ref.killed(), "运行中不得视为被 kill");
-
-        assert_eq!(ProcessRegistry::kill(id), KillOutcome::Killed);
-        assert!(
-            registry_ref.killed(),
-            "在册条目 kill 后 RegistryRef::killed() 必须为 true"
-        );
-    }
-}
-
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文
 /// （`<main_subagent_message>`，防止子代理把传入内容当作自己的 user 消息
 /// 而直接动项目）+ 任务（`[TASK]`）。
@@ -228,48 +89,21 @@ fn build_subagent_task(task_description: &str, context: &str) -> String {
     parts.join("\n\n")
 }
 
-// ── serve 端子代理注册表（ProcessRegistry 权威进程）─────────────────
-//
-// ProcessRegistry 是进程内单例：exec 后台进程与 process 工具（Workspace
-// placement）在 workspace serve 进程执行，而 spawn_subagent（HostOnly）在
-// 主代理 worker 进程执行——此前子代理记录注册在 worker 进程，主代理的
-// `process check/wait/kill` 却在 serve 进程查询，永远 NOT_FOUND（甚至因
-// 两个进程 ID 都从 1 编号而误查/误杀同号的 exec 后台进程）。
-//
-// 修复：子代理记录注册到 serve 进程（`POST /subagent`），与 process 工具
-// 的执行进程一致；collect 线程轮询 serve 检测 kill、收尾时回写终态。
-// serve 不可达时回退到本地注册表（退化到旧行为，仅影响进程可见性）。
-
-/// 子代理进程记录的实际存放位置。
+/// 子代理进程记录统一存放在 daemon actor 进程的本地注册表中。
 enum RegistryRef {
-    /// serve 进程注册表（process 工具可见）。
-    Remote {
-        client: ServeRegistryClient,
-        id: u32,
-    },
-    /// 本地（worker 进程）注册表——serve 不可达时的降级路径。
     Local { id: u32 },
 }
 
 impl RegistryRef {
     fn id(&self) -> u32 {
         match self {
-            RegistryRef::Remote { id, .. } | RegistryRef::Local { id } => *id,
+            RegistryRef::Local { id } => *id,
         }
     }
 
     /// 是否已被 `process kill` 标记为 killed。
     fn killed(&self) -> bool {
         match self {
-            RegistryRef::Remote { client, id } => client
-                .post("status", *id, "", "", 0)
-                .and_then(|v| v.get("info").cloned())
-                .and_then(|info| {
-                    info.get("status")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s == "killed")
-                })
-                .unwrap_or(false),
             RegistryRef::Local { id } => {
                 qaqh_workspace::process_registry::ProcessRegistry::get_info(*id)
                     .and_then(|info| {
@@ -285,9 +119,6 @@ impl RegistryRef {
     /// 收尾：写入最终作答与退出码。
     fn finish(&self, answer: &str, exit_code: i32) {
         match self {
-            RegistryRef::Remote { client, id } => {
-                let _ = client.post("update", *id, "", answer, exit_code);
-            }
             RegistryRef::Local { id } => {
                 qaqh_workspace::process_registry::ProcessRegistry::set_answer(
                     *id,
@@ -299,83 +130,8 @@ impl RegistryRef {
     }
 }
 
-/// workspace serve 的 `/subagent` 端点访问器（worker 环境变量注入端点）。
-#[derive(Clone)]
-struct ServeRegistryClient {
-    endpoint: String,
-    token: String,
-}
-
-impl ServeRegistryClient {
-    /// 从 daemon 注入的 worker 环境发现 serve 端点。
-    fn discover() -> Option<Self> {
-        let endpoint = std::env::var("QAQH_WORKSPACE_URL")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())?;
-        let token = std::env::var("QAQH_WORKSPACE_TOKEN")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())?;
-        Some(Self { endpoint, token })
-    }
-
-    fn post(
-        &self,
-        action: &str,
-        id: u32,
-        name: &str,
-        answer: &str,
-        exit_code: i32,
-    ) -> Option<serde_json::Value> {
-        let url = format!("{}/subagent", self.endpoint.trim_end_matches('/'));
-        let body = serde_json::json!({
-            "action": action,
-            "id": id,
-            "name": name,
-            "answer": answer,
-            "exit_code": exit_code,
-        });
-        let result = ureq::Agent::config_builder()
-            .timeout_connect(Some(std::time::Duration::from_secs(5)))
-            .timeout_per_call(Some(std::time::Duration::from_secs(10)))
-            .build()
-            .new_agent()
-            .post(&url)
-            .header("Authorization", &format!("Bearer {}", self.token))
-            .header("Content-Type", "application/json")
-            .send_json(body);
-        match result {
-            Ok(mut response) => response.body_mut().read_json::<serde_json::Value>().ok(),
-            Err(error) => {
-                log::warn!("[SUBAGENT] serve /subagent {action} failed: {error}");
-                None
-            }
-        }
-    }
-}
-
-/// 注册子代理进程记录：优先 serve 进程（process 工具可见），失败回退本地。
+/// 注册子代理进程记录到本地 actor 进程注册表。
 fn register_subagent_process(name: &str) -> RegistryRef {
-    if let Some(client) = ServeRegistryClient::discover() {
-        match client
-            .post("register", 0, name, "", 0)
-            .and_then(|v| v.get("id").and_then(|x| x.as_u64()))
-        {
-            Some(id) => {
-                log::info!("[SUBAGENT] '{name}' registered in serve registry id={id}");
-                return RegistryRef::Remote {
-                    client,
-                    id: id as u32,
-                };
-            }
-            None => {
-                log::warn!(
-                    "[SUBAGENT] '{name}' serve register failed; falling back to local registry (process tools will NOT see it)"
-                );
-            }
-        }
-    }
     let id = qaqh_workspace::process_registry::ProcessRegistry::register(name);
     log::info!("[SUBAGENT] '{name}' registered in local registry id={id}");
     RegistryRef::Local { id }
@@ -595,9 +351,8 @@ fn handle_spawn_subagent(ctx: ToolCallCtx) -> ToolResult {
 
     // ── 3. Register the process and collect the result in the background. ──
     //
-    // 记录注册到 serve 进程（ProcessRegistry 权威进程，process 工具同进程），
-    // 主代理的 `process check/wait/kill` 才能看到子代理；serve 不可达时回退
-    // 本地注册表。最终结果仍经 Ringing 注入主代理会话回传。
+    // 子代理与 exec 的 process 工具都运行在 daemon actor 进程内，共享同一个
+    // ProcessRegistry。最终结果仍经 Ringing 注入主代理会话回传。
     let registry_ref = register_subagent_process(&format!("subagent:{name}"));
     let registry_id = registry_ref.id();
     // 主代理会话 seed：collect 完成后把最终作答注入回主会话（模型下一轮自然看到）。
@@ -649,7 +404,6 @@ fn collect_subagent_result(
 
     while !did_finish && !did_cancel {
         // Kill requested (process kill {id}) → cancel the sub turn.
-        // 状态权威在 serve 进程（Remote），或本地注册表（Local 降级）。
         if registry_ref.killed() {
             log::info!("[SUBAGENT] '{name}' kill requested via process registry — cancelling");
             let cancel = RingingCommand::Conversation(
@@ -861,4 +615,143 @@ fn collect_subagent_result(
     log::info!(
         "[SUBAGENT] '{name}' collector complete (seed={seed}), answer_len={answer_len}, exit={exit_code}, cancelled={did_cancel}, first_event={first_event_logged}"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_subagent_schema_never_accepts_api_keys() {
+        let mut manager = ToolManager::new();
+        register(&mut manager);
+
+        let handler = manager
+            .lookup("spawn_subagent")
+            .expect("spawn_subagent should be registered");
+        let properties = handler.input_schema["properties"]
+            .as_object()
+            .expect("tool properties should be an object");
+
+        assert!(!properties.contains_key("api_key"));
+        assert!(!handler.input_schema.to_string().contains("--api-key"));
+    }
+
+    #[test]
+    fn spawn_subagent_schema_exposes_only_the_llm_facing_params() {
+        let mut manager = ToolManager::new();
+        register(&mut manager);
+        let handler = manager
+            .lookup("spawn_subagent")
+            .expect("spawn_subagent should be registered");
+        let properties = handler.input_schema["properties"]
+            .as_object()
+            .expect("tool properties should be an object");
+
+        // 模型面只有 4 个参数；system_prompt / tools / model / base_url /
+        // max_tokens 不再暴露（由设置页配置或内置身份提示提供）。
+        let expected: Vec<&str> = vec!["task_description", "agent_name", "context", "timeout_secs"];
+        assert_eq!(properties.len(), expected.len());
+        for key in expected {
+            assert!(properties.contains_key(key), "missing {key}");
+        }
+        for legacy in [
+            "system_prompt",
+            "tools",
+            "model",
+            "base_url",
+            "max_tokens",
+            "name",
+            "task",
+        ] {
+            assert!(
+                !properties.contains_key(legacy),
+                "{legacy} must not be exposed"
+            );
+        }
+        assert_eq!(
+            handler.input_schema["required"][0], "task_description",
+            "task_description must be the only required param"
+        );
+    }
+
+    #[test]
+    fn task_builder_injects_identity_and_wraps_context() {
+        // 无 context：身份提示 + 任务，无 context 段。
+        let bare = build_subagent_task("do the thing", "");
+        assert!(bare.contains("[SYSTEM]"));
+        assert!(bare.contains(SUBAGENT_IDENTITY_PROMPT));
+        assert!(bare.contains("[TASK]\ndo the thing"));
+        assert!(!bare.contains("[CONTEXT]"));
+
+        // 有 context：必须包裹在 <main_subagent_message> 内，防止子代理把
+        // 传入内容误判为自身 user 消息而直接修改项目。
+        let with_ctx = build_subagent_task("review the diff", "repo at F:\\proj\nbranch main");
+        assert!(with_ctx.contains(
+            "<main_subagent_message>\nrepo at F:\\proj\nbranch main\n</main_subagent_message>"
+        ));
+        assert!(with_ctx.contains("[TASK]\nreview the diff"));
+        // 身份提示在前，任务在后。
+        assert!(with_ctx.find("[SYSTEM]").unwrap() < with_ctx.find("[TASK]").unwrap());
+    }
+
+    // ── kill 路径回归（PR #57 reviewer 阻断 ③）────────────────────────
+    //
+    // 阻断背景：subagent 的登记路径只 `register` + `mark_exited`，**从不**
+    // `attach_child` → 其进程条目没有 os_pid。`collect_subagent_result`
+    // 每个轮询周期只看 `RegistryRef::killed()`（即 `status == "killed"`）。
+    // 若墓碑 kill 之后状态仍停留在 `exited`，子代理永远收不到 kill 请求。
+
+    /// 墓碑路径：条目已按终态时间驱逐 → `process kill` 命中墓碑 → 状态必须
+    /// 收敛为 `killed`，`RegistryRef::killed()` 必须看到 true。
+    #[test]
+    fn registry_ref_killed_sees_tombstone_kill() {
+        use qaqh_workspace::process_registry::{KillOutcome, ProcessRegistry};
+
+        let id = ProcessRegistry::register("subagent-tombstone-kill");
+        let registry_ref = RegistryRef::Local { id };
+
+        // subagent 形态：登记后直接进终态，无 os_pid。
+        ProcessRegistry::mark_exited(id, 0);
+        assert!(!registry_ref.killed(), "终态为 exited 时不得视为被 kill");
+
+        // 把条目熬成墓碑（终态 >600s 后下一次 register 触发惰性驱逐）。
+        ProcessRegistry::age_registration_for_test(id, 3600);
+        let _trigger = ProcessRegistry::register("subagent-tombstone-trigger");
+        let info = ProcessRegistry::get_info(id).expect("条目必须已降级为墓碑");
+        assert_eq!(info["evicted"], true, "前置条件：条目已驱逐: {info}");
+
+        // 墓碑 kill：无 os_pid，故如实报 NoOsPid，但状态仍须收敛为 killed
+        // （id 有效、终态确定，子代理据此停止轮询）。
+        assert_eq!(
+            ProcessRegistry::kill(id),
+            KillOutcome::NoOsPid,
+            "无 os_pid 的墓碑不得谎报清理成功"
+        );
+        let after = ProcessRegistry::get_info(id).expect("墓碑仍可查询");
+        assert_eq!(
+            after["status"], "killed",
+            "墓碑 kill 后状态必须为 killed: {after}"
+        );
+        assert!(
+            registry_ref.killed(),
+            "RegistryRef::killed() 必须覆盖墓碑路径（否则子代理无法感知 kill）"
+        );
+    }
+
+    /// 对照：在册条目的 kill 路径同样被 `RegistryRef::killed()` 看见。
+    #[test]
+    fn registry_ref_killed_sees_in_place_kill() {
+        use qaqh_workspace::process_registry::{KillOutcome, ProcessRegistry};
+
+        let id = ProcessRegistry::register("subagent-in-place-kill");
+        let registry_ref = RegistryRef::Local { id };
+        assert!(!registry_ref.killed(), "运行中不得视为被 kill");
+
+        assert_eq!(ProcessRegistry::kill(id), KillOutcome::Killed);
+        assert!(
+            registry_ref.killed(),
+            "在册条目 kill 后 RegistryRef::killed() 必须为 true"
+        );
+    }
 }

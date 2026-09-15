@@ -395,7 +395,7 @@ handler_from_string!(handle_delete_file, exec_delete_file);
 // ── Registration ──
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(ToolHandler {
+    mgr.register(ToolHandler {
         key: "write".to_string(),
         description: "Write/overwrite/append file (full content). Summary only; dry_run previews diff; use edit for targeted changes.",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File"},"content":{"type":"string","description":"Content"},"append":{"type":"boolean","description":"Append (default false)","default":false},"dry_run":{"type":"boolean","description":"Preview only","default":false},"expected_hash":{"type":"string","description":"Hash from prior read (optional)"}},"required":["path","content"],"additionalProperties":false}),
@@ -403,10 +403,8 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::Write,
         category: crate::permission::ToolCategory::Write,
         default_timeout: std::time::Duration::from_secs(30),
-    },
-    crate::ToolPlacement::Workspace,
-);
-    mgr.register_with_placement(ToolHandler {
+    });
+    mgr.register(ToolHandler {
         key: "delete".to_string(),
         description: "Move file to trash (.qaqh/trash/).",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File"}},"required":["path"],"additionalProperties":false}),
@@ -414,9 +412,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::Destructive,
         category: crate::permission::ToolCategory::Write,
         default_timeout: std::time::Duration::from_secs(15),
-    },
-    crate::ToolPlacement::Workspace,
-);
+    });
 }
 #[cfg(test)]
 mod tests {

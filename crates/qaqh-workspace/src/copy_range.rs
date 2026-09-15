@@ -370,7 +370,7 @@ fn handle_copy_range(ctx: crate::ToolCallCtx) -> ToolResult {
 // ─────────────────────────────────────────────────────────────
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(ToolHandler {
+    mgr.register(ToolHandler {
         key: "copy_range".to_string(),
         description: "Copy content range by line anchors (exact line match). source_start/source_end = range; mode=insert_after/before(need target_anchor) or append/prepend.",
         input_schema: serde_json::json!({
@@ -390,9 +390,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
         risk: ToolRisk::Write,
         category: crate::permission::ToolCategory::Write,
         default_timeout: std::time::Duration::from_secs(60),
-    },
-    crate::ToolPlacement::Workspace,
-    );
+    });
 }
 
 // ─────────────────────────────────────────────────────────────

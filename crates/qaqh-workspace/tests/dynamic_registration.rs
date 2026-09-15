@@ -21,7 +21,7 @@ use std::time::Duration;
 use qaqh_workspace::permission::ToolCategory;
 use qaqh_workspace::{
     DYNAMIC_DESCRIPTION_LIMIT, MCP_DYNAMIC_PREFIX, ToolCallCtx, ToolHandler, ToolManager,
-    ToolPlacement, ToolResult, ToolRisk, build_dynamic_tool,
+    ToolResult, ToolRisk, build_dynamic_tool,
 };
 
 fn noop(_ctx: ToolCallCtx) -> ToolResult {
@@ -51,7 +51,6 @@ fn echo_entry(
         description,
         serde_json::json!({ "type": "object", "properties": {} }),
         noop,
-        ToolPlacement::HostOnly,
         ToolCategory::Exec,
         Duration::from_secs(30),
     )

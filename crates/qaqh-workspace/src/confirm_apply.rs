@@ -85,8 +85,7 @@ fn handle_confirm_apply(ctx: crate::ToolCallCtx) -> ToolResult {
 // ─────────────────────────────────────────────────────────────
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(
-        ToolHandler {
+    mgr.register(ToolHandler {
             key: "confirm_apply".to_string(),
             description: "Commit/discard pending dry_run (pending_id from edit/apply_patch/write). One-shot, 30min expiry.",
             input_schema: serde_json::json!({
@@ -102,9 +101,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             risk: ToolRisk::Write,
             category: crate::permission::ToolCategory::Write,
             default_timeout: std::time::Duration::from_secs(60),
-        },
-        crate::ToolPlacement::Workspace,
-    );
+        });
 }
 
 // ─────────────────────────────────────────────────────────────

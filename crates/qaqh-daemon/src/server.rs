@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 
 use qaqh_runtime::QaqhService;
 use qaqh_runtime::RingingHub;
-use qaqh_runtime::{WorkspaceMode, WorkspaceSupervisor};
 use qaqh_types::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -162,51 +161,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // 宿主直连：`spawn_subagent` 工具此后经进程内宿主句柄运行，不再回连
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
     qaqh_subagent::install_host(Arc::new(service.clone()));
-    // 工具套件运行环境：config `[workspace] mode`（local 默认 / wsl 可选）。
-    // 拉起失败不阻塞 daemon——worker 回退进程内工具执行。
-    let workspace_mode = qaqh_config::Config::load()
-        .map(|config| WorkspaceMode::parse(&config.workspace.mode))
-        .unwrap_or(WorkspaceMode::Local);
-    let workspace_service = service.clone();
-    let workspace = WorkspaceSupervisor::start(
-        workspace_mode,
-        Arc::new(move |connection| {
-            // 新 endpoint/token 仅经 daemon 内存注入后续 worker，绝不进日志或 IPC。
-            workspace_service.attach_workspace(
-                connection.endpoint.clone(),
-                connection.token,
-                workspace_mode.label(),
-            );
-            workspace_service.attach_workspace_state(qaqh_runtime::WorkspaceRuntimeState {
-                configured_mode: workspace_mode.label().into(),
-                active_mode: connection.mode.label().into(),
-                endpoint: connection.endpoint,
-                generation: connection.generation,
-            });
-        }),
-    )
-    .ok();
-    if let Some(ref ws) = workspace {
-        let connection = ws.connection();
-        service.attach_workspace(
-            connection.endpoint.clone(),
-            connection.token,
-            workspace_mode.label(),
-        );
-        service.attach_workspace_state(qaqh_runtime::WorkspaceRuntimeState {
-            configured_mode: workspace_mode.label().into(),
-            active_mode: connection.mode.label().into(),
-            endpoint: connection.endpoint,
-            generation: connection.generation,
-        });
-    } else {
-        service.attach_workspace_state(qaqh_runtime::WorkspaceRuntimeState {
-            configured_mode: workspace_mode.label().into(),
-            active_mode: "disabled".into(),
-            endpoint: String::new(),
-            generation: 0,
-        });
-    }
     let ringing_leases = Arc::new(Mutex::new(qaqh_runtime::ringing::RingingLeaseStore::new()));
     let pending_commands = Arc::new(Mutex::new(
         qaqh_runtime::ringing::PendingCommandStore::new_persistent(),
@@ -355,9 +309,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // F2: timeline 持久化是异步合并 checkpoint；退出前同步落盘全部 pending
     // seed，缩小子进程被杀时 transcript 尾部的丢失窗口。
     hub.flush_timeline_persistence();
-    if let Some(ref ws) = workspace {
-        ws.stop();
-    }
     let _ = std::fs::remove_file(qaqh_types::platform::daemon_discovery_path());
     let _ = std::fs::remove_file(qaqh_types::platform::daemon_lock_path());
     Ok(())

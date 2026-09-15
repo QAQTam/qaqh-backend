@@ -276,18 +276,6 @@ pub fn patch_target_paths(patch: &str) -> Vec<String> {
 /// Resolve symlinks/junctions in the nearest existing ancestor, then append
 /// any missing suffix. This keeps authorization checks correct for new files.
 pub(crate) fn resolve_target_path(path: PathBuf) -> PathBuf {
-    // WSL serve 侧：worker 下发的 Windows 绝对路径转 /mnt，使授权资源路径与
-    // workspace_root（同样已被归一化为 /mnt）一致，避免被误判为跨 workspace。
-    //
-    // 注意：`wsl_path` 是纯字符串逻辑，必须走 `&str`。**只在路径可无损表示为
-    // UTF-8 时**才经此转换——非 UTF-8 路径若先 `to_string_lossy()` 会把非法字节
-    // 折叠成 `U+FFFD`，使 `sh\xFFared` 与 `sh\u{FFFD}ared` 变成同一路径而误判
-    // 相等（越权 AutoApprove）。非 UTF-8 路径原样保留字节参与后续比较。
-    // Windows 下发的路径恒为 UTF-8（盘符 + 路径体），故此处不会漏转换。
-    let path = match path.to_str() {
-        Some(utf8) => PathBuf::from(crate::wsl_path::platform_workspace_path(utf8)),
-        None => path,
-    };
     let absolute = if path.is_absolute() {
         path
     } else {

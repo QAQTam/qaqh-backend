@@ -4,7 +4,7 @@ use crate::edit::MAX_HUNKS;
 use crate::edit::hunk::Hunk;
 use crate::edit::transaction::*;
 use crate::file_shared::{atomic_write, content_hash, normalize_newlines};
-use crate::{ToolCallCtx, ToolHandler, ToolManager, ToolPlacement, ToolResult, ToolRisk};
+use crate::{ToolCallCtx, ToolHandler, ToolManager, ToolResult, ToolRisk};
 use serde_json::{Value, json};
 
 pub fn exec_edit(args: &serde_json::Value) -> ToolResult {
@@ -339,8 +339,7 @@ pub(crate) fn handle_edit(ctx: ToolCallCtx) -> ToolResult {
 }
 
 pub fn register(mgr: &mut ToolManager) {
-    mgr.register_with_placement(
-        ToolHandler {
+    mgr.register(ToolHandler {
             key: "edit".to_string(),
             description: "File editor (hunk-based, content-matched, supports replace_all). Kinds: replace(old/new), insert_after/insert_before(anchor/new), replace_inline(anchor/old/new), prepend/append_file(new). Use shortest unique old/anchor; supports expected_hash, dry_run+confirm_apply.",
             input_schema: serde_json::json!({
@@ -369,7 +368,5 @@ pub fn register(mgr: &mut ToolManager) {
             risk: ToolRisk::Write,
             category: crate::permission::ToolCategory::Write,
             default_timeout: std::time::Duration::from_secs(60),
-        },
-        ToolPlacement::Workspace,
-    );
+        });
 }

@@ -2,7 +2,6 @@ use crate::secrets::{CONFIG_MARKER, SecretSlot, SecretStore};
 use qaqh_types::{
     ConfigStore, PersistentConfig, PersistentLspConfig, PersistentLspServerConfig,
     PersistentMcpConfig, PersistentMcpServerConfig, PersistentSubagentConfig,
-    PersistentWorkspaceConfig,
 };
 use std::collections::HashMap; // still used by profiles
 use std::sync::{Mutex, OnceLock};
@@ -110,26 +109,10 @@ pub struct Config {
     /// daemon 周期任务消费；运行时 Config 承载该值以保证 save 往返不丢
     /// 用户手写配置（save_with 从运行时 Config 全量重构 PersistentConfig）。
     pub session_idle_unload_secs: u64,
-    /// 工具套件运行环境："local"（默认）| "wsl"（仅 Windows）。
-    pub workspace: WorkspaceConfig,
     /// MCP 客户端配置（docs/mcp-client-design.md §6；load 时已 fail-fast 校验）。
     pub mcp: McpConfig,
     /// LSP 客户端配置（docs/lsp-client-design.md §6；load 时已 fail-fast 校验）。
     pub lsp: LspConfig,
-}
-
-/// 工具套件运行环境（daemon 据此拉起 qaqh-workspace serve）。
-#[derive(Debug, Clone)]
-pub struct WorkspaceConfig {
-    pub mode: String,
-}
-
-impl Default for WorkspaceConfig {
-    fn default() -> Self {
-        Self {
-            mode: "local".into(),
-        }
-    }
 }
 
 // ── MCP 客户端配置（docs/mcp-client-design.md §6）──
@@ -613,7 +596,6 @@ impl Default for Config {
             tokenizer_path: None,
             auto_compact_threshold: 0.75,
             session_idle_unload_secs: 0,
-            workspace: WorkspaceConfig::default(),
             mcp: McpConfig::default(),
             lsp: LspConfig::default(),
         }
@@ -890,13 +872,6 @@ falling back to 1 (MaxLockdown)"
                 cfg.session_idle_unload_secs = v;
             }
 
-            // ── 工具套件运行环境 ──
-            if let Some(ref ws) = pc.workspace
-                && let Some(ref mode) = ws.mode
-            {
-                cfg.workspace.mode = mode.clone();
-            }
-
             // ── MCP 客户端（fail-fast：非法名/互斥冲突/缺 command 直接 load 失败）──
             cfg.mcp = map_mcp_config(pc.mcp.clone())?;
             // E-4 fail-fast：`${secret:name}` 引用的名字必须在 secrets.toml
@@ -1104,9 +1079,6 @@ falling back to 1 (MaxLockdown)"
             auto_compact_threshold: Some(self.auto_compact_threshold),
             session_idle_unload_secs: (self.session_idle_unload_secs > 0)
                 .then_some(self.session_idle_unload_secs),
-            workspace: Some(PersistentWorkspaceConfig {
-                mode: Some(self.workspace.mode.clone()),
-            }),
             mcp: Some(PersistentMcpConfig {
                 enabled: Some(self.mcp.enabled),
                 import_external: Some(self.mcp.import_external),

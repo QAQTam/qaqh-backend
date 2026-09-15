@@ -57,12 +57,8 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
         "session.get_activity" => Some(READ_SEEDED),
         // workspace
         "workspace.get" => Some(READ_SEEDED),
-        "workspace.status" => Some(READ),
         "workspace.list" => Some(READ),
-        "workspace.diagnose" => Some(READ),
         "workspace.set" => Some(WRITE),
-        "workspace.set_mode" => Some(WRITE),
-        "workspace.install_wsl" => Some(WRITE),
         "workspace.create" => Some(WRITE),
         "workspace.rename" => Some(WRITE),
         "workspace.delete" => Some(WRITE),

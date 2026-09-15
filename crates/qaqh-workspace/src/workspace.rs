@@ -39,14 +39,12 @@ pub fn set_current_session(seed: &str) {
 /// workspace. Path resolution never depends on the process cwd while an
 /// actor context is active, so skipping the cd is behavior-preserving there.
 pub fn set_process_workspace(path: &str) {
-    // WSL serve 侧把 Windows 路径转 /mnt 后再落盘 + cd（Linux 下才能真实 cd 成功）。
-    let path = crate::wsl_path::platform_workspace_path(path);
     let in_actor_context = crate::is_actor_context();
-    crate::set_workspace(&path);
+    crate::set_workspace(path);
     if in_actor_context {
         return;
     }
-    if let Err(error) = std::env::set_current_dir(&path) {
+    if let Err(error) = std::env::set_current_dir(path) {
         log::warn!("set_process_workspace: cannot cd to '{}': {error}", path);
     }
 }

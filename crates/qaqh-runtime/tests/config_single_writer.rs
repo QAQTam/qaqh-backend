@@ -50,19 +50,5 @@ fn daemon_config_actions_share_one_write_port() {
         "permission write must not drop base_url"
     );
 
-    service
-        .handle("workspace.set_mode", &json!({ "mode": "local" }))
-        .expect("workspace mode");
-    let cfg = qaqh_config::Config::load().expect("reload config");
-    assert_eq!(cfg.workspace.mode, "local");
-    assert_eq!(
-        cfg.permission_level, 2,
-        "workspace write must not drop permission"
-    );
-    assert_eq!(
-        cfg.max_tokens, 123456,
-        "workspace write must not drop max_tokens"
-    );
-
     let _ = std::fs::remove_dir_all(root);
 }

@@ -257,12 +257,6 @@ pub struct AgentRegistry {
     sessions: Arc<qaqh_session::SessionManager>,
     /// Ringing 运行时；None = 未启用 legacy worker-only 模式。
     hub: Option<Arc<RingingHub>>,
-    /// daemon 拉起的 workspace serve endpoint + token（注入每个 worker env）。
-    workspace_env: Option<(String, String)>,
-    /// workspace 运行模式（"local" / "wsl"）。工具执行后端据此决定：
-    /// local 默认进程内（worker 内最短路径，serve 可退役）；仅 wsl 才经 HTTP
-    /// 远程到 WSL2 serve 执行跨 OS 工具。
-    workspace_mode: String,
     /// daemon 正在关闭：worker 退出是预期的，禁止自动重生。
     shutting_down: bool,
     /// 最近一次 spawn 时间（防崩溃-重启风暴：同一 seed 1 秒内不重复拉起）。
@@ -276,19 +270,9 @@ impl AgentRegistry {
             activity: SessionActivityTracker::default(),
             sessions,
             hub: None,
-            workspace_env: None,
-            workspace_mode: "local".to_string(),
             shutting_down: false,
             last_spawn: HashMap::new(),
         }
-    }
-
-    /// 注入 workspace serve 连接信息与运行模式；worker spawn 时写入其环境变量。
-    /// `mode` ∈ {"local", "wsl"}：local 时 worker 仍可用 endpoint（subagent 注册表
-    /// 等），但工具执行后端保持进程内；wsl 时才启用 HTTP 远程工具执行。
-    pub fn attach_workspace(&mut self, endpoint: String, token: String, mode: &str) {
-        self.workspace_env = Some((endpoint, token));
-        self.workspace_mode = mode.to_string();
     }
 
     /// 挂载 Ringing 运行时。Ringing worker 事件只进入 native hub。
@@ -409,8 +393,6 @@ impl AgentRegistry {
         let actor_seed = seed.to_string();
         let actor_spec = spec.clone();
         let tools_len = spec.tools.len();
-        let workspace_mode = self.workspace_mode.clone();
-        let workspace_env = self.workspace_env.clone();
         let liveness = std::sync::Arc::new(crate::agent::liveness::WorkerLiveness::new());
         let thread = std::thread::Builder::new()
             .name(format!("qaqh-subagent-{actor_seed}"))
@@ -423,8 +405,6 @@ impl AgentRegistry {
                     cancel,
                     writer_dead,
                     liveness,
-                    workspace_mode,
-                    workspace_env,
                 );
             })
             .map_err(|e| format!("spawn in-process subagent {seed}: {e}"))?;
@@ -523,8 +503,6 @@ impl AgentRegistry {
             None
         };
         let new_seed_owned = new_seed.map(str::to_string);
-        let workspace_mode = self.workspace_mode.clone();
-        let workspace_env = self.workspace_env.clone();
         let liveness = std::sync::Arc::new(crate::agent::liveness::WorkerLiveness::new());
         let liveness_for_registry = std::sync::Arc::clone(&liveness);
         let thread = std::thread::Builder::new()
@@ -540,8 +518,6 @@ impl AgentRegistry {
                     cancel,
                     writer_dead,
                     liveness,
-                    workspace_mode,
-                    workspace_env,
                 );
             })
             .map_err(|e| format!("spawn in-process session {seed}: {e}"))?;
