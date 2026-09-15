@@ -1,7 +1,7 @@
 # buglist（2026-09-15）— `--features ts` 编译不过：G1 新类型没跟上派生
 
 > 登记规则：一行一个缺陷；**详情进 `docs/report/`**，本文件只做索引与状态跟踪。
-> 状态口径：`open` / `fixed（工作区，待提交）` / `fixed @e39d7f7` / `verified` / `wontfix`。
+> 状态口径：`open` / `fixed（工作区，待提交）` / `fixed @4ac2f9c` / `verified` / `wontfix`。
 >
 > 本条目**未单开 report**（证据自足并逐条内联于下）。
 > 发现来源：本轮做深翻页时给 `qaqh-domain::TimelineTurn` 加 `ts` 属性，顺手验了一下
@@ -11,7 +11,7 @@
 
 | ID | 状态 | 项 |
 |---|---|---|
-| BUG-2026-09-15-06 | `fixed @e39d7f7` | `cargo check -p qaqh-domain --features ts` 编译失败（3 个 `E0277`）。G1 给 `ConversationState` 派生了 `TS`，但它的载荷类型 `TurnData` / `RoundData` / `RoundBlock` / `ToolCallDef` / `ToolResultDef` / `FileSnapshotInfo` **一个都没派生** |
+| BUG-2026-09-15-06 | `fixed @4ac2f9c` | `cargo check -p qaqh-domain --features ts` 编译失败（3 个 `E0277`）。G1 给 `ConversationState` 派生了 `TS`，但它的载荷类型 `TurnData` / `RoundData` / `RoundBlock` / `ToolCallDef` / `ToolResultDef` / `FileSnapshotInfo` **一个都没派生** |
 
 ## 事实与证据
 
