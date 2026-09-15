@@ -91,10 +91,6 @@ pub struct PersistentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_threshold: Option<f64>,
 
-    /// 工具套件运行环境（qaqh-workspace serve）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<PersistentWorkspaceConfig>,
-
     /// MCP 客户端配置（docs/mcp-client-design.md §6）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<PersistentMcpConfig>,
@@ -102,18 +98,6 @@ pub struct PersistentConfig {
     /// LSP 客户端配置（docs/lsp-client-design.md §6；全部 Option）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsp: Option<PersistentLspConfig>,
-}
-
-/// 工具套件运行环境配置。
-///
-/// - `local`（默认）：daemon 拉起本机 `qaqh-workspace serve`（Windows 原生）。
-/// - `wsl`（仅 Windows）：daemon 经 `wsl.exe` 在 WSL 发行版内拉起
-///   `qaqh-workspace serve`，Windows 端经 localhost 访问（WSL2 自动转发）。
-///   Linux 原生系统无此选项——工具本来就在 Linux 环境运行。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PersistentWorkspaceConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
 }
 
 /// Persistence-friendly subagent config with all-Option fields.

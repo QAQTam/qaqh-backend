@@ -104,15 +104,11 @@ pub fn execute_authorized(
         }
     };
 
-    // Phase 2: execute without holding the manager lock.
-    let mut tool_result = crate::backend::execute(
-        prepared.placement,
-        session_id,
-        authorized_workspace,
-        authorized_resources,
-        prepared.handler_fn,
-        prepared.ctx.clone(),
-    );
+    // Phase 2: execute without holding the manager lock. All tools now run in
+    // the daemon actor process; WSL deployment moves the whole daemon instead
+    // of routing individual tool calls across an environment boundary.
+    let _ = (session_id, authorized_workspace, authorized_resources);
+    let mut tool_result = (prepared.handler_fn)(prepared.ctx.clone());
     // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
     // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
     crate::tool_side_fold::apply(&name, &mut tool_result);
@@ -281,7 +277,7 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::{Arc, MutexGuard, atomic::AtomicU32};
+    use std::sync::{MutexGuard, atomic::AtomicU32};
     use std::time::Duration;
 
     static TEST_HANDLER_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -290,26 +286,11 @@ mod tests {
         crate::ToolResult::ok("counter incremented")
     }
 
-    struct TestWorkspaceBackend {
-        calls: Arc<AtomicU32>,
-    }
-
     struct WorkspaceReset;
 
     impl Drop for WorkspaceReset {
         fn drop(&mut self) {
             crate::set_workspace(".");
-        }
-    }
-
-    impl crate::ToolExecutionBackend for TestWorkspaceBackend {
-        fn execute(&self, request: crate::BackendRequest) -> crate::ToolResult {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(request.session_id, "test_session");
-            assert_eq!(request.ctx.name, "test_workspace");
-            assert!(request.authorized_resources.is_empty());
-            assert!(!request.host_workspace.as_os_str().is_empty());
-            crate::ToolResult::ok("workspace backend")
         }
     }
 
@@ -338,18 +319,6 @@ mod tests {
             category: crate::permission::ToolCategory::Write,
             default_timeout: std::time::Duration::from_secs(5),
         });
-        crate::runtime::register_test_handler_with_placement(
-            crate::ToolHandler {
-                key: "test_workspace".to_string(),
-                description: "test workspace handler",
-                input_schema: serde_json::json!({}),
-                handler: test_counter_handler,
-                risk: crate::ToolRisk::ReadOnly,
-                category: crate::permission::ToolCategory::Read,
-                default_timeout: std::time::Duration::from_secs(5),
-            },
-            crate::ToolPlacement::Workspace,
-        );
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         test_guard
     }
@@ -522,99 +491,6 @@ mod tests {
             ),
         }
         assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn workspace_backend_routes_only_workspace_tools() {
-        let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 4);
-        let backend_calls = Arc::new(AtomicU32::new(0));
-        let _backend_guard =
-            crate::backend::replace_workspace_backend_for_test(Arc::new(TestWorkspaceBackend {
-                calls: backend_calls.clone(),
-            }));
-        let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let trusted = HashSet::new();
-
-        let workspace_call = match admit(
-            make_invocation("test_workspace", "workspace-route-1"),
-            4,
-            &ws,
-            &trusted,
-        ) {
-            Admission::Authorized(call) => call,
-            _ => panic!("expected workspace call to be authorized"),
-        };
-        let workspace_result = execute_authorized(workspace_call, None);
-        assert!(workspace_result.success);
-        assert_eq!(workspace_result.content, "workspace backend");
-        assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 0);
-
-        let host_call = match admit(
-            make_invocation("test_counter", "host-route-1"),
-            4,
-            &ws,
-            &trusted,
-        ) {
-            Admission::Authorized(call) => call,
-            _ => panic!("expected host call to be authorized"),
-        };
-        let host_result = execute_authorized(host_call, None);
-        assert!(host_result.success);
-        assert_eq!(host_result.content, "counter incremented");
-        assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 1);
-    }
-
-    struct TestProcessBackend {
-        calls: Arc<AtomicU32>,
-    }
-
-    impl crate::ToolExecutionBackend for TestProcessBackend {
-        fn execute(&self, _request: crate::BackendRequest) -> crate::ToolResult {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            crate::ToolResult::ok("workspace backend")
-        }
-    }
-
-    /// exec 与 process 必须路由到 workspace 后端（共享 serve 进程的
-    /// ProcessRegistry）。若 process 仍为 HostOnly，则 LLM 拿到的 exec
-    /// process_id 在 worker 本地注册表查不到（跨进程注册表隔离 bug）。
-    #[test]
-    fn process_tools_route_to_workspace_backend() {
-        let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 4);
-        let backend_calls = Arc::new(AtomicU32::new(0));
-        let _backend_guard =
-            crate::backend::replace_workspace_backend_for_test(Arc::new(TestProcessBackend {
-                calls: backend_calls.clone(),
-            }));
-        let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let trusted = HashSet::new();
-
-        for tool in ["exec", "process"] {
-            backend_calls.store(0, Ordering::SeqCst);
-            let call = match admit(
-                make_invocation(tool, &format!("proc-route-{tool}")),
-                4,
-                &ws,
-                &trusted,
-            ) {
-                Admission::Authorized(call) => call,
-                _ => panic!("expected {tool} to be authorized"),
-            };
-            let result = execute_authorized(call, None);
-            assert!(
-                result.success,
-                "{tool} should succeed via workspace backend"
-            );
-            assert_eq!(
-                backend_calls.load(Ordering::SeqCst),
-                1,
-                "{tool} must route to workspace backend (shared ProcessRegistry)"
-            );
-        }
     }
 
     // ── Test 2: Level 1 (MaxLockdown) requires approval ──

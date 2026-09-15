@@ -110,38 +110,35 @@ handler!(handle_glob, exec_glob);
 // ── Registration ──
 
 pub fn register(mgr: &mut crate::ToolManager) {
-    mgr.register_with_placement(
-        ToolHandler {
-            key: "glob".to_string(),
-            description: "List files by glob (gitignore-aware, native). Pattern vs rg -g.",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Glob pattern"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Search root"
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10000,
-                        "description": "Max results (default 500)"
-                    }
+    mgr.register(ToolHandler {
+        key: "glob".to_string(),
+        description: "List files by glob (gitignore-aware, native). Pattern vs rg -g.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern"
                 },
-                "required": ["pattern"],
-                "additionalProperties": false
-            }),
-            handler: handle_glob,
-            risk: ToolRisk::ReadOnly,
-            category: crate::permission::ToolCategory::Read,
-            default_timeout: std::time::Duration::from_secs(30),
-        },
-        crate::ToolPlacement::HostOnly,
-    );
+                "path": {
+                    "type": "string",
+                    "description": "Search root"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "description": "Max results (default 500)"
+                }
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        }),
+        handler: handle_glob,
+        risk: ToolRisk::ReadOnly,
+        category: crate::permission::ToolCategory::Read,
+        default_timeout: std::time::Duration::from_secs(30),
+    });
 }
 
 #[cfg(test)]

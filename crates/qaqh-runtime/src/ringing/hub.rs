@@ -3110,6 +3110,137 @@ mod tests {
         ));
     }
 
+    /// 前端契约 G1：三段 `state` 的类型化视图必须能**无损**取回产出方写的字段。
+    ///
+    /// 这是把「产出方审计」变成**可执行断言**：字段名/形状/所属频道一旦漂移
+    /// （改键名、改类型、挪到别的频道），本测试即红——而不是让 winui/web/TUI
+    /// 三端各自的手解在运行期静默变缺省（TUI 的手解就这样漏了六个字段）。
+    ///
+    /// 破坏验证：把 `qaqh-domain` 里任一字段名改掉（如 `active_turn` →
+    /// `activeTurn`）→ 对应断言红。
+    #[test]
+    fn typed_state_views_recover_every_producer_field() {
+        use qaqh_domain::state::{ConversationState, ControlState, InteractionKind, ToolState};
+        let hub = RingingHub::new("epoch-typed");
+
+        hub.publish(
+            "s",
+            DomainEvent::Conversation(ConversationEvent::TurnStarted {
+                turn_id: "t1".into(),
+                user_text: "hi".into(),
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Conversation(ConversationEvent::RoundCompleted {
+                turn_id: "t1".into(),
+                round_num: 2,
+                thinking: None,
+                answer: None,
+                output_ref: None,
+                is_final: true,
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Conversation(ConversationEvent::CompactStarted {
+                compact_id: "compact-1".into(),
+                turns_total: 8,
+                turns_keeping: 2,
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Tool(ToolEvent::ToolStarted {
+                tool_call_id: "c1".into(),
+                turn_id: "t1".into(),
+                round_num: 0,
+                name: "exec".into(),
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Tool(ToolEvent::ToolPermissionRequested {
+                tool_call_id: "c2".into(),
+                turn_id: "t1".into(),
+                round_num: 0,
+                tool_name: "exec".into(),
+                reason: "r".into(),
+                paths: vec![],
+                category: qaqh_domain::PermissionCategory::Exec,
+                level: 3,
+                risk: qaqh_domain::PermissionRisk::High,
+                consequence: "run".into(),
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Control(ControlEvent::InteractionRequested {
+                interaction_id: "i1".into(),
+                turn_id: "t1".into(),
+                mode: qaqh_domain::AskMode::Single,
+                questions: vec![],
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Control(ControlEvent::SessionActivityChanged {
+                seed: "s".into(),
+                state: qaqh_domain::ActivityState::Working,
+                turn_id: Some("t1".into()),
+                seq: 1,
+                updated_at: 0,
+            }),
+        );
+        hub.publish(
+            "s",
+            DomainEvent::Control(ControlEvent::AgentLifecycleChanged {
+                state: qaqh_domain::AgentLifecycleState::Ready,
+            }),
+        );
+
+        let boot = qaqh_ringing::RingingSessionBootstrap::new(
+            hub.epoch(),
+            "s",
+            hub.snapshot(RingingChannel::Control, "s"),
+            hub.snapshot(RingingChannel::Conversation, "s"),
+            hub.snapshot(RingingChannel::Tool, "s"),
+        );
+
+        let conv: ConversationState = boot.conversation_state().expect("conversation state 可解析");
+        assert_eq!(
+            conv.active_turn.as_deref(),
+            Some("t1"),
+            "active_turn —— TUI 手解至今漏掉的字段之一"
+        );
+        assert_eq!(conv.compact_status.as_deref(), Some("running"));
+        assert_eq!(conv.compact_id.as_deref(), Some("compact-1"));
+        let last_round = conv.last_round.expect("last_round 应存在");
+        assert_eq!(last_round.turn_id, "t1");
+        assert_eq!(last_round.round_num, 2);
+        assert!(
+            last_round.is_final,
+            "线上键名是 `final`，类型里改名为 is_final —— 本断言防改名改错"
+        );
+
+        let ctl: ControlState = boot.control_state().expect("control state 可解析");
+        assert_eq!(ctl.activity, Some(qaqh_domain::ActivityState::Working));
+        assert_eq!(
+            ctl.agent_lifecycle,
+            Some(qaqh_domain::AgentLifecycleState::Ready)
+        );
+        let pending = ctl.pending_interaction.expect("pending_interaction 应存在");
+        assert_eq!(pending.id, "i1");
+        assert_eq!(pending.kind, InteractionKind::Ask);
+
+        let tools: ToolState = boot.tool_state().expect("tool state 可解析");
+        assert_eq!(tools.pending_permission.as_deref(), Some("c2"));
+        let running = tools.running.expect("running 应存在");
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].tool_call_id, "c1");
+        assert_eq!(running[0].round_num, 0);
+    }
+
     #[test]
     fn seal_orphan_channel_state_converges_three_channels() {
         let hub = RingingHub::new("epoch-seal");

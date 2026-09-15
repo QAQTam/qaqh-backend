@@ -2072,7 +2072,6 @@ dependencies = [
  "qaqh-workspace",
  "serde",
  "serde_json",
- "ureq",
 ]
 
 [[package]]
@@ -2102,7 +2101,6 @@ dependencies = [
  "image",
  "libc",
  "log",
- "qaqh-config",
  "qaqh-domain",
  "qaqh-skills",
  "qaqh-types",
@@ -2114,7 +2112,6 @@ dependencies = [
  "similar",
  "strsim",
  "tempfile",
- "tiny_http",
  "unicode-normalization",
  "ureq",
  "windows 0.58.0",

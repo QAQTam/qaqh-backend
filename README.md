@@ -21,7 +21,6 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,14 个 workspace 成�
  │   qaqh-msgloop TurnEngine:用户输入 → gate → 工具环 → 回合完成 → compact  │
  │        ├─ qaqh-gate      LLM 网关(Chat/Responses/Anthropic,SSE 流式+重试)│
  │        ├─ qaqh-workspace 19 个工具执行 + 四级权限准入 + 审计              │
- │        │      └─ serve 子进程(local 原生 或 WSL,HTTP 工具后端,可回退)    │
  │        └─ qaqh-skills / qaqh-subagent                                     │
  └──────────────────────────────────────────────────────────────────────────┘
         │
@@ -48,7 +47,7 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,14 个 workspace 成�
 | | `qaqh-config` | Config 加载/保存事务、provider 注册表、system prompt、secrets |
 | | `qaqh-config-api` | 配置契约层(wire DTO):ConfigDto 读模型 / ConfigPatch 写模型,多前端共享唯一真相 |
 | LLM | `qaqh-gate` | LLM API 网关:OpenAI Chat Completions / Responses / Anthropic Messages 三协议、自研 SSE 解码器(~143MB/s)、429/5xx 指数退避重试、reasoning/tool-call 流提取 |
-| 工具 | `qaqh-workspace` | 工具执行框架 + 19 个内置工具 + 权限/审计 + `serve` HTTP 工具后端二进制 |
+| 工具 | `qaqh-workspace` | 进程内工具执行框架 + 19 个内置工具 + 权限/审计 |
 | | `qaqh-subagent` | `spawn_subagent`:派生隔离 Ringing 子会话(in-process 守护线程,ephemeral,结果异步注入父会话) |
 | | `qaqh-skills` | Agent Skills 发现/解析/激活(SKILL.md + YAML frontmatter,catalog 渐进披露) |
 | 客户端/周边 | `qaqh-client` | daemon HTTP/SSE 传输层:discovery → open 协商 → 三频道 SSE + timeline 流 + lease 自愈;供外部壳复用 |
@@ -90,7 +89,7 @@ daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器�
 ## 快速开始
 
 ```powershell
-# 构建(release,产出 daemon 与 workspace serve 二进制)
+# 构建(release,产出 daemon 二进制)
 just build-daemon
 
 # 开发运行(headless daemon)
@@ -101,11 +100,6 @@ cargo run -p qaqh-daemon -- run      # 默认启动
 cargo run -p qaqh-daemon -- server   # 局域网 headless 模式(远端壳直连)
 cargo run -p qaqh-daemon -- status   # 读 daemon.json 探活
 cargo run -p qaqh-daemon -- stop
-
-# 工具直调(CLI)
-qaqh-workspace list                      # 列出全部工具定义
-qaqh-workspace read '{"path":"src/lib.rs"}'
-qaqh-workspace serve --port N --token T  # HTTP 工具后端(daemon 自动拉起)
 
 # webUI(浏览器直连,与桌面壳同一 renderer)
 # 启动 daemon 后打开 http://127.0.0.1:<port>/debug/

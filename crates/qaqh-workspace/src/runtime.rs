@@ -7,7 +7,7 @@
 //! the tool-result fold policy live per-thread and give concurrent actors real
 //! isolation without `ACTOR_SERIAL`. The process-level [`TOOL_MANAGER`] stays as
 //! the stable fallback for non-actor threads (daemon `skills.list_tools`,
-//! serve, CLI).
+//! CLI).
 
 use qaqh_types::ToolDef;
 use std::cell::Cell;
@@ -65,7 +65,7 @@ pub fn set_mode(mode: u8) {
 }
 
 /// Explicit tool-execution context (PR-3-2 / D5-G2): the caller (agent tool
-/// dispatch, workspace serve, CLI) assembles one per execution instead of
+/// dispatch, CLI) assembles one per execution instead of
 /// mutating process/thread state first. Threaded through the execute path;
 /// the workspace installs it for the duration of the call and restores the
 /// previous ambient state on drop.
@@ -76,13 +76,12 @@ pub struct ToolCtx {
     /// Agent operating mode (0=Code, 1=Plan) recorded at dispatch time.
     pub mode: u8,
     /// Workspace root for this execution. `None` = keep the current process
-    /// workspace (agent in-process path; serve sets it separately until
-    /// PR-3-3 moves cwd injection fully host-side).
+    /// workspace (the in-process agent path).
     pub workspace_root: Option<String>,
 }
 
 impl ToolCtx {
-    /// Context for an already-admitted caller (serve / CLI): full permission,
+    /// Context for an already-admitted caller (CLI/tests): full permission,
     /// Code mode, current process workspace.
     pub fn admitted(session_id: impl Into<String>) -> Self {
         Self {
@@ -314,14 +313,6 @@ pub(crate) fn active_workspace_root() -> PathBuf {
     crate::permission::resolve_target_path(root)
 }
 
-#[cfg(test)]
-pub(crate) fn register_test_handler_with_placement(
-    handler: crate::ToolHandler,
-    placement: crate::ToolPlacement,
-) {
-    with_manager(|manager| manager.register_with_placement(handler, placement));
-}
-
 pub fn all_tools() -> Vec<ToolDef> {
     let defs = with_manager(|manager| manager.filtered_defs()).unwrap_or_default();
     if image_tool_enabled() {
@@ -408,7 +399,7 @@ struct ImageCaps {
 
 static IMAGE_CAPS: Mutex<Option<ImageCaps>> = Mutex::new(None);
 
-/// 注入图片能力快照（PR-1-10 / D2）。宿主在装配 / reload / serve 启动时
+/// 注入图片能力快照（PR-1-10 / D2）。宿主在装配 / reload 时
 /// 以当前配置计算后调用；快照存活期内工具调用路径不再触碰磁盘。
 pub fn set_image_capability(endpoint_enabled: bool, model_supported: bool) {
     *IMAGE_CAPS
