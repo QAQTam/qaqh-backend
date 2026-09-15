@@ -11,7 +11,7 @@
 
 | ID | 状态 | 项 |
 |---|---|---|
-| BUG-2026-09-15-02 | `open` | 启动期工具探测用 `Command::…output()` 且**无超时**：被探测程序的后代进程若持续持有管道写端，EOF 永不到达，`.output()` 永久阻塞 → **daemon 永远起不来**（不报错、不退出、无日志） |
+| BUG-2026-09-15-02 | `fixed @674742f` | 启动期工具探测用 `Command::…output()` 且**无超时**：被探测程序的后代进程若持续持有管道写端，EOF 永不到达，`.output()` 永久阻塞 → **daemon 永远起不来**（不报错、不退出、无日志） |
 
 ## 事实与证据
 
@@ -65,7 +65,29 @@ for c in $(pgrep -P $PID); do tr '\0' ' ' < /proc/$c/cmdline; echo; done
 - **与在改的 workspace 重构无关**：用 HEAD 干净构建（不含任何未提交改动）同样复现；
   且 `qaqh-daemon` 不依赖 `qaqh-client`，故该重构与本条目无因果。
 
-## 建议
+## 处置（2026-09-15，`674742f`）
+
+新增 `probe_output(command, timeout)`（`registry.rs`）替代全部 4 处 `.output()`：
+stdin 接空设备、等退出改 `try_wait` 轮询 + 截止时间（超时 `kill` + `wait` 回收僵尸）、
+读管道另起线程 + `recv_timeout`（子进程已退出而后代仍持有写端时拿多少算多少）。
+工具快照另加 6s 总预算，超出即降级。超时统一 `log::warn!`——「无日志」这一半也堵上。
+
+**真机端到端（同机同病态 shim：`cargo` 留一个持有管道的后代 30s）**：
+
+| 场景 | daemon.json 产出 |
+|---|---|
+| 正常 PATH，修复后 | 1003 ms |
+| 病态 shim，修复后 | 5007 ms（探测超时降级） |
+| 病态 shim，**修复前** | **31036 ms** |
+
+回归锁 4 条（`registry::tests::probe_output_*`），核心那条复现缺陷精确形状
+（`sh -c 'sleep 30 & echo hi'`）。破坏验证：`recv_timeout` 退回 `recv()` → 该测试红，
+实测 30.0026s。
+
+验证边界：Windows 两处（`cmd /d /c ver`、`reg query`）本机无 Windows target，
+**未经编译核验**，改动形状与非 Windows 分支逐字同构以降低风险。
+
+## 建议（原始记录，保留）
 
 给探测加超时并回收子进程（对照 `qaqh-client/src/session.rs` 中 `OPEN_TIMEOUT_SECS` 一类做法），
 或改为不依赖管道 EOF 的探测方式（例如显式 `kill` 子进程、或只取退出码不读管道）。
