@@ -85,8 +85,25 @@ pub struct TimelinePage {
     pub server_epoch: String,
     pub seed: String,
     pub snapshot: TimelineSnapshot,
+    /// 本页之前（游标方向）**仍有可交付的回合**，即在已物化的 timeline 里还能
+    /// 再往前翻一页。
+    ///
+    /// 不变式：`has_more == true ⇒ 本页非空`（BUG-2026-09-13-18——违反它会让
+    /// 按 has_more 驱动的翻页客户端拿到零行却永不终止）。
     pub has_more: bool,
+    /// 会话持久化的**真实回合总数**，与物化窗口无关。
+    ///
+    /// 与「已交付回合数」的差即未交付的历史；见 [`Self::truncated_before`]。
     pub total_turns: usize,
+    /// 物化窗口**未覆盖到历史开头**：更早的回合存在（在 daemon 归档里），但
+    /// 本次交付不到，且当前**没有**深翻页接口能取到它们。
+    ///
+    /// T-08：重建路径只物化最近几十轮。此前这种截断对客户端完全不可见——既无
+    /// 提示、也无从知道历史更长。它**不能**用 `has_more` 表达，因为那会让客户端
+    /// 反复请求一个永远拿不到内容的页（见上）。缺省 `false`（旧 daemon 无此字段
+    /// 时按「未截断」处理，即维持旧行为）。
+    #[serde(default)]
+    pub truncated_before: bool,
 }
 
 impl TimelinePage {
@@ -232,6 +249,7 @@ mod tests {
             },
             has_more: false,
             total_turns: 0,
+            truncated_before: false,
         };
         page.validate_for("seed-1").expect("valid page");
         assert!(page.validate_for("seed-2").is_err());
