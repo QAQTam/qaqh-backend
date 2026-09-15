@@ -21,6 +21,12 @@ use crate::{TimelineAppender, TimelineError, TimelineLiveEntry};
 /// 只用于「快照最后一回合是否仍是归档最后一回合」的同一性确认，不物化历史。
 const RECONCILE_TAIL_MESSAGES: usize = 200;
 
+/// 深翻页的归档首读条数（不足则加倍重试）。
+const DEEP_PAGE_INITIAL_MESSAGES: usize = 200;
+/// 深翻页的硬上限：再往前的历史不再读，如实报 `truncated_before`。
+/// 4000 条消息 ≈ 数百轮会话，覆盖现实长会话；GB 级归档也不会被一次请求拖垮。
+const DEEP_PAGE_MAX_MESSAGES: usize = 4000;
+
 impl RingingHub {
     /// Move timeline checkpoint I/O off the producer/writer hot path.
     ///
@@ -362,8 +368,10 @@ impl RingingHub {
         if snapshot.turns.len() + 1 >= meta.turn_count {
             return false;
         }
-        let Some(messages) = sessions.load_recent_for_projection(seed, RECONCILE_TAIL_MESSAGES)
-        else {
+        // 读归档而非 compact 视图：快照本身就由归档重建（见
+        // `timeline_rebuild::rebuild_timeline_snapshot`），两边同源才谈得上「尾部一致」。
+        // 最末回合在两个视图里本是同一个，故这条改动不改变既有判定结果。
+        let Some(messages) = sessions.load_archive_tail(seed, RECONCILE_TAIL_MESSAGES) else {
             return false;
         };
         let (_, archive_turns) =
@@ -654,6 +662,66 @@ impl RingingHub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .snapshot(seed)
+    }
+
+    /// 从**归档**投影一页更早的回合（BUG-2026-09-15-05 深翻页）。
+    ///
+    /// 常驻 snapshot 是**有界窗口**（重建后只有最近 `REBUILD_RECENT_TURNS` 轮），
+    /// 窗口之外的回合只存在于 append-only 的 `messages.jsonl` 里。本方法按需读归档
+    /// 尾部——`need = total - start` 可精确算出，故先按估算读，不够就加倍重试，
+    /// 直到覆盖请求或触顶（`DEEP_PAGE_MAX_MESSAGES`）。**不**新建索引、**不**改文件
+    /// 格式：与 `bounded_read` 模块文档拒绝持久化偏移索引的既有决策一致。
+    ///
+    /// 返回 `(页, 本页最旧回合的全局序号, 是否触顶)`。触顶表示更旧的回合取不到，
+    /// 调用方据此把 `has_more` 置假、`truncated_before` 置真——「翻不动」必须如实说，
+    /// 否则客户端会永远请求同一个空页（BUG-2026-09-13-18 那一族）。
+    pub fn archive_turn_page(
+        &self,
+        seed: &str,
+        before_index: usize,
+        limit: usize,
+    ) -> Option<(Vec<qaqh_domain::TimelineTurn>, usize, bool)> {
+        let sessions = self.sessions.as_deref()?;
+        let meta_total = sessions.load_meta(seed)?.turn_count;
+        let limit = limit.max(1);
+        let mut read = DEEP_PAGE_INITIAL_MESSAGES;
+        loop {
+            let messages = sessions.load_archive_tail(seed, read)?;
+            let (pool, turns) =
+                super::projection::project_turns_from_messages(seed, &messages, None, None);
+            if pool == 0 {
+                return None;
+            }
+            // meta 可能落后于归档（运行中回合已落盘而 meta 未更新）。取两者较大值，
+            // 与 `window_metadata` 的 `total_never_below_materialized` 同一条保守原则。
+            let total = meta_total.max(pool);
+            let base = total - pool; // 池内第 0 个回合的全局序号
+            let end = before_index.min(total);
+            if end == 0 {
+                return None; // 没有更旧的回合
+            }
+            let want_start = end.saturating_sub(limit);
+            let capped = base > want_start && read >= DEEP_PAGE_MAX_MESSAGES;
+            if base <= want_start || capped {
+                let start = want_start.max(base);
+                let hi = end.min(start.saturating_add(limit));
+                let lo = start - base;
+                let hi = hi.saturating_sub(base).min(turns.len());
+                if lo >= hi {
+                    return Some((Vec::new(), start, capped));
+                }
+                // id 由全局序号派生（见 `timeline_snapshot_from_turns` 的说明）：
+                // 池内下标会让相邻两页的边界对不上。
+                let snapshot = super::timeline_rebuild::timeline_snapshot_from_turns(
+                    seed,
+                    &turns[lo..hi],
+                    start,
+                )
+                .map(|(snapshot, _)| snapshot)?;
+                return Some((snapshot.turns, start, capped));
+            }
+            read = read.saturating_mul(2);
+        }
     }
 
     /// Restore full turn bodies for one already-paginated timeline page.
