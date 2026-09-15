@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::agent::SubagentSpawnSpec;
 use crate::{RingingHub, SessionActivityTracker};
@@ -18,7 +19,8 @@ pub fn cache_system_path() {
         r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
     ] {
         let mut command = background_command("reg");
-        if let Ok(output) = command.args(["query", key, "/v", "Path"]).output() {
+        command.args(["query", key, "/v", "Path"]);
+        if let Some(output) = probe_output(command, PROBE_TIMEOUT) {
             let text = String::from_utf8_lossy(&output.stdout);
             if let Some(value) = text
                 .lines()
@@ -55,23 +57,39 @@ pub fn detect_shell() {
     log::info!("[runtime] exec shell bootstrap: {shell}");
 }
 
+/// 探测型命令的单次超时上界。
+///
+/// `--version` / `uname` 这类探测本该毫秒级返回，2s 已是极大宽限。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 整份工具快照（6 次探测）的总预算；超出即停止探测、用已有结果降级。
+///
+/// 探测结果只喂给提示词里的工具快照（`crate::agent::prompt::TOOLS_INFO`），
+/// **不值得为它拖慢启动**——何况它跑在 daemon 开始服务之前。
+const PROBE_BUDGET: Duration = Duration::from_secs(6);
+
+/// 等子进程退出时的轮询间隔。
+const PROBE_POLL: Duration = Duration::from_millis(10);
+
 pub fn detect_os_info() {
     #[cfg(target_os = "windows")]
-    let info = background_command("cmd")
-        .args(["/d", "/c", "ver"])
-        .output()
-        .ok()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("windows {}", std::env::consts::ARCH));
+    let info = {
+        let mut command = background_command("cmd");
+        command.args(["/d", "/c", "ver"]);
+        probe_output(command, PROBE_TIMEOUT)
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("windows {}", std::env::consts::ARCH))
+    };
     #[cfg(not(target_os = "windows"))]
-    let info = Command::new("uname")
-        .arg("-a")
-        .output()
-        .ok()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("{} {}", std::env::consts::OS, std::env::consts::ARCH));
+    let info = {
+        let mut command = Command::new("uname");
+        command.arg("-a");
+        probe_output(command, PROBE_TIMEOUT)
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{} {}", std::env::consts::OS, std::env::consts::ARCH))
+    };
     let _ = crate::agent::prompt::OS_INFO.set(info);
     // Toolchain snapshot. Each probe lists candidate program names tried in
     // order (first success wins): e.g. Windows ships `python` while most
@@ -84,10 +102,13 @@ pub fn detect_os_info() {
         (&["rustc"], &["--version"]),
         (&["pnpm"], &["--version"]),
     ];
+    let budget = Instant::now() + PROBE_BUDGET;
     let mut tools = Vec::new();
-    for (programs, args) in tool_probes {
+    'probes: for (programs, args) in tool_probes {
         for program in programs {
-            if let Ok(output) = background_command(program).args(args).output() {
+            let mut command = background_command(program);
+            command.args(args);
+            if let Some(output) = probe_output(command, PROBE_TIMEOUT) {
                 let value = if output.stdout.is_empty() {
                     &output.stderr
                 } else {
@@ -99,9 +120,89 @@ pub fn detect_os_info() {
                     break;
                 }
             }
+            if Instant::now() >= budget {
+                log::warn!(
+                    "[runtime] 工具探测超出 {PROBE_BUDGET:?} 总预算，放弃剩余探测（已得 {} 项）",
+                    tools.len()
+                );
+                break 'probes;
+            }
         }
     }
     let _ = crate::agent::prompt::TOOLS_INFO.set(tools.join(", "));
+}
+
+/// 跑一个探测型命令并取回输出，**带超时**。
+///
+/// 为什么不能用 `Command::output()`：它的契约是「等子进程退出 **且** 把
+/// stdout/stderr 管道读到 EOF」。只要有任何后代进程继承并持有管道的写端，
+/// EOF 就永不出现——**即便被探测的程序本身早已退出**。把它放在 daemon 开始
+/// 服务**之前**的同步路径上，就得到一个不报错、不退出、无日志的永久挂起
+/// （BUG-2026-09-15-02）。
+///
+/// 这里三重设防：stdin 接空设备（不再有交互等待）、等退出用轮询限时、读管道
+/// 另起线程且同样限时。任一环节超时即 `kill` 并回收子进程、返回 `None`——
+/// **探测失败必须降级，不得阻塞启动**。
+fn probe_output(mut command: Command, timeout: Duration) -> Option<Output> {
+    let deadline = Instant::now() + timeout;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout_rx = drain(child.stdout.take());
+    let stderr_rx = drain(child.stderr.take());
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait(); // 回收，避免僵尸
+                    log::warn!(
+                        "[runtime] 探测命令超时（{timeout:?}），已终止并跳过：{:?}",
+                        command.get_program()
+                    );
+                    return None;
+                }
+                std::thread::sleep(PROBE_POLL);
+            }
+            Err(_) => return None,
+        }
+    };
+
+    // 子进程已退出 **≠** 管道已到 EOF：后代可能仍持有写端（同一失败模式在
+    // `qaqh-workspace/src/process_registry.rs:354` 已有认知）。故这里同样限时，
+    // 拿多少算多少——绝不回到无限等待。
+    let left = deadline.saturating_duration_since(Instant::now());
+    Some(Output {
+        status,
+        stdout: stdout_rx.recv_timeout(left).unwrap_or_default(),
+        stderr: stderr_rx.recv_timeout(left).unwrap_or_default(),
+    })
+}
+
+/// 另起线程把 `reader` 读干，结果经 channel 回传。
+///
+/// 读取必须离开主线程：`read_to_end` 会一直阻塞到 EOF，而 EOF 正是此处不可信
+/// 的东西。读线程可能永远收不到 EOF（后代持有写端），但它只是**有界**地泄漏
+/// 一个线程，而主线程的等待是限时的。
+fn drain<R: std::io::Read + Send + 'static>(
+    reader: Option<R>,
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(mut reader) = reader {
+        let _ = std::thread::Builder::new()
+            .name("qaqh-probe-io".to_string())
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let _ = reader.read_to_end(&mut buf);
+                let _ = tx.send(buf);
+            });
+    }
+    rx
 }
 
 fn background_command(program: &str) -> Command {
@@ -820,6 +921,60 @@ fn broadcast_command_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 正常路径：探测命令秒回，输出拿得到。
+    #[test]
+    fn probe_output_returns_fast_command_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo hi"]);
+        let output = probe_output(command, Duration::from_secs(5)).expect("应拿到输出");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hi");
+    }
+
+    /// BUG-2026-09-15-02 的直接回归：命令本身不退出时，探测必须限时返回而非
+    /// 永久阻塞。
+    #[test]
+    fn probe_output_times_out_instead_of_blocking() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let started = Instant::now();
+        assert!(
+            probe_output(command, Duration::from_millis(200)).is_none(),
+            "超时应当返回 None"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "必须在超时后立刻返回，实测 {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 同一条缺陷的**精确形状**：被探测程序已经退出，但它的后代继承了管道
+    /// 写端 → `Command::output()` 会一直等到后代退出（这里 30s），daemon 的
+    /// 启动就此卡死。`probe_output` 必须把总耗时压在超时预算内。
+    ///
+    /// 变异验证：把 [`probe_output`] 里的 `recv_timeout` 换回阻塞式读取
+    /// （或改用 `Command::output()`），本测试立刻红。
+    #[test]
+    fn probe_output_survives_grandchild_holding_the_pipe() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & echo hi"]);
+        let started = Instant::now();
+        let output = probe_output(command, Duration::from_millis(300));
+        assert!(output.is_some(), "子进程已退出，应拿到（可能是空的）输出");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "管道 EOF 不可信，不得为它无限等待；实测 {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 程序不存在时降级为 None，而不是 panic 或挂起。
+    #[test]
+    fn probe_output_missing_program_is_none() {
+        let command = Command::new("qaqh-no-such-program-xyz");
+        assert!(probe_output(command, Duration::from_millis(200)).is_none());
+    }
 
     fn tool_finished(summary: String) -> qaqh_domain::DomainEvent {
         // The worker normally sends the bounded model projection. This test
