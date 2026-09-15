@@ -358,6 +358,12 @@ pub(crate) fn stateful_noop_sync_error() -> String {
     "STATEFUL_INCREMENT_EMPTY: stateful provider 增量无新消息（远端已持有该 assistant），本次调用跳过；请重建会话或改用非 stateful 端点".to_string()
 }
 
+/// 空请求保护（非 stateful 路径）：投影后无任何可发送内容（如 responses 的
+/// `input: []`）。同一族语义——本地短路，**零 HTTP 请求**，不拿空数组换上游 400。
+pub(crate) fn empty_request_sync_error() -> String {
+    "EMPTY_REQUEST: 本次请求无任何可投影内容（input 为空），已本地短路；未向上游发送空请求".to_string()
+}
+
 pub(crate) fn normalize_skill_envelope(
     provider: &ProviderConfig,
     mut messages: Vec<Message>,
