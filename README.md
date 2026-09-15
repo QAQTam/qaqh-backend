@@ -1,6 +1,6 @@
 # QAQ-Harness
 
-AI 编码代理的跨平台 **Rust 后端核心**(monorepo,14 个 workspace 成员)。单个常驻 daemon 承载多会话对话循环、LLM 网关、19 个内置工具、Agent Skills 与子代理隔离执行;Windows 桌面壳(WinUI3)/ TUI / Web 壳位于独立仓库,通过统一的 **Ringing V1** HTTP/SSE 协议接入。
+AI 编码代理的跨平台 **Rust 后端核心**(monorepo,16 个 workspace 成员)。单个常驻 daemon 承载多会话对话循环、LLM 网关、19 个内置工具、Agent Skills 与子代理隔离执行;Windows 桌面壳(WinUI3)/ TUI / Web 壳位于独立仓库,通过统一的 **Ringing V1** HTTP/SSE 协议接入。
 
 - Edition 2024 · License MIT · 状态:alpha
 - HTTP 栈: `axum 0.8 + hyper 1.1 + tower 0.5 + tower-http 0.6 + tokio 1.44`，`SSE KeepAlive 15s`，release 静态 CRT 单文件 exe(`opt-level=z` + LTO + strip)
@@ -18,18 +18,18 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,14 个 workspace 成�
  │   AgentRegistry ── spawn/close ── actor(每会话一个线程,含子代理沙箱)     │
  │   RingingHub:事件双投(fanout 给所有订阅者,带 causation)                 │
  │        │                                                                 │
- │   qaqh-msgloop TurnEngine:用户输入 → gate → 工具环 → 回合完成 → compact  │
+ │   qaqh-runtime TurnEngine:用户输入 → gate → 工具环 → 回合完成 → compact  │
  │        ├─ qaqh-gate      LLM 网关(Chat/Responses/Anthropic,SSE 流式+重试)│
  │        ├─ qaqh-workspace 19 个工具执行 + 四级权限准入 + 审计              │
  │        └─ qaqh-skills / qaqh-subagent                                     │
  └──────────────────────────────────────────────────────────────────────────┘
         │
-        ├─ {data_dir}/  全局数据根(Windows: %USERPROFILE%\.deepx;
+        ├─ {data_dir}/  全局数据根(Windows: %USERPROFILE%\.qaqh;
         │               Linux/macOS: ~/.config/qaqh;可用 QAQH_DATA_DIR 重定向)
         │     ├─ config.toml + secrets.toml(API key 不落明文,Windows DPAPI 加密)
         │     ├─ daemon.json / daemon.lock(发现 + 单实例锁)
         │     └─ sessions/{8位hex seed}/ meta.json · messages.jsonl · todo.json …
-        └─ <workspace>/.deepx/  项目级目录:PLAN.md · trash/ · skills/
+        └─ <workspace>/.qaqh/  项目级目录:PLAN.md · trash/ · skills/
 ```
 
 ## Workspace 成员
@@ -38,8 +38,7 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,14 个 workspace 成�
 |---|---|---|
 | 领域/线协议 | `qaqh-domain` | 中立 DomainCommand/DomainEvent + 回合聚合投影等共享模型（复用 `qaqh-types` 的规范工具结果模型（ContentRef/ToolResult 经 `event.rs` 重导出）） |
 | | `qaqh-ringing` | Ringing 线协议:envelope / ack / batch / snapshot / content ref / worker frame / 能力协商 |
-| 运行时 | `qaqh-runtime` | daemon 应用运行时:`QaqhService` 方法分发、AgentRegistry、actor、RingingHub |
-| | `qaqh-msgloop` | 对话循环引擎:输入处理 → gate 快照 → 工具审批/执行 → 回合完成 → 自动压缩 |
+| 运行时 | `qaqh-runtime` | daemon 应用运行时:`QaqhService` 方法分发、AgentRegistry、actor、RingingHub、TurnEngine(对话循环:输入处理 → gate 快照 → 工具审批/执行 → 回合完成 → 自动压缩) |
 | | `qaqh-message` | 消息存储状态机(Turn/Step 结构、Effect 驱动、ContextFlow 摄取编排) |
 | | `qaqh-daemon` | headless 入口二进制(`run` / `server` / `status` / `stop`) |
 | 会话/配置 | `qaqh-session` | SessionManager 单例:index/meta/消息 JSONL 持久化、归档、临时会话、WorkspaceStore |
@@ -50,6 +49,8 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,14 个 workspace 成�
 | 工具 | `qaqh-workspace` | 进程内工具执行框架 + 19 个内置工具 + 权限/审计 |
 | | `qaqh-subagent` | `spawn_subagent`:派生隔离 Ringing 子会话(in-process 守护线程,ephemeral,结果异步注入父会话) |
 | | `qaqh-skills` | Agent Skills 发现/解析/激活(SKILL.md + YAML frontmatter,catalog 渐进披露) |
+| | `qaqh-mcp` | MCP **客户端**支持:server 连接/生命周期/冷却 + 工具与资源投影(`mcp__{server}__{tool}` 与聚合只读工具 `mcp`) |
+| | `qaqh-lsp` | LSP **客户端**支持:按扩展名路由的 server 管理 + 精确代码导航(definition/references/hover/documentSymbol/workspaceSymbol) |
 | 客户端/周边 | `qaqh-client` | daemon HTTP/SSE 传输层:discovery → open 协商 → 三频道 SSE + timeline 流 + lease 自愈;供外部壳复用 |
 
 ## 核心概念
@@ -84,7 +85,7 @@ daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器�
 内置 11 家 provider 注册表(deepseek/qwen/glm/kimi/mimo/minimax/doubao/openai/openrouter/deepseek-web/opencode-go),endpoint 级声明协议(openai/responses)、thinking 字段、缓存字段等能力,新 provider 只加配置不改网关代码。`config.toml` 支持命名 profiles;API key 存 `secrets.toml`(Windows DPAPI 加密,其余平台 0600 明文),config 中只留 `"set"` 标记。
 
 ### 技能系统
-扫描项目 `.deepx/skills > .agents/skills > skills`,再用户级同名目录;SKILL.md frontmatter 必填 name/description。catalog 只注入元数据(progressive disclosure),正文仅在 `$mention` 或 `skills activate` 时经类型化 effect 通道注入 `<skill_context_envelope>`;allowed-tools 永不自行授予权限。
+扫描项目 `.qaqh/skills > .agents/skills > skills`,再用户级同名目录;SKILL.md frontmatter 必填 name/description。catalog 只注入元数据(progressive disclosure),正文仅在 `$mention` 或 `skills activate` 时经类型化 effect 通道注入 `<skill_context_envelope>`;allowed-tools 永不自行授予权限。
 
 ## 快速开始
 
