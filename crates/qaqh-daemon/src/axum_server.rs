@@ -6,7 +6,6 @@ mod axum_impl;
 pub use axum_impl::{AppState, build_router};
 
 #[cfg(test)]
-use axum_impl as apis;
 
 /// 进程级 SessionManager 初始化守卫。
 ///
@@ -944,14 +943,5 @@ mod axum_tests {
         // limit=0 必须被钳到 1（而非返回空页 + has_more=true 的死循环）。
         assert_eq!(turns.len(), 1, "limit=0 must degrade to a bounded page");
         assert_eq!(page["total_turns"], serde_json::json!(3));
-    }
-
-    /// 纯函数契约：`limit=0` 不得产出「空页 + has_more」的翻页死锁。
-    #[test]
-    fn timeline_pagination_zero_limit_is_bounded() {
-        let (page, has_more) = apis::paginate_turns(apis::pure_tests::paged_turns(40), None, 0);
-        assert_eq!(page.len(), 1, "limit=0 must be clamped to 1");
-        assert_eq!(page.first().unwrap().turn_id, "t40");
-        assert!(has_more);
     }
 }

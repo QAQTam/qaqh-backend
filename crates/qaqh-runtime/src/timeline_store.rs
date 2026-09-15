@@ -447,6 +447,8 @@ mod tests {
     fn test_turn(turn_id: &str, progress: &str) -> TimelineTurn {
         TimelineTurn {
             turn_id: turn_id.into(),
+            // 夹具走实时路径语义：不带全局序号。
+            turn_index: None,
             created_seq: 1,
             user_text: "question".into(),
             sealed: true,
