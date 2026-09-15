@@ -30,13 +30,18 @@ pub use session::{RingingSession, SessionState};
 pub use timeline::TimelineStream;
 pub use types::ResetRequired;
 pub use types::{
-    AskAnswer, Channel, ChannelStatus, CommandOptions, ContentRef, ControlCommand, ControlEvent,
-    ConversationCommand, ConversationEvent, ConversationMode, DomainActivityState,
-    DomainAskQuestion, DomainDashboardSnapshot, DomainError, DomainSessionState, ErrorScope,
-    EventBatch, PermissionCategory, PermissionRisk, ProviderToolState, RingingCommand,
-    RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,
-    RingingEvent, RingingEventEnvelope, RoundDeltaKind, SkillInfo, SkillRuntimeInfo, TimelineBlock,
-    TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent, TimelinePage,
-    TimelineRound, TimelineSnapshot, TimelineStatus, TimelineTool, TimelineToolState, TimelineTurn,
-    TimelineTurnState, TodoItem, ToolCommand, ToolEvent,
+    AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
+    ChannelStatus, CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent,
+    ConversationCommand, ConversationEvent, ConversationMode, DashboardDocument, DashboardTask,
+    Delivery, DomainActivityState, DomainAskQuestion, DomainDashboardSnapshot, DomainError,
+    DomainSessionState, ErrorScope, EventBatch, ImageBlock, MAX_SAFE_INTEGER, NoticeLevel,
+    PermissionCategory, PermissionRisk, ProviderToolState, RINGING_SCHEMA, RINGING_VERSION,
+    RingingChannelSnapshot, RingingCommand, RingingCommandAck, RingingCommandAckStatus,
+    RingingCommandState, RingingCommandStatus, RingingEvent, RingingEventEnvelope,
+    RingingSessionBootstrap, RoundDeltaKind, SkillInfo, SkillRuntimeInfo, SkillsStatus,
+    TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
+    TimelineFailure, TimelinePage, TimelineRound, TimelineSnapshot, TimelineStatus, TimelineTool,
+    TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState, TodoItem,
+    ToolCommand, ToolContinuation, ToolError, ToolEvent, ToolImage, ToolModelPayload, ToolResult,
+    ToolStatus, UsageInfo, is_safe_integer,
 };

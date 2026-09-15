@@ -4,24 +4,38 @@
 //! and wire types. JSON is a serialization detail at the HTTP/SSE boundary;
 //! it is not an application-facing event model.
 
-use qaqh_ringing::{RINGING_SCHEMA, RINGING_VERSION};
+// `RINGING_SCHEMA`/`RINGING_VERSION` 由下面的 `pub use` 一并带入本模块作用域。
 use serde::{Deserialize, Serialize};
 
+// 再导出的完整性是**有意的**：壳层只认 `qaqh-client` 一个入口，不该越过它去直接
+// 依赖 `qaqh-domain`/`qaqh-ringing`/`qaqh-types`。缺一个名字，壳层就只能再抄一份
+// 镜像——而抄镜像正是漂移的来源（TUI 曾照抄 2419 行协议镜像，实测已漂移出四处
+// 缺陷：两个 timeline 反序列化缺口、config 的两处字段缺失）。
+//
+// 少数类型带 `Domain` 前缀：它们与 `qaqh-client` 自身的类型**同名而语义不同**。
+// 最典型的是 `SessionState`——`qaqh-client::SessionState` 是协商出来的租约状态，
+// `qaqh_domain::SessionState` 是会话生命周期状态，两者毫无关系。
 pub use qaqh_domain::{
-    ActivityState as DomainActivityState, AskAnswer, AskQuestion as DomainAskQuestion, ContentRef,
-    ControlCommand, ControlEvent, ConversationCommand, ConversationEvent, ConversationMode,
-    DashboardSnapshot as DomainDashboardSnapshot, DomainError, ErrorScope, PermissionCategory,
-    PermissionRisk, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
-    SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, TimelineBlock,
-    TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent, TimelineRound,
-    TimelineSnapshot, TimelineTool, TimelineToolState, TimelineTurn, TimelineTurnState, TodoItem,
+    ActivityState as DomainActivityState, AgentLifecycleState, AskAnswer, AskMode,
+    AskQuestion as DomainAskQuestion, AskResolution, CompactStatus, ContentRef, ControlCommand,
+    ControlEvent, ConversationCommand, ConversationEvent, ConversationMode, DashboardDocument,
+    DashboardSnapshot as DomainDashboardSnapshot, DashboardTask, Delivery, DomainError, ErrorScope,
+    ImageBlock, NoticeLevel, PermissionCategory, PermissionRisk, ProviderToolState,
+    RingingChannel as Channel, RoundDeltaKind, SessionState as DomainSessionState, SkillInfo,
+    SkillRuntimeInfo, SkillsStatus, TimelineBlock, TimelineBlockKind, TimelineBlockState,
+    TimelineEntry, TimelineEvent, TimelineFailure, TimelineRound, TimelineSnapshot, TimelineTool,
+    TimelineToolPermission, TimelineToolState, TimelineTurn, TimelineTurnState, TodoItem,
     ToolCommand, ToolEvent,
 };
 pub use qaqh_ringing::{
-    ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse, RingingCommand,
+    CLIENT_SESSION_HEADER, ClientOpenRequest as OpenRequest, ClientOpenResponse as OpenResponse,
+    MAX_SAFE_INTEGER, RINGING_SCHEMA, RINGING_VERSION, RingingChannelSnapshot, RingingCommand,
     RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,
     RingingEvent, RingingEventBatch as EventBatch, RingingEventEnvelope,
-    RingingResetRequired as ResetRequired,
+    RingingResetRequired as ResetRequired, RingingSessionBootstrap, is_safe_integer,
+};
+pub use qaqh_types::{
+    ToolContinuation, ToolError, ToolImage, ToolModelPayload, ToolResult, ToolStatus, UsageInfo,
 };
 
 /// Stable channel order used to start the three independent SSE streams.
