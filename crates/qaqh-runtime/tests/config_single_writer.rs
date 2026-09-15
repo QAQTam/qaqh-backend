@@ -25,12 +25,16 @@ fn daemon_config_actions_share_one_write_port() {
     qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
     let service = QaqhService::init(qaqh_session::SessionManager::global());
 
+    // 载荷用**当前**契约键风格（K2 camelCase）。这里原先是 snake_case，
+    // 靠 `qaqh-config-api` 的 `alias` 才能解析进 ConfigPatch——该兼容臂已按
+    // spec §0b 删除，故载荷随之改正。本测试真正要钉的东西（「权限写入不得
+    // 丢掉其它字段」）与键风格无关。
     service
         .handle(
             "config.save",
             &json!({
-                "base_url": "https://custom.example/v1",
-                "max_tokens": 123456,
+                "baseUrl": "https://custom.example/v1",
+                "maxTokens": 123456,
             }),
         )
         .expect("config.save");

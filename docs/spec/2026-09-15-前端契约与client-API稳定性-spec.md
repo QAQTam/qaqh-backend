@@ -38,15 +38,29 @@
 
 ### 0b.2 现存兼容臂清单（**分级**，不是一句「删掉」）
 
-**A 级 —— wire 上的版本偏斜兼容。按本政策是死重量。**
+**A 级 —— wire 上的版本偏斜兼容。✅ 已全部清除（2026-09-15）。**
 
-| 位置 | 自述理由 |
-|---|---|
-| `qaqh-domain/src/state.rs:117` `InteractionKind::Unknown` + `#[serde(other)]` | 「daemon 新增类别时旧客户端仍能解析（不因未知取值丢掉整个字段）」 |
-| `qaqh-client/src/types.rs:107` `TimelinePage.truncated_before` 的 `#[serde(default)]` | 「旧 daemon 无此字段时按未截断处理」 |
-| TUI `src/protocol/mod.rs` 的 `config_contract_exposes_fields_tui_needs` 第 3 条断言 | 「旧 daemon 的 snake_case 形状仍须可解析」 |
+| 位置 | 自述理由 | 处置 |
+|---|---|---|
+| `qaqh-domain/src/state.rs` `InteractionKind::Unknown` + `#[serde(other)]` | 「daemon 新增类别时旧客户端仍能解析」 | 删（后端 `7c7a223`）。现在未知取值**解析失败**——静默降级会让 UI 显示一个**错**的状态，失败至少响亮 |
+| `qaqh-client/src/types.rs` `TimelinePage.truncated_before` 的 `#[serde(default)]` | 「旧 daemon 无此字段时按未截断处理」 | 删（同上）。daemon 侧恒发此键（`timeline_api.rs` 的 body 写死） |
+| `qaqh-config-api` 的 **20 条 `#[serde(alias = "snake_case")]`** | 「读路径额外接受历史 snake_case 别名」 | 删 |
+| `qaqh-config-api` **8 个读模型**的 struct 级 `#[serde(default)]` | 「`serde(default)` 保证旧 daemon 缺字段时向前兼容」 | 删 |
+| `ConfigDto::notifications_enabled` 的字段级 `default` + `default_notifications_enabled()` | 「字段缺失时的读侧兜底」 | 删。语义缺省（开）由**产出侧**决定：`to_dto` 里 `unwrap_or(true)` |
+| TUI `src/protocol/mod.rs` 的旧 snake_case 断言 | 「旧 daemon 的 snake_case 形状仍须可解析」 | 反转为「残缺载荷**必须报错**」 |
 
-全仓 `#[serde(other)]` **只有一处**（上表第一行）：`grep -rn "serde(other)" --include=*.rs crates/` 实测。
+全仓 `#[serde(other)]` 现存 **0 处**：`grep -rn "serde(other)" --include=*.rs crates/` 实测。
+
+**config 那两条是一对，不能只删 alias**（实测过）：`alias` 走后，旧形状的键变成
+**未知键被 serde 静默忽略**，而 struct 级 `default` 再把缺失字段补成缺省 ⇒ 解析
+**成功**但得到的是一份**全默认的配置**。设置页会显示一堆空值而不是报错——比不删更糟。
+删除后同一条载荷直接 `missing field` 失败。
+
+**连带改动（同批）**：`qaqh-runtime/tests/config_single_writer.rs` 的 `config.save`
+载荷由 snake_case 改为 camelCase（该测试真正要钉的是「权限写入不得丢掉其它字段」，
+与键风格无关）；TUI `app/settings.rs` 的测试 fixture 改为**由 `ConfigDto::default()`
+生成**再覆盖关心的字段（原先手写的 JSON 缺 6 个键、且 `subagent.api_key` 是
+snake_case，全靠那条 struct 级 default 兜着）。
 
 **B 级 —— 陈旧磁盘文件兼容。判据不同，看那次破坏性改动有没有真的删数据根。**
 
@@ -295,8 +309,8 @@ TUI 在 2026-09-15 完成 T-01 三阶段迁移后：
    ~~顺带收口 `session.activity`~~ ✅ 同批落地（TUI 侧协议手解面至此归零）。
 2. ~~**G3 的流程**（缺方法按补丁提），实现上维持封闭枚举~~ ✅ **已立**（见 §2），
    并顺带补上 action 侧 15 条路由的零覆盖。
-3. **按 §0b 清理 A 级兼容臂**（3 处，逐个确认无其它调用方）。B 级先不动——它读的是
-   磁盘上的遗留文件，判据是「那次改动有没有真的删数据根」，不该顺手删。
+3. ~~按 §0b 清理 A 级兼容臂~~ ✅ **已清零（2026-09-15）**，见 §0b.2。B 级仍不动——
+   它读的是磁盘上的遗留文件，判据是「那次改动有没有真的删数据根」，不该顺手删。
 4. `BUG-2026-09-15-05`（深翻页）：让 `truncated_before` 那部分历史真正可读。做完后
    `truncated_before` 会自然收敛为 `false`，前端提示随之消失——**不要提前为它加特判**。
    （按 §0b，第 3 步若先做，`truncated_before` 的 `#[serde(default)]` 会一并消失；
