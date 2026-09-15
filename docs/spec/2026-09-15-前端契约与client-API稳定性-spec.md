@@ -44,17 +44,38 @@ bootstrap 的三频道各带一段中立 JSON，**形状没有任何 Rust 类型
 `state`，`ConversationStateView` / `ChannelStateView` 逐个字段 `state.get("…")`。
 winui 与 web 将各写一份，且**没有任何机制阻止三份漂移**——这正是 2419 行镜像的成因。
 
-**实测形状**（由 `qaqh-runtime` 生产、TUI 消费，双方独立确认）：
+**实测形状（产出侧）**——注意：**按消费侧抄是错的**。TUI 那份手解只覆盖了它自己
+要用的子集；照它写类型会漏字段。下表取自产出方 `qaqh-runtime`：
 
-| 频道 | `state` 字段 |
+`conversation`：
+
+| 来源 | 字段 |
 |---|---|
-| `conversation` | `turns[]`（见下）、`total_turns`、`has_more`、`usage`、`usage_totals`、`usage_requests`、`cache_reported_requests`、`model`、`context_limit` |
-| `control` | `session_state`、`activity`（**两种形态**：字符串，或 `{state:"…"}`）、`agent_lifecycle`、`config_rev`、`pending_interaction`（`null` 或 `{id, kind}`，`kind ∈ {ask, plan}`）、`skills`、`dashboard_snapshot` |
-| `tool` | `running[]`、`pending_permission`（`null` 或 tool_call_id 字符串） |
+| 初始快照（`conversation_snapshot.rs::persisted_conversation_state`） | `turns[]`、`total_turns`、`has_more`、`usage`、`usage_totals`、`usage_requests`、`cache_reported_requests`、`model`、`context_limit` |
+| 事件折叠（`projection.rs:143-192`） | `active_turn`（`null` \| turn_id）、`last_completed_turn`、`last_failed_turn`、`last_round`（`{turn_id, round_num, final}`）、`compact_status`（字符串）、`compact_id`、`cancelled`（`null` \| bool） |
 
-`turns[]` 元素（`qaqh-runtime/src/ringing/conversation_snapshot.rs::neutral_turn`）：
-`turn_id`、`user_text`、`rounds[]`；`rounds[]` 元素：`round_num`、`is_final`、
-`thinking`、`answer`、`blocks`、`tool_calls`、`tool_results`。
+`control`：
+
+| 来源 | 字段 |
+|---|---|
+| 初始快照（`hub.rs` 构建） | `session_state`、`activity`、`agent_lifecycle`、`config_rev`、`skills`、`dashboard_snapshot` |
+| 事件折叠（`projection.rs:110-142`） | `pending_interaction`（`null` \| `{id, kind}`，`kind ∈ {ask, plan}`）、`last_failure`（`null` \| `{occurred:true}`）、`last_notice`（notice_id）、`dashboard_snapshot` |
+
+`tool`（`projection.rs:203-236`）：`pending_permission`（`null` \| tool_call_id）、
+`last_finished`（tool_call_id）、`running`（`null` \| `[{tool_call_id, turn_id, round_num}]`）。
+
+`turns[]` 元素（`conversation_snapshot.rs::neutral_turn`）：`turn_id`、`user_text`、
+`rounds[]`；`rounds[]` 元素：`round_num`、`is_final`、`thinking`、`answer`、`blocks`、
+`tool_calls`、`tool_results` ——**与 `qaqh_domain::RoundData` 逐字段同构**，
+故 `Vec<TurnData>` 可直接反序列化（已核 `RoundData` 的 `serde(default)` 覆盖）。
+
+**这条本身就是一个论据**：TUI 已上线的手解至今**没解** `active_turn`、`last_round`、
+`compact_status`、`compact_id`、`cancelled`、`last_finished` 六个字段——**手抄必然漏**，
+而且漏了没人会发现。G1 的类型化必须**从产出侧全量审计**，不能照抄任何现有消费侧实现。
+
+**前置工作（实现类型前的第一步）**：枚举三段 `state` 的**全部写入方**——
+`projection.rs` 的事件折叠、`conversation_snapshot.rs` 的初始快照、`hub.rs` 的快照
+构建、`orphan_seal.rs` 的孤儿收尾——逐个字段确认，再定类型。跳过这步就会重演上表。
 
 **建议**：在 `qaqh-ringing`（或新 leaf crate）为三段 `state` 定义 `ConversationState`
 / `ControlState` / `ToolState`，`state` 改为带 `#[serde(untagged)]` 或
