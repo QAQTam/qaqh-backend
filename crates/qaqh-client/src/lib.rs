@@ -29,6 +29,12 @@ pub use remote_path::{display_host, display_path, remote_path_from_display};
 pub use session::{RingingSession, SessionState};
 pub use timeline::TimelineStream;
 pub use types::ResetRequired;
+/// 三频道快照 `state` 的类型化视图（前端契约 G1）。三端共用，替代各自手解
+/// `serde_json::Value`——经 [`RingingSessionBootstrap`] 的同名访问器取用。
+pub use qaqh_domain::state::{
+    ControlState, ConversationState, InteractionKind, LastFailure, LastRound, PendingInteraction,
+    RunningTool, ToolState,
+};
 pub use types::{
     AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
     ChannelStatus, CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent,
