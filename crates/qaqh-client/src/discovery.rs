@@ -201,33 +201,53 @@ pub fn daemon_executable() -> std::path::PathBuf {
     std::path::PathBuf::from(exe)
 }
 
-fn spawn_daemon_detached() -> Result<()> {
-    let executable = daemon_executable();
+/// 以「脱离当前 shell」的方式拉起 daemon 进程。**daemon 的唯一 spawn 出口**
+/// （此前 `discovery::spawn_daemon_detached` 与 `client::spawn_detached` 各写一份，
+/// 加保护极易只改一处）。
+///
+/// **为什么必须脱离**（BUG-2026-09-15-04）：daemon 与 shell 同进程组、同会话时
+/// （实测：daemon 的 PGID == 起它的 TUI 的 PGID，PPID 即 TUI），终端一收尾——
+/// 关窗、Ctrl+C 打到前台组、父进程被 SIGTERM——daemon 会被一并收走。它来不及
+/// 清理 `daemon.json`，于是留下一条陈旧记录；判活若不可靠
+/// （BUG-2026-09-15-03），下一个 shell 就被那条记录永久卡死。设计上 daemon 本就
+/// 该跨 shell 复用（`daemon.lock` 单实例锁、`/control/v1/stop-if-idle` 都指向
+/// 这一点），原先的行为与设计相反。
+///
+/// Unix 用 `process_group(0)` 让 daemon 自成一个进程组（pgid = 自身 pid）——终端
+/// 关闭时的 SIGHUP 只发给**前台进程组**，故此一步即足以保命；std 自带，无需引
+/// libc。Windows 仍用 `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`。
+pub(crate) fn spawn_daemon_process(executable: &std::path::Path) -> Result<()> {
     log::info!("[qaqh-client] spawning daemon: {}", executable.display());
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("run")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    configure_detached(&mut command);
+    let _ = command.spawn()?;
+    Ok(())
+}
+
+/// 让 `command` 拉起的子进程脱离调用方的进程组。抽出来是为了可测——这是
+/// 「daemon 会不会随 shell 一起死」的唯一开关。
+fn configure_detached(command: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new(&executable)
-            .arg("run")
-            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        Ok(())
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new(&executable)
-            .arg("run")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        Ok(())
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
+}
+
+fn spawn_daemon_detached() -> Result<()> {
+    spawn_daemon_process(&daemon_executable())
 }
 
 /// Process liveness probe — client-side implementation, deliberately distinct
@@ -405,6 +425,37 @@ mod tests {
             !discovery_is_live(&d),
             "记录里的 pid 已死 → 判死（这正是真机那条）"
         );
+    }
+
+    /// BUG-2026-09-15-04：daemon 必须**自成进程组**，否则终端收尾时会被连同
+    /// shell 的前台进程组一起收走（实测：修复前 daemon 的 PGID == 起它的 TUI 的
+    /// PGID，shell 退出后 daemon 消失并留下陈旧 `daemon.json`）。
+    ///
+    /// 限定 Linux：读 `/proc/<pid>/stat` 的 pgrp 字段。
+    /// 破坏验证：去掉 `configure_detached` 里的 `process_group(0)` → 本测试红。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detached_spawn_lands_in_its_own_process_group() {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        configure_detached(&mut command);
+        let mut child = command.spawn().expect("spawn sleep");
+        let pid = child.id();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("read stat");
+        // `pid (comm) state ppid pgrp session ...`；comm 可能含空格与括号，
+        // 故从 `) ` 之后开始数：state / ppid / pgrp。
+        let pgrp: u32 = stat
+            .rsplit_once(") ")
+            .expect("comm 以 `) ` 收尾")
+            .1
+            .split_whitespace()
+            .nth(2)
+            .expect("pgrp 字段")
+            .parse()
+            .expect("pgrp 是数字");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(pgrp, pid, "daemon 必须自成一个进程组（pgid == 自身 pid）");
     }
 
     /// 反向闸：健康的 daemon 不能被误判为陈旧，否则会对在跑的实例重复拉起。
