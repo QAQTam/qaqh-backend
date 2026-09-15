@@ -13,7 +13,7 @@
 | ID | 状态 | 项 |
 |---|---|---|
 | BUG-2026-09-15-03 | `fixed @9556aec` | 非 Windows 的 `process_is_running` 是**恒返回 `true` 的 stub**：daemon 非正常死亡后遗留的 `daemon.json` 让「pid 判活过滤」全部放行 → 客户端拿死端点去连 → `Connection refused`，**永不回退到拉起 daemon**。Linux/macOS 上每个 shell 都得手工删文件才恢复 |
-| BUG-2026-09-15-04 | `open` | `spawn_daemon_detached`（Unix）未 `setsid`/未建新进程组，daemon 与 shell 同进程组 → shell 异常退出时 daemon 被一并收走。**这是 03 的实际触发路径**：它不断制造陈旧记录，03 则把记录变成永久砖 |
+| BUG-2026-09-15-04 | `fixed @572f36a` | `spawn_daemon_detached`（Unix）未 `setsid`/未建新进程组，daemon 与 shell 同进程组 → shell 异常退出时 daemon 被一并收走。**这是 03 的实际触发路径**：它不断制造陈旧记录，03 则把记录变成永久砖 |
 
 ## 事实与证据（03）
 
@@ -78,7 +78,26 @@ daemon 同目录）：
 验证边界：**未在 Windows 上编译核验**（本机无该 target）；Windows 分支改动仅为
 保留原实现，未触碰。
 
-## 04 的证据与建议
+## 处置（04，`572f36a`）
+
+Unix 分支加 `process_group(0)`（std 自带，无需 libc）；两处 spawn 合并为唯一出口
+`discovery::spawn_daemon_process`（此前 `discovery::spawn_daemon_detached` 与
+`client::spawn_detached` 各一份，本次实测就吃了亏：先只改了 discovery 那份，
+daemon 仍随 shell 死，才发现 client 那份也在生效路径上）；「脱离配置」抽成
+`configure_detached(&mut Command)` 以便测试。
+
+**真机前后对比**（同一探针）：
+
+| | daemon PGID | shell 收尾后 |
+|---|---|---|
+| 修复前 | 99007（= TUI 的组） | **死**，`daemon.json` 残留 |
+| 修复后 | 112135 = 自身 pid | **存活** |
+
+回归锁 `detached_spawn_lands_in_its_own_process_group`（Linux 读 `/proc/<pid>/stat`
+的 pgrp）。破坏验证：注掉 `process_group(0)` → 红。
+边界：未 `setsid`（仍在原会话，但已不在前台进程组，实测足以存活）；Windows/macOS 未验。
+
+## 04 的证据与建议（原始记录，保留）
 
 `discovery.rs::spawn_daemon_detached`（Unix 分支）只设了 null stdio，**没有
 `setsid`、也没有独立进程组**；Windows 分支设了 `CREATE_NEW_PROCESS_GROUP`，
