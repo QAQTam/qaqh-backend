@@ -374,6 +374,9 @@ pub fn process_is_running(pid: u32) -> bool {
     } else {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
+            // 判死是**正常路径**（陈旧 discovery、进程已退出），不是异常：
+            // kill 的 `没有那个进程` 不该漏进调用方的 stderr。
+            .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
     }

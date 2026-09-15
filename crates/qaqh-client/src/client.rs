@@ -154,13 +154,14 @@ impl Client {
                 (base_url, remote.token)
             }
             None => {
-                // 只接受"pid 存活"的 discovery：残留的 daemon.json（daemon 被强杀
-                // 后遗留）会导致直连死端口（connection refused），此前仅检查文件
-                // 存在与否。pid 已死的 discovery 视为缺失，走拉起路径（新 daemon
-                // 启动时经单实例锁清理 stale lock/discovery 自愈）。
+                // 只接受「pid 存活 **且** 端点真的在听」的 discovery：残留的
+                // daemon.json（daemon 被强杀后遗留）会导致直连死端口
+                // （connection refused），此前仅检查文件存在与否。判据不成立的
+                // discovery 一律视为缺失，走拉起路径（新 daemon 启动时经单实例
+                // 锁清理 stale lock/discovery 自愈）。
                 let discovery = match read_discovery()
                     .ok()
-                    .filter(|d| crate::discovery::process_is_running(d.pid))
+                    .filter(|d| crate::discovery::discovery_is_live(d))
                 {
                     Some(d) => d,
                     None => {
@@ -831,7 +832,7 @@ async fn wait_for_daemon(
     // 持有者活着即意味着有实例正在初始化，直接轮询等待其发布即可。
     let live = read_discovery()
         .ok()
-        .filter(|d| crate::discovery::process_is_running(d.pid));
+        .filter(|d| crate::discovery::discovery_is_live(d));
     if live.is_none() && !crate::discovery::lock_holder_alive() {
         log::info!("[qaqh-client] spawning daemon: {}", executable.display());
         spawn_detached(executable.as_ref())?;
@@ -841,9 +842,9 @@ async fn wait_for_daemon(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         match read_discovery() {
-            // 同样要求 pid 存活：spawn 前残留的 stale discovery 不得被
-            // 当作新 daemon 的就绪信号（旧 pid 已死）。
-            Ok(d) if crate::discovery::process_is_running(d.pid) => return Ok(d),
+            // 同样要求「pid 存活 + 端点真的在听」：spawn 前残留的 stale
+            // discovery 不得被当作新 daemon 的就绪信号。
+            Ok(d) if crate::discovery::discovery_is_live(&d) => return Ok(d),
             Ok(_) | Err(_) if tokio::time::Instant::now() >= deadline => {
                 return Err(ClientError::Discovery(
                     "daemon did not publish live discovery in time".into(),

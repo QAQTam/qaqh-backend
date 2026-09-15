@@ -3,6 +3,8 @@
 //! `CONTROL_PROTOCOL_VERSION`) is single-sourced in `qaqh-types` (PR-3-1);
 //! this module owns only the client-side filesystem access and URL derivation.
 
+use std::net::ToSocketAddrs;
+
 use crate::error::{ClientError, Result};
 
 pub use qaqh_types::DaemonDiscovery;
@@ -63,7 +65,7 @@ pub fn read_discovery() -> Result<DaemonDiscovery> {
 /// existing discovery when the daemon process is alive.
 pub fn ensure_daemon_running(timeout: std::time::Duration) -> Result<DaemonDiscovery> {
     if let Ok(discovery) = read_discovery()
-        && process_is_running(discovery.pid)
+        && discovery_is_live(&discovery)
     {
         return Ok(discovery);
     }
@@ -76,7 +78,7 @@ pub fn ensure_daemon_running(timeout: std::time::Duration) -> Result<DaemonDisco
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match read_discovery() {
-            Ok(discovery) if process_is_running(discovery.pid) => return Ok(discovery),
+            Ok(discovery) if discovery_is_live(&discovery) => return Ok(discovery),
             Ok(_) => {}
             Err(_) => {}
         }
@@ -89,27 +91,64 @@ pub fn ensure_daemon_running(timeout: std::time::Duration) -> Result<DaemonDisco
     }
 }
 
+/// 一条 discovery 记录是否指向**真正可用**的 daemon。
+///
+/// 两道判据缺一不可：
+/// 1. **记录的 pid 存活** —— 挡住 daemon 崩溃/被 SIGKILL/重启后留下的陈旧
+///    记录（此前非 Windows 的判活是恒 `true` 的 stub，等于完全没挡）；
+/// 2. **端点真的在监听** —— 挡住 pid 判活的两处漏网：**pid 复用**（记录里的
+///    pid 被无关进程占用）与 **daemon 活着但没在听**（启动中卡住、监听 socket
+///    已关闭）。少了这一条，客户端会拿一个死端点去连，`Connection refused`
+///    之后**不会**回退到拉起 daemon。
+///
+/// 判据 2 是本地回环的一次 TCP 连接（≤[`ENDPOINT_PROBE_TIMEOUT`]），只在
+/// 「已有 discovery 记录」的连接路径上发生，不进热路径。
+pub(crate) fn discovery_is_live(discovery: &DaemonDiscovery) -> bool {
+    process_is_running(discovery.pid) && endpoint_reachable(discovery)
+}
+
+/// 端点探测超时。本地回环，300ms 已是极大宽限。
+const ENDPOINT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// 端点是否连得上。**判不了就返回 `true`**——宁可放行，也不要因误判「陈旧」
+/// 而对一个其实健康的 daemon 重复拉起。
+fn endpoint_reachable(discovery: &DaemonDiscovery) -> bool {
+    // 非 http（如远端 https）不做此检查：那是另一套信任与超时模型。
+    let Some(authority) = discovery
+        .base_url()
+        .ok()
+        .and_then(|url| url.strip_prefix("http://").map(str::to_owned))
+    else {
+        return true;
+    };
+    let authority = authority.split('/').next().unwrap_or_default();
+    if authority.is_empty() {
+        return true;
+    }
+    let Ok(mut addrs) = authority.to_socket_addrs() else {
+        return true;
+    };
+    let Some(addr) = addrs.next() else {
+        return true;
+    };
+    std::net::TcpStream::connect_timeout(&addr, ENDPOINT_PROBE_TIMEOUT).is_ok()
+}
+
 /// 检查 `daemon.lock` 持有者进程是否存活（daemon 单实例锁，见
 /// `qaqh-daemon::server::acquire_single_instance`）。lock 持有者活着即
 /// 意味着有 daemon 正在启动/运行，即使 `daemon.json` 尚未发布。
 /// `pub(crate)`：`client::wait_for_daemon` 在 spawn 前据此避免重复拉起。
 pub(crate) fn lock_holder_alive() -> bool {
-    #[cfg(not(windows))]
+    // 曾经非 Windows 直接 `false`（因为判活是恒 true 的 stub，读了也没用），
+    // 代价是「daemon 正在冷启动、discovery 尚未发布」时会被重复 spawn。判活
+    // 修好后两个平台同构，不再分叉。
+    let lock = data_dir().join("daemon.lock");
+    match std::fs::read_to_string(&lock)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
     {
-        // 非 Windows 无 pid 判活实现（`process_is_running` stub 恒 true），
-        // 回退旧行为：始终允许 spawn，由 daemon 侧单实例锁兜底。
-        false
-    }
-    #[cfg(windows)]
-    {
-        let lock = data_dir().join("daemon.lock");
-        match std::fs::read_to_string(&lock)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok())
-        {
-            Some(pid) => process_is_running(pid),
-            None => false,
-        }
+        Some(pid) => process_is_running(pid),
+        None => false,
     }
 }
 
@@ -192,10 +231,17 @@ fn spawn_daemon_detached() -> Result<()> {
 }
 
 /// Process liveness probe — client-side implementation, deliberately distinct
-/// from `qaqh_types::platform::process_is_running` (which shells out to
-/// `tasklist`/`kill`): this one uses the Win32 API directly (no subprocess
-/// latency) and treats non-Windows discovery presence as sufficient. Do NOT
-/// merge the two; they serve different perf/semantics envelopes.
+/// from [`qaqh_types::platform::process_is_running`]: on Windows this one uses
+/// the Win32 API directly (no `tasklist` subprocess latency). On non-Windows it
+/// **delegates** to that same function (`kill -0`).
+///
+/// 曾经这里在非 Windows 上是 `true` 的 stub（注释写「discovery 文件存在即视为
+/// 存活」）。那不是占位符无伤大雅，而是**把一个陈旧 `daemon.json` 变成永久
+/// 砖**：daemon 被 SIGKILL/崩溃/重启后记录仍在，于是
+/// [`ensure_daemon_running`] 与 `Client::connect_async` 的「pid 判活过滤」
+/// 双双通过，客户端拿死端点去连 → `Connection refused`，
+/// **且永不回退到拉起 daemon**。任何 shell 都得手工删文件才恢复（真机复现：
+/// 记录 pid 已死、端口无人监听，TUI 仍直连该端口报错）。
 #[cfg(windows)]
 pub fn process_is_running(pid: u32) -> bool {
     let handle = unsafe {
@@ -220,8 +266,8 @@ pub fn process_is_running(pid: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn process_is_running(_pid: u32) -> bool {
-    true // discovery presence is the check on non-Windows for now
+pub fn process_is_running(pid: u32) -> bool {
+    qaqh_types::platform::process_is_running(pid)
 }
 
 #[cfg(test)]
@@ -281,5 +327,92 @@ mod tests {
         let json = serde_json::to_string(&parsed).expect("serialize");
         let reparsed: DaemonDiscovery = serde_json::from_str(&json).expect("reparse");
         assert_eq!(reparsed, parsed);
+    }
+
+    // ── 陈旧 discovery 判活（真机事故回归）────────────────────────────────
+    //
+    // 曾经非 Windows 的 `process_is_running` 是恒 `true` 的 stub，于是 daemon
+    // 被 SIGKILL 后留下的 `daemon.json` 成了**永久砖**：判活过滤全部放行，
+    // 客户端拿死端点去连 → `Connection refused`，且永不回退到拉起 daemon。
+    // 实测现场：记录 pid 已死、端口无人监听，TUI 仍直连该端口报错。
+
+    /// 死 pid 必须判死。stub 恒 `true` 时这条会红。
+    #[test]
+    fn process_is_running_is_false_for_a_reaped_child() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn sh");
+        let pid = child.id();
+        child.wait().expect("wait child");
+        assert!(
+            !process_is_running(pid),
+            "已回收的子进程 pid {pid} 必须判死"
+        );
+    }
+
+    #[test]
+    fn process_is_running_is_true_for_self() {
+        assert!(process_is_running(std::process::id()));
+    }
+
+    fn discovery_at(endpoint: String, pid: u32) -> DaemonDiscovery {
+        DaemonDiscovery {
+            endpoint,
+            token: String::new(),
+            pid,
+            server_epoch: String::new(),
+            protocol_version: 1,
+            daemon_version: String::new(),
+            build_id: String::new(),
+            channel: String::new(),
+            executable: String::new(),
+        }
+    }
+
+    /// 取一个「刚被释放、几乎必然无人在听」的回环端口。
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.local_addr().expect("local_addr").port()
+    }
+
+    /// pid 判活的漏网之一：**端口没人听**（daemon 启动中卡住、监听已关）。
+    /// 只判 pid 会让客户端拿死端点去连且不回退。
+    #[test]
+    fn discovery_is_dead_when_endpoint_refuses() {
+        let port = free_port();
+        let d = discovery_at(format!("http://127.0.0.1:{port}"), std::process::id());
+        assert!(
+            !discovery_is_live(&d),
+            "端口 {port} 无人监听，即便 pid 存活也必须判死"
+        );
+    }
+
+    /// pid 判活的漏网之二：**pid 复用**——记录里的 pid 被无关进程占用。
+    /// 这里用「stub 恒 true 时唯一会放行的组合」来逼近：存活 pid + 死端口。
+    #[test]
+    fn discovery_is_dead_when_pid_is_gone_even_if_endpoint_listens() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn sh");
+        let pid = child.id();
+        child.wait().expect("wait child");
+        let d = discovery_at(format!("http://127.0.0.1:{port}"), pid);
+        assert!(
+            !discovery_is_live(&d),
+            "记录里的 pid 已死 → 判死（这正是真机那条）"
+        );
+    }
+
+    /// 反向闸：健康的 daemon 不能被误判为陈旧，否则会对在跑的实例重复拉起。
+    #[test]
+    fn healthy_discovery_is_live() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+        let d = discovery_at(format!("http://127.0.0.1:{port}"), std::process::id());
+        assert!(discovery_is_live(&d), "有人在听 + pid 存活 → 判活");
     }
 }
