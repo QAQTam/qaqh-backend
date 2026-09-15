@@ -737,7 +737,17 @@ fn convert_messages(
     }
 
     let mut img_idx: usize = image_index_base;
+    // 工具图片降级成的合成 user 消息不能就地落盘：一个 assistant 消息里的多个
+    // tool_call 会产生**连续多条** tool 消息，而 OpenAI 要求 assistant(tool_calls)
+    // 之后紧跟全部对应的 tool 消息，中间插入 user 会直接 HTTP 400
+    //（"An assistant message with 'tool_calls' must be followed by tool messages
+    // responding to each tool_call_id"）。所以先把合成消息攒起来，等这串 tool
+    // 消息走完（遇到非 tool 消息，或消息遍历结束）再统一落盘。
+    let mut pending_media: Vec<serde_json::Value> = Vec::new();
     for msg in messages {
+        if msg.role != "tool" && !pending_media.is_empty() {
+            out.append(&mut pending_media);
+        }
         let name = &msg.name;
         match msg.role.as_str() {
             "system" | "developer" => {
@@ -851,10 +861,10 @@ fn convert_messages(
                             }));
                         }
                         // 工具产出的图片（read_image）：OpenAI 兼容端点的
-                        // tool 消息只接受字符串 content，图片降级为紧随的
-                        // 合成 user 消息（opencode 同款策略）。
+                        // tool 消息只接受字符串 content，图片降级为合成 user
+                        // 消息（opencode 同款策略）；落盘时机见 pending_media。
                         ContentBlock::Image { mime_type, data } => {
-                            out.push(serde_json::json!({
+                            pending_media.push(serde_json::json!({
                                 "role": "user",
                                 "content": [
                                     {"type": "text", "text": "Attached media from tool result:"},
@@ -867,7 +877,7 @@ fn convert_messages(
                         } => {
                             // A-2 L0：按需读盘后走同一 data URI 降格路径。
                             match qaqh_types::image_store::load_image_b64(sha256, mime_type) {
-                                Ok(data) => out.push(serde_json::json!({
+                                Ok(data) => pending_media.push(serde_json::json!({
                                     "role": "user",
                                     "content": [
                                         {"type": "text", "text": "Attached media from tool result:"},
@@ -886,6 +896,8 @@ fn convert_messages(
             _ => {}
         }
     }
+    // tool 段结束后再落盘合成 media 消息（含消息列尾的未清空情形）。
+    out.append(&mut pending_media);
 
     out
 }
@@ -1042,6 +1054,81 @@ mod skill_envelope_tests {
             .collect();
         assert!(joined.contains("[Image #0:"), "first upload → #0");
         assert!(joined.contains("[Image #1:"), "second upload → #1");
+    }
+
+    /// 复现 BUG-2026-09-16-01：一个 assistant 消息里连发两次 `read_image`
+    /// （两个 tool_call），两条 tool 消息各带一张图。图片降级成的合成 user
+    /// 消息**不得插在两条 tool 消息之间**——OpenAI 要求 assistant(tool_calls)
+    /// 之后紧跟全部对应的 tool 消息，否则 HTTP 400：
+    /// "An assistant message with 'tool_calls' must be followed by tool
+    /// messages responding to each tool_call_id"。
+    #[test]
+    fn parallel_tool_result_images_do_not_split_the_tool_run() {
+        let provider = provider();
+        let assistant = Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "read_image".into(),
+                    input: serde_json::json!({"path": "a.png"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "call-2".into(),
+                    name: "read_image".into(),
+                    input: serde_json::json!({"path": "b.png"}),
+                },
+            ],
+        };
+        let tool_msg = |id: &str, b64: &str| Message {
+            msg_id: None,
+            role: "tool".into(),
+            name: None,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: id.into(),
+                    result: qaqh_types::ToolResult::ok("image attached"),
+                },
+                ContentBlock::image("image/png", b64),
+            ],
+        };
+        let messages = vec![
+            assistant,
+            tool_msg("call-1", "Zm9v"),
+            tool_msg("call-2", "YmFy"),
+        ];
+        let out = convert_messages(&provider, messages.clone(), None, 0);
+        let roles: Vec<&str> = out
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["assistant", "tool", "tool", "user", "user"],
+            "两条 tool 消息必须紧邻 assistant(tool_calls)，图片合成消息延后：{out:#?}"
+        );
+
+        // 同一串 tool 消息后面还有普通消息时，合成图片消息必须在进入下一条
+        // 消息之前就落盘（否则图片会跑到 assistant 回合之后）。
+        let mut with_next_turn = messages;
+        with_next_turn.push(Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::text("both images seen")],
+        });
+        let out = convert_messages(&provider, with_next_turn, None, 0);
+        let roles: Vec<&str> = out
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["assistant", "tool", "tool", "user", "user", "assistant"],
+            "图片合成消息不得跟到 assistant 之后：{out:#?}"
+        );
     }
 
     #[test]
