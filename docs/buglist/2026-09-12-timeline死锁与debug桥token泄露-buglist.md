@@ -22,8 +22,14 @@
 - **验证**：`timeline_persist_deadlock_repro` 2/2 passed（1.11s，修复前 2 failed/16s）；
   `qaqh-runtime` lib 174 passed（12.19s，修复前整体挂死）；曾挂死的
   `terminal_timeline_intent_is_persisted_before_publish_returns` 现 0.01s 通过。
-- **遗留**：`enable_turn_offload` 仍是死代码（无调用者，内含 `drop(store)` 空操作，编译器告警）；
-  offload 回调与持久化路径的 ABBA 锁序未改（报告 §3.6-4），启用 offload 前必须处理。
+- **遗留（2026-09-17 复核：已由 `ea6063c` 处理；以下保留为修复时记录）**：`enable_turn_offload` 仍是死代码
+  （无调用者，内含 `drop(store)` 空操作，编译器告警）；offload 回调与持久化路径的 ABBA 锁序未改
+  （报告 §3.6-4），启用 offload 前必须处理。
+  → **现状（`ea6063c` 之后）**：`enable_turn_offload` 已有生产调用点
+  （`crates/qaqh-runtime/src/ringing/timeline_hub.rs:261/293/319/533`，加载/重建路径另有
+  `appender.enable_offload` 接线 `:313/:407`），`drop(store)` 空操作随之删除；offload 改为**在两把锁之外执行**
+  （`offload_all_sealed_turns`，`:252/325/420/481/532-534`），seal/持久化路径不再嵌套持有 `timeline`
+  与 `timeline_store` 两把锁（`offload_all_sealed_turns_from` 的文档注释 `:538-543` 明示该不变式）。
 
 ### BUG-2026-09-12-02（/debug 桥 token 泄漏）
 

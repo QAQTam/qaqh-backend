@@ -44,7 +44,7 @@
 ```
 # probe
 
-| BUG-2026-09-16-01 | `fixed`（工作区，待提交） | some really long trailing text to make this line long |
+| BUG-2026-09-16-XX | `fixed`（工作区，待提交） | some really long trailing text to make this line long |
 | other row | x | y |
 ```
 
@@ -55,10 +55,18 @@ hunk0 replace: NO_MATCH — best score 0.32 is below threshold 0.85 — closest 
 wrong; re-check 'old' against the file (see candidates below)
   candidate #1 L3-L3 score 0.32 tier3
   - `fixed`（工作区，待提交） |
-  + | BUG-2026-09-16-01 | `fixed`（工作区，待提交） | some really long trailing text … |
+  + | BUG-2026-09-16-XX | `fixed`（工作区，待提交） | some really long trailing text … |
 ```
 
 会话里同一现象：`2026-09-16-read_image连发触发400-buglist.md` L15（长表格行）连失败两次。
+
+> **示例行 ID 为占位（2026-09-17 卫生复核改）**：探针文件里的示例行原照抄真实登记号
+> `BUG-2026-09-16-01`，与 `2026-09-16-read_image连发触发400-buglist.md` 的真实条目**撞号**——
+> 任何 `^\| BUG-` 的 grep 都会把这段代码块误当成登记行。现改为占位号 `BUG-2026-09-16-XX`
+> （**与原号等长，均 18 字符**，故行的长度、`old` 片段与记录里的 score/候选 diff 全部不变；
+> 示例演示的是「`old` 是长表格行的行内真子串却 NO_MATCH」，与 ID 取值无关）。
+> 示例行里的状态文案 `fixed（工作区，待提交）` 是**探针文件的伪造内容**、非登记状态，
+> 保留原样以免改动复现记录（`rg '工作区，待提交'` 仍会命中这 4 行代码块，属预期）。
 
 ### 06：片段够「像」时整行被顶掉
 
