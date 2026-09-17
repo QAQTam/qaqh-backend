@@ -203,4 +203,9 @@ Windows-only 路径在 Linux 上无法运行验证的，必须在 PR body 明确
 - `cnb pulls merge-pull` **必须带 `--commit-title`**（否则 400 `commit_title is required`）；
   `cnb pulls list-pull-comments` 的正确命令名是 `list-pull-comments`（`--repo` + `--number` 均必填）。
 - NPC 自动评审有时**只写 review 不写 comment**（`cnb pulls list-pull-reviews` 看得到），
-  有时整条流水线在 10s 内 `error`（基础设施抖动）——**空推一个 commit 即可重触发**。
+  有时整条流水线在 6~10s 内 `error`（基础设施抖动）——**空推一个 commit 即可重触发**。
+- ⚠️ **2026-09-17 傍晚实测：评审服务连续故障约 1 小时**（#90~#95 六个 PR 全部 6~10s `error`，
+  其中包含一个**纯文档 PR**，可判定与 diff 无关；空推重触发也无效）。
+  当时按「评审只评论、不阻塞」的既有约定**以本地验证合并**，并在每个 PR 上留言说明原因。
+  下次遇到同类情况：先看是否连纯文档 PR 也失败 → 是则等一段时间或直接按本地验证合并，
+  **不要为了等评审无限期挂住**；合并后把「本轮无自动评审」写进 PR 评论与 checklist 的勾选注记。
