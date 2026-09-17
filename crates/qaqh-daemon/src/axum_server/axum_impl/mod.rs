@@ -53,11 +53,12 @@ pub(crate) use auth::{
 };
 pub(crate) use command::{handle_command, handle_command_status, handle_open, handle_renew};
 pub(crate) use content::{handle_content_get, handle_content_upload};
-pub(crate) use debug_control::{
-    activity, debug_headers, handle_debug, handle_debug_bridge, handle_debug_index, handle_debug_token,
-    handle_stop, handle_stop_if_idle, health, host_guard, loopback_guard, not_found,
-};
 pub use debug_control::DebugNonceStore;
+pub(crate) use debug_control::{
+    activity, debug_headers, handle_debug, handle_debug_bridge, handle_debug_index,
+    handle_debug_token, handle_stop, handle_stop_if_idle, health, host_guard, loopback_guard,
+    not_found,
+};
 pub(crate) use service_api::handle_service;
 pub(crate) use sse::{handle_events, handle_timeline_events};
 #[cfg(test)]

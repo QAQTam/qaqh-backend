@@ -73,8 +73,8 @@ fn fs_read_rejects_meta_json() {
 #[test]
 fn fs_list_rejects_sessions_dir() {
     let sessions = qaqh_types::platform::data_dir().join("sessions");
-    let error = list(sessions.to_str().expect("utf8 sessions"))
-        .expect_err("sessions dir must be rejected");
+    let error =
+        list(sessions.to_str().expect("utf8 sessions")).expect_err("sessions dir must be rejected");
     assert!(
         error.starts_with("FORBIDDEN"),
         "expected a FORBIDDEN rejection, got: {error}"
@@ -102,8 +102,8 @@ fn fs_read_allows_workspace_file() {
 #[test]
 fn fs_read_rejects_dotdot_escape() {
     let escaped = workspace().join("..").join("etc").join("passwd");
-    let error = read(escaped.to_str().expect("utf8 escape"))
-        .expect_err("dotdot escape must be rejected");
+    let error =
+        read(escaped.to_str().expect("utf8 escape")).expect_err("dotdot escape must be rejected");
     assert!(error.starts_with("FORBIDDEN"), "{error}");
 }
 

@@ -121,13 +121,22 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&temp_home).expect("create isolated home");
+    let temp_data = temp_home.join(".qaqh");
+    std::fs::create_dir_all(&temp_data).expect("create isolated data root");
 
     // This integration test binary owns an isolated process home.
-    // Linux 上 todo 数据目录解析优先 HOME：两个变量都必须钉住，
-    // 否则会读进真实用户 home 的历史 todo（并行测试全局态污染）。
+    // `qaqh_types::platform::data_dir()` 的优先级是
+    // `QAQH_DATA_DIR` > `%USERPROFILE%`(win) / `$XDG_CONFIG_HOME` / `$HOME`(unix)，
+    // 所以三个变量都必须钉住：
+    // - 不钉 `HOME`/`USERPROFILE`：会读进真实用户 home 的历史 todo；
+    // - 不钉 `QAQH_DATA_DIR`：外层（CI/验收脚本）若复用了同一数据目录，
+    //   上一次运行留下的 `sessions/todo-contract/todo.json` 会让本次
+    //   `todo_write` 拿不到 `T1`（`NOT_FOUND: no matching todos: T1`）——
+    //   即「跑两遍就假红」（N-6）。
     unsafe {
         std::env::set_var("USERPROFILE", &temp_home);
         std::env::set_var("HOME", &temp_home);
+        std::env::set_var("QAQH_DATA_DIR", &temp_data);
     }
     qaqh_workspace::runtime::init_tools("todo-contract", &[], vec![]);
     qaqh_workspace::runtime::set_context("todo-contract", 1);

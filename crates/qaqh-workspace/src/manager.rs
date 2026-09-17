@@ -844,7 +844,10 @@ mod m13_tests {
         ));
         // `..` 逃逸被词法归一化捕获。
         assert!(!in_ws(&ctx_with_path("../outside.txt"), ToolRisk::Write));
-        assert!(!in_ws(&ctx_with_path("a/../../outside.txt"), ToolRisk::Write));
+        assert!(!in_ws(
+            &ctx_with_path("a/../../outside.txt"),
+            ToolRisk::Write
+        ));
         // 无 path 参数：非 Destructive 工具默认放行（ask/task/skills 不碰文件系统）。
         assert!(is_path_in_workspace(
             &crate::ToolCallCtx {

@@ -152,6 +152,10 @@ struct ConnState {
     /// 连接成功后自动拉取的 `resources/templates/list` 快照（uriTemplate
     /// 展开提示的来源；生命周期同上）。
     resource_templates: Option<Arc<Vec<rmcp::model::ResourceTemplate>>>,
+    /// 最近一次连接后的 `resources/list` 拉取是否失败（N-3）。`resources == None`
+    /// 有两种成因——「从未连接/未拉取」与「已连接但拉取失败/超时」——聚合工具
+    /// `list_resources` 靠这个标记把后者与「未连接」分开报。成功路径清零。
+    resources_fetch_failed: bool,
     /// P2-3：连接成功后自动拉取的 `prompts/list` 快照（聚合工具
     /// `list_prompts`/`read_prompt` 的数据源）。server 无 prompts 能力时
     /// 保持 None（try-fetch 降级，method not found 静默）。生命周期同 tools。
@@ -211,6 +215,7 @@ impl ServerConnection {
                 tools: None,
                 resources: None,
                 resource_templates: None,
+                resources_fetch_failed: false,
                 prompts: None,
             }),
             connect_serializer: TokioMutex::new(()),
@@ -434,6 +439,7 @@ impl ServerConnection {
                     let mut state = self.lock_state();
                     state.resources = Some(Arc::new(resources));
                     state.resource_templates = Some(Arc::new(templates));
+                    state.resources_fetch_failed = false;
                 }
                 log::info!(
                     "[mcp] server {} cached {r} resource(s) + {t} template(s)",
@@ -441,12 +447,14 @@ impl ServerConnection {
                 );
             }
             Ok((Err(error), _)) | Ok((_, Err(error))) => {
+                self.lock_state().resources_fetch_failed = true;
                 log::warn!(
                     "[mcp] server {} resources/list after connect failed: {error} — resource list stays empty until next connect",
                     self.name
                 );
             }
             Err(_elapsed) => {
+                self.lock_state().resources_fetch_failed = true;
                 log::warn!(
                     "[mcp] server {} resources/list after connect timed out — resource list stays empty until next connect",
                     self.name
@@ -580,6 +588,13 @@ impl ServerConnection {
     /// 当前资源模板快照（PR-M2-1：uriTemplate 展开提示的来源）。
     pub fn cached_resource_templates(&self) -> Option<Arc<Vec<rmcp::model::ResourceTemplate>>> {
         self.lock_state().resource_templates.clone()
+    }
+
+    /// 最近一次 `resources/list` 拉取是否失败/超时（N-3）。为 true 时
+    /// `cached_resources() == None` 的成因是「拉取失败」而不是「未连接」，
+    /// 聚合工具 `list_resources` 据此输出第三种文案。
+    pub fn resources_fetch_failed(&self) -> bool {
+        self.lock_state().resources_fetch_failed
     }
 
     fn store_connected(self: &Arc<Self>, service: ClientService) {

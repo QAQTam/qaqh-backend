@@ -12,7 +12,7 @@
 //! 真正跑起来，随后的收割窗口才置位取消。
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -151,7 +151,9 @@ struct BatchReport {
     open: Vec<String>,
     /// 每个 call_id 的副作用发生次数。
     executed: Vec<usize>,
-    /// ToolFinished 领域事件数（成功回填的已执行项会各发一条）。
+    /// ToolFinished 领域事件数。**本函数内恒为 0**：批执行只落 store（外加
+    /// CodeChanged/DashboardUpdated），ringing 终态由批后的
+    /// `turn_lap::backfill::emit_completed_tool_round` 逐项发。
     tool_finished: usize,
 }
 
@@ -240,7 +242,7 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
     let writer_dead = Arc::new(AtomicBool::new(false));
     let mut stats = StatsCollector::new();
     let mut flow = qaqh_message::ContextFlow::new();
-    let mut tool = ToolEngine::new();
+    let tool = ToolEngine::new();
     let tool_call_order: Vec<String> = CALL_IDS.iter().map(|id| (*id).to_string()).collect();
     let serial_call_ids = HashSet::new();
 
@@ -257,7 +259,7 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
         };
         execute_admitted_batch(
             &mut ctx,
-            &mut tool,
+            &tool,
             admitted,
             &tool_call_order,
             &serial_call_ids,
@@ -303,14 +305,23 @@ fn cancel_mid_batch_keeps_executed_tool_results() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (report, temp) = run_batch(false, "cancel-mid-batch");
     // 批确实跑起来了：4 个工具都产生了副作用（取消点在中途，不是批前）。
+    let executed_count = report.executed.iter().filter(|count| **count > 0).count();
     assert!(
-        report.executed.iter().any(|count| *count == 1),
+        report.executed.contains(&1),
         "取消点没有落在工具批中途（无任何工具执行）：{report:?}",
     );
     assert!(
         report.executed.iter().all(|count| *count <= 1),
         "已执行工具被重复执行：{:?}",
         report.executed
+    );
+    // 分工锁定：`execute_admitted_batch` 只落 store + CodeChanged/DashboardUpdated，
+    // ringing 终态（ToolFinished）由批后的 `turn_lap::backfill::emit_completed_tool_round`
+    // 逐项发。即使这里 4 个工具都真的执行了，本函数内也不得出现终态事件——
+    // 否则就会与 backfill 双发、顺序错乱。
+    assert_eq!(
+        report.tool_finished, 0,
+        "{executed_count} 个工具已执行，但终态事件必须留给批后 backfill：{report:?}"
     );
     assert!(
         report.open.is_empty(),
