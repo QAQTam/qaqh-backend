@@ -51,6 +51,22 @@ pub enum EngineError {
     PathOutsideWorkspace {
         path: String,
     },
+    /// `*** Add File:` targeted a path that already exists. Dry-run reports this
+    /// instead of a plain `[DRY RUN] … ok`; a real apply keeps the upstream
+    /// overwrite semantics (fixture `011_add_overwrites_existing_file`) but the
+    /// replaced contents are captured in [`FileDelta::old`].
+    WouldOverwrite {
+        path: String,
+    },
+    /// A hunk failed after earlier hunks were already written to disk (hunks are
+    /// applied one at a time — non-atomic, inherited from upstream codex). Carries
+    /// the already-applied and not-yet-applied patch paths so the tool layer can
+    /// state the facts instead of claiming "no partial application happened".
+    Partial {
+        error: Box<EngineError>,
+        applied: Vec<String>,
+        not_applied: Vec<String>,
+    },
 }
 
 impl fmt::Display for EngineError {
@@ -62,6 +78,37 @@ impl fmt::Display for EngineError {
             EngineError::EmptyPatch => write!(f, "no changes to apply"),
             EngineError::PathOutsideWorkspace { path } => {
                 write!(f, "patch path resolves outside the workspace: {path}")
+            }
+            EngineError::WouldOverwrite { path } => {
+                write!(f, "Add File target already exists: {path}")
+            }
+            EngineError::Partial {
+                error,
+                applied,
+                not_applied,
+            } => write!(
+                f,
+                "{error}\nNOTE: hunks are applied one at a time and are NOT atomic — already applied: {}; not applied: {}. Fix and re-send ONLY the failed part, or verify the already-applied files with `git diff`/read before re-sending.",
+                applied.join(", "),
+                not_applied.join(", ")
+            ),
+        }
+    }
+}
+
+impl EngineError {
+    /// Attach "already applied / not applied" patch paths to a mid-patch
+    /// failure. Returns the error unchanged when nothing was written yet (the
+    /// first hunk failed), so the existing single-hunk failure surface — and its
+    /// error variants — stay exactly as before.
+    fn with_partial(self, applied: Vec<String>, not_applied: Vec<String>) -> Self {
+        if applied.is_empty() {
+            self
+        } else {
+            EngineError::Partial {
+                error: Box::new(self),
+                applied,
+                not_applied,
             }
         }
     }
@@ -178,30 +225,107 @@ pub fn apply_patch_engine(
         return Err(EngineError::EmptyPatch);
     }
     let mut outcome = ApplyOutcome::default();
-    for hunk in &hunks {
-        let affected_path = hunk.path().to_string_lossy().to_string();
-        let resolved = resolve_workspace_path(cwd, hunk.path())?;
-        match hunk {
-            Hunk::AddFile { contents, .. } => {
-                write_file_with_missing_parent_retry(&resolved, contents.as_bytes())?;
-                outcome.affected.added.push(affected_path.clone());
-                outcome.deltas.push(FileDelta {
-                    path: affected_path,
-                    resolved_path: resolved.to_string_lossy().to_string(),
-                    old: None,
-                    new: Some(contents.clone()),
+    for (idx, hunk) in hunks.iter().enumerate() {
+        if let Err(err) = apply_hunk(hunk, cwd, mode, &mut outcome) {
+            // Hunks are written one at a time (non-atomic, inherited from
+            // upstream): everything already in `outcome` is on disk. Report it
+            // with the error instead of letting the caller claim otherwise.
+            let applied = outcome.deltas.iter().map(|d| d.path.clone()).collect();
+            let not_applied = hunks[idx..]
+                .iter()
+                .map(|h| h.path().to_string_lossy().to_string())
+                .collect();
+            return Err(err.with_partial(applied, not_applied));
+        }
+    }
+    Ok(outcome)
+}
+
+/// Apply a single hunk to disk, appending its delta to `outcome`.
+fn apply_hunk(
+    hunk: &Hunk,
+    cwd: &Path,
+    mode: UpdateMode,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), EngineError> {
+    let affected_path = hunk.path().to_string_lossy().to_string();
+    let resolved = resolve_workspace_path(cwd, hunk.path())?;
+    match hunk {
+        Hunk::AddFile { contents, .. } => {
+            // `*** Add File:` keeps upstream's overwrite semantics (fixture
+            // 011_add_overwrites_existing_file), but the replaced contents must
+            // be captured — upstream reads them into `overwritten_content`
+            // (codex-rs/apply-patch/src/lib.rs:508-533) so the delta carries
+            // rollback material. This port dropped that into `old: None`, which
+            // made the overwrite silent (BUG-2026-09-16-10).
+            let old = existing_file_contents(&resolved);
+            write_file_with_missing_parent_retry(&resolved, contents.as_bytes())?;
+            outcome.affected.added.push(affected_path.clone());
+            outcome.deltas.push(FileDelta {
+                path: affected_path,
+                resolved_path: resolved.to_string_lossy().to_string(),
+                old,
+                new: Some(contents.clone()),
+            });
+        }
+        Hunk::DeleteFile { .. } => {
+            let old = std::fs::read_to_string(&resolved).ok();
+            let meta = std::fs::metadata(&resolved).map_err(|e| EngineError::Io {
+                context: format!("Failed to delete file {}", resolved.to_string_lossy()),
+                source: e,
+            })?;
+            if meta.is_dir() {
+                return Err(EngineError::Io {
+                    context: format!(
+                        "Failed to delete file {}: path is a directory",
+                        resolved.to_string_lossy()
+                    ),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "path is a directory",
+                    ),
                 });
             }
-            Hunk::DeleteFile { .. } => {
-                let old = std::fs::read_to_string(&resolved).ok();
+            std::fs::remove_file(&resolved).map_err(|e| EngineError::Io {
+                context: format!("Failed to delete file {}", resolved.to_string_lossy()),
+                source: e,
+            })?;
+            outcome.affected.deleted.push(affected_path.clone());
+            outcome.deltas.push(FileDelta {
+                path: affected_path,
+                resolved_path: resolved.to_string_lossy().to_string(),
+                old,
+                new: None,
+            });
+        }
+        Hunk::UpdateFile {
+            path: src_path,
+            move_path,
+            chunks,
+        } => {
+            let resolved = resolve_workspace_path(cwd, src_path)?;
+            let applied =
+                derive_new_contents_from_chunks(&resolved, chunks, mode).map_err(|e| match e {
+                    EngineError::Compute(msg) => EngineError::Compute(format!(
+                        "Failed to update file {}: {msg}",
+                        resolved.to_string_lossy()
+                    )),
+                    other => other,
+                })?;
+            if let Some(dest) = move_path {
+                let dest_resolved = resolve_workspace_path(cwd, dest)?;
+                write_file_with_missing_parent_retry(
+                    &dest_resolved,
+                    applied.new_contents.as_bytes(),
+                )?;
                 let meta = std::fs::metadata(&resolved).map_err(|e| EngineError::Io {
-                    context: format!("Failed to delete file {}", resolved.to_string_lossy()),
+                    context: format!("Failed to remove original {}", resolved.to_string_lossy()),
                     source: e,
                 })?;
                 if meta.is_dir() {
                     return Err(EngineError::Io {
                         context: format!(
-                            "Failed to delete file {}: path is a directory",
+                            "Failed to remove original {}: path is a directory",
                             resolved.to_string_lossy()
                         ),
                         source: std::io::Error::new(
@@ -211,83 +335,27 @@ pub fn apply_patch_engine(
                     });
                 }
                 std::fs::remove_file(&resolved).map_err(|e| EngineError::Io {
-                    context: format!("Failed to delete file {}", resolved.to_string_lossy()),
+                    context: format!("Failed to remove original {}", resolved.to_string_lossy()),
                     source: e,
                 })?;
-                outcome.affected.deleted.push(affected_path.clone());
-                outcome.deltas.push(FileDelta {
-                    path: affected_path,
-                    resolved_path: resolved.to_string_lossy().to_string(),
-                    old,
-                    new: None,
-                });
-            }
-            Hunk::UpdateFile {
-                path: src_path,
-                move_path,
-                chunks,
-            } => {
-                let resolved = resolve_workspace_path(cwd, src_path)?;
-                let applied = derive_new_contents_from_chunks(&resolved, chunks, mode).map_err(
-                    |e| match e {
-                        EngineError::Compute(msg) => EngineError::Compute(format!(
-                            "Failed to update file {}: {msg}",
-                            resolved.to_string_lossy()
-                        )),
-                        other => other,
-                    },
-                )?;
-                if let Some(dest) = move_path {
-                    let dest_resolved = resolve_workspace_path(cwd, dest)?;
-                    write_file_with_missing_parent_retry(
-                        &dest_resolved,
-                        applied.new_contents.as_bytes(),
-                    )?;
-                    let meta = std::fs::metadata(&resolved).map_err(|e| EngineError::Io {
-                        context: format!(
-                            "Failed to remove original {}",
-                            resolved.to_string_lossy()
-                        ),
+            } else {
+                std::fs::write(&resolved, applied.new_contents.as_bytes()).map_err(|e| {
+                    EngineError::Io {
+                        context: format!("Failed to write file {}", resolved.to_string_lossy()),
                         source: e,
-                    })?;
-                    if meta.is_dir() {
-                        return Err(EngineError::Io {
-                            context: format!(
-                                "Failed to remove original {}: path is a directory",
-                                resolved.to_string_lossy()
-                            ),
-                            source: std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "path is a directory",
-                            ),
-                        });
                     }
-                    std::fs::remove_file(&resolved).map_err(|e| EngineError::Io {
-                        context: format!(
-                            "Failed to remove original {}",
-                            resolved.to_string_lossy()
-                        ),
-                        source: e,
-                    })?;
-                } else {
-                    std::fs::write(&resolved, applied.new_contents.as_bytes()).map_err(|e| {
-                        EngineError::Io {
-                            context: format!("Failed to write file {}", resolved.to_string_lossy()),
-                            source: e,
-                        }
-                    })?;
-                }
-                outcome.affected.modified.push(affected_path.clone());
-                outcome.deltas.push(FileDelta {
-                    path: affected_path,
-                    resolved_path: resolved.to_string_lossy().to_string(),
-                    old: Some(applied.original_contents),
-                    new: Some(applied.new_contents),
-                });
+                })?;
             }
+            outcome.affected.modified.push(affected_path.clone());
+            outcome.deltas.push(FileDelta {
+                path: affected_path,
+                resolved_path: resolved.to_string_lossy().to_string(),
+                old: Some(applied.original_contents),
+                new: Some(applied.new_contents),
+            });
         }
     }
-    Ok(outcome)
+    Ok(())
 }
 
 /// Dry-run: parse and fully compute every hunk against the current file state,
@@ -313,6 +381,14 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
                             std::io::ErrorKind::InvalidInput,
                             "path is a directory",
                         ),
+                    });
+                }
+                // Dry-run must not report a plain `[DRY RUN] … ok` for a patch
+                // that would replace an existing file wholesale
+                // (BUG-2026-09-16-10).
+                if std::fs::metadata(&resolved).is_ok() {
+                    return Err(EngineError::WouldOverwrite {
+                        path: resolved.to_string_lossy().to_string(),
                     });
                 }
                 outcome.affected.added.push(affected_path.clone());
@@ -374,6 +450,14 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
     Ok(outcome)
 }
 
+/// Contents of `path` when it is an existing regular file, `None` otherwise
+/// (missing, a directory, or not valid UTF-8). Used by `*** Add File:` to keep
+/// the overwritten contents as rollback material.
+fn existing_file_contents(path: &Path) -> Option<String> {
+    std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    std::fs::read_to_string(path).ok()
+}
+
 fn write_file_with_missing_parent_retry(path: &Path, contents: &[u8]) -> Result<(), EngineError> {
     match std::fs::write(path, contents) {
         Ok(()) => Ok(()),
@@ -396,5 +480,109 @@ fn write_file_with_missing_parent_retry(path: &Path, contents: &[u8]) -> Result<
             context: format!("Failed to write file {}", path.to_string_lossy()),
             source: err,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn add_file_patch(path: &str) -> String {
+        format!("*** Begin Patch\n*** Add File: {path}\n+new\n*** End Patch\n")
+    }
+
+    /// T-3-1 / BUG-2026-09-16-10：覆盖保持上游语义，但旧内容必须进
+    /// `FileDelta.old`（回滚素材），不再丢成 `None`。
+    #[test]
+    fn add_file_overwrite_records_previous_contents() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "old one\nold two\n").unwrap();
+        let outcome =
+            apply_patch_engine(&add_file_patch("a.txt"), dir.path(), UpdateMode::default())
+                .expect("overwrite keeps upstream semantics");
+        assert_eq!(outcome.deltas.len(), 1);
+        assert_eq!(outcome.deltas[0].old.as_deref(), Some("old one\nold two\n"));
+        assert_eq!(outcome.deltas[0].new.as_deref(), Some("new\n"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "new\n"
+        );
+    }
+
+    /// T-3-1：dry_run 对已存在路径必须显式 `WOULD_OVERWRITE`，且不落盘。
+    #[test]
+    fn dry_run_reports_would_overwrite_for_existing_add_target() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "old\n").unwrap();
+        let err = dry_run_patch_engine(&add_file_patch("a.txt"), dir.path()).unwrap_err();
+        assert!(
+            matches!(err, EngineError::WouldOverwrite { .. }),
+            "got: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "old\n"
+        );
+    }
+
+    /// T-3-1：不存在的路径照常 dry-run 通过。
+    #[test]
+    fn dry_run_allows_add_of_missing_path() {
+        let dir = tempdir().unwrap();
+        let outcome = dry_run_patch_engine(&add_file_patch("fresh.txt"), dir.path()).unwrap();
+        assert_eq!(outcome.affected.added, vec!["fresh.txt".to_string()]);
+        assert!(!dir.path().join("fresh.txt").exists());
+    }
+
+    /// T-3-2：失败发生在第 2 个 hunk 时，错误必须携带「已生效 / 未生效」。
+    #[test]
+    fn partial_failure_carries_applied_paths() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "beta\n").unwrap();
+        let patch = "\
+*** Begin Patch
+*** Update File: a.txt
+@@
+-alpha
++ALPHA
+*** Update File: b.txt
+@@
+-ABSENT
++whatever
+*** End Patch
+";
+        let err = apply_patch_engine(patch, dir.path(), UpdateMode::default()).unwrap_err();
+        match err {
+            EngineError::Partial {
+                applied,
+                not_applied,
+                ..
+            } => {
+                assert_eq!(applied, vec!["a.txt".to_string()]);
+                assert_eq!(not_applied, vec!["b.txt".to_string()]);
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+        // 1 号 hunk 确实已落盘（非原子，与上游一致）
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "ALPHA\n"
+        );
+    }
+
+    /// T-3-2：首个 hunk 就失败时不加 `Partial` 包装（单 hunk 失败面保持不变）。
+    #[test]
+    fn first_hunk_failure_is_not_wrapped() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+        let patch =
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n-ABSENT\n+whatever\n*** End Patch\n";
+        let err = apply_patch_engine(patch, dir.path(), UpdateMode::default()).unwrap_err();
+        assert!(
+            matches!(err, EngineError::Compute(_)),
+            "expected plain Compute, got {err:?}"
+        );
     }
 }
