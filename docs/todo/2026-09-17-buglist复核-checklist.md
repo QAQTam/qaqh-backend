@@ -13,7 +13,7 @@
 | 1 | 子代理取消链 | 5 | P0/P1/P2 | 无 | ☑ 629637d (#88) |
 | 2 | 安全 P0（越权/边界/凭据/泄漏） | 4 | P0 | 无 | ☐ |
 | 3 | `apply_patch` 契约 | 3 | P0/P1 | 无 | ☑ 1705449 (#87) |
-| 4 | `edit` 契约 | 3 | P0/P1 | 无 | 🔵 PR #89 待合并 |
+| 4 | `edit` 契约 | 3 | P0/P1 | 无 | ☑ 61b39d0 (#89) |
 | 5 | 计量与超限 | 2 | P1 | 无 | ☐ |
 | 6 | 热重载与 MCP 文案 | 2 | P1/P2 | 无 | ☐ |
 | 7 | 零散修复 | 2 | P1 | 无 | ☐ |
@@ -141,21 +141,21 @@
 - 依赖：无
 - 涉及：`crates/qaqh-workspace/src/edit/matching.rs`、`edit/resolve.rs`、`edit/mod.rs`、`edit/handler.rs`、`edit/transaction.rs`
 
-- [ ] **T-4-1 描述与 schema 收敛到 3 个 kind**（P1，纯文案）
+- [x] **T-4-1 描述与 schema 收敛到 3 个 kind**（P1，纯文案）→ 61b39d0（PR #89）
   - 位置：`crates/qaqh-workspace/src/edit/handler.rs:344`（工具描述）、`:356`（hunks schema）；`edit/mod.rs:10`（模块文档）；`edit/transaction.rs:341`（`INVALID_REGEX → replace_inline` 映射）
   - 现状：四处仍列 `insert_after` / `insert_before` / `replace_inline`，实现已在 `a92626d`（2026-09-08）删除 ⇒ 任何按描述发起的调用恒 `PARSE_ERROR: unknown hunk kind '…' (expected replace / prepend_file / append_file)`（E2）
   - 动作：描述与 schema 收敛到 `replace` / `prepend_file` / `append_file`；`transaction.rs:341` 的 `INVALID_REGEX` 提示改为指向 bash/python 做正则替换
   - 验收：`rg -n 'insert_after|insert_before|replace_inline' crates/qaqh-workspace/src/edit/` → 仅剩 `tests.rs` 的历史注释（或无）；新增用例断言按描述发起的调用不再出现在描述里
   - 关联：D-13 / BUG-2026-09-16-08
 
-- [ ] **T-4-2 Tier3 采纳后替换区间锚定到 `old` 的行内 span**（P0）
+- [x] **T-4-2 Tier3 采纳后替换区间锚定到 `old` 的行内 span**（P0）→ 61b39d0（PR #89；**选方案 (b)**——窗口剥缩进字数 > `old` 剥缩进字数则跳过该候选，护栏放在 Tier3 打分循环内，真·整行 typo 仍能胜出）
   - 位置：`crates/qaqh-workspace/src/edit/resolve.rs:34-35`（`char_starts[start_line]..char_starts[start_line + win_lines]`）、`edit/matching.rs:102`（`TextDiff::from_chars().ratio()`）、`edit/mod.rs:32`（`T3_THRESHOLD = 0.85`）
   - 现状：字符级评分 ≥ 0.85 即采纳，但替换区间是**整个命中窗口**，不是 `old` 在行内的位置 ⇒ 行内片段 `old` 被采纳时，该行未被 `old` 覆盖的前后缀**无提示删除**，返回仍是 `1/1 hunks applied … score 0.98`（**静默丢内容**）（E2）
   - 动作：二选一——(a) 让 Tier3 的替换区间锚定到 `old` 的实际行内 span；(b) 采纳前要求 `old` 覆盖整行（否则不采纳）。方案 (b) 改动更小、语义更保守，建议优先
   - 验收：新增「片段 old」用例（清单自述 42 个 `#[test]` 里目前**一个都没有**）；`cargo test -p qaqh-workspace edit` 全绿；手动复现清单探针 → 期望不再出现前后缀被删
   - 关联：D-12① / BUG-2026-09-16-06
 
-- [ ] **T-4-3 补第四种失败诊断「`old` 是行内片段」**（P1）
+- [x] **T-4-3 补第四种失败诊断「`old` 是行内片段」**（P1）→ 61b39d0（PR #89）
   - 位置：`crates/qaqh-workspace/src/edit/matching.rs:190-204`（`no_match_detail`）
   - 现状：只有「差阈值 / 差 margin / 完全不像」三种口径。当 `old` 是行内片段且达不到 0.85 时，报「best score 0.32 is below threshold 0.85 — closest location is probably wrong; re-check 'old' against the file」，而 `old` **逐字符就在候选行里** ⇒ 模型据此判定「自己记错了内容」，真因是「片段 vs 整行」（E2）
   - 动作：新增第四种诊断——检测到候选行**包含** `old` 子串时，提示「`old` 是行内片段，需给出完整行内容」
