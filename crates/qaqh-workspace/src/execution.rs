@@ -724,8 +724,12 @@ mod tests {
 
         // `test_write` 不在 PLAN_BLOCKED 名单（`["edit", "exec", "process", "todo"]`，
         // 见 `crate::PLAN_BLOCKED`）中：PLAN 模式下仍放行，阻断只发生在名单内工具。
-
-        let inv = make_invocation("test_write", "plan-write");
+        //
+        // 注意：`test_write` 是 Destructive + Write 的文件型工具，P0-2 之后
+        // 「缺 path」会被 `SafetyPolicy` fail-closed 拦下（与 PLAN 模式无关）。
+        // 本用例检验的是 PLAN 名单语义，故显式给出工区内 path 让安全闸门放行。
+        let mut inv = make_invocation("test_write", "plan-write");
+        inv.args = serde_json::json!({ "path": "." });
         if let Admission::Authorized(auth) = admit(inv, 4, &ws, &trusted) {
             let result = execute_authorized(auth, None);
             assert!(
