@@ -17,7 +17,7 @@
 | 5 | 计量与超限 | 2 | P1 | 无 | ☑ 006b2b3 (#90)，T-5-2 部分（见 N-1） |
 | 6 | 热重载与 MCP 文案 | 2 | P1/P2 | 无 | ☑ b4851b0 (#92)，T-6-1 真机复测待做 |
 | 7 | 零散修复 | 2 | P1 | 无 | ☑ c627a1b (#94) |
-| 8 | 安全 P1/P2 收尾 | 3 | P1/P2 | 批次 2 | ☐ |
+| 8 | 安全 P1/P2 收尾 | 3 | P1/P2 | 批次 2 | ☑ 440a608 (#95) |
 | 9 | 清单归档与卫生（文档） | 4 | — | 无 | ☑ 563f1e3 (#91) |
 | — | 阻塞项（需现场环境，不派） | 8 | — | — | 🚫 |
 
@@ -261,21 +261,39 @@
 - 依赖：批次 2（同一批文件的后续改动，避免冲突）
 - 涉及：`crates/qaqh-config/src/config.rs`、`crates/qaqh-mcp/src/connection.rs`、`crates/qaqh-workspace/src/file_state.rs`、`tools/cnb-mcp-enhance/auth.mjs`、`crates/qaqh-workspace/src/audit.rs`、`tools/cnb-mcp-enhance/server.mjs`
 
-- [ ] **T-8-1 MCP 并发上限收紧 + DynamicTool 权限层**（P1）
+- [x] **T-8-1 MCP 并发上限收紧 + DynamicTool 权限层**（P1）→ 440a608（PR #95）
+  - 配置校验 `1..=64` → `1..=16`，并在 `connection.rs` 执行点加 `min(16)` 运行时兜底；
+    `mcp__` 前缀的 D5 快路径不再无条件放行——**Exec/Net** 类在 Level 1/2/3 强制 `AskUser`。
+  - 一并更新两条与旧行为冲突的既有断言（`rejects_concurrency_out_of_range`、
+    `mcp_tools_bypass_approval_at_all_levels` → `mcp_exec_net_require_approval_until_unrestricted`）。
+  - ⚠️ **边界**：默认 `permission_level = 4`，Level 4 对内置 exec/网络工具同样全放行 ⇒
+    本次消除的是「MCP 工具**独有**的 allow-all 特权」，不是「任何档位都弹审批」。
   - 位置：`crates/qaqh-config/src/config.rs:293-302`（校验 `1..=64`）、`crates/qaqh-mcp/src/connection.rs:717`（执行点）
   - 现状：上限是 64 而非 16；`DynamicTool` 权限层默认 allow-all（E2）
   - 动作：`max_concurrent_calls` 收紧到 `<= 16`；`DynamicTool` 对 `Exec`/`Net` 默认强制 `Permissions::AskUser`
   - 验收：集成测试 `mcp_concurrency_ceiling_16`、`mcp_dynamic_tool_requires_permission`
   - 关联：O-4 / 安全审查 P1-1
 
-- [ ] **T-8-2 CNB `auth.mjs` token 原子写**（P1）
+- [x] **T-8-2 CNB `auth.mjs` token 原子写**（P1）→ 440a608（PR #95）
+  - 改为**同目录** tmp + `rename`（跨文件系统 rename 不保证原子）；tmp 名带 pid/时间戳/nonce。
+  - 验证：并发 48 路 refresh + 紧循环读者、2 MiB payload ⇒ 修复版 `PASS`，
+    旧版稳定 `FAIL … 9-10 partial/truncated reads`。
   - 位置：`tools/cnb-mcp-enhance/auth.mjs:86-87`
   - 现状：`await mkdir(...)` + `await writeFile(TOKEN_FILE, ...)` 直写，非原子 ⇒ 并发刷新可产生 partial write / token 丢失（E2）
   - 动作：改为 `tmp` + `rename`（与 `crates/qaqh-config/src/secrets.rs:336-346` 的 `next_temp_path` + `write_doc` 同种机制）
   - 验收：lint 测试 `auth_refresh_token_atomic`；模拟并发刷新 → token 不丢
   - 关联：安全审查 P1-2
 
-- [ ] **T-8-3 审计与账本键收尾**（P2）
+- [x] **T-8-3 审计与账本键收尾**（P2）→ 440a608（PR #95）
+  - ① `audit.csv` 4 MiB 上限 + 3 代 rotate（只 `rename` 不 `truncate`，rename 失败宁可继续 append
+    不丢记录；进程内 mutex 串行化「判定 + append」）。上限值/代数由实现选定（清单未指定）。
+  - ② **保守方案**：`resolve_workspace_path` 只做词法归一，账本层 `file_state::state_key`
+    再做 best-effort `canonicalize`（剥 Windows `\\?\` 前缀）。不把 canonicalize 放进共享 resolve——
+    会与既有键形态分叉（BUG-2026-09-13-16 的根因），且相对键是账本既有契约。
+  - ③ `repoPath` 加 `^[A-Za-z0-9_./-]+$` 校验，并把裸拼的 `getBuildStage` 收编进 `repoPath`。
+  - ④ `state_reason` 改显式参数（默认 `completed`）+ `{completed, not_planned}` 枚举校验。
+  - ⚠️ 执行期间有一次**意外的线上探针调用**：`repo:"evil"` 通过白名单发出真实
+    `PATCH https://api.cnb.cool/evil/-/issues/1` → 404（仓库不存在，无副作用）。
   - 位置：`crates/qaqh-workspace/src/audit.rs:31-59`（无 rotation）、`crates/qaqh-workspace/src/file_state.rs:128-158` + `crates/qaqh-workspace/src/lib.rs:424-441`（键未 canonicalize）、`tools/cnb-mcp-enhance/server.mjs:87`（`repoPath` 无校验）、`:299/:438`（`state_reason` 硬编码）
   - 现状：`audit.csv` 只 append、无大小上限；`resolve_workspace_path` 对绝对路径原样返回不做归一（`lib.rs:430-432`）+ 符号链接不解析 ⇒ 账本键可能分歧；`repoPath = (repo) => \`/${repo || DEFAULT_REPO}\`` 无 `^[A-Za-z0-9_./-]+$` 校验；`cnb_issue_close` 硬编码 `state_reason=completed`（E2）
   - 动作：① `audit.csv` 加大小上限 + rotate；② 账本键改为 `canonicalize(resolve_workspace_path(raw))`（注意 Windows 大小写与符号链接语义）；③ `repoPath` 加字符白名单校验；④ `state_reason` 改为显式参数
