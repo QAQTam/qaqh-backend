@@ -8,8 +8,11 @@
 > [`2026-09-12-timeline快照落后被当权威装载-buglist.md`](./2026-09-12-timeline快照落后被当权威装载-buglist.md)、
 > [`2026-09-12-多会话高频输出与切会话401-buglist.md`](./2026-09-12-多会话高频输出与切会话401-buglist.md)
 >
-> 2026-09-15 复核基线：`1c92413`。本文件四项均已修复并通过后端全量测试、
-> clippy 与格式检查；TUI 的 O-2 已随 `59541dd` 修复并通过 TUI 测试与性能回归。
+> 2026-09-15 复核基线：`1c92413`——**该哈希只是本清单/主报告的「登记提交」**（2026-09-14 13:04，
+> commit message 就是 `1`），**不是修复提交**。四项修复实际随 `ea6063c`
+> （2026-09-15 02:27，`fix(runtime): 修复 timeline 工具块内存放大`）提交，且是当前 HEAD 的祖先
+> （`git merge-base --is-ancestor ea6063c HEAD` → 0）；后端全量测试、clippy 与格式检查在该提交通过。
+> TUI 的 O-2 已随 `59541dd` 修复并通过 TUI 测试与性能回归。
 > 9 月 12/13 日清单的其它条目已完成状态回填。
 
 ## 修复执行清单
@@ -28,10 +31,10 @@
 
 | ID | 严重度 | 状态 | 类型 | 位置 | 影响（一句话） | 对应发现 |
 |---|---|---|---|---|---|---|
-| BUG-2026-09-14-01 | P2 | fixed（工作区，待提交） | 冗余存储 / 契约违反 | `crates/qaqh-runtime/src/agent/engine_tool.rs:31` | `TimelineTool.summary` 直接克隆 `output`：实测 17 个会话 2,536 个 tool block **100% 逐字节重复**（单会话最多 0.81 MB），且绕过 `TOOL_SUMMARY_MAX_CHARS=512` 契约（实测 8,083 字符），而 TUI 消费端只取 48 字符 | F-1 |
-| BUG-2026-09-14-02 | P1 | fixed（工作区，待提交） | 无界累积 / 内存放大 | `crates/qaqh-runtime/src/timeline.rs:460` | `append_tool_progress` 无条件 `push_str` 无上限：单条 `findstr /s` 把 3.5 MB sourcemap 单行灌入 `tool.progress`（实测 4,177,593 字符），随 `ToolUpdated` 进快照物化 + 全量落盘 | F-2 |
-| BUG-2026-09-14-03 | P1 | fixed（工作区，待提交） | 死代码 / 治本手段未接线 | `crates/qaqh-runtime/src/ringing/timeline_hub.rs:445-476` | `enable_turn_offload` 全仓无调用者 → `offload_turn_blocks`（`timeline.rs:788-807`，本可截 progress 到 512 字符并清空 output/diff）永不执行；实测 375 个 sealed tool block 中 **152 个仍携带完整 progress（4.83 MB）** | F-3 |
-| BUG-2026-09-14-04 | P2 | fixed（工作区，待提交） | 内存预算记账漏算 | `crates/qaqh-runtime/src/timeline.rs:762-769` | `journal_entry_payload_bytes` 对 `ToolUpdated` 返回 0，但它携带整个 `TimelineTool`（summary+output+diff+progress）→ 最重的一类事件不进 `MAX_TIMELINE_JOURNAL_BYTES`（256 MiB）预算，字节上限形同虚设 | F-4 |
+| BUG-2026-09-14-01 | P2 | fixed @ea6063c | 冗余存储 / 契约违反 | `crates/qaqh-runtime/src/agent/engine_tool.rs:31` | `TimelineTool.summary` 直接克隆 `output`：实测 17 个会话 2,536 个 tool block **100% 逐字节重复**（单会话最多 0.81 MB），且绕过 `TOOL_SUMMARY_MAX_CHARS=512` 契约（实测 8,083 字符），而 TUI 消费端只取 48 字符 | F-1 |
+| BUG-2026-09-14-02 | P1 | fixed @ea6063c | 无界累积 / 内存放大 | `crates/qaqh-runtime/src/timeline.rs:460` | `append_tool_progress` 无条件 `push_str` 无上限：单条 `findstr /s` 把 3.5 MB sourcemap 单行灌入 `tool.progress`（实测 4,177,593 字符），随 `ToolUpdated` 进快照物化 + 全量落盘 | F-2 |
+| BUG-2026-09-14-03 | P1 | fixed @ea6063c | 死代码 / 治本手段未接线 | `crates/qaqh-runtime/src/ringing/timeline_hub.rs:445-476` | `enable_turn_offload` 全仓无调用者 → `offload_turn_blocks`（`timeline.rs:788-807`，本可截 progress 到 512 字符并清空 output/diff）永不执行；实测 375 个 sealed tool block 中 **152 个仍携带完整 progress（4.83 MB）** | F-3 |
+| BUG-2026-09-14-04 | P2 | fixed @ea6063c | 内存预算记账漏算 | `crates/qaqh-runtime/src/timeline.rs:762-769` | `journal_entry_payload_bytes` 对 `ToolUpdated` 返回 0，但它携带整个 `TimelineTool`（summary+output+diff+progress）→ 最重的一类事件不进 `MAX_TIMELINE_JOURNAL_BYTES`（256 MiB）预算，字节上限形同虚设 | F-4 |
 
 ## 详细状态
 
@@ -82,7 +85,7 @@
 
 ## 修复优先级（与主报告 §7 一致）
 
-### 已完成（工作区，待提交）
+### 已完成（已随 `ea6063c` 提交）
 
 | 优先级 | 工作 | 关联 | 验证 |
 |---|---|---|---|

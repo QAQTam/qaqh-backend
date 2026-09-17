@@ -27,4 +27,9 @@
 - **遗留（未做，见 report §7）**：
   1. TUI 侧 `TimelineModel::apply` 对已存在回合的 `TurnOpened` 直接忽略，与后端「原地 reopen」语义不镜像（同一族错位症状）；
   2. 重建窗口型快照的 `has_more` 语义（客户端无法翻到窗口之前的历史，只能读 `messages.jsonl`）；
-  3. `enable_turn_offload` 仍是死代码 + 持久化路径 ABBA 锁序（沿用 01 的遗留项）。
+  3. `enable_turn_offload` 仍是死代码 + 持久化路径 ABBA 锁序（沿用 01 的遗留项）——
+     **2026-09-17 复核：已由 `ea6063c` 处理**（`enable_turn_offload` 现有生产调用点
+     `timeline_hub.rs:261/293/319/533`；offload 在两把锁之外执行，`offload_all_sealed_turns`
+     `:252/325/420/481/532-534`），详见
+     [`2026-09-12-timeline死锁与debug桥token泄露-buglist.md`](./2026-09-12-timeline死锁与debug桥token泄露-buglist.md)
+     的同一注记。
