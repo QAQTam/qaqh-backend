@@ -106,7 +106,7 @@ pub(crate) fn run_edit(
                     }
                     LocateError::Underspecified => (
                         "UNDERSPECIFIED".to_string(),
-                        "old/anchor and contexts are all empty; use insert_after / insert_before / prepend_file / append_file instead"
+                        "old and contexts are all empty; give 'old' (the complete line) with optional context_before/context_after, or use prepend_file / append_file instead"
                             .to_string(),
                         None,
                     ),
@@ -330,7 +330,7 @@ pub(crate) fn hint_for(code: &str) -> Option<&'static str> {
             Some("Split or merge hunks so their resolved ranges do not overlap.")
         }
         "UNDERSPECIFIED" => Some(
-            "Provide context, or use insert_after / insert_before / prepend_file / append_file.",
+            "Provide 'old' (the complete line) plus context_before/context_after, or use prepend_file / append_file.",
         ),
         "OVERWRITE_EXCLUSIVE" => {
             Some("overwrite replaces the whole file — send it as the only hunk in the call.")
@@ -338,7 +338,9 @@ pub(crate) fn hint_for(code: &str) -> Option<&'static str> {
         "HASH_MISMATCH" => Some(
             "Re-read the file with read and retry with the fresh hash (or omit expected_hash to edit without verification).",
         ),
-        "INVALID_REGEX" => Some("replace_inline: fix the regex (regex crate syntax) and retry."),
+        "INVALID_REGEX" => Some(
+            "edit no longer does regex replacement — use bash (sed/perl) or python for regex edits.",
+        ),
         _ => None,
     }
 }

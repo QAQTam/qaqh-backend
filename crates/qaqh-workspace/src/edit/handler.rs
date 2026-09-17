@@ -341,7 +341,7 @@ pub(crate) fn handle_edit(ctx: ToolCallCtx) -> ToolResult {
 pub fn register(mgr: &mut ToolManager) {
     mgr.register(ToolHandler {
             key: "edit".to_string(),
-            description: "File editor (hunk-based, content-matched, supports replace_all). Kinds: replace(old/new), insert_after/insert_before(anchor/new), replace_inline(anchor/old/new), prepend/append_file(new). Use shortest unique old/anchor; supports expected_hash, dry_run+confirm_apply.",
+            description: "File editor (hunk-based, content-matched, supports replace_all). Kinds: replace(old/new), prepend_file(new), append_file(new). 'old' is WHOLE-LINE: give the complete line(s) to replace — for an in-line change, pass the entire line as 'old' and the edited entire line as 'new' (an in-line fragment of 'old' is rejected). Use the shortest unique whole-line old; supports context_before/context_after, hint_line, expected_hash, dry_run+confirm_apply.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -353,7 +353,7 @@ pub fn register(mgr: &mut ToolManager) {
                     "hunks": {
                         "type": "array",
                         "minItems": 1,
-                        "description": "Hunks: replace/insert_after/insert_before/replace_inline/prepend_file/append_file (at least one)"
+                        "description": "Hunks: replace/prepend_file/append_file (at least one)"
                     },
                     "dry_run": {
                         "type": "boolean",
