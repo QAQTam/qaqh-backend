@@ -14,11 +14,11 @@
 | 2 | 安全 P0（越权/边界/凭据/泄漏） | 4 | P0 | 无 | ☐ |
 | 3 | `apply_patch` 契约 | 3 | P0/P1 | 无 | ☑ 1705449 (#87) |
 | 4 | `edit` 契约 | 3 | P0/P1 | 无 | ☑ 61b39d0 (#89) |
-| 5 | 计量与超限 | 2 | P1 | 无 | ☐ |
-| 6 | 热重载与 MCP 文案 | 2 | P1/P2 | 无 | ☐ |
+| 5 | 计量与超限 | 2 | P1 | 无 | ☑ 006b2b3 (#90)，T-5-2 部分（见 N-1） |
+| 6 | 热重载与 MCP 文案 | 2 | P1/P2 | 无 | ☑ b4851b0 (#92)，T-6-1 真机复测待做 |
 | 7 | 零散修复 | 2 | P1 | 无 | ☐ |
 | 8 | 安全 P1/P2 收尾 | 3 | P1/P2 | 批次 2 | ☐ |
-| 9 | 清单归档与卫生（文档） | 4 | — | 无 | ☐ |
+| 9 | 清单归档与卫生（文档） | 4 | — | 无 | ☑ 563f1e3 (#91) |
 | — | 阻塞项（需现场环境，不派） | 8 | — | — | 🚫 |
 
 ---
@@ -169,14 +169,20 @@
 - 依赖：无
 - 涉及：`crates/qaqh-runtime/src/agent/state/token_calibration.rs`、`crates/qaqh-runtime/src/agent/engine_compact.rs`、`crates/qaqh-runtime/src/agent/engine_turn.rs`
 
-- [ ] **T-5-1 图片字节不计入 token 估算**（P1）
+- [x] **T-5-1 图片字节不计入 token 估算**（P1）→ 006b2b3（PR #90；结构化剥离 `ContentBlock::Image.data` 与 `ToolResult.images[].data`，每图固定 4096 token，`count_tokens` 语义未改。修前 1 MiB 截图折算 317,788 token）
   - 位置：`crates/qaqh-runtime/src/agent/state/token_calibration.rs:163-164`；同一盲点第二处 `crates/qaqh-runtime/src/agent/engine_compact.rs:432-435`
   - 现状：把整份 `(messages, tools)` `serde_json::to_string` 后交 `count_tokens`，而 `ToolResult.images[].data` 的内联 base64（`crates/qaqh-types/src/tool_result.rs:83-96`）就在这份字符串里，计数实现（`crates/qaqh-types/src/token.rs:19-28`）无图片感知 ⇒ 1 MiB 截图被折算成二三十万 token，而端点按像素只算几千；带图会话每轮触发 auto-compact，压缩后仍超阈值，prompt cache 反复失效（E2）
   - 动作：序列化前把图片字节替换为等价计费占位符（保守固定上限，改动最小、无契约变更）；`engine_compact.rs:432` 一并处理
   - 验收：新增回归锁断言 `prepared_request_metrics` 不随图片字节线性增长（当前必然失败）；`rg -n 'image|base64' crates/qaqh-runtime/src/agent/state/token_calibration.rs` 出现处理分支
   - 关联：D-14 / BUG-2026-09-16-05
 
-- [ ] **T-5-2 超限请求本地 pre-flight**（P1）
+- [x] **T-5-2 超限请求本地 pre-flight**（P1）→ 006b2b3（PR #90，**部分完成**）
+  - 已做：`compact_preflight`（`decision_tokens ≥ context_limit` ⇒ `ForcedCompact`，在 `gate_request` 之前）
+    + 端点 400 超限回收分支（识别各 provider 文案，上限 2 次，压缩无产出即放弃）。
+  - 未做：**profile schema 增 `context_window` 字段**（需改 `qaqh-types/src/config.rs` +
+    `qaqh-config/src/config.rs`，超出本批次允许改动范围）→ 已立为 **B-6**。
+  - 未覆盖：`run_auto_compact` → `ContinueTurn` → 重发的完整回收链路无自动测试
+    （`prepare_gate_snapshot` 需完整 `RingContext` + provider，须新建集成测试文件）。
   - 位置：`crates/qaqh-runtime/src/agent/engine_turn.rs:880-925`（唯一压缩触发路径）
   - 现状：`rg "CONTEXT_OVERFLOW|context_overflow" crates/` 零命中；`rg "context_limit" crates/qaqh-gate/src/` 零命中；`rg "context_window" crates/qaqh-config crates/qaqh-types` 只命中文档。触发条件只有 `decision_tokens > limit × threshold`，**无「连续 400 ⇒ 强制压缩重试」分支** ⇒ 上下文超限时 400 整轮 Fatal（E2）
   - 动作：先做「超限请求本地 pre-flight」——拿 `context_limit` 在发请求前预判并触发压缩；再做「端点声明上下文窗口」（profile schema 增 `context_window` 字段）
@@ -191,14 +197,19 @@
 - 依赖：无
 - 涉及：`crates/qaqh-runtime/src/service.rs`、`crates/qaqh-mcp/src/resources.rs`
 
-- [ ] **T-6-1 删除 reloader 的前置 `changed()` 守卫**（P1）
+- [x] **T-6-1 删除 reloader 的前置 `changed()` 守卫**（P1）→ b4851b0（PR #92）
+  - ⚠️ **真机半条待主代理复测**：沙箱内起不了 daemon、改不了 `~/.config/qaqh/config.toml`。
+    「重启 daemon 后第一次改 `[lsp]` 段 → 日志立即出现 `[lsp] hot-reload applied`」需在真实环境验证。
+    可验证部分已由回归测试锁定（`first_publish_after_subscribe_is_observed` 红→绿）。
   - 位置：`crates/qaqh-runtime/src/service.rs:733-734`（mcp）、`:775-776`（lsp）；对照 `:736`、`:778` 是真正处理循环
   - 现状：`if rx.changed().await.is_ok() { rx.borrow_and_update(); }` 在真正循环之前。`qaqh_config::watch::subscribe()`（`crates/qaqh-config/src/watch.rs:34`）返回的 receiver 其 version 已是当前版本 ⇒ 那次 `changed()` 等到的是**用户启动后的第一次真实改动**，随即被 `borrow_and_update()` 丢弃 ⇒ 首次改 `[lsp]`/`[mcp]` 被静默吞掉（E2）
   - 动作：删掉两处前置守卫（`subscribe()` 语义下该守卫的意图不成立）；保留循环体内的 `if published.<sec> == manager.config() { continue; }` 幂等判定
   - 验收：重启 daemon 后**第一次**改 `config.toml` 的 `[lsp]` 段 → 日志立即出现 `[lsp] hot-reload applied`；新增回归测试覆盖「首次变更不被吞」
   - 关联：D-16① / BUG-2026-09-15-07（热重载那份）
 
-- [ ] **T-6-2 `list_resources` 区分「未连接」与「已连接但为空」**（P2）
+- [x] **T-6-2 `list_resources` 区分「未连接」与「已连接但为空」**（P2）→ b4851b0（PR #92）
+  - 遗留（未做，建议另开单）：`resources/list` **拉取失败**时缓存同样是 `None`，仍落「not connected yet」；
+    三态拆分需 `connection.rs` 侧记录失败状态。
   - 位置：`crates/qaqh-mcp/src/resources.rs:181-191`
   - 现状：`resources.filter(|r| !r.is_empty())` 把 `Some(vec![])`（已连接、无资源）与 `None`（未连接）合并成同一分支，`:187-190` 输出 `"no resource list available — server not connected yet; …"`；同文件的 `list_prompts` 区分正确（E2）
   - 动作：拆成两个分支——`None` 保留未连接文案，`Some(empty)` 输出「已连接，资源列表为空」
@@ -261,25 +272,27 @@
 - 依赖：无
 - 涉及：`docs/buglist/*`
 
-- [ ] **T-9-1 归档 5 条状态过期条目**
+- [x] **T-9-1 归档 5 条状态过期条目** → 563f1e3（PR #91，已核实 `ea6063c`/`d9fa81c` 均为 HEAD 祖先）
   - 现状：`2026-09-14-timeline工具块内存放大-buglist.md` 的 `BUG-2026-09-14-01` ~ `-04` 仍写 `fixed（工作区，待提交）`，实际已随 `ea6063c`（2026-09-15）提交且是 HEAD 祖先；`2026-09-15-热重载吞首次变更与资源文案-buglist.md:17` 的 `BUG-2026-09-15-09` 同样，实际已随 `d9fa81c` 提交
   - 动作：状态改为 `fixed @ea6063c` / `fixed @d9fa81c`；同文件的「修复优先级 → 已完成（工作区，待提交）」小标题一并更新；表头「复核基线 `1c92413`」注明那只是登记提交
   - 验收：`rg -n '工作区，待提交' docs/buglist/` → 不再命中已提交项
   - 关联：D-20
 
-- [ ] **T-9-2 修正 `BUG-2026-09-17-06` 的描述**
+- [x] **T-9-2 修正 `BUG-2026-09-17-06` 的描述** → 563f1e3（PR #91，标「HEAD 不成立，待确认运行二进制版本」+ TUI `33253a5` 证据）
   - 现状：该条称 TUI `apply_status` 收到 `CANCELLED` 后不停跟踪；实测 TUI 仓 `~/Projects/qaqh-tui-app` @ `33253a5` 的 `src/app/mod.rs:844-856` 已调用 `untrack_subagent`（定义 `src/app/subagent.rs:352-356`，接线来自 `f85c33d`，2026-09-09 即已在历史里）
   - 动作：标注「HEAD 不成立；日志证据与代码事实不一致，需先确认运行的是哪个版本的二进制」，或直接关闭
   - 验收：该条状态不再是裸 `open`
   - 关联：D-21
 
-- [ ] **T-9-3 修正 `BUG-2026-09-13-13` 的状态**
+- [x] **T-9-3 修正 `BUG-2026-09-13-13` 的状态** → 563f1e3（PR #91，改为 `⚠️ PARTIAL @3775a9c`，残留指向 `chat_completions_api.rs:695-697`）
   - 现状：标 `✅ fixed @3775a9c`，但 chat 路径 `crates/qaqh-gate/src/chat_completions_api.rs:695-697` 仍缺 `null→{}` 兜底与 name 过滤 ⇒ 应改为 `PARTIAL`（或拆出新条目）
   - 动作：改状态 + 注明残留子情形与对应位置
   - 验收：状态列含 `PARTIAL` 或新条目已登记
   - 关联：D-18
 
-- [ ] **T-9-4 清单卫生四项**
+- [x] **T-9-4 清单卫生四项** → 563f1e3（PR #91）
+  - ① 撞号消歧：keepalive 那份改 `keepalive-BUG-2026-09-15-07`（加文件前缀，保留子串可查性）；
+    ② 回填哈希按索引表纠正；③ 示例伪表行改等长占位号；④ timeline 两处标「已由 `ea6063c` 处理」。
   - 现状：① `BUG-2026-09-15-07` 被 `keepalive` 与 `热重载` 两份文件同时占用；`BUG-2026-09-16-01` 被 `read_image` 与 `edit` 同时占用；`BUG-2026-09-13-31` 与 `-08` 是同一缺陷重复登记。② `2026-09-12-多会话…` 的「状态回填」注记把 09/10/11/12 写成 `90d7051 / fbb7f4d / 4197db1 / 86264b7`（那四个其实是 09-13 清单的 `Closes #9/#10/#11/#12`），与同文件索引表的 `33e6261 / 13cb21e / 13cb21e / fe4da88` 矛盾。③ `2026-09-16-edit工具行内片段与kind虚报-buglist.md` 的复现示例在代码块内内嵌了一行伪造的 `| BUG-2026-09-16-01 | fixed … |`，任何 `^\| BUG-` 的 grep 都会误命中。④ `2026-09-12-timeline死锁…:25-26` 与 `2026-09-12-timeline快照…:30` 仍称 `enable_turn_offload` 是死代码、ABBA 锁序未改，与 `ea6063c` 之后的代码事实相反
   - 动作：① 重编 ID 或加文件前缀；② 修正哈希；③ 改掉示例里的 ID；④ 标注「已由 `ea6063c` 处理」
   - 验收：`rg -n '^\| BUG-2026-09-15-07' docs/buglist/` → 单份文件命中
@@ -300,6 +313,42 @@
   - 缺什么：`ACTOR_WORKSPACE` 那条已被 `crates/qaqh-workspace/src/runtime.rs:167-176` 的 `ActorToolScope` 部分缓解，**需重判**；另两行清单行号已失效，需重定位
 - [ ] **B-5** D-2 的审批面板可见性（Level 3 弹窗里用户能否看到 `exec` 的目标路径）
   - 缺什么：实机点击验证（本轮是从 `extract_target_paths` 对 `exec` 参数名的行为推断的）
+
+---
+
+## 后续待办（执行批次过程中新发现，非阻塞，尚未派发）
+
+> 这些不在原复核范围内，是子代理执行/评审时暴露出来的。**未派发**，待机主决定优先级。
+
+- [ ] **N-1（来自 T-5-2 的未完成半条）profile schema 增 `context_window` 字段**
+  - 位置：`crates/qaqh-types/src/config.rs`、`crates/qaqh-config/src/config.rs`
+  - 现状：批次 5 只做了本地 pre-flight（以既有 `context_limit` 当硬窗口），
+    「端点声明上下文窗口」这半条因超出批次 5 允许改动的文件范围而未做。
+  - 动作：profile schema 增 `context_window`，pre-flight 优先用它、缺失时回落 `context_limit`。
+  - 关联：D-15 / BUG-2026-09-16-04
+
+- [ ] **N-2（来自 PR #87 自动评审的建议项）`apply_patch` 三处收尾**
+  - ① `WOULD_OVERWRITE` 的 hint 措辞在「真 apply 走到这里」时不成立（前序 hunk 已落盘，
+    重发同 patch 会 `NO_MATCH`）⇒ 需区分 dry_run / 非 dry_run 两种场景。
+  - ② `file_state` 未随 `apply_patch` 的覆盖同步（与既有 `UpdateFile`/`Move` 分支一致，
+    但需确认紧随其后的 `edit` 是否会被 hash 漂移拒绝）。
+  - ③ `OVERWROTE` 文本只取首个 `*** Add File:` marker，多 Add File 时会漏报。
+  - 关联：PR #87 评审评论 / BUG-2026-09-16-10、-11
+
+- [ ] **N-3（来自批次 6 的附带观察）`list_resources` 的三态拆分**
+  - 现状：`resources/list` **拉取失败**与**未连接**目前都落到「not connected yet」文案；
+    批次 6 只拆了「已连接但为空」。
+  - 动作：`connection.rs` 侧记录失败状态，`resources.rs` 输出第三种文案。
+  - 关联：D-17 / BUG-2026-09-15-08
+
+- [ ] **N-4（来自 PR #87 评审的解析类观察）`apply_patch` 解析边界**
+  - ① `*** End Patch` 被当作 Add File 目标（`strip_prefix` 未校验 rest 为空）⇒ 返回 Ok 并真的建文件；
+    控制用例（只有 END marker）现在也返回 Ok。
+  - ② 文件名为空时 `resolve_workspace_path` 的 `ParentDir` 分支会 `pop()` 掉 workspace 根。
+  - ③ 符号链接 workspace + 绝对路径：`resolve_workspace_path` 的 `joined.exists()` 走 canonicalize
+    与原 cwd 比对，会拒掉合法请求。
+  - 说明：三条**早于批次 3 存在**，与批次 3 的改动无因果关系。
+  - 关联：PR #87 评审评论附注
 
 ---
 
