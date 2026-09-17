@@ -530,7 +530,16 @@ fn collect_subagent_result(
     } else {
         ("completed", format!("subagent '{name}' completed"))
     };
-    if !parent_seed.is_empty() {
+    // T-1-2：被取消的子代理不得把结果注入父会话。取消是终态——父会话可能
+    // 正是被用户取消（或本 collector 的 kill/timeout 路径）而停下的，注入会
+    // 触发一个 `TurnStart` 把已判定 cancel 的会话复活，并把一段早已作废的
+    // `final_answer` 当作模型输入。仅留日志痕迹，不注入、不留存正文。
+    if did_cancel {
+        log::info!(
+            "[SUBAGENT] '{name}' cancelled — result injection suppressed (answer_len={answer_len})"
+        );
+    }
+    if !parent_seed.is_empty() && !did_cancel {
         // 注入到主代理会话。主代理 idle 时该消息触发新回合；运行中则进入
         // cmd_rx 排队 / lap 边界见缝插针通道。daemon 的 Accepted ACK 只代表
         // "已转发"，不代表 worker 落地；worker 侧的 compact 拒绝已改为延迟处理
@@ -752,6 +761,107 @@ mod tests {
         assert!(
             registry_ref.killed(),
             "在册条目 kill 后 RegistryRef::killed() 必须为 true"
+        );
+    }
+
+    // ── T-1-2：取消后不得注入父会话 ──────────────────────────────────────
+
+    /// 记录投递命令的 mock 传输：事件流由测试预置（这里只放一条
+    /// `ConversationCancelled`，让 collector 立即进取消终态）。
+    struct RecordingTransport {
+        batch_rx: mpsc::Receiver<EventBatch>,
+        sent: Arc<std::sync::Mutex<Vec<(String, RingingCommand)>>>,
+    }
+
+    impl SubagentTransport for RecordingTransport {
+        fn send_command(&self, seed: &str, command: RingingCommand) -> Result<bool, String> {
+            self.sent
+                .lock()
+                .expect("test mutex must not be poisoned")
+                .push((seed.to_string(), command));
+            Ok(true)
+        }
+
+        fn download_content(
+            &self,
+            _seed: &str,
+            _reference: &ContentRef,
+        ) -> Result<Vec<u8>, String> {
+            Err("no externalized content in this test".into())
+        }
+
+        fn attach(&self, _seed: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn close(&self) {}
+
+        fn events(&self) -> &mpsc::Receiver<EventBatch> {
+            &self.batch_rx
+        }
+    }
+
+    fn cancelled_batch(seed: &str) -> EventBatch {
+        let envelope = qaqh_ringing::RingingEventEnvelope::new(
+            seed,
+            1,
+            1,
+            1,
+            "ev-cancel-1",
+            RingingEvent::Conversation(ConversationEvent::ConversationCancelled { turn_id: None }),
+        );
+        EventBatch {
+            schema: qaqh_ringing::protocol::RINGING_SCHEMA.to_string(),
+            version: qaqh_ringing::protocol::RINGING_VERSION,
+            channel: qaqh_domain::RingingChannel::Conversation,
+            seed: seed.to_string(),
+            server_epoch: "test-epoch".to_string(),
+            from_stream_seq: 1,
+            to_stream_seq: 1,
+            envelopes: vec![envelope],
+        }
+    }
+
+    /// T-1-2 回归：collector 收到 `ConversationCancelled` 后**不得**把
+    /// `final_answer` 注入父会话。未修复时本测试红：仍向父 seed 发
+    /// `ConversationSendMessage { as_system: true }`，父会话被重新开回合
+    /// （TurnStart）——「已判定 cancel 的子代理复活」的第二段根因。
+    #[test]
+    fn cancelled_collector_does_not_inject() {
+        use qaqh_workspace::process_registry::ProcessRegistry;
+
+        let child = "sub-cancel-inject-child";
+        let parent = "sub-cancel-inject-parent";
+        let (tx, rx) = mpsc::channel::<EventBatch>();
+        tx.send(cancelled_batch(child))
+            .expect("test channel must not fail");
+
+        let sent: Arc<std::sync::Mutex<Vec<(String, RingingCommand)>>> = Arc::default();
+        let transport = Box::new(RecordingTransport {
+            batch_rx: rx,
+            sent: Arc::clone(&sent),
+        });
+        let registry_ref = RegistryRef::Local {
+            id: ProcessRegistry::register("subagent-cancel-no-inject"),
+        };
+
+        collect_subagent_result(transport, child, "cancelled_task", registry_ref, 5, parent);
+
+        let sent = sent.lock().expect("test mutex must not be poisoned");
+        let injected: Vec<_> = sent.iter().filter(|(seed, _)| seed == parent).collect();
+        assert!(
+            injected.is_empty(),
+            "取消后不得向父会话注入任何命令，实测: {injected:?}"
+        );
+        assert!(
+            sent.iter().any(|(seed, command)| {
+                seed == child
+                    && matches!(
+                        command,
+                        RingingCommand::Control(qaqh_domain::ControlCommand::SessionClose { .. })
+                    )
+            }),
+            "子 worker 的自动卸载（SessionClose）不受抑制影响，实测: {sent:?}"
         );
     }
 }

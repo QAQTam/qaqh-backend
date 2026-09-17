@@ -475,10 +475,21 @@ impl ProcessRegistry {
     }
 
     /// Mark a process as exited.
+    ///
+    /// 单调性守卫（T-1-5）：只有 `Running` 才允许改写为 `Exited`。`Killed` 是
+    /// 由 `kill` 写入的终态，迟到的读线程 settle（管道 EOF）不得把它覆盖回
+    /// `Exited`——否则 `RegistryRef::killed()`（只看 `status == "killed"`）会
+    /// 丢失 kill 信号，而 `is_running` 的同文件注释已声明「status 单调，一旦
+    /// 离开 Running 不会回退」。句柄释放与终态时刻仍照常维护（幂等）。
     pub fn mark_exited(id: u32, code: i32) {
         Self::with(|r| {
             if let Some(entry) = r.entries.get(&id) {
-                *entry.status.lock().unwrap_or_else(|e| e.into_inner()) = ProcStatus::Exited(code);
+                {
+                    let mut status = entry.status.lock().unwrap_or_else(|e| e.into_inner());
+                    if matches!(*status, ProcStatus::Running) {
+                        *status = ProcStatus::Exited(code);
+                    }
+                }
                 *entry.child.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *entry.terminal_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
             }
@@ -891,5 +902,35 @@ mod tests {
             !ProcessRegistry::is_running(u32::MAX),
             "缺失条目视为不在运行"
         );
+    }
+
+    /// T-1-5 回归：`kill` 写入的 `Killed` 终态不得被迟到的 `mark_exited`
+    /// （读线程 settle 路径）覆盖回 `Exited`。未加守卫时本测试红：
+    /// `status` 变回 `exited`，`RegistryRef::killed()` 丢失 kill 信号。
+    #[test]
+    fn mark_exited_does_not_downgrade_killed() {
+        let id = ProcessRegistry::register("mark-exited-killed-test");
+        // subagent 登记路径：无 os_pid/child，kill 仍把状态收敛为 Killed。
+        assert_eq!(ProcessRegistry::kill(id), KillOutcome::Killed);
+        let after_kill = ProcessRegistry::get_info(id).expect("entry must exist");
+        assert_eq!(after_kill["status"], "killed", "前置条件：已进 Killed");
+
+        ProcessRegistry::mark_exited(id, 0);
+
+        let after_settle = ProcessRegistry::get_info(id).expect("entry must exist");
+        assert_eq!(
+            after_settle["status"], "killed",
+            "mark_exited 不得把 Killed 降级为 Exited: {after_settle}"
+        );
+    }
+
+    /// 对照：正常路径（Running → Exited）不受守卫影响。
+    #[test]
+    fn mark_exited_still_moves_running_to_exited() {
+        let id = ProcessRegistry::register("mark-exited-running-test");
+        ProcessRegistry::mark_exited(id, 7);
+        let info = ProcessRegistry::get_info(id).expect("entry must exist");
+        assert_eq!(info["status"], "exited");
+        assert_eq!(info["exit_code"], 7);
     }
 }

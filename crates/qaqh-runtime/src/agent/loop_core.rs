@@ -154,6 +154,12 @@ pub struct Loop {
     // ── Process-level signals ──
     /// Cancellation token shared across engines.
     pub(super) cancel: CancelToken,
+    /// T-1-3：取消**原因**位——用户显式取消（`ConversationCancel`）后置位，
+    /// 直到下一条用户输入才清除。`cancel` token 只表达「此刻是否取消」，无法
+    /// 区分「用户取消」与「回合内取消」，于是任何系统注入（子代理报告等）
+    /// 都会在 idle 分支清掉取消标记并开新回合，把用户已取消的会话复活。
+    /// 置位期间系统注入只入队、不开回合。
+    pub(super) user_cancelled: bool,
     /// Current phase (Idle / GateRunning / ToolsRunning).
     pub(super) phase: LoopPhase,
     /// Deferred interrupt commands received while busy.
@@ -237,6 +243,7 @@ impl Loop {
             cmd_rx,
             event_tx,
             cancel,
+            user_cancelled: false,
             phase: LoopPhase::Idle,
             pending: PendingState::default(),
             deferred_ringing: VecDeque::new(),
@@ -369,6 +376,10 @@ impl Loop {
         self.reset_all_engines();
         self.cancel.clear();
         qaqh_workspace::clear_cancel();
+        // T-1-3：取消原因位随旧会话一起作废——新会话/恢复的会话不是「用户
+        // 取消」的会话，系统注入必须能照常开回合（否则一次取消会永久压制
+        // 后续所有子代理结果注入）。
+        self.user_cancelled = false;
     }
 
     /// 将会话 seed 同步到 PacedEmitter（Ringing 事件信封路由键）。

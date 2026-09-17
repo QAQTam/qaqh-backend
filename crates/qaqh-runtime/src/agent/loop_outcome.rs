@@ -100,8 +100,12 @@ impl Loop {
     /// 边界 `drain_injections` 落盘进当前回合（见缝插针语义不变），
     /// writer 死亡则进程即将退出。
     pub(super) fn dispatch_injections_after_compact(&mut self) {
+        // T-1-3：用户取消态下 compact 完成后也不得逐条开新回合（与
+        // `Loop::inject` 的 idle 分支同一语义）。记录留在总线里，等用户重新
+        // 输入后由 lap 边界落盘。
         if self.writer_dead.load(Ordering::SeqCst)
             || self.phase != LoopPhase::Idle
+            || self.user_cancelled
             || self.injection_bus.pending_len() == 0
         {
             return;

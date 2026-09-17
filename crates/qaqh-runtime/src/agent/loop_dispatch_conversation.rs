@@ -83,6 +83,9 @@ impl Loop {
                     stats: &mut self.session.stats,
                     flow: &mut self.flow,
                 };
+                // T-1-3：用户输入是唯一的「复活」入口——显式取消态在此解除，
+                // 之后的系统注入（子代理报告）才允许再开回合。
+                self.user_cancelled = false;
                 let outcome = self.input.handle_user_input(
                     &mut ctx,
                     qaqh_message::builtin::USER,
@@ -95,6 +98,9 @@ impl Loop {
             ConversationCommand::ConversationCancel { turn_id } => {
                 self.cancel.set();
                 qaqh_workspace::set_cancel(true);
+                // T-1-3：记录取消**原因**——系统注入只在非用户取消态清除标记
+                // 并开回合（见 `Loop::inject` / `dispatch_injections_after_compact`）。
+                self.user_cancelled = true;
                 // BUG-2026-09-13-08：取消不得留下「有 tool_use 无 tool_result」
                 // 的孤儿 step —— 下轮模型会重发同一 tool_use，已执行过的工具
                 // 被重复执行（挂起→批准→取消正是触发窗口）。

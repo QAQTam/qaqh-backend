@@ -4,17 +4,29 @@
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
-use qaqh_domain::{ControlEvent, SessionState};
-use qaqh_ringing::RingingEvent;
+use qaqh_domain::{
+    ControlEvent, ConversationCommand, ConversationEvent, DomainEvent, RingingChannel, SessionState,
+};
+use qaqh_ringing::{RingingCommand, RingingEvent, RingingWorkerCommandEnvelope};
 use qaqh_runtime::{AgentRegistry, RingingHub};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-#[test]
-fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
-    let _test_lock = TEST_LOCK.lock().expect("test setup must not fail");
+/// 进程级装配（QAQH_DATA_DIR / 工作区 / SessionManager 单例 / 工具快照）。
+/// 必须在 [`test_guard`] 内调用：这些都是进程级全局状态，且
+/// `SessionManager::init` 只能成功一次。
+static ENV_INIT: Once = Once::new();
+
+fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    // 中毒只说明别的用例 panic 过，不代表本用例的前置条件不成立。
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn init_env(tag: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "qaqh-subagent-inprocess-test-{}-{}",
+        "qaqh-{tag}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -26,16 +38,22 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("test setup must not fail");
     unsafe {
-        // QAQH_DATA_DIR is process-wide; this integration-test binary contains
-        // a single test and holds TEST_LOCK around all global state mutations.
+        // QAQH_DATA_DIR is process-wide; this integration-test binary holds
+        // TEST_LOCK around all global state mutations.
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    static INIT: Once = Once::new();
-    INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
+    ENV_INIT.call_once(|| qaqh_session::SessionManager::init(qaqh_types::platform::data_dir()));
     // Daemon process manager snapshot: must stay stable while the actor
     // installs its private ToolManager.
     qaqh_workspace::runtime::init_tools("daemon-test", &[], vec![]);
+    root
+}
+
+#[test]
+fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
+    let _test_lock = test_guard();
+    let _root = init_env("subagent-inprocess-test");
     let process_tools = qaqh_workspace::runtime::process_all_tool_names();
 
     let seed = format!("sub-inproc-{}", std::process::id());
@@ -164,4 +182,125 @@ fn spawn_subagent_does_not_go_through_process_spawn() {
         body.contains("spawn_subagent_inprocess("),
         "spawn_subagent must delegate to the in-process actor path: {body}"
     );
+}
+
+/// T-1-1 回归：`spawn_subagent_inprocess` 必须把子 seed 登记进 hub 的活表。
+///
+/// 未修复时本测试红：子 seed 不在 `live_workers`，bootstrap 路径
+/// （`seal_orphan_channel_state(seed, force=false)`）会把它判为孤儿，封禁其
+/// 正在进行的 turn（前端据此显示 cancelled），而子 actor 仍在运行并继续
+/// 发布事件——即「已判定 cancel 的子代理复活」。
+#[test]
+fn spawn_subagent_registers_liveness() {
+    let _test_lock = test_guard();
+    let _root = init_env("subagent-liveness-test");
+    let seed = format!("sub-live-{}", std::process::id());
+    let hub = Arc::new(RingingHub::new("subagent-liveness-test"));
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    registry.attach_ringing(Arc::clone(&hub));
+
+    registry
+        .spawn_subagent(&seed, &[], None, None, None)
+        .expect("spawn in-process subagent");
+
+    // 构造可观察的「无终态 running 状态」：一个已开但未收尾的 turn。
+    hub.publish(
+        &seed,
+        DomainEvent::Conversation(ConversationEvent::TurnStarted {
+            turn_id: "t1".into(),
+            user_text: "hello".into(),
+        }),
+    );
+    let before = hub.snapshot(RingingChannel::Conversation, &seed);
+    assert_eq!(
+        before.state.get("active_turn").and_then(|v| v.as_str()),
+        Some("t1"),
+        "前置条件：存在未收尾的 running turn"
+    );
+
+    // 活 worker 在册 → bootstrap 收尾（force=false）必须整体跳过。
+    assert!(
+        !hub.seal_orphan_channel_state(&seed, false),
+        "活 worker 的 seed 不得被 bootstrap 收尾（本 seed 必须已在 live_workers）"
+    );
+
+    let after = hub.snapshot(RingingChannel::Conversation, &seed);
+    assert_eq!(
+        after.state.get("active_turn").and_then(|v| v.as_str()),
+        Some("t1"),
+        "活 worker 的 running turn 不得被 seal——否则前端显示 cancelled 而 actor 仍在跑"
+    );
+
+    registry.shutdown_all();
+}
+
+/// T-1-4 回归：父会话收到 `ConversationCancel` 时，取消必须传播到它派生的
+/// 子 seed（子 actor 收到 `ConversationCancel` 并发布 `ConversationCancelled`）。
+///
+/// 未修复时本测试红：子 seed 收不到任何取消，继续跑完自己的回合并（在
+/// T-1-2 之前）把结果注入已取消的父会话。
+#[test]
+fn parent_cancel_propagates_to_children() {
+    let _test_lock = test_guard();
+    let _root = init_env("subagent-parent-cancel-test");
+    let parent = format!("sub-parent-{}", std::process::id());
+    let child = format!("sub-child-{}", std::process::id());
+    let hub = Arc::new(RingingHub::new("subagent-parent-cancel-test"));
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    registry.attach_ringing(Arc::clone(&hub));
+
+    // 父：无运行时上下文 → 无父链（顶层会话语义）。
+    qaqh_workspace::runtime::clear_context();
+    registry
+        .spawn_subagent(&parent, &[], None, None, None)
+        .expect("spawn parent");
+    // 子：spawn_subagent handler 运行在父会话的工具线程上，RUNTIME_CTX 即父
+    // 会话 → 登记 parent -> child。
+    qaqh_workspace::runtime::set_context(&parent, 4);
+    registry
+        .spawn_subagent(&child, &[], None, None, None)
+        .expect("spawn child");
+    qaqh_workspace::runtime::clear_context();
+
+    assert_eq!(
+        registry.subagent_children(&parent),
+        vec![child.clone()],
+        "spawn 时必须登记 parent -> children"
+    );
+
+    let mut child_events = hub.subscribe(RingingChannel::Conversation, &child);
+
+    let cancel_env = RingingWorkerCommandEnvelope::new(
+        parent.clone(),
+        "cancel-parent-1",
+        RingingCommand::Conversation(ConversationCommand::ConversationCancel { turn_id: None }),
+    );
+    registry
+        .send_ringing(&parent, &cancel_env)
+        .expect("cancel must reach the parent worker");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_child_cancel = false;
+    while Instant::now() < deadline {
+        match child_events.try_recv() {
+            Ok(envelope)
+                if envelope.seed == child
+                    && matches!(
+                        envelope.event,
+                        RingingEvent::Conversation(ConversationEvent::ConversationCancelled { .. })
+                    ) =>
+            {
+                saw_child_cancel = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    assert!(
+        saw_child_cancel,
+        "父取消必须传播到子 seed（子 actor 应发布 ConversationCancelled）"
+    );
+
+    registry.shutdown_all();
 }
