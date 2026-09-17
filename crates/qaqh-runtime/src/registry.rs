@@ -261,6 +261,13 @@ pub struct AgentRegistry {
     shutting_down: bool,
     /// 最近一次 spawn 时间（防崩溃-重启风暴：同一 seed 1 秒内不重复拉起）。
     last_spawn: HashMap<String, std::time::Instant>,
+    /// T-1-4：子代理 seed → 派生出它的父会话 seed（`spawn_subagent` 登记，
+    /// `close` 清理）。取消传播需要反向查询，故与 `subagent_children` 成对
+    /// 维护。
+    subagent_parent: HashMap<String, String>,
+    /// T-1-4：父会话 seed → 其子代理 seed 集合。父会话收到
+    /// `ConversationCancel` 时逐个取消（见 `cancel_subagent_children`）。
+    subagent_children: HashMap<String, std::collections::HashSet<String>>,
 }
 
 impl AgentRegistry {
@@ -272,6 +279,8 @@ impl AgentRegistry {
             hub: None,
             shutting_down: false,
             last_spawn: HashMap::new(),
+            subagent_parent: HashMap::new(),
+            subagent_children: HashMap::new(),
         }
     }
 
@@ -346,6 +355,13 @@ impl AgentRegistry {
         let persist = std::env::var("QAQH_SUBAGENT_PERSIST")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
         let ephemeral = !persist;
+        // T-1-4：登记「父会话 → 子 seed」。父 seed 取自当前工具线程的运行时
+        // 上下文——`spawn_subagent` handler 运行在父 actor 的工具线程上，
+        // `ActorToolScope` 已把父会话的 `RUNTIME_CTX` 安装到该线程。daemon
+        // RPC `subagent.spawn`（无父上下文）与测试路径读到 None，跳过登记。
+        let parent_seed = qaqh_workspace::runtime::context()
+            .map(|ctx| ctx.active_session)
+            .unwrap_or_default();
         self.spawn_subagent_inprocess(
             seed,
             SubagentSpawnSpec {
@@ -355,7 +371,11 @@ impl AgentRegistry {
                 max_tokens,
                 ephemeral,
             },
-        )
+        )?;
+        if !parent_seed.is_empty() && parent_seed != seed {
+            self.link_subagent(&parent_seed, seed);
+        }
+        Ok(())
     }
 
     fn spawn_subagent_inprocess(
@@ -394,6 +414,11 @@ impl AgentRegistry {
         let actor_spec = spec.clone();
         let tools_len = spec.tools.len();
         let liveness = std::sync::Arc::new(crate::agent::liveness::WorkerLiveness::new());
+        // T-1-5：worker 退出即摘除活表（与 T-1-1 的 spawn 登记成对）。
+        // `live_workers` 此前只靠 `forget_seed`（会话关闭）清理，子代理 actor
+        // 自然退出后条目永留——bootstrap 的孤儿收尾因此永远跳过该 seed。
+        let hub_for_worker = self.hub.clone();
+        let dead_seed = seed.to_string();
         let thread = std::thread::Builder::new()
             .name(format!("qaqh-subagent-{actor_seed}"))
             .spawn(move || {
@@ -406,6 +431,9 @@ impl AgentRegistry {
                     writer_dead,
                     liveness,
                 );
+                if let Some(hub) = hub_for_worker.as_ref() {
+                    hub.mark_worker_dead(&dead_seed);
+                }
             })
             .map_err(|e| format!("spawn in-process subagent {seed}: {e}"))?;
 
@@ -423,6 +451,13 @@ impl AgentRegistry {
                 thread: Some(thread),
             },
         );
+        // T-1-1：子 seed 必须进活表。否则 bootstrap 的
+        // `seal_orphan_channel_state(seed, force=false)` 会把它判为孤儿并封禁
+        // 其正在进行的 turn（前端据此显示 cancelled），而子 actor 仍在运行并
+        // 继续发布事件——即「已判定 cancel 的子代理复活」。
+        if let Some(hub) = self.hub.as_ref() {
+            hub.mark_worker_live(seed);
+        }
         log::info!(
             "[subagent] spawned in-process actor seed={seed} tools={tools_len} (no child process)"
         );
@@ -570,6 +605,19 @@ impl AgentRegistry {
             }
         };
         if write(self.instances.get(seed).expect("spawned instance")).is_ok() {
+            // T-1-4：父会话取消传播到它派生的子 seed。放在投递成功之后——
+            // 取消帧确实进入了父 worker 才谈得上「取消已经发生」。registry
+            // 是 Ringing 命令的唯一咽喉（daemon RPC、宿主直连、广播都经此），
+            // 因此这里也是唯一能同时触达 hub（mark_worker_dead）与子实例
+            // cmd_tx 的位置。
+            if matches!(
+                &env.command,
+                qaqh_ringing::RingingCommand::Conversation(
+                    qaqh_domain::ConversationCommand::ConversationCancel { .. }
+                )
+            ) {
+                self.cancel_subagent_children(seed);
+            }
             return Ok(());
         }
         let kind = self
@@ -608,6 +656,110 @@ impl AgentRegistry {
     pub fn close(&mut self, seed: &str) {
         if let Some(instance) = self.instances.remove(seed) {
             instance.shutdown();
+        }
+        // T-1-4：会话/子代理关闭即摘除派生登记（等价于 hub 的 `forget_seed`
+        // 生命周期点）——父集合与反向指针都不随历史 seed 无界增长。
+        self.unlink_subagent(seed);
+    }
+
+    /// T-1-4：登记父会话 → 子代理的派生关系（幂等）。
+    fn link_subagent(&mut self, parent: &str, child: &str) {
+        self.subagent_parent
+            .insert(child.to_string(), parent.to_string());
+        self.subagent_children
+            .entry(parent.to_string())
+            .or_default()
+            .insert(child.to_string());
+    }
+
+    /// T-1-4：摘除某个 seed 的派生登记——作为父会话关闭时丢弃它的子集合；
+    /// 作为子代理关闭时从父集合中移除自身。
+    fn unlink_subagent(&mut self, seed: &str) {
+        if let Some(parent) = self.subagent_parent.remove(seed) {
+            let parent_now_empty = match self.subagent_children.get_mut(&parent) {
+                Some(children) => {
+                    children.remove(seed);
+                    children.is_empty()
+                }
+                None => false,
+            };
+            if parent_now_empty {
+                self.subagent_children.remove(&parent);
+            }
+        }
+        self.subagent_children.remove(seed);
+    }
+
+    /// T-1-4：父会话当前登记的子代理 seed（排序后返回，便于日志与测试）。
+    fn children_of(&self, parent: &str) -> Vec<String> {
+        let mut children: Vec<String> = self
+            .subagent_children
+            .get(parent)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default();
+        children.sort();
+        children
+    }
+
+    /// T-1-4 测试/运维只读视图：父会话登记的子代理 seed。
+    #[doc(hidden)]
+    pub fn subagent_children(&self, parent: &str) -> Vec<String> {
+        self.children_of(parent)
+    }
+
+    /// T-1-4：把父会话的取消传播到它派生的全部子 seed（递归覆盖孙代）。
+    ///
+    /// 子代理的取消入口与父会话一致：会话键控取消标记（子 seed 在途工具在
+    /// 轮询点立即中止）+ `ConversationCancel` 命令（子 Loop 收尾当前回合并
+    /// 发布 `ConversationCancelled`）。子代理同时从 `live_workers` 摘除：父
+    /// 取消后它不再是活 worker，bootstrap 的孤儿收尾必须能收掉它遗留的
+    /// running 状态，否则前端会把它投影为仍在运行。
+    ///
+    /// 只对**已在册**的子实例投递命令——绝不 `get_or_spawn`：已取消/已退出
+    /// 的子代理不得因为一次取消传播而被重新拉起。
+    fn cancel_subagent_children(&mut self, parent: &str) {
+        let children = self.children_of(parent);
+        for child in children {
+            qaqh_workspace::set_session_cancel(&child, true);
+            if let Some(hub) = self.hub.as_ref() {
+                hub.mark_worker_dead(&child);
+            }
+            let command_id = format!(
+                "parent-cancel-{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+            let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
+                child.clone(),
+                command_id.clone(),
+                qaqh_ringing::RingingCommand::Conversation(
+                    qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
+                ),
+            );
+            let delivered = match self.instances.get(&child) {
+                Some(AgentInstance {
+                    transport: AgentTransport::InProcess { cmd_tx, cancel },
+                    ..
+                }) => {
+                    // 与 `send_ringing` 的 interrupt 分支一致：先置 token，长
+                    // 在途的 gate/tool 工作立即观察到取消。
+                    cancel.set();
+                    cmd_tx
+                        .send(crate::agent::types::WorkerCommand {
+                            frame: env,
+                            causation: Some(command_id),
+                        })
+                        .is_ok()
+                }
+                None => false,
+            };
+            log::info!(
+                "[subagent] parent cancel {parent} propagated to child {child} (delivered={delivered})"
+            );
+            // 子 actor 自身分派取消时不经过 registry，孙代在此逐层传播。
+            self.cancel_subagent_children(&child);
         }
     }
 
