@@ -79,7 +79,7 @@ fn session_spawns_inprocess_and_receives_created_event() {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    let manager_owns_this_test_dir = init_manager_for_this_test(&data);
+    let _manager_owns_this_test_dir = init_manager_for_this_test(&data);
     qaqh_workspace::runtime::init_tools("daemon-test", &[], vec![]);
 
     let seed = format!("session-inproc-{}", std::process::id());
@@ -165,7 +165,7 @@ fn cross_session_cancel_does_not_leak() {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    let manager_owns_this_test_dir = init_manager_for_this_test(&data);
+    let _manager_owns_this_test_dir = init_manager_for_this_test(&data);
     qaqh_workspace::runtime::init_tools("daemon-test", &[], vec![]);
 
     let hub = Arc::new(RingingHub::new("cross-cancel-test"));
@@ -244,7 +244,7 @@ fn idle_unload_then_respawn_preserves_history() {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    let manager_owns_this_test_dir = init_manager_for_this_test(&data);
+    let _manager_owns_this_test_dir = init_manager_for_this_test(&data);
     qaqh_workspace::runtime::init_tools("daemon-test", &[], vec![]);
 
     let seed = format!("session-idle-unload-{}", std::process::id());
@@ -338,7 +338,7 @@ fn close_session_cleans_per_seed_resident_state() {
         std::env::set_var("QAQH_DATA_DIR", &data);
     }
     qaqh_workspace::set_workspace(&ws.to_string_lossy());
-    let manager_owns_this_test_dir = init_manager_for_this_test(&data);
+    let _manager_owns_this_test_dir = init_manager_for_this_test(&data);
     qaqh_workspace::runtime::init_tools("daemon-test", &[], vec![]);
 
     // 不实际 spawn worker：本用例验证 close_session 对 per-seed 全局常驻态
