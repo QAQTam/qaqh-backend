@@ -13,7 +13,7 @@
 
 | ID | 状态 | 项 |
 |---|---|---|
-| BUG-2026-09-17-08 | `fixed（工作区，待提交）`（**P0**） | `exec` 在 Level 4 原先自动批准后可在工作区外写入。第二轮修复已选择权限层收口：`needs_permission` 保留 Level 4 的 Read/Write 免审批，但 Exec/Net 统一进入 `AskUser`；子代理沙箱继续拒绝 Exec/Net，MCP 动态 Exec/Net 同步执行该规则。 |
+| BUG-2026-09-17-08 | `fixed @cef3faa`（**P0**） | `exec` 在 Level 4 原先自动批准后可在工作区外写入。第二轮修复已选择权限层收口：`needs_permission` 保留 Level 4 的 Read/Write 免审批，但 Exec/Net 统一进入 `AskUser`；子代理沙箱继续拒绝 Exec/Net，MCP 动态 Exec/Net 同步执行该规则。 |
 
 ## 证据链
 
@@ -56,4 +56,4 @@ cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-以上命令在当前工作区全部通过。状态待提交主线后改为 `fixed @{commit}`。
+以上命令在当前工作区全部通过。修复提交：`cef3faa`；当前状态为 `fixed @cef3faa`，待 PR 评审。
