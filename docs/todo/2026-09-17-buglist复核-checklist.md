@@ -11,7 +11,7 @@
 | 批次 | 主题 | 条目数 | 严重度 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | 1 | 子代理取消链 | 5 | P0/P1/P2 | 无 | ☑ 629637d (#88) |
-| 2 | 安全 P0（越权/边界/凭据/泄漏） | 4 | P0 | 无 | ☑ 238331f (#93) + cef3faa；T-2-2 的 Exec/Net 残余已按 N-5 收口 |
+| 2 | 安全 P0（越权/边界/凭据/泄漏） | 4 | P0 | 无 | ☑ 238331f (#93) + 5c7dd4d；T-2-2 的 Exec/Net 改由 Level 3 审批，Level 4 明确为 bypass |
 | 3 | `apply_patch` 契约 | 3 | P0/P1 | 无 | ☑ 1705449 (#87) |
 | 4 | `edit` 契约 | 3 | P0/P1 | 无 | ☑ 61b39d0 (#89) |
 | 5 | 计量与超限 | 2 | P1 | 无 | ☑ 006b2b3 (#90)，T-5-2 部分（见 N-1） |
@@ -20,7 +20,7 @@
 | 8 | 安全 P1/P2 收尾 | 3 | P1/P2 | 批次 2 | ☑ 440a608 (#95) |
 | 9 | 清单归档与卫生（文档） | 4 | — | 无 | ☑ 563f1e3 (#91) |
 | — | 阻塞项（需现场环境，不派） | 8 | — | — | 🚫 |
-| — | 后续待办收尾（N-1~N-7；N-5 已按权限层收口提交 `cef3faa`） | 7 | P0/P1/P2 | 无 | ☑ 3749df1 (#96) + cef3faa（N-5），⚠️ **N-5 仍待 PR 评审**——此前 PR #96 无自动评审，根因为组织 CPU 配额不足 |
+| — | 后续待办收尾（N-1~N-7；N-5 改为 L3 审批 + L4 bypass 语义） | 7 | P0/P1/P2 | 无 | ☑ 3749df1 (#96) + 5c7dd4d；⚠️ **N-5/B-5 仍待 PR 评审**——此前 PR #96 无自动评审，根因为组织 CPU 配额不足 |
 
 ---
 
@@ -268,7 +268,7 @@
   - 一并更新两条与旧行为冲突的既有断言（`rejects_concurrency_out_of_range`、
     `mcp_tools_bypass_approval_at_all_levels` → `mcp_exec_net_require_approval_until_unrestricted`）。
   - ⚠️ **当时的边界**：默认 `permission_level = 4`，Level 4 对内置 exec/网络工具仍全放行 ⇒
-    当时只消除了「MCP 工具**独有**的 allow-all 特权」。该全局边界已由随后 N-5 的权限层收口完成（`cef3faa`）。
+    当时只消除了「MCP 工具**独有**的 allow-all 特权」。后续权限语义定案为：Level 3 审批 Exec/Net，Level 4 显式 bypass（`5c7dd4d`）。
   - 位置：`crates/qaqh-config/src/config.rs:293-302`（校验 `1..=64`）、`crates/qaqh-mcp/src/connection.rs:717`（执行点）
   - 现状：上限是 64 而非 16；`DynamicTool` 权限层默认 allow-all（E2）
   - 动作：`max_concurrent_calls` 收紧到 `<= 16`；`DynamicTool` 对 `Exec`/`Net` 默认强制 `Permissions::AskUser`
@@ -347,14 +347,14 @@
   - 缺什么：可跑基准的环境（本轮只确认结构性改动在位）
 - [ ] **B-4** `2026-09-16-安全并发与审查登记` 的 P2/P3 表剩余行
   - 缺什么：`ACTOR_WORKSPACE` 那条已被 `crates/qaqh-workspace/src/runtime.rs:167-176` 的 `ActorToolScope` 部分缓解，**需重判**；另两行清单行号已失效，需重定位
-- [x] **B-5** D-2 的审批面板可见性（Level 3 弹窗里用户能否看到 `exec` 的目标路径）→ 后端 `eef1231` + TUI `4a795b3`
+- [x] **B-5** D-2 的审批面板可见性（Level 3 弹窗里用户能否看到 `exec` 的命令/目标）→ 后端 `eef1231` + TUI `4a795b3` + `2ce1fec`
   - 2026-09-18 链路复核原结论：`ToolPermissionRequested` 不含原始 `args`，
     `extract_target_paths("exec")` 只提取 `cwd`，TUI 弹窗看不到 `command`/`argv`。
   - 修复：权限事件新增可选 `action_summary`；后端为 `exec` 生成有界摘要
     （`command`/`argv`/`args`/`shell`/`cwd`，明确排除 `env`）；TUI 在审批面板新增“执行:”行。
-  - 验证：后端 `permission_lifecycle` e2e 断言 exec 事件必带摘要；TUI `TestBackend`
-    渲染回归 + 全量 209 测试通过（临时使用已发布 ratatui，未残留 `Cargo.toml`/`Cargo.lock` 改动）。
-  - 环境备注：本机真实 patched ratatui 构建仍缺 `../ratatui/ratatui`；这不影响本次代码链路验证。
+  - 验证：真实本地 `ratatui` patch 构建；TUI 全量 210 测试与严格 clippy 通过；隔离
+    daemon + TUI + mock 模型联调确认弹窗显示命令、批准后 marker 实际写入、第二轮响应正常。
+  - 联调附带修复：TUI 空会话视口越界（`2ce1fec`），并补回归测试。
 
 ---
 
@@ -362,19 +362,19 @@
 
 > 这些不在原复核范围内，是子代理执行/评审时暴露出来的。
 > **2026-09-17 接手后**已作为「后续待办收尾」一批派发（PR #96 / `3749df1`）：
-> N-1/N-2/N-3/N-4/N-6/N-7 全部落盘。N-5 已按“权限层收口”完成并提交 `cef3faa`，待 PR 评审。
+> N-1/N-2/N-3/N-4/N-6/N-7 全部落盘。N-5 先按权限语义重新定案：Level 3 拦截 Exec/Net，
+> Level 4 显式 bypass；L4 sandbox 作为后续项保留，待 PR 评审。
 
-- [x] 🔴 **N-5（P0，安全，来自 T-2-2 的未闭合半条）`exec` 在 Level 4 可写工区外路径** → fixed @cef3faa，待 PR 评审
-  - 现状：`is_path_in_workspace` 只能从 `ctx.args["path"]` 判定目标，而 `exec` 的 schema 里
-    **没有 `path`**（只有 `command`/`argv`/`cwd`）⇒ 无法从 `command` 文本判定写入目标；
-    Level 4 原先完全自动批准 ⇒ **`exec` 可写工区外路径**（安全审查 P0-2 的原始攻击面）。
-  - 落地：已选路线 **(a) 权限层收口**。Level 4 保留 Read/Write 免审批，Exec/Net 统一
-    进入 `AskUser`；MCP 动态 Exec/Net 同规则，子代理沙箱继续自动拒绝 Exec/Net。
+- [x] 🔴 **N-5（P0，安全，来自 T-2-2 的未闭合半条）`exec` 在 Level 4 可写工区外路径** → `wontfix @5c7dd4d`（L4 显式 bypass）
+  - 现状：`exec` schema 没有 `path`，无法从 `command` 文本判定真实写入目标；Level 4 自动批准
+    意味着 `exec` 可写工区外路径。
+  - 定案：Level 3 = 安全工作区自主档，Exec/Net 审批；Level 4 = 显式危险 bypass，普通工具
+    全部放行；新配置默认 Level 3。L4 exec 的系统调用级沙箱另立后续项，等 Codex 沙箱移植。
   - 正式登记：[`../buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](../buglist/2026-09-17-exec工作区外写入未收口-buglist.md)
   - 验收：`cargo test -p qaqh-workspace`、`cargo test -p qaqh-runtime --no-fail-fast`、
     `cargo test --workspace --no-fail-fast`、`cargo clippy --workspace --all-targets -- -D warnings`
-    均通过；提交后补 `fixed @{commit}`。
-  - 关联：安全审查 P0-2 / D-2 / PR #93 描述
+    均通过。
+  - 关联：安全审查 P0-2 / D-2 / PR #93 描述 / L4 sandbox 后续项
 
 - [x] **N-1（来自 T-5-2 的未完成半条）profile schema 增 `context_window` 字段** → 3749df1（PR #96）
   - 位置：`crates/qaqh-types/src/config.rs`、`crates/qaqh-config/src/config.rs`
@@ -481,6 +481,11 @@
   - 验收（原文）：`cargo clippy --workspace --all-targets -- -D warnings` →
     `Finished dev profile`（无告警）；`cargo clippy --workspace --all-targets --all-features -- -D warnings`
     → 同上；`cargo fmt --all -- --check` → 无输出。
+
+- [ ] **N-8（Level 4 exec sandbox，后续）`Unrestricted` 下提供虚拟文件系统/沙箱**
+  - 目标：Level 4 保持 bypass 语义，但移植 Codex 沙箱能力，使 `exec` 的删除、写入、重命名
+    落在隔离视图，而不是真实磁盘；验证删除虚拟文件后宿主机文件仍存在。
+  - 关联：`BUG-2026-09-18-01`、安全审查 P0-2、`BUG-2026-09-17-08` 的 L4 后续项。
 
 ---
 

@@ -18,7 +18,7 @@
 | 09-17 上午 | buglist 全量复核：20 份清单 91 条 → 54 条已修、5 条状态过期、2 条部分、29 条仍在生产、1 条描述与 HEAD 不符 | [`todo/2026-09-17-buglist复核-report.md`](./todo/2026-09-17-buglist复核-report.md) |
 | **09-17 16:41–19:41** | **九批次集中修复 + 后续待办收尾**（10 个提交，见 §2.1） | 下方 §2 |
 | 09-17 | 工具结果展示层契约 spec 补登（**草案待评审**） | [`spec/2026-09-17-工具结果展示层契约-spec.md`](./spec/2026-09-17-工具结果展示层契约-spec.md) |
-| **09-17 第二轮 fix** | **N-5 权限层收口**：Level 4 的 Exec/Net 统一审批；**B-5 动作摘要**：审批弹窗展示 `exec` 命令（后端 `cef3faa`/`eef1231`，TUI `4a795b3`） | [`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md) |
+| **09-17 第二轮 fix** | **权限语义重构**：Level 3 拦截 Exec/Net，Level 4 恢复显式 bypass；B-5 审批摘要保留用于 L3（后端 `5c7dd4d`/`eef1231`，TUI `4a795b3`/`2ce1fec`） | [`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md) |
 
 ## 2. 已归档（2026-09-17，方案 A）
 
@@ -124,26 +124,28 @@
 |---|---|
 | [2026-09-12-exec管道命令间歇性空输出-buglist.md](./buglist/2026-09-12-exec管道命令间歇性空输出-buglist.md) | 7 条待复测，需 Windows 11 + 安装版 daemon + `%TEMP%\qaqh-exec-probe\` 现场 |
 | [2026-09-14-timeline工具块内存放大-buglist.md](./buglist/2026-09-14-timeline工具块内存放大-buglist.md) | O-2：TUI 侧非 bash progress 归一/限长未验证（需 TUI 仓访问） |
-| [2026-09-16-安全并发与审查登记-buglist.md](./buglist/2026-09-16-安全并发与审查登记-buglist.md) | P2/P3 表剩余行；N-5 已转独立 buglist（`fixed @cef3faa`）；B-5 已修（后端 `eef1231` + TUI `4a795b3`） |
+| [2026-09-16-安全并发与审查登记-buglist.md](./buglist/2026-09-16-安全并发与审查登记-buglist.md) | P2/P3 表剩余行；N-5 已转独立 buglist（`wontfix @5c7dd4d`：L4 显式 bypass）；B-5 已修（后端 `eef1231` + TUI `4a795b3`/`2ce1fec`） |
 
-### 5.2 第二轮修复：N-5 + B-5
+### 5.2 第二轮修复：权限语义 + B-5
 
-> **`exec` 在 Level 4 可越出工作区**的原攻击面已按“权限层收口”完成修复。
-> 现在 Level 4 仅对 Read/Write 免审批；Exec/Net 统一进入审批，MCP 动态 Exec/Net 同规则，子代理沙箱继续拒绝。
-> B-5 已补齐审批信息面：后端 `eef1231` 为 `exec` 生成有界 `action_summary`（含 `command`/`argv`/`args`/`shell`/`cwd`，排除 `env`），TUI `4a795b3` 在弹窗渲染“执行:”行。
+> Level 3 是安全工作区自主档：工作区内 Write 放行，Exec/Net 审批；跨区 Write 按 trust folder。
+> Level 4 恢复为显式 `Unrestricted/Bypass`：普通工具全部放行；新配置默认降到 Level 3。
+> L4 下 `exec` 仍可能越过工作区，已登记为后续 sandbox 项，等 Codex 沙箱能力移植后再收口。
+> B-5 保留在 Level 3：后端 `eef1231` 为 `exec` 生成有界 `action_summary`，TUI `4a795b3` 渲染“执行:”行；真实 daemon + mock 联调已验证命令可见、批准后实际执行，空会话崩溃由 TUI `2ce1fec` 修复。
 > 正式登记：[`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md)。
-> 当前状态为 `fixed @cef3faa` + B-5 `fixed @eef1231` / TUI @`4a795b3`；已提交修复分支，待 PR 评审。
+> 当前状态：N-5 `wontfix @5c7dd4d`；B-5 `fixed @eef1231` / TUI `4a795b3` + `2ce1fec`；待 PR 评审。
 
 ### 5.3 其它未闭环
 
 - 性能收益复测（08 的 72k→110k ev/s、09 的 2 MiB→18.9 ms、12 的 62–247 ms、13 的 O(n) 阶跃、09-14 的 63 ms→0.01 ms）：只确认结构性改动在位，**未复跑基准**。
 - `2026-09-16-安全并发与审查登记` 的 P2/P3 表：部分行号已失效，需重定位。
+- Level 4 `exec` sandbox：等 Codex 沙箱能力移植后再消除工作区外真实写风险。
 - 计划中的工具层契约重写（P0–P8）与 09-17 展示层契约（阶段 1–4）：**均未开工**。
 
 ## 6. 归档校验记录
 
 1. **状态回写已完成**：`2026-09-16-apply_patch`、`2026-09-16-edit`、`2026-09-15-热重载`、`2026-09-17-子代理取消后复活` 四份 buglist 已分别回写 `1705449`(#87)、`61b39d0`(#89)、`b4851b0`(#92)、`629637d`(#88)；子代理清单中的 HEAD 不成立项按 `wontfix @33253a5` 关闭。
-2. **N-5 已建档并完成修复**：见 §5.2 的 [`2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md)。当前状态为 `fixed @cef3faa`，全量测试与严格 clippy 已通过，待 PR 评审。
+2. **N-5 权限语义已定案**：见 §5.2 的 [`2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md)。Level 3 负责拦截 Exec/Net，Level 4 是显式 bypass；新配置默认 Level 3，L4 exec sandbox 作为后续项保留。
 
 ## 7. 归档方式（已执行）
 
