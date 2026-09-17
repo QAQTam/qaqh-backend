@@ -349,6 +349,10 @@
   - 缺什么：`ACTOR_WORKSPACE` 那条已被 `crates/qaqh-workspace/src/runtime.rs:167-176` 的 `ActorToolScope` 部分缓解，**需重判**；另两行清单行号已失效，需重定位
 - [ ] **B-5** D-2 的审批面板可见性（Level 3 弹窗里用户能否看到 `exec` 的目标路径）
   - 缺什么：实机点击验证（本轮是从 `extract_target_paths` 对 `exec` 参数名的行为推断的）
+  - 2026-09-18 链路复核（**不通过**）：`ToolPermissionRequested` 事件不含原始 `args`；后端
+    `extract_target_paths("exec")` 只提取 `cwd`，不提取 `command`/`argv`；TUI `draw_permission`
+    只渲染 `tool_name/reason/paths/...`。因此审批弹窗最多显示工作目录，**看不到将要执行的命令/参数**。
+  - 实机运行仍受环境阻塞：TUI 仓 `[patch.crates-io]` 指向缺失的 `../ratatui/ratatui`，当前无法构建点击验证。
 
 ---
 
