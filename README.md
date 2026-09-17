@@ -73,8 +73,8 @@ daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器�
 |---|---|---|
 | 1 | MaxLockdown | 一切调用需确认 |
 | 2 | ReadFree | 读放行,写/exec/net 需确认 |
-| 3 | WorkspaceFree | 工作区内写放行;跨区写一次性信任文件夹;exec/net 仍需确认 |
-| 4 | Unrestricted | Read/Write 放行,exec/net 仍需确认 |
+| 3 | WorkspaceFree | 工作区内写放行;跨区写一次性信任文件夹;exec/net 仍需确认（新配置默认档） |
+| 4 | Unrestricted | 显式危险 bypass，普通工具全部放行；exec 沙箱待补，可越出工作区 |
 
 - 审批闭环:`PermissionChallenge`(一次性,TTL)→ UI 确认 → 不可伪造的授权凭证执行;支持 trust folder
 - 写入防漂移:read/edit/write 维护文件 hash 账本,失配报 `STALE_FILE`;dry-run 暂存 pending_id 后 `confirm_apply` 直提

@@ -764,13 +764,13 @@ mod tests {
             }
         }
 
-        // Same at Level 4 — write tools still auto-approve
+        // Same at Level 4 — explicit bypass auto-approves write tools
         for id in &["inv-c", "inv-d"] {
             let inv = make_invocation("test_write", id);
             match admit(inv, 4, &ws, &trusted) {
-                Admission::Authorized(_) => {} // expected for Write at Level 4
+                Admission::Authorized(_) => {} // expected for bypass mode
                 other => panic!(
-                    "level 4 should auto-approve write tools, {:?}",
+                    "level 4 bypass should auto-approve write tools, {:?}",
                     std::any::type_name_of_val(&other)
                 ),
             }

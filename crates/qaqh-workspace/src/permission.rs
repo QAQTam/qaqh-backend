@@ -100,7 +100,8 @@ pub enum PermissionLevel {
     ReadFree = 2,
     /// Level 3: Workspace all auto-approve; cross-workspace writes require one-time folder trust.
     WorkspaceFree = 3,
-    /// Level 4: Read/Write auto-approve; Exec/Net require confirmation.
+    /// Level 4: Dangerous bypass. Ordinary tools auto-approve; exec may
+    /// escape the workspace until the sandbox is introduced.
     Unrestricted = 4,
 }
 
@@ -162,7 +163,7 @@ impl PermissionLevel {
                 "Auto-approve within workspace. Cross-workspace writes are trusted once per folder."
             }
             Self::Unrestricted => {
-                "Reads and writes execute immediately. Execution and network tools require confirmation."
+                "Dangerous bypass: ordinary tools auto-approve; exec may escape the workspace until sandboxing lands."
             }
         }
     }
@@ -589,22 +590,11 @@ pub fn needs_permission(
     let risk = classify_risk(category, &paths, &workspace_root);
     let consequence = risk.consequence().to_string();
 
-    // Level 4: Read/Write stay frictionless. Exec/Net remain behind the
-    // approval boundary because they can escape the workspace through a
-    // shell, subprocess, network side effect, or dynamic MCP tool.
+    // Level 4 is the explicit bypass mode: ordinary tools auto-approve,
+    // including Exec/Net. The sensitive-session-file guard above still wins.
+    // Exec sandboxing is a separate follow-up; until then this mode can write
+    // outside the workspace.
     if level == PermissionLevel::Unrestricted {
-        if matches!(category, ToolCategory::Exec | ToolCategory::Net) {
-            return PermissionDecision::AskUser {
-                reason: format!(
-                    "Level 4: '{}' requires execution or network confirmation.",
-                    tool_name
-                ),
-                paths,
-                category,
-                risk,
-                consequence,
-            };
-        }
         return PermissionDecision::AutoApprove;
     }
 
@@ -1001,30 +991,46 @@ mod tests {
     }
 
     #[test]
-    fn workspace_free_and_unrestricted_require_approval_for_exec_and_network() {
-        for level in [
-            PermissionLevel::WorkspaceFree,
-            PermissionLevel::Unrestricted,
+    fn workspace_free_requires_approval_for_exec_and_network() {
+        for (tool, category) in [
+            ("exec", ToolCategory::Exec),
+            ("spawn_subagent", ToolCategory::Exec),
+            ("web_fetch", ToolCategory::Net),
         ] {
-            for (tool, category) in [
-                ("exec", ToolCategory::Exec),
-                ("spawn_subagent", ToolCategory::Exec),
-                ("web_fetch", ToolCategory::Net),
-            ] {
-                let decision = needs_permission(
-                    level,
-                    tool,
-                    &serde_json::json!({}),
-                    Path::new("."),
-                    &HashSet::new(),
-                    category,
-                );
-                assert!(
-                    matches!(decision, PermissionDecision::AskUser { .. }),
-                    "level {} must ask before {tool}",
-                    level.to_u8()
-                );
-            }
+            let decision = needs_permission(
+                PermissionLevel::WorkspaceFree,
+                tool,
+                &serde_json::json!({}),
+                Path::new("."),
+                &HashSet::new(),
+                category,
+            );
+            assert!(
+                matches!(decision, PermissionDecision::AskUser { .. }),
+                "Level 3 must ask before {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrestricted_auto_approves_execution_and_network() {
+        for (tool, category) in [
+            ("exec", ToolCategory::Exec),
+            ("spawn_subagent", ToolCategory::Exec),
+            ("web_fetch", ToolCategory::Net),
+        ] {
+            let decision = needs_permission(
+                PermissionLevel::Unrestricted,
+                tool,
+                &serde_json::json!({}),
+                Path::new("."),
+                &HashSet::new(),
+                category,
+            );
+            assert!(
+                matches!(decision, PermissionDecision::AutoApprove),
+                "Level 4 bypass must auto-approve {tool}"
+            );
         }
     }
 

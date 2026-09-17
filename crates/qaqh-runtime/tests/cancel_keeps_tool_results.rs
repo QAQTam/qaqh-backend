@@ -206,18 +206,7 @@ fn run_batch(cancel_before_batch: bool, label: &str) -> (BatchReport, tempfile::
                     auth: Box::new(auth),
                 })
             }
-            qaqh_workspace::Admission::ApprovalRequired(challenge) => {
-                // N-5：Level 4 的 exec 现在也必须审批。测试要继续构造“用户
-                // 已全部批准、批执行前”的状态，因此显式批准 challenge。
-                let auth = challenge
-                    .approve(true)
-                    .expect("test approval should produce an authorized call");
-                admitted.push(qaqh_runtime::agent::types::AdmittedTool {
-                    call_id: (*id).to_string(),
-                    auth: Box::new(auth),
-                });
-            }
-            _ => panic!("call {index} ({id}) must be authorized or approval-required"),
+            _ => panic!("call {index} ({id}) must be authorized"),
         }
     }
 
