@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use qaqh_config::secrets::SecretStore;
 
-use crate::connection::{LifecycleSettings, ServerConnection};
+use crate::connection::{ConnStatus, LifecycleSettings, ServerConnection};
 use crate::error::{LspError, LspErrorKind};
 use qaqh_config::config::LspConfig;
 
@@ -198,6 +198,9 @@ impl LspManager {
             )
         })?;
         let key = conn_key(server, root);
+        // 惰性摘除：取连接入口顺手清掉已被空闲看门狗回收的表条目
+        // （路由键生命周期与连接生命周期绑定；D-19）。
+        self.evict_recycled_conns();
         let conn = {
             let mut conns = self.lock_conns();
             if let Some(existing) = conns.get(&key) {
@@ -319,6 +322,27 @@ impl LspManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// 惰性摘除「已被空闲看门狗回收」的连接表条目（D-19）。
+    ///
+    /// `ServerConnection` 的看门狗在 `idle_shutdown_secs` 后回收连接对象
+    /// （`shutdown()` → 进程退出、会话释放），但 `(server, root)` 路由键若
+    /// 只增不减，长驻 daemon 跨项目使用会缓慢泄漏表条目。这里在**取连接入口**
+    /// 顺手收敛，不另起巡检任务：空闲回收逻辑在 connection.rs 的看门狗里，
+    /// manager 侧加回调需要改连接对象的所有权/生命周期。
+    ///
+    /// 判据（两条同时成立才摘，避免误摘正在用的连接）：
+    /// - `status == Disconnected`：`Connected`（在用）、`Cooling`（冷却中——
+    ///   摘掉会让冷却失效、直接触发重连风暴）、`ShuttingDown` 一律保留；
+    /// - `Arc::strong_count == 1`：只有连接表持有它。建连窗口内调用方持有
+    ///   `Arc`（此时 `status` 仍是 `Disconnected`），只看状态会在并发取连接时
+    ///   把别人正在拉的连接摘掉，下一次调用就会重复 spawn 同一 (server, root)。
+    fn evict_recycled_conns(&self) {
+        let mut conns = self.lock_conns();
+        conns.retain(|_, conn| {
+            Arc::strong_count(conn) > 1 || conn.status() != ConnStatus::Disconnected
+        });
+    }
 }
 
 #[cfg(test)]
@@ -362,5 +386,95 @@ mod tests {
     fn disabled_manager_rejects_with_disabled_code() {
         let manager = LspManager::disabled();
         assert!(manager.server_for_extension("a.rs").is_none());
+    }
+
+    fn cfg_with_command(command: &str) -> LspConfig {
+        LspConfig {
+            enabled: true,
+            idle_shutdown_secs: 120,
+            servers: BTreeMap::from([(
+                "rust".to_owned(),
+                qaqh_config::config::LspServerConfig {
+                    command: command.to_owned(),
+                    args: vec![],
+                    env: BTreeMap::new(),
+                    extensions: vec!["rs".to_owned()],
+                    startup_timeout_secs: 1,
+                    default_timeout_secs: 30,
+                },
+            )]),
+        }
+    }
+
+    /// 直接构造连接对象塞进表（不走 IO）——模拟 `get_or_connect` 插入后的状态。
+    fn fake_conn(manager: &LspManager, root: &str) -> Arc<ServerConnection> {
+        let server_cfg = match manager.snapshot_cfg().servers.get("rust").cloned() {
+            Some(cfg) => cfg,
+            None => panic!("test config must declare the rust server"),
+        };
+        Arc::new(ServerConnection::new(
+            "rust",
+            root,
+            server_cfg,
+            120,
+            LifecycleSettings::default(),
+            Arc::new(AtomicBool::new(false)),
+            SecretStore::default_location(),
+        ))
+    }
+
+    /// D-19：空闲看门狗回收连接对象后，`(server, root)` 路由键不得留在表里
+    /// （长驻 daemon 跨项目使用会只增不减）。
+    #[tokio::test]
+    async fn idle_recycled_conns_are_evicted_from_the_table() {
+        let manager = LspManager::new(cfg_with(vec!["rs"]));
+        let recycled = fake_conn(&manager, "/proj-a");
+        manager
+            .lock_conns()
+            .insert(conn_key("rust", "/proj-a"), Arc::clone(&recycled));
+        assert_eq!(manager.lock_conns().len(), 1);
+
+        // ① 仍被调用方持有（strong_count>1）→ 不得摘除：建连窗口内 status
+        //    同样是 Disconnected，只看状态会误摘正在拉的连接。
+        manager.evict_recycled_conns();
+        assert_eq!(manager.lock_conns().len(), 1, "in-use conn must survive");
+
+        // ② 空闲看门狗回收（shutdown → Disconnected）且调用方放手 → 摘除。
+        recycled.shutdown().await;
+        drop(recycled);
+        manager.evict_recycled_conns();
+        assert_eq!(
+            manager.lock_conns().len(),
+            0,
+            "recycled conn must be evicted"
+        );
+
+        // ③ 取连接入口（`get_or_connect`）走同一摘除路径：对**新 root** 建连前
+        //    先清掉回收态旧条目。命令故意不存在 ⇒ spawn 立即失败（冷却态入表），
+        //    不真拉起 LSP server。
+        let manager = LspManager::with_settings(
+            cfg_with_command("qaqh-definitely-not-a-real-lsp-binary"),
+            LifecycleSettings {
+                connect_timeout: std::time::Duration::from_secs(1),
+                reconnect_cooldown: std::time::Duration::from_millis(50),
+                close_timeout: std::time::Duration::from_secs(1),
+                idle_tick: std::time::Duration::from_millis(50),
+            },
+        );
+        let recycled = fake_conn(&manager, "/proj-a");
+        manager
+            .lock_conns()
+            .insert(conn_key("rust", "/proj-a"), Arc::clone(&recycled));
+        recycled.shutdown().await;
+        drop(recycled);
+        assert!(
+            manager.get_or_connect("rust", "/proj-b").await.is_err(),
+            "bogus server command must fail to connect"
+        );
+        assert_eq!(
+            manager.lock_conns().len(),
+            1,
+            "recycled /proj-a must be evicted; only the new /proj-b entry stays"
+        );
     }
 }
