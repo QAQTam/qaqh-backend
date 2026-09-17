@@ -39,7 +39,7 @@ pub(crate) struct Located {
 pub(crate) enum LocateError {
     NoMatch {
         candidates: Vec<Candidate>,
-        /// 为什么没命中：差阈值 / 差 margin / 完全不像（见 no_match_detail）。
+        /// 为什么没命中：行内片段 / 差阈值 / 差 margin / 完全不像（见 no_match_detail）。
         detail: String,
     },
     Ambiguous {
@@ -183,11 +183,44 @@ pub(crate) struct Tier3Probe {
     pub(crate) hit: Option<(usize, usize, f32)>,
     pub(crate) best: f32,
     pub(crate) second: f32,
+    /// 「`old` 是行内片段」证据（T-4-3）：某文件行（剥缩进后）**真包含** `old`
+    /// （剥缩进后）⇒ 记录该行 1-based 行号，供针对性诊断使用。
+    pub(crate) fragment_line: Option<usize>,
 }
 
-/// 失败诊断：告诉模型**为什么**没采纳（差阈值 / 差 margin / 完全不像），
+/// 「`old` 是行内片段」判定：单行 `old`（剥缩进）是某文件行（剥缩进）的**真子串**
+/// （长度严格更大 ⇒ 未与行边界对齐）。多行 `old` 无「片段 vs 整行」语义 → None。
+pub(crate) fn fragment_line(view: &FileView, pat: &[&str]) -> Option<usize> {
+    let stripped = strip_indent(pat);
+    let mut non_empty = stripped.iter().filter(|l| !l.is_empty());
+    let old = non_empty.next()?;
+    if non_empty.next().is_some() {
+        return None;
+    }
+    view.lines
+        .iter()
+        .position(|l| {
+            let line = l.trim_start();
+            line.len() > old.len() && line.contains(old.as_str())
+        })
+        .map(|i| i + 1)
+}
+
+/// T-4-2（方案 b）：「`old` 覆盖整个窗口」判定。窗口（剥缩进）比 `old`（剥缩进）
+/// 更长 ⇒ 窗口里有 `old` 未覆盖的前后缀，而命中后的替换区间是**整个窗口** ⇒
+/// 直接采纳会静默删除这些前后缀。故此时不采纳（保守：`old` 必须是整行内容）。
+pub(crate) fn covers_window(old_s: &str, win_s: &str) -> bool {
+    win_s.chars().count() <= old_s.chars().count()
+}
+
+/// 失败诊断：告诉模型**为什么**没采纳（行内片段 / 差阈值 / 差 margin / 完全不像），
 /// 而不是只给一句 NO_MATCH。
 pub(crate) fn no_match_detail(probe: &Tier3Probe) -> String {
+    if let Some(line) = probe.fragment_line {
+        return format!(
+            "'old' appears verbatim inside line {line} but is an in-line FRAGMENT, not a whole line — replace is whole-line: pass the COMPLETE line(s) as 'old' and the edited whole line(s) as 'new' (see candidates below)"
+        );
+    }
     if probe.best >= T3_THRESHOLD {
         format!(
             "best score {:.2} but margin to second-best ({:.2}) is below {:.2} — two locations look equally plausible; add context_before/context_after or extend 'old'",
@@ -216,11 +249,13 @@ pub(crate) fn tier3_probe(
 ) -> Tier3Probe {
     let fl = &view.lines;
     let p = pat.len();
+    let fragment = fragment_line(view, pat);
     if p == 0 || p > fl.len() + 2 {
         return Tier3Probe {
             hit: None,
             best: 0.0,
             second: 0.0,
+            fragment_line: fragment,
         };
     }
     let old_s = strip_indent(pat).join("\n");
@@ -238,6 +273,11 @@ pub(crate) fn tier3_probe(
     for win in lo..=hi {
         for s in 0..=fl.len() - win {
             let win_s = strip_indent(&fl[s..s + win]).join("\n");
+            // T-4-2（方案 b）：窗口比 old 长 ⇒ old 未覆盖整行/整窗，不参与采纳
+            // （否则整窗替换会静默删掉 old 未覆盖的前后缀）。
+            if !covers_window(&old_s, &win_s) {
+                continue;
+            }
             let mut score = w_old * ratio(&old_s, &win_s);
             if w_b > 0.0 {
                 let avail = strip_indent(&fl[s.saturating_sub(before.len())..s]).join("\n");
@@ -269,11 +309,13 @@ pub(crate) fn tier3_probe(
             hit: None,
             best: 0.0,
             second: 0.0,
+            fragment_line: fragment,
         },
         Some((s, w, sc)) => Tier3Probe {
             hit: (sc >= T3_THRESHOLD && (sc - second_score) >= T3_MARGIN).then_some((s, w, sc)),
             best: sc,
             second: second_score,
+            fragment_line: fragment,
         },
     }
 }

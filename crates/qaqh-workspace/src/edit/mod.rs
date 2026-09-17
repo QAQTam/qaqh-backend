@@ -7,8 +7,11 @@
 //!
 //! v2 的能力面（对齐 edit-tool-design-spec.md）：
 //!
-//! - 结构化 hunk 协议：`replace` / `insert_after` / `insert_before` /
-//!   `prepend_file` / `append_file`，字段名（old/new/anchor）与 v1 刻意区分。
+//! - 结构化 hunk 协议：`replace` / `prepend_file` / `append_file`（kind 收敛后
+//!   只剩 3 个，字段名 old/new 与 v1 刻意区分）。`replace` 是**整行语义**：
+//!   `old` 必须是一行/多行的完整内容；行内改动 = `old` 取整行、`new` 给改后的
+//!   整行。行内片段 `old`（未对齐行边界）不再被 Tier3 采纳（T-4-2），并给出
+//!   针对性诊断（T-4-3）；正则替换走 bash/python，不在 edit 内。
 //! - 四层匹配流水线：Tier1 精确（context 全等消歧）→ Tier2 缩进形状 →
 //!   Tier3 相似度评分（0.6/0.2/0.2 加权 + 阈值 0.85 + margin 0.10 自动采纳）→
 //!   Tier4 拒绝并返回 Top3 候选。
