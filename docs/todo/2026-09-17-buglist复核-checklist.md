@@ -16,7 +16,7 @@
 | 4 | `edit` 契约 | 3 | P0/P1 | 无 | ☑ 61b39d0 (#89) |
 | 5 | 计量与超限 | 2 | P1 | 无 | ☑ 006b2b3 (#90)，T-5-2 部分（见 N-1） |
 | 6 | 热重载与 MCP 文案 | 2 | P1/P2 | 无 | ☑ b4851b0 (#92)，T-6-1 真机复测待做 |
-| 7 | 零散修复 | 2 | P1 | 无 | ☐ |
+| 7 | 零散修复 | 2 | P1 | 无 | ☑ c627a1b (#94) |
 | 8 | 安全 P1/P2 收尾 | 3 | P1/P2 | 批次 2 | ☐ |
 | 9 | 清单归档与卫生（文档） | 4 | — | 无 | ☑ 563f1e3 (#91) |
 | — | 阻塞项（需现场环境，不派） | 8 | — | — | 🚫 |
@@ -240,14 +240,14 @@
 - 依赖：无
 - 涉及：`crates/qaqh-gate/src/chat_completions_api.rs`、`crates/qaqh-lsp/src/manager.rs`
 
-- [ ] **T-7-1 chat 路径补 `null→{}` 兜底**（P1）
+- [x] **T-7-1 chat 路径补 `null→{}` 兜底**（P1）→ c627a1b（PR #94；组装抽成 `assemble_streamed_message` 以便单测，逻辑逐行等价。未做可选的 `name.is_empty()` 过滤——anthropic 侧也不做，加了反而制造两条路径不一致）
   - 位置：`crates/qaqh-gate/src/chat_completions_api.rs:695-697`；对照 `crates/qaqh-gate/src/message_api.rs:739-745`（anthropic 侧已有）
   - 现状：`serde_json::from_str(&args_json).unwrap_or(Value::Null)`，无 `null→{}` 兜底、无 `name.is_empty()` 过滤。而 `is_hanging_tool_use`（`crates/qaqh-types/src/message.rs:120-125`）只判 id/name 是否为空 ⇒ 流在「拿到 id+name、arguments 增量未到」时中断（`args_json == ""`）时 `input` 落成 `Null`，逃过持久化前清洗（`crates/qaqh-message/src/store.rs:798`）被写盘；出站序列化（`:823`）产生 `"arguments": "null"`，部分端点回 400（E2）
   - 动作：chat 的 Done 组装处对齐 anthropic——`if input.is_null() { json!({}) }`；若要更严格，对 `stop_reason.is_none()` 的抢救路径丢弃 args 解析失败的调用
   - 验收：新增单测 `chat_tool_use_null_input_becomes_empty_object`
   - 关联：D-18 / BUG-2026-09-13-13（清单需同步改为 `PARTIAL`）
 
-- [ ] **T-7-2 LSP 连接表随空闲回收摘除**（P1）
+- [x] **T-7-2 LSP 连接表随空闲回收摘除**（P1）→ c627a1b（PR #94；**选惰性摘除**——回收看门狗在 `connection.rs` 内，同步摘除需改连接对象所有权（违反本批次文件约束）；惰性摘除挂在 `get_or_connect` 入口，而表增长只由该入口触发，故天然有界。判据 `Disconnected` **且** `Arc::strong_count == 1`，排除建连窗口与冷却中/在用）
   - 位置：`crates/qaqh-lsp/src/manager.rs:202-215`（`get_or_connect` 插入）；HEAD 上仅 `:141`（配置变更）、`:309`（`shutdown_all`）两处 remove
   - 现状：按 `(server, root)` 插入连接后**从不摘除**；连接对象自身会被 `idle_shutdown_secs` 回收，但 map 条目保留 ⇒ 长驻 daemon 跨项目使用时缓慢增长（E2）
   - 动作：连接空闲回收时同步摘除 map 条目（路由键生命周期与连接生命周期绑定），或改惰性摘除
