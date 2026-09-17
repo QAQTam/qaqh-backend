@@ -153,8 +153,11 @@ fn list_servers(manager: &Arc<McpManager>) -> ToolResult {
 
 /// `list_resources`：资源清单 + URI 模板（缓存快照，不触发连接）。
 ///
-/// `server` 缺省 = 全部 server 遍历；未连接/未拉取的 server 标注占位行
-/// （指引模型先看 list_servers 或直接 read_resource 触发 lazy connect）。
+/// `server` 缺省 = 全部 server 遍历；未连接（`None`）与已连接但清单为空
+/// （`Some(empty)`）是两种状态，文案分开（T-6-2）：
+/// - 未连接 → 占位行（指引模型先看 list_servers 或直接 read_resource 触发
+///   lazy connect）；
+/// - 已连接但无资源 → 「已连接、资源列表为空」，不得误报未连接。
 fn list_resources(manager: &Arc<McpManager>, server: Option<&serde_json::Value>) -> ToolResult {
     let wanted = server.and_then(|value| value.as_str());
     let cfg_snapshot = manager.config();
@@ -178,12 +181,14 @@ fn list_resources(manager: &Arc<McpManager>, server: Option<&serde_json::Value>)
             None => (None, None),
         };
         let mut section = format!("## {name} ({transport})", transport = transport_label(cfg));
-        match resources.filter(|resources| !resources.is_empty()) {
-            Some(resources) => {
+        match resources {
+            Some(resources) if !resources.is_empty() => {
                 for resource in resources.iter() {
                     section.push_str(&format_resource_line(resource));
                 }
             }
+            // 已连接、server 声明了 resources 能力但清单为空。
+            Some(_) => section.push_str("\n  (connected — server lists no resources)"),
             None => section.push_str(
                 "\n  (no resource list available — server not connected yet; call read_resource \
                  to connect, or check list_servers)",

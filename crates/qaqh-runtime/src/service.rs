@@ -727,19 +727,12 @@ impl QaqhService {
 /// （外部 Codex/Claude 用户级文件的变化在此一并捕获）→ `apply_config`
 /// diff 热更新 → 投影置脏（下一回合投影批次自动重建）。日志记录 diff 报告。
 fn spawn_mcp_reloader() {
-    let mut rx = qaqh_config::watch::subscribe();
+    let rx = qaqh_config::watch::subscribe();
     tokio::spawn(async move {
-        // 首个广播是启动期快照（manager 已按它装配）——消费掉，避免空转 apply。
-        if rx.changed().await.is_ok() {
-            rx.borrow_and_update();
-        }
-        while rx.changed().await.is_ok() {
-            let Some(published) = rx.borrow_and_update().clone() else {
-                continue;
-            };
+        reload_loop(rx, |published| async move {
             let manager = qaqh_mcp::manager_slot();
             if published.mcp == manager.config() {
-                continue; // 非 [mcp] 段变更：与 MCP 无关，跳过
+                return; // 非 [mcp] 段变更：与 MCP 无关，跳过
             }
             let mut new_mcp = published.mcp.clone();
             // 外部配置重扫：ext-* 条目随用户级外部文件变化增删；本地
@@ -762,26 +755,44 @@ fn spawn_mcp_reloader() {
             if !report.added.is_empty() || !report.updated.is_empty() {
                 qaqh_mcp::prime_all_async();
             }
-        }
+        })
+        .await;
         log::warn!("[mcp] hot-reload watcher channel closed; exiting");
     });
+}
+
+/// 热重载事件循环（T-6-1 抽出的可测小函数）。
+///
+/// 语义契约：`qaqh_config::watch::subscribe()` 走 `Sender::subscribe`，返回的
+/// receiver **已消费到当前版本**——订阅前的任何快照都不会唤醒 `changed()`，
+/// 因此首次 `changed()` 等到的是**订阅后的第一次真实发布**。
+/// 故此处不得有任何「前置消费启动快照」的守卫：那会吞掉用户启动后的首次
+/// 真实变更（BUG-2026-09-15-07 / E2，回归见 `reload_loop_tests`）。
+/// 段级幂等（`published.<sec> == manager.config()`）由 `on_publish` 自理。
+async fn reload_loop<F, Fut>(
+    mut rx: tokio::sync::watch::Receiver<Option<Arc<qaqh_config::Config>>>,
+    on_publish: F,
+) where
+    F: Fn(Arc<qaqh_config::Config>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    while rx.changed().await.is_ok() {
+        let Some(published) = rx.borrow_and_update().clone() else {
+            continue;
+        };
+        on_publish(published).await;
+    }
 }
 
 /// P2-1 同款：`[lsp]` 热重载——新配置与 manager 当前配置不等 →
 /// `apply_config` diff 保连。LSP 无外部源重扫（只认手写面）。
 fn spawn_lsp_reloader() {
-    let mut rx = qaqh_config::watch::subscribe();
+    let rx = qaqh_config::watch::subscribe();
     tokio::spawn(async move {
-        if rx.changed().await.is_ok() {
-            rx.borrow_and_update();
-        }
-        while rx.changed().await.is_ok() {
-            let Some(published) = rx.borrow_and_update().clone() else {
-                continue;
-            };
+        reload_loop(rx, |published| async move {
             let manager = qaqh_lsp::manager_slot();
             if published.lsp == manager.config() {
-                continue; // 非 [lsp] 段变更：与 LSP 无关，跳过
+                return; // 非 [lsp] 段变更：与 LSP 无关，跳过
             }
             let report = manager.apply_config(published.lsp.clone()).await;
             log::info!(
@@ -791,7 +802,8 @@ fn spawn_lsp_reloader() {
                 report.removed,
                 report.kept.len()
             );
-        }
+        })
+        .await;
         log::warn!("[lsp] hot-reload watcher channel closed; exiting");
     });
 }
@@ -888,6 +900,60 @@ mod tool_mode_tests {
             assert!(validate_tool_mode(mode).is_ok(), "{mode}");
         }
         assert!(validate_tool_mode("turbo").is_err());
+    }
+}
+
+#[cfg(test)]
+mod reload_loop_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::reload_loop;
+    use qaqh_config::Config;
+
+    /// T-6-1 回归（BUG-2026-09-15-07 / E2）：`qaqh_config::watch::subscribe()`
+    /// 走 `Sender::subscribe`，返回的 receiver **已消费到当前版本** ⇒ 订阅后的
+    /// **第一次**发布必须被 reloader 观察到，不得被「前置 changed() 守卫」吞掉
+    /// （旧代码那次 `borrow_and_update()` 正好丢掉用户启动后的首次真实改动）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn first_publish_after_subscribe_is_observed() {
+        let (tx, _bootstrap) = tokio::sync::watch::channel::<Option<Arc<Config>>>(None);
+        // 订阅前已有一版快照（模拟「daemon 启动时 manager 已按当前配置装配」）。
+        tx.send(Some(Arc::new(Config {
+            context_limit: 1,
+            ..Default::default()
+        })))
+        .unwrap();
+        let rx = tx.subscribe(); // 与 watch::subscribe() 同款：Sender::subscribe
+
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn(reload_loop(rx, move |published| {
+            let seen_tx = seen_tx.clone();
+            async move {
+                let _ = seen_tx.send(published.context_limit);
+            }
+        }));
+
+        // 订阅前的历史快照不得被重放（subscribe() 已把它标记为已消费）。
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), seen_rx.recv())
+                .await
+                .is_err(),
+            "订阅前的快照不得触发 apply"
+        );
+
+        // 订阅后的第一次真实变更必须被观察到（旧前置守卫在此处吞掉本次变更）。
+        tx.send(Some(Arc::new(Config {
+            context_limit: 4242,
+            ..Default::default()
+        })))
+        .unwrap();
+        let seen = tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+            .await
+            .expect("首次变更被吞：reloader 未观察到订阅后的第一次发布")
+            .expect("seen 通道未关闭");
+        assert_eq!(seen, 4242);
+        handle.abort();
     }
 }
 
