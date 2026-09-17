@@ -232,6 +232,7 @@ impl ToolEngine {
                         turn_id: format!("tc_{}", challenge.call_id()),
                         round_num: 0,
                         tool_name: challenge.tool_name().to_string(),
+                        action_summary: challenge.action_summary(),
                         reason: challenge.reason().to_string(),
                         paths: challenge
                             .resources()
@@ -504,6 +505,7 @@ impl ToolEngine {
                             turn_id: turn_id.to_string(),
                             round_num,
                             tool_name: challenge.tool_name().to_string(),
+                            action_summary: challenge.action_summary(),
                             reason: challenge.reason().to_string(),
                             paths: challenge
                                 .resources()
