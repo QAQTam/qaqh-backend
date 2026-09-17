@@ -1054,7 +1054,7 @@ mod io_fault_tests {
     fn checkpoint_still_truncates_a_clean_log_and_refuses_a_torn_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_fixture(dir.path(), 2);
-        assert_eq!(checkpoint_file(dir.path()).expect("checkpoint"), true);
+        assert!(checkpoint_file(dir.path()).expect("checkpoint"));
         assert!(read_ops(dir.path()).is_empty(), "clean log is truncated");
 
         write_fixture(dir.path(), 1);
@@ -1067,9 +1067,8 @@ mod io_fault_tests {
         // A torn tail is normal crash input: the valid prefix was replayed, so
         // the checkpoint proceeds — and the quarantine copy still holds the
         // torn bytes as evidence.
-        assert_eq!(
+        assert!(
             checkpoint_file(dir.path()).expect("checkpoint call"),
-            true,
             "a torn tail does not refuse the checkpoint (the prefix was replayed)"
         );
         assert!(

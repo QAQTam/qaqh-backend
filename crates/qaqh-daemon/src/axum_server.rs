@@ -6,7 +6,6 @@ mod axum_impl;
 pub use axum_impl::{AppState, DebugNonceStore, build_router};
 
 #[cfg(test)]
-
 /// 进程级 SessionManager 初始化守卫。
 ///
 /// `SessionManager::init` 内部是 `OnceLock::set().expect(...)`——同一测试
@@ -720,7 +719,10 @@ mod axum_tests {
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         let txt = String::from_utf8_lossy(&body);
         assert!(txt.contains("ok epoch="), "{txt}");
-        assert!(!txt.contains("token"), "/health must not mention token: {txt}");
+        assert!(
+            !txt.contains("token"),
+            "/health must not mention token: {txt}"
+        );
     }
 
     /// nonce 一次性兑换：第一次成功、第二次（同 nonce）作废。

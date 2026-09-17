@@ -526,6 +526,131 @@ mod tests {
         );
     }
 
+    // ── N-4①（PR #87 评审附带观察）：hunk 头里的路径不得是另一条 marker 行 ──
+    //
+    // 修前实测：`*** Add File: *** End Patch` 会把 marker 行当作文件名，引擎返回
+    // `Ok` 并**真的建出一个叫 `*** End Patch` 的文件**（探针跑在 2026-09-17，
+    // 目录列表出现 `["*** End Patch: bar.txt", "*** End Patch"]`）。
+
+    /// Add/Delete/Update/Move to 四种头都必须拒绝「路径 = 另一条 `***` marker」。
+    #[test]
+    fn marker_line_is_rejected_as_a_hunk_path() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+        let cases = [
+            "*** Begin Patch\n*** Add File: *** End Patch\n+x\n*** End Patch\n",
+            "*** Begin Patch\n*** Delete File: *** End Patch\n*** End Patch\n",
+            "*** Begin Patch\n*** Update File: *** End Patch\n@@\n-alpha\n+ALPHA\n*** End Patch\n",
+            "*** Begin Patch\n*** Update File: a.txt\n*** Move to: *** End Patch\n@@\n-alpha\n+ALPHA\n*** End Patch\n",
+        ];
+        for patch in cases {
+            let err = apply_patch_engine(patch, dir.path(), UpdateMode::default())
+                .expect_err(&format!("marker path must be rejected: {patch}"));
+            assert!(
+                matches!(err, EngineError::Parse(_)),
+                "expected a parse error, got: {err:?}"
+            );
+        }
+        // 没有任何「marker 文件名」落到盘上，源文件也没被动过。
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "alpha\n"
+        );
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.txt".to_string()], "got: {names:?}");
+    }
+
+    /// 空路径本来就被 marker 的尾随空格卡住（`*** Add File: ` 去掉尾空格后
+    /// 不再匹配 `"*** Add File: "`），这里把该行为锁住——评审怀疑它会把
+    /// workspace 根 `pop()` 掉，实测不会（N-4②）。
+    #[test]
+    fn empty_hunk_path_is_a_parse_error() {
+        let dir = tempdir().unwrap();
+        for patch in [
+            "*** Begin Patch\n*** Add File: \n+x\n*** End Patch\n",
+            "*** Begin Patch\n*** Delete File: \n*** End Patch\n",
+        ] {
+            let err = apply_patch_engine(patch, dir.path(), UpdateMode::default())
+                .expect_err(&format!("empty path must be rejected: {patch}"));
+            assert!(
+                matches!(err, EngineError::Parse(_)),
+                "expected a parse error, got: {err:?}"
+            );
+        }
+        // workspace 根还在（没有被 `pop()` 掉）。
+        assert!(dir.path().exists());
+    }
+
+    /// 控制用例：只有 `*** End Patch` 的「补丁」既不是合法开头也不是合法结尾，
+    /// 必须是 `PARSE_ERROR`（评审声称它现在返回 Ok，实测不成立）。
+    #[test]
+    fn end_marker_alone_is_a_parse_error() {
+        let dir = tempdir().unwrap();
+        for patch in [
+            "*** End Patch\n+x\n*** End Patch\n",
+            "*** Begin Patch\n*** Add File: c.txt\n+x\n*** End Patch\n*** Add File: d.txt\n+y\n*** End Patch\n",
+        ] {
+            let err = apply_patch_engine(patch, dir.path(), UpdateMode::default())
+                .expect_err(&format!("must not parse: {patch}"));
+            assert!(
+                matches!(err, EngineError::Parse(_)),
+                "expected a parse error, got: {err:?}"
+            );
+        }
+        assert!(!dir.path().join("c.txt").exists());
+        assert!(!dir.path().join("d.txt").exists());
+    }
+
+    /// 符号链接 workspace + 绝对路径：合法请求不得被拒（N-4③，评审怀疑
+    /// `joined.exists()` 的 canonicalize 与原 cwd 比对会误拒）。
+    #[test]
+    fn symlinked_workspace_accepts_absolute_paths() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("a.txt"), "alpha\n").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // cwd 走链接，patch 用绝对真路径：改得动。
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: {}\n@@\n-alpha\n+ALPHA\n*** End Patch\n",
+            real.join("a.txt").display()
+        );
+        apply_patch_engine(&patch, &link, UpdateMode::default()).expect("link cwd + real abs path");
+        assert_eq!(
+            std::fs::read_to_string(real.join("a.txt")).unwrap(),
+            "ALPHA\n"
+        );
+
+        // cwd 走真路径，patch 用绝对链接路径：同样改得动。
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: {}\n@@\n-ALPHA\n+ALPHA2\n*** End Patch\n",
+            link.join("a.txt").display()
+        );
+        apply_patch_engine(&patch, &real, UpdateMode::default()).expect("real cwd + link abs path");
+        assert_eq!(
+            std::fs::read_to_string(real.join("a.txt")).unwrap(),
+            "ALPHA2\n"
+        );
+
+        // 但逃逸仍然被拒：workspace 内的链接指向外部时写不进去。
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let escape = real.join("escape");
+        std::os::unix::fs::symlink(&outside, &escape).unwrap();
+        let patch = "*** Begin Patch\n*** Add File: escape/leak.txt\n+x\n*** End Patch\n";
+        let err = apply_patch_engine(patch, &real, UpdateMode::default()).unwrap_err();
+        assert!(
+            matches!(err, EngineError::PathOutsideWorkspace { .. }),
+            "got: {err:?}"
+        );
+        assert!(!outside.join("leak.txt").exists());
+    }
+
     /// T-3-1：不存在的路径照常 dry-run 通过。
     #[test]
     fn dry_run_allows_add_of_missing_path() {

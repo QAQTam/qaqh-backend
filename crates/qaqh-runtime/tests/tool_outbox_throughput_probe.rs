@@ -63,6 +63,9 @@ fn dirs(root: &Path, count: usize) -> Vec<PathBuf> {
         .collect()
 }
 
+/// 基准里的写回调句柄（`run_round` 的 `record` 装箱后交给 worker 线程）。
+type WriteFn = std::sync::Arc<dyn Fn(&Path, usize, usize) + Send + Sync>;
+
 /// 跑一轮：`threads` 个会话各自在一个线程里追加 `PER_THREAD` 条。
 /// 返回（墙钟耗时, p50 单条延迟微秒）。
 fn run_round(
@@ -70,8 +73,7 @@ fn run_round(
     threads: usize,
     record: impl Fn(&Path, usize, usize) + Copy + Send + Sync + 'static,
 ) -> (Duration, f64) {
-    let write: std::sync::Arc<dyn Fn(&Path, usize, usize) + Send + Sync> =
-        std::sync::Arc::new(record);
+    let write: WriteFn = std::sync::Arc::new(record);
     let started = Instant::now();
     let handles: Vec<_> = dirs[..threads]
         .iter()

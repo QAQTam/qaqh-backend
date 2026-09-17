@@ -189,6 +189,11 @@ fn exec_engine_patch(ws: &str, patch: &str, dry_run: bool) -> ToolResult {
 /// 否则模型看到的仍是一句「找不到上下文」，照旧重发整个 patch
 /// （BUG-2026-09-16-09）。这里只保留一句短的行动指引，避免 512 截断吃掉它。
 fn error_code_and_hint(e: &EngineError) -> (&'static str, String) {
+    // ⚠ 可达性（N-2①）：`WouldOverwrite` **只可能由 dry-run 产生**——真 apply 的
+    // `AddFile` 分支没有守卫，保持上游覆盖语义（见 `apply_patch_engine::apply_hunk`，
+    // 旧内容记进 `FileDelta.old`）。评审担心的「真 apply 走到这里时前序 hunk 已
+    // 落盘、重发同 patch 会 NO_MATCH」在 HEAD 上不成立，故 hint 只需标明这是
+    // dry-run 的发现，不必再分两种场景写两套文案。
     match e {
         EngineError::Partial { error, .. } => {
             let (code, hint) = error_code_and_hint(error);
@@ -221,7 +226,7 @@ fn error_code_and_hint(e: &EngineError) -> (&'static str, String) {
         ),
         EngineError::WouldOverwrite { .. } => (
             "WOULD_OVERWRITE",
-            "'*** Add File:' would replace an existing file wholesale. Use '*** Update File:' to edit it in place (or '*** Delete File:' first); to overwrite deliberately, re-send the same patch without dry_run — the replaced contents are recorded in the delta/journal for rollback.".to_string(),
+            "dry-run finding: '*** Add File:' would replace an existing file wholesale. Use '*** Update File:' to edit it in place (or '*** Delete File:' first). To overwrite deliberately, re-send the same patch without dry_run — a real apply keeps the upstream overwrite semantics and records the replaced contents in the delta/journal for rollback.".to_string(),
         ),
     }
 }
@@ -446,6 +451,84 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "clobbered\n"
+        );
+    }
+
+    // ── N-2②/N-2③（PR #87 评审建议项）：多文件覆盖逐条上报 + 账本同步 ──
+
+    /// N-2③：同批多个 `*** Add File:` 命中已存在路径时，`overwritten` 必须逐个列出。
+    /// （评审当时按 `ADD_FILE_MARKER` 全局匹配推断「只报第一个」；HEAD 已按 delta
+    /// 判定，本用例把多文件行为锁住。）
+    #[test]
+    fn multiple_add_file_overwrites_are_all_reported() {
+        let (dir, ws) = repo_with_commit(&[("a.txt", "old a\n"), ("b.txt", "old b\n")]);
+        let patch = "\
+*** Begin Patch
+*** Add File: a.txt
++new a
+*** Add File: b.txt
++new b
+*** End Patch
+";
+        let out = run_in(&ws, patch, serde_json::json!({}));
+        assert_eq!(out["status"], "ok", "got: {out}");
+        assert_eq!(
+            out["overwritten"],
+            serde_json::json!(["a.txt", "b.txt"]),
+            "every overwritten file must be listed: {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "new a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "new b\n"
+        );
+    }
+
+    /// N-2②：覆盖后账本（`file_state`）必须同步到新内容——否则紧随其后的 `edit`
+    /// 会拿旧指纹把本次写入判成漂移（STALE_FILE/HASH_MISMATCH）。
+    #[test]
+    fn overwrite_refreshes_file_state_for_followup_edit() {
+        let (dir, ws) = repo_with_commit(&[("a.txt", "one\ntwo\n")]);
+        let abs = dir.path().canonicalize().unwrap().join("a.txt");
+        let before = crate::file_shared::content_hash("one\ntwo\n");
+        let patch = "*** Begin Patch\n*** Add File: a.txt\n+clobbered\n*** End Patch\n";
+        let out = run_in(&ws, patch, serde_json::json!({}));
+        assert_eq!(out["status"], "ok", "got: {out}");
+
+        let abs = abs.to_string_lossy().to_string();
+        assert_eq!(
+            crate::file_state::last_hash(&abs),
+            Some(crate::file_shared::content_hash("clobbered\n")),
+            "apply_patch must refresh the ledger key for the overwritten file"
+        );
+
+        // 紧随其后的 edit：传覆盖前的旧指纹必须被拒……
+        let stale = crate::edit::exec_edit(&serde_json::json!({
+            "path": abs,
+            "expected_hash": before,
+            "hunks": [{"kind": "replace", "old": "clobbered", "new": "CLOBBERED"}],
+        }));
+        assert!(
+            !stale.is_success(),
+            "the pre-overwrite hash must be rejected: {}",
+            stale.model_text()
+        );
+        // ……不传指纹（内容定位）必须成功，且看得见 apply_patch 写进去的新内容。
+        let ok = crate::edit::exec_edit(&serde_json::json!({
+            "path": abs,
+            "hunks": [{"kind": "replace", "old": "clobbered", "new": "CLOBBERED"}],
+        }));
+        assert!(
+            ok.is_success(),
+            "follow-up edit must see the new content: {}",
+            ok.model_text()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "CLOBBERED\n"
         );
     }
 

@@ -48,6 +48,23 @@ enum StreamingParserMode {
     EndedPatch,
 }
 
+/// 校验 hunk 头里解析出的路径：空、或本身就是另一条 `*** …` marker 行时拒绝。
+///
+/// 没有这道守卫时 `*** Add File: *** End Patch` 会把 marker 行当成文件名，
+/// 引擎返回 `Ok` 并**真的建出一个叫 `*** End Patch` 的文件**（N-4①，2026-09-17
+/// PR #87 评审附带观察；同族的 Delete/Move to 一并覆盖）。
+fn validate_hunk_path(path: &str, line_number: usize) -> Result<(), ParseError> {
+    if path.is_empty() || path.starts_with("***") {
+        return Err(InvalidHunkError {
+            message: format!(
+                "'{path}' is not a valid hunk path: a hunk path must not be empty or another '***' marker line"
+            ),
+            line_number,
+        });
+    }
+    Ok(())
+}
+
 impl StreamingPatchParser {
     pub fn environment_id(&self) -> Option<&str> {
         self.state.environment_id.as_deref()
@@ -109,6 +126,7 @@ impl StreamingPatchParser {
         }
         if let Some(path) = trimmed.strip_prefix(ADD_FILE_MARKER) {
             self.ensure_update_hunk_is_not_empty(trimmed)?;
+            validate_hunk_path(path, self.line_number)?;
             self.state.hunks.push(AddFile {
                 path: PathBuf::from(path),
                 contents: String::new(),
@@ -118,6 +136,7 @@ impl StreamingPatchParser {
         }
         if let Some(path) = trimmed.strip_prefix(DELETE_FILE_MARKER) {
             self.ensure_update_hunk_is_not_empty(trimmed)?;
+            validate_hunk_path(path, self.line_number)?;
             self.state.hunks.push(DeleteFile {
                 path: PathBuf::from(path),
             });
@@ -126,6 +145,7 @@ impl StreamingPatchParser {
         }
         if let Some(path) = trimmed.strip_prefix(UPDATE_FILE_MARKER) {
             self.ensure_update_hunk_is_not_empty(trimmed)?;
+            validate_hunk_path(path, self.line_number)?;
             self.state.hunks.push(UpdateFile {
                 path: PathBuf::from(path),
                 move_path: None,
@@ -257,6 +277,7 @@ impl StreamingPatchParser {
                         && move_path.is_none()
                         && let Some(move_to_path) = update_line.strip_prefix(MOVE_TO_MARKER)
                     {
+                        validate_hunk_path(move_to_path, self.line_number)?;
                         *move_path = Some(PathBuf::from(move_to_path));
                         self.state.mode = StreamingParserMode::UpdateFile { hunk_line_number };
                         return Ok(());

@@ -105,6 +105,7 @@ impl SessionEngine {
         agent.config.reasoning_effort = cfg.reasoning_effort;
         agent.config.max_tokens = cfg.max_tokens;
         agent.config.context_limit = cfg.context_limit;
+        agent.config.context_window = cfg.context_window;
         agent.config.auto_compact_threshold = cfg.auto_compact_threshold;
         agent.config.permission_level = cfg.permission_level;
         // (provider, endpoint) 解析随配置刷新（PR-1-9：engines 只读字段）。
@@ -131,6 +132,7 @@ mod tests {
             reasoning_effort: "max".into(),
             max_tokens: 123_456,
             context_limit: 2_000_000,
+            context_window: Some(1_500_000),
             auto_compact_threshold: 0.95,
             permission_level: 3,
             ..Default::default()
@@ -158,6 +160,8 @@ mod tests {
         assert_eq!(agent.config.reasoning_effort, "max");
         assert_eq!(agent.config.max_tokens, 123_456);
         assert_eq!(agent.config.context_limit, 2_000_000);
+        // N-1：端点声明的硬窗口也是热字段（reload 后 pre-flight 必须用新窗口）。
+        assert_eq!(agent.config.context_window, Some(1_500_000));
         // R1 主角：阈值必须随 reload 同步到运行中会话。
         assert!((agent.config.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(agent.config.permission_level, 3);

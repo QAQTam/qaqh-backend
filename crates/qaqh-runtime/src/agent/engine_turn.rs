@@ -180,6 +180,17 @@ pub(crate) fn compact_preflight(
     CompactPreflight::None
 }
 
+/// Hard context window for the local pre-flight (N-1 / D-15).
+///
+/// The profile may declare the endpoint's real window (`context_window`); when
+/// it is absent the user-facing `context_limit` is used as before. The two are
+/// deliberately separate: `context_limit` stays the base of the auto-compact
+/// soft threshold, while this value answers "would the endpoint reject this
+/// request outright?".
+pub(crate) fn hard_context_limit(cfg: &qaqh_config::Config) -> u64 {
+    cfg.context_window.unwrap_or(cfg.context_limit) as u64
+}
+
 /// TurnEngine manages a single LLM turn lifecycle.
 pub struct TurnEngine {
     /// If Some, a turn is suspended waiting for permission or ask_user.
@@ -958,12 +969,15 @@ impl TurnEngine {
         let mut request_estimate = ctx
             .agent
             .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
-        let limit = ctx.agent.config.context_limit as u64;
+        // 硬窗口：优先用 profile 声明的端点真实窗口（`context_window`，N-1），
+        // 缺失时回落用户侧口径 `context_limit`。
+        let limit = hard_context_limit(&ctx.agent.config);
         let threshold = ctx.agent.config.auto_compact_threshold;
         let api_context_tokens = request_estimate.api_context_tokens;
         let decision_tokens = ctx.agent.auto_compact_decision_tokens(&request_estimate);
-        // 本地 pre-flight（D-15）：软阈值照旧，硬窗口（`context_limit`）超限
-        // 即使守卫说"不"也必须先压缩——否则该请求必然被端点 400 拒绝。
+        // 本地 pre-flight（D-15）：软阈值照旧，硬窗口（`context_window` /
+        // `context_limit`）超限即使守卫说"不"也必须先压缩——否则该请求必然被
+        // 端点 400 拒绝。
         match compact_preflight(
             decision_tokens,
             limit,
@@ -1577,6 +1591,37 @@ mod tests {
             compact_preflight(10_000, 0, THRESHOLD, true),
             CompactPreflight::Compact
         );
+    }
+
+    /// N-1 验收：硬窗口取「端点声明的 `context_window`」，缺失时回落
+    /// `context_limit`；软阈值基数仍是 `context_limit`（两者不得互相顶替）。
+    #[test]
+    fn hard_context_limit_prefers_the_endpoint_declared_window() {
+        use super::hard_context_limit;
+
+        let base = qaqh_config::Config {
+            context_limit: 1_000_000,
+            context_window: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            hard_context_limit(&base),
+            1_000_000,
+            "缺失时回落 context_limit"
+        );
+
+        let declared = qaqh_config::Config {
+            context_window: Some(200_000),
+            ..base.clone()
+        };
+        assert_eq!(hard_context_limit(&declared), 200_000, "声明了就用端点窗口");
+
+        // 声明窗口 > 用户口径时也照用（口径分工：软阈值仍按 context_limit）。
+        let wider = qaqh_config::Config {
+            context_window: Some(2_000_000),
+            ..base
+        };
+        assert_eq!(hard_context_limit(&wider), 2_000_000);
     }
 
     /// 端点侧超限文案（各 provider 口径）必须被识别为 `CONTEXT_OVERFLOW`，

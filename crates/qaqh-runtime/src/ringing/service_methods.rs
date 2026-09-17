@@ -216,7 +216,10 @@ mod tests {
     #[test]
     fn forbidden_prefix_maps_to_forbidden_code() {
         for kind in [MethodKind::Read, MethodKind::Write] {
-            let value = error_response(kind, "FORBIDDEN: fs.read /etc/passwd: path is outside the allowed roots");
+            let value = error_response(
+                kind,
+                "FORBIDDEN: fs.read /etc/passwd: path is outside the allowed roots",
+            );
             assert_eq!(value["code"], serde_json::json!("forbidden"));
             assert!(
                 value["message"]

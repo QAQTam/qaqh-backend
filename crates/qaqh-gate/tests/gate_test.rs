@@ -1609,16 +1609,10 @@ fn responses_empty_input_is_noop_success() {
     let provider = make_responses_provider(&mock);
 
     let mut events: Vec<StreamEvent> = Vec::new();
-    let result = qaqh_gate::chat_stream(
-        &provider,
-        vec![],
-        None,
-        4096,
-        None,
-        None,
-        None,
-        &mut |ev| events.push(ev),
-    );
+    let result =
+        qaqh_gate::chat_stream(&provider, vec![], None, 4096, None, None, None, &mut |ev| {
+            events.push(ev)
+        });
 
     assert!(result.is_ok(), "空输入必须本地短路成功: {result:?}");
     assert_eq!(
@@ -1638,7 +1632,8 @@ fn responses_empty_input_sync_reports_diagnostic_error() {
     let mock = MockServer::new(vec![SseChunk::text("must not be requested")]);
     let provider = make_responses_provider(&mock);
 
-    let err = qaqh_gate::chat_sync(&provider, vec![], 1024).expect_err("空输入必须报错而非发空请求");
+    let err =
+        qaqh_gate::chat_sync(&provider, vec![], 1024).expect_err("空输入必须报错而非发空请求");
     assert!(err.contains("EMPTY_REQUEST"), "错误必须可诊断，got: {err}");
     assert_eq!(
         mock.request_count.load(Ordering::SeqCst),

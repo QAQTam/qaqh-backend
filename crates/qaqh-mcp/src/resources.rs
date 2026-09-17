@@ -26,6 +26,7 @@ use qaqh_types::{ToolDef, ToolFunction, ToolResult};
 use qaqh_workspace::{DynamicTool, ToolCallCtx, ToolRisk};
 
 use crate::bridge::{DEFAULT_TIMEOUT_SECS, error_result};
+use crate::connection::ConnStatus;
 use crate::error::{McpError, McpErrorKind};
 use crate::manager::McpManager;
 
@@ -153,11 +154,13 @@ fn list_servers(manager: &Arc<McpManager>) -> ToolResult {
 
 /// `list_resources`：资源清单 + URI 模板（缓存快照，不触发连接）。
 ///
-/// `server` 缺省 = 全部 server 遍历；未连接（`None`）与已连接但清单为空
-/// （`Some(empty)`）是两种状态，文案分开（T-6-2）：
+/// `server` 缺省 = 全部 server 遍历；`None` 快照有三种成因，文案分开
+/// （T-6-2 + N-3）：
 /// - 未连接 → 占位行（指引模型先看 list_servers 或直接 read_resource 触发
 ///   lazy connect）；
-/// - 已连接但无资源 → 「已连接、资源列表为空」，不得误报未连接。
+/// - 已连接但 `resources/list` **拉取失败/超时** → 「拉取失败」文案（旧实现把
+///   它折叠进「not connected yet」，模型会去重连一个本来已经连上的 server）；
+/// - 已连接但无资源（`Some(empty)`）→ 「已连接、资源列表为空」，不得误报未连接。
 fn list_resources(manager: &Arc<McpManager>, server: Option<&serde_json::Value>) -> ToolResult {
     let wanted = server.and_then(|value| value.as_str());
     let cfg_snapshot = manager.config();
@@ -189,10 +192,26 @@ fn list_resources(manager: &Arc<McpManager>, server: Option<&serde_json::Value>)
             }
             // 已连接、server 声明了 resources 能力但清单为空。
             Some(_) => section.push_str("\n  (connected — server lists no resources)"),
-            None => section.push_str(
-                "\n  (no resource list available — server not connected yet; call read_resource \
-                 to connect, or check list_servers)",
-            ),
+            None => {
+                let connected = conn
+                    .as_ref()
+                    .is_some_and(|conn| matches!(conn.status(), ConnStatus::Connected { .. }));
+                if connected
+                    && conn
+                        .as_ref()
+                        .is_some_and(|conn| conn.resources_fetch_failed())
+                {
+                    section.push_str(
+                        "\n  (connected — the resources/list fetch failed or timed out; the list \
+                         stays empty until the next connect. read_resource still works for a known uri)",
+                    );
+                } else {
+                    section.push_str(
+                        "\n  (no resource list available — server not connected yet; call read_resource \
+                         to connect, or check list_servers)",
+                    );
+                }
+            }
         }
         if let Some(templates) = templates.filter(|templates| !templates.is_empty()) {
             section.push_str(

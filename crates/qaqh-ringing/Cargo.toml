@@ -8,7 +8,9 @@ description = "Ringing 线协议层（Wire）：envelope/ack/batch/snapshot/cont
 qaqh-domain = { path = "../qaqh-domain" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl"], optional = true }
+# `no-serde-warnings`：见 qaqh-types/Cargo.toml 的同名说明（`ConversationMode`
+# 的 `alias = "normal"` 会触发 ts-rs 的 serde-compat 告警）。
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 
 
 [features]

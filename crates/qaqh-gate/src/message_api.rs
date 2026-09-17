@@ -304,9 +304,8 @@ fn convert_messages_to_anthropic(
         let Some(blocks) = msg.get_mut("content").and_then(|v| v.as_array_mut()) else {
             continue;
         };
-        let is_tr = |b: &serde_json::Value| {
-            b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-        };
+        let is_tr =
+            |b: &serde_json::Value| b.get("type").and_then(|t| t.as_str()) == Some("tool_result");
         if !blocks.iter().any(is_tr) {
             continue;
         }
@@ -1135,8 +1134,8 @@ mod tests {
     }
 
     /// 回归 BUG-2026-09-16-03：工具图（read_image）在存储层是「内联 `result.images`
-    /// + 兄弟 `ImageRef`」双份（`qaqh-message/src/store.rs:874` 外置落盘后未剥离原
-    /// 字节）。投影时必须只发一份——线上实测曾把 16 张工具图发成 32 个 image 块。
+    /// 字节 + 兄弟 `ImageRef`」双份（`qaqh-message/src/store.rs:874` 外置落盘后未剥离
+    /// 原字节）。投影时必须只发一份——线上实测曾把 16 张工具图发成 32 个 image 块。
     #[test]
     fn tool_image_inline_and_ref_are_projected_once() {
         let b64 = "Zm9vYmFy";
@@ -1178,7 +1177,10 @@ mod tests {
             blocks.iter().filter(|b| b["type"] == "image").collect();
         assert_eq!(images.len(), 1, "同一张图只应投影一次：{api:#?}");
         assert_eq!(images[0]["source"]["data"], b64);
-        assert_eq!(blocks[0]["type"], "tool_result", "tool_result 必须仍在前：{api:#?}");
+        assert_eq!(
+            blocks[0]["type"], "tool_result",
+            "tool_result 必须仍在前：{api:#?}"
+        );
     }
 
     /// 回归 BUG-2026-09-16-02：Anthropic 的 `input_tokens` **不含**缓存读写部分，
