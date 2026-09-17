@@ -926,9 +926,9 @@ mod m13_tests {
     }
 }
 
-/// P0-2 e2e：Level 4 的文件型 Write 仍免审批，`SafetyPolicy` 是
-/// 文件型 Destructive 工具进入 handler 前的最后出工区闸门。缺 `path` 的
-/// `delete` 形态必须被它阻断（`prepare_req` 真实路径，不经 handler）。
+/// P0-2 e2e：Level 4 bypass 下，`SafetyPolicy` 仍是文件型 Destructive 工具
+/// 进入 handler 前的最后出工区闸门。缺 `path` 的 `delete` 形态必须被它阻断
+/// （`prepare_req` 真实路径，不经 handler）。
 #[cfg(test)]
 mod safety_e2e_tests {
     use super::*;
@@ -959,7 +959,7 @@ mod safety_e2e_tests {
         let mut mgr = ToolManager::new();
         mgr.register(destructive_handler("delete"));
 
-        // Level 4 = Read/Write 免审批；本测试直接调用 `prepare_req`，
+        // Level 4 bypass；本测试直接调用 `prepare_req`，
         // `SafetyPolicy` 是文件型 Destructive 工具进入 handler 前的最后闸门。
         let report = mgr
             .prepare_req(
