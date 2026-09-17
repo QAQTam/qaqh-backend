@@ -102,6 +102,84 @@ pub(crate) enum StreamContinuation {
 /// is a fresh billable request; past this the partial output is accepted as-is.
 const MAX_STREAM_CONTINUATIONS: u32 = 3;
 
+/// Upper bound on forced-compact retries after an endpoint-reported context
+/// overflow (D-15 / BUG-2026-09-16-04). Each retry costs one compaction call
+/// plus one re-sent request; past this the turn fails as before.
+const MAX_CONTEXT_OVERFLOW_RECOVERIES: u32 = 2;
+
+/// Substrings identifying a provider-side context-overflow rejection.
+///
+/// Endpoints word the same condition differently (OpenAI
+/// `context_length_exceeded` / "maximum context length", Anthropic "prompt is
+/// too long", gateways "context window" / "context limit"). The gate forwards
+/// the provider body into `StreamEvent::Error`, so a case-insensitive
+/// substring match is the only provider-agnostic signal available locally.
+const CONTEXT_OVERFLOW_MARKERS: &[&str] = &[
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "context limit",
+    "prompt is too long",
+    "too many tokens",
+    "reduce the length of the messages",
+];
+
+/// True when a gate/provider error message looks like a context-overflow
+/// rejection (HTTP 400/413 "too much context") rather than a transport or
+/// authentication failure.
+fn is_context_overflow_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    CONTEXT_OVERFLOW_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+/// What the local pre-flight wants to do about the estimated request size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactPreflight {
+    /// Below `context_limit × auto_compact_threshold` — send as-is.
+    None,
+    /// Above the soft threshold, but the unchanged-failed-candidate guard
+    /// suppresses a retry (legacy behaviour, keeps the livelock guard).
+    Suppressed,
+    /// Above the soft threshold — routine auto-compact.
+    Compact,
+    /// At/over the provider window: the request would be rejected outright
+    /// (HTTP 400 context overflow), so compact before sending even when the
+    /// guard above would suppress it.
+    ForcedCompact,
+}
+
+/// Local pre-flight decision for one prepared request.
+///
+/// `context_limit` is the provider window and `threshold` the configured
+/// auto-compact fraction (`0.0` disables the soft path). A request at/over the
+/// window is rejected by the endpoint whatever the threshold is, so it always
+/// compacts — bounded by the caller's recovery counter.
+pub(crate) fn compact_preflight(
+    decision_tokens: u64,
+    context_limit: u64,
+    threshold: f64,
+    auto_compact_allowed: bool,
+) -> CompactPreflight {
+    // Hard window first: at/over `context_limit` the endpoint rejects the
+    // request whatever the threshold says, so compaction is forced even when
+    // the unchanged-failed-candidate guard would suppress a retry.
+    if context_limit > 0 && decision_tokens >= context_limit {
+        return CompactPreflight::ForcedCompact;
+    }
+    // Soft threshold — the legacy condition, kept verbatim (including the
+    // `context_limit == 0` corner, which keeps compacting on any estimate).
+    if threshold > 0.0 && (decision_tokens as f64) > context_limit as f64 * threshold {
+        return if auto_compact_allowed {
+            CompactPreflight::Compact
+        } else {
+            CompactPreflight::Suppressed
+        };
+    }
+    CompactPreflight::None
+}
+
 /// TurnEngine manages a single LLM turn lifecycle.
 pub struct TurnEngine {
     /// If Some, a turn is suspended waiting for permission or ask_user.
@@ -110,6 +188,10 @@ pub struct TurnEngine {
     pub(crate) continuation: Option<StreamContinuation>,
     /// Consecutive resumes consumed for the current turn.
     pub(crate) continuation_count: u32,
+    /// Consecutive forced-compact recoveries consumed for the current turn
+    /// after the endpoint reported a context overflow (bounded by
+    /// [`MAX_CONTEXT_OVERFLOW_RECOVERIES`]).
+    pub(crate) context_overflow_recoveries: u32,
 }
 
 impl Default for TurnEngine {
@@ -124,6 +206,7 @@ impl TurnEngine {
             suspended: None,
             continuation: None,
             continuation_count: 0,
+            context_overflow_recoveries: 0,
         }
     }
 
@@ -875,54 +958,66 @@ impl TurnEngine {
         let mut request_estimate = ctx
             .agent
             .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
+        let limit = ctx.agent.config.context_limit as u64;
         let threshold = ctx.agent.config.auto_compact_threshold;
-        if threshold > 0.0 {
-            let limit = ctx.agent.config.context_limit as u64;
-            let api_context_tokens = request_estimate.api_context_tokens;
-            let decision_tokens = ctx.agent.auto_compact_decision_tokens(&request_estimate);
-            if decision_tokens as f64 > limit as f64 * threshold {
-                if !ctx.agent.auto_compact_allowed() {
-                    log::debug!(
-                        "[TURN] auto-compact skipped for unchanged failed candidate at revision {}",
-                        ctx.agent.msg.context_revision()
-                    );
-                } else {
-                    log::info!(
-                        "[TURN] auto-compact preflight: source={}, decision={}, raw={}, predicted={}, upper={}/{limit} tokens ({} samples, {:.0}% threshold)",
-                        if api_context_tokens.is_some() {
-                            "api"
-                        } else {
-                            "estimate"
-                        },
-                        decision_tokens,
-                        request_estimate.raw_tokens,
-                        request_estimate.predicted_tokens,
-                        request_estimate.upper_bound_tokens,
-                        request_estimate.sample_count,
-                        threshold * 100.0
-                    );
-                    let compacted = Self::run_auto_compact(ctx);
-                    ctx.agent.record_auto_compact_result(compacted);
-                    if compacted {
-                        messages = ctx.agent.build_context();
-                        request_estimate = ctx
-                            .agent
-                            .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
-                        let post_compact_tokens = request_estimate
-                            .api_context_tokens
-                            .unwrap_or(request_estimate.upper_bound_tokens);
-                        if post_compact_tokens as f64 > limit as f64 * threshold {
-                            log::warn!(
-                                "[TURN] post-compact preflight remains above threshold: source={}, decision={}/{limit}, upper={}",
-                                if request_estimate.api_context_tokens.is_some() {
-                                    "api"
-                                } else {
-                                    "estimate"
-                                },
-                                post_compact_tokens,
-                                request_estimate.upper_bound_tokens
-                            );
-                        }
+        let api_context_tokens = request_estimate.api_context_tokens;
+        let decision_tokens = ctx.agent.auto_compact_decision_tokens(&request_estimate);
+        // 本地 pre-flight（D-15）：软阈值照旧，硬窗口（`context_limit`）超限
+        // 即使守卫说"不"也必须先压缩——否则该请求必然被端点 400 拒绝。
+        match compact_preflight(
+            decision_tokens,
+            limit,
+            threshold,
+            ctx.agent.auto_compact_allowed(),
+        ) {
+            CompactPreflight::None => {}
+            CompactPreflight::Suppressed => {
+                log::debug!(
+                    "[TURN] auto-compact skipped for unchanged failed candidate at revision {}",
+                    ctx.agent.msg.context_revision()
+                );
+            }
+            pressure @ (CompactPreflight::Compact | CompactPreflight::ForcedCompact) => {
+                log::info!(
+                    "[TURN] auto-compact preflight: source={}, decision={}, raw={}, predicted={}, upper={}/{limit} tokens ({} samples, {:.0}% threshold{})",
+                    if api_context_tokens.is_some() {
+                        "api"
+                    } else {
+                        "estimate"
+                    },
+                    decision_tokens,
+                    request_estimate.raw_tokens,
+                    request_estimate.predicted_tokens,
+                    request_estimate.upper_bound_tokens,
+                    request_estimate.sample_count,
+                    threshold * 100.0,
+                    if matches!(pressure, CompactPreflight::ForcedCompact) {
+                        ", hard-limit"
+                    } else {
+                        ""
+                    }
+                );
+                let compacted = Self::run_auto_compact(ctx);
+                ctx.agent.record_auto_compact_result(compacted);
+                if compacted {
+                    messages = ctx.agent.build_context();
+                    request_estimate = ctx
+                        .agent
+                        .estimate_prepared_request(&messages, Some(&ctx.agent.tool_defs));
+                    let post_compact_tokens = request_estimate
+                        .api_context_tokens
+                        .unwrap_or(request_estimate.upper_bound_tokens);
+                    if post_compact_tokens as f64 > limit as f64 * threshold {
+                        log::warn!(
+                            "[TURN] post-compact preflight remains above threshold: source={}, decision={}/{limit}, upper={}",
+                            if request_estimate.api_context_tokens.is_some() {
+                                "api"
+                            } else {
+                                "estimate"
+                            },
+                            post_compact_tokens,
+                            request_estimate.upper_bound_tokens
+                        );
                     }
                 }
             }
@@ -1074,6 +1169,50 @@ impl TurnEngine {
             }
 
             if (had_error || request_error.is_some()) && !done_seen {
+                let message = gate_error
+                    .or_else(|| request_error.clone())
+                    .unwrap_or_else(|| "Model request failed".into());
+                // ── 超限兜底（D-15 / BUG-2026-09-16-04）──
+                // 本地 estimate 看不出的上下文超限（端点按像素/自身口径计费）
+                // 在这里回收：强制压缩一次并重试同一轮，而不是整轮 Fatal。
+                // 只在尚未流出任何内容时回收（避免重复输出），次数由
+                // MAX_CONTEXT_OVERFLOW_RECOVERIES 封顶，压缩无产出即放弃。
+                let streamed_nothing = content.is_empty()
+                    && reasoning.is_empty()
+                    && tool_calls_raw
+                        .as_array()
+                        .is_none_or(|calls| calls.is_empty());
+                if streamed_nothing
+                    && !ctx.cancel.is_set()
+                    && self.context_overflow_recoveries < MAX_CONTEXT_OVERFLOW_RECOVERIES
+                    && is_context_overflow_error(&message)
+                {
+                    self.context_overflow_recoveries += 1;
+                    log::warn!(
+                        "[TURN] context overflow rejected by endpoint ({}); forcing compaction and retrying locally ({}/{})",
+                        message,
+                        self.context_overflow_recoveries,
+                        MAX_CONTEXT_OVERFLOW_RECOVERIES
+                    );
+                    crate::agent::turn_lap::gate::seal_active_stream_block(
+                        ctx,
+                        &turn_id,
+                        round_num,
+                        &mut active_stream_block,
+                    );
+                    let compacted = Self::run_auto_compact(ctx);
+                    ctx.agent.record_auto_compact_result(compacted);
+                    if compacted {
+                        return Outcome::ContinueTurn {
+                            turn_id,
+                            round_num,
+                            usage: last_usage,
+                        };
+                    }
+                    log::warn!(
+                        "[TURN] context overflow recovery produced no compaction; failing the turn"
+                    );
+                }
                 log::info!(
                     "[TURN] run_lap turn_id={} round_num={} gate error or had_error={}",
                     turn_id,
@@ -1083,9 +1222,6 @@ impl TurnEngine {
                 ctx.agent
                     .msg
                     .flush_meta(&ctx.agent.config.model, &ctx.agent.config.reasoning_effort);
-                let message = gate_error
-                    .or_else(|| request_error.clone())
-                    .unwrap_or_else(|| "Model request failed".into());
                 seal_timeline_terminal_round(
                     ctx,
                     &turn_id,
@@ -1259,6 +1395,7 @@ impl TurnEngine {
         self.suspended = None;
         self.continuation = None;
         self.continuation_count = 0;
+        self.context_overflow_recoveries = 0;
     }
 
     pub fn take_suspended_for_abort(&mut self) -> Option<(String, Option<UsageInfo>)> {
@@ -1396,5 +1533,73 @@ mod tests {
             "reasoning-before-tool",
             "reasoning-after-tool",
         );
+    }
+
+    /// T-5-2 验收：超限的 `decision_tokens`/`context_limit` 输入必须走**本地**
+    /// pre-flight 压缩分支（`ForcedCompact`），而不是把请求发出去等 400。
+    #[test]
+    fn over_limit_estimate_forces_local_preflight_compaction() {
+        use super::{CompactPreflight, compact_preflight};
+
+        const LIMIT: u64 = 1_000_000;
+        const THRESHOLD: f64 = 0.9;
+
+        // 超限：即使 unchanged-failure 守卫（allowed=false）也在本地压缩。
+        assert_eq!(
+            compact_preflight(LIMIT, LIMIT, THRESHOLD, false),
+            CompactPreflight::ForcedCompact
+        );
+        assert_eq!(
+            compact_preflight(LIMIT + 200_000, LIMIT, THRESHOLD, true),
+            CompactPreflight::ForcedCompact
+        );
+        // 阈值被配置成 0（关闭软路径）时，超限仍必须压缩，否则必然 400。
+        assert_eq!(
+            compact_preflight(LIMIT, LIMIT, 0.0, false),
+            CompactPreflight::ForcedCompact
+        );
+        // 软阈值内：维持原行为。
+        assert_eq!(
+            compact_preflight(950_000, LIMIT, THRESHOLD, true),
+            CompactPreflight::Compact
+        );
+        assert_eq!(
+            compact_preflight(950_000, LIMIT, THRESHOLD, false),
+            CompactPreflight::Suppressed
+        );
+        assert_eq!(
+            compact_preflight(100_000, LIMIT, THRESHOLD, true),
+            CompactPreflight::None
+        );
+        // 未声明窗口（context_limit = 0）时不做新的硬窗口预判；软阈值路径
+        // 保持 legacy 语义（原条件 `decision > 0 × threshold` 恒真）。
+        assert_eq!(
+            compact_preflight(10_000, 0, THRESHOLD, true),
+            CompactPreflight::Compact
+        );
+    }
+
+    /// 端点侧超限文案（各 provider 口径）必须被识别为 `CONTEXT_OVERFLOW`，
+    /// 否则回收分支不会被走到。
+    #[test]
+    fn endpoint_context_overflow_errors_are_recognized() {
+        use super::is_context_overflow_error;
+
+        assert!(is_context_overflow_error(
+            "OpenAI API HTTP 400 (Bad Request): {\"error\":{\"code\":\"context_length_exceeded\",\
+             \"message\":\"This model's maximum context length is 131072 tokens.\"}}"
+        ));
+        assert!(is_context_overflow_error(
+            "HTTP 400: prompt is too long: 210000 tokens > 200000 maximum"
+        ));
+        assert!(is_context_overflow_error(
+            "HTTP 400 (Bad Request): input length and `max_tokens` exceed context limit"
+        ));
+        assert!(!is_context_overflow_error(
+            "OpenAI API HTTP 401 (Unauthorized): authentication failed"
+        ));
+        assert!(!is_context_overflow_error(
+            "HTTP transport error: connection reset by peer"
+        ));
     }
 }
