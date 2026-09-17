@@ -11,6 +11,7 @@
 //! | `list_resources_unknown_server_maps_not_found` | `MCP_NOT_FOUND`（附名单） |
 //! | `list_resources_before_connect_shows_placeholder` | 未连接 → 占位行（指引 lazy connect） |
 //! | `list_resources_connected_but_empty_is_not_reported_as_unconnected` | 已连接但清单为空 ≠ 未连接（T-6-2） |
+//! | `list_resources_fetch_failure_is_not_reported_as_unconnected` | 已连接但 `resources/list` 拉取失败 ≠ 未连接（N-3，第三种文案） |
 //! | `list_resources_after_connect_lists_cache_and_templates` | 缓存清单 + URI 模板段 |
 //! | `read_resource_text_passthrough` | 文本直通（mime 头） |
 //! | `read_resource_blob_placeholder` | `[blob mime=... size=3 uri=...]` |
@@ -50,9 +51,13 @@ use serde_json::json;
 // `empty_resources = true`（server 名 "empty"）：声明 resources 能力但
 // `resources/list` 与 `resources/templates/list` 都返回空清单——T-6-2 的
 // 「已连接但为空」靶（与「未连接」的 None 必须走不同文案）。
+//
+// `failing_resources = true`（server 名 "broken"）：连接成功但 `resources/list`
+// 返回错误——N-3 的「已连接但拉取失败」靶（第三种文案）。
 
 struct ResourceServer {
     empty_resources: bool,
+    failing_resources: bool,
 }
 
 impl ServerHandler for ResourceServer {
@@ -91,6 +96,12 @@ impl ServerHandler for ResourceServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, rmcp::ErrorData> {
+        if self.failing_resources {
+            return Err(rmcp::ErrorData::internal_error(
+                "mock resources/list failure (N-3 probe)",
+                None,
+            ));
+        }
         if self.empty_resources {
             return Ok(ListResourcesResult::with_all_items(vec![]));
         }
@@ -208,17 +219,22 @@ fn mock_factory() -> ConnectFactory {
         let name = name.to_owned();
         // server 名 "empty"：已连接但资源清单为空（T-6-2 靶）。
         let empty_resources = name == "empty";
+        // server 名 "broken"：已连接但 resources/list 报错（N-3 靶）。
+        let failing_resources = name == "broken";
         Box::pin(async move {
             let (client_half, server_half) = tokio::io::duplex(64 * 1024);
             let (c_read, c_write) = tokio::io::split(client_half);
             let (s_read, s_write) = tokio::io::split(server_half);
             let server_task = tokio::spawn(async move {
-                let service = ResourceServer { empty_resources }
-                    .serve((s_read, s_write))
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        format!("mock server init failed: {e}").into()
-                    })?;
+                let service = ResourceServer {
+                    empty_resources,
+                    failing_resources,
+                }
+                .serve((s_read, s_write))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("mock server init failed: {e}").into()
+                })?;
                 service.waiting().await.map_err(
                     |e| -> Box<dyn std::error::Error + Send + Sync> {
                         format!("mock server wait failed: {e}").into()
@@ -436,6 +452,43 @@ async fn list_resources_connected_but_empty_is_not_reported_as_unconnected() {
     assert!(
         text.contains("connected — server lists no resources"),
         "got: {text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_resources_fetch_failure_is_not_reported_as_unconnected() {
+    // N-3：已连接但 `resources/list` **拉取失败**，与「未连接」是两种状态
+    // （旧实现两者都落到 "not connected yet"，模型会去重连一个已连上的 server）。
+    let manager = make_manager_named(Some("broken"));
+    manager.get_or_connect("broken").await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if manager
+            .connection("broken")
+            .is_some_and(|conn| conn.resources_fetch_failed())
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        manager
+            .connection("broken")
+            .is_some_and(|conn| conn.resources_fetch_failed()),
+        "mock must have failed its resources/list"
+    );
+
+    let result = aggregate(&manager, json!({ "action": "list_resources" }));
+    assert!(result.is_success(), "{}", result.model_text());
+    let text = result.model_text();
+    assert!(text.contains("## broken (stdio)"), "got: {text}");
+    assert!(
+        text.contains("the resources/list fetch failed"),
+        "拉取失败必须单独成态: {text}"
+    );
+    assert!(
+        !text.contains("not connected"),
+        "已连接（拉取失败）不得报未连接: {text}"
     );
 }
 

@@ -307,8 +307,6 @@ mod tests {
         assert!(!s.contains("base_url"), "{s}");
     }
 
-    /// 读路径向前兼容：旧 daemon 缺字段 → serde(default) 兜底不报错。
-    #[test]
     /// 缺字段**必须失败**（原先这条叫 `dto_tolerates_missing_fields`，断言的
     /// 是相反的行为）。按 spec §0b：读模型不接受残缺载荷——因为 struct 级
     /// `#[serde(default)]` 会让「旧形状」**静默**变成「一份全默认的配置」，

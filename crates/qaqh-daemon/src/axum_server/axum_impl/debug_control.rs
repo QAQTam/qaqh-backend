@@ -171,9 +171,7 @@ fn sec_fetch_site_allowed(headers: &HeaderMap) -> bool {
         .and_then(|value| value.to_str().ok())
     {
         None => true,
-        Some(site) => {
-            site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none")
-        }
+        Some(site) => site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none"),
     }
 }
 
@@ -208,7 +206,8 @@ pub(crate) async fn handle_debug_token(
                 return (
                     StatusCode::BAD_REQUEST,
                     [(header::CONTENT_TYPE, "application/json")],
-                    br#"{"code":"invalid_body","message":"expected {\"nonce\":\"...\"}"}"#.as_slice(),
+                    br#"{"code":"invalid_body","message":"expected {\"nonce\":\"...\"}"}"#
+                        .as_slice(),
                 )
                     .into_response();
             }
@@ -529,14 +528,20 @@ mod tests {
     #[test]
     fn sec_fetch_site_allowlist() {
         let mut headers = HeaderMap::new();
-        assert!(sec_fetch_site_allowed(&headers), "absent header = non-browser client");
+        assert!(
+            sec_fetch_site_allowed(&headers),
+            "absent header = non-browser client"
+        );
         for allowed in ["same-origin", "none", "SAME-ORIGIN"] {
             headers.insert("sec-fetch-site", allowed.parse().unwrap());
             assert!(sec_fetch_site_allowed(&headers), "{allowed} must pass");
         }
         for rejected in ["cross-site", "same-site"] {
             headers.insert("sec-fetch-site", rejected.parse().unwrap());
-            assert!(!sec_fetch_site_allowed(&headers), "{rejected} must be rejected");
+            assert!(
+                !sec_fetch_site_allowed(&headers),
+                "{rejected} must be rejected"
+            );
         }
     }
 }

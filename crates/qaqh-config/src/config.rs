@@ -69,6 +69,10 @@ pub struct Config {
     pub max_tokens: u32,
     /// Maximum context window size in tokens.
     pub context_limit: u32,
+    /// 端点声明的硬上下文窗口（输入 token）；`None` = 回落 `context_limit`。
+    /// 本地 pre-flight（`engine_turn::compact_preflight`）用它判「必然 400」，
+    /// `context_limit` 继续作为 auto-compact 软阈值的基数（N-1 / D-15）。
+    pub context_window: Option<u32>,
     /// Selected provider ID (e.g. "deepseek", "qwen").
     pub provider_id: String,
     /// Selected endpoint within the provider (e.g. "openai").
@@ -570,6 +574,7 @@ impl Default for Config {
                 max_tokens: 16384,
                 effort: Some("high".into()),
                 context_limit: 1_000_000,
+                context_window: None,
                 base_url: base_url.clone(),
                 endpoint: None,
             },
@@ -580,6 +585,7 @@ impl Default for Config {
             model,
             max_tokens: 16384,
             context_limit: 1_000_000,
+            context_window: None,
             provider_id,
             endpoint,
             reasoning_effort: "high".into(),
@@ -706,6 +712,7 @@ impl Config {
                     cfg.max_tokens = profile.max_tokens;
                     cfg.reasoning_effort = profile.effort.clone().unwrap_or_else(|| "high".into());
                     cfg.context_limit = profile.context_limit;
+                    cfg.context_window = profile.context_window;
                     cfg.base_url = profile.base_url.clone();
                     if let Some(ref ep) = profile.endpoint
                         && !ep.is_empty()
@@ -918,6 +925,7 @@ falling back to 1 (MaxLockdown)"
                                 .unwrap_or_else(|| cfg.reasoning_effort.clone()),
                         ),
                         context_limit: fresh.context_limit.unwrap_or(cfg.context_limit),
+                        context_window: cfg.context_window,
                         base_url: fresh
                             .base_url
                             .clone()
@@ -953,6 +961,7 @@ falling back to 1 (MaxLockdown)"
                     max_tokens: cfg.max_tokens,
                     effort: Some(cfg.reasoning_effort.clone()),
                     context_limit: cfg.context_limit,
+                    context_window: cfg.context_window,
                     base_url: cfg.base_url.clone(),
                     endpoint: Some(cfg.endpoint.clone()),
                 },
@@ -1011,6 +1020,7 @@ falling back to 1 (MaxLockdown)"
                 max_tokens: self.max_tokens,
                 effort: Some(self.reasoning_effort.clone()),
                 context_limit: self.context_limit,
+                context_window: self.context_window,
                 base_url: self.base_url.clone(),
                 endpoint: Some(self.endpoint.clone()),
             },
@@ -1161,6 +1171,7 @@ falling back to 1 (MaxLockdown)"
         self.max_tokens = profile.max_tokens;
         self.reasoning_effort = profile.effort.unwrap_or_else(|| "high".into());
         self.context_limit = profile.context_limit;
+        self.context_window = profile.context_window;
         self.base_url = profile.base_url;
         if let Some(ref ep) = profile.endpoint {
             self.endpoint = ep.clone();
@@ -1184,6 +1195,7 @@ falling back to 1 (MaxLockdown)"
                 max_tokens: self.max_tokens,
                 effort: Some(self.reasoning_effort.clone()),
                 context_limit: self.context_limit,
+                context_window: self.context_window,
                 base_url: self.base_url.clone(),
                 endpoint: Some(self.endpoint.clone()),
             },
@@ -1449,6 +1461,89 @@ mod c3_migration_tests {
         let cfg2 = Config::load_from_paths_with(store, secrets).expect("reload");
         assert_eq!(cfg2.model, "m1");
         assert_eq!(cfg2.reasoning_effort, "max");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// N-1：profile 的 `context_window`（端点声明的硬窗口）必须能读写往返；
+    /// 缺该键的老配置照常解析（`None`，回落 `context_limit`）。
+    #[test]
+    fn profile_context_window_round_trips() {
+        let (dir, store, secrets) = setup(
+            "ctxwin",
+            "active_profile = \"default\"
+             [profiles.default]
+             model = \"m1\"
+             max_tokens = 96000
+             context_limit = 1000000
+             context_window = 200000
+             base_url = \"https://x/v1\"
+             endpoint = \"openai\"
+",
+        );
+        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
+        assert_eq!(cfg.context_limit, 1_000_000);
+        assert_eq!(
+            cfg.context_window,
+            Some(200_000),
+            "profile 值必须进运行时 Config"
+        );
+        cfg.save_with(&store, &secrets).expect("save");
+        let text = std::fs::read_to_string(dir.join("config.toml")).expect("read back");
+        let doc: toml::Value = toml::from_str(&text).expect("toml");
+        assert_eq!(
+            doc["profiles"]["default"]["context_window"].as_integer(),
+            Some(200_000),
+            "save 往返不得丢 context_window: {text}"
+        );
+        let cfg2 = Config::load_from_paths_with(store, secrets).expect("reload");
+        assert_eq!(cfg2.context_window, Some(200_000));
+
+        // 老配置（没有这个键）→ None，且照常解析。
+        let (dir2, store2, secrets2) = setup(
+            "ctxwin-old",
+            "active_profile = \"default\"
+             [profiles.default]
+             model = \"m1\"
+             max_tokens = 96000
+             context_limit = 1000000
+             base_url = \"https://x/v1\"
+             endpoint = \"openai\"
+",
+        );
+        let old = Config::load_from_paths_with(store2, secrets2).expect("load old");
+        assert_eq!(old.context_window, None, "缺键必须是 None 而不是解析失败");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    /// N-1：切 profile 时硬窗口必须跟着切——没有声明的 profile 要把它清成
+    /// `None`（否则会沿用上一个 profile 的窗口）。
+    #[test]
+    fn apply_profile_switches_context_window() {
+        let (dir, store, secrets) = setup(
+            "ctxwin-switch",
+            "active_profile = \"a\"
+             [profiles.a]
+             model = \"ma\"
+             max_tokens = 1000
+             context_limit = 100000
+             context_window = 200000
+             base_url = \"https://a/v1\"
+             endpoint = \"openai\"
+             [profiles.b]
+             model = \"mb\"
+             max_tokens = 1000
+             context_limit = 100000
+             base_url = \"https://b/v1\"
+             endpoint = \"openai\"
+",
+        );
+        let mut cfg = Config::load_from_paths_with(store, secrets).expect("load");
+        assert_eq!(cfg.context_window, Some(200_000));
+        cfg.apply_profile("b");
+        assert_eq!(cfg.context_window, None, "无声明的 profile 必须清掉硬窗口");
+        cfg.apply_profile("a");
+        assert_eq!(cfg.context_window, Some(200_000));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

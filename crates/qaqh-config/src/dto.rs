@@ -233,6 +233,7 @@ mod tests {
                 max_tokens: 4096,
                 effort: Some("high".into()),
                 context_limit: 128_000,
+                context_window: None,
                 base_url: String::new(),
                 endpoint: None,
             },

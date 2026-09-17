@@ -14,7 +14,7 @@
 //! `SessionManager` 是进程级单例（`init` 只能调用一次），全部用例共用一个
 //! data root，各自使用独立 seed。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use qaqh_domain::TimelineBlockKind;
@@ -82,7 +82,7 @@ fn complete_tool_archive() -> Vec<Message> {
 }
 
 /// reload = 新的 RingingHub（空 timeline 缓存）+ 同一持久化归档。
-fn reload_hub(root: &PathBuf, epoch: &str) -> RingingHub {
+fn reload_hub(root: &Path, epoch: &str) -> RingingHub {
     RingingHub::with_persistence(epoch, root.join("ringing"))
         .with_sessions(SessionManager::global())
 }

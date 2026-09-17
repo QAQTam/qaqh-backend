@@ -224,6 +224,15 @@ pub struct ProfileConfig {
     pub effort: Option<String>,
     /// Maximum context window size (input tokens).
     pub context_limit: u32,
+    /// 端点声明的真实上下文窗口（输入 token）；`None` = 用 `context_limit`。
+    ///
+    /// 与 `context_limit` 的分工（N-1 / D-15 / BUG-2026-09-16-04）：
+    /// `context_limit` 是**用户侧**口径（auto-compact 软阈值以它为基数），
+    /// `context_window` 是**端点硬窗口**——发请求前的本地 pre-flight 用后者
+    /// 判定「这一发必然被 400」，缺失时回落 `context_limit`。
+    /// 可选字段：老配置文件没有它时必须照常解析（默认 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
     /// API base URL for this profile.
     #[serde(default = "default_base_url")]
     pub base_url: String,
