@@ -396,6 +396,29 @@
   - 说明：三条**早于批次 3 存在**，与批次 3 的改动无因果关系。
   - 关联：PR #87 评审评论附注
 
+- [ ] **N-6（来自主代理最终验证）`todo_contract` 测试不隔离，复用数据目录时会假红**
+  - 现状：`crates/qaqh-workspace/tests/todo_contract.rs::manual_status_transitions_round_trip_to_the_frontend_contract`
+    依赖 `qaqh_workspace::todo::load_todo()` 的**持久化 todo 列表**。
+    在**全新** `QAQH_DATA_DIR` 下通过；复用同一数据目录再跑一次就 FAILED
+    （`NOT_FOUND: no matching todos: T1`——上一次运行留下的条目让新条目拿不到 `T1`）。
+  - 实测：`QAQH_DATA_DIR=$(mktemp -d) cargo test --workspace` → **90 个 test 目标全 ok、0 failed**；
+    用复用目录则这一个用例红。**与本轮 9 个批次无关**（该文件在 `8c1c154..HEAD` 无改动）。
+  - 动作：让该测试用临时数据目录（或先清理 todo 状态），否则「跑两遍」会假红，
+    容易被误判成本轮改动引入的回归。
+  - 关联：主代理最终验证（2026-09-17）
+
+- [ ] **N-7（来自主代理最终验证）README §5.4 的严格 clippy 命令在 main 上**本来就**跑不过**
+  - 现状：`cargo clippy --workspace --all-targets -- -D warnings` 在 main 上失败，且**与本轮 9 个批次无关**
+    （相关 crate 在 `8c1c154..HEAD` 无改动）：
+    - `crates/qaqh-config-api/src/lib.rs:316` —— `duplicate-macro-attributes`（重复的 `#[test]`，属**测试目标**）
+    - `crates/qaqh-message/src/wal.rs:609` —— `io_other_error`（`io::Error::new(kind, "…")` 建议改 `Error::other`）
+  - 疑似工具链较新（clippy 报 `rust-1.98.0` 的 lint 索引）而仓库代码早于这两个 lint。
+  - 影响：**子代理按 §5.4 验收会拿到「基线就红」的结果**，容易误判成本轮回归。
+    本轮各批次的 clippy 验收因此实际是「按 crate 跑、确认新增代码零告警」。
+  - 动作：要么修掉这两处（各一行），要么把 §5.4 的命令改成
+    `cargo clippy --workspace --all-targets`（不加 `-D warnings`）+「新增代码零告警」的口径。
+  - 关联：`docs/todo/README.md` §5.4
+
 ---
 
 ## 下发模板（复制即用）
