@@ -721,3 +721,130 @@ fn hint_line_zero_via_json_is_normalized_to_one() {
     assert_eq!(r.data["hunks"][0]["used_hint"], 1);
     assert_eq!(r.data["hunks"][0]["actual_line"], 2);
 }
+
+// ─────────────────────────────────────────────────────────────
+// T-4-1：模型可见契约只宣传 3 个 kind（replace / prepend_file / append_file）
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+fn tool_contract_advertises_only_three_kinds() {
+    let mut mgr = crate::ToolManager::new();
+    register(&mut mgr);
+    let h = mgr.lookup("edit").expect("edit tool registered");
+    let desc = h.description;
+    let schema = h.input_schema.to_string();
+    // a92626d 已删的三个 kind 不得再出现在任何模型可见文案里（照描述调用恒 PARSE_ERROR）。
+    for dead in ["insert_after", "insert_before", "replace_inline"] {
+        assert!(
+            !desc.contains(dead),
+            "description still advertises {dead}: {desc}"
+        );
+        assert!(
+            !schema.contains(dead),
+            "schema still advertises {dead}: {schema}"
+        );
+    }
+    for live in ["replace", "prepend_file", "append_file"] {
+        assert!(desc.contains(live), "description lost {live}: {desc}");
+        assert!(schema.contains(live), "schema lost {live}: {schema}");
+    }
+    // 整行语义指引（旧文案 "Use shortest unique old/anchor" 诱导模型给片段）。
+    assert!(desc.contains("WHOLE-LINE"), "description: {desc}");
+}
+
+// ─────────────────────────────────────────────────────────────
+// T-4-2：行内片段 old 不再被 Tier3 采纳（整行语义；此前整行被顶掉＝静默丢内容）
+// ─────────────────────────────────────────────────────────────
+
+/// buglist probe5 的最小复刻：整行 = "prefix: " + 'a'×200（208 字符），
+/// old = 'a'×200（占行 98%，字符级 ratio 0.98、边际 0.16）。
+/// 修复前：Tier3 采纳 ⇒ 替换区间是**整行** ⇒ "prefix: " 无提示删除。
+#[test]
+fn inline_fragment_old_is_not_adopted() {
+    let fragment = "a".repeat(200);
+    let content = format!(
+        "prefix: {fragment}\n{}\n{}\n",
+        "x".repeat(80),
+        "y".repeat(80)
+    );
+    let out = edit(&content, &[rp(&fragment, &("a".repeat(199) + "b"))]);
+    assert!(out.edited.is_none(), "fragment old must not be adopted");
+    assert_eq!(err_code(&out), "NO_MATCH");
+    let detail = out.reports[0].detail.as_deref().unwrap_or("");
+    assert!(detail.contains("FRAGMENT"), "detail: {detail}");
+}
+
+/// exec 层探针（清单的「手动复现」等价物）：文件必须逐字节不变。
+#[test]
+fn fragment_probe_leaves_file_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("probe6.md");
+    let fragment = "a".repeat(200);
+    let original = format!(
+        "prefix: {fragment}\n{}\n{}\n",
+        "x".repeat(80),
+        "y".repeat(80)
+    );
+    std::fs::write(&path, &original).unwrap();
+    let replacement = "a".repeat(199) + "b";
+    let r = exec_edit(&json!({
+        "path": path.to_string_lossy(),
+        "hunks": [{"kind": "replace", "old": fragment, "new": replacement}],
+    }));
+    assert!(!r.is_success(), "model text: {}", r.model_text());
+    assert_eq!(r.data["code"], "NO_MATCH");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        original,
+        "file must stay byte-identical (prefix must not be silently dropped)"
+    );
+}
+
+/// 反向护栏：整行 old 的 Tier3 模糊采纳不受 T-4-2 影响（回归锁，见测试 3）。
+#[test]
+fn whole_line_tier3_typo_still_applies() {
+    let content = "fn main() {\n    let foo = 1;\n}\n";
+    let out = edit(content, &[rp("let fo0 = 1;", "let foo = 1;")]);
+    assert!(out.edited.is_some(), "whole-line typo must still apply");
+    assert_eq!(out.reports[0].tier, Some(3));
+}
+
+// ─────────────────────────────────────────────────────────────
+// T-4-3：第四种失败诊断——「old 是行内片段」
+// ─────────────────────────────────────────────────────────────
+
+/// buglist probe07：old 逐字符就在 L3 里，但 ratio 0.32 < 0.85。
+/// 旧文案「closest location is probably wrong; re-check 'old'」误导模型以为
+/// 自己记错了内容；真因是「片段 vs 整行」。
+#[test]
+fn no_match_detail_reports_inline_fragment() {
+    let content = "# probe\n\n| BUG-2026-09-16-01 | `fixed`（工作区，待提交） | some really long trailing text to make this line long |\n| other row | x | y |\n";
+    let out = edit(content, &[rp("`fixed`（工作区，待提交） |", "`fixed` |")]);
+    assert!(out.edited.is_none());
+    assert_eq!(err_code(&out), "NO_MATCH");
+    let detail = out.reports[0].detail.as_deref().unwrap_or("");
+    assert!(detail.contains("FRAGMENT"), "detail: {detail}");
+    assert!(detail.contains("line 3"), "detail: {detail}");
+    assert!(detail.contains("whole line"), "detail: {detail}");
+    // 旧口径的误导性文案不得再出现在这一分支里。
+    assert!(!detail.contains("probably wrong"), "detail: {detail}");
+}
+
+/// 无片段证据时，原有三种口径（margin / 阈值 / 完全不像）不受影响。
+#[test]
+fn no_match_detail_keeps_existing_branches_without_fragment() {
+    // 差 margin（两个候选同样像，old 不是任何行的子串）
+    let out = edit(
+        "let alpha_value = 1;\nlet alpho_value = 1;\n",
+        &[rp("let alphu_value = 1;", "let x = 1;")],
+    );
+    let detail = out.reports[0].detail.as_deref().unwrap_or("");
+    assert!(detail.contains("margin"), "detail: {detail}");
+    // 完全不像
+    let out = edit("a\nb\nc\n", &[rp("zzzz", "x")]);
+    let detail = out.reports[0].detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("no window had any similarity"),
+        "detail: {detail}"
+    );
+}
