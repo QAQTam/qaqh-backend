@@ -6,6 +6,7 @@
  *   2. access_token 过期时自动 refresh（POST /oauth2/token, grant_type=refresh_token）
  *   3. refresh 失败/无 token 时发起设备授权流（RFC 8628）：
  *      POST /oauth2/device/auth → 用户访问 verification_uri_complete → 轮询 /oauth2/token
+ *   4. token 落盘原子化（同目录 tmp + rename，见 writeTokenFile）
  *
  * 状态机：
  *   ok ──(临近过期)──► refresh ──成功──► ok
@@ -16,9 +17,9 @@
  * 被授权流阻塞时的回调：onAuthorizationRequired({ verification_url, user_code, expires_in })
  * —— MCP 层用它向客户端发 elicitation（弹授权卡片）。
  */
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, unlink } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const API_BASE = process.env.CNB_API_ENDPOINT || "https://api.cnb.cool";
 const CLIENT_ID = "cnb_cli";
@@ -81,10 +82,34 @@ export async function tryRefresh(t) {
   }
 }
 
+/**
+ * 原子写 token 文件：同目录 `tmp` + `rename`。
+ *
+ * 直写（`writeFile(TOKEN_FILE, …)`）在并发 refresh（多个 MCP client，或同一
+ * 进程内多路 fetch 同时 401）下会让读者看到 **partial write**（截断的 JSON
+ * ⇒ `readTokenFile` 解析失败 ⇒ token 丢失），或让后写者覆盖先写者。
+ *
+ * `rename` 在同一文件系统内是原子替换：读者永远看到完整的旧文件或完整的
+ * 新文件。因此 tmp 必须与目标**同目录**——跨文件系统 rename 非原子且可能
+ * 直接 `EXDEV` 失败。
+ *
+ * 与 `qaqh-config::secrets.rs` 的 `next_temp_path` + `write_doc` 同机制：
+ * tmp 名带 pid + 时间戳 + nonce，并发写者互不覆盖。
+ */
 async function writeTokenFile(t) {
   cached = t;
-  await mkdir(join(TOKEN_FILE, ".."), { recursive: true });
-  await writeFile(TOKEN_FILE, JSON.stringify(t, null, 2));
+  const dir = dirname(TOKEN_FILE);
+  await mkdir(dir, { recursive: true });
+  const tmp = `${TOKEN_FILE}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`;
+  await writeFile(tmp, JSON.stringify(t, null, 2));
+  try {
+    await rename(tmp, TOKEN_FILE);
+  } catch (err) {
+    // rename 失败（如跨卷、权限）时清理 tmp，避免残留；错误照旧上抛，
+    // 调用方（tryRefresh 的 catch）会返回 null 走授权流。
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
 }
 
 // ─────────────────────────── 设备授权流（RFC 8628） ───────────────────────────

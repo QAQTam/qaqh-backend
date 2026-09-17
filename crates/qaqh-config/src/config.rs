@@ -229,7 +229,8 @@ impl Default for LspConfig {
 /// - tools 白名单条目非空；
 /// - `default_timeout_secs` ∈ 1..=3600（越界即错，不做静默 clamp——静默修正
 ///   会掩盖配置错误）；
-/// - `max_concurrent_calls` ∈ 1..=64。
+/// - `max_concurrent_calls` ∈ 1..=16（T-8-1 / O-4：上限从 64 收紧，
+///   单 server 并发调用是 MCP 侧的资源放大面，16 为安全上限）。
 ///
 /// 注意：TOML 层面的重复表（`[mcp.servers.x]` 写两次）由 toml 解析器拒绝，
 /// 走 `ConfigStore::load` 返回 None → 整体回退默认的既有语义（见 PLAN §8）。
@@ -294,12 +295,12 @@ pub(crate) fn map_mcp_config(
             None => 1,
             Some(0) => {
                 return Err(format!(
-                    "[mcp] server {name:?}: max_concurrent_calls 必须在 1..=64（得到 0）"
+                    "[mcp] server {name:?}: max_concurrent_calls 必须在 1..=16（得到 0）"
                 ));
             }
-            Some(n) if n > 64 => {
+            Some(n) if n > 16 => {
                 return Err(format!(
-                    "[mcp] server {name:?}: max_concurrent_calls 必须在 1..=64（得到 {n}）"
+                    "[mcp] server {name:?}: max_concurrent_calls 必须在 1..=16（得到 {n}）"
                 ));
             }
             Some(n) => n,

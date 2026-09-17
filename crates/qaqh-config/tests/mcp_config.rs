@@ -148,12 +148,35 @@ fn rejects_timeout_out_of_range() {
 
 #[test]
 fn rejects_concurrency_out_of_range() {
+    // T-8-1 / O-4：上限从 64 收紧到 16。64 是**旧上限**，现在必须被拒绝
+    // （回归锁：防止上限被改回 64）。
     let err = load_toml(
         "badconc",
-        "[mcp.servers.x1]\ncommand = \"npx\"\nmax_concurrent_calls = 65\n",
+        "[mcp.servers.x1]\ncommand = \"npx\"\nmax_concurrent_calls = 64\n",
     )
-    .expect_err("并发 65 应被拒绝");
-    assert!(err.contains("1..=64"), "实际错误: {err}");
+    .expect_err("并发 64 应被拒绝（新上限 16）");
+    assert!(err.contains("1..=16"), "实际错误: {err}");
+}
+
+/// T-8-1 验收：单 server 并发上限收紧到 `1..=16`（安全审查 P1-1 / O-4）。
+///
+/// 16 是上限内的合法值；17 越界必须 fail-fast 拒绝。收紧前 `1..=64` 会
+/// 放行 17..=64，本用例在收紧前对 17 的 `expect_err` 会失败。
+#[test]
+fn mcp_concurrency_ceiling_16() {
+    let cfg = load_toml(
+        "concurrency16",
+        "[mcp.servers.x1]\ncommand = \"npx\"\nmax_concurrent_calls = 16\n",
+    )
+    .expect("并发 16 是上限内的合法值");
+    assert_eq!(cfg.mcp.servers.get("x1").unwrap().max_concurrent_calls, 16);
+
+    let err = load_toml(
+        "concurrency17",
+        "[mcp.servers.x1]\ncommand = \"npx\"\nmax_concurrent_calls = 17\n",
+    )
+    .expect_err("并发 17 必须被拒绝（上限 16）");
+    assert!(err.contains("1..=16"), "实际错误: {err}");
 }
 
 // ── 持久层往返（serde 层，不经过运行时映射）──

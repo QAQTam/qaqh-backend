@@ -419,9 +419,17 @@ pub fn set_workspace(path: &str) {
 }
 
 /// Resolve a path against the workspace root.
-/// If the path is already absolute, return as-is.
+/// If the path is already absolute, return it lexically normalized.
 /// If the workspace is empty or ".", return the path as-is (OS cwd resolution).
 /// Otherwise, join the workspace root with the relative path.
+///
+/// T-8-3②（安全审查 P1-3）：绝对路径此前**原样返回**，于是 `/ws/./a.rs` 与
+/// `/ws/a.rs` 派生两套账本键，read 建立的基线对 write/edit 不可见
+/// （STALE_FILE 误判）。现在统一做词法归一（去 `.` / `..` / 冗余分隔符）。
+///
+/// 只做词法归一、**不** `canonicalize`：`std::fs::canonicalize` 在 Windows
+/// 返回 `\\?\` verbatim 前缀，会与既有键形态分叉（BUG-2026-09-13-16 的
+/// 根因）；符号链接解析改在账本层（`file_state::state_key`）best-effort 做。
 pub fn resolve_workspace_path(path: &str) -> String {
     use std::path::Path;
     if path.is_empty() {
@@ -429,16 +437,20 @@ pub fn resolve_workspace_path(path: &str) -> String {
     }
     let p = Path::new(path);
     if p.is_absolute() {
-        return path.to_string();
+        return crate::permission::normalize_lexically(p)
+            .to_string_lossy()
+            .to_string();
     }
     let ws = current_workspace();
     if ws.is_empty() || ws == "." {
         return path.to_string();
     }
     let joined = Path::new(&ws).join(p);
-    // Normalise: strip redundant . components via iterator (e.g. D:\foo\./bar → D:\foo\bar)
-    let normalized: std::path::PathBuf = joined.components().collect();
-    normalized.to_string_lossy().to_string()
+    // Normalise: strip redundant `.`/`..` components via iterator
+    // (e.g. D:\foo\./bar → D:\foo\bar).
+    crate::permission::normalize_lexically(&joined)
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Convert an absolute path into a display-friendly relative path.

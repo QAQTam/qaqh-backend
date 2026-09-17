@@ -92,10 +92,52 @@ fn next_order() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Windows 上 `canonicalize` 返回 `\\?\C:\…` verbatim 前缀路径；剥掉以与
+/// read/write 既有键形态一致（见 `copy_range.rs` 的 BUG-2026-09-13-16 注）。
+fn strip_verbatim(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+}
+
+/// 账本键的唯一派生（T-8-3② / 安全审查 P1-3）：`resolve_workspace_path` 词法
+/// 归一 + 文件存在时 best-effort `canonicalize`（解析符号链接）。
+///
+/// 缺陷形态：同一文件的不同书写形态（绝对路径里的 `./` / `..`、符号链接
+/// 别名）此前派生**两套键**，read 建立的基线对 write/edit 不可见
+/// （STALE_FILE 误判 / hash 漂移）。
+///
+/// 保守点：`resolve_workspace_path` 先做跨平台安全的词法归一（不引入
+/// Windows `\\?\` verbatim 前缀——那是 BUG-2026-09-13-16 的根因）；文件
+/// 不存在（新建/已删除，或跨机 serve→daemon 回传）时解析父目录后拼回文件名；
+/// 父目录也解析失败则退回词法归一形态。
+///
+/// 相对路径**原样保留**：生产调用方（read/write/edit/copy_range/apply_patch）
+/// 都已先经 `resolve_workspace_path` 产出绝对路径；账本层再解析会把无锚点的
+/// 相对键悄悄改成 workspace/cwd 绝对键，破坏既有相对键契约（且与并行测试的
+/// 全局 `CURRENT_WORKSPACE` 互相干扰）。
+fn state_key(raw: &str) -> String {
+    let raw_path = std::path::Path::new(raw);
+    if !raw_path.is_absolute() {
+        return raw.to_string();
+    }
+    let resolved = crate::resolve_workspace_path(raw);
+    let path = std::path::Path::new(&resolved);
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return strip_verbatim(&canon);
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        && let Ok(canon_parent) = std::fs::canonicalize(parent)
+    {
+        return strip_verbatim(&canon_parent.join(name));
+    }
+    resolved
+}
+
 fn insert(path: &str, op: &'static str, line_count: usize, hash: Option<String>) {
+    let key = state_key(path);
     let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
     s.insert(
-        path.to_string(),
+        key.clone(),
         FileEntry {
             op,
             line_count,
@@ -108,10 +150,10 @@ fn insert(path: &str, op: &'static str, line_count: usize, hash: Option<String>)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push(StateEntry {
-            path: path.to_string(),
+            path: key,
             op: op.to_string(),
             line_count,
-            hash: hash.clone(),
+            hash,
         });
 }
 
@@ -131,15 +173,16 @@ pub fn record_read(path: &str, content: &str, line_count: usize) {
     shifts_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(path);
+        .remove(&state_key(path));
 }
 
 /// Record a file write (create/overwrite/append). 全覆盖语义：行号全失效，
 /// 清空偏移链（模型应重新 read 建立基线）。
 pub fn record_write(path: &str, content: &str) {
     crate::file_cache::invalidate(path);
+    let key = state_key(path);
     let s = state().lock().unwrap_or_else(|e| e.into_inner());
-    let op = if s.contains_key(path) {
+    let op = if s.contains_key(&key) {
         "edited"
     } else {
         "created"
@@ -154,7 +197,7 @@ pub fn record_write(path: &str, content: &str) {
     shifts_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(path);
+        .remove(&key);
 }
 
 /// Record a file edit with per-hunk line shifts (账本行号修正的数据源)。
@@ -167,8 +210,9 @@ pub fn record_edit_with_shifts(path: &str, content: &str, shifts: &[(usize, i64)
         content.lines().count(),
         Some(ledger_hash(content)),
     );
+    let key = state_key(path);
     let mut m = shifts_map().lock().unwrap_or_else(|e| e.into_inner());
-    let list = m.entry(path.to_string()).or_default();
+    let list = m.entry(key).or_default();
     for (before_line, delta) in shifts {
         if *delta != 0 {
             list.push(LineShift {
@@ -184,8 +228,9 @@ pub fn record_edit_with_shifts(path: &str, content: &str, shifts: &[(usize, i64)
 /// 返回 `(修正后行号, 总偏移)`；无偏移链（该文件从未被 read 过或链已清）
 /// 返回 `Some((line, 0))` 原样，无基线返回 `None`。
 pub fn correct_line(path: &str, line: usize) -> Option<(usize, i64)> {
+    let key = state_key(path);
     let m = shifts_map().lock().unwrap_or_else(|e| e.into_inner());
-    let list = m.get(path)?;
+    let list = m.get(&key)?;
     if list.is_empty() {
         return Some((line, 0));
     }
@@ -203,7 +248,7 @@ pub fn record_grep(path: &str) {
     shifts_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(path);
+        .remove(&state_key(path));
 }
 
 /// Record a file edit.
@@ -227,7 +272,7 @@ pub fn record_delete(path: &str) {
 /// `None` = 本会话中工具从未见过该文件（尚无校验基线）。
 pub fn last_hash(path: &str) -> Option<String> {
     let s = state().lock().unwrap_or_else(|e| e.into_inner());
-    s.get(path).and_then(|e| e.hash.clone())
+    s.get(&state_key(path)).and_then(|e| e.hash.clone())
 }
 
 /// Generate file state summary. Capped at 20 most recently touched files.
@@ -344,5 +389,45 @@ mod tests {
             queue = take_pending();
         }
         assert!(saw_own, "own entry observed in the queue");
+    }
+
+    #[test]
+    fn file_state_key_matches_resolved_key() {
+        // T-8-3②：同一文件的不同书写形态必须派生**同一个**账本键——否则
+        // read 建立的基线对 write/edit 不可见（STALE_FILE 误判 / hash 漂移）。
+        // 不调用 clear()：账本是进程级全局，清空会踩并行测试。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("ledger.txt");
+        std::fs::write(&file, "hello\n").expect("write file");
+
+        // 绝对路径 + 冗余分量（`./` 与 `sub/..` 回折）。旧实现把绝对路径
+        // 原样返回，该字符串与归一化后的解析键分叉。
+        let dotted = format!("{}/./sub/../ledger.txt", dir.path().display());
+        record_read(&dotted, "hello\n", 1);
+
+        let resolved = crate::resolve_workspace_path(&file.to_string_lossy());
+        assert!(
+            std::path::Path::new(&resolved).is_absolute(),
+            "fixture must resolve to an absolute key, got {resolved}"
+        );
+        assert_eq!(
+            state_key(&dotted),
+            state_key(&resolved),
+            "state key must not depend on the path spelling"
+        );
+        assert_eq!(
+            last_hash(&dotted),
+            last_hash(&resolved),
+            "file_state key must match the resolved key for the same file"
+        );
+        assert!(
+            last_hash(&resolved).is_some(),
+            "the read baseline must be visible through the resolved key"
+        );
+        assert!(
+            !state_key(&dotted).contains("/./"),
+            "key must be normalized: {}",
+            state_key(&dotted)
+        );
     }
 }

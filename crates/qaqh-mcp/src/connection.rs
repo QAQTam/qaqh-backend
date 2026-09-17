@@ -41,6 +41,19 @@ use crate::bridge;
 use crate::error::{McpError, McpErrorKind};
 use qaqh_config::config::McpServerConfig;
 
+/// T-8-1 / O-4 硬上限（与 `qaqh-config::config::map_mcp_config` 的
+/// `max_concurrent_calls ∈ 1..=16` 校验同值）。
+///
+/// 配置校验已是第一道闸；`begin_call` 再夹一层，兜住绕过校验的构造路径
+/// （旧版持久化 DTO、程序化装配的 `McpServerConfig`），保证运行时生效值
+/// 永远 ≤16。
+const MAX_CONCURRENT_CALLS_CEILING: u64 = 16;
+
+/// 运行时生效的并发上限：配置值 ∩ 硬上限 [`MAX_CONCURRENT_CALLS_CEILING`]。
+fn effective_concurrency_cap(configured: u32) -> u64 {
+    u64::from(configured).min(MAX_CONCURRENT_CALLS_CEILING)
+}
+
 // ═══════ PR-M2-2：server 通知 → 重拉管线（list_changed 订阅）═══════
 //
 // adapter 的 NotifyBridge（客户端 handler）收到 server 的
@@ -714,12 +727,15 @@ impl ServerConnection {
                 ));
             }
             // max_concurrent_calls 生效点（M1-5）：并发上限按 server 配置隔离。
-            if state.inflight >= u64::from(self.server_cfg.max_concurrent_calls) {
+            // T-8-1 / O-4：再夹一层硬上限 16（配置校验是第一道闸，这里兜底
+            // 绕过校验的构造路径）。
+            let cap = effective_concurrency_cap(self.server_cfg.max_concurrent_calls);
+            if state.inflight >= cap {
                 return Err(McpError::new(
                     McpErrorKind::Busy,
                     format!(
                         "server {}: {}/{} in-flight calls — max_concurrent_calls reached; retry after they drain",
-                        self.name, state.inflight, self.server_cfg.max_concurrent_calls
+                        self.name, state.inflight, cap
                     ),
                 ));
             }
@@ -1026,5 +1042,24 @@ impl Drop for CallGuard {
         if state.inflight == 0 {
             state.idle_since = Some(Instant::now());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_CONCURRENT_CALLS_CEILING, effective_concurrency_cap};
+
+    /// T-8-1 验收（运行时侧）：即使 `McpServerConfig` 绕过配置校验塞进
+    /// `max_concurrent_calls > 16`，`begin_call` 的生效上限也必须夹到 16。
+    #[test]
+    fn mcp_runtime_concurrency_clamped_to_16() {
+        assert_eq!(MAX_CONCURRENT_CALLS_CEILING, 16);
+        assert_eq!(effective_concurrency_cap(0), 0);
+        assert_eq!(effective_concurrency_cap(1), 1);
+        assert_eq!(effective_concurrency_cap(16), 16);
+        // 旧上限 64 与任意越界值都被夹到 16。
+        assert_eq!(effective_concurrency_cap(17), 16);
+        assert_eq!(effective_concurrency_cap(64), 16);
+        assert_eq!(effective_concurrency_cap(u32::MAX), 16);
     }
 }
