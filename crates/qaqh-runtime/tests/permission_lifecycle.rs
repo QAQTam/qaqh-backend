@@ -242,6 +242,24 @@ fn permission_id(receiver: &std::sync::mpsc::Receiver<RingingEvent>) -> String {
     }
 }
 
+fn permission_id_and_action(
+    receiver: &std::sync::mpsc::Receiver<RingingEvent>,
+) -> (String, Option<String>) {
+    match expect_event(receiver, Duration::from_secs(5), |event| {
+        matches!(
+            event,
+            RingingEvent::Tool(ToolEvent::ToolPermissionRequested { .. })
+        )
+    }) {
+        RingingEvent::Tool(ToolEvent::ToolPermissionRequested {
+            tool_call_id,
+            action_summary,
+            ..
+        }) => (tool_call_id, action_summary),
+        other => panic!("expected ToolPermissionRequested, got {other:?}"),
+    }
+}
+
 fn assert_no_round_completion(receiver: &std::sync::mpsc::Receiver<RingingEvent>) {
     let deadline = Instant::now() + Duration::from_millis(300);
     while Instant::now() < deadline {
@@ -608,7 +626,19 @@ fn llm_four_pending_bash_calls_defer_execution_until_all_resolved() {
         2,
         move |writer, receiver| {
             send_cmd(writer, "", cmd_user_input("run four commands"));
-            let mut ids = (0..4).map(|_| permission_id(receiver)).collect::<Vec<_>>();
+            let permissions = (0..4)
+                .map(|_| permission_id_and_action(receiver))
+                .collect::<Vec<_>>();
+            for (_, action_summary) in &permissions {
+                let summary = action_summary
+                    .as_deref()
+                    .expect("exec permission must carry an action summary");
+                assert!(summary.contains("argv: ["), "{summary}");
+            }
+            let mut ids = permissions
+                .into_iter()
+                .map(|(tool_call_id, _)| tool_call_id)
+                .collect::<Vec<_>>();
             ids.sort();
             assert_eq!(ids, vec!["bash-1", "bash-2", "bash-3", "bash-4"]);
 
