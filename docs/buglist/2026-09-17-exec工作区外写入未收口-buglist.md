@@ -1,6 +1,6 @@
 # buglist（2026-09-17）— `exec` 在 Level 4 可写工作区外路径
 
-> 状态口径：`open` / `fixed（工作区，待提交）` / `fixed @{commit}` / `verified` / `wontfix`。
+> 状态口径：`open` / `fixed（工作区，待提交）` / `fixed @{commit}` / `verified` / `wontfix @{commit}` / `wontfix`。
 >
 > 来源：
 > [`../todo/2026-09-17-buglist复核-checklist.md`](../todo/2026-09-17-buglist复核-checklist.md)
@@ -13,39 +13,37 @@
 
 | ID | 状态 | 项 |
 |---|---|---|
-| BUG-2026-09-17-08 | `fixed @cef3faa`（**P0**） | `exec` 在 Level 4 原先自动批准后可在工作区外写入。第二轮修复已选择权限层收口：`needs_permission` 保留 Level 4 的 Read/Write 免审批，但 Exec/Net 统一进入 `AskUser`；子代理沙箱继续拒绝 Exec/Net，MCP 动态 Exec/Net 同步执行该规则。 |
+| BUG-2026-09-17-08 | `wontfix @5c7dd4d`（**P0**） | N-5 的原问题是 `exec` 在 Level 4 自动批准后可写工作区外。权限语义重新定案后，Level 4 明确为危险 bypass，允许普通工具（含 Exec/Net）自动放行；不再把它当作“普通档位需要拦截”的缺陷。 |
+| BUG-2026-09-18-01 | `open`（**P0，后续**） | Level 4 bypass 下的 `exec` 还没有系统调用级沙箱；等移植 Codex 沙箱能力后，确保删除/写入的是隔离视图而非真实磁盘。 |
 
 ## 证据链
 
 ```text
-ToolEngine::admit_batch
-  -> qaqh_workspace::authorize_call
-  -> admit
-  -> needs_permission
-       Level 4 + Exec/Net => AskUser
-  -> UI approval required
-  -> AuthorizedToolCall
-  -> execute_authorized
-  -> handle_run_exec
+Level 1/2/3
+  -> needs_permission(/mcp Exec/Net) => AskUser
+  -> UI approval (L3) -> AuthorizedToolCall -> execute
+
+Level 4 (explicit bypass)
+  -> needs_permission => AutoApprove
+  -> AuthorizedToolCall -> execute
+  -> 待补：exec sandbox / virtual filesystem
 ```
 
 关键位置：
 
-- `crates/qaqh-workspace/src/permission.rs:467`
-- `crates/qaqh-workspace/src/authorization.rs:244`
-- `crates/qaqh-workspace/src/manager.rs:544`
-- `crates/qaqh-workspace/src/safety.rs:14`
-- `crates/qaqh-workspace/src/exec/handler.rs:61`
+- `crates/qaqh-workspace/src/permission.rs`
+- `crates/qaqh-workspace/src/authorization.rs`
+- `crates/qaqh-workspace/src/manager.rs`
+- `crates/qaqh-workspace/src/safety.rs`
+- `crates/qaqh-workspace/src/exec/handler.rs`
 
-## 收口方案
+## 权限语义定案
 
-已采用**权限层收口**：
-
-- Level 4 的 Read/Write 继续自动放行。
-- Level 4 的 Exec/Net 与 Level 1/2/3 一样进入审批。
+- **Level 3（默认新档）**：工作区内 Write 放行；Exec/Net 进入审批；跨区 Write 按 trust folder。
+- **Level 4**：显式危险 bypass，普通工具全部自动放行，包括 Exec/Net 和动态 MCP。
 - `ask`、会话内 todo 操作保持无递归弹窗的既有例外。
 - 子代理沙箱继续自动拒绝 Exec/Net，不提供审批通道。
-- MCP 动态工具若声明为 Exec/Net，同样不能在 Level 4 绕过审批。
+- Level 4 的 `exec` 工作区外风险暂按已接受风险处理；sandbox 完成后重新关闭 `BUG-2026-09-18-01`。
 
 ## 验收
 
@@ -56,6 +54,9 @@ cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-以上命令在当前工作区全部通过。修复提交：`cef3faa`；当前状态为 `fixed @cef3faa`，待 PR 评审。
+以上命令在当前工作区全部通过。权限语义提交：`5c7dd4d`；当前状态：N-5 `wontfix @5c7dd4d`，L4 sandbox 为 `open`。
 
-补充（2026-09-18）：B-5 已修复。后端 `eef1231` 在 `ToolPermissionRequested` 增加可选 `action_summary`，并由 `PermissionChallenge::action_summary()` 为 `exec` 生成有界、无 `env` 的命令摘要；TUI `4a795b3` 在审批面板渲染“执行:”行。后端 e2e 断言该事件必带摘要，TUI 渲染回归与全量 209 测试通过（使用已发布 ratatui 临时验证，依赖文件无残留）。
+补充（2026-09-18）：B-5 保留给 Level 3 的 Exec 审批。后端 `eef1231` 在
+`ToolPermissionRequested` 增加可选 `action_summary`，并由 `PermissionChallenge::action_summary()`
+为 `exec` 生成有界、无 `env` 的命令摘要；TUI `4a795b3` 渲染“执行:”行，`2ce1fec` 修复真实联调
+发现的空会话崩溃。已用隔离 daemon + TUI + mock 模型在 Level 3 验证：命令可见、批准后真实执行。
