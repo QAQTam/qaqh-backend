@@ -254,11 +254,9 @@ pub fn admit(
     // 供审计展示。
     //
     // T-8-1（安全审查 P1-1 / O-4）收紧：**Exec/Net 类别不再无条件放行**——
-    // 落到下面的 needs_permission 决策（Level 1/2/3 → AskUser），消除
-    // 「配置一个 MCP server 即获得内置 exec/网络工具都没有的免审批特权」。
+    // 落到下面的 needs_permission 决策（所有档位 → AskUser；子代理沙箱随后拒绝）。
     // 只读类（Read，如 `mcp` resources 聚合）保留 D5 快路径，避免误伤。
-    // Level 4（Unrestricted）仍全放行——与内置工具语义一致（全局档位策略，
-    // 不在本条目收敛范围）。
+    // Level 4（Unrestricted）仍只对 Read/Write 免审批，Exec/Net 必须确认。
     //
     // 子代理沙箱优先于 D5：S3 要求 MCP 工具在子代理上下文一律拒绝
     // （防越狱）——原“沙箱零代码”依赖 needs_permission→AskUser 路径，
@@ -602,21 +600,20 @@ mod tests {
     }
 
     #[test]
-    fn mcp_exec_net_require_approval_until_unrestricted() {
+    fn mcp_exec_net_require_approval_at_all_levels() {
         // T-8-1（安全审查 P1-1 / O-4）：D5 不再对 Exec/Net 类别无条件放行。
-        // 收紧前本用例的 Level 1/3 断言是「必须 Authorized」；现在改为
-        // 「必须 ApprovalRequired」，Level 4 仍放行（Unrestricted 语义）。
+        // N-5：Level 4 也必须审批，避免动态 MCP Exec/Net 绕过内置工具的同档策略。
         // 全局 AtomicBool 需串行（与 sandbox_guard 同锁）。
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         set_subagent_sandbox(false);
         let ws = std::env::temp_dir().join("qaqh-mcp-d5");
-        for level in [1u8, 2, 3] {
+        for level in [1u8, 2, 3, 4] {
             let admission = admit(
                 ToolInvocation {
                     session_id: "seed-d5".into(),
-                    call_id: "call-d5".into(),
+                    call_id: format!("call-d5-{level}"),
                     tool_name: "mcp__demo__echo".into(),
                     action: String::new(),
                     args: serde_json::json!({}),
@@ -631,23 +628,6 @@ mod tests {
                 "level {level} Exec MCP call must require approval, got non-approval"
             );
         }
-        let admission = admit(
-            ToolInvocation {
-                session_id: "seed-d5".into(),
-                call_id: "call-d5-4".into(),
-                tool_name: "mcp__demo__echo".into(),
-                action: String::new(),
-                args: serde_json::json!({}),
-                category: crate::permission::ToolCategory::Exec,
-            },
-            4,
-            &ws,
-            &HashSet::new(),
-        );
-        assert!(
-            matches!(admission, Admission::Authorized(_)),
-            "level 4 (Unrestricted) must still authorize, got non-authorized"
-        );
     }
 
     #[test]
