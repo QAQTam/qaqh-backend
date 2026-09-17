@@ -323,23 +323,27 @@ impl ToolManager {
         }
 
         // 内置/动态统一路由视图：PreparedCall 只需要 fn 指针 + 超时 + risk；
-        // ToolHandler 的 'static description 不参与执行路径。
+        // ToolHandler 的 'static description 不参与执行路径。`category` 只供
+        // 出工区安全判定区分「文件型」与「执行/网络型」Destructive 工具。
         struct ResolvedRoute {
             handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
             default_timeout: Duration,
             risk: ToolRisk,
+            category: crate::permission::ToolCategory,
         }
         let route = match self.handlers.get(name) {
             Some(handler) => ResolvedRoute {
                 handler_fn: handler.handler,
                 default_timeout: handler.default_timeout,
                 risk: handler.risk.clone(),
+                category: handler.category,
             },
             None => match self.dynamic.get(name) {
                 Some(tool) => ResolvedRoute {
                     handler_fn: tool.handler_fn,
                     default_timeout: tool.default_timeout,
                     risk: tool.risk.clone(),
+                    category: tool.category,
                 },
                 None => {
                     let msg = format!("[ERROR] Unknown tool: {}", name);
@@ -372,7 +376,7 @@ impl ToolManager {
             cancel: cancel_flag.clone(),
             skill_effects: skill_effects.clone(),
         };
-        let in_workspace = is_path_in_workspace(&ctx);
+        let in_workspace = is_path_in_workspace(&ctx, &route.risk, route.category);
         match crate::safety::SafetyPolicy::evaluate(route.risk.clone(), in_workspace) {
             SafetyVerdict::Block(reason) => {
                 let msg = format!("[ERROR] {}", reason);
@@ -522,7 +526,26 @@ fn extract_files_affected(_tool_name: &str, args: &serde_json::Value) -> Vec<Str
 }
 
 /// Determine whether the tool call is operating within the current workspace.
-fn is_path_in_workspace(ctx: &crate::ToolCallCtx) -> bool {
+///
+/// `risk`/`category` only matter on the **fail-closed** path: a file-scoped
+/// destructive tool ([`ToolRisk::Destructive`] + [`ToolCategory::Write`], e.g.
+/// `delete`) that carries no `path` argument cannot prove its target is inside
+/// the workspace, so it is treated as outside and blocked by
+/// [`crate::safety::SafetyPolicy`] (P0-2). Without this, such a call fell
+/// through to the old unconditional `true` and short-circuited the block.
+///
+/// Exec/Net destructive tools (`exec`) declare no `path` at all by design
+/// (`command`/`argv`, workdir defaults to the workspace root); failing them
+/// closed here would block the tool at every permission level, so their
+/// containment stays with the permission layer (`classify_risk` already reports
+/// Exec/Net as [`crate::PermissionRisk::High`]). Tools that never touch the file
+/// system (`ask`, `task`, `skills`, …) are `ReadOnly`/`Write`/`Administrative`
+/// and keep the permissive default.
+fn is_path_in_workspace(
+    ctx: &crate::ToolCallCtx,
+    risk: &ToolRisk,
+    category: crate::permission::ToolCategory,
+) -> bool {
     if let Some(path) = ctx.args.get("path").and_then(|v| v.as_str()) {
         if path.is_empty() || path == "." {
             return true;
@@ -543,8 +566,11 @@ fn is_path_in_workspace(ctx: &crate::ToolCallCtx) -> bool {
         let path_norm = crate::permission::normalize_lexically(&abs_path);
         path_norm.starts_with(&ws_norm)
     } else {
-        // No path arg — assume workspace operation (e.g. task, skills, ask)
-        true
+        // No `path` arg — assume workspace operation for non-destructive tools
+        // (e.g. task, skills, ask). A **file-scoped** Destructive tool without a
+        // `path` fails closed (see doc comment above).
+        !(matches!(risk, ToolRisk::Destructive)
+            && matches!(category, crate::permission::ToolCategory::Write))
     }
 }
 
@@ -771,18 +797,27 @@ mod tests {
 #[cfg(test)]
 mod m13_tests {
     use super::*;
+    use crate::ToolRisk;
 
     fn ctx_with_path(path: &str) -> crate::ToolCallCtx {
+        ctx_with_args(serde_json::json!({ "path": path }))
+    }
+
+    fn ctx_with_args(args: serde_json::Value) -> crate::ToolCallCtx {
         crate::ToolCallCtx {
             id: "t".to_string(),
             name: "write_file".to_string(),
             action: String::new(),
-            args: serde_json::json!({ "path": path }),
+            args,
             tx_progress: None,
             timeout_secs: None,
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             skill_effects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    fn in_ws(ctx: &crate::ToolCallCtx, risk: ToolRisk) -> bool {
+        is_path_in_workspace(ctx, &risk, crate::permission::ToolCategory::Write)
     }
 
     #[test]
@@ -797,28 +832,180 @@ mod m13_tests {
         crate::set_workspace(ws.to_str().unwrap());
 
         // 工作区内：相对与绝对路径均通过。
-        assert!(is_path_in_workspace(&ctx_with_path("src/main.rs")));
-        assert!(is_path_in_workspace(&ctx_with_path(
-            ws.join("src/main.rs").to_str().unwrap()
-        )));
+        assert!(in_ws(&ctx_with_path("src/main.rs"), ToolRisk::Write));
+        assert!(in_ws(
+            &ctx_with_path(ws.join("src/main.rs").to_str().unwrap()),
+            ToolRisk::Write
+        ));
         // sibling 前缀（ws-proj-backup）不再被字符串前缀误判。
-        assert!(!is_path_in_workspace(&ctx_with_path(
-            tmp.path().join("ws-proj-backup/x").to_str().unwrap()
-        )));
+        assert!(!in_ws(
+            &ctx_with_path(tmp.path().join("ws-proj-backup/x").to_str().unwrap()),
+            ToolRisk::Write
+        ));
         // `..` 逃逸被词法归一化捕获。
-        assert!(!is_path_in_workspace(&ctx_with_path("../outside.txt")));
-        assert!(!is_path_in_workspace(&ctx_with_path("a/../../outside.txt")));
-        // 无 path 参数默认放行。
-        assert!(is_path_in_workspace(&crate::ToolCallCtx {
-            id: "t".to_string(),
-            name: "ask".to_string(),
-            action: String::new(),
-            args: serde_json::json!({}),
-            tx_progress: None,
-            timeout_secs: None,
-            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            skill_effects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        }));
+        assert!(!in_ws(&ctx_with_path("../outside.txt"), ToolRisk::Write));
+        assert!(!in_ws(&ctx_with_path("a/../../outside.txt"), ToolRisk::Write));
+        // 无 path 参数：非 Destructive 工具默认放行（ask/task/skills 不碰文件系统）。
+        assert!(is_path_in_workspace(
+            &crate::ToolCallCtx {
+                id: "t".to_string(),
+                name: "ask".to_string(),
+                ..ctx_with_args(serde_json::json!({}))
+            },
+            &ToolRisk::ReadOnly,
+            crate::permission::ToolCategory::Read,
+        ));
+
+        crate::set_workspace(&old_ws);
+    }
+
+    /// P0-2：文件型 Destructive 工具（`delete`：Destructive + Write）缺 `path`
+    /// 时必须 fail-closed，否则会短路 `SafetyPolicy` 的出工区阻断。
+    #[test]
+    fn destructive_tool_without_path_is_treated_as_outside_workspace() {
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws-proj");
+        std::fs::create_dir_all(&ws).unwrap();
+        let old_ws = crate::current_workspace();
+        crate::set_workspace(ws.to_str().unwrap());
+
+        let write_cat = crate::permission::ToolCategory::Write;
+        // `delete` 形态：Destructive + Write，却没有 path。
+        let no_path = ctx_with_args(serde_json::json!({}));
+        assert!(
+            !is_path_in_workspace(&no_path, &ToolRisk::Destructive, write_cat),
+            "文件型 Destructive 工具缺 path 必须判为工区外（fail-closed）"
+        );
+        // 同样的参数形状下，非 Destructive 工具不受影响（不误伤 ask/task/skills）。
+        assert!(is_path_in_workspace(&no_path, &ToolRisk::Write, write_cat));
+        assert!(is_path_in_workspace(
+            &no_path,
+            &ToolRisk::ReadOnly,
+            crate::permission::ToolCategory::Read
+        ));
+        assert!(is_path_in_workspace(
+            &no_path,
+            &ToolRisk::Administrative,
+            crate::permission::ToolCategory::Read
+        ));
+        // 端到端判定：SafetyPolicy 必须把它阻断。
+        assert!(matches!(
+            crate::safety::SafetyPolicy::evaluate(
+                ToolRisk::Destructive,
+                is_path_in_workspace(&no_path, &ToolRisk::Destructive, write_cat)
+            ),
+            SafetyVerdict::Block(_)
+        ));
+        // Destructive 工具带工区内 path 时仍放行（`delete` 的正常形态）。
+        assert!(is_path_in_workspace(
+            &ctx_with_path(ws.join("trash-me.txt").to_str().unwrap()),
+            &ToolRisk::Destructive,
+            write_cat
+        ));
+        // Destructive 工具带工区外 path 时阻断。
+        assert!(!is_path_in_workspace(
+            &ctx_with_path(tmp.path().join("outside.txt").to_str().unwrap()),
+            &ToolRisk::Destructive,
+            write_cat
+        ));
+        // Exec/Net 型 Destructive 工具（`exec`：无 path 参数是设计使然，workdir
+        // 缺省 = 工区根）保持放行——它们的围栏在权限层（classify_risk 已报 High）。
+        assert!(is_path_in_workspace(
+            &ctx_with_args(serde_json::json!({ "command": "rm -rf /tmp/x" })),
+            &ToolRisk::Destructive,
+            crate::permission::ToolCategory::Exec
+        ));
+
+        crate::set_workspace(&old_ws);
+    }
+}
+
+/// P0-2 e2e：Level 4（`needs_permission` 全自动批准）下，`SafetyPolicy` 是
+/// 文件型 Destructive 工具唯一的出工区闸门。缺 `path` 的 `delete` 形态必须
+/// 被它阻断（`prepare_req` 真实路径，不经 handler）。
+#[cfg(test)]
+mod safety_e2e_tests {
+    use super::*;
+
+    fn destructive_handler(key: &str) -> ToolHandler {
+        ToolHandler {
+            key: key.to_string(),
+            description: "test destructive handler",
+            input_schema: serde_json::json!({ "type": "object" }),
+            handler: |_ctx| crate::ToolResult::ok("ran"),
+            risk: ToolRisk::Destructive,
+            category: crate::permission::ToolCategory::Write,
+            default_timeout: std::time::Duration::from_secs(5),
+        }
+    }
+
+    #[test]
+    fn destructive_tool_without_path_is_blocked_by_safety_policy() {
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let old_ws = crate::current_workspace();
+        crate::set_workspace(ws.to_str().unwrap());
+
+        let mut mgr = ToolManager::new();
+        mgr.register(destructive_handler("delete"));
+
+        // Level 4 = 无权限检查（`needs_permission` 自动批准）；`prepare_req`
+        // 里的 `SafetyPolicy` 是唯一剩下的闸门。
+        let report = mgr
+            .prepare_req(
+                "c1".to_string(),
+                "delete",
+                "",
+                serde_json::json!({}),
+                None,
+                None,
+            )
+            .err()
+            .expect("file-scoped Destructive tool without path must be blocked");
+        assert!(
+            report.content.contains("outside workspace is blocked"),
+            "{}",
+            report.content
+        );
+
+        // 反向：Destructive 工具带工区内 `path` 时仍可 prepare。
+        assert!(
+            mgr.prepare_req(
+                "c2".to_string(),
+                "delete",
+                "",
+                serde_json::json!({ "path": ws.join("trash-me.txt").to_str().unwrap() }),
+                None,
+                None,
+            )
+            .is_ok(),
+            "in-workspace destructive target must stay allowed"
+        );
+
+        // 反向：Destructive 工具带工区外 `path` 时被阻断。
+        let report = mgr
+            .prepare_req(
+                "c3".to_string(),
+                "delete",
+                "",
+                serde_json::json!({ "path": tmp.path().join("outside.txt").to_str().unwrap() }),
+                None,
+                None,
+            )
+            .err()
+            .expect("outside-workspace destructive target must be blocked");
+        assert!(
+            report.content.contains("outside workspace is blocked"),
+            "{}",
+            report.content
+        );
 
         crate::set_workspace(&old_ws);
     }

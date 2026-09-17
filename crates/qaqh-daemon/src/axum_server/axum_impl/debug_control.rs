@@ -9,10 +9,58 @@ use rust_embed::RustEmbed;
 struct WebUi;
 
 pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        format!("ok epoch={} token_len={}", state.epoch, state.token.len()),
-    )
+    // P0-3：不再回显 `token_len`——长度本身就是对凭据的旁路信息，`/health`
+    // 免鉴权且不受回环守卫约束。
+    (StatusCode::OK, format!("ok epoch={}", state.epoch))
+}
+
+/// Debug 桥一次性兑换券（nonce）存储。
+///
+/// `/debug/__qaqh_bridge__.js` 只下发 nonce，不再把全权 token 交给页面脚本；
+/// 前端凭 nonce 调 [`handle_debug_token`]（`POST /debug/__qaqh_token__`）
+/// **一次性**换取 token，兑换即作废。券带 TTL，过期同样作废——即使 nonce 被
+/// 读到，也只在极短窗口内、且只能兑换一次。
+pub struct DebugNonceStore {
+    ttl: Duration,
+    inner: Mutex<HashMap<String, std::time::Instant>>,
+}
+
+impl Default for DebugNonceStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DebugNonceStore {
+    pub fn new() -> Self {
+        Self {
+            ttl: Duration::from_secs(60),
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 签发一张券（并顺手回收过期券，避免长驻 daemon 无界增长）。
+    fn issue(&self) -> String {
+        let nonce = random_hex();
+        let now = std::time::Instant::now();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, issued| now.duration_since(*issued) < self.ttl);
+        map.insert(nonce.clone(), now);
+        nonce
+    }
+
+    /// 兑换并作废。已兑换 / 不存在 / 过期一律 `false`（fail-closed）。
+    fn redeem(&self, nonce: &str) -> bool {
+        if nonce.is_empty() {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match map.remove(nonce) {
+            Some(issued) => now.duration_since(issued) < self.ttl,
+            None => false,
+        }
+    }
 }
 
 /// 只读活动快照（冻结事故 P0 观测项）：暴露 has_active_work 与逐会话
@@ -101,17 +149,95 @@ pub(crate) fn safe_join(root: &StdPath, url_path: &str) -> Option<PathBuf> {
 }
 
 pub(crate) async fn handle_debug_bridge(State(state): State<AppState>) -> Response {
-    let body = format!(
-        "window.__QAQH_DEBUG__={{\"token\":\"{}\",\"nonce\":\"{}\"}};\n",
-        state.token,
-        random_hex()
-    );
+    // P0-3：桥脚本只下发**一次性 nonce**，不再内联全权 token。
+    let nonce = state.debug_nonces.issue();
+    let body = format!("window.__QAQH_DEBUG__={{\"nonce\":\"{nonce}\"}};\n");
     (
         [
             (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
         body,
+    )
+        .into_response()
+}
+
+/// `Sec-Fetch-Site` 白名单：缺省（curl/原生壳等非浏览器客户端）放行；
+/// 浏览器发起的请求只允许 `same-origin`（本页自用）与 `none`（地址栏直接
+/// 导航）。跨站页面（DNS rebinding / 外站 `<script>` 之外的 fetch）会被拒。
+fn sec_fetch_site_allowed(headers: &HeaderMap) -> bool {
+    match headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+    {
+        None => true,
+        Some(site) => {
+            site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none")
+        }
+    }
+}
+
+/// `POST /debug/__qaqh_token__`：凭一次性 nonce 兑换全权 token。
+///
+/// 兑换即作废（见 [`DebugNonceStore::redeem`]）；响应 `no-store`，不得被缓存。
+/// 挂在 `/debug` 前缀下，因此回环 IP + Host 白名单 + CORP/nosniff 三层已覆盖；
+/// 这里再要求 `Sec-Fetch-Site` 同源，堵住 rebinding 页面的跨站兑换。
+pub(crate) async fn handle_debug_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !sec_fetch_site_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            br#"{"code":"cross_site","message":"debug token exchange is same-origin only"}"#
+                .as_slice(),
+        )
+            .into_response();
+    }
+    let params: serde_json::Value = if body.is_empty() {
+        serde_json::json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    br#"{"code":"invalid_body","message":"expected {\"nonce\":\"...\"}"}"#.as_slice(),
+                )
+                    .into_response();
+            }
+        }
+    };
+    let Some(nonce) = params.get("nonce").and_then(|value| value.as_str()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "application/json")],
+            br#"{"code":"invalid_envelope","message":"nonce is required"}"#.as_slice(),
+        )
+            .into_response();
+    };
+    if !state.debug_nonces.redeem(nonce) {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            br#"{"code":"invalid_nonce","message":"nonce is unknown, expired, or already redeemed"}"#
+                .as_slice(),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::json!({ "token": state.token }).to_string(),
     )
         .into_response()
 }
@@ -329,7 +455,7 @@ pub(crate) async fn host_guard(
 }
 
 /// `/debug` 响应加固：跨源 no-cors 子资源加载（`<script src=...>`）必须在浏览器侧被拒，
-/// 否则任意网页都能把桥脚本执行进自己的 realm 并读走 `window.__QAQH_DEBUG__.token`。
+/// 否则任意网页都能把桥脚本执行进自己的 realm 并读到 `window.__QAQH_DEBUG__`。
 /// 与 `host_guard` 互为补充：一个堵「跨源读取」，一个堵「rebinding 同源」。
 pub(crate) async fn debug_headers(
     req: axum::extract::Request,
@@ -382,4 +508,35 @@ pub(crate) async fn handle_stop_if_idle(
     state.hub.flush_timeline_persistence();
     let _ = state.shutdown.send(true);
     (StatusCode::OK, "").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-2-3：券一次性、未知/空券一律 fail-closed。
+    #[test]
+    fn debug_nonce_is_single_use() {
+        let store = DebugNonceStore::new();
+        let nonce = store.issue();
+        assert!(store.redeem(&nonce), "first redemption must succeed");
+        assert!(!store.redeem(&nonce), "second redemption must fail");
+        assert!(!store.redeem("deadbeef"), "unknown nonce must fail");
+        assert!(!store.redeem(""), "empty nonce must fail");
+    }
+
+    /// `Sec-Fetch-Site` 白名单：缺省/同源/直接导航放行，跨站拒绝。
+    #[test]
+    fn sec_fetch_site_allowlist() {
+        let mut headers = HeaderMap::new();
+        assert!(sec_fetch_site_allowed(&headers), "absent header = non-browser client");
+        for allowed in ["same-origin", "none", "SAME-ORIGIN"] {
+            headers.insert("sec-fetch-site", allowed.parse().unwrap());
+            assert!(sec_fetch_site_allowed(&headers), "{allowed} must pass");
+        }
+        for rejected in ["cross-site", "same-site"] {
+            headers.insert("sec-fetch-site", rejected.parse().unwrap());
+            assert!(!sec_fetch_site_allowed(&headers), "{rejected} must be rejected");
+        }
+    }
 }
