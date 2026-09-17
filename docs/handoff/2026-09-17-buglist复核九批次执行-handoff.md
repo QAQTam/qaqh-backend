@@ -217,3 +217,37 @@ cargo fmt -p <crate> -- --check
   编辑一律用 `edit_file`/`write_file`。与本仓 `qaqh-workspace` 的 `apply_patch` 是两码事。
 - `/tmp` 里还留着约 23MB 的 `qaqh-*` 测试夹具（几百个小目录），是 `cargo test` 每次跑都会生成的，
   非本轮特有，未清。
+
+---
+
+## 9. 接手后追加（2026-09-17 19:30，后续待办收尾）
+
+> 本节由接手 agent 追加；§0~§8 是上一轮的历史快照，未改动。
+
+- **`main = 3749df1`**（`fix(workspace,mcp,config,runtime): 后续待办 N-1~N-4/N-6/N-7 收尾 (#96)`），
+  工作区干净、本地无 worktree。
+- **§5.3 的 N-1/N-2/N-3/N-4/N-6/N-7 全部落盘**（PR #96）。⚠️ **本轮又是「无自动评审」**：
+  NPC 流水线连续两次 6.8s / 7.5s `error`，下载 runner 日志只见 git-clone 阶段跑完就直接清理容器
+  （**没有评审步骤输出、也没有与 diff 相关的报错**）——与 §4.3 记录的是同一种基础设施故障，
+  已按「评审只评论、不阻塞」的既有约定以本地验证合并，并在 PR #96 上留证。
+- 与清单原文的**三处修正**（都是「先复现再动手」的结果，细节见 checklist 的 N-2/N-4/N-7 条目）：
+  - **N-4① 是真问题**：`*** Add File: *** End Patch` 修前会返回 `Ok` 并**真的建出名为
+    `*** End Patch` 的文件**；已加四头守卫（Add/Delete/Update/Move to）+ 4 条回归锁。
+  - **N-4②③ 与 N-2②③ 实测不成立**（HEAD 上已是正确行为：空文件名本来就 `PARSE_ERROR`、
+    符号链接 workspace 的绝对路径能正常解析、`file_state` 已同步、多 Add File 覆盖已逐条上报），
+    因此只补回归锁、不动代码。
+  - **N-7 的 `wal.rs:609 io_other_error` 不再复现**（1.98.1 上首参是变量而非字面 `ErrorKind::Other`），
+    实际报的是 `wal.rs:1057/1070` 的 `assert_eq!(x, true)`。最终清掉 main 上 **23 条**既有 warning，
+    并把 `cargo fmt --all` 的既有漂移（`debug_control.rs` 等 7 个文件，仅换行）一并修掉
+    ⇒ **§7.4 的四条验证命令现在可以直接照抄**（`README.md` §5.4 已同步更新）。
+- **仍未闭合（需要机主决策，agent 不能自己拍）**：
+  1. 🔴 **N-5（P0 安全）**：`exec` 在 Level 4 仍可写工区外路径。两条路都要产品口径：
+     **(a) 权限层收口**（Level 4 不再无条件放行 Exec/Net，会新增审批弹窗，改变日常体感）；
+     **(b) 给 `exec` 加沙箱**（系统调用层拒绝工区外写入，改动面大）。
+  2. **§6 远端分支积压**：是否清理那 56 个分支（新增本轮的 `fix/bug-2026-09-17-followups`）。
+  3. B-1~B-5（需真实环境，见 §5.2）。
+- 顺手记两条操作教训：
+  - `rg -rn "<pat>" <path>` 里的 `-r` 是 **`--replace`**（不是递归），会把匹配替换成字面量 `n`
+    打出来——本会话因此一度照着假输出写错函数名。递归是 `rg` 的默认行为，直接 `rg -n "<pat>" <path>`。
+  - 新增/改动 clippy 相关代码后要**重跑** `-D warnings`：本会话第一轮全绿后，新加的测试里
+    `let mut cfg = Config::default(); cfg.x = …` 又触发了 `field_reassign_with_default`。
