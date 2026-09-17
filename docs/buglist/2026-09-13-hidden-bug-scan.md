@@ -1,8 +1,9 @@
 # 隐藏 Bug 扫描报告 — 2026-09-13
 
 > 静态审查（codegraph 索引 + 4 个产出子代理 + 人工复核），**未跑测试复现**。
-> 编号沿用 `BUG-YYYY-MM-DD-NN` 惯例。状态：⬜ 待修 / ✅ 已修。
-> 2026-09-15 状态回填：本页 `-01` ~ `-27` 已全部在当前 `main` 合入并带回归测试；
+> 编号沿用 `BUG-YYYY-MM-DD-NN` 惯例。状态：⬜ 待修 / ✅ 已修 / ⚠️ PARTIAL（部分修复，见 `-13`）。
+> 2026-09-15 状态回填：本页 `-01` ~ `-27` 已全部在当前 `main` 合入并带回归测试
+> （**2026-09-17 卫生复核更正：`-13` 实为 `PARTIAL`**——持久化/回放侧已修，gate 的 Done 组装仍漏，见该条详情）；
 > 详情中的“修法/验证（建议，未实跑）”保留为扫描时记录，不代表当前仍待办。
 > 复核中被推翻的子代理结论见文末附录 B，勿按其修复。
 > 上游 Codex 同问题修法对照见 `docs/report/2026-09-13-codex-parity-analysis.md`（相关条目内已标注 **Codex 参照**）。
@@ -23,7 +24,7 @@
 | BUG-2026-09-13-10 | P1 | ✅ fixed @fbb7f4d | timeline 实时流缺逐事件 owns_seed 复查（吊销后数据暴露窗口） |
 | BUG-2026-09-13-11 | P1 | ✅ fixed @4197db1 | secrets 固定 tmp 文件名，跨进程并发写丢 DPAPI 密钥 |
 | BUG-2026-09-13-12 | P1 | ✅ fixed @86264b7 | stateful 过滤死分支 → 空 messages 数组 400，回合 Fatal |
-| BUG-2026-09-13-13 | P1 | ✅ fixed @3775a9c | 中断流悬挂 ToolUse（input:Null / name:""）进历史回放 |
+| BUG-2026-09-13-13 | P1 | ⚠️ PARTIAL @3775a9c | 中断流悬挂 ToolUse（input:Null / name:""）：持久化/回放侧已修，gate 的 Done 组装仍漏 |
 | BUG-2026-09-13-14 | P2 | ✅ fixed @6ade448 | trust folder 精确匹配，信任目录新建子目录仍弹审批 |
 | BUG-2026-09-13-15 | P2 | ✅ fixed @6b37056 | from_u8 fail-open：非法档位静默升级 Unrestricted |
 | BUG-2026-09-13-16 | P2 | ✅ fixed @8024577 | 账本键路径形态不一致，copy_range 写绕过防漂移 |
@@ -92,6 +93,8 @@
 - **后果**：工具副作用已发生（outbox 已记录）但结果不回填 → store 留 open tool_use；不 `remove_last_step_if_incomplete`、不 flush、无 Cancelled seal → 下轮模型重发 tool_use，工具重复执行；串行路径还丢弃已收集的 skill_effects。
 - **对照**：同文件 `admit_and_dispatch` 的取消处理完整（L527-529 break + L738-748 统一收尾）。
 - **修法**：取消分支照常收割回填已完成的 call_id；或至少对齐 admit_and_dispatch 的 remove_last_step_if_incomplete + flush_meta 收尾。L158、L216、L312-314 统一。
+- **重复登记（2026-09-17 卫生复核）**：附录 D 的 `BUG-2026-09-13-31` 与本条**同源**（同一 `turn_lap/admit.rs`
+  取消路径、同一修法），是盲区复扫时的重复发现；引用时以本条（`-08`）为准。
 
 ### BUG-2026-09-13-09 ✅ fixed @90d7051 P1 lease 续期无超时
 - **位置**：`crates/qaqh-client/src/session.rs:191-201`（renew_once 的 `.send()` 无 `.timeout(..)`）
@@ -115,11 +118,22 @@
 - **机制**：stateful provider 且最后一条消息是 assistant 时 `start == len`、`out` 必空，回退分支守卫 `last.role != "assistant"` 恒假（死代码）→ 三协议发 `"messages": []`（chat_completions_api.rs:88、message_api.rs:751）→ 400 不可重试 → 回合 Fatal。
 - **修法**：`last.role == "assistant"` 时合成最小 user 续写消息（或显式报错）。
 
-### BUG-2026-09-13-13 ✅ fixed @3775a9c P1 悬挂 ToolUse 进历史
+### BUG-2026-09-13-13 ⚠️ PARTIAL @3775a9c P1 悬挂 ToolUse 进历史（gate 组装侧残留）
 - **位置**：`crates/qaqh-gate/src/chat_completions_api.rs:683-687`（`unwrap_or(Value::Null)` 直接入 blocks，无 name 过滤）、`message_api.rs:441-445`、`:697-701`（or_insert 造无名工具，L697 只兜 id 不兜 name）
 - **触发**：流中断（读错误/空闲超时）时 tool_acc/tool_states 非空走抢救路径；或 provider 漏发 content_block_start。
 - **后果**：`input: Null`（chat 无 anthropic 的 `null→{}` 兜底 L692-695）、`name: ""` → 下游执行必失败；进历史回放序列化 `arguments:"null"`，部分端点 400。responses 有防护（responses_api.rs:1106 `!call_id.is_empty() && !name.is_empty()`），属漏改。
 - **修法**：Done 组装统一过滤 `name.is_empty()`；`stream_interrupted && stop_reason.is_none()` 时丢弃解析失败的工具调用；chat 补 Null→{}。
+- **残留（2026-09-17 复核 → `PARTIAL` 的依据）**：`3775a9c` 只落在**持久化 / 回放侧**——
+  `qaqh-message/src/store.rs:791-798` 写侧清洗、`qaqh-runtime/src/ringing/projection.rs` 回放过滤、
+  `qaqh-types/src/message.rs:106-123` 的 `is_hanging_tool_use()` 判据（缺 id 或 name 即不可执行，
+  与 `responses_api.rs` 既有防护同源），并由 `qaqh-runtime/tests/hanging_tool_use_reload.rs` 锁定。
+  **gate 的 Done 组装路径未动**，残留两处：
+  1. `crates/qaqh-gate/src/chat_completions_api.rs:695-697`：`serde_json::from_str(&args_json).unwrap_or(Value::Null)`
+     直接入 `blocks`，**既无 `null→{}` 兜底、也无 `name.is_empty()` 过滤**；
+  2. `crates/qaqh-gate/src/message_api.rs:737-751`：有 `null→{}` 兜底（`:740-745`），但**同样不滤 name**
+     （`:746-750` 只兜空 id）。
+  判据真源已存在（`is_hanging_tool_use()`），残留只是这两处调用点未接线；`responses_api.rs:1120-1124`
+  是既有正确对照（守卫 `!call_id.is_empty() && !name.is_empty()` 在 `:1122`）。
 
 ### BUG-2026-09-13-14 ✅ fixed @6ade448 P2 trust folder 子树失效
 - **位置**：`crates/qaqh-workspace/src/permission.rs:461-470`
@@ -226,7 +240,7 @@
 | BUG-2026-09-13-28 | P1 | `qaqh-runtime/src/service/plan.rs:11` | `stats.token_usage.days` 直取 IPC 参数无上限：20 万条目起步，`u32::MAX` 直接 OOM/挂死 daemon 线程 | ✅ 已修 |
 | BUG-2026-09-13-29 | P2 | `qaqh-workspace/src/permission.rs:174` | `web_fetch.output` 是真实写目标却不进授权资源 → 审批清单看不到、workspace 边界与 trust folder 判定全部失明 | ✅ 已修 |
 | BUG-2026-09-13-30 | P2 | `qaqh-mcp/src/connection.rs:498` | `prompts/get` 无 `begin_call`/`timeout`/`handle_crash`：idle 回收可撕掉在飞连接、挂死 server 钉住锁、断连后 status 停在 Connected | ✅ 已修 |
-| BUG-2026-09-13-31 | P1 | `qaqh-runtime/src/agent/turn_lap/admit.rs:156,216` | 取消路径丢弃已执行工具结果且不做步收尾 → store 留 open tool_use，下轮模型重发同一工具（副作用重复） | ✅ 已修 |
+| BUG-2026-09-13-31 | P1 | `qaqh-runtime/src/agent/turn_lap/admit.rs:156,216` | 取消路径丢弃已执行工具结果且不做步收尾 → store 留 open tool_use，下轮模型重发同一工具（副作用重复） | ✅ 已修（与 `-08` 同源重复登记） |
 
 ### BUG-2026-09-13-28 ✅ P1 token_stats 窗口无界
 - **位置**：`crates/qaqh-runtime/src/service/plan.rs:11`（`let days = days.max(1)`），入口 `service.rs:551`（`pu64(params,"days") as u32`）
@@ -251,13 +265,17 @@
 - **修法**：签名加 `timeout: Duration` 并对齐两兄弟路径（`Timeout` / `ServerCrashed` 已在 `hint_for` 映射表中，无需扩表）。
 - **验证**：`get_prompt_holds_the_inflight_guard`（红：`observed inflight = 0`）+ `get_prompt_times_out_and_frees_the_service_lock`。
 
-### BUG-2026-09-13-31 ✅ P1 取消路径丢弃工具结果
+### BUG-2026-09-13-31 ✅ P1 取消路径丢弃工具结果（与 `-08` 重复登记）
 - **位置**：`crates/qaqh-runtime/src/agent/turn_lap/admit.rs:156-161`（并行批 `let _ = handle.join(); continue;`）、`:216-218`（串行 `return false`）
 - **触发**：权限挂起（YieldToUser）→ 用户批准 → deferred 批执行中取消（`handle_permission_resolved` → `execute_admitted_batch`）。
 - **机制**：工具线程副作用已发生（outbox 已记录），但结果不回填，且不做 `remove_last_step_if_incomplete` / `flush_meta` 收尾 → store 留 open tool_use；下一轮模型看到未回填的 tool_use 会重发同一调用 → **工具重复执行**（副作用不可逆时即数据损坏）。
 - **对照**：同文件 `admit_and_dispatch` 的取消路径有完整收尾（L729-745 调 `abort_running_turn`，内部即 `remove_last_step_if_incomplete` + `flush_meta`）。
 - **修法**：抽 `finish_cancelled_batch`，并行/串行两处取消分支调用，与 `abort_running_turn` 同款收尾。
 - **验证**：`incomplete_step_is_removed_so_no_open_tool_use_survives`（锁住收尾原语：取消后 store 不留 open tool_use）。
+- **编号注记（2026-09-17 卫生复核）**：本条与 `BUG-2026-09-13-08`（本页 `## 汇总` / `### BUG-2026-09-13-08 ✅ fixed @a920f90`）
+  是**同一缺陷的重复登记**——同位置（`turn_lap/admit.rs:156-161` / `:216-218`）、同机制、同修法。
+  `-08` 是 09-13 主清单的编号（修复提交 `a920f90`），本条是附录 D 盲区复扫时的重复发现。
+  **保留原号**（不重编号、不加前缀），以免打断既有引用（`docs/todo/`）；引用时以 `-08` 为准。
 
 ### 误报（逐条证据，跳过）
 
