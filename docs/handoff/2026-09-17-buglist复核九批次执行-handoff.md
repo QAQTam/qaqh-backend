@@ -130,12 +130,25 @@ NPC 自动评审流水线在 2026-09-17 17:05~18:10 左右**连续故障**（`#9
 | N-6 | `todo_contract` 测试不隔离，复用数据目录会假红 | `crates/qaqh-workspace/tests/todo_contract.rs` |
 | N-7 | README §5.4 的严格 clippy 在 main 上本就跑不过 | `crates/qaqh-config-api/src/lib.rs:316`、`crates/qaqh-message/src/wal.rs:609` |
 
-## 6. 远端分支积压（待决策）
+## 6. 远端分支积压（**2026-09-17 晚已清理**）
 
 远端 56 个分支里 38 个是 `fix/bug-2026-09-1*`（本轮 9 个 + 更早几轮积压）。
 **坑**：这些都是 **squash 合并**，所以 `git branch --merged main` / `merge-base --is-ancestor`
 **判定不出来**（分支 commit 不是 main 的祖先）；只能靠 CNB PR API 的 `is_merged: true` 确认内容已落盘。
-删除的代价是分支上的原始 commit 对象变为不可达（PR 里仍有完整 diff 与讨论）。**本轮未删，等决策。**
+删除的代价是分支上的原始 commit 对象变为不可达（PR 里仍有完整 diff 与讨论）。
+
+**执行结果（2026-09-17 晚，机主指示清理）**：
+
+- 逐分支核对了两条独立判据（① `git merge-base --is-ancestor origin/<b> main`；
+  ② `cnb pulls list-pulls --state all` 里该 head 的 `mergeable_state == merged`），
+  **55 个分支两条至少一条成立** ⇒ 一次 `git push origin --delete <55 refs>` 删除完毕。
+- **唯一未删**：`perf/bug-2026-09-13-28-block-checkpoint`——它的 PR **#77 是 closed 而非 merged**，
+  关闭留言写明「让位同 issue 的 #78」（预检发现 v1 的字节闸退化成每 token 一发，属功能回归；
+  v2 = #78 已合并）。**内容是被主动否决的实现**，删不删等机主拍板（当前保留）。
+- 删后：远端只剩 `main` + 上面那一个分支；`main` 未变；open PR 仍为 0（没有在跑的 PR 依赖被删分支）；
+  抽查 #87 等已删分支的 PR 记录与 diff 仍可读。
+- 本地还剩两个已合并分支（`fix/bug-2026-09-17-followups`、`docs/todo-sandbox-verified`），
+  它们的远端副本已随本轮删除；本地副本是**目前唯一**保存 pre-squash commit 对象的地方，故未动。
 
 ## 7. 继续推进的操作手册（照抄即可）
 
@@ -256,7 +269,8 @@ cargo fmt -p <crate> -- --check
   1. 🔴 **N-5（P0 安全）**：`exec` 在 Level 4 仍可写工区外路径。两条路都要产品口径：
      **(a) 权限层收口**（Level 4 不再无条件放行 Exec/Net，会新增审批弹窗，改变日常体感）；
      **(b) 给 `exec` 加沙箱**（系统调用层拒绝工区外写入，改动面大）。
-  2. **§6 远端分支积压**：是否清理那 56 个分支（新增本轮的 `fix/bug-2026-09-17-followups`）。
+  2. **§6 远端分支积压** —— ✅ **已按机主指示清理**（55 个已合并分支删除；只剩一个
+     closed-not-merged 的 `perf/bug-2026-09-13-28-block-checkpoint`，等机主拍板是否也删，见 §6）。
   3. B-1~B-5（需真实环境，见 §5.2）。
 - 顺手记两条操作教训：
   - `rg -rn "<pat>" <path>` 里的 `-r` 是 **`--replace`**（不是递归），会把匹配替换成字面量 `n`
