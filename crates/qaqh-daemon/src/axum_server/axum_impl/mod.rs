@@ -54,9 +54,10 @@ pub(crate) use auth::{
 pub(crate) use command::{handle_command, handle_command_status, handle_open, handle_renew};
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use debug_control::{
-    activity, debug_headers, handle_debug, handle_debug_bridge, handle_debug_index, handle_stop,
-    handle_stop_if_idle, health, host_guard, loopback_guard, not_found,
+    activity, debug_headers, handle_debug, handle_debug_bridge, handle_debug_index, handle_debug_token,
+    handle_stop, handle_stop_if_idle, health, host_guard, loopback_guard, not_found,
 };
+pub use debug_control::DebugNonceStore;
 pub(crate) use service_api::handle_service;
 pub(crate) use sse::{handle_events, handle_timeline_events};
 #[cfg(test)]
@@ -84,6 +85,9 @@ pub struct AppState {
     pub service: QaqhService,
     pub token: String,
     pub epoch: String,
+    /// Debug 桥一次性 nonce 存储（T-2-3）：桥脚本只下发 nonce，token 经
+    /// `POST /debug/__qaqh_token__` 一次性兑换。
+    pub debug_nonces: Arc<DebugNonceStore>,
     pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
@@ -154,6 +158,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/control/v1/stop", post(handle_stop))
         .route("/control/v1/stop-if-idle", post(handle_stop_if_idle))
         .route("/debug/__qaqh_bridge__.js", get(handle_debug_bridge))
+        .route("/debug/__qaqh_token__", post(handle_debug_token))
         .route("/debug", get(handle_debug_index))
         .route("/debug/", get(handle_debug_index))
         .route("/debug/{*path}", get(handle_debug))

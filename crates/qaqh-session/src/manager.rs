@@ -235,6 +235,15 @@ impl SessionManager {
         store::remove_from_index(&self.sessions_dir, seed);
         // 同步清理 workspace 账户（会话删除后不留悬空引用）。
         crate::grouping::WorkspaceStore::global().remove_session(seed);
+        // D-4：释放 per-seed 锁槽位与占用登记。两者都以 seed 为键、只在
+        // 创建/首次取锁时插入，删除路径若不回收，长驻 daemon 每删一个会话就
+        // 永久多留一条（无界增长；`release_seed_claim` 清的是另一个 map）。
+        // 此处已释放全部其它锁，再取 `session_locks` 不引入反向获取顺序。
+        self.session_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(seed);
+        self.release_seed_claim(seed);
 
         log::info!("SessionManager: deleted session {seed}");
         Ok(())
@@ -1480,6 +1489,72 @@ impl SessionManager {
                 format!("{}..", &s[..end])
             })
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod session_lock_gc_tests {
+    //! D-4 / 安全审查 P0-4：`session_locks` 必须在会话删除路径回收。
+
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    static TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn manager() -> (PathBuf, SessionManager) {
+        let root = std::env::temp_dir().join(format!(
+            "qaqh-session-lockgc-{}-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos(),
+        ));
+        let sessions_dir = root.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create test sessions");
+        let manager = SessionManager {
+            sessions_dir,
+            active_path: root.join(".active_session"),
+            session_locks: Mutex::new(HashMap::new()),
+            claimed_seeds: Mutex::new(std::collections::HashSet::new()),
+        };
+        // `delete()` 会经 `WorkspaceStore::global()` 摘除账户；该单例是进程级
+        // `OnceLock`，其它用例可能已初始化 → 重复初始化会 panic，忽略即可。
+        let _ = std::panic::catch_unwind(|| {
+            crate::grouping::WorkspaceStore::init(root.clone());
+        });
+        (root, manager)
+    }
+
+    fn lock_len(manager: &SessionManager) -> usize {
+        manager
+            .session_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    #[test]
+    fn session_locks_shrinks_after_delete() {
+        let (_root, manager) = manager();
+        let baseline = lock_len(&manager);
+
+        // 创建会话 → `persist_new_session_if_absent_with` 经 `session_lock`
+        // 插入一条；删除会话必须把它回收，而不是每删一个留一条。
+        assert!(manager.persist_new_session_if_absent_with("lock-gc-1", None, |_| true));
+        assert_eq!(
+            lock_len(&manager),
+            baseline + 1,
+            "创建会话应在 session_locks 里留下一条"
+        );
+
+        manager.delete("lock-gc-1").expect("delete session");
+        assert_eq!(
+            lock_len(&manager),
+            baseline,
+            "删除会话后 session_locks 必须回落到创建前水位"
+        );
     }
 }
 

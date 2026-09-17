@@ -142,6 +142,14 @@ impl WorkspaceStore {
             .expect("WorkspaceStore not initialized — call init() first")
     }
 
+    /// 非 panic 的可选访问（未初始化返回 `None`）。
+    ///
+    /// 供「初始化与否都不该中断」的读取路径使用（如远端 `fs.list` 的路径
+    /// 白名单：注册表尚未装配时跳过 workspace 根，而不是 panic）。
+    pub fn try_global() -> Option<&'static Self> {
+        INSTANCE.get()
+    }
+
     fn persist(&self, items: &[WorkspaceMeta]) -> Result<(), String> {
         let tmp = self.file.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(items)

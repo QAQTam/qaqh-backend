@@ -275,7 +275,7 @@ pub fn patch_target_paths(patch: &str) -> Vec<String> {
 
 /// Resolve symlinks/junctions in the nearest existing ancestor, then append
 /// any missing suffix. This keeps authorization checks correct for new files.
-pub(crate) fn resolve_target_path(path: PathBuf) -> PathBuf {
+pub fn resolve_target_path(path: PathBuf) -> PathBuf {
     let absolute = if path.is_absolute() {
         path
     } else {
@@ -314,7 +314,7 @@ pub(crate) fn resolve_target_path(path: PathBuf) -> PathBuf {
     resolved
 }
 
-pub(crate) fn normalize_lexically(path: &Path) -> PathBuf {
+pub fn normalize_lexically(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -372,7 +372,7 @@ fn trimmed_key(path: &Path) -> Option<Vec<u8>> {
 ///
 /// Fail-closed：任何一侧无法得到非空比较键（空/纯分隔符目录）时返回 `false`，
 /// 即「不算命中信任目录」，维持弹审批，而非放行。
-fn path_within_dir(path: &Path, dir: &Path) -> bool {
+pub fn path_within_dir(path: &Path, dir: &Path) -> bool {
     let Some(dir_key) = trimmed_key(dir) else {
         return false;
     };
@@ -421,13 +421,29 @@ pub enum PermissionDecision {
 /// Whether `path` points at the agent's own persistent state (history /
 /// credentials under the platform data dir). Blocked from normal `read`
 /// access even at Level 4 to prevent exfiltration of prior turns.
-fn is_sensitive_session_path(path: &Path) -> bool {
+///
+/// 也是远端 `fs.read`/`fs.list` 的单一事实源（T-2-1）：白名单放行的数据根下，
+/// 这些敏感路径必须单独拦掉。
+pub fn is_sensitive_session_path(path: &Path) -> bool {
     // Block the agent from reading its own persistent history / credentials.
     // These live under the platform data dir (e.g. ~/.config/qaqh/sessions/…/messages.jsonl,
     // meta.json, compact-context.json, token_stats.jsonl, secrets.toml) and are
     // outside any workspace. At Level 4 they'd otherwise auto-approve, allowing
     // the model to exfiltrate prior turns via a normal `read` tool call and then
     // replay that content into the gateway (messages.jsonl → gateway leak).
+    //
+    // 平台会话目录本身及其全部后代：字符串名单靠 `"/sessions/"` 判定会漏掉
+    // 目录本身（无尾分隔符），且数据根可被 `QAQH_DATA_DIR` 重定向到任意名字
+    // ——所以这里按平台权威路径做组件级包含判定（T-2-1 让 `fs.list` 拦下
+    // `sessions/` 目录本身）。
+    let sessions_dir = qaqh_types::platform::sessions_dir();
+    if sessions_dir.is_absolute() {
+        let candidate = normalize_lexically(&resolve_target_path(path.to_path_buf()));
+        let sessions_norm = normalize_lexically(&resolve_target_path(sessions_dir));
+        if path_within_dir(&candidate, &sessions_norm) {
+            return true;
+        }
+    }
     let s = path.to_string_lossy().to_ascii_lowercase();
     s.contains("messages.jsonl")
         || s.contains("meta.json")

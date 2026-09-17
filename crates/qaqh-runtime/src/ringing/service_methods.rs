@@ -102,9 +102,16 @@ pub fn lookup(method: &str) -> Option<MethodInfo> {
 
 /// 统一错误响应形状（daemon HTTP 层使用），按方法类别区分 code。
 pub fn error_response(kind: MethodKind, message: &str) -> Value {
-    let code = match kind {
-        MethodKind::Read => "query_failed",
-        MethodKind::Write => "action_failed",
+    // 白名单/边界拒绝（`fs.read`/`fs.list` 的 `FORBIDDEN:` 前缀）单独成码：
+    // 调用方必须能把「出白名单」与「查询本身失败（IO / 未知）」区分开
+    // （T-2-1 验收：拒绝返回 FORBIDDEN，而非伪装成 IO_ERROR）。
+    let code = if message.starts_with("FORBIDDEN") {
+        "forbidden"
+    } else {
+        match kind {
+            MethodKind::Read => "query_failed",
+            MethodKind::Write => "action_failed",
+        }
     };
     serde_json::json!({ "code": code, "message": message })
 }
@@ -202,5 +209,21 @@ mod tests {
             error_response(MethodKind::Write, "x")["code"],
             serde_json::json!("action_failed")
         );
+    }
+
+    /// T-2-1：白名单拒绝必须成 `forbidden` 码，而不是伪装成 `query_failed`
+    /// （与 IO 失败不可区分）。
+    #[test]
+    fn forbidden_prefix_maps_to_forbidden_code() {
+        for kind in [MethodKind::Read, MethodKind::Write] {
+            let value = error_response(kind, "FORBIDDEN: fs.read /etc/passwd: path is outside the allowed roots");
+            assert_eq!(value["code"], serde_json::json!("forbidden"));
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("FORBIDDEN")
+            );
+        }
     }
 }
