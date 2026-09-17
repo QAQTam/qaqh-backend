@@ -57,3 +57,5 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 以上命令在当前工作区全部通过。修复提交：`cef3faa`；当前状态为 `fixed @cef3faa`，待 PR 评审。
+
+补充（2026-09-18）：B-5 链路复核不通过——`ToolPermissionRequested` 不携带原始 `args`，而 `extract_target_paths("exec")` 只提取 `cwd`，TUI 权限弹窗因此看不到 `command/argv`。权限闸门本身已生效，但“用户能看清批准内容”的验收仍未完成。
