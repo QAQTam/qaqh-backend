@@ -18,7 +18,7 @@
 | 09-17 上午 | buglist 全量复核：20 份清单 91 条 → 54 条已修、5 条状态过期、2 条部分、29 条仍在生产、1 条描述与 HEAD 不符 | [`todo/2026-09-17-buglist复核-report.md`](./todo/2026-09-17-buglist复核-report.md) |
 | **09-17 16:41–19:41** | **九批次集中修复 + 后续待办收尾**（10 个提交，见 §2.1） | 下方 §2 |
 | 09-17 | 工具结果展示层契约 spec 补登（**草案待评审**） | [`spec/2026-09-17-工具结果展示层契约-spec.md`](./spec/2026-09-17-工具结果展示层契约-spec.md) |
-| **09-17 第二轮 fix** | **N-5 权限层收口**：Level 4 的 Exec/Net 统一审批；workspace 测试与严格 clippy 通过，待提交 | [`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md) |
+| **09-17 第二轮 fix** | **N-5 权限层收口**：Level 4 的 Exec/Net 统一审批；workspace 测试与严格 clippy 通过（`cef3faa`） | [`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md) |
 
 ## 2. 已归档（2026-09-17，方案 A）
 
@@ -124,14 +124,14 @@
 |---|---|
 | [2026-09-12-exec管道命令间歇性空输出-buglist.md](./buglist/2026-09-12-exec管道命令间歇性空输出-buglist.md) | 7 条待复测，需 Windows 11 + 安装版 daemon + `%TEMP%\qaqh-exec-probe\` 现场 |
 | [2026-09-14-timeline工具块内存放大-buglist.md](./buglist/2026-09-14-timeline工具块内存放大-buglist.md) | O-2：TUI 侧非 bash progress 归一/限长未验证（需 TUI 仓访问） |
-| [2026-09-16-安全并发与审查登记-buglist.md](./buglist/2026-09-16-安全并发与审查登记-buglist.md) | P2/P3 表剩余行；N-5 已转独立 buglist（工作区修复待提交）；Exec 审批面板的命令/目标可见性仍需实机验证（B-5） |
+| [2026-09-16-安全并发与审查登记-buglist.md](./buglist/2026-09-16-安全并发与审查登记-buglist.md) | P2/P3 表剩余行；N-5 已转独立 buglist（`fixed @cef3faa`）；Exec 审批面板的命令/目标可见性仍需实机验证（B-5） |
 
-### 5.2 第二轮修复待提交：N-5
+### 5.2 第二轮修复：N-5（`fixed @cef3faa`）
 
-> **`exec` 在 Level 4 可越出工作区**的原攻击面已按“权限层收口”完成工作区修复。
+> **`exec` 在 Level 4 可越出工作区**的原攻击面已按“权限层收口”完成修复。
 > 现在 Level 4 仅对 Read/Write 免审批；Exec/Net 统一进入审批，MCP 动态 Exec/Net 同规则，子代理沙箱继续拒绝。
 > 正式登记：[`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md)。
-> 当前状态为 `fixed（工作区，待提交）`；提交主线并通过评审后改为 `fixed @{commit}`。
+> 当前状态为 `fixed @cef3faa`；已提交修复分支，待 PR 评审。
 
 ### 5.3 其它未闭环
 
@@ -142,7 +142,7 @@
 ## 6. 归档校验记录
 
 1. **状态回写已完成**：`2026-09-16-apply_patch`、`2026-09-16-edit`、`2026-09-15-热重载`、`2026-09-17-子代理取消后复活` 四份 buglist 已分别回写 `1705449`(#87)、`61b39d0`(#89)、`b4851b0`(#92)、`629637d`(#88)；子代理清单中的 HEAD 不成立项按 `wontfix @33253a5` 关闭。
-2. **N-5 已建档并完成工作区修复**：见 §5.2 的 [`2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md)。当前状态为 `fixed（工作区，待提交）`，全量测试与严格 clippy 已通过。
+2. **N-5 已建档并完成修复**：见 §5.2 的 [`2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md)。当前状态为 `fixed @cef3faa`，全量测试与严格 clippy 已通过，待 PR 评审。
 
 ## 7. 归档方式（已执行）
 
