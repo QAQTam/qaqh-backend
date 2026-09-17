@@ -27,7 +27,7 @@ pub(crate) fn located(
     }
 }
 
-/// 锚点定位（insert_after / insert_before 的 anchor，以及纯插入的 context）。
+/// 锚点定位（纯插入的 context_before / context_after 各自定位）。
 /// 无 context 消歧可用——多处命中即 Ambiguous。
 pub(crate) fn locate_anchor(view: &FileView, anchor: &str) -> Result<Located, LocateError> {
     let pat = pattern_lines(anchor);
