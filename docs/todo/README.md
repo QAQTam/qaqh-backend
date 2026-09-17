@@ -51,19 +51,33 @@
 **二进制只用** `/home/qaqtamsy/Desktop/ws/codex`（其余路径下的是旧版实现）。
 **注意**：它依赖 `node` 在 PATH 中；在非登录 shell（如 git credential helper）里必须用绝对路径。
 
-### 4.1 ⚠️ CLI 子代理不是真子代理，默认没有隔离
+### 4.1 ⚠️ CLI 子代理不是真子代理，但沙箱是真的（已实测）
 
-我们走的是 CLI 伪子代理，**不是** codex 的原生子代理机制 ⇒ 它没有共享文件系统的隔离，
-多个 agent 会真的互相踩。必须由下发方自己兜住这五条：
+我们走的是 CLI 伪子代理，**不是** codex 的原生子代理机制。不过 `-s` 沙箱在**挂载层**生效，
+实测边界如下（2026-09-17 用 4 组探针验证；shell 与文件编辑工具同源受限）：
+
+| 目标路径 | `-s workspace-write -C <worktree>` | `-s read-only` |
+|---|---|---|
+| `-C` 指定的 worktree 内 | ✅ 可写 | ❌ Read-only file system |
+| `/tmp` | ✅ **可写（唯一共享区）** | ❌ |
+| 主 worktree / 兄弟 worktree | ❌ Read-only file system | ❌ |
+| `~`、其它仓库（如 `qaqh-tui-app`） | ❌ Read-only file system | ❌ |
+
+拒绝方式是 `EROFS`（挂载层只读）而非权限位 ⇒ 子代理无法 chmod 绕过。
+
+所以**兄弟 worktree 之间是真隔离**，按 worktree 切分即可放心并行。但必须自己兜住这几条：
 
 1. **一个 agent 锁一个 worktree**：`-C <worktree 绝对路径>`，**绝不允许两个 agent 跑同一个 worktree**。
-2. **显式指定沙箱**：`-s workspace-write`（只可写 `-C` 指定目录）或 `-s read-only`。
-   **永不用** `--dangerously-bypass-approvals-and-sandbox`。
-3. **prompt 里写死禁区**：不得碰主 worktree、其它 worktree、`.git/`、`~/.codex/`、
+2. **显式指定沙箱**：`-s workspace-write` 或 `-s read-only`。
+   **永不用** `--dangerously-bypass-approvals-and-sandbox`（那才是真无沙箱）。
+3. **`/tmp` 是唯一共享可写区 ⇒ 必须按 agent 命名空间**：`-o /tmp/<批次名>-report.md`，
+   prompt 里的临时文件也一律带批次前缀，否则并行 agent 会互相覆盖产出。
+4. **prompt 里写死禁区**：不得碰主 worktree、其它 worktree、`.git/`、`~/.codex/`、
    `~/.config/qaqh/`；`docs/buglist/` 只有批次 9 可动。
-4. **禁止子代理做远端写操作**：`git push`、`cnb pulls post-pull` / `merge-pull` /
+   （沙箱已挡住**写**，但**读**是开放的——要防的是子代理读了别人未完成的中间态而得出错误结论。）
+5. **禁止子代理做远端写操作**：`git push`、`cnb pulls post-pull` / `merge-pull` /
    `post-pull-review` 一律由主代理统一执行，避免并发写远端与重复建 PR。
-5. 并行上限 4（含主代理），超出排队。
+6. 并行上限 4（含主代理），超出排队。
 
 ### 4.2 命令模板
 
