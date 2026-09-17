@@ -162,3 +162,45 @@ Windows-only 路径在 Linux 上无法运行验证的，必须在 PR body 明确
 | `docs/plan/` | 设计/方案 |
 | `docs/spec/` | 规格化契约 |
 | **`docs/todo/`** | **report → 可执行 checklist，供 codex-cli 直接消费** |
+
+## 7. 本轮并行下发的实测补充（2026-09-17，批次 1~4 跑完）
+
+§4.1 的沙箱边界成立（兄弟 worktree 之间确实真隔离、`/tmp` 是唯一共享可写区），
+但下面四条是**下发时没写、踩到才知道**的，后续按此下发：
+
+1. **子代理在 worktree 里 `git add` / `git commit` 会直接 EROFS**。
+   worktree 的 `.git` 是一个指向主仓库 `.git/worktrees/<name>/` 的**文件**，
+   写 `index.lock` 落在主仓库 `.git/` 下 —— 在沙箱可写根之外。
+   ⇒ **提交、推送、建 PR、合并一律由主代理做**；prompt 里要显式禁止子代理
+   `git commit`（否则它会浪费轮次去试，batch1 的子代理就是这么卡住的）。
+2. **不要让子代理回写 checklist**。一个批次一个 worktree ⇒ 每个分支各改一份
+   `docs/todo/*-checklist.md`，合并时必然冲突。**勾选由主代理在 main 上统一回写**
+   （`[x] … → {squash commit}（PR #N）`），子代理只在 `/tmp/<批次>-report.md` 里给状态表。
+3. **并发上限按「子代理 3 + 主代理 1」用满**：3 个 `codex exec` 并行时 CPU 已吃满，
+   再叠加主代理的 cargo 会明显拖慢（本轮 `cargo test -p qaqh-workspace` 从 ~30s 涨到 ~2min）。
+   每个 worktree 自带 `target/`（12~26 GiB），**合并后立刻 `git worktree remove --force` 回收**，
+   否则 6 个 worktree 就能吃掉 ~70 GiB。
+4. **`git worktree remove` 需要 `--force`**（`target/` 是 ignored 但仍是未跟踪内容），
+   且本环境**不允许 `rm -rf`**——直接 `git worktree remove --force <path>` 即可连 `target/` 一起删。
+
+### 7.1 两条影响「怎么写工具文案」的事实（供后续批次复用）
+
+- **模型可见通道只有 `ToolResult::render_xml_envelope()`**：
+  `body = model.text`，而 `model.text` 来自 `error_with(code, message, ..)` 的 **`message`**
+  （即 `EngineError` 的 `Display`，上限 `TOOL_MODEL_MAX_CHARS`）。
+  **`ToolError.hint` 不进模型通道**（`project_for_model` 也不携带它），
+  它只在 ToolResult JSON 里、且被 `TOOL_SUMMARY_MAX_CHARS`(512) 截断。
+  ⇒ 任何「要让模型照做」的文案必须落进 `message`/`Display`，写在 hint 里等于没写
+  （PR #87 的评审阻断项即此）。
+- **`error.message` 字段本身也是 512 截断的**，只有 `model.text`（= 传入的 `message` 原串）
+  走大预算。别把长清单塞进 `error.message` 字段的字段级投影里。
+
+### 7.2 环境注意
+
+- 本会话里 Codex 自带的 `apply_patch` 工具在此环境**直接 abort**（连 `/tmp` 下的 ASCII 文件
+  都失败），编辑一律用 `edit_file` / `write_file`。与本仓 `qaqh-workspace` 的
+  `apply_patch` 工具（批次 3 修的那个）是两码事。
+- `cnb pulls merge-pull` **必须带 `--commit-title`**（否则 400 `commit_title is required`）；
+  `cnb pulls list-pull-comments` 的正确命令名是 `list-pull-comments`（`--repo` + `--number` 均必填）。
+- NPC 自动评审有时**只写 review 不写 comment**（`cnb pulls list-pull-reviews` 看得到），
+  有时整条流水线在 10s 内 `error`（基础设施抖动）——**空推一个 commit 即可重触发**。
