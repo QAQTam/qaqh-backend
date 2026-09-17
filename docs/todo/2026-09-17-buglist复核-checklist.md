@@ -11,7 +11,7 @@
 | 批次 | 主题 | 条目数 | 严重度 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | 1 | 子代理取消链 | 5 | P0/P1/P2 | 无 | ☑ 629637d (#88) |
-| 2 | 安全 P0（越权/边界/凭据/泄漏） | 4 | P0 | 无 | ☐ |
+| 2 | 安全 P0（越权/边界/凭据/泄漏） | 4 | P0 | 无 | ☑ 238331f (#93)，**T-2-2 部分（见 N-5）** |
 | 3 | `apply_patch` 契约 | 3 | P0/P1 | 无 | ☑ 1705449 (#87) |
 | 4 | `edit` 契约 | 3 | P0/P1 | 无 | ☑ 61b39d0 (#89) |
 | 5 | 计量与超限 | 2 | P1 | 无 | ☑ 006b2b3 (#90)，T-5-2 部分（见 N-1） |
@@ -71,28 +71,45 @@
 - 依赖：无
 - 涉及：`crates/qaqh-runtime/src/service/fs_git.rs`、`crates/qaqh-runtime/src/service.rs`、`crates/qaqh-workspace/src/manager.rs`、`crates/qaqh-workspace/src/safety.rs`、`crates/qaqh-daemon/src/axum_server.rs`、`crates/qaqh-daemon/src/axum_server/axum_impl/debug_control.rs`、`crates/qaqh-session/src/manager.rs`
 
-- [ ] **T-2-1 `fs.read`/`fs.list` 加路径白名单**（P0）
+- [x] **T-2-1 `fs.read`/`fs.list` 加路径白名单**（P0）→ 238331f（PR #93）
+  - 白名单 = 任一注册 UI workspace ∪ 任一会话 `meta.cwd` ∪ `platform::data_dir()`；
+    敏感路径恒拒（含 `sessions` 目录本身），拒绝返回 `FORBIDDEN`。
+  - ⚠️ 集成影响：`examples/remote_fs.rs` 默认参数是 `/`，现在会拿到 `FORBIDDEN`；
+    HTTP 层错误码从 `query_failed` 变为 `{"code":"forbidden"}`。
   - 位置：`crates/qaqh-runtime/src/service/fs_git.rs:10-64`、`:68-91`；入口 `crates/qaqh-runtime/src/service.rs:232-243`
   - 现状：两个函数只校验 `is_absolute()`，源码注释 `:8-9` 自述「临时跨端版本有意不做路径沙箱/权限校验」⇒ 持 token 者可读列任意绝对路径（E2）
   - 动作：两入口各加 `allowed_roots(workspace_root, data_dir)` 前缀校验（组件级比较，复用 `crates/qaqh-workspace/src/permission.rs:375` 的 `path_within_dir`）；拒绝返回 `FORBIDDEN` 而非 `IO_ERROR`；显式复用 `is_sensitive_session_path` 取代按 `meta.json` 子串过滤；删除 `:8-9` 的过时注释
   - 验收：新增集成测试 `fs_read_rejects_meta_json`、`fs_list_rejects_sessions_dir`，断言返回码非 IO；`cargo test -p qaqh-runtime` 全绿
   - 关联：D-1 / 安全审查 P0-1
 
-- [ ] **T-2-2 Destructive 工具缺 `path` 参数时 fail-closed**（P0）
+- [x] **T-2-2 Destructive 工具缺 `path` 参数时 fail-closed**（P0）→ 238331f（PR #93，**只做了文件型，P0 未闭合**）
+  - ⚠️ **清单原文自相矛盾**：`exec` 是 `Destructive` + `ToolCategory::Exec`，其 schema
+    **没有 `path` 参数**（只有 `command`/`argv`/`cwd`）⇒ 字面规则「所有 Destructive 缺 path ⇒ false」
+    会在**所有权限等级**阻断 `exec`。实测打红
+    `execution::plan_mode_blocks_destructive_but_not_reads` 与
+    `permission_lifecycle::llm_four_pending_bash_calls_defer_execution_until_all_resolved`。
+  - 实际落地：`is_path_in_workspace` 增加 `category` 参数——**文件型** Destructive
+    （`Destructive` + `Write`，即 `delete`）缺 `path` 才 fail-closed；Exec/Net 维持原判定。
+  - ❌ **仍未闭合**：「`exec` 在 Level 4 可写工区外路径」这半条**依然敞开**
+    （`is_path_in_workspace` 无法从 `command` 文本判定目标）⇒ 见 **N-5（P0）**。
   - 位置：`crates/qaqh-workspace/src/manager.rs:525-549`（`is_path_in_workspace`）、`crates/qaqh-workspace/src/safety.rs:14-24`
   - 现状：`is_path_in_workspace` 只读 `ctx.args["path"]`；`exec` 的参数名是 `command`，于是走 `:545-548` 的 `else` 分支**恒返回 `true`**。`exec` 在 `exec/register.rs:29` 声明为 `ToolRisk::Destructive`，而 `safety.rs:18-21` 只在 `(Destructive, false)` 时阻断 ⇒ 判定被短路，永远放行。Level 4（`permission.rs:489-491`）完全自动批准（E2）
   - 动作：`is_path_in_workspace` 的 `else` 分支按 risk 分级——`Destructive` 工具缺 `path` 时返回 `false`（fail-closed）；`Write`/`ReadOnly` 维持 `true` 以免误伤 `task`/`skills`/`ask`
   - 验收：新增单测 `destructive_tool_without_path_is_treated_as_outside_workspace`；e2e 覆盖 Level 4 下 `exec` 写工区外路径 → 期望被 `SafetyPolicy` 阻断
   - 关联：D-2 / 安全审查 P0-2
 
-- [ ] **T-2-3 停止泄露 token**（P0）
+- [x] **T-2-3 停止泄露 token**（P0）→ 238331f（PR #93）
+  - `/health` 不再报 `token_len`；debug 桥只下发 nonce，token 改由
+    `POST /debug/__qaqh_token__` 一次性兑换（TTL 60s + `Sec-Fetch-Site` 同源约束）。
+  - ⚠️ **破坏性契约变更**：仓外 webui/壳层若仍读 `window.__QAQH_DEBUG__.token`
+    会拿到 `undefined` → 全部 API 401，**必须迁移**；`AppState` 新增 `debug_nonces` 字段。
   - 位置：`crates/qaqh-daemon/src/axum_server.rs:14`、`crates/qaqh-daemon/src/axum_server/axum_impl/debug_control.rs:105-106`
   - 现状：`/health` 返回 `format!("ok epoch={} token_len={}", …)`；debug 桥把明文 `state.token` 注入 `window.__QAQH_DEBUG__`。回环 + Host 双检（`debug_control.rs:283`、`:306`）已在，但 nonce 一次性兑换 / `Sec-Fetch-Site` / 常量时间比较三项加固未做（E2）
   - 动作：`/health` 改为只报 `ok epoch={}`；桥脚本改为**只下发 nonce**，token 由客户端凭 nonce 走一次兑换接口换取、兑换后作废
   - 验收：单测断言 `/health` 响应体不含 `token` 子串；`/debug` 响应体不含真实 token 字面量
   - 关联：D-3 / 安全审查 P0-3
 
-- [ ] **T-2-4 `session_locks` 在删除路径释放**（P0）
+- [x] **T-2-4 `session_locks` 在删除路径释放**（P0）→ 238331f（PR #93，摘除动作在所有其它锁释放之后执行，无反向获取）
   - 位置：`crates/qaqh-session/src/manager.rs:1380-1385`（insert）、`:223-241`（`delete()`）
   - 现状：`delete()` 只做 `invalidate_watermark` / `remove_dir_all` / `remove_from_index` / `remove_session`，**不碰 `session_locks`**；`:1237` 的 `release_seed_claim` 清的是另一个 map（`claimed_seeds`）⇒ 每删一个会话永久多留一条（E2）
   - 动作：`delete()` 末尾加 `self.session_locks.lock()?.remove(seed);`，并同步 `WorkspaceStore::remove_session` 侧；注意与 `session_lock()` 的持锁顺序，避免反向获取
@@ -319,6 +336,17 @@
 ## 后续待办（执行批次过程中新发现，非阻塞，尚未派发）
 
 > 这些不在原复核范围内，是子代理执行/评审时暴露出来的。**未派发**，待机主决定优先级。
+
+- [ ] 🔴 **N-5（P0，安全，来自 T-2-2 的未闭合半条）`exec` 在 Level 4 可写工区外路径**
+  - 现状：`is_path_in_workspace` 只能从 `ctx.args["path"]` 判定目标，而 `exec` 的 schema 里
+    **没有 `path`**（只有 `command`/`argv`/`cwd`）⇒ 无法从 `command` 文本判定写入目标；
+    Level 4 完全自动批准 ⇒ **`exec` 仍可写工区外路径**（安全审查 P0-2 的原始攻击面）。
+  - 为什么没在批次 2 顺手修：`exec` 也是 `ToolRisk::Destructive`，字面 fail-closed 会
+    在所有权限等级阻断它（实测打红两条既有测试）；真正的收口有两条路，**都需要机主定产品口径**：
+    - (a) 权限层收口：`needs_permission`/`authorize_call` 里 Level 4 **不再无条件放行**
+      Exec/Net（会新增审批弹窗，改变日常使用体感）；
+    - (b) 给 `exec` 加沙箱（工作区外的写入在系统调用层被拒，改动面更大）。
+  - 关联：安全审查 P0-2 / D-2 / PR #93 描述
 
 - [ ] **N-1（来自 T-5-2 的未完成半条）profile schema 增 `context_window` 字段**
   - 位置：`crates/qaqh-types/src/config.rs`、`crates/qaqh-config/src/config.rs`
