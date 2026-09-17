@@ -150,6 +150,18 @@ NPC 自动评审流水线在 2026-09-17 17:05~18:10 左右**连续故障**（`#9
 - 本地还剩两个已合并分支（`fix/bug-2026-09-17-followups`、`docs/todo-sandbox-verified`），
   它们的远端副本已随本轮删除；本地副本是**目前唯一**保存 pre-squash commit 对象的地方，故未动。
 
+**收尾（2026-09-17 晚，机主确认「删了，只剩 main」）**：
+
+- 远端最后那一个 `perf/bug-2026-09-13-28-block-checkpoint` 也已删除。
+- 本地 `fix/bug-2026-09-17-followups`、`docs/todo-sandbox-verified` 一并删除。
+- **现在本地与远端都只剩 `main`**（`refs/heads/main` + `refs/remotes/origin/{HEAD,main}`），
+  无 tag、无 stash、无额外 worktree。
+- 被删掉、现已不可达的 SHA（留档备查；内容仍在各自 PR 的 diff/讨论里，
+  且本地 reflog 默认 90 天内可用 `git branch <名> <sha>` 找回）：
+  - `perf/bug-2026-09-13-28-block-checkpoint` → `d544e8fab22d4b8a32c1060f6187a5d3f704f3a9`（PR #77，closed）
+  - `fix/bug-2026-09-17-followups` → `6cb9e907b8b7d066d6bc956c68286947aed240fc`（PR #96，merged，main 上是 squash 后的 `3749df1`）
+  - `docs/todo-sandbox-verified` → `926e3f086d92fb4f9d6a6efd7a191225082e34dd`（PR #85，merged）
+
 ## 7. 继续推进的操作手册（照抄即可）
 
 ### 7.1 worktree 与沙箱
@@ -269,8 +281,8 @@ cargo fmt -p <crate> -- --check
   1. 🔴 **N-5（P0 安全）**：`exec` 在 Level 4 仍可写工区外路径。两条路都要产品口径：
      **(a) 权限层收口**（Level 4 不再无条件放行 Exec/Net，会新增审批弹窗，改变日常体感）；
      **(b) 给 `exec` 加沙箱**（系统调用层拒绝工区外写入，改动面大）。
-  2. **§6 远端分支积压** —— ✅ **已按机主指示清理**（55 个已合并分支删除；只剩一个
-     closed-not-merged 的 `perf/bug-2026-09-13-28-block-checkpoint`，等机主拍板是否也删，见 §6）。
+  2. **§6 远端分支积压** —— ✅ **已清理干净**（56 个非 main 分支全部删除，本地两个遗留分支同步删除；
+     现在本地与远端都只剩 `main`，见 §6 的收尾小节与留档 SHA）。
   3. B-1~B-5（需真实环境，见 §5.2）。
 - 顺手记两条操作教训：
   - `rg -rn "<pat>" <path>` 里的 `-r` 是 **`--replace`**（不是递归），会把匹配替换成字面量 `n`
