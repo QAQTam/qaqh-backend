@@ -10,6 +10,7 @@
 //! | `list_servers_shows_connection_state` | 未连接 disconnected → 连接后 connected + 计数 |
 //! | `list_resources_unknown_server_maps_not_found` | `MCP_NOT_FOUND`（附名单） |
 //! | `list_resources_before_connect_shows_placeholder` | 未连接 → 占位行（指引 lazy connect） |
+//! | `list_resources_connected_but_empty_is_not_reported_as_unconnected` | 已连接但清单为空 ≠ 未连接（T-6-2） |
 //! | `list_resources_after_connect_lists_cache_and_templates` | 缓存清单 + URI 模板段 |
 //! | `read_resource_text_passthrough` | 文本直通（mime 头） |
 //! | `read_resource_blob_placeholder` | `[blob mime=... size=3 uri=...]` |
@@ -45,8 +46,14 @@ use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RequestContext, Servi
 use serde_json::json;
 
 // ── mock：echo 工具 + greeting/logo 资源 + item/{id} 模板 ──
+//
+// `empty_resources = true`（server 名 "empty"）：声明 resources 能力但
+// `resources/list` 与 `resources/templates/list` 都返回空清单——T-6-2 的
+// 「已连接但为空」靶（与「未连接」的 None 必须走不同文案）。
 
-struct ResourceServer;
+struct ResourceServer {
+    empty_resources: bool,
+}
 
 impl ServerHandler for ResourceServer {
     fn get_info(&self) -> ServerInfo {
@@ -84,6 +91,9 @@ impl ServerHandler for ResourceServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, rmcp::ErrorData> {
+        if self.empty_resources {
+            return Ok(ListResourcesResult::with_all_items(vec![]));
+        }
         Ok(ListResourcesResult::with_all_items(vec![
             Resource::new("fixture://greeting", "greeting")
                 .with_mime_type("text/plain")
@@ -100,6 +110,9 @@ impl ServerHandler for ResourceServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
+        if self.empty_resources {
+            return Ok(ListResourceTemplatesResult::with_all_items(vec![]));
+        }
         Ok(ListResourceTemplatesResult::with_all_items(vec![
             ResourceTemplate::new("fixture://item/{id}", "item")
                 .with_mime_type("text/plain")
@@ -193,16 +206,19 @@ impl ServerHandler for ResourceServer {
 fn mock_factory() -> ConnectFactory {
     Arc::new(move |name, _cfg| {
         let name = name.to_owned();
+        // server 名 "empty"：已连接但资源清单为空（T-6-2 靶）。
+        let empty_resources = name == "empty";
         Box::pin(async move {
             let (client_half, server_half) = tokio::io::duplex(64 * 1024);
             let (c_read, c_write) = tokio::io::split(client_half);
             let (s_read, s_write) = tokio::io::split(server_half);
             let server_task = tokio::spawn(async move {
-                let service = ResourceServer.serve((s_read, s_write)).await.map_err(
-                    |e| -> Box<dyn std::error::Error + Send + Sync> {
+                let service = ResourceServer { empty_resources }
+                    .serve((s_read, s_write))
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                         format!("mock server init failed: {e}").into()
-                    },
-                )?;
+                    })?;
                 service.waiting().await.map_err(
                     |e| -> Box<dyn std::error::Error + Send + Sync> {
                         format!("mock server wait failed: {e}").into()
@@ -400,6 +416,27 @@ async fn list_resources_before_connect_shows_placeholder() {
     let text = result.model_text();
     assert!(text.contains("## mock (stdio)"), "got: {text}");
     assert!(text.contains("no resource list available"), "got: {text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_resources_connected_but_empty_is_not_reported_as_unconnected() {
+    // T-6-2 / BUG-2026-09-15-08：`Some(vec![])`（已连接、无资源）与 `None`
+    // （未连接）是两种状态，文案必须分开（旧代码 `filter(|r| !r.is_empty())`
+    // 把前者折叠进「not connected yet」分支）。
+    let manager = make_manager_named(Some("empty"));
+    connect_and_wait(&manager, "empty").await;
+    let result = aggregate(&manager, json!({ "action": "list_resources" }));
+    assert!(result.is_success(), "{}", result.model_text());
+    let text = result.model_text();
+    assert!(text.contains("## empty (stdio)"), "got: {text}");
+    assert!(
+        !text.contains("not connected"),
+        "已连接且资源清单为空不得报未连接: {text}"
+    );
+    assert!(
+        text.contains("connected — server lists no resources"),
+        "got: {text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
