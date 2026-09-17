@@ -226,10 +226,22 @@ cargo fmt -p <crate> -- --check
 
 - **`main = 3749df1`**（`fix(workspace,mcp,config,runtime): 后续待办 N-1~N-4/N-6/N-7 收尾 (#96)`），
   工作区干净、本地无 worktree。
-- **§5.3 的 N-1/N-2/N-3/N-4/N-6/N-7 全部落盘**（PR #96）。⚠️ **本轮又是「无自动评审」**：
-  NPC 流水线连续两次 6.8s / 7.5s `error`，下载 runner 日志只见 git-clone 阶段跑完就直接清理容器
-  （**没有评审步骤输出、也没有与 diff 相关的报错**）——与 §4.3 记录的是同一种基础设施故障，
-  已按「评审只评论、不阻塞」的既有约定以本地验证合并，并在 PR #96 上留证。
+- **§5.3 的 N-1/N-2/N-3/N-4/N-6/N-7 全部落盘**（PR #96）。⚠️ **本轮又是「无自动评审」**，
+  根因已查明 = **组织级 CPU 配额不足**（不是评审链路、不是 NPC 角色/召唤写错）：
+
+  ```
+  $ cnb build get-build-stage --repo QAQ-Harness/qaqh-backend --sn cnb-028-1k2nih8fo \
+        --pipelineId cnb-028-1k2nih8fo-001 --stageId prepare
+  Pipeline prepare error: Root Group's events CPU core-hours are insufficient for pre-freezing
+    (Freezing time:5.00 min,equivalent to 0.67 core-hours). Contact the root group administrator to extend.
+  根组织的云原生构建-CPU配额已不够预冻结(冻结时间：5.00 min，折合0.67核时)，请联系根组织管理员提升配额。
+  ```
+
+  阶段表显示 **`Prepare` error、`npc go` skipped**（NPC 从未启动）；`main.push` 的
+  `build-npc-image`（与角色无关）也是同一条报错。正向对照：`cnb-n2h-1k2nb4trh`（09:28:47Z）
+  抢到 runner，`npc go` 成功 572s，PR #92 随后收到 NPC 评审评论 ⇒ 链路可用，
+  **能否跑到取决于当时配额余量**。按既有约定以本地验证合并，证据留在 PR #96 评论。
+  （处置：根组织管理员提额 / 等配额周期刷新；补评审可用 `api_trigger_wm` 事件。）
 - 与清单原文的**三处修正**（都是「先复现再动手」的结果，细节见 checklist 的 N-2/N-4/N-7 条目）：
   - **N-4① 是真问题**：`*** Add File: *** End Patch` 修前会返回 `Ok` 并**真的建出名为
     `*** End Patch` 的文件**；已加四头守卫（Add/Delete/Update/Move to）+ 4 条回归锁。
