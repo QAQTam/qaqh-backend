@@ -101,7 +101,7 @@ pub struct Config {
     pub compliance_allowlist: Vec<String>,
     /// Agent permission level:
     /// 1 = MaxLockdown, 2 = ReadFree, 3 = WorkspaceFree,
-    /// 4 = Unrestricted (Read/Write auto, Exec/Net require confirmation).
+    /// 4 = Unrestricted (explicit dangerous bypass; all ordinary tools auto).
     pub permission_level: u8,
     /// Path to a HuggingFace tokenizer.json. `None` = use heuristic fallback.
     pub tokenizer_path: Option<String>,
@@ -600,7 +600,7 @@ impl Default for Config {
             compliance_enabled: true,
             compliance_extra_keywords: Vec::new(),
             compliance_allowlist: Vec::new(),
-            permission_level: 4, // Unrestricted — backward compat
+            permission_level: 3, // WorkspaceFree — safe autonomous default
             tokenizer_path: None,
             auto_compact_threshold: 0.75,
             session_idle_unload_secs: 0,

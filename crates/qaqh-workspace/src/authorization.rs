@@ -260,14 +260,15 @@ pub fn admit(
     // 供审计展示。
     //
     // T-8-1（安全审查 P1-1 / O-4）收紧：**Exec/Net 类别不再无条件放行**——
-    // 落到下面的 needs_permission 决策（所有档位 → AskUser；子代理沙箱随后拒绝）。
-    // 只读类（Read，如 `mcp` resources 聚合）保留 D5 快路径，避免误伤。
-    // Level 4（Unrestricted）仍只对 Read/Write 免审批，Exec/Net 必须确认。
+    // Level 1/2/3 落到下面的 needs_permission 决策并进入审批；Level 4 是
+    // 显式 bypass，继续走 D5 快路径。只读类（Read，如 `mcp` resources 聚合）
+    // 在任何档位都保留 D5 快路径，避免误伤。
     //
     // 子代理沙箱优先于 D5：S3 要求 MCP 工具在子代理上下文一律拒绝
     // （防越狱）——原“沙箱零代码”依赖 needs_permission→AskUser 路径，
     // 而 D5 快路径绕过 needs_permission，故在此显式拦截（仅针对 mcp__ 前缀，
     // 不影响内置工具的沙箱语义）。
+    let level = crate::permission::PermissionLevel::from_u8(permission_level);
     if invocation
         .tool_name
         .starts_with(crate::manager::MCP_DYNAMIC_PREFIX)
@@ -281,7 +282,7 @@ pub fn admit(
         let d5_bypass = !matches!(
             invocation.category,
             crate::permission::ToolCategory::Exec | crate::permission::ToolCategory::Net
-        );
+        ) || level == crate::permission::PermissionLevel::Unrestricted;
         if d5_bypass {
             let mut resources =
                 crate::permission::extract_target_paths(&invocation.tool_name, &invocation.args);
@@ -296,7 +297,6 @@ pub fn admit(
     }
 
     let workspace_root = crate::permission::resolve_target_path(workspace_root.to_path_buf());
-    let level = crate::permission::PermissionLevel::from_u8(permission_level);
     match crate::permission::needs_permission(
         level,
         &invocation.tool_name,
@@ -606,16 +606,16 @@ mod tests {
     }
 
     #[test]
-    fn mcp_exec_net_require_approval_at_all_levels() {
+    fn mcp_exec_net_require_approval_until_unrestricted() {
         // T-8-1（安全审查 P1-1 / O-4）：D5 不再对 Exec/Net 类别无条件放行。
-        // N-5：Level 4 也必须审批，避免动态 MCP Exec/Net 绕过内置工具的同档策略。
+        // Level 1/2/3 必须审批；Level 4 是显式 bypass，继续走 D5 快路径。
         // 全局 AtomicBool 需串行（与 sandbox_guard 同锁）。
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         set_subagent_sandbox(false);
         let ws = std::env::temp_dir().join("qaqh-mcp-d5");
-        for level in [1u8, 2, 3, 4] {
+        for level in [1u8, 2, 3] {
             let admission = admit(
                 ToolInvocation {
                     session_id: "seed-d5".into(),
@@ -634,6 +634,23 @@ mod tests {
                 "level {level} Exec MCP call must require approval, got non-approval"
             );
         }
+        let admission = admit(
+            ToolInvocation {
+                session_id: "seed-d5".into(),
+                call_id: "call-d5-4".into(),
+                tool_name: "mcp__demo__echo".into(),
+                action: String::new(),
+                args: serde_json::json!({}),
+                category: crate::permission::ToolCategory::Exec,
+            },
+            4,
+            &ws,
+            &HashSet::new(),
+        );
+        assert!(
+            matches!(admission, Admission::Authorized(_)),
+            "level 4 explicit bypass must authorize MCP Exec calls"
+        );
     }
 
     #[test]
