@@ -216,8 +216,28 @@ Windows-only 路径在 Linux 上无法运行验证的，必须在 PR body 明确
   `cnb pulls list-pull-comments` 的正确命令名是 `list-pull-comments`（`--repo` + `--number` 均必填）。
 - NPC 自动评审有时**只写 review 不写 comment**（`cnb pulls list-pull-reviews` 看得到），
   有时整条流水线在 6~10s 内 `error`（基础设施抖动）——**空推一个 commit 即可重触发**。
-- ⚠️ **2026-09-17 傍晚实测：评审服务连续故障约 1 小时**（#90~#95 六个 PR 全部 6~10s `error`，
+- ⚠️ **2026-09-17 傍晚实测：评审流水线连续故障约 1 小时**（#90~#95 六个 PR 全部 6~10s `error`，
   其中包含一个**纯文档 PR**，可判定与 diff 无关；空推重触发也无效）。
   当时按「评审只评论、不阻塞」的既有约定**以本地验证合并**，并在每个 PR 上留言说明原因。
-  下次遇到同类情况：先看是否连纯文档 PR 也失败 → 是则等一段时间或直接按本地验证合并，
-  **不要为了等评审无限期挂住**；合并后把「本轮无自动评审」写进 PR 评论与 checklist 的勾选注记。
+  **2026-09-17 晚补查根因**（正确姿势，后续照抄）：`6~10s error` 一律先看**阶段表与 Prepare 日志**，
+  而不是只看 runner 日志——
+
+  ```bash
+  cnb build get-build-status --repo QAQ-Harness/qaqh-backend --sn <sn> -v
+  #   → 若 Prepare=error 且 npc go=skipped ⇒ NPC 从未启动，与角色/提示词/diff 都无关
+  cnb build get-build-stage  --repo QAQ-Harness/qaqh-backend --sn <sn> \
+      --pipelineId <sn>-001 --stageId prepare -v | tail -3
+  #   → "Root Group's events CPU core-hours are insufficient for pre-freezing …
+  #      根组织的云原生构建-CPU配额已不够预冻结 … 请联系根组织管理员提升配额"
+  ```
+
+  实测那次就是**组织级 CPU 配额不足**（连与角色无关的 `main.push` → `build-npc-image` 同挂），
+  而同一时段 `cnb-n2h-1k2nb4trh`（09:28:47Z）抢到 runner 后 `npc go` 成功跑满 572s、
+  PR #92 收到评审评论 ⇒ **链路本身可用，能否跑到取决于配额余量**。
+  处置：请根组织管理员提额或等配额刷新；**不要为了等评审无限期挂住**，
+  按本地验证合并并把「本轮无自动评审 + 根因」写进 PR 评论与 checklist 勾选注记。
+  补评审可用 `.cnb.yml` 的 `api_trigger_wm` 事件（程序化触发，带可信 scope）。
+- **召唤 NPC 角色时**：`.cnb/settings.yml` 的 `npc.roles[].name` 必须与召唤名一致
+  （`@QAQ-Harness/qaqh-backend(bug-fixer)` / `(reviewer)`；`.cnb.yml` 的
+  `npc:go` 用 `options.role: <name>`）。角色写错的表现是 **`npc go` 阶段自己报错**，
+  而不是 `Prepare` 阶段 error + `npc go` skipped——两者要分清。
