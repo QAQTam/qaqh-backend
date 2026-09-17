@@ -10,10 +10,10 @@
 
 | 批次 | 主题 | 条目数 | 严重度 | 依赖 | 状态 |
 |---|---|---|---|---|---|
-| 1 | 子代理取消链 | 5 | P0/P1/P2 | 无 | ☐ |
+| 1 | 子代理取消链 | 5 | P0/P1/P2 | 无 | ☑ 629637d (#88) |
 | 2 | 安全 P0（越权/边界/凭据/泄漏） | 4 | P0 | 无 | ☐ |
-| 3 | `apply_patch` 契约 | 3 | P0/P1 | 无 | ☐ |
-| 4 | `edit` 契约 | 3 | P0/P1 | 无 | ☐ |
+| 3 | `apply_patch` 契约 | 3 | P0/P1 | 无 | ☑ 1705449 (#87) |
+| 4 | `edit` 契约 | 3 | P0/P1 | 无 | 🔵 PR #89 待合并 |
 | 5 | 计量与超限 | 2 | P1 | 无 | ☐ |
 | 6 | 热重载与 MCP 文案 | 2 | P1/P2 | 无 | ☐ |
 | 7 | 零散修复 | 2 | P1 | 无 | ☐ |
@@ -29,35 +29,35 @@
 - 涉及：`crates/qaqh-runtime/src/registry.rs`、`crates/qaqh-subagent/src/lib.rs`、`crates/qaqh-runtime/src/agent/loop_injection.rs`、`crates/qaqh-runtime/src/agent/engine_input.rs`、`crates/qaqh-workspace/src/process_registry.rs`、`crates/qaqh-runtime/src/ringing/hub.rs`
 - 说明：这批是机主报告的「已取消的子代理怎么复活了」的完整根因链。清单自述 T-1-1 是 1 行、T-1-2 是 1 个守卫。
 
-- [ ] **T-1-1 子代理 spawn 时注册 liveness**（P0）
+- [x] **T-1-1 子代理 spawn 时注册 liveness**（P0）→ 629637d（PR #88）
   - 位置：`crates/qaqh-runtime/src/registry.rs:361-430`（`spawn_subagent_inprocess`）
   - 现状：全文无 `hub.mark_worker_live(seed)`；`hub` 在 `:386` 被 clone 后只交给 event reader 线程。对照 `:292`（`get_or_spawn`）与 `:715`（`respawn_dead_agents`）都有。⇒ 子 seed 不在 `live_workers`，bootstrap 的 orphan seal 会把它判为孤儿封禁（E2）
   - 动作：在 `:425` 插入 `self.instances` 之后补 `self.hub.mark_worker_live(seed);`
   - 验收：`rg -n 'mark_worker_live' crates/qaqh-runtime/src/registry.rs` → 出现 3 处（含 `spawn_subagent_inprocess`）；新增单测 `spawn_subagent_registers_liveness`；daemon 日志出现 `worker alive for {seed}` 而非 `sealing orphan active turn`
   - 关联：D-5 / BUG-2026-09-17-01
 
-- [ ] **T-1-2 取消后不再注入结果**（P0）
+- [x] **T-1-2 取消后不再注入结果**（P0）→ 629637d（PR #88）
   - 位置：`crates/qaqh-subagent/src/lib.rs:533-595`
   - 现状：`did_cancel` 只在 `:523` 决定 `state_tag` 文案；`:543-586` 的注入块无守卫，取消后仍把完整 `final_answer` 注入父会话。`registry_ref.finish()` 在注入**之后**（`:597`）（E2）
   - 动作：`:533` 条件改为 `if !parent_seed.is_empty() && !did_cancel`；若产品上要留痕，改为注入**不含 `final_answer`** 的状态行
   - 验收：新增单测 `cancelled_collector_does_not_inject`；cancel 路径日志不再出现 `inject accepted`
   - 关联：D-6 / BUG-2026-09-17-02
 
-- [ ] **T-1-3 系统注入区分「用户取消」与「回合取消」**（P1）
+- [x] **T-1-3 系统注入区分「用户取消」与「回合取消」**（P1）→ 629637d（PR #88，落点在 Loop 层 `loop_injection.rs`）
   - 位置：`crates/qaqh-runtime/src/agent/loop_injection.rs:196-220`、`crates/qaqh-runtime/src/agent/engine_input.rs:261-262`
   - 现状：`LoopPhase::Idle` 分支无条件 `handle_system_input` 开新回合；`engine_input.rs` 主动 `ctx.cancel.clear(); qaqh_workspace::clear_cancel();` ⇒ 任何系统注入都能复活已取消会话（E2）
   - 动作：引入取消原因位（`cancel_reason` / `user_cancelled`）；系统注入仅在**非用户取消**态清除标志并开回合
   - 验收：取消后父会话不再出现新的 `TurnStart`；单测覆盖「用户取消后系统注入被拒」
   - 关联：D-7 / BUG-2026-09-17-03
 
-- [ ] **T-1-4 父会话取消传播到子 seed**（P1）
+- [x] **T-1-4 父会话取消传播到子 seed**（P1）→ 629637d（PR #88，落点 `AgentRegistry::send_ringing`）
   - 位置：`crates/qaqh-runtime/src/registry.rs`（新增登记）、`crates/qaqh-runtime/src/agent/loop_dispatch_conversation.rs:95-124`（取消处理）
   - 现状：全仓 `rg -n 'children|descendants|child_seeds' crates/qaqh-runtime/src` 在 cancel 路径零命中；父会话没有「自身子 seed 集合」的登记能力（E2）
   - 动作：spawn 时登记 `parent_seed -> {child_seeds}`，`forget_seed` 时清理；cancel 处理遍历并逐个 `cancel` + `mark_worker_dead`
   - 验收：新增单测 `parent_cancel_propagates_to_children`；daemon 日志显示子 seed 收到取消
   - 关联：D-8 / BUG-2026-09-17-04
 
-- [ ] **T-1-5 状态单调性守卫 + 接入 `mark_worker_dead`**（P2）
+- [x] **T-1-5 状态单调性守卫 + 接入 `mark_worker_dead`**（P2）→ 629637d（PR #88）
   - 位置：`crates/qaqh-workspace/src/process_registry.rs:478-486`、`crates/qaqh-runtime/src/ringing/hub.rs:752`
   - 现状：`mark_exited` 无条件 `= ProcStatus::Exited(code)`，会把 `Killed` 覆盖回 `Exited`，违反同文件 `:463-465` 注释自称的单调性；`mark_worker_dead` 全仓**零生产调用点**（仅 `:3417` 一个测试调 `mark_worker_live`），`live_workers` 只靠 `forget_seed`（`:791-793`）清理（E2）
   - 动作：`mark_exited` 加守卫——仅当前状态为 `Running` 时才改写；把 `mark_worker_dead` 接到子代理退出路径（与 T-1-1 同一处改动）
@@ -106,21 +106,28 @@
 - 依赖：无
 - 涉及：`crates/qaqh-workspace/src/apply_patch.rs`、`crates/qaqh-workspace/src/apply_patch_engine/mod.rs`、`crates/qaqh-workspace/src/apply_patch_engine/seek_sequence.rs`
 
-- [ ] **T-3-1 `Add File` 对已存在路径加守卫**（P0）
+- [x] **T-3-1 `Add File` 对已存在路径加守卫**（P0）→ 1705449（PR #87；走清单备选路径——dry_run 报 `WOULD_OVERWRITE` + 真 apply 把旧内容记入 `FileDelta.old`，因拒绝覆盖会打红既有上游 fixture `011_add_overwrites_existing_file`）
   - 位置：`crates/qaqh-workspace/src/apply_patch_engine/mod.rs:185-186`（真 apply）、`:305-317`（dry-run）、`:188-193`（delta `old: None`）
   - 现状：`Hunk::AddFile` 直接 `write_file_with_missing_parent_retry`，无 exists 检查；dry-run 也只拒绝目录。⇒ `dry_run=true` 返回普通 `[DRY RUN] … ok`，真 apply 整文件覆盖且返回体不含 overwrite 字段（**静默数据丢失**）（E2）
   - 动作：`AddFile` 加 exists 守卫；`dry_run` 对已存在路径返回 `WOULD_OVERWRITE`；把旧内容读进 `FileDelta.old` 以便回滚
   - 验收：新增单测 `add_file_refuses_existing_path`；手动复现清单探针（对已存在 5 行文件发 `*** Add File:`）→ 期望拒绝或显式 `WOULD_OVERWRITE`
   - 关联：D-11② / BUG-2026-09-16-10
 
-- [ ] **T-3-2 失败 hint 改为陈述事实**（P1）
+- [x] **T-3-2 失败结果改为陈述事实**（P1）→ 1705449 + cdff8e3（PR #87）
+  - ⚠️ **复核纠正**：清单原写的「失败 hint 改为陈述事实」**不足以修好**——`ToolError.hint` 不进模型通道
+    （模型读 `ToolResult::render_xml_envelope()`，body = `model.text` = `error_with` 的 `message`，
+    即 `EngineError` 的 `Display`；`hint` 只在 ToolResult JSON 里，`project_for_model` 也不带它）。
+    原实现只改了展示面，模型看到的仍是「找不到上下文」，照旧重发整个 patch。
+  - 最终落法：清单写进 `EngineError::Partial` 的 `Display`（进 `model.text`，预算 `TOOL_MODEL_MAX_CHARS`），
+    `hint` 只留一句 <512 的行动指引；新增用例 `partial_failure_lists_survive_for_many_files`
+    锁住列表**尾部**不被 512 截断。详见 PR #87 的评审回复评论。
   - 位置：`crates/qaqh-workspace/src/apply_patch.rs:157`；对照 `apply_patch_engine/mod.rs:181`（`for hunk in &hunks`）+ `:273`（循环体内 `std::fs::write`）
   - 现状：hint 写「Re-send the FULL corrected patch — no partial application happened」，而引擎是逐 hunk 边算边写、非原子；同文件 `:7-9` 的模块文档自述的恰恰是「已写入的文件保留」，两处互相矛盾。模型按提示重发完整 patch 必然二次 `NO_MATCH`（E2）
   - 动作：hint 改为陈述事实（「已生效：a.txt；未生效：b.txt — 修正后**只重发失败部分**，或先 `git diff`/`read` 核对已生效文件」）
   - 验收：新增单测 `failed_hunk_hint_reports_partial_application`；手动复现清单 BUG-09 探针（1 号 hunk 合法、2 号上下文不存在）→ 期望文案列出已生效文件
   - 关联：D-11① / BUG-2026-09-16-09
 
-- [ ] **T-3-3 补「上下文充分性」警示**（P2）
+- [x] **T-3-3 补「上下文充分性」警示**（P2）→ 1705449（PR #87，只补文案；`seek_sequence` 仍取首个命中，与上游 `codex-rs/apply-patch` 一致）
   - 位置：`crates/qaqh-workspace/src/apply_patch_engine/seek_sequence.rs:39-43`；工具描述 `crates/qaqh-workspace/src/apply_patch.rs:188-197`
   - 现状：exact 循环直接 `return Some(i)`，无歧义拒绝（对比 `edit` 会报 `Ambiguous`）；工具描述与格式说明都**没有**「同一上下文多处出现时必须补足上下文或用 `@@` 锚定」这条警示 ⇒ 静默改第一处并返回 `[OK]`（E2）
   - 动作：在工具描述里补该警示（保持「取首个命中」的现有语义不变，只补文案）；若决定改为歧义拒绝，需单独评估与上游 `codex-rs/apply-patch` 的行为差异
