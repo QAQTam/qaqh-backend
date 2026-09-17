@@ -124,7 +124,7 @@
 |---|---|
 | [2026-09-12-exec管道命令间歇性空输出-buglist.md](./buglist/2026-09-12-exec管道命令间歇性空输出-buglist.md) | 7 条待复测，需 Windows 11 + 安装版 daemon + `%TEMP%\qaqh-exec-probe\` 现场 |
 | [2026-09-14-timeline工具块内存放大-buglist.md](./buglist/2026-09-14-timeline工具块内存放大-buglist.md) | O-2：TUI 侧非 bash progress 归一/限长未验证（需 TUI 仓访问） |
-| [2026-09-16-安全并发与审查登记-buglist.md](./buglist/2026-09-16-安全并发与审查登记-buglist.md) | P2/P3 表剩余行；N-5 已转独立 buglist（`fixed @cef3faa`）；Exec 审批面板的命令/目标可见性仍需实机验证（B-5） |
+| [2026-09-16-安全并发与审查登记-buglist.md](./buglist/2026-09-16-安全并发与审查登记-buglist.md) | P2/P3 表剩余行；N-5 已转独立 buglist（`fixed @cef3faa`）；B-5 链路复核不通过——审批弹窗不含 `exec` 的 `command/argv`，实机验证仍待修复 |
 
 ### 5.2 第二轮修复：N-5（`fixed @cef3faa`）
 
