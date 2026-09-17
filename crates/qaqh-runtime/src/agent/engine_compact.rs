@@ -430,8 +430,15 @@ fn build_navigation_anchors_for(seed: &str) -> String {
 }
 
 fn estimate_message_tokens(message: &qaqh_types::Message) -> usize {
-    let serialized = serde_json::to_string(message).unwrap_or_default();
-    qaqh_types::count_tokens(&serialized) as usize
+    use crate::agent::state::token_calibration::{image_token_charge, redact_image_payloads};
+
+    // Same accounting rule as the gate pre-flight: inline image bytes are
+    // charged a fixed per-image budget, not their base64 length
+    // (BUG-2026-09-16-05 / D-14).
+    let mut accounted = [message.clone()];
+    let images = redact_image_payloads(&mut accounted);
+    let serialized = serde_json::to_string(&accounted).unwrap_or_default();
+    (u64::from(qaqh_types::count_tokens(&serialized)) + image_token_charge(images)) as usize
 }
 
 // ═══════════════════════════════════════════════════════
@@ -707,6 +714,29 @@ mod tests {
         let message = qaqh_types::Message::user(&"上下文压缩".repeat(100));
 
         assert!(estimate_message_tokens(&message) > 300);
+    }
+
+    /// 回归（BUG-2026-09-16-05 / D-14 第二处盲点）：图片字节按固定预算计，
+    /// 不按 base64 长度线性增长。
+    #[test]
+    fn message_tokens_charge_images_a_fixed_budget() {
+        let mut small = qaqh_types::Message::user("see this");
+        small.content.push(qaqh_types::ContentBlock::image(
+            "image/png",
+            &"A".repeat(1_024),
+        ));
+        let mut huge = qaqh_types::Message::user("see this");
+        huge.content.push(qaqh_types::ContentBlock::image(
+            "image/png",
+            &"A".repeat(1_048_576),
+        ));
+
+        let small_tokens = estimate_message_tokens(&small);
+        let huge_tokens = estimate_message_tokens(&huge);
+        assert!(
+            huge_tokens <= small_tokens + 64,
+            "image bytes must not grow the estimate linearly: small={small_tokens} huge={huge_tokens}"
+        );
     }
 
     /// 回归（上游 `code=11128 "first message is not system prompt"`）：
