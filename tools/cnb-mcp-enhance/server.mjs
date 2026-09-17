@@ -84,12 +84,37 @@ async function api(path, { method = "GET", body } = {}) {
 }
 
 const enc = encodeURIComponent;
-const repoPath = (repo) => `/${repo || DEFAULT_REPO}`;
+
+// T-8-3③（安全审查 P2 表）：`repo` 直接拼进 REST 路径。未校验时
+// `args.repo = "evil"`（或含 `..`/`//` 的取值）可把请求导向非预期的 API
+// 路径（REST bypass）。白名单限定为 `owner/name` 形态的字符集，并拒绝
+// 空段 / `.` / `..` 段（含首尾 `/`）。
+const REPO_RE = /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/;
+const repoPath = (repo) => {
+  const r = repo || DEFAULT_REPO;
+  const valid = typeof r === "string"
+    && REPO_RE.test(r)
+    && r.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+  if (!valid) throw new Error(`invalid repo: ${JSON.stringify(repo)}`);
+  return `/${r}`;
+};
+
+// T-8-3④（安全审查 P2 表）：`cnb_issue_close` / `cnb_merge_queue` 曾把
+// `state_reason=completed` 硬编码，调用方无法表达「不修复关单」。改为显式
+// 参数（默认 completed，保持既有语义），并在入口校验取值。
+const STATE_REASONS = new Set(["completed", "not_planned"]);
+const stateReason = (v) => {
+  const r = v || "completed";
+  if (!STATE_REASONS.has(r)) {
+    throw new Error(`invalid state_reason: ${JSON.stringify(v)}`);
+  }
+  return r;
+};
 
 // ── build ──
 const getBuildStatus = (repo, sn) => api(`${repoPath(repo)}/-/build/status/${enc(sn)}`);
 const getBuildStage = (repo, sn, pipelineId, stageId) =>
-  api(`/${repo || DEFAULT_REPO}/-/build/logs/stage/${enc(sn)}/${enc(pipelineId)}/${enc(stageId)}`);
+  api(`${repoPath(repo)}/-/build/logs/stage/${enc(sn)}/${enc(pipelineId)}/${enc(stageId)}`);
 const getBuildLogs = (repo, query = {}) => {
   const q = new URLSearchParams(query).toString();
   return api(`${repoPath(repo)}/-/build/logs${q ? "?" + q : ""}`);
@@ -253,7 +278,7 @@ async function precheckVerdict(repo, prNumber) {
 /** 合并队列：逐个串行（前一合并会改变后续 PR 的 merge-base）。
  *  预检【可合并】→ squash merge → 解析标题 Closes #N → 关单（state+state_reason 双参数）。
  *  预检非【可合并】且未 ignore_verdict → 跳过不合并。 */
-async function mergeQueue(repo, prs, { ignore_verdict = false, close_issues = true, dry_run = false } = {}) {
+async function mergeQueue(repo, prs, { ignore_verdict = false, close_issues = true, dry_run = false, state_reason = "completed" } = {}) {
   const results = [];
   for (const n of prs) {
     const item = { pr: n };
@@ -296,7 +321,7 @@ async function mergeQueue(repo, prs, { ignore_verdict = false, close_issues = tr
           try {
             await api(`${repoPath(repo)}/-/issues/${inum}`, {
               method: "PATCH",
-              body: { state: "closed", state_reason: "completed" },
+              body: { state: "closed", state_reason },
             });
             item.closed_issues.push(inum);
           } catch (e) {
@@ -383,19 +408,24 @@ const TOOLS = [
   },
   {
     name: "cnb_issue_close",
-    description: "关单一步到位：state=closed + state_reason=completed（CNB 要求两个参数同时传才生效）",
+    description: "关单一步到位：state=closed + state_reason（CNB 要求两个参数同时传才生效）。state_reason 默认 completed，可用 not_planned 表示不修复。",
     inputSchema: {
       type: "object",
       properties: {
         repo: { type: "string" },
         number: { type: "number", description: "issue 编号" },
+        state_reason: {
+          type: "string",
+          enum: ["completed", "not_planned"],
+          description: "关单原因；默认 completed（已完成）。not_planned = 不修复/不处理。",
+        },
       },
       required: ["number"],
     },
   },
   {
     name: "cnb_merge_queue",
-    description: "批量 squash 合并队列：串行逐个 PR——预检结论【可合并】才放行 → squash merge → 解析标题 Closes #N 自动关单（双参数）。预检非【可合并】默认跳过。dry_run=true 只预演不合并。",
+    description: "批量 squash 合并队列：串行逐个 PR——预检结论【可合并】才放行 → squash merge → 解析标题 Closes #N 自动关单（双参数，state_reason 可选，默认 completed）。预检非【可合并】默认跳过。dry_run=true 只预演不合并。",
     inputSchema: {
       type: "object",
       properties: {
@@ -404,6 +434,11 @@ const TOOLS = [
         ignore_verdict: { type: "boolean", description: "忽略预检结论强制合并（默认 false）" },
         close_issues: { type: "boolean", description: "合并后自动关标题 Closes #N 的 issue（默认 true）" },
         dry_run: { type: "boolean", description: "只检查预检结论与预演，不真正合并" },
+        state_reason: {
+          type: "string",
+          enum: ["completed", "not_planned"],
+          description: "自动关单的 state_reason；默认 completed。",
+        },
       },
       required: ["prs"],
     },
@@ -432,10 +467,11 @@ async function callTool(name, args) {
     case "cnb_build_tail":
       return await buildTail(repo, args.sn, args.lines || 40);
     case "cnb_issue_close": {
-      // PATCH issue：state=closed + state_reason=completed（组合必须同时传）
+      // PATCH issue：state=closed + state_reason（组合必须同时传）。
+      // state_reason 由调用方显式给出，默认 completed（T-8-3④）。
       return await api(`${repoPath(repo)}/-/issues/${args.number}`, {
         method: "PATCH",
-        body: { state: "closed", state_reason: "completed" },
+        body: { state: "closed", state_reason: stateReason(args.state_reason) },
       });
     }
     case "cnb_merge_queue":
@@ -443,6 +479,7 @@ async function callTool(name, args) {
         ignore_verdict: args.ignore_verdict === true,
         close_issues: args.close_issues !== false,
         dry_run: args.dry_run === true,
+        state_reason: stateReason(args.state_reason),
       });
     default:
       throw new Error(`unknown tool: ${name}`);
