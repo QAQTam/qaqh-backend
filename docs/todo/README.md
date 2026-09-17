@@ -161,6 +161,7 @@ Windows-only 路径在 Linux 上无法运行验证的，必须在 PR body 明确
 | `docs/report/` | 证据与结论（长文，只读快照） |
 | `docs/plan/` | 设计/方案 |
 | `docs/spec/` | 规格化契约 |
+| `docs/handoff/` | 交接快照（本轮：`2026-09-17-buglist复核九批次执行-handoff.md`） |
 | **`docs/todo/`** | **report → 可执行 checklist，供 codex-cli 直接消费** |
 
 ## 7. 本轮并行下发的实测补充（2026-09-17，批次 1~4 跑完）
