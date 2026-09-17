@@ -1,7 +1,7 @@
 # docs — 索引与归档状态
 
-> **索引日期**：2026-09-17（UTC+8）
-> **最后复核**：2026-09-17（归档状态回写、N-5 权限层收口与全量验证后）
+> **索引日期**：2026-09-18（UTC+8）
+> **最后复核**：2026-09-18（N-5 权限收口与 B-5 审批动作摘要复核后）
 > **基线**：`main` @ `2b472f2`
 > **本文件用途**：`docs/` 的唯一索引入口——**已完成什么、什么还在跑、归档去哪找**。
 > 目录职责与命名约定见 [`todo/README.md`](./todo/README.md) §6；各目录另有 `以yyyy-mm-dd-标题-*.md作为命名` 说明文件。
@@ -18,7 +18,7 @@
 | 09-17 上午 | buglist 全量复核：20 份清单 91 条 → 54 条已修、5 条状态过期、2 条部分、29 条仍在生产、1 条描述与 HEAD 不符 | [`todo/2026-09-17-buglist复核-report.md`](./todo/2026-09-17-buglist复核-report.md) |
 | **09-17 16:41–19:41** | **九批次集中修复 + 后续待办收尾**（10 个提交，见 §2.1） | 下方 §2 |
 | 09-17 | 工具结果展示层契约 spec 补登（**草案待评审**） | [`spec/2026-09-17-工具结果展示层契约-spec.md`](./spec/2026-09-17-工具结果展示层契约-spec.md) |
-| **09-17 第二轮 fix** | **N-5 权限层收口**：Level 4 的 Exec/Net 统一审批；workspace 测试与严格 clippy 通过（`cef3faa`） | [`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md) |
+| **09-17 第二轮 fix** | **N-5 权限层收口**：Level 4 的 Exec/Net 统一审批；**B-5 动作摘要**：审批弹窗展示 `exec` 命令（后端 `cef3faa`/`eef1231`，TUI `4a795b3`） | [`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md) |
 
 ## 2. 已归档（2026-09-17，方案 A）
 
@@ -124,14 +124,15 @@
 |---|---|
 | [2026-09-12-exec管道命令间歇性空输出-buglist.md](./buglist/2026-09-12-exec管道命令间歇性空输出-buglist.md) | 7 条待复测，需 Windows 11 + 安装版 daemon + `%TEMP%\qaqh-exec-probe\` 现场 |
 | [2026-09-14-timeline工具块内存放大-buglist.md](./buglist/2026-09-14-timeline工具块内存放大-buglist.md) | O-2：TUI 侧非 bash progress 归一/限长未验证（需 TUI 仓访问） |
-| [2026-09-16-安全并发与审查登记-buglist.md](./buglist/2026-09-16-安全并发与审查登记-buglist.md) | P2/P3 表剩余行；N-5 已转独立 buglist（`fixed @cef3faa`）；B-5 链路复核不通过——审批弹窗不含 `exec` 的 `command/argv`，实机验证仍待修复 |
+| [2026-09-16-安全并发与审查登记-buglist.md](./buglist/2026-09-16-安全并发与审查登记-buglist.md) | P2/P3 表剩余行；N-5 已转独立 buglist（`fixed @cef3faa`）；B-5 已修（后端 `eef1231` + TUI `4a795b3`） |
 
-### 5.2 第二轮修复：N-5（`fixed @cef3faa`）
+### 5.2 第二轮修复：N-5 + B-5
 
 > **`exec` 在 Level 4 可越出工作区**的原攻击面已按“权限层收口”完成修复。
 > 现在 Level 4 仅对 Read/Write 免审批；Exec/Net 统一进入审批，MCP 动态 Exec/Net 同规则，子代理沙箱继续拒绝。
+> B-5 已补齐审批信息面：后端 `eef1231` 为 `exec` 生成有界 `action_summary`（含 `command`/`argv`/`args`/`shell`/`cwd`，排除 `env`），TUI `4a795b3` 在弹窗渲染“执行:”行。
 > 正式登记：[`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md)。
-> 当前状态为 `fixed @cef3faa`；已提交修复分支，待 PR 评审。
+> 当前状态为 `fixed @cef3faa` + B-5 `fixed @eef1231` / TUI @`4a795b3`；已提交修复分支，待 PR 评审。
 
 ### 5.3 其它未闭环
 

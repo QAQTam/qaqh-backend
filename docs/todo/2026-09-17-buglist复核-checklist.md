@@ -347,12 +347,14 @@
   - 缺什么：可跑基准的环境（本轮只确认结构性改动在位）
 - [ ] **B-4** `2026-09-16-安全并发与审查登记` 的 P2/P3 表剩余行
   - 缺什么：`ACTOR_WORKSPACE` 那条已被 `crates/qaqh-workspace/src/runtime.rs:167-176` 的 `ActorToolScope` 部分缓解，**需重判**；另两行清单行号已失效，需重定位
-- [ ] **B-5** D-2 的审批面板可见性（Level 3 弹窗里用户能否看到 `exec` 的目标路径）
-  - 缺什么：实机点击验证（本轮是从 `extract_target_paths` 对 `exec` 参数名的行为推断的）
-  - 2026-09-18 链路复核（**不通过**）：`ToolPermissionRequested` 事件不含原始 `args`；后端
-    `extract_target_paths("exec")` 只提取 `cwd`，不提取 `command`/`argv`；TUI `draw_permission`
-    只渲染 `tool_name/reason/paths/...`。因此审批弹窗最多显示工作目录，**看不到将要执行的命令/参数**。
-  - 实机运行仍受环境阻塞：TUI 仓 `[patch.crates-io]` 指向缺失的 `../ratatui/ratatui`，当前无法构建点击验证。
+- [x] **B-5** D-2 的审批面板可见性（Level 3 弹窗里用户能否看到 `exec` 的目标路径）→ 后端 `eef1231` + TUI `4a795b3`
+  - 2026-09-18 链路复核原结论：`ToolPermissionRequested` 不含原始 `args`，
+    `extract_target_paths("exec")` 只提取 `cwd`，TUI 弹窗看不到 `command`/`argv`。
+  - 修复：权限事件新增可选 `action_summary`；后端为 `exec` 生成有界摘要
+    （`command`/`argv`/`args`/`shell`/`cwd`，明确排除 `env`）；TUI 在审批面板新增“执行:”行。
+  - 验证：后端 `permission_lifecycle` e2e 断言 exec 事件必带摘要；TUI `TestBackend`
+    渲染回归 + 全量 209 测试通过（临时使用已发布 ratatui，未残留 `Cargo.toml`/`Cargo.lock` 改动）。
+  - 环境备注：本机真实 patched ratatui 构建仍缺 `../ratatui/ratatui`；这不影响本次代码链路验证。
 
 ---
 

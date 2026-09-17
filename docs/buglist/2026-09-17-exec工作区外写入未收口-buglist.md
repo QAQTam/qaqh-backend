@@ -58,4 +58,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 以上命令在当前工作区全部通过。修复提交：`cef3faa`；当前状态为 `fixed @cef3faa`，待 PR 评审。
 
-补充（2026-09-18）：B-5 链路复核不通过——`ToolPermissionRequested` 不携带原始 `args`，而 `extract_target_paths("exec")` 只提取 `cwd`，TUI 权限弹窗因此看不到 `command/argv`。权限闸门本身已生效，但“用户能看清批准内容”的验收仍未完成。
+补充（2026-09-18）：B-5 已修复。后端 `eef1231` 在 `ToolPermissionRequested` 增加可选 `action_summary`，并由 `PermissionChallenge::action_summary()` 为 `exec` 生成有界、无 `env` 的命令摘要；TUI `4a795b3` 在审批面板渲染“执行:”行。后端 e2e 断言该事件必带摘要，TUI 渲染回归与全量 209 测试通过（使用已发布 ratatui 临时验证，依赖文件无残留）。
