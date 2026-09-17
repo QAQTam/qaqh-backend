@@ -15,6 +15,61 @@ const CALIBRATED_MARGIN_PERCENT: u64 = 5;
 const MIN_COLD_START_MARGIN: u64 = 256;
 const MIN_CALIBRATED_MARGIN: u64 = 128;
 
+/// Conservative fixed per-image token charge used when accounting a request.
+///
+/// Provider-side image accounting is pixel based: a 1 MiB-class screenshot
+/// costs a few thousand tokens (Anthropic ≈ `w*h/750`, OpenAI high detail
+/// ≈ `85 + 170·tiles`), while the very same base64 payload counted as prose
+/// costs 250k-300k tokens under the character heuristic
+/// (BUG-2026-09-16-05 / D-14). Charging this fixed upper bound per image keeps
+/// the local estimate on the same order of magnitude as the endpoint without
+/// pretending to know the pixel dimensions.
+pub(crate) const IMAGE_TOKEN_BUDGET: u64 = 4_096;
+
+/// Placeholder that replaces an inline base64 payload before serialization.
+///
+/// It keeps the byte length (so the prepared-request key still distinguishes
+/// differently sized images) but never the bytes themselves.
+fn image_payload_placeholder(byte_len: usize) -> String {
+    format!("<inline image payload: {byte_len} bytes>")
+}
+
+/// Replace inline image payloads with [`image_payload_placeholder`] and return
+/// how many images were replaced.
+///
+/// Only the two structural positions that carry image bytes are rewritten —
+/// [`qaqh_types::ContentBlock::Image::data`] and
+/// [`qaqh_types::ToolResult::images`]`[].data`. Base64-looking text inside
+/// ordinary string content is deliberately left untouched.
+pub(crate) fn redact_image_payloads(messages: &mut [Message]) -> u64 {
+    let mut images = 0u64;
+    for message in messages.iter_mut() {
+        for block in message.content.iter_mut() {
+            match block {
+                qaqh_types::ContentBlock::Image { data, .. } => {
+                    let placeholder = image_payload_placeholder(data.len());
+                    *data = placeholder;
+                    images += 1;
+                }
+                qaqh_types::ContentBlock::ToolResult { result, .. } => {
+                    for image in result.images.iter_mut() {
+                        let placeholder = image_payload_placeholder(image.data.len());
+                        image.data = placeholder;
+                        images += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    images
+}
+
+/// Token charge for `images` redacted inline image payloads.
+pub(crate) fn image_token_charge(images: u64) -> u64 {
+    images.saturating_mul(IMAGE_TOKEN_BUDGET)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RequestTokenEstimate {
     pub raw_tokens: u64,
@@ -160,8 +215,14 @@ pub(crate) fn prepared_request_metrics(
 ) -> (u64, String) {
     use std::hash::{Hash, Hasher};
 
-    let serialized = serde_json::to_string(&(messages, tools)).unwrap_or_default();
-    let raw_tokens = u64::from(qaqh_types::count_tokens(&serialized)).max(1);
+    // Account a redacted copy: inline image bytes are billed by the endpoint
+    // per pixel, never per base64 character (BUG-2026-09-16-05 / D-14).
+    let mut accounted = messages.to_vec();
+    let images = redact_image_payloads(&mut accounted);
+    let serialized = serde_json::to_string(&(&accounted, tools)).unwrap_or_default();
+    let raw_tokens = u64::from(qaqh_types::count_tokens(&serialized))
+        .max(1)
+        .saturating_add(image_token_charge(images));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     serialized.hash(&mut hasher);
     (raw_tokens, format!("{:016x}", hasher.finish()))
@@ -291,5 +352,73 @@ mod tests {
         let (with_tools, with_key) = prepared_request_metrics(&messages, Some(&[tool]));
         assert!(with_tools > without_tools);
         assert_ne!(with_key, without_key);
+    }
+
+    fn image_message(bytes: usize) -> Message {
+        let mut message = Message::user("look at this");
+        message.content.push(qaqh_types::ContentBlock::image(
+            "image/png",
+            &"A".repeat(bytes),
+        ));
+        message
+    }
+
+    fn tool_image_message(bytes: usize) -> Message {
+        let result = qaqh_types::ToolResult::ok("done").with_image("image/png", "A".repeat(bytes));
+        Message::tool_result("call-1", result)
+    }
+
+    #[test]
+    fn image_payload_bytes_are_not_counted_as_prose() {
+        let small = image_message(1_024);
+        let huge = image_message(1_048_576);
+        let (small_tokens, _) = prepared_request_metrics(std::slice::from_ref(&small), None);
+        let (huge_tokens, _) = prepared_request_metrics(std::slice::from_ref(&huge), None);
+        assert!(
+            huge_tokens <= small_tokens + 64,
+            "image bytes must not grow the estimate linearly: small={small_tokens} huge={huge_tokens}"
+        );
+        // 1 MiB of inline base64 would be ~300k tokens as prose; the endpoint
+        // charges a few thousand.
+        assert!(
+            huge_tokens < 10_000,
+            "a 1 MiB screenshot must stay in the endpoint's order of magnitude: {huge_tokens}"
+        );
+    }
+
+    #[test]
+    fn tool_result_images_use_the_same_fixed_budget() {
+        let small = tool_image_message(1_024);
+        let huge = tool_image_message(1_048_576);
+        let (small_tokens, _) = prepared_request_metrics(std::slice::from_ref(&small), None);
+        let (huge_tokens, _) = prepared_request_metrics(std::slice::from_ref(&huge), None);
+        assert!(
+            huge_tokens <= small_tokens + 64,
+            "ToolResult.images[].data must be redacted too: small={small_tokens} huge={huge_tokens}"
+        );
+    }
+
+    #[test]
+    fn every_image_is_charged_the_fixed_budget() {
+        let one = image_message(4_096);
+        let twenty: Vec<Message> = (0..20).map(|_| image_message(4_096)).collect();
+        let (one_tokens, _) = prepared_request_metrics(std::slice::from_ref(&one), None);
+        let (twenty_tokens, _) = prepared_request_metrics(&twenty, None);
+        assert!(
+            twenty_tokens >= one_tokens + 19 * IMAGE_TOKEN_BUDGET,
+            "each image must be charged separately: one={one_tokens} twenty={twenty_tokens}"
+        );
+    }
+
+    #[test]
+    fn base64_looking_text_is_not_redacted() {
+        let small = Message::user(&"A".repeat(1_000));
+        let large = Message::user(&"A".repeat(100_000));
+        let (small_tokens, _) = prepared_request_metrics(&[small], None);
+        let (large_tokens, _) = prepared_request_metrics(&[large], None);
+        assert!(
+            large_tokens > small_tokens + 10_000,
+            "ordinary text must keep its linear cost: small={small_tokens} large={large_tokens}"
+        );
     }
 }
