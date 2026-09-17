@@ -18,9 +18,9 @@
 
 | ID | 状态 | 项 |
 |---|---|---|
-| BUG-2026-09-16-09 | `open`（**模型可见文案与事实相反**，优先级最高） | hunk 失败时返回的 `hint` 明确写「Re-send the FULL corrected patch — **no partial application happened**」，但引擎是**逐 hunk 边算边写**：hunk N 失败时 hunk 1..N-1 **已经落盘**（实测见下）。模型按这句提示重发「完整修正版」⇒ 已生效的 hunk 在磁盘上已不存在旧内容，重发必然二次 `NO_MATCH`（或误判为「文件被人改过」）。同文件的模块文档 `apply_patch.rs:7-9` 自述的恰恰是「任一 hunk 失败即停，**已写入的文件保留**」——**两处模型/开发者可见文字互相矛盾** |
-| BUG-2026-09-16-10 | `open`（**静默数据丢失**） | `*** Add File:` 对**已存在**的路径没有任何存在性守卫：`dry_run=true` 返回普通 `[DRY RUN] … ok`，真实 apply 直接整文件覆盖，结果只报 `[OK] apply_patch — applied: 1 file(s), +1 -0`，**不提「覆盖」二字**。上游 codex 同分支会先把旧内容读进 `overwritten_content` 交给 delta（`codex-rs/apply-patch/src/lib.rs:508-533`），本移植把该字段丢成 `FileDelta { old: None }` ⇒ 既无提示也无回滚素材 |
-| BUG-2026-09-16-11 | `open`（设计继承，但**文案未警示**） | 同一段上下文在文件里出现多次时，`seek_sequence` 取**首个**命中（`seek_sequence.rs:38-44`），**没有歧义拒绝**。实测两行完全相同的 `dup line`，patch 只写 `-dup line / +dup CHANGED`（不补上下文），被改的是**第一处**，返回 `[OK]`。对比 `edit` 对多候选命中会显式报 `Ambiguous`。工具描述（`apply_patch.rs:188`：`Content-matched hunks; use dry_run to preview.`）与格式说明都**没有**「同一上下文多处出现时必须补足上下文或用 `@@` 锚定」这条警示 |
+| BUG-2026-09-16-09 | `fixed @1705449`（**模型可见文案与事实相反**，优先级最高） | hunk 失败时返回的 `hint` 明确写「Re-send the FULL corrected patch — **no partial application happened**」，但引擎是**逐 hunk 边算边写**：hunk N 失败时 hunk 1..N-1 **已经落盘**（实测见下）。模型按这句提示重发「完整修正版」⇒ 已生效的 hunk 在磁盘上已不存在旧内容，重发必然二次 `NO_MATCH`（或误判为「文件被人改过」）。同文件的模块文档 `apply_patch.rs:7-9` 自述的恰恰是「任一 hunk 失败即停，**已写入的文件保留**」——**两处模型/开发者可见文字互相矛盾** |
+| BUG-2026-09-16-10 | `fixed @1705449`（**静默数据丢失**） | `*** Add File:` 对**已存在**的路径没有任何存在性守卫：`dry_run=true` 返回普通 `[DRY RUN] … ok`，真实 apply 直接整文件覆盖，结果只报 `[OK] apply_patch — applied: 1 file(s), +1 -0`，**不提「覆盖」二字**。上游 codex 同分支会先把旧内容读进 `overwritten_content` 交给 delta（`codex-rs/apply-patch/src/lib.rs:508-533`），本移植把该字段丢成 `FileDelta { old: None }` ⇒ 既无提示也无回滚素材 |
+| BUG-2026-09-16-11 | `fixed @1705449`（设计继承，但**文案未警示**） | 同一段上下文在文件里出现多次时，`seek_sequence` 取**首个**命中（`seek_sequence.rs:38-44`），**没有歧义拒绝**。实测两行完全相同的 `dup line`，patch 只写 `-dup line / +dup CHANGED`（不补上下文），被改的是**第一处**，返回 `[OK]`。对比 `edit` 对多候选命中会显式报 `Ambiguous`。工具描述（`apply_patch.rs:188`：`Content-matched hunks; use dry_run to preview.`）与格式说明都**没有**「同一上下文多处出现时必须补足上下文或用 `@@` 锚定」这条警示 |
 
 ### 非缺陷（同期确认为正面能力，写在这里免得后人误改）
 

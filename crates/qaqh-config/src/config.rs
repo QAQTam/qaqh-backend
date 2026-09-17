@@ -100,7 +100,8 @@ pub struct Config {
     /// Whitelisted patterns exempt from content filtering.
     pub compliance_allowlist: Vec<String>,
     /// Agent permission level:
-    /// 1 = MaxLockdown, 2 = ReadFree, 3 = WorkspaceFree, 4 = Unrestricted.
+    /// 1 = MaxLockdown, 2 = ReadFree, 3 = WorkspaceFree,
+    /// 4 = Unrestricted (Read/Write auto, Exec/Net require confirmation).
     pub permission_level: u8,
     /// Path to a HuggingFace tokenizer.json. `None` = use heuristic fallback.
     pub tokenizer_path: Option<String>,

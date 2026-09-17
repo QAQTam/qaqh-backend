@@ -195,7 +195,8 @@ pub struct ConfigPatch {
     pub theme: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notifications_enabled: Option<bool>,
-    /// 权限档位（1=MaxLockdown … 4=Unrestricted）。
+    /// 权限档位（1=MaxLockdown，2=ReadFree，3=WorkspaceFree，
+    /// 4=Unrestricted：Read/Write 免审批，Exec/Net 仍需审批）。
     ///
     /// BUG-2026-09-13-15：历史上该字段刻意缺席写模型，只有
     /// `config.set_permission_level` 单写口；但写口校验缺失时非法档位仍能从

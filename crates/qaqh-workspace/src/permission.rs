@@ -100,7 +100,7 @@ pub enum PermissionLevel {
     ReadFree = 2,
     /// Level 3: Workspace all auto-approve; cross-workspace writes require one-time folder trust.
     WorkspaceFree = 3,
-    /// Level 4: No permission checks (current default behavior).
+    /// Level 4: Read/Write auto-approve; Exec/Net require confirmation.
     Unrestricted = 4,
 }
 
@@ -161,7 +161,9 @@ impl PermissionLevel {
             Self::WorkspaceFree => {
                 "Auto-approve within workspace. Cross-workspace writes are trusted once per folder."
             }
-            Self::Unrestricted => "No permission checks. All tools execute immediately.",
+            Self::Unrestricted => {
+                "Reads and writes execute immediately. Execution and network tools require confirmation."
+            }
         }
     }
 }
@@ -480,37 +482,32 @@ pub fn needs_permission(
         return PermissionDecision::AutoApprove;
     }
 
+    // ask is itself the user-interaction boundary. Opening a permission
+    // dialog for it creates a recursive prompt and prevents the Ring from
+    // delivering the actual model question.
+    if tool_name == "ask" {
+        return PermissionDecision::AutoApprove;
+    }
+
     // Sensitive session files are never auto-approved, even at Level 4.
     // The paths are outside the workspace already, but Level 4 would otherwise
     // bypass the outside-workspace check. Treat them as High risk and force a
     // dialog so the user sees "read messages.jsonl" before it happens.
-    let early_paths = extract_target_paths(tool_name, args);
-    if early_paths.iter().any(|p| is_sensitive_session_path(p)) {
+    let paths = extract_target_paths(tool_name, args);
+    if paths.iter().any(|p| is_sensitive_session_path(p)) {
         let risk = PermissionRisk::High;
         return PermissionDecision::AskUser {
             reason: format!(
                 "Sensitive session file access requires confirmation: '{}'",
                 tool_name
             ),
-            paths: early_paths,
+            paths,
             category: ToolCategory::Read,
             risk,
             consequence:
                 "May expose prior conversation history or credentials to the model/gateway."
                     .to_string(),
         };
-    }
-
-    // Level 4: everything auto-approved
-    if level == PermissionLevel::Unrestricted {
-        return PermissionDecision::AutoApprove;
-    }
-
-    // ask is itself the user-interaction boundary. Opening a permission
-    // dialog for it creates a recursive prompt and prevents the Ring from
-    // delivering the actual model question.
-    if tool_name == "ask" {
-        return PermissionDecision::AutoApprove;
     }
 
     // `process` 按调用形态细分（per-action 授权颗粒度的扩展点）：
@@ -524,10 +521,28 @@ pub fn needs_permission(
         },
         _ => declared_category,
     };
-    let paths = extract_target_paths(tool_name, args);
     let workspace_root = resolve_target_path(workspace_root.to_path_buf());
     let risk = classify_risk(category, &paths, &workspace_root);
     let consequence = risk.consequence().to_string();
+
+    // Level 4: Read/Write stay frictionless. Exec/Net remain behind the
+    // approval boundary because they can escape the workspace through a
+    // shell, subprocess, network side effect, or dynamic MCP tool.
+    if level == PermissionLevel::Unrestricted {
+        if matches!(category, ToolCategory::Exec | ToolCategory::Net) {
+            return PermissionDecision::AskUser {
+                reason: format!(
+                    "Level 4: '{}' requires execution or network confirmation.",
+                    tool_name
+                ),
+                paths,
+                category,
+                risk,
+                consequence,
+            };
+        }
+        return PermissionDecision::AutoApprove;
+    }
 
     // Level 1: everything requires confirmation
     if level == PermissionLevel::MaxLockdown {
@@ -922,23 +937,51 @@ mod tests {
     }
 
     #[test]
-    fn workspace_free_still_requires_approval_for_exec_and_network() {
+    fn workspace_free_and_unrestricted_require_approval_for_exec_and_network() {
+        for level in [
+            PermissionLevel::WorkspaceFree,
+            PermissionLevel::Unrestricted,
+        ] {
+            for (tool, category) in [
+                ("exec", ToolCategory::Exec),
+                ("spawn_subagent", ToolCategory::Exec),
+                ("web_fetch", ToolCategory::Net),
+            ] {
+                let decision = needs_permission(
+                    level,
+                    tool,
+                    &serde_json::json!({}),
+                    Path::new("."),
+                    &HashSet::new(),
+                    category,
+                );
+                assert!(
+                    matches!(decision, PermissionDecision::AskUser { .. }),
+                    "level {} must ask before {tool}",
+                    level.to_u8()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unrestricted_keeps_reads_and_writes_frictionless() {
         for (tool, category) in [
-            ("exec", ToolCategory::Exec),
-            ("spawn_subagent", ToolCategory::Exec),
-            ("web_fetch", ToolCategory::Net),
+            ("read", ToolCategory::Read),
+            ("write", ToolCategory::Write),
+            ("edit", ToolCategory::Write),
         ] {
             let decision = needs_permission(
-                PermissionLevel::WorkspaceFree,
+                PermissionLevel::Unrestricted,
                 tool,
-                &serde_json::json!({}),
+                &serde_json::json!({"path": "src/lib.rs"}),
                 Path::new("."),
                 &HashSet::new(),
                 category,
             );
             assert!(
-                matches!(decision, PermissionDecision::AskUser { .. }),
-                "Level 3 must ask before {tool}"
+                matches!(decision, PermissionDecision::AutoApprove),
+                "Level 4 must keep {tool} auto-approved"
             );
         }
     }

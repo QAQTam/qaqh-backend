@@ -17,9 +17,9 @@
 
 | ID | 状态 | 项 |
 |---|---|---|
-| BUG-2026-09-16-06 | `open`（**静默丢内容**，优先级最高） | 行内片段 `old` 占所在行 ≥ ~85% 时被 Tier3 采纳，替换区间是**整个命中行**，`new` 把整行顶掉 ⇒ 该行未被 `old` 覆盖的前后缀**无提示删除**；返回仍是 `1/1 hunks applied … score 0.98` |
-| BUG-2026-09-16-07 | `open` | 行内片段 `old` 达不到 0.85 时判 `NO_MATCH`，诊断文案是「best score 0.32 is below threshold 0.85 — closest location is probably wrong; re-check 'old' against the file」——**而 `old` 逐字符存在于候选行里**（候选 diff 的 `-` 行就是 `old` 原文）。模型据此判定「自己记错了内容」，真因却是「片段 vs 整行」 |
-| BUG-2026-09-16-08 | `open` | 工具描述与 `hunks` schema 仍列 `insert_after` / `insert_before` / `replace_inline` 三个 kind，实现已在 `a92626d` 删除 ⇒ 任何按描述发起的调用恒 `PARSE_ERROR: unknown hunk kind '…' (expected replace / prepend_file / append_file)`。`edit/mod.rs:10-11` 的模块文档「能力面」清单、`transaction.rs:341` 的 `INVALID_REGEX → replace_inline` 提示映射、`tests.rs:565-579` 的 R19–R25 需求注释，同为残留 |
+| BUG-2026-09-16-06 | `fixed @61b39d0`（**静默丢内容**，优先级最高） | 行内片段 `old` 占所在行 ≥ ~85% 时被 Tier3 采纳，替换区间是**整个命中行**，`new` 把整行顶掉 ⇒ 该行未被 `old` 覆盖的前后缀**无提示删除**；返回仍是 `1/1 hunks applied … score 0.98` |
+| BUG-2026-09-16-07 | `fixed @61b39d0` | 行内片段 `old` 达不到 0.85 时判 `NO_MATCH`，诊断文案是「best score 0.32 is below threshold 0.85 — closest location is probably wrong; re-check 'old' against the file」——**而 `old` 逐字符存在于候选行里**（候选 diff 的 `-` 行就是 `old` 原文）。模型据此判定「自己记错了内容」，真因却是「片段 vs 整行」 |
+| BUG-2026-09-16-08 | `fixed @61b39d0` | 工具描述与 `hunks` schema 仍列 `insert_after` / `insert_before` / `replace_inline` 三个 kind，实现已在 `a92626d` 删除 ⇒ 任何按描述发起的调用恒 `PARSE_ERROR: unknown hunk kind '…' (expected replace / prepend_file / append_file)`。`edit/mod.rs:10-11` 的模块文档「能力面」清单、`transaction.rs:341` 的 `INVALID_REGEX → replace_inline` 提示映射、`tests.rs:565-579` 的 R19–R25 需求注释，同为残留 |
 
 ## 事实与证据
 

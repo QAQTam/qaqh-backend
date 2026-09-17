@@ -78,7 +78,8 @@ pub struct PersistentConfig {
     pub compliance_allowlist: Option<Vec<String>>,
 
     // ── Permission ──
-    /// Agent permission level: 1=MaxLockdown, 2=ReadFree, 3=WorkspaceFree, 4=Unrestricted.
+    /// Agent permission level: 1=MaxLockdown, 2=ReadFree, 3=WorkspaceFree,
+    /// 4=Unrestricted (Read/Write auto, Exec/Net require confirmation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_level: Option<u8>,
 
