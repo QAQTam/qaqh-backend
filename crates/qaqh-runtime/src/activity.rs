@@ -376,6 +376,7 @@ mod tests {
                 turn_id: "t2".into(),
                 round_num: 0,
                 tool_name: "exec".into(),
+                action_summary: Some(r#"command: "cargo test""#.into()),
                 reason: "r".into(),
                 paths: vec![],
                 category: qaqh_domain::PermissionCategory::Exec,

@@ -174,6 +174,12 @@ impl PermissionChallenge {
         &self.normalized_args
     }
 
+    /// Minimal action description that remote approval UIs can render without
+    /// receiving full normalized args (which may contain secrets in `env`).
+    pub fn action_summary(&self) -> Option<String> {
+        crate::permission::summarize_permission_action(&self.tool_name, &self.normalized_args)
+    }
+
     pub fn resources(&self) -> &[PathBuf] {
         &self.resources
     }

@@ -249,6 +249,70 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
     paths.into_iter().map(resolve_target_path).collect()
 }
 
+/// Build the bounded, user-facing operation summary for an approval dialog.
+///
+/// `exec` is the one built-in tool whose effect cannot be inferred from
+/// [`extract_target_paths`]: the command text may write outside `cwd`. Include
+/// the command/argv/args, shell and cwd for informed approval, but deliberately
+/// omit `env` and all other arbitrary tool args so the dialog cannot become a
+/// secret-dumping surface.
+pub fn summarize_permission_action(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    if tool_name != "exec" {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if let Some(command) = args
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("command: {}", json_display(command)));
+    }
+    for key in ["argv", "args"] {
+        if let Some(values) = args
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .filter(|values| !values.is_empty())
+        {
+            let rendered = values
+                .iter()
+                .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "\"?\"".into()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("{key}: [{rendered}]"));
+        }
+    }
+    for key in ["shell", "cwd"] {
+        if let Some(value) = args
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(format!("{key}: {}", json_display(value)));
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+    Some(bounded_action_summary(parts.join(" · ")))
+}
+
+fn json_display(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"?\"".to_string())
+}
+
+fn bounded_action_summary(value: String) -> String {
+    const MAX_CHARS: usize = 4096;
+    if value.chars().count() <= MAX_CHARS {
+        return value;
+    }
+    let mut bounded: String = value.chars().take(MAX_CHARS - 1).collect();
+    bounded.push('…');
+    bounded
+}
+
 /// 解析 Codex 格式 patch 文本的目标路径（M1/W3 共享助手）。
 /// 支持 `*** Update File:` / `*** Add File:` / `*** Delete File:` /
 /// `*** Move to:` 四种头；解析结果仅用于冲突分组与授权资源绑定。
@@ -1032,5 +1096,46 @@ mod w3_w7_tests {
         let patch = "*** Begin Patch\n*** Update File: a.rs\n*** Delete File: b.rs\n*** Move to: c.rs\nnot-a-header: d.rs\n*** End Patch";
         assert_eq!(patch_target_paths(patch), vec!["a.rs", "b.rs", "c.rs"]);
         assert!(patch_target_paths("no headers here").is_empty());
+    }
+
+    #[test]
+    fn exec_permission_action_summary_shows_command_without_env() {
+        let summary = summarize_permission_action(
+            "exec",
+            &serde_json::json!({
+                "command": "cargo test",
+                "args": ["--all", "name with spaces"],
+                "shell": "bash",
+                "cwd": "/repo",
+                "env": {"API_KEY": "must-not-leak"}
+            }),
+        )
+        .expect("exec summary");
+
+        assert!(summary.contains(r#"command: "cargo test""#), "{summary}");
+        assert!(
+            summary.contains(r#"args: ["--all", "name with spaces"]"#),
+            "{summary}"
+        );
+        assert!(summary.contains(r#"shell: "bash""#), "{summary}");
+        assert!(summary.contains(r#"cwd: "/repo""#), "{summary}");
+        assert!(!summary.contains("must-not-leak"), "{summary}");
+        assert_eq!(
+            summarize_permission_action("read", &serde_json::json!({})),
+            None
+        );
+    }
+
+    #[test]
+    fn exec_permission_action_summary_uses_argv_and_is_bounded() {
+        let argv = vec!["echo"; 3000];
+        let summary = summarize_permission_action(
+            "exec",
+            &serde_json::json!({ "argv": argv, "cwd": "/repo" }),
+        )
+        .expect("argv summary");
+        assert!(summary.starts_with(r#"argv: ["echo", "echo""#), "{summary}");
+        assert!(summary.ends_with('…'), "summary must be visibly truncated");
+        assert_eq!(summary.chars().count(), 4096);
     }
 }

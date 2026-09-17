@@ -476,6 +476,10 @@ pub enum ToolEvent {
         turn_id: String,
         round_num: u32,
         tool_name: String,
+        /// Bounded, tool-specific action summary for informed approval.
+        /// Optional for backward compatibility with older producers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action_summary: Option<String>,
         reason: String,
         paths: Vec<String>,
         category: PermissionCategory,
