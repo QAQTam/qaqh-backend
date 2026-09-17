@@ -304,7 +304,7 @@ fn host_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Resp
 | `crates/qaqh-runtime/tests/timeline_persist_deadlock_repro.rs` | 新增（**未提交**） | ✅ 工作区 | D-1 复现 + 修复后回归用例（两条均有界超时，不会挂死） |
 | `%TEMP%\qaqh_hostpoc.ps1` | 临时脚本 | ✅ 本机临时目录 | D-2 PoC（全文见附录 B.3；重定向 `USERPROFILE` 隔离数据根） |
 | `target/release/qaqh-daemon.exe` | 构建产物 | ✅ | 01:16 构建，**含 D-1**，勿用于验收；已安装版本（00:09）不受影响 |
-| `run_lib.log`（仓库根） | 临时日志 | ✅ | **非本执行者产物**：并行会话 01:52 的 `cargo test --lib` 输出，见附录 C.1；归档前请确认归属 |
+| `run_lib.log`（仓库根） | 临时日志 | ✅ | **非本执行者产物**：并行会话 01:52 的 `cargo test --lib` 输出，见附录 C.1；归档前请确认归属〔2026-09-17 归属已确认：误随 `4e03a88 clean docs;update to 1.0.1` 入库，同日从仓库删除；文件内容转录见附录 C.1，此后引用以附录为准〕 |
 | 源码 / 配置 / 测试 | — | ❌ 未改动 | 两个补丁均以 diff 形式给出，未落盘；未执行任何提交 |
 | ↑ **2026-09-12 更正** | 源码 / 测试 | ✅ 工作区（未提交） | 本行为写入时的快照；补丁已于同日落地，清单与验证证据见**附录 D** |
 
