@@ -11,7 +11,7 @@
 | 批次 | 主题 | 条目数 | 严重度 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | 1 | 子代理取消链 | 5 | P0/P1/P2 | 无 | ☑ 629637d (#88) |
-| 2 | 安全 P0（越权/边界/凭据/泄漏） | 4 | P0 | 无 | ☑ 238331f (#93)，**T-2-2 部分（见 N-5）** |
+| 2 | 安全 P0（越权/边界/凭据/泄漏） | 4 | P0 | 无 | ☑ 238331f (#93)；T-2-2 的 Exec/Net 残余已按 N-5 完成工作区修复，待提交 |
 | 3 | `apply_patch` 契约 | 3 | P0/P1 | 无 | ☑ 1705449 (#87) |
 | 4 | `edit` 契约 | 3 | P0/P1 | 无 | ☑ 61b39d0 (#89) |
 | 5 | 计量与超限 | 2 | P1 | 无 | ☑ 006b2b3 (#90)，T-5-2 部分（见 N-1） |
@@ -20,7 +20,7 @@
 | 8 | 安全 P1/P2 收尾 | 3 | P1/P2 | 批次 2 | ☑ 440a608 (#95) |
 | 9 | 清单归档与卫生（文档） | 4 | — | 无 | ☑ 563f1e3 (#91) |
 | — | 阻塞项（需现场环境，不派） | 8 | — | — | 🚫 |
-| — | 后续待办收尾（N-1~N-4/N-6/N-7，**N-5 另议**） | 6 | P1/P2 | 无 | ☑ 3749df1 (#96)，⚠️ **本轮无自动评审**——组织 CPU 配额不足（Prepare 阶段报 `Root Group's events CPU core-hours are insufficient for pre-freezing`，`npc go` 被 skip，非角色/链路问题；见 PR #96 评论） |
+| — | 后续待办收尾（N-1~N-7，N-5 权限层收口已完成工作区修复，待提交） | 7 | P0/P1/P2 | 无 | ☑ 3749df1 (#96) + N-5 工作区修复，⚠️ **N-5 提交后仍需评审**——此前 PR #96 无自动评审，根因为组织 CPU 配额不足 |
 
 ---
 
@@ -94,7 +94,7 @@
   - ❌ **仍未闭合**：「`exec` 在 Level 4 可写工区外路径」这半条**依然敞开**
     （`is_path_in_workspace` 无法从 `command` 文本判定目标）⇒ 见 **N-5（P0）**。
   - 位置：`crates/qaqh-workspace/src/manager.rs:525-549`（`is_path_in_workspace`）、`crates/qaqh-workspace/src/safety.rs:14-24`
-  - 现状：`is_path_in_workspace` 只读 `ctx.args["path"]`；`exec` 的参数名是 `command`，于是走 `:545-548` 的 `else` 分支**恒返回 `true`**。`exec` 在 `exec/register.rs:29` 声明为 `ToolRisk::Destructive`，而 `safety.rs:18-21` 只在 `(Destructive, false)` 时阻断 ⇒ 判定被短路，永远放行。Level 4（`permission.rs:489-491`）完全自动批准（E2）
+  - 现状（历史）：`is_path_in_workspace` 只读 `ctx.args["path"]`；`exec` 的参数名是 `command`，于是走 `:545-548` 的 `else` 分支**恒返回 `true`**。`exec` 在 `exec/register.rs:29` 声明为 `ToolRisk::Destructive`，而 `safety.rs:18-21` 只在 `(Destructive, false)` 时阻断 ⇒ 判定被短路，永远放行。Level 4（`permission.rs:489-491`）原先完全自动批准（E2；第二轮已按 N-5 在权限层收口）
   - 动作：`is_path_in_workspace` 的 `else` 分支按 risk 分级——`Destructive` 工具缺 `path` 时返回 `false`（fail-closed）；`Write`/`ReadOnly` 维持 `true` 以免误伤 `task`/`skills`/`ask`
   - 验收：新增单测 `destructive_tool_without_path_is_treated_as_outside_workspace`；e2e 覆盖 Level 4 下 `exec` 写工区外路径 → 期望被 `SafetyPolicy` 阻断
   - 关联：D-2 / 安全审查 P0-2
@@ -267,8 +267,8 @@
     `mcp__` 前缀的 D5 快路径不再无条件放行——**Exec/Net** 类在 Level 1/2/3 强制 `AskUser`。
   - 一并更新两条与旧行为冲突的既有断言（`rejects_concurrency_out_of_range`、
     `mcp_tools_bypass_approval_at_all_levels` → `mcp_exec_net_require_approval_until_unrestricted`）。
-  - ⚠️ **边界**：默认 `permission_level = 4`，Level 4 对内置 exec/网络工具同样全放行 ⇒
-    本次消除的是「MCP 工具**独有**的 allow-all 特权」，不是「任何档位都弹审批」。
+  - ⚠️ **当时的边界**：默认 `permission_level = 4`，Level 4 对内置 exec/网络工具仍全放行 ⇒
+    当时只消除了「MCP 工具**独有**的 allow-all 特权」。该全局边界已由随后 N-5 的权限层收口完成。
   - 位置：`crates/qaqh-config/src/config.rs:293-302`（校验 `1..=64`）、`crates/qaqh-mcp/src/connection.rs:717`（执行点）
   - 现状：上限是 64 而非 16；`DynamicTool` 权限层默认 allow-all（E2）
   - 动作：`max_concurrent_calls` 收紧到 `<= 16`；`DynamicTool` 对 `Exec`/`Net` 默认强制 `Permissions::AskUser`
@@ -356,17 +356,18 @@
 
 > 这些不在原复核范围内，是子代理执行/评审时暴露出来的。
 > **2026-09-17 接手后**已作为「后续待办收尾」一批派发（PR #96 / `3749df1`）：
-> N-1/N-2/N-3/N-4/N-6/N-7 全部落盘，**只剩 N-5（P0，安全，需产品口径决策）**。
+> N-1/N-2/N-3/N-4/N-6/N-7 全部落盘。N-5 已按“权限层收口”完成工作区修复，待提交。
 
-- [ ] 🔴 **N-5（P0，安全，来自 T-2-2 的未闭合半条）`exec` 在 Level 4 可写工区外路径**
+- [x] 🔴 **N-5（P0，安全，来自 T-2-2 的未闭合半条）`exec` 在 Level 4 可写工区外路径** → 工作区修复完成，待提交
   - 现状：`is_path_in_workspace` 只能从 `ctx.args["path"]` 判定目标，而 `exec` 的 schema 里
     **没有 `path`**（只有 `command`/`argv`/`cwd`）⇒ 无法从 `command` 文本判定写入目标；
-    Level 4 完全自动批准 ⇒ **`exec` 仍可写工区外路径**（安全审查 P0-2 的原始攻击面）。
-  - 为什么没在批次 2 顺手修：`exec` 也是 `ToolRisk::Destructive`，字面 fail-closed 会
-    在所有权限等级阻断它（实测打红两条既有测试）；真正的收口有两条路，**都需要机主定产品口径**：
-    - (a) 权限层收口：`needs_permission`/`authorize_call` 里 Level 4 **不再无条件放行**
-      Exec/Net（会新增审批弹窗，改变日常使用体感）；
-    - (b) 给 `exec` 加沙箱（工作区外的写入在系统调用层被拒，改动面更大）。
+    Level 4 原先完全自动批准 ⇒ **`exec` 可写工区外路径**（安全审查 P0-2 的原始攻击面）。
+  - 落地：已选路线 **(a) 权限层收口**。Level 4 保留 Read/Write 免审批，Exec/Net 统一
+    进入 `AskUser`；MCP 动态 Exec/Net 同规则，子代理沙箱继续自动拒绝 Exec/Net。
+  - 正式登记：[`../buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](../buglist/2026-09-17-exec工作区外写入未收口-buglist.md)
+  - 验收：`cargo test -p qaqh-workspace`、`cargo test -p qaqh-runtime --no-fail-fast`、
+    `cargo test --workspace --no-fail-fast`、`cargo clippy --workspace --all-targets -- -D warnings`
+    均通过；提交后补 `fixed @{commit}`。
   - 关联：安全审查 P0-2 / D-2 / PR #93 描述
 
 - [x] **N-1（来自 T-5-2 的未完成半条）profile schema 增 `context_window` 字段** → 3749df1（PR #96）

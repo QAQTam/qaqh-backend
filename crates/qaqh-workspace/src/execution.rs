@@ -764,13 +764,13 @@ mod tests {
             }
         }
 
-        // Same at Level 4 — both auto-approve
+        // Same at Level 4 — write tools still auto-approve
         for id in &["inv-c", "inv-d"] {
             let inv = make_invocation("test_write", id);
             match admit(inv, 4, &ws, &trusted) {
                 Admission::Authorized(_) => {} // expected for Write at Level 4
                 other => panic!(
-                    "level 4 should auto-approve all tools, {:?}",
+                    "level 4 should auto-approve write tools, {:?}",
                     std::any::type_name_of_val(&other)
                 ),
             }
