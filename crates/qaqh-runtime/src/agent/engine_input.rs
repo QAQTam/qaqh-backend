@@ -258,6 +258,11 @@ impl InputEngine {
             ctx.emitter.set_seed(&ctx.agent.session.seed);
         }
 
+        // T-1-3：清零取消标记意味着「开新回合」——因此本函数**不得**在用户
+        // 显式取消后被调用。唯一的两个调用方（`Loop::inject` 的 idle 分支与
+        // `dispatch_injections_after_compact`）都在 `Loop::user_cancelled`
+        // 置位时提前拒绝（注入改为入总线排队），用户输入路径才是复位点。
+        // 新增调用方必须沿用同一守卫，否则系统注入会复活已取消的会话。
         ctx.cancel.clear();
         qaqh_workspace::clear_cancel();
 
