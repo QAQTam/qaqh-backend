@@ -249,13 +249,19 @@ pub fn admit(
 ) -> Admission {
     // ── MCP 动态工具（D5 + S3，设计 §5.5）──
     //
-    // D5（owner 2026-09-07 拍板）：MCP 调用全档位默认放行，不经
-    // PermissionChallenge——配置声明即信任（D4）；category 照常填写（S3：
-    // stdio=Exec / http=Net）供审计展示。MaxLockdown 档下同样放行属登记在
-    // 案的临时豁免（设计 §5.5），由未来 workspace 隔离权限重构收敛。
+    // D5（owner 2026-09-07 拍板）：MCP 调用默认放行，不经 PermissionChallenge
+    // ——配置声明即信任（D4）；category 照常填写（S3：stdio=Exec / http=Net）
+    // 供审计展示。
     //
-    // 子代理沙箱优先于 D5：S3 要求 MCP 工具（Exec/Net 类别）在子代理上下文
-    // 一律拒绝（防越狱）——原“沙箱零代码”依赖 needs_permission→AskUser 路径，
+    // T-8-1（安全审查 P1-1 / O-4）收紧：**Exec/Net 类别不再无条件放行**——
+    // 落到下面的 needs_permission 决策（Level 1/2/3 → AskUser），消除
+    // 「配置一个 MCP server 即获得内置 exec/网络工具都没有的免审批特权」。
+    // 只读类（Read，如 `mcp` resources 聚合）保留 D5 快路径，避免误伤。
+    // Level 4（Unrestricted）仍全放行——与内置工具语义一致（全局档位策略，
+    // 不在本条目收敛范围）。
+    //
+    // 子代理沙箱优先于 D5：S3 要求 MCP 工具在子代理上下文一律拒绝
+    // （防越狱）——原“沙箱零代码”依赖 needs_permission→AskUser 路径，
     // 而 D5 快路径绕过 needs_permission，故在此显式拦截（仅针对 mcp__ 前缀，
     // 不影响内置工具的沙箱语义）。
     if invocation
@@ -268,15 +274,21 @@ pub fn admit(
                 invocation.tool_name
             ));
         }
-        let mut resources =
-            crate::permission::extract_target_paths(&invocation.tool_name, &invocation.args);
-        resources.sort();
-        resources.dedup();
-        return Admission::Authorized(AuthorizedToolCall::new(
-            invocation,
-            resources,
-            crate::permission::resolve_target_path(workspace_root.to_path_buf()),
-        ));
+        let d5_bypass = !matches!(
+            invocation.category,
+            crate::permission::ToolCategory::Exec | crate::permission::ToolCategory::Net
+        );
+        if d5_bypass {
+            let mut resources =
+                crate::permission::extract_target_paths(&invocation.tool_name, &invocation.args);
+            resources.sort();
+            resources.dedup();
+            return Admission::Authorized(AuthorizedToolCall::new(
+                invocation,
+                resources,
+                crate::permission::resolve_target_path(workspace_root.to_path_buf()),
+            ));
+        }
     }
 
     let workspace_root = crate::permission::resolve_target_path(workspace_root.to_path_buf());
@@ -590,15 +602,17 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tools_bypass_approval_at_all_levels() {
-        // D5：MCP 调用全档位放行（含 MaxLockdown），不经 PermissionChallenge。
+    fn mcp_exec_net_require_approval_until_unrestricted() {
+        // T-8-1（安全审查 P1-1 / O-4）：D5 不再对 Exec/Net 类别无条件放行。
+        // 收紧前本用例的 Level 1/3 断言是「必须 Authorized」；现在改为
+        // 「必须 ApprovalRequired」，Level 4 仍放行（Unrestricted 语义）。
         // 全局 AtomicBool 需串行（与 sandbox_guard 同锁）。
         let _serial = crate::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         set_subagent_sandbox(false);
         let ws = std::env::temp_dir().join("qaqh-mcp-d5");
-        for level in [1u8, 3u8] {
+        for level in [1u8, 2, 3] {
             let admission = admit(
                 ToolInvocation {
                     session_id: "seed-d5".into(),
@@ -613,8 +627,54 @@ mod tests {
                 &HashSet::new(),
             );
             assert!(
+                matches!(admission, Admission::ApprovalRequired(_)),
+                "level {level} Exec MCP call must require approval, got non-approval"
+            );
+        }
+        let admission = admit(
+            ToolInvocation {
+                session_id: "seed-d5".into(),
+                call_id: "call-d5-4".into(),
+                tool_name: "mcp__demo__echo".into(),
+                action: String::new(),
+                args: serde_json::json!({}),
+                category: crate::permission::ToolCategory::Exec,
+            },
+            4,
+            &ws,
+            &HashSet::new(),
+        );
+        assert!(
+            matches!(admission, Admission::Authorized(_)),
+            "level 4 (Unrestricted) must still authorize, got non-authorized"
+        );
+    }
+
+    #[test]
+    fn mcp_read_tools_keep_d5_fast_path() {
+        // 只读动态工具（mcp resources 聚合）不得被 T-8-1 收紧误伤。
+        let _serial = crate::TEST_RUNTIME_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set_subagent_sandbox(false);
+        let ws = std::env::temp_dir().join("qaqh-mcp-d5-read");
+        for level in [1u8, 2, 3, 4] {
+            let admission = admit(
+                ToolInvocation {
+                    session_id: "seed-d5r".into(),
+                    call_id: "call-d5r".into(),
+                    tool_name: "mcp__demo__resources".into(),
+                    action: String::new(),
+                    args: serde_json::json!({}),
+                    category: crate::permission::ToolCategory::Read,
+                },
+                level,
+                &ws,
+                &HashSet::new(),
+            );
+            assert!(
                 matches!(admission, Admission::Authorized(_)),
-                "level {level} MCP call must be authorized (D5), got non-authorized"
+                "level {level} Read MCP call must keep D5 bypass, got non-authorized"
             );
         }
     }
