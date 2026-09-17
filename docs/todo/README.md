@@ -147,9 +147,20 @@ PR body 按 `.cnb/settings.yml` 的要求写：改动点 / 回归测试清单 / 
 `.cnb.yml` 明确 **`rust-ci` 已下线**（云端 cargo test/clippy 按量计费），验证一律本地跑：
 
 ```bash
-cargo test --workspace
+QAQH_DATA_DIR=$(mktemp -d) cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
 ```
+
+**2026-09-17 起这四条在 main 上都是绿的**（PR #96 / `3749df1` 之前不是）：
+严格 clippy 原本有 23 条既有 warning（`duplicate-macro-attributes`、`io_other_error` 一类），
+`--all-features` 另加 ts-rs 的 serde 属性告警，`cargo fmt --all --check` 也有若干既有漂移。
+所以**照抄上面的命令即可**；若哪天又出现「基线就红」，先确认是不是又漂了，
+而不是当成自己这批改动引入的回归（历史坑：批次 1~9 的验收只能退化成「按 crate 跑 + 新增代码零告警」）。
+
+`QAQH_DATA_DIR` **每次都要换新目录**：默认数据目录是 `~/.config/qaqh`（子代理沙箱里只读、
+主代理侧会写进机主真实会话目录），而复用同一目录会让 `todo_contract` 这类持久化用例假红（N-6）。
 
 Windows-only 路径在 Linux 上无法运行验证的，必须在 PR body 明确标注「未做 Windows 运行时验证」。
 
