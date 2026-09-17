@@ -3,7 +3,7 @@
 AI 编码代理的跨平台 **Rust 后端核心**(monorepo,16 个 workspace 成员)。单个常驻 daemon 承载多会话对话循环、LLM 网关、19 个内置工具、Agent Skills 与子代理隔离执行;Windows 桌面壳(WinUI3)/ TUI / Web 壳位于独立仓库,通过统一的 **Ringing V1** HTTP/SSE 协议接入。
 
 - Edition 2024 · License MIT · 状态:alpha
-- HTTP 栈: `axum 0.8 + hyper 1.1 + tower 0.5 + tower-http 0.6 + tokio 1.44`，`SSE KeepAlive 15s`，release 静态 CRT 单文件 exe(`opt-level=z` + LTO + strip)
+- HTTP 栈: `axum 0.8 + hyper 1 + tower 0.5 + tower-http 0.6 + tokio 1`，`SSE KeepAlive 15s`，release 静态 CRT 单文件 exe(`opt-level=z` + LTO + strip)
 
 ## 架构总览
 
@@ -25,7 +25,7 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,16 个 workspace 成�
  └──────────────────────────────────────────────────────────────────────────┘
         │
         ├─ {data_dir}/  全局数据根(Windows: %USERPROFILE%\.qaqh;
-        │               Linux/macOS: ~/.config/qaqh;可用 QAQH_DATA_DIR 重定向)
+        │               Linux/macOS: $XDG_CONFIG_HOME/qaqh(默认 ~/.config/qaqh);可用 QAQH_DATA_DIR 重定向)
         │     ├─ config.toml + secrets.toml(API key 不落明文,Windows DPAPI 加密)
         │     ├─ daemon.json / daemon.lock(发现 + 单实例锁)
         │     └─ sessions/{8位hex seed}/ meta.json · messages.jsonl · todo.json …
@@ -59,7 +59,7 @@ AI 编码代理的跨平台 **Rust 后端核心**(monorepo,16 个 workspace 成�
 客户端先 `POST /clients/open` 能力协商,获得 `client_instance_id / session_id / lease`;命令按 control/conversation/tool 三频道 POST,事件经对应频道 SSE 推送(batch 信封,16MB 帧上限);另有 per-session timeline SSE(快照页 + Last-Event-ID 断点续传)。鉴权三层:Bearer token + client-session lease + seed 所有权。worker 已收敛为 daemon 内线程,但保留完整 frame 边界语义,未来可无感切回子进程隔离。
 
 ### 多前端与 webUI 托管
-daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器一律以 Ringing V1 HTTP/SSE 接入,daemon 侧不存在任何第二前端协议。浏览器形态由 daemon 内置静态托管承担:`GET /debug/` 直接服务 renderer 静态产物(定位 `out/renderer`,electron-vite 布局),入口页注入 `__qaqh_bridge__.js`(内联 token)后即与桌面壳 renderer 完全等价——改前端 → 刷新浏览器即可,无需重打包。安全边界:**仅限 loopback 来源**(非回环连接一律 403,LAN 模式下远端壳是已持 token 的原生应用);只读,无命令端点。
+daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器一律以 Ringing V1 HTTP/SSE 接入,daemon 侧不存在任何第二前端协议。浏览器形态由 daemon 内置静态托管承担:`GET /debug/` 直接服务 renderer 静态产物(定位 `out/renderer`,electron-vite 布局),入口页加载 `__qaqh_bridge__.js` 获取一次性 nonce,再经同源 `/debug/__qaqh_token__` 兑换运行 token——改前端 → 刷新浏览器即可,无需重打包。安全边界:**仅限 loopback 来源**(非回环连接一律 403,LAN 模式下远端壳是已持 token 的原生应用);debug 托管本身只提供静态读取与 nonce 兑换端点。
 
 ### 会话与存储
 - seed 为 8 位 hex;磁盘布局 `sessions/index.json` + `sessions/{seed}/{meta.json, messages.jsonl, compact-context.json, todo.json}`,全部 temp+rename 原子写
@@ -74,7 +74,7 @@ daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器�
 | 1 | MaxLockdown | 一切调用需确认 |
 | 2 | ReadFree | 读放行,写/exec/net 需确认 |
 | 3 | WorkspaceFree | 工作区内写放行;跨区写一次性信任文件夹;exec/net 仍需确认 |
-| 4 | Unrestricted | 默认,无检查 |
+| 4 | Unrestricted | Read/Write 放行,exec/net 仍需确认 |
 
 - 审批闭环:`PermissionChallenge`(一次性,TTL)→ UI 确认 → 不可伪造的授权凭证执行;支持 trust folder
 - 写入防漂移:read/edit/write 维护文件 hash 账本,失配报 `STALE_FILE`;dry-run 暂存 pending_id 后 `confirm_apply` 直提
@@ -82,7 +82,7 @@ daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器�
 - 工具模式档位:`standard` / `minimal` / `minimal:b` / `minimal:c` / `custom`(白名单 + 模型面投影)
 
 ### Provider 与配置
-内置 11 家 provider 注册表(deepseek/qwen/glm/kimi/mimo/minimax/doubao/openai/openrouter/deepseek-web/opencode-go),endpoint 级声明协议(openai/responses)、thinking 字段、缓存字段等能力,新 provider 只加配置不改网关代码。`config.toml` 支持命名 profiles;API key 存 `secrets.toml`(Windows DPAPI 加密,其余平台 0600 明文),config 中只留 `"set"` 标记。
+内置 13 家 provider 注册表(deepseek/qwen/glm/kimi/mimo/minimax/doubao/openai/openrouter/zcode/workbuddy/deepseek-web/opencode-go),endpoint 级声明协议(openai/responses)、thinking 字段、缓存字段等能力,新 provider 只加配置不改网关代码。`config.toml` 支持命名 profiles;API key 存 `secrets.toml`(Windows DPAPI 加密,其余平台 0600 明文),config 中只留 `"set"` 标记。
 
 ### 技能系统
 扫描项目 `.qaqh/skills > .agents/skills > skills`,再用户级同名目录;SKILL.md frontmatter 必填 name/description。catalog 只注入元数据(progressive disclosure),正文仅在 `$mention` 或 `skills activate` 时经类型化 effect 通道注入 `<skill_context_envelope>`;allowed-tools 永不自行授予权限。
@@ -121,9 +121,9 @@ cargo run -p qaqh-daemon -- stop
 | `just sync-version` | 从 `version.txt` 同步版本到 Cargo.toml + package.json |
 
 - Clippy 全仓 deny `unwrap_used`、`string_slice`(少数 crate 局部豁免并注明理由;测试代码经 clippy.toml 豁免)
-- 测试规模约 **820 个**(100 个内联 cfg(test) 模块 + 22 个集成测试文件);触碰全局状态的测试统一走 `TEST_RUNTIME_SERIAL` 互斥串行
+- 测试规模以 `cargo test --workspace -- --list` 为准:当前列出 1300+ 用例，并包含 63 个集成测试文件；触碰全局状态的测试统一走 `TEST_RUNTIME_SERIAL` 互斥串行
 - 测试/多实例用 `QAQH_DATA_DIR` 环境变量整体重定向数据根
-- 无 CI 配置,质量门禁即上述本地 recipe 链
+- 云端 `.cnb.yml` 只负责 NPC 审查与镜像构建;Rust test/clippy 当前不跑云端，质量门禁以本地 recipe 链为准
 
 ## 版本管理
 

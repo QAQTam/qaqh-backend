@@ -287,9 +287,8 @@ fn replace_dynamic_tools_clears_and_rebuilds() {
 /// 收紧前：`admit()` 对 `mcp__` 前缀工具走 D5 快路径，**全档位无条件
 /// Authorized**（含 Level 1/2/3），DynamicTool 权限层等于 allow-all。
 /// 收紧后：category ∈ {Exec, Net} 落到 `needs_permission` 决策——
-/// Level 1/2/3 一律 `ApprovalRequired`；只读类（Read，如 `mcp` resources
-/// 聚合）保留 D5 快路径，不误伤。Level 4（Unrestricted）语义与内置工具
-/// 一致：全放行。
+/// Level 1/2/3/4 一律 `ApprovalRequired`；只读类（Read，如 `mcp` resources
+/// 聚合）保留 D5 快路径，不误伤。Level 4 仍只对 Read/Write 免审批。
 #[test]
 fn mcp_dynamic_tool_requires_permission() {
     let ws = std::env::temp_dir().join("qaqh-mcp-dynamic-perm");
@@ -311,21 +310,15 @@ fn mcp_dynamic_tool_requires_permission() {
         )
     };
 
-    // Exec（stdio server）与 Net（http server）：Level 1/2/3 全部要审批。
+    // Exec（stdio server）与 Net（http server）：所有档位全部要审批。
     for category in [ToolCategory::Exec, ToolCategory::Net] {
-        for level in [1u8, 2, 3] {
+        for level in [1u8, 2, 3, 4] {
             let admission = call(category, "mcp__demo__echo", level);
             assert!(
                 matches!(admission, Admission::ApprovalRequired(_)),
                 "{category:?} 动态工具在 Level {level} 必须要求审批，got non-approval"
             );
         }
-        // Level 4：与内置工具同语义（Unrestricted 全放行）。
-        let admission = call(category, "mcp__demo__echo", 4);
-        assert!(
-            matches!(admission, Admission::Authorized(_)),
-            "{category:?} 动态工具在 Level 4 应放行（Unrestricted 语义）"
-        );
     }
 
     // 只读动态工具仍走 D5 快路径（收紧 Exec/Net 不得误伤只读）。
