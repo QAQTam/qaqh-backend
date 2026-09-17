@@ -650,7 +650,32 @@ fn stream_sse(
         );
     }
 
-    // Build final message from accumulated content
+    let raw_message = assemble_streamed_message(reasoning_buf, text_buf, tool_acc);
+
+    traced(StreamEvent::Done {
+        raw_message,
+        usage: usage_info,
+        stop_reason,
+    });
+
+    Ok(())
+}
+
+/// 由累积缓冲组装最终的 assistant 消息（`Done` 事件载荷）。
+///
+/// 独立成函数是为了让「参数缺失的 tool_call 如何收口」能被单测直接覆盖
+/// （T-7-1 / BUG-2026-09-13-13）：上游掐流时可能只送到 `id`+`name`、
+/// `arguments` 增量未到（`args_json == ""`），或显式送来 `null`——两种情况下
+/// `serde_json::from_str` 都得 `Null`。若把 `Null` 原样落进 `input`，持久化前
+/// 清洗（`is_hanging_tool_use` 只按 id/name 判悬挂）不会拦下它，出站序列化便
+/// 写出 `"arguments": "null"`，部分端点直接判 400。
+///
+/// 与 anthropic 侧（`message_api.rs`）保持同一语义：空/非法参数收敛为 `{}`。
+fn assemble_streamed_message(
+    reasoning_buf: String,
+    text_buf: String,
+    mut tool_acc: HashMap<usize, (String, String, String)>,
+) -> Message {
     let mut blocks: Vec<ContentBlock> = Vec::new();
 
     if !reasoning_buf.is_empty() {
@@ -660,7 +685,7 @@ fn stream_sse(
     }
 
     // ── DSML integration: extract tool calls from text content ──
-    let _final_text = if crate::tool_parser::has_dsml(&text_buf) {
+    if crate::tool_parser::has_dsml(&text_buf) {
         let (cleaned, dsml_tcs) = crate::tool_parser::parse_dsml_tool_calls(&text_buf, &[]);
         // Merge DSML tool calls into tool_acc (with unique ids to avoid collision)
         let base_idx = tool_acc.len();
@@ -678,13 +703,9 @@ fn stream_sse(
         if !cleaned.is_empty() {
             blocks.push(ContentBlock::text(&cleaned));
         }
-        cleaned
-    } else {
-        if !text_buf.is_empty() {
-            blocks.push(ContentBlock::text(&text_buf));
-        }
-        text_buf.clone()
-    };
+    } else if !text_buf.is_empty() {
+        blocks.push(ContentBlock::text(&text_buf));
+    }
 
     let mut sorted: Vec<(usize, String, String, String)> = tool_acc
         .into_iter()
@@ -694,23 +715,22 @@ fn stream_sse(
     for (_idx, id, name, args_json) in sorted {
         let input: serde_json::Value =
             serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Null);
+        // anthropic 侧同款兜底：模型中途掐流时 `input` 可能为 null，
+        // 收敛为空对象，避免出站 `"arguments": "null"` 被端点判 400。
+        let input = if input.is_null() {
+            serde_json::json!({})
+        } else {
+            input
+        };
         blocks.push(ContentBlock::ToolUse { id, name, input });
     }
 
-    let raw_message = Message {
+    Message {
         msg_id: None,
         role: "assistant".into(),
         name: None,
         content: blocks,
-    };
-
-    traced(StreamEvent::Done {
-        raw_message,
-        usage: usage_info,
-        stop_reason,
-    });
-
-    Ok(())
+    }
 }
 
 // ── Message conversion ──
@@ -1405,5 +1425,90 @@ mod skill_envelope_tests {
         )
         .unwrap_err();
         assert!(error.contains("SKILL_CONTEXT_SYNC_UNSUPPORTED"));
+    }
+
+    /// T-7-1 / BUG-2026-09-13-13：上游掐流时可能只送到 tool_call 的
+    /// `id`+`name`、`arguments` 增量未到（`args_json == ""`），Done 组装必须把
+    /// `input` 收敛成 `{}` 而不是 `null`——否则持久化前清洗（`is_hanging_tool_use`
+    /// 只按 id/name 判悬挂）会放行，出站序列化写出 `"arguments": "null"`
+    /// 被部分端点判 400。与 anthropic 侧（`message_api.rs`）同语义。
+    #[test]
+    fn chat_tool_use_null_input_becomes_empty_object() {
+        let provider = provider();
+        let mut text_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut tool_acc = HashMap::new();
+        let mut dsml_buf = String::new();
+        let mut dsml_seen = HashSet::new();
+        let mut usage_info = None;
+        let mut stop_reason = None;
+        let mut inline_thinking = false;
+        let mut events = Vec::new();
+        let mut traced = |ev: StreamEvent| events.push(ev);
+
+        // id+name 已到、arguments 增量未到：tool_acc 里 args 仍是空串。
+        let frame = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_cut",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "" }
+                    }]
+                }
+            }]
+        })
+        .to_string();
+        if let Err(error) = handle_chat_frame(
+            &frame,
+            &provider,
+            &mut text_buf,
+            &mut reasoning_buf,
+            &mut tool_acc,
+            &mut dsml_buf,
+            &mut dsml_seen,
+            &mut usage_info,
+            &mut stop_reason,
+            &mut inline_thinking,
+            &mut traced,
+        ) {
+            panic!("chat frame failed: {error}");
+        }
+
+        let msg = assemble_streamed_message(reasoning_buf, text_buf, tool_acc);
+        let (id, name, input) = msg
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolUse { id, name, input } => Some((id, name, input)),
+                _ => None,
+            })
+            .expect("tool_use block assembled from the accumulated call");
+        assert_eq!(id, "call_cut");
+        assert_eq!(name, "read");
+        assert!(!input.is_null(), "input must not stay null: {input:?}");
+        assert_eq!(input, &serde_json::json!({}));
+
+        // 显式 `null` 参数（部分端点会这么发）同样收敛为空对象。
+        let explicit_null = assemble_streamed_message(
+            String::new(),
+            String::new(),
+            HashMap::from([(
+                0usize,
+                ("call_x".to_owned(), "read".to_owned(), "null".to_owned()),
+            )]),
+        );
+        assert_eq!(
+            explicit_null
+                .content
+                .into_iter()
+                .find_map(|block| match block {
+                    ContentBlock::ToolUse { input, .. } => Some(input),
+                    _ => None,
+                }),
+            Some(serde_json::json!({}))
+        );
     }
 }
