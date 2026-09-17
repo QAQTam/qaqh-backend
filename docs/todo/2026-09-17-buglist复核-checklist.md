@@ -20,6 +20,7 @@
 | 8 | 安全 P1/P2 收尾 | 3 | P1/P2 | 批次 2 | ☑ 440a608 (#95) |
 | 9 | 清单归档与卫生（文档） | 4 | — | 无 | ☑ 563f1e3 (#91) |
 | — | 阻塞项（需现场环境，不派） | 8 | — | — | 🚫 |
+| — | 后续待办收尾（N-1~N-4/N-6/N-7，**N-5 另议**） | 6 | P1/P2 | 无 | ☑ 3749df1 (#96)，⚠️ **本轮无自动评审**（流水线故障，见 PR #96 评论） |
 
 ---
 
@@ -351,9 +352,11 @@
 
 ---
 
-## 后续待办（执行批次过程中新发现，非阻塞，尚未派发）
+## 后续待办（执行批次过程中新发现，非阻塞）
 
-> 这些不在原复核范围内，是子代理执行/评审时暴露出来的。**未派发**，待机主决定优先级。
+> 这些不在原复核范围内，是子代理执行/评审时暴露出来的。
+> **2026-09-17 接手后**已作为「后续待办收尾」一批派发（PR #96 / `3749df1`）：
+> N-1/N-2/N-3/N-4/N-6/N-7 全部落盘，**只剩 N-5（P0，安全，需产品口径决策）**。
 
 - [ ] 🔴 **N-5（P0，安全，来自 T-2-2 的未闭合半条）`exec` 在 Level 4 可写工区外路径**
   - 现状：`is_path_in_workspace` 只能从 `ctx.args["path"]` 判定目标，而 `exec` 的 schema 里
@@ -366,28 +369,50 @@
     - (b) 给 `exec` 加沙箱（工作区外的写入在系统调用层被拒，改动面更大）。
   - 关联：安全审查 P0-2 / D-2 / PR #93 描述
 
-- [ ] **N-1（来自 T-5-2 的未完成半条）profile schema 增 `context_window` 字段**
+- [x] **N-1（来自 T-5-2 的未完成半条）profile schema 增 `context_window` 字段** → 3749df1（PR #96）
   - 位置：`crates/qaqh-types/src/config.rs`、`crates/qaqh-config/src/config.rs`
   - 现状：批次 5 只做了本地 pre-flight（以既有 `context_limit` 当硬窗口），
     「端点声明上下文窗口」这半条因超出批次 5 允许改动的文件范围而未做。
   - 动作：profile schema 增 `context_window`，pre-flight 优先用它、缺失时回落 `context_limit`。
   - 关联：D-15 / BUG-2026-09-16-04
+  - 落地：`ProfileConfig`/`Config` 各增 `context_window: Option<u32>`（`#[serde(default)]`），
+    load / `save_with` / `save_profile` / `apply_profile` / `engine_session::apply_config`（热字段）
+    全链路打通；`engine_turn::hard_context_limit(cfg)` 做「优先 `context_window`、缺失回落
+    `context_limit`」，**auto-compact 软阈值基数仍是 `context_limit`**。
+  - 验收（原文）：`cargo test -p qaqh-config --lib context_window` → 2 passed；
+    `cargo test -p qaqh-runtime --lib hard_context_limit` → 1 passed；
+    `cargo test -p qaqh-runtime --lib applies_all_hot_fields` → 1 passed。
+  - 残留：设置页 DTO（`qaqh-config-api`）未暴露该字段 ⇒ 目前只能手写 config.toml
+    的 `[profiles.<name>] context_window = …`（前端要能设需另开一条，涉及 webui 契约）。
 
-- [ ] **N-2（来自 PR #87 自动评审的建议项）`apply_patch` 三处收尾**
+- [x] **N-2（来自 PR #87 自动评审的建议项）`apply_patch` 三处收尾** → 3749df1（PR #96）
   - ① `WOULD_OVERWRITE` 的 hint 措辞在「真 apply 走到这里」时不成立（前序 hunk 已落盘，
     重发同 patch 会 `NO_MATCH`）⇒ 需区分 dry_run / 非 dry_run 两种场景。
   - ② `file_state` 未随 `apply_patch` 的覆盖同步（与既有 `UpdateFile`/`Move` 分支一致，
     但需确认紧随其后的 `edit` 是否会被 hash 漂移拒绝）。
   - ③ `OVERWROTE` 文本只取首个 `*** Add File:` marker，多 Add File 时会漏报。
   - 关联：PR #87 评审评论 / BUG-2026-09-16-10、-11
+  - 落地：① 前提**在 HEAD 上不成立**——`WouldOverwrite` 只可能由 `dry_run_patch_engine`
+    产生（真 apply 的 `AddFile` 分支无守卫，保持上游覆盖语义并把旧内容记进 `FileDelta.old`），
+    故 hint 改为显式标明 `dry-run finding:` 并把可达性事实写进 `error_code_and_hint` 注释；
+    ②③ 实测 HEAD 已正确（工具层逐 delta `record_write`；`overwritten` 按 delta 判定），
+    **只补回归锁**，无代码改动。
+  - 验收（原文）：`cargo test -p qaqh-workspace --lib apply_patch` → 26 passed
+    （含新增 `multiple_add_file_overwrites_are_all_reported`、
+    `overwrite_refreshes_file_state_for_followup_edit`）。
 
-- [ ] **N-3（来自批次 6 的附带观察）`list_resources` 的三态拆分**
+- [x] **N-3（来自批次 6 的附带观察）`list_resources` 的三态拆分** → 3749df1（PR #96）
   - 现状：`resources/list` **拉取失败**与**未连接**目前都落到「not connected yet」文案；
     批次 6 只拆了「已连接但为空」。
   - 动作：`connection.rs` 侧记录失败状态，`resources.rs` 输出第三种文案。
   - 关联：D-17 / BUG-2026-09-15-08
+  - 落地：`ConnState` 增 `resources_fetch_failed`（成功清零、失败/超时置位）+ 只读访问器；
+    `list_resources` 的 `None` 分支按「已连接 + 拉取失败」输出第三种文案。
+  - 验收（原文）：`cargo test -p qaqh-mcp --test resources` → 24 passed
+    （含新增 `list_resources_fetch_failure_is_not_reported_as_unconnected`，mock 新增
+    `broken` server：连接成功但 `resources/list` 返回错误）。
 
-- [ ] **N-4（来自 PR #87 评审的解析类观察）`apply_patch` 解析边界**
+- [x] **N-4（来自 PR #87 评审的解析类观察）`apply_patch` 解析边界** → 3749df1（PR #96）
   - ① `*** End Patch` 被当作 Add File 目标（`strip_prefix` 未校验 rest 为空）⇒ 返回 Ok 并真的建文件；
     控制用例（只有 END marker）现在也返回 Ok。
   - ② 文件名为空时 `resolve_workspace_path` 的 `ParentDir` 分支会 `pop()` 掉 workspace 根。
@@ -395,8 +420,18 @@
     与原 cwd 比对，会拒掉合法请求。
   - 说明：三条**早于批次 3 存在**，与批次 3 的改动无因果关系。
   - 关联：PR #87 评审评论附注
+  - 落地（先复现后修）：① **真问题**——修前探针实测 `*** Add File: *** End Patch`
+    返回 `Ok` 且盘上出现名为 `*** End Patch` 的文件；修法是 `streaming_parser.rs` 新增
+    `validate_hunk_path`，`*** Add/Delete/Update File:` 与 `*** Move to:` 四条头统一拒绝
+    「空路径」或「路径本身是另一条 `***` marker」。
+    ②③ **实测不成立**：`*** Add File: `（尾随空格被 trim）本来就落 `PARSE_ERROR`，
+    不会 `pop()` workspace 根；符号链接 workspace 的绝对路径（双向）都能正常解析，
+    逃逸（workspace 内链接指向外部）仍被 `PathOutsideWorkspace` 拒。②③ 只补回归锁。
+  - 验收（原文）：`cargo test -p qaqh-workspace --lib apply_patch_engine` → 14 passed
+    （含 `marker_line_is_rejected_as_a_hunk_path`、`empty_hunk_path_is_a_parse_error`、
+    `end_marker_alone_is_a_parse_error`、`symlinked_workspace_accepts_absolute_paths`）。
 
-- [ ] **N-6（来自主代理最终验证）`todo_contract` 测试不隔离，复用数据目录时会假红**
+- [x] **N-6（来自主代理最终验证）`todo_contract` 测试不隔离，复用数据目录时会假红** → 3749df1（PR #96）
   - 现状：`crates/qaqh-workspace/tests/todo_contract.rs::manual_status_transitions_round_trip_to_the_frontend_contract`
     依赖 `qaqh_workspace::todo::load_todo()` 的**持久化 todo 列表**。
     在**全新** `QAQH_DATA_DIR` 下通过；复用同一数据目录再跑一次就 FAILED
@@ -406,8 +441,12 @@
   - 动作：让该测试用临时数据目录（或先清理 todo 状态），否则「跑两遍」会假红，
     容易被误判成本轮改动引入的回归。
   - 关联：主代理最终验证（2026-09-17）
+  - 落地：根因是 `platform::data_dir()` 的优先级为 `QAQH_DATA_DIR` > `HOME`/`USERPROFILE`，
+    而用例只钉了后两者 ⇒ 补钉 `QAQH_DATA_DIR` 到本用例的临时根。
+  - 验收（原文）：`d=$(mktemp -d); QAQH_DATA_DIR=$d cargo test -p qaqh-workspace --test todo_contract`
+    连跑两遍 → 两遍 `3 passed`（修前第二遍 `FAILED`，已用 `git stash` 回到修前代码复现）。
 
-- [ ] **N-7（来自主代理最终验证）README §5.4 的严格 clippy 命令在 main 上**本来就**跑不过**
+- [x] **N-7（来自主代理最终验证）README §5.4 的严格 clippy 命令在 main 上**本来就**跑不过** → 3749df1（PR #96）
   - 现状：`cargo clippy --workspace --all-targets -- -D warnings` 在 main 上失败，且**与本轮 9 个批次无关**
     （相关 crate 在 `8c1c154..HEAD` 无改动）：
     - `crates/qaqh-config-api/src/lib.rs:316` —— `duplicate-macro-attributes`（重复的 `#[test]`，属**测试目标**）
@@ -418,6 +457,23 @@
   - 动作：要么修掉这两处（各一行），要么把 §5.4 的命令改成
     `cargo clippy --workspace --all-targets`（不加 `-D warnings`）+「新增代码零告警」的口径。
   - 关联：`docs/todo/README.md` §5.4
+  - 落地（**选「修掉」**，让 §5.4 的严格命令直接可用）：清掉 main 上既有 **23 条** warning
+    —— `qaqh-config-api` 重复 `#[test]`（连同与断言相反的陈旧文档注释）、`qaqh-gate` 文档列表续行、
+    `qaqh-message` `assert_eq!(x, true)` ×2、`qaqh-runtime` 测试目标的 `&PathBuf`/未使用变量/未使用
+    import/复杂类型/死字段/多余 `mut`/`manual_contains`、`qaqh-daemon` 属性后空行；
+    `ts-rs` 加 `no-serde-warnings`（`#[serde(alias = "normal")]` 与 TS 形状无关却会打编译告警，
+    会让 `--all-features -- -D warnings` 红）。
+    - 清单原文里的 `wal.rs:609` `io_other_error` **在 1.98.1 上不再复现**（首个参数是变量而非字面
+      `ErrorKind::Other`），实际报的是 `wal.rs:1057/1070` 的 `assert_eq!(x, true)` 两条。
+    - 死字段 `tool_finished` 改为被断言使用，并锁定分工：`execute_admitted_batch` 自身不发 ringing
+      终态，终态由批后 `turn_lap::backfill::emit_completed_tool_round` 逐项发。
+  - 附带（同类「基线就红」）：`cargo fmt --all -- --check` 在 main 上也不干净
+    （`debug_control.rs`、`gate_test.rs`、`manager.rs`、`service_methods.rs`、`transport.rs`、
+    `remote_fs_allowlist.rs` 等，已用 `rustfmt --check` 在 HEAD 上单独证实是既有漂移）。
+    PR #96 一并 `cargo fmt --all`（仅换行、无语义）。
+  - 验收（原文）：`cargo clippy --workspace --all-targets -- -D warnings` →
+    `Finished dev profile`（无告警）；`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+    → 同上；`cargo fmt --all -- --check` → 无输出。
 
 ---
 
