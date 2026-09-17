@@ -228,10 +228,11 @@ impl QaqhService {
                     .collect();
                 Ok(Value::Array(items))
             }
-            // 远端文件浏览（临时跨端模式）：路径一律是 daemon 侧绝对路径。
+            // 远端文件浏览（临时跨端模式）：路径一律是 daemon 侧绝对路径，
+            // 且必须落在会话工作区根 / 数据根白名单内（T-2-1）。
             "fs.list" => {
                 let path = pstr(params, "path")?;
-                list_remote_directory(&path)
+                list_remote_directory(&self.sessions, &path)
             }
             "fs.read" => {
                 let path = pstr(params, "path")?;
@@ -239,7 +240,7 @@ impl QaqhService {
                     .get("max_bytes")
                     .and_then(Value::as_u64)
                     .unwrap_or(512 * 1024);
-                read_remote_file(&path, max_bytes)
+                read_remote_file(&self.sessions, &path, max_bytes)
             }
             "workspace.create" => {
                 let path = pstr(params, "path")?;

@@ -63,7 +63,8 @@ pub use authorization::{
 };
 pub use permission::{
     PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory, TrustedFolderSet,
-    classify_risk, extract_target_paths, patch_target_paths,
+    classify_risk, extract_target_paths, is_sensitive_session_path, normalize_lexically,
+    patch_target_paths, path_within_dir, resolve_target_path,
 };
 pub use safety::SafetyVerdict;
 

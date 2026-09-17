@@ -3,14 +3,79 @@
 use serde_json::{Value, json};
 
 use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use qaqh_workspace::permission::{
+    is_sensitive_session_path, normalize_lexically, path_within_dir, resolve_target_path,
+};
+
+/// 远端文件接口的允许根（**上界**）：会话工作区根 + daemon 数据根。
+///
+/// `fs.list`/`fs.read` 的合法用途是浏览会话工作区（前端远端文件选择器）。
+/// 数据根承载会话/配置目录，其下的敏感会话文件（`sessions/**`、`meta.json`、
+/// `secrets.toml` …）仍由 [`is_sensitive_session_path`] 单独拦掉。
+pub(crate) fn allowed_roots(sessions: &qaqh_session::SessionManager) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    // 数据根（会话/配置目录）。
+    roots.push(qaqh_types::platform::data_dir());
+    // UI 工作区注册表（组织语义，与运行环境 workspace 解耦）。注册表尚未
+    // 装配时跳过，而不是 panic（远端浏览不应因初始化顺序失败）。
+    if let Some(store) = qaqh_session::WorkspaceStore::try_global() {
+        for ws in store.list() {
+            if !ws.path.is_empty() {
+                roots.push(PathBuf::from(ws.path));
+            }
+        }
+    }
+    // 会话工作区：meta.cwd（覆盖未注册为 UI workspace 的会话）。旧版在非
+    // Windows 上写坏的 `\` 形态 cwd 读取时归一化，避免合法工作区被漏判。
+    for meta in sessions.list() {
+        if let Some(cwd) = meta.cwd.as_deref().filter(|c| !c.is_empty()) {
+            roots.push(PathBuf::from(
+                qaqh_session::grouping::repair_legacy_backslash_cwd(cwd),
+            ));
+        }
+    }
+    roots
+}
+
+/// 远端文件接口的路径白名单判定（T-2-1 / 安全审查 P0-1）。
+///
+/// - 先按 `is_sensitive_session_path` 拒掉会话私有数据（与 `needs_permission`
+///   共用同一名单，单一事实源）；
+/// - 再把路径与每个允许根做**组件级**比较（`path_within_dir`），软链接经
+///   `resolve_target_path` 解析、`..` 逃逸由 `normalize_lexically` 吃掉；
+/// - 任一根命中即放行；无一命中返回 `false`（fail-closed）。
+fn path_allowed(sessions: &qaqh_session::SessionManager, path: &Path) -> bool {
+    if is_sensitive_session_path(path) {
+        return false;
+    }
+    let normalized = normalize_lexically(&resolve_target_path(path.to_path_buf()));
+    allowed_roots(sessions).iter().any(|root| {
+        let root = normalize_lexically(&resolve_target_path(root.clone()));
+        path_within_dir(&normalized, &root)
+    })
+}
+
+/// 白名单拒绝的统一错误串：daemon 侧据 `FORBIDDEN` 前缀映射为 `forbidden`
+/// 码，与 IO 失败（文件不存在/权限不足）区分开。
+fn forbidden(kind: &str, path: &str) -> String {
+    format!("FORBIDDEN: {kind} {path}: path is outside the allowed roots")
+}
 
 /// `fs.list`：目录条目（目录优先 + 名称排序），返回 daemon 侧绝对路径。
 ///
-/// 临时跨端版本有意不做路径沙箱/权限校验，只要求绝对路径。
-pub(crate) fn list_remote_directory(path: &str) -> Result<Value, String> {
+/// 路径必须落在 [`allowed_roots`]（会话工作区根 + 数据根）内。
+pub(crate) fn list_remote_directory(
+    sessions: &qaqh_session::SessionManager,
+    path: &str,
+) -> Result<Value, String> {
     let dir = std::path::Path::new(path);
     if !dir.is_absolute() {
         return Err("fs.list requires an absolute path".to_string());
+    }
+    if !path_allowed(sessions, dir) {
+        return Err(forbidden("fs.list", path));
     }
     let mut entries: Vec<Value> = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|e| format!("fs.list {path}: {e}"))? {
@@ -65,10 +130,19 @@ pub(crate) fn list_remote_directory(path: &str) -> Result<Value, String> {
 
 /// `fs.read`：文本预览。读满 `max_bytes + 1` 以判断截断；内容按 UTF-8
 /// lossy 返回（临时版不处理二进制编码协商）。
-pub(crate) fn read_remote_file(path: &str, max_bytes: u64) -> Result<Value, String> {
+///
+/// 路径必须落在 [`allowed_roots`]（会话工作区根 + 数据根）内。
+pub(crate) fn read_remote_file(
+    sessions: &qaqh_session::SessionManager,
+    path: &str,
+    max_bytes: u64,
+) -> Result<Value, String> {
     let file_path = std::path::Path::new(path);
     if !file_path.is_absolute() {
         return Err("fs.read requires an absolute path".to_string());
+    }
+    if !path_allowed(sessions, file_path) {
+        return Err(forbidden("fs.read", path));
     }
     let meta = std::fs::metadata(file_path).map_err(|e| format!("fs.read {path}: {e}"))?;
     if !meta.is_file() {

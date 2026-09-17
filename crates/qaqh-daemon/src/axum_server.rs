@@ -3,7 +3,7 @@
 
 mod axum_impl;
 
-pub use axum_impl::{AppState, build_router};
+pub use axum_impl::{AppState, DebugNonceStore, build_router};
 
 #[cfg(test)]
 
@@ -83,6 +83,7 @@ mod sse_tests {
                 .clone(),
             token: TOKEN.into(),
             epoch: "lag-epoch".into(),
+            debug_nonces: std::sync::Arc::new(DebugNonceStore::new()),
             shutdown,
         }
     }
@@ -371,6 +372,7 @@ mod axum_tests {
             service,
             token: String::from("test-token"),
             epoch: String::from("test-epoch"),
+            debug_nonces: std::sync::Arc::new(DebugNonceStore::new()),
             shutdown,
         }
     }
@@ -680,8 +682,9 @@ mod axum_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// P0-3：桥脚本只下发一次性 nonce，绝不内联真实 token。
     #[tokio::test]
-    async fn debug_bridge_returns_token() {
+    async fn debug_bridge_returns_nonce_not_token() {
         let app = build_router(test_state());
         let req = Request::builder()
             .uri("/debug/__qaqh_bridge__.js")
@@ -697,7 +700,110 @@ mod axum_tests {
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         let txt = String::from_utf8_lossy(&body);
         assert!(txt.contains("window.__QAQH_DEBUG__"));
-        assert!(txt.contains("test-token"));
+        assert!(txt.contains("nonce"));
+        assert!(
+            !txt.contains("test-token"),
+            "bridge must not inline the daemon token: {txt}"
+        );
+    }
+
+    /// `/health` 不再回显 `token_len`（凭据长度也是旁路信息）。
+    #[tokio::test]
+    async fn health_does_not_leak_token() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let txt = String::from_utf8_lossy(&body);
+        assert!(txt.contains("ok epoch="), "{txt}");
+        assert!(!txt.contains("token"), "/health must not mention token: {txt}");
+    }
+
+    /// nonce 一次性兑换：第一次成功、第二次（同 nonce）作废。
+    #[tokio::test]
+    async fn debug_token_exchange_is_one_time() {
+        let state = test_state();
+        let app = build_router(state);
+        // 1) 取桥脚本里的 nonce。
+        let bridge = Request::builder()
+            .uri("/debug/__qaqh_bridge__.js")
+            .header("host", "127.0.0.1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(bridge).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let txt = String::from_utf8_lossy(&body);
+        let nonce = txt
+            .split("\"nonce\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("bridge body must carry a nonce")
+            .to_string();
+
+        // 2) 兑换成功并拿到真实 token。
+        let exchange = |nonce: String| {
+            Request::builder()
+                .method("POST")
+                .uri("/debug/__qaqh_token__")
+                .header("host", "127.0.0.1")
+                .header("sec-fetch-site", "same-origin")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "nonce": nonce }).to_string(),
+                ))
+                .unwrap()
+        };
+        let resp = app.clone().oneshot(exchange(nonce.clone())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("cache-control").map(|v| v.as_bytes()),
+            Some(b"no-store".as_slice()),
+            "token exchange must not be cacheable"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["token"], serde_json::json!("test-token"));
+
+        // 3) 同一 nonce 再用一次 → 403。
+        let resp = app.oneshot(exchange(nonce)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// 跨站 `Sec-Fetch-Site` 的兑换请求必须被拒（DNS rebinding 兜底）。
+    #[tokio::test]
+    async fn debug_token_exchange_rejects_cross_site() {
+        let state = test_state();
+        let app = build_router(state);
+        let bridge = Request::builder()
+            .uri("/debug/__qaqh_bridge__.js")
+            .header("host", "127.0.0.1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(bridge).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let txt = String::from_utf8_lossy(&body);
+        let nonce = txt
+            .split("\"nonce\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("bridge body must carry a nonce")
+            .to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/debug/__qaqh_token__")
+            .header("host", "127.0.0.1")
+            .header("sec-fetch-site", "cross-site")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "nonce": nonce }).to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
