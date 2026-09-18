@@ -85,6 +85,7 @@ pub fn aggregate_entry(timeout: std::time::Duration) -> (String, DynamicTool) {
     };
     let entry = DynamicTool {
         def,
+        effective_name: None,
         handler_fn: aggregate_dispatch,
         category: qaqh_workspace::ToolCategory::Read,
         // mcp `mcp` 同款：risk 恒 Administrative，真实风险由 category 裁决。
