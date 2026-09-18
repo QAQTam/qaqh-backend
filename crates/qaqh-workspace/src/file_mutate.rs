@@ -395,6 +395,8 @@ handler_from_string!(handle_delete_file, exec_delete_file);
 // ── Registration ──
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("write", crate::display::project_write);
+    mgr.register_display("delete", crate::display::project_delete);
     mgr.register(ToolHandler {
         key: "write".to_string(),
         description: "Write/overwrite/append file (full content). Summary only; dry_run previews diff; use edit for targeted changes.",

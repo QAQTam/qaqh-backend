@@ -362,6 +362,7 @@ handler!(handle_grep, exec_grep);
 // ── Registration ──
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("grep", crate::display::project_grep);
     mgr.register(ToolHandler {
             key: "grep".to_string(),
             description: "Search file contents (ripgrep, regex). Returns path:line:content; use glob to filter files; max_results capped.",

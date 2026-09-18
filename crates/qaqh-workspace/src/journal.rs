@@ -458,6 +458,7 @@ fn handle_journal(ctx: crate::ToolCallCtx) -> crate::ToolResult {
 
 /// Register the `journal` workspace tool.
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("journal", crate::display::project_journal);
     mgr.register(crate::ToolHandler {
             key: "journal".to_string(),
             description: "Query/replay session journal (SMJ): query list, export dump, replay restore.",

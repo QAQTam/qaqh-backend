@@ -75,10 +75,10 @@ fn normalize_carriage_returns(text: &str) -> String {
     for line in normalized.split('\n') {
         if let Some(first_cr) = line.find('\r') {
             let _ = first_cr;
-            match line.rsplit('\r').find(|segment| !segment.is_empty()) {
-                Some(segment) => lines.push(segment),
+            if let Some(segment) = line.rsplit('\r').find(|segment| !segment.is_empty()) {
+                lines.push(segment)
+            } else {
                 // 纯 `\r` 行：没有有效内容，整行丢弃。
-                None => {}
             }
         } else {
             lines.push(line);
@@ -171,7 +171,10 @@ mod tests {
                 truncated: false,
             }
         );
-        assert_eq!(display.summary.as_deref(), Some("exit 0 · bash cargo check"));
+        assert_eq!(
+            display.summary.as_deref(),
+            Some("exit 0 · bash cargo check")
+        );
         assert!(!display.summary.as_deref().unwrap_or("").contains('{'));
     }
 
@@ -199,17 +202,20 @@ mod tests {
     }
 
     #[test]
-    fn builtin_manager_registers_exec_projector_only() {
+    fn builtin_manager_registers_contracted_projectors() {
         let manager = crate::registration::build_tool_manager(&[]);
         let args = serde_json::json!({"command": "ls"});
-        let output =
-            r#"{"status":"completed","exit_code":0,"output":"ok","truncated":false,"timed_out":false}"#;
+        let output = r#"{"status":"completed","exit_code":0,"output":"ok","truncated":false,"timed_out":false}"#;
         let display = manager
             .project_display("exec", &args, output)
             .expect("exec projector must be registered by exec::register");
         assert!(display.summary.is_some());
         assert!(
-            manager.project_display("read", &args, output).is_none(),
+            manager.project_display("read", &args, "L1: ok").is_some(),
+            "契约 §6.1 的文件读取投影必须可用"
+        );
+        assert!(
+            manager.project_display("skills", &args, output).is_none(),
             "未迁移工具必须保持 display=None，client 完整回退"
         );
     }

@@ -122,6 +122,7 @@ fn web_fetch(args: &serde_json::Value, timeout_secs: u64) -> String {
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("web_fetch", crate::display::project_web_fetch);
     mgr.register(ToolHandler { key: "web_fetch".to_string(),
         description: "Fetch URL (http). Plain HTTP; web_search is server-side built-in.",
         input_schema: serde_json::json!({"type":"object","properties":{"url":{"type":"string","description":"URL"},"output":{"type":"string","description":"Save to file (optional)"}},"required":["url"],"additionalProperties":false}),

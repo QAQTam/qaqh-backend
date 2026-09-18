@@ -339,6 +339,7 @@ pub(crate) fn handle_edit(ctx: ToolCallCtx) -> ToolResult {
 }
 
 pub fn register(mgr: &mut ToolManager) {
+    mgr.register_display("edit", crate::display::project_edit);
     mgr.register(ToolHandler {
             key: "edit".to_string(),
             description: "File editor (hunk-based, content-matched, supports replace_all). Kinds: replace(old/new), prepend_file(new), append_file(new). 'old' is WHOLE-LINE: give the complete line(s) to replace — for an in-line change, pass the entire line as 'old' and the edited entire line as 'new' (an in-line fragment of 'old' is rejected). Use the shortest unique whole-line old; supports context_before/context_after, hint_line, expected_hash, dry_run+confirm_apply.",

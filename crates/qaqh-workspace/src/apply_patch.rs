@@ -248,6 +248,7 @@ pub(crate) const DESCRIPTION: &str = "Apply Codex-format patch (*** Begin Patch)
      occurrence is edited (silently) and the result still reports [OK].";
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("apply_patch", crate::display::project_apply_patch);
     mgr.register(ToolHandler {
         key: "apply_patch".to_string(),
         description: DESCRIPTION,

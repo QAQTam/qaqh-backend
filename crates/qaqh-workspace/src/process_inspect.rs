@@ -10,6 +10,7 @@ use crate::{
 };
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("process", crate::display::project_process);
     mgr.register(crate::ToolHandler {
         key: "process".into(),
         description: "Control backgrounded process: check/wait/write/kill.",

@@ -182,6 +182,9 @@ type SplitTool = (
 );
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("todo_write", crate::display::project_todo_write);
+    mgr.register_display("todo_update", crate::display::project_todo_update);
+    mgr.register_display("todo_list", crate::display::project_todo_list);
     let tools: [SplitTool; 3] = [
         (
             "todo_write",
