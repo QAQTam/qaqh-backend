@@ -119,6 +119,7 @@ pub fn build_dynamic_tool(
         name.clone(),
         DynamicTool {
             def,
+            effective_name: Some(tool_name.to_owned()),
             handler_fn,
             category,
             risk: ToolRisk::Administrative,
@@ -137,6 +138,8 @@ pub fn build_dynamic_tool(
 pub struct DynamicTool {
     /// 模型面（`mcp__{server}__{tool}` 命名 + schema 直通 + 截断后描述）。
     pub def: qaqh_types::ToolDef,
+    /// 上游工具原名；动态注册条目由此写入，静态工具保持 None。
+    pub effective_name: Option<String>,
     /// 路由 fn（MCP 全体工具指向同一个 dispatcher，E-5）。
     pub handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
     /// 能力类别（S3：stdio=Exec / http=Net）——权限决策单一事实源。
@@ -155,6 +158,7 @@ pub struct DynamicTool {
 pub(crate) struct PreparedCall {
     pub(crate) id: String,
     pub(crate) name: String,
+    pub(crate) effective_tool_name: Option<String>,
     pub(crate) handler_fn: fn(crate::ToolCallCtx) -> crate::ToolResult,
     pub(crate) ctx: crate::ToolCallCtx,
     pub(crate) audit_args: serde_json::Value,
@@ -352,6 +356,7 @@ impl ToolManager {
             default_timeout: Duration,
             risk: ToolRisk,
             category: crate::permission::ToolCategory,
+            effective_tool_name: Option<String>,
         }
         let route = match self.handlers.get(name) {
             Some(handler) => ResolvedRoute {
@@ -359,6 +364,7 @@ impl ToolManager {
                 default_timeout: handler.default_timeout,
                 risk: handler.risk.clone(),
                 category: handler.category,
+                effective_tool_name: None,
             },
             None => match self.dynamic.get(name) {
                 Some(tool) => ResolvedRoute {
@@ -366,6 +372,7 @@ impl ToolManager {
                     default_timeout: tool.default_timeout,
                     risk: tool.risk.clone(),
                     category: tool.category,
+                    effective_tool_name: tool.effective_name.clone(),
                 },
                 None => {
                     let msg = format!("[ERROR] Unknown tool: {}", name);
@@ -435,6 +442,7 @@ impl ToolManager {
         Ok(PreparedCall {
             id,
             name: name.to_string(),
+            effective_tool_name: route.effective_tool_name,
             handler_fn: route.handler_fn,
             ctx,
             audit_args,
@@ -792,6 +800,7 @@ mod tests {
             )
             .map_err(|report| report.content)
             .expect("dynamic tool prepare should succeed");
+        assert_eq!(prepared.effective_tool_name.as_deref(), Some("echo"));
         assert_eq!(
             prepared.handler_fn as *const () as usize, marker_fn as *const () as usize,
             "路由必须指向注入的 dispatcher fn（E-5 单一 fn 指针）"

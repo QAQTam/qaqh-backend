@@ -85,6 +85,7 @@ pub fn aggregate_entry(timeout: Duration) -> (String, DynamicTool) {
     };
     let entry = DynamicTool {
         def,
+        effective_name: None,
         handler_fn: aggregate_dispatch,
         category: qaqh_workspace::ToolCategory::Read,
         // 与 per-server 工具同构（§5.5）：risk 恒 Administrative（无条件
