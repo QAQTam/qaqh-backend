@@ -110,6 +110,7 @@ handler!(handle_glob, exec_glob);
 // ── Registration ──
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("glob", crate::display::project_glob);
     mgr.register(ToolHandler {
         key: "glob".to_string(),
         description: "List files by glob (gitignore-aware, native). Pattern vs rg -g.",

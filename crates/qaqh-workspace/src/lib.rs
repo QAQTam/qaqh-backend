@@ -6,6 +6,7 @@ pub mod confirm_apply;
 pub mod conflict;
 pub mod copy_range;
 pub mod dashboard;
+pub mod display;
 pub mod exec;
 pub mod grep_tool;
 pub mod pending;
@@ -557,7 +558,10 @@ impl ExecProgressSender {
             .emitted_bytes
             .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed)
             + bytes;
-        event.bytes_total = emitted + self.dropped_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        event.bytes_total = emitted
+            + self
+                .dropped_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
         if self.tx.try_send(event).is_err() {
             // 通道满：这批字节未被消费，从 emitted 挪到 dropped（总量口径不变）。
             self.emitted_bytes

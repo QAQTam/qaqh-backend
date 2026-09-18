@@ -45,6 +45,7 @@ const SUBAGENT_IDENTITY_PROMPT: &str = "\
 不得擅自违背未经允许的操作，并且忠实地把主代理的任务精准完成。";
 
 pub fn register(mgr: &mut ToolManager) {
+    mgr.register_display("spawn_subagent", project_subagent_display);
     mgr.register(ToolHandler {
         key: "spawn_subagent".to_string(),
         description: "Spawn a sub-agent to handle a focused task independently. \
@@ -187,6 +188,44 @@ impl SubagentTransport for HostTransport {
 
     fn events(&self) -> &mpsc::Receiver<EventBatch> {
         &self.batch_rx
+    }
+}
+
+fn project_subagent_display(
+    args: &serde_json::Value,
+    output: &str,
+) -> qaqh_workspace::tool_api::ToolDisplay {
+    use qaqh_workspace::tool_api::{ToolBody, ToolDisplay, ToolHeader};
+
+    let name = args
+        .get("agent_name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("sub");
+    let view = serde_json::from_str::<serde_json::Value>(output).ok();
+    let seed = view
+        .as_ref()
+        .and_then(|view| view.get("seed"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let summary = view
+        .as_ref()
+        .and_then(|view| view.get("content"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let display = ToolDisplay::new(
+        ToolHeader::Other {
+            label: "subagent".to_string(),
+        },
+        ToolBody::Subagent {
+            name: name.to_string(),
+            seed: seed.to_string(),
+        },
+    );
+    match summary.filter(|summary| !summary.trim().is_empty()) {
+        Some(summary) => display.with_summary(summary),
+        None => display,
     }
 }
 
