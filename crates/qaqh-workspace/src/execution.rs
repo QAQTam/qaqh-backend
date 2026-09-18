@@ -121,6 +121,9 @@ pub fn execute_authorized(
     let success = tool_result.is_success();
     let mut canonical = tool_result.clone();
 
+    // PreparedCall 要整体交给 finalize 清理 inflight；effective name 先取出。
+    let effective_tool_name = prepared.effective_tool_name.clone();
+
     // Phase 3: finalize while holding the manager lock again.
     let report = crate::runtime::with_manager(|manager| {
         manager.finalize_req(prepared, tool_result, elapsed_ms)
@@ -137,7 +140,7 @@ pub fn execute_authorized(
                 elapsed_ms: Some(report.meta.elapsed_ms),
                 output_bytes: report.meta.output_size as u64,
                 retry_count: 0,
-                effective_tool_name: None,
+                effective_tool_name,
                 user_initiated: false,
             };
             let result = ToolExecResult {
@@ -330,6 +333,40 @@ mod tests {
         });
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         test_guard
+    }
+
+    #[test]
+    fn mcp_dynamic_execution_keeps_upstream_tool_name_in_metrics() {
+        let _test_guard = setup_test_manager();
+        let (full_name, dynamic_tool) = crate::build_dynamic_tool(
+            "demo",
+            "echo",
+            "test dynamic tool",
+            serde_json::json!({"type":"object"}),
+            test_counter_handler,
+            crate::permission::ToolCategory::Exec,
+            Duration::from_secs(30),
+        );
+        let rejected =
+            crate::runtime::replace_dynamic_tools(vec![(full_name.clone(), dynamic_tool)]);
+        assert_eq!(rejected, 0, "MCP test projection must register");
+
+        let result = execute_with_context(
+            &full_name,
+            "",
+            r#"{}"#,
+            "mcp-metrics-call",
+            None,
+            &crate::runtime::ToolCtx::admitted("test_session"),
+        );
+
+        assert!(result.success, "{}", result.content);
+        assert_eq!(result.meta.name, full_name);
+        assert_eq!(
+            result.result.metrics.effective_tool_name.as_deref(),
+            Some("echo"),
+            "display metrics must carry the upstream MCP tool name"
+        );
     }
 
     #[test]
