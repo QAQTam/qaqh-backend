@@ -172,6 +172,7 @@ pub(super) fn exec_ask_user(args: &serde_json::Value) -> ToolResult {
 handler!(handle_ask_user, exec_ask_user);
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("ask", crate::display::project_ask);
     mgr.register(ToolHandler {
         key: "ask".to_string(),
         description: "Ask user questions (Ringing interaction).",

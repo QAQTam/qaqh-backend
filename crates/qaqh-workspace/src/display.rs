@@ -296,6 +296,98 @@ pub(crate) fn project_todo_list(_args: &serde_json::Value, output: &str) -> Tool
     todo_display("todo", output)
 }
 
+/// ask 的结果由 interaction 面板承载；display 只留一条调用语义。
+pub(crate) fn project_ask(args: &serde_json::Value, _output: &str) -> ToolDisplay {
+    let count = args
+        .get("questions")
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or(1);
+    ToolDisplay::new(
+        ToolHeader::Other {
+            label: "ask".to_string(),
+        },
+        ToolBody::None,
+    )
+    .with_summary(format!(
+        "asked {count} question{}",
+        if count == 1 { "" } else { "s" }
+    ))
+}
+
+/// skills 的 activate/list/resource/validate 输出各自有明确回执语义。
+pub(crate) fn project_skills(args: &serde_json::Value, output: &str) -> ToolDisplay {
+    let action = args
+        .get("action")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("skills");
+    let name = args
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let path = args
+        .get("path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let label = format!("skills {action}");
+
+    let body = if action == "resource" {
+        text_body(&human_body(output))
+    } else {
+        ToolBody::None
+    };
+    let display = ToolDisplay::new(ToolHeader::Other { label }, body);
+
+    let view = json_view(output);
+    let summary = match action {
+        "activate" => json_string(view.as_ref(), &["content", "message"]),
+        "resource" => Some(match (name, path) {
+            (Some(name), Some(path)) => format!("resource · {name}/{path}"),
+            (Some(name), None) => format!("resource · {name}"),
+            _ => "resource".to_string(),
+        }),
+        "list" => {
+            let skills = view
+                .as_ref()
+                .and_then(|view| view.get("skills"))
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            let diagnostics = view
+                .as_ref()
+                .and_then(|view| view.get("diagnostics"))
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            Some(format!(
+                "listed {skills} skills · {diagnostics} diagnostics"
+            ))
+        }
+        "validate" => {
+            let valid = view
+                .as_ref()
+                .and_then(|view| view.get("valid"))
+                .and_then(|value| value.as_bool());
+            let errors = view
+                .as_ref()
+                .and_then(|view| view.get("errors"))
+                .and_then(|value| value.as_array())
+                .map(Vec::len);
+            match (valid, errors) {
+                (Some(true), _) => Some("validation passed".to_string()),
+                (Some(false), Some(count)) => Some(format!("validation failed · {count} errors")),
+                _ => json_summary(output),
+            }
+        }
+        _ => json_summary(output),
+    };
+    with_line_summary(display, summary.or_else(|| json_summary(output)))
+}
+
 pub(crate) fn project_process(args: &serde_json::Value, output: &str) -> ToolDisplay {
     let action = args
         .get("action")
@@ -408,6 +500,48 @@ mod tests {
         assert_eq!(display.body, ToolBody::None);
         assert_eq!(display.summary.as_deref(), Some("Updated 3 todo(s)"));
         assert!(!display.summary.as_deref().unwrap().starts_with('{'));
+    }
+
+    #[test]
+    fn ask_and_skills_use_panel_semantics_without_json_dumping() {
+        let ask = project_ask(
+            &json!({"questions": [{"question": "A?"}, {"question": "B?"}]}),
+            &crate::json_ok(json!({"mode":"batch"})),
+        );
+        assert_eq!(ask.summary.as_deref(), Some("asked 2 questions"));
+        assert_eq!(ask.body, ToolBody::None);
+
+        let activate = project_skills(
+            &json!({"action":"activate","name":"foo"}),
+            &crate::json_ok(json!({"skill":"foo","content":"[OK] skill 'foo' activated."})),
+        );
+        assert_eq!(
+            activate.summary.as_deref(),
+            Some("[OK] skill 'foo' activated.")
+        );
+        assert_eq!(activate.body, ToolBody::None);
+
+        let list = project_skills(
+            &json!({"action":"list"}),
+            r#"{"skills":[{},{}],"diagnostics":[]}"#,
+        );
+        assert_eq!(
+            list.summary.as_deref(),
+            Some("listed 2 skills · 0 diagnostics")
+        );
+
+        let resource = project_skills(
+            &json!({"action":"resource","name":"foo","path":"guide.md"}),
+            "use foo like this",
+        );
+        assert_eq!(resource.summary.as_deref(), Some("resource · foo/guide.md"));
+        assert_eq!(
+            resource.body,
+            ToolBody::Text {
+                text: "use foo like this".into(),
+                truncated: false
+            }
+        );
     }
 
     #[test]
