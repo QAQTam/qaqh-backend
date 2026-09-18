@@ -79,6 +79,25 @@ fn mcp_prefix_and_model_face_merge() {
     );
     assert!(defs[0].function.parameters.is_object());
 
+    let fallback = mgr
+        .project_display(
+            "mcp__demo__echo",
+            &serde_json::json!({"limit":3,"query":"rust"}),
+            "canonical output",
+        )
+        .expect("MCP fallback projection");
+    assert_eq!(
+        fallback.header,
+        qaqh_workspace::tool_api::ToolHeader::Other {
+            label: "mcp__demo__echo".into()
+        }
+    );
+    assert_eq!(fallback.body, qaqh_workspace::tool_api::ToolBody::None);
+    assert_eq!(
+        fallback.summary.as_deref(),
+        Some("args [limit=3, query=rust]")
+    );
+
     // 全量重建：clear 后动态层清空（M2 tools/list_changed 的入口语义）。
     mgr.clear_dynamic();
     assert!(mgr.all_defs().is_empty());

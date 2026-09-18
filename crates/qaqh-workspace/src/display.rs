@@ -296,6 +296,67 @@ pub(crate) fn project_todo_list(_args: &serde_json::Value, output: &str) -> Tool
     todo_display("todo", output)
 }
 
+/// MCP 动态工具没有工具作者专属投影时的 canonical fallback。
+///
+/// `label` 必须是完整注册名，多个 MCP 工具同屏时标题/身份才可区分。
+/// 正文保持 `None`：模型/展示的 `output` 是同一份 canonical 内容，wire 不双写。
+/// `summary` 携带紧凑参数摘要，让 client 可以删除通用 args 考古器。
+pub(crate) fn project_mcp_fallback(
+    name: &str,
+    args: &serde_json::Value,
+    _output: &str,
+) -> ToolDisplay {
+    let display = ToolDisplay::new(
+        ToolHeader::Other {
+            label: name.to_string(),
+        },
+        ToolBody::None,
+    );
+    let summary = compact_args_summary(args);
+    if summary.is_empty() {
+        display
+    } else {
+        display.with_summary(summary)
+    }
+}
+
+/// 紧凑参数摘要：最多取 3 个 primitive 字段，避免把任意 MCP args 全量上屏。
+///
+/// MCP server 的参数面是任意的；这里不猜 schema，只把模型调用时用户关心的
+/// 简单标量透出。空对象/复杂对象不产生伪造文本。
+fn compact_args_summary(args: &serde_json::Value) -> String {
+    const MAX_PARTS: usize = 3;
+    const MAX_VALUE_CHARS: usize = 40;
+    let Some(object) = args.as_object() else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    for (key, value) in object {
+        let rendered = match value {
+            serde_json::Value::String(text) if !text.is_empty() => {
+                let short: String = text.chars().take(MAX_VALUE_CHARS).collect();
+                let ellipsis = if text.chars().count() > MAX_VALUE_CHARS {
+                    "…"
+                } else {
+                    ""
+                };
+                format!("{key}={short}{ellipsis}")
+            }
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) => format!("{key}={value}"),
+            _ => continue,
+        };
+        parts.push(rendered);
+        if parts.len() >= MAX_PARTS {
+            break;
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("args [{}]", parts.join(", "))
+    }
+}
+
 /// ask 的结果由 interaction 面板承载；display 只留一条调用语义。
 pub(crate) fn project_ask(args: &serde_json::Value, _output: &str) -> ToolDisplay {
     let count = args
@@ -500,6 +561,38 @@ mod tests {
         assert_eq!(display.body, ToolBody::None);
         assert_eq!(display.summary.as_deref(), Some("Updated 3 todo(s)"));
         assert!(!display.summary.as_deref().unwrap().starts_with('{'));
+    }
+
+    #[test]
+    fn mcp_fallback_uses_full_registration_name_and_compact_args_only() {
+        let args = serde_json::json!({
+            "alpha": "z".repeat(45),
+            "beta": true,
+            "delta": 1,
+            "gamma": "dropped"
+        });
+        let display = project_mcp_fallback("mcp__demo__echo", &args, "canonical-output");
+        assert_eq!(
+            display.header,
+            ToolHeader::Other {
+                label: "mcp__demo__echo".into()
+            }
+        );
+        assert_eq!(display.body, ToolBody::None);
+        assert_eq!(
+            display.summary.as_deref(),
+            Some("args [alpha=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz…, beta=true, delta=1]")
+        );
+        assert!(!display.summary.as_deref().unwrap().contains("gamma"));
+
+        let empty = project_mcp_fallback("mcp__demo__noargs", &serde_json::json!({}), "");
+        assert_eq!(empty.summary, None);
+        assert_eq!(
+            empty.header,
+            ToolHeader::Other {
+                label: "mcp__demo__noargs".into()
+            }
+        );
     }
 
     #[test]
