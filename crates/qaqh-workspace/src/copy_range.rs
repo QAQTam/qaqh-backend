@@ -370,6 +370,7 @@ fn handle_copy_range(ctx: crate::ToolCallCtx) -> ToolResult {
 // ─────────────────────────────────────────────────────────────
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("copy_range", crate::display::project_copy_range);
     mgr.register(ToolHandler {
         key: "copy_range".to_string(),
         description: "Copy content range by line anchors (exact line match). source_start/source_end = range; mode=insert_after/before(need target_anchor) or append/prepend.",
