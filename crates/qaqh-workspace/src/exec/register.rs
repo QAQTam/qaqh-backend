@@ -21,6 +21,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
             .to_string()
             .into_boxed_str(),
     );
+    mgr.register_display("exec", super::display::project_display);
     mgr.register(ToolHandler {
         key: "exec".to_string(),
         description,

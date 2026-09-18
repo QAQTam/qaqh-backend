@@ -55,6 +55,9 @@ pub struct ToolManager {
     stats_failures: u32,
     files_read: Vec<String>,
     files_written: Vec<String>,
+    /// 工具作者声明的展示投影（09-18 展示契约 §3.4）。未注册 = 保持 None，
+    /// client 完整回退旧字段（H16）。
+    display_projectors: BTreeMap<String, crate::tool_api::ToolDisplayFn>,
 }
 
 /// 动态工具名前缀（S2：`mcp__{server}__{tool}`；与内置 19 工具零碰撞）。
@@ -175,12 +178,31 @@ impl ToolManager {
             stats_failures: 0,
             files_read: Vec::new(),
             files_written: Vec::new(),
+            display_projectors: BTreeMap::new(),
         }
     }
 
     pub fn register(&mut self, handler: ToolHandler) {
         let key = handler.key.clone();
         self.handlers.insert(key, handler);
+    }
+
+    /// 注册工具作者声明的展示投影（09-18 展示契约 §3.4）。
+    ///
+    /// 与 `handlers` 分离：投影是展示面扩展，未注册的工具在 timeline 上保持
+    /// `display = None`，由 client 回退旧字段。
+    pub fn register_display(&mut self, name: &str, projector: crate::tool_api::ToolDisplayFn) {
+        self.display_projectors.insert(name.to_string(), projector);
+    }
+
+    /// 按工具名调用展示投影；未声明投影时返回 `None`。
+    pub fn project_display(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        output: &str,
+    ) -> Option<crate::tool_api::ToolDisplay> {
+        self.display_projectors.get(name).map(|f| f(args, output))
     }
 
     /// 注册动态工具（MCP 投影入口；仅回合边界由 actor 调用——无并发写面）。

@@ -418,6 +418,18 @@ fn image_caps() -> Option<ImageCaps> {
 
 /// 查询 handler 声明的能力类别（权限决策单一事实源）。
 /// 未注册/未初始化返回 None——调用方回退保守默认（Write）。
+/// 按工具名调用作者声明的展示投影（09-18 展示契约 §3.4）。
+///
+/// 未注册投影、或当前线程没有可用 manager 时返回 `None`；调用方必须完整
+/// 回退旧字段（H16），不得自行解析工具输出。
+pub fn project_tool_display(
+    name: &str,
+    args: &serde_json::Value,
+    output: &str,
+) -> Option<crate::tool_api::ToolDisplay> {
+    with_manager(|manager| manager.project_display(name, args, output)).flatten()
+}
+
 pub fn lookup_category(name: &str) -> Option<crate::permission::ToolCategory> {
     // 内置 + 动态（MCP）两层：S3 沙箱按 category 拒绝必须覆盖 MCP 工具。
     with_manager(|manager| manager.category_of(name)).flatten()

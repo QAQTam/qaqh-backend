@@ -47,7 +47,7 @@ pub use state::DebugLevel;
 pub use tool_def::{ToolDef, ToolFunction};
 pub use tool_result::{
     ContentRef, TOOL_MODEL_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, ToolContinuation, ToolError,
-    ToolImage, ToolModelPayload, ToolResult, ToolStatus,
+    ToolImage, ToolModelPayload, ToolResult, ToolResultMetrics, ToolStatus,
 };
 
 // ── Unified arg parsers ──

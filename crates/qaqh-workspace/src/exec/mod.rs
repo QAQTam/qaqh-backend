@@ -7,6 +7,7 @@
 //!（测试经 `super::*` 可达）。
 
 pub mod direct;
+pub mod display;
 pub mod handler;
 pub mod pipe;
 pub mod register;

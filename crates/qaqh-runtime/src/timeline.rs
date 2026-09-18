@@ -9,8 +9,9 @@ use std::fmt;
 
 use qaqh_domain::{
     TimelineBlock, TimelineBlockKind, TimelineBlockState, TimelineEntry, TimelineEvent,
-    TimelineIntent, TimelineRound, TimelineSnapshot, TimelineTool, TimelineToolState, TimelineTurn,
-    TimelineTurnState,
+    TimelineIntent, TimelinePathOp, TimelineRound, TimelineSnapshot, TimelineTool,
+    TimelineToolBody, TimelineToolDisplay, TimelineToolHeader, TimelineToolMetrics,
+    TimelineToolState, TimelineTurn, TimelineTurnState,
 };
 
 /// A live Ringing V1 timeline delivery record. `entry.timeline_seq` is the sole SSE cursor for
@@ -114,15 +115,183 @@ impl fmt::Display for TimelineError {
 
 impl std::error::Error for TimelineError {}
 
-/// Build the bounded one-line summary shown for a tool result.
-pub(crate) fn tool_summary(output: &str) -> String {
-    output
-        .lines()
-        .next()
-        .unwrap_or("")
+/// Canonical tool summary projection (09-18 展示契约 §7.1)。
+///
+/// 优先级：
+/// 1. `display_summary`（Phase B 起的工具声明摘要，当前调用点传 `None`）；
+/// 2. legacy 输出的首个**非 JSON** 行；
+/// 3. `"{name} · {state}"` 兜底。
+///
+/// H1：任一路径产出的摘要命中 [`is_json_like_summary`] 都必须丢弃并降级，
+/// 保证 `TimelineTool.summary` 永远不是被截断的 JSON。
+pub(crate) fn project_tool_summary(
+    effective_name: &str,
+    state: TimelineToolState,
+    display_summary: Option<&str>,
+    legacy_output: Option<&str>,
+) -> String {
+    if let Some(summary) = display_summary.and_then(bounded_summary)
+        && !is_json_like_summary(&summary)
+    {
+        return summary;
+    }
+    if let Some(summary) = legacy_output.map(first_line_summary)
+        && !summary.is_empty()
+        && !is_json_like_summary(&summary)
+    {
+        return summary;
+    }
+    bounded_summary(&format!("{effective_name} · {}", state_label(state)))
+        .unwrap_or_else(|| effective_name.to_string())
+}
+
+/// H1 判定：摘要不得是 JSON object/array，也不得是它们的截断前缀。
+///
+/// 解析式判定覆盖完整 JSON；前缀判定覆盖被 `TOOL_SUMMARY_MAX_CHARS` 截断的
+/// `{...` / `[{...` / `["...`。`[2/5] Building` 这类人类文本不误伤。
+pub(crate) fn is_json_like_summary(summary: &str) -> bool {
+    let value = summary.trim();
+    if value.is_empty() {
+        return false;
+    }
+    if value.starts_with('{') {
+        return true;
+    }
+    if matches!(
+        serde_json::from_str::<serde_json::Value>(value),
+        Ok(parsed) if parsed.is_object() || parsed.is_array()
+    ) {
+        return true;
+    }
+    if let Some(rest) = value.strip_prefix('[') {
+        let rest = rest.trim_start();
+        if rest.starts_with('{') || rest.starts_with('[') || rest.starts_with('"') {
+            return true;
+        }
+    }
+    false
+}
+
+fn first_line_summary(output: &str) -> String {
+    bounded_summary(output.lines().next().unwrap_or("")).unwrap_or_default()
+}
+
+fn bounded_summary(value: &str) -> Option<String> {
+    let one_line: String = value
         .chars()
-        .take(qaqh_types::TOOL_SUMMARY_MAX_CHARS)
-        .collect()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = one_line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        trimmed
+            .chars()
+            .take(qaqh_types::TOOL_SUMMARY_MAX_CHARS)
+            .collect(),
+    )
+}
+
+fn state_label(state: TimelineToolState) -> &'static str {
+    match state {
+        TimelineToolState::Prepared => "prepared",
+        TimelineToolState::Running => "running",
+        TimelineToolState::Succeeded => "succeeded",
+        TimelineToolState::Failed => "failed",
+        TimelineToolState::Cancelled => "cancelled",
+        TimelineToolState::Backgrounded => "backgrounded",
+    }
+}
+
+/// 把 canonical `ToolResult.metrics` 填入展示投影（H4：框架填充，工具不写）。
+pub(crate) fn apply_result_metrics(
+    display: &mut qaqh_workspace::tool_api::ToolDisplay,
+    metrics: &qaqh_types::ToolResultMetrics,
+) {
+    display.metrics = qaqh_workspace::tool_api::ToolMetrics {
+        elapsed_ms: metrics.elapsed_ms,
+        output_bytes: metrics.output_bytes,
+        retry_count: metrics.retry_count,
+        effective_tool_name: metrics.effective_tool_name.clone(),
+        user_initiated: metrics.user_initiated,
+    };
+}
+
+/// SDK 内部展示投影 → wire 类型（09-18 契约 §3.4 的唯一映射点）。
+///
+/// `metrics` 仅在 `elapsed_ms` 已接线时出现；本期未接时 wire 为 `None`，
+/// client 回退旧字段（H16）。
+pub(crate) fn wire_display(
+    display: &qaqh_workspace::tool_api::ToolDisplay,
+) -> TimelineToolDisplay {
+    use qaqh_workspace::tool_api as sdk;
+
+    let header = match &display.header {
+        sdk::ToolHeader::None => None,
+        sdk::ToolHeader::Path { path, op } => Some(TimelineToolHeader::Path {
+            path: path.clone(),
+            op: match op {
+                sdk::PathOp::Read => TimelinePathOp::Read,
+                sdk::PathOp::Write => TimelinePathOp::Write,
+                sdk::PathOp::Edit => TimelinePathOp::Edit,
+                sdk::PathOp::List => TimelinePathOp::List,
+                sdk::PathOp::Patch => TimelinePathOp::Patch,
+                sdk::PathOp::Delete => TimelinePathOp::Delete,
+            },
+        }),
+        sdk::ToolHeader::Shell { command } => Some(TimelineToolHeader::Shell {
+            command: command.clone(),
+        }),
+        sdk::ToolHeader::Query { query, scope } => Some(TimelineToolHeader::Query {
+            query: query.clone(),
+            scope: scope.clone(),
+        }),
+        sdk::ToolHeader::Other { label } => Some(TimelineToolHeader::Other {
+            label: label.clone(),
+        }),
+    };
+
+    let body = match &display.body {
+        sdk::ToolBody::None => Some(TimelineToolBody::None),
+        sdk::ToolBody::Text { text, truncated } => Some(TimelineToolBody::Text {
+            text: text.clone(),
+            truncated: *truncated,
+        }),
+        sdk::ToolBody::Diff { unified, files } => Some(TimelineToolBody::Diff {
+            unified: unified.clone(),
+            files: files.clone(),
+        }),
+        sdk::ToolBody::Shell {
+            output,
+            exit_code,
+            truncated,
+        } => Some(TimelineToolBody::Shell {
+            output: output.clone(),
+            exit_code: *exit_code,
+            truncated: *truncated,
+        }),
+        sdk::ToolBody::Subagent { name, seed } => Some(TimelineToolBody::Subagent {
+            name: name.clone(),
+            seed: seed.clone(),
+        }),
+    };
+
+    let metrics = display.metrics.elapsed_ms.map(|elapsed_ms| TimelineToolMetrics {
+        elapsed_ms,
+        output_bytes: display.metrics.output_bytes,
+        retry_count: display.metrics.retry_count,
+        effective_tool_name: display.metrics.effective_tool_name.clone(),
+        user_initiated: display.metrics.user_initiated,
+    });
+
+    TimelineToolDisplay {
+        summary: display.summary.clone(),
+        diff: display.diff.clone(),
+        header,
+        body,
+        metrics,
+    }
 }
 
 /// Tool progress is a display tail, not a second copy of the complete tool
@@ -478,6 +647,12 @@ impl TimelineAppender {
         } else {
             next_tool.progress_truncated |= tool.progress_truncated;
         }
+        // 进度元数据是单调量：终态更新不携带时保留运行中累积的值。
+        if next_tool.progress_stream.is_none() {
+            next_tool.progress_stream = tool.progress_stream.clone();
+        }
+        next_tool.progress_bytes_total =
+            next_tool.progress_bytes_total.max(tool.progress_bytes_total);
         if next_tool.permission.is_none() {
             next_tool.permission = tool.permission.clone();
         }
@@ -496,6 +671,7 @@ impl TimelineAppender {
     /// Applies an append-only execution-output patch to an existing tool
     /// block. Identity, arguments, terminal output, and permission state stay
     /// untouched until their explicit lifecycle update arrives.
+    #[allow(clippy::too_many_arguments)] // stream/bytes_total 为 09-18 契约新增；参数面塑形另立项（PLAN D-5）
     pub fn append_tool_progress(
         &mut self,
         seed: &str,
@@ -503,6 +679,8 @@ impl TimelineAppender {
         round_num: u32,
         block_id: &str,
         mut chunk: String,
+        stream: Option<String>,
+        bytes_total: u64,
     ) -> Result<TimelineEntry, TimelineError> {
         let timeline = self.timeline_mut(seed)?;
         let round = existing_round_mut(timeline, turn_id, round_num)?;
@@ -518,6 +696,12 @@ impl TimelineAppender {
         let buffer_truncated = retain_utf8_tail(&mut tool.progress, TOOL_PROGRESS_MAX_BYTES);
         let truncated = chunk_truncated || buffer_truncated;
         tool.progress_truncated |= truncated;
+        if let Some(stream) = stream {
+            tool.progress_stream = Some(stream);
+        }
+        tool.progress_bytes_total = tool.progress_bytes_total.max(bytes_total);
+        let progress_stream = tool.progress_stream.clone();
+        let progress_bytes_total = tool.progress_bytes_total;
         Ok(next_entry(
             timeline,
             turn_id.to_string(),
@@ -526,6 +710,8 @@ impl TimelineAppender {
                 block_id: block_id.to_string(),
                 chunk,
                 truncated,
+                stream: progress_stream,
+                bytes_total: progress_bytes_total,
             },
         ))
     }
@@ -583,7 +769,17 @@ impl TimelineAppender {
                 round_num,
                 block_id,
                 chunk,
-            } => self.append_tool_progress(seed, &turn_id, round_num, &block_id, chunk),
+                stream,
+                bytes_total,
+            } => self.append_tool_progress(
+                seed,
+                &turn_id,
+                round_num,
+                &block_id,
+                chunk,
+                stream,
+                bytes_total,
+            ),
             TimelineIntent::BlockSealed {
                 turn_id,
                 round_num,
@@ -1008,6 +1204,9 @@ mod tests {
             diff: None,
             progress: String::new(),
             progress_truncated: false,
+            progress_stream: None,
+            progress_bytes_total: 0,
+            display: None,
             failure: None,
             permission: None,
         }
@@ -1201,6 +1400,39 @@ mod tests {
     }
 
     #[test]
+    fn tool_progress_carries_stream_and_cumulative_bytes_through_terminal_update() {
+        let mut appender = TimelineAppender::new();
+        appender.open_turn("s", "t", "question").unwrap();
+        appender
+            .open_block("s", "t", 0, "tool", TimelineBlockKind::Tool, Some(tool()))
+            .unwrap();
+        appender
+            .apply_intent(
+                "s",
+                TimelineIntent::ToolProgress {
+                    turn_id: "t".into(),
+                    round_num: 0,
+                    block_id: "tool".into(),
+                    chunk: "downloading…".into(),
+                    stream: Some("stdout".into()),
+                    bytes_total: 12_600,
+                },
+            )
+            .unwrap();
+
+        // 终态更新不携带进度元数据：必须保留运行中累积的值（单调）。
+        let mut final_tool = tool();
+        final_tool.state = TimelineToolState::Succeeded;
+        final_tool.output = Some("done".into());
+        appender.replace_tool("s", "t", 0, "tool", final_tool).unwrap();
+
+        let snapshot = appender.snapshot("s").unwrap();
+        let tool = snapshot.turns[0].rounds[0].blocks[0].tool.as_ref().unwrap();
+        assert_eq!(tool.progress_stream.as_deref(), Some("stdout"));
+        assert_eq!(tool.progress_bytes_total, 12_600);
+    }
+
+    #[test]
     fn tool_progress_survives_a_terminal_lifecycle_update() {
         let mut appender = TimelineAppender::new();
         appender.open_turn("s", "t", "question").unwrap();
@@ -1215,6 +1447,8 @@ mod tests {
                     round_num: 0,
                     block_id: "tool".into(),
                     chunk: "executing\\n".into(),
+                    stream: None,
+                    bytes_total: 0,
                 },
             )
             .unwrap();
@@ -1243,7 +1477,7 @@ mod tests {
 
         let chunk = format!("{}{}", "a".repeat(TOOL_PROGRESS_CHUNK_MAX_BYTES), "tail");
         let event = appender
-            .append_tool_progress("s", "t", 0, "tool", chunk)
+            .append_tool_progress("s", "t", 0, "tool", chunk, None, 0)
             .unwrap();
         assert!(matches!(
             event.event,
@@ -1263,6 +1497,8 @@ mod tests {
                     0,
                     "tool",
                     "x".repeat(TOOL_PROGRESS_CHUNK_MAX_BYTES),
+                    None,
+                    0,
                 )
                 .unwrap();
         }
@@ -1286,6 +1522,8 @@ mod tests {
                 0,
                 "tool",
                 "x".repeat(TOOL_PROGRESS_CHUNK_MAX_BYTES + 1),
+                None,
+                0,
             )
             .unwrap();
 
@@ -1320,13 +1558,79 @@ mod tests {
     }
 
     #[test]
-    fn tool_summary_uses_the_first_line_and_is_utf8_bounded() {
-        assert_eq!(tool_summary("first line\nsecond line"), "first line");
+    fn tool_summary_keeps_non_json_text_and_prefers_display_summary() {
+        assert_eq!(
+            project_tool_summary(
+                "read",
+                TimelineToolState::Succeeded,
+                None,
+                Some("src/lib.rs\n---\nbody"),
+            ),
+            "src/lib.rs"
+        );
+        assert_eq!(
+            project_tool_summary(
+                "exec",
+                TimelineToolState::Succeeded,
+                Some("exit 0 · cargo check"),
+                Some(r#"{"status":"completed"}"#),
+            ),
+            "exit 0 · cargo check"
+        );
+    }
 
-        let long = "界".repeat(qaqh_types::TOOL_SUMMARY_MAX_CHARS + 1);
-        let summary = tool_summary(&long);
+    #[test]
+    fn json_like_summaries_fall_back_to_name_and_state() {
+        let exec_json = r#"{"status":"completed","command":"bash -lc ls","exit_code":0,"output":"a\nb"}"#;
+        assert_eq!(
+            project_tool_summary("exec", TimelineToolState::Succeeded, None, Some(exec_json)),
+            "exec · succeeded"
+        );
+
+        // 被 512 字符截断的 JSON 前缀同样必须降级。
+        let truncated = r#"{"status":"completed","command":"bash -lc ls","output":"aaa"#;
+        assert_eq!(
+            project_tool_summary("exec", TimelineToolState::Failed, None, Some(truncated)),
+            "exec · failed"
+        );
+
+        // display summary 是 JSON 时也不采用，退回 legacy 文本。
+        assert_eq!(
+            project_tool_summary(
+                "todo_write",
+                TimelineToolState::Succeeded,
+                Some(r#"{"status":"ok","total":3}"#),
+                Some("Plan updated: 3 items"),
+            ),
+            "Plan updated: 3 items"
+        );
+    }
+
+    #[test]
+    fn json_like_detection_does_not_reject_human_brackets() {
+        assert!(!is_json_like_summary("[2/5] Building"));
+        assert!(!is_json_like_summary("read src/lib.rs"));
+        assert!(!is_json_like_summary(""));
+        assert!(is_json_like_summary(r#"[{"id":"T1"}]"#));
+        assert!(is_json_like_summary(r#"[{"id":"T1"#));
+        assert!(is_json_like_summary("[1, 2, 3]"));
+        assert!(is_json_like_summary("{not json but brace-prefixed}"));
+    }
+
+    #[test]
+    fn fallback_summary_is_bounded_and_never_empty() {
+        let long = "界".repeat(qaqh_types::TOOL_SUMMARY_MAX_CHARS + 10);
+        let summary = project_tool_summary("read", TimelineToolState::Succeeded, None, Some(&long));
         assert_eq!(summary.chars().count(), qaqh_types::TOOL_SUMMARY_MAX_CHARS);
-        assert_ne!(summary, long);
+
+        assert_eq!(
+            project_tool_summary("exec", TimelineToolState::Running, None, Some("")),
+            "exec · running"
+        );
+        assert_eq!(
+            project_tool_summary("exec", TimelineToolState::Backgrounded, None, None),
+            "exec · backgrounded"
+        );
     }
 
     #[test]
@@ -1701,7 +2005,7 @@ mod tests {
             .open_block("s", "t1", 0, "tool", TimelineBlockKind::Tool, Some(tool()))
             .unwrap();
         appender
-            .append_tool_progress("s", "t1", 0, "tool", "progress".into())
+            .append_tool_progress("s", "t1", 0, "tool", "progress".into(), None, 0)
             .unwrap();
         let mut final_tool = tool();
         final_tool.summary = Some("summary".into());
@@ -1793,5 +2097,74 @@ mod tests {
             over.as_secs_f64() * 1e6 / WINDOW as f64,
             over.as_secs_f64() / inside,
         );
+    }
+}
+
+#[cfg(test)]
+mod display_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn wire_display_maps_sdk_types_and_defers_metrics() {
+        use qaqh_workspace::tool_api as sdk;
+
+        let display = sdk::ToolDisplay::new(
+            sdk::ToolHeader::Shell {
+                command: "bash ls".into(),
+            },
+            sdk::ToolBody::Shell {
+                output: "ok".into(),
+                exit_code: Some(0),
+                truncated: false,
+            },
+        )
+        .with_summary("exit 0 · bash ls");
+        let wire = wire_display(&display);
+
+        assert_eq!(wire.summary.as_deref(), Some("exit 0 · bash ls"));
+        assert!(
+            matches!(wire.header, Some(TimelineToolHeader::Shell { ref command }) if command == "bash ls")
+        );
+        assert!(matches!(
+            wire.body,
+            Some(TimelineToolBody::Shell {
+                exit_code: Some(0),
+                ..
+            })
+        ));
+        assert!(wire.metrics.is_none(), "metrics 未接线时不得伪造");
+    }
+
+    #[test]
+    fn wire_display_emits_framework_metrics_once_elapsed_is_known() {
+        use qaqh_workspace::tool_api as sdk;
+
+        let mut display = sdk::ToolDisplay::new(
+            sdk::ToolHeader::Shell {
+                command: "bash ls".into(),
+            },
+            sdk::ToolBody::Shell {
+                output: "ok".into(),
+                exit_code: Some(0),
+                truncated: false,
+            },
+        )
+        .with_summary("exit 0 · bash ls");
+        apply_result_metrics(
+            &mut display,
+            &qaqh_types::ToolResultMetrics {
+                elapsed_ms: Some(1234),
+                output_bytes: 2,
+                retry_count: 0,
+                effective_tool_name: None,
+                user_initiated: true,
+            },
+        );
+        let wire = wire_display(&display);
+        let metrics = wire.metrics.expect("elapsed 已知时必须产出 metrics");
+        assert_eq!(metrics.elapsed_ms, 1234);
+        assert_eq!(metrics.output_bytes, 2);
+        assert!(metrics.user_initiated);
+        assert!(metrics.effective_tool_name.is_none());
     }
 }

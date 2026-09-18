@@ -442,6 +442,7 @@ pub(crate) fn send_progress(
             stream,
             seq: seq.fetch_add(1, Ordering::Relaxed),
             chunk,
+            bytes_total: 0,
         });
     }
 }

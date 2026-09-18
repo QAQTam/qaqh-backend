@@ -119,7 +119,7 @@ pub fn execute_authorized(
     };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let success = tool_result.is_success();
-    let canonical = tool_result.clone();
+    let mut canonical = tool_result.clone();
 
     // Phase 3: finalize while holding the manager lock again.
     let report = crate::runtime::with_manager(|manager| {
@@ -131,6 +131,15 @@ pub fn execute_authorized(
 
     match report {
         Some(report) => {
+            // 运行元数据由执行层统一落盘（H4）：elapsed/output size 只有这里
+            // 同时可知；`user_initiated` 由用户直调路径在返回后翻牌。
+            canonical.metrics = qaqh_types::ToolResultMetrics {
+                elapsed_ms: Some(report.meta.elapsed_ms),
+                output_bytes: report.meta.output_size as u64,
+                retry_count: 0,
+                effective_tool_name: None,
+                user_initiated: false,
+            };
             let result = ToolExecResult {
                 content: report.content,
                 success: report.success,

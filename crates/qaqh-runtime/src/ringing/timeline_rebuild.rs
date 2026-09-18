@@ -338,7 +338,23 @@ fn rebuild_tool(
             .filter(|output| !output.is_empty())
             .unwrap_or_else(|| "tool result missing in archived messages".into()),
     });
-    let summary = result.map(|result| crate::timeline::tool_summary(&result.output));
+    // 展示投影由工具作者声明；重建路径用归档 args 重新调用同一投影函数，
+    // 保证 live 与 rebuild 两条路径产出同形 display（契约 §7.1）。
+    let mut display = result.and_then(|result| {
+        let args = serde_json::from_str::<serde_json::Value>(&card.args_json).ok()?;
+        qaqh_workspace::runtime::project_tool_display(&card.name, &args, &result.output)
+    });
+    if let (Some(display), Some(result)) = (display.as_mut(), result) {
+        crate::timeline::apply_result_metrics(display, &result.metrics);
+    }
+    let summary = Some(crate::timeline::project_tool_summary(
+        &card.name,
+        state,
+        display
+            .as_ref()
+            .and_then(|display| display.summary.as_deref()),
+        result.map(|result| result.output.as_str()),
+    ));
     TimelineTool {
         tool_call_id: card.id.clone(),
         name: card.name.clone(),
@@ -349,6 +365,9 @@ fn rebuild_tool(
         diff: None,
         progress: String::new(),
         progress_truncated: false,
+        progress_stream: None,
+        progress_bytes_total: 0,
+        display: display.as_ref().map(crate::timeline::wire_display),
         failure,
         permission: None,
     }
@@ -380,6 +399,7 @@ mod tests {
                     success: true,
                     status: None,
                     file: None,
+                    metrics: Default::default(),
                 }],
                 blocks: vec![
                     RoundBlock::Reasoning {
@@ -475,6 +495,7 @@ mod tests {
             success: false,
             status: None,
             file: None,
+            metrics: Default::default(),
         }];
 
         let (snapshot, _) =
@@ -511,6 +532,7 @@ mod tests {
             success: false,
             status: Some(qaqh_types::ToolStatus::Cancelled),
             file: None,
+            metrics: Default::default(),
         }];
 
         let (snapshot, _) =
