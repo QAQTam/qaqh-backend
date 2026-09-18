@@ -89,6 +89,128 @@ pub struct TimelineToolPermission {
     pub consequence: String,
 }
 
+/// 类型化展示投影（09-18 跨仓展示契约 §3.3）。
+///
+/// 全部字段可选、可忽略；未知 header/body 变体解析为 `Unknown`，
+/// 旧 client 不会因为新变体丢整块。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct TimelineToolDisplay {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<TimelineToolHeader>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<TimelineToolBody>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<TimelineToolMetrics>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TimelineToolHeader {
+    Path {
+        path: String,
+        op: TimelinePathOp,
+    },
+    Shell {
+        command: String,
+    },
+    Query {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
+    Other {
+        label: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum TimelinePathOp {
+    Read,
+    Write,
+    Edit,
+    List,
+    Patch,
+    Delete,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for TimelinePathOp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "read" => Self::Read,
+            "write" => Self::Write,
+            "edit" => Self::Edit,
+            "list" => Self::List,
+            "patch" => Self::Patch,
+            "delete" => Self::Delete,
+            _ => Self::Unknown,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TimelineToolBody {
+    None,
+    Text {
+        text: String,
+        #[serde(default)]
+        truncated: bool,
+    },
+    Diff {
+        unified: String,
+        #[serde(default)]
+        files: Vec<String>,
+    },
+    Shell {
+        output: String,
+        /// 字段必须存在；前台 completed 必须为 Some，backgrounded/cancelled 允许 None。
+        #[serde(default)]
+        exit_code: Option<i32>,
+        #[serde(default)]
+        truncated: bool,
+    },
+    Subagent {
+        name: String,
+        seed: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct TimelineToolMetrics {
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub output_bytes: u64,
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_tool_name: Option<String>,
+    #[serde(default)]
+    pub user_initiated: bool,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 /// Immutable identity and mutable presentation state for one tool block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -119,6 +241,15 @@ pub struct TimelineTool {
     /// True once the writer discarded an older prefix of `progress`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub progress_truncated: bool,
+    /// 进度流标识（09-18 契约 §5.1）："stdout" | "stderr" | "mixed"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_stream: Option<String>,
+    /// 本次调用累计观测字节（emitted + dropped，含被尾部裁剪的部分）。
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub progress_bytes_total: u64,
+    /// 类型化展示投影；缺失时 client 完整回退旧字段（H16）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<TimelineToolDisplay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<TimelineFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,6 +370,12 @@ pub enum TimelineEvent {
         chunk: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         truncated: bool,
+        /// 进度流标识（"stdout" | "stderr"）；None = 未知/历史数据。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<String>,
+        /// 累计观测字节（emitted + dropped），0 = 未接线。
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        bytes_total: u64,
     },
     BlockSealed {
         block_id: String,
@@ -317,6 +454,12 @@ pub enum TimelineIntent {
         round_num: u32,
         block_id: String,
         chunk: String,
+        /// 进度流标识（"stdout" | "stderr" | "mixed"）；None = 未知。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<String>,
+        /// 累计观测字节（emitted + dropped），0 = 未接线。
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        bytes_total: u64,
     },
     BlockSealed {
         turn_id: String,
@@ -370,6 +513,9 @@ pub struct ToolResultDef {
     pub status: Option<qaqh_types::ToolStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<FileSnapshotInfo>,
+    /// 运行元数据（09-18 展示契约）。历史归档缺失时为空对象。
+    #[serde(default, skip_serializing_if = "qaqh_types::ToolResultMetrics::is_empty")]
+    pub metrics: qaqh_types::ToolResultMetrics,
 }
 
 /// File metadata snapshot for rich rendering.
@@ -430,4 +576,44 @@ pub enum RoundBlock {
     /// (Responses API). Shown as a record line; the search itself ran on the
     /// provider, so there is no local tool card or result round-trip.
     WebSearch { action: String },
+}
+
+#[cfg(test)]
+mod display_contract_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_timeline_tool_json_without_display_still_parses() {
+        let raw = r#"{"tool_call_id":"c1","name":"read","state":"succeeded","summary":"read src/lib.rs","progress":"","progress_truncated":false}"#;
+        let tool: TimelineTool = serde_json::from_str(raw).expect("legacy json must parse");
+        assert!(tool.display.is_none());
+        assert_eq!(tool.summary.as_deref(), Some("read src/lib.rs"));
+    }
+
+    #[test]
+    fn unknown_display_variants_and_path_ops_fall_back_to_unknown() {
+        let body: TimelineToolBody =
+            serde_json::from_str(r#"{"kind":"hologram","x":1}"#).expect("unknown body tolerated");
+        assert!(matches!(body, TimelineToolBody::Unknown));
+
+        let header: TimelineToolHeader =
+            serde_json::from_str(r#"{"kind":"wormhole"}"#).expect("unknown header tolerated");
+        assert!(matches!(header, TimelineToolHeader::Unknown));
+
+        let op: TimelinePathOp =
+            serde_json::from_str("\"frobnicate\"").expect("unknown op tolerated");
+        assert!(matches!(op, TimelinePathOp::Unknown));
+    }
+
+    #[test]
+    fn shell_body_serializes_exit_code_key_even_when_none() {
+        let body = TimelineToolBody::Shell {
+            output: String::new(),
+            exit_code: None,
+            truncated: false,
+        };
+        let json = serde_json::to_value(&body).expect("serialize");
+        assert!(json.get("exit_code").is_some(), "H2: key must exist");
+        assert!(json["exit_code"].is_null());
+    }
 }

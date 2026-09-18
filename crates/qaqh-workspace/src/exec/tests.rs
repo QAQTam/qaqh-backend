@@ -583,6 +583,8 @@ fn pipe_reader_forwards_retained_chunks_with_the_call_id() {
             stream: ExecOutputStream::Stdout,
             seq: 0,
             chunk: "first\nsecond\n".to_string(),
+            // sender 统一填写累计观测字节（含 dropped）；此处即本帧长度。
+            bytes_total: "first\nsecond\n".len() as u64,
         }]
     );
 }
@@ -765,9 +767,12 @@ fn bounded_progress_queue_drops_updates_without_blocking_pipe_readers() {
             stream: ExecOutputStream::Stdout,
             seq: seq as u64,
             chunk: "x".to_string(),
+            bytes_total: 0,
         });
     }
     assert_eq!(tx.dropped_bytes(), 1);
+    // 累计口径：256 帧入队 + 1 帧被丢弃 = 257 字节观测总量。
+    assert_eq!(tx.totals().total_bytes(), crate::EXEC_PROGRESS_CHANNEL_CAPACITY as u64 + 1);
 }
 
 /// 阶段 2（报告 P1）回归：process wait 阻塞期间收到取消旗标必须立即

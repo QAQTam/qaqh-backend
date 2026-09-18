@@ -15,6 +15,7 @@ use qaqh_domain::{AskMode, AskQuestion};
 
 use super::types::*;
 
+#[allow(clippy::too_many_arguments)] // display 为 09-18 契约新增参数；参数面塑形另立项（PLAN D-5）
 fn timeline_tool(
     tool_call_id: &str,
     name: &str,
@@ -23,17 +24,29 @@ fn timeline_tool(
     output: Option<String>,
     diff: Option<String>,
     failure: Option<qaqh_domain::TimelineFailure>,
+    display: Option<qaqh_workspace::tool_api::ToolDisplay>,
 ) -> qaqh_domain::TimelineTool {
+    let summary = crate::timeline::project_tool_summary(
+        name,
+        state,
+        display
+            .as_ref()
+            .and_then(|display| display.summary.as_deref()),
+        output.as_deref(),
+    );
     qaqh_domain::TimelineTool {
         tool_call_id: tool_call_id.to_string(),
         name: name.to_string(),
         state,
-        summary: output.as_deref().map(crate::timeline::tool_summary),
+        summary: Some(summary),
         args_json,
         output,
         diff,
         progress: String::new(),
         progress_truncated: false,
+        progress_stream: None,
+        progress_bytes_total: 0,
+        display: display.as_ref().map(crate::timeline::wire_display),
         failure,
         permission: None,
     }
@@ -45,6 +58,8 @@ fn emit_timeline_tool_progress(
     round_num: u32,
     tool_call_id: &str,
     chunk: String,
+    stream: Option<String>,
+    bytes_total: u64,
 ) {
     ctx.emitter
         .emit_timeline(qaqh_domain::TimelineIntent::ToolProgress {
@@ -52,6 +67,8 @@ fn emit_timeline_tool_progress(
             round_num,
             block_id: format!("tool:{tool_call_id}"),
             chunk,
+            stream,
+            bytes_total,
         });
 }
 
@@ -97,6 +114,7 @@ impl ToolEngine {
                     None,
                     None,
                     None,
+                    None,
                 ),
             });
     }
@@ -111,12 +129,19 @@ impl ToolEngine {
         args: &str,
         output: &str,
         status: qaqh_types::ToolStatus,
+        metrics: &qaqh_types::ToolResultMetrics,
         diff: Option<String>,
     ) {
         let failure = status.is_failure().then(|| qaqh_domain::TimelineFailure {
             code: "TOOL_EXECUTION_FAILED".into(),
             message: output.to_string(),
         });
+        let mut display = serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .and_then(|args| qaqh_workspace::runtime::project_tool_display(name, &args, output));
+        if let Some(display) = display.as_mut() {
+            crate::timeline::apply_result_metrics(display, metrics);
+        }
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::ToolUpdated {
                 turn_id: turn_id.to_string(),
@@ -130,6 +155,7 @@ impl ToolEngine {
                     Some(output.to_string()),
                     diff,
                     failure,
+                    display,
                 ),
             });
     }
@@ -221,6 +247,9 @@ impl ToolEngine {
                             diff: None,
                             progress: String::new(),
                             progress_truncated: false,
+                            progress_stream: None,
+                            progress_bytes_total: 0,
+                            display: None,
                             failure: None,
                             permission: Some(permission),
                         }),
@@ -467,6 +496,9 @@ impl ToolEngine {
                                 diff: None,
                                 progress: String::new(),
                                 progress_truncated: false,
+                                progress_stream: None,
+                                progress_bytes_total: 0,
+                                display: None,
                                 failure: None,
                                 permission: Some(qaqh_domain::TimelineToolPermission {
                                     reason: challenge.reason().to_string(),
@@ -587,6 +619,7 @@ impl ToolEngine {
                         None,
                         None,
                         None,
+                        None,
                     )),
                 });
         }
@@ -600,6 +633,7 @@ impl ToolEngine {
                     name,
                     qaqh_domain::TimelineToolState::Running,
                     Some(args.to_string()),
+                    None,
                     None,
                     None,
                     None,
@@ -652,7 +686,7 @@ impl ToolEngine {
         // Drain progress（tool_done 有界收尾，冻结事故 P0，见 drain_bounded）
         self.drain_progress_external(ctx, progress_rx, &turn_id, 0, || handle.is_finished());
 
-        let (tid, result, code_delta, skill_effects) = handle.join().unwrap_or_else(|_| {
+        let (tid, mut result, code_delta, skill_effects) = handle.join().unwrap_or_else(|_| {
             (
                 id.to_string(),
                 qaqh_types::ToolResult::error("[ERROR] tool thread panicked"),
@@ -660,6 +694,8 @@ impl ToolEngine {
                 Vec::new(),
             )
         });
+        // UI 直调路径：用户发起（权限批准后的续跑同属 UI 路径）。
+        result.metrics.user_initiated = true;
         let output = result.model_text().to_string();
         let status = result.status;
 
@@ -701,8 +737,9 @@ impl ToolEngine {
             ));
         }
 
-        // 展示平面 diff：先取出（ToolFinished 会 move 整个 result）。
+        // 展示平面 diff / metrics：先取出（ToolFinished 会 move 整个 result）。
         let display_diff = result.diff.clone();
+        let result_metrics = result.metrics.clone();
 
         ctx.emitter.emit_domain(qaqh_domain::DomainEvent::Tool(
             qaqh_domain::ToolEvent::ToolFinished {
@@ -717,6 +754,10 @@ impl ToolEngine {
             code: "TOOL_EXECUTION_FAILED".into(),
             message: output.clone(),
         });
+        let mut display = qaqh_workspace::runtime::project_tool_display(name, args, &output);
+        if let Some(display) = display.as_mut() {
+            crate::timeline::apply_result_metrics(display, &result_metrics);
+        }
         ctx.emitter
             .emit_timeline(qaqh_domain::TimelineIntent::ToolUpdated {
                 turn_id: turn_id.clone(),
@@ -730,6 +771,7 @@ impl ToolEngine {
                     Some(output.clone()),
                     display_diff,
                     failure,
+                    display,
                 ),
             });
         ctx.emitter
@@ -803,6 +845,8 @@ impl ToolEngine {
             round_num,
             &event.tool_call_id,
             event.chunk.clone(),
+            Some(event.stream.as_str().to_string()),
+            event.bytes_total,
         );
     }
 
@@ -836,6 +880,7 @@ impl ToolEngine {
                         None,
                         None,
                         None,
+                        None,
                     )),
                 });
         }
@@ -848,6 +893,7 @@ impl ToolEngine {
             args_json,
             &output,
             qaqh_types::ToolStatus::Error,
+            &qaqh_types::ToolResultMetrics::default(),
             None,
         );
         ctx.emitter
@@ -970,6 +1016,7 @@ mod drain_bounded_tests {
             stream: qaqh_workspace::ExecOutputStream::Stdout,
             seq: 0,
             chunk: chunk.to_string(),
+            bytes_total: 0,
         }
     }
 
@@ -1027,5 +1074,54 @@ mod drain_bounded_tests {
             },
         );
         assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod display_projection_tests {
+    use super::*;
+
+    #[test]
+    fn timeline_tool_prefers_declared_display_summary() {
+        let display = qaqh_workspace::tool_api::ToolDisplay::new(
+            qaqh_workspace::tool_api::ToolHeader::Shell {
+                command: "bash ls".into(),
+            },
+            qaqh_workspace::tool_api::ToolBody::Shell {
+                output: "ok".into(),
+                exit_code: Some(0),
+                truncated: false,
+            },
+        )
+        .with_summary("exit 0 · bash ls");
+        let tool = timeline_tool(
+            "c1",
+            "exec",
+            qaqh_domain::TimelineToolState::Succeeded,
+            Some(r#"{"shell":"bash","command":"ls"}"#.into()),
+            Some(r#"{"status":"completed","exit_code":0}"#.into()),
+            None,
+            None,
+            Some(display),
+        );
+        assert_eq!(tool.summary.as_deref(), Some("exit 0 · bash ls"));
+        assert!(tool.display.is_some());
+        assert!(!tool.summary.as_deref().unwrap_or("").contains('{'));
+    }
+
+    #[test]
+    fn timeline_tool_without_display_falls_back_to_non_json_summary() {
+        let tool = timeline_tool(
+            "c2",
+            "exec",
+            qaqh_domain::TimelineToolState::Succeeded,
+            None,
+            Some(r#"{"status":"completed","exit_code":0,"output":"ok"}"#.into()),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(tool.summary.as_deref(), Some("exec · succeeded"));
+        assert!(tool.display.is_none());
     }
 }
