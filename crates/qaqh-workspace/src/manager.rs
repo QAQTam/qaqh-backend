@@ -200,13 +200,21 @@ impl ToolManager {
     }
 
     /// 按工具名调用展示投影；未声明投影时返回 `None`。
+    ///
+    /// MCP per-server 工具是唯一的 canonical fallback：server 工具面任意，无法
+    /// 逐个手写投影。fallback 用完整注册名保住卡片身份，正文保持 `None` 以
+    /// 避免与 `TimelineTool.output` 双写；summary 携带紧凑 args。
     pub fn project_display(
         &self,
         name: &str,
         args: &serde_json::Value,
         output: &str,
     ) -> Option<crate::tool_api::ToolDisplay> {
-        self.display_projectors.get(name).map(|f| f(args, output))
+        if let Some(projector) = self.display_projectors.get(name) {
+            return Some(projector(args, output));
+        }
+        (self.dynamic.contains_key(name) && name.starts_with(crate::MCP_DYNAMIC_PREFIX))
+            .then(|| crate::display::project_mcp_fallback(name, args, output))
     }
 
     /// 注册动态工具（MCP 投影入口；仅回合边界由 actor 调用——无并发写面）。
