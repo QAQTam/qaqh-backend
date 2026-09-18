@@ -63,6 +63,11 @@ fn mcp_prefix_and_model_face_merge() {
     let mut mgr = ToolManager::new();
     let (name, tool) = echo_entry("demo", "echo", "echo back");
     assert_eq!(name, "mcp__demo__echo", "S2 前缀命名");
+    assert_eq!(
+        tool.effective_name.as_deref(),
+        Some("echo"),
+        "动态条目必须保留 MCP server 侧原名供 display.metrics 使用"
+    );
     mgr.register_dynamic(name, tool).expect("register");
 
     let defs = mgr.all_defs();
