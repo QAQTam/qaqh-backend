@@ -215,7 +215,9 @@ mod tests {
             "契约 §6.1 的文件读取投影必须可用"
         );
         assert!(
-            manager.project_display("skills", &args, output).is_none(),
+            manager
+                .project_display("read_image", &serde_json::json!({"path": "a.png"}), "image")
+                .is_none(),
             "未迁移工具必须保持 display=None，client 完整回退"
         );
     }

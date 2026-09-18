@@ -171,6 +171,7 @@ fn handle_skills(ctx: crate::ToolCallCtx) -> ToolResult {
 }
 
 pub fn register(mgr: &mut crate::ToolManager) {
+    mgr.register_display("skills", crate::display::project_skills);
     mgr.register(ToolHandler {
         key: "skills".to_string(),
         description: "Skills: activate/list/resource/validate. activate injects envelope as trailing system message.",
