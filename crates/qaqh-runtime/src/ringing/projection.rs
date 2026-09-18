@@ -522,6 +522,7 @@ fn build_turns(
                                 success: result.is_success(),
                                 status: Some(result.status),
                                 file: None,
+                                metrics: result.metrics.clone(),
                             })
                         } else {
                             None

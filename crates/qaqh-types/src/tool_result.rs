@@ -86,6 +86,44 @@ pub struct ToolImage {
     pub data: String,
 }
 
+/// 工具运行元数据（09-18 展示契约 §3.4 / base spec §11）。
+///
+/// `elapsed_ms = None` 表示本次结果未接线 metrics（授权拒绝、历史归档等）；
+/// 全空对象不序列化，旧 wire 保持不变。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ToolResultMetrics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub output_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub retry_count: u32,
+    /// 别名/MCP 解析后的实际工具名；None = 与卡片 name 相同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_initiated: bool,
+}
+
+impl ToolResultMetrics {
+    pub fn is_empty(&self) -> bool {
+        self.elapsed_ms.is_none()
+            && self.output_bytes == 0
+            && self.retry_count == 0
+            && self.effective_tool_name.is_none()
+            && !self.user_initiated
+    }
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ToolResult {
@@ -103,6 +141,9 @@ pub struct ToolResult {
     pub diff: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ToolError>,
+    /// 运行元数据（框架填充，工具实现不写）。
+    #[serde(default, skip_serializing_if = "ToolResultMetrics::is_empty")]
+    pub metrics: ToolResultMetrics,
 
     // ── 投影区（私有）──────────────────────────────────────────────
     //
@@ -234,6 +275,7 @@ impl ToolResult {
             diff: None,
             output_ref: None,
             error: None,
+            metrics: ToolResultMetrics::default(),
             images: Vec::new(),
         }
     }

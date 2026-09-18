@@ -75,6 +75,7 @@ pub(crate) fn emit_completed_tool_round(
             &args,
             content,
             result.status,
+            &result.metrics,
             result.diff.clone(),
         );
         // Ringing 双发：AuditRecorded（args 只进 content store，事件仅携带引用）
