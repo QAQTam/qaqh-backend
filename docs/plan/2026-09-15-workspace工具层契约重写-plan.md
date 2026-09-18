@@ -185,6 +185,11 @@ crates/qaqh-workspace/src/tool_api/
 - 定义 `TypedTool`、`ErasedTool`。
 - 定义 `ToolError`、`ToolErrorKind`、`FatalToolError`、`ToolExecutionError`。
 - 定义 `ToolOutput`、`ToolOutcome`、`ToolDisplay`、`ToolExecutionMetrics`。
+  ⚠ 展示结构（`ToolDisplay/Header/Body/Metrics` 与 wire 类型）以
+  [`spec/2026-09-18-工具结果展示契约-v1-spec.md`](../spec/2026-09-18-工具结果展示契约-v1-spec.md)
+  §3–§4 为准；按 09-17 旧草案实现两字段 `ToolDisplay` 属返工路径。
+- `ToolOutcome` 必须含可恢复错误的承载位（`error`）与 `ToolOutputValue`；
+  `ToolError` 必须含 `code`。
 - 定义 `ToolProgress`。
 
 验收：
@@ -362,14 +367,19 @@ ToolHandler
 
 修改：
 
-- `TimelineTool.summary` 使用 `ToolOutcome.display.summary`。
-- `TimelineTool.failure.code` 使用真实 ToolErrorKind。
-- `diff` 使用 `ToolOutcome.display.diff`。
+- `TimelineTool.summary` 使用 `ToolOutcome.display.summary`；缺失/非法时按
+  09-18 契约 §7.1 的 legacy fallback 合成 `"{name} · {state}"`（live 与 rebuild
+  共用同一函数）。
+- `TimelineTool.failure.code` 使用 `ToolError.code`。
+- `diff` 使用 `ToolOutcome.display.diff`，并与 legacy `TimelineTool.diff` 双写。
+- timeline 投影函数负责 `project_display(&ToolDisplay) -> TimelineToolDisplay`
+  的唯一映射（09-18 契约 §3.4）。
 
 验收：
 
-- 不再从 output 第一行构造 summary。
+- H1 对全部既有工具成立（含未迁移工具），不再从 output 第一行构造 summary。
 - ToolFinished 与 TimelineTool 的 status/failure 一致。
+- display 进快照；旧快照（无 display）与未知 body 变体均有兼容测试。
 
 ### P4 低风险工具迁移
 
