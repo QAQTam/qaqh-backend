@@ -18,6 +18,7 @@
 | 09-17 上午 | buglist 全量复核：20 份清单 91 条 → 54 条已修、5 条状态过期、2 条部分、29 条仍在生产、1 条描述与 HEAD 不符 | [`todo/2026-09-17-buglist复核-report.md`](./todo/2026-09-17-buglist复核-report.md) |
 | **09-17 16:41–19:41** | **九批次集中修复 + 后续待办收尾**（10 个提交，见 §2.1） | 下方 §2 |
 | 09-17 | 工具结果展示层契约 spec 补登（**草案待评审**） | [`spec/2026-09-17-工具结果展示层契约-spec.md`](./spec/2026-09-17-工具结果展示层契约-spec.md) |
+| **09-18** | **工具结果展示契约 v1（跨仓唯一事实源，评审阻塞项修复）** | [`spec/2026-09-18-工具结果展示契约-v1-spec.md`](./spec/2026-09-18-工具结果展示契约-v1-spec.md) |
 | **09-17 第二轮 fix** | **权限语义重构**：Level 3 拦截 Exec/Net，Level 4 恢复显式 bypass；B-5 审批摘要保留用于 L3（后端 `5c7dd4d`/`eef1231`，TUI `4a795b3`/`2ce1fec`） | [`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md) |
 
 ## 2. 已归档（2026-09-17，方案 A）
@@ -107,7 +108,8 @@
 |---|---|---|
 | spec | [2026-09-15-workspace工具层契约重写-spec.md](./spec/2026-09-15-workspace工具层契约重写-spec.md) | 草案待评审 |
 | spec | [2026-09-15-前端契约与client-API稳定性-spec.md](./spec/2026-09-15-前端契约与client-API稳定性-spec.md) | G1/G2 已落地，其余待评审 |
-| spec | [2026-09-17-工具结果展示层契约-spec.md](./spec/2026-09-17-工具结果展示层契约-spec.md) | 草案待评审；**§10 引用的 TUI 消费面文档在 `qaqh-tui-app` 不存在，属悬空引用** |
+| spec | [2026-09-17-工具结果展示层契约-spec.md](./spec/2026-09-17-工具结果展示层契约-spec.md) | **已被 09-18 跨仓契约取代**，保留为量化证据与设计参照（悬空引用已修复） |
+| spec | [2026-09-18-工具结果展示契约-v1-spec.md](./spec/2026-09-18-工具结果展示契约-v1-spec.md) | **草案待评审；前后端唯一事实源**；修复评审阻塞项（错误承载位 / ToolError.code / display(args) / 超时取消 / 归属与兼容 / H11 分期） |
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
 | todo | [README.md](./todo/README.md) / [2026-09-17-buglist复核-report.md](./todo/2026-09-17-buglist复核-report.md) / [2026-09-17-buglist复核-checklist.md](./todo/2026-09-17-buglist复核-checklist.md) | 在线 open 项索引；N-5 另有独立 buglist |
