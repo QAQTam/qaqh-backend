@@ -62,6 +62,9 @@ fn open_large_progress_tool(hub: &RingingHub, seed: &str) {
                 diff: None,
                 progress: String::new(),
                 progress_truncated: false,
+                progress_stream: None,
+                progress_bytes_total: 0,
+                display: None,
                 failure: None,
                 permission: None,
             }),
@@ -75,6 +78,8 @@ fn open_large_progress_tool(hub: &RingingHub, seed: &str) {
             round_num: 0,
             block_id: "tool".into(),
             chunk: "x".repeat(2 * 1024 * 1024),
+            stream: None,
+            bytes_total: 0,
         },
     )
     .expect("large progress accepted");

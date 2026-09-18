@@ -122,6 +122,8 @@ mod tests {
                 block_id: "b".into(),
                 chunk: "x".into(),
                 truncated: false,
+                stream: None,
+                bytes_total: 0,
             },
         ];
         for event in &transient {
@@ -174,6 +176,9 @@ mod tests {
                     diff: None,
                     progress: String::new(),
                     progress_truncated: false,
+                    progress_stream: None,
+                    progress_bytes_total: 0,
+                    display: None,
                     failure: None,
                     permission: None,
                 },

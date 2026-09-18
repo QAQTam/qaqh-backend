@@ -28,6 +28,7 @@ pub mod read_image;
 pub mod runtime;
 mod safety;
 pub mod skill;
+pub mod tool_api;
 pub mod tool_side_fold;
 mod web;
 
@@ -502,6 +503,28 @@ pub struct ExecProgressEvent {
     pub stream: ExecOutputStream,
     pub seq: u64,
     pub chunk: String,
+    /// 截至本帧的累计观测字节（成功入队 + 被有界 channel 丢弃）。
+    /// 由 [`ExecProgressSender`] 统一填写，构造方填 0 即可。
+    pub bytes_total: u64,
+}
+
+/// 进度字节总量句柄：与 sender 共享计数器；sender 全部 drop 后仍可读终值。
+#[derive(Clone, Debug, Default)]
+pub struct ExecProgressTotals {
+    emitted: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ExecProgressTotals {
+    /// 累计观测字节（09-18 展示契约 §5.1：含被丢弃与被尾部裁剪的部分）。
+    pub fn total_bytes(&self) -> u64 {
+        self.emitted.load(std::sync::atomic::Ordering::Relaxed)
+            + self.dropped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn dropped_bytes(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -523,13 +546,22 @@ impl ExecOutputStream {
 #[derive(Clone)]
 pub struct ExecProgressSender {
     tx: std::sync::mpsc::SyncSender<ExecProgressEvent>,
+    emitted_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
     dropped_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ExecProgressSender {
-    pub fn try_send(&self, event: ExecProgressEvent) {
+    pub fn try_send(&self, mut event: ExecProgressEvent) {
         let bytes = event.chunk.len() as u64;
+        let emitted = self
+            .emitted_bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed)
+            + bytes;
+        event.bytes_total = emitted + self.dropped_bytes.load(std::sync::atomic::Ordering::Relaxed);
         if self.tx.try_send(event).is_err() {
+            // 通道满：这批字节未被消费，从 emitted 挪到 dropped（总量口径不变）。
+            self.emitted_bytes
+                .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
             self.dropped_bytes
                 .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
         }
@@ -538,6 +570,14 @@ impl ExecProgressSender {
     pub fn dropped_bytes(&self) -> u64 {
         self.dropped_bytes
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 与本 sender 共享计数的总量句柄（供 runtime 在 seal 时读终值）。
+    pub fn totals(&self) -> ExecProgressTotals {
+        ExecProgressTotals {
+            emitted: self.emitted_bytes.clone(),
+            dropped: self.dropped_bytes.clone(),
+        }
     }
 }
 
@@ -549,7 +589,15 @@ pub fn bounded_exec_progress_channel() -> (
 ) {
     let (tx, rx) = std::sync::mpsc::sync_channel(EXEC_PROGRESS_CHANNEL_CAPACITY);
     let dropped_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    (ExecProgressSender { tx, dropped_bytes }, rx)
+    let emitted_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    (
+        ExecProgressSender {
+            tx,
+            emitted_bytes,
+            dropped_bytes,
+        },
+        rx,
+    )
 }
 
 #[derive(Clone)]
