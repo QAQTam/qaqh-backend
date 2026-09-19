@@ -218,6 +218,7 @@ pub enum FactPayload {
 | `turn_id` | `TurnId` | 是 | — | 必须与 envelope 一致 |
 | `input_id` | `InputId` | 是 | — | 指向已接受输入 |
 | `mode` | `TurnMode` | 是 | snake_case | `normal/plan/ask` |
+| `recovery_ref` | `Option<RecoveryRef>` | 否 | skip none | recovery 补写 `TurnStarted` 时必填 |
 
 #### ModelRoundStarted
 
@@ -369,7 +370,7 @@ policy 生命周期是规范顺序，不允许由 handler 或 UI 自行改变：
 | 字段 | 类型 | 必填 | serde | 规则 |
 |---|---|---:|---|---|
 | `interaction_id` | `InteractionId` | 是 | — | 必须与 envelope 一致 |
-| `reason` | `InteractionExpiryReason` | 是 | snake_case | `timeout/session_closed/restart_policy` |
+| `reason` | `InteractionExpiryReason` | 是 | snake_case | `timeout/session_closed/restart_policy/turn_cancelled` |
 | `recovery_ref` | `Option<RecoveryRef>` | 否 | skip none | recovery 产生的 expiry 必填 |
 | `expired_at_ms` | `i64` | 是 | — | 闭合时间 |
 
@@ -490,6 +491,7 @@ Expired -> terminal
 | `status` | `SubagentTerminalStatus` | 是 | snake_case | `completed/failed/cancelled/timed_out` |
 | `result_ref` | `Option<ContentRef>` | 否 | skip none | 最终结果 |
 | `finished_at_ms` | `i64` | 是 | — | 终态时间 |
+| `recovery_ref` | `Option<RecoveryRef>` | 否 | skip none | recovery 补写 edge 终态时必填 |
 
 ### 2.4 必填、可选与未知字段规则
 
@@ -618,7 +620,7 @@ pub enum InteractionKind { Ask, Plan, Permission }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDecision { Approved, Rejected }
-pub enum InteractionExpiryReason { Timeout, SessionClosed, RestartPolicy }
+pub enum InteractionExpiryReason { Timeout, SessionClosed, RestartPolicy, TurnCancelled }
 pub enum TurnTerminal { Completed, Failed, Cancelled }
 pub struct TurnError {
     pub code: String,
@@ -687,11 +689,14 @@ pub struct ContentUnavailable {
 | `kind` | 附加字段 | 含义 |
 |---|---|---|
 | `turn_interrupted` | `turn_id`, `last_fact_seq` | 闭合未完成 turn |
+| `turn_started` | `turn_id`, `input_id` | 恢复补写 durable input 的唯一 turn |
 | `tool_indeterminate` | `call_id`, `execution_id` | 非幂等工具不确定 |
 | `tool_denied` | `call_id`, `error_code` | 无 intent 的 approval/policy 拒绝终态 |
 | `tool_replayed` | `call_id`, `execution_id`, `idempotency_key` | 幂等工具完成一次重放 |
 | `tool_reconciled` | `call_id`, `execution_id`, `evidence_ref` | 对账得出终态 |
-| `interaction_expired` | `interaction_id`, `reason` | 超时/重启闭合 |
+| `interaction_expired` | `interaction_id`, `reason` | 超时/重启/turn cancel 闭合 |
+| `subagent_finished` | `child_session_id`, `parent_call_id`, `status` | 恢复补写 child edge 终态 |
+| `upgrade_superseded` | `previous_recovery_id` | 已验证新 payload version，显式退出 read-only |
 | `torn_tail_truncated` | `bytes`, `last_good_fact_seq` | 截断 torn tail |
 | `projection_rebuilt` | `projection`, `through_fact_seq` | 重建 derived projection |
 
@@ -1287,12 +1292,16 @@ pub trait Projection: Default + Send {
 ```text
 {data_dir}/sessions/{session_id}/
   events.jsonl                 # canonical, append-only
-  events.lock                  # 跨进程 writer ownership
+  events.lock                  # OS 级互斥；ownership 仅在 writer-fence.json
   writer-fence.json            # writer_id/generation_epoch/fencing_token 的 CAS lease
+  upgrade-fence.json           # 版本无关的 monotonic read-only/writable supersede 状态
+  events.commit.json           # 最后一次 durable barrier 的 committed_fact_seq/offset；恢复的权威 high-water
+  events.poison.json           # fsync EIO 后的证据；不能替代 events.commit.json
   recovery.intent.json         # 崩溃恢复批次意图，SessionRecovered 后删除
   replay-window.json           # ReplayWindowManifest，cursor expiry 判定
   snapshots/{generation}.json  # snapshot_generation/hash/path 指向的 baseline
   content/{sha256}             # content-addressed
+  quota/ledger.jsonl           # root tree reservation/commit/release，可 reconciliation
   content/index.jsonl          # ContentRecord，append-only
   content/clock.json           # ContentClockRecord，replay/GC 共用逻辑 clock
   content.lock                 # content append/GC 互斥
@@ -1333,7 +1342,7 @@ SessionActor
 5. `ToolIntent`、`InteractionResolved`、`InteractionExpired`、`ToolFinished` 必须独立 fsync barrier。
 6. 无副作用 fact 可以 group commit，但不得跨越 durable barrier 合并。
 7. writer lock 使用 OS file lock；锁文件不是事实源。
-8. `content/clock.json` 的推进必须发生在 canonical fact fsync 之后；clock durable 之前不得更新 replay window 或执行依赖逻辑时间的 GC。
+8. `content/clock.json` 的推进必须发生在 canonical fact `fsync` 且 `events.commit.json` durable 之后；commit marker durable 之前不得推进 clock、更新 replay window 或执行依赖逻辑时间的 GC。恢复时若 `clock.source_fact_seq > events.commit.committed_fact_seq`，该 clock 值必须忽略并从 committed prefix 重建，禁止用于 replay/GC。
 
 generation fencing 的唯一持久化形状：
 
@@ -1357,6 +1366,38 @@ pub struct AppendRejected {
     pub presented_token: u128,
     pub epoch: u64,
 }
+
+pub struct EventsCommit {
+    pub schema: String, // "qaqh.events-commit/v1"
+    pub log_id: LogId,
+    pub committed_fact_seq: u64,
+    pub committed_offset: u64,
+    pub last_barrier_event_id: Option<EventId>,
+    pub commit_generation: u64,
+}
+
+pub enum UpgradeState { ReadOnly, Writable }
+
+pub struct UpgradeFence {
+    pub schema: String, // "qaqh.upgrade-fence/v1"
+    pub log_id: LogId,
+    pub generation: u64,
+    pub state: UpgradeState,
+    pub last_recovery_id: Option<RecoveryId>,
+    pub updated_at_ms: i64,
+}
+
+pub struct EventsPoison {
+    pub schema: String, // "qaqh.events-poison/v1"
+    pub log_id: LogId,
+    pub writer_id: WriterId,
+    pub committed_fact_seq: u64,
+    pub committed_offset: u64,
+    pub failed_offset: u64,
+    pub failed_bytes_hash: ContentHash,
+    pub error: String,
+    pub poisoned_at_ms: i64,
+}
 ```
 
 `WriterFence.fencing_token` 以及 `AppendRejected.expected_token/presented_token` 在 CLI 与 JSON 中统一表示为无符号十进制字符串，格式为 `0|[1-9][0-9]*`，不得使用 JSON number。服务端解析为 `u128`，溢出必须拒绝；递增与相等比较必须基于解析后的数值，不得按字符串字典序比较。`generation_epoch` 仍按 JSON number 表示。
@@ -1369,6 +1410,11 @@ pub struct AppendRejected {
 4. epoch 切换（migration/cutover/rollback/恢复接管）必须递增 `generation_epoch` 并生成更大的 `fencing_token`；旧 epoch 的 fence 只用于审计。
 5. 每次 append 前比较调用方持有的 `(writer_id, generation_epoch, fencing_token)` 与当前 fence。任一不匹配、lease 已过期或 `log_id` 不匹配，返回 `AppendRejected { code="stale_writer", expected_token, presented_token, epoch }`，不得写 fact。
 6. 旧 writer 收到 `stale_writer` 后必须停止所有 handler、取消未发布 projection、写 audit，并向上层返回 `ResetRequired { reason=StaleWriter }`；禁止用本地 retry 覆盖 fence。
+7. `events.jsonl` 的每次成功 barrier 都要记录内存 `committed_fact_seq/committed_offset`。barrier 成功后、发布 projection 或返回 durable ack 前，必须用 temp + fsync + rename + 父目录 fsync 更新 `events.commit.json`；commit marker 才是跨重启 committed high-water，`events.poison.json` 只是 EIO 证据。commit marker 更新失败时不得发布/ack，session 立即进入 read-only。
+8. `fsync` 返回 EIO 时，必须保持 `events.commit.json` 指向失败前的 committed offset，再尝试写 `events.poison.json` 并 `ftruncate` 回 committed offset + fsync；poison marker 写入或截断失败时 session 保持不可写。启动时若 `events.commit.json` 缺失、损坏或 `log_id` 不匹配，session 必须 read-only；若 `events.jsonl` 长度大于 committed offset，先截断到 committed offset，禁止把失败 segment 的完整前缀当作 canonical。
+9. 不允许 `events.lock` 在持锁期间被 unlink/replace；fence CAS 与 append 必须共同校验 `log_id`，锁 inode 变化视为 stale writer。
+10. `upgrade-fence.json` 是版本无关的单调 sidecar；任何 writer 在写 unknown kind/version 的 read-only marker 前必须先校验它。若已存在更高 generation 的 `state=writable`，旧 writer 不得追加 read-only marker，只能返回 `ResetRequired { reason=UpgradeRequired }`。
+11. 升级 writer 只有在验证全部 payload version 后，才可按 `upgrade-fence generation + 1` 写 `state=writable`，再写 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }`；旧 writer 永远不得降低 generation 或把 writable 改回 read-only。
 
 ### 5.3 Fsync 矩阵
 
@@ -1428,7 +1474,7 @@ pub struct AppendRejected {
 ### 5.4 Torn tail
 
 1. 读到无 `\n` 结尾的最后一行：判定 torn tail。
-2. 将原始字节移动到 `events.jsonl.torn.<fact_seq>`，保留证据。
+2. 将原始字节移动到 `events.jsonl.torn.<fact_seq>.<bytes_hash>`，保留证据；兼容读取可接受旧的 `events.jsonl.torn.<fact_seq>`，但同路径冲突时禁止覆盖，必须使用 hash 后缀。
 3. 截断到最后一个完整记录。
 4. 写 `SessionRecovered { torn_tail: true }`。
 5. 不允许把 torn tail 解析为半条 fact。
@@ -1612,11 +1658,14 @@ GC 协议：
 
 ```text
 load events.jsonl
-  -> validate envelope + schema
+  -> validate events.commit.json
+  -> truncate anything beyond committed_offset
+  -> validate envelope + schema on committed prefix
+  -> inspect events.poison.json
   -> find last complete line
   -> detect torn tail
   -> rebuild projections
-  -> detect open Turn/ToolIntent/Interaction
+  -> detect open Turn/ToolIntent/Interaction/Input/Subagent edge
   -> compute recovery batch key and plan
   -> append missing recovery facts atomically
   -> mark session writable or read-only
@@ -1642,6 +1691,7 @@ pub struct RecoveryPlan {
     pub last_good_fact_seq: u64,
     pub sorted_open_ids: Vec<String>,
     pub torn_tail_bytes_hash: ContentHash,
+    pub child_terminal_digest: ContentHash,
     pub steps: Vec<RecoveryStep>,
 }
 
@@ -1661,13 +1711,24 @@ pub struct RecoveryToolCompletion {
     pub evidence_event_id: Option<EventId>,
 }
 
+pub struct RecoverySubagentCompletion {
+    pub child_session_id: SessionId,
+    pub parent_call_id: ToolCallId,
+    pub status: SubagentTerminalStatus,
+    pub result_ref: Option<ContentRef>,
+    pub finished_at_ms: i64,
+    pub recovery_ref: RecoveryRef,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum RecoveryStep {
     MoveTornTail { from: String, to: String, bytes: u64, bytes_hash: ContentHash },
+    TurnStarted { turn_id: TurnId, input_id: InputId, mode: TurnMode },
     TurnInterrupted { turn_id: TurnId, last_fact_seq: u64 },
     ToolFinished { completion: RecoveryToolCompletion },
     InteractionExpired { interaction_id: InteractionId, reason: InteractionExpiryReason },
+    SubagentFinished { completion: RecoverySubagentCompletion },
     SessionRecovered { outcome: RecoveryOutcome, torn_tail: bool, torn_bytes: Option<u64> },
 }
 ```
@@ -1676,13 +1737,17 @@ canonical step 顺序和排序键固定为：
 
 ```text
 1. MoveTornTail（若存在；最多一个）
-2. TurnInterrupted（按 turn_id 字典序）
-3. ToolFinished（按 call_id 字典序）
-4. InteractionExpired（按 interaction_id 字典序）
-5. SessionRecovered（恰好一个，必须最后）
+2. TurnStarted（按 input_id 字典序）
+3. TurnInterrupted（按 turn_id 字典序）
+4. ToolFinished（按 call_id 字典序）
+5. InteractionExpired（按 interaction_id 字典序）
+6. SubagentFinished（按 child_session_id 字典序）
+7. SessionRecovered（恰好一个，必须最后）
 ```
 
 `RecoveryStep::ToolFinished` 的 typed `completion` 必须足以逐字段构造 canonical `ToolFinished`：`call_id`、`execution_id`、`terminal_status`、`output_ref`、`error`、`metrics`、`reconciled`、`recovery_ref`、`finished_at_ms`、`evidence_ref`、`evidence_fact_seq` 和 `evidence_event_id` 均在 plan 中显式存在；nullable 字段允许为 `None`，但不得依赖恢复时重新读取墙钟或临时内存来补值。
+
+`RecoveryStep::TurnStarted` 只用于闭合“已 durable `InputAccepted`、但尚无 `TurnStarted` 的 trigger-turn 输入”；`turn_id` 必须是 `turn_<ULID>`，由 `sha256(log_id || ":" || input_id)` 的前 128 bit 按 canonical ULID 编码稳定派生，不能每次恢复重新随机生成；system/subagent 的恢复模式固定为 `normal`。`RecoveryStep::SubagentFinished` 只用于 child 已 terminal、parent edge 尚未闭合的情况，字段必须来自 child canonical terminal 与 parent `SubagentSpawned`，不得用墙钟或内存猜测。
 
 `RecoveryToolCompletion` 的终态集合固定为 `indeterminate/succeeded/failed/partial/cancelled/timed_out/denied`。其中 `succeeded/failed/partial/cancelled/timed_out` 必须由 probe/canonical evidence 确定；`denied` 只用于无 intent 的 approval/policy 路径且 `error.code` 只能是 `approval_rejected` 或 `policy_denied`；`cancelled` 的无 intent 路径只允许 `error.code=approval_expired` 或 `recovery_before_policy_decision`。有 `ToolIntent` 时 `execution_id` 必须等于该 intent 的 execution id；只有无 intent 的 `denied/cancelled` 终态才允许为 `None`。`recovery_ref` 必须等于当前 batch；不得用 recovery 伪造 `backgrounded` 或新的 attempt。`MoveTornTail` 的 `from/to` 必须使用 session 目录下的相对 canonical 路径，不得包含临时文件名、绝对路径或墙钟。
 
@@ -1700,23 +1765,26 @@ plan_hash = sha256(canonical_json({
   last_good_fact_seq: u64,
   sorted_open_ids: [string, ...], // 字典序升序，去重
   torn_tail_bytes_hash: "sha256:<64hex>",
+  child_terminal_digest: "sha256:<64hex>",
   steps: [
     {kind: string, data: {...}}, ...
   ]
 }))
 ```
 
-`recovery_input_fingerprint = sha256(canonical_json({log_id, last_good_fact_seq, sorted_open_ids, torn_tail_bytes_hash}))`，同样不包含 `plan_hash` 或 `RecoveryIntent`。因此不存在 `RecoveryIntent(plan_hash)` 自引用。
+`recovery_input_fingerprint = sha256(canonical_json({log_id, last_good_fact_seq, sorted_open_ids, torn_tail_bytes_hash, child_terminal_digest}))`，同样不包含 `plan_hash` 或 `RecoveryIntent`。因此不存在 `RecoveryIntent(plan_hash)` 自引用。
+
+`child_terminal_digest` 的规范输入是 parent 当前开放 `SubagentSpawned` edge 对应 child log 的稳定终态证据数组，按 `child_session_id` 排序：`{child_session_id, child_log_id, terminal_fact_seq, terminal_event_id, status}`；child 尚未 terminal 时使用空数组的 sha256。child terminal 证据变化必须产生新的 batch key，禁止复用已闭合的 parent recovery batch。
 
 恢复批次协议：
 
 1. 从 pre-recovery canonical log 计算 `recovery_input_fingerprint` 和 batch key；batch key 为 `(log_id, recovery_input_fingerprint, last_good_fact_seq)`。
 2. 若 batch key 对应的 `SessionRecovered` 已存在，则该 batch 已 closed；本次 load 只验证并复用，不再写任何 recovery fact。
 3. 若 batch 未 closed，预分配 `RecoveryRef`，计算 `RecoveryPlan` 和 `plan_hash`，再写 `recovery.intent.json`。
-4. 按 canonical step 顺序逐个 append + fsync；`SessionRecovered` 必须最后写。每个 recovery fact 都携带同一 `RecoveryRef`。
+4. 按 canonical step 顺序逐个 append + fsync；`SessionRecovered` 必须最后写。每个 recovery fact 都携带同一 `RecoveryRef`；`TurnStarted` 与 `SubagentFinished` 的 `recovery_ref` 字段也必须逐字写入。
 5. 任一步骤 crash：重启后以 batch key 找到既有 recovery facts，按 step 幂等键跳过已写项，只补齐缺失项；不得重新生成 identity 或重排 step。
 6. `SessionRecovered` 不存在时 session 保持 `recovery_in_progress/read_only`，不得接受新 command；存在后 batch closed。
-7. 只有 `SessionRecovered` 之后产生新的 open Turn/Tool/Interaction，或 pre-recovery canonical log 改变，才允许创建新的 batch；旧 batch 不得复用。
+7. 只有 `SessionRecovered` 之后产生新的 open Turn/Tool/Interaction、pre-recovery canonical log 改变，或 `child_terminal_digest` 改变，才允许创建新的 batch；旧 batch 不得复用。
 
 在修改 `events.jsonl`、移动 torn tail 或写首条 recovery fact 前，必须原子写入 `recovery.intent.json`：
 
@@ -1728,6 +1796,7 @@ pub struct RecoveryIntent {
     pub last_good_fact_seq: u64,
     pub sorted_open_ids: Vec<String>,
     pub torn_tail_bytes_hash: ContentHash,
+    pub child_terminal_digest: ContentHash,
     pub plan_hash: ContentHash,
 }
 ```
@@ -1739,7 +1808,8 @@ canonical_json({
   log_id: string,
   last_good_fact_seq: u64,
   sorted_open_ids: [string, ...], // 字典序升序，重复项去除
-  torn_tail_bytes_hash: "sha256:<64hex>" // 无 torn tail 时使用 sha256(empty)
+  torn_tail_bytes_hash: "sha256:<64hex>", // 无 torn tail 时使用 sha256(empty)
+  child_terminal_digest: "sha256:<64hex>" // 无开放 child edge 时使用 sha256(empty)
 })
 ```
 
@@ -1747,7 +1817,7 @@ canonical_json({
 - 重启时先判定 intent 是否为 active：若同 `recovery_event_id` 的 `SessionRecovered` 已存在，则该 intent 已 closed/stale。
 - 若同一 batch key 的既有 recovery facts 计算出不同 `plan_hash`，必须 fail-closed 进入 read-only/upgrade-required，禁止覆盖旧 batch。
 - 若同一 batch key 已存在但 `recovery_event_id` 不同，必须 fail-closed；不得把两个 identity 合并成同一 batch。
-- closed intent 不得复用到新的 open state；若 `SessionRecovered` 之后又有新 open Turn/Tool/Interaction，必须基于当前 pre-recovery log 生成新的 `RecoveryRef` 与 fingerprint，并原子覆盖/归档旧 intent。
+- closed intent 不得复用到新的 open state；若 `SessionRecovered` 之后又有新 open Turn/Tool/Interaction，或 `child_terminal_digest` 改变，必须基于当前 pre-recovery log 生成新的 `RecoveryRef` 与 fingerprint，并原子覆盖/归档旧 intent。
 - active intent 才允许复用其中的 `RecoveryRef` 与 fingerprint。
 - `SessionRecovered` fsync 成功后才允许删除 intent；删除失败只留下 stale intent，不影响后续正确性。
 - 若 intent 不存在，必须先从 pre-recovery canonical log 计算并落盘，再执行恢复。
@@ -1760,12 +1830,14 @@ canonical_json({
 |---|---|---|---|
 | no-action | `SessionRecovered { outcome=writable, actions=[], torn_tail=false }` | 无 | 无 open 状态且无 torn/unknown/tombstone 时，创建一次闭合 batch |
 | unknown fact | `SessionRecovered { outcome=read_only_upgrade_required, actions=[], last_good_fact_seq=<unknown 前> }` | 无 | 不解释 unknown 及其后 fact；后续 load 复用同一 batch |
+| upgrade supersede | 先 durable 写 `upgrade-fence {generation+1,state=writable}`，再写 `SessionRecovered { outcome=writable, actions=[upgrade_superseded] }` | 新 writer 已验证全部 payload version | 仅允许在已有 read-only marker 且 pre-recovery log 已变化时创建新 batch；旧 writer 不得写此 batch |
 | tombstone | `SessionRecovered { outcome=tombstone, actions=[] }` | 无 | 不写其它 recovery fact，不执行物理清理 |
 
 其它恢复矩阵：
 
 | 输入状态 | canonical fact 集合 | 可写性 |
 |---|---|---|
+| `InputAccepted` 无 `TurnStarted`，`input_kind=system` 且 actor 为 subagent | `TurnStarted`（按 `(log_id,input_id)` 派生唯一 turn） + final `SessionRecovered` | 恢复后可写 |
 | `TurnStarted` 无终态 | `TurnInterrupted` + final `SessionRecovered` | 恢复后可写 |
 | `InteractionResolved(rejected)` 无 `ToolIntent`/`ToolFinished` | `ToolFinished { terminal_status=denied, execution_id=None, metrics=<零执行>, error.code=approval_rejected }` + final `SessionRecovered { actions=[tool_denied] }` | 恢复后可写 |
 | `ToolCallDeclared` 无 `ToolIntent`/`ToolFinished` 且无 interaction 终态（policy 决策前崩溃） | `ToolFinished { terminal_status=cancelled, execution_id=None, metrics=<零执行>, error.code=recovery_before_policy_decision }` + final `SessionRecovered` | 恢复后可写 |
@@ -1773,7 +1845,9 @@ canonical_json({
 | `ToolIntent` 无 `ToolFinished`，`IdempotentReplay` | 一次重放后的成功/失败 `ToolFinished` + final `SessionRecovered`；无法取得结果时写 `indeterminate` | 重放后写 |
 | `ToolIntent` 无 `ToolFinished`，`Reconcile` | probe/canonical evidence 确定的成功/失败/partial `ToolFinished { reconciled=true }`，或 `indeterminate` + final `SessionRecovered` | 对账后写 |
 | `InteractionRequested` 无终态且未过期 | final `SessionRecovered { actions=[] }`；不重发 modal fact | 可写 |
-| `InteractionRequested` 已过期/重启策略取消 | `InteractionExpired` + final `SessionRecovered` | 恢复后写 |
+| `InteractionRequested` 已过期/重启策略取消/turn cancel | `InteractionExpired` + final `SessionRecovered` | 恢复后写 |
+| child terminal 且 parent `SubagentSpawned` 无 `SubagentFinished` | `SubagentFinished` + final `SessionRecovered` | 恢复后可写 |
+| `events.poison.json` 或 `events.jsonl` 超出 committed offset | 先按 `events.commit.json` 验证/截断，再写 recovery batch | 清除 poison 前只读 |
 | `CompactionApplied` 无 checkpoint | 仅 final `SessionRecovered`；从 active facts 重建 context | 重建后写 |
 | torn tail | `SessionRecovered { torn_tail=true, torn_bytes=n }` 作为唯一 final fact | 恢复后写 |
 
@@ -1853,9 +1927,11 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 |---|---|---|
 | batch | `(log_id, recovery_input_fingerprint, last_good_fact_seq)` | closed batch 直接复用，不追加 fact |
 | `SessionRecovered` | `(log_id, recovery_id)` 且必须匹配 batch key | 已有则跳过 |
+| `TurnStarted` | `(log_id, input_id, turn_id)` | 已有则跳过；同一 input 不得启动第二个 turn |
 | `TurnInterrupted` | `(turn_id, recovery_id)` | 已有则跳过 |
 | `ToolFinished` | `(call_id, recovery_id)` | 已有则跳过；不得写第二个终态 |
 | `InteractionExpired` | `(interaction_id, recovery_id)` | 已有则跳过 |
+| `SubagentFinished` | `(child_session_id)` | 已有则校验字段一致并跳过；不得写第二个 edge 终态 |
 | `MoveTornTail` side effect | `(log_id, torn_tail_bytes_hash)` | 已移动则验证目标文件，不重复移动 |
 
 `recovery_event_id` 在 plan 阶段预分配；同一 batch 的所有 recovery facts 共享该 ID。重复 load 只有在 batch key 或 pre-recovery log 改变时才生成新 `RecoveryRef`、新 `plan_hash` 和新 batch；不得按“每次 load”追加 `SessionRecovered`。
@@ -1887,8 +1963,21 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 - `child_session_id` 必须是真实 canonical session。
 - `parent_call_id` 必须指向 parent 的 tool call。
 - `SubagentFinished` 必须与 `SubagentSpawned` 成对。
+- spawn 顺序固定为 child `SessionCreated` durable 后，parent 才写 `SubagentSpawned`；child 在 edge durable 前不得接收输入。
+- edge 无 child log 是完整性损坏，parent 必须进入 `read_only_upgrade_required`，不得伪造 child 或 `SubagentFinished`。
+- child log 无 edge 时，child 必须 tombstone/取消，禁止继续执行；child terminal 且 parent edge open 时，只能由 `RecoveryStep::SubagentFinished` 补齐。
 - v2.0 只冻结 edge + mailbox；graph scorer/role template 延后。
 - child session 的 fact log 与 parent log 不互相复制。
+- child terminal 只从 child 的 committed high-water 读取，并按下表映射；`child_terminal_digest` 必须覆盖映射后的全部字段。
+- `result_ref` 对 `completed` 取最后一个 `AssistantBlockSealed.content_ref`，其他状态为 `None`；`finished_at_ms` 取 `TurnFinished.finished_at_ms`，`TurnInterrupted` 取该 fact 的 envelope `ts_ms`。
+- `timed_out` 只能由 `TurnFinished { terminal=failed, error.code=subagent_timed_out }` 映射；`TurnFinished { terminal=cancelled }` 或 `TurnInterrupted` 映射为 `cancelled`。
+
+| child committed terminal | parent `SubagentTerminalStatus` |
+|---|---|
+| `TurnFinished { terminal=completed }` | `completed` |
+| `TurnFinished { terminal=failed, error.code!=subagent_timed_out }` | `failed` |
+| `TurnFinished { terminal=failed, error.code=subagent_timed_out }` | `timed_out` |
+| `TurnFinished { terminal=cancelled }` / `TurnInterrupted` | `cancelled` |
 
 ---
 
@@ -2143,6 +2232,10 @@ E2E 证据要求：
 | `interaction-duplicate-resolution.jsonl` | canonical 只含 Requested + Resolved；第二个 resolution 在 `interaction-duplicate-resolution.rejected.json` | 2 | 第二个输入被拒绝，canonical 终态不变 | revision 不前进 | none |
 | `recovery-no-action.jsonl` | SessionCreated + 无 open 状态 + 首轮 load | 2（SessionCreated + final SessionRecovered） | `outcome=writable`, actions=[] | 可写后 revision 单调 | none |
 | `recovery-unknown-fact.jsonl` | 已知前缀 + unknown kind + 已知后缀 | 3（前缀 + unknown line + final SessionRecovered） | `outcome=read_only_upgrade_required` | 后缀不产生 revision | none |
+| `recovery-upgrade-supersede.jsonl` | read-only marker + 新 writer 理解全部 payload version | 2（旧 marker + writable supersede marker） | `outcome=writable`，actions=`upgrade_superseded` | 升级前 revision 不变，升级后恢复单调 | none |
+| `recovery-input-admission.jsonl` | InputAccepted(system/subagent) + crash before TurnStarted | 3（InputAccepted + TurnStarted + final SessionRecovered） | 同一 input 只有一个 TurnStarted | conversation revision 前进一次 | none |
+| `recovery-subagent-edge.jsonl` | SubagentSpawned + child terminal + parent restart | 3（Spawned + Finished + final SessionRecovered） | child edge 只闭合一次 | control revision 前进一次 | none |
+| `events-poison.jsonl` | committed fact + 失败 segment 完整前缀 + poison marker | 1（只保留 committed fact，截断失败前缀） | 不把 poison 后前缀当 canonical | 只重放 committed revision | none |
 | `recovery-tombstone.jsonl` | SessionCreated + SessionDeleted + load | 3（SessionCreated + SessionDeleted + final SessionRecovered） | `outcome=tombstone` | 不再前进 | none |
 | `compaction.jsonl` | facts + CompactionApplied | 2 | checkpoint 缺失可重建 | context revision 一致 | none |
 | `torn-tail.jsonl` | 完整 fact + 半行 | 2（完整 fact + final SessionRecovered） | `torn_tail=true` | 与截断后 rebuild 一致 | none |
