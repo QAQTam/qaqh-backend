@@ -64,20 +64,22 @@ node tools/cnb-mcp-enhance/server.mjs --watch --issues 6,7,8,10,12,13 --json > w
 node tools/cnb-mcp-enhance/server.mjs --watch --builds cnb-90o-xxx,cnb-69o-xxx
 ```
 
-## A/B Agent 消息桥
+## A/B Agent 消息桥（issue / PR）
 
 ```bash
-# 读取工程师 B 的最新消息
+# 读取 issue 或 PR 中工程师 B 的最新消息
 ./cnb-chat --chat-read --issue 100 --author AnyBuddy --limit 10
+./cnb-chat --chat-read --pr 102 --author AnyBuddy --limit 10
 
 # 等待一条新消息；无消息时返回 timed_out=true
 ./cnb-chat --chat-wait --issue 100 --author AnyBuddy --timeout-ms 30000 --json
 
 # 常驻监听；静默超时不刷屏，只在收到新消息时输出
-./cnb-chat --chat-listen --issue 100 --author AnyBuddy --interval-ms 3000 --json
+./cnb-chat --chat-listen --pr 102 --author AnyBuddy --interval-ms 3000 --json
 
-# 直接回复
+# 直接回复 issue 或 PR
 ./cnb-chat --chat-send --issue 100 --body '[ACK] 已收到。'
+./cnb-chat --chat-send --pr 102 --body '[READY] 已按意见更新。'
 ```
 
 完整说明见仓库根目录 `CNB_AGENT_CHAT.md`。
