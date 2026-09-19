@@ -1,9 +1,9 @@
 //! `confirm_apply`：dry-run 后的内存直提。
 //!
-//! 写工具（edit / apply_patch / write）以 `dry_run=true` 通过验证时
+//! 写工具（apply_patch / write）以 `dry_run=true` 通过验证时
 //! 返回 `pending_id`（参数已暂存在 `pending` 注册表）。模型向用户确认后调
 //! 本工具：**从注册表取出参数重放执行路径**——模型不需要重新输出 patch /
-//! hunks / content（消除二次输出）。
+//! patch / content（消除二次输出）。
 //!
 //! - `action=apply`：重放 → 落盘（各工具的 expected_hash 校验拦截 dry-run
 //!   之后发生的外部改动；内容匹配工具天然防漂移）。
@@ -25,7 +25,7 @@ fn exec_confirm_apply(args: &serde_json::Value) -> ToolResult {
                 "timeis": crate::now_utc8(),
                 "status": "error",
                 "code": "MISSING_PENDING_ID",
-                "message": "confirm_apply requires 'pending_id' (returned by a dry_run of edit / apply_patch / write)",
+                "message": "confirm_apply requires 'pending_id' (returned by a dry_run of apply_patch / write)",
             })
             .to_string());
         }
@@ -48,7 +48,6 @@ fn exec_confirm_apply(args: &serde_json::Value) -> ToolResult {
 
     match action {
         "apply" => match p.tool_name.as_str() {
-            "edit" => crate::edit::exec_edit(&p.args),
             "write" => crate::file_mutate::exec_write_file(&p.args),
             "apply_patch" => crate::apply_patch::exec_apply_patch(&p.args),
             other => crate::ToolResult::error(
@@ -87,7 +86,7 @@ fn handle_confirm_apply(ctx: crate::ToolCallCtx) -> ToolResult {
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register(ToolHandler {
             key: "confirm_apply".to_string(),
-            description: "Commit/discard pending dry_run (pending_id from edit/apply_patch/write). One-shot, 30min expiry.",
+            description: "Apply or discard a dry_run pending_id (apply_patch/write). One-shot, 30min TTL.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -138,84 +137,6 @@ mod tests {
         } else {
             data
         }
-    }
-
-    fn dry_run_v2(
-        _path: &str,
-        old: &str,
-        new: &str,
-    ) -> (tempfile::TempDir, String, serde_json::Value) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("f.txt"), old).unwrap();
-        // 用绝对路径：resolve_workspace_path 对绝对路径直接返回，
-        // 避免并行测试踩踏全局 CURRENT_WORKSPACE。
-        let ws = dir.path().to_string_lossy().to_string();
-        let result = crate::edit::exec_edit(&serde_json::json!({
-            "path": format!("{}/f.txt", ws.replace('\\', "/")),
-            "dry_run": true,
-            "hunks": [{"kind": "replace", "old": old, "new": new}],
-        }));
-        let data = result.data.clone();
-        (dir, ws, data)
-    }
-
-    #[test]
-    fn v2_dry_run_then_confirm_applies_without_resending_hunks() {
-        let (dir, _ws, data) = dry_run_v2("f.txt", "a\nb\nc\n", "A\nb\nc\n");
-        assert_eq!(data["status"], "ok", "dry run failed: {data}");
-        let pending_id = data["pending_id"].as_str().expect("pending_id").to_string();
-
-        // 文件未写
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
-            "a\nb\nc\n"
-        );
-
-        // 确认 → 落盘（重放参数，模型无需重发 hunks）
-        let out = run_confirm(&pending_id, "apply");
-        assert_eq!(out["status"], "ok", "confirm failed: {out}");
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
-            "A\nb\nc\n"
-        );
-
-        // 一次性：再确认 → 过期/不存在
-        let out2 = run_confirm(&pending_id, "apply");
-        assert_eq!(out2["code"], "PENDING_NOT_FOUND_OR_EXPIRED");
-    }
-
-    #[test]
-    fn discard_drops_pending_without_writing() {
-        let (dir, _ws, data) = dry_run_v2("f.txt", "x\ny\n", "X\ny\n");
-        let pending_id = data["pending_id"].as_str().expect("pending_id").to_string();
-
-        let out = run_confirm(&pending_id, "discard");
-        assert_eq!(out["status"], "ok", "discard failed: {out}");
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
-            "x\ny\n"
-        );
-        // 已消费
-        assert_eq!(
-            run_confirm(&pending_id, "apply")["code"],
-            "PENDING_NOT_FOUND_OR_EXPIRED"
-        );
-    }
-
-    #[test]
-    fn confirm_rejected_when_file_changed_after_dry_run() {
-        let (dir, _ws, data) = dry_run_v2("f.txt", "a\nb\n", "A\nb\n");
-        let pending_id = data["pending_id"].as_str().expect("pending_id").to_string();
-
-        // dry-run 后文件被外部改动 → 重放时 hash gate 拒绝
-        std::fs::write(dir.path().join("f.txt"), "a\nCHANGED\n").unwrap();
-        let out = run_confirm(&pending_id, "apply");
-        assert_eq!(out["code"], "HASH_MISMATCH", "got: {out}");
-        // 文件保持外部改动，未被覆盖
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
-            "a\nCHANGED\n"
-        );
     }
 
     #[test]

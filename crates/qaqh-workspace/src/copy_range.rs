@@ -165,7 +165,7 @@ fn run_copy_range(
         })
         .to_string()
     })?;
-    let (tgt_lf, was_crlf) = crate::file_shared::normalize_newlines(&tgt_content);
+    let (tgt_lf, endings) = crate::file_shared::normalize_newlines(&tgt_content);
     let mut tgt_lines: Vec<String> = tgt_lf.split('\n').map(String::from).collect();
     if tgt_lines.last().is_some_and(|s| s.is_empty()) {
         tgt_lines.pop();
@@ -217,12 +217,23 @@ fn run_copy_range(
     }
 
     // ── 组装并写回 ──────────────────────────────────────────────
-    let eol = if was_crlf { "\r\n" } else { "\n" };
+    let eol = endings.preferred.as_str();
     tgt_lines.splice(insert_at..insert_at, copied.iter().cloned());
     let mut out = tgt_lines.join(eol);
     // 历史行为：目标文件以换行结尾（无尾换行时补上；空文件不加）。
     if !out.is_empty() && !out.ends_with('\n') {
         out.push_str(eol);
+    }
+    // 写策略：拒绝符号链接（不替换链接、不穿透写）与设备/FIFO/目录。
+    let tgt_str = tgt.to_string_lossy();
+    if let Err(guard) = crate::file_shared::ensure_writable_regular_target(&tgt_str) {
+        return Err(serde_json::json!({
+            "timeis": crate::now_utc8(),
+            "status": "error",
+            "code": guard.code(),
+            "message": guard.message(),
+        })
+        .to_string());
     }
     std::fs::write(tgt, &out).map_err(|e| {
         serde_json::json!({
@@ -373,7 +384,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_display("copy_range", crate::display::project_copy_range);
     mgr.register(ToolHandler {
         key: "copy_range".to_string(),
-        description: "Copy content range by line anchors (exact line match). source_start/source_end = range; mode=insert_after/before(need target_anchor) or append/prepend.",
+        description: "Copy a line range by exact line anchors: source_start/source_end; mode=insert_after|insert_before|append|prepend.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

@@ -1,6 +1,6 @@
 //! Query tools: file read, diff.
 
-use super::file_shared::{content_hash, is_binary_read_error};
+use super::file_shared::{LineIndex, content_hash, is_binary_read_error, normalize_newlines};
 use crate::{ToolCallCtx, ToolHandler, ToolResult, ToolRisk, handler};
 
 // ------ exec_read (from file_read.rs) ------
@@ -89,6 +89,34 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
             serde_json::json!({}),
         );
     }
+    // 只允许普通文件：FIFO 会永久阻塞、设备无 EOF（/dev/zero 无界读）、socket 同理。
+    if let Err(guard) = crate::file_shared::ensure_readable_regular_file(&path) {
+        return (guard.into_tool_result(), serde_json::json!({}));
+    }
+    // 大小上限：避免大文件全量读入内存后才截断。
+    if let Ok(meta) = std::fs::metadata(&path)
+        && meta.is_file()
+        && meta.len() > crate::file_shared::READ_MAX_BYTES
+    {
+        return (
+            ToolResult::error_data(
+                "FILE_TOO_LARGE",
+                format!(
+                    "'{path}' is {} bytes (read limit {} bytes)",
+                    meta.len(),
+                    crate::file_shared::READ_MAX_BYTES
+                ),
+                false,
+                Some("Use exec (rg/sed/head) to inspect large files.".into()),
+                serde_json::json!({
+                    "path": path,
+                    "size": meta.len(),
+                    "max_bytes": crate::file_shared::READ_MAX_BYTES
+                }),
+            ),
+            serde_json::json!({}),
+        );
+    }
 
     let mut start = args
         .get("start_line")
@@ -148,17 +176,15 @@ fn read_one(args: &serde_json::Value) -> (ToolResult, serde_json::Value) {
             );
         }
     };
-    let content = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let (content, _endings) = normalize_newlines(&raw);
     let hash = content_hash(&content);
     if args.get("if_hash").and_then(|v| v.as_str()) == Some(hash.as_str()) {
         let meta = serde_json::json!({"path": path, "not_modified": true, "hash": hash});
         return (ToolResult::ok_data(meta.clone(), "not modified"), meta);
     }
-    let mut lines: Vec<&str> = content.split('\n').collect();
-    if content.ends_with('\n') {
-        lines.pop();
-    }
-    let total_lines = lines.len();
+    let index = LineIndex::new(&content);
+    let lines = index.lines();
+    let total_lines = index.line_count();
 
     // ── 账本行号修正 ──────────────────────────────────────────────
     // 偏移链非空 = 最近一次 read 基线之后发生过账本 edit → 模型仍用旧行号
@@ -513,13 +539,12 @@ fn end_to_end_edit_then_stale_read_is_corrected() {
 
     let r1 = exec_read(&serde_json::json!({ "path": path }));
     assert!(r1.is_success());
-    let h1 = r1.data["files"][0]["hash"].as_str().unwrap().to_string();
 
     // 真实 edit 工具：L3 的 c 替换为 c+C1+C2（+2 偏移，等价于 c 后插入两行）
     let e = crate::edit::exec_edit(&serde_json::json!({
         "path": path,
-        "expected_hash": h1,
-        "hunks": [{"kind": "replace", "old": "c", "new": "c\nC1\nC2"}],
+        "old_str": "c",
+        "new_str": "c\nC1\nC2",
     }));
     assert!(e.is_success(), "edit: {}", e.model_text());
 
@@ -549,9 +574,8 @@ fn multi_line_edit_records_shifts_for_later_reads() {
 
     let e = crate::edit::exec_edit(&serde_json::json!({
         "path": path,
-        "hunks": [
-            {"kind": "replace", "old": "b", "new": "B1\nB2"},
-        ],
+        "old_str": "b",
+        "new_str": "B1\nB2",
     }));
     assert!(e.is_success(), "edit: {}", e.model_text());
 
@@ -566,4 +590,64 @@ fn multi_line_edit_records_shifts_for_later_reads() {
     let meta = &r2.data["files"][0];
     assert_eq!(meta["corrected"], serde_json::json!(true));
     assert_eq!(meta["line_offset"], serde_json::json!(1));
+}
+
+#[test]
+fn read_normalizes_mixed_endings_consistently() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("mixed.txt");
+    std::fs::write(&p, "a\r\nb\rc\n").unwrap();
+    let r = exec_read(&serde_json::json!({ "path": p.to_string_lossy() }));
+    assert!(r.is_success(), "{}", r.model_text());
+    assert_eq!(r.model_text(), "L1: a\nL2: b\nL3: c");
+    // 与账本/写侧同一 LF 视图 hash（write 的 STALE_FILE 不再误报）。
+    let hash = r.data["files"][0]["hash"].as_str().unwrap();
+    assert_eq!(hash, crate::file_shared::content_hash("a\nb\nc\n"));
+}
+
+#[test]
+fn read_rejects_fifo_without_hanging() {
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let path = fifo.to_string_lossy().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = exec_read(&serde_json::json!({"path": path}));
+            let _ = tx.send(r.model_text().to_string());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(text) => assert!(text.contains("not a regular file"), "{text}"),
+            Err(_) => panic!("read on FIFO hung (type guard regressed)"),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn read_rejects_dev_null() {
+    let r = exec_read(&serde_json::json!({"path": "/dev/null"}));
+    assert!(!r.is_success());
+    assert!(
+        r.model_text().contains("not a regular file"),
+        "{}",
+        r.model_text()
+    );
+}
+
+#[test]
+fn read_rejects_oversized_regular_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("big.txt");
+    let f = std::fs::File::create(&p).unwrap();
+    f.set_len(crate::file_shared::READ_MAX_BYTES + 1).unwrap();
+    let r = exec_read(&serde_json::json!({"path": p.to_string_lossy()}));
+    assert!(!r.is_success());
+    assert!(r.model_text().contains("read limit"), "{}", r.model_text());
 }

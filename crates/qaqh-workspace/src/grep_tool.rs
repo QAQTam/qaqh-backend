@@ -365,7 +365,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_display("grep", crate::display::project_grep);
     mgr.register(ToolHandler {
             key: "grep".to_string(),
-            description: "Search file contents (ripgrep, regex). Returns path:line:content; use glob to filter files; max_results capped.",
+            description: "Search file contents with ripgrep regex. Returns path:line:content; filter files with glob.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

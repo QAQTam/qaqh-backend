@@ -51,23 +51,23 @@ pub fn aggregate_entry(timeout: Duration) -> (String, DynamicTool) {
                     "list_prompts",
                     "read_prompt"
                 ],
-                "description": "list_servers = MCP server 状态总览；list_resources = 列出资源清单（server 可选，缺省全部）；read_resource = 读取单个资源内容（server+uri 必填）；list_prompts = 列出 server 声明的 prompt 模板（server 可选）；read_prompt = 拉取渲染后的 prompt 消息（server+name 必填，arguments 可选）"
+                "description": "list_servers = server status; list_resources = resources and URI templates (server optional); read_resource = read one resource (server+uri required); list_prompts = prompt templates (server optional); read_prompt = render a prompt (server+name required, arguments optional)"
             },
             "server": {
                 "type": "string",
-                "description": "list_resources/list_prompts 时限定单个 server；read_resource/read_prompt 时必填"
+                "description": "Limit list_resources/list_prompts to one server; required for read_resource/read_prompt"
             },
             "uri": {
                 "type": "string",
-                "description": "read_resource 时必填；可从 list_resources 结果或 URI 模板展开得到"
+                "description": "Required for read_resource; from list_resources or a URI template"
             },
             "name": {
                 "type": "string",
-                "description": "read_prompt 时必填；可从 list_prompts 结果得到"
+                "description": "Required for read_prompt; from list_prompts"
             },
             "arguments": {
                 "type": "object",
-                "description": "read_prompt 的可选渲染参数（键值对；schema 见 list_prompts）"
+                "description": "Optional render arguments for read_prompt (see list_prompts schema)"
             }
         },
         "required": ["action"]
@@ -76,9 +76,7 @@ pub fn aggregate_entry(timeout: Duration) -> (String, DynamicTool) {
         call_type: "function".to_owned(),
         function: ToolFunction {
             name: AGGREGATE_TOOL_NAME.to_owned(),
-            description: "MCP 资源总览与读取。list_servers 列出已配置的 MCP server 及状态；\
-              list_resources 列出某 server（或全部）可读资源与 URI 模板；read_resource 按 uri 读取资源内容\
-              （文本直通，二进制返回占位行）。"
+            description: "MCP resources: list_servers, list_resources, read_resource, list_prompts, read_prompt."
                 .to_owned(),
             parameters: schema,
         },

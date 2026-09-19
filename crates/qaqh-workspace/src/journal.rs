@@ -291,6 +291,11 @@ pub fn replay_to_path(
                 std::fs::create_dir_all(parent)
                     .map_err(|error| format!("cannot create output dir: {error}"))?;
             }
+            if let Err(guard) =
+                crate::file_shared::ensure_writable_regular_target(&path.to_string_lossy())
+            {
+                return Err(guard.message());
+            }
             std::fs::write(&path, content.as_bytes())
                 .map_err(|error| format!("cannot write output file: {error}"))?;
         } else if path.exists() {
