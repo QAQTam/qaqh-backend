@@ -126,9 +126,15 @@ const listIssueComments = (repo, number, { sort = "-created", pageSize = 3 } = {
   api(`${repoPath(repo)}/-/issues/${number}/comments?sort=${sort}&page_size=${pageSize}`);
 const postIssueComment = (repo, number, body) =>
   api(`${repoPath(repo)}/-/issues/${number}/comments`, { method: "POST", body: { body } });
+const postPullComment = (repo, number, body) =>
+  api(`${repoPath(repo)}/-/pulls/${number}/comments`, { method: "POST", body: { body } });
 
-// ── issue chat bridge ──
+// ── Agent chat bridge (issue / PR) ──
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function normalizeTargetType(value) {
+  return value === "pr" || value === "pull" ? "pr" : "issue";
+}
 
 function compareCommentIds(a, b) {
   try {
@@ -164,12 +170,14 @@ function chatCommentView(comment, maxChars = 12000) {
   };
 }
 
-async function fetchIssueComments(repo, number, { pageSize = 100, maxPages = 3 } = {}) {
+async function fetchChatComments(repo, number, { target_type = "issue", pageSize = 100, maxPages = 3 } = {}) {
+  const target = normalizeTargetType(target_type);
+  const resource = target === "pr" ? "pulls" : "issues";
   const all = [];
   for (let page = 1; page <= maxPages; page++) {
-    const response = await api(
-      `${repoPath(repo)}/-/issues/${number}/comments?sort=-created&page=${page}&page_size=${pageSize}`,
-    );
+    const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (target === "issue") query.set("sort", "-created");
+    const response = await api(`${repoPath(repo)}/-/${resource}/${number}/comments?${query}`);
     const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
     all.push(...rows);
     const total = Number(response?.header?.["x-cnb-total"] ?? response?.total ?? 0);
@@ -199,13 +207,15 @@ function parseIssueNumber(value) {
 }
 
 async function readChat(repo, issue, {
+  target_type = "issue",
   after_id = null,
   author = null,
   limit = 20,
   max_chars = 12000,
 } = {}) {
   const number = parseIssueNumber(issue);
-  const comments = await fetchIssueComments(repo, number);
+  const target = normalizeTargetType(target_type);
+  const comments = await fetchChatComments(repo, number, { target_type: target });
   const cursor = after_id == null || after_id === "" ? null : String(after_id);
   let selected = cursor == null
     ? comments
@@ -215,6 +225,7 @@ async function readChat(repo, issue, {
   selected = selected.slice(-count);
   return {
     repo,
+    target_type: target,
     issue: number,
     after_id: cursor,
     author: author || null,
@@ -224,6 +235,7 @@ async function readChat(repo, issue, {
 }
 
 async function waitChat(repo, issue, {
+  target_type = "issue",
   after_id = null,
   author = null,
   timeout_ms = 30000,
@@ -231,6 +243,7 @@ async function waitChat(repo, issue, {
   max_chars = 12000,
 } = {}) {
   const number = parseIssueNumber(issue);
+  const target = normalizeTargetType(target_type);
   const timeoutValue = Number(timeout_ms);
   const timeout = Number.isFinite(timeoutValue) ? Math.max(0, timeoutValue) : 30000;
   const interval = Math.max(1000, Number(poll_interval_ms) || 3000);
@@ -239,13 +252,14 @@ async function waitChat(repo, issue, {
   if (cursor == null) {
     // Baseline against the newest comment from all authors; otherwise an
     // author filter could replay an older message that already existed.
-    const latest = await readChat(repo, number, { limit: 1, max_chars });
+    const latest = await readChat(repo, number, { target_type: target, limit: 1, max_chars });
     cursor = latest.comments.at(-1)?.id || "0";
   }
 
   const startedAt = Date.now();
   while (true) {
     const batch = await readChat(repo, number, {
+      target_type: target,
       after_id: cursor,
       author,
       limit: 100,
@@ -262,6 +276,7 @@ async function waitChat(repo, issue, {
     if (remaining <= 0) {
       return {
         repo,
+        target_type: target,
         issue: number,
         after_id: cursor,
         author: author || null,
@@ -275,13 +290,16 @@ async function waitChat(repo, issue, {
   }
 }
 
-async function sendChat(repo, issue, body) {
+async function sendChat(repo, issue, body, { target_type = "issue" } = {}) {
   const number = parseIssueNumber(issue);
+  const target = normalizeTargetType(target_type);
   const text = String(body ?? "");
   if (!text.trim()) throw new Error("chat body must not be empty");
-  const response = await postIssueComment(repo, number, text);
+  const response = target === "pr"
+    ? await postPullComment(repo, number, text)
+    : await postIssueComment(repo, number, text);
   const comment = normalizeChatComment(response?.data ?? response);
-  return { repo, issue: number, sent: true, comment };
+  return { repo, target_type: target, issue: number, sent: true, comment };
 }
 
 // ── pulls ──
@@ -584,12 +602,13 @@ const TOOLS = [
   },
   {
     name: "cnb_chat_read",
-    description: "读取 issue 评论，按起始评论 ID、作者过滤，返回按时间排序的 Agent 对话消息。适合查看工程师 B 的回复。",
+    description: "读取 issue 或 PR 评论，按起始评论 ID、作者过滤，返回按时间排序的 Agent 对话消息。适合查看工程师 B 的回复。",
     inputSchema: {
       type: "object",
       properties: {
         repo: { type: "string", description: "仓库路径，默认 " + DEFAULT_REPO },
-        issue: { type: "number", description: "issue 编号" },
+        target_type: { type: "string", enum: ["issue", "pr"], description: "评论目标类型，默认 issue" },
+        issue: { type: "number", description: "issue 或 PR 编号" },
         after_id: { type: "string", description: "只返回 ID 大于该值的评论；不传则返回最新评论" },
         author: { type: "string", description: "只保留指定 CNB 用户名，如 AnyBuddy" },
         limit: { type: "number", description: "最多返回多少条，默认 20，最大 100" },
@@ -600,12 +619,13 @@ const TOOLS = [
   },
   {
     name: "cnb_chat_wait",
-    description: "短轮询等待 issue 新评论。首次调用会以当前最新评论为游标，只等待之后的新消息；返回 timed_out=true 表示本轮没有新消息。",
+    description: "短轮询等待 issue 或 PR 新评论。首次调用会以当前最新评论为游标，只等待之后的新消息；返回 timed_out=true 表示本轮没有新消息。",
     inputSchema: {
       type: "object",
       properties: {
         repo: { type: "string", description: "仓库路径，默认 " + DEFAULT_REPO },
-        issue: { type: "number", description: "issue 编号" },
+        target_type: { type: "string", enum: ["issue", "pr"], description: "评论目标类型，默认 issue" },
+        issue: { type: "number", description: "issue 或 PR 编号" },
         after_id: { type: "string", description: "从该评论 ID 之后开始等待；不传则从当前最新评论开始" },
         author: { type: "string", description: "只等待指定 CNB 用户名，如 AnyBuddy" },
         timeout_ms: { type: "number", description: "最长等待毫秒数，默认 30000" },
@@ -617,12 +637,13 @@ const TOOLS = [
   },
   {
     name: "cnb_chat_send",
-    description: "向 issue 发送评论，作为 Agent 的直接回复。正文必填，返回创建后的评论 ID。",
+    description: "向 issue 或 PR 发送评论，作为 Agent 的直接回复。正文必填，返回创建后的评论 ID。",
     inputSchema: {
       type: "object",
       properties: {
         repo: { type: "string", description: "仓库路径，默认 " + DEFAULT_REPO },
-        issue: { type: "number", description: "issue 编号" },
+        target_type: { type: "string", enum: ["issue", "pr"], description: "评论目标类型，默认 issue" },
+        issue: { type: "number", description: "issue 或 PR 编号" },
         body: { type: "string", description: "评论正文" },
       },
       required: ["issue", "body"],
@@ -681,6 +702,7 @@ async function callTool(name, args) {
     }
     case "cnb_chat_read":
       return await readChat(repo, args.issue, {
+        target_type: args.target_type,
         after_id: args.after_id,
         author: args.author,
         limit: args.limit,
@@ -688,6 +710,7 @@ async function callTool(name, args) {
       });
     case "cnb_chat_wait":
       return await waitChat(repo, args.issue, {
+        target_type: args.target_type,
         after_id: args.after_id,
         author: args.author,
         timeout_ms: args.timeout_ms,
@@ -695,7 +718,7 @@ async function callTool(name, args) {
         max_chars: args.max_chars,
       });
     case "cnb_chat_send":
-      return await sendChat(repo, args.issue, args.body);
+      return await sendChat(repo, args.issue, args.body, { target_type: args.target_type });
     case "cnb_merge_queue":
       return await mergeQueue(repo, args.prs, {
         ignore_verdict: args.ignore_verdict === true,
@@ -838,6 +861,7 @@ function parseArgs(argv) {
     repo: null,
     issues: [],
     builds: [],
+    targetType: "issue",
     issue: null,
     afterId: null,
     author: null,
@@ -861,6 +885,10 @@ function parseArgs(argv) {
     else if (a === "--issues") args.issues = (argv[++i] || "").split(",").map(Number).filter(Boolean);
     else if (a === "--builds") args.builds = (argv[++i] || "").split(",").filter(Boolean);
     else if (a === "--issue") args.issue = argv[++i] || null;
+    else if (a === "--pr" || a === "--pull") {
+      args.targetType = "pr";
+      args.issue = argv[++i] || null;
+    }
     else if (a === "--after-id") args.afterId = argv[++i] || null;
     else if (a === "--author") args.author = argv[++i] || null;
     else if (a === "--limit") args.limit = Number(argv[++i]);
@@ -877,10 +905,10 @@ function printCliHelp() {
   console.log(`用法:
   node server.mjs                        启动 MCP stdio server
   node server.mjs --watch --issues 97,100
-  node server.mjs --chat-read --issue 100 [--after-id ID] [--author AnyBuddy] [--json]
-  node server.mjs --chat-wait --issue 100 [--after-id ID] [--author AnyBuddy] [--timeout-ms 30000] [--interval-ms 3000] [--json]
-  node server.mjs --chat-listen --issue 100 [--after-id ID] [--author AnyBuddy] [--timeout-ms 30000] [--interval-ms 3000] [--json]
-  node server.mjs --chat-send --issue 100 (--body TEXT | --body-file FILE) [--json]`);
+  node server.mjs --chat-read (--issue 100 | --pr 102) [--after-id ID] [--author AnyBuddy] [--json]
+  node server.mjs --chat-wait (--issue 100 | --pr 102) [--after-id ID] [--author AnyBuddy] [--timeout-ms 30000] [--interval-ms 3000] [--json]
+  node server.mjs --chat-listen (--issue 100 | --pr 102) [--after-id ID] [--author AnyBuddy] [--timeout-ms 30000] [--interval-ms 3000] [--json]
+  node server.mjs --chat-send (--issue 100 | --pr 102) (--body TEXT | --body-file FILE) [--json]`);
 }
 
 function formatChatResult(result) {
@@ -901,24 +929,31 @@ async function runChatListen(args) {
   if (!args.issue) throw new Error("--issue is required");
   const repo = args.repo || DEFAULT_REPO;
   const issue = parseIssueNumber(args.issue);
+  const targetType = normalizeTargetType(args.targetType);
   let cursor = args.afterId == null || args.afterId === "" ? null : String(args.afterId);
   if (cursor == null) {
-    const latest = await readChat(repo, issue, { limit: 1, max_chars: args.maxChars });
+    const latest = await readChat(repo, issue, {
+      target_type: targetType,
+      limit: 1,
+      max_chars: args.maxChars,
+    });
     cursor = latest.comments.at(-1)?.id || "0";
   }
 
   const started = {
     type: "listening",
     repo,
+    target_type: targetType,
     issue,
     author: args.author || null,
     after_id: cursor,
     interval_ms: Math.max(1000, args.intervalMs || 3000),
   };
-  process.stdout.write((args.json ? JSON.stringify(started) : `listening issue=${issue} author=${started.author || "*"} after_id=${cursor}`) + "\n");
+  process.stdout.write((args.json ? JSON.stringify(started) : `listening ${targetType}=${issue} author=${started.author || "*"} after_id=${cursor}`) + "\n");
 
   while (true) {
     const result = await waitChat(repo, issue, {
+      target_type: targetType,
       after_id: cursor,
       author: args.author,
       timeout_ms: args.timeoutMs,
@@ -936,9 +971,11 @@ async function runChatListen(args) {
 async function runChat(args) {
   if (!args.issue) throw new Error("--issue is required");
   const repo = args.repo || DEFAULT_REPO;
+  const targetType = normalizeTargetType(args.targetType);
   let result;
   if (args.mode === "chat-read") {
     result = await readChat(repo, args.issue, {
+      target_type: targetType,
       after_id: args.afterId,
       author: args.author,
       limit: args.limit,
@@ -946,6 +983,7 @@ async function runChat(args) {
     });
   } else if (args.mode === "chat-wait") {
     result = await waitChat(repo, args.issue, {
+      target_type: targetType,
       after_id: args.afterId,
       author: args.author,
       timeout_ms: args.timeoutMs,
@@ -958,7 +996,7 @@ async function runChat(args) {
       const { readFile } = await import("node:fs/promises");
       body = await readFile(args.bodyFile, "utf-8");
     }
-    result = await sendChat(repo, args.issue, body);
+    result = await sendChat(repo, args.issue, body, { target_type: targetType });
   } else {
     throw new Error(`unsupported chat mode: ${args.mode}`);
   }

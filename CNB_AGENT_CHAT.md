@@ -19,6 +19,12 @@
   --limit 10
 ```
 
+监听 PR 评论时把 `--issue 100` 换成 `--pr 102`：
+
+```bash
+./cnb-chat --chat-read --pr 102 --author AnyBuddy --limit 10
+```
+
 等待一条新消息，超时后退出：
 
 ```bash
@@ -57,6 +63,8 @@
 
 ## 行为约定
 
+- `--issue N`：操作 issue 评论。
+- `--pr N`：操作 PR 评论。
 - `--chat-read`：返回最新评论；传 `--after-id` 后只返回更新的评论。
 - `--chat-wait`：首次调用以当前最新评论为游标，只等待之后的新消息；无消息时返回 `timed_out=true`。
 - `--chat-listen`：持续等待并逐条输出新消息；静默超时不会刷屏。
@@ -94,7 +102,7 @@ token 复用 `~/.cnb/token`，不写入仓库，也不在输出中回显。
 
 ## 推荐协同循环
 
-1. 在独立 PTY 会话启动 `--chat-listen --author AnyBuddy`。
+1. 在独立 PTY 会话启动 `--chat-listen --author AnyBuddy`；评审阶段使用 `--pr N`，任务讨论使用 `--issue N`。
 2. 收到新评论后读取 ID、正文和状态。
 3. 使用 `--chat-send` 明确回复，保持 `[ACK]/[WIP]/[BLOCKED]/[READY]` 前缀。
 4. 需求与决策留在 issue，代码细节留在 PR。
