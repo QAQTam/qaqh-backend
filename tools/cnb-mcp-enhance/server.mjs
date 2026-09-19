@@ -170,17 +170,24 @@ function chatCommentView(comment, maxChars = 12000) {
   };
 }
 
-async function fetchChatComments(repo, number, { target_type = "issue", pageSize = 100, maxPages = 3 } = {}) {
+async function fetchChatComments(repo, number, {
+  target_type = "issue",
+  pageSize = 100,
+  maxPages = 1000,
+} = {}) {
   const target = normalizeTargetType(target_type);
   const resource = target === "pr" ? "pulls" : "issues";
   const all = [];
+  let total = 0;
+  let pages = 0;
   for (let page = 1; page <= maxPages; page++) {
     const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
     if (target === "issue") query.set("sort", "-created");
     const response = await api(`${repoPath(repo)}/-/${resource}/${number}/comments?${query}`);
     const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
     all.push(...rows);
-    const total = Number(response?.header?.["x-cnb-total"] ?? response?.total ?? 0);
+    pages = page;
+    total = Number(response?.header?.["x-cnb-total"] ?? response?.total ?? total);
     if (rows.length < pageSize || (total > 0 && all.length >= total)) break;
   }
 
@@ -192,10 +199,16 @@ async function fetchChatComments(repo, number, { target_type = "issue", pageSize
     seen.add(comment.id);
     comments.push(comment);
   }
-  return comments.sort((a, b) => {
+  comments.sort((a, b) => {
     const byId = compareCommentIds(a.id, b.id);
     return byId || a.created_at.localeCompare(b.created_at);
   });
+  return {
+    comments,
+    pages,
+    total: total || comments.length,
+    truncated: total > 0 && comments.length < total,
+  };
 }
 
 function parseIssueNumber(value) {
@@ -212,24 +225,29 @@ async function readChat(repo, issue, {
   author = null,
   limit = 20,
   max_chars = 12000,
+  order = "latest",
 } = {}) {
   const number = parseIssueNumber(issue);
   const target = normalizeTargetType(target_type);
-  const comments = await fetchChatComments(repo, number, { target_type: target });
+  const fetched = await fetchChatComments(repo, number, { target_type: target });
   const cursor = after_id == null || after_id === "" ? null : String(after_id);
   let selected = cursor == null
-    ? comments
-    : comments.filter((comment) => compareCommentIds(comment.id, cursor) > 0);
+    ? fetched.comments
+    : fetched.comments.filter((comment) => compareCommentIds(comment.id, cursor) > 0);
   if (author) selected = selected.filter((comment) => comment.author === author);
   const count = Math.max(1, Math.min(Number(limit) || 20, 100));
-  selected = selected.slice(-count);
+  selected = order === "earliest" ? selected.slice(0, count) : selected.slice(-count);
   return {
     repo,
     target_type: target,
     issue: number,
     after_id: cursor,
     author: author || null,
+    order,
     count: selected.length,
+    pages: fetched.pages,
+    total: fetched.total,
+    truncated: fetched.truncated,
     comments: selected.map((comment) => chatCommentView(comment, max_chars)),
   };
 }
@@ -257,6 +275,7 @@ async function waitChat(repo, issue, {
   }
 
   const startedAt = Date.now();
+  let lastBatch = null;
   while (true) {
     const batch = await readChat(repo, number, {
       target_type: target,
@@ -264,7 +283,9 @@ async function waitChat(repo, issue, {
       author,
       limit: 100,
       max_chars,
+      order: "earliest",
     });
+    lastBatch = batch;
     if (batch.count > 0) {
       return {
         ...batch,
@@ -275,11 +296,17 @@ async function waitChat(repo, issue, {
     const remaining = timeout - (Date.now() - startedAt);
     if (remaining <= 0) {
       return {
-        repo,
-        target_type: target,
-        issue: number,
-        after_id: cursor,
-        author: author || null,
+        ...(lastBatch || {
+          repo,
+          target_type: target,
+          issue: number,
+          after_id: cursor,
+          author: author || null,
+          order: "earliest",
+          pages: 0,
+          total: 0,
+          truncated: false,
+        }),
         count: 0,
         comments: [],
         waited_ms: Date.now() - startedAt,
