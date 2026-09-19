@@ -1,6 +1,6 @@
 //! BUG-2026-09-12-05 回归：actor 线程设置的会话工作区必须对派生工具线程可见。
 //!
-//! 事故模型（docs/report/2026-09-12-会话cwd未传导工具线程grep越界-report.md）：
+//! 事故模型（docs/archive/2026-09/report/2026-09-12-会话cwd未传导工具线程grep越界-report.md）：
 //! `dae42c7` 让 actor 上下文跳过物理 cd 后，会话 cwd 只存在于 actor 线程 TLS；
 //! 工具线程的 `current_workspace()` 回退到恒空的进程全局，相对路径全部锚到
 //! daemon 进程 cwd。修复 = `ActorToolScope` 携带 workspace 快照跨线程搬运。

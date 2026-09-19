@@ -1,7 +1,7 @@
 # Codex 上游对照分析 — QAQ-Harness 隐藏 Bug 修法参照
 
 > 对照对象：`D:\project\codex-main`（OpenAI Codex，codex-rs workspace）。
-> 目的：对我们 buglist（`docs/buglist/2026-09-13-hidden-bug-scan.md`）中可对照的条目，
+> 目的：对我们 buglist（`docs/archive/2026-09/buglist/2026-09-13-hidden-bug-scan.md`）中可对照的条目，
 > 考察上游同问题的实现方式，校准/升级修法。
 > 分析日期：2026-09-13。Codex 源码位置均以该快照为准。
 

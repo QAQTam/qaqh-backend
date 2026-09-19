@@ -1,8 +1,8 @@
 # handoff：main 编译回归修复 + 远端工单/PR 全量收口（2026-09-14）
 
 > 交接对象：下一个接手 qaqh-backend 开发循环的 agent 或人。
-> 关联：流程手册 [`2026-09-13-CNB-NPC全流程开发管线-handoff.md`](./2026-09-13-CNB-NPC全流程开发管线-handoff.md)、
-> 主报告 [`docs/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md`](../report/)
+> 关联：流程手册 [`2026-09-13-CNB-NPC全流程开发管线-handoff.md`](../../../handoff/2026-09-13-CNB-NPC全流程开发管线-handoff.md)、
+> 主报告 [`docs/archive/2026-09/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md`](../report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md)
 
 ## 0. 最终状态（2026-09-14 18:25）
 
