@@ -1,68 +1,24 @@
-#![allow(unused_imports)]
-//! edit — 差分实现的第二代编辑工具。
+//! edit — 精确字符串替换（str_replace 语义）。
 //!
-//! 定位（见 docs/nextdev/PLAN-EDIT-FILE-V2.md）：**只实现 v1 没有的部分**。
-//! v1（edit_file：行号定位、replace_all、regex、每 op 独立事务与诊断体系）
-//! 已下线删除——v2 是唯一编辑入口。
+//! 模型面字段：`path` / `old_str` / `new_str`（+ 可选 `replace_all`）。
 //!
-//! v2 的能力面（对齐 edit-tool-design-spec.md）：
+//! - `old_str` 必须精确命中文件中的**唯一**位置：
+//!   - 0 处命中 → `NOT_FOUND`，返回一份「old_str → 文件实际内容」的 diff 供模型自纠；
+//!   - 多处命中 → `AMBIGUOUS_MATCH`，列出各命中位置与上下文，提示扩展 `old_str`；
+//!   - 恰好 1 处 → 替换并返回紧凑回执（pass）。
+//!   - 多处命中且 `replace_all=true` → 全部替换（非重叠，`str::replace` 语义）。
+//! - 匹配在 LF 规范视图上做，写回按原文件 CRLF 还原；成功写盘走 `atomic_write`，
+//!   并维护 `file_state` 行号偏移链与 session journal。
 //!
-//! - 结构化 hunk 协议：`replace` / `prepend_file` / `append_file`（kind 收敛后
-//!   只剩 3 个，字段名 old/new 与 v1 刻意区分）。`replace` 是**整行语义**：
-//!   `old` 必须是一行/多行的完整内容；行内改动 = `old` 取整行、`new` 给改后的
-//!   整行。行内片段 `old`（未对齐行边界）不再被 Tier3 采纳（T-4-2），并给出
-//!   针对性诊断（T-4-3）；正则替换走 bash/python，不在 edit 内。
-//! - 四层匹配流水线：Tier1 精确（context 全等消歧）→ Tier2 缩进形状 →
-//!   Tier3 相似度评分（0.6/0.2/0.2 加权 + 阈值 0.85 + margin 0.10 自动采纳）→
-//!   Tier4 拒绝并返回 Top3 候选。
-//! - 单快照两阶段全事务：全部 hunk 在同一份未修改快照上定位，任一失败整体拒绝；
-//!   区间重叠 → OVERLAPPING_HUNKS；应用按位置倒序走 ropey remove/insert。
-//! - 显式 `expected_hash` 乐观锁；失配返回 current_hash + current_content（截断）。
-//! - 成功返回 new_hash（sha256，与 read 协议一致），可续接下一次调用。
-//!
-//! 复用（基础设施白名单，非 v1 能力）：`file_shared::{content_hash,
-//! normalize_newlines, atomic_write, unified_diff}`。CRLF 契约与 v1 相同：
-//! LF 规范视图上匹配与算 hash，写回按 was_crlf 还原。
+//! 已移除（v2 遗留）：`hunks`/kind、`context_before`/`context_after`、`hint_line`、
+//! `expected_hash`、`dry_run`、Tier2/Tier3 模糊采纳、reindent、
+//! read/overwrite 模式。多文件/大范围重排仍走 `apply_patch`。
 
-use crate::file_shared::{content_hash, normalize_newlines};
-use crate::{ToolHandler, ToolManager, ToolResult, ToolRisk};
-
-// ─────────────────────────────────────────────────────────────
-// 配置常量
-// ─────────────────────────────────────────────────────────────
-
-/// Tier3 相似度采纳阈值
-pub(crate) const T3_THRESHOLD: f32 = 0.85;
-/// Tier3 胜出边际
-pub(crate) const T3_MARGIN: f32 = 0.10;
-/// 单次调用 hunk 数上限。
-pub(crate) const MAX_HUNKS: usize = 64;
-
-/// 读取相关上限（复用 file_shared 单点上限）
-pub(crate) use crate::file_shared::{
-    CANDIDATE_MAX, CONTENT_CAP, READ_MAX_CHARS, READ_MAX_LINES, SNIPPET_MAX,
-};
-/// hint_line 兜底窗口
-pub(crate) const HINT_WINDOW: usize = 10;
-
-// ─────────────────────────────────────────────────────────────
-// 子模块
-// ─────────────────────────────────────────────────────────────
-
+pub mod core;
 pub mod handler;
-pub mod hunk;
-pub mod locate;
-pub mod matching;
-pub mod resolve;
-pub mod transaction;
-pub mod view;
 
-// 核心平面重导出（PR-4-1：旧 shim 已退役，外部直接用 crate::edit::*）
 pub use handler::exec_edit;
 pub use handler::register;
-pub(crate) use hunk::Hunk;
-pub(crate) use transaction::{FileOutcome, render_text, run_edit};
-pub(crate) use view::FileView;
 
 #[cfg(test)]
 mod tests;

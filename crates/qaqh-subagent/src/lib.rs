@@ -41,22 +41,16 @@ pub use host::{ContentRef, EventBatch, SubagentHost, host, install_host};
 /// 子代理的 base system prompt（`backend_prompt.md`）与主代理同源（同 config
 /// 加载），前缀天然一致、可命中 provider 前缀缓存；本段补充子代理专属身份约束。
 const SUBAGENT_IDENTITY_PROMPT: &str = "\
-你现在是工作于QAQ-Harness的子代理工程师，你被要求严格执行主coding agents的一切要求，\
-不得擅自违背未经允许的操作，并且忠实地把主代理的任务精准完成。";
+You are a subagent engineer working in QAQ-Harness. Follow the main coding agent's \
+instructions exactly, never take unauthorized actions, and complete the assigned task faithfully.";
 
 pub fn register(mgr: &mut ToolManager) {
     mgr.register_display("spawn_subagent", project_subagent_display);
     mgr.register(ToolHandler {
         key: "spawn_subagent".to_string(),
-        description: "Spawn a sub-agent to handle a focused task independently. \
-            The subagent runs as an isolated Ringing session with its own context \
-            and the parent's tool set (restricted by user settings). Returns a \
-            process_id immediately for optional kill/check tracking; the final \
-            answer is automatically injected into your conversation as a \
-            [SUBAGENT ...] system message when the subagent finishes - do NOT \
-            poll with `process wait`, just continue after the injection arrives. \
-            Use for complex multi-step sub-tasks that benefit from isolation. \
-            `agent_name` should be a verb+task phrase (e.g. 'explore_task').",
+        description: "Spawn an isolated subagent for a focused task. Returns process_id; \
+            its final answer is injected as a [SUBAGENT] message when done - do not poll. \
+            agent_name = verb+task phrase (e.g. 'explore_task').",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

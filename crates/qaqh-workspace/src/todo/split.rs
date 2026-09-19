@@ -188,7 +188,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     let tools: [SplitTool; 3] = [
         (
             "todo_write",
-            "Replace the whole task list (full-replace). Each item needs title + status; re-include every item you keep, with its id to preserve it. Exactly one in_progress while working. New items omit id.",
+            "Replace the whole task list (full-replace). Each item needs title+status; keep ids to preserve items; exactly one in_progress.",
             todo_write_schema(),
             handle_write,
             ToolRisk::Write,

@@ -77,7 +77,7 @@ daemon 是唯一协议面:WinUI3 桌面壳 / Tauri / Electron / TUI / 浏览器�
 | 4 | Unrestricted | 显式危险 bypass，普通工具全部放行；exec 沙箱待补，可越出工作区 |
 
 - 审批闭环:`PermissionChallenge`(一次性,TTL)→ UI 确认 → 不可伪造的授权凭证执行;支持 trust folder
-- 写入防漂移:read/edit/write 维护文件 hash 账本,失配报 `STALE_FILE`;dry-run 暂存 pending_id 后 `confirm_apply` 直提
+- 写入防漂移:read/write 维护文件 hash 账本,失配报 `STALE_FILE`;write/apply_patch 支持 dry-run 暂存 pending_id 后 `confirm_apply` 直提;edit 采用精确字符串匹配
 - 子代理沙箱:读写自动批准,exec/net 自动拒绝,无弹窗通道
 - 工具模式档位:`standard` / `minimal` / `minimal:b` / `minimal:c` / `custom`(白名单 + 模型面投影)
 

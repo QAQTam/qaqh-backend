@@ -17,7 +17,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     let _ = Shell::detect();
     let _ = Shell::from_name("bash");
     let description: &'static str = Box::leak(
-        "Run command: argv|[exe,args] direct exec without a shell, or command|[shell string] via shell (default auto-detected: pwsh on Windows, bash elsewhere; explicit shell: bash/zsh/sh/pwsh/cmd). POSIX args fill $1/$2/$@, pwsh args fill $args. Returns status/exit_code/output; backgrounded+process_id if timeout."
+        "Run a command. argv = direct exec without a shell; command = shell string (pwsh on Windows, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id."
             .to_string()
             .into_boxed_str(),
     );

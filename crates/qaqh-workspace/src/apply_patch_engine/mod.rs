@@ -51,6 +51,11 @@ pub enum EngineError {
     PathOutsideWorkspace {
         path: String,
     },
+    /// 目标路径的最终组件是符号链接：按策略拒绝（不替换链接、不穿透写）。
+    SymlinkTarget {
+        path: String,
+        target: String,
+    },
     /// `*** Add File:` targeted a path that already exists. Dry-run reports this
     /// instead of a plain `[DRY RUN] … ok`; a real apply keeps the upstream
     /// overwrite semantics (fixture `011_add_overwrites_existing_file`) but the
@@ -79,6 +84,10 @@ impl fmt::Display for EngineError {
             EngineError::PathOutsideWorkspace { path } => {
                 write!(f, "patch path resolves outside the workspace: {path}")
             }
+            EngineError::SymlinkTarget { path, target } => write!(
+                f,
+                "refusing to patch '{path}': it is a symbolic link to '{target}'; use the target path directly"
+            ),
             EngineError::WouldOverwrite { path } => {
                 write!(f, "Add File target already exists: {path}")
             }
@@ -183,6 +192,19 @@ pub(crate) fn resolve_workspace_path(cwd: &Path, path: &Path) -> Result<PathBuf,
         use crate::permission::normalize_lexically;
         normalize_lexically(&joined)
     };
+    // 策略：最终组件是符号链接时拒绝（不替换链接、不穿透写），
+    // 必须在 canonicalize 之前检查——canonicalize 会把链接解析成目标。
+    if let Ok(meta) = std::fs::symlink_metadata(&joined)
+        && meta.file_type().is_symlink()
+    {
+        let target = std::fs::read_link(&joined)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "<unresolved>".to_string());
+        return Err(EngineError::SymlinkTarget {
+            path: joined.to_string_lossy().to_string(),
+            target,
+        });
+    }
     // Canonicalize the parent so `..` escapes are caught; the file itself may
     // not exist yet (Add), so canonicalize the deepest existing ancestor.
     let abs = if joined.exists() {

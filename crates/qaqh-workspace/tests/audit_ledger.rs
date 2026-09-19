@@ -104,7 +104,7 @@ fn audit_ledger_traces_calls_end_to_end() {
     };
     let blocked = call(
         "edit",
-        serde_json::json!({"path": env.workspace.join("plan.txt"), "hunks": []}),
+        serde_json::json!({"path": env.workspace.join("plan.txt"), "old_str": "a", "new_str": "b"}),
         "call-3",
         &plan,
     );

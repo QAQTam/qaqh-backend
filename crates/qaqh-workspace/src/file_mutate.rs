@@ -53,6 +53,14 @@ fn write_error(path: &str, error: &std::io::Error) -> String {
 pub(super) fn exec_write_file(args: &serde_json::Value) -> ToolResult {
     let raw_path = args.s("path");
     let path = crate::resolve_workspace_path(&raw_path);
+    // 写策略：拒绝符号链接（不替换链接、不穿透写）与设备/FIFO/目录。
+    if let Err(guard) = crate::file_shared::ensure_writable_regular_target(&path) {
+        let hint = guard.hint().unwrap_or_default();
+        return ToolResult::error(format!(
+            "[ERROR] Cannot write {raw_path}: {} [HINT] {hint}",
+            guard.message()
+        ));
+    }
     let content = args.s("content");
     let append = args.opt_bool("append").unwrap_or(false);
     let dry_run = args.opt_bool("dry_run").unwrap_or(false);
@@ -399,7 +407,7 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_display("delete", crate::display::project_delete);
     mgr.register(ToolHandler {
         key: "write".to_string(),
-        description: "Write/overwrite/append file (full content). Summary only; dry_run previews diff; use edit for targeted changes.",
+        description: "Write/overwrite/append a file. dry_run previews a diff; use edit for targeted changes.",
         input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File"},"content":{"type":"string","description":"Content"},"append":{"type":"boolean","description":"Append (default false)","default":false},"dry_run":{"type":"boolean","description":"Preview only","default":false},"expected_hash":{"type":"string","description":"Hash from prior read (optional)"}},"required":["path","content"],"additionalProperties":false}),
         handler: handle_write_file,
         risk: ToolRisk::Write,
@@ -505,5 +513,39 @@ mod tests {
         }));
         assert!(out.starts_with("[ERROR]"), "got: {out}");
         assert!(out.contains("[HINT]"), "got: {out}");
+    }
+
+    #[test]
+    fn mixed_endings_read_then_write_has_no_false_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("mixed.txt");
+        std::fs::write(&p, "a\r\nb\rc\n").unwrap();
+        let path = p.to_string_lossy().to_string();
+        // read 的账本基线 = 统一 LF 视图。
+        crate::file_state::record_read(&path, "a\nb\nc\n", 3);
+        // 无 expected_hash 的 write：归一化统一后 hash 一致，不得误报 STALE_FILE。
+        let result = exec_write_file(&serde_json::json!({
+            "path": path, "content": "a\r\nB\rc\n"
+        }));
+        assert!(result.is_success(), "{}", result.model_text());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_symlink_target_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "hello\n").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let out = write(serde_json::json!({"path": link, "content": "WORLD\n"}));
+        assert!(out.contains("symbolic link"), "got: {out}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello\n");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }

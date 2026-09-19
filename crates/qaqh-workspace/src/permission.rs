@@ -609,8 +609,9 @@ pub fn needs_permission(
         };
     }
 
-    // Level 2+: Reads auto-approve
-    if category == ToolCategory::Read {
+    // Level 2+: 工作区内 Reads auto-approve；工作区外读进入审批
+    // （L4 已在上面显式 bypass 返回；子代理沙箱在 authorization 层另行拒绝）。
+    if category == ToolCategory::Read && all_within_workspace(&paths, &workspace_root) {
         return PermissionDecision::AutoApprove;
     }
 
@@ -651,7 +652,13 @@ pub fn needs_permission(
     }
 
     // Otherwise: ask user
-    let reason = if level == PermissionLevel::ReadFree {
+    let reason = if category == ToolCategory::Read {
+        format!(
+            "Level {}: '{}' reads a path outside the workspace.",
+            level.to_u8(),
+            tool_name
+        )
+    } else if level == PermissionLevel::ReadFree {
         format!(
             "Level 2: '{}' (write/exec/net) requires confirmation.",
             tool_name
@@ -1143,5 +1150,56 @@ mod w3_w7_tests {
         assert!(summary.starts_with(r#"argv: ["echo", "echo""#), "{summary}");
         assert!(summary.ends_with('…'), "summary must be visibly truncated");
         assert_eq!(summary.chars().count(), 4096);
+    }
+
+    #[test]
+    fn read_outside_workspace_requires_approval_at_levels_2_and_3() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let inside = ws.join("inside.txt");
+        std::fs::write(&inside, "x").unwrap();
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "x").unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+
+        for level in [PermissionLevel::ReadFree, PermissionLevel::WorkspaceFree] {
+            let inside_decision = needs_permission(
+                level,
+                "read",
+                &serde_json::json!({"path": inside.clone()}),
+                &ws,
+                &HashSet::new(),
+                ToolCategory::Read,
+            );
+            assert!(
+                matches!(inside_decision, PermissionDecision::AutoApprove),
+                "inside read must auto-approve at L{}",
+                level.to_u8()
+            );
+            let outside_decision = needs_permission(
+                level,
+                "read",
+                &serde_json::json!({"path": outside.clone()}),
+                &ws,
+                &HashSet::new(),
+                ToolCategory::Read,
+            );
+            assert!(
+                matches!(outside_decision, PermissionDecision::AskUser { .. }),
+                "outside read must ask at L{}",
+                level.to_u8()
+            );
+        }
+
+        let bypass = needs_permission(
+            PermissionLevel::Unrestricted,
+            "read",
+            &serde_json::json!({"path": outside}),
+            &ws,
+            &HashSet::new(),
+            ToolCategory::Read,
+        );
+        assert!(matches!(bypass, PermissionDecision::AutoApprove));
     }
 }

@@ -224,6 +224,10 @@ fn error_code_and_hint(e: &EngineError) -> (&'static str, String) {
             "PATH_OUTSIDE_WORKSPACE",
             "Every patch path must resolve inside the workspace root; '..' escapes and absolute paths outside the workspace are rejected.".to_string(),
         ),
+        EngineError::SymlinkTarget { .. } => (
+            "SYMLINK_TARGET",
+            "Patch paths must not be symbolic links: resolve the link and retry with the real target path (links are never replaced or written through).".to_string(),
+        ),
         EngineError::WouldOverwrite { .. } => (
             "WOULD_OVERWRITE",
             "dry-run finding: '*** Add File:' would replace an existing file wholesale. Use '*** Update File:' to edit it in place (or '*** Delete File:' first). To overwrite deliberately, re-send the same patch without dry_run — a real apply keeps the upstream overwrite semantics and records the replaced contents in the delta/journal for rollback.".to_string(),
@@ -242,10 +246,8 @@ fn handle_apply_patch(ctx: crate::ToolCallCtx) -> ToolResult {
 /// 工具描述。**必须**保留「重复上下文取首个命中」的警示：匹配器不做歧义
 /// 拒绝（`seek_sequence` exact 循环直接返回首个 `i`，与上游 codex 一致），
 /// 上下文不够时被改的是第一处而结果仍是 `[OK]`（BUG-2026-09-16-11）。
-pub(crate) const DESCRIPTION: &str = "Apply Codex-format patch (*** Begin Patch). Content-matched hunks; use dry_run to preview. \
-     WARNING: matching takes the FIRST hit — if the same context appears more than once in the file, \
-     add surrounding context lines or anchor the chunk with '@@ <context line>', otherwise the first \
-     occurrence is edited (silently) and the result still reports [OK].";
+pub(crate) const DESCRIPTION: &str = "Apply a Codex-format patch (*** Begin Patch). Matching takes the FIRST hit; \
+     disambiguate repeated context with extra lines or '@@ <context line>'. dry_run previews.";
 
 pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_display("apply_patch", crate::display::project_apply_patch);
@@ -494,7 +496,6 @@ mod tests {
     fn overwrite_refreshes_file_state_for_followup_edit() {
         let (dir, ws) = repo_with_commit(&[("a.txt", "one\ntwo\n")]);
         let abs = dir.path().canonicalize().unwrap().join("a.txt");
-        let before = crate::file_shared::content_hash("one\ntwo\n");
         let patch = "*** Begin Patch\n*** Add File: a.txt\n+clobbered\n*** End Patch\n";
         let out = run_in(&ws, patch, serde_json::json!({}));
         assert_eq!(out["status"], "ok", "got: {out}");
@@ -506,21 +507,11 @@ mod tests {
             "apply_patch must refresh the ledger key for the overwritten file"
         );
 
-        // 紧随其后的 edit：传覆盖前的旧指纹必须被拒……
-        let stale = crate::edit::exec_edit(&serde_json::json!({
-            "path": abs,
-            "expected_hash": before,
-            "hunks": [{"kind": "replace", "old": "clobbered", "new": "CLOBBERED"}],
-        }));
-        assert!(
-            !stale.is_success(),
-            "the pre-overwrite hash must be rejected: {}",
-            stale.model_text()
-        );
-        // ……不传指纹（内容定位）必须成功，且看得见 apply_patch 写进去的新内容。
+        // 紧随其后的 edit：精确匹配必须看得见 apply_patch 写进去的新内容。
         let ok = crate::edit::exec_edit(&serde_json::json!({
             "path": abs,
-            "hunks": [{"kind": "replace", "old": "clobbered", "new": "CLOBBERED"}],
+            "old_str": "clobbered",
+            "new_str": "CLOBBERED",
         }));
         assert!(
             ok.is_success(),
@@ -656,6 +647,28 @@ mod tests {
         assert!(
             desc.contains("@@ <context line>"),
             "description must tell the model to anchor with @@: {desc}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_patch_rejects_symlink_target() {
+        let (dir, ws) = repo_with_commit(&[("target.txt", "hello\n")]);
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: {}\n@@\n-hello\n+HELLO\n*** End Patch\n",
+            link.display()
+        );
+        let out = run_in(&ws, &patch, serde_json::json!({}));
+        assert_eq!(out["code"], "SYMLINK_TARGET", "got: {out}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello\n");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
     }
 }

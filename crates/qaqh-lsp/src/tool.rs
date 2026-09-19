@@ -48,27 +48,27 @@ pub fn aggregate_entry(timeout: std::time::Duration) -> (String, DynamicTool) {
             "action": {
                 "type": "string",
                 "enum": ACTIONS,
-                "description": "list_servers = LSP server 状态总览；definition = 跳转定义（filePath+line+character 必填，1-based）；references = 查找引用（同上）；hover = 悬停类型/文档（同上）；documentSymbol = 文件符号树（filePath 必填）；workspaceSymbol = 工作区符号搜索（query 必填）"
+                "description": "list_servers = server status; definition = go to definition (filePath+line+character, 1-based); references = find references (same); hover = type/docs (same); documentSymbol = file symbols (filePath); workspaceSymbol = workspace symbol search (query)"
             },
             "filePath": {
                 "type": "string",
-                "description": "目标文件路径（相对 root 或绝对；definition/references/hover/documentSymbol 时必填）"
+                "description": "Target file path (relative to root or absolute; required for definition/references/hover/documentSymbol)"
             },
             "line": {
                 "type": "integer",
-                "description": "1-based 行号（definition/references/hover 时必填）"
+                "description": "1-based line (required for definition/references/hover)"
             },
             "character": {
                 "type": "integer",
-                "description": "1-based 列号（definition/references/hover 时必填）"
+                "description": "1-based character (required for definition/references/hover)"
             },
             "query": {
                 "type": "string",
-                "description": "workspaceSymbol 时必填的搜索串"
+                "description": "Search query (required for workspaceSymbol)"
             },
             "server": {
                 "type": "string",
-                "description": "显式指定 server（缺省按文件扩展名路由；未知扩展名时必填）"
+                "description": "Explicit language server (optional; defaults to extension routing; required for unknown extensions)"
             }
         },
         "required": ["action"]
@@ -77,8 +77,7 @@ pub fn aggregate_entry(timeout: std::time::Duration) -> (String, DynamicTool) {
         call_type: "function".to_owned(),
         function: ToolFunction {
             name: AGGREGATE_TOOL_NAME.to_owned(),
-            description: "LSP 精确代码导航。definition/references/hover/documentSymbol/workspaceSymbol 五操作；\
-              坐标 1-based；按文件扩展名自动路由到配置的 language server。"
+            description: "LSP code navigation: definition, references, hover, documentSymbol, workspaceSymbol (1-based positions; auto-routed by file extension)."
                 .to_owned(),
             parameters: schema,
         },
