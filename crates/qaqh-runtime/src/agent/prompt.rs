@@ -170,12 +170,58 @@ mod tests {
     fn env_template_renders_all_placeholders() {
         let prompt = full_system_prompt_with_env("probe-os-debian-linux");
         // 环境块必须存在，且 OS 探测值被注入。
-        assert!(prompt.contains("执行环境"));
+        assert!(prompt.contains("# Environment"));
         assert!(prompt.contains("probe-os-debian-linux"));
         // 占位符禁止原样漏出（模板与渲染必须一一对应）。
         assert!(!prompt.contains("{{"));
         // OS_INFO 未初始化时降级为 std::env::consts::OS，而非留空。
         assert!(full_system_prompt_with_env("").contains(std::env::consts::OS));
+    }
+
+    #[test]
+    fn prompt_and_tool_defs_char_budget() {
+        let identity = full_system_prompt();
+        let system = full_system_prompt_with_env("test-os");
+        let mgr = qaqh_workspace::registration::build_tool_manager(&[qaqh_subagent::register]);
+        let defs = mgr.filtered_defs();
+        let tools_json = serde_json::to_string(&defs).expect("serialize tool defs");
+
+        let identity_chars = identity.chars().count();
+        let system_chars = system.chars().count();
+        let tools_chars = tools_json.chars().count();
+        println!("identity prompt: {identity_chars} chars");
+        println!("system prompt (identity+env): {system_chars} chars");
+        println!("tool_defs: {tools_chars} chars / {} tools", defs.len());
+        println!(
+            "system prompt + tool_defs: {} chars (~{} tokens)",
+            system_chars + tools_chars,
+            (system_chars + tools_chars) / 4
+        );
+        let mut rows: Vec<(usize, &str)> = defs
+            .iter()
+            .map(|t| {
+                (
+                    serde_json::to_string(t)
+                        .map(|j| j.chars().count())
+                        .unwrap_or(0),
+                    t.function.name.as_str(),
+                )
+            })
+            .collect();
+        rows.sort_by_key(|b| std::cmp::Reverse(b.0));
+        for (chars, name) in rows.iter().take(5) {
+            println!("  largest: {chars} chars  {name}");
+        }
+
+        assert!(
+            identity_chars <= 128,
+            "identity prompt too long: {identity_chars}"
+        );
+        assert!(
+            system_chars + tools_chars < 20_000,
+            "prompt+tools exceeds 20k chars: {}",
+            system_chars + tools_chars
+        );
     }
 
     #[test]

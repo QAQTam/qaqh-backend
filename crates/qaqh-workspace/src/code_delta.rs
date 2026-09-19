@@ -39,19 +39,17 @@ pub(crate) fn compute(
             file: file_path.map(String::from),
         }),
         ("edit", _) => {
-            // v2：单文件 path + hunks（内容锚定：`old` 删除行数、`new` 新增行数）。
-            let mut added = 0usize;
-            let mut removed = 0usize;
-            if let Some(hunks) = args.get("hunks").and_then(|x| x.as_array()) {
-                for h in hunks {
-                    if let Some(new) = h.get("new").and_then(|x| x.as_str()) {
-                        added += new.lines().count();
-                    }
-                    if let Some(old) = h.get("old").and_then(|x| x.as_str()) {
-                        removed += old.lines().count();
-                    }
-                }
-            }
+            // str_replace：old_str 删除行数、new_str 新增行数。
+            let added = args
+                .get("new_str")
+                .and_then(|x| x.as_str())
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
+            let removed = args
+                .get("old_str")
+                .and_then(|x| x.as_str())
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
             Some(qaqh_domain::CodeDeltaRecord {
                 timestamp: now,
                 lines_added: added,

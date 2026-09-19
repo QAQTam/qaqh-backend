@@ -74,13 +74,11 @@ mod schema_spot_check {
         );
 
         // 文件修改工具选择指引
-        for (tool, needle) in [
-            ("edit", "replace_all"),
-            ("write", "use edit for targeted changes"),
-        ] {
-            let desc = by_name(tool).function.description.as_str();
-            assert!(desc.contains(needle), "{tool} missing guidance: {needle}");
-        }
+        let write_desc = by_name("write").function.description.as_str();
+        assert!(
+            write_desc.contains("use edit for targeted changes"),
+            "write missing edit guidance: {write_desc}"
+        );
 
         // read：单文件模式字段必须有描述（曾缺失导致模型不知 if_hash 语义）
         for field in ["path", "start_line", "end_line", "if_hash"] {
@@ -110,25 +108,32 @@ mod schema_spot_check {
             "edit description must not mention legacy name"
         );
 
-        // edit：read 模式已移除（行号系统归 read 工具）——hunks required 且
-        // schema 不得再宣传 read 形态。
+        // edit：str_replace 三字段契约（path/old_str/new_str），不得残留 v2 字段。
         let edit_params = &by_name("edit").function.parameters;
-        assert!(
-            edit_params["required"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!("hunks")),
-            "edit must require hunks"
-        );
-        assert!(
-            edit_params.get("oneOf").is_none()
-                && edit_params["properties"].get("start_line").is_none(),
-            "edit schema must not carry read-mode branches"
-        );
-        assert_eq!(
-            edit_params["properties"]["hunks"]["minItems"].as_u64(),
-            Some(1),
-            "edit hunks must be non-empty"
-        );
+        let required: Vec<&str> = edit_params["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(required, vec!["path", "old_str", "new_str"]);
+        let props = edit_params["properties"].as_object().unwrap();
+        assert_eq!(props.len(), 4, "edit schema: {edit_params}");
+        assert_eq!(props["replace_all"]["type"], "boolean");
+        assert!(!required.contains(&"replace_all"));
+        for legacy in [
+            "hunks",
+            "kind",
+            "context_before",
+            "context_after",
+            "hint_line",
+            "expected_hash",
+            "dry_run",
+        ] {
+            assert!(
+                !edit_params.to_string().contains(legacy),
+                "edit schema still carries legacy field {legacy}"
+            );
+        }
     }
 }

@@ -215,7 +215,7 @@ mod tests {
         apply("read", &mut result);
         assert_eq!(result.model_text(), read_body);
 
-        let edit_receipt = "[OK] edit src/lib.rs\n  2/2 hunks applied (new_hash a1b2c3d4)\n";
+        let edit_receipt = "[OK] edit src/lib.rs\n  replaced 1 occurrence (L1-L1)\n";
         let mut result = ok(edit_receipt);
         apply("edit", &mut result);
         assert_eq!(result.model_text(), edit_receipt);

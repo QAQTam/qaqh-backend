@@ -1,850 +1,437 @@
-use super::*;
-use serde_json::{Value, json};
+use super::core::{ReplaceError, find_occurrences, nearest_match, run_replace};
+use super::exec_edit;
+use crate::ToolResult;
+use serde_json::json;
 
-fn rp(old: &str, new: &str) -> Hunk {
-    Hunk::Replace {
-        old: old.to_string(),
-        new: new.to_string(),
-        context_before: String::new(),
-        context_after: String::new(),
-        replace_all: false,
-        hint_line: None,
+fn call(path: &str, old: &str, new: &str) -> ToolResult {
+    exec_edit(&json!({"path": path, "old_str": old, "new_str": new}))
+}
+
+fn call_all(path: &str, old: &str, new: &str, replace_all: bool) -> ToolResult {
+    exec_edit(&json!({
+        "path": path,
+        "old_str": old,
+        "new_str": new,
+        "replace_all": replace_all
+    }))
+}
+
+fn write_file(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, content).unwrap();
+    path.to_string_lossy().to_string()
+}
+
+fn read(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap()
+}
+
+fn code(result: &ToolResult) -> &str {
+    result.error.as_ref().map(|e| e.code.as_str()).unwrap_or("")
+}
+
+// ─────────────────────────────────────────────────────────────
+// core：精确匹配与唯一性
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+fn inline_substring_replaces_without_touching_rest() {
+    let out = run_replace("prefix: aaa bbb\nother\n", "aaa", "AAA", false).unwrap();
+    assert_eq!(out.edited, "prefix: AAA bbb\nother\n");
+    assert_eq!(out.lines, vec![1]);
+}
+
+#[test]
+fn multi_line_substring_replaces() {
+    let out = run_replace("a\nb\nc\nd\n", "b\nc", "B\nC", false).unwrap();
+    assert_eq!(out.edited, "a\nB\nC\nd\n");
+    assert_eq!(out.lines, vec![2]);
+}
+
+#[test]
+fn new_str_empty_deletes_the_match() {
+    let out = run_replace("a\nb\nc\n", "b\n", "", false).unwrap();
+    assert_eq!(out.edited, "a\nc\n");
+}
+
+#[test]
+fn not_found_carries_nearest_match() {
+    match run_replace("alpha\nlet x = 1;\nbeta\n", "let x = 2;", "y", false) {
+        Err(ReplaceError::NotFound { nearest }) => {
+            let nearest = nearest.expect("nearest match");
+            assert_eq!(nearest.start_line, 2);
+            assert!(nearest.text.contains("let x = 1;"));
+            assert!(nearest.score > 0.5, "score {}", nearest.score);
+        }
+        other => panic!("expected NotFound, got {}", describe(other)),
     }
 }
 
-fn rp_all(old: &str, new: &str) -> Hunk {
-    Hunk::Replace {
-        old: old.to_string(),
-        new: new.to_string(),
-        context_before: String::new(),
-        context_after: String::new(),
-        replace_all: true,
-        hint_line: None,
+#[test]
+fn nearest_match_prefers_the_closest_line() {
+    let nearest = nearest_match("alpha\nlet x = 1;\nbeta\n", "let x = 2;").unwrap();
+    assert_eq!(nearest.start_line, 2);
+}
+
+#[test]
+fn ambiguous_counts_overlapping_occurrences() {
+    assert_eq!(find_occurrences("aaa", "aa"), vec![0, 1]);
+}
+
+#[test]
+fn ambiguous_returns_total_and_occurrences() {
+    match run_replace("x\nx\nx\n", "x", "y", false) {
+        Err(ReplaceError::Ambiguous { total, occurrences }) => {
+            assert_eq!(total, 3);
+            assert_eq!(occurrences.len(), 3);
+            assert_eq!(occurrences[0].line, 1);
+            assert!(occurrences[0].context.contains("L1: x"));
+        }
+        other => panic!("expected Ambiguous, got {}", describe(other)),
     }
 }
 
-fn rp_ctx(old: &str, new: &str, before: &str, after: &str) -> Hunk {
-    Hunk::Replace {
-        old: old.to_string(),
-        new: new.to_string(),
-        context_before: before.to_string(),
-        context_after: after.to_string(),
-        replace_all: false,
-        hint_line: None,
-    }
-}
-
-fn rp_hint(old: &str, new: &str, hint: usize) -> Hunk {
-    Hunk::Replace {
-        old: old.to_string(),
-        new: new.to_string(),
-        context_before: String::new(),
-        context_after: String::new(),
-        replace_all: false,
-        hint_line: Some(hint),
-    }
-}
-
-fn edit(content: &str, hunks: &[Hunk]) -> FileOutcome {
-    run_edit(content, "test.rs", hunks, Vec::new())
-}
-
-fn err_code(o: &FileOutcome) -> &str {
-    o.code.as_deref().unwrap_or("")
-}
-
-// 0. replace_all：全部精确匹配位置一次替换
 #[test]
-fn replace_all_substitutes_every_exact_occurrence() {
-    let out = edit("a\nx\nb\nx\nc\n", &[rp_all("x", "X")]);
-    assert_eq!(out.edited.as_deref(), Some("a\nX\nb\nX\nc\n"));
-    assert_eq!(out.reports.len(), 1);
-    assert_eq!(out.reports[0].tier, Some(1));
-    assert_eq!(
-        out.reports[0].note.as_deref(),
-        Some("2 location(s) replaced")
-    );
+fn replace_all_replaces_every_occurrence() {
+    let out = run_replace("x\na\nx\n", "x", "y", true).unwrap();
+    assert_eq!(out.edited, "y\na\ny\n");
+    assert_eq!(out.replaced, 2);
+    assert_eq!(out.lines, vec![1, 3]);
 }
 
-// 0b. replace_all：零精确命中 → NO_MATCH，不降级模糊匹配（多位置风险不可控）
 #[test]
-fn replace_all_without_exact_match_rejects() {
-    // old 与文件内容有缩进差异 → Tier2 可单点命中，但 replace_all 拒绝降级。
-    let out = edit("a\n    x\nb\n", &[rp_all("x", "X")]);
-    assert_eq!(err_code(&out), "NO_MATCH");
-    assert!(out.edited.is_none());
+fn replace_all_without_match_is_not_found() {
+    assert!(matches!(
+        run_replace("a\n", "z", "y", true),
+        Err(ReplaceError::NotFound { .. })
+    ));
 }
 
-// 0c. replace_all：与其它 hunk 共存（区间互不重叠）
 #[test]
-fn replace_all_coexists_with_other_hunks() {
-    let out = edit("a\nx\nb\nx\nc\n", &[rp_all("x", "X"), rp("b", "B")]);
-    assert_eq!(out.edited.as_deref(), Some("a\nX\nB\nX\nc\n"));
+fn replace_all_uses_non_overlapping_matches() {
+    // "aa" 在 "aaa" 里有重叠命中（0/1），replace_all 按 str::replace 语义取非重叠。
+    let out = run_replace("aaa", "aa", "X", true).unwrap();
+    assert_eq!(out.edited, "Xa");
+    assert_eq!(out.replaced, 1);
 }
 
-// 1. 精确匹配唯一命中
 #[test]
-fn exact_match_unique_hit() {
-    let out = edit("a\nb\nc\n", &[rp("b", "B")]);
-    assert_eq!(out.edited.as_deref(), Some("a\nB\nc\n"));
-    assert_eq!(out.reports[0].tier, Some(1));
-    assert_eq!(out.reports[0].line_range, Some((2, 2)));
+fn exec_replace_all_reports_count_and_shifts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "all.txt", "x\nmid\nx\nmid\nx\n");
+    let result = call_all(&path, "x", "x\nY", true);
+    assert!(result.is_success(), "{}", result.model_text());
+    assert_eq!(read(&path), "x\nY\nmid\nx\nY\nmid\nx\nY\n");
+    assert!(result.model_text().contains("replaced 3 occurrences"));
+    // 三处起始行 1/3/5，各 +1 行。
+    assert_eq!(crate::file_state::correct_line(&path, 2), Some((3, 1)));
+    assert_eq!(crate::file_state::correct_line(&path, 4), Some((6, 2)));
+    assert_eq!(crate::file_state::correct_line(&path, 6), Some((9, 3)));
 }
 
-// 2. 缩进基准不同 → Tier2 形状命中
 #[test]
-fn indent_shape_matches_on_tier2() {
-    let content = "fn outer() {\n    fn inner() {\n        let x = 1;\n    }\n}\n";
-    // 模型忘了 inner 体里多缩进两格：old 不带缩进，文件行带 8 空格
-    let out = edit(content, &[rp("let x = 1;", "let x = 2;")]);
-    assert_eq!(
-        out.edited.as_deref(),
-        Some("fn outer() {\n    fn inner() {\n        let x = 2;\n    }\n}\n")
-    );
-    assert_eq!(out.reports[0].tier, Some(2));
-    assert_eq!(out.reports[0].note.as_deref(), Some("indent-shape"));
-}
-
-// 3. 细微出入 → Tier3 达标自动采纳
-#[test]
-fn tier3_auto_applies_when_score_and_margin_pass() {
-    // 文件里是 "let foo = 1;"，模型记为 "let fo0 = 1;"（一字之差）；
-    // 且忘了缩进。剥缩进后 ratio 0.92 ≥ 0.85，唯一高分候选 → Tier3 采纳。
-    let content = "fn main() {\n    let foo = 1;\n    println!(\"{}\", foo);\n}\n";
-    let out = edit(content, &[rp("let fo0 = 1;", "let foo = 1;")]);
-    assert_eq!(
-        out.edited.as_deref(),
-        Some("fn main() {\n    let foo = 1;\n    println!(\"{}\", foo);\n}\n")
-    );
-    assert_eq!(out.reports[0].tier, Some(3));
-    assert!(out.reports[0].score.unwrap() >= T3_THRESHOLD);
-}
-
-// 4. 双候选 margin 不足 → 拒绝
-#[test]
-fn tier3_rejects_when_margin_insufficient() {
-    let content = "let alpha_value = 1;\nlet alpho_value = 1;\n";
-    let out = edit(content, &[rp("let alphu_value = 1;", "let x = 1;")]);
-    assert!(out.edited.is_none());
-    assert_eq!(err_code(&out), "NO_MATCH");
-    assert!(out.reports[0].candidates.as_ref().unwrap().len() >= 2);
-}
-
-// 5. 同一模式 ×3 + context_before 消歧
-#[test]
-fn context_before_disambiguates_repeated_pattern() {
-    let content = "fn a() {\n    return Ok(());\n}\nfn b() {\n    return Ok(());\n}\nfn c() {\n    return Ok(());\n}\n";
-    let out = edit(
+fn extending_context_makes_a_repeat_unique() {
+    let content = "fn a() {\n    return Ok(());\n}\nfn b() {\n    return Ok(());\n}\n";
+    let out = run_replace(
         content,
-        &[rp_ctx("return Ok(());", "return Err(());", "fn b() {", "")],
-    );
-    assert_eq!(
-        out.edited.as_deref(),
-        Some(
-            "fn a() {\n    return Ok(());\n}\nfn b() {\n    return Err(());\n}\nfn c() {\n    return Ok(());\n}\n"
-        )
-    );
-    // 行带缩进 → 精确不命中，Tier2 形状命中（3 处）→ context_before 消歧
-    assert_eq!(out.reports[0].tier, Some(2));
-}
-
-// 6. 两 hunk 互不重叠，各自命中
-#[test]
-fn two_hunks_apply_independently() {
-    let out = edit("a\nb\nc\nd\n", &[rp("a", "A"), rp("c", "C")]);
-    assert_eq!(out.edited.as_deref(), Some("A\nb\nC\nd\n"));
-    assert_eq!(out.reports.len(), 2);
-}
-
-// 7. 两 hunk 重叠 → 整体拒绝，零改动
-#[test]
-fn overlapping_hunks_rejected_atomically() {
-    let content = "a\nb\nc\n";
-    let before = content.to_string();
-    // replace 窗口 [0,4)（"a\nb\nc" 不含尾换行），insert_before "c" 的
-    // 插入点 = 行 2 行首 = char 4 ∈ [0,4) 边界…… 用更直白的严格内部冲突：
-    // replace "a\nb\nc" 区间 [0,5)，insert_before "b" 的插入点 = 行 1 行首 = char 2 ∈ (0,5) 内部 → 冲突
-    let out = edit(
-        content,
-        &[rp("a\nb\nc", "X"), rp("a\nb", "Y")], // 第二个区间严格内部 → 冲突
-    );
-    assert!(out.edited.is_none());
-    assert_eq!(err_code(&out), "OVERLAPPING_HUNKS");
-    assert_eq!(before, "a\nb\nc\n");
-}
-
-// 8. 空文件 PrependFile / AppendFile
-#[test]
-fn empty_file_prepend_and_append() {
-    let out = edit(
-        "",
-        &[Hunk::PrependFile {
-            new: "hello\n".into(),
-        }],
-    );
-    assert_eq!(out.edited.as_deref(), Some("hello\n"));
-    let out = edit(
-        "",
-        &[Hunk::AppendFile {
-            new: "world\n".into(),
-        }],
-    );
-    assert_eq!(out.edited.as_deref(), Some("world\n"));
-}
-
-// 9. 无结尾换行 AppendFile 沿用原约定（自动补换行）
-#[test]
-fn append_file_respects_missing_trailing_newline() {
-    let out = edit("a\nb", &[Hunk::AppendFile { new: "c\n".into() }]);
-    assert_eq!(out.edited.as_deref(), Some("a\nb\nc\n"));
-}
-
-// 10. CRLF 混入 → 归一化 + notes
-#[test]
-fn crlf_in_request_normalized_with_notes() {
-    // 归一化在 Hunk::parse 层：CRLF → LF 并记 note，走真实解析路径。
-    let mut notes = Vec::new();
-    let hunk = Hunk::parse(
-        &json!({"kind": "replace", "old": "a\r\nb", "new": "A\nB"}),
-        &mut notes,
+        "fn b() {\n    return Ok(());\n}",
+        "fn b() {\n    return Err(());\n}",
+        false,
     )
     .unwrap();
-    let out = run_edit("a\nb\n", "test.rs", &[hunk], notes);
-    assert_eq!(out.edited.as_deref(), Some("A\nB\n"));
-    assert_eq!(out.reports[0].status, "ok");
-    assert!(out.notes.iter().any(|n| n.contains("CRLF")));
+    assert!(out.edited.contains("return Err(())"));
+    assert!(out.edited.contains("fn a() {\n    return Ok(());"));
 }
 
-// 14. old 空 + context 全空 → Underspecified
 #[test]
-fn empty_old_without_context_is_underspecified() {
-    let out = edit("a\nb\n", &[rp("", "X\n")]);
-    assert_eq!(err_code(&out), "UNDERSPECIFIED");
-    assert!(out.edited.is_none());
+fn fragment_old_matches_inside_an_indented_line() {
+    // 子串语义：不带缩进的片段也能命中（这正是 v2 整行语义做不到的）。
+    let out = run_replace("    let x = 1;\n", "let x = 1;", "let x = 2;", false).unwrap();
+    assert_eq!(out.edited, "    let x = 2;\n");
 }
 
-// 纯插入：context_before 定位
-
-// 纯插入：双 context 交界
-
-// 15. insert_after / insert_before 锚点
-
-// 15a. 同一位置的两次插入 → 重叠拒绝（顺序无歧义才允许）
-
-// 15b. 锚点多处命中 → Ambiguous
-
-// 16. CRLF 文件写回保持 CRLF（execute 层测试）
 #[test]
-fn crlf_file_roundtrip_via_execute() {
+fn wrong_whitespace_inside_old_does_not_match() {
+    assert!(matches!(
+        run_replace("    let x = 1;\n", "let x =  1;", "let x = 2;", false),
+        Err(ReplaceError::NotFound { .. })
+    ));
+}
+
+fn describe(r: Result<super::core::ReplaceOutcome, ReplaceError>) -> &'static str {
+    match r {
+        Ok(_) => "Ok",
+        Err(ReplaceError::NotFound { .. }) => "NotFound",
+        Err(ReplaceError::Ambiguous { .. }) => "Ambiguous",
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// exec：成功路径（pass + 展示面 diff）
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+fn exec_replaces_and_returns_compact_pass() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("crlf.txt");
-    std::fs::write(&path, "a\r\nb\r\n").unwrap();
-    let hash = content_hash("a\nb\n"); // LF 视图 hash
-    let result = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "expected_hash": hash,
-        "hunks": [{"kind": "replace", "old": "b", "new": "c"}],
-    }));
-    assert!(result.is_success(), "model text: {}", result.model_text());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\r\nc\r\n");
-}
-
-// 11. expected_hash 失配 → 拒绝 + current_content
-#[test]
-fn hash_mismatch_rejected_with_current_content() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("f.txt");
-    std::fs::write(&path, "a\nb\n").unwrap();
-    let result = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "expected_hash": "deadbeef",
-        "hunks": [{"kind": "replace", "old": "a", "new": "A"}],
-    }));
-    assert!(!result.is_success());
-    assert_eq!(result.data["code"], "HASH_MISMATCH");
+    let path = write_file(&dir, "a.txt", "prefix: aaa\nother\n");
+    let result = call(&path, "aaa", "AAA");
+    assert!(result.is_success(), "{}", result.model_text());
+    assert_eq!(read(&path), "prefix: AAA\nother\n");
+    let text = result.model_text();
+    assert!(text.starts_with("[OK] edit "), "{text}");
+    assert!(text.contains("replaced 1 occurrence"), "{text}");
     assert!(
-        result.data["current_content"]
-            .as_str()
-            .unwrap()
-            .contains("a\nb\n")
+        !text.contains("diff"),
+        "model text must stay compact: {text}"
     );
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
+    assert!(
+        !text.contains("hash"),
+        "model text must stay compact: {text}"
+    );
+    // diff 只走展示面。
+    assert!(
+        result
+            .diff
+            .as_deref()
+            .is_some_and(|d| d.contains("+prefix: AAA"))
+    );
 }
 
-// 12. 无 hash 编辑已有文件 → 直接编辑（内容定位命中即安全）
 #[test]
-fn edit_existing_file_without_hash() {
+fn exec_multibyte_inline_replace() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("f.txt");
-    std::fs::write(&path, "x\n").unwrap();
-    let result = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
-    }));
-    assert!(result.is_success(), "model text: {}", result.model_text());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "y\n");
+    let path = write_file(&dir, "cjk.txt", "第一行\n第二行\n第三行\n");
+    let result = call(&path, "第二行", "第二行（改）");
+    assert!(result.is_success(), "{}", result.model_text());
+    assert_eq!(read(&path), "第一行\n第二行（改）\n第三行\n");
 }
 
-// 12b. 创建新文件成功
 #[test]
-fn create_new_file_with_prepend() {
+fn exec_crlf_file_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("new.txt");
-    let result = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "hunks": [{"kind": "prepend_file", "new": "hello\n"}],
-    }));
-    assert!(result.is_success(), "model text: {}", result.model_text());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\n");
+    let path = write_file(&dir, "crlf.txt", "a\r\nb\r\n");
+    let result = call(&path, "b", "B");
+    assert!(result.is_success(), "{}", result.model_text());
+    assert_eq!(read(&path), "a\r\nB\r\n");
+    // 请求侧 CRLF 同样归一化。
+    let result = call(&path, "B\r\n", "C\r\n");
+    assert!(result.is_success(), "{}", result.model_text());
+    assert_eq!(read(&path), "a\r\nC\r\n");
 }
 
-// 13. 非 UTF-8 → NotUtf8Text
 #[test]
-fn binary_file_rejected_as_not_utf8() {
+fn exec_shift_ledger_records_line_growth() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "shift.txt", "a\nb\nc\n");
+    let result = call(&path, "b", "b1\nb2");
+    assert!(result.is_success(), "{}", result.model_text());
+    // 旧 L3（c）在编辑后 = L4。
+    assert_eq!(crate::file_state::correct_line(&path, 3), Some((4, 1)));
+}
+
+#[test]
+fn exec_inline_replace_records_zero_shift() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "inline.txt", "a\nb\nc\n");
+    let result = call(&path, "b", "B");
+    assert!(result.is_success(), "{}", result.model_text());
+    assert_eq!(crate::file_state::correct_line(&path, 3), Some((3, 0)));
+}
+
+// ─────────────────────────────────────────────────────────────
+// exec：失败路径（NOT_FOUND / AMBIGUOUS + diff）
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+fn exec_not_found_returns_diff_in_model_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "nf.txt", "alpha\nlet x = 1;\nbeta\n");
+    let result = call(&path, "let x = 2;", "let x = 3;");
+    assert!(!result.is_success());
+    assert_eq!(code(&result), "NOT_FOUND");
+    let text = result.model_text();
+    assert!(text.contains("NOT_FOUND"), "{text}");
+    assert!(text.contains("diff (your old_str"), "{text}");
+    assert!(text.contains("-let x = 2;"), "{text}");
+    assert!(text.contains("+let x = 1;"), "{text}");
+    // 文件与账本都不动。
+    assert_eq!(read(&path), "alpha\nlet x = 1;\nbeta\n");
+    assert_eq!(crate::file_state::correct_line(&path, 3), None);
+}
+
+#[test]
+fn exec_ambiguous_lists_occurrences_and_leaves_file_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "amb.txt", "x\nx\n");
+    let result = call(&path, "x", "y");
+    assert!(!result.is_success());
+    assert_eq!(code(&result), "AMBIGUOUS_MATCH");
+    assert_eq!(result.data["match_count"], 2);
+    let text = result.model_text();
+    assert!(text.contains("matches 2 locations"), "{text}");
+    assert!(text.contains("occurrence #1 at L1"), "{text}");
+    assert!(text.contains("occurrence #2 at L2"), "{text}");
+    assert_eq!(read(&path), "x\nx\n");
+}
+
+#[test]
+fn exec_read_prefix_is_not_stripped() {
+    // 模型把 read 的 "L1: " 前缀抄进 old_str 时，diff 会指出真实行内容。
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "prefix.txt", "foo\n");
+    let result = call(&path, "L1: foo", "bar");
+    assert!(!result.is_success());
+    assert_eq!(code(&result), "NOT_FOUND");
+    let text = result.model_text();
+    assert!(text.contains("-L1: foo"), "{text}");
+    assert!(text.contains("+foo"), "{text}");
+}
+
+#[test]
+fn exec_empty_file_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "empty.txt", "");
+    let result = call(&path, "x", "y");
+    assert!(!result.is_success());
+    assert_eq!(code(&result), "NOT_FOUND");
+    assert_eq!(read(&path), "");
+}
+
+// ─────────────────────────────────────────────────────────────
+// exec：参数校验与文件错误
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+fn exec_missing_path_is_parse_error() {
+    let result = exec_edit(&json!({"old_str": "a", "new_str": "b"}));
+    assert_eq!(code(&result), "PARSE_ERROR");
+    assert!(result.model_text().contains("missing 'path'"));
+}
+
+#[test]
+fn exec_missing_old_or_new_is_parse_error() {
+    let missing_old = exec_edit(&json!({"path": "a.txt", "new_str": "b"}));
+    assert!(missing_old.model_text().contains("missing 'old_str'"));
+    let missing_new = exec_edit(&json!({"path": "a.txt", "old_str": "a"}));
+    assert!(missing_new.model_text().contains("missing 'new_str'"));
+}
+
+#[test]
+fn exec_empty_old_str_is_rejected() {
+    let result = exec_edit(&json!({"path": "a.txt", "old_str": "", "new_str": "b"}));
+    assert_eq!(code(&result), "PARSE_ERROR");
+    assert!(result.model_text().contains("must be non-empty"));
+}
+
+#[test]
+fn exec_identical_old_and_new_is_rejected() {
+    let result = exec_edit(&json!({"path": "a.txt", "old_str": "a", "new_str": "a"}));
+    assert_eq!(code(&result), "PARSE_ERROR");
+    assert!(result.model_text().contains("identical"));
+}
+
+#[test]
+fn exec_missing_file_does_not_create() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ghost.txt").to_string_lossy().to_string();
+    let result = call(&path, "a", "b");
+    assert_eq!(code(&result), "FILE_NOT_FOUND");
+    assert!(!std::path::Path::new(&path).exists());
+}
+
+#[test]
+fn exec_binary_file_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bin.dat");
-    std::fs::write(&path, [0xffu8, 0xfe, 0x00, 0x01]).unwrap();
-    let result = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "expected_hash": "whatever",
-        "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
-    }));
-    assert!(!result.is_success());
-    assert_eq!(result.error.as_ref().unwrap().code, "NOT_UTF8_TEXT");
-}
-
-// 17. new_hash 续接
-#[test]
-fn new_hash_chains_into_next_call() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("f.txt");
-    std::fs::write(&path, "a\nb\n").unwrap();
-    let r1 = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "expected_hash": content_hash("a\nb\n"),
-        "hunks": [{"kind": "replace", "old": "a", "new": "A"}],
-    }));
-    assert!(r1.is_success(), "model text: {}", r1.model_text());
-    let new_hash = r1.data["new_hash"].as_str().unwrap().to_string();
-    assert!(!new_hash.is_empty());
-    let r2 = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "expected_hash": new_hash,
-        "hunks": [{"kind": "replace", "old": "b", "new": "B"}],
-    }));
-    assert!(r2.is_success(), "model text: {}", r2.model_text());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\nB\n");
-}
-
-// 18. 多 hunk 失败时报告全部失败详情
-#[test]
-fn all_hunk_failures_reported_at_once() {
-    let out = edit("a\nb\nc\n", &[rp("a", "A"), rp("zzz", "Z"), rp("", "P")]);
-    assert!(out.edited.is_none());
-    assert_eq!(out.reports.len(), 3);
-    assert_eq!(out.reports[0].status, "ok");
-    assert_eq!(out.reports[1].status, "error");
-    assert_eq!(out.reports[2].status, "error");
-    assert_eq!(err_code(&out), "NO_MATCH");
-}
-
-// 19. 未知 kind → 拒绝
-#[test]
-fn unknown_hunk_kind_rejected() {
-    let mut notes = Vec::new();
-    let err = Hunk::parse(&json!({"kind": "magic", "new": "x"}), &mut notes).unwrap_err();
-    assert!(err.contains("unknown hunk kind"));
-}
-
-// 20. 三 hunk 倒序应用（文件头/中/尾）
-#[test]
-fn three_hunks_apply_head_mid_tail() {
-    let out = edit(
-        "a\nb\nc\nd\ne\n",
-        // old 无尾换行 → 区间不含尾换行 → new 对称地也不带
-        &[rp("a", "A"), rp("c", "C"), rp("e", "E")],
-    );
-    assert_eq!(out.edited.as_deref(), Some("A\nb\nC\nd\nE\n"));
-}
-
-// 插入点与替换区间边界相邻（不冲突）→ 都应用
-
-// 21. partial 模式：成功 hunk 应用、失败 hunk 只报告
-
-// 22. partial 模式：全部失败 → 零改动（不写空结果）
-
-// 23. partial 模式：成功 hunk 之间重叠 → 仍拒绝
-
-// 24. NO_MATCH 诊断：候选带 -/+ 对照
-#[test]
-fn no_match_candidates_carry_pattern_diff() {
-    let out = edit(
-        "let alpha_value = 1;\nlet alpho_value = 1;\n",
-        &[rp("let alphu_value = 1;", "let x = 1;")],
-    );
-    let cands = out.reports[0].candidates.as_ref().unwrap();
-    assert!(!cands.is_empty());
-    let diff = &cands[0].diff;
-    assert!(diff.contains("- let alphu_value = 1;"), "diff: {diff}");
-    assert!(
-        diff.contains("+ let alpha_value = 1;") || diff.contains("+ let alpho_value = 1;"),
-        "diff: {diff}"
-    );
-}
-
-// 25. NO_MATCH 诊断：margin 不足时说明原因
-#[test]
-fn no_match_detail_explains_margin_shortfall() {
-    let out = edit(
-        "let alpha_value = 1;\nlet alpho_value = 1;\n",
-        &[rp("let alphu_value = 1;", "let x = 1;")],
-    );
-    let detail = out.reports[0].detail.as_deref().unwrap_or("");
-    assert!(detail.contains("margin"), "detail: {detail}");
-    assert!(detail.contains("context_before"), "detail: {detail}");
-}
-
-// 26. NO_MATCH 诊断：完全不像时说明原因
-#[test]
-fn no_match_detail_explains_total_mismatch() {
-    let out = edit("a\nb\nc\n", &[rp("zzzz", "x")]);
-    let detail = out.reports[0].detail.as_deref().unwrap_or("");
-    assert!(
-        detail.contains("no window had any similarity"),
-        "detail: {detail}"
-    );
-}
-
-// 28. 未知 mode → PARSE_ERROR
-
-// ── 多字节（中文）回归：FileView 字节/字符索引混淆曾导致 ropey 越界
-//    panic 与区间错位（char_indices 返回字节偏移被误当 char 索引）。
-// ────────────────────────────────────────────────────────────────
-
-// 中文行 Tier1 精确替换：多字节行命中 + 区间正确（修复前会 panic/错位）。
-#[test]
-fn multibyte_exact_replace() {
-    let content = "fn main() {\n    // 处理用户输入\n    let x = 1;\n}\n";
-    let out = edit(content, &[rp("    // 处理用户输入", "    // 处理用户请求")]);
-    assert_eq!(
-        out.edited.as_deref(),
-        Some("fn main() {\n    // 处理用户请求\n    let x = 1;\n}\n")
-    );
-    assert_eq!(out.reports[0].tier, Some(1));
-}
-
-// 中文文件多 hunk 倒序应用：两处中文替换 + 一处 ASCII 替换，倒序区间都正确。
-#[test]
-fn multibyte_multi_hunk_reverse_apply() {
-    let content = "// 配置说明\nlet a = 1;\n// 环境变量\nlet b = 2;\n";
-    let out = edit(
-        content,
-        &[
-            rp("// 配置说明", "// 配置文档"),
-            rp("let b = 2;", "let b = 3;"),
-            rp("// 环境变量", "// 环境参数"),
-        ],
-    );
-    assert_eq!(
-        out.edited.as_deref(),
-        Some("// 配置文档\nlet a = 1;\n// 环境参数\nlet b = 3;\n")
-    );
-    assert_eq!(err_code(&out), "");
-}
-
-// 中文锚点 InsertAfter：插入位置按 char 索引定位，中文行后插入正确。
-// （语义：new 自带换行，与 ASCII 用例 15 一致。）
-
-// 中文文件无尾换行 AppendFile：自动补换行（new 给纯内容，不带前导 \n）。
-#[test]
-fn multibyte_append_no_trailing_newline() {
-    let content = "// 中文内容";
-    let out = edit(
-        content,
-        &[Hunk::AppendFile {
-            new: "// 追加行".to_string(),
-        }],
-    );
-    assert_eq!(out.edited.as_deref(), Some("// 中文内容\n// 追加行"));
-}
-
-// 中文 + 尾换行语义：old 带 \n 的整段替换（删除尾行时区间含 \n）。
-#[test]
-fn multibyte_replace_with_trailing_newline() {
-    let content = "第一行\n第二行\n第三行\n";
-    let out = edit(content, &[rp("第二行\n", "第二行（改）\n")]);
-    assert_eq!(
-        out.edited.as_deref(),
-        Some("第一行\n第二行（改）\n第三行\n")
-    );
-}
-
-// O1. 整文件覆盖：new 全文替换，Tier1 恒命中
-
-// O2. 空内容（创建路径）上 overwrite = 创建
-
-// O3. overwrite 与其他 hunk 混用 → OVERWRITE_EXCLUSIVE（独占语义）
-
-// O4. 两个 overwrite → OVERWRITE_EXCLUSIVE
-
-// O5. parse：overwrite 只要 new；误传的 old 被忽略（整文件语义不看旧内容）
-
-// O6. exec 层：overwrite 创建新文件
-
-// O7. exec 层：overwrite 覆盖已有文件
-
-// O8. overwrite + expected_hash：错值拒绝（防覆盖竞争写），对值通过
-
-// O9. 不存在文件上误用 replace → NO_MATCH + 创建提示（hint 含 does not exist）
-#[test]
-fn replace_on_missing_file_hints_creation() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ghost.txt");
-    let result = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "hunks": [{"kind": "replace", "old": "x", "new": "y"}],
-    }));
-    assert!(!result.is_success());
-    assert_eq!(result.data["code"], "NO_MATCH");
-    let hint = result
-        .error
-        .as_ref()
-        .and_then(|e| e.hint.as_deref())
-        .unwrap_or("");
-    assert!(
-        hint.contains("does not exist"),
-        "hint should guide creation, got: {hint}"
-    );
-    assert!(!path.exists());
-}
-
-// O10. exec 层混用 → OVERWRITE_EXCLUSIVE 透传
-
-// ── 读路径（空 hunks = 读，二元组场景）──
-
-// R1. 空 hunks 读已有文件：read_only + content + hash + line_count，不写盘
-
-// R2. 省略 hunks 字段同样走读路径
-
-// R3. 空 hunks 读不存在的文件 → FILE_NOT_FOUND，且不创建
-
-// R4. 读→编辑闭环：读的 hash 直接作 expected_hash 编辑成功
-
-// ── 读路径扩展：行号范围读（grep 直连）──
-
-// R5. 范围读：L 前缀行 + 元数据，hash 为全文件 hash
-
-// R6. 只给 start_line：读到文件尾
-
-// R7. 越界 → LINE_OUT_OF_RANGE（带 total_lines + hash）
-
-// R8. end < start → PARSE_ERROR
-
-// R9. 行号从 1 开始
-
-// R10. 行数超上限 → RANGE_TOO_LARGE
-
-// R11. 字符预算超限 → RANGE_TOO_LARGE
-
-// ── 读路径扩展：锚定读（复用定位引擎）──
-
-// R12. 锚定读基本：唯一命中 → 窗口 + anchor_line + tier + 全文件 hash
-
-// R13. 锚定读上下文窗口：context_before/context_after 控制展示范围
-
-// R14. 模糊锚 → ANCHOR_AMBIGUOUS + 候选（读阶段消歧，改阶段不再失败）
-
-// R15. 未命中 → NO_MATCH + 候选
-
-// R16. 参数互斥与依赖校验
-
-// R17. 范围读的 hash 链进编辑（grep → 读 → 改 闭环）
-
-// R18. 锚定读的 hash 链进编辑（锚定读 → 同锚编辑 闭环）
-
-// ── replace_inline（sed `s///` 语义）──
-
-// R19. 基本：anchor 窗口内子串替换第一处，窗口外不受影响
-
-// R20. replace_all：窗口内全部替换（仍不跨窗口）
-
-// R21. 超长行场景（backend_prompt.md 案例）：整行锚 + 行内子串替换
-
-// R22. 窗口内无 old → NO_MATCH
-
-// R23. regex 替换 + 捕获组引用
-
-// R24. 非法正则 → INVALID_REGEX
-
-// R25. 模糊锚 → AMBIGUOUS_MATCH（与 replace/insert 同款消歧）
-
-#[test]
-fn shifts_are_computed_for_line_level_edits() {
-    let content = "a\nb\nc\nd\ne\n";
-    // L2 的 b 换成两行 → (2, +1)；L4-5 的 d+e 行块换 e → (4, -1)
-    let outcome = edit(content, &[rp("b", "b1\nb2"), rp("d\ne", "e")]);
-    assert!(outcome.edited.is_some(), "strict edit should apply");
-    let mut shifts = outcome.shifts.clone();
-    shifts.sort(); // 应用序 = 倒序（位置大者先）；断言与顺序无关
-    assert_eq!(shifts, vec![(2, 1), (4, -1)]);
-}
-
-#[test]
-fn inline_replace_has_zero_shift() {
-    let content = "aaa\nbbb\nccc\n";
-    let outcome = edit(content, &[rp("bbb", "BBB")]);
-    assert!(outcome.edited.is_some());
-    assert_eq!(outcome.shifts, vec![(2, 0)]);
-}
-
-#[test]
-fn failed_edit_has_empty_shifts() {
-    let content = "aaa\nbbb\n";
-    let outcome = edit(content, &[rp("zzz", "yyy")]);
-    assert!(outcome.edited.is_none());
-    assert!(outcome.shifts.is_empty());
-}
-
-#[test]
-fn hint_line_disambiguates_repeated_content() {
-    // x 出现两次（L3 与 L14），hint=14 的窗口 [4,24) 只含第二个 → 唯一命中。
-    let content = "a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nx\nm\n";
-    let out = edit(content, &[rp_hint("x", "X", 14)]);
-    assert!(out.edited.is_some(), "hint window should disambiguate");
-    // 只替换 L14 的 x（L3 保持小写）。
-    assert_eq!(
-        out.edited.as_deref(),
-        Some("a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nX\nm\n")
-    );
-    let r = &out.reports[0];
-    assert_eq!(r.status, "ok");
-    assert_eq!(r.tier, Some(4));
-    assert_eq!(r.used_hint, Some(14));
-    assert_eq!(r.line_range, Some((14, 14)));
-}
-
-#[test]
-fn hint_line_window_still_ambiguous_keeps_error() {
-    // 两个 x 都在窗口 [1,12) 内 → hint 无法消歧 → 保持 AMBIGUOUS_MATCH。
-    let content = "x\nx\ny\n";
-    let out = edit(content, &[rp_hint("x", "X", 2)]);
-    assert!(out.edited.is_none());
-    assert_eq!(err_code(&out), "AMBIGUOUS_MATCH");
-    assert_eq!(out.reports[0].used_hint, None);
-}
-
-#[test]
-fn hint_line_miss_keeps_original_error() {
-    // hint 偏太远（窗口内无 x）→ 保留原 Ambiguous（不误改）。
-    // x 位于 L2 与 L25；hint=13 的窗口 [3,23) 不含任何 x。
-    let content = "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nt\nu\nv\nw\nx\ny\n";
-    let out = edit(content, &[rp_hint("x", "X", 13)]);
-    assert!(out.edited.is_none());
-    assert_eq!(err_code(&out), "AMBIGUOUS_MATCH");
-}
-
-#[test]
-fn hint_line_disambiguates_anchor_insert() {
-    // "x" 两处，hint=14 窗口只含第二个 → replace 落到第二处。
-    let content = "a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nx\nm\n";
-    let out = edit(content, &[rp_hint("x", "INS", 14)]);
-    assert!(out.edited.is_some(), "hint should disambiguate");
-    assert_eq!(
-        out.edited.as_deref(),
-        Some("a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nINS\nm\n")
-    );
-    assert_eq!(out.reports[0].used_hint, Some(14));
-}
-
-#[test]
-fn no_hint_line_keeps_default_behavior() {
-    // 无 hint_line：多命中 → 原样 AMBIGUOUS_MATCH（默认路径零变化）。
-    let content = "a\nx\nb\nx\n";
-    let out = edit(content, &[rp("x", "X")]);
-    assert!(out.edited.is_none());
-    assert_eq!(err_code(&out), "AMBIGUOUS_MATCH");
-}
-
-#[test]
-fn hint_line_zero_is_treated_as_one() {
-    // hint_line=0（LSP 习惯）→ 视为 1；窗口 [1,11) 含第一个 x（L2 的 0-based 1）。
-    let content = "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\nx\n";
-    let out = edit(content, &[rp_hint("x", "X", 0)]);
-    assert!(out.edited.is_some());
-    // 替换的是 0-based 1（L2）的 x。
-    assert_eq!(
-        out.edited.as_deref(),
-        Some(content.replacen("x", "X", 1).as_str())
-    );
-    assert_eq!(out.reports[0].line_range, Some((2, 2)));
-    assert_eq!(out.reports[0].used_hint, Some(1));
-}
-#[test]
-fn hint_line_via_json_parses_and_reports() {
-    // JSON 解析层："hint_line" 字段 → parse_hint_line → 窗口消歧 → JSON 回传。
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("h.txt");
-    std::fs::write(&path, "a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nx\nm\n").unwrap();
-    let r = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "hunks": [{"kind": "replace", "old": "x", "new": "X", "hint_line": 14}],
-    }));
-    assert!(r.is_success(), "model text: {}", r.model_text());
-    // 只改 L14 的 x（L3 保持小写）。
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        "a\nb\nx\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nX\nm\n"
-    );
-    let hr = &r.data["hunks"][0];
-    assert_eq!(hr["used_hint"], 14);
-    assert_eq!(hr["actual_line"], 14);
-    assert_eq!(hr["line_offset"], 0);
-}
-
-#[test]
-fn hint_line_zero_via_json_is_normalized_to_one() {
-    // 两个 x 相距 >20 行（L2 与 L16），hint_line=0 → 归一化 1 → 窗口只含
-    // 第一个 → 消歧成功，used_hint 回传归一化后的 1。
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("h0.txt");
-    std::fs::write(&path, "a\nx\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\nx\n").unwrap();
-    let r = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "hunks": [{"kind": "replace", "old": "x", "new": "X", "hint_line": 0}],
-    }));
-    assert!(r.is_success(), "model text: {}", r.model_text());
-    // 只改 L2 的 x（L16 保持小写）。
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        "a\nX\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\nx\n"
-    );
-    assert_eq!(r.data["hunks"][0]["used_hint"], 1);
-    assert_eq!(r.data["hunks"][0]["actual_line"], 2);
+    std::fs::write(&path, [0u8, 159, 146, 150]).unwrap();
+    let result = call(&path.to_string_lossy(), "a", "b");
+    assert_eq!(code(&result), "NOT_UTF8_TEXT");
 }
 
 // ─────────────────────────────────────────────────────────────
-// T-4-1：模型可见契约只宣传 3 个 kind（replace / prepend_file / append_file）
+// 工具契约：只暴露三个字段
 // ─────────────────────────────────────────────────────────────
 
 #[test]
-fn tool_contract_advertises_only_three_kinds() {
+fn tool_contract_exposes_str_replace_fields() {
     let mut mgr = crate::ToolManager::new();
-    register(&mut mgr);
-    let h = mgr.lookup("edit").expect("edit tool registered");
-    let desc = h.description;
-    let schema = h.input_schema.to_string();
-    // a92626d 已删的三个 kind 不得再出现在任何模型可见文案里（照描述调用恒 PARSE_ERROR）。
-    for dead in ["insert_after", "insert_before", "replace_inline"] {
+    super::register(&mut mgr);
+    let handler = mgr.lookup("edit").expect("edit tool registered");
+    let schema = &handler.input_schema;
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(required, vec!["path", "old_str", "new_str"]);
+    let props = schema["properties"].as_object().unwrap();
+    assert_eq!(props.len(), 4, "schema: {schema}");
+    assert_eq!(props["replace_all"]["type"], "boolean");
+    assert_eq!(props["replace_all"]["default"], false);
+    let all = format!("{} {}", handler.description, schema);
+    for legacy in [
+        "hunks",
+        "kind",
+        "context_before",
+        "context_after",
+        "hint_line",
+        "expected_hash",
+        "dry_run",
+    ] {
         assert!(
-            !desc.contains(dead),
-            "description still advertises {dead}: {desc}"
-        );
-        assert!(
-            !schema.contains(dead),
-            "schema still advertises {dead}: {schema}"
+            !all.contains(legacy),
+            "legacy field '{legacy}' still exposed: {all}"
         );
     }
-    for live in ["replace", "prepend_file", "append_file"] {
-        assert!(desc.contains(live), "description lost {live}: {desc}");
-        assert!(schema.contains(live), "schema lost {live}: {schema}");
-    }
-    // 整行语义指引（旧文案 "Use shortest unique old/anchor" 诱导模型给片段）。
-    assert!(desc.contains("WHOLE-LINE"), "description: {desc}");
+    assert!(handler.description.contains("exactly once"));
+    assert!(handler.description.contains("replace_all"));
 }
 
-// ─────────────────────────────────────────────────────────────
-// T-4-2：行内片段 old 不再被 Tier3 采纳（整行语义；此前整行被顶掉＝静默丢内容）
-// ─────────────────────────────────────────────────────────────
-
-/// buglist probe5 的最小复刻：整行 = "prefix: " + 'a'×200（208 字符），
-/// old = 'a'×200（占行 98%，字符级 ratio 0.98、边际 0.16）。
-/// 修复前：Tier3 采纳 ⇒ 替换区间是**整行** ⇒ "prefix: " 无提示删除。
 #[test]
-fn inline_fragment_old_is_not_adopted() {
-    let fragment = "a".repeat(200);
-    let content = format!(
-        "prefix: {fragment}\n{}\n{}\n",
-        "x".repeat(80),
-        "y".repeat(80)
-    );
-    let out = edit(&content, &[rp(&fragment, &("a".repeat(199) + "b"))]);
-    assert!(out.edited.is_none(), "fragment old must not be adopted");
-    assert_eq!(err_code(&out), "NO_MATCH");
-    let detail = out.reports[0].detail.as_deref().unwrap_or("");
-    assert!(detail.contains("FRAGMENT"), "detail: {detail}");
-}
-
-/// exec 层探针（清单的「手动复现」等价物）：文件必须逐字节不变。
-#[test]
-fn fragment_probe_leaves_file_untouched() {
+fn exec_mixed_endings_preserve_surrounding_bytes() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("probe6.md");
-    let fragment = "a".repeat(200);
-    let original = format!(
-        "prefix: {fragment}\n{}\n{}\n",
-        "x".repeat(80),
-        "y".repeat(80)
-    );
-    std::fs::write(&path, &original).unwrap();
-    let replacement = "a".repeat(199) + "b";
-    let r = exec_edit(&json!({
-        "path": path.to_string_lossy(),
-        "hunks": [{"kind": "replace", "old": fragment, "new": replacement}],
-    }));
-    assert!(!r.is_success(), "model text: {}", r.model_text());
-    assert_eq!(r.data["code"], "NO_MATCH");
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        original,
-        "file must stay byte-identical (prefix must not be silently dropped)"
-    );
+    let path = write_file(&dir, "mixed.txt", "a\r\nb\nc\r\nd\r\n");
+    // 命中 LF 行 → 插入文本用 LF；文件其余字节原样保留。
+    let result = call(&path, "b", "B1\nB2");
+    assert!(result.is_success(), "{}", result.model_text());
+    assert_eq!(read(&path), "a\r\nB1\nB2\nc\r\nd\r\n");
+    // 命中 CRLF 行 → 插入文本用 CRLF；其余不变。
+    let result = call(&path, "d", "D1\nD2");
+    assert!(result.is_success(), "{}", result.model_text());
+    assert_eq!(read(&path), "a\r\nB1\nB2\nc\r\nD1\r\nD2\r\n");
 }
 
-/// 反向护栏：整行 old 的 Tier3 模糊采纳不受 T-4-2 影响（回归锁，见测试 3）。
 #[test]
-fn whole_line_tier3_typo_still_applies() {
-    let content = "fn main() {\n    let foo = 1;\n}\n";
-    let out = edit(content, &[rp("let fo0 = 1;", "let foo = 1;")]);
-    assert!(out.edited.is_some(), "whole-line typo must still apply");
-    assert_eq!(out.reports[0].tier, Some(3));
+fn exec_lone_cr_file_is_normalized_to_lf_on_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(&dir, "cr.txt", "a\rb\rc\r");
+    let result = call(&path, "b", "B");
+    assert!(result.is_success(), "{}", result.model_text());
+    // 孤立 CR 的命中行按 LF 还原；其余孤立 CR 字节原样保留。
+    assert_eq!(read(&path), "a\rB\rc\r");
 }
 
-// ─────────────────────────────────────────────────────────────
-// T-4-3：第四种失败诊断——「old 是行内片段」
-// ─────────────────────────────────────────────────────────────
-
-/// buglist probe07：old 逐字符就在 L3 里，但 ratio 0.32 < 0.85。
-/// 旧文案「closest location is probably wrong; re-check 'old'」误导模型以为
-/// 自己记错了内容；真因是「片段 vs 整行」。
+#[cfg(unix)]
 #[test]
-fn no_match_detail_reports_inline_fragment() {
-    let content = "# probe\n\n| BUG-2026-09-16-01 | `fixed`（工作区，待提交） | some really long trailing text to make this line long |\n| other row | x | y |\n";
-    let out = edit(content, &[rp("`fixed`（工作区，待提交） |", "`fixed` |")]);
-    assert!(out.edited.is_none());
-    assert_eq!(err_code(&out), "NO_MATCH");
-    let detail = out.reports[0].detail.as_deref().unwrap_or("");
-    assert!(detail.contains("FRAGMENT"), "detail: {detail}");
-    assert!(detail.contains("line 3"), "detail: {detail}");
-    assert!(detail.contains("whole line"), "detail: {detail}");
-    // 旧口径的误导性文案不得再出现在这一分支里。
-    assert!(!detail.contains("probably wrong"), "detail: {detail}");
-}
-
-/// 无片段证据时，原有三种口径（margin / 阈值 / 完全不像）不受影响。
-#[test]
-fn no_match_detail_keeps_existing_branches_without_fragment() {
-    // 差 margin（两个候选同样像，old 不是任何行的子串）
-    let out = edit(
-        "let alpha_value = 1;\nlet alpho_value = 1;\n",
-        &[rp("let alphu_value = 1;", "let x = 1;")],
-    );
-    let detail = out.reports[0].detail.as_deref().unwrap_or("");
-    assert!(detail.contains("margin"), "detail: {detail}");
-    // 完全不像
-    let out = edit("a\nb\nc\n", &[rp("zzzz", "x")]);
-    let detail = out.reports[0].detail.as_deref().unwrap_or("");
+fn exec_symlink_target_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.txt");
+    std::fs::write(&target, "hello\n").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let result = call(&link.to_string_lossy(), "hello", "HELLO");
+    assert_eq!(code(&result), "SYMLINK_TARGET");
     assert!(
-        detail.contains("no window had any similarity"),
-        "detail: {detail}"
+        result.model_text().contains("symbolic link"),
+        "{}",
+        result.model_text()
+    );
+    assert_eq!(read(&target.to_string_lossy()), "hello\n");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
     );
 }
