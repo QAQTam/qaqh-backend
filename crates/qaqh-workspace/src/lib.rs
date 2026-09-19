@@ -30,6 +30,7 @@ pub mod runtime;
 mod safety;
 pub mod skill;
 pub mod tool_api;
+pub mod tool_capabilities;
 pub mod tool_side_fold;
 mod web;
 
@@ -764,22 +765,45 @@ impl std::fmt::Display for ToolError {
 }
 
 impl ToolError {
+    /// Machine-readable 错误码（审计/遥测用）。
+    ///
+    /// 与 [`Self::into_result`] 的 code 单一来源：改这里即同时改模型面与
+    /// 审计账本，避免两处映射漂移。
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ManagerUnavailable => "MANAGER_UNAVAILABLE",
+            Self::UnknownTool { .. } => "UNKNOWN_TOOL",
+            Self::SessionMismatch => "SESSION_MISMATCH",
+            Self::PermissionDenied { .. } => "PERMISSION_DENIED",
+            Self::Cancelled => "CANCELLED",
+            Self::BlockedByMode { .. } => "BLOCKED_BY_MODE",
+            Self::InvalidArgs { .. } => "INVALID_ARGUMENTS",
+            Self::Io { .. } => "IO_ERROR",
+            Self::ResourceMismatch => "RESOURCE_MISMATCH",
+            Self::RuntimeNotInitialized => "RUNTIME_NOT_INITIALIZED",
+            Self::ToolSpecific { .. } => "TOOL_ERROR",
+            Self::Partial { .. } => "PARTIAL",
+            Self::Internal { .. } => "INTERNAL_ERROR",
+        }
+    }
+
     pub fn into_result(self) -> ToolResult {
         let message = self.to_string();
-        let (code, retryable, hint) = match &self {
-            Self::ManagerUnavailable => ("MANAGER_UNAVAILABLE", true, None),
-            Self::UnknownTool { .. } => ("UNKNOWN_TOOL", false, None),
-            Self::SessionMismatch => ("SESSION_MISMATCH", false, None),
-            Self::PermissionDenied { .. } => ("PERMISSION_DENIED", false, None),
-            Self::Cancelled => ("CANCELLED", false, None),
-            Self::BlockedByMode { .. } => ("BLOCKED_BY_MODE", false, None),
-            Self::InvalidArgs { .. } => ("INVALID_ARGUMENTS", false, None),
-            Self::Io { .. } => ("IO_ERROR", false, None),
-            Self::ResourceMismatch => ("RESOURCE_MISMATCH", false, None),
-            Self::RuntimeNotInitialized => ("RUNTIME_NOT_INITIALIZED", false, None),
-            Self::ToolSpecific { .. } => ("TOOL_ERROR", false, None),
-            Self::Partial { .. } => ("PARTIAL", false, None),
-            Self::Internal { .. } => ("INTERNAL_ERROR", true, None),
+        let code = self.code();
+        let (retryable, hint) = match &self {
+            Self::ManagerUnavailable => (true, None),
+            Self::UnknownTool { .. } => (false, None),
+            Self::SessionMismatch => (false, None),
+            Self::PermissionDenied { .. } => (false, None),
+            Self::Cancelled => (false, None),
+            Self::BlockedByMode { .. } => (false, None),
+            Self::InvalidArgs { .. } => (false, None),
+            Self::Io { .. } => (false, None),
+            Self::ResourceMismatch => (false, None),
+            Self::RuntimeNotInitialized => (false, None),
+            Self::ToolSpecific { .. } => (false, None),
+            Self::Partial { .. } => (false, None),
+            Self::Internal { .. } => (true, None),
         };
         ToolResult::error_with(code, message, retryable, hint.map(str::to_string))
     }

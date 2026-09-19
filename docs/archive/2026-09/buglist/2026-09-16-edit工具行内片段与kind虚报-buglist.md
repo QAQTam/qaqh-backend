@@ -4,7 +4,7 @@
 > 状态口径：`open` / `fixed（工作区，待提交）` / `fixed @{commit}` / `verified` / `wontfix`。
 >
 > 本条目**未单开 report**（证据自足并逐条内联于下）。
-> 发现来源：**模型自报告** —— 本机 harness 在 `docs/buglist/2026-09-16-read_image连发触发400-buglist.md`
+> 发现来源：**模型自报告** —— 本机 harness 在 `docs/archive/2026-09/buglist/2026-09-16-read_image连发触发400-buglist.md`
 > 的 L15（超长表格行）上连做两次 `edit` 全是 `NO_MATCH`，而 `old` 逐字符就在那一行里；改用 `sed`
 > 绕过后登记（机主：**「后续我通知团队优化 edit」**）。
 >

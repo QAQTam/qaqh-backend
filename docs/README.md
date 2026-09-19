@@ -1,7 +1,7 @@
 # docs — 索引与归档状态
 
 > **索引日期**：2026-09-18（UTC+8）
-> **最后复核**：2026-09-18（N-5 权限收口与 B-5 审批动作摘要复核后）
+> **最后复核**：2026-09-19（docs 物理归档——方案 B 执行：31 份历史文档迁入 `archive/2026-09/`）
 > **基线**：`main` @ `2b472f2`
 > **本文件用途**：`docs/` 的唯一索引入口——**已完成什么、什么还在跑、归档去哪找**。
 > 目录职责与命名约定见 [`todo/README.md`](./todo/README.md) §6；各目录另有 `以yyyy-mm-dd-标题-*.md作为命名` 说明文件。
@@ -11,7 +11,7 @@
 | 日期 | 里程碑 | 产物 |
 |---|---|---|
 | 09-12 | 首批缺陷登记与证据报告：timeline 死锁/快照、多会话 401、exec 管道静默截断、子代理无法拉起、会话 cwd 越界 | [`buglist/2026-09-12-*`](./buglist/)、[`report/2026-09-12-*`](./report/) |
-| 09-13 | 隐藏缺陷全量静态扫描（31 条）+ Codex 同问题修法对照 | [`buglist/2026-09-13-hidden-bug-scan.md`](./buglist/2026-09-13-hidden-bug-scan.md)、[`report/2026-09-13-codex-parity-analysis.md`](./report/2026-09-13-codex-parity-analysis.md) |
+| 09-13 | 隐藏缺陷全量静态扫描（31 条）+ Codex 同问题修法对照 | [`buglist/2026-09-13-hidden-bug-scan.md`](./archive/2026-09/buglist/2026-09-13-hidden-bug-scan.md)、[`report/2026-09-13-codex-parity-analysis.md`](./archive/2026-09/report/2026-09-13-codex-parity-analysis.md) |
 | 09-14 | timeline 工具块内存放大定案并修复 | [`buglist/2026-09-14-timeline工具块内存放大-buglist.md`](./buglist/2026-09-14-timeline工具块内存放大-buglist.md) |
 | 09-15 | 工具层契约重写（Tool SDK v1）spec + plan 立项（**均草案待评审**）；client 系列 7 条登记 | [`spec/2026-09-15-workspace工具层契约重写-spec.md`](./spec/2026-09-15-workspace工具层契约重写-spec.md)、[`plan/2026-09-15-workspace工具层契约重写-plan.md`](./plan/2026-09-15-workspace工具层契约重写-plan.md) |
 | 09-16 | 安全/并发/前端渲染审查；apply_patch、edit、read_image 契约登记 | [`buglist/2026-09-16-*`](./buglist/) |
@@ -20,10 +20,14 @@
 | 09-17 | 工具结果展示层契约 spec 补登（**草案待评审**） | [`spec/2026-09-17-工具结果展示层契约-spec.md`](./spec/2026-09-17-工具结果展示层契约-spec.md) |
 | **09-18** | **工具结果展示契约 v1（跨仓唯一事实源，评审阻塞项修复）** | [`spec/2026-09-18-工具结果展示契约-v1-spec.md`](./spec/2026-09-18-工具结果展示契约-v1-spec.md) |
 | **09-17 第二轮 fix** | **权限语义重构**：Level 3 拦截 Exec/Net，Level 4 恢复显式 bypass；B-5 审批摘要保留用于 L3（后端 `5c7dd4d`/`eef1231`，TUI `4a795b3`/`2ce1fec`） | [`buglist/2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md) |
+| **09-19** | **审计账本 v2 落地**：JSONL 哈希链 + seq/单调时钟 + 授权决策链 + 对象 before/after 指纹 + 拒绝路径记账；双写 v1 CSV | [`spec/2026-09-19-审计账本v2-spec.md`](./spec/2026-09-19-审计账本v2-spec.md) |
+| **09-19** | **测试缺口盘点（v2.0 重构前）**：16 crate 测试资产清点 + 四个重构面（Ringing/TurnCore/Tool SDK/沙箱）缺口交叉比对 + P0/P1/P2 测试部署清单 | [`report/2026-09-19-测试缺口盘点-v2重构前-report.md`](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) |
+| **09-19** | **docs 物理归档（方案 B）**：§3 归档区 31 份历史文档（buglist 17 / report 11 / handoff 3）迁入 `archive/2026-09/`；`git mv` + 全量改链 + 链接校验同批完成 | [`archive/2026-09/`](./archive/2026-09/) |
 
-## 2. 已归档（2026-09-17，方案 A）
+## 2. 已归档（2026-09-17，方案 A；2026-09-19 物理迁移）
 
-> 归档采用零风险方案 A：文件保留原路径，归档状态以本索引为准。
+> 归档采用零风险方案 A：归档状态以本索引为准。
+> **2026-09-19 起升级为方案 B（物理隔离）**：本节涉及的文档已 `git mv` 至 [`archive/2026-09/`](./archive/2026-09/)。
 > 本轮已先完成 4 份遗留 `open` 清单的状态回写，并为唯一 P0 建档后完成“权限层收口”的工作区修复。
 
 ### 2.1 九批次集中修复（2026-09-17）
@@ -47,59 +51,59 @@
 
 | 主题 | 提交 | 关联文档 |
 |---|---|---|
-| 隐藏扫描补盲区（31 条） | `16f2c39` 等 30 个提交 | [`buglist/2026-09-13-hidden-bug-scan.md`](./buglist/2026-09-13-hidden-bug-scan.md) |
+| 隐藏扫描补盲区（31 条） | `16f2c39` 等 30 个提交 | [`buglist/2026-09-13-hidden-bug-scan.md`](./archive/2026-09/buglist/2026-09-13-hidden-bug-scan.md) |
 | exec 管道静默截断 / 空输出（EXEC-01a~d） | `30a011b` | [`buglist/2026-09-12-exec管道命令间歇性空输出-buglist.md`](./buglist/2026-09-12-exec管道命令间歇性空输出-buglist.md) |
-| 多会话热路径串行化与切会话 401 | `13cb21e` 等 | [`buglist/2026-09-12-多会话高频输出与切会话401-buglist.md`](./buglist/2026-09-12-多会话高频输出与切会话401-buglist.md) |
-| timeline 工具块内存放大 | `ea6063c` | [`report/2026-09-14-timeline工具块内存放大-report.md`](./report/2026-09-14-timeline工具块内存放大-report.md) |
+| 多会话热路径串行化与切会话 401 | `13cb21e` 等 | [`buglist/2026-09-12-多会话高频输出与切会话401-buglist.md`](./archive/2026-09/buglist/2026-09-12-多会话高频输出与切会话401-buglist.md) |
+| timeline 工具块内存放大 | `ea6063c` | [`report/2026-09-14-timeline工具块内存放大-report.md`](./archive/2026-09/report/2026-09-14-timeline工具块内存放大-report.md) |
 | client 系列：TS 特性编译、keepalive、陈旧 discovery、深翻页、启动期探测挂起、epoch 归零 | `4ac2f9c` / `d9fa81c` / `9556aec` / `572f36a` / `a9531ce` / `674742f` / `a72ce0c` | [`buglist/2026-09-15-*`](./buglist/) |
-| read_image 400 系列 | `1c13662` | [`buglist/2026-09-16-read_image连发触发400-buglist.md`](./buglist/2026-09-16-read_image连发触发400-buglist.md) |
+| read_image 400 系列 | `1c13662` | [`buglist/2026-09-16-read_image连发触发400-buglist.md`](./archive/2026-09/buglist/2026-09-16-read_image连发触发400-buglist.md) |
 
 > 闭环判定依据：[`todo/2026-09-17-buglist复核-report.md`](./todo/2026-09-17-buglist复核-report.md) §4「已核实修复在位、状态正确、可直接归档的 54 条」+ §2.1 九批次验收。
 
 ## 3. 归档区（已完成 → 指向这些文件）
 
-> 以下条目自 2026-09-17 起视为已归档；文件未移动，避免破坏文档间相对引用。
-> `docs/archive/` 目录未创建。
+> 以下条目自 2026-09-17 起视为已归档；**2026-09-19 已物理迁移至 `archive/2026-09/`**
+> （`git mv` + 全量改链 + 链接校验，同一批完成）。
 
 ### 3.1 buglist（17 份）
 
-- [2026-09-12-timeline快照落后被当权威装载-buglist.md](./buglist/2026-09-12-timeline快照落后被当权威装载-buglist.md)
-- [2026-09-12-timeline死锁与debug桥token泄露-buglist.md](./buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md)
-- [2026-09-12-多会话高频输出与切会话401-buglist.md](./buglist/2026-09-12-多会话高频输出与切会话401-buglist.md)
-- [2026-09-13-hidden-bug-scan.md](./buglist/2026-09-13-hidden-bug-scan.md)
-- [2026-09-15-daemon启动期工具探测可挂起-buglist.md](./buglist/2026-09-15-daemon启动期工具探测可挂起-buglist.md)
-- [2026-09-15-keepalive存活信号无出口-buglist.md](./buglist/2026-09-15-keepalive存活信号无出口-buglist.md)
-- [2026-09-15-timeline深翻页缺失-buglist.md](./buglist/2026-09-15-timeline深翻页缺失-buglist.md)
-- [2026-09-15-ts特性编译不过-buglist.md](./buglist/2026-09-15-ts特性编译不过-buglist.md)
-- [2026-09-15-热重载吞首次变更与资源文案-buglist.md](./buglist/2026-09-15-热重载吞首次变更与资源文案-buglist.md)
-- [2026-09-15-陈旧discovery永久卡死shell-buglist.md](./buglist/2026-09-15-陈旧discovery永久卡死shell-buglist.md)
-- [2026-09-15-频道流epoch未归零-buglist.md](./buglist/2026-09-15-频道流epoch未归零-buglist.md)
-- [2026-09-16-anthropic-400-真因-上下文超限-buglist.md](./buglist/2026-09-16-anthropic-400-真因-上下文超限-buglist.md)
-- [2026-09-16-apply_patch静默覆盖与误导性文案-buglist.md](./buglist/2026-09-16-apply_patch静默覆盖与误导性文案-buglist.md)
-- [2026-09-16-edit工具行内片段与kind虚报-buglist.md](./buglist/2026-09-16-edit工具行内片段与kind虚报-buglist.md)
-- [2026-09-16-read_image连发触发400-buglist.md](./buglist/2026-09-16-read_image连发触发400-buglist.md)
-- [2026-09-16-图片base64计入token估算致压缩空转-buglist.md](./buglist/2026-09-16-图片base64计入token估算致压缩空转-buglist.md)
-- [2026-09-17-子代理取消后复活-buglist.md](./buglist/2026-09-17-子代理取消后复活-buglist.md)
+- [2026-09-12-timeline快照落后被当权威装载-buglist.md](./archive/2026-09/buglist/2026-09-12-timeline快照落后被当权威装载-buglist.md)
+- [2026-09-12-timeline死锁与debug桥token泄露-buglist.md](./archive/2026-09/buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md)
+- [2026-09-12-多会话高频输出与切会话401-buglist.md](./archive/2026-09/buglist/2026-09-12-多会话高频输出与切会话401-buglist.md)
+- [2026-09-13-hidden-bug-scan.md](./archive/2026-09/buglist/2026-09-13-hidden-bug-scan.md)
+- [2026-09-15-daemon启动期工具探测可挂起-buglist.md](./archive/2026-09/buglist/2026-09-15-daemon启动期工具探测可挂起-buglist.md)
+- [2026-09-15-keepalive存活信号无出口-buglist.md](./archive/2026-09/buglist/2026-09-15-keepalive存活信号无出口-buglist.md)
+- [2026-09-15-timeline深翻页缺失-buglist.md](./archive/2026-09/buglist/2026-09-15-timeline深翻页缺失-buglist.md)
+- [2026-09-15-ts特性编译不过-buglist.md](./archive/2026-09/buglist/2026-09-15-ts特性编译不过-buglist.md)
+- [2026-09-15-热重载吞首次变更与资源文案-buglist.md](./archive/2026-09/buglist/2026-09-15-热重载吞首次变更与资源文案-buglist.md)
+- [2026-09-15-陈旧discovery永久卡死shell-buglist.md](./archive/2026-09/buglist/2026-09-15-陈旧discovery永久卡死shell-buglist.md)
+- [2026-09-15-频道流epoch未归零-buglist.md](./archive/2026-09/buglist/2026-09-15-频道流epoch未归零-buglist.md)
+- [2026-09-16-anthropic-400-真因-上下文超限-buglist.md](./archive/2026-09/buglist/2026-09-16-anthropic-400-真因-上下文超限-buglist.md)
+- [2026-09-16-apply_patch静默覆盖与误导性文案-buglist.md](./archive/2026-09/buglist/2026-09-16-apply_patch静默覆盖与误导性文案-buglist.md)
+- [2026-09-16-edit工具行内片段与kind虚报-buglist.md](./archive/2026-09/buglist/2026-09-16-edit工具行内片段与kind虚报-buglist.md)
+- [2026-09-16-read_image连发触发400-buglist.md](./archive/2026-09/buglist/2026-09-16-read_image连发触发400-buglist.md)
+- [2026-09-16-图片base64计入token估算致压缩空转-buglist.md](./archive/2026-09/buglist/2026-09-16-图片base64计入token估算致压缩空转-buglist.md)
+- [2026-09-17-子代理取消后复活-buglist.md](./archive/2026-09/buglist/2026-09-17-子代理取消后复活-buglist.md)
 
 ### 3.2 report（11 份）
 
-- [2026-09-12-exec输出静默截断与引入点考证-report.md](./report/2026-09-12-exec输出静默截断与引入点考证-report.md)
-- [2026-09-12-timeline快照落后被当权威装载-report.md](./report/2026-09-12-timeline快照落后被当权威装载-report.md)
-- [2026-09-12-timeline持久化死锁与debug桥token泄露-report.md](./report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md)
-- [2026-09-12-会话cwd未传导工具线程grep越界-report.md](./report/2026-09-12-会话cwd未传导工具线程grep越界-report.md)
-- [2026-09-12-多会话高频输出热路径串行化与切会话401-report.md](./report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md)
-- [2026-09-12-子代理无法拉起排查-report.md](./report/2026-09-12-子代理无法拉起排查-report.md)
-- [2026-09-12-首消息双写与transcript重复渲染-report.md](./report/2026-09-12-首消息双写与transcript重复渲染-report.md)
-- [2026-09-13-codex-parity-analysis.md](./report/2026-09-13-codex-parity-analysis.md)
-- [2026-09-14-timeline工具块内存放大-report.md](./report/2026-09-14-timeline工具块内存放大-report.md)
-- [2026-09-15-进程架构对照-codex与grok-build-report.md](./report/2026-09-15-进程架构对照-codex与grok-build-report.md)
-- [2026-09-17-子代理取消后复活根因-report.md](./report/2026-09-17-子代理取消后复活根因-report.md)
+- [2026-09-12-exec输出静默截断与引入点考证-report.md](./archive/2026-09/report/2026-09-12-exec输出静默截断与引入点考证-report.md)
+- [2026-09-12-timeline快照落后被当权威装载-report.md](./archive/2026-09/report/2026-09-12-timeline快照落后被当权威装载-report.md)
+- [2026-09-12-timeline持久化死锁与debug桥token泄露-report.md](./archive/2026-09/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md)
+- [2026-09-12-会话cwd未传导工具线程grep越界-report.md](./archive/2026-09/report/2026-09-12-会话cwd未传导工具线程grep越界-report.md)
+- [2026-09-12-多会话高频输出热路径串行化与切会话401-report.md](./archive/2026-09/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md)
+- [2026-09-12-子代理无法拉起排查-report.md](./archive/2026-09/report/2026-09-12-子代理无法拉起排查-report.md)
+- [2026-09-12-首消息双写与transcript重复渲染-report.md](./archive/2026-09/report/2026-09-12-首消息双写与transcript重复渲染-report.md)
+- [2026-09-13-codex-parity-analysis.md](./archive/2026-09/report/2026-09-13-codex-parity-analysis.md)
+- [2026-09-14-timeline工具块内存放大-report.md](./archive/2026-09/report/2026-09-14-timeline工具块内存放大-report.md)
+- [2026-09-15-进程架构对照-codex与grok-build-report.md](./archive/2026-09/report/2026-09-15-进程架构对照-codex与grok-build-report.md)
+- [2026-09-17-子代理取消后复活根因-report.md](./archive/2026-09/report/2026-09-17-子代理取消后复活根因-report.md)
 
 ### 3.3 handoff（3 份归档 + 1 份建议转 guides）
 
-- [2026-09-12-timeline快照落后自愈-handoff.md](./handoff/2026-09-12-timeline快照落后自愈-handoff.md)
-- [2026-09-12-多会话热路径修复进展-handoff.md](./handoff/2026-09-12-多会话热路径修复进展-handoff.md)
-- [2026-09-14-main编译回归修复与PR76收口-handoff.md](./handoff/2026-09-14-main编译回归修复与PR76收口-handoff.md)
+- [2026-09-12-timeline快照落后自愈-handoff.md](./archive/2026-09/handoff/2026-09-12-timeline快照落后自愈-handoff.md)
+- [2026-09-12-多会话热路径修复进展-handoff.md](./archive/2026-09/handoff/2026-09-12-多会话热路径修复进展-handoff.md)
+- [2026-09-14-main编译回归修复与PR76收口-handoff.md](./archive/2026-09/handoff/2026-09-14-main编译回归修复与PR76收口-handoff.md)
 - [2026-09-13-CNB-NPC全流程开发管线-handoff.md](./handoff/2026-09-13-CNB-NPC全流程开发管线-handoff.md) —— **不是一次性交接，是开发管线手册**，建议转 `docs/guides/` 而非 archive
 
 ## 4. 进行中（活文档，勿归档）
@@ -110,6 +114,8 @@
 | spec | [2026-09-15-前端契约与client-API稳定性-spec.md](./spec/2026-09-15-前端契约与client-API稳定性-spec.md) | G1/G2 已落地，其余待评审 |
 | spec | [2026-09-17-工具结果展示层契约-spec.md](./spec/2026-09-17-工具结果展示层契约-spec.md) | **已被 09-18 跨仓契约取代**，保留为量化证据与设计参照（悬空引用已修复） |
 | spec | [2026-09-18-工具结果展示契约-v1-spec.md](./spec/2026-09-18-工具结果展示契约-v1-spec.md) | **草案待评审；前后端唯一事实源**；修复评审阻塞项（错误承载位 / ToolError.code / display(args) / 超时取消 / 归属与兼容 / H11 分期） |
+| spec | [2026-09-19-审计账本v2-spec.md](./spec/2026-09-19-审计账本v2-spec.md) | **核心已落地**（链/校验/双写/拒绝记账 + 端到端测试）；留存/签名/查询 CLI 待排期（§7） |
+| report | [2026-09-19-测试缺口盘点-v2重构前-report.md](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) | **v2.0 重构前测试部署输入**：P0 五项（编排表征 ✅ / 重放等价 ✅ / 权限矩阵 / SDK 双路径 / e2e tier） |
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
 | todo | [README.md](./todo/README.md) / [2026-09-17-buglist复核-report.md](./todo/2026-09-17-buglist复核-report.md) / [2026-09-17-buglist复核-checklist.md](./todo/2026-09-17-buglist复核-checklist.md) | 在线 open 项索引；N-5 另有独立 buglist |
@@ -150,7 +156,11 @@
 1. **状态回写已完成**：`2026-09-16-apply_patch`、`2026-09-16-edit`、`2026-09-15-热重载`、`2026-09-17-子代理取消后复活` 四份 buglist 已分别回写 `1705449`(#87)、`61b39d0`(#89)、`b4851b0`(#92)、`629637d`(#88)；子代理清单中的 HEAD 不成立项按 `wontfix @33253a5` 关闭。
 2. **N-5 权限语义已定案**：见 §5.2 的 [`2026-09-17-exec工作区外写入未收口-buglist.md`](./buglist/2026-09-17-exec工作区外写入未收口-buglist.md)。Level 3 负责拦截 Exec/Net，Level 4 是显式 bypass；新配置默认 Level 3，L4 exec sandbox 作为后续项保留。
 
-## 7. 归档方式（已执行）
+## 7. 归档方式（已执行：方案 A → 方案 B）
 
-- **已采用方案 A（零风险）**：文件不移动，以本文件作为索引，归档表现为「§3 归档区」的收录状态。
-- **方案 B（物理隔离）未执行**：`docs/archive/2026-09/` 目录未创建。当前文档间存在 40+ 处相对链接、30+ 个唯一目标；如后续改为物理隔离，必须在同一个提交内完成 `git mv` + 全量改链 + 链接校验。
+- **2026-09-17 方案 A（零风险）**：文件不移动，以本文件作为索引，归档表现为「§3 归档区」的收录状态。
+- **2026-09-19 方案 B（物理隔离，已执行）**：31 份历史文档 `git mv` 至 [`archive/2026-09/`](./archive/2026-09/)
+  （buglist 17 / report 11 / handoff 3），全量改链（源或目标在迁移集内的相对链接按新坐标重算）
+  并完成链接校验（全部可解析）；`crates/qaqh-workspace/tests/tool_thread_workspace.rs` 的文档引用同步更新。
+- 未随迁（按 §4/§5 状态保留原位）：§4 进行中活文档、§5 未闭环清单、
+  `handoff/2026-09-13-CNB-NPC全流程开发管线-handoff.md`（流程手册，建议转 `docs/guides/` 而非 archive）。

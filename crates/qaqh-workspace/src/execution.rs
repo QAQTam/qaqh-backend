@@ -23,21 +23,40 @@ pub fn execute_authorized(
     progress_tx: Option<crate::ExecProgressSender>,
 ) -> ToolExecResult {
     let started = Instant::now();
-    let (invocation, authorized_resources, authorized_workspace) = call.into_parts();
+    let (invocation, authorized_resources, authorized_workspace, grant) = call.into_parts();
+    // 审计要用的环境权限档位：必须在 bind_session 之前取——bind_session 把
+    // permission_level 置 0（授权凭证本身才是执行上下文），事后读会失真。
+    // 档位 0 非法（fail-closed 归 MaxLockdown），视为"未知"。
+    // ⚠ 该值仅在会话比对通过后可信：会话不匹配的拒绝事件必须传 None。
+    let pre_bind_level = crate::runtime::context()
+        .map(|ctx| ctx.permission_level)
+        .filter(|level| *level > 0);
 
     // PR-3-2：授权调用本身就是执行上下文。环境上下文仅作防御性比对
     // （存在且 ≠ 调用会话才拒绝；工具线程无预置环境属合法形态），随后
     // 显式绑定调用会话，供深层 handler 的 ambient 读取（todo/read_image/
     // subagent 父会话解析）。
+    //
+    // 拒绝路径同样落审计（kind=tool_rejected）：商业审计要求"未执行的
+    // 调用"也可追溯，不能只在成功路径记账。
     if let Some(ambient) = crate::runtime::context()
         && ambient.active_session != invocation.session_id
     {
+        audit_rejected(&invocation, "rejected", "SESSION_MISMATCH", None, None, started);
         return failure(&invocation.tool_name, crate::ToolError::SessionMismatch);
     }
     let _session_guard = crate::runtime::bind_session(&invocation.session_id);
 
     let active_workspace = crate::runtime::active_workspace_root();
     if active_workspace != authorized_workspace {
+        audit_rejected(
+            &invocation,
+            "rejected",
+            "WORKSPACE_MISMATCH",
+            None,
+            pre_bind_level,
+            started,
+        );
         return failure(
             &invocation.tool_name,
             crate::ToolError::ToolSpecific {
@@ -56,7 +75,46 @@ pub fn execute_authorized(
     authorized_resources.sort();
     authorized_resources.dedup();
     if current_resources != authorized_resources {
+        audit_rejected(
+            &invocation,
+            "rejected",
+            "RESOURCE_MISMATCH",
+            None,
+            pre_bind_level,
+            started,
+        );
         return failure(&invocation.tool_name, crate::ToolError::ResourceMismatch);
+    }
+
+    if crate::is_cancel() {
+        audit_rejected(
+            &invocation,
+            "rejected",
+            "CANCELLED",
+            None,
+            pre_bind_level,
+            started,
+        );
+        return failure(&invocation.tool_name, crate::ToolError::Cancelled);
+    }
+
+    if crate::runtime::is_plan_mode() && crate::PLAN_BLOCKED.contains(&invocation.tool_name.as_str())
+    {
+        audit_rejected(
+            &invocation,
+            "rejected",
+            "BLOCKED_BY_MODE",
+            Some("PLAN mode"),
+            pre_bind_level,
+            started,
+        );
+        return failure(
+            &invocation.tool_name,
+            crate::ToolError::BlockedByMode {
+                mode: "PLAN".into(),
+                tool: invocation.tool_name.clone(),
+            },
+        );
     }
 
     let ToolInvocation {
@@ -65,30 +123,41 @@ pub fn execute_authorized(
         tool_name: name,
         action,
         args,
-        category: _,
+        category,
     } = invocation;
-
-    if crate::is_cancel() {
-        return failure(&name, crate::ToolError::Cancelled);
-    }
-
-    if crate::runtime::is_plan_mode() && crate::PLAN_BLOCKED.contains(&name.as_str()) {
-        return failure(
-            &name,
-            crate::ToolError::BlockedByMode {
-                mode: "PLAN".into(),
-                tool: name.clone(),
-            },
-        );
-    }
 
     // Phase 1: prepare while holding the manager lock.
     let prepared = crate::runtime::with_manager(|manager| {
-        manager.prepare_req(call_id, &name, &action, args.clone(), None, progress_tx)
+        manager.prepare_req(
+            call_id.clone(),
+            &name,
+            &action,
+            args.clone(),
+            None,
+            progress_tx,
+        )
     });
     let prepared = match prepared {
         Some(Ok(prepared)) => prepared,
         Some(Err(report)) => {
+            // prepare 阶段拒绝（未知工具/白名单外/参数预检失败等）：不进入
+            // 执行，但仍必须落审计。
+            let audit_invocation = ToolInvocation {
+                session_id: session_id.clone(),
+                call_id: call_id.clone(),
+                tool_name: name.clone(),
+                action: action.clone(),
+                args: args.clone(),
+                category,
+            };
+            audit_rejected(
+                &audit_invocation,
+                "rejected",
+                "PREPARE_REJECTED",
+                Some(&report.content),
+                pre_bind_level,
+                started,
+            );
             let canonical = crate::ToolResult::error(report.content.clone());
             return ToolExecResult {
                 content: report.content,
@@ -100,6 +169,22 @@ pub fn execute_authorized(
             };
         }
         None => {
+            let audit_invocation = ToolInvocation {
+                session_id: session_id.clone(),
+                call_id: call_id.clone(),
+                tool_name: name.clone(),
+                action: action.clone(),
+                args: args.clone(),
+                category,
+            };
+            audit_rejected(
+                &audit_invocation,
+                "rejected",
+                "MANAGER_UNAVAILABLE",
+                None,
+                pre_bind_level,
+                started,
+            );
             return failure(&name, crate::ToolError::ManagerUnavailable);
         }
     };
@@ -107,7 +192,14 @@ pub fn execute_authorized(
     // Phase 2: execute without holding the manager lock. All tools now run in
     // the daemon actor process; WSL deployment moves the whole daemon instead
     // of routing individual tool calls across an environment boundary.
-    let _ = (session_id, authorized_workspace, authorized_resources);
+    let _ = (authorized_workspace, authorized_resources);
+    // 审计对象 before 指纹：派发前按与 finalize 同源的 args 口径快照
+    // file_state 账本（键一致，命中即 before，未命中为 None）。
+    let audit_paths = crate::manager::extract_files_affected(&name, &args);
+    let before_hashes: Vec<(String, Option<String>)> = audit_paths
+        .iter()
+        .map(|path| (path.clone(), crate::file_state::last_hash(path)))
+        .collect();
     let mut tool_result = (prepared.handler_fn)(prepared.ctx.clone());
     // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
     // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
@@ -143,6 +235,47 @@ pub fn execute_authorized(
                 effective_tool_name,
                 user_initiated: false,
             };
+            let error_code = canonical
+                .error
+                .as_ref()
+                .map(|error| error.code.clone());
+            // 对象可追溯：路径 + before/after 内容指纹（file_state LF 规范
+            // 视图 hash；未建立基线/新文件为 None）。
+            let objects: Vec<crate::audit::v2::AuditObject> = report
+                .files_affected
+                .iter()
+                .map(|path| crate::audit::v2::AuditObject {
+                    kind: "file".to_string(),
+                    path: path.clone(),
+                    before_sha: before_hashes
+                        .iter()
+                        .find(|(candidate, _)| candidate == path)
+                        .and_then(|(_, hash)| hash.clone()),
+                    after_sha: crate::file_state::last_hash(path),
+                })
+                .collect();
+            let audit_entry = crate::audit::AuditEntry {
+                ts: chrono::Utc::now().to_rfc3339(),
+                user: "agent".into(),
+                tool: name.clone(),
+                action: action.clone(),
+                args_hash: crate::audit::hash_args(&args),
+                args_bytes: crate::audit::args_size(&args),
+                status: crate::audit::status_str(canonical.status).to_string(),
+                elapsed_ms: report.meta.elapsed_ms,
+                kind: crate::audit::v2::AuditKind::ToolCall,
+                session: session_id,
+                call_id,
+                category: category.as_str().to_string(),
+                permission_level: pre_bind_level,
+                error_code,
+                output_bytes: report.meta.output_size as u64,
+                retry_count: canonical.metrics.retry_count,
+                effective_name: canonical.metrics.effective_tool_name.clone(),
+                decision: Some(grant.as_str().to_string()),
+                decision_reason: None,
+                objects,
+            };
             let result = ToolExecResult {
                 content: report.content,
                 success: report.success,
@@ -151,20 +284,30 @@ pub fn execute_authorized(
                 code_delta,
                 skill_effects,
             };
-            let audit_entry = crate::audit::AuditEntry {
-                ts: chrono::Utc::now().to_rfc3339(),
-                user: "agent".into(),
-                tool: name.clone(),
-                action: action.clone(),
-                args_hash: crate::audit::hash_args(&args),
-                result: if result.success { "ok" } else { "fail" }.into(),
-                elapsed_ms: result.meta.elapsed_ms,
-                files: report.files_affected,
-            };
-            crate::audit::append_audit(&audit_entry);
+            if let Err(e) = crate::audit::append_audit(&audit_entry) {
+                log::error!("audit: append failed for {name}: {e}");
+            }
             result
         }
-        None => failure(&name, crate::ToolError::ManagerUnavailable),
+        None => {
+            let audit_invocation = ToolInvocation {
+                session_id,
+                call_id,
+                tool_name: name.clone(),
+                action: action.clone(),
+                args: args.clone(),
+                category,
+            };
+            audit_rejected(
+                &audit_invocation,
+                "rejected",
+                "MANAGER_UNAVAILABLE",
+                None,
+                pre_bind_level,
+                started,
+            );
+            failure(&name, crate::ToolError::ManagerUnavailable)
+        }
     }
 }
 
@@ -179,26 +322,15 @@ pub fn execute_with_context(
     progress_tx: Option<crate::ExecProgressSender>,
     ctx: &crate::runtime::ToolCtx,
 ) -> ToolExecResult {
+    let started = Instant::now();
     // Fail closed：显式上下文缺会话等价于旧“runtime 未初始化”。
+    // （无会话 = 无主体身份，拒绝事件无从归属，不落审计。）
     if ctx.session_id.is_empty() {
         return failure(
             &resolve_name(name, action),
             crate::ToolError::RuntimeNotInitialized,
         );
     }
-    let args: serde_json::Value = match serde_json::from_str(args) {
-        Ok(args) => args,
-        Err(error) => {
-            return failure(
-                &resolve_name(name, action),
-                crate::ToolError::InvalidArgs {
-                    message: error.to_string(),
-                },
-            );
-        }
-    };
-    let _ctx_guard = crate::runtime::install_tool_ctx(ctx);
-
     let call_id = if tool_call_id.is_empty() {
         format!(
             "agent_{}",
@@ -211,6 +343,34 @@ pub fn execute_with_context(
         tool_call_id.to_string()
     };
     let resolved_name = resolve_name(name, action);
+    let args: serde_json::Value = match serde_json::from_str(args) {
+        Ok(args) => args,
+        Err(error) => {
+            let error = crate::ToolError::InvalidArgs {
+                message: error.to_string(),
+            };
+            let audit_invocation = ToolInvocation {
+                session_id: ctx.session_id.clone(),
+                call_id,
+                tool_name: resolved_name.clone(),
+                action: action.to_string(),
+                args: serde_json::Value::Null,
+                category: crate::runtime::lookup_category(&resolved_name)
+                    .unwrap_or(crate::permission::ToolCategory::Write),
+            };
+            audit_rejected(
+                &audit_invocation,
+                "rejected",
+                error.code(),
+                Some(&error.to_string()),
+                Some(ctx.permission_level),
+                started,
+            );
+            return failure(&resolved_name, error);
+        }
+    };
+    let _ctx_guard = crate::runtime::install_tool_ctx(ctx);
+
     let resolved_action = if action.is_empty() {
         args.get("action")
             .and_then(serde_json::Value::as_str)
@@ -231,6 +391,8 @@ pub fn execute_with_context(
         args,
         category,
     };
+    // admit 消费 invocation；拒绝路径需要完整授权快照来落审计。
+    let audit_invocation = invocation.clone();
 
     match admit(
         invocation,
@@ -239,16 +401,79 @@ pub fn execute_with_context(
         &HashSet::new(),
     ) {
         Admission::Authorized(authorized) => execute_authorized(authorized, progress_tx),
-        Admission::ApprovalRequired(challenge) => failure(
-            &resolved_name,
-            crate::ToolError::PermissionDenied {
+        Admission::ApprovalRequired(challenge) => {
+            let error = crate::ToolError::PermissionDenied {
                 reason: challenge.reason().to_string(),
-            },
-        ),
-        Admission::Denied(reason) => failure(
-            &resolved_name,
-            crate::ToolError::PermissionDenied { reason },
-        ),
+            };
+            audit_rejected(
+                &audit_invocation,
+                "challenge_required",
+                error.code(),
+                Some(challenge.reason()),
+                Some(ctx.permission_level),
+                started,
+            );
+            failure(&resolved_name, error)
+        }
+        Admission::Denied(reason) => {
+            let error = crate::ToolError::PermissionDenied {
+                reason: reason.clone(),
+            };
+            audit_rejected(
+                &audit_invocation,
+                "rejected",
+                error.code(),
+                Some(&reason),
+                Some(ctx.permission_level),
+                started,
+            );
+            failure(&resolved_name, error)
+        }
+    }
+}
+
+/// 记录一条"未进入执行"的拒绝事件（v1 CSV + v2 账本双写）。
+///
+/// 拒绝路径没有 `ToolResult`：错误码/原因由调用方给出，主体/工具面从
+/// 授权快照提取。写失败只记日志——审计写入失败不改变工具调用结果，
+/// fail-closed 策略属配置层，另行接线。
+fn audit_rejected(
+    invocation: &ToolInvocation,
+    outcome: &str,
+    error_code: &str,
+    reason: Option<&str>,
+    permission_level: Option<u8>,
+    started: Instant,
+) {
+    let entry = crate::audit::AuditEntry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        user: "agent".into(),
+        tool: invocation.tool_name.clone(),
+        action: invocation.action.clone(),
+        args_hash: crate::audit::hash_args(&invocation.args),
+        args_bytes: crate::audit::args_size(&invocation.args),
+        status: "error".to_string(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        kind: crate::audit::v2::AuditKind::ToolRejected,
+        session: invocation.session_id.clone(),
+        call_id: invocation.call_id.clone(),
+        category: invocation.category.as_str().to_string(),
+        permission_level,
+        error_code: Some(error_code.to_string()),
+        output_bytes: 0,
+        retry_count: 0,
+        effective_name: None,
+        decision: Some(outcome.to_string()),
+        // 原因上界 512 字符：账本可读性与磁盘占用保护（截断标记不必要——
+        // 结构上仍是前缀，verify 只校验链）。
+        decision_reason: reason.map(|text| text.chars().take(512).collect::<String>()),
+        objects: Vec::new(),
+    };
+    if let Err(e) = crate::audit::append_audit(&entry) {
+        log::error!(
+            "audit: append rejected event for {} failed: {e}",
+            invocation.tool_name
+        );
     }
 }
 
@@ -949,7 +1174,12 @@ mod tests {
             args: serde_json::json!({}),
             category: crate::permission::ToolCategory::Read,
         };
-        let auth = AuthorizedToolCall::new(inv, vec![], crate::runtime::active_workspace_root());
+        let auth = AuthorizedToolCall::new(
+            inv,
+            vec![],
+            crate::runtime::active_workspace_root(),
+            crate::authorization::GrantKind::Auto,
+        );
         let result = execute_authorized(auth, None);
         assert!(!result.success, "session mismatch should be rejected");
         assert!(
@@ -1008,6 +1238,7 @@ mod tests {
             inv2,
             auth.resources().to_vec(),
             auth.workspace_root().to_path_buf(),
+            crate::authorization::GrantKind::Auto,
         );
         let result = execute_authorized(forged_auth, None);
         assert!(!result.success, "resource mismatch should be rejected");

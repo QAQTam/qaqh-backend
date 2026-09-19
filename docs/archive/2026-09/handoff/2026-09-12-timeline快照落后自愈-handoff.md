@@ -1,8 +1,8 @@
 # handoff：timeline 落后快照自愈（2026-09-12）
 
-> 关联：[`docs/report/2026-09-12-timeline快照落后被当权威装载-report.md`](../report/2026-09-12-timeline快照落后被当权威装载-report.md)、
-> [`docs/buglist/2026-09-12-timeline快照落后被当权威装载-buglist.md`](../buglist/2026-09-12-timeline快照落后被当权威装载-buglist.md)、
-> [`docs/buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md`](../buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md)
+> 关联：[`docs/archive/2026-09/report/2026-09-12-timeline快照落后被当权威装载-report.md`](../report/2026-09-12-timeline快照落后被当权威装载-report.md)、
+> [`docs/archive/2026-09/buglist/2026-09-12-timeline快照落后被当权威装载-buglist.md`](../buglist/2026-09-12-timeline快照落后被当权威装载-buglist.md)、
+> [`docs/archive/2026-09/buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md`](../buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md)
 
 ## 1. 一句话交接
 
