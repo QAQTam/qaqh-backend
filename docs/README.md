@@ -1,7 +1,7 @@
 # docs — 索引与归档状态
 
-> **索引日期**：2026-09-18（UTC+8）
-> **最后复核**：2026-09-19（docs 物理归档——方案 B 执行：31 份历史文档迁入 `archive/2026-09/`）
+> **索引日期**：2026-09-20（UTC+8）
+> **最后复核**：2026-09-20（新增 v2.0 总架构设计，纳入进行中活文档）
 > **基线**：`main` @ `2b472f2`
 > **本文件用途**：`docs/` 的唯一索引入口——**已完成什么、什么还在跑、归档去哪找**。
 > 目录职责与命名约定见 [`todo/README.md`](./todo/README.md) §6；各目录另有 `以yyyy-mm-dd-标题-*.md作为命名` 说明文件。
@@ -23,6 +23,7 @@
 | **09-19** | **审计账本 v2 落地**：JSONL 哈希链 + seq/单调时钟 + 授权决策链 + 对象 before/after 指纹 + 拒绝路径记账；双写 v1 CSV | [`spec/2026-09-19-审计账本v2-spec.md`](./spec/2026-09-19-审计账本v2-spec.md) |
 | **09-19** | **测试缺口盘点（v2.0 重构前）**：16 crate 测试资产清点 + 四个重构面（Ringing/TurnCore/Tool SDK/沙箱）缺口交叉比对 + P0/P1/P2 测试部署清单 | [`report/2026-09-19-测试缺口盘点-v2重构前-report.md`](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) |
 | **09-19** | **docs 物理归档（方案 B）**：§3 归档区 31 份历史文档（buglist 17 / report 11 / handoff 3）迁入 `archive/2026-09/`；`git mv` + 全量改链 + 链接校验同批完成 | [`archive/2026-09/`](./archive/2026-09/) |
+| **09-20** | **QAQH v2.0 总架构设计**：交叉 qaqh-backend / qaqh-tui-app / codex-main / grok-build，裁决 canonical fact、SessionActor、TurnCore、ToolRuntime、Policy/Sandbox、Ringing v2 与迁移验收 | [`plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md`](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) |
 
 ## 2. 已归档（2026-09-17，方案 A；2026-09-19 物理迁移）
 
@@ -116,6 +117,7 @@
 | spec | [2026-09-18-工具结果展示契约-v1-spec.md](./spec/2026-09-18-工具结果展示契约-v1-spec.md) | **草案待评审；前后端唯一事实源**；修复评审阻塞项（错误承载位 / ToolError.code / display(args) / 超时取消 / 归属与兼容 / H11 分期） |
 | spec | [2026-09-19-审计账本v2-spec.md](./spec/2026-09-19-审计账本v2-spec.md) | **核心已落地**（链/校验/双写/拒绝记账 + 端到端测试）；留存/签名/查询 CLI 待排期（§7） |
 | report | [2026-09-19-测试缺口盘点-v2重构前-report.md](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) | **v2.0 重构前测试部署输入**：P0 五项（编排表征 ✅ / 重放等价 ✅ / 权限矩阵 / SDK 双路径 / e2e tier） |
+| plan | [2026-09-20-qaqh-v2.0-总架构设计-plan.md](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) | **v2.0 总架构定稿草案**：裁决 Ringing/TurnCore/Tool SDK/Sandbox/client 的版本、状态所有权、迁移顺序与验收 |
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
 | todo | [README.md](./todo/README.md) / [2026-09-17-buglist复核-report.md](./todo/2026-09-17-buglist复核-report.md) / [2026-09-17-buglist复核-checklist.md](./todo/2026-09-17-buglist复核-checklist.md) | 在线 open 项索引；N-5 另有独立 buglist |
