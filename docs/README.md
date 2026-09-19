@@ -118,6 +118,7 @@
 | spec | [2026-09-19-审计账本v2-spec.md](./spec/2026-09-19-审计账本v2-spec.md) | **核心已落地**（链/校验/双写/拒绝记账 + 端到端测试）；留存/签名/查询 CLI 待排期（§7） |
 | spec | [2026-09-20-session-fact-v2-schema-spec.md](./spec/2026-09-20-session-fact-v2-schema-spec.md) | **P0 冻结候选**：#105 字段级 fact schema、复合 cursor、recovery 与 cutover；待 #106 独立反证 |
 | report | [2026-09-19-测试缺口盘点-v2重构前-report.md](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) | **v2.0 重构前测试部署输入**：P0 五项（编排表征 ✅ / 重放等价 ✅ / 权限矩阵 / SDK 双路径 / e2e tier） |
+| plan | [2026-09-19-qaqh-v2.0-前瞻设计-plan.md](./plan/2026-09-19-qaqh-v2.0-前瞻设计-plan.md) | **已被 09-20 总架构设计取代**；保留为方向输入与历史证据 |
 | plan | [2026-09-20-qaqh-v2.0-总架构设计-plan.md](./plan/2026-09-20-qaqh-v2.0-总架构设计-plan.md) | **v2.0 总架构定稿草案**：裁决 Ringing/TurnCore/Tool SDK/Sandbox/client 的版本、状态所有权、迁移顺序与验收 |
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
