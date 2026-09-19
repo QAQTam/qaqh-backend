@@ -3,10 +3,10 @@
 > 登记规则：一行一个缺陷；**详情进 `docs/report/`**，本文件只做索引与状态跟踪。
 > 状态口径：`open` / `fixed（工作区，待提交）` / `fixed @{commit}` / `verified` / `wontfix`。
 >
-> 主报告：[`docs/report/2026-09-14-timeline工具块内存放大-report.md`](../report/2026-09-14-timeline工具块内存放大-report.md)
-> 姊妹文件：[`2026-09-12-timeline死锁与debug桥token泄露-buglist.md`](./2026-09-12-timeline死锁与debug桥token泄露-buglist.md)、
-> [`2026-09-12-timeline快照落后被当权威装载-buglist.md`](./2026-09-12-timeline快照落后被当权威装载-buglist.md)、
-> [`2026-09-12-多会话高频输出与切会话401-buglist.md`](./2026-09-12-多会话高频输出与切会话401-buglist.md)
+> 主报告：[`docs/archive/2026-09/report/2026-09-14-timeline工具块内存放大-report.md`](../archive/2026-09/report/2026-09-14-timeline工具块内存放大-report.md)
+> 姊妹文件：[`2026-09-12-timeline死锁与debug桥token泄露-buglist.md`](../archive/2026-09/buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md)、
+> [`2026-09-12-timeline快照落后被当权威装载-buglist.md`](../archive/2026-09/buglist/2026-09-12-timeline快照落后被当权威装载-buglist.md)、
+> [`2026-09-12-多会话高频输出与切会话401-buglist.md`](../archive/2026-09/buglist/2026-09-12-多会话高频输出与切会话401-buglist.md)
 >
 > 2026-09-15 复核基线：`1c92413`——**该哈希只是本清单/主报告的「登记提交」**（2026-09-14 13:04，
 > commit message 就是 `1`），**不是修复提交**。四项修复实际随 `ea6063c`

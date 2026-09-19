@@ -27,7 +27,7 @@
 | D-3 | P2 | open | 并发/锁粒度 | `process_registry.rs:428-484`（`kill`）、`112-114`（`with`）、`325-362`（`append_output`/`append_stderr`） | `kill` 在**持有全局注册表 Mutex** 期间同步 spawn `taskkill` 并 `child.wait()`（E1 实测 108.7 ms / 9 子进程树）；窗口内所有会话的读线程 `append_output` 与所有 exec 的 `try_wait` 轮询（50 ms 周期）一起停顿 |
 | D-4 | P1 | open | 生命周期收敛 | `process_registry.rs:86-88,428-471`（`os_pid` 快照 + `taskkill /pid`）、`direct.rs:47`（仅 `CREATE_NO_WINDOW`） | 进程树收敛依赖 **pid 快照**：句柄被 `try_wait` 回收后按 `os_pid` 执行 `taskkill /pid`/`killpg`，pid/pgid 已被系统复用时**会误杀无关进程树**；Windows 侧无 JobObject（同仓库 `qaqh-lsp`/`qaqh-mcp` 已在用） |
 | D-5 | P2 | open；**修订见附录 C R-5** | 契约缺位 | `process_inspect.rs:13-38,160-186`、`process_registry.rs:92,161,216-256`、`exec/direct.rs:193-229`、`exec/handler.rs:226-234` | 三处契约失真：① `process.write` 是**死功能**（`pty_writer` 全仓只被写成 `None`，stdin 恒为 `null`），schema 仍在承诺；② 无 `read`/`list`，后台进程的 `captured_full`（5 MiB）**模型永远读不到**；③ `timeout_secs` 到点**不超时**（只移交后台）却在结果里报 `timed_out: true` |
-| D-6 | P1 | open；**修订见附录 C R-3** | 事件流 / 前端成本 | `exec/pipe.rs:126-138`（每 chunk 一次）、`qaqh-runtime/src/agent/engine_tool.rs:41-55`、`qaqh-runtime/src/timeline.rs:457,751-753,762`、`ringing/hub.rs:669-682` | 活跃期每 8–64 KiB 输出产生 **1 个 timeline 事件 + 1 次 `tool.progress` 无界 `push_str` + 1 次有损 `broadcast(1024)` 投递**；单条命令最多向时间线注入 10 MiB 进度文本，并占用该 seed 回放尾的条目与字节预算，挤掉重连补帧窗口。与 `docs/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md` 的写放大族同源 |
+| D-6 | P1 | open；**修订见附录 C R-3** | 事件流 / 前端成本 | `exec/pipe.rs:126-138`（每 chunk 一次）、`qaqh-runtime/src/agent/engine_tool.rs:41-55`、`qaqh-runtime/src/timeline.rs:457,751-753,762`、`ringing/hub.rs:669-682` | 活跃期每 8–64 KiB 输出产生 **1 个 timeline 事件 + 1 次 `tool.progress` 无界 `push_str` + 1 次有损 `broadcast(1024)` 投递**；单条命令最多向时间线注入 10 MiB 进度文本，并占用该 seed 回放尾的条目与字节预算，挤掉重连补帧窗口。与 `docs/archive/2026-09/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md` 的写放大族同源 |
 | D-7 | P2 | open；**修订见附录 C R-4** | 生命周期 / 内存 | `process_registry.rs:38-45,119-140`（驱逐只在 `register` 内做，终态保留 600 s）、`direct.rs:236` | 条目可达 **10 MiB/条**（两流 × 5 MiB）且终态后再保留 10 分钟，驱逐只在"下一次 register"时发生；daemon/工具宿主退出**不清理任何子进程**（全仓无 `kill_all`/`Drop` 收敛），孤儿既跑又不可达 |
 | D-8 | P2 | open | 耦合 | `qaqh-subagent/src/lib.rs:185-240,299-320,590-605`、`serve.rs:311-374` | 子代理与 exec 子进程共用同一张全局表：`process kill` 对子代理是**协作式**的（collect 线程每轮 `killed()` 一次，`recv_timeout` 300 ms），Remote 模式下 `killed()` **每轮发一次 HTTP POST**（≈3.3 req/s/子代理），而 `kill` 的返回值在子代理未真正停下前就已声称 killed |
 
@@ -218,7 +218,7 @@ taskkill /T /F elapsed_ms = 108.7
 
 #### D-3.3 影响面
 
-多会话并行 + 高频输出场景下的延迟尖刺来源之一；与 `docs/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md` 记录的热路径串行化是同一类问题（"锁跨阻塞系统调用"）。单会话场景影响可忽略（P2）。
+多会话并行 + 高频输出场景下的延迟尖刺来源之一；与 `docs/archive/2026-09/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md` 记录的热路径串行化是同一类问题（"锁跨阻塞系统调用"）。单会话场景影响可忽略（P2）。
 
 #### D-3.4 复现（E1，见附录 B）
 
@@ -354,7 +354,7 @@ process(action="check", id=N)                  → 只有 output_tail（≤500 �
 
 #### D-6.3 影响面
 
-这是"多 session + 多并行 + api 输出过快 → 前端视觉变慢"的直接机制之一：单条命令能注入 640+ 帧、最多 10 MiB 进度文本，同时压缩所有会话共用的回放尾。与 `docs/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md` 的写放大族同源；本报告只补 exec 侧的注入源与限额事实，不重复该报告的结论。
+这是"多 session + 多并行 + api 输出过快 → 前端视觉变慢"的直接机制之一：单条命令能注入 640+ 帧、最多 10 MiB 进度文本，同时压缩所有会话共用的回放尾。与 `docs/archive/2026-09/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md` 的写放大族同源；本报告只补 exec 侧的注入源与限额事实，不重复该报告的结论。
 
 #### D-6.4 复现（E2）
 
@@ -619,7 +619,7 @@ ProcessHandle {
 | 仓库 | `D:\project\QAQ-Harness`，commit `e61efe0`（2026-09-12 22:02:26 +0800） |
 | Rust | edition 2024 workspace，16 crates |
 | 构建 profile | release `opt-level="z"` + LTO + strip（本报告未构建，全部结论来自读码 + 一次 shell 实测） |
-| 相关既有报告 | `docs/report/2026-09-12-exec输出静默截断与引入点考证-report.md`（截断根因与引入点）、`docs/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md`（热路径写放大族，**挂起中**） |
+| 相关既有报告 | `docs/archive/2026-09/report/2026-09-12-exec输出静默截断与引入点考证-report.md`（截断根因与引入点）、`docs/archive/2026-09/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md`（热路径写放大族，**挂起中**） |
 
 ## 附录 B：复现命令
 

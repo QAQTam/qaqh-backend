@@ -300,7 +300,7 @@ fn host_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Resp
 | 路径 | 类型 | 是否落盘 | 说明 |
 |---|---|---|---|
 | `docs/report/TEMPLATE.md` | 新增 | ✅ 已落盘 | 本报告样式基准（v1，2026-09-12 立） |
-| `docs/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md` | 新增 | ✅ 已落盘 | 本报告 |
+| `docs/archive/2026-09/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md` | 新增 | ✅ 已落盘 | 本报告 |
 | `crates/qaqh-runtime/tests/timeline_persist_deadlock_repro.rs` | 新增（**未提交**） | ✅ 工作区 | D-1 复现 + 修复后回归用例（两条均有界超时，不会挂死） |
 | `%TEMP%\qaqh_hostpoc.ps1` | 临时脚本 | ✅ 本机临时目录 | D-2 PoC（全文见附录 B.3；重定向 `USERPROFILE` 隔离数据根） |
 | `target/release/qaqh-daemon.exe` | 构建产物 | ✅ | 01:16 构建，**含 D-1**，勿用于验收；已安装版本（00:09）不受影响 |
@@ -478,7 +478,7 @@ test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
 ### D.3 登记与未做项
 
-- 已登记 `docs/buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md`（两个 P0 互链本报告）。
+- 已登记 `docs/archive/2026-09/buglist/2026-09-12-timeline死锁与debug桥token泄露-buglist.md`（两个 P0 互链本报告）。
 - **未提交**：工作区含大量既存删除（`.stress/`、`bindings/`、`skills/`、`.workbuddy/` 等，非本次产物），为避免误提交，本次不执行 commit；改动停留在工作区，待 owner 审阅后自行提交。
 - **未做**（不影响本次验收）：`enable_turn_offload` 死代码清理与 offload 回调 ABBA 锁序改造（§3.6-3/4）；nonce 一次性兑换、`Sec-Fetch-Site` 校验、常量时间 token 比较（§4.5-③④⑤）；次要观察 O-1/O-2 未动。
 

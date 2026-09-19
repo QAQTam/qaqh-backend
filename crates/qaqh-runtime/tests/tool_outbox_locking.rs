@@ -12,8 +12,9 @@
 //!    pre-fix 会被互斥锁钉住 → 红）；
 //! 2. `flush_is_joined_before_returning`——显式 flush 是同步屏障：返回时
 //!    该会话的 fsync 已发生（持久化语义不牺牲）；
-//! 3. `concurrent_sessions_scale_end_to_end`——8 会话并发追加的墙钟时间必须
-//!    远低于串行算术和（无跨会话互斥时可并行，pre-fix → 红）。
+//! 3. `concurrent_sessions_scale_end_to_end`——8 会话 × 64 条并发追加的
+//!    **fsync 次数**必须远低于记录数（批量化：每会话每轮至多 1 次；
+//!    pre-fix 每条一次 = 512 次 → 红）。判据不依赖墙钟（D-1 修复）。
 //!
 //! 装置：注入**独立于 outbox 实现**的 `FaultFsyncHook`，按路径让 `sync_all`
 //! 挂起/计时。它把「单条成本」与「并发阻塞」解耦，因此其存在本身就证明追加
@@ -35,6 +36,58 @@ struct FaultFsyncHook {
     delay: Option<Duration>,
     /// 累计延迟次数（诊断用）。
     hits: AtomicUsize,
+}
+
+/// 闸门式 fsync 钩子：命中后挂起在钩子内，直到测试显式放行。
+///
+/// 用于把「B 会话的追加是否被 A 的 fsync 阻塞」变成**相对判据**：
+/// A 在闸门内期间，B 必须能完成追加；pre-fix（进程级锁）下 B 会一直等到
+/// 看门狗放行才返回 → 断言打红。全程无墙钟阈值（看门狗只在失败路径兜底）。
+struct GatedFsyncHook {
+    target: PathBuf,
+    entered: AtomicUsize,
+    released: std::sync::atomic::AtomicBool,
+    hits: AtomicUsize,
+}
+
+impl GatedFsyncHook {
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+    }
+
+    /// 等待钩子被命中（A 已进入 fsync）。返回是否在超时前进入。
+    fn wait_until_entered(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.entered.load(Ordering::SeqCst) > 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        false
+    }
+}
+
+fn install_gated_hook(target: PathBuf) -> Arc<GatedFsyncHook> {
+    let hook = Arc::new(GatedFsyncHook {
+        target,
+        entered: AtomicUsize::new(0),
+        released: std::sync::atomic::AtomicBool::new(false),
+        hits: AtomicUsize::new(0),
+    });
+    let weak = Arc::downgrade(&hook);
+    tool_outbox::set_fsync_hook(Some(Box::new(move |path: &Path| {
+        let Some(hook) = weak.upgrade() else { return };
+        if path != hook.target {
+            return;
+        }
+        hook.hits.fetch_add(1, Ordering::SeqCst);
+        hook.entered.fetch_add(1, Ordering::SeqCst);
+        while !hook.released.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    })));
+    hook
 }
 
 /// 安装钩子并返回它；同一时刻只允许一个（测试内串行使用）。
@@ -69,10 +122,10 @@ fn temp_root(tag: &str) -> PathBuf {
     root
 }
 
-/// 1. 慢会话的批量化 fsync 不得阻塞其它会话的追加。
+/// 1. 慢会话的批量化 fsync 不得阻塞其它会话的追加（相对判据，无墙钟阈值）。
 ///
-/// pre-fix：追加路径同步 `sync_all` 且全程持进程级锁 → 线程 A 的 fsync
-/// 挂起 400 ms 期间，线程 B 的 `record_in` 至少被阻塞 ~400 ms → 红。
+/// pre-fix：追加路径同步 `sync_all` 且全程持进程级锁 → A 的 fsync 挂起期间
+/// B 的 `record_in` 也会被阻塞，直到看门狗放行 → 断言打红。
 #[test]
 fn flush_does_not_serialize_on_a_slow_session() {
     let root = temp_root("slow-session");
@@ -81,38 +134,44 @@ fn flush_does_not_serialize_on_a_slow_session() {
     std::fs::create_dir_all(&dir_a).expect("dir a");
     std::fs::create_dir_all(&dir_b).expect("dir b");
 
-    // 会话 A 的 fsync 挂起 400 ms；会话 B 的文件不受影响。
-    let hook = install_hook(
-        tool_outbox::outbox_path(&dir_a),
-        Some(Duration::from_millis(400)),
-    );
+    // 会话 A 的 fsync 被闸门挂起；会话 B 的文件不受影响。
+    let hook = install_gated_hook(tool_outbox::outbox_path(&dir_a));
 
     // A 先写入并在后台触发其批量化 fsync（显式 flush = 同步屏障）。
     tool_outbox::record_in(&dir_a, "a-1", "bash", true);
     let a_dir = dir_a.clone();
     let slow_a = std::thread::spawn(move || tool_outbox::flush_in(&a_dir));
 
-    // 给 A 一点时间真正进入 fsync 后再测 B（避免调度假阴性）。
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while hook.hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(1));
-    }
     assert!(
-        hook.hits.load(Ordering::SeqCst) > 0,
+        hook.wait_until_entered(Duration::from_secs(2)),
         "会话 A 的 fsync 未被触发——批量化/屏障语义未生效"
     );
 
-    let started = Instant::now();
+    // 看门狗：2s 后强制放行，防止 pre-fix 下 B 被阻塞导致测试挂死
+    //（放行前 B 返回 = 通过；放行后才返回 = 打红）。正常路径下测试立即
+    // 发信号让看门狗退出，不引入额外等待。
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let watchdog_hook = Arc::clone(&hook);
+    let watchdog = std::thread::spawn(move || {
+        if done_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+            watchdog_hook.release();
+        }
+    });
+
+    // A 仍被闸门挂在 fsync 内：B 的追加必须现在就能完成。
     tool_outbox::record_in(&dir_b, "b-1", "grep", true);
-    let elapsed = started.elapsed();
+    let blocked = hook.released.load(Ordering::SeqCst);
+    let _ = done_tx.send(());
+    hook.release();
+    slow_a.join().expect("flush thread");
+    watchdog.join().expect("watchdog thread");
+    clear_hook();
+
     assert!(
-        elapsed < Duration::from_millis(150),
-        "会话 B 的追加被会话 A 的慢 fsync 阻塞了 {elapsed:?}（期望 < 150ms）——\
+        !blocked,
+        "会话 B 的追加被会话 A 的挂起 fsync 阻塞（直到看门狗放行才返回）——\
          锁仍是进程级或 fsync 仍在写路径内"
     );
-
-    slow_a.join().expect("flush thread");
-    clear_hook();
     assert_eq!(tool_outbox::read_records(&dir_b).len(), 1);
 }
 
@@ -139,15 +198,17 @@ fn flush_is_joined_before_returning() {
     clear_hook();
 }
 
-/// 3. 8 会话并发追加必须可扩展：墙钟远低于「单会话成本 × 会话数」。
+/// 3. 8 会话并发追加的 fsync 次数必须远低于记录数（批量化判据，无墙钟）。
 ///
-/// pre-fix：跨会话互斥 + 每条 8 ms 的同步 fsync ⇒ 墙钟 ≈ 64 × 8 ms ≈ 512 ms；
-/// post-fix：追加路径无 fsync（只在 flush 时一次）⇒ 墙钟 ~ 毫秒级。
+/// pre-fix：每条记录同步 fsync ⇒ 次数 = SESSIONS × PER_SESSION = 512 → 红；
+/// post-fix：fsync 只在 flush 轮次发生（显式 flush 每会话 ≤1 次 = 8，加上
+/// 后台 flusher 每 100ms 一轮、每轮每会话 ≤1 次）。判据给足余量：
+/// `hits <= SESSIONS * 8`（64）——要 8 轮后台 flush（≈800ms 窗口）才可能触及，
+/// 而回归值 512 是它的 8 倍。
 #[test]
 fn concurrent_sessions_scale_end_to_end() {
     const SESSIONS: usize = 8;
     const PER_SESSION: usize = 64;
-    const FSYNC_COST: Duration = Duration::from_millis(8);
 
     let root = temp_root("scale");
     let dirs: Vec<PathBuf> = (0..SESSIONS)
@@ -157,20 +218,18 @@ fn concurrent_sessions_scale_end_to_end() {
             dir
         })
         .collect();
-    // 所有会话共用一个耗时钩子：命中的 fsync 各睡 8 ms。
+    // 计数钩子：命中即记一次 fsync（不引入延迟，避免把判据变成时序）。
     let hook = Arc::new(FaultFsyncHook {
         target: PathBuf::new(),
-        delay: Some(FSYNC_COST),
+        delay: None,
         hits: AtomicUsize::new(0),
     });
     let weak = Arc::downgrade(&hook);
     tool_outbox::set_fsync_hook(Some(Box::new(move |_path: &Path| {
         let Some(hook) = weak.upgrade() else { return };
         hook.hits.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(FSYNC_COST);
     })));
 
-    let started = Instant::now();
     let handles: Vec<_> = dirs
         .iter()
         .map(|dir| {
@@ -186,14 +245,19 @@ fn concurrent_sessions_scale_end_to_end() {
     for handle in handles {
         handle.join().expect("append thread");
     }
-    let elapsed = started.elapsed();
+    let hits = hook.hits.load(Ordering::SeqCst);
     clear_hook();
 
-    let serial_floor = FSYNC_COST * (PER_SESSION as u32);
+    let records = SESSIONS * PER_SESSION;
     assert!(
-        elapsed < serial_floor / 4,
-        "8 会话并发追加耗时 {elapsed:?}，未见扩展（串行下限 {serial_floor:?}）——\
-         锁分片或 fsync 批量化未生效"
+        hits <= SESSIONS * 8,
+        "fsync 次数 {hits} 过高（记录数 {records}；批量化后应为每会话每轮 ≤1 次，\
+         pre-fix 每条一次 = {records}）——fsync 批量化或锁分片未生效"
+    );
+    // 反向保险：至少要真的发生过 flush（否则上界会被"零次"平凡满足）。
+    assert!(
+        hits >= SESSIONS,
+        "fsync 次数 {hits} 少于会话数 {SESSIONS}——显式 flush 未对每个会话生效"
     );
 
     for dir in &dirs {

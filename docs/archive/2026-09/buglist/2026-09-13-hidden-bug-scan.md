@@ -6,7 +6,7 @@
 > （**2026-09-17 卫生复核更正：`-13` 实为 `PARTIAL`**——持久化/回放侧已修，gate 的 Done 组装仍漏，见该条详情）；
 > 详情中的“修法/验证（建议，未实跑）”保留为扫描时记录，不代表当前仍待办。
 > 复核中被推翻的子代理结论见文末附录 B，勿按其修复。
-> 上游 Codex 同问题修法对照见 `docs/report/2026-09-13-codex-parity-analysis.md`（相关条目内已标注 **Codex 参照**）。
+> 上游 Codex 同问题修法对照见 `docs/archive/2026-09/report/2026-09-13-codex-parity-analysis.md`（相关条目内已标注 **Codex 参照**）。
 
 ## 汇总
 
@@ -47,14 +47,14 @@
 - **机制**：patch 写 `*** Add File: a/b/../../evil.txt` 且 `a/b` 不存在（Add File 常态）→ `joined.exists()`=false、parent 也不存在 → 走 `_ => joined.clone()`，`abs` 含未消解 `..`；L150 `starts_with` 纯词法前缀比较照常通过 → 返回 Ok，后续落盘时 OS 解析 `..`，写到 workspace 外。
 - **修法**：resolve 入口先 `normalize_lexically`（permission.rs:290 已有现成实现），或拒绝含 `Component::ParentDir` 的路径；`canonicalize().unwrap_or(joined)` 降级必须走 Err 而非原样放行。
 - **验证**：集成测试——patch `Add File: a/b/../../evil.txt`，断言 Err 且 `evil.txt` 不存在于 workspace 外。
-- **Codex 参照**：`PathUri::join` 词法消解 `..` 且 clamp 在锚点内（docs/report/2026-09-13-codex-parity-analysis.md BUG-01 节）；修法可升级为路径收敛进归一化新类型（同时消除 -16）。
+- **Codex 参照**：`PathUri::join` 词法消解 `..` 且 clamp 在锚点内（docs/archive/2026-09/report/2026-09-13-codex-parity-analysis.md BUG-01 节）；修法可升级为路径收敛进归一化新类型（同时消除 -16）。
 
 ### BUG-2026-09-13-02 ✅ fixed @9ca245d P0 重试退避指数溢出
 - **位置**：`crates/qaqh-gate/src/transport.rs:123`（`let mult = 2u64.pow(attempt.saturating_sub(1));`）
 - **触发**：`RetrySpec.max_retries` 来自 TOML 无上限校验（L103-105）。max_retries ≥ 66 时 `2u64.pow` 溢出：debug/测试构建 panic（`u64::pow` 内部 expect，非 overflow-checks 门控）；release 回绕（2^64 ≡ 0）→ 退避塌缩 0ms → 重试风暴。
 - **修法**：`2u64.checked_pow(attempt.saturating_sub(1)).unwrap_or(u64::MAX)`；下游 `saturating_mul` + `min(max_delay)` 已能正确封顶。顺带给 max_retries 加配置上限（如 ≤ 32）。
 - **验证**：`delay_for(66)` 负例测试。
-- **Codex 参照**：`core/src/util.rs:86` 用 f64 `powi` + 饱和转换，等效防法（docs/report/2026-09-13-codex-parity-analysis.md BUG-02 节）。
+- **Codex 参照**：`core/src/util.rs:86` 用 f64 `powi` + 饱和转换，等效防法（docs/archive/2026-09/report/2026-09-13-codex-parity-analysis.md BUG-02 节）。
 
 ### BUG-2026-09-13-03 ✅ fixed @8afe3f5 P0 content media_type 头注入 → handler panic
 - **位置**：`crates/qaqh-daemon/src/axum_server/axum_impl/content.rs:104`（原样收下）、`:115`（仅缺省兜底无校验）、`:40`（直接拼 CONTENT_TYPE 响应头）
@@ -66,7 +66,7 @@
 - **机制**：ingest 时持久化副本不含图片；push 只改内存。归档 JSONL 的用户消息永远无图片块；唯一补救 `snapshot_full` 全量重写仅在 undo/compact 触发。带图会话崩溃/重启后图片永久丢失（内存 ImageRef 指向的磁盘字节还在，但索引丢了）。
 - **修法**：push 图片后重新入队该消息持久化（或把图片外置挪到 ingest 之前、Message 构造时带上）。
 - **验证**：带 UI 消息 + 图片 → flush → 从磁盘重放 → 断言 ImageRef 在场。
-- **Codex 参照**：`AttachmentStore` 契约——durable ref 是字节落盘的后置产物（docs/report/2026-09-13-codex-parity-analysis.md BUG-04 节）；中期可把 ImageRef 构造改为"字节已在场"的后置契约。
+- **Codex 参照**：`AttachmentStore` 契约——durable ref 是字节落盘的后置产物（docs/archive/2026-09/report/2026-09-13-codex-parity-analysis.md BUG-04 节）；中期可把 ImageRef 构造改为"字节已在场"的后置契约。
 
 ### BUG-2026-09-13-05 ✅ fixed @ff20292 P0 save_full 丢 meta 字段
 - **位置**：`crates/qaqh-session/src/manager.rs:770-791`（`..Default::default()` 前只保留了 mode/skills/tool_mode/custom_tools/title）
@@ -74,7 +74,7 @@
 - **连锁**：undo/compact 一次 → 重启 resume 后 `load_session_workspace`（lifecycle.rs:11-18 读 meta.cwd）退回 `"."`；`restore_frozen_annotation`（agent.rs:527-528）拿不到注解 → 重新生成（日期变化）击穿 provider 前缀缓存——正是 session.rs:101-108 注释强调的 P0 cache fix 被自己冲掉。
 - **修法**：与 tool_mode/title 同款，从 `existing` 保留全部持久化字段（或改为 `let mut meta = existing;` 再覆写需要更新的字段）。
 - **验证**：undo → 断言 meta.json 中 cwd/frozen_annotation 保留。
-- **关联**：持久化时序类缺陷，与 -04 同类（Codex durable ref 契约参照见 docs/report/2026-09-13-codex-parity-analysis.md）。
+- **关联**：持久化时序类缺陷，与 -04 同类（Codex durable ref 契约参照见 docs/archive/2026-09/report/2026-09-13-codex-parity-analysis.md）。
 
 ### BUG-2026-09-13-06 ✅ fixed @806f013 P1 WAL read_ops 吞 IO 错误
 - **位置**：`crates/qaqh-message/src/wal.rs:233`（`reader.lines().map_while(Result::ok)`）
@@ -111,7 +111,7 @@
 - **触发**：daemon 进程（webUI 保存配置）与 CLI 进程（`qaqh-daemon mcp import --exec`）并发写——`config_io_lock`（config.rs:629）是进程内 Mutex，跨进程无效。
 - **后果**：rename 竞态 → 后写者用不含对方键的文档整体覆盖 → DPAPI 密文不可重生成，静默丢密钥。
 - **修法**：tmp 名加 pid+nonce（参照 qaqh-workspace atomic_write file_shared.rs:50-54）；read-modify-write 加跨进程文件锁。
-- **Codex 参照**：`secrets/src/local.rs:295` 的 `.tmp-{pid}-{nonce}` 与本修法逐字一致（docs/report/2026-09-13-codex-parity-analysis.md BUG-11 节），按原案执行。
+- **Codex 参照**：`secrets/src/local.rs:295` 的 `.tmp-{pid}-{nonce}` 与本修法逐字一致（docs/archive/2026-09/report/2026-09-13-codex-parity-analysis.md BUG-11 节），按原案执行。
 
 ### BUG-2026-09-13-12 ✅ fixed @86264b7 P1 stateful 过滤死分支 → 空 messages 400
 - **位置**：`crates/qaqh-gate/src/transport.rs:262-272`
@@ -179,7 +179,7 @@
 - **位置**：`crates/qaqh-gate/src/transport.rs:209-227`（秒数与 HTTP-date 两条路径均不封顶）
 - **后果**：`retry-after: 999999` → run_with_retry L176/183 直接 sleep，回合挂起数小时（本地退避有 30s 封顶 L125，服务端头路径没有）。
 - **修法**：`parse_retry_after` 返回前 `min(上限)`（如 120s 或 5×max_delay）。
-- **Codex 参照**：上游同样未封顶（`retry_after.rs:245` TODO(anp)），本地退避硬顶 60s；修复即领先（docs/report/2026-09-13-codex-parity-analysis.md BUG-22 节）。
+- **Codex 参照**：上游同样未封顶（`retry_after.rs:245` TODO(anp)），本地退避硬顶 60s；修复即领先（docs/archive/2026-09/report/2026-09-13-codex-parity-analysis.md BUG-22 节）。
 
 ### BUG-2026-09-13-23 ✅ fixed @ba9e0c0 P2 ProcessRegistry 驱逐丢 os_pid
 - **位置**：`crates/qaqh-workspace/src/process_registry.rs:120-140`（按 started 计时 >600s 驱逐终态条目）
@@ -190,7 +190,7 @@
 - **位置**：`crates/qaqh-session/src/manager.rs:897-910`（DefaultHasher(nanos+pid) 截断 32 位，无 exists 复查）
 - **后果**：碰撞时 persist_new_session 加载旧 meta 覆盖 created_at/cwd，save_append 的 msg_id 去重还会丢新消息——静默写穿旧会话目录。
 - **修法**：生成后 `session_dir(seed).is_some()` 重试。
-- **Codex 参照**：身份用 UUID（ThreadId）+ OS 写者锁，不玩 hash 截断（docs/report/2026-09-13-codex-parity-analysis.md BUG-24 节）；中期正解为 seed 换 UUID 形态。
+- **Codex 参照**：身份用 UUID（ThreadId）+ OS 写者锁，不玩 hash 截断（docs/archive/2026-09/report/2026-09-13-codex-parity-analysis.md BUG-24 节）；中期正解为 seed 换 UUID 形态。
 
 ### BUG-2026-09-13-25 ✅ fixed @537c098 P2 push_image_to_last_user 静默丢图
 - **位置**：`crates/qaqh-message/src/store.rs:699-702`（`if let Some(turn) = self.turns.last_mut()` else 无声跳过）

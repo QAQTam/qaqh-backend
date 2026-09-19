@@ -539,7 +539,9 @@ impl ToolManager {
 }
 
 /// Extract file paths from tool args.
-fn extract_files_affected(_tool_name: &str, args: &serde_json::Value) -> Vec<String> {
+/// 从 args 提取受影响的文件路径（审计对象 + 统计共用；execution 侧
+/// 在派发前用同一口径快照 before 指纹）。
+pub(crate) fn extract_files_affected(_tool_name: &str, args: &serde_json::Value) -> Vec<String> {
     let obj = match args.as_object() {
         Some(o) => o,
         None => return Vec::new(),

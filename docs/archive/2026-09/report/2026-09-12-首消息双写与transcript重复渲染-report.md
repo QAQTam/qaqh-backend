@@ -77,7 +77,7 @@ cargo check -p qaqh-runtime -p qaqh-daemon  # 通过
 
 | 路径 | 类型 | 是否落盘 | 说明 |
 |---|---|---|---|
-| `docs/report/2026-09-12-首消息双写与transcript重复渲染-report.md` | 本报告 | ✅ | 即本文件 |
+| `docs/archive/2026-09/report/2026-09-12-首消息双写与transcript重复渲染-report.md` | 本报告 | ✅ | 即本文件 |
 | `crates/qaqh-session/src/manager.rs`（save_append 幂等 + 测试） | 代码修复 | ✅ 工作区 | 与 BUG-05/06 修复同批待提交 |
 | `crates/qaqh-session/src/store/mod.rs`（max_msg_id） | 代码修复 | ✅ 工作区 | 同上 |
 

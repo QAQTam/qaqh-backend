@@ -7,7 +7,7 @@
 
 | ID | 严重度 | 状态 | 类型 | 位置 | 影响（一句话） | 报告 |
 |---|---|---|---|---|---|---|
-| BUG-2026-09-12-01 | P0 | ✅ fixed @4e03a88 | 锁 / 功能阻塞 | `crates/qaqh-runtime/src/ringing/timeline_hub.rs`（旧行号 :87、:367、:427） | timeline 持久化同线程重入 `timeline_store` 锁 → `TurnSealed` 冻结会话、持久化 worker 持锁死亡、优雅关闭挂死、仓库自带单测挂死 | [`docs/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md`](../report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md) |
+| BUG-2026-09-12-01 | P0 | ✅ fixed @4e03a88 | 锁 / 功能阻塞 | `crates/qaqh-runtime/src/ringing/timeline_hub.rs`（旧行号 :87、:367、:427） | timeline 持久化同线程重入 `timeline_store` 锁 → `TurnSealed` 冻结会话、持久化 worker 持锁死亡、优雅关闭挂死、仓库自带单测挂死 | [`docs/archive/2026-09/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md`](../report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md) |
 | BUG-2026-09-12-02 | P0/P1 | ✅ fixed @4e03a88 | 安全 | `crates/qaqh-daemon/src/axum_server/axum_impl/debug_control.rs`（桥 :103、回环守卫 :257） | `/debug/__qaqh_bridge__.js` 对任意 `Host` 直发全权 Bearer token；回环守卫不校验 Host → 跨源脚本包含 / DNS rebinding 可接管控制面（含 `exec`） | 同上（§4） |
 | BUG-2026-09-12-03 | P3（门禁阻塞） | ✅ fixed @4e03a88 | 质量门禁 | `crates/qaqh-session/src/store/bounded_read.rs:141` | `loop` 三条出边全为 `break` → clippy correctness `never_loop`（error）使 `just clippy` 无法编译该 crate（连带无法检查其它 crate） | 同上（附录 D.4） |
 

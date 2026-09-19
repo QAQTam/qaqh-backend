@@ -2,7 +2,7 @@
 
 > 交接对象：下一个接手 qaqh-backend / qaqh-winui-app 开发循环的 agent 或人。
 > 本文是**流程手册 + 当前快照**，不是单次 bug 修复记录。
-> 关联：主报告 [`docs/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md`](../report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md)、buglist [`docs/buglist/2026-09-13-隐藏缺陷全面扫描-buglist.md`](../buglist/)
+> 关联：主报告 [`docs/archive/2026-09/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md`](../archive/2026-09/report/2026-09-12-多会话高频输出热路径串行化与切会话401-report.md)、buglist [`docs/buglist/2026-09-13-隐藏缺陷全面扫描-buglist.md`](../buglist/)
 
 ---
 

@@ -9,7 +9,7 @@
 | 分析对象 B | `D:\project\QAQ-Harness` @ `e61efe0`（对照基准 = 同日评审报告） |
 | 触发方式 | 用户提供 codex 源码快照并询问"OpenAI 是怎么做 exec/shell 或类似工具的" |
 | 执行者 | 本会话（主读者）+ 4 路并行 subagent（分别覆盖 unified_exec 核心、PTY/containment、exec-server、UI/截断/安全） |
-| 关联 | 续报：`docs/report/2026-09-12-exec与process工具设计评审-report.md`（下称"评审报告"，其结论用 D-1..D-8 / V-1..V-5 编号）；`docs/report/2026-09-12-exec输出静默截断与引入点考证-report.md` |
+| 关联 | 续报：`docs/report/2026-09-12-exec与process工具设计评审-report.md`（下称"评审报告"，其结论用 D-1..D-8 / V-1..V-5 编号）；`docs/archive/2026-09/report/2026-09-12-exec输出静默截断与引入点考证-report.md` |
 | 结论 | **Codex 验证了我方 4 条诊断（D-2/D-3/D-4/D-5），证伪了 2 条处方（D-1 的 spill-first、D-6 的"加合并器"），并暴露出我方 1 处比 Codex 更差的地方（有损通道无游标兜底）。真正该抄的是"按会话拥有进程表 + 帧预算 + 排空式读取 + kill-on-drop"，不是"落盘"。** |
 
 > 证据等级：本报告 codex 侧结论**全部为 E2（代码实证）**，由逐行阅读 + 四个 subagent 交叉核对得到，**未编译、未运行任何 codex 测试**。所有"Codex 会/不会"均为静态结论。QAQ 侧行号同前一份报告（`e61efe0`）。
