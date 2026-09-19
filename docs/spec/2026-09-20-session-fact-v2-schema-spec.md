@@ -256,6 +256,7 @@ pub enum FactPayload {
 | `call_id` | `ToolCallId` | 是 | — | 必须与 envelope 一致 |
 | `execution_id` | `ExecutionId` | 是 | — | 每次尝试唯一 |
 | `idempotency_key` | `Option<String>` | 否 | skip none | 仅幂等工具可给 |
+| `replay_capability` | `ToolReplayCapability` | 是 | tagged enum | `NoReplay/IdempotentReplay/Reconcile` |
 | `policy_decision` | `PolicyDecisionRef` | 是 | — | `allow/ask/deny/amend` 与规则 id |
 | `effective_args_ref` | `Option<ContentRef>` | 否 | skip none | policy amend 后的实际参数 |
 | `effective_args_hash` | `Option<sha256:<hex>>` | 否 | skip none | 与 effective_args_ref 一致 |
@@ -277,7 +278,7 @@ pub enum FactPayload {
 | 字段 | 类型 | 必填 | serde | 规则 |
 |---|---|---:|---|---|
 | `call_id` | `ToolCallId` | 是 | — | 必须与 envelope 一致 |
-| `execution_id` | `ExecutionId` | 是 | — | 对应 intent |
+| `execution_id` | `Option<ExecutionId>` | 条件必填 | skip none | Denied 为 None，其余终态必填且对应 intent |
 | `terminal_status` | `ToolTerminalStatus` | 是 | snake_case | 唯一终态 |
 | `output_ref` | `Option<ContentRef>` | 否 | skip none | typed output 内容 |
 | `error` | `Option<ToolError>` | 否 | skip none | 终态错误 |
@@ -364,6 +365,7 @@ Expired -> terminal
 | `recovery_id` | `RecoveryId` | 是 | — | 一次恢复唯一 |
 | `recovery_event_id` | `EventId` | 是 | — | 预分配并写入所有 recovery facts |
 | `recovery_input_fingerprint` | `ContentHash` | 是 | — | 固定 pre-recovery 输入指纹 |
+| `outcome` | `RecoveryOutcome` | 是 | snake_case | `writable/read_only_upgrade_required/tombstone` |
 | `last_good_fact_seq` | `u64` | 是 | — | 最后完整 fact |
 | `torn_tail` | `bool` | 是 | — | 是否发现撕裂 |
 | `torn_bytes` | `Option<u64>` | 否 | skip none | 撕裂字节数 |
@@ -637,10 +639,10 @@ else:
 
 一个 fact 可产生 0..N 个 reliable `ProjectionEvent`。`projection_index` 的分配必须稳定：
 
-- 同一 fact 的 projection 顺序只由 §4.1 的 `ProjectionId` ordinal 决定。
+- `projection_index` 由 §13.6 的静态 `ProjectionSlot` 决定，不由运行时 delta 顺序决定。
+- slot 允许稀疏；某 projection 不消费该 fact 时跳过该 slot，但不得重编号其它 slot。
 - `ProjectionSet` 字段声明顺序不参与 index 分配。
-- 新增 projection 只能追加更高 ordinal，不能重排既有 ordinal。
-- 某 projection 不消费该 fact 时，不为它分配 index。
+- 新增 projection 只能追加更高 slot，且必须提升 `payload_version`。
 - reliable `projection_index` 只允许 `0..=65534`；`65535` 保留给 snapshot `END_OF_FACT`。
 - 同一 fact 多次 rebuild 必须得到相同 cursor 映射。
 
@@ -755,7 +757,7 @@ pub struct ProjectionSet {
 }
 ```
 
-`ProjectionId` 是 `projection_index` 的唯一 ordinal 注册表。对每个 fact，按 ordinal 升序调用 projection；只有实际产生 delta 的 projection 分配连续 `projection_index = 0..N-1`。表格中的书写顺序不具备规范性，禁止据此分配 index。
+`ProjectionId`/`ProjectionSlot` 是 `projection_index` 的唯一静态注册表。对每个 fact，按 slot 升序调用 projection；只有实际产生 delta 的 projection 发布事件，但 index 始终使用固定 slot 值，不压缩、不重编号。表格中的书写顺序不具备规范性。
 
 `ToolProjection` 是 Tool SDK 的 typed output 适配器（model/display），不是 `ProjectionSet` 成员，也不分配 canonical `projection_index`。它先产出 typed output；`ControlProjection` 保存当前 tool 状态，`TimelineProjection` 保存 transcript，`ConversationProjection` 保存模型面，`ResourceProjection` 消费 workspace effects。v2.0 不新增 `ProjectionSet` ordinal。
 
@@ -853,6 +855,7 @@ pub trait Projection: Default + Send {
   events.jsonl                 # canonical, append-only
   events.lock                  # 跨进程 writer ownership
   recovery.intent.json         # 崩溃恢复批次意图，SessionRecovered 后删除
+  replay-window.json           # ReplayWindowManifest，cursor expiry 判定
   content/{sha256}             # content-addressed
   content/index.jsonl          # ContentRecord，append-only
   content.lock                 # content append/GC 互斥
@@ -1103,8 +1106,8 @@ canonical_json({
 | `InteractionRequested` 无终态，重启策略取消 | 闭合 | `InteractionExpired { restart_policy }` | 恢复后写 |
 | `CompactionApplied` 无 checkpoint | 从 active facts 重建 context | `SessionRecovered` | 重建后写 |
 | torn tail | 保存证据并截断 | `SessionRecovered { torn_tail: true }` | 恢复后写 |
-| unknown fact/kind | 停止解释，标记只读 | 无 | read-only/upgrade-required |
-| `SessionDeleted` | 禁止恢复写入 | 无 | tombstone-only |
+| unknown fact/kind | 停止解释，标记只读 | `SessionRecovered { outcome=read_only_upgrade_required }` | read-only/upgrade-required |
+| `SessionDeleted` | 禁止恢复写入 | `SessionRecovered { outcome=tombstone }` | tombstone-only |
 
 ### 6.3 Tool recovery
 
@@ -1318,7 +1321,8 @@ rollback 触发条件：
 | `tool-success.jsonl` | ToolCallDeclared + Intent + Finished succeeded | 唯一终态 |
 | `tool-indeterminate.jsonl` | Intent + crash + Finished indeterminate | 不重跑非幂等工具 |
 | `interaction-pending.jsonl` | InteractionRequested + restart | pending 重放一次 |
-| `interaction-resolved.jsonl` | Requested + two Resolved | 只接受第一个 |
+| `interaction-resolved.jsonl` | Requested + 一个 Resolved | canonical fact count 正确，终态唯一 |
+| `interaction-duplicate-resolution.jsonl` | Requested + Resolved + 第二个 resolution 拒绝输入 | 第二个输入不进入 canonical log |
 | `compaction.jsonl` | facts + CompactionApplied | checkpoint 缺失可重建 |
 | `torn-tail.jsonl` | 完整 fact + 半行 | torn 保留、截断、SessionRecovered |
 | `unknown-fact.jsonl` | 已知前缀 + unknown kind + 已知后缀 | session read-only，后缀不解释 |
@@ -1341,14 +1345,14 @@ rollback 触发条件：
 Tool intent/finish：
 
 ```jsonl
-{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":4,"event_id":"01J00000000000000000000004","ts_ms":1789830000030,"turn_id":"turn_01J00000000000000000000000","call_id":"call_01J00000000000000000000000","payload":{"kind":"tool_intent","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","policy_decision":{"outcome":"allow","rule_id":"policy/read","decided_at_ms":1789830000030},"sandbox_spec_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111","side_effect_class":"workspace_write","intent_at_ms":1789830000030}}}
+{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":4,"event_id":"01J00000000000000000000004","ts_ms":1789830000030,"turn_id":"turn_01J00000000000000000000000","call_id":"call_01J00000000000000000000000","payload":{"kind":"tool_intent","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","replay_capability":{"kind":"no_replay"},"policy_decision":{"outcome":"allow","rule_id":"policy/read","decided_at_ms":1789830000030},"sandbox_spec_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111","side_effect_class":"workspace_write","intent_at_ms":1789830000030}}}
 {"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":5,"event_id":"01J00000000000000000000005","ts_ms":1789830000040,"turn_id":"turn_01J00000000000000000000000","call_id":"call_01J00000000000000000000000","causation_id":"01J00000000000000000000004","payload":{"kind":"tool_finished","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"indeterminate","error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false},"metrics":{"started_at_ms":1789830000030,"finished_at_ms":1789830000040,"retry_count":0,"output_bytes":0,"progress_bytes_total":0},"reconciled":false,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"finished_at_ms":1789830000040}}}
 ```
 
 Recovery：
 
 ```jsonl
-{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":6,"event_id":"01J00000000000000000000006","ts_ms":1789830000050,"payload":{"kind":"session_recovered","data":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111","last_good_fact_seq":4,"torn_tail":false,"actions":[{"kind":"tool_indeterminate","call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000"}],"recovered_at_ms":1789830000050}}}
+{"schema":{"name":"qaqh.session-fact","version":2,"payload_version":2},"session_id":"0198f1a0-0000-7000-8000-000000000001","log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":6,"event_id":"01J00000000000000000000006","ts_ms":1789830000050,"payload":{"kind":"session_recovered","data":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000006","recovery_input_fingerprint":"sha256:1111111111111111111111111111111111111111111111111111111111111111","outcome":"writable","last_good_fact_seq":4,"torn_tail":false,"actions":[{"kind":"tool_indeterminate","call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000"}],"recovered_at_ms":1789830000050}}}
 ```
 
 ### 10.2 必测命令
@@ -1356,12 +1360,14 @@ Recovery：
 本阶段只冻结测试清单，不实现测试。后续 P1/P2 实现时应至少提供：
 
 ```bash
-cargo test -p qaqh-session session_fact_v2
-cargo test -p qaqh-runtime session_fact_v2
-cargo test -p qaqh-daemon v1_cursor_mapping
-cargo test -p qaqh-ringing cursor_compat
-cargo test -p qaqh-domain fact_payload_serde
+cargo test -p qaqh-session --exact session_fact_v2_envelope_roundtrip
+cargo test -p qaqh-runtime --exact session_fact_v2_replay_cursor
+cargo test -p qaqh-daemon --exact v1_cursor_mapping_reset
+cargo test -p qaqh-ringing --exact cursor_compat_snapshot
+cargo test -p qaqh-domain --exact fact_payload_serde
 ```
+
+零匹配不算通过；CI/脚本必须解析 `test result`，并断言 expected test count > 0。
 
 ### 10.3 独立反证 hook
 
@@ -1417,3 +1423,292 @@ B 在 #106 可直接反证：
 - 已知未决项及 owner/截止条件；P0 不允许存在无 owner 的未决项。
 
 本 spec 的验收结论由 #106 独立反证报告给出；A 不得自行宣告“已通过独立评审”。
+
+---
+
+## 13. #106 复审阻断项规范性收口
+
+本节是 #106/PR #108 §7 的规范性补充；若与前文有冲突，以本节为准。
+
+### 13.1 ProjectionEvent、ProjectionPayload、WireEvent、StreamKey
+
+```rust
+pub enum StreamKey {
+    Session,
+    Channel(RingingChannel),
+    Resource { kind: ResourceKind, id: ResourceId },
+}
+
+pub struct ProjectionEvent {
+    pub stream_key: StreamKey,
+    pub delivery: Delivery,
+    pub payload: ProjectionPayload,
+}
+
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum ProjectionPayload {
+    ConversationDelta(ConversationDelta),
+    TimelineDelta(TimelineDelta),
+    ControlDelta(ControlDelta),
+    ResourceDelta(ResourceDelta),
+    MetaDelta(MetaDelta),
+    AuditRef(AuditRef),
+    Unknown(UnknownProjection),
+}
+
+pub struct ConversationDelta {
+    pub session_id: SessionId,
+    pub turn_id: Option<TurnId>,
+    pub block_id: Option<BlockId>,
+    pub revision: u64,
+    pub payload_ref: ContentRef,
+}
+pub struct TimelineDelta {
+    pub session_id: SessionId,
+    pub block_id: Option<BlockId>,
+    pub revision: u64,
+    pub payload_ref: ContentRef,
+}
+pub struct ControlDelta {
+    pub session_id: SessionId,
+    pub revision: u64,
+    pub payload_ref: ContentRef,
+}
+pub struct ResourceDelta {
+    pub session_id: SessionId,
+    pub resource_kind: ResourceKind,
+    pub resource_id: ResourceId,
+    pub revision: u64,
+    pub payload_ref: ContentRef,
+}
+pub struct MetaDelta {
+    pub session_id: SessionId,
+    pub revision: u64,
+    pub payload_ref: ContentRef,
+}
+pub struct AuditRef { pub audit_seq: u64, pub audit_hash: ContentHash }
+pub struct UnknownProjection { pub raw_ref: ContentRef }
+
+pub struct WireEvent {
+    pub wire_version: u32,
+    pub channel: RingingChannel,
+    pub event_id: EventId,
+    pub cursor: Option<ReliableCursor>,
+    pub payload: serde_json::Value, // 只允许在 wire adapter 边界出现
+}
+```
+
+字段规则：
+
+- `ProjectionPayload` 不得包含 UI 动画、SSE 文本或 provider 原始 JSON。
+- `payload_ref` 指向 typed projection snapshot/delta；消费方不得猜 JSON 字段。
+- `WireEvent.payload` 由 adapter 从 `ProjectionPayload` 生成；业务层禁止读取。
+- `AuditRef` 只引用全局 audit seq/hash，不进入 session cursor。
+- `Unknown` 只用于 wire 兼容；canonical unknown fact 必须 fail-closed。
+
+### 13.2 Tool replay/reconciliation 能力
+
+```rust
+pub enum ToolReplayCapability {
+    NoReplay,
+    IdempotentReplay,
+    Reconcile { probe_ref: ContentRef },
+}
+
+pub enum ToolTerminalStatus {
+    Succeeded,
+    Failed,
+    Partial,
+    Cancelled,
+    TimedOut,
+    Backgrounded,
+    Indeterminate,
+    Denied,
+}
+```
+
+`ToolIntent` 增加必填 `replay_capability`。规则：
+
+- `NoReplay`：恢复时禁止重放，写 `Indeterminate`。
+- `IdempotentReplay`：可重放，但必须保持同一 `call_id`/`execution_id`。
+- `Reconcile`：允许查询 `probe_ref` 指向的对账接口；结果写 `reconciled=true`。
+- `idempotency_key` 只是对账输入，不是可重放证明。
+
+### 13.3 Policy ask/deny 生命周期
+
+| decision | canonical 顺序 | 终态 |
+|---|---|---|
+| `allow` | ToolIntent → execute → ToolFinished | `Succeeded/Failed/...` |
+| `amend` | effective args → ToolIntent → execute → ToolFinished | 同上 |
+| `ask` | InteractionRequested → InteractionResolved → ToolIntent → execute → ToolFinished | 批准后同上；拒绝写 `Denied` |
+| `deny` | ToolFinished(Denied) | 无 ToolIntent，`execution_id=None` |
+
+`ToolFinished.execution_id` 对 `Denied` 允许为 `None`，其余终态必填。被 deny 的 call 不执行 handler，不产生 ToolIntent，但仍满足每 call 唯一终态。
+
+### 13.4 Recovery outcome 与 SessionRecovered
+
+`SessionRecovered` 增加必填：
+
+```rust
+pub enum RecoveryOutcome {
+    Writable,
+    ReadOnlyUpgradeRequired,
+    Tombstone,
+}
+```
+
+规则：
+
+- 每次 session load 必须写且只写一个 `SessionRecovered`，包括 unknown fact 与 tombstone。
+- unknown fact：`outcome=ReadOnlyUpgradeRequired`，不解释未知 fact 之后的语义。
+- tombstone：`outcome=Tombstone`，不写其他 recovery facts。
+- 正常/可修复：`outcome=Writable`。
+- `actions=[]` 合法；它仍表示一次完成的恢复批次。
+
+### 13.5 Recovery plan 顺序、plan_hash 与 stale intent
+
+`RecoveryPlan` 的固定顺序：
+
+```text
+1. RecoveryIntent(plan_hash)
+2. MoveTornTail
+3. TurnInterrupted
+4. ToolFinished(Indeterminate|Reconciled)
+5. InteractionExpired
+6. SessionRecovered
+7. DeleteRecoveryIntent
+```
+
+`plan_hash = sha256(canonical_json({ recovery_ref, fingerprint, ordered_steps }))`。`ordered_steps` 使用上表枚举名和稳定参数，不包含墙钟或随机值。
+
+stale intent：
+
+- 若同 `recovery_event_id` 的 `SessionRecovered` 已存在，intent 为 closed。
+- closed intent 不得复用到新的 open state。
+- 新 open state 必须生成新 `recovery_id`、`recovery_event_id`、`plan_hash`，原子覆盖/归档旧 intent。
+- 只有 active intent 才能复用原 `RecoveryRef`。
+
+### 13.6 静态 projection_index
+
+`projection_index` 不是运行时 delta 顺序，而是静态 `ProjectionSlot`：
+
+```rust
+pub enum ProjectionSlot {
+    Conversation = 0,
+    Timeline = 1,
+    Control = 2,
+    Resources = 3,
+    Meta = 4,
+}
+```
+
+规则：
+
+- 每个 fact kind 在 schema 版本内冻结 slot 集合，允许稀疏，不允许按是否产生 delta 重新编号。
+- 某 fact 没有对应 slot 时跳过该 slot；有 slot 时 index 固定为 slot 值。
+- 新增 slot 必须提升 `payload_version`，旧 cursor 不得被重排。
+- `projection_index` 的稳定身份优先于“0..N 连续”描述；前文连续分配规则作废。
+
+### 13.7 Snapshot、replay window 与 expiry
+
+```rust
+pub struct ReplayWindowManifest {
+    pub log_id: LogId,
+    pub earliest_available_fact_seq: u64,
+    pub latest_fact_seq: u64,
+    pub earliest_cursor: ReliableCursor,
+    pub snapshot_cursor: ReliableCursor,
+    pub retained_from_ms: i64,
+    pub reason: String,
+}
+```
+
+- `earliest_available_fact_seq` 是当前可靠 replay 窗口下界。
+- `snapshot_cursor` 固定为 `(log_id, snapshot_fact_seq, u16::MAX)`。
+- cursor 早于下界、log_id 不匹配或 snapshot cursor 不可解释时，必须 `ResetRequired`。
+- replay window 变化必须写 manifest，并可通过同一 cursor 重放测试验证。
+
+### 13.8 Tool terminal parity
+
+`ToolTerminalStatus` 已加入 `partial`、`backgrounded`、`denied`。映射规则：
+
+- `partial`：有部分可消费 output，但不是成功终态。
+- `backgrounded`：进程/任务已转后台，后续由资源事件闭合。
+- `denied`：policy/approval 拒绝，不执行 handler。
+- `cancelled/timed_out` 仍是终态；不得回退为 running。
+
+### 13.9 Content GC 与 I3 等价口径
+
+I3 rebuild 等价定义为：
+
+- 结构等价：projection shape、revision、引用关系一致。
+- 内容等价：未 GC content 必须字节一致；已 GC content 必须一致产生 `ContentUnavailable` 标记，不得变成空内容。
+- I3 fixture 必须同时包含 retained content 与 GC 后缺失 content 两组。
+- canonical fact 仍引用已 GC content 时，replay/model 必须显式降级并保留 marker。
+
+### 13.10 Fsync、torn-tail、overflow reason
+
+写入顺序固定为：
+
+```text
+content fsync
+-> recovery intent fsync + parent dir fsync
+-> canonical fact append fsync
+-> projection update
+-> publish
+```
+
+`ResetReason` 增加：
+
+```text
+content_quota
+per_connection_overflow
+replay_overflow
+progress_buffer_overflow
+actor_mailbox_overflow
+```
+
+所有 overflow 必须携带 reason 和终态；禁止静默丢 reliable fact。
+
+### 13.11 Legacy 1:N、generation fencing、cutover/rollback 命令
+
+`LegacyMapping` 允许迁移阶段 1:N：
+
+```rust
+pub struct LegacyMappingTarget {
+    pub fact_seq: u64,
+    pub projection_index: u16,
+    pub delivery: V1DeliveryKind,
+}
+pub struct LegacyMapping {
+    // ...既有字段...
+    pub targets: Vec<LegacyMappingTarget>,
+}
+```
+
+- v1 `Last-Event-ID` 映射仍必须 1:1；迁移 mapping 可 1:N。
+- generation 切换必须携带 `writer_id`、`generation_epoch`、`fencing_token`；旧 writer 使用过期 token 必须拒绝。
+- cutover/rollback 命令契约：
+  - `qaqh migrate dual-write status --session <id>`
+  - `qaqh migrate cutover --session <id> --to s2`
+  - `qaqh migrate rollback --session <id> --to s1`
+  - 命令必须返回 machine-readable status、非零 exit code 和审计记录。
+- S3 后 rollback 仍按 §8.4 只允许前向 migration PR。
+
+### 13.12 精确测试命令与 fixture 修正
+
+测试命令必须使用精确 test name，禁止子串过滤：
+
+```bash
+cargo test -p qaqh-session --exact session_fact_v2_envelope_roundtrip
+cargo test -p qaqh-runtime --exact session_fact_v2_replay_cursor
+cargo test -p qaqh-daemon --exact v1_cursor_mapping_reset
+cargo test -p qaqh-ringing --exact cursor_compat_snapshot
+cargo test -p qaqh-domain --exact fact_payload_serde
+```
+
+fixture 修正：
+
+- `interaction-resolved.jsonl` 只包含 `InteractionRequested + InteractionResolved`。
+- 新增 `interaction-duplicate-resolution.jsonl`，第二个 resolution 只能作为拒绝输入，不得进入 canonical log。
+- 所有 fixture 的精确断言必须写明 expected fact count、terminal status、projection revision 和 ContentUnavailable 行为。
