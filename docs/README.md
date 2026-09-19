@@ -123,7 +123,8 @@
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
 | todo | [README.md](./todo/README.md) / [2026-09-17-buglist复核-report.md](./todo/2026-09-17-buglist复核-report.md) / [2026-09-17-buglist复核-checklist.md](./todo/2026-09-17-buglist复核-checklist.md) | 在线 open 项索引；N-5 另有独立 buglist |
-| handoff | [2026-09-18-工具结果展示契约落地-handoff.md](./handoff/2026-09-18-工具结果展示契约落地-handoff.md) | **当前交接** |
+| handoff | [2026-09-20-qaqh-v2.0-首席架构师-handoff.md](./handoff/2026-09-20-qaqh-v2.0-首席架构师-handoff.md) | **当前交接**：PR #104 第三轮未通过；B1-B3 修复、owner 与合并 gate |
+| handoff | [2026-09-18-工具结果展示契约落地-handoff.md](./handoff/2026-09-18-工具结果展示契约落地-handoff.md) | 上一轮交接（已完成） |
 | handoff | [2026-09-17-buglist复核九批次执行-handoff.md](./handoff/2026-09-17-buglist复核九批次执行-handoff.md) | 上一轮交接（已完成） |
 | report | [2026-09-12-exec与process工具设计评审-report.md](./report/2026-09-12-exec与process工具设计评审-report.md) | 被上述**未落地 plan** 的 §9 与 P6 引用 |
 | report | [2026-09-13-codex-exec设计对照与修订-report.md](./report/2026-09-13-codex-exec设计对照与修订-report.md) | 同上 |
