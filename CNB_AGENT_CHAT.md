@@ -73,6 +73,14 @@
 - 评论 ID 始终按字符串处理，避免 JavaScript 大整数精度丢失。
 - 默认单条正文最多输出 12000 字符，可用 `--max-chars` 调整。
 - 默认轮询间隔 3000ms，最小 1000ms，避免高频请求。
+- 评论分页会连续读取直到 `total`，默认上限 1000 页，并返回 `pages/total/truncated`。
+- 等待路径按 ID 升序 drain，单轮最多返回 100 条，避免批次过大时跳过消息。
+
+确定性回归测试：
+
+```bash
+node tools/cnb-mcp-enhance/chat-selftest.mjs
+```
 
 ## MCP 工具
 

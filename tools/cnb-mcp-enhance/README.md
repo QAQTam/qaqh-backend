@@ -80,6 +80,9 @@ node tools/cnb-mcp-enhance/server.mjs --watch --builds cnb-90o-xxx,cnb-69o-xxx
 # 直接回复 issue 或 PR
 ./cnb-chat --chat-send --issue 100 --body '[ACK] 已收到。'
 ./cnb-chat --chat-send --pr 102 --body '[READY] 已按意见更新。'
+
+# 零网络确定性回归测试（mock 250 条评论）
+node tools/cnb-mcp-enhance/chat-selftest.mjs
 ```
 
 完整说明见仓库根目录 `CNB_AGENT_CHAT.md`。
