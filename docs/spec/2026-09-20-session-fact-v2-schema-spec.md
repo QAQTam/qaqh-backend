@@ -299,7 +299,7 @@ pub enum FactPayload {
 规则：
 
 - 一个 `(call_id)` 只允许一个 `ToolFinished`；重复终态必须拒绝或幂等返回既有 fact。
-- `execution_id` 必须与同 call 的 `ToolIntent` 一致；只有 call 在 intent 之前结束的 `denied/cancelled` 终态才允许为 `None`，包括 policy deny、审批拒绝/过期，以及 `ToolCallDeclared` 后 policy 决策前崩溃的 recovery cancelled。
+- `execution_id` 必须与同 call 的 `ToolIntent` 一致；只有 call 在 intent 之前结束的 `denied/cancelled` 终态才允许为 `None`，包括 policy deny、审批拒绝/过期，以及 `ToolCallDeclared` 后 policy 决策前崩溃的 recovery cancelled；同一无 intent recovery 路径产生的 `denied/approval_rejected` 也必须为 `None`。
 - `metrics.retry_count` 在 v2.0 固定为 0。实际执行过 handler 时，`started_at_ms` 取 handler 开始时间，`finished_at_ms` 取 handler 结束时间，字节计数取 typed output/progress 的真实值。
 - 无 handler 的 `denied`、审批拒绝与审批过期也必须写 metrics，规则固定为：`started_at_ms = finished_at_ms`，`retry_count=0`，`output_bytes=0`，`progress_bytes_total=0`。`finished_at_ms` 对 policy deny 取 `ToolCallDeclared` 后 actor 作出 deny 的 canonical `ToolFinished.finished_at_ms`，对 ask 拒绝取 `InteractionResolved.resolved_at_ms`，对 ask 过期取 `InteractionExpired.expired_at_ms`。
 - `ToolFinished` 是唯一 call 终态；`backgrounded` 也是终态，后续资源事件不得写第二个 `ToolFinished`。
@@ -325,7 +325,7 @@ policy 生命周期是规范顺序，不允许由 handler 或 UI 自行改变：
 
 `started_at_ms` 与 `finished_at_ms` 按上文对应事实的时间字段填入；其余字段不得因 deny/拒绝/过期而省略。
 
-被 `deny`、审批拒绝或审批过期的 call 不执行 handler，不产生 `ToolIntent`，但仍必须写唯一 `ToolFinished`。`execution_id=None` 只允许出现在上述无 intent 的 `denied/cancelled` 终态，以及 §6.2/§6.3.1 定义的 policy 决策前崩溃 recovery cancelled。
+被 `deny`、审批拒绝或审批过期的 call 不执行 handler，不产生 `ToolIntent`，但仍必须写唯一 `ToolFinished`。`execution_id=None` 只允许出现在上述无 intent 的 `denied/cancelled` 终态，以及 §6.2/§6.3.1 定义的 policy 决策前崩溃 recovery cancelled 和 recovery denied。
 对应 `error.code` 固定为：policy deny 使用 `policy_denied`，ask 拒绝使用 `approval_rejected`，ask 过期使用 `approval_expired`；三者均 `retryable=false` 且按上表写零执行 metrics。
 
 旧 v1 terminal 名称只允许在兼容 adapter 输入侧出现，必须按下表逐项映射；canonical fact 只接受 §2.5 的唯一 `ToolTerminalStatus`：
@@ -688,11 +688,14 @@ pub struct ContentUnavailable {
 |---|---|---|
 | `turn_interrupted` | `turn_id`, `last_fact_seq` | 闭合未完成 turn |
 | `tool_indeterminate` | `call_id`, `execution_id` | 非幂等工具不确定 |
+| `tool_denied` | `call_id`, `error_code` | 无 intent 的 approval/policy 拒绝终态 |
 | `tool_replayed` | `call_id`, `execution_id`, `idempotency_key` | 幂等工具完成一次重放 |
 | `tool_reconciled` | `call_id`, `execution_id`, `evidence_ref` | 对账得出终态 |
 | `interaction_expired` | `interaction_id`, `reason` | 超时/重启闭合 |
 | `torn_tail_truncated` | `bytes`, `last_good_fact_seq` | 截断 torn tail |
 | `projection_rebuilt` | `projection`, `through_fact_seq` | 重建 derived projection |
+
+`tool_denied.error_code` 只能是 `approval_rejected` 或 `policy_denied`，且必须等于对应 `ToolFinished.error.code`。每个无 intent 的 `denied` recovery completion 必须在最终 `SessionRecovered.actions` 中产生恰好一个对应的 `tool_denied` action；该路径没有 `execution_id`，不得伪造执行身份。
 
 `SessionMetadataPatch` 字段：
 
@@ -1343,7 +1346,7 @@ pub struct WriterFence {
     pub log_id: LogId,
     pub writer_id: WriterId,
     pub generation_epoch: u64,
-    pub fencing_token: u128,
+    pub fencing_token: u128, // JSON/CLI 表示为无符号十进制字符串
     pub acquired_at_ms: i64,
     pub lease_expires_at_ms: i64,
 }
@@ -1355,6 +1358,8 @@ pub struct AppendRejected {
     pub epoch: u64,
 }
 ```
+
+`WriterFence.fencing_token` 以及 `AppendRejected.expected_token/presented_token` 在 CLI 与 JSON 中统一表示为无符号十进制字符串，格式为 `0|[1-9][0-9]*`，不得使用 JSON number。服务端解析为 `u128`，溢出必须拒绝；递增与相等比较必须基于解析后的数值，不得按字符串字典序比较。`generation_epoch` 仍按 JSON number 表示。
 
 规则：
 
@@ -1679,7 +1684,7 @@ canonical step 顺序和排序键固定为：
 
 `RecoveryStep::ToolFinished` 的 typed `completion` 必须足以逐字段构造 canonical `ToolFinished`：`call_id`、`execution_id`、`terminal_status`、`output_ref`、`error`、`metrics`、`reconciled`、`recovery_ref`、`finished_at_ms`、`evidence_ref`、`evidence_fact_seq` 和 `evidence_event_id` 均在 plan 中显式存在；nullable 字段允许为 `None`，但不得依赖恢复时重新读取墙钟或临时内存来补值。
 
-`RecoveryToolCompletion` 只允许 `indeterminate` 或由 probe/canonical evidence 确定的终态（`succeeded/failed/cancelled/timed_out`）；有 `ToolIntent` 时 `execution_id` 必须等于该 intent 的 execution id，只有 `ToolCallDeclared` 后、policy 决策前崩溃且没有 intent 的 `cancelled` 终态才允许为 `None`。`recovery_ref` 必须等于当前 batch；不得用 recovery 伪造 `denied`、`backgrounded` 或新的 attempt。`MoveTornTail` 的 `from/to` 必须使用 session 目录下的相对 canonical 路径，不得包含临时文件名、绝对路径或墙钟。
+`RecoveryToolCompletion` 的终态集合固定为 `indeterminate/succeeded/failed/partial/cancelled/timed_out/denied`。其中 `succeeded/failed/partial/cancelled/timed_out` 必须由 probe/canonical evidence 确定；`denied` 只用于无 intent 的 approval/policy 路径且 `error.code` 只能是 `approval_rejected` 或 `policy_denied`；`cancelled` 的无 intent 路径只允许 `error.code=approval_expired` 或 `recovery_before_policy_decision`。有 `ToolIntent` 时 `execution_id` 必须等于该 intent 的 execution id；只有无 intent 的 `denied/cancelled` 终态才允许为 `None`。`recovery_ref` 必须等于当前 batch；不得用 recovery 伪造 `backgrounded` 或新的 attempt。`MoveTornTail` 的 `from/to` 必须使用 session 目录下的相对 canonical 路径，不得包含临时文件名、绝对路径或墙钟。
 
 `plan_hash` 的规范输入只包含上述 `RecoveryPlan`，不得包含 `plan_hash`、`RecoveryIntent`、`DeleteRecoveryIntent`、墙钟或随机值：
 
@@ -1762,10 +1767,11 @@ canonical_json({
 | 输入状态 | canonical fact 集合 | 可写性 |
 |---|---|---|
 | `TurnStarted` 无终态 | `TurnInterrupted` + final `SessionRecovered` | 恢复后可写 |
-| `ToolCallDeclared` 无 `ToolIntent`/`ToolFinished`（policy 决策前崩溃） | `ToolFinished { terminal_status=cancelled, execution_id=None, metrics=<零执行>, error.code=recovery_before_policy_decision }` + final `SessionRecovered` | 恢复后可写 |
+| `InteractionResolved(rejected)` 无 `ToolIntent`/`ToolFinished` | `ToolFinished { terminal_status=denied, execution_id=None, metrics=<零执行>, error.code=approval_rejected }` + final `SessionRecovered { actions=[tool_denied] }` | 恢复后可写 |
+| `ToolCallDeclared` 无 `ToolIntent`/`ToolFinished` 且无 interaction 终态（policy 决策前崩溃） | `ToolFinished { terminal_status=cancelled, execution_id=None, metrics=<零执行>, error.code=recovery_before_policy_decision }` + final `SessionRecovered` | 恢复后可写 |
 | `ToolIntent` 无 `ToolFinished`，`NoReplay` | `ToolFinished { terminal_status=indeterminate, metrics=<零执行或已知执行 metrics> }` + final `SessionRecovered` | 恢复后可写 |
 | `ToolIntent` 无 `ToolFinished`，`IdempotentReplay` | 一次重放后的成功/失败 `ToolFinished` + final `SessionRecovered`；无法取得结果时写 `indeterminate` | 重放后写 |
-| `ToolIntent` 无 `ToolFinished`，`Reconcile` | probe/canonical evidence 确定的成功/失败 `ToolFinished { reconciled=true }`，或 `indeterminate` + final `SessionRecovered` | 对账后写 |
+| `ToolIntent` 无 `ToolFinished`，`Reconcile` | probe/canonical evidence 确定的成功/失败/partial `ToolFinished { reconciled=true }`，或 `indeterminate` + final `SessionRecovered` | 对账后写 |
 | `InteractionRequested` 无终态且未过期 | final `SessionRecovered { actions=[] }`；不重发 modal fact | 可写 |
 | `InteractionRequested` 已过期/重启策略取消 | `InteractionExpired` + final `SessionRecovered` | 恢复后写 |
 | `CompactionApplied` 无 checkpoint | 仅 final `SessionRecovered`；从 active facts 重建 context | 重建后写 |
@@ -1777,7 +1783,7 @@ canonical_json({
 
 1. 查找同 `call_id` 的 `ToolFinished`；存在则不再执行。
 2. 按 §2.3 的组合优先级读取 `replay_capability`、`side_effect_class`、`idempotency_key`。
-3. `NoReplay` 由 builder 写 `indeterminate`；`Reconcile` 只接受 probe/canonical evidence 确定的终态，否则写 `indeterminate`；`IdempotentReplay` 才允许一次同 identity 重放，并以 typed result 构造成功/失败终态。
+3. `NoReplay` 由 builder 写 `indeterminate`；`Reconcile` 只接受 probe/canonical evidence 确定的终态，否则写 `indeterminate`；`IdempotentReplay` 才允许一次同 identity 重放，并以 typed result 构造成功/失败/partial 终态。
 4. `reconciled=true` 必须带 `evidence_ref`，或带 canonical fact 的 `evidence_fact_seq + evidence_event_id`；`call_id` 本身不能宣称 exactly-once。
 5. 四类 replay capability/副作用/对账组合必须由 §10.1 的显式 fixture 覆盖。
 
@@ -1788,7 +1794,7 @@ probe evidence 的 canonical shape：
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ToolProbeOutcome { Succeeded, Failed, Indeterminate }
+pub enum ToolProbeOutcome { Succeeded, Failed, Partial, Indeterminate }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolProbeEvidence {
@@ -1796,7 +1802,9 @@ pub struct ToolProbeEvidence {
     pub call_id: ToolCallId,
     pub execution_id: ExecutionId,
     pub outcome: ToolProbeOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub output_ref: Option<ContentRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ToolError>,
     pub output_bytes: u64,
     pub progress_bytes_total: u64,
@@ -1807,7 +1815,7 @@ pub struct ToolProbeEvidence {
 `ToolProbeEvidence` 的 canonical JSON 形状固定为：
 
 ```json
-{"schema":"qaqh.tool-probe/v1","call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","outcome":"succeeded","output_ref":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","error":null,"output_bytes":12,"progress_bytes_total":12,"observed_at_ms":1789830000040}
+{"schema":"qaqh.tool-probe/v1","call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","outcome":"succeeded","output_ref":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","output_bytes":12,"progress_bytes_total":12,"observed_at_ms":1789830000040}
 ```
 
 builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared`/唯一 `ToolIntent`、当前 `RecoveryRef`，以及按 capability 得到的 probe evidence 或一次 idempotent replay 的 typed result。builder 不读取墙钟、文件 mtime 或进程内存；所有输出必须可从这些输入重算。
@@ -1816,14 +1824,14 @@ builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared
 
 1. 若 canonical log 已有同 `call_id` 的 `ToolFinished`，返回该终态，不产生 recovery step。
 2. 若 call 有 `ToolIntent`，校验其唯一性以及 `call_id/execution_id`；同 call 多个 intent 时 fail-closed，不得伪造 completion。
-3. 若 call 没有 `ToolIntent` 但有 `ToolCallDeclared`，先检查 interaction：仍有 pending `InteractionRequested` 且未过期时不生成 `ToolFinished`，保留 call open，等待正常 resolution/expiry。若 `InteractionResolved(rejected)` 则构造 `denied/approval_rejected`，若 `InteractionExpired` 则构造 `cancelled/approval_expired`；两者都不存在时构造 `cancelled/recovery_before_policy_decision`。无 intent 终态路径的 `execution_id=None`、`reconciled=false`、`output_ref=None`、`metrics` 为零执行 metrics，`finished_at_ms` 取对应 terminal fact 的 `ts_ms` 或 `ToolCallDeclared.ts_ms`。
+3. 若 call 没有 `ToolIntent` 但有 `ToolCallDeclared`，先检查 interaction：仍有 pending `InteractionRequested` 且未过期时不生成 `ToolFinished`，保留 call open，等待正常 resolution/expiry。若 `InteractionResolved(rejected)` 则构造 `denied/approval_rejected` 并产生对应 `tool_denied` action，若 `InteractionExpired` 则构造 `cancelled/approval_expired`；两者都不存在时构造 `cancelled/recovery_before_policy_decision`。无 intent 终态路径的 `execution_id=None`、`reconciled=false`、`output_ref=None`、`metrics` 为零执行 metrics，`finished_at_ms` 取对应 terminal fact 的 `ts_ms` 或 `ToolCallDeclared.ts_ms`。
 4. 若 call 既没有 `ToolIntent` 也没有 `ToolCallDeclared`，fail-closed，不得伪造 completion。
 5. `Reconcile` 读取 `probe_ref` 对应内容并解析为 `ToolProbeEvidence`；`schema`、`call_id`、`execution_id` 任一不匹配时视为无结论，而不是失败。
 6. canonical evidence 只接受与 call 明确关联的终态事实：`SubagentFinished.parent_call_id == call_id` 映射为 `completed -> succeeded`、`failed -> failed`、`cancelled -> cancelled`、`timed_out -> timed_out`。`WorkspaceResourceChanged.source_call_id` 只表示资源 revision，单独出现不能证明普通 tool 成功或失败。
 7. `NoReplay` 或无有效 evidence 的 `Reconcile` 生成 `terminal_status=indeterminate`、`output_ref=None`、`error={code:"indeterminate_after_crash",message:"tool outcome could not be determined",retryable:false}`、`reconciled=false`。
-8. `IdempotentReplay` 只允许以同 `call_id/execution_id/idempotency_key` 重放一次；typed result 为成功时生成 `succeeded`，为稳定错误时生成 `failed`，无法取得 typed result 时生成 `indeterminate`。重放路径的 `reconciled=false`，`evidence_ref=None`。
-9. probe `succeeded/failed` 与 canonical `SubagentFinished` 生成确定终态：`reconciled=true`；probe 终态设置 `evidence_ref=probe_ref`，canonical 终态设置 `evidence_fact_seq` 与 `evidence_event_id`，有 `result_ref` 时同时设置 `evidence_ref`。
-10. 成功终态必须有 `output_ref` 或显式允许空输出的 typed result；失败终态必须有 `ToolError`。缺少必需 output/error 时降级为 `indeterminate`，不得凭空补 message 或摘要。
+8. `IdempotentReplay` 只允许以同 `call_id/execution_id/idempotency_key` 重放一次；typed result 为成功时生成 `succeeded`，为稳定错误时生成 `failed`，为部分可消费结果时生成 `partial`，无法取得 typed result 时生成 `indeterminate`。重放路径的 `reconciled=false`，`evidence_ref=None`。
+9. probe `succeeded/failed/partial` 与 canonical `SubagentFinished` 生成确定终态：`reconciled=true`；probe 终态设置 `evidence_ref=probe_ref`，canonical 终态设置 `evidence_fact_seq` 与 `evidence_event_id`，有 `result_ref` 时同时设置 `evidence_ref`。probe `partial` 只映射为 `partial`，并保留 probe 的 `output_ref/error/output_bytes/progress_bytes_total`。
+10. `succeeded` 必须有 `output_ref` 或显式允许空输出的 typed result；`partial` 必须有 `output_ref`；`failed` 必须有 `ToolError`。缺少必需 output/error 时降级为 `indeterminate`，不得凭空补 message 或摘要。
 11. `metrics.started_at_ms = ToolIntent.intent_at_ms`；无 intent 路径取 `ToolCallDeclared.ts_ms`。`finished_at_ms` 取 `max(intent_or_declared_at_ms, probe.observed_at_ms, canonical evidence fact.ts_ms, idempotent replay observed_at_ms)`；无任何观测时间时取 `intent_or_declared_at_ms`。`metrics.finished_at_ms = finished_at_ms`，`retry_count=0`；`output_bytes/progress_bytes_total` 取 evidence/typed result 的显式计数，canonical evidence 缺失计数时按 `output_ref` 的 ContentRecord byte length 计算，仍不可得则为 0。
 12. `RecoveryToolCompletion.execution_id` 在有 intent 时必须等于 intent 的 execution id，在无 intent 的 `ToolCallDeclared` 路径必须为 `None`；`recovery_ref` 必须等于当前 batch；`ToolFinished` canonical fact 的 `output_ref/error/recovery_ref/finished_at_ms/metrics` 全部由 completion 逐字段复制，不允许恢复时再补算。
 
@@ -2028,11 +2036,11 @@ cutover/rollback 与 generation 切换使用以下命令；`--format json` 为�
 qaqh migrate status --session <session_id> --format json
 qaqh migrate legacy-map --session <session_id> --source <messages_jsonl|ringing_journal|ringing_latest|ringing_timeline|ringing_offload|meta_json> --source-generation <generation_id> --output <path> --format json [--dry-run]
 qaqh migrate reconcile --session <session_id> --source-generation <generation_id> --canonical-log <log_id> --format json
-qaqh migrate cutover --session <session_id> --to <s0|s1|s2|s3|s4> --writer-id <writer_id> --generation-epoch <u64> --fencing-token <u128> --format json
-qaqh migrate rollback --session <session_id> --to <s0|s1|s2> --writer-id <writer_id> --generation-epoch <u64> --fencing-token <u128> --format json
+qaqh migrate cutover --session <session_id> --to <s0|s1|s2|s3|s4> --writer-id <writer_id> --generation-epoch <u64> --fencing-token <decimal_u128_string> --format json
+qaqh migrate rollback --session <session_id> --to <s0|s1|s2> --writer-id <writer_id> --generation-epoch <u64> --fencing-token <decimal_u128_string> --format json
 ```
 
-所有写命令的参数必须显式给出 `writer_id`、`generation_epoch`、`fencing_token`；服务端必须在 `writer-fence.json` 上执行 §5.2 的 CAS/拒绝协议。`status` 与 `legacy-map --dry-run` 不修改 fence。
+所有写命令的参数必须显式给出 `writer_id`、`generation_epoch`、`fencing_token`；`fencing_token` 按 §5.2 使用无符号十进制字符串；服务端必须在 `writer-fence.json` 上执行 §5.2 的 CAS/拒绝协议。`status` 与 `legacy-map --dry-run` 不修改 fence。
 
 输出 schema 固定为 `qaqh.migration-status/v1`：
 
@@ -2045,7 +2053,7 @@ qaqh migrate rollback --session <session_id> --to <s0|s1|s2> --writer-id <writer
   "canonical_log_id": "0198f1a0-0000-7000-8000-000000000002",
   "writer_id": "writer-1",
   "generation_epoch": 7,
-  "fencing_token": 1007,
+  "fencing_token": "1007",
   "mapping_count": 128,
   "canonical_count": 128,
   "missing_canonical": 0,
