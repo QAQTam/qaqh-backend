@@ -32,7 +32,7 @@
 1. `events.jsonl` 是 session 历史唯一 canonical source。
 2. `SessionActor` 是 session 状态唯一 writer；其他模块只能提交 command。
 3. fact 必须先 durable append，再更新 projection，再发布 wire event。
-4. 每个 `ToolIntent` 必须有且只有一个终态 `ToolFinished`，包括 `indeterminate`。
+4. 每个 call 恰好有一个终态 `ToolFinished`；每个实际进入执行阶段的 call 恰好有一个 `ToolIntent`。`deny`、审批拒绝与审批过期不进入执行阶段，只产生唯一 `ToolFinished`，不产生 `ToolIntent`。
 5. 同 schema 未知 fact 必须 fail-closed；不得跳过未知 fact 继续解释后续事实。
 
 ### 0.3 与 I1-I15 的关系
@@ -257,7 +257,7 @@ pub enum FactPayload {
 | `execution_id` | `ExecutionId` | 是 | — | 每次尝试唯一 |
 | `idempotency_key` | `Option<String>` | 条件必填 | skip none | `idempotent_replay` 必填；`reconcile` 可作 probe 输入；`no_replay` 必须缺失 |
 | `replay_capability` | `ToolReplayCapability` | 是 | tagged enum | `NoReplay/IdempotentReplay/Reconcile` |
-| `policy_decision` | `PolicyDecisionRef` | 是 | — | `allow/ask/deny/amend` 与规则 id |
+| `policy_decision` | `PolicyDecisionRef` | 是 | — | 仅允许 `allow/ask/amend`；`deny` 不产生 `ToolIntent` |
 | `effective_args_ref` | `Option<ContentRef>` | 否 | skip none | policy amend 后的实际参数 |
 | `effective_args_hash` | `Option<sha256:<hex>>` | 否 | skip none | 与 effective_args_ref 一致 |
 | `sandbox_spec_hash` | `sha256:<hex>` | 是 | — | 基于 effective args 的 SandboxSpec hash |
@@ -269,7 +269,8 @@ pub enum FactPayload {
 - 有副作用的 `ToolIntent` 必须先 fsync，再允许 handler 执行。
 - `policy_decision.outcome = amend` 时，`effective_args_ref` 与 `effective_args_hash` 必填；实际执行参数以 effective args 为准。
 - `sandbox_spec_hash` 必须基于 effective args 计算，不能基于模型原始 args。
-- v2.0 每个 `call_id` 恰好一个 `ToolIntent`、一个 `ToolFinished`，`execution_id` 在该 call 内稳定。
+- v2.0 每个实际进入执行阶段的 `call_id` 恰好一个 `ToolIntent`，并且每个 `call_id` 恰好一个 `ToolFinished`；`execution_id` 在该 call 内稳定。
+- `policy_decision.outcome=deny` 时不得写 `ToolIntent`；审批拒绝/过期同样不得写 `ToolIntent`。这些 call 仍必须写唯一 `ToolFinished`，因此不存在“无 `ToolIntent` 就无终态”的例外。
 - 用户显式重试必须创建新的 `call_id`；不得复用旧 call 追加第二个 intent/终态。
 - v2.0 `retry_count` 必须为 0；未来若允许 attempt 级重试，必须提升 `payload_version` 并新增聚合终态，不能改变现有唯一性。
 
@@ -286,11 +287,11 @@ pub enum FactPayload {
 | 字段 | 类型 | 必填 | serde | 规则 |
 |---|---|---:|---|---|
 | `call_id` | `ToolCallId` | 是 | — | 必须与 envelope 一致 |
-| `execution_id` | `Option<ExecutionId>` | 条件必填 | skip none | 无 intent 的 `denied/cancelled` 为 None；其余终态必填且对应 intent |
+| `execution_id` | `Option<ExecutionId>` | 条件必填 | skip none | 无 intent 的 `denied/cancelled`（含 policy 前崩溃恢复）为 None；其余终态必填且对应 intent |
 | `terminal_status` | `ToolTerminalStatus` | 是 | snake_case | 唯一终态 |
 | `output_ref` | `Option<ContentRef>` | 否 | skip none | typed output 内容 |
 | `error` | `Option<ToolError>` | 否 | skip none | 终态错误 |
-| `metrics` | `Option<ToolMetrics>` | 条件必填 | skip none | 实际执行过 handler 时必填；无执行终态必须为 `None` |
+| `metrics` | `ToolMetrics` | 是 | — | 所有终态都必须可物化；无 handler 时使用下述零执行 metrics |
 | `reconciled` | `bool` | 是 | — | 是否经 reconciliation 得出 |
 | `recovery_ref` | `Option<RecoveryRef>` | 否 | skip none | recovery 产生的终态必填 |
 | `finished_at_ms` | `i64` | 是 | — | 终态时间 |
@@ -298,23 +299,34 @@ pub enum FactPayload {
 规则：
 
 - 一个 `(call_id)` 只允许一个 `ToolFinished`；重复终态必须拒绝或幂等返回既有 fact。
-- `execution_id` 必须与同 call 的 `ToolIntent` 一致；只有 policy 在 intent 之前拒绝或取消的终态才允许为 `None`。
-- `metrics = None` 只适用于没有执行 handler 的 `denied`、审批拒绝或审批过期终态；其他终态必须有 metrics，且 `retry_count` 在 v2.0 固定为 0。
+- `execution_id` 必须与同 call 的 `ToolIntent` 一致；只有 call 在 intent 之前结束的 `denied/cancelled` 终态才允许为 `None`，包括 policy deny、审批拒绝/过期，以及 `ToolCallDeclared` 后 policy 决策前崩溃的 recovery cancelled。
+- `metrics.retry_count` 在 v2.0 固定为 0。实际执行过 handler 时，`started_at_ms` 取 handler 开始时间，`finished_at_ms` 取 handler 结束时间，字节计数取 typed output/progress 的真实值。
+- 无 handler 的 `denied`、审批拒绝与审批过期也必须写 metrics，规则固定为：`started_at_ms = finished_at_ms`，`retry_count=0`，`output_bytes=0`，`progress_bytes_total=0`。`finished_at_ms` 对 policy deny 取 `ToolCallDeclared` 后 actor 作出 deny 的 canonical `ToolFinished.finished_at_ms`，对 ask 拒绝取 `InteractionResolved.resolved_at_ms`，对 ask 过期取 `InteractionExpired.expired_at_ms`。
 - `ToolFinished` 是唯一 call 终态；`backgrounded` 也是终态，后续资源事件不得写第二个 `ToolFinished`。
 
 policy 生命周期是规范顺序，不允许由 handler 或 UI 自行改变：
 
-| `PolicyOutcome` | canonical 顺序 | `ToolIntent` | `ToolFinished` | `metrics` |
+| policy result | canonical 顺序 | `ToolIntent` | `ToolFinished` | `metrics` |
 |---|---|---:|---|---|
-| `allow` | `ToolCallDeclared -> ToolIntent -> execute -> ToolFinished` | 有 | 唯一终态 | 有执行时必填 |
-| `amend` | 生成 effective args -> `ToolIntent -> execute -> ToolFinished` | 有 | 唯一终态 | 有执行时必填 |
-| `ask` 批准 | `InteractionRequested -> InteractionResolved(approved) -> ToolIntent -> execute -> ToolFinished` | 有 | 唯一终态 | 有执行时必填 |
-| `ask` 拒绝 | `InteractionRequested -> InteractionResolved(rejected) -> ToolFinished(denied)` | 无 | 唯一 `denied` | 必须 `None` |
-| `ask` 过期 | `InteractionRequested -> InteractionExpired -> ToolFinished(cancelled)` | 无 | 唯一 `cancelled`，`error.code=approval_expired` | 必须 `None` |
-| `deny` | `ToolCallDeclared -> ToolFinished(denied)` | 无 | 唯一 `denied` | 必须 `None` |
+| `allow` | `ToolCallDeclared -> ToolIntent -> execute -> ToolFinished` | 有 | 唯一终态 | 执行 metrics |
+| `amend` | 生成 effective args -> `ToolIntent -> execute -> ToolFinished` | 有 | 唯一终态 | 执行 metrics |
+| `ask` 批准 | `InteractionRequested -> InteractionResolved(approved) -> ToolIntent -> execute -> ToolFinished` | 有 | 唯一终态 | 执行 metrics |
+| `ask` 拒绝 | `InteractionRequested -> InteractionResolved(rejected) -> ToolFinished(denied)` | 无 | 唯一 `denied` | 零执行 metrics |
+| `ask` 过期 | `InteractionRequested -> InteractionExpired -> ToolFinished(cancelled)` | 无 | 唯一 `cancelled`，`error.code=approval_expired` | 零执行 metrics |
+| `deny` | `ToolCallDeclared -> ToolFinished(denied)` | 无 | 唯一 `denied` | 零执行 metrics |
 
-被 `deny`、审批拒绝或审批过期的 call 不执行 handler，不产生 `ToolIntent`，但仍必须写唯一 `ToolFinished`。`execution_id=None` 只允许出现在上述无 intent 的 `denied/cancelled` 终态。
-对应 `error.code` 固定为：policy deny 使用 `policy_denied`，ask 拒绝使用 `approval_rejected`，ask 过期使用 `approval_expired`；三者均 `retryable=false` 且 `metrics=None`。
+`allow`、`ask`、`amend` 是 `ToolIntentPolicyOutcome` 的闭集值；`deny` 是 intent 之前结束的 policy result，不属于该 enum，也绝不能写入 `ToolIntent.policy_decision`。
+
+零执行 metrics 的 canonical JSON 固定为：
+
+```json
+{"started_at_ms":1789830000025,"finished_at_ms":1789830000025,"retry_count":0,"output_bytes":0,"progress_bytes_total":0}
+```
+
+`started_at_ms` 与 `finished_at_ms` 按上文对应事实的时间字段填入；其余字段不得因 deny/拒绝/过期而省略。
+
+被 `deny`、审批拒绝或审批过期的 call 不执行 handler，不产生 `ToolIntent`，但仍必须写唯一 `ToolFinished`。`execution_id=None` 只允许出现在上述无 intent 的 `denied/cancelled` 终态，以及 §6.2/§6.3.1 定义的 policy 决策前崩溃 recovery cancelled。
+对应 `error.code` 固定为：policy deny 使用 `policy_denied`，ask 拒绝使用 `approval_rejected`，ask 过期使用 `approval_expired`；三者均 `retryable=false` 且按上表写零执行 metrics。
 
 旧 v1 terminal 名称只允许在兼容 adapter 输入侧出现，必须按下表逐项映射；canonical fact 只接受 §2.5 的唯一 `ToolTerminalStatus`：
 
@@ -552,15 +564,23 @@ pub struct ActorRef {
 pub enum InputKind { UserText, Command, Approval, Resume, System }
 pub enum TurnMode { Normal, Plan, Ask }
 pub enum AssistantBlockKind { Reasoning, Answer, ToolCall }
-pub enum PolicyOutcome { Allow, Ask, Deny, Amend }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolIntentPolicyOutcome { Allow, Ask, Amend }
 pub struct PolicyDecisionRef {
-    pub outcome: PolicyOutcome,
+    pub outcome: ToolIntentPolicyOutcome,
     pub rule_id: String,
     pub decided_at_ms: i64,
     pub reason_ref: Option<ContentRef>,
 }
 
 pub enum SideEffectClass { ReadOnly, WorkspaceWrite, Process, Network, External }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RingingChannel { Control, Conversation, Tool }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityState { Idle, Running, Interrupted }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolReplayCapability {
@@ -654,6 +674,8 @@ pub struct ContentUnavailable {
 | `ActorRef.id` | user 为稳定本地身份；api 为 key id；agent/subagent 为 session/call 身份 |
 | `PolicyDecisionRef.rule_id` | 必须来自 policy engine，不接受自由文本 |
 | `SideEffectClass` | 闭集；新增类别必须提升 `payload_version` |
+| `RingingChannel` | 闭集，只能为 `control/conversation/tool`；不得扩展 `session` |
+| `ActivityState` | 闭集；`ControlDelta::Activity` 不接受自由字符串 |
 | `ToolMetrics` | 时间使用毫秒；计数不允许负数 |
 | `ToolError.code` | 稳定 snake_case；message 必须脱敏 |
 | `TurnError.code` | 稳定 snake_case；message 必须脱敏 |
@@ -684,6 +706,34 @@ pub struct ContentUnavailable {
 | `schema_caps` | `Option<Vec<String>>` | 替换式 patch，不做集合 merge |
 
 `SessionMetadataPatch` 所有字段同时为 `None` 时非法；未出现的字段表示不变，`Some` 表示替换值。
+
+### 2.6 FactPayload 全量 golden JSON
+
+以下 21 行按 §2.1 的 variant 顺序逐一冻结每个 `FactPayload` 的 canonical serde 形状。每行是 payload 值（不是完整 `SessionFact` envelope）；完整 envelope 形状见 §1.1/§10.1.1。UUID、ULID、时间和 hash 是固定 golden 占位值，不得在 fixture 中改成随机值。新增 variant 或改变任一 payload 字段必须提升 `payload_version` 并同时新增本表行。
+
+```jsonl
+{"kind":"session_created","data":{"created_at_ms":1789830000000,"cwd":"/workspace","model":"deepseek-v4.1-flash","schema_caps":["reliable_replay","interaction_replay"]}}
+{"kind":"input_accepted","data":{"input_id":"input_01J00000000000000000000000","input_kind":"user_text","inline_text":"hello","attachments":[],"actor":{"kind":"user","id":"local"}}}
+{"kind":"turn_started","data":{"turn_id":"turn_01J00000000000000000000000","input_id":"input_01J00000000000000000000000","mode":"normal"}}
+{"kind":"model_round_started","data":{"turn_id":"turn_01J00000000000000000000000","round":0,"request_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111","context_revision":1}}
+{"kind":"assistant_block_sealed","data":{"turn_id":"turn_01J00000000000000000000000","block_id":"block_01J00000000000000000000000","kind":"answer","content_ref":"sha256:2222222222222222222222222222222222222222222222222222222222222222","model":"deepseek-v4.1-flash"}}
+{"kind":"tool_call_declared","data":{"turn_id":"turn_01J00000000000000000000000","call_id":"call_01J00000000000000000000000","tool_name":"read_file","args_ref":"sha256:3333333333333333333333333333333333333333333333333333333333333333","args_hash":"sha256:3333333333333333333333333333333333333333333333333333333333333333"}}
+{"kind":"tool_intent","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","replay_capability":{"kind":"no_replay"},"policy_decision":{"outcome":"allow","rule_id":"policy/read","decided_at_ms":1789830000030},"sandbox_spec_hash":"sha256:4444444444444444444444444444444444444444444444444444444444444444","side_effect_class":"read_only","intent_at_ms":1789830000030}}
+{"kind":"tool_finished","data":{"call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","terminal_status":"succeeded","output_ref":"sha256:5555555555555555555555555555555555555555555555555555555555555555","metrics":{"started_at_ms":1789830000030,"finished_at_ms":1789830000040,"retry_count":0,"output_bytes":12,"progress_bytes_total":12},"reconciled":false,"finished_at_ms":1789830000040}}
+{"kind":"interaction_requested","data":{"interaction_id":"int_01J00000000000000000000000","call_id":"call_01J00000000000000000000000","turn_id":"turn_01J00000000000000000000000","kind":"permission","request_ref":"sha256:6666666666666666666666666666666666666666666666666666666666666666","expires_at_ms":1789830300000,"requested_at_ms":1789830000020}}
+{"kind":"interaction_resolved","data":{"interaction_id":"int_01J00000000000000000000000","decision_ref":"sha256:7777777777777777777777777777777777777777777777777777777777777777","resolved_by":{"kind":"user","id":"local"},"resolution_seq":1,"resolved_at_ms":1789830000025}}
+{"kind":"interaction_expired","data":{"interaction_id":"int_01J00000000000000000000000","reason":"timeout","expired_at_ms":1789830300000}}
+{"kind":"turn_finished","data":{"turn_id":"turn_01J00000000000000000000000","terminal":"completed","finished_at_ms":1789830000050}}
+{"kind":"turn_interrupted","data":{"turn_id":"turn_01J00000000000000000000000","reason":"crash","last_fact_seq":7,"recovery_ref":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000007","recovery_input_fingerprint":"sha256:8888888888888888888888888888888888888888888888888888888888888888"}}}
+{"kind":"session_recovered","data":{"recovery_id":"recovery_01J00000000000000000000000","recovery_event_id":"01J00000000000000000000007","recovery_input_fingerprint":"sha256:8888888888888888888888888888888888888888888888888888888888888888","outcome":"writable","last_good_fact_seq":7,"torn_tail":false,"actions":[],"recovered_at_ms":1789830000060}}
+{"kind":"compaction_applied","data":{"checkpoint_id":"ckpt_01J00000000000000000000000","replaces_through_fact_seq":7,"summary_ref":"sha256:9999999999999999999999999999999999999999999999999999999999999999","context_revision":2,"applied_at_ms":1789830000060}}
+{"kind":"session_metadata_changed","data":{"patch":{"model":"deepseek-v4.1-flash"},"source":"user","changed_at_ms":1789830000060}}
+{"kind":"session_title_changed","data":{"title":"Golden session","source":"user","changed_at_ms":1789830000060}}
+{"kind":"session_deleted","data":{"tombstone_at_ms":1789830000070,"reason":"user"}}
+{"kind":"workspace_resource_changed","data":{"resource_kind":"file","resource_id":"res_01J00000000000000000000000","source_call_id":"call_01J00000000000000000000000","revision":1,"summary_ref":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","deleted":false}}
+{"kind":"subagent_spawned","data":{"child_session_id":"0198f1a0-0000-7000-8000-000000000003","parent_call_id":"call_01J00000000000000000000000","spawned_at_ms":1789830000080}}
+{"kind":"subagent_finished","data":{"child_session_id":"0198f1a0-0000-7000-8000-000000000003","parent_call_id":"call_01J00000000000000000000000","status":"completed","result_ref":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","finished_at_ms":1789830000090}}
+```
 
 ---
 
@@ -716,7 +766,6 @@ pub enum Delivery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum StreamKey {
-    Session,
     Channel(RingingChannel),
     Resource { kind: ResourceKind, id: ResourceId },
 }
@@ -763,7 +812,7 @@ pub enum ConversationDelta {
     TurnStarted { revision: u64, turn_id: TurnId, input_id: InputId, mode: TurnMode },
     AssistantBlockSealed { revision: u64, turn_id: TurnId, block_id: BlockId, block_kind: AssistantBlockKind, content: ContentValue, model: String, usage: Option<UsageInfo> },
     ToolCallDeclared { revision: u64, turn_id: TurnId, call_id: ToolCallId, tool_name: String, args: ContentValue, args_hash: ContentHash },
-    ToolFinished { revision: u64, call_id: ToolCallId, terminal_status: ToolTerminalStatus, output: Option<ContentValue>, error: Option<ToolError>, metrics: Option<ToolMetrics>, reconciled: bool },
+    ToolFinished { revision: u64, call_id: ToolCallId, terminal_status: ToolTerminalStatus, output: Option<ContentValue>, error: Option<ToolError>, metrics: ToolMetrics, reconciled: bool },
     TurnFinished { revision: u64, turn_id: TurnId, terminal: TurnTerminal, usage: Option<UsageInfo>, error: Option<TurnError> },
     TurnInterrupted { revision: u64, turn_id: TurnId, reason: InterruptReason, last_fact_seq: u64, recovery_ref: RecoveryRef },
     CompactionApplied { revision: u64, checkpoint_id: CheckpointId, replaces_through_fact_seq: u64, summary: ContentValue, context_revision: u64 },
@@ -786,9 +835,9 @@ pub enum TimelineDelta {
 pub enum ControlDelta {
     SessionCreated { revision: u64, session_id: SessionId, cwd: String, model: String, schema_caps: Vec<String> },
     Round { revision: u64, turn_id: TurnId, round: u32, request_hash: ContentHash, context_revision: u64 },
-    Activity { revision: u64, turn_id: Option<TurnId>, call_id: Option<ToolCallId>, state: String },
+    Activity { revision: u64, turn_id: Option<TurnId>, call_id: Option<ToolCallId>, state: ActivityState },
     ToolIntent { revision: u64, call_id: ToolCallId, execution_id: ExecutionId, policy_decision: PolicyDecisionRef, replay_capability: ToolReplayCapability, side_effect_class: SideEffectClass, intent_at_ms: i64 },
-    ToolFinished { revision: u64, call_id: ToolCallId, execution_id: Option<ExecutionId>, terminal_status: ToolTerminalStatus, output: Option<ContentValue>, error: Option<ToolError>, metrics: Option<ToolMetrics>, reconciled: bool },
+    ToolFinished { revision: u64, call_id: ToolCallId, execution_id: Option<ExecutionId>, terminal_status: ToolTerminalStatus, output: Option<ContentValue>, error: Option<ToolError>, metrics: ToolMetrics, reconciled: bool },
     InteractionRequested { revision: u64, interaction_id: InteractionId, call_id: Option<ToolCallId>, kind: InteractionKind, request: ContentValue, expires_at_ms: Option<i64> },
     InteractionResolved { revision: u64, interaction_id: InteractionId, decision: ContentValue, resolved_by: ActorRef, resolution_seq: u64 },
     InteractionExpired { revision: u64, interaction_id: InteractionId, reason: InteractionExpiryReason },
@@ -834,7 +883,9 @@ pub struct WireEvent {
     pub wire_version: u32,
     pub stream_key: StreamKey,
     pub event_id: EventId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<ReliableCursor>,
+    pub delivery: Delivery,
     pub payload: WirePayload,
 }
 ```
@@ -844,8 +895,19 @@ pub struct WireEvent {
 - `ProjectionPayload` 不得包含 UI 动画、SSE 文本或 provider 原始 JSON；`ConversationDelta`/`TimelineDelta`/`ControlDelta`/`ResourceDelta`/`MetaDelta` 的 variant 名称和字段是稳定 schema。
 - `ContentValue::Ref` 只允许指向 typed projection 内容；大内容必须带 `ContentRef`，但 `ContentValue::Unavailable` 必须保留 `ContentUnavailable` 结构，不得降级为空文本。
 - `ProjectionEvent.projection_slot` 和 `projection_index` 只对 `Reliable` 有值；`projection_index` 必须等于 `projection_slot as u16`，`Replaceable`/`Ephemeral` 不得占用 canonical index。
+- `StreamKey::Channel` 只允许 `RingingChannel::Control`、`RingingChannel::Conversation`、`RingingChannel::Tool`，JSON channel 值只能是 `control`、`conversation`、`tool`；不存在 `session` channel。
+- `WireEvent.delivery` 必须原样复制来源 `ProjectionEvent.delivery`，因此 `Reliable { cursor }`、`Replaceable { revision }` 与 `Ephemeral` 在 wire 上可直接区分；adapter 不得把三者都压成裸 cursor 或裸 payload。`delivery=Reliable` 时 `WireEvent.cursor` 必须为 `Some` 且等于 `delivery.cursor`；`Replaceable`/`Ephemeral` 时必须为 `None`。
+- `ControlDelta::Activity.state` 必须使用闭集 `ActivityState`：`turn_started -> running`、`turn_finished -> idle`、`turn_interrupted -> interrupted`。实现不得接受自由字符串；新增状态必须提升 `payload_version`。
 - `WireEvent.payload` 使用 typed `WirePayload`；adapter 才把它编码为 SSE JSON，业务层不得读取或解析 provider JSON。
 - `AuditRef` 只引用全局 audit seq/hash，不进入 session cursor；`Unknown` 只用于 wire 兼容，canonical unknown fact 仍必须 fail-closed。
+
+`WireEvent.delivery` 的三种 canonical JSON 形状：
+
+```jsonl
+{"wire_version":2,"stream_key":{"kind":"channel","data":"control"},"event_id":"01J00000000000000000000021","cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":1,"projection_index":2},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":1,"projection_index":2}}},"payload":{"kind":"heartbeat"}}
+{"wire_version":2,"stream_key":{"kind":"channel","data":"conversation"},"event_id":"01J00000000000000000000022","delivery":{"Replaceable":{"revision":7}},"payload":{"kind":"heartbeat"}}
+{"wire_version":2,"stream_key":{"kind":"channel","data":"tool"},"event_id":"01J00000000000000000000023","delivery":"Ephemeral","payload":{"kind":"heartbeat"}}
+```
 
 ### 3.2 排序
 
@@ -918,6 +980,7 @@ pub struct ReplayWindowManifest {
     pub snapshot_fact_seq: Option<u64>,
     pub snapshot_created_at_logical_ms: Option<i64>,
     pub snapshot_expires_at_logical_ms: Option<i64>,
+    pub logical_now_ms: i64,
     pub retained_from_ms: i64,
     pub retained_until_ms: i64,
     pub window_capacity_facts: u64,
@@ -928,7 +991,7 @@ pub struct ReplayWindowManifest {
 }
 ```
 
-默认窗口参数冻结为：`window_capacity_facts = 100_000`、`window_capacity_bytes = 64 MiB`、`replay_window_retention_ms = 30 days`、`snapshot_max_age_ms = 7 days`。`logical_now_ms` 是单调逻辑 clock，不是 `SystemTime::now()`；manifest 更新时必须取 `max(previous_logical_now, durable_event_ts)`，不得因墙钟回拨减小。
+默认窗口参数冻结为：`window_capacity_facts = 100_000`、`window_capacity_bytes = 64 MiB`、`replay_window_retention_ms = 30 days`、`snapshot_max_age_ms = 7 days`。`logical_now_ms` 是单调逻辑 clock，不是 `SystemTime::now()`；它必须复制同一 session 最新 durable `ContentClockRecord.logical_now_ms`，不得独立推进，也不得因墙钟回拨减小。manifest 更新顺序固定为：canonical fact durable -> `content/clock.json` durable -> manifest 写入同一 `logical_now_ms` -> replay/GC 判定。
 
 `manifest.generation` 每次 manifest 变更递增；`snapshot_generation` 只在 snapshot 内容或覆盖边界改变时递增。`snapshot_path` 必须是相对 `{session}/snapshots/` 的规范路径，`snapshot_hash` 是该文件 bytes 的 SHA-256。
 
@@ -953,6 +1016,8 @@ retained_bytes  = sum(canonical_json_len(f) for f in earliest_available_fact_seq
 snapshot_cursor = Some((log_id, snapshot_fact_seq, u16::MAX))  // snapshot_valid 时
 snapshot_cursor = None                                           // snapshot 缺失或失效时
 ```
+
+`time_floor`、`snapshot_created_at_logical_ms`、`snapshot_expires_at_logical_ms` 与 Content GC 的 `delete_after_ms` 判定必须读取同一个 `logical_now_ms`。manifest 不是 clock 的 owner；重启时先按 §5.5 从 `content/clock.json` + manifest + canonical facts 恢复 `logical_now_ms`，再计算 `time_floor`，最后把恢复值和重算后的窗口写回 manifest。
 
 | 条件 | 结果 |
 |---|---|
@@ -1095,43 +1160,43 @@ pub type ProjectionIndex = u16;
 
 下表是 v2.0 的 per-fact/per-slot 规范表。`projection_index` 必须等于左侧 slot 的 `repr` 值；不允许按是否产生 delta 动态重排。多个可靠 projection 的 cursor 顺序仍按 `(fact_seq, projection_index)` 排序。
 
-| `FactPayload.kind` | `projection_slot` | `projection_index` | `ProjectionPayload` typed variant | Replaceable/Ephemeral |
-|---|---|---:|---|---|
-| `session_created` | `control` | `2` | `ControlDelta::SessionCreated` | `control:current` |
-| `session_created` | `meta` | `4` | `MetaDelta::Created` | — |
-| `input_accepted` | `conversation` | `0` | `ConversationDelta::InputAccepted` | — |
-| `input_accepted` | `timeline` | `1` | `TimelineDelta::Input` | `control:activity` |
-| `turn_started` | `conversation` | `0` | `ConversationDelta::TurnStarted` | — |
-| `turn_started` | `control` | `2` | `ControlDelta::Activity` | `control:current` |
-| `model_round_started` | `control` | `2` | `ControlDelta::Round` | `control:activity` |
-| `assistant_block_sealed` | `conversation` | `0` | `ConversationDelta::AssistantBlockSealed` | — |
-| `assistant_block_sealed` | `timeline` | `1` | `TimelineDelta::Block` | `timeline:current`、`assistant_delta` 不回放 |
-| `tool_call_declared` | `conversation` | `0` | `ConversationDelta::ToolCallDeclared` | — |
-| `tool_call_declared` | `timeline` | `1` | `TimelineDelta::ToolCall` | `control:tool_current` |
-| `tool_intent` | `control` | `2` | `ControlDelta::ToolIntent` | `control:tool_current` |
-| `tool_finished` | `conversation` | `0` | `ConversationDelta::ToolFinished` | — |
-| `tool_finished` | `timeline` | `1` | `TimelineDelta::ToolResult` | `control:tool_current`、progress 不回放 |
-| `interaction_requested` | `control` | `2` | `ControlDelta::InteractionRequested` | `control:current` |
-| `interaction_resolved` | `control` | `2` | `ControlDelta::InteractionResolved` | `control:current` |
-| `interaction_expired` | `control` | `2` | `ControlDelta::InteractionExpired` | `control:current` |
-| `turn_finished` | `conversation` | `0` | `ConversationDelta::TurnFinished` | — |
-| `turn_finished` | `control` | `2` | `ControlDelta::Activity` | `control:current` |
-| `turn_interrupted` | `conversation` | `0` | `ConversationDelta::TurnInterrupted` | — |
-| `turn_interrupted` | `control` | `2` | `ControlDelta::Activity` | `control:current` |
-| `session_recovered` | `control` | `2` | `ControlDelta::SessionRecovered` | `control:current` |
-| `session_recovered` | `meta` | `4` | `MetaDelta::Recovered` | — |
-| `compaction_applied` | `conversation` | `0` | `ConversationDelta::CompactionApplied` | — |
-| `compaction_applied` | `meta` | `4` | `MetaDelta::ContextRevision` | `control:current` |
-| `session_metadata_changed` | `meta` | `4` | `MetaDelta::MetadataChanged` | `meta:current` |
-| `session_title_changed` | `meta` | `4` | `MetaDelta::TitleChanged` | `meta:current` |
-| `session_deleted` | `meta` | `4` | `MetaDelta::Deleted` | `meta:current` |
-| `workspace_resource_changed` | `resources` | `3` | `ResourceDelta::WorkspaceResourceChanged` | `resources:current`、`activity_delta` 不回放 |
-| `subagent_spawned` | `control` | `2` | `ControlDelta::SubagentSpawned` | `control:current` |
-| `subagent_spawned` | `resources` | `3` | `ResourceDelta::GraphEdge` | — |
-| `subagent_finished` | `control` | `2` | `ControlDelta::SubagentFinished` | `control:current` |
-| `subagent_finished` | `resources` | `3` | `ResourceDelta::GraphEdge` | — |
+| `FactPayload.kind` | `projection_slot` | `projection_index` | `stream_key` | `ProjectionPayload` typed variant | delivery / 辅助流 |
+|---|---|---:|---|---|---|
+| `session_created` | `control` | `2` | `channel:control` | `ControlDelta::SessionCreated` | `Reliable` + `Replaceable(control:current)` |
+| `session_created` | `meta` | `4` | `channel:control` | `MetaDelta::Created` | `Reliable` |
+| `input_accepted` | `conversation` | `0` | `channel:conversation` | `ConversationDelta::InputAccepted` | `Reliable` |
+| `input_accepted` | `timeline` | `1` | `channel:conversation` | `TimelineDelta::Input` | `Reliable` + `Ephemeral(control:activity)` |
+| `turn_started` | `conversation` | `0` | `channel:conversation` | `ConversationDelta::TurnStarted` | `Reliable` |
+| `turn_started` | `control` | `2` | `channel:control` | `ControlDelta::Activity(state=running)` | `Reliable` + `Replaceable(control:current)` |
+| `model_round_started` | `control` | `2` | `channel:control` | `ControlDelta::Round` | `Reliable` + `Ephemeral(control:activity)` |
+| `assistant_block_sealed` | `conversation` | `0` | `channel:conversation` | `ConversationDelta::AssistantBlockSealed` | `Reliable` |
+| `assistant_block_sealed` | `timeline` | `1` | `channel:conversation` | `TimelineDelta::Block` | `Reliable` + `Replaceable(timeline:current)`; `assistant_delta` 为 `Ephemeral` |
+| `tool_call_declared` | `conversation` | `0` | `channel:conversation` | `ConversationDelta::ToolCallDeclared` | `Reliable` |
+| `tool_call_declared` | `timeline` | `1` | `channel:tool` | `TimelineDelta::ToolCall` | `Reliable` + `Replaceable(control:tool_current)` |
+| `tool_intent` | `control` | `2` | `channel:tool` | `ControlDelta::ToolIntent` | `Reliable` + `Replaceable(control:tool_current)` |
+| `tool_finished` | `conversation` | `0` | `channel:conversation` | `ConversationDelta::ToolFinished` | `Reliable` |
+| `tool_finished` | `timeline` | `1` | `channel:tool` | `TimelineDelta::ToolResult` | `Reliable` + `Replaceable(control:tool_current)`; progress 为 `Ephemeral` |
+| `interaction_requested` | `control` | `2` | `channel:control` | `ControlDelta::InteractionRequested` | `Reliable` + `Replaceable(control:current)` |
+| `interaction_resolved` | `control` | `2` | `channel:control` | `ControlDelta::InteractionResolved` | `Reliable` + `Replaceable(control:current)` |
+| `interaction_expired` | `control` | `2` | `channel:control` | `ControlDelta::InteractionExpired` | `Reliable` + `Replaceable(control:current)` |
+| `turn_finished` | `conversation` | `0` | `channel:conversation` | `ConversationDelta::TurnFinished` | `Reliable` |
+| `turn_finished` | `control` | `2` | `channel:control` | `ControlDelta::Activity(state=idle)` | `Reliable` + `Replaceable(control:current)` |
+| `turn_interrupted` | `conversation` | `0` | `channel:conversation` | `ConversationDelta::TurnInterrupted` | `Reliable` |
+| `turn_interrupted` | `control` | `2` | `channel:control` | `ControlDelta::Activity(state=interrupted)` | `Reliable` + `Replaceable(control:current)` |
+| `session_recovered` | `control` | `2` | `channel:control` | `ControlDelta::SessionRecovered` | `Reliable` + `Replaceable(control:current)` |
+| `session_recovered` | `meta` | `4` | `channel:control` | `MetaDelta::Recovered` | `Reliable` |
+| `compaction_applied` | `conversation` | `0` | `channel:conversation` | `ConversationDelta::CompactionApplied` | `Reliable` |
+| `compaction_applied` | `meta` | `4` | `channel:control` | `MetaDelta::ContextRevision` | `Reliable` + `Replaceable(control:current)` |
+| `session_metadata_changed` | `meta` | `4` | `channel:control` | `MetaDelta::MetadataChanged` | `Reliable` + `Replaceable(meta:current)` |
+| `session_title_changed` | `meta` | `4` | `channel:control` | `MetaDelta::TitleChanged` | `Reliable` + `Replaceable(meta:current)` |
+| `session_deleted` | `meta` | `4` | `channel:control` | `MetaDelta::Deleted` | `Reliable` + `Replaceable(meta:current)` |
+| `workspace_resource_changed` | `resources` | `3` | `channel:tool` | `ResourceDelta::WorkspaceResourceChanged` | `Reliable` + `Replaceable(resources:current)`; `activity_delta` 为 `Ephemeral` |
+| `subagent_spawned` | `control` | `2` | `channel:control` | `ControlDelta::SubagentSpawned` | `Reliable` + `Replaceable(control:current)` |
+| `subagent_spawned` | `resources` | `3` | `channel:control` | `ResourceDelta::GraphEdge` | `Reliable` |
+| `subagent_finished` | `control` | `2` | `channel:control` | `ControlDelta::SubagentFinished` | `Reliable` + `Replaceable(control:current)` |
+| `subagent_finished` | `resources` | `3` | `channel:control` | `ResourceDelta::GraphEdge` | `Reliable` |
 
-该表的每一行都是规范性映射；新增 fact kind 或 slot 必须提升 `payload_version`，并新增行而不是改变旧行的 index。没有 delta 时可以不发布对应 `ProjectionEvent`，但 cursor 的 slot 解释保持不变。
+该表的每一行都是规范性映射；`stream_key` 只能取表中 `channel:control`、`channel:conversation`、`channel:tool`，不得出现 `session` channel。新增 fact kind 或 slot 必须提升 `payload_version`，并新增行而不是改变旧行的 index。没有 delta 时可以不发布对应 `ProjectionEvent`，但 cursor 的 slot 解释保持不变。`delivery` 列的 `Reliable` 部分占用 canonical `projection_index`；`Replaceable`/`Ephemeral` 辅助流不占用 canonical index，且必须按 §3.3 回放规则处理。
 
 ### 4.2.1 Golden projection JSON 示例
 
@@ -1140,19 +1205,19 @@ pub type ProjectionIndex = u16;
 `SessionCreated -> control:session_created`（slot `2`）：
 
 ```json
-{"event_id":"01J00000000000000000000011","source_fact_seq":1,"source_event_id":"01J00000000000000000000001","stream_key":{"kind":"channel","data":"session"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":1,"projection_index":2}}},"projection_slot":"control","projection_index":2,"payload":{"kind":"control_delta","data":{"kind":"session_created","data":{"revision":1,"session_id":"0198f1a0-0000-7000-8000-000000000001","cwd":"/workspace","model":"deepseek-v4.1-flash","schema_caps":["reliable_replay","interaction_replay"]}}}}
+{"event_id":"01J00000000000000000000011","source_fact_seq":1,"source_event_id":"01J00000000000000000000001","stream_key":{"kind":"channel","data":"control"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":1,"projection_index":2}}},"projection_slot":"control","projection_index":2,"payload":{"kind":"control_delta","data":{"kind":"session_created","data":{"revision":1,"session_id":"0198f1a0-0000-7000-8000-000000000001","cwd":"/workspace","model":"deepseek-v4.1-flash","schema_caps":["reliable_replay","interaction_replay"]}}}}
 ```
 
 `InputAccepted -> conversation:input`（slot `0`）：
 
 ```json
-{"event_id":"01J00000000000000000000012","source_fact_seq":2,"source_event_id":"01J00000000000000000000002","stream_key":{"kind":"session"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":2,"projection_index":0}}},"projection_slot":"conversation","projection_index":0,"payload":{"kind":"conversation_delta","data":{"kind":"input_accepted","data":{"revision":1,"input_id":"input_01J00000000000000000000000","input_kind":"user_text","content":{"kind":"inline","data":{"text":"hello"}},"attachments":[],"actor":{"kind":"user","id":"local"}}}}}
+{"event_id":"01J00000000000000000000012","source_fact_seq":2,"source_event_id":"01J00000000000000000000002","stream_key":{"kind":"channel","data":"conversation"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":2,"projection_index":0}}},"projection_slot":"conversation","projection_index":0,"payload":{"kind":"conversation_delta","data":{"kind":"input_accepted","data":{"revision":1,"input_id":"input_01J00000000000000000000000","input_kind":"user_text","content":{"kind":"inline","data":{"text":"hello"}},"attachments":[],"actor":{"kind":"user","id":"local"}}}}}
 ```
 
 `ToolFinished -> timeline:tool_result`（slot `1`）：
 
 ```json
-{"event_id":"01J00000000000000000000013","source_fact_seq":5,"source_event_id":"01J00000000000000000000005","stream_key":{"kind":"session"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":5,"projection_index":1}}},"projection_slot":"timeline","projection_index":1,"payload":{"kind":"timeline_delta","data":{"kind":"tool_result","data":{"revision":3,"call_id":"call_01J00000000000000000000000","terminal_status":"indeterminate","output":null,"error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false}}}}}
+{"event_id":"01J00000000000000000000013","source_fact_seq":5,"source_event_id":"01J00000000000000000000005","stream_key":{"kind":"channel","data":"tool"},"delivery":{"Reliable":{"cursor":{"log_id":"0198f1a0-0000-7000-8000-000000000002","fact_seq":5,"projection_index":1}}},"projection_slot":"timeline","projection_index":1,"payload":{"kind":"timeline_delta","data":{"kind":"tool_result","data":{"revision":3,"call_id":"call_01J00000000000000000000000","terminal_status":"indeterminate","output":null,"error":{"code":"indeterminate_after_crash","message":"non-idempotent execution not replayed","retryable":false}}}}}
 ```
 
 Workspace effect 唯一权威路径：
@@ -1226,6 +1291,7 @@ pub trait Projection: Default + Send {
   snapshots/{generation}.json  # snapshot_generation/hash/path 指向的 baseline
   content/{sha256}             # content-addressed
   content/index.jsonl          # ContentRecord，append-only
+  content/clock.json           # ContentClockRecord，replay/GC 共用逻辑 clock
   content.lock                 # content append/GC 互斥
   derived/
     conversation.json
@@ -1250,6 +1316,7 @@ SessionActor
   -> validate fact + assign fact_seq
   -> append JSON line
   -> fsync/group barrier
+  -> advance content/clock.json if fact.ts_ms is newer
   -> ProjectionSet.apply(fact)
   -> publish reliable projection
 ```
@@ -1263,6 +1330,7 @@ SessionActor
 5. `ToolIntent`、`InteractionResolved`、`InteractionExpired`、`ToolFinished` 必须独立 fsync barrier。
 6. 无副作用 fact 可以 group commit，但不得跨越 durable barrier 合并。
 7. writer lock 使用 OS file lock；锁文件不是事实源。
+8. `content/clock.json` 的推进必须发生在 canonical fact fsync 之后；clock durable 之前不得更新 replay window 或执行依赖逻辑时间的 GC。
 
 generation fencing 的唯一持久化形状：
 
@@ -1369,6 +1437,7 @@ pub struct AppendRejected {
 ```rust
 pub struct ContentRecord {
     pub content_ref: ContentRef,
+    pub byte_len: u64,
     pub created_at_logical_ms: i64,
     pub last_referenced_fact_seq: u64,
     pub retention_classes: Vec<ContentRetentionClass>,
@@ -1402,7 +1471,52 @@ pub struct ContentGcRecord {
     pub attempt: u32,
     pub error: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentClockRecord {
+    pub schema: String, // 固定 "qaqh.content-clock/v1"
+    pub logical_now_ms: i64,
+    pub source_fact_seq: u64,
+    pub source_event_id: EventId,
+    pub updated_at_ms: i64, // 仅诊断；不得参与过期判定
+}
 ```
+
+`ContentClockRecord` 是 replay window 与 Content GC 共用的唯一持久化逻辑 clock，文件位置固定为 `{data_dir}/sessions/{session_id}/content/clock.json`，文件内容是一个 JSON object，不允许 JSONL：
+
+```json
+{"schema":"qaqh.content-clock/v1","logical_now_ms":1789830000040,"source_fact_seq":5,"source_event_id":"01J00000000000000000000005","updated_at_ms":1789830000040}
+```
+
+更新顺序固定为：
+
+1. canonical fact append 并 fsync 成功。
+2. 计算 `next_logical_now_ms = max(previous_clock.logical_now_ms, fact.ts_ms)`；若值不变则跳过 clock 写入。
+3. 需要推进时，以 temp + fsync + rename + `content/` 父目录 fsync 原子替换 `content/clock.json`，记录触发推进的 `fact_seq/event_id`。
+4. clock durable 后，才允许用同一 `next_logical_now_ms` 更新 `ReplayWindowManifest.logical_now_ms`，并执行依赖逻辑时间的 GC/retention 决策。
+5. 若 clock 更新成功而 manifest 更新失败，manifest 可暂时落后；恢复算法必须用 clock 与 canonical log 的较大值修复，禁止反向把 clock 减小到 manifest 值。
+
+`logical_now_ms` 永不回退；墙钟回拨、文件 mtime、进程启动时间均不得改变它。`updated_at_ms` 只用于诊断，不得替代 `logical_now_ms`。
+
+重启恢复算法：
+
+```text
+complete_facts = 从 events.jsonl 解析出的完整 fact 前缀
+max_fact_ts = max(fact.ts_ms for fact in complete_facts)（空 log 时为 0）
+clock_value = 若 content/clock.json 存在且 schema 合法，则为 clock.logical_now_ms；否则为 0
+manifest_value = 若 replay-window.json 存在且 log_id 匹配，则为 manifest.logical_now_ms；否则为 0
+logical_now_ms = max(clock_value, manifest_value, max_fact_ts)
+
+若 clock.json 缺失、损坏或 clock.logical_now_ms < logical_now_ms：
+  以 logical_now_ms 写新的 ContentClockRecord；
+  source 取 complete_facts 中 ts_ms 最大且 fact_seq 最大的 fact；
+  没有 fact 时 source_fact_seq=0、source_event_id="00000000000000000000000000"，并立即写 clock
+
+time_floor = 满足 fact.ts_ms >= logical_now_ms - replay_window_retention_ms
+             的最小 fact_seq；全部过期则取 latest_fact_seq
+```
+
+恢复完成后，`ReplayWindowManifest.logical_now_ms` 必须被重写为同一 `logical_now_ms`，再重算 `time_floor/earliest_available_fact_seq/retained_*`。若 manifest 与 clock 都缺失，允许先从 canonical log 重建 clock，再重建 manifest；任何缺失都不得导致使用墙钟提前过期或回放已被 GC 的窗口。
 
 默认 retention：
 
@@ -1457,7 +1571,7 @@ active ref 谓词：
 - `AuditEvidence`：被 audit retention 或 legal hold 引用。
 - `UserAttachment`：由用户显式保留，默认不自动删除。
 
-所有 GC 时间判断使用 `logical_now_ms`，定义为 `max(previous_logical_now_ms, max(canonical fact ts_ms))`，持久化在 `content/index.jsonl` 的最后一条 clock record；禁止使用墙钟 `now`、文件 mtime 或进程启动时间。逻辑 clock 只允许单调前进，墙钟回拨不得让内容提前过期。
+所有 GC 时间判断使用 §5.5 定义的 `ContentClockRecord.logical_now_ms`；该值同时供 replay window 使用。禁止使用墙钟 `now`、文件 mtime 或进程启动时间。逻辑 clock 只允许单调前进，墙钟回拨不得让内容提前过期。
 
 GC 协议：
 
@@ -1527,17 +1641,27 @@ pub struct RecoveryPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryToolCompletion {
+    pub call_id: ToolCallId,
+    pub execution_id: Option<ExecutionId>,
+    pub terminal_status: ToolTerminalStatus,
+    pub output_ref: Option<ContentRef>,
+    pub error: Option<ToolError>,
+    pub metrics: ToolMetrics,
+    pub reconciled: bool,
+    pub recovery_ref: RecoveryRef,
+    pub finished_at_ms: i64,
+    pub evidence_ref: Option<ContentRef>,
+    pub evidence_fact_seq: Option<u64>,
+    pub evidence_event_id: Option<EventId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum RecoveryStep {
     MoveTornTail { from: String, to: String, bytes: u64, bytes_hash: ContentHash },
     TurnInterrupted { turn_id: TurnId, last_fact_seq: u64 },
-    ToolFinished {
-        call_id: ToolCallId,
-        execution_id: Option<ExecutionId>,
-        terminal_status: ToolTerminalStatus,
-        reconciled: bool,
-        evidence_ref: Option<ContentRef>,
-    },
+    ToolFinished { completion: RecoveryToolCompletion },
     InteractionExpired { interaction_id: InteractionId, reason: InteractionExpiryReason },
     SessionRecovered { outcome: RecoveryOutcome, torn_tail: bool, torn_bytes: Option<u64> },
 }
@@ -1553,7 +1677,9 @@ canonical step 顺序和排序键固定为：
 5. SessionRecovered（恰好一个，必须最后）
 ```
 
-`RecoveryStep::ToolFinished` 只允许 `indeterminate` 或由 evidence 确定的成功/失败终态；不得用 recovery 伪造 `denied`、`backgrounded` 或新的 attempt。`MoveTornTail` 的 `from/to` 必须使用 session 目录下的相对 canonical 路径，不得包含临时文件名、绝对路径或墙钟。
+`RecoveryStep::ToolFinished` 的 typed `completion` 必须足以逐字段构造 canonical `ToolFinished`：`call_id`、`execution_id`、`terminal_status`、`output_ref`、`error`、`metrics`、`reconciled`、`recovery_ref`、`finished_at_ms`、`evidence_ref`、`evidence_fact_seq` 和 `evidence_event_id` 均在 plan 中显式存在；nullable 字段允许为 `None`，但不得依赖恢复时重新读取墙钟或临时内存来补值。
+
+`RecoveryToolCompletion` 只允许 `indeterminate` 或由 probe/canonical evidence 确定的终态（`succeeded/failed/cancelled/timed_out`）；有 `ToolIntent` 时 `execution_id` 必须等于该 intent 的 execution id，只有 `ToolCallDeclared` 后、policy 决策前崩溃且没有 intent 的 `cancelled` 终态才允许为 `None`。`recovery_ref` 必须等于当前 batch；不得用 recovery 伪造 `denied`、`backgrounded` 或新的 attempt。`MoveTornTail` 的 `from/to` 必须使用 session 目录下的相对 canonical 路径，不得包含临时文件名、绝对路径或墙钟。
 
 `plan_hash` 的规范输入只包含上述 `RecoveryPlan`，不得包含 `plan_hash`、`RecoveryIntent`、`DeleteRecoveryIntent`、墙钟或随机值：
 
@@ -1636,9 +1762,10 @@ canonical_json({
 | 输入状态 | canonical fact 集合 | 可写性 |
 |---|---|---|
 | `TurnStarted` 无终态 | `TurnInterrupted` + final `SessionRecovered` | 恢复后可写 |
-| `ToolIntent` 无 `ToolFinished`，`NoReplay` | `ToolFinished { terminal_status=indeterminate }` + final `SessionRecovered` | 恢复后可写 |
-| `ToolIntent` 无 `ToolFinished`，`IdempotentReplay` | 一次重放后的 `ToolFinished` + final `SessionRecovered` | 重放后写 |
-| `ToolIntent` 无 `ToolFinished`，`Reconcile` | 证据确定的 `ToolFinished { reconciled=true }`，或 `indeterminate` + final `SessionRecovered` | 对账后写 |
+| `ToolCallDeclared` 无 `ToolIntent`/`ToolFinished`（policy 决策前崩溃） | `ToolFinished { terminal_status=cancelled, execution_id=None, metrics=<零执行>, error.code=recovery_before_policy_decision }` + final `SessionRecovered` | 恢复后可写 |
+| `ToolIntent` 无 `ToolFinished`，`NoReplay` | `ToolFinished { terminal_status=indeterminate, metrics=<零执行或已知执行 metrics> }` + final `SessionRecovered` | 恢复后可写 |
+| `ToolIntent` 无 `ToolFinished`，`IdempotentReplay` | 一次重放后的成功/失败 `ToolFinished` + final `SessionRecovered`；无法取得结果时写 `indeterminate` | 重放后写 |
+| `ToolIntent` 无 `ToolFinished`，`Reconcile` | probe/canonical evidence 确定的成功/失败 `ToolFinished { reconciled=true }`，或 `indeterminate` + final `SessionRecovered` | 对账后写 |
 | `InteractionRequested` 无终态且未过期 | final `SessionRecovered { actions=[] }`；不重发 modal fact | 可写 |
 | `InteractionRequested` 已过期/重启策略取消 | `InteractionExpired` + final `SessionRecovered` | 恢复后写 |
 | `CompactionApplied` 无 checkpoint | 仅 final `SessionRecovered`；从 active facts 重建 context | 重建后写 |
@@ -1650,9 +1777,57 @@ canonical_json({
 
 1. 查找同 `call_id` 的 `ToolFinished`；存在则不再执行。
 2. 按 §2.3 的组合优先级读取 `replay_capability`、`side_effect_class`、`idempotency_key`。
-3. `NoReplay` 写 `indeterminate`；`Reconcile` 只写 evidence 确定的终态或 `indeterminate`；`IdempotentReplay` 才允许一次同 identity 重放。
-4. `reconciled=true` 必须带 evidence ref；`call_id` 本身不能宣称 exactly-once。
-5. 三类 crash fixture 必须分别覆盖 `NoReplay`、`IdempotentReplay`、`Reconcile`，见 §10.1。
+3. `NoReplay` 由 builder 写 `indeterminate`；`Reconcile` 只接受 probe/canonical evidence 确定的终态，否则写 `indeterminate`；`IdempotentReplay` 才允许一次同 identity 重放，并以 typed result 构造成功/失败终态。
+4. `reconciled=true` 必须带 `evidence_ref`，或带 canonical fact 的 `evidence_fact_seq + evidence_event_id`；`call_id` 本身不能宣称 exactly-once。
+5. 四类 replay capability/副作用/对账组合必须由 §10.1 的显式 fixture 覆盖。
+
+#### 6.3.1 Recovery fact builder
+
+probe evidence 的 canonical shape：
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProbeOutcome { Succeeded, Failed, Indeterminate }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolProbeEvidence {
+    pub schema: String, // "qaqh.tool-probe/v1"
+    pub call_id: ToolCallId,
+    pub execution_id: ExecutionId,
+    pub outcome: ToolProbeOutcome,
+    pub output_ref: Option<ContentRef>,
+    pub error: Option<ToolError>,
+    pub output_bytes: u64,
+    pub progress_bytes_total: u64,
+    pub observed_at_ms: i64,
+}
+```
+
+`ToolProbeEvidence` 的 canonical JSON 形状固定为：
+
+```json
+{"schema":"qaqh.tool-probe/v1","call_id":"call_01J00000000000000000000000","execution_id":"exec_01J00000000000000000000000","outcome":"succeeded","output_ref":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","error":null,"output_bytes":12,"progress_bytes_total":12,"observed_at_ms":1789830000040}
+```
+
+builder 的输入是 pre-recovery canonical log、同 call 的 `ToolCallDeclared`/唯一 `ToolIntent`、当前 `RecoveryRef`，以及按 capability 得到的 probe evidence 或一次 idempotent replay 的 typed result。builder 不读取墙钟、文件 mtime 或进程内存；所有输出必须可从这些输入重算。
+
+构造规则按以下顺序执行，顺序不可交换：
+
+1. 若 canonical log 已有同 `call_id` 的 `ToolFinished`，返回该终态，不产生 recovery step。
+2. 若 call 有 `ToolIntent`，校验其唯一性以及 `call_id/execution_id`；同 call 多个 intent 时 fail-closed，不得伪造 completion。
+3. 若 call 没有 `ToolIntent` 但有 `ToolCallDeclared`，先检查 interaction：仍有 pending `InteractionRequested` 且未过期时不生成 `ToolFinished`，保留 call open，等待正常 resolution/expiry。若 `InteractionResolved(rejected)` 则构造 `denied/approval_rejected`，若 `InteractionExpired` 则构造 `cancelled/approval_expired`；两者都不存在时构造 `cancelled/recovery_before_policy_decision`。无 intent 终态路径的 `execution_id=None`、`reconciled=false`、`output_ref=None`、`metrics` 为零执行 metrics，`finished_at_ms` 取对应 terminal fact 的 `ts_ms` 或 `ToolCallDeclared.ts_ms`。
+4. 若 call 既没有 `ToolIntent` 也没有 `ToolCallDeclared`，fail-closed，不得伪造 completion。
+5. `Reconcile` 读取 `probe_ref` 对应内容并解析为 `ToolProbeEvidence`；`schema`、`call_id`、`execution_id` 任一不匹配时视为无结论，而不是失败。
+6. canonical evidence 只接受与 call 明确关联的终态事实：`SubagentFinished.parent_call_id == call_id` 映射为 `completed -> succeeded`、`failed -> failed`、`cancelled -> cancelled`、`timed_out -> timed_out`。`WorkspaceResourceChanged.source_call_id` 只表示资源 revision，单独出现不能证明普通 tool 成功或失败。
+7. `NoReplay` 或无有效 evidence 的 `Reconcile` 生成 `terminal_status=indeterminate`、`output_ref=None`、`error={code:"indeterminate_after_crash",message:"tool outcome could not be determined",retryable:false}`、`reconciled=false`。
+8. `IdempotentReplay` 只允许以同 `call_id/execution_id/idempotency_key` 重放一次；typed result 为成功时生成 `succeeded`，为稳定错误时生成 `failed`，无法取得 typed result 时生成 `indeterminate`。重放路径的 `reconciled=false`，`evidence_ref=None`。
+9. probe `succeeded/failed` 与 canonical `SubagentFinished` 生成确定终态：`reconciled=true`；probe 终态设置 `evidence_ref=probe_ref`，canonical 终态设置 `evidence_fact_seq` 与 `evidence_event_id`，有 `result_ref` 时同时设置 `evidence_ref`。
+10. 成功终态必须有 `output_ref` 或显式允许空输出的 typed result；失败终态必须有 `ToolError`。缺少必需 output/error 时降级为 `indeterminate`，不得凭空补 message 或摘要。
+11. `metrics.started_at_ms = ToolIntent.intent_at_ms`；无 intent 路径取 `ToolCallDeclared.ts_ms`。`finished_at_ms` 取 `max(intent_or_declared_at_ms, probe.observed_at_ms, canonical evidence fact.ts_ms, idempotent replay observed_at_ms)`；无任何观测时间时取 `intent_or_declared_at_ms`。`metrics.finished_at_ms = finished_at_ms`，`retry_count=0`；`output_bytes/progress_bytes_total` 取 evidence/typed result 的显式计数，canonical evidence 缺失计数时按 `output_ref` 的 ContentRecord byte length 计算，仍不可得则为 0。
+12. `RecoveryToolCompletion.execution_id` 在有 intent 时必须等于 intent 的 execution id，在无 intent 的 `ToolCallDeclared` 路径必须为 `None`；`recovery_ref` 必须等于当前 batch；`ToolFinished` canonical fact 的 `output_ref/error/recovery_ref/finished_at_ms/metrics` 全部由 completion 逐字段复制，不允许恢复时再补算。
+
+无 intent recovery 的 `ToolError.message` 分别固定为 `approval rejected`、`approval expired`、`recovery before policy decision`，`retryable=false`；不得写空 message。
 
 ### 6.4 Interaction recovery
 
@@ -1918,7 +2093,7 @@ E2E 证据要求：
 | I2 | `fact_seq` 连续 + snapshot cursor | crash 注入后 seq 连续；snapshot 不领先 |
 | I3 | ProjectionSet + ContentUnavailable + derived/ | 删除 derived 后 rebuild 等价；GC content 保留 marker |
 | I4 | TurnStarted/Finished/Interrupted | 并发输入/cancel/resume 单 active turn |
-| I5 | ToolIntent/ToolFinished | 每 call 唯一终态；deny/ask/backgrounded 均有终态 |
+| I5 | ToolIntent/ToolFinished | 每 call 恰好一个终态；执行阶段恰好一个 Intent；deny/ask/backgrounded 均有终态 |
 | I6 | replay_capability + side_effect_class/idempotency | NoReplay/IdempotentReplay/Reconcile crash fixture |
 | I7 | typed output/content ref | model/display/resource/service 同源 |
 | I8 | ReliableCursor + ReplayWindowManifest | `(fact_seq, projection_index)` 严格递增；snapshot/旧 cursor 按 expiry 表处理 |
@@ -1941,18 +2116,20 @@ E2E 证据要求：
 | Fixture | 内容 | expected fact count | terminal / 状态断言 | projection revision | ContentUnavailable |
 |---|---|---|---|---|---|
 | `minimal-session.jsonl` | SessionCreated + InputAccepted + TurnStarted + TurnFinished | 4 | turn=`completed` | 每个 slot 可重建且 revision 单调 | none |
-| `multi-round.jsonl` | 两个 ModelRoundStarted + AssistantBlockSealed | 4 | turn 未闭合时 fail-closed | block seal 顺序稳定 | none |
+| `multi-round.jsonl` | TurnStarted + 两个 ModelRoundStarted + AssistantBlockSealed | 4 | turn 未闭合时 fail-closed | block seal 顺序稳定 | none |
 | `projection-session-created.json` | §4.2.1 control slot 2 golden | fact_count=1; projection_events=1 | control state=`created` | `control.revision=1` | none |
 | `projection-input-accepted.json` | §4.2.1 conversation slot 0 golden | fact_count=1; projection_events=1 | input=`accepted` | `conversation.revision=1` | none |
 | `projection-tool-finished.json` | §4.2.1 timeline slot 1 golden | fact_count=1; projection_events=1 | `indeterminate` | `timeline.revision=3` | none |
 | `tool-success.jsonl` | ToolCallDeclared + Intent + Finished succeeded | 3 | `succeeded` 唯一 | control/timeline 一致 | none |
-| `tool-crash-no-replay.jsonl` | Intent(no_replay) + crash | 2（Intent + Finished） | `indeterminate` | control/timeline 一致 | none |
-| `tool-crash-idempotent-replay.jsonl` | Intent(idempotent_replay, key) + crash + replay | 2 | 同 call 最终仅一个终态 | replay 前后 revision 不重复 | none |
-| `tool-crash-reconcile.jsonl` | Intent(reconcile, probe_ref) + crash + probe | 2 | `reconciled=true` 的确定终态或 `indeterminate` | control/timeline 一致 | none |
+| `replay-matrix-no-replay-readonly.jsonl` | Intent(no_replay, read_only) + crash | 2（Intent + Finished） | `indeterminate`，不重放 | control/timeline 一致 | none |
+| `replay-matrix-no-replay-side-effect.jsonl` | Intent(no_replay, workspace_write) + crash | 2（Intent + Finished） | `indeterminate`，不重放、不二次副作用 | control/timeline 一致 | none |
+| `replay-matrix-idempotent-side-effect.jsonl` | Intent(idempotent_replay, key, workspace_write) + crash + replay | 2 | 同 call 最终仅一个成功/失败终态 | replay 前后 revision 不重复 | none |
+| `replay-matrix-reconcile-side-effect-conclusive.jsonl` | Intent(reconcile, external, probe_ref) + crash + conclusive probe | 2 | `reconciled=true` 的确定终态 | control/timeline 一致 | none |
+| `replay-matrix-reconcile-side-effect-indeterminate.jsonl` | Intent(reconcile, external, probe_ref) + crash + inconclusive probe | 2 | `indeterminate`，`reconciled=false` | control/timeline 一致 | none |
 | `tool-indeterminate.jsonl` | Intent + crash + Finished indeterminate | 2 | `indeterminate` | control/timeline 一致 | none |
-| `policy-deny.jsonl` | ToolCallDeclared + ToolFinished(denied) | 2 | `denied`，无 Intent，`metrics=null` | control revision 前进一次 | none |
-| `policy-ask-rejected.jsonl` | Requested + Resolved(rejected) + Finished(denied) | 3 | interaction=`resolved`; call=`denied` | control revision 前进一次 | none |
-| `policy-ask-expired.jsonl` | Requested + Expired + Finished(cancelled) | 3 | interaction=`expired`; call=`cancelled` | control revision 前进一次 | none |
+| `policy-deny.jsonl` | ToolCallDeclared + ToolFinished(denied) | 2 | `denied`，无 Intent，零执行 metrics | control revision 前进一次 | none |
+| `policy-ask-rejected.jsonl` | Requested + Resolved(rejected) + Finished(denied) | 3 | interaction=`resolved`; call=`denied`，无 Intent，零执行 metrics | control revision 前进一次 | none |
+| `policy-ask-expired.jsonl` | Requested + Expired + Finished(cancelled) | 3 | interaction=`expired`; call=`cancelled`，无 Intent，零执行 metrics | control revision 前进一次 | none |
 | `interaction-pending.jsonl` | InteractionRequested + restart | 1 | interaction=`pending` | 只重放一次 | none |
 | `interaction-resolved.jsonl` | Requested + 一个 Resolved | 2 | interaction=`resolved`，终态唯一 | control revision 前进一次 | none |
 | `interaction-duplicate-resolution.jsonl` | canonical 只含 Requested + Resolved；第二个 resolution 在 `interaction-duplicate-resolution.rejected.json` | 2 | 第二个输入被拒绝，canonical 终态不变 | revision 不前进 | none |
@@ -1980,6 +2157,15 @@ E2E 证据要求：
 | `writer-fence-stale.jsonl` | epoch 切换后旧 writer append | 0（拒绝输入） | `E_STALE_WRITER`，无新 fact | 不前进 | none |
 
 `interaction-duplicate-resolution.jsonl` 的修正语义是：canonical fixture 只有 `InteractionRequested` 与一个 `InteractionResolved` 两行；重复 resolution 只能存在于单独的 rejected input 文件，不能被写入 canonical JSONL，也不能产生第三行或新 revision。
+
+Replay capability/副作用/对账组合的四个规范单元必须全部有独立 fixture：
+
+| 单元 | capability | side effect | 对账输入 | fixture | 期望 |
+|---:|---|---|---|---|---|
+| 1 | `no_replay` | `read_only` | 无 | `replay-matrix-no-replay-readonly.jsonl` | 不重放，唯一 `indeterminate` |
+| 2 | `no_replay` | `workspace_write/process/network/external` | 无 | `replay-matrix-no-replay-side-effect.jsonl` | 不重放，唯一 `indeterminate`，无二次副作用 |
+| 3 | `idempotent_replay` | 有副作用且 key 稳定 | typed replay result | `replay-matrix-idempotent-side-effect.jsonl` | 唯一成功/失败终态，重复 load 不重复副作用 |
+| 4 | `reconcile` | 有副作用且 probe 可判定 | probe conclusive/inconclusive | `replay-matrix-reconcile-side-effect-conclusive.jsonl` + `replay-matrix-reconcile-side-effect-indeterminate.jsonl` | 前者确定终态且 `reconciled=true`；后者唯一 `indeterminate` |
 
 ### 10.1.1 最小 JSONL 样例
 
@@ -2013,6 +2199,7 @@ cargo test -p qaqh-session --test session_fact_v2 -- --exact session_fact_v2::en
 cargo test -p qaqh-session --test projection -- --exact projection::golden_projection_shapes
 cargo test -p qaqh-session --test projection -- --exact projection::static_slot_mapping
 cargo test -p qaqh-session --test tool_recovery -- --exact tool_recovery::replay_capability_priority
+cargo test -p qaqh-session --test tool_recovery -- --exact tool_recovery::replay_capability_matrix
 cargo test -p qaqh-session --test policy_lifecycle -- --exact policy_lifecycle::ask_deny_terminal
 cargo test -p qaqh-session --test recovery -- --exact recovery::batch_idempotency
 cargo test -p qaqh-session --test recovery -- --exact recovery::plan_hash_has_no_self_reference
@@ -2043,6 +2230,7 @@ run_exact() {
 |---:|---|
 | 1 projection/wire schema 与 golden JSON | `cargo test -p qaqh-session --test projection -- --exact projection::golden_projection_shapes` |
 | 2 replay capability 优先级 | `cargo test -p qaqh-session --test tool_recovery -- --exact tool_recovery::replay_capability_priority` |
+| 2a replay capability/副作用/对账四单元 | `cargo test -p qaqh-session --test tool_recovery -- --exact tool_recovery::replay_capability_matrix` |
 | 3 policy lifecycle | `cargo test -p qaqh-session --test policy_lifecycle -- --exact policy_lifecycle::ask_deny_terminal` |
 | 4 recovery batch 幂等 | `cargo test -p qaqh-session --test recovery -- --exact recovery::batch_idempotency` |
 | 5 plan_hash 无自引用 | `cargo test -p qaqh-session --test recovery -- --exact recovery::plan_hash_has_no_self_reference` |
@@ -2081,11 +2269,12 @@ B 在 #106 可直接反证：
 ### 11.1 本 spec 完成后允许进入的 P0 Gate
 
 - `session-fact-v2` 字段级 schema 已冻结。
+- 全部 `FactPayload` variant 的 golden JSON 与 `ActivityState` 闭集已冻结。
 - `ProjectionEvent`/`ProjectionPayload`/`WireEvent`/`StreamKey` 与 per-fact slot 表已冻结。
 - Tool replay capability、policy lifecycle 与唯一 `ToolFinished` 终态已冻结。
 - 复合 cursor、replay、dedupe、expiry 已冻结。
 - recovery batch、plan_hash 与幂等键已冻结。
-- snapshot/replay window、ContentUnavailable、content quota 与 GC 逻辑 clock 已冻结。
+- snapshot/replay window、`ContentClockRecord`、ContentUnavailable、content quota 与 GC 逻辑 clock 已冻结。
 - v1 `Last-Event-ID` 映射规则已冻结。
 - 双写、legacy mapping 唯一键、writer fencing、cutover/rollback 阈值与 CLI 已冻结。
 - fixture/反证清单已冻结。
