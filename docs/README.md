@@ -115,13 +115,14 @@
 | spec | [2026-09-17-工具结果展示层契约-spec.md](./spec/2026-09-17-工具结果展示层契约-spec.md) | **已被 09-18 跨仓契约取代**，保留为量化证据与设计参照（悬空引用已修复） |
 | spec | [2026-09-18-工具结果展示契约-v1-spec.md](./spec/2026-09-18-工具结果展示契约-v1-spec.md) | **草案待评审；前后端唯一事实源**；修复评审阻塞项（错误承载位 / ToolError.code / display(args) / 超时取消 / 归属与兼容 / H11 分期） |
 | spec | [2026-09-19-审计账本v2-spec.md](./spec/2026-09-19-审计账本v2-spec.md) | **核心已落地**（链/校验/双写/拒绝记账 + 端到端测试）；留存/签名/查询 CLI 待排期（§7） |
-| spec | [2026-09-20-session-fact-v2-schema-spec.md](./spec/2026-09-20-session-fact-v2-schema-spec.md) | **P0 冻结候选**：#105 字段级 fact schema、复合 cursor、recovery 与 cutover；待 #106 独立反证 |
+| spec | [2026-09-20-session-fact-v2-schema-spec.md](./spec/2026-09-20-session-fact-v2-schema-spec.md) | **已冻结并合并**：#105 字段级 fact schema、复合 cursor、recovery 与 cutover；approved @ `83a36f2`，merge `7000322` |
+| report | [2026-09-20-v2-p0-验收矩阵与反证-report.md](./report/2026-09-20-v2-p0-验收矩阵与反证-report.md) | **已合并**：#106 I1-I15 / P0-P6 验收矩阵、六类边界与 24 个反例；merge `5e0a9a9` |
 | report | [2026-09-19-测试缺口盘点-v2重构前-report.md](./report/2026-09-19-测试缺口盘点-v2重构前-report.md) | **v2.0 重构前测试部署输入**：P0 五项（编排表征 ✅ / 重放等价 ✅ / 权限矩阵 / SDK 双路径 / e2e tier） |
 | plan | [2026-09-15-workspace工具层契约重写-plan.md](./plan/2026-09-15-workspace工具层契约重写-plan.md) | 草案待评审，P0–P8 **零代码落地** |
 | plan | [2026-09-12-session级模型配料-plan.md](./plan/2026-09-12-session级模型配料-plan.md) | 草案待评审 |
 | todo | [README.md](./todo/README.md) / [2026-09-17-buglist复核-report.md](./todo/2026-09-17-buglist复核-report.md) / [2026-09-17-buglist复核-checklist.md](./todo/2026-09-17-buglist复核-checklist.md) | 在线 open 项索引；N-5 另有独立 buglist |
-| handoff | [2026-09-18-工具结果展示契约落地-handoff.md](./handoff/2026-09-18-工具结果展示契约落地-handoff.md) | **当前交接** |
-| handoff | [2026-09-17-buglist复核九批次执行-handoff.md](./handoff/2026-09-17-buglist复核九批次执行-handoff.md) | 上一轮交接（已完成） |
+| handoff | [2026-09-20-v2-P0冻结与验收收口-handoff.md](./handoff/2026-09-20-v2-P0冻结与验收收口-handoff.md) | **当前交接**：v2 设计冻结完成，下一步进入实现 |
+| handoff | [2026-09-18-工具结果展示契约落地-handoff.md](./handoff/2026-09-18-工具结果展示契约落地-handoff.md) | 上一轮交接（已完成） |
 | report | [2026-09-12-exec与process工具设计评审-report.md](./report/2026-09-12-exec与process工具设计评审-report.md) | 被上述**未落地 plan** 的 §9 与 P6 引用 |
 | report | [2026-09-13-codex-exec设计对照与修订-report.md](./report/2026-09-13-codex-exec设计对照与修订-report.md) | 同上 |
 | 模板 | [TEMPLATE.md](./report/TEMPLATE.md) | report 写作规范，非内容 |
