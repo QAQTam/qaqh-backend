@@ -337,7 +337,7 @@ crates/qaqh-runtime/src/ringing/timeline_hub.rs:445:    pub fn enable_turn_offlo
 
 #### 修复建议
 
-沿用 `docs/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md` §3.6 的既有结论：**启用前必须先处理** `drop(store)` 空操作告警（`timeline_hub.rs:454-455,468`，对引用调用 `drop`，编译器已报 `dropping_references`）与持久化路径 ABBA 锁序。
+沿用 `docs/archive/2026-09/report/2026-09-12-timeline持久化死锁与debug桥token泄露-report.md` §3.6 的既有结论：**启用前必须先处理** `drop(store)` 空操作告警（`timeline_hub.rs:454-455,468`，对引用调用 `drop`，编译器已报 `dropping_references`）与持久化路径 ABBA 锁序。
 
 **补充建议（本报告新增）**：`rehydrate_offloaded_turns`（`timeline_hub.rs:485-509`）的壳判定过松，启用 offload 前应一并收紧：
 

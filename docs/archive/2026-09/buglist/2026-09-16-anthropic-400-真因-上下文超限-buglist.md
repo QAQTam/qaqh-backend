@@ -66,7 +66,7 @@
 4. **另两条协议路径同款图片重复**：`chat_completions_api.rs:775/866`、
    `responses_api.rs` 有同形的 inline + ImageRef 双份，需一并去重（含 `image_index`
    计数/`dropped_images` 语义核对）。
-5. **`docs/buglist/2026-09-16-read_image连发触发400-buglist.md` 的结论需按本文修正**：
+5. **`docs/archive/2026-09/buglist/2026-09-16-read_image连发触发400-buglist.md` 的结论需按本文修正**：
    那里记录的根因（tool_result 交织形态）已被证伪。
 
 ## 复盘

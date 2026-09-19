@@ -33,6 +33,7 @@ pub fn is_subagent_sandbox() -> bool {
 }
 
 /// Identity of a single tool invocation destined for a handler.
+#[derive(Debug, Clone)]
 pub struct ToolInvocation {
     pub session_id: String,
     pub call_id: String,
@@ -43,6 +44,31 @@ pub struct ToolInvocation {
     pub category: crate::permission::ToolCategory,
 }
 
+/// 授权凭证的签发路径（审计用）：这次调用**为什么被放行**。
+///
+/// 凭证本身不区分签发路径（单次性由类型保证），但审计账本必须能回答
+/// 「自动放行还是用户批准」——决策链因此显式随凭证传递。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantKind {
+    /// 策略自动放行（含 MCP D5 快路径与 Level 4 bypass）。
+    Auto,
+    /// 用户在审批通道显式批准（一次性凭证）。
+    UserApproved,
+    /// 子代理沙箱内自动批准（工作区内文件操作）。
+    SandboxAuto,
+}
+
+impl GrantKind {
+    /// 审计词汇表（v2 `decision.outcome`）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::UserApproved => "user_approved",
+            Self::SandboxAuto => "sandbox_auto",
+        }
+    }
+}
+
 /// Authorization proof required to dispatch a handler.
 ///
 /// Fields and construction stay private to this crate. External callers can
@@ -51,6 +77,7 @@ pub struct AuthorizedToolCall {
     invocation: ToolInvocation,
     resources: Vec<PathBuf>,
     workspace_root: PathBuf,
+    grant: GrantKind,
     _sealed: (),
 }
 
@@ -59,13 +86,20 @@ impl AuthorizedToolCall {
         invocation: ToolInvocation,
         resources: Vec<PathBuf>,
         workspace_root: PathBuf,
+        grant: GrantKind,
     ) -> Self {
         Self {
             invocation,
             resources,
             workspace_root,
+            grant,
             _sealed: (),
         }
+    }
+
+    /// 凭证签发路径（审计用）。
+    pub fn grant(&self) -> GrantKind {
+        self.grant
     }
 
     pub fn session_id(&self) -> &str {
@@ -96,8 +130,8 @@ impl AuthorizedToolCall {
         &self.workspace_root
     }
 
-    pub(crate) fn into_parts(self) -> (ToolInvocation, Vec<PathBuf>, PathBuf) {
-        (self.invocation, self.resources, self.workspace_root)
+    pub(crate) fn into_parts(self) -> (ToolInvocation, Vec<PathBuf>, PathBuf, GrantKind) {
+        (self.invocation, self.resources, self.workspace_root, self.grant)
     }
 }
 
@@ -235,6 +269,7 @@ impl PermissionChallenge {
             invocation,
             self.resources,
             self.workspace_root,
+            GrantKind::UserApproved,
         ))
     }
 }
@@ -292,6 +327,7 @@ pub fn admit(
                 invocation,
                 resources,
                 crate::permission::resolve_target_path(workspace_root.to_path_buf()),
+                GrantKind::Auto,
             ));
         }
     }
@@ -314,6 +350,7 @@ pub fn admit(
                 invocation,
                 resources,
                 workspace_root,
+                GrantKind::Auto,
             ))
         }
         crate::permission::PermissionDecision::AskUser {
@@ -341,6 +378,7 @@ pub fn admit(
                         invocation,
                         resources,
                         workspace_root,
+                        GrantKind::SandboxAuto,
                     ))
                 } else {
                     // Exec / Net / 跨 workspace：自动拒绝，防止越狱。

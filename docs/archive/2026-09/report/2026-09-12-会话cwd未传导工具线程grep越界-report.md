@@ -145,7 +145,7 @@ cargo clippy -p qaqh-workspace -p qaqh-runtime --all-targets
 
 | 路径 | 类型 | 是否落盘 | 说明 |
 |---|---|---|---|
-| `docs/report/2026-09-12-会话cwd未传导工具线程grep越界-report.md` | 本报告 | ✅ | 即本文件 |
+| `docs/archive/2026-09/report/2026-09-12-会话cwd未传导工具线程grep越界-report.md` | 本报告 | ✅ | 即本文件 |
 | — | 代码改动 | 无 | 纯分析，未修改任何源码 |
 | 会话内调试命令记录 | 过程物 | 会话日志 | git -S/show 命令原文见附录 B |
 
