@@ -1812,6 +1812,11 @@ plan_hash = sha256(canonical_json({
 
 `child_terminal_digest` 的规范输入是 parent 当前开放 `SubagentSpawned` edge 对应 child log 的稳定终态证据数组，按 `child_session_id` 排序：`{child_session_id, child_log_id, terminal_fact_seq, terminal_event_id, status, parent_call_id, result_ref, finished_at_ms}`；child 尚未 terminal 时使用空数组的 sha256。该字段集必须等于 `RecoverySubagentCompletion` 去掉 `recovery_ref` 后的字段集；`RecoveryAction::subagent_finished` 与 `RecoveryStep::SubagentFinished.completion` 则必须包含完整的 9 字段（含 `recovery_ref`）并逐字段同构。新增 completion 字段时必须同步 digest 与 action。child terminal 证据变化必须产生新的 batch key，禁止复用已闭合的 parent recovery batch。
 
+| 结构 | 字段集合 | 数量 |
+|---|---|---:|
+| `child_terminal_digest` 输入 | `child_session_id`, `child_log_id`, `terminal_fact_seq`, `terminal_event_id`, `status`, `parent_call_id`, `result_ref`, `finished_at_ms` | 8 |
+| `RecoverySubagentCompletion` / `RecoveryStep::SubagentFinished` / `RecoveryAction::subagent_finished` | 上述 8 字段 + `recovery_ref` | 9 |
+
 恢复批次协议：
 
 1. 从 pre-recovery canonical log 计算 `recovery_input_fingerprint` 和 batch key；batch key 为 `(log_id, recovery_input_fingerprint, last_good_fact_seq)`。
@@ -2293,7 +2298,7 @@ I17 的 canonical 文本固定为：
 | `recovery-unknown-fact.jsonl` | 已知前缀 + unknown kind + 已知后缀 | 3（前缀 + unknown line + final SessionRecovered） | `outcome=read_only_upgrade_required` | 后缀不产生 revision | none |
 | `recovery-upgrade-supersede.jsonl` | read-only marker + 新 writer 理解全部 payload version | 2（旧 marker + writable supersede marker） | `outcome=writable`，actions=`upgrade_superseded` | 升级前 revision 不变，升级后恢复单调 | none |
 | `recovery-upgrade-supersede-crash.jsonl` | writable marker 已 durable，`SessionRecovered` 前崩溃 | 2（旧 marker + 补写 final SessionRecovered） | 不再次递增 generation；`previous_recovery_id == marker.last_recovery_id` | 升级后恢复单调，无第二个 action | none |
-| `recovery-input-admission.jsonl` | InputAccepted(input_purpose=trigger_turn) + crash before TurnStarted | 3（InputAccepted + TurnStarted + final SessionRecovered） | `expected_turn_started_count=1`；同一 input 只有一个 TurnStarted | conversation slot 0 与 control slot 2 各发布一次；slot 1 仅属 timeline，不参与本断言 | none |
+| `recovery-input-admission.jsonl` | InputAccepted(input_purpose=trigger_turn) + crash before TurnStarted | 3（InputAccepted + TurnStarted + final SessionRecovered） | `expected_turn_started_count=1`；同一 input 只有一个 TurnStarted | `expected_turn_projection_count=2`：conversation slot 0 与 control slot 2 各一次；slot 1 仅属 timeline，不参与本断言 | none |
 | `recovery-input-queue-only.jsonl` | InputAccepted(input_purpose=queue_only) + crash before TurnStarted | 2（InputAccepted + final SessionRecovered） | `expected_turn_started_count=0`；不补 `TurnStarted` | `expected_turn_projection_count=0`；InputAccepted 的 conversation/timeline revision 正常前进 | none |
 | `recovery-subagent-edge.jsonl` | SubagentSpawned + child terminal + parent restart | 3（Spawned + Finished + final SessionRecovered） | child edge 只闭合一次 | control revision 前进一次 | none |
 | `recovery-tool-denied.jsonl` | ToolCallDeclared + InteractionResolved(rejected) + parent restart | 3（Declared + Resolved + denied Finished） | `terminal_status=denied`，`execution_id=None`，零执行 metrics；`actions=[tool_finished]` | control/timeline revision 各前进一次 | none |
