@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use qaqh_runtime::agent::tool_outbox;
+use qaqh_runtime::agent::tool_outbox::{self, FsyncPhase};
 
 /// fsync 故障注入：命中的路径要么延迟 `delay`、要么计时返回。
 struct FaultFsyncHook {
@@ -36,6 +36,10 @@ struct FaultFsyncHook {
     delay: Option<Duration>,
     /// 累计延迟次数（诊断用）。
     hits: AtomicUsize,
+    /// 显式 flush 路径命中次数。
+    explicit_hits: AtomicUsize,
+    /// 后台 flusher 路径命中次数。
+    background_hits: AtomicUsize,
 }
 
 /// 闸门式 fsync 钩子：命中后挂起在钩子内，直到测试显式放行。
@@ -48,6 +52,17 @@ struct GatedFsyncHook {
     entered: AtomicUsize,
     released: std::sync::atomic::AtomicBool,
     hits: AtomicUsize,
+}
+
+/// 同时观察显式/后台两条 fsync 路径；后台命中时停在闸门内，显式命中时检查
+/// 目标文件是否已经包含调用方刚追加的记录。
+struct ExplicitBarrierHook {
+    background_path: PathBuf,
+    explicit_path: PathBuf,
+    background_entered: std::sync::atomic::AtomicBool,
+    explicit_entered: std::sync::atomic::AtomicBool,
+    release_background: std::sync::atomic::AtomicBool,
+    saw_explicit_record: std::sync::atomic::AtomicBool,
 }
 
 impl GatedFsyncHook {
@@ -76,9 +91,9 @@ fn install_gated_hook(target: PathBuf) -> Arc<GatedFsyncHook> {
         hits: AtomicUsize::new(0),
     });
     let weak = Arc::downgrade(&hook);
-    tool_outbox::set_fsync_hook(Some(Box::new(move |path: &Path| {
+    tool_outbox::set_fsync_hook(Some(Arc::new(move |path: &Path, phase: FsyncPhase| {
         let Some(hook) = weak.upgrade() else { return };
-        if path != hook.target {
+        if phase != FsyncPhase::Explicit || path != hook.target {
             return;
         }
         hook.hits.fetch_add(1, Ordering::SeqCst);
@@ -96,14 +111,20 @@ fn install_hook(target: PathBuf, delay: Option<Duration>) -> Arc<FaultFsyncHook>
         target,
         delay,
         hits: AtomicUsize::new(0),
+        explicit_hits: AtomicUsize::new(0),
+        background_hits: AtomicUsize::new(0),
     });
     let weak = Arc::downgrade(&hook);
-    tool_outbox::set_fsync_hook(Some(Box::new(move |path: &Path| {
+    tool_outbox::set_fsync_hook(Some(Arc::new(move |path: &Path, phase: FsyncPhase| {
         let Some(hook) = weak.upgrade() else { return };
         if path != hook.target {
             return;
         }
         hook.hits.fetch_add(1, Ordering::SeqCst);
+        match phase {
+            FsyncPhase::Explicit => hook.explicit_hits.fetch_add(1, Ordering::SeqCst),
+            FsyncPhase::Background => hook.background_hits.fetch_add(1, Ordering::SeqCst),
+        };
         if let Some(delay) = hook.delay {
             std::thread::sleep(delay);
         }
@@ -120,6 +141,27 @@ fn temp_root(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("create temp root");
     root
+}
+
+fn shard_index_for_test(path: &Path) -> usize {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.as_os_str().to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (hash as usize) % 16
+}
+
+fn distinct_shard_dirs(root: &Path) -> (PathBuf, PathBuf) {
+    let first = root.join("shard-a");
+    let first_index = shard_index_for_test(&tool_outbox::outbox_path(&first));
+    for index in 0..128 {
+        let candidate = root.join(format!("shard-b-{index}"));
+        if shard_index_for_test(&tool_outbox::outbox_path(&candidate)) != first_index {
+            return (first, candidate);
+        }
+    }
+    panic!("failed to find two outbox paths in distinct shards");
 }
 
 /// 1. 慢会话的批量化 fsync 不得阻塞其它会话的追加（相对判据，无墙钟阈值）。
@@ -186,19 +228,100 @@ fn flush_is_joined_before_returning() {
     for i in 0..8 {
         tool_outbox::record_in(&dir, &format!("c-{i}"), "bash", true);
     }
-    let before = hook.hits.load(Ordering::SeqCst);
+    let before = hook.explicit_hits.load(Ordering::SeqCst);
     tool_outbox::flush_in(&dir);
-    let after = hook.hits.load(Ordering::SeqCst);
+    let after = hook.explicit_hits.load(Ordering::SeqCst);
 
     assert!(
         after > before,
-        "flush 返回前该会话的 fsync 必须已发生（before={before}, after={after}）"
+        "flush 返回前该会话的显式 fsync 必须已发生（before={before}, after={after}）"
     );
     assert_eq!(tool_outbox::read_records(&dir).len(), 8);
     clear_hook();
 }
 
-/// 3. 8 会话并发追加的 fsync 次数必须远低于记录数（批量化判据，无墙钟）。
+/// 3. 显式 flush 必须携带显式 phase，并且调用 hook 时记录已经完成 append；
+/// 后台 flusher 的命中不能被当成显式屏障。
+#[test]
+fn explicit_flush_is_distinct_from_background_flusher() {
+    let root = temp_root("explicit-phase");
+    let (dir_background, dir_explicit) = distinct_shard_dirs(&root);
+    std::fs::create_dir_all(&dir_background).expect("background dir");
+    std::fs::create_dir_all(&dir_explicit).expect("explicit dir");
+
+    let background_path = tool_outbox::outbox_path(&dir_background);
+    let explicit_path = tool_outbox::outbox_path(&dir_explicit);
+    let hook = Arc::new(ExplicitBarrierHook {
+        background_path: background_path.clone(),
+        explicit_path: explicit_path.clone(),
+        background_entered: std::sync::atomic::AtomicBool::new(false),
+        explicit_entered: std::sync::atomic::AtomicBool::new(false),
+        release_background: std::sync::atomic::AtomicBool::new(false),
+        saw_explicit_record: std::sync::atomic::AtomicBool::new(false),
+    });
+    let weak = Arc::downgrade(&hook);
+    tool_outbox::set_fsync_hook(Some(Arc::new(move |path: &Path, phase: FsyncPhase| {
+        let Some(hook) = weak.upgrade() else { return };
+        match phase {
+            FsyncPhase::Background if path == hook.background_path => {
+                hook.background_entered.store(true, Ordering::SeqCst);
+                while !hook.release_background.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            FsyncPhase::Explicit if path == hook.explicit_path => {
+                let bytes = std::fs::read(path).unwrap_or_default();
+                let expected = b"explicit-record";
+                hook.saw_explicit_record.store(
+                    bytes
+                        .windows(expected.len())
+                        .any(|window| window == expected),
+                    Ordering::SeqCst,
+                );
+                hook.explicit_entered.store(true, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+    })));
+
+    tool_outbox::record_in(&dir_background, "background-record", "bash", true);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !hook.background_entered.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let background_entered = hook.background_entered.load(Ordering::SeqCst);
+    if !background_entered {
+        hook.release_background.store(true, Ordering::SeqCst);
+        clear_hook();
+        panic!("后台 flusher 未进入 fsync 钩子");
+    }
+
+    tool_outbox::record_in(&dir_explicit, "explicit-record", "grep", true);
+    let explicit_dir = dir_explicit.clone();
+    let explicit_flush = std::thread::spawn(move || tool_outbox::flush_in(&explicit_dir));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !hook.explicit_entered.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let explicit_entered = hook.explicit_entered.load(Ordering::SeqCst);
+    let saw_explicit_record = hook.saw_explicit_record.load(Ordering::SeqCst);
+
+    hook.release_background.store(true, Ordering::SeqCst);
+    explicit_flush.join().expect("explicit flush thread");
+    clear_hook();
+
+    assert!(
+        explicit_entered,
+        "flush_in 未进入显式 fsync 路径（后台 flusher 被误当成显式屏障）"
+    );
+    assert!(
+        saw_explicit_record,
+        "显式 fsync 时记录尚未完成 append——FS 追加顺序契约被破坏"
+    );
+}
+
+/// 4. 8 会话并发追加的 fsync 次数必须远低于记录数（批量化判据，无墙钟）。
 ///
 /// pre-fix：每条记录同步 fsync ⇒ 次数 = SESSIONS × PER_SESSION = 512 → 红；
 /// post-fix：fsync 只在 flush 轮次发生（显式 flush 每会话 ≤1 次 = 8，加上
@@ -223,9 +346,11 @@ fn concurrent_sessions_scale_end_to_end() {
         target: PathBuf::new(),
         delay: None,
         hits: AtomicUsize::new(0),
+        explicit_hits: AtomicUsize::new(0),
+        background_hits: AtomicUsize::new(0),
     });
     let weak = Arc::downgrade(&hook);
-    tool_outbox::set_fsync_hook(Some(Box::new(move |_path: &Path| {
+    tool_outbox::set_fsync_hook(Some(Arc::new(move |_path: &Path, _phase: FsyncPhase| {
         let Some(hook) = weak.upgrade() else { return };
         hook.hits.fetch_add(1, Ordering::SeqCst);
     })));
