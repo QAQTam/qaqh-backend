@@ -5,6 +5,7 @@
 //! lifecycle transitions into the pure `TurnCore`, establishing one place to
 //! enforce active-turn and terminal invariants before later mailbox migration.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use qaqh_session::actor::{
@@ -16,6 +17,13 @@ use qaqh_session::session_fact_v2::{InputId, TurnId, TurnMode, TurnTerminal};
 use super::types::Outcome;
 
 const MAILBOX_CAPACITY: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InteractionAdmission {
+    Accepted { remaining: usize },
+    AlreadyResolved,
+    Unknown,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TurnActorError {
@@ -90,6 +98,8 @@ impl From<SessionActorError> for TurnActorError {
 #[derive(Debug)]
 pub(crate) struct TurnActor {
     actor: SessionActor,
+    pending_interactions: BTreeSet<String>,
+    resolved_interactions: BTreeSet<String>,
 }
 
 impl Default for TurnActor {
@@ -102,6 +112,8 @@ impl TurnActor {
     pub(crate) fn new() -> Self {
         Self {
             actor: SessionActor::new(MAILBOX_CAPACITY),
+            pending_interactions: BTreeSet::new(),
+            resolved_interactions: BTreeSet::new(),
         }
     }
 
@@ -123,7 +135,16 @@ impl TurnActor {
     /// `ContinueTurn { round_num: 0 }` starts a turn. Later rounds first
     /// resume a suspended actor, matching the legacy permission/ask resume
     /// path, then advance the round.
+    #[cfg(test)]
     pub(crate) fn observe_outcome(&mut self, outcome: &Outcome) -> Result<(), TurnActorError> {
+        self.observe_outcome_with_interactions(outcome, &[])
+    }
+
+    pub(crate) fn observe_outcome_with_interactions(
+        &mut self,
+        outcome: &Outcome,
+        pending_interactions: &[String],
+    ) -> Result<(), TurnActorError> {
         match outcome {
             Outcome::ContinueTurn {
                 turn_id, round_num, ..
@@ -131,12 +152,29 @@ impl TurnActor {
             Outcome::ContinueTurn {
                 turn_id, round_num, ..
             } => self.round_started(turn_id, *round_num),
-            Outcome::YieldToUser { turn_id, .. } => self.suspend(turn_id),
+            Outcome::YieldToUser { turn_id, .. } => self.suspend(turn_id, pending_interactions),
             Outcome::TurnComplete { turn_id, .. } => self.finish(turn_id, TurnTerminal::Completed),
             Outcome::TurnAborted { turn_id, .. } => self.finish(turn_id, TurnTerminal::Cancelled),
             Outcome::TurnFailed { turn_id, .. } => self.finish(turn_id, TurnTerminal::Failed),
             Outcome::Handled | Outcome::Error(_) | Outcome::Shutdown => Ok(()),
         }
+    }
+
+    pub(crate) fn admit_interaction_resolution(
+        &mut self,
+        interaction_id: &str,
+    ) -> InteractionAdmission {
+        if self.pending_interactions.remove(interaction_id) {
+            self.resolved_interactions
+                .insert(interaction_id.to_string());
+            return InteractionAdmission::Accepted {
+                remaining: self.pending_interactions.len(),
+            };
+        }
+        if self.resolved_interactions.contains(interaction_id) {
+            return InteractionAdmission::AlreadyResolved;
+        }
+        InteractionAdmission::Unknown
     }
 
     /// Record an explicit cancellation. Late cancellation of an idle or
@@ -151,6 +189,7 @@ impl TurnActor {
                 self.apply(TurnCommand::Cancel {
                     turn_id: TurnId::new(turn_id),
                 })?;
+                self.pending_interactions.clear();
                 Ok(())
             }
             TurnCoreState::Active {
@@ -166,6 +205,7 @@ impl TurnActor {
         match self.state().clone() {
             TurnCoreState::Active { turn_id, .. } => {
                 self.apply(TurnCommand::Cancel { turn_id })?;
+                self.pending_interactions.clear();
                 Ok(())
             }
             TurnCoreState::Idle | TurnCoreState::Terminal { .. } => Ok(()),
@@ -174,6 +214,8 @@ impl TurnActor {
 
     pub(crate) fn reset(&mut self) {
         self.actor = SessionActor::new(MAILBOX_CAPACITY);
+        self.pending_interactions.clear();
+        self.resolved_interactions.clear();
     }
 
     fn start(&mut self, turn_id: &str) -> Result<(), TurnActorError> {
@@ -197,6 +239,8 @@ impl TurnActor {
                     input_id: InputId::new(input_id),
                     mode: TurnMode::Normal,
                 })?;
+                self.pending_interactions.clear();
+                self.resolved_interactions.clear();
                 Ok(())
             }
         }
@@ -229,6 +273,7 @@ impl TurnActor {
                     turn_id: active,
                     round,
                 })?;
+                self.pending_interactions.clear();
                 Ok(())
             }
             TurnCoreState::Idle => {
@@ -237,6 +282,7 @@ impl TurnActor {
                     turn_id: TurnId::new(turn_id),
                     round,
                 })?;
+                self.pending_interactions.clear();
                 Ok(())
             }
             TurnCoreState::Terminal {
@@ -253,6 +299,7 @@ impl TurnActor {
                     turn_id: TurnId::new(turn_id),
                     round,
                 })?;
+                self.pending_interactions.clear();
                 Ok(())
             }
             TurnCoreState::Active {
@@ -264,12 +311,17 @@ impl TurnActor {
         }
     }
 
-    fn suspend(&mut self, turn_id: &str) -> Result<(), TurnActorError> {
+    fn suspend(
+        &mut self,
+        turn_id: &str,
+        pending_interactions: &[String],
+    ) -> Result<(), TurnActorError> {
         match self.state().clone() {
             TurnCoreState::Active {
                 turn_id: active, ..
             } if active.as_str() == turn_id => {
                 self.apply(TurnCommand::Suspend { turn_id: active })?;
+                self.pending_interactions = pending_interactions.iter().cloned().collect();
                 Ok(())
             }
             TurnCoreState::Idle => {
@@ -277,6 +329,7 @@ impl TurnActor {
                 self.apply(TurnCommand::Suspend {
                     turn_id: TurnId::new(turn_id),
                 })?;
+                self.pending_interactions = pending_interactions.iter().cloned().collect();
                 Ok(())
             }
             TurnCoreState::Terminal { .. } => Err(TurnActorError::TerminalTurnCannotAdvance {
@@ -301,6 +354,7 @@ impl TurnActor {
                     turn_id: active,
                     terminal,
                 })?;
+                self.pending_interactions.clear();
                 Ok(())
             }
             TurnCoreState::Active {
@@ -339,7 +393,7 @@ mod tests {
     use qaqh_session::actor::TurnCoreState;
     use qaqh_session::session_fact_v2::TurnTerminal;
 
-    use super::{TurnActor, TurnActorError};
+    use super::{InteractionAdmission, TurnActor, TurnActorError};
     use crate::agent::types::Outcome;
 
     fn continue_round(turn_id: &str, round_num: u32) -> Outcome {
@@ -477,6 +531,40 @@ mod tests {
             TurnActorError::ActiveTurnConflict { active, incoming }
                 if active.as_str() == "t1" && incoming.as_str() == "t2"
         ));
+    }
+
+    #[test]
+    fn interaction_resolution_is_first_answer_wins() {
+        let mut actor = TurnActor::new();
+        actor
+            .begin_input("t1", "input-1")
+            .expect("admit first input");
+        actor
+            .observe_outcome_with_interactions(
+                &Outcome::YieldToUser {
+                    turn_id: "t1".into(),
+                    reason: crate::agent::types::YieldReason::PermissionPending,
+                },
+                &["p1".into(), "p2".into()],
+            )
+            .expect("suspend with interactions");
+
+        assert_eq!(
+            actor.admit_interaction_resolution("p1"),
+            InteractionAdmission::Accepted { remaining: 1 }
+        );
+        assert_eq!(
+            actor.admit_interaction_resolution("p1"),
+            InteractionAdmission::AlreadyResolved
+        );
+        assert_eq!(
+            actor.admit_interaction_resolution("missing"),
+            InteractionAdmission::Unknown
+        );
+        assert_eq!(
+            actor.admit_interaction_resolution("p2"),
+            InteractionAdmission::Accepted { remaining: 0 }
+        );
     }
 
     #[test]

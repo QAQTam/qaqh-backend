@@ -10,7 +10,7 @@ use qaqh_domain::AskAnswer;
 use qaqh_types::UsageInfo;
 
 use super::engine_tool::ToolEngine;
-use super::turn_actor::{TurnActor, TurnActorError};
+use super::turn_actor::{InteractionAdmission, TurnActor, TurnActorError};
 use super::types::*;
 use crate::agent::turn_lap::admit as turn_admit;
 use crate::agent::turn_lap::backfill as turn_backfill;
@@ -239,7 +239,23 @@ impl TurnEngine {
     }
 
     pub(crate) fn observe_outcome(&mut self, outcome: &Outcome) -> Result<(), TurnActorError> {
-        self.actor.observe_outcome(outcome)
+        let pending_interactions = if matches!(outcome, Outcome::YieldToUser { .. }) {
+            self.suspended
+                .as_ref()
+                .map(Self::pending_interaction_ids)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.actor
+            .observe_outcome_with_interactions(outcome, &pending_interactions)
+    }
+
+    pub(crate) fn admit_interaction_resolution(
+        &mut self,
+        interaction_id: &str,
+    ) -> InteractionAdmission {
+        self.actor.admit_interaction_resolution(interaction_id)
     }
 
     pub(crate) fn begin_input(
@@ -256,6 +272,19 @@ impl TurnEngine {
 
     pub(crate) fn cancel_active_turn(&mut self) -> Result<(), TurnActorError> {
         self.actor.cancel_active()
+    }
+
+    fn pending_interaction_ids(state: &TurnState) -> Vec<String> {
+        let mut ids = Vec::new();
+        ids.extend(state.pending_permission_ids.iter().cloned());
+        ids.extend(state.pending_asks.iter().map(|ask| ask.call_id.clone()));
+        ids.extend(state.pending_plans.iter().map(|plan| plan.call_id.clone()));
+        if let Some(todo) = &state.pending_todo_activation {
+            ids.push(todo.call_id.clone());
+        }
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     // ── Public API ──
