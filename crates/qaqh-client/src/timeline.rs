@@ -154,6 +154,7 @@ impl TimelineStream {
                         seed: self.seed.clone(),
                         retry_ms,
                         cursor: self.cursor,
+                        reason: err.reconnect_reason(),
                     });
                     log::warn!(
                         "[qaqh-client] timeline {} reconnect in {retry_ms}ms: {err}",
@@ -305,13 +306,7 @@ impl TimelineStream {
     fn dispatch(&mut self, frame: SseFrame, server_epoch: &str) -> Result<()> {
         // BUG-2026-09-12-11：服务端 Lagged 终止帧（与频道流同协议）。
         if frame.event_type == "ringing.stream_terminated" {
-            let code = serde_json::from_str::<serde_json::Value>(frame.data.trim())
-                .ok()
-                .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string))
-                .unwrap_or_else(|| "unknown".into());
-            return Err(ClientError::Transport(format!(
-                "server terminated timeline stream ({code}); reconnecting"
-            )));
+            return Err(ClientError::stream_terminated(frame.data.trim()));
         }
         let parsed: TimelineSseFrame = serde_json::from_str(frame.data.trim())
             .map_err(|e| ClientError::Protocol(format!("bad timeline frame: {e}")))?;
@@ -385,10 +380,11 @@ mod tests {
     //! Timeline SSE 终止帧归一（BUG-2026-09-12-11 遗留 / issue #35）。
     //!
     //! 与频道流同协议：daemon 的 `ringing.stream_terminated`（Lagged）在
-    //! timeline 流上同样归一为 `Transport`，绝不能落成
+    //! timeline 流上同样归一为结构化 `StreamTerminated`，绝不能落成
     //! `Protocol("invalid Ringing V1 timeline SSE frame")`。
 
     use super::*;
+    use crate::types::ReconnectReason;
     use std::sync::Arc;
 
     fn stream() -> TimelineStream {
@@ -417,9 +413,9 @@ mod tests {
         }
     }
 
-    /// 终止帧 → Transport（可重连）。
+    /// 终止帧 → 结构化可重连原因。
     #[test]
-    fn lagged_termination_frame_normalizes_to_transport() {
+    fn lagged_termination_frame_carries_structured_reason() {
         let mut s = stream();
         let err = s
             .dispatch(
@@ -431,8 +427,18 @@ mod tests {
             )
             .expect_err("termination frame must end the timeline stream");
         assert!(
-            matches!(err, ClientError::Transport(_)),
-            "must normalize to Transport: {err:?}"
+            matches!(
+                err,
+                ClientError::StreamTerminated {
+                    ref code,
+                    skipped: Some(9)
+                } if code == "lagged"
+            ),
+            "must retain structured termination: {err:?}"
+        );
+        assert_eq!(
+            err.reconnect_reason(),
+            Some(ReconnectReason::Lagged { skipped: 9 })
         );
         assert!(
             err.to_string().contains("lagged"),
@@ -447,7 +453,10 @@ mod tests {
         let err = s
             .dispatch(frame("ringing.stream_terminated", "not-json"), "epoch-1")
             .expect_err("must error");
-        assert!(matches!(err, ClientError::Transport(_)), "{err:?}");
+        assert!(
+            matches!(err, ClientError::StreamTerminated { ref code, .. } if code == "unknown"),
+            "{err:?}"
+        );
         assert!(!err.to_string().contains("timeline SSE frame"), "{err}");
     }
 
