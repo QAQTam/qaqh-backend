@@ -1,0 +1,16 @@
+//! Canonical `events.jsonl` storage contracts.
+//!
+//! The fact schema itself lives in [`crate::session_fact_v2`]. This module
+//! owns durable storage identity, writer fencing and commit high-water.
+
+mod log;
+mod types;
+
+pub use log::{
+    CanonicalError, CanonicalLog, EVENTS_COMMIT_FILE, EVENTS_FILE, EVENTS_LOCK_FILE,
+    WRITER_FENCE_FILE,
+};
+pub use types::{
+    AppendRejected, EVENTS_COMMIT_SCHEMA, EventsCommit, WRITER_FENCE_SCHEMA, WriterFence, WriterId,
+    WriterLease,
+};
