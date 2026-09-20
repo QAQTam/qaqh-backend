@@ -83,9 +83,6 @@ impl Loop {
                     stats: &mut self.session.stats,
                     flow: &mut self.flow,
                 };
-                // T-1-3：用户输入是唯一的「复活」入口——显式取消态在此解除，
-                // 之后的系统注入（子代理报告）才允许再开回合。
-                self.user_cancelled = false;
                 let outcome = self.input.handle_user_input(
                     &mut ctx,
                     &mut self.session.turn,
@@ -100,9 +97,6 @@ impl Loop {
             ConversationCommand::ConversationCancel { turn_id } => {
                 self.cancel.set();
                 qaqh_workspace::set_cancel(true);
-                // T-1-3：记录取消**原因**——系统注入只在非用户取消态清除标记
-                // 并开回合（见 `Loop::inject` / `dispatch_injections_after_compact`）。
-                self.user_cancelled = true;
                 let actor_cancel = match turn_id.as_deref() {
                     Some(turn_id) => self.session.turn.cancel_turn(turn_id),
                     None => self.session.turn.cancel_active_turn(),
