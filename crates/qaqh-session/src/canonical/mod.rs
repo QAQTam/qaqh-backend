@@ -6,6 +6,7 @@
 mod clock;
 mod log;
 mod reader;
+mod recovery;
 mod store;
 mod types;
 
@@ -17,6 +18,12 @@ pub use log::{
     EVENTS_POISON_FILE, UPGRADE_FENCE_FILE, WRITER_FENCE_FILE,
 };
 pub use reader::CommittedFactReader;
+pub use recovery::{
+    RECOVERY_INTENT_FILE, RECOVERY_INTENT_SCHEMA, RecoveryBatchKey, RecoveryIntent,
+    RecoveryIntentStatus, RecoveryIntentWriteOutcome, load_recovery_intent,
+    persist_recovery_intent, recovery_input_fingerprint, recovery_intent_path,
+    remove_recovery_intent_if_stale, sha256_content_hash,
+};
 pub use store::{AppendOutcome, CanonicalSessionStore};
 pub use types::{
     AppendRejected, EVENTS_COMMIT_SCHEMA, EVENTS_POISON_SCHEMA, EventsCommit, EventsPoison,

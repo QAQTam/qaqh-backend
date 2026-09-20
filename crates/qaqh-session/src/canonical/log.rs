@@ -59,6 +59,12 @@ pub enum CanonicalError {
     #[error("canonical log is not writable: {0}")]
     NotWritable(String),
 
+    #[error("recovery intent is invalid: {0}")]
+    InvalidRecoveryIntent(String),
+
+    #[error("recovery intent conflict: {0}")]
+    RecoveryIntentConflict(String),
+
     #[error("writer lease duration must be positive, got {0}")]
     InvalidLeaseDuration(i64),
 
