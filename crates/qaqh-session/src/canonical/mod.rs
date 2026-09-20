@@ -7,6 +7,7 @@ mod clock;
 mod log;
 mod reader;
 mod recovery;
+mod replay_window;
 mod store;
 mod types;
 
@@ -23,6 +24,12 @@ pub use recovery::{
     RecoveryIntentStatus, RecoveryIntentWriteOutcome, load_recovery_intent,
     persist_recovery_intent, recovery_input_fingerprint, recovery_intent_path,
     remove_recovery_intent_if_stale, sha256_content_hash,
+};
+pub use replay_window::{
+    DEFAULT_REPLAY_WINDOW_RETENTION_MS, DEFAULT_SNAPSHOT_MAX_AGE_MS, DEFAULT_WINDOW_CAPACITY_BYTES,
+    DEFAULT_WINDOW_CAPACITY_FACTS, REPLAY_WINDOW_FILE, REPLAY_WINDOW_SCHEMA, ReplayWindowConfig,
+    ReplayWindowManifest, ReplayWindowReason, SnapshotStatus, load_replay_window_manifest,
+    recover_replay_window_manifest, replay_window_path,
 };
 pub use store::{AppendOutcome, CanonicalSessionStore};
 pub use types::{
