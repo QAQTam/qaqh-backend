@@ -1,5 +1,10 @@
 //! axum_impl::sse — see parent module docs.
 
+use std::collections::BTreeSet;
+
+use qaqh_runtime::QaqhService;
+use qaqh_session::actor::ConnectionId;
+
 use super::*;
 
 /// 活跃会话但尚无任何 seed 分片时的挂起轮询间隔（reviewer 阻断 1）。
@@ -154,6 +159,77 @@ fn session_owned_seeds(
     }
 }
 
+/// Transport-owned socket lease for one logical `(connection, channel)`.
+///
+/// The session actor stores the logical subscription; this object only tracks
+/// which seed shards the transport currently has receivers for and mirrors
+/// additions/removals into that actor.
+struct SubscriptionLease {
+    service: QaqhService,
+    connection_id: ConnectionId,
+    channel: RingingChannel,
+    seeds: BTreeSet<String>,
+}
+
+impl SubscriptionLease {
+    fn new(service: QaqhService, connection_id: ConnectionId, channel: RingingChannel) -> Self {
+        Self {
+            service,
+            connection_id,
+            channel,
+            seeds: BTreeSet::new(),
+        }
+    }
+
+    fn subscribe(&mut self, seed: &str) {
+        if !self.seeds.insert(seed.to_string()) {
+            return;
+        }
+        if let Err(error) = self
+            .service
+            .subscribe_channel(seed, &self.connection_id, self.channel)
+        {
+            log::debug!(
+                "[sse] logical subscribe skipped for {seed}/{}: {error}",
+                self.channel
+            );
+        }
+    }
+
+    fn unsubscribe(&mut self, seed: &str) {
+        if !self.seeds.remove(seed) {
+            return;
+        }
+        if let Err(error) =
+            self.service
+                .unsubscribe_channel(seed, &self.connection_id, self.channel)
+        {
+            log::debug!(
+                "[sse] logical unsubscribe skipped for {seed}/{}: {error}",
+                self.channel
+            );
+        }
+    }
+
+    fn close_all(&mut self) {
+        let seeds = std::mem::take(&mut self.seeds);
+        for seed in seeds {
+            if let Err(error) = self.service.connection_closed(&seed, &self.connection_id) {
+                log::debug!(
+                    "[sse] logical connection close skipped for {seed}/{}: {error}",
+                    self.channel
+                );
+            }
+        }
+    }
+}
+
+impl Drop for SubscriptionLease {
+    fn drop(&mut self) {
+        self.close_all();
+    }
+}
+
 /// 某会话在某频道上的**分片**实时流：每个已 attach 的 seed 一个
 /// `broadcast::Receiver`，`recv` 在其上做合并。
 ///
@@ -170,8 +246,9 @@ struct ShardedChannelStream {
         String,
         tokio::sync::broadcast::Receiver<qaqh_ringing::RingingEventEnvelope>,
     )>,
-    /// 已订阅的 seed 集合（增量对账用）。
-    subscribed: HashSet<String>,
+    /// Optional P2-2d-b logical subscription mirror. Tests and non-SSE
+    /// callers may construct the transport without a session actor.
+    subscription: Option<SubscriptionLease>,
     /// 每个分片「已取出但尚未交付」的事件（跨分片按 stream_seq 归并）。
     pending: HashMap<String, qaqh_ringing::RingingEventEnvelope>,
     /// 已检测到溢出、但尚未上报的 `Lagged`（reviewer 阻断 2）。
@@ -200,26 +277,60 @@ impl ShardedChannelStream {
             session_id,
             leases,
             receivers,
-            subscribed: owned,
+            subscription: None,
             pending: HashMap::new(),
             pending_lag: None,
         }
+    }
+
+    fn with_subscription(mut self, service: QaqhService, connection_id: ConnectionId) -> Self {
+        let seeds: Vec<String> = self
+            .receivers
+            .iter()
+            .map(|(seed, _)| seed.clone())
+            .collect();
+        let mut subscription = SubscriptionLease::new(service, connection_id, self.channel);
+        for seed in seeds {
+            subscription.subscribe(&seed);
+        }
+        self.subscription = Some(subscription);
+        self
     }
 
     /// 对账租约的 seed 归属：新 attach 的 seed 增量补订（保持「订阅先于
     /// 回放」的无缝语义）；已 detach 的 seed 退订。会话失活时返回 false。
     fn refresh(&mut self, hub: &RingingHub) -> bool {
         let Some(owned) = session_owned_seeds(&self.session_id, &self.leases) else {
+            if let Some(subscription) = self.subscription.as_mut() {
+                subscription.close_all();
+            }
             return false;
         };
+        let removed: Vec<String> = self
+            .receivers
+            .iter()
+            .filter(|(seed, _)| !owned.contains(seed))
+            .map(|(seed, _)| seed.clone())
+            .collect();
+        for seed in &removed {
+            if let Some(subscription) = self.subscription.as_mut() {
+                subscription.unsubscribe(seed);
+            }
+        }
         self.receivers.retain(|(seed, _)| owned.contains(seed));
         self.pending.retain(|seed, _| owned.contains(seed));
-        self.subscribed.retain(|seed| owned.contains(seed));
-        let added: Vec<String> = owned.difference(&self.subscribed).cloned().collect();
+        let active: HashSet<&String> = self.receivers.iter().map(|(seed, _)| seed).collect();
+        let added: Vec<String> = owned
+            .iter()
+            .filter(|seed| !active.contains(seed))
+            .cloned()
+            .collect();
         for seed in added {
+            if let Some(subscription) = self.subscription.as_mut() {
+                subscription.subscribe(&seed);
+            }
             self.receivers
                 .push((seed.clone(), hub.subscribe(self.channel, &seed)));
-            self.subscribed.insert(seed);
         }
         true
     }
@@ -293,8 +404,10 @@ impl ShardedChannelStream {
             }
             // 2) 有分片关闭：摘除（其 pending 一并丢弃）后重试。
             if let Some(seed) = closed_seed {
+                if let Some(subscription) = self.subscription.as_mut() {
+                    subscription.unsubscribe(&seed);
+                }
                 self.receivers.retain(|(s, _)| s != &seed);
-                self.subscribed.remove(&seed);
                 self.pending.remove(&seed);
                 continue;
             }
@@ -338,8 +451,10 @@ impl ShardedChannelStream {
                     });
                 }
                 Err(RecvError::Closed) => {
+                    if let Some(subscription) = self.subscription.as_mut() {
+                        subscription.unsubscribe(&seed);
+                    }
                     self.receivers.retain(|(s, _)| s != &seed);
-                    self.subscribed.remove(&seed);
                     self.pending.remove(&seed);
                 }
             }
@@ -387,12 +502,19 @@ pub(crate) async fn handle_events(
     // Subscribe before replay to avoid gap。BUG-2026-09-12-12（issue #31）：
     // 按 **(channel, seed) 分片**订阅该会话实际拥有的 seed（而非频道单环），
     // 其它会话的风暴不再把本连接推向 `Lagged`（验收标准 1）。
+    let connection_id = ConnectionId::new(format!(
+        "{}:{}:{}",
+        session_id,
+        channel.as_str(),
+        crate::server::random_hex()
+    ));
     let mut rx = ShardedChannelStream::new(
         &state.hub,
         channel,
         session_id.clone(),
         state.leases.clone(),
-    );
+    )
+    .with_subscription(state.service.clone(), connection_id);
     let replay = filter_replay_for_session(
         state
             .hub
