@@ -109,6 +109,15 @@ impl TurnActor {
         self.actor.state()
     }
 
+    /// Admit a newly allocated input before its message is written to storage.
+    pub(crate) fn begin_input(
+        &mut self,
+        turn_id: &str,
+        input_id: &str,
+    ) -> Result<(), TurnActorError> {
+        self.start_with_input(turn_id, input_id)
+    }
+
     /// Mirror one existing runtime outcome into the canonical turn state.
     ///
     /// `ContinueTurn { round_num: 0 }` starts a turn. Later rounds first
@@ -168,6 +177,10 @@ impl TurnActor {
     }
 
     fn start(&mut self, turn_id: &str) -> Result<(), TurnActorError> {
+        self.start_with_input(turn_id, &format!("input:{turn_id}"))
+    }
+
+    fn start_with_input(&mut self, turn_id: &str, input_id: &str) -> Result<(), TurnActorError> {
         match self.state().clone() {
             TurnCoreState::Active {
                 turn_id: active, ..
@@ -181,7 +194,7 @@ impl TurnActor {
             _ => {
                 self.apply(TurnCommand::Start {
                     turn_id: TurnId::new(turn_id),
-                    input_id: InputId::new(format!("input:{turn_id}")),
+                    input_id: InputId::new(input_id),
                     mode: TurnMode::Normal,
                 })?;
                 Ok(())
@@ -434,6 +447,31 @@ mod tests {
         let error = actor
             .observe_outcome(&continue_round("t2", 0))
             .expect_err("second active turn must fail");
+        assert!(matches!(
+            error,
+            TurnActorError::ActiveTurnConflict { active, incoming }
+                if active.as_str() == "t1" && incoming.as_str() == "t2"
+        ));
+    }
+
+    #[test]
+    fn input_admission_starts_the_turn_before_storage() {
+        let mut actor = TurnActor::new();
+        actor
+            .begin_input("t1", "input-1")
+            .expect("admit first input");
+        assert!(matches!(
+            actor.state(),
+            TurnCoreState::Active {
+                input_id,
+                round: 0,
+                ..
+            } if input_id.as_str() == "input-1"
+        ));
+
+        let error = actor
+            .begin_input("t2", "input-2")
+            .expect_err("second active input must fail");
         assert!(matches!(
             error,
             TurnActorError::ActiveTurnConflict { active, incoming }

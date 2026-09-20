@@ -88,7 +88,9 @@ impl Loop {
                 self.user_cancelled = false;
                 let outcome = self.input.handle_user_input(
                     &mut ctx,
+                    &mut self.session.turn,
                     qaqh_message::builtin::USER,
+                    command_id,
                     &text,
                     images,
                 );
