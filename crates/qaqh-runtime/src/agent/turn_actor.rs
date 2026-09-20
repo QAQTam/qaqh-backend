@@ -12,7 +12,7 @@ use qaqh_session::actor::{
     SessionActor, SessionActorEffect, SessionActorError, SessionCommand, TurnCommand,
     TurnCoreState, TurnEffect,
 };
-use qaqh_session::session_fact_v2::{InputId, TurnId, TurnMode, TurnTerminal};
+use qaqh_session::session_fact_v2::{InputId, InterruptReason, TurnId, TurnMode, TurnTerminal};
 
 use super::types::Outcome;
 
@@ -51,6 +51,13 @@ pub(crate) enum TurnActorError {
         incoming: u32,
     },
     UnexpectedEffect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnCancellation {
+    Interrupted { reason: InterruptReason },
+    Idle,
+    AlreadyTerminal,
 }
 
 impl fmt::Display for TurnActorError {
@@ -197,17 +204,18 @@ impl TurnActor {
     /// Record an explicit cancellation. Late cancellation of an idle or
     /// already-terminal turn is a no-op; cancelling a different active turn is
     /// rejected.
-    pub(crate) fn cancel(&mut self, turn_id: &str) -> Result<(), TurnActorError> {
+    pub(crate) fn cancel(&mut self, turn_id: &str) -> Result<TurnCancellation, TurnActorError> {
         match self.state().clone() {
-            TurnCoreState::Idle | TurnCoreState::Terminal { .. } => Ok(()),
+            TurnCoreState::Idle => Ok(TurnCancellation::Idle),
+            TurnCoreState::Terminal { .. } => Ok(TurnCancellation::AlreadyTerminal),
             TurnCoreState::Active {
                 turn_id: active, ..
             } if active.as_str() == turn_id => {
-                self.apply(TurnCommand::Cancel {
+                let effect = self.apply(TurnCommand::Cancel {
                     turn_id: TurnId::new(turn_id),
                 })?;
                 self.pending_interactions.clear();
-                Ok(())
+                Self::cancellation_from_effect(effect)
             }
             TurnCoreState::Active {
                 turn_id: active, ..
@@ -218,14 +226,15 @@ impl TurnActor {
         }
     }
 
-    pub(crate) fn cancel_active(&mut self) -> Result<(), TurnActorError> {
+    pub(crate) fn cancel_active(&mut self) -> Result<TurnCancellation, TurnActorError> {
         match self.state().clone() {
             TurnCoreState::Active { turn_id, .. } => {
-                self.apply(TurnCommand::Cancel { turn_id })?;
+                let effect = self.apply(TurnCommand::Cancel { turn_id })?;
                 self.pending_interactions.clear();
-                Ok(())
+                Self::cancellation_from_effect(effect)
             }
-            TurnCoreState::Idle | TurnCoreState::Terminal { .. } => Ok(()),
+            TurnCoreState::Idle => Ok(TurnCancellation::Idle),
+            TurnCoreState::Terminal { .. } => Ok(TurnCancellation::AlreadyTerminal),
         }
     }
 
@@ -405,14 +414,23 @@ impl TurnActor {
             | None => Err(TurnActorError::UnexpectedEffect),
         }
     }
+
+    fn cancellation_from_effect(effect: TurnEffect) -> Result<TurnCancellation, TurnActorError> {
+        match effect {
+            TurnEffect::Interrupted { reason, .. } => Ok(TurnCancellation::Interrupted { reason }),
+            _ => Err(TurnActorError::UnexpectedEffect),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use qaqh_session::actor::TurnCoreState;
-    use qaqh_session::session_fact_v2::TurnTerminal;
+    use qaqh_session::session_fact_v2::{InterruptReason, TurnTerminal};
 
-    use super::{InteractionAdmission, InteractionState, TurnActor, TurnActorError};
+    use super::{
+        InteractionAdmission, InteractionState, TurnActor, TurnActorError, TurnCancellation,
+    };
     use crate::agent::types::Outcome;
 
     fn continue_round(turn_id: &str, round_num: u32) -> Outcome {
@@ -630,8 +648,16 @@ mod tests {
         actor
             .observe_outcome(&continue_round("t1", 0))
             .expect("start turn");
-        actor.cancel("t1").expect("cancel turn");
-        actor.cancel("t1").expect("duplicate cancel");
+        assert_eq!(
+            actor.cancel("t1").expect("cancel turn"),
+            TurnCancellation::Interrupted {
+                reason: InterruptReason::CancelBeforeSeal
+            }
+        );
+        assert_eq!(
+            actor.cancel("t1").expect("duplicate cancel"),
+            TurnCancellation::AlreadyTerminal
+        );
         assert!(matches!(
             actor.state(),
             TurnCoreState::Terminal {

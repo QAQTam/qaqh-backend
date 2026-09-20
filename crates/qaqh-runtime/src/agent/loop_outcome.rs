@@ -481,7 +481,7 @@ impl Loop {
             Outcome::TurnAborted { turn_id, usage } => {
                 self.session.agent.skills.abort_user_turn();
                 self.session.flush();
-                self.reset_all_engines();
+                self.reset_all_engines_preserving_turn_terminal();
                 self.paced_emitter
                     .emit_domain(qaqh_domain::DomainEvent::Conversation(
                         qaqh_domain::ConversationEvent::TurnCompleted {
