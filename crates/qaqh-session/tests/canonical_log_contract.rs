@@ -127,6 +127,25 @@ fn expired_lease_is_rejected_without_writing() {
 }
 
 #[test]
+fn renewal_extends_lease_without_rotating_fence_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut log = open(temp.path());
+    let lease = log
+        .acquire_writer(WriterId::new("writer-a"), NOW_MS, LEASE_MS)
+        .expect("acquire writer");
+
+    let renewed = log
+        .renew_writer(&lease, NOW_MS + 500, LEASE_MS)
+        .expect("renew writer");
+    assert_eq!(renewed.writer_id, lease.writer_id);
+    assert_eq!(renewed.generation_epoch, lease.generation_epoch);
+    assert_eq!(renewed.fencing_token, lease.fencing_token);
+    assert_eq!(renewed.lease_expires_at_ms, NOW_MS + 1_500);
+    log.append(&renewed, fact(1), NOW_MS + 1_000)
+        .expect("append within renewed lease");
+}
+
+#[test]
 fn tampered_lease_token_is_rejected_without_writing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut log = open(temp.path());
